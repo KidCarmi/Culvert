@@ -208,7 +208,7 @@ python3 docs/design/mcp/predicates/predicate-27.py
 
 Exit `0` = every property holds, every seed fired its intended violation, every negative control stayed silent. Exit `1` = at least one violation, printed. Stdlib only; no network, no third-party imports, no repository mutation.
 
-**Seeded positive controls — each of the 15 mutations MUST fire its INTENDED violation** (the harness checks that the seed's new violation contains a target substring, so a seed that trips only a *different* check — e.g. anti-vacuity — is reported `MISSED`, not laundered into a pass):
+**Seeded positive controls — each of the 17 mutations MUST fire its INTENDED violation** (the harness checks that the seed's new violation contains a target substring, so a seed that trips only a *different* check — e.g. anti-vacuity — is reported `MISSED`, not laundered into a pass):
 
 1. wrong total requirement count;
 2. wrong count for one live requirement family (`PROTO`);
@@ -224,7 +224,9 @@ Exit `0` = every property holds, every seed fired its intended violation, every 
 12. **remove** one valid live threat row without updating any census;
 13. the requirement registry table parses to **zero** rows — anti-vacuity;
 14. a malformed requirement-registry delimiter/header width;
-15. **first-match laundering** — a correct total followed by a wrong duplicate; a first-match reader passes on the correct one, occurrence counting catches the second.
+15. **first-match laundering** — a correct total followed by a wrong duplicate; a first-match reader passes on the correct one, occurrence counting catches the second;
+16. a requirement row whose first cell is a **malformed ID** (`MCP-OPS-0O5`) — a row inside a matched registry table must be *reported*, not silently dropped, or a recount-and-reduce hides an untracked requirement *(added in response to Codex review)*;
+17. a stale **duplicate total in a later paragraph** of `## Summary` — census claims are counted over the whole bounded section, not just its first paragraph *(added in response to Codex review)*.
 
 **Enforced but not covered by a dedicated seed** (each is either exercised transitively by the add/remove-row seeds, or shares the exact code path of a seeded case): **per-ID uniqueness** in both registries (a duplicate requirement or threat ID); the **namespace-count** claim and the **family-census internal-sum** consistency (both move under seeds 7/8); the **threat registry's** own anti-vacuity and delimiter/width validation (same parser as the requirement registry, whose zero-row and malformed cases are seeded — 13, 14); and the `TEST-TRACEABILITY-MATRIX.md` **§3 coverage total** and **per-family spot-claims** (both move under seeds 7/8/11/12 — e.g. removing `MCP-OPS-005` makes the `MCP-OPS **5**` spot-claim and the §3 total disagree with the live registry).
 

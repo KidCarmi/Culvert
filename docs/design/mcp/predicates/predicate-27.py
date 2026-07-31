@@ -181,7 +181,12 @@ def derive_requirements(text):
     for ln, val in rows:
         m = REQ_ID.match(val)
         if not m:
-            continue                       # a non-ID first cell is not a requirement row
+            v.append(f'requirement registry: data row at line {ln} has first cell '
+                     f'{val!r}, which is not a valid MCP requirement ID — a row inside '
+                     f'a matched registry table must carry a valid ID or be reported, '
+                     f'never silently dropped (a dropped row is an untracked requirement '
+                     f'a recount-and-reduce would hide)')
+            continue
         ids.append(val)
         if val in seen:
             v.append(f'duplicate requirement ID {val!r} at lines {seen[val]} and {ln}')
@@ -209,6 +214,9 @@ def derive_threats(text):
     seen = {}
     for ln, val in rows:
         if not THREAT_ID.match(val):
+            v.append(f'threat registry: data row at line {ln} has first cell {val!r}, '
+                     f'which is not a canonical MCP-T-### ID — a row inside the §11 '
+                     f'registry table must carry a valid ID or be reported')
             continue
         ids.append(val)
         if val in seen:
@@ -222,18 +230,24 @@ def derive_threats(text):
 
 # ── census parsing helpers ───────────────────────────────────────────────────
 
-def paragraph_from(text, needle):
-    """The contiguous non-empty block containing the first line with `needle`."""
+def summary_section(text):
+    """The entire bounded `## Summary` section (its heading up to the next `## `).
+
+    Census claims are counted over the WHOLE section, not just its first
+    paragraph: a stale duplicate total or namespace claim placed after a blank
+    line would otherwise escape the occurrence-counting that the duplicate /
+    first-match-laundering protection depends on.
+    """
     L = text.split('\n')
-    i = next((k for k, l in enumerate(L) if needle in l), None)
-    if i is None:
+    start = next((i for i, l in enumerate(L) if l.strip() == '## Summary'), None)
+    if start is None:
         return None
-    out = [L[i]]
-    for j in range(i + 1, len(L)):
-        if not L[j].strip():
+    end = len(L)
+    for j in range(start + 1, len(L)):
+        if L[j].startswith('## '):
+            end = j
             break
-        out.append(L[j])
-    return ' '.join(out)
+    return '\n'.join(L[start:end])
 
 
 def flatten(text):
@@ -266,12 +280,12 @@ def check_requirement_family_census(req_text, family_counts):
     n_fam = len(family_counts)
     total = sum(family_counts.values())
 
-    para = paragraph_from(req_text, 'Total requirements:')
-    if para is None:
-        return ['requirement family census (SECURITY-REQUIREMENTS Summary) not '
+    sec = summary_section(req_text)
+    if sec is None or 'Total requirements:' not in sec:
+        return ['requirement family census (SECURITY-REQUIREMENTS `## Summary`) not '
                 'found — the "Total requirements: N ... (per-family)" census is '
                 'missing or was relabelled']
-    plain = para.replace('*', '')
+    plain = sec.replace('*', '')
 
     v += totals_check('requirement total (SECURITY-REQUIREMENTS Summary)',
                       [int(x) for x in re.findall(r'Total requirements:\s*(\d+)', plain)],
@@ -467,6 +481,23 @@ def seed_bad_req_delimiter(t):
     return _mut(t, 'requirements', bust)
 
 
+def seed_malformed_req_id(t):
+    """A requirement row's ID mistyped to a non-matching form. It must be
+    REPORTED, not silently dropped — otherwise a recount-and-reduce of the
+    published totals hides an untracked requirement still in the table."""
+    return _mut(t, 'requirements', lambda s: s.replace('| MCP-OPS-005 |', '| MCP-OPS-0O5 |', 1))
+
+
+def seed_duplicate_total_later_paragraph(t):
+    """A stale duplicate total placed in a SECOND paragraph of `## Summary` —
+    invisible to a first-paragraph-only reader, caught once the whole section is
+    counted."""
+    return _mut(t, 'requirements',
+                lambda s: s.replace('and the Phase 5 consistency checks.',
+                                    'and the Phase 5 consistency checks.\n\n'
+                                    '**Total requirements: 91** (stale second copy).', 1))
+
+
 def seed_first_match_laundering(t):
     """First total correct, a second duplicate total wrong — a first-match
     reader passes on the correct one; occurrence counting catches the second."""
@@ -491,6 +522,8 @@ SEEDS = [
     ('requirement registry table parses to zero rows', seed_req_zero_rows, 'ZERO'),
     ('malformed requirement registry delimiter/header width', seed_bad_req_delimiter, 'width mismatch'),
     ('first-match laundering (correct then wrong duplicate total)', seed_first_match_laundering, 'stated 2 times'),
+    ('malformed requirement ID dropped instead of reported', seed_malformed_req_id, 'not a valid MCP requirement ID'),
+    ('duplicate total in a later Summary paragraph', seed_duplicate_total_later_paragraph, 'stated 2 times'),
 ]
 
 # Negative controls: mutations that MUST stay silent, proving the predicate is
