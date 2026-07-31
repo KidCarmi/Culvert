@@ -1105,29 +1105,27 @@ func recordStats(ip, host, status, ruleMatched, actionTaken string) {
 	atomic.AddInt64(&statTotal, 1)
 	isAllowed := status == "OK" || status == "POLICY_ALLOW" || status == "POLICY_REDIRECT"
 	tsRecordResult(isAllowed)
-	// Fire webhook alerts for security events (async, non-blocking). PR3 Option B: the
-	// alert payload is a STREAMED sink (Slack/PagerDuty/SIEM webhook), so the
-	// destination host carries the same pseudonym contract as the logs when the posture
-	// is on — the "no plaintext destination on any streamed sink" guarantee includes
-	// alerts. Off ⇒ plaintext, byte-identical.
-	alertHost := redactDestinationHost(host)
+	// PR3 Option B: both sinks below are subject to the SAME destination contract, so
+	// the pseudonym is derived ONCE here and shared. The alert payload is a STREAMED
+	// sink (Slack/PagerDuty/SIEM webhook) — the "no plaintext destination on any
+	// streamed sink" guarantee includes alerts — and the top-hosts ranking is a
+	// viewer-facing sink (/api/top-hosts, the dashboard widget, PAC sampling). Deriving
+	// it twice cost a second keyed HMAC per request for a value already in hand.
+	// Off ⇒ plaintext, byte-identical.
+	redactedHost := redactDestinationHost(host)
 	switch status {
 	case "THREAT_BLOCKED", "SCAN_BLOCKED", "DPI_BLOCKED":
 		go fireAlert("threat_detected", AlertPayload{
-			Actor: ip, Host: alertHost, Detail: ruleMatched + " " + actionTaken, Source: ruleMatched,
+			Actor: ip, Host: redactedHost, Detail: ruleMatched + " " + actionTaken, Source: ruleMatched,
 		})
 	case "POLICY_BLOCK", "POLICY_DROP":
 		go fireAlert("policy_block", AlertPayload{
-			Actor: ip, Host: alertHost, Detail: ruleMatched, Source: "policy",
+			Actor: ip, Host: redactedHost, Detail: ruleMatched, Source: "policy",
 		})
 	}
 	if status == "OK" || status == "POLICY_ALLOW" {
-		// PR3 Option B: the top-hosts ranking is a viewer-facing sink (/api/top-hosts,
-		// the dashboard widget, PAC sampling), so it must carry the SAME destination
-		// contract as the logs — record the pseudonym token, not the plaintext host,
-		// when the posture is on. Token cardinality is fixed (12 hex), so the
-		// bounded-map behavior is unchanged. Off ⇒ plaintext, byte-identical.
-		topHosts.Record(redactDestinationHost(host))
+		// Token cardinality is fixed (12 hex), so the bounded-map behavior is unchanged.
+		topHosts.Record(redactedHost)
 	}
 }
 
