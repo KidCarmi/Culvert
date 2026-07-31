@@ -178,6 +178,142 @@ def action_class_drift():
     return v
 
 
+# ─── ARM 4: the two post-merge #926 leftovers ────────────────────────────────
+# Narrow by construction.  This is NOT a prose linter: it reads exactly two
+# named blocks (MCP-AC-016 and OPEN-DECISIONS D-5) and checks four stated
+# properties.  It was added because the #926 remediation updated some fields of
+# those blocks and not others, leaving a single abuse case that simultaneously
+# required the denial-event lockout (Expected control / Expected event /
+# Closure) and forbade it (Expected policy result / Test) — and a decision block
+# still calling the residual "accepted" while THREAT-MODEL R-6 records it as
+# PENDING and not human-accepted.  Both survived a full predicate run, CI, and a
+# self-check by the authoring session, because nothing quantified over them.
+AC = pathlib.Path('docs/design/mcp/ABUSE-CASES.md')
+OD = pathlib.Path('docs/design/mcp/OPEN-DECISIONS.md')
+
+AC016_FIELDS = ('Expected control', 'Expected event', 'Expected policy result', 'Test')
+
+# A POSITIVE requirement for the superseded lockout.  Each pattern is a phrase
+# that only appears when the text is DEMANDING the lockout as a desired outcome.
+LOCKOUT_POSITIVE = (
+    r'DURABILITY LOCKOUT',
+    r'durability lockout',
+    r'the lockout proven',
+    r'operations are blocked\b',
+    r'blocking NEW\b',
+    r'\bcritical degraded state\b',
+)
+# Text explicitly labelled as describing the REMOVED rule is allowed anywhere in
+# the sentence — these words cannot plausibly introduce a live requirement.
+HISTORICAL = (
+    r'superseded', r'SUPERSEDED', r'\bformer\b', r'\bno longer\b',
+    r'\bremoved\b', r'PROVEN TO FAIL', r'\bnot closed by\b',
+)
+# A grammatical negation only laundates a positive phrase when it is ATTACHED to
+# it.  Scanning the whole sentence was too loose: "If the aggregate cannot be
+# committed … operations are blocked" contains `cannot` ~110 chars upstream,
+# attached to a different clause, and that alone laundered a genuine lockout
+# demand (the seed below caught it).  The window is deliberately short.
+NEGATED_NEAR = (r'MUST NOT', r'\bnever\b', r'\bdoes not\b', r'\bcannot\b', r'\bno\b')
+NEG_WINDOW = 45
+
+
+def _ac016_block():
+    t = AC.read_text()
+    i = t.find('### MCP-AC-016')
+    j = t.find('### MCP-AC-017', i + 1)
+    return t[i:j if j > 0 else len(t)]
+
+
+def _fields(block):
+    """{field name: its text} for the labelled `- **Name:** …` bullets, plus Closure."""
+    out = {}
+    for name in AC016_FIELDS:
+        k = block.find(f'**{name}:**')
+        if k < 0:
+            continue
+        nxt = block.find('\n- **', k)
+        out[name] = block[k:nxt if nxt > 0 else len(block)]
+    k = block.find('**Closure:**')
+    if k >= 0:
+        out['Closure'] = block[k:]
+    return out
+
+
+def _demands_lockout(seg):
+    """True when the segment REQUIRES lockout semantics rather than denying them.
+
+    A historical label anywhere in the sentence exempts it; a grammatical
+    negation exempts it only when ATTACHED (within NEG_WINDOW chars before the
+    positive phrase).  Sentence-wide negation matching was too loose and let a
+    real lockout demand pass on an unrelated upstream 'cannot'.
+    """
+    for sentence in re.split(r'(?<=[.;])\s+', seg):
+        if any(re.search(h, sentence) for h in HISTORICAL):
+            continue
+        for pat in LOCKOUT_POSITIVE:
+            m = re.search(pat, sentence)
+            if not m:
+                continue
+            near = sentence[max(0, m.start() - NEG_WINDOW):m.start()]
+            if not any(re.search(n, near) for n in NEGATED_NEAR):
+                return sentence.strip()
+    return None
+
+
+def ac016_d5_drift():
+    v = []
+    block = _ac016_block()
+    if not block:
+        return ['MCP-AC-016 not found — predicate not sound']
+    fields = _fields(block)
+    missing = [f for f in AC016_FIELDS + ('Closure',) if f not in fields]
+    if missing:
+        return [f'MCP-AC-016 missing field(s) {missing} — predicate not sound']
+
+    # (1) + (2): no field may demand the lockout, so all five necessarily agree.
+    stances = {}
+    for name, seg in fields.items():
+        hit = _demands_lockout(seg)
+        stances[name] = 'lockout' if hit else 'denial-lane'
+        if hit:
+            v.append(f'MCP-AC-016 "{name}" states POSITIVE denial-event lockout semantics -> {hit[:130]!r}')
+    if len(set(stances.values())) > 1:
+        v.append(f'MCP-AC-016 fields disagree: {stances}')
+
+    # The closure must assert the ATTACK FAILS, not that a lockout happened.
+    if not re.search(r'ATTACK PROVEN TO FAIL|attack .{0,20}fail', fields['Closure'], re.I):
+        v.append('MCP-AC-016 Closure does not assert the lockout ATTACK failed')
+
+    # (3) + (4): D-5's residual status and evidence range.
+    t = OD.read_text()
+    i = t.find('### D-5')
+    j = t.find('### D-6', i + 1)
+    d5 = t[i:j if j > 0 else len(t)]
+    if not d5:
+        return v + ['OPEN-DECISIONS D-5 not found — predicate not sound']
+    k = d5.find('**Residual risk:**')
+    residual = d5[k:d5.find('\n  - **', k + 1) if d5.find('\n  - **', k + 1) > 0 else len(d5)] if k >= 0 else ''
+    if not residual:
+        v.append('D-5 has no Residual risk field — predicate not sound')
+    else:
+        if not re.search(r'`?R-6`?', residual):
+            v.append('D-5 residual does not reference R-6')
+        if not re.search(r'PENDING', residual):
+            v.append('D-5 residual does not reproduce R-6\'s PENDING status')
+        # "accepted" is allowed only as an explicit denial of acceptance.
+        for sentence in re.split(r'(?<=[.;])\s+', residual):
+            if re.search(r'\baccepted\b', sentence) and \
+               not re.search(r'NOT accepted|not accepted|does \*\*not\*\* accept|does not accept|stale|never inferred', sentence):
+                v.append(f'D-5 residual claims acceptance while R-6 is PENDING -> {sentence.strip()[:130]!r}')
+    ev = d5[d5.find('**Evidence:**', d5.find('CLOSED —')):]
+    ev = ev[:ev.find('\n  - **')] if ev.find('\n  - **') > 0 else ev
+    for need in ('MCP-EVENT-001..007', 'MCP-OPS-005'):
+        if need not in ev:
+            v.append(f'D-5 evidence omits {need}')
+    return v
+
+
 def clauses(text):
     """Per-class ABSENCE clauses: the text introduced by `<class> ⇒ | : | →`, up to
     the next `;` or the end of the sentence.
@@ -323,7 +459,53 @@ if __name__ == '__main__':
     finally:
         _src.write_text(_orig)
 
+    print('\n=== ARM 4: MCP-AC-016 + OPEN-DECISIONS D-5 consistency (#926 post-merge) ===')
+    d4 = ac016_d5_drift()
+    print('\n'.join('  ' + x for x in d4) if d4
+          else '  NONE (no positive lockout semantics; five fields agree; D-5 residual PENDING; evidence current)')
+
+    print('\n=== ARM 4 seeded known-positives (each MUST fire) ===')
+    # The first two reproduce the ACTUAL text that survived the #926 merge.
+    arm4_seeds = {
+        'LIVE DEFECT 1a: restore the pre-fix Expected control (demands a DURABILITY LOCKOUT)': (
+            AC,
+            ('Aggregate-commit failure enters **`denial-lane-degraded` only**, with its own distinct loss counter.',
+             'instead **critical degraded state + alert + loss counter + a DURABILITY LOCKOUT blocking NEW *allowed* '
+             'write/high-risk operations until durability is restored**.')),
+        'LIVE DEFECT 1b: restore the pre-fix Closure ("the lockout proven")': (
+            AC,
+            ('**Closure:** zero critical loss demonstrated **and the lockout ATTACK PROVEN TO FAIL**',
+             '**Closure:** zero critical loss demonstrated **and** the lockout proven')),
+        'LIVE DEFECT 2a: restore the stale D-5 residual ("accepted, alertable")': (
+            OD,
+            ('  - **Residual risk:** tracked as **`R-6`**',
+             '  - **Residual risk:** critical-event blocking of new writes during a persistence outage is an '
+             'availability trade-off (accepted, alertable); tracked as **`R-6`**')),
+        'LIVE DEFECT 2b: revert D-5 evidence to the stale MCP-EVENT-001..006 range': (
+            OD,
+            ('**MCP-EVENT-001..007** and **MCP-OPS-005**.', 'MCP-EVENT-001..006.')),
+        'MCP-AC-016 field disagreement: weaken ONLY Expected event back to blocking': (
+            AC,
+            ('and **no authenticated operation is blocked anywhere**',
+             'and subsequent allowed write/high-risk operations are blocked')),
+    }
+    originals = {AC: AC.read_text(), OD: OD.read_text()}
+    try:
+        for label, (target, (old, new)) in arm4_seeds.items():
+            if old not in originals[target]:
+                print(f'  SEED-DID-NOT-APPLY: {label}')
+                ok = False
+                continue
+            target.write_text(originals[target].replace(old, new, 1))
+            got = ac016_d5_drift()
+            print(f'  {"FIRES" if got else "MISSED"}: {label}' + (f' -> {got[0][:110]}' if got else ''))
+            ok &= bool(got)
+            target.write_text(originals[target])
+    finally:
+        for f, src in originals.items():
+            f.write_text(src)
+
     print('\n=== residual on the live documents ===')
     v = run(SITES)
     print('\n'.join('  ' + x for x in v) if v else '  NONE')
-    sys.exit(0 if ok and not v and not d and not d3 else 1)
+    sys.exit(0 if ok and not v and not d and not d3 and not d4 else 1)
