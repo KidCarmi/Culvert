@@ -131,6 +131,30 @@ func TestPrivilegeExpansionFixture(t *testing.T) {
 	}
 }
 
+// TestTypeConstraintDropIsExpansion pins the conservative-direction fix: an
+// absent `type` means "any type", so DROPPING a type constraint broadens the
+// accepted input and MUST be privilege_expansion — never safe_narrowing. A
+// classifier that treated absent-type as the empty set would call this narrowing.
+func TestTypeConstraintDropIsExpansion(t *testing.T) {
+	c := New(lim(t))
+	srv := serverRecord(testServer, testIdentity)
+	ingestApproved(t, c, srv, "t", `{"name":"t","inputSchema":{"type":"object","properties":{"p":{"type":"string"}}}}`)
+	// Drop the property's type constraint: string → any.
+	dropped := `{"name":"t","inputSchema":{"type":"object","properties":{"p":{}}}}`
+	rep := ingest(t, c, srv, testIdentity, result(dropped))
+	if classOf(rep, "t") != PrivilegeExpansion {
+		t.Fatalf("dropping a type constraint must be privilege_expansion, got %v; diffs=%v", classOf(rep, "t"), diffsFor(rep, "t"))
+	}
+	// Adding a type constraint is the inverse: safe narrowing.
+	c2 := New(lim(t))
+	ingestApproved(t, c2, srv, "t", `{"name":"t","inputSchema":{"type":"object","properties":{"p":{}}}}`)
+	added := `{"name":"t","inputSchema":{"type":"object","properties":{"p":{"type":"string"}}}}`
+	rep2 := ingest(t, c2, srv, testIdentity, result(added))
+	if classOf(rep2, "t") != SafeNarrowing {
+		t.Fatalf("adding a type constraint must be safe_narrowing, got %v; diffs=%v", classOf(rep2, "t"), diffsFor(rep2, "t"))
+	}
+}
+
 func TestSemanticDriftFixture(t *testing.T) {
 	c := New(lim(t))
 	srv := serverRecord(testServer, testIdentity)

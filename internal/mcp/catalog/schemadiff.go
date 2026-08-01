@@ -111,12 +111,23 @@ func diffSchema(prior, observed *canonical.Node) schemaSignals {
 	return s
 }
 
-// diffType compares the `type` keyword as a set: a superset is broadening, a
-// subset is narrowing, a disjoint change is ambiguous.
+// diffType compares the `type` keyword as a set of allowed types: a superset is
+// broadening, a subset is narrowing, a disjoint change is ambiguous. An ABSENT
+// `type` means "any type allowed" (the universal set), NOT the empty set — so
+// dropping `type` is an EXPANSION (a specific type → anything) and adding one is
+// a NARROWING. Getting this backwards would mislabel a real broadening as safe
+// narrowing, exactly what the conservative rule forbids.
 func diffType(prior, observed *canonical.Node, s *schemaSignals) {
 	po, pok := prior.Get("type")
 	oo, ook := observed.Get("type")
-	if !pok && !ook {
+	switch {
+	case !pok && !ook:
+		return
+	case pok && !ook:
+		s.expand("type constraint dropped (now any type)")
+		return
+	case !pok && ook:
+		s.narrow("type constraint added")
 		return
 	}
 	pset := typeSet(po)
