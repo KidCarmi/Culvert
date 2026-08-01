@@ -915,6 +915,11 @@ func addRequestLogHealth(resp map[string]any) {
 	if n := reqlog.WriteErrors(); n > 0 {
 		resp["requestLogWriteErrors"] = n
 	}
+	// Saturation of the async JSONL queue: no entry is lost, but request
+	// goroutines are waiting on the disk again, so latency is affected.
+	if n := reqlog.Backpressure(); n > 0 {
+		resp["requestLogBackpressure"] = n
+	}
 }
 
 // apiHealthz is an unauthenticated health-check endpoint for load balancers.

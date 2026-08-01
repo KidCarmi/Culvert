@@ -87,6 +87,9 @@ func apiStats(w http.ResponseWriter, r *http.Request) {
 		// Persistent request-log health: non-zero means writes are failing
 		// (e.g. disk full) and the on-disk history is incomplete.
 		"logWriteErrors": reqlog.WriteErrors(),
+		// Non-zero means the async JSONL persistence queue saturated: no
+		// entry was lost, but request goroutines waited on the disk.
+		"logBackpressure": reqlog.Backpressure(),
 		// Audit/request-log persistence state: if the operator configured a
 		// file path but the engine could not open it at startup (bad
 		// permissions, missing directory, full disk), both silently fall
