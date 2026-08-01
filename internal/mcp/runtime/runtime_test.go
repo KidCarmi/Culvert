@@ -70,7 +70,8 @@ func TestRuntime_StartServeShutdownNoLeak(t *testing.T) {
 func TestRuntime_TransactionalStartupRollback(t *testing.T) {
 	k := newESKey(t, "k1")
 	// Occupy a port so the Management listener's bind fails.
-	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	var lc net.ListenConfig
+	occupied, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("occupy: %v", err)
 	}

@@ -94,7 +94,8 @@ func newListener(cfg ListenerConfig, deps Deps, listenerID string, rev uint64) (
 // limiter (MaxConns) so a connection flood cannot exhaust file descriptors or
 // per-connection goroutines regardless of the request-level pools.
 func (l *Listener) bind() error {
-	ln, err := net.Listen("tcp", l.cfg.Addr())
+	var lc net.ListenConfig
+	ln, err := lc.Listen(context.Background(), "tcp", l.cfg.Addr())
 	if err != nil {
 		return err
 	}
@@ -224,7 +225,7 @@ func (l *Listener) admit(ctx context.Context) (func(), bool) {
 // body is exposed as a bounded reader the pipeline reads at its byte-limit step. It
 // NEVER trusts a forwarded Host/Origin header or a client-supplied certificate
 // thumbprint. A non-zero returned status means a transport-level rejection.
-func (l *Listener) extractRequest(w http.ResponseWriter, r *http.Request) (Request, int) {
+func (l *Listener) extractRequest(w http.ResponseWriter, r *http.Request) (req Request, status int) {
 	// mTLS defense-in-depth: a require-cert listener must have a verified peer cert.
 	if l.cfg.ClientCertMode == ClientCertRequire {
 		if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
@@ -234,7 +235,7 @@ func (l *Listener) extractRequest(w http.ResponseWriter, r *http.Request) (Reque
 	// Cap the body at the server layer too (defense-in-depth); the pipeline applies
 	// the authoritative byte limit when it actually reads it.
 	body := http.MaxBytesReader(w, r.Body, int64(l.lim.MaxBodyBytes())+1)
-	req := Request{
+	req = Request{
 		HTTPMethod:           r.Method,
 		Capability:           l.cfg.Capability,
 		Host:                 r.Host, // the real Host / :authority, never X-Forwarded-Host

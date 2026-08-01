@@ -17,12 +17,13 @@ import (
 
 // startInsecureRuntime binds a Gateway-only insecure runtime on an ephemeral port
 // and returns it plus the bound address. It registers cleanup.
-func startInsecureRuntime(t *testing.T, k *esKey) (*Runtime, string) {
+func startInsecureRuntime(t *testing.T, k *esKey) (rt *Runtime, addr string) {
 	t.Helper()
 	g := gwListenerConfig(t)
 	g.Port = 0 // ephemeral
 	cfg := Config{Gateway: g, Deps: testDeps(t, k, NewBoundedSink(64))}
-	rt, err := NewRuntime(cfg)
+	var err error
+	rt, err = NewRuntime(cfg)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -34,7 +35,7 @@ func startInsecureRuntime(t *testing.T, k *esKey) (*Runtime, string) {
 		defer cancel()
 		_ = rt.Shutdown(ctx)
 	})
-	addr := rt.Addr(false)
+	addr = rt.Addr(false)
 	return rt, addr
 }
 
@@ -50,8 +51,10 @@ func dialTCP(t *testing.T, addr string) net.Conn {
 	return conn
 }
 
-// rawPost writes one HTTP/1.1 POST on conn and returns the parsed response.
-func rawPost(t *testing.T, conn net.Conn, br *bufio.Reader, host, token string, body []byte) *http.Response {
+// rawPost writes one HTTP/1.1 POST on conn and returns the response status code and
+// the Mcp-Session-Id header. It closes the response body itself so no *http.Response
+// escapes the helper (satisfies bodyclose).
+func rawPost(t *testing.T, conn net.Conn, br *bufio.Reader, host, token string, body []byte) (status int, sessionID string) {
 	t.Helper()
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "POST %s HTTP/1.1\r\n", gwResource)
@@ -64,14 +67,14 @@ func rawPost(t *testing.T, conn net.Conn, br *bufio.Reader, host, token string, 
 	if _, err := conn.Write([]byte(sb.String())); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	req, _ := http.NewRequest("POST", gwResource, nil)
+	req, _ := http.NewRequestWithContext(context.Background(), "POST", gwResource, http.NoBody)
 	resp, err := http.ReadResponse(br, req)
 	if err != nil {
 		t.Fatalf("read response: %v", err)
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
-	return resp
+	_ = resp.Body.Close()
+	return resp.StatusCode, resp.Header.Get("Mcp-Session-Id")
 }
 
 // TestListener_HostRecheckedPerRequestH11 is the MCP-INSP-009 H1.1 reuse proof: a
@@ -85,18 +88,18 @@ func TestListener_HostRecheckedPerRequestH11(t *testing.T) {
 	br := bufio.NewReader(conn)
 
 	// Request 1: valid host + auth → 200 initialize.
-	r1 := rawPost(t, conn, br, gwHost, gwToken(k), initializeBody(1))
-	if r1.StatusCode != 200 {
-		t.Fatalf("first request status = %d, want 200", r1.StatusCode)
+	s1, sid1 := rawPost(t, conn, br, gwHost, gwToken(k), initializeBody(1))
+	if s1 != 200 {
+		t.Fatalf("first request status = %d, want 200", s1)
 	}
-	if r1.Header.Get("Mcp-Session-Id") == "" {
+	if sid1 == "" {
 		t.Fatal("first request did not assign a session id")
 	}
 
 	// Request 2 on the SAME connection with a spoofed Host → 403 host_rejected.
-	r2 := rawPost(t, conn, br, "evil.example.com", gwToken(k), initializeBody(2))
-	if r2.StatusCode != 403 {
-		t.Fatalf("reused-connection spoofed-host request status = %d, want 403", r2.StatusCode)
+	s2, _ := rawPost(t, conn, br, "evil.example.com", gwToken(k), initializeBody(2))
+	if s2 != 403 {
+		t.Fatalf("reused-connection spoofed-host request status = %d, want 403", s2)
 	}
 }
 
@@ -117,7 +120,7 @@ func TestListener_HostRecheckedPerStreamH2(t *testing.T) {
 	client.Transport.(*http.Transport).ForceAttemptHTTP2 = true
 
 	post := func(host string, body []byte) int {
-		req, _ := http.NewRequest("POST", srv.URL+gwResource, strings.NewReader(string(body)))
+		req, _ := http.NewRequestWithContext(context.Background(), "POST", srv.URL+gwResource, strings.NewReader(string(body)))
 		req.Host = host // becomes :authority on the H2 stream
 		req.Header.Set("Authorization", "Bearer "+gwToken(k))
 		req.Header.Set("Content-Type", "application/json")
@@ -155,7 +158,7 @@ func gwTLSListenerConfig(t testing.TB, _ *esKey) ListenerConfig {
 // base64url SHA-256 of the peer cert DER and never a client-supplied header.
 func TestPeerThumbprint(t *testing.T) {
 	cert := &x509.Certificate{Raw: []byte("fake-der-bytes-for-hashing")}
-	r, _ := http.NewRequest("POST", "/", nil)
+	r, _ := http.NewRequestWithContext(context.Background(), "POST", "/", http.NoBody)
 	r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}}
 	r.Header.Set("X-Client-Cert-Thumbprint", "attacker-supplied") // must be ignored
 
