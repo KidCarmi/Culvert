@@ -53,7 +53,7 @@ the most-proven validator. 3.1.1 migration is a recorded follow-up.
 
 ## 3. Go-native critical path
 
-**getkin/kin-openapi** — **[VERIFIED]** latest v0.145.0, MIT, pure Go, supports 3.0/3.1/3.2 document validation; 3.1 landed v0.136.0 (<https://github.com/getkin/kin-openapi/releases>). Runs inside `go test` — the single most important property for an air-gapped shop. Limitation: request/response *middleware* is 3.0-mature (§2).
+**getkin/kin-openapi** — **[VERIFIED]** pinned v0.145.0 (go.mod), MIT, pure Go, supports 3.0/3.1/3.2 document validation; 3.1 landed v0.136.0 (<https://github.com/getkin/kin-openapi/releases>). Runs inside `go test` — the single most important property for an air-gapped shop. Limitation: request/response *middleware* is 3.0-mature (§2).
 
 **Route/RBAC coverage (no new dep)** — bind the live `uiRoutes` table (already
 C1-enforced) to the spec via a Go test: every documented op maps to a real route
