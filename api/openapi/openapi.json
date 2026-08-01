@@ -12,6 +12,17 @@
         },
         "description": "Malformed request (invalid JSON, missing/invalid parameter). Body is plain text."
       },
+      "PlainConflict": {
+        "content": {
+          "text/plain": {
+            "example": "saas feed config is control-plane managed on this data-plane node",
+            "schema": {
+              "type": "string"
+            }
+          }
+        },
+        "description": "Request conflicts with the node's role (e.g. a control-plane-managed setting cannot be edited locally on a data-plane node). Body is plain text."
+      },
       "PlainForbidden": {
         "content": {
           "text/plain": {
@@ -525,6 +536,34 @@
           "groups",
           "names"
         ],
+        "type": "object"
+      },
+      "CategoryOverrides": {
+        "additionalProperties": false,
+        "description": "Admin category overrides layered on the feed snapshot. Each key carries host+subdomain suffix scope. A wholly-empty object clears every override.",
+        "properties": {
+          "added": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "host → category to insert.",
+            "type": "object"
+          },
+          "recategorized": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "host → category to repoint.",
+            "type": "object"
+          },
+          "tombstones": {
+            "description": "hosts to suppress (self + subdomains).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
         "type": "object"
       },
       "ChangePasswordRequest": {
@@ -2249,6 +2288,100 @@
         ],
         "type": "object"
       },
+      "SaaSFeedOverridesResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "editable": {
+            "description": "false on a managed data-plane node.",
+            "type": "boolean"
+          },
+          "overrides": {
+            "$ref": "#/components/schemas/CategoryOverrides"
+          }
+        },
+        "required": [
+          "overrides",
+          "editable"
+        ],
+        "type": "object"
+      },
+      "SaaSFeedSettings": {
+        "additionalProperties": true,
+        "description": "Configured SaaS signed category-feed settings plus resolved effective values. runtime_activation_available is always false until the signed-feed client ships; this schema deliberately carries no last_success / active version / freshness / provenance.",
+        "properties": {
+          "editable": {
+            "description": "false on a managed data-plane node (feed policy is control-plane-authoritative).",
+            "type": "boolean"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "managed": {
+            "description": "true ⇒ enabled is authoritative; false ⇒ on-by-default (never explicitly configured).",
+            "type": "boolean"
+          },
+          "note": {
+            "type": "string"
+          },
+          "official_url": {
+            "description": "The official built-in feed endpoint the empty URL resolves to and the only accepted origin.",
+            "type": "string"
+          },
+          "protocol": {
+            "description": "Signed-only; not downgradeable.",
+            "enum": [
+              "signed_manifest_v1"
+            ],
+            "type": "string"
+          },
+          "refresh_seconds": {
+            "description": "Poll cadence in seconds (0 ⇒ the 24h default; effective min 1h).",
+            "format": "int64",
+            "type": "integer"
+          },
+          "resolve_error": {
+            "type": "string"
+          },
+          "resolved": {
+            "additionalProperties": false,
+            "properties": {
+              "enabled": {
+                "type": "boolean"
+              },
+              "protocol": {
+                "type": "string"
+              },
+              "refresh_seconds": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "runtime_activation_available": {
+            "description": "Always false in this release — configuration is stored but no feed is fetched, verified, activated, or served yet.",
+            "type": "boolean"
+          },
+          "url": {
+            "description": "Configured manifest URL ('' ⇒ the built-in official endpoint).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "managed",
+          "enabled",
+          "url",
+          "protocol",
+          "refresh_seconds",
+          "official_url",
+          "editable",
+          "runtime_activation_available"
+        ],
+        "type": "object"
+      },
       "ScanCache": {
         "additionalProperties": true,
         "properties": {
@@ -2700,6 +2833,37 @@
           "rotate_key": {
             "description": "When true, mint a new node-local pseudonym key (breaks correlation with older records).",
             "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "SetSaaSFeedSettings": {
+        "additionalProperties": false,
+        "description": "SaaS feed configuration update. All fields optional.",
+        "properties": {
+          "enabled": {
+            "description": "Presence toggle: omit ⇒ enabled defaults true.",
+            "type": "boolean"
+          },
+          "managed": {
+            "description": "Presence toggle: omit ⇒ managed becomes true (a PUT is explicit management).",
+            "type": "boolean"
+          },
+          "protocol": {
+            "description": "'' ⇒ signed_manifest_v1. No other value is accepted (no unsigned/raw fallback).",
+            "enum": [
+              "",
+              "signed_manifest_v1"
+            ],
+            "type": "string"
+          },
+          "refresh": {
+            "description": "Go duration (e.g. '24h'); '' ⇒ default. Min-clamped to 1h.",
+            "type": "string"
+          },
+          "url": {
+            "description": "Official-origin manifest URL; '' ⇒ the built-in official endpoint. Any non-official value is rejected (no generic mirror).",
+            "type": "string"
           }
         },
         "type": "object"
@@ -13345,6 +13509,195 @@
         "x-culvert-idempotency": "idempotent",
         "x-culvert-introduced-version": "1.0.0",
         "x-culvert-permission": "operator",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/saas-feed/overrides": {
+      "get": {
+        "description": "Returns the admin-owned category overrides (added, recategorized, tombstones) layered on the SaaS feed snapshot.",
+        "operationId": "getSaaSFeedOverrides",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SaaSFeedOverridesResponse"
+                }
+              }
+            },
+            "description": "Admin category overrides."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Admin category overrides",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "put": {
+        "description": "Full-set replacement of the admin category overrides. Transmit the complete desired set; an empty body ({}) is a deliberate clear of every override (an explicit empty replacement that delete-propagates to the fleet). Denied with 409 on a managed data-plane node.",
+        "operationId": "setSaaSFeedOverrides",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CategoryOverrides"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Updated overrides."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/PlainConflict"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Replace admin category overrides",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-audit-event": "saasfeed.overrides",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/saas-feed/settings": {
+      "get": {
+        "description": "Returns the CONFIGURED SaaS signed category-feed settings (url, protocol, managed, enabled, refresh) and the resolved effective values. Clearly separates configured state from runtime activation state — runtime activation (download/verify/activate/serve) is not yet available, so this endpoint never reports last_success, an active version, freshness, or provenance.",
+        "operationId": "getSaaSFeedSettings",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SaaSFeedSettings"
+                }
+              }
+            },
+            "description": "SaaS feed configuration."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "SaaS signed category-feed configuration",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "put": {
+        "description": "Updates the SaaS signed category-feed configuration. The protocol is signed-only (signed_manifest_v1); the URL is constrained to the official Culvert feed origin (an empty URL resolves to the built-in official endpoint). Configuration only — no feed is downloaded, verified, or activated. Denied with 409 on a managed data-plane node (feed policy is control-plane-authoritative).",
+        "operationId": "setSaaSFeedSettings",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetSaaSFeedSettings"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SaaSFeedSettings"
+                }
+              }
+            },
+            "description": "Updated SaaS feed configuration."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/PlainConflict"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Set SaaS signed category-feed configuration",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-audit-event": "saasfeed.settings",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"

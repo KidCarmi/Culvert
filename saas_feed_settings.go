@@ -15,11 +15,16 @@ package main
 
 import "sync"
 
-// saasFeedDurable is the durable feed-config ownership state (excluding the URL,
-// which the legacy syncer owns in F3a-1).
+// saasFeedDurable is the durable feed-config ownership state. As of F3a-2 it OWNS
+// the URL too: the signed-feed manifest URL is deliberately decoupled from the
+// legacy additive syncer (globalSaaSFeed) so that configuring the signed feed
+// never points the legacy syncer at manifest.sigstore.json nor triggers a fetch
+// (the "critical separation from the legacy SaaS syncer" contract). The legacy
+// syncer keeps its own startup URL; nothing here feeds it.
 type saasFeedDurable struct {
 	Managed        bool
 	Enabled        bool
+	URL            string
 	Protocol       string
 	RefreshSeconds int64
 	SchemaVersion  int
@@ -50,11 +55,30 @@ func getSaaSFeedDurable() saasFeedDurable {
 
 // snapshotSaaSFeedDurable writes the holder's durable fields into s during the
 // omnibus SaveAdminSettings rebuild, preserving them across unrelated mutations.
+// It is the SOLE writer of s.SaaSFeedURL (F3a-2): the legacy syncer no longer
+// owns the field, so the signed-feed URL round-trips through the holder alone.
 func snapshotSaaSFeedDurable(s *AdminSettings) {
 	d := getSaaSFeedDurable()
 	s.SaaSFeedManaged = d.Managed
 	s.SaaSFeedEnabled = d.Enabled
+	s.SaaSFeedURL = d.URL
 	s.SaaSFeedProtocol = d.Protocol
 	s.SaaSFeedRefreshSeconds = d.RefreshSeconds
 	s.SaaSStoreSchemaVersion = d.SchemaVersion
+}
+
+// resolvedSaaSFeedConfig applies the F0 §3 single-source rule to the current
+// durable holder, returning the effective (managed, enabled, url, protocol,
+// refresh) feed configuration. Pure/read-only — it neither fetches nor arms
+// anything. Shared by the admin API read path and the CP→DP capture so both
+// agree on the resolved values.
+func resolvedSaaSFeedConfig() (SaaSFeedConfig, error) {
+	d := getSaaSFeedDurable()
+	return ResolveSaaSFeedConfig(&AdminSettings{
+		SaaSFeedManaged:        d.Managed,
+		SaaSFeedEnabled:        d.Enabled,
+		SaaSFeedURL:            d.URL,
+		SaaSFeedProtocol:       d.Protocol,
+		SaaSFeedRefreshSeconds: d.RefreshSeconds,
+	})
 }

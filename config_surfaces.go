@@ -346,23 +346,64 @@ var configSurfaces = []configSurfaceRow{
 	{ID: "blocklist_feeds", Kind: kindConfig, Owner: "blocklistfeed", AdminDurable: true,
 		Note:     "gated by blocklist_feeds_saved sentinel (authoritative incl. empty list)",
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "BlocklistFeeds"}}},
-	// SaaS signed category feed (F3a-1). Node-local durable rows only; the CP→DP
-	// ClusterSynced flip + ConfigSnapshot bindings + *bool presence land in F3a-2
-	// (roadmap/FEEDS-DISTRIBUTION-F3-DESIGN.md Part C: "rows — declared but
-	// ClusterSynced wiring lands in F3a-2"). Not on export/import or rollback yet.
-	{ID: "saas_feed_url", Kind: kindConfig, Owner: "saasFeed", AdminDurable: true,
-		Note:     "F3a-1: node-local; official-origin URL contract enforced by resolveFeedURL/validateOfficialManifestURL",
-		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "SaaSFeedURL"}}},
-	{ID: "saas_feed_managed", Kind: kindConfig, Owner: "saasFeed", AdminDurable: true,
-		Note:     "on-by-default sentinel: false ⇒ never-touched ⇒ enabled; true ⇒ SaaSFeedEnabled authoritative",
-		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "SaaSFeedManaged"}}},
-	{ID: "saas_feed_enabled", Kind: kindConfig, Owner: "saasFeed", AdminDurable: true,
-		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "SaaSFeedEnabled"}}},
-	{ID: "saas_feed_protocol", Kind: kindConfig, Owner: "saasFeed", AdminDurable: true,
-		Note:     "signed_manifest_v1 only (no unsigned/raw fallback)",
-		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "SaaSFeedProtocol"}}},
-	{ID: "saas_feed_refresh_seconds", Kind: kindConfig, Owner: "saasFeed", AdminDurable: true,
-		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "SaaSFeedRefreshSeconds"}}},
+	// SaaS signed category feed (F3a-2). Dual AdminDurable + ClusterSynced (the
+	// default_action shape): CP-authoritative fleet policy, exported/imported,
+	// rollback-able, and pushed CP→DP. Each scalar row carries an AdminSettings
+	// binding (restart durability), a configBackup binding (export/import/rollback),
+	// and a ConfigSnapshot binding (CP→DP). managed/enabled are *bool PRESENCE
+	// fields with a NIL-SKIP snapshot apply — nil ⇒ DP keeps local, non-nil ⇒
+	// authoritative even when false — so a rolled-back CP that omits them can never
+	// re-enable a durably-disabled DP (§A.2.2, Codex P1). configBackup rollback
+	// applies unconditionally (like default_action); import gates on protocol
+	// presence (never-wipe). Not secrets ⇒ not redacted; scalars ⇒ no SnapshotCap.
+	{ID: "saas_feed_url", Kind: kindConfig, Owner: "saasFeed",
+		Export: true, Import: true, Rollback: true, Diffed: true, DiffKey: "saas_feed_url",
+		AdminDurable: true, ClusterSynced: true,
+		Note: "official-origin URL contract (resolveFeedURL/validateOfficialManifestURL); decoupled from the legacy syncer (F3a-2); DP \"\"-skips",
+		Bindings: []surfaceBinding{
+			{Struct: "configBackup", Field: "SaaSFeedURL", Apply: semAlwaysReplace},
+			{Struct: "AdminSettings", Field: "SaaSFeedURL"},
+			{Struct: "ConfigSnapshot", Field: "SaaSFeedURL", Apply: semSkipIfZero}}},
+	{ID: "saas_feed_managed", Kind: kindConfig, Owner: "saasFeed",
+		Export: true, Import: true, Rollback: true, Diffed: true, DiffKey: "saas_feed_managed",
+		AdminDurable: true, ClusterSynced: true,
+		Note: "on-by-default sentinel: false ⇒ never-touched ⇒ enabled; true ⇒ SaaSFeedEnabled authoritative. ConfigSnapshot binding is a *bool presence field: nil ⇒ keep DP-local (never re-enable a durable disable), non-nil ⇒ apply even false",
+		Bindings: []surfaceBinding{
+			{Struct: "configBackup", Field: "SaaSFeedManaged", Apply: semAlwaysReplace},
+			{Struct: "AdminSettings", Field: "SaaSFeedManaged"},
+			{Struct: "ConfigSnapshot", Field: "SaaSFeedManaged", Apply: semNilSkipEmptyWipe}}},
+	{ID: "saas_feed_enabled", Kind: kindConfig, Owner: "saasFeed",
+		Export: true, Import: true, Rollback: true, Diffed: true, DiffKey: "saas_feed_enabled",
+		AdminDurable: true, ClusterSynced: true,
+		Note: "authoritative only when managed=true. ConfigSnapshot binding is a *bool presence field (nil-skip apply)",
+		Bindings: []surfaceBinding{
+			{Struct: "configBackup", Field: "SaaSFeedEnabled", Apply: semAlwaysReplace},
+			{Struct: "AdminSettings", Field: "SaaSFeedEnabled"},
+			{Struct: "ConfigSnapshot", Field: "SaaSFeedEnabled", Apply: semNilSkipEmptyWipe}}},
+	{ID: "saas_feed_protocol", Kind: kindConfig, Owner: "saasFeed",
+		Export: true, Import: true, Rollback: true, Diffed: true, DiffKey: "saas_feed_protocol",
+		AdminDurable: true, ClusterSynced: true,
+		Note: "signed_manifest_v1 only (no unsigned/raw fallback); DP \"\"-skips",
+		Bindings: []surfaceBinding{
+			{Struct: "configBackup", Field: "SaaSFeedProtocol", Apply: semAlwaysReplace},
+			{Struct: "AdminSettings", Field: "SaaSFeedProtocol"},
+			{Struct: "ConfigSnapshot", Field: "SaaSFeedProtocol", Apply: semSkipIfZero}}},
+	{ID: "saas_feed_refresh_seconds", Kind: kindConfig, Owner: "saasFeed",
+		Export: true, Import: true, Rollback: true, Diffed: true, DiffKey: "saas_feed_refresh_seconds",
+		AdminDurable: true, ClusterSynced: true,
+		Note: "poll cadence (≥1h); DP 0-skips",
+		Bindings: []surfaceBinding{
+			{Struct: "configBackup", Field: "SaaSFeedRefreshSeconds", Apply: semAlwaysReplace},
+			{Struct: "AdminSettings", Field: "SaaSFeedRefreshSeconds"},
+			{Struct: "ConfigSnapshot", Field: "SaaSFeedRefreshSeconds", Apply: semSkipIfZero}}},
+	{ID: "category_overrides", Kind: kindConfig, Owner: "globalCategoryOverrides",
+		Export: true, Import: true, Rollback: true, Diffed: true, DiffKey: "category_overrides",
+		DiffNilGuarded: true, ClusterSynced: true, WireWipeCapable: true,
+		SnapshotCap: maxSnapCategoryOverrides,
+		Note:        "admin overrides layered on the feed snapshot (added/recategorized/tombstones). Pointer-to-struct on BOTH configBackup and ConfigSnapshot for presence: nil ⇒ keep-local (never wipe), non-nil (even empty) ⇒ authoritative replacement. WireWipeCapable + NO omitempty on ConfigSnapshot: unlike category_groups, clearing the last override MUST reach every DP (a stale tombstone would keep a host suppressed — the DecryptionProfiles delete-propagation posture). Import never wipes (skips nil/empty); apply ordered before policy_rules. Host-aggregate cap enforced in validateConfigSnapshot (pointer-to-struct is not a configSnapshotSliceCaps row, so the capped-count literal is unchanged)",
+		Bindings: []surfaceBinding{
+			{Struct: "configBackup", Field: "CategoryOverrides", Apply: semNilSkipEmptyWipe},
+			{Struct: "ConfigSnapshot", Field: "CategoryOverrides", Apply: semNilSkipEmptyWipe}}},
 	{ID: "saas_store_schema_version", Kind: kindMeta, Owner: "saasFeed", AdminDurable: true,
 		Note:     "F3a-1 durable migration marker; absence triggers one-time schema init, a newer value is refused (fail-closed downgrade guard)",
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "SaaSStoreSchemaVersion"}}},

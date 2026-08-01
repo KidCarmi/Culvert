@@ -98,7 +98,7 @@ import (
 //   - 189 — Added /api/urlcat/feed-status (GET viewer: UT1 + SaaS category
 //     feed freshness/failure counts, previously Prometheus-only).
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 189
+	const want = 191 // + /api/saas-feed/settings + /api/saas-feed/overrides (F3a-2)
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}

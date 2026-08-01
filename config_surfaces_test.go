@@ -40,6 +40,7 @@ import (
 	"github.com/KidCarmi/Culvert/internal/pac"
 
 	"github.com/KidCarmi/Culvert/internal/blocklist"
+	"github.com/KidCarmi/Culvert/internal/catoverride"
 	"github.com/KidCarmi/Culvert/internal/decryptprofile"
 )
 
@@ -227,6 +228,15 @@ func csrNilGuardCases() map[string]struct {
 			},
 			wipe: func(c *configBackup) { c.PACPools = []pac.Pool{} },
 		},
+		// category_overrides is a pointer-to-struct on the rollback surface with
+		// nil-skip / non-nil-replace semantics: nil target ⇒ apply skips (no diff);
+		// a non-nil (even empty) set ⇒ apply replaces (diff reports the clear).
+		"category_overrides": {
+			populate: func(c *configBackup) {
+				c.CategoryOverrides = &CategoryOverrides{Added: map[string]string{"csr.example.com": "csr-cat"}}
+			},
+			wipe: func(c *configBackup) { c.CategoryOverrides = &CategoryOverrides{} },
+		},
 	}
 }
 
@@ -346,6 +356,34 @@ func csrDiffMutators() map[string]func(a, b *configBackup) {
 			a.PACPools = []pac.Pool{}
 			b.PACPools = []pac.Pool{{ID: "csr-diff-pool", Name: "CSR"}}
 		},
+		// SaaS feed scalars: the diff block is gated on b.SaaSFeedProtocol != ""
+		// (mirroring applyConfigBackup), so every mutator sets protocol non-empty on
+		// both sides, then diverges the target field on one side.
+		"saas_feed_url": func(a, b *configBackup) {
+			a.SaaSFeedProtocol, b.SaaSFeedProtocol = saasFeedProtocolV1, saasFeedProtocolV1
+			a.SaaSFeedURL = builtinSaaSFeedURL
+			b.SaaSFeedURL = ""
+		},
+		"saas_feed_managed": func(a, b *configBackup) {
+			a.SaaSFeedProtocol, b.SaaSFeedProtocol = saasFeedProtocolV1, saasFeedProtocolV1
+			a.SaaSFeedManaged, b.SaaSFeedManaged = false, true
+		},
+		"saas_feed_enabled": func(a, b *configBackup) {
+			a.SaaSFeedProtocol, b.SaaSFeedProtocol = saasFeedProtocolV1, saasFeedProtocolV1
+			a.SaaSFeedEnabled, b.SaaSFeedEnabled = false, true
+		},
+		"saas_feed_protocol": func(a, b *configBackup) {
+			a.SaaSFeedProtocol = "signed_manifest_v0"
+			b.SaaSFeedProtocol = saasFeedProtocolV1
+		},
+		"saas_feed_refresh_seconds": func(a, b *configBackup) {
+			a.SaaSFeedProtocol, b.SaaSFeedProtocol = saasFeedProtocolV1, saasFeedProtocolV1
+			a.SaaSFeedRefreshSeconds, b.SaaSFeedRefreshSeconds = 3600, 7200
+		},
+		"category_overrides": func(a, b *configBackup) {
+			a.CategoryOverrides = &CategoryOverrides{Added: map[string]string{"csr.example.com": "csr-cat"}}
+			b.CategoryOverrides = &CategoryOverrides{}
+		},
 	}
 }
 
@@ -427,6 +465,16 @@ func csrIsolateRollbackStores(t *testing.T) {
 
 	origAction := defaultPolicyAction()
 	t.Cleanup(func() { setDefaultPolicyAction(origAction) })
+
+	// SaaS feed durable holder (F3a-2): snapshot + restore the whole struct.
+	origFeed := getSaaSFeedDurable()
+	t.Cleanup(func() { setSaaSFeedDurable(origFeed) })
+
+	// globalCategoryOverrides (F3a-2): swap for a fresh in-memory store (path="" →
+	// Save is a no-op) and restore, so the round-trip diverges it without leaking.
+	origOv := globalCategoryOverrides
+	globalCategoryOverrides = catoverride.New()
+	t.Cleanup(func() { globalCategoryOverrides = origOv })
 }
 
 // csrSeedStateA drives every rollback-surface store to a known state A.
@@ -456,6 +504,13 @@ func csrSeedStateA() {
 	catStore.ReplaceAll([]CategoryEntry{{Name: "csr-cat", Hosts: []string{"csr.example.com"}}})
 	globalCategoryGroups.ReplaceAll([]CategoryGroup{{Name: "csr-group", Categories: []string{"csr-cat"}}})
 	globalDecryptionProfiles.ReplaceAll([]DecryptionProfile{{Name: "csr-dp-a", MinTLSVersion: "1.2", OnInspectError: "fail-open"}})
+	// SaaS feed config (F3a-2): a fully-set managed state so capture (resolved
+	// url/protocol non-empty) applies on rollback and round-trips.
+	setSaaSFeedDurable(saasFeedDurable{
+		Managed: true, Enabled: true, URL: builtinSaaSFeedURL,
+		Protocol: saasFeedProtocolV1, RefreshSeconds: 3600, SchemaVersion: saasStoreSchemaVersion,
+	})
+	_ = globalCategoryOverrides.ReplaceAll(CategoryOverrides{Added: map[string]string{"csr-a.example.com": "csr-cat"}})
 }
 
 // csrMutateStateB moves every store somewhere else, so an apply-miss for any
@@ -482,6 +537,12 @@ func csrMutateStateB() {
 	catStore.ReplaceAll([]CategoryEntry{})
 	globalCategoryGroups.ReplaceAll([]CategoryGroup{})
 	globalDecryptionProfiles.ReplaceAll([]DecryptionProfile{})
+	// SaaS feed config (F3a-2): diverge every field so an apply-miss is caught.
+	setSaaSFeedDurable(saasFeedDurable{
+		Managed: false, Enabled: false, URL: "", Protocol: "", RefreshSeconds: 0,
+		SchemaVersion: saasStoreSchemaVersion,
+	})
+	_ = globalCategoryOverrides.ReplaceAll(CategoryOverrides{Tombstones: []string{"csr-b.example.com"}})
 }
 
 // csrCanon renders a captured field value order-insensitively for slices
@@ -813,6 +874,7 @@ var snapshotApplyFuncs = map[string]bool{
 	"applySnapshotClusterRuntime":         true,
 	"applySnapshotSessionSecret":          true,
 	"applySnapshotExtendedState":          true,
+	"applySnapshotSaaSFeed":               true, // F3a-2: SaaS feed config + category overrides
 	"applyExternalAuthSnapshotSettings":   true,
 	"syncSnapshotIdPProfiles":             true,
 	"fetchAndApply":                       true, // controlplane_client.go (DP poller)
