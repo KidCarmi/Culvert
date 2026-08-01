@@ -12,11 +12,14 @@
 > this window — the MCP Agent Security Gateway going from 100%-design-doc to a real PR-1..PR-6
 > implementation, and the blocklist/URL-category SaaS feed's F3b-1/2/3 generation-activation-GC
 > subsystem.
-> **Companion change:** none. Every finding below touches a live YAML config key, wire field
-> (`ConfigSnapshot`/admin-settings JSON), or already-shipped Prometheus metric/API field — none meet
-> this program's zero-compatibility-risk bar for a same-day fix (that bar has consistently meant
-> doc/comment/design-doc-only changes; see T-22/T-23/T-24/T-26/T-27/T-28 in the 07-24 review). All four
-> new findings are documented for dedicated follow-up, the same treatment already given to T-9/T-17/
+> **Companion change:** none. Three findings touch a live YAML config key, wire field
+> (`ConfigSnapshot`/admin-settings JSON), or already-shipped Prometheus metric (T-29, T-30, T-31); the
+> fourth (T-32) touches an already-persisted on-disk field name feeding code paths that other F3b
+> subsystems already depend on, with a live API exposure explicitly scoped as the *next* development
+> slice. None meet this program's zero-compatibility-risk bar for a same-day fix (that bar has
+> consistently meant doc/comment/design-doc-only changes; see T-22/T-23/T-24/T-26/T-27/T-28 in the 07-24
+> review). All four new findings are documented for dedicated follow-up, the same treatment already given
+> to T-9/T-17/
 > T-12/T-21.
 
 ---
@@ -47,9 +50,10 @@ contradiction, is consistent with the expected background rate of drift at this 
 regression).
 
 **Fixed in this change:** none. Unlike 07-24 (which found ten doc/copy-only issues cheap to fix
-same-day), this pass's new findings all touch already-shipped config keys, wire fields, or metrics —
-none are pre-implementation design-doc corrections or copy-only GUI strings, so none clear this
-program's same-day bar. All four are sized and documented below for dedicated follow-up PRs.
+same-day), three of this pass's findings touch already-shipped config keys, wire fields, or metrics, and
+the fourth (T-32) touches on-disk/internal identifiers already depended on by sibling code — none are
+pre-implementation design-doc corrections or copy-only GUI strings, so none clear this program's
+same-day bar. All four are sized and documented below for dedicated follow-up PRs.
 
 ---
 
@@ -120,13 +124,16 @@ unrelated meaning — see T-32 below.
 - **Current names:**
   - YAML: `security.max_conns_per_ip` — `config.go:54`
   - CP→DP wire (`ConfigSnapshot`): `MaxConnsPerIP`/`max_conns_per_ip` — `controlplane_snapshot.go:57`
-  - Admin-settings persistence / JSON API: `ConnLimitMaxPerIP`/`conn_limit_max_per_ip` —
-    `admin_settings.go:34`
-  - Config-version rollback struct (`configBackup`): `connLimitMaxPerIP` — `ui_policy.go:1253`
-  - `config_surfaces.go:267-272` already explicitly cross-binds all three spellings under one logical
-    field for rollback-membership purposes — it documents *that* the names differ, not *why*.
+  - Admin-settings persistence / JSON API / export-import (`configBackup`, shared struct):
+    `ConnLimitMaxPerIP`/`conn_limit_max_per_ip` — `admin_settings.go:34`, `ui_policy.go:1253`. **Not** on
+    the config-version rollback/diff surface — `config_surfaces.go:267-272`'s `conn_limit_max_per_ip` row
+    carries no `Rollback`/`Diffed` flag (contrast the neighboring `category_groups` row, which does), and
+    `configversion.go` never captures or diffs this field. An earlier draft of this finding mischaracterized
+    it as a rollback-surface name; corrected after review.
+  - `config_surfaces.go:267-272` explicitly cross-binds all three spellings under one logical field
+    (YAML/wire vs. admin-persistence/export-import) — it documents *that* the names differ, not *why*.
 - **Why this is real drift:** the inverse split from T-29 — YAML and the CP→DP wire agree on
-  `max_conns_per_ip`; admin-settings persistence, the live API, and the rollback/diff surface all use the
+  `max_conns_per_ip`; admin-settings persistence, the live API, and export/import all use the
   `conn_limit_*` family instead. Nothing in `config_surfaces.go` or CLAUDE.md documents this split as
   deliberate (unlike the explicitly-rationalized four-name Session Secret case).
 - **Recommended canonical name:** `conn_limit_max_per_ip` — it already matches the sibling
@@ -167,35 +174,43 @@ unrelated meaning — see T-32 below.
 - **Business concept:** the canonical per-generation, host→category content digest that the new
   blocklist/URL-category SaaS feed's F3b activation record and admin-visible feed-status view carry.
 - **Current names / collision:** F3b (merged today, 2026-08-01) names this `SnapshotSHA256` /
-  `snapshot_sha256` in three places — `saas_feed_activation.go:112,139` (the durable activation record),
-  `saas_feed_view.go:70` (`effectiveCategoryView`, which backs the admin-visible, already-live
-  `GET /api/urlcat/feed-status` response per `ui_policy.go:1158` / `ui_routes_meta.go:311`), and the
-  on-disk filename `snapshot.normalized.json` (`saas_feed_genstore.go:72`). "Snapshot" already has two
+  `snapshot_sha256` in three places — `saas_feed_activation.go:112,139` (the durable, on-disk activation
+  record), `saas_feed_view.go:70` (`effectiveCategoryView`, an in-memory struct field with no JSON tag —
+  **not currently API-exposed**), and the on-disk filename `snapshot.normalized.json`
+  (`saas_feed_genstore.go:72`). Correction after review: `GET /api/urlcat/feed-status`
+  (`apiURLCatFeedStatus`, `ui_policy.go:1158-1183`) does **not** return this field today — it only emits
+  the legacy configured/count/timing/failure fields, and `effectiveCategoryView` isn't read anywhere in
+  that handler. Wiring `SnapshotSHA256` (or whichever field the F0 §14 spec settles on) into that endpoint
+  is explicitly the *next*, not-yet-shipped slice — F3b-4, per `roadmap/FEEDS-DISTRIBUTION-F3-DESIGN.md`
+  (§ F3b-3's own "Non-goals: GUI telemetry polish (F3b-4)"; F3b-4 lists "extend `apiURLCatFeedStatus`
+  (`ui_policy.go:1158-1184`) with the F0 §14 fields" as its own scope). "Snapshot" already has two
   established, unrelated meanings this program tracks: the CP→DP `ConfigSnapshot` struct
   (`controlplane_snapshot.go`) and the informally-named rollback "config snapshot" that T-21 (07-24
   review) already flags as confusable with a *different* "Config Version" concept in the same admin UI.
   F3b's own `saas_feed_api.go` header comment uses two of the three meanings side by side in one
   paragraph ("snapshots a config version... republishes the cluster snapshot"), in the same file that
   introduces the third.
-- **Why this is real drift, not cosmetic:** `snapshot_sha256` is a wire JSON field on a live,
-  already-shipped admin-read API response, not an internal variable — an operator or engineer reading
-  "snapshot" in that response could reasonably (and wrongly) associate it with the `ConfigSnapshot`/
-  config-version-rollback machinery T-21 already flags as ambiguous, when it is actually a
-  content-integrity digest of one immutable feed generation with no relationship to either existing
-  "snapshot." This is precisely the pattern this review's Wave-2 methodology exists to catch — new code
-  reusing an already-overloaded term — and it compounds T-21 rather than being independent of it.
+- **Why this is real drift, not cosmetic:** even though `snapshot_sha256` is not yet API-exposed, it is
+  already a persisted on-disk field name (the durable activation record) that other F3b code
+  (`saas_feed_activate.go`, `saas_feed_reverify.go`, `saas_feed_recover.go`) reads and writes by that
+  name, and F3b-4 is already scoped to carry it (or an equivalent field) onto the live admin API. An
+  operator or engineer reading "snapshot" there, once F3b-4 ships, could reasonably (and wrongly)
+  associate it with the `ConfigSnapshot`/config-version-rollback machinery T-21 already flags as
+  ambiguous, when it is actually a content-integrity digest of one immutable feed generation with no
+  relationship to either existing "snapshot." This is precisely the pattern this review's Wave-2
+  methodology exists to catch — new code reusing an already-overloaded term — caught here *before* the
+  F3b-4 API-exposure step, which is the cheapest point to fix it.
 - **Recommended canonical name:** rename the F3b field/filename to something scoped to the feed content —
   e.g. `content_sha256` or `normalized_sha256` — leaving `SnapshotSHA256`'s two pre-existing meanings
-  (`ConfigSnapshot`, rollback "config snapshot") untouched. Consider resolving this alongside T-21's own
-  recommended fix, since both are about reclaiming "snapshot"/"Config Version" as unambiguous terms in the
-  same admin surface area.
-- **Priority:** Medium (the term is already live on an admin API response, and every day it stays
-  compounds the confusion T-21 already documented — but F3b is only hours old, at the cheapest point in
-  its lifecycle to fix, same logic as T-24's pre-implementation catch, just one step later since code
-  already merged). **Migration risk:** Low (F3b just shipped; `/api/urlcat/feed-status` is a new,
-  read-only, viewer-facing endpoint unlikely to have external consumers yet — but still a live wire field,
-  so treated with the same rename discipline as T-29/T-30/T-31 rather than a same-day blind fix).
-  **Est. PR size:** Small.
+  (`ConfigSnapshot`, rollback "config snapshot") untouched. Land this *before* F3b-4 wires the field onto
+  `apiURLCatFeedStatus`, and consider resolving it alongside T-21's own recommended fix, since both are
+  about reclaiming "snapshot"/"Config Version" as unambiguous terms in the same admin surface area.
+- **Priority:** Medium (not urgent from an external-compatibility standpoint — nothing external reads
+  this today — but time-sensitive: F3b-4 is the very next planned slice for this subsystem, and once it
+  wires `snapshot_sha256` onto a live GET response, this becomes a wire-API rename with the same
+  compatibility bar as T-29/T-30/T-31 instead of an internal one). **Migration risk:** Low today (only
+  internal Go identifiers + one on-disk activation-record field, both younger than a day; zero API/GUI
+  exposure yet). **Est. PR size:** Small.
 
 ---
 
@@ -249,9 +264,11 @@ the MCP Agent Security Gateway's transition from design to implementation held i
 discipline (a positive result, not a finding), and surfaced four new findings in the 263 commits of
 feature work since 07-24 — three ordinary config/metric naming splits (T-29, T-30, T-31) and one fresh
 subsystem reusing an already-overloaded term on day one (T-32, which compounds the still-open T-21).
-None of the four met this program's same-day fix bar (all touch already-shipped config keys, wire
-fields, or metrics rather than being pre-implementation design-doc or GUI-copy corrections), so all four
-are documented here for dedicated follow-up at the same priority bar as the program's existing backlog.
+None of the four met this program's same-day fix bar (T-29/T-30/T-31 touch already-shipped config keys,
+wire fields, or metrics; T-32 touches on-disk/internal identifiers other F3b code already depends on,
+with live API exposure scoped as the very next slice — none are pre-implementation design-doc or
+GUI-copy corrections), so all four are documented here for dedicated follow-up at the same priority bar
+as the program's existing backlog.
 No cosmetic or preference-driven renames were proposed; every new finding here is a genuine cross-surface
 naming split an operator, engineer, or support agent would trip over when correlating one surface against
 another.
