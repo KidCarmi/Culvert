@@ -809,6 +809,12 @@ func TestFloor_Advance_ConcurrentWriters(t *testing.T) {
 	fs := newFakeFS()
 	s := newFakeStore(t, fs, 1)
 	const n = 12
+	// Build the candidates in the TEST goroutine (mkFloor touches t); the goroutines
+	// only call Advance, so nothing races on testing.T.
+	cands := make([]floorRecord, n+1)
+	for v := 1; v <= n; v++ {
+		cands[v] = mkFloor(t, int64(v), floorTS0, fmt.Sprintf("%d", v), floorHexA, floorHexB)
+	}
 	var wg sync.WaitGroup
 	start := make(chan struct{})
 	for i := 1; i <= n; i++ {
@@ -816,8 +822,7 @@ func TestFloor_Advance_ConcurrentWriters(t *testing.T) {
 		go func(v int) {
 			defer wg.Done()
 			<-start
-			gen := fmt.Sprintf("%d", v)
-			_, _ = s.Advance(context.Background(), mkFloor(t, int64(v), floorTS0, gen, floorHexA, floorHexB))
+			_, _ = s.Advance(context.Background(), cands[v])
 		}(i)
 	}
 	close(start)
