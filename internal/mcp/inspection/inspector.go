@@ -157,25 +157,30 @@ func (p Profile) evaluateDispositions(rep *dlp.Report) (Disposition, bool, mcper
 	blocked := false
 	reason := mcperr.ReasonNone
 	for i := range rep.Findings {
-		f := &rep.Findings[i]
-		var d Disposition
-		if f.Class == dlp.ClassPossibleInjection {
-			d = DispLabel
-			if p.injectionBlockSeverity != dlp.SevUnset && f.Severity >= p.injectionBlockSeverity {
-				d = DispBlock
-				if !blocked {
-					blocked, reason = true, mcperr.ReasonInjectionSuspected
-				}
-			}
-		} else {
-			d = p.disposition(f.Class)
-			if d.Blocks() && !blocked {
-				blocked, reason = true, blockReasonForClass(f.Class)
-			}
+		d, blocks, blockReason := p.findingDisposition(&rep.Findings[i])
+		if blocks && !blocked {
+			blocked, reason = true, blockReason
 		}
 		worst = worse(worst, d)
 	}
 	return worst, blocked, reason
+}
+
+// findingDisposition maps one finding to its disposition and, when it hard-blocks,
+// the block reason. Injection is labeled unless the profile opts into a
+// severity-based hard block; every other class uses the profile disposition.
+func (p Profile) findingDisposition(f *dlp.Finding) (Disposition, bool, mcperr.Reason) {
+	if f.Class == dlp.ClassPossibleInjection {
+		if p.injectionBlockSeverity != dlp.SevUnset && f.Severity >= p.injectionBlockSeverity {
+			return DispBlock, true, mcperr.ReasonInjectionSuspected
+		}
+		return DispLabel, false, mcperr.ReasonNone
+	}
+	d := p.disposition(f.Class)
+	if d.Blocks() {
+		return d, true, blockReasonForClass(f.Class)
+	}
+	return d, false, mcperr.ReasonNone
 }
 
 func blockReasonForClass(c dlp.Classification) mcperr.Reason {
