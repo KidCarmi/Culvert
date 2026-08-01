@@ -109,6 +109,10 @@ type pipeline struct {
 	policy       PolicyProvider
 	policyEngine *policy.Engine
 
+	// inspection is the OPTIONAL capability-local inspection provider (PR-7). When
+	// nil the pipeline keeps the pre-inspection decision path (byte-identical).
+	inspection InspectionProvider
+
 	// boundMu guards boundIDs — the set of session ids this pipeline has bound an
 	// identity to. It lets reconcileBindings unbind identities for sessions the
 	// kernel sweeper reclaimed (which has no per-binding hook), so the binding store
@@ -148,6 +152,9 @@ func newPipeline(cfg ListenerConfig, deps Deps, listenerID string, ctr *counters
 	if deps.Policy != nil {
 		p.policy = deps.Policy
 		p.policyEngine = newPolicyEngine()
+	}
+	if deps.Inspection != nil {
+		p.inspection = deps.Inspection
 	}
 	return p, nil
 }

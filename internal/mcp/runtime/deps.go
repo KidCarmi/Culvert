@@ -30,6 +30,14 @@ type Deps struct {
 	// missing snapshot fails closed with MCP.POLICY.SNAPSHOT_UNAVAILABLE, never a
 	// permissive fall-back.
 	Policy PolicyProvider
+	// Inspection is the OPTIONAL capability-local inspection provider (PR-7). When
+	// nil, decision-point methods keep the pre-inspection path (byte-identical). When
+	// set, a Gateway tools/call is semantically inspected (schema/DLP/destination)
+	// BEFORE policy evaluation; a hard security failure blocks regardless of the
+	// policy action, and an ALLOW_WITH_REDACTION obligation is satisfied by a
+	// re-validated transform — still decision-only (no upstream/credential/broker
+	// call, execution_state stays not_implemented).
+	Inspection InspectionProvider
 	// Clock is injected for deterministic tests; nil ⇒ time.Now.
 	Clock func() time.Time
 }

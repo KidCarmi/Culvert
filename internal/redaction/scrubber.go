@@ -168,9 +168,9 @@ func (sc *Scrubber) Scrub(s string) (out string, n int) {
 		}
 	}
 	count := 0
-	s = sc.applyTokenPass(s, &count)
+	s = sc.applyTokenPass(s, &count, nil)
 	for i := range sc.valueRules {
-		s = sc.valueRules[i].apply(s, &count)
+		s = sc.valueRules[i].apply(s, &count, nil)
 	}
 	if count > maxReplacements {
 		return "[redacted:overflow]", 1 // maximal doubt → replace whole
@@ -179,8 +179,10 @@ func (sc *Scrubber) Scrub(s string) (out string, n int) {
 }
 
 // applyTokenPass replaces each whole-match secret shape with its named token in a
-// single left-to-right pass.
-func (sc *Scrubber) applyTokenPass(s string, count *int) string {
+// single left-to-right pass. When names != nil, every replaced shape's detector
+// name is appended (the classification companion for the MCP DLP layer); when
+// nil the pass is byte-identical to the historical scrubber behavior.
+func (sc *Scrubber) applyTokenPass(s string, count *int, names *[]string) string {
 	locs := sc.tokenRE.FindAllStringSubmatchIndex(s, -1)
 	if len(locs) == 0 {
 		return s
@@ -199,14 +201,18 @@ func (sc *Scrubber) applyTokenPass(s string, count *int) string {
 		b.WriteString("[redacted:" + name + "]")
 		last = idx[1]
 		*count++
+		if names != nil {
+			*names = append(*names, name)
+		}
 	}
 	b.WriteString(s[last:])
 	return b.String()
 }
 
 // apply redacts only the rule's secret capture group, keeping all other bytes. A
-// match whose captured value fails the skip predicate is left untouched.
-func (v valueRule) apply(s string, count *int) string {
+// match whose captured value fails the skip predicate is left untouched. When
+// names != nil the rule name is appended for each redacted value.
+func (v valueRule) apply(s string, count *int, names *[]string) string {
 	locs := v.re.FindAllStringSubmatchIndex(s, -1)
 	if len(locs) == 0 {
 		return s
@@ -225,6 +231,9 @@ func (v valueRule) apply(s string, count *int) string {
 		b.WriteString("[redacted:" + v.name + "]")
 		last = ge
 		*count++
+		if names != nil {
+			*names = append(*names, v.name)
+		}
 	}
 	b.WriteString(s[last:])
 	return b.String()

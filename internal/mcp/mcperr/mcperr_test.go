@@ -61,6 +61,17 @@ func TestReasonCodesStable(t *testing.T) {
 		{ReasonPolicyConditionInvalid, "policy_condition_invalid"}, {ReasonPolicyObligationInvalid, "policy_obligation_invalid"},
 		{ReasonPolicyInputInvalid, "policy_input_invalid"}, {ReasonPolicyNamespaceMismatch, "policy_namespace_mismatch"},
 		{ReasonPolicyStaleRevision, "policy_stale_revision"}, {ReasonPolicyLimitExceeded, "policy_limit_exceeded"},
+		// PR-7 inspection reasons.
+		{ReasonSchemaInvalid, "schema_invalid"}, {ReasonSchemaUnsupported, "schema_unsupported"},
+		{ReasonSchemaLimitExceeded, "schema_limit_exceeded"}, {ReasonOutputTooLarge, "output_too_large"},
+		{ReasonOutputSchemaInvalid, "output_schema_invalid"}, {ReasonSecretDetected, "secret_detected"},
+		{ReasonPIIDetected, "pii_detected"}, {ReasonRedactionFailed, "redaction_failed"},
+		{ReasonDestinationMalformed, "destination_malformed"}, {ReasonDestinationSchemeRejected, "destination_scheme_rejected"},
+		{ReasonSSRFBlocked, "ssrf_blocked"}, {ReasonDNSResolutionFailed, "dns_resolution_failed"},
+		{ReasonDNSAnswerMixed, "dns_answer_mixed"}, {ReasonDNSPinMismatch, "dns_pin_mismatch"},
+		{ReasonRedirectRejected, "redirect_rejected"}, {ReasonRedirectLimitExceeded, "redirect_limit_exceeded"},
+		{ReasonInjectionSuspected, "injection_suspected"}, {ReasonInspectionUnavailable, "inspection_unavailable"},
+		{ReasonInspectionLimitExceeded, "inspection_limit_exceeded"},
 	}
 	seen := map[Reason]bool{}
 	for _, p := range want {

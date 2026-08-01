@@ -317,6 +317,86 @@ const (
 	// ReasonPolicyLimitExceeded — a policy structural/evaluation bound was exceeded
 	// (rules/conditions/values/trace/simulator cases/compile work).
 	ReasonPolicyLimitExceeded
+
+	// ── PR-7 inspection reasons ───────────────────────────────────────────────
+	// Appended (never reordered). Every reason is a DETERMINISTIC inspection
+	// outcome; none ever carries a raw argument, raw output, matched secret,
+	// bearer token, private key or full URL (Detail is fixed developer text). The
+	// inspection layer translates any provider/resolver/parser error string into
+	// one of these without embedding the untrusted external text.
+
+	// ReasonSchemaInvalid — tool-call arguments (or a registered output) failed
+	// SEMANTIC schema validation against the exact catalog input/output schema
+	// (type/required/enum/bounds/format/additionalProperties). Distinct from the
+	// PR-1 structural ReasonMalformedJSON: the bytes decoded, the VALUE is wrong.
+	ReasonSchemaInvalid
+	// ReasonSchemaUnsupported — the compiled schema (or the value under it) uses a
+	// security-relevant keyword outside the closed supported V1 subset. Fails
+	// conservative: an unsupported keyword on a decision-point tool is never
+	// silently ignored.
+	ReasonSchemaUnsupported
+	// ReasonSchemaLimitExceeded — a schema compile/validation bound was exceeded
+	// (schema nodes, alternatives, validation operations, argument nodes).
+	ReasonSchemaLimitExceeded
+	// ReasonOutputTooLarge — a structured output exceeded the security byte/node
+	// bound. Structured over-limit output is BLOCKED (never blindly truncated).
+	ReasonOutputTooLarge
+	// ReasonOutputSchemaInvalid — an output failed validation against the tool's
+	// registered output schema (or was not the required JSON type).
+	ReasonOutputSchemaInvalid
+	// ReasonSecretDetected — a secret/credential shape was found and the profile
+	// disposition for that classification is BLOCK. The raw secret is never
+	// carried in the error.
+	ReasonSecretDetected
+	// ReasonPIIDetected — a PII classification was found and the profile
+	// disposition for it is BLOCK.
+	ReasonPIIDetected
+	// ReasonRedactionFailed — a MANDATORY redaction could not be produced or the
+	// transformed copy failed re-validation (schema revalidation, residual secret,
+	// broadened destination, missing/stale profile). Fails closed: no partial
+	// transform is published.
+	ReasonRedactionFailed
+	// ReasonDestinationMalformed — a destination URL/host/IP failed canonicalization
+	// (bad host syntax, malformed port, userinfo, control chars, ambiguous percent
+	// encoding, non-canonical numeric-IP, IPv6 zone id, fragment-as-policy).
+	ReasonDestinationMalformed
+	// ReasonDestinationSchemeRejected — the destination scheme is not on the narrow
+	// allowlist (file/data/javascript/gopher/ftp/unix/unknown rejected).
+	ReasonDestinationSchemeRejected
+	// ReasonSSRFBlocked — a destination resolved (or was verified at connect) to a
+	// private/link-local/metadata/reserved/multicast/prohibited address. Wraps the
+	// authoritative internal/ssrf table; never a second divergent private table.
+	ReasonSSRFBlocked
+	// ReasonDNSResolutionFailed — bounded DNS resolution timed out, returned an
+	// empty answer, a malformed address, or overflowed the address-count bound.
+	ReasonDNSResolutionFailed
+	// ReasonDNSAnswerMixed — a DNS answer mixed public and private addresses. The
+	// whole answer fails closed (a single private address poisons the answer).
+	ReasonDNSAnswerMixed
+	// ReasonDNSPinMismatch — the actual connect-time peer is not a member of the
+	// immutable PinnedDestination address set, or the pin is stale/expired. The
+	// rebinding TOCTOU guard.
+	ReasonDNSPinMismatch
+	// ReasonRedirectRejected — a redirect hop was refused (scheme downgrade,
+	// userinfo, cross-origin without opt-in, public→private/metadata, credential
+	// URL, malformed relative target, or a re-run destination/SSRF failure).
+	ReasonRedirectRejected
+	// ReasonRedirectLimitExceeded — the bounded redirect hop count was exceeded or
+	// a redirect loop was detected.
+	ReasonRedirectLimitExceeded
+	// ReasonInjectionSuspected — best-effort deterministic labeling flagged output
+	// content that attempts to instruct/manipulate the agent, and the profile
+	// treats that label as a hard block (lower-confidence labels are reported, not
+	// blocked).
+	ReasonInjectionSuspected
+	// ReasonInspectionUnavailable — a rule/operation required inspection evidence
+	// that no inspector is wired to supply (fail closed for a high-risk operation;
+	// never a silent pass).
+	ReasonInspectionUnavailable
+	// ReasonInspectionLimitExceeded — a general inspection bound was exceeded
+	// (findings, redactions, extracted destinations, bytes scanned, safe-result
+	// bytes) on a high-risk operation. Fails closed.
+	ReasonInspectionLimitExceeded
 )
 
 // reasonCode maps each Reason to its stable machine string. The strings are part
@@ -417,6 +497,26 @@ var reasonCode = map[Reason]string{ // #nosec G101 -- stable machine-readable er
 	ReasonPolicyNamespaceMismatch: "policy_namespace_mismatch",
 	ReasonPolicyStaleRevision:     "policy_stale_revision",
 	ReasonPolicyLimitExceeded:     "policy_limit_exceeded",
+
+	ReasonSchemaInvalid:             "schema_invalid",
+	ReasonSchemaUnsupported:         "schema_unsupported",
+	ReasonSchemaLimitExceeded:       "schema_limit_exceeded",
+	ReasonOutputTooLarge:            "output_too_large",
+	ReasonOutputSchemaInvalid:       "output_schema_invalid",
+	ReasonSecretDetected:            "secret_detected",
+	ReasonPIIDetected:               "pii_detected",
+	ReasonRedactionFailed:           "redaction_failed",
+	ReasonDestinationMalformed:      "destination_malformed",
+	ReasonDestinationSchemeRejected: "destination_scheme_rejected",
+	ReasonSSRFBlocked:               "ssrf_blocked",
+	ReasonDNSResolutionFailed:       "dns_resolution_failed",
+	ReasonDNSAnswerMixed:            "dns_answer_mixed",
+	ReasonDNSPinMismatch:            "dns_pin_mismatch",
+	ReasonRedirectRejected:          "redirect_rejected",
+	ReasonRedirectLimitExceeded:     "redirect_limit_exceeded",
+	ReasonInjectionSuspected:        "injection_suspected",
+	ReasonInspectionUnavailable:     "inspection_unavailable",
+	ReasonInspectionLimitExceeded:   "inspection_limit_exceeded",
 }
 
 // Code returns the stable machine string for the reason (e.g. "malformed_json").

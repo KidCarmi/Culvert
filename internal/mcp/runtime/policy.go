@@ -45,6 +45,24 @@ func (p *pipeline) dispatchPolicy(rb *recBuilder, req Request, msg jsonrpc.Messa
 		return p.finish(rb, Outcome{Status: 200, Disposition: DispRejected, Reason: mcperr.ReasonPolicySnapshotInvalid, ResponseBody: body})
 	}
 	in := p.buildPolicyInput(req, msg, ctx, snap.Revision(), now)
+
+	// PR-7: semantic inspection runs BEFORE policy evaluation (Gateway tools/call
+	// only). A hard security failure (schema invalid, SSRF/private destination,
+	// DLP block, malformed args) blocks HERE — an ordinary ALLOW rule can never
+	// override it, and schema-invalid arguments never reach policy as valid.
+	insp := p.runInspection(req, msg, now)
+	if insp.ran {
+		recordInspection(rb, insp.result.Summary)
+		applyInspectionToInput(&in, insp.result.Summary)
+		if insp.result.HardFail {
+			p.ctr.requestsRejected.Add(1)
+			rb.rec.PolicyAction = "BLOCKED_BY_INSPECTION"
+			rb.rec.PolicyReason = insp.result.HardReason.Code()
+			body := inspectionError(msg.ID, insp.result.HardReason)
+			return p.finish(rb, Outcome{Status: 200, Disposition: DispRejected, Reason: insp.result.HardReason, ResponseBody: body})
+		}
+	}
+
 	d, _, _ := p.policyEngine.Evaluate(snap, &in)
 
 	// Sanitized policy observation (safe metadata only).
@@ -54,7 +72,18 @@ func (p *pipeline) dispatchPolicy(rb *recBuilder, req Request, msg jsonrpc.Messa
 	rb.rec.PolicyRevision = uint64(d.PolicyRevision)
 
 	if d.Action.IsAllowClass() {
-		// Record the TRUE policy result, but do not execute: PR-6 has no upstream.
+		// An ALLOW_WITH_REDACTION decision requires a REAL, re-validated redaction
+		// transform (transformed hash) — otherwise it fails closed. No obligation, no
+		// transform, residual secret, stale/missing profile ⇒ block, never a pretend
+		// redaction.
+		if d.Action == policy.ActionAllowWithRedaction && !p.satisfyRedaction(rb, insp, d) {
+			p.ctr.requestsRejected.Add(1)
+			rb.rec.PolicyAction = "REDACTION_FAILED"
+			rb.rec.PolicyReason = mcperr.ReasonRedactionFailed.Code()
+			body := inspectionError(msg.ID, mcperr.ReasonRedactionFailed)
+			return p.finish(rb, Outcome{Status: 200, Disposition: DispRejected, Reason: mcperr.ReasonRedactionFailed, ResponseBody: body})
+		}
+		// Record the TRUE policy result, but do not execute: PR-7 has no upstream.
 		p.ctr.observeOnly.Add(1)
 		rb.rec.ExecutionState = "not_implemented"
 		body := executionNotAvailable(msg.ID, d)
