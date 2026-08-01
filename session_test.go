@@ -124,3 +124,23 @@ func TestInitSessionSecret_TrailingNewline(t *testing.T) {
 		t.Fatalf("session secret = %x, want %x", got, want)
 	}
 }
+
+// TestInitSessionSecret_WhitespaceOnly guards against a regression where
+// trimming to fix TestInitSessionSecret_TrailingNewline could make an
+// explicitly-set-but-whitespace-only value indistinguishable from an unset
+// one: it must still be treated as an invalid explicit value (panic), not
+// silently fall through to a random key the way an actually-unset env var
+// does (Codex review on PR #983).
+func TestInitSessionSecret_WhitespaceOnly(t *testing.T) {
+	origSecret := session.SigningKey()
+	defer session.SetSigningKey(origSecret)
+
+	t.Setenv("CULVERT_SESSION_SECRET", "   \n\t  ")
+
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatalf("initSessionSecret did not panic on a whitespace-only explicit secret (should not silently fall back to a random key)")
+		}
+	}()
+	initSessionSecret()
+}

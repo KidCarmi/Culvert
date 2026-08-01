@@ -36,8 +36,14 @@ var sessionRevoked = session.Revoked
 // initSessionSecret sets the HMAC key for session cookies.
 // Priority: CULVERT_SESSION_SECRET env > config file > random.
 func initSessionSecret() {
-	if s := strings.TrimSpace(os.Getenv("CULVERT_SESSION_SECRET")); s != "" {
-		key, err := hex.DecodeString(s)
+	// Check the raw value for absence first — trimming before the emptiness
+	// check would make a whitespace-only value indistinguishable from unset
+	// and silently install a random key with no diagnostic. Only a value
+	// that was actually left unset should take the random-key path; an
+	// explicitly-set-but-invalid value (including whitespace-only) must
+	// still hit the panic below.
+	if raw := os.Getenv("CULVERT_SESSION_SECRET"); raw != "" {
+		key, err := hex.DecodeString(strings.TrimSpace(raw))
 		if err != nil || len(key) < 32 {
 			panic("CULVERT_SESSION_SECRET must be at least 32 bytes of hex (64 hex chars)")
 		}
@@ -51,11 +57,13 @@ func initSessionSecret() {
 // initSessionSecretFromConfig applies a config-file session secret.
 // Called after config is loaded, before the UI starts.
 func initSessionSecretFromConfig(hexKey string) {
-	hexKey = strings.TrimSpace(hexKey)
+	// Same raw-then-trim ordering as initSessionSecret: an unset field must
+	// stay silent, but an explicitly-set whitespace-only value must still
+	// warn (not silently fall back with no diagnostic).
 	if hexKey == "" {
 		return // keep env or random key
 	}
-	key, err := hex.DecodeString(hexKey)
+	key, err := hex.DecodeString(strings.TrimSpace(hexKey))
 	if err != nil || len(key) < 32 {
 		logWarnf("Session: session_secret must be ≥32 bytes hex — ignoring, using random key")
 		return

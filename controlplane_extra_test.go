@@ -311,6 +311,27 @@ func TestInitSessionSecretFromConfig_TrailingNewline(t *testing.T) {
 	}
 }
 
+// TestInitSessionSecretFromConfig_WhitespaceOnly guards against a regression
+// where trimming to fix TestInitSessionSecretFromConfig_TrailingNewline
+// could make an explicitly-configured-but-whitespace-only session_secret
+// indistinguishable from an omitted field: it must still be rejected (kept
+// original key, warning logged), not silently accepted as "no override"
+// (Codex review on PR #983).
+func TestInitSessionSecretFromConfig_WhitespaceOnly(t *testing.T) {
+	origSecret := session.SigningKey()
+	defer session.SetSigningKey(origSecret)
+
+	baseline := bytes.Repeat([]byte{0x42}, 32)
+	session.SetSigningKey(baseline)
+
+	initSessionSecretFromConfig("   \n\t  ")
+
+	got := session.SigningKey()
+	if !bytes.Equal(got, baseline) {
+		t.Fatalf("session secret changed on whitespace-only config value: got %x, want unchanged %x", got, baseline)
+	}
+}
+
 // ── cpServerOption Tests ───────────────────────────────────────────────────
 
 func TestCPServerOption_NoTLS_NoInsecure(t *testing.T) {
