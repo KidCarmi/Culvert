@@ -210,8 +210,16 @@ func (c *activationCoordinator) commitWithConfigStability(ctx context.Context, r
 			floorAdvanced, floorAfter = true, q.Floor
 		}
 		// S4a: re-check the authoritative revision immediately before the record commit.
-		// If it changed, rebuild (loop) rather than commit a stale-policy view.
-		if _, rev2, cerr := c.overrides.Current(); cerr == nil && rev2 != rev {
+		// A recheck ERROR (managed-DP outage / invalid snapshot transition) means we can no
+		// longer confirm the revision is unchanged, so we must NOT commit + swap the view we
+		// built under the old revision — abort, leaving the live store untouched (the
+		// "invalid override snapshot leaves live untouched / abort to LKG" contract). Only a
+		// confirmed-unchanged revision proceeds to commit; a confirmed CHANGE rebuilds (loop).
+		_, rev2, cerr := c.overrides.Current()
+		if cerr != nil {
+			return activationResult{}, fmt.Errorf("%w: config recheck: %v", errActivateOverrides, cerr)
+		}
+		if rev2 != rev {
 			continue
 		}
 		// S4b: commit the activation record durably (read-back verified).

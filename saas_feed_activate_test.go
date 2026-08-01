@@ -264,6 +264,62 @@ func TestF3b3_Overrides_ApplyChangeRemove(t *testing.T) {
 	}
 }
 
+// ── config recheck ERROR before cutover must abort, not commit the pre-recheck view ──
+// (Codex P1 #1): an unconfirmable revision (managed-DP outage / invalid snapshot) leaves
+// the live store untouched — never a silent commit of a possibly-stale-policy view.
+
+func TestF3b3_Activate_ConfigRecheckErrorAborts(t *testing.T) {
+	resetOwnership(t)
+	dir := t.TempDir()
+	g := buildFeedGen(t, feedGenOpts{feedVersion: 1})
+	persistRealGen(t, dir+"/generations", g)
+	ovp := newOverrideProvider("rev-1")
+	// The build Current() succeeds; the S4 recheck Current() (2nd call) fails — we can no
+	// longer confirm the revision is unchanged, so activation must ABORT.
+	ovp.onCurrent = func(p *fakeOverrideProvider) {
+		if p.calls >= 2 {
+			p.err = context.DeadlineExceeded
+		}
+	}
+	env := newCoordEnv(t, dir, g, coordOpts{overrides: ovp})
+	if _, err := env.coord.Activate(context.Background(),
+		activateInput{GenerationID: "1", Provenance: activationProvenanceDownloaded}); err == nil {
+		t.Fatal("a failed config recheck must abort activation, not commit the pre-recheck view (Codex P1 #1)")
+	}
+	// No live cutover and no committed activation record on a recheck failure.
+	if env.live.Current() != nil {
+		t.Fatal("live cutover happened despite an unconfirmable config revision")
+	}
+	if _, s, _ := env.activ.Read(); s == activationValid {
+		t.Fatal("activation record committed despite a failed recheck")
+	}
+}
+
+// ── an override on a DESCENDANT of an ancestor feed entry is resolved MOST-SPECIFIC-first ─
+// The effective view has no rule-ordering ambiguity to reject (Codex P1 #2 decline): the
+// descendant override governs its subtree, the ancestor feed entry governs the rest.
+
+func TestF3b3_View_SubdomainOverrideBeatsAncestorFeed(t *testing.T) {
+	feed := map[string]string{"example.com": "allowed"}
+	ov := catoverride.Overrides{Added: map[string]string{"app.example.com": "blocked"}}
+	// ComposeView keeps BOTH: the ancestor is NOT a subdomain of the override key, so it is
+	// not suppressed (the mirror case — a descendant feed entry under an ancestor override —
+	// IS collapsed by catoverride; that asymmetry is deliberate).
+	composed := catoverride.ComposeView(feed, ov)
+	view := newEffectiveView(composed, effectiveCategoryView{Source: sourceDownloaded, FeedVersion: 1})
+
+	for _, c := range []struct{ host, want string }{
+		{"app.example.com", "blocked"},   // exact descendant override — the longest match wins
+		{"x.app.example.com", "blocked"}, // inside the override subtree
+		{"example.com", "allowed"},       // the ancestor itself
+		{"other.example.com", "allowed"}, // ancestor subtree outside the override
+	} {
+		if got, ok := view.LookupHost(c.host); !ok || got != c.want {
+			t.Fatalf("LookupHost(%q) = %q,%v; want %q", c.host, got, ok, c.want)
+		}
+	}
+}
+
 func TestF3b3_Overrides_InvalidLeavesLiveUntouched(t *testing.T) {
 	resetOwnership(t)
 	dir := t.TempDir()
