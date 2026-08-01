@@ -25,11 +25,11 @@ package main
 //     candidate, the recovery-required prior LKG) regardless of age or count. GC never
 //     deletes a rooted generation (saas_feed_gc.go).
 //
-//   - COMPILED_MAX_VALIDITY = urlcatfeed.MaxValidity (30d) — the structural validity
-//     ceiling already enforced by the trust kernel + the F3b-2 freshness gate; aliased
-//     here for the activation/recovery freshness classification.
-
-import "github.com/KidCarmi/Culvert/internal/urlcatfeed"
+//   - COMPILED_MAX_VALIDITY = the 30-day validity ceiling already enforced structurally
+//     by the trust kernel (at generation time) + the F3b-2 freshness gate + the
+//     activation/recovery classifyFreshness expiry check; there is deliberately no local
+//     alias constant — the ceiling has exactly one owner (urlcatfeed.MaxValidity) and the
+//     freshness verdict is derived from each manifest's own expires_at.
 
 const (
 	// compiledMinFeedVersion is the baked rollback-floor checkpoint (see the file
@@ -40,7 +40,3 @@ const (
 	// retains beyond the explicit root set (approved product parameter).
 	generationRetentionCount = 5
 )
-
-// compiledMaxValidity is the 30-day validity ceiling (aliased from the trust kernel so
-// the activation/recovery freshness classification and the producer/verifier agree).
-const compiledMaxValidity = urlcatfeed.MaxValidity

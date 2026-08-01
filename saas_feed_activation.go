@@ -325,13 +325,6 @@ func validConfigRevision(v string) bool {
 	return true
 }
 
-// activationWatermark returns the active generation's ordering key (used to compare an
-// activation-record floor copy against the floor records).
-func (r activationRecord) floorWatermark() floorWatermark {
-	t, _ := canonicalUTCSecond(r.FloorGeneratedAt) // zero time when unset — the fresh checkpoint
-	return floorWatermark{Version: r.FloorVersion, GeneratedAt: t}
-}
-
 // ─── single-record store (§B.5 S4) ────────────────────────────────────────────────
 
 // activationStore owns the fixed activation-state.json path + the durability seam

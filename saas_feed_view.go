@@ -21,7 +21,6 @@ package main
 // while dormant).
 
 import (
-	"sort"
 	"strings"
 	"sync/atomic"
 
@@ -117,21 +116,6 @@ func (v *effectiveCategoryView) LookupHost(host string) (string, bool) {
 		}
 		h = h[i+1:]
 	}
-}
-
-// sortedCategories returns the distinct categories in deterministic order (test/golden
-// support).
-func (v *effectiveCategoryView) sortedCategories() []string {
-	seen := map[string]struct{}{}
-	for _, c := range v.entries {
-		seen[c] = struct{}{}
-	}
-	out := make([]string, 0, len(seen))
-	for c := range seen {
-		out = append(out, c)
-	}
-	sort.Strings(out)
-	return out
 }
 
 // ─── embedded baseline ─────────────────────────────────────────────────────────────

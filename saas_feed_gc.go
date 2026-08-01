@@ -32,9 +32,8 @@ import (
 const gcTombstonePrefix = ".gc-tombstone-"
 
 var (
-	errGCDisabled = errors.New("saas feed gc: disabled by inconsistent durable state")
-	errGCRoot     = errors.New("saas feed gc: empty generations root")
-	errGCEscape   = errors.New("saas feed gc: refusing to delete outside the generations root")
+	errGCRoot   = errors.New("saas feed gc: empty generations root")
+	errGCEscape = errors.New("saas feed gc: refusing to delete outside the generations root")
 )
 
 // gcFS is the injectable filesystem seam (production: os.*). Tests inject per-step
@@ -111,8 +110,8 @@ func (g *gcCollector) Collect(ctx context.Context) (gcResult, error) {
 		return gcResult{Enabled: false, Detail: "durable floor/activation state is corrupt, ambiguous, or equivocal"}, nil
 	}
 
-	roots := g.rootSet(arec, frec)
-	candidates, skipped, err := g.enumerateGenerations(roots)
+	roots := g.rootSet(arec)
+	candidates, skipped, err := g.enumerateGenerations()
 	if err != nil {
 		return gcResult{}, err
 	}
@@ -153,8 +152,10 @@ func (g *gcCollector) durableStateConsistent(frec floorRecovery) bool {
 }
 
 // rootSet is the union of the active generation + every valid floor record's generation
-// (which also covers a resumable floor-ahead candidate, since it IS a floor record).
-func (g *gcCollector) rootSet(arec activationRecord, frec floorRecovery) map[string]struct{} {
+// (which also covers a resumable floor-ahead candidate, since it IS a floor record). The
+// caller has already gated on durable-state consistency (durableStateConsistent), so this
+// re-reads the two floor replicas directly rather than taking the recovery struct.
+func (g *gcCollector) rootSet(arec activationRecord) map[string]struct{} {
 	roots := map[string]struct{}{arec.GenerationID: {}}
 	recs, sts := readBothFloorRecords(g.floor.fs, g.floor.paths)
 	for i := 0; i < 2; i++ {
@@ -175,8 +176,9 @@ type gcCandidate struct {
 
 // enumerateGenerations lists the generation root and returns the VALIDATED candidate
 // generations (id + version from canonical metadata) plus the skipped dirs. It never
-// follows symlinks and never validates a staging/tombstone path.
-func (g *gcCollector) enumerateGenerations(roots map[string]struct{}) (candidates []gcCandidate, skipped []string, err error) {
+// follows symlinks and never validates a staging/tombstone path. Roots are applied later
+// by applyRetention, so this stage does not need the root set.
+func (g *gcCollector) enumerateGenerations() (candidates []gcCandidate, skipped []string, err error) {
 	entries, err := g.fs.readDir(g.genRoot)
 	if err != nil {
 		if os.IsNotExist(err) {

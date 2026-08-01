@@ -202,7 +202,7 @@ func TestF3b3_Activate_ConfigChurnAbortsToLKG(t *testing.T) {
 	persistRealGen(t, dir+"/generations", g)
 	ovp := newOverrideProvider("rev-1")
 	// Change the revision on EVERY recheck so churn never settles.
-	ovp.onCurrent = func(p *fakeOverrideProvider) { p.rev = p.rev + "x" }
+	ovp.onCurrent = func(p *fakeOverrideProvider) { p.rev += "x" }
 	env := newCoordEnv(t, dir, g, coordOpts{overrides: ovp})
 	res, err := env.coord.Activate(context.Background(), activateInput{GenerationID: "1", Provenance: activationProvenanceDownloaded})
 	if err == nil {
@@ -234,8 +234,14 @@ func TestF3b3_Overrides_ApplyChangeRemove(t *testing.T) {
 	}
 	// Recategorize chat.example → "blocked" and rebuild.
 	ovp.set(catoverride.Overrides{Recategorized: map[string]string{"chat.example": "blocked"}}, "rev-2")
-	if _, err := env.coord.RebuildForOverrides(context.Background()); err != nil {
+	res, err := env.coord.RebuildForOverrides(context.Background())
+	if err != nil {
 		t.Fatalf("rebuild (apply): %v", err)
+	}
+	// The rebuild reports a committed result over the SAME base generation with the NEW
+	// override revision (base generation, floor, and activation record are unchanged).
+	if res.Outcome != activationCommitted || res.Version != 1 || res.ConfigRev != "rev-2" {
+		t.Fatalf("rebuild result = %+v; want committed base v1 at rev-2", res)
 	}
 	if c, _ := env.live.Current().LookupHost("chat.example"); c != "blocked" {
 		t.Fatalf("recategorized category = %q; want blocked", c)

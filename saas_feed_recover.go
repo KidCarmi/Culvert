@@ -97,9 +97,7 @@ func (c *activationCoordinator) Recover(ctx context.Context) (recoveryResult, er
 
 	// Floor-ahead resumable candidate (crash after floor advance, before/at activation).
 	if frec.Candidate != nil && frec.Candidate.FeedVersion > activeVer {
-		if res, ok, err := c.tryResume(ctx, frec, *frec.Candidate); err != nil {
-			return recoveryResult{}, err
-		} else if ok {
+		if res, ok := c.tryResume(ctx, frec, *frec.Candidate); ok {
 			return res, nil
 		}
 		// Candidate missing/corrupt/expired/identity-mismatch: do NOT activate it; fall
@@ -154,9 +152,9 @@ func (c *activationCoordinator) recoverFailClosed(ctx context.Context, arec acti
 
 // tryResume completes a floor-ahead candidate idempotently (§B.9): re-verify the exact
 // digest-bound generation offline and, on success, write the still-missing durable records
-// + cut over. Returns ok=false (no error) when the candidate cannot be safely resumed, so
-// the caller falls through to the LKG / embedded baseline.
-func (c *activationCoordinator) tryResume(ctx context.Context, frec floorRecovery, cand floorRecord) (recoveryResult, bool, error) {
+// + cut over. Returns ok=false when the candidate cannot be safely resumed, so the caller
+// falls through to the LKG / embedded baseline (a failure here is never fatal to recovery).
+func (c *activationCoordinator) tryResume(ctx context.Context, frec floorRecovery, cand floorRecord) (recoveryResult, bool) {
 	res, err := c.activateLocked(ctx, activateInput{
 		GenerationID: cand.GenerationID,
 		Provenance:   activationProvenanceResumed,
@@ -166,10 +164,10 @@ func (c *activationCoordinator) tryResume(ctx context.Context, frec floorRecover
 	if err != nil {
 		// Missing/corrupt/expired-future/identity-mismatch/durability failure ⇒ not
 		// resumable. This is a recovery fall-through, not a fatal error.
-		return recoveryResult{}, false, nil
+		return recoveryResult{}, false
 	}
 	if res.Outcome != activationCommitted {
-		return recoveryResult{}, false, nil
+		return recoveryResult{}, false
 	}
 	class := recoveryResumed
 	if res.Stale {
@@ -181,7 +179,7 @@ func (c *activationCoordinator) tryResume(ctx context.Context, frec floorRecover
 		Critical: res.Stale, GCEnabled: true, FloorHealth: frec.Health,
 		ActivationStatus: activationValid, View: c.live.Current(),
 		Detail: "floor-ahead candidate re-verified; activation completed idempotently",
-	}, true, nil
+	}, true
 }
 
 // tryServeActive re-verifies the committed active generation offline and installs its

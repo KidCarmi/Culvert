@@ -5,6 +5,7 @@ package main
 // and store commit + read-back.
 
 import (
+	"bytes"
 	"errors"
 	"strings"
 	"testing"
@@ -66,7 +67,7 @@ func TestF3b3_Activation_GoldenBytes(t *testing.T) {
 	}
 	// Deterministic: re-encode is byte-identical.
 	got2, _ := encodeActivationRecord(rec)
-	if string(got) != string(got2) {
+	if !bytes.Equal(got, got2) {
 		t.Fatal("encode is not deterministic")
 	}
 }

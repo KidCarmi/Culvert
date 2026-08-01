@@ -31,7 +31,6 @@ const maxGenerationMetaBytes = 64 << 10
 var (
 	errReverifyRead     = errors.New("saas feed reverify: cannot read generation file")
 	errReverifyVerify   = errors.New("saas feed reverify: signature verification failed")
-	errReverifyDigest   = errors.New("saas feed reverify: stored bytes do not match the bound digest")
 	errReverifyMeta     = errors.New("saas feed reverify: generation metadata invalid or inconsistent")
 	errReverifySnapshot = errors.New("saas feed reverify: normalized snapshot is not the canonical projection of the verified artifact")
 	errReverifyBinding  = errors.New("saas feed reverify: candidate does not match the requested identity binding")
@@ -74,36 +73,20 @@ func reverifyGeneration(read reverifyReader, v feedVerifier, root, generationID 
 	}
 	dir := filepath.Join(root, generationID)
 
-	envelope, err := readGenFileBounded(read, dir, genFileManifestEnvelope, urlcatfeed.MaxBundleBytes)
-	if err != nil {
-		return nil, err
-	}
-	artifactBytes, err := readGenFileBounded(read, dir, genFileArtifact, urlcatfeed.MaxArtifactSize)
-	if err != nil {
-		return nil, err
-	}
-	bundle, err := readGenFileBounded(read, dir, genFileArtifactBundle, urlcatfeed.MaxBundleBytes)
-	if err != nil {
-		return nil, err
-	}
-	snapshot, err := readGenFileBounded(read, dir, genFileSnapshotNormalized, urlcatfeed.MaxArtifactSize)
-	if err != nil {
-		return nil, err
-	}
-	metaBytes, err := readGenFileBounded(read, dir, genFileMeta, maxGenerationMetaBytes)
+	files, err := readGenerationFiles(read, dir)
 	if err != nil {
 		return nil, err
 	}
 
 	// Verify-before-parse: the signatures over the exact stored bytes, then bind.
-	manifest, err := v.VerifyEnvelope(envelope)
+	manifest, err := v.VerifyEnvelope(files.envelope)
 	if err != nil {
 		return nil, fmt.Errorf("%w: envelope: %v", errReverifyVerify, err)
 	}
 	if manifest == nil {
 		return nil, fmt.Errorf("%w: nil manifest", errReverifyVerify)
 	}
-	artifact, err := v.VerifyArtifact(artifactBytes, bundle, manifest)
+	artifact, err := v.VerifyArtifact(files.artifact, files.bundle, manifest)
 	if err != nil {
 		return nil, fmt.Errorf("%w: artifact: %v", errReverifyVerify, err)
 	}
@@ -111,25 +94,23 @@ func reverifyGeneration(read reverifyReader, v feedVerifier, root, generationID 
 		return nil, fmt.Errorf("%w: nil artifact", errReverifyVerify)
 	}
 
-	manifestDigest := sha256Hex(envelope)
-	snapshotDigest := sha256Hex(snapshot)
+	manifestDigest := sha256Hex(files.envelope)
+	snapshotDigest := sha256Hex(files.snapshot)
 
 	// The generation directory name must equal the verified feed version.
 	if generationID != strconv.FormatInt(manifest.FeedVersion, 10) {
 		return nil, fmt.Errorf("%w: dir %q != feed_version %d", errReverifyMeta, generationID, manifest.FeedVersion)
 	}
 	// Re-derive + re-assert the metadata record and the normalized snapshot.
-	if err := checkGenerationMeta(metaBytes, manifest, manifestDigest, snapshotDigest, generationID); err != nil {
+	if err := checkGenerationMeta(files.meta, manifest, manifestDigest, snapshotDigest, generationID); err != nil {
 		return nil, err
 	}
-	if err := checkNormalizedSnapshot(snapshot, artifact); err != nil {
+	if err := checkNormalizedSnapshot(files.snapshot, artifact); err != nil {
 		return nil, err
 	}
 	// Optional exact-identity binding (floor-ahead resume): the record's bound digests.
-	if bind != nil {
-		if generationID != bind.GenerationID || manifestDigest != bind.ManifestSHA256 || manifest.ArtifactSHA256 != bind.ArtifactSHA256 {
-			return nil, fmt.Errorf("%w: id/digest mismatch", errReverifyBinding)
-		}
+	if err := checkBinding(bind, generationID, manifestDigest, manifest.ArtifactSHA256); err != nil {
+		return nil, err
 	}
 
 	return &reverifiedGeneration{
@@ -144,8 +125,53 @@ func reverifyGeneration(read reverifyReader, v feedVerifier, root, generationID 
 		Manifest:        manifest,
 		Artifact:        artifact,
 		SnapshotEntries: artifactToHostCategoryMap(artifact),
-		EnvelopeBytes:   envelope,
+		EnvelopeBytes:   files.envelope,
 	}, nil
+}
+
+// generationFiles holds the five immutable payloads F3b-2 committed for a generation.
+type generationFiles struct {
+	envelope []byte
+	artifact []byte
+	bundle   []byte
+	snapshot []byte
+	meta     []byte
+}
+
+// readGenerationFiles bounded-reads the five immutable files of generations/<id>/ (any
+// read/empty/over-limit failure rejects the whole generation).
+func readGenerationFiles(read reverifyReader, dir string) (generationFiles, error) {
+	var f generationFiles
+	var err error
+	if f.envelope, err = readGenFileBounded(read, dir, genFileManifestEnvelope, urlcatfeed.MaxBundleBytes); err != nil {
+		return generationFiles{}, err
+	}
+	if f.artifact, err = readGenFileBounded(read, dir, genFileArtifact, urlcatfeed.MaxArtifactSize); err != nil {
+		return generationFiles{}, err
+	}
+	if f.bundle, err = readGenFileBounded(read, dir, genFileArtifactBundle, urlcatfeed.MaxBundleBytes); err != nil {
+		return generationFiles{}, err
+	}
+	if f.snapshot, err = readGenFileBounded(read, dir, genFileSnapshotNormalized, urlcatfeed.MaxArtifactSize); err != nil {
+		return generationFiles{}, err
+	}
+	if f.meta, err = readGenFileBounded(read, dir, genFileMeta, maxGenerationMetaBytes); err != nil {
+		return generationFiles{}, err
+	}
+	return f, nil
+}
+
+// checkBinding enforces the optional exact-identity binding (floor-ahead resume): the
+// re-derived (generation_id, manifest_sha256, artifact_sha256) must equal the durable
+// record's binding, so a same-numbered impostor is rejected (§B.9). nil bind ⇒ no-op.
+func checkBinding(bind *generationBinding, generationID, manifestDigest, artifactDigest string) error {
+	if bind == nil {
+		return nil
+	}
+	if generationID != bind.GenerationID || manifestDigest != bind.ManifestSHA256 || artifactDigest != bind.ArtifactSHA256 {
+		return fmt.Errorf("%w: id/digest mismatch", errReverifyBinding)
+	}
+	return nil
 }
 
 // generationBinding is the exact-identity binding a durable record carries (used by a
@@ -172,17 +198,24 @@ func checkGenerationMeta(metaBytes []byte, m *urlcatfeed.ManifestPayload, manife
 	if !bytes.Equal(canon, metaBytes) {
 		return fmt.Errorf("%w: non-canonical", errReverifyMeta)
 	}
-	if meta.SchemaVersion != genMetaSchemaVersion ||
-		meta.Protocol != urlcatfeed.Protocol || meta.Feed != urlcatfeed.FeedID ||
-		meta.FeedVersion != m.FeedVersion || meta.GenerationID != generationID ||
-		meta.ManifestSHA256 != manifestDigest || meta.ArtifactSHA256 != m.ArtifactSHA256 ||
-		meta.ArtifactSize != m.ArtifactSize ||
-		meta.CategoryCount != m.CategoryCount || meta.HostCount != m.HostCount ||
-		meta.GeneratedAt != m.GeneratedAt || meta.ExpiresAt != m.ExpiresAt {
+	if !metaBindsManifest(meta, m, manifestDigest, generationID) {
 		return fmt.Errorf("%w: metadata does not bind the verified generation", errReverifyMeta)
 	}
 	_ = snapshotDigest // snapshot digest is bound by checkNormalizedSnapshot (byte-exact), not by the meta record
 	return nil
+}
+
+// metaBindsManifest reports whether the stored generation.json binds exactly the same
+// schema/protocol/feed constants, version, digests, counts, and timestamps the verified
+// manifest carries.
+func metaBindsManifest(meta generationMeta, m *urlcatfeed.ManifestPayload, manifestDigest, generationID string) bool {
+	return meta.SchemaVersion == genMetaSchemaVersion &&
+		meta.Protocol == urlcatfeed.Protocol && meta.Feed == urlcatfeed.FeedID &&
+		meta.FeedVersion == m.FeedVersion && meta.GenerationID == generationID &&
+		meta.ManifestSHA256 == manifestDigest && meta.ArtifactSHA256 == m.ArtifactSHA256 &&
+		meta.ArtifactSize == m.ArtifactSize &&
+		meta.CategoryCount == m.CategoryCount && meta.HostCount == m.HostCount &&
+		meta.GeneratedAt == m.GeneratedAt && meta.ExpiresAt == m.ExpiresAt
 }
 
 // checkNormalizedSnapshot asserts snapshot.normalized.json is EXACTLY the canonical

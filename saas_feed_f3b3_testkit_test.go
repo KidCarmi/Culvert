@@ -106,7 +106,6 @@ type f3b3Env struct {
 	overrides *fakeOverrideProvider
 	coord     *activationCoordinator
 	verifier  feedVerifier
-	now       *time.Time
 }
 
 // coordOpts configures the coordinator wiring (nil seams default to real/os).
