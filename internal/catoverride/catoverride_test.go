@@ -165,6 +165,49 @@ func TestComposeView_PureAndDeterministic(t *testing.T) {
 	}
 }
 
+// An override key's suffix scope supersedes a covered feed DESCENDANT, so the
+// descendant does not survive in a different category (Codex P1 / F0 §7.4-§7.5).
+func TestComposeView_OverrideCoversFeedDescendant(t *testing.T) {
+	feed := map[string]string{
+		"app.example.com": "A", // descendant of the override key
+		"other.net":       "News",
+	}
+	got := ComposeView(feed, Overrides{Recategorized: map[string]string{"example.com": "B"}})
+	if _, stillA := got["app.example.com"]; stillA {
+		t.Errorf("feed descendant must be superseded by the override subtree; got %+v", got)
+	}
+	if got["example.com"] != "B" {
+		t.Errorf("override example.com→B must govern the subtree; got %+v", got)
+	}
+	if got["other.net"] != "News" {
+		t.Errorf("unrelated feed entry must survive; got %+v", got)
+	}
+	// Same for an addition that covers a feed descendant.
+	got = ComposeView(map[string]string{"cdn.acme.io": "A"}, Overrides{Added: map[string]string{"acme.io": "B"}})
+	if _, stillA := got["cdn.acme.io"]; stillA {
+		t.Errorf("added key must supersede its feed descendant; got %+v", got)
+	}
+}
+
+// A valid envelope followed by any trailing token (a stray closer or a second
+// value) is rejected — strict whole-input decode (Codex P2).
+func TestLoad_TrailingDataRejected(t *testing.T) {
+	dir := t.TempDir()
+	for i, body := range []string{
+		`{"schema_version":1,"overrides":{}}}`,              // stray closer
+		`{"schema_version":1,"overrides":{}} {"x":1}`,       // second value
+		`{"schema_version":1,"overrides":{}}` + "\n" + `[]`, // trailing array
+	} {
+		path := filepath.Join(dir, "trail.json")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := New().Load(path); err == nil {
+			t.Errorf("case %d: trailing data must be rejected: %q", i, body)
+		}
+	}
+}
+
 // Normalize accepts a clean set and canonicalizes hosts/categories.
 func TestNormalize_ValidCanonicalizes(t *testing.T) {
 	got, err := Normalize(Overrides{

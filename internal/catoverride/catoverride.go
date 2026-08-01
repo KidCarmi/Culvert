@@ -17,9 +17,11 @@
 package catoverride
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -129,7 +131,7 @@ func (s *Store) Load(path string) error {
 // data are rejected so a malformed or newer-shaped file cannot be silently
 // half-read.
 func decodeEnvelope(data []byte) (fileEnvelope, error) {
-	dec := json.NewDecoder(strings.NewReader(string(data)))
+	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	var env fileEnvelope
 	if err := dec.Decode(&env); err != nil {
@@ -138,7 +140,11 @@ func decodeEnvelope(data []byte) (fileEnvelope, error) {
 		}
 		return fileEnvelope{}, fmt.Errorf("catoverride: decode envelope: %w", err)
 	}
-	if dec.More() {
+	// Require EOF after the envelope: dec.More() is not a reliable whole-input
+	// check (a trailing "}" or "]" can slip past it), so a SECOND decode must fail
+	// with io.EOF for the input to be exactly one envelope. Any trailing token —
+	// junk, a second value, or a stray closer — is rejected.
+	if err := dec.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
 		return fileEnvelope{}, errors.New("catoverride: trailing data after overrides envelope")
 	}
 	return env, nil
@@ -208,16 +214,33 @@ func cloneOverrides(o Overrides) Overrides {
 // effective host→category view (F0 §7.2). It is PURE and deterministic: the
 // snapshot is not mutated, and repeated calls on equal input return equal output.
 //
-// Precedence (admin layer 1 over feed layer 2): start from the feed snapshot,
-// drop every entry suppressed by a tombstone (self OR subdomain of a tombstone
-// host), then apply recategorizations, then union additions. Tombstones only
-// suppress feed entries — an admin `added`/`recategorized` host is authoritative
-// and Validate already forbids tombstoning a host the admin also added or
-// recategorized, so no override erases another.
+// Precedence (admin layer 1 over feed layer 2): every override key carries
+// host+subdomain SUFFIX scope (F0 §7.5), so an override key GOVERNS ITS WHOLE
+// SUBTREE. Start from the feed snapshot and drop every entry that is equal to or a
+// subdomain of a tombstone OR of an added/recategorized key — a descendant feed
+// host must not survive in a different category than the override that covers it
+// (which the policy engine's per-category suffix walk could otherwise match in
+// both, F0 §7.4). Then insert the recategorizations and additions. Validate
+// already forbids tombstoning a host the admin also asserts, so no override erases
+// another.
+//
+// Note: this makes each override key the sole authority over its subtree. A
+// residual ancestor/descendant conflict between an override key and a feed
+// ANCESTOR outside its subtree (e.g. an override for `app.example.com` while the
+// feed keeps `example.com` in another category) is an override↔feed interaction
+// that can only be detected against the live feed at activation (F3b), since
+// overrides are validated in isolation here.
 func ComposeView(feed map[string]string, o Overrides) map[string]string {
+	assertKeys := make([]string, 0, len(o.Recategorized)+len(o.Added))
+	for host := range o.Recategorized {
+		assertKeys = append(assertKeys, host)
+	}
+	for host := range o.Added {
+		assertKeys = append(assertKeys, host)
+	}
 	out := make(map[string]string, len(feed))
 	for host, cat := range feed {
-		if suffixSuppressed(host, o.Tombstones) {
+		if suffixSuppressed(host, o.Tombstones) || suffixSuppressed(host, assertKeys) {
 			continue
 		}
 		out[host] = cat

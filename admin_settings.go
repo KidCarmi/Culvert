@@ -11,6 +11,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"sync"
 	"time"
@@ -221,7 +222,16 @@ func LoadAdminSettings(path string) {
 	// (safe-default) resolution, retrying next boot. It does NOT change the persisted
 	// URL the legacy syncer reads, so there is no live behavior change here.
 	if rep, mErr := migrateSaaSFeedStore(&s, path, data, time.Now); mErr != nil {
-		logger.Printf("AdminSettings: SaaS feed store migration not applied (%v); outcome=%s", mErr, rep.Outcome)
+		if errors.Is(mErr, ErrSaaSSchemaTooNew) {
+			// A feed-store schema newer than this binary supports: fail CLOSED to the
+			// compiled baseline. Clear the persisted feed URL in memory so the legacy
+			// syncer below does NOT consume a field from a schema we just declared
+			// unsafe (the file is left untouched — the migration refused to write).
+			s.SaaSFeedURL = ""
+			logger.Printf("AdminSettings: SaaS feed store schema newer than supported (%v) — failing closed to the baseline feed config", mErr)
+		} else {
+			logger.Printf("AdminSettings: SaaS feed store migration not applied (%v); outcome=%s", mErr, rep.Outcome)
+		}
 	} else if rep.Outcome == "migrated" {
 		logger.Printf("AdminSettings: migrated SaaS feed store to schema %d (url_class=%s protocol_reset=%t backup=%q)",
 			rep.ToSchema, rep.URLClass, rep.ProtocolReset, sanitizeLog(rep.BackupPath))
@@ -339,6 +349,15 @@ func applyAdminServices(s *AdminSettings) {
 	if s.SaaSFeedURL != "" {
 		globalSaaSFeed.Configure(s.SaaSFeedURL, 24*time.Hour)
 	}
+	// F3a-1: publish the new durable feed-config fields to their holder so the
+	// omnibus SaveAdminSettings rebuild preserves them (schema marker included).
+	setSaaSFeedDurable(saasFeedDurable{
+		Managed:        s.SaaSFeedManaged,
+		Enabled:        s.SaaSFeedEnabled,
+		Protocol:       s.SaaSFeedProtocol,
+		RefreshSeconds: s.SaaSFeedRefreshSeconds,
+		SchemaVersion:  s.SaaSStoreSchemaVersion,
+	})
 }
 
 // BlocklistFeedSetting is the persisted form of one blocklist feed.
@@ -594,10 +613,13 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 
 	snapshotBlocklistFeeds(&s)
 
-	// SaaS feed
+	// SaaS feed. URL stays owned by the legacy syncer; the F3a-1 durable fields
+	// (managed/enabled/protocol/refresh + schema marker) are snapshotted from their
+	// holder so an unrelated admin mutation does not drop them or reset the marker.
 	if saasURL := globalSaaSFeed.FeedURL(); saasURL != "" {
 		s.SaaSFeedURL = saasURL
 	}
+	snapshotSaaSFeedDurable(&s)
 
 	// Upstream proxy pool (raw entries — see field comment)
 	s.UpstreamProxiesSaved = true
