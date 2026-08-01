@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -444,5 +445,40 @@ func TestStorageWriteAlert_RetryQueueDoesNotConsumeAlertGate(t *testing.T) {
 	}
 	if !strings.Contains((*alerts)[0], "policy.json") {
 		t.Errorf("alert %q does not name the store that failed", (*alerts)[0])
+	}
+}
+
+// TestStorageWriteAlert_NoGoroutineWithoutSubscriber pins the property that a
+// fault-driven producer must not inject goroutine churn into a process nobody
+// asked to be alerted in.
+//
+// This producer is triggered by an EXTERNAL condition — a failing disk fires it
+// from arbitrary goroutines at arbitrary moments — so an unconditional
+// `go fireAlert(...)` would spawn goroutines on every node with no webhooks
+// configured, which is the default posture and the state of every test binary.
+// It showed up as a spurious failure in an unrelated guardrail that samples
+// runtime.NumGoroutine() over a 50ms window.
+func TestStorageWriteAlert_NoGoroutineWithoutSubscriber(t *testing.T) {
+	withCleanStorageWriteHealth(t)
+
+	// The PRODUCTION seam, deliberately not swapped: this test is about what
+	// the real one does.
+	prevStore := globalAlertStore
+	globalAlertStore = &AlertStore{}
+	t.Cleanup(func() { globalAlertStore = prevStore })
+
+	before := runtime.NumGoroutine()
+	failingWrite(t, "policy.json")
+	time.Sleep(50 * time.Millisecond) // let anything spawned get scheduled
+	if after := runtime.NumGoroutine(); after > before {
+		t.Errorf("a failed durable write spawned %d goroutine(s) with no webhook subscribed", after-before)
+	}
+
+	// With a subscriber, delivery is attempted (the goroutine is legitimate).
+	globalAlertStore.Add(AlertWebhook{
+		URL: "https://alerts.invalid/hook", Enabled: true, Events: []string{"storage_write_failed"},
+	})
+	if !globalAlertStore.HasSubscriber("storage_write_failed") {
+		t.Fatal("setup: webhook not registered as a subscriber")
 	}
 }

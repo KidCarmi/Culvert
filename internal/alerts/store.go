@@ -232,6 +232,31 @@ func (as *Store) List() []Webhook {
 	return out
 }
 
+// HasSubscriber reports whether any ENABLED webhook is subscribed to event
+// (directly or via the "*" catch-all). Cheap: one RLock, no allocation.
+//
+// It lets a producer skip the work of firing an alert nobody will receive —
+// including, for producers that dispatch asynchronously, skipping the
+// goroutine spawn entirely. That matters beyond efficiency: a producer driven
+// by an external fault (a failing disk) would otherwise inject goroutine churn
+// into every process that has no webhooks configured at all, which is the
+// default posture and the state of every test binary.
+func (as *Store) HasSubscriber(event string) bool {
+	as.mu.RLock()
+	defer as.mu.RUnlock()
+	for i := range as.hooks {
+		if !as.hooks[i].Enabled {
+			continue
+		}
+		for _, ev := range as.hooks[i].Events {
+			if ev == event || ev == "*" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // Add stores a new webhook and returns it (secret redacted).
 func (as *Store) Add(h Webhook) Webhook {
 	h.ID = fmt.Sprintf("%d", time.Now().UnixNano())

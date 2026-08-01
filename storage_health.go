@@ -91,6 +91,16 @@ var storageWrites storageWriteHealth
 // alertRetryQueueBase: the observer runs on the failing goroutine, which may
 // hold a store lock, and alerts.Dispatch can block on a disk write.
 var fireStorageWriteAlert = func(detail string) {
+	// Nobody subscribed → do nothing at all, and in particular do not spawn a
+	// goroutine. This producer is driven by an EXTERNAL fault: a failing disk
+	// fires it from arbitrary goroutines at arbitrary moments. Spawning a
+	// delivery goroutine for an alert with no recipient would inject goroutine
+	// churn into every node that has no webhooks configured — the default
+	// posture, and the state of every test binary, where it shows up as
+	// spurious failures in guardrails that sample runtime.NumGoroutine().
+	if !globalAlertStore.HasSubscriber("storage_write_failed") {
+		return
+	}
 	go fireAlert("storage_write_failed", AlertPayload{
 		Detail: detail,
 		Source: "storage",
