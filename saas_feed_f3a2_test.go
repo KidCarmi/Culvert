@@ -53,6 +53,26 @@ func f3a2SwapRole(t *testing.T, role string) {
 
 func boolPtr(b bool) *bool { return &b }
 
+// f3a2IsolateConfigWriters isolates the two PROCESS-GLOBAL writers a settings/
+// overrides PUT drives — the config-version store (saveConfigVersion advances its
+// Seq + writes numbered files) and the cluster config store (publishCurrentConfigSnapshot
+// advances its version). Without this, a handler test leaks global state into
+// shuffled sibling tests (the determinism gate). Mirrors the standard pattern in
+// auth_password_change_no_versioning_test.go + cluster_benchgate_test.go.
+func f3a2IsolateConfigWriters(t *testing.T) {
+	t.Helper()
+	origDir, origSeq := configVersions.Dir(), configVersions.Seq()
+	configVersions.SetDirForTest(t.TempDir())
+	configVersions.SetSeqForTest(0)
+	origStore := globalConfigStore
+	globalConfigStore = &ConfigStore{}
+	t.Cleanup(func() {
+		configVersions.SetDirForTest(origDir)
+		configVersions.SetSeqForTest(origSeq)
+		globalConfigStore = origStore
+	})
+}
+
 // ─── 1. CP snapshot encode/decode round-trip ────────────────────────────────────
 
 func TestF3a2_SnapshotRoundTrip(t *testing.T) {
@@ -244,6 +264,7 @@ func TestF3a2_SettingsHandler(t *testing.T) {
 	f3a2ResetFeedDurable(t)
 	f3a2SwapOverrides(t)
 	swapAdminSettingsPath(t, filepath.Join(t.TempDir(), "admin_settings.json"))
+	f3a2IsolateConfigWriters(t)
 	f3a2SwapRole(t, "standalone")
 
 	// GET viewer OK.
@@ -284,6 +305,7 @@ func TestF3a2_ManagedDPDenial(t *testing.T) {
 	f3a2ResetFeedDurable(t)
 	f3a2SwapOverrides(t)
 	swapAdminSettingsPath(t, filepath.Join(t.TempDir(), "admin_settings.json"))
+	f3a2IsolateConfigWriters(t)
 	f3a2SwapRole(t, "data-plane")
 
 	if w := dispatchSettings(RoleAdmin, http.MethodPut, `{"enabled":true}`); w.Code != http.StatusConflict {
@@ -321,6 +343,7 @@ func TestF3a2_OverridesHandler(t *testing.T) {
 	f3a2ResetFeedDurable(t)
 	s := f3a2SwapOverrides(t)
 	swapAdminSettingsPath(t, filepath.Join(t.TempDir(), "admin_settings.json"))
+	f3a2IsolateConfigWriters(t)
 	f3a2SwapRole(t, "standalone")
 
 	// PUT full set.
@@ -458,6 +481,7 @@ func TestF3a2_NoLegacySyncerOrLiveStoreSideEffects(t *testing.T) {
 	f3a2ResetFeedDurable(t)
 	f3a2SwapOverrides(t)
 	swapAdminSettingsPath(t, filepath.Join(t.TempDir(), "admin_settings.json"))
+	f3a2IsolateConfigWriters(t)
 	f3a2SwapRole(t, "standalone")
 
 	// Snapshot the legacy syncer's configured URL + the live category store.
