@@ -1056,11 +1056,7 @@ func applySnapshotSaaSFeed(snap ConfigSnapshot) {
 		// re-applies the last-good snapshot on restart. A follower DP's node-local
 		// admin_settings.json is NOT the source of truth for CP-pushed config, so
 		// (like ProxyBaseURL) it is deliberately not written here — avoiding an
-		// admin-settings write on the hot sync path. Known limitation shared with
-		// ProxyBaseURL (Codex P1): on restart LoadAdminSettings reloads the local
-		// file and the cached-version poll can short-circuit re-sync until the next
-		// CP bump. The feed has NO runtime consumer until F3b, so this has zero
-		// runtime effect today; durable DP persistence lands with the F3b consumer.
+		// admin-settings write on the hot sync path.
 		setSaaSFeedDurable(d)
 	}
 
@@ -1075,6 +1071,21 @@ func applySnapshotSaaSFeed(snap ConfigSnapshot) {
 			logger.Printf("DataPlane: category overrides save: %v", serr)
 		}
 	}
+
+	// F3b-4: close the deferred managed-DP persistence finding. The scalar overlay
+	// above stays in-memory only (like ProxyBaseURL), but the F3b lifecycle IS the
+	// runtime consumer, so on a managed DP we now durably mirror the last authoritative
+	// CP feed configuration + fencing identity to a node-local, off-every-config-surface
+	// record. This runs AFTER the durable holder + overrides are updated so the mirror
+	// (incl. the overrides fingerprint) reflects the just-accepted snapshot. The snapshot
+	// reached here only after dpObserveEpoch (fencing) + validateConfigSnapshot passed,
+	// so the mirror is written only for authenticated, fenced, validated authority. A
+	// no-op on a non-managed node or before the lifecycle wires the store.
+	persistSaaSFeedAuthorityMirror(snap)
+
+	// A fresh authoritative snapshot (new epoch / enable / interval change) requires the
+	// scheduler to re-evaluate now rather than waiting for its next tick.
+	wakeSignedFeedScheduler()
 }
 
 func applyExternalAuthSnapshotSettings(snap ConfigSnapshot) {
