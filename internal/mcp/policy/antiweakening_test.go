@@ -202,3 +202,24 @@ func TestAW_ExpiredRuleSkipped(t *testing.T) {
 		t.Fatalf("an expired rule must never permit, got %v", d.Action)
 	}
 }
+
+// M18: no condition can be VACUOUSLY TRUE. `prefix ""` matches every present value,
+// so an empty (or omitted) scalar value would turn a scope-limited ALLOW into an
+// unconditional one — a broad allow that reads as narrow in review. The compiler
+// must reject the empty value outright; a rule author who wants "match everything"
+// must say so explicitly with an empty condition list.
+func TestAW_VacuousConditionCannotWidenARule(t *testing.T) {
+	vacuous := []string{
+		`{"field":"tool.name","op":"prefix"}`,
+		`{"field":"tool.name","op":"prefix","value":""}`,
+		`{"field":"principal.tenant","op":"exact","value":""}`,
+		`{"field":"principal.groups","op":"contains","value":""}`,
+		`{"field":"principal.groups","op":"contains_any","values":[""]}`,
+	}
+	for _, c := range vacuous {
+		rule := `{"id":"V","priority":1,"action":"ALLOW","reason":"MCP.POLICY.RESOURCE_SCOPE","remediation":"none","conditions":[` + c + `],"obligations":{"logging":"standard"}}`
+		if _, err := Compile([]byte(gwSnap(rule)), CreatedMeta{}, DefaultLimits()); err == nil {
+			t.Fatalf("a vacuous condition must not compile: %s", c)
+		}
+	}
+}
