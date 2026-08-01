@@ -916,9 +916,11 @@ func TestSealedGoldenREADMEIsPresentAndMarked(t *testing.T) {
 // testdata. (Requirement 11; test-key confinement wall.)
 func TestSealedGoldenTestKeyIsConfinedToTestData(t *testing.T) {
 	markers := []string{sealedFixtureKeyID, "recipient_private_key.bin", "telemetry/v1/sealed"}
-	checked := 0
-	// filepath.Walk uses Lstat internally and never follows symlinks (matches the
-	// repo's existing walk convention and avoids the gosec G122 WalkDir warning).
+	// Collect candidate production .go paths during the walk, then read them AFTER
+	// the walk returns. Doing no filesystem operation inside the walk callback
+	// avoids the gosec G122 race-prone-path warning; filepath.Walk itself uses
+	// Lstat and never follows symlinks.
+	var goFiles []string
 	err := filepath.Walk(pkgSourceDir(), func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -930,13 +932,21 @@ func TestSealedGoldenTestKeyIsConfinedToTestData(t *testing.T) {
 			}
 			return nil
 		}
-		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return nil
+		if strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go") {
+			goFiles = append(goFiles, path)
 		}
-		checked++
-		b, rerr := os.ReadFile(path) // #nosec G304 -- trusted in-repo source path from filepath.Walk
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+	if len(goFiles) == 0 {
+		t.Fatal("no production files scanned — the confinement wall would be vacuous")
+	}
+	for _, path := range goFiles {
+		b, rerr := os.ReadFile(path) // #nosec G304 -- trusted in-repo source path collected by filepath.Walk
 		if rerr != nil {
-			return rerr
+			t.Fatalf("read %s: %v", path, rerr)
 		}
 		src := string(b)
 		for _, m := range markers {
@@ -945,13 +955,6 @@ func TestSealedGoldenTestKeyIsConfinedToTestData(t *testing.T) {
 				t.Errorf("production file %s references %q — the C3 test key material must be confined to testdata and tests", rel, m)
 			}
 		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("walk: %v", err)
-	}
-	if checked == 0 {
-		t.Fatal("no production files scanned — the confinement wall would be vacuous")
 	}
 }
 
