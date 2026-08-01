@@ -172,6 +172,23 @@ func (c generationCandidate) validate() error {
 	if !validSHA256Hex(c.ManifestSHA256) || !validSHA256Hex(c.ArtifactSHA256) {
 		return errGenDigest
 	}
+	if err := c.validatePayloadBounds(); err != nil {
+		return err
+	}
+	// Re-bind bytes → digests (never trust the field without the bytes proving it).
+	if sha256Hex(c.EnvelopeBytes) != c.ManifestSHA256 {
+		return fmt.Errorf("%w: manifest envelope", errGenNotVerified)
+	}
+	if sha256Hex(c.ArtifactBytes) != c.ArtifactSHA256 {
+		return fmt.Errorf("%w: artifact", errGenNotVerified)
+	}
+	return nil
+}
+
+// validatePayloadBounds checks each raw payload is present and within its protocol
+// ceiling: envelope + bundle ≤ MaxBundleBytes, artifact == declared size ∈ (0, cap],
+// and the derived normalized snapshot ≤ the artifact ceiling.
+func (c generationCandidate) validatePayloadBounds() error {
 	if len(c.EnvelopeBytes) == 0 || len(c.EnvelopeBytes) > urlcatfeed.MaxBundleBytes {
 		return fmt.Errorf("%w: envelope %d", errGenSizeBound, len(c.EnvelopeBytes))
 	}
@@ -185,13 +202,6 @@ func (c generationCandidate) validate() error {
 	// the same artifact ceiling; it must be present (F3b-3 needs the feed-owned layer).
 	if len(c.SnapshotBytes) == 0 || len(c.SnapshotBytes) > urlcatfeed.MaxArtifactSize {
 		return fmt.Errorf("%w: snapshot %d", errGenSizeBound, len(c.SnapshotBytes))
-	}
-	// Re-bind bytes → digests (never trust the field without the bytes proving it).
-	if sha256Hex(c.EnvelopeBytes) != c.ManifestSHA256 {
-		return fmt.Errorf("%w: manifest envelope", errGenNotVerified)
-	}
-	if sha256Hex(c.ArtifactBytes) != c.ArtifactSHA256 {
-		return fmt.Errorf("%w: artifact", errGenNotVerified)
 	}
 	return nil
 }
