@@ -80,6 +80,15 @@ func (c *ReplayCache) CheckAndAdd(capb protocol.Capability, partKey, jti string,
 			return mcperr.New(mcperr.ReasonDPoPReplay, "senderconstraint.replay", "duplicate proof jti")
 		}
 	}
+	// If the capability cache looks full, reclaim expired room across ALL of its
+	// partitions before failing closed — otherwise a cache filled across many
+	// distinct (attacker-rotated) partitions would reject every new proof
+	// indefinitely even after its entries expire, since only the incoming
+	// partition was swept above.
+	if cs.total >= c.lim.MaxReplayEntries() {
+		cs.total -= sweepCapState(cs, now)
+		part = cs.parts[partKey] // the full sweep may have deleted an emptied partition
+	}
 	if cs.total >= c.lim.MaxReplayEntries() {
 		return mcperr.New(mcperr.ReasonDPoPReplay, "senderconstraint.replay", "capability replay cache at capacity (fail closed)")
 	}
@@ -107,14 +116,9 @@ func (c *ReplayCache) Sweep() int {
 	reclaimed := 0
 	for i := range c.cap {
 		cs := &c.cap[i]
-		for pk, part := range cs.parts {
-			n := sweepPartition(part, now)
-			cs.total -= n
-			reclaimed += n
-			if len(part) == 0 {
-				delete(cs.parts, pk)
-			}
-		}
+		n := sweepCapState(cs, now)
+		cs.total -= n
+		reclaimed += n
 	}
 	return reclaimed
 }
@@ -124,6 +128,19 @@ func (c *ReplayCache) Size(capb protocol.Capability) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.cap[capIndex(capb)].total
+}
+
+// sweepCapState reclaims expired jti across every partition of one capability,
+// deleting emptied partitions, and returns the total count removed.
+func sweepCapState(cs *capState, now time.Time) int {
+	reclaimed := 0
+	for pk, part := range cs.parts {
+		reclaimed += sweepPartition(part, now)
+		if len(part) == 0 {
+			delete(cs.parts, pk)
+		}
+	}
+	return reclaimed
 }
 
 // sweepPartition deletes expired jti from a partition and returns the count removed.

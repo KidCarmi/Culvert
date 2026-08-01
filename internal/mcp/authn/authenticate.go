@@ -240,8 +240,19 @@ func subjectID(s identity.Subject) string {
 }
 
 func subjectAssurance(s identity.Subject) identity.AssuranceLevel {
-	if s.Kind == identity.SubjectHuman && s.Human != nil {
-		return s.Human.Assurance
+	switch s.Kind {
+	case identity.SubjectHuman:
+		if s.Human != nil {
+			return s.Human.Assurance
+		}
+	case identity.SubjectWorkload:
+		// A workload earns high assurance ONLY when it carries attestation material;
+		// an unattested workload cannot satisfy a high MinAssurance floor by merely
+		// labelling itself a workload (that would be an assurance-escalation seam).
+		if s.Workload != nil && s.Workload.Attestation != "" {
+			return identity.AssuranceHigh
+		}
+		return identity.AssuranceLow
 	}
-	return identity.AssuranceHigh // a workload identity is attested, not interactively assured
+	return identity.AssuranceUnknown
 }

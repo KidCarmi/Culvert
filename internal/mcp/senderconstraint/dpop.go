@@ -117,7 +117,15 @@ func checkProofClaims(in DPoPInput, claims *canonical.Node, thumb string, lim li
 	if !jose.ConstantTimeEqual(ath, jose.SHA256B64URL([]byte(in.AccessToken))) {
 		return dpopBinding("ath does not match the presented access token")
 	}
-	if in.ExpectedJKT != "" && !jose.ConstantTimeEqual(thumb, in.ExpectedJKT) {
+	// The access token MUST itself be DPoP-bound: a proof only proves possession of
+	// its OWN key, so without a token-carried cnf.jkt to bind that key to, any holder
+	// of a bare bearer token could mint a proof. Fail closed on an unbound token (this
+	// also blocks a DPoPOrMTLS downgrade — an mTLS-bound token, cnf.jkt empty, cannot
+	// be routed through the DPoP path).
+	if in.ExpectedJKT == "" {
+		return dpopBinding("access token is not DPoP-bound (missing cnf.jkt); cannot sender-constrain")
+	}
+	if !jose.ConstantTimeEqual(thumb, in.ExpectedJKT) {
 		return dpopBinding("proof key does not match the access-token cnf thumbprint")
 	}
 	if in.Nonce != "" {

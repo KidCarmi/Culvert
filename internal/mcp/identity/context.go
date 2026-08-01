@@ -93,8 +93,10 @@ func (c *ResolvedContext) Tenant() Tenant { return c.tenant }
 // TenantID returns the tenant id.
 func (c *ResolvedContext) TenantID() TenantID { return c.tenant.ID }
 
-// Subject returns the authenticated subject (Human or Workload).
-func (c *ResolvedContext) Subject() Subject { return c.subject }
+// Subject returns the authenticated subject (Human or Workload) as a deep copy, so
+// a consumer can never mutate the context's internal principal (which would
+// diverge it from its precomputed fingerprint).
+func (c *ResolvedContext) Subject() Subject { return cloneSubject(c.subject) }
 
 // Agent returns the agent principal and whether one is present.
 func (c *ResolvedContext) Agent() (Agent, bool) {
@@ -181,9 +183,13 @@ func Resolve(in ResolveInput, reg *registry.Registry, cat *catalog.Catalog) (*Re
 			return nil, chainInvalid("agent owner does not reference the authenticated subject")
 		}
 	}
+	// Deep-copy every caller-owned pointer/slice so the context owns private copies:
+	// the caller must not be able to mutate the subject/agent/resource (or server/tool,
+	// copied in resolveCapabilityRefs) after resolution and silently diverge the
+	// identity from its precomputed fingerprint.
 	ctx := &ResolvedContext{
-		capability: in.Capability, tenant: in.Tenant, subject: in.Subject,
-		agent: in.Agent, client: in.Client, resource: in.Resource,
+		capability: in.Capability, tenant: in.Tenant, subject: cloneSubject(in.Subject),
+		agent: cloneAgent(in.Agent), client: in.Client, resource: cloneResource(in.Resource),
 		canonicalResource: in.CanonicalResource, issuer: in.Issuer,
 		assurance: in.Assurance, sender: in.SenderConstraint,
 		expiry: in.Expiry, authTime: in.AuthTime, hasAuthTime: in.HasAuthTime,
@@ -255,7 +261,8 @@ func resolveCapabilityRefs(in ResolveInput, reg *registry.Registry, cat *catalog
 	if !ok || !srv.Usable() {
 		return mcperr.New(mcperr.ReasonRegistryServerUnavailable, "identity.resolve", "Gateway server is not registered or not enabled")
 	}
-	ctx.server = in.Server
+	serverCopy := *in.Server
+	ctx.server = &serverCopy
 	if in.Tool == nil {
 		return nil
 	}
@@ -271,7 +278,8 @@ func resolveCapabilityRefs(in ResolveInput, reg *registry.Registry, cat *catalog
 	}
 	// Carry the catalog eligibility (quarantined/review) — never turn it into an
 	// allow decision here (PR-6 owns that).
-	ctx.tool = in.Tool
+	toolCopy := *in.Tool
+	ctx.tool = &toolCopy
 	ctx.toolEligibility = rec.Eligibility
 	ctx.hasToolElig = true
 	return nil

@@ -159,6 +159,45 @@ type ToolRef struct {
 	Name   string
 }
 
+// cloneSubject returns a deep copy of a Subject: the Human/Workload pointer and the
+// Human.Groups slice are copied so the returned value shares no mutable state with
+// the input. Used to isolate the resolved context from caller-owned pointers (both
+// when resolving and when handing a subject back through an accessor).
+func cloneSubject(s Subject) Subject {
+	out := Subject{Kind: s.Kind}
+	if s.Human != nil {
+		h := *s.Human
+		if s.Human.Groups != nil {
+			h.Groups = append([]string(nil), s.Human.Groups...)
+		}
+		out.Human = &h
+	}
+	if s.Workload != nil {
+		w := *s.Workload
+		out.Workload = &w
+	}
+	return out
+}
+
+// cloneAgent returns a deep copy of an Agent pointer (nil-safe). Agent has only
+// value fields, so a shallow struct copy behind a fresh pointer fully isolates it.
+func cloneAgent(a *Agent) *Agent {
+	if a == nil {
+		return nil
+	}
+	c := *a
+	return &c
+}
+
+// cloneResource returns a deep copy of a ResourceRef pointer (nil-safe).
+func cloneResource(r *ResourceRef) *ResourceRef {
+	if r == nil {
+		return nil
+	}
+	c := *r
+	return &c
+}
+
 // SubjectKind selects which subject a Subject carries.
 type SubjectKind uint8
 

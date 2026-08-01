@@ -323,3 +323,49 @@ func mustResolveF(f *testing.F, in ResolveInput, reg *registry.Registry) *Resolv
 	}
 	return ctx
 }
+
+// Review fix (P1): the resolved context must deep-copy caller-owned principals. A
+// caller mutating its input Human after Resolve, or a consumer mutating the Subject
+// returned by an accessor, must NOT alter the context (which would diverge it from
+// its precomputed fingerprint while BindingStore still treats it as the old id).
+func TestReviewFix_ResolvedContextDeepCopiesPrincipals(t *testing.T) {
+	reg := gwReg(t)
+	in := baseGatewayInput()
+	h := &Human{Subject: "user-1", Tenant: "tenant-a", Issuer: "iss", Assurance: AssuranceHigh, Groups: []string{"g1"}}
+	in.Subject = Subject{Kind: SubjectHuman, Human: h}
+	in.Agent = &Agent{AgentID: "a1", Owner: in.Subject.ref(), Managed: ManagedState(1)}
+	ctx, err := Resolve(in, reg, nil)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	fp := ctx.Fingerprint()
+
+	// Mutate the caller's original pointers AFTER resolution.
+	h.Subject = "attacker"
+	h.Groups[0] = "admins"
+	in.Agent.AgentID = "a2"
+
+	if got := ctx.Subject().Human.Subject; got != "user-1" {
+		t.Fatalf("context subject mutated via caller pointer: %q", got)
+	}
+	if got := ctx.Subject().Human.Groups[0]; got != "g1" {
+		t.Fatalf("context groups mutated via caller slice: %q", got)
+	}
+	if ag, _ := ctx.Agent(); ag.AgentID != "a1" {
+		t.Fatalf("context agent mutated via caller pointer: %q", ag.AgentID)
+	}
+
+	// Mutate the value returned by the accessor — must not touch the internal copy.
+	s := ctx.Subject()
+	s.Human.Subject = "attacker2"
+	s.Human.Groups[0] = "admins2"
+	if got := ctx.Subject().Human.Subject; got != "user-1" {
+		t.Fatalf("context subject mutated via accessor return: %q", got)
+	}
+	if got := ctx.Subject().Human.Groups[0]; got != "g1" {
+		t.Fatalf("context groups mutated via accessor return: %q", got)
+	}
+	if ctx.Fingerprint() != fp {
+		t.Fatal("fingerprint changed under mutation attempts")
+	}
+}

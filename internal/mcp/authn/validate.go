@@ -64,6 +64,12 @@ func validateTime(c *Claims, cfg CapabilityAuthConfig, now time.Time) error {
 	switch {
 	case c.HasIat:
 		iat := time.Unix(c.IssuedAt, 0)
+		// An issuance time in the future (beyond skew) is invalid regardless of nbf:
+		// without this, a token whose iat/exp are years ahead but a few minutes apart
+		// would pass both the expiry and max-TTL checks and be usable immediately.
+		if iat.Sub(now) > skew {
+			return mcperr.New(mcperr.ReasonTokenNotYetValid, "authn.validate", "token issued in the future beyond clock skew")
+		}
 		if exp.Before(iat) {
 			return mcperr.New(mcperr.ReasonTokenTTLExceeded, "authn.validate", "expiry precedes issuance")
 		}
@@ -84,12 +90,18 @@ func validateAudience(c *Claims, cfg CapabilityAuthConfig) error {
 	if len(c.Audiences) == 0 {
 		return mcperr.New(mcperr.ReasonAudienceMissing, "authn.validate", "token carries no audience")
 	}
+	// The effective audience set must contain ONLY the canonical Culvert resource.
+	// A token co-issued for Culvert AND an upstream/unrelated service is an ambiguous
+	// multi-audience credential reusable across trust boundaries, so a foreign
+	// co-audience is rejected even when the canonical resource is also present
+	// (duplicate copies of the canonical resource are fine).
 	found := false
 	for _, a := range c.Audiences {
 		if a == cfg.canonicalResource {
 			found = true
-			break
+			continue
 		}
+		return mcperr.New(mcperr.ReasonAudienceRejected, "authn.validate", "token carries a foreign co-audience alongside the canonical Culvert resource")
 	}
 	if !found {
 		return mcperr.New(mcperr.ReasonAudienceRejected, "authn.validate", "audience is not the canonical Culvert resource for this capability")

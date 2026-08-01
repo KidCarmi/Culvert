@@ -90,6 +90,13 @@ func NewCapabilityConfig(in CapabilityConfigInput) (CapabilityAuthConfig, error)
 	if in.SenderProfile == senderconstraint.ProfileUnset {
 		return CapabilityAuthConfig{}, cfgErr("sender-constraint profile must be set (the zero profile fails closed)")
 	}
+	// At least one EFFECTIVE accepted client id is required. An empty allowlist (or
+	// one made of only empty strings, which toSet drops) would silently accept every
+	// client_id, disabling the Management/Gateway client-registration separation —
+	// fail closed instead.
+	if len(toSet(in.AcceptedClientIDs)) == 0 {
+		return CapabilityAuthConfig{}, cfgErr("at least one accepted client id is required (client-registration separation)")
+	}
 	cfg := CapabilityAuthConfig{
 		capability:        in.Capability,
 		trustedIssuers:    toSet(in.TrustedIssuers),

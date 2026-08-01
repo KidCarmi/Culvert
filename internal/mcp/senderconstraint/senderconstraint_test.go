@@ -150,3 +150,30 @@ func FuzzVerifyDPoP(f *testing.F) {
 		}
 	})
 }
+
+// Review fix (P2): at capability capacity the cache must reclaim expired entries
+// across ALL partitions before failing closed — otherwise a cache filled across
+// many attacker-rotated partitions would reject every new proof indefinitely even
+// after the entries expire.
+func TestReviewFix_ReplayReclaimsExpiredPartitionsAtCapacity(t *testing.T) {
+	now := time.Unix(1000, 0)
+	lim := smallReplayLimits(t, 4, 4) // per-capability cap = 4
+	c := NewReplayCache(lim, func() time.Time { return now })
+	for i := 0; i < 4; i++ {
+		pk := PartitionKey("iss", "client", "thumb-"+itoa(i))
+		if err := c.CheckAndAdd(protocol.Gateway, pk, "jti-"+itoa(i), time.Minute); err != nil {
+			t.Fatalf("fill %d: %v", i, err)
+		}
+	}
+	// At capacity while all entries are live: a brand-new partition is rejected.
+	fresh := PartitionKey("iss", "client", "thumb-new")
+	if err := c.CheckAndAdd(protocol.Gateway, fresh, "jti-new", time.Minute); mcperr.ReasonOf(err) != mcperr.ReasonDPoPReplay {
+		t.Fatalf("cache should be at capacity, got %v", err)
+	}
+	// Advance past the TTL so the filled entries expire, then retry: admission must
+	// be restored without any external Sweep call.
+	now = now.Add(2 * time.Minute)
+	if err := c.CheckAndAdd(protocol.Gateway, fresh, "jti-new", time.Minute); err != nil {
+		t.Fatalf("expired room must be reclaimed at capacity, got %v", err)
+	}
+}
