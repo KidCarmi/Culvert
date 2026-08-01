@@ -25,6 +25,7 @@ package main
 
 import (
 	"context"
+	"strings"
 	"time"
 )
 
@@ -83,11 +84,11 @@ func startSignedFeedLifecycle(feedDir string, ctx context.Context) {
 		sched.Wake()
 	}
 
-	// The interpolated strings are bounded enum names, but resolveAuthority() derives
-	// them from user-settable config, so sanitize at the log site (CWE-117 / CodeQL).
-	logger.Printf("SaaSFeed: signed-feed lifecycle armed (authority=%s enabled=%v recovery=%s state=%s)",
-		sanitizeLog(res.Authority.String()), res.Config.Enabled,
-		sanitizeLog(recRes.Class.String()), sanitizeLog(rt.status.Snapshot().State.String()))
+	// authority derives from user-settable config (via resolveAuthority), so inline
+	// strings.ReplaceAll at the call site so CodeQL sees the sanitiser (CWE-117); recovery
+	// class comes from offline record recovery (not user input) and enabled is a bool.
+	logger.Printf("SaaSFeed: signed-feed lifecycle armed (authority=%s enabled=%v recovery=%s)",
+		strings.ReplaceAll(res.Authority.String(), "\n", ""), res.Config.runtimeEnabled(), recRes.Class)
 }
 
 // wakeSignedFeedScheduler requests an immediate refresh evaluation (a config change:

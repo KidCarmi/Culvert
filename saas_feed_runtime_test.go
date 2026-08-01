@@ -275,7 +275,7 @@ func TestF3b4_ClassifyAcquireError(t *testing.T) {
 		errors.New("unknown"): saasFeedErrFetch,
 	}
 	for err, want := range cases {
-		if got, _ := classifyAcquireError(err); got != want {
+		if got := classifyAcquireError(err); got != want {
 			t.Errorf("classify(%v) = %s, want %s", err, got, want)
 		}
 	}

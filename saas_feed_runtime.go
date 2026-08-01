@@ -352,8 +352,9 @@ func (rt *saasFeedRuntime) noteOverrideFootprint() {
 // it into the status. Returns the scheduler outcome.
 func (rt *saasFeedRuntime) recordAcquireError(err error) saasFeedRefreshOutcome {
 	canceled := errors.Is(err, context.Canceled) || errors.Is(err, errAcquireCanceled) || errors.Is(err, errFeedFetchCanceled)
-	class, httpStatus := classifyAcquireError(err)
-	rt.status.noteAttemptFailure(class, httpStatus, canceled, "acquire failed")
+	// The acquire error sentinels do not carry an HTTP status, so httpStatus is 0 here
+	// (the HTTP class is still distinguished via saasFeedErrHTTP).
+	rt.status.noteAttemptFailure(classifyAcquireError(err), 0, canceled, "acquire failed")
 	return rt.failedOrCanceled(canceled)
 }
 
@@ -415,27 +416,23 @@ func (rt *saasFeedRuntime) conditionalETag(cfg SaaSFeedConfig) string {
 	return et
 }
 
-// classifyAcquireError maps an AcquireGeneration error to a bounded (class, httpStatus).
-func classifyAcquireError(err error) (class string, httpStatus int) {
+// classifyAcquireError maps an AcquireGeneration error to a bounded failure class.
+func classifyAcquireError(err error) string {
 	switch {
 	case errors.Is(err, errAcquireVerify):
-		return saasFeedErrVerify, 0
+		return saasFeedErrVerify
 	case errors.Is(err, errAcquireExpired), errors.Is(err, errAcquireFuture), errors.Is(err, errAcquireFresh):
-		return saasFeedErrFreshness, 0
+		return saasFeedErrFreshness
 	case errors.Is(err, errAcquireFloor):
-		return saasFeedErrFloor, 0
+		return saasFeedErrFloor
 	case errors.Is(err, errAcquirePersist):
-		return saasFeedErrPersist, 0
+		return saasFeedErrPersist
 	case errors.Is(err, errFeedFetchStatus):
-		return saasFeedErrHTTP, 0
+		return saasFeedErrHTTP
 	case errors.Is(err, errFeedFetchBody), errors.Is(err, errFeedFetchEncoding):
-		return saasFeedErrParse, 0
-	case errors.Is(err, errFeedFetchSSRF), errors.Is(err, errFeedFetchResolve),
-		errors.Is(err, errFeedFetchRedirect), errors.Is(err, errFeedFetchTooMany),
-		errors.Is(err, errFeedFetchURLContract), errors.Is(err, errAcquireManifest), errors.Is(err, errAcquireArtifact):
-		return saasFeedErrFetch, 0
+		return saasFeedErrParse
 	default:
-		return saasFeedErrFetch, 0
+		return saasFeedErrFetch
 	}
 }
 
