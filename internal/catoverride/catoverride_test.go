@@ -1,6 +1,7 @@
 package catoverride
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -47,7 +48,7 @@ func TestSaveLoad_RoundTrip(t *testing.T) {
 	}
 	// The persisted file carries the schema marker.
 	b, _ := os.ReadFile(path)
-	if !contains(b, `"schema_version": 1`) {
+	if !bytes.Contains(b, []byte(`"schema_version": 1`)) {
 		t.Errorf("persisted envelope missing schema_version marker: %s", b)
 	}
 }
@@ -242,17 +243,4 @@ func TestNormalize_TombstoneDedup(t *testing.T) {
 	if len(got.Tombstones) != 1 {
 		t.Errorf("expected 1 deduped tombstone; got %+v", got.Tombstones)
 	}
-}
-
-func contains(b []byte, sub string) bool {
-	return len(b) > 0 && len(sub) > 0 && (indexOf(string(b), sub) >= 0)
-}
-
-func indexOf(s, sub string) int {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
-		}
-	}
-	return -1
 }

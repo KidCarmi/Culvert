@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -14,10 +15,11 @@ func fixedClock() func() time.Time {
 }
 
 // writeSettings marshals s to a temp settings file and returns (path, rawBytes).
-func writeSettings(t *testing.T, s AdminSettings) (string, []byte) {
+func writeSettings(t *testing.T, s AdminSettings) (path string, raw []byte) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "admin_settings.json")
-	raw, err := json.MarshalIndent(s, "", "  ")
+	path = filepath.Join(t.TempDir(), "admin_settings.json")
+	var err error
+	raw, err = json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +67,7 @@ func TestMigrate_FromPreF3State(t *testing.T) {
 	if err != nil {
 		t.Fatalf("backup unreadable: %v", err)
 	}
-	if string(bak) != string(raw) {
+	if !bytes.Equal(bak, raw) {
 		t.Errorf("backup does not equal the pre-migration bytes")
 	}
 }

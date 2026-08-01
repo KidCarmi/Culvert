@@ -241,11 +241,11 @@ func ResolveSaaSFeedConfig(s *AdminSettings) (SaaSFeedConfig, error) {
 	if cfg.Managed {
 		cfg.Enabled = s.SaaSFeedEnabled
 	}
-	url, err := resolveFeedURL(s.SaaSFeedURL)
+	feedURL, err := resolveFeedURL(s.SaaSFeedURL)
 	if err != nil {
 		return SaaSFeedConfig{}, err
 	}
-	cfg.URL = url
+	cfg.URL = feedURL
 	proto, err := resolveFeedProtocol(s.SaaSFeedProtocol)
 	if err != nil {
 		return SaaSFeedConfig{}, err
