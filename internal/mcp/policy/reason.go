@@ -135,7 +135,7 @@ func validCodeToken(t string) bool {
 	}
 	for i := 0; i < len(t); i++ {
 		c := t[i]
-		if !(c >= 'A' && c <= 'Z') && !(c >= '0' && c <= '9') && c != '_' {
+		if (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '_' {
 			return false
 		}
 	}

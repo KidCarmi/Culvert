@@ -47,12 +47,12 @@ func policyPipeline(t *testing.T, k *esKey, prov PolicyProvider) *pipeline {
 }
 
 // driveToDecisionPoint initializes a session and returns (pipeline, token, sid).
-func driveToDecisionPoint(t *testing.T, p *pipeline, k *esKey) (string, string) {
+func driveToDecisionPoint(t *testing.T, p *pipeline, k *esKey) (token, sid string) {
 	t.Helper()
-	tok := gwToken(k)
-	sid := doInit(t, p, tok)
-	p.Process(withSession(gwRequest(tok, initializedNotification()), sid), fixedClock())
-	return tok, sid
+	token = gwToken(k)
+	sid = doInit(t, p, token)
+	p.Process(withSession(gwRequest(token, initializedNotification()), sid), fixedClock())
+	return token, sid
 }
 
 func decodeEnv(t *testing.T, body []byte) (errMember *struct {

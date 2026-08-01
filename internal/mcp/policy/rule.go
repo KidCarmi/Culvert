@@ -57,7 +57,7 @@ func (r *Rule) AllowsDestructive() bool { return r.allowDestructive }
 // returns the id of the FIRST condition that did not match (for the explain trace),
 // or "" when all matched. An expired rule (relative to the input's EvalTime) never
 // matches. A rule with no conditions matches every input of its namespace.
-func (r *Rule) matches(in *DecisionInput) (bool, string) {
+func (r *Rule) matches(in *DecisionInput) (matched bool, failCond string) {
 	if r.expiryUnix != 0 && in.EvalTime.Unix() >= r.expiryUnix {
 		return false, "expiry"
 	}

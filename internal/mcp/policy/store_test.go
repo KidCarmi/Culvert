@@ -95,6 +95,7 @@ func TestStore_ConcurrentReadersSeeConsistentSnapshot(t *testing.T) {
 	}
 	// Serial publisher (only one writer, optimistic base).
 	for rev := 2; rev <= 200; rev++ {
+		// #nosec G115 -- rev is a bounded positive test loop counter (2..200)
 		_ = st.Publish(Revision(rev-1), snapRev(t, "gateway", rev))
 	}
 	close(stop)
