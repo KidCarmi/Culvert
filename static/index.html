@@ -2366,6 +2366,7 @@ Firefox (all platforms):
           <!-- Delivery History (Finding 8.1) -->
           <details style="margin-top:12px">
             <summary style="cursor:pointer;font-size:.85rem;font-weight:600;color:var(--accent)">Delivery History</summary>
+            <div id="alert-retry-health" style="font-size:.78rem;color:var(--muted);margin-top:8px"></div>
             <div class="tbl-wrap" style="margin-top:8px">
               <table id="delivery-hist-table" style="font-size:.78rem">
                 <thead><tr><th>Time</th><th>Webhook</th><th>Event</th><th>Status</th><th>Attempt</th><th>Error</th></tr></thead>
@@ -9817,6 +9818,15 @@ async function testWebhook(id) {
 async function loadDeliveryHistory() {
   try {
     const d = await api('/api/alerts/webhooks/history');
+    const health = document.getElementById('alert-retry-health');
+    const queued = d.retry_queue_depth || 0;
+    const exhausted = d.retry_exhausted_total || 0;
+    const dropped = d.retry_dropped_total || 0;
+    const degraded = exhausted > 0 || dropped > 0;
+    health.style.color = degraded ? 'var(--red)' : 'var(--muted)';
+    health.textContent = `Retry queue: ${queued} pending` +
+      (exhausted ? ` · ${exhausted} gave up after max retries` : '') +
+      (dropped ? ` · ${dropped} dropped (queue full)` : '');
     const tbody = document.getElementById('delivery-hist-tbody');
     const items = d.deliveries || [];
     if (!items.length) { tbody.innerHTML = '<tr><td colspan="6" style="color:var(--muted)">No deliveries yet</td></tr>'; return; }
