@@ -45,7 +45,7 @@ func (st *scanState) scanSecretString(s, path string) error {
 // severity. It reuses redaction.SecretClass for the coarse family and refines
 // severity: private keys and provider secrets are critical, bearer/JWT high,
 // password/api-key assignments high, oversized medium.
-func classifySecretName(name string) (Classification, Severity) {
+func classifySecretName(name string) (class Classification, sev Severity) {
 	switch redaction.SecretClass(name) {
 	case "private_key":
 		return ClassPrivateKey, SevCritical

@@ -90,7 +90,7 @@ type TruncationEvidence struct {
 // convenience for a future display path; security inspection must already have run
 // on the FULL content. When the profile forbids truncation the text is returned
 // unchanged with Truncated=false.
-func (p Profile) TruncateText(s string) (string, TruncationEvidence) {
+func (p Profile) TruncateText(s string) (result string, evidence TruncationEvidence) {
 	ev := TruncationEvidence{OriginalSize: len(s), ResultingSize: len(s)}
 	if !p.allowTextTruncation || len(s) <= p.lim.MaxTruncatedTextBytes() {
 		ev.TransformedHash = shortHash(s)

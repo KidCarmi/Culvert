@@ -131,7 +131,7 @@ func parsePointer(p string) ([]string, error) {
 	return segs, nil
 }
 
-func resolvePointer(n *canonical.Node, segs []string) (*canonical.Node, bool) {
+func resolvePointer(n *canonical.Node, segs []string) (found *canonical.Node, ok bool) {
 	cur := n
 	for _, s := range segs {
 		if cur == nil {

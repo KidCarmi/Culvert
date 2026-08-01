@@ -179,7 +179,7 @@ func (p Profile) Capability() string { return p.capability }
 func (p Profile) Revision() uint64 { return p.revision }
 
 // RedactionProfile looks up an immutable redaction profile by ref.
-func (p Profile) RedactionProfile(ref string) (RedactionProfile, bool) {
+func (p Profile) RedactionProfile(ref string) (profile RedactionProfile, ok bool) {
 	rp, ok := p.redactionProfiles[ref]
 	return rp, ok
 }

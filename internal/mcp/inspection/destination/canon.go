@@ -94,7 +94,7 @@ func finishHost(c Canonical, host string) (Canonical, Class, error) {
 
 // parseIPLiteral parses a host as an IP literal. url.Hostname already strips the
 // [] from an IPv6 literal.
-func parseIPLiteral(host string) (netip.Addr, bool) {
+func parseIPLiteral(host string) (addr netip.Addr, ok bool) {
 	addr, err := netip.ParseAddr(host)
 	if err != nil {
 		return netip.Addr{}, false
@@ -155,12 +155,16 @@ func validLabel(label string) error {
 		return destErr(mcperr.ReasonDestinationMalformed, "host label hyphen boundary")
 	}
 	for i := 0; i < len(label); i++ {
-		c := label[i]
-		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
+		if !isLabelChar(label[i]) {
 			return destErr(mcperr.ReasonDestinationMalformed, "invalid host label char")
 		}
 	}
 	return nil
+}
+
+// isLabelChar reports whether c is a valid LDH (letter/digit/hyphen) host-label byte.
+func isLabelChar(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-'
 }
 
 // looksNumericIP reports whether host is composed only of characters an IP literal

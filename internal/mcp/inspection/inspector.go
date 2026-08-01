@@ -110,7 +110,7 @@ func hardFail(res Result, reason mcperr.Reason) Result {
 	return res
 }
 
-func compileAndValidate(p Profile, in RequestInput) (schema.Status, mcperr.Reason) {
+func compileAndValidate(p Profile, in RequestInput) (status schema.Status, reason mcperr.Reason) {
 	compiled := in.Compiled
 	if compiled == nil {
 		c, err := schema.Compile(in.InputSchema, p.lim)
@@ -152,7 +152,7 @@ func schemaStatusReason(st schema.Status) mcperr.Reason {
 // whether any finding is a hard block (with the block reason). Redact/label/pass do
 // not block here (redaction runs on the ALLOW_WITH_REDACTION obligation); injection
 // is labeled unless the profile opts into a severity-based hard block.
-func (p Profile) evaluateDispositions(rep *dlp.Report) (Disposition, bool, mcperr.Reason) {
+func (p Profile) evaluateDispositions(rep *dlp.Report) (outDisp Disposition, anyBlock bool, blockReason mcperr.Reason) {
 	worst := DispPass
 	blocked := false
 	reason := mcperr.ReasonNone
@@ -169,7 +169,7 @@ func (p Profile) evaluateDispositions(rep *dlp.Report) (Disposition, bool, mcper
 // findingDisposition maps one finding to its disposition and, when it hard-blocks,
 // the block reason. Injection is labeled unless the profile opts into a
 // severity-based hard block; every other class uses the profile disposition.
-func (p Profile) findingDisposition(f *dlp.Finding) (Disposition, bool, mcperr.Reason) {
+func (p Profile) findingDisposition(f *dlp.Finding) (disp Disposition, blocks bool, reason mcperr.Reason) {
 	if f.Class == dlp.ClassPossibleInjection {
 		if p.injectionBlockSeverity != dlp.SevUnset && f.Severity >= p.injectionBlockSeverity {
 			return DispBlock, true, mcperr.ReasonInjectionSuspected
@@ -213,7 +213,7 @@ func applyDLPToSummary(s *Summary, rep *dlp.Report) {
 // destination candidate. A modeled destination that is malformed/blocked/private/
 // SSRF-blocked is a HARD failure; an unmodeled (heuristic) candidate is a
 // conservative finding but a private/metadata IP literal is always a hard block.
-func (p Profile) inspectDestinations(ctx context.Context, in RequestInput, now time.Time, res *Result) (bool, mcperr.Reason) {
+func (p Profile) inspectDestinations(ctx context.Context, in RequestInput, now time.Time, res *Result) (hardFail bool, hardReason mcperr.Reason) {
 	cands, err := p.extraction.Extract(in.Args, p.lim)
 	if err != nil {
 		return true, mcperr.ReasonInspectionLimitExceeded
@@ -244,7 +244,7 @@ func (p Profile) inspectDestinations(ctx context.Context, in RequestInput, now t
 
 // inspectOneDestination canonicalizes one candidate and, when a resolver is
 // present, resolves + pins it. Returns (hardFail, reason, class).
-func (p Profile) inspectOneDestination(ctx context.Context, cand destination.Candidate, now time.Time, res *Result) (bool, mcperr.Reason, destination.Class) {
+func (p Profile) inspectOneDestination(ctx context.Context, cand destination.Candidate, now time.Time, res *Result) (hardFail bool, hardReason mcperr.Reason, destClass destination.Class) {
 	c, class, err := destination.Canonicalize(cand.RawURL, p.destPolicy, p.lim)
 	if err != nil {
 		if cand.Modeled {

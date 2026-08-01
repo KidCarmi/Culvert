@@ -89,7 +89,7 @@ func (vs *valueState) checkTypeEnumConst(cn *compiledNode, v *canonical.Node, pa
 	return StatusValid, "", "", false
 }
 
-func (vs *valueState) checkAnyOf(cn *compiledNode, v *canonical.Node, path string) (Status, string, string, bool) {
+func (vs *valueState) checkAnyOf(cn *compiledNode, v *canonical.Node, path string) (status Status, failPath string, detail string, done bool) {
 	for _, sub := range cn.anyOf {
 		st, _, _ := vs.validate(sub, v, path)
 		if st == StatusValid {
@@ -102,7 +102,7 @@ func (vs *valueState) checkAnyOf(cn *compiledNode, v *canonical.Node, path strin
 	return StatusInvalid, path, "no anyOf branch matched", true
 }
 
-func (vs *valueState) validateObject(cn *compiledNode, v *canonical.Node, path string) (Status, string, string) {
+func (vs *valueState) validateObject(cn *compiledNode, v *canonical.Node, path string) (status Status, failPath string, detail string) {
 	// required members present
 	for _, req := range cn.required {
 		if !vs.tick() {
@@ -133,7 +133,7 @@ func (vs *valueState) validateObject(cn *compiledNode, v *canonical.Node, path s
 	return StatusValid, "", ""
 }
 
-func (vs *valueState) checkAdditional(cn *compiledNode, k string, child *canonical.Node, path string) (Status, string, string, bool) {
+func (vs *valueState) checkAdditional(cn *compiledNode, k string, child *canonical.Node, path string) (status Status, failPath string, detail string, done bool) {
 	if cn.addlIsBool {
 		if !cn.addlBool {
 			return StatusInvalid, join(path, k), "additional property not allowed", true
@@ -147,7 +147,7 @@ func (vs *valueState) checkAdditional(cn *compiledNode, k string, child *canonic
 	return StatusValid, "", "", false
 }
 
-func (vs *valueState) validateArray(cn *compiledNode, v *canonical.Node, path string) (Status, string, string) {
+func (vs *valueState) validateArray(cn *compiledNode, v *canonical.Node, path string) (status Status, failPath string, detail string) {
 	if cn.minItems != nil && int64(len(v.Arr)) < *cn.minItems {
 		return StatusInvalid, path, "too few items"
 	}
@@ -173,7 +173,7 @@ func (vs *valueState) validateArray(cn *compiledNode, v *canonical.Node, path st
 	return vs.validateItems(cn, v, path)
 }
 
-func (vs *valueState) validateItems(cn *compiledNode, v *canonical.Node, path string) (Status, string, string) {
+func (vs *valueState) validateItems(cn *compiledNode, v *canonical.Node, path string) (status Status, failPath string, detail string) {
 	for i, e := range v.Arr {
 		if !vs.tick() {
 			return StatusLimitExceeded, joinIdx(path, i), "validation operations"
@@ -194,7 +194,7 @@ func (vs *valueState) validateItems(cn *compiledNode, v *canonical.Node, path st
 	return StatusValid, "", ""
 }
 
-func (vs *valueState) validateString(cn *compiledNode, v *canonical.Node, path string) (Status, string, string) {
+func (vs *valueState) validateString(cn *compiledNode, v *canonical.Node, path string) (status Status, failPath string, detail string) {
 	rc := int64(utf8.RuneCountInString(v.Str))
 	if cn.minLength != nil && rc < *cn.minLength {
 		return StatusInvalid, path, "string shorter than minLength"
@@ -208,7 +208,7 @@ func (vs *valueState) validateString(cn *compiledNode, v *canonical.Node, path s
 	return StatusValid, "", ""
 }
 
-func (vs *valueState) validateNumber(cn *compiledNode, v *canonical.Node, path string) (Status, string, string) {
+func (vs *valueState) validateNumber(cn *compiledNode, v *canonical.Node, path string) (status Status, failPath string, detail string) {
 	if cn.minimum != "" {
 		if cmp, ok := canonical.NumCmp(v.Num, cn.minimum); !ok || cmp < 0 {
 			return StatusInvalid, path, "below minimum"
