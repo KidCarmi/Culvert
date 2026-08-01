@@ -399,7 +399,15 @@ jobs:
             # -A: an unidentified curl UA is indistinguishable from bot traffic to
             # a CDN/WAF fronting the catalog origin and gets 403'd (same class of
             # issue fixed for the Go client in release_catalog_http.go).
-            GOT="$(curl -fsS -A "$CATALOG_UA" -H 'Cache-Control: no-cache' "$R2_PUBLIC_BASE/release-catalog/index.json" | sha256sum | awk '{print $1}')" || GOT=""
+            #
+            # NO `Cache-Control: no-cache` request header: Cloudflare IGNORES it
+            # for edge bypass (the purge_cache call above is the real cache-bust,
+            # and the bounded retry rides out edge eventual-consistency), while the
+            # WAF on this orange-clouded zone treats the header as a scraper signal
+            # and 403s the request BEFORE the object is served — so it does nothing
+            # useful and actively breaks the confirm. Match the known-good Go client
+            # request shape (UA only); see release_catalog_http.go.
+            GOT="$(curl -fsS -A "$CATALOG_UA" "$R2_PUBLIC_BASE/release-catalog/index.json" | sha256sum | awk '{print $1}')" || GOT=""
             if [ "$GOT" = "$WANT" ]; then echo "live index confirmed ($WANT)"; exit 0; fi
             echo "confirm attempt $i: got '$GOT' want '$WANT' — retrying"; sleep $((i*i))
           done
