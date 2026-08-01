@@ -23,8 +23,9 @@ outer_envelope.json bytes
 ## Algorithm: raw libsodium `crypto_box_seal`
 
 `algorithm = "x25519-sealbox"` is libsodium `crypto_box_seal`: a **raw** anonymous
-X25519 sealed box (`nacl/box.SealAnonymous` — ephemeral public key ‖ ciphertext ‖
-Poly1305 tag, 48-byte overhead), with **no `CVRTSB01` magic or version prefix**. The
+X25519 sealed box (`nacl/box.SealAnonymous` — 32-byte ephemeral public key ‖ 16-byte
+Poly1305 tag ‖ encrypted plaintext, 48-byte overhead), with **no `CVRTSB01` magic or
+version prefix**. The
 `CVRTSB01`-framed `internal/sealbox` envelope is the separate M4 support-bundle
 export; telemetry uses the raw box, which the merged TAC consumer opens directly
 with `box.OpenAnonymous`. Reconciled in roadmap §3.2 in this same change.

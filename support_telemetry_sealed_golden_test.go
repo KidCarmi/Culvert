@@ -15,8 +15,10 @@ package main
 //
 // The telemetry `algorithm` label "x25519-sealbox" is libsodium `crypto_box_seal`:
 // a RAW anonymous sealed box (golang.org/x/crypto/nacl/box.SealAnonymous —
-// ephemeral X25519 public key ‖ ciphertext ‖ Poly1305 tag, 48-byte overhead), with
-// NO `CVRTSB01` magic or version prefix. internal/sealbox.Seal is a DIFFERENT
+// 32-byte ephemeral X25519 public key ‖ 16-byte Poly1305 tag ‖ encrypted plaintext,
+// 48-byte overhead), with NO `CVRTSB01` magic or version prefix. (SealAnonymous
+// prepends the ephemeral public key and then delegates to secretbox, whose output
+// is the tag followed by the ciphertext.) internal/sealbox.Seal is a DIFFERENT
 // artifact: it frames the same primitive with a `CVRTSB01`+version header for the
 // M4 support-bundle export. The merged TAC consumer (FileRecipientKeyProvider,
 // M7 2.5-C1) opens the ciphertext directly with box.OpenAnonymous, so the telemetry
@@ -46,14 +48,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"go/ast"
 	"go/parser"
 	"go/token"
 	"io"
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"testing"
 
@@ -637,170 +637,212 @@ func TestSealedGoldenDeterministicReaderRejectsOverRead(t *testing.T) {
 
 // ─── 5. Mutation-positive controls (each proves the relevant check FIRES) ────────
 
-func TestSealedGoldenMutationControls(t *testing.T) {
-	inner := readInnerFixture(t)
-	pub := sealedFixtureRecipientPub(t)
+// mutControlEnv is the shared setup each mutation control recomputes. Extracting
+// the subtest bodies into named package-level helpers (rather than nested closures)
+// keeps TestSealedGoldenMutationControls' cognitive complexity low.
+type mutControlEnv struct {
+	inner     []byte
+	pub       [32]byte
+	base      []byte
+	baseOuter []byte
+}
+
+func mutControlSetup(t *testing.T) mutControlEnv {
+	t.Helper()
 	base := regenerateCiphertext(t)
-	baseOuter := buildOuterEnvelope(base)
-
-	seal := func(in []byte, p *[32]byte, entropy []byte) []byte {
-		rd := &exactEntropyReader{data: entropy}
-		ct, err := sealTelemetryRaw(in, p, rd)
-		if err != nil {
-			t.Fatalf("seal: %v", err)
-		}
-		return ct
+	return mutControlEnv{
+		inner:     readInnerFixture(t),
+		pub:       sealedFixtureRecipientPub(t),
+		base:      base,
+		baseOuter: buildOuterEnvelope(base),
 	}
+}
 
-	t.Run("changed inner byte", func(t *testing.T) {
-		mut := append([]byte(nil), inner...)
-		mut[10] ^= 0x01
-		if bytes.Equal(seal(mut, &pub, sealedFixtureEphemeralEntropy()), base) {
-			t.Error("a changed inner byte produced the same ciphertext")
+func sealWithEntropy(t *testing.T, in []byte, p *[32]byte, entropy []byte) []byte {
+	t.Helper()
+	rd := &exactEntropyReader{data: entropy}
+	ct, err := sealTelemetryRaw(in, p, rd)
+	if err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+	return ct
+}
+
+func TestSealedGoldenMutationControls(t *testing.T) {
+	t.Run("changed inner byte", mutControlChangedInnerByte)
+	t.Run("changed public key", mutControlChangedPublicKey)
+	t.Run("changed deterministic entropy", mutControlChangedEntropy)
+	t.Run("changed ciphertext fails digest and open", mutControlChangedCiphertext)
+	t.Run("changed outer member order", mutControlChangedMemberOrder)
+	t.Run("added outer member", mutControlAddedMember)
+	t.Run("trailing newline", mutControlTrailingNewline)
+	t.Run("wrong digest is bound to the ciphertext", mutControlWrongDigest)
+	t.Run("wrong registry hash breaks binding", mutControlWrongRegistryHash)
+}
+
+func mutControlChangedInnerByte(t *testing.T) {
+	e := mutControlSetup(t)
+	mut := append([]byte(nil), e.inner...)
+	mut[10] ^= 0x01
+	if bytes.Equal(sealWithEntropy(t, mut, &e.pub, sealedFixtureEphemeralEntropy()), e.base) {
+		t.Error("a changed inner byte produced the same ciphertext")
+	}
+}
+
+func mutControlChangedPublicKey(t *testing.T) {
+	e := mutControlSetup(t)
+	other := e.pub
+	other[0] ^= 0x01
+	// May be low-order-rejected (also a valid failure); only a MATCH is wrong.
+	rd := &exactEntropyReader{data: sealedFixtureEphemeralEntropy()}
+	ct, err := sealTelemetryRaw(e.inner, &other, rd)
+	if err == nil && bytes.Equal(ct, e.base) {
+		t.Error("a changed public key produced the same ciphertext")
+	}
+}
+
+func mutControlChangedEntropy(t *testing.T) {
+	e := mutControlSetup(t)
+	ent := sealedFixtureEphemeralEntropy()
+	// Flip a MIDDLE byte: X25519 clamps the ephemeral scalar (clears the low 3
+	// bits of byte 0 and the top bits of byte 31), so a change there could be
+	// erased; a middle byte is preserved, guaranteeing a different ephemeral key.
+	ent[15] ^= 0x01
+	if bytes.Equal(sealWithEntropy(t, e.inner, &e.pub, ent), e.base) {
+		t.Error("changed ephemeral entropy produced the same ciphertext")
+	}
+}
+
+func mutControlChangedCiphertext(t *testing.T) {
+	e := mutControlSetup(t)
+	mut := append([]byte(nil), e.base...)
+	mut[len(mut)-1] ^= 0x01
+	if hexSHA256(mut) == sealedFixtureCiphertextSHA256 {
+		t.Error("a changed ciphertext still matched the recorded digest")
+	}
+	priv := sealedFixtureRecipientScalar()
+	if _, ok := box.OpenAnonymous(nil, mut, &e.pub, &priv); ok {
+		t.Error("a bit-flipped ciphertext still opened")
+	}
+}
+
+func mutControlChangedMemberOrder(t *testing.T) {
+	e := mutControlSetup(t)
+	// Re-serialize the SAME eight real values in a DIFFERENT key order and require
+	// the bytes to differ from the canonical builder output. This proves the
+	// byte-exact wall is order-sensitive (not merely value-sensitive): the mutant
+	// carries the identical values, so any inequality is driven by member order.
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(e.baseOuter, &m); err != nil {
+		t.Fatalf("unmarshal baseOuter: %v", err)
+	}
+	order := []string{
+		"registry_hash", "schema_version", "sample_id", "ciphertext_sha256",
+		"ciphertext", "algorithm", "key_id", "envelope_version",
+	}
+	var buf bytes.Buffer
+	buf.WriteByte('{')
+	for i, k := range order {
+		raw, ok := m[k]
+		if !ok {
+			t.Fatalf("baseOuter is missing expected member %q", k)
 		}
-	})
-	t.Run("changed public key", func(t *testing.T) {
-		other := pub
-		other[0] ^= 0x01
-		// May be low-order-rejected (also a valid failure); only a MATCH is wrong.
-		rd := &exactEntropyReader{data: sealedFixtureEphemeralEntropy()}
-		ct, err := sealTelemetryRaw(inner, &other, rd)
-		if err == nil && bytes.Equal(ct, base) {
-			t.Error("a changed public key produced the same ciphertext")
+		if i > 0 {
+			buf.WriteByte(',')
 		}
-	})
-	t.Run("changed deterministic entropy", func(t *testing.T) {
-		ent := sealedFixtureEphemeralEntropy()
-		// Flip a MIDDLE byte: X25519 clamps the ephemeral scalar (clears the low 3
-		// bits of byte 0 and the top bits of byte 31), so a change there could be
-		// erased; a middle byte is preserved, guaranteeing a different ephemeral key.
-		ent[15] ^= 0x01
-		if bytes.Equal(seal(inner, &pub, ent), base) {
-			t.Error("changed ephemeral entropy produced the same ciphertext")
-		}
-	})
-	t.Run("changed ciphertext fails digest and open", func(t *testing.T) {
-		mut := append([]byte(nil), base...)
-		mut[len(mut)-1] ^= 0x01
-		if hexSHA256(mut) == sealedFixtureCiphertextSHA256 {
-			t.Error("a changed ciphertext still matched the recorded digest")
-		}
-		priv := sealedFixtureRecipientScalar()
-		if _, ok := box.OpenAnonymous(nil, mut, &pub, &priv); ok {
-			t.Error("a bit-flipped ciphertext still opened")
-		}
-	})
-	t.Run("changed outer member order", func(t *testing.T) {
-		// Re-serialize the SAME eight real values in a DIFFERENT key order and
-		// require the bytes to differ from the canonical builder output. This
-		// proves the byte-exact wall is order-sensitive (not merely value-
-		// sensitive): the mutant carries the identical values, so any inequality
-		// is driven by member order alone.
-		var m map[string]json.RawMessage
-		if err := json.Unmarshal(baseOuter, &m); err != nil {
-			t.Fatalf("unmarshal baseOuter: %v", err)
-		}
-		order := []string{
-			"registry_hash", "schema_version", "sample_id", "ciphertext_sha256",
-			"ciphertext", "algorithm", "key_id", "envelope_version",
-		}
-		var buf bytes.Buffer
-		buf.WriteByte('{')
-		for i, k := range order {
-			raw, ok := m[k]
-			if !ok {
-				t.Fatalf("baseOuter is missing expected member %q", k)
-			}
-			if i > 0 {
-				buf.WriteByte(',')
-			}
-			kb, _ := json.Marshal(k)
-			buf.Write(kb)
-			buf.WriteByte(':')
-			buf.Write(raw)
-		}
-		buf.WriteByte('}')
-		reordered := buf.Bytes()
-		// Same members and values as the canonical bytes...
-		if len(outerMemberViolations(reordered)) != 0 {
-			t.Fatalf("reordered envelope changed the member set: %v", outerMemberViolations(reordered))
-		}
-		// ...yet byte-different, because only the key order changed.
-		if bytes.Equal(reordered, baseOuter) {
-			t.Error("a reordered outer envelope with identical values matched the canonical bytes — the byte-exact wall is not order-sensitive")
-		}
-	})
-	t.Run("added outer member", func(t *testing.T) {
-		// The unmutated bytes pass the closed-set validator...
-		if v := outerMemberViolations(baseOuter); len(v) != 0 {
-			t.Fatalf("baseline envelope unexpectedly violates the closed set: %v", v)
-		}
-		// ...and adding a ninth member makes the SAME validator fire.
-		var m map[string]json.RawMessage
-		if err := json.Unmarshal(baseOuter, &m); err != nil {
-			t.Fatalf("unmarshal baseOuter: %v", err)
-		}
-		m["ninth"] = json.RawMessage(`1`)
-		mb, err := json.Marshal(m)
-		if err != nil {
-			t.Fatalf("marshal mutated envelope: %v", err)
-		}
-		if v := outerMemberViolations(mb); len(v) == 0 {
-			t.Error("a nine-member envelope passed the closed-set validator")
-		}
-	})
-	t.Run("trailing newline", func(t *testing.T) {
-		// The canonical builder never emits a trailing newline, so a byte-exact
-		// comparison against a freshly rebuilt envelope (the real wall in
-		// TestSealedGoldenOuterEnvelopeIsByteExact) must reject an appended '\n'.
-		withNL := append(append([]byte(nil), baseOuter...), '\n')
-		if bytes.Equal(withNL, buildOuterEnvelope(base)) {
-			t.Error("a trailing-newline envelope matched the canonical builder output")
-		}
-	})
-	t.Run("wrong digest is bound to the ciphertext", func(t *testing.T) {
-		// Mutating the ciphertext must change the derived ciphertext_sha256 the
-		// builder records (proving the digest binds to the ciphertext), and the
-		// recorded digest must verify against its own ciphertext.
-		mut := append([]byte(nil), base...)
-		mut[0] ^= 0x01
-		var mutated, canonical sealedOuterEnvelope
-		if err := json.Unmarshal(buildOuterEnvelope(mut), &mutated); err != nil {
-			t.Fatalf("unmarshal mutated: %v", err)
-		}
-		if err := json.Unmarshal(baseOuter, &canonical); err != nil {
-			t.Fatalf("unmarshal canonical: %v", err)
-		}
-		if mutated.CiphertextSHA256 == canonical.CiphertextSHA256 {
-			t.Error("mutating the ciphertext did not change ciphertext_sha256 — the digest is not bound to the ciphertext")
-		}
-		ct, err := base64.StdEncoding.DecodeString(mutated.Ciphertext)
-		if err != nil {
-			t.Fatalf("decode mutated ciphertext: %v", err)
-		}
-		if hexSHA256(ct) != mutated.CiphertextSHA256 {
-			t.Error("ciphertext_sha256 does not verify against its own ciphertext")
-		}
-	})
-	t.Run("wrong registry hash breaks binding", func(t *testing.T) {
-		// Establish that the real values bind (the wall's precondition)...
-		env := decodeCommittedOuter(t)
-		var inner struct {
-			RegistryHash string `json:"registry_hash"`
-		}
-		if err := json.Unmarshal(readInnerFixture(t), &inner); err != nil {
-			t.Fatalf("unmarshal inner: %v", err)
-		}
-		if env.RegistryHash != inner.RegistryHash {
-			t.Fatalf("precondition failed: committed outer/inner registry_hash already differ (%q vs %q)", env.RegistryHash, inner.RegistryHash)
-		}
-		// ...then show a mutated outer value breaks the equality the binding wall
-		// (TestSealedGoldenOuterInnerBinding) enforces.
-		mutated := strings.Repeat("a", 64)
-		if mutated == inner.RegistryHash {
-			t.Error("a mutated registry_hash still equals the inner value — the binding wall would not fire")
-		}
-	})
+		kb, _ := json.Marshal(k)
+		buf.Write(kb)
+		buf.WriteByte(':')
+		buf.Write(raw)
+	}
+	buf.WriteByte('}')
+	reordered := buf.Bytes()
+	// Same members and values as the canonical bytes...
+	if v := outerMemberViolations(reordered); len(v) != 0 {
+		t.Fatalf("reordered envelope changed the member set: %v", v)
+	}
+	// ...yet byte-different, because only the key order changed.
+	if bytes.Equal(reordered, e.baseOuter) {
+		t.Error("a reordered outer envelope with identical values matched the canonical bytes — the byte-exact wall is not order-sensitive")
+	}
+}
+
+func mutControlAddedMember(t *testing.T) {
+	e := mutControlSetup(t)
+	// The unmutated bytes pass the closed-set validator...
+	if v := outerMemberViolations(e.baseOuter); len(v) != 0 {
+		t.Fatalf("baseline envelope unexpectedly violates the closed set: %v", v)
+	}
+	// ...and adding a ninth member makes the SAME validator fire.
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(e.baseOuter, &m); err != nil {
+		t.Fatalf("unmarshal baseOuter: %v", err)
+	}
+	m["ninth"] = json.RawMessage(`1`)
+	mb, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal mutated envelope: %v", err)
+	}
+	if v := outerMemberViolations(mb); len(v) == 0 {
+		t.Error("a nine-member envelope passed the closed-set validator")
+	}
+}
+
+func mutControlTrailingNewline(t *testing.T) {
+	e := mutControlSetup(t)
+	// The canonical builder never emits a trailing newline, so a byte-exact
+	// comparison against a freshly rebuilt envelope (the real wall in
+	// TestSealedGoldenOuterEnvelopeIsByteExact) must reject an appended '\n'.
+	withNL := append(append([]byte(nil), e.baseOuter...), '\n')
+	if bytes.Equal(withNL, buildOuterEnvelope(e.base)) {
+		t.Error("a trailing-newline envelope matched the canonical builder output")
+	}
+}
+
+func mutControlWrongDigest(t *testing.T) {
+	e := mutControlSetup(t)
+	// Mutating the ciphertext must change the derived ciphertext_sha256 the builder
+	// records (proving the digest binds to the ciphertext), and the recorded digest
+	// must verify against its own ciphertext.
+	mut := append([]byte(nil), e.base...)
+	mut[0] ^= 0x01
+	var mutated, canonical sealedOuterEnvelope
+	if err := json.Unmarshal(buildOuterEnvelope(mut), &mutated); err != nil {
+		t.Fatalf("unmarshal mutated: %v", err)
+	}
+	if err := json.Unmarshal(e.baseOuter, &canonical); err != nil {
+		t.Fatalf("unmarshal canonical: %v", err)
+	}
+	if mutated.CiphertextSHA256 == canonical.CiphertextSHA256 {
+		t.Error("mutating the ciphertext did not change ciphertext_sha256 — the digest is not bound to the ciphertext")
+	}
+	ct, err := base64.StdEncoding.DecodeString(mutated.Ciphertext)
+	if err != nil {
+		t.Fatalf("decode mutated ciphertext: %v", err)
+	}
+	if hexSHA256(ct) != mutated.CiphertextSHA256 {
+		t.Error("ciphertext_sha256 does not verify against its own ciphertext")
+	}
+}
+
+func mutControlWrongRegistryHash(t *testing.T) {
+	// Establish that the real values bind (the wall's precondition)...
+	env := decodeCommittedOuter(t)
+	var inner struct {
+		RegistryHash string `json:"registry_hash"`
+	}
+	if err := json.Unmarshal(readInnerFixture(t), &inner); err != nil {
+		t.Fatalf("unmarshal inner: %v", err)
+	}
+	if env.RegistryHash != inner.RegistryHash {
+		t.Fatalf("precondition failed: committed outer/inner registry_hash already differ (%q vs %q)", env.RegistryHash, inner.RegistryHash)
+	}
+	// ...then show a mutated outer value breaks the equality the binding wall
+	// (TestSealedGoldenOuterInnerBinding) enforces.
+	mutated := strings.Repeat("a", 64)
+	if mutated == inner.RegistryHash {
+		t.Error("a mutated registry_hash still equals the inner value — the binding wall would not fire")
+	}
 }
 
 // ─── 6. Manifest + README are consistent metadata ───────────────────────────────
@@ -868,29 +910,6 @@ func TestSealedGoldenREADMEIsPresentAndMarked(t *testing.T) {
 
 // ─── 7. Test-key confinement + no-egress walls ───────────────────────────────────
 
-// productionGoSources returns the package-main production .go files (non-test),
-// excluding this file's own test surface.
-func sealedProductionGoFiles(t *testing.T) []string {
-	t.Helper()
-	entries, err := os.ReadDir(pkgSourceDir())
-	if err != nil {
-		t.Fatalf("read pkg dir: %v", err)
-	}
-	var out []string
-	for _, e := range entries {
-		n := e.Name()
-		if e.IsDir() || !strings.HasSuffix(n, ".go") || strings.HasSuffix(n, "_test.go") {
-			continue
-		}
-		out = append(out, filepath.Join(pkgSourceDir(), n))
-	}
-	if len(out) == 0 {
-		t.Fatal("no production .go files found — the confinement wall would be vacuous")
-	}
-	sort.Strings(out)
-	return out
-}
-
 // TestSealedGoldenTestKeyIsConfinedToTestData — no PRODUCTION source (package main
 // non-test files, and every non-test .go under internal/) references the test
 // key_id or the sealed artifact directory. The fixture key material lives only in
@@ -898,12 +917,14 @@ func sealedProductionGoFiles(t *testing.T) []string {
 func TestSealedGoldenTestKeyIsConfinedToTestData(t *testing.T) {
 	markers := []string{sealedFixtureKeyID, "recipient_private_key.bin", "telemetry/v1/sealed"}
 	checked := 0
-	err := filepath.WalkDir(pkgSourceDir(), func(path string, d os.DirEntry, err error) error {
+	// filepath.Walk uses Lstat internally and never follows symlinks (matches the
+	// repo's existing walk convention and avoids the gosec G122 WalkDir warning).
+	err := filepath.Walk(pkgSourceDir(), func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() {
-			base := d.Name()
+		if info.IsDir() {
+			base := info.Name()
 			if base == "testdata" || base == ".git" || base == "node_modules" {
 				return filepath.SkipDir
 			}
@@ -913,7 +934,7 @@ func TestSealedGoldenTestKeyIsConfinedToTestData(t *testing.T) {
 			return nil
 		}
 		checked++
-		b, rerr := os.ReadFile(path)
+		b, rerr := os.ReadFile(path) // #nosec G304 -- trusted in-repo source path from filepath.Walk
 		if rerr != nil {
 			return rerr
 		}
@@ -972,7 +993,6 @@ func TestSealedGoldenNoEgress(t *testing.T) {
 			t.Errorf("the C3 sealed-vector test imports %q — C3 adds a golden vector, not egress (Slice 3 is blocked)", p)
 		}
 	}
-	_ = ast.Inspect // keep go/ast referenced for the confinement helpers above
 }
 
 // TestSealedGoldenKeyIDHasNoProductionIdentity — the test key_id carries no "prod",
@@ -1030,7 +1050,7 @@ func TestSealedGoldenRegenerate(t *testing.T) {
 		sealedManifestFile:      manifest,
 	}
 	for name, b := range writes {
-		if err := os.WriteFile(filepath.Join(dir, name), b, 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, name), b, 0o600); err != nil {
 			t.Fatalf("write %s: %v", name, err)
 		}
 	}
