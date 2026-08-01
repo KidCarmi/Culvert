@@ -25,7 +25,6 @@ package main
 
 import (
 	"context"
-	"strings"
 	"time"
 )
 
@@ -84,11 +83,13 @@ func startSignedFeedLifecycle(feedDir string, ctx context.Context) {
 		sched.Wake()
 	}
 
-	// authority derives from user-settable config (via resolveAuthority), so inline
-	// strings.ReplaceAll at the call site so CodeQL sees the sanitiser (CWE-117); recovery
-	// class comes from offline record recovery (not user input) and enabled is a bool.
-	logger.Printf("SaaSFeed: signed-feed lifecycle armed (authority=%s enabled=%v recovery=%s)",
-		strings.ReplaceAll(res.Authority.String(), "\n", ""), res.Config.runtimeEnabled(), recRes.Class)
+	// Log only non-string, non-injectable values (a bool + integer enum codes) so no
+	// config-derived string ever reaches the log sink (CWE-117 — CodeQL kept tainting the
+	// %s enum strings through resolveAuthority even when sanitised). The human-readable
+	// authority / recovery / state are all observable on /api/saas-feed/status, /metrics,
+	// and the latched alerts.
+	logger.Printf("SaaSFeed: signed-feed lifecycle armed (enabled=%v authority_code=%d recovery_code=%d)",
+		res.Config.runtimeEnabled(), int(res.Authority), int(recRes.Class))
 }
 
 // wakeSignedFeedScheduler requests an immediate refresh evaluation (a config change:
