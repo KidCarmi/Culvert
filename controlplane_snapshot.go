@@ -1062,8 +1062,8 @@ func applySnapshotSaaSFeed(snap ConfigSnapshot) {
 	if snap.CategoryOverrides != nil {
 		if err := globalCategoryOverrides.ReplaceAll(*snap.CategoryOverrides); err != nil {
 			logger.Printf("DataPlane: category overrides apply rejected: %v", err)
-		} else {
-			globalCategoryOverrides.Save()
+		} else if serr := globalCategoryOverrides.Save(); serr != nil {
+			logger.Printf("DataPlane: category overrides save: %v", serr)
 		}
 	}
 }

@@ -13,6 +13,7 @@ package main
 // API handlers.
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -411,7 +412,9 @@ func applyConfigBackup(b *configBackup) {
 	// never rejects. No downloader/live-view recompute here (F3b owns that).
 	if b.CategoryOverrides != nil {
 		if err := globalCategoryOverrides.ReplaceAll(*b.CategoryOverrides); err == nil {
-			globalCategoryOverrides.Save()
+			if serr := globalCategoryOverrides.Save(); serr != nil {
+				logger.Printf("Rollback: category overrides save: %v", serr)
+			}
 		}
 	}
 
@@ -642,27 +645,8 @@ func diffConfigs(a, b *configBackup) []configChange {
 		diffPACPools(a.PACPools, b.PACPools, &changes)
 	}
 
-	// SaaS feed config (F3a-2). Scalars diffed directly, but the whole block is
-	// gated on b.SaaSFeedProtocol != "" to mirror applyConfigBackup's gate: a
-	// pre-extension target snapshot (protocol absent) is skipped by apply, so the
-	// dry-run diff must not report phantom feed-config changes it would never make.
-	if b.SaaSFeedProtocol != "" {
-		if a.SaaSFeedManaged != b.SaaSFeedManaged {
-			cmp("saas_feed_managed", a.SaaSFeedManaged, b.SaaSFeedManaged)
-		}
-		if a.SaaSFeedEnabled != b.SaaSFeedEnabled {
-			cmp("saas_feed_enabled", a.SaaSFeedEnabled, b.SaaSFeedEnabled)
-		}
-		if a.SaaSFeedURL != b.SaaSFeedURL {
-			cmp("saas_feed_url", a.SaaSFeedURL, b.SaaSFeedURL)
-		}
-		if a.SaaSFeedProtocol != b.SaaSFeedProtocol {
-			cmp("saas_feed_protocol", a.SaaSFeedProtocol, b.SaaSFeedProtocol)
-		}
-		if a.SaaSFeedRefreshSeconds != b.SaaSFeedRefreshSeconds {
-			cmp("saas_feed_refresh_seconds", a.SaaSFeedRefreshSeconds, b.SaaSFeedRefreshSeconds)
-		}
-	}
+	// SaaS feed config (F3a-2).
+	diffSaaSFeedConfig(a, b, cmp)
 
 	// Category overrides (F3a-2). Nil-guarded on b to mirror applyConfigBackup: a
 	// nil target is a pre-extension/absent snapshot apply leaves untouched, so the
@@ -673,6 +657,31 @@ func diffConfigs(a, b *configBackup) []configChange {
 	}
 
 	return changes
+}
+
+// diffSaaSFeedConfig emits scalar diffs for the SaaS feed configuration. The whole
+// block is gated on b.SaaSFeedProtocol != "" to mirror applyConfigBackup's gate: a
+// pre-extension target snapshot (protocol absent) is skipped by apply, so the
+// dry-run diff must not report phantom feed-config changes it would never make.
+func diffSaaSFeedConfig(a, b *configBackup, cmp func(string, any, any)) {
+	if b.SaaSFeedProtocol == "" {
+		return
+	}
+	if a.SaaSFeedManaged != b.SaaSFeedManaged {
+		cmp("saas_feed_managed", a.SaaSFeedManaged, b.SaaSFeedManaged)
+	}
+	if a.SaaSFeedEnabled != b.SaaSFeedEnabled {
+		cmp("saas_feed_enabled", a.SaaSFeedEnabled, b.SaaSFeedEnabled)
+	}
+	if a.SaaSFeedURL != b.SaaSFeedURL {
+		cmp("saas_feed_url", a.SaaSFeedURL, b.SaaSFeedURL)
+	}
+	if a.SaaSFeedProtocol != b.SaaSFeedProtocol {
+		cmp("saas_feed_protocol", a.SaaSFeedProtocol, b.SaaSFeedProtocol)
+	}
+	if a.SaaSFeedRefreshSeconds != b.SaaSFeedRefreshSeconds {
+		cmp("saas_feed_refresh_seconds", a.SaaSFeedRefreshSeconds, b.SaaSFeedRefreshSeconds)
+	}
 }
 
 // diffCategoryOverrides reports whether the effective admin override set changed.
@@ -690,7 +699,7 @@ func diffCategoryOverrides(a, b *CategoryOverrides, changes *[]configChange) {
 	}
 	aj, _ := json.Marshal(av)
 	bj, _ := json.Marshal(bv)
-	if string(aj) != string(bj) {
+	if !bytes.Equal(aj, bj) {
 		*changes = append(*changes, configChange{Field: "category_overrides", From: av, To: bv})
 	}
 }

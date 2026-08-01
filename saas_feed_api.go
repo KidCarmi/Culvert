@@ -85,10 +85,12 @@ func importCategoryOverrides(b *configBackup, replaceMode bool) {
 		target = mergeCategoryOverrides(globalCategoryOverrides.Get(), incoming)
 	}
 	if err := globalCategoryOverrides.ReplaceAll(target); err != nil {
-		logger.Printf("ConfigImport: category overrides rejected: %v", err)
+		logger.Printf("ConfigImport: category overrides rejected: %q", sanitizeLog(err.Error()))
 		return
 	}
-	globalCategoryOverrides.Save()
+	if err := globalCategoryOverrides.Save(); err != nil {
+		logger.Printf("ConfigImport: category overrides save: %v", err)
+	}
 }
 
 // mergeCategoryOverrides unions incoming onto base (incoming wins on key

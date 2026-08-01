@@ -212,6 +212,10 @@ func TestF3a2_StaleEpochRejection(t *testing.T) {
 	f3a2ResetFeedDurable(t)
 	f3a2SwapOverrides(t)
 	// Ratchet the DP's last-seen epoch high, then push a stale-epoch snapshot.
+	// dpLastSeenEpoch is a PROCESS-GLOBAL ratchet — save/restore it so this test
+	// does not leak a high epoch into shuffled sibling tests (determinism gate).
+	origEpoch := dpLastSeenEpoch.Load()
+	t.Cleanup(func() { dpLastSeenEpoch.Store(origEpoch) })
 	dpObserveEpoch("test seed", 50)
 	before := getSaaSFeedDurable()
 	err := applyConfigSnapshot(ConfigSnapshot{
@@ -407,18 +411,18 @@ func TestF3a2_RollbackConfigRoundTrip(t *testing.T) {
 	setSaaSFeedDurable(saasFeedDurable{Managed: true, Enabled: false, URL: builtinSaaSFeedURL, Protocol: saasFeedProtocolV1, RefreshSeconds: 3600, SchemaVersion: saasStoreSchemaVersion})
 	_ = globalCategoryOverrides.ReplaceAll(CategoryOverrides{Added: map[string]string{"a.example.com": "social"}})
 
-	cap := captureConfigBackup()
-	if cap.SaaSFeedProtocol != saasFeedProtocolV1 || !cap.SaaSFeedManaged || cap.SaaSFeedEnabled {
-		t.Fatalf("capture wrong: %+v", cap)
+	capA := captureConfigBackup()
+	if capA.SaaSFeedProtocol != saasFeedProtocolV1 || !capA.SaaSFeedManaged || capA.SaaSFeedEnabled {
+		t.Fatalf("capture wrong: %+v", capA)
 	}
-	if cap.CategoryOverrides == nil || cap.CategoryOverrides.Added["a.example.com"] != "social" {
-		t.Fatalf("override capture wrong: %+v", cap.CategoryOverrides)
+	if capA.CategoryOverrides == nil || capA.CategoryOverrides.Added["a.example.com"] != "social" {
+		t.Fatalf("override capture wrong: %+v", capA.CategoryOverrides)
 	}
 
 	// Diverge, then roll back.
 	setSaaSFeedDurable(saasFeedDurable{Managed: false, Enabled: true, SchemaVersion: saasStoreSchemaVersion})
 	_ = globalCategoryOverrides.ReplaceAll(CategoryOverrides{Tombstones: []string{"z.example.com"}})
-	applyConfigBackup(cap)
+	applyConfigBackup(capA)
 
 	if d := getSaaSFeedDurable(); !d.Managed || d.Enabled || d.URL != builtinSaaSFeedURL {
 		t.Errorf("feed config not restored: %+v", d)
