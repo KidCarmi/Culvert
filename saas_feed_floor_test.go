@@ -252,6 +252,10 @@ func TestFloor_FieldValidation(t *testing.T) {
 		{"genid_slash", func(r *floorRecord) { r.GenerationID = "a/b" }, errFloorGenerationID},
 		{"genid_empty", func(r *floorRecord) { r.GenerationID = "" }, errFloorGenerationID},
 		{"genid_dotdot", func(r *floorRecord) { r.GenerationID = ".." }, errFloorGenerationID},
+		// Codex P2: a safe segment that is NOT the decimal feed_version is rejected —
+		// the generation dir must be generations/<feed_version>/.
+		{"genid_not_version", func(r *floorRecord) { r.GenerationID = "99" }, errFloorGenerationID},
+		{"genid_nondecimal", func(r *floorRecord) { r.GenerationID = "foo" }, errFloorGenerationID},
 		{"manifest_short", func(r *floorRecord) { r.ManifestSHA256 = "abc" }, errFloorDigest},
 		{"manifest_upper", func(r *floorRecord) { r.ManifestSHA256 = strings.ToUpper(floorHexA) }, errFloorDigest},
 		{"artifact_nonhex", func(r *floorRecord) { r.ArtifactSHA256 = strings.Repeat("g", 64) }, errFloorDigest},
@@ -276,7 +280,10 @@ func TestFloor_FieldValidation(t *testing.T) {
 // crc corruption: flip a bound field WITHOUT re-CRC ⇒ crc mismatch.
 func TestFloor_CRCMismatch(t *testing.T) {
 	rec := mkFloor(t, 42, floorTS0, "42", floorHexA, floorHexB)
-	rec.FeedVersion = 99 // crc now stale
+	// Flip a bound field (a digest) WITHOUT re-CRC ⇒ the crc is now stale. (Use a digest
+	// rather than feed_version so the record still passes the generation_id↔version
+	// binding and the failure is specifically the crc mismatch.)
+	rec.ManifestSHA256 = floorHexC
 	b, err := floorCanonicalBytes(rec)
 	if err != nil {
 		t.Fatalf("encode: %v", err)
@@ -453,8 +460,11 @@ func TestFloor_Recovery_DifferentVersions(t *testing.T) {
 // different generated_at is a benign interrupted re-sign — newer wins, the stale
 // replica is repaired — NOT critical equivocation.
 func TestFloor_Recovery_ReSignPartialIsNotEquivocation(t *testing.T) {
-	newer := mkFloor(t, 5, floorTS1, "5", floorHexA, floorHexB)
-	older := mkFloor(t, 5, floorTS0, "5", floorHexA, floorHexB) // same content, older gen
+	// A REAL re-sign changes generated_at, which is inside the signed payloads, so the
+	// digests change too. Different WATERMARK ⇒ ordered by maxPair (newer wins), NOT a
+	// same-watermark conflict — so this interrupted re-sign is a repair, not equivocation.
+	newer := mkFloor(t, 5, floorTS1, "5", floorHexC, floorHexD)
+	older := mkFloor(t, 5, floorTS0, "5", floorHexA, floorHexB)
 	fs := newFakeFS()
 	paths := floorPathsIn("/d")
 	fs.putRaw(paths.a, mustEncode(t, newer))
@@ -462,7 +472,7 @@ func TestFloor_Recovery_ReSignPartialIsNotEquivocation(t *testing.T) {
 
 	rec := recoverFloor(fs.seam(), paths, 1, 0)
 	if rec.Health == floorHealthEquivocation || rec.FailClosed {
-		t.Fatalf("same-content re-sign partial must NOT be equivocation: %+v", rec)
+		t.Fatalf("re-sign partial (changed digests) must NOT be equivocation: %+v", rec)
 	}
 	if rec.Health != floorHealthDegraded || !rec.RepairRequired {
 		t.Fatalf("re-sign partial ⇒ degraded + repair (rewrite stale replica): %+v", rec)
@@ -475,8 +485,8 @@ func TestFloor_Recovery_ReSignPartialIsNotEquivocation(t *testing.T) {
 // ─── 11 + 12. same-version identity equivocation ⇒ floor RETAINED ────────────────
 
 func TestFloor_Recovery_Equivocation(t *testing.T) {
-	a := mkFloor(t, 7, floorTS0, "7a", floorHexA, floorHexB)
-	b := mkFloor(t, 7, floorTS0, "7b", floorHexC, floorHexD) // same version, different identity
+	a := mkFloor(t, 7, floorTS0, "7", floorHexA, floorHexB)
+	b := mkFloor(t, 7, floorTS0, "7", floorHexC, floorHexD) // SAME watermark (v7,TS0), different digests
 	fs := newFakeFS()
 	paths := floorPathsIn("/d")
 	fs.putRaw(paths.a, mustEncode(t, a))
@@ -603,11 +613,12 @@ func TestFloor_Advance_IdempotentRetry(t *testing.T) {
 func TestFloor_Advance_SameVersionEquivocationRejected(t *testing.T) {
 	fs := newFakeFS()
 	s := newFakeStore(t, fs, 1)
-	if _, err := s.Advance(context.Background(), mkFloor(t, 5, floorTS0, "5a", floorHexA, floorHexB)); err != nil {
+	if _, err := s.Advance(context.Background(), mkFloor(t, 5, floorTS0, "5", floorHexA, floorHexB)); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	before, _ := fs.read(s.paths.a)
-	_, err := s.Advance(context.Background(), mkFloor(t, 5, floorTS0, "5b", floorHexC, floorHexD))
+	// SAME watermark (v5,TS0), different digests ⇒ unorderable content conflict.
+	_, err := s.Advance(context.Background(), mkFloor(t, 5, floorTS0, "5", floorHexC, floorHexD))
 	if !errors.Is(err, errFloorEquivocation) {
 		t.Fatalf("got %v want errFloorEquivocation", err)
 	}
@@ -629,10 +640,20 @@ func TestFloor_Advance_ReplayAndResign(t *testing.T) {
 	if !errors.Is(err, errFloorReplay) {
 		t.Fatalf("older gen_at: got %v want errFloorReplay", err)
 	}
-	// same version, NEWER generated_at ⇒ re-sign advance (accepted).
-	newerGen := mkFloor(t, 5, "2026-08-02T00:00:00Z", "5", floorHexA, floorHexB)
-	if _, err := s.Advance(context.Background(), newerGen); err != nil {
-		t.Fatalf("newer gen_at (re-sign) must be accepted: %v", err)
+	// same version, NEWER generated_at ⇒ re-sign advance (accepted) — with the CHANGED
+	// digests a real re-sign necessarily carries (generated_at is inside the signed
+	// payloads). This is the case Codex P1 flagged: it must NOT be treated as a conflict.
+	newerGen := mkFloor(t, 5, "2026-08-02T00:00:00Z", "5", floorHexC, floorHexD)
+	r, err := s.Advance(context.Background(), newerGen)
+	if err != nil {
+		t.Fatalf("newer gen_at re-sign (changed digests) must be accepted: %v", err)
+	}
+	if r.Outcome != floorAdvanceCommitted {
+		t.Fatalf("re-sign advance outcome=%s want committed", r.Outcome)
+	}
+	// Both records now bind the re-sign; recovery is healthy at the new watermark.
+	if got := s.Recover(0); got.Health != floorHealthy || !got.Floor.GeneratedAt.Equal(recordWatermark(newerGen).GeneratedAt) {
+		t.Fatalf("post-re-sign state wrong: %+v", got)
 	}
 }
 
@@ -823,8 +844,8 @@ func TestFloor_Advance_ConcurrentSameVersionConflict(t *testing.T) {
 	fs := newFakeFS()
 	s := newFakeStore(t, fs, 1)
 	cands := []floorRecord{
-		mkFloor(t, 5, floorTS0, "5a", floorHexA, floorHexB),
-		mkFloor(t, 5, floorTS0, "5b", floorHexC, floorHexD),
+		mkFloor(t, 5, floorTS0, "5", floorHexA, floorHexB),
+		mkFloor(t, 5, floorTS0, "5", floorHexC, floorHexD), // same watermark, different digests
 	}
 	var wg sync.WaitGroup
 	var mu sync.Mutex

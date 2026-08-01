@@ -35,6 +35,7 @@ import (
 	"hash/crc32"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -245,6 +246,13 @@ func validateFloorFields(rec floorRecord) error {
 	}
 	if !validGenerationID(rec.GenerationID) {
 		return fmt.Errorf("%w: %q", errFloorGenerationID, rec.GenerationID)
+	}
+	// The immutable generation directory is named by generation_id, which the on-disk
+	// schema DEFINES to be the decimal feed_version string (§B.3/§B.4). Enforce the
+	// binding so a valid record can never point recovery/GC at a noncanonical path
+	// (Codex P2): a candidate must reference generations/<feed_version>/, nothing else.
+	if rec.GenerationID != strconv.FormatInt(rec.FeedVersion, 10) {
+		return fmt.Errorf("%w: %q != feed_version %d", errFloorGenerationID, rec.GenerationID, rec.FeedVersion)
 	}
 	if !validSHA256Hex(rec.ManifestSHA256) {
 		return fmt.Errorf("%w: manifest", errFloorDigest)
@@ -478,12 +486,26 @@ type floorEquivocation struct {
 }
 
 func detectEquivocation(recs []floorRecord) *floorEquivocation {
-	byVer := map[int64][]floorRecord{}
+	// Group by the FULL watermark (feed_version + generated_at). Equivocation is an
+	// UNORDERABLE conflict: two records at the SAME watermark binding different content.
+	// Records at the same version but a DIFFERENT generated_at are ORDERED by maxPair
+	// (a newer re-sign wins; the older is a stale replica repaired at recovery) — NOT
+	// equivocation. This is what lets a legitimate same-version re-sign (which changes
+	// both digests because generated_at is inside the signed payloads,
+	// internal/urlcatfeed/schema.go:92,103) advance instead of being falsely flagged
+	// (Codex P1). A genuine conflict — same version AND same generated_at, different
+	// digests — cannot be ordered and IS equivocation.
+	type watermarkKey struct {
+		version int64
+		genAt   string // canonical string ⇒ exact equality
+	}
+	byWatermark := map[watermarkKey][]floorRecord{}
 	for i := range recs {
-		byVer[recs[i].FeedVersion] = append(byVer[recs[i].FeedVersion], recs[i])
+		k := watermarkKey{recs[i].FeedVersion, recs[i].GeneratedAt}
+		byWatermark[k] = append(byWatermark[k], recs[i])
 	}
 	var worst *floorEquivocation
-	for ver, group := range byVer {
+	for k, group := range byWatermark {
 		if len(group) < 2 {
 			continue
 		}
@@ -494,10 +516,9 @@ func detectEquivocation(recs []floorRecord) *floorEquivocation {
 				break
 			}
 		}
-		// Deterministic despite map iteration: keep the HIGHEST conflicting version
-		// (the one that could block the top candidate).
-		if conflict && (worst == nil || ver > worst.Version) {
-			worst = &floorEquivocation{Version: ver, Records: group}
+		// Deterministic despite map iteration: keep the HIGHEST conflicting version.
+		if conflict && (worst == nil || k.version > worst.Version) {
+			worst = &floorEquivocation{Version: k.version, Records: group}
 		}
 	}
 	return worst
@@ -822,34 +843,45 @@ func (s *floorStore) Advance(ctx context.Context, cand floorRecord) (floorQuorum
 	return floorQuorumResult{Outcome: outcome, Floor: candW}, nil
 }
 
-// checkAdvanceAllowed enforces the monotonic + equivocation + replay gate (step 2). It
-// returns idempotent=true when the candidate is an exact retry of the current floor
-// identity (same version + same generated_at). It rejects: a lower version (rollback),
-// a same-version different-identity candidate (equivocation), and a same-version
-// strictly-older generated_at (replay). A same-version newer generated_at (re-sign) and
-// a strictly-higher version both advance.
+// checkAdvanceAllowed enforces the monotonic + replay + equivocation gate (step 2)
+// against the current recoverable state. The candidate is ALREADY fully
+// signature-verified by the caller (§B.5 S0), so this gate arbitrates ORDERING and
+// conflict, not authenticity. It returns idempotent=true only for an exact retry (same
+// watermark as the current floor). Decisions:
+//   - candidate version < floor version           → rollback (reject)
+//   - candidate version > floor version           → advance
+//   - same version, older generated_at            → replay (reject)
+//   - same version, newer generated_at            → re-sign ADVANCE — permitted even
+//     though the digests differ (generated_at is inside the signed payloads, so every
+//     real re-sign changes them; Codex P1). The upstream signature verification is what
+//     makes this safe.
+//   - same version AND same generated_at, different content → equivocation (reject): an
+//     unorderable same-watermark conflict, never overwrite one arbitrarily.
+//   - same version AND same generated_at, same content       → idempotent retry.
 func (s *floorStore) checkAdvanceAllowed(cand floorRecord, candW, cur floorWatermark, curValid []floorRecord) (bool, error) {
 	if candW.Version < cur.Version {
 		return false, fmt.Errorf("%w: candidate v%d < floor v%d", errFloorRollback, candW.Version, cur.Version)
 	}
 	if candW.Version > cur.Version {
-		return false, nil // strictly higher — advance
+		return false, nil // strictly higher version — advance
 	}
-	// Same version as the current floor. Any valid record at this version binding
-	// DIFFERENT CONTENT is equivocation — refuse (never overwrite committed content at a
-	// version with different content). A same-content different-generated_at candidate is
-	// the re-sign/replay axis, handled by the generated_at comparison below.
-	for i := range curValid {
-		if curValid[i].FeedVersion == candW.Version && !sameFloorContent(curValid[i], cand) {
-			return false, fmt.Errorf("%w: v%d", errFloorEquivocation, candW.Version)
-		}
-	}
+	// Same version as the floor.
 	if candW.GeneratedAt.Before(cur.GeneratedAt) {
 		return false, fmt.Errorf("%w: v%d", errFloorReplay, candW.Version)
 	}
-	// Exact retry iff same (version, generated_at); a newer generated_at is a re-sign
-	// advance, still permitted, but not "idempotent".
-	return candW.GeneratedAt.Equal(cur.GeneratedAt), nil
+	// candidate generated_at >= floor generated_at. Only a record at the EXACT same
+	// watermark (version + generated_at) binding different content is equivocation; a
+	// strictly-newer generated_at is a re-sign advance whose changed digests are expected.
+	for i := range curValid {
+		if curValid[i].FeedVersion == candW.Version &&
+			recordWatermark(curValid[i]).GeneratedAt.Equal(candW.GeneratedAt) &&
+			!sameFloorContent(curValid[i], cand) {
+			return false, fmt.Errorf("%w: v%d", errFloorEquivocation, candW.Version)
+		}
+	}
+	// Exact retry iff same watermark as the current floor; a newer generated_at re-sign
+	// advances but is not "idempotent".
+	return candW.equal(cur), nil
 }
 
 // verifyReadBack re-reads a written record and asserts it decodes valid and binds the
