@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/KidCarmi/Culvert/internal/hostutil"
@@ -195,11 +196,17 @@ func TestTrafficRedaction_ConcurrentRotationNeverPanics(t *testing.T) {
 
 // ── Benchmarks ───────────────────────────────────────────────────────────────
 //
-// Baseline measured on this change's parent commit (Intel Xeon @2.80GHz, GOMAXPROCS=4):
+// Baseline measured on this change's parent commit, INTERLEAVED with the post-change
+// run in one sitting (Intel Xeon @2.80GHz, GOMAXPROCS=4, -count=6, medians). Interleaving
+// matters: this is a shared vCPU whose absolute ns/op drifts >2x between sittings, so
+// before/after figures taken minutes apart are not comparable. The allocation columns are
+// the machine-independent signal and the ones the benchgate below actually asserts on.
 //
-//	BenchmarkPseudonymizeHost           1742 ns/op   704 B/op   11 allocs/op
-//	BenchmarkRecordStats/posture_on     3375 ns/op  1344 B/op   20 allocs/op
-//	BenchmarkRecordStats/posture_off     101 ns/op     0 B/op    0 allocs/op
+//	                                    before                     after
+//	PseudonymizeHost           881 ns  672 B  10 allocs    264 ns  16 B  1 alloc
+//	PseudonymizeHostParallel   398 ns  672 B  10 allocs     77 ns  16 B  1 alloc
+//	RecordStats/posture_on    1890 ns 1344 B  20 allocs    386 ns  16 B  1 alloc
+//	RecordStats/posture_off    112 ns    0 B   0 allocs    112 ns   0 B  0 allocs
 
 func benchTrafficPostureOn(b *testing.B) {
 	b.Helper()
@@ -222,14 +229,22 @@ func BenchmarkPseudonymizeHost(b *testing.B) {
 // BenchmarkPseudonymizeHostParallel is the contention benchmark: the pool must scale
 // with cores rather than serialize. This is the shape production sees — many request
 // goroutines pseudonymizing concurrently.
+//
+// The sink is deliberately goroutine-LOCAL inside the timed loop, published once per
+// worker afterwards. A shared package-level sink would be both a data race under
+// `go test -race -bench` and — worse for a benchmark whose whole job is to measure
+// scaling — a shared cache line that every worker writes on every iteration, so it
+// would report the cost of false sharing rather than the cost of the pool.
 func BenchmarkPseudonymizeHostParallel(b *testing.B) {
 	benchTrafficPostureOn(b)
 	b.ReportAllocs()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
+		var local string
 		for pb.Next() {
-			benchTokenSink = pseudonymizeHost("cdn.example.com:443")
+			local = pseudonymizeHost("cdn.example.com:443")
 		}
+		benchTokenSinkParallel.Store(&local) // one synchronized publish per worker
 	})
 }
 
@@ -257,7 +272,13 @@ func BenchmarkRecordStats(b *testing.B) {
 	})
 }
 
-var benchTokenSink string
+// benchTokenSink keeps the serial benchmarks' results live so the compiler cannot
+// elide the call under test. benchTokenSinkParallel is its concurrency-safe counterpart
+// for RunParallel workers — see BenchmarkPseudonymizeHostParallel.
+var (
+	benchTokenSink         string
+	benchTokenSinkParallel atomic.Pointer[string]
+)
 
 // ── Benchgate ────────────────────────────────────────────────────────────────
 
