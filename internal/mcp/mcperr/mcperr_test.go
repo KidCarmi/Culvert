@@ -21,6 +21,18 @@ func TestReasonCodesStable(t *testing.T) {
 		ReasonDuplicateCompletion:  "duplicate_completion",
 		ReasonInvalidCancellation:  "invalid_cancellation",
 		ReasonLateCancellation:     "late_cancellation",
+
+		ReasonInvalidRegistration:    "invalid_registration",
+		ReasonUnregisteredServer:     "unregistered_server",
+		ReasonServerIdentityMismatch: "server_identity_mismatch",
+		ReasonMalformedDiscovery:     "malformed_discovery",
+		ReasonDuplicateTool:          "duplicate_tool",
+		ReasonCanonicalizationFailed: "canonicalization_failed",
+		ReasonCapacityExceeded:       "capacity_exceeded",
+		ReasonUnknownTool:            "unknown_tool",
+		ReasonPrivilegeExpansion:     "privilege_expansion",
+		ReasonSemanticDrift:          "semantic_drift",
+		ReasonStaleSnapshot:          "stale_snapshot",
 	}
 	for r, code := range want {
 		if r.Code() != code {

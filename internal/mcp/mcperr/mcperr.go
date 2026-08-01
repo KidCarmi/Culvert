@@ -66,6 +66,59 @@ const (
 	// completed. Tolerated per the spec — NOT a fault and NOT a duplicate
 	// completion; surfaced as a distinct reason so callers can no-op it.
 	ReasonLateCancellation
+
+	// --- PR-2 (registry & catalog) reasons ---------------------------------
+	// These extend the shared model for the server-registry and tool-catalog
+	// packages. They are appended (never reordered) so every PR-1 numeric value is
+	// unchanged. Byte/depth/element structural bounds keep using ReasonResourceLimit
+	// (shared with the decoder); ReasonCapacityExceeded is reserved for entity-count
+	// capacity (registered servers, tools, catalog entries).
+
+	// ReasonInvalidRegistration — a server registration that fails validation:
+	// empty/malformed id, malformed or non-canonical endpoint, missing pinned
+	// identity, a Gateway record placed in the wrong capability namespace, a
+	// duplicate id, or an already-registered canonical endpoint. Distinct from a
+	// live-identity MISMATCH (ReasonServerIdentityMismatch) and from ingestion of an
+	// UNREGISTERED server (ReasonUnregisteredServer).
+	ReasonInvalidRegistration
+	// ReasonUnregisteredServer — discovery/ingestion was attempted for a server id
+	// that is not present (and enabled) in the registry snapshot. An unregistered
+	// server is never eligible for tool ingestion.
+	ReasonUnregisteredServer
+	// ReasonServerIdentityMismatch — the caller-supplied verified identity does not
+	// exactly match the server's pinned identity. A server-level fault that disables
+	// the server; it can never be downgraded to tool-schema drift.
+	ReasonServerIdentityMismatch
+	// ReasonMalformedDiscovery — a tools/list discovery result that is structurally
+	// invalid against the supported V1 contract (bad top-level shape, missing/typed
+	// tool name, missing input schema, unknown envelope member) — distinct from raw
+	// JSON malformation (ReasonMalformedJSON).
+	ReasonMalformedDiscovery
+	// ReasonDuplicateTool — two tools with the same name in one server's discovery
+	// result. Never silently collapsed (no map/last-write-wins).
+	ReasonDuplicateTool
+	// ReasonCanonicalizationFailed — a value could not be canonicalized for hashing
+	// (invalid UTF-8, duplicate key, trailing data, over-bound) when the failure is
+	// not already a plain ReasonMalformedJSON at the byte layer.
+	ReasonCanonicalizationFailed
+	// ReasonCapacityExceeded — an entity-count capacity was exceeded (registered
+	// servers, tools-per-server, or total catalog entries). Distinct from the
+	// byte/structural ReasonResourceLimit.
+	ReasonCapacityExceeded
+	// ReasonUnknownTool — an observation for a (server,tool) with no prior catalog
+	// record. Classified as quarantine-required; PR-2 never converts it to allowed.
+	ReasonUnknownTool
+	// ReasonPrivilegeExpansion — an observation that broadens a tool's capability
+	// (proven, or conservatively-classified ambiguous security-relevant broadening).
+	// Classified as quarantine-required.
+	ReasonPrivilegeExpansion
+	// ReasonSemanticDrift — a behavioral/description change that is neither proven
+	// safe narrowing nor proven privilege expansion. Classified as review-required.
+	ReasonSemanticDrift
+	// ReasonStaleSnapshot — an optimistic publish whose base revision no longer
+	// matches the current snapshot (a concurrent publish won). The caller re-reads
+	// and retries; the current snapshot is left unchanged.
+	ReasonStaleSnapshot
 )
 
 // reasonCode maps each Reason to its stable machine string. The strings are part
@@ -83,6 +136,18 @@ var reasonCode = map[Reason]string{
 	ReasonDuplicateCompletion:  "duplicate_completion",
 	ReasonInvalidCancellation:  "invalid_cancellation",
 	ReasonLateCancellation:     "late_cancellation",
+
+	ReasonInvalidRegistration:    "invalid_registration",
+	ReasonUnregisteredServer:     "unregistered_server",
+	ReasonServerIdentityMismatch: "server_identity_mismatch",
+	ReasonMalformedDiscovery:     "malformed_discovery",
+	ReasonDuplicateTool:          "duplicate_tool",
+	ReasonCanonicalizationFailed: "canonicalization_failed",
+	ReasonCapacityExceeded:       "capacity_exceeded",
+	ReasonUnknownTool:            "unknown_tool",
+	ReasonPrivilegeExpansion:     "privilege_expansion",
+	ReasonSemanticDrift:          "semantic_drift",
+	ReasonStaleSnapshot:          "stale_snapshot",
 }
 
 // Code returns the stable machine string for the reason (e.g. "malformed_json").
