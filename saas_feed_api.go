@@ -210,8 +210,10 @@ func putSaaSFeedSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	auditEvent(r, "saasfeed.settings", boolState(next.Enabled), "saas feed configuration updated")
 	saveConfigVersion(sessionAdmin(r), "saasfeed.settings")
-	// Republish so the fleet converges (CP-authoritative). No fetch is armed —
-	// F3a-2 has no downloader; this only distributes configuration.
+	// F3b-4: a config change (esp. disabled→enabled or an interval change) requires the
+	// scheduler to re-evaluate now rather than at the next tick.
+	wakeSignedFeedScheduler()
+	// Republish so the fleet converges (CP-authoritative).
 	pubErr := publishCurrentConfigSnapshot()
 	resp := saasFeedSettingsView()
 	if pubErr != nil {
@@ -262,10 +264,11 @@ func saasFeedSettingsView() map[string]any {
 		// exact host the GUI constrains input to (no generic mirror).
 		"official_url": builtinSaaSFeedURL,
 		"editable":     !isManagedDataPlane(),
-		// Honest capability signal: configuration is stored but nothing fetches,
-		// verifies, activates, or serves it yet.
-		"runtime_activation_available": false,
-		"note":                         "configuration only — the signed-feed client (download/verify/activate) is not yet available",
+		// F3b-4: the signed-feed runtime (download/verify/activate/serve) is now wired.
+		// This endpoint stays CONFIG-only; the live runtime state (state/provenance/
+		// version/freshness/counts/activity) is on GET /api/saas-feed/status.
+		"runtime_activation_available": true,
+		"note":                         "configuration surface — the live runtime status is on /api/saas-feed/status",
 	}
 	if resolveErr == nil {
 		view["resolved"] = map[string]any{

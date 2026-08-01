@@ -2987,19 +2987,34 @@ Firefox (all platforms):
       </p>
       <div id="urlcat-feed-status" style="display:none;margin-bottom:16px;font-size:.78rem"></div>
 
-      <!-- SaaS Signed Category Feed (F3a-2) — configuration + admin overrides.
-           Configuration only: nothing here downloads, verifies, or activates a
-           feed. Runtime activation is unavailable until the signed-feed client
-           ships, and the panel says so honestly. -->
+      <!-- SaaS Signed Category Feed (F3b-4) — runtime status + configuration + admin
+           overrides. The RUNTIME STATE (top) is separate from the CONFIGURATION (form
+           below): the status panel reflects the live signed-feed engine (provenance,
+           trust, version, freshness, counts, activity, failure), and the config form
+           edits the CP/standalone-authoritative settings. Managed-DP nodes are
+           read-only for configuration. All dynamic values are rendered via textContent
+           (XSS-safe). UT1 and the SaaS feed are separate feeds and shown separately. -->
       <section class="panel" id="saasfeed-panel" style="margin-bottom:20px" aria-labelledby="saasfeed-title">
         <div class="panel-header">
           <span class="panel-title" id="saasfeed-title"><svg class="ico" aria-hidden="true"><use href="#i-shield"/></svg> SaaS Signed Category Feed</span>
           <span id="saasfeed-role-note" style="font-size:.72rem;color:var(--muted)"></span>
         </div>
         <div class="panel-body">
-          <div id="saasfeed-activation-banner" class="hint" role="status" style="margin-bottom:12px;padding:8px 10px;border-radius:6px;background:var(--surface2)">
-            <svg class="ico" aria-hidden="true"><use href="#i-shield-alert"/></svg>
-            Configuration only — the signed-feed client (download, verify, activate) is not yet available, so this feed is <strong>configured but not fetched, verified, active, or serving</strong>.
+          <!-- Runtime status (read-only for everyone; the live signed-feed engine state) -->
+          <div id="saasfeed-status" role="status" aria-live="polite" style="margin-bottom:14px;padding:10px 12px;border-radius:6px;background:var(--surface2)">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+              <div style="display:flex;align-items:center;gap:8px">
+                <span style="font-size:.72rem;color:var(--muted)">Runtime state</span>
+                <span id="saasfeed-state" class="badge" aria-label="signed feed state">—</span>
+                <span id="saasfeed-provenance" style="font-size:.72rem;color:var(--muted)"></span>
+              </div>
+              <div style="display:flex;align-items:center;gap:8px" data-min-role="admin">
+                <button type="button" class="btn sm" id="saasfeed-refresh-btn" data-min-role="admin" data-click="refreshSaaSFeed">Refresh now</button>
+                <span id="saasfeed-refresh-status" class="hint" role="status" aria-live="polite" style="font-size:.72rem"></span>
+              </div>
+            </div>
+            <div id="saasfeed-status-detail" style="margin-top:8px;display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:6px;font-size:.74rem"></div>
+            <div id="saasfeed-status-banner" class="hint" style="margin-top:8px;display:none"></div>
           </div>
           <div id="saasfeed-loading" class="hint" role="status">Loading feed configuration…</div>
           <div id="saasfeed-error" class="hint" role="alert" style="color:var(--red);display:none"></div>
@@ -6345,10 +6360,85 @@ async function loadSaaSFeedConfig() {
     document.getElementById('saasfeed-save-status').textContent = '';
     loadSaaSFeedOverrides();
     applySessionRoleVisibilityScope('#saasfeed-panel');
+    loadSaaSFeedStatus();
   } catch (err) {
     loading.style.display = 'none';
     errEl.textContent = 'Failed to load feed configuration: ' + err.message;
     errEl.style.display = '';
+  }
+}
+
+// loadSaaSFeedStatus renders the READ-ONLY signed-feed runtime status (state,
+// provenance, trust, version, freshness, counts, activity, failure). All dynamic
+// values are written via textContent = XSS-safe (never innerHTML interpolation).
+async function loadSaaSFeedStatus() {
+  const stateEl = document.getElementById('saasfeed-state');
+  const provEl = document.getElementById('saasfeed-provenance');
+  const detailEl = document.getElementById('saasfeed-status-detail');
+  const bannerEl = document.getElementById('saasfeed-status-banner');
+  if (!stateEl) return;
+  try {
+    const s = await api('/api/saas-feed/status');
+    stateEl.textContent = s.state || '—';
+    stateEl.style.color = _saasFeedStateColor(s.state);
+    provEl.textContent = s.provenance ? ('provenance: ' + s.provenance + ' · trust: ' + (s.signature_status || '')) : '';
+    const rows = [
+      ['Active version', s.active_feed_version == null ? '—' : String(s.active_feed_version)],
+      ['Freshness', s.stale ? 'stale (expired LKG)' : (s.expires_in_days == null ? '—' : (s.expires_in_days + ' day(s) to expiry'))],
+      ['Hosts', String(s.host_count == null ? 0 : s.host_count)],
+      ['Categories', String(s.category_count == null ? 0 : s.category_count)],
+      ['Overrides', String(s.override_count == null ? 0 : s.override_count)],
+      ['Last success', s.last_successful_activation || '—'],
+      ['Next attempt', s.next_attempt || '—'],
+      ['Failures (since start)', String(s.failures_since_start == null ? 0 : s.failures_since_start)],
+      ['Last outcome', s.last_outcome || '—'],
+    ];
+    detailEl.replaceChildren();
+    for (const [k, v] of rows) {
+      const cell = document.createElement('div');
+      const label = document.createElement('span'); label.style.color = 'var(--muted)'; label.textContent = k + ': ';
+      const val = document.createElement('span'); val.textContent = v; // textContent = XSS-safe
+      cell.appendChild(label); cell.appendChild(val);
+      detailEl.appendChild(cell);
+    }
+    if (s.critical || s.waiting_for_authority) {
+      bannerEl.style.display = ''; bannerEl.style.color = 'var(--red)';
+      bannerEl.textContent = s.detail || (s.critical ? 'Critical — operator action required' : 'Waiting for control-plane authority');
+    } else if (s.state === 'stale' || s.state === 'degraded') {
+      bannerEl.style.display = ''; bannerEl.style.color = 'var(--amber, #b58900)';
+      bannerEl.textContent = s.detail || (s.state === 'stale' ? 'Serving an expired last-known-good snapshot' : 'Recent refreshes failing — serving last-known-good');
+    } else {
+      bannerEl.style.display = 'none';
+    }
+  } catch (err) {
+    stateEl.textContent = 'unavailable';
+  }
+}
+
+function _saasFeedStateColor(state) {
+  switch (state) {
+    case 'fresh': return 'var(--green, #2aa198)';
+    case 'stale': case 'degraded': case 'syncing': case 'recovering': return 'var(--amber, #b58900)';
+    case 'critical': case 'waiting_for_authority': return 'var(--red)';
+    default: return 'var(--muted)';
+  }
+}
+
+// refreshSaaSFeed triggers a manual refresh (admin). Handles disabled/in-progress
+// states and re-loads the status. Singleflight: an in-flight refresh returns 202.
+async function refreshSaaSFeed() {
+  const btn = document.getElementById('saasfeed-refresh-btn');
+  const status = document.getElementById('saasfeed-refresh-status');
+  if (btn) btn.disabled = true;
+  if (status) status.textContent = 'Refreshing…';
+  try {
+    const r = await api('/api/saas-feed/refresh', { method: 'POST' });
+    if (status) status.textContent = r.status === 'in_progress' ? 'Refresh already in progress' : ('Result: ' + (r.status || 'done'));
+    loadSaaSFeedStatus();
+  } catch (err) {
+    if (status) status.textContent = 'Refresh failed: ' + err.message;
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 

@@ -13,7 +13,6 @@ import (
 
 	"github.com/KidCarmi/Culvert/internal/feedsync"
 	"github.com/KidCarmi/Culvert/internal/pac"
-	"github.com/KidCarmi/Culvert/internal/saasfeed"
 )
 
 // blocklistCleanupUnattributed handles DELETE /api/blocklist?scope=unattributed:
@@ -1170,14 +1169,20 @@ func apiURLCatFeedStatus(w http.ResponseWriter, r *http.Request) {
 		ut1["syncFailures"] = feedsync.SyncFailures()
 	}
 
-	saasEnabled := globalSaaSFeed.Enabled()
-	saas := map[string]any{"configured": saasEnabled}
-	if saasEnabled {
-		_, lastSync, added, interval := globalSaaSFeed.Stats()
-		saas["hostsAddedLastSync"] = added
-		saas["lastSync"] = rfc3339OrEmpty(lastSync)
-		saas["intervalSeconds"] = int64(interval.Seconds())
-		saas["syncFailures"] = saasfeed.SyncFailures()
+	// SaaS block now reflects the SIGNED feed (F3b-4). The legacy raw syncer is retired
+	// from runtime authority, so its sync-failure counters no longer contaminate this
+	// status — this is a compact summary of the signed-feed runtime state (the full
+	// snapshot lives on GET /api/saas-feed/status). UT1 stays a separate, unchanged feed.
+	sf := globalSaaSFeedStatus.Snapshot()
+	saas := map[string]any{
+		"configured":        sf.Configured,
+		"enabled":           sf.Enabled,
+		"state":             sf.State.String(),
+		"activeFeedVersion": nullableInt64(sf.ActiveFeedVersion),
+		"provenance":        sf.Provenance,
+		"lastSuccess":       rfc3339OrEmpty(sf.LastSuccessfulActivation),
+		"syncFailures":      sf.FailuresSinceStart,
+		"stale":             sf.Stale,
 	}
 
 	jsonOK(w, map[string]any{"ut1": ut1, "saas": saas})
@@ -2264,6 +2269,8 @@ func registerPolicyRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/urlcat/feed-status", apiURLCatFeedStatus)                        // GET — UT1 + SaaS feed freshness/failure counts (viewer, read-only)
 	mux.HandleFunc("/api/saas-feed/settings", apiSaaSFeedSettings)                        // GET viewer / PUT admin (F3a-2 signed-feed config)
 	mux.HandleFunc("/api/saas-feed/overrides", apiSaaSFeedOverrides)                      // GET viewer / PUT admin (F3a-2 category overrides)
+	mux.HandleFunc("/api/saas-feed/status", apiSaaSFeedStatus)                            // GET viewer (F3b-4 signed-feed runtime status)
+	mux.HandleFunc("/api/saas-feed/refresh", apiSaaSFeedRefresh)                          // POST admin (F3b-4 manual refresh, singleflight)
 
 	// Block page template (shown to users blocked by a policy rule).
 	mux.HandleFunc("/api/blockpage", apiBlockPage) // GET template / PUT update

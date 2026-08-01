@@ -320,6 +320,14 @@ var uiRoutes = []uiRouteMetadata{
 			{Method: "GET", MinRole: RoleViewer, Note: "F3a-2: read the admin category-override set"},
 			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "F3a-2: full-set override replacement (empty ⇒ clear all); denied on a managed data-plane node (409)"},
 		}},
+	{Path: "/api/saas-feed/status", Handler: "apiSaaSFeedStatus", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "F3b-4: read the signed-feed runtime status (state/provenance/freshness/counts)"},
+		}},
+	{Path: "/api/saas-feed/refresh", Handler: "apiSaaSFeedRefresh", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "F3b-4: manual signed-feed refresh (singleflight; deterministic accepted/in_progress/no-op/error)"},
+		}},
 	{Path: "/api/blockpage", Handler: "apiBlockPage", Domain: "policy", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer},
