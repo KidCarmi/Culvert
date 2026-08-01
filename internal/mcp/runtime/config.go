@@ -50,7 +50,7 @@ type ListenerConfig struct {
 	AllowedOrigins []string
 	RequireOrigin  bool
 	AuthConfig     authn.CapabilityAuthConfig // this capability's immutable PR-3 config
-	Limits         RuntimeLimits              // this capability's immutable runtime bounds (listener/HTTP bounds)
+	Limits         Limits                     // this capability's immutable runtime bounds (listener/HTTP bounds)
 	// SessionLimits are the PR-1 kernel session/wire bounds for this capability's
 	// dedicated session.Manager (distinct from the listener HTTP bounds above). A
 	// zero value (MaxSessions()==0) is resolved to the capability default at
@@ -84,10 +84,10 @@ func (c ListenerConfig) sessionLimits() limits.Limits {
 	return limits.DefaultGateway()
 }
 
-// RuntimeConfig is the whole MCP runtime configuration: two independent listeners
+// Config is the whole MCP runtime configuration: two independent listeners
 // plus the shared IMMUTABLE libraries (registry/catalog/auth-deps) they read. The
 // listeners never share mutable state.
-type RuntimeConfig struct {
+type Config struct {
 	Gateway    ListenerConfig
 	Management ListenerConfig
 	Deps       Deps
@@ -95,14 +95,14 @@ type RuntimeConfig struct {
 
 // Enabled reports whether ANY MCP listener is enabled. When false the runtime binds
 // nothing and starts no goroutine (disabled-by-default).
-func (c RuntimeConfig) Enabled() bool { return c.Gateway.Enabled || c.Management.Enabled }
+func (c Config) Enabled() bool { return c.Gateway.Enabled || c.Management.Enabled }
 
 func cfgErr(detail string) error { return limErr(detail) }
 
 // Validate checks both listener configurations transactionally BEFORE anything binds:
 // unsafe/zero/negative/wildcard/conflicting configurations fail here. A disabled
 // listener is not validated (it binds nothing).
-func (c RuntimeConfig) Validate() error {
+func (c Config) Validate() error {
 	if c.Gateway.Enabled {
 		if c.Gateway.Capability != protocol.Gateway {
 			return cfgErr("gateway listener config is not the Gateway capability")
@@ -149,6 +149,24 @@ func normalizeBind(s string) string {
 }
 
 func (c ListenerConfig) validate() error {
+	if err := c.validateBind(); err != nil {
+		return err
+	}
+	if len(c.AllowedHosts) == 0 {
+		return cfgErr("listener host allowlist is mandatory (empty is not permitted)")
+	}
+	if c.TLS == nil && !c.AllowInsecure {
+		return cfgErr("listener requires TLS (no server TLS config supplied)")
+	}
+	if c.ClientCertMode == ClientCertRequire && c.TLS == nil {
+		return cfgErr("mTLS-required listener needs a TLS config with a client CA pool")
+	}
+	return nil
+}
+
+// validateBind checks the port + bind-address rules (extracted to keep validate
+// under the cyclomatic-complexity bound).
+func (c ListenerConfig) validateBind() error {
 	// Port 0 is an ephemeral-port bind, permitted only under the AllowInsecure
 	// test/loopback seam (a production listener binds a fixed, declared port).
 	if c.Port == 0 && !c.AllowInsecure {
@@ -169,15 +187,6 @@ func (c ListenerConfig) validate() error {
 		if _, err := net.ResolveTCPAddr("tcp", c.Addr()); err != nil {
 			return cfgErr("listener bind address is not a valid IP/interface")
 		}
-	}
-	if len(c.AllowedHosts) == 0 {
-		return cfgErr("listener host allowlist is mandatory (empty is not permitted)")
-	}
-	if c.TLS == nil && !c.AllowInsecure {
-		return cfgErr("listener requires TLS (no server TLS config supplied)")
-	}
-	if c.ClientCertMode == ClientCertRequire && c.TLS == nil {
-		return cfgErr("mTLS-required listener needs a TLS config with a client CA pool")
 	}
 	return nil
 }

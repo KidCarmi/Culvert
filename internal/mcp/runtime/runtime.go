@@ -12,7 +12,7 @@ import (
 // enabled, Start binds no socket, starts no goroutine/timer, and the SWG request
 // path is completely untouched.
 type Runtime struct {
-	cfg RuntimeConfig
+	cfg Config
 	rev uint64
 
 	mu         sync.Mutex
@@ -25,7 +25,7 @@ type Runtime struct {
 // NewRuntime validates the whole configuration (both listeners + their isolation)
 // and returns a Runtime. An unsafe/zero/negative/wildcard/conflicting configuration
 // fails here, before anything binds.
-func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
+func NewRuntime(cfg Config) (*Runtime, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -127,8 +127,9 @@ func (rt *Runtime) Addr(management bool) string {
 	return l.netln.Addr().String()
 }
 
-// Health returns the per-listener typed health snapshots (Gateway first when both
-// are enabled). A disabled listener contributes a Disabled-phase snapshot.
+// Health returns the per-listener typed health snapshots for the ENABLED listeners
+// (Gateway first when both are enabled). A disabled runtime binds no listener, so it
+// returns an empty slice.
 func (rt *Runtime) Health() []HealthSnapshot {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()

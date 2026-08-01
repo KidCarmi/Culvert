@@ -1,10 +1,14 @@
 package runtime
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"strconv"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -56,8 +60,13 @@ type Request struct {
 	PeerCertThumbprint string
 	CanonicalURI       string // absolute request URI for the DPoP htu binding
 
-	// Body — already byte-limited by the listener; re-asserted here.
-	Body []byte
+	// Body carries a pre-read request body (unit-test path). The live listener leaves
+	// Body nil and supplies BodyReader instead, so the pipeline reads the body LAZILY
+	// — only after Host/Origin (per request/stream), method dispatch, path/capability
+	// and registry resolution have passed. A cross-origin/foreign-route/unsupported-
+	// method request is therefore rejected WITHOUT ever buffering its body.
+	Body       []byte
+	BodyReader io.Reader // bounded reader (live path); read at step 9 only for an admitted POST route
 }
 
 // Outcome is the pipeline's terminal decision for one request. Status is the HTTP
@@ -86,12 +95,19 @@ type pipeline struct {
 	authCfg    authn.CapabilityAuthConfig
 	sessions   *session.Manager
 	bindings   *identity.BindingStore
-	lim        RuntimeLimits
+	lim        Limits
 	sessLim    limits.Limits
 	deps       Deps
 	ctr        *counters
 	rev        uint64
 	idSeq      atomic.Uint64
+
+	// boundMu guards boundIDs — the set of session ids this pipeline has bound an
+	// identity to. It lets reconcileBindings unbind identities for sessions the
+	// kernel sweeper reclaimed (which has no per-binding hook), so the binding store
+	// can never grow unbounded under ordinary successful traffic.
+	boundMu  sync.Mutex
+	boundIDs map[string]struct{}
 }
 
 // newPipeline builds a capability pipeline from a validated listener config. It
@@ -120,7 +136,47 @@ func newPipeline(cfg ListenerConfig, deps Deps, listenerID string, ctr *counters
 		deps:       deps,
 		ctr:        ctr,
 		rev:        rev,
+		boundIDs:   make(map[string]struct{}),
 	}, nil
+}
+
+// trackBinding records that sessionID now carries a bound identity (so a later
+// sweep can unbind it).
+func (p *pipeline) trackBinding(sessionID string) {
+	p.boundMu.Lock()
+	p.boundIDs[sessionID] = struct{}{}
+	p.boundMu.Unlock()
+}
+
+// closeSession tears down a session the pipeline itself created (on a rejection
+// after open, or a rollback): it closes the protocol session, unbinds its identity,
+// and stops tracking it. It never affects another session.
+func (p *pipeline) closeSession(sessionID string) {
+	p.sessions.Close(sessionID)
+	p.bindings.Unbind(sessionID)
+	p.boundMu.Lock()
+	delete(p.boundIDs, sessionID)
+	p.boundMu.Unlock()
+}
+
+// reconcileBindings unbinds identities whose sessions the kernel sweeper has
+// already reclaimed. It is a bounded scan the listener runs on the sweep cadence,
+// so the binding store tracks the live session set rather than growing forever.
+func (p *pipeline) reconcileBindings() {
+	p.boundMu.Lock()
+	ids := make([]string, 0, len(p.boundIDs))
+	for id := range p.boundIDs {
+		ids = append(ids, id)
+	}
+	p.boundMu.Unlock()
+	for _, id := range ids {
+		if _, live := p.sessions.Get(id); !live {
+			p.bindings.Unbind(id)
+			p.boundMu.Lock()
+			delete(p.boundIDs, id)
+			p.boundMu.Unlock()
+		}
+	}
 }
 
 // recBuilder accumulates the sanitized observation fields as the request flows
@@ -188,16 +244,23 @@ func (p *pipeline) processPost(req Request, rb *recBuilder, now time.Time) Outco
 		return p.reject(rb, 404, mcperr.ReasonAdmissionRejected, "")
 	}
 	// Step 8: server-id / registry (Gateway only). Management must not access the
-	// Gateway catalog/registry.
-	if out, ok := p.resolveServer(req, rb); !ok {
+	// Gateway catalog/registry. The opaque server id is resolved from the route here,
+	// BEFORE the body is read, and pinned onto the request for the auth/resource check.
+	serverID, out, ok := p.resolveServer(req, rb)
+	if !ok {
 		return out
 	}
-	// Step 9: body byte limit (already enforced by the listener; re-asserted).
-	if len(req.Body) > p.lim.MaxBodyBytes() {
+	req.ServerID = serverID
+	// Step 9: read + byte-limit the body. Reached ONLY after Host/Origin, method
+	// dispatch, path/capability and registry resolution have passed — a rejected
+	// request never buffers its body.
+	body, ok := p.readBody(req)
+	if !ok {
 		return p.reject(rb, 413, mcperr.ReasonResourceLimit, "")
 	}
+	rb.rec.RequestBytes = len(body)
 	// Step 10: PR-1 strict JSON-RPC decode.
-	msg, err := jsonrpc.Decode(req.Body, p.sessLim)
+	msg, err := jsonrpc.Decode(body, p.sessLim)
 	if err != nil {
 		return p.reject(rb, 400, mcperr.ReasonOf(err), "")
 	}
@@ -214,39 +277,84 @@ func (p *pipeline) processPost(req Request, rb *recBuilder, now time.Time) Outco
 // resolveServer performs step 8. For Gateway it resolves the opaque ServerID from
 // the route against the live registry: the server must exist and be enabled, and
 // the auth resource must match the server. Management carries no server authority.
-func (p *pipeline) resolveServer(req Request, rb *recBuilder) (Outcome, bool) {
+func (p *pipeline) resolveServer(req Request, rb *recBuilder) (string, Outcome, bool) {
 	if p.capability == protocol.Management {
-		if req.ServerID != "" {
-			return p.reject(rb, 404, mcperr.ReasonAdmissionRejected, ""), false
+		// Management is a single fixed path and carries no server authority.
+		if req.ServerID != "" || (req.Path != "" && req.Path != managementPath) {
+			return "", p.reject(rb, 404, mcperr.ReasonAdmissionRejected, ""), false
 		}
-		return Outcome{}, true
+		return "", Outcome{}, true
 	}
-	if req.ServerID == "" {
-		return p.reject(rb, 404, mcperr.ReasonRegistryServerUnavailable, ""), false
+	// Gateway: use an explicitly-supplied server id (unit tests) or parse it from the
+	// route path (live listener). A malformed/foreign path resolves to no server.
+	serverID := req.ServerID
+	if serverID == "" {
+		serverID = parseGatewayServerID(req.Path)
+	}
+	if serverID == "" {
+		return "", p.reject(rb, 404, mcperr.ReasonRegistryServerUnavailable, ""), false
 	}
 	if p.deps.Registry == nil {
-		return p.reject(rb, 404, mcperr.ReasonRegistryServerUnavailable, ""), false
+		return "", p.reject(rb, 404, mcperr.ReasonRegistryServerUnavailable, ""), false
 	}
-	rec, ok := p.deps.Registry.Current().Get(registry.ServerID(req.ServerID))
+	rec, ok := p.deps.Registry.Current().Get(registry.ServerID(serverID))
 	if !ok || !rec.Usable() {
-		return p.reject(rb, 404, mcperr.ReasonRegistryServerUnavailable, ""), false
+		return "", p.reject(rb, 404, mcperr.ReasonRegistryServerUnavailable, ""), false
 	}
 	// The server is registered + enabled: safe to carry its opaque id in the record.
-	rb.rec.ServerID = req.ServerID
-	return Outcome{}, true
+	rb.rec.ServerID = serverID
+	return serverID, Outcome{}, true
+}
+
+// readBody obtains the request body: a pre-read Body (unit tests) or, on the live
+// path, a bounded read of BodyReader. It returns ok=false when the body exceeds the
+// configured byte cap (the caller returns 413).
+func (p *pipeline) readBody(req Request) ([]byte, bool) {
+	if req.Body != nil || req.BodyReader == nil {
+		if len(req.Body) > p.lim.MaxBodyBytes() {
+			return nil, false
+		}
+		return req.Body, true
+	}
+	// Read one byte past the cap so an exactly-at-cap body is accepted and an
+	// over-cap body is detected without trusting the transport's own limiter alone.
+	limited := io.LimitReader(req.BodyReader, int64(p.lim.MaxBodyBytes())+1)
+	body, err := io.ReadAll(limited)
+	if err != nil || len(body) > p.lim.MaxBodyBytes() {
+		return nil, false
+	}
+	return body, true
+}
+
+// parseGatewayServerID extracts the opaque server id from a Gateway route path
+// (`/mcp/gateway/<server-id>[/...]`). Returns "" for a foreign or malformed path.
+func parseGatewayServerID(path string) string {
+	if !strings.HasPrefix(path, gatewayPathPrefix) {
+		return ""
+	}
+	rest := path[len(gatewayPathPrefix):]
+	if i := strings.IndexByte(rest, '/'); i >= 0 {
+		rest = rest[:i]
+	}
+	return rest
 }
 
 // processMessage runs steps 11–15 for a decoded request/notification.
 func (p *pipeline) processMessage(req Request, rb *recBuilder, msg jsonrpc.Message, now time.Time) Outcome {
 	// Step 11: version / session / lifecycle — resolve or create the session and,
-	// for initialize, negotiate the protocol version.
-	sess, negotiated, out, ok := p.resolveSession(req, rb, msg)
+	// for initialize, negotiate the protocol version. `created` is true only for a
+	// session this request just opened (an initialize), so a later-step rejection can
+	// tear it down and never leave an unauthenticated session pinning the cap.
+	sess, negotiated, created, out, ok := p.resolveSession(req, rb, msg)
 	if !ok {
 		return out
 	}
 	// Step 12: PR-3 auth + sender-constraint (+ step 13: immutable identity binding).
 	ctx, err := p.authenticate(req, sess, now)
 	if err != nil {
+		if created {
+			p.closeSession(sess.ID())
+		}
 		p.ctr.authFailures.Add(1)
 		return p.reject(rb, statusForAuth(mcperr.ReasonOf(err)), mcperr.ReasonOf(err), "")
 	}
@@ -257,6 +365,9 @@ func (p *pipeline) processMessage(req Request, rb *recBuilder, msg jsonrpc.Messa
 	// Step 14: method admission (lifecycle + reviewed registry, via the session).
 	adm, err := sess.Admit(protocol.ClientOriginated, msg.Class, msg.Method)
 	if err != nil {
+		if created {
+			p.closeSession(sess.ID())
+		}
 		p.ctr.admissionRejected.Add(1)
 		return p.reject(rb, statusForAdmission(mcperr.ReasonOf(err)), mcperr.ReasonOf(err), "")
 	}
@@ -269,7 +380,7 @@ func (p *pipeline) processMessage(req Request, rb *recBuilder, msg jsonrpc.Messa
 // negotiates the version; on any other method it looks up the session named by
 // MCP-Session-Id. It returns the session, the negotiated version (initialize only),
 // and a rejection Outcome when session/version resolution fails.
-func (p *pipeline) resolveSession(req Request, rb *recBuilder, msg jsonrpc.Message) (*session.Session, protocol.Version, Outcome, bool) {
+func (p *pipeline) resolveSession(req Request, rb *recBuilder, msg jsonrpc.Message) (sess *session.Session, v protocol.Version, created bool, out Outcome, ok bool) {
 	if msg.Method == "initialize" && msg.Class == jsonrpc.ClassRequest {
 		return p.openInitialize(req, rb, msg)
 	}
@@ -280,46 +391,47 @@ func (p *pipeline) resolveSession(req Request, rb *recBuilder, msg jsonrpc.Messa
 			cond = protocol.CondSessionlessMissingVersion
 		}
 		d := protocol.DecideTransport(cond)
-		return nil, "", p.reject(rb, d.Status, mcperr.ReasonUnsupportedVersion, ""), false
+		return nil, "", false, p.reject(rb, d.Status, mcperr.ReasonUnsupportedVersion, ""), false
 	}
 	// A present-but-unsupported version header is a terminal 400.
 	if req.HasVersionHeader && !protocol.IsSupported(protocol.Version(req.ProtocolVersion)) {
 		d := protocol.DecideTransport(protocol.CondInvalidVersionHeader)
-		return nil, "", p.reject(rb, d.Status, mcperr.ReasonUnsupportedVersion, ""), false
+		return nil, "", false, p.reject(rb, d.Status, mcperr.ReasonUnsupportedVersion, ""), false
 	}
-	sess, ok := p.sessions.Get(req.SessionID)
-	if !ok {
+	s, found := p.sessions.Get(req.SessionID)
+	if !found {
 		d := protocol.DecideTransport(protocol.CondUnknownOrTerminatedSession)
-		return nil, "", p.reject(rb, d.Status, mcperr.ReasonInvalidLifecycle, ""), false
+		return nil, "", false, p.reject(rb, d.Status, mcperr.ReasonInvalidLifecycle, ""), false
 	}
-	v, _ := sess.Version()
-	rb.rec.ProtocolVer = string(v)
-	return sess, v, Outcome{}, true
+	ver, _ := s.Version()
+	rb.rec.ProtocolVer = string(ver)
+	return s, ver, false, Outcome{}, true
 }
 
 // openInitialize opens a fresh session for an initialize request and negotiates the
-// protocol version from the initialize body.
-func (p *pipeline) openInitialize(req Request, rb *recBuilder, msg jsonrpc.Message) (*session.Session, protocol.Version, Outcome, bool) {
+// protocol version from the initialize body. On success it returns created=true so
+// the caller tears the session down if a later step (auth/admission) rejects.
+func (p *pipeline) openInitialize(req Request, rb *recBuilder, msg jsonrpc.Message) (*session.Session, protocol.Version, bool, Outcome, bool) {
 	// A session id on an initialize means a client is re-initializing an existing
 	// session — reject (initialize is a one-time bootstrap, enforced by lifecycle).
 	if req.HasSession && req.SessionID != "" {
 		if _, exists := p.sessions.Get(req.SessionID); exists {
-			return nil, "", p.reject(rb, 400, mcperr.ReasonInvalidLifecycle, ""), false
+			return nil, "", false, p.reject(rb, 400, mcperr.ReasonInvalidLifecycle, ""), false
 		}
 	}
 	sid := p.newSessionID()
 	sess, err := p.sessions.Open(sid, p.capability, protocol.ClientFacing)
 	if err != nil {
 		p.ctr.admissionRejected.Add(1)
-		return nil, "", p.reject(rb, 429, mcperr.ReasonOf(err), ""), false
+		return nil, "", false, p.reject(rb, 429, mcperr.ReasonOf(err), ""), false
 	}
 	neg := protocol.Negotiate(requestedVersion(msg))
 	if err := sess.SetNegotiatedVersion(neg.Selected); err != nil {
-		p.sessions.Close(sid)
-		return nil, "", p.reject(rb, 400, mcperr.ReasonOf(err), ""), false
+		p.closeSession(sid)
+		return nil, "", false, p.reject(rb, 400, mcperr.ReasonOf(err), ""), false
 	}
 	rb.rec.ProtocolVer = string(neg.Selected)
-	return sess, neg.Selected, Outcome{}, true
+	return sess, neg.Selected, true, Outcome{}, true
 }
 
 // dispatch performs step 15: the observe-only disposition. Kernel-terminal methods
@@ -401,11 +513,16 @@ func (p *pipeline) emit(rec ObserveRecord) {
 	}
 }
 
-// newSessionID mints a listener-unique, non-guessable-enough session id from the
-// listener id + a monotonic counter. (The kernel session manager keys on it; it is
-// never a security token.)
+// newSessionID mints an unguessable session id from crypto/rand (128 bits),
+// namespaced by the listener id. MCP recommends non-enumerable session ids; a
+// counter would be trivially enumerable. On the vanishingly unlikely rand failure
+// it falls back to the monotonic counter (still unique within the process).
 func (p *pipeline) newSessionID() string {
-	return "s-" + p.listenerID + "-" + strconv.FormatUint(p.idSeq.Add(1), 10)
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "s-" + p.listenerID + "-" + strconv.FormatUint(p.idSeq.Add(1), 10)
+	}
+	return "s-" + p.listenerID + "-" + hex.EncodeToString(b[:])
 }
 
 // requestedVersion extracts the requested protocolVersion from an initialize body.

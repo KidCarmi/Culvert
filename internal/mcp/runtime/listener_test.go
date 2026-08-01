@@ -21,7 +21,7 @@ func startInsecureRuntime(t *testing.T, k *esKey) (*Runtime, string) {
 	t.Helper()
 	g := gwListenerConfig(t)
 	g.Port = 0 // ephemeral
-	cfg := RuntimeConfig{Gateway: g, Deps: testDeps(t, k, NewBoundedSink(64))}
+	cfg := Config{Gateway: g, Deps: testDeps(t, k, NewBoundedSink(64))}
 	rt, err := NewRuntime(cfg)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
@@ -34,7 +34,20 @@ func startInsecureRuntime(t *testing.T, k *esKey) (*Runtime, string) {
 		defer cancel()
 		_ = rt.Shutdown(ctx)
 	})
-	return rt, rt.Addr(false)
+	addr := rt.Addr(false)
+	return rt, addr
+}
+
+// dialTCP dials addr with a bounded context (satisfies the noctx linter).
+func dialTCP(t *testing.T, addr string) net.Conn {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	return conn
 }
 
 // rawPost writes one HTTP/1.1 POST on conn and returns the parsed response.
@@ -67,10 +80,7 @@ func rawPost(t *testing.T, conn net.Conn, br *bufio.Reader, host, token string, 
 func TestListener_HostRecheckedPerRequestH11(t *testing.T) {
 	k := newESKey(t, "k1")
 	_, addr := startInsecureRuntime(t, k)
-	conn, err := net.Dial("tcp", addr)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
+	conn := dialTCP(t, addr)
 	defer conn.Close()
 	br := bufio.NewReader(conn)
 

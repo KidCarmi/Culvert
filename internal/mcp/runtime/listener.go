@@ -4,13 +4,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
-	"io"
 	"net"
 	"net/http"
-	"strings"
+	"sync"
 	"time"
-
-	"github.com/KidCarmi/Culvert/internal/mcp/protocol"
 )
 
 // Route prefixes. Gateway addresses a specific server by opaque id in the path;
@@ -31,7 +28,7 @@ type Listener struct {
 	listenerID string
 	pipe       *pipeline
 	ctr        *counters
-	lim        RuntimeLimits
+	lim        Limits
 	clock      func() time.Time
 
 	srv   *http.Server
@@ -93,13 +90,15 @@ func newListener(cfg ListenerConfig, deps Deps, listenerID string, rev uint64) (
 
 // bind opens the listener's socket (but does not serve). Binding both listeners
 // before serving either makes an address/port conflict a clean, pre-serve failure
-// the Runtime can roll back.
+// the Runtime can roll back. The socket is wrapped in a hard concurrent-connection
+// limiter (MaxConns) so a connection flood cannot exhaust file descriptors or
+// per-connection goroutines regardless of the request-level pools.
 func (l *Listener) bind() error {
 	ln, err := net.Listen("tcp", l.cfg.Addr())
 	if err != nil {
 		return err
 	}
-	l.netln = ln
+	l.netln = newLimitListener(ln, l.cfg.Limits.MaxConns())
 	return nil
 }
 
@@ -137,6 +136,9 @@ func (l *Listener) sweepLoop() {
 			return
 		case <-t.C:
 			l.pipe.sessions.Sweep()
+			// Unbind identities whose sessions the sweep reclaimed (the binding store
+			// has no per-session sweep hook), so it tracks the live session set.
+			l.pipe.reconcileBindings()
 		}
 	}
 }
@@ -147,8 +149,11 @@ func (l *Listener) sweepLoop() {
 func (l *Listener) stop(ctx context.Context) {
 	l.ctr.setPhase(PhaseDraining)
 	close(l.stopCh)
-	err := l.srv.Shutdown(ctx)
-	if err != nil {
+	// Bound the drain by the smaller of the caller's deadline and this listener's own
+	// ShutdownTimeout, so one listener's slow drain can never consume the whole budget.
+	dctx, cancel := context.WithTimeout(ctx, l.lim.ShutdownTimeout())
+	defer cancel()
+	if err := l.srv.Shutdown(dctx); err != nil {
 		// Deadline hit: force-close remaining connections rather than hang.
 		l.ctr.shutdownCancels.Add(1)
 		_ = l.srv.Close() //nolint:errcheck // best-effort force close on drain timeout
@@ -212,11 +217,13 @@ func (l *Listener) admit(ctx context.Context) (func(), bool) {
 	}
 }
 
-// extractRequest reads the transport-level fields into a pipeline Request. It reads
-// the body under a hard byte cap (413 on overflow) and routes the path to this
-// listener's capability (404 on a foreign/malformed path). It NEVER trusts a
-// forwarded Host/Origin header or a client-supplied certificate thumbprint. A
-// non-zero returned status means a transport-level rejection.
+// extractRequest builds a pipeline Request from the transport-level fields. It does
+// NOT read the body or resolve the route — both are deferred to the pipeline so they
+// run only AFTER Host/Origin, method dispatch and path/capability have passed (a
+// cross-origin/foreign-route/unsupported-method request never buffers its body). The
+// body is exposed as a bounded reader the pipeline reads at its byte-limit step. It
+// NEVER trusts a forwarded Host/Origin header or a client-supplied certificate
+// thumbprint. A non-zero returned status means a transport-level rejection.
 func (l *Listener) extractRequest(w http.ResponseWriter, r *http.Request) (Request, int) {
 	// mTLS defense-in-depth: a require-cert listener must have a verified peer cert.
 	if l.cfg.ClientCertMode == ClientCertRequire {
@@ -224,14 +231,9 @@ func (l *Listener) extractRequest(w http.ResponseWriter, r *http.Request) (Reque
 			return Request{}, http.StatusUnauthorized
 		}
 	}
-	serverID, status := l.route(r)
-	if status != 0 {
-		return Request{}, status
-	}
-	body, ok := readBounded(w, r, l.lim.MaxBodyBytes())
-	if !ok {
-		return Request{}, http.StatusRequestEntityTooLarge
-	}
+	// Cap the body at the server layer too (defense-in-depth); the pipeline applies
+	// the authoritative byte limit when it actually reads it.
+	body := http.MaxBytesReader(w, r.Body, int64(l.lim.MaxBodyBytes())+1)
 	req := Request{
 		HTTPMethod:           r.Method,
 		Capability:           l.cfg.Capability,
@@ -239,7 +241,6 @@ func (l *Listener) extractRequest(w http.ResponseWriter, r *http.Request) (Reque
 		Origin:               r.Header.Get("Origin"),
 		OriginPresent:        len(r.Header.Values("Origin")) > 0,
 		Path:                 r.URL.Path,
-		ServerID:             serverID,
 		SessionID:            r.Header.Get("Mcp-Session-Id"),
 		HasSession:           r.Header.Get("Mcp-Session-Id") != "",
 		ProtocolVersion:      r.Header.Get("MCP-Protocol-Version"),
@@ -250,32 +251,9 @@ func (l *Listener) extractRequest(w http.ResponseWriter, r *http.Request) (Reque
 		HasDPoP:              r.Header.Get("DPoP") != "",
 		PeerCertThumbprint:   peerThumbprint(r, l.cfg.ClientCertMode),
 		CanonicalURI:         canonicalURI(r),
-		Body:                 body,
+		BodyReader:           body,
 	}
 	return req, 0
-}
-
-// route resolves the request path to this listener's capability and, for Gateway,
-// extracts the opaque server id from the path. A path outside this listener's
-// capability space is a 404.
-func (l *Listener) route(r *http.Request) (string, int) {
-	if l.cfg.Capability == protocol.Management {
-		if r.URL.Path != managementPath {
-			return "", http.StatusNotFound
-		}
-		return "", 0
-	}
-	if !strings.HasPrefix(r.URL.Path, gatewayPathPrefix) {
-		return "", http.StatusNotFound
-	}
-	rest := strings.TrimPrefix(r.URL.Path, gatewayPathPrefix)
-	if i := strings.IndexByte(rest, '/'); i >= 0 {
-		rest = rest[:i]
-	}
-	if rest == "" {
-		return "", http.StatusNotFound
-	}
-	return rest, 0
 }
 
 // writeOutcome writes the pipeline outcome to the HTTP response. It NEVER opens a
@@ -299,20 +277,6 @@ func (l *Listener) health() HealthSnapshot {
 	snap := l.ctr.snapshot(l.cfg.Capability.String(), l.listenerID)
 	snap.ActiveSessions = int64(l.pipe.sessions.SessionCount())
 	return snap
-}
-
-// readBounded reads the request body under a hard byte cap. It returns ok=false when
-// the body exceeds the cap (the caller returns 413).
-func readBounded(w http.ResponseWriter, r *http.Request, maxBytes int) ([]byte, bool) {
-	if r.Body == nil {
-		return nil, true
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, int64(maxBytes))
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		return nil, false
-	}
-	return body, true
 }
 
 // hasQueryCredential reports whether a bearer credential appears in the query string
@@ -347,4 +311,50 @@ func canonicalURI(r *http.Request) string {
 // writeStatus writes a bare status with no body and no stream.
 func writeStatus(w http.ResponseWriter, status int) {
 	w.WriteHeader(status)
+}
+
+// limitListener wraps a net.Listener with a hard cap on concurrently-open
+// connections (MaxConns). Accept blocks until a slot frees, and each accepted
+// connection releases its slot exactly once on Close — so a connection flood is
+// bounded to MaxConns live sockets/goroutines regardless of the request-level
+// worker pool. (A minimal, dependency-free equivalent of x/net/netutil.)
+type limitListener struct {
+	net.Listener
+	sem chan struct{}
+}
+
+func newLimitListener(inner net.Listener, maxConns int) net.Listener {
+	if maxConns <= 0 {
+		return inner
+	}
+	return &limitListener{Listener: inner, sem: make(chan struct{}, maxConns)}
+}
+
+// Accept acquires a connection slot (blocking) then accepts; the slot is released
+// when the returned connection is closed.
+func (l *limitListener) Accept() (net.Conn, error) {
+	l.sem <- struct{}{}
+	c, err := l.Listener.Accept()
+	if err != nil {
+		<-l.sem
+		return nil, err
+	}
+	return &limitConn{Conn: c, release: l.releaseOnce()}, nil
+}
+
+// releaseOnce returns a func that frees exactly one slot the first time it is called.
+func (l *limitListener) releaseOnce() func() {
+	var once sync.Once
+	return func() { once.Do(func() { <-l.sem }) }
+}
+
+type limitConn struct {
+	net.Conn
+	release func()
+}
+
+// Close releases the connection's slot exactly once, then closes the socket.
+func (c *limitConn) Close() error {
+	c.release()
+	return c.Conn.Close()
 }

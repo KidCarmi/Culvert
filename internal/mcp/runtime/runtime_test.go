@@ -10,7 +10,7 @@ import (
 
 func TestRuntime_DisabledByDefault(t *testing.T) {
 	before := runtime.NumGoroutine()
-	rt, err := NewRuntime(RuntimeConfig{})
+	rt, err := NewRuntime(Config{})
 	if err != nil {
 		t.Fatalf("NewRuntime(disabled): %v", err)
 	}
@@ -46,11 +46,7 @@ func TestRuntime_StartServeShutdownNoLeak(t *testing.T) {
 		t.Fatal("runtime did not bind")
 	}
 	// A live request works.
-	conn, err := net.Dial("tcp", addr)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	conn.Close()
+	dialTCP(t, addr).Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -87,7 +83,7 @@ func TestRuntime_TransactionalStartupRollback(t *testing.T) {
 	m.Port = busyPort // will fail to bind
 	m.BindAddress = "127.0.0.1"
 
-	rt, err := NewRuntime(RuntimeConfig{Gateway: g, Management: m, Deps: testDeps(t, k, nil)})
+	rt, err := NewRuntime(Config{Gateway: g, Management: m, Deps: testDeps(t, k, nil)})
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -95,8 +91,10 @@ func TestRuntime_TransactionalStartupRollback(t *testing.T) {
 		t.Fatal("expected Start to fail on management bind conflict")
 	}
 	// Rollback: the already-bound gateway socket must be closed (nothing serving).
-	if rt.Addr(false) != "" {
-		if c, derr := net.DialTimeout("tcp", rt.Addr(false), 200*time.Millisecond); derr == nil {
+	if gwAddr := rt.Addr(false); gwAddr != "" {
+		dctx, dcancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer dcancel()
+		if c, derr := (&net.Dialer{}).DialContext(dctx, "tcp", gwAddr); derr == nil {
 			c.Close()
 			t.Fatal("gateway listener still serving after rollback")
 		}
@@ -109,7 +107,7 @@ func TestListener_AdmissionBounded(t *testing.T) {
 	lc := validLimitConfig()
 	lc.MaxConcurrent = 1
 	lc.QueueDepth = 1
-	lim, err := NewRuntimeLimits(lc)
+	lim, err := NewLimits(lc)
 	if err != nil {
 		t.Fatalf("limits: %v", err)
 	}
@@ -144,7 +142,7 @@ func TestRuntime_ListenerIsolation(t *testing.T) {
 	lc := validLimitConfig()
 	lc.MaxConcurrent = 1
 	lc.QueueDepth = 1
-	lim, _ := NewRuntimeLimits(lc)
+	lim, _ := NewLimits(lc)
 	gcfg.Limits, mcfg.Limits = lim, lim
 
 	gl, err := newListener(gcfg, testDeps(t, k, nil), "gw", 1)

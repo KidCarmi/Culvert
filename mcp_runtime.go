@@ -20,7 +20,7 @@ var mcpRuntime *mcpruntime.Runtime
 // enablement path; today it proves the SWG path is untouched when MCP is off and
 // that startup succeeds with NO MCP certificates, registry or auth configured.
 func initMCPRuntime(_ *startupState) {
-	rt, err := mcpruntime.NewRuntime(mcpruntime.RuntimeConfig{})
+	rt, err := mcpruntime.NewRuntime(mcpruntime.Config{})
 	if err != nil {
 		// A disabled runtime never fails validation; log defensively and continue —
 		// MCP wiring must never block SWG startup.

@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"encoding/json"
+	"io"
 	"testing"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
@@ -158,6 +159,66 @@ func TestPipeline_UnknownServerRejected(t *testing.T) {
 	if out.Status != 404 || out.Reason != mcperr.ReasonRegistryServerUnavailable {
 		t.Fatalf("unknown server: status=%d reason=%v", out.Status, out.Reason)
 	}
+}
+
+func TestPipeline_InitializeAuthFailClosesSession(t *testing.T) {
+	k := newESKey(t, "k1")
+	p := newGatewayPipeline(t, testDeps(t, k, nil))
+	// An initialize with NO credential must not leave a session pinning the cap.
+	req := gwRequest(gwToken(k), initializeBody(1))
+	req.AuthorizationHeaders = nil
+	out := p.Process(req, fixedClock())
+	if out.Status != 401 {
+		t.Fatalf("status = %d, want 401", out.Status)
+	}
+	if n := p.sessions.SessionCount(); n != 0 {
+		t.Fatalf("session count = %d after rejected initialize, want 0 (leak)", n)
+	}
+	if p.bindings.Len() != 0 {
+		t.Fatalf("binding count = %d, want 0", p.bindings.Len())
+	}
+}
+
+func TestPipeline_ReconcileUnbindsSweptSessions(t *testing.T) {
+	k := newESKey(t, "k1")
+	p := newGatewayPipeline(t, testDeps(t, k, nil))
+	sid := doInit(t, p, gwToken(k))
+	if p.bindings.Len() != 1 {
+		t.Fatalf("binding count = %d, want 1", p.bindings.Len())
+	}
+	// Simulate the kernel sweeper reclaiming the session out from under the pipeline.
+	p.sessions.Close(sid)
+	p.reconcileBindings()
+	if p.bindings.Len() != 0 {
+		t.Fatalf("binding not reconciled after session close: Len=%d", p.bindings.Len())
+	}
+}
+
+func TestPipeline_BodyReadOnlyAfterHostOrigin(t *testing.T) {
+	k := newESKey(t, "k1")
+	p := newGatewayPipeline(t, testDeps(t, k, nil))
+	// A bad-Host request supplying a body via BodyReader must be rejected WITHOUT
+	// the body ever being read (host/origin precedes the body-read step).
+	tr := &trackReader{}
+	req := gwRequest(gwToken(k), nil)
+	req.Body = nil
+	req.BodyReader = tr
+	req.Host = "evil.example.com"
+	out := p.Process(req, fixedClock())
+	if out.Status != 403 {
+		t.Fatalf("status = %d, want 403", out.Status)
+	}
+	if tr.reads != 0 {
+		t.Fatalf("body was read %d times for a host-rejected request", tr.reads)
+	}
+}
+
+// trackReader counts Read calls to prove the body is not read on a rejected path.
+type trackReader struct{ reads int }
+
+func (t *trackReader) Read(p []byte) (int, error) {
+	t.reads++
+	return 0, io.EOF
 }
 
 func TestPipeline_ObserveRecordEmitted(t *testing.T) {

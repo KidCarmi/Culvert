@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"sync/atomic"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
@@ -99,17 +100,12 @@ type Sink interface {
 	Observe(rec ObserveRecord) error
 }
 
-// nopSink drops records (bounded, never errors). Used when no sink is injected.
-type nopSink struct{}
-
-func (nopSink) Observe(ObserveRecord) error { return nil }
-
 // boundedChanSink is an in-memory, bounded, non-blocking sink for tests: records are
 // dropped (counted) when full so a slow/failed sink can never block the request path
 // or shutdown.
 type boundedChanSink struct {
 	ch      chan ObserveRecord
-	dropped int64
+	dropped atomic.Int64
 }
 
 // NewBoundedSink returns a bounded in-memory sink holding up to size records. It is
@@ -127,7 +123,7 @@ func (s *boundedChanSink) Observe(rec ObserveRecord) error {
 	case s.ch <- rec:
 		return nil
 	default:
-		s.dropped++
+		s.dropped.Add(1)
 		return nil
 	}
 }
@@ -146,4 +142,4 @@ func (s *boundedChanSink) Records() []ObserveRecord {
 }
 
 // Dropped returns how many records were dropped at capacity.
-func (s *boundedChanSink) Dropped() int64 { return s.dropped }
+func (s *boundedChanSink) Dropped() int64 { return s.dropped.Load() }

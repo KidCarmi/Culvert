@@ -8,8 +8,8 @@ import (
 	"github.com/KidCarmi/Culvert/internal/mcp/protocol"
 )
 
-func validLimitConfig() RuntimeLimitConfig {
-	return RuntimeLimitConfig{
+func validLimitConfig() LimitConfig {
+	return LimitConfig{
 		MaxConns: 1024, MaxConcurrent: 64, QueueDepth: 256, MaxSessions: 4096,
 		MaxOutstanding: 8192, MaxHeaderBytes: 64 << 10, MaxBodyBytes: 1 << 20,
 		MaxResponseBytes: 1 << 20, AuthConcurrency: 32, DPoPConcurrency: 32,
@@ -24,22 +24,22 @@ func validLimitConfig() RuntimeLimitConfig {
 func TestRuntimeLimits_ValidateRejects(t *testing.T) {
 	tests := []struct {
 		name  string
-		patch func(*RuntimeLimitConfig)
+		patch func(*LimitConfig)
 	}{
-		{"zero MaxConcurrent", func(c *RuntimeLimitConfig) { c.MaxConcurrent = 0 }},
-		{"negative QueueDepth", func(c *RuntimeLimitConfig) { c.QueueDepth = -1 }},
-		{"over-ceiling body", func(c *RuntimeLimitConfig) { c.MaxBodyBytes = capBodyBytes + 1 }},
-		{"outstanding below concurrent", func(c *RuntimeLimitConfig) { c.MaxOutstanding = c.MaxConcurrent - 1 }},
-		{"read below header", func(c *RuntimeLimitConfig) { c.ReadTimeout = c.ReadHeaderTimeout - 1 }},
-		{"response below body", func(c *RuntimeLimitConfig) { c.MaxResponseBytes = c.MaxBodyBytes - 1 }},
-		{"zero timeout", func(c *RuntimeLimitConfig) { c.WriteTimeout = 0 }},
-		{"over-ceiling timeout", func(c *RuntimeLimitConfig) { c.ReadTimeout = capTimeout + time.Second }},
+		{"zero MaxConcurrent", func(c *LimitConfig) { c.MaxConcurrent = 0 }},
+		{"negative QueueDepth", func(c *LimitConfig) { c.QueueDepth = -1 }},
+		{"over-ceiling body", func(c *LimitConfig) { c.MaxBodyBytes = capBodyBytes + 1 }},
+		{"outstanding below concurrent", func(c *LimitConfig) { c.MaxOutstanding = c.MaxConcurrent - 1 }},
+		{"read below header", func(c *LimitConfig) { c.ReadTimeout = c.ReadHeaderTimeout - 1 }},
+		{"response below body", func(c *LimitConfig) { c.MaxResponseBytes = c.MaxBodyBytes - 1 }},
+		{"zero timeout", func(c *LimitConfig) { c.WriteTimeout = 0 }},
+		{"over-ceiling timeout", func(c *LimitConfig) { c.ReadTimeout = capTimeout + time.Second }},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			c := validLimitConfig()
 			tc.patch(&c)
-			if _, err := NewRuntimeLimits(c); err == nil {
+			if _, err := NewLimits(c); err == nil {
 				t.Fatalf("expected validation error for %s", tc.name)
 			} else if mcperr.ReasonOf(err) != mcperr.ReasonListenerConfigInvalid {
 				t.Fatalf("reason = %v, want listener_config_invalid", mcperr.ReasonOf(err))
@@ -49,10 +49,10 @@ func TestRuntimeLimits_ValidateRejects(t *testing.T) {
 }
 
 func TestRuntimeLimits_ValidAccepts(t *testing.T) {
-	if _, err := NewRuntimeLimits(validLimitConfig()); err != nil {
+	if _, err := NewLimits(validLimitConfig()); err != nil {
 		t.Fatalf("valid config rejected: %v", err)
 	}
-	_ = DefaultRuntimeLimits() // must not panic
+	_ = DefaultLimits() // must not panic
 }
 
 func TestListenerConfig_ValidateRejects(t *testing.T) {
@@ -60,7 +60,7 @@ func TestListenerConfig_ValidateRejects(t *testing.T) {
 		return ListenerConfig{
 			Enabled: true, Capability: protocol.Gateway, BindAddress: "127.0.0.1",
 			Port: 8443, AllowInsecure: true, AllowedHosts: []string{"h"},
-			Limits: DefaultRuntimeLimits(),
+			Limits: DefaultLimits(),
 		}
 	}
 	tests := []struct {
@@ -91,7 +91,7 @@ func TestListenerConfig_WildcardAllowed(t *testing.T) {
 	c := ListenerConfig{
 		Enabled: true, Capability: protocol.Gateway, BindAddress: "0.0.0.0",
 		Port: 8443, AllowInsecure: true, AllowWildcard: true,
-		AllowedHosts: []string{"h"}, Limits: DefaultRuntimeLimits(),
+		AllowedHosts: []string{"h"}, Limits: DefaultLimits(),
 	}
 	if err := c.validate(); err != nil {
 		t.Fatalf("wildcard with AllowWildcard rejected: %v", err)
@@ -103,7 +103,7 @@ func TestRuntimeConfig_RejectsSharedAddr(t *testing.T) {
 	m := mgmtListenerConfig(t)
 	g.Port, m.Port = 9000, 9000 // same addr/port
 	g.BindAddress, m.BindAddress = "127.0.0.1", "127.0.0.1"
-	cfg := RuntimeConfig{Gateway: g, Management: m}
+	cfg := Config{Gateway: g, Management: m}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected shared-address rejection")
 	}
@@ -116,17 +116,17 @@ func TestRuntimeConfig_RejectsSharedResource(t *testing.T) {
 	// Force the same canonical resource on both — capability isolation violated.
 	m.AuthConfig = gwAuthConfig(t) // gateway resource under the management listener
 	m.Capability = protocol.Management
-	cfg := RuntimeConfig{Gateway: g, Management: m}
+	cfg := Config{Gateway: g, Management: m}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected shared-resource rejection")
 	}
 }
 
 func TestRuntimeConfig_DisabledValidatesTrivially(t *testing.T) {
-	if err := (RuntimeConfig{}).Validate(); err != nil {
+	if err := (Config{}).Validate(); err != nil {
 		t.Fatalf("disabled config failed validation: %v", err)
 	}
-	if (RuntimeConfig{}).Enabled() {
+	if (Config{}).Enabled() {
 		t.Fatal("empty config reports enabled")
 	}
 }
@@ -134,7 +134,7 @@ func TestRuntimeConfig_DisabledValidatesTrivially(t *testing.T) {
 func TestRuntimeConfig_WrongCapabilityRejected(t *testing.T) {
 	g := gwListenerConfig(t)
 	g.Capability = protocol.Management // gateway slot holding a management capability
-	cfg := RuntimeConfig{Gateway: g}
+	cfg := Config{Gateway: g}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected wrong-capability rejection")
 	}

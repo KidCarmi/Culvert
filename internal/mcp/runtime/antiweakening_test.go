@@ -78,7 +78,7 @@ func TestAntiWeakening_RetainStreamAlwaysFalse(t *testing.T) {
 // TestAntiWeakening_DisabledRuntimeInert proves a disabled runtime binds nothing and
 // its Process path is never reachable (no listener), i.e. no SWG effect.
 func TestAntiWeakening_DisabledRuntimeInert(t *testing.T) {
-	rt, err := NewRuntime(RuntimeConfig{})
+	rt, err := NewRuntime(Config{})
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -131,7 +131,7 @@ func BenchmarkRuntimeDisabledStartStop(b *testing.B) {
 	ctx := context.Background()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		rt, err := NewRuntime(RuntimeConfig{})
+		rt, err := NewRuntime(Config{})
 		if err != nil {
 			b.Fatal(err)
 		}

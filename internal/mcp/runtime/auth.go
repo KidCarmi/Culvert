@@ -116,6 +116,9 @@ func (p *pipeline) authenticate(req Request, sess *session.Session, now time.Tim
 	if _, err := p.bindings.Bind(sess.ID(), ctx); err != nil {
 		return nil, err
 	}
+	// Track the bound session so a later kernel sweep can unbind it (the binding
+	// store has no per-session sweep hook of its own).
+	p.trackBinding(sess.ID())
 	return ctx, nil
 }
 

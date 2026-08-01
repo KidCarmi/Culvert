@@ -159,7 +159,7 @@ func gwListenerConfig(t testing.TB) ListenerConfig {
 		Enabled: true, Capability: protocol.Gateway,
 		BindAddress: "127.0.0.1", Port: 1, AllowInsecure: true,
 		AllowedHosts: []string{gwHost}, AuthConfig: gwAuthConfig(t),
-		Limits: DefaultRuntimeLimits(),
+		Limits: DefaultLimits(),
 	}
 }
 
@@ -169,7 +169,7 @@ func mgmtListenerConfig(t testing.TB) ListenerConfig {
 		Enabled: true, Capability: protocol.Management,
 		BindAddress: "127.0.0.1", Port: 2, AllowInsecure: true,
 		AllowedHosts: []string{mgmtHost}, AuthConfig: mgmtAuthConfig(t),
-		Limits: DefaultRuntimeLimits(),
+		Limits: DefaultLimits(),
 	}
 }
 

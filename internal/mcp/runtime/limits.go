@@ -37,15 +37,15 @@ const (
 	capShutdown           = 5 * time.Minute
 )
 
-// RuntimeLimits is the immutable, validated per-capability runtime bound set. Every
+// Limits is the immutable, validated per-capability runtime bound set. Every
 // dimension an attacker (or overload) can drive is finite and validated. Management
-// and Gateway each hold their OWN RuntimeLimits — a shared mutable limit object is
+// and Gateway each hold their OWN Limits — a shared mutable limit object is
 // forbidden (a saturation in one capability must never exhaust the other). A zero,
 // negative, or over-ceiling value fails construction (fail closed).
-type RuntimeLimits struct{ c RuntimeLimitConfig }
+type Limits struct{ c LimitConfig }
 
-// RuntimeLimitConfig is the mutable input to NewRuntimeLimits.
-type RuntimeLimitConfig struct {
+// LimitConfig is the mutable input to NewLimits.
+type LimitConfig struct {
 	MaxConns          int           // accepted connections
 	MaxConcurrent     int           // concurrent in-flight requests (worker pool size)
 	QueueDepth        int           // admission queue depth beyond the workers
@@ -74,7 +74,7 @@ func limErr(detail string) error {
 }
 
 // Validate enforces positivity, hard-cap ceilings, and consistency.
-func (c RuntimeLimitConfig) Validate() error {
+func (c LimitConfig) Validate() error {
 	ints := []struct {
 		name string
 		v, c int
@@ -134,18 +134,18 @@ func (c RuntimeLimitConfig) Validate() error {
 	return nil
 }
 
-// NewRuntimeLimits validates c into an immutable RuntimeLimits.
-func NewRuntimeLimits(c RuntimeLimitConfig) (RuntimeLimits, error) {
+// NewLimits validates c into an immutable Limits.
+func NewLimits(c LimitConfig) (Limits, error) {
 	if err := c.Validate(); err != nil {
-		return RuntimeLimits{}, err
+		return Limits{}, err
 	}
-	return RuntimeLimits{c: c}, nil
+	return Limits{c: c}, nil
 }
 
-// DefaultRuntimeLimits returns a conservative, valid runtime bound set for tests and
+// DefaultLimits returns a conservative, valid runtime bound set for tests and
 // the dormant default wiring.
-func DefaultRuntimeLimits() RuntimeLimits {
-	l, err := NewRuntimeLimits(RuntimeLimitConfig{
+func DefaultLimits() Limits {
+	l, err := NewLimits(LimitConfig{
 		MaxConns: 1024, MaxConcurrent: 64, QueueDepth: 256, MaxSessions: 4096,
 		MaxOutstanding: 8192, MaxHeaderBytes: 64 << 10, MaxBodyBytes: 1 << 20,
 		MaxResponseBytes: 1 << 20, AuthConcurrency: 32, DPoPConcurrency: 32,
@@ -156,31 +156,72 @@ func DefaultRuntimeLimits() RuntimeLimits {
 		SessionTTL: 5 * time.Minute, ShutdownTimeout: 20 * time.Second,
 	})
 	if err != nil {
-		panic("runtime: DefaultRuntimeLimits invalid: " + err.Error())
+		panic("runtime: DefaultLimits invalid: " + err.Error())
 	}
 	return l
 }
 
-// Accessors (immutable).
+// Accessors (immutable). Each returns the corresponding validated bound.
 
-func (l RuntimeLimits) MaxConns() int                    { return l.c.MaxConns }
-func (l RuntimeLimits) MaxConcurrent() int               { return l.c.MaxConcurrent }
-func (l RuntimeLimits) QueueDepth() int                  { return l.c.QueueDepth }
-func (l RuntimeLimits) MaxSessions() int                 { return l.c.MaxSessions }
-func (l RuntimeLimits) MaxOutstanding() int              { return l.c.MaxOutstanding }
-func (l RuntimeLimits) MaxHeaderBytes() int              { return l.c.MaxHeaderBytes }
-func (l RuntimeLimits) MaxBodyBytes() int                { return l.c.MaxBodyBytes }
-func (l RuntimeLimits) MaxResponseBytes() int            { return l.c.MaxResponseBytes }
-func (l RuntimeLimits) AuthConcurrency() int             { return l.c.AuthConcurrency }
-func (l RuntimeLimits) DPoPConcurrency() int             { return l.c.DPoPConcurrency }
-func (l RuntimeLimits) MaxObservations() int             { return l.c.MaxObservations }
-func (l RuntimeLimits) AdmissionBudget() int             { return l.c.AdmissionBudget }
-func (l RuntimeLimits) CleanupPerOp() int                { return l.c.CleanupPerOp }
-func (l RuntimeLimits) ReadHeaderTimeout() time.Duration { return l.c.ReadHeaderTimeout }
-func (l RuntimeLimits) ReadTimeout() time.Duration       { return l.c.ReadTimeout }
-func (l RuntimeLimits) WriteTimeout() time.Duration      { return l.c.WriteTimeout }
-func (l RuntimeLimits) IdleTimeout() time.Duration       { return l.c.IdleTimeout }
-func (l RuntimeLimits) HandshakeTimeout() time.Duration  { return l.c.HandshakeTimeout }
-func (l RuntimeLimits) RequestDeadline() time.Duration   { return l.c.RequestDeadline }
-func (l RuntimeLimits) SessionTTL() time.Duration        { return l.c.SessionTTL }
-func (l RuntimeLimits) ShutdownTimeout() time.Duration   { return l.c.ShutdownTimeout }
+// MaxConns returns the accepted-connection cap.
+func (l Limits) MaxConns() int { return l.c.MaxConns }
+
+// MaxConcurrent returns the concurrent in-flight request cap (worker-pool size).
+func (l Limits) MaxConcurrent() int { return l.c.MaxConcurrent }
+
+// QueueDepth returns the admission-queue depth beyond the workers.
+func (l Limits) QueueDepth() int { return l.c.QueueDepth }
+
+// MaxSessions returns the live-session cap.
+func (l Limits) MaxSessions() int { return l.c.MaxSessions }
+
+// MaxOutstanding returns the outstanding-request cap across sessions.
+func (l Limits) MaxOutstanding() int { return l.c.MaxOutstanding }
+
+// MaxHeaderBytes returns the request-header byte cap.
+func (l Limits) MaxHeaderBytes() int { return l.c.MaxHeaderBytes }
+
+// MaxBodyBytes returns the request-body byte cap.
+func (l Limits) MaxBodyBytes() int { return l.c.MaxBodyBytes }
+
+// MaxResponseBytes returns the response byte cap.
+func (l Limits) MaxResponseBytes() int { return l.c.MaxResponseBytes }
+
+// AuthConcurrency returns the concurrent-authentication cap.
+func (l Limits) AuthConcurrency() int { return l.c.AuthConcurrency }
+
+// DPoPConcurrency returns the concurrent DPoP-verification cap.
+func (l Limits) DPoPConcurrency() int { return l.c.DPoPConcurrency }
+
+// MaxObservations returns the in-flight observe-record cap.
+func (l Limits) MaxObservations() int { return l.c.MaxObservations }
+
+// AdmissionBudget returns the per-source admission token-bucket size.
+func (l Limits) AdmissionBudget() int { return l.c.AdmissionBudget }
+
+// CleanupPerOp returns the bounded per-operation cleanup-scan size.
+func (l Limits) CleanupPerOp() int { return l.c.CleanupPerOp }
+
+// ReadHeaderTimeout returns the header-read deadline (slowloris defense).
+func (l Limits) ReadHeaderTimeout() time.Duration { return l.c.ReadHeaderTimeout }
+
+// ReadTimeout returns the full-request read deadline.
+func (l Limits) ReadTimeout() time.Duration { return l.c.ReadTimeout }
+
+// WriteTimeout returns the response-write deadline.
+func (l Limits) WriteTimeout() time.Duration { return l.c.WriteTimeout }
+
+// IdleTimeout returns the idle keep-alive deadline.
+func (l Limits) IdleTimeout() time.Duration { return l.c.IdleTimeout }
+
+// HandshakeTimeout returns the TLS-handshake deadline.
+func (l Limits) HandshakeTimeout() time.Duration { return l.c.HandshakeTimeout }
+
+// RequestDeadline returns the absolute per-request deadline.
+func (l Limits) RequestDeadline() time.Duration { return l.c.RequestDeadline }
+
+// SessionTTL returns the idle-session expiry window.
+func (l Limits) SessionTTL() time.Duration { return l.c.SessionTTL }
+
+// ShutdownTimeout returns the graceful-shutdown budget.
+func (l Limits) ShutdownTimeout() time.Duration { return l.c.ShutdownTimeout }
