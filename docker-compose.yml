@@ -103,6 +103,11 @@ services:
       # logs (/data/logstore) and falls back to the CA passphrase when unset.
       - CULVERT_CA_PASSPHRASE=${CULVERT_CA_PASSPHRASE:-}
       - CULVERT_LOG_PASSPHRASE=${CULVERT_LOG_PASSPHRASE:-}
+      # Session-cookie HMAC signing key (64 hex chars, >=32 bytes). Required
+      # on every node in a multi-node/HA deployment so admin sessions stay
+      # valid cluster-wide (docs/OPERATIONS.md §3); leave unset for a single
+      # node to let the proxy generate one automatically at startup.
+      - CULVERT_SESSION_SECRET=${CULVERT_SESSION_SECRET:-}
       # Release Management catalog/dispatch config. The maint-agent URL is
       # intentionally supplied only by docker-compose.maint-agent.yml, because
       # it is valid only when the Maintenance Agent socket is mounted.
