@@ -473,22 +473,7 @@ func applyConfigBackup(b *configBackup) error {
 
 	applyScanStoresFromBackup(b)
 
-	// File block extensions: remove all, then add.
-	for _, ext := range fileBlocker.List() {
-		fileBlocker.Remove(ext)
-	}
-	for _, ext := range b.FileBlockExtensions {
-		fileBlocker.Add(ext)
-	}
-
-	// IP filter: remove all, set mode, then add.
-	ipf.SetMode(b.IPFilterMode)
-	for _, ip := range ipf.List() {
-		ipf.Remove(ip)
-	}
-	for _, ip := range b.IPList {
-		_ = ipf.Add(ip)
-	}
+	applyFilterStoresFromBackup(b)
 
 	if b.RateLimitRPM > 0 {
 		rl.Configure(b.RateLimitRPM, time.Minute)
@@ -539,6 +524,33 @@ func persistFailureCount(err error) int {
 		return len(pe.Files)
 	}
 	return 0
+}
+
+// applyFilterStoresFromBackup restores the file-extension blocker and the IP
+// filter from a snapshot. Split out of applyConfigBackup for cyclop only —
+// behaviour and ordering are unchanged. Callers must keep invoking it at the
+// same point in the apply sequence.
+//
+// Both stores are runtime-only on this path: neither Add/Remove nor SetMode
+// persists, so these surfaces revert on restart (CHAOS-46, surfaced to the
+// caller as rollbackRuntimeOnlySurfaces).
+func applyFilterStoresFromBackup(b *configBackup) {
+	// File block extensions: remove all, then add.
+	for _, ext := range fileBlocker.List() {
+		fileBlocker.Remove(ext)
+	}
+	for _, ext := range b.FileBlockExtensions {
+		fileBlocker.Add(ext)
+	}
+
+	// IP filter: remove all, set mode, then add.
+	ipf.SetMode(b.IPFilterMode)
+	for _, ip := range ipf.List() {
+		ipf.Remove(ip)
+	}
+	for _, ip := range b.IPList {
+		_ = ipf.Add(ip)
+	}
 }
 
 // applyScanStoresFromBackup restores the SSL-bypass matcher and the content
