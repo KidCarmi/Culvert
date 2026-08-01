@@ -107,10 +107,17 @@ func buildFeedGen(t *testing.T, o feedGenOpts) feedGen {
 	}
 	envBytes, _ := json.Marshal(envObj)
 	bundleBytes := []byte(`{"test":"opaque-artifact-bundle"}`)
+	// Parse the REAL generated artifact so the fake verifier can return the genuine
+	// normalized categories (the F3b-3 override composition needs real hosts to fold).
+	var artifact urlcatfeed.ArtifactPayload
+	if err := json.Unmarshal(gen.ArtifactBytes, &artifact); err != nil {
+		t.Fatalf("unmarshal artifact: %v", err)
+	}
 	return feedGen{
 		ManifestBytes: gen.ManifestBytes,
 		ArtifactBytes: gen.ArtifactBytes,
 		Manifest:      gen.Manifest,
+		Artifact:      artifact,
 		EnvelopeBytes: envBytes,
 		BundleBytes:   bundleBytes,
 	}
@@ -167,13 +174,12 @@ func (f *fakeFeedVerifier) VerifyArtifact(artifactBytes, bundleJSON []byte, mani
 	if !bytes.Equal(bundleJSON, f.gen.BundleBytes) {
 		return nil, urlcatfeed.ErrVerify
 	}
-	return &urlcatfeed.ArtifactPayload{
-		SchemaVersion: urlcatfeed.SchemaVersion,
-		Protocol:      urlcatfeed.Protocol,
-		Feed:          urlcatfeed.FeedID,
-		FeedVersion:   manifest.FeedVersion,
-		GeneratedAt:   manifest.GeneratedAt,
-	}, nil
+	// Return the genuine parsed artifact (with its normalized categories) so downstream
+	// composition/snapshot derivation sees real hosts — a deep copy so callers can't mutate
+	// the shared fixture.
+	a := f.gen.Artifact
+	a.Categories = append([]urlcatfeed.ArtifactCategory(nil), f.gen.Artifact.Categories...)
+	return &a, nil
 }
 
 // realFeedVerifier builds a genuine kernel verifier bound to an offline

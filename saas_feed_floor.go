@@ -738,7 +738,12 @@ func newFloorStoreFS(fs floorFS, dir string, checkpoint int64) (*floorStore, err
 	if dir == "" {
 		return nil, errFloorNoDir
 	}
-	if checkpoint < 1 {
+	// The compiled checkpoint may be 0 (F3b-3 resolved COMPILED_MIN_FEED_VERSION = 0:
+	// no public feed version has shipped, so the fresh-install floor is 0 and the first
+	// network candidate v1 is strictly greater). A NEGATIVE checkpoint is still invalid.
+	// Record VERSIONS remain ≥ 1 (validateFloorFields) — 0 is only the floor watermark's
+	// fresh-install value, never a stored record.
+	if checkpoint < 0 {
 		return nil, fmt.Errorf("%w: %d", errFloorCheckpoint, checkpoint)
 	}
 	return &floorStore{fs: fs, paths: floorPathsIn(dir), dir: dir, checkpoint: checkpoint}, nil

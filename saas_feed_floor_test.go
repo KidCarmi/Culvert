@@ -1051,8 +1051,11 @@ func TestFloor_StoreConstructorValidation(t *testing.T) {
 	if _, err := newFloorStore("", 1); !errors.Is(err, errFloorNoDir) {
 		t.Fatalf("empty dir: got %v", err)
 	}
-	if _, err := newFloorStore("/d", 0); !errors.Is(err, errFloorCheckpoint) {
-		t.Fatalf("zero checkpoint: got %v", err)
+	// Checkpoint 0 is VALID as of F3b-3 (resolved COMPILED_MIN_FEED_VERSION = 0: no
+	// public feed version has shipped, so the fresh-install floor is 0). A negative
+	// checkpoint stays invalid.
+	if _, err := newFloorStore("/d", 0); err != nil {
+		t.Fatalf("zero checkpoint should be valid (COMPILED_MIN_FEED_VERSION=0): got %v", err)
 	}
 	if _, err := newFloorStore("/d", -5); !errors.Is(err, errFloorCheckpoint) {
 		t.Fatalf("negative checkpoint: got %v", err)
