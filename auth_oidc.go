@@ -14,6 +14,12 @@ import (
 	"time"
 )
 
+// oidcIntrospectTimeout bounds a single RFC 7662 introspection round-trip. It
+// matches the http.Client Timeout the provider is built with; the explicit
+// context deadline makes the bound visible at the call site and lets the
+// in-flight request be cancelled.
+const oidcIntrospectTimeout = 10 * time.Second
+
 // OIDCConfig holds settings for OAuth2 / OIDC token-introspection auth.
 //
 // How it works for proxy authentication:
@@ -175,8 +181,21 @@ func (a *OIDCAuth) ResolveIdentity(_ string, token string) (*Identity, bool) {
 		return id, ok
 	}
 
-	id, ok, exp := a.introspect(token)
+	id, ok, exp, unavailable := a.introspect(token)
+	if unavailable != "" {
+		// The IdP did not answer. Fail closed for THIS request — posture is
+		// unchanged — but do not cache: a cached negative would keep denying
+		// this token for the full TTL after the endpoint recovered, turning a
+		// brief introspection outage into a multi-minute user outage
+		// (CHAOS-16).
+		noteIdPUnavailable("oidc", unavailable)
+		logger.Printf("OIDC auth UNAVAILABLE: reason=%q — denied (introspection did not answer; result not cached)",
+			sanitizeLog(unavailable))
+		return nil, false
+	}
+
 	id, ok = a.oidcCacheSetIdentityWithExp(k, id, ok, exp)
+	noteIdPAnswered("oidc")
 	if ok {
 		logger.Printf("OIDC auth OK: subject=%q", sanitizeLog(id.Sub))
 	} else {
@@ -191,20 +210,36 @@ func (a *OIDCAuth) CaptiveLoginURL(_ string, _ *http.Request) string {
 }
 
 // introspect returns the canonical token identity and its Unix expiry.
-func (a *OIDCAuth) introspect(token string) (identity *Identity, active bool, tokenExp *int64) {
+//
+// The fourth return value is a fixed-vocabulary reason, non-empty only when
+// the introspection endpoint did NOT answer — the caller must then deny
+// without caching (CHAOS-16). It is never a raw error string; see the
+// disclosure note on noteIdPUnavailable.
+//
+// The line between "did not answer" and "answered no" matters most at the HTTP
+// status: only `active:false` in a 200 body is the IdP saying this token is
+// not valid. A 401 means OUR client credentials are wrong, a 429 means we are
+// being throttled, a 5xx means the IdP is broken — none of them is a statement
+// about the user's token, and caching any of them as one is the defect.
+func (a *OIDCAuth) introspect(token string) (identity *Identity, active bool, tokenExp *int64, unavailable string) {
 	body := url.Values{
 		"token":           {token},
 		"token_type_hint": {"access_token"},
 	}
+	// An explicit request deadline in addition to the client's Timeout, so the
+	// in-flight request is cancellable and the bound is visible at the call
+	// site — matching the registry provider's introspect (auth_oidc_flow.go).
+	ctx, cancel := context.WithTimeout(context.Background(), oidcIntrospectTimeout)
+	defer cancel()
 	req, err := http.NewRequestWithContext(
-		context.Background(),
+		ctx,
 		http.MethodPost,
 		a.cfg.IntrospectionURL,
 		strings.NewReader(body.Encode()),
 	)
 	if err != nil {
 		logger.Printf("OIDC introspect build error: %v", err)
-		return nil, false, nil
+		return nil, false, nil, "request_build_failed"
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.SetBasicAuth(a.cfg.ClientID, a.cfg.ClientSecret)
@@ -212,21 +247,44 @@ func (a *OIDCAuth) introspect(token string) (identity *Identity, active bool, to
 	resp, err := a.client.Do(req)
 	if err != nil {
 		logger.Printf("OIDC introspect request error: %v", err)
-		return nil, false, nil
+		return nil, false, nil, "request_failed"
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		logger.Printf("OIDC introspect HTTP %d", resp.StatusCode)
-		return nil, false, nil
+		// The status code is a closed, non-sensitive vocabulary — safe to
+		// carry to the operator surface, and the single most useful thing for
+		// telling a misconfigured client secret (401) apart from an IdP
+		// outage (503).
+		return nil, false, nil, fmt.Sprintf("http_%d", resp.StatusCode)
 	}
 
 	var ir introspectionResponse
 	if err := decodeStrictJSON(resp.Body, 64<<10, &ir, false); err != nil {
+		// A 200 we cannot parse is not an answer either — a truncated body or
+		// an HTML error page from an intercepting proxy lands here.
 		logger.Printf("OIDC introspect parse error: %v", err)
-		return nil, false, nil
+		return nil, false, nil, "parse_failed"
 	}
+	// From here the IdP has ANSWERED. Everything below is us evaluating that
+	// answer against local policy, so every rejection is definitive and
+	// cacheable — the unavailable reason stays empty for the rest of the
+	// function.
+	identity, active, tokenExp = a.identityFromIntrospection(&ir)
+	return identity, active, tokenExp, ""
+}
+
+// identityFromIntrospection applies the local acceptance policy to an
+// introspection reply the IdP successfully returned: active flag, declared
+// expiry, required scope/audience, and a usable canonical subject.
+//
+// Every negative here is a real answer about the token — never an
+// unavailability — which is why this half is separated from the transport half
+// in introspect().
+func (a *OIDCAuth) identityFromIntrospection(ir *introspectionResponse) (*Identity, bool, *int64) {
 	if !ir.Active {
+		// The one true negative answer in RFC 7662.
 		return nil, false, nil
 	}
 	tokenExp, validExp := parseDeclaredExpiry(ir.Exp)

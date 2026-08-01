@@ -675,6 +675,41 @@ culvert_storage_write_last_failure_age_seconds %d
 		)
 	}
 
+	// CHAOS-16 / AU-7: identity-provider reachability. Without these series an
+	// IdP outage and a credential-stuffing spike are indistinguishable — both
+	// look like a burst of auth failures — yet the operator response to them is
+	// opposite. Emitted per backend, and ONLY for backends that have actually
+	// failed to answer at least once, so a healthy fleet carries no series at
+	// all rather than a wall of zeroes.
+	if idpEntries := idpHealthSnapshot(); len(idpEntries) > 0 {
+		_, _ = fmt.Fprint(w, `# HELP culvert_idp_unavailable_total Authentication attempts the identity provider did not answer (unreachable / refused / unintelligible reply) — denied fail-closed and deliberately not cached
+# TYPE culvert_idp_unavailable_total counter
+`)
+		for _, e := range idpEntries {
+			_, _ = fmt.Fprintf(w, "culvert_idp_unavailable_total{backend=%q} %d\n", e.Backend, e.Total)
+		}
+		_, _ = fmt.Fprint(w, `
+# HELP culvert_idp_unavailable 1 while an identity provider has failed to answer and no definitive answer has been observed since
+# TYPE culvert_idp_unavailable gauge
+`)
+		for _, e := range idpEntries {
+			degraded := 0
+			if e.Degraded() {
+				degraded = 1
+			}
+			_, _ = fmt.Fprintf(w, "culvert_idp_unavailable{backend=%q} %d\n", e.Backend, degraded)
+		}
+		_, _ = fmt.Fprint(w, `
+# HELP culvert_idp_unavailable_last_age_seconds Seconds since the most recent unanswered auth attempt, per backend (absent for backends that have always answered)
+# TYPE culvert_idp_unavailable_last_age_seconds gauge
+`)
+		for _, e := range idpEntries {
+			_, _ = fmt.Fprintf(w, "culvert_idp_unavailable_last_age_seconds{backend=%q} %d\n",
+				e.Backend, int64(time.Since(e.Last).Seconds()))
+		}
+		_, _ = fmt.Fprint(w, "\n")
+	}
+
 	// Decryption-profile success delta: which protocol inspected tunnels negotiated
 	// on the upstream leg (h2 = Inspect-as-HTTP/2 working; http/1.1 = strip/downgrade).
 	_, _ = fmt.Fprintf(w, `# HELP culvert_inspect_upstream_alpn_total Inspected-tunnel upstream (origin) leg negotiated protocol

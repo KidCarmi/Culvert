@@ -918,6 +918,14 @@ func resetDiagVerdictGlobals(t *testing.T) {
 	t.Helper()
 	resetStorageWriteHealthForTest()
 	t.Cleanup(resetStorageWriteHealthForTest)
+	// CHAOS-16: the aggregate verdict also folds in idp_reachability, and the
+	// IdP health record is a process global that any earlier auth test can
+	// dirty (auth_ldap_test.go's dial-failure cases record a real
+	// unavailability). Isolation belongs here, on the assertion side, for the
+	// same reason it does for policyStore and the durable-write record — the
+	// injecting tests are numerous and the list only grows.
+	resetIdPHealthForTest()
+	t.Cleanup(resetIdPHealthForTest)
 	policyStore.mu.Lock()
 	prevRules := policyStore.rules
 	prevVersion := policyStore.version

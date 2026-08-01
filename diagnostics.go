@@ -158,6 +158,7 @@ func buildOperatorContract() OperatorContract {
 		checkKeyAtRest(),
 		checkAuditPersistence(),
 		checkMemoryBackstop(),
+		checkIdPReachability(),
 	}
 	// Auth Exempt risk diagnostics (Slice 8): WARN-only rows for risky Stage-1
 	// exemption postures. Contributes nothing when no exempt rules exist.
@@ -304,6 +305,64 @@ func checkStorage() OperatorContractCheck {
 			Message:        "data directory writability unknown — startup probe did not run or path not configured",
 			OperatorAction: "Set --data-dir or the data_dir config field and restart the proxy so the startup probe can verify writability.",
 		}
+	}
+}
+
+// checkIdPReachability surfaces authentication attempts that the identity
+// provider did not ANSWER, as distinct from ones it answered with a rejection
+// (CHAOS-16 / AU-7).
+//
+// The distinction is the whole point of the row. A burst of auth failures on
+// the dashboard has two completely different causes — an attacker spraying
+// passwords, or the directory being down — and before this row they were
+// indistinguishable, so the operator could not tell "block the source" from
+// "page the directory team".
+//
+// Recovery is reported only on evidence: a definitive answer (allow OR deny)
+// observed after the last unanswered attempt. Elapsed silence is not recovery
+// — an IdP that is still down looks identical to a healthy one when nothing
+// happens to authenticate. Same rule as the durable-write row (CHAOS-45).
+//
+// Only the fixed reason vocabulary reaches this surface, never raw error text:
+// /api/diagnostics is viewer-role, and LDAP/OIDC errors carry directory
+// hostnames, bind DNs and introspection URLs.
+func checkIdPReachability() OperatorContractCheck {
+	entries := idpHealthSnapshot()
+	if len(entries) == 0 {
+		return OperatorContractCheck{
+			Code:    "idp_reachability",
+			Status:  diagOK,
+			Message: "no unanswered identity-provider authentication attempts observed",
+		}
+	}
+
+	var degraded, healed []string
+	for _, e := range entries {
+		desc := fmt.Sprintf("%s (%d unanswered, last: %s at %s)",
+			e.Backend, e.Total, e.Reason, e.Last.UTC().Format(time.RFC3339))
+		if e.Degraded() {
+			degraded = append(degraded, desc)
+		} else {
+			healed = append(healed, desc)
+		}
+	}
+
+	if len(degraded) > 0 {
+		return OperatorContractCheck{
+			Code:   "idp_reachability",
+			Status: diagFail,
+			Message: fmt.Sprintf("identity provider(s) not answering and NO definitive answer observed since — users are being DENIED because auth cannot be evaluated, not because their credentials were rejected: %s",
+				strings.Join(degraded, "; ")),
+			OperatorAction: "Check reachability of the configured directory / introspection endpoint from this node (DNS, routing, firewall state, TLS, and the service-account or client credentials). Denials during this window are fail-closed and are NOT cached, so access is restored as soon as the provider answers again — no cache flush or restart is needed.",
+		}
+	}
+
+	return OperatorContractCheck{
+		Code:   "idp_reachability",
+		Status: diagWarn,
+		Message: fmt.Sprintf("identity provider(s) failed to answer earlier in this process; a definitive answer has since been observed: %s",
+			strings.Join(healed, "; ")),
+		OperatorAction: "The provider is answering again and no user is still blocked by this — unanswered attempts are never cached. Investigate the transient fault at the source (directory restart, network blip, throttling) using the reason shown; culvert_idp_unavailable_total carries the magnitude.",
 	}
 }
 
