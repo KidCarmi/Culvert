@@ -325,6 +325,15 @@ func validConfigRevision(v string) bool {
 	return true
 }
 
+// floorWatermark returns the activation record's DURABLE floor copy as an ordering key.
+// §B.4/§B.6: this copy is a THIRD max input to floor selection alongside floor.a/floor.b,
+// so a valid activation record restores the rollback floor even if both floor replicas are
+// lost (see raiseFloorFromActivation, saas_feed_recover.go).
+func (r activationRecord) floorWatermark() floorWatermark {
+	t, _ := canonicalUTCSecond(r.FloorGeneratedAt) // zero time when unset — the fresh checkpoint
+	return floorWatermark{Version: r.FloorVersion, GeneratedAt: t}
+}
+
 // ─── single-record store (§B.5 S4) ────────────────────────────────────────────────
 
 // activationStore owns the fixed activation-state.json path + the durability seam

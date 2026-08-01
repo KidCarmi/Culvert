@@ -17,6 +17,8 @@ package main
 import (
 	"context"
 	"errors"
+
+	"github.com/KidCarmi/Culvert/internal/urlcatfeed"
 )
 
 // recoveryClass distinguishes every startup outcome so F3b-4 can surface the exact
@@ -88,6 +90,15 @@ func (c *activationCoordinator) Recover(ctx context.Context) (recoveryResult, er
 	}
 	frec := c.floor.Recover(activeVer)
 
+	// §B.4/§B.6 — the activation-record floor copy is a THIRD max input to floor selection.
+	// If both floor replicas were lost or rolled below what a VALID activation record durably
+	// witnessed, restore the durable floor from that witness BEFORE any branch, so monotonic
+	// rollback protection (and the activation floor gate) survives replica loss. Never lowers
+	// the floor. (Design concern 1; a later signed v < N must not slip past a dropped floor.)
+	if ast == activationValid {
+		frec = c.raiseFloorFromActivation(ctx, arec, frec, activeVer)
+	}
+
 	// Equivocation or corrupt-all durable state: the floor is RETAINED (never lowered),
 	// content resume is refused, GC is disabled. Keep a valid LKG if the activation record
 	// re-verifies; otherwise fall to the embedded baseline (critical).
@@ -123,6 +134,55 @@ func (c *activationCoordinator) Recover(ctx context.Context) (recoveryResult, er
 	}
 	return c.installEmbedded(frec, recoveryEmbeddedDegraded, true, false,
 		"no valid activation record with durable floor state"), nil
+}
+
+// raiseFloorFromActivation folds the activation record's durable floor copy into floor
+// selection as the design's THIRD max input (§B.4/§B.6). When the copy witnesses a HIGHER
+// floor than the two replicas recovered (e.g. both replicas were lost/corrupt but a valid
+// activation record at version N survives), it DURABLY repairs the floor replicas from the
+// witness so the on-disk floor — and therefore the activation gate on the next fresh
+// activation — is protected against a rollback to a signed v < N. It NEVER lowers the floor:
+// if the replicas already stand at/above the witness, it is a no-op. The durable repair goes
+// through floorStore.Advance, which itself rejects a rollback/equivocation, so a genuine
+// same-watermark conflict cannot be overwritten; in that pathological case the reported floor
+// is still raised to the witness (never under-reported) without a durable write.
+func (c *activationCoordinator) raiseFloorFromActivation(ctx context.Context, arec activationRecord, frec floorRecovery, activeVer int64) floorRecovery {
+	aw := arec.floorWatermark()
+	if !frec.Floor.less(aw) {
+		return frec // replicas already at/above the durable activation witness — no-op.
+	}
+	if fr, ok := floorRecordFromActivation(arec); ok {
+		if _, err := c.floor.Advance(ctx, fr); err == nil {
+			return c.floor.Recover(activeVer) // repaired: re-read the now-protected floor state.
+		}
+	}
+	// Could not durably repair (unorderable conflict at the witness version, or a floor copy
+	// that does not name the active generation). Never under-report the floor: take the max.
+	frec.Floor = aw
+	frec.FloorFromCheckpoint = false
+	return frec
+}
+
+// floorRecordFromActivation reconstructs the durable floor record a valid activation record
+// witnesses. It is digest-valid ONLY when the floor copy names the ACTIVE generation
+// (FloorVersion == ActiveVersion) — the committed-activation invariant, since S3 advances
+// the floor to the activating generation before the S4 record commit. When that does not
+// hold the record cannot be reconstructed digest-bound, so it returns ok=false and the
+// caller falls back to a numeric-only floor raise.
+func floorRecordFromActivation(arec activationRecord) (floorRecord, bool) {
+	if arec.FloorVersion < 1 || arec.FloorVersion != arec.ActiveVersion {
+		return floorRecord{}, false
+	}
+	return floorRecord{
+		SchemaVersion:  floorSchemaVersion,
+		Protocol:       urlcatfeed.Protocol,
+		Feed:           urlcatfeed.FeedID,
+		FeedVersion:    arec.FloorVersion,
+		GeneratedAt:    arec.FloorGeneratedAt,
+		GenerationID:   arec.GenerationID,
+		ManifestSHA256: arec.ManifestSHA256,
+		ArtifactSHA256: arec.ArtifactSHA256,
+	}, true
 }
 
 // recoverFailClosed handles equivocation / corrupt-all: never lower the floor, disable GC,

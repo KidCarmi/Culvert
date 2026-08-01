@@ -261,6 +261,53 @@ func TestF3b3_Recover_ActiveGenerationCorrupt(t *testing.T) {
 	}
 }
 
+// ── both floor replicas lost + valid activation record → floor restored from the ──────
+// ── activation-record floor copy (the THIRD max input), durably repaired (Codex P1 #3) ─
+
+func TestF3b3_Recover_ActivationFloorWitnessRepairsLostReplicas(t *testing.T) {
+	resetOwnership(t)
+	dir := t.TempDir()
+	g1 := buildFeedGen(t, feedGenOpts{feedVersion: 1})
+	g2 := buildFeedGen(t, feedGenOpts{feedVersion: 2})
+	persistRealGen(t, dir+"/generations", g1)
+	persistRealGen(t, dir+"/generations", g2)
+	env := newCoordEnv(t, dir, g2, coordOpts{verifier: multiVerifier(g1, g2)})
+	activateFresh(t, env, "2") // floor + activation committed at v2, live @2
+
+	// Total floor-replica loss AFTER the activation record was durable: corrupt BOTH
+	// floor.a/floor.b. The activation record still durably witnesses floor v2.
+	for _, f := range []string{floorFileA, floorFileB} {
+		if err := os.WriteFile(filepath.Join(dir, f), []byte("garbage"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// A fresh holder recovers. Before the fix this dropped the floor to the compiled
+	// checkpoint (0); now the activation-record floor copy raises it back to v2.
+	env2 := newCoordEnv(t, dir, g2, coordOpts{verifier: multiVerifier(g1, g2)})
+	rec, err := env2.coord.Recover(context.Background())
+	if err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if rec.Floor.Version != 2 {
+		t.Fatalf("floor dropped to %d despite a valid activation record at v2 (Codex P1 #3)", rec.Floor.Version)
+	}
+	// The active generation still re-verifies, so it is served (not degraded to embedded).
+	if rec.Class != recoveryActiveServed || rec.ActiveVersion != 2 {
+		t.Fatalf("recovery = %+v; want active_served v2", rec)
+	}
+	// DURABLE repair: a read of only the on-disk floor replicas now sees v2, so the
+	// activation floor gate is protected — a signed v1 (< 2) is rejected as a rollback,
+	// which is exactly the monotonic protection the missing witness had defeated.
+	if fv := env2.coord.currentFloorVersion(); fv != 2 {
+		t.Fatalf("durable floor not repaired: on-disk floor = %d, want 2", fv)
+	}
+	if _, aerr := env2.coord.Activate(context.Background(),
+		activateInput{GenerationID: "1", Provenance: activationProvenanceDownloaded}); aerr == nil {
+		t.Fatal("a signed v1 activated below the restored v2 floor — rollback protection defeated")
+	}
+}
+
 func writeFloorRaw(t *testing.T, path string, rec floorRecord) {
 	t.Helper()
 	b, err := encodeFloorRecord(rec)
