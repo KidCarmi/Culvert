@@ -7,6 +7,18 @@ the SWG rule (`policy.go:91-188`, four actions `:19-27`) is a network-destinatio
 be extended with MCP fields, and the SWG evaluator (which does DNS/disk I/O during a decision,
 `policy.go:1387`) **MUST NOT** be reused because MCP evaluation must be I/O-free.
 
+> **Implementation status (PR-6) — IMPLEMENTED (dormant).** This model is realized by `internal/mcp/policy`
+> (engine, immutable `DecisionInput` tuple, immutable capability-local compiled `Snapshot`, strict parser,
+> deterministic order-independent hash, bounded lock-free store, `Decision` + sanitized `ExplainTrace`) and
+> `internal/mcp/policy/simulate` (single/corpus/blast-radius/shadow over the SAME evaluator). The engine is a
+> pure, **I/O-free** function of `(snapshot, input)` — no network/fs/db/DNS/env/**clock**/secret/logging on the
+> eval path (explicit `EvalTime`, never `time.Now()`; enforced by an AST import-allowlist test) — exactly the
+> separation this section mandates from the SWG rule. It is a **separate** Go type set from SWG `PolicyRule` and
+> calls no SWG evaluator. Decision-only in this slice: wired into the PR-5 runtime as an optional provider, an
+> ALLOW-class decision returns `execution_state: not_implemented` (no upstream/credential/broker call). The
+> approval-UX lifecycle (`MCP-POLICY-007`) and the policy-bundle publication API/GUI + signed CP→DP distribution
+> are later slices (PR-9/PR-10). See [`IMPLEMENTATION-SLICES.md`](IMPLEMENTATION-SLICES.md) PR-6.
+
 Legend: **[FACT]** repo-verified · **[INFER]** · **[REC]** · **[EXT]**.
 
 ---

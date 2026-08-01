@@ -74,6 +74,15 @@ implemented starting at PR-1/PR-2:
   alongside D-1.** The binding structural constraint it selects is recorded in
   [`ADR-0024 §Decision Part 1 item 8`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md).
 
+> **PR-6 update — the policy engine adds NO operator config surface.** `internal/mcp/policy` is a dormant,
+> decision-only engine: it has **no CLI flag, env var, YAML key, Admin API, or GUI panel**, so it introduces no
+> new `configBackup`/`AdminSettings`/`ConfigSnapshot` field and no `configSurfaces` row in this slice. The
+> policy-bundle upload/publish and reason-code-catalog rows below (tagged for their own slices) are the surfaces
+> that carry the config parity obligation — and they land with the Management API/GUI (PR-9) and signed CP→DP
+> distribution (PR-10), **not** PR-6. A policy `Snapshot` is compiled from an in-memory document and published
+> through a bounded in-process `Store`; there is no persisted, exported, rolled-back, or CP→DP-synced policy
+> config field in PR-6, so the anti-drift wall is intentionally untouched here.
+
 **Known limitation this closes — stated plainly, because the gap is invisible by construction.**
 `config_surfaces_test.go`'s type inventory (`csrStructTypes()`) is **hard-coded to exactly three
 types** — `configBackup`, `AdminSettings`, `ConfigSnapshot` — and its reflection walk is **one level

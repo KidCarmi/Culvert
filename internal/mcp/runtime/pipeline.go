@@ -18,6 +18,7 @@ import (
 	"github.com/KidCarmi/Culvert/internal/mcp/jsonrpc"
 	"github.com/KidCarmi/Culvert/internal/mcp/limits"
 	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
+	"github.com/KidCarmi/Culvert/internal/mcp/policy"
 	"github.com/KidCarmi/Culvert/internal/mcp/protocol"
 	"github.com/KidCarmi/Culvert/internal/mcp/registry"
 	"github.com/KidCarmi/Culvert/internal/mcp/session"
@@ -102,6 +103,12 @@ type pipeline struct {
 	rev        uint64
 	idSeq      atomic.Uint64
 
+	// policy is the OPTIONAL capability-local policy provider; policyEngine is this
+	// pipeline's own pure evaluator (never shared mutable state). When policy is nil
+	// the pipeline keeps the PR-5 observe-only disposition.
+	policy       PolicyProvider
+	policyEngine *policy.Engine
+
 	// boundMu guards boundIDs — the set of session ids this pipeline has bound an
 	// identity to. It lets reconcileBindings unbind identities for sessions the
 	// kernel sweeper reclaimed (which has no per-binding hook), so the binding store
@@ -124,7 +131,7 @@ func newPipeline(cfg ListenerConfig, deps Deps, listenerID string, ctr *counters
 	}
 	sl := cfg.sessionLimits()
 	mgr := session.NewManager(sl, sl, deps.now)
-	return &pipeline{
+	p := &pipeline{
 		capability: cfg.Capability,
 		listenerID: listenerID,
 		host:       hv,
@@ -137,7 +144,12 @@ func newPipeline(cfg ListenerConfig, deps Deps, listenerID string, ctr *counters
 		ctr:        ctr,
 		rev:        rev,
 		boundIDs:   make(map[string]struct{}),
-	}, nil
+	}
+	if deps.Policy != nil {
+		p.policy = deps.Policy
+		p.policyEngine = newPolicyEngine()
+	}
+	return p, nil
 }
 
 // trackBinding records that sessionID now carries a bound identity (so a later
@@ -372,8 +384,8 @@ func (p *pipeline) processMessage(req Request, rb *recBuilder, msg jsonrpc.Messa
 		return p.reject(rb, statusForAdmission(mcperr.ReasonOf(err)), mcperr.ReasonOf(err), "")
 	}
 	rb.rec.Method = msg.Method // safe: an admitted method is one of the reviewed six
-	// Step 15: observe-only disposition.
-	return p.dispatch(rb, msg, sess, negotiated, adm)
+	// Step 15: disposition (observe-only in PR-5; decision-only policy in PR-6).
+	return p.dispatch(rb, req, msg, sess, ctx, negotiated, adm, now)
 }
 
 // resolveSession performs step 11. On an initialize it opens a new session and
@@ -438,9 +450,14 @@ func (p *pipeline) openInitialize(req Request, rb *recBuilder, msg jsonrpc.Messa
 // complete normally; decision-point methods (tools/list, tools/call) end in a
 // deterministic observe-only rejection — never a policy call, credential
 // materialization, upstream contact, or fabricated success.
-func (p *pipeline) dispatch(rb *recBuilder, msg jsonrpc.Message, sess *session.Session, negotiated protocol.Version, adm protocol.Admission) Outcome {
+func (p *pipeline) dispatch(rb *recBuilder, req Request, msg jsonrpc.Message, sess *session.Session, ctx *identity.ResolvedContext, negotiated protocol.Version, adm protocol.Admission, now time.Time) Outcome {
 	if adm.Handling == protocol.HandlingDecisionPoint {
-		// Observe-only: sanitized record + deterministic typed rejection.
+		// PR-6: if a policy provider is wired, evaluate the capability-local snapshot
+		// (decision-only — never an upstream/credential/broker call). Otherwise keep
+		// the PR-5 observe-only disposition.
+		if p.policy != nil {
+			return p.dispatchPolicy(rb, req, msg, ctx, now)
+		}
 		p.ctr.observeOnly.Add(1)
 		body := observeOnlyError(msg.ID)
 		return p.finish(rb, Outcome{

@@ -159,6 +159,22 @@ surface it covers — i.e. these are hard entry gates for PR-1 through PR-10, no
 > `TestAntiWeakening_RetainStreamAlwaysFalse`). Wiring the diff-scoped `golangci-lint`/`gosec` PR gates over the
 > new package is mechanical CI (`pr-fast-gate.yml`).
 
+> **PR-6 policy-engine gate — IMPLEMENTED.** The PR-6 `Release gate` (determinism + authorization-negative
+> green) is backed by `internal/mcp/policy` + `internal/mcp/policy/simulate`: the determinism/property suite
+> (`property_test.go` — same-input⇒same-decision over repeats, order-independent snapshot hash, input
+> immutability, fail-closed-on-error), the authorization-negative suite (`antiweakening_test.go` 17 tripwires +
+> `engine_test.go` hard-override/ambiguous-identity/default-deny + `compile_test.go` obligation-matrix +
+> Management-legal-actions), the **I/O-free / clock-free static wall** (`noio_test.go` — AST import allowlist +
+> forbidden-`time.Now` scan), the simulator≡evaluator parity + blast-radius (`simulate_test.go`), the runtime
+> decision-only integration (`internal/mcp/runtime/policy_test.go` — never contacts an upstream server, a
+> credential provider, or the broker, an ALLOW-class decision returns an unimplemented execution state, and a
+> missing snapshot fails closed), three fuzz targets
+> (`FuzzCompile`/`FuzzEvaluate`/`FuzzGlob`), and benchmarks (compile/eval/no-match/override/parallel/atomic-read).
+> All green under `-race -count=2 -shuffle=on`. The policy-bundle UPLOAD API / reason-code-catalog config
+> surfaces (`CONFIG-SURFACE-MATRIX.md`, tagged PR-6/PR-9) and signed CP→DP policy distribution are deliberately
+> OUT of PR-6 scope — decision engine only. Diff-scoped `golangci-lint`/`gosec` over the new packages is
+> mechanical CI (`pr-fast-gate.yml`).
+
 > **Fuzz gate — blocking (PR-time) vs. advisory (scheduled).** PR-1's acceptance requires **fuzz green**,
 > so a **bounded, blocking** protocol-kernel fuzz job must be wired into `pr-fast-gate.yml`/`pr-deep-gate.yml`
 > (the first row above). `fuzz-nightly.yml` is **not** that gate and **must not be described as
