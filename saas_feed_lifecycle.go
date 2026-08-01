@@ -59,8 +59,9 @@ func startSignedFeedLifecycle(feedDir string, ctx context.Context) {
 	rt.status.noteConfig(res)
 
 	// 3+4. Record-driven recovery with NO network; installs active/LKG/embedded atomically.
-	recRes, rerr := rt.recover(ctx)
-	if rerr != nil {
+	// The recovery outcome is folded into the status holder (surfaced via
+	// /api/saas-feed/status, /metrics, and the latched alerts), so it is not logged here.
+	if _, rerr := rt.recover(ctx); rerr != nil {
 		logger.Printf("SaaSFeed: recovery error (embedded baseline serving): %s", sanitizeLog(rerr.Error()))
 	}
 
@@ -83,13 +84,16 @@ func startSignedFeedLifecycle(feedDir string, ctx context.Context) {
 		sched.Wake()
 	}
 
-	// Log only non-string, non-injectable values (a bool + integer enum codes) so no
-	// config-derived string ever reaches the log sink (CWE-117 — CodeQL kept tainting the
-	// %s enum strings through resolveAuthority even when sanitised). The human-readable
-	// authority / recovery / state are all observable on /api/saas-feed/status, /metrics,
-	// and the latched alerts.
-	logger.Printf("SaaSFeed: signed-feed lifecycle armed (enabled=%v authority_code=%d recovery_code=%d)",
-		res.Config.runtimeEnabled(), int(res.Authority), int(recRes.Class))
+	// CodeQL's log-injection query taints anything derived from res.Config (user config)
+	// reaching a log sink regardless of type, so pass NO tainted-derived value: branch on
+	// the resolved-enable condition and log a STATIC string literal in each arm. The
+	// runtime authority/recovery/state remain observable on /api/saas-feed/status,
+	// /metrics, and the latched alerts.
+	if res.Config.runtimeEnabled() {
+		logger.Printf("SaaSFeed: signed-feed lifecycle armed and ENABLED (runtime state on /api/saas-feed/status)")
+	} else {
+		logger.Printf("SaaSFeed: signed-feed lifecycle armed, disabled/dormant by default (runtime state on /api/saas-feed/status)")
+	}
 }
 
 // wakeSignedFeedScheduler requests an immediate refresh evaluation (a config change:
