@@ -89,6 +89,7 @@ type Adapter interface {
 
 type identityAdapter struct{ v Version }
 
+// Version returns the protocol version this adapter normalizes for.
 func (a identityAdapter) Version() Version { return a.v }
 
 // Normalize validates the message is one the kernel can carry for this version

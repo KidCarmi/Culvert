@@ -9,24 +9,24 @@ package protocol
 type TransportCondition int
 
 const (
-	// CondSessionlessMissingVersion: a sessionless / first request with no
+	// CondSessionlessMissingVersion — a sessionless / first request with no
 	// MCP-Protocol-Version header. D-1 CLOSED: reject with 400 (never silently
 	// assume 2025-03-26).
 	CondSessionlessMissingVersion TransportCondition = iota
-	// CondInvalidVersionHeader: an invalid or unsupported MCP-Protocol-Version
+	// CondInvalidVersionHeader — an invalid or unsupported MCP-Protocol-Version
 	// header on a subsequent request → 400.
 	CondInvalidVersionHeader
-	// CondMissingSessionID: a required session identifier is missing → 400.
+	// CondMissingSessionID — a required session identifier is missing → 400.
 	CondMissingSessionID
-	// CondUnknownOrTerminatedSession: an unknown or terminated session → 404.
+	// CondUnknownOrTerminatedSession — an unknown or terminated session → 404.
 	CondUnknownOrTerminatedSession
-	// CondDeleteUnsupported: an unsupported DELETE → 405.
+	// CondDeleteUnsupported — an unsupported DELETE → 405.
 	CondDeleteUnsupported
-	// CondGetWithoutNegotiatedContext: a GET without a valid negotiated context →
+	// CondGetWithoutNegotiatedContext — a GET without a valid negotiated context →
 	// terminal 405, and NO text/event-stream is opened (no legacy SSE, no
 	// pre-negotiation held stream).
 	CondGetWithoutNegotiatedContext
-	// CondInitializeVersionUnsupported: an initialize whose requested version is
+	// CondInitializeVersionUnsupported — an initialize whose requested version is
 	// unsupported. Preferred handling is a 200 InitializeResult counter-offer of a
 	// supported version — NOT a 4xx — so a spec-conformant or catch-any SDK client
 	// is never recruited into the legacy 2024-11-05 probe.

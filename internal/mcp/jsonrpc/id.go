@@ -19,14 +19,14 @@ import (
 type IDKind int
 
 const (
-	// IDAbsent: the message carried no "id" member (a notification).
+	// IDAbsent — the message carried no "id" member (a notification).
 	IDAbsent IDKind = iota
-	// IDNull: an explicit JSON null id. Not correlatable; only ever legitimate on
+	// IDNull — an explicit JSON null id. Not correlatable; only ever legitimate on
 	// an outbound "unparseable input" error, never accepted as a request id.
 	IDNull
-	// IDInt: an integer id preserved exactly as int64 (no float precision loss).
+	// IDInt — an integer id preserved exactly as int64 (no float precision loss).
 	IDInt
-	// IDString: a string id.
+	// IDString — a string id.
 	IDString
 )
 

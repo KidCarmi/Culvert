@@ -44,27 +44,27 @@ type dirState struct {
 	pending  map[string]*entry     // key = id.Key(); requests awaiting resolution
 	resolved map[string]resolution // bounded recently-resolved ids (duplicate/late detection)
 	order    []string              // ring order for bounded eviction of resolved
-	cap      int                   // resolved ring capacity
+	capacity int                   // resolved ring capacity
 }
 
-func newDirState(cap int) *dirState {
-	if cap < 1 {
-		cap = 1
+func newDirState(capacity int) *dirState {
+	if capacity < 1 {
+		capacity = 1
 	}
 	return &dirState{
 		pending:  make(map[string]*entry),
 		resolved: make(map[string]resolution),
-		cap:      cap,
+		capacity: capacity,
 	}
 }
 
 // resolve moves key out of pending into the bounded resolved ring, evicting the
 // oldest resolved id when full. Bounded memory: the resolved ring can never
-// exceed cap regardless of traffic.
+// exceed capacity regardless of traffic.
 func (d *dirState) resolve(key string, r resolution) {
 	delete(d.pending, key)
 	if _, ok := d.resolved[key]; !ok {
-		if len(d.order) >= d.cap {
+		if len(d.order) >= d.capacity {
 			oldest := d.order[0]
 			d.order = d.order[1:]
 			delete(d.resolved, oldest)

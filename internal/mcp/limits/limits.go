@@ -55,18 +55,41 @@ type Config struct {
 // Limits is an immutable, validated bound set.
 type Limits struct{ c Config }
 
-func (l Limits) MaxFrameBytes() int            { return l.c.MaxFrameBytes }
-func (l Limits) MaxDepth() int                 { return l.c.MaxDepth }
-func (l Limits) MaxObjectMembers() int         { return l.c.MaxObjectMembers }
-func (l Limits) MaxArrayElements() int         { return l.c.MaxArrayElements }
-func (l Limits) MaxStringBytes() int           { return l.c.MaxStringBytes }
-func (l Limits) MaxMethodBytes() int           { return l.c.MaxMethodBytes }
-func (l Limits) MaxIDBytes() int               { return l.c.MaxIDBytes }
-func (l Limits) MaxErrorDataBytes() int        { return l.c.MaxErrorDataBytes }
-func (l Limits) MaxSessions() int              { return l.c.MaxSessions }
+// MaxFrameBytes returns the maximum bytes of a single wire frame.
+func (l Limits) MaxFrameBytes() int { return l.c.MaxFrameBytes }
+
+// MaxDepth returns the maximum JSON nesting depth.
+func (l Limits) MaxDepth() int { return l.c.MaxDepth }
+
+// MaxObjectMembers returns the maximum members in any one JSON object.
+func (l Limits) MaxObjectMembers() int { return l.c.MaxObjectMembers }
+
+// MaxArrayElements returns the maximum elements in any one JSON array.
+func (l Limits) MaxArrayElements() int { return l.c.MaxArrayElements }
+
+// MaxStringBytes returns the maximum bytes of any one JSON string.
+func (l Limits) MaxStringBytes() int { return l.c.MaxStringBytes }
+
+// MaxMethodBytes returns the maximum bytes of a method name.
+func (l Limits) MaxMethodBytes() int { return l.c.MaxMethodBytes }
+
+// MaxIDBytes returns the maximum encoded bytes of a request/response id.
+func (l Limits) MaxIDBytes() int { return l.c.MaxIDBytes }
+
+// MaxErrorDataBytes returns the maximum bytes of an error data member.
+func (l Limits) MaxErrorDataBytes() int { return l.c.MaxErrorDataBytes }
+
+// MaxSessions returns the maximum concurrent sessions per capability.
+func (l Limits) MaxSessions() int { return l.c.MaxSessions }
+
+// MaxOutstandingPerSession returns the maximum in-flight requests per (session, direction).
 func (l Limits) MaxOutstandingPerSession() int { return l.c.MaxOutstandingPerSession }
-func (l Limits) MaxTotalOutstanding() int      { return l.c.MaxTotalOutstanding }
-func (l Limits) SessionTTL() time.Duration     { return l.c.SessionTTL }
+
+// MaxTotalOutstanding returns the maximum in-flight requests fleet-wide per capability.
+func (l Limits) MaxTotalOutstanding() int { return l.c.MaxTotalOutstanding }
+
+// SessionTTL returns the lifecycle idle timeout / expiry window.
+func (l Limits) SessionTTL() time.Duration { return l.c.SessionTTL }
 
 // posCap validates that v is strictly positive and does not exceed ceiling.
 func posCap(v, ceiling int, name string) error {
@@ -84,8 +107,8 @@ func posCap(v, ceiling int, name string) error {
 // gate every Limits passes through.
 func (c Config) Validate() error {
 	for _, ck := range []struct {
-		v, cap int
-		name   string
+		v, ceil int
+		name    string
 	}{
 		{c.MaxFrameBytes, capFrameBytes, "MaxFrameBytes"},
 		{c.MaxDepth, capDepth, "MaxDepth"},
@@ -99,7 +122,7 @@ func (c Config) Validate() error {
 		{c.MaxOutstandingPerSession, capOutstandingSession, "MaxOutstandingPerSession"},
 		{c.MaxTotalOutstanding, capTotalOutstanding, "MaxTotalOutstanding"},
 	} {
-		if err := posCap(ck.v, ck.cap, ck.name); err != nil {
+		if err := posCap(ck.v, ck.ceil, ck.name); err != nil {
 			return err
 		}
 	}

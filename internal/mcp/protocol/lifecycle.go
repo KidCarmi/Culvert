@@ -7,16 +7,17 @@ package protocol
 type State int
 
 const (
-	// StateNew: created, not yet initialized. Only initialize is admissible.
+	// StateNew — created, not yet initialized. Only initialize is admissible.
 	StateNew State = iota
-	// StateInitializing: initialize accepted, awaiting notifications/initialized.
+	// StateInitializing — initialize accepted, awaiting notifications/initialized.
 	StateInitializing
-	// StateInitialized: steady state; all admitted non-handshake methods allowed.
+	// StateInitialized — steady state; all admitted non-handshake methods allowed.
 	StateInitialized
-	// StateClosed: terminal; nothing is admissible.
+	// StateClosed — terminal; nothing is admissible.
 	StateClosed
 )
 
+// String returns the lifecycle-state label.
 func (s State) String() string {
 	switch s {
 	case StateNew:

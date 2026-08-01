@@ -29,9 +29,9 @@ func FuzzNegotiateAndAdmit(f *testing.F) {
 		f.Add(s.v, s.method, s.cap, s.dir)
 	}
 	f.Fuzz(func(t *testing.T, vs, method string, capN, dirN int) {
-		cap := Gateway
+		capV := Gateway
 		if capN%2 != 0 {
-			cap = Management
+			capV = Management
 		}
 		dir := ClientOriginated
 		if dirN%2 != 0 {
@@ -59,8 +59,8 @@ func FuzzNegotiateAndAdmit(f *testing.F) {
 		if (capN>>1)&1 == 1 {
 			class = jsonrpc.ClassNotification
 		}
-		a1 := Admit(cap, dir, class, method)
-		a2 := Admit(cap, dir, class, method)
+		a1 := Admit(capV, dir, class, method)
+		a2 := Admit(capV, dir, class, method)
 		if a1 != a2 {
 			t.Fatalf("admission non-deterministic for %q", method)
 		}

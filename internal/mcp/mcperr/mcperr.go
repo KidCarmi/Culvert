@@ -28,41 +28,41 @@ type Reason int
 const (
 	// ReasonNone is the zero value: no kernel error.
 	ReasonNone Reason = iota
-	// ReasonMalformedJSON: the bytes are not well-formed strict JSON, or violate
+	// ReasonMalformedJSON — the bytes are not well-formed strict JSON, or violate
 	// a strict-decode rule (duplicate object key, invalid UTF-8, trailing bytes /
 	// multiple top-level values, excessive nesting depth).
 	ReasonMalformedJSON
-	// ReasonInvalidJSONRPC: structurally valid JSON that is not a valid JSON-RPC
+	// ReasonInvalidJSONRPC — structurally valid JSON that is not a valid JSON-RPC
 	// 2.0 envelope (bad "jsonrpc", invalid id shape, request without id,
 	// notification with id, response with both result and error or neither,
 	// ambiguous request/response shape).
 	ReasonInvalidJSONRPC
-	// ReasonUnsupportedBatch: a top-level JSON-RPC batch array. Rejected whole in
+	// ReasonUnsupportedBatch — a top-level JSON-RPC batch array. Rejected whole in
 	// V1 — never split or partially processed.
 	ReasonUnsupportedBatch
-	// ReasonUnsupportedVersion: a protocol version outside the supported set, or a
+	// ReasonUnsupportedVersion — a protocol version outside the supported set, or a
 	// sessionless first request missing the MCP-Protocol-Version identification.
 	ReasonUnsupportedVersion
-	// ReasonUnsupportedMethod: a method absent from the reviewed admitted registry
+	// ReasonUnsupportedMethod — a method absent from the reviewed admitted registry
 	// (every non-admitted method, including a method valid in the negotiated spec
 	// version but not in Culvert's V1 set).
 	ReasonUnsupportedMethod
-	// ReasonResourceLimit: a structural or resource bound was exceeded (frame
+	// ReasonResourceLimit — a structural or resource bound was exceeded (frame
 	// bytes, depth, member/element counts, string/method/id/error-data bytes,
 	// session or outstanding-request caps).
 	ReasonResourceLimit
-	// ReasonInvalidLifecycle: an operation illegal in the current lifecycle state.
+	// ReasonInvalidLifecycle — an operation illegal in the current lifecycle state.
 	ReasonInvalidLifecycle
-	// ReasonUncorrelatedResponse: a response whose (session, direction, id) matches
+	// ReasonUncorrelatedResponse — a response whose (session, direction, id) matches
 	// no outstanding request owned by this side.
 	ReasonUncorrelatedResponse
-	// ReasonDuplicateCompletion: a second completion for an already-resolved
+	// ReasonDuplicateCompletion — a second completion for an already-resolved
 	// request (distinct from a tolerated late cancellation).
 	ReasonDuplicateCompletion
-	// ReasonInvalidCancellation: a cancellation violating ownership, direction or
+	// ReasonInvalidCancellation — a cancellation violating ownership, direction or
 	// target rules (wrong owner, opposite direction, or naming initialize).
 	ReasonInvalidCancellation
-	// ReasonLateCancellation: a cancellation that arrives after its target already
+	// ReasonLateCancellation — a cancellation that arrives after its target already
 	// completed. Tolerated per the spec — NOT a fault and NOT a duplicate
 	// completion; surfaced as a distinct reason so callers can no-op it.
 	ReasonLateCancellation
@@ -168,14 +168,14 @@ func ReasonOf(err error) Reason {
 // replaces every byte that is not a printable ASCII graphic (0x20–0x7E, excl.
 // backslash and quote to keep CWE-117 scanners happy) with '.', and truncates to
 // max bytes with a trailing "…" marker. It never returns the raw input. A
-// non-positive max defaults to 64.
-func Sanitize(s string, max int) string {
-	if max <= 0 {
-		max = 64
+// non-positive maxLen defaults to 64.
+func Sanitize(s string, maxLen int) string {
+	if maxLen <= 0 {
+		maxLen = 64
 	}
 	truncated := false
-	if len(s) > max {
-		s = s[:max]
+	if len(s) > maxLen {
+		s = s[:maxLen]
 		truncated = true
 	}
 	var b strings.Builder

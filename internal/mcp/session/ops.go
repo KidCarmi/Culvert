@@ -13,10 +13,10 @@ import (
 // Session is one MCP protocol session. All fields are guarded by mu; callers use
 // the methods, never the fields.
 type Session struct {
-	mu   sync.Mutex
-	id   string
-	cap  protocol.Capability
-	role protocol.PeerRole
+	mu         sync.Mutex
+	id         string
+	capability protocol.Capability
+	role       protocol.PeerRole
 
 	state      protocol.State
 	version    protocol.Version
@@ -36,7 +36,7 @@ type Session struct {
 func (s *Session) ID() string { return s.id }
 
 // Capability returns the session's surface.
-func (s *Session) Capability() protocol.Capability { return s.cap }
+func (s *Session) Capability() protocol.Capability { return s.capability }
 
 // Role returns the session's peer role (leg).
 func (s *Session) Role() protocol.PeerRole { return s.role }
@@ -125,7 +125,14 @@ func (s *Session) Admit(dir protocol.Direction, class jsonrpc.Class, method stri
 		return protocol.Admission{Handling: protocol.HandlingRejected, Reason: mcperr.ReasonInvalidLifecycle},
 			mcperr.New(mcperr.ReasonInvalidLifecycle, "admit", "method not allowed in state "+s.state.String())
 	}
-	adm := protocol.Admit(s.cap, dir, class, method)
+	// The handshake cannot complete without a negotiated version: allowing
+	// notifications/initialized (and thus steady-state admission) while hasVersion
+	// is false would run the whole session outside the version allowlist/adapters.
+	if method == "notifications/initialized" && !s.hasVersion {
+		return protocol.Admission{Handling: protocol.HandlingRejected, Reason: mcperr.ReasonInvalidLifecycle},
+			mcperr.New(mcperr.ReasonInvalidLifecycle, "admit", "handshake completion before version negotiation")
+	}
+	adm := protocol.Admit(s.capability, dir, class, method)
 	if adm.Handling == protocol.HandlingRejected {
 		return adm, mcperr.New(adm.Reason, "admit", adm.Detail)
 	}
@@ -158,7 +165,7 @@ func (s *Session) RegisterRequest(dir protocol.Direction, owner string, id jsonr
 	if len(ds.pending) >= s.lim.MaxOutstandingPerSession() {
 		return mcperr.New(mcperr.ReasonResourceLimit, "register", "per-session outstanding cap reached")
 	}
-	if !s.mgr.chargeOutstanding(s.lim) {
+	if !s.mgr.chargeOutstanding(s.capability, s.lim) {
 		return mcperr.New(mcperr.ReasonResourceLimit, "register", "fleet outstanding cap reached")
 	}
 	ds.pending[key] = &entry{id: id, owner: owner, method: method, registeredAt: s.mgr.now()}
@@ -170,9 +177,9 @@ func (s *Session) RegisterRequest(dir protocol.Direction, owner string, id jsonr
 type CorrelateResult int
 
 const (
-	// Completed: the response matched a pending request, which is now released.
+	// Completed — the response matched a pending request, which is now released.
 	Completed CorrelateResult = iota + 1
-	// ToleratedAfterCancel: the response arrived after the request was cancelled;
+	// ToleratedAfterCancel — the response arrived after the request was cancelled;
 	// tolerated per the cancellation spec, not a fault.
 	ToleratedAfterCancel
 )
@@ -193,43 +200,46 @@ func (s *Session) CorrelateResponse(dir protocol.Direction, id jsonrpc.ID) (Corr
 		return 0, mcperr.New(mcperr.ReasonInvalidLifecycle, "correlate", "session closed")
 	}
 	key := id.Key()
-	if ds := s.dirs[dir]; ds != nil {
-		if _, ok := ds.pending[key]; ok {
-			ds.resolve(key, resCompleted)
-			s.mgr.releaseOutstanding()
-			s.lastActive = s.mgr.now()
-			return Completed, nil
-		}
-		if r, ok := ds.resolved[key]; ok {
-			if r == resCancelled {
-				s.lastActive = s.mgr.now()
-				return ToleratedAfterCancel, nil
-			}
-			return 0, mcperr.New(mcperr.ReasonDuplicateCompletion, "correlate", "second completion for an already-completed request")
-		}
+	ds := s.dirs[dir]
+	if ds == nil {
+		return 0, mcperr.New(mcperr.ReasonUncorrelatedResponse, "correlate", "response id matches no outstanding request in this direction")
 	}
-	return 0, mcperr.New(mcperr.ReasonUncorrelatedResponse, "correlate", "response id matches no outstanding request in this direction")
+	if _, ok := ds.pending[key]; ok {
+		ds.resolve(key, resCompleted)
+		s.mgr.releaseOutstanding(s.capability)
+		s.lastActive = s.mgr.now()
+		return Completed, nil
+	}
+	r, ok := ds.resolved[key]
+	if !ok {
+		return 0, mcperr.New(mcperr.ReasonUncorrelatedResponse, "correlate", "response id matches no outstanding request in this direction")
+	}
+	if r == resCancelled {
+		s.lastActive = s.mgr.now()
+		return ToleratedAfterCancel, nil
+	}
+	return 0, mcperr.New(mcperr.ReasonDuplicateCompletion, "correlate", "second completion for an already-completed request")
 }
 
 // CancelResult is the outcome of a cancellation.
 type CancelResult int
 
 const (
-	// CancelApplied: a pending request owned by the canceller was released.
+	// CancelApplied — a pending request owned by the canceller was released.
 	CancelApplied CancelResult = iota + 1
-	// CancelLate: the target was already resolved (completed or cancelled) —
+	// CancelLate — the target was already resolved (completed or cancelled) —
 	// tolerated no-op, no state changed.
 	CancelLate
-	// CancelNoTarget: no request with this id in this direction — tolerated no-op,
+	// CancelNoTarget — no request with this id in this direction — tolerated no-op,
 	// all state retained.
 	CancelNoTarget
-	// CancelRejectedOppositeDirection: the id is outstanding ONLY in the other
+	// CancelRejectedOppositeDirection — the id is outstanding ONLY in the other
 	// direction — rejected, the other direction's entry retained.
 	CancelRejectedOppositeDirection
-	// CancelRejectedWrongOwner: the id is pending in this direction but owned by a
+	// CancelRejectedWrongOwner — the id is pending in this direction but owned by a
 	// different requestor — rejected, retained.
 	CancelRejectedWrongOwner
-	// CancelRejectedInitialize: the target is the initialize request, which must
+	// CancelRejectedInitialize — the target is the initialize request, which must
 	// not be cancelled — rejected, retained.
 	CancelRejectedInitialize
 )
@@ -252,22 +262,8 @@ func (s *Session) Cancel(dir protocol.Direction, owner string, id jsonrpc.ID) Ca
 		return CancelNoTarget
 	}
 	key := id.Key()
-	if ds := s.dirs[dir]; ds != nil {
-		if e, ok := ds.pending[key]; ok {
-			if e.method == "initialize" {
-				return CancelRejectedInitialize
-			}
-			if e.owner != owner {
-				return CancelRejectedWrongOwner
-			}
-			ds.resolve(key, resCancelled)
-			s.mgr.releaseOutstanding()
-			s.lastActive = s.mgr.now()
-			return CancelApplied
-		}
-		if _, ok := ds.resolved[key]; ok {
-			return CancelLate
-		}
+	if res, owned := s.cancelInDirLocked(dir, owner, key); owned {
+		return res
 	}
 	// Not in this direction: if it is outstanding in the OTHER direction, this is
 	// an opposite-direction cancellation attempt — reject and retain it.
@@ -277,4 +273,50 @@ func (s *Session) Cancel(dir protocol.Direction, owner string, id jsonrpc.ID) Ca
 		}
 	}
 	return CancelNoTarget
+}
+
+// cancelInDirLocked applies a cancellation against direction dir's own state.
+// It returns (result, true) when dir knows the id (pending or recently resolved)
+// and (_, false) when dir has no knowledge of it. It never touches the other
+// direction. Caller holds s.mu.
+func (s *Session) cancelInDirLocked(dir protocol.Direction, owner, key string) (CancelResult, bool) {
+	ds := s.dirs[dir]
+	if ds == nil {
+		return 0, false
+	}
+	if e, ok := ds.pending[key]; ok {
+		switch {
+		case e.method == "initialize":
+			return CancelRejectedInitialize, true
+		case e.owner != owner:
+			return CancelRejectedWrongOwner, true
+		default:
+			ds.resolve(key, resCancelled)
+			s.mgr.releaseOutstanding(s.capability)
+			s.lastActive = s.mgr.now()
+			return CancelApplied, true
+		}
+	}
+	if _, ok := ds.resolved[key]; ok {
+		return CancelLate, true
+	}
+	return 0, false
+}
+
+// sweepStalePendingLocked deletes pending requests older than the session TTL and
+// returns how many were removed (so the caller can release that many outstanding
+// budget units). It runs even while the session is otherwise active, so a peer
+// that withholds responses cannot pin the budget. Caller holds s.mu.
+func (s *Session) sweepStalePendingLocked(now time.Time) int {
+	ttl := s.lim.SessionTTL()
+	released := 0
+	for _, ds := range s.dirs {
+		for key, e := range ds.pending {
+			if now.Sub(e.registeredAt) > ttl {
+				delete(ds.pending, key)
+				released++
+			}
+		}
+	}
+	return released
 }

@@ -171,6 +171,44 @@ func TestDuplicateKeyIsRejectedNotLastWins(t *testing.T) {
 	}
 }
 
+// --- anti-weakening guard: unpaired surrogate id collision ----------------
+//
+// This pins the correlation-key integrity control (MCP-PROTO-001/013). Two
+// DISTINCT string ids "\ud800" and "\udc00" both name unpaired surrogates that
+// encoding/json silently decodes to U+FFFD — so a decoder that let them through
+// would map two different requests to the SAME correlation key, letting one
+// request's response release the other's outstanding state. Both must be
+// rejected as malformed. A decoder weakened to drop the surrogate check would
+// classify them as valid and this test would fail.
+func TestUnpairedSurrogateIDRejected(t *testing.T) {
+	lim := gw(t)
+	cases := []struct {
+		name string
+		in   string
+	}{
+		{"lone-high-surrogate-id", `{"jsonrpc":"2.0","id":"\ud800","method":"ping"}`},
+		{"lone-low-surrogate-id", `{"jsonrpc":"2.0","id":"\udc00","method":"ping"}`},
+		{"unpaired-high-in-params", `{"jsonrpc":"2.0","id":1,"method":"ping","params":{"x":"\ud800!"}}`},
+		{"lone-low-in-method-arg", `{"jsonrpc":"2.0","id":"a\udfffb","method":"ping"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := mcperr.ReasonOf(mustErr(Decode([]byte(tc.in), lim))); got != mcperr.ReasonMalformedJSON {
+				t.Fatalf("reason = %v, want malformed_json", got)
+			}
+		})
+	}
+	// A PROPERLY paired surrogate escape (a valid astral code point) must still
+	// decode — the guard rejects only UNpaired surrogates, never valid data.
+	if _, err := Decode([]byte(`{"jsonrpc":"2.0","id":"😀","method":"ping"}`), lim); err != nil {
+		t.Fatalf("valid surrogate pair rejected: %v", err)
+	}
+	// An escaped backslash before a u is literal data, not a \u escape.
+	if _, err := Decode([]byte(`{"jsonrpc":"2.0","id":"\\ud800","method":"ping"}`), lim); err != nil {
+		t.Fatalf("literal backslash-u data rejected: %v", err)
+	}
+}
+
 // --- anti-weakening guard: batch ------------------------------------------
 func TestBatchIsRejectedWhole(t *testing.T) {
 	// Even a batch of otherwise-valid messages is rejected as a whole, never split.

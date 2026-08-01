@@ -37,6 +37,7 @@ const (
 	Allow
 )
 
+// String returns the decision label (allow/reject).
 func (d Decision) String() string {
 	if d == Allow {
 		return "allow"

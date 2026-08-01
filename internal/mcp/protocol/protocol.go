@@ -23,6 +23,7 @@ const (
 	Management
 )
 
+// String returns the capability label.
 func (c Capability) String() string {
 	if c == Management {
 		return "management"
@@ -35,12 +36,13 @@ func (c Capability) String() string {
 type PeerRole int
 
 const (
-	// ClientFacing: the agent → Culvert leg (TB-1 / TB-7).
+	// ClientFacing — the agent → Culvert leg (TB-1 / TB-7).
 	ClientFacing PeerRole = iota
-	// UpstreamFacing: the Culvert ↔ upstream-MCP-server leg (TB-2).
+	// UpstreamFacing — the Culvert ↔ upstream-MCP-server leg (TB-2).
 	UpstreamFacing
 )
 
+// String returns the peer-role label.
 func (r PeerRole) String() string {
 	if r == UpstreamFacing {
 		return "upstream-facing"
@@ -57,14 +59,15 @@ func (r PeerRole) String() string {
 type Direction int
 
 const (
-	// ClientOriginated: the natural client→server request flow (the client, or
+	// ClientOriginated — the natural client→server request flow (the client, or
 	// Culvert acting as a client toward an upstream server, is the requestor).
 	ClientOriginated Direction = iota
-	// ServerOriginated: the reverse channel (the server is the requestor). In V1
+	// ServerOriginated — the reverse channel (the server is the requestor). In V1
 	// server-originated requests are rejected at admission.
 	ServerOriginated
 )
 
+// String returns the direction label.
 func (d Direction) String() string {
 	if d == ServerOriginated {
 		return "server-originated"

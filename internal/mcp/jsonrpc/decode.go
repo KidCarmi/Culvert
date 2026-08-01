@@ -27,6 +27,17 @@ var envelopeKeys = map[string]struct{}{
 
 func envelopeKey(k string) bool { _, ok := envelopeKeys[k]; return ok }
 
+// envelope is the six known JSON-RPC 2.0 top-level members, captured as raw views
+// into the original frame (no business content is re-parsed).
+type envelope struct {
+	JSONRPC json.RawMessage `json:"jsonrpc"`
+	Method  json.RawMessage `json:"method"`
+	ID      json.RawMessage `json:"id"`
+	Params  json.RawMessage `json:"params"`
+	Result  json.RawMessage `json:"result"`
+	Error   json.RawMessage `json:"error"`
+}
+
 // Decode strictly validates and classifies a single JSON-RPC frame under the
 // given limits. It returns a Message whose Raw is the exact validated frame
 // (forward Raw downstream — never a re-encoding — to preserve MCP-PROTO-001's
@@ -36,26 +47,15 @@ func Decode(raw []byte, lim limits.Limits) (Message, error) {
 	if err := validateStrict(raw, lim); err != nil {
 		return Message{}, err
 	}
-
-	var env struct {
-		JSONRPC json.RawMessage `json:"jsonrpc"`
-		Method  json.RawMessage `json:"method"`
-		ID      json.RawMessage `json:"id"`
-		Params  json.RawMessage `json:"params"`
-		Result  json.RawMessage `json:"result"`
-		Error   json.RawMessage `json:"error"`
-	}
-	// Safe: validateStrict already proved this frame is strict JSON with only
-	// known top-level members. RawMessage fields view the original bytes, so no
-	// business content is re-parsed and nothing is re-encoded.
+	// Safe — validateStrict already proved this frame is strict JSON with only
+	// known top-level members. RawMessage fields view the original bytes.
+	var env envelope
 	if err := json.Unmarshal(raw, &env); err != nil {
 		return Message{}, malformed("envelope extraction failed")
 	}
-
 	if string(trimSpace(env.JSONRPC)) != `"2.0"` {
 		return Message{}, invalidJSONRPC(`jsonrpc member must be exactly "2.0"`)
 	}
-
 	if env.ID != nil && len(env.ID) > lim.MaxIDBytes() {
 		return Message{}, resourceLimit("id length")
 	}
@@ -63,36 +63,38 @@ func Decode(raw []byte, lim limits.Limits) (Message, error) {
 	if err != nil {
 		return Message{}, err
 	}
-
-	hasMethod := env.Method != nil
-	hasResult := env.Result != nil
-	hasError := env.Error != nil
-
-	if hasMethod {
-		// Request or notification. A method paired with result/error is ambiguous.
-		if hasResult || hasError {
-			return Message{}, invalidJSONRPC("message carries both method and result/error")
-		}
-		method, err := decodeMethod(env.Method, lim)
-		if err != nil {
-			return Message{}, err
-		}
-		switch id.Kind {
-		case IDAbsent:
-			return Message{Class: ClassNotification, Method: method, Params: env.Params, Raw: raw}, nil
-		case IDInt, IDString:
-			return Message{Class: ClassRequest, Method: method, ID: id, Params: env.Params, Raw: raw}, nil
-		default: // IDNull
-			// A notification MUST omit id; a request MUST carry a correlatable id.
-			// method + null id is neither.
-			return Message{}, invalidJSONRPC("method message with null id (neither a valid request nor notification)")
-		}
+	if env.Method != nil {
+		return classifyMethodful(raw, env, id, lim)
 	}
+	return classifyResponse(raw, env, id, lim)
+}
 
-	// No method => response.
+// classifyMethodful classifies a message that carries a method (a request or a
+// notification).
+func classifyMethodful(raw []byte, env envelope, id ID, lim limits.Limits) (Message, error) {
+	if env.Result != nil || env.Error != nil {
+		return Message{}, invalidJSONRPC("message carries both method and result/error")
+	}
+	method, err := decodeMethod(env.Method, lim)
+	if err != nil {
+		return Message{}, err
+	}
+	switch id.Kind {
+	case IDAbsent:
+		return Message{Class: ClassNotification, Method: method, Params: env.Params, Raw: raw}, nil
+	case IDInt, IDString:
+		return Message{Class: ClassRequest, Method: method, ID: id, Params: env.Params, Raw: raw}, nil
+	default: // IDNull — a notification must omit id; a request needs a correlatable one.
+		return Message{}, invalidJSONRPC("method message with null id (neither a valid request nor notification)")
+	}
+}
+
+// classifyResponse classifies a message that carries no method (a response).
+func classifyResponse(raw []byte, env envelope, id ID, lim limits.Limits) (Message, error) {
 	if env.Params != nil {
 		return Message{}, invalidJSONRPC("response carries params")
 	}
+	hasResult, hasError := env.Result != nil, env.Error != nil
 	if hasResult && hasError {
 		return Message{}, invalidJSONRPC("response carries both result and error")
 	}
@@ -197,6 +199,13 @@ func validateStrict(raw []byte, lim limits.Limits) error {
 	if !utf8.Valid(raw) {
 		return malformed("invalid UTF-8")
 	}
+	// utf8.Valid only checks the ENCODED bytes; a JSON \uXXXX escape naming an
+	// unpaired surrogate is ASCII-valid but encoding/json silently decodes it to
+	// U+FFFD. Two distinct string ids ("\ud800" and "\udc00") would then collapse
+	// to the same correlation key. Reject unpaired surrogate escapes up front.
+	if err := rejectUnpairedSurrogateEscapes(raw); err != nil {
+		return err
+	}
 
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber() // never route numbers through float64 during validation
@@ -229,6 +238,82 @@ func validateStrict(raw []byte, lim limits.Limits) error {
 		return invalidJSONRPC("trailing bytes or multiple top-level values")
 	}
 	return nil
+}
+
+// hex4 reads exactly four hex digits at raw[pos:pos+4], returning the value and
+// ok=false if out of range or non-hex.
+func hex4(raw []byte, pos int) (int, bool) {
+	if pos+4 > len(raw) {
+		return 0, false
+	}
+	v := 0
+	for i := 0; i < 4; i++ {
+		c := raw[pos+i]
+		switch {
+		case c >= '0' && c <= '9':
+			v = v<<4 | int(c-'0')
+		case c >= 'a' && c <= 'f':
+			v = v<<4 | int(c-'a'+10)
+		case c >= 'A' && c <= 'F':
+			v = v<<4 | int(c-'A'+10)
+		default:
+			return 0, false
+		}
+	}
+	return v, true
+}
+
+// rejectUnpairedSurrogateEscapes scans for JSON \uXXXX escapes and rejects any
+// high surrogate (D800-DBFF) not immediately followed by a \u low surrogate
+// (DC00-DFFF), and any lone low surrogate. A `\\` escapes the backslash, so a
+// literal "\\uD800" is data, not an escape, and is skipped. Backslashes appear
+// only inside JSON strings, and the structural walk independently rejects any
+// backslash that is not part of a valid string.
+func rejectUnpairedSurrogateEscapes(raw []byte) error {
+	for i := 0; i < len(raw); i++ {
+		if raw[i] != '\\' {
+			continue
+		}
+		if i+1 >= len(raw) {
+			break // a trailing backslash is a JSON error the structural walk catches
+		}
+		if raw[i+1] != 'u' {
+			i++ // an escaped char (\\, \", \n, …); skip it so \\u is not read as \u
+			continue
+		}
+		consumed, err := checkUnicodeEscape(raw, i)
+		if err != nil {
+			return err
+		}
+		i += consumed
+	}
+	return nil
+}
+
+// checkUnicodeEscape validates the \uXXXX escape at raw[i] (raw[i]=='\\',
+// raw[i+1]=='u'), rejecting an unpaired high or lone low surrogate. It returns
+// the number of EXTRA bytes to advance past the escape(s) — the caller's loop
+// adds the final +1 — so a single escape yields 5 and a valid surrogate pair 11.
+func checkUnicodeEscape(raw []byte, i int) (int, error) {
+	hi, ok := hex4(raw, i+2)
+	if !ok {
+		return 0, malformed("malformed \\u escape")
+	}
+	if hi >= 0xDC00 && hi <= 0xDFFF {
+		return 0, malformed("lone low surrogate escape")
+	}
+	if hi < 0xD800 || hi > 0xDBFF {
+		return 5, nil // a non-surrogate \uXXXX
+	}
+	// A high surrogate must be immediately followed by a low-surrogate \u escape.
+	if i+6 >= len(raw) || raw[i+6] != '\\' || raw[i+7] != 'u' {
+		return 0, malformed("unpaired high surrogate escape")
+	}
+	lo, ok := hex4(raw, i+8)
+	if !ok || lo < 0xDC00 || lo > 0xDFFF {
+		return 0, malformed("unpaired high surrogate escape")
+	}
+	return 11, nil // consumed both \uXXXX escapes
 }
 
 // walker carries the decoder and limits through the recursive structural walk.

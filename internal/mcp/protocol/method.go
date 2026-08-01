@@ -9,16 +9,17 @@ import (
 type Handling int
 
 const (
-	// HandlingRejected: the method is not admitted; there is no dispatch path.
+	// HandlingRejected — the method is not admitted; there is no dispatch path.
 	HandlingRejected Handling = iota
-	// HandlingKernelTerminal: the kernel handles and answers the method itself and
+	// HandlingKernelTerminal — the kernel handles and answers the method itself and
 	// never dispatches it downstream.
 	HandlingKernelTerminal
-	// HandlingDecisionPoint: the method is admitted and dispatched to exactly one
+	// HandlingDecisionPoint — the method is admitted and dispatched to exactly one
 	// named downstream decision point (implemented in a later slice, not PR-1).
 	HandlingDecisionPoint
 )
 
+// String returns the handling label.
 func (h Handling) String() string {
 	switch h {
 	case HandlingKernelTerminal:
@@ -110,7 +111,7 @@ type Admission struct {
 // Admission is intentionally version-agnostic: the registry is Culvert's
 // reviewed set, NOT "whatever the negotiated version contains". A method valid in
 // the negotiated spec version but absent here is rejected all the same.
-func Admit(cap Capability, dir Direction, class jsonrpc.Class, method string) Admission {
+func Admit(capability Capability, dir Direction, class jsonrpc.Class, method string) Admission {
 	spec, ok := registryIndex[method]
 	if !ok {
 		return Admission{Handling: HandlingRejected, Reason: mcperr.ReasonUnsupportedMethod, Detail: "method not in reviewed registry"}
@@ -132,7 +133,7 @@ func Admit(cap Capability, dir Direction, class jsonrpc.Class, method string) Ad
 		return Admission{Handling: HandlingKernelTerminal}
 	}
 	point := spec.gatewayPoint
-	if cap == Management {
+	if capability == Management {
 		point = spec.managementPoint
 	}
 	return Admission{Handling: HandlingDecisionPoint, DecisionPoint: point}

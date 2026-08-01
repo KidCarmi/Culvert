@@ -15,14 +15,15 @@ type Class int
 const (
 	// ClassInvalid is the zero value: not a valid, classifiable message.
 	ClassInvalid Class = iota
-	// ClassRequest: has a method and a correlatable id.
+	// ClassRequest — has a method and a correlatable id.
 	ClassRequest
-	// ClassNotification: has a method and NO id (one-way).
+	// ClassNotification — has a method and NO id (one-way).
 	ClassNotification
-	// ClassResponse: no method, a correlatable id, and exactly one of result/error.
+	// ClassResponse — no method, a correlatable id, and exactly one of result/error.
 	ClassResponse
 )
 
+// String returns the class label (request/notification/response/invalid).
 func (c Class) String() string {
 	switch c {
 	case ClassRequest:
@@ -60,9 +61,13 @@ type Message struct {
 }
 
 // IsRequest / IsNotification / IsResponse are convenience predicates.
-func (m Message) IsRequest() bool      { return m.Class == ClassRequest }
+func (m Message) IsRequest() bool { return m.Class == ClassRequest }
+
+// IsNotification reports whether the message is a notification.
 func (m Message) IsNotification() bool { return m.Class == ClassNotification }
-func (m Message) IsResponse() bool     { return m.Class == ClassResponse }
+
+// IsResponse reports whether the message is a response.
+func (m Message) IsResponse() bool { return m.Class == ClassResponse }
 
 // trimSpace trims JSON insignificant whitespace from both ends of a byte slice.
 func trimSpace(b []byte) []byte {
