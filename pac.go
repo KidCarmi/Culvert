@@ -114,18 +114,20 @@ func apiPACConfig(w http.ResponseWriter, r *http.Request) {
 // routeProxyListenerBuiltin dispatches the proxy listener's non-proxied
 // built-in endpoints (health/ready/metrics/PAC). It returns true when it
 // handled the request; false means the caller must forward to handleRequest.
-// PAC endpoints share the plain-HTTP contract of the proxy port (clients
+// These endpoints share the plain-HTTP contract of the proxy port (clients
 // fetch without TLS); the r.URL.Host guard keeps PROXIED absolute-URI
-// requests (which carry a Host in the URL) out of the PAC handler so a
-// client that proxies `GET http://origin/pac/x.pac` is forwarded, not
-// hijacked into serving the local PAC.
+// requests (which carry a Host in the URL) out of the local handlers so a
+// client proxying `GET http://origin/health` (or /ready, /metrics, /pac/x.pac)
+// is forwarded to origin, not hijacked into serving Culvert's own status —
+// a forward proxy must not shadow an upstream site's own paths of the same
+// name (e.g. an app's own /metrics or /health endpoint).
 func routeProxyListenerBuiltin(w http.ResponseWriter, r *http.Request) bool {
 	switch {
-	case r.URL.Path == "/health":
+	case r.URL.Path == "/health" && r.URL.Host == "":
 		handleHealth(w, r)
-	case r.URL.Path == "/ready":
+	case r.URL.Path == "/ready" && r.URL.Host == "":
 		handleReady(w, r)
-	case r.URL.Path == "/metrics":
+	case r.URL.Path == "/metrics" && r.URL.Host == "":
 		handleMetrics(w, r)
 	case r.URL.Path == "/proxy.pac" && r.URL.Host == "":
 		servePACFile(w, r)

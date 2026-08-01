@@ -47,6 +47,10 @@ PREDICATES=(
   predicate-23.py
   predicate-24.py
   predicate-26.py
+  predicate-27.py
+  predicate-28.py
+  predicate-29.py
+  predicate-30.py
 )
 
 echo "MCP design-document predicates"

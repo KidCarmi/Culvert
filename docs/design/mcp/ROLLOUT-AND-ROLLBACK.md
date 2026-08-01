@@ -34,10 +34,10 @@ to actually operate a promotion decision.
 |---|---|
 | Enforcement | No listener bound, no traffic accepted. Both `/mcp/management` and `/mcp/gateway/{server-id}` are absent from the mux — not merely denying, **not registered**. |
 | Entry criteria | Default state. Also the landing state of any rollback (§3). |
-| Exit criteria | PR-0 design package approved (this package); the ADR promoted to [`docs/adr/0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md) (done 2026-07-24, `Status: Proposed`) and **ratified to Accepted by ARB + Security Architecture**; **D-1 protocol baseline externally verified + approved**; **build/test baseline run + recorded**; lab environment ready. |
-| Evidence required | PR-0 review sign-off ([PR0-REVIEW-CHECKLIST.md](PR0-REVIEW-CHECKLIST.md)); **ADR-0024 Accepted** (currently `Proposed`); recorded build/test baseline. |
+| Exit criteria | PR-0 design package complete (this package); the ADR promoted to [`docs/adr/0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md) and now **`Status: Accepted`** (no ARB / committee ratification step); **D-1 protocol baseline CLOSED**; **D-15 config anti-drift contract CLOSED**; **build/test baseline re-anchored to `main` + recorded**; lab environment ready. |
+| Evidence required | PR-0 review evidence ([PR0-REVIEW-CHECKLIST.md](PR0-REVIEW-CHECKLIST.md)); **ADR-0024 Accepted** (done 2026-07-31); **D-1 + D-15 CLOSED**; recorded build/test baseline. All satisfied — see [PR1-ENTRY-CLOSURE.md](PR1-ENTRY-CLOSURE.md). |
 | Owner | Staff / Principal Engineer (architecture); Product Lead (scope). |
-| Approval authority | Architecture Review Board (ADR); Executive Sponsor / GM (scope). |
+| Approval basis | Merged repository state — accepted ADR, closed decisions, structural predicates, CI. No ARB / committee / board sign-off step exists in this project. |
 
 ### 1.2 Observe
 

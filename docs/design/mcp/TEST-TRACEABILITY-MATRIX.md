@@ -22,8 +22,23 @@ mixed-version/stale-epoch/corrupt-snapshot, MCP-off overhead) are **missing**; t
 > - **Follow-up remediation** allocated **MCP-PROTO-014** (UTF-8/protocol-token handling), **MCP-INSP-009**
 >   (PR-5 listener), and **MCP-ID-008** (PR-3 identity) — three new requirement IDs. *(`MCP-PROTO-014` is
 >   counted here once, in the follow-up; it is not part of the first-remediation `001..013` block.)*
-> - **Final totals (independently recomputed):** **74 threats**; **91 requirements** (MCP-PROTO **14**,
->   MCP-INSP **9**, MCP-ID **8**; the other families unchanged). No ID was removed; no duplicates; no orphans.
+> - **[#927](https://github.com/KidCarmi/Culvert/issues/927) remediation** allocated **MCP-CFG-001**
+>   (config-surface anti-drift governance) — one new requirement ID, no new threat.
+> - **[#926](https://github.com/KidCarmi/Culvert/issues/926) remediation** allocated **MCP-T-075**
+>   (unauthenticated denial-event flood → durability-lockout DoS) and the requirement IDs
+>   **MCP-EVENT-007** (isolated denial lane) and **MCP-OPS-005** (restart-persistent, bounded, scoped
+>   degraded-state machine) — one new threat, two new requirements.
+> - **Final totals (independently recomputed against the live registries, not carried forward):**
+>   **78 threats**; **97 requirements** (MCP-PROTO **17**, MCP-INSP **9**, MCP-ID **8**, MCP-EVENT **7**,
+>   MCP-OPS **5**, MCP-CFG **1**; the other families unchanged). No ID was removed; no duplicates; no
+>   orphans. The RPR-1 remediation for [#925](https://github.com/KidCarmi/Culvert/issues/925) and
+>   [#928](https://github.com/KidCarmi/Culvert/issues/928) added `MCP-PROTO-015`/`MCP-PROTO-016` (two
+>   requirements) and `MCP-T-076`/`MCP-T-077` (two threats). The RPR-4 remediation for
+>   [#929](https://github.com/KidCarmi/Culvert/issues/929) added `MCP-PROTO-017` (legacy-transport
+>   exclusion + no-pre-negotiation-held-stream) and `MCP-T-078` (security-rejection-path legacy fallback +
+>   retained unauthenticated stream) — one requirement, one threat. *(The previously published "**91 requirements**" was stale: it predated `MCP-CFG-001`, which
+>   #927 added without updating this line. Recounting from the registry rather than incrementing the
+>   published figure is what surfaced that — the same class of drift these matrices exist to catch.)*
 
 IDs: threats `MCP-T-*` ([`THREAT-MODEL.md`](THREAT-MODEL.md)); requirements `MCP-*-*`
 ([`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md)); abuse cases `MCP-AC-*` ([`ABUSE-CASES.md`](ABUSE-CASES.md)).
@@ -75,6 +90,63 @@ Gate = slice/CI gate that must be green.
 | MCP-T-069 identity rebind | MCP-ID-008 | One resolved identity bound per session; mid-session rebind denied | Identity-binding + no-rebind + cross-session tests | No mid-session identity rebind | IAM/Eng | PR-3 |
 | MCP-T-074 hostile-input crash/panic | MCP-PROTO-009, MCP-PROTO-013 | Crash-resistant parse/adapter; bounded error + cleanup | Fuzz (panic/crash detection) + race | No panic/crash on corpus; bounded error | Sec/Eng | PR-1 |
 | MCP-T-057/065 UTF-8 / protocol-token handling | MCP-PROTO-014 | Reject invalid UTF-8; **exact** method-token comparison; reject non-ASCII method names (pending D-1); opaque identifiers not globally normalized by the kernel | Invalid-UTF-8 rejection + exact-comparison + non-ASCII-method-rejection (D-1-gated) + no-global-normalization fixtures | Invalid UTF-8 rejected; method tokens compared exactly; non-ASCII methods rejected; opaque IDs untouched by kernel normalization | Sec/Eng | PR-1 |
+| MCP-T-076 reverse-channel / requestor-direction state confusion | MCP-PROTO-015, MCP-PROTO-003, MCP-PROTO-013 | Peer-role kernel; requestor-scoped `(session, direction, id)` correlation; direction-scoped cancellation; no cross-direction state release | Opposite-direction-cancel-rejected + same-id-both-directions + initialize-not-cancellable + late-cancel-tolerated + upstream-corpus-same-kernel fixtures | Correlation direction-scoped; other direction's state never released; one kernel over both legs | Sec/Eng | PR-1 |
+| MCP-T-077 admitted-but-unpoliced method dispatch | MCP-PROTO-016, MCP-POLICY-001 | Culvert-reviewed admitted-method registry; forward/reverse parity; registry-absent rejected; representable operand before default-deny | Forward/reverse-parity (predicate-28) + resources/read-rejected + registry-absent-rejected + no-config-re-admission + advertisement-matches-registry fixtures | Every admitted method owned once; absent rejected; no unpoliced dispatch | Sec/Eng | PR-1 (parity) / PR-6 (enforcement) |
+
+### 1b. RPR-1 protocol-direction & method-registry blocking fixtures (#925 + #928)
+
+The eighteen fixtures below are **blocking**: the registry/parity and protocol-state fixtures at **PR-1**,
+and the two business-policy-enforcement fixtures (#15, #16) at **PR-6** — without weakening the PR-1
+registry gate. Mirrored in [`CI-GATES.md`](CI-GATES.md); the parity fixtures are executable now as
+`predicates/predicate-28.py`.
+
+| # | Blocking fixture | Requirement | Gate |
+|---|---|---|---|
+| 1 | Same-session **opposite-direction** cancellation is rejected and the owning entry is retained | MCP-PROTO-015 | PR-1 |
+| 2 | The same `id` is outstanding **concurrently in both directions** with no cross-correlation | MCP-PROTO-015 | PR-1 |
+| 3 | Cancellation of `initialize` is rejected | MCP-PROTO-015 | PR-1 |
+| 4 | A **late** post-response cancellation is tolerated, not a duplicate-completion fault | MCP-PROTO-012, MCP-PROTO-015 | PR-1 |
+| 5 | **Wrong-requestor** cancellation (right direction, wrong owner) is rejected | MCP-PROTO-015 | PR-1 |
+| 6 | Server-originated `sampling`/`elicitation`/`roots` request is rejected (no wire response where the class forbids) | MCP-PROTO-016, MCP-PROTO-013 | PR-1 |
+| 7 | `tasks/*` (incl. `tasks/cancel`) is rejected under capability admission | MCP-PROTO-016 | PR-1 |
+| 8 | Hostile **upstream-leg** corpus runs through the **same** kernel — identical classification and bounds on both legs | MCP-PROTO-015 | PR-1 |
+| 9 | Every admitted method resolves to **one** decision point **or** is kernel-terminal | MCP-PROTO-016 | PR-1 |
+| 10 | A registry row with **neither** owner fails the build | MCP-PROTO-016 | PR-1 |
+| 11 | A registry row with **both** owners fails the build | MCP-PROTO-016 | PR-1 |
+| 12 | **No** dispatch path exists for a method absent from the registry (reverse parity) | MCP-PROTO-016 | PR-1 |
+| 13 | A spec-valid but **registry-absent** method is rejected | MCP-PROTO-016 | PR-1 |
+| 14 | `resources/read` is **explicitly rejected** (never admitted-and-unpoliced) | MCP-PROTO-016 | PR-1 |
+| 15 | Each admitted **business** method reaches default-deny with a **representable** operand | MCP-POLICY-001, MCP-PROTO-016 | PR-6 |
+| 16 | Credential scope and audit category resolve for every admitted business method | MCP-CRED-002 | PR-6 |
+| 17 | Arbitrary config **cannot** re-admit an unsupported method (no `allow_unknown_methods`) | MCP-PROTO-016, MCP-CFG-001 | PR-1 |
+| 18 | Capability advertisement **exactly matches** the admitted registry | MCP-PROTO-016 | PR-1 |
+
+### 1c. RPR-4 transport-fallback blocking fixtures (#929)
+
+Structural / terminal-status / zero-stream properties block at **PR-1** (primitive) or **PR-5** (listener).
+Fixtures whose expected values depend on the **final selected version set** are **`D-1 BLOCKED`** and MUST
+NOT be marked green until D-1 closes. Mirrored in [`CI-GATES.md`](CI-GATES.md) and enumerated with sources in
+[`TRANSPORT-FALLBACK-EVIDENCE.md`](TRANSPORT-FALLBACK-EVIDENCE.md) §9. Threat: `MCP-T-078`; requirement:
+`MCP-PROTO-017` (+ `MCP-INSP-009`/`MCP-OPS-002` for the listener assertions).
+
+| # | Blocking fixture | Requirement | Gate |
+|---|---|---|---|
+| 19 | Legacy `2024-11-05` endpoint negative — no route/config pair can emit an `endpoint` event | MCP-PROTO-017 | PR-1 |
+| 20 | GET without a valid negotiated session/context → terminal **405**, no `text/event-stream`, zero allocation | MCP-PROTO-017, MCP-INSP-009 | PR-1 (primitive) / PR-5 (listener) |
+| 21 | Invalid/unsupported `MCP-Protocol-Version` → **400**; observed SDK follow-on; terminal GET **405**; zero retention | MCP-PROTO-017 | PR-1 / PR-5 |
+| 22 | Missing `MCP-Session-Id` → **400**; observed SDK behavior; no retained stream | MCP-PROTO-017 | PR-1 / PR-5 |
+| 23 | Terminated session → **404**; SDK reinitialize; terminal GET **405**; zero retention | MCP-PROTO-017 | PR-1 / PR-5 |
+| 24 | DELETE termination unsupported → **405**; zero retention | MCP-PROTO-017 | PR-1 / PR-5 |
+| 25 | Initialize **counter-offer** at HTTP **200**; compatible client continues; incompatible client disconnects; no legacy probe | MCP-PROTO-010, MCP-PROTO-017 | PR-1 / PR-5 — **D-1 BLOCKED** (version set) |
+| 26 | Sessionless absent-`MCP-Protocol-Version` — the exact D-1 ruling asserted; no silent `2025-03-26` admission | MCP-PROTO-017, MCP-PROTO-010 | PR-1 — **D-1 BLOCKED** |
+| 27 | Official-SDK unsupported-version full sequence terminates deterministically; zero retained streams | MCP-PROTO-017 | PR-5 — **D-1 BLOCKED** (version set) |
+| 28 | Catch-any-failure client — every failure branch terminates; no held stream | MCP-PROTO-017 | PR-5 |
+| 29 | Load: **N** rejected clients ⇒ **zero** retained pre-negotiation streams | MCP-OPS-002, MCP-PROTO-017 | PR-5 |
+| 30 | Protocol-era separation — 2025 initialize/session fixtures cannot run on a 2026-era handler, and 2026 stateless/discovery fixtures cannot silently fall into 2025 legacy SSE probing | MCP-PROTO-017, MCP-PROTO-016 | PR-1 / PR-5 |
+
+The **PR-1 gate proves structural / terminal / zero-stream properties only**; it does **not** claim the PR-5
+runtime listener assertions (load, N-client zero-retention) are implemented, and it does **not** claim any
+`D-1 BLOCKED` fixture is green.
 
 ### 1a. Requirement-specific coverage (completeness — do not rely on the "Unit | all" row)
 
@@ -94,7 +166,8 @@ Owner → Gate chain.
 | MCP-T-038/039 injection/elicitation | MCP-INSP-007 | Label/report | Injection corpus | Labels emitted | Sec/Eng | PR-7 |
 | MCP-T-040 oversized payloads | MCP-PROTO-006 (parse-time, PR-1), MCP-OPS-002 (runtime under load, PR-5) | Structural bounds at the kernel + listener bounds under load | Fuzz + limit tests (PR-1); load/soak (PR-5) | Oversized rejected at parse; bounds hold under load | SRE/Sec | PR-1 (parse) / PR-5 (runtime) |
 | MCP-T-042/043 SSE exhaustion/slow | MCP-OPS-002 | Stream bounds + rate limit | Load/soak/slowloris | Bounds hold | SRE/Sec | PR-5 |
-| MCP-T-044 queue saturation/loss | MCP-EVENT-001,002 | Backpressure + **commit-before-side-effect per class** + fail-closed + denial-event durability lockout | Queue-saturation **and a spool-commit-failure case distinct from saturation** (`ENOSPC` / `fsync` error / encryption-key failure), **run on both the Management and Gateway legs**, incl. a **Management-originated** denial-event loss; **each critical class asserts the absence of EVERY irreversible action downstream of that flow's commit gate — not only the action the class is NAMED after** — write/destructive: no upstream call **and no broker-side materialization** (DFD-5 gates both); configuration publication: no new revision, nothing signed or pushed, every DP on the prior epoch; credential: broker state unchanged (nothing minted, rotated or revoked) **and no upstream call**; state-affecting Management: no state change **and no new revision, nothing signed or pushed, every DP on the prior epoch** — DFD-3 publishes a signed snapshot, so a state-change-only assertion passes a handler that publishes anyway (**stub only at PR-8 — no V1 Management mutation exists per ADR-0024 §D-13; the real-path assertion is owned by the future Management-mutation gate**) | Zero critical loss; **for every critical class, EVERY irreversible action downstream of that flow's commit gate is proven not to have happened** — not only the eponymous one, and not merely that an error was returned or degraded mode entered; commit failure after admission fails closed identically to saturation; **a Management-originated denial-event loss blocks a subsequent allowed Gateway write/high-risk operation** (lockout is system-wide); **the configuration-publication case is re-run against the real signed publication path at PR-10, since that path does not exist at PR-8** | SRE/Sec | PR-8 **+ mandatory PR-10 re-run (publication path)** **+ mandatory re-run at the Future Management-Mutation Gate (D-13) for the `state-affecting Management` class — PR-8 can only stub it** |
+| MCP-T-044 queue saturation/loss | MCP-EVENT-001,002 | Backpressure + **commit-before-side-effect per class** + fail-closed + **domain-scoped degradation** (denial events routed to the isolated denial lane, MCP-EVENT-007 — never a lockout) | Queue-saturation **and a spool-commit-failure case distinct from saturation** (`ENOSPC` / `fsync` error / encryption-key failure), **run on both the Management and Gateway legs**, incl. a **Management-originated** denial-event loss; **each critical class asserts the absence of EVERY irreversible action downstream of that flow's commit gate — not only the action the class is NAMED after** — write/destructive: no upstream call **and no broker-side materialization** (DFD-5 gates both); configuration publication: no new revision, nothing signed or pushed, every DP on the prior epoch; credential: broker state unchanged (nothing minted, rotated or revoked) **and no upstream call**; state-affecting Management: no state change **and no new revision, nothing signed or pushed, every DP on the prior epoch** — DFD-3 publishes a signed snapshot, so a state-change-only assertion passes a handler that publishes anyway (**stub only at PR-8 — no V1 Management mutation exists per ADR-0024 §D-13; the real-path assertion is owned by the future Management-mutation gate**) | Zero critical loss; **for every critical class, EVERY irreversible action downstream of that flow's commit gate is proven not to have happened** — not only the eponymous one, and not merely that an error was returned or degraded mode entered; commit failure after admission fails closed identically to saturation; **a Management-originated denial-event loss does NOT block a subsequent allowed Gateway write/high-risk operation** — containment is per durability domain, and a cross-capability block is a FAILING result (`MCP-T-075`); **the configuration-publication case is re-run against the real signed publication path at PR-10, since that path does not exist at PR-8** | SRE/Sec | PR-8 **+ mandatory PR-10 re-run (publication path)** **+ mandatory re-run at the Future Management-Mutation Gate (D-13) for the `state-affecting Management` class — PR-8 can only stub it** |
+| **MCP-T-075 unauthenticated denial-event flood → durability-lockout DoS** | MCP-EVENT-007, MCP-EVENT-001, MCP-EVENT-002, MCP-OPS-005, MCP-OPS-002 | Separate denial lane (pre-queue admission control + attacker-rate-independent coalescing + own quota, no access to the `P-CRIT` reserve); three logically separate spool partitions with reserved critical capacity and a deterministic reclamation order; degraded state **scoped to one durability domain**, restart-persistent, bounded on exit; **no emergency-policy bypass** | The **nine blocking `MCP-T-075` containment tests** ([CI-GATES.md](CI-GATES.md)): headline attacker test, coalescing, reserved partition, local-scope containment, **preserved fail-closed guarantee** (queue saturation **and** post-admission commit failure), recovery termination, restart persistence, storage reclamation, counter integrity | Authenticated allowed critical work in another tenant/listener/capability succeeds throughout a saturated denial lane; `N` denials ⇒ O(1) durable records with correct count and first/last-seen; critical event commits from reserve under denial saturation; degradation provably confined to `node × capability × partition`; **fail-closed still holds in both failure modes**; state exits within one probe interval and survives restart; unexported critical records outlive all denial/ordinary records; denial-loss and critical-commit-failure counters distinct | SRE/Sec | PR-8 |
 | MCP-T-045 audit tampering | MCP-EVENT-005 | Integrity fields | Tamper-evidence (unit) | Tamper detected | Sec | PR-8 |
 | MCP-T-047 stale snapshot | MCP-HA-001, MCP-CPDP-002 | Epoch fence + whole-reject | Stale-epoch + corrupt-snapshot | Rejected; last-good served | Eng/SRE | PR-10 |
 | MCP-T-048 split-brain | MCP-HA-001,002 | Fence + rollback | HA/failover tests | No split-brain | Eng/SRE | PR-10 |
@@ -118,6 +191,7 @@ Owner → Gate chain.
 | MCP-T-032,033,039 approval UX | MCP-POLICY-007 | Approval dialog shows exact action/resource/impact/credential | Approval-UX completeness tests | Dialog completeness proven | Product Sec/Eng | PR-9 |
 | MCP-T-014 semantic drift | MCP-TOOL-005 | Semantic/description drift triggers risk re-score + review | Semantic-drift tests | Re-score recorded | Sec/Eng | PR-2 |
 | MCP-T-044,051 operability | MCP-OPS-003 | Dashboards, alerts and runbooks for every incident class | Ops review (runbooks + alerts present) | Runbooks + alerts exist | SRE | Prod-Qual |
+| MCP-T-078 transport-rejection legacy fallback | MCP-PROTO-017 (+ MCP-INSP-009, MCP-OPS-002 listener) | Legacy `2024-11-05` exclusion + no-pre-negotiation-stream: terminal `405` on GET-without-context, `200` counter-offer preferred, every `4xx` follow-on GET is `405` with zero retention | Legacy-endpoint-negative + GET→`405`-zero-stream + `400`/`404`/`405`-terminal-zero-retention + N-rejected-zero-streams (PR-5) + counter-offer + era-separation fixtures ([`TRANSPORT-FALLBACK-EVIDENCE.md`](TRANSPORT-FALLBACK-EVIDENCE.md) §9) | No legacy endpoint; zero pre-negotiation streams; `2025-03-26` not silently admitted (D-1) | Sec/Eng | PR-1 (exclusion/terminal) / PR-5 (held-stream/load); version-set fixtures **D-1 BLOCKED** |
 
 **Cross-cutting / posture requirements (no threat ID — supply-chain/build posture; still with explicit
 test, evidence, owner and gate, per the completeness rule — a fake threat is NOT invented for these):**
@@ -176,7 +250,7 @@ test, evidence, owner and gate, per the completeness rule — a fake threat is N
   test, evidence expectation, owner and gate.
 - Every requirement in [`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md) is reachable from a §1 or §1a
   row (or the labeled cross-cutting/posture block in §1a) with an explicit test/evidence/owner/gate — **all
-  91 requirements, 0 unreachable** (independently recomputed with exact/comma/range expansion, excluding the
+  97 requirements, 0 unreachable** (independently recomputed with exact/comma/range expansion, excluding the
   generic "Unit | all" and "Integration" harness rows, which are **not** counted as requirement-specific
   proof).
 - Every abuse case `MCP-AC-*` maps to a §1 row via its threat/requirement IDs.

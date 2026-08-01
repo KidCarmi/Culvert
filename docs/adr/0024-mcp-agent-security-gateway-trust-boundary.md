@@ -1,8 +1,8 @@
 # ADR-0024: MCP Agent Security Gateway — trust boundaries, separation from the SWG, and PR-1 entry decisions
 
-- **Status:** Proposed (design decisions approved by the PR-0 facilitator on 2026-07-24; **awaiting formal ratification by the Architecture Review Board and Security Architecture** — see "Ratification" below). Do not treat as organizationally Accepted until that step is recorded.
-- **Date:** 2026-07-24
-- **Deciders:** Staff/Principal Engineer + Product Security Architect (proposer). **Ratifiers (pending):** Architecture Review Board (ARB) + Security Architecture, with domain approvers IAM/PAM (D-2), SRE/Security (D-5), Privacy/Legal + Network Security (D-8, D-9), Security Architecture (D-13).
+- **Status:** Accepted (2026-07-31). The accepted architecture baseline is the merged repository state — this ADR, the `docs/design/mcp/` package, the predicates, and the CI gates that enforce them. See "Acceptance" below.
+- **Date:** 2026-07-24 (decided); 2026-07-31 (accepted).
+- **How decided:** developed through independent, isolated AI architecture and security reviews plus adversarial red-team review, with every decision reduced to a recorded requirement, threat, config surface, or predicate. There is no external Architecture Review Board, Security Architecture team, IAM/PAM team, SRE team, or Privacy team in this project; it is developed by the repository owner using independent AI research, adversarial review, structural predicates, and CI. The domain labels retained below (identity, events, connectivity, dual-surface) name the *review lens*, not an organizational sign-off.
 - **Supersedes:** [`docs/design/mcp/ADR-PROPOSAL-mcp-trust-boundary.md`](../design/mcp/ADR-PROPOSAL-mcp-trust-boundary.md) (the in-package Option-B proposal, now a non-authoritative pointer to this ADR).
 - **Related:** ADR-0001 (record architecture decisions), ADR-0002 (flat `package main` → `internal/`), [`docs/adr/0018-openapi-contract.md`](0018-openapi-contract.md) (OpenAPI contract — renamed on `main` from the former `ADR-0007-openapi-contract.md`); the C1/C1.5/C2 admin-route metadata program; the PR-0 design package under [`docs/design/mcp/`](../design/mcp/README.md).
 - **Numbering:** `0024` is the **next free number across the repository-wide ADR/RFC allocation**, not merely "next in `docs/adr/`". As of `origin/main` `7791c706`, `docs/adr/` runs `0001–0018` (with legacy duplicate numbers at `0008`–`0011`); the OpenAPI-contract ADR was **renamed from the former `ADR-0007-openapi-contract.md` to [`docs/adr/0018-openapi-contract.md`](0018-openapi-contract.md)**, leaving `0007` solely the secret-containment ADR (`docs/adr/0007-secret-containment-boundary.md`). `docs/support/rfc/` holds `0012` and `0018`–`0022` (highest RFC `0022`). **`0023` is claimed by the unrelated Durable Configuration Publication ADR in open PR #854** (`docs/adr/0023-durable-config-publication.md`), wholly separate from MCP. This MCP ADR therefore takes **`0024`**, which is **unique across all `origin/main` refs and open PRs** (verified — no `0024` exists on `main`).
@@ -116,8 +116,10 @@ These five decisions were the blocking GO/NO-GO items required before PR-1. They
    verifiable audience cannot be shown to target Culvert at all (fail closed; the unconditional form of
    MCP-AUTH-002).
 3. The client token **MUST NOT** use the upstream business MCP server as its recipient/audience. The
-   approved upstream MCP server, tool and enterprise resource are **policy inputs and credential-broker
-   scope attributes**. Culvert selects a separate upstream credential **only after** an ALLOW-class
+   approved upstream MCP server, **the protocol method and its operation class**, tool and enterprise
+   resource are **policy inputs and credential-broker scope attributes** — the authorization tuple is keyed
+   on the **method/operation**, not tool identity alone (**tool name is one operand type, not the universal
+   key**; #928, MCP-PROTO-016). Culvert selects a separate upstream credential **only after** an ALLOW-class
    policy decision (MCP-POLICY-004 / MCP-CRED-001).
 4. Management MCP and Gateway MCP **MUST** use separate OAuth client registrations, canonical resource
    identifiers and disjoint scope namespaces (MCP-AUTH-008).
@@ -175,15 +177,50 @@ performing the other.
 **A confirmed commit, not an enqueue.** Queue admission is not durability: a full disk, an `fsync` error or an
 encryption-key failure is a commit FAILURE and must fail closed exactly as saturation does.
 
-| Action class | Behavior when a decision event cannot be durably persisted |
+| Action class | Behavior when the decision event cannot be durably persisted |
 |---|---|
-| Read-only / low-risk ALLOW or MONITOR | May proceed **only** when an explicit degraded-mode policy permits it; raise a health alarm; increment an integrity-protected loss/degradation counter; keep retrying persistence/export within bounded budgets; **never fail silently**. |
-| Write action | **Fail closed AND** enter degraded mode + alert + integrity-protected loss counter. |
-| Destructive / production action | **Fail closed AND** degraded mode + alert + loss counter. |
-| Configuration publication | **Fail closed AND** degraded mode + alert — do not publish a configuration change without a durable change event. |
-| Credential issue / rotation / revoke / selection for a high-risk operation | **Fail closed AND** degraded mode + alert + loss counter. |
-| State-affecting Management MCP operation | **Fail closed AND** degraded mode + alert (and such operations remain out of V1 regardless — see D-13). |
-| Authentication failure or authorization denial | The request is **already denied** — this is **not** relabeled as an additional "fail closed" action. If the denial event cannot be persisted, enter a **critical degraded state**, alert, increment integrity-protected loss counters, and **block new write/high-risk allowed operations until critical-event durability is restored**, unless an explicitly approved emergency policy states otherwise. |
+| Read-only / low-risk `ALLOW` or `MONITOR` | May proceed **only** when an explicit degraded-mode policy permits it; raise a health alarm; increment an **integrity-protected loss/degradation counter**; keep retrying persistence/export within bounded budgets; **never fail silently**. |
+| Write action | **Fail closed** (deny the operation) **AND** enter `critical-durability-degraded` **scoped to the affected durability domain only** + alert + integrity-protected loss counter. |
+| Destructive / production action | **Fail closed AND** enter `critical-durability-degraded` **scoped to the affected durability domain only** + alert + loss counter. |
+| Configuration publication | **Fail closed AND** enter `critical-durability-degraded` **scoped to the affected durability domain only** + alert — do not publish a configuration change without a durable change event. |
+| Credential issue / rotation / revoke / selection for a high-risk operation | **Fail closed AND** enter `critical-durability-degraded` **scoped to the affected durability domain only** + alert + loss counter. |
+| State-affecting Management MCP operation | **Fail closed AND** enter `critical-durability-degraded` **scoped to the affected durability domain only** + alert (and out of V1 regardless — see ADR-0024 §D-13). |
+| Authentication failure **or** authorization denial | The request is **already denied** — this is **not** relabeled as an additional "fail closed" action. These events are **attacker-mintable**, so they **MUST NOT** enter `critical-durability-degraded` and **MUST NOT** block any authenticated operation. They travel the **separate denial lane**: pre-queue admission control → attacker-rate-independent coalescing → the denial partition `P-DEN`, which **MUST NOT** consume the reserved critical partition `P-CRIT`. If the coalesced aggregate cannot be committed, enter **`denial-lane-degraded`** for that capability on that node only, alert, increment a **distinct** integrity-protected denial-loss counter, and **continue rejecting** the request. **No fleet-wide, cross-tenant or cross-capability lockout, and no emergency-policy bypass.** |
+
+**Degradation is CONTAINED, and a denial event can never widen it (amendment — MCP-T-075).** The original
+form of the denial row made an **unauthenticated** attacker the trigger of a **fleet-wide write lockout**:
+mint auth failures faster than the spool commits them, and every allowed write across the estate stops. The
+control was reachable by the one actor it was meant to produce evidence about, so it converted an
+evidence-integrity mechanism into a denial-of-service amplifier. Two separate mechanisms now replace it, and
+they must not be recombined:
+
+1. **Authenticated critical-operation commit failure** — the triggering operation still **fails closed before
+   its own irreversible action** (unchanged, non-negotiable), and the runtime enters
+   `critical-durability-degraded` **only in the narrow durability domain that could have lost the evidence**.
+   The **maximum automatic domain** is `(one node / DP runtime) × (one MCP capability) × (the affected durable
+   critical partition)`. Management and Gateway degradation states are **independent**; one tenant, listener or
+   capability **MUST NOT** automatically block another; and **fleet-wide escalation is not a protocol or
+   runtime side effect** — any broader action is a separately authorized incident-response decision by a human.
+2. **Authentication failures and authorization denials** — the attacker-mintable class — use the **denial
+   lane** described in the row above and in [`EVENT-MODEL.md`](../design/mcp/EVENT-MODEL.md) §4b, with its own
+   quota, its own partition and its own degraded state. It can exhaust **only itself**.
+
+**Three logically separate partitions** are required, even when one physical encrypted spool or transport is
+shared: `P-CRIT` (authenticated critical decision events, with **reserved capacity denial traffic cannot
+consume**), `P-ORD` (ordinary authenticated events) and `P-DEN` (coalesced unauthenticated / authorization-denial
+aggregates). Reclamation is deterministic and priority-ordered — `P-DEN` before `P-ORD` before `P-CRIT`, and
+**unexported critical records are never reclaimed while any lower-priority record remains**. The bounded sizes,
+reserve, watermarks, retention, rotation and recovery-probe interval are configuration rows in
+[`CONFIG-SURFACE-MATRIX.md`](../design/mcp/CONFIG-SURFACE-MATRIX.md); the normative state machine
+(`normal` → `denial-lane-degraded` / `critical-durability-degraded` → `recovering`), its bounded exit criteria
+and its **restart persistence** are [`EVENT-MODEL.md`](../design/mcp/EVENT-MODEL.md) §4b.
+
+**There is NO emergency-policy escape hatch, and V1 instantiates no bypass configuration.** The former
+"unless an explicitly approved emergency policy states otherwise" clause is **deleted**, not relocated: it
+offered an operator under active attack a switch whose only effect was to disable the evidence guarantee at
+exactly the moment evidence mattered most, and it was never needed once the attacker-mintable class stopped
+being able to trigger a lockout at all. **Recovery means restoring durable event commitment** and satisfying
+the §4b exit criteria — never disabling the control. No hidden or unnamed break-glass path exists.
 
 The in-memory audit ring (`MaxRing=500`), SSE hub, syslog queue and best-effort OTLP exporters are **not**
 the durable decision-event pipeline. The PR-8 design **MUST** specify: event-ordering scope, deduplication,
@@ -284,8 +321,9 @@ Isolation requirements:
 - The corrected D-2 replay posture avoids a false sense of security from access-token `jti` one-time-use
   and instead pins replay defense to sender-constraint (DPoP-proof / mTLS) for high-risk/external profiles.
 - D-5's per-action durability matrix (**fail closed AND** degrade+alert for the critical classes; **critical degraded
-  state + durability lockout** for a non-persistable auth-failure/authz-denial) makes critical-event durability a
-  design invariant, not an operational hope.
+  state, scoped to ONE durability domain**, with the attacker-mintable auth-failure/authz-denial class isolated in its own
+  non-blocking denial lane) makes critical-event durability a design invariant, not an operational hope — and one that an
+  unauthenticated attacker cannot turn into an outage.
 
 **Negative / costs:**
 - Net-new subsystems (protocol kernel, registry/catalog, identity, broker, policy, inspection, event
@@ -330,35 +368,65 @@ blueprint red line and a GO/NO-GO NO-GO condition.
 
 PR-1 (Protocol Kernel) may begin only when **all** of the following hold:
 
-1. This ADR is **Accepted** under `docs/adr/` (ARB + Security Architecture ratification recorded — see
-   "Ratification"). Until then it is `Proposed` and the gate is **not** satisfied.
-2. `PR0-REVIEW-CHECKLIST.md` is signed by all roles.
+1. This ADR is **Accepted** under `docs/adr/` (recorded above and in "Acceptance"). **Satisfied.**
+2. The PR-0 role-evidence review is complete — the eight review lenses in
+   [`PR0-REVIEW-CHECKLIST.md`](../design/mcp/PR0-REVIEW-CHECKLIST.md) each point to concrete documents,
+   RPRs, tests, or independent-verification evidence (no human role signatures are required — see #923
+   Gate 2). **Satisfied.**
 3. The Scope, Architecture, Dual-surface (D-13), Identity (D-2), Events (D-5) and Connectivity (D-8, D-9)
    domain gates are GO with no hard NO-GO line tripped ([`GO-NO-GO-CHECKLIST.md`](../design/mcp/GO-NO-GO-CHECKLIST.md)).
 4. Every blocking decision due at PR-1/PR-3 has a named owner.
-5. **D-1 (supported MCP protocol-version baseline and compatibility policy) is externally verified and
-   human-approved.** Because PR-1 *is* the Protocol Kernel — parser, lifecycle, transport and
-   compatibility behavior depend directly on D-1 — D-1 **must not** be left for closure during
-   implementation.
-6. The **current repository build and test baseline is run and recorded** before any PR-1 code change
-   begins (the PR-0 session did not run it — VRC §11).
+5. **D-1 (supported MCP protocol-version baseline and compatibility policy) is CLOSED** with the V1
+   baseline recorded in [`OPEN-DECISIONS.md`](../design/mcp/OPEN-DECISIONS.md) §D-1,
+   [`PROTOCOL-COMPATIBILITY.md`](../design/mcp/PROTOCOL-COMPATIBILITY.md),
+   [`TRANSPORT-FALLBACK-EVIDENCE.md`](../design/mcp/TRANSPORT-FALLBACK-EVIDENCE.md) and
+   [`PR1-ENTRY-CLOSURE.md`](../design/mcp/PR1-ENTRY-CLOSURE.md): primary `2025-11-25`, compatibility floor
+   `2025-06-18`, every other revision (incl. `2024-11-05`, `2025-03-26`, `2026-07-28`) rejected; Remote
+   Streamable HTTP only (no stdio, no legacy HTTP+SSE); batch rejected; the six-method admitted surface of
+   [`MCP-OPERATION-REGISTRY.md`](../design/mcp/MCP-OPERATION-REGISTRY.md). **Satisfied.**
+6. **D-15 (MCP config-surface registry integration) is CLOSED** — implementation contract accepted;
+   `MCP-CFG-001` and the config-surface matrix are authoritative (OPEN-DECISIONS §D-15). **Satisfied.**
+7. The **current repository build and test baseline is re-anchored to current `main`** and recorded in
+   #923 Gate 4 and [`PR1-ENTRY-CLOSURE.md`](../design/mcp/PR1-ENTRY-CLOSURE.md). **Satisfied.**
 
-This ADR closes **D-2, D-5, D-8, D-9, D-13**. **D-1** remains open and is elevated to a hard PR-1 entry
-gate (item 5). **D-3, D-4, D-6, D-10, D-12** remain slice-scoped; **D-7, D-11** remain post-V1 / GA. **D-14**
-(concrete protocol-kernel limit values + batch policy) is added slice-scoped to PR-1 — the `MCP-PROTO-*`
-requirements are defined; only their numeric values are open.
+This ADR closes **D-2, D-5, D-8, D-9, D-13**; **D-1** and **D-15** are now CLOSED (the two hard PR-1 entry
+gates — see [`OPEN-DECISIONS.md`](../design/mcp/OPEN-DECISIONS.md)). **D-3, D-4, D-6, D-10, D-12** remain
+slice-scoped; **D-7, D-11** remain post-V1 / GA. **D-14** (concrete protocol-kernel limit values + batch
+policy) is added slice-scoped to PR-1 — the `MCP-PROTO-*` requirements are defined and batch is rejected in
+V1; only the numeric limit values are open.
 
 **PR-1 Protocol-Kernel scope (post-remediation).** The PR-1 attack surface — MCP parser, JSON-RPC framing,
-version adapters and protocol state — is modeled by threats **MCP-T-057..074**, bounded by requirements
-**MCP-PROTO-001..014**, and gated by blocking PR-1 fuzz + structural/differential/protocol-state suites plus
-a **D-1-gated** compatibility gate (see `THREAT-MODEL.md`, `SECURITY-REQUIREMENTS.md`, `CI-GATES.md`, and
-`PR1-READINESS-REMEDIATION.md`). Item 8's `internal/mcp/*` decision ratifies the **namespace and boundary**;
+version adapters and protocol state — is modeled by threats **MCP-T-057..074** (plus RPR-1 **MCP-T-076/077**),
+bounded by requirements **MCP-PROTO-001..016**, and gated by blocking PR-1 fuzz +
+structural/differential/protocol-state suites plus a **D-1-gated** compatibility gate. **The kernel is
+peer-role parameterized (one decoder for BOTH the client-facing and upstream-server-facing legs; #925,
+MCP-PROTO-015) with requestor-scoped `(session, direction, id)` correlation, and admits methods only from
+the Culvert-reviewed [`MCP-OPERATION-REGISTRY.md`](../design/mcp/MCP-OPERATION-REGISTRY.md), not the raw
+negotiated-version method set (#928, MCP-PROTO-016).** (See `THREAT-MODEL.md`, `SECURITY-REQUIREMENTS.md`,
+`CI-GATES.md`, and `PR1-READINESS-REMEDIATION.md`.) Item 8's `internal/mcp/*` decision ratifies the **namespace and boundary**;
 the exact leaf-package names remain `[REC]`, subject to implementation review (not fixed by this ADR).
 
-## Ratification
+## Acceptance
 
-This ADR is created as `Status: Proposed`. To move to `Accepted`, record here: the ratification date, the
-named ARB and Security Architecture approvers, and confirmation that the domain approvers (IAM/PAM for D-2,
-SRE/Security for D-5, Privacy/Legal + Network Security for D-8/D-9, Security Architecture for D-13) have
-signed. Per ADR-0001 practice, reference this ADR from the Technical Risk/Debt registers and the
-Engineering Dashboard on acceptance. Do not claim organizational approval that has not occurred.
+This ADR is **Accepted** as of 2026-07-31. Acceptance rests on the merged repository state, not on an
+organizational sign-off:
+
+- The design decisions were developed through **independent, isolated AI architecture and security
+  reviews** and **adversarial red-team review**. This project has no external ARB, Security Architecture,
+  IAM/PAM, SRE, or Privacy organization; those labels name review lenses, not approvers.
+- All **five board blockers** ([#925](https://github.com/KidCarmi/Culvert/issues/925),
+  [#926](https://github.com/KidCarmi/Culvert/issues/926),
+  [#927](https://github.com/KidCarmi/Culvert/issues/927),
+  [#928](https://github.com/KidCarmi/Culvert/issues/928),
+  [#929](https://github.com/KidCarmi/Culvert/issues/929)) were **remediated and independently verified**,
+  and are closed as completed.
+- **RPR-1 through RPR-4** (the four-PR remediation plan covering those blockers) are **complete**.
+- **D-1** (protocol baseline) and **D-15** (config-surface registry integration) — the two hard PR-1 entry
+  decisions — are **CLOSED** (see [`OPEN-DECISIONS.md`](../design/mcp/OPEN-DECISIONS.md)).
+- Implementation must satisfy the recorded requirements (`MCP-*`), the structural **predicates**
+  ([`predicates/`](../design/mcp/predicates/README.md), enforced by the required Fast PR Gate), and the CI
+  gates ([`CI-GATES.md`](../design/mcp/CI-GATES.md)).
+
+No separate signature block is required, and none is implied. Per ADR-0001 practice, this ADR is referenced
+from the closure record [`PR1-ENTRY-CLOSURE.md`](../design/mcp/PR1-ENTRY-CLOSURE.md) and the PR-1 entry
+tracker [#923](https://github.com/KidCarmi/Culvert/issues/923).

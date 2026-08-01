@@ -532,6 +532,35 @@ func TestRouteProxyListenerBuiltin_PAC(t *testing.T) {
 	}
 }
 
+// TestRouteProxyListenerBuiltin_StatusEndpointsNotHijacked pins the same
+// Host-guard contract as TestRouteProxyListenerBuiltin_PAC for the built-in
+// status endpoints. A forward proxy must not shadow an upstream origin's own
+// /health, /ready, or /metrics path: a client proxying an absolute-URI
+// request to such a path on a real destination must be forwarded to that
+// destination, not served Culvert's own local status response.
+func TestRouteProxyListenerBuiltin_StatusEndpointsNotHijacked(t *testing.T) {
+	for _, path := range []string{"/health", "/ready", "/metrics"} {
+		// Direct (non-proxied) request on the proxy listener is still served locally.
+		direct := httptest.NewRequest(http.MethodGet, path, http.NoBody)
+		rec := httptest.NewRecorder()
+		if !routeProxyListenerBuiltin(rec, direct) {
+			t.Errorf("direct GET %s must be handled by the proxy listener", path)
+		}
+
+		// A PROXIED absolute-URI request for the same path on a real origin
+		// (URL.Host set) must NOT be hijacked — it must fall through to
+		// handleRequest so the origin's own endpoint is reached.
+		proxied := httptest.NewRequest(http.MethodGet, "http://origin.example"+path, http.NoBody)
+		if proxied.URL.Host == "" {
+			t.Fatal("test setup: absolute-URI request must carry URL.Host")
+		}
+		rec = httptest.NewRecorder()
+		if routeProxyListenerBuiltin(rec, proxied) {
+			t.Errorf("proxied absolute-URI request to origin.example%s must fall through to handleRequest, not be hijacked by the local handler (got body=%s)", path, rec.Body.String())
+		}
+	}
+}
+
 // ─── Concurrent mutation safety (Palo QA #1, #12) ──────────────────────────────
 
 func TestPACProfilesAPI_ConcurrentMutationsNoLostUpdate(t *testing.T) {

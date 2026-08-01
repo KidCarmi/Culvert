@@ -8,13 +8,14 @@ not about running code (none exists).
 How to use: each role signs off its section. Any unchecked blocking item holds the gate. Link findings to
 the specific document and ID.
 
-> **Decision status (2026-07-24).** Five blocking decisions are closed and recorded in
-> [`docs/adr/0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md): **D-2** (Architecture /
-> IAL below), **D-5** (Privacy / events), **D-8 + D-9** (Privacy / connectivity), **D-13** (Product /
-> Architecture / dual-surface). The ADR is `Status: Proposed`; the per-role sign-offs in this checklist
-> plus **ARB + Security Architecture ratification of ADR-0024** are the remaining gate steps. **D-1
-> (protocol baseline) is elevated to a hard PR-1 entry gate** and the **build/test baseline must be run +
-> recorded** before PR-1 code.
+> **Decision status (2026-07-31 — PR-1 entry closed).** All five blocking decisions are closed and recorded
+> in [`docs/adr/0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md): **D-2** (identity), **D-5**
+> (events), **D-8 + D-9** (connectivity), **D-13** (dual-surface). **ADR-0024 is `Status: Accepted`.** The two
+> remaining hard PR-1 entry decisions **D-1** (protocol baseline) and **D-15** (config anti-drift contract)
+> are **CLOSED**, and the **build/test baseline is re-anchored to current `main` + recorded**. The lenses
+> below are review dimensions, satisfied on an **evidence basis** — actual documents, RPRs, tests, and
+> independent-verification comments — **not** human role signatures; there is no ARB / committee / sign-off
+> step in this project (#923 Gate 2). See [`PR1-ENTRY-CLOSURE.md`](PR1-ENTRY-CLOSURE.md).
 
 ---
 
@@ -30,7 +31,7 @@ the specific document and ID.
 - [ ] Proposed `internal/mcp/*` boundaries are **evaluated, not adopted**; consistent with ADR-0002.
 - [ ] Prohibited coupling is explicit (no SWG `PolicyRule` fields; no OIDC-flow reuse; no audit-ring reuse; no shared listeners; no policy-eval I/O).
 - [ ] Trust boundaries TB-1..TB-7 are coherent across [`DATA-FLOW-DIAGRAMS.md`](DATA-FLOW-DIAGRAMS.md) and [`THREAT-MODEL.md`](THREAT-MODEL.md).
-- [x] ADR proposal promoted to [`docs/adr/0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md) (D-0, Option B); the in-package file is now a pointer. *(ADR is `Status: Proposed` — **PR-1 gate closes only on ARB + Security Architecture ratification**.)*
+- [x] ADR proposal promoted to [`docs/adr/0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md) (D-0, Option B); the in-package file is now a pointer. *(ADR is **`Status: Accepted`** — the PR-1 ADR gate is satisfied on the merged repository state; no ARB / committee ratification step exists in this project.)*
 
 ## Product Security
 - [ ] [`THREAT-MODEL.md`](THREAT-MODEL.md) covers all listed threat classes; every Critical/High has controls, tests, owner, closure.

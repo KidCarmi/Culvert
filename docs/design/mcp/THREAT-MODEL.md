@@ -56,7 +56,7 @@ implemented. Repository facts are cited from [`VERIFIED-REPOSITORY-CONTEXT.md`](
 | TB | Boundary | Primary concerns |
 |---|---|---|
 | TB-1 | Agent/client ↔ Culvert MCP listener | Token validation, Origin/Host, protocol bounds, rate limits. |
-| TB-2 | Culvert ↔ upstream MCP server | mTLS/TLS identity, SSRF/DNS, credential isolation, allowlist. |
+| TB-2 | Culvert ↔ upstream MCP server | mTLS/TLS identity, SSRF/DNS, credential isolation, allowlist. **Untrusted upstream leg carries the same MCP-PROTO obligations as TB-1** — `MCP-PROTO-001..016` decode/framing/version/state bounds and requestor-scoped correlation are enforced by the **same** kernel (`MCP-PROTO-015`, peer role = upstream-server-facing); server-originated reverse-channel requests are rejected per the admitted-method registry (`MCP-PROTO-016`). |
 | TB-3 | Control Plane ↔ Data Planes | Signed snapshot, epoch/fencing, whole-snapshot validation. |
 | TB-4 | Runtime ↔ event/export | Redaction, durability, bounded queues, loss policy. |
 | TB-5 | Admin ↔ policy publication | RBAC, four-eyes, simulation, audit. |
@@ -71,8 +71,9 @@ connector/DMZ ingress · E-7 credential-provider integration · E-8 event export
 
 ## 6. Data flows
 
-See [`DATA-FLOW-DIAGRAMS.md`](DATA-FLOW-DIAGRAMS.md) (15 numbered DFDs; DFD-15 — the PR-1 protocol-kernel
-decode path — added by the remediation). STRIDE-per-flow in §9 references those DFD numbers (DFD-1 … DFD-15).
+See [`DATA-FLOW-DIAGRAMS.md`](DATA-FLOW-DIAGRAMS.md) (16 numbered DFDs; DFD-15 — the PR-1 protocol-kernel
+decode path; DFD-16 — the RPR-1 two-leg kernel & method-admission flow). STRIDE-per-flow in §9 references
+those DFD numbers (DFD-1 … DFD-16).
 
 ## 7. Risk-rating methodology
 
@@ -126,13 +127,15 @@ Severity = f(Impact, Likelihood), each rated Low/Medium/High.
 | DFD-6 | Credential selection | MCP-T-022..025 |
 | DFD-7 | Input inspection | MCP-T-026, MCP-T-036, MCP-T-037, MCP-T-041 |
 | DFD-8 | Output inspection | MCP-T-027, MCP-T-038, MCP-T-039 |
-| DFD-9 | Decision event publication | MCP-T-028, MCP-T-044, MCP-T-045 |
+| DFD-9 | Decision event publication | MCP-T-028, MCP-T-044, MCP-T-045, MCP-T-075 |
 | DFD-10 | CP→DP snapshot publication | MCP-T-047..050 |
 | DFD-11 | Rollback | MCP-T-047, MCP-T-048 |
 | DFD-12 | Local enterprise client connectivity | MCP-T-036, MCP-T-037, MCP-T-030 |
-| DFD-13 | Outbound-only connector | MCP-T-051, MCP-T-052, MCP-T-053 |
-| DFD-14 | Hardened DMZ endpoint | MCP-T-036, MCP-T-042, MCP-T-051 |
+| DFD-13 | Outbound-only connector | MCP-T-051, MCP-T-053, MCP-T-010 |
+| DFD-14 | Hardened DMZ endpoint | MCP-T-036, MCP-T-042, MCP-T-052 |
 | DFD-15 | Protocol-kernel decode path (PR-1) | MCP-T-057..074 (parser/framing/version/state) |
+| DFD-16 | Two-leg kernel + method admission (PR-1) | MCP-T-076, MCP-T-077 (reverse-channel/direction confusion; admitted-but-unpoliced dispatch) |
+| DFD-17 | Transport rejection → terminal GET → zero stream (PR-1/PR-5) | MCP-T-078 (security-rejection-path legacy fallback + retained unauthenticated stream) |
 
 ## 10. Security objectives
 
@@ -182,6 +185,7 @@ reference [`TEST-TRACEABILITY-MATRIX.md`](TEST-TRACEABILITY-MATRIX.md). Owner = 
 | MCP-T-018 | Policy bypass | High | MCP-POLICY-001,002,005 | Sec/Eng |
 | MCP-T-019 | Privilege expansion | High | MCP-TOOL-004, MCP-POLICY-003 | Sec/Eng |
 | MCP-T-046 | Confused deputy | High | MCP-POLICY-004, MCP-CRED-002 | Sec/Eng |
+| MCP-T-077 | Admitted-but-unpoliced method dispatch — a method Culvert admits (or a spec-version method absent from the Culvert registry) reaches dispatch with **no** downstream decision point, bypassing policy/catalog/credential/approval at once (e.g. `resources/read` carrying no tool identity) | Critical | MCP-POLICY-001, MCP-PROTO-016 (admitted-method registry: forward/reverse parity; registry-absent rejected), MCP-PROTO-002 (admission ordering) | Sec/Eng |
 
 ### Credentials
 
@@ -239,6 +243,7 @@ reference [`TEST-TRACEABILITY-MATRIX.md`](TEST-TRACEABILITY-MATRIX.md). Owner = 
 | MCP-T-042 | SSE exhaustion | High | MCP-OPS-002 | SRE/Sec |
 | MCP-T-043 | Slow-client attacks | Medium | MCP-OPS-002 | SRE/Sec |
 | MCP-T-044 | Queue saturation / event-loss | Critical | MCP-EVENT-001,002,004 | SRE/Sec |
+| MCP-T-075 | **Unauthenticated denial-event flood → durability-lockout DoS.** An unauthenticated attacker mints authentication-failure / authorization-denial events at will. Under the superseded ADR-0024 §D-5 rule, a **non-persistable denial event blocked new allowed write/high-risk operations until durability returned** — so flooding auth failures faster than the spool commits them **converted an evidence control into a fleet-wide write outage**, triggerable by the very actor it existed to record. Sub-cases, all in scope: (a) **denial flood exhausting event durability**; (b) **cross-tenant / cross-capability availability coupling** — one tenant's or capability's degradation halting another's authenticated work; (c) **restart bypass** — clearing a degraded state by bouncing the process instead of restoring durability; (d) **shared-volume `ENOSPC`** — a co-tenant process filling the volume, or denial traffic filling it, starving the critical partition; (e) **starvation of authenticated critical records** — denial/ordinary records consuming the capacity a critical decision event needs to commit, so authenticated critical work fails closed on attacker-induced pressure. | **Critical** | MCP-EVENT-007 (separate denial lane: pre-queue admission control, attacker-rate-independent coalescing, own quota, no access to the `P-CRIT` reserve), MCP-EVENT-001 (three logically separate partitions + reserved critical capacity + deterministic reclamation order that never reclaims unexported critical records first), MCP-EVENT-002 (degraded state **scoped to one durability domain**; the attacker-mintable class removed from it entirely), MCP-OPS-005 (restart-persistent, bounded, scoped degraded-state machine), MCP-OPS-002 (runtime admission bounds) | SRE/Sec |
 
 ### Integrity & audit
 
@@ -314,10 +319,13 @@ single "invalid input"). Controls are the new `MCP-PROTO-*` requirements
 | MCP-T-072 | Reconnect / replay of protocol messages (resumption abuse) | Medium | MCP-PROTO-012 | Sec/Eng |
 | MCP-T-073 | Slow-input / partial-frame buffering resource exhaustion (parse-time) | Medium | MCP-PROTO-005,008 | SRE/Sec |
 | MCP-T-074 | Panic / crash / uncontrolled allocation from hostile input | High | MCP-PROTO-009,013 | Sec/Eng |
+| MCP-T-076 | Reverse-channel / requestor-direction state confusion — a well-formed message on one leg/direction (an upstream server's `notifications/cancelled`, or a server-originated `sampling`/`elicitation`/`roots` request) mis-correlates to, cancels or deletes the **other** direction's in-flight state, or is dispatched as a client-originated operation across an unspecified second decoder | High | MCP-PROTO-015 (peer-role kernel + requestor-scoped `(session, direction, id)` state), MCP-PROTO-003, MCP-PROTO-013 | Sec/Eng |
+| MCP-T-078 | Security-rejection-path legacy fallback + retained unauthenticated stream — a security-motivated `400`/`404`/`405` (unlisted `initialize` version, invalid/missing `MCP-Protocol-Version`, missing/terminated session, unsupported DELETE) recruits a spec-conformant **or** catch-any SDK client into the legacy `2024-11-05` HTTP+SSE probe (a GET expecting an `endpoint` event); a stream opened or held awaiting an `endpoint` Culvert never emits becomes an **unauthenticated, pre-initialize, indefinitely-held stream per rejected client** (N rejected ⇒ N held streams, self-amplifying), and 2025/2026-era confusion can misroute a stateless-RC client into 2025 legacy SSE probing | High | MCP-PROTO-017 (legacy-transport exclusion + no-pre-negotiation-stream; counter-offer-preferred terminal `405`), MCP-PROTO-010 (no downgrade-by-fallback), MCP-INSP-009 (listener GET→`405` zero-stream, PR-5), MCP-OPS-002 (held-stream bounds, PR-5); evidence [`TRANSPORT-FALLBACK-EVIDENCE.md`](TRANSPORT-FALLBACK-EVIDENCE.md) | Sec/Eng |
 
-The eight **High** protocol-kernel threats (`MCP-T-058,060,063,066,067,068,069,074`) carry a full
+The ten **High** protocol-kernel/transport threats (`MCP-T-058,060,063,066,067,068,069,074` plus the RPR-1
+reverse-channel threat `MCP-T-076` and the RPR-4 transport-rejection threat `MCP-T-078`) carry a full
 Threat → Requirement → Control → Test → Evidence → Owner → Gate row in
-[`TEST-TRACEABILITY-MATRIX.md`](TEST-TRACEABILITY-MATRIX.md) §1; the Medium ones are covered by the
+[`TEST-TRACEABILITY-MATRIX.md`](TEST-TRACEABILITY-MATRIX.md) §1/§1a; the Medium ones are covered by the
 protocol-kernel fuzz + structural-limit test classes there.
 
 ## 12. Residual risk ownership
@@ -329,6 +337,7 @@ protocol-kernel fuzz + structural-limit test classes there.
 | R-3 | Approved server later compromised (MCP-T-021) | Sec/Eng | Drift + destination + output controls; accepted. |
 | R-4 | Human approval social engineering (MCP-T-032,033) | Product Sec | Explicit, auditable approval UX; accepted. |
 | R-5 | Cloud AI vendor data handling (MCP-T-053) | Privacy/Legal | Customer contract + allowlist + DLP-before-egress; accepted per deployment. |
+| R-6 | **A genuine durability failure may block critical operations on the affected node/capability until recovery (MCP-T-075, MCP-T-044)** | **SRE / Reliability** (proposed owner — **acceptance PENDING approval, NOT accepted by a named human**) | **Proposed acceptance:** when the durable spool genuinely cannot commit an **authenticated** critical decision event, critical operations in that one durability domain **fail closed until recovery** — this is the preserved fail-closed guarantee working as designed, and it is **not** removed by #926. What #926 removes is the **attacker's ability to expand it**: the failure is contained to `(one node/DP runtime) × (one capability) × (the affected partition)`, cannot be induced by unauthenticated traffic (MCP-EVENT-007), cannot starve the critical reserve (MCP-EVENT-001), cannot survive a restored spool beyond one bounded probe interval, and cannot be cleared by a restart (MCP-OPS-005). **The accepted residual is a bounded local availability cost on real storage failure; the rejected risk is an attacker-expandable fleet-wide outage.** Mitigations: reserved critical capacity, bounded recovery, per-domain alerting, and the [`OPERATIONS-AND-SUPPORT.md`](OPERATIONS-AND-SUPPORT.md) durability-degradation runbook. |
 
 ## 13. Closure criteria
 

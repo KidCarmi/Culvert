@@ -1,11 +1,12 @@
 # MCP Data-Flow Diagrams
 
-Fifteen numbered data-flow diagrams (DFD-1 … DFD-15) for the MCP subsystem. Each marks its **trust
+Seventeen numbered data-flow diagrams (DFD-1 … DFD-17) for the MCP subsystem. Each marks its **trust
 boundaries** (TB-1 … TB-7 from [`THREAT-MODEL.md`](THREAT-MODEL.md)) and the dominant threats. **Status:
 PR-0 design artifact (Proposed).** These are design flows; no runtime exists. Diagrams are Mermaid so they
 render on GitHub and diff cleanly. Management MCP (Capability A) and the Security Gateway (Capability B)
 are kept as **separate** flows. **DFD-15 (the PR-1 protocol-kernel decode path) was added by the PR-1
-remediation** (`PR1-READINESS-REMEDIATION.md`, finding M-3).
+remediation** (`PR1-READINESS-REMEDIATION.md`, finding M-3). **DFD-17 (transport rejection → terminal GET →
+zero stream) was added by the RPR-4 remediation for [#929](https://github.com/KidCarmi/Culvert/issues/929).**
 
 Trust-boundary legend: **TB-1** agent/client↔Culvert · **TB-2** Culvert↔MCP server · **TB-3** CP↔DP ·
 **TB-4** runtime↔events · **TB-5** admin↔publication · **TB-6** cloud AI↔customer network · **TB-7**
@@ -205,13 +206,19 @@ Raw output not stored by default (MCP-EVENT-003); injection labeled (MCP-INSP-00
 
 ## DFD-9 — Decision event publication (Capability B/A)
 
-Crosses TB-4. Threats: MCP-T-028, MCP-T-044, MCP-T-045.
+Crosses TB-4. Threats: MCP-T-028, MCP-T-044, MCP-T-045, MCP-T-075.
 
 ```mermaid
 flowchart LR
   DEC["Decision + request-side inspection<br/>NO execution yet"] --> RDX[Redact: no tokens/secrets/raw]
-  RDX --> Q[[Bounded queue + backpressure]]
-  Q -->|"admitted (NOT yet a commit)"| SPOOL[Mandatory local encrypted durable spool per DP]
+  RDX --> CLASSIFY{"AUTHENTICATED event,<br/>or attacker-mintable<br/>auth-failure / authz-denial?"}
+  CLASSIFY -->|"attacker-mintable denial"| ADMIT[["DENIAL-LANE ADMISSION CONTROL<br/>pre-queue, attacker-rate-independent"]]
+  ADMIT --> COAL["COALESCE by capability x normalized source<br/>x denial reason x window<br/>N denials ⇒ O(1) durable records<br/>count + first-seen + last-seen retained"]
+  COAL --> PDEN[("P-DEN partition — own quota<br/>MUST NOT consume the P-CRIT reserve")]
+  PDEN -->|"aggregate commit CONFIRMED"| INT
+  PDEN -->|"aggregate commit FAILED or P-DEN quota reached"| DLD["denial-lane-degraded — LOCAL, capability-scoped<br/>+ alert + DISTINCT denial-loss counter<br/>request STILL rejected<br/>BLOCKS NO AUTHENTICATED WORK<br/>NO edge to LOSS, FC or any lockout"]
+  CLASSIFY -->|"authenticated event"| Q[[Bounded queue + backpressure]]
+  Q -->|"admitted (NOT yet a commit)"| SPOOL[("Mandatory local encrypted durable spool per DP<br/>P-CRIT RESERVED · P-ORD · P-DEN<br/>reclaim P-DEN → P-ORD → exported P-CRIT;<br/>UNEXPORTED P-CRIT never reclaimed")]
   SPOOL -->|"commit CONFIRMED"| GATE{Critical action class?}
   SPOOL -->|"commit FAILED: ENOSPC / fsync error / encryption-key failure"| LOSS
   GATE -->|"write / destructive"| XUP["Upstream call<br/>MCP-EVENT-002 write/destructive class"]
@@ -220,7 +227,6 @@ flowchart LR
   GATE -->|"state-affecting Management op"| XMGMT["Management state change<br/>out of V1 — ADR-0024 D-13"]
   GATE -->|"read-only / low-risk: NOT execution-gated"| XLOW["Execute read-only / low-risk call<br/>proceeds WITHOUT a commit gate<br/>see LOSS for the non-persistable case"]
   XLOW --> OUT
-  GATE -->|"auth-failure / authz-denial event, commit CONFIRMED:<br/>request already denied, nothing to gate"| INT
   XUP --> OUT["Outcome event — emitted AFTER the irreversible action<br/>NOT the fail-closed gate"]
   XPUB --> OUT
   XCRED --> OUT
@@ -232,13 +238,16 @@ flowchart LR
   QO -->|"saturated"| ODEG
   SPOOLO -->|"commit FAILED"| ODEG["Degraded + alert + loss counter ONLY<br/>the operation ALREADY happened, so fail-closed is vacuous<br/>NEVER a re-execution path"]
   Q -->|"saturated"| LOSS{{"DURABILITY LOST — dispatch by event class<br/>IDENTICAL for queue saturation and spool commit failure"}}
-  LOSS -->|"critical: write / destructive / config-publication /<br/>credential / state-affecting Management"| FC["Fail closed AND degraded mode + alert + loss counter<br/>the operation NEVER RUNS — commit precedes execution"]
-  LOSS -->|"auth-failure / authz-denial (already denied)"| CDEG["CRITICAL degraded state\n+ alert + loss counter\nrequest already denied"]
+  LOSS -->|"critical: write / destructive / config-publication /<br/>credential / state-affecting Management"| FC["Fail closed AND critical-durability-degraded + alert + loss counter<br/>the operation NEVER RUNS — commit precedes execution"]
   LOSS -->|"read-only / low-risk"| LP{"configured loss policy?<br/>mcp_{gateway,mgmt}_event_loss_policy"}
   LP -->|"degrade-and-alert"| LDEG["Degraded + alert + integrity-protected loss counter<br/>DECISION lane: the operation has NOT happened yet"]
   LDEG --> XLOW
   LP -->|"fail-closed"| FC
-  CDEG --> LOCK["DURABILITY LOCKOUT:\nblock NEW allowed write/high-risk ops\nuntil durability is restored"]
+  FC --> SCOPE["DEGRADATION SCOPE — MAXIMUM AUTOMATIC DOMAIN:<br/>one node/DP runtime x one capability x the affected partition<br/>Mgmt and Gateway INDEPENDENT; no cross-tenant, cross-capability<br/>or cross-node propagation; NO fleet-wide escalation"]
+  SCOPE --> REC{"RECOVERY PROBE — all four required:<br/>storage writable; P-CRIT reserve above recovery watermark;<br/>recovery marker COMMITTED and READ BACK;<br/>pending critical records within the safe bound"}
+  REC -->|"any criterion false"| SCOPE
+  REC -->|"all true"| RECOV["recovering ⇒ normal<br/>within ONE bounded probe interval"]
+  SCOPE -.->|"survives process restart;<br/>corrupt metadata ⇒ stay LOCAL-degraded, never normal,<br/>never fleet-wide"| SCOPE
   INT[Integrity + replay-id + tenant tag]
   INT -. additive, async .-> EXP[Additive authorized, tenant-separated export — never a substitute]
 ```
@@ -246,13 +255,17 @@ flowchart LR
 
 **The gate decides whether execution is *gated*, not whether it happens.** A committed **read-only / low-risk** decision proceeds to execution (`XLOW`) **without** being gated on the commit, and its outcome enters the outcome lane like any other — routing it straight to integrity/export would either drop every successful low-risk call or silently discard its outcome event, since DFD-5 sends **all** ALLOW-class traffic through this path. Only the **already-denied** classes terminate at `INT` without execution, because there is nothing left to run.
 
-**`SPOOL` has NO unconditional onward edge.** Every path out of the spool is labelled: `commit CONFIRMED` reaches `GATE`, `commit FAILED` reaches `LOSS`. An unconditional `SPOOL --> INT` would let a failed commit continue to integrity/export and reach neither fail-closed nor the lockout — which would make the single dispatch below decorative. A **successfully committed** denial event is routed to `INT` **through `GATE`**, after classification, not around it.
+**`SPOOL` has NO unconditional onward edge.** Every path out of the spool is labelled: `commit CONFIRMED` reaches `GATE`, `commit FAILED` reaches `LOSS`. An unconditional `SPOOL --> INT` would let a failed commit continue to integrity/export and reach neither fail-closed nor a degraded state — which would make the dispatch below decorative.
 
-**Durability loss has ONE dispatch, and it covers every class.** Queue saturation and spool **commit failure** converge on `LOSS`, which routes by event class: the five critical classes (write, destructive, configuration publication, credential, **state-affecting Management**) to fail-closed + degraded; an already-denied **auth-failure / authz-denial** event to the **critical degraded state + durability lockout** (fail-closed is vacuous there — the request was already denied); and read-only/low-risk to the **configured loss policy** (`LP`) — `degrade-and-alert` records the degradation and the operation **still proceeds** to `XLOW`, `fail-closed` denies it. That arm is a **policy branch, not a posture**: terminating it at a degradation node would make `degrade-and-alert` and `fail-closed` behave identically and delete a configurable contract. Sending commit failure straight to fail-closed would bypass the lockout for denial events, and omitting the Management class would leave a saturated Management state change with no route at all.
+**The lanes SPLIT BEFORE the shared queue, and that is the whole defense (`MCP-T-075`).** `CLASSIFY` is the first node after redaction, not an afterthought inside `GATE`: an **attacker-mintable** auth-failure / authz-denial never enters the authenticated queue, the shared spool path or `LOSS` at all. It is admission-controlled (`ADMIT`), **coalesced** (`COAL` — `N` equivalent denials in one bucket/window cost **O(1)** durable records while keeping a count and first/last-seen), and committed to `P-DEN`, which has its **own quota** and **cannot consume the `P-CRIT` reserve**. Its only failure terminal is `DLD`, which has **no edge to `LOSS`, `FC`, `SCOPE` or any lockout node** — an unauthenticated flood therefore exhausts **only itself**. The superseded diagram routed denial events into the same `LOSS` dispatch and out to a `DURABILITY LOCKOUT` node that blocked allowed write/high-risk operations; that made an unauthenticated actor the trigger of a fleet-wide outage, and it is deleted rather than narrowed.
+
+**Durability loss dispatches by class, and every class has exactly one route.** Queue saturation and spool **commit failure** converge on `LOSS`, which routes the five critical classes (write, destructive, configuration publication, credential, **state-affecting Management**) to fail-closed + `critical-durability-degraded`, and read-only/low-risk to the **configured loss policy** (`LP`) — `degrade-and-alert` records the degradation and the operation **still proceeds** to `XLOW`, `fail-closed` denies it. That arm is a **policy branch, not a posture**: terminating it at a degradation node would make `degrade-and-alert` and `fail-closed` behave identically and delete a configurable contract. Omitting the Management class would leave a saturated Management state change with no route at all. `LOSS` has **no denial arm** — denials never reach it.
+
+**Degradation is scoped, and recovery terminates.** `FC` leads to `SCOPE`, which fixes the **maximum automatic domain** at `one node/DP runtime × one capability × the affected partition`: Management and Gateway degrade independently, no node degrades another, and there is **no fleet-wide escalation edge** — broader action is a separately authorized human incident-response decision, which is why no automatic edge to one exists in this graph. `REC` is a **bounded** probe requiring **all four** exit criteria (storage writable, `P-CRIT` reserve above the recovery watermark, a recovery marker **committed and read back**, pending critical records within the safe bound); it returns to `SCOPE` while any criterion is false and reaches `normal` within one probe interval once all hold. The self-loop on `SCOPE` records **restart persistence**: the state and its scope survive a process restart, and corrupt or ambiguous recovery metadata resolves to the **narrow local** degraded state — never to `normal` (a restart bypass) and never to a fleet-wide state (the amplification this design removes).
 
 **The gate dispatches by class, because each class has a different irreversible action** (`MCP-EVENT-002`): write/destructive → the upstream call; configuration publication → snapshot **sign/push/apply**, entering DFD-10 at `SIGN` and never earlier; credential → **broker materialization** (mint/rotate/revoke); state-affecting Management → the state change. A single edge to "upstream call" would leave publication and credential mutation ungated, since neither makes one.
 
-**Two lanes, and they must never join.** The **decision** lane (`DEC → RDX → Q → SPOOL → GATE`) gates execution; the **outcome** lane (`XUP`/`XPUB`/`XCRED`/`XMGMT` → `OUT → RDXO → QO → SPOOLO → INT`) records what happened and **never returns to `GATE`** or to any execution node. Feeding outcome events back into the decision lane would re-enter the gate still carrying the critical action class, whose only matching edge is `EXEC` — i.e. it would re-execute the side effect, indefinitely. Outcome-lane loss is therefore **degraded + alert + loss counter only**: the operation has already happened, so fail-closed is vacuous for it, exactly as for an already-denied request. **Ordering is load-bearing:** for the critical classes the decision event is **durably committed BEFORE that class's OWN irreversible action**, so a saturated queue can still fail the operation closed. A durability check reached only *after* execution cannot fail closed at all — the side effect has already happened (`MCP-T-044`). The **outcome** event is emitted after execution and is explicitly **not** the fail-closed gate. Critical events never silently lost (MCP-EVENT-002); **not** the audit ring (`MaxRing=500`). The **three** loss branches are **distinct**: the five critical classes (write, destructive, configuration publication, credential, **state-affecting Management**) ⇒ **fail closed AND** degrade+alert; a non-persistable **authentication-failure / authorization-denial** ⇒ **critical degraded state + durability lockout** (the request is already denied, so there is no operation to fail closed); **read-only / low-risk ⇒ the configured loss policy**, which is a selection between two behaviours and not a posture of its own — EVENT-MODEL §4a, ADR-0024 §D-5.
+**Two lanes, and they must never join.** The **decision** lane (`DEC → RDX → CLASSIFY → Q → SPOOL → GATE`) gates execution; the **outcome** lane (`XUP`/`XPUB`/`XCRED`/`XMGMT` → `OUT → RDXO → QO → SPOOLO → INT`) records what happened and **never returns to `GATE`** or to any execution node. Feeding outcome events back into the decision lane would re-enter the gate still carrying the critical action class, whose only matching edge is `EXEC` — i.e. it would re-execute the side effect, indefinitely. Outcome-lane loss is therefore **degraded + alert + loss counter only**: the operation has already happened, so fail-closed is vacuous for it, exactly as for an already-denied request. **Ordering is load-bearing:** for the critical classes the decision event is **durably committed BEFORE that class's OWN irreversible action**, so a saturated queue can still fail the operation closed. A durability check reached only *after* execution cannot fail closed at all — the side effect has already happened (`MCP-T-044`). The **outcome** event is emitted after execution and is explicitly **not** the fail-closed gate. Critical events never silently lost (MCP-EVENT-002); **not** the audit ring (`MaxRing=500`). `LOSS` has **two** branches, both authenticated: the five critical classes (write, destructive, configuration publication, credential, **state-affecting Management**) ⇒ **fail closed AND** `critical-durability-degraded`, scoped to one durability domain; **read-only / low-risk ⇒ the configured loss policy**, which is a selection between two behaviours and not a posture of its own. The **attacker-mintable** authentication-failure / authorization-denial class is **not a branch of `LOSS` at all** — it is diverted at `CLASSIFY`, before the queue, into the denial lane, and its worst outcome is `denial-lane-degraded`, which blocks nothing — EVENT-MODEL §4a/§4b, ADR-0024 §D-5.
 
 ## DFD-10 — Control Plane → Data Plane snapshot publication
 
@@ -311,7 +324,7 @@ today**, and the PR-1 primitive alone does not make the listener safe.
 
 ## DFD-13 — Outbound-only connector (Model B)
 
-Crosses TB-6. Threats: MCP-T-051, MCP-T-052, MCP-T-010.
+Crosses TB-6. Threats: MCP-T-051, MCP-T-053, MCP-T-010.
 
 ```mermaid
 flowchart LR
@@ -349,7 +362,7 @@ so the **identity half of MCP-T-069 is NOT closed by this diagram**.
 
 ```mermaid
 flowchart LR
-  BYTES["Hostile client bytes (untrusted)<br/>EITHER listener: Gateway or Management"] --> FRAME["Bounded transport / framing<br/>MCP-PROTO-005/006/008<br/>evaluated against THIS listener's own bound set"]
+  BYTES["Hostile PEER bytes (untrusted)<br/>parameterized by PEER ROLE: client-facing OR upstream-server-facing leg<br/>EITHER listener/capability — SAME kernel (MCP-PROTO-015)"] --> FRAME["Bounded transport / framing<br/>MCP-PROTO-005/006/008<br/>evaluated against THIS listener's own bound set"]
   FRAME --> DEC[Strict JSON-RPC decode<br/>single parser, no differential<br/>MCP-PROTO-001/007]
   DEC --> CLASS["ENVELOPE classification: req / resp / notif<br/>version-INDEPENDENT; ID correlation MCP-PROTO-003<br/>MCP-PROTO-002 (envelope half)"]
   CLASS --> STRUCT[Structural validation:<br/>size/depth/fields/string/number limits<br/>MCP-PROTO-006/007]
@@ -381,6 +394,66 @@ flowchart LR
 ```
 Untrusted bytes are bounded and strictly decoded before any downstream stage. **Classification is split around version negotiation:** `CLASS` decides the JSON-RPC *envelope* (request / response / notification) and correlates IDs — both version-independent — while `ADMIT` rejects unknown methods and unadvertised capabilities/extensions **against the negotiated version's** allowlist, which is what `MCP-PROTO-002`'s "per the negotiated version" requires and what a single pre-negotiation classify stage could not implement. Rejection **branches by message class** (MCP-PROTO-013): a rejected **request** yields a bounded, non-leaky JSON-RPC error; a rejected **notification** yields **no wire response at all** (one-way — replying would recreate the notification-flood reply amplifier), only a recorded rejection and metric; a rejected **response** — uncorrelated, malformed or over-limit — is **discarded and recorded with no wire response** (answering a response is a feedback loop); the **offending message's** resources are freed, but an **outstanding-request entry is released only on trustworthy same-session correlation** — never on an ID lifted from the rejected message, since that would be a remote state-deletion primitive — and otherwise expires on its bounded timeout; an **unclassifiable** message yields at most one `id: null` error over a **rate-bounded** path. Deterministic cleanup is **unconditional across every class**. No hostile input may panic the kernel
 (MCP-PROTO-009). **No policy/credential/upstream call exists on this path** — PR-1 is the kernel only.
+The ingress is **parameterized by peer role** (client-facing vs upstream-server-facing); the `ADMIT` stage
+resolves against the Culvert-reviewed [MCP-OPERATION-REGISTRY.md](MCP-OPERATION-REGISTRY.md), not the raw
+negotiated-version method set. DFD-16 shows the two legs and the admission/owner branches.
+
+## DFD-16 — Two-leg kernel & method admission (Capability **B**, PR-1)
+
+Crosses **TB-1, TB-2**. Threats: MCP-T-076, MCP-T-077 (reverse-channel/requestor-direction state confusion; admitted-but-unpoliced dispatch). The SAME kernel decodes both the client-facing leg (TB-1) and the upstream-server-facing leg (TB-2) with **requestor-scoped** correlation; admission resolves against [MCP-OPERATION-REGISTRY.md](MCP-OPERATION-REGISTRY.md); **no reverse-channel proxying in V1**.
+
+```mermaid
+flowchart LR
+  CBYTES["Client-facing leg (TB-1)<br/>agent → Culvert bytes"] --> KERNEL
+  UBYTES["Upstream-server-facing leg (TB-2)<br/>server ↔ Culvert bytes"] --> KERNEL
+  KERNEL["SAME protocol kernel (MCP-PROTO-001..016)<br/>peer-role parameterized; parser MUST NOT diverge<br/>correlation keyed by (session, requestor-role/direction, request-id)"] --> ADMIT
+  ADMIT{"METHOD ADMISSION<br/>Culvert-reviewed registry (MCP-OPERATION-REGISTRY.md)<br/>NOT the raw negotiated-version method set"}
+  ADMIT --> |"admitted + kernel-terminal<br/>initialize / notifications/initialized / ping / notifications/cancelled"| KT["Kernel handles + answers<br/>no downstream dispatch"]
+  ADMIT --> |"admitted + names ONE decision point<br/>tools/list, tools/call"| DP["Named downstream decision point<br/>catalog/discovery (DFD-4) · policy engine (DFD-5)<br/>default-deny on a representable operand"]
+  ADMIT --> |"absent from registry / rejected class<br/>resources/*, prompts/*, completion/*, tasks/*"| REJ["REJECT at admission (MCP-PROTO-013/016)<br/>no dispatch path; no wire response where class forbids"]
+  ADMIT --> |"server-originated REQUEST (sampling / elicitation / roots) — reverse channel"| REJ2["REJECTED at admission — not proxied to the agent<br/>Culvert advertises no such client capability<br/>MCP-T-076"]
+  ADMIT --> |"server→Culvert notifications/cancelled"| RCANCEL{"owns SERVER-originated requests ONLY<br/>(same direction) — none admitted in V1"}
+  RCANCEL -. "names a Culvert-originated id (opposite direction)" .-> NOOP["NO effect — never cancels/releases the other<br/>direction's state (MCP-PROTO-015)"]
+  classDef tb fill:#fee,stroke:#c00;
+  class KERNEL,ADMIT tb
+```
+
+Both legs enter the **same** kernel; admission is the single choke point where a method is either
+kernel-terminal, routed to exactly one named decision point, or rejected — never admitted-and-unpoliced and
+never dispatched from outside the registry. A reverse-direction cancellation resolves **only** against the
+same-direction outstanding set; an opposite-direction `id` match has no effect.
+
+---
+
+## DFD-17 — Transport rejection → terminal GET → zero stream (Capability **B**, PR-1/PR-5)
+
+Crosses **TB-1**. Threats: MCP-T-078 (security-rejection-path legacy fallback + retained unauthenticated
+stream). Shows that every security-motivated rejection is **terminal** and that the client's spec-mandated
+follow-on GET is answered with **405** and allocates **zero** stream — the legacy `2024-11-05` `endpoint`
+event is **not hosted**. Status/transport facts are bound to
+[`TRANSPORT-FALLBACK-EVIDENCE.md`](TRANSPORT-FALLBACK-EVIDENCE.md); the sessionless absent-header ruling is
+D-1 (OPEN).
+
+```mermaid
+flowchart LR
+  REJ["Security rejection (TB-1)<br/>400 unlisted version / invalid MCP-Protocol-Version / missing session<br/>404 terminated session"] --> CO
+  CO{"Initialize path?"}
+  CO -->|"PREFER 200 counter-offer (InitializeResult)"| CONT["Client continues — or SHOULD disconnect if it<br/>cannot support the offered version — NO probe"]
+  CO -->|"terminal 4xx (header / session / malformed)"| PROBE["Spec-conformant OR catch-any SDK client<br/>concludes legacy 2024-11-05 and issues GET (endpoint-event probe)"]
+  PROBE --> GET{"GET without a valid negotiated session/context"}
+  GET -->|"MUST 405 Method Not Allowed"| TERM["Terminal: no text/event-stream<br/>ZERO stream allocated or retained (MCP-PROTO-017)"]
+  TERM --> ZERO["N rejected clients leave ZERO retained streams<br/>client fallback terminates (MCP-T-078 closed)"]
+  GET -.->|"FORBIDDEN: open or hold an endpoint-awaiting SSE"| BLOCK["legacy 2024-11-05 endpoint event<br/>NOT HOSTED — no route or config can emit it"]
+  classDef tb fill:#fee,stroke:#c00;
+  classDef no fill:#eee,stroke:#999,stroke-dasharray:4 3;
+  class REJ,GET tb
+  class BLOCK no
+```
+
+Both the initialize counter-offer and every terminal `4xx` avoid recruiting a stream: the counter-offer is
+an HTTP 200 success so no probe fires, and a terminal rejection's follow-on GET is `405` with no allocation.
+The forbidden dashed edge (opening or holding an `endpoint`-awaiting SSE) is the #929 vector, closed by
+`MCP-PROTO-017`; the legacy endpoint event is not reachable by any route or configuration.
 
 ---
 
@@ -396,10 +469,48 @@ Untrusted bytes are bounded and strictly decoded before any downstream stage. **
 | 6 | B (gateway) | TB-2 | 022–025, 005 |
 | 7 | B (gateway) | TB-1 | 026, 036, 037, 041, 040 |
 | 8 | B (gateway) | TB-2, TB-4 | 027, 038, 039 |
-| 9 | A/B | TB-4 | 028, 044, 045 |
+| 9 | A/B | TB-4 | 028, 044, 045, 075 |
 | 10 | platform | TB-3, TB-5 | 047–050 |
 | 11 | platform | TB-3 | 047, 048 |
 | 12 | connectivity | TB-1, TB-6 | 036, 037, 030, 031/055 |
-| 13 | connectivity | TB-6 | 051, 052, 010 |
+| 13 | connectivity | TB-6 | 051, 053, 010 |
 | 14 | connectivity | TB-6, TB-1 | 036, 042, 052, 031 |
 | 15 | **A and B** (both listeners, PR-1 kernel) | **TB-1, TB-7** | 057–074 (parser/framing/version/state) |
+| 16 | **B** (both legs, PR-1 kernel) | **TB-1, TB-2** | 076, 077 (reverse-channel/direction confusion; admitted-but-unpoliced dispatch) |
+| 17 | **B** (transport rejection, PR-1/PR-5) | **TB-1** | 078 (security-rejection-path legacy fallback + retained unauthenticated stream) |
+
+## STRIDE-divergence reconciliation (predicate-21 advisory arm)
+
+`predicate-21` has two arms. Its **STRICT (gated)** arm proves that each DFD's own header threat/boundary
+declaration equals the coverage-summary row above — those two are the **authoritative per-flow
+enumeration** and are kept byte-parity-locked. Its **advisory (non-gated)** arm additionally compares each
+header against the [`THREAT-MODEL.md`](THREAT-MODEL.md) §9 *"Dominant STRIDE threats"* row, which is a
+**curated dominant-subset** summary — deliberately narrower than the full per-flow enumeration. A header ⊇
+§9 relationship is therefore expected and is **not** a defect. This subsection adjudicates every divergence
+the advisory arm reports, so none remains unexplained:
+
+- **DFD-6 (credential selection).** Header adds `MCP-T-005` (credential-substitution) to the §9 dominant
+  set `022–025`. **Intentional:** the credential-selection flow can be attacked by substitution, but §9
+  lists only the dominant credential-scoping threats. Header is the authoritative superset.
+- **DFD-7 (input inspection).** Header adds `MCP-T-040` to the §9 dominant set `026/036/037/041`.
+  **Intentional:** `040` is an inspection-adjacent threat carried in the full flow enumeration; §9 lists the
+  dominant subset.
+- **DFD-12 (local enterprise client connectivity).** Header adds the inbound-rebinding pair
+  `MCP-T-031/055` to the §9 dominant set `030/036/037`. **Intentional:** the local-client listener still
+  crosses TB-1, where inbound rebinding applies (validated per request by `MCP-INSP-009`); §9 lists the
+  connectivity-dominant subset.
+- **DFD-13 (outbound-only connector, Model B).** **Corrected — this was a genuine transposition, now
+  reconciled.** The connector's binding threats are the D-8 closure mapping (THREAT-MODEL §"decision→threat"
+  closure: `D-8 → MCP-T-051 / MCP-T-053 / MCP-T-010`): connector compromise (`051`), cloud data-residency
+  (`053`, residual R-5), and tenant-binding (`010`). The header, coverage row, **and** §9 now all read
+  `051, 053, 010`. The prior `MCP-T-052` (DMZ endpoint abuse) belonged to the DMZ flow (DFD-14), not the
+  connector — a connector has no unsolicited inbound port — and has been removed here.
+- **DFD-14 (hardened DMZ endpoint, Model C).** **Corrected + intentional superset.** The DMZ's own
+  endpoint-abuse threat is `MCP-T-052` (not the connector-compromise `MCP-T-051`), per the D-9 closure
+  mapping (`D-9 → MCP-T-052 / MCP-T-031`); §9 now reads `036, 042, 052`. The header additionally carries
+  `MCP-T-031` (inbound DNS-rebinding — a DMZ threat under D-9, enforced by `MCP-INSP-009`), so header ⊇ §9
+  by the same intentional dominant-subset rule as DFD-6/7/12.
+
+After this reconciliation the advisory arm reports only the three intentional header⊇§9 supersets
+(DFD-6/7/12) plus DFD-14's single intentional `031` superset; DFD-13 now matches exactly. No unexplained
+DFD-header vs THREAT-MODEL divergence remains.

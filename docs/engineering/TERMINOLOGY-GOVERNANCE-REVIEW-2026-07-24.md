@@ -87,6 +87,14 @@ compatibility risk — nothing shipped depends on any of the old names):**
   renamed to `support_health_uptime_bucket` in the design doc, before it ships as a real metric ID.
   Design-doc-only; zero code, wire, or persisted-field impact (nothing has shipped yet to be
   compatibility-broken).
+  > **SUPERSEDED (2026-07-31, M7 Slice 2.5-A contract sync).** The rename described in the
+  > preceding two lines (`support_uptime_bucket` → `support_health_uptime_bucket`) did **not**
+  > ship. When the registry was implemented, the metric shipped as **`support_uptime_bucket`**
+  > (`support_telemetry_registry.go`; golden fixture `testdata/telemetry/v1/inner_sample.json`;
+  > `registry_hash 061fe684…`). The `support_health_uptime_bucket` spelling above is therefore an
+  > **erroneous historical proposal**, retained only as the record of this review; the authoritative
+  > id is `support_uptime_bucket`, and `roadmap/M7-proactive-telemetry-plan.md` §7 has been corrected
+  > to match the shipped registry.
 - **T-25 (partial) — Two disjoint "recipient" registries reachable from the same GUI panel create a
   functional dead end (GUI copy fixed now; deeper unification deferred).** M5's admin-CRUD named
   recipient registry (`support_recipients.go`, GUI section "Sealing recipients," feeds only the manual

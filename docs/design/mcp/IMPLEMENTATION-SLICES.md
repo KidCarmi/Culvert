@@ -25,11 +25,12 @@ Delivery rule (BLUEPRINT §23): every slice needs a defined trust boundary, acce
 rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted ADR under `docs/adr/`**
 (Option B — now [`docs/adr/0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md)).
 
-> **PR-1 entry gate (updated 2026-07-24, [`ADR-0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md)).**
-> ADR-0024 is `Status: Proposed`; PR-1 also requires: **(a)** ARB + Security Architecture ratification of
-> ADR-0024 (→ Accepted); **(b)** **D-1 (protocol-version baseline) externally verified and human-approved**
-> — because PR-1 *is* the Protocol Kernel, D-1 **must not** be left for closure during implementation; and
-> **(c)** the **repository build/test baseline run and recorded** (the PR-0 session executed neither).
+> **PR-1 entry gate — CLOSED (2026-07-31, [`ADR-0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md)).**
+> All four hard entry gates are complete: ADR-0024 is **`Status: Accepted`**; **D-1** (protocol-version
+> baseline) is **CLOSED** (V1 baseline frozen); **D-15** (config anti-drift contract) is **CLOSED**; and the
+> **repository build/test baseline is re-anchored to current `main` and recorded**. There is no ARB /
+> committee ratification step in this project. **PR-1 implementation is GO** — see
+> [`PR1-ENTRY-CLOSURE.md`](PR1-ENTRY-CLOSURE.md).
 
 ---
 
@@ -44,7 +45,7 @@ rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted AD
 - **Acceptance:** evidence-backed; two capabilities kept separate; go/no-go cleared; ADR **proposal**
   present.
 - **Rollback:** delete the docs directory (no runtime effect).
-- **Owner:** Staff Eng + Product Sec. **Reviewer:** ARB + all roles ([`PR0-REVIEW-CHECKLIST.md`](PR0-REVIEW-CHECKLIST.md)).
+- **Owner:** Staff Eng + Product Sec. **Review:** evidence-based across all lenses ([`PR0-REVIEW-CHECKLIST.md`](PR0-REVIEW-CHECKLIST.md)); no ARB / committee step.
 - **Release gate:** GO-NO-GO cleared; numbered ADR accepted before PR-1.
 
 ## PR-1 — Protocol Kernel
@@ -52,9 +53,11 @@ rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted AD
 - **Scope:** an `internal/mcp/*` protocol-kernel package (**working name `internal/mcp/protocol` — `[REC]`, subject to implementation review**); inbound Origin/Host validation. **ADR-0024 §Decision item 8 ratifies the `internal/mcp/*` *namespace and boundary*, not the exact leaf-package name** — the concrete name/split stays `[REC]` in [`RECOMMENDED-ARCHITECTURE.md`](RECOMMENDED-ARCHITECTURE.md) even after ADR-0024 is Accepted.
 - **Non-goals:** policy, identity, upstream calls.
 - **Trust boundary:** TB-1 (agent/client ↔ Culvert).
-- **Dependencies:** PR-0 approved; **ADR-0024 Accepted (ARB + Sec-Arch ratified)**; **D-1 protocol baseline externally verified + approved**; **repository build/test baseline recorded**; **`D-15` config-surface registry integration strategy selected + approved**. *(All four are hard PR-1 entry gates — [`ADR-0024` PR-1 entry gate](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md).)*
+- **Dependencies (all satisfied 2026-07-31):** PR-0 evidence review complete; **ADR-0024 Accepted**; **D-1 protocol baseline CLOSED** (V1 frozen); **repository build/test baseline re-anchored to current `main` + recorded**; **`D-15` config-surface registry integration CLOSED — implementation contract accepted**. *(All four hard PR-1 entry gates are complete — [`PR1-ENTRY-CLOSURE.md`](PR1-ENTRY-CLOSURE.md).)*
 - **Config-surface ownership (`MCP-CFG-001`, `D-15`) — PR-1 owns this, deliberately.** PR-1 is the slice that builds the anti-drift wall for MCP config, **before** PR-2/PR-4/PR-8 add registry, credential and event rows behind it. Concretely PR-1 delivers: enumeration of every MCP config structure (including nested) in the parity inventory; the registry-class semantics from [`CONFIG-SURFACE-MATRIX.md`](CONFIG-SURFACE-MATRIX.md) §Registry semantics wired to real registry fields; and the anti-drift gate in [`CI-GATES.md`](CI-GATES.md) failing on **both** omission cases. Retrofitting after credential (`RC-2`) and server-registry (`RC-1`) rows exist is materially harder and leaves a live disclosure path to unenrolled peers in the interim. **Owner:** Eng — platform/config. **Approver:** Architecture **and** Product Security.
-- **Security requirements:** **MCP-PROTO-001..014** (protocol-kernel framing, structural bounds, UTF-8/Unicode identifier handling, version negotiation/adapter equivalence, protocol-lifecycle/opaque-session-context — the concrete replacement for the former undefined "protocol bounds") and **MCP-INSP-008** (the **pure Origin/Host validation primitive + test harness — NO listener**). **PR-1 binds no listener:** listener binding, configured-interface binding, host-allowlist enforcement and end-to-end rebinding are **MCP-INSP-009 at PR-5**. **`MCP-OPS-002` is NOT a PR-1 requirement** — deployed-listener/runtime bounding is **PR-5**; PR-1's parse-time bounds live in `MCP-PROTO-006/008`. **Identity is a non-goal in PR-1** — `MCP-PROTO-012` covers protocol lifecycle + an *immutable opaque* session context only; resolved-identity binding / no-rebind is **MCP-ID-008 at PR-3**.
+- **RPR-1 (#925/#928) additions — PR-1 owns these:** the kernel is **peer-role parameterized** (one decoder for the client-facing AND upstream-server-facing legs), correlation/cancellation state is **requestor-scoped** `(session, direction, id)` (**MCP-PROTO-015**), and admission resolves against the Culvert-reviewed **admitted-method registry** [`MCP-OPERATION-REGISTRY.md`](MCP-OPERATION-REGISTRY.md) with a **forward/reverse parity gate** (**MCP-PROTO-016**, executable as `predicates/predicate-28.py`). The registry admission + parity + protocol-state fixtures are blocking at **PR-1**; the per-method business-policy enforcement (e.g. `tools/call`) is blocking at **PR-6**.
+- **RPR-4 (#929) additions — PR-1 owns the primitive, PR-5 the listener:** the transport-rejection posture (**MCP-PROTO-017**) — **no** legacy `2024-11-05` HTTP+SSE endpoint pair, a GET without a valid negotiated session/context → terminal **`405`** with **zero** stream, every security-motivated `4xx` follow-on GET terminal **`405`**, a **`200` `initialize` counter-offer preferred** over a `4xx` hard reject, and the **no-pre-negotiation-held-stream** invariant. The exclusion + terminal-status **primitive** and its legacy-negative / era-separation fixtures are blocking at **PR-1**; the **listener** held-stream / N-rejected-clients-zero-retained-streams load assertions are **PR-5**; version-set-dependent fixtures are **`D-1 BLOCKED`** (`MCP-T-078`, [`TRANSPORT-FALLBACK-EVIDENCE.md`](TRANSPORT-FALLBACK-EVIDENCE.md)).
+- **Security requirements:** **MCP-PROTO-001..017** (protocol-kernel framing, structural bounds, UTF-8/Unicode identifier handling, version negotiation/adapter equivalence, protocol-lifecycle/opaque-session-context — the concrete replacement for the former undefined "protocol bounds") and **MCP-INSP-008** (the **pure Origin/Host validation primitive + test harness — NO listener**). **PR-1 binds no listener:** listener binding, configured-interface binding, host-allowlist enforcement and end-to-end rebinding are **MCP-INSP-009 at PR-5**. **`MCP-OPS-002` is NOT a PR-1 requirement** — deployed-listener/runtime bounding is **PR-5**; PR-1's parse-time bounds live in `MCP-PROTO-006/008`. **Identity is a non-goal in PR-1** — `MCP-PROTO-012` covers protocol lifecycle + an *immutable opaque* session context only; resolved-identity binding / no-rebind is **MCP-ID-008 at PR-3**.
 - **Tests:** protocol-kernel fuzz (parser/framing/adapter/cancellation, panic/crash detection), race, structural-limit + parser-differential + protocol-state suite, compatibility fixtures (**D-1-gated**), inbound-rebinding, malformed JSON-RPC (all **new**; see [`TEST-TRACEABILITY-MATRIX.md`](TEST-TRACEABILITY-MATRIX.md) and [`CI-GATES.md`](CI-GATES.md)).
 - **Acceptance:** no public listener; the protocol-kernel fuzz + race + structural/differential/protocol-state suites are green as **blocking PR-1 gates**; Origin/Host validated. **Compatibility conformance is green only after D-1 (protocol baseline) is externally verified and its fixtures exist — it MUST NOT be reported green before D-1 closes.**
 - **Rollback:** feature-flag disabled build; no listener bound.
@@ -140,14 +143,17 @@ rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted AD
 - **Non-goals:** reusing the 500-entry audit ring as production evidence.
 - **Trust boundary:** TB-4.
 - **Dependencies:** PR-6.
-- **Security requirements:** MCP-EVENT-001..006; MCP-PRIVACY-002.
+- **Security requirements:** MCP-EVENT-001..**007**; **MCP-OPS-005**; MCP-PRIVACY-002. *(`MCP-EVENT-007` — the isolated denial lane — and `MCP-OPS-005` — the restart-persistent, bounded, scoped degraded-state machine — are the requirements the nine `MCP-T-075` containment tests below implement. Omitting them here would let an implementer scoping from this slice treat both as unassigned despite the acceptance text demanding them.)*
 - **Tests:** queue-saturation **and a distinct post-admission spool-commit-failure case** (`ENOSPC` / `fsync` error / encryption-key failure — admission is not a commit), event-durability, integrity/tamper, replay-id, export-authz, secret-scan, and the
-  **denial-event durability-lockout** test (drop a denial event under saturation; assert the critical degraded state
-  **and** that a subsequent *allowed* write/high-risk operation is blocked until durability returns).
+  **nine blocking `MCP-T-075` containment tests** ([CI-GATES.md](CI-GATES.md)), headed by the **attacker test**:
+  saturate the denial lane with unauthenticated auth failures and assert authenticated allowed critical work in
+  another tenant/listener/capability **succeeds throughout**. These REPLACE the superseded denial-event
+  durability-lockout test, which asserted the vulnerability succeeded.
   **Per-class commit-before-side-effect assertions are mandatory**: for each critical class the test MUST assert the ABSENCE OF EVERY IRREVERSIBLE ACTION DOWNSTREAM OF THAT FLOW'S COMMIT GATE — **not only the action the class is named after**, since one flow can carry two classes' side effects — write/destructive: **no upstream call occurred AND no broker-side materialization occurred** (DFD-5's `WAL` gates both, and its fail-closed node names both); configuration publication: **no new revision, nothing signed or pushed, every DP on the prior epoch**; credential: **broker state unchanged — nothing minted, rotated or revoked — AND no upstream call occurred**; state-affecting Management: **no state change AND no revision created, nothing signed or pushed, every DP on the prior epoch** (DFD-3 publishes a signed snapshot, so the state-change assertion alone passes a handler that publishes anyway). **SLICE TIMING — `state-affecting Management` has NO V1 mechanism** (ADR-0024 §D-13 defers every Management mutation to a post-V1 decision), so PR-8 can only **stub** this class; the **real-path** assertion is assigned to the ****Future Management-Mutation Gate** (IMPLEMENTATION-SLICES, D-13), which MUST NOT be marked green without it** (amendment 18's dual ownership, as for the PR-10 publication re-run). Observing fail-closed plus degraded state is NOT sufficient — an act-first implementation that reports `ENOSPC` after the side effect satisfies that and is rejected by `MCP-EVENT-002`.
-- **Acceptance:** zero loss for critical classes under tested conditions (or **fail closed AND** degrade+alert); for a
-  non-persistable auth-failure/authz-denial event, the **critical degraded state + durability lockout** is observed —
-  fail-closed-plus-alert alone does **not** satisfy this slice.
+- **Acceptance:** zero loss for critical classes under tested conditions (or **fail closed AND** degrade+alert), with the
+  degraded state **scoped to one durability domain**, **restart-persistent** and **bounded on exit**; for a
+  non-persistable auth-failure/authz-denial event, the isolated **denial lane** absorbs it and **no authenticated
+  operation anywhere is blocked** — a system-wide block is a FAILING result, not a passing one.
 - **Rollback:** degraded mode → fail-closed for write/high-risk.
   **Additionally: for every critical class the side effect is proven not to have occurred**, and a spool-commit failure after admission fails closed identically to saturation.
 - **Owner:** SRE/Sec. **Reviewer:** Sec Arch. **Release gate:** durability-under-saturation green **+ the spool-commit-failure case green + every per-class side-effect-absence assertion green** (`MCP-EVENT-002`).
@@ -234,7 +240,7 @@ rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted AD
   action as well as its own, and `MCP-EVENT-002` requires the absence of **every** irreversible action downstream
   of the flow's commit gate, not only the one the class is named after. Observing the returned error or degraded
   mode is NOT sufficient for either.
-- **Owner:** Sec Arch. **Reviewer:** ARB + Security Architecture. **Gate:** this gate **MUST NOT be marked
+- **Owner:** Sec Arch. **Review:** security/architecture evidence + adversarial review (no ARB / committee step). **Gate:** this gate **MUST NOT be marked
   green without that re-run** (amendment 18 dual ownership, as for the PR-10 publication re-run); **not**
   reachable via PR-11, and **not** a Production Qualification dependency (post-GA, like PR-C and the DMZ gate).
 

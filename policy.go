@@ -1097,6 +1097,11 @@ func (ps *PolicyStore) Evaluate(clientIP, identity, authSource, host string, gro
 	// precomputed srcIPNet reuses it (previously net.ParseCIDR + net.ParseIP
 	// ran per rule per request, ~4 allocs/rule on source-scoped rulesets).
 	clientAddr := net.ParseIP(clientIP)
+	// Read the clock ONCE for the whole scan, lazily on the first scheduled
+	// rule reached (a scan with no scheduled rules never reads it). Previously
+	// every scheduled rule paid its own time.Now() inside matchSchedule; one
+	// instant per scan is also the more consistent decision point.
+	var scanNow time.Time
 
 	for i := range rules {
 		rule := rules[i]
@@ -1112,8 +1117,13 @@ func (ps *PolicyStore) Evaluate(clientIP, identity, authSource, host string, gro
 		if !matchSourceAddr(rule, clientIP, clientAddr, identity, authSource, groups) {
 			continue
 		}
-		if !matchSchedule(rule.Schedule) {
-			continue
+		if rule.Schedule != nil {
+			if scanNow.IsZero() {
+				scanNow = time.Now()
+			}
+			if !matchScheduleAt(rule.Schedule, scanNow) {
+				continue
+			}
 		}
 		if !matchDestNorm(rule, host, normHost) {
 			continue
@@ -1213,43 +1223,100 @@ func matchSchedule(s *PolicySchedule) bool {
 	if s == nil {
 		return true
 	}
+	return matchScheduleAt(s, time.Now())
+}
+
+// matchScheduleAt is matchSchedule against a caller-supplied instant. The
+// Stage-2 Evaluate scan reads the clock once per request and passes the same
+// instant to every scheduled rule — previously each rule paid its own
+// time.Now() inside the scan (and one decision could straddle a minute
+// boundary mid-scan).
+func matchScheduleAt(s *PolicySchedule, now time.Time) bool {
 	loc := time.UTC
 	if s.Timezone != "" {
 		loc = scheduleLocation(s.Timezone)
 	}
-	now := time.Now().In(loc)
+	now = now.In(loc)
+	if !scheduleDayMatch(s.Days, now) {
+		return false
+	}
+	if s.TimeStart == "" || s.TimeEnd == "" {
+		return true
+	}
+	return scheduleTimeMatch(s.TimeStart, s.TimeEnd, now)
+}
 
-	// Day-of-week check.
-	if len(s.Days) > 0 {
-		day := now.Weekday().String()[:3] // "Mon", "Tue" …
-		found := false
-		for _, d := range s.Days {
-			if strings.EqualFold(d, day) {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return false
+// scheduleDayMatch is the day-of-week check ("Mon", "Tue" …, case-insensitive).
+// An empty Days list means every day.
+func scheduleDayMatch(days []string, now time.Time) bool {
+	if len(days) == 0 {
+		return true
+	}
+	day := now.Weekday().String()[:3] // "Mon", "Tue" …
+	for _, d := range days {
+		if strings.EqualFold(d, day) {
+			return true
 		}
 	}
+	return false
+}
 
-	// Time-of-day check.
-	if s.TimeStart != "" && s.TimeEnd != "" {
-		cur := fmt.Sprintf("%02d:%02d", now.Hour(), now.Minute())
-		if s.TimeStart <= s.TimeEnd {
-			// Normal range e.g. 09:00–17:00.
-			if cur < s.TimeStart || cur >= s.TimeEnd {
-				return false
-			}
-		} else {
-			// Overnight range e.g. 22:00–06:00.
-			if cur < s.TimeStart && cur >= s.TimeEnd {
-				return false
-			}
-		}
+// scheduleTimeMatch is the time-of-day window check (start inclusive, end
+// exclusive; start > end is an overnight range). Well-formed zero-padded
+// "HH:MM" bounds compare on a minutes-of-day scale — the same total order as
+// the previous lexicographic string comparison, minus the per-rule fmt.Sprintf
+// allocation that put O(rules) heap garbage on the policy hot path. Malformed
+// bounds fall back to the legacy string comparison unchanged.
+func scheduleTimeMatch(startStr, endStr string, now time.Time) bool {
+	start, okStart := parseClockMinutes(startStr)
+	end, okEnd := parseClockMinutes(endStr)
+	if !okStart || !okEnd {
+		return scheduleTimeMatchLegacy(startStr, endStr, now)
 	}
-	return true
+	cur := now.Hour()*60 + now.Minute()
+	if start <= end {
+		// Normal range e.g. 09:00–17:00.
+		return cur >= start && cur < end
+	}
+	// Overnight range e.g. 22:00–06:00.
+	return cur >= start || cur < end
+}
+
+// scheduleTimeMatchLegacy preserves the pre-optimization lexicographic
+// comparison for bounds parseClockMinutes rejects (e.g. unpadded "9:00"):
+// whatever such a schedule matched before, it matches now.
+func scheduleTimeMatchLegacy(startStr, endStr string, now time.Time) bool {
+	cur := fmt.Sprintf("%02d:%02d", now.Hour(), now.Minute())
+	if startStr <= endStr {
+		return cur >= startStr && cur < endStr
+	}
+	return cur >= startStr || cur < endStr
+}
+
+// parseClockMinutes converts a strict zero-padded 24-h "HH:MM" clock string to
+// minutes since midnight. "24:00" is accepted (1440) as the exclusive
+// end-of-day bound existing schedules use to close a full-day window. On the
+// strict format the minute scale is order-isomorphic to string comparison, so
+// swapping the comparison cannot flip any schedule decision; anything else
+// returns ok=false and stays on the legacy comparison.
+func parseClockMinutes(s string) (int, bool) {
+	if len(s) != 5 || s[2] != ':' {
+		return 0, false
+	}
+	h1, h2 := s[0]-'0', s[1]-'0'
+	m1, m2 := s[3]-'0', s[4]-'0'
+	if h1 > 9 || h2 > 9 || m1 > 9 || m2 > 9 {
+		return 0, false
+	}
+	hh := int(h1)*10 + int(h2)
+	mm := int(m1)*10 + int(m2)
+	if hh == 24 && mm == 0 {
+		return 1440, true
+	}
+	if hh > 23 || mm > 59 {
+		return 0, false
+	}
+	return hh*60 + mm, true
 }
 
 // ─── Source matching ──────────────────────────────────────────────────────────

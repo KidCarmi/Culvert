@@ -133,7 +133,7 @@ Goal: Prevent a decision/security event from being recorded
 | Queue saturation | MCP-T-044 | MCP-EVENT-001,002 |
 | Wedge export | MCP-T-044 | MCP-EVENT-001,002 |
 | Tamper stored events | MCP-T-045 | MCP-EVENT-005 |
-| Undefined loss policy | MCP-T-044 | MCP-EVENT-002 — for critical classes **fail closed AND** enter degraded mode + alert + integrity-protected loss counter (**not** "fail closed *or* degrade"). For a non-persistable **authentication-failure / authorization-denial** event the triggering request is already denied, so the posture is instead the **critical degraded state + durability lockout** — new *allowed* write/high-risk operations are blocked until durability is restored; see [`EVENT-MODEL.md`](EVENT-MODEL.md) §4a and ADR-0024 §D-5 |
+| Undefined loss policy | MCP-T-044 | MCP-EVENT-002 — for critical classes **fail closed AND** enter degraded mode + alert + integrity-protected loss counter (**not** "fail closed *or* degrade"). For a non-persistable **authentication-failure / authorization-denial** event the triggering request is already denied AND the event is attacker-mintable, so the posture is instead the isolated **denial lane** (`MCP-EVENT-007`) — admission control, attacker-rate-independent coalescing, its own `P-DEN` quota, no access to the `P-CRIT` reserve — whose worst outcome is `denial-lane-degraded`: alert + a distinct loss counter, the request still rejected, and **no authenticated operation blocked anywhere**. Gating authenticated work on an attacker-mintable event would be a fleet-wide DoS (`MCP-T-075`); see [`EVENT-MODEL.md`](EVENT-MODEL.md) §4a/§4b and ADR-0024 §D-5 |
 
 ## AT-8 — Control Plane compromise / split-brain
 

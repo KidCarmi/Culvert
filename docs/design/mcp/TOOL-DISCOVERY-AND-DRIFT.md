@@ -8,6 +8,15 @@ B (MCP Security Gateway); Capability A (Culvert Management MCP Server) does not 
 third-party MCP tools and is out of scope for this document (see
 [`README.md`](README.md) doctrine on keeping the two capabilities separate).
 
+**Non-tool operands are not catalogued in V1 (#928).** Catalog identity, fingerprinting and drift below key
+strictly on the `(server_registry_id, tool name)` tool operand. Non-tool operands — `resources/*` (incl.
+`resources/read`), `prompts/*`, `completion/*` and any other non-tool method — have **no** catalog,
+fingerprint or drift treatment because they are **not admitted** in V1: they are rejected at admission per
+the Culvert-reviewed [`MCP-OPERATION-REGISTRY.md`](MCP-OPERATION-REGISTRY.md) (`MCP-PROTO-016`). A non-tool
+operand therefore never reaches discovery/drift; there is no "uncatalogued resource" path to police. If a
+future version admits a non-tool operand class, it must first define that class's catalog/fingerprint
+substitute here (`MCP-T-077`).
+
 **Status: PR-0 design artifact (Proposed).** Nothing in this document is implemented. All schemas,
 thresholds and lifecycle states are design targets pending PR-1/PR-2 (Protocol kernel; Registry &
 catalog), a numbered ADR, and the PR-0 review gate in

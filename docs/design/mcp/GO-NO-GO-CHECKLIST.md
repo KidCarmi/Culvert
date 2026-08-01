@@ -49,21 +49,26 @@ These six are non-negotiable and apply at every stage.
 
 ## PR-0 → PR-1 gate (this package)
 
-> **Decision-closure status (2026-07-24).** The five blocking domain decisions are **CLOSED** and recorded
-> in [`docs/adr/0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md): **Dual-surface (D-13),
-> Connectivity (D-8 + D-9), Identity (D-2), Events (D-5)** are **GO**. ADR-0024 is `Status: Proposed`, so
-> the ADR gate item below is **not yet satisfied** — it closes on ARB + Security Architecture ratification.
+> **Decision-closure status (2026-07-31 — PR-1 entry closed).** All five blocking domain decisions are
+> **CLOSED** and recorded in [`docs/adr/0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md):
+> **Dual-surface (D-13), Connectivity (D-8 + D-9), Identity (D-2), Events (D-5)** are **GO**. **ADR-0024 is
+> `Status: Accepted`**, so the ADR gate item below is **satisfied**. The two hard PR-1 entry decisions **D-1**
+> (protocol baseline) and **D-15** (config anti-drift contract) are **CLOSED**. There is **no** ARB / Security
+> Architecture / committee ratification step in this project — closure rests on independent AI research,
+> adversarial review, structural predicates, and CI. See [`PR1-ENTRY-CLOSURE.md`](PR1-ENTRY-CLOSURE.md) and
+> tracker [#923](https://github.com/KidCarmi/Culvert/issues/923). **PR-1 implementation is GO.**
 
 GO to begin PR-1 requires ALL of:
-- [ ] PR-0 documentation reviewed per [`PR0-REVIEW-CHECKLIST.md`](PR0-REVIEW-CHECKLIST.md) (all roles).
-- [ ] No hard NO-GO line tripped by the design.
+- [x] PR-0 documentation review complete per [`PR0-REVIEW-CHECKLIST.md`](PR0-REVIEW-CHECKLIST.md) — evidence-based (documents, RPRs, tests, independent verification), not human role signatures (#923 Gate 2).
+- [x] No hard NO-GO line tripped by the design.
 - [x] Scope, Architecture, Dual-surface, Identity, Threat-model, Policy, Events domains GO. *(D-2/D-5/D-8/D-9/D-13 closed in ADR-0024.)*
-- [ ] Blocking open decisions with "Due: PR-1/PR-3" have owners assigned (D-0 minimum resolved).
-- [ ] **A numbered ADR is Accepted under `docs/adr/`** (Option B, D-0) — **ADR-0024 CREATED as `Proposed`; still requires ARB + Security Architecture ratification to become Accepted.**
-- [ ] **D-1 (protocol-version baseline) externally verified and human-approved** — elevated to a hard PR-1 entry gate; PR-1 *is* the Protocol Kernel, so D-1 must not be deferred to implementation.
-- [ ] **Repository build/test baseline run and recorded** before any PR-1 code change (not done in the PR-0 session — VRC §11).
-- [x] **PR-1 protocol-kernel attack surface modeled** (MCP-T-057..074) and mapped to **MCP-PROTO-001..014** with PR-1 **blocking** fuzz + structural/differential/protocol-state gates, and a **D-1-gated** compatibility gate defined (remediation findings H-1..H-4). *(Documentation done; the gates themselves are wired in PR-1 and compatibility greenness still depends on D-1.)*
-- [ ] Two capabilities (Management vs Gateway) confirmed separate across all documents.
+- [x] Blocking open decisions with "Due: PR-1/PR-3" have owners assigned (D-0 resolved).
+- [x] **A numbered ADR is Accepted under `docs/adr/`** (Option B, D-0) — **ADR-0024 is `Status: Accepted`.**
+- [x] **D-1 (protocol-version baseline) CLOSED** — V1 baseline frozen (primary `2025-11-25`, floor `2025-06-18`, all others rejected; Streamable HTTP only; batch rejected; six-method surface; sessionless missing-header → `400`).
+- [x] **D-15 (config anti-drift contract) CLOSED** — implementation contract accepted; `MCP-CFG-001` authoritative.
+- [x] **Repository build/test baseline re-anchored to current `main` and recorded** (#923 Gate 4; [`PR1-ENTRY-CLOSURE.md`](PR1-ENTRY-CLOSURE.md)).
+- [x] **PR-1 protocol-kernel attack surface modeled** (MCP-T-057..074 + RPR-1 MCP-T-076/077) and mapped to **MCP-PROTO-001..016** with PR-1 **blocking** fuzz + structural/differential/protocol-state gates and the compatibility gate (remediation findings H-1..H-4; the gates are wired in PR-1).
+- [x] Two capabilities (Management vs Gateway) confirmed separate across all documents.
 
 ## Production Qualification gate
 
@@ -81,11 +86,13 @@ the Joint Go/No-Go Board sign-off (BLUEPRINT §24 RACI). Any hard NO-GO line rem
 | Two-capability separation | Met (enforced across docs). |
 | Hard NO-GO lines designed-for | Met (each mapped to a requirement + abuse case + test). |
 | Repository claims evidenced | Met ([`VERIFIED-REPOSITORY-CONTEXT.md`](VERIFIED-REPOSITORY-CONTEXT.md)). |
-| ADR under `docs/adr/` | **Created as `docs/adr/0024` (`Status: Proposed`, 2026-07-24).** Becomes Accepted only on ARB + Security Architecture ratification — **PR-1 gate still open.** |
-| Five blocking decisions (D-2/D-5/D-8/D-9/D-13) | **CLOSED** in ADR-0024 (facilitator-approved; ratification pending). |
-| D-1 protocol baseline | **OPEN — elevated to a hard PR-1 entry gate** ([EXT] external verification + human approval). |
-| Test baseline verified | **Not verified this session** — no build/test executed; **must be run + recorded before PR-1 code.** |
+| ADR under `docs/adr/` | **`docs/adr/0024` is `Status: Accepted` (2026-07-31).** Accepted on the merged repository state — no organizational ratification step exists in this project. |
+| Five blocking decisions (D-2/D-5/D-8/D-9/D-13) | **CLOSED** in ADR-0024. |
+| D-1 protocol baseline | **CLOSED (2026-07-31)** — V1 baseline frozen (see [`OPEN-DECISIONS.md`](OPEN-DECISIONS.md) §D-1). |
+| D-15 config anti-drift contract | **CLOSED — implementation contract accepted.** |
+| Test baseline | **Re-anchored to current `main` and recorded** (#923 Gate 4; [`PR1-ENTRY-CLOSURE.md`](PR1-ENTRY-CLOSURE.md)). |
 
-**PR-0 recommendation:** ready for human review; PR-1 remains gated on **(1)** ARB/Security-Architecture
-ratification of ADR-0024, **(2)** D-1 external verification + approval, **(3)** the recorded build/test
-baseline, and **(4)** all-role reviewer sign-off.
+**Recommendation (2026-07-31):** the four PR-1 entry gates are complete and **PR-1 implementation is GO**
+(protocol-kernel scope only — see [`PR1-ENTRY-CLOSURE.md`](PR1-ENTRY-CLOSURE.md) for the allowed/prohibited
+scope). GO does not authorize a listener, OAuth, policy, credentials, upstream execution, UI, or production
+traffic.
