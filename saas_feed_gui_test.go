@@ -28,7 +28,7 @@ func TestSaaSFeedGUI_PanelAndWiringRender(t *testing.T) {
 		`id="saasfeed-form"`,
 		`id="saasfeed-error"`,               // failure-state slot
 		`id="saasfeed-loading"`,             // loading-state slot
-		`id="saasfeed-activation-banner"`,   // honest "not active" banner
+		`id="saasfeed-status"`,              // F3b-4 runtime status panel
 		`id="overrides-rows"`,               // overrides editor table body
 		`id="overrides-empty"`,              // empty-state slot
 		`id="overrides-error"`,              // validation-error slot
@@ -36,21 +36,24 @@ func TestSaaSFeedGUI_PanelAndWiringRender(t *testing.T) {
 		`data-click="saveSaaSFeedOverrides"`,
 		`data-click="clearSaaSFeedOverrides"`, // explicit empty replacement
 		`data-click="addOverrideRow"`,
-		`loadSaaSFeedConfig`,      // loader
+		`loadSaaSFeedConfig`,      // config loader
+		`loadSaaSFeedStatus`,      // F3b-4 runtime-status loader
+		`refreshSaaSFeed`,         // F3b-4 manual-refresh handler
 		`renderOverrideRows`,      // XSS-safe DOM renderer
 		`/api/saas-feed/settings`, // endpoints the JS calls
 		`/api/saas-feed/overrides`,
-		`not downgradeable`, // protocol is signed-only, stated in UI
+		`/api/saas-feed/status`,  // F3b-4 runtime status
+		`/api/saas-feed/refresh`, // F3b-4 manual refresh
+		`not downgradeable`,      // protocol is signed-only, stated in UI
 	} {
 		if !strings.Contains(html, marker) {
 			t.Errorf("rendered SPA missing SaaS-feed marker %q", marker)
 		}
 	}
 
-	// Honest labeling: the panel must NOT claim the feed is downloaded/verified/
-	// active/serving. It must say configuration only.
-	if !strings.Contains(html, "not yet available") && !strings.Contains(html, "not fetched, verified, active, or serving") {
-		t.Error("SaaS feed panel must honestly state runtime activation is unavailable")
+	// F3b-4: the panel now surfaces the live runtime state separately from config.
+	if !strings.Contains(html, "Runtime state") {
+		t.Error("SaaS feed panel must surface the runtime state (F3b-4)")
 	}
 
 	// XSS posture: the override renderer must build rows via textContent, not by
@@ -65,13 +68,15 @@ func TestSaaSFeedGUI_ReadExposesConfiguredNotRuntime(t *testing.T) {
 	viewer := fx.loginAs(e2eViewUser, e2eViewPass)
 	doc := decodeJSONMap(t, mustGet(t, viewer, fx.srv.URL+"/api/saas-feed/settings")) //nolint:bodyclose // decodeJSONMap closes resp.Body
 
-	if v, ok := doc["runtime_activation_available"]; !ok || v != false {
-		t.Errorf("GET settings must report runtime_activation_available=false; got %v (present=%v)", v, ok)
+	// F3b-4: runtime activation is now available (the signed-feed client is wired).
+	if v, ok := doc["runtime_activation_available"]; !ok || v != true {
+		t.Errorf("GET settings must report runtime_activation_available=true (F3b-4); got %v (present=%v)", v, ok)
 	}
-	// Must NOT fabricate runtime/activation fields before F3b.
+	// The SETTINGS endpoint stays CONFIG-only: runtime/activation fields live on
+	// /api/saas-feed/status and must NOT be fabricated here.
 	for _, k := range []string{"last_success", "active_version", "freshness", "provenance", "state"} {
 		if _, ok := doc[k]; ok {
-			t.Errorf("GET settings must not fabricate runtime field %q before the signed-feed client exists", k)
+			t.Errorf("GET settings must not carry runtime field %q (it belongs on /api/saas-feed/status)", k)
 		}
 	}
 	if _, ok := doc["official_url"]; !ok {

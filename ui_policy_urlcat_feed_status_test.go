@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -19,7 +18,7 @@ import (
 func TestAPIURLCatFeedStatus_NotConfigured(t *testing.T) {
 	snapshotFeedGlobals(t)
 	globalUT1FeedSyncer = nil
-	globalSaaSFeed = saasfeed.New(saasfeed.Deps{}) // Configure never called → not enabled
+	swapFeedStatus(t, time.Unix(1_700_000_000, 0)) // default signed-feed status: not configured
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodGet, "/api/urlcat/feed-status", http.NoBody)
@@ -82,20 +81,16 @@ func TestAPIURLCatFeedStatus_UT1ConfiguredReportsStatsAndFailures(t *testing.T) 
 	}
 }
 
-// SaaS "configured" is driven by the syncer's own Enabled() state (set by
-// Configure/Stop), so this exercises the real transition rather than the
-// SeedStats-only test seam used above for UT1.
+// F3b-4: the SaaS block now reflects the SIGNED feed runtime status (the legacy raw
+// syncer is retired). "configured" is driven by the signed-feed config; the block
+// surfaces the derived state, active version, provenance, and process-lifetime failure
+// count — never the retired syncer's hostsAddedLastSync/entries fields.
 func TestAPIURLCatFeedStatus_SaaSEnabledReportsConfiguredTrue(t *testing.T) {
 	snapshotFeedGlobals(t)
 	globalUT1FeedSyncer = nil
-
-	saas := saasfeed.New(saasfeed.Deps{Lifecycle: context.Background})
-	saas.Configure("http://localhost:9999/feed.json", time.Hour) // unreachable local port, fails fast — mirrors internal/saasfeed's own Configure test
-	t.Cleanup(saas.Stop)
-	// SeedStats after Configure to pin a deterministic "hosts added" value,
-	// overwriting whatever the async unreachable-URL sync attempt wrote.
-	saas.SeedStats(time.Unix(1_700_000_500, 0), 7)
-	globalSaaSFeed = saas
+	s := swapFeedStatus(t, time.Unix(1_700_000_500, 0))
+	s.noteConfig(feedAuthorityResolution{Authority: authorityStandalone, Config: SaaSFeedConfig{Managed: true, Enabled: true, URL: builtinSaaSFeedURL, Protocol: saasFeedProtocolV1}})
+	s.noteActivation(viewFor(sourceDownloaded, 7, "2026-08-01T00:00:00Z", "2026-08-20T00:00:00Z"), saasFeedActivationDelta{HostsAdded: 7}, 200)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodGet, "/api/urlcat/feed-status", http.NoBody)
@@ -108,21 +103,23 @@ func TestAPIURLCatFeedStatus_SaaSEnabledReportsConfiguredTrue(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	if configured, _ := got.SaaS["configured"].(bool); !configured {
-		t.Fatalf("saas.configured = false, want true once Configure has run")
+		t.Fatalf("saas.configured = false, want true once the signed feed is configured")
+	}
+	if state, _ := got.SaaS["state"].(string); state != "fresh" {
+		t.Errorf("saas.state = %v, want fresh", got.SaaS["state"])
+	}
+	if v, _ := got.SaaS["activeFeedVersion"].(float64); v != 7 {
+		t.Errorf("saas.activeFeedVersion = %v, want 7", got.SaaS["activeFeedVersion"])
 	}
 	if _, present := got.SaaS["syncFailures"]; !present {
-		t.Errorf("saas response should include syncFailures when configured")
+		t.Errorf("saas response should include syncFailures")
 	}
-	// Regression: the SaaS syncer's Stats() count is hosts newly ADDED on the
-	// last sync (mergeSaaSCategories' return value), not the feed's total
-	// size — 0 is normal on a routine unchanged sync. It must be surfaced
-	// under its own field name, never as "entries" (which would misread as
-	// an empty/broken feed on a healthy sync that added nothing new).
-	if added, _ := got.SaaS["hostsAddedLastSync"].(float64); added != 7 {
-		t.Errorf("saas.hostsAddedLastSync = %v, want 7", got.SaaS["hostsAddedLastSync"])
+	// The retired legacy fields must be gone.
+	if _, present := got.SaaS["hostsAddedLastSync"]; present {
+		t.Errorf("saas response must not carry the retired legacy hostsAddedLastSync field")
 	}
 	if _, present := got.SaaS["entries"]; present {
-		t.Errorf(`saas response must not use the "entries" key — it would misrepresent the added-this-sync delta as the feed's total size`)
+		t.Errorf("saas response must not carry the retired legacy entries field")
 	}
 }
 
