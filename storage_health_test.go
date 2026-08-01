@@ -103,8 +103,13 @@ func TestStorageWriteFailure_CountedAlertedAndSurfaced(t *testing.T) {
 	if snap.Total < 1 {
 		t.Fatalf("failure total = %d, want at least the one we injected", snap.Total)
 	}
-	if snap.Path != "policy.json" {
-		t.Errorf("last path = %q, want the base name policy.json", snap.Path)
+	// Shape, not identity: the last-failure slot is process-global and a leaked
+	// goroutine's failing write can claim it between our write and this read.
+	// What must always hold is that whatever is recorded is a BARE BASE NAME —
+	// the path-redaction contract. Identity is asserted on the alert below,
+	// which is captured through a test-local synchronous seam.
+	if strings.ContainsRune(snap.Path, filepath.Separator) {
+		t.Errorf("last path %q is not a bare base name", snap.Path)
 	}
 	if snap.Err == "" {
 		t.Error("last error is empty — the operator gets no cause")

@@ -152,17 +152,19 @@ func TestRollbackConfigVersion_PartialDurabilityIsNot200(t *testing.T) {
 	if got := len(policyStore.List()); got != 0 {
 		t.Errorf("live rules = %d, want 0 (the baseline snapshot) — apply must not abort on a persist failure", got)
 	}
-	// And the failure is RECORDED globally, not just in this reply.
+	// The failure is RECORDED globally — but assert ONLY that the observer
+	// fired, never which file is last and never storageDegraded().
 	//
-	// Deliberately not asserting storageDegraded() here. Degraded means "a write
-	// failed and no successful write has been observed since", and this handler
-	// legitimately writes again after the failed store — saveConfigVersion lands
-	// in a writable temp dir — which is genuine evidence the filesystem works.
-	// Only the target directory was missing. Conflating a per-path failure with
-	// a filesystem-wide outage is exactly what the recovery-by-evidence rule
-	// exists to avoid.
-	if snap := storageWriteFailures(); snap.Total < 1 || snap.Path != "policy.json" {
-		t.Errorf("failure record = %+v, want the policy.json failure recorded", snap)
+	// Both of those are properties of process-global state that this handler
+	// itself keeps changing after the failed store: saveConfigVersion writes to
+	// a writable temp dir (a SUCCESS, which legitimately clears degraded — only
+	// the target directory was missing, the filesystem is fine), and
+	// globalConfigStore.Update writes /data/cp_config_version.json (a FAILURE on
+	// a node whose data directory is unwritable, which claims the last-failure
+	// slot). Which file THIS rollback failed to persist is the scoped
+	// collector's job, and it is already asserted above via persist_errors.
+	if snap := storageWriteFailures(); snap.Total < 1 {
+		t.Errorf("failure record = %+v, want the failed durable write recorded", snap)
 	}
 }
 
