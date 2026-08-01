@@ -32,8 +32,8 @@ func (vs *valueState) tick() bool {
 	return vs.ops <= vs.lim.MaxValidationOps()
 }
 
-// validate returns (status, path, detail). path is "" for a valid result.
-func (vs *valueState) validate(cn *compiledNode, v *canonical.Node, path string) (Status, string, string) {
+// validate returns (status, failPath, detail). failPath is "" for a valid result.
+func (vs *valueState) validate(cn *compiledNode, v *canonical.Node, path string) (status Status, failPath string, detail string) {
 	if !vs.tick() {
 		return StatusLimitExceeded, path, "validation operations"
 	}
@@ -61,7 +61,7 @@ func (vs *valueState) validate(cn *compiledNode, v *canonical.Node, path string)
 }
 
 // checkTypeEnumConst applies type/enum/const/anyOf; done==true short-circuits.
-func (vs *valueState) checkTypeEnumConst(cn *compiledNode, v *canonical.Node, path string) (Status, string, string, bool) {
+func (vs *valueState) checkTypeEnumConst(cn *compiledNode, v *canonical.Node, path string) (status Status, failPath string, detail string, done bool) {
 	if len(cn.types) > 0 && !typeMatches(cn.types, v) {
 		return StatusInvalid, path, "type mismatch", true
 	}

@@ -51,7 +51,7 @@ func RedactLeaf(s string, want map[Classification]struct{}) (out string, removed
 // secret class, returning the scrubbed string, the redaction count, and whether the
 // scrub was kept (only kept when a detected class is in want). Detected wanted
 // classes are recorded in seen.
-func redactSecrets(s string, want map[Classification]struct{}, seen map[Classification]struct{}) (string, int, bool) {
+func redactSecrets(s string, want map[Classification]struct{}, seen map[Classification]struct{}) (out string, count int, kept bool) {
 	if !wantsAnySecret(want) {
 		return s, 0, false
 	}
