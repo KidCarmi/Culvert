@@ -213,8 +213,8 @@ test, evidence, owner and gate, per the completeness rule — a fake threat is N
 | Protocol structural limits (size/depth/field/string/number) | MCP-PROTO-006,007,008 | **Missing** — limit + resource-budget assertions | PR-1 |
 | Version negotiation / downgrade / adapter equivalence | MCP-PROTO-010,011 | **Missing** — D-1-gated fixtures | PR-1 (D-1-gated) |
 | Protocol-state / cancellation / duplicate-completion | MCP-PROTO-012 | **Missing** — protocol-state machine tests | PR-1 |
-| Malicious MCP server fixtures | MCP-SERVER-*, MCP-TOOL-* | **Missing** | PR-2 |
-| Non-compliant server fixtures | MCP-SERVER-*, protocol | **Missing** | PR-2 |
+| Malicious MCP server fixtures | MCP-SERVER-*, MCP-TOOL-* | **Present (PR-2)** | PR-2 |
+| Non-compliant server fixtures | MCP-SERVER-*, protocol | **Present (PR-2)** | PR-2 |
 | Fuzzing (protocol kernel: parser/framing/adapter/cancellation) | MCP-PROTO-009 (+006,008) | `fuzz-nightly.yml` exists but is **advisory/nightly — not a merge gate**; a **new bounded blocking PR-1 fuzz gate** is required ([`CI-GATES.md`](CI-GATES.md)) | PR-1 |
 | Race | concurrency invariants | `-race` gate exists | PR-1+ |
 | Config-surface matrix **parse validity + anti-vacuity** — valid GFM table (header == delimiter == every data-row width) with **every delimiter cell ≥ 3 hyphens**, **non-empty** parse, expected row count, no duplicate field IDs; **summary integrity** (every declared label exactly once, no duplicate member inside a row, forward parity plus reverse parity bound either to the class it enumerates exhaustively or to an explicit pinned name list for a bounded subset); and **two complete, unique censuses** (value kind *and* registry class — every token claimed exactly once incl. zero-valued `pinned-identity`/`RC-X`, no unknown tokens, plus row and sensitive-kind totals); **zero parsed rows is an unconditional failure**. Executable now as `predicates/predicate-26.py` with **22** seeded controls (delimiter cells of one/two hyphens and malformed alignment, 16-vs-17 delimiter, zero-row parse, dropped bounded-summary member, duplicate summary member, duplicate summary row, registry-class census omitted/wrong/duplicated/`RC-X`-nonzero, deleted value-kind claim, falsified zero-valued claim, falsified row total, RC-1 summary disagreement, `RC-0` row in the `RC-2` summary, missing summary member, `provider-ref → RC-6`, duplicate field, unknown value kind, live `RC-X` row) and 3 negative controls. | **MCP-CFG-001** | `predicate-26.py` **runs in the required Fast PR Gate** (`Gate · MCP design predicates`) for PRs touching the MCP design surface; a failure blocks the aggregate. This gates the **design matrix** only — the runtime `configSurfaces` parity below remains unenforced until PR-1. | PR-1 |
@@ -229,8 +229,8 @@ test, evidence, owner and gate, per the completeness rule — a fake threat is N
 | Redirect chains | MCP-INSP-006 | per-client tests exist; shared MCP **missing** | PR-7 |
 | Origin/Host validation primitive (no listener) | MCP-INSP-008 | **Missing** | PR-1 |
 | Listener bind + host-allowlist + E2E rebinding enforcement | MCP-INSP-009 | **Missing** | PR-5 |
-| Tool canonicalization | MCP-TOOL-001 | **Missing** | PR-2 |
-| Tool drift / privilege expansion | MCP-TOOL-003,004 | **Missing** | PR-2/PR-6 |
+| Tool canonicalization | MCP-TOOL-001 | **Present (PR-2)** | PR-2 |
+| Tool drift / privilege expansion | MCP-TOOL-003,004 | **Present (PR-2 classify); enforcement PR-6** | PR-2/PR-6 |
 | Streaming / cancellation / reconnect | MCP-PROTO-012 (protocol-state, PR-1); MCP-OPS-002 (stream bounds under load, PR-5) | **Missing** | PR-1 (state) / PR-5 (load) |
 | Load / soak | MCP-OPS-002 | nightly load harness exists (not gate) | PR-5 |
 | Slow clients / queue saturation | MCP-OPS-002, MCP-EVENT-001 | **Missing** | PR-5/PR-8 |

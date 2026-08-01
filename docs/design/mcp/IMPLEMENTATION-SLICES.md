@@ -75,6 +75,7 @@ rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted AD
 - **Acceptance:** unknown/changed behavior deterministic and tested; unregistered denied.
 - **Rollback:** registry read-only / disabled; no catalog publication.
 - **Owner:** Sec/Eng. **Reviewer:** Sec Arch. **Release gate:** drift + malicious-server suites green.
+- **Implementation status (code PR):** IMPLEMENTED under `internal/mcp/registry` (server identity, pinning, enable/disable, identity-change), `internal/mcp/catalog` (fingerprints, discovery ingestion, drift classification, quarantine/disabled states, immutable snapshots), and the shared leaves `internal/mcp/canonical` (strict JSON/JSON-Schema canonicalization + SHA-256) and `internal/mcp/limits` (`CatalogLimits`). Listener-independent and NOT wired into `package main` (dormant), matching the PR-1 posture. MCP-SERVER-001/002/003 and MCP-TOOL-001/002/003/005 are covered by Go tests, three fuzz targets, and a malicious/non-compliant server corpus; the MCP-TOOL-004/006 QUARANTINE **enforcement** (policy ALLOW block) remains PR-6 — PR-2 records the quarantined state only.
 
 ## PR-3 — Identity Principal
 - **Objective:** human/workload/agent/client/tenant model + token/audience/resource validation.
