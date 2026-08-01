@@ -17,6 +17,15 @@ one platform, shared Control Plane services, separate enforcement engines and tr
 > inferences are **[INFER]**; human decisions are **[REC]**; anything needing a non-repository source is
 > **[EXT]**. See the legend in [`README.md`](README.md).
 
+> **PR-5 update.** An MCP listener runtime now EXISTS in the repository — `internal/mcp/runtime` — but is
+> **DISABLED BY DEFAULT** and **observe-only** (no policy/credential/upstream; decision-point methods return
+> a deterministic `observe_only` rejection). It exposes a typed, low-cardinality per-listener health/counter
+> surface (`HealthSnapshot` — phase, accepted/rejected conns, requests total/rejected, kernel-terminal vs
+> observe-only, active sessions, queued/in-flight, timeouts, auth + host/origin failures, admission rejects,
+> shutdown cancels, observe drops) that a later slice will wire to the `MCP-OPS-003` metrics/dashboards
+> surface. The SLO/capacity numbers below remain **unverified DESIGN TARGETS** — PR-5 ships the runtime and
+> its load/slowloris/queue-saturation + MCP-off benchmarks, not a production availability measurement.
+
 ---
 
 ## 1 · SLOs as design targets

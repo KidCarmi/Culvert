@@ -216,6 +216,7 @@ func main() {
 	initBackgroundServices(s)
 	initSOCKS5(s)
 	initPersistentAdminState(s)
+	initMCPRuntime(s) // PR-5: disabled-by-default MCP listener runtime (no SWG effect when off)
 	loadReleaseManagement(resolveReleaseStartupConfig())
 	startAdminUI(s)
 

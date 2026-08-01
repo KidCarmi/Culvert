@@ -85,6 +85,18 @@ Verification · Evidence · Gate**. Status is `Proposed` for all rows unless not
 
 ---
 
+> **PR-5 status — `MCP-INSP-009`, `MCP-OPS-001`, `MCP-OPS-002` IMPLEMENTED.** `internal/mcp/runtime` binds
+> dedicated, isolated Gateway + Management listeners on explicitly configured interfaces (wildcard binds
+> rejected unless explicitly acked; validated before bind), invokes the PR-1 `MCP-INSP-008` primitive **after
+> header parsing on every request and every HTTP/2 stream** (proven E2E over reused H1.1 + H2 connections —
+> `TestListener_HostRecheckedPerRequestH11`/`TestListener_HostRecheckedPerStreamH2`), enforces per-listener
+> bounded worker pools + admission queues with cross-capability isolation (`MCP-OPS-002` —
+> `TestListener_AdmissionBounded`/`TestRuntime_ListenerIsolation`), opens **zero streams** on any path
+> (`RetainStream` unconditionally false), and is DISABLED BY DEFAULT with a near-zero MCP-off cost
+> (`MCP-OPS-001` — `BenchmarkRuntimeDisabledStartStop`). The listener runs the PR-1 kernel + PR-3 auth +
+> immutable identity-session binding and is **observe-only** (decision-point methods deterministically
+> rejected `observe_only`; no policy/credential/upstream). See [`IMPLEMENTATION-SLICES.md`](IMPLEMENTATION-SLICES.md) PR-5.
+
 ## MCP-PROTO — Protocol kernel (framing, bounds, version negotiation, state)
 
 New family added by the PR-1 remediation (`PR1-READINESS-REMEDIATION.md`, finding H-2). These are the

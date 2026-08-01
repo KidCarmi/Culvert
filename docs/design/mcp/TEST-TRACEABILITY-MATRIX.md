@@ -148,6 +148,17 @@ The **PR-1 gate proves structural / terminal / zero-stream properties only**; it
 runtime listener assertions (load, N-client zero-retention) are implemented, and it does **not** claim any
 `D-1 BLOCKED` fixture is green.
 
+> **PR-5 status (listener assertions IMPLEMENTED).** The listener-side rows above (`MCP-INSP-009` rebinding,
+> rows 20–24/28–29 terminal-405/zero-stream, `MCP-OPS-002` saturation) are now backed by
+> `internal/mcp/runtime`: `TestPipeline_TransportMethods` (GET/DELETE/other → 405, no body/stream),
+> `TestListener_HostRecheckedPerRequestH11` + `TestListener_HostRecheckedPerStreamH2` (E2E rebinding over a
+> reused H1.1 keep-alive and a multiplexed HTTP/2 connection — the per-request/per-stream revalidation proof),
+> `TestListener_AdmissionBounded` + `TestRuntime_ListenerIsolation` (per-listener bounds + cross-capability
+> isolation), and `TestAntiWeakening_RetainStreamAlwaysFalse` (the unconditional zero-retained-stream
+> invariant). Version-set-dependent rows (25, 27) stay **D-1 BLOCKED** as noted; the N-rejected-clients load
+> row (29) is discharged structurally — PR-5 opens no stream on any path, so N rejections retain zero streams
+> by construction. Observe-only disposition (decision-point methods) is `TestPipeline_DecisionPointObserveOnly`.
+
 ### 1a. Requirement-specific coverage (completeness — do not rely on the "Unit | all" row)
 
 These requirements were previously reachable only via family/range shorthand or the catch-all "Unit | all"
