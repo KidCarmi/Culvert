@@ -25,11 +25,12 @@ Delivery rule (BLUEPRINT §23): every slice needs a defined trust boundary, acce
 rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted ADR under `docs/adr/`**
 (Option B — now [`docs/adr/0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md)).
 
-> **PR-1 entry gate (updated 2026-07-24, [`ADR-0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md)).**
-> ADR-0024 is `Status: Proposed`; PR-1 also requires: **(a)** ARB + Security Architecture ratification of
-> ADR-0024 (→ Accepted); **(b)** **D-1 (protocol-version baseline) externally verified and human-approved**
-> — because PR-1 *is* the Protocol Kernel, D-1 **must not** be left for closure during implementation; and
-> **(c)** the **repository build/test baseline run and recorded** (the PR-0 session executed neither).
+> **PR-1 entry gate — CLOSED (2026-07-31, [`ADR-0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md)).**
+> All four hard entry gates are complete: ADR-0024 is **`Status: Accepted`**; **D-1** (protocol-version
+> baseline) is **CLOSED** (V1 baseline frozen); **D-15** (config anti-drift contract) is **CLOSED**; and the
+> **repository build/test baseline is re-anchored to current `main` and recorded**. There is no ARB /
+> committee ratification step in this project. **PR-1 implementation is GO** — see
+> [`PR1-ENTRY-CLOSURE.md`](PR1-ENTRY-CLOSURE.md).
 
 ---
 
@@ -44,7 +45,7 @@ rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted AD
 - **Acceptance:** evidence-backed; two capabilities kept separate; go/no-go cleared; ADR **proposal**
   present.
 - **Rollback:** delete the docs directory (no runtime effect).
-- **Owner:** Staff Eng + Product Sec. **Reviewer:** ARB + all roles ([`PR0-REVIEW-CHECKLIST.md`](PR0-REVIEW-CHECKLIST.md)).
+- **Owner:** Staff Eng + Product Sec. **Review:** evidence-based across all lenses ([`PR0-REVIEW-CHECKLIST.md`](PR0-REVIEW-CHECKLIST.md)); no ARB / committee step.
 - **Release gate:** GO-NO-GO cleared; numbered ADR accepted before PR-1.
 
 ## PR-1 — Protocol Kernel
@@ -52,7 +53,7 @@ rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted AD
 - **Scope:** an `internal/mcp/*` protocol-kernel package (**working name `internal/mcp/protocol` — `[REC]`, subject to implementation review**); inbound Origin/Host validation. **ADR-0024 §Decision item 8 ratifies the `internal/mcp/*` *namespace and boundary*, not the exact leaf-package name** — the concrete name/split stays `[REC]` in [`RECOMMENDED-ARCHITECTURE.md`](RECOMMENDED-ARCHITECTURE.md) even after ADR-0024 is Accepted.
 - **Non-goals:** policy, identity, upstream calls.
 - **Trust boundary:** TB-1 (agent/client ↔ Culvert).
-- **Dependencies:** PR-0 approved; **ADR-0024 Accepted (ARB + Sec-Arch ratified)**; **D-1 protocol baseline externally verified + approved**; **repository build/test baseline recorded**; **`D-15` config-surface registry integration strategy selected + approved**. *(All four are hard PR-1 entry gates — [`ADR-0024` PR-1 entry gate](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md).)*
+- **Dependencies (all satisfied 2026-07-31):** PR-0 evidence review complete; **ADR-0024 Accepted**; **D-1 protocol baseline CLOSED** (V1 frozen); **repository build/test baseline re-anchored to current `main` + recorded**; **`D-15` config-surface registry integration CLOSED — implementation contract accepted**. *(All four hard PR-1 entry gates are complete — [`PR1-ENTRY-CLOSURE.md`](PR1-ENTRY-CLOSURE.md).)*
 - **Config-surface ownership (`MCP-CFG-001`, `D-15`) — PR-1 owns this, deliberately.** PR-1 is the slice that builds the anti-drift wall for MCP config, **before** PR-2/PR-4/PR-8 add registry, credential and event rows behind it. Concretely PR-1 delivers: enumeration of every MCP config structure (including nested) in the parity inventory; the registry-class semantics from [`CONFIG-SURFACE-MATRIX.md`](CONFIG-SURFACE-MATRIX.md) §Registry semantics wired to real registry fields; and the anti-drift gate in [`CI-GATES.md`](CI-GATES.md) failing on **both** omission cases. Retrofitting after credential (`RC-2`) and server-registry (`RC-1`) rows exist is materially harder and leaves a live disclosure path to unenrolled peers in the interim. **Owner:** Eng — platform/config. **Approver:** Architecture **and** Product Security.
 - **RPR-1 (#925/#928) additions — PR-1 owns these:** the kernel is **peer-role parameterized** (one decoder for the client-facing AND upstream-server-facing legs), correlation/cancellation state is **requestor-scoped** `(session, direction, id)` (**MCP-PROTO-015**), and admission resolves against the Culvert-reviewed **admitted-method registry** [`MCP-OPERATION-REGISTRY.md`](MCP-OPERATION-REGISTRY.md) with a **forward/reverse parity gate** (**MCP-PROTO-016**, executable as `predicates/predicate-28.py`). The registry admission + parity + protocol-state fixtures are blocking at **PR-1**; the per-method business-policy enforcement (e.g. `tools/call`) is blocking at **PR-6**.
 - **RPR-4 (#929) additions — PR-1 owns the primitive, PR-5 the listener:** the transport-rejection posture (**MCP-PROTO-017**) — **no** legacy `2024-11-05` HTTP+SSE endpoint pair, a GET without a valid negotiated session/context → terminal **`405`** with **zero** stream, every security-motivated `4xx` follow-on GET terminal **`405`**, a **`200` `initialize` counter-offer preferred** over a `4xx` hard reject, and the **no-pre-negotiation-held-stream** invariant. The exclusion + terminal-status **primitive** and its legacy-negative / era-separation fixtures are blocking at **PR-1**; the **listener** held-stream / N-rejected-clients-zero-retained-streams load assertions are **PR-5**; version-set-dependent fixtures are **`D-1 BLOCKED`** (`MCP-T-078`, [`TRANSPORT-FALLBACK-EVIDENCE.md`](TRANSPORT-FALLBACK-EVIDENCE.md)).
@@ -239,7 +240,7 @@ rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted AD
   action as well as its own, and `MCP-EVENT-002` requires the absence of **every** irreversible action downstream
   of the flow's commit gate, not only the one the class is named after. Observing the returned error or degraded
   mode is NOT sufficient for either.
-- **Owner:** Sec Arch. **Reviewer:** ARB + Security Architecture. **Gate:** this gate **MUST NOT be marked
+- **Owner:** Sec Arch. **Review:** security/architecture evidence + adversarial review (no ARB / committee step). **Gate:** this gate **MUST NOT be marked
   green without that re-run** (amendment 18 dual ownership, as for the PR-10 publication re-run); **not**
   reachable via PR-11, and **not** a Production Qualification dependency (post-GA, like PR-C and the DMZ gate).
 
