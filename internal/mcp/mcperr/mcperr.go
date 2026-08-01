@@ -119,11 +119,93 @@ const (
 	// matches the current snapshot (a concurrent publish won). The caller re-reads
 	// and retries; the current snapshot is left unchanged.
 	ReasonStaleSnapshot
+
+	// --- PR-3 (identity, token validation, sender constraint) reasons ------
+	// Appended (never reordered). Every reason is a DETERMINISTIC negative-auth
+	// outcome; none ever carries a raw token, proof JWT, private key, full claim
+	// set, subject email or tenant free-text (Detail is fixed developer text).
+
+	// ReasonCredentialMissing — no credential was presented.
+	ReasonCredentialMissing
+	// ReasonCredentialInQuery — a bearer token presented in the query string; a
+	// forbidden location, rejected before any normal validation.
+	ReasonCredentialInQuery
+	// ReasonMalformedToken — a token that is not well-formed for its declared type
+	// (bad compact JWT shape, undecodable segment, malformed introspection metadata).
+	ReasonMalformedToken
+	// ReasonUnsupportedTokenType — a credential of a type PR-3 does not validate.
+	ReasonUnsupportedTokenType
+	// ReasonUnsupportedAlgorithm — a JWS alg outside the allowlist, missing, or
+	// `none`; also an algorithm-confusion attempt (a key type that cannot serve the
+	// declared alg).
+	ReasonUnsupportedAlgorithm
+	// ReasonSignatureInvalid — the JWS signature did not verify against the trusted key.
+	ReasonSignatureInvalid
+	// ReasonIssuerRejected — the token issuer is absent or not in the capability's
+	// trusted-issuer allowlist.
+	ReasonIssuerRejected
+	// ReasonAudienceMissing — the token carries no effective audience/resource.
+	ReasonAudienceMissing
+	// ReasonAudienceRejected — the effective audience is not the capability's
+	// canonical Culvert resource (foreign aud, upstream URL, SWG client id, etc.).
+	ReasonAudienceRejected
+	// ReasonResourceMismatch — the audience is a Culvert resource but for the wrong
+	// capability or a different ServerID.
+	ReasonResourceMismatch
+	// ReasonTokenExpired — the token/metadata is past its expiry (with skew).
+	ReasonTokenExpired
+	// ReasonTokenNotYetValid — nbf is in the future beyond the permitted skew.
+	ReasonTokenNotYetValid
+	// ReasonTokenTTLExceeded — the token's lifetime exceeds the configured maximum,
+	// or its future nbf / authentication age exceeds the configured bound.
+	ReasonTokenTTLExceeded
+	// ReasonScopeMissing — a required scope is absent, or a presented scope is
+	// malformed / a forbidden blanket-or-wildcard scope.
+	ReasonScopeMissing
+	// ReasonCapabilityMismatch — a credential/scope/resource for the other capability.
+	ReasonCapabilityMismatch
+	// ReasonTenantMismatch — conflicting tenant ids in the chain, or a cross-tenant
+	// resource reference.
+	ReasonTenantMismatch
+	// ReasonDelegationChainInvalid — an ambiguous or inconsistent principal chain
+	// (both/neither Human and Workload subject, agent owner mismatch, tool not under
+	// the selected server, Management carrying Gateway authority, etc.).
+	ReasonDelegationChainInvalid
+	// ReasonSenderConstraintRequired — the deployment profile requires a sender
+	// constraint (DPoP/mTLS) that is absent.
+	ReasonSenderConstraintRequired
+	// ReasonDPoPMalformed — a DPoP proof that is not a well-formed proof JWT (bad
+	// type, missing JWK, private JWK material, undecodable).
+	ReasonDPoPMalformed
+	// ReasonDPoPBindingMismatch — the proof's htm/htu/ath/cnf thumbprint does not
+	// match the request or the access token.
+	ReasonDPoPBindingMismatch
+	// ReasonDPoPReplay — a DPoP proof jti already seen within its bounded partition.
+	ReasonDPoPReplay
+	// ReasonDPoPNonce — a required server nonce is missing or does not match.
+	ReasonDPoPNonce
+	// ReasonMTLSBindingMismatch — the observed certificate thumbprint does not match
+	// the token's cnf.x5t#S256 (or the binding is missing/malformed).
+	ReasonMTLSBindingMismatch
+	// ReasonInactiveToken — an opaque introspection result marked inactive.
+	ReasonInactiveToken
+	// ReasonSessionIdentityBound — an attempt to read/derive where a session already
+	// carries a (different) bound identity in a context that forbids it.
+	ReasonSessionIdentityBound
+	// ReasonSessionIdentityRebind — an attempt to bind a DIFFERENT identity to a
+	// session that already has one (subject/tenant/client/agent/capability/resource
+	// change). The existing binding is retained.
+	ReasonSessionIdentityRebind
+	// ReasonRegistryServerUnavailable — the Gateway resource names a ServerID that is
+	// not registered or not enabled in the live registry snapshot.
+	ReasonRegistryServerUnavailable
 )
 
 // reasonCode maps each Reason to its stable machine string. The strings are part
 // of the package contract and MUST NOT change without a coordinated update.
-var reasonCode = map[Reason]string{
+//
+//nolint:gosec // G101: these are stable machine-readable error codes, not credentials.
+var reasonCode = map[Reason]string{ // #nosec G101 -- stable machine-readable error-code strings (e.g. "token_expired"), not hardcoded credentials
 	ReasonNone:                 "none",
 	ReasonMalformedJSON:        "malformed_json",
 	ReasonInvalidJSONRPC:       "invalid_jsonrpc",
@@ -148,6 +230,34 @@ var reasonCode = map[Reason]string{
 	ReasonPrivilegeExpansion:     "privilege_expansion",
 	ReasonSemanticDrift:          "semantic_drift",
 	ReasonStaleSnapshot:          "stale_snapshot",
+
+	ReasonCredentialMissing:         "credential_missing",
+	ReasonCredentialInQuery:         "credential_in_query",
+	ReasonMalformedToken:            "malformed_token",
+	ReasonUnsupportedTokenType:      "unsupported_token_type",
+	ReasonUnsupportedAlgorithm:      "unsupported_algorithm",
+	ReasonSignatureInvalid:          "signature_invalid",
+	ReasonIssuerRejected:            "issuer_rejected",
+	ReasonAudienceMissing:           "audience_missing",
+	ReasonAudienceRejected:          "audience_rejected",
+	ReasonResourceMismatch:          "resource_mismatch",
+	ReasonTokenExpired:              "token_expired",
+	ReasonTokenNotYetValid:          "token_not_yet_valid",
+	ReasonTokenTTLExceeded:          "token_ttl_exceeded",
+	ReasonScopeMissing:              "scope_missing",
+	ReasonCapabilityMismatch:        "capability_mismatch",
+	ReasonTenantMismatch:            "tenant_mismatch",
+	ReasonDelegationChainInvalid:    "delegation_chain_invalid",
+	ReasonSenderConstraintRequired:  "sender_constraint_required",
+	ReasonDPoPMalformed:             "dpop_malformed",
+	ReasonDPoPBindingMismatch:       "dpop_binding_mismatch",
+	ReasonDPoPReplay:                "dpop_replay",
+	ReasonDPoPNonce:                 "dpop_nonce",
+	ReasonMTLSBindingMismatch:       "mtls_binding_mismatch",
+	ReasonInactiveToken:             "inactive_token",
+	ReasonSessionIdentityBound:      "session_identity_bound",
+	ReasonSessionIdentityRebind:     "session_identity_rebind",
+	ReasonRegistryServerUnavailable: "registry_server_unavailable",
 }
 
 // Code returns the stable machine string for the reason (e.g. "malformed_json").

@@ -10,6 +10,18 @@ after a policy decision. It is the authoritative source for requirement IDs in t
 
 **Status: PR-0 design artifact (Proposed).**
 
+> **Update (PR-3) — identity/auth core IMPLEMENTED.** The principal model (§3), capability-specific
+> OAuth client/resource/scope validation (§4), JWT and opaque-token validation, audience/tenant
+> isolation, short-TTL/temporal checks, and the DPoP/mTLS sender-constraint primitives with bounded
+> proof-`jti` replay protection (§5) are now realized, listener-independently, in `internal/mcp/identity`,
+> `internal/mcp/authn`, `internal/mcp/senderconstraint`, and the shared `internal/mcp/jose` leaf
+> (`MCP-ID-001..008`, `MCP-AUTH-001..008`). The `[INFER] net-new` / `NOT-VERIFIED` provenance tags below
+> describe the pre-PR-3 codebase and are retained as the historical evidence record; where a cell says a
+> control is "net-new" or "absent today", read it together with this note: the control now exists as code,
+> but remains dormant (no listener, no `package main` wiring, no network I/O — all key material,
+> introspection results and TLS-binding thumbprints are explicit inputs). Credential-profile selection /
+> brokering (§7) stays PR-4 and is deliberately still absent.
+
 > **Decision status — D-2 CLOSED (2026-07-24, [`ADR-0024 §D-2`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md)).**
 > Culvert is the **OAuth protected resource server** (Option A): client tokens terminate at Culvert;
 > clients request the canonical Culvert MCP resource via RFC 8707 `resource` and Culvert validates the

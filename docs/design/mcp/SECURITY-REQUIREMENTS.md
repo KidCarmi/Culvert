@@ -5,6 +5,17 @@ Canonical **requirement-ID registry** for the PR-0 package. IDs are stable and r
 [`ABUSE-CASES.md`](ABUSE-CASES.md) and [`IMPLEMENTATION-SLICES.md`](IMPLEMENTATION-SLICES.md).
 
 **All requirements are `Status: Proposed`** (PR-0 is design-only; nothing is implemented). Normative
+
+> **Update (PR-3) — auth/identity requirements now IMPLEMENTED (dormant).** `MCP-AUTH-001,002,003,004,006,007,008`
+> and `MCP-ID-001,002,003,007,008` are realized listener-independently in `internal/mcp/authn`,
+> `internal/mcp/identity`, `internal/mcp/senderconstraint` and the shared `internal/mcp/jose`/`internal/mcp/limits`
+> leaves, verified by the negative-auth matrix, anti-weakening tests, fuzz targets, race/shuffle and benchmarks.
+> `MCP-AUTH-005` (no-passthrough broker) stays PR-4; `MCP-ID-004` stays PR-8; `MCP-ID-005,006` stay PR-6 (policy).
+> The code is NOT wired into `package main` and performs no network I/O (keys, introspection results and TLS
+> thumbprints are explicit inputs), so the operative `Status` for release-gating stays `Proposed` until the PR-5
+> listener and PR-6 policy engine land — this note records that the PR-3 *code* exists, not that the end-to-end
+> control is deployed.
+
 keywords **MUST / MUST NOT / SHOULD / MAY** are used deliberately. "Gate" names the slice or CI gate that
 must be green before the requirement is considered satisfied. Every requirement carries: statement,
 rationale, threat IDs, control owner, implementation owner, verification method, evidence required.
