@@ -48,13 +48,13 @@ func TestDockerComposeForwardsSessionSecretEnv(t *testing.T) {
 	// Isolate the proxy service block: from "\n  proxy:" up to the next
 	// top-level (2-space-indented) service header, mirroring the scoping
 	// approach in install_script_compose_command_flags_scope_test.go.
-	proxyHeader := regexp.MustCompile(`(?m)^  proxy:`)
+	proxyHeader := regexp.MustCompile(`(?m)^ {2}proxy:`)
 	loc := proxyHeader.FindStringIndex(s)
 	if loc == nil {
 		t.Fatal("docker-compose.yml has no top-level `proxy:` service")
 	}
 	rest := s[loc[1]:]
-	nextService := regexp.MustCompile(`(?m)^  [a-zA-Z0-9_-]+:`)
+	nextService := regexp.MustCompile(`(?m)^ {2}[a-zA-Z0-9_-]+:`)
 	if end := nextService.FindStringIndex(rest); end != nil {
 		rest = rest[:end[0]]
 	}
