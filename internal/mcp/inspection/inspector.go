@@ -39,14 +39,14 @@ type RequestInput struct {
 }
 
 // InspectRequest runs the ordered request-inspection pipeline for a Gateway
-// tools/call and returns a sanitized InspectionResult. Order: identity/schema-hash
+// tools/call and returns a sanitized Result. Order: identity/schema-hash
 // consistency → semantic schema validation → DLP secret/PII classification +
 // disposition → destination extraction/canonicalization/(optional resolve+pin) →
 // summary. A hard security failure sets HardFail + HardReason; the runtime blocks
 // on it regardless of the PR-6 policy action. It performs NO upstream execution
 // and NO credential work.
-func InspectRequest(ctx context.Context, p Profile, in RequestInput, now time.Time) InspectionResult {
-	res := InspectionResult{Summary: baseSummary(p)}
+func InspectRequest(ctx context.Context, p Profile, in RequestInput, now time.Time) Result {
+	res := Result{Summary: baseSummary(p)}
 	// 1. identity consistency — no name-only lookup, no record swap.
 	if in.RequestedName != "" && in.RequestedName != in.Tool.Name {
 		return hardFail(res, mcperr.ReasonSchemaInvalid)
@@ -60,32 +60,38 @@ func InspectRequest(ctx context.Context, p Profile, in RequestInput, now time.Ti
 		}
 	}
 	// 2. semantic schema validation.
-	compiled, st, hardReason := compileAndValidate(p, in)
+	st, hardReason := compileAndValidate(p, in)
 	res.Summary.SchemaStatus = st
 	if st != schema.StatusValid {
 		return hardFail(res, hardReason)
 	}
-	_ = compiled
 	// 3. DLP secret/PII classification + disposition.
 	rep, err := dlp.Scan(in.Args, dlp.RequestMode(), p.lim)
 	if err != nil {
 		return hardFail(res, mcperr.ReasonInspectionLimitExceeded)
 	}
+	// A truncated scan (a bound was hit — findings/strings/bytes) is a fail-closed
+	// signal: dropped findings could have hidden a blocking secret behind a flood of
+	// label-only findings, so a high-risk operation must not proceed on partial DLP.
+	if rep.Truncated {
+		return hardFail(res, mcperr.ReasonInspectionLimitExceeded)
+	}
 	res.Findings = append(res.Findings, rep.Findings...)
 	applyDLPToSummary(&res.Summary, rep)
-	if blocked, reason := p.evaluateDispositions(rep); blocked {
+	worst, blocked, reason := p.evaluateDispositions(rep)
+	res.Summary.Disposition = worst
+	if blocked {
 		return hardFail(res, reason)
 	}
 	// 4. destination extraction + SSRF classification (+ optional pinned resolution).
-	if hf, reason := p.inspectDestinations(ctx, in, now, &res); hf {
-		return hardFail(res, reason)
+	if hf, dreason := p.inspectDestinations(ctx, in, now, &res); hf {
+		return hardFail(res, dreason)
 	}
-	finalizeSummary(&res.Summary, rep)
 	return res
 }
 
-func baseSummary(p Profile) InspectionSummary {
-	return InspectionSummary{
+func baseSummary(p Profile) Summary {
+	return Summary{
 		Revision:             p.revision,
 		DLPAvailable:         true,
 		RedactionAvailable:   true,
@@ -97,27 +103,27 @@ func baseSummary(p Profile) InspectionSummary {
 	}
 }
 
-func hardFail(res InspectionResult, reason mcperr.Reason) InspectionResult {
+func hardFail(res Result, reason mcperr.Reason) Result {
 	res.HardFail = true
 	res.HardReason = reason
 	res.Summary.Disposition = DispBlock
 	return res
 }
 
-func compileAndValidate(p Profile, in RequestInput) (*schema.Compiled, schema.Status, mcperr.Reason) {
+func compileAndValidate(p Profile, in RequestInput) (schema.Status, mcperr.Reason) {
 	compiled := in.Compiled
 	if compiled == nil {
 		c, err := schema.Compile(in.InputSchema, p.lim)
 		if err != nil {
-			return nil, compileStatus(err), mcperr.ReasonOf(err)
+			return compileStatus(err), mcperr.ReasonOf(err)
 		}
 		compiled = c
 	}
 	r := compiled.Validate(in.Args)
 	if r.Valid() {
-		return compiled, schema.StatusValid, mcperr.ReasonNone
+		return schema.StatusValid, mcperr.ReasonNone
 	}
-	return compiled, r.Status, schemaStatusReason(r.Status)
+	return r.Status, schemaStatusReason(r.Status)
 }
 
 func compileStatus(err error) schema.Status {
@@ -142,25 +148,34 @@ func schemaStatusReason(st schema.Status) mcperr.Reason {
 	}
 }
 
-// evaluateDispositions returns (blocked, reason) if any finding's disposition is a
-// hard block. Redact/label/pass do not block here (redaction runs on the
-// ALLOW_WITH_REDACTION obligation).
-func (p Profile) evaluateDispositions(rep *dlp.Report) (bool, mcperr.Reason) {
+// evaluateDispositions computes the worst disposition across all findings and
+// whether any finding is a hard block (with the block reason). Redact/label/pass do
+// not block here (redaction runs on the ALLOW_WITH_REDACTION obligation); injection
+// is labeled unless the profile opts into a severity-based hard block.
+func (p Profile) evaluateDispositions(rep *dlp.Report) (Disposition, bool, mcperr.Reason) {
+	worst := DispPass
+	blocked := false
+	reason := mcperr.ReasonNone
 	for i := range rep.Findings {
 		f := &rep.Findings[i]
-		disp := p.disposition(f.Class)
+		var d Disposition
 		if f.Class == dlp.ClassPossibleInjection {
-			// Injection is labeled unless the profile opts into a severity-based block.
+			d = DispLabel
 			if p.injectionBlockSeverity != dlp.SevUnset && f.Severity >= p.injectionBlockSeverity {
-				return true, mcperr.ReasonInjectionSuspected
+				d = DispBlock
+				if !blocked {
+					blocked, reason = true, mcperr.ReasonInjectionSuspected
+				}
 			}
-			continue
+		} else {
+			d = p.disposition(f.Class)
+			if d.Blocks() && !blocked {
+				blocked, reason = true, blockReasonForClass(f.Class)
+			}
 		}
-		if disp.Blocks() {
-			return true, blockReasonForClass(f.Class)
-		}
+		worst = worse(worst, d)
 	}
-	return false, mcperr.ReasonNone
+	return worst, blocked, reason
 }
 
 func blockReasonForClass(c dlp.Classification) mcperr.Reason {
@@ -177,7 +192,7 @@ func blockReasonForClass(c dlp.Classification) mcperr.Reason {
 }
 
 // applyDLPToSummary folds scan facts into the summary.
-func applyDLPToSummary(s *InspectionSummary, rep *dlp.Report) {
+func applyDLPToSummary(s *Summary, rep *dlp.Report) {
 	s.SecretFound = rep.SecretFound()
 	s.InjectionSuspected = rep.InjectionSuspected()
 	s.MaxSeverity = rep.MaxSeverity()
@@ -189,20 +204,11 @@ func applyDLPToSummary(s *InspectionSummary, rep *dlp.Report) {
 	}
 }
 
-// finalizeSummary computes the worst disposition across all findings.
-func finalizeSummary(s *InspectionSummary, rep *dlp.Report) {
-	disp := DispPass
-	if s.Disposition != DispUnset {
-		disp = s.Disposition
-	}
-	s.Disposition = disp
-}
-
 // inspectDestinations extracts, canonicalizes and (optionally) resolves+pins every
 // destination candidate. A modeled destination that is malformed/blocked/private/
 // SSRF-blocked is a HARD failure; an unmodeled (heuristic) candidate is a
 // conservative finding but a private/metadata IP literal is always a hard block.
-func (p Profile) inspectDestinations(ctx context.Context, in RequestInput, now time.Time, res *InspectionResult) (bool, mcperr.Reason) {
+func (p Profile) inspectDestinations(ctx context.Context, in RequestInput, now time.Time, res *Result) (bool, mcperr.Reason) {
 	cands, err := p.extraction.Extract(in.Args, p.lim)
 	if err != nil {
 		return true, mcperr.ReasonInspectionLimitExceeded
@@ -233,7 +239,7 @@ func (p Profile) inspectDestinations(ctx context.Context, in RequestInput, now t
 
 // inspectOneDestination canonicalizes one candidate and, when a resolver is
 // present, resolves + pins it. Returns (hardFail, reason, class).
-func (p Profile) inspectOneDestination(ctx context.Context, cand destination.Candidate, now time.Time, res *InspectionResult) (bool, mcperr.Reason, destination.Class) {
+func (p Profile) inspectOneDestination(ctx context.Context, cand destination.Candidate, now time.Time, res *Result) (bool, mcperr.Reason, destination.Class) {
 	c, class, err := destination.Canonicalize(cand.RawURL, p.destPolicy, p.lim)
 	if err != nil {
 		if cand.Modeled {

@@ -41,14 +41,19 @@ func ApplyRedaction(p Profile, ref string, expectedMinRevision uint64, args *can
 			return nil, RedactionEvidence{}, redErr("transformed value no longer satisfies the schema")
 		}
 	}
-	// (2) re-scan DLP; any residual block-disposition secret fails closed.
+	// (2) re-scan DLP; fail closed on ANY residual value that is either a
+	// block-disposition class OR a class the profile was REQUIRED to redact (a
+	// redact-class value that survived — e.g. a financial identifier dropped once
+	// MaxRedactions was hit — must not be reported as satisfied). A truncated
+	// re-scan also fails closed.
 	rep, err := dlp.Scan(transformed, dlp.RequestMode(), p.lim)
-	if err != nil {
-		return nil, RedactionEvidence{}, redErr("re-scan failed")
+	if err != nil || rep.Truncated {
+		return nil, RedactionEvidence{}, redErr("re-scan failed or truncated")
 	}
 	for i := range rep.Findings {
-		if p.disposition(rep.Findings[i].Class).Blocks() {
-			return nil, RedactionEvidence{}, redErr("secret remains after redaction")
+		c := rep.Findings[i].Class
+		if p.disposition(c).Blocks() || rp.Redacts(c) {
+			return nil, RedactionEvidence{}, redErr("sensitive value remains after redaction")
 		}
 	}
 	// (3) destination scope must not broaden.

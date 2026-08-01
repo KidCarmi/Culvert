@@ -56,6 +56,11 @@ func CompileRules(pointers []string, heuristic bool, lim limits.InspectionLimits
 // not. Deterministic order: explicit rules first (in rule order), then heuristic
 // hits in document order.
 func (r ExtractionRules) Extract(v *canonical.Node, lim limits.InspectionLimits) ([]Candidate, error) {
+	if v == nil {
+		// A tools/call that omits the optional `arguments` member decodes to a nil
+		// value: no destinations to extract (and never a nil dereference).
+		return nil, nil
+	}
 	var out []Candidate
 	for _, segs := range r.pointers {
 		if n, ok := resolvePointer(v, segs); ok && n.Kind == canonical.KindString {

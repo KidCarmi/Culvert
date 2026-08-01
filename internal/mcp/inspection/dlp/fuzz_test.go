@@ -8,7 +8,7 @@ import (
 	"github.com/KidCarmi/Culvert/internal/mcp/limits"
 )
 
-const fuzzCanary = `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U`
+const fuzzCanary = `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U` //nolint:gosec // G101 -- static JWT test fixture, not a real credential
 
 // FuzzScan drives the DLP traversal over arbitrary JSON. Invariants: no panic,
 // bounded work, determinism, and NO secret-canary leakage into any finding field.

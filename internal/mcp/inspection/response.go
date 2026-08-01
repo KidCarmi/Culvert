@@ -30,8 +30,8 @@ type ResponseInput struct {
 // fields may be truncated, and only under an explicit profile flag — and DLP +
 // security inspection always run on the FULL admitted content BEFORE any allowed
 // display truncation (see TruncateText).
-func InspectResponse(ctx context.Context, p Profile, in ResponseInput, now time.Time) InspectionResult {
-	res := InspectionResult{Summary: baseSummary(p)}
+func InspectResponse(ctx context.Context, p Profile, in ResponseInput, now time.Time) Result {
+	res := Result{Summary: baseSummary(p)}
 	res.Summary.DestInspected = false // response inspection does not extract request destinations
 	// 1. size bound — structured over-limit output blocks (no blind truncation).
 	if len(in.Body) > p.lim.MaxOutputBytes() {
@@ -60,12 +60,18 @@ func InspectResponse(ctx context.Context, p Profile, in ResponseInput, now time.
 	if serr != nil {
 		return hardFail(res, mcperr.ReasonInspectionLimitExceeded)
 	}
+	if rep.Truncated {
+		// Partial DLP on a high-risk output fails closed (a dropped finding could
+		// have hidden a blocking secret behind a flood of label-only findings).
+		return hardFail(res, mcperr.ReasonInspectionLimitExceeded)
+	}
 	res.Findings = append(res.Findings, rep.Findings...)
 	applyDLPToSummary(&res.Summary, rep)
-	if blocked, reason := p.evaluateDispositions(rep); blocked {
+	worst, blocked, reason := p.evaluateDispositions(rep)
+	res.Summary.Disposition = worst
+	if blocked {
 		return hardFail(res, reason)
 	}
-	finalizeSummary(&res.Summary, rep)
 	return res
 }
 

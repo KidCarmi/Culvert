@@ -97,6 +97,66 @@ func TestAW_InjectionNotSilentlyTrusted(t *testing.T) {
 	}
 }
 
+// AW (Codex P1): a tools/call that omits the optional `arguments` member decodes
+// to nil args — destination extraction must not panic and must not hard-fail.
+func TestAW_NilArgsNoPanicNoHardFail(t *testing.T) {
+	p := gwProfile(t) // heuristic extraction enabled
+	in := RequestInput{Tool: ToolRef{Name: "t", ServerID: "s1"}, Compiled: compileSchema(t, `{}`), Args: nil}
+	res := InspectRequest(context.Background(), p, in, time.Unix(1, 0))
+	if res.HardFail {
+		t.Fatalf("nil args must not hard-fail: %v", res.HardReason.Code())
+	}
+}
+
+// AW (Codex P1): when the finding cap is exhausted, the DLP scan is truncated and
+// the operation MUST fail closed — a flood of label-only findings before a secret
+// must not bypass the blocking disposition by dropping the secret finding.
+func TestAW_FindingCapFailsClosed(t *testing.T) {
+	cfg := destGwCfg()
+	cfg.MaxFindings = 2 // tiny — a flood will truncate
+	lim, err := limits.NewInspection(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := NewProfile(ProfileConfig{Capability: "gateway", Limits: lim,
+		DestPolicy: destination.DefaultGatewayPolicy(), Revision: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Many PII emails (label) followed by a bearer token (block) — the flood fills
+	// the cap so the secret finding would be dropped; truncation must fail closed.
+	args := `{"a":"a@x.com","b":"b@x.com","c":"c@x.com","d":"d@x.com","tok":"` + jwtCanary + `"}`
+	res := InspectRequest(context.Background(), p, RequestInput{Tool: ToolRef{Name: "t", ServerID: "s1"}, Args: nd(t, args)}, time.Unix(1, 0))
+	if !res.HardFail {
+		t.Fatal("a truncated (cap-exhausted) DLP scan must fail closed")
+	}
+}
+
+// AW (Codex P1): a redact-class value that survives the transform (because the
+// redaction cap was hit) MUST fail the redaction — it is not enough to reject only
+// block-disposition residuals.
+func TestAW_RedactionResidualRedactClassFailsClosed(t *testing.T) {
+	cfg := destGwCfg()
+	cfg.MaxRedactions = 1 // only the first redaction happens; the second PAN survives
+	lim, err := limits.NewInspection(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rp := NewRedactionProfile("r1", 5, []dlp.Classification{dlp.ClassFinancial}, true)
+	disp := defaultDispositions() // financial → redact (NOT block)
+	p, err := NewProfile(ProfileConfig{Capability: "gateway", Limits: lim,
+		DestPolicy: destination.DefaultGatewayPolicy(), Dispositions: disp,
+		RedactionProfiles: []RedactionProfile{rp}, Revision: 9})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Two Luhn-valid PANs in separate leaves; only one can be redacted under the cap.
+	args := nd(t, `{"a":"4111111111111111","b":"4012888888881881"}`)
+	if _, _, rerr := ApplyRedaction(p, "r1", 0, args, nil); mcperr.ReasonOf(rerr) != mcperr.ReasonRedactionFailed {
+		t.Fatalf("surviving redact-class value must fail closed, got %v", rerr)
+	}
+}
+
 func redactProfileWithSchema(t *testing.T) Profile {
 	t.Helper()
 	disp := defaultDispositions()

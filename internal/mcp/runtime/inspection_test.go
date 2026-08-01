@@ -84,7 +84,7 @@ func TestInspection_SSRFHardBlockBeatsAllow(t *testing.T) {
 // policy regardless of a broad ALLOW.
 func TestInspection_SecretHardBlockBeatsAllow(t *testing.T) {
 	k := newESKey(t, "k1")
-	jwt := `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U`
+	jwt := `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U` //nolint:gosec // G101 -- static JWT test fixture, not a real credential
 	p := inspectionPipeline(t, k, fakePolicy{gw: gwPolicySnap(t, broadAllow)}, fakeInspection{gw: gwInspectionProfile(t)})
 	tok, sid := driveToDecisionPoint(t, p, k)
 
@@ -157,7 +157,7 @@ func TestInspection_ManagementDoesNotRunGatewayInspection(t *testing.T) {
 func TestSatisfyRedaction_RequiresRealEvidence(t *testing.T) {
 	set := map[dlp.Classification]struct{}{dlp.ClassBearerToken: {}}
 	rp := inspectionRedactionProfile(t, set)
-	jwt := `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U`
+	jwt := `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U` //nolint:gosec // G101 -- static JWT test fixture, not a real credential
 	args := decodeArgsForTest(t, rp, `{"token":"`+jwt+`","keep":"x"}`)
 	run := inspectionRun{ran: true, profile: rp, args: args}
 

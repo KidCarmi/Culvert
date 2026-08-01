@@ -14,7 +14,7 @@ import (
 	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
 )
 
-const jwtCanary = `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U`
+const jwtCanary = `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U` //nolint:gosec // G101 -- static JWT test fixture, not a real credential
 
 func bnd() canonical.Bounds {
 	return canonical.Bounds{MaxBytes: 1 << 20, MaxDepth: 64, MaxObjectMembers: 4096, MaxArrayElements: 4096, MaxStringBytes: 1 << 16}

@@ -90,43 +90,62 @@ func isDateTime(s string) bool {
 	if len(s) < 20 || len(s) > 40 {
 		return false
 	}
-	digits := func(seg string) bool {
-		for i := 0; i < len(seg); i++ {
-			if seg[i] < '0' || seg[i] > '9' {
-				return false
-			}
-		}
-		return true
-	}
-	if !digits(s[0:4]) || s[4] != '-' || !digits(s[5:7]) || s[7] != '-' || !digits(s[8:10]) {
+	if !dtDatePart(s[0:10]) {
 		return false
 	}
 	if s[10] != 'T' && s[10] != 't' {
 		return false
 	}
-	if !digits(s[11:13]) || s[13] != ':' || !digits(s[14:16]) || s[16] != ':' || !digits(s[17:19]) {
+	if !dtTimePart(s[11:19]) {
 		return false
 	}
-	rest := s[19:]
-	// optional fractional seconds
-	if len(rest) > 0 && rest[0] == '.' {
-		i := 1
-		for i < len(rest) && rest[i] >= '0' && rest[i] <= '9' {
-			i++
-		}
-		if i == 1 {
-			return false
-		}
-		rest = rest[i:]
+	return dtZonePart(dtStripFraction(s[19:]))
+}
+
+// dtDatePart validates "YYYY-MM-DD".
+func dtDatePart(s string) bool {
+	return dtDigits(s[0:4]) && s[4] == '-' && dtDigits(s[5:7]) && s[7] == '-' && dtDigits(s[8:10])
+}
+
+// dtTimePart validates "HH:MM:SS".
+func dtTimePart(s string) bool {
+	return dtDigits(s[0:2]) && s[2] == ':' && dtDigits(s[3:5]) && s[5] == ':' && dtDigits(s[6:8])
+}
+
+// dtStripFraction removes an optional ".<digits>" fractional-seconds segment; a
+// lone "." with no digits is left in place so the zone check rejects it.
+func dtStripFraction(rest string) string {
+	if rest == "" || rest[0] != '.' {
+		return rest
 	}
-	// zone: Z | z | (+|-)HH:MM
+	i := 1
+	for i < len(rest) && rest[i] >= '0' && rest[i] <= '9' {
+		i++
+	}
+	if i == 1 {
+		return rest // no digits after '.' — invalid, keep so zone check fails
+	}
+	return rest[i:]
+}
+
+// dtZonePart validates the zone marker: Z | z | (+|-)HH:MM.
+func dtZonePart(rest string) bool {
 	if rest == "Z" || rest == "z" {
 		return true
 	}
 	if len(rest) == 6 && (rest[0] == '+' || rest[0] == '-') && rest[3] == ':' {
-		return digits(rest[1:3]) && digits(rest[4:6])
+		return dtDigits(rest[1:3]) && dtDigits(rest[4:6])
 	}
 	return false
+}
+
+func dtDigits(seg string) bool {
+	for i := 0; i < len(seg); i++ {
+		if seg[i] < '0' || seg[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // isURI is a conservative structural check: an absolute URI must begin with a

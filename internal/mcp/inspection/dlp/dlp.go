@@ -160,16 +160,16 @@ func (r *Report) InjectionSuspected() bool { return r != nil && r.inject }
 
 // MaxSeverity returns the highest finding severity (SevUnset if none).
 func (r *Report) MaxSeverity() Severity {
-	max := SevUnset
+	highest := SevUnset
 	if r == nil {
-		return max
+		return highest
 	}
 	for i := range r.Findings {
-		if r.Findings[i].Severity > max {
-			max = r.Findings[i].Severity
+		if r.Findings[i].Severity > highest {
+			highest = r.Findings[i].Severity
 		}
 	}
-	return max
+	return highest
 }
 
 // Classes returns the sorted, unique set of finding classifications.

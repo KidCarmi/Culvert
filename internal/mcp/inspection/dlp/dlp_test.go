@@ -51,7 +51,7 @@ func hasDetector(r *Report, id string) bool {
 }
 
 // A JWT canary that the scrubber recognizes; asserted never to leak into findings.
-const jwtCanary = `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U`
+const jwtCanary = `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U` //nolint:gosec // G101 -- static JWT test fixture, not a real credential
 
 func TestSecret_JWTDetected(t *testing.T) {
 	r := scan(t, node(t, `{"token":"`+jwtCanary+`"}`), RequestMode())
@@ -162,7 +162,7 @@ func TestInjection_ProseNearMiss(t *testing.T) {
 
 func TestInjection_HiddenMarker(t *testing.T) {
 	// A zero-width space embedded in output text is a hidden-marker label.
-	r := scan(t, node(t, "{\"o\":\"hello​world\"}"), ResponseMode())
+	r := scan(t, node(t, "{\"o\":\"hello\u200bworld\"}"), ResponseMode())
 	if !hasDetector(r, "injection.hidden_marker") {
 		t.Fatalf("hidden zero-width marker must be labeled: %+v", r.Findings)
 	}

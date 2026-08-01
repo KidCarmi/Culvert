@@ -17,24 +17,9 @@ func RedactLeaf(s string, want map[Classification]struct{}) (out string, removed
 	out = s
 	seen := map[Classification]struct{}{}
 	// 1. secret shapes — scrub whole leaf if any secret class is wanted.
-	if wantsAnySecret(want) {
-		scrubbed, names, cnt := redaction.ScrubDetailDefault(out)
-		if cnt > 0 {
-			// Only keep the scrub if at least one detected class is wanted.
-			keep := false
-			for _, name := range names {
-				cl, sev := classifySecretName(name)
-				_ = sev
-				if _, ok := want[cl]; ok {
-					keep = true
-					mark(seen, cl)
-				}
-			}
-			if keep {
-				out = scrubbed
-				n += cnt
-			}
-		}
+	if scrubbed, cnt, ok := redactSecrets(out, want, seen); ok {
+		out = scrubbed
+		n += cnt
 	}
 	// 2. PII/financial spans — replace matched spans for wanted classes.
 	for i := range piiDetectors {
@@ -60,6 +45,32 @@ func RedactLeaf(s string, want map[Classification]struct{}) (out string, removed
 	}
 	sortClasses(removed)
 	return out, removed, n
+}
+
+// redactSecrets scrubs secret shapes from s when the profile wants at least one
+// secret class, returning the scrubbed string, the redaction count, and whether the
+// scrub was kept (only kept when a detected class is in want). Detected wanted
+// classes are recorded in seen.
+func redactSecrets(s string, want map[Classification]struct{}, seen map[Classification]struct{}) (string, int, bool) {
+	if !wantsAnySecret(want) {
+		return s, 0, false
+	}
+	scrubbed, names, cnt := redaction.ScrubDetailDefault(s)
+	if cnt == 0 {
+		return s, 0, false
+	}
+	keep := false
+	for _, name := range names {
+		cl, _ := classifySecretName(name)
+		if _, ok := want[cl]; ok {
+			keep = true
+			mark(seen, cl)
+		}
+	}
+	if !keep {
+		return s, 0, false
+	}
+	return scrubbed, cnt, true
 }
 
 func wantsAnySecret(want map[Classification]struct{}) bool {

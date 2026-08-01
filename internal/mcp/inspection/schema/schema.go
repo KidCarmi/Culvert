@@ -148,10 +148,9 @@ type compiledNode struct {
 
 // compileState bounds the compile pass.
 type compileState struct {
-	lim      limits.InspectionLimits
-	nodes    int
-	alts     int
-	unsupErr error // set when an unsupported keyword is seen (fail conservative)
+	lim   limits.InspectionLimits
+	nodes int
+	alts  int
 }
 
 // errLimit / errUnsupported are the compile-time sentinels.

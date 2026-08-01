@@ -122,12 +122,12 @@ type PinnedEvidence struct {
 	Class            destination.Class
 }
 
-// InspectionSummary is the immutable, sanitized fact set the runtime maps into the
+// Summary is the immutable, sanitized fact set the runtime maps into the
 // PR-6 DecisionInput. It carries NO raw arguments/output, NO secret matches, NO
 // full URLs with sensitive queries, NO bearer/credential material — only typed
 // facts and one-way hashes. The PR-6 evaluator stays deterministic and I/O-free;
 // inspection did all resolver/scan work before evaluation.
-type InspectionSummary struct {
+type Summary struct {
 	Revision           uint64
 	SchemaStatus       schema.Status
 	OutputSchemaStatus schema.Status
@@ -156,11 +156,11 @@ type InspectionSummary struct {
 	TransformedHash  string
 }
 
-// InspectionResult is the full sanitized inspection outcome. HardFail marks a hard
+// Result is the full sanitized inspection outcome. HardFail marks a hard
 // security failure that an ordinary PR-6 ALLOW rule can NEVER override; the runtime
 // blocks with HardReason regardless of the policy action.
-type InspectionResult struct {
-	Summary  InspectionSummary
+type Result struct {
+	Summary  Summary
 	Findings []dlp.Finding
 	Redirect []destination.RedirectEvidence
 	Pins     []PinnedEvidence

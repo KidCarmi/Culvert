@@ -32,19 +32,19 @@ var piiDetectors = []piiDetector{
 	},
 	{
 		id: "pii.us_ssn", class: ClassPII, sev: SevHigh,
-		re:   regexp.MustCompile(`\b[0-9]{3}-[0-9]{2}-[0-9]{4}\b`),
+		re:   regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`),
 		skip: skipInvalidSSN,
 	},
 	{
 		id: "pii.e164_phone", class: ClassPII, sev: SevLow,
 		// E.164-ish: leading + and 8–15 digits. Precision-first (requires the +).
-		re: regexp.MustCompile(`\+[1-9][0-9]{7,14}\b`),
+		re: regexp.MustCompile(`\+[1-9]\d{7,14}\b`),
 	},
 	{
 		id: "financial.pan", class: ClassFinancial, sev: SevHigh,
 		// 13–19 digit run, optionally space/dash grouped. Luhn-gated to avoid
 		// flagging ordinary long digit strings (ids, counters).
-		re:   regexp.MustCompile(`\b(?:[0-9][ \-]?){13,19}\b`),
+		re:   regexp.MustCompile(`\b(?:\d[ \-]?){13,19}\b`),
 		skip: skipNonLuhn,
 	},
 }

@@ -38,7 +38,7 @@ type inspectionRun struct {
 	profile  inspection.Profile
 	args     *canonical.Node
 	compiled *schema.Compiled
-	result   inspection.InspectionResult
+	result   inspection.Result
 }
 
 // runInspection runs PR-7 semantic inspection for a Gateway tools/call BEFORE
@@ -73,7 +73,7 @@ func (p *pipeline) runInspection(req Request, msg jsonrpc.Message, now time.Time
 	run := inspectionRun{ran: true, profile: prof}
 	if derr != nil {
 		// A malformed/over-bound arguments value is a hard semantic failure.
-		run.result = inspection.InspectionResult{HardFail: true, HardReason: mcperr.ReasonSchemaInvalid}
+		run.result = inspection.Result{HardFail: true, HardReason: mcperr.ReasonSchemaInvalid}
 		run.result.Summary.Revision = prof.Revision()
 		return run
 	}
@@ -92,7 +92,7 @@ func (p *pipeline) runInspection(req Request, msg jsonrpc.Message, now time.Time
 // applyInspectionToInput folds the sanitized inspection summary into the decision
 // tuple BEFORE policy evaluation. It sets only safe typed facts; the evaluator
 // remains I/O-free.
-func applyInspectionToInput(in *policy.DecisionInput, s inspection.InspectionSummary) {
+func applyInspectionToInput(in *policy.DecisionInput, s inspection.Summary) {
 	in.Inspection = policy.Inspection{
 		DLPAvailable:         s.DLPAvailable,
 		RedactionAvailable:   s.RedactionAvailable,
@@ -122,7 +122,7 @@ func mapDestClass(c destination.Class) policy.Destination {
 }
 
 // recordInspection stamps the sanitized inspection facts onto the observe record.
-func recordInspection(rb *recBuilder, s inspection.InspectionSummary) {
+func recordInspection(rb *recBuilder, s inspection.Summary) {
 	rb.rec.InspectionRevision = s.Revision
 	rb.rec.InspectionSchema = s.SchemaStatus.String()
 	rb.rec.InspectionDestClass = s.DestClass.String()
