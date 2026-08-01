@@ -360,7 +360,7 @@ func (s *saasFeedStatus) noteNoChange(expiresAt time.Time, stale bool) {
 // caller passes the immutable view + the host delta. Status must never claim success
 // before the durable activation + live cutover complete — the orchestrator calls this
 // only AFTER the coordinator reports activationCommitted.
-func (s *saasFeedStatus) noteActivation(view *effectiveCategoryView, delta saasFeedActivationDelta, httpStatus int) {
+func (s *saasFeedStatus) noteActivation(view *effectiveCategoryView, delta saasFeedActivationDelta) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
@@ -370,7 +370,7 @@ func (s *saasFeedStatus) noteActivation(view *effectiveCategoryView, delta saasF
 	s.lastOutcome = saasFeedOutcomeOK
 	s.lastErrorClass = saasFeedErrNone
 	s.last304 = false
-	s.lastHTTPStatus = httpStatus
+	s.lastHTTPStatus = 200 // a fresh activation always follows a 200 fetch
 	s.consecutiveFailures = 0
 	s.everSucceeded = true
 	s.sigFailed = false
@@ -390,17 +390,15 @@ func (s *saasFeedStatus) noteActivation(view *effectiveCategoryView, delta saasF
 	}
 }
 
-// noteOverrides records the applied override footprint (count + revision) after an
-// override-driven rebuild.
-func (s *saasFeedStatus) noteOverrides(count int, revision string, view *effectiveCategoryView) {
+// noteOverrides records the applied override footprint (count + revision). Called by the
+// runtime after each successful activation/recovery so the composed override count and
+// revision are observable alongside the served view.
+func (s *saasFeedStatus) noteOverrides(count int, revision string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.overrideCount = count
-	s.overrideRevision = revision
-	if view != nil {
-		s.hostCount = view.HostCount()
-		s.categoryCount = view.CategoryCount()
-		s.configRevision = view.ConfigRevision
+	if revision != "" {
+		s.overrideRevision = revision
 	}
 }
 

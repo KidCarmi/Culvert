@@ -191,6 +191,7 @@ func (rt *saasFeedRuntime) recover(ctx context.Context) (recoveryResult, error) 
 		return recoveryResult{}, err
 	}
 	rt.status.noteRecovery(res)
+	rt.noteOverrideFootprint()
 	saasFeedRecordRecovery(res)
 	if arec, st, _ := rt.activation.Read(); st == activationValid {
 		rt.setETag(arec.ETag)
@@ -334,8 +335,17 @@ func (rt *saasFeedRuntime) activateAcquired(ctx context.Context, ar AcquireResul
 	}
 	view := rt.live.Current()
 	delta := computeActivationDelta(prev, view)
-	rt.status.noteActivation(view, delta, 200)
+	rt.status.noteActivation(view, delta)
+	rt.noteOverrideFootprint()
 	return refreshActivated
+}
+
+// noteOverrideFootprint publishes the current applied-override count + revision so the
+// status/API/metrics reflect the composed override footprint alongside the served view.
+func (rt *saasFeedRuntime) noteOverrideFootprint() {
+	ov := rt.overrides.Get()
+	count := len(ov.Added) + len(ov.Recategorized) + len(ov.Tombstones)
+	rt.status.noteOverrides(count, saasFeedOverridesFingerprint(ov))
 }
 
 // recordAcquireError classifies an AcquireGeneration error into a bounded class + folds
@@ -406,7 +416,7 @@ func (rt *saasFeedRuntime) conditionalETag(cfg SaaSFeedConfig) string {
 }
 
 // classifyAcquireError maps an AcquireGeneration error to a bounded (class, httpStatus).
-func classifyAcquireError(err error) (string, int) {
+func classifyAcquireError(err error) (class string, httpStatus int) {
 	switch {
 	case errors.Is(err, errAcquireVerify):
 		return saasFeedErrVerify, 0

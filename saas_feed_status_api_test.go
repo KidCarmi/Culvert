@@ -33,7 +33,7 @@ func TestF3b4_API_Status(t *testing.T) {
 	base := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
 	s := swapFeedStatus(t, base)
 	s.noteConfig(feedAuthorityResolution{Authority: authorityStandalone, Config: SaaSFeedConfig{Managed: true, Enabled: true, Protocol: saasFeedProtocolV1}})
-	s.noteActivation(viewFor(sourceDownloaded, 42, "2026-08-01T00:00:00Z", "2026-08-20T00:00:00Z"), saasFeedActivationDelta{HostsAdded: 5}, 200)
+	s.noteActivation(viewFor(sourceDownloaded, 42, "2026-08-01T00:00:00Z", "2026-08-20T00:00:00Z"), saasFeedActivationDelta{HostsAdded: 5})
 
 	// Viewer GET OK.
 	w := dispatchStatus(RoleViewer, http.MethodGet)

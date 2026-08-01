@@ -54,7 +54,7 @@ func TestF3b4_Status_DerivedStatePrecedence(t *testing.T) {
 	t.Run("fresh", func(t *testing.T) {
 		s := statusWithClock(base)
 		s.noteConfig(feedAuthorityResolution{Authority: authorityStandalone, Config: SaaSFeedConfig{Managed: true, Enabled: true}})
-		s.noteActivation(viewFor(sourceDownloaded, 5, "2026-08-01T00:00:00Z", "2026-08-20T00:00:00Z"), saasFeedActivationDelta{HostsAdded: 3}, 200)
+		s.noteActivation(viewFor(sourceDownloaded, 5, "2026-08-01T00:00:00Z", "2026-08-20T00:00:00Z"), saasFeedActivationDelta{HostsAdded: 3})
 		snap := s.Snapshot()
 		if snap.State != saasFeedStateFresh {
 			t.Errorf("state = %s, want fresh", snap.State)
@@ -69,12 +69,18 @@ func TestF3b4_Status_DerivedStatePrecedence(t *testing.T) {
 			t.Errorf("expires_in_days = %v, want 19", snap.ExpiresInDays)
 		}
 	})
+}
+
+// TestF3b4_Status_DerivedStateServing covers the serving/operational states (split from
+// the precedence test to keep each function under the cognitive-complexity bound).
+func TestF3b4_Status_DerivedStateServing(t *testing.T) {
+	base := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
 	t.Run("stale", func(t *testing.T) {
 		s := statusWithClock(base)
 		s.noteConfig(feedAuthorityResolution{Authority: authorityStandalone, Config: SaaSFeedConfig{Managed: true, Enabled: true}})
 		v := viewFor(sourceCached, 5, "2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z")
 		v.Stale = true
-		s.noteActivation(v, saasFeedActivationDelta{}, 200)
+		s.noteActivation(v, saasFeedActivationDelta{})
 		if got := s.Snapshot().State; got != saasFeedStateStale {
 			t.Errorf("state = %s, want stale", got)
 		}
@@ -82,7 +88,7 @@ func TestF3b4_Status_DerivedStatePrecedence(t *testing.T) {
 	t.Run("degraded (active + recent failures)", func(t *testing.T) {
 		s := statusWithClock(base)
 		s.noteConfig(feedAuthorityResolution{Authority: authorityStandalone, Config: SaaSFeedConfig{Managed: true, Enabled: true}})
-		s.noteActivation(viewFor(sourceDownloaded, 5, "2026-08-01T00:00:00Z", "2026-08-20T00:00:00Z"), saasFeedActivationDelta{}, 200)
+		s.noteActivation(viewFor(sourceDownloaded, 5, "2026-08-01T00:00:00Z", "2026-08-20T00:00:00Z"), saasFeedActivationDelta{})
 		s.noteAttemptFailure(saasFeedErrFetch, 0, false, "dial timeout")
 		if got := s.Snapshot().State; got != saasFeedStateDegraded {
 			t.Errorf("state = %s, want degraded", got)
@@ -91,7 +97,7 @@ func TestF3b4_Status_DerivedStatePrecedence(t *testing.T) {
 	t.Run("syncing (fresh + in-flight)", func(t *testing.T) {
 		s := statusWithClock(base)
 		s.noteConfig(feedAuthorityResolution{Authority: authorityStandalone, Config: SaaSFeedConfig{Managed: true, Enabled: true}})
-		s.noteActivation(viewFor(sourceDownloaded, 5, "2026-08-01T00:00:00Z", "2026-08-20T00:00:00Z"), saasFeedActivationDelta{}, 200)
+		s.noteActivation(viewFor(sourceDownloaded, 5, "2026-08-01T00:00:00Z", "2026-08-20T00:00:00Z"), saasFeedActivationDelta{})
 		s.noteSyncStart()
 		if got := s.Snapshot().State; got != saasFeedStateSyncing {
 			t.Errorf("state = %s, want syncing", got)
@@ -134,7 +140,7 @@ func TestF3b4_Status_FailuresSinceStartAndCancellation(t *testing.T) {
 	}
 
 	// A successful activation resets the consecutive streak but not the lifetime counter.
-	s.noteActivation(viewFor(sourceDownloaded, 1, "2026-08-01T00:00:00Z", "2026-08-20T00:00:00Z"), saasFeedActivationDelta{HostsAdded: 1}, 200)
+	s.noteActivation(viewFor(sourceDownloaded, 1, "2026-08-01T00:00:00Z", "2026-08-20T00:00:00Z"), saasFeedActivationDelta{HostsAdded: 1})
 	snap = s.Snapshot()
 	if snap.ConsecutiveFailures != 0 || snap.FailuresSinceStart != 2 {
 		t.Errorf("post-success counters = %d/%d, want 0/2", snap.ConsecutiveFailures, snap.FailuresSinceStart)
@@ -145,7 +151,7 @@ func TestF3b4_Status_304RetainsProvenance(t *testing.T) {
 	base := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
 	s := statusWithClock(base)
 	s.noteConfig(feedAuthorityResolution{Authority: authorityStandalone, Config: SaaSFeedConfig{Managed: true, Enabled: true}})
-	s.noteActivation(viewFor(sourceDownloaded, 5, "2026-08-01T00:00:00Z", "2026-08-20T00:00:00Z"), saasFeedActivationDelta{HostsAdded: 2}, 200)
+	s.noteActivation(viewFor(sourceDownloaded, 5, "2026-08-01T00:00:00Z", "2026-08-20T00:00:00Z"), saasFeedActivationDelta{HostsAdded: 2})
 
 	// A 304 recomputes freshness, keeps provenance, resets the failure streak, no new activation.
 	s.noteAttemptFailure(saasFeedErrFetch, 0, false, "blip") // streak = 1

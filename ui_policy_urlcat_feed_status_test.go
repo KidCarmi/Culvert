@@ -90,7 +90,7 @@ func TestAPIURLCatFeedStatus_SaaSEnabledReportsConfiguredTrue(t *testing.T) {
 	globalUT1FeedSyncer = nil
 	s := swapFeedStatus(t, time.Unix(1_700_000_500, 0))
 	s.noteConfig(feedAuthorityResolution{Authority: authorityStandalone, Config: SaaSFeedConfig{Managed: true, Enabled: true, URL: builtinSaaSFeedURL, Protocol: saasFeedProtocolV1}})
-	s.noteActivation(viewFor(sourceDownloaded, 7, "2026-08-01T00:00:00Z", "2026-08-20T00:00:00Z"), saasFeedActivationDelta{HostsAdded: 7}, 200)
+	s.noteActivation(viewFor(sourceDownloaded, 7, "2026-08-01T00:00:00Z", "2026-08-20T00:00:00Z"), saasFeedActivationDelta{HostsAdded: 7})
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodGet, "/api/urlcat/feed-status", http.NoBody)

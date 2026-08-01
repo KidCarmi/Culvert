@@ -4,6 +4,7 @@ package main
 // effective-configuration authority resolver.
 
 import (
+	"bytes"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -53,7 +54,7 @@ func TestF3b4_Authority_CanonicalByteStable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(b1) != string(b2) {
+	if !bytes.Equal(b1, b2) {
 		t.Errorf("non-deterministic encoding:\n%s\n%s", b1, b2)
 	}
 	// Field order is load-bearing: schema_version must be first, crc32c last.

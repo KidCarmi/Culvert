@@ -191,7 +191,9 @@ func backoffDelay(failures int) time.Duration {
 	if shift > saasFeedBackoffShift {
 		shift = saasFeedBackoffShift
 	}
-	d := saasFeedBackoffMin << uint(shift)
+	// shift is clamped to [0, saasFeedBackoffShift]; a signed shift count is valid Go
+	// (>=1.13) and non-negative here, so no unsigned conversion is needed (avoids G115).
+	d := saasFeedBackoffMin << shift
 	if d > saasFeedBackoffMax || d <= 0 {
 		return saasFeedBackoffMax
 	}
