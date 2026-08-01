@@ -9,6 +9,7 @@ package main
 // idempotent retry, deterministic concurrency, and fuzz/property coverage.
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -562,7 +563,7 @@ func TestFloor_Advance_RollbackRejected(t *testing.T) {
 		t.Fatalf("got %v want errFloorRollback", err)
 	}
 	after, _ := fs.read(s.paths.a)
-	if string(before) != string(after) {
+	if !bytes.Equal(before, after) {
 		t.Fatal("a rejected rollback must NOT mutate the durable record")
 	}
 	if got := s.Recover(0).Floor.Version; got != 5 {
@@ -592,7 +593,7 @@ func TestFloor_Advance_IdempotentRetry(t *testing.T) {
 	}
 	a2, _ := fs.read(s.paths.a)
 	b2, _ := fs.read(s.paths.b)
-	if string(a1) != string(a2) || string(b1) != string(b2) {
+	if !bytes.Equal(a1, a2) || !bytes.Equal(b1, b2) {
 		t.Fatal("idempotent retry must produce byte-identical records")
 	}
 }
@@ -611,7 +612,7 @@ func TestFloor_Advance_SameVersionEquivocationRejected(t *testing.T) {
 		t.Fatalf("got %v want errFloorEquivocation", err)
 	}
 	after, _ := fs.read(s.paths.a)
-	if string(before) != string(after) {
+	if !bytes.Equal(before, after) {
 		t.Fatal("rejected equivocating write must not mutate the durable record")
 	}
 }
@@ -636,28 +637,32 @@ func TestFloor_Advance_ReplayAndResign(t *testing.T) {
 }
 
 // ─── 18 + 19 + 20. failure injection at every durability point ────────────────────
+//
+// Split into focused top-level tests (one durability point each) so the cognitive
+// complexity stays low; together they cover mkdir, first write, second write, and
+// read-back.
 
-func TestFloor_Advance_FailureInjection(t *testing.T) {
+func TestFloor_Advance_FailInject_Mkdir(t *testing.T) {
+	fs := newFakeFS()
+	fs.mkdirErr = errors.New("EACCES")
+	s := newFakeStore(t, fs, 1)
 	cand := mkFloor(t, 5, floorTS0, "5", floorHexA, floorHexB)
+	if _, err := s.Advance(context.Background(), cand); err == nil {
+		t.Fatal("mkdir failure must abort the advance")
+	}
+	if fs.has(s.paths.a) || fs.has(s.paths.b) {
+		t.Fatal("no record should be written after mkdir failure")
+	}
+}
 
-	t.Run("mkdir_fails", func(t *testing.T) {
-		fs := newFakeFS()
-		fs.mkdirErr = errors.New("EACCES")
-		s := newFakeStore(t, fs, 1)
-		if _, err := s.Advance(context.Background(), cand); err == nil {
-			t.Fatal("mkdir failure must abort the advance")
-		}
-		if fs.has(s.paths.a) || fs.has(s.paths.b) {
-			t.Fatal("no record should be written after mkdir failure")
-		}
-	})
-
-	// The floor state machine treats any AtomicWrite failure uniformly (an fsync,
-	// rename, or dir-sync failure all surface as "the write did not complete"), so we
-	// inject cause-labeled errors at the first and second write to prove cause-agnostic
-	// handling AND the partial-state contract.
+// The floor state machine treats any AtomicWrite failure uniformly (an fsync, rename,
+// or dir-sync failure all surface as "the write did not complete"), so cause-labeled
+// errors at the first write prove cause-agnostic handling AND that a failed first write
+// leaves nothing durable.
+func TestFloor_Advance_FailInject_WriteA(t *testing.T) {
+	cand := mkFloor(t, 5, floorTS0, "5", floorHexA, floorHexB)
 	for _, cause := range []string{"fsync", "rename", "dir_sync", "generic"} {
-		t.Run("write_a_fails_"+cause, func(t *testing.T) {
+		t.Run(cause, func(t *testing.T) {
 			fs := newFakeFS()
 			fs.writeHook = func(_ string, n int) error {
 				if n == 1 {
@@ -675,63 +680,63 @@ func TestFloor_Advance_FailureInjection(t *testing.T) {
 			}
 		})
 	}
+}
 
-	// 19. first replica durable, second fails ⇒ partial preserved, NO success, and an
-	// exact retry completes the quorum.
-	t.Run("write_b_fails_then_retry_completes", func(t *testing.T) {
-		fs := newFakeFS()
-		fs.writeHook = func(_ string, n int) error {
-			if n == 2 {
-				return errors.New("simulated floor.b failure")
-			}
-			return nil
+// 19. first replica durable, second fails ⇒ partial preserved, NO success, and an
+// exact retry completes the quorum.
+func TestFloor_Advance_FailInject_WriteBThenRetry(t *testing.T) {
+	fs := newFakeFS()
+	fs.writeHook = func(_ string, n int) error {
+		if n == 2 {
+			return errors.New("simulated floor.b failure")
 		}
-		s := newFakeStore(t, fs, 1)
-		_, err := s.Advance(context.Background(), cand)
-		if !errors.Is(err, errFloorQuorumWrite) {
-			t.Fatalf("got %v want errFloorQuorumWrite", err)
-		}
-		if !fs.has(s.paths.a) || fs.has(s.paths.b) {
-			t.Fatal("floor.a must be durable (partial) and floor.b absent")
-		}
-		// Recovery classifies the partial as degraded, floor preserved at the candidate.
-		rec := s.Recover(0)
-		if rec.Floor.Version != 5 || rec.Health != floorHealthDegraded || !rec.RepairRequired {
-			t.Fatalf("partial must be degraded + floor preserved: %+v", rec)
-		}
-		// Exact-record retry with a healthy FS completes the quorum idempotently.
-		fs.writeHook = nil
-		r2, err := s.Advance(context.Background(), cand)
-		if err != nil {
-			t.Fatalf("retry err: %v", err)
-		}
-		if r2.Outcome != floorAdvanceIdempotent {
-			t.Fatalf("retry outcome=%s want idempotent", r2.Outcome)
-		}
-		if !fs.has(s.paths.a) || !fs.has(s.paths.b) {
-			t.Fatal("retry must complete both records")
-		}
-		if s.Recover(0).Health != floorHealthy {
-			t.Fatal("after retry the quorum must be healthy")
-		}
-	})
+		return nil
+	}
+	s := newFakeStore(t, fs, 1)
+	cand := mkFloor(t, 5, floorTS0, "5", floorHexA, floorHexB)
+	if _, err := s.Advance(context.Background(), cand); !errors.Is(err, errFloorQuorumWrite) {
+		t.Fatalf("got %v want errFloorQuorumWrite", err)
+	}
+	if !fs.has(s.paths.a) || fs.has(s.paths.b) {
+		t.Fatal("floor.a must be durable (partial) and floor.b absent")
+	}
+	// Recovery classifies the partial as degraded, floor preserved at the candidate.
+	rec := s.Recover(0)
+	if rec.Floor.Version != 5 || rec.Health != floorHealthDegraded || !rec.RepairRequired {
+		t.Fatalf("partial must be degraded + floor preserved: %+v", rec)
+	}
+	// Exact-record retry with a healthy FS completes the quorum idempotently.
+	fs.writeHook = nil
+	r2, err := s.Advance(context.Background(), cand)
+	if err != nil {
+		t.Fatalf("retry err: %v", err)
+	}
+	if r2.Outcome != floorAdvanceIdempotent {
+		t.Fatalf("retry outcome=%s want idempotent", r2.Outcome)
+	}
+	if !fs.has(s.paths.a) || !fs.has(s.paths.b) {
+		t.Fatal("retry must complete both records")
+	}
+	if s.Recover(0).Health != floorHealthy {
+		t.Fatal("after retry the quorum must be healthy")
+	}
+}
 
-	// 20. both durable, read-back verification fails ⇒ NO success.
-	t.Run("readback_fails", func(t *testing.T) {
-		fs := newFakeFS()
-		s := newFakeStore(t, fs, 1)
-		// Corrupt every read of floor.a ONCE both writes have happened (read-back phase).
-		fs.readHook = func(path string, data []byte, exists bool) ([]byte, error, bool) {
-			if path == s.paths.a && fs.writes >= 2 && exists {
-				return []byte("{tampered-readback"), nil, true
-			}
-			return nil, nil, false
+// 20. both durable, read-back verification fails ⇒ NO success.
+func TestFloor_Advance_FailInject_ReadBack(t *testing.T) {
+	fs := newFakeFS()
+	s := newFakeStore(t, fs, 1)
+	cand := mkFloor(t, 5, floorTS0, "5", floorHexA, floorHexB)
+	// Corrupt every read of floor.a ONCE both writes have happened (read-back phase).
+	fs.readHook = func(path string, _ []byte, exists bool) ([]byte, error, bool) {
+		if path == s.paths.a && fs.writes >= 2 && exists {
+			return []byte("{tampered-readback"), nil, true
 		}
-		_, err := s.Advance(context.Background(), cand)
-		if !errors.Is(err, errFloorQuorumVerify) {
-			t.Fatalf("got %v want errFloorQuorumVerify", err)
-		}
-	})
+		return nil, nil, false
+	}
+	if _, err := s.Advance(context.Background(), cand); !errors.Is(err, errFloorQuorumVerify) {
+		t.Fatalf("got %v want errFloorQuorumVerify", err)
+	}
 }
 
 // ─── cancellation cannot convert a partial quorum into success ───────────────────
@@ -805,7 +810,7 @@ func TestFloor_Advance_ConcurrentWriters(t *testing.T) {
 	}
 	a, _ := fs.read(s.paths.a)
 	b, _ := fs.read(s.paths.b)
-	if string(a) != string(b) {
+	if !bytes.Equal(a, b) {
 		t.Fatal("replicas diverged under concurrency (mixed identity)")
 	}
 	if rec.Health != floorHealthy {
@@ -849,7 +854,7 @@ func TestFloor_Advance_ConcurrentSameVersionConflict(t *testing.T) {
 	}
 	a, _ := fs.read(s.paths.a)
 	b, _ := fs.read(s.paths.b)
-	if string(a) != string(b) {
+	if !bytes.Equal(a, b) {
 		t.Fatal("final replicas must be the single winner's identity")
 	}
 	if s.Recover(0).Health != floorHealthy {
@@ -969,7 +974,7 @@ func FuzzFloor_Decode(f *testing.F) {
 		if eerr != nil {
 			t.Fatalf("accepted record failed to re-encode: %v", eerr)
 		}
-		if string(out) != string(data) {
+		if !bytes.Equal(out, data) {
 			t.Fatalf("accepted record is non-canonical (round-trip differs):\n in=%q\nout=%q", data, out)
 		}
 		again, aerr := decodeFloorRecord(out)

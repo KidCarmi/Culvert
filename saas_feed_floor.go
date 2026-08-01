@@ -322,12 +322,15 @@ func isLowerHex(s string, n int) bool {
 		return false
 	}
 	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+		if !isHexByte(s[i]) {
 			return false
 		}
 	}
 	return true
+}
+
+func isHexByte(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
 }
 
 // ─── filesystem seam (injectable durability) ─────────────────────────────────────
@@ -783,18 +786,15 @@ func (s *floorStore) Advance(ctx context.Context, cand floorRecord) (floorQuorum
 		return floorQuorumResult{}, err
 	}
 
-	// 3+4. write BOTH records durably. AtomicWrite = temp → fsync → rename → dir fsync.
-	b, err := encodeFloorRecord(cand)
-	if err != nil {
-		return floorQuorumResult{}, err
-	}
+	// 3+4. write BOTH records durably via writeFloorRecord (validate → encode → the
+	// atomic seam: temp → fsync → rename → dir fsync).
 	if err := s.fs.mkdirAll(s.dir, floorDirPerm); err != nil {
 		return floorQuorumResult{}, fmt.Errorf("saas feed floor: mkdir: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
 		return floorQuorumResult{}, err
 	}
-	if err := s.fs.atomicWrite(s.paths.a, b, floorFilePerm); err != nil {
+	if err := writeFloorRecord(s.fs, s.paths.a, cand); err != nil {
 		return floorQuorumResult{}, fmt.Errorf("%w: floor.a: %v", errFloorQuorumWrite, err)
 	}
 	// A is durable; B not yet. A crash/cancel HERE is a floor-ahead partial an exact
@@ -802,7 +802,7 @@ func (s *floorStore) Advance(ctx context.Context, cand floorRecord) (floorQuorum
 	if err := ctx.Err(); err != nil {
 		return floorQuorumResult{}, err
 	}
-	if err := s.fs.atomicWrite(s.paths.b, b, floorFilePerm); err != nil {
+	if err := writeFloorRecord(s.fs, s.paths.b, cand); err != nil {
 		return floorQuorumResult{}, fmt.Errorf("%w: floor.b: %v", errFloorQuorumWrite, err)
 	}
 
