@@ -225,6 +225,58 @@ func TestSync_NoopWhenPersistenceDisabled(t *testing.T) {
 	}
 }
 
+// TestSync_TimesOutWhenDrainAcceptsButNeverCompletes is the regression gate
+// for the two-phase Sync deadline.
+//
+// It reproduces the exact shape the drain goroutine has when a sink wedges
+// inside bw.Flush: the handshake IS accepted (the loop was idle in its select
+// when Sync arrived), and only then does the flush stall, so `done` is never
+// closed. A deadline covering only the handshake send leaves the subsequent
+// `<-done` unbounded and Sync never returns — and since ReadPersistent calls
+// Sync, that hangs an admin API request on a bad log volume.
+//
+// The stand-in drain goroutine is used deliberately: driving the real loop
+// into "handshake accepted, then flush wedges" depends on which case select
+// picks, so a real-sink version of this test would be probabilistic and could
+// pass against the bug. This one fails against it every run.
+func TestSync_TimesOutWhenDrainAcceptsButNeverCompletes(t *testing.T) {
+	oldTimeout := persistSyncTimeout
+	persistSyncTimeout = 250 * time.Millisecond
+	defer func() { persistSyncTimeout = oldTimeout }()
+
+	persistMu.Lock()
+	oldFlush := flushCh
+	stall := make(chan chan struct{})
+	flushCh = stall
+	persistMu.Unlock()
+	defer func() {
+		persistMu.Lock()
+		flushCh = oldFlush
+		persistMu.Unlock()
+	}()
+
+	// Accept the handshake and then never signal completion — a drain
+	// goroutine parked in a write(2) that never returns.
+	accepted := make(chan struct{})
+	go func() {
+		<-stall
+		close(accepted)
+	}()
+
+	returned := make(chan struct{})
+	go func() { Sync(); close(returned) }()
+
+	select {
+	case <-returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("REGRESSION: Sync never returned after the drain goroutine accepted " +
+			"the flush handshake but stalled before completing it. The deadline must " +
+			"cover the wait for completion, not just the handshake send — ReadPersistent " +
+			"calls Sync, so this hangs an admin API request on a wedged log volume.")
+	}
+	<-accepted // the handshake really was taken, i.e. we exercised phase two
+}
+
 // TestBackpressure_CountsSaturation checks the saturation gauge moves only
 // when the queue actually fills, so a healthy deployment reports zero.
 func TestBackpressure_CountsSaturation(t *testing.T) {

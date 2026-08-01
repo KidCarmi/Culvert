@@ -45,8 +45,10 @@ import (
 const persistQueueDepth = 4096
 
 // persistSyncTimeout bounds how long Sync waits for the drain goroutine. A
-// wedged write must not turn a shutdown hook (or a test) into a deadlock.
-const persistSyncTimeout = 5 * time.Second
+// wedged write must not turn a shutdown hook (or an admin read) into a
+// deadlock. A var, not a const, so the wedged-sink test can lower it instead
+// of spending the full timeout.
+var persistSyncTimeout = 5 * time.Second
 
 // writerMu guards the writer/closer/path trio. Before the async split these
 // were plain globals read from every request goroutine while Init and the
@@ -141,13 +143,35 @@ func stopPersist() {
 	persistMu.Unlock()
 
 	close(stop)
-	persistWG.Wait()
+
+	// Bounded wait, for the same reason Sync's is bounded: the drain goroutine
+	// may be parked inside a write(2) on a wedged volume, where closing `stop`
+	// cannot reach it. Close() calls this from a shutdown hook, so an
+	// unbounded Wait would turn a hung log disk into a hung shutdown. On
+	// timeout we abandon the goroutine — it is blocked in a syscall on a sink
+	// we are done with, and its next write can only fail into writeErrors.
+	waited := make(chan struct{})
+	go func() { persistWG.Wait(); close(waited) }()
+	timer := time.NewTimer(persistSyncTimeout)
+	defer timer.Stop()
+	select {
+	case <-waited:
+	case <-timer.C:
+		obs.Printf("WARN request log: persistence drain did not stop within %v (sink wedged); abandoning it", persistSyncTimeout)
+	}
 }
 
 // Sync blocks until every entry enqueued before the call has been written.
 // It is the deterministic alternative to sleeping: shutdown uses Close (which
 // drains), and tests that assert on file contents call this. Cheap no-op when
 // persistence is not running.
+//
+// ONE deadline covers BOTH phases — handing the request to the drain goroutine
+// and waiting for it to finish flushing. Timing only the handshake would leave
+// the wait on `done` unbounded, so a sink that wedges inside bw.Flush (a hung
+// NFS mount, a device that stops completing writes) would hang the caller
+// forever. ReadPersistent calls Sync, so that caller is an admin API request:
+// a stalled log volume must degrade the read, never block it indefinitely.
 func Sync() {
 	persistMu.Lock()
 	fc := flushCh
@@ -156,12 +180,18 @@ func Sync() {
 		return
 	}
 	done := make(chan struct{})
+	timer := time.NewTimer(persistSyncTimeout)
+	defer timer.Stop()
 	select {
 	case fc <- done:
-		<-done
-	case <-time.After(persistSyncTimeout):
-		// The drain goroutine is wedged on a stalled write. Returning is
-		// strictly better than deadlocking a shutdown hook or a test.
+	case <-timer.C:
+		return // drain goroutine is busy and not reaching the flush handshake
+	}
+	select {
+	case <-done:
+	case <-timer.C:
+		// Wedged mid-flush. Returning without the guarantee is strictly better
+		// than deadlocking an admin request or a shutdown hook.
 	}
 }
 
