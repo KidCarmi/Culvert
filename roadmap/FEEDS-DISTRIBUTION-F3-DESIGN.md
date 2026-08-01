@@ -99,14 +99,16 @@ authenticity) and written via `AtomicWrite`. The design **separates four concern
 explicitly** — rollback-floor selection, active-generation selection,
 resumable-candidate state, and the live in-memory commit point — so **a floor number
 never implicitly selects content for activation**. Floor selection is the numeric
-`max` over *valid, compatible, non-equivocating* records (+ compiled checkpoint);
-content selection is record-driven and **digest-re-verified**, never numeric/filename/
-mtime. Each floor record **binds the candidate generation id + manifest/artifact
-digests**, so an interruption after the floor advances but before the activation
-commits is **resumed** (Option 1: re-verify the exact immutable generation from its
-signed bytes and complete activation idempotently — zero freshness lag, versus one
-publish cycle of staleness for the reject-and-wait alternative). Two same-version
-records with different digests are **equivocation** ⇒ fail closed + critical. This
+`max` over *all valid, compatible* records (+ compiled checkpoint); content selection
+is record-driven and **digest-re-verified**, never numeric/filename/mtime. Each floor
+record **binds the candidate generation id + manifest/artifact digests**, so an
+interruption after the floor advances but before the activation commits is **resumed**
+(Option 1: re-verify the exact immutable generation from its signed bytes and complete
+activation idempotently — zero freshness lag, versus one publish cycle of staleness for
+the reject-and-wait alternative). Two same-version records with different digests are
+**equivocation** ⇒ **content resume refused + critical, but the floor is retained at
+the shared version** (never lowered to the checkpoint — that would open a rollback
+window). This
 closes F0 §9's hole for **both** the floor and the served content, keeps the F0 §8
 commit ordering (generation durable → commit-intent durable → activation commit →
 serve), and — stated honestly — the two records are **redundant durable records on one
@@ -163,8 +165,8 @@ constant) / `derived`. **Mut**: `configurable` / `immutable`.
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | `saas_feed_protocol` | durable | CP | configurable (1 legal value) | GET viewer / PUT admin | admin panel | yes | yes | yes (scalar, `omitempty`) | old binary ignores unknown key; on-wire value only ever `signed_manifest_v1` | default `signed_manifest_v1`; reject any other value at settings-write | validation only (no refetch) |
 | `saas_feed_url` | durable | CP | configurable (official origin only) | GET viewer / PUT admin | admin panel | yes | yes | yes (scalar, `omitempty`) | old binary ignores unknown key | default `""`⇒built-in official envelope URL; validate per the §A.8 contract (exact official origin, or a historical URL rewritten to it; **all else rejected**) | **triggers refetch+verify+activate** on the node |
-| `saas_feed_managed` | durable | CP | configurable | (folded into settings PUT) | admin toggle | yes | yes | yes (scalar bool, no `omitempty` — see §A.5) | old binary reads `false`⇒on-by-default preserved | default `false` (never touched) | resolves enable |
-| `saas_feed_enabled` | durable | CP | configurable | (folded into settings PUT) | admin toggle | yes | yes | yes (scalar bool, no `omitempty`) | old binary reads `false` but `managed=false`⇒still on-by-default | authoritative only when `managed=true` | enable⇒arm loop; disable⇒serve embedded |
+| `saas_feed_managed` | durable | CP | configurable | (folded into settings PUT) | admin toggle | yes | yes | yes (`*bool` presence, `omitempty` — see §A.2.2) | rolled-back CP **omits** it ⇒ `nil` ⇒ DP keeps local (durable disable preserved, not re-enabled) | default `false` (never touched) on the node's own AdminSettings | resolves enable |
+| `saas_feed_enabled` | durable | CP | configurable | (folded into settings PUT) | admin toggle | yes | yes | yes (`*bool` presence, `omitempty`) | rolled-back CP omits it ⇒ `nil` ⇒ DP keeps local resolution | authoritative only when `managed=true` | enable⇒arm loop; disable⇒serve embedded |
 | `saas_feed_refresh_interval` | durable | CP | configurable | GET viewer / PUT admin | admin panel | yes | yes | yes (scalar, `omitempty`) | old binary ignores unknown key | default `24h`; min-clamp `1h`, parse `time.Duration` | re-arm ticker |
 | category **overrides** (`added`/`recategorized`/`tombstones`) | durable | CP | configurable | GET viewer / PUT admin | overrides editor | yes | yes | **yes (slice, no `omitempty` + `WireWipeCapable`)** | old binary ignores unknown snapshot field⇒overrides simply not applied (feed-only view) | per-host `NormalizeHost` parity (§A.4); reject IP/wildcard/PSL-only | recompute composed view |
 | `COMPILED_MIN_FEED_VERSION` | compiled | compiled | immutable | (surfaced read-only) | read-only status | no | no | no | n/a | baked at build | fresh-install floor |
@@ -213,24 +215,40 @@ SaaSFeedRefreshSeconds int64  `json:"saas_feed_refresh_seconds,omitempty"`
 ### A.2.2 `ConfigSnapshot` additions (`controlplane_snapshot.go`)
 
 Five scalar fields (scalars ⇒ `SnapshotCap = 0`, so they do **not** bump the capped
-count literal). `omitempty` on the value fields (an absent field means "CP has not
-set it", the DP keeps its local resolution); the two sentinel bools carry **no**
-`omitempty` so a `false` propagates:
+count literal). **The two sentinel bools are POINTER (`*bool`) presence fields, not
+plain `bool`** — a mixed-version rollout hazard forces this (R1 review, Codex P1): a
+plain `bool` cannot distinguish "an older/rolled-back CP that does not know this field
+and omitted it" from "the CP explicitly set `false`". With `semAlwaysReplace` on a
+plain bool, an old CP's snapshot (fields absent ⇒ decode to `false`) would apply
+`managed=false` to a DP that had a durable **disable** (`managed=true, enabled=false`)
+and silently **re-enable the on-by-default feed** — exactly the rollback regression the
+`configBackup`/AdminSettings side avoids and the §A.5.2 `default_auth_outcome *string`
+precedent (`store.go:756-771`) exists to prevent. Pointers make absence (`nil` ⇒ DP
+keeps its local resolution) distinct from an explicit `false`, and apply with a
+**nil-skip** semantic. The value fields keep `omitempty` (empty string / 0 = "CP has
+not set it" ⇒ skip):
 
 ```go
-SaaSFeedManaged        bool   `json:"saas_feed_managed"`
-SaaSFeedEnabled        bool   `json:"saas_feed_enabled"`
+SaaSFeedManaged        *bool  `json:"saas_feed_managed,omitempty"`   // nil ⇒ absent (keep DP-local); non-nil ⇒ authoritative even when false
+SaaSFeedEnabled        *bool  `json:"saas_feed_enabled,omitempty"`
 SaaSFeedURL            string `json:"saas_feed_url,omitempty"`
 SaaSFeedProtocol       string `json:"saas_feed_protocol,omitempty"`
 SaaSFeedRefreshSeconds int64  `json:"saas_feed_refresh_seconds,omitempty"`
 ```
 
+A **current** CP always sets both pointers (it always knows the resolved
+managed/enabled), so a live fleet always propagates an explicit disable; only a
+pre-F3a / rolled-back CP omits them, and then the DP correctly **falls back to its
+local durable settings** rather than re-enabling. (Alternatively a single versioned
+enclosing `*SaaSFeedConfig` sub-object would carry the same presence signal; the two
+`*bool`s are the minimal change and match the existing per-field registry model.)
+
 - **Capture** in `CurrentConfigSnapshot` (`controlplane_snapshot.go:1048-1132`):
-  `snap.SaaSFeed* = <resolver getters>`.
+  `snap.SaaSFeedManaged = &managed; snap.SaaSFeedEnabled = &enabled;` etc.
 - **Apply** in an `applySnapshot*` function (the traffic/extended-state family,
-  `controlplane_snapshot.go:754-903`): validate then drive the downloader; a
-  URL/protocol change **triggers a node-local refetch**. Not sensitive ⇒ no
-  redaction.
+  `controlplane_snapshot.go:754-903`): **nil pointer ⇒ skip that field (keep DP-local
+  resolution)**; non-nil ⇒ apply (even `false`); validate then drive the downloader; a
+  URL/protocol change **triggers a node-local refetch**. Not sensitive ⇒ no redaction.
 - These are **not** secrets ⇒ they stay out of `redactUnenrolledSnapshot`
   (`controlplane_server.go:171-174`).
 
@@ -249,8 +267,11 @@ Replace the single `saas_feed_url` AdminDurable-only row
         {Struct: "AdminSettings", Field: "SaaSFeedURL"},
         {Struct: "ConfigSnapshot", Field: "SaaSFeedURL", Apply: semSkipIfZero}}},
 // … analogous rows for saas_feed_protocol, saas_feed_managed, saas_feed_enabled,
-//     saas_feed_refresh_seconds (managed/enabled use Apply: semAlwaysReplace since
-//     a false bool must propagate; the value fields use semSkipIfZero).
+//     saas_feed_refresh_seconds. managed/enabled are *bool presence fields with a
+//     NIL-SKIP apply (semNilSkipEmptyWipe-style: nil ⇒ keep DP-local, non-nil ⇒ apply
+//     even false) — NOT semAlwaysReplace, which would let a rolled-back CP's omitted
+//     field re-enable a durably-disabled DP (Codex P1). The value fields use
+//     semSkipIfZero.
 ```
 
 ### A.2.4 Parity-test deltas (`config_surfaces_test.go`)
@@ -523,6 +544,16 @@ generic mirror feature.
 > write-quorum contract (§B.6), mechanically-precise GC roots (§B.10), and time/
 > freshness resilience (§B.11). The **four concerns are separated explicitly** (§B.1):
 > a floor value never implicitly selects a generation for activation.
+>
+> **Post-approval PR-review corrections (Codex P1 ×2, applied to the design doc, no
+> implementation).** (1) **Equivocation must not lower the floor** (§B.6.2/§B.7/§B.8/
+> §B.12 #9): two intact records disagreeing on identity at version `V` still prove the
+> floor is `≥ V`, so the floor is **retained at the shared/max version** and only
+> *content* resume is refused — returning the compiled checkpoint would open a
+> `[checkpoint, V)` rollback window. (2) **Presence-aware CP→DP sentinels** (§A.2.2):
+> the `saas_feed_managed`/`saas_feed_enabled` snapshot fields are `*bool` presence
+> pointers with a nil-skip apply, so a rolled-back/older CP that omits them can never
+> re-enable a DP that had a durable disable.
 
 ## B.1 The four separated concerns (governing model)
 
@@ -532,7 +563,7 @@ hazard.
 
 | Concern | What it decides | Authority | Selection rule |
 |---|---|---|---|
-| **1. Rollback-floor selection** | which future fetches are *accepted* (reject `< floor`) | the floor/commit-intent records + compiled checkpoint | numeric `max` over *valid, compatible, non-equivocating* records (§B.6). **Governs accept/reject only — never selects served content.** |
+| **1. Rollback-floor selection** | which future fetches are *accepted* (reject `< floor`) | the floor/commit-intent records + compiled checkpoint | numeric `max` over **all** *valid, compatible* records (§B.6); equivocation blocks content resume but **does not lower the floor**. **Governs accept/reject only — never selects served content.** |
 | **2. Active-generation selection** | which immutable generation is *served* | the activation record + explicit candidate re-verification | record-driven + digest-re-verified (§B.7). **Never** numeric max, filename order, dir enumeration, or mtime. |
 | **3. Resumable-candidate state** | an in-flight activation to *complete idempotently* after a crash | the commit-intent binding inside the floor record (generation id + digests) | present iff a valid record binds a generation *ahead of* the activation record's active gen (§B.7 floor-ahead). |
 | **4. Live in-memory commit point** | the instant serving *cuts over* | `atomic.Pointer[EffectiveView].Store` | strictly last; a crash before it changes nothing live. |
@@ -647,9 +678,11 @@ binding** (concern 3). It binds enough to detect ambiguity and to safely resume:
   (CRC + structural) and carry the **same `feed_version`** but differ in **any bound
   identity field** — `generation_id`, `generated_at`, `manifest_sha256`, **or**
   `artifact_sha256` (any one difference is sufficient) — recovery treats it as
-  **equivocation/corruption**, does **not** pick one arbitrarily, refuses to advance or
-  resume, emits a **critical** `saas_feed_floor_equivocation` alert + audit event, and
-  falls to the safe floor/content precedence (§B.6/§B.7). Identical records at the same
+  **equivocation/corruption**, does **not** pick one arbitrarily, **refuses to resume
+  either disputed candidate for content**, and emits a **critical**
+  `saas_feed_floor_equivocation` alert + audit event — **but retains the rollback floor
+  at the shared version** (both records prove `≥ V`, so the floor is not lowered;
+  §B.6/§B.7). Identical records at the same
   version (all bound fields equal) are the normal case (both replicas written from the
   same accept) and are idempotent.
 
@@ -744,20 +777,30 @@ selectFloor():
   cands := []                                   // FIXED paths only — no dir scan / mtime
   for src in [floor.a, floor.b, activation_state.floor]:
       if rec, ok := readValidated(src); ok: cands.append(rec)
-  if equivocates(cands):                         // same feed_version, different digests/id/gen_at
-      CRITICAL saas_feed_floor_equivocation; return (COMPILED_MIN_FEED_VERSION, zero)  // fail closed
+  // The floor is the max PROVEN version. Equivocation (same version, different
+  // identity) is a CONTENT ambiguity (§B.7) — it must NOT lower the floor, because
+  // every valid record still proves the floor reached at least its own version.
   floor := (COMPILED_MIN_FEED_VERSION, zero)
   for rec in cands: floor := maxPair(floor, (rec.feed_version, rec.generated_at))
-  return floor
+  if equivocates(cands):                         // same feed_version, different digests/id/gen_at
+      CRITICAL saas_feed_floor_equivocation      // refuse CONTENT resume (§B.7); floor RETAINED
+  return floor                                    // never below the max proven version
 ```
 
 - `maxPair` compares `feed_version`, then `generated_at` at equal version. Numeric max
-  is used **only** across *valid, compatible, non-equivocating* records — it is a floor
-  operation, never a content-selection operation.
-- The floor is unconditionally bounded below by `COMPILED_MIN_FEED_VERSION`; no missing/
-  corrupt combination lowers it below the binary's checkpoint.
-- **Equivocation fails closed** (to the compiled checkpoint + critical signal), rather
-  than arbitrarily trusting one branch.
+  is a **floor** operation over *valid, compatible* records — never a content-selection
+  operation.
+- The floor is unconditionally bounded **below** by `COMPILED_MIN_FEED_VERSION` and,
+  critically, is **never lowered** by equivocation: two intact records that disagree on
+  identity at version `V` still both prove the floor is `≥ V`, so the floor stays at the
+  max proven version (Codex P1 — returning the checkpoint here would drop the floor from
+  `V` to the checkpoint and let a later fetch activate an *older* still-valid signed feed
+  in `[checkpoint, V)`, turning equivocation into a rollback opportunity). Invariant
+  §B.12 #4 ("never lower the floor") governs.
+- **Equivocation fails closed for CONTENT only** (refuse to resume *either* disputed
+  candidate, §B.7; critical signal), while the numeric **floor is retained** at the
+  shared/max version. The checkpoint is the floor **only** when there is no valid record
+  at all — never as a response to equivocation.
 
 ## B.7 Active-generation selection & recovery precedence (concern 2; obligation 7)
 
@@ -785,7 +828,7 @@ Precedence, stated as the review requires — **separately per axis**:
 
 | Axis | Precedence |
 |---|---|
-| **Max trusted rollback floor** | `max` over valid compatible non-equivocating floor records, else compiled checkpoint (§B.6). Equivocation ⇒ checkpoint + critical. |
+| **Max trusted rollback floor** | `max` over **all** valid, compatible floor records (§B.6), else compiled checkpoint when there is no valid record. **Equivocation does NOT lower it** — the floor stays at the max proven version; only content resume is refused (+ critical). |
 | **Resumable candidate** | a floor-ahead, digest-bound generation that **fully re-verifies** — completed idempotently (§B.9). Never selected by number alone. |
 | **Currently active generation** | `activation-state.active_generation`, if it re-verifies. |
 | **Last-known-good generation** | the active generation *is* the LKG until a new activation commits; the retention window (§B.10) keeps the prior N as rollback candidates, but only the record selects what is served. |
@@ -805,7 +848,7 @@ re-verified.
 | After S3, before S4 (both records, no active-gen) | F',G' | F',G' | F | F' | yes (A,B agree) | G(F) then → G' | Same as above; A,B agree so no equivocation. |
 | After S4, before S5 (active-gen committed, no cutover) | F',G' | F',G' | F',G' | F' | (already active=G') | G' | Reboot re-verifies G', serves it. Converged. |
 | **One record has G', other + activation-state have old F** (partial, different versions) | F',G' | F | F | **F'** | yes (the F' record) | G(F) then → G' | Different *versions* ⇒ not equivocation; max=F'; resume G' via its digests. Then rewrite the stale record to F'. |
-| Two records same version F' but **different digests** | F',G'₁ | F',G'₂ | any | **checkpoint** | no (refused) | G(F) or embedded | **Equivocation** → fail closed + `saas_feed_floor_equivocation` critical. Neither branch resumed. |
+| Two records same version F' but **different digests** | F',G'₁ | F',G'₂ | any | **F'** (floor RETAINED) | no (refused) | G(F) or embedded | **Equivocation** → refuse *both* candidate resumes + `saas_feed_floor_equivocation` critical, but floor stays at F' (never dropped to checkpoint — else `[checkpoint,F')` becomes a rollback window). |
 | One record corrupt (CRC), other valid | ✗ | F',G' | F',G' | F' | yes | per record | Corrupt excluded; floor + candidate intact. |
 | Both floor records corrupt, activation-state valid | ✗ | ✗ | F',G' | F' (from activation-state copy) | (active=G') | G' | Floor from the record copy; degraded-records alert. |
 | **Activation record corrupt, both floor records valid (the F0 §9 hole)** | F',G' | F',G' | ✗ | **F'** | yes (floor records bind G') | → G' | **Floor PRESERVED and content RESUMED**: re-verify G' from its bound digests, rebuild the activation record, serve G'. The §9 hole is closed for both floor *and* content. |
@@ -918,9 +961,11 @@ clock** (there is no external trusted-time source — stated explicitly).
    records + the activation record durable before cutover (§B.6.1); any required-write
    failure aborts to the old LKG. An *interruption* leaves a resumable candidate that is
    re-verified before it can serve (§B.9). ∎
-9. **Equivocation fails closed.** Two valid same-version records with different
-   digests/identities ⇒ floor → checkpoint, no candidate resumed, critical signal
-   (§B.3/§B.6/§B.8). Never an arbitrary pick. ∎
+9. **Equivocation fails closed for content, floor retained.** Two valid same-version
+   records with different digests/identities ⇒ **no candidate resumed** + critical
+   signal, but the **rollback floor stays at the shared version** (never dropped to the
+   checkpoint — both records prove `≥ V`, so lowering it would open a `[checkpoint, V)`
+   rollback window; §B.3/§B.6/§B.8). Never an arbitrary pick, never a floor regression. ∎
 10. **Embedded-baseline fallback is explicit and critically observable.** The terminal
     §B.7 step-4 path sets `active_source=embedded`, `signature_status=compiled_trusted`,
     and emits `saas_feed_recovery_degraded` (critical) + audit. ∎
@@ -1029,8 +1074,9 @@ overrides from F3a-1).
   (higher version; same-version newer `generated_at`; same-version older refused —
   replay guard); per-record corruption matrix (bad CRC, truncate, negative version,
   unparseable time, wrong protocol/feed) asserting each is **excluded** from the max;
-  **equivocation** (same version, different digests) ⇒ checkpoint + critical, not an
-  arbitrary pick; three-record corruption ⇒ compiled checkpoint; missing file ⇒
+  **equivocation** (same version, different digests) ⇒ **floor retained at the shared
+  version** (asserted NOT lowered to checkpoint) + content-resume refused + critical,
+  not an arbitrary pick; three-record corruption ⇒ compiled checkpoint; missing file ⇒
   zero-contribution; crash-between-records simulated by writing only `floor.a` then
   selecting (max=F', candidate bound).
 - **Acceptance:** every §B.8 crash-matrix row and §B.12 invariants 4/5/6/7/9 have a
@@ -1156,11 +1202,14 @@ provided constraints 2–4 hold.
    CRC-32C-checksummed (corruption detection, **not** authenticity) and `AtomicWrite`-n.
    The four concerns are separated (floor selection / active-gen selection / resumable
    candidate / live commit point) so a floor number never selects content. Floor =
-   numeric `max` over valid, compatible, **non-equivocating** records + compiled
-   checkpoint; content = record-driven + **digest-re-verified**. Each record binds the
-   candidate `generation_id` + digests, so an S3–S4 interruption is **resumed** (Option
-   1: re-verify the exact immutable generation, complete idempotently). Same-version
-   different-digest records ⇒ **equivocation ⇒ fail closed + critical**. Write quorum:
+   numeric `max` over **all** valid, compatible records + compiled checkpoint; content =
+   record-driven + **digest-re-verified**. Each record binds the candidate
+   `generation_id` + digests, so an S3–S4 interruption is **resumed** (Option 1:
+   re-verify the exact immutable generation, complete idempotently). Same-version
+   different-digest records ⇒ **equivocation ⇒ content resume refused + critical, floor
+   RETAINED at the shared version** (not lowered to the checkpoint — else a rollback
+   window opens; Codex P1). Presence-aware `*bool` sentinels (nil-skip apply) keep a
+   rolled-back CP from re-enabling a durably-disabled DP (Codex P1). Write quorum:
    both records + activation record required for a clean activation (any required-write
    failure aborts to LKG); recovery tolerates ≥1 valid record. Chosen over a two-slot
    journal (**equivalent** safety when two physical files — chosen for simplicity, not
