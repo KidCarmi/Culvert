@@ -14,7 +14,7 @@ const (
 	prefixServer     = "MCP.SERVER"
 	prefixTool       = "MCP.TOOL"
 	prefixPolicy     = "MCP.POLICY"
-	prefixCredential = "MCP.CREDENTIAL"
+	prefixCredential = "MCP.CREDENTIAL" // #nosec G101 -- reason-code domain prefix, not a credential
 	prefixInspection = "MCP.INSPECTION"
 	prefixRate       = "MCP.RATE"
 	prefixSystem     = "MCP.SYSTEM"

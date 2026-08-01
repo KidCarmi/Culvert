@@ -65,9 +65,9 @@ func compileCondition(rc rawCondition, lim Limits) (compiledCond, error) {
 	kind, ok := fieldKinds[rc.Field]
 	attrKey := ""
 	if !ok {
-		// resource.attr:<key> is the one parameterized field family.
-		if k, key, isAttr := resourceAttrField(rc.Field); isAttr {
-			kind, attrKey = k, key
+		// resource.attr:<key> is the one parameterized field family (always string-kind).
+		if key, isAttr := resourceAttrField(rc.Field); isAttr {
+			kind, attrKey = kindString, key
 		} else {
 			return compiledCond{}, condErr("unknown condition field")
 		}

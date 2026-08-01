@@ -171,8 +171,9 @@ runtime listener assertions (load, N-client zero-retention) are implemented, and
 > `property_test.go`, `noio_test.go` (AST import-allowlist + clock-free wall), `input_test.go`. Explain-trace
 > safety/bounds: `engine_test.go` (`TestExplainTrace_SafeAndBounded`). Simulator ≡ same evaluator + blast
 > radius: `simulate_test.go` (`TestSingle_UsesSameEvaluator`, `TestCompare_NewAllowHighlighted`,
-> `TestShadow_Relation`). Runtime decision-only integration (never upstream/credential/broker; ALLOW-class ⇒
-> `execution_state: not_implemented`; missing snapshot fails closed): `internal/mcp/runtime/policy_test.go`.
+> `TestShadow_Relation`). Runtime decision-only integration — never contacts an upstream server, a credential
+> provider, or the broker, an ALLOW-class decision returns an unimplemented execution state, and a missing
+> snapshot fails closed: `internal/mcp/runtime/policy_test.go`.
 > Fuzz: `FuzzCompile`/`FuzzEvaluate`/`FuzzGlob`. `MCP-POLICY-007` (approval UX) is deferred to PR-9.
 
 ### 1a. Requirement-specific coverage (completeness — do not rely on the "Unit | all" row)

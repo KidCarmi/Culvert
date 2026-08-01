@@ -70,7 +70,7 @@ func TestCompile_AllNineActions(t *testing.T) {
 		`{"id":"a5","priority":5,"action":"REQUIRE_CONFIRMATION","reason":"MCP.POLICY.RESOURCE_SCOPE","remediation":"request_confirmation","conditions":[],"obligations":{"confirmation":true}}`,
 		`{"id":"a6","priority":6,"action":"REQUIRE_APPROVAL","reason":"MCP.POLICY.APPROVAL_REQUIRED","remediation":"request_approval","conditions":[],"obligations":{"approval":true,"ticket_required":true}}`,
 		`{"id":"a7","priority":7,"action":"ALLOW_ONCE","reason":"MCP.POLICY.RESOURCE_SCOPE","remediation":"none","conditions":[],"obligations":{"once_call":true,"logging":"standard"}}`,
-		`{"id":"a8","priority":8,"action":"ALLOW_FOR_SESSION","reason":"MCP.POLICY.RESOURCE_SCOPE","remediation":"none","conditions":[],"obligations":{"session":{"ttl_seconds":300,"max_calls":5,"revoke_required":true},"logging":"standard"}}`,
+		`{"id":"a8","priority":8,"action":"ALLOW_FOR_SESSION","reason":"MCP.POLICY.RESOURCE_SCOPE","remediation":"none","conditions":[],"obligations":{"session":{"session_bound":true,"ttl_seconds":300,"max_calls":5,"revoke_required":true},"logging":"standard"}}`,
 		`{"id":"a9","priority":9,"action":"ALLOW_WITH_REDACTION","reason":"MCP.POLICY.RESOURCE_SCOPE","remediation":"none","conditions":[],"obligations":{"redaction":{"profile_ref":"r1","transformed_hash_required":true},"logging":"standard"}}`,
 	}
 	snap := mustCompile(t, gwSnap(strings.Join(rules, ",")))

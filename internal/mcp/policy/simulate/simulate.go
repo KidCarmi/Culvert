@@ -92,6 +92,7 @@ type Comparison struct {
 	ActionChanges       int
 	ReasonChanges       int
 	RuleChanges         int
+	ObligationChanges   int // same action/reason/rule but a different obligation payload
 	NewAllow            int // NEW ALLOW-class decisions (security-sensitive)
 	NewDeny             int
 	NewQuarantine       int
@@ -126,9 +127,14 @@ func (s *Simulator) Compare(oldSnap, newSnap *policy.Snapshot, cases []Case) (Co
 	return cmp, nil
 }
 
-// tally folds one case's old/new decisions into the comparison.
+// tally folds one case's old/new decisions into the comparison. A decision is
+// "changed" if its action, reason, matched rule OR its OBLIGATION payload differs —
+// so a candidate that only weakens an obligation (e.g. a longer session TTL or
+// max-calls, same action/reason/rule) is not silently reported as zero-impact.
 func (s *Simulator) tally(cmp *Comparison, c Case, oldD, newD policy.Decision, affected map[policy.RuleID]struct{}) {
-	changed := oldD.Action != newD.Action || oldD.Reason != newD.Reason || oldD.MatchedRule != newD.MatchedRule
+	oblChanged := !oldD.Obligations.Equal(newD.Obligations)
+	changed := oldD.Action != newD.Action || oldD.Reason != newD.Reason ||
+		oldD.MatchedRule != newD.MatchedRule || oblChanged
 	if !changed {
 		cmp.Unchanged++
 		return
@@ -142,20 +148,10 @@ func (s *Simulator) tally(cmp *Comparison, c Case, oldD, newD policy.Decision, a
 	if oldD.MatchedRule != newD.MatchedRule {
 		cmp.RuleChanges++
 	}
-	// New-decision-class tallies (based on the candidate's action vs the old one).
-	newAllow := newD.IsAllowClass() && !oldD.IsAllowClass()
-	if newAllow {
-		cmp.NewAllow++
+	if oblChanged {
+		cmp.ObligationChanges++
 	}
-	if newD.Action == policy.ActionDeny && oldD.Action != policy.ActionDeny {
-		cmp.NewDeny++
-	}
-	if newD.Action == policy.ActionQuarantine && oldD.Action != policy.ActionQuarantine {
-		cmp.NewQuarantine++
-	}
-	if newD.Action == policy.ActionRequireApproval && oldD.Action != policy.ActionRequireApproval {
-		cmp.NewApprovalRequired++
-	}
+	newAllow := s.tallyNewClasses(cmp, oldD, newD)
 	if newD.MatchedRule != "" {
 		affected[newD.MatchedRule] = struct{}{}
 	}
@@ -170,6 +166,25 @@ func (s *Simulator) tally(cmp *Comparison, c Case, oldD, newD policy.Decision, a
 			OldRule: oldD.MatchedRule, NewRule: newD.MatchedRule, NewAllowClass: newAllow,
 		})
 	}
+}
+
+// tallyNewClasses bumps the new-decision-class counters (candidate action vs old)
+// and reports whether the candidate is a NEW ALLOW-class decision.
+func (s *Simulator) tallyNewClasses(cmp *Comparison, oldD, newD policy.Decision) bool {
+	newAllow := newD.IsAllowClass() && !oldD.IsAllowClass()
+	if newAllow {
+		cmp.NewAllow++
+	}
+	if newD.Action == policy.ActionDeny && oldD.Action != policy.ActionDeny {
+		cmp.NewDeny++
+	}
+	if newD.Action == policy.ActionQuarantine && oldD.Action != policy.ActionQuarantine {
+		cmp.NewQuarantine++
+	}
+	if newD.Action == policy.ActionRequireApproval && oldD.Action != policy.ActionRequireApproval {
+		cmp.NewApprovalRequired++
+	}
+	return newAllow
 }
 
 // aggregate bumps the per-tenant/server/tool changed-case counters (safe ids only).

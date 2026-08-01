@@ -26,7 +26,7 @@ func Compile(raw []byte, meta CreatedMeta, lim Limits) (*Snapshot, error) {
 	if rs.SchemaVersion != schemaVersionV1 {
 		return nil, snapshotErr("unsupported policy schema version")
 	}
-	cap, ok := parseCapability(rs.Capability)
+	capNS, ok := parseCapability(rs.Capability)
 	if !ok {
 		return nil, snapshotErr("missing or invalid capability")
 	}
@@ -41,14 +41,14 @@ func Compile(raw []byte, meta CreatedMeta, lim Limits) (*Snapshot, error) {
 	if len(rs.Rules) > lim.MaxRulesPerSnap() {
 		return nil, snapshotErr("too many rules")
 	}
-	rules, err := compileRules(rs.Rules, cap, lim)
+	rules, err := compileRules(rs.Rules, capNS, lim)
 	if err != nil {
 		return nil, err
 	}
 	sort.Slice(rules, func(i, j int) bool { return rules[i].priority < rules[j].priority })
 	snap := &Snapshot{
 		schemaVersion: rs.SchemaVersion,
-		capability:    cap,
+		capability:    capNS,
 		revision:      Revision(rs.PolicyRevision),
 		description:   rs.Description,
 		rules:         rules,
@@ -62,12 +62,12 @@ func Compile(raw []byte, meta CreatedMeta, lim Limits) (*Snapshot, error) {
 
 // compileRules compiles + validates every rule and enforces uniqueness of RuleID
 // and priority within the capability namespace.
-func compileRules(rrs []rawRule, cap Capability, lim Limits) ([]*Rule, error) {
+func compileRules(rrs []rawRule, capNS Capability, lim Limits) ([]*Rule, error) {
 	rules := make([]*Rule, 0, len(rrs))
 	seenID := make(map[string]struct{}, len(rrs))
 	seenPri := make(map[int]struct{}, len(rrs))
 	for i := range rrs {
-		r, err := compileRule(rrs[i], cap, lim)
+		r, err := compileRule(rrs[i], capNS, lim)
 		if err != nil {
 			return nil, err
 		}
@@ -89,30 +89,10 @@ func ruleErr(detail string) error {
 }
 
 // compileRule validates + compiles one rule.
-func compileRule(rr rawRule, cap Capability, lim Limits) (*Rule, error) {
-	if rr.ID == "" || len(rr.ID) > lim.MaxStringBytes() {
-		return nil, ruleErr("missing or over-long rule id")
-	}
-	if rr.Priority <= 0 {
-		return nil, ruleErr("rule priority must be positive")
-	}
-	action, ok := ParseAction(rr.Action)
-	if !ok {
-		return nil, ruleErr("malformed or unknown action")
-	}
-	// Management rules are limited to the V1-legal action set (ALLOW/DENY/
-	// REQUIRE_APPROVAL); no ordinary Management rule may permit-once/for-session/
-	// with-redaction/monitor/quarantine/confirm.
-	if cap == CapManagement && !managementLegalAction(action) {
-		return nil, ruleErr("action not legal for a Management rule (V1: ALLOW/DENY/REQUIRE_APPROVAL)")
-	}
-	reason := ReasonCode(rr.Reason)
-	if !reason.Valid() {
-		return nil, ruleErr("malformed reason code")
-	}
-	rem := Remediation(rr.Remediation)
-	if !rem.Valid() {
-		return nil, ruleErr("malformed or unknown remediation code")
+func compileRule(rr rawRule, capNS Capability, lim Limits) (*Rule, error) {
+	action, reason, rem, err := compileRuleHeader(rr, capNS, lim)
+	if err != nil {
+		return nil, err
 	}
 	if len(rr.Conditions) > lim.MaxConditions() {
 		return nil, ruleErr("too many conditions")
@@ -133,7 +113,7 @@ func compileRule(rr rawRule, cap Capability, lim Limits) (*Rule, error) {
 	if rr.AllowDestructive && action != ActionAllowOnce && action != ActionAllowForSession {
 		return nil, ruleErr("allow_destructive requires a bounded action (ALLOW_ONCE or ALLOW_FOR_SESSION)")
 	}
-	if err := obl.validateFor(action, cap, rr.AllowDestructive); err != nil {
+	if err := obl.validateFor(action, capNS, rr.AllowDestructive); err != nil {
 		return nil, err
 	}
 	enabled := rr.Enabled == nil || *rr.Enabled
@@ -151,6 +131,36 @@ func compileRule(rr rawRule, cap Capability, lim Limits) (*Rule, error) {
 		allowDestructive: rr.AllowDestructive,
 		rawKey:           canonicalRuleKey(rr, action, reason, rem, obl),
 	}, nil
+}
+
+// compileRuleHeader validates a rule's id/priority/action/reason/remediation and
+// the Management-legal-action constraint, returning the parsed typed values.
+func compileRuleHeader(rr rawRule, capNS Capability, lim Limits) (Action, ReasonCode, Remediation, error) {
+	if rr.ID == "" || len(rr.ID) > lim.MaxStringBytes() {
+		return ActionInvalid, "", "", ruleErr("missing or over-long rule id")
+	}
+	if rr.Priority <= 0 {
+		return ActionInvalid, "", "", ruleErr("rule priority must be positive")
+	}
+	action, ok := ParseAction(rr.Action)
+	if !ok {
+		return ActionInvalid, "", "", ruleErr("malformed or unknown action")
+	}
+	// Management rules are limited to the V1-legal action set (ALLOW/DENY/
+	// REQUIRE_APPROVAL); no ordinary Management rule may permit-once/for-session/
+	// with-redaction/monitor/quarantine/confirm.
+	if capNS == CapManagement && !managementLegalAction(action) {
+		return ActionInvalid, "", "", ruleErr("action not legal for a Management rule (V1: ALLOW/DENY/REQUIRE_APPROVAL)")
+	}
+	reason := ReasonCode(rr.Reason)
+	if !reason.Valid() {
+		return ActionInvalid, "", "", ruleErr("malformed reason code")
+	}
+	rem := Remediation(rr.Remediation)
+	if !rem.Valid() {
+		return ActionInvalid, "", "", ruleErr("malformed or unknown remediation code")
+	}
+	return action, reason, rem, nil
 }
 
 // buildObligations translates the raw obligation shape into the typed Obligations.
@@ -232,13 +242,41 @@ func canonicalRuleKey(rr rawRule, action Action, reason ReasonCode, rem Remediat
 	b.WriteString(";rem=" + string(rem))
 	b.WriteString(";exp=" + strconv.FormatInt(rr.ExpiryUnix, 10))
 	b.WriteString(";dst=" + strconv.FormatBool(rr.AllowDestructive))
-	b.WriteString(";obl=" + strings.Join(sortedCopy(obl.IDs()), ","))
+	b.WriteString(";obl=" + canonicalObligations(obl))
 	conds := make([]string, 0, len(rr.Conditions))
 	for _, c := range rr.Conditions {
 		conds = append(conds, canonicalCondKey(c))
 	}
 	sort.Strings(conds)
 	b.WriteString(";cnd=[" + strings.Join(conds, "|") + "]")
+	return b.String()
+}
+
+// canonicalObligations serializes the FULL obligation payload (not just IDs) into a
+// stable key so two rules whose grants differ only in a session TTL/max-calls/
+// binding/revocation or a redaction attestation flag hash differently — the
+// snapshot hash must distinguish materially different authorization constraints.
+func canonicalObligations(o Obligations) string {
+	var b strings.Builder
+	b.WriteString("log=" + o.Logging.String())
+	b.WriteString(";obs=" + o.Observation.String())
+	b.WriteString(";rate=" + o.RateLimitProfile)
+	b.WriteString(";dest=" + o.Destination.String())
+	b.WriteString(";cred=" + o.CredentialProfile)
+	b.WriteString(";once=" + strconv.FormatBool(o.OnceCall))
+	b.WriteString(";conf=" + strconv.FormatBool(o.Confirmation))
+	b.WriteString(";appr=" + strconv.FormatBool(o.Approval))
+	b.WriteString(";tick=" + strconv.FormatBool(o.TicketRequired))
+	if o.Session != nil {
+		s := o.Session
+		b.WriteString(";sess=" + strconv.FormatBool(s.SessionBound) + "/" +
+			strconv.Itoa(s.TTLSeconds) + "/" + strconv.Itoa(s.MaxCalls) + "/" +
+			strconv.FormatBool(s.RevokeRequired))
+	}
+	if o.Redaction != nil {
+		b.WriteString(";red=" + o.Redaction.ProfileRef + "/" +
+			strconv.FormatBool(o.Redaction.TransformedHashRequired))
+	}
 	return b.String()
 }
 

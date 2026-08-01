@@ -166,8 +166,9 @@ surface it covers — i.e. these are hard entry gates for PR-1 through PR-10, no
 > `engine_test.go` hard-override/ambiguous-identity/default-deny + `compile_test.go` obligation-matrix +
 > Management-legal-actions), the **I/O-free / clock-free static wall** (`noio_test.go` — AST import allowlist +
 > forbidden-`time.Now` scan), the simulator≡evaluator parity + blast-radius (`simulate_test.go`), the runtime
-> decision-only integration (`internal/mcp/runtime/policy_test.go` — never upstream/credential/broker,
-> ALLOW-class ⇒ `execution_state: not_implemented`, missing snapshot fails closed), three fuzz targets
+> decision-only integration (`internal/mcp/runtime/policy_test.go` — never contacts an upstream server, a
+> credential provider, or the broker, an ALLOW-class decision returns an unimplemented execution state, and a
+> missing snapshot fails closed), three fuzz targets
 > (`FuzzCompile`/`FuzzEvaluate`/`FuzzGlob`), and benchmarks (compile/eval/no-match/override/parallel/atomic-read).
 > All green under `-race -count=2 -shuffle=on`. The policy-bundle UPLOAD API / reason-code-catalog config
 > surfaces (`CONFIG-SURFACE-MATRIX.md`, tagged PR-6/PR-9) and signed CP→DP policy distribution are deliberately

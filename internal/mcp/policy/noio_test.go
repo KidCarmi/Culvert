@@ -4,7 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io/fs"
+	"os"
 	"strings"
 	"testing"
 )
@@ -47,43 +47,61 @@ var forbiddenCalls = map[string]bool{
 // allowlist, and no forbidden call (headline: time.Now) appears anywhere in the
 // package source.
 func TestNoIO_ImportsAndClock(t *testing.T) {
-	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, ".", func(fi fs.FileInfo) bool {
-		return !strings.HasSuffix(fi.Name(), "_test.go")
-	}, 0)
+	entries, err := os.ReadDir(".")
 	if err != nil {
-		t.Fatalf("parse policy package: %v", err)
+		t.Fatalf("read policy package dir: %v", err)
 	}
-	if len(pkgs) == 0 {
+	fset := token.NewFileSet()
+	scanned := 0
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		scanned++
+		checkImports(t, name, file)
+		checkForbiddenCalls(t, name, file)
+	}
+	if scanned == 0 {
 		t.Fatal("no non-test Go files found in the policy package")
 	}
-	for _, pkg := range pkgs {
-		for path, file := range pkg.Files {
-			for _, imp := range file.Imports {
-				p := strings.Trim(imp.Path.Value, `"`)
-				if !allowedImports[p] {
-					t.Errorf("%s imports %q which is NOT on the I/O-free allowlist", path, p)
-				}
-			}
-			ast.Inspect(file, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				sel, ok := call.Fun.(*ast.SelectorExpr)
-				if !ok {
-					return true
-				}
-				pkgIdent, ok := sel.X.(*ast.Ident)
-				if !ok {
-					return true
-				}
-				name := pkgIdent.Name + "." + sel.Sel.Name
-				if forbiddenCalls[name] {
-					t.Errorf("%s calls %s — forbidden on the I/O-free / clock-free evaluation path", path, name)
-				}
-				return true
-			})
+}
+
+// checkImports asserts every import of one file is on the I/O-free allowlist.
+func checkImports(t *testing.T, path string, file *ast.File) {
+	t.Helper()
+	for _, imp := range file.Imports {
+		p := strings.Trim(imp.Path.Value, `"`)
+		if !allowedImports[p] {
+			t.Errorf("%s imports %q which is NOT on the I/O-free allowlist", path, p)
 		}
 	}
+}
+
+// checkForbiddenCalls asserts one file makes no forbidden (clock/I/O) call.
+func checkForbiddenCalls(t *testing.T, path string, file *ast.File) {
+	t.Helper()
+	ast.Inspect(file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		pkgIdent, ok := sel.X.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		name := pkgIdent.Name + "." + sel.Sel.Name
+		if forbiddenCalls[name] {
+			t.Errorf("%s calls %s — forbidden on the I/O-free / clock-free evaluation path", path, name)
+		}
+		return true
+	})
 }

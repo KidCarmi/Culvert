@@ -36,6 +36,13 @@ func NewEngine(lim Limits) *Engine { return &Engine{lim: lim} }
 //  11. default deny                 → DENY  MCP.POLICY.NO_MATCH_DEFAULT_DENY
 func (e *Engine) Evaluate(snap *Snapshot, in *DecisionInput) (Decision, ExplainTrace, error) {
 	tb := newTraceBuilder(e.lim.MaxTraceEntries())
+	if in == nil {
+		// A nil tuple is a caller/programming error, not a policy no-match: fail closed
+		// with a typed invalid-input error and never dereference it.
+		d := hard(ActionDeny, ReasonInvalidInput, RemediationNotPermitted, &DecisionInput{}, nil)
+		tb.add(TraceInputInvalid, "", "", false, "nil decision input")
+		return d, tb.finishOverride(d), inputErr("nil decision input")
+	}
 	if snap == nil {
 		d := failClosed(ActionDeny, ReasonSnapshotUnavailable, RemediationWaitForPolicyPublication, in, 0)
 		return d, tb.finish(d, ""), mcperr.New(mcperr.ReasonPolicySnapshotInvalid, "policy.evaluate", "no policy snapshot")
@@ -56,9 +63,19 @@ func (e *Engine) Evaluate(snap *Snapshot, in *DecisionInput) (Decision, ExplainT
 	return e.matchRules(snap, in, tb)
 }
 
-// hardOverride evaluates the hard security overrides in precedence order. It
-// returns (decision, true) when one fires, else (_, false).
+// hardOverride evaluates the hard security overrides in precedence order (subject-
+// level first, then server/tool). It returns (decision, true) when one fires, else
+// (_, false). Splitting the two bands keeps each helper simple and the precedence
+// explicit — subject/tenant/Management overrides dominate server/tool ones.
 func (e *Engine) hardOverride(snap *Snapshot, in *DecisionInput, tb *traceBuilder) (Decision, bool) {
+	if d, ok := e.subjectOverride(snap, in, tb); ok {
+		return d, true
+	}
+	return e.serverToolOverride(snap, in, tb)
+}
+
+// subjectOverride evaluates the tenant/identity/Management-mutation overrides.
+func (e *Engine) subjectOverride(snap *Snapshot, in *DecisionInput, tb *traceBuilder) (Decision, bool) {
 	// 3. Cross-tenant resource reference.
 	if in.Resource != nil && in.Resource.Tenant != "" && in.Resource.Tenant != in.Principal.Tenant {
 		tb.add(TraceHardOverride, "", "resource.tenant", false, "cross-tenant resource reference")
@@ -74,6 +91,11 @@ func (e *Engine) hardOverride(snap *Snapshot, in *DecisionInput, tb *traceBuilde
 		tb.add(TraceHardOverride, "", "operation.class", false, "Management mutation/activation is not permitted in V1")
 		return hard(ActionDeny, ReasonManagementMutationNotApproved, RemediationNotPermitted, in, snap), true
 	}
+	return Decision{}, false
+}
+
+// serverToolOverride evaluates the Gateway server + tool fail-closed overrides.
+func (e *Engine) serverToolOverride(snap *Snapshot, in *DecisionInput, tb *traceBuilder) (Decision, bool) {
 	// 6/7. Server-level fail-closed (Gateway).
 	if in.Server != nil {
 		if in.Server.Verification == ServerIdentityMismatch || in.Tool != nil && in.Tool.Drift == DriftIdentityChange {
@@ -85,11 +107,14 @@ func (e *Engine) hardOverride(snap *Snapshot, in *DecisionInput, tb *traceBuilde
 			return hard(ActionDeny, ReasonServerDisabled, RemediationVerifyServerIdentity, in, snap), true
 		}
 	}
-	// 8/9. Tool-level quarantine overrides.
+	// 8/9. Tool-level quarantine overrides. A quarantined disposition is an
+	// authoritative catalog signal and quarantines INDEPENDENT of drift — it is not
+	// shadowed by the input validator's drift requirement, so a catalog-quarantined
+	// tool (which carries an unresolved drift class) still fails closed here.
 	if in.Tool != nil {
 		switch {
-		case in.Tool.Drift == DriftUnknownTool || in.Tool.Disposition == DispQuarantined && in.Tool.Drift == DriftUnset:
-			tb.add(TraceHardOverride, "", "tool.drift", false, "unknown tool")
+		case in.Tool.Drift == DriftUnknownTool || in.Tool.Disposition == DispQuarantined:
+			tb.add(TraceHardOverride, "", "tool.drift", false, "unknown or quarantined tool")
 			return hard(ActionQuarantine, ReasonToolUnknown, RemediationReviewToolDrift, in, snap), true
 		case in.Tool.Drift == DriftPrivilegeExpansion:
 			tb.add(TraceHardOverride, "", "tool.drift", false, "privilege expansion")

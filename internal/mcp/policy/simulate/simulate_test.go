@@ -105,15 +105,15 @@ func TestSingle_NoSideEffects(t *testing.T) {
 func TestCorpus_Bounded(t *testing.T) {
 	snap := gwSnap(t, allowRead)
 	sim := New(policy.DefaultLimits())
-	max := policy.DefaultLimits().MaxSimCases()
-	cases := make([]Case, max+1)
+	maxCases := policy.DefaultLimits().MaxSimCases()
+	cases := make([]Case, maxCases+1)
 	for i := range cases {
 		cases[i] = Case{ID: itoa(i), Input: gwInput("read_file")}
 	}
 	if _, err := sim.Corpus(snap, cases); err == nil {
 		t.Fatal("over-limit corpus must be rejected")
 	}
-	if res, err := sim.Corpus(snap, cases[:max]); err != nil || len(res) != max {
+	if res, err := sim.Corpus(snap, cases[:maxCases]); err != nil || len(res) != maxCases {
 		t.Fatalf("at-limit corpus: err=%v len=%d", err, len(res))
 	}
 }
@@ -171,6 +171,35 @@ func TestCompare_NewDeny(t *testing.T) {
 	cmp, _ := sim.Compare(oldSnap, newSnap, cases)
 	if cmp.NewDeny != 1 || cmp.NewAllow != 0 {
 		t.Fatalf("expected a NewDeny, got newDeny=%d newAllow=%d", cmp.NewDeny, cmp.NewAllow)
+	}
+}
+
+// TestCompare_ObligationOnlyChange: a candidate that keeps the same action/reason/
+// rule but weakens an obligation (longer session TTL) is NOT reported as zero-impact
+// — it is counted as a changed decision with an obligation change + a sample.
+func TestCompare_ObligationOnlyChange(t *testing.T) {
+	sessRule := func(ttl string) string {
+		return `{"id":"S","priority":1,"action":"ALLOW_FOR_SESSION","reason":"MCP.POLICY.RESOURCE_SCOPE","remediation":"none","conditions":[{"field":"tool.name","op":"exact","value":"read_file"}],"obligations":{"session":{"session_bound":true,"ttl_seconds":` + ttl + `,"max_calls":5,"revoke_required":true},"logging":"standard"}}`
+	}
+	oldSnap := gwSnap(t, sessRule("300"))
+	newSnap := gwSnap(t, sessRule("86400")) // materially broader grant, same action/reason/rule
+	cases := []Case{{ID: "read", Input: gwInput("read_file")}}
+	sim := New(policy.DefaultLimits())
+	cmp, err := sim.Compare(oldSnap, newSnap, cases)
+	if err != nil {
+		t.Fatalf("compare: %v", err)
+	}
+	if cmp.Unchanged != 0 {
+		t.Fatalf("obligation-only change must not be counted as unchanged: %+v", cmp)
+	}
+	if cmp.ObligationChanges != 1 {
+		t.Fatalf("ObligationChanges = %d, want 1", cmp.ObligationChanges)
+	}
+	if cmp.ActionChanges != 0 || cmp.ReasonChanges != 0 || cmp.RuleChanges != 0 {
+		t.Fatalf("only the obligation changed: %+v", cmp)
+	}
+	if len(cmp.Samples) != 1 {
+		t.Fatalf("obligation change must produce a sample, got %d", len(cmp.Samples))
 	}
 }
 

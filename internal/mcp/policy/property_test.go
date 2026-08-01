@@ -156,7 +156,7 @@ func allowClassObligation(a Action) string {
 	case ActionAllowOnce:
 		return `,"obligations":{"once_call":true,"logging":"standard"}`
 	case ActionAllowForSession:
-		return `,"obligations":{"session":{"ttl_seconds":300,"max_calls":5,"revoke_required":true},"logging":"standard"}`
+		return `,"obligations":{"session":{"session_bound":true,"ttl_seconds":300,"max_calls":5,"revoke_required":true},"logging":"standard"}`
 	case ActionAllowWithRedaction:
 		return `,"obligations":{"redaction":{"profile_ref":"r1","transformed_hash_required":true},"logging":"standard"}`
 	case ActionRequireApproval:

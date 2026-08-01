@@ -234,16 +234,18 @@ func credStr(in *DecisionInput, f func(*CredentialMeta) string) (string, bool) {
 	return present(f(in.Credential))
 }
 
-// resourceAttrField recognises the "resource.attr:<key>" parameterized field.
-func resourceAttrField(field string) (fieldKind, string, bool) {
+// resourceAttrField recognises the "resource.attr:<key>" parameterized field and
+// returns its <key>. Every attribute is a string-kind field, so the caller assumes
+// kindString on a match.
+func resourceAttrField(field string) (string, bool) {
 	const p = "resource.attr:"
 	if strings.HasPrefix(field, p) {
 		key := field[len(p):]
 		if key != "" {
-			return kindString, key, true
+			return key, true
 		}
 	}
-	return 0, "", false
+	return "", false
 }
 
 // resourceAttr reads a bounded resource scope attribute (absent → not present).

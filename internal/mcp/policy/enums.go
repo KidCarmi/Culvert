@@ -170,6 +170,12 @@ const (
 	DispUsable
 )
 
+// Valid reports whether the disposition is a real catalog eligibility (never the
+// zero value, never an out-of-range value). Used by input validation so a hostile
+// tuple carrying an unknown disposition fails closed rather than slipping past the
+// hard-override switch.
+func (d Disposition) Valid() bool { return d >= DispQuarantined && d <= DispUsable }
+
 // String returns the disposition label.
 func (d Disposition) String() string {
 	switch d {
@@ -207,6 +213,12 @@ const (
 	// DriftUnknownTool — no prior record for this (server, tool).
 	DriftUnknownTool
 )
+
+// Valid reports whether the drift class is a real classification (never an
+// out-of-range value). DriftUnset is intentionally NOT valid: an input carries a
+// concrete drift class unless the tool is quarantined (handled explicitly by input
+// validation).
+func (d DriftClass) Valid() bool { return d >= DriftNoMaterialChange && d <= DriftUnknownTool }
 
 // String returns the drift-class label.
 func (d DriftClass) String() string {
@@ -377,6 +389,11 @@ const (
 	// ServerIdentityMismatch — a later verified identity did not match the pin.
 	ServerIdentityMismatch
 )
+
+// Valid reports whether the verification state is a real value (never the unset
+// zero value, never out-of-range). Input validation requires it so a hostile tuple
+// carrying an unknown verification state cannot masquerade as a verified server.
+func (s ServerVerification) Valid() bool { return s == ServerVerified || s == ServerIdentityMismatch }
 
 // String returns the server-verification label.
 func (s ServerVerification) String() string {

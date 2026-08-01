@@ -6,20 +6,20 @@ package policy
 // stops appending (deterministic truncation) so a hostile snapshot cannot grow the
 // trace without bound.
 type traceBuilder struct {
-	max       int
+	limit     int
 	entries   []TraceEntry
 	truncated bool
 }
 
-func newTraceBuilder(max int) *traceBuilder {
-	if max < 1 {
-		max = 1
+func newTraceBuilder(limit int) *traceBuilder {
+	if limit < 1 {
+		limit = 1
 	}
-	return &traceBuilder{max: max}
+	return &traceBuilder{limit: limit}
 }
 
 func (tb *traceBuilder) add(kind TraceKind, ruleID RuleID, condID string, matched bool, label string) {
-	if len(tb.entries) >= tb.max {
+	if len(tb.entries) >= tb.limit {
 		tb.truncated = true
 		return
 	}

@@ -235,8 +235,11 @@ func (in DecisionInput) validateCapabilityRefs(lim Limits) error {
 	if in.Server == nil || in.Server.ServerID == "" {
 		return inputErr("Gateway input requires a server")
 	}
-	if in.Server.Verification == ServerVerifyUnset {
-		return inputErr("Gateway server verification state is unset")
+	// The verification state must be a REAL value (not unset, not out-of-range): a
+	// hostile tuple with an unknown verification enum must never masquerade as a
+	// verified server and slip past the server-identity hard override.
+	if !in.Server.Verification.Valid() {
+		return inputErr("Gateway server verification state is unset or invalid")
 	}
 	// A tool operation (not pure discovery) requires a bound, fingerprinted tool.
 	if in.Operation.Class == OpDiscovery && in.Tool == nil {
@@ -245,22 +248,41 @@ func (in DecisionInput) validateCapabilityRefs(lim Limits) error {
 	if in.Tool == nil {
 		return inputErr("Gateway tool operation requires a resolved tool")
 	}
-	if in.Tool.Name == "" {
+	return in.validateGatewayTool(lim)
+}
+
+// validateGatewayTool validates the resolved Gateway tool. Every catalog-derived
+// enum must be a REAL value so a hostile out-of-range disposition/drift cannot slip
+// past the hard-override switch (which recognises only defined values) and reach a
+// broad ALLOW rule — the tuple fails closed instead.
+func (in DecisionInput) validateGatewayTool(lim Limits) error {
+	t := in.Tool
+	if t.Name == "" {
 		return inputErr("Gateway tool requires a name")
 	}
-	if in.Tool.ServerID != in.Server.ServerID {
+	if t.ServerID != in.Server.ServerID {
 		return inputErr("tool is not bound to the selected server")
 	}
-	if in.Tool.Disposition == DispUnset || in.Tool.Drift == DriftUnset {
-		return inputErr("Gateway tool requires a catalog disposition and drift class")
+	if !t.Disposition.Valid() {
+		return inputErr("Gateway tool requires a valid catalog disposition")
 	}
-	// An UNKNOWN tool (absent from the catalog) legitimately has no fingerprint — it
-	// is a valid decision tuple defined by its unknown-ness, and the engine's hard
-	// override quarantines it. A KNOWN tool must always carry its catalog fingerprint.
-	if in.Tool.Drift != DriftUnknownTool && in.Tool.FingerprintHash == "" {
+	// A QUARANTINED tool is defined by its quarantine and legitimately carries an
+	// unresolved drift class (DriftUnset) — the engine quarantines it regardless. Any
+	// OTHER disposition requires a concrete, valid drift class.
+	if t.Disposition != DispQuarantined && !t.Drift.Valid() {
+		return inputErr("Gateway tool requires a valid drift class")
+	}
+	if t.Disposition == DispQuarantined && t.Drift != DriftUnset && !t.Drift.Valid() {
+		return inputErr("Gateway tool has an invalid drift class")
+	}
+	// A fingerprint is required for a KNOWN, non-quarantined tool. An UNKNOWN tool
+	// (absent from the catalog) or a QUARANTINED tool is exempt — both can only be
+	// denied/quarantined by the engine, never allowed, so the missing fingerprint is
+	// not a permit vector.
+	if t.Disposition != DispQuarantined && t.Drift != DriftUnknownTool && t.FingerprintHash == "" {
 		return inputErr("missing fingerprint for a Gateway tool")
 	}
-	if len(in.Tool.RiskSignals) > lim.MaxSetValues() {
+	if len(t.RiskSignals) > lim.MaxSetValues() {
 		return inputErr("too many tool risk signals")
 	}
 	return nil
