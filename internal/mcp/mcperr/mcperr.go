@@ -256,6 +256,38 @@ const (
 	ReasonMaterialAlreadyConsumed
 	// ReasonCredentialKindUnsupported — the plan's credential kind is not supported.
 	ReasonCredentialKindUnsupported
+
+	// ── PR-5 runtime / listener reasons ───────────────────────────────────────
+
+	// ReasonListenerDisabled — an MCP listener is disabled (off by default).
+	ReasonListenerDisabled
+	// ReasonHTTPMethodRejected — an HTTP method is not accepted (terminal 405: GET
+	// without a negotiated session, DELETE, or any unsupported method). No stream is
+	// allocated and no session state is mutated.
+	ReasonHTTPMethodRejected
+	// ReasonHostRejected — the request Host / :authority is not on the listener's
+	// allowlist (evaluated per request and per HTTP/2 stream).
+	ReasonHostRejected
+	// ReasonOriginRejected — the request Origin is missing (where required), malformed,
+	// or not allowlisted.
+	ReasonOriginRejected
+	// ReasonAdmissionRejected — the listener refused admission before expensive work
+	// (connection / concurrency / queue / session / rate budget exhausted).
+	ReasonAdmissionRejected
+	// ReasonObserveOnly — a decision-point method (tools/list, tools/call) reached a
+	// listener that runs in observe mode only: no policy engine, credential broker or
+	// upstream exists yet, so the request is deterministically rejected (never a
+	// fabricated success).
+	ReasonObserveOnly
+	// ReasonTLSRequired — a non-test deployment requires TLS but none was configured,
+	// or an mTLS-required listener did not receive a verified peer certificate.
+	ReasonTLSRequired
+	// ReasonListenerConfigInvalid — a listener configuration is unsafe (zero/negative/
+	// wildcard/conflicting address or port, shared mutable limits, missing TLS).
+	ReasonListenerConfigInvalid
+	// ReasonRequestDeadlineExceeded — a request exceeded its bounded deadline
+	// (slowloris / trickle / handshake stall defense).
+	ReasonRequestDeadlineExceeded
 )
 
 // reasonCode maps each Reason to its stable machine string. The strings are part
@@ -337,6 +369,16 @@ var reasonCode = map[Reason]string{ // #nosec G101 -- stable machine-readable er
 	ReasonMaterializationGateUnavailable: "materialization_gate_unavailable",
 	ReasonMaterialAlreadyConsumed:        "material_already_consumed",
 	ReasonCredentialKindUnsupported:      "credential_kind_unsupported",
+
+	ReasonListenerDisabled:        "listener_disabled",
+	ReasonHTTPMethodRejected:      "http_method_rejected",
+	ReasonHostRejected:            "host_rejected",
+	ReasonOriginRejected:          "origin_rejected",
+	ReasonAdmissionRejected:       "admission_rejected",
+	ReasonObserveOnly:             "observe_only",
+	ReasonTLSRequired:             "tls_required",
+	ReasonListenerConfigInvalid:   "listener_config_invalid",
+	ReasonRequestDeadlineExceeded: "request_deadline_exceeded",
 }
 
 // Code returns the stable machine string for the reason (e.g. "malformed_json").

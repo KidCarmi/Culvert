@@ -7,6 +7,15 @@ repository today (**[FACT]** grep for an MCP/JSON-RPC listener returns zero hits
 [`VERIFIED-REPOSITORY-CONTEXT.md`](VERIFIED-REPOSITORY-CONTEXT.md)). Nothing in this document should be
 read as describing shipped behavior.
 
+> **PR-5 note (Observe runtime shipped; config surface still PROPOSED).** PR-5 lands
+> `internal/mcp/runtime` — the dedicated Gateway/Management listeners, bounded pools and observe pipeline —
+> **wired into `package main` DISABLED BY DEFAULT** (`initMCPRuntime`, always-off). PR-5 deliberately ships
+> **NO config surface**: no `-mcp-*` CLI flag, no `mcp.*` YAML key, no `CULVERT_MCP_*` env var, and no
+> admin API/GUI. Every `mcp_*` row below therefore remains **PROPOSED (PR-9)** — the enable/bind/port/
+> allowlist settings and their API+GUI parity are a later slice — so this matrix's anti-drift inventory is
+> **unchanged** by PR-5 (no new registered config field). The listener's runtime bounds are validated in-code
+> (`internal/mcp/runtime/limits.go`, `config.go`) at construction, not via any persisted config surface.
+
 ## Purpose
 
 This matrix exists so that **no MCP configuration field is ever proposed, reviewed, or implemented

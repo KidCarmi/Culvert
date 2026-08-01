@@ -1,0 +1,188 @@
+package runtime
+
+import (
+	"strings"
+	"time"
+
+	"github.com/KidCarmi/Culvert/internal/mcp/authn"
+	"github.com/KidCarmi/Culvert/internal/mcp/identity"
+	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
+	"github.com/KidCarmi/Culvert/internal/mcp/protocol"
+	"github.com/KidCarmi/Culvert/internal/mcp/registry"
+	"github.com/KidCarmi/Culvert/internal/mcp/session"
+)
+
+// parseCredential extracts the bearer credential from the request headers ONLY,
+// enforcing the location and duplication rules the listener owns before any PR-3
+// token validation:
+//
+//   - a token presented in the query string is a forbidden location (rejected as
+//     credential_in_query) — checked first, so it can never be silently ignored;
+//   - more than one Authorization header is ambiguous/conflicting and rejected;
+//   - the single header must carry a well-formed "Bearer <token>" or "DPoP <token>"
+//     scheme; any other/malformed scheme is rejected;
+//   - an absent credential where one is required is rejected.
+//
+// It never returns or logs the raw token beyond placing it in the Credential the
+// PR-3 validator consumes.
+func parseCredential(req Request) (authn.Credential, error) {
+	if req.BearerInQuery {
+		return authn.Credential{}, mcperr.New(mcperr.ReasonCredentialInQuery, "runtime.auth", "bearer credential presented in the query string is forbidden")
+	}
+	if len(req.AuthorizationHeaders) > 1 {
+		return authn.Credential{}, mcperr.New(mcperr.ReasonCredentialMissing, "runtime.auth", "multiple Authorization headers (ambiguous credential source)")
+	}
+	if len(req.AuthorizationHeaders) == 0 {
+		return authn.Credential{}, mcperr.New(mcperr.ReasonCredentialMissing, "runtime.auth", "no Authorization header")
+	}
+	raw := strings.TrimSpace(req.AuthorizationHeaders[0])
+	scheme, token, ok := splitScheme(raw)
+	if !ok {
+		return authn.Credential{}, mcperr.New(mcperr.ReasonCredentialMissing, "runtime.auth", "malformed Authorization header (no scheme/token)")
+	}
+	switch strings.ToLower(scheme) {
+	case "bearer", "dpop":
+		// ok — both are header-location credentials; the sender-constraint profile
+		// (PR-3) decides whether a DPoP proof is required, not the scheme label.
+	default:
+		return authn.Credential{}, mcperr.New(mcperr.ReasonUnsupportedTokenType, "runtime.auth", "unsupported Authorization scheme")
+	}
+	if token == "" {
+		return authn.Credential{}, mcperr.New(mcperr.ReasonCredentialMissing, "runtime.auth", "empty credential token")
+	}
+	return authn.Credential{Location: authn.LocationAuthorizationHeader, Type: guessTokenType(token), Token: token}, nil
+}
+
+// splitScheme splits "Scheme token" into its two parts. It requires exactly one
+// separating run of spaces and a non-empty scheme; a bare token with no scheme is
+// not a valid Authorization value.
+func splitScheme(v string) (scheme, token string, ok bool) {
+	i := strings.IndexByte(v, ' ')
+	if i <= 0 {
+		return "", "", false
+	}
+	scheme = v[:i]
+	token = strings.TrimSpace(v[i+1:])
+	return scheme, token, true
+}
+
+// guessTokenType classifies a credential by shape: a compact JWT is exactly three
+// non-empty dot-separated segments; anything else is treated as opaque and
+// validated via introspection. The PR-3 validator re-checks the shape, so a
+// mis-guess fails closed rather than bypassing validation.
+func guessTokenType(token string) authn.TokenType {
+	parts := strings.Split(token, ".")
+	if len(parts) == 3 && parts[0] != "" && parts[1] != "" && parts[2] != "" {
+		return authn.TokenJWT
+	}
+	return authn.TokenOpaque
+}
+
+// authenticate runs the PR-3 authentication pipeline for one request and binds the
+// resolved identity to the session (one-identity-per-session). Because the observe
+// listener has no out-of-band principal-assertion channel, it derives the asserted
+// principals (subject/client/tenant) from the cryptographically-validated token
+// claims and then calls authn.Authenticate, which re-validates the token and
+// cross-checks those principals against it. This DOUBLE token validation reuses the
+// PR-3 APIs verbatim (ValidateJWT/ValidateOpaque + Authenticate) and duplicates no
+// JWT/opaque/DPoP/mTLS logic.
+//
+// The observed mTLS thumbprint is passed as an EXPLICIT binding derived by the
+// listener from the verified peer certificate; a client-supplied thumbprint header
+// is never trusted and no private-key material is ever passed. On success the
+// immutable identity is bound to the session; a second, DIFFERENT identity on the
+// same session is rejected (the binding is immutable).
+func (p *pipeline) authenticate(req Request, sess *session.Session, now time.Time) (*identity.ResolvedContext, error) {
+	cred, err := parseCredential(req)
+	if err != nil {
+		return nil, err
+	}
+	// First validation: token → normalized claims (PR-3), used only to derive the
+	// asserted principals the second call cross-checks.
+	claims, err := p.validateClaims(cred, now)
+	if err != nil {
+		return nil, err
+	}
+	authReq, err := p.buildAuthRequest(req, cred, claims)
+	if err != nil {
+		return nil, err
+	}
+	ctx, err := authn.Authenticate(authReq, p.authCfg, p.deps.authDeps(), now)
+	if err != nil {
+		return nil, err
+	}
+	// Immutable session-identity binding. A rejected auth never reaches here, so a
+	// failed authentication can never overwrite or delete an existing binding.
+	if _, err := p.bindings.Bind(sess.ID(), ctx); err != nil {
+		return nil, err
+	}
+	return ctx, nil
+}
+
+// validateClaims runs the PR-3 token validator that matches the credential type.
+func (p *pipeline) validateClaims(cred authn.Credential, now time.Time) (*authn.Claims, error) {
+	switch cred.Type {
+	case authn.TokenJWT:
+		if p.deps.Keys == nil {
+			return nil, mcperr.New(mcperr.ReasonUnsupportedTokenType, "runtime.auth", "no key resolver for JWT validation")
+		}
+		return authn.ValidateJWT(cred.Token, p.authCfg, p.deps.Keys, now)
+	case authn.TokenOpaque:
+		if p.deps.Introspector == nil {
+			return nil, mcperr.New(mcperr.ReasonUnsupportedTokenType, "runtime.auth", "no introspector for opaque validation")
+		}
+		return authn.ValidateOpaque(cred.Token, p.authCfg, p.deps.Introspector, now)
+	default:
+		return nil, mcperr.New(mcperr.ReasonUnsupportedTokenType, "runtime.auth", "unsupported token type")
+	}
+}
+
+// buildAuthRequest assembles the PR-3 AuthRequest from the validated claims and the
+// request binding. The subject is modeled as a Human principal keyed by the token
+// subject (a pure token cannot reliably distinguish a workload). Assurance reflects
+// the OBSERVED sender-binding strength — a DPoP proof or a verified peer
+// certificate yields high assurance, a plain bearer low — so it is derived, never
+// fabricated.
+func (p *pipeline) buildAuthRequest(req Request, cred authn.Credential, claims *authn.Claims) (authn.AuthRequest, error) {
+	tenant := identity.TenantID(claims.Tenant)
+	assur := identity.AssuranceLow
+	if req.HasDPoP || req.PeerCertThumbprint != "" {
+		assur = identity.AssuranceHigh
+	}
+	subject := identity.Subject{
+		Kind: identity.SubjectHuman,
+		Human: &identity.Human{
+			Subject:   claims.Subject,
+			Tenant:    tenant,
+			Assurance: assur,
+			Issuer:    claims.Issuer,
+		},
+	}
+	client := identity.Client{
+		ClientID:   claims.ClientID,
+		Tenant:     tenant,
+		Capability: p.capability,
+	}
+	authReq := authn.AuthRequest{
+		Credential: cred,
+		Subject:    subject,
+		Client:     client,
+		Tenant:     identity.Tenant{ID: tenant},
+		Binding: authn.RequestBinding{
+			HTTPMethod:             req.HTTPMethod,
+			HTTPURI:                req.CanonicalURI,
+			DPoPProof:              req.DPoPProof,
+			ObservedCertThumbprint: req.PeerCertThumbprint,
+		},
+	}
+	// Gateway resolves the opaque ServerID from the route; Management never carries
+	// server/tool authority.
+	if p.capability == protocol.Gateway {
+		if req.ServerID == "" {
+			return authn.AuthRequest{}, mcperr.New(mcperr.ReasonRegistryServerUnavailable, "runtime.auth", "gateway request without a server id")
+		}
+		sid := registry.ServerID(req.ServerID)
+		authReq.Server = &sid
+	}
+	return authReq, nil
+}

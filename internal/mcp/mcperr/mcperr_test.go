@@ -52,6 +52,11 @@ func TestReasonCodesStable(t *testing.T) {
 		{ReasonRevocationFailed, "revocation_failed"}, {ReasonMaterializationGateDenied, "materialization_gate_denied"},
 		{ReasonMaterializationGateUnavailable, "materialization_gate_unavailable"}, {ReasonMaterialAlreadyConsumed, "material_already_consumed"},
 		{ReasonCredentialKindUnsupported, "credential_kind_unsupported"},
+		{ReasonListenerDisabled, "listener_disabled"}, {ReasonHTTPMethodRejected, "http_method_rejected"},
+		{ReasonHostRejected, "host_rejected"}, {ReasonOriginRejected, "origin_rejected"},
+		{ReasonAdmissionRejected, "admission_rejected"}, {ReasonObserveOnly, "observe_only"},
+		{ReasonTLSRequired, "tls_required"}, {ReasonListenerConfigInvalid, "listener_config_invalid"},
+		{ReasonRequestDeadlineExceeded, "request_deadline_exceeded"},
 	}
 	seen := map[Reason]bool{}
 	for _, p := range want {
