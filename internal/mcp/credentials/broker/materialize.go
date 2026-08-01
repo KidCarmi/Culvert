@@ -100,19 +100,33 @@ func (b *Broker) obtainEnvelope(ctx context.Context, plan CredentialPlan, prof p
 	lowRiskCacheOK := plan.risk == profile.RiskLow && prof.Failure().AllowLowRiskCachedFallback && prof.Cache().Enabled
 	if lowRiskCacheOK {
 		if e, ok := b.tryCacheServe(plan, prof, st); ok {
-			out := make([]byte, len(e.env))
-			copy(out, e.env)
-			return out, e.lease, e.kind, true, nil
+			// Re-validate the cached credential against THIS plan's scope/power (the
+			// cache key is per-version, not per-plan, so a credential validated for a
+			// broader/other plan must not be served to a narrower/different one).
+			if verr := b.validateLeaseAgainstPlan(plan, prof, e.kind, e.lease); verr == nil {
+				return e.env, e.lease, e.kind, true, nil // e.env is a private copy from get
+			}
+			zeroize(e.env)
+			// Not usable for THIS plan ⇒ fall through to a fresh fetch (no stale fallback).
 		}
-		// Not a valid/fresh hit ⇒ fall through to a fresh fetch (no stale fallback).
 	}
 	env, lease, kind, err = b.fetch(ctx, plan, prof, st)
-	return env, lease, kind, false, err
+	if err != nil {
+		return nil, provider.Lease{}, 0, false, err
+	}
+	// The leader validated its OWN plan in doFetch; a single-flight WAITER (or the
+	// leader re-checked, harmlessly) validates the shared result against its plan.
+	if verr := b.validateLeaseAgainstPlan(plan, prof, kind, lease); verr != nil {
+		zeroize(env)
+		return nil, provider.Lease{}, 0, false, verr
+	}
+	return env, lease, kind, false, nil
 }
 
-// tryCacheServe returns a valid, fresh, non-revoked cache entry for the plan's
-// usable version, or (nil,false). It is consulted only for eligible low-risk
-// requests; high-risk never reaches it.
+// tryCacheServe returns a valid, fresh, non-revoked cache entry (with a PRIVATE env
+// copy) for the plan's usable version, or (nil,false). It re-checks freshness /
+// revocation but NOT per-plan scope — the caller re-validates scope against its own
+// plan. Consulted only for eligible low-risk requests; high-risk never reaches it.
 func (b *Broker) tryCacheServe(plan CredentialPlan, prof profile.Profile, st *profileState) (*cacheEntry, bool) {
 	now := b.now()
 	st.mu.Lock()
@@ -122,7 +136,7 @@ func (b *Broker) tryCacheServe(plan CredentialPlan, prof profile.Profile, st *pr
 		return nil, false
 	}
 	key := cacheKey{tenant: plan.tenant, server: plan.server, profile: plan.profileID, version: v}
-	e, hit := b.cache.get(key)
+	e, hit := b.cache.get(key) // e carries a private env copy made under the cache lock
 	if !hit {
 		return nil, false
 	}
@@ -130,6 +144,7 @@ func (b *Broker) tryCacheServe(plan CredentialPlan, prof profile.Profile, st *pr
 	if fresh && now.Before(e.lease.Expiry) && !st.snapshotRevokedVersion(v) {
 		return e, true
 	}
+	zeroize(e.env)
 	return nil, false
 }
 
@@ -188,7 +203,11 @@ func (b *Broker) doFetch(ctx context.Context, plan CredentialPlan, prof profile.
 		req.Tools = []string{plan.tool.Name}
 	}
 
+	if err := b.acquireProvider(ctx); err != nil {
+		return nil, provider.Lease{}, 0, err
+	}
 	result, ferr := b.fetchWithRetry(ctx, p, req)
+	b.releaseProvider()
 	if ferr != nil {
 		_, out := sanitizeProviderError(ferr)
 		return nil, provider.Lease{}, 0, out
@@ -253,13 +272,24 @@ func (b *Broker) fetchWithRetry(ctx context.Context, p provider.Provider, req pr
 	return nil, last
 }
 
-// validateLease checks the provider-returned lease/scope/power/kind against the
-// plan (never broadening). It returns a stable sanitized reason on any violation.
+// validateLease checks a provider Result against the plan. Thin wrapper over
+// validateLeaseAgainstPlan (which is ALSO run for every consumer of a shared
+// credential — cache hits and single-flight waiters — so a credential validated for
+// one plan can never be materialized for a different plan without its own
+// least-privilege check).
 func (b *Broker) validateLease(plan CredentialPlan, prof profile.Profile, result *provider.Result) error {
-	if result.Kind != plan.kind {
+	return b.validateLeaseAgainstPlan(plan, prof, result.Kind, result.Lease)
+}
+
+// validateLeaseAgainstPlan checks a lease/kind against ONE plan (never broadening):
+// kind match, finite unexpired expiry, TTL within the profile maximum, and the
+// effective scope/power window. It is idempotent and is run for the leader, every
+// single-flight waiter, and every cache hit — so a shared credential is always
+// re-validated against the plan actually consuming it.
+func (b *Broker) validateLeaseAgainstPlan(plan CredentialPlan, prof profile.Profile, kind profile.CredentialKind, lease provider.Lease) error {
+	if kind != plan.kind {
 		return brokerErr(mcperr.ReasonCredentialKindUnsupported, "provider material kind does not match the plan")
 	}
-	lease := result.Lease
 	if lease.Version == "" {
 		return errInvalidMaterial("provider returned an empty credential version")
 	}
@@ -276,10 +306,7 @@ func (b *Broker) validateLease(plan CredentialPlan, prof profile.Profile, result
 	}
 	// Effective scope/power must not exceed the plan. High-risk requires scope proof.
 	requireProof := plan.risk == profile.RiskHigh
-	if err := profile.ValidateEffectiveScope(lease.Scope, plan.scopeBound(requireProof)); err != nil {
-		return err
-	}
-	return nil
+	return profile.ValidateEffectiveScope(lease.Scope, plan.scopeBound(requireProof))
 }
 
 // sealHandle opens the provider handle's plaintext (scoped, zeroizing) and seals it

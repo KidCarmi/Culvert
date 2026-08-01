@@ -75,13 +75,11 @@ func (c *cache) put(e *cacheEntry) error {
 	if len(e.env) > c.lim.MaxEnvelopeBytes() {
 		return errInvalidMaterial("encrypted envelope exceeds the maximum size")
 	}
-	// Replace-in-place if the key already exists.
-	if old, ok := c.entries[e.key]; ok {
-		c.totalBytes -= len(old.env)
-		zeroize(old.env)
-		c.totalBytes += len(e.env)
-		c.entries[e.key] = e
-		return nil
+	// Replace an existing key by removing it first, then re-inserting through the
+	// bounded path — so a larger replacement envelope is still subject to the global
+	// byte/entry caps and eviction (never silently grows the cache past its limit).
+	if _, ok := c.entries[e.key]; ok {
+		c.remove(e.key)
 	}
 	// Per-profile version cap: evict this profile's oldest version if at cap.
 	if c.perProfile[e.key.profile] >= maxVersionsPerProfile {
@@ -106,7 +104,9 @@ func (c *cache) put(e *cacheEntry) error {
 	return nil
 }
 
-// get returns a live (unexpired) entry for key. An expired entry is removed and
+// get returns a live (unexpired) entry for key, with its env DEEP-COPIED under the
+// cache lock so the caller owns it and a concurrent eviction/revocation zeroizing the
+// stored envelope cannot race the caller's use. An expired entry is removed and
 // zeroized, and (nil,false) returned (a miss).
 func (c *cache) get(key cacheKey) (*cacheEntry, bool) {
 	c.mu.Lock()
@@ -119,7 +119,11 @@ func (c *cache) get(key cacheKey) (*cacheEntry, bool) {
 		c.remove(key)
 		return nil, false
 	}
-	return e, true
+	cp := &cacheEntry{
+		env: append([]byte(nil), e.env...), kind: e.kind, lease: e.lease,
+		insertedAt: e.insertedAt, expiry: e.expiry, key: e.key,
+	}
+	return cp, true
 }
 
 // invalidateProfile removes and zeroizes every entry for a profile (revocation).

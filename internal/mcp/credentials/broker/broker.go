@@ -10,6 +10,7 @@
 package broker
 
 import (
+	"context"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -19,6 +20,7 @@ import (
 	"github.com/KidCarmi/Culvert/internal/mcp/credentials/profile"
 	"github.com/KidCarmi/Culvert/internal/mcp/credentials/provider"
 	"github.com/KidCarmi/Culvert/internal/mcp/limits"
+	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
 	"github.com/KidCarmi/Culvert/internal/mcp/registry"
 	"github.com/KidCarmi/Culvert/internal/secret"
 )
@@ -51,6 +53,7 @@ type Broker struct {
 	states  map[profile.ID]*profileState
 	inflt   map[profile.ID]*call
 
+	sem     chan struct{} // global provider-request concurrency bound (MaxProviderConc)
 	planSeq atomic.Uint64
 }
 
@@ -72,8 +75,24 @@ func New(deps Deps, lim limits.CredentialLimits) *Broker {
 		providers: make(map[profile.ProviderID]provider.Provider),
 		states:    make(map[profile.ID]*profileState),
 		inflt:     make(map[profile.ID]*call),
+		sem:       make(chan struct{}, lim.MaxProviderConc()),
 	}
 }
+
+// acquireProvider blocks until a global provider-request slot is free (bounding
+// concurrency at MaxProviderConc across ALL profiles, so bursts across distinct
+// profiles cannot exhaust the provider/process), or fails closed if the context is
+// cancelled. releaseProvider returns the slot.
+func (b *Broker) acquireProvider(ctx context.Context) error {
+	select {
+	case b.sem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return brokerErr(mcperr.ReasonProviderUnavailable, "provider concurrency limit; context cancelled")
+	}
+}
+
+func (b *Broker) releaseProvider() { <-b.sem }
 
 // RegisterProvider registers a provider under its id, bounded by the provider limit.
 func (b *Broker) RegisterProvider(p provider.Provider) error {

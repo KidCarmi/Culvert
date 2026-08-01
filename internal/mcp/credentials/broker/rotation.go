@@ -40,7 +40,12 @@ func (b *Broker) Rotate(ctx context.Context, id profile.ID) (SafeResult, error) 
 		Operation: profile.OpRead, Kind: prof.Kind(), PowerCeiling: prof.Power(),
 		PlanID: "rotate-" + string(id),
 	}
+	if err := b.acquireProvider(ctx); err != nil {
+		clearRotating(stActive)
+		return fail(res, mcperr.ReasonRotationFailed, "provider concurrency limit")
+	}
 	result, ferr := p.Rotate(ctx, req)
+	b.releaseProvider()
 	if ferr != nil {
 		clearRotating(stActive) // current version stays active
 		res.Rotation = stActive.String()
@@ -123,6 +128,10 @@ func (b *Broker) claimRotation(st *profileState, res SafeResult) (profile.Creden
 func (b *Broker) publishSuccessor(id profile.ID, prof profile.Profile, st *profileState, result *provider.Result, env []byte, prevVersion profile.CredentialVersion, hadCurrent bool) error {
 	st.mu.Lock()
 	if st.isRevoked(result.Lease.Version) {
+		// Clear the rotation claim so the profile is not stuck in rotation_in_progress
+		// forever; the current version stays active (only the successor was revoked).
+		st.rotating = false
+		st.state = stActive
 		st.mu.Unlock()
 		zeroize(env)
 		return brokerErr(mcperr.ReasonRotationFailed, "successor revoked mid-rotation")
@@ -160,10 +169,20 @@ func (b *Broker) validateRotated(prof profile.Profile, result *provider.Result) 
 	if !now.Before(result.Lease.Expiry) {
 		return brokerErr(mcperr.ReasonCredentialExpired, "successor is already expired")
 	}
+	// The successor lease TTL must be within the profile maximum (short-lived bound),
+	// exactly like a normal fetch — a provider cannot plant a long-lived successor.
+	issued := result.Lease.IssuedAt
+	if issued.IsZero() {
+		issued = now
+	}
+	if result.Lease.Expiry.Sub(issued) > prof.MaxTTL() {
+		return brokerErr(mcperr.ReasonProviderInvalidMaterial, "successor lease TTL exceeds the profile maximum")
+	}
 	bound := profile.ScopeBound{
 		Tenant: prof.Tenant(), Environment: prof.Environment(), Server: prof.Server(),
-		Resources: prof.Resources(), PowerCeiling: prof.Power(), RequireProof: true,
+		Tools: prof.Tools(), Resources: prof.Resources(), PowerCeiling: prof.Power(), RequireProof: true,
 	}
-	// Rotation validates against the profile ceiling only (no per-op floor).
+	// Rotation validates against the profile ceiling + tool bound (no per-op floor,
+	// since rotation has no per-request operation).
 	return profile.ValidateEffectiveScope(result.Lease.Scope, bound)
 }

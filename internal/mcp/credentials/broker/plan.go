@@ -17,7 +17,7 @@ import (
 type PlanInput struct {
 	Identity     *identity.ResolvedContext // PR-3 immutable resolved identity
 	Profile      profile.ID                // policy-selected profile reference (opaque id)
-	BaseRevision uint64                    // expected profile-store revision (stale ⇒ rejected)
+	BaseRevision uint64                    // expected PROFILE revision (Profile.Revision(); 0 ⇒ skip). Compared to the selected profile's own revision, NOT the store snapshot revision, so an unrelated profile change never spuriously rejects.
 	Environment  profile.Environment       // deployment environment (must match the profile)
 	Operation    profile.OperationClass
 	Tool         *profile.ToolBinding // optional tool binding (catalog-resolved)
