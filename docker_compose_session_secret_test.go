@@ -59,14 +59,20 @@ func TestDockerComposeForwardsSessionSecretEnv(t *testing.T) {
 		rest = rest[:end[0]]
 	}
 
-	if !strings.Contains(rest, "CULVERT_SESSION_SECRET") {
-		t.Fatalf("docker-compose.yml proxy service `environment:` block does not forward "+
-			"CULVERT_SESSION_SECRET (found CA_PASSPHRASE=%v, LOG_PASSPHRASE=%v) — "+
-			"session.go reads this env var directly and docs/OPERATIONS.md §3 / "+
+	// Require an ACTIVE forwarding entry, not just the variable name anywhere
+	// in the block: a commented-out line ("# - CULVERT_SESSION_SECRET=...")
+	// or a hardcoded non-forwarding value ("CULVERT_SESSION_SECRET=") would
+	// satisfy a bare substring match without actually passing the host/.env
+	// value through, defeating the contract this test exists to enforce.
+	activeForward := regexp.MustCompile(`(?m)^\s*-\s*CULVERT_SESSION_SECRET=\$\{CULVERT_SESSION_SECRET:-\}\s*$`)
+	if !activeForward.MatchString(rest) {
+		t.Fatalf("docker-compose.yml proxy service `environment:` block does not have an active "+
+			"`- CULVERT_SESSION_SECRET=${CULVERT_SESSION_SECRET:-}` entry (found CA_PASSPHRASE=%v, "+
+			"LOG_PASSPHRASE=%v) — session.go reads this env var directly and docs/OPERATIONS.md §3 / "+
 			"docs/enterprise/ENTERPRISE-PREREQUISITES.md instruct operators to set it on every "+
-			"node, but Compose never injects an env var into the container unless it is named "+
-			"in the service's `environment:` block, so the documented setup silently does nothing "+
-			"on the standard docker-compose deployment",
+			"node, but Compose never injects an env var into the container unless it is actively "+
+			"named (uncommented, interpolated) in the service's `environment:` block, so the "+
+			"documented setup silently does nothing on the standard docker-compose deployment",
 			strings.Contains(rest, "CULVERT_CA_PASSPHRASE"), strings.Contains(rest, "CULVERT_LOG_PASSPHRASE"))
 	}
 }
