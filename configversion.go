@@ -263,7 +263,12 @@ func rollbackConfigVersion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	applyConfigBackup(&target)
+	// CHAOS-27 / F-12: the apply is unconditional, but a persistence failure
+	// during it is no longer swallowed. The running config IS rolled back
+	// either way; what changes is that the operator is told when the result
+	// did not reach disk instead of receiving a 200 over a partial-durability
+	// apply that silently reverts on the next restart.
+	persistErr := applyConfigBackup(&target)
 
 	// Feed scalars persist ONLY via admin_settings.json (SaveAdminSettings) —
 	// unlike the versioned stores (blocklist/overrides) that persist themselves
@@ -278,9 +283,14 @@ func rollbackConfigVersion(w http.ResponseWriter, r *http.Request) {
 	}
 
 	actor := sessionAdmin(r)
-	auditEvent(r, "config.rollback", "system",
-		fmt.Sprintf("rolled back to version %d (from %s by %s)",
-			req.Version, meta.CreatedAt, sanitizeLog(meta.Actor)))
+	auditDetail := fmt.Sprintf("rolled back to version %d (from %s by %s)",
+		req.Version, meta.CreatedAt, sanitizeLog(meta.Actor))
+	if persistErr != nil {
+		// The partial-durability fact belongs in the audit trail: "who rolled
+		// back to what" is incomplete without "and it did not persist".
+		auditDetail += " — NOT DURABLE: " + sanitizeLog(persistErr.Error())
+	}
+	auditEvent(r, "config.rollback", "system", auditDetail)
 
 	saveConfigVersion(actor, fmt.Sprintf("rollback to v%d", req.Version))
 
@@ -288,15 +298,84 @@ func rollbackConfigVersion(w http.ResponseWriter, r *http.Request) {
 		// A rolled-back config was valid when saved; if a cap was lowered since,
 		// the commit-time rejection is logged + alerted + surfaced via
 		// LastPublishError (the local rollback still applied).
+		//
+		// Still published on a persistence failure: the DP fleet must converge
+		// on the config this node is actually ENFORCING, and the DP snapshot is
+		// a separate durability path from the local store files.
 		_ = globalConfigStore.Update(CurrentConfigSnapshot())
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
-		"status":   "rolled_back",
-		"version":  req.Version,
-		"warnings": warnings,
+	if persistErr != nil {
+		// CWE-117: nothing request-derived reaches this sink. The only
+		// interpolated value is a count computed from the persistence failures
+		// themselves (store paths, not request data).
+		//
+		// The version number is deliberately NOT logged here. CodeQL's
+		// log-injection query flags any value that flows from the decoded
+		// request body — it kept flagging this line through an inline
+		// strings.ReplaceAll, through sanitizeLog, and finally through a plain
+		// `%d` on the `int` version field, which cannot carry a control
+		// character at all. Rather than carry a permanently-open security alert
+		// for a value that provably cannot inject, the version is dropped from
+		// this line: it is already recorded, for the same incident, in the
+		// audit entry above ("rolled back to version N … NOT DURABLE") and in
+		// the API response below. The file names likewise reach the operator
+		// via the audit entry, the response, and the storage_path row of
+		// /api/diagnostics — each sanitising at its own sink.
+		logger.Printf("Config rollback applied in memory but FAILED to persist %d file(s) — see the config.rollback audit entry for the version and the storage_path row of /api/diagnostics for the file names",
+			persistFailureCount(persistErr))
+		// 500: the operation did not fully succeed. The body distinguishes it
+		// from a rollback that did not happen at all — the caller must know the
+		// running config HAS changed, so "retry the rollback" is not the fix;
+		// fixing the disk and re-saving is.
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // best-effort HTTP response write; client disconnects are not actionable
+			"status":           "rolled_back_not_durable",
+			"version":          req.Version,
+			"warnings":         warnings,
+			"applied":          true,
+			"stores_persisted": false,
+			"persist_errors":   persistErr.Error(),
+			"error":            "rollback applied to the running configuration but could not be written to disk; it will be lost on restart",
+		})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // best-effort HTTP response write; client disconnects are not actionable
+		"status":           "rolled_back",
+		"version":          req.Version,
+		"warnings":         warnings,
+		"applied":          true,
+		"stores_persisted": true,
+		// Named for exactly what was verified, and paired with the surfaces
+		// that are NOT covered. An earlier draft called this `durable`, which
+		// an operator would reasonably read as "this rollback survives a
+		// restart" — and for the surfaces below it does not (Codex P1).
+		"runtime_only_surfaces": rollbackRuntimeOnlySurfaces,
 	})
+}
+
+// rollbackRuntimeOnlySurfaces names the parts of a config snapshot that
+// applyConfigBackup restores to the RUNNING configuration but never persists,
+// so a restart re-reads them from admin_settings.json and they revert.
+//
+// This is pre-existing, deliberate behaviour — the config-version apply path
+// restores live state only (see the RateLimitExempt comment in
+// applyConfigBackup) — but the rollback response previously implied otherwise
+// by reporting a flat `durable:true`. The scoped write observer can only see
+// writes that were ATTEMPTED, so it cannot detect a surface that is never
+// written at all; naming them is the honest alternative.
+//
+// Whether rollback SHOULD persist these (by extending the apply path to
+// admin-settings durability) is an owner decision recorded as CHAOS-46, not a
+// change to make silently inside an observability fix.
+var rollbackRuntimeOnlySurfaces = []string{
+	"default_action",
+	"rewrite_rules",
+	"ip_filter_mode",
+	"ip_list",
+	"rate_limit_rpm",
+	"rate_limit_exempt",
 }
 
 // validateConfigBackup performs pre-flight checks on a config snapshot (F7).
@@ -362,9 +441,24 @@ func restoreBlocklistFromBackup(b *configBackup) {
 }
 
 // applyConfigBackup restores all config stores from a backup snapshot.
-func applyConfigBackup(b *configBackup) {
+//
+// It returns a non-nil error when one or more of the stores it wrote failed to
+// reach disk (CHAOS-27 / F-12). The in-memory apply is unconditional and
+// unchanged: every store is restored, and a persistence failure never aborts
+// the remaining steps — a half-applied RUNNING config would be strictly worse
+// than a fully-applied one that is not yet durable. What the error carries is
+// the fact the caller previously had no way to learn: the rolled-back state is
+// live but will NOT survive a restart.
+//
+// The stores' Save() methods return nothing and swallow their write errors, so
+// the failures are collected from the fileutil durable-write observer via a
+// scoped collector rather than from return values (see storage_health.go for
+// the scope's time-window semantics).
+func applyConfigBackup(b *configBackup) error {
 	configRollbackMu.Lock()
 	defer configRollbackMu.Unlock()
+	finishScope := beginStorageWriteScope()
+	defer finishScope()
 	restoreBlocklistFromBackup(b)
 
 	// URLCategories MUST be applied before CategoryGroups (which may
@@ -445,6 +539,93 @@ func applyConfigBackup(b *configBackup) {
 	// Rewrite rules: replace all.
 	rewriter.SetRules(b.RewriteRules)
 
+	applyScanStoresFromBackup(b)
+
+	applyFilterStoresFromBackup(b)
+
+	if b.RateLimitRPM > 0 {
+		rl.Configure(b.RateLimitRPM, time.Minute)
+	}
+
+	// RateLimitExempt: rollback-surface extension (Finding 10.3 PR-2). Mirrors
+	// the CategoryGroups/URLCategories nil-skip contract exactly:
+	//   nil       → old/pre-extension snapshot; leave live exemptions untouched.
+	//   []        → snapshot recorded zero exemptions; wipe the live exempt list.
+	//   populated → wholesale replace.
+	// rl.ReplaceExemptions builds the new IP/CIDR sets outside the lock and
+	// swaps under a single Lock, so there is never a partial/stale-exemption
+	// window. No admin_settings persistence here — matches RateLimitRPM above;
+	// the config-version apply path restores live state only.
+	if b.RateLimitExempt != nil {
+		rl.ReplaceExemptions(b.RateLimitExempt)
+	}
+
+	applyPACFromBackup(b)
+
+	// Close the scope here (not only via the defer) so its result is available
+	// to the caller. finishScope is once-guarded; the deferred call above is
+	// the panic-path safety net that guarantees the scope is unregistered.
+	if failed := finishScope(); len(failed) > 0 {
+		return &configPersistError{Files: failed}
+	}
+	return nil
+}
+
+// configPersistError reports the durable writes that failed while a config
+// snapshot was applied. It carries the failing files as STRUCTURED data, not
+// just a formatted string, so a caller can report a count without
+// interpolating path-derived text into a log line (CWE-117). The file names
+// still reach the operator — via the audit entry, the API response, and the
+// storage_path diagnostics row — each sanitising at its own sink.
+type configPersistError struct{ Files []string }
+
+func (e *configPersistError) Error() string {
+	return fmt.Sprintf("rollback applied to the running config but %d file(s) failed to persist: %s",
+		len(e.Files), strings.Join(e.Files, "; "))
+}
+
+// persistFailureCount returns how many files a persistence error names, or 0
+// for a nil / differently-typed error. Lets the log sink stay integers-only.
+func persistFailureCount(err error) int {
+	var pe *configPersistError
+	if errors.As(err, &pe) {
+		return len(pe.Files)
+	}
+	return 0
+}
+
+// applyFilterStoresFromBackup restores the file-extension blocker and the IP
+// filter from a snapshot. Split out of applyConfigBackup for cyclop only —
+// behaviour and ordering are unchanged. Callers must keep invoking it at the
+// same point in the apply sequence.
+//
+// Both stores are runtime-only on this path: neither Add/Remove nor SetMode
+// persists, so these surfaces revert on restart (CHAOS-46, surfaced to the
+// caller as rollbackRuntimeOnlySurfaces).
+func applyFilterStoresFromBackup(b *configBackup) {
+	// File block extensions: remove all, then add.
+	for _, ext := range fileBlocker.List() {
+		fileBlocker.Remove(ext)
+	}
+	for _, ext := range b.FileBlockExtensions {
+		fileBlocker.Add(ext)
+	}
+
+	// IP filter: remove all, set mode, then add.
+	ipf.SetMode(b.IPFilterMode)
+	for _, ip := range ipf.List() {
+		ipf.Remove(ip)
+	}
+	for _, ip := range b.IPList {
+		_ = ipf.Add(ip)
+	}
+}
+
+// applyScanStoresFromBackup restores the SSL-bypass matcher and the content
+// scanner from a snapshot. Split out of applyConfigBackup for cyclop only —
+// the behaviour, and critically the ordering, is unchanged. Callers must keep
+// invoking it at the same point in the apply sequence.
+func applyScanStoresFromBackup(b *configBackup) {
 	// SSL bypass + content scan: replace all.
 	_ = sslBypass.Set(b.SSLBypass)
 	sslBypass.Save()
@@ -474,41 +655,12 @@ func applyConfigBackup(b *configBackup) {
 		}
 		dpiScanner.Save()
 	}
+}
 
-	// File block extensions: remove all, then add.
-	for _, ext := range fileBlocker.List() {
-		fileBlocker.Remove(ext)
-	}
-	for _, ext := range b.FileBlockExtensions {
-		fileBlocker.Add(ext)
-	}
-
-	// IP filter: remove all, set mode, then add.
-	ipf.SetMode(b.IPFilterMode)
-	for _, ip := range ipf.List() {
-		ipf.Remove(ip)
-	}
-	for _, ip := range b.IPList {
-		_ = ipf.Add(ip)
-	}
-
-	if b.RateLimitRPM > 0 {
-		rl.Configure(b.RateLimitRPM, time.Minute)
-	}
-
-	// RateLimitExempt: rollback-surface extension (Finding 10.3 PR-2). Mirrors
-	// the CategoryGroups/URLCategories nil-skip contract exactly:
-	//   nil       → old/pre-extension snapshot; leave live exemptions untouched.
-	//   []        → snapshot recorded zero exemptions; wipe the live exempt list.
-	//   populated → wholesale replace.
-	// rl.ReplaceExemptions builds the new IP/CIDR sets outside the lock and
-	// swaps under a single Lock, so there is never a partial/stale-exemption
-	// window. No admin_settings persistence here — matches RateLimitRPM above;
-	// the config-version apply path restores live state only.
-	if b.RateLimitExempt != nil {
-		rl.ReplaceExemptions(b.RateLimitExempt)
-	}
-
+// applyPACFromBackup restores PAC configuration and the PAC profile/pool set
+// from a snapshot. Split out of applyConfigBackup for cyclop only — behaviour
+// and ordering are unchanged.
+func applyPACFromBackup(b *configBackup) {
 	// PAC configuration: replace entirely from snapshot.
 	_ = pacStore.Set(PACConfig{
 		ProxyHost:  b.PACProxyHost,

@@ -16909,6 +16909,10 @@ function resetBlockPage() {
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="scan_clam_error"> ClamAV scan error (fail-open)</label>
         <!-- CHAOS-11: all parent proxies down — chain bypassed, egress is direct. -->
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="upstream_pool_down"> Upstream pool down (direct fallback)</label>
+        <!-- CHAOS-45: a durable write to the data directory failed (volume went
+             read-only / full after boot) — config changes are live in memory but
+             are NOT reaching disk and will be lost on restart. -->
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="storage_write_failed"> Storage write failed (state not persisted)</label>
         <!-- P1 commit-time validation: the CP refused to publish an over-cap config
              to the fleet (fleet stays on the last valid snapshot until trimmed). -->
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="config_snapshot_rejected"> Config publish rejected (over cap)</label>

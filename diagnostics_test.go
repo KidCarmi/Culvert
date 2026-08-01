@@ -22,7 +22,14 @@ func withCachedStorageState(t *testing.T) {
 	t.Helper()
 	prevDir := dataDir
 	prevState := storageWritableState.Load()
+	// CHAOS-45: checkStorage now reports observed runtime durable-write
+	// failures ahead of the cached boot probe, and that record is
+	// process-global — any earlier test in the package that provoked a real
+	// AtomicWrite failure would otherwise leak into these assertions. Clear it
+	// on both edges so storage-state tests stay order-independent.
+	resetStorageWriteHealthForTest()
 	t.Cleanup(func() {
+		resetStorageWriteHealthForTest()
 		dataDir = prevDir
 		if prevState == nil {
 			// atomic.Value cannot be cleared once written; store the
@@ -165,7 +172,7 @@ func findDiagnosticCheck(c OperatorContract, code string) *OperatorContractCheck
 
 func TestApiDiagnostics_WarnsOnClusterInsecure(t *testing.T) {
 	// Snapshot + restore the globals we mutate so this test is hermetic.
-	resetPolicyStoreForDiag(t) // verdict folds in policyStore; keep it leak-proof
+	resetDiagVerdictGlobals(t) // verdict folds in policyStore; keep it leak-proof
 	prevInsecure := clusterInsecure
 	clusterRoleMu.Lock()
 	prevRole := clusterRole.role
@@ -210,7 +217,7 @@ func TestApiDiagnostics_WarnsOnClusterInsecure(t *testing.T) {
 }
 
 func TestApiDiagnostics_WarnsOnClusteredSAMLState(t *testing.T) {
-	resetPolicyStoreForDiag(t) // verdict folds in policyStore; keep it leak-proof
+	resetDiagVerdictGlobals(t) // verdict folds in policyStore; keep it leak-proof
 	prevRegistry := idpRegistry
 	prevInsecure := clusterInsecure
 	clusterRoleMu.Lock()
@@ -887,16 +894,30 @@ func TestApiDiagnostics_SessionSecretMissingFail(t *testing.T) {
 	}
 }
 
-// resetPolicyStoreForDiag snapshots and clears the global policyStore for the
-// duration of the test, restoring it on cleanup. Any diagnostics test that
-// asserts on the aggregate Verdict MUST call this: the verdict folds in
-// policyStore.List(), so an auth rule leaked by an earlier test (which only
-// resets the store at its own setup, per the setupProxyTest convention) can
-// flip the verdict to fail under -shuffle/-count — e.g. a leaked
-// CredentialRequired rule with no credential-capable provider configured trips
-// the auth_cr_no_credential_provider diagFail check.
-func resetPolicyStoreForDiag(t *testing.T) {
+// resetDiagVerdictGlobals isolates the process-global state that the aggregate
+// diagnostics Verdict folds in. Any diagnostics test that asserts on the
+// Verdict MUST call this, because the verdict is a roll-up over globals that
+// earlier tests legitimately dirty and do not restore:
+//
+//   - policyStore.List() — an auth rule leaked by an earlier test (which only
+//     resets the store at its own setup, per the setupProxyTest convention)
+//     flips the verdict to fail under -shuffle/-count; e.g. a leaked
+//     CredentialRequired rule with no credential-capable provider configured
+//     trips the auth_cr_no_credential_provider diagFail check.
+//   - the CHAOS-45 durable-write failure record — several tests inject REAL
+//     AtomicWrite failures on purpose (TestPolicyStore_Save_MetaSkippedOn
+//     MainWriteFailure, and every test running with dataDir unwritable), and
+//     checkStorage now correctly reports fail for a recent failure. That is the
+//     production behaviour we want; in the test binary it is cross-talk, so it
+//     is cleared on both edges here rather than in each injecting test (they
+//     are numerous and the list only grows).
+//
+// Policy state is snapshot-and-restored; the write-failure record is pure
+// observability, so it is simply cleared.
+func resetDiagVerdictGlobals(t *testing.T) {
 	t.Helper()
+	resetStorageWriteHealthForTest()
+	t.Cleanup(resetStorageWriteHealthForTest)
 	policyStore.mu.Lock()
 	prevRules := policyStore.rules
 	prevVersion := policyStore.version
@@ -920,7 +941,7 @@ func resetPolicyStoreForDiag(t *testing.T) {
 // at version 0 / no rules; this test snapshots and restores the store
 // so it is hermetic regardless of run order with future policy tests.
 func TestApiDiagnostics_EmptyPolicyWarn(t *testing.T) {
-	resetPolicyStoreForDiag(t)
+	resetDiagVerdictGlobals(t)
 
 	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
 	w := httptest.NewRecorder()
