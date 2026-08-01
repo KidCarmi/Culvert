@@ -9811,7 +9811,16 @@ async function cdrToggleEnabled() {
 
 async function cdrRefreshHealth() {
   try {
-    cdrState.health = await api('/api/cdr/health');
+    // Refetch instances alongside health so the breaker-state badge
+    // (driven by cdrState.instances) doesn't go stale - otherwise a
+    // breaker that opened/recovered since the tab loaded would show
+    // outdated state despite the admin explicitly clicking Refresh.
+    const [health, instances] = await Promise.all([
+      api('/api/cdr/health'),
+      api('/api/cdr/instances').catch(() => null),
+    ]);
+    cdrState.health = health;
+    if (instances) cdrState.instances = instances.instances || [];
     cdrRenderOverview();
     toast('Health refreshed', 'success');
   } catch (e) { toast('Refresh failed: ' + e.message, 'error'); }
