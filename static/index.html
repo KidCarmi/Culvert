@@ -9890,7 +9890,8 @@ function cdrBreakerBadge(inst) {
   const title = `${inst.cbConsecFails ?? 0} consecutive failure(s), tripped open ${inst.cbTotalOpens ?? 0} time(s), ${inst.cbTotalTrips ?? 0} request(s) denied while open`;
   if (state === 'open') return `<span class="badge drop" title="${escHtml(title)}">open</span>`;
   if (state === 'half_open') return `<span class="badge warn" title="${escHtml(title)}">half-open</span>`;
-  return `<span class="badge allow" title="${escHtml(title)}">closed</span>`;
+  if (state === 'closed') return `<span class="badge allow" title="${escHtml(title)}">closed</span>`;
+  return `<span class="badge info" title="${escHtml(title)}">${escHtml(state)}</span>`;
 }
 
 async function cdrRefreshInstances() {

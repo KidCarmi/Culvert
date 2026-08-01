@@ -154,6 +154,13 @@ func apiCDRInstances(w http.ResponseWriter, r *http.Request) {
 		}
 		list := cdrInstances.List()
 		ver, updatedAt := cdrInstances.Version()
+		// Snapshot the live pool once and index by name so enrichment
+		// below is O(1) per instance instead of re-scanning the pool
+		// (and re-acquiring its RLock) for every registry entry.
+		pooled := make(map[string]*cdrPooledClient, cdrPool.Len())
+		for _, pc := range cdrPool.List() {
+			pooled[pc.Name] = pc
+		}
 		// Enrich each entry with cert-expiry metadata so the GUI can
 		// render a countdown + banner without having to parse PEMs
 		// itself.  Errors are non-fatal — we just omit the expiry
@@ -169,7 +176,7 @@ func apiCDRInstances(w http.ResponseWriter, r *http.Request) {
 			// Merge in the live pool state (circuit-breaker + poller health)
 			// so an admin can see WHY the proxy is routing around or
 			// skipping an instance without needing Prometheus or SSH.
-			if pc := cdrPool.Get(inst.Name); pc != nil {
+			if pc, ok := pooled[inst.Name]; ok {
 				stats := pc.Breaker.Stats()
 				entry["cbState"] = stats.State
 				entry["cbConsecFails"] = stats.ConsecFails
