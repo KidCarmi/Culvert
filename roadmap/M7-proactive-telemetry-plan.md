@@ -170,18 +170,29 @@ registry_hash
 An **unknown outer member under `schema_version == 3` is a malformed request (`400`)**,
 not an additive extension; adding a ninth member requires a new `schema_version` (§3).
 
-- `key_id` — the `key_id` of the TAC recipient key the ciphertext is sealed to
-  (from `sealBundleToTAC`/`activeTACTrustKey`, §10). TAC selects the matching private
-  key.
-- `algorithm` — fixed `"x25519-sealbox"` (the `CVRTSB01` `box.SealAnonymous` scheme).
-  A reader that does not recognize it rejects (`422`).
+- `key_id` — the `key_id` of the TAC recipient key the ciphertext is sealed to. The
+  appliance selects the active TAC recipient key via `activeTACTrustKey` (§10) and seals
+  the inner plaintext to its X25519 public key (raw `crypto_box_seal`, above). TAC selects
+  the matching private key. *(The `CVRTSB01`-framed `sealBundleToTAC` path is the M4
+  support-bundle export, a different envelope; telemetry uses the raw sealed box.)*
+- `algorithm` — fixed `"x25519-sealbox"`: libsodium `crypto_box_seal` — an anonymous
+  X25519 sealed box (`golang.org/x/crypto/nacl/box`'s `SealAnonymous`, opened with
+  `OpenAnonymous`). This is the **RAW** sealed box and **NOT** the `CVRTSB01`-framed
+  support-bundle envelope (`internal/sealbox`, M4): the TAC recipient opens the
+  ciphertext directly with `box.OpenAnonymous`, so there is **no `CVRTSB01` magic and no
+  version prefix**. A reader that does not recognize the label rejects (`422`).
+  *(Reconciled in M7 Slice 2.5-C3: the merged TAC consumer — `FileRecipientKeyProvider`
+  and `VerifyAndOpen` — opens the raw `crypto_box_seal` blob directly, so the producer
+  telemetry sealer emits the raw box rather than reusing the `CVRTSB01`-framed
+  support-bundle path.)*
 - `ciphertext` — **standard padded base64** (the RFC 4648 standard alphabet) of the raw
-  `sealbox` blob (`CVRTSB01` magic + version + anonymous-box bytes). **No** URL-safe
-  alphabet, **no** whitespace, carriage returns, or line breaks — none of those are part
-  of the producer format.
-- `ciphertext_sha256` — integrity digest over the **raw** blob; exactly **64 lowercase
-  hex** characters. TAC recomputes after base64-decode and rejects on mismatch (`422`)
-  before attempting decryption.
+  sealed-box blob: exactly the `box.SealAnonymous` output — ephemeral X25519 public key ‖
+  ciphertext ‖ Poly1305 tag, a fixed **48-byte overhead**, with **no `CVRTSB01` magic or
+  version prefix**. **No** URL-safe alphabet, **no** whitespace, carriage returns, or line
+  breaks — none of those are part of the producer format.
+- `ciphertext_sha256` — integrity digest over the **raw sealed-box blob** (the exact bytes
+  above, pre-base64); exactly **64 lowercase hex** characters. TAC recomputes after
+  base64-decode and rejects on mismatch (`422`) before attempting decryption.
 - `sample_id` — exactly **32 lowercase hex** characters (128-bit random); equals the
   `Idempotency-Key` header.
 - `registry_hash` — exactly **64 lowercase hex** characters.
