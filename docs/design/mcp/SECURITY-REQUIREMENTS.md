@@ -16,6 +16,25 @@ Canonical **requirement-ID registry** for the PR-0 package. IDs are stable and r
 > listener and PR-6 policy engine land — this note records that the PR-3 *code* exists, not that the end-to-end
 > control is deployed.
 
+> **Update (PR-4) — credential-broker requirements now IMPLEMENTED (dormant).** `MCP-AUTH-005` (no client-token
+> passthrough) and `MCP-CRED-001,002,003,004,005,006` are realized listener-independently in
+> `internal/mcp/credentials/{profile,provider,broker}` (reusing the `internal/secret` boundary via two minimal
+> audited additions, `NewSealed`/`MemoryProvider`). Proven by: the broker consumes only the PR-3
+> `identity.ResolvedContext` and the provider request carries only the one-way correlation digest (`MCP-CRED-001`,
+> `MCP-AUTH-005`); profiles are scoped by tenant/environment/server/tool/resource with a power ceiling and
+> provider-effective-scope validation rejects any broadening (`MCP-CRED-002`); short-TTL leases with an atomic
+> validate-before-publish rotation state machine + bounded grace and immediate tombstone-and-cache-invalidate
+> revocation (`MCP-CRED-003`); a scoped zeroize-on-success/error/panic materialization callback, sanitized
+> `SafeResult`, canary-proof provider-error sanitization, and no exported byte/string secret accessor
+> (`MCP-CRED-004`); a bounded, partitioned, TTL, encrypted-envelope-only cache with deterministic eviction
+> (`MCP-CRED-005`); and a fail-closed posture — high-risk always fails closed, low-risk cached fallback only under
+> explicit profile policy with a valid, fresh, non-revoked entry (`MCP-CRED-006`). The injected
+> pre-materialization gate (policy = PR-6, durable events = PR-8) is an interface only here. The code is NOT wired
+> into `package main` and performs no network I/O (trusted keys, introspection results and provider material arrive
+> as explicit inputs), so the operative `Status` stays `Proposed` until the PR-5 listener and PR-6 policy engine
+> land — this records that the PR-4 *code* exists, not that the end-to-end control is deployed. `MCP-CRED-004`'s
+> event-redaction leg and the durable spool stay PR-8.
+
 keywords **MUST / MUST NOT / SHOULD / MAY** are used deliberately. "Gate" names the slice or CI gate that
 must be green before the requirement is considered satisfied. Every requirement carries: statement,
 rationale, threat IDs, control owner, implementation owner, verification method, evidence required.

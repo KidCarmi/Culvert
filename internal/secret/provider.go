@@ -146,6 +146,44 @@ func (p *envProvider) kek() ([]byte, error) {
 	return k, nil
 }
 
+// ── In-memory KEK (test / dormant-package support) ─────────────────────────
+
+// memProvider holds a KEK entirely in memory. It backs MemoryProvider, the
+// deterministic KEK source used by the dormant credential-broker package
+// (internal/mcp/credentials) for its encrypted cache in tests, benchmarks and
+// fuzzing, where a process-global env var (model C) or an on-disk file (model B)
+// would be racy or unavailable. It holds the KEK at the same trust level as the
+// file/env sources (the raw bytes never cross the Provider boundary) and never
+// formats them.
+type memProvider struct {
+	k []byte
+}
+
+var _ kekSource = (*memProvider)(nil)
+
+func (p *memProvider) name() string { return "memory" }
+
+func (p *memProvider) kek() ([]byte, error) {
+	if len(p.k) != KEKLen {
+		return nil, ErrKEKMissing
+	}
+	out := make([]byte, KEKLen)
+	copy(out, p.k)
+	return out, nil
+}
+
+// MemoryProvider returns an opaque Provider backed by an in-memory KEK. It COPIES
+// key so the caller's slice is not retained. key must be exactly KEKLen bytes; an
+// out-of-size key yields a provider that fails closed (ErrKEKMissing) on use. This
+// is the smallest in-memory KEK source for exercising the encrypted-cache path of
+// the dormant credential broker deterministically; production consumers still use
+// FileProvider/EnvProvider/ResolveProvider.
+func MemoryProvider(key []byte) *Provider {
+	k := make([]byte, len(key))
+	copy(k, key)
+	return &Provider{src: &memProvider{k: k}}
+}
+
 // ── Constructors / resolution ──────────────────────────────────────────────
 
 // FileProvider returns an opaque Provider backed by the KEK file at path

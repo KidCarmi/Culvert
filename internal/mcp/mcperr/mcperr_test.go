@@ -41,6 +41,17 @@ func TestReasonCodesStable(t *testing.T) {
 		{ReasonMTLSBindingMismatch, "mtls_binding_mismatch"}, {ReasonInactiveToken, "inactive_token"},
 		{ReasonSessionIdentityBound, "session_identity_bound"}, {ReasonSessionIdentityRebind, "session_identity_rebind"},
 		{ReasonRegistryServerUnavailable, "registry_server_unavailable"},
+		{ReasonCredentialProfileMissing, "credential_profile_missing"}, {ReasonCredentialProfileDisabled, "credential_profile_disabled"},
+		{ReasonCredentialProfileAmbiguous, "credential_profile_ambiguous"}, {ReasonProviderUnavailable, "provider_unavailable"},
+		{ReasonProviderUnsupportedOperation, "provider_unsupported_operation"}, {ReasonProviderInvalidMaterial, "provider_invalid_material"},
+		{ReasonCredentialScopeMismatch, "credential_scope_mismatch"}, {ReasonCredentialPowerExceeded, "credential_power_exceeded"},
+		{ReasonCredentialExpired, "credential_expired"}, {ReasonCredentialRevoked, "credential_revoked"},
+		{ReasonCredentialVersionStale, "credential_version_stale"}, {ReasonCacheMiss, "cache_miss"},
+		{ReasonCacheFull, "cache_full"}, {ReasonCacheIntegrityFailure, "cache_integrity_failure"},
+		{ReasonRotationInProgress, "rotation_in_progress"}, {ReasonRotationFailed, "rotation_failed"},
+		{ReasonRevocationFailed, "revocation_failed"}, {ReasonMaterializationGateDenied, "materialization_gate_denied"},
+		{ReasonMaterializationGateUnavailable, "materialization_gate_unavailable"}, {ReasonMaterialAlreadyConsumed, "material_already_consumed"},
+		{ReasonCredentialKindUnsupported, "credential_kind_unsupported"},
 	}
 	seen := map[Reason]bool{}
 	for _, p := range want {
