@@ -219,6 +219,21 @@ target PR live in [SECURITY-REQUIREMENTS.md](SECURITY-REQUIREMENTS.md); threat c
 > agent's token is valid only for Culvert; after a policy ALLOW-class decision, Culvert's broker selects
 > a short-lived, scoped, revocable upstream credential on the agent's behalf.
 
+> **Update (PR-4) — the credential broker is IMPLEMENTED (dormant).** The model in this section is realized
+> listener-independently in `internal/mcp/credentials/{profile,provider,broker}` (`MCP-CRED-001..006`,
+> `MCP-AUTH-005`): immutable credential profiles (§7.1) with opaque ids scoped by tenant/environment/server/tool/
+> resource and a power ceiling; a narrow provider interface (§7.2) returning an OPAQUE `secret.Sealed` handle +
+> non-secret lease (never raw bytes/strings/secret-bearing errors); a two-phase `Plan`→`Materialize` flow where an
+> injected pre-materialization gate runs BEFORE any cache decrypt or provider fetch (policy = PR-6, durable events
+> = PR-8 supply the gate later); the §7.3 failure matrix (high-risk fail-closed, low-risk cached fallback only under
+> explicit policy); atomic rotation + immediate revocation; and a bounded, partitioned, encrypted-envelope-only
+> cache. It reuses the `internal/secret` containment boundary (two minimal audited additions, `NewSealed`/
+> `MemoryProvider`) — no second secret container. The agent still never holds a credential and the client token is
+> never forwarded upstream (the broker consumes only the PR-3 resolved identity; the provider request carries only
+> the one-way correlation digest). NOT wired into `package main`; no network I/O — the actual upstream call, the
+> policy decision and the durable event spool are PR-5/PR-6/PR-8. Provenance/`[INFER]`-net-new tags below describe
+> the pre-PR-4 codebase and are retained as the historical record.
+
 ### 7.1 Credential Profiles
 
 Profiles are partitioned by:

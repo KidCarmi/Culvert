@@ -199,6 +199,63 @@ const (
 	// ReasonRegistryServerUnavailable — the Gateway resource names a ServerID that is
 	// not registered or not enabled in the live registry snapshot.
 	ReasonRegistryServerUnavailable
+
+	// ── PR-4 credential-broker reasons ────────────────────────────────────────
+
+	// ReasonCredentialProfileMissing — no credential profile resolves for the plan.
+	ReasonCredentialProfileMissing
+	// ReasonCredentialProfileDisabled — the selected profile exists but is disabled.
+	ReasonCredentialProfileDisabled
+	// ReasonCredentialProfileAmbiguous — more than one profile matches; selection is
+	// not mechanically unique, so the broker fails closed rather than guessing.
+	ReasonCredentialProfileAmbiguous
+	// ReasonProviderUnavailable — the credential provider could not be reached or
+	// returned a transient failure (sanitized; no provider error text).
+	ReasonProviderUnavailable
+	// ReasonProviderUnsupportedOperation — the provider does not support the
+	// requested operation (rotate/revoke/inspect).
+	ReasonProviderUnsupportedOperation
+	// ReasonProviderInvalidMaterial — the provider returned material or lease
+	// metadata that is malformed or fails structural validation.
+	ReasonProviderInvalidMaterial
+	// ReasonCredentialScopeMismatch — the provider-returned effective scope exceeds
+	// or does not match the plan's server/tool/resource/tenant/environment scope.
+	ReasonCredentialScopeMismatch
+	// ReasonCredentialPowerExceeded — the credential's effective power exceeds the
+	// profile/plan ceiling (e.g. write/admin material for a read-only plan).
+	ReasonCredentialPowerExceeded
+	// ReasonCredentialExpired — the credential lease is past its expiry.
+	ReasonCredentialExpired
+	// ReasonCredentialRevoked — the credential version/profile is revoked.
+	ReasonCredentialRevoked
+	// ReasonCredentialVersionStale — the plan's profile revision or credential
+	// version is older than the live one.
+	ReasonCredentialVersionStale
+	// ReasonCacheMiss — no cache entry for the requested key (fail closed for
+	// high-risk; fail closed for low-risk unless explicit fallback is enabled).
+	ReasonCacheMiss
+	// ReasonCacheFull — the encrypted cache is at capacity and no room can be
+	// reclaimed; the broker fails closed rather than growing unbounded.
+	ReasonCacheFull
+	// ReasonCacheIntegrityFailure — a cached envelope failed to decrypt/authenticate.
+	ReasonCacheIntegrityFailure
+	// ReasonRotationInProgress — a concurrent rotation for the profile is underway
+	// and the request cannot be serviced (serialized/rejected).
+	ReasonRotationInProgress
+	// ReasonRotationFailed — a rotation could not validate a successor; the current
+	// version stays active.
+	ReasonRotationFailed
+	// ReasonRevocationFailed — a provider-side revoke failed; local use stays blocked.
+	ReasonRevocationFailed
+	// ReasonMaterializationGateDenied — the pre-materialization gate denied the plan.
+	ReasonMaterializationGateDenied
+	// ReasonMaterializationGateUnavailable — the pre-materialization gate could not
+	// render a decision (fail closed; provider not called, cache not decrypted).
+	ReasonMaterializationGateUnavailable
+	// ReasonMaterialAlreadyConsumed — a single-use material handle was consumed twice.
+	ReasonMaterialAlreadyConsumed
+	// ReasonCredentialKindUnsupported — the plan's credential kind is not supported.
+	ReasonCredentialKindUnsupported
 )
 
 // reasonCode maps each Reason to its stable machine string. The strings are part
@@ -258,6 +315,28 @@ var reasonCode = map[Reason]string{ // #nosec G101 -- stable machine-readable er
 	ReasonSessionIdentityBound:      "session_identity_bound",
 	ReasonSessionIdentityRebind:     "session_identity_rebind",
 	ReasonRegistryServerUnavailable: "registry_server_unavailable",
+
+	ReasonCredentialProfileMissing:       "credential_profile_missing",
+	ReasonCredentialProfileDisabled:      "credential_profile_disabled",
+	ReasonCredentialProfileAmbiguous:     "credential_profile_ambiguous",
+	ReasonProviderUnavailable:            "provider_unavailable",
+	ReasonProviderUnsupportedOperation:   "provider_unsupported_operation",
+	ReasonProviderInvalidMaterial:        "provider_invalid_material",
+	ReasonCredentialScopeMismatch:        "credential_scope_mismatch",
+	ReasonCredentialPowerExceeded:        "credential_power_exceeded",
+	ReasonCredentialExpired:              "credential_expired",
+	ReasonCredentialRevoked:              "credential_revoked",
+	ReasonCredentialVersionStale:         "credential_version_stale",
+	ReasonCacheMiss:                      "cache_miss",
+	ReasonCacheFull:                      "cache_full",
+	ReasonCacheIntegrityFailure:          "cache_integrity_failure",
+	ReasonRotationInProgress:             "rotation_in_progress",
+	ReasonRotationFailed:                 "rotation_failed",
+	ReasonRevocationFailed:               "revocation_failed",
+	ReasonMaterializationGateDenied:      "materialization_gate_denied",
+	ReasonMaterializationGateUnavailable: "materialization_gate_unavailable",
+	ReasonMaterialAlreadyConsumed:        "material_already_consumed",
+	ReasonCredentialKindUnsupported:      "credential_kind_unsupported",
 }
 
 // Code returns the stable machine string for the reason (e.g. "malformed_json").

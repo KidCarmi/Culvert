@@ -189,6 +189,23 @@ func Open(envelope []byte, p *Provider) (*Sealed, error) {
 // Sealed must only ever originate inside this package.
 func sealedOf(plaintext []byte) *Sealed { return &Sealed{b: plaintext} }
 
+// NewSealed wraps caller-owned plaintext in an opaque, single-use Sealed handle.
+// It TAKES OWNERSHIP of b: the caller must not read, reuse, or retain b after the
+// call, because the returned Sealed zeroizes the SAME backing array on consumption
+// (WithPlaintext) or Destroy. It is the smallest ownership-taking constructor for
+// credential-provider adapters (internal/mcp/credentials) that materialize secret
+// bytes (e.g. a fetched lease secret or a short-lived workload-identity assertion)
+// and must hand back an opaque handle rather than raw bytes: the plaintext stays
+// inside this compiler-enforced boundary (Sealed has no byte-returning accessor and
+// redacts under every fmt verb), and there is no formatting of the plaintext. A nil
+// or empty b yields an already-consumed handle whose WithPlaintext fails closed.
+func NewSealed(b []byte) *Sealed {
+	if len(b) == 0 {
+		return &Sealed{}
+	}
+	return &Sealed{b: b}
+}
+
 // OpenOrPlaintext returns an opaque handle for raw on-disk key bytes following
 // the content-driven at-rest contract shared by every key-at-rest consumer: if
 // the bytes are a PSCA envelope it decrypts them (fail closed on missing/wrong
