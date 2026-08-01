@@ -26,9 +26,9 @@ func FuzzIngest(f *testing.F) {
 	l := limitsForFuzz()
 	f.Fuzz(func(t *testing.T, raw []byte) {
 		c := New(l)
-		srv := serverRecord(testServer, testIdentity)
+		reg := regWith(t, l, [2]string{string(testServer), string(testIdentity)})
 		before := c.Current()
-		snap, rep, err := c.Ingest(srv, DiscoveryInput{ServerID: srv.ID, Identity: testIdentity, Raw: raw})
+		snap, rep, err := c.Ingest(reg, DiscoveryInput{ServerID: testServer, Identity: testIdentity, Raw: raw})
 		if err != nil {
 			if c.Current() != before {
 				t.Fatal("rejected ingest mutated the catalog")

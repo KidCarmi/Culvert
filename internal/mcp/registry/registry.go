@@ -4,6 +4,7 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/limits"
 	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
@@ -167,6 +168,40 @@ func (r *Registry) SetEnabled(id ServerID, enabled bool) (ServerRecord, error) {
 	updated := *cur
 	updated.Enabled = enabled
 	updated.Revision = rev
+	next := base.clone(rev)
+	next.byID[id] = &updated
+	r.cur.Store(next)
+	return updated, nil
+}
+
+// Repin is the documented recovery path after an identity change: it re-pins an
+// EXISTING server to a freshly VERIFIED identity (supplied by the caller — the
+// registry does not perform the verification), clears the mismatch, and re-enables
+// the server under its stable ServerID. It fails for an unknown id or a malformed
+// identity, leaving the snapshot unchanged. This is the ONLY transition that
+// clears VerifyIdentityMismatch, so a mismatched server is never permanently
+// stuck: an operator re-verifies out of band and calls Repin.
+func (r *Registry) Repin(id ServerID, newIdentity Identity, updatedAt time.Time) (ServerRecord, error) {
+	if newIdentity == "" {
+		return ServerRecord{}, invalidReg("pinned identity is required")
+	}
+	if err := validateOpaqueToken(string(newIdentity), r.lim.MaxIdentityBytes(), "identity"); err != nil {
+		return ServerRecord{}, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	base := r.cur.Load()
+	cur, ok := base.byID[id]
+	if !ok {
+		return ServerRecord{}, mcperr.New(mcperr.ReasonUnregisteredServer, "registry.repin", "server id is not registered")
+	}
+	rev := base.revision + 1
+	updated := *cur
+	updated.PinnedIdentity = newIdentity
+	updated.Verification = VerifyVerified
+	updated.Enabled = true
+	updated.Revision = rev
+	updated.UpdatedAt = updatedAt
 	next := base.clone(rev)
 	next.byID[id] = &updated
 	r.cur.Store(next)

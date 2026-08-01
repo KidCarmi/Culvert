@@ -60,12 +60,12 @@ func BenchmarkClassifyTypicalCycle(b *testing.B) {
 
 func BenchmarkIngestPublish(b *testing.B) {
 	l := limitsForFuzz()
-	srv := serverRecord(testServer, testIdentity)
+	reg := regWith(b, l, [2]string{string(testServer), string(testIdentity)})
 	raw := result(`{"name":"a","inputSchema":` + typicalSchema + `}`)
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		c := New(l)
-		if _, _, err := c.Ingest(srv, DiscoveryInput{ServerID: srv.ID, Identity: testIdentity, Raw: raw}); err != nil {
+		if _, _, err := c.Ingest(reg, DiscoveryInput{ServerID: testServer, Identity: testIdentity, Raw: raw}); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -74,8 +74,8 @@ func BenchmarkIngestPublish(b *testing.B) {
 func BenchmarkParallelSnapshotReads(b *testing.B) {
 	l := limitsForFuzz()
 	c := New(l)
-	srv := serverRecord(testServer, testIdentity)
-	_, _, _ = c.Ingest(srv, DiscoveryInput{ServerID: srv.ID, Identity: testIdentity, Raw: result(`{"name":"a","inputSchema":` + typicalSchema + `}`)})
+	reg := regWith(b, l, [2]string{string(testServer), string(testIdentity)})
+	_, _, _ = c.Ingest(reg, DiscoveryInput{ServerID: testServer, Identity: testIdentity, Raw: result(`{"name":"a","inputSchema":` + typicalSchema + `}`)})
 	b.ReportAllocs()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {

@@ -42,6 +42,32 @@ const (
 	KindObject
 )
 
+// Clone returns a deep copy of the node: fresh slices and child nodes, sharing no
+// mutable state with the original. It lets a snapshot hand out schema trees a
+// caller can inspect (or even mutate) without corrupting the immutable stored
+// tree or racing lock-free readers.
+func (n *Node) Clone() *Node {
+	if n == nil {
+		return nil
+	}
+	out := &Node{Kind: n.Kind, Bool: n.Bool, Num: n.Num, Str: n.Str}
+	if n.Arr != nil {
+		out.Arr = make([]*Node, len(n.Arr))
+		for i, e := range n.Arr {
+			out.Arr[i] = e.Clone()
+		}
+	}
+	if n.Keys != nil {
+		out.Keys = make([]string, len(n.Keys))
+		copy(out.Keys, n.Keys)
+		out.Vals = make([]*Node, len(n.Vals))
+		for i, v := range n.Vals {
+			out.Vals[i] = v.Clone()
+		}
+	}
+	return out
+}
+
 // Get returns the value for key and whether it is present. Keys are sorted, so
 // this is a binary search — O(log n), deterministic, and allocation-free.
 func (n *Node) Get(key string) (*Node, bool) {
@@ -50,7 +76,7 @@ func (n *Node) Get(key string) (*Node, bool) {
 	}
 	lo, hi := 0, len(n.Keys)
 	for lo < hi {
-		mid := int(uint(lo+hi) >> 1)
+		mid := lo + (hi-lo)/2 // overflow-safe midpoint (no int↔uint conversion)
 		switch {
 		case n.Keys[mid] < key:
 			lo = mid + 1

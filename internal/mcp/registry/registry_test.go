@@ -3,6 +3,7 @@ package registry
 import (
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/limits"
 	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
@@ -115,6 +116,39 @@ func TestIdentityMismatchDisables(t *testing.T) {
 	// A mismatched server cannot be re-enabled by an admin flag.
 	if _, err := r.SetEnabled("s1", true); mcperr.ReasonOf(err) != mcperr.ReasonServerIdentityMismatch {
 		t.Fatalf("re-enable of mismatched server should fail, got %v", err)
+	}
+}
+
+func TestRepinRecoversMismatchedServer(t *testing.T) {
+	r := newReg(t)
+	in := goodReg("s1")
+	_, _ = r.Register(in)
+	// Mismatch disables the server.
+	if _, _, err := r.VerifyIdentity("s1", "spiffe://evil/x"); mcperr.ReasonOf(err) != mcperr.ReasonServerIdentityMismatch {
+		t.Fatalf("verify: %v", err)
+	}
+	if cur, _ := r.Current().Get("s1"); cur.Usable() {
+		t.Fatal("precondition: server should be disabled")
+	}
+	// Repin to a freshly verified identity restores it under the stable id.
+	rec, err := r.Repin("s1", "spiffe://culvert/s1-rotated", time.Unix(2000, 0))
+	if err != nil {
+		t.Fatalf("repin: %v", err)
+	}
+	if !rec.Usable() || rec.Verification != VerifyVerified || rec.PinnedIdentity != "spiffe://culvert/s1-rotated" {
+		t.Fatalf("repinned record not usable/re-pinned: %+v", rec)
+	}
+	// The new identity now verifies; the old one mismatches.
+	if v, _, err := r.VerifyIdentity("s1", "spiffe://culvert/s1-rotated"); v != VerifyVerified || err != nil {
+		t.Fatalf("new identity should verify: v=%v err=%v", v, err)
+	}
+	// Repin of an unknown id fails.
+	if _, err := r.Repin("nope", "x", time.Unix(2000, 0)); mcperr.ReasonOf(err) != mcperr.ReasonUnregisteredServer {
+		t.Fatalf("repin unknown: want unregistered_server, got %v", err)
+	}
+	// Repin with an empty identity fails.
+	if _, err := r.Repin("s1", "", time.Unix(2000, 0)); mcperr.ReasonOf(err) != mcperr.ReasonInvalidRegistration {
+		t.Fatalf("repin empty identity: want invalid_registration, got %v", err)
 	}
 }
 

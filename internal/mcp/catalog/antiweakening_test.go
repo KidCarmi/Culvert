@@ -66,9 +66,9 @@ func TestAntiWeakening_ArbitraryArraySorting(t *testing.T) {
 
 // An unknown tool must never be inserted as usable.
 func TestAntiWeakening_UnknownToolNeverUsable(t *testing.T) {
-	c := New(lim(t))
-	srv := serverRecord(testServer, testIdentity)
-	ingest(t, c, srv, testIdentity, result(`{"name":"x","inputSchema":{"type":"object"}}`))
+	l := lim(t)
+	c, reg := New(l), oneServerReg(t, l)
+	ingest(t, c, reg, testServer, testIdentity, result(`{"name":"x","inputSchema":{"type":"object"}}`))
 	rec, _ := c.Current().Get(ToolKey{Server: testServer, Name: "x"})
 	if rec.Eligibility == Usable {
 		t.Fatal("unknown tool must never be Usable")
@@ -87,13 +87,13 @@ func TestAntiWeakening_UnknownToolNeverUsable(t *testing.T) {
 // Privilege expansion must never be labelled safe narrowing — even when the same
 // observation ALSO carries a genuine narrowing signal (mixed change).
 func TestAntiWeakening_ExpansionNotLabelledNarrowing(t *testing.T) {
-	c := New(lim(t))
-	srv := serverRecord(testServer, testIdentity)
+	l := lim(t)
+	c, reg := New(l), oneServerReg(t, l)
 	// Prior removes an enum value (narrowing) BUT also adds a sensitive property
 	// (expansion). Precedence must pick expansion.
-	ingestApproved(t, c, srv, "t", `{"name":"t","inputSchema":{"type":"object","properties":{"mode":{"enum":["a","b","c"]}}}}`)
+	ingestApproved(t, c, reg, testServer, testIdentity, "t", `{"name":"t","inputSchema":{"type":"object","properties":{"mode":{"enum":["a","b","c"]}}}}`)
 	mixed := `{"name":"t","inputSchema":{"type":"object","properties":{"mode":{"enum":["a"]},"command":{"type":"string"}}}}`
-	rep := ingest(t, c, srv, testIdentity, result(mixed))
+	rep := ingest(t, c, reg, testServer, testIdentity, result(mixed))
 	if classOf(rep, "t") != PrivilegeExpansion {
 		t.Fatalf("mixed narrowing+expansion must classify as privilege_expansion, got %v", classOf(rep, "t"))
 	}
@@ -101,11 +101,11 @@ func TestAntiWeakening_ExpansionNotLabelledNarrowing(t *testing.T) {
 
 // An identity mismatch must never be processed as tool drift.
 func TestAntiWeakening_IdentityMismatchNotToolDrift(t *testing.T) {
-	c := New(lim(t))
-	srv := serverRecord(testServer, testIdentity)
-	ingestApproved(t, c, srv, "t", `{"name":"t","inputSchema":{"type":"object"}}`)
+	l := lim(t)
+	c, reg := New(l), oneServerReg(t, l)
+	ingestApproved(t, c, reg, testServer, testIdentity, "t", `{"name":"t","inputSchema":{"type":"object"}}`)
 	// Even a benign re-observation under a WRONG identity must be refused server-side.
-	_, _, err := c.Ingest(srv, DiscoveryInput{ServerID: srv.ID, Identity: "spiffe://evil/x", Raw: result(`{"name":"t","inputSchema":{"type":"object"}}`)})
+	_, _, err := c.Ingest(reg, DiscoveryInput{ServerID: testServer, Identity: "spiffe://evil/x", Raw: result(`{"name":"t","inputSchema":{"type":"object"}}`)})
 	if mcperr.ReasonOf(err) != mcperr.ReasonServerIdentityMismatch {
 		t.Fatalf("identity mismatch must be a server fault, not tool drift: %v", err)
 	}
@@ -113,10 +113,10 @@ func TestAntiWeakening_IdentityMismatchNotToolDrift(t *testing.T) {
 
 // Duplicate tools must never collapse last-write-wins.
 func TestAntiWeakening_DuplicatesNotLastWriteWins(t *testing.T) {
-	c := New(lim(t))
-	srv := serverRecord(testServer, testIdentity)
+	l := lim(t)
+	c, reg := New(l), oneServerReg(t, l)
 	raw := result(`{"name":"d","inputSchema":{"type":"object"}}`, `{"name":"d","inputSchema":{"type":"string"}}`)
-	_, _, err := c.Ingest(srv, DiscoveryInput{ServerID: srv.ID, Identity: testIdentity, Raw: raw})
+	_, _, err := c.Ingest(reg, DiscoveryInput{ServerID: testServer, Identity: testIdentity, Raw: raw})
 	if mcperr.ReasonOf(err) != mcperr.ReasonDuplicateTool {
 		t.Fatalf("duplicate names must be rejected, not collapsed: %v", err)
 	}
@@ -125,13 +125,13 @@ func TestAntiWeakening_DuplicatesNotLastWriteWins(t *testing.T) {
 // A failed publish must leave the previous snapshot byte-for-byte unchanged
 // (no partial publication).
 func TestAntiWeakening_NoPartialPublication(t *testing.T) {
-	c := New(lim(t))
-	srv := serverRecord(testServer, testIdentity)
-	ingest(t, c, srv, testIdentity, result(`{"name":"a","inputSchema":{}}`))
+	l := lim(t)
+	c, reg := New(l), oneServerReg(t, l)
+	ingest(t, c, reg, testServer, testIdentity, result(`{"name":"a","inputSchema":{}}`))
 	before := c.Current()
 	// A batch whose SECOND tool is malformed must not publish the first.
 	raw := result(`{"name":"b","inputSchema":{}}`, `{"name":"c"}`)
-	if _, _, err := c.Ingest(srv, DiscoveryInput{ServerID: srv.ID, Identity: testIdentity, Raw: raw}); err == nil {
+	if _, _, err := c.Ingest(reg, DiscoveryInput{ServerID: testServer, Identity: testIdentity, Raw: raw}); err == nil {
 		t.Fatal("expected an error for the malformed second tool")
 	}
 	if c.Current() != before {
@@ -146,14 +146,14 @@ func TestAntiWeakening_NoPartialPublication(t *testing.T) {
 func TestAntiWeakening_BoundedCatalogGrowth(t *testing.T) {
 	cfg := smallCatalog(t) // per-server tool cap is four
 	c := New(cfg)
-	srv := serverRecord(testServer, testIdentity)
+	reg := regWith(t, cfg, [2]string{string(testServer), string(testIdentity)})
 	// Just over the per-server tool cap: decodes structurally, then hits the
 	// entity-count capacity gate (capacity_exceeded).
 	tools := make([]string, 0, 5)
 	for i := 0; i < 5; i++ {
 		tools = append(tools, `{"name":"t`+itoaLocal(i)+`","inputSchema":{}}`)
 	}
-	if _, _, err := c.Ingest(srv, DiscoveryInput{ServerID: srv.ID, Identity: testIdentity, Raw: result(tools...)}); mcperr.ReasonOf(err) != mcperr.ReasonCapacityExceeded {
+	if _, _, err := c.Ingest(reg, DiscoveryInput{ServerID: testServer, Identity: testIdentity, Raw: result(tools...)}); mcperr.ReasonOf(err) != mcperr.ReasonCapacityExceeded {
 		t.Fatalf("over-cap discovery must hit capacity, got %v", err)
 	}
 	// A structurally huge array is ALSO bounded (a different, earlier gate).
@@ -161,7 +161,7 @@ func TestAntiWeakening_BoundedCatalogGrowth(t *testing.T) {
 	for i := 0; i < 500; i++ {
 		huge = append(huge, `{"name":"h`+itoaLocal(i)+`","inputSchema":{}}`)
 	}
-	if _, _, err := c.Ingest(srv, DiscoveryInput{ServerID: srv.ID, Identity: testIdentity, Raw: result(huge...)}); mcperr.ReasonOf(err) != mcperr.ReasonResourceLimit {
+	if _, _, err := c.Ingest(reg, DiscoveryInput{ServerID: testServer, Identity: testIdentity, Raw: result(huge...)}); mcperr.ReasonOf(err) != mcperr.ReasonResourceLimit {
 		t.Fatalf("huge array must be structurally bounded, got %v", err)
 	}
 }
@@ -169,15 +169,15 @@ func TestAntiWeakening_BoundedCatalogGrowth(t *testing.T) {
 // --- concurrency ------------------------------------------------------------
 
 func TestConcurrentIngestSameServer(t *testing.T) {
-	c := New(lim(t))
-	srv := serverRecord(testServer, testIdentity)
+	l := lim(t)
+	c, reg := New(l), oneServerReg(t, l)
 	var wg sync.WaitGroup
 	for i := 0; i < 16; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
 			tool := `{"name":"t","inputSchema":{"type":"object","properties":{"p` + itoaLocal(i) + `":{"type":"string"}}}}`
-			_, _, _ = c.Ingest(srv, DiscoveryInput{ServerID: srv.ID, Identity: testIdentity, Raw: result(tool)})
+			_, _, _ = c.Ingest(reg, DiscoveryInput{ServerID: testServer, Identity: testIdentity, Raw: result(tool)})
 		}(i)
 	}
 	// Readers during publication never see a torn snapshot.
@@ -197,33 +197,60 @@ func TestConcurrentIngestSameServer(t *testing.T) {
 }
 
 func TestConcurrentIngestAndDisable(t *testing.T) {
-	c := New(lim(t))
-	srv := serverRecord(testServer, testIdentity)
+	l := lim(t)
+	c, reg := New(l), oneServerReg(t, l)
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 200; i++ {
-			_, _, _ = c.Ingest(srv, DiscoveryInput{ServerID: srv.ID, Identity: testIdentity, Raw: result(`{"name":"t","inputSchema":{"type":"object"}}`)})
+			_, _, _ = c.Ingest(reg, DiscoveryInput{ServerID: testServer, Identity: testIdentity, Raw: result(`{"name":"t","inputSchema":{"type":"object"}}`)})
 		}
 	}()
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 200; i++ {
-			c.DisableServer(testServer)
+			_, _ = c.DisableServer(testServer)
 		}
 	}()
 	wg.Wait()
 }
 
+// TestReturnedSchemaIsDeepCopied proves Snapshot.Get returns schema nodes that a
+// caller can mutate WITHOUT corrupting the immutable stored tree that lock-free
+// readers and later classifications rely on. A shallow copy would alias the
+// snapshot's nodes and let this mutation leak back in.
+func TestReturnedSchemaIsDeepCopied(t *testing.T) {
+	l := lim(t)
+	c, reg := New(l), oneServerReg(t, l)
+	ingest(t, c, reg, testServer, testIdentity, result(`{"name":"t","inputSchema":{"type":"object","properties":{"p":{"type":"string"}}}}`))
+	got, _ := c.Current().Get(ToolKey{Server: testServer, Name: "t"})
+	// Mutate the returned schema tree destructively.
+	got.InputSchema.Keys = nil
+	got.InputSchema.Vals = nil
+	if len(got.InputSchema.Arr) > 0 {
+		got.InputSchema.Arr[0] = nil
+	}
+	// The stored snapshot must be untouched: a re-fetch still has the object keys.
+	again, _ := c.Current().Get(ToolKey{Server: testServer, Name: "t"})
+	if len(again.InputSchema.Keys) == 0 {
+		t.Fatal("mutating a returned schema corrupted the stored snapshot (shallow copy)")
+	}
+	// And a no-material-change re-ingest still classifies correctly (schema intact).
+	rep := ingest(t, c, reg, testServer, testIdentity, result(`{"name":"t","inputSchema":{"type":"object","properties":{"p":{"type":"string"}}}}`))
+	if classOf(rep, "t") != NoMaterialChange {
+		t.Fatalf("stored schema corrupted: class = %v, want no_material_change", classOf(rep, "t"))
+	}
+}
+
 // TryPublish stale semantics: a captured base that is no longer current is rejected.
 func TestStaleBaseSnapshotRejected(t *testing.T) {
-	c := New(lim(t))
-	srv := serverRecord(testServer, testIdentity)
-	ingest(t, c, srv, testIdentity, result(`{"name":"a","inputSchema":{}}`))
+	l := lim(t)
+	c, reg := New(l), oneServerReg(t, l)
+	ingest(t, c, reg, testServer, testIdentity, result(`{"name":"a","inputSchema":{}}`))
 	stale := c.Current()
 	// Advance the catalog so `stale` is no longer current.
-	ingest(t, c, srv, testIdentity, result(`{"name":"b","inputSchema":{}}`))
+	ingest(t, c, reg, testServer, testIdentity, result(`{"name":"b","inputSchema":{}}`))
 	// A single-shot publish against the stale base must be rejected, current unchanged.
 	next := stale.clone(stale.revision + 1)
 	cur := c.Current()
@@ -238,8 +265,8 @@ func TestStaleBaseSnapshotRejected(t *testing.T) {
 // --- malicious / non-compliant corpus --------------------------------------
 
 func TestMaliciousCorpusRejected(t *testing.T) {
-	c := New(lim(t))
-	srv := serverRecord(testServer, testIdentity)
+	l := lim(t)
+	c, reg := New(l), oneServerReg(t, l)
 	corpus := map[string][]byte{
 		"duplicate-json-key":    []byte(`{"tools":[{"name":"a","name":"b","inputSchema":{}}]}`),
 		"invalid-utf8":          append([]byte(`{"tools":[{"name":"`), append([]byte{0xff}, []byte(`","inputSchema":{}}]}`)...)...),
@@ -258,7 +285,7 @@ func TestMaliciousCorpusRejected(t *testing.T) {
 		"top-level-array":       []byte(`[{"name":"a"}]`),
 	}
 	for name, raw := range corpus {
-		if _, _, err := c.Ingest(srv, DiscoveryInput{ServerID: srv.ID, Identity: testIdentity, Raw: raw}); err == nil {
+		if _, _, err := c.Ingest(reg, DiscoveryInput{ServerID: testServer, Identity: testIdentity, Raw: raw}); err == nil {
 			t.Fatalf("%s: malicious input was accepted", name)
 		}
 		if c.Current().Len() != 0 {
@@ -270,9 +297,9 @@ func TestMaliciousCorpusRejected(t *testing.T) {
 func TestMaliciousDeepNestingBounded(t *testing.T) {
 	cfg := smallCatalog(t) // schema depth cap is sixteen
 	c := New(cfg)
-	srv := serverRecord(testServer, testIdentity)
+	reg := regWith(t, cfg, [2]string{string(testServer), string(testIdentity)})
 	deep := `{"name":"a","inputSchema":` + strings.Repeat(`{"properties":{"x":`, 40) + `{}` + strings.Repeat(`}}`, 40) + `}`
-	if _, _, err := c.Ingest(srv, DiscoveryInput{ServerID: srv.ID, Identity: testIdentity, Raw: result(deep)}); mcperr.ReasonOf(err) != mcperr.ReasonResourceLimit {
+	if _, _, err := c.Ingest(reg, DiscoveryInput{ServerID: testServer, Identity: testIdentity, Raw: result(deep)}); mcperr.ReasonOf(err) != mcperr.ReasonResourceLimit {
 		t.Fatalf("deep nesting must hit resource_limit, got %v", err)
 	}
 }
@@ -280,9 +307,9 @@ func TestMaliciousDeepNestingBounded(t *testing.T) {
 func TestMaliciousOversizedSchema(t *testing.T) {
 	cfg := smallCatalog(t) // schema byte cap is 4 KiB
 	c := New(cfg)
-	srv := serverRecord(testServer, testIdentity)
+	reg := regWith(t, cfg, [2]string{string(testServer), string(testIdentity)})
 	big := `{"name":"a","inputSchema":{"type":"object","description":"` + strings.Repeat("A", 5000) + `"}}`
-	if _, _, err := c.Ingest(srv, DiscoveryInput{ServerID: srv.ID, Identity: testIdentity, Raw: result(big)}); mcperr.ReasonOf(err) != mcperr.ReasonResourceLimit {
+	if _, _, err := c.Ingest(reg, DiscoveryInput{ServerID: testServer, Identity: testIdentity, Raw: result(big)}); mcperr.ReasonOf(err) != mcperr.ReasonResourceLimit {
 		t.Fatalf("oversized schema must hit resource_limit, got %v", err)
 	}
 }

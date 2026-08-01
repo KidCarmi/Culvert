@@ -78,20 +78,23 @@ func (s *Snapshot) Revision() uint64 { return s.revision }
 // Len returns the number of catalog entries.
 func (s *Snapshot) Len() int { return len(s.byKey) }
 
-// Get returns a copy of the record for key and whether it is present.
+// Get returns a copy of the record for key and whether it is present. The schema
+// trees are DEEP-COPIED so a caller cannot mutate the immutable stored nodes that
+// lock-free readers and later classifications rely on.
 func (s *Snapshot) Get(key ToolKey) (ToolRecord, bool) {
 	r, ok := s.byKey[key]
 	if !ok {
 		return ToolRecord{}, false
 	}
-	return *r, true
+	return r.deepCopy(), true
 }
 
-// Records returns copies of all entries in deterministic (server, name) order.
+// Records returns copies of all entries in deterministic (server, name) order,
+// with deep-copied schema trees (see Get).
 func (s *Snapshot) Records() []ToolRecord {
 	out := make([]ToolRecord, 0, len(s.byKey))
 	for _, r := range s.byKey {
-		out = append(out, *r)
+		out = append(out, r.deepCopy())
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Key.Server != out[j].Key.Server {
@@ -99,6 +102,16 @@ func (s *Snapshot) Records() []ToolRecord {
 		}
 		return out[i].Key.Name < out[j].Key.Name
 	})
+	return out
+}
+
+// deepCopy returns a ToolRecord value whose schema nodes share no mutable state
+// with the stored record, so a caller can inspect (or mutate) them without
+// corrupting the snapshot other goroutines read lock-free.
+func (r *ToolRecord) deepCopy() ToolRecord {
+	out := *r
+	out.InputSchema = r.InputSchema.Clone()
+	out.OutputSchema = r.OutputSchema.Clone()
 	return out
 }
 
@@ -144,22 +157,27 @@ type Report struct {
 }
 
 // Ingest validates and classifies a discovery result for one server and publishes
-// a new catalog snapshot. It is fail-closed at every server-level gate BEFORE any
-// tool is processed, so a server-identity problem can never be laundered into a
-// tool-schema verdict, and it is all-or-nothing (a validation error publishes
-// NOTHING, leaving the previous snapshot unchanged):
+// a new catalog snapshot. The server record is read from the LIVE registry
+// snapshot (never trusted from the caller), so a stale record captured before a
+// VerifyIdentity mismatch — or a record fabricated without registration — can
+// never bypass the registered-and-usable gate. It is fail-closed at every
+// server-level gate BEFORE any tool is processed, so a server-identity problem
+// can never be laundered into a tool-schema verdict, and it is all-or-nothing (a
+// validation error publishes NOTHING, leaving the previous snapshot unchanged):
 //
-//   - the server must be registered and usable (else unregistered/mismatch error);
-//   - the supplied verified identity must EXACTLY match the pin (else a
+//   - the server must be registered and usable in the CURRENT registry snapshot
+//     (else unregistered/mismatch error);
+//   - the supplied verified identity must EXACTLY match the live pin (else a
 //     server-identity mismatch — discovery is not processed);
 //   - the whole result parses and validates strictly (else malformed/limit error).
 //
 // Each tool is classified against its last-known record and written with a
 // disposition that never yields Usable and never auto-clears an existing
 // quarantine.
-func (c *Catalog) Ingest(server registry.ServerRecord, in DiscoveryInput) (*Snapshot, *Report, error) {
-	if server.ID != in.ServerID {
-		return nil, nil, mcperr.New(mcperr.ReasonUnregisteredServer, "catalog.ingest", "server record does not match input server id")
+func (c *Catalog) Ingest(reg *registry.Registry, in DiscoveryInput) (*Snapshot, *Report, error) {
+	server, ok := reg.Current().Get(in.ServerID)
+	if !ok {
+		return nil, nil, mcperr.New(mcperr.ReasonUnregisteredServer, "catalog.ingest", "server id is not registered")
 	}
 	if !server.Usable() {
 		if server.Verification == registry.VerifyIdentityMismatch {
@@ -215,6 +233,7 @@ func (c *Catalog) buildIngest(base *Snapshot, serverID registry.ServerID, observ
 	for _, obs := range observed {
 		prior := base.byKey[obs.Key] // nil ⇒ unknown tool
 		class, diffs := Classify(prior, obs)
+		diffs = boundDiffs(diffs, c.lim.MaxDiffOps())
 		elig := dispositionFor(class, prior)
 		rec := *obs
 		rec.Eligibility = elig
@@ -238,8 +257,11 @@ func (c *Catalog) buildIngest(base *Snapshot, serverID registry.ServerID, observ
 // server-identity change: called after registry.VerifyIdentity reports a
 // mismatch, it makes the whole server's tools unusable atomically — no partial
 // mutation, and the mismatch is never expressible as per-tool drift. It is a
-// no-op (no new revision) if nothing changes.
-func (c *Catalog) DisableServer(serverID registry.ServerID) *Snapshot {
+// no-op (no new revision) if nothing changes. Because this is a SECURITY
+// transition that must not be silently dropped, it returns ReasonStaleSnapshot if
+// contention exhausts the retry bound (mirroring Ingest) so the caller retries —
+// it never fails open by returning a snapshot in which the tools are still usable.
+func (c *Catalog) DisableServer(serverID registry.ServerID) (*Snapshot, error) {
 	for attempt := 0; attempt < maxPublishRetries; attempt++ {
 		base := c.cur.Load()
 		var touched bool
@@ -256,13 +278,28 @@ func (c *Catalog) DisableServer(serverID registry.ServerID) *Snapshot {
 			touched = true
 		}
 		if !touched {
-			return base
+			return base, nil
 		}
-		if c.cur.CompareAndSwap(base, next) {
-			return next
+		if err := c.tryPublish(base, next); err == nil {
+			return next, nil
 		}
 	}
-	return c.cur.Load()
+	return nil, mcperr.New(mcperr.ReasonStaleSnapshot, "catalog.disable", "snapshot contention exceeded retry bound")
+}
+
+// boundDiffs enforces the MaxDiffOps bound on the reported field diffs: if a
+// classification somehow produced more diffs than the configured cap, the list is
+// deterministically truncated and a marker appended, so the diff report can never
+// grow without bound. In practice the diff count is already bounded by the schema
+// structural limits (depth/members/elements/bytes), so this is a safety net.
+func boundDiffs(diffs []FieldDiff, maxOps int) []FieldDiff {
+	if maxOps <= 0 || len(diffs) <= maxOps {
+		return diffs
+	}
+	out := make([]FieldDiff, 0, maxOps+1)
+	out = append(out, diffs[:maxOps]...)
+	out = append(out, FieldDiff{Field: "input_schema", Change: "semantic", Detail: "diff truncated at MaxDiffOps"})
+	return out
 }
 
 // dispositionFor maps a drift class to an eligibility, applying the sticky-

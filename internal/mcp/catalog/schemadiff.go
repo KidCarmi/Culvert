@@ -130,8 +130,15 @@ func diffType(prior, observed *canonical.Node, s *schemaSignals) {
 		s.narrow("type constraint added")
 		return
 	}
-	pset := typeSet(po)
-	oset := typeSet(oo)
+	pset, pwf := typeSet(po)
+	oset, owf := typeSet(oo)
+	if !pwf || !owf {
+		// A malformed/degenerate `type` (non-string/array, mixed array, or empty
+		// array) is ambiguous — a validator that ignores it treats the field as any
+		// type, so it must NEVER be labelled narrowing.
+		s.ambig("type changed")
+		return
+	}
 	if eqSet(pset, oset) {
 		return
 	}
@@ -145,31 +152,51 @@ func diffType(prior, observed *canonical.Node, s *schemaSignals) {
 	}
 }
 
-// typeSet normalizes a `type` value (string or array of strings) to a set.
-func typeSet(n *canonical.Node) map[string]struct{} {
+// typeSet normalizes a well-formed `type` value (a non-empty string, or a
+// non-empty array of strings) to a set, returning ok=false for any degenerate or
+// malformed shape (a non-string/array value, an empty array, or an array with a
+// non-string element) so the caller can treat it as ambiguous rather than a shrink.
+func typeSet(n *canonical.Node) (map[string]struct{}, bool) {
 	set := map[string]struct{}{}
 	if n == nil {
-		return set
+		return set, false
 	}
 	switch n.Kind {
 	case canonical.KindString:
 		set[n.Str] = struct{}{}
+		return set, true
 	case canonical.KindArray:
-		for _, e := range n.Arr {
-			if e.Kind == canonical.KindString {
-				set[e.Str] = struct{}{}
-			}
+		if len(n.Arr) == 0 {
+			return set, false
 		}
+		for _, e := range n.Arr {
+			if e.Kind != canonical.KindString {
+				return set, false
+			}
+			set[e.Str] = struct{}{}
+		}
+		return set, true
+	default:
+		return set, false
 	}
-	return set
 }
 
-// diffEnum: values added (superset) is broadening; values only removed is
-// narrowing; disjoint change is ambiguous. Enum arrays are already sorted.
+// diffEnum: dropping an `enum` (present → absent) removes the value allow-list
+// entirely — the field goes from a fixed set to ANY value, a real broadening —
+// so it is EXPANSION, never narrowing (the sibling of the `type`-drop case).
+// Adding one is narrowing. With both present, values added is broadening and
+// values only removed is narrowing. Enum arrays are already canonically sorted.
 func diffEnum(prior, observed *canonical.Node, s *schemaSignals) {
 	po, pok := prior.Get("enum")
 	oo, ook := observed.Get("enum")
-	if !pok && !ook {
+	switch {
+	case !pok && !ook:
+		return
+	case pok && !ook:
+		s.expand("enum constraint dropped (now any value)")
+		return
+	case !pok && ook:
+		s.narrow("enum constraint added")
 		return
 	}
 	pset := encodedSet(po)
@@ -268,8 +295,12 @@ func numberOf(n *canonical.Node, key string) (string, bool) {
 
 // diffProperties recurses per property. A property present in both is diffed
 // recursively; an added property is expansion if sensitive/URL-shaped else
-// ambiguous (input-surface growth needing review); a removed property is
-// narrowing (a defined input withdrawn).
+// ambiguous (input-surface growth needing review). Removing a property is
+// NARROWING only when the observed schema FORBIDS additional properties (the key
+// is then rejected outright); when additional properties are permitted, removing
+// a property's schema does not withdraw the input — it strips that key's value
+// constraint, BROADENING what it accepts, so it is classified semantic
+// (ambiguous), never safe narrowing.
 func diffProperties(prior, observed *canonical.Node, s *schemaSignals) {
 	pp, _ := prior.Get("properties")
 	op, _ := observed.Get("properties")
@@ -292,9 +323,15 @@ func diffProperties(prior, observed *canonical.Node, s *schemaSignals) {
 			s.ambig("optional property added: " + safeName(name))
 		}
 	}
+	observedForbidsAdditional := additionalForbidden(observed)
 	for name := range priorNames {
-		if _, still := observedNames[name]; !still {
-			s.narrow("property removed: " + safeName(name))
+		if _, still := observedNames[name]; still {
+			continue
+		}
+		if observedForbidsAdditional {
+			s.narrow("property removed (additional properties forbidden): " + safeName(name))
+		} else {
+			s.ambig("property schema removed while additional properties permitted: " + safeName(name))
 		}
 	}
 }

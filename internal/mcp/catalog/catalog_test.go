@@ -19,7 +19,8 @@ func lim(t *testing.T) limits.CatalogLimits {
 	return limits.DefaultCatalog()
 }
 
-// serverRecord builds a usable Gateway server record for ingestion tests.
+// serverRecord builds a usable Gateway server record (used directly by the
+// Classify/fingerprint tests that do not go through Ingest).
 func serverRecord(id registry.ServerID, identity registry.Identity) registry.ServerRecord {
 	return registry.ServerRecord{
 		ID:                id,
@@ -29,6 +30,31 @@ func serverRecord(id registry.ServerID, identity registry.Identity) registry.Ser
 		Enabled:           true,
 		Verification:      registry.VerifyVerified,
 	}
+}
+
+// regWith returns a registry with each (id, identity) registered as a usable
+// Gateway server — the live authority Ingest consults. It takes testing.TB so
+// benchmarks can use it too.
+func regWith(tb testing.TB, l limits.CatalogLimits, pairs ...[2]string) *registry.Registry {
+	tb.Helper()
+	reg := registry.New(l)
+	for _, p := range pairs {
+		if _, err := reg.Register(registry.Registration{
+			ID:                registry.ServerID(p[0]),
+			Endpoint:          registry.Endpoint("mcp://" + p[0]),
+			PinnedIdentity:    registry.Identity(p[1]),
+			Capability:        protocol.Gateway,
+			CredentialProfile: "cred-a",
+		}); err != nil {
+			tb.Fatalf("register %s: %v", p[0], err)
+		}
+	}
+	return reg
+}
+
+// oneServerReg is regWith for the single default test server.
+func oneServerReg(tb testing.TB, l limits.CatalogLimits) *registry.Registry {
+	return regWith(tb, l, [2]string{string(testServer), string(testIdentity)})
 }
 
 // result wraps one or more tool JSON blobs into a tools/list result.
@@ -43,9 +69,9 @@ func result(tools ...string) []byte {
 	return []byte(out + `]}`)
 }
 
-func ingest(t *testing.T, c *Catalog, srv registry.ServerRecord, identity registry.Identity, raw []byte) *Report {
+func ingest(t *testing.T, c *Catalog, reg *registry.Registry, id registry.ServerID, identity registry.Identity, raw []byte) *Report {
 	t.Helper()
-	_, rep, err := c.Ingest(srv, DiscoveryInput{ServerID: srv.ID, Identity: identity, Raw: raw})
+	_, rep, err := c.Ingest(reg, DiscoveryInput{ServerID: id, Identity: identity, Raw: raw})
 	if err != nil {
 		t.Fatalf("ingest: %v", err)
 	}
@@ -69,12 +95,50 @@ func eligOf(c *Catalog, name string) Eligibility {
 	return rec.Eligibility
 }
 
+func diffsFor(rep *Report, name string) []FieldDiff {
+	for _, o := range rep.Observations {
+		if o.Key.Name == name {
+			return o.Diffs
+		}
+	}
+	return nil
+}
+
+// ingestApproved ingests a tool then whitebox-sets its record to Usable, standing
+// in for the (out-of-PR-2) human approval so drift-from-approved can be tested.
+func ingestApproved(t *testing.T, c *Catalog, reg *registry.Registry, id registry.ServerID, identity registry.Identity, name, tool string) {
+	t.Helper()
+	ingest(t, c, reg, id, identity, result(tool))
+	base := c.Current()
+	next := base.clone(base.revision + 1)
+	key := ToolKey{Server: id, Name: name}
+	rec := *next.byKey[key]
+	rec.Eligibility = Usable
+	next.byKey[key] = &rec
+	c.cur.Store(next)
+}
+
+func smallCatalog(t *testing.T) limits.CatalogLimits {
+	t.Helper()
+	c, err := limits.NewCatalog(limits.CatalogConfig{
+		MaxServers: 8, MaxToolsPerServer: 4, MaxCatalogEntries: 8,
+		MaxDiscoveryBytes: 65536, MaxSchemaBytes: 4096, MaxDescriptionBytes: 1024,
+		MaxSchemaDepth: 16, MaxObjectMembers: 64, MaxArrayElements: 64, MaxDiffOps: 4096,
+		MaxNameBytes: 128, MaxEndpointBytes: 512, MaxIdentityBytes: 512,
+		MaxServerIDBytes: 128, MaxCredProfileBytes: 128, MaxOwnerScopeBytes: 128,
+	})
+	if err != nil {
+		t.Fatalf("small catalog limits: %v", err)
+	}
+	return c
+}
+
 // --- the six drift fixtures ------------------------------------------------
 
 func TestFirstObservationUnknownQuarantined(t *testing.T) {
-	c := New(lim(t))
-	srv := serverRecord(testServer, testIdentity)
-	rep := ingest(t, c, srv, testIdentity, result(`{"name":"read","inputSchema":{"type":"object"}}`))
+	l := lim(t)
+	c, reg := New(l), oneServerReg(t, l)
+	rep := ingest(t, c, reg, testServer, testIdentity, result(`{"name":"read","inputSchema":{"type":"object"}}`))
 	if classOf(rep, "read") != UnknownTool {
 		t.Fatalf("first observation class = %v, want unknown_tool", classOf(rep, "read"))
 	}
@@ -84,32 +148,29 @@ func TestFirstObservationUnknownQuarantined(t *testing.T) {
 }
 
 func TestNoMaterialChange(t *testing.T) {
-	c := New(lim(t))
-	srv := serverRecord(testServer, testIdentity)
+	l := lim(t)
+	c, reg := New(l), oneServerReg(t, l)
 	tool := `{"name":"read","inputSchema":{"type":"object","properties":{"path":{"type":"string"}}}}`
-	ingest(t, c, srv, testIdentity, result(tool))
-	// Re-ingest the SAME tool with cosmetic re-formatting (whitespace, key order).
+	ingest(t, c, reg, testServer, testIdentity, result(tool))
 	reformatted := `{"inputSchema":{"properties":{"path":{"type":"string"}},"type":"object"},"name":"read"}`
-	rep := ingest(t, c, srv, testIdentity, result(reformatted))
+	rep := ingest(t, c, reg, testServer, testIdentity, result(reformatted))
 	if classOf(rep, "read") != NoMaterialChange {
 		t.Fatalf("reformatted re-observation class = %v, want no_material_change", classOf(rep, "read"))
 	}
 }
 
 func TestSafeNarrowingFixture(t *testing.T) {
-	c := New(lim(t))
-	srv := serverRecord(testServer, testIdentity)
-	ingestApproved(t, c, srv, "op", `{"name":"op","inputSchema":{"type":"object","properties":{"mode":{"enum":["read","write","admin"]}}}}`)
-	// Remove an enum value (none added), add a required property: proven narrowing.
+	l := lim(t)
+	c, reg := New(l), oneServerReg(t, l)
+	ingestApproved(t, c, reg, testServer, testIdentity, "op", `{"name":"op","inputSchema":{"type":"object","properties":{"mode":{"enum":["read","write","admin"]}}}}`)
 	narrowed := `{"name":"op","inputSchema":{"type":"object","required":["mode"],"properties":{"mode":{"enum":["read","write"]}}}}`
-	rep := ingest(t, c, srv, testIdentity, result(narrowed))
+	rep := ingest(t, c, reg, testServer, testIdentity, result(narrowed))
 	if classOf(rep, "op") != SafeNarrowing {
 		t.Fatalf("class = %v, want safe_narrowing; diffs=%v", classOf(rep, "op"), diffsFor(rep, "op"))
 	}
 }
 
 func TestPrivilegeExpansionFixture(t *testing.T) {
-	srv := serverRecord(testServer, testIdentity)
 	cases := map[string][2]string{
 		"enum-added":       {`{"name":"t","inputSchema":{"type":"object","properties":{"mode":{"enum":["read"]}}}}`, `{"name":"t","inputSchema":{"type":"object","properties":{"mode":{"enum":["read","admin"]}}}}`},
 		"required-removed": {`{"name":"t","inputSchema":{"type":"object","required":["confirm"],"properties":{"confirm":{"type":"boolean"}}}}`, `{"name":"t","inputSchema":{"type":"object","properties":{"confirm":{"type":"boolean"}}}}`},
@@ -119,9 +180,10 @@ func TestPrivilegeExpansionFixture(t *testing.T) {
 		"bound-relaxed":    {`{"name":"t","inputSchema":{"type":"object","properties":{"n":{"type":"number","maximum":10}}}}`, `{"name":"t","inputSchema":{"type":"object","properties":{"n":{"type":"number","maximum":1000}}}}`},
 	}
 	for name, pair := range cases {
-		c := New(lim(t))
-		ingestApproved(t, c, srv, "t", pair[0])
-		rep := ingest(t, c, srv, testIdentity, result(pair[1]))
+		l := lim(t)
+		c, reg := New(l), oneServerReg(t, l)
+		ingestApproved(t, c, reg, testServer, testIdentity, "t", pair[0])
+		rep := ingest(t, c, reg, testServer, testIdentity, result(pair[1]))
 		if classOf(rep, "t") != PrivilegeExpansion {
 			t.Fatalf("%s: class = %v, want privilege_expansion; diffs=%v", name, classOf(rep, "t"), diffsFor(rep, "t"))
 		}
@@ -131,38 +193,84 @@ func TestPrivilegeExpansionFixture(t *testing.T) {
 	}
 }
 
-// TestTypeConstraintDropIsExpansion pins the conservative-direction fix: an
-// absent `type` means "any type", so DROPPING a type constraint broadens the
-// accepted input and MUST be privilege_expansion — never safe_narrowing. A
-// classifier that treated absent-type as the empty set would call this narrowing.
+// TestTypeConstraintDropIsExpansion pins the conservative-direction fix for the
+// `type` keyword: an absent `type` means "any type", so dropping a type
+// constraint broadens the input and MUST be privilege_expansion.
 func TestTypeConstraintDropIsExpansion(t *testing.T) {
-	c := New(lim(t))
-	srv := serverRecord(testServer, testIdentity)
-	ingestApproved(t, c, srv, "t", `{"name":"t","inputSchema":{"type":"object","properties":{"p":{"type":"string"}}}}`)
-	// Drop the property's type constraint: string → any.
+	l := lim(t)
+	c, reg := New(l), oneServerReg(t, l)
+	ingestApproved(t, c, reg, testServer, testIdentity, "t", `{"name":"t","inputSchema":{"type":"object","properties":{"p":{"type":"string"}}}}`)
 	dropped := `{"name":"t","inputSchema":{"type":"object","properties":{"p":{}}}}`
-	rep := ingest(t, c, srv, testIdentity, result(dropped))
+	rep := ingest(t, c, reg, testServer, testIdentity, result(dropped))
 	if classOf(rep, "t") != PrivilegeExpansion {
 		t.Fatalf("dropping a type constraint must be privilege_expansion, got %v; diffs=%v", classOf(rep, "t"), diffsFor(rep, "t"))
 	}
-	// Adding a type constraint is the inverse: safe narrowing.
-	c2 := New(lim(t))
-	ingestApproved(t, c2, srv, "t", `{"name":"t","inputSchema":{"type":"object","properties":{"p":{}}}}`)
+	l2 := lim(t)
+	c2, reg2 := New(l2), oneServerReg(t, l2)
+	ingestApproved(t, c2, reg2, testServer, testIdentity, "t", `{"name":"t","inputSchema":{"type":"object","properties":{"p":{}}}}`)
 	added := `{"name":"t","inputSchema":{"type":"object","properties":{"p":{"type":"string"}}}}`
-	rep2 := ingest(t, c2, srv, testIdentity, result(added))
+	rep2 := ingest(t, c2, reg2, testServer, testIdentity, result(added))
 	if classOf(rep2, "t") != SafeNarrowing {
 		t.Fatalf("adding a type constraint must be safe_narrowing, got %v; diffs=%v", classOf(rep2, "t"), diffsFor(rep2, "t"))
 	}
 }
 
+// TestEnumConstraintDropIsExpansion is the enum sibling of the type-drop case:
+// dropping an enum allow-list broadens to any value → privilege_expansion.
+func TestEnumConstraintDropIsExpansion(t *testing.T) {
+	l := lim(t)
+	c, reg := New(l), oneServerReg(t, l)
+	ingestApproved(t, c, reg, testServer, testIdentity, "t", `{"name":"t","inputSchema":{"type":"object","properties":{"mode":{"type":"string","enum":["read","write"]}}}}`)
+	dropped := `{"name":"t","inputSchema":{"type":"object","properties":{"mode":{"type":"string"}}}}`
+	rep := ingest(t, c, reg, testServer, testIdentity, result(dropped))
+	if classOf(rep, "t") != PrivilegeExpansion {
+		t.Fatalf("dropping an enum must be privilege_expansion, got %v; diffs=%v", classOf(rep, "t"), diffsFor(rep, "t"))
+	}
+}
+
+// TestMalformedTypeNotNarrowing pins that a degenerate/malformed observed `type`
+// (a non-string/array value) is ambiguous → semantic, NEVER safe narrowing.
+func TestMalformedTypeNotNarrowing(t *testing.T) {
+	l := lim(t)
+	c, reg := New(l), oneServerReg(t, l)
+	ingestApproved(t, c, reg, testServer, testIdentity, "t", `{"name":"t","inputSchema":{"type":"object","properties":{"p":{"type":"string"}}}}`)
+	malformed := `{"name":"t","inputSchema":{"type":"object","properties":{"p":{"type":5}}}}`
+	rep := ingest(t, c, reg, testServer, testIdentity, result(malformed))
+	if got := classOf(rep, "t"); got == SafeNarrowing || got == NoMaterialChange {
+		t.Fatalf("malformed type must not be narrowing/no-change, got %v; diffs=%v", got, diffsFor(rep, "t"))
+	}
+}
+
+// TestPropertyRemovalPermissiveNotNarrowing pins that removing a property's
+// schema while additionalProperties is permitted is NOT safe narrowing (the key
+// keeps being accepted, now unconstrained) — it must be semantic.
+func TestPropertyRemovalPermissiveNotNarrowing(t *testing.T) {
+	l := lim(t)
+	c, reg := New(l), oneServerReg(t, l)
+	ingestApproved(t, c, reg, testServer, testIdentity, "t", `{"name":"t","inputSchema":{"type":"object","properties":{"x":{"type":"string"}}}}`)
+	// Remove property x; additionalProperties defaults to permissive.
+	removed := `{"name":"t","inputSchema":{"type":"object","properties":{}}}`
+	rep := ingest(t, c, reg, testServer, testIdentity, result(removed))
+	if got := classOf(rep, "t"); got == SafeNarrowing {
+		t.Fatalf("property removal under permissive additionalProperties must not be safe_narrowing, got %v; diffs=%v", got, diffsFor(rep, "t"))
+	}
+	// With additionalProperties:false it IS a narrowing (key now rejected).
+	l2 := lim(t)
+	c2, reg2 := New(l2), oneServerReg(t, l2)
+	ingestApproved(t, c2, reg2, testServer, testIdentity, "t", `{"name":"t","inputSchema":{"type":"object","additionalProperties":false,"properties":{"x":{"type":"string"}}}}`)
+	removedStrict := `{"name":"t","inputSchema":{"type":"object","additionalProperties":false,"properties":{}}}`
+	rep2 := ingest(t, c2, reg2, testServer, testIdentity, result(removedStrict))
+	if classOf(rep2, "t") != SafeNarrowing {
+		t.Fatalf("property removal with additionalProperties:false must be safe_narrowing, got %v; diffs=%v", classOf(rep2, "t"), diffsFor(rep2, "t"))
+	}
+}
+
 func TestSemanticDriftFixture(t *testing.T) {
-	c := New(lim(t))
-	srv := serverRecord(testServer, testIdentity)
-	base := `{"name":"t","description":"reads a file","inputSchema":{"type":"object"}}`
-	ingestApproved(t, c, srv, "t", base)
-	// Description content changes, schema identical → semantic drift.
+	l := lim(t)
+	c, reg := New(l), oneServerReg(t, l)
+	ingestApproved(t, c, reg, testServer, testIdentity, "t", `{"name":"t","description":"reads a file","inputSchema":{"type":"object"}}`)
 	changed := `{"name":"t","description":"reads and writes a file","inputSchema":{"type":"object"}}`
-	rep := ingest(t, c, srv, testIdentity, result(changed))
+	rep := ingest(t, c, reg, testServer, testIdentity, result(changed))
 	if classOf(rep, "t") != SemanticDrift {
 		t.Fatalf("class = %v, want semantic_drift", classOf(rep, "t"))
 	}
@@ -172,10 +280,9 @@ func TestSemanticDriftFixture(t *testing.T) {
 }
 
 func TestIdentityChangeFixture(t *testing.T) {
-	c := New(lim(t))
-	srv := serverRecord(testServer, testIdentity)
-	ingestApproved(t, c, srv, "t", `{"name":"t","inputSchema":{"type":"object"}}`)
-	// A tool-level classification with a different recorded identity is identity_change.
+	l := lim(t)
+	c, reg := New(l), oneServerReg(t, l)
+	ingestApproved(t, c, reg, testServer, testIdentity, "t", `{"name":"t","inputSchema":{"type":"object"}}`)
 	prior, _ := c.Current().Get(ToolKey{Server: testServer, Name: "t"})
 	observed := prior
 	observed.Fingerprint.Identity = "spiffe://evil/imposter"
@@ -188,13 +295,11 @@ func TestIdentityChangeFixture(t *testing.T) {
 // --- ingestion-level identity + server gates -------------------------------
 
 func TestIngestIdentityMismatchRefused(t *testing.T) {
-	c := New(lim(t))
-	srv := serverRecord(testServer, testIdentity)
-	ingestApproved(t, c, srv, "t", `{"name":"t","inputSchema":{"type":"object"}}`)
+	l := lim(t)
+	c, reg := New(l), oneServerReg(t, l)
+	ingestApproved(t, c, reg, testServer, testIdentity, "t", `{"name":"t","inputSchema":{"type":"object"}}`)
 	before := c.Current().Revision()
-	// Ingest with a mismatched verified identity: refused, no mutation, and NEVER
-	// downgraded to tool drift.
-	_, _, err := c.Ingest(srv, DiscoveryInput{ServerID: srv.ID, Identity: "spiffe://evil/x", Raw: result(`{"name":"t","inputSchema":{"type":"object","properties":{"cmd":{"type":"string"}}}}`)})
+	_, _, err := c.Ingest(reg, DiscoveryInput{ServerID: testServer, Identity: "spiffe://evil/x", Raw: result(`{"name":"t","inputSchema":{"type":"object","properties":{"cmd":{"type":"string"}}}}`)})
 	if mcperr.ReasonOf(err) != mcperr.ReasonServerIdentityMismatch {
 		t.Fatalf("want server_identity_mismatch, got %v", err)
 	}
@@ -204,27 +309,39 @@ func TestIngestIdentityMismatchRefused(t *testing.T) {
 }
 
 func TestIngestUnregisteredAndDisabled(t *testing.T) {
-	c := New(lim(t))
+	l := lim(t)
+	c := New(l)
+	// An unregistered server refuses ingestion.
+	emptyReg := registry.New(l)
+	if _, _, err := c.Ingest(emptyReg, DiscoveryInput{ServerID: testServer, Identity: testIdentity, Raw: result(`{"name":"t","inputSchema":{}}`)}); mcperr.ReasonOf(err) != mcperr.ReasonUnregisteredServer {
+		t.Fatalf("unregistered server: want unregistered_server, got %v", err)
+	}
 	// A disabled server refuses ingestion.
-	disabled := serverRecord(testServer, testIdentity)
-	disabled.Enabled = false
-	if _, _, err := c.Ingest(disabled, DiscoveryInput{ServerID: disabled.ID, Identity: testIdentity, Raw: result(`{"name":"t","inputSchema":{}}`)}); mcperr.ReasonOf(err) != mcperr.ReasonUnregisteredServer {
+	reg := oneServerReg(t, l)
+	if _, err := reg.SetEnabled(testServer, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := c.Ingest(reg, DiscoveryInput{ServerID: testServer, Identity: testIdentity, Raw: result(`{"name":"t","inputSchema":{}}`)}); mcperr.ReasonOf(err) != mcperr.ReasonUnregisteredServer {
 		t.Fatalf("disabled server: want unregistered_server, got %v", err)
 	}
-	// A mismatched server refuses ingestion with the identity reason.
-	mism := serverRecord(testServer, testIdentity)
-	mism.Enabled = false
-	mism.Verification = registry.VerifyIdentityMismatch
-	if _, _, err := c.Ingest(mism, DiscoveryInput{ServerID: mism.ID, Identity: testIdentity, Raw: result(`{"name":"t","inputSchema":{}}`)}); mcperr.ReasonOf(err) != mcperr.ReasonServerIdentityMismatch {
+	// A mismatched (disabled) server refuses with the identity reason.
+	reg2 := oneServerReg(t, l)
+	if _, _, err := reg2.VerifyIdentity(testServer, "spiffe://evil/x"); mcperr.ReasonOf(err) != mcperr.ReasonServerIdentityMismatch {
+		t.Fatalf("verify mismatch: %v", err)
+	}
+	if _, _, err := c.Ingest(reg2, DiscoveryInput{ServerID: testServer, Identity: testIdentity, Raw: result(`{"name":"t","inputSchema":{}}`)}); mcperr.ReasonOf(err) != mcperr.ReasonServerIdentityMismatch {
 		t.Fatalf("mismatched server: want server_identity_mismatch, got %v", err)
 	}
 }
 
 func TestDisableServerMakesEntriesUnusable(t *testing.T) {
-	c := New(lim(t))
-	srv := serverRecord(testServer, testIdentity)
-	ingest(t, c, srv, testIdentity, result(`{"name":"a","inputSchema":{}}`, `{"name":"b","inputSchema":{}}`))
-	snap := c.DisableServer(testServer)
+	l := lim(t)
+	c, reg := New(l), oneServerReg(t, l)
+	ingest(t, c, reg, testServer, testIdentity, result(`{"name":"a","inputSchema":{}}`, `{"name":"b","inputSchema":{}}`))
+	snap, err := c.DisableServer(testServer)
+	if err != nil {
+		t.Fatalf("disable: %v", err)
+	}
 	for _, name := range []string{"a", "b"} {
 		rec, _ := snap.Get(ToolKey{Server: testServer, Name: name})
 		if rec.Eligibility != ServerDisabled {
@@ -236,10 +353,10 @@ func TestDisableServerMakesEntriesUnusable(t *testing.T) {
 // --- shadowing / duplicate behavior ----------------------------------------
 
 func TestDuplicateToolNamesRejected(t *testing.T) {
-	c := New(lim(t))
-	srv := serverRecord(testServer, testIdentity)
+	l := lim(t)
+	c, reg := New(l), oneServerReg(t, l)
 	raw := result(`{"name":"dup","inputSchema":{}}`, `{"name":"dup","inputSchema":{"type":"object"}}`)
-	if _, _, err := c.Ingest(srv, DiscoveryInput{ServerID: srv.ID, Identity: testIdentity, Raw: raw}); mcperr.ReasonOf(err) != mcperr.ReasonDuplicateTool {
+	if _, _, err := c.Ingest(reg, DiscoveryInput{ServerID: testServer, Identity: testIdentity, Raw: raw}); mcperr.ReasonOf(err) != mcperr.ReasonDuplicateTool {
 		t.Fatalf("want duplicate_tool, got %v", err)
 	}
 	if c.Current().Len() != 0 {
@@ -248,11 +365,11 @@ func TestDuplicateToolNamesRejected(t *testing.T) {
 }
 
 func TestSameNameDifferentServersDistinct(t *testing.T) {
-	c := New(lim(t))
-	srvA := serverRecord("srv-A", "spiffe://culvert/A")
-	srvB := serverRecord("srv-B", "spiffe://culvert/B")
-	_, _, _ = c.Ingest(srvA, DiscoveryInput{ServerID: "srv-A", Identity: "spiffe://culvert/A", Raw: result(`{"name":"shared","inputSchema":{"type":"object"}}`)})
-	_, _, _ = c.Ingest(srvB, DiscoveryInput{ServerID: "srv-B", Identity: "spiffe://culvert/B", Raw: result(`{"name":"shared","inputSchema":{"type":"string"}}`)})
+	l := lim(t)
+	c := New(l)
+	reg := regWith(t, l, [2]string{"srv-A", "spiffe://culvert/A"}, [2]string{"srv-B", "spiffe://culvert/B"})
+	ingest(t, c, reg, "srv-A", "spiffe://culvert/A", result(`{"name":"shared","inputSchema":{"type":"object"}}`))
+	ingest(t, c, reg, "srv-B", "spiffe://culvert/B", result(`{"name":"shared","inputSchema":{"type":"string"}}`))
 	a, okA := c.Current().Get(ToolKey{Server: "srv-A", Name: "shared"})
 	b, okB := c.Current().Get(ToolKey{Server: "srv-B", Name: "shared"})
 	if !okA || !okB {
@@ -264,47 +381,41 @@ func TestSameNameDifferentServersDistinct(t *testing.T) {
 }
 
 func TestQuarantineCannotAutoClear(t *testing.T) {
-	c := New(lim(t))
-	srv := serverRecord(testServer, testIdentity)
-	// First observation → quarantined.
-	ingest(t, c, srv, testIdentity, result(`{"name":"t","inputSchema":{"type":"object","properties":{"mode":{"enum":["a","b"]}}}}`))
+	l := lim(t)
+	c, reg := New(l), oneServerReg(t, l)
+	ingest(t, c, reg, testServer, testIdentity, result(`{"name":"t","inputSchema":{"type":"object","properties":{"mode":{"enum":["a","b"]}}}}`))
 	if eligOf(c, "t") != Quarantined {
 		t.Fatal("precondition: tool must start quarantined")
 	}
-	// A subsequent SAFE NARROWING must NOT lift the quarantine.
-	ingest(t, c, srv, testIdentity, result(`{"name":"t","inputSchema":{"type":"object","properties":{"mode":{"enum":["a"]}}}}`))
+	ingest(t, c, reg, testServer, testIdentity, result(`{"name":"t","inputSchema":{"type":"object","properties":{"mode":{"enum":["a"]}}}}`))
 	if eligOf(c, "t") != Quarantined {
 		t.Fatalf("quarantine auto-cleared by narrowing: %v", eligOf(c, "t"))
 	}
-	// And a no-material-change re-observation keeps it quarantined too.
-	ingest(t, c, srv, testIdentity, result(`{"name":"t","inputSchema":{"type":"object","properties":{"mode":{"enum":["a"]}}}}`))
+	ingest(t, c, reg, testServer, testIdentity, result(`{"name":"t","inputSchema":{"type":"object","properties":{"mode":{"enum":["a"]}}}}`))
 	if eligOf(c, "t") != Quarantined {
 		t.Fatalf("quarantine cleared by no-material-change: %v", eligOf(c, "t"))
 	}
 }
 
 func TestNoMaterialChangePreservesUsable(t *testing.T) {
-	// Whitebox: seed an APPROVED (Usable) prior — approval is a later slice, so we
-	// construct it directly — and prove no_material_change preserves it.
-	c := New(lim(t))
-	srv := serverRecord(testServer, testIdentity)
-	ingestApproved(t, c, srv, "t", `{"name":"t","inputSchema":{"type":"object"}}`)
+	l := lim(t)
+	c, reg := New(l), oneServerReg(t, l)
+	ingestApproved(t, c, reg, testServer, testIdentity, "t", `{"name":"t","inputSchema":{"type":"object"}}`)
 	if eligOf(c, "t") != Usable {
 		t.Fatal("precondition: seeded Usable")
 	}
-	rep := ingest(t, c, srv, testIdentity, result(`{"name":"t","inputSchema":{"type":"object"}}`))
+	rep := ingest(t, c, reg, testServer, testIdentity, result(`{"name":"t","inputSchema":{"type":"object"}}`))
 	if classOf(rep, "t") != NoMaterialChange || eligOf(c, "t") != Usable {
 		t.Fatalf("no_material_change must preserve Usable: class=%v elig=%v", classOf(rep, "t"), eligOf(c, "t"))
 	}
 }
 
 func TestFailedIngestPublishesNothing(t *testing.T) {
-	c := New(lim(t))
-	srv := serverRecord(testServer, testIdentity)
-	ingest(t, c, srv, testIdentity, result(`{"name":"ok","inputSchema":{}}`))
+	l := lim(t)
+	c, reg := New(l), oneServerReg(t, l)
+	ingest(t, c, reg, testServer, testIdentity, result(`{"name":"ok","inputSchema":{}}`))
 	before := c.Current()
-	// A malformed second ingest must leave the snapshot byte-for-byte unchanged.
-	_, _, err := c.Ingest(srv, DiscoveryInput{ServerID: srv.ID, Identity: testIdentity, Raw: []byte(`{"tools":[{"name":"bad"}]}`)})
+	_, _, err := c.Ingest(reg, DiscoveryInput{ServerID: testServer, Identity: testIdentity, Raw: []byte(`{"tools":[{"name":"bad"}]}`)})
 	if mcperr.ReasonOf(err) != mcperr.ReasonMalformedDiscovery {
 		t.Fatalf("want malformed_discovery, got %v", err)
 	}
@@ -314,15 +425,13 @@ func TestFailedIngestPublishesNothing(t *testing.T) {
 }
 
 func TestDeterministicDiffOrdering(t *testing.T) {
-	c := New(lim(t))
-	srv := serverRecord(testServer, testIdentity)
-	ingestApproved(t, c, srv, "t", `{"name":"t","description":"x","inputSchema":{"type":"object","properties":{"a":{"type":"string"}}}}`)
 	changed := `{"name":"t","description":"y","inputSchema":{"type":"object","properties":{"a":{"type":"string"},"b":{"type":"string"}}}}`
 	var first []FieldDiff
 	for i := 0; i < 8; i++ {
-		cc := New(lim(t))
-		ingestApproved(t, cc, srv, "t", `{"name":"t","description":"x","inputSchema":{"type":"object","properties":{"a":{"type":"string"}}}}`)
-		rep := ingest(t, cc, srv, testIdentity, result(changed))
+		l := lim(t)
+		cc, reg := New(l), oneServerReg(t, l)
+		ingestApproved(t, cc, reg, testServer, testIdentity, "t", `{"name":"t","description":"x","inputSchema":{"type":"object","properties":{"a":{"type":"string"}}}}`)
+		rep := ingest(t, cc, reg, testServer, testIdentity, result(changed))
 		d := diffsFor(rep, "t")
 		if first == nil {
 			first = d
@@ -342,15 +451,15 @@ func TestDeterministicDiffOrdering(t *testing.T) {
 func TestCatalogCapacityBounded(t *testing.T) {
 	cfg := smallCatalog(t)
 	c := New(cfg)
-	// MaxCatalogEntries is 8; MaxToolsPerServer is 4 — fill across servers.
 	for s := 0; s < 3; s++ {
-		id := registry.ServerID("srv-" + string(rune('A'+s)))
-		sr := serverRecord(id, registry.Identity("id-"+string(rune('A'+s))))
+		id := "srv-" + string(rune('A'+s))
+		identity := "id-" + string(rune('A'+s))
+		reg := regWith(t, cfg, [2]string{id, identity})
 		tools := make([]string, 0, 4)
 		for i := 0; i < 4; i++ {
 			tools = append(tools, `{"name":"t`+string(rune('0'+i))+`","inputSchema":{}}`)
 		}
-		_, _, err := c.Ingest(sr, DiscoveryInput{ServerID: id, Identity: registry.Identity("id-" + string(rune('A'+s))), Raw: result(tools...)})
+		_, _, err := c.Ingest(reg, DiscoveryInput{ServerID: registry.ServerID(id), Identity: registry.Identity(identity), Raw: result(tools...)})
 		if s < 2 && err != nil {
 			t.Fatalf("server %d: unexpected error %v", s, err)
 		}
@@ -358,44 +467,4 @@ func TestCatalogCapacityBounded(t *testing.T) {
 			t.Fatalf("expected capacity_exceeded on the 3rd server, got %v", err)
 		}
 	}
-}
-
-// --- helpers ---------------------------------------------------------------
-
-func smallCatalog(t *testing.T) limits.CatalogLimits {
-	t.Helper()
-	c, err := limits.NewCatalog(limits.CatalogConfig{
-		MaxServers: 8, MaxToolsPerServer: 4, MaxCatalogEntries: 8,
-		MaxDiscoveryBytes: 65536, MaxSchemaBytes: 4096, MaxDescriptionBytes: 1024,
-		MaxSchemaDepth: 16, MaxObjectMembers: 64, MaxArrayElements: 64, MaxDiffOps: 4096,
-		MaxNameBytes: 128, MaxEndpointBytes: 512, MaxIdentityBytes: 512,
-		MaxServerIDBytes: 128, MaxCredProfileBytes: 128, MaxOwnerScopeBytes: 128,
-	})
-	if err != nil {
-		t.Fatalf("small catalog limits: %v", err)
-	}
-	return c
-}
-
-// ingestApproved ingests a tool then whitebox-sets its record to Usable, standing
-// in for the (out-of-PR-2) human approval so drift-from-approved can be tested.
-func ingestApproved(t *testing.T, c *Catalog, srv registry.ServerRecord, name, tool string) {
-	t.Helper()
-	ingest(t, c, srv, srv.PinnedIdentity, result(tool))
-	base := c.Current()
-	next := base.clone(base.revision + 1)
-	key := ToolKey{Server: srv.ID, Name: name}
-	rec := *next.byKey[key]
-	rec.Eligibility = Usable
-	next.byKey[key] = &rec
-	c.cur.Store(next)
-}
-
-func diffsFor(rep *Report, name string) []FieldDiff {
-	for _, o := range rep.Observations {
-		if o.Key.Name == name {
-			return o.Diffs
-		}
-	}
-	return nil
 }
