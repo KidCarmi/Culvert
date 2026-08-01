@@ -23,6 +23,13 @@ type Deps struct {
 	// bounded). Sink failure NEVER permits a denied request or a decision-point
 	// operation, and must not block shutdown.
 	Sink Sink
+	// Policy is the OPTIONAL capability-local policy provider (PR-6). When nil, the
+	// listener keeps the PR-5 observe-only disposition for decision-point methods.
+	// When set, decision-point methods are evaluated against the capability-local
+	// policy snapshot (decision-only — never an upstream/credential/broker call); a
+	// missing snapshot fails closed with MCP.POLICY.SNAPSHOT_UNAVAILABLE, never a
+	// permissive fall-back.
+	Policy PolicyProvider
 	// Clock is injected for deterministic tests; nil ⇒ time.Now.
 	Clock func() time.Time
 }

@@ -159,6 +159,22 @@ runtime listener assertions (load, N-client zero-retention) are implemented, and
 > row (29) is discharged structurally — PR-5 opens no stream on any path, so N rejections retain zero streams
 > by construction. Observe-only disposition (decision-point methods) is `TestPipeline_DecisionPointObserveOnly`.
 
+> **PR-6 status (policy engine + simulator IMPLEMENTED).** `MCP-POLICY-001..006`, `MCP-TOOL-004/006`,
+> `MCP-ID-005/006` are backed by `internal/mcp/policy` + `internal/mcp/policy/simulate`. Default-deny +
+> action-matrix + first-match ordering: `engine_smoke_test.go`, `compile_test.go` (`TestCompile_AllNineActions`,
+> `TestCompile_ObligationMatrix`, `TestCompile_ManagementLegalActionsOnly`), `engine_test.go`
+> (`TestMatch_*`, `TestMatch_FirstByPriority`, `TestReasonAndRevisionAlwaysStamped`). Hard overrides + no
+> laundering + destructive contract + fail-closed: `antiweakening_test.go` (17 tripwires — unknown-tool,
+> privilege-expansion, server-identity/disabled, cross-tenant, ambiguous-identity, Management-mutation,
+> destructive-never-implicit), `engine_test.go` (`TestHardOverride_BeatsBroadAllow`,
+> `TestIdentityAmbiguous_WriteDenied`). Determinism + namespace isolation + I/O-freedom + input immutability:
+> `property_test.go`, `noio_test.go` (AST import-allowlist + clock-free wall), `input_test.go`. Explain-trace
+> safety/bounds: `engine_test.go` (`TestExplainTrace_SafeAndBounded`). Simulator ≡ same evaluator + blast
+> radius: `simulate_test.go` (`TestSingle_UsesSameEvaluator`, `TestCompare_NewAllowHighlighted`,
+> `TestShadow_Relation`). Runtime decision-only integration (never upstream/credential/broker; ALLOW-class ⇒
+> `execution_state: not_implemented`; missing snapshot fails closed): `internal/mcp/runtime/policy_test.go`.
+> Fuzz: `FuzzCompile`/`FuzzEvaluate`/`FuzzGlob`. `MCP-POLICY-007` (approval UX) is deferred to PR-9.
+
 ### 1a. Requirement-specific coverage (completeness — do not rely on the "Unit | all" row)
 
 These requirements were previously reachable only via family/range shorthand or the catch-all "Unit | all"

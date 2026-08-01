@@ -6,6 +6,7 @@ import (
 
 	"github.com/KidCarmi/Culvert/internal/mcp/jsonrpc"
 	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
+	"github.com/KidCarmi/Culvert/internal/mcp/policy"
 	"github.com/KidCarmi/Culvert/internal/mcp/protocol"
 )
 
@@ -71,6 +72,53 @@ func observeOnlyError(id jsonrpc.ID) []byte {
 	}{JSONRPC: "2.0", ID: idJSON(id)}
 	env.Error.Code = observeOnlyErrorCode
 	env.Error.Message = mcperr.ReasonObserveOnly.Code()
+	b, _ := json.Marshal(env) //nolint:errcheck // fixed-shape struct, marshal cannot fail
+	return b
+}
+
+// policyError builds the deterministic JSON-RPC error for a policy DENY /
+// QUARANTINE / REQUIRE_* / snapshot-unavailable decision. The machine-readable
+// policy reason code is the message; the data carries the action + matched rule
+// (safe metadata only — never arguments, tokens or the policy document).
+func policyError(id jsonrpc.ID, reason policy.ReasonCode, action policy.Action, rule policy.RuleID) []byte {
+	env := struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Error   struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+			Data    struct {
+				PolicyAction string `json:"policy_action"`
+				MatchedRule  string `json:"matched_rule,omitempty"`
+			} `json:"data"`
+		} `json:"error"`
+	}{JSONRPC: "2.0", ID: idJSON(id)}
+	env.Error.Code = policyErrorCode
+	env.Error.Message = string(reason)
+	env.Error.Data.PolicyAction = action.String()
+	env.Error.Data.MatchedRule = string(rule)
+	b, _ := json.Marshal(env) //nolint:errcheck // fixed-shape struct, marshal cannot fail
+	return b
+}
+
+// executionNotAvailable builds the JSON-RPC result for an ALLOW-class policy
+// decision in PR-6: it records the TRUE policy action but states that execution is
+// NOT implemented in this slice — it never fabricates a tool result.
+func executionNotAvailable(id jsonrpc.ID, d policy.Decision) []byte {
+	env := struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Result  struct {
+			ExecutionState string `json:"execution_state"`
+			PolicyAction   string `json:"policy_action"`
+			PolicyRevision uint64 `json:"policy_revision"`
+			Reason         string `json:"reason"`
+		} `json:"result"`
+	}{JSONRPC: "2.0", ID: idJSON(id)}
+	env.Result.ExecutionState = "not_implemented"
+	env.Result.PolicyAction = d.Action.String()
+	env.Result.PolicyRevision = uint64(d.PolicyRevision)
+	env.Result.Reason = string(d.Reason)
 	b, _ := json.Marshal(env) //nolint:errcheck // fixed-shape struct, marshal cannot fail
 	return b
 }

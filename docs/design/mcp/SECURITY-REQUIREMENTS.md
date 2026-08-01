@@ -97,6 +97,22 @@ Verification · Evidence · Gate**. Status is `Proposed` for all rows unless not
 > immutable identity-session binding and is **observe-only** (decision-point methods deterministically
 > rejected `observe_only`; no policy/credential/upstream). See [`IMPLEMENTATION-SLICES.md`](IMPLEMENTATION-SLICES.md) PR-5.
 
+> **PR-6 status — `MCP-POLICY-001..006`, `MCP-TOOL-004`, `MCP-TOOL-006`, `MCP-ID-005`, `MCP-ID-006` IMPLEMENTED
+> (dormant).** `internal/mcp/policy` is a deterministic, **I/O-free** decision engine (`Engine.Evaluate`) over
+> an immutable `DecisionInput` tuple + an immutable, capability-local compiled `Snapshot`: default-deny, bounded,
+> namespace-isolated (Gateway/Management can never cross-match), with the exactly nine actions, typed reason
+> codes/remediation, and a per-action obligation matrix. **Hard security overrides run before any rule** —
+> unknown-tool / privilege-expansion → QUARANTINE (`MCP-TOOL-004/006`), cross-tenant / ambiguous-identity-on-write
+> (`MCP-ID-005`) / Management-mutation-V1 / server-identity-change / server-disabled → fail-closed DENY — so a broad
+> ALLOW can never launder them; a destructive op is never implicitly allowed. The evaluator does NO network/fs/db/
+> DNS/env/clock/secret/logging work (explicit `EvalTime`, never `time.Now()`; pinned by an AST import-allowlist
+> test). The simulator (`internal/mcp/policy/simulate`) reuses the SAME evaluator (single/corpus/blast-radius/
+> shadow) and publishes/executes nothing. Wired into the PR-5 runtime as an OPTIONAL decision-only provider: an
+> ALLOW-class decision is recorded but returns `execution_state: not_implemented` (no upstream/credential/broker
+> call, no fabricated success); a missing snapshot fails closed with `MCP.POLICY.SNAPSHOT_UNAVAILABLE`. NOT wired
+> into `package main` (dormant). `MCP-POLICY-007` (approval UX) is PR-9. See
+> [`IMPLEMENTATION-SLICES.md`](IMPLEMENTATION-SLICES.md) PR-6.
+
 ## MCP-PROTO — Protocol kernel (framing, bounds, version negotiation, state)
 
 New family added by the PR-1 remediation (`PR1-READINESS-REMEDIATION.md`, finding H-2). These are the

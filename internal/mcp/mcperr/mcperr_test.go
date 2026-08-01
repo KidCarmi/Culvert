@@ -57,6 +57,10 @@ func TestReasonCodesStable(t *testing.T) {
 		{ReasonAdmissionRejected, "admission_rejected"}, {ReasonObserveOnly, "observe_only"},
 		{ReasonTLSRequired, "tls_required"}, {ReasonListenerConfigInvalid, "listener_config_invalid"},
 		{ReasonRequestDeadlineExceeded, "request_deadline_exceeded"},
+		{ReasonPolicySnapshotInvalid, "policy_snapshot_invalid"}, {ReasonPolicyRuleInvalid, "policy_rule_invalid"},
+		{ReasonPolicyConditionInvalid, "policy_condition_invalid"}, {ReasonPolicyObligationInvalid, "policy_obligation_invalid"},
+		{ReasonPolicyInputInvalid, "policy_input_invalid"}, {ReasonPolicyNamespaceMismatch, "policy_namespace_mismatch"},
+		{ReasonPolicyStaleRevision, "policy_stale_revision"}, {ReasonPolicyLimitExceeded, "policy_limit_exceeded"},
 	}
 	seen := map[Reason]bool{}
 	for _, p := range want {

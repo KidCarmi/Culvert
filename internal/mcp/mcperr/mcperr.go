@@ -288,6 +288,35 @@ const (
 	// ReasonRequestDeadlineExceeded — a request exceeded its bounded deadline
 	// (slowloris / trickle / handshake stall defense).
 	ReasonRequestDeadlineExceeded
+
+	// ── PR-6 policy-engine reasons ────────────────────────────────────────────
+
+	// ReasonPolicySnapshotInvalid — a policy snapshot failed strict parsing or
+	// structural validation (bad schema version, duplicate key, unknown field,
+	// over-limit size, mixed-capability rule set).
+	ReasonPolicySnapshotInvalid
+	// ReasonPolicyRuleInvalid — a policy rule failed compilation (malformed action,
+	// reason/remediation code, duplicate RuleID/priority, bad condition).
+	ReasonPolicyRuleInvalid
+	// ReasonPolicyConditionInvalid — a rule condition matcher is malformed (unknown
+	// matcher/field, bad glob, over-limit set, invalid time window).
+	ReasonPolicyConditionInvalid
+	// ReasonPolicyObligationInvalid — an obligation is invalid for its action
+	// (credential profile on DENY, missing one-call for ALLOW_ONCE, etc.).
+	ReasonPolicyObligationInvalid
+	// ReasonPolicyInputInvalid — a decision tuple is structurally invalid (missing
+	// capability/revision, conflicting tenants, cross-capability authority, raw
+	// token/body supplied, unknown enum). Distinct from a valid no-match default deny.
+	ReasonPolicyInputInvalid
+	// ReasonPolicyNamespaceMismatch — a snapshot mixes Gateway and Management rules,
+	// or a rule/input crosses the capability namespace.
+	ReasonPolicyNamespaceMismatch
+	// ReasonPolicyStaleRevision — a snapshot publication used a stale base revision
+	// (a concurrent publish won); nothing is published.
+	ReasonPolicyStaleRevision
+	// ReasonPolicyLimitExceeded — a policy structural/evaluation bound was exceeded
+	// (rules/conditions/values/trace/simulator cases/compile work).
+	ReasonPolicyLimitExceeded
 )
 
 // reasonCode maps each Reason to its stable machine string. The strings are part
@@ -379,6 +408,15 @@ var reasonCode = map[Reason]string{ // #nosec G101 -- stable machine-readable er
 	ReasonTLSRequired:             "tls_required",
 	ReasonListenerConfigInvalid:   "listener_config_invalid",
 	ReasonRequestDeadlineExceeded: "request_deadline_exceeded",
+
+	ReasonPolicySnapshotInvalid:   "policy_snapshot_invalid",
+	ReasonPolicyRuleInvalid:       "policy_rule_invalid",
+	ReasonPolicyConditionInvalid:  "policy_condition_invalid",
+	ReasonPolicyObligationInvalid: "policy_obligation_invalid",
+	ReasonPolicyInputInvalid:      "policy_input_invalid",
+	ReasonPolicyNamespaceMismatch: "policy_namespace_mismatch",
+	ReasonPolicyStaleRevision:     "policy_stale_revision",
+	ReasonPolicyLimitExceeded:     "policy_limit_exceeded",
 }
 
 // Code returns the stable machine string for the reason (e.g. "malformed_json").

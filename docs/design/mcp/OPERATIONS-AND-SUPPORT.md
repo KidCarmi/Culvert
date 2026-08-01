@@ -26,6 +26,18 @@ one platform, shared Control Plane services, separate enforcement engines and tr
 > surface. The SLO/capacity numbers below remain **unverified DESIGN TARGETS** — PR-5 ships the runtime and
 > its load/slowloris/queue-saturation + MCP-off benchmarks, not a production availability measurement.
 
+> **PR-6 update.** A deterministic, **I/O-free** MCP policy decision engine now EXISTS — `internal/mcp/policy`
+> (+ `internal/mcp/policy/simulate`) — and is wired into the PR-5 runtime as an **optional, decision-only**
+> provider. It changes NO operational surface in this slice: it is still **DISABLED BY DEFAULT** (nil provider ⇒
+> the observe-only path is byte-identical), performs no upstream/credential/broker/inspection work, and even an
+> ALLOW-class decision returns `execution_state: not_implemented` — so the "Policy regression" runbook (§4)
+> still governs *decision distribution* review, not execution. Two operationally load-bearing fail-closed
+> behaviors are now real and testable: **(a)** default-deny (`MCP.POLICY.NO_MATCH_DEFAULT_DENY`) on any
+> unmatched operation, and **(b)** a **missing/unpublished snapshot fails closed** with
+> `MCP.POLICY.SNAPSHOT_UNAVAILABLE` — never a permissive fall-back. The policy-bundle publication API, the
+> decision-metrics dashboards (`MCP-OPS-003`), and signed CP→DP policy distribution remain later slices
+> (PR-9/PR-10); the SLO/capacity numbers below stay **unverified DESIGN TARGETS**.
+
 ---
 
 ## 1 · SLOs as design targets

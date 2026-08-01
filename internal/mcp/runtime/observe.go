@@ -47,8 +47,12 @@ const (
 	DispKernelTerminal
 	// DispObserveOnly — a decision-point method (tools/list, tools/call) reached the
 	// observe boundary and was deterministically rejected (no policy/credential/
-	// upstream).
+	// upstream). PR-5 default when no policy provider is wired.
 	DispObserveOnly
+	// DispPolicyAllowed — a decision-point method received an ALLOW-class policy
+	// decision (PR-6). The policy result is recorded truthfully, but execution is NOT
+	// implemented in this slice: no upstream call, no credential, no tool result.
+	DispPolicyAllowed
 )
 
 // String returns the disposition label.
@@ -58,6 +62,8 @@ func (d Disposition) String() string {
 		return "kernel_terminal"
 	case DispObserveOnly:
 		return "observe_only"
+	case DispPolicyAllowed:
+		return "policy_allowed"
 	default:
 		return "rejected"
 	}
@@ -90,6 +96,15 @@ type ObserveRecord struct {
 	DurationMS    int64               // bounded duration in ms
 	RequestBytes  int                 // bounded body-byte count
 	RuntimeRev    uint64              // runtime configuration revision
+
+	// PR-6 policy-decision fields (set only for a decision-point method evaluated
+	// against a policy snapshot). They carry safe metadata only — the policy action,
+	// stable reason code, matched rule id, policy revision and the execution state.
+	PolicyAction   string // policy action (e.g. "ALLOW", "DENY", "QUARANTINE"), if evaluated
+	PolicyReason   string // stable policy reason code (e.g. "MCP.POLICY.NO_MATCH_DEFAULT_DENY")
+	MatchedRule    string // matched rule id, if any
+	PolicyRevision uint64 // policy snapshot revision that produced the decision
+	ExecutionState string // "not_implemented" for an ALLOW-class decision in PR-6
 }
 
 // Sink receives sanitized observe records. Implementations MUST be bounded and MUST
