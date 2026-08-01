@@ -16,8 +16,8 @@ type fakePolicy struct {
 	mgmt *policy.Snapshot
 }
 
-func (f fakePolicy) PolicySnapshot(cap protocol.Capability) *policy.Snapshot {
-	if cap == protocol.Management {
+func (f fakePolicy) PolicySnapshot(capNS protocol.Capability) *policy.Snapshot {
+	if capNS == protocol.Management {
 		return f.mgmt
 	}
 	return f.gw

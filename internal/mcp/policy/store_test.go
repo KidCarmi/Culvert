@@ -5,9 +5,9 @@ import (
 	"testing"
 )
 
-func snapRev(t *testing.T, cap string, rev int) *Snapshot {
+func snapRev(t *testing.T, capName string, rev int) *Snapshot {
 	t.Helper()
-	doc := `{"schema_version":1,"capability":"` + cap + `","policy_revision":` + itoaS(rev) + `,"default_action":"DENY","rules":[]}`
+	doc := `{"schema_version":1,"capability":"` + capName + `","policy_revision":` + itoaS(rev) + `,"default_action":"DENY","rules":[]}`
 	return mustCompile(t, doc)
 }
 

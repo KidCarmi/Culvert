@@ -19,7 +19,7 @@ import (
 // load); the listener never mutates it. A nil return means no snapshot is published
 // for that capability — the runtime then fails closed (never permissive).
 type PolicyProvider interface {
-	PolicySnapshot(cap protocol.Capability) *policy.Snapshot
+	PolicySnapshot(capNS protocol.Capability) *policy.Snapshot
 }
 
 // newPolicyEngine builds this pipeline's own pure evaluator (no shared mutable state).
@@ -71,16 +71,16 @@ func (p *pipeline) dispatchPolicy(rb *recBuilder, req Request, msg jsonrpc.Messa
 // read BEFORE evaluation (the evaluator itself does no I/O). It carries no raw
 // arguments — only the tool name (an operand identity) and one-way fingerprints.
 func (p *pipeline) buildPolicyInput(req Request, msg jsonrpc.Message, ctx *identity.ResolvedContext, polRev policy.Revision, now time.Time) policy.DecisionInput {
-	cap := policyCapability(p.capability)
+	capNS := policyCapability(p.capability)
 	in := policy.DecisionInput{
-		Capability:       cap,
+		Capability:       capNS,
 		PolicyRevision:   uint64(polRev),
 		CatalogRevision:  catalogRevision(p.deps),
 		RegistryRevision: registryRevision(p.deps),
 		RuntimeRevision:  p.rev,
 		EvalTime:         now,
 		Principal:        policyPrincipal(ctx),
-		Client:           policyClient(ctx, cap),
+		Client:           policyClient(ctx, capNS),
 		Session:          policy.Session{Fingerprint: digest(ctx.Fingerprint()), Assurance: policyAssurance(ctx.Assurance())},
 	}
 	if ag, ok := ctx.Agent(); ok {
@@ -165,11 +165,11 @@ func policyPrincipal(ctx *identity.ResolvedContext) policy.Principal {
 	return p
 }
 
-func policyClient(ctx *identity.ResolvedContext, cap policy.Capability) policy.Client {
+func policyClient(ctx *identity.ResolvedContext, capNS policy.Capability) policy.Client {
 	c := ctx.Client()
 	return policy.Client{
 		ClientID: c.ClientID, AppID: c.AppID, Tenant: string(c.Tenant),
-		Trust: policyTrust(c.Trust), Capability: cap,
+		Trust: policyTrust(c.Trust), Capability: capNS,
 	}
 }
 

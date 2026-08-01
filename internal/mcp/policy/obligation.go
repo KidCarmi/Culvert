@@ -195,12 +195,7 @@ func (o Obligations) validateActionObligations(a Action) error {
 	case ActionAllowForSession:
 		return o.validateSessionGrant()
 	case ActionAllowWithRedaction:
-		if o.Redaction == nil || o.Redaction.ProfileRef == "" {
-			return obligationErr("ALLOW_WITH_REDACTION requires a redaction-profile reference")
-		}
-		if !o.Redaction.TransformedHashRequired {
-			return obligationErr("ALLOW_WITH_REDACTION requires transformed-content hash attestation")
-		}
+		return o.validateRedaction()
 	case ActionMonitor:
 		if o.Logging == LogUnset {
 			return obligationErr("MONITOR requires a logging/telemetry obligation")
@@ -232,6 +227,18 @@ func (o Obligations) validateSessionGrant() error {
 	return nil
 }
 
+// validateRedaction requires the attestation guarantee the action model mandates
+// for an ALLOW_WITH_REDACTION grant.
+func (o Obligations) validateRedaction() error {
+	if o.Redaction == nil || o.Redaction.ProfileRef == "" {
+		return obligationErr("ALLOW_WITH_REDACTION requires a redaction-profile reference")
+	}
+	if !o.Redaction.TransformedHashRequired {
+		return obligationErr("ALLOW_WITH_REDACTION requires transformed-content hash attestation")
+	}
+	return nil
+}
+
 // validateDestructive enforces the stronger obligation contract a destructive
 // operation needs to reach an ALLOW-class action (bounded + audited).
 func (o Obligations) validateDestructive(a Action, destructive bool) error {
@@ -252,26 +259,31 @@ func (o Obligations) validateDestructive(a Action, destructive bool) error {
 // weakens ONLY an obligation (e.g. a longer session TTL, same action/reason/rule) is
 // still counted as a changed decision in the blast-radius report.
 func (o Obligations) Equal(x Obligations) bool {
-	if o.Logging != x.Logging || o.Observation != x.Observation ||
-		o.RateLimitProfile != x.RateLimitProfile || o.Destination != x.Destination ||
-		o.CredentialProfile != x.CredentialProfile || o.OnceCall != x.OnceCall ||
-		o.Confirmation != x.Confirmation || o.Approval != x.Approval ||
-		o.TicketRequired != x.TicketRequired {
+	return o.scalarsEqual(x) && sessionGrantEqual(o.Session, x.Session) &&
+		redactionReqEqual(o.Redaction, x.Redaction)
+}
+
+// scalarsEqual compares the non-pointer obligation fields.
+func (o Obligations) scalarsEqual(x Obligations) bool {
+	return o.Logging == x.Logging && o.Observation == x.Observation &&
+		o.RateLimitProfile == x.RateLimitProfile && o.Destination == x.Destination &&
+		o.CredentialProfile == x.CredentialProfile && o.OnceCall == x.OnceCall &&
+		o.Confirmation == x.Confirmation && o.Approval == x.Approval &&
+		o.TicketRequired == x.TicketRequired
+}
+
+func sessionGrantEqual(a, b *SessionGrant) bool {
+	if (a == nil) != (b == nil) {
 		return false
 	}
-	if (o.Session == nil) != (x.Session == nil) {
+	return a == nil || *a == *b
+}
+
+func redactionReqEqual(a, b *RedactionReq) bool {
+	if (a == nil) != (b == nil) {
 		return false
 	}
-	if o.Session != nil && *o.Session != *x.Session {
-		return false
-	}
-	if (o.Redaction == nil) != (x.Redaction == nil) {
-		return false
-	}
-	if o.Redaction != nil && *o.Redaction != *x.Redaction {
-		return false
-	}
-	return true
+	return a == nil || *a == *b
 }
 
 // validateShape rejects internally inconsistent obligation payloads (zero/negative
