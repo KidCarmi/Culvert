@@ -7,8 +7,10 @@ package main
 // committed directory after partial failure).
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -34,6 +36,9 @@ func candFromGen(g feedGen) generationCandidate {
 		EnvelopeBytes:  g.EnvelopeBytes,
 		ArtifactBytes:  g.ArtifactBytes,
 		BundleBytes:    g.BundleBytes,
+		SnapshotBytes: []byte(fmt.Sprintf(
+			`{"schema_version":1,"feed":"url-categories/saas","feed_version":%d,"generated_at":%q,"categories":[]}`,
+			g.Manifest.FeedVersion, g.Manifest.GeneratedAt)),
 	}
 }
 
@@ -64,7 +69,7 @@ func TestF3b2_Gen_GoldenLayout(t *testing.T) {
 		got = append(got, e.Name())
 	}
 	sort.Strings(got)
-	want := []string{genFileArtifact, genFileArtifactBundle, genFileMeta, genFileManifestEnvelope}
+	want := []string{genFileArtifact, genFileArtifactBundle, genFileSnapshotNormalized, genFileMeta, genFileManifestEnvelope}
 	sort.Strings(want)
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("dir entries = %v; want %v", got, want)
@@ -148,8 +153,8 @@ func TestF3b2_Gen_FailureInjection(t *testing.T) {
 	for name, brk := range stages {
 		t.Run(name, func(t *testing.T) {
 			root := filepath.Join(t.TempDir(), "generations")
-			real := osGenFS()
-			fs := newFakeGenFS(real)
+			inner := osGenFS()
+			fs := newFakeGenFS(inner)
 			brk(fs)
 			store, err := newGenerationStoreFS(fs.seam(), root)
 			if err != nil {
@@ -205,8 +210,8 @@ func TestF3b2_Gen_CancelEachStage(t *testing.T) {
 	for _, step := range steps {
 		t.Run(step, func(t *testing.T) {
 			root := filepath.Join(t.TempDir(), "generations")
-			real := osGenFS()
-			fs := newFakeGenFS(real)
+			inner := osGenFS()
+			fs := newFakeGenFS(inner)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel() // idempotent; hooks may also call it — silences vet lostcancel
 			switch step {
@@ -347,7 +352,7 @@ func assertFileBytes(t *testing.T, path string, want []byte) {
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
 	}
-	if string(got) != string(want) {
+	if !bytes.Equal(got, want) {
 		t.Fatalf("%s: bytes differ (got %d, want %d)", path, len(got), len(want))
 	}
 }

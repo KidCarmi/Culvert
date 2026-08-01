@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
@@ -45,7 +46,7 @@ func TestF3b2Probe_TLSOriginFetch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fetchManifest: %v", err)
 	}
-	if string(out.Body) != string(g.EnvelopeBytes) {
+	if !bytes.Equal(out.Body, g.EnvelopeBytes) {
 		t.Fatalf("manifest body mismatch")
 	}
 	if fo.dialedAddr != "127.0.0.1:443" {

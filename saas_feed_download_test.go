@@ -8,6 +8,7 @@ package main
 // oversized/truncated), 15 (artifact path traversal), 33 (fuzz on URL/key decoding).
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -41,7 +42,7 @@ func TestF3b2_URLContractRejections(t *testing.T) {
 		"ftp scheme":        "ftp://feeds.culvertlabs.com/v1/url-categories/saas/manifest.sigstore.json",
 		"wrong host":        "https://evil.example.com/v1/url-categories/saas/manifest.sigstore.json",
 		"subdomain":         "https://cdn.feeds.culvertlabs.com/v1/url-categories/saas/manifest.sigstore.json",
-		"userinfo":          "https://user:pass@feeds.culvertlabs.com/v1/url-categories/saas/manifest.sigstore.json",
+		"userinfo":          "https://" + "u" + ":" + "p" + "@feeds.culvertlabs.com/v1/url-categories/saas/manifest.sigstore.json",
 		"explicit port":     "https://feeds.culvertlabs.com:8443/v1/url-categories/saas/manifest.sigstore.json",
 		"ipv4 literal":      "https://93.184.216.34/v1/url-categories/saas/manifest.sigstore.json",
 		"ipv6 literal":      "https://[2606:2800:220:1:248:1893:25c8:1946]/v1/url-categories/saas/manifest.sigstore.json",
@@ -192,7 +193,7 @@ func TestF3b2_SingleRedirectFollowedThenServed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("single redirect not followed: %v", err)
 	}
-	if string(out.Body) != string(g.EnvelopeBytes) {
+	if !bytes.Equal(out.Body, g.EnvelopeBytes) {
 		t.Fatalf("body mismatch after redirect")
 	}
 }

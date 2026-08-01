@@ -22,6 +22,7 @@ package main
 // No production trust root, signing key, or bundle fixture enters non-test code.
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -47,10 +48,6 @@ import (
 
 // Compile-time proof that the production verifier satisfies the F3b-2 seam.
 var _ feedVerifier = (*urlcatfeed.Verifier)(nil)
-
-// feedMatchingSAN satisfies urlcatfeed.OfficialSANRegex (a tagged release run of the
-// feed signing workflow).
-const feedMatchingSAN = "https://github.com/KidCarmi/Culvert/.github/workflows/publish-feeds.yml@refs/tags/feeds-v1.0.0"
 
 // ─── generated wire bytes (real generator, real manifest) ────────────────────────
 
@@ -148,7 +145,7 @@ func (f *fakeFeedVerifier) VerifyEnvelope(b []byte) (*urlcatfeed.ManifestPayload
 	if f.envelopeErr != nil {
 		return nil, f.envelopeErr
 	}
-	if string(b) != string(f.gen.EnvelopeBytes) {
+	if !bytes.Equal(b, f.gen.EnvelopeBytes) {
 		return nil, urlcatfeed.ErrVerify
 	}
 	m := f.gen.Manifest
@@ -167,7 +164,7 @@ func (f *fakeFeedVerifier) VerifyArtifact(artifactBytes, bundleJSON []byte, mani
 	if int64(len(artifactBytes)) != manifest.ArtifactSize || sha256Hex(artifactBytes) != manifest.ArtifactSHA256 {
 		return nil, urlcatfeed.ErrBinding
 	}
-	if string(bundleJSON) != string(f.gen.BundleBytes) {
+	if !bytes.Equal(bundleJSON, f.gen.BundleBytes) {
 		return nil, urlcatfeed.ErrVerify
 	}
 	return &urlcatfeed.ArtifactPayload{

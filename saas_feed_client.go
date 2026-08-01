@@ -267,6 +267,14 @@ func (c *saasFeedClient) AcquireGeneration(ctx context.Context, in AcquireInput)
 	}
 
 	// ── Step 15: persist the fully-verified candidate as an immutable generation. ──
+	// Derive the feed-owned normalized snapshot from the VERIFIED artifact and stage it
+	// with the signed evidence, so §B.4's snapshot.normalized.json is durable inside the
+	// immutable generation (F3b-3 composes it with overrides; it never has to be added
+	// later by mutating the immutable dir).
+	snapshotBytes, err := normalizedSnapshotBytes(artifact)
+	if err != nil {
+		return AcquireResult{}, fmt.Errorf("%w: normalized snapshot: %v", errAcquireInternal, err)
+	}
 	cand := generationCandidate{
 		FeedVersion:    manifest.FeedVersion,
 		GenerationID:   feedVersionID(manifest.FeedVersion),
@@ -280,6 +288,7 @@ func (c *saasFeedClient) AcquireGeneration(ctx context.Context, in AcquireInput)
 		EnvelopeBytes:  envelopeBytes,
 		ArtifactBytes:  artifactBytes,
 		BundleBytes:    bundleBytes,
+		SnapshotBytes:  snapshotBytes,
 	}
 	persisted, err := c.store.Persist(ctx, cand)
 	if err != nil {
@@ -359,7 +368,16 @@ func (c *saasFeedClient) acquireArtifact(ctx context.Context, in AcquireInput, m
 	if e := ctx.Err(); e != nil {
 		return nil, nil, nil, classifyAcquireCtx(e)
 	}
-	artifactBytes, aerr := c.fetcher.fetchArtifactObject(ctx, in.Config.URL, manifest.ArtifactPath, urlcatfeed.MaxArtifactSize)
+	// Bound the artifact read by the SIGNED, verified artifact_size (clamped to the
+	// protocol cap): min(artifact_size, MaxArtifactSize)+1 (§A.8). The kernel already
+	// validated artifact_size ∈ (0, MaxArtifactSize], so an oversized/malformed body is
+	// rejected at read time — before VerifyArtifact — instead of reading up to the full
+	// 8 MiB cap for a small declared artifact (Codex P2).
+	artifactLimit := manifest.ArtifactSize
+	if artifactLimit > urlcatfeed.MaxArtifactSize {
+		artifactLimit = urlcatfeed.MaxArtifactSize
+	}
+	artifactBytes, aerr := c.fetcher.fetchArtifactObject(ctx, in.Config.URL, manifest.ArtifactPath, artifactLimit)
 	if aerr != nil {
 		return nil, nil, nil, c.wrapArtifactErr(aerr, "")
 	}
@@ -457,3 +475,43 @@ func isAcquireCanceled(err error) bool {
 // feedVersionID renders the immutable generation id for a feed version (the decimal
 // string; §B.3/§B.4).
 func feedVersionID(v int64) string { return fmt.Sprintf("%d", v) }
+
+// normalizedFeedSnapshot is the feed-owned normalized category layer persisted as
+// snapshot.normalized.json (§B.4). It is a deterministic projection of the VERIFIED
+// artifact — the feed's normalized, sorted categories — WITHOUT admin overrides
+// (overrides are CP-synced/mutable and are layered on at F3b-3 activation, so they must
+// NOT live in the immutable per-generation dir). Its bytes are canonical (fixed field
+// order, no HTML escaping, no trailing newline), so the snapshot is byte-stable.
+type normalizedFeedSnapshot struct {
+	SchemaVersion int                        `json:"schema_version"`
+	Feed          string                     `json:"feed"`
+	FeedVersion   int64                      `json:"feed_version"`
+	GeneratedAt   string                     `json:"generated_at"`
+	Categories    []normalizedFeedCategoryJS `json:"categories"`
+}
+
+type normalizedFeedCategoryJS struct {
+	Name  string   `json:"name"`
+	Hosts []string `json:"hosts"`
+}
+
+// normalizedSnapshotBytes derives the canonical normalized-snapshot bytes from the
+// verified artifact. The artifact's categories are already normalized, deduplicated,
+// and strictly sorted (kernel-enforced), so this is a pure, order-preserving projection.
+func normalizedSnapshotBytes(a *urlcatfeed.ArtifactPayload) ([]byte, error) {
+	if a == nil {
+		return nil, fmt.Errorf("%w: nil artifact", errAcquireInternal)
+	}
+	cats := make([]normalizedFeedCategoryJS, 0, len(a.Categories))
+	for i := range a.Categories {
+		cats = append(cats, normalizedFeedCategoryJS{Name: a.Categories[i].Name, Hosts: a.Categories[i].Hosts})
+	}
+	snap := normalizedFeedSnapshot{
+		SchemaVersion: a.SchemaVersion,
+		Feed:          a.Feed,
+		FeedVersion:   a.FeedVersion,
+		GeneratedAt:   a.GeneratedAt,
+		Categories:    cats,
+	}
+	return floorCanonicalBytes(snap)
+}

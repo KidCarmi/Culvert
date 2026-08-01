@@ -58,13 +58,19 @@ const (
 	// genMetaSchemaVersion is the only supported generation-metadata schema.
 	genMetaSchemaVersion = 1
 
-	// The four immutable files of a generation (§B.4 on-disk contract; the fourth
-	// is the canonical verified metadata / commit-intent record required by the
-	// F3b-2 slice — it binds the signed digests so F3b-3 re-verifies offline).
-	genFileManifestEnvelope = "manifest.envelope.json"
-	genFileArtifact         = "artifact.json"
-	genFileArtifactBundle   = "artifact.json.sigstore"
-	genFileMeta             = "generation.json"
+	// The immutable files of a generation. The first four are the §B.4 on-disk
+	// contract: the two signed-evidence files (manifest envelope + artifact), the
+	// artifact Sigstore bundle, and snapshot.normalized.json — the feed-owned
+	// normalized category layer F3b-3 composes with overrides at activation, derived
+	// deterministically from the VERIFIED artifact and staged before the commit rename
+	// (so it never has to be added later by mutating the immutable dir). generation.json
+	// is the additional canonical verified metadata / commit-intent record the F3b-2
+	// slice requires — it binds the signed digests so F3b-3 re-verifies offline.
+	genFileManifestEnvelope   = "manifest.envelope.json"
+	genFileArtifact           = "artifact.json"
+	genFileArtifactBundle     = "artifact.json.sigstore"
+	genFileSnapshotNormalized = "snapshot.normalized.json"
+	genFileMeta               = "generation.json"
 
 	genFilePerm os.FileMode = 0o600 // generation files are 0600.
 	genDirPerm  os.FileMode = 0o700 // the generations/<id> dir is 0700.
@@ -112,6 +118,7 @@ type generationCandidate struct {
 	EnvelopeBytes []byte // exact wire manifest envelope
 	ArtifactBytes []byte // exact wire artifact
 	BundleBytes   []byte // exact wire artifact Sigstore bundle
+	SnapshotBytes []byte // canonical normalized feed-layer snapshot (derived from the VERIFIED artifact)
 }
 
 // generationMeta is the canonical verified metadata / commit-intent record persisted
@@ -173,6 +180,11 @@ func (c generationCandidate) validate() error {
 	}
 	if len(c.BundleBytes) == 0 || len(c.BundleBytes) > urlcatfeed.MaxBundleBytes {
 		return fmt.Errorf("%w: bundle %d", errGenSizeBound, len(c.BundleBytes))
+	}
+	// The normalized snapshot is derived from the verified artifact, so it is bounded by
+	// the same artifact ceiling; it must be present (F3b-3 needs the feed-owned layer).
+	if len(c.SnapshotBytes) == 0 || len(c.SnapshotBytes) > urlcatfeed.MaxArtifactSize {
+		return fmt.Errorf("%w: snapshot %d", errGenSizeBound, len(c.SnapshotBytes))
 	}
 	// Re-bind bytes → digests (never trust the field without the bytes proving it).
 	if sha256Hex(c.EnvelopeBytes) != c.ManifestSHA256 {
@@ -348,20 +360,8 @@ func (s *generationStore) stageAndCommit(ctx context.Context, cand generationCan
 		}
 	}()
 
-	files := cand.files()
-	for _, f := range files {
-		if err := ctx.Err(); err != nil {
-			return genPersistResult{}, err
-		}
-		p := filepath.Join(stage, f.name)
-		if err := s.fs.atomicWrite(p, f.data, genFilePerm); err != nil {
-			return genPersistResult{}, fmt.Errorf("%w: write %s: %v", errGenStage, f.name, err)
-		}
-		// Read back + byte-verify EACH file immediately (write → sync → close →
-		// read-back). AtomicWrite already fsynced the file and the staging dir.
-		if err := s.readBackBytes(p, f.data); err != nil {
-			return genPersistResult{}, fmt.Errorf("%w: %s: %v", errGenReadBack, f.name, err)
-		}
+	if err := s.writeStagedFiles(ctx, stage, cand.files()); err != nil {
+		return genPersistResult{}, err
 	}
 
 	// Sync the staging directory (belt over AtomicWrite's per-file parent sync) so all
@@ -401,6 +401,25 @@ func (s *generationStore) stageAndCommit(ctx context.Context, cand generationCan
 		return genPersistResult{}, fmt.Errorf("%w: post-commit: %v", errGenReadBack, err)
 	}
 	return genPersistResult{Outcome: genPersistCommitted, Dir: final}, nil
+}
+
+// writeStagedFiles writes each generation file into the staging dir and immediately
+// reads it back + byte-verifies it (write → sync → close → read-back; AtomicWrite
+// fsyncs the file + staging dir). Cancellation is honored before each write.
+func (s *generationStore) writeStagedFiles(ctx context.Context, stage string, files []genFile) error {
+	for _, f := range files {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		p := filepath.Join(stage, f.name)
+		if err := s.fs.atomicWrite(p, f.data, genFilePerm); err != nil {
+			return fmt.Errorf("%w: write %s: %v", errGenStage, f.name, err)
+		}
+		if err := s.readBackBytes(p, f.data); err != nil {
+			return fmt.Errorf("%w: %s: %v", errGenReadBack, f.name, err)
+		}
+	}
+	return nil
 }
 
 // reconcileExisting validates an existing committed generation against the candidate:
@@ -464,6 +483,7 @@ func (c generationCandidate) files() []genFile {
 		{genFileManifestEnvelope, c.EnvelopeBytes},
 		{genFileArtifact, c.ArtifactBytes},
 		{genFileArtifactBundle, c.BundleBytes},
+		{genFileSnapshotNormalized, c.SnapshotBytes},
 		{genFileMeta, metaBytes},
 	}
 }

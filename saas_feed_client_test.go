@@ -10,6 +10,7 @@ package main
 // 31 (no legacy SaaS-syncer interaction).
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
@@ -64,6 +65,19 @@ func TestF3b2_Acquire_ValidEndToEnd(t *testing.T) {
 	}
 	if mux.manifestHits.Load() != 1 || mux.artifactHits.Load() != 1 || mux.bundleHits.Load() != 1 {
 		t.Fatalf("hits: manifest=%d artifact=%d bundle=%d", mux.manifestHits.Load(), mux.artifactHits.Load(), mux.bundleHits.Load())
+	}
+	// The immutable generation carries the §B.4 feed-owned normalized snapshot, derived
+	// from the VERIFIED artifact and staged before the commit (not added later).
+	wantSnap, derr := normalizedSnapshotBytes(res.Generation.Artifact)
+	if derr != nil {
+		t.Fatalf("derive snapshot: %v", derr)
+	}
+	gotSnap, rerr := os.ReadFile(filepath.Join(root, "42", genFileSnapshotNormalized))
+	if rerr != nil {
+		t.Fatalf("read snapshot.normalized.json: %v", rerr)
+	}
+	if !bytes.Equal(gotSnap, wantSnap) {
+		t.Fatalf("snapshot.normalized.json mismatch: got %s", gotSnap)
 	}
 	// A second acquisition is idempotent (existing immutable generation).
 	res2, err := c.AcquireGeneration(context.Background(), baseAcquireInput(g))
@@ -121,14 +135,34 @@ func TestF3b2_Acquire_RealKernelRejectsForged_ZeroArtifactFetch(t *testing.T) {
 func TestF3b2_Acquire_TamperedArtifact(t *testing.T) {
 	g := buildFeedGen(t, feedGenOpts{})
 	c, mux, root := newClientWithFake(t, g)
-	// Serve an artifact whose bytes no longer match the manifest digest/size.
+	// Serve an artifact of the SAME size but a flipped byte, so it passes the size-
+	// bounded read and is rejected at digest/signature VERIFICATION (not the bound).
 	mux.artifactExtra = func(w http.ResponseWriter, r *http.Request) bool {
-		_, _ = w.Write(append(append([]byte(nil), g.ArtifactBytes...), 'Z'))
+		tampered := append([]byte(nil), g.ArtifactBytes...)
+		tampered[len(tampered)-1] ^= 0xff
+		_, _ = w.Write(tampered)
 		return true
 	}
 	_, err := c.AcquireGeneration(context.Background(), baseAcquireInput(g))
 	if !errors.Is(err, errAcquireVerify) {
 		t.Fatalf("err = %v; want errAcquireVerify", err)
+	}
+	assertNoGeneration(t, root)
+}
+
+// An OVERSIZED artifact body (larger than the SIGNED artifact_size) is rejected at the
+// size-bounded read — before verification — per §A.8 min(artifact_size,cap)+1 (Codex P2).
+func TestF3b2_Acquire_OversizedArtifactRejectedAtBound(t *testing.T) {
+	g := buildFeedGen(t, feedGenOpts{})
+	c, mux, root := newClientWithFake(t, g)
+	mux.artifactExtra = func(w http.ResponseWriter, r *http.Request) bool {
+		// One byte over the declared artifact_size: must be refused at the read bound.
+		_, _ = w.Write(append(append([]byte(nil), g.ArtifactBytes...), 'Z'))
+		return true
+	}
+	_, err := c.AcquireGeneration(context.Background(), baseAcquireInput(g))
+	if !errors.Is(err, errAcquireArtifact) {
+		t.Fatalf("err = %v; want errAcquireArtifact (bounded read)", err)
 	}
 	assertNoGeneration(t, root)
 }
@@ -309,10 +343,10 @@ func TestF3b2_Acquire_NoFloorOrActivationMutation(t *testing.T) {
 	afterA, _ := os.ReadFile(floorA)
 	afterB, _ := os.ReadFile(floorB)
 	afterAct, _ := os.ReadFile(activation)
-	if string(beforeA) != string(afterA) || string(beforeB) != string(afterB) {
+	if !bytes.Equal(beforeA, afterA) || !bytes.Equal(beforeB, afterB) {
 		t.Fatal("acquisition mutated a floor record")
 	}
-	if string(beforeAct) != string(afterAct) {
+	if !bytes.Equal(beforeAct, afterAct) {
 		t.Fatal("acquisition mutated the activation record")
 	}
 }

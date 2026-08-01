@@ -1,6 +1,6 @@
 package main
 
-// fakeGenFS wraps a real genFS and injects failures / hooks at each durability
+// fakeGenFS wraps a inner genFS and injects failures / hooks at each durability
 // boundary so the immutable-generation store's transactionality can be proven
 // deterministically (no sleeps).
 
@@ -14,7 +14,7 @@ import (
 )
 
 type fakeGenFS struct {
-	real genFS
+	inner genFS
 
 	failMkdirAll  bool
 	failMkdirTemp bool
@@ -34,7 +34,7 @@ type fakeGenFS struct {
 
 var errFakeGenFS = errors.New("fakeGenFS injected failure")
 
-func newFakeGenFS(real genFS) *fakeGenFS { return &fakeGenFS{real: real} }
+func newFakeGenFS(inner genFS) *fakeGenFS { return &fakeGenFS{inner: inner} }
 
 func (f *fakeGenFS) seam() genFS {
 	return genFS{
@@ -42,20 +42,20 @@ func (f *fakeGenFS) seam() genFS {
 			if f.failMkdirAll {
 				return errFakeGenFS
 			}
-			return f.real.mkdirAll(path, perm)
+			return f.inner.mkdirAll(path, perm)
 		},
 		mkdirTemp: func(dir, pattern string) (string, error) {
 			if f.failMkdirTemp {
 				return "", errFakeGenFS
 			}
-			return f.real.mkdirTemp(dir, pattern)
+			return f.inner.mkdirTemp(dir, pattern)
 		},
 		atomicWrite: func(path string, data []byte, perm os.FileMode) error {
 			base := filepath.Base(path)
 			if f.failWriteOn != "" && base == f.failWriteOn {
 				return errFakeGenFS
 			}
-			if err := f.real.atomicWrite(path, data, perm); err != nil {
+			if err := f.inner.atomicWrite(path, data, perm); err != nil {
 				return err
 			}
 			if f.afterWrite != nil {
@@ -70,14 +70,14 @@ func (f *fakeGenFS) seam() genFS {
 			if f.failRename {
 				return errFakeGenFS
 			}
-			return f.real.rename(oldpath, newpath)
+			return f.inner.rename(oldpath, newpath)
 		},
 		syncDir: func(path string) error {
 			n := f.syncCalls.Add(1)
 			if f.failSyncDir != 0 && int(n) == f.failSyncDir {
 				return errFakeGenFS
 			}
-			if err := f.real.syncDir(path); err != nil {
+			if err := f.inner.syncDir(path); err != nil {
 				return err
 			}
 			if f.afterSyncDir != nil {
@@ -86,7 +86,7 @@ func (f *fakeGenFS) seam() genFS {
 			return nil
 		},
 		readFile: func(path string) ([]byte, error) {
-			b, err := f.real.readFile(path)
+			b, err := f.inner.readFile(path)
 			if err != nil {
 				return nil, err
 			}
@@ -95,8 +95,8 @@ func (f *fakeGenFS) seam() genFS {
 			}
 			return b, nil
 		},
-		stat:      f.real.stat,
-		removeAll: f.real.removeAll,
+		stat:      f.inner.stat,
+		removeAll: f.inner.removeAll,
 	}
 }
 
