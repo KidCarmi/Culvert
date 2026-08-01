@@ -8149,7 +8149,7 @@
                 }
               }
             },
-            "description": "Rollback applied and persisted (`status:rolled_back`, `durable:true`).\n"
+            "description": "Rollback applied, and every store it wrote reached disk\n(`status:rolled_back`, `stores_persisted:true`).\n`runtime_only_surfaces` lists the parts of the snapshot that are\nrestored to the RUNNING configuration but are not persisted by this\npath — they are re-read from admin settings on restart and will\nrevert (CHAOS-46).\n"
           },
           "400": {
             "$ref": "#/components/responses/PlainBadRequest"
@@ -8171,7 +8171,7 @@
                 }
               }
             },
-            "description": "Either the stored version could not be read, or (CHAOS-27) the\nrollback was applied to the RUNNING configuration but one or more\nstores could not be written to disk — `status:rolled_back_not_durable`\nwith `applied:true`, `durable:false`, and `persist_errors` naming the\nfiles. The running config has already changed, so the recovery is to\nfix the data directory and re-save, not to retry the rollback.\n"
+            "description": "Either the stored version could not be read, or (CHAOS-27) the\nrollback was applied to the RUNNING configuration but one or more\nstores could not be written to disk — `status:rolled_back_not_durable`\nwith `applied:true`, `stores_persisted:false`, and `persist_errors`\nnaming the files. The running config has already changed, so the\nrecovery is to fix the data directory and re-save, not to retry the\nrollback.\n"
           }
         },
         "security": [

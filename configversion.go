@@ -277,23 +277,51 @@ func rollbackConfigVersion(w http.ResponseWriter, r *http.Request) {
 		// fixing the disk and re-saving is.
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // best-effort HTTP response write; client disconnects are not actionable
-			"status":         "rolled_back_not_durable",
-			"version":        req.Version,
-			"warnings":       warnings,
-			"applied":        true,
-			"durable":        false,
-			"persist_errors": persistErr.Error(),
-			"error":          "rollback applied to the running configuration but could not be written to disk; it will be lost on restart",
+			"status":           "rolled_back_not_durable",
+			"version":          req.Version,
+			"warnings":         warnings,
+			"applied":          true,
+			"stores_persisted": false,
+			"persist_errors":   persistErr.Error(),
+			"error":            "rollback applied to the running configuration but could not be written to disk; it will be lost on restart",
 		})
 		return
 	}
 	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // best-effort HTTP response write; client disconnects are not actionable
-		"status":   "rolled_back",
-		"version":  req.Version,
-		"warnings": warnings,
-		"applied":  true,
-		"durable":  true,
+		"status":           "rolled_back",
+		"version":          req.Version,
+		"warnings":         warnings,
+		"applied":          true,
+		"stores_persisted": true,
+		// Named for exactly what was verified, and paired with the surfaces
+		// that are NOT covered. An earlier draft called this `durable`, which
+		// an operator would reasonably read as "this rollback survives a
+		// restart" — and for the surfaces below it does not (Codex P1).
+		"runtime_only_surfaces": rollbackRuntimeOnlySurfaces,
 	})
+}
+
+// rollbackRuntimeOnlySurfaces names the parts of a config snapshot that
+// applyConfigBackup restores to the RUNNING configuration but never persists,
+// so a restart re-reads them from admin_settings.json and they revert.
+//
+// This is pre-existing, deliberate behaviour — the config-version apply path
+// restores live state only (see the RateLimitExempt comment in
+// applyConfigBackup) — but the rollback response previously implied otherwise
+// by reporting a flat `durable:true`. The scoped write observer can only see
+// writes that were ATTEMPTED, so it cannot detect a surface that is never
+// written at all; naming them is the honest alternative.
+//
+// Whether rollback SHOULD persist these (by extending the apply path to
+// admin-settings durability) is an owner decision recorded as CHAOS-46, not a
+// change to make silently inside an observability fix.
+var rollbackRuntimeOnlySurfaces = []string{
+	"default_action",
+	"rewrite_rules",
+	"ip_filter_mode",
+	"ip_list",
+	"rate_limit_rpm",
+	"rate_limit_exempt",
 }
 
 // validateConfigBackup performs pre-flight checks on a config snapshot (F7).

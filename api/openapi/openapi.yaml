@@ -4068,7 +4068,12 @@ paths:
       responses:
         '200':
           description: |
-            Rollback applied and persisted (`status:rolled_back`, `durable:true`).
+            Rollback applied, and every store it wrote reached disk
+            (`status:rolled_back`, `stores_persisted:true`).
+            `runtime_only_surfaces` lists the parts of the snapshot that are
+            restored to the RUNNING configuration but are not persisted by this
+            path — they are re-read from admin settings on restart and will
+            revert (CHAOS-46).
           content:
             application/json:
               schema: { type: object, additionalProperties: true }
@@ -4079,9 +4084,10 @@ paths:
             Either the stored version could not be read, or (CHAOS-27) the
             rollback was applied to the RUNNING configuration but one or more
             stores could not be written to disk — `status:rolled_back_not_durable`
-            with `applied:true`, `durable:false`, and `persist_errors` naming the
-            files. The running config has already changed, so the recovery is to
-            fix the data directory and re-save, not to retry the rollback.
+            with `applied:true`, `stores_persisted:false`, and `persist_errors`
+            naming the files. The running config has already changed, so the
+            recovery is to fix the data directory and re-save, not to retry the
+            rollback.
           content:
             application/json:
               schema: { type: object, additionalProperties: true }

@@ -33,19 +33,44 @@ import (
 //   - called synchronously on the failing goroutine, possibly while the caller
 //     holds a store lock — it MUST NOT block and MUST NOT re-enter AtomicWrite
 //     (see storage_health.go's alert-path recursion guard in package main).
-//   - never called on success: the success path performs no atomic load.
+//   - never called on success; the SUCCESS observer below is the separate seam
+//     for that, so a consumer can tell "no failures" from "no writes at all".
 var writeFailObserver atomic.Pointer[func(path string, err error)]
 
+// writeOKObserver is notified after a fully successful AtomicWrite. It exists
+// so a consumer can establish RECOVERY BY EVIDENCE rather than by elapsed time:
+// silence is not proof that a read-only or full filesystem healed, it is only
+// proof that nothing tried to write. Durable writes are admin-action-rate (the
+// fsync alone dominates), so the extra atomic load on the success path is not
+// a hot-path cost.
+var writeOKObserver atomic.Pointer[func(path string)]
+
 // SetWriteFailureObserver publishes the durable-write failure observer.
-// Published once at startup by package main (init order is irrelevant — the
-// success path never reads it). A nil fn clears the observer, which is what
-// tests use to restore the default no-op state.
+// Published once at startup by package main. A nil fn clears the observer,
+// which is what tests use to restore the default no-op state.
 func SetWriteFailureObserver(fn func(path string, err error)) {
 	if fn == nil {
 		writeFailObserver.Store(nil)
 		return
 	}
 	writeFailObserver.Store(&fn)
+}
+
+// SetWriteSuccessObserver publishes the durable-write success observer. Nil
+// clears it. See writeOKObserver for why successes are observed at all.
+func SetWriteSuccessObserver(fn func(path string)) {
+	if fn == nil {
+		writeOKObserver.Store(nil)
+		return
+	}
+	writeOKObserver.Store(&fn)
+}
+
+// noteWriteSuccess notifies the success observer (if any).
+func noteWriteSuccess(path string) {
+	if p := writeOKObserver.Load(); p != nil {
+		(*p)(path)
+	}
 }
 
 // noteWriteFailure notifies the observer (if any) and returns err unchanged so
@@ -102,7 +127,9 @@ func AtomicWrite(path string, data []byte, perm os.FileMode) error {
 
 	d, err := os.Open(dir)
 	if err != nil {
-		// Best-effort: opening a directory for sync is not portable.
+		// Best-effort: opening a directory for sync is not portable. The data
+		// is already renamed into place, so this is a successful durable write.
+		noteWriteSuccess(path)
 		return nil
 	}
 	syncErr := d.Sync()
@@ -116,5 +143,6 @@ func AtomicWrite(path string, data []byte, perm os.FileMode) error {
 	if closeErr != nil && syncErr == nil {
 		return noteWriteFailure(path, fmt.Errorf("atomic write %s: parent dir close: %w", path, closeErr))
 	}
+	noteWriteSuccess(path)
 	return nil
 }

@@ -253,13 +253,17 @@ func checkStorage() OperatorContractCheck {
 	// "writable (verified once at startup)" while every save silently failed.
 	// Observed failures are authoritative evidence that persistence is broken
 	// NOW; the probe is only evidence about the state at boot.
+	// Recovery is reported ONLY on evidence — a successful durable write
+	// observed after the last failure. Elapsed silence is not recovery: a
+	// filesystem that is still read-only or still full looks identical to a
+	// healthy one when nothing tries to write.
 	if s := storageWriteFailures(); s.Total > 0 {
 		last := s.Last.UTC().Format(time.RFC3339)
-		if time.Since(s.Last) < storageDegradedWindow {
+		if !storageRecoveryObserved() {
 			return OperatorContractCheck{
 				Code:   "storage_path",
 				Status: diagFail,
-				Message: fmt.Sprintf("%d durable write(s) to the data directory failed — persisted state is being LOST (last: %s at %s: %s)",
+				Message: fmt.Sprintf("%d durable write(s) to the data directory failed and NO successful write has been observed since — persisted state is being LOST (last: %s at %s: %s)",
 					s.Total, s.Path, last, s.Err),
 				OperatorAction: "The data directory has become unwritable or full since startup. Check free space and inode count, confirm the volume is still mounted read-write, then re-apply any configuration changed since the first failure — admin-API changes made during this window are live in memory but did NOT reach disk and will be lost on restart.",
 			}
@@ -267,9 +271,9 @@ func checkStorage() OperatorContractCheck {
 		return OperatorContractCheck{
 			Code:   "storage_path",
 			Status: diagWarn,
-			Message: fmt.Sprintf("%d durable write(s) failed earlier in this process, none in the last %s (last: %s at %s)",
-				s.Total, storageDegradedWindow, s.Path, last),
-			OperatorAction: "Writes are landing again, but configuration changed during the failure window may not have reached disk. Re-save anything edited around that time, and check the host for the transient full-disk / read-only-remount event.",
+			Message: fmt.Sprintf("%d durable write(s) failed earlier in this process; writes have since been observed to succeed (last failure: %s at %s)",
+				s.Total, s.Path, last),
+			OperatorAction: "Writes are landing again — a later write was observed to succeed. Configuration changed during the failure window may still not have reached disk: re-save anything edited around that time, and check the host for the transient full-disk / read-only-remount event.",
 		}
 	}
 

@@ -212,13 +212,23 @@ func TestCheckStorage_HealedFailureDegradesToWarn(t *testing.T) {
 	probeStorageWritability()
 	failingWrite(t, "policy.json")
 
-	// Age the record past the degraded window.
-	storageWrites.mu.Lock()
-	storageWrites.last = time.Now().Add(-storageDegradedWindow - time.Minute)
-	storageWrites.mu.Unlock()
+	if !storageDegraded() {
+		t.Fatal("setup: not degraded immediately after a failure")
+	}
+
+	// Recovery must be EVIDENCE, not elapsed time. Merely waiting proves
+	// nothing about a filesystem that is still read-only — only a durable write
+	// that actually succeeds does. Perform one.
+	okTarget := filepath.Join(t.TempDir(), "recovered.json")
+	if err := fileutil.AtomicWrite(okTarget, []byte("{}"), 0o600); err != nil {
+		t.Fatalf("recovery write: %v", err)
+	}
 
 	if storageDegraded() {
-		t.Error("storageDegraded() still true outside the degraded window")
+		t.Error("storageDegraded() still true after an observed successful write")
+	}
+	if !storageRecoveryObserved() {
+		t.Error("storageRecoveryObserved() = false after a successful write")
 	}
 	ck := checkStorage()
 	if ck.Status != diagWarn {
@@ -369,5 +379,65 @@ func TestMetrics_StorageWriteSeries(t *testing.T) {
 	}
 	if !strings.Contains(body, "culvert_storage_write_last_failure_age_seconds") {
 		t.Error("age gauge missing after a failure")
+	}
+}
+
+// TestStorageDegraded_SilenceIsNotRecovery pins the Codex P1 correction: an
+// earlier draft aged the failure out on a timer, so a filesystem that stayed
+// broken but simply received no further write attempts reported itself
+// recovered. Only an observed successful write may clear the state.
+func TestStorageDegraded_SilenceIsNotRecovery(t *testing.T) {
+	withCleanStorageWriteHealth(t)
+	captureStorageWriteAlerts(t)
+
+	failingWrite(t, "policy.json")
+	if !storageDegraded() {
+		t.Fatal("setup: not degraded after a failure")
+	}
+
+	// Simulate an arbitrarily long quiet period: push the failure far into the
+	// past. Under the old time-based rule this alone cleared the state.
+	storageWrites.mu.Lock()
+	storageWrites.last = time.Now().Add(-24 * time.Hour)
+	storageWrites.mu.Unlock()
+
+	if !storageDegraded() {
+		t.Error("storage reported recovered after mere elapsed time — silence is not evidence that the filesystem healed")
+	}
+	if ck := checkStorage(); ck.Status != diagFail {
+		t.Errorf("checkStorage = %q, want fail while no successful write has been observed", ck.Status)
+	}
+
+	// A successful durable write is the only thing that clears it.
+	if err := fileutil.AtomicWrite(filepath.Join(t.TempDir(), "ok.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatalf("recovery write: %v", err)
+	}
+	if storageDegraded() {
+		t.Error("still degraded after an observed successful durable write")
+	}
+}
+
+// TestStorageWriteAlert_RetryQueueDoesNotConsumeAlertGate pins the Codex P2
+// correction. The alert engine persists its own retry queue, so during a disk
+// incident that file is a likely FIRST failure. If it consumed the shared rate
+// gate, the next real store failure would be silently un-paged for a full
+// interval — muting the signal during exactly the incident it exists for.
+func TestStorageWriteAlert_RetryQueueDoesNotConsumeAlertGate(t *testing.T) {
+	withCleanStorageWriteHealth(t)
+	alerts := captureStorageWriteAlerts(t)
+
+	// The retry queue fails FIRST.
+	failingWrite(t, alertRetryQueueBase)
+	if len(*alerts) != 0 {
+		t.Fatalf("retry-queue failure fired %d alerts, want 0", len(*alerts))
+	}
+
+	// A real store fails immediately afterwards, well inside the interval.
+	failingWrite(t, "policy.json")
+	if len(*alerts) != 1 {
+		t.Fatalf("fired %d alerts for the store failure, want 1 — the retry-queue write consumed the alert gate", len(*alerts))
+	}
+	if !strings.Contains((*alerts)[0], "policy.json") {
+		t.Errorf("alert %q does not name the store that failed", (*alerts)[0])
 	}
 }

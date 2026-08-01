@@ -78,8 +78,10 @@ What this change removes is the *silence*.
   `atomic.Pointer` seam that every failure branch of `AtomicWrite` notifies via
   `noteWriteFailure(path, err)`, which returns the error unchanged. Callers that
   *do* check the error are unaffected: the observer is notified **in addition
-  to**, never instead of, the returned error. The success path performs no
-  atomic load, so healthy writes are byte-identical.
+  to**, never instead of, the returned error. A companion
+  `SetWriteSuccessObserver` seam reports successful writes, which is how
+  recovery is established by evidence rather than by a timer (see the Codex
+  amendments below).
 - **Fix (`storage_health.go`, new):** package main publishes the observer at
   `init` (so coverage starts before the first store loads) and records:
   a monotonic failure count, the failing file's base name, the error text, and
@@ -87,12 +89,12 @@ What this change removes is the *silence*.
   goroutine may hold a store lock.
 - **Surfaces:**
   - `checkStorage()` (`diagnostics.go`) now reports observed runtime failures
-    **ahead of** the cached boot probe: `fail` while a failure sits inside
-    `storageDegradedWindow` (15m), `warn` afterwards (a healed incident still
-    means edits made during the window never reached disk), otherwise the
-    existing probe verdict. This closes the "one-shot probe caches forever" gap
-    without making the handler do disk I/O — the contract that check has always
-    kept.
+    **ahead of** the cached boot probe: `fail` while a failure has occurred and
+    no successful durable write has been observed since, `warn` once a later
+    write is observed to succeed (a healed incident still means edits made
+    during the window never reached disk), otherwise the existing probe verdict.
+    This closes the "one-shot probe caches forever" gap without making the
+    handler do disk I/O — the contract that check has always kept.
   - `/metrics`: `culvert_storage_write_failures_total` (counter),
     `culvert_storage_write_degraded` (gauge), and
     `culvert_storage_write_last_failure_age_seconds` — the age gauge is **omitted
@@ -112,9 +114,11 @@ What this change removes is the *silence*.
     would saturate the bounded webhook queue and evict every other alert — the
     storage fault would take the alerting channel down with it. The log line and
     the alert are rate-gated to one per `storageWriteAlertInterval` (5m) under
-    the same lock that increments the counter; the **counter itself is never
-    gated**, so magnitude is preserved. The gate re-arms, so a disk that stays
-    broken keeps paging rather than going quiet after one message.
+    the same lock that increments the counter, via **two independent gates** so
+    a non-alertable failure cannot consume the alert budget; the **counter
+    itself is never gated**, so magnitude is preserved. The gate re-arms, so a
+    disk that stays broken keeps paging rather than going quiet after one
+    message.
 
 ### F2 — Config rollback reports partial durability (CHAOS-27 / F-12) · MED-HIGH
 
@@ -130,10 +134,12 @@ What this change removes is the *silence*.
   worse than a fully-applied one that is not yet durable. What the error carries
   is the fact the caller previously had no way to learn.
 - **Handler contract:** `500` + `status:"rolled_back_not_durable"`,
-  `applied:true`, `durable:false`, `persist_errors` naming the files. `applied`
+  `applied:true`, `stores_persisted:false`, `persist_errors` naming the files.
+  The success path reports `stores_persisted:true` alongside
+  `runtime_only_surfaces` (CHAOS-46) rather than a blanket `durable`. `applied`
   is load-bearing — it tells the operator the running config **has already
   changed**, so the recovery is *fix the disk and re-save*, not *retry the
-  rollback*. The healthy path additionally reports `durable:true`. The audit
+  rollback*. The audit
   entry is appended with `— NOT DURABLE: …`: "who rolled back to what" is an
   incomplete compliance record without "and it did not persist".
 - **The CP→DP snapshot is still published** on the failure path: the fleet must
@@ -242,6 +248,42 @@ during the window must be re-applied.
   green; `make api-verify` green after documenting the new 500 in the OpenAPI
   spec and regenerating the bundle.
 
+### Post-review amendments (same PR)
+
+Three findings from the Codex review pass, all accepted after verifying them
+against the code:
+
+- **Rollback overclaimed durability (P1).** The response reported a flat
+  `durable:true`, which an operator reads as "this rollback survives a
+  restart". Verified false for four surfaces: `setDefaultPolicyAction` is an
+  `atomic.Int32`, `rewriter.SetRules` and `ipf.SetMode`/`Add` are memory-only,
+  and `admin_settings.go:220-246` restores all of them at startup from a file
+  `applyConfigBackup` never writes. The scoped observer cannot detect this — it
+  only sees writes that were ATTEMPTED, and these are never attempted at all.
+  The field is now `stores_persisted` (exactly what was verified) alongside
+  `runtime_only_surfaces` naming what will revert. The behaviour gap is
+  recorded as **CHAOS-46** rather than fixed silently: extending rollback to
+  admin-settings durability changes a documented contract and belongs to an
+  owner.
+- **Recovery was inferred from silence (P1).** `checkStorage` aged a failure
+  from `fail` down to `warn` after 15 minutes, and the warn text asserted
+  "writes are landing again" — with no successful write to justify it. A
+  filesystem that stays read-only but simply receives no write attempts is
+  indistinguishable from a healthy one under a timer. That is the same
+  reasoning error this whole review is about, reintroduced in the fix. The
+  timer is deleted: `fileutil` gained a **success** observer, and degraded
+  state now clears only on an OBSERVED successful durable write. Pinned by
+  `TestStorageDegraded_SilenceIsNotRecovery`, which pushes the failure 24h into
+  the past and asserts the node still reports `fail`.
+- **The retry queue could eat the page (P2).** The log and alert shared one
+  rate gate, so a failure writing the alert engine's own `alert_retry_queue.json`
+  — a *likely first* casualty of a disk incident, since Dispatch persists that
+  queue — advanced the gate and suppressed the alert for the next real store
+  failure within the interval, muting the signal during exactly the incident it
+  exists for. Split into independent `logAt`/`alertAt` gates; the retry queue
+  now touches neither the alert gate nor the alert. Pinned by
+  `TestStorageWriteAlert_RetryQueueDoesNotConsumeAlertGate`.
+
 ### An unplanned corroboration of the finding
 
 Wiring the observer made a property of the test suite visible that had been
@@ -286,6 +328,7 @@ the 2026-07-05 review remains the authority for detailed write-ups.
 | ID | Sev | Title | Status |
 |---|---|---|---|
 | CHAOS-45 | HIGH (vis.) | Durable-write failures are silent; storage health is a one-shot boot probe | **FIXED** (this change) — observer seam + counter/gauge/alert/contract row |
+| CHAOS-46 | MED | Config rollback restores `default_action`, `rewrite_rules`, `ip_filter_mode`/`ip_list` and the rate-limit settings to the RUNNING config only — `applyConfigBackup` never writes admin settings, so `admin_settings.go` re-reads the OLD values at startup and those parts of the rollback silently revert | **OPEN (new)** — pre-existing behaviour, deliberate per the apply path's "live state only" contract, but it was being reported as durable. This change stops the overclaim (`stores_persisted` + `runtime_only_surfaces`); whether rollback SHOULD extend to admin-settings durability is an owner decision, not a silent change inside an observability fix |
 | CHAOS-27 (F-12) | LOW-MED | Config rollback swallows `Save()` errors → 200 on a partial-durability apply | **FIXED** (this change) — T4 is now GREEN |
 | CHAOS-27 (relay) | LOW-MED | Double write-block escapes the idle reaper (ID collision — the 07-10 finding) | OPEN — unrelated to the config finding that shares this ID; **the collision should be resolved by renumbering** |
 | CHAOS-11 | MED | Upstream-pool all-down fails open to direct | MITIGATED (07-26B) — remainder: `upstream.fail_mode` posture config |
@@ -347,6 +390,14 @@ way in, or it trades a silent failure for a loud disclosure.
 - **Scope attribution is by time window**, so a rollback can be reported
   non-durable because a *different* store failed concurrently. Safe direction,
   documented at the type.
+- **Recovery evidence is process-wide, not per-path.** Any successful durable
+  write clears the degraded state, not necessarily one to the file that failed.
+  Deliberate: the failure modes this exists for (volume remounted read-only,
+  filesystem or inode table full, quota engaged) are directory- or
+  filesystem-wide, and the file that failed may never be written again. The
+  cost is that a purely per-path failure (a missing target directory) is
+  cleared by an unrelated success — correct for "is storage broken", weaker for
+  "did THAT file land", which is what the scoped collector answers instead.
 - **The alert rate gate is a constant** (5m), not operator-tunable — consistent
   with the other chaos-hardening thresholds in the codebase (recorded
   deferral, same class as the release-catalog thresholds).

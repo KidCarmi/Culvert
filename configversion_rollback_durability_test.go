@@ -140,8 +140,8 @@ func TestRollbackConfigVersion_PartialDurabilityIsNot200(t *testing.T) {
 	if resp["applied"] != true {
 		t.Error("applied != true — the caller must know the RUNNING config already changed, so retrying is not the fix")
 	}
-	if resp["durable"] != false {
-		t.Error("durable != false")
+	if resp["stores_persisted"] != false {
+		t.Error("stores_persisted != false")
 	}
 	pe, _ := resp["persist_errors"].(string)
 	if !strings.Contains(pe, "policy.json") {
@@ -152,9 +152,17 @@ func TestRollbackConfigVersion_PartialDurabilityIsNot200(t *testing.T) {
 	if got := len(policyStore.List()); got != 0 {
 		t.Errorf("live rules = %d, want 0 (the baseline snapshot) — apply must not abort on a persist failure", got)
 	}
-	// And the failure is visible on the operator contract, not just this reply.
-	if !storageDegraded() {
-		t.Error("storage health not degraded after a failed rollback persist")
+	// And the failure is RECORDED globally, not just in this reply.
+	//
+	// Deliberately not asserting storageDegraded() here. Degraded means "a write
+	// failed and no successful write has been observed since", and this handler
+	// legitimately writes again after the failed store — saveConfigVersion lands
+	// in a writable temp dir — which is genuine evidence the filesystem works.
+	// Only the target directory was missing. Conflating a per-path failure with
+	// a filesystem-wide outage is exactly what the recovery-by-evidence rule
+	// exists to avoid.
+	if snap := storageWriteFailures(); snap.Total < 1 || snap.Path != "policy.json" {
+		t.Errorf("failure record = %+v, want the policy.json failure recorded", snap)
 	}
 }
 
@@ -180,8 +188,24 @@ func TestRollbackConfigVersion_HealthyPathUnchanged(t *testing.T) {
 	if resp["status"] != "rolled_back" {
 		t.Errorf("status = %v, want rolled_back", resp["status"])
 	}
-	if resp["durable"] != true {
-		t.Error("durable != true on a healthy rollback")
+	if resp["stores_persisted"] != true {
+		t.Error("stores_persisted != true on a healthy rollback")
+	}
+	// The response must NOT claim blanket durability: several restored surfaces
+	// are runtime-only and revert on restart (CHAOS-46). Naming them is the
+	// contract; an operator reading only "durable:true" would be misled.
+	surfaces, _ := resp["runtime_only_surfaces"].([]any)
+	if len(surfaces) == 0 {
+		t.Error("runtime_only_surfaces missing — the response would overclaim durability")
+	}
+	var haveDefaultAction bool
+	for _, s := range surfaces {
+		if s == "default_action" {
+			haveDefaultAction = true
+		}
+	}
+	if !haveDefaultAction {
+		t.Errorf("runtime_only_surfaces = %v, want it to name default_action (applied via an atomic int, never persisted by this path)", surfaces)
 	}
 	if got := len(policyStore.List()); got != 0 {
 		t.Errorf("live rules = %d, want 0 (baseline restored)", got)

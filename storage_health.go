@@ -30,6 +30,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/fileutil"
@@ -42,12 +43,6 @@ const (
 	// save. One signal per interval is enough to page an operator; the
 	// counter and the operator-contract row carry the magnitude.
 	storageWriteAlertInterval = 5 * time.Minute
-
-	// storageDegradedWindow is how long after the most recent failure the
-	// operator contract reports storage as FAILING rather than as a healed
-	// historical incident. Sized above storageWriteAlertInterval so a
-	// still-broken disk never flips back to a non-fail verdict between alerts.
-	storageDegradedWindow = 15 * time.Minute
 
 	// alertRetryQueueBase is the alert engine's own persistent retry queue
 	// (internal/alerts). A failure writing THAT file must never fire an alert:
@@ -65,7 +60,22 @@ type storageWriteHealth struct {
 	last     time.Time
 	lastPath string
 	lastErr  string
-	alertAt  time.Time
+
+	// lastOK is the most recent OBSERVED successful durable write. Recovery is
+	// established by evidence, never by elapsed time: a filesystem that is
+	// still read-only or still full looks exactly like a healthy one if
+	// nothing happens to write during the window. While lastOK is not after
+	// `last`, persistence stays degraded (Codex P1).
+	lastOK time.Time
+
+	// logAt / alertAt are SEPARATE rate gates. They must not be shared: a
+	// failure writing the alert engine's own retry queue is logged but never
+	// alerted (see alertRetryQueueBase), and if it consumed the alert gate it
+	// would suppress the next real store failure for a full interval —
+	// silencing the page during exactly the disk incident it exists for
+	// (Codex P2).
+	logAt   time.Time
+	alertAt time.Time
 
 	// scopes are the currently-open collectors (see beginStorageWriteScope).
 	// Nil until a scope opens; a rollback is the only production user.
@@ -87,8 +97,13 @@ var fireStorageWriteAlert = func(detail string) {
 	})
 }
 
+// storageEverFailed short-circuits the success observer until the first
+// failure, so the success path stays a single atomic load on a healthy node.
+var storageEverFailed atomic.Bool
+
 func init() {
 	fileutil.SetWriteFailureObserver(noteStorageWriteFailure)
+	fileutil.SetWriteSuccessObserver(noteStorageWriteSuccess)
 }
 
 // noteStorageWriteFailure is the fileutil observer. It runs synchronously on
@@ -116,6 +131,14 @@ func noteStorageWriteFailure(path string, err error) {
 	}
 	now := time.Now()
 
+	// A failure writing the alert engine's own retry queue is counted and
+	// logged but never alerted, and — critically — never touches the ALERT
+	// gate, so it cannot suppress the page for a real store failure that
+	// follows it within the interval.
+	alertable := base != alertRetryQueueBase
+
+	storageEverFailed.Store(true)
+
 	storageWrites.mu.Lock()
 	storageWrites.total++
 	storageWrites.last = now
@@ -125,29 +148,45 @@ func noteStorageWriteFailure(path string, err error) {
 	for sc := range storageWrites.scopes {
 		sc.record(safeBase, safeErr)
 	}
-	// Rate-gate the noisy surfaces (log + alert) under the same lock so
-	// concurrent failing writers cannot both pass the gate.
-	notify := storageWrites.alertAt.IsZero() || now.Sub(storageWrites.alertAt) >= storageWriteAlertInterval
-	if notify {
+	// Two independent gates, both evaluated under the lock so concurrent
+	// failing writers cannot both pass.
+	doLog := storageWrites.logAt.IsZero() || now.Sub(storageWrites.logAt) >= storageWriteAlertInterval
+	if doLog {
+		storageWrites.logAt = now
+	}
+	doAlert := alertable &&
+		(storageWrites.alertAt.IsZero() || now.Sub(storageWrites.alertAt) >= storageWriteAlertInterval)
+	if doAlert {
 		storageWrites.alertAt = now
 	}
 	storageWrites.mu.Unlock()
 
-	if !notify {
-		return
-	}
 	// The observer is installed at init, which can precede initLogger for a
 	// write that fails during very early startup.
-	if logger != nil {
+	if doLog && logger != nil {
 		logger.Printf("Storage: DURABLE WRITE FAILED for %q (%d since boot) — persisted state is being lost: %q",
 			safeBase, total, safeErr)
 	}
-	if base == alertRetryQueueBase {
-		// Counted and logged, never alerted — see alertRetryQueueBase.
+	if doAlert {
+		fireStorageWriteAlert(fmt.Sprintf("durable write to %s failed (%d failures since boot): %s",
+			safeBase, total, safeErr))
+	}
+}
+
+// noteStorageWriteSuccess records an OBSERVED successful durable write. This is
+// the only thing that clears the degraded state — see storageWriteHealth.lastOK.
+//
+// The common case (no failure has ever been recorded) takes no lock: the
+// atomic guard keeps the cost of observing every successful durable write to a
+// single relaxed load.
+func noteStorageWriteSuccess(string) {
+	if !storageEverFailed.Load() {
 		return
 	}
-	fireStorageWriteAlert(fmt.Sprintf("durable write to %s failed (%d failures since boot): %s",
-		safeBase, total, safeErr))
+	now := time.Now()
+	storageWrites.mu.Lock()
+	storageWrites.lastOK = now
+	storageWrites.mu.Unlock()
 }
 
 // redactWritePath strips the directory prefix from every occurrence of the
@@ -194,12 +233,37 @@ func storageWriteFailures() storageWriteSnapshot {
 	}
 }
 
-// storageDegraded reports whether a durable write failed recently enough that
-// persistence should be treated as broken RIGHT NOW (as opposed to a healed
-// historical incident). Used by the operator contract and /metrics.
+// storageDegraded reports whether persistence should be treated as broken
+// RIGHT NOW. Used by the operator contract and /metrics.
+//
+// Degraded means: a durable write has failed, and NO successful durable write
+// has been observed since. Recovery is established by evidence only. An
+// earlier draft aged the failure out after a fixed window, which was wrong in
+// the exact scenario that matters: a filesystem that stays read-only or full
+// but happens to receive no write attempts is indistinguishable from a healthy
+// one under a timer, so the node would quietly report itself recovered without
+// a single successful write to justify it (Codex P1).
+//
+// Recovery evidence is process-wide, not per-path: any successful durable
+// write clears the state, not necessarily one to the file that failed. That is
+// deliberate — the failure modes this exists for (volume remounted read-only,
+// filesystem or inode table full, quota engaged) are directory- or
+// filesystem-wide, and the file that failed may never be written again.
 func storageDegraded() bool {
-	s := storageWriteFailures()
-	return s.Total > 0 && time.Since(s.Last) < storageDegradedWindow
+	storageWrites.mu.Lock()
+	defer storageWrites.mu.Unlock()
+	if storageWrites.total == 0 {
+		return false
+	}
+	return !storageWrites.lastOK.After(storageWrites.last)
+}
+
+// storageRecoveryObserved reports whether a successful durable write has been
+// seen since the last failure — i.e. the incident is historical.
+func storageRecoveryObserved() bool {
+	storageWrites.mu.Lock()
+	defer storageWrites.mu.Unlock()
+	return storageWrites.total > 0 && storageWrites.lastOK.After(storageWrites.last)
 }
 
 // ── Scoped collection ────────────────────────────────────────────────────────
@@ -273,6 +337,9 @@ func resetStorageWriteHealthForTest() {
 	storageWrites.last = time.Time{}
 	storageWrites.lastPath = ""
 	storageWrites.lastErr = ""
+	storageWrites.lastOK = time.Time{}
+	storageWrites.logAt = time.Time{}
 	storageWrites.alertAt = time.Time{}
 	storageWrites.scopes = nil
+	storageEverFailed.Store(false)
 }
