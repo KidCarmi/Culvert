@@ -11,6 +11,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"sync"
 	"time"
@@ -99,8 +100,20 @@ type AdminSettings struct {
 	BlocklistFeedURL      string                 `json:"blocklist_feed_url,omitempty"`
 	BlocklistFeedInterval string                 `json:"blocklist_feed_interval,omitempty"` // e.g. "24h"
 
-	// SaaS category feed
-	SaaSFeedURL string `json:"saas_feed_url,omitempty"`
+	// SaaS signed category feed (F3a-1). SaaSFeedManaged is the sentinel that
+	// distinguishes "operator never touched it" (false ⇒ on-by-default) from
+	// "explicitly configured"; SaaSFeedEnabled is authoritative only when managed.
+	// Empty URL ⇒ the built-in official endpoint. Protocol has one legal value
+	// today (signed_manifest_v1). SaaSStoreSchemaVersion is the durable migration
+	// marker (§A.5) — its absence triggers the one-time schema init; a value newer
+	// than this binary supports is refused. These fields are node-local and durable
+	// in F3a-1 (the CP→DP wire + *bool presence lands in F3a-2).
+	SaaSFeedURL            string `json:"saas_feed_url,omitempty"`
+	SaaSFeedManaged        bool   `json:"saas_feed_managed"`
+	SaaSFeedEnabled        bool   `json:"saas_feed_enabled"`
+	SaaSFeedProtocol       string `json:"saas_feed_protocol,omitempty"`
+	SaaSFeedRefreshSeconds int64  `json:"saas_feed_refresh_seconds,omitempty"`
+	SaaSStoreSchemaVersion int    `json:"saas_store_schema_version,omitempty"`
 
 	// Upstream proxy chaining. UpstreamProxiesSaved is a sentinel (mirroring
 	// BlocklistFeedsSaved): when true the persisted list is authoritative and
@@ -201,6 +214,27 @@ func LoadAdminSettings(path string) {
 		// clobber it, fire the state_file_corrupt alert, and record a /readyz fail row.
 		quarantineCorruptStateFile("admin_settings", path, err)
 		return
+	}
+
+	// F3a-1: initialize the SaaS feed-config schema boundary before applying admin
+	// services. Idempotent (marker-guarded), backed up before mutation, atomic, and
+	// fail-safe — a failure logs and this boot proceeds with the pre-migration
+	// (safe-default) resolution, retrying next boot. It does NOT change the persisted
+	// URL the legacy syncer reads, so there is no live behavior change here.
+	if rep, mErr := migrateSaaSFeedStore(&s, path, data, time.Now); mErr != nil {
+		if errors.Is(mErr, ErrSaaSSchemaTooNew) {
+			// A feed-store schema newer than this binary supports: fail CLOSED to the
+			// compiled baseline. Clear the persisted feed URL in memory so the legacy
+			// syncer below does NOT consume a field from a schema we just declared
+			// unsafe (the file is left untouched — the migration refused to write).
+			s.SaaSFeedURL = ""
+			logger.Printf("AdminSettings: SaaS feed store schema newer than supported (%v) — failing closed to the baseline feed config", mErr)
+		} else {
+			logger.Printf("AdminSettings: SaaS feed store migration not applied (%v); outcome=%s", mErr, rep.Outcome)
+		}
+	} else if rep.Outcome == "migrated" {
+		logger.Printf("AdminSettings: migrated SaaS feed store to schema %d (url_class=%s protocol_reset=%t backup=%q)",
+			rep.ToSchema, rep.URLClass, rep.ProtocolReset, sanitizeLog(rep.BackupPath))
 	}
 
 	applyAdminSecurity(&s)
@@ -315,6 +349,15 @@ func applyAdminServices(s *AdminSettings) {
 	if s.SaaSFeedURL != "" {
 		globalSaaSFeed.Configure(s.SaaSFeedURL, 24*time.Hour)
 	}
+	// F3a-1: publish the new durable feed-config fields to their holder so the
+	// omnibus SaveAdminSettings rebuild preserves them (schema marker included).
+	setSaaSFeedDurable(saasFeedDurable{
+		Managed:        s.SaaSFeedManaged,
+		Enabled:        s.SaaSFeedEnabled,
+		Protocol:       s.SaaSFeedProtocol,
+		RefreshSeconds: s.SaaSFeedRefreshSeconds,
+		SchemaVersion:  s.SaaSStoreSchemaVersion,
+	})
 }
 
 // BlocklistFeedSetting is the persisted form of one blocklist feed.
@@ -570,10 +613,13 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 
 	snapshotBlocklistFeeds(&s)
 
-	// SaaS feed
+	// SaaS feed. URL stays owned by the legacy syncer; the F3a-1 durable fields
+	// (managed/enabled/protocol/refresh + schema marker) are snapshotted from their
+	// holder so an unrelated admin mutation does not drop them or reset the marker.
 	if saasURL := globalSaaSFeed.FeedURL(); saasURL != "" {
 		s.SaaSFeedURL = saasURL
 	}
+	snapshotSaaSFeedDurable(&s)
 
 	// Upstream proxy pool (raw entries — see field comment)
 	s.UpstreamProxiesSaved = true

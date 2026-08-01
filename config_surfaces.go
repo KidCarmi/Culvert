@@ -346,8 +346,26 @@ var configSurfaces = []configSurfaceRow{
 	{ID: "blocklist_feeds", Kind: kindConfig, Owner: "blocklistfeed", AdminDurable: true,
 		Note:     "gated by blocklist_feeds_saved sentinel (authoritative incl. empty list)",
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "BlocklistFeeds"}}},
+	// SaaS signed category feed (F3a-1). Node-local durable rows only; the CP→DP
+	// ClusterSynced flip + ConfigSnapshot bindings + *bool presence land in F3a-2
+	// (roadmap/FEEDS-DISTRIBUTION-F3-DESIGN.md Part C: "rows — declared but
+	// ClusterSynced wiring lands in F3a-2"). Not on export/import or rollback yet.
 	{ID: "saas_feed_url", Kind: kindConfig, Owner: "saasFeed", AdminDurable: true,
+		Note:     "F3a-1: node-local; official-origin URL contract enforced by resolveFeedURL/validateOfficialManifestURL",
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "SaaSFeedURL"}}},
+	{ID: "saas_feed_managed", Kind: kindConfig, Owner: "saasFeed", AdminDurable: true,
+		Note:     "on-by-default sentinel: false ⇒ never-touched ⇒ enabled; true ⇒ SaaSFeedEnabled authoritative",
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "SaaSFeedManaged"}}},
+	{ID: "saas_feed_enabled", Kind: kindConfig, Owner: "saasFeed", AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "SaaSFeedEnabled"}}},
+	{ID: "saas_feed_protocol", Kind: kindConfig, Owner: "saasFeed", AdminDurable: true,
+		Note:     "signed_manifest_v1 only (no unsigned/raw fallback)",
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "SaaSFeedProtocol"}}},
+	{ID: "saas_feed_refresh_seconds", Kind: kindConfig, Owner: "saasFeed", AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "SaaSFeedRefreshSeconds"}}},
+	{ID: "saas_store_schema_version", Kind: kindMeta, Owner: "saasFeed", AdminDurable: true,
+		Note:     "F3a-1 durable migration marker; absence triggers one-time schema init, a newer value is refused (fail-closed downgrade guard)",
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "SaaSStoreSchemaVersion"}}},
 	{ID: "yara_enabled", Kind: kindConfig, Owner: "yara", AdminDurable: true,
 		Note:     "gated by yara_settings_saved sentinel (as are all yara_* rows)",
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "YARAEnabled"}}},
