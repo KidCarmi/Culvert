@@ -120,9 +120,8 @@ site's own paths and leaked local status to a request that was never addressed t
 Culvert. Origin-form health checks (`GET /health` + `Host:` header) set
 `r.URL.Host == ""` and are unaffected.
 
-I checked the obvious bypass: a request-URI of `//evil.com/metrics`. Go's
-`url.parse` with `viaRequest=true` and no scheme does not parse an authority, so
-`Path` becomes `"//evil.com/metrics"` — it matches neither the old nor the new
+I checked the obvious bypass: a request-target of `//evil.com/metrics`. Go's `net/url` request-target parsing (e.g. `url.ParseRequestURI`) treats this as a path, not an authority, so
+`r.URL.Path` becomes `"//evil.com/metrics"` — it matches neither the old nor the new
 switch arm and is forwarded. No bypass.
 
 ### `internal/urlcatfeed` — Sigstore keyless feed trust kernel (new, dormant)
