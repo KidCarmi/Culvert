@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -452,6 +453,104 @@ func TestF3a2_RollbackConfigRoundTrip(t *testing.T) {
 	}
 	if got := globalCategoryOverrides.Get(); got.Added["a.example.com"] != "social" || len(got.Tombstones) != 0 {
 		t.Errorf("overrides not restored: %+v", got)
+	}
+}
+
+// ─── 13b. rollback persists feed config to admin_settings.json (Codex P2) ───────
+//
+// applyConfigBackup restores feed scalars in-memory only; the versioned stores
+// (blocklist/overrides) persist themselves, but feed scalars live in
+// admin_settings.json. Without the rollback-path SaveAdminSettings, a restart
+// would reload the pre-rollback values. This proves the rolled-back state is
+// actually written to disk.
+func TestF3a2_RollbackPersistsFeedConfig(t *testing.T) {
+	f3a2ResetFeedDurable(t)
+	f3a2SwapOverrides(t)
+	settingsPath := filepath.Join(t.TempDir(), "admin_settings.json")
+	swapAdminSettingsPath(t, settingsPath)
+	f3a2IsolateConfigWriters(t)
+
+	// State A: managed, disabled — captured as version 1.
+	setSaaSFeedDurable(saasFeedDurable{Managed: true, Enabled: false, URL: builtinSaaSFeedURL, Protocol: saasFeedProtocolV1, RefreshSeconds: 3600, SchemaVersion: saasStoreSchemaVersion})
+	saveConfigVersion("tester", "seed feed A")
+	ver := configVersions.Seq()
+
+	// Diverge to state B (unmanaged, enabled) and persist B so the file starts at B.
+	setSaaSFeedDurable(saasFeedDurable{Managed: false, Enabled: true, URL: builtinSaaSFeedURL, Protocol: saasFeedProtocolV1, RefreshSeconds: 60, SchemaVersion: saasStoreSchemaVersion})
+	if err := SaveAdminSettings(); err != nil {
+		t.Fatalf("seed B persist: %v", err)
+	}
+
+	// Roll back to A via the real handler.
+	body, _ := json.Marshal(map[string]any{"version": ver})
+	r := httptest.NewRequest(http.MethodPost, "/api/config/rollback", strings.NewReader(string(body)))
+	w := httptest.NewRecorder()
+	rollbackConfigVersion(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("rollback status = %d, want 200 (%s)", w.Code, w.Body.String())
+	}
+
+	// The on-disk admin_settings.json must reflect the rolled-back (A) feed state.
+	raw, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read admin settings: %v", err)
+	}
+	var got AdminSettings
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal admin settings: %v", err)
+	}
+	if !got.SaaSFeedManaged || got.SaaSFeedEnabled || got.SaaSFeedRefreshSeconds != 3600 {
+		t.Errorf("rollback not persisted: managed=%v enabled=%v refresh=%d (want true/false/3600)",
+			got.SaaSFeedManaged, got.SaaSFeedEnabled, got.SaaSFeedRefreshSeconds)
+	}
+}
+
+// ─── 13c. import preview surfaces feed + override changes (Codex P3) ─────────────
+func TestF3a2_ImportPreviewShowsFeedAndOverrides(t *testing.T) {
+	f3a2SwapOverrides(t) // clean current override set so "current" count is 0
+
+	b := configBackup{
+		SaaSFeedProtocol:       saasFeedProtocolV1,
+		SaaSFeedManaged:        true,
+		SaaSFeedEnabled:        true,
+		SaaSFeedURL:            builtinSaaSFeedURL,
+		SaaSFeedRefreshSeconds: 7200,
+		CategoryOverrides:      &CategoryOverrides{Added: map[string]string{"h.example.com": "social"}},
+	}
+	sections, settings := buildImportPreview(&b, false)
+
+	var ovSection *importPreviewSection
+	for i := range sections {
+		if sections[i].Section == "Category Overrides" {
+			ovSection = &sections[i]
+		}
+	}
+	if ovSection == nil {
+		t.Fatalf("Category Overrides section missing from preview: %+v", sections)
+	}
+	if ovSection.Incoming != 1 {
+		t.Errorf("override incoming = %d, want 1", ovSection.Incoming)
+	}
+
+	want := map[string]bool{"SaaS Feed": false, "SaaS Feed URL": false, "SaaS Feed Refresh": false}
+	for _, s := range settings {
+		if _, ok := want[s.Setting]; ok {
+			want[s.Setting] = true
+		}
+	}
+	for name, seen := range want {
+		if !seen {
+			t.Errorf("import preview missing setting %q: %+v", name, settings)
+		}
+	}
+
+	// A pre-extension backup (no protocol) must surface no feed rows.
+	empty := configBackup{}
+	_, emptySettings := buildImportPreview(&empty, false)
+	for _, s := range emptySettings {
+		if strings.HasPrefix(s.Setting, "SaaS Feed") {
+			t.Errorf("pre-extension backup leaked feed setting %q", s.Setting)
+		}
 	}
 }
 

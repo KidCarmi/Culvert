@@ -1050,8 +1050,17 @@ func applySnapshotSaaSFeed(snap ConfigSnapshot) {
 	}
 	if changed {
 		// A managed DP must not retain a conflicting local feed policy: publish the
-		// CP-overlaid state so it wins (in-memory, mirroring ProxyBaseURL — the CP
-		// re-syncs on every pull, and the DP re-pulls on restart).
+		// CP-overlaid state so it wins. In-memory only, BYTE-IDENTICAL to the
+		// existing ProxyBaseURL snapshot field (applyExternalAuthSnapshotSettings):
+		// the CP is authoritative and re-syncs on every version bump, and the DP
+		// re-applies the last-good snapshot on restart. A follower DP's node-local
+		// admin_settings.json is NOT the source of truth for CP-pushed config, so
+		// (like ProxyBaseURL) it is deliberately not written here — avoiding an
+		// admin-settings write on the hot sync path. Known limitation shared with
+		// ProxyBaseURL (Codex P1): on restart LoadAdminSettings reloads the local
+		// file and the cached-version poll can short-circuit re-sync until the next
+		// CP bump. The feed has NO runtime consumer until F3b, so this has zero
+		// runtime effect today; durable DP persistence lands with the F3b consumer.
 		setSaaSFeedDurable(d)
 	}
 

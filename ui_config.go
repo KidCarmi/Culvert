@@ -774,6 +774,19 @@ func buildImportPreview(b *configBackup, replaceMode bool) ([]importPreviewSecti
 	add("Category Groups", len(b.CategoryGroups), len(globalCategoryGroups.List()), taxonomyNote)
 	add("Decryption Profiles", len(b.DecryptionProfiles), len(globalDecryptionProfiles.List()), taxonomyNote)
 
+	// Category overrides (F3a-2): mirror importCategoryOverrides — an empty/absent
+	// set skips (import never wipes), a populated set merges (upsert by host) or
+	// replaces. add()'s incoming==0 guard matches the never-wipe apply semantics.
+	ovInc := 0
+	if b.CategoryOverrides != nil {
+		ovInc = categoryOverridesCount(*b.CategoryOverrides)
+	}
+	ovCur := 0
+	if cur := captureCategoryOverrides(); cur != nil {
+		ovCur = categoryOverridesCount(*cur)
+	}
+	add("Category Overrides", ovInc, ovCur, taxonomyNote)
+
 	add("Rewrite Rules", len(b.RewriteRules), len(rewriter.List()), "")
 	add("SSL Bypass", len(b.SSLBypass), len(sslBypass.List()), "")
 	add("Content Scan Patterns", len(b.ContentScanPatterns), len(dpiScanner.List()), "")
@@ -833,6 +846,26 @@ func buildImportSettingsPreview(b *configBackup) []importPreviewSetting {
 			state = "enabled"
 		}
 		setting("Connection Limit", fmt.Sprintf("%d per IP (%s)", b.ConnLimitMaxPerIP, state))
+	}
+	// SaaS feed config (F3a-2): gated on SaaSFeedProtocol != "" to mirror
+	// importSaaSFeedConfig's apply gate exactly — a pre-extension backup (protocol
+	// absent) applies nothing, so the preview must report nothing.
+	if b.SaaSFeedProtocol != "" {
+		mgmt := "unmanaged"
+		if b.SaaSFeedManaged {
+			mgmt = "managed"
+		}
+		state := "disabled"
+		if b.SaaSFeedEnabled {
+			state = "enabled"
+		}
+		setting("SaaS Feed", fmt.Sprintf("%s, %s (%s)", mgmt, state, b.SaaSFeedProtocol))
+		if b.SaaSFeedURL != "" {
+			setting("SaaS Feed URL", b.SaaSFeedURL)
+		}
+		if b.SaaSFeedRefreshSeconds != 0 {
+			setting("SaaS Feed Refresh", fmt.Sprintf("%ds", b.SaaSFeedRefreshSeconds))
+		}
 	}
 	return settings
 }

@@ -265,6 +265,18 @@ func rollbackConfigVersion(w http.ResponseWriter, r *http.Request) {
 
 	applyConfigBackup(&target)
 
+	// Feed scalars persist ONLY via admin_settings.json (SaveAdminSettings) —
+	// unlike the versioned stores (blocklist/overrides) that persist themselves
+	// inside applyConfigBackup. A feed-carrying rollback must therefore save, else
+	// a restart reloads the pre-rollback values, silently undoing this slice of the
+	// rollback (Codex P2). Rollback runs on an authoritative CP/standalone node, so
+	// admin_settings.json IS the source of truth here (unlike a follower DP).
+	if target.SaaSFeedProtocol != "" {
+		if err := SaveAdminSettings(); err != nil {
+			logger.Printf("ConfigRollback: SaaS feed persist failed: %v", err)
+		}
+	}
+
 	actor := sessionAdmin(r)
 	auditEvent(r, "config.rollback", "system",
 		fmt.Sprintf("rolled back to version %d (from %s by %s)",

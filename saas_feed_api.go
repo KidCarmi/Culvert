@@ -41,6 +41,13 @@ func categoryOverridesEmpty(o CategoryOverrides) bool {
 	return len(o.Added) == 0 && len(o.Recategorized) == 0 && len(o.Tombstones) == 0
 }
 
+// categoryOverridesCount totals the host entries in an override set (adds +
+// recategorizations + tombstones) — used by the import preview to report the
+// incoming/current override footprint.
+func categoryOverridesCount(o CategoryOverrides) int {
+	return len(o.Added) + len(o.Recategorized) + len(o.Tombstones)
+}
+
 // validateSaaSFeedImport strict-validates the feed-config + override fields of an
 // import payload through the SAME F3a-1 boundary the write path uses — no weaker
 // duplicate. A legacy/unsupported protocol or URL, a malformed refresh interval,
