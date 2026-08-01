@@ -181,10 +181,10 @@ not an additive extension; adding a ninth member requires a new `schema_version`
   support-bundle envelope (`internal/sealbox`, M4): the TAC recipient opens the
   ciphertext directly with `box.OpenAnonymous`, so there is **no `CVRTSB01` magic and no
   version prefix**. A reader that does not recognize the label rejects (`422`).
-  *(Reconciled in M7 Slice 2.5-C3: the merged TAC consumer — `FileRecipientKeyProvider`
-  and `VerifyAndOpen` — opens the raw `crypto_box_seal` blob directly, so the producer
-  telemetry sealer emits the raw box rather than reusing the `CVRTSB01`-framed
-  support-bundle path.)*
+  *(Reconciled in M7 Slice 2.5-C3: telemetry uses the RAW `crypto_box_seal` box — opened
+  directly with `box.OpenAnonymous`, with no `CVRTSB01` framing — so the producer telemetry
+  sealer emits the raw box rather than reusing the `CVRTSB01`-framed support-bundle path.
+  This is a wire-format decision; it does not change TAC's implementation status in §13.)*
 - `ciphertext` — **standard padded base64** (the RFC 4648 standard alphabet) of the raw
   sealed-box blob: exactly the `box.SealAnonymous` output — 32-byte ephemeral X25519 public
   key ‖ 16-byte Poly1305 tag ‖ encrypted plaintext (SealAnonymous prepends the ephemeral
@@ -708,15 +708,9 @@ API), through TAC PRs #10, #11, and #12. TAC 2.5-A enforces: strict bounded oute
 inner JSON decoding; **closed** top-level member sets for `schema_version == 3`; additive
 metric growth only inside the governed `metrics` map; producer-canonical metric number
 literals; raw-request-byte idempotency; and a producer-owned inner fixture copied
-byte-for-byte from Culvert. TAC has additionally landed the **2.5-C decryptor library** as
-merged, standalone package code — **C1** (`FileRecipientKeyProvider` key resolution) and
-**C2** (`VerifyAndOpen` digest verification + `box.OpenAnonymous` decryption into the opaque
-`VerifiedSampleHandle`) — which is why §3.2 above can reference the merged consumer. What TAC
-has **not** yet built: **no telemetry route yet, no authentication, no persistence**, and the
-2.5-C **C3** sealed cross-repository interoperability gate is still **in progress** (Culvert
-publishes the producer vector in Slice 2.5-C3 PR A; TAC wires the hermetic consumer test in
-PR B). So the receive path is **not yet functional**, 2.5-C is **not complete**, and Slice 3
-(the only egress slice) still **must not** be built against it.
+byte-for-byte from Culvert. What TAC has **not** yet built: **no telemetry route yet, no
+authentication, no crypto/decryption, no persistence.** So the receive path is **not yet
+functional**, and Slice 3 (the only egress slice) still **must not** be built against it.
 
 | Milestone | Status |
 |---|---|
@@ -727,7 +721,7 @@ PR B). So the receive path is **not yet functional**, 2.5-C is **not complete**,
 | TAC 2.5-0 — gateway service skeleton | **Complete** |
 | TAC 2.5-A — strict contract, fixture consumption, stabilized opaque carrier API | **Complete** |
 | TAC 2.5-B — credential identity + server-side attribution | **Not implemented** |
-| TAC 2.5-C — key resolution, digest verification, decryption, sealed interop vectors | **Partial** — C1 key resolution + C2 verify/decrypt library merged; C3 sealed interop vectors in progress (Slice 2.5-C3 PR A/PR B); slice **not complete** |
+| TAC 2.5-C — key resolution, digest verification, decryption, sealed interop vectors | **Not implemented** |
 | TAC 2.5-D — idempotent transactional ingestion | **Not implemented** |
 | Retention / deletion / read-side operations | **Not implemented** |
 | Culvert Slice 3 — sender, spool, retry, egress | **Blocked** (this checkpoint) |
