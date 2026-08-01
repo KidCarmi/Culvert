@@ -19,21 +19,13 @@ import (
 type slowSink struct {
 	mu    sync.Mutex
 	delay time.Duration
-	n     int
 }
 
 func (s *slowSink) Write(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	time.Sleep(s.delay)
-	s.n++
 	return len(p), nil
-}
-
-func (s *slowSink) count() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.n
 }
 
 // countingSink records every line written so loss can be asserted exactly.
