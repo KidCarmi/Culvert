@@ -204,6 +204,13 @@ func computeReadiness() (report readinessReport, code int) {
 	appendStateFileChecks(checks)
 	appendDPHealthChecks(checks)
 
+	// 10. Signed SaaS feed (F3b-4) — REPORT-ONLY, never gates readiness. A valid
+	// embedded baseline always exists, so the feed never makes readiness
+	// internet-dependent: a stuck origin / stale LKG is a non-gating degradation, and
+	// corruption/equivocation/authority-loss is a non-gating critical row (probes that
+	// want to eject such nodes opt in via /ready?strict=1).
+	appendSaaSFeedHealthCheck(checks)
+
 	status, code := "ready", http.StatusOK
 	if !allOK {
 		status, code = "not_ready", http.StatusServiceUnavailable
