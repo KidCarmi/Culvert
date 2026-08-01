@@ -2935,6 +2935,46 @@ routes:
     audit_expected: false
     danger_level: none
     documented: true
+  - route: "/api/saas-feed/settings"
+    method: "GET"
+    handler: "apiSaaSFeedSettings"
+    domain: "policy"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
+  - route: "/api/saas-feed/settings"
+    method: "PUT"
+    handler: "apiSaaSFeedSettings"
+    domain: "policy"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: true
+    audit_expected: true
+    danger_level: medium
+    documented: true
+  - route: "/api/saas-feed/overrides"
+    method: "GET"
+    handler: "apiSaaSFeedOverrides"
+    domain: "policy"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
+  - route: "/api/saas-feed/overrides"
+    method: "PUT"
+    handler: "apiSaaSFeedOverrides"
+    domain: "policy"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: true
+    audit_expected: true
+    danger_level: medium
+    documented: true
   - route: "/auth/logout"
     method: "*"
     handler: "authLogout"

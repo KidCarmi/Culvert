@@ -1297,6 +1297,26 @@ type configBackup struct {
 	// serializes as `[]` (wipe on apply) and distinguishes itself from
 	// an old pre-extension snapshot (absent field → nil → skip).
 	ContentScanBypassHosts []string `json:"contentScanBypassHosts"`
+
+	// SaaS signed category-feed configuration (F3a-2). CP-authoritative fleet
+	// policy on the export/import/rollback surface. Exported as CONFIGURATION only —
+	// never the node-local runtime/activation/floor state (design §A.6). On import,
+	// the block is applied only when SaaSFeedProtocol is set (never-wipe); on
+	// rollback it is applied unconditionally (like DefaultAction). URL/protocol are
+	// strict-validated at import through the F3a-1 boundary (legacy/unsupported
+	// values rejected). The values round-trip through the durable holder, NOT the
+	// legacy syncer.
+	SaaSFeedManaged        bool   `json:"saasFeedManaged,omitempty"`
+	SaaSFeedEnabled        bool   `json:"saasFeedEnabled,omitempty"`
+	SaaSFeedURL            string `json:"saasFeedURL,omitempty"`
+	SaaSFeedProtocol       string `json:"saasFeedProtocol,omitempty"`
+	SaaSFeedRefreshSeconds int64  `json:"saasFeedRefreshSeconds,omitempty"`
+
+	// CategoryOverrides is the admin category-override set (F3a-2). Pointer for
+	// presence — nil ⇒ absent (import skips = never-wipe; rollback keep-local) —
+	// mirroring the ConfigSnapshot posture. NO omitempty so an explicit empty set
+	// (a deliberate clear) round-trips as `{}` rather than being dropped.
+	CategoryOverrides *CategoryOverrides `json:"categoryOverrides"`
 }
 
 // GET /api/config/export — download a full configuration backup as JSON.
@@ -2242,6 +2262,8 @@ func registerPolicyRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/urlcat/host", apiURLCatHost)                                     // POST/DELETE individual hosts
 	mux.HandleFunc("/api/urlcat/lookup", apiURLCatLookup)                                 // GET — resolve a domain to its category
 	mux.HandleFunc("/api/urlcat/feed-status", apiURLCatFeedStatus)                        // GET — UT1 + SaaS feed freshness/failure counts (viewer, read-only)
+	mux.HandleFunc("/api/saas-feed/settings", apiSaaSFeedSettings)                        // GET viewer / PUT admin (F3a-2 signed-feed config)
+	mux.HandleFunc("/api/saas-feed/overrides", apiSaaSFeedOverrides)                      // GET viewer / PUT admin (F3a-2 category overrides)
 
 	// Block page template (shown to users blocked by a policy rule).
 	mux.HandleFunc("/api/blockpage", apiBlockPage) // GET template / PUT update

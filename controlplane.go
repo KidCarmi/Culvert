@@ -337,6 +337,19 @@ var (
 	}
 )
 
+// isManagedDataPlane reports whether this node is an enrolled Data Plane node
+// (role "data-plane"), i.e. a node whose fleet-authoritative configuration is
+// owned by a Control Plane. Such a node MUST NOT accept local mutations of
+// CP-authoritative feed policy (F3a-2): the CP is the single writer, and a local
+// edit would either be silently overwritten on the next config sync or diverge
+// the node from the fleet. A standalone or control-plane node is locally
+// authoritative and may edit freely. Read under clusterRoleMu.
+func isManagedDataPlane() bool {
+	clusterRoleMu.RLock()
+	defer clusterRoleMu.RUnlock()
+	return clusterRole.role == "data-plane"
+}
+
 // enrollRateLimit tracks per-IP enrollment attempt timestamps for rate limiting.
 // Limits to 5 attempts per minute per IP to prevent brute-force token guessing.
 var enrollRateLimit struct {

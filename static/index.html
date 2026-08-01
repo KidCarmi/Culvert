@@ -2986,6 +2986,87 @@ Firefox (all platforms):
         Categories are matched by hostname suffix (e.g. adding <code>example.com</code> also matches <code>www.example.com</code>).
       </p>
       <div id="urlcat-feed-status" style="display:none;margin-bottom:16px;font-size:.78rem"></div>
+
+      <!-- SaaS Signed Category Feed (F3a-2) — configuration + admin overrides.
+           Configuration only: nothing here downloads, verifies, or activates a
+           feed. Runtime activation is unavailable until the signed-feed client
+           ships, and the panel says so honestly. -->
+      <section class="panel" id="saasfeed-panel" style="margin-bottom:20px" aria-labelledby="saasfeed-title">
+        <div class="panel-header">
+          <span class="panel-title" id="saasfeed-title"><svg class="ico" aria-hidden="true"><use href="#i-shield"/></svg> SaaS Signed Category Feed</span>
+          <span id="saasfeed-role-note" style="font-size:.72rem;color:var(--muted)"></span>
+        </div>
+        <div class="panel-body">
+          <div id="saasfeed-activation-banner" class="hint" role="status" style="margin-bottom:12px;padding:8px 10px;border-radius:6px;background:var(--surface2)">
+            <svg class="ico" aria-hidden="true"><use href="#i-shield-alert"/></svg>
+            Configuration only — the signed-feed client (download, verify, activate) is not yet available, so this feed is <strong>configured but not fetched, verified, active, or serving</strong>.
+          </div>
+          <div id="saasfeed-loading" class="hint" role="status">Loading feed configuration…</div>
+          <div id="saasfeed-error" class="hint" role="alert" style="color:var(--red);display:none"></div>
+
+          <form id="saasfeed-form" style="display:none" autocomplete="off">
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;max-width:840px">
+              <label style="display:flex;flex-direction:column;gap:4px">
+                <span>Manifest URL</span>
+                <input type="url" class="input" id="saasfeed-url" inputmode="url"
+                  aria-describedby="saasfeed-url-hint" placeholder="(built-in official endpoint)">
+                <span id="saasfeed-url-hint" class="hint" style="font-size:.7rem">Constrained to the official Culvert feed endpoint. Leave blank for the built-in default.</span>
+              </label>
+              <label style="display:flex;flex-direction:column;gap:4px">
+                <span>Protocol</span>
+                <input type="text" class="input" id="saasfeed-protocol" value="signed_manifest_v1" readonly aria-readonly="true"
+                  aria-describedby="saasfeed-proto-hint" style="background:var(--surface2)">
+                <span id="saasfeed-proto-hint" class="hint" style="font-size:.7rem">Signed-only — not downgradeable.</span>
+              </label>
+              <label style="display:flex;flex-direction:column;gap:4px">
+                <span>Refresh interval</span>
+                <input type="text" class="input" id="saasfeed-refresh" placeholder="24h" aria-describedby="saasfeed-refresh-hint">
+                <span id="saasfeed-refresh-hint" class="hint" style="font-size:.7rem">Go duration (min 1h). Blank ⇒ 24h default.</span>
+              </label>
+              <div style="display:flex;flex-direction:column;gap:8px;justify-content:center">
+                <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="saasfeed-managed"> <span>Managed (explicitly configured)</span></label>
+                <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="saasfeed-enabled"> <span>Enabled</span></label>
+              </div>
+            </div>
+            <div style="margin-top:14px;display:flex;gap:8px;align-items:center" data-min-role="admin">
+              <button type="button" class="btn sm" data-min-role="admin" data-click="saveSaaSFeedSettings">Save configuration</button>
+              <span id="saasfeed-save-status" class="hint" role="status" aria-live="polite" style="font-size:.72rem"></span>
+            </div>
+          </form>
+
+          <!-- Admin category overrides editor -->
+          <div id="saasfeed-overrides-block" style="display:none;margin-top:22px;border-top:1px solid var(--surface2);padding-top:16px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+              <h3 style="margin:0;font-size:.92rem">Category Overrides</h3>
+              <span class="hint" style="font-size:.7rem">Admin overrides layered on the feed (host + subdomain scope)</span>
+            </div>
+            <div id="overrides-error" class="hint" role="alert" style="color:var(--red);display:none;margin-bottom:8px"></div>
+            <div style="overflow-x:auto">
+              <table style="width:100%;border-collapse:collapse;font-size:.8rem" aria-label="Category overrides">
+                <thead>
+                  <tr style="text-align:left;color:var(--muted)">
+                    <th scope="col" style="padding:4px 8px">Kind</th>
+                    <th scope="col" style="padding:4px 8px">Host</th>
+                    <th scope="col" style="padding:4px 8px">Category</th>
+                    <th scope="col" style="padding:4px 8px"></th>
+                  </tr>
+                </thead>
+                <tbody id="overrides-rows"></tbody>
+              </table>
+            </div>
+            <p id="overrides-empty" class="hint" style="display:none;font-size:.75rem;margin:8px 0">No overrides configured.</p>
+            <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap" data-min-role="admin">
+              <button type="button" class="btn sm ghost" data-min-role="admin" data-click="addOverrideRow" data-arg="added">+ Addition</button>
+              <button type="button" class="btn sm ghost" data-min-role="admin" data-click="addOverrideRow" data-arg="recategorized">+ Recategorization</button>
+              <button type="button" class="btn sm ghost" data-min-role="admin" data-click="addOverrideRow" data-arg="tombstone">+ Tombstone</button>
+              <button type="button" class="btn sm" data-min-role="admin" data-click="saveSaaSFeedOverrides">Save overrides</button>
+              <button type="button" class="btn sm ghost" data-min-role="admin" data-click="clearSaaSFeedOverrides" title="Transmit an explicit empty replacement set (clears every override fleet-wide)">Clear all</button>
+              <span id="overrides-save-status" class="hint" role="status" aria-live="polite" style="font-size:.72rem;align-self:center"></span>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <!-- URL Lookup Tool - highlighted with accent border so it's easy to spot -->
       <div class="panel" style="margin-bottom:20px;border:1px solid var(--accent)">
         <div class="panel-header" style="border-bottom:1px solid var(--accent)30">
@@ -4791,6 +4872,11 @@ document.addEventListener('click', e => {
     case 'deleteCatGroup':    deleteCatGroup(arg); break;
     case 'removeCgCat':       removeCgCat(arg); break;
     case 'runURLLookup':      runURLLookup(); break;
+    case 'saveSaaSFeedSettings': saveSaaSFeedSettings(); break;
+    case 'addOverrideRow':    addOverrideRow(arg); break;
+    case 'removeOverrideRow': removeOverrideRow(el); break;
+    case 'saveSaaSFeedOverrides': saveSaaSFeedOverrides(); break;
+    case 'clearSaaSFeedOverrides': clearSaaSFeedOverrides(); break;
     case 'blCatLoadMore':     blCatLoadMore(); break;
     case 'deleteURLCategory': deleteURLCategory(arg); break;
     case 'addURLCatHost':     addURLCatHost(arg); break;
@@ -6184,6 +6270,7 @@ async function loadURLCategories() {
   }
   loadBlCat();
   loadURLCatFeedStatus();
+  loadSaaSFeedConfig();
 }
 
 // Surfaces the UT1 + SaaS category-feed freshness/failure counts that were
@@ -6221,6 +6308,223 @@ function _fmtURLCatFeedRow(label, feed, countText) {
     ? '<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> '
     : '';
   return `<span style="color:${color}">${icon}${escHtml(label)}: ${escHtml(countText)}, last sync ${escHtml(when)}${failText}</span>`;
+}
+
+// ── SaaS signed category feed (F3a-2) ─────────────────────────────────────
+// Configuration + admin overrides. Purely configuration: every action here is
+// an admin API call; nothing triggers a feed fetch/verify/activate. Rendering is
+// XSS-safe — override values are written via textContent / input.value (never
+// interpolated into innerHTML). On a managed data-plane node the API reports
+// editable=false and the UI presents everything read-only.
+let _saasFeedEditable = false;
+
+async function loadSaaSFeedConfig() {
+  const form = document.getElementById('saasfeed-form');
+  const loading = document.getElementById('saasfeed-loading');
+  const errEl = document.getElementById('saasfeed-error');
+  errEl.style.display = 'none';
+  loading.style.display = '';
+  form.style.display = 'none';
+  try {
+    const d = await api('/api/saas-feed/settings');
+    _saasFeedEditable = !!d.editable;
+    document.getElementById('saasfeed-url').value = d.url || '';
+    document.getElementById('saasfeed-protocol').value = d.protocol || 'signed_manifest_v1';
+    document.getElementById('saasfeed-refresh').value = d.refresh_seconds ? _secsToDuration(d.refresh_seconds) : '';
+    document.getElementById('saasfeed-managed').checked = !!d.managed;
+    document.getElementById('saasfeed-enabled').checked = !!d.enabled;
+    if (d.official_url) document.getElementById('saasfeed-url').placeholder = d.official_url;
+    // Role-appropriate state: read-only presentation on a managed DP.
+    ['saasfeed-url','saasfeed-refresh','saasfeed-managed','saasfeed-enabled'].forEach(id => {
+      document.getElementById(id).disabled = !_saasFeedEditable;
+    });
+    const roleNote = document.getElementById('saasfeed-role-note');
+    roleNote.textContent = _saasFeedEditable ? '' : 'Read-only — managed by the control plane';
+    loading.style.display = 'none';
+    form.style.display = '';
+    document.getElementById('saasfeed-save-status').textContent = '';
+    loadSaaSFeedOverrides();
+    applySessionRoleVisibilityScope('#saasfeed-panel');
+  } catch (err) {
+    loading.style.display = 'none';
+    errEl.textContent = 'Failed to load feed configuration: ' + err.message;
+    errEl.style.display = '';
+  }
+}
+
+function _secsToDuration(s) {
+  s = Number(s) || 0;
+  if (s % 3600 === 0) return (s / 3600) + 'h';
+  if (s % 60 === 0) return (s / 60) + 'm';
+  return s + 's';
+}
+
+async function saveSaaSFeedSettings() {
+  if (!_saasFeedEditable) return;
+  const status = document.getElementById('saasfeed-save-status');
+  const body = {
+    managed: document.getElementById('saasfeed-managed').checked,
+    enabled: document.getElementById('saasfeed-enabled').checked,
+    url: document.getElementById('saasfeed-url').value.trim(),
+    refresh: document.getElementById('saasfeed-refresh').value.trim(),
+  };
+  status.style.color = '';
+  status.textContent = 'Saving…';
+  try {
+    await api('/api/saas-feed/settings', { method: 'PUT', body });
+    status.style.color = 'var(--ok,green)';
+    status.textContent = 'Saved (configured — not yet fetched or active)';
+    loadSaaSFeedConfig();
+  } catch (err) {
+    status.style.color = 'var(--red)';
+    status.textContent = 'Error: ' + err.message;
+  }
+}
+
+async function loadSaaSFeedOverrides() {
+  const block = document.getElementById('saasfeed-overrides-block');
+  try {
+    const d = await api('/api/saas-feed/overrides');
+    block.style.display = '';
+    renderOverrideRows(d.overrides || {});
+    applySessionRoleVisibilityScope('#saasfeed-panel');
+  } catch (err) {
+    document.getElementById('overrides-error').textContent = 'Failed to load overrides: ' + err.message;
+    document.getElementById('overrides-error').style.display = '';
+  }
+}
+
+// renderOverrideRows builds the editable rows from the override set using DOM
+// APIs (textContent / value) — never innerHTML interpolation — so a hostile
+// host/category string can never inject markup (stored-XSS safe).
+function renderOverrideRows(ov) {
+  const tbody = document.getElementById('overrides-rows');
+  tbody.textContent = '';
+  const rows = [];
+  Object.entries(ov.added || {}).forEach(([h, c]) => rows.push(['added', h, c]));
+  Object.entries(ov.recategorized || {}).forEach(([h, c]) => rows.push(['recategorized', h, c]));
+  (ov.tombstones || []).forEach(h => rows.push(['tombstone', h, '']));
+  rows.forEach(([kind, host, cat]) => tbody.appendChild(_overrideRowEl(kind, host, cat)));
+  document.getElementById('overrides-empty').style.display = rows.length ? 'none' : '';
+}
+
+function _overrideRowEl(kind, host, cat) {
+  const tr = document.createElement('tr');
+  tr.dataset.kind = kind;
+  const kindLabel = { added: 'Addition', recategorized: 'Recategorize', tombstone: 'Tombstone' }[kind] || kind;
+
+  const tdKind = document.createElement('td');
+  tdKind.style.padding = '4px 8px';
+  tdKind.textContent = kindLabel; // textContent = XSS-safe
+  tr.appendChild(tdKind);
+
+  const tdHost = document.createElement('td');
+  tdHost.style.padding = '4px 8px';
+  const hostIn = document.createElement('input');
+  hostIn.type = 'text';
+  hostIn.className = 'input over-host';
+  hostIn.value = host || ''; // .value assignment never parses markup
+  hostIn.placeholder = 'host.example.com';
+  hostIn.setAttribute('aria-label', kindLabel + ' host');
+  hostIn.disabled = !_saasFeedEditable;
+  tdHost.appendChild(hostIn);
+  tr.appendChild(tdHost);
+
+  const tdCat = document.createElement('td');
+  tdCat.style.padding = '4px 8px';
+  if (kind === 'tombstone') {
+    const dash = document.createElement('span');
+    dash.className = 'hint';
+    dash.textContent = '—';
+    tdCat.appendChild(dash);
+  } else {
+    const catIn = document.createElement('input');
+    catIn.type = 'text';
+    catIn.className = 'input over-cat';
+    catIn.value = cat || '';
+    catIn.placeholder = 'category';
+    catIn.setAttribute('aria-label', kindLabel + ' category');
+    catIn.disabled = !_saasFeedEditable;
+    tdCat.appendChild(catIn);
+  }
+  tr.appendChild(tdCat);
+
+  const tdDel = document.createElement('td');
+  tdDel.style.padding = '4px 8px';
+  if (_saasFeedEditable) {
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'btn sm ghost';
+    del.dataset.click = 'removeOverrideRow';
+    del.setAttribute('aria-label', 'Remove ' + kindLabel + ' override');
+    del.textContent = 'Remove';
+    tdDel.appendChild(del);
+  }
+  tr.appendChild(tdDel);
+  return tr;
+}
+
+function addOverrideRow(kind) {
+  if (!_saasFeedEditable) return;
+  document.getElementById('overrides-empty').style.display = 'none';
+  const tbody = document.getElementById('overrides-rows');
+  const row = _overrideRowEl(kind, '', '');
+  tbody.appendChild(row);
+  const hostIn = row.querySelector('.over-host');
+  if (hostIn) hostIn.focus(); // keyboard/focus handling
+}
+
+function removeOverrideRow(btn) {
+  const tr = btn.closest('tr');
+  if (tr) tr.remove();
+  const tbody = document.getElementById('overrides-rows');
+  document.getElementById('overrides-empty').style.display = tbody.children.length ? 'none' : '';
+}
+
+// collectOverrides gathers the table into the wire shape. Empty-host rows are
+// dropped; the server re-validates and reports errors.
+function collectOverrides() {
+  const out = { added: {}, recategorized: {}, tombstones: [] };
+  document.querySelectorAll('#overrides-rows tr').forEach(tr => {
+    const kind = tr.dataset.kind;
+    const host = (tr.querySelector('.over-host')?.value || '').trim();
+    if (!host) return;
+    if (kind === 'tombstone') { out.tombstones.push(host); return; }
+    const cat = (tr.querySelector('.over-cat')?.value || '').trim();
+    if (kind === 'added') out.added[host] = cat;
+    else if (kind === 'recategorized') out.recategorized[host] = cat;
+  });
+  return out;
+}
+
+async function saveSaaSFeedOverrides() {
+  if (!_saasFeedEditable) return;
+  await _putOverrides(collectOverrides());
+}
+
+// clearSaaSFeedOverrides transmits an EXPLICIT empty replacement set so every
+// override is cleared fleet-wide (delete-propagating), per the F3a-2 contract.
+async function clearSaaSFeedOverrides() {
+  if (!_saasFeedEditable) return;
+  await _putOverrides({});
+}
+
+async function _putOverrides(body) {
+  const status = document.getElementById('overrides-save-status');
+  const errEl = document.getElementById('overrides-error');
+  errEl.style.display = 'none';
+  status.style.color = '';
+  status.textContent = 'Saving…';
+  try {
+    await api('/api/saas-feed/overrides', { method: 'PUT', body });
+    status.style.color = 'var(--ok,green)';
+    status.textContent = 'Saved';
+    loadSaaSFeedOverrides();
+  } catch (err) {
+    status.textContent = '';
+    errEl.textContent = 'Error: ' + err.message; // host/category validation errors shown clearly
+    errEl.style.display = '';
+  }
 }
 
 // ── Blocklist-as-category card ────────────────────────────────────────────
@@ -12665,9 +12969,16 @@ function renderPACPoolsList() {
 // applySessionRoleVisibility re-applies data-min-role hiding to freshly
 // rendered elements (applySession only runs on session changes).
 function applySessionRoleVisibility() {
+  applySessionRoleVisibilityScope('#view-pac');
+}
+
+// applySessionRoleVisibilityScope re-applies data-min-role hiding within one
+// container selector — used by dynamically-rendered panels (PAC rows, the SaaS
+// feed panel) that inject data-min-role elements after the initial login pass.
+function applySessionRoleVisibilityScope(sel) {
   const roleLevel = { admin: 3, operator: 2, viewer: 1 };
   const myLevel = roleLevel[window.currentRole] || 0;
-  document.querySelectorAll('#view-pac [data-min-role]').forEach(el => {
+  document.querySelectorAll(sel + ' [data-min-role]').forEach(el => {
     const required = roleLevel[el.getAttribute('data-min-role')] || 0;
     el.style.display = myLevel >= required ? '' : 'none';
   });

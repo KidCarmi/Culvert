@@ -310,6 +310,16 @@ var uiRoutes = []uiRouteMetadata{
 		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer, Note: "no direct requireRole; protected by uiAuthMiddleware"}}},
 	{Path: "/api/urlcat/feed-status", Handler: "apiURLCatFeedStatus", Domain: "policy", Public: false,
 		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer, Note: "no direct requireRole; protected by uiAuthMiddleware; read-only feed freshness/failure counts"}}},
+	{Path: "/api/saas-feed/settings", Handler: "apiSaaSFeedSettings", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "F3a-2: read the SaaS signed-feed configuration (configured vs runtime-activation state)"},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "F3a-2: set url/protocol/managed/enabled/refresh; validate→persist→publish; denied on a managed data-plane node (409)"},
+		}},
+	{Path: "/api/saas-feed/overrides", Handler: "apiSaaSFeedOverrides", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "F3a-2: read the admin category-override set"},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "F3a-2: full-set override replacement (empty ⇒ clear all); denied on a managed data-plane node (409)"},
+		}},
 	{Path: "/api/blockpage", Handler: "apiBlockPage", Domain: "policy", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer},

@@ -10,6 +10,7 @@ package main
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/KidCarmi/Culvert/internal/feedsync"
@@ -41,6 +42,18 @@ func loadURLCategories(cfg urlCategoriesStartupConfig, ctx context.Context) *Fee
 	}
 	if dpFirstRun && cfg.DecryptionProfilesPath != "" {
 		seedDefaultDecryptionProfiles()
+	}
+
+	// Admin category overrides (F3a-2). CP-authoritative fleet policy, folded onto
+	// the feed snapshot only by the future downloader (F3b) — inert config here.
+	// Non-fatal: a missing file is the first-run state (empty overrides); a corrupt
+	// or schema-newer file leaves the store empty and is re-synced from the CP.
+	if cfg.CategoryOverridesPath != "" {
+		if err := os.MkdirAll(filepath.Dir(cfg.CategoryOverridesPath), 0o700); err != nil {
+			logger.Printf("CategoryOverrides: cannot create store dir: %v", err)
+		} else if err := globalCategoryOverrides.Load(cfg.CategoryOverridesPath); err != nil {
+			logger.Printf("CategoryOverrides: load error: %v", err)
+		}
 	}
 
 	// SaaS category feed (dynamic updates from GitHub). Additive merge: new

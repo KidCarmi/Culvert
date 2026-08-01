@@ -346,14 +346,18 @@ func applyAdminServices(s *AdminSettings) {
 		setCriticalDiskPct(s.LogCriticalDiskPct)
 	}
 	applyBlocklistFeeds(s)
-	if s.SaaSFeedURL != "" {
-		globalSaaSFeed.Configure(s.SaaSFeedURL, 24*time.Hour)
-	}
-	// F3a-1: publish the new durable feed-config fields to their holder so the
-	// omnibus SaveAdminSettings rebuild preserves them (schema marker included).
+	// F3a-2: the signed-feed URL is NO LONGER routed into the legacy additive
+	// syncer (globalSaaSFeed). The legacy syncer keeps whatever URL it was
+	// configured with at startup; the new signed-feed URL lives only in the
+	// durable holder below. This is the "critical separation" contract — a
+	// persisted signed URL (feeds.culvertlabs.com/…/manifest.sigstore.json) must
+	// never be handed to the raw-category syncer, which would misinterpret it and
+	// fetch it as a plain feed. No downloader consumes the holder in F3a-2; it is
+	// inert configuration until the F3b signed-feed client lands.
 	setSaaSFeedDurable(saasFeedDurable{
 		Managed:        s.SaaSFeedManaged,
 		Enabled:        s.SaaSFeedEnabled,
+		URL:            s.SaaSFeedURL,
 		Protocol:       s.SaaSFeedProtocol,
 		RefreshSeconds: s.SaaSFeedRefreshSeconds,
 		SchemaVersion:  s.SaaSStoreSchemaVersion,
@@ -613,12 +617,11 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 
 	snapshotBlocklistFeeds(&s)
 
-	// SaaS feed. URL stays owned by the legacy syncer; the F3a-1 durable fields
-	// (managed/enabled/protocol/refresh + schema marker) are snapshotted from their
-	// holder so an unrelated admin mutation does not drop them or reset the marker.
-	if saasURL := globalSaaSFeed.FeedURL(); saasURL != "" {
-		s.SaaSFeedURL = saasURL
-	}
+	// SaaS feed (F3a-2). ALL durable feed-config fields — including the URL —
+	// are snapshotted from the holder (snapshotSaaSFeedDurable is the sole writer
+	// of s.SaaSFeedURL). The legacy syncer no longer owns the URL, so an unrelated
+	// admin mutation preserves the signed-feed config + schema marker without
+	// re-reading (and thereby coupling to) the legacy additive syncer.
 	snapshotSaaSFeedDurable(&s)
 
 	// Upstream proxy pool (raw entries — see field comment)

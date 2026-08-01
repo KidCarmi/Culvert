@@ -665,6 +665,17 @@ func apiConfigExport(w http.ResponseWriter, r *http.Request) {
 		b.CategoryGroups = globalCategoryGroups.List()
 		b.DecryptionProfiles = globalDecryptionProfiles.List()
 		b.ContentScanBypassHosts = dpiScanner.BypassHosts()
+		// SaaS signed category-feed CONFIGURATION + overrides (F3a-2). Exported as
+		// configuration only — never the node-local runtime/activation/floor state,
+		// which is off every surface by construction (no configBackup binding). The
+		// URL/protocol are captured RESOLVED (always non-empty), so a same-version
+		// round-trip restores them exactly; a pre-F3a-2 backup lacks these fields.
+		b.SaaSFeedManaged = captureSaaSFeedManaged()
+		b.SaaSFeedEnabled = captureSaaSFeedEnabled()
+		b.SaaSFeedURL = captureSaaSFeedURL()
+		b.SaaSFeedProtocol = captureSaaSFeedProtocol()
+		b.SaaSFeedRefreshSeconds = getSaaSFeedDurable().RefreshSeconds
+		b.CategoryOverrides = captureCategoryOverrides()
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -763,6 +774,19 @@ func buildImportPreview(b *configBackup, replaceMode bool) ([]importPreviewSecti
 	add("Category Groups", len(b.CategoryGroups), len(globalCategoryGroups.List()), taxonomyNote)
 	add("Decryption Profiles", len(b.DecryptionProfiles), len(globalDecryptionProfiles.List()), taxonomyNote)
 
+	// Category overrides (F3a-2): mirror importCategoryOverrides — an empty/absent
+	// set skips (import never wipes), a populated set merges (upsert by host) or
+	// replaces. add()'s incoming==0 guard matches the never-wipe apply semantics.
+	ovInc := 0
+	if b.CategoryOverrides != nil {
+		ovInc = categoryOverridesCount(*b.CategoryOverrides)
+	}
+	ovCur := 0
+	if cur := captureCategoryOverrides(); cur != nil {
+		ovCur = categoryOverridesCount(*cur)
+	}
+	add("Category Overrides", ovInc, ovCur, taxonomyNote)
+
 	add("Rewrite Rules", len(b.RewriteRules), len(rewriter.List()), "")
 	add("SSL Bypass", len(b.SSLBypass), len(sslBypass.List()), "")
 	add("Content Scan Patterns", len(b.ContentScanPatterns), len(dpiScanner.List()), "")
@@ -822,6 +846,26 @@ func buildImportSettingsPreview(b *configBackup) []importPreviewSetting {
 			state = "enabled"
 		}
 		setting("Connection Limit", fmt.Sprintf("%d per IP (%s)", b.ConnLimitMaxPerIP, state))
+	}
+	// SaaS feed config (F3a-2): gated on SaaSFeedProtocol != "" to mirror
+	// importSaaSFeedConfig's apply gate exactly — a pre-extension backup (protocol
+	// absent) applies nothing, so the preview must report nothing.
+	if b.SaaSFeedProtocol != "" {
+		mgmt := "unmanaged"
+		if b.SaaSFeedManaged {
+			mgmt = "managed"
+		}
+		state := "disabled"
+		if b.SaaSFeedEnabled {
+			state = "enabled"
+		}
+		setting("SaaS Feed", fmt.Sprintf("%s, %s (%s)", mgmt, state, b.SaaSFeedProtocol))
+		if b.SaaSFeedURL != "" {
+			setting("SaaS Feed URL", b.SaaSFeedURL)
+		}
+		if b.SaaSFeedRefreshSeconds != 0 {
+			setting("SaaS Feed Refresh", fmt.Sprintf("%ds", b.SaaSFeedRefreshSeconds))
+		}
 	}
 	return settings
 }
@@ -939,6 +983,21 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// SaaS feed config (F3a-2). A managed Data Plane node must not import
+	// CP-authoritative feed policy locally — reject the whole import with a
+	// deterministic error before any mutation. And strict-validate the incoming
+	// feed config through the F3a-1 boundary (reject legacy/unsupported protocol or
+	// URL, and any invalid override) so a bad backup is refused whole, never
+	// partially applied.
+	if backupCarriesSaaSFeed(&b) && isManagedDataPlane() {
+		http.Error(w, "saas feed config is control-plane managed on a data-plane node; import it on the control plane", http.StatusConflict)
+		return
+	}
+	if err := validateSaaSFeedImport(&b); err != nil {
+		http.Error(w, "invalid saas feed config: "+sanitizeLog(err.Error()), http.StatusBadRequest)
+		return
+	}
+
 	// PAC pre-validation (before ANY store mutation): strictly validate the
 	// IMPORTED PAC fields themselves so a malformed backup is rejected whole
 	// with actionable errors instead of silently importing junk. Pre-existing
@@ -968,6 +1027,11 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	// applyConfigBackup's leaf-first dependency order (rules reference groups,
 	// groups reference categories by name).
 	importCategoryTaxonomy(&b, replaceMode)
+
+	// Category overrides (F3a-2) — leaf-first, before policy rules. Import never
+	// wipes: an absent/empty override set skips in both modes (an explicit clear is
+	// a rollback-only capability). Pre-validated above.
+	importCategoryOverrides(&b, replaceMode)
 
 	// Policy rules — replace or upsert-by-identity (extracted to keep the
 	// handler under the nestif complexity threshold).
@@ -1110,6 +1174,11 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 			connLimiter.Disable()
 		}
 	}
+
+	// SaaS feed config (F3a-2). Never-wipe: applied only when the backup carries it
+	// (SaaSFeedProtocol set). Pre-validated above; publishes to the durable holder
+	// only (persisted by adminSettingsSave below) — no downloader/legacy syncer.
+	importSaaSFeedConfig(&b)
 
 	importMode := "merge"
 	if replaceMode {
