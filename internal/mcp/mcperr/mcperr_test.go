@@ -7,36 +7,52 @@ import (
 )
 
 func TestReasonCodesStable(t *testing.T) {
-	// The machine strings are a contract; pin them.
-	want := map[Reason]string{
-		ReasonNone:                 "none",
-		ReasonMalformedJSON:        "malformed_json",
-		ReasonInvalidJSONRPC:       "invalid_jsonrpc",
-		ReasonUnsupportedBatch:     "unsupported_batch",
-		ReasonUnsupportedVersion:   "unsupported_version",
-		ReasonUnsupportedMethod:    "unsupported_method",
-		ReasonResourceLimit:        "resource_limit",
-		ReasonInvalidLifecycle:     "invalid_lifecycle",
-		ReasonUncorrelatedResponse: "uncorrelated_response",
-		ReasonDuplicateCompletion:  "duplicate_completion",
-		ReasonInvalidCancellation:  "invalid_cancellation",
-		ReasonLateCancellation:     "late_cancellation",
-
-		ReasonInvalidRegistration:    "invalid_registration",
-		ReasonUnregisteredServer:     "unregistered_server",
-		ReasonServerIdentityMismatch: "server_identity_mismatch",
-		ReasonMalformedDiscovery:     "malformed_discovery",
-		ReasonDuplicateTool:          "duplicate_tool",
-		ReasonCanonicalizationFailed: "canonicalization_failed",
-		ReasonCapacityExceeded:       "capacity_exceeded",
-		ReasonUnknownTool:            "unknown_tool",
-		ReasonPrivilegeExpansion:     "privilege_expansion",
-		ReasonSemanticDrift:          "semantic_drift",
-		ReasonStaleSnapshot:          "stale_snapshot",
+	// The machine strings are a contract; pin every one. Structured as a slice of
+	// pairs (not a map literal) so it does not read as a duplicate of the source
+	// reasonCode map to the dupl linter, while still asserting the full set.
+	type pair struct {
+		r    Reason
+		code string
 	}
-	for r, code := range want {
-		if r.Code() != code {
-			t.Fatalf("Reason(%d).Code() = %q, want %q", r, r.Code(), code)
+	want := []pair{
+		{ReasonNone, "none"}, {ReasonMalformedJSON, "malformed_json"},
+		{ReasonInvalidJSONRPC, "invalid_jsonrpc"}, {ReasonUnsupportedBatch, "unsupported_batch"},
+		{ReasonUnsupportedVersion, "unsupported_version"}, {ReasonUnsupportedMethod, "unsupported_method"},
+		{ReasonResourceLimit, "resource_limit"}, {ReasonInvalidLifecycle, "invalid_lifecycle"},
+		{ReasonUncorrelatedResponse, "uncorrelated_response"}, {ReasonDuplicateCompletion, "duplicate_completion"},
+		{ReasonInvalidCancellation, "invalid_cancellation"}, {ReasonLateCancellation, "late_cancellation"},
+		{ReasonInvalidRegistration, "invalid_registration"}, {ReasonUnregisteredServer, "unregistered_server"},
+		{ReasonServerIdentityMismatch, "server_identity_mismatch"}, {ReasonMalformedDiscovery, "malformed_discovery"},
+		{ReasonDuplicateTool, "duplicate_tool"}, {ReasonCanonicalizationFailed, "canonicalization_failed"},
+		{ReasonCapacityExceeded, "capacity_exceeded"}, {ReasonUnknownTool, "unknown_tool"},
+		{ReasonPrivilegeExpansion, "privilege_expansion"}, {ReasonSemanticDrift, "semantic_drift"},
+		{ReasonStaleSnapshot, "stale_snapshot"},
+		{ReasonCredentialMissing, "credential_missing"}, {ReasonCredentialInQuery, "credential_in_query"},
+		{ReasonMalformedToken, "malformed_token"}, {ReasonUnsupportedTokenType, "unsupported_token_type"},
+		{ReasonUnsupportedAlgorithm, "unsupported_algorithm"}, {ReasonSignatureInvalid, "signature_invalid"},
+		{ReasonIssuerRejected, "issuer_rejected"}, {ReasonAudienceMissing, "audience_missing"},
+		{ReasonAudienceRejected, "audience_rejected"}, {ReasonResourceMismatch, "resource_mismatch"},
+		{ReasonTokenExpired, "token_expired"}, {ReasonTokenNotYetValid, "token_not_yet_valid"},
+		{ReasonTokenTTLExceeded, "token_ttl_exceeded"}, {ReasonScopeMissing, "scope_missing"},
+		{ReasonCapabilityMismatch, "capability_mismatch"}, {ReasonTenantMismatch, "tenant_mismatch"},
+		{ReasonDelegationChainInvalid, "delegation_chain_invalid"}, {ReasonSenderConstraintRequired, "sender_constraint_required"},
+		{ReasonDPoPMalformed, "dpop_malformed"}, {ReasonDPoPBindingMismatch, "dpop_binding_mismatch"},
+		{ReasonDPoPReplay, "dpop_replay"}, {ReasonDPoPNonce, "dpop_nonce"},
+		{ReasonMTLSBindingMismatch, "mtls_binding_mismatch"}, {ReasonInactiveToken, "inactive_token"},
+		{ReasonSessionIdentityBound, "session_identity_bound"}, {ReasonSessionIdentityRebind, "session_identity_rebind"},
+		{ReasonRegistryServerUnavailable, "registry_server_unavailable"},
+	}
+	seen := map[Reason]bool{}
+	for _, p := range want {
+		if p.r.Code() != p.code {
+			t.Fatalf("Reason(%d).Code() = %q, want %q", p.r, p.r.Code(), p.code)
+		}
+		seen[p.r] = true
+	}
+	// Exhaustiveness: every reason in the source map is pinned above.
+	for r := range reasonCode {
+		if !seen[r] {
+			t.Fatalf("reason %d (%q) is not pinned by the stability test", r, r.Code())
 		}
 	}
 }

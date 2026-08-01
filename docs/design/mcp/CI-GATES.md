@@ -218,7 +218,7 @@ have — and a test claiming both that a bypass exists and that it cannot be con
 | Protocol-compatibility conformance gate (D-1-gated) | proposed (target PR-1) | Proposed | Yes, for PR-1 (green only after D-1) | MCP-PROTO-010,011 | No |
 | Deeper scheduled protocol-kernel fuzzing | proposed (extends `fuzz-nightly.yml`) | Advisory | No (scheduled/deep signal) | MCP-PROTO-009 | Partial (harness exists) |
 | Malicious-MCP-server test suite | present (PR-2) | Existing | Yes, for PR-2 | MCP-TOOL-001..006 | No |
-| OAuth/audience/replay negative matrix | proposed (target PR-3) | Proposed | Yes, for PR-3 | MCP-AUTH-001..008 | No |
+| OAuth/audience/replay negative matrix | present (PR-3) | Existing | Yes, for PR-3 | MCP-AUTH-001..008 | No |
 | SSRF private-IP matrix + DNS-rebinding lab + inbound Origin/Host tests (**incl. cross-capability allowlist isolation**) | proposed (target PR-1/**PR-5**/PR-7) | Proposed | Yes, for PR-1 (INSP-008 **primitive only**, no listener) / **PR-5 (INSP-009 — listener bind + host allowlist + E2E rebinding; the PR-1 unit test does NOT close the listener-side threat)** / PR-7 (SSRF) | MCP-INSP-004,005,008,**009** | No |
 | SSE-exhaustion/slowloris/queue-saturation tests (**per listener**) | proposed (target PR-5/PR-8) | Proposed | Yes, for PR-5/PR-8 | MCP-OPS-002, MCP-EVENT-002 | No |
 | Mixed-version/stale-epoch/corrupt-snapshot tests **+ PR-8 durability-suite re-run on the real publication path** | proposed (target PR-10) | Proposed | Yes, for PR-10 | MCP-CPDP-001..003, MCP-HA-001..002, **MCP-EVENT-002** | No |
