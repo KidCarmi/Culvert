@@ -32,7 +32,17 @@ var globalAlertStore = &AlertStore{}
 // fireAlert dispatches payload to all enabled webhooks matching event via the
 // process-wide store. Installed as the alerts.Fire sink at init so internal
 // packages (the scan engines) fire through the same path.
-func fireAlert(event string, payload AlertPayload) {
+//
+// It is a var so tests can observe the DISPATCH DECISION directly instead of
+// asserting on webhook HTTP delivery. That distinction matters: delivery passes
+// through a package-global concurrency semaphore in internal/alerts (cap 10)
+// shared by every test in the binary, and when it is saturated Dispatch diverts
+// the payload to the retry queue instead of delivering it. A delivery-based
+// assertion therefore fails whenever unrelated tests happen to hold those slots
+// — which is load- and order-dependent, and reports as "the alert was
+// suppressed" even though the producer did everything right. Mirrors the same
+// seam rationale as startupAlertFire below.
+var fireAlert = func(event string, payload AlertPayload) {
 	defer recoverGoroutine("alert") // fired via `go fireAlert(...)` from the proxy hot path
 	globalAlertStore.Dispatch(event, payload)
 }
