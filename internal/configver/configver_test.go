@@ -196,6 +196,48 @@ func TestList_SkipsCorruptAndSortsDescending(t *testing.T) {
 	}
 }
 
+// ─── Integrity: present vs readable ──────────────────────────────────────────
+
+func TestIntegrity_AllReadable(t *testing.T) {
+	dir := t.TempDir()
+	s := New(dir, 0)
+	s.Init()
+	writeVersion(t, dir, 1, `{"meta":{"version":1,"actor":"a"}}`)
+	writeVersion(t, dir, 2, `{"meta":{"version":2,"actor":"b"}}`)
+
+	present, readable := s.Integrity()
+	if present != 2 || readable != 2 {
+		t.Fatalf("present=%d readable=%d, want 2, 2", present, readable)
+	}
+}
+
+func TestIntegrity_FlagsHiddenCorruptFileNotJustLatest(t *testing.T) {
+	dir := t.TempDir()
+	s := New(dir, 0)
+	s.Init()
+	// v2 is corrupt but is NOT the latest version — a check that only
+	// inspects the latest file would miss this entirely.
+	writeVersion(t, dir, 1, `{"meta":{"version":1,"actor":"a"}}`)
+	writeVersion(t, dir, 2, "this is not json")
+	writeVersion(t, dir, 3, `{"meta":{"version":3,"actor":"c"}}`)
+
+	present, readable := s.Integrity()
+	if present != 3 {
+		t.Fatalf("present = %d, want 3", present)
+	}
+	if readable != 2 {
+		t.Fatalf("readable = %d, want 2 (v2 is corrupt)", readable)
+	}
+}
+
+func TestIntegrity_MissingDirReturnsZeroZero(t *testing.T) {
+	s := New(filepath.Join(t.TempDir(), "nonexistent"), 0)
+	present, readable := s.Integrity()
+	if present != 0 || readable != 0 {
+		t.Fatalf("present=%d readable=%d, want 0, 0", present, readable)
+	}
+}
+
 // ─── Load: not-found vs corrupt ──────────────────────────────────────────────
 
 func TestLoad_NotFoundIsOSError(t *testing.T) {

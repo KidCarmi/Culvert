@@ -761,6 +761,54 @@ func TestConfigVersionsCheck_ValidationWarning(t *testing.T) {
 	}
 }
 
+// TestConfigVersionsCheck_IntegrityFlagsHiddenCorruptFile proves the gap
+// checkConfigVersionsReadable cannot cover: a corrupt file that is NOT the
+// latest version is invisible to the latest-only checks, but must still be
+// flagged so it doesn't silently vanish from the rollback list.
+func TestConfigVersionsCheck_IntegrityFlagsHiddenCorruptFile(t *testing.T) {
+	dir := t.TempDir()
+	origDir := configVersions.Dir()
+	configVersions.SetDirForTest(dir)
+	t.Cleanup(func() { configVersions.SetDirForTest(origDir) })
+
+	writeConfigVersionFile(t, dir, 1, validEnvelope(1))
+	if err := os.WriteFile(filepath.Join(dir, "v2.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("seed corrupt: %v", err)
+	}
+	writeConfigVersionFile(t, dir, 3, validEnvelope(3))
+
+	// The latest-only check sees v3, which is clean — it must NOT flag
+	// the hidden corruption in v2.
+	sum := summarizeLatestConfigVersionAt(dir)
+	if got := checkConfigVersionsReadable(sum); got.Status != diagOK {
+		t.Fatalf("readable status = %q, want ok (latest v3 is clean)", got.Status)
+	}
+
+	got := checkConfigVersionsIntegrity()
+	if got.Status != diagWarn {
+		t.Fatalf("integrity status = %q, want warn", got.Status)
+	}
+	if got.OperatorAction == "" {
+		t.Error("integrity warn must include operator_action")
+	}
+	if !strings.Contains(got.Message, "1 of 3") {
+		t.Errorf("message = %q, want it to mention 1 of 3", got.Message)
+	}
+}
+
+func TestConfigVersionsCheck_IntegrityOKWhenAllReadable(t *testing.T) {
+	dir := t.TempDir()
+	origDir := configVersions.Dir()
+	configVersions.SetDirForTest(dir)
+	t.Cleanup(func() { configVersions.SetDirForTest(origDir) })
+
+	writeConfigVersionFile(t, dir, 1, validEnvelope(1))
+
+	if got := checkConfigVersionsIntegrity(); got.Status != diagOK {
+		t.Errorf("integrity status = %q, want ok", got.Status)
+	}
+}
+
 func TestConfigVersionsCheck_LatestSelectionByNumber(t *testing.T) {
 	dir := t.TempDir()
 	// Write v3 first, then v10, then v2. Latest must be v10 strictly by

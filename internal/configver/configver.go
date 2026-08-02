@@ -240,6 +240,29 @@ func (s *Store) ListMeta() []Meta {
 	})
 }
 
+// Integrity scans the version directory and reports how many candidate
+// v{N}.json files exist (present) versus how many parsed cleanly via
+// ListMeta (readable). present > readable means one or more files are
+// corrupt or unreadable and have been silently excluded from List/ListMeta
+// (D1.2-flag-F5) — those versions are unusable rollback targets even though
+// they still count toward the max-versions retention window. Callers use
+// this to raise an operator-visible diagnostic instead of relying on the
+// obs.Printf skip lines, which are invisible without log/SSH access.
+func (s *Store) Integrity() (present, readable int) {
+	dir := s.dirSnapshot()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0, 0
+	}
+	for _, e := range entries {
+		if _, ok := versionOf(e.Name()); ok {
+			present++
+		}
+	}
+	readable = len(s.ListMeta())
+	return present, readable
+}
+
 // Seq returns the current sequence counter (the last assigned version).
 func (s *Store) Seq() int {
 	s.mu.Lock()
