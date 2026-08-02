@@ -1,0 +1,403 @@
+name: Publish SaaS URL-Category Feed
+
+# DORMANT public-feed publisher (F5 — feeds.culvertlabs.com).
+#
+# Deterministically generates + keyless-signs the public SaaS URL-category feed and
+# publishes it to Cloudflare R2 behind feeds.culvertlabs.com, as a fail-closed
+# generate+sign -> re-verify -> stage-immutable -> public-verify -> CAS-promote
+# pipeline. Inert until an owner sets `vars.FEEDS_PUBLISH_ENABLED=true` AND
+# provisions the R2/Cloudflare secrets (F6 activation).
+#
+# ─── TWO-JOB PRIVILEGE MODEL (F0 §11.1 — a real boundary, not named steps) ──────
+#   Job A `generate`: permissions contents:read + id-token:write. Holds NO R2 and NO
+#     Cloudflare credential — it CANNOT write anything to R2. It validates the source,
+#     deterministically generates + normalizes the artifact, keyless-signs the artifact
+#     and the manifest payload (cosign, Fulcio+Rekor, no private key), assembles the
+#     self-contained signed manifest envelope, RE-VERIFIES the whole bundle with the
+#     production in-binary verifier (baked root + pinned feed identity), and emits it as
+#     a GitHub Actions WORKFLOW ARTIFACT (never to R2).
+#   Job B `publish`: permissions contents:read + actions:read, NO id-token. Holds the
+#     narrowly-scoped R2 write + Cloudflare cache-purge secrets. It downloads Job A's
+#     workflow artifact, re-verifies every signed input, then runs the §11.2 sequence.
+#
+# The pinned feed signing identity (internal/urlcatfeed/identity.go +
+# feeds_identity.env, asserted equal by feeds_identity_ssot / TestFeedIdentitySSOT)
+# is anchored to THIS workflow file on a `feeds-v*` tag — so signing MUST happen here,
+# on a feeds-v* tag push, and renaming this file requires the coordinated identity
+# update + overlap window documented in feeds_identity.env.
+#
+# ─── SECURITY MODEL ────────────────────────────────────────────────────────────
+# R2 (immutable artifact keys + the mutable envelope) is UNTRUSTED transport.
+# Integrity comes from the feed's keyless Sigstore signature, verified IN-BINARY
+# against the baked trusted root + pinned feed identity (offline Rekor timestamp).
+# Artifact immutability comes from create-only `--if-none-match '*'` + public
+# re-verification; envelope safety from the §11.3 CAS `If-Match` guard on the single
+# `manifest.sigstore.json` object — NOT from credential prefix scoping (R2 S3 tokens
+# scope to a bucket, not a key prefix; F0 §11.4).
+#
+# ─── INVARIANTS (pinned by feeds_publish_workflow_test.go) ─────────────────────
+#   - Job A grants id-token but references NONE of the R2/CF secrets.
+#   - Job B references the R2/CF secrets but grants NO id-token (any level).
+#   - Job B is dormant-gated on `vars.FEEDS_PUBLISH_ENABLED` (never `secrets.*`, which
+#     is unavailable in `if:` anyway) and requires a feeds-v* tag context.
+#   - Job B step order: re-verify(downloaded) -> stage create-only -> public-artifact
+#     re-verify -> CAS envelope promote -> public-envelope re-verify; every re-verify
+#     step carries the enforcing non-skip pass-proof (`go test -json` + `jq -e` on
+#     Action==pass + `exit 1`), and promote reads the LIVE feed_version from the R2
+#     ORIGIN and requires the new one STRICTLY GREATER under an `If-Match` CAS.
+#   - `concurrency: feeds-publish, cancel-in-progress: false` serializes publications.
+#
+# OWNER ACTIVATION (full runbook: docs/operator/feeds-hosting-r2-activation.md, F6):
+#   vars: FEEDS_PUBLISH_ENABLED=true, FEEDS_PUBLIC_BASE=https://feeds.culvertlabs.com
+#   secrets: FEEDS_R2_S3_ENDPOINT, FEEDS_R2_S3_ACCESS_KEY_ID,
+#            FEEDS_R2_S3_SECRET_ACCESS_KEY, FEEDS_R2_BUCKET,
+#            FEEDS_CF_ZONE_ID, FEEDS_CF_CACHE_PURGE_TOKEN
+
+on:
+  push:
+    tags: ["feeds-v*"]
+  workflow_dispatch:
+    inputs:
+      validity_hours:
+        description: "Feed validity window in hours (default 336 = 14d; capped at 720 = 30d)."
+        required: false
+        type: string
+
+# Restrictive top-level default; jobs elevate only what they need (Job A: id-token;
+# Job B: actions:read for the same-run artifact download). Never contents:write.
+permissions:
+  contents: read
+
+# Serialize feed publications; never cancel an in-flight CAS promote.
+concurrency:
+  group: feeds-publish
+  cancel-in-progress: false
+
+jobs:
+  # ── Job A — generate + keyless sign (id-token, NO R2/CF credential) ───────────
+  generate:
+    name: Generate + sign feed (id-token, no R2)
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write     # cosign keyless blob signing of the artifact + manifest payload
+    outputs:
+      signed: ${{ steps.sign.outputs.signed }}
+    steps:
+      # Signing contacts Fulcio/Rekor/TUF; audit baseline (same posture as ci.yml's
+      # catalog-pipeline signing job) — the block flip enumerates sigstore endpoints.
+      - name: Harden runner (egress audit)
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-go-cache
+
+      # Capture the SINGLE generated_at instant ONCE (whole-second UTC). feed_version
+      # is its Unix seconds (F5, strictly increasing over wall-clock); the same instant
+      # drives every artifact/manifest timestamp so the signed bytes are self-consistent
+      # and a no-content-change re-sign still mints a strictly greater immutable version.
+      - name: Generate feed artifact + manifest (deterministic)
+        id: gen
+        env:
+          IN_VALIDITY_HRS: ${{ github.event.inputs.validity_hours }}
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/feed-out"
+          mkdir -p "$OUT"
+          GEN_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          {
+            echo "out=$OUT"
+            echo "gen_at=$GEN_AT"
+          } >> "$GITHUB_OUTPUT"
+          CULVERT_FEED_GEN_OUT="$OUT" \
+          CULVERT_FEED_GEN_GENERATED_AT="$GEN_AT" \
+          CULVERT_FEED_GEN_VALIDITY_HRS="${IN_VALIDITY_HRS:-}" \
+            go test -run '^TestFeedGenGate$' -count=1 -v .
+          test -s "$OUT/metadata.json" || { echo "FATAL: generator emitted no metadata.json"; exit 1; }
+          test -s "$OUT/manifest-payload.json" || { echo "FATAL: generator emitted no manifest-payload.json"; exit 1; }
+
+      # ── Keyless signing (feeds-v* TAG path only) ──────────────────────────────
+      # Sign the RAW artifact bytes and the RAW manifest-payload bytes keyless (Fulcio
+      # + Rekor, no private key). The pinned SAN requires a feeds-v* tag ref, so these
+      # steps are inert on a branch/dispatch dry-run (which still proves determinism +
+      # the generator gate).
+      - name: Install cosign
+        if: startsWith(github.ref, 'refs/tags/feeds-v')
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: 'v3.0.6'
+      - name: Sign artifact + manifest keyless, assemble + verify the envelope
+        id: sign
+        if: startsWith(github.ref, 'refs/tags/feeds-v')
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+          OUT: ${{ steps.gen.outputs.out }}
+        run: |
+          set -euo pipefail
+          # The immutable artifact filename is chosen by the generator (saas-<ver>-<date>.json);
+          # read it from the (as-yet-unsigned) metadata.json — the envelope re-verify below is
+          # the trust decision, this is only file wiring.
+          ART="$(jq -r '.artifact_path' "$OUT/metadata.json")"
+          printf '%s' "$ART" | grep -Eq '^saas-[0-9]{8}-[0-9]{8}\.json$' \
+            || { echo "FATAL: unexpected artifact_path '$ART'"; exit 1; }
+          cosign sign-blob --yes --bundle "$OUT/$ART.sigstore"                 "$OUT/$ART"
+          cosign sign-blob --yes --bundle "$OUT/manifest-payload.json.sigstore" "$OUT/manifest-payload.json"
+          test -s "$OUT/$ART.sigstore"                 || { echo "FATAL: empty artifact bundle"; exit 1; }
+          test -s "$OUT/manifest-payload.json.sigstore" || { echo "FATAL: empty manifest bundle"; exit 1; }
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+
+      # Assemble the self-contained signed envelope (manifest.sigstore.json) AND run the
+      # FULL production offline verify (baked root + pinned feed identity) over the
+      # envelope + artifact + bundles, cross-checked against the just-generated result.
+      # TestFeedGenKeylessVerify writes manifest.sigstore.json ONLY on a proven PASS.
+      - name: Keyless end-to-end verify (baked root + pinned feed identity)
+        if: startsWith(github.ref, 'refs/tags/feeds-v')
+        env:
+          CULVERT_FEED_GEN_OUT: ${{ steps.gen.outputs.out }}
+          CULVERT_FEED_GEN_GENERATED_AT: ${{ steps.gen.outputs.gen_at }}
+          CULVERT_FEED_GEN_VALIDITY_HRS: ${{ github.event.inputs.validity_hours }}
+          CULVERT_FEED_GEN_VERIFY_SIGSTORE: "1"
+        run: |
+          set -euo pipefail
+          go test -json -run '^TestFeedGenKeylessVerify$' -count=1 . | tee kv.jsonl
+          jq -e 'select(.Test=="TestFeedGenKeylessVerify" and .Action=="pass")' kv.jsonl >/dev/null \
+            || { echo "FATAL: keyless end-to-end verify did not PASS (skipped or failed)"; exit 1; }
+          test -s "${{ steps.gen.outputs.out }}/manifest.sigstore.json" \
+            || { echo "FATAL: verified envelope manifest.sigstore.json missing"; exit 1; }
+
+      # Emit the signed bundle as a WORKFLOW artifact (NOT R2). Job B is the only holder
+      # of the R2 credential. On a dry-run (no tag) the .sigstore/envelope files are
+      # absent and this upload carries only the unsigned generate output.
+      - name: Upload signed feed bundle (workflow artifact)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: feed-bundle
+          path: ${{ steps.gen.outputs.out }}
+          if-no-files-found: error
+
+  # ── Job B — publish (R2 + CF creds, NO id-token) ─ dormant + feeds-v* only ────
+  publish:
+    name: Publish signed feed to R2 (dormant)
+    needs: generate
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    # Dormant gate keyed on a repository VARIABLE (secrets.* is unavailable in `if:`).
+    # Absent/!= 'true' => skipped => green + neutral, no secret ever read. When active,
+    # only a feeds-v* tag context proceeds (signed identity present; a dry-run dispatch
+    # produced no envelope and must never publish).
+    if: >-
+      ${{ vars.FEEDS_PUBLISH_ENABLED == 'true' &&
+          startsWith(github.ref, 'refs/tags/feeds-v') }}
+    permissions:
+      contents: read
+      actions: read       # download the same-run workflow artifact. NO id-token.
+    steps:
+      # This job holds R2 write + a CF cache-purge token: egress-BLOCK with a static
+      # allow-list so a compromised transitive dependency cannot exfiltrate them. At
+      # activation the owner appends their R2 S3 endpoint host if it is not already a
+      # subdomain of r2.cloudflarestorage.com.
+      - name: Harden runner (egress block)
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            github.com:443
+            api.github.com:443
+            objects.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+            proxy.golang.org:443
+            sum.golang.org:443
+            storage.googleapis.com:443
+            api.cloudflare.com:443
+            *.r2.cloudflarestorage.com:443
+            feeds.culvertlabs.com:443
+      # Check out the DEFAULT-BRANCH copy (checkout's default ref). The re-verify steps
+      # compile + run package main; a feeds-v* tag is cut from a reviewed main commit,
+      # but pinning to the default branch keeps the executed verifier code out of a
+      # would-be attacker's reach regardless.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-go-cache
+      - name: Download signed feed bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: feed-bundle
+          path: dl
+
+      # §11.2 step 3 — RE-VERIFY Job A's signed handoff with the production verifier,
+      # WITHOUT regenerating. The gate writes the VERIFIED manifest facts (feed_version
+      # for the §11.3 CAS is taken from SIGNED bytes, never unsigned metadata) which we
+      # read into step outputs. Enforcing pass-proof: a skip/no-run fails the step.
+      - name: Re-verify downloaded bundle (production verifier, must PASS)
+        id: verify
+        env:
+          CULVERT_FEED_PUBLISH_DIR: dl
+          CULVERT_FEED_PUBLISH_VERIFIED_OUT: verified.json
+        run: |
+          set -euo pipefail
+          test -s dl/manifest.sigstore.json || { echo "FATAL: downloaded bundle has no signed envelope — refusing to publish"; exit 1; }
+          go test -json -run '^TestFeedPublishVerifyGate$' -count=1 . | tee verify_dl.jsonl
+          jq -e 'select(.Test=="TestFeedPublishVerifyGate" and .Action=="pass")' verify_dl.jsonl >/dev/null \
+            || { echo "FATAL: downloaded-bundle re-verify did not PASS (skipped or failed)"; exit 1; }
+          FV="$(jq -r '.feed_version' verified.json)"
+          ART="$(jq -r '.artifact_path' verified.json)"
+          ARTSIG="$(jq -r '.artifact_sig_path' verified.json)"
+          printf '%s' "$ART"    | grep -Eq '^saas-[0-9]{8}-[0-9]{8}\.json$'          || { echo "FATAL: bad artifact_path '$ART'"; exit 1; }
+          printf '%s' "$ARTSIG" | grep -Eq '^saas-[0-9]{8}-[0-9]{8}\.json\.sigstore$' || { echo "FATAL: bad artifact_sig_path '$ARTSIG'"; exit 1; }
+          printf '%s' "$FV"     | grep -Eq '^[0-9]+$'                                || { echo "FATAL: bad feed_version '$FV'"; exit 1; }
+          {
+            echo "feed_version=$FV"
+            echo "artifact=$ART"
+            echo "artifact_sig=$ARTSIG"
+          } >> "$GITHUB_OUTPUT"
+
+      # §11.2 step 4 — upload the IMMUTABLE artifact + its bundle to their FINAL
+      # create-only keys. `--if-none-match '*'` makes a re-publish of an existing
+      # version a no-clobber no-op: a same-key 412 is treated as "already staged,
+      # immutable" and we continue — BUT only after asserting the pre-existing origin
+      # bytes are byte-identical to what we hold (substitution/brick guard). The
+      # envelope (mutable) is NOT touched here — it is promoted LAST (step 7).
+      - name: Upload immutable artifact + bundle (create-only)
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.FEEDS_R2_S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.FEEDS_R2_S3_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_S3_ENDPOINT: ${{ secrets.FEEDS_R2_S3_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.FEEDS_R2_BUCKET }}
+          ART: ${{ steps.verify.outputs.artifact }}
+          ARTSIG: ${{ steps.verify.outputs.artifact_sig }}
+        run: |
+          set -euo pipefail
+          PREFIX="v1/url-categories/saas"
+          put_create_only() { # <local> <key>
+            local src="$1" key="$2"
+            if aws s3api put-object --bucket "$R2_BUCKET" --key "$key" --body "$src" \
+                 --if-none-match '*' --endpoint-url "$R2_S3_ENDPOINT" >/dev/null 2>put_err.txt; then
+              return 0
+            fi
+            if grep -Eqi 'PreconditionFailed|status code: 412' put_err.txt; then
+              # Already present + immutable — assert byte-identity before trusting it.
+              aws s3api get-object --bucket "$R2_BUCKET" --key "$key" \
+                --endpoint-url "$R2_S3_ENDPOINT" origin_obj >/dev/null
+              if [ "$(sha256sum origin_obj | awk '{print $1}')" != "$(sha256sum "$src" | awk '{print $1}')" ]; then
+                echo "FATAL: origin $key differs from the signed bundle — refusing (possible substitution)"; exit 1
+              fi
+              echo "note: $key already staged (immutable, byte-identical) — continuing"; return 0
+            fi
+            echo "FATAL: staging $key failed:"; cat put_err.txt; return 1
+          }
+          put_create_only "dl/$ART"    "$PREFIX/$ART"
+          put_create_only "dl/$ARTSIG" "$PREFIX/$ARTSIG"
+
+      # §11.2 steps 5–6 — retrieve the artifact + bundle THROUGH the public origin and
+      # re-verify the PUBLIC bytes with the production verifier (digest, size, counts,
+      # identity), bound to the locally-verified envelope. The envelope is NOT public
+      # yet, so we stage the locally-verified envelope alongside the public artifact.
+      - name: Retrieve + re-verify PUBLIC artifact (must PASS)
+        env:
+          FEEDS_PUBLIC_BASE: ${{ vars.FEEDS_PUBLIC_BASE }}
+          ART: ${{ steps.verify.outputs.artifact }}
+          ARTSIG: ${{ steps.verify.outputs.artifact_sig }}
+          CULVERT_FEED_PUBLISH_DIR: pub
+        run: |
+          set -euo pipefail
+          test -n "$FEEDS_PUBLIC_BASE" || { echo "FATAL: FEEDS_PUBLIC_BASE unset"; exit 1; }
+          mkdir -p pub
+          BASE="$FEEDS_PUBLIC_BASE/v1/url-categories/saas"
+          curl -fsS "$BASE/$ART"    -o "pub/$ART"
+          curl -fsS "$BASE/$ARTSIG" -o "pub/$ARTSIG"
+          # The envelope is not promoted yet — use the locally verified one to bind the
+          # public artifact through the same production verify path.
+          cp dl/manifest.sigstore.json pub/manifest.sigstore.json
+          go test -json -run '^TestFeedPublishVerifyGate$' -count=1 . | tee verify_pub_art.jsonl
+          jq -e 'select(.Test=="TestFeedPublishVerifyGate" and .Action=="pass")' verify_pub_art.jsonl >/dev/null \
+            || { echo "FATAL: public-artifact re-verify did not PASS — refusing to promote the envelope"; exit 1; }
+
+      # §11.2 step 7 + §11.3 — CAS-guarded envelope promote (publish manifest.sigstore.json
+      # LAST). Read the LIVE envelope's ETag + embedded feed_version from the R2 ORIGIN
+      # (authenticated S3 API, NOT the CDN — edge caching must not fool the CAS), require
+      # the new feed_version STRICTLY GREATER, and conditionally write: `If-Match: <live
+      # ETag>` when a live envelope exists, `If-None-Match: '*'` on first publish. A
+      # concurrent/stale publisher's write fails 412 => abort without overwriting a newer
+      # envelope. Any gate failure above aborts BEFORE this step, leaving the live
+      # envelope untouched.
+      - name: CAS-guarded envelope promote (If-Match strictly-greater)
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.FEEDS_R2_S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.FEEDS_R2_S3_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_S3_ENDPOINT: ${{ secrets.FEEDS_R2_S3_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.FEEDS_R2_BUCKET }}
+          NEW_FV: ${{ steps.verify.outputs.feed_version }}
+        run: |
+          set -euo pipefail
+          KEY="v1/url-categories/saas/manifest.sigstore.json"
+          COND=(--if-none-match '*')
+          if aws s3api get-object --bucket "$R2_BUCKET" --key "$KEY" \
+               --endpoint-url "$R2_S3_ENDPOINT" live_env.json >/dev/null 2>get_err.txt; then
+            LIVE_FV="$(jq -r '.payload_b64' live_env.json | base64 -d | jq -r '.feed_version // 0')"
+            printf '%s' "$LIVE_FV" | grep -Eq '^[0-9]+$' || { echo "FATAL: unreadable live feed_version"; exit 1; }
+            if [ "$NEW_FV" -le "$LIVE_FV" ]; then
+              echo "FATAL: new feed_version $NEW_FV is not strictly greater than live $LIVE_FV — refusing to roll back"; exit 1
+            fi
+            ETAG="$(aws s3api head-object --bucket "$R2_BUCKET" --key "$KEY" \
+                      --endpoint-url "$R2_S3_ENDPOINT" --query ETag --output text)"
+            test -n "$ETAG" || { echo "FATAL: could not read live envelope ETag"; exit 1; }
+            COND=(--if-match "$ETAG")
+            echo "CAS: promoting v$NEW_FV over live v$LIVE_FV (If-Match $ETAG)"
+          else
+            grep -Eqi 'NoSuchKey|status code: 404|Not Found' get_err.txt \
+              || { echo "FATAL: could not read the live envelope (fail-closed):"; cat get_err.txt; exit 1; }
+            echo "CAS: first publish (If-None-Match '*') for v$NEW_FV"
+          fi
+          if ! aws s3api put-object --bucket "$R2_BUCKET" --key "$KEY" \
+                 --body dl/manifest.sigstore.json --content-type application/json \
+                 "${COND[@]}" --endpoint-url "$R2_S3_ENDPOINT" >/dev/null 2>promote_err.txt; then
+            if grep -Eqi 'PreconditionFailed|status code: 412' promote_err.txt; then
+              echo "FATAL: CAS precondition failed (concurrent/stale publisher) — aborting without overwrite"; exit 1
+            fi
+            echo "FATAL: envelope promote failed:"; cat promote_err.txt; exit 1
+          fi
+
+      # §11.2 steps 8–10 — purge ONLY the envelope URL from the CDN, then retrieve +
+      # re-verify the PUBLIC envelope (+ the public artifact it names) through the
+      # production verifier and confirm convergence to the promoted bytes.
+      - name: Purge CDN + re-verify PUBLIC envelope + confirm convergence (must PASS)
+        env:
+          CF_ZONE_ID: ${{ secrets.FEEDS_CF_ZONE_ID }}
+          CF_CACHE_PURGE_TOKEN: ${{ secrets.FEEDS_CF_CACHE_PURGE_TOKEN }}
+          FEEDS_PUBLIC_BASE: ${{ vars.FEEDS_PUBLIC_BASE }}
+          ART: ${{ steps.verify.outputs.artifact }}
+          ARTSIG: ${{ steps.verify.outputs.artifact_sig }}
+          CULVERT_FEED_PUBLISH_DIR: pubenv
+        run: |
+          set -euo pipefail
+          BASE="$FEEDS_PUBLIC_BASE/v1/url-categories/saas"
+          ENV_URL="$BASE/manifest.sigstore.json"
+          curl -fsS -X POST "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/purge_cache" \
+            -H "Authorization: Bearer $CF_CACHE_PURGE_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data "{\"files\":[\"$ENV_URL\"]}" >/dev/null
+          WANT="$(sha256sum dl/manifest.sigstore.json | awk '{print $1}')"
+          mkdir -p pubenv
+          cp "pub/$ART" "pubenv/$ART"
+          cp "pub/$ARTSIG" "pubenv/$ARTSIG"
+          ok=""
+          for i in 1 2 3 4 5; do
+            if curl -fsS "$ENV_URL" -o pubenv/manifest.sigstore.json; then
+              GOT="$(sha256sum pubenv/manifest.sigstore.json | awk '{print $1}')"
+              if [ "$GOT" = "$WANT" ]; then ok="1"; break; fi
+              echo "convergence attempt $i: got '$GOT' want '$WANT' — retrying"
+            fi
+            sleep $((i*i))
+          done
+          test -n "$ok" || { echo "FATAL: public envelope did not converge to the promoted digest"; exit 1; }
+          go test -json -run '^TestFeedPublishVerifyGate$' -count=1 . | tee verify_pub_env.jsonl
+          jq -e 'select(.Test=="TestFeedPublishVerifyGate" and .Action=="pass")' verify_pub_env.jsonl >/dev/null \
+            || { echo "FATAL: public-envelope re-verify did not PASS"; exit 1; }
+          echo "feed published + verified live: envelope digest $WANT (v${{ steps.verify.outputs.feed_version }})"
