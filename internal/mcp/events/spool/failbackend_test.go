@@ -5,14 +5,14 @@ import (
 	"syscall"
 )
 
-// hookBackend wraps a real fsBackend and lets a test inject a deterministic
+// hookBackend wraps a real Backend and lets a test inject a deterministic
 // failure at exactly one filesystem step, without depending on filling the host
 // disk. A hook returning a non-nil error fails that operation instead of
 // delegating; a nil hook delegates. This is how the post-admission commit-failure
 // cases (append error, fsync/ENOSPC, checkpoint rename failure) are proven to fail
 // closed at each individual step.
 type hookBackend struct {
-	inner     fsBackend
+	inner     Backend
 	onAppend  func(path string) error
 	onReplace func(path string) error
 	onReadAt  func(path string) error

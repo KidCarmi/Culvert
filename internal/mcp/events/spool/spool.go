@@ -51,7 +51,7 @@ type Config struct {
 	Limits     limits.EventLimits
 	KEK        *secret.Provider
 	// Backend is the filesystem seam; nil uses the real OS backend.
-	Backend fsBackend
+	Backend Backend
 	// Clock supplies commit timestamps; nil uses time.Now.
 	Clock func() time.Time
 }
@@ -64,7 +64,7 @@ type Spool struct {
 	nodeID string
 	lim    limits.EventLimits
 	cr     *cryptor
-	be     fsBackend
+	be     Backend
 	clock  func() time.Time
 
 	parts map[model.Partition]*partition

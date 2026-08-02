@@ -8,7 +8,7 @@ import (
 )
 
 // The checkpoint is the crash-consistent committed-position metadata for one
-// partition. It is written via the fsBackend's AtomicReplace (temp + fsync +
+// partition. It is written via the Backend's AtomicReplace (temp + fsync +
 // rename + dir-sync), so a crash during a checkpoint update leaves either the old
 // or the new file intact — never a torn one. A record is COMMITTED if and only if
 // the checkpoint's per-segment CommittedLen covers it; anything on disk beyond

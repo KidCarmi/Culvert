@@ -11,7 +11,7 @@ import (
 	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
 )
 
-func spoolWithBackend(t *testing.T, root string, be fsBackend) *Spool {
+func spoolWithBackend(t *testing.T, root string, be Backend) *Spool {
 	t.Helper()
 	s, err := New(Config{
 		Root: root, Capability: model.CapGateway, NodeID: "dp-test",

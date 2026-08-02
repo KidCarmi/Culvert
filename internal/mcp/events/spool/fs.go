@@ -7,7 +7,7 @@ import (
 	"syscall"
 )
 
-// fsBackend is the injected filesystem seam the spool commits through. The real
+// Backend is the injected filesystem seam the spool commits through. The real
 // implementation (osBackend) calls the OS directly; tests substitute a failing
 // backend to exercise every commit-failure branch (short write, append error,
 // ENOSPC, fsync error, directory-sync error, rename failure) DETERMINISTICALLY,
@@ -20,7 +20,7 @@ import (
 // AtomicReplace writes a whole metadata file via a temp+rename+dir-sync sequence
 // (the checkpoint / state / sealed-DEK writer). A non-nil error from either is a
 // commit FAILURE: the caller must treat the write as not durable and fail closed.
-type fsBackend interface {
+type Backend interface {
 	// MkdirAll creates dir (and parents) with perm.
 	MkdirAll(dir string, perm os.FileMode) error
 	// AppendSync opens path (creating with perm), appends frame at the end, and
@@ -49,7 +49,11 @@ type fsBackend interface {
 // errShortWrite is returned when an append could not place the whole frame.
 var errShortWrite = errors.New("spool: short write")
 
-// osBackend is the production fsBackend. It uses O_APPEND + explicit fsync for
+// NewOSBackend returns the production filesystem backend. It is exported so a
+// higher layer (or a fault-injecting test wrapper) can compose it.
+func NewOSBackend() Backend { return osBackend{} }
+
+// osBackend is the production Backend. It uses O_APPEND + explicit fsync for
 // records and fileutil-style temp+rename+dir-sync for metadata. Only READ and
 // APPEND are used for segment data; whole-file replacement is reserved for
 // bounded metadata (checkpoints, state, sealed DEK).

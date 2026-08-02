@@ -5,7 +5,6 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 
 	"github.com/KidCarmi/Culvert/internal/secret"
@@ -51,7 +50,7 @@ type cryptor struct {
 // With a nil KEK provider it fails closed (errEncryptionUnavailable) — the spool
 // never falls back to plaintext. A DEK file that exists is opened; otherwise a
 // fresh random DEK is generated, sealed under the KEK, and durably written.
-func openCryptor(be fsBackend, keyPath string, kek *secret.Provider) (*cryptor, error) {
+func openCryptor(be Backend, keyPath string, kek *secret.Provider) (*cryptor, error) {
 	if kek == nil {
 		return nil, errEncryptionUnavailable
 	}
@@ -151,9 +150,6 @@ func (c *cryptor) open(aad, nonce, ciphertext []byte) ([]byte, error) {
 	}
 	return pt, nil
 }
-
-// keyIDHex returns the hex key id for recording in a segment header.
-func (c *cryptor) keyIDHex() string { return hex.EncodeToString(c.keyID[:]) }
 
 // zero wipes a byte slice (best-effort DEK hygiene at the call sites that own raw
 // key bytes; secret.Sealed already zeroizes its own buffer).
