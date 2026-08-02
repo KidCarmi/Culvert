@@ -163,7 +163,7 @@ func TestFeedGen_VersionDerivation(t *testing.T) {
 // so the workflow's `[0-9]+` anchor and the generator format can never silently diverge.
 func TestFeedGen_ArtifactNameShape(t *testing.T) {
 	// Same grammar the sign + publish steps encode in publish-feeds.yml.
-	nameRE := regexp.MustCompile(`^saas-([0-9]+)-[0-9]{8}\.json$`)
+	nameRE := regexp.MustCompile(`^saas-(\d+)-\d{8}\.json$`)
 	inst := time.Date(2026, 8, 2, 3, 4, 5, 0, time.UTC)
 	b, err := generateFeed(feedGenSpec{DatasetPath: writeDataset(t, cleanDatasetJSON), GeneratedAt: inst})
 	if err != nil {
