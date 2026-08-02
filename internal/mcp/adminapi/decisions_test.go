@@ -14,7 +14,7 @@ type fakeReader struct {
 	byPart map[string][]evmodel.Event
 }
 
-func (f *fakeReader) CommittedEvents(_, partition string, afterSeq uint64, max int) ([]evmodel.Event, []uint64, uint64, error) {
+func (f *fakeReader) CommittedEvents(_, partition string, afterSeq uint64, maxN int) ([]evmodel.Event, []uint64, uint64, error) {
 	all := f.byPart[partition]
 	var (
 		evs  []evmodel.Event
@@ -26,7 +26,7 @@ func (f *fakeReader) CommittedEvents(_, partition string, afterSeq uint64, max i
 		if seq <= afterSeq {
 			continue
 		}
-		if len(evs) >= max {
+		if len(evs) >= maxN {
 			break
 		}
 		evs = append(evs, all[i])

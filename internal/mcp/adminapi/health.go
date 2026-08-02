@@ -118,16 +118,16 @@ func (s *HealthService) Snapshot() HealthView {
 	return v
 }
 
-func (s *HealthService) capability(cap string) CapabilityHealth {
-	c := CapabilityHealth{Capability: cap}
+func (s *HealthService) capability(capNS string) CapabilityHealth {
+	c := CapabilityHealth{Capability: capNS}
 	if s.src.Runtime != nil {
-		c.Runtime = s.src.Runtime(cap)
+		c.Runtime = s.src.Runtime(capNS)
 	}
 	if s.src.Durability != nil {
-		c.Durability = s.src.Durability(cap)
+		c.Durability = s.src.Durability(capNS)
 	}
 	if s.src.Policy != nil {
-		if store, ok := s.src.Policy.Store(cap); ok {
+		if store, ok := s.src.Policy.Store(capNS); ok {
 			c.PolicyRevision = uint64(store.CurrentRevision())
 			if cur := store.Current(); cur != nil {
 				c.PolicySnapshotHash = cur.Hash()
@@ -135,10 +135,10 @@ func (s *HealthService) capability(cap string) CapabilityHealth {
 		}
 	}
 	if s.src.Inventory != nil {
-		c.Servers, c.QuarantinedTools, c.DriftedTools = s.src.Inventory.Counts(cap)
+		c.Servers, c.QuarantinedTools, c.DriftedTools = s.src.Inventory.Counts(capNS)
 	}
 	if s.src.Approvals != nil {
-		c.PendingApprovals, c.PendingPublications = s.src.Approvals.PendingCounts(cap)
+		c.PendingApprovals, c.PendingPublications = s.src.Approvals.PendingCounts(capNS)
 	}
 	return c
 }
