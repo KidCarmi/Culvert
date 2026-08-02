@@ -126,7 +126,7 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 		upstreamAtt.Record(err) // nil-safe
 		logger.Printf("upstream request error: %v", err)
 		if isDNSError(err) {
-			go fireAlert("dns_failure", AlertPayload{Host: r.Host, Detail: err.Error(), Source: "proxy"})
+			fireDNSFailureAlert(r.Host, err)
 		}
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return

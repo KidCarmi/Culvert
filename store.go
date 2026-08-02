@@ -1113,15 +1113,30 @@ func recordStats(ip, host, status, ruleMatched, actionTaken string) {
 	// it twice cost a second keyed HMAC per request for a value already in hand.
 	// Off ⇒ plaintext, byte-identical.
 	redactedHost := redactDestinationHost(host)
+	// Nobody subscribed → do nothing at all, and in particular do not spawn a
+	// goroutine (the HasSubscriber contract; same rationale as the
+	// storage_write_failed producer in storage_health.go). This is the PER-REQUEST
+	// block path, so it is the hottest alert producer in the product and the one
+	// where the skip matters most: without the gate every blocked request pays a
+	// goroutine spawn, a payload allocation and a global dedup-mutex round trip to
+	// deliver an alert to nobody. That cost lands precisely when a gateway is under
+	// a scanning/beaconing flood — when block volume is highest and latency matters
+	// most — and it is paid on the default posture (no webhooks configured) and in
+	// every test binary. The gate is a pure fast path: when a subscriber does exist
+	// the dispatch below is byte-identical.
 	switch status {
 	case "THREAT_BLOCKED", "SCAN_BLOCKED", "DPI_BLOCKED":
-		go fireAlert("threat_detected", AlertPayload{
-			Actor: ip, Host: redactedHost, Detail: ruleMatched + " " + actionTaken, Source: ruleMatched,
-		})
+		if globalAlertStore.HasSubscriber("threat_detected") {
+			go fireAlert("threat_detected", AlertPayload{
+				Actor: ip, Host: redactedHost, Detail: ruleMatched + " " + actionTaken, Source: ruleMatched,
+			})
+		}
 	case "POLICY_BLOCK", "POLICY_DROP":
-		go fireAlert("policy_block", AlertPayload{
-			Actor: ip, Host: redactedHost, Detail: ruleMatched, Source: "policy",
-		})
+		if globalAlertStore.HasSubscriber("policy_block") {
+			go fireAlert("policy_block", AlertPayload{
+				Actor: ip, Host: redactedHost, Detail: ruleMatched, Source: "policy",
+			})
+		}
 	}
 	if status == "OK" || status == "POLICY_ALLOW" {
 		// Token cardinality is fixed (12 hex), so the bounded-map behavior is unchanged.

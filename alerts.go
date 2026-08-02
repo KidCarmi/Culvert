@@ -39,6 +39,26 @@ func fireAlert(event string, payload AlertPayload) {
 
 func init() { alerts.SetSink(fireAlert) }
 
+// fireDNSFailureAlert reports a failed destination lookup from the proxy
+// request path. It is the single producer for the "dns_failure" event, shared
+// by the four per-request dial sites (plain HTTP, CONNECT bypass, CONNECT
+// inspect, WebSocket) that previously each inlined the same payload literal.
+//
+// The HasSubscriber gate is load-bearing rather than cosmetic: this producer is
+// driven by resolution failure, so its rate is set by the environment, not by
+// the operator. A resolver outage or DGA-beaconing malware puts EVERY request on
+// this path, and without the gate each one would spawn a delivery goroutine and
+// format err.Error() to deliver an alert to nobody — the default posture is no
+// webhooks configured. Gating keeps a DNS brownout from turning into goroutine
+// churn on top of the outage. When a subscriber exists the dispatch is
+// byte-identical to the previous inline call.
+func fireDNSFailureAlert(host string, err error) {
+	if !globalAlertStore.HasSubscriber("dns_failure") {
+		return
+	}
+	go fireAlert("dns_failure", AlertPayload{Host: host, Detail: err.Error(), Source: "proxy"})
+}
+
 // validateWebhookURL is re-exposed for the admin API handlers (config-time
 // shape check; the SSRF check stays at delivery time).
 var validateWebhookURL = alerts.ValidateURL

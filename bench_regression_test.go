@@ -400,3 +400,78 @@ func TestBenchGate_PolicyEvalScheduledAllocs(t *testing.T) {
 		}
 	}
 }
+
+// TestBenchGate_BlockPathAlertAllocs locks in the per-request alert-producer
+// gate. Before it, every blocked request ran `go fireAlert(...)` unconditionally:
+// a goroutine spawn, a heap-escaped payload, an RFC3339 timestamp format, a
+// dedup-key concat and a round trip through the single process-wide dedup mutex
+// — all to deliver an alert to nobody, because the default posture is no
+// webhooks configured. Measured cost was 752-3106 ns/op at 2-3 allocs/op against
+// an allow-path baseline of ~113 ns/op at 0 allocs/op, i.e. a blocked request
+// cost 5-20x an allowed one.
+//
+// That is the wrong way round for a gateway: block volume peaks exactly when a
+// scanning or beaconing flood is in progress, so the ungated producer degraded
+// the proxy hardest under attack. recordStats now consults HasSubscriber first
+// (the same contract storage_health.go uses), and the block path is allocation-
+// free again.
+//
+// Allocations are the gate, not ns/op: they are deterministic and hardware-
+// independent, so this bound holds across runners. A single alloc/op here means
+// the goroutine spawn (or the payload build feeding it) has returned to the
+// unsubscribed block path.
+func TestBenchGate_BlockPathAlertAllocs(t *testing.T) {
+	const maxAllocs int64 = 0 // steady state 0; pre-fix 2-3
+
+	orig := globalAlertStore
+	defer func() { globalAlertStore = orig }()
+	as := &AlertStore{}
+	as.Init("") // no webhooks — the default posture
+	globalAlertStore = as
+
+	for _, status := range []string{"POLICY_BLOCK", "POLICY_DROP", "THREAT_BLOCKED", "SCAN_BLOCKED", "DPI_BLOCKED"} {
+		res := testing.Benchmark(func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				recordStats("203.0.113.7", "target.example.com", status, "deny-rule", "block")
+			}
+		})
+		allocs := res.AllocsPerOp()
+		t.Logf("recordStats %s (no subscriber): %d allocs/op (bound %d), %d ns/op", status, allocs, maxAllocs, res.NsPerOp())
+		if allocs > maxAllocs {
+			t.Errorf("REGRESSION: recordStats %s allocates %d/op with NO webhook subscribed, exceeds bound %d — "+
+				"the HasSubscriber gate has been bypassed and every blocked request is spawning an alert "+
+				"goroutine again. See store.go recordStats.", status, allocs, maxAllocs)
+		}
+	}
+}
+
+// TestBenchGate_DNSFailureAlertAllocs is the same contract for the second
+// per-request producer. fireDNSFailureAlert is reached from all four dial sites
+// (plain HTTP, CONNECT bypass, CONNECT inspect, WebSocket); its rate is set by
+// the environment, not the operator, so a resolver brownout would otherwise turn
+// every request into a goroutine spawn plus an err.Error() format.
+func TestBenchGate_DNSFailureAlertAllocs(t *testing.T) {
+	const maxAllocs int64 = 0 // steady state 0; the err.Error() format alone was 1
+
+	orig := globalAlertStore
+	defer func() { globalAlertStore = orig }()
+	as := &AlertStore{}
+	as.Init("")
+	globalAlertStore = as
+
+	err := errTestDNS{}
+	res := testing.Benchmark(func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			fireDNSFailureAlert("dns-fail.example.com", err)
+		}
+	})
+	allocs := res.AllocsPerOp()
+	t.Logf("fireDNSFailureAlert (no subscriber): %d allocs/op (bound %d), %d ns/op", allocs, maxAllocs, res.NsPerOp())
+	if allocs > maxAllocs {
+		t.Errorf("REGRESSION: fireDNSFailureAlert allocates %d/op with NO webhook subscribed, exceeds bound %d — "+
+			"the HasSubscriber gate has been bypassed; a DNS brownout will now spawn a goroutine per request. "+
+			"See alerts.go fireDNSFailureAlert.", allocs, maxAllocs)
+	}
+}
