@@ -53,17 +53,17 @@ func candidateDoc(rev uint64) []byte {
 	return []byte(`{"schema_version":1,"capability":"gateway","policy_revision":` + strconv.FormatUint(rev, 10) + `,"default_action":"DENY","rules":[]}`)
 }
 
-func newPubSvc(t *testing.T) (*PublicationService, *policy.Store, *approval.Store, func() approval.ID, *fakePubCommitter) {
+func newPubSvc(t *testing.T) (svc *PublicationService, gwStore *policy.Store, appr *approval.Store, idgen func() approval.ID, pub *fakePubCommitter) {
 	t.Helper()
-	gw := policy.NewStore(policy.CapGateway)
-	stores := &fakePolicyStores{gw: gw}
+	gwStore = policy.NewStore(policy.CapGateway)
+	stores := &fakePolicyStores{gw: gwStore}
 	ps := NewPolicyService(stores, policy.DefaultLimits(), DefaultLimits(), func() time.Time { return time.Unix(1, 0) })
-	appr := approval.NewStore(approval.Config{MaxPending: 100, MaxPerTenant: 50, TTL: time.Hour})
+	appr = approval.NewStore(approval.Config{MaxPending: 100, MaxPerTenant: 50, TTL: time.Hour})
 	var ctr int64
-	idgen := func() approval.ID { return approval.ID("pub-" + strconv.FormatInt(atomic.AddInt64(&ctr, 1), 10)) }
-	pub := &fakePubCommitter{}
-	svc := NewPublicationService(ps, stores, appr, pub, idgen, func() time.Time { return time.Unix(1, 0) })
-	return svc, gw, appr, idgen, pub
+	idgen = func() approval.ID { return approval.ID("pub-" + strconv.FormatInt(atomic.AddInt64(&ctr, 1), 10)) }
+	pub = &fakePubCommitter{}
+	svc = NewPublicationService(ps, stores, appr, pub, idgen, func() time.Time { return time.Unix(1, 0) })
+	return svc, gwStore, appr, idgen, pub
 }
 
 func TestPublish_HappyPath(t *testing.T) {
