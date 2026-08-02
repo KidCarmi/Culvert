@@ -533,10 +533,27 @@ is additionally protected by its persisted floor.
   §11.2 sequence.
 
 **PR-untrusted runs:** receive neither production OIDC signing identity nor
-publishing credentials. Job B is dormant-gated (`FEEDS_PUBLISH_ENABLED`) and runs
-only via `workflow_run` on a signed tag context, default-branch workflow copy,
-`harden-runner egress: block` (allow `feeds.culvertlabs.com`,
+publishing credentials. Job B is dormant-gated (`FEEDS_PUBLISH_ENABLED`) on a
+signed tag context, `harden-runner egress: block` (allow `feeds.culvertlabs.com`,
 `*.r2.cloudflarestorage.com`, `api.cloudflare.com`).
+
+> **Implementation note (F5, amends this section):** both jobs are triggered
+> **directly by the `feeds-v*` tag push** in `publish-feeds.yml`, NOT by a
+> `workflow_run` fan-out. This is forced by the trust model, not a shortcut: the
+> pinned feed signing identity is anchored to
+> `publish-feeds.yml@refs/tags/feeds-v*` (§F2, `feeds_identity.env` /
+> `internal/urlcatfeed/identity.go`), so the keyless signature can only be minted
+> by a run **of this workflow file on that tag**. A `workflow_run` split would put
+> signing in a different triggering workflow and break the pinned SAN. A tag push
+> already executes the workflow copy **as of the tagged commit** (tags are cut
+> from a reviewed `main` by the owner, and the `feeds-v*` tag namespace is
+> creation-restricted by the F6 tag ruleset), so the default-branch-copy guarantee
+> the original `workflow_run` phrasing sought is preserved by tag protection rather
+> than by `workflow_run`. Job A holds `id-token: write` (signing) and no R2/CF
+> credential; Job B holds the R2/CF credentials and no `id-token`; the privilege
+> boundary is unchanged. Job B additionally requires `startsWith(github.ref,
+> 'refs/tags/feeds-v')` so a dry-run `workflow_dispatch` (which produces no signed
+> envelope) can never publish. Pinned by `feeds_publish_workflow_test.go`.
 
 ### 11.2 Publish sequence (fail-closed; no public staging prefix)
 

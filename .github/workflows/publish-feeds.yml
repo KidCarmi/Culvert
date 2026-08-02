@@ -325,7 +325,11 @@ jobs:
       # ETag>` when a live envelope exists, `If-None-Match: '*'` on first publish. A
       # concurrent/stale publisher's write fails 412 => abort without overwriting a newer
       # envelope. Any gate failure above aborts BEFORE this step, leaving the live
-      # envelope untouched.
+      # envelope untouched. The ETag is captured from the SAME get-object that yields
+      # the bytes we read feed_version from (get-object returns it on stdout), so the
+      # version and the If-Match token are bound to one atomic read — a second head-object
+      # would open a get→head TOCTOU window (harmless, since a diverging ETag still 412s,
+      # but the single read is both tighter and one round-trip cheaper).
       - name: CAS-guarded envelope promote (If-Match strictly-greater)
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.FEEDS_R2_S3_ACCESS_KEY_ID }}
@@ -338,16 +342,17 @@ jobs:
           set -euo pipefail
           KEY="v1/url-categories/saas/manifest.sigstore.json"
           COND=(--if-none-match '*')
-          if aws s3api get-object --bucket "$R2_BUCKET" --key "$KEY" \
-               --endpoint-url "$R2_S3_ENDPOINT" live_env.json >/dev/null 2>get_err.txt; then
+          # get-object writes the body to live_env.json AND prints the object metadata
+          # (incl. ETag) as JSON on stdout — capture both from the one read.
+          if META="$(aws s3api get-object --bucket "$R2_BUCKET" --key "$KEY" \
+               --endpoint-url "$R2_S3_ENDPOINT" live_env.json 2>get_err.txt)"; then
             LIVE_FV="$(jq -r '.payload_b64' live_env.json | base64 -d | jq -r '.feed_version // 0')"
             printf '%s' "$LIVE_FV" | grep -Eq '^[0-9]+$' || { echo "FATAL: unreadable live feed_version"; exit 1; }
             if [ "$NEW_FV" -le "$LIVE_FV" ]; then
               echo "FATAL: new feed_version $NEW_FV is not strictly greater than live $LIVE_FV — refusing to roll back"; exit 1
             fi
-            ETAG="$(aws s3api head-object --bucket "$R2_BUCKET" --key "$KEY" \
-                      --endpoint-url "$R2_S3_ENDPOINT" --query ETag --output text)"
-            test -n "$ETAG" || { echo "FATAL: could not read live envelope ETag"; exit 1; }
+            ETAG="$(printf '%s' "$META" | jq -r '.ETag // empty')"
+            test -n "$ETAG" || { echo "FATAL: get-object returned no ETag for the live envelope"; exit 1; }
             COND=(--if-match "$ETAG")
             echo "CAS: promoting v$NEW_FV over live v$LIVE_FV (If-Match $ETAG)"
           else
