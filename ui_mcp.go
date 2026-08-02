@@ -616,8 +616,11 @@ func apiMCPConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Transactional: validate the complete candidate; on any failure the
-		// current running config is retained (ConfigStore.Set is atomic). Local
-		// node only — no CP→DP propagation.
+		// current running config is retained (ConfigStore.Set is atomic). This
+		// persists the node-local config ONLY — it does not (re)bind or restart a
+		// live MCP listener, and it never propagates CP→DP. The response is
+		// explicit that listener activation is not implemented in this build, so a
+		// caller cannot mistake a stored config for a bound endpoint.
 		before := m.svc.Config.Current()
 		if err := m.svc.Config.Set(cand); err != nil {
 			mcpErr(w, err)
@@ -625,7 +628,8 @@ func apiMCPConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		auditEventDiff(r, "mcp.config.update", "mcp", "local_only", mcpRedactConfig(before), mcpRedactConfig(m.svc.Config.Current()))
 		jsonOK(w, map[string]any{
-			"applied":                      true,
+			"stored":                       true,
+			"listener_activation":          "not_implemented",
 			"distribution_state":           "local_only",
 			"distribution_not_implemented": true,
 			"config":                       mcpRedactConfig(m.svc.Config.Current()),

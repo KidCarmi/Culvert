@@ -49,7 +49,8 @@ type PublicationService struct {
 	idgen     func() approval.ID
 	clock     func() time.Time
 
-	mu      sync.Mutex
+	mu      sync.Mutex // guards pending
+	pubMu   sync.Mutex // serializes Publish: one commit+store.Publish at a time
 	pending map[approval.ID]*pendingPublication
 }
 
@@ -68,6 +69,7 @@ func NewPublicationService(ps *PolicyService, stores PolicyStores, approvals *ap
 // Create compiles+validates the candidate, checks the expected base revision,
 // and records a pending four-eyes publication request. It publishes nothing.
 func (s *PublicationService) Create(capability, tenant string, requester approval.PrincipalID, raw []byte, expectedBase uint64) (approval.ID, error) {
+	s.sweepPending() // release snapshots of rejected/expired requests before adding
 	snap, err := s.policySvc.compile(capability, raw)
 	if err != nil {
 		return "", err
@@ -115,12 +117,38 @@ func (s *PublicationService) Approve(id approval.ID, approver approval.Principal
 	return s.approvals.Approve(id, approver, live, appCommit)
 }
 
-// Reject denies a pending publication request.
+// Reject denies a pending publication request and releases its retained
+// compiled snapshot (a rejected request is terminal).
 func (s *PublicationService) Reject(id approval.ID, approver approval.PrincipalID, reason string, appCommit approval.Committer) error {
 	if _, err := s.lookup(id); err != nil {
 		return err
 	}
-	return s.approvals.Reject(id, approver, reason, appCommit)
+	if err := s.approvals.Reject(id, approver, reason, appCommit); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	delete(s.pending, id)
+	s.mu.Unlock()
+	return nil
+}
+
+// sweepPending releases the compiled snapshots of any pending publication whose
+// approval request is gone (expired out of the store) or terminal-and-not-
+// granted (rejected/expired), so an operator cannot grow memory unbounded by
+// letting request TTLs elapse. Called on Create (bounded by the pending cap).
+func (s *PublicationService) sweepPending() {
+	s.mu.Lock()
+	stale := make([]approval.ID, 0)
+	for id, pp := range s.pending {
+		r, err := s.approvals.Get(id, pp.tenant)
+		if err != nil || r.State() == approval.StateRejected || r.State() == approval.StateExpired {
+			stale = append(stale, id)
+		}
+	}
+	for _, id := range stale {
+		delete(s.pending, id)
+	}
+	s.mu.Unlock()
 }
 
 // Publish performs the final local publication: it verifies the approval is
@@ -129,6 +157,11 @@ func (s *PublicationService) Reject(id approval.ID, approver approval.PrincipalI
 // into the local PR-6 store. Any failure publishes nothing and retains the
 // active policy.
 func (s *PublicationService) Publish(id approval.ID, tenant string, rc approval.Receipt) (PublishResult, error) {
+	// Serialize the whole publish so two requests on the same base can never both
+	// commit a durable event before one advances the store (which would leave a
+	// durable record for a candidate that never became active).
+	s.pubMu.Lock()
+	defer s.pubMu.Unlock()
 	pp, err := s.lookup(id)
 	if err != nil {
 		return PublishResult{}, err
@@ -144,14 +177,20 @@ func (s *PublicationService) Publish(id approval.ID, tenant string, rc approval.
 	if !rc.Matches(pp.tenant, pp.capability, pp.hash, pp.proposed) {
 		return PublishResult{}, mcperr.New(mcperr.ReasonApprovalBindingMismatch, "adminapi.publish", "receipt does not match candidate")
 	}
+	store, ok := s.stores.Store(pp.capability)
+	if !ok {
+		return PublishResult{}, mcperr.New(mcperr.ReasonAdminNotFound, "adminapi.publish", "no policy store")
+	}
+	// Re-check the LIVE base BEFORE committing the durable event: if another
+	// publish advanced the store since this request was created, fail closed with
+	// no durable record (commit-before-state-change is preserved for the happy path).
+	if uint64(store.CurrentRevision()) != pp.base {
+		return PublishResult{}, mcperr.New(mcperr.ReasonPublicationStaleBase, "adminapi.publish", "active base revision advanced since request")
+	}
 	// Durably commit the configuration-publication event BEFORE touching the store.
 	digest, err := s.commit.CommitPublication(pp.capability, pp.tenant, pp.hash, pp.base, pp.proposed)
 	if err != nil {
 		return PublishResult{}, mcperr.Wrap(mcperr.ReasonPublicationDurabilityRequired, "adminapi.publish", "publication event did not commit", err)
-	}
-	store, ok := s.stores.Store(pp.capability)
-	if !ok {
-		return PublishResult{}, mcperr.New(mcperr.ReasonAdminNotFound, "adminapi.publish", "no policy store")
 	}
 	if err := store.Publish(policy.Revision(pp.base), pp.snap); err != nil {
 		// The active policy is unchanged; surface as a stale-base publication failure.

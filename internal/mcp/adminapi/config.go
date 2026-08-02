@@ -105,44 +105,50 @@ func validPort(p int) bool { return p >= 1 && p <= 65535 }
 // Validate enforces the PR-9 configuration invariants. A candidate config that
 // fails validation is rejected with a classified error and the current running
 // configuration is retained by the caller.
-//
-//nolint:gocyclo,cyclop,funlen // a flat table of independent listener invariants
 func (c MCPConfig) Validate(maxOutputBytes int) error {
 	// Per-listener structural checks (only when enabled — a disabled listener
 	// keeps safe defaults but need not be fully configured).
 	if c.Gateway.Enabled {
-		if err := c.Gateway.ListenerConfig.validate("gateway"); err != nil {
+		if err := c.Gateway.validate("gateway"); err != nil {
 			return err
 		}
 	}
 	if c.Management.Enabled {
-		if err := c.Management.ListenerConfig.validate("management"); err != nil {
+		if err := c.Management.validateManagement(maxOutputBytes); err != nil {
 			return err
-		}
-		if c.Management.MutationEnabled {
-			return mcperr.New(mcperr.ReasonConfigInvalid, "mcpconfig", "management mutation is unavailable in V1")
-		}
-		switch c.Management.DefaultMinRole {
-		case "viewer", "operator", "admin":
-		default:
-			return mcperr.New(mcperr.ReasonConfigInvalid, "mcpconfig", "management default_min_role must be viewer|operator|admin")
-		}
-		if c.Management.AuthMode != "oauth-token" {
-			return mcperr.New(mcperr.ReasonConfigInvalid, "mcpconfig", "management auth_mode must be oauth-token")
-		}
-		if c.Management.OutputMaxBytes <= 0 || c.Management.OutputMaxBytes > maxOutputBytes {
-			return mcperr.New(mcperr.ReasonConfigInvalid, "mcpconfig", "management output_max_bytes out of range")
-		}
-		if c.Management.OutputRedaction == "" {
-			return mcperr.New(mcperr.ReasonConfigInvalid, "mcpconfig", "management output_redaction_profile required")
 		}
 	}
 	// Non-overlap: Gateway and Management may not share a bind endpoint.
-	if c.Gateway.Enabled && c.Management.Enabled {
-		if c.Gateway.Port == c.Management.Port &&
-			strings.EqualFold(c.Gateway.BindAddress, c.Management.BindAddress) {
-			return mcperr.New(mcperr.ReasonConfigInvalid, "mcpconfig", "gateway and management must not share a bind endpoint")
-		}
+	if c.Gateway.Enabled && c.Management.Enabled &&
+		c.Gateway.Port == c.Management.Port &&
+		strings.EqualFold(c.Gateway.BindAddress, c.Management.BindAddress) {
+		return mcperr.New(mcperr.ReasonConfigInvalid, "mcpconfig", "gateway and management must not share a bind endpoint")
+	}
+	return nil
+}
+
+// validateManagement checks the Management-specific access invariants (read-only
+// in V1, min-role floor, bounded output). ListenerConfig.validate is promoted.
+func (m ManagementConfig) validateManagement(maxOutputBytes int) error {
+	if err := m.validate("management"); err != nil {
+		return err
+	}
+	if m.MutationEnabled {
+		return mcperr.New(mcperr.ReasonConfigInvalid, "mcpconfig", "management mutation is unavailable in V1")
+	}
+	switch m.DefaultMinRole {
+	case "viewer", "operator", "admin":
+	default:
+		return mcperr.New(mcperr.ReasonConfigInvalid, "mcpconfig", "management default_min_role must be viewer|operator|admin")
+	}
+	if m.AuthMode != "oauth-token" {
+		return mcperr.New(mcperr.ReasonConfigInvalid, "mcpconfig", "management auth_mode must be oauth-token")
+	}
+	if m.OutputMaxBytes <= 0 || m.OutputMaxBytes > maxOutputBytes {
+		return mcperr.New(mcperr.ReasonConfigInvalid, "mcpconfig", "management output_max_bytes out of range")
+	}
+	if m.OutputRedaction == "" {
+		return mcperr.New(mcperr.ReasonConfigInvalid, "mcpconfig", "management output_redaction_profile required")
 	}
 	return nil
 }

@@ -32,7 +32,7 @@ const (
 	RoleAdmin
 )
 
-func (r Role) atLeast(min Role) bool { return r != RoleNone && r >= min }
+func (r Role) atLeast(minRole Role) bool { return r != RoleNone && r >= minRole }
 
 // Class classifies a Management tool. Only these two classes exist — there is no
 // mutation class.

@@ -116,9 +116,10 @@ func (s *InventoryService) GetServer(tenant, serverID string) (ServerView, error
 	if tenant == "" {
 		return ServerView{}, mcperr.New(mcperr.ReasonAdminTenantScope, "adminapi.inventory", "tenant required")
 	}
-	for _, r := range s.reg.Servers() {
-		if string(r.ID) == serverID && string(r.OwnerScope) == tenant {
-			return serverView(r), nil
+	recs := s.reg.Servers()
+	for i := range recs {
+		if string(recs[i].ID) == serverID && string(recs[i].OwnerScope) == tenant {
+			return serverView(recs[i]), nil
 		}
 	}
 	return ServerView{}, mcperr.New(mcperr.ReasonAdminNotFound, "adminapi.inventory", "not found")
@@ -165,9 +166,10 @@ func (s *InventoryService) GetTool(tenant, serverID, name string) (ToolView, err
 	if s.serverTenants()[serverID] != tenant {
 		return ToolView{}, mcperr.New(mcperr.ReasonAdminNotFound, "adminapi.inventory", "not found")
 	}
-	for _, tr := range s.cat.Tools() {
-		if string(tr.Key.Server) == serverID && tr.Key.Name == name {
-			return toolView(tr), nil
+	tools := s.cat.Tools()
+	for i := range tools {
+		if string(tools[i].Key.Server) == serverID && tools[i].Key.Name == name {
+			return toolView(tools[i]), nil
 		}
 	}
 	return ToolView{}, mcperr.New(mcperr.ReasonAdminNotFound, "adminapi.inventory", "not found")
@@ -175,8 +177,9 @@ func (s *InventoryService) GetTool(tenant, serverID, name string) (ToolView, err
 
 func (s *InventoryService) serverTenants() map[string]string {
 	m := make(map[string]string)
-	for _, r := range s.reg.Servers() {
-		m[string(r.ID)] = string(r.OwnerScope)
+	recs := s.reg.Servers()
+	for i := range recs {
+		m[string(recs[i].ID)] = string(recs[i].OwnerScope)
 	}
 	return m
 }

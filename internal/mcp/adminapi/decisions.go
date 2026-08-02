@@ -189,12 +189,11 @@ func (s *DecisionService) Search(capability, tenant, cursor string, limit int, f
 	if limit <= 0 || limit > s.lim.MaxPageSize() {
 		limit = s.lim.MaxPageSize()
 	}
-	parts := []string{partitionCrit, partitionOrd}
-	out := make([]DecisionView, 0, limit)
-	scanned := 0
-	batch := s.lim.MaxPageSize()
-	for pi := range parts {
-		part := parts[pi]
+	// out is intentionally NOT pre-sized from the user-provided limit (CodeQL:
+	// no allocation sized by an external value); limit only bounds appends.
+	var out []DecisionView
+	st := &searchScan{svc: s, capability: capability, tenant: tenant, limit: limit, f: f, batch: s.lim.MaxPageSize()}
+	for _, part := range []string{partitionCrit, partitionOrd} {
 		if partRank(part) < partRank(cur.part) {
 			continue // already passed this partition
 		}
@@ -202,34 +201,67 @@ func (s *DecisionService) Search(capability, tenant, cursor string, limit int, f
 		if part == cur.part {
 			afterSeq = cur.seq
 		}
-		for {
-			evs, seqs, next, rerr := s.reader.CommittedEvents(capability, part, afterSeq, batch)
-			if rerr != nil {
-				return SearchResult{}, rerr
-			}
-			for i := range evs {
-				scanned++
-				if scanned > s.lim.MaxProjectionScan() {
-					return SearchResult{Decisions: out, NextCursor: encodeCursor(part, seqs[i])}, nil
-				}
-				if evs[i].Identity.Tenant != tenant {
-					continue
-				}
-				if !matchFilter(&evs[i], f) {
-					continue
-				}
-				out = append(out, decisionView(&evs[i], part, seqs[i]))
-				if len(out) >= limit {
-					return SearchResult{Decisions: out, NextCursor: encodeCursor(part, seqs[i])}, nil
-				}
-			}
-			if len(evs) < batch {
-				break // partition exhausted
-			}
-			afterSeq = next
+		cursor, done, err := st.scan(part, afterSeq, &out)
+		if err != nil {
+			return SearchResult{}, err
+		}
+		if done {
+			return SearchResult{Decisions: out, NextCursor: cursor}, nil
 		}
 	}
 	return SearchResult{Decisions: out}, nil
+}
+
+// searchScan holds the per-call scan state for Search. Extracted so Search
+// itself stays under the cognitive-complexity bound.
+type searchScan struct {
+	svc                *DecisionService
+	capability, tenant string
+	limit              int
+	f                  DecisionFilter
+	batch              int
+	scanned            int
+}
+
+// scan reads one partition after afterSeq, appending tenant+filter matches to
+// out. It returns (resumeCursor, done): done=true means the page filled or the
+// bounded scan budget was hit and the caller should stop. The resume cursor
+// always points at the LAST event actually EXAMINED, so the event that triggered
+// the scan-budget stop is re-read on the next call and never skipped.
+func (st *searchScan) scan(part string, afterSeq uint64, out *[]DecisionView) (string, bool, error) {
+	for {
+		evs, seqs, next, err := st.svc.reader.CommittedEvents(st.capability, part, afterSeq, st.batch)
+		if err != nil {
+			return "", false, err
+		}
+		for i := range evs {
+			if st.scanned >= st.svc.lim.MaxProjectionScan() {
+				return encodeCursor(part, prevSeq(seqs, i, afterSeq)), true, nil
+			}
+			st.scanned++
+			if evs[i].Identity.Tenant != st.tenant || !matchFilter(&evs[i], st.f) {
+				continue
+			}
+			*out = append(*out, decisionView(&evs[i], part, seqs[i]))
+			if len(*out) >= st.limit {
+				return encodeCursor(part, seqs[i]), true, nil
+			}
+		}
+		if len(evs) < st.batch {
+			return "", false, nil // partition exhausted
+		}
+		afterSeq = next
+	}
+}
+
+// prevSeq returns the sequence of the last event examined before index i (the
+// batch's prior element, or afterSeq when i==0), so a scan-budget stop resumes
+// at — not past — the unexamined boundary event.
+func prevSeq(seqs []uint64, i int, afterSeq uint64) uint64 {
+	if i > 0 {
+		return seqs[i-1]
+	}
+	return afterSeq
 }
 
 // Explain returns the full historical explanation of one committed decision,
@@ -293,29 +325,22 @@ func partRank(part string) int {
 }
 
 func matchFilter(e *evmodel.Event, f DecisionFilter) bool {
-	if f.Action != "" && e.Decision.Action != f.Action {
-		return false
+	// Exact-match string filters, as (want, have) pairs — a table keeps this
+	// under the cyclomatic bound as filters grow.
+	eq := [...][2]string{
+		{f.Action, e.Decision.Action},
+		{f.ReasonCode, e.Decision.ReasonCode},
+		{f.RuleID, e.Decision.MatchedRuleID},
+		{f.ServerID, e.Identity.ServerID},
+		{f.ToolName, e.Identity.ToolName},
+		{f.ToolFingerprint, e.Identity.ToolFingerprint},
+		{f.PrincipalID, e.Identity.PrincipalID},
+		{f.AgentID, e.Identity.AgentID},
 	}
-	if f.ReasonCode != "" && e.Decision.ReasonCode != f.ReasonCode {
-		return false
-	}
-	if f.RuleID != "" && e.Decision.MatchedRuleID != f.RuleID {
-		return false
-	}
-	if f.ServerID != "" && e.Identity.ServerID != f.ServerID {
-		return false
-	}
-	if f.ToolName != "" && e.Identity.ToolName != f.ToolName {
-		return false
-	}
-	if f.ToolFingerprint != "" && e.Identity.ToolFingerprint != f.ToolFingerprint {
-		return false
-	}
-	if f.PrincipalID != "" && e.Identity.PrincipalID != f.PrincipalID {
-		return false
-	}
-	if f.AgentID != "" && e.Identity.AgentID != f.AgentID {
-		return false
+	for _, p := range eq {
+		if p[0] != "" && p[1] != p[0] {
+			return false
+		}
 	}
 	if f.StartUnixNano != 0 && e.TimeUnixNano < f.StartUnixNano {
 		return false
