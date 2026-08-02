@@ -40,7 +40,7 @@ type Manager struct {
 
 // domain is one capability's isolated durability stack.
 type domain struct {
-	cap   model.Capability
+	capNS model.Capability
 	lim   limits.EventLimits
 	spool *spool.Spool
 	agg   *denial.Aggregator
@@ -79,17 +79,18 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	m := &Manager{nodeID: cfg.NodeID, clock: clock, domains: map[model.Capability]*domain{}}
 
 	specs := []struct {
-		cap model.Capability
-		sub string
-		lim limits.EventLimits
+		capNS model.Capability
+		sub   string
+		lim   limits.EventLimits
 	}{
 		{model.CapGateway, "gateway", cfg.GatewayLimits},
 		{model.CapManagement, "management", cfg.ManagementLimits},
 	}
-	for _, sp := range specs {
+	for i := range specs {
+		sp := &specs[i] // pointer: the value carries an EventLimits (avoid a per-iter copy)
 		root := filepath.Join(cfg.DataDir, sp.sub)
 		spl, err := spool.New(spool.Config{
-			Root: root, Capability: sp.cap, NodeID: cfg.NodeID,
+			Root: root, Capability: sp.capNS, NodeID: cfg.NodeID,
 			Limits: sp.lim, KEK: cfg.KEK, Backend: cfg.Backend, Clock: clock,
 		})
 		if err != nil {
@@ -100,7 +101,7 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 			return nil, rerr
 		}
 		st := state.New(state.Config{
-			Capability: sp.cap, NodeID: cfg.NodeID,
+			Capability: sp.capNS, NodeID: cfg.NodeID,
 			Persist: state.NewFilePersist(filepath.Join(root, "degraded_state.json")),
 			Clock:   clock,
 		})
@@ -113,11 +114,11 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 			_ = st.OnCriticalCommitFailure(spl.DomainID(model.PartCrit), "recovery detected spool corruption: "+rep.CorruptReason)
 		}
 		agg := denial.NewAggregator(denial.Config{
-			Capability: sp.cap, NodeID: cfg.NodeID, Window: sp.lim.AggregationWindow(),
+			Capability: sp.capNS, NodeID: cfg.NodeID, Window: sp.lim.AggregationWindow(),
 			MaxBuckets: sp.lim.MaxDenialBuckets(), MaxPerSource: sp.lim.MaxBucketsPerSource(),
 			IDGen: randID,
 		})
-		m.domains[sp.cap] = &domain{cap: sp.cap, lim: sp.lim, spool: spl, agg: agg, state: st}
+		m.domains[sp.capNS] = &domain{capNS: sp.capNS, lim: sp.lim, spool: spl, agg: agg, state: st}
 	}
 	return m, nil
 }
@@ -127,8 +128,8 @@ func mgrErr(r mcperr.Reason, detail string) error {
 }
 
 // domainFor returns the isolated domain for a capability.
-func (m *Manager) domainFor(cap model.Capability) (*domain, error) {
-	d, ok := m.domains[cap]
+func (m *Manager) domainFor(capNS model.Capability) (*domain, error) {
+	d, ok := m.domains[capNS]
 	if !ok {
 		return nil, mgrErr(mcperr.ReasonEventInvalid, "unknown capability")
 	}
@@ -138,8 +139,8 @@ func (m *Manager) domainFor(cap model.Capability) (*domain, error) {
 // WriteAllowedCritical reports whether the given capability's critical track is
 // normal (not degraded/recovering). The runtime consults this to fail a critical
 // operation closed while its domain is degraded.
-func (m *Manager) WriteAllowedCritical(cap model.Capability) bool {
-	d, err := m.domainFor(cap)
+func (m *Manager) WriteAllowedCritical(capNS model.Capability) bool {
+	d, err := m.domainFor(capNS)
 	if err != nil {
 		return false
 	}
@@ -148,8 +149,8 @@ func (m *Manager) WriteAllowedCritical(cap model.Capability) bool {
 
 // Spool exposes the capability spool for the export foundation (read-only reads /
 // export ack). It returns nil for an unknown capability.
-func (m *Manager) Spool(cap model.Capability) *spool.Spool {
-	d, ok := m.domains[cap]
+func (m *Manager) Spool(capNS model.Capability) *spool.Spool {
+	d, ok := m.domains[capNS]
 	if !ok {
 		return nil
 	}

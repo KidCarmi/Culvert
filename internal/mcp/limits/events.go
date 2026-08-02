@@ -254,7 +254,7 @@ func evtLimitErr(detail string) error {
 
 // Validate reports whether the EventConfig is safe and internally consistent.
 // Zero, negative, over-cap, or inconsistent limits are rejected.
-func (c EventConfig) Validate() error { //nolint:gocyclo,cyclop // a flat table of independent bound checks
+func (c EventConfig) Validate() error { //nolint:gocyclo,cyclop,funlen // a flat table of independent bound checks + consistency invariants
 	posCaps := []struct {
 		name string
 		v    int
@@ -427,6 +427,8 @@ var gatewayEventConfig = EventConfig{
 // surface — deliberately tighter and INDEPENDENT of the Gateway set. Management
 // carries configuration payloads (the higher-privilege stream) at far lower
 // volume, so its spool and queues are smaller while its reserve share is larger.
+//
+//nolint:dupl // Gateway and Management default sets are intentionally parallel literals (independent tunables)
 var managementEventConfig = EventConfig{
 	SpoolMaxBytes:           128 << 20,
 	CriticalReserveBytes:    48 << 20,

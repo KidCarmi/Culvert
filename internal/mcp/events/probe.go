@@ -12,8 +12,8 @@ import (
 // confirmed commit, not an enqueue), then finalizes to normal only when all four
 // criteria hold. It returns true when the domain returned to normal this tick.
 // There is no bypass: a failed marker commit/readback leaves the domain degraded.
-func (m *Manager) RecoverProbe(cap model.Capability) bool {
-	d, err := m.domainFor(cap)
+func (m *Manager) RecoverProbe(capNS model.Capability) bool {
+	d, err := m.domainFor(capNS)
 	if err != nil {
 		return false
 	}
@@ -65,7 +65,7 @@ func (m *Manager) commitAndReadbackMarker(d *domain) (string, bool) {
 		Phase:         model.PhaseRecoveryMarker,
 		Criticality:   model.CritCritical,
 		Partition:     model.PartCrit,
-		Capability:    d.cap,
+		Capability:    d.capNS,
 		ActionClass:   model.ActionClassNone,
 		NodeID:        m.nodeID,
 		DomainID:      d.spool.DomainID(model.PartCrit),
@@ -86,24 +86,25 @@ func (m *Manager) commitAndReadbackMarker(d *domain) (string, bool) {
 		return "", false
 	}
 	// Read it back: the committed marker must be retrievable and verify.
-	evs, _, rerr := d.spool.CommittedForExport(model.PartCrit, rec.Sequence()-1, 1)
-	if rerr != nil {
-		return "", false
-	}
-	for _, got := range evs {
-		if got.EventID == e.EventID && got.VerifyDigest() {
-			return rec.EventDigest(), true
-		}
+	evs, _, _, rerr := d.spool.CommittedForExport(model.PartCrit, rec.Sequence()-1, 1)
+	if rerr == nil && markerPresent(evs, e.EventID) {
+		return rec.EventDigest(), true
 	}
 	// Fall back to a broader scan when sequence bookkeeping does not line up.
-	all, _, aerr := d.spool.CommittedForExport(model.PartCrit, 0, d.lim.MaxRecoveryRecords())
-	if aerr != nil {
-		return "", false
-	}
-	for _, got := range all {
-		if got.EventID == e.EventID && got.VerifyDigest() {
-			return rec.EventDigest(), true
-		}
+	all, _, _, aerr := d.spool.CommittedForExport(model.PartCrit, 0, d.lim.MaxRecoveryRecords())
+	if aerr == nil && markerPresent(all, e.EventID) {
+		return rec.EventDigest(), true
 	}
 	return "", false
+}
+
+// markerPresent reports whether a committed event with the given id is present and
+// verifies. Index-based iteration avoids copying the 920-byte events per loop.
+func markerPresent(evs []model.Event, id string) bool {
+	for i := range evs {
+		if evs[i].EventID == id && evs[i].VerifyDigest() {
+			return true
+		}
+	}
+	return false
 }

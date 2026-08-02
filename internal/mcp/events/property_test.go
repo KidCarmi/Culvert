@@ -40,7 +40,7 @@ func TestProperty_RecoveredEventEqualsCommitted(t *testing.T) {
 	// Reopen and read the committed event back; its digest must match and verify.
 	m2 := newMgr(t, dir, nil)
 	defer m2.Close()
-	evs, _, rerr := m2.Spool(model.CapGateway).CommittedForExport(model.PartCrit, 0, 10)
+	evs, _, _, rerr := m2.Spool(model.CapGateway).CommittedForExport(model.PartCrit, 0, 10)
 	if rerr != nil {
 		t.Fatalf("read back: %v", rerr)
 	}

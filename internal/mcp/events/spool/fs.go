@@ -59,8 +59,10 @@ func NewOSBackend() Backend { return osBackend{} }
 // bounded metadata (checkpoints, state, sealed DEK).
 type osBackend struct{}
 
+// MkdirAll creates dir and parents with perm.
 func (osBackend) MkdirAll(dir string, perm os.FileMode) error { return os.MkdirAll(dir, perm) }
 
+// AppendSync appends frame at EOF (creating path with perm) and fsyncs the file.
 func (osBackend) AppendSync(path string, frame []byte, perm os.FileMode) error {
 	f, err := os.OpenFile(filepath.Clean(path), os.O_CREATE|os.O_WRONLY|os.O_APPEND, perm)
 	if err != nil {
@@ -81,6 +83,7 @@ func (osBackend) AppendSync(path string, frame []byte, perm os.FileMode) error {
 	return f.Close()
 }
 
+// AtomicReplace writes data to path via temp+fsync+rename+dir-sync with perm.
 func (osBackend) AtomicReplace(path string, data []byte, perm os.FileMode) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".tmp-*")
@@ -133,8 +136,10 @@ func syncDir(dir string) error {
 	return cerr
 }
 
+// ReadFile reads a whole file.
 func (osBackend) ReadFile(path string) ([]byte, error) { return os.ReadFile(filepath.Clean(path)) }
 
+// ReadAt reads len(buf) bytes at off from path.
 func (osBackend) ReadAt(path string, off int64, buf []byte) (int, error) {
 	f, err := os.Open(filepath.Clean(path))
 	if err != nil {
@@ -144,12 +149,15 @@ func (osBackend) ReadAt(path string, off int64, buf []byte) (int, error) {
 	return f.ReadAt(buf, off)
 }
 
+// Truncate truncates path to size.
 func (osBackend) Truncate(path string, size int64) error {
 	return os.Truncate(filepath.Clean(path), size)
 }
 
+// Remove removes a file.
 func (osBackend) Remove(path string) error { return os.Remove(filepath.Clean(path)) }
 
+// Size returns the byte size of path.
 func (osBackend) Size(path string) (int64, error) {
 	fi, err := os.Stat(filepath.Clean(path))
 	if err != nil {
@@ -158,6 +166,7 @@ func (osBackend) Size(path string) (int64, error) {
 	return fi.Size(), nil
 }
 
+// List returns the base names of non-directory entries in dir.
 func (osBackend) List(dir string) ([]string, error) {
 	ents, err := os.ReadDir(filepath.Clean(dir))
 	if err != nil {

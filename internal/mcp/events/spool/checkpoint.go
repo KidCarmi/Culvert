@@ -20,16 +20,21 @@ const checkpointVersion = 1
 
 var errCheckpointCorrupt = errors.New("spool: checkpoint integrity check failed")
 
-// segMeta is the durable metadata for one segment.
+// segMeta is the durable metadata for one segment. FirstChainHex is the
+// per-partition hash-chain value BEFORE this segment's first record — its own
+// anchor — so recovery verifies each surviving segment from its stored anchor.
+// This makes reclamation (which deletes whole earlier segments) safe: a later
+// segment no longer depends on a reclaimed segment's final chain value.
 type segMeta struct {
-	ID           uint32 `json:"id"`
-	FirstSeq     uint64 `json:"first_seq"`
-	LastSeq      uint64 `json:"last_seq"`
-	CommittedLen int64  `json:"committed_len"`
-	Records      int    `json:"records"`
-	Sealed       bool   `json:"sealed"`
-	Exported     bool   `json:"exported"`
-	CreatedNano  int64  `json:"created_nano"`
+	ID            uint32 `json:"id"`
+	FirstSeq      uint64 `json:"first_seq"`
+	LastSeq       uint64 `json:"last_seq"`
+	CommittedLen  int64  `json:"committed_len"`
+	Records       int    `json:"records"`
+	Sealed        bool   `json:"sealed"`
+	Exported      bool   `json:"exported"`
+	CreatedNano   int64  `json:"created_nano"`
+	FirstChainHex string `json:"first_chain_hex"`
 }
 
 // checkpoint is one partition's durable committed state.

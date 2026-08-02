@@ -18,8 +18,11 @@ type fakeReader struct {
 
 func (f *fakeReader) Capability() model.Capability { return f.cap }
 
-func (f *fakeReader) CommittedForExport(_ model.Partition, afterSeq uint64, maxRecords int) ([]model.Event, uint64, error) {
-	var out []model.Event
+func (f *fakeReader) CommittedForExport(_ model.Partition, afterSeq uint64, maxRecords int) ([]model.Event, []uint64, uint64, error) {
+	var (
+		out  []model.Event
+		seqs []uint64
+	)
 	cursor := afterSeq
 	for i := uint64(0); i < uint64(len(f.events)); i++ {
 		seq := i + 1
@@ -30,9 +33,10 @@ func (f *fakeReader) CommittedForExport(_ model.Partition, afterSeq uint64, maxR
 			break
 		}
 		out = append(out, f.events[i])
+		seqs = append(seqs, seq)
 		cursor = seq
 	}
-	return out, cursor, nil
+	return out, seqs, cursor, nil
 }
 
 func ev(tenant string) model.Event {

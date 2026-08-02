@@ -36,10 +36,10 @@ type DomainHealth struct {
 // Health returns a safe snapshot across both capability domains.
 func (m *Manager) Health() Health {
 	h := Health{NodeID: m.nodeID, Domains: map[model.Capability]DomainHealth{}}
-	for cap, d := range m.domains {
+	for capNS, d := range m.domains {
 		snap := d.state.Snapshot()
-		h.Domains[cap] = DomainHealth{
-			Capability:        cap,
+		h.Domains[capNS] = DomainHealth{
+			Capability:        capNS,
 			CriticalState:     snap.Critical.String(),
 			DenialState:       snap.Denial.String(),
 			Severity:          severityString(snap.Severity),

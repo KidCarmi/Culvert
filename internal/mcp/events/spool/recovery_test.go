@@ -3,11 +3,13 @@ package spool
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/events/model"
 	"github.com/KidCarmi/Culvert/internal/mcp/limits"
+	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
 )
 
 func critSegPath(root string) string {
@@ -28,7 +30,7 @@ func TestCrashTailTruncated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _ = f.Write([]byte("TORN-PARTIAL-RECORD-GARBAGE"))
+	_, _ = f.WriteString("TORN-PARTIAL-RECORD-GARBAGE")
 	_ = f.Close()
 
 	s2 := newTestSpool(t, root)
@@ -163,6 +165,91 @@ func TestReclamationOrder(t *testing.T) {
 	}
 }
 
+// TestReclaimThenRecoverPreservesChain is the regression guard for the
+// reclamation chain-anchor fix: reclaiming EARLIER sealed segments (dropping
+// their bytes and their checkpoint rows) must never be read as a hash-chain
+// break on the next recovery. Each surviving segment verifies from its OWN
+// stored anchor, so a reopened spool reports no corruption and recovers the
+// records that survived reclamation.
+func TestReclaimThenRecoverPreservesChain(t *testing.T) {
+	root := t.TempDir()
+	cfg := smallEventConfig()
+	// Tiny segments so many sealed segments accumulate behind the active tail.
+	cfg.SegmentMaxBytes = 2048
+	cfg.MaxEventBytes = 1024
+	lim, err := limits.NewEvent(cfg)
+	if err != nil {
+		t.Fatalf("limits: %v", err)
+	}
+	s, err := New(Config{Root: root, Capability: model.CapGateway, NodeID: "dp", Limits: lim, KEK: testKEK(), Clock: func() time.Time { return time.Unix(0, 1) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Recover(); err != nil {
+		t.Fatal(err)
+	}
+	committed := 0
+	for i := 0; i < 300; i++ {
+		if _, cerr := s.Commit(ordinaryEvent(i)); cerr != nil {
+			// Filling toward the ordinary quota is expected; stop once saturated so
+			// several sealed segments already exist to reclaim.
+			if mcperr.ReasonOf(cerr) == mcperr.ReasonEventQueueSaturated {
+				break
+			}
+			t.Fatalf("commit %d: %v", i, cerr)
+		}
+		committed++
+	}
+	if committed == 0 {
+		t.Fatal("no ordinary records committed")
+	}
+	before := partitionBytes(s, model.PartOrd)
+	// Remove the OLDEST sealed ordinary segments through the same reclamation path
+	// reclaimLocked uses (removeSegmentLocked drops the file + rewrites the
+	// checkpoint). Doing this directly is deterministic regardless of watermark and
+	// is exactly the operation the chain-anchor fix must survive.
+	removeOldestSealed(t, s, model.PartOrd, 2)
+	after := partitionBytes(s, model.PartOrd)
+	if after >= before {
+		t.Fatalf("reclamation freed nothing (%d >= %d); test would not exercise the fix", after, before)
+	}
+
+	// Reopen from the same root and recover: reclaiming the earliest segments must
+	// not corrupt the surviving chain.
+	s2 := newTestSpool(t, root)
+	rep, rerr := s2.Recover()
+	if rerr != nil {
+		t.Fatalf("Recover after reclamation: %v", rerr)
+	}
+	if rep.Corrupt {
+		t.Fatalf("recovery after reclaiming early segments reported corruption: %s", rep.CorruptReason)
+	}
+	if rep.Records[model.PartOrd] == 0 {
+		t.Fatal("no ordinary records survived reclamation + recovery")
+	}
+}
+
+// removeOldestSealed reclaims up to n of the oldest sealed segments in a
+// partition through removeSegmentLocked — the exact operation reclaimLocked
+// performs — so the reclamation chain-anchor path is exercised deterministically.
+func removeOldestSealed(t *testing.T, s *Spool, part model.Partition, n int) {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p := s.parts[part]
+	removed := 0
+	for i := 0; i < len(p.segments) && removed < n; {
+		if p.segments[i].sealed && s.removeSegmentLocked(p, i) {
+			removed++ // slice shrank at i; do not advance
+			continue
+		}
+		i++
+	}
+	if removed == 0 {
+		t.Fatal("no sealed segment available to reclaim")
+	}
+}
+
 func partitionBytes(s *Spool, p model.Partition) int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -184,7 +271,7 @@ func markAllSealedExported(s *Spool, p model.Partition) {
 }
 
 func ordinaryEvent(i int) *model.Event {
-	id := "o" + pad8(uint32(i))
+	id := "o" + strconv.Itoa(i)
 	e := &model.Event{
 		SchemaVersion: model.SchemaVersion, EventID: "evt_" + id, Phase: model.PhaseDecision,
 		Criticality: model.CritOrdinary, Partition: model.PartOrd, Capability: model.CapGateway,

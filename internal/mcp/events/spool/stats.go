@@ -82,22 +82,26 @@ func (s *Spool) ProbeWritable() bool {
 }
 
 // CommittedForExport returns up to maxRecords committed events from a partition
-// whose sequence is strictly greater than afterSeq, in ascending sequence order.
-// The events are the full safe envelopes (no secrets by construction); the export
-// layer applies tenant/capability authorization and bounds. This never returns an
-// uncommitted tail record.
-func (s *Spool) CommittedForExport(part model.Partition, afterSeq uint64, maxRecords int) ([]model.Event, uint64, error) {
+// whose sequence is strictly greater than afterSeq, in ascending sequence order,
+// together with each event's sequence (parallel slice) and the scan cursor (the
+// highest sequence scanned). The events are the full safe envelopes (no secrets by
+// construction); the export layer applies tenant/capability authorization and
+// bounds. This never returns an uncommitted tail record.
+func (s *Spool) CommittedForExport(part model.Partition, afterSeq uint64, maxRecords int) ([]model.Event, []uint64, uint64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	p := s.parts[part]
 	if p == nil {
-		return nil, afterSeq, spErr(mcperr.ReasonEventInvalid, "unknown partition")
+		return nil, nil, afterSeq, spErr(mcperr.ReasonEventInvalid, "unknown partition")
 	}
 	segs := make([]*segState, len(p.segments))
 	copy(segs, p.segments)
 	sort.Slice(segs, func(i, j int) bool { return segs[i].id < segs[j].id })
 
-	var out []model.Event
+	var (
+		out  []model.Event
+		seqs []uint64
+	)
 	cursor := afterSeq
 	for _, sg := range segs {
 		if len(out) >= maxRecords {
@@ -108,23 +112,24 @@ func (s *Spool) CommittedForExport(part model.Partition, afterSeq uint64, maxRec
 		}
 		evs, err := s.readSegmentEventsLocked(sg)
 		if err != nil {
-			return nil, cursor, err
+			return nil, nil, cursor, err
 		}
 		// Records within a segment are stored in ascending sequence starting at the
 		// segment's firstSeq, so the i-th committed record has sequence firstSeq+i.
-		for i, e := range evs {
+		for i := range evs {
 			if len(out) >= maxRecords {
 				break
 			}
-			seq := sg.firstSeq + uint64(i)
+			seq := sg.firstSeq + uint64(i) // #nosec G115 -- i is a non-negative slice index
 			if seq <= afterSeq {
 				continue
 			}
-			out = append(out, e)
+			out = append(out, evs[i])
+			seqs = append(seqs, seq)
 			cursor = seq
 		}
 	}
-	return out, cursor, nil
+	return out, seqs, cursor, nil
 }
 
 // readSegmentEventsLocked decodes all committed events in a segment (used by

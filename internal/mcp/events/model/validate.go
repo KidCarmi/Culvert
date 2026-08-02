@@ -78,70 +78,80 @@ func (e Event) Validate() error { //nolint:gocyclo,cyclop // a flat set of indep
 }
 
 // validatePhase enforces per-phase evidence requirements and the
-// criticality/action-class coupling.
+// criticality/action-class coupling by delegating to a per-phase helper.
 func (e Event) validatePhase() error {
 	switch e.Phase {
 	case PhaseDecision, PhaseOutcome:
-		// A decision/outcome event carries authenticated identity: a tenant and a
-		// principal must be present (denials are the only identity-free phase).
-		if e.Identity.Tenant == "" {
-			return evtErr(mcperr.ReasonEventTenantConflict, "authenticated event without tenant")
-		}
-		if e.Identity.PrincipalID == "" {
-			return evtErr(mcperr.ReasonEventEvidenceMissing, "authenticated event without principal")
-		}
-		if e.Denial != nil {
-			return evtErr(mcperr.ReasonEventInvalid, "denial evidence on a non-denial event")
-		}
-		if e.Decision.Action == "" || e.Decision.ReasonCode == "" {
-			return evtErr(mcperr.ReasonEventEvidenceMissing, "decision evidence missing action/reason")
-		}
-		if e.Criticality == CritCritical && !e.ActionClass.IsCritical() {
-			return evtErr(mcperr.ReasonEventEvidenceMissing, "critical decision lacks an action-class binding")
-		}
-		if e.Criticality == CritOrdinary && e.ActionClass.IsCritical() {
-			return evtErr(mcperr.ReasonEventPartitionMismatch, "critical action class on an ordinary event")
-		}
-		if e.Phase == PhaseOutcome {
-			if e.Outcome == nil {
-				return evtErr(mcperr.ReasonEventEvidenceMissing, "outcome event without outcome evidence")
-			}
-			// An outcome event MUST reference a committed decision; it never
-			// replaces the pre-execution decision commit.
-			if err := checkID("decision_ref", "evt_", e.Outcome.DecisionRef); err != nil {
-				return evtErr(mcperr.ReasonEventEvidenceMissing, "outcome event without a committed decision ref")
-			}
-		} else if e.Outcome != nil {
-			return evtErr(mcperr.ReasonEventInvalid, "outcome evidence on a non-outcome event")
-		}
+		return e.validateDecisionPhase()
 	case PhaseDenialAggregate:
-		if e.Criticality != CritDenial {
-			return evtErr(mcperr.ReasonEventPartitionMismatch, "denial aggregate must be criticality denial")
-		}
-		if e.Denial == nil {
-			return evtErr(mcperr.ReasonEventEvidenceMissing, "denial aggregate without denial evidence")
-		}
-		if e.Denial.DenialReason == "" || e.Denial.SourceBucket == "" {
-			return evtErr(mcperr.ReasonEventEvidenceMissing, "denial aggregate missing reason/source")
-		}
-		if e.Denial.Count == 0 {
-			return evtErr(mcperr.ReasonEventEvidenceMissing, "denial aggregate with zero count")
-		}
-		if e.Denial.FirstSeenUnixNano <= 0 || e.Denial.LastSeenUnixNano < e.Denial.FirstSeenUnixNano {
-			return evtErr(mcperr.ReasonEventInvalid, "denial aggregate with invalid first/last seen")
-		}
-		// Before identity exists, a denial aggregate MUST NOT carry tenant
-		// attribution invented from an attacker hint. Tenant is permitted only when
-		// it was verified — the aggregator sets it only in that case — so no extra
-		// structural check is imposed here; the aggregator owns the rule and its
-		// tests. The Outcome sub-evidence must be absent.
-		if e.Outcome != nil {
-			return evtErr(mcperr.ReasonEventInvalid, "outcome evidence on a denial aggregate")
-		}
+		return e.validateDenialPhase()
 	case PhaseRecoveryMarker, PhaseHealth:
 		if e.Marker == nil || e.Marker.State == "" {
 			return evtErr(mcperr.ReasonEventEvidenceMissing, "marker event without marker state")
 		}
+	}
+	return nil
+}
+
+// validateDecisionPhase validates a decision or outcome event: authenticated
+// identity, decision evidence, the criticality/action-class coupling, and (for an
+// outcome) a committed decision reference.
+func (e Event) validateDecisionPhase() error {
+	if e.Identity.Tenant == "" {
+		return evtErr(mcperr.ReasonEventTenantConflict, "authenticated event without tenant")
+	}
+	if e.Identity.PrincipalID == "" {
+		return evtErr(mcperr.ReasonEventEvidenceMissing, "authenticated event without principal")
+	}
+	if e.Denial != nil {
+		return evtErr(mcperr.ReasonEventInvalid, "denial evidence on a non-denial event")
+	}
+	if e.Decision.Action == "" || e.Decision.ReasonCode == "" {
+		return evtErr(mcperr.ReasonEventEvidenceMissing, "decision evidence missing action/reason")
+	}
+	if e.Criticality == CritCritical && !e.ActionClass.IsCritical() {
+		return evtErr(mcperr.ReasonEventEvidenceMissing, "critical decision lacks an action-class binding")
+	}
+	if e.Criticality == CritOrdinary && e.ActionClass.IsCritical() {
+		return evtErr(mcperr.ReasonEventPartitionMismatch, "critical action class on an ordinary event")
+	}
+	if e.Phase == PhaseOutcome {
+		if e.Outcome == nil {
+			return evtErr(mcperr.ReasonEventEvidenceMissing, "outcome event without outcome evidence")
+		}
+		// An outcome event MUST reference a committed decision; it never replaces
+		// the pre-execution decision commit.
+		if err := checkID("decision_ref", "evt_", e.Outcome.DecisionRef); err != nil {
+			return evtErr(mcperr.ReasonEventEvidenceMissing, "outcome event without a committed decision ref")
+		}
+	} else if e.Outcome != nil {
+		return evtErr(mcperr.ReasonEventInvalid, "outcome evidence on a non-outcome event")
+	}
+	return nil
+}
+
+// validateDenialPhase validates a coalesced denial aggregate. Tenant attribution
+// is NOT structurally required or forbidden here: the aggregator sets it only when
+// verified identity existed and never invents it pre-identity (that rule is owned
+// and tested by the aggregator).
+func (e Event) validateDenialPhase() error {
+	if e.Criticality != CritDenial {
+		return evtErr(mcperr.ReasonEventPartitionMismatch, "denial aggregate must be criticality denial")
+	}
+	if e.Denial == nil {
+		return evtErr(mcperr.ReasonEventEvidenceMissing, "denial aggregate without denial evidence")
+	}
+	if e.Denial.DenialReason == "" || e.Denial.SourceBucket == "" {
+		return evtErr(mcperr.ReasonEventEvidenceMissing, "denial aggregate missing reason/source")
+	}
+	if e.Denial.Count == 0 {
+		return evtErr(mcperr.ReasonEventEvidenceMissing, "denial aggregate with zero count")
+	}
+	if e.Denial.FirstSeenUnixNano <= 0 || e.Denial.LastSeenUnixNano < e.Denial.FirstSeenUnixNano {
+		return evtErr(mcperr.ReasonEventInvalid, "denial aggregate with invalid first/last seen")
+	}
+	if e.Outcome != nil {
+		return evtErr(mcperr.ReasonEventInvalid, "outcome evidence on a denial aggregate")
 	}
 	return nil
 }

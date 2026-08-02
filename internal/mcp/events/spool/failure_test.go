@@ -2,6 +2,7 @@ package spool
 
 import (
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -178,12 +179,12 @@ func smallEventConfig() limits.EventConfig {
 }
 
 func denialEvent(i int) *model.Event {
-	id := "d" + pad8(uint32(i))
+	id := "d" + strconv.Itoa(i)
 	e := &model.Event{
 		SchemaVersion: model.SchemaVersion, EventID: "evt_" + id, Phase: model.PhaseDenialAggregate,
 		Criticality: model.CritDenial, Partition: model.PartDen, Capability: model.CapGateway,
 		NodeID: "dp", DomainID: "d", TimeUnixNano: 1, ReplayID: "rpl_" + id, CorrelationID: "cor_" + id,
-		Denial: &model.DenialEvidence{DenialReason: "auth_failed", SourceBucket: "ip:203.0.113." + pad8(uint32(i%250)), Count: 1, FirstSeenUnixNano: 1, LastSeenUnixNano: 2},
+		Denial: &model.DenialEvidence{DenialReason: "auth_failed", SourceBucket: "ip:203.0.113." + strconv.Itoa(i%250), Count: 1, FirstSeenUnixNano: 1, LastSeenUnixNano: 2},
 	}
 	_, _ = e.ComputeDigest()
 	return e

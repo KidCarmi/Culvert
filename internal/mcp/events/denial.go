@@ -42,8 +42,8 @@ func (m *Manager) ObserveDenial(in DenialInput) {
 // request stays denied — it NEVER blocks authenticated critical work and NEVER
 // enters critical-durability-degraded. It returns the number of aggregates
 // committed and the number lost.
-func (m *Manager) FlushDenials(cap model.Capability) (committed, lost int) {
-	d, err := m.domainFor(cap)
+func (m *Manager) FlushDenials(capNS model.Capability) (committed, lost int) {
+	d, err := m.domainFor(capNS)
 	if err != nil {
 		return 0, 0
 	}

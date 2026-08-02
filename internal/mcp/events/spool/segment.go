@@ -30,8 +30,9 @@ var (
 )
 
 const (
-	// segHeaderLen is the fixed segment-header size for keyIDLen=8.
-	segHeaderLen = 4 + 1 + 1 + 1 + 4 + 8 + 8 + 1 + keyIDLen
+	// segHeaderLen is the fixed segment-header size for keyIDLen=8:
+	// magic(4)+ver(1)+capability(1)+partition(1)+segID(4)+firstSeq(8)+keyIDLen(1)+keyID.
+	segHeaderLen = 4 + 1 + 1 + 1 + 4 + 8 + 1 + keyIDLen
 	// recFixedPrefixLen is the record-header size before the variable ciphertext:
 	// magic(4)+ver(1)+partition(1)+seq(8)+priorChain(32)+nonceLen(1)+nonce(12)+ctLen(4).
 	recFixedPrefixLen = 4 + 1 + 1 + 8 + 32 + 1 + spoolNonceLen + 4
@@ -40,17 +41,17 @@ const (
 var (
 	errBadSegHeader = errors.New("spool: malformed segment header")
 	errBadRecord    = errors.New("spool: malformed record frame")
-	errChainBreak   = errors.New("spool: hash-chain break (reorder/removal/insertion)")
 )
 
-// segHeader is the parsed segment header.
+// segHeader is the parsed segment header. Creation time is NOT in the wire header
+// (it is carried in the durable checkpoint's segMeta); the header binds only the
+// identity fields recovery needs to validate.
 type segHeader struct {
-	partition   model.Partition
-	capability  model.Capability
-	segID       uint32
-	firstSeq    uint64
-	createdNano int64
-	keyID       [keyIDLen]byte
+	partition  model.Partition
+	capability model.Capability
+	segID      uint32
+	firstSeq   uint64
+	keyID      [keyIDLen]byte
 }
 
 // encodeSegHeader renders a segment header.
@@ -62,9 +63,8 @@ func encodeSegHeader(h segHeader) []byte {
 	b[6] = byte(h.partition)
 	binary.BigEndian.PutUint32(b[7:11], h.segID)
 	binary.BigEndian.PutUint64(b[11:19], h.firstSeq)
-	binary.BigEndian.PutUint64(b[19:27], uint64(h.createdNano))
-	b[27] = keyIDLen
-	copy(b[28:28+keyIDLen], h.keyID[:])
+	b[19] = keyIDLen
+	copy(b[20:20+keyIDLen], h.keyID[:])
 	return b
 }
 
@@ -79,17 +79,16 @@ func decodeSegHeader(b []byte) (segHeader, error) {
 	if b[4] != segFormatVersion {
 		return segHeader{}, errBadSegHeader
 	}
-	if b[27] != keyIDLen {
+	if b[19] != keyIDLen {
 		return segHeader{}, errBadSegHeader
 	}
 	h := segHeader{
-		capability:  model.Capability(b[5]),
-		partition:   model.Partition(b[6]),
-		segID:       binary.BigEndian.Uint32(b[7:11]),
-		firstSeq:    binary.BigEndian.Uint64(b[11:19]),
-		createdNano: int64(binary.BigEndian.Uint64(b[19:27])),
+		capability: model.Capability(b[5]),
+		partition:  model.Partition(b[6]),
+		segID:      binary.BigEndian.Uint32(b[7:11]),
+		firstSeq:   binary.BigEndian.Uint64(b[11:19]),
 	}
-	copy(h.keyID[:], b[28:28+keyIDLen])
+	copy(h.keyID[:], b[20:20+keyIDLen])
 	if !h.partition.Valid() || !h.capability.Valid() {
 		return segHeader{}, errBadSegHeader
 	}
@@ -125,7 +124,8 @@ func encodeRecord(cr *cryptor, part model.Partition, seq uint64, prior [32]byte,
 		return nil, next, serr
 	}
 	copy(hdr[47:47+spoolNonceLen], nonce)
-	binary.BigEndian.PutUint32(hdr[47+spoolNonceLen:recFixedPrefixLen], uint32(len(ct)))
+	// ciphertext length is bounded by maxCiphertextLen (< 2^32); safe conversion.
+	binary.BigEndian.PutUint32(hdr[47+spoolNonceLen:recFixedPrefixLen], uint32(len(ct))) // #nosec G115 -- len(ct) <= maxCiphertextLen < 2^32
 	// The AAD used at Seal time was the header BEFORE nonce/ctLen were written; to
 	// make verification reproduce the exact AAD, re-seal is avoided by defining the
 	// AAD as the header prefix with nonce+ctLen zeroed. See sealAAD/verifyAAD.

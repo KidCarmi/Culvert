@@ -2,7 +2,6 @@ package events
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/credentials/broker"
 	"github.com/KidCarmi/Culvert/internal/mcp/events/model"
@@ -46,15 +45,15 @@ func (g *CredentialGate) Authorize(_ context.Context, plan broker.CredentialPlan
 		Decision: model.DecisionEvidence{
 			Action: "ALLOW", ReasonCode: "MCP.CREDENTIAL.MATERIALIZE",
 			PolicyRevision: plan.ProfileRevision(), CatalogRevision: 0,
-			OperationClass: fmt.Sprintf("%v", plan.Operation()),
-			RiskClass:      fmt.Sprintf("%v", plan.Risk()),
+			OperationClass: plan.Operation().String(),
+			RiskClass:      plan.Risk().String(),
 			ExecutionState: "not_implemented",
 		},
 		Credential: model.CredentialEvidence{
 			ProfileID:    string(plan.ProfileID()),
 			ProviderID:   string(plan.ProviderID()),
-			PlannedKind:  fmt.Sprintf("%v", plan.Kind()),
-			PowerCeiling: fmt.Sprintf("%v", plan.PowerCeiling()),
+			PlannedKind:  plan.Kind().String(),
+			PowerCeiling: plan.PowerCeiling().String(),
 			PlanID:       plan.PlanID(),
 			Version:      plan.ProfileRevision(),
 		},

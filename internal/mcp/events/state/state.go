@@ -178,6 +178,7 @@ func (m *Machine) CriticalState() State {
 	return m.critical
 }
 
+// DenialState returns the current denial-track state.
 func (m *Machine) DenialState() State {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -345,6 +346,7 @@ func (m *Machine) CriticalLoss() uint64 {
 	return m.criticalLoss
 }
 
+// DenialLoss returns the distinct denial-lane loss counter.
 func (m *Machine) DenialLoss() uint64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()

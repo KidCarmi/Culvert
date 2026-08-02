@@ -103,6 +103,7 @@ type segState struct {
 	sealed       bool
 	exported     bool
 	createdNano  int64
+	firstChain   [32]byte // hash-chain anchor before this segment's first record
 }
 
 func spErr(r mcperr.Reason, detail string) error {
@@ -302,18 +303,26 @@ func (s *Spool) appendLocked(p *partition, e *model.Event, plaintext []byte, fra
 	}
 	offset := seg.committedLen
 	if err := s.be.AppendSync(seg.path, frame, filePerm); err != nil {
+		// The append may have written a partial/torn tail; drop anything past the
+		// last committed offset so a later append/readback never sees a stale frame.
+		s.truncateTailLocked(seg, offset)
 		return CommitReceipt{}, s.classifyIOFailure("append record", err)
 	}
 	// Integrity readback: re-read the just-appended frame and verify it decrypts,
 	// chains and matches. A torn or silently-mangled write is caught here BEFORE the
 	// checkpoint acknowledges it.
 	if err := s.readbackVerifyLocked(seg, offset, int64(len(frame)), p.kind, seq, prior, e.EventDigest); err != nil {
+		s.truncateTailLocked(seg, offset)
 		return CommitReceipt{}, err
 	}
 	// Advance the durable checkpoint. Until this succeeds the record is an
-	// uncommitted tail; if it fails we do not advance in-memory state.
+	// uncommitted tail; if it fails we do not advance in-memory state — and we drop
+	// the uncommitted frame from disk so the NEXT append starts at the committed
+	// offset and never reads back this stale record (which would otherwise wedge the
+	// recovery-marker probe).
 	newLen := offset + int64(len(frame))
 	if err := s.persistCheckpointLocked(p, seg, seq, next, newLen, int64(len(frame))); err != nil {
+		s.truncateTailLocked(seg, offset)
 		return CommitReceipt{}, err
 	}
 	seg.committedLen = newLen
@@ -359,21 +368,23 @@ func (s *Spool) activeSegmentLocked(p *partition, frameLen int64) (*segState, er
 	if len(p.segments) >= s.lim.MaxSegments() {
 		return nil, spErr(mcperr.ReasonEventStorageFull, "segment count cap reached")
 	}
-	// Create a new segment: durably write its header first.
+	// Create a new segment: durably write its header first. Its chain anchor is the
+	// current partition chain (the prior for this segment's first record), stored so
+	// the segment self-verifies after earlier segments are reclaimed.
 	id := p.nextSegID
 	seg := &segState{
 		id:          id,
 		path:        filepath.Join(p.dir, "seg-"+pad8(id)+".dat"),
 		firstSeq:    p.nextSeq,
 		createdNano: s.clock().UnixNano(),
+		firstChain:  p.lastChain,
 	}
 	hdr := encodeSegHeader(segHeader{
-		partition:   p.kind,
-		capability:  s.cap,
-		segID:       id,
-		firstSeq:    p.nextSeq,
-		createdNano: seg.createdNano,
-		keyID:       s.cr.keyID,
+		partition:  p.kind,
+		capability: s.cap,
+		segID:      id,
+		firstSeq:   p.nextSeq,
+		keyID:      s.cr.keyID,
 	})
 	if err := s.be.AppendSync(seg.path, hdr, filePerm); err != nil {
 		return nil, s.classifyIOFailure("write segment header", err)
@@ -445,11 +456,13 @@ func (s *Spool) persistCheckpointLocked(p *partition, seg *segState, seq uint64,
 // and lastChain overridden by the pending advance.
 func (s *Spool) buildCheckpointLocked(p *partition, nextSeq uint64, lastChain [32]byte) checkpoint {
 	segs := make([]segMeta, 0, len(p.segments))
-	for _, sg := range p.segments {
+	for i := range p.segments {
+		sg := p.segments[i]
 		segs = append(segs, segMeta{
 			ID: sg.id, FirstSeq: sg.firstSeq, LastSeq: sg.lastSeq,
 			CommittedLen: sg.committedLen, Records: sg.records,
 			Sealed: sg.sealed, Exported: sg.exported, CreatedNano: sg.createdNano,
+			FirstChainHex: hexChain(sg.firstChain),
 		})
 	}
 	return checkpoint{
@@ -460,6 +473,16 @@ func (s *Spool) buildCheckpointLocked(p *partition, nextSeq uint64, lastChain [3
 		LastChainHex: hexChain(lastChain),
 		TotalBytes:   p.totalBytes,
 		Segments:     segs,
+	}
+}
+
+// truncateTailLocked drops any bytes past the last committed offset for a segment
+// after a post-append failure, so the uncommitted frame cannot be read back by a
+// later append or resurrect on recovery. Best-effort: on a truncate error the
+// recovery path still truncates to the checkpointed length.
+func (s *Spool) truncateTailLocked(seg *segState, committedOffset int64) {
+	if sz, err := s.be.Size(seg.path); err == nil && sz > committedOffset {
+		_ = s.be.Truncate(seg.path, committedOffset) //nolint:errcheck // best-effort; recovery re-truncates to the checkpointed length
 	}
 }
 

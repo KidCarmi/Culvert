@@ -61,7 +61,8 @@ func (s *Spool) Recover() (RecoverReport, error) {
 
 	// Restore the replay-dedup window from the most recent committed events.
 	sort.Slice(recovered, func(i, j int) bool { return recovered[i].time < recovered[j].time })
-	for _, rc := range recovered {
+	for i := range recovered {
+		rc := &recovered[i]
 		s.rememberReplayLocked(rc.replayID, rc.digest, rc.receipt)
 	}
 	return rep, nil
@@ -104,26 +105,36 @@ func (s *Spool) recoverPartitionLocked(p *partition) ([]recoveredEvent, error) {
 		return nil, spErr(mcperr.ReasonEventSpoolCorrupt, "checkpoint chain unparsable")
 	}
 
-	// Replay committed records across segments in id order, verifying the chain.
+	// Replay committed records segment by segment in id order. Each segment starts
+	// verification from ITS OWN stored chain anchor, so reclaiming an earlier segment
+	// never breaks a surviving one; the LAST segment's end chain must reconcile with
+	// the checkpoint's LastChainHex (intra-segment + committed-tail tamper evidence).
 	sort.Slice(ck.Segments, func(i, j int) bool { return ck.Segments[i].ID < ck.Segments[j].ID })
 	var (
-		chain     [32]byte
-		evs       []recoveredEvent
-		scanBytes int64
-		scanRecs  int
+		lastSegEnd [32]byte
+		haveSeg    bool
+		evs        []recoveredEvent
+		scanBytes  int64
+		scanRecs   int
 	)
 	for i := range ck.Segments {
 		sm := ck.Segments[i]
-		seg, segEvs, nchain, serr := s.recoverSegmentLocked(p, sm, chain, &scanBytes, &scanRecs)
+		anchor, aok := parseHexChain(sm.FirstChainHex)
+		if !aok {
+			return nil, spErr(mcperr.ReasonEventSpoolCorrupt, "segment chain anchor unparsable")
+		}
+		seg, segEvs, endChain, serr := s.recoverSegmentLocked(p, sm, anchor, &scanBytes, &scanRecs)
 		if serr != nil {
 			return nil, serr
 		}
-		chain = nchain
+		seg.firstChain = anchor
 		p.segments = append(p.segments, seg)
 		p.totalBytes += seg.committedLen
 		evs = append(evs, segEvs...)
+		lastSegEnd = endChain
+		haveSeg = true
 	}
-	if chain != lastChain {
+	if haveSeg && lastSegEnd != lastChain {
 		return nil, spErr(mcperr.ReasonEventSpoolCorrupt, "chain does not reconcile with checkpoint")
 	}
 	p.nextSeq = ck.NextSeq
@@ -138,8 +149,9 @@ func (s *Spool) recoverPartitionLocked(p *partition) ([]recoveredEvent, error) {
 	return evs, nil
 }
 
-// recoverSegmentLocked replays one segment's committed records, verifying the
-// header and each record, truncating any uncommitted tail beyond CommittedLen.
+// recoverSegmentLocked replays one segment's committed records starting from the
+// segment's own chain anchor, verifying the header and each record, and truncating
+// any uncommitted tail beyond CommittedLen. It returns the segment's end chain.
 func (s *Spool) recoverSegmentLocked(p *partition, sm segMeta, chain [32]byte, scanBytes *int64, scanRecs *int) (*segState, []recoveredEvent, [32]byte, error) {
 	path := segmentPath(p.dir, sm.ID)
 	size, err := s.be.Size(path)
@@ -158,8 +170,13 @@ func (s *Spool) recoverSegmentLocked(p *partition, sm segMeta, chain [32]byte, s
 	if rerr != nil || int64(n) != sm.CommittedLen {
 		return nil, nil, chain, spWrap(mcperr.ReasonEventSpoolCorrupt, "read segment", rerr)
 	}
-	if _, herr := decodeSegHeader(buf); herr != nil {
+	hdr, herr := decodeSegHeader(buf)
+	if herr != nil {
 		return nil, nil, chain, spWrap(mcperr.ReasonEventSpoolCorrupt, "segment header", herr)
+	}
+	// The header must agree with the checkpoint's identity for this segment.
+	if hdr.partition != p.kind || hdr.segID != sm.ID || hdr.firstSeq != sm.FirstSeq {
+		return nil, nil, chain, spErr(mcperr.ReasonEventSpoolCorrupt, "segment header identity mismatch")
 	}
 	seg := &segState{
 		id: sm.ID, path: path, firstSeq: sm.FirstSeq, lastSeq: sm.LastSeq,

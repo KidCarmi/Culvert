@@ -24,8 +24,10 @@ import (
 )
 
 // Reader is the spool-side committed-event source (implemented by *spool.Spool).
+// CommittedForExport returns the events, their parallel sequences, and the scan
+// cursor (highest sequence scanned).
 type Reader interface {
-	CommittedForExport(part model.Partition, afterSeq uint64, maxRecords int) ([]model.Event, uint64, error)
+	CommittedForExport(part model.Partition, afterSeq uint64, maxRecords int) ([]model.Event, []uint64, uint64, error)
 	Capability() model.Capability
 }
 
@@ -82,36 +84,45 @@ func Read(r Reader, lim limits.EventLimits, auth Authorization, part model.Parti
 	if !auth.Partitions[part] {
 		return ReadResult{}, expErr(mcperr.ReasonEventExportUnauthorized, "partition not authorized")
 	}
-	// Read a bounded window and filter to the tenant scope. We over-read the raw
-	// window (bounded by MaxRecords) and then filter, so a tenant only ever sees its
-	// own events; the returned cursor advances past what was scanned so pagination
-	// terminates, but the events themselves are tenant-isolated.
-	raw, next, err := r.CommittedForExport(part, afterSeq, auth.MaxRecords)
+	// Read a bounded window and filter to the tenant scope. The returned cursor is
+	// the sequence of the LAST event actually INCLUDED when a record/byte bound stops
+	// iteration — so following it never skips a matching event. When NOTHING matched,
+	// the cursor advances to the raw scan end (past non-matching records) so
+	// pagination still makes progress; the events themselves are tenant-isolated.
+	raw, seqs, next, err := r.CommittedForExport(part, afterSeq, auth.MaxRecords)
 	if err != nil {
 		return ReadResult{}, err
 	}
-	res := ReadResult{NextCursor: next, More: len(raw) == auth.MaxRecords}
-	var bytesUsed int
+	res := ReadResult{NextCursor: next}
+	var (
+		bytesUsed int
+		lastSeq   uint64
+		included  bool
+		bounded   bool
+	)
 	for i := range raw {
 		e := raw[i]
-		if e.Capability != auth.Capability {
-			continue
-		}
-		// Tenant isolation: an authorized tenant sees only its own events; the
-		// unattributed scope (empty tenant) sees only unattributed events.
-		if e.Identity.Tenant != auth.Tenant {
-			continue
+		if e.Capability != auth.Capability || e.Identity.Tenant != auth.Tenant {
+			continue // tenant isolation: only this scope's own events
 		}
 		enc, merr := e.Marshal()
 		if merr != nil {
 			continue
 		}
 		if bytesUsed+len(enc) > auth.MaxBytes {
-			res.More = true
+			bounded = true // the byte bound stopped us before this event
 			break
 		}
 		bytesUsed += len(enc)
 		res.Events = append(res.Events, e)
+		lastSeq = seqs[i]
+		included = true
+	}
+	if included {
+		res.NextCursor = lastSeq // resume right after the last returned event
+		res.More = bounded || len(raw) == auth.MaxRecords
+	} else {
+		res.More = len(raw) == auth.MaxRecords
 	}
 	return res, nil
 }

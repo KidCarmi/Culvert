@@ -69,35 +69,33 @@ func (p *Pump) Step(ctx context.Context) (int, error) {
 	cur := p.cursor
 	p.mu.Unlock()
 
-	res, err := Read(p.cfg.Reader, p.cfg.Limits, p.cfg.Auth, p.cfg.Partition, cur)
+	// Bound this step's read to the batch size (never re-slice below Read, which
+	// would leave the extra matching events skipped by the returned cursor).
+	stepAuth := p.cfg.Auth
+	if p.cfg.BatchSize > 0 && p.cfg.BatchSize < stepAuth.MaxRecords {
+		stepAuth.MaxRecords = p.cfg.BatchSize
+	}
+	res, err := Read(p.cfg.Reader, p.cfg.Limits, stepAuth, p.cfg.Partition, cur)
 	if err != nil {
 		return 0, err
 	}
-	next := res.NextCursor
 	if len(res.Events) == 0 {
-		// Advance the scan cursor even when nothing matched the tenant filter, so a
-		// stream of other-tenant records does not wedge this pump — but only up to
-		// what was scanned, never past a pending record.
-		p.advance(next)
+		// Nothing matched this scope in the scanned window. Advance the SCAN cursor
+		// past the non-matching records so the pump makes progress, but do NOT ack —
+		// nothing was exported, so no segment may be marked exported.
+		p.advance(res.NextCursor)
 		return 0, nil
 	}
-	batch := res.Events
-	if p.cfg.BatchSize > 0 && len(batch) > p.cfg.BatchSize {
-		batch = batch[:p.cfg.BatchSize]
+	// The read is bounded to the batch, so Read's NextCursor is exactly the last
+	// event in this batch. Accept the batch all-or-nothing: on a partial/failed
+	// export, keep local durability and do not advance (retry next step).
+	accepted, xerr := p.exportWithRetry(ctx, res.Events)
+	if xerr != nil || accepted < len(res.Events) {
+		return accepted, xerr
 	}
-	accepted, xerr := p.exportWithRetry(ctx, batch)
-	if xerr != nil || accepted == 0 {
-		// Fail-safe: keep local durability, do not advance the cursor.
-		return 0, xerr
-	}
-	// Advance only through the acknowledged prefix.
-	throughSeq := next
-	if accepted < len(batch) {
-		throughSeq = cur + uint64(accepted) // conservative: advance by accepted count
-	}
-	p.advance(throughSeq)
+	p.advance(res.NextCursor)
 	if p.cfg.OnAck != nil {
-		p.cfg.OnAck(p.cfg.Partition, throughSeq)
+		p.cfg.OnAck(p.cfg.Partition, res.NextCursor)
 	}
 	return accepted, nil
 }
