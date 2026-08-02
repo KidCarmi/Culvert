@@ -484,6 +484,88 @@ const (
 	// ReasonEventExportRangeExceeded — an export/read request exceeded its bounded
 	// range, record count or byte budget. Fails closed.
 	ReasonEventExportRangeExceeded
+
+	// ── PR-9 admin API / Management MCP / approval / publication reasons ──
+
+	// ReasonAdminRequestInvalid — a malformed admin/Management request: a bad
+	// cursor, identifier, enum value, sort direction or filter. Fails closed.
+	ReasonAdminRequestInvalid
+	// ReasonAdminRangeExceeded — an admin/Management request exceeded a bounded
+	// page size, time range, simulation corpus, comparison sample or record/byte
+	// budget. Fails closed.
+	ReasonAdminRangeExceeded
+	// ReasonAdminUnknownField — an admin/Management request carried an unknown
+	// query parameter or body field under the strict-decode contract. Fails closed.
+	ReasonAdminUnknownField
+	// ReasonAdminNotFound — the addressed admin/Management resource does not exist
+	// within the caller's authorized tenant scope. Returned uniformly so a caller
+	// cannot distinguish "absent" from "exists in another tenant".
+	ReasonAdminNotFound
+	// ReasonAdminForbidden — the resolved administrative or Management identity is
+	// not authorized for the requested operation (role, scope or tenant). Fails
+	// closed; never leaks the existence of the target.
+	ReasonAdminForbidden
+	// ReasonAdminTenantScope — a request attempted to read or act across a tenant
+	// boundary, or supplied a tenant hint not backed by the authenticated identity.
+	// Fails closed; no cross-tenant record, count, range or existence is revealed.
+	ReasonAdminTenantScope
+
+	// ReasonApprovalNotFound — the addressed approval or publication request does
+	// not exist within the caller's authorized tenant scope. Uniform not-found.
+	ReasonApprovalNotFound
+	// ReasonApprovalSelfApproval — four-eyes violation: the approver is the same
+	// authenticated principal as the requester. Rejected.
+	ReasonApprovalSelfApproval
+	// ReasonApprovalExpired — the approval/publication request is past its TTL and
+	// can no longer be approved. Rejected.
+	ReasonApprovalExpired
+	// ReasonApprovalStaleRevision — a bound policy, catalog, tool or credential
+	// revision changed since the request was created, invalidating it. Rejected.
+	ReasonApprovalStaleRevision
+	// ReasonApprovalTerminalState — the request is already in a terminal
+	// (approved/rejected) state; terminal states are immutable. A conflicting
+	// transition is rejected; an identical repeat is idempotent.
+	ReasonApprovalTerminalState
+	// ReasonApprovalBindingMismatch — the presented candidate/decision digest,
+	// tenant, capability, base revision or expiry does not match the immutable
+	// request binding (a TOCTOU guard). Rejected.
+	ReasonApprovalBindingMismatch
+
+	// ReasonPublicationValidationFailed — a candidate policy document failed
+	// compilation/validation and must not be published. Fails closed.
+	ReasonPublicationValidationFailed
+	// ReasonPublicationStaleBase — the expected base revision does not match the
+	// active local revision at publish time (optimistic-concurrency guard).
+	ReasonPublicationStaleBase
+	// ReasonPublicationNotApproved — a local publication was attempted without a
+	// matching four-eyes approval bound to the exact candidate. Fails closed.
+	ReasonPublicationNotApproved
+	// ReasonPublicationDurabilityRequired — the required PR-8 P-CRIT publication
+	// event did not durably commit, so nothing is published and the active policy
+	// is retained. Fails closed.
+	ReasonPublicationDurabilityRequired
+
+	// ReasonManagementToolUnknown — a tools/call named a tool outside the fixed
+	// Management catalog, or one the resolved identity was never authorized to see.
+	// A remembered-but-unauthorized name gains no authority. Fails closed.
+	ReasonManagementToolUnknown
+	// ReasonManagementToolUnauthorized — the resolved Management identity is not
+	// authorized for the selected tool (scope, role, capability or tenant). Each
+	// tools/call is re-authorized independently of any prior tools/list. Fails closed.
+	ReasonManagementToolUnauthorized
+	// ReasonManagementResultTooLarge — a Management result exceeded the bounded
+	// safe-result byte budget and could not be safely returned; the caller must
+	// page. Fails closed rather than truncating unsafely.
+	ReasonManagementResultTooLarge
+
+	// ReasonConfigInvalid — a candidate PR-9 listener/access configuration failed
+	// validation (missing reference, bad value, or Gateway/Management overlap of
+	// address, port, OAuth resource, client or scope). Current runtime retained.
+	ReasonConfigInvalid
+	// ReasonConfigApplyFailed — a validated local configuration could not be
+	// applied/bound; the previous running configuration is retained unchanged and
+	// no CP→DP propagation is claimed. Fails closed.
+	ReasonConfigApplyFailed
 )
 
 // reasonCode maps each Reason to its stable machine string. The strings are part
@@ -626,6 +708,33 @@ var reasonCode = map[Reason]string{ // #nosec G101 -- stable machine-readable er
 	ReasonEventReceiptInvalid:        "event_receipt_invalid",
 	ReasonEventExportUnauthorized:    "event_export_unauthorized",
 	ReasonEventExportRangeExceeded:   "event_export_range_exceeded",
+
+	// ── PR-9 admin API / Management MCP / approval / publication reasons ──
+	ReasonAdminRequestInvalid: "admin_request_invalid",
+	ReasonAdminRangeExceeded:  "admin_range_exceeded",
+	ReasonAdminUnknownField:   "admin_unknown_field",
+	ReasonAdminNotFound:       "admin_not_found",
+	ReasonAdminForbidden:      "admin_forbidden",
+	ReasonAdminTenantScope:    "admin_tenant_scope",
+
+	ReasonApprovalNotFound:        "approval_not_found",
+	ReasonApprovalSelfApproval:    "approval_self_approval",
+	ReasonApprovalExpired:         "approval_expired",
+	ReasonApprovalStaleRevision:   "approval_stale_revision",
+	ReasonApprovalTerminalState:   "approval_terminal_state",
+	ReasonApprovalBindingMismatch: "approval_binding_mismatch",
+
+	ReasonPublicationValidationFailed:   "publication_validation_failed",
+	ReasonPublicationStaleBase:          "publication_stale_base",
+	ReasonPublicationNotApproved:        "publication_not_approved",
+	ReasonPublicationDurabilityRequired: "publication_durability_required",
+
+	ReasonManagementToolUnknown:      "management_tool_unknown",
+	ReasonManagementToolUnauthorized: "management_tool_unauthorized",
+	ReasonManagementResultTooLarge:   "management_result_too_large",
+
+	ReasonConfigInvalid:     "config_invalid",
+	ReasonConfigApplyFailed: "config_apply_failed",
 }
 
 // Code returns the stable machine string for the reason (e.g. "malformed_json").

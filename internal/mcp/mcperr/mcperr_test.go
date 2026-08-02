@@ -83,6 +83,18 @@ func TestReasonCodesStable(t *testing.T) {
 		{ReasonEventSpoolCorrupt, "event_spool_corrupt"}, {ReasonEventDurabilityDegraded, "event_durability_degraded"},
 		{ReasonEventDenialLaneDegraded, "event_denial_lane_degraded"}, {ReasonEventReceiptInvalid, "event_receipt_invalid"},
 		{ReasonEventExportUnauthorized, "event_export_unauthorized"}, {ReasonEventExportRangeExceeded, "event_export_range_exceeded"},
+		// PR-9 admin API / Management MCP / approval / publication reasons.
+		{ReasonAdminRequestInvalid, "admin_request_invalid"}, {ReasonAdminRangeExceeded, "admin_range_exceeded"},
+		{ReasonAdminUnknownField, "admin_unknown_field"}, {ReasonAdminNotFound, "admin_not_found"},
+		{ReasonAdminForbidden, "admin_forbidden"}, {ReasonAdminTenantScope, "admin_tenant_scope"},
+		{ReasonApprovalNotFound, "approval_not_found"}, {ReasonApprovalSelfApproval, "approval_self_approval"},
+		{ReasonApprovalExpired, "approval_expired"}, {ReasonApprovalStaleRevision, "approval_stale_revision"},
+		{ReasonApprovalTerminalState, "approval_terminal_state"}, {ReasonApprovalBindingMismatch, "approval_binding_mismatch"},
+		{ReasonPublicationValidationFailed, "publication_validation_failed"}, {ReasonPublicationStaleBase, "publication_stale_base"},
+		{ReasonPublicationNotApproved, "publication_not_approved"}, {ReasonPublicationDurabilityRequired, "publication_durability_required"},
+		{ReasonManagementToolUnknown, "management_tool_unknown"}, {ReasonManagementToolUnauthorized, "management_tool_unauthorized"},
+		{ReasonManagementResultTooLarge, "management_result_too_large"},
+		{ReasonConfigInvalid, "config_invalid"}, {ReasonConfigApplyFailed, "config_apply_failed"},
 	}
 	seen := map[Reason]bool{}
 	for _, p := range want {
