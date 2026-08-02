@@ -56,3 +56,6 @@ func approvalView(r *approval.Request) ApprovalView {
 
 // approvalIDFromString wraps a raw id string as an approval.ID.
 func approvalIDFromString(s string) approval.ID { return approval.ID(s) }
+
+// ApprovalViewOf is the exported mapping used by the admin HTTP layer.
+func ApprovalViewOf(r *approval.Request) ApprovalView { return approvalView(r) }
