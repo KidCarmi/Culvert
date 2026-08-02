@@ -87,7 +87,7 @@ func (s *Spool) ProbeWritable() bool {
 // highest sequence scanned). The events are the full safe envelopes (no secrets by
 // construction); the export layer applies tenant/capability authorization and
 // bounds. This never returns an uncommitted tail record.
-func (s *Spool) CommittedForExport(part model.Partition, afterSeq uint64, maxRecords int) ([]model.Event, []uint64, uint64, error) {
+func (s *Spool) CommittedForExport(part model.Partition, afterSeq uint64, maxRecords int) (events []model.Event, seqs []uint64, cursor uint64, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	p := s.parts[part]
@@ -98,38 +98,34 @@ func (s *Spool) CommittedForExport(part model.Partition, afterSeq uint64, maxRec
 	copy(segs, p.segments)
 	sort.Slice(segs, func(i, j int) bool { return segs[i].id < segs[j].id })
 
-	var (
-		out  []model.Event
-		seqs []uint64
-	)
-	cursor := afterSeq
+	cursor = afterSeq
 	for _, sg := range segs {
-		if len(out) >= maxRecords {
+		if len(events) >= maxRecords {
 			break
 		}
 		if sg.lastSeq <= afterSeq {
 			continue
 		}
-		evs, err := s.readSegmentEventsLocked(sg)
-		if err != nil {
-			return nil, nil, cursor, err
+		evs, rerr := s.readSegmentEventsLocked(sg)
+		if rerr != nil {
+			return nil, nil, cursor, rerr
 		}
 		// Records within a segment are stored in ascending sequence starting at the
 		// segment's firstSeq, so the i-th committed record has sequence firstSeq+i.
 		for i := range evs {
-			if len(out) >= maxRecords {
+			if len(events) >= maxRecords {
 				break
 			}
 			seq := sg.firstSeq + uint64(i) // #nosec G115 -- i is a non-negative slice index
 			if seq <= afterSeq {
 				continue
 			}
-			out = append(out, evs[i])
+			events = append(events, evs[i])
 			seqs = append(seqs, seq)
 			cursor = seq
 		}
 	}
-	return out, seqs, cursor, nil
+	return events, seqs, cursor, nil
 }
 
 // readSegmentEventsLocked decodes all committed events in a segment (used by

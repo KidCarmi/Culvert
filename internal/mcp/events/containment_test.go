@@ -32,16 +32,16 @@ func newMgr(t *testing.T, dir string, be spool.Backend) *Manager {
 	return m
 }
 
-func critFacts(cap model.Capability, tenant string) DecisionFacts {
+func critFacts(capNS model.Capability, tenant string) DecisionFacts {
 	return DecisionFacts{
-		Capability: cap, Criticality: model.CritCritical, ActionClass: model.ActionClassWrite,
+		Capability: capNS, Criticality: model.CritCritical, ActionClass: model.ActionClassWrite,
 		Identity: model.IdentityEvidence{Tenant: tenant, PrincipalID: "u", PrincipalType: "human"},
 		Decision: model.DecisionEvidence{Action: "ALLOW", ReasonCode: "MCP.POLICY.OK", PolicyRevision: 1, CatalogRevision: 1},
 	}
 }
 
-func denialIn(cap model.Capability, i int) DenialInput {
-	return DenialInput{Capability: cap, Listener: "gw", Source: "203.0.113." + itoa(i%250), Reason: "auth_failed"}
+func denialIn(capNS model.Capability, i int) DenialInput {
+	return DenialInput{Capability: capNS, Listener: "gw", Source: "203.0.113." + itoa(i%250), Reason: "auth_failed"}
 }
 
 func itoa(i int) string {

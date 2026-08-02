@@ -385,6 +385,8 @@ func NewEvent(c EventConfig) (EventLimits, error) {
 
 // gatewayEventConfig is the conservative safe-default for the Gateway event
 // surface (business tool traffic — the higher-throughput surface).
+//
+//nolint:dupl // Gateway and Management default sets are intentionally parallel literals (independent tunables)
 var gatewayEventConfig = EventConfig{
 	SpoolMaxBytes:           512 << 20,
 	CriticalReserveBytes:    128 << 20,

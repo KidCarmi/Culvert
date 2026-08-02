@@ -183,27 +183,43 @@ func (s *Spool) recoverSegmentLocked(p *partition, sm segMeta, chain [32]byte, s
 		committedLen: sm.CommittedLen, records: 0, sealed: sm.Sealed,
 		exported: sm.Exported, createdNano: sm.CreatedNano,
 	}
+	evs, endChain, rverr := s.replaySegmentRecordsLocked(seg, buf, chain, scanRecs)
+	if rverr != nil {
+		return nil, nil, chain, rverr
+	}
+	// Truncate any uncommitted tail beyond the committed length.
+	if size > sm.CommittedLen {
+		_ = s.be.Truncate(path, sm.CommittedLen) //nolint:errcheck // best-effort tail truncation
+	}
+	return seg, evs, endChain, nil
+}
+
+// replaySegmentRecordsLocked replays the committed records in buf (after the
+// header) from the given chain anchor, verifying each record's hash-chain link
+// and authenticated encryption, and appending each to seg's recovered set. It
+// returns the recovered events and the segment's end chain.
+func (s *Spool) replaySegmentRecordsLocked(seg *segState, buf []byte, chain [32]byte, scanRecs *int) ([]recoveredEvent, [32]byte, error) {
 	off := segHeaderLen
 	var evs []recoveredEvent
 	for off < len(buf) {
 		*scanRecs++
 		if *scanRecs > s.lim.MaxRecoveryRecords() {
-			return nil, nil, chain, spErr(mcperr.ReasonEventSpoolCorrupt, "recovery record bound exceeded")
+			return nil, chain, spErr(mcperr.ReasonEventSpoolCorrupt, "recovery record bound exceeded")
 		}
 		f, derr := decodeRecordAt(buf[off:])
 		if derr != nil {
-			return nil, nil, chain, spWrap(mcperr.ReasonEventSpoolCorrupt, "record decode", derr)
+			return nil, chain, spWrap(mcperr.ReasonEventSpoolCorrupt, "record decode", derr)
 		}
 		if f.priorChain != chain {
-			return nil, nil, chain, spErr(mcperr.ReasonEventSpoolCorrupt, "hash-chain break")
+			return nil, chain, spErr(mcperr.ReasonEventSpoolCorrupt, "hash-chain break")
 		}
 		pt, next, verr := verifyRecord(s.cr, f)
 		if verr != nil {
-			return nil, nil, chain, spWrap(mcperr.ReasonEventSpoolCorrupt, "record verify", verr)
+			return nil, chain, spWrap(mcperr.ReasonEventSpoolCorrupt, "record verify", verr)
 		}
 		var e model.Event
 		if uerr := unmarshalEvent(pt, &e); uerr != nil || !e.VerifyDigest() {
-			return nil, nil, chain, spErr(mcperr.ReasonEventSpoolCorrupt, "record event invalid")
+			return nil, chain, spErr(mcperr.ReasonEventSpoolCorrupt, "record event invalid")
 		}
 		chain = next
 		seg.records++
@@ -213,11 +229,7 @@ func (s *Spool) recoverSegmentLocked(p *partition, sm segMeta, chain [32]byte, s
 		})
 		off += f.total
 	}
-	// Truncate any uncommitted tail beyond the committed length.
-	if size > sm.CommittedLen {
-		_ = s.be.Truncate(path, sm.CommittedLen) //nolint:errcheck // best-effort tail truncation
-	}
-	return seg, evs, chain, nil
+	return evs, chain, nil
 }
 
 // reconstructReceipt rebuilds a bound receipt for a recovered committed event so
