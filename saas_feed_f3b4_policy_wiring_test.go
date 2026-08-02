@@ -456,7 +456,12 @@ func TestF3b4Finding2_AuthorityPersistsAcrossRestart(t *testing.T) {
 		Protocol: saasFeedProtocolV1, RefreshSeconds: 3600, SchemaVersion: saasStoreSchemaVersion,
 	})
 	snap := ConfigSnapshot{Version: 7, Epoch: 3, CAFingerprint: "cp-fingerprint-01"}
+	// Seed the fencing-epoch ratchet and RESTORE it on cleanup — leaking a non-zero epoch
+	// would make every later applyConfigSnapshot with epoch 0 fail the stale-epoch fence
+	// under a shuffled run order.
+	prevEpoch := dpLastSeenEpoch.Load()
 	dpLastSeenEpoch.Store(3)
+	t.Cleanup(func() { dpLastSeenEpoch.Store(prevEpoch) })
 	persistSaaSFeedAuthorityMirror(snap)
 
 	// A valid mirror must now exist.

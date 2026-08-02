@@ -17,10 +17,16 @@ import (
 func swapFeedRuntimeGlobals(t *testing.T) {
 	t.Helper()
 	prevRT, prevSched, prevAuth := globalSaaSFeedRuntime, globalSaaSFeedScheduler, globalSaaSFeedAuthorityStore
+	// The production runtime uses the PROCESS-WIDE saasEffectiveView as its live store, so
+	// arming the lifecycle installs a view the policy path reads. Isolate + restore it, or a
+	// leaked non-nil view would make other tests' built-in-category lookups resolve against
+	// the admin-only path and miss (order-dependent under -shuffle).
+	prevView := saasEffectiveView.Swap(nil)
 	t.Cleanup(func() {
 		globalSaaSFeedRuntime = prevRT
 		globalSaaSFeedScheduler = prevSched
 		globalSaaSFeedAuthorityStore = prevAuth
+		saasEffectiveView.Swap(prevView)
 	})
 }
 
