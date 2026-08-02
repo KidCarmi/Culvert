@@ -98,6 +98,8 @@ func importCategoryOverrides(b *configBackup, replaceMode bool) {
 	if err := globalCategoryOverrides.Save(); err != nil {
 		logger.Printf("ConfigImport: category overrides save: %v", err)
 	}
+	// F3b-4 finding #5: recompose the policy view for the imported overrides (local, no network).
+	recomposeSignedFeedOverrides()
 }
 
 // mergeCategoryOverrides unions incoming onto base (incoming wins on key
@@ -347,6 +349,9 @@ func putSaaSFeedOverrides(w http.ResponseWriter, r *http.Request) {
 	}
 	auditEvent(r, "saasfeed.overrides", "replace", "category overrides updated")
 	saveConfigVersion(sessionAdmin(r), "saasfeed.overrides")
+	// F3b-4 finding #5: apply the new overrides to the policy hot path NOW (local recompose,
+	// no network) so an add/change/delete-all takes effect immediately.
+	recomposeSignedFeedOverrides()
 	pubErr := publishCurrentConfigSnapshot()
 	resp := map[string]any{"ok": true, "overrides": globalCategoryOverrides.Get()}
 	if pubErr != nil {

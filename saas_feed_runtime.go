@@ -130,11 +130,19 @@ func newSaaSFeedRuntime(dir string, overrides *catoverride.Store, status *saasFe
 	if err != nil {
 		return nil, err
 	}
-	authority, err := newSaaSFeedAuthorityStore(dir)
-	if err != nil {
-		return nil, err
+	// Re-use the authority store wired early (before the DP last-good replay, F3b-4
+	// finding #2) when present; otherwise construct it now. Both target the same file.
+	authority := globalSaaSFeedAuthorityStore
+	if authority == nil {
+		authority, err = newSaaSFeedAuthorityStore(dir)
+		if err != nil {
+			return nil, err
+		}
 	}
-	live := newFeedLiveStore()
+	// Use the PROCESS-WIDE effective-view holder the policy hot path reads, so a signed
+	// cutover / override recompose is observed by matchCategory/lookupHostCategory as a
+	// single atomic pointer swap (F3b-4 hot-path routing).
+	live := saasEffectiveView
 	coord := newActivationCoordinator(genRoot, floor, activation, client.verifier, live,
 		feedOverrideProvider{store: overrides}, osReverifyReader, compiledMinFeedVersion, now, saasFeedDefaultFutureSkew)
 	return &saasFeedRuntime{
@@ -271,9 +279,11 @@ func (rt *saasFeedRuntime) runRefreshLocked(ctx context.Context) saasFeedRefresh
 	if err != nil {
 		return rt.recordAcquireError(err)
 	}
-	if ar.ETag != "" {
-		rt.setETag(ar.ETag)
-	}
+	// NOTE (F3b-4 finding #4): the observed ETag is NOT committed here. It is advanced only
+	// once we know the candidate is the live generation — a true 304 keeps the current ETag,
+	// a committed activation adopts the new one, and a FAILED activation deliberately retains
+	// the previous ETag so the next poll re-fetches the candidate instead of a 304 masking
+	// the failed activation as fresh. applyAcquireResult owns that decision per outcome.
 	return rt.applyAcquireResult(ctx, ar)
 }
 
@@ -285,10 +295,34 @@ func (rt *saasFeedRuntime) applyAcquireResult(ctx context.Context, ar AcquireRes
 		// Readiness rejected before any network I/O (defense-in-depth; the outer gate
 		// already handled disabled/waiting). Not a failure.
 		return refreshSkipped
-	case acquireNotModified, acquireIdempotent:
-		// 304 or same-version: recompute freshness on the CURRENT active manifest; no
-		// activation, provenance unchanged. A 304 near expiry is impossible here (we sent
-		// no If-None-Match near expiry), so a 304 means genuinely-unchanged upstream.
+	case acquireNotModified:
+		// TRUE HTTP 304: upstream unchanged since the ETag we sent (which belongs to the
+		// active generation). Recompute freshness on the CURRENT active manifest; no
+		// activation, provenance unchanged, and the ETag stays as-is. A 304 near expiry is
+		// impossible here (we sent no If-None-Match near expiry), so it means genuinely
+		// unchanged upstream.
+		exp, stale := rt.activeExpiryAndStale()
+		rt.status.noteNoChange(exp, stale)
+		return refreshNoChange
+	case acquireIdempotent:
+		// The verified generation bytes already existed on disk (F3b-4 finding #3). This is
+		// NOT a 304: it carries a full verified Generation. Two cases, distinguished by
+		// version:
+		//   (a) it IS the currently-active generation (a near-expiry unconditional refetch)
+		//       — a genuine no-change; refresh the ETag to the just-fetched manifest's.
+		//   (b) it is an ORPHAN — persisted before a crash that interrupted its floor/
+		//       activation commit, so it is on disk yet never became live and is strictly
+		//       newer than the active generation. It MUST run the activation coordinator so
+		//       its floor/activation transaction completes; mere file existence is NOT a
+		//       successful activation.
+		// Re-activating an already-active generation would trip the strictly-greater floor
+		// gate, so only a genuinely-newer orphan is routed to activation.
+		if ar.Generation != nil && ar.Generation.FeedVersion > rt.activeVersion() {
+			return rt.activateAcquired(ctx, ar)
+		}
+		if ar.ETag != "" {
+			rt.setETag(ar.ETag) // the refetched bytes ARE the active generation — ETag is valid
+		}
 		exp, stale := rt.activeExpiryAndStale()
 		rt.status.noteNoChange(exp, stale)
 		return refreshNoChange
@@ -323,21 +357,64 @@ func (rt *saasFeedRuntime) activateAcquired(ctx context.Context, ar AcquireResul
 		case errors.Is(err, errActivateConfigChurn), errors.Is(err, errActivateOverrides):
 			class = saasFeedErrConfig
 		}
+		// Activation FAILED: the previous LKG is still live. Deliberately do NOT advance the
+		// ETag (finding #4) — leaving it retained means the next poll re-fetches this
+		// candidate rather than receiving a 304 that would mask the failed activation as a
+		// successful no-change and stall re-activation until the origin ETag changes.
 		rt.status.noteAttemptFailure(class, 200, canceled, "activation failed")
 		return rt.failedOrCanceled(canceled)
 	}
 	if act.Outcome != activationCommitted {
 		// Aborted to LKG (config churn / durability) or idempotent no-op: live content
-		// unchanged. Treat a non-error abort-to-LKG as a no-change (LKG preserved).
+		// unchanged, so the ETag must keep matching the still-live generation — do NOT
+		// advance it. Treat a non-error abort-to-LKG as a no-change (LKG preserved).
 		exp, stale := rt.activeExpiryAndStale()
 		rt.status.noteNoChange(exp, stale)
 		return refreshNoChange
+	}
+	// Cutover committed: the candidate is now the live generation, so its manifest ETag is
+	// the active ETag. Advance it ONLY now — never before we know activation succeeded.
+	if ar.ETag != "" {
+		rt.setETag(ar.ETag)
 	}
 	view := rt.live.Current()
 	delta := computeActivationDelta(prev, view)
 	rt.status.noteActivation(view, delta)
 	rt.noteOverrideFootprint()
 	return refreshActivated
+}
+
+// recomposeOverrides rebuilds and atomically swaps the effective category view for the
+// CURRENT authoritative overrides with NO network fetch (F3b-4 finding #5). An override-only
+// change therefore takes effect on the policy hot path immediately — it does not depend on a
+// new feed generation or a non-304 response (a 304 is irrelevant to whether overrides apply).
+// It recomposes onto the committed signed generation when one is active, else onto the
+// embedded baseline. Serialized through the coordinator mutex, so it can never interleave
+// with a signed activation and readers observe only a complete old/new view. An invalid or
+// unavailable override snapshot leaves the live view UNTOUCHED (logged, no swap).
+func (rt *saasFeedRuntime) recomposeOverrides(ctx context.Context) {
+	res, err := rt.coord.RebuildForOverrides(ctx)
+	if err != nil {
+		if logger != nil {
+			logger.Printf("SaaSFeed: override recompose failed (previous view unchanged): %s", sanitizeLog(err.Error()))
+		}
+		return
+	}
+	if res.Outcome == activationCommitted {
+		rt.noteOverrideFootprint()
+	}
+}
+
+// recomposeSignedFeedOverrides triggers a local, no-network effective-view recompose for the
+// current authoritative overrides (F3b-4 finding #5). Safe no-op when the signed-feed
+// lifecycle is unarmed. Call AFTER the durable override set has been updated (admin PUT /
+// import / config-version rollback / accepted CP snapshot).
+func recomposeSignedFeedOverrides() {
+	rt := globalSaaSFeedRuntime
+	if rt == nil {
+		return
+	}
+	rt.recomposeOverrides(resolveLifecycleCtx())
 }
 
 // noteOverrideFootprint publishes the current applied-override count + revision so the

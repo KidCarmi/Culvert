@@ -45,12 +45,16 @@ type Entry struct {
 
 // Store manages URL categories with thread-safe, file-backed persistence.
 // index maps lowercase(category-name) → set of lowercase host strings for O(1)
-// host membership checks during policy evaluation.
+// host membership checks during policy evaluation. adminIndex is the same,
+// restricted to admin-created (BuiltIn=false) categories — the signed-feed
+// F3b-4 cutover consults it so the SaaS taxonomy (BuiltIn=true) is served by
+// the atomic effective view instead of double-served from here.
 type Store struct {
-	mu      sync.RWMutex
-	entries []*Entry
-	index   map[string]map[string]bool // lowercase cat → lowercase host set
-	path    string
+	mu         sync.RWMutex
+	entries    []*Entry
+	index      map[string]map[string]bool // lowercase cat → lowercase host set (ALL entries)
+	adminIndex map[string]map[string]bool // same, BuiltIn=false entries only
+	path       string
 }
 
 // New builds a store over entries and its derived host index.
@@ -60,10 +64,11 @@ func New(entries []*Entry) *Store {
 	return s
 }
 
-// rebuildIndex reconstructs the category→hosts index from s.entries.
+// rebuildIndex reconstructs the category→hosts indices from s.entries.
 // Caller must hold s.mu (write or be the sole owner).
 func (s *Store) rebuildIndex() {
 	idx := make(map[string]map[string]bool, len(s.entries))
+	admin := make(map[string]map[string]bool)
 	for _, e := range s.entries {
 		key := strings.ToLower(e.Name)
 		set := make(map[string]bool, len(e.Hosts))
@@ -71,8 +76,12 @@ func (s *Store) rebuildIndex() {
 			set[strings.ToLower(strings.TrimSuffix(h, "."))] = true
 		}
 		idx[key] = set
+		if !e.BuiltIn {
+			admin[key] = set
+		}
 	}
 	s.index = idx
+	s.adminIndex = admin
 }
 
 // defaultCategoriesJSON is the embedded SaaS category seed list.
@@ -209,12 +218,22 @@ func (s *Store) Set(name string, hosts []string, builtIn bool) error {
 		}
 		e.Hosts = hosts
 		s.index[key] = set
+		if e.BuiltIn {
+			delete(s.adminIndex, key)
+		} else {
+			s.adminIndex[key] = set
+		}
 		s.mu.Unlock()
 		s.Save()
 		return nil
 	}
 	s.entries = append(s.entries, &Entry{Name: name, Hosts: hosts, BuiltIn: builtIn})
 	s.index[key] = set
+	if builtIn {
+		delete(s.adminIndex, key)
+	} else {
+		s.adminIndex[key] = set
+	}
 	s.mu.Unlock()
 	s.Save()
 	return nil
@@ -230,6 +249,7 @@ func (s *Store) Delete(name string) error {
 		}
 		s.entries = append(s.entries[:i], s.entries[i+1:]...)
 		delete(s.index, key)
+		delete(s.adminIndex, key)
 		s.mu.Unlock()
 		s.Save()
 		return nil
@@ -324,6 +344,82 @@ func (s *Store) MatchesHost(cat Category, host string) bool {
 		}
 	}
 	return false
+}
+
+// MatchesHostAdmin is MatchesHost restricted to admin-created (BuiltIn=false)
+// categories. The signed-feed F3b-4 policy path consults this so the built-in /
+// embedded SaaS taxonomy is served exclusively by the atomic effective view and
+// never double-served (or served stale) from this store after a signed
+// activation supersedes it. Same normalization + exact-then-suffix semantics as
+// MatchesHost.
+func (s *Store) MatchesHostAdmin(cat Category, host string) bool {
+	host = hostutil.NormalizeHost(host)
+	catKey := strings.ToLower(string(cat))
+
+	s.mu.RLock()
+	hostSet := s.adminIndex[catKey]
+	s.mu.RUnlock()
+
+	if hostSet == nil {
+		return false
+	}
+	if hostSet[host] {
+		return true
+	}
+	for i, ch := range host {
+		if ch == '.' && hostSet[host[i+1:]] {
+			return true
+		}
+	}
+	return false
+}
+
+// LookupHostAdmin is LookupHost restricted to admin-created (BuiltIn=false)
+// categories (the admin layer of the F3b-4 source-aware resolution). Same
+// exact-or-subdomain grammar as LookupHost.
+func (s *Store) LookupHostAdmin(host string) (category, matchedBy string, ok bool) {
+	h := hostutil.NormalizeHost(host)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, e := range s.entries {
+		if e.BuiltIn {
+			continue
+		}
+		for _, p := range e.Hosts {
+			pl := strings.ToLower(p)
+			if h == pl || strings.HasSuffix(h, "."+pl) {
+				return e.Name, p, true
+			}
+		}
+	}
+	return "", "", false
+}
+
+// BuiltInHostCategories returns a normalized host→category map over the
+// BuiltIn=true entries (the embedded/seeded SaaS taxonomy + rule-vocabulary
+// built-ins). It is the initial effective-view baseline for the signed feed:
+// building it from the live store — not the compiled DefaultEntries — preserves
+// any admin host-additions to built-in categories and any legacy-merged SaaS
+// hosts already persisted, so the pre-signed-activation policy result is
+// byte-identical to today's full-store match. Empty-host entries (e.g. UT1
+// name-seeds) contribute nothing. Later keys win on collision (deterministic;
+// callers hold no ordering contract on duplicate host keys across categories).
+func (s *Store) BuiltInHostCategories() map[string]string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string]string)
+	for _, e := range s.entries {
+		if !e.BuiltIn {
+			continue
+		}
+		for _, h := range e.Hosts {
+			nh := hostutil.NormalizeHost(strings.TrimSpace(h))
+			if nh != "" {
+				out[nh] = e.Name
+			}
+		}
+	}
+	return out
 }
 
 // LookupHost resolves a hostname to its category by scanning entries

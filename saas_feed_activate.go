@@ -241,6 +241,27 @@ func (c *activationCoordinator) commitWithConfigStability(ctx context.Context, r
 		fmt.Errorf("%w", errActivateConfigChurn)
 }
 
+// overridesEmpty reports whether an override set is a no-op (no add / recategorize /
+// tombstone), so the embedded baseline can keep its "compiled" provenance unchanged.
+func overridesEmpty(ov catoverride.Overrides) bool {
+	return len(ov.Added) == 0 && len(ov.Recategorized) == 0 && len(ov.Tombstones) == 0
+}
+
+// buildEmbeddedComposedView builds the embedded-baseline effective view with the CURRENT
+// authoritative overrides layered on (F3b-4: override-only changes apply on the policy path
+// even before the first signed activation). With no overrides it returns the raw baseline
+// with the unchanged "compiled" provenance; an override-provider error also degrades to the
+// raw baseline (never fail-closed on the taxonomy). The caller holds c.mu.
+func (c *activationCoordinator) buildEmbeddedComposedView() *effectiveCategoryView {
+	base := embeddedBaselineEntries()
+	ov, rev, err := c.overrides.Current()
+	if err != nil || overridesEmpty(ov) {
+		return newEffectiveView(base, effectiveCategoryView{Source: sourceEmbedded, ConfigRevision: "compiled"})
+	}
+	composed := catoverride.ComposeView(base, ov)
+	return newEffectiveView(composed, effectiveCategoryView{Source: sourceEmbedded, ConfigRevision: rev})
+}
+
 // buildEffectiveView composes the feed-owned snapshot with the current overrides OFF-PATH
 // and validates the result before it can be swapped in.
 func (c *activationCoordinator) buildEffectiveView(rg *reverifiedGeneration, ov catoverride.Overrides, rev, provenance string, stale bool) (*effectiveCategoryView, error) {
@@ -354,9 +375,31 @@ func (c *activationCoordinator) RebuildForOverrides(ctx context.Context) (activa
 	}
 	arec, st, _ := c.activation.Read()
 	if st != activationValid {
-		// No committed active generation ⇒ overrides have no signed base to layer onto;
-		// the embedded baseline (if any) is unaffected. Deterministic no-op.
-		return activationResult{Outcome: activationAbortedLKG}, nil
+		// No committed signed generation ⇒ recompose the EMBEDDED baseline with the new
+		// overrides and swap atomically (F3b-4 finding #5: an override-only change takes
+		// effect on the policy hot path even before the first signed activation; an explicit
+		// empty override set restores the raw base categories). An invalid/unavailable
+		// override snapshot leaves the current live view UNTOUCHED (abort, no swap).
+		base := embeddedBaselineEntries()
+		ov, rev, err := c.overrides.Current()
+		if err != nil {
+			return activationResult{}, fmt.Errorf("%w: %v", errActivateOverrides, err)
+		}
+		var view *effectiveCategoryView
+		if overridesEmpty(ov) {
+			view = newEffectiveView(base, effectiveCategoryView{Source: sourceEmbedded, ConfigRevision: "compiled"})
+		} else {
+			composed := catoverride.ComposeView(base, ov)
+			if verr := validateEffectiveComposition(composed); verr != nil {
+				return activationResult{}, fmt.Errorf("%w: %v", errActivateStore, verr)
+			}
+			view = newEffectiveView(composed, effectiveCategoryView{Source: sourceEmbedded, ConfigRevision: rev})
+		}
+		c.live.Swap(view)
+		return activationResult{
+			Outcome: activationCommitted, Version: 0,
+			Provenance: activationProvenanceCached, ConfigRev: view.ConfigRevision,
+		}, nil
 	}
 	// Re-verify the exact active generation offline (bound to the record's digests).
 	rg, err := reverifyGeneration(c.read, c.verifier, c.genRoot, arec.GenerationID, bindingFromActivation(arec))

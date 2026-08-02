@@ -14,14 +14,46 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/KidCarmi/Culvert/internal/catoverride"
 )
 
-// globalSaaSFeedAuthorityStore is the process-wide managed-DP authority mirror store,
-// wired at startup by the feed lifecycle. Nil while unwired (tests / pre-lifecycle),
-// in which case the mirror write-point is a safe no-op.
+// globalSaaSFeedAuthorityStore is the process-wide managed-DP authority mirror store. It is
+// wired EARLY — before a data plane replays its last-good ConfigSnapshot (F3b-4 finding #2) —
+// and re-used by the signed-feed runtime. Nil while unwired (tests / pre-wiring), in which
+// case the mirror write-point is a safe no-op.
 var globalSaaSFeedAuthorityStore *saasFeedAuthorityStore
+
+// saasFeedDir is the on-disk root for the signed-feed durable stores (generations, floor,
+// activation, authority mirror). It mirrors the urlcategories startup slice's derivation
+// (filepath.Dir(CategoryOverridesPath)) so the early authority wiring and the later runtime
+// wiring target the same directory.
+func saasFeedDir() string { return filepath.Join(dataDir, "saas_feed") }
+
+// wireSaaSFeedAuthorityStore constructs + publishes the managed-DP authority mirror store if
+// not already wired. It MUST run before startDataPlane replays the last-good snapshot so that
+// replay persists the authoritative feed config on the first restart after upgrade — closing
+// the finding-#2 window where the store was wired only later (in initURLCategories) and the
+// replay's mirror write silently no-op'd, leaving the node waiting_for_authority until the CP
+// bumped its config version. Idempotent; the signed-feed runtime re-uses this same instance.
+func wireSaaSFeedAuthorityStore() {
+	if globalSaaSFeedAuthorityStore != nil {
+		return
+	}
+	dir := saasFeedDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		logger.Printf("SaaSFeedAuthority: cannot create authority store dir: %s", sanitizeLog(err.Error()))
+		return
+	}
+	store, err := newSaaSFeedAuthorityStore(dir)
+	if err != nil {
+		logger.Printf("SaaSFeedAuthority: cannot wire authority store: %s", sanitizeLog(err.Error()))
+		return
+	}
+	globalSaaSFeedAuthorityStore = store
+}
 
 // currentFeedAuthority maps the cluster role to the feed's ownership domain. Read under
 // clusterRoleMu to stay race-safe against a control-plane enable/join transition.
@@ -189,11 +221,15 @@ func buildSaaSFeedAuthorityRecord(d saasFeedDurable, overrides catoverride.Overr
 }
 
 // persistSaaSFeedAuthorityMirror writes the durable authority mirror on a managed DP
-// AFTER an authenticated, fenced, validated CP snapshot has been accepted and applied.
-// It is a no-op on a non-managed node or when the store is unwired. A write failure is
-// logged (non-fatal): the in-memory authoritative config still drives this run and the
-// next accepted snapshot retries — but a managed DP that has NEVER durably mirrored will
-// fall to WaitingForAuthority on the next restart (fail-closed), never to local defaults.
+// AFTER an authenticated, fenced, validated CP snapshot has been accepted and applied —
+// including the last-good snapshot REPLAYED at startup, because the store is now wired
+// early (wireSaaSFeedAuthorityStore, before startDataPlane's replay). So the first restart
+// after upgrade durably mirrors the authoritative config without depending on the CP
+// bumping its version. It is a no-op on a non-managed node or when the store is still
+// unwired. A genuine write failure is logged (non-fatal): the in-memory authoritative
+// config still drives this run, the next accepted/replayed snapshot retries, and only a
+// managed DP whose mirror write keeps failing falls to WaitingForAuthority on a later
+// restart (fail-closed) — never to local defaults.
 func persistSaaSFeedAuthorityMirror(snap ConfigSnapshot) {
 	if currentFeedAuthority() != authorityManagedDP {
 		return

@@ -1148,6 +1148,52 @@ overrides from F3a-1).
   `/metrics`; degraded recovery is critically visible (invariant 8).
 - **Rollback:** additive observability; safe to revert.
 
+#### F3b-4 (amended) — effective-view policy routing (the final runtime wiring slice)
+
+A design omission corrected before merge (Codex P1 #1/#5): the original slicing built the
+effective-view holder and retired the legacy `globalSaaSFeed` catStore writer but never
+routed the activated view into policy enforcement, so an enabled feed downloaded, verified,
+persisted, and "activated" a view **no policy reader consulted**. F3b-4 is the final runtime
+wiring slice and therefore explicitly ALSO owns:
+
+- **Atomic hot-path routing.** `matchCategory` / `lookupHostCategory` (`policy.go`) — the
+  sole per-request category seam, shared by single-category and category-group rules across
+  the HTTP/CONNECT/WebSocket dispatch (SOCKS5/CDR do not consult categories) — consult a
+  PROCESS-WIDE `atomic.Pointer[effectiveCategoryView]` (`saasEffectiveView`) that the
+  signed-feed runtime uses as its live store. A cutover is one lock-free pointer swap:
+  readers observe an entirely-old or entirely-new view, never a hybrid. No live policy change
+  occurs before the S3 floor quorum + S4 activation-record durability commit (§B.5); a failed
+  activation leaves the hot path on the previous complete view; restart recovery installs the
+  exact committed view before the proxy serves.
+- **SaaS-source replacement without touching UT1 or admin categories.** The embedded/signed
+  SaaS taxonomy is served EXCLUSIVELY from the atomic view; catStore contributes
+  ADMIN-created (`BuiltIn=false`) categories only, via a new `MatchesHostAdmin` /
+  `LookupHostAdmin` (a second `adminIndex`). The initial view is the embedded baseline built
+  from catStore's `BuiltIn=true` entries (preserving admin host-additions to built-in
+  categories + already-persisted legacy hosts), so the pre-signed-activation match result is
+  byte-identical to the prior full-store behavior. UT1 (`communityDB`) and the two-tier
+  precedence (admin → SaaS view → UT1) are unchanged; no longest-wins/priority/first-match
+  redesign; suffix + whole-candidate-collision semantics preserved. When the view is not
+  installed (lifecycle unarmed / disabled build) the full catStore path serves unchanged.
+  Signed data is never appended to catStore (the legacy merge stays retired), so there is
+  exactly one SaaS writer and no double/conflicting match across the embedded↔signed cutover.
+- **Override-only recomposition WITHOUT a network fetch.** A validated authoritative override
+  change (admin PUT / import / config-version rollback / accepted CP snapshot) recomposes the
+  effective view locally via the coordinator's `RebuildForOverrides` (serialized through the
+  activation mutex) onto the committed signed generation, or the embedded baseline when none
+  is active — add/change/delete-all take effect on the policy hot path immediately; an
+  explicit empty override set restores the base categories; an invalid recomposition leaves
+  the prior view untouched. A 304 is irrelevant to whether overrides apply.
+- **Enforcement changes only after the durable commit point.** The live pointer swap (S5) is
+  the ONLY enforcement-visible mutation and happens strictly after S3+S4 commit; the observed
+  ETag advances only after a committed cutover (a failed activation retains the prior ETag so
+  the next poll re-fetches the candidate rather than a 304 masking failure as success); an
+  `acquireIdempotent` result (verified generation already on disk, e.g. a crash-orphaned
+  candidate) runs the activation coordinator rather than being classed as a no-change.
+
+This amendment changes NO F0/F3 trust, floor, activation, or matching invariant; it only
+connects the already-committed effective view to the readers that enforce it.
+
 ## C.1 F5 parallelization — NORMATIVE constraints (R1 obligation 9)
 
 **F5 (the CI publisher `publish-feeds.yml`) MAY proceed in parallel with F3**, but

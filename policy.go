@@ -1538,8 +1538,25 @@ func matchFQDN(pattern, host string) bool { return hostutil.MatchFQDN(pattern, h
 func matchFQDNNorm(pattern, host string) bool { return hostutil.MatchFQDNNorm(pattern, host) }
 
 func matchCategory(cat URLCategory, host string) bool {
-	// Layer 1: admin-managed catStore — exact + suffix match (fast, in-memory).
-	if catStore.MatchesHost(cat, host) {
+	// F3b-4 source-aware resolution. When the signed-feed effective view is installed
+	// (offline at startup, atomically replaced on a committed activation / override
+	// recompose), the SaaS taxonomy is served EXCLUSIVELY from that view and catStore
+	// contributes ADMIN-created categories only — so a signed activation cannot be
+	// double-served or served stale from catStore, and policy readers observe a single
+	// complete view via one atomic pointer load. When the view is absent (lifecycle
+	// unarmed / disabled build / unit tests) the full catStore taxonomy serves, byte-for-
+	// byte as before.
+	if view := saasEffectiveView.Current(); view != nil {
+		if catStore.MatchesHostAdmin(cat, host) {
+			return true
+		}
+		// Membership check (not a short-circuit): a view classification under a DIFFERENT
+		// category must still fall through to the UT1 layer, matching the original
+		// cross-layer OR semantics.
+		if c, ok := view.LookupHost(host); ok && strings.EqualFold(c, string(cat)) {
+			return true
+		}
+	} else if catStore.MatchesHost(cat, host) {
 		return true
 	}
 	// Layer 2: community BadgerDB feed — domain-walking point lookups.
@@ -1555,8 +1572,18 @@ func matchCategory(cat URLCategory, host string) bool {
 // Returns (category, tier, matchedBy) where tier is "admin", "community", or "none".
 // Used by the admin URL-lookup API endpoint and policy test response enrichment.
 func lookupHostCategory(host string) (category, tier, matchedBy string) {
-	// Layer 1: admin-managed catStore — exact + suffix match.
-	if name, pattern, ok := catStore.LookupHost(host); ok {
+	// F3b-4 source-aware resolution (see matchCategory). With the signed-feed effective
+	// view installed: admin-created categories (catStore, BuiltIn=false) first, then the
+	// SaaS taxonomy from the atomic view (tier "saas"), then UT1. Without it, the full
+	// catStore taxonomy serves as before (tier "admin").
+	if view := saasEffectiveView.Current(); view != nil {
+		if name, pattern, ok := catStore.LookupHostAdmin(host); ok {
+			return name, "admin", pattern
+		}
+		if c, ok := view.LookupHost(host); ok {
+			return c, "saas", normalizeHost(host)
+		}
+	} else if name, pattern, ok := catStore.LookupHost(host); ok {
 		return name, "admin", pattern
 	}
 
