@@ -28,6 +28,19 @@ func (s *Spool) Recover() (RecoverReport, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Recover is a full rebuild from disk and is idempotent: reset in-memory
+	// partition state and the replay window before reconstructing, so calling it
+	// more than once (or after New) never double-counts segments.
+	for _, p := range s.parts {
+		p.segments = nil
+		p.totalBytes = 0
+		p.nextSeq = 1
+		p.nextSegID = 1
+		p.lastChain = [32]byte{}
+	}
+	s.replay = map[string]replayEntry{}
+	s.replayFIFO = nil
+
 	rep := RecoverReport{Records: map[model.Partition]int{}}
 	var recovered []recoveredEvent
 
