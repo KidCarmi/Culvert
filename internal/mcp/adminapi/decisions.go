@@ -228,7 +228,7 @@ type searchScan struct {
 // bounded scan budget was hit and the caller should stop. The resume cursor
 // always points at the LAST event actually EXAMINED, so the event that triggered
 // the scan-budget stop is re-read on the next call and never skipped.
-func (st *searchScan) scan(part string, afterSeq uint64, out *[]DecisionView) (string, bool, error) {
+func (st *searchScan) scan(part string, afterSeq uint64, out *[]DecisionView) (resumeCursor string, done bool, err error) {
 	for {
 		evs, seqs, next, err := st.svc.reader.CommittedEvents(st.capability, part, afterSeq, st.batch)
 		if err != nil {

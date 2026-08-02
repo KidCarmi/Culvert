@@ -14,26 +14,23 @@ type fakeReader struct {
 	byPart map[string][]evmodel.Event
 }
 
-func (f *fakeReader) CommittedEvents(_, partition string, afterSeq uint64, maxN int) ([]evmodel.Event, []uint64, uint64, error) {
+func (f *fakeReader) CommittedEvents(_, partition string, afterSeq uint64, maxN int) (events []evmodel.Event, seqs []uint64, next uint64, err error) {
 	all := f.byPart[partition]
-	var (
-		evs  []evmodel.Event
-		seqs []uint64
-	)
-	next := afterSeq
+	next = afterSeq
+	var seq uint64 // 1-based sequence; a counter avoids an int->uint64 conversion (gosec G115)
 	for i := range all {
-		seq := uint64(i + 1)
+		seq++
 		if seq <= afterSeq {
 			continue
 		}
-		if len(evs) >= maxN {
+		if len(events) >= maxN {
 			break
 		}
-		evs = append(evs, all[i])
+		events = append(events, all[i])
 		seqs = append(seqs, seq)
 		next = seq
 	}
-	return evs, seqs, next, nil
+	return events, seqs, next, nil
 }
 
 func decEvent(tenant, id, action, reason, rule string) evmodel.Event {
