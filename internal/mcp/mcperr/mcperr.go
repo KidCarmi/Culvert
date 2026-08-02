@@ -397,6 +397,93 @@ const (
 	// (findings, redactions, extracted destinations, bytes scanned, safe-result
 	// bytes) on a high-risk operation. Fails closed.
 	ReasonInspectionLimitExceeded
+
+	// ── PR-8 durable decision-event reasons ─────────────────────────────────
+	// Appended at the end; every value above is frozen. These name the ways a
+	// decision event can be rejected before persistence, a durable commit can
+	// fail, a receipt can be forged/mismatched, and an export can be refused.
+
+	// ReasonEventInvalid — a decision event failed structural validation before
+	// persistence for a reason without a more specific code below (malformed
+	// envelope, phase/category mismatch, unknown enum). Fails closed; no
+	// malformed event ever partially publishes.
+	ReasonEventInvalid
+	// ReasonEventSchemaVersion — the event envelope carried an unknown or
+	// unsupported schema version. Fails closed (no forward-guessing of an
+	// unrecognised layout).
+	ReasonEventSchemaVersion
+	// ReasonEventPartitionMismatch — the event's partition does not match its
+	// category/criticality: a critical operation routed outside P-CRIT, or an
+	// authentication/authorization denial routed into P-CRIT. Fails closed.
+	ReasonEventPartitionMismatch
+	// ReasonEventTenantConflict — the event mixes tenants, or mixes Management
+	// and Gateway capability fields, in a way that would break tenant/capability
+	// isolation. Fails closed.
+	ReasonEventTenantConflict
+	// ReasonEventSecretPresent — the event carried raw token, credential,
+	// private-key or other secret-classified material. Structural exclusion
+	// rejects it before it can reach the spool; never redacted-in-place.
+	ReasonEventSecretPresent
+	// ReasonEventEvidenceMissing — a required revision or decision-evidence field
+	// was absent (e.g. a critical decision with no action-class binding, an
+	// outcome event referencing no committed decision). Fails closed.
+	ReasonEventEvidenceMissing
+	// ReasonEventTooLarge — the encoded event, or one of its bounded fields,
+	// exceeded the configured event/metadata byte bound. Fails closed.
+	ReasonEventTooLarge
+	// ReasonEventCorrelationMalformed — an event ID, replay ID or correlation ID
+	// was malformed or out of the accepted shape/bounds. Fails closed.
+	ReasonEventCorrelationMalformed
+	// ReasonEventReplayConflict — a second, DIFFERING critical event was appended
+	// under a replay identity already bound to a different committed event within
+	// the retained window. Deterministic duplicate rejection; never two differing
+	// committed critical events under one replay identity.
+	ReasonEventReplayConflict
+	// ReasonEventQueueSaturated — bounded-queue admission failed. For a critical
+	// event this is a critical commit FAILURE (fail closed), not an invitation to
+	// drop the event.
+	ReasonEventQueueSaturated
+	// ReasonEventCommitFailed — a durable commit failed after admission (short
+	// write, append error, fsync/dir-sync error, checkpoint-metadata failure,
+	// rotation failure). Admission is not durability; the record is not
+	// acknowledged and the triggering critical operation fails closed.
+	ReasonEventCommitFailed
+	// ReasonEventEncryptionUnavailable — the spool encryption key/provider was
+	// unavailable at commit time. Treated as a commit FAILURE, never a plaintext
+	// fallback. Fails closed.
+	ReasonEventEncryptionUnavailable
+	// ReasonEventEncryptionFailed — authenticated encryption (or its inverse on
+	// recovery) failed. Treated as a commit/integrity FAILURE, never a plaintext
+	// fallback. Fails closed.
+	ReasonEventEncryptionFailed
+	// ReasonEventStorageFull — storage returned ENOSPC and deterministic
+	// reclamation could not free space without reclaiming unexported critical
+	// evidence. Fails closed; the domain enters critical-durability-degraded.
+	ReasonEventStorageFull
+	// ReasonEventSpoolCorrupt — segment/record/checkpoint integrity verification
+	// failed, or recovery metadata was ambiguous/corrupt. Fails toward the narrow
+	// local critical-durability-degraded state, never toward normal.
+	ReasonEventSpoolCorrupt
+	// ReasonEventDurabilityDegraded — the durability domain is in
+	// critical-durability-degraded, so a new critical operation in that domain
+	// fails closed until the bounded recovery criteria are met.
+	ReasonEventDurabilityDegraded
+	// ReasonEventDenialLaneDegraded — a coalesced denial aggregate could not be
+	// committed, or P-DEN reached its quota. Recorded on the DISTINCT denial-loss
+	// counter; the request stays denied; NEVER blocks authenticated work and
+	// NEVER enters critical-durability-degraded.
+	ReasonEventDenialLaneDegraded
+	// ReasonEventReceiptInvalid — a commit receipt was forged, mismatched against
+	// its decision digest, or presented for a different request/tenant/capability
+	// than it was bound to. Fails closed.
+	ReasonEventReceiptInvalid
+	// ReasonEventExportUnauthorized — an export/read request failed tenant,
+	// capability or partition-scope authorization (including any cross-tenant
+	// read). Fails closed.
+	ReasonEventExportUnauthorized
+	// ReasonEventExportRangeExceeded — an export/read request exceeded its bounded
+	// range, record count or byte budget. Fails closed.
+	ReasonEventExportRangeExceeded
 )
 
 // reasonCode maps each Reason to its stable machine string. The strings are part
@@ -517,6 +604,28 @@ var reasonCode = map[Reason]string{ // #nosec G101 -- stable machine-readable er
 	ReasonInjectionSuspected:        "injection_suspected",
 	ReasonInspectionUnavailable:     "inspection_unavailable",
 	ReasonInspectionLimitExceeded:   "inspection_limit_exceeded",
+
+	// ── PR-8 durable decision-event reasons ──
+	ReasonEventInvalid:               "event_invalid",
+	ReasonEventSchemaVersion:         "event_schema_version",
+	ReasonEventPartitionMismatch:     "event_partition_mismatch",
+	ReasonEventTenantConflict:        "event_tenant_conflict",
+	ReasonEventSecretPresent:         "event_secret_present",
+	ReasonEventEvidenceMissing:       "event_evidence_missing",
+	ReasonEventTooLarge:              "event_too_large",
+	ReasonEventCorrelationMalformed:  "event_correlation_malformed",
+	ReasonEventReplayConflict:        "event_replay_conflict",
+	ReasonEventQueueSaturated:        "event_queue_saturated",
+	ReasonEventCommitFailed:          "event_commit_failed",
+	ReasonEventEncryptionUnavailable: "event_encryption_unavailable",
+	ReasonEventEncryptionFailed:      "event_encryption_failed",
+	ReasonEventStorageFull:           "event_storage_full",
+	ReasonEventSpoolCorrupt:          "event_spool_corrupt",
+	ReasonEventDurabilityDegraded:    "event_durability_degraded",
+	ReasonEventDenialLaneDegraded:    "event_denial_lane_degraded",
+	ReasonEventReceiptInvalid:        "event_receipt_invalid",
+	ReasonEventExportUnauthorized:    "event_export_unauthorized",
+	ReasonEventExportRangeExceeded:   "event_export_range_exceeded",
 }
 
 // Code returns the stable machine string for the reason (e.g. "malformed_json").

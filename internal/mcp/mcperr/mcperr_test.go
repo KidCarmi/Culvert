@@ -72,6 +72,17 @@ func TestReasonCodesStable(t *testing.T) {
 		{ReasonRedirectRejected, "redirect_rejected"}, {ReasonRedirectLimitExceeded, "redirect_limit_exceeded"},
 		{ReasonInjectionSuspected, "injection_suspected"}, {ReasonInspectionUnavailable, "inspection_unavailable"},
 		{ReasonInspectionLimitExceeded, "inspection_limit_exceeded"},
+		// PR-8 durable decision-event reasons.
+		{ReasonEventInvalid, "event_invalid"}, {ReasonEventSchemaVersion, "event_schema_version"},
+		{ReasonEventPartitionMismatch, "event_partition_mismatch"}, {ReasonEventTenantConflict, "event_tenant_conflict"},
+		{ReasonEventSecretPresent, "event_secret_present"}, {ReasonEventEvidenceMissing, "event_evidence_missing"},
+		{ReasonEventTooLarge, "event_too_large"}, {ReasonEventCorrelationMalformed, "event_correlation_malformed"},
+		{ReasonEventReplayConflict, "event_replay_conflict"}, {ReasonEventQueueSaturated, "event_queue_saturated"},
+		{ReasonEventCommitFailed, "event_commit_failed"}, {ReasonEventEncryptionUnavailable, "event_encryption_unavailable"},
+		{ReasonEventEncryptionFailed, "event_encryption_failed"}, {ReasonEventStorageFull, "event_storage_full"},
+		{ReasonEventSpoolCorrupt, "event_spool_corrupt"}, {ReasonEventDurabilityDegraded, "event_durability_degraded"},
+		{ReasonEventDenialLaneDegraded, "event_denial_lane_degraded"}, {ReasonEventReceiptInvalid, "event_receipt_invalid"},
+		{ReasonEventExportUnauthorized, "event_export_unauthorized"}, {ReasonEventExportRangeExceeded, "event_export_range_exceeded"},
 	}
 	seen := map[Reason]bool{}
 	for _, p := range want {
