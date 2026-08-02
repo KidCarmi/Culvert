@@ -247,19 +247,42 @@ func overridesEmpty(ov catoverride.Overrides) bool {
 	return len(ov.Added) == 0 && len(ov.Recategorized) == 0 && len(ov.Tombstones) == 0
 }
 
-// buildEmbeddedComposedView builds the embedded-baseline effective view with the CURRENT
+// rawEmbeddedView is the embedded baseline with the unchanged "compiled" provenance (no
+// overrides applied).
+func rawEmbeddedView() *effectiveCategoryView {
+	return newEffectiveView(embeddedBaselineEntries(), effectiveCategoryView{Source: sourceEmbedded, ConfigRevision: "compiled"})
+}
+
+// composeEmbeddedForOverrides builds the embedded-baseline effective view with the CURRENT
 // authoritative overrides layered on (F3b-4: override-only changes apply on the policy path
-// even before the first signed activation). With no overrides it returns the raw baseline
-// with the unchanged "compiled" provenance; an override-provider error also degrades to the
-// raw baseline (never fail-closed on the taxonomy). The caller holds c.mu.
-func (c *activationCoordinator) buildEmbeddedComposedView() *effectiveCategoryView {
-	base := embeddedBaselineEntries()
+// even before the first signed activation). It PROPAGATES an override-provider error and a
+// composition-validation error so a caller that must not corrupt the live view can abort
+// without swapping. With no overrides it returns the raw baseline ("compiled" provenance).
+// The caller holds c.mu.
+func (c *activationCoordinator) composeEmbeddedForOverrides() (*effectiveCategoryView, error) {
 	ov, rev, err := c.overrides.Current()
-	if err != nil || overridesEmpty(ov) {
-		return newEffectiveView(base, effectiveCategoryView{Source: sourceEmbedded, ConfigRevision: "compiled"})
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", errActivateOverrides, err)
 	}
-	composed := catoverride.ComposeView(base, ov)
-	return newEffectiveView(composed, effectiveCategoryView{Source: sourceEmbedded, ConfigRevision: rev})
+	if overridesEmpty(ov) {
+		return rawEmbeddedView(), nil
+	}
+	composed := catoverride.ComposeView(embeddedBaselineEntries(), ov)
+	if verr := validateEffectiveComposition(composed); verr != nil {
+		return nil, fmt.Errorf("%w: %v", errActivateStore, verr)
+	}
+	return newEffectiveView(composed, effectiveCategoryView{Source: sourceEmbedded, ConfigRevision: rev}), nil
+}
+
+// buildEmbeddedComposedView is the FAIL-SAFE embedded view builder for recovery's
+// installEmbedded: it degrades to the raw baseline on any override error (never fail-closed
+// on the taxonomy) rather than propagating. The caller holds c.mu.
+func (c *activationCoordinator) buildEmbeddedComposedView() *effectiveCategoryView {
+	view, err := c.composeEmbeddedForOverrides()
+	if err != nil {
+		return rawEmbeddedView()
+	}
+	return view
 }
 
 // buildEffectiveView composes the feed-owned snapshot with the current overrides OFF-PATH
@@ -379,21 +402,10 @@ func (c *activationCoordinator) RebuildForOverrides(ctx context.Context) (activa
 		// overrides and swap atomically (F3b-4 finding #5: an override-only change takes
 		// effect on the policy hot path even before the first signed activation; an explicit
 		// empty override set restores the raw base categories). An invalid/unavailable
-		// override snapshot leaves the current live view UNTOUCHED (abort, no swap).
-		base := embeddedBaselineEntries()
-		ov, rev, err := c.overrides.Current()
+		// override snapshot propagates an error, leaving the current live view UNTOUCHED.
+		view, err := c.composeEmbeddedForOverrides()
 		if err != nil {
-			return activationResult{}, fmt.Errorf("%w: %v", errActivateOverrides, err)
-		}
-		var view *effectiveCategoryView
-		if overridesEmpty(ov) {
-			view = newEffectiveView(base, effectiveCategoryView{Source: sourceEmbedded, ConfigRevision: "compiled"})
-		} else {
-			composed := catoverride.ComposeView(base, ov)
-			if verr := validateEffectiveComposition(composed); verr != nil {
-				return activationResult{}, fmt.Errorf("%w: %v", errActivateStore, verr)
-			}
-			view = newEffectiveView(composed, effectiveCategoryView{Source: sourceEmbedded, ConfigRevision: rev})
+			return activationResult{}, err
 		}
 		c.live.Swap(view)
 		return activationResult{
