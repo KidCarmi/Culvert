@@ -3,6 +3,7 @@ package reqlog
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"io"
 	"sync"
 	"sync/atomic"
@@ -24,8 +25,8 @@ import (
 // The fix is the pattern this codebase already applies to its other two
 // request-log sinks — internal/logstore (queryable history) and
 // internal/syslog (SIEM): callers enqueue on a bounded channel and ONE drain
-// goroutine owns the file. A slow or stalled disk now costs bounded drops,
-// never proxy latency. Entries are drained in FIFO order by a single
+// goroutine owns the file. A slow disk now costs queue depth rather than
+// proxy latency. Entries are drained in FIFO order by a single
 // goroutine, so the JSONL file stays chronologically ordered exactly as
 // before, and the bytes written per entry are unchanged.
 //
@@ -81,8 +82,10 @@ var (
 // Backpressure reports how many request-log entries had to wait for room in
 // the persistence queue. Non-zero means the JSONL sink is not keeping up with
 // the request rate and proxy latency is once again coupled to disk latency —
-// the signal to move the request log to a faster volume. No entry is ever
-// lost, so this is a saturation gauge, not a loss counter.
+// the signal to move the request log to a faster volume. This is a saturation
+// gauge, not a loss counter: steady-state saturation loses nothing (callers
+// wait). Entries that genuinely never reach the file — a failed write, or a
+// saturated queue caught by shutdown — are counted by WriteErrors() instead.
 func Backpressure() int64 { return atomic.LoadInt64(&backpressure) }
 
 // enqueue hands an entry to the drain goroutine. The common path is a
@@ -111,9 +114,18 @@ func enqueue(e Entry) {
 	case ch <- e:
 	case <-stop:
 		// Shutdown raced this send; the drain goroutine has stopped
-		// consuming, so waiting would hang the caller forever.
+		// consuming, so waiting would hang the caller forever. The entry
+		// does NOT reach the file, so charge it to writeErrors — that
+		// counter's contract is "entries that did not reach the file", and
+		// leaving this path silent would let the durable audit record lose
+		// entries with no counter and no log to show for it.
+		countWriteError(1, errShutdownRace)
 	}
 }
+
+// errShutdownRace marks an entry discarded because persistence shut down while
+// the caller was blocked on a saturated queue.
+var errShutdownRace = errors.New("request log: persistence stopped while the queue was saturated")
 
 // startPersist brings up the drain goroutine if it is not already running.
 // Idempotent; callers hold no lock.

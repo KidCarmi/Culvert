@@ -481,6 +481,10 @@ func applyConfigBackup(b *configBackup) error {
 	if b.URLCategories != nil {
 		catStore.ReplaceAll(b.URLCategories)
 		catStore.Save()
+		// The rolled-back taxonomy's BuiltIn entries reach policy evaluation only through
+		// the effective view. The CategoryOverrides block below recomposes too, but it is
+		// nil-skipped on a pre-extension / no-override snapshot, so rollback needs its own.
+		recomposeSignedFeedTaxonomy()
 	}
 
 	// CategoryGroups MUST be applied before PolicyRules. Policy rules

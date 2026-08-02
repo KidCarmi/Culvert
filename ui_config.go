@@ -1306,6 +1306,11 @@ func importCategoryTaxonomy(b *configBackup, replaceMode bool) {
 				func(e CategoryEntry) string { return e.Name }))
 		}
 		catStore.Save()
+		// The imported taxonomy's BuiltIn entries are served from the effective view, so
+		// the import only reaches policy evaluation after a recompose. importCategoryOverrides
+		// runs its own recompose but early-returns on an absent/empty override set, which is
+		// the common case for a taxonomy-only import.
+		recomposeSignedFeedTaxonomy()
 	}
 	if len(b.CategoryGroups) > 0 {
 		if replaceMode {
