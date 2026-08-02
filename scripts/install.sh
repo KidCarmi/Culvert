@@ -1983,7 +1983,7 @@ wire_release_agent_for_compose() {
     warn "Release Management auto-wiring skipped: culvert-maint group/GID not found."
     return 0
   fi
-  if [[ ! -f "$cfg" || ! -f "$sudoers" ]]; then
+  if ! sudo test -f "$cfg" || ! sudo test -f "$sudoers"; then
     warn "Release Management auto-wiring skipped: maintenance-agent config or sudoers file is missing."
     return 0
   fi
@@ -2039,7 +2039,7 @@ wire_release_agent_for_compose() {
     # re-runs) AND safe against a hand-edited config.toml whose last line lacks a
     # trailing newline (without this, the key would glue onto that line and the
     # maint installer would not render the two-`-f` sudoers rule).
-    if [[ -n "$(tail -c1 "$cfg" 2>/dev/null)" ]]; then
+    if [[ -n "$(sudo tail -c1 "$cfg" 2>/dev/null)" ]]; then
       printf '\n' | sudo tee -a "$cfg" >/dev/null
     fi
     printf 'compose_override_file = "docker-compose.maint-agent.yml"\n' | sudo tee -a "$cfg" >/dev/null
@@ -2415,7 +2415,7 @@ install_maint_agent() {
   # untouched default — never an operator-edited path. Re-render reuses the
   # already-installed binary (skip-verify) so we never download twice.
   if [[ "$INSTALL_DIR" != "/srv/culvert" ]] \
-     && grep -q '^compose_project_dir = "/srv/culvert"' /etc/culvert-maint/config.toml 2>/dev/null; then
+     && sudo grep -q '^compose_project_dir = "/srv/culvert"' /etc/culvert-maint/config.toml 2>/dev/null; then
     info "Pointing maintenance agent at this stack (compose_project_dir=$INSTALL_DIR)..."
     sudo sed -i "s|^compose_project_dir = .*|compose_project_dir = \"$INSTALL_DIR\"|" /etc/culvert-maint/config.toml
     if ! sudo CULVERT_MAINT_SKIP_VERIFY=1 bash "$maint_installer" /usr/local/bin/culvert-maint; then
@@ -2430,7 +2430,7 @@ install_maint_agent() {
   # the unprivileged agent cannot bind directly in root-owned /run. Rewrite ONLY
   # the untouched old default to the managed-runtime-dir path; never touch a
   # customized value. socket_path is not sudoers-bound, so no re-render needed.
-  if grep -q '^socket_path = "/run/culvert-maint.sock"' /etc/culvert-maint/config.toml 2>/dev/null; then
+  if sudo grep -q '^socket_path = "/run/culvert-maint.sock"' /etc/culvert-maint/config.toml 2>/dev/null; then
     info "Migrating socket_path to the managed runtime dir (/run/culvert-maint/culvert-maint.sock)..."
     sudo sed -i 's|^socket_path = "/run/culvert-maint.sock"|socket_path = "/run/culvert-maint/culvert-maint.sock"|' /etc/culvert-maint/config.toml
   fi
