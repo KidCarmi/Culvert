@@ -123,6 +123,29 @@ func executionNotAvailable(id jsonrpc.ID, d policy.Decision) []byte {
 	return b
 }
 
+// inspectionError builds the deterministic JSON-RPC error for a PR-7 hard
+// inspection failure (schema invalid, SSRF blocked, secret detected, redaction
+// failed, …). The machine-readable inspection reason code is the message; no raw
+// argument/output/secret/URL is ever included.
+func inspectionError(id jsonrpc.ID, reason mcperr.Reason) []byte {
+	env := struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Error   struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+			Data    struct {
+				Stage string `json:"stage"`
+			} `json:"data"`
+		} `json:"error"`
+	}{JSONRPC: "2.0", ID: idJSON(id)}
+	env.Error.Code = inspectionErrorCode
+	env.Error.Message = reason.Code()
+	env.Error.Data.Stage = "inspection"
+	b, _ := json.Marshal(env) //nolint:errcheck // fixed-shape struct, marshal cannot fail
+	return b
+}
+
 // statusForAuth maps an authentication/binding rejection reason to an HTTP status.
 // Every authentication failure class is a 401 except the immutable-binding conflict,
 // which is a 409, and the forbidden query-string location, which is a 400.

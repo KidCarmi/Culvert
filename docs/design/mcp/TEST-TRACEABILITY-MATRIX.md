@@ -258,9 +258,9 @@ test, evidence, owner and gate, per the completeness rule — a fake threat is N
 | Secret containment (broker) | MCP-CRED-004 | **Present (PR-4)** — opaque `secret.Sealed` handles only; scoped zeroize-on-success/error/panic callback; sanitized `SafeResult`; canary-proof provider-error sanitization; canary scans over errors/metadata/cache/snapshots. Event-redaction leg stays PR-8 | PR-4 (broker) / PR-8 (events) |
 | Encrypted bounded credential cache | MCP-CRED-005 | **Present (PR-4)** — bounded, partitioned, TTL, deterministic-eviction, stampede-coalesced cache holding only encrypted envelopes (no plaintext) | PR-4 |
 | Broker fail-closed semantics | MCP-CRED-006 | **Present (PR-4)** — high-risk always fails closed (no stale fallback); low-risk cached fallback only under explicit profile policy with a valid, fresh, non-revoked entry; gate failure leaves provider/cache untouched | PR-4 |
-| SSRF (private-IP matrix) | MCP-INSP-004 | ssrf unit tests exist; MCP matrix **missing** | PR-7 |
-| DNS rebinding lab | MCP-INSP-005 | **Missing** | PR-7 |
-| Redirect chains | MCP-INSP-006 | per-client tests exist; shared MCP **missing** | PR-7 |
+| SSRF (private-IP matrix) | MCP-INSP-004 | **Present (PR-7)** — `internal/mcp/inspection/destination` canonicalization + private-IP matrix over the authoritative `internal/ssrf` table (loopback/RFC1918/link-local/metadata/multicast/reserved/mapped-bypass/non-canonical-numeric/userinfo/scheme) | PR-7 |
+| DNS rebinding lab | MCP-INSP-005 | **Present (PR-7)** — injected-resolver `Resolve` + immutable `PinnedDestination` + connect-time `VerifyPeer` (peer-in-pin, private-peer, mixed/empty answer, stale pin, real `ssrf.Control`) + fuzz | PR-7 |
+| Redirect chains | MCP-INSP-006 | **Present (PR-7)** — one shared request-local `RedirectGuard` (hop cap, loop, downgrade, cross-origin, public→private/metadata, credential URL, per-hop re-pin, cross-origin auth strip) + fuzz | PR-7 |
 | Origin/Host validation primitive (no listener) | MCP-INSP-008 | **Missing** | PR-1 |
 | Listener bind + host-allowlist + E2E rebinding enforcement | MCP-INSP-009 | **Missing** | PR-5 |
 | Tool canonicalization | MCP-TOOL-001 | **Present (PR-2)** | PR-2 |

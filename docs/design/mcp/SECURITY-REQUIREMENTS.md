@@ -113,6 +113,30 @@ Verification · Evidence · Gate**. Status is `Proposed` for all rows unless not
 > into `package main` (dormant). `MCP-POLICY-007` (approval UX) is PR-9. See
 > [`IMPLEMENTATION-SLICES.md`](IMPLEMENTATION-SLICES.md) PR-6.
 
+> **PR-7 status — `MCP-INSP-001..007` IMPLEMENTED (dormant).** `internal/mcp/inspection` (+ `schema`, `dlp`,
+> `destination`) is the decision-only inspection layer. `MCP-INSP-001` — semantic tool-argument validation
+> against the exact catalog schema over a CLOSED V1 keyword subset with exact-rational numbers (no `float64`);
+> unsupported security-relevant keywords fail conservative, never silently ignored. `MCP-INSP-002` — bounded
+> output size/type/schema validation with an explicit truncation contract (structured over-limit → block;
+> invalid/schema-invalid JSON → block; DLP runs on the FULL admitted content before any allowed display
+> truncation). `MCP-INSP-003` — deterministic secret + synthetic PII/financial DLP reusing the existing
+> `internal/redaction` scrubber (no second scrubber) with block/redact/label dispositions and sanitized findings
+> that never carry the matched secret. `MCP-INSP-004` — destination scheme/host/IP classification through the
+> AUTHORITATIVE `internal/ssrf` table (private/link-local/metadata/loopback/reserved/multicast/mapped-bypass
+> rejected). `MCP-INSP-005` — pinned resolve→connect via an INJECTED resolver + connect-time peer verification
+> against the immutable `PinnedDestination` and the real `ssrf.Control` (rebinding TOCTOU). `MCP-INSP-006` — one
+> shared request-local redirect guard that re-canonicalizes/re-SSRF-checks/re-pins each hop and refuses scheme
+> downgrade, cross-origin, public→private/metadata, credential URLs and loops. `MCP-INSP-007` — best-effort
+> deterministic prompt-injection labeling (labeled, never silently trusted; hard-block opt-in per profile).
+> Immutable capability-split Gateway/Management profiles; the `ALLOW_WITH_REDACTION` transform deep-copies (never
+> mutates the original), re-validates the schema, re-scans for residual secrets and attests original/transformed
+> canonical hashes. Wired into `internal/mcp/runtime` as an OPTIONAL provider (`Deps.Inspection`; nil ⇒
+> byte-identical old path): a Gateway `tools/call` is inspected BEFORE policy, a hard security failure blocks
+> regardless of the PR-6 action, and the sanitized summary feeds `policy.DecisionInput.Inspection`. Still
+> decision-only — NO upstream/credential/broker/durable-event work; an inspected ALLOW still returns
+> `execution_state: not_implemented`. NOT wired into `package main` (dormant). `MCP-INSP-008` (PR-1 primitive) and
+> `MCP-INSP-009` (PR-5 listener) are unchanged. See [`IMPLEMENTATION-SLICES.md`](IMPLEMENTATION-SLICES.md) PR-7.
+
 ## MCP-PROTO — Protocol kernel (framing, bounds, version negotiation, state)
 
 New family added by the PR-1 remediation (`PR1-READINESS-REMEDIATION.md`, finding H-2). These are the

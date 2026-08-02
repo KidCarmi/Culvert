@@ -134,14 +134,21 @@ type Session struct {
 	PriorGrant        bool
 }
 
-// Inspection carries the PR-7 inspection placeholders. In PR-6 the *Available flags
-// are all false, so a rule requiring inspection evidence never silently passes.
+// Inspection carries the PR-7 inspection summary facts. When no inspector is wired
+// the *Available flags are all false, so a rule requiring inspection evidence never
+// silently passes (fail closed via ReasonInspectionUnavailable). PR-7 populates
+// these from the sanitized inspection summary; every field is a typed fact, never a
+// raw argument/output/secret. The evaluator stays I/O-free (no new imports).
 type Inspection struct {
 	DLPAvailable         bool
 	RedactionAvailable   bool
 	DestInspectAvailable bool
 	SecretScanAvailable  bool
 	SecretFound          bool // meaningful only when SecretScanAvailable
+	// PR-7 summary facts (all safe booleans; matchable via condition fields).
+	PIIFound           bool // a PII/financial classification was found
+	InjectionSuspected bool // best-effort injection labeling flagged output content
+	SchemaInvalid      bool // semantic schema validation rejected the arguments
 }
 
 func inputErr(detail string) error {

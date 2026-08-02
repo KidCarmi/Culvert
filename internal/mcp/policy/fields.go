@@ -61,6 +61,9 @@ var fieldKinds = map[string]fieldKind{
 	"inspection.dest_inspect_available": kindBool,
 	"inspection.secret_scan_available":  kindBool,
 	"inspection.secret_found":           kindBool,
+	"inspection.pii_found":              kindBool,
+	"inspection.injection_suspected":    kindBool,
+	"inspection.schema_invalid":         kindBool,
 	"time":                              kindTime,
 }
 
@@ -166,6 +169,12 @@ var boolFields = map[string]func(*DecisionInput) bool{
 	// absent scan reports false (fail closed — a rule keyed on secret_found=false
 	// must also assert the scan is available).
 	"inspection.secret_found": func(in *DecisionInput) bool { return in.Inspection.SecretScanAvailable && in.Inspection.SecretFound },
+	// PR-7 summary facts. pii_found/schema_invalid gate on scan/inspection availability
+	// so an absent inspector reports false (fail closed — a rule keyed on the negative
+	// must also assert availability); injection_suspected likewise requires DLP.
+	"inspection.pii_found":           func(in *DecisionInput) bool { return in.Inspection.DLPAvailable && in.Inspection.PIIFound },
+	"inspection.injection_suspected": func(in *DecisionInput) bool { return in.Inspection.DLPAvailable && in.Inspection.InjectionSuspected },
+	"inspection.schema_invalid":      func(in *DecisionInput) bool { return in.Inspection.DestInspectAvailable && in.Inspection.SchemaInvalid },
 }
 
 // assuranceFields maps an assurance field to its accessor.

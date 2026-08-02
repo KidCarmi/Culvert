@@ -105,6 +105,19 @@ type ObserveRecord struct {
 	MatchedRule    string // matched rule id, if any
 	PolicyRevision uint64 // policy snapshot revision that produced the decision
 	ExecutionState string // "not_implemented" for an ALLOW-class decision in PR-6
+
+	// PR-7 inspection fields (set only for an inspected Gateway tools/call). Safe
+	// metadata only — never arguments, output, secrets, URLs or credentials.
+	InspectionRevision  uint64 // inspection profile revision
+	InspectionSchema    string // schema status label ("valid"/"invalid"/"unsupported"/…)
+	InspectionDestClass string // destination class label ("public"/"private"/"metadata"/…)
+	InspectionDisp      string // worst inspection disposition ("pass"/"label"/"redact"/"block")
+	SecretFound         bool   // a secret classification was found
+	PIIFound            bool   // a PII/financial classification was found
+	InjectionSuspected  bool   // injection labeling flagged content
+	RedactionApplied    bool   // an ALLOW_WITH_REDACTION transform was produced
+	RedactionProfile    string // opaque redaction-profile ref, if applied
+	TransformedHash     string // transformed canonical hash, if redaction applied
 }
 
 // Sink receives sanitized observe records. Implementations MUST be bounded and MUST
