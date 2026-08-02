@@ -313,7 +313,7 @@ func TestOIDCCacheSetWithExp_Eviction(t *testing.T) {
 		a.cache[key] = &oidcCacheEntry{ok: true, expiry: time.Now().Add(5 * time.Minute)}
 	}
 	// Adding one more should trigger eviction
-	a.oidcCacheSetIdentityWithExp("new-key", &Identity{Sub: "test"}, true, nil)
+	a.oidcCacheSetIdentityWithExp("new-key", &Identity{Sub: "test"}, backendAllow, nil)
 	a.mu.Lock()
 	size := len(a.cache)
 	a.mu.Unlock()
@@ -329,7 +329,7 @@ func TestOIDCCacheSetWithExp_TokenExpiry(t *testing.T) {
 	}
 	// Set with a token expiry sooner than ttl
 	futureExp := time.Now().Add(5 * time.Minute).Unix()
-	a.oidcCacheSetIdentityWithExp("expiry-test", &Identity{Sub: "test"}, true, &futureExp)
+	a.oidcCacheSetIdentityWithExp("expiry-test", &Identity{Sub: "test"}, backendAllow, &futureExp)
 	a.mu.Lock()
 	e := a.cache["expiry-test"]
 	a.mu.Unlock()

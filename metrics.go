@@ -675,6 +675,37 @@ culvert_storage_write_last_failure_age_seconds %d
 		)
 	}
 
+	// CHAOS-16: external auth-backend reachability. An IdP outage denies
+	// requests fail-closed, which on every other surface is indistinguishable
+	// from users getting their passwords wrong; these series are the only
+	// signal that separates "the directory rejected them" from "the directory
+	// is gone". Rows appear per backend once it has been unreachable at least
+	// once — a backend that has never failed is ABSENT rather than reported
+	// healthy, because nothing here probes: silence can equally mean nobody has
+	// authenticated, and reporting that as health is the CHAOS-45 error.
+	if ab := authBackendHealthSnapshot(); len(ab) > 0 {
+		// HELP/TYPE emitted once per metric name, rows appended per backend —
+		// a repeated HELP line for the same name is a parse error.
+		_, _ = fmt.Fprint(w, `# HELP culvert_auth_backend_unreachable_total Authentication attempts an external auth backend could not answer (denied fail-closed, NOT a credential rejection)
+# TYPE culvert_auth_backend_unreachable_total counter
+`)
+		for _, e := range ab {
+			_, _ = fmt.Fprintf(w, "culvert_auth_backend_unreachable_total{backend=%q} %d\n",
+				strings.ReplaceAll(e.Backend, `"`, ""), e.Unreachable)
+		}
+		_, _ = fmt.Fprint(w, `# HELP culvert_auth_backend_degraded 1 when an external auth backend has failed and no answer has been observed from it since
+# TYPE culvert_auth_backend_degraded gauge
+`)
+		for _, e := range ab {
+			degraded := 0
+			if e.Degraded {
+				degraded = 1
+			}
+			_, _ = fmt.Fprintf(w, "culvert_auth_backend_degraded{backend=%q} %d\n",
+				strings.ReplaceAll(e.Backend, `"`, ""), degraded)
+		}
+	}
+
 	// Decryption-profile success delta: which protocol inspected tunnels negotiated
 	// on the upstream leg (h2 = Inspect-as-HTTP/2 working; http/1.1 = strip/downgrade).
 	_, _ = fmt.Fprintf(w, `# HELP culvert_inspect_upstream_alpn_total Inspected-tunnel upstream (origin) leg negotiated protocol

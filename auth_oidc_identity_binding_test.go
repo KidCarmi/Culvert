@@ -330,7 +330,7 @@ func TestOIDCAuth_CacheReturnsDetachedIdentity(t *testing.T) {
 	srv, provider := mockIDP(t, introspectionResponse{Active: true, Sub: "unused"})
 	defer srv.Close()
 	key := cacheKey("", "detached-token")
-	provider.oidcCacheSetIdentityWithExp(key, &Identity{Sub: "canonical", Groups: []string{"engineering"}, Provider: "oidc"}, true, nil)
+	provider.oidcCacheSetIdentityWithExp(key, &Identity{Sub: "canonical", Groups: []string{"engineering"}, Provider: "oidc"}, backendAllow, nil)
 
 	first, ok, hit := provider.oidcIdentityCacheGet(key)
 	if !hit || !ok || first == nil {

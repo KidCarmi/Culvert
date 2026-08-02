@@ -159,6 +159,9 @@ func buildOperatorContract() OperatorContract {
 		checkAuditPersistence(),
 		checkMemoryBackstop(),
 	}
+	// CHAOS-16: external auth-backend outages. Contributes nothing until a
+	// backend has actually failed to answer.
+	checks = append(checks, authBackendDiagnostics()...)
 	// Auth Exempt risk diagnostics (Slice 8): WARN-only rows for risky Stage-1
 	// exemption postures. Contributes nothing when no exempt rules exist.
 	checks = append(checks, authExemptDiagnostics(policyStore.List(), policyActionFromDefault())...)
@@ -389,6 +392,49 @@ func checkAuditPersistence() OperatorContractCheck {
 		Status:  diagOK,
 		Message: "audit trail is persisting to the configured log file",
 	}
+}
+
+// authBackendDiagnostics reports external auth backends that have failed to
+// answer (CHAOS-16). It contributes NOTHING when no backend has ever been
+// unreachable — deliberately, and for the same reason the metric rows are
+// absent in that case: this signal is derived from observed authentications,
+// never from a probe, so "no failures recorded" can equally mean "nobody has
+// authenticated". A green row would be asserting knowledge the process does not
+// have, which is the failure mode the storage-health work (CHAOS-45) had to
+// undo.
+//
+// Rows are fail while the backend is degraded (it failed and nothing has been
+// observed to answer since) and warn once an answer has been observed — a
+// healed outage still means requests were denied during the window, which an
+// operator investigating "users report they could not authenticate at 14:20"
+// needs to see.
+func authBackendDiagnostics() []OperatorContractCheck {
+	entries := authBackendHealthSnapshot()
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make([]OperatorContractCheck, 0, len(entries))
+	for _, e := range entries {
+		last := e.Last.UTC().Format(time.RFC3339)
+		if e.Degraded {
+			out = append(out, OperatorContractCheck{
+				Code:   "auth_backend_reachability",
+				Status: diagFail,
+				Message: fmt.Sprintf("external auth backend %q could not answer %d authentication attempt(s) and has not answered since — those requests were DENIED fail-closed, which is not a credential rejection (last: %s: %s)",
+					e.Backend, e.Unreachable, last, e.LastErr),
+				OperatorAction: "The directory / IdP is unreachable or erroring, so valid users are being denied. Check connectivity, DNS and TLS to the configured backend, its own health, and the service-account credentials Culvert binds with. Denials stop as soon as the backend answers again — results from the outage are not cached as credential decisions.",
+			})
+			continue
+		}
+		out = append(out, OperatorContractCheck{
+			Code:   "auth_backend_reachability",
+			Status: diagWarn,
+			Message: fmt.Sprintf("external auth backend %q failed to answer %d authentication attempt(s) earlier in this process; it has since answered (last failure: %s: %s)",
+				e.Backend, e.Unreachable, last, e.LastErr),
+			OperatorAction: "The backend is answering again. Requests during the failure window were denied fail-closed — correlate with user reports from that period, and investigate the transient (network, IdP restart, rate limiting) so it does not recur.",
+		})
+	}
+	return out
 }
 
 // checkCDR summarises Content-Disarm-and-Reconstruction state without

@@ -182,7 +182,7 @@ func TestOIDCCacheSetWithExp_PastExpiryFailsClosed(t *testing.T) {
 		ttl:   1 * time.Hour,
 	}
 	pastExp := time.Now().Add(-1 * time.Minute).Unix()
-	a.oidcCacheSetIdentityWithExp("past-expiry-test", &Identity{Sub: "test"}, true, &pastExp)
+	a.oidcCacheSetIdentityWithExp("past-expiry-test", &Identity{Sub: "test"}, backendAllow, &pastExp)
 	id, ok, hit := a.oidcIdentityCacheGet("past-expiry-test")
 	if !hit || ok || id != nil {
 		t.Fatalf("expired positive cache result = (%+v, %v, %v), want cached failure", id, ok, hit)

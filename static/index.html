@@ -17003,6 +17003,11 @@ function resetBlockPage() {
              read-only / full after boot) — config changes are live in memory but
              are NOT reaching disk and will be lost on restart. -->
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="storage_write_failed"> Storage write failed (state not persisted)</label>
+        <!-- CHAOS-16: an external auth backend (LDAP / OIDC introspection) could
+             not answer, so requests are being DENIED fail-closed. This is not a
+             credential-rejection event — it is the directory being unreachable,
+             which otherwise looks identical to users typing the wrong password. -->
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="auth_backend_unreachable"> Auth backend unreachable (denying fail-closed)</label>
         <!-- P1 commit-time validation: the CP refused to publish an over-cap config
              to the fleet (fleet stays on the last valid snapshot until trimmed). -->
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="config_snapshot_rejected"> Config publish rejected (over cap)</label>

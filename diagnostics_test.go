@@ -918,6 +918,12 @@ func resetDiagVerdictGlobals(t *testing.T) {
 	t.Helper()
 	resetStorageWriteHealthForTest()
 	t.Cleanup(resetStorageWriteHealthForTest)
+	// CHAOS-16: the aggregate verdict also folds in auth-backend reachability
+	// rows, and that record is process-global — any earlier test that drove a
+	// real LDAP/OIDC failure would otherwise leak a fail row into these
+	// assertions (the -count=2 -shuffle=on determinism class).
+	resetAuthBackendHealthForTest()
+	t.Cleanup(resetAuthBackendHealthForTest)
 	policyStore.mu.Lock()
 	prevRules := policyStore.rules
 	prevVersion := policyStore.version

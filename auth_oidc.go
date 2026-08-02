@@ -175,12 +175,18 @@ func (a *OIDCAuth) ResolveIdentity(_ string, token string) (*Identity, bool) {
 		return id, ok
 	}
 
-	id, ok, exp := a.introspect(token)
-	id, ok = a.oidcCacheSetIdentityWithExp(k, id, ok, exp)
-	if ok {
+	id, outcome, reason, exp := a.introspect(token)
+	id, ok := a.oidcCacheSetIdentityWithExp(k, id, outcome, exp)
+	noteAuthOutcome(a.Name(), outcome, redactAuthReason(reason, a.cfg.IntrospectionURL))
+	switch {
+	case ok:
 		logger.Printf("OIDC auth OK: subject=%q", sanitizeLog(id.Sub))
-	} else {
+	case outcome == backendDeny:
 		logger.Printf("OIDC auth FAIL")
+	default:
+		// Indeterminate: noteAuthBackendUnreachable logs the outage behind a
+		// rate gate. Logging per denied request here would flood the log with
+		// lines an operator reads as authentication failures.
 	}
 	return id, ok
 }
@@ -190,8 +196,17 @@ func (a *OIDCAuth) CaptiveLoginURL(_ string, _ *http.Request) string {
 	return a.cfg.LoginURL
 }
 
-// introspect returns the canonical token identity and its Unix expiry.
-func (a *OIDCAuth) introspect(token string) (identity *Identity, active bool, tokenExp *int64) {
+// introspect returns the canonical token identity, the three-valued outcome,
+// the reason text for an indeterminate outcome, and the token's Unix expiry.
+//
+// Outcome classification (CHAOS-16 / F-11): RFC 7662 gives the IdP exactly one
+// way to say something about a token — a 200 carrying `active`. Any other
+// result (transport error, 4xx, 5xx, unparseable body) is the endpoint failing
+// to answer, not the token being invalid. A 401 in particular means OUR client
+// credentials are wrong; treating it as "the user's token is inactive" is a
+// misconfiguration silently rendered as a mass credential rejection — and,
+// before this change, one cached for the full TTL.
+func (a *OIDCAuth) introspect(token string) (identity *Identity, outcome authBackendOutcome, reason string, tokenExp *int64) {
 	body := url.Values{
 		"token":           {token},
 		"token_type_hint": {"access_token"},
@@ -204,7 +219,7 @@ func (a *OIDCAuth) introspect(token string) (identity *Identity, active bool, to
 	)
 	if err != nil {
 		logger.Printf("OIDC introspect build error: %v", err)
-		return nil, false, nil
+		return nil, backendIndeterminate, fmt.Sprintf("build request: %v", err), nil
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.SetBasicAuth(a.cfg.ClientID, a.cfg.ClientSecret)
@@ -212,41 +227,46 @@ func (a *OIDCAuth) introspect(token string) (identity *Identity, active bool, to
 	resp, err := a.client.Do(req)
 	if err != nil {
 		logger.Printf("OIDC introspect request error: %v", err)
-		return nil, false, nil
+		// The URL is admin-configured, but the error text can carry the
+		// resolved host and port; the reason feeds an operator surface, so it
+		// is kept but the credential never is.
+		return nil, backendIndeterminate, fmt.Sprintf("introspection request: %v", err), nil
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		logger.Printf("OIDC introspect HTTP %d", resp.StatusCode)
-		return nil, false, nil
+		return nil, backendIndeterminate, fmt.Sprintf("introspection endpoint returned HTTP %d", resp.StatusCode), nil
 	}
 
 	var ir introspectionResponse
 	if err := decodeStrictJSON(resp.Body, 64<<10, &ir, false); err != nil {
 		logger.Printf("OIDC introspect parse error: %v", err)
-		return nil, false, nil
+		return nil, backendIndeterminate, fmt.Sprintf("parse introspection response: %v", err), nil
 	}
+	// From here on the IdP has answered. Every remaining branch is a decision
+	// about the token itself and is cacheable for the full TTL.
 	if !ir.Active {
-		return nil, false, nil
+		return nil, backendDeny, "", nil
 	}
 	tokenExp, validExp := parseDeclaredExpiry(ir.Exp)
 	if !validExp {
 		logger.Printf("OIDC: active token has invalid declared expiry")
-		return nil, false, nil
+		return nil, backendDeny, "", nil
 	}
 
 	// Optional scope check.
 	if a.cfg.RequiredScope != "" {
 		if !strings.Contains(" "+ir.Scope+" ", " "+a.cfg.RequiredScope+" ") {
-			logger.Printf("OIDC: required scope %q not in %q", a.cfg.RequiredScope, ir.Scope)
-			return nil, false, nil
+			logger.Printf("OIDC: required scope %q not in %q", a.cfg.RequiredScope, sanitizeLog(ir.Scope))
+			return nil, backendDeny, "", nil
 		}
 	}
 
 	// Optional audience check.
 	if a.cfg.RequiredAudience != "" && !audienceContains(ir.Audience, a.cfg.RequiredAudience) {
 		logger.Printf("OIDC: required audience %q not present", a.cfg.RequiredAudience)
-		return nil, false, nil
+		return nil, backendDeny, "", nil
 	}
 
 	canonicalSub := ir.Sub
@@ -255,13 +275,13 @@ func (a *OIDCAuth) introspect(token string) (identity *Identity, active bool, to
 	}
 	if strings.TrimSpace(canonicalSub) == "" {
 		logger.Printf("OIDC: active token has no canonical sub or username claim")
-		return nil, false, nil
+		return nil, backendDeny, "", nil
 	}
 	return &Identity{
 		Sub:      canonicalSub,
 		Name:     strings.TrimSpace(ir.Username),
 		Provider: a.Name(),
-	}, true, tokenExp
+	}, backendAllow, "", tokenExp
 }
 
 // audienceContains handles both string and []string JWT aud claims.
@@ -288,7 +308,16 @@ func (a *OIDCAuth) oidcIdentityCacheGet(key string) (identity *Identity, ok, hit
 	return nil, false, false
 }
 
-func (a *OIDCAuth) oidcCacheSetIdentityWithExp(key string, identity *Identity, ok bool, tokenExp *int64) (*Identity, bool) {
+// oidcCacheSetIdentityWithExp caches the outcome and returns the effective
+// identity/allow decision.
+//
+// A determinate outcome (the IdP answered) is cached for the configured TTL,
+// clamped to the token's own declared expiry. An indeterminate outcome (the IdP
+// did not answer) denies the request but is cached only for
+// authIndeterminateTTL — the seconds-scale load guard — so an introspection
+// outage cannot deny a valid token for minutes after the endpoint recovers.
+func (a *OIDCAuth) oidcCacheSetIdentityWithExp(key string, identity *Identity, outcome authBackendOutcome, tokenExp *int64) (*Identity, bool) {
+	ok := outcome.allowed()
 	// A positive cache entry must always carry the canonical identity needed by
 	// ResolveIdentity. Fail closed if an internal caller violates that invariant.
 	if ok && (identity == nil || strings.TrimSpace(identity.Sub) == "") {
@@ -297,6 +326,10 @@ func (a *OIDCAuth) oidcCacheSetIdentityWithExp(key string, identity *Identity, o
 	}
 	now := time.Now()
 	ttl := a.ttl
+	if !outcome.determinate() {
+		identity = nil
+		ttl = authIndeterminateTTL
+	}
 	if ok && tokenExp != nil {
 		until := time.Unix(*tokenExp, 0).Sub(now)
 		if until <= 0 {

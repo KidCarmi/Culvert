@@ -180,10 +180,20 @@ diff-triggered), **nightly/e2e** (`install-lifecycle-e2e.yml`, `proxy-nightly-e2
 - **Failure injected:** a fake IdP that errors (dial/bind/introspect) then recovers; assert a valid
   credential succeeds immediately on recovery (no 5m/2m denial tail).
 - **Expected result (post-fix):** error negatives not cached; recovery is immediate.
-- **Current expected result:** error negatives cached 5m LDAP / 2m OIDC → valid creds denied post-recovery
-  — **RED** (CHAOS-16).
-- **Level:** unit. **Harness:** existing `auth_ldap_test.go`/`auth_oidc_test.go` fakes + a clock/TTL seam.
-  **Runtime:** <1s (inject TTL). **Lane:** Fast. **Flakiness:** none (do not use real sleeps — inject TTL).
+- **Status: GREEN (2026-08-02)** — `auth_backend_outage_test.go`.
+  `TestOIDC_IntrospectionOutageDoesNotOutliveItself` is the end-to-end proof: the IdP 503s, recovers,
+  and the same token is accepted once the short indeterminate window has elapsed. The window is
+  elapsed by rewinding the cached entry's expiry by exactly `authIndeterminateTTL` rather than
+  sleeping — which is what makes it discriminating, since the pre-fix entry carried the provider's
+  1h CacheTTL and would still have been a denial. `TestLDAP_UnreachableDirectoryIsNotCachedAsA`
+  `CredentialDecision` covers the LDAP dial-failure half, `TestOIDC_Non200IsNotACredentialDecision`
+  the 401/500/502 class, and `TestLDAP_DecisionKeepsTheConfiguredTTL` /
+  `TestOIDC_ActiveFalseStaysAFullTTLDecision` pin the other direction — a real answer must stay
+  cacheable, or every rejected credential becomes a round-trip per request. Both directions were
+  mutation-checked (reverting the TTL split fails them).
+- **Level:** unit. **Harness:** existing `auth_ldap_test.go`/`auth_oidc_test.go` fakes + a closed
+  loopback port for the LDAP dial failure. **Runtime:** <1s. **Lane:** Fast. **Flakiness:** none (no
+  real sleeps — the entry expiry is rewound instead).
 
 ---
 
@@ -272,7 +282,7 @@ These require the real stack; put them in `install-lifecycle-e2e.yml` / a nightl
 | T9 | F-18 | P1-4 | Fast | RED |
 | T10 | F-10 | P1-5 | Fast | RED |
 | T11 | F-09 | P1-5 | Fast | RED |
-| T12 | F-11 | (P1-adjacent) | Fast | RED |
+| T12 | F-11 | (P1-adjacent) | Fast | **GREEN** (2026-08-02) |
 | T13 | F-26 | (confirm) | Deep/nightly | GREEN-expected |
 | T14 | F-19 | (confirm) | Deep | GREEN-expected |
 | T15 | F-20 | P2-1 | Deep | RED |

@@ -21,6 +21,7 @@ package alerts
 //   "scan_skipped"          — response body exceeds scan size limit, forwarded unscanned
 //   "upstream_pool_down"    — all parent proxies down: egress failing open to DIRECT (chain bypassed, CHAOS-11)
 //   "storage_write_failed"  — a durable write to the data directory failed: persisted state is being lost (CHAOS-45)
+//   "auth_backend_unreachable" — an external auth backend (LDAP/OIDC) could not answer: requests denied fail-closed, NOT credential rejections (CHAOS-16)
 //   "state_file_corrupt"    — corrupt state file quarantined at startup (CHAOS-05/07)
 //   "cluster_node_reenrolled" — expired-but-registered node re-enrolled with a fresh token (CHAOS-12)
 //
