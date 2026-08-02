@@ -2288,6 +2288,22 @@
         ],
         "type": "object"
       },
+      "SaaSFeedActivationDelta": {
+        "additionalProperties": false,
+        "description": "Host-count change of the last SUCCESSFUL activation. null in never_succeeded.",
+        "properties": {
+          "hosts_added": {
+            "type": "integer"
+          },
+          "hosts_changed": {
+            "type": "integer"
+          },
+          "hosts_removed": {
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
       "SaaSFeedOverridesResponse": {
         "additionalProperties": false,
         "properties": {
@@ -2302,6 +2318,35 @@
         "required": [
           "overrides",
           "editable"
+        ],
+        "type": "object"
+      },
+      "SaaSFeedRefreshResult": {
+        "additionalProperties": false,
+        "properties": {
+          "refreshed": {
+            "description": "true only when a strictly-greater generation activated.",
+            "type": "boolean"
+          },
+          "state": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "activated",
+              "no_change",
+              "failed",
+              "skipped",
+              "canceled",
+              "in_progress",
+              "unavailable"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "refreshed",
+          "status"
         ],
         "type": "object"
       },
@@ -2379,6 +2424,208 @@
           "official_url",
           "editable",
           "runtime_activation_available"
+        ],
+        "type": "object"
+      },
+      "SaaSFeedStatus": {
+        "additionalProperties": true,
+        "description": "Signed SaaS category-feed runtime status (read-only). Nullable fields render null when absent.",
+        "properties": {
+          "active_feed_version": {
+            "nullable": true,
+            "type": "integer"
+          },
+          "active_source": {
+            "enum": [
+              "embedded",
+              "downloaded",
+              "cached",
+              "resumed"
+            ],
+            "type": "string"
+          },
+          "authority": {
+            "description": "standalone / control-plane / managed-dp",
+            "type": "string"
+          },
+          "category_count": {
+            "type": "integer"
+          },
+          "compiled_trusted": {
+            "type": "boolean"
+          },
+          "config_revision": {
+            "nullable": true,
+            "type": "string"
+          },
+          "configured": {
+            "type": "boolean"
+          },
+          "consecutive_failures": {
+            "type": "integer"
+          },
+          "critical": {
+            "type": "boolean"
+          },
+          "critical_reason": {
+            "type": "string"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "expires_in_days": {
+            "nullable": true,
+            "type": "integer"
+          },
+          "failures_since_start": {
+            "type": "integer"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string"
+          },
+          "host_count": {
+            "type": "integer"
+          },
+          "last_activation_delta": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SaaSFeedActivationDelta"
+              }
+            ],
+            "nullable": true
+          },
+          "last_attempt": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string"
+          },
+          "last_error_class": {
+            "nullable": true,
+            "type": "string"
+          },
+          "last_http_status": {
+            "nullable": true,
+            "type": "integer"
+          },
+          "last_outcome": {
+            "enum": [
+              "ok",
+              "no_change",
+              "error",
+              "canceled",
+              "skipped"
+            ],
+            "nullable": true,
+            "type": "string"
+          },
+          "last_successful_activation": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string"
+          },
+          "last_successful_check": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string"
+          },
+          "managed": {
+            "type": "boolean"
+          },
+          "manifest_expires_at": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string"
+          },
+          "never_succeeded": {
+            "type": "boolean"
+          },
+          "next_attempt": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string"
+          },
+          "not_modified": {
+            "type": "boolean"
+          },
+          "override_count": {
+            "type": "integer"
+          },
+          "override_revision": {
+            "nullable": true,
+            "type": "string"
+          },
+          "protocol": {
+            "type": "string"
+          },
+          "provenance": {
+            "enum": [
+              "embedded",
+              "downloaded",
+              "cached"
+            ],
+            "type": "string"
+          },
+          "recovering": {
+            "type": "boolean"
+          },
+          "signature_status": {
+            "enum": [
+              "verified",
+              "failed",
+              "compiled_trusted"
+            ],
+            "type": "string"
+          },
+          "stale": {
+            "type": "boolean"
+          },
+          "state": {
+            "enum": [
+              "disabled",
+              "waiting_for_authority",
+              "recovering",
+              "embedded",
+              "fresh",
+              "stale",
+              "syncing",
+              "degraded",
+              "critical"
+            ],
+            "type": "string"
+          },
+          "syncing": {
+            "type": "boolean"
+          },
+          "url": {
+            "type": "string"
+          },
+          "waiting_for_authority": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "state",
+          "configured",
+          "enabled",
+          "managed",
+          "authority",
+          "protocol",
+          "active_source",
+          "provenance",
+          "signature_status",
+          "compiled_trusted",
+          "stale",
+          "host_count",
+          "category_count",
+          "override_count",
+          "failures_since_start",
+          "consecutive_failures",
+          "never_succeeded"
         ],
         "type": "object"
       },
@@ -13625,6 +13872,67 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/saas-feed/refresh": {
+      "post": {
+        "description": "Triggers a manual refresh of the signed SaaS category feed. Shares the runtime's serialized refresh path (singleflight): if a refresh is already in flight it returns 202 with status=in_progress and does NOT start a second. A manual refresh is an operational action (it mutates no configuration), so it is permitted on a managed data-plane node; it is a deterministic no-op when the feed is disabled or the node lacks authoritative configuration.",
+        "operationId": "refreshSaaSFeed",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SaaSFeedRefreshResult"
+                }
+              }
+            },
+            "description": "Refresh completed (see status for the outcome)."
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SaaSFeedRefreshResult"
+                }
+              }
+            },
+            "description": "A refresh is already in flight (status=in_progress)."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SaaSFeedRefreshResult"
+                }
+              }
+            },
+            "description": "The signed-feed runtime is not armed."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Trigger a manual SaaS signed-feed refresh",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-audit-event": "saasfeed.refresh",
+        "x-culvert-danger-level": "low",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/saas-feed/settings": {
       "get": {
         "description": "Returns the CONFIGURED SaaS signed category-feed settings (url, protocol, managed, enabled, refresh) and the resolved effective values. Clearly separates configured state from runtime activation state — runtime activation (download/verify/activate/serve) is not yet available, so this endpoint never reports last_success, an active version, freshness, or provenance.",
@@ -13714,6 +14022,45 @@
         "x-culvert-idempotency": "idempotent",
         "x-culvert-introduced-version": "1.0.0",
         "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/saas-feed/status": {
+      "get": {
+        "description": "Returns the signed SaaS category-feed's runtime status: the derived state (disabled, waiting_for_authority, recovering, embedded, fresh, stale, syncing, degraded, critical), serving provenance and signature trust, the active feed version and freshness, the composed host/category/override footprint, and attempt/failure bookkeeping. Nullable fields (active version, timestamps, last activation delta, expires_in_days) render as null when absent — never a fabricated zero. Read-only; never reports success before a durable activation and live cutover complete.",
+        "operationId": "getSaaSFeedStatus",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SaaSFeedStatus"
+                }
+              }
+            },
+            "description": "SaaS feed runtime status."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "SaaS signed category-feed runtime status",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"

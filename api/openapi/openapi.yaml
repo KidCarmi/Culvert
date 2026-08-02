@@ -1521,6 +1521,73 @@ components:
       properties:
         overrides: { $ref: '#/components/schemas/CategoryOverrides' }
         editable: { type: boolean, description: "false on a managed data-plane node." }
+    SaaSFeedActivationDelta:
+      type: object
+      additionalProperties: false
+      description: "Host-count change of the last SUCCESSFUL activation. null in never_succeeded."
+      properties:
+        hosts_added: { type: integer }
+        hosts_removed: { type: integer }
+        hosts_changed: { type: integer }
+    SaaSFeedStatus:
+      type: object
+      additionalProperties: true
+      description: "Signed SaaS category-feed runtime status (read-only). Nullable fields render null when absent."
+      required: [state, configured, enabled, managed, authority, protocol, active_source, provenance, signature_status, compiled_trusted, stale, host_count, category_count, override_count, failures_since_start, consecutive_failures, never_succeeded]
+      properties:
+        state:
+          type: string
+          enum: [disabled, waiting_for_authority, recovering, embedded, fresh, stale, syncing, degraded, critical]
+        configured: { type: boolean }
+        enabled: { type: boolean }
+        managed: { type: boolean }
+        authority: { type: string, description: "standalone / control-plane / managed-dp" }
+        protocol: { type: string }
+        url: { type: string }
+        active_source: { type: string, enum: [embedded, downloaded, cached, resumed] }
+        provenance: { type: string, enum: [embedded, downloaded, cached] }
+        signature_status: { type: string, enum: [verified, failed, compiled_trusted] }
+        compiled_trusted: { type: boolean }
+        stale: { type: boolean }
+        host_count: { type: integer }
+        category_count: { type: integer }
+        override_count: { type: integer }
+        not_modified: { type: boolean }
+        failures_since_start: { type: integer }
+        consecutive_failures: { type: integer }
+        never_succeeded: { type: boolean }
+        syncing: { type: boolean }
+        waiting_for_authority: { type: boolean }
+        recovering: { type: boolean }
+        critical: { type: boolean }
+        active_feed_version: { type: integer, nullable: true }
+        config_revision: { type: string, nullable: true }
+        override_revision: { type: string, nullable: true }
+        generated_at: { type: string, format: date-time, nullable: true }
+        manifest_expires_at: { type: string, format: date-time, nullable: true }
+        expires_in_days: { type: integer, nullable: true }
+        last_attempt: { type: string, format: date-time, nullable: true }
+        last_successful_check: { type: string, format: date-time, nullable: true }
+        last_successful_activation: { type: string, format: date-time, nullable: true }
+        next_attempt: { type: string, format: date-time, nullable: true }
+        last_outcome: { type: string, nullable: true, enum: [ok, no_change, error, canceled, skipped] }
+        last_error_class: { type: string, nullable: true }
+        last_http_status: { type: integer, nullable: true }
+        last_activation_delta:
+          nullable: true
+          allOf: [ { $ref: '#/components/schemas/SaaSFeedActivationDelta' } ]
+        critical_reason: { type: string }
+        detail: { type: string }
+    SaaSFeedRefreshResult:
+      type: object
+      additionalProperties: false
+      required: [refreshed, status]
+      properties:
+        refreshed: { type: boolean, description: "true only when a strictly-greater generation activated." }
+        status:
+          type: string
+          enum: [activated, no_change, failed, skipped, canceled, in_progress, unavailable]
+        state: { type: string }
     SetClusterLabels:
       type: object
       required: [node_id]
@@ -9086,6 +9153,76 @@ paths:
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
         '409': { $ref: '#/components/responses/PlainConflict' }
+  /api/saas-feed/status:
+    get:
+      operationId: getSaaSFeedStatus
+      tags: [policy]
+      summary: SaaS signed category-feed runtime status
+      description: >-
+        Returns the signed SaaS category-feed's runtime status: the derived state
+        (disabled, waiting_for_authority, recovering, embedded, fresh, stale,
+        syncing, degraded, critical), serving provenance and signature trust, the
+        active feed version and freshness, the composed host/category/override
+        footprint, and attempt/failure bookkeeping. Nullable fields (active version,
+        timestamps, last activation delta, expires_in_days) render as null when
+        absent — never a fabricated zero. Read-only; never reports success before a
+        durable activation and live cutover complete.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: SaaS feed runtime status.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SaaSFeedStatus' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/saas-feed/refresh:
+    post:
+      operationId: refreshSaaSFeed
+      tags: [policy]
+      summary: Trigger a manual SaaS signed-feed refresh
+      description: >-
+        Triggers a manual refresh of the signed SaaS category feed. Shares the
+        runtime's serialized refresh path (singleflight): if a refresh is already in
+        flight it returns 202 with status=in_progress and does NOT start a second. A
+        manual refresh is an operational action (it mutates no configuration), so it
+        is permitted on a managed data-plane node; it is a deterministic no-op when
+        the feed is disabled or the node lacks authoritative configuration.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: low
+      x-culvert-audit-event: saasfeed.refresh
+      responses:
+        '200':
+          description: Refresh completed (see status for the outcome).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SaaSFeedRefreshResult' }
+        '202':
+          description: A refresh is already in flight (status=in_progress).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SaaSFeedRefreshResult' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '503':
+          description: The signed-feed runtime is not armed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SaaSFeedRefreshResult' }
   /api/alerts/webhooks/history:
     get:
       operationId: getAlertHistory

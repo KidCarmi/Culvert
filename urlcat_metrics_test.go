@@ -40,39 +40,48 @@ func scrapeMetrics(t *testing.T) string {
 	return w.Body.String()
 }
 
-// 1. All six new metric names are rendered.
+// 1. The UT1 category-feed metric names are rendered. The legacy raw-SaaS-syncer
+// metrics (culvert_saas_feed_*) were RETIRED in F3b-4 (the syncer is no longer armed);
+// the signed feed's observability is the culvert_saasfeed_* family.
 func TestURLCatMetrics_AllNamesRendered(t *testing.T) {
 	snapshotFeedGlobals(t)
 	globalUT1FeedSyncer = newFeedSyncer(nil, "x", time.Hour)
-	globalSaaSFeed = &SaaSFeedSyncer{}
 
 	body := scrapeMetrics(t)
 	for _, name := range []string{
 		"culvert_category_feed_last_sync_timestamp_seconds",
 		"culvert_category_feed_entries",
-		"culvert_saas_feed_last_sync_timestamp_seconds",
-		"culvert_saas_feed_entries",
 		"culvert_category_feed_sync_failures_total",
-		"culvert_saas_feed_sync_failures_total",
 	} {
 		if !strings.Contains(body, name) {
 			t.Errorf("/metrics missing %q", name)
 		}
 	}
+	// The retired legacy SaaS syncer metrics must be gone.
+	for _, gone := range []string{
+		"culvert_saas_feed_last_sync_timestamp_seconds",
+		"culvert_saas_feed_entries",
+		"culvert_saas_feed_sync_failures_total",
+	} {
+		if strings.Contains(body, gone) {
+			t.Errorf("/metrics still emits retired legacy metric %q", gone)
+		}
+	}
+	// The signed-feed metrics ARE present.
+	if !strings.Contains(body, "culvert_saasfeed_refresh_total") {
+		t.Error("/metrics missing signed-feed culvert_saasfeed_refresh_total")
+	}
 }
 
-// 2. Timestamp renders 0 when never synced.
+// 2. UT1 timestamp renders 0 when never synced.
 func TestURLCatMetrics_NeverSyncedRendersZero(t *testing.T) {
 	snapshotFeedGlobals(t)
 	globalUT1FeedSyncer = newFeedSyncer(nil, "x", time.Hour) // lastSync = zero time
-	globalSaaSFeed = &SaaSFeedSyncer{}                       // lastSync = zero time
 
 	body := scrapeMetrics(t)
 	for _, want := range []string{
 		"culvert_category_feed_last_sync_timestamp_seconds 0",
-		"culvert_saas_feed_last_sync_timestamp_seconds 0",
 		"culvert_category_feed_entries 0",
-		"culvert_saas_feed_entries 0",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("/metrics missing %q\n--- body ---\n%s", want, body)
@@ -80,25 +89,19 @@ func TestURLCatMetrics_NeverSyncedRendersZero(t *testing.T) {
 	}
 }
 
-// 3. Populated Stats() render the expected timestamp/count values.
+// 3. Populated UT1 Stats() render the expected timestamp/count values.
 func TestURLCatMetrics_PopulatedRendersValues(t *testing.T) {
 	snapshotFeedGlobals(t)
 	ut1Time := time.Unix(1_700_000_000, 0)
-	saasTime := time.Unix(1_700_000_500, 0)
 
 	ut1 := newFeedSyncer(nil, "x", time.Hour)
 	ut1.SeedStats(ut1Time, 42)
 	globalUT1FeedSyncer = ut1
-	saas := saasfeed.New(saasfeed.Deps{})
-	saas.SeedStats(saasTime, 7)
-	globalSaaSFeed = saas
 
 	body := scrapeMetrics(t)
 	for _, want := range []string{
 		fmt.Sprintf("culvert_category_feed_last_sync_timestamp_seconds %d", ut1Time.Unix()),
 		"culvert_category_feed_entries 42",
-		fmt.Sprintf("culvert_saas_feed_last_sync_timestamp_seconds %d", saasTime.Unix()),
-		"culvert_saas_feed_entries 7",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("/metrics missing %q\n--- body ---\n%s", want, body)

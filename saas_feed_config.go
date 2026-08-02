@@ -82,6 +82,20 @@ type SaaSFeedConfig struct {
 	Refresh  time.Duration // poll cadence (≥ saasFeedMinRefresh)
 }
 
+// runtimeEnabled reports whether the signed feed may perform NETWORK activity. The feed
+// is DORMANT unless EXPLICITLY enabled (managed && enabled).
+//
+// Reconciliation (F3b-4): F0 §3 / ResolveSaaSFeedConfig treats an UNMANAGED node
+// (operator never touched it) as on-by-default (Enabled=true). That is the intended
+// POST-PUBLICATION (F6) posture — once the official feed is live, a fresh appliance
+// should get it automatically. But PRE-F6 the official host is not yet published, and the
+// F3b-4 boundary is absolute: "do not enable the feed by default" and "merging must not
+// cause unsolicited requests to an unpublished hostname". So the RUNTIME gate requires
+// explicit enablement (a GUI/CP PUT sets managed=true), keeping an untouched install
+// dormant while still letting an operator/CP turn it on. The config resolver stays frozen;
+// this gate lives at the runtime boundary. (Recorded contradiction + resolution.)
+func (c SaaSFeedConfig) runtimeEnabled() bool { return c.Managed && c.Enabled }
+
 // SaaSFeedConfigDelta is the PRESENCE-SENSITIVE overlay the CP→DP wire will carry
 // (F3a §A.2.2). Pointer fields distinguish "absent" (nil ⇒ keep the base) from an
 // explicit value (including a deliberate false) — the mixed-version-rollout guard

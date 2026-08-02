@@ -2975,6 +2975,26 @@ routes:
     audit_expected: true
     danger_level: medium
     documented: true
+  - route: "/api/saas-feed/status"
+    method: "GET"
+    handler: "apiSaaSFeedStatus"
+    domain: "policy"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
+  - route: "/api/saas-feed/refresh"
+    method: "POST"
+    handler: "apiSaaSFeedRefresh"
+    domain: "policy"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: true
+    audit_expected: true
+    danger_level: low
+    documented: true
   - route: "/auth/logout"
     method: "*"
     handler: "authLogout"

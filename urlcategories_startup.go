@@ -56,10 +56,14 @@ func loadURLCategories(cfg urlCategoriesStartupConfig, ctx context.Context) *Fee
 		}
 	}
 
-	// SaaS category feed (dynamic updates from GitHub). Additive merge: new
-	// domains added, admin removals preserved. Disabled by default; enabled
-	// via the admin GUI.
-	globalSaaSFeed.Configure(cfg.SaaSFeedURL, cfg.SaaSFeedInterval)
+	// Signed SaaS URL-category feed (F3b-4). This RETIRES the legacy raw syncer from
+	// runtime authority: we no longer arm globalSaaSFeed (no fetch of the old raw GitHub
+	// URL, no dual scheduler/writer). The signed-feed lifecycle runs offline-first record
+	// recovery + arms the single refresh scheduler; the compiled embedded baseline in
+	// catStore preserves safe SaaS category behavior until the signed feed is explicitly
+	// enabled (disabled by default; no unsolicited requests). cfg.SaaSFeedURL/Interval are
+	// retained on the config struct for the migration/historical-URL contract only.
+	startSignedFeedLifecycle(filepath.Dir(cfg.CategoryOverridesPath), ctx)
 
 	// Community URL category feed (BadgerDB, Layer 2). Layer 1 (catStore)
 	// remains the priority; BadgerDB is the fallback.

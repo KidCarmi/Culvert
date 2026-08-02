@@ -282,10 +282,11 @@ func (c *activationCoordinator) tryServeActive(ctx context.Context, arec activat
 	}, true, nil
 }
 
-// installEmbedded swaps in the compiled baseline view and returns the classified result.
-// It NEVER touches the floor or activation records (the baseline is not a generation).
+// installEmbedded swaps in the embedded baseline view (with any authoritative overrides
+// composed on — F3b-4) and returns the classified result. It NEVER touches the floor or
+// activation records (the baseline is not a generation).
 func (c *activationCoordinator) installEmbedded(frec floorRecovery, class recoveryClass, critical, gcEnabled bool, detail string) recoveryResult {
-	view := embeddedBaselineView()
+	view := c.buildEmbeddedComposedView()
 	c.live.Swap(view)
 	return recoveryResult{
 		Class: class, Floor: frec.Floor, FloorFromCheckpt: frec.FloorFromCheckpoint,

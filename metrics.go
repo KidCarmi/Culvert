@@ -727,6 +727,7 @@ culvert_decrypt_autoexclude_surge_total %d
 	liveFeedWritePrometheus(&ruleMetBuf)
 	releaseCatalogWritePrometheus(&ruleMetBuf)
 	pacWritePrometheus(&ruleMetBuf)
-	supportWritePrometheus(&ruleMetBuf) // culvert_support_bundle_retention_* (M5 retention observability)
-	fmt.Fprint(w, ruleMetBuf.String())  //nolint:errcheck // writes to http.ResponseWriter; an error only means the client disconnected
+	supportWritePrometheus(&ruleMetBuf)  // culvert_support_bundle_retention_* (M5 retention observability)
+	saasFeedWritePrometheus(&ruleMetBuf) // culvert_saasfeed_* (F3b-4 signed-feed observability)
+	fmt.Fprint(w, ruleMetBuf.String())   //nolint:errcheck // writes to http.ResponseWriter; an error only means the client disconnected
 }

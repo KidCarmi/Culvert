@@ -98,6 +98,8 @@ func importCategoryOverrides(b *configBackup, replaceMode bool) {
 	if err := globalCategoryOverrides.Save(); err != nil {
 		logger.Printf("ConfigImport: category overrides save: %v", err)
 	}
+	// F3b-4 finding #5: recompose the policy view for the imported overrides (local, no network).
+	recomposeSignedFeedOverrides()
 }
 
 // mergeCategoryOverrides unions incoming onto base (incoming wins on key
@@ -210,8 +212,10 @@ func putSaaSFeedSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	auditEvent(r, "saasfeed.settings", boolState(next.Enabled), "saas feed configuration updated")
 	saveConfigVersion(sessionAdmin(r), "saasfeed.settings")
-	// Republish so the fleet converges (CP-authoritative). No fetch is armed —
-	// F3a-2 has no downloader; this only distributes configuration.
+	// F3b-4: a config change (esp. disabled→enabled or an interval change) requires the
+	// scheduler to re-evaluate now rather than at the next tick.
+	wakeSignedFeedScheduler()
+	// Republish so the fleet converges (CP-authoritative).
 	pubErr := publishCurrentConfigSnapshot()
 	resp := saasFeedSettingsView()
 	if pubErr != nil {
@@ -262,10 +266,11 @@ func saasFeedSettingsView() map[string]any {
 		// exact host the GUI constrains input to (no generic mirror).
 		"official_url": builtinSaaSFeedURL,
 		"editable":     !isManagedDataPlane(),
-		// Honest capability signal: configuration is stored but nothing fetches,
-		// verifies, activates, or serves it yet.
-		"runtime_activation_available": false,
-		"note":                         "configuration only — the signed-feed client (download/verify/activate) is not yet available",
+		// F3b-4: the signed-feed runtime (download/verify/activate/serve) is now wired.
+		// This endpoint stays CONFIG-only; the live runtime state (state/provenance/
+		// version/freshness/counts/activity) is on GET /api/saas-feed/status.
+		"runtime_activation_available": true,
+		"note":                         "configuration surface — the live runtime status is on /api/saas-feed/status",
 	}
 	if resolveErr == nil {
 		view["resolved"] = map[string]any{
@@ -344,6 +349,9 @@ func putSaaSFeedOverrides(w http.ResponseWriter, r *http.Request) {
 	}
 	auditEvent(r, "saasfeed.overrides", "replace", "category overrides updated")
 	saveConfigVersion(sessionAdmin(r), "saasfeed.overrides")
+	// F3b-4 finding #5: apply the new overrides to the policy hot path NOW (local recompose,
+	// no network) so an add/change/delete-all takes effect immediately.
+	recomposeSignedFeedOverrides()
 	pubErr := publishCurrentConfigSnapshot()
 	resp := map[string]any{"ok": true, "overrides": globalCategoryOverrides.Get()}
 	if pubErr != nil {

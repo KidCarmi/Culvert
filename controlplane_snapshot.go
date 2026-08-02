@@ -1056,11 +1056,7 @@ func applySnapshotSaaSFeed(snap ConfigSnapshot) {
 		// re-applies the last-good snapshot on restart. A follower DP's node-local
 		// admin_settings.json is NOT the source of truth for CP-pushed config, so
 		// (like ProxyBaseURL) it is deliberately not written here — avoiding an
-		// admin-settings write on the hot sync path. Known limitation shared with
-		// ProxyBaseURL (Codex P1): on restart LoadAdminSettings reloads the local
-		// file and the cached-version poll can short-circuit re-sync until the next
-		// CP bump. The feed has NO runtime consumer until F3b, so this has zero
-		// runtime effect today; durable DP persistence lands with the F3b consumer.
+		// admin-settings write on the hot sync path.
 		setSaaSFeedDurable(d)
 	}
 
@@ -1068,13 +1064,41 @@ func applySnapshotSaaSFeed(snap ConfigSnapshot) {
 	// the DP's local copy; non-nil ⇒ authoritative replacement (empty ⇒ wipe).
 	// ReplaceAll re-validates + persists overrides.json; the snapshot was already
 	// validated, so this cannot reject.
+	overridesChanged := false
 	if snap.CategoryOverrides != nil {
+		beforeFP := saasFeedOverridesFingerprint(globalCategoryOverrides.Get())
 		if err := globalCategoryOverrides.ReplaceAll(*snap.CategoryOverrides); err != nil {
 			logger.Printf("DataPlane: category overrides apply rejected: %v", err)
-		} else if serr := globalCategoryOverrides.Save(); serr != nil {
-			logger.Printf("DataPlane: category overrides save: %v", serr)
+		} else {
+			if serr := globalCategoryOverrides.Save(); serr != nil {
+				logger.Printf("DataPlane: category overrides save: %v", serr)
+			}
+			overridesChanged = saasFeedOverridesFingerprint(globalCategoryOverrides.Get()) != beforeFP
 		}
 	}
+
+	// F3b-4: close the deferred managed-DP persistence finding. The scalar overlay
+	// above stays in-memory only (like ProxyBaseURL), but the F3b lifecycle IS the
+	// runtime consumer, so on a managed DP we now durably mirror the last authoritative
+	// CP feed configuration + fencing identity to a node-local, off-every-config-surface
+	// record. This runs AFTER the durable holder + overrides are updated so the mirror
+	// (incl. the overrides fingerprint) reflects the just-accepted snapshot. The snapshot
+	// reached here only after dpObserveEpoch (fencing) + validateConfigSnapshot passed,
+	// so the mirror is written only for authenticated, fenced, validated authority. A
+	// no-op on a non-managed node or before the lifecycle wires the store.
+	persistSaaSFeedAuthorityMirror(snap)
+
+	// F3b-4 finding #5: when the CP snapshot changed ONLY the overrides (manifest unchanged),
+	// a scheduler wake would fetch and 304 without recomposing. Apply the new authoritative
+	// overrides to the policy hot path directly via a local, no-network recompose. Gated on a
+	// real fingerprint change so an unchanged-override snapshot does no needless work.
+	if overridesChanged {
+		recomposeSignedFeedOverrides()
+	}
+
+	// A fresh authoritative snapshot (new epoch / enable / interval change) requires the
+	// scheduler to re-evaluate now rather than waiting for its next tick.
+	wakeSignedFeedScheduler()
 }
 
 func applyExternalAuthSnapshotSettings(snap ConfigSnapshot) {

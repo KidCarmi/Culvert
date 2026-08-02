@@ -24,8 +24,19 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/KidCarmi/Culvert/internal/urlcat"
+	"github.com/KidCarmi/Culvert/internal/hostutil"
 )
+
+// saasEffectiveView is the PROCESS-WIDE atomic holder of the effective signed-SaaS
+// category view that the policy hot path consults (F3b-4 hot-path routing). It is the
+// single source-aware SaaS layer: installed offline at startup (embedded baseline →
+// recovered LKG), atomically replaced on a committed signed activation or an override
+// recompose, and read lock-free by matchCategory / lookupHostCategory. The signed-feed
+// runtime uses THIS holder as its live store, so a cutover is observed by policy as a
+// single all-or-nothing pointer swap. When it is nil (lifecycle unarmed / disabled
+// build / most unit tests) the policy path falls back to the full catStore taxonomy —
+// byte-identical to the pre-F3b-4 behavior.
+var saasEffectiveView = newFeedLiveStore()
 
 // effectiveSource classifies where a live view's content came from (surfaced read-only
 // for F3b-4; the recovery classifier sets it).
@@ -98,11 +109,14 @@ func (v *effectiveCategoryView) CategoryCount() int {
 
 // LookupHost resolves a host to its category using host+subdomain SUFFIX semantics
 // (exact key, then progressively strip the leftmost label): a query `a.b.example.com`
-// matches a key `example.com`. This mirrors the feed/override suffix grammar WITHOUT
-// touching the policy engine's existing urlcat matching (this holder is not yet on the
-// hot path). Returns ("", false) when no key covers the host.
+// matches a key `example.com`. This mirrors the feed/override suffix grammar. The query
+// is IDNA-normalized via hostutil.NormalizeHost — the SAME canonicalization the policy
+// hot path applies to catStore/UT1 lookups — so a Unicode/punycode query resolves against
+// the view's canonical A-label keys identically to the other category layers (F3b-4
+// closes the prior plain-ToLower divergence). Returns ("", false) when no key covers the
+// host.
 func (v *effectiveCategoryView) LookupHost(host string) (string, bool) {
-	h := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+	h := hostutil.NormalizeHost(host)
 	if h == "" {
 		return "", false
 	}
@@ -120,25 +134,23 @@ func (v *effectiveCategoryView) LookupHost(host string) (string, bool) {
 
 // ─── embedded baseline ─────────────────────────────────────────────────────────────
 
-// embeddedBaselineView builds the terminal fail-closed view from the compiled category
-// baseline (urlcat.DefaultEntries). It carries no feed version and source=embedded — the
-// recovery step-4 fallback (§B.7) and the fresh-install state. ConfigRevision is
-// "compiled" (overrides never apply to the embedded baseline in this slice; the
-// composed-with-overrides view is only built for a re-verified generation).
+// embeddedBaselineEntries is the RAW (pre-override) embedded SaaS taxonomy: the live
+// catStore's BuiltIn=true host→category set. Sourcing it from catStore — not the compiled
+// urlcat.DefaultEntries — preserves any admin host-additions to built-in categories and
+// any already-persisted legacy-merged SaaS hosts, so wiring the effective view onto the
+// policy path leaves the pre-signed-activation match result byte-identical to the prior
+// full-store behavior. On a fresh install catStore == DefaultEntries, so this is exactly
+// the compiled baseline.
+func embeddedBaselineEntries() map[string]string {
+	return catStore.BuiltInHostCategories()
+}
+
+// embeddedBaselineView builds the terminal fail-closed view from the embedded SaaS
+// taxonomy WITHOUT overrides. It carries no feed version and source=embedded — used where
+// a raw baseline is wanted; the coordinator's installEmbedded composes admin overrides on
+// top (F3b-4 override-only recompose applies to the embedded baseline too).
 func embeddedBaselineView() *effectiveCategoryView {
-	entries := map[string]string{}
-	for _, e := range urlcat.DefaultEntries() {
-		if e == nil {
-			continue
-		}
-		for _, h := range e.Hosts {
-			nh := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(h)), ".")
-			if nh != "" {
-				entries[nh] = e.Name
-			}
-		}
-	}
-	return newEffectiveView(entries, effectiveCategoryView{
+	return newEffectiveView(embeddedBaselineEntries(), effectiveCategoryView{
 		Source:         sourceEmbedded,
 		ConfigRevision: "compiled",
 	})

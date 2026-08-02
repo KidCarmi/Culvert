@@ -246,6 +246,13 @@ func startDataPlane(ctx context.Context, addr, nodeID, certFile, keyFile, caFile
 	// restart cannot reopen the epoch-0 window an epoch-0 zombie CP would exploit.
 	loadDPLastSeenEpoch()
 
+	// F3b-4 finding #2: wire the durable feed-authority mirror store BEFORE replaying the
+	// last-good snapshot below, so the replay persists the authoritative feed config on the
+	// first restart after upgrade — without depending on the CP incrementing its config
+	// version. The signed-feed lifecycle (initURLCategories, run later) re-uses this same
+	// instance.
+	wireSaaSFeedAuthorityStore()
+
 	if certFile != "" {
 		if err := checkDPCertExpiry(certFile); err != nil {
 			logWarnf("ControlPlane: %v", err)

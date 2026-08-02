@@ -515,12 +515,15 @@ func applyConfigBackup(b *configBackup) error {
 	// ordering). nil → pre-extension snapshot, skip; non-nil (even empty) →
 	// wholesale replace (a deliberate clear round-trips as a wipe). ReplaceAll
 	// re-validates; an invalid historical set is tolerated (skipped) so rollback
-	// never rejects. No downloader/live-view recompute here (F3b owns that).
+	// never rejects.
 	if b.CategoryOverrides != nil {
 		if err := globalCategoryOverrides.ReplaceAll(*b.CategoryOverrides); err == nil {
 			if serr := globalCategoryOverrides.Save(); serr != nil {
 				logger.Printf("Rollback: category overrides save: %v", serr)
 			}
+			// F3b-4 finding #5: recompose the effective policy view for the rolled-back
+			// override set (local, no network).
+			recomposeSignedFeedOverrides()
 		}
 	}
 
