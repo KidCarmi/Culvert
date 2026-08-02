@@ -70,7 +70,7 @@ func dialWebSocketUpstream(w http.ResponseWriter, r *http.Request) (net.Conn, bo
 	if err != nil {
 		logger.Printf("WS dial error %q: %v", sanitizeLog(host), err)
 		if isDNSError(err) {
-			go fireAlert("dns_failure", AlertPayload{Host: host, Detail: err.Error(), Source: "proxy"})
+			fireDNSFailureAlert(host, err)
 		}
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return nil, false
@@ -404,7 +404,7 @@ func handleTunnelBypass(w http.ResponseWriter, r *http.Request, match *PolicyMat
 	if err != nil {
 		logger.Printf("tunnel dial error %q: %v", sanitizeLog(r.Host), err)
 		if isDNSError(err) {
-			go fireAlert("dns_failure", AlertPayload{Host: r.Host, Detail: err.Error(), Source: "proxy"})
+			fireDNSFailureAlert(r.Host, err)
 		}
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
@@ -609,7 +609,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, dec sslResoluti
 	if err != nil {
 		logger.Printf("inspect dial error %q: %v", sanitizeLog(targetHost), err)
 		if isDNSError(err) {
-			go fireAlert("dns_failure", AlertPayload{Host: targetHost, Detail: err.Error(), Source: "proxy"})
+			fireDNSFailureAlert(targetHost, err)
 		}
 		// ADR-0011: an inspect rule whose ORIGIN is unreachable is a FAILED
 		// decryption attempt (fail_stage=tcp_connect) — count it toward coverage +
