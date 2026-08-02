@@ -276,7 +276,8 @@ func assertFeedsPublishSequence(t *testing.T, pub feedsWFJob) {
 	if pubEnv == -1 {
 		t.Fatal("missing public-envelope re-verify step")
 	}
-	if !(verifyDL < stage && stage < pubArt && pubArt < promote && promote < pubEnv) {
+	ordered := verifyDL < stage && stage < pubArt && pubArt < promote && promote < pubEnv
+	if !ordered {
 		t.Fatalf("publish steps must be ordered verify(%d) < stage(%d) < public-artifact(%d) < promote(%d) < public-envelope(%d) — the envelope must be promoted LAST",
 			verifyDL, stage, pubArt, promote, pubEnv)
 	}

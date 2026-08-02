@@ -142,7 +142,7 @@ jobs:
           # read it from the (as-yet-unsigned) metadata.json — the envelope re-verify below is
           # the trust decision, this is only file wiring.
           ART="$(jq -r '.artifact_path' "$OUT/metadata.json")"
-          printf '%s' "$ART" | grep -Eq '^saas-[0-9]{8}-[0-9]{8}\.json$' \
+          printf '%s' "$ART" | grep -Eq '^saas-[0-9]+-[0-9]{8}\.json$' \
             || { echo "FATAL: unexpected artifact_path '$ART'"; exit 1; }
           cosign sign-blob --yes --bundle "$OUT/$ART.sigstore"                 "$OUT/$ART"
           cosign sign-blob --yes --bundle "$OUT/manifest-payload.json.sigstore" "$OUT/manifest-payload.json"
@@ -247,8 +247,8 @@ jobs:
           FV="$(jq -r '.feed_version' verified.json)"
           ART="$(jq -r '.artifact_path' verified.json)"
           ARTSIG="$(jq -r '.artifact_sig_path' verified.json)"
-          printf '%s' "$ART"    | grep -Eq '^saas-[0-9]{8}-[0-9]{8}\.json$'          || { echo "FATAL: bad artifact_path '$ART'"; exit 1; }
-          printf '%s' "$ARTSIG" | grep -Eq '^saas-[0-9]{8}-[0-9]{8}\.json\.sigstore$' || { echo "FATAL: bad artifact_sig_path '$ARTSIG'"; exit 1; }
+          printf '%s' "$ART"    | grep -Eq '^saas-[0-9]+-[0-9]{8}\.json$'          || { echo "FATAL: bad artifact_path '$ART'"; exit 1; }
+          printf '%s' "$ARTSIG" | grep -Eq '^saas-[0-9]+-[0-9]{8}\.json\.sigstore$' || { echo "FATAL: bad artifact_sig_path '$ARTSIG'"; exit 1; }
           printf '%s' "$FV"     | grep -Eq '^[0-9]+$'                                || { echo "FATAL: bad feed_version '$FV'"; exit 1; }
           {
             echo "feed_version=$FV"

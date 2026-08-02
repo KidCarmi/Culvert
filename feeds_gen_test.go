@@ -13,6 +13,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -131,7 +134,7 @@ func TestFeedGen_VersionDerivation(t *testing.T) {
 		t.Error("sub-second instants must derive the same feed_version")
 	}
 	// A later whole second is strictly greater (monotonic over wall-clock).
-	if !(deriveFeedVersion(inst.Add(time.Second)) > deriveFeedVersion(inst)) {
+	if deriveFeedVersion(inst.Add(time.Second)) <= deriveFeedVersion(inst) {
 		t.Error("a later instant must derive a strictly greater feed_version")
 	}
 	// Non-UTC input normalizes to the same instant's Unix seconds.
@@ -146,6 +149,46 @@ func TestFeedGen_VersionDerivation(t *testing.T) {
 	}
 	if b.Inventory.FeedVersion != inst.Unix() {
 		t.Errorf("manifest feed_version = %d, want %d", b.Inventory.FeedVersion, inst.Unix())
+	}
+}
+
+// TestFeedGen_ArtifactNameShape pins the immutable artifact-name GRAMMAR that the
+// publisher workflow's shell validation depends on: `saas-<feed_version>-<YYYYMMDD>.json`,
+// where the VERSION segment is the raw decimal feed_version (variable length) and only
+// the DATE segment is fixed at 8 digits. The generator uses `%08d` — a MINIMUM width —
+// so a Unix-second version is 10 digits today; a workflow regex that pinned the version
+// to exactly 8 digits (`[0-9]{8}`) would reject every real run before cosign. This test
+// is the regression guard: it asserts the name matches the version-variable grammar AND
+// that the version segment is NOT fixed-width (it exceeds 8 digits for a real instant),
+// so the workflow's `[0-9]+` anchor and the generator format can never silently diverge.
+func TestFeedGen_ArtifactNameShape(t *testing.T) {
+	// Same grammar the sign + publish steps encode in publish-feeds.yml.
+	nameRE := regexp.MustCompile(`^saas-([0-9]+)-[0-9]{8}\.json$`)
+	inst := time.Date(2026, 8, 2, 3, 4, 5, 0, time.UTC)
+	b, err := generateFeed(feedGenSpec{DatasetPath: writeDataset(t, cleanDatasetJSON), GeneratedAt: inst})
+	if err != nil {
+		t.Fatalf("gen: %v", err)
+	}
+	m := nameRE.FindStringSubmatch(b.Result.ArtifactPath)
+	if m == nil {
+		t.Fatalf("artifact_path %q does not match the workflow grammar %q", b.Result.ArtifactPath, nameRE)
+	}
+	// The version segment must be exactly the decimal feed_version.
+	ver, err := strconv.ParseInt(m[1], 10, 64)
+	if err != nil || ver != b.Inventory.FeedVersion {
+		t.Fatalf("version segment %q != feed_version %d", m[1], b.Inventory.FeedVersion)
+	}
+	// A real Unix-second version is >8 digits — proving the version segment is NOT
+	// fixed-width, which is exactly the assumption a `[0-9]{8}` anchor would break.
+	if len(m[1]) <= 8 {
+		t.Fatalf("version segment %q is <=8 digits; the workflow must not pin it to a fixed width", m[1])
+	}
+	if b.Result.ArtifactSigPath != b.Result.ArtifactPath+".sigstore" {
+		t.Errorf("artifact_sig_path %q != %q", b.Result.ArtifactSigPath, b.Result.ArtifactPath+".sigstore")
+	}
+	// Belt-and-suspenders: the sig name matches the same grammar with a .sigstore tail.
+	if !strings.HasSuffix(b.Result.ArtifactSigPath, ".json.sigstore") {
+		t.Errorf("artifact_sig_path %q lacks the .json.sigstore tail", b.Result.ArtifactSigPath)
 	}
 }
 
