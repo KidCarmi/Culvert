@@ -3101,3 +3101,164 @@ routes:
     audit_expected: false
     danger_level: none
     documented: true
+  # ── MCP admin API (PR-9) ──────────────────────────────────────────────
+  - route: "/api/mcp/overview"
+    method: "GET"
+    handler: "apiMCPOverview"
+    domain: "mcp"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
+  - route: "/api/mcp/health"
+    method: "GET"
+    handler: "apiMCPHealth"
+    domain: "mcp"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
+  - route: "/api/mcp/servers"
+    method: "GET"
+    handler: "apiMCPServers"
+    domain: "mcp"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
+  - route: "/api/mcp/tools"
+    method: "GET"
+    handler: "apiMCPTools"
+    domain: "mcp"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
+  - route: "/api/mcp/decisions"
+    method: "GET"
+    handler: "apiMCPDecisions"
+    domain: "mcp"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
+  - route: "/api/mcp/decision-explain"
+    method: "GET"
+    handler: "apiMCPDecisionExplain"
+    domain: "mcp"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
+  - route: "/api/mcp/policy"
+    method: "GET"
+    handler: "apiMCPPolicy"
+    domain: "mcp"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
+  - route: "/api/mcp/policy-simulate"
+    method: "POST"
+    handler: "apiMCPPolicySimulate"
+    domain: "mcp"
+    visibility: admin-supported
+    min_role: "operator"
+    mutating: true
+    audit_expected: false
+    danger_level: none
+    documented: true
+  - route: "/api/mcp/publications"
+    method: "GET"
+    handler: "apiMCPPublications"
+    domain: "mcp"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
+  - route: "/api/mcp/publications"
+    method: "POST"
+    handler: "apiMCPPublications"
+    domain: "mcp"
+    visibility: admin-supported
+    min_role: "operator"
+    mutating: true
+    audit_expected: true
+    danger_level: high
+    documented: true
+  - route: "/api/mcp/publication-decision"
+    method: "POST"
+    handler: "apiMCPPublicationDecision"
+    domain: "mcp"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: true
+    audit_expected: true
+    danger_level: high
+    documented: true
+  - route: "/api/mcp/approvals"
+    method: "GET"
+    handler: "apiMCPApprovals"
+    domain: "mcp"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
+  - route: "/api/mcp/approval-decision"
+    method: "POST"
+    handler: "apiMCPApprovalDecision"
+    domain: "mcp"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: true
+    audit_expected: true
+    danger_level: high
+    documented: true
+  - route: "/api/mcp/config"
+    method: "GET"
+    handler: "apiMCPConfig"
+    domain: "mcp"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
+  - route: "/api/mcp/config"
+    method: "PUT"
+    handler: "apiMCPConfig"
+    domain: "mcp"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: true
+    audit_expected: true
+    danger_level: high
+    documented: true
+  - route: "/api/mcp/management-access"
+    method: "GET"
+    handler: "apiMCPManagementAccess"
+    domain: "mcp"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true

@@ -114,6 +114,12 @@ components:
         text/plain:
           schema: { type: string }
           example: "saas feed config is control-plane managed on this data-plane node"
+    PlainNotFound:
+      description: Resource not found within the caller's authorized scope (uniform across tenants). Body is plain text.
+      content:
+        text/plain:
+          schema: { type: string }
+          example: "admin_not_found"
     PlainMethodNotAllowed:
       description: HTTP method not supported by this route. Body is plain text.
       content:
@@ -9955,3 +9961,343 @@ paths:
           description: Unknown profile. Body is plain text.
           content:
             text/plain: { schema: { type: string } }
+
+  # ── MCP admin API (PR-9) ─────────────────────────────────────────────────────
+  /api/mcp/overview:
+    get:
+      operationId: getMCPOverview
+      tags: [mcp]
+      summary: MCP admin overview
+      description: Safe MCP overview — distribution state (local_only), execution state (not_implemented), Management tool count and a health snapshot.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200': { description: Overview, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/mcp/health:
+    get:
+      operationId: getMCPHealth
+      tags: [mcp]
+      summary: MCP health & durability
+      description: Capability-isolated MCP health — Gateway/Management runtime and PR-8 durability state, distribution_state local_only, and Management access surface.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200': { description: Health snapshot, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/mcp/servers:
+    get:
+      operationId: listMCPServers
+      tags: [mcp]
+      summary: MCP server inventory
+      description: Tenant-scoped, redacted server inventory. Requires the tenant query parameter. A server_id parameter returns one server. No raw endpoint or credential material.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: tenant
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      parameters:
+        - { name: tenant, in: query, required: true, schema: { type: string } }
+        - { name: server_id, in: query, required: false, schema: { type: string } }
+        - { name: limit, in: query, required: false, schema: { type: integer } }
+      responses:
+        '200': { description: Server list or one server, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404': { $ref: '#/components/responses/PlainNotFound' }
+  /api/mcp/tools:
+    get:
+      operationId: listMCPTools
+      tags: [mcp]
+      summary: MCP tool inventory
+      description: Tenant-scoped, redacted tool inventory. Quarantined/drifted tools stay visibly quarantined. No complete schemas, arguments or output.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: tenant
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      parameters:
+        - { name: tenant, in: query, required: true, schema: { type: string } }
+        - { name: server_id, in: query, required: false, schema: { type: string } }
+        - { name: tool_name, in: query, required: false, schema: { type: string } }
+        - { name: limit, in: query, required: false, schema: { type: integer } }
+      responses:
+        '200': { description: Tool list or one tool, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404': { $ref: '#/components/responses/PlainNotFound' }
+  /api/mcp/decisions:
+    get:
+      operationId: searchMCPDecisions
+      tags: [mcp]
+      summary: MCP decision search
+      description: Bounded, tenant-scoped, cursor-paginated search over committed PR-8 decision events. Safe filters only; no raw arguments or output.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: tenant
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      parameters:
+        - { name: tenant, in: query, required: true, schema: { type: string } }
+        - { name: capability, in: query, required: false, schema: { type: string, enum: [gateway, management] } }
+        - { name: cursor, in: query, required: false, schema: { type: string } }
+        - { name: action, in: query, required: false, schema: { type: string } }
+        - { name: reason_code, in: query, required: false, schema: { type: string } }
+        - { name: rule_id, in: query, required: false, schema: { type: string } }
+        - { name: limit, in: query, required: false, schema: { type: integer } }
+      responses:
+        '200': { description: Decision page, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/mcp/decision-explain:
+    get:
+      operationId: explainMCPDecision
+      tags: [mcp]
+      summary: MCP historical decision explanation
+      description: Historical explanation projected exclusively from the committed PR-8 event (never re-evaluated against the current policy). Source is always "historical".
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: tenant
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      parameters:
+        - { name: tenant, in: query, required: true, schema: { type: string } }
+        - { name: capability, in: query, required: false, schema: { type: string, enum: [gateway, management] } }
+        - { name: event_id, in: query, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Historical explanation, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404': { $ref: '#/components/responses/PlainNotFound' }
+  /api/mcp/policy:
+    get:
+      operationId: getMCPPolicy
+      tags: [mcp]
+      summary: Current MCP policy metadata
+      description: Active capability-local policy revision, hash, rule count and default action. distribution_state local_only.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      parameters:
+        - { name: capability, in: query, required: false, schema: { type: string, enum: [gateway, management] } }
+      responses:
+        '200': { description: Policy metadata, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404': { $ref: '#/components/responses/PlainNotFound' }
+  /api/mcp/policy-simulate:
+    post:
+      operationId: simulateMCPPolicy
+      tags: [mcp]
+      summary: Validate/simulate/compare a candidate MCP policy
+      description: Runs a candidate policy through the SAME PR-6 engine (mode=validate|simulate|compare). Deterministic, I/O-free, publishes nothing.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: none
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        '200': { description: Validation/simulation/comparison result, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/mcp/publications:
+    get:
+      operationId: listMCPPublications
+      tags: [mcp]
+      summary: List MCP publication requests
+      description: Tenant-scoped list of pending/terminal local policy-publication requests.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: tenant
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      parameters:
+        - { name: tenant, in: query, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Publication requests, content: { application/json: { schema: { type: array, items: { type: object, additionalProperties: true } } } } }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: createMCPPublication
+      tags: [mcp]
+      summary: Create an MCP publication request
+      description: Compiles+validates a candidate, checks the expected base revision, and binds a four-eyes publication request. Publishes nothing.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: tenant
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: mcp.publication.create
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        '200': { description: Request created, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/mcp/publication-decision:
+    post:
+      operationId: decideMCPPublication
+      tags: [mcp]
+      summary: Approve/reject/publish an MCP publication request
+      description: Four-eyes decision on a publication request. Publish commits the PR-8 P-CRIT event BEFORE the local store change (fail-closed, local_only). Never executes.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: tenant
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: mcp.publication.decision
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        '200': { description: Decision applied, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404': { $ref: '#/components/responses/PlainNotFound' }
+        '409': { $ref: '#/components/responses/PlainConflict' }
+        '503': { description: Durability not available; nothing published. Body is plain text., content: { text/plain: { schema: { type: string } } } }
+  /api/mcp/approvals:
+    get:
+      operationId: listMCPApprovals
+      tags: [mcp]
+      summary: List MCP operational approvals
+      description: Tenant-scoped operational approval requests. An id parameter returns one, with the full MCP-POLICY-007 dialog fields (no credential material).
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: tenant
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      parameters:
+        - { name: tenant, in: query, required: true, schema: { type: string } }
+        - { name: id, in: query, required: false, schema: { type: string } }
+      responses:
+        '200': { description: Approvals or one approval, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404': { $ref: '#/components/responses/PlainNotFound' }
+  /api/mcp/approval-decision:
+    post:
+      operationId: decideMCPApproval
+      tags: [mcp]
+      summary: Approve/reject an MCP operational approval
+      description: Four-eyes decision on an operational approval. Commits the PR-8 event before state change; never executes, calls upstream, or materializes a credential.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: tenant
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: mcp.approval.decision
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        '200': { description: Decision applied, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404': { $ref: '#/components/responses/PlainNotFound' }
+        '409': { $ref: '#/components/responses/PlainConflict' }
+        '503': { description: Durability not available; approval unchanged. Body is plain text., content: { text/plain: { schema: { type: string } } } }
+  /api/mcp/config:
+    get:
+      operationId: getMCPConfig
+      tags: [mcp]
+      summary: Get PR-9 MCP configuration
+      description: Node-local Gateway/Management MCP listener+access configuration (references and metadata only; no secrets). distribution_state local_only.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200': { description: MCP config, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    put:
+      operationId: updateMCPConfig
+      tags: [mcp]
+      summary: Update PR-9 MCP configuration (local only)
+      description: Transactional local apply — validate the complete candidate, retain the previous config on failure. Gateway/Management stay separate; no wildcard bind; no shared port; mutation stays disabled in V1. No CP→DP propagation (distribution_not_implemented).
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: mcp.config.update
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        '200': { description: Applied locally, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/mcp/management-access:
+    get:
+      operationId: getMCPManagementAccess
+      tags: [mcp]
+      summary: Management MCP access status
+      description: Safe Management-access surface — enabled/bound/min-role/output-bound/mutation-off — plus the fixed read-only tool catalog and per-tool authorization (no mutation tools).
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200': { description: Management access + tool catalog, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '403': { $ref: '#/components/responses/PlainForbidden' }

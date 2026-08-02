@@ -90,6 +90,7 @@ func newAdminUIHandler() http.Handler { //nolint:funlen // route registration; e
 	registerReleaseRoutes(mux)       // release_api.go    —  5 routes (P1.6d-0, no GUI)
 	registerSupportRoutes(mux)       // ui_support.go     —  2 routes (M1 Slice 1)
 	registerDiagnoseRoutes(mux)      // diagnose.go       —  1 route  (M3 diagnose verbs)
+	registerMCPRoutes(mux)           // ui_mcp.go         — 14 routes (PR-9 MCP admin API)
 
 	// ADMIN-plane panic backstop (outermost). The admin chain never hijacks, so a
 	// clean 500 is valid when nothing was committed; trackedRW preserves

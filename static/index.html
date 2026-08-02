@@ -572,6 +572,32 @@ tr.dragging  { opacity: .4; }
       <svg class="ico" aria-hidden="true"><use href="#i-flask"/></svg> Policy Tester
     </div>
 
+    <div class="nav-section" data-min-role="viewer">MCP Gateway</div>
+    <div class="nav-item" data-view="mcp-overview" data-min-role="viewer" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-shield"/></svg> MCP Overview
+    </div>
+    <div class="nav-item" data-view="mcp-servers" data-min-role="viewer" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-list"/></svg> MCP Servers &amp; Tools
+    </div>
+    <div class="nav-item" data-view="mcp-decisions" data-min-role="viewer" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-list"/></svg> MCP Decisions &amp; Explain
+    </div>
+    <div class="nav-item" data-view="mcp-policies" data-min-role="viewer" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-flask"/></svg> MCP Policies &amp; Simulator
+    </div>
+    <div class="nav-item" data-view="mcp-approvals" data-min-role="viewer" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-shield"/></svg> MCP Approvals
+    </div>
+    <div class="nav-item" data-view="mcp-health" data-min-role="viewer" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-shield"/></svg> MCP Health &amp; Durability
+    </div>
+    <div class="nav-item" data-view="mcp-management" data-min-role="viewer" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-shield"/></svg> Management MCP Access
+    </div>
+    <div class="nav-item" data-view="mcp-settings" data-min-role="admin" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-cog"/></svg> MCP Listener Settings
+    </div>
+
     <div class="nav-section">Policies</div>
     <div class="nav-item" data-view="policy" data-min-role="operator" role="button" tabindex="0">
       <svg class="ico" aria-hidden="true"><use href="#i-shield"/></svg> Access Rules
@@ -3400,6 +3426,83 @@ Firefox (all platforms):
       </div>
     </div>
 
+    <!-- ── MCP Admin (PR-9) ────────────────────────────────────────────── -->
+    <div class="view" id="view-mcp-overview">
+      <div class="panel"><h3>MCP Overview</h3>
+        <p class="muted">Decision-only preview. Gateway execution is <code>not_implemented</code>; local policy publication is <code>local_only</code> (no CP&rarr;DP distribution).</p>
+        <button class="btn" data-click="loadMCPOverview">Refresh</button>
+        <div id="mcp-overview-status" class="muted"></div>
+        <pre class="mono" id="mcp-overview-out" style="white-space:pre-wrap"></pre>
+      </div>
+    </div>
+    <div class="view" id="view-mcp-servers">
+      <div class="panel"><h3>MCP Servers &amp; Tools</h3>
+        <label>Tenant <input id="mcp-srv-tenant" placeholder="tenant" /></label>
+        <button class="btn" data-click="loadMCPServers">Load servers</button>
+        <button class="btn" data-click="loadMCPTools">Load tools</button>
+        <div id="mcp-servers-status" class="muted"></div>
+        <pre class="mono" id="mcp-servers-out" style="white-space:pre-wrap"></pre>
+      </div>
+    </div>
+    <div class="view" id="view-mcp-decisions">
+      <div class="panel"><h3>MCP Decisions &amp; Explain</h3>
+        <label>Tenant <input id="mcp-dec-tenant" placeholder="tenant" /></label>
+        <label>Event ID <input id="mcp-dec-event" placeholder="event_id (for explain)" /></label>
+        <button class="btn" data-click="loadMCPDecisions">Search (historical)</button>
+        <button class="btn" data-click="loadMCPExplain">Explain (historical)</button>
+        <p class="muted">Explanation is the persisted historical decision evidence &mdash; <b>not</b> a re-evaluation against the current policy. Use the Simulator for a current/candidate what-if.</p>
+        <div id="mcp-decisions-status" class="muted"></div>
+        <pre class="mono" id="mcp-decisions-out" style="white-space:pre-wrap"></pre>
+      </div>
+    </div>
+    <div class="view" id="view-mcp-policies">
+      <div class="panel"><h3>MCP Policies &amp; Simulator</h3>
+        <label>Capability
+          <select id="mcp-pol-cap"><option>gateway</option><option>management</option></select></label>
+        <button class="btn" data-click="loadMCPPolicy">Current policy</button>
+        <div><textarea id="mcp-pol-candidate" rows="6" style="width:100%" placeholder='candidate policy JSON'></textarea></div>
+        <button class="btn" data-min-role="operator" data-click="mcpValidate">Validate</button>
+        <button class="btn" data-min-role="operator" data-click="mcpSimulate">Simulate (candidate)</button>
+        <button class="btn" data-min-role="operator" data-click="mcpCompare">Compare active&rarr;candidate</button>
+        <div id="mcp-policies-status" class="muted"></div>
+        <pre class="mono" id="mcp-policies-out" style="white-space:pre-wrap"></pre>
+      </div>
+    </div>
+    <div class="view" id="view-mcp-approvals">
+      <div class="panel"><h3>MCP Approvals</h3>
+        <label>Tenant <input id="mcp-appr-tenant" placeholder="tenant" /></label>
+        <button class="btn" data-click="loadMCPApprovals">Load approvals</button>
+        <div id="mcp-approvals-status" class="muted"></div>
+        <div id="mcp-approvals-list"></div>
+        <div id="mcp-approval-dialog" style="display:none;border:1px solid var(--border,#ccc);padding:10px;margin-top:10px"></div>
+      </div>
+    </div>
+    <div class="view" id="view-mcp-health">
+      <div class="panel"><h3>MCP Health &amp; Durability</h3>
+        <button class="btn" data-click="loadMCPHealth">Refresh</button>
+        <p class="muted">Gateway and Management health are capability-isolated. distribution_state is <code>local_only</code>.</p>
+        <div id="mcp-health-status" class="muted"></div>
+        <pre class="mono" id="mcp-health-out" style="white-space:pre-wrap"></pre>
+      </div>
+    </div>
+    <div class="view" id="view-mcp-management">
+      <div class="panel"><h3>Management MCP Access</h3>
+        <button class="btn" data-click="loadMCPManagement">Refresh</button>
+        <p class="muted">Fixed read-only tool catalog. No mutation tools are exposed.</p>
+        <div id="mcp-management-status" class="muted"></div>
+        <pre class="mono" id="mcp-management-out" style="white-space:pre-wrap"></pre>
+      </div>
+    </div>
+    <div class="view" id="view-mcp-settings">
+      <div class="panel"><h3>MCP Listener Settings</h3>
+        <p class="muted">Gateway and Management are separate and default disabled. No wildcard bind, no shared port; Management mutation stays disabled in V1. Local node only (<code>distribution_not_implemented</code>).</p>
+        <button class="btn" data-click="loadMCPConfig">Load current</button>
+        <div><textarea id="mcp-cfg-json" rows="16" style="width:100%" placeholder="MCP config JSON"></textarea></div>
+        <button class="btn" data-min-role="admin" data-click="mcpSaveConfig">Apply (local only)</button>
+        <div id="mcp-settings-status" class="muted"></div>
+      </div>
+    </div>
+
     <!-- ── FILE BLOCK PROFILE ──────────────────────────────────────────── -->
     <div class="view" id="view-fileblock">
       <div style="margin-bottom:14px">
@@ -4675,6 +4778,24 @@ document.addEventListener('click', e => {
   // Dispatch table - every valid click action must be listed here.
   // No eval, no Function(), fully CSP-compliant.
   switch (fn) {
+    // ── MCP admin (PR-9) ──
+    case 'loadMCPOverview':   loadMCPOverview(); break;
+    case 'loadMCPServers':    loadMCPServers(); break;
+    case 'loadMCPTools':      loadMCPTools(); break;
+    case 'loadMCPDecisions':  loadMCPDecisions(); break;
+    case 'loadMCPExplain':    loadMCPExplain(); break;
+    case 'loadMCPPolicy':     loadMCPPolicy(); break;
+    case 'mcpValidate':       mcpPolicyAction('validate'); break;
+    case 'mcpSimulate':       mcpPolicyAction('simulate'); break;
+    case 'mcpCompare':        mcpPolicyAction('compare'); break;
+    case 'loadMCPApprovals':  loadMCPApprovals(); break;
+    case 'mcpApproveReq':     mcpApprovalDecide(arg, 'approve'); break;
+    case 'mcpRejectReq':      mcpApprovalDecide(arg, 'reject'); break;
+    case 'loadMCPHealth':     loadMCPHealth(); break;
+    case 'loadMCPManagement': loadMCPManagement(); break;
+    case 'loadMCPConfig':     loadMCPConfig(); break;
+    case 'mcpSaveConfig':     mcpSaveConfig(); break;
+
     // ── Global / nav ──
     case 'toggleTheme':       toggleTheme(); break;
     case 'toggleSidebar':     document.getElementById('sidebar').classList.toggle('open'); break;
@@ -5229,6 +5350,14 @@ let rwRules = [];
 // Navigation
 // ═══════════════════════════════════════════════════════════════════════════
 const viewMeta = {
+  'mcp-overview':   { title: 'MCP Overview', meta: 'MCP gateway posture — decision-only, local_only, execution not_implemented' },
+  'mcp-servers':    { title: 'MCP Servers & Tools', meta: 'Tenant-scoped, redacted server & tool inventory' },
+  'mcp-decisions':  { title: 'MCP Decisions & Explain', meta: 'Historical decision search & explanation from durable events (not re-evaluated)' },
+  'mcp-policies':   { title: 'MCP Policies & Simulator', meta: 'Current policy + validate/simulate/compare a candidate (publishes nothing)' },
+  'mcp-approvals':  { title: 'MCP Approvals', meta: 'Four-eyes operational approvals — never executes' },
+  'mcp-health':     { title: 'MCP Health & Durability', meta: 'Capability-isolated runtime & PR-8 durability health' },
+  'mcp-management': { title: 'Management MCP Access', meta: 'Fixed read-only tool catalog & access status (no mutation tools)' },
+  'mcp-settings':   { title: 'MCP Listener Settings', meta: 'Node-local Gateway/Management config (disabled by default, local_only)' },
   dashboard:    { title: 'Dashboard',     meta: 'Security posture and real-time proxy overview' },
   livefeed:     { title: 'Traffic',       meta: 'All requests in real time (formerly Live Feed)' },
   blocklist:    { title: 'Blocklist',     meta: 'Manage blocked hosts & wildcards' },
@@ -5288,6 +5417,113 @@ const viewLeaveGuards = {
   },
 };
 
+// ── MCP admin (PR-9) ─────────────────────────────────────────────────────────
+// All rendering is textContent-based (XSS-safe). Every fetch handles loading,
+// permission-denied (403), bounded error, and empty states. No raw HTML from
+// server-controlled values; no secrets/arguments/output are ever requested.
+function mcpSetStatus(id, msg) { const e = document.getElementById(id); if (e) e.textContent = msg || ''; }
+function mcpShow(id, obj) { const e = document.getElementById(id); if (e) e.textContent = (obj == null) ? '' : JSON.stringify(obj, null, 2); }
+async function mcpGet(url, statusId, outId) {
+  mcpSetStatus(statusId, 'Loading…'); if (outId) mcpShow(outId, null);
+  try {
+    const r = await fetch(url, { credentials: 'same-origin' });
+    if (r.status === 403) { mcpSetStatus(statusId, 'Permission denied.'); return null; }
+    const txt = await r.text();
+    if (!r.ok) { mcpSetStatus(statusId, 'Error (' + r.status + '): ' + txt.slice(0, 200)); return null; }
+    let data; try { data = JSON.parse(txt); } catch (e) { mcpSetStatus(statusId, 'Malformed response'); return null; }
+    const empty = Array.isArray(data) ? data.length === 0 : (data && Object.keys(data).length === 0);
+    mcpSetStatus(statusId, empty ? 'No results.' : '');
+    if (outId) mcpShow(outId, data);
+    return data;
+  } catch (e) { mcpSetStatus(statusId, 'Request failed.'); return null; }
+}
+async function mcpPost(url, body, statusId) {
+  mcpSetStatus(statusId, 'Working…');
+  try {
+    const r = await fetch(url, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': (window.csrfToken || '') }, body: JSON.stringify(body) });
+    if (r.status === 403) { mcpSetStatus(statusId, 'Permission denied.'); return null; }
+    const txt = await r.text();
+    if (!r.ok) { mcpSetStatus(statusId, 'Error (' + r.status + '): ' + txt.slice(0, 200)); return null; }
+    mcpSetStatus(statusId, 'Done.');
+    try { return JSON.parse(txt); } catch (e) { return {}; }
+  } catch (e) { mcpSetStatus(statusId, 'Request failed.'); return null; }
+}
+function mcpTenantVal(id) { const e = document.getElementById(id); return e ? encodeURIComponent((e.value || '').trim()) : ''; }
+function loadMCPOverview() { mcpGet('/api/mcp/overview', 'mcp-overview-status', 'mcp-overview-out'); }
+function loadMCPHealth() { mcpGet('/api/mcp/health', 'mcp-health-status', 'mcp-health-out'); }
+function loadMCPManagement() { mcpGet('/api/mcp/management-access', 'mcp-management-status', 'mcp-management-out'); }
+function loadMCPServers() { const t = mcpTenantVal('mcp-srv-tenant'); if (!t) { mcpSetStatus('mcp-servers-status', 'Enter a tenant.'); return; } mcpGet('/api/mcp/servers?tenant=' + t, 'mcp-servers-status', 'mcp-servers-out'); }
+function loadMCPTools() { const t = mcpTenantVal('mcp-srv-tenant'); if (!t) { mcpSetStatus('mcp-servers-status', 'Enter a tenant.'); return; } mcpGet('/api/mcp/tools?tenant=' + t, 'mcp-servers-status', 'mcp-servers-out'); }
+function loadMCPDecisions() { const t = mcpTenantVal('mcp-dec-tenant'); if (!t) { mcpSetStatus('mcp-decisions-status', 'Enter a tenant.'); return; } mcpGet('/api/mcp/decisions?tenant=' + t, 'mcp-decisions-status', 'mcp-decisions-out'); }
+function loadMCPExplain() { const t = mcpTenantVal('mcp-dec-tenant'); const ev = document.getElementById('mcp-dec-event'); const id = ev ? encodeURIComponent((ev.value || '').trim()) : ''; if (!t || !id) { mcpSetStatus('mcp-decisions-status', 'Enter tenant and event id.'); return; } mcpGet('/api/mcp/decision-explain?tenant=' + t + '&event_id=' + id, 'mcp-decisions-status', 'mcp-decisions-out'); }
+function loadMCPPolicy() { const c = document.getElementById('mcp-pol-cap'); const cap = c ? c.value : 'gateway'; mcpGet('/api/mcp/policy?capability=' + encodeURIComponent(cap), 'mcp-policies-status', 'mcp-policies-out'); }
+async function mcpPolicyAction(mode) {
+  const c = document.getElementById('mcp-pol-cap'); const cap = c ? c.value : 'gateway';
+  const ta = document.getElementById('mcp-pol-candidate'); let cand;
+  try { cand = JSON.parse(ta.value || 'null'); } catch (e) { mcpSetStatus('mcp-policies-status', 'Candidate is not valid JSON.'); return; }
+  const res = await mcpPost('/api/mcp/policy-simulate', { mode: mode, capability: cap, candidate: cand, cases: [] }, 'mcp-policies-status');
+  if (res) mcpShow('mcp-policies-out', res);
+}
+async function loadMCPApprovals() {
+  const t = mcpTenantVal('mcp-appr-tenant'); const list = document.getElementById('mcp-approvals-list');
+  if (list) list.textContent = '';
+  if (!t) { mcpSetStatus('mcp-approvals-status', 'Enter a tenant.'); return; }
+  const data = await mcpGet('/api/mcp/approvals?tenant=' + t, 'mcp-approvals-status', null);
+  if (!Array.isArray(data)) return;
+  if (data.length === 0) { mcpSetStatus('mcp-approvals-status', 'No approvals.'); return; }
+  data.slice(0, 500).forEach(function (a) {
+    const row = document.createElement('div'); row.style.borderBottom = '1px solid var(--border,#ccc)'; row.style.padding = '6px 0';
+    // MCP-POLICY-007 dialog fields, all rendered via textContent (safe).
+    const fields = [['action', a.action], ['resource', a.resource], ['server', a.server_id], ['tool', a.tool_fingerprint],
+      ['op-class', a.operation_class], ['risk', a.risk_class], ['requester', a.requester], ['cred-profile', a.credential_profile_ref],
+      ['power-ceiling', a.power_ceiling], ['policy-rev', a.policy_revision], ['catalog-rev', a.catalog_revision],
+      ['event-id', a.decision_event_id], ['state', a.state], ['expiry', a.expiry_unix_nano]];
+    const line = document.createElement('div'); line.className = 'mono'; line.style.fontSize = '.82rem';
+    line.textContent = fields.filter(function (f) { return f[1] != null && f[1] !== ''; }).map(function (f) { return f[0] + '=' + f[1]; }).join('  ');
+    row.appendChild(line);
+    if (a.state === 'pending') {
+      const ap = document.createElement('button'); ap.className = 'btn'; ap.textContent = 'Approve'; ap.dataset.click = 'mcpApproveReq'; ap.dataset.arg = a.id;
+      const rj = document.createElement('button'); rj.className = 'btn'; rj.textContent = 'Reject'; rj.dataset.click = 'mcpRejectReq'; rj.dataset.arg = a.id;
+      ap.dataset.destructive = (a.risk_class === 'destructive' || a.operation_class === 'destructive') ? '1' : '';
+      row.appendChild(ap); row.appendChild(rj);
+    }
+    list.appendChild(row);
+  });
+}
+async function mcpApprovalDecide(id, action) {
+  if (action === 'approve') {
+    const btn = document.querySelector('[data-click="mcpApproveReq"][data-arg="' + id + '"]');
+    if (btn && btn.dataset.destructive === '1') {
+      const ok = window.confirm('Approve DESTRUCTIVE request ' + id + '? This names a destructive/production action.');
+      if (!ok) return;
+    }
+  }
+  const t = mcpTenantVal('mcp-appr-tenant');
+  const res = await mcpPost('/api/mcp/approval-decision', { request_id: id, tenant: decodeURIComponent(t), action: action, reason: '' }, 'mcp-approvals-status');
+  if (res) loadMCPApprovals();
+}
+function loadMCPConfig() {
+  fetch('/api/mcp/config', { credentials: 'same-origin' }).then(function (r) {
+    if (r.status === 403) { mcpSetStatus('mcp-settings-status', 'Permission denied.'); return null; }
+    return r.text();
+  }).then(function (txt) {
+    if (txt == null) return;
+    const ta = document.getElementById('mcp-cfg-json'); if (ta) { try { ta.value = JSON.stringify(JSON.parse(txt), null, 2); } catch (e) { ta.value = txt; } }
+    mcpSetStatus('mcp-settings-status', 'Loaded (local_only).');
+  }).catch(function () { mcpSetStatus('mcp-settings-status', 'Request failed.'); });
+}
+async function mcpSaveConfig() {
+  const ta = document.getElementById('mcp-cfg-json'); let cfg;
+  try { cfg = JSON.parse(ta.value || '{}'); } catch (e) { mcpSetStatus('mcp-settings-status', 'Config is not valid JSON.'); return; }
+  mcpSetStatus('mcp-settings-status', 'Applying (local only)…');
+  try {
+    const r = await fetch('/api/mcp/config', { method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': (window.csrfToken || '') }, body: JSON.stringify(cfg) });
+    const txt = await r.text();
+    if (r.status === 403) { mcpSetStatus('mcp-settings-status', 'Permission denied.'); return; }
+    mcpSetStatus('mcp-settings-status', r.ok ? 'Applied locally (distribution_not_implemented).' : ('Error (' + r.status + '): ' + txt.slice(0, 200)));
+  } catch (e) { mcpSetStatus('mcp-settings-status', 'Request failed.'); }
+}
+
 function switchView(name) {
   if (name !== currentView) {
     const guard = viewLeaveGuards[currentView];
@@ -5327,6 +5563,14 @@ function switchView(name) {
   if (name === 'pac')            loadPACConfig();
   if (name === 'policy-tester')  loadPolicyProviderOptions();
   if (name === 'ca-mgmt')        loadCAMgmt();
+  if (name === 'mcp-overview')   loadMCPOverview();
+  if (name === 'mcp-servers')    loadMCPServers();
+  if (name === 'mcp-decisions')  { /* awaits tenant input */ }
+  if (name === 'mcp-policies')   loadMCPPolicy();
+  if (name === 'mcp-approvals')  { /* awaits tenant input */ }
+  if (name === 'mcp-health')     loadMCPHealth();
+  if (name === 'mcp-management') loadMCPManagement();
+  if (name === 'mcp-settings')   loadMCPConfig();
   if (name === 'upstream')       loadUpstream();
   if (name === 'cluster')        loadCluster();
   if (name === 'cdr')            loadCDRData();

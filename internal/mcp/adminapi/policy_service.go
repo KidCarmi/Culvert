@@ -88,6 +88,10 @@ func NewPolicyService(stores PolicyStores, plim policy.Limits, lim Limits, clock
 	return &PolicyService{stores: stores, sim: simulate.New(plim), plim: plim, lim: lim, clock: clock}
 }
 
+// Stores returns the policy-store resolver (used by the admin HTTP layer to
+// read the current active policy per capability).
+func (s *PolicyService) Stores() PolicyStores { return s.stores }
+
 // candidateHash returns the hex SHA-256 of the raw candidate bytes. The hash
 // binds an approval to an exact candidate (TOCTOU guard).
 func candidateHash(raw []byte) string {
