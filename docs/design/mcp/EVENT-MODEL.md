@@ -13,8 +13,11 @@ enforcement engines and trust boundaries, shared conventions only).
 > + replay IDs + pluggable asynchronous exporters; a message bus / SIEM is an **adapter**, never a
 > mandatory runtime dependency. The per-action durability-unavailable semantics are fixed in **§4a** below.
 
-**Status:** PR-0 design artifact (Proposed). No event pipeline described here is implemented; this
-document is normative input to PR-8 (Durable decision events) per
+**Status:** PR-0 design artifact, now IMPLEMENTED by PR-8 (Durable decision events) in
+`internal/mcp/events` (model / spool / denial / state / export + manager, gate adapters and the
+optional nil-safe runtime integration); it remains DORMANT (not wired into `package main`, decision-only,
+`execution_state` stays `not_implemented`). This document stays the normative specification for that
+pipeline per
 [`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md#mcp-event--durable-decision-events) and
 [`THREAT-MODEL.md`](THREAT-MODEL.md). Repository facts are cited from
 [`VERIFIED-REPOSITORY-CONTEXT.md`](VERIFIED-REPOSITORY-CONTEXT.md) using the `[FACT]` legend; everything

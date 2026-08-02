@@ -83,13 +83,26 @@ func (p *pipeline) dispatchPolicy(rb *recBuilder, req Request, msg jsonrpc.Messa
 			body := inspectionError(msg.ID, mcperr.ReasonRedactionFailed)
 			return p.finish(rb, Outcome{Status: 200, Disposition: DispRejected, Reason: mcperr.ReasonRedactionFailed, ResponseBody: body})
 		}
-		// Record the TRUE policy result, but do not execute: PR-7 has no upstream.
+		// PR-8: DURABLY COMMIT the sanitized decision event BEFORE the (still
+		// not-implemented) execution response. A CRITICAL operation whose event
+		// cannot commit fails closed here — the receipt is evidence a FUTURE
+		// execution stage may proceed, never an execution itself.
+		if p.events != nil {
+			if out, blocked := p.commitDecisionAllow(rb, &in, d, ctx, insp, snap.Hash(), msg); blocked {
+				return out
+			}
+		}
+		// Record the TRUE policy result, but do not execute: PR-8 has no upstream.
 		p.ctr.observeOnly.Add(1)
 		rb.rec.ExecutionState = "not_implemented"
 		body := executionNotAvailable(msg.ID, d)
 		return p.finish(rb, Outcome{Status: 200, Disposition: DispPolicyAllowed, Reason: mcperr.ReasonObserveOnly, ResponseBody: body})
 	}
-	// DENY / QUARANTINE / REQUIRE_* → deterministic typed JSON-RPC rejection.
+	// DENY / QUARANTINE / REQUIRE_* → deterministic typed JSON-RPC rejection. PR-8:
+	// route the authorization denial into the isolated denial lane (never blocks).
+	if p.events != nil {
+		p.routeDenial(ctx, string(d.Reason))
+	}
 	p.ctr.requestsRejected.Add(1)
 	body := policyError(msg.ID, d.Reason, d.Action, d.MatchedRule)
 	return p.finish(rb, Outcome{Status: 200, Disposition: DispRejected, Reason: mcperr.ReasonObserveOnly, ResponseBody: body})

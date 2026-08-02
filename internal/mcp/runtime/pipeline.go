@@ -113,6 +113,10 @@ type pipeline struct {
 	// nil the pipeline keeps the pre-inspection decision path (byte-identical).
 	inspection InspectionProvider
 
+	// events is the OPTIONAL capability-scoped PR-8 durable decision-event provider.
+	// When nil the pipeline commits no event and routes no denial (byte-identical).
+	events EventProvider
+
 	// boundMu guards boundIDs — the set of session ids this pipeline has bound an
 	// identity to. It lets reconcileBindings unbind identities for sessions the
 	// kernel sweeper reclaimed (which has no per-binding hook), so the binding store
@@ -155,6 +159,9 @@ func newPipeline(cfg ListenerConfig, deps Deps, listenerID string, ctr *counters
 	}
 	if deps.Inspection != nil {
 		p.inspection = deps.Inspection
+	}
+	if deps.Events != nil {
+		p.events = deps.Events
 	}
 	return p, nil
 }
@@ -375,6 +382,9 @@ func (p *pipeline) processMessage(req Request, rb *recBuilder, msg jsonrpc.Messa
 			p.closeSession(sess.ID())
 		}
 		p.ctr.authFailures.Add(1)
+		// PR-8: route the pre-identity authentication failure into the isolated
+		// denial lane (attacker-mintable; no tenant attribution). Never blocks.
+		p.routeAuthDenial(mcperr.ReasonOf(err))
 		return p.reject(rb, statusForAuth(mcperr.ReasonOf(err)), mcperr.ReasonOf(err), "")
 	}
 	rb.rec.PrincipalHash = digest(ctx.Fingerprint())
@@ -388,6 +398,9 @@ func (p *pipeline) processMessage(req Request, rb *recBuilder, msg jsonrpc.Messa
 			p.closeSession(sess.ID())
 		}
 		p.ctr.admissionRejected.Add(1)
+		// PR-8: route the authorization/admission denial into the denial lane, with
+		// the verified identity that now exists. Never blocks authenticated work.
+		p.routeDenial(ctx, mcperr.ReasonOf(err).Code())
 		return p.reject(rb, statusForAdmission(mcperr.ReasonOf(err)), mcperr.ReasonOf(err), "")
 	}
 	rb.rec.Method = msg.Method // safe: an admitted method is one of the reviewed six

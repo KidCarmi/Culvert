@@ -146,6 +146,28 @@ func inspectionError(id jsonrpc.ID, reason mcperr.Reason) []byte {
 	return b
 }
 
+// durabilityError renders the deterministic JSON-RPC error for a PR-8 fail-closed
+// critical durability failure (the decision event could not be durably committed).
+// No execution_state is present; the machine reason code is the message.
+func durabilityError(id jsonrpc.ID, reason mcperr.Reason) []byte {
+	env := struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Error   struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+			Data    struct {
+				Stage string `json:"stage"`
+			} `json:"data"`
+		} `json:"error"`
+	}{JSONRPC: "2.0", ID: idJSON(id)}
+	env.Error.Code = durabilityErrorCode
+	env.Error.Message = reason.Code()
+	env.Error.Data.Stage = "durability"
+	b, _ := json.Marshal(env) //nolint:errcheck // fixed-shape struct, marshal cannot fail
+	return b
+}
+
 // statusForAuth maps an authentication/binding rejection reason to an HTTP status.
 // Every authentication failure class is a 401 except the immutable-binding conflict,
 // which is a 409, and the forbidden query-string location, which is a 400.

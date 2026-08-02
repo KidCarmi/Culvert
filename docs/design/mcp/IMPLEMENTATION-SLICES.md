@@ -144,6 +144,10 @@ rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted AD
 - **Owner:** Sec/Eng. **Reviewer:** Sec Arch/Privacy. **Release gate:** SSRF + DLP suites green.
 
 ## PR-8 — Durable Decision Events
+- **Status:** IMPLEMENTED — `internal/mcp/events` (`model`, `spool`, `denial`, `state`, `export`) + the
+  composition-root manager, gate adapters and the OPTIONAL nil-safe `runtime` integration. All nine
+  blocking `MCP-T-075` containment tests plus the per-class side-effect-absence suite are green. DORMANT:
+  not wired into `package main`, decision-only, `execution_state` stays `not_implemented`.
 - **Objective:** durable, backpressured, replay-addressable decision events; exporters; loss policy.
 - **Scope:** `internal/mcp/events` [REC]; **not** the audit ring; may refactor from `internal/reqlog` prior art.
 - **Non-goals:** reusing the 500-entry audit ring as production evidence.

@@ -38,6 +38,14 @@ type Deps struct {
 	// re-validated transform — still decision-only (no upstream/credential/broker
 	// call, execution_state stays not_implemented).
 	Inspection InspectionProvider
+	// Events is the OPTIONAL capability-scoped PR-8 durable decision-event provider.
+	// When nil, the pipeline keeps the PR-7 decision-only path byte-identically (no
+	// event committed, no denial routed). When set, an ALLOW-class decision-point
+	// outcome durably commits a sanitized decision event before the (still
+	// not-implemented) response — a critical operation whose event cannot commit
+	// fails closed — and auth/authorization denials are routed into the isolated
+	// denial lane. It never causes an upstream/credential/broker call.
+	Events EventProvider
 	// Clock is injected for deterministic tests; nil ⇒ time.Now.
 	Clock func() time.Time
 }
