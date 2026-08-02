@@ -24,7 +24,7 @@ import (
 // alertGateHarness installs a fresh, isolated alert store as the process-wide
 // singleton and returns it alongside the channel that receiving endpoints
 // signal on. Mirrors the swap-the-global idiom used by security_coverage_test.go.
-func alertGateHarness(t *testing.T) (*AlertStore, chan string) {
+func alertGateHarness(t *testing.T) (store *AlertStore, delivered chan string) {
 	t.Helper()
 	restore := ssrf.AllowLoopbackForTest()
 	t.Cleanup(restore)
