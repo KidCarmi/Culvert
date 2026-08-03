@@ -226,7 +226,12 @@ func isSameOrigin(r *http.Request, origin string) bool {
 func uiAuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Always public: setup bootstrap, specific auth endpoints (login/logout/status),
-		// IdP callbacks, and /proxy.pac (Windows clients need it without credentials).
+		// IdP callbacks, /proxy.pac (Windows clients need it without credentials), and
+		// the cluster node-bootstrap dispatch (apiBootstrapRouter): its own single-use,
+		// time-limited enrollment token IS the auth (see bootstrap.go and the
+		// uiRoutes "gating delegated to handler" note) — the generated onboarding
+		// `curl` runs from a brand-new host that has no session cookie or credentials,
+		// so this must stay reachable even after cfg.IsConfigured() is true.
 		// NOTE: /api/auth/users is intentionally NOT in this list — it requires admin role.
 		if strings.HasPrefix(r.URL.Path, "/api/setup") ||
 			r.URL.Path == "/api/auth/login" ||
@@ -235,7 +240,8 @@ func uiAuthMiddleware(next http.Handler) http.Handler {
 			strings.HasPrefix(r.URL.Path, "/api/auth/totp") ||
 			strings.HasPrefix(r.URL.Path, "/auth/") ||
 			r.URL.Path == "/proxy.pac" ||
-			strings.HasPrefix(r.URL.Path, "/pac/") {
+			strings.HasPrefix(r.URL.Path, "/pac/") ||
+			strings.HasPrefix(r.URL.Path, "/api/cluster/bootstrap/") {
 			next.ServeHTTP(w, r)
 			return
 		}
