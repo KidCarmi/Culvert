@@ -3262,3 +3262,23 @@ routes:
     audit_expected: false
     danger_level: none
     documented: true
+  - route: "/api/mcp/distribution"
+    method: "GET"
+    handler: "apiMCPDistribution"
+    domain: "mcp"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
+  - route: "/api/mcp/rollback"
+    method: "POST"
+    handler: "apiMCPRollback"
+    domain: "mcp"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: true
+    audit_expected: true
+    danger_level: high
+    documented: true

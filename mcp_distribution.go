@@ -102,6 +102,60 @@ func (d *mcpDistribution) setDPApplier(capability cpdp.Capability, a *apply.Appl
 	}
 }
 
+// mcpCapabilityStatus is the safe, read-only distribution status for one MCP
+// capability (no secret, no signing key). Zeros/empties when nothing is published.
+type mcpCapabilityStatus struct {
+	CurrentHash       string `json:"current_hash"`
+	PreviousHash      string `json:"previous_hash"`
+	Epoch             int64  `json:"epoch"`
+	ConfigRevision    uint64 `json:"config_revision"`
+	PolicyRevision    uint64 `json:"policy_revision"`
+	CatalogRevision   uint64 `json:"catalog_revision"`
+	CredentialRev     uint64 `json:"credential_revision"`
+	SigningKeyID      string `json:"signing_key_id"`
+	MinimumDPVersion  uint32 `json:"minimum_dp_version"`
+	RollbackAvailable bool   `json:"rollback_available"`
+}
+
+// mcpDistributionStatus reports the safe, operator-visible distribution status for
+// both capabilities. When MCP distribution is disabled (the default) it truthfully
+// reports local_only with empty per-capability status. It never exposes a private
+// signing key, a raw signature, or a full raw snapshot.
+func mcpDistributionStatus() map[string]any {
+	d := globalMCPDistribution
+	enabled := d.enabled.Load()
+	d.mu.Lock()
+	gw := capStatus(d.cpGateway)
+	mg := capStatus(d.cpManagement)
+	d.mu.Unlock()
+	state := "local_only"
+	if enabled && (d.cpGateway != nil || d.cpManagement != nil) {
+		state = "pending_distribution"
+	}
+	return map[string]any{
+		"enabled":            enabled,
+		"distribution_state": state,
+		"gateway":            gw,
+		"management":         mg,
+	}
+}
+
+func capStatus(env *cpdp.Envelope) mcpCapabilityStatus {
+	if env == nil {
+		return mcpCapabilityStatus{}
+	}
+	return mcpCapabilityStatus{
+		CurrentHash:      env.ContentHash,
+		Epoch:            env.Manifest.Epoch,
+		ConfigRevision:   env.Manifest.Revisions.Config,
+		PolicyRevision:   env.Manifest.Revisions.Policy,
+		CatalogRevision:  env.Manifest.Revisions.Catalog,
+		CredentialRev:    env.Manifest.Revisions.Credential,
+		SigningKeyID:     env.KeyID,
+		MinimumDPVersion: uint32(env.Manifest.MinDPVersion),
+	}
+}
+
 // applySnapshotMCP applies the OPTIONAL signed MCP envelopes carried by a received
 // ConfigSnapshot. Each capability is applied INDEPENDENTLY and WHOLE:
 //

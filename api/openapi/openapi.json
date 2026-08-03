@@ -11750,6 +11750,46 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/mcp/distribution": {
+      "get": {
+        "description": "Safe, read-only signed CP→DP distribution status per capability (current/previous content hash, epoch, config/policy/catalog/credential revisions, signing key id, minimum DP version, rollback availability). Never exposes a private signing key, a raw signature, or a full raw snapshot. local_only when signed distribution is not active.",
+        "operationId": "getMCPDistribution",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Distribution status"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Signed CP→DP MCP distribution status",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/mcp/health": {
       "get": {
         "description": "Capability-isolated MCP health — Gateway/Management runtime and PR-8 durability state, distribution_state local_only, and Management access surface.",
@@ -12161,6 +12201,83 @@
         "x-culvert-permission": "operator",
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "tenant",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/mcp/rollback": {
+      "post": {
+        "description": "Initiates an operator-controlled atomic rollback of a capability's active signed snapshot to an exact retained target content hash, via the four-eyes publication workflow with a PR-8 durable commit before any signing/push/swap. Admin-only and CSRF-protected. Management MCP may read distribution health but never publish or roll back. Fails closed with distribution_not_configured when signed distribution is not active on this node.",
+        "operationId": "createMCPRollback",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "capability": {
+                    "enum": [
+                      "gateway",
+                      "management"
+                    ],
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": "string"
+                  },
+                  "target_hash": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "capability",
+                  "target_hash"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Rollback initiated"
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/PlainConflict"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Four-eyes atomic rollback to a retained signed snapshot",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-audit-event": "mcp.rollback.request",
+        "x-culvert-danger-level": "high",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"
       }
     },
