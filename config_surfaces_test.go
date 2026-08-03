@@ -879,6 +879,7 @@ var snapshotApplyFuncs = map[string]bool{
 	"syncSnapshotIdPProfiles":             true,
 	"fetchAndApply":                       true, // controlplane_client.go (DP poller)
 	"applyBlocklistDeltaSnapshot":         true, // T3 P1: DP-side delta apply (controlplane_delta.go)
+	"applySnapshotMCP":                    true, // PR-10: optional signed MCP CP→DP snapshots (mcp_distribution.go)
 }
 
 func snapshotApplyFuncNames() string {
@@ -896,7 +897,7 @@ func snapshotApplyFuncNames() string {
 func snapshotConsumedFields(t *testing.T) map[string]bool {
 	t.Helper()
 	consumed := map[string]bool{}
-	for _, file := range []string{"controlplane_snapshot.go", "controlplane_client.go"} {
+	for _, file := range []string{"controlplane_snapshot.go", "controlplane_client.go", "mcp_distribution.go"} {
 		fset := token.NewFileSet()
 		f, err := parser.ParseFile(fset, file, nil, parser.SkipObjectResolution)
 		if err != nil {

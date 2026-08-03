@@ -114,6 +114,19 @@ var configSurfaces = []configSurfaceRow{
 	{ID: "snapshot_epoch", Kind: kindMeta,
 		Note:     "ADR-0005 fencing epoch; DPs CAS-ratchet and reject stale-epoch snapshots",
 		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "Epoch", AppliesOnDP: true}}},
+	// PR-10 signed MCP CP→DP snapshots — derived, independently-signed integrity
+	// artifacts (RC-5 snapshot-meta): consumed on the DP (applySnapshotMCP) but not
+	// applied as an operator config value, so kindMeta + AppliesOnDP like Epoch. NOT
+	// sensitive: the envelope carries only a public content hash + ed25519 signature
+	// and a secret-free reviewed payload — the signing private key and any credential
+	// value NEVER enter it (guaranteed by construction in internal/mcp/cpdp). Absent
+	// (nil) on a disabled node ⇒ omitempty ⇒ byte-compatible SWG snapshot.
+	{ID: "mcp_gateway_snapshot", Kind: kindMeta, ClusterSynced: true,
+		Note:     "PR-10 signed MCP Gateway snapshot; DP verifies signature/epoch/version and applies whole or rejects whole (SWG unaffected)",
+		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "MCPGatewaySnapshot", AppliesOnDP: true}}},
+	{ID: "mcp_management_snapshot", Kind: kindMeta, ClusterSynced: true,
+		Note:     "PR-10 signed MCP Management snapshot; capability-isolated from Gateway; DP applies whole or rejects whole",
+		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "MCPManagementSnapshot", AppliesOnDP: true}}},
 	{ID: "snapshot_updated_at", Kind: kindMeta,
 		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "UpdatedAt"}}},
 	{ID: "policy_version", Kind: kindMeta,

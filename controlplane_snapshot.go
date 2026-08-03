@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/catoverride"
+	"github.com/KidCarmi/Culvert/internal/mcp/cpdp"
 	"github.com/KidCarmi/Culvert/internal/pac"
 	"github.com/KidCarmi/Culvert/internal/session"
 )
@@ -149,6 +150,24 @@ type ConfigSnapshot struct {
 	// sends non-nil. Bounded by maxSnapCategoryOverrides (host-aggregate, enforced
 	// in validateConfigSnapshot). Not a secret ⇒ not redacted.
 	CategoryOverrides *CategoryOverrides `json:"category_overrides"`
+
+	// MCPGatewaySnapshot / MCPManagementSnapshot are the OPTIONAL signed, immutable
+	// MCP CP→DP snapshots (PR-10, MCP-CPDP-001). They ride the existing SWG
+	// ConfigSnapshot channel but are independently signed + validated: presence
+	// (non-nil) means "an authoritative signed MCP snapshot for this capability is
+	// attached, apply it whole after signature/epoch/version validation"; absence
+	// (nil, omitempty ⇒ not on the wire) means "no MCP change — an older/rolled-back
+	// CP that predates MCP never wipes valid DP-local MCP state" (absence is not
+	// deletion; an intended MCP removal is an explicit signed rollback, not an empty
+	// snapshot). A malformed present envelope rejects the MCP capability WHOLE and
+	// never corrupts the SWG apply (the two are applied independently). The envelope
+	// carries only public integrity material (content hash + ed25519 signature) and
+	// secret-free reviewed payload — NO signing private key and NO credential value
+	// ever enter it, so it is not redacted. kindMeta / AppliesOnDP in the
+	// config-surface registry (like Epoch): a derived signed artifact, consumed on
+	// the DP but not applied as an operator config value.
+	MCPGatewaySnapshot    *cpdp.Envelope `json:"mcp_gateway_snapshot,omitempty"`
+	MCPManagementSnapshot *cpdp.Envelope `json:"mcp_management_snapshot,omitempty"`
 }
 
 // ConfigSnapshot per-slice size caps (H5 fix).
@@ -749,6 +768,12 @@ func applyConfigSnapshot(snap ConfigSnapshot) error {
 	applySnapshotExtendedState(snap)
 	applySnapshotSaaSFeed(snap)
 
+	// Optional signed MCP CP→DP snapshots (PR-10). Applied AFTER the SWG apply and
+	// only touching MCP state: a malformed/rejected MCP envelope never corrupts the
+	// SWG config above, and each capability applies independently. A no-op when MCP
+	// distribution is disabled (the default).
+	applySnapshotMCP(snap)
+
 	logger.Printf("DataPlane: applied config v%d (%d blocked hosts, %d rules, ip_mode=%s, rate=%d rpm)",
 		snap.Version, len(snap.BlockedHosts), len(snap.PolicyRules), snap.IPFilterMode, snap.RateLimitRPM)
 	return nil
@@ -1324,6 +1349,12 @@ func CurrentConfigSnapshot() ConfigSnapshot {
 	// that predates the field sends nothing and the DP keeps its local copy.
 	ov := globalCategoryOverrides.Get()
 	snap.CategoryOverrides = &ov
+
+	// Optional signed MCP CP→DP snapshots (PR-10). nil when MCP distribution is
+	// disabled (the default) ⇒ omitempty ⇒ the snapshot is byte-identical to the
+	// pre-PR-10 SWG snapshot. A published capability stamps its signed envelope here.
+	snap.MCPGatewaySnapshot = mcpCapturedGateway()
+	snap.MCPManagementSnapshot = mcpCapturedManagement()
 
 	return snap
 }
