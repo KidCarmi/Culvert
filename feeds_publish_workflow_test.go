@@ -621,6 +621,12 @@ func assertResignDispatchesPinnedTag(t *testing.T, doc feedsWFDoc) {
 	if !runContainsAll(seq, `--ref "$SIGNING_TAG"`, "validity_hours=336") {
 		t.Fatal("resign must dispatch at the PINNED tag ($SIGNING_TAG from vars.FEEDS_SIGNING_TAG) preserving 336h validity")
 	}
+	// The dispatch job has NO checkout, so gh cannot infer the repo from a git remote — it
+	// MUST pass --repo (as resign-catalog.yml does) or the weekly renewal silently fails to
+	// dispatch. Pin it so this regression cannot recur.
+	if !runContainsAll(seq, `--repo "$REPO"`) {
+		t.Fatal("resign must pass --repo \"$REPO\" to gh workflow run (no checkout ⇒ repo is not inferable)")
+	}
 	// gate + tag grammar + 40-hex SHA + lightweight-tag resolution, fail-closed. (The master-gate
 	// VAR reference is asserted in assertResignPinnedVars; the body checks it via the $GATE env
 	// alias with a `!= "true"` fail-closed guard.)
