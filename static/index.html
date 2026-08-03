@@ -18020,6 +18020,10 @@ async function mcpxRenderActivity(afterCb){
       tb.appendChild(tr);
     });
     tbl.appendChild(tb); wrap.appendChild(tbl);
+    // Completeness: the search is one deterministic page. When more results exist
+    // (next_cursor present), say so, so a page-capped filtered list is never
+    // mistaken for the complete set.
+    if(data.next_cursor) wrap.appendChild(mcpxEl('div','mcpx-source','Showing the first '+rows.length+' results for this view; more exist. Narrow the filter to see the rest.'));
   }
   // No modal scrim: this is a CONTEXTUAL side drawer, so the Activity table stays
   // interactive underneath (select another row, switch decisions) while it is open.
@@ -18189,7 +18193,7 @@ function mcpxPaintDecision(drawer, frame){
     mcpxChip('evaluated '+(ex.action||'-'), (ex.action&&ex.action.indexOf('ALLOW')===0)?'ok':'crit'),
     mcpxChip('effective '+eff.label, eff.kind),
     eff.override?mcpxChip('shadow override','warn'):mcpxChip('no override','muted')
-  ], [ mcpxKv('Shadow override (derived)', eff.override?'yes':'no'), mcpxKvNR('Rollout mode at decision time', '') ]));
+  ], [ mcpxKv('Shadow override (derived)', eff.override?'yes':'no') ]));
 
   // 7. Durable event.
   drawer.appendChild(mcpxStageBlock(7,'Durable event',
@@ -18205,11 +18209,12 @@ function mcpxPaintDecision(drawer, frame){
       [ mcpxKv('Credential profile', ex.credential_profile_ref), mcpxKvNR('Power ceiling', ex.credential_power_ceiling) ]));
   }
 
-  // 9. Upstream execution outcome - recorded disposition only; no HTTP/latency source.
+  // 9. Upstream execution outcome - the recorded disposition only. Upstream HTTP
+  // status and latency have no DTO slot, so they are OMITTED (not shown as a
+  // "not recorded" row, which the contract reserves for schema-present fields);
+  // the drawer footer states they are not kept.
   drawer.appendChild(mcpxStageBlock(9,'Upstream execution outcome',
-    [ mcpxEl('span','v', ex.execution_state||'not recorded') ], [
-    mcpxKvNR('Upstream HTTP status', ''), mcpxKvNR('Latency', '')
-  ]));
+    [ mcpxEl('span','v', ex.execution_state||'not recorded') ], []));
 
   // 10. Response inspection and DLP.
   var dlpSum=[];
@@ -18232,7 +18237,7 @@ function mcpxPaintDecision(drawer, frame){
     mcpxKvNR('Runtime rev', ex.runtime_revision)
   ]));
 
-  drawer.appendChild(mcpxEl('div','mcpx-source','Evidence stages render only when the committed event carries the field. Approval/allowance is omitted (not on the decision event). Quarantine and revoke are not offered: no endpoint exists in V1.'));
+  drawer.appendChild(mcpxEl('div','mcpx-source','Evidence stages render only when the committed event carries the field; rollout mode, upstream HTTP status and latency are not recorded on it, and approval/allowance is not on the decision event, so those are omitted. Quarantine and revoke are not offered: no endpoint exists in V1.'));
 }
 
 function mcpxOpenServer(tenant, serverId){
@@ -18292,7 +18297,7 @@ function mcpxPaintTool(drawer, frame){
 }
 
 document.addEventListener('keydown', function(e){
-  if(e.key==='Escape'){ if(mcpxFrames.length){ mcpxPopFrame(); return; } }
+  if(e.key==='Escape'){ var od=document.getElementById('mcpx-drawer'); if(mcpxFrames.length && od && od.classList.contains('open')){ mcpxPopFrame(); return; } }
   if(e.key!=='Enter' && e.key!==' ') return;
   var tr=e.target && e.target.closest && e.target.closest('table.mcpx-act tbody tr'); if(!tr) return;
   e.preventDefault(); mcpxOpenDecision(tr.dataset.arg);
