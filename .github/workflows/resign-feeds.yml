@@ -91,5 +91,8 @@ jobs:
           # Dispatch the REAL publisher at the pinned tag. It signs + verifies + publishes
           # there; its Job B still requires feeds-production approval. Preserve the normal
           # 336-hour (14-day) validity window explicitly. This dispatcher NEVER runs cosign.
-          gh workflow run publish-feeds.yml --ref "$SIGNING_TAG" -f validity_hours=336
+          # --repo is REQUIRED: this job has no checkout, so gh cannot infer the repo from a
+          # git remote and would fail to dispatch. $REPO (= github.repository) is set above and
+          # already used for the tag-resolution gh api call; mirrors resign-catalog.yml.
+          gh workflow run publish-feeds.yml --repo "$REPO" --ref "$SIGNING_TAG" -f validity_hours=336
           echo "dispatched publish-feeds.yml @ $SIGNING_TAG (validity 336h); publication awaits feeds-production approval"
