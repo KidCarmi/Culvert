@@ -63,6 +63,12 @@ type CallOptions struct {
 	// WireID is the independent upstream-leg JSON-RPC id (never assumed equal to the
 	// client-leg id). Empty ⇒ the client assigns one.
 	WireID string
+	// AuthHeader is the OPTIONAL upstream Authorization header value — the
+	// broker-materialized credential for the APPROVED SERVER (e.g. "Bearer <token>").
+	// It is NEVER the client's own token (the client token is never forwarded); it is
+	// set only from inside the broker materialization callback and lives only for the
+	// duration of the request.
+	AuthHeader string
 }
 
 // Response is the decoded, admitted upstream JSON-RPC response.
@@ -161,7 +167,7 @@ func (c *Client) attempt(ctx context.Context, target Target, method string, para
 	if err != nil {
 		return nil, false, err
 	}
-	raw, preResponse, err := c.roundTrip(ctx, target, body)
+	raw, preResponse, err := c.roundTrip(ctx, target, body, opts.AuthHeader)
 	if err != nil {
 		return nil, preResponse, err
 	}

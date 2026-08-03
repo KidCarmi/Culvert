@@ -53,7 +53,7 @@ func (p *serverPool) acquire(ctx context.Context) (func(), error) {
 // returns (rawBody, preResponse, error): preResponse is true when the failure
 // happened before any response headers were received (dial/TLS/timeout) so an
 // idempotent read may retry.
-func (c *Client) roundTrip(ctx context.Context, target Target, body []byte) ([]byte, bool, error) {
+func (c *Client) roundTrip(ctx context.Context, target Target, body []byte, authHeader string) ([]byte, bool, error) {
 	canon, class, err := destination.Canonicalize(target.Endpoint, c.cfg.Policy, c.cfg.InspectionLimits)
 	if err != nil {
 		return nil, false, mcperr.Wrap(mcperr.ReasonUpstreamEndpointInvalid, "upstreamclient", "endpoint canonicalize", err)
@@ -79,7 +79,12 @@ func (c *Client) roundTrip(ctx context.Context, target Target, body []byte) ([]b
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	// NO Authorization header is ever set — the client token is never forwarded.
+	// The ONLY Authorization value ever sent is the broker-materialized APPROVED
+	// SERVER credential (set by the executor inside the materialization callback).
+	// The client's own token is never forwarded.
+	if authHeader != "" {
+		req.Header.Set("Authorization", authHeader)
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {

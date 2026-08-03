@@ -49,6 +49,7 @@ type counters struct {
 	requestsRejected   atomic.Int64
 	kernelTerminal     atomic.Int64
 	observeOnly        atomic.Int64
+	requestsExecuted   atomic.Int64
 	activeSessions     atomic.Int64
 	queued             atomic.Int64
 	inFlight           atomic.Int64
@@ -74,6 +75,7 @@ type HealthSnapshot struct {
 	RequestsRejected   int64
 	KernelTerminal     int64
 	ObserveOnly        int64
+	RequestsExecuted   int64
 	ActiveSessions     int64
 	Queued             int64
 	InFlight           int64
@@ -91,7 +93,8 @@ func (c *counters) snapshot(capability, listenerID string) HealthSnapshot {
 		AcceptedConns: c.acceptedConns.Load(), RejectedConns: c.rejectedConns.Load(),
 		RequestsTotal: c.requestsTotal.Load(), RequestsRejected: c.requestsRejected.Load(),
 		KernelTerminal: c.kernelTerminal.Load(), ObserveOnly: c.observeOnly.Load(),
-		ActiveSessions: c.activeSessions.Load(), Queued: c.queued.Load(), InFlight: c.inFlight.Load(),
+		RequestsExecuted: c.requestsExecuted.Load(),
+		ActiveSessions:   c.activeSessions.Load(), Queued: c.queued.Load(), InFlight: c.inFlight.Load(),
 		Timeouts: c.timeouts.Load(), AuthFailures: c.authFailures.Load(),
 		HostOriginFailures: c.hostOriginFailures.Load(), AdmissionRejected: c.admissionRejected.Load(),
 		ShutdownCancels: c.shutdownCancels.Load(), ObserveDrops: c.observeDrops.Load(),
