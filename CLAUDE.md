@@ -7,7 +7,7 @@ Single binary, zero runtime dependencies.
 
 ```
 *.go          — package main: composition roots, HTTP/API handlers, and thin shims over internal/
-internal/     — 61 packages (ADR-0002 decomposition, COMPLETE, plus post-decomposition additions): 53 extracted/added engines (incl. autoexclude — the adaptive decryption-exclusion cache) + 4 seams (obs, fileutil, hostutil, ssrf) + halease (ADR-0005 fencing lease) + internal/mcp (25 subpackages — the MCP Agent Security Gateway engine, ADR-0024; see Architecture Notes). Engines own logic/state/persistence; main keeps singletons, aliases, and wiring. New engines go here with a recorded design; do not re-inline them.
+internal/     — 61 packages (ADR-0002 decomposition, COMPLETE, plus post-decomposition additions): 55 extracted/added engines (incl. autoexclude — the adaptive decryption-exclusion cache; catoverride — admin-owned category-override engine for the signed SaaS URL-category feed; urlcatfeed — the signed SaaS URL-category feed engine) + 4 seams (obs, fileutil, hostutil, ssrf) + halease (ADR-0005 fencing lease) + internal/mcp (25 subpackages — the MCP Agent Security Gateway engine, ADR-0024; see Architecture Notes). Engines own logic/state/persistence; main keeps singletons, aliases, and wiring. New engines go here with a recorded design; do not re-inline them.
 main.go       — Composition root: entrypoint, flag parsing, the 24 init* startup shims, proxy-server wiring, signal handling (DEBT-003 split; the file is the startup orchestrator only)
 main_shutdown.go — Graceful-shutdown sequence: runShutdownSequence, shutdown-order constants, registerEarly/LateShutdownHooks, drainActiveTunnels
 healthcheck.go — /healthz + /readyz handlers: handleHealth, handleReady, configSnapshotValidatorOK
@@ -71,7 +71,7 @@ bandwidth.go  — Per-group bandwidth/QoS policies with token bucket rate limiti
 bootstrap.go  — Bootstrap shim: token-gated HTTP handlers over internal/bootstrap (ADR-0002; templates + image refs + URL helpers live in the package)
 scan_remote.go — Remote scan sidecar for production sandboxing
 mcp_runtime.go / mcp_distribution.go / mcp_distribution_adapters.go / mcp_rollout.go — MCP Agent Security Gateway composition-root seam (ADR-0024, disabled-by-default): mcp_runtime.go wires the dedicated MCP listener runtime (Gateway + Management, PR-5) over internal/mcp/runtime; mcp_distribution.go + mcp_distribution_adapters.go carry the CP→DP signed-snapshot distribution (PR-10) over internal/mcp/cpdp{,/apply,/publication} + internal/mcp/events; mcp_rollout.go owns the PR-11 rollout-mode composition (Disabled→Observe→Shadow→Canary→Production) over internal/mcp/rollout. All logic lives in internal/mcp's 25 subpackages; these root files are wiring only (ADR-0002 shim convention)
-ui_mcp.go / ui_mcp_rollout.go — MCP admin API: policy/approval/management CRUD (ui_mcp.go, PR-9) + rollout-mode admin surface (ui_mcp_rollout.go, PR-11) over internal/mcp/{adminapi,approval,management,policy,rollout}; GUI is the Command Center + Activity panels in static/index.html
+ui_mcp.go / ui_mcp_rollout.go — MCP admin API: policy/approval CRUD + read-only Management access (ui_mcp.go, PR-9 — Management is deliberately read-only + draft/validate/simulate only, ADR-0024 D-13; `apiMCPManagementAccess` accepts GET only and always reports `mutation_tools: 0`) + rollout-mode admin surface (ui_mcp_rollout.go, PR-11) over internal/mcp/{adminapi,approval,management,policy,rollout}; GUI is the Command Center + Activity panels in static/index.html
 ```
 
 ## Build & Test
