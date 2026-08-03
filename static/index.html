@@ -3484,6 +3484,18 @@ Firefox (all platforms):
         <div id="mcp-health-status" class="muted"></div>
         <pre class="mono" id="mcp-health-out" style="white-space:pre-wrap"></pre>
       </div>
+      <div class="panel"><h3>Signed CP&#8594;DP Distribution &amp; Rollback</h3>
+        <button class="btn" data-click="loadMCPDistribution">Refresh status</button>
+        <p class="muted">Read-only signed-distribution status per capability: content hash, epoch, revision tuple, signing key id, minimum DP version, rollback availability. No private key, raw signature, or full raw snapshot is exposed. Rollback uses the four-eyes publication workflow (admin only); Management MCP may read this health but never publish or roll back.</p>
+        <div id="mcp-distribution-status" class="muted"></div>
+        <pre class="mono" id="mcp-distribution-out" style="white-space:pre-wrap"></pre>
+        <div data-min-role="admin">
+          <h4>Rollback to a retained snapshot</h4>
+          <select id="mcp-rollback-capability"><option value="gateway">gateway</option><option value="management">management</option></select>
+          <input id="mcp-rollback-target" type="text" placeholder="target content hash" style="width:60%">
+          <button class="btn" data-min-role="admin" data-click="mcpRollback">Request rollback (four-eyes)</button>
+        </div>
+      </div>
     </div>
     <div class="view" id="view-mcp-management">
       <div class="panel"><h3>Management MCP Access</h3>
@@ -4792,6 +4804,8 @@ document.addEventListener('click', e => {
     case 'mcpApproveReq':     mcpApprovalDecide(arg, 'approve'); break;
     case 'mcpRejectReq':      mcpApprovalDecide(arg, 'reject'); break;
     case 'loadMCPHealth':     loadMCPHealth(); break;
+    case 'loadMCPDistribution': loadMCPDistribution(); break;
+    case 'mcpRollback':       mcpRollback(); break;
     case 'loadMCPManagement': loadMCPManagement(); break;
     case 'loadMCPConfig':     loadMCPConfig(); break;
     case 'mcpSaveConfig':     mcpSaveConfig(); break;
@@ -5451,6 +5465,20 @@ async function mcpPost(url, body, statusId) {
 function mcpTenantVal(id) { const e = document.getElementById(id); return e ? encodeURIComponent((e.value || '').trim()) : ''; }
 function loadMCPOverview() { mcpGet('/api/mcp/overview', 'mcp-overview-status', 'mcp-overview-out'); }
 function loadMCPHealth() { mcpGet('/api/mcp/health', 'mcp-health-status', 'mcp-health-out'); }
+function loadMCPDistribution() { mcpGet('/api/mcp/distribution', 'mcp-distribution-status', 'mcp-distribution-out'); }
+function mcpRollback() {
+  var cap = document.getElementById('mcp-rollback-capability').value;
+  var target = (document.getElementById('mcp-rollback-target').value || '').trim();
+  if (!target) { mcpSetStatus('mcp-distribution-status', 'Enter a target content hash.'); return; }
+  fetch('/api/mcp/rollback', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': (window.csrfToken || '') }, body: JSON.stringify({ capability: cap, target_hash: target }) })
+    .then(function (r) {
+      if (r.status === 403) { mcpSetStatus('mcp-distribution-status', 'Permission denied.'); return null; }
+      if (r.status === 409) { mcpSetStatus('mcp-distribution-status', 'Signed distribution is not configured on this node.'); return null; }
+      return r.json();
+    })
+    .then(function (j) { if (j) { mcpSetStatus('mcp-distribution-status', 'Rollback requested: ' + (j.rollback_state || '')); } })
+    .catch(function () { mcpSetStatus('mcp-distribution-status', 'Request failed.'); });
+}
 function loadMCPManagement() { mcpGet('/api/mcp/management-access', 'mcp-management-status', 'mcp-management-out'); }
 function loadMCPServers() { const t = mcpTenantVal('mcp-srv-tenant'); if (!t) { mcpSetStatus('mcp-servers-status', 'Enter a tenant.'); return; } mcpGet('/api/mcp/servers?tenant=' + t, 'mcp-servers-status', 'mcp-servers-out'); }
 function loadMCPTools() { const t = mcpTenantVal('mcp-srv-tenant'); if (!t) { mcpSetStatus('mcp-servers-status', 'Enter a tenant.'); return; } mcpGet('/api/mcp/tools?tenant=' + t, 'mcp-servers-status', 'mcp-servers-out'); }

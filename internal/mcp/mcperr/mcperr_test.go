@@ -95,6 +95,19 @@ func TestReasonCodesStable(t *testing.T) {
 		{ReasonManagementToolUnknown, "management_tool_unknown"}, {ReasonManagementToolUnauthorized, "management_tool_unauthorized"},
 		{ReasonManagementResultTooLarge, "management_result_too_large"},
 		{ReasonConfigInvalid, "config_invalid"}, {ReasonConfigApplyFailed, "config_apply_failed"},
+		// PR-10 signed CP→DP snapshot / fencing / rollback reasons.
+		{ReasonSnapshotMalformed, "snapshot_malformed"}, {ReasonSnapshotSchemaUnknown, "snapshot_schema_unknown"},
+		{ReasonSnapshotCapabilityMismatch, "snapshot_capability_mismatch"}, {ReasonSnapshotAlgUnknown, "snapshot_alg_unknown"},
+		{ReasonSnapshotKeyUntrusted, "snapshot_key_untrusted"}, {ReasonSnapshotHashMismatch, "snapshot_hash_mismatch"},
+		{ReasonSnapshotSignatureInvalid, "snapshot_signature_invalid"}, {ReasonSnapshotTooLarge, "snapshot_too_large"},
+		{ReasonSnapshotRevisionInvalid, "snapshot_revision_invalid"}, {ReasonSnapshotRevisionRegression, "snapshot_revision_regression"},
+		{ReasonSnapshotEpochStale, "snapshot_epoch_stale"}, {ReasonSnapshotEpochInvalid, "snapshot_epoch_invalid"},
+		{ReasonSnapshotMinVersionUnmet, "snapshot_min_version_unmet"}, {ReasonSnapshotMinVersionMalformed, "snapshot_min_version_malformed"},
+		{ReasonSnapshotValidationFailed, "snapshot_validation_failed"}, {ReasonSnapshotPersistFailed, "snapshot_persist_failed"},
+		{ReasonSnapshotSignerUnavailable, "snapshot_signer_unavailable"}, {ReasonDistributionWriteAuthority, "distribution_write_authority"},
+		{ReasonAckInvalid, "ack_invalid"}, {ReasonAckUnauthenticated, "ack_unauthenticated"},
+		{ReasonRollbackTargetMissing, "rollback_target_missing"}, {ReasonRollbackTargetCorrupt, "rollback_target_corrupt"},
+		{ReasonRollbackDirectiveInvalid, "rollback_directive_invalid"},
 	}
 	seen := map[Reason]bool{}
 	for _, p := range want {

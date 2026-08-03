@@ -10301,3 +10301,50 @@ paths:
       responses:
         '200': { description: Management access + tool catalog, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/mcp/distribution:
+    get:
+      operationId: getMCPDistribution
+      tags: [mcp]
+      summary: Signed CP→DP MCP distribution status
+      description: Safe, read-only signed CP→DP distribution status per capability (current/previous content hash, epoch, config/policy/catalog/credential revisions, signing key id, minimum DP version, rollback availability). Never exposes a private signing key, a raw signature, or a full raw snapshot. local_only when signed distribution is not active.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200': { description: Distribution status, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/mcp/rollback:
+    post:
+      operationId: createMCPRollback
+      tags: [mcp]
+      summary: Four-eyes atomic rollback to a retained signed snapshot
+      description: Initiates an operator-controlled atomic rollback of a capability's active signed snapshot to an exact retained target content hash, via the four-eyes publication workflow with a PR-8 durable commit before any signing/push/swap. Admin-only and CSRF-protected. Management MCP may read distribution health but never publish or roll back. Fails closed with distribution_not_configured when signed distribution is not active on this node.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: mcp.rollback.request
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [capability, target_hash]
+              properties:
+                capability: { type: string, enum: [gateway, management] }
+                target_hash: { type: string }
+                reason: { type: string }
+      responses:
+        '200': { description: Rollback initiated, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '409': { $ref: '#/components/responses/PlainConflict' }

@@ -139,6 +139,8 @@ func registerMCPRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/mcp/approval-decision", apiMCPApprovalDecision)
 	mux.HandleFunc("/api/mcp/config", apiMCPConfig)
 	mux.HandleFunc("/api/mcp/management-access", apiMCPManagementAccess)
+	mux.HandleFunc("/api/mcp/distribution", apiMCPDistribution)
+	mux.HandleFunc("/api/mcp/rollback", apiMCPRollback)
 }
 
 // mcpErr maps a classified MCP error to a plain-text HTTP response. The reason
@@ -218,6 +220,55 @@ func apiMCPHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, getMCPAdmin().svc.Health.Snapshot())
+}
+
+// apiMCPDistribution (PR-10) reports the safe, read-only signed CP→DP distribution
+// status for both capabilities: current/previous content hash, epoch, revision
+// tuple, signing key id, minimum DP version, and rollback availability. It never
+// exposes a private signing key, a raw signature, or a full raw snapshot.
+// Management MCP may READ this health but never publish or roll back.
+func apiMCPDistribution(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		mcpMethodNotAllowed(w)
+		return
+	}
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+	jsonOK(w, mcpDistributionStatus())
+}
+
+// apiMCPRollback (PR-10) initiates an operator-controlled atomic rollback to a
+// retained signed snapshot via the four-eyes publication workflow. It is admin-only
+// and mutating (CSRF-protected by the security middleware). When signed CP→DP
+// distribution is not configured/active on this node, it fails closed with a
+// truthful "not configured" reason rather than fabricating a rollback.
+func apiMCPRollback(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		mcpMethodNotAllowed(w)
+		return
+	}
+	if !requireRole(w, r, RoleAdmin) {
+		return
+	}
+	var req mcpRollbackReq
+	if err := decodeJSON(r, &req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if req.Capability == "" || req.TargetHash == "" {
+		http.Error(w, "admin_request_invalid", http.StatusBadRequest)
+		return
+	}
+	// Live signed rollback runs through the capability coordinator's four-eyes +
+	// PR-8 durable commit before any sign/push/swap. That coordinator is wired at
+	// startup when signed CP→DP distribution is configured; it is NOT resolvable from
+	// this handler in the disabled-by-default posture of this slice. Report the request
+	// truthfully as not-configured — NEVER fabricate a pending/success result for a
+	// rollback that was not actually initiated (the rollback runtime wiring is the
+	// recorded follow-up, mirroring the PR-9 publish stub).
+	auditEvent(r, "mcp.rollback.request", req.Capability+":"+req.TargetHash, "")
+	http.Error(w, "distribution_not_configured", http.StatusConflict)
 }
 
 func apiMCPServers(w http.ResponseWriter, r *http.Request) {
@@ -478,6 +529,14 @@ type mcpDecisionReq struct {
 	Tenant    string `json:"tenant"`
 	Action    string `json:"action"` // approve | reject | publish
 	Reason    string `json:"reason"`
+}
+
+// mcpRollbackReq is the four-eyes rollback request (PR-10): revert a capability's
+// active signed snapshot to an exact retained target hash.
+type mcpRollbackReq struct {
+	Capability string `json:"capability"` // gateway | management
+	TargetHash string `json:"target_hash"`
+	Reason     string `json:"reason"`
 }
 
 func apiMCPPublicationDecision(w http.ResponseWriter, r *http.Request) {

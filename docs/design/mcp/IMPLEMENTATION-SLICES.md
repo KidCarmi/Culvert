@@ -184,6 +184,38 @@ rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted AD
 ## PR-10 — CP/DP & HA
 - **Objective:** immutable signed snapshots (epoch + revisions + min_dp_version + content_hash + signature),
   fencing, acknowledgements, rollback; **connector snapshot semantics**.
+- **Implementation status (code PR):** IMPLEMENTED under `internal/mcp/cpdp` (+ sub-packages `apply`, `publication`)
+  implementing `MCP-CPDP-001..003`, `MCP-HA-001,002` and the real configuration-publication leg of
+  `MCP-EVENT-002`. **D-10 CLOSED** (Ed25519; reuse of the release-catalog envelope pattern +
+  `internal/mcp/canonical` + SHA-256; domain separation `culvert-mcp-snapshot-v1 || 0x00 || content_hash`;
+  bounded overlapping trust roots; a snapshot never self-authorizes a carried key; scoped `Signer` with no
+  raw-key getter; private key never distributed to a DP; Sigstore keyless NOT used). The core kernel is a
+  leaf: an immutable **signed envelope** (schema/capability/epoch/independent config·policy·catalog·credential
+  revisions/min_dp_version/content_hash/ed25519 signature) over capability-isolated Gateway/Management
+  payloads (map-free, no secret-bearing field); a fail-closed `TrustStore`; a strict monotonic
+  `CompatVersion` minimum-version gate; the `CheckEpoch` (non-mutating) / `CommitObservedEpoch` (ratchet)
+  split; a **whole-snapshot validator** (verify → capability → isolation → epoch → revisions → min-version →
+  bounds → consistency; no partial apply); a hash-bound acknowledgement; and a signed hash-bound rollback
+  directive. `cpdp/apply` is the DP engine — off-path prepare with the EXACT PR-6 compiler + dry samples,
+  **persist-before-swap** (`fileutil.AtomicWrite`), atomic activation, current+previous retention, and
+  integrity-checked restart recovery that fails closed on corrupt metadata. `cpdp/publication` is the CP
+  coordinator — reuse of the PR-9 four-eyes approval + exact candidate binding, the `globalHA` write-authority
+  gate, and the PR-8 `CommitThenAct` so **sign/install/push/swap run only after a confirmed P-CRIT commit**;
+  truthful distribution states derived from acknowledgements; a bounded ack tracker keyed by
+  node×capability×content-hash. Wired into the existing SWG `ConfigSnapshot` channel as two OPTIONAL signed
+  `*cpdp.Envelope` fields (presence semantics; **absence never wipes DP-local MCP state**; MCP disabled ⇒
+  byte-identical SWG snapshot ⇒ no request-path work), applied AFTER and isolated from the SWG apply. Admin
+  surface adds `GET /api/mcp/distribution` (viewer, safe fields only) + `POST /api/mcp/rollback` (admin,
+  four-eyes) with full `uiRoutes`/route-classification/OpenAPI/GUI parity (route count-locks 207→**209**);
+  config anti-drift registers the two envelope fields (RC-5 snapshot-meta, `kindMeta`+`AppliesOnDP`, not
+  sensitive). Still DECISION-ONLY: NO upstream MCP call, NO credential materialization, NO Management
+  mutation, NO Shadow/Canary — an ALLOW-class decision still returns `execution_state: not_implemented`. The
+  BLOCKING PR-8 durability re-run is proven against the REAL `events.Manager` (forward: admission rejection
+  AND post-admission spool-commit failure → nothing signed/installed/pushed; rollback: post-admission commit
+  failure → **no swap, current snapshot retained**). Covered by signing/canonical/whole-validation/epoch/
+  compat/DP-apply/ack/forward-publication/rollback/mixed-version/failover/config-parity/no-execution tests,
+  anti-weakening + property tests, fuzz targets (envelope/rollback/ack/recover) and benchmarks (race+shuffle
+  green). PR-11 (Shadow/Canary), connector/DMZ and upstream execution remain out of scope.
 - **Scope:** MCP snapshot fields extending the CP/DP machinery; reuse `halease`/`dpObserveEpoch`/`configver`.
 - **Non-goals:** DP depending on CP per call.
 - **Trust boundary:** TB-3.
