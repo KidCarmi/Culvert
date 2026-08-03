@@ -203,21 +203,6 @@ func Sign(m Manifest, p Payload, s Signer, l Limits) (*Envelope, error) {
 	}, nil
 }
 
-// VerifySignature performs the cryptographic verification of an envelope in the
-// mandated order, WITHOUT the semantic validation (which is a separate step so
-// the ordering "authenticate before ratchet, validate before mutate" is explicit
-// in the caller):
-//
-//  1. structural: bounded header fields are present;
-//  2. known schema version;
-//  3. known algorithm (ed25519);
-//  4. trusted key id;
-//  5. recomputed content hash equals the declared content hash;
-//  6. ed25519 signature verifies over the domain-separated content hash.
-//
-// An unknown algorithm, unknown key, malformed hash, or malformed/oversized
-// signature rejects the whole snapshot. A key carried inside the snapshot never
-// authorizes itself — only the trust store is consulted.
 // verifyEnvelopeHeader checks the bounded structural header fields of an envelope
 // (schema version, capability, key id, signature length, algorithm) without
 // consulting the trust store or recomputing the hash. Split out to keep
@@ -243,6 +228,21 @@ func verifyEnvelopeHeader(env *Envelope, l Limits) error {
 	return nil
 }
 
+// VerifySignature performs the cryptographic verification of an envelope in the
+// mandated order, WITHOUT the semantic validation (which is a separate step so
+// the ordering "authenticate before ratchet, validate before mutate" is explicit
+// in the caller):
+//
+//  1. structural: bounded header fields are present;
+//  2. known schema version;
+//  3. known algorithm (ed25519);
+//  4. trusted key id;
+//  5. recomputed content hash equals the declared content hash;
+//  6. ed25519 signature verifies over the domain-separated content hash.
+//
+// An unknown algorithm, unknown key, malformed hash, or malformed/oversized
+// signature rejects the whole snapshot. A key carried inside the snapshot never
+// authorizes itself — only the trust store is consulted.
 func VerifySignature(env *Envelope, trust *TrustStore, l Limits) error {
 	if env == nil || trust == nil {
 		return mcperr.New(mcperr.ReasonSnapshotMalformed, "cpdp.verify", "nil envelope or trust store")
