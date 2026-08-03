@@ -77,15 +77,25 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 		return e.blocked(in, mcperr.ReasonUpstreamCallFailed, false)
 	}
 	e.cfg.Metrics.ObserveUpstream(in.Capability.String(), "success")
+	return e.finishUpstream(ctx, in, upResp, res)
+}
+
+// finishUpstream processes a successful upstream response: it forwards a sanitized
+// JSON-RPC error, runs response DLP before egress (failing closed on any hard block
+// OR a redact/block disposition the guarded path cannot transform), records the
+// best-effort outcome event, and returns the executed result.
+func (e *Executor) finishUpstream(ctx context.Context, in runtime.ExecInput, upResp *upstreamclient.Response, res rollout.Resolution) runtime.ExecOutput {
 	if upResp.Error != nil {
 		// A bounded, sanitized upstream JSON-RPC error is forwarded (never raw text).
 		return runtime.ExecOutput{Status: 200, Disposition: dispReject, Reason: mcperr.ReasonUpstreamCallFailed,
 			ResponseBody: upstreamErrorResult(in.MessageID), ExecutionState: "executed", Executed: true,
 			EvaluatedAction: in.Decision.Action.String(), EffectiveAction: "execute"}
 	}
-
 	// Response DLP: inspect the FULL upstream result BEFORE returning it to the
-	// client. A hard block (secret/PII/schema/oversize) refuses the content.
+	// client. A hard block (secret/PII/schema/oversize) refuses the content; a
+	// non-hard redact/block disposition (e.g. the default profile classifies
+	// financial data as DispRedact) also fails closed, since the guarded-execute path
+	// performs no response redaction and must never forward untransformed content.
 	ir := inspection.InspectResponse(ctx, e.cfg.ResponseProfile, inspection.ResponseInput{
 		Tool: toolRef(in), Body: []byte(upResp.Result),
 	}, in.Now)
@@ -93,12 +103,7 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 		e.cfg.Metrics.ObserveDLPBlock(in.Capability.String(), true)
 		return e.blocked(in, ir.HardReason, false)
 	}
-	// A non-hard redact/block disposition (e.g. the default profile classifies
-	// financial data as DispRedact) still requires transformation before egress. The
-	// guarded-execute path performs no response redaction, so anything but a
-	// pass/label disposition fails closed rather than forwarding the untransformed
-	// result to the client.
-	if disp := ir.Summary.Disposition; disp != inspection.DispPass && disp != inspection.DispLabel {
+	if !responseEgressAllowed(ir.Summary.Disposition) {
 		e.cfg.Metrics.ObserveDLPBlock(in.Capability.String(), true)
 		return e.blocked(in, mcperr.ReasonRedactionFailed, false)
 	}
@@ -116,6 +121,13 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 		ResponseBody: executedResult(in.MessageID, upResp.Result), ExecutionState: "executed", Executed: true,
 		EvaluatedAction: in.Decision.Action.String(), EffectiveAction: effective, ShadowOverride: res.ShadowOverride,
 	}
+}
+
+// responseEgressAllowed reports whether an inspection disposition permits returning
+// the upstream result unchanged. Only pass/label are egress-safe; redact/block/unset
+// require a transform the guarded path does not perform, so they fail closed.
+func responseEgressAllowed(d inspection.Disposition) bool {
+	return d == inspection.DispPass || d == inspection.DispLabel
 }
 
 // materializeAndCall runs the broker materialization with the PR-8 credential gate

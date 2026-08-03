@@ -162,8 +162,8 @@ func (t toolSet) empty() bool        { return len(t) == 0 }
 
 // EmptyScope returns a compiled scope for a capability that matches nothing (the
 // safe default at every mode's entry). Revision 0.
-func EmptyScope(cap Capability) Scope {
-	sc, _ := Compile(ScopeSpec{Capability: cap}, 0, DefaultLimits())
+func EmptyScope(capb Capability) Scope {
+	sc, _ := Compile(ScopeSpec{Capability: capb}, 0, DefaultLimits())
 	return sc
 }
 
