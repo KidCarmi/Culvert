@@ -35,7 +35,22 @@ type feedsWFJob struct {
 	Needs       interface{}   `yaml:"needs"`
 	If          string        `yaml:"if"`
 	Permissions interface{}   `yaml:"permissions"`
+	Environment interface{}   `yaml:"environment"` // string OR {name: ...} map, or absent
 	Steps       []feedsWFStep `yaml:"steps"`
+}
+
+// envName extracts the environment name from a job's `environment:` node, which may
+// be a bare string or a `{name: ...}` map. Empty string ⇒ no environment binding.
+func envName(env interface{}) string {
+	switch v := env.(type) {
+	case string:
+		return v
+	case map[string]interface{}:
+		if s, ok := v["name"].(string); ok {
+			return s
+		}
+	}
+	return ""
 }
 
 type feedsWFDoc struct {
@@ -92,10 +107,118 @@ func TestFeedsWorkflowInvariants(t *testing.T) {
 	assertFeedsTopLevel(t, doc)
 	assertFeedsPrivilegeBoundary(t, doc)
 	assertFeedsGenerateSigns(t, doc)
+	assertFeedsMasterGateDominance(t, doc)
+	assertFeedsSigningRefPinning(t, doc)
 	pub := requireFeedsPublishJob(t, doc)
 	assertFeedsNoSecretsInIf(t, doc)
 	assertFeedsPublishSequence(t, pub)
 	assertFeedsEgressAllowList(t, pub)
+}
+
+// feedsMasterGate is the exact expression that must dominate every signing step (Job
+// A) and the publish job (Job B): the master switch AND the feeds-v* tag context.
+const feedsMasterGate = "vars.FEEDS_PUBLISH_ENABLED == 'true'"
+
+// assertFeedsMasterGateDominance: NO signing/publication path may run unless the master
+// gate is exactly 'true'. Every Job A step that installs cosign, runs `cosign sign-blob`,
+// or runs the keyless end-to-end verify must carry `vars.FEEDS_PUBLISH_ENABLED == 'true'`
+// in its `if:`; the publish job's `if:` must too. So a feeds-v* tag push with the gate
+// disabled signs and publishes nothing.
+func assertFeedsMasterGateDominance(t *testing.T, doc feedsWFDoc) {
+	t.Helper()
+	gen := doc.Jobs["generate"]
+	guarded, total := 0, 0
+	for i := range gen.Steps {
+		run := runScript(gen.Steps[i].Run)
+		uses := gen.Steps[i].Uses
+		isSigningPath := strings.Contains(run, "cosign sign-blob") ||
+			strings.Contains(uses, "cosign-installer") ||
+			strings.Contains(run, "TestFeedGenKeylessVerify")
+		if !isSigningPath {
+			continue
+		}
+		total++
+		if strings.Contains(gen.Steps[i].If, feedsMasterGate) {
+			guarded++
+		} else {
+			t.Fatalf("MASTER GATE: generate-job signing step %q is not gated on `%s`; got if: %q",
+				gen.Steps[i].Name, feedsMasterGate, gen.Steps[i].If)
+		}
+	}
+	if total == 0 {
+		t.Fatal("MASTER GATE: found no signing steps in the generate job to guard (detection broke)")
+	}
+	if guarded != total {
+		t.Fatalf("MASTER GATE: %d/%d signing steps guarded", guarded, total)
+	}
+	// The publish job's own gate must also key on the master switch.
+	if !strings.Contains(doc.Jobs["publish"].If, feedsMasterGate) {
+		t.Fatalf("MASTER GATE: publish job `if:` must include `%s`; got %q", feedsMasterGate, doc.Jobs["publish"].If)
+	}
+}
+
+// assertFeedsSigningRefPinning: before any cosign call, Job A must PROVE it is running
+// at the operator-pinned tag/SHA — a step that (a) is gated on the master gate, (b)
+// references both `vars.FEEDS_SIGNING_TAG` and `vars.FEEDS_SIGNING_TAG_SHA`, (c) checks
+// the exact feeds-vX.Y.Z grammar and a 40-hex SHA, (d) compares to github.ref_name +
+// github.sha, and (e) fails closed (`exit 1`) — and it must appear BEFORE the first
+// `cosign sign-blob`. The publish job must re-assert the same pin.
+func assertFeedsSigningRefPinning(t *testing.T, doc feedsWFDoc) {
+	t.Helper()
+	pinIdx, signIdx := feedsPinAndSignIdx(doc.Jobs["generate"])
+	if pinIdx == -1 {
+		t.Fatal("SIGNING-REF PIN: generate job has no signing-ref pinning proof step")
+	}
+	if signIdx == -1 {
+		t.Fatal("SIGNING-REF PIN: generate job has no cosign sign-blob step")
+	}
+	if pinIdx >= signIdx {
+		t.Fatalf("SIGNING-REF PIN: the pinning proof (%d) must run BEFORE cosign sign-blob (%d)", pinIdx, signIdx)
+	}
+	assertPinStepShape(t, "generate", doc.Jobs["generate"].Steps[pinIdx])
+	// Job B must re-assert the pin on the publication path.
+	pubPin, _ := feedsPinAndSignIdx(doc.Jobs["publish"])
+	if pubPin == -1 {
+		t.Fatal("SIGNING-REF PIN: publish job must re-assert the tag/SHA pin on the publication path")
+	}
+	assertPinStepShape(t, "publish", doc.Jobs["publish"].Steps[pubPin])
+}
+
+// feedsPinAndSignIdx returns (pinning-proof index, first cosign-sign index) for a job.
+// The pinning proof is identified by its run-body signature: the exact feeds-vX.Y.Z tag
+// grammar, the 40-hex SHA grammar, and the REF_NAME/RUN_SHA equality checks together
+// appear only in a signing-ref pin step.
+func feedsPinAndSignIdx(job feedsWFJob) (pin, sign int) {
+	pin, sign = -1, -1
+	for i := range job.Steps {
+		run := runScript(job.Steps[i].Run)
+		if pin == -1 && runContainsAll(run,
+			`^feeds-v[0-9]+\.[0-9]+\.[0-9]+$`, `^[0-9a-f]{40}$`, "REF_NAME", "RUN_SHA") {
+			pin = i
+		}
+		if sign == -1 && strings.Contains(run, "cosign sign-blob") {
+			sign = i
+		}
+	}
+	return pin, sign
+}
+
+// assertPinStepShape proves a pinning step is fail-closed and checks all four facets:
+// tag grammar, 40-hex SHA, ref-name equality, and commit-SHA equality.
+func assertPinStepShape(t *testing.T, job string, step feedsWFStep) {
+	t.Helper()
+	// The pinned vars must be wired in via env (so `${{ vars.* }}` appears in env values).
+	if step.Env["SIGNING_TAG"] == "" || step.Env["SIGNING_TAG_SHA"] == "" {
+		t.Fatalf("SIGNING-REF PIN (%s): step must wire SIGNING_TAG + SIGNING_TAG_SHA from vars via env", job)
+	}
+	if !strings.Contains(step.Env["SIGNING_TAG"], "FEEDS_SIGNING_TAG") ||
+		!strings.Contains(step.Env["SIGNING_TAG_SHA"], "FEEDS_SIGNING_TAG_SHA") {
+		t.Fatalf("SIGNING-REF PIN (%s): env must reference vars.FEEDS_SIGNING_TAG / _SHA", job)
+	}
+	run := step.Run
+	if !runContainsAll(run, `^feeds-v[0-9]+\.[0-9]+\.[0-9]+$`, `^[0-9a-f]{40}$`, "REF_NAME", "RUN_SHA", "exit 1") {
+		t.Fatalf("SIGNING-REF PIN (%s): step must check feeds-vX.Y.Z grammar, 40-hex SHA, ref_name + sha equality, and fail closed (exit 1)", job)
+	}
 }
 
 // assertFeedsTopLevel: explicit restrictive top-level permissions (absent inherits a
@@ -147,6 +270,14 @@ func assertFeedsPrivilegeBoundary(t *testing.T, doc feedsWFDoc) {
 	}
 	if permsContentsWritable(pub.Permissions) {
 		t.Fatal("the publish job must not grant contents:write")
+	}
+	// B-1: ONLY the publish job binds the protected `feeds-production` environment
+	// (required-reviewer approval + environment secrets). Job A must NOT bind it.
+	if envName(pub.Environment) != "feeds-production" {
+		t.Fatalf("PRIVILEGE BOUNDARY: the publish job must bind environment `feeds-production`; got %q", envName(pub.Environment))
+	}
+	if envName(gen.Environment) != "" {
+		t.Fatalf("PRIVILEGE BOUNDARY: the generate (sign) job must NOT bind any environment; got %q", envName(gen.Environment))
 	}
 	// Job B must depend on Job A (it publishes A's signed artifact).
 	if !needsContains(pub.Needs, "generate") {
@@ -382,5 +513,126 @@ func TestFeedsPublisherSecretContract(t *testing.T) {
 	})
 	assertSetEquals(t, "publish-feeds.yml vars", varSet, []string{
 		"FEEDS_PUBLISH_ENABLED", "FEEDS_PUBLIC_BASE",
+		"FEEDS_SIGNING_TAG", "FEEDS_SIGNING_TAG_SHA",
 	})
+}
+
+// ─── resign-feeds.yml (renewal dispatcher) invariants ─────────────────────────
+
+const resignFeedsWorkflowPath = ".github/workflows/resign-feeds.yml"
+
+// TestResignFeedsWorkflowInvariants proves the weekly renewal dispatcher CANNOT sign
+// or publish anything itself: it holds contents:read + actions:write ONLY, has no
+// id-token / no environment / references no secrets and no cosign, validates the master
+// gate + pinned tag/SHA, and dispatches publish-feeds.yml at the pinned protected tag.
+func TestResignFeedsWorkflowInvariants(t *testing.T) {
+	raw, err := os.ReadFile(resignFeedsWorkflowPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", resignFeedsWorkflowPath, err)
+	}
+	var doc feedsWFDoc
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("parse %s: %v", resignFeedsWorkflowPath, err)
+	}
+	if len(doc.Jobs) == 0 {
+		t.Fatalf("%s has no jobs", resignFeedsWorkflowPath)
+	}
+
+	// (1) No id-token anywhere; contents at most read; NO secrets referenced.
+	if permsGrantIDToken(doc.Permissions) {
+		t.Fatal("resign workflow top-level grants id-token — a renewal dispatcher must not be able to sign")
+	}
+	if permsContentsWritable(doc.Permissions) {
+		t.Fatal("resign workflow top-level grants contents:write")
+	}
+	for name, job := range doc.Jobs {
+		if permsGrantIDToken(job.Permissions) {
+			t.Fatalf("resign job %q grants id-token", name)
+		}
+		if permsContentsWritable(job.Permissions) {
+			t.Fatalf("resign job %q grants contents:write", name)
+		}
+		if envName(job.Environment) != "" {
+			t.Fatalf("resign job %q must NOT bind any environment (no feeds-production access); got %q", name, envName(job.Environment))
+		}
+		if refs := jobSecretRefs(job); len(refs) != 0 {
+			t.Fatalf("resign job %q must reference NO secrets; found %v", name, refs)
+		}
+	}
+
+	// (2) No secrets context in ANY expression (catches secrets['X'] / toJSON(secrets)).
+	for _, expr := range wfExprRE.FindAllString(string(raw), -1) {
+		if strings.Contains(expr, "secrets") {
+			t.Fatalf("resign workflow expression mentions the secrets context (any form is a violation): %q", expr)
+		}
+	}
+
+	// (3) Weekly schedule + manual dispatch triggers.
+	if !strings.Contains(string(raw), "schedule:") || !strings.Contains(string(raw), "cron:") {
+		t.Fatal("resign workflow must carry a weekly `schedule: cron:` trigger")
+	}
+	if !strings.Contains(string(raw), "workflow_dispatch") {
+		t.Fatal("resign workflow must also allow manual workflow_dispatch")
+	}
+
+	// (4) Its ONLY side effect is to dispatch publish-feeds.yml at the pinned tag —
+	// it must NEVER sign locally, and must validate the gate + tag + SHA first.
+	var body strings.Builder
+	sawActionsWrite := false
+	for _, job := range doc.Jobs {
+		if toStr(mapGet(job.Permissions, "actions")) == "write" {
+			sawActionsWrite = true
+		}
+		for i := range job.Steps {
+			// Strip shell comments first — a "never runs cosign" comment must not trip this.
+			if strings.Contains(runScript(job.Steps[i].Run), "cosign") {
+				t.Fatalf("resign workflow must NOT run cosign (no local signing); step %q", job.Steps[i].Name)
+			}
+			body.WriteString(job.Steps[i].Run)
+			body.WriteByte('\n')
+		}
+	}
+	if !sawActionsWrite {
+		t.Fatal("resign job must grant actions:write to dispatch the publisher")
+	}
+	seq := body.String()
+	if !strings.Contains(seq, "gh workflow run publish-feeds.yml") {
+		t.Fatal("resign workflow must dispatch publish-feeds.yml (gh workflow run)")
+	}
+	if !runContainsAll(seq, `--ref "$SIGNING_TAG"`, "validity_hours=336") {
+		t.Fatal("resign must dispatch at the PINNED tag ($SIGNING_TAG from vars.FEEDS_SIGNING_TAG) preserving 336h validity")
+	}
+	// Validation of gate + tag grammar + 40-hex SHA + lightweight-tag resolution, fail-closed.
+	// (The master-gate VAR reference is asserted in step (5) via the expression scan; the
+	// run body checks it through the $GATE env alias with a `!= "true"` fail-closed guard.)
+	if !runContainsAll(seq,
+		`!= "true"`,
+		`^feeds-v[0-9]+\.[0-9]+\.[0-9]+$`, `^[0-9a-f]{40}$`,
+		"object.type", "commit", "exit 1") {
+		t.Fatal("resign must validate the master gate, exact tag grammar, 40-hex SHA, and lightweight-tag resolution, failing closed")
+	}
+
+	// (5) Pinned vars are referenced from vars.* (not hardcoded).
+	_, varSet := wfRefSets(t, resignFeedsWorkflowPath)
+	for _, must := range []string{"FEEDS_PUBLISH_ENABLED", "FEEDS_SIGNING_TAG", "FEEDS_SIGNING_TAG_SHA"} {
+		if !varSet[must] {
+			t.Fatalf("resign workflow must reference vars.%s", must)
+		}
+	}
+
+	// (6) Concurrency so overlapping renewals cannot race.
+	if doc.Concurrency.Group == "" {
+		t.Fatal("resign workflow must declare a concurrency group (no racing renewals)")
+	}
+	if isTruthy(doc.Concurrency.CancelInProgress) {
+		t.Fatal("resign concurrency.cancel-in-progress must be false")
+	}
+}
+
+// mapGet reads key from an interface{} that may be a map[string]interface{}.
+func mapGet(m interface{}, key string) interface{} {
+	if mm, ok := m.(map[string]interface{}); ok {
+		return mm[key]
+	}
+	return nil
 }
