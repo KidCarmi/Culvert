@@ -948,6 +948,9 @@ func (ps *PolicyStore) sortLocked() {
 			}
 		}
 		r.matchedConds = buildMatchedConditions(r)
+		// Stage-1 (auth-rule) subject CIDRs, same contract: parse once here so
+		// the per-request resolver never runs net.ParseCIDR.
+		precomputeSubjectNets(r.SubjectMatch)
 	}
 	ps.rules = next
 }
@@ -988,6 +991,10 @@ func copyPolicyRuleForPublication(nr, rule *PolicyRule) {
 		sm.All = append([]SubjectPredicate(nil), rule.SubjectMatch.All...)
 		for i := range sm.All {
 			sm.All[i].Values = append([]string(nil), sm.All[i].Values...)
+			// Drop the precompute with the same discipline as srcIPNet below: a
+			// copy must never carry a net parsed from a since-edited Values.
+			// sortLocked repopulates it on the published definition.
+			sm.All[i].nets = nil
 		}
 		nr.SubjectMatch = &sm
 	}
@@ -1200,22 +1207,44 @@ func buildMatchedConditions(rule *PolicyRule) string {
 // (and warns once instead of once per request); a tzdata fix therefore needs a
 // restart to be picked up, matching the read-once posture of other config.
 // time.Location values are immutable and safe for concurrent use.
-var scheduleLocCache sync.Map // timezone string → *time.Location
+var scheduleLocCache sync.Map // timezone string → scheduleLoc
+
+// scheduleLoc is one memoised timezone resolution. It carries the parse OUTCOME
+// alongside the location so callers that need to distinguish "resolved to UTC"
+// from "failed, fell back to UTC" — the Stage-1 auth gate, which must fail
+// closed on a timezone it cannot evaluate — can share this cache instead of
+// calling time.LoadLocation themselves.
+type scheduleLoc struct {
+	loc *time.Location
+	ok  bool
+}
+
+// scheduleLocationResolved resolves an IANA timezone name through the
+// process-wide cache, returning the location and whether the name actually
+// parsed. On failure it returns (time.UTC, false).
+func scheduleLocationResolved(name string) (*time.Location, bool) {
+	if cached, ok := scheduleLocCache.Load(name); ok {
+		e := cached.(scheduleLoc)
+		return e.loc, e.ok
+	}
+	e := scheduleLoc{ok: true}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		logWarnf("Policy: invalid schedule timezone %q, falling back to UTC", sanitizeLog(name))
+		e.loc, e.ok = time.UTC, false
+	} else {
+		e.loc = loc
+	}
+	scheduleLocCache.Store(name, e)
+	return e.loc, e.ok
+}
 
 // scheduleLocation resolves an IANA timezone name to a *time.Location through
 // the process-wide cache, falling back to UTC on failure. Shared by every
 // matchSchedule caller (Stage-2 access rules, Stage-1 auth rules, CDR policy,
 // and the policy simulator).
 func scheduleLocation(name string) *time.Location {
-	if cached, ok := scheduleLocCache.Load(name); ok {
-		return cached.(*time.Location)
-	}
-	loc, err := time.LoadLocation(name)
-	if err != nil {
-		logWarnf("Policy: invalid schedule timezone %q, falling back to UTC", sanitizeLog(name))
-		loc = time.UTC
-	}
-	scheduleLocCache.Store(name, loc)
+	loc, _ := scheduleLocationResolved(name)
 	return loc
 }
 
