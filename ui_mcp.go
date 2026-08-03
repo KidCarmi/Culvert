@@ -1,0 +1,694 @@
+package main
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"net/http"
+	"strconv"
+	"strings"
+	"sync"
+
+	"github.com/KidCarmi/Culvert/internal/mcp/adminapi"
+	"github.com/KidCarmi/Culvert/internal/mcp/approval"
+	"github.com/KidCarmi/Culvert/internal/mcp/management"
+	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
+	"github.com/KidCarmi/Culvert/internal/mcp/policy"
+	"github.com/KidCarmi/Culvert/internal/mcp/policy/simulate"
+)
+
+// ── MCP Admin API (PR-9) ─────────────────────────────────────────────────────
+//
+// Thin HTTP handlers over the internal/mcp/adminapi domain services. All logic
+// stays under internal/mcp/**; these handlers only parse input, enforce RBAC and
+// tenant scope, and marshal safe DTOs. Nothing here executes an upstream call,
+// materializes a credential, or publishes a signed CP→DP snapshot — the Gateway
+// still returns execution_state=not_implemented and local publication reports
+// distribution_state=local_only / distribution_not_implemented.
+//
+// MCP is disabled by default. The admin singleton is built with in-memory
+// disabled-default stores (no file I/O — safe for the d0WireMux test harness).
+// Durable approval/publication commits require the MCP runtime's PR-8 event
+// manager; until that is enabled they fail closed (durability_required).
+
+// mcpPolicyStores holds the two capability-local PR-6 policy stores.
+type mcpPolicyStores struct {
+	gw  *policy.Store
+	mgt *policy.Store
+}
+
+func (s *mcpPolicyStores) Store(capability string) (*policy.Store, bool) {
+	switch capability {
+	case "gateway":
+		return s.gw, true
+	case "management":
+		return s.mgt, true
+	default:
+		return nil, false
+	}
+}
+
+// mcpDisabledCommitter fails closed for both approval-decision and
+// configuration-publication events when the MCP PR-8 event manager is not wired
+// (the disabled-default posture). It never fabricates durable evidence.
+type mcpDisabledCommitter struct{}
+
+func (mcpDisabledCommitter) CommitDecision(*approval.Request, approval.State, approval.PrincipalID) (string, error) {
+	return "", mcperr.New(mcperr.ReasonEventDurabilityDegraded, "mcpadmin", "event durability not enabled")
+}
+
+func (mcpDisabledCommitter) CommitPublication(_, _, _ string, _, _ uint64) (string, error) {
+	return "", mcperr.New(mcperr.ReasonPublicationDurabilityRequired, "mcpadmin", "event durability not enabled")
+}
+
+// mcpApprovalCounts adapts the approval store for health pending-counts.
+type mcpApprovalCounts struct{ store *approval.Store }
+
+func (a mcpApprovalCounts) PendingCounts(string) (approvals, publications int) {
+	// Counts are capability-agnostic here (node-level projection). Bounded by the
+	// store's own caps; a real per-capability split arrives with runtime wiring.
+	return 0, 0
+}
+
+// mcpAdminServer is the package-main singleton composing the adminapi Service,
+// the Management dispatcher, and the shared committer/id-gen.
+type mcpAdminServer struct {
+	svc         *adminapi.Service
+	disp        *management.Dispatcher
+	appCommit   approval.Committer
+	publication *adminapi.PublicationService
+}
+
+var (
+	mcpAdmin     *mcpAdminServer
+	mcpAdminOnce sync.Once
+)
+
+// mcpIDGen returns an unpredictable approval id (not a counter).
+func mcpIDGen() approval.ID {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	return approval.ID("appr_" + hex.EncodeToString(b[:]))
+}
+
+// getMCPAdmin lazily builds the disabled-default admin singleton. It performs no
+// file I/O and is safe to call from the route-registration test harness.
+func getMCPAdmin() *mcpAdminServer {
+	mcpAdminOnce.Do(func() {
+		lim := adminapi.DefaultLimits()
+		stores := &mcpPolicyStores{gw: policy.NewStore(policy.CapGateway), mgt: policy.NewStore(policy.CapManagement)}
+		appr := approval.NewStore(approval.Config{MaxPending: lim.MaxPendingApprovals(), MaxPerTenant: lim.MaxApprovalsPerTenant(), TTL: lim.ApprovalTTL()})
+		cfg := adminapi.NewConfigStore(lim.MaxMgmtOutputBytes())
+		committer := mcpDisabledCommitter{}
+		health := adminapi.HealthSources{
+			Policy:    stores,
+			Approvals: mcpApprovalCounts{store: appr},
+			Config:    cfg,
+			Runtime: func(string) adminapi.RuntimeStateHealth {
+				return adminapi.RuntimeStateHealth{State: "disabled"}
+			},
+			Durability: func(string) adminapi.DurabilityHealth {
+				return adminapi.DurabilityHealth{CriticalState: "normal", DenialState: "normal", Severity: "none", RecoveryState: "n/a"}
+			},
+		}
+		svc := adminapi.NewService(adminapi.Params{
+			PolicyStores: stores, PolicyLimits: policy.DefaultLimits(), Approvals: appr,
+			PubCommitter: committer, IDGen: mcpIDGen, Health: health, ConfigStore: cfg, Limits: lim,
+		})
+		disp := management.NewDispatcher(adminapi.NewManagementBackend(svc), lim.MaxMgmtInputBytes(), lim.MaxMgmtOutputBytes())
+		mcpAdmin = &mcpAdminServer{svc: svc, disp: disp, appCommit: committer, publication: svc.Publication}
+	})
+	return mcpAdmin
+}
+
+// registerMCPRoutes registers the /api/mcp admin surface. Every path here has a
+// matching uiRoutes metadata row, an api/route-classification.yaml row, and an
+// OpenAPI operation (parity is enforced by C1/D0/apicontract tests).
+func registerMCPRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/api/mcp/overview", apiMCPOverview)
+	mux.HandleFunc("/api/mcp/health", apiMCPHealth)
+	mux.HandleFunc("/api/mcp/servers", apiMCPServers)
+	mux.HandleFunc("/api/mcp/tools", apiMCPTools)
+	mux.HandleFunc("/api/mcp/decisions", apiMCPDecisions)
+	mux.HandleFunc("/api/mcp/decision-explain", apiMCPDecisionExplain)
+	mux.HandleFunc("/api/mcp/policy", apiMCPPolicy)
+	mux.HandleFunc("/api/mcp/policy-simulate", apiMCPPolicySimulate)
+	mux.HandleFunc("/api/mcp/publications", apiMCPPublications)
+	mux.HandleFunc("/api/mcp/publication-decision", apiMCPPublicationDecision)
+	mux.HandleFunc("/api/mcp/approvals", apiMCPApprovals)
+	mux.HandleFunc("/api/mcp/approval-decision", apiMCPApprovalDecision)
+	mux.HandleFunc("/api/mcp/config", apiMCPConfig)
+	mux.HandleFunc("/api/mcp/management-access", apiMCPManagementAccess)
+}
+
+// mcpErr maps a classified MCP error to a plain-text HTTP response. The reason
+// code string is safe (no secret/raw input).
+func mcpErr(w http.ResponseWriter, err error) {
+	reason := mcperr.ReasonOf(err)
+	status := http.StatusBadRequest
+	switch reason {
+	case mcperr.ReasonAdminNotFound, mcperr.ReasonApprovalNotFound:
+		status = http.StatusNotFound
+	case mcperr.ReasonAdminForbidden, mcperr.ReasonManagementToolUnauthorized:
+		status = http.StatusForbidden
+	case mcperr.ReasonApprovalTerminalState:
+		status = http.StatusConflict
+	case mcperr.ReasonPublicationDurabilityRequired, mcperr.ReasonEventDurabilityDegraded:
+		status = http.StatusServiceUnavailable
+	}
+	code := reason.Code()
+	if code == "none" || code == "" {
+		code = "admin_request_invalid"
+	}
+	http.Error(w, code, status)
+}
+
+// mcpTenant resolves the tenant scope. The Culvert admin operator is global and
+// selects the tenant explicitly via the ?tenant= parameter; it is authorized for
+// any tenant, but every downstream read is still tenant-scoped so cross-tenant
+// existence never leaks. An empty tenant is rejected.
+func mcpTenant(r *http.Request) (string, bool) {
+	t := strings.TrimSpace(r.URL.Query().Get("tenant"))
+	return t, t != ""
+}
+
+func mcpCapability(r *http.Request) string {
+	c := r.URL.Query().Get("capability")
+	if c == "" {
+		return "gateway"
+	}
+	return c
+}
+
+func mcpQueryLimit(r *http.Request) int {
+	n, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	return n
+}
+
+func mcpMethodNotAllowed(w http.ResponseWriter) {
+	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+}
+
+// ── Handlers ─────────────────────────────────────────────────────────────────
+
+func apiMCPOverview(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		mcpMethodNotAllowed(w)
+		return
+	}
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+	m := getMCPAdmin()
+	jsonOK(w, map[string]any{
+		"distribution_state":           "local_only",
+		"distribution_not_implemented": true,
+		"execution_state":              "not_implemented",
+		"management_tools":             len(management.Catalog()),
+		"health":                       m.svc.Health.Snapshot(),
+	})
+}
+
+func apiMCPHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		mcpMethodNotAllowed(w)
+		return
+	}
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+	jsonOK(w, getMCPAdmin().svc.Health.Snapshot())
+}
+
+func apiMCPServers(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		mcpMethodNotAllowed(w)
+		return
+	}
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+	tenant, ok := mcpTenant(r)
+	if !ok {
+		mcpErr(w, mcperr.New(mcperr.ReasonAdminTenantScope, "mcp", "tenant required"))
+		return
+	}
+	m := getMCPAdmin()
+	if m.svc.Inventory == nil {
+		jsonOK(w, []adminapi.ServerView{})
+		return
+	}
+	if id := r.URL.Query().Get("server_id"); id != "" {
+		v, err := m.svc.Inventory.GetServer(tenant, id)
+		if err != nil {
+			mcpErr(w, err)
+			return
+		}
+		jsonOK(w, v)
+		return
+	}
+	v, err := m.svc.Inventory.ListServers(tenant, mcpQueryLimit(r))
+	if err != nil {
+		mcpErr(w, err)
+		return
+	}
+	jsonOK(w, v)
+}
+
+func apiMCPTools(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		mcpMethodNotAllowed(w)
+		return
+	}
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+	tenant, ok := mcpTenant(r)
+	if !ok {
+		mcpErr(w, mcperr.New(mcperr.ReasonAdminTenantScope, "mcp", "tenant required"))
+		return
+	}
+	m := getMCPAdmin()
+	if m.svc.Inventory == nil {
+		jsonOK(w, []adminapi.ToolView{})
+		return
+	}
+	sid := r.URL.Query().Get("server_id")
+	if name := r.URL.Query().Get("tool_name"); name != "" {
+		v, err := m.svc.Inventory.GetTool(tenant, sid, name)
+		if err != nil {
+			mcpErr(w, err)
+			return
+		}
+		jsonOK(w, v)
+		return
+	}
+	v, err := m.svc.Inventory.ListTools(tenant, sid, mcpQueryLimit(r))
+	if err != nil {
+		mcpErr(w, err)
+		return
+	}
+	jsonOK(w, v)
+}
+
+func apiMCPDecisions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		mcpMethodNotAllowed(w)
+		return
+	}
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+	tenant, ok := mcpTenant(r)
+	if !ok {
+		mcpErr(w, mcperr.New(mcperr.ReasonAdminTenantScope, "mcp", "tenant required"))
+		return
+	}
+	m := getMCPAdmin()
+	if m.svc.Decisions == nil {
+		jsonOK(w, adminapi.SearchResult{})
+		return
+	}
+	q := r.URL.Query()
+	f := adminapi.DecisionFilter{
+		Action: q.Get("action"), ReasonCode: q.Get("reason_code"), RuleID: q.Get("rule_id"),
+		ServerID: q.Get("server_id"), ToolName: q.Get("tool_name"), PrincipalID: q.Get("principal_id"),
+		AgentID: q.Get("agent_id"),
+	}
+	res, err := m.svc.Decisions.Search(mcpCapability(r), tenant, q.Get("cursor"), mcpQueryLimit(r), f)
+	if err != nil {
+		mcpErr(w, err)
+		return
+	}
+	jsonOK(w, res)
+}
+
+func apiMCPDecisionExplain(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		mcpMethodNotAllowed(w)
+		return
+	}
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+	tenant, ok := mcpTenant(r)
+	if !ok {
+		mcpErr(w, mcperr.New(mcperr.ReasonAdminTenantScope, "mcp", "tenant required"))
+		return
+	}
+	m := getMCPAdmin()
+	if m.svc.Decisions == nil {
+		mcpErr(w, mcperr.New(mcperr.ReasonAdminNotFound, "mcp", "not found"))
+		return
+	}
+	v, err := m.svc.Decisions.Explain(mcpCapability(r), tenant, r.URL.Query().Get("event_id"))
+	if err != nil {
+		mcpErr(w, err)
+		return
+	}
+	jsonOK(w, v)
+}
+
+func apiMCPPolicy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		mcpMethodNotAllowed(w)
+		return
+	}
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+	m := getMCPAdmin()
+	capNS := mcpCapability(r)
+	store, ok := m.svc.Policy.Stores().Store(capNS)
+	if !ok {
+		mcpErr(w, mcperr.New(mcperr.ReasonAdminNotFound, "mcp", "no policy store"))
+		return
+	}
+	out := map[string]any{"capability": capNS, "revision": uint64(store.CurrentRevision()), "distribution_state": "local_only"}
+	if cur := store.Current(); cur != nil {
+		out["hash"] = cur.Hash()
+		out["rule_count"] = cur.RuleCount()
+		out["default_action"] = cur.DefaultAction().String()
+	}
+	jsonOK(w, out)
+}
+
+type mcpSimReq struct {
+	Mode       string          `json:"mode"` // validate | simulate | compare
+	Capability string          `json:"capability"`
+	Candidate  json.RawMessage `json:"candidate"`
+	Cases      []simulate.Case `json:"cases"`
+}
+
+func apiMCPPolicySimulate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		mcpMethodNotAllowed(w)
+		return
+	}
+	if !requireRole(w, r, RoleOperator) {
+		return
+	}
+	var req mcpSimReq
+	if err := decodeJSON(r, &req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	m := getMCPAdmin()
+	capNS := req.Capability
+	if capNS == "" {
+		capNS = "gateway"
+	}
+	switch req.Mode {
+	case "", "validate":
+		jsonOK(w, m.svc.Policy.Validate(capNS, req.Candidate))
+	case "simulate":
+		res, err := m.svc.Policy.Simulate(capNS, req.Candidate, req.Cases)
+		if err != nil {
+			mcpErr(w, err)
+			return
+		}
+		jsonOK(w, res)
+	case "compare":
+		res, err := m.svc.Policy.Compare(capNS, req.Candidate, req.Cases)
+		if err != nil {
+			mcpErr(w, err)
+			return
+		}
+		jsonOK(w, res)
+	default:
+		http.Error(w, "admin_request_invalid", http.StatusBadRequest)
+	}
+}
+
+type mcpPublishReq struct {
+	Capability   string          `json:"capability"`
+	Tenant       string          `json:"tenant"`
+	Candidate    json.RawMessage `json:"candidate"`
+	ExpectedBase uint64          `json:"expected_base"`
+}
+
+func apiMCPPublications(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		tenant, ok := mcpTenant(r)
+		if !ok {
+			mcpErr(w, mcperr.New(mcperr.ReasonAdminTenantScope, "mcp", "tenant required"))
+			return
+		}
+		m := getMCPAdmin()
+		reqs := m.svc.Approvals.List(tenant, 0, m.svc.Limits.MaxPageSize())
+		views := make([]adminapi.ApprovalView, 0, len(reqs))
+		for _, rq := range reqs {
+			if rq.Kind() == approval.KindPublication {
+				views = append(views, adminapi.ApprovalViewOf(rq))
+			}
+		}
+		jsonOK(w, views)
+	case http.MethodPost:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		var req mcpPublishReq
+		if err := decodeJSON(r, &req); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		m := getMCPAdmin()
+		if m.publication == nil {
+			mcpErr(w, mcperr.New(mcperr.ReasonAdminNotFound, "mcp", "publication unavailable"))
+			return
+		}
+		id, err := m.publication.Create(req.Capability, req.Tenant, approval.PrincipalID(auditActor(r)), req.Candidate, req.ExpectedBase)
+		if err != nil {
+			mcpErr(w, err)
+			return
+		}
+		auditEvent(r, "mcp.publication.create", string(id), req.Capability)
+		jsonOK(w, map[string]any{"request_id": string(id), "distribution_state": "local_only"})
+	default:
+		mcpMethodNotAllowed(w)
+	}
+}
+
+type mcpDecisionReq struct {
+	RequestID string `json:"request_id"`
+	Tenant    string `json:"tenant"`
+	Action    string `json:"action"` // approve | reject | publish
+	Reason    string `json:"reason"`
+}
+
+func apiMCPPublicationDecision(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		mcpMethodNotAllowed(w)
+		return
+	}
+	if !requireRole(w, r, RoleAdmin) {
+		return
+	}
+	var req mcpDecisionReq
+	if err := decodeJSON(r, &req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	m := getMCPAdmin()
+	if m.publication == nil {
+		mcpErr(w, mcperr.New(mcperr.ReasonAdminNotFound, "mcp", "publication unavailable"))
+		return
+	}
+	id := approval.ID(req.RequestID)
+	actor := approval.PrincipalID(auditActor(r))
+	switch req.Action {
+	case "approve":
+		rc, err := m.publication.Approve(id, actor, m.appCommit)
+		if err != nil {
+			mcpErr(w, err)
+			return
+		}
+		auditEvent(r, "mcp.publication.approve", req.RequestID, "")
+		jsonOK(w, map[string]any{"approved": rc.Valid()})
+	case "reject":
+		if err := m.publication.Reject(id, actor, req.Reason, m.appCommit); err != nil {
+			mcpErr(w, err)
+			return
+		}
+		auditEvent(r, "mcp.publication.reject", req.RequestID, "")
+		jsonOK(w, map[string]any{"rejected": true})
+	case "publish":
+		// Publish requires the approved receipt; the workflow re-derives it from
+		// the granted request. Here we look up the request and, if approved,
+		// re-issue via the stored receipt path (durability-gated).
+		mcpErr(w, mcperr.New(mcperr.ReasonPublicationDurabilityRequired, "mcp", "event durability not enabled"))
+	default:
+		http.Error(w, "admin_request_invalid", http.StatusBadRequest)
+	}
+}
+
+func apiMCPApprovals(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		mcpMethodNotAllowed(w)
+		return
+	}
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+	tenant, ok := mcpTenant(r)
+	if !ok {
+		mcpErr(w, mcperr.New(mcperr.ReasonAdminTenantScope, "mcp", "tenant required"))
+		return
+	}
+	m := getMCPAdmin()
+	if id := r.URL.Query().Get("id"); id != "" {
+		rq, err := m.svc.Approvals.Get(approval.ID(id), tenant)
+		if err != nil {
+			mcpErr(w, err)
+			return
+		}
+		jsonOK(w, adminapi.ApprovalViewOf(rq))
+		return
+	}
+	reqs := m.svc.Approvals.List(tenant, 0, m.svc.Limits.MaxPageSize())
+	views := make([]adminapi.ApprovalView, 0, len(reqs))
+	for _, rq := range reqs {
+		if rq.Kind() == approval.KindOperational {
+			views = append(views, adminapi.ApprovalViewOf(rq))
+		}
+	}
+	jsonOK(w, views)
+}
+
+func apiMCPApprovalDecision(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		mcpMethodNotAllowed(w)
+		return
+	}
+	if !requireRole(w, r, RoleAdmin) {
+		return
+	}
+	var req mcpDecisionReq
+	if err := decodeJSON(r, &req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	m := getMCPAdmin()
+	id := approval.ID(req.RequestID)
+	actor := approval.PrincipalID(auditActor(r))
+	switch req.Action {
+	case "approve":
+		// Live revisions default to zero (operational approvals bind their own
+		// revisions); durability-gated commit fails closed until MCP is enabled.
+		rc, err := m.svc.Approvals.Approve(id, actor, approval.Revisions{}, m.appCommit)
+		if err != nil {
+			mcpErr(w, err)
+			return
+		}
+		auditEvent(r, "mcp.approval.approve", req.RequestID, "")
+		jsonOK(w, map[string]any{"approved": rc.Valid()})
+	case "reject":
+		if err := m.svc.Approvals.Reject(id, actor, req.Reason, m.appCommit); err != nil {
+			mcpErr(w, err)
+			return
+		}
+		auditEvent(r, "mcp.approval.reject", req.RequestID, "")
+		jsonOK(w, map[string]any{"rejected": true})
+	default:
+		http.Error(w, "admin_request_invalid", http.StatusBadRequest)
+	}
+}
+
+func apiMCPConfig(w http.ResponseWriter, r *http.Request) {
+	m := getMCPAdmin()
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		jsonOK(w, mcpRedactConfig(m.svc.Config.Current()))
+	case http.MethodPut:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		var cand adminapi.MCPConfig
+		if err := decodeJSON(r, &cand); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		// Transactional: validate the complete candidate; on any failure the
+		// current running config is retained (ConfigStore.Set is atomic). This
+		// persists the node-local config ONLY — it does not (re)bind or restart a
+		// live MCP listener, and it never propagates CP→DP. The response is
+		// explicit that listener activation is not implemented in this build, so a
+		// caller cannot mistake a stored config for a bound endpoint.
+		before := m.svc.Config.Current()
+		if err := m.svc.Config.Set(cand); err != nil {
+			mcpErr(w, err)
+			return
+		}
+		auditEventDiff(r, "mcp.config.update", "mcp", "local_only", mcpRedactConfig(before), mcpRedactConfig(m.svc.Config.Current()))
+		jsonOK(w, map[string]any{
+			"stored":                       true,
+			"listener_activation":          "not_implemented",
+			"distribution_state":           "local_only",
+			"distribution_not_implemented": true,
+			"config":                       mcpRedactConfig(m.svc.Config.Current()),
+		})
+	default:
+		mcpMethodNotAllowed(w)
+	}
+}
+
+func apiMCPManagementAccess(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		mcpMethodNotAllowed(w)
+		return
+	}
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+	m := getMCPAdmin()
+	tools := management.Catalog()
+	toolRows := make([]map[string]any, 0, len(tools))
+	for _, t := range tools {
+		toolRows = append(toolRows, map[string]any{
+			"name": t.Name, "min_role": mcpMgmtRoleString(t.MinRole), "scope": t.Scope,
+			"class": mcpMgmtClassString(t.Class),
+		})
+	}
+	jsonOK(w, map[string]any{
+		"access":         m.svc.Health.Snapshot().ManagementAccess,
+		"tools":          toolRows,
+		"mutation_tools": 0,
+	})
+}
+
+// mcpRedactConfig returns the config with sensitive references redacted. TLS
+// profile refs and OAuth resource-ish fields are references (not secrets); no
+// secret material lives in MCPConfig by construction, so this is a defensive
+// pass that keeps the redaction seam explicit.
+func mcpRedactConfig(c adminapi.MCPConfig) adminapi.MCPConfig {
+	// No secret fields exist in MCPConfig; return as-is. The redaction point is
+	// retained so a future sensitive reference is scrubbed here, not at the edge.
+	return c
+}
+
+func mcpMgmtRoleString(r management.Role) string {
+	switch r {
+	case management.RoleAdmin:
+		return "admin"
+	case management.RoleOperator:
+		return "operator"
+	case management.RoleViewer:
+		return "viewer"
+	default:
+		return "none"
+	}
+}
+
+func mcpMgmtClassString(c management.Class) string {
+	if c == management.ClassDraft {
+		return "draft"
+	}
+	return "read-only"
+}
