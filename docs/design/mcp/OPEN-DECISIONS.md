@@ -244,6 +244,31 @@ start; **Slice** = blocks the named slice; **Non-blocking** = can trail.
 - **Evidence:** [FACT] no snapshot signing today (mTLS+epoch only); ed25519 exists only in the release-catalog subsystem.
 - **Owner:** Eng/Sec Arch. **Approver:** Arch. **Due:** PR-10. **Closure:** scheme selected + tested.
 - **Blocking:** Slice (PR-10).
+- **CLOSED — PR-10 (this slice).** Decision, implemented and tested in `internal/mcp/cpdp`:
+  - **Ed25519** is the ONLY snapshot signature algorithm (`SigAlgEd25519 = "ed25519"`, `sign.go`); an unknown
+    algorithm is never treated as ed25519 (`VerifySignature`, downgrade guard, `ReasonSnapshotAlgUnknown`).
+  - **Reuses the release-catalog envelope pattern** (`{schema_version, alg, key_id, sig}`) and the repository's
+    crypto conventions (`crypto/ed25519`, `internal/mcp/canonical` for deterministic bytes, `sha256` content
+    hash). **No new signature scheme, cipher, MAC, or unstable map serializer is introduced.** **Sigstore
+    keyless is NOT used** for the MCP runtime snapshot path (it stays confined to the release-catalog subsystem).
+  - **Content hash + domain separation:** the content hash is SHA-256 over the canonical unsigned
+    manifest+payload (incl. alg + key_id + every revision + epoch + min-version); the signature is over
+    `culvert-mcp-snapshot-v1 || 0x00 || content_hash` — a deliberate domain-separation prefix the prior art
+    lacks, so an MCP snapshot signature can never be confused with a release-catalog signature. Rollback
+    directives use a distinct prefix (`culvert-mcp-rollback-v1`).
+  - **Key id + explicit algorithm identifier** are carried on every envelope and are part of the signed hash.
+  - **Bounded overlapping trust-root set for rotation** (`TrustStore`, up to `capTrustRoots`), with explicit
+    removal/revocation (build a store without the key). A **snapshot never self-authorizes a key** — only trust
+    roots provisioned through the trusted local/enrollment/config boundary are consulted
+    (`TestAntiWeakening_SnapshotCannotSelfAuthorize`).
+  - **The private signing key never leaves a scoped `Signer`** (no raw-byte getter; mirrors `ca.KeyProvider`)
+    and **is never distributed to a DP** — a DP stores public trust roots only.
+  - **Tested:** round-trip, deterministic hash, mutation-changes-hash (every section), wrong key, unknown key
+    id, malformed/oversized signature, unknown alg, hash mismatch, key-rotation overlap, removed-key rejection,
+    fail-closed trust store, and the anti-weakening tripwires above (`internal/mcp/cpdp/cpdp_test.go`,
+    `sign_fuzz_test.go`).
+  - **No committee/board/governance-remediation PR or new ADR was created for this closure** (per the PR-10
+    instruction); the decision is recorded here and in `internal/mcp/cpdp` doc comments.
 
 ### D-11 — Packaging / licensing / pricing / support lifecycle
 - **Question:** SKU vs bundled; pricing; entitlement; support lifecycle?
