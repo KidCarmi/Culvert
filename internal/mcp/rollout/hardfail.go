@@ -45,7 +45,7 @@ const (
 	HardInspectionPrivacy
 )
 
-var hardClassToken = map[HardClass]string{
+var hardClassLabel = map[HardClass]string{
 	HardNone:               "none",
 	HardAuthIdentity:       "auth_identity",
 	HardServerTrust:        "server_trust",
@@ -59,7 +59,7 @@ var hardClassToken = map[HardClass]string{
 
 // String returns the stable token for the class.
 func (h HardClass) String() string {
-	if s, ok := hardClassToken[h]; ok {
+	if s, ok := hardClassLabel[h]; ok {
 		return s
 	}
 	return "unknown"

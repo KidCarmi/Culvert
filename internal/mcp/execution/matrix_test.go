@@ -20,12 +20,15 @@ import (
 // ── Canary nine-action matrix ───────────────────────────────────────────────
 
 func TestCanaryNineActionMatrix(t *testing.T) {
+	// ALLOW_WITH_REDACTION does NOT execute on the guarded path: it requires a
+	// re-validated request-argument transform before egress, which this path does not
+	// perform, so it fails closed (no untransformed arguments reach the upstream).
 	execClass := map[policy.Action]bool{
 		policy.ActionAllow:               true,
 		policy.ActionMonitor:             true,
 		policy.ActionAllowOnce:           true,
 		policy.ActionAllowForSession:     true,
-		policy.ActionAllowWithRedaction:  true,
+		policy.ActionAllowWithRedaction:  false,
 		policy.ActionDeny:                false,
 		policy.ActionQuarantine:          false,
 		policy.ActionRequireConfirmation: false,
@@ -44,6 +47,24 @@ func TestCanaryNineActionMatrix(t *testing.T) {
 		if !shouldExecute && out.EffectiveAction != "block" {
 			t.Fatalf("canary action %v should block, got %q", action, out.EffectiveAction)
 		}
+	}
+}
+
+// TestCanaryRedactionFailsClosed proves ALLOW_WITH_REDACTION never egresses
+// untransformed arguments on the guarded-execute path: it blocks with
+// redaction_failed and makes no upstream call, in an executing mode.
+func TestCanaryRedactionFailsClosed(t *testing.T) {
+	up := &fakeUpstream{}
+	e := newExec(t, stateForMode(t, rollout.ModeCanary), up, realEvents(t, nil))
+	out := e.Execute(context.Background(), execInput(policy.ActionAllowWithRedaction, false))
+	if up.calls != 0 {
+		t.Fatalf("redaction must not reach the upstream (calls=%d)", up.calls)
+	}
+	if out.Executed || out.EffectiveAction != "block" {
+		t.Fatalf("redaction must fail closed (executed=%v effective=%q)", out.Executed, out.EffectiveAction)
+	}
+	if out.Reason != mcperr.ReasonRedactionFailed {
+		t.Fatalf("expected redaction_failed, got %q", out.Reason.Code())
 	}
 }
 
@@ -188,7 +209,7 @@ func TestAntiWeakening_AllowOnceConsumedOnce(t *testing.T) {
 func TestExecResponseDLPBlocksSecret(t *testing.T) {
 	// The upstream returns a private key in its result; response DLP must BLOCK it
 	// before it is delivered to the client (no sensitive content returned).
-	up := &fakeUpstream{result: `{"data":"-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Q\n-----END RSA PRIVATE KEY-----"}`}
+	up := &fakeUpstream{result: `{"data":"-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Q\n-----END RSA PRIVATE KEY-----"}`} // #nosec G101 -- test fixture; asserts response DLP blocks a private key
 	e := newExec(t, stateForMode(t, rollout.ModeCanary), up, realEvents(t, nil))
 	out := e.Execute(context.Background(), execInput(policy.ActionAllow, false))
 	if up.calls != 1 {

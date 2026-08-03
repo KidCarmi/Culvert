@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"hash"
 	"sort"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
@@ -196,61 +197,64 @@ func Compile(spec ScopeSpec, revision uint64, lim Limits) (Scope, error) {
 		return set, nil
 	}
 	sc := Scope{schema: selectorSchema, capability: spec.Capability, revision: revision, percent: spec.Percent, bucketSalt: spec.BucketSalt, bucketKey: spec.BucketKey, highRisk: spec.HighRisk}
+	// Compile every string-selector dimension through the same bounded builder; the
+	// table keeps the cyclomatic footprint flat as dimensions are added.
+	strSets := []struct {
+		dst *stringSet
+		src []string
+	}{
+		{&sc.tenants, spec.Tenants},
+		{&sc.servers, spec.Servers},
+		{&sc.fingerprints, spec.ToolFingerprints},
+		{&sc.principals, spec.Principals},
+		{&sc.agents, spec.Agents},
+		{&sc.clients, spec.Clients},
+		{&sc.groups, spec.Groups},
+		{&sc.environments, spec.Environments},
+		{&sc.exTenants, spec.ExcludeTenants},
+		{&sc.exServers, spec.ExcludeServers},
+		{&sc.exPrincipals, spec.ExcludePrincipals},
+	}
+	for _, d := range strSets {
+		set, err := mkSet(d.src)
+		if err != nil {
+			return Scope{}, err
+		}
+		*d.dst = set
+	}
+	if err := sc.compileToolsAndBounds(spec, total, lim); err != nil {
+		return Scope{}, err
+	}
 	var err error
-	if sc.tenants, err = mkSet(spec.Tenants); err != nil {
-		return Scope{}, err
-	}
-	if sc.servers, err = mkSet(spec.Servers); err != nil {
-		return Scope{}, err
-	}
-	if sc.fingerprints, err = mkSet(spec.ToolFingerprints); err != nil {
-		return Scope{}, err
-	}
-	if sc.principals, err = mkSet(spec.Principals); err != nil {
-		return Scope{}, err
-	}
-	if sc.agents, err = mkSet(spec.Agents); err != nil {
-		return Scope{}, err
-	}
-	if sc.clients, err = mkSet(spec.Clients); err != nil {
-		return Scope{}, err
-	}
-	if sc.groups, err = mkSet(spec.Groups); err != nil {
-		return Scope{}, err
-	}
-	if sc.environments, err = mkSet(spec.Environments); err != nil {
-		return Scope{}, err
-	}
-	if sc.exTenants, err = mkSet(spec.ExcludeTenants); err != nil {
-		return Scope{}, err
-	}
-	if sc.exServers, err = mkSet(spec.ExcludeServers); err != nil {
-		return Scope{}, err
-	}
-	if sc.exPrincipals, err = mkSet(spec.ExcludePrincipals); err != nil {
-		return Scope{}, err
-	}
-	if sc.tools, total, err = mkToolSet(spec.Tools, total, lim); err != nil {
-		return Scope{}, err
-	}
-	if sc.exTools, total, err = mkToolSet(spec.ExcludeTools, total, lim); err != nil {
-		return Scope{}, err
-	}
-	if total > lim.MaxSelectors() {
-		return Scope{}, mcperr.New(mcperr.ReasonRolloutScopeInvalid, "rollout.scope", "total selector count over limit")
-	}
-	if (len(sc.exTenants) + len(sc.exServers) + len(sc.exTools) + len(sc.exPrincipals)) > lim.MaxExclusions() {
-		return Scope{}, mcperr.New(mcperr.ReasonRolloutScopeInvalid, "rollout.scope", "exclusion count over limit")
-	}
 	if sc.operations, err = compileOps(spec.Operations, spec.HighRisk); err != nil {
 		return Scope{}, err
 	}
-	if err = validatePercent(spec); err != nil {
+	if err := validatePercent(spec); err != nil {
 		return Scope{}, err
 	}
 	sc.hash = sc.computeHash()
 	sc.built = true
 	return sc, nil
+}
+
+// compileToolsAndBounds compiles the tool selectors onto sc and enforces the total
+// selector and exclusion bounds. total carries the string-selector count already
+// accumulated by Compile.
+func (sc *Scope) compileToolsAndBounds(spec ScopeSpec, total int, lim Limits) error {
+	var err error
+	if sc.tools, total, err = mkToolSet(spec.Tools, total, lim); err != nil {
+		return err
+	}
+	if sc.exTools, total, err = mkToolSet(spec.ExcludeTools, total, lim); err != nil {
+		return err
+	}
+	if total > lim.MaxSelectors() {
+		return mcperr.New(mcperr.ReasonRolloutScopeInvalid, "rollout.scope", "total selector count over limit")
+	}
+	if (len(sc.exTenants) + len(sc.exServers) + len(sc.exTools) + len(sc.exPrincipals)) > lim.MaxExclusions() {
+		return mcperr.New(mcperr.ReasonRolloutScopeInvalid, "rollout.scope", "exclusion count over limit")
+	}
+	return nil
 }
 
 func mkToolSet(vals []ToolSel, total int, lim Limits) (toolSet, int, error) {
@@ -368,35 +372,31 @@ func (s Scope) Contains(subj Subject) bool {
 }
 
 func (s Scope) matchDimensions(subj Subject) bool {
-	if !s.tenants.empty() && !s.tenants.has(subj.Tenant) {
-		return false
+	// Each inclusion dimension is satisfied when its set is empty (matches anything)
+	// or contains the subject's value. Evaluated as a flat table so the cyclomatic
+	// footprint stays low as dimensions are added.
+	checks := []bool{
+		dimOK(s.tenants, subj.Tenant),
+		dimOK(s.servers, subj.ServerID),
+		dimOK(s.fingerprints, subj.ToolFingerprint),
+		s.tools.empty() || s.tools.has(ToolSel{Server: subj.ServerID, Name: subj.ToolName, Fingerprint: subj.ToolFingerprint}),
+		dimOK(s.principals, subj.PrincipalID),
+		dimOK(s.agents, subj.AgentID),
+		dimOK(s.clients, subj.ClientID),
+		dimOK(s.environments, subj.Environment),
+		s.groups.empty() || s.matchGroup(subj),
 	}
-	if !s.servers.empty() && !s.servers.has(subj.ServerID) {
-		return false
-	}
-	if !s.fingerprints.empty() && !s.fingerprints.has(subj.ToolFingerprint) {
-		return false
-	}
-	if !s.tools.empty() && !s.tools.has(ToolSel{Server: subj.ServerID, Name: subj.ToolName, Fingerprint: subj.ToolFingerprint}) {
-		return false
-	}
-	if !s.principals.empty() && !s.principals.has(subj.PrincipalID) {
-		return false
-	}
-	if !s.agents.empty() && !s.agents.has(subj.AgentID) {
-		return false
-	}
-	if !s.clients.empty() && !s.clients.has(subj.ClientID) {
-		return false
-	}
-	if !s.environments.empty() && !s.environments.has(subj.Environment) {
-		return false
-	}
-	if !s.groups.empty() && !s.matchGroup(subj) {
-		return false
+	for _, ok := range checks {
+		if !ok {
+			return false
+		}
 	}
 	return true
 }
+
+// dimOK reports whether a single string-selector inclusion dimension admits val:
+// an empty set matches anything; otherwise val must be present.
+func dimOK(set stringSet, val string) bool { return set.empty() || set.has(val) }
 
 func (s Scope) matchGroup(subj Subject) bool {
 	for _, g := range subj.Groups {
@@ -446,7 +446,8 @@ func StableBucket(salt, key string) uint32 {
 	h.Write([]byte{0})
 	h.Write([]byte(key))
 	sum := h.Sum(nil)
-	return uint32(binary.BigEndian.Uint64(sum[:8]) % 100)
+	// The modulo bounds the value to [0,99], so it always fits uint32.
+	return uint32(binary.BigEndian.Uint64(sum[:8]) % 100) // #nosec G115 -- value is modulo 100
 }
 
 // computeHash produces a deterministic content hash over the normalized scope
@@ -455,7 +456,7 @@ func StableBucket(salt, key string) uint32 {
 func (s Scope) computeHash() string {
 	h := sha256.New()
 	h.Write([]byte("culvert-mcp-rollout-scope-v1"))
-	writeByte(h, byte(s.schema))
+	writeByte(h, byte(s.schema)) // #nosec G115 -- schema is a tiny constant version tag
 	writeByte(h, byte(s.capability))
 	writeUint64(h, s.revision)
 	writeBool(h, s.highRisk)
@@ -506,7 +507,7 @@ func sortedOps(set map[RiskClass]struct{}) []string {
 	return out
 }
 
-func writeField(h interface{ Write([]byte) (int, error) }, label string, vals []string) {
+func writeField(h hash.Hash, label string, vals []string) {
 	h.Write([]byte(label))
 	h.Write([]byte{0x1e})
 	writeInt(h, len(vals))
@@ -516,21 +517,23 @@ func writeField(h interface{ Write([]byte) (int, error) }, label string, vals []
 	}
 }
 
-func writeInt(h interface{ Write([]byte) (int, error) }, v int) {
+func writeInt(h hash.Hash, v int) {
 	var b [8]byte
-	binary.BigEndian.PutUint64(b[:], uint64(v))
+	// Deterministic length/count serialization for the content hash; v is a bounded
+	// non-negative length, so the sign-preserving conversion is safe.
+	binary.BigEndian.PutUint64(b[:], uint64(v)) // #nosec G115 -- bounded non-negative length
 	h.Write(b[:])
 }
 
-func writeUint64(h interface{ Write([]byte) (int, error) }, v uint64) {
+func writeUint64(h hash.Hash, v uint64) {
 	var b [8]byte
 	binary.BigEndian.PutUint64(b[:], v)
 	h.Write(b[:])
 }
 
-func writeByte(h interface{ Write([]byte) (int, error) }, v byte) { h.Write([]byte{v}) }
+func writeByte(h hash.Hash, v byte) { h.Write([]byte{v}) }
 
-func writeBool(h interface{ Write([]byte) (int, error) }, v bool) {
+func writeBool(h hash.Hash, v bool) {
 	if v {
 		h.Write([]byte{1})
 	} else {

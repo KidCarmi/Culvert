@@ -68,8 +68,8 @@ func initMCPRollout(_ *startupState) {
 }
 
 // stateFor returns the capability-local rollout state (never shared).
-func (r *mcpRollout) stateFor(cap rollout.Capability) *rollout.State {
-	switch cap {
+func (r *mcpRollout) stateFor(capb rollout.Capability) *rollout.State {
+	switch capb {
 	case rollout.CapabilityManagement:
 		return r.management
 	default:
@@ -97,20 +97,20 @@ func (r *mcpRollout) applyRolloutConfig(cfg *rollout.SignedConfig, actor string)
 // emergencyDisable engages the capability-local kill switch immediately (admission
 // stop) without a CP round trip. It never widens access. The signed-publication
 // convergence of the fleet is a separate step.
-func (r *mcpRollout) emergencyDisable(cap rollout.Capability, actor string) {
-	r.stateFor(cap).EngageKillSwitch(actor, time.Now().UnixNano())
+func (r *mcpRollout) emergencyDisable(capb rollout.Capability, actor string) {
+	r.stateFor(capb).EngageKillSwitch(actor, time.Now().UnixNano())
 	r.metrics.emergencies.Add(1)
 }
 
 // clearEmergency clears the capability-local kill switch (does not change mode).
-func (r *mcpRollout) clearEmergency(cap rollout.Capability) {
-	r.stateFor(cap).ClearKillSwitch()
+func (r *mcpRollout) clearEmergency(capb rollout.Capability) {
+	r.stateFor(capb).ClearKillSwitch()
 }
 
 // mcpRolloutStatus returns a bounded, safe status view for the admin surface. It
 // never includes a tenant/subject/token/secret.
 func (r *mcpRollout) status() map[string]any {
-	cap := func(st *rollout.State) map[string]any {
+	capView := func(st *rollout.State) map[string]any {
 		return map[string]any{
 			"mode":        st.CurrentMode().String(),
 			"desired":     st.Desired().String(),
@@ -121,8 +121,8 @@ func (r *mcpRollout) status() map[string]any {
 		}
 	}
 	return map[string]any{
-		"gateway":    cap(r.gateway),
-		"management": cap(r.management),
+		"gateway":    capView(r.gateway),
+		"management": capView(r.management),
 		"metrics": map[string]int64{
 			"in_scope":        r.metrics.inScope.Load(),
 			"out_of_scope":    r.metrics.outOfScope.Load(),

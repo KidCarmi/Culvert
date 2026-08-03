@@ -19,8 +19,17 @@ type Metrics interface {
 // noopMetrics is the default no-op sink.
 type noopMetrics struct{}
 
+// ObserveResolution discards the resolution observation.
 func (noopMetrics) ObserveResolution(string, rollout.Resolution) {}
-func (noopMetrics) ObserveBlock(string, mcperr.Reason)           {}
-func (noopMetrics) ObserveExecution(string, bool)                {}
-func (noopMetrics) ObserveUpstream(string, string)               {}
-func (noopMetrics) ObserveDLPBlock(string, bool)                 {}
+
+// ObserveBlock discards the block observation.
+func (noopMetrics) ObserveBlock(string, mcperr.Reason) {}
+
+// ObserveExecution discards the execution observation.
+func (noopMetrics) ObserveExecution(string, bool) {}
+
+// ObserveUpstream discards the upstream-outcome observation.
+func (noopMetrics) ObserveUpstream(string, string) {}
+
+// ObserveDLPBlock discards the response-DLP observation.
+func (noopMetrics) ObserveDLPBlock(string, bool) {}

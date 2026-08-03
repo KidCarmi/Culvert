@@ -30,6 +30,12 @@ type State struct {
 
 	cur atomic.Pointer[activeState] // hot-path lock-free reads
 
+	// swapMu serializes the read-modify-write of cur across ALL writers (config
+	// apply + kill-switch engage/clear) so two concurrent mutators can never both
+	// load the same prior pointer and lose one update (e.g. a config apply silently
+	// re-enabling admission after an emergency disable). Readers stay lock-free.
+	swapMu sync.Mutex
+
 	mu       sync.Mutex // guards the cold-path bookkeeping below
 	desired  Mode
 	history  []TransitionRecord
@@ -125,12 +131,15 @@ func (s *State) SetConfig(cfg SignedConfig, actor string, atUnixNano int64) erro
 	if err != nil {
 		return err
 	}
+	// Serialize the load→store so a concurrent kill-switch change is never lost.
+	s.swapMu.Lock()
 	prev := s.cur.Load()
 	next := &activeState{
 		config: cfg, mode: cfg.Mode, scope: scope, shadowScope: shadow,
 		hasShadow: cfg.hasShadowScope(), killed: prev.killed,
 	}
 	s.cur.Store(next)
+	s.swapMu.Unlock()
 	if prev.mode != cfg.Mode {
 		kind := TransitionDemotion
 		if cfg.Mode.Rank() > prev.mode.Rank() {
@@ -144,18 +153,23 @@ func (s *State) SetConfig(cfg SignedConfig, actor string, atUnixNano int64) erro
 // EngageKillSwitch engages the emergency disable (admission stop) without changing
 // the mode/scope. Idempotent. Restart-persistent via ToPersist.
 func (s *State) EngageKillSwitch(actor string, atUnixNano int64) {
+	s.swapMu.Lock()
 	prev := s.cur.Load()
 	if prev.killed {
+		s.swapMu.Unlock()
 		return
 	}
 	next := *prev
 	next.killed = true
 	s.cur.Store(&next)
+	s.swapMu.Unlock()
 	s.appendHistory(TransitionRecord{From: prev.mode, To: prev.mode, Kind: TransitionDemotion, ScopeHash: prev.scope.Hash(), Actor: sanitize(actor), AtUnixNano: atUnixNano, Emergency: true, Note: "kill-switch engaged"})
 }
 
 // ClearKillSwitch clears the emergency disable. Idempotent.
 func (s *State) ClearKillSwitch() {
+	s.swapMu.Lock()
+	defer s.swapMu.Unlock()
 	prev := s.cur.Load()
 	if !prev.killed {
 		return
@@ -214,8 +228,8 @@ func (s *State) appendHistory(rec TransitionRecord) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.history = append(s.history, rec)
-	if max := s.lim.MaxHistory(); len(s.history) > max {
-		s.history = s.history[len(s.history)-max:]
+	if maxHist := s.lim.MaxHistory(); len(s.history) > maxHist {
+		s.history = s.history[len(s.history)-maxHist:]
 	}
 }
 

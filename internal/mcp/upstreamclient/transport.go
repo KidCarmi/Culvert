@@ -53,7 +53,7 @@ func (p *serverPool) acquire(ctx context.Context) (func(), error) {
 // returns (rawBody, preResponse, error): preResponse is true when the failure
 // happened before any response headers were received (dial/TLS/timeout) so an
 // idempotent read may retry.
-func (c *Client) roundTrip(ctx context.Context, target Target, body []byte, authHeader string) ([]byte, bool, error) {
+func (c *Client) roundTrip(ctx context.Context, target Target, body []byte, authHeader string) (respBody []byte, preResponse bool, err error) {
 	canon, class, err := destination.Canonicalize(target.Endpoint, c.cfg.Policy, c.cfg.InspectionLimits)
 	if err != nil {
 		return nil, false, mcperr.Wrap(mcperr.ReasonUpstreamEndpointInvalid, "upstreamclient", "endpoint canonicalize", err)
@@ -73,7 +73,10 @@ func (c *Client) roundTrip(ctx context.Context, target Target, body []byte, auth
 	client := c.httpClientFor(target, canon, pin)
 	reqCtx, cancel := context.WithTimeout(ctx, c.cfg.Limits.RequestTimeout())
 	defer cancel()
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, canon.Origin()+"/", bytesReader(body))
+	// POST to the FULL validated canonical endpoint (origin + path), so a
+	// Streamable-HTTP server mounted under a path such as /mcp is reached rather than
+	// the bare origin root.
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, canon.RequestURL(), bytesReader(body))
 	if err != nil {
 		return nil, false, mcperr.Wrap(mcperr.ReasonUpstreamCallFailed, "upstreamclient", "build request", err)
 	}
@@ -198,13 +201,13 @@ func (spkiVerifier) VerifyIdentity(state tls.ConnectionState, pinnedIdentity str
 	return nil
 }
 
-// readBounded reads at most max+1 bytes; exceeding max is a classified failure.
-func readBounded(r io.Reader, max int) ([]byte, error) {
-	buf, err := io.ReadAll(io.LimitReader(r, int64(max)+1))
+// readBounded reads at most limit+1 bytes; exceeding limit is a classified failure.
+func readBounded(r io.Reader, limit int) ([]byte, error) {
+	buf, err := io.ReadAll(io.LimitReader(r, int64(limit)+1))
 	if err != nil {
 		return nil, mcperr.Wrap(mcperr.ReasonUpstreamCallFailed, "upstreamclient", "read response", err)
 	}
-	if len(buf) > max {
+	if len(buf) > limit {
 		return nil, mcperr.New(mcperr.ReasonUpstreamResponseTooLarge, "upstreamclient", "upstream response exceeds bound")
 	}
 	return buf, nil

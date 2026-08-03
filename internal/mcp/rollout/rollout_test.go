@@ -194,7 +194,9 @@ func TestScopeDefaultReadOnly(t *testing.T) {
 func TestPercentageBucketStable(t *testing.T) {
 	// Same (salt,key) must produce the same bucket every call (restart stability).
 	for i := 0; i < 100; i++ {
-		if StableBucket("salt-A", "user-42") != StableBucket("salt-A", "user-42") {
+		first := StableBucket("salt-A", "user-42")
+		second := StableBucket("salt-A", "user-42")
+		if first != second {
 			t.Fatal("bucket not deterministic")
 		}
 	}
