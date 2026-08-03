@@ -372,8 +372,10 @@ func apiMCPDecisions(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	f := adminapi.DecisionFilter{
 		Action: q.Get("action"), ReasonCode: q.Get("reason_code"), RuleID: q.Get("rule_id"),
-		ServerID: q.Get("server_id"), ToolName: q.Get("tool_name"), PrincipalID: q.Get("principal_id"),
-		AgentID: q.Get("agent_id"),
+		ServerID: q.Get("server_id"), ToolName: q.Get("tool_name"), ToolFingerprint: q.Get("tool_fingerprint"),
+		PrincipalID: q.Get("principal_id"), AgentID: q.Get("agent_id"), ClientID: q.Get("client_id"),
+		ExecutionState: q.Get("execution_state"), PolicySnapshotHash: q.Get("policy_snapshot_hash"),
+		CredentialProfileRef: q.Get("credential_profile_ref"),
 	}
 	res, err := m.svc.Decisions.Search(mcpCapability(r), tenant, q.Get("cursor"), mcpQueryLimit(r), f)
 	if err != nil {

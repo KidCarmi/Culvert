@@ -10060,6 +10060,15 @@ paths:
         - { name: action, in: query, required: false, schema: { type: string } }
         - { name: reason_code, in: query, required: false, schema: { type: string } }
         - { name: rule_id, in: query, required: false, schema: { type: string } }
+        - { name: server_id, in: query, required: false, schema: { type: string, maxLength: 256 } }
+        - { name: tool_name, in: query, required: false, schema: { type: string, maxLength: 256 } }
+        - { name: tool_fingerprint, in: query, required: false, schema: { type: string, maxLength: 256 } }
+        - { name: principal_id, in: query, required: false, schema: { type: string, maxLength: 256 } }
+        - { name: agent_id, in: query, required: false, schema: { type: string, maxLength: 256 } }
+        - { name: client_id, in: query, required: false, schema: { type: string, maxLength: 256 } }
+        - { name: execution_state, in: query, required: false, schema: { type: string, maxLength: 256 } }
+        - { name: policy_snapshot_hash, in: query, required: false, schema: { type: string, maxLength: 256 } }
+        - { name: credential_profile_ref, in: query, required: false, schema: { type: string, maxLength: 256 } }
         - { name: limit, in: query, required: false, schema: { type: integer } }
       responses:
         '200': { description: Decision page, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
