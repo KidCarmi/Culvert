@@ -31,7 +31,7 @@ type fakeCommitter struct {
 	actRuns int
 }
 
-func (f *fakeCommitter) CommitThenAct(_ PublicationFact, act func() error) error {
+func (f *fakeCommitter) CommitThenAct(_ Fact, act func() error) error {
 	switch f.mode {
 	case commitFailAdmission:
 		// Queue admission rejected: act NEVER runs.
@@ -51,7 +51,6 @@ type fakeDist struct {
 	unavailable   map[string]bool // node is unreachable
 	pushCount     int
 	rollbackCount int
-	nodeID        string // authenticated identity passed to Record is the node id
 }
 
 func (f *fakeDist) Nodes() []string { return f.nodes }
@@ -74,7 +73,7 @@ func (f *fakeDist) Push(node string, env *cpdp.Envelope) (*cpdp.Acknowledgement,
 	}, nil
 }
 
-func (f *fakeDist) PushRollback(node string, d *cpdp.RollbackDirective) (*cpdp.Acknowledgement, error) {
+func (f *fakeDist) PushRollback(node string, d *cpdp.RollbackDirective, _ *cpdp.Envelope) (*cpdp.Acknowledgement, error) {
 	f.rollbackCount++
 	if f.unavailable[node] {
 		return nil, errors.New("unreachable")
@@ -116,8 +115,8 @@ func mkCoord(t *testing.T, auth *fakeAuth, com *fakeCommitter, dist *fakeDist) *
 func pubInput(rev uint64) PublishInput {
 	return PublishInput{
 		Payload: gwPayload(), Revisions: cpdp.Revisions{Config: rev, Policy: rev, Catalog: 1, Credential: 1},
-		MinDPVersion: 1, PayloadType: "gateway", CandidateHash: "cand",
-		VerifyApproval: func() bool { return true }, VerifyBase: func() bool { return true },
+		MinDPVersion: 1, PayloadType: "gateway",
+		VerifyApproval: func(string) bool { return true }, VerifyBase: func() bool { return true },
 	}
 }
 
@@ -205,7 +204,7 @@ func TestPublish_StaleBaseAndBadApprovalRejected(t *testing.T) {
 		t.Fatal("stale base must be rejected")
 	}
 	in2 := pubInput(2)
-	in2.VerifyApproval = func() bool { return false }
+	in2.VerifyApproval = func(string) bool { return false }
 	if _, err := c.Publish(in2); err == nil {
 		t.Fatal("bad approval must be rejected")
 	}
@@ -266,6 +265,32 @@ func setupPublished(t *testing.T) (*Coordinator, *fakeCommitter, *fakeDist, stri
 	return c, com, dist, e1
 }
 
+// TestPublish_CandidateHashBinding proves the coordinator binds the signed payload
+// to the approved candidate: a mismatched CandidateHash is rejected, and the
+// four-eyes callback receives the coordinator-computed candidate hash.
+func TestPublish_CandidateHashBinding(t *testing.T) {
+	c := mkCoord(t, &fakeAuth{allowed: true, epoch: 5}, &fakeCommitter{mode: commitOK}, &fakeDist{nodes: []string{"n1"}})
+	// A wrong candidate hash for the payload must be rejected before signing.
+	in := pubInput(2)
+	in.CandidateHash = "definitely-not-the-hash"
+	if _, err := c.Publish(in); err == nil {
+		t.Fatal("mismatched candidate hash must be rejected")
+	}
+	if c.CurrentHash() != "" {
+		t.Fatal("a snapshot was installed despite a candidate mismatch")
+	}
+	// The approval callback receives a non-empty candidate hash it can bind a receipt to.
+	var seen string
+	in2 := pubInput(2)
+	in2.VerifyApproval = func(h string) bool { seen = h; return true }
+	if _, err := c.Publish(in2); err != nil {
+		t.Fatal(err)
+	}
+	if seen == "" {
+		t.Fatal("approval callback did not receive the candidate hash")
+	}
+}
+
 func TestRollback_HappyPath(t *testing.T) {
 	c, com, dist, e1 := setupPublished(t)
 	com.actRuns = 0
@@ -279,6 +304,11 @@ func TestRollback_HappyPath(t *testing.T) {
 	}
 	if res.TargetHash != e1 || dist.rollbackCount != 1 {
 		t.Fatalf("rollback result/push wrong: %+v push=%d", res, dist.rollbackCount)
+	}
+	// A fleet that all returned AckRolledBack must report rolled_back completion
+	// (rolled-back acks count toward completion, not as unavailable).
+	if res.State != StateRolledBack || res.Counts.RolledBack != 1 {
+		t.Fatalf("rolled-back completion not reported: state=%q counts=%+v", res.State, res.Counts)
 	}
 }
 

@@ -104,8 +104,8 @@ type ManagementPayload struct {
 // the declared capability and nothing belonging to the other one. A Gateway
 // envelope with a non-nil Management payload (or vice versa), or an empty/both
 // payload, fails closed.
-func (p Payload) checkCapabilityIsolation(cap Capability) error {
-	switch cap {
+func (p Payload) checkCapabilityIsolation(capab Capability) error {
+	switch capab {
 	case CapabilityGateway:
 		if p.Gateway == nil {
 			return mcperr.New(mcperr.ReasonSnapshotCapabilityMismatch, "cpdp.payload", "gateway payload missing")

@@ -105,14 +105,10 @@ func SignRollback(d RollbackDirective, s Signer) (*RollbackDirective, error) {
 	return &d, nil
 }
 
-// VerifyRollback verifies a rollback directive's signature and structural
-// validity against the trust store, then checks it is not expired and binds to
-// the expected current active hash. A directive that is malformed, signed by an
-// untrusted key, expired, or bound to a different current hash is rejected.
-func VerifyRollback(d *RollbackDirective, trust *TrustStore, expectCap Capability, currentActiveHash string, nowUnixNano int64, dpVersion CompatVersion) error {
-	if d == nil || trust == nil {
-		return mcperr.New(mcperr.ReasonRollbackDirectiveInvalid, "cpdp.rollback", "nil directive or trust store")
-	}
+// verifyRollbackSignature checks a directive's structural fields (schema,
+// capability, algorithm, completeness), trusted key, and ed25519 signature. Split
+// out to keep VerifyRollback under the cyclomatic-complexity bound.
+func verifyRollbackSignature(d *RollbackDirective, trust *TrustStore, expectCap Capability) error {
 	if !schemaSupported(d.SchemaVersion) {
 		return mcperr.New(mcperr.ReasonSnapshotSchemaUnknown, "cpdp.rollback", "unsupported directive schema")
 	}
@@ -139,6 +135,20 @@ func VerifyRollback(d *RollbackDirective, trust *TrustStore, expectCap Capabilit
 	}
 	if !ed25519.Verify(pub, msg, sig) {
 		return mcperr.New(mcperr.ReasonRollbackDirectiveInvalid, "cpdp.rollback", "signature did not verify")
+	}
+	return nil
+}
+
+// VerifyRollback verifies a rollback directive's signature and structural
+// validity against the trust store, then checks it is not expired and binds to
+// the expected current active hash. A directive that is malformed, signed by an
+// untrusted key, expired, or bound to a different current hash is rejected.
+func VerifyRollback(d *RollbackDirective, trust *TrustStore, expectCap Capability, currentActiveHash string, nowUnixNano int64, dpVersion CompatVersion) error {
+	if d == nil || trust == nil {
+		return mcperr.New(mcperr.ReasonRollbackDirectiveInvalid, "cpdp.rollback", "nil directive or trust store")
+	}
+	if err := verifyRollbackSignature(d, trust, expectCap); err != nil {
+		return err
 	}
 	// Expiry.
 	if d.ExpiryUnixNano != 0 && nowUnixNano > d.ExpiryUnixNano {

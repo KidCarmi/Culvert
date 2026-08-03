@@ -87,6 +87,27 @@ func buildSignable(m Manifest, p Payload, alg, keyID string) signable {
 	}
 }
 
+// CandidateHash computes a stable hex SHA-256 over just the capability + payload,
+// EXCLUDING the CP-stamped manifest fields (epoch, created time, revisions). It
+// lets the CP bind an approved four-eyes candidate to the EXACT payload that will
+// be signed: the coordinator recomputes it from the payload it is about to sign
+// and rejects a mismatch with the approved candidate hash, so a caller cannot
+// approve one candidate and then sign a different payload.
+func CandidateHash(capability Capability, p Payload, b canonical.Bounds) (string, error) {
+	raw, err := json.Marshal(struct {
+		Capability string  `json:"capability"`
+		Payload    Payload `json:"payload"`
+	}{capability.String(), p})
+	if err != nil {
+		return "", mcperr.Wrap(mcperr.ReasonSnapshotMalformed, "cpdp.hash", "marshal candidate", err)
+	}
+	h, err := canonical.Hash(raw, b)
+	if err != nil {
+		return "", mcperr.Wrap(mcperr.ReasonSnapshotMalformed, "cpdp.hash", "canonicalize candidate", err)
+	}
+	return hex.EncodeToString(h[:]), nil
+}
+
 // ContentHash computes the hex SHA-256 content hash over the canonical signable
 // representation of (manifest, payload, alg, keyID). It is the single hashing
 // primitive used by both the signer (to produce content_hash) and the verifier

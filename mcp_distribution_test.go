@@ -172,7 +172,7 @@ func mcpPubInput(rev uint64) publication.PublishInput {
 			Tools:   []cpdp.ToolRecord{{Server: "s1", Name: "read", Fingerprint: "fp"}}, PolicySource: mcpTestPolicyDoc,
 		}},
 		Revisions: cpdp.Revisions{Config: rev, Policy: rev, Catalog: 1, Credential: 1}, MinDPVersion: 1, PayloadType: "gateway",
-		CandidateHash: "c", VerifyApproval: func() bool { return true }, VerifyBase: func() bool { return true },
+		VerifyApproval: func(string) bool { return true }, VerifyBase: func() bool { return true },
 	}
 }
 

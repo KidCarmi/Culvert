@@ -260,16 +260,15 @@ func apiMCPRollback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "admin_request_invalid", http.StatusBadRequest)
 		return
 	}
-	// Signed distribution is startup-scoped; when it is not active this node cannot
-	// roll back a signed snapshot. Report truthfully (no fabricated success).
-	if !globalMCPDistribution.enabled.Load() {
-		http.Error(w, "distribution_not_configured", http.StatusConflict)
-		return
-	}
+	// Live signed rollback runs through the capability coordinator's four-eyes +
+	// PR-8 durable commit before any sign/push/swap. That coordinator is wired at
+	// startup when signed CP→DP distribution is configured; it is NOT resolvable from
+	// this handler in the disabled-by-default posture of this slice. Report the request
+	// truthfully as not-configured — NEVER fabricate a pending/success result for a
+	// rollback that was not actually initiated (the rollback runtime wiring is the
+	// recorded follow-up, mirroring the PR-9 publish stub).
 	auditEvent(r, "mcp.rollback.request", req.Capability+":"+req.TargetHash, "")
-	// The live rollback runs through the coordinator's four-eyes + PR-8 durable
-	// commit; when wired it returns the rolled_back distribution state.
-	jsonOK(w, map[string]any{"rollback_state": "rollback_pending", "target_hash": req.TargetHash})
+	http.Error(w, "distribution_not_configured", http.StatusConflict)
 }
 
 func apiMCPServers(w http.ResponseWriter, r *http.Request) {

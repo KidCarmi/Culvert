@@ -55,7 +55,10 @@ func New(cfg Config) (*Applier, error) {
 func (a *Applier) Active() *cpdp.Envelope { return a.store.Active() }
 
 // ActiveHash / PreviousHash expose the current/previous hashes for status + acks.
-func (a *Applier) ActiveHash() string   { return a.store.ActiveHash() }
+// ActiveHash returns the current active content hash, or "".
+func (a *Applier) ActiveHash() string { return a.store.ActiveHash() }
+
+// PreviousHash returns the retained previous content hash, or "".
 func (a *Applier) PreviousHash() string { return a.store.PreviousHash() }
 
 // TrustedEpoch returns the DP's last-seen trusted epoch.
@@ -96,9 +99,19 @@ func (a *Applier) Apply(env *cpdp.Envelope) (*cpdp.Acknowledgement, error) {
 	}); err != nil {
 		return a.reject(env, err), err
 	}
-	// Step 4b: revision ordering against the current active snapshot.
+	// Step 4b: revision ordering + duplicate-revision guard against the current active
+	// snapshot. The same-revision-but-different-content rejection MUST run BEFORE the
+	// durable persist (below), not only inside the later atomic Activate — otherwise a
+	// rejected candidate would be written to the state file and a subsequent restart
+	// would Recover it as active, violating rejection atomicity.
 	if cur := a.store.Active(); cur != nil {
 		if err := cpdp.CheckMonotonic(cur.Manifest.Revisions, env.Manifest.Revisions, cur.Manifest.Epoch, env.Manifest.Epoch); err != nil {
+			return a.reject(env, err), err
+		}
+		if cur.ContentHash != env.ContentHash &&
+			cur.Manifest.Epoch == env.Manifest.Epoch &&
+			cur.Manifest.Revisions.Config == env.Manifest.Revisions.Config {
+			err := mcperr.New(mcperr.ReasonSnapshotRevisionRegression, "cpdp.apply", "same revision with a different content hash")
 			return a.reject(env, err), err
 		}
 	}

@@ -151,30 +151,74 @@ func DefaultLimits() Limits {
 	return l
 }
 
-// Accessors (read-only; Limits is immutable once constructed).
+// Accessors (read-only; Limits is immutable once constructed). Each returns the
+// validated bound of the same name.
 
-func (l Limits) MaxEnvelopeBytes() int         { return l.c.MaxEnvelopeBytes }
-func (l Limits) MaxPayloadSectionBytes() int   { return l.c.MaxPayloadSectionBytes }
-func (l Limits) MaxAggregateBytes() int        { return l.c.MaxAggregateBytes }
-func (l Limits) MaxRegistryServers() int       { return l.c.MaxRegistryServers }
-func (l Limits) MaxCatalogTools() int          { return l.c.MaxCatalogTools }
-func (l Limits) MaxPolicyRules() int           { return l.c.MaxPolicyRules }
-func (l Limits) MaxCredentialProfiles() int    { return l.c.MaxCredentialProfiles }
-func (l Limits) MaxInspectionProfiles() int    { return l.c.MaxInspectionProfiles }
-func (l Limits) MaxTrustRoots() int            { return l.c.MaxTrustRoots }
-func (l Limits) MaxKeyIDBytes() int            { return l.c.MaxKeyIDBytes }
-func (l Limits) MaxSignatureBytes() int        { return l.c.MaxSignatureBytes }
-func (l Limits) MaxAcksPerNodeCap() int        { return l.c.MaxAcksPerNodeCap }
-func (l Limits) MaxAckHistory() int            { return l.c.MaxAckHistory }
-func (l Limits) MaxPendingAckRetries() int     { return l.c.MaxPendingAckRetries }
-func (l Limits) MaxRetainedSnapshots() int     { return l.c.MaxRetainedSnapshots }
-func (l Limits) MaxRetainedBytes() int         { return l.c.MaxRetainedBytes }
-func (l Limits) MaxRollbackDirectives() int    { return l.c.MaxRollbackDirectives }
+// MaxEnvelopeBytes is the maximum encoded bytes of a whole signed envelope.
+func (l Limits) MaxEnvelopeBytes() int { return l.c.MaxEnvelopeBytes }
+
+// MaxPayloadSectionBytes is the maximum encoded bytes of a single payload section.
+func (l Limits) MaxPayloadSectionBytes() int { return l.c.MaxPayloadSectionBytes }
+
+// MaxAggregateBytes is the maximum aggregate payload byte budget.
+func (l Limits) MaxAggregateBytes() int { return l.c.MaxAggregateBytes }
+
+// MaxRegistryServers is the maximum number of server records in a Gateway payload.
+func (l Limits) MaxRegistryServers() int { return l.c.MaxRegistryServers }
+
+// MaxCatalogTools is the maximum number of tool records in a Gateway payload.
+func (l Limits) MaxCatalogTools() int { return l.c.MaxCatalogTools }
+
+// MaxPolicyRules is the maximum number of compiled policy rules.
+func (l Limits) MaxPolicyRules() int { return l.c.MaxPolicyRules }
+
+// MaxCredentialProfiles is the maximum number of credential-profile metadata entries.
+func (l Limits) MaxCredentialProfiles() int { return l.c.MaxCredentialProfiles }
+
+// MaxInspectionProfiles is the maximum number of inspection-profile metadata entries.
+func (l Limits) MaxInspectionProfiles() int { return l.c.MaxInspectionProfiles }
+
+// MaxTrustRoots is the maximum number of trust roots in a trust store.
+func (l Limits) MaxTrustRoots() int { return l.c.MaxTrustRoots }
+
+// MaxKeyIDBytes is the maximum length of a signing key id.
+func (l Limits) MaxKeyIDBytes() int { return l.c.MaxKeyIDBytes }
+
+// MaxSignatureBytes is the maximum encoded length of a signature.
+func (l Limits) MaxSignatureBytes() int { return l.c.MaxSignatureBytes }
+
+// MaxAcksPerNodeCap is the maximum tracked acknowledgements per node/capability.
+func (l Limits) MaxAcksPerNodeCap() int { return l.c.MaxAcksPerNodeCap }
+
+// MaxAckHistory is the maximum retained acknowledgement/known-hash history.
+func (l Limits) MaxAckHistory() int { return l.c.MaxAckHistory }
+
+// MaxPendingAckRetries is the maximum pending-acknowledgement retry count.
+func (l Limits) MaxPendingAckRetries() int { return l.c.MaxPendingAckRetries }
+
+// MaxRetainedSnapshots is the maximum retained snapshot count (>= 2 for rollback).
+func (l Limits) MaxRetainedSnapshots() int { return l.c.MaxRetainedSnapshots }
+
+// MaxRetainedBytes is the maximum retained-snapshot byte budget.
+func (l Limits) MaxRetainedBytes() int { return l.c.MaxRetainedBytes }
+
+// MaxRollbackDirectives is the maximum retained rollback-directive count.
+func (l Limits) MaxRollbackDirectives() int { return l.c.MaxRollbackDirectives }
+
+// RollbackExpiry is the maximum validity window of a rollback directive.
 func (l Limits) RollbackExpiry() time.Duration { return l.c.RollbackExpiry }
-func (l Limits) MaxDryValidationCases() int    { return l.c.MaxDryValidationCases }
-func (l Limits) MaxConcurrentApplies() int     { return l.c.MaxConcurrentApplies }
-func (l Limits) MaxConcurrentPublish() int     { return l.c.MaxConcurrentPublish }
-func (l Limits) MaxConcurrentRollbacks() int   { return l.c.MaxConcurrentRollbacks }
+
+// MaxDryValidationCases is the maximum bounded dry-validation case count.
+func (l Limits) MaxDryValidationCases() int { return l.c.MaxDryValidationCases }
+
+// MaxConcurrentApplies is the maximum concurrent DP applies.
+func (l Limits) MaxConcurrentApplies() int { return l.c.MaxConcurrentApplies }
+
+// MaxConcurrentPublish is the maximum concurrent CP publications.
+func (l Limits) MaxConcurrentPublish() int { return l.c.MaxConcurrentPublish }
+
+// MaxConcurrentRollbacks is the maximum concurrent rollbacks.
+func (l Limits) MaxConcurrentRollbacks() int { return l.c.MaxConcurrentRollbacks }
 
 // CanonicalBounds derives the strict canonical-serializer bounds used to decode
 // and hash a snapshot payload, sized from the envelope byte bound. It is exported
