@@ -17730,6 +17730,9 @@ function mcpxChip(txt, kind){ return mcpxEl('span','mcpx-chip '+(kind||'muted'),
 function mcpxKv(k, v){ var r=mcpxEl('div','mcpx-row'); r.appendChild(mcpxEl('span','k',k)); r.appendChild(mcpxEl('span','v', (v==null||v==='')?'-':String(v))); return r; }
 function mcpxNow(){ var d=new Date(), p=function(n){return String(n).padStart(2,'0');}; return p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds()); }
 function mcpxShortHash(h){ if(!h) return 'none'; return h.length>16 ? h.slice(0,10)+'...'+h.slice(-4) : h; }
+function mcpxSevRank(s){ return s==='critical'?4:(s==='high'?3:(s==='medium'?2:(s==='low'?1:0))); }
+function mcpxKillWho(gw,mg){ return gw&&mg?'gateway + management':(gw?'gateway':'management'); }
+var mcpxDrawerReq=0;
 var mcpxReasonLabels = { out_of_scope:'out of rollout scope', observe_only:'observe only (not enforced)', secret_detected:'secret detected in request', pii_detected:'PII detected', sender_constraint_required:'sender proof-of-possession required', credential_power_exceeded:'credential power exceeded', unregistered_server:'unregistered server', unknown_tool:'unknown tool', none:'none' };
 var mcpxDistLabels = { local_only:'local only (no fleet)', pending_distribution:'pending distribution', partially_acknowledged:'partially acknowledged', fully_acknowledged:'fully acknowledged', distribution_degraded:'distribution degraded', rollback_pending:'rollback pending', rolled_back:'rolled back', rejected_by_all:'rejected by all nodes' };
 var mcpxHardClass = { sender_constraint_required:'auth_identity', dpop_binding_mismatch:'auth_identity', mtls_binding_mismatch:'auth_identity', issuer_rejected:'auth_identity', token_expired:'auth_identity', credential_power_exceeded:'credential_safety', credential_scope_mismatch:'credential_safety', credential_revoked:'credential_safety', unregistered_server:'server_trust', server_identity_mismatch:'server_trust', unknown_tool:'tool_trust', privilege_expansion:'tool_trust', semantic_drift:'tool_trust', secret_detected:'inspection_privacy', pii_detected:'inspection_privacy', redaction_failed:'inspection_privacy', ssrf_blocked:'destination_safety', dns_pin_mismatch:'destination_safety', redirect_rejected:'destination_safety' };
@@ -17771,21 +17774,32 @@ async function renderMCPCommandCenter(){
   if(mcpxIsErr(ov) && ov.__err==='forbidden'){ root.appendChild(mcpxEl('div','mcpx-empty','Permission denied.')); return; }
   if(mcpxIsErr(ov)){ root.appendChild(mcpxEl('div','mcpx-empty','Could not load MCP posture ('+(ov.status||ov.__err)+').')); return; }
   var health=ov.health||{}, gwH=health.gateway||{}, gwRun=gwH.runtime||{}, gwDur=gwH.durability||{};
-  var r=mcpxIsErr(rollout)?{}:rollout, rg=r.gateway||{}, rm=r.management||{}, met=r.metrics||{};
-  var d=mcpxIsErr(dist)?{}:dist, distState=d.distribution_state||health.distribution_state||'local_only';
-  var localOnly=distState==='local_only', killed=!!rg.killed, sev=gwDur.severity||'none';
-  var hardBlocks=met.hard_blocks||0, prodLocked=r.production_locked!==false;
+  var mgH=health.management||{}, mgDur=mgH.durability||{};
+  // A failed rollout/distribution read is surfaced as UNAVAILABLE, never as a benign
+  // default: substituting {} would hide an active kill switch or a degraded fleet.
+  var rolloutErr=mcpxIsErr(rollout), distErr=mcpxIsErr(dist);
+  var r=rolloutErr?{}:rollout, rg=r.gateway||{}, rm=r.management||{}, met=r.metrics||{};
+  var d=distErr?{}:dist;
+  var distState=distErr?null:(d.distribution_state||health.distribution_state||'local_only');
+  var localOnly=distState==='local_only';
+  // Both capabilities own an independent kill switch and durability severity; the
+  // posture reflects the WORSE of the two so a management degradation is never hidden.
+  var gwKilled=!rolloutErr&&!!rg.killed, mgmtKilled=!rolloutErr&&!!rm.killed;
+  var gwSev=gwDur.severity||'none', mgSev=mgDur.severity||'none';
+  var worstSev=mcpxSevRank(mgSev)>mcpxSevRank(gwSev)?mgSev:gwSev;
+  var hardBlocks=rolloutErr?null:(met.hard_blocks||0);
   var snapHash=(d.gateway&&d.gateway.current_hash)||gwH.policy_snapshot_hash||'';
 
   var posture=mcpxEl('div','mcpx-posture');
-  posture.appendChild(mcpxChip('Gateway: '+(rg.mode||'disabled'),'accent'));
-  posture.appendChild(mcpxChip('Mgmt: '+(rm.mode||'disabled'),'muted'));
-  if(killed) posture.appendChild(mcpxChip('Admission: STOPPED','crit'));
-  posture.appendChild(mcpxChip('Hard fails: '+hardBlocks, hardBlocks>0?'warn':'ok'));
-  posture.appendChild(mcpxChip('Fleet: '+(localOnly?'local only':(mcpxDistLabels[distState]||distState)), localOnly?'muted':(distState==='fully_acknowledged'?'ok':'warn')));
-  posture.appendChild(mcpxChip('Durability: '+(sev==='none'?'OK':sev), sev==='none'?'ok':((sev==='high'||sev==='critical')?'crit':'warn')));
+  posture.appendChild(mcpxChip('Gateway: '+(rolloutErr?'unavailable':(rg.mode||'disabled')), rolloutErr?'warn':'accent'));
+  posture.appendChild(mcpxChip('Mgmt: '+(rolloutErr?'unavailable':(rm.mode||'disabled')), rolloutErr?'warn':'muted'));
+  if(gwKilled||mgmtKilled) posture.appendChild(mcpxChip('Admission STOPPED: '+mcpxKillWho(gwKilled,mgmtKilled),'crit'));
+  posture.appendChild(mcpxChip('Hard fails: '+(hardBlocks==null?'unavailable':hardBlocks), (hardBlocks==null||hardBlocks>0)?'warn':'ok'));
+  if(distErr) posture.appendChild(mcpxChip('Fleet: unavailable','warn'));
+  else posture.appendChild(mcpxChip('Fleet: '+(localOnly?'local only':(mcpxDistLabels[distState]||distState)), localOnly?'muted':(distState==='fully_acknowledged'?'ok':'warn')));
+  posture.appendChild(mcpxChip('Durability: '+(worstSev==='none'?'OK':worstSev), worstSev==='none'?'ok':((worstSev==='high'||worstSev==='critical')?'crit':'warn')));
   posture.appendChild(mcpxChip('Snapshot '+mcpxShortHash(snapHash),'muted'));
-  if(prodLocked) posture.appendChild(mcpxChip('Production: LOCKED','warn'));
+  if(!rolloutErr && r.production_locked!==false) posture.appendChild(mcpxChip('Production: LOCKED','warn'));
   posture.appendChild(mcpxEl('span','mcpx-asof','as-of '+mcpxNow()+' - refresh'));
   root.appendChild(posture);
 
@@ -17795,11 +17809,11 @@ async function renderMCPCommandCenter(){
 
   var gc=mcpxEl('div','mcpx-card'), gh=mcpxEl('div','mcpx-card-h');
   gh.appendChild(mcpxEl('div','mcpx-card-title','Gateway'));
-  gh.appendChild(killed?mcpxChip('ADMISSION STOPPED','crit'):mcpxChip(rg.mode||'disabled','accent')); gc.appendChild(gh);
+  gh.appendChild(rolloutErr?mcpxChip('unavailable','warn'):(gwKilled?mcpxChip('ADMISSION STOPPED','crit'):mcpxChip(rg.mode||'disabled','accent'))); gc.appendChild(gh);
   var tri=mcpxEl('div','mcpx-triplet');
-  tri.appendChild(triCell('Desired', rg.desired||rg.mode||'disabled'));
-  tri.appendChild(triCell('Locally active', killed?((rg.mode||'')+' (stopped)'):(rg.mode||'disabled')));
-  tri.appendChild(triCell('Fleet-effective', localOnly?'local only':(mcpxDistLabels[distState]||distState), !localOnly && distState!=='fully_acknowledged'));
+  tri.appendChild(triCell('Desired', rolloutErr?'unavailable':(rg.desired||rg.mode||'disabled'), rolloutErr));
+  tri.appendChild(triCell('Locally active', rolloutErr?'unavailable':(gwKilled?((rg.mode||'')+' (stopped)'):(rg.mode||'disabled')), rolloutErr||gwKilled));
+  tri.appendChild(triCell('Fleet-effective', distErr?'unavailable':(localOnly?'local only':(mcpxDistLabels[distState]||distState)), distErr||(!localOnly && distState!=='fully_acknowledged')));
   gc.appendChild(tri);
   var mtr=mcpxEl('div','mcpx-metric');
   mtr.appendChild(metric('sessions', gwRun.active_sessions!=null?gwRun.active_sessions:'-'));
@@ -17811,11 +17825,12 @@ async function renderMCPCommandCenter(){
   left.appendChild(gc);
 
   var mc=mcpxEl('div','mcpx-card'), mh=mcpxEl('div','mcpx-card-h');
-  mh.appendChild(mcpxEl('div','mcpx-card-title','Management')); mh.appendChild(mcpxChip(rm.mode||'disabled','muted')); mc.appendChild(mh);
+  mh.appendChild(mcpxEl('div','mcpx-card-title','Management'));
+  mh.appendChild(rolloutErr?mcpxChip('unavailable','warn'):(mgmtKilled?mcpxChip('ADMISSION STOPPED','crit'):mcpxChip(rm.mode||'disabled','muted'))); mc.appendChild(mh);
   var mtri=mcpxEl('div','mcpx-triplet');
-  mtri.appendChild(triCell('Desired', rm.desired||rm.mode||'disabled'));
-  mtri.appendChild(triCell('Locally active', rm.mode||'disabled'));
-  mtri.appendChild(triCell('Fleet-effective', localOnly?'local only':(mcpxDistLabels[distState]||distState))); mc.appendChild(mtri);
+  mtri.appendChild(triCell('Desired', rolloutErr?'unavailable':(rm.desired||rm.mode||'disabled'), rolloutErr));
+  mtri.appendChild(triCell('Locally active', rolloutErr?'unavailable':(mgmtKilled?((rm.mode||'')+' (stopped)'):(rm.mode||'disabled')), rolloutErr||mgmtKilled));
+  mtri.appendChild(triCell('Fleet-effective', distErr?'unavailable':(localOnly?'local only':(mcpxDistLabels[distState]||distState)), distErr)); mc.appendChild(mtri);
   var ma=health.management_access||{}, mmtr=mcpxEl('div','mcpx-metric');
   mmtr.appendChild(metric('mutation', ma.mutation_enabled?'on':'off'));
   mmtr.appendChild(metric('tools', (ov.management_tools!=null?ov.management_tools:'-')+' read-only'));
@@ -17824,12 +17839,16 @@ async function renderMCPCommandCenter(){
   var attn=mcpxEl('div','mcpx-card'), ah=mcpxEl('div','mcpx-card-h');
   ah.appendChild(mcpxEl('div','mcpx-card-title','Needs attention')); attn.appendChild(ah);
   var items=[];
-  if(killed) items.push(['crit','Emergency kill switch active on gateway: all admission stopped (node-local)','mcp-rollout']);
-  if(sev!=='none') items.push([(sev==='high'||sev==='critical')?'crit':'warn','Durability '+sev+': see durability meters','mcp-health']);
-  if(hardBlocks>0) items.push(['warn','Hard failures observed ('+hardBlocks+'): review blocked calls','mcp-decisions']);
+  if(rolloutErr) items.push(['warn','Rollout posture unavailable: /api/mcp/rollout did not respond - kill switch, hard-fail and production-lock state are unknown','mcp-rollout']);
+  if(distErr) items.push(['warn','Distribution posture unavailable: /api/mcp/distribution did not respond - fleet-effective state is unknown','mcp-health']);
+  if(gwKilled) items.push(['crit','Emergency kill switch active on gateway: all admission stopped (node-local)','mcp-rollout']);
+  if(mgmtKilled) items.push(['crit','Emergency kill switch active on management: all admission stopped (node-local)','mcp-rollout']);
+  if(gwSev!=='none') items.push([(gwSev==='high'||gwSev==='critical')?'crit':'warn','Gateway durability '+gwSev+': see durability meters','mcp-health']);
+  if(mgSev!=='none') items.push([(mgSev==='high'||mgSev==='critical')?'crit':'warn','Management durability '+mgSev+': see durability meters','mcp-health']);
+  if(hardBlocks!=null && hardBlocks>0) items.push(['warn','Hard failures observed ('+hardBlocks+'): review blocked calls','mcp-decisions']);
   if(distState==='distribution_degraded') items.push(['warn','Distribution degraded: a DP may be incompatible or unavailable','mcp-health']);
   if(distState==='rejected_by_all') items.push(['crit','Snapshot rejected by all data planes','mcp-health']);
-  if(prodLocked) items.push(['info','Production is locked: qualification required (no issuer in build)','mcp-rollout']);
+  if(!rolloutErr && r.production_locked!==false) items.push(['info','Production is locked: qualification required (no issuer in build)','mcp-rollout']);
   if(!items.length){ attn.appendChild(mcpxEl('div','mcpx-empty','Nothing needs attention.')); }
   else{
     var SEVL={crit:'CRIT',warn:'WARN',info:'INFO',ok:'OK'};
@@ -17906,8 +17925,12 @@ async function mcpxOpenDecision(eventId){
   var rows=root.querySelectorAll('table.mcpx-act tbody tr');
   Array.prototype.forEach.call(rows, function(x){ if(x.dataset.arg===eventId) x.classList.add('sel'); });
   drawer.classList.add('open'); if(scrim) scrim.classList.add('open');
+  // Guard against a slower earlier request overwriting a newer selection (or a close):
+  // each open takes a ticket; only the latest ticket is allowed to render its response.
+  var myReq=++mcpxDrawerReq;
   drawer.textContent=''; drawer.appendChild(mcpxEl('div','mcpx-source','Loading evidence...'));
   var ex=await mcpxFetchJSON('/api/mcp/decision-explain?tenant='+encodeURIComponent(tenant)+'&event_id='+encodeURIComponent(eventId));
+  if(myReq!==mcpxDrawerReq) return;
   drawer.textContent='';
   var top=mcpxEl('div','mcpx-drawer-top'), th=mcpxEl('div','mcpx-card-h'), idw=mcpxEl('div','');
   idw.appendChild(mcpxChip('Decision','muted')); idw.appendChild(mcpxEl('span','',' '+eventId)); th.appendChild(idw);
@@ -17958,7 +17981,7 @@ async function mcpxOpenDecision(eventId){
   drawer.appendChild(sa);
   var live=document.getElementById('mcpx-act-live'); if(live) live.textContent='Opened decision '+eventId;
 }
-function mcpxCloseDrawer(){ var d=document.getElementById('mcpx-drawer'), s=document.getElementById('mcpx-scrim'); if(d){ d.classList.remove('open'); d.textContent=''; } if(s) s.classList.remove('open'); }
+function mcpxCloseDrawer(){ mcpxDrawerReq++; var d=document.getElementById('mcpx-drawer'), s=document.getElementById('mcpx-scrim'); if(d){ d.classList.remove('open'); d.textContent=''; } if(s) s.classList.remove('open'); }
 
 document.addEventListener('keydown', function(e){
   if(e.key==='Escape'){ var d=document.getElementById('mcpx-drawer'); if(d && d.classList.contains('open')){ mcpxCloseDrawer(); return; } }

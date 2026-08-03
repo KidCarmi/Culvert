@@ -54,6 +54,19 @@ const fxExplainShadow = `{"event_id":"evt_9f1a","correlation_id":"corr_7788","ca
 	`"inspection_revision":3,"runtime_revision":2,"policy_snapshot_hash":"sha256:11aa22bb33cc44dd55ee66ff77009988",` +
 	`"inspection_schema_status":"valid","dlp_disposition":"pass","credential_profile_ref":"cp-github-rw","credential_power_ceiling":"write","source":"historical"}`
 
+// Degraded posture: BOTH kill switches active, Management durability critical while
+// Gateway is clean, and /api/mcp/distribution unavailable (5xx). Proves the Command
+// Center surfaces the management kill switch + management durability independently and
+// renders the failed distribution read as unavailable rather than a benign default.
+const fxOverviewDegraded = `{"distribution_state":"local_only","execution_state":"not_implemented","management_tools":14,` +
+	`"health":{"gateway":{"capability":"gateway","runtime":{"state":"ready","active_sessions":0,"in_flight":0},"durability":{"severity":"none"},"policy_snapshot_hash":"sha256:11aa22bb33cc44dd55ee66ff77009988"},` +
+	`"management":{"capability":"management","runtime":{"state":"degraded","active_sessions":0,"in_flight":0},"durability":{"severity":"critical","commit_failures":91,"recovery_state":"stalled"}},` +
+	`"distribution_state":"local_only","management_access":{"enabled":true,"default_min_role":"admin","mutation_enabled":false}}}`
+
+const fxRolloutDegraded = `{"gateway":{"mode":"canary","desired":"canary","killed":true,"connector":"local-client","history_len":6},` +
+	`"management":{"mode":"observe","desired":"observe","killed":true,"connector":"","history_len":2},` +
+	`"metrics":{"hard_blocks":0},"production_locked":true}`
+
 // mcpuxRoute installs interception: /api/mcp/* -> synthetic fixtures; external ->
 // abort; everything else (the real handler, static assets) -> continue.
 func mcpuxRoute(t *testing.T, ctx playwright.BrowserContext, base string) {
@@ -296,4 +309,79 @@ func TestMCPUX_States(t *testing.T) {
 	if err := assert.Locator(page.Locator("#mcpx-overview-root")).ToContainText("Permission denied", playwright.LocatorAssertionsToContainTextOptions{Timeout: playwright.Float(7000)}); err != nil {
 		t.Fatalf("expected permission-denied state: %v", err)
 	}
+}
+
+// TestMCPUX_DegradedPosture proves the Command Center surfaces BOTH capabilities'
+// kill switches and durability independently, and renders a failed distribution read
+// as unavailable rather than substituting a benign "local only" default.
+func TestMCPUX_DegradedPosture(t *testing.T) {
+	mcpuxSeed(t)
+	srv := httptest.NewServer(newAdminUIHandler())
+	t.Cleanup(srv.Close)
+	browser := uiE2EBrowser(t)
+
+	ctx, err := browser.NewContext(playwright.BrowserNewContextOptions{Viewport: &playwright.Size{Width: 1440, Height: 900}})
+	if err != nil {
+		t.Fatalf("context: %v", err)
+	}
+	t.Cleanup(func() { _ = ctx.Close() })
+	injectChartStub(t, ctx)
+	// overview + rollout = degraded fixtures; distribution = 500 (unavailable).
+	_ = ctx.Route("**/*", func(route playwright.Route) {
+		u := route.Request().URL()
+		loopback := strings.Contains(u, "127.0.0.1") || strings.Contains(u, "localhost")
+		if !loopback && !strings.HasPrefix(u, "data:") && !strings.HasPrefix(u, "blob:") {
+			_ = route.Abort()
+			return
+		}
+		switch {
+		case strings.Contains(u, "/api/mcp/overview"):
+			_ = route.Fulfill(playwright.RouteFulfillOptions{Status: playwright.Int(200), ContentType: playwright.String("application/json"), Body: playwright.String(fxOverviewDegraded)})
+		case strings.Contains(u, "/api/mcp/distribution"):
+			_ = route.Fulfill(playwright.RouteFulfillOptions{Status: playwright.Int(500), Body: playwright.String("boom")})
+		case strings.Contains(u, "/api/mcp/rollout"):
+			_ = route.Fulfill(playwright.RouteFulfillOptions{Status: playwright.Int(200), ContentType: playwright.String("application/json"), Body: playwright.String(fxRolloutDegraded)})
+		default:
+			_ = route.Continue()
+		}
+	})
+	_ = ctx.AddCookies([]playwright.OptionalCookie{{Name: uiSessionCookieName, Value: mintUISessionValue(t, "ux_admin", RoleAdmin), URL: playwright.String(srv.URL)}})
+	page, err := ctx.NewPage()
+	if err != nil {
+		t.Fatalf("page: %v", err)
+	}
+	var pageErrs []string
+	page.On("pageerror", func(e error) { pageErrs = append(pageErrs, e.Error()) })
+	if _, err := page.Goto(srv.URL+"/", playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateLoad}); err != nil {
+		t.Fatalf("goto: %v", err)
+	}
+	page.SetDefaultTimeout(8000)
+	assert := playwright.NewPlaywrightAssertions()
+	if err := page.Locator(`.nav-item[data-view="mcp-overview"]`).First().Click(); err != nil {
+		t.Fatalf("nav: %v", err)
+	}
+	tct := func(sub, ctxs string) {
+		if err := assert.Locator(page.Locator("#mcpx-overview-root")).ToContainText(sub, playwright.LocatorAssertionsToContainTextOptions{Timeout: playwright.Float(7000)}); err != nil {
+			t.Fatalf("%s (want %q): %v | pageErrs=%v", ctxs, sub, err, pageErrs)
+		}
+	}
+	// Both kill switches surfaced in the strip and needs-attention.
+	tct("Admission STOPPED: gateway + management", "combined kill chip")
+	tct("Emergency kill switch active on gateway", "gateway kill attn")
+	tct("Emergency kill switch active on management", "management kill attn")
+	// Management durability critical must drive the strip severity + its own attn item,
+	// even though Gateway durability is clean.
+	tct("Durability: critical", "worst-of-both severity")
+	tct("Management durability critical", "management durability attn")
+	// A failed distribution read renders as unavailable, not "local only".
+	tct("Fleet: unavailable", "distribution unavailable chip")
+	tct("Distribution posture unavailable", "distribution unavailable attn")
+	dtxt, _ := page.Locator("#mcpx-overview-root").TextContent()
+	if strings.Contains(dtxt, "Fleet: local only") {
+		t.Fatalf("failed distribution read must not fall back to 'local only'; got %q", dtxt)
+	}
+	if len(pageErrs) != 0 {
+		t.Fatalf("uncaught page errors: %v", pageErrs)
+	}
+	mcpuxShot(t, page, "command-center-degraded-dark-1440.png")
 }
