@@ -141,6 +141,15 @@ func registerMCPRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/mcp/management-access", apiMCPManagementAccess)
 	mux.HandleFunc("/api/mcp/distribution", apiMCPDistribution)
 	mux.HandleFunc("/api/mcp/rollback", apiMCPRollback)
+	// PR-11 rollout surface.
+	mux.HandleFunc("/api/mcp/rollout", apiMCPRollout)
+	mux.HandleFunc("/api/mcp/rollout/transition", apiMCPRolloutTransition)
+	mux.HandleFunc("/api/mcp/rollout/scope", apiMCPRolloutScope)
+	mux.HandleFunc("/api/mcp/rollout/evidence", apiMCPRolloutEvidence)
+	mux.HandleFunc("/api/mcp/rollout/emergency", apiMCPRolloutEmergency)
+	mux.HandleFunc("/api/mcp/rollout/rehearse-rollback", apiMCPRolloutRehearse)
+	mux.HandleFunc("/api/mcp/executions", apiMCPExecutions)
+	mux.HandleFunc("/api/mcp/upstream-health", apiMCPUpstreamHealth)
 }
 
 // mcpErr maps a classified MCP error to a plain-text HTTP response. The reason

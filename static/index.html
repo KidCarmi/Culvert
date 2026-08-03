@@ -591,6 +591,9 @@ tr.dragging  { opacity: .4; }
     <div class="nav-item" data-view="mcp-health" data-min-role="viewer" role="button" tabindex="0">
       <svg class="ico" aria-hidden="true"><use href="#i-shield"/></svg> MCP Health &amp; Durability
     </div>
+    <div class="nav-item" data-view="mcp-rollout" data-min-role="viewer" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-shield"/></svg> MCP Rollout &amp; Execution
+    </div>
     <div class="nav-item" data-view="mcp-management" data-min-role="viewer" role="button" tabindex="0">
       <svg class="ico" aria-hidden="true"><use href="#i-shield"/></svg> Management MCP Access
     </div>
@@ -3497,6 +3500,46 @@ Firefox (all platforms):
         </div>
       </div>
     </div>
+    <div class="view" id="view-mcp-rollout">
+      <div class="panel"><h3>Rollout Overview &amp; Mode &amp; Scope</h3>
+        <button class="btn" data-click="loadMCPRollout">Refresh</button>
+        <p class="muted">PR-11 guarded execution (Model A / local-client only). Disabled &#8594; Observe &#8594; Shadow &#8594; Canary &#8594; Production. Observe never executes; Shadow/Canary execute only inside an exact approved scope; Production is qualification-locked. Shows desired / local / fleet-effective mode, scope revision + hash, signed snapshot hash/epoch, and DP acknowledgement counts.</p>
+        <div id="mcp-rollout-status" class="muted"></div>
+        <pre class="mono" id="mcp-rollout-out" style="white-space:pre-wrap"></pre>
+      </div>
+      <div class="panel"><h3>Shadow Decisions &amp; Canary Health &amp; Hard Failures</h3>
+        <p class="muted">Shadow records the evaluated policy action separately from the effective (allow-and-record) action; the fixed hard-failure set always blocks. Canary enforces all nine policy actions inside scope. Counts only — never a raw request/response, token, credential, or matched secret.</p>
+        <div id="mcp-executions-status" class="muted"></div>
+        <pre class="mono" id="mcp-executions-out" style="white-space:pre-wrap"></pre>
+        <button class="btn" data-click="loadMCPExecutions">Refresh executions</button>
+      </div>
+      <div class="panel"><h3>Executions &amp; Upstream Health</h3>
+        <button class="btn" data-click="loadMCPUpstreamHealth">Refresh upstream</button>
+        <div id="mcp-upstream-status" class="muted"></div>
+        <pre class="mono" id="mcp-upstream-out" style="white-space:pre-wrap"></pre>
+      </div>
+      <div class="panel"><h3>Production Qualification Status</h3>
+        <p class="muted"><strong>Production locked &#8212; qualification required.</strong> Production is a real mode semantic but is unreachable without a machine-verifiable qualification receipt issued by the separate Production Qualification gate; this build ships no issuer. No config flag, environment variable, CLI flag, API parameter, or GUI control can bypass it. The evidence windows below are measurable targets, not completed rollout evidence.</p>
+        <button class="btn" data-click="loadMCPRolloutEvidence">Refresh evidence</button>
+        <div id="mcp-evidence-status" class="muted"></div>
+        <pre class="mono" id="mcp-evidence-out" style="white-space:pre-wrap"></pre>
+      </div>
+      <div class="panel" data-min-role="admin"><h3>Mode Transition (promotion / demotion)</h3>
+        <p class="muted">A promotion is one stage at a time and rides the signed publication path (four-eyes approval + durable commit + sign + distribute + DP-ack). Widening discloses the exact scope delta, newly executable/enforced operation classes, ServerIDs/tool fingerprints, credential-power implications, base/snapshot revision, rollback target, and satisfied/missing evidence. There is no generic Production-enable control.</p>
+        <select id="mcp-rollout-cap"><option value="gateway">gateway</option><option value="management">management</option></select>
+        <select id="mcp-rollout-tomode"><option value="observe">observe</option><option value="shadow">shadow</option><option value="canary">canary</option><option value="disabled">disabled</option></select>
+        <button class="btn" data-min-role="admin" data-click="mcpRolloutTransition">Request transition (four-eyes)</button>
+        <span id="mcp-transition-out" class="muted"></span>
+      </div>
+      <div class="panel" data-min-role="admin"><h3>Emergency Controls</h3>
+        <p class="muted">Emergency actions <strong>narrow only</strong> &#8212; they immediately stop new admission (node-local, no CP round trip) and can never promote, widen scope, or enable execution.</p>
+        <select id="mcp-emergency-cap"><option value="gateway">gateway</option><option value="management">management</option></select>
+        <button class="btn danger" data-min-role="admin" data-click="mcpEmergencyDisable">Emergency disable</button>
+        <button class="btn" data-min-role="admin" data-click="mcpEmergencyClear">Clear</button>
+        <button class="btn" data-min-role="admin" data-click="mcpRehearseRollback">Record rollback rehearsal</button>
+        <span id="mcp-emergency-out" class="muted"></span>
+      </div>
+    </div>
     <div class="view" id="view-mcp-management">
       <div class="panel"><h3>Management MCP Access</h3>
         <button class="btn" data-click="loadMCPManagement">Refresh</button>
@@ -4806,6 +4849,14 @@ document.addEventListener('click', e => {
     case 'loadMCPHealth':     loadMCPHealth(); break;
     case 'loadMCPDistribution': loadMCPDistribution(); break;
     case 'mcpRollback':       mcpRollback(); break;
+    case 'loadMCPRollout':    loadMCPRollout(); break;
+    case 'loadMCPExecutions': loadMCPExecutions(); break;
+    case 'loadMCPUpstreamHealth': loadMCPUpstreamHealth(); break;
+    case 'loadMCPRolloutEvidence': loadMCPRolloutEvidence(); break;
+    case 'mcpRolloutTransition': mcpRolloutTransition(); break;
+    case 'mcpEmergencyDisable': mcpEmergency('disable'); break;
+    case 'mcpEmergencyClear':  mcpEmergency('clear'); break;
+    case 'mcpRehearseRollback': mcpRehearseRollback(); break;
     case 'loadMCPManagement': loadMCPManagement(); break;
     case 'loadMCPConfig':     loadMCPConfig(); break;
     case 'mcpSaveConfig':     mcpSaveConfig(); break;
@@ -5478,6 +5529,38 @@ function mcpRollback() {
     })
     .then(function (j) { if (j) { mcpSetStatus('mcp-distribution-status', 'Rollback requested: ' + (j.rollback_state || '')); } })
     .catch(function () { mcpSetStatus('mcp-distribution-status', 'Request failed.'); });
+}
+
+// PR-11 rollout GUI consumers (safe read-only rendering via mcpGet; POSTs are CSRF-guarded).
+function loadMCPRollout() { mcpGet('/api/mcp/rollout', 'mcp-rollout-status', 'mcp-rollout-out'); }
+function loadMCPExecutions() { mcpGet('/api/mcp/executions', 'mcp-executions-status', 'mcp-executions-out'); }
+function loadMCPUpstreamHealth() { mcpGet('/api/mcp/upstream-health', 'mcp-upstream-status', 'mcp-upstream-out'); }
+function loadMCPRolloutEvidence() { mcpGet('/api/mcp/rollout/evidence', 'mcp-evidence-status', 'mcp-evidence-out'); }
+function mcpRolloutTransition() {
+  var cap = document.getElementById('mcp-rollout-cap').value;
+  var to = document.getElementById('mcp-rollout-tomode').value;
+  fetch('/api/mcp/rollout/transition', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': (window.csrfToken || '') }, body: JSON.stringify({ capability: cap, to_mode: to }) })
+    .then(function (r) {
+      var el = document.getElementById('mcp-transition-out');
+      if (r.status === 403) { el.textContent = 'Permission denied / Production is qualification-locked.'; return; }
+      if (r.status === 409) { el.textContent = 'Signed distribution is not configured on this node.'; return; }
+      el.textContent = 'Transition accepted (pending signed publication + DP acknowledgement).';
+    })
+    .catch(function () { document.getElementById('mcp-transition-out').textContent = 'Request failed.'; });
+}
+function mcpEmergency(action) {
+  var cap = document.getElementById('mcp-emergency-cap').value;
+  fetch('/api/mcp/rollout/emergency', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': (window.csrfToken || '') }, body: JSON.stringify({ capability: cap, action: action }) })
+    .then(function (r) { return r.status === 200 ? r.json() : null; })
+    .then(function (j) { document.getElementById('mcp-emergency-out').textContent = j ? (cap + ' killed=' + j.killed) : 'Request failed / denied.'; })
+    .catch(function () { document.getElementById('mcp-emergency-out').textContent = 'Request failed.'; });
+}
+function mcpRehearseRollback() {
+  var cap = document.getElementById('mcp-emergency-cap').value;
+  fetch('/api/mcp/rollout/rehearse-rollback', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': (window.csrfToken || '') }, body: JSON.stringify({ capability: cap }) })
+    .then(function (r) { return r.status === 200 ? r.json() : null; })
+    .then(function (j) { document.getElementById('mcp-emergency-out').textContent = j ? (cap + ' rollback_rehearsed=' + j.rollback_rehearsed) : 'Request failed / denied.'; })
+    .catch(function () { document.getElementById('mcp-emergency-out').textContent = 'Request failed.'; });
 }
 function loadMCPManagement() { mcpGet('/api/mcp/management-access', 'mcp-management-status', 'mcp-management-out'); }
 function loadMCPServers() { const t = mcpTenantVal('mcp-srv-tenant'); if (!t) { mcpSetStatus('mcp-servers-status', 'Enter a tenant.'); return; } mcpGet('/api/mcp/servers?tenant=' + t, 'mcp-servers-status', 'mcp-servers-out'); }
