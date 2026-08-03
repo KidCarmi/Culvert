@@ -62,3 +62,47 @@ from the already-stored `action` + `execution_state`, no new telemetry).
 Removed (cannot be truthful, no source and not planned for V1): per-call latency,
 upstream HTTP status, DP-node attribution, and environment in the decision drawer;
 quarantine and revoke actions.
+
+## Round 2
+
+**Verdict: APPROVED FOR IMPLEMENTATION.** The reviewer re-inspected all refined
+renders and the changed source and confirmed every one of the 11 required changes
+is resolved: fabricated-telemetry components are removed or gated behind an
+honestly-labeled additive endpoint with a visible source caption, and the
+local-only empty-states structurally prevent invented fleet data. No truthfulness
+or safety blocker remains.
+
+Three non-blocking nits (folded into the production implementation, not gating):
+1. Add a "derived from reason_code" note to the drawer "Hard failure class" line
+   (like the effective / shadow-override derivation note).
+2. Mirror Health's per-field rollback-target caption in the blast-radius modal.
+3. Keep a Playwright a11y proof at implementation (keyboard opens the drawer,
+   focus ring visible, aria-live announces the confirm) since live-region behavior
+   cannot be confirmed from a static render.
+
+### Integration record (production gate passed)
+- Latest main SHA at gate: `e0c2935` (origin/main)
+- Prototype approval commit (audit branch): `e6204d6`
+- Reviewer verdict: `APPROVED FOR IMPLEMENTATION`
+- Approved render set: the 23 renders + 5 comparison sheets under
+  `docs/design/mcp/ux-audit-assets/target-prototypes/` at commit `e6204d6`
+- Production branch: `claude/mcp-ux-production-integration` (from `e0c2935`)
+- The audit branch remains design evidence; production is NOT built on it.
+
+### Approved components mapped to production PRs
+
+| Component | Data source | PR |
+|---|---|---|
+| Status chips, desired/local/fleet triplet, as-of/stale, operator token labels, loading/empty/error/stale | presentation over existing GETs | PR-UX-1 |
+| Command Center posture strip, needs-attention, recent-changes, next actions | composes `GET /api/mcp/{overview,health,rollout,distribution,approvals}` | PR-UX-2 |
+| Activity table, evaluated to effective, detail drawer, DLP + hard-fail | `GET /api/mcp/decisions` + `/decision-explain`; effective/shadow_override derived client-side from real `action`+`execution_state` | PR-UX-2 |
+| Entity pivots, evidence chain, related activity | additive decision entity filters on `/api/mcp/decisions` | PR-UX-3 |
+| Dangerous-action dialog (quarantine/revoke deferred; demote/rollback/emergency/scope/promote) | existing mutation routes | PR-UX-4 |
+| Mode ladder, triplet, scope editor, blast-radius preview, DP ack matrix, freshness | additive `GET /api/mcp/distribution/acks`, `POST /api/mcp/rollout/scope-preview`; existing scope PUT | PR-UX-5 |
+| Qualification checklist, real/synthetic badge, publications + four-eyes | `GET /api/mcp/rollout/evidence`; existing publications routes | PR-UX-6 |
+| Structured servers/tools, durability meters, management catalog, sim, config form | existing GET/PUT | PR-UX-7 |
+| Deep-linking, a11y, responsive, token alignment, remove duplicate raw panels | presentation | PR-UX-8 |
+
+Removed from production scope (no truthful source): per-call latency, upstream
+HTTP status, DP-node attribution, environment in the decision drawer; quarantine
+and revoke actions (would require new bounded mutations before appearing).
