@@ -78,6 +78,34 @@ func Validate(env *Envelope, in ValidateInput) error {
 	return nil
 }
 
+// ValidateCandidate validates an UNSIGNED candidate (manifest + payload) before
+// it is signed — the CP-side "validate the unsigned candidate completely" step. It
+// runs every check Validate runs EXCEPT the signature/hash verification (there is
+// no signature yet). A candidate that fails here is never signed or published.
+func ValidateCandidate(m Manifest, p Payload, in ValidateInput) error {
+	if !schemaSupported(m.SchemaVersion) {
+		return mcperr.New(mcperr.ReasonSnapshotSchemaUnknown, "cpdp.validate", "unsupported schema version")
+	}
+	if !in.ExpectCapability.Valid() || m.Capability != in.ExpectCapability {
+		return mcperr.New(mcperr.ReasonSnapshotCapabilityMismatch, "cpdp.validate", "candidate capability mismatch")
+	}
+	if err := p.checkCapabilityIsolation(m.Capability); err != nil {
+		return err
+	}
+	if err := m.Revisions.validate(); err != nil {
+		return err
+	}
+	if err := CheckMinVersion(m.MinDPVersion, in.DPVersion); err != nil {
+		return err
+	}
+	// Bound the payload sections (an envelope wrapper is not needed for section caps).
+	tmp := &Envelope{Manifest: m, Payload: p}
+	if err := validateBounds(tmp, in.Limits); err != nil {
+		return err
+	}
+	return validatePayloadConsistency(tmp, in.Limits)
+}
+
 // validateBounds enforces the per-section entry caps and the aggregate byte
 // bound. A section over its cap, or a total encoding over the aggregate/envelope
 // bound, rejects the whole snapshot.

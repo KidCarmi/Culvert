@@ -176,9 +176,11 @@ func (l Limits) MaxConcurrentApplies() int     { return l.c.MaxConcurrentApplies
 func (l Limits) MaxConcurrentPublish() int     { return l.c.MaxConcurrentPublish }
 func (l Limits) MaxConcurrentRollbacks() int   { return l.c.MaxConcurrentRollbacks }
 
-// canonicalBounds derives the strict canonical-serializer bounds used to decode
-// and hash a snapshot payload, sized from the envelope byte bound.
-func (l Limits) canonicalBounds() canonical.Bounds {
+// CanonicalBounds derives the strict canonical-serializer bounds used to decode
+// and hash a snapshot payload, sized from the envelope byte bound. It is exported
+// so the publication coordinator can compute a content hash pre-sign with the same
+// bounds the DP verifier uses.
+func (l Limits) CanonicalBounds() canonical.Bounds {
 	return canonical.Bounds{
 		MaxBytes:         l.c.MaxEnvelopeBytes,
 		MaxDepth:         capCanonicalDepth,
@@ -187,3 +189,6 @@ func (l Limits) canonicalBounds() canonical.Bounds {
 		MaxStringBytes:   capCanonicalStringBytes,
 	}
 }
+
+// canonicalBounds is the unexported alias used within the package.
+func (l Limits) canonicalBounds() canonical.Bounds { return l.CanonicalBounds() }
