@@ -537,8 +537,17 @@ func TestResignFeedsWorkflowInvariants(t *testing.T) {
 	if len(doc.Jobs) == 0 {
 		t.Fatalf("%s has no jobs", resignFeedsWorkflowPath)
 	}
+	assertResignNoPrivilege(t, doc)         // (1) no id-token/contents:write/env/secrets
+	assertResignNoSecretsContext(t, raw)    // (2) no secrets context in any expression
+	assertResignTriggers(t, raw)            // (3) weekly schedule + manual dispatch
+	assertResignDispatchesPinnedTag(t, doc) // (4) dispatch-only, no cosign, validated
+	assertResignPinnedVars(t)               // (5) references the pinned vars.*
+	assertResignConcurrency(t, doc)         // (6) concurrency guard
+}
 
-	// (1) No id-token anywhere; contents at most read; NO secrets referenced.
+// (1) No id-token anywhere; contents at most read; no environment; no secrets.
+func assertResignNoPrivilege(t *testing.T, doc feedsWFDoc) {
+	t.Helper()
 	if permsGrantIDToken(doc.Permissions) {
 		t.Fatal("resign workflow top-level grants id-token — a renewal dispatcher must not be able to sign")
 	}
@@ -559,24 +568,34 @@ func TestResignFeedsWorkflowInvariants(t *testing.T) {
 			t.Fatalf("resign job %q must reference NO secrets; found %v", name, refs)
 		}
 	}
+}
 
-	// (2) No secrets context in ANY expression (catches secrets['X'] / toJSON(secrets)).
+// (2) No secrets context in ANY expression (catches secrets['X'] / toJSON(secrets)).
+func assertResignNoSecretsContext(t *testing.T, raw []byte) {
+	t.Helper()
 	for _, expr := range wfExprRE.FindAllString(string(raw), -1) {
 		if strings.Contains(expr, "secrets") {
 			t.Fatalf("resign workflow expression mentions the secrets context (any form is a violation): %q", expr)
 		}
 	}
+}
 
-	// (3) Weekly schedule + manual dispatch triggers.
-	if !strings.Contains(string(raw), "schedule:") || !strings.Contains(string(raw), "cron:") {
+// (3) Weekly schedule + manual dispatch triggers.
+func assertResignTriggers(t *testing.T, raw []byte) {
+	t.Helper()
+	s := string(raw)
+	if !strings.Contains(s, "schedule:") || !strings.Contains(s, "cron:") {
 		t.Fatal("resign workflow must carry a weekly `schedule: cron:` trigger")
 	}
-	if !strings.Contains(string(raw), "workflow_dispatch") {
+	if !strings.Contains(s, "workflow_dispatch") {
 		t.Fatal("resign workflow must also allow manual workflow_dispatch")
 	}
+}
 
-	// (4) Its ONLY side effect is to dispatch publish-feeds.yml at the pinned tag —
-	// it must NEVER sign locally, and must validate the gate + tag + SHA first.
+// (4) Its ONLY side effect is to dispatch publish-feeds.yml at the pinned tag — it must
+// NEVER sign locally, must grant actions:write, and must validate the gate + tag + SHA.
+func assertResignDispatchesPinnedTag(t *testing.T, doc feedsWFDoc) {
+	t.Helper()
 	var body strings.Builder
 	sawActionsWrite := false
 	for _, job := range doc.Jobs {
@@ -602,25 +621,30 @@ func TestResignFeedsWorkflowInvariants(t *testing.T) {
 	if !runContainsAll(seq, `--ref "$SIGNING_TAG"`, "validity_hours=336") {
 		t.Fatal("resign must dispatch at the PINNED tag ($SIGNING_TAG from vars.FEEDS_SIGNING_TAG) preserving 336h validity")
 	}
-	// Validation of gate + tag grammar + 40-hex SHA + lightweight-tag resolution, fail-closed.
-	// (The master-gate VAR reference is asserted in step (5) via the expression scan; the
-	// run body checks it through the $GATE env alias with a `!= "true"` fail-closed guard.)
-	if !runContainsAll(seq,
-		`!= "true"`,
+	// gate + tag grammar + 40-hex SHA + lightweight-tag resolution, fail-closed. (The master-gate
+	// VAR reference is asserted in assertResignPinnedVars; the body checks it via the $GATE env
+	// alias with a `!= "true"` fail-closed guard.)
+	if !runContainsAll(seq, `!= "true"`,
 		`^feeds-v[0-9]+\.[0-9]+\.[0-9]+$`, `^[0-9a-f]{40}$`,
 		"object.type", "commit", "exit 1") {
 		t.Fatal("resign must validate the master gate, exact tag grammar, 40-hex SHA, and lightweight-tag resolution, failing closed")
 	}
+}
 
-	// (5) Pinned vars are referenced from vars.* (not hardcoded).
+// (5) Pinned vars are referenced from vars.* (not hardcoded).
+func assertResignPinnedVars(t *testing.T) {
+	t.Helper()
 	_, varSet := wfRefSets(t, resignFeedsWorkflowPath)
 	for _, must := range []string{"FEEDS_PUBLISH_ENABLED", "FEEDS_SIGNING_TAG", "FEEDS_SIGNING_TAG_SHA"} {
 		if !varSet[must] {
 			t.Fatalf("resign workflow must reference vars.%s", must)
 		}
 	}
+}
 
-	// (6) Concurrency so overlapping renewals cannot race.
+// (6) Concurrency so overlapping renewals cannot race.
+func assertResignConcurrency(t *testing.T, doc feedsWFDoc) {
+	t.Helper()
 	if doc.Concurrency.Group == "" {
 		t.Fatal("resign workflow must declare a concurrency group (no racing renewals)")
 	}
