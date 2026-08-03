@@ -17896,6 +17896,7 @@ var mcpxMaxDepth=3;
 var mcpxNav=null;      // {tenant, filter:{}, label, selEvent}
 var mcpxNavBack=[];    // prior Activity filter states (bounded)
 var mcpxFrames=[];     // drawer frame stack (bounded; frames[0] is always the Decision)
+var mcpxActReq=0;      // latest-request ticket for the Activity table fetch
 
 function mcpxShort(v){ v=String(v==null?'':v); return v.length>22 ? v.slice(0,12)+'...'+v.slice(-6) : v; }
 function mcpxCapBack(){ while(mcpxNavBack.length>mcpxMaxDepth) mcpxNavBack.shift(); }
@@ -17974,7 +17975,12 @@ async function mcpxRenderActivity(afterCb){
   var tenant=mcpxNav.tenant, filter=mcpxNav.filter||{};
   var hasFilter=Object.keys(filter).some(function(k){ return filter[k]!=null && filter[k]!==''; });
   root.appendChild(mcpxEl('div','mcpx-source','Loading decisions...'));
+  // Latest-request guard: a slower earlier Search/Back/clear-filter response must
+  // not overwrite a newer navigation (or fire a stale afterCb that reopens the
+  // wrong event). Same discipline as the drawer reads.
+  var myReq=++mcpxActReq;
   var data=await mcpxFetchJSON(mcpxDecQuery(tenant, filter));
+  if(myReq!==mcpxActReq) return;
   root.textContent='';
   if(data && data.__err==='forbidden'){ root.appendChild(mcpxEl('div','mcpx-empty','Permission denied.')); return; }
   if(mcpxIsErr(data)){ root.appendChild(mcpxEl('div','mcpx-empty','Could not load decisions ('+(data.status||data.__err)+').')); return; }
@@ -17996,7 +18002,12 @@ async function mcpxRenderActivity(afterCb){
   fb.appendChild(mcpxEl('span','mcpx-asof','as-of '+mcpxNow())); wrap.appendChild(fb);
 
   if(!rows.length){
-    wrap.appendChild(mcpxEl('div','mcpx-empty', hasFilter?('No decisions match this filter for tenant "'+tenant+'".'):('No decisions for tenant "'+tenant+'".')));
+    // Truthful emptiness: a filtered search can exhaust the bounded scan window
+    // before finding a match and still return next_cursor. Do not report that as a
+    // definitive "no matches" - say the window was scanned and more may exist.
+    var emptyMsg = hasFilter?('No decisions match this filter for tenant "'+tenant+'".'):('No decisions for tenant "'+tenant+'".');
+    if(data.next_cursor) emptyMsg = 'No matches in the scanned window'+(hasFilter?' for this filter':'')+'; more results may exist beyond it. Narrow the filter (for example a time range) to reach them.';
+    wrap.appendChild(mcpxEl('div','mcpx-empty', emptyMsg));
   } else {
     var tbl=mcpxEl('table','mcpx-act'), thead=mcpxEl('thead'), htr=mcpxEl('tr');
     ['Time','Result','Evaluated to effective','Principal','Server / tool','Reason'].forEach(function(h){ htr.appendChild(mcpxEl('th',null,h)); });
@@ -18161,7 +18172,13 @@ function mcpxPaintDecision(drawer, frame){
   // 2. Server and Tool - real inventory drawers + destination/assurance.
   var stSum=[];
   if(ex.server_id) stSum.push(mcpxPivot('server', ex.server_id, function(){ mcpxOpenServer(tenant, ex.server_id); }, {verb:'open server', short:true}));
-  if(ex.tool_name) stSum.push(mcpxPivot('tool', ex.tool_name, function(){ mcpxOpenTool(tenant, ex.server_id, ex.tool_name); }, {verb:'open tool', short:true}));
+  if(ex.tool_name){
+    // The Tool inventory drawer needs (server_id, tool_name); GetTool rejects an
+    // empty server_id. Without a server binding, pivot to related decisions by
+    // tool name (a real destination) rather than an always-unavailable drawer.
+    if(ex.server_id) stSum.push(mcpxPivot('tool', ex.tool_name, function(){ mcpxOpenTool(tenant, ex.server_id, ex.tool_name); }, {verb:'open tool', short:true}));
+    else stSum.push(mcpxPivot('tool', ex.tool_name, function(){ mcpxPivotDecisions({tool_name:ex.tool_name}); }, {verb:'related decisions', short:true}));
+  }
   if(!stSum.length) stSum.push(mcpxEl('span','v muted','not recorded'));
   var stDet=[];
   if(ex.tool_fingerprint){ var fpr=mcpxEl('div','mcpx-row'); fpr.appendChild(mcpxEl('span','k','Tool fingerprint')); var fv=mcpxEl('span','v',mcpxShort(ex.tool_fingerprint)); fpr.appendChild(fv); fpr.appendChild(mcpxCopyBtn(ex.tool_fingerprint)); stDet.push(fpr); }

@@ -400,7 +400,8 @@ func TestMCPUX_DegradedPosture(t *testing.T) {
 const fxDec3Base = `{"decisions":[` +
 	`{"event_id":"evt-rich","sequence":9001,"partition":"P-CRIT","capability":"gateway","time_unix_nano":1722690123000000000,"tenant":"acme","principal_id":"svc-billing","principal_type":"workload","agent_id":"agent-42","server_id":"srv-rich","tool_name":"create_issue","action":"DENY","reason_code":"out_of_scope","matched_rule_id":"rule-guard","operation_class":"write","execution_state":"shadow_recorded"},` +
 	`{"event_id":"evt-fast","sequence":9000,"partition":"P-ORD","capability":"gateway","time_unix_nano":1722690121000000000,"tenant":"acme","principal_id":"u-jdoe","principal_type":"human","server_id":"srv-fast","tool_name":"list_issues","action":"ALLOW","reason_code":"observe_only","execution_state":"executed"},` +
-	`{"event_id":"evt-slow","sequence":8999,"partition":"P-ORD","capability":"gateway","time_unix_nano":1722690119000000000,"tenant":"acme","principal_id":"u-slow","principal_type":"human","server_id":"srv-slow","tool_name":"read_repo","action":"ALLOW","reason_code":"observe_only","execution_state":"executed"}` +
+	`{"event_id":"evt-slow","sequence":8999,"partition":"P-ORD","capability":"gateway","time_unix_nano":1722690119000000000,"tenant":"acme","principal_id":"u-slow","principal_type":"human","server_id":"srv-slow","tool_name":"read_repo","action":"ALLOW","reason_code":"observe_only","execution_state":"executed"},` +
+	`{"event_id":"evt-noserver","sequence":8998,"partition":"P-ORD","capability":"gateway","time_unix_nano":1722690118000000000,"tenant":"acme","principal_id":"u-sparse","principal_type":"human","tool_name":"orphan_tool","action":"ALLOW","reason_code":"observe_only","execution_state":"executed"}` +
 	`]}`
 
 // Any entity-filtered decision query returns this single marker row, proving the
@@ -426,6 +427,13 @@ const fxExplainMinFast = `{"event_id":"evt-fast","correlation_id":"corr-9000","c
 
 const fxExplainMinSlow = `{"event_id":"evt-slow","correlation_id":"corr-8999","capability":"gateway","partition":"P-ORD","time_unix_nano":1722690119000000000,` +
 	`"tenant":"acme","principal_id":"u-slow","principal_type":"human","server_id":"srv-slow","tool_name":"read_repo",` +
+	`"action":"ALLOW","reason_code":"observe_only","execution_state":"executed","source":"historical"}`
+
+// Server-less event: has tool_name but NO server_id. GetTool rejects an empty
+// server_id, so the Tool pivot must degrade to a tool-name related-decisions
+// pivot, never open an always-unavailable inventory drawer.
+const fxExplainNoServer = `{"event_id":"evt-noserver","correlation_id":"corr-8998","capability":"gateway","partition":"P-ORD","time_unix_nano":1722690118000000000,` +
+	`"tenant":"acme","principal_id":"u-sparse","principal_type":"human","tool_name":"orphan_tool",` +
 	`"action":"ALLOW","reason_code":"observe_only","execution_state":"executed","source":"historical"}`
 
 const fxServerRich = `{"server_id":"srv-rich","tenant":"acme","capability":"gateway","enabled":true,"verification":"verified","identity_changed":false,"revision":7,"credential_profile_ref":"cp-github-rw","endpoint_configured":true}`
@@ -456,6 +464,8 @@ func mcpuxRichRoute(t *testing.T, ctx playwright.BrowserContext) {
 			switch q.Get("event_id") {
 			case "evt-rich":
 				fulfill(fxExplainFull)
+			case "evt-noserver":
+				fulfill(fxExplainNoServer)
 			case "evt-slow":
 				// Delay the stale request; fulfill from a goroutine so the handler
 				// returns immediately and does not block evt-rich's fast read.
@@ -466,9 +476,17 @@ func mcpuxRichRoute(t *testing.T, ctx playwright.BrowserContext) {
 		case strings.Contains(u, "/api/mcp/decisions"):
 			entity := q.Get("tool_fingerprint") + q.Get("principal_id") + q.Get("agent_id") +
 				q.Get("client_id") + q.Get("rule_id") + q.Get("policy_snapshot_hash") + q.Get("credential_profile_ref") + q.Get("server_id")
-			if entity != "" {
+			switch {
+			case q.Get("principal_id") == "u-sparse":
+				// Empty page but the bounded scan window was not exhausted -> a
+				// truthful "more may exist" state, not "no matches".
+				fulfill(`{"decisions":[],"next_cursor":"P-CRIT:1"}`)
+			case q.Get("agent_id") != "":
+				// Delayed filtered response for the activity-search race proof.
+				go func() { time.Sleep(350 * time.Millisecond); fulfill(fxDecFiltered) }()
+			case entity != "":
 				fulfill(fxDecFiltered)
-			} else {
+			default:
 				fulfill(fxDec3Base)
 			}
 		case strings.Contains(u, "/api/mcp/servers"):
@@ -690,6 +708,85 @@ func TestMCPUX_DecisionDrawerRace(t *testing.T) {
 	if !strings.Contains(dtxt, "Evaluated: DENY") || strings.Contains(dtxt, "srv-slow") {
 		t.Fatalf("stale evt-slow response overwrote newer evt-rich; drawer=%q", dtxt)
 	}
+	if len(pageErrs) != 0 {
+		t.Fatalf("uncaught page errors: %v", pageErrs)
+	}
+}
+
+// TestMCPUX_ReviewFixes proves the three Codex review fixes:
+//
+//	#1 a Tool pivot for an event with no server_id degrades to a tool-name
+//	   related-decisions pivot (never opens an always-unavailable inventory
+//	   drawer, since GetTool rejects an empty server_id);
+//	#2 the activity-search fetch has a latest-request guard, so a slower earlier
+//	   navigation cannot overwrite a newer one;
+//	#3 an empty page carrying next_cursor is reported as "more results may exist",
+//	   not a definitive "no matches".
+func TestMCPUX_ReviewFixes(t *testing.T) {
+	mcpuxSeed(t)
+	srv := httptest.NewServer(newAdminUIHandler())
+	t.Cleanup(srv.Close)
+	browser := uiE2EBrowser(t)
+	var pageErrs []string
+	page := mcpuxRichPage(t, browser, srv.URL, &pageErrs)
+	page.SetDefaultTimeout(8000)
+	assert := playwright.NewPlaywrightAssertions()
+	must := func(err error, ctx string) {
+		if err != nil {
+			t.Fatalf("%s: %v | pageErrs=%v", ctx, err, pageErrs)
+		}
+	}
+	tct := func(loc playwright.Locator, sub, ctx string) {
+		if err := assert.Locator(loc).ToContainText(sub, playwright.LocatorAssertionsToContainTextOptions{Timeout: playwright.Float(7000)}); err != nil {
+			t.Fatalf("%s (want %q): %v | pageErrs=%v", ctx, sub, err, pageErrs)
+		}
+	}
+
+	must(page.Locator(`.nav-item[data-view="mcp-decisions"]`).First().Click(), "nav decisions")
+	must(page.Locator("#mcp-dec-tenant").Fill("acme"), "fill tenant")
+	must(page.Locator(`[data-click="renderMCPActivity"]`).First().Click(), "search")
+	if err := assert.Locator(page.Locator("table.mcpx-act")).ToBeVisible(playwright.LocatorAssertionsToBeVisibleOptions{Timeout: playwright.Float(7000)}); err != nil {
+		t.Fatalf("table: %v", err)
+	}
+
+	// (#1) Server-less event: the tool pivot filters by tool name instead of
+	// opening an unavailable Tool drawer.
+	must(page.Locator(`tr[data-arg="evt-noserver"]`).Click(), "open evt-noserver")
+	tct(page.Locator("#mcpx-drawer.open"), "Server and tool", "noserver drawer")
+	// No server pivot exists (no server_id); the tool pivot leads to related decisions.
+	if c, _ := page.Locator(`#mcpx-drawer button.mcpx-pivot:has-text("orphan_tool")`).Count(); c != 1 {
+		t.Fatalf("expected exactly one tool pivot for the server-less event, got %d", c)
+	}
+	must(page.Locator(`#mcpx-drawer button.mcpx-pivot:has-text("orphan_tool")`).First().Click(), "tool pivot (no server)")
+	tct(page.Locator(".mcpx-filterbar"), "tool = orphan_tool", "tool-name filter applied")
+	if c, _ := page.Locator(`#mcpx-drawer.open:has-text("unavailable")`).Count(); c != 0 {
+		t.Fatalf("server-less tool pivot must not open an unavailable drawer")
+	}
+	must(page.Locator(".mcpx-filterbar .mcpx-back").First().Click(), "back from tool filter")
+
+	// (#3) Empty page with next_cursor is reported as incomplete, not "no matches".
+	must(page.Locator(`tr[data-arg="evt-noserver"]`).Click(), "reopen evt-noserver")
+	must(page.Locator(`#mcpx-drawer button.mcpx-pivot:has-text("u-sparse")`).First().Click(), "principal pivot (sparse)")
+	tct(page.Locator("#mcpx-decisions-root .mcpx-empty"), "more results may exist", "incomplete empty message")
+	must(page.Locator(".mcpx-filterbar .mcpx-back").First().Click(), "back from sparse")
+
+	// (#2) Activity-search race: a slow agent-filter navigation followed by a fast
+	// Search must leave the base list showing, never the stale filtered marker.
+	must(page.Locator(`tr[data-arg="evt-rich"]`).Click(), "open evt-rich")
+	must(page.Locator(`#mcpx-drawer button.mcpx-pivot:has-text("agent-42")`).First().Click(), "agent pivot (slow)")
+	// While the agent filter is still loading, issue a fresh Search (fast base).
+	must(page.Locator(`[data-click="renderMCPActivity"]`).First().Click(), "search over slow nav")
+	if err := assert.Locator(page.Locator(`tr[data-arg="evt-rich"]`)).ToBeVisible(playwright.LocatorAssertionsToBeVisibleOptions{Timeout: playwright.Float(7000)}); err != nil {
+		t.Fatalf("base list should win the race: %v", err)
+	}
+	time.Sleep(700 * time.Millisecond) // let the stale agent response arrive + be discarded
+	if c, _ := page.Locator(`tr[data-arg="evt-related"]`).Count(); c != 0 {
+		t.Fatalf("stale agent-filter response overwrote the newer base view")
+	}
+	if c, _ := page.Locator(".mcpx-filterbar .mcpx-back").Count(); c != 0 {
+		t.Fatalf("base view after Search must have no Back affordance (nav stack reset)")
+	}
+
 	if len(pageErrs) != 0 {
 		t.Fatalf("uncaught page errors: %v", pageErrs)
 	}
