@@ -146,6 +146,7 @@ func TestApiDiagnostics_DefaultOK(t *testing.T) {
 		"config_versions_readable":   false,
 		"config_rollback_validation": false,
 		"key_at_rest":                false,
+		"identity_backend":           false,
 		"memory_backstop":            false,
 	}
 	for i := range c.Checks {
@@ -918,6 +919,11 @@ func resetDiagVerdictGlobals(t *testing.T) {
 	t.Helper()
 	resetStorageWriteHealthForTest()
 	t.Cleanup(resetStorageWriteHealthForTest)
+	// CHAOS-47: identity-backend health is a process-global that also folds
+	// into the aggregate verdict, so it belongs in the same isolation helper
+	// (one rule to remember, per the CHAOS-45 precedent).
+	resetAuthBackendHealthForTest()
+	t.Cleanup(resetAuthBackendHealthForTest)
 	policyStore.mu.Lock()
 	prevRules := policyStore.rules
 	prevVersion := policyStore.version

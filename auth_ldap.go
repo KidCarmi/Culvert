@@ -66,6 +66,10 @@ type LDAPAuth struct {
 	ttl   time.Duration
 	mu    sync.Mutex
 	cache map[string]*ldapCacheEntry // key = cacheKey(user, pass)
+
+	// gate arms when the directory is unreachable, so an outage denies without
+	// re-dialing and recovers on one probe (CHAOS-47, auth_backend_health.go).
+	gate authProbeGate
 }
 
 // NewLDAPAuth validates the config and returns a ready-to-use LDAPAuth.
@@ -100,7 +104,14 @@ func (a *LDAPAuth) Name() string { return "ldap" }
 //  2. Bind with user DN + supplied password to verify the credential.
 //
 // Optionally checks group membership if RequiredGroup is configured.
-// Results are cached for CacheTTL to protect the LDAP server from load.
+//
+// An AUTHORITATIVE result — the directory answered, and the answer was yes or
+// no — is cached for CacheTTL to protect the LDAP server from load. A failure
+// to REACH the directory is not (CHAOS-47): the request still fails closed, but
+// caching it would keep denying the user for the whole TTL after the directory
+// recovered, turning a one-second restart into minutes of lockout for everyone
+// who authenticated during it. Instead the backend is gated, so the outage
+// costs one probe per cooldown and clears the instant the directory answers.
 func (a *LDAPAuth) Verify(username, password string) bool {
 	if password == "" {
 		return false // never permit empty passwords
@@ -111,7 +122,23 @@ func (a *LDAPAuth) Verify(username, password string) bool {
 		return ok
 	}
 
-	ok := a.verify(username, password)
+	if !a.gate.allow() {
+		// Directory is in its unreachable cooldown. Deny — the posture is
+		// fail-closed — but without a dial, so a hard-down directory cannot
+		// turn every request into a full dial timeout.
+		noteAuthBackendGatedDenial()
+		return false
+	}
+
+	ok, err := a.verify(username, password)
+	if err != nil {
+		a.gate.recordUnavailable()
+		noteAuthBackendUnavailable("ldap", err.Error())
+		return false
+	}
+	a.gate.recordReachable()
+	noteAuthBackendReachable("ldap")
+
 	a.cacheSet(k, ok)
 	if ok {
 		logger.Printf("LDAP auth OK: user=%q", sanitizeLog(username))
@@ -121,7 +148,13 @@ func (a *LDAPAuth) Verify(username, password string) bool {
 	return ok
 }
 
-func (a *LDAPAuth) verify(username, password string) bool {
+// verify performs one directory round trip.
+//
+// The returned error is reserved for INFRASTRUCTURE failure — the directory
+// could not be reached or could not answer. `(false, nil)` means the directory
+// answered and the answer was "no". Only the latter is cacheable, so the split
+// is load-bearing rather than stylistic; see Verify.
+func (a *LDAPAuth) verify(username, password string) (bool, error) {
 	tlsCfg := &tls.Config{InsecureSkipVerify: a.cfg.TLSSkipVerify} // #nosec G402 -- TLSSkipVerify is an explicit admin opt-in for self-signed LDAP certs
 
 	// Dial with timeout to prevent DoS from hung LDAP servers.
@@ -131,7 +164,7 @@ func (a *LDAPAuth) verify(username, password string) bool {
 	)
 	if err != nil {
 		logger.Printf("LDAP dial error: %v", err)
-		return false
+		return false, fmt.Errorf("dial: %w", err)
 	}
 	defer conn.Close()
 
@@ -139,15 +172,18 @@ func (a *LDAPAuth) verify(username, password string) bool {
 	if a.cfg.StartTLS && !strings.HasPrefix(strings.ToLower(a.cfg.URL), "ldaps") {
 		if err := conn.StartTLS(tlsCfg); err != nil {
 			logger.Printf("LDAP STARTTLS error: %v", err)
-			return false
+			return false, fmt.Errorf("starttls: %w", err)
 		}
 	}
 
 	// Step 1: bind with service account to search for the user's DN.
+	// A service-bind failure is never a statement about the END USER's
+	// credential — it is a wrong/expired service account or a directory that
+	// stopped answering — so it is infrastructure, not a deny to remember.
 	if a.cfg.BindDN != "" {
 		if err := conn.Bind(a.cfg.BindDN, a.cfg.BindPassword); err != nil {
 			logger.Printf("LDAP service bind error: %v", err)
-			return false
+			return false, fmt.Errorf("service bind: %w", err)
 		}
 	} else if a.cfg.RequiredGroup != "" {
 		logWarnf("LDAP: anonymous bind with RequiredGroup=%q — group resolution may fail", sanitizeLog(a.cfg.RequiredGroup))
@@ -165,29 +201,41 @@ func (a *LDAPAuth) verify(username, password string) bool {
 	res, err := conn.Search(req)
 	if err != nil {
 		logger.Printf("LDAP search error: %v", err)
-		return false
+		return false, fmt.Errorf("search: %w", err)
 	}
 	if len(res.Entries) != 1 {
+		// The directory answered: no such user (or an ambiguous filter). That
+		// is an authoritative deny and stays cacheable.
 		logger.Printf("LDAP: user %q not found (entries=%d)", username, len(res.Entries))
-		return false
+		return false, nil
 	}
 
 	userDN := res.Entries[0].DN
 
 	// Step 2: bind with user DN + password to verify credential.
+	// Only result code 49 (invalidCredentials) is the directory REJECTING the
+	// password. Anything else here — the connection dropped mid-bind, the
+	// server returned unavailable/busy — is infrastructure and must not be
+	// remembered as a bad password.
 	if err := conn.Bind(userDN, password); err != nil {
-		return false // wrong password — not logged to avoid credential leakage
+		if !ldap.IsErrorWithCode(err, ldap.LDAPResultInvalidCredentials) {
+			// The directory's diagnostic text is server-controlled, so it goes
+			// through the CWE-117 barrier before it reaches the log.
+			logger.Printf("LDAP user bind error: %q", sanitizeLog(err.Error()))
+			return false, fmt.Errorf("user bind: %w", err)
+		}
+		return false, nil // wrong password — not logged to avoid credential leakage
 	}
 
 	// Optional group membership check.
 	if a.cfg.RequiredGroup != "" {
 		if !a.isMember(res.Entries[0], a.cfg.RequiredGroup) {
 			logger.Printf("LDAP: user %q not in required group %s", username, a.cfg.RequiredGroup)
-			return false
+			return false, nil
 		}
 	}
 
-	return true
+	return true, nil
 }
 
 // isMember checks the memberOf attribute for the required group DN.

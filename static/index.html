@@ -17436,6 +17436,11 @@ function resetBlockPage() {
              read-only / full after boot) — config changes are live in memory but
              are NOT reaching disk and will be lost on restart. -->
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="storage_write_failed"> Storage write failed (state not persisted)</label>
+        <!-- CHAOS-47: the external identity backend (LDAP / OIDC introspection)
+             could not be reached, so proxy authentication is failing closed.
+             Distinct from an auth-failure spike: this is infrastructure, and
+             the denials clear as soon as the backend answers again. -->
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="idp_unreachable"> Identity backend unreachable (auth failing closed)</label>
         <!-- P1 commit-time validation: the CP refused to publish an over-cap config
              to the fleet (fleet stays on the last valid snapshot until trimmed). -->
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="config_snapshot_rejected"> Config publish rejected (over cap)</label>

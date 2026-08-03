@@ -124,6 +124,11 @@ type OIDCAuth struct {
 	client *http.Client
 	mu     sync.Mutex
 	cache  map[string]*oidcCacheEntry // key = cacheKey("", token)
+
+	// gate arms when the IdP is unreachable, so an outage denies without
+	// re-introspecting and recovers on one probe (CHAOS-47,
+	// auth_backend_health.go).
+	gate authProbeGate
 }
 
 // NewOIDCAuth validates the config and returns a ready-to-use OIDCAuth.
@@ -175,7 +180,27 @@ func (a *OIDCAuth) ResolveIdentity(_ string, token string) (*Identity, bool) {
 		return id, ok
 	}
 
-	id, ok, exp := a.introspect(token)
+	if !a.gate.allow() {
+		// IdP is in its unreachable cooldown — deny without another round trip
+		// (CHAOS-47). Fail-closed posture unchanged; the difference is that
+		// nothing about this denial is remembered.
+		noteAuthBackendGatedDenial()
+		return nil, false
+	}
+
+	id, ok, exp, err := a.introspect(token)
+	if err != nil {
+		// Could not reach the IdP, or it did not answer coherently. Deny this
+		// request, but never cache it: a cached infrastructure failure keeps
+		// denying a valid token for the full TTL after the IdP recovers.
+		a.gate.recordUnavailable()
+		noteAuthBackendUnavailable("oidc", err.Error())
+		logger.Printf("OIDC auth UNAVAILABLE (introspection endpoint unreachable) — failing closed, not cached")
+		return nil, false
+	}
+	a.gate.recordReachable()
+	noteAuthBackendReachable("oidc")
+
 	id, ok = a.oidcCacheSetIdentityWithExp(k, id, ok, exp)
 	if ok {
 		logger.Printf("OIDC auth OK: subject=%q", sanitizeLog(id.Sub))
@@ -191,62 +216,74 @@ func (a *OIDCAuth) CaptiveLoginURL(_ string, _ *http.Request) string {
 }
 
 // introspect returns the canonical token identity and its Unix expiry.
-func (a *OIDCAuth) introspect(token string) (identity *Identity, active bool, tokenExp *int64) {
+//
+// The returned error is reserved for INFRASTRUCTURE failure — the introspection
+// endpoint could not be reached, or did not answer coherently. `(nil, false,
+// nil, nil)` means the endpoint answered and the answer was "this token is not
+// valid". Only the latter is cacheable (CHAOS-47); see ResolveIdentity.
+//
+// RFC 7662 is what makes the split clean: an inactive token is reported as HTTP
+// 200 with `active:false`, so ANY non-200 is a problem with the endpoint or our
+// client credentials — never a verdict about the caller's token.
+func (a *OIDCAuth) introspect(token string) (identity *Identity, active bool, tokenExp *int64, err error) {
 	body := url.Values{
 		"token":           {token},
 		"token_type_hint": {"access_token"},
 	}
-	req, err := http.NewRequestWithContext(
+	req, reqErr := http.NewRequestWithContext(
 		context.Background(),
 		http.MethodPost,
 		a.cfg.IntrospectionURL,
 		strings.NewReader(body.Encode()),
 	)
-	if err != nil {
-		logger.Printf("OIDC introspect build error: %v", err)
-		return nil, false, nil
+	if reqErr != nil {
+		logger.Printf("OIDC introspect build error: %v", reqErr)
+		return nil, false, nil, fmt.Errorf("build request: %w", reqErr)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.SetBasicAuth(a.cfg.ClientID, a.cfg.ClientSecret)
 
-	resp, err := a.client.Do(req)
-	if err != nil {
-		logger.Printf("OIDC introspect request error: %v", err)
-		return nil, false, nil
+	resp, doErr := a.client.Do(req)
+	if doErr != nil {
+		logger.Printf("OIDC introspect request error: %v", doErr)
+		return nil, false, nil, fmt.Errorf("introspection request: %w", doErr)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		logger.Printf("OIDC introspect HTTP %d", resp.StatusCode)
-		return nil, false, nil
+		return nil, false, nil, fmt.Errorf("introspection endpoint returned HTTP %d", resp.StatusCode)
 	}
 
 	var ir introspectionResponse
-	if err := decodeStrictJSON(resp.Body, 64<<10, &ir, false); err != nil {
-		logger.Printf("OIDC introspect parse error: %v", err)
-		return nil, false, nil
+	if decErr := decodeStrictJSON(resp.Body, 64<<10, &ir, false); decErr != nil {
+		logger.Printf("OIDC introspect parse error: %v", decErr)
+		return nil, false, nil, fmt.Errorf("introspection response: %w", decErr)
 	}
+	// From here on the endpoint has answered coherently: every remaining
+	// branch is an authoritative verdict about the token, and therefore
+	// cacheable.
 	if !ir.Active {
-		return nil, false, nil
+		return nil, false, nil, nil
 	}
 	tokenExp, validExp := parseDeclaredExpiry(ir.Exp)
 	if !validExp {
 		logger.Printf("OIDC: active token has invalid declared expiry")
-		return nil, false, nil
+		return nil, false, nil, nil
 	}
 
 	// Optional scope check.
 	if a.cfg.RequiredScope != "" {
 		if !strings.Contains(" "+ir.Scope+" ", " "+a.cfg.RequiredScope+" ") {
 			logger.Printf("OIDC: required scope %q not in %q", a.cfg.RequiredScope, ir.Scope)
-			return nil, false, nil
+			return nil, false, nil, nil
 		}
 	}
 
 	// Optional audience check.
 	if a.cfg.RequiredAudience != "" && !audienceContains(ir.Audience, a.cfg.RequiredAudience) {
 		logger.Printf("OIDC: required audience %q not present", a.cfg.RequiredAudience)
-		return nil, false, nil
+		return nil, false, nil, nil
 	}
 
 	canonicalSub := ir.Sub
@@ -255,13 +292,13 @@ func (a *OIDCAuth) introspect(token string) (identity *Identity, active bool, to
 	}
 	if strings.TrimSpace(canonicalSub) == "" {
 		logger.Printf("OIDC: active token has no canonical sub or username claim")
-		return nil, false, nil
+		return nil, false, nil, nil
 	}
 	return &Identity{
 		Sub:      canonicalSub,
 		Name:     strings.TrimSpace(ir.Username),
 		Provider: a.Name(),
-	}, true, tokenExp
+	}, true, tokenExp, nil
 }
 
 // audienceContains handles both string and []string JWT aud claims.

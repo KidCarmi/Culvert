@@ -157,6 +157,7 @@ func buildOperatorContract() OperatorContract {
 		checkConfigRollbackValidation(cv),
 		checkKeyAtRest(),
 		checkAuditPersistence(),
+		checkIdentityBackend(),
 		checkMemoryBackstop(),
 	}
 	// Auth Exempt risk diagnostics (Slice 8): WARN-only rows for risky Stage-1
@@ -388,6 +389,47 @@ func checkAuditPersistence() OperatorContractCheck {
 		Code:    "audit_log_persistence",
 		Status:  diagOK,
 		Message: "audit trail is persisting to the configured log file",
+	}
+}
+
+// checkIdentityBackend reports external identity-backend (LDAP / OIDC)
+// reachability (CHAOS-47).
+//
+// This row exists because the only prior signal for "the directory is down"
+// was a rise in authentication failures — indistinguishable from a
+// brute-force spike, and the response to those two situations is opposite.
+// Like the storage row, recovery is reported on EVIDENCE only: the degraded
+// state clears when a backend is observed to answer, never on elapsed time.
+// Memory-only read; no probe is issued from the diagnostics path. The cause
+// text is deliberately NOT reproduced here: it names the configured endpoint
+// (an LDAP URL, an IdP host), and this contract is a VIEWER-role surface with a
+// standing no-sensitive-values guardrail. The cause goes to the admin-scoped
+// sinks — the log line and the idp_unreachable alert.
+func checkIdentityBackend() OperatorContractCheck {
+	s := authBackendHealthStatus()
+	if s.Unavailable == 0 {
+		return OperatorContractCheck{
+			Code:    "identity_backend",
+			Status:  diagOK,
+			Message: "no external identity-backend outage observed since startup",
+		}
+	}
+	last := s.Last.UTC().Format(time.RFC3339)
+	if s.Degraded {
+		return OperatorContractCheck{
+			Code:   "identity_backend",
+			Status: diagFail,
+			Message: fmt.Sprintf("identity backend %q is UNREACHABLE — proxy authentication is failing closed (%d outage(s) since boot, %d request(s) denied without reaching it; last at %s)",
+				s.Backend, s.Unavailable, s.GatedDenials, last),
+			OperatorAction: "Users cannot authenticate until the directory/IdP answers again. Check reachability from this node (DNS, route, firewall, TLS) and the service account's credentials. No operator action is needed here once it recovers: the denials are not cached, so authentication resumes on the first successful reach.",
+		}
+	}
+	return OperatorContractCheck{
+		Code:   "identity_backend",
+		Status: diagWarn,
+		Message: fmt.Sprintf("identity backend %q was unreachable earlier in this process and has since answered (%d outage(s), %d request(s) denied during them; last at %s)",
+			s.Backend, s.Unavailable, s.GatedDenials, last),
+		OperatorAction: "Authentication has recovered. Users who authenticated during the window saw 407s; investigate the transient directory/IdP outage on the host or the identity service itself.",
 	}
 }
 
