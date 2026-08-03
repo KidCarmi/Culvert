@@ -566,6 +566,89 @@ const (
 	// applied/bound; the previous running configuration is retained unchanged and
 	// no CP→DP propagation is claimed. Fails closed.
 	ReasonConfigApplyFailed
+
+	// ── PR-10 signed CP→DP snapshot / fencing / rollback reasons ──
+
+	// ReasonSnapshotMalformed — the snapshot envelope is structurally invalid:
+	// undecodable, truncated, a duplicate canonical field, or a bounded header
+	// field could not be located. Rejected whole; no partial apply.
+	ReasonSnapshotMalformed
+	// ReasonSnapshotSchemaUnknown — the snapshot declares a schema version outside
+	// the supported set (a newer/unknown schema a DP must not partially interpret).
+	// Rejected whole.
+	ReasonSnapshotSchemaUnknown
+	// ReasonSnapshotCapabilityMismatch — the snapshot's signed capability does not
+	// match the target store, or the payload carries a field belonging to the other
+	// capability (Gateway↔Management isolation). Fails closed.
+	ReasonSnapshotCapabilityMismatch
+	// ReasonSnapshotAlgUnknown — the signature algorithm identifier is not the one
+	// supported algorithm (ed25519). An unknown alg is never treated as ed25519.
+	ReasonSnapshotAlgUnknown
+	// ReasonSnapshotKeyUntrusted — the signing key ID is not present in the DP's
+	// trust store. A key carried inside the snapshot never authorizes itself.
+	ReasonSnapshotKeyUntrusted
+	// ReasonSnapshotHashMismatch — the recomputed content hash over the canonical
+	// unsigned manifest+payload does not equal the declared content_hash.
+	ReasonSnapshotHashMismatch
+	// ReasonSnapshotSignatureInvalid — the Ed25519 signature did not verify against
+	// the trusted public key over the domain-separated signing input.
+	ReasonSnapshotSignatureInvalid
+	// ReasonSnapshotTooLarge — an envelope, payload section, or aggregate byte/entry
+	// bound was exceeded. Rejected before any state mutation.
+	ReasonSnapshotTooLarge
+	// ReasonSnapshotRevisionInvalid — a revision in the tuple is negative, missing,
+	// out of bounds, or inconsistent with the payload actually included.
+	ReasonSnapshotRevisionInvalid
+	// ReasonSnapshotRevisionRegression — a lower revision arrived in the same or a
+	// lower epoch, or the same revision arrived with a different content hash.
+	// Rejected (never silently regresses component state).
+	ReasonSnapshotRevisionRegression
+	// ReasonSnapshotEpochStale — the snapshot's configuration epoch is below the
+	// DP's last-seen trusted epoch (a stale/zombie Control Plane). Rejected without
+	// ratcheting; the DP keeps serving its last valid snapshot.
+	ReasonSnapshotEpochStale
+	// ReasonSnapshotEpochInvalid — an unfenced/zero epoch after a positive epoch was
+	// already observed, or a higher epoch whose authenticity did not pass (so it
+	// must not ratchet the trusted epoch). Fails closed.
+	ReasonSnapshotEpochInvalid
+	// ReasonSnapshotMinVersionUnmet — the receiving DP's compatibility version is
+	// below the snapshot's minimum_dp_version; it must not apply semantics it cannot
+	// interpret. The DP keeps its prior valid snapshot.
+	ReasonSnapshotMinVersionUnmet
+	// ReasonSnapshotMinVersionMalformed — the minimum_dp_version is absent or not a
+	// valid monotonic compatibility value for a PR-10 MCP snapshot. Rejected.
+	ReasonSnapshotMinVersionMalformed
+	// ReasonSnapshotValidationFailed — a whole-snapshot semantic validation failed
+	// (registry/catalog/policy/credential/inspection consistency, required
+	// references, safe configuration). Rejected whole; active state unchanged.
+	ReasonSnapshotValidationFailed
+	// ReasonSnapshotPersistFailed — the DP could not durably persist the validated
+	// candidate before the atomic swap; activation is aborted and the current active
+	// snapshot is retained byte-unchanged. Fails closed.
+	ReasonSnapshotPersistFailed
+	// ReasonSnapshotSignerUnavailable — signing is required but the CP signer is
+	// unavailable; nothing is signed or published. Fails closed.
+	ReasonSnapshotSignerUnavailable
+	// ReasonDistributionWriteAuthority — the CP is not the write-authoritative
+	// lease holder at the irreversible publication boundary (lost/never-held lease
+	// or a fenced-out generation). Publication is refused.
+	ReasonDistributionWriteAuthority
+	// ReasonAckInvalid — a DP acknowledgement is malformed or does not bind to a
+	// known snapshot: wrong node identity, wrong capability, or an unknown content
+	// hash. An acknowledgement for one snapshot never satisfies another.
+	ReasonAckInvalid
+	// ReasonAckUnauthenticated — an acknowledgement arrived over an unauthenticated
+	// channel (no enrolled-node identity). Rejected.
+	ReasonAckUnauthenticated
+	// ReasonRollbackTargetMissing — the rollback directive references a retained
+	// target snapshot the DP does not hold. Refused; current snapshot retained.
+	ReasonRollbackTargetMissing
+	// ReasonRollbackTargetCorrupt — the retained rollback target failed
+	// re-verification (hash/signature) at rollback time. Refused; current retained.
+	ReasonRollbackTargetCorrupt
+	// ReasonRollbackDirectiveInvalid — the signed rollback directive is invalid:
+	// bad signature, expired, wrong current hash, or a capability/epoch mismatch.
+	ReasonRollbackDirectiveInvalid
 )
 
 // reasonCode maps each Reason to its stable machine string. The strings are part
@@ -735,6 +818,31 @@ var reasonCode = map[Reason]string{ // #nosec G101 -- stable machine-readable er
 
 	ReasonConfigInvalid:     "config_invalid",
 	ReasonConfigApplyFailed: "config_apply_failed",
+
+	// ── PR-10 signed CP→DP snapshot / fencing / rollback reasons ──
+	ReasonSnapshotMalformed:           "snapshot_malformed",
+	ReasonSnapshotSchemaUnknown:       "snapshot_schema_unknown",
+	ReasonSnapshotCapabilityMismatch:  "snapshot_capability_mismatch",
+	ReasonSnapshotAlgUnknown:          "snapshot_alg_unknown",
+	ReasonSnapshotKeyUntrusted:        "snapshot_key_untrusted",
+	ReasonSnapshotHashMismatch:        "snapshot_hash_mismatch",
+	ReasonSnapshotSignatureInvalid:    "snapshot_signature_invalid",
+	ReasonSnapshotTooLarge:            "snapshot_too_large",
+	ReasonSnapshotRevisionInvalid:     "snapshot_revision_invalid",
+	ReasonSnapshotRevisionRegression:  "snapshot_revision_regression",
+	ReasonSnapshotEpochStale:          "snapshot_epoch_stale",
+	ReasonSnapshotEpochInvalid:        "snapshot_epoch_invalid",
+	ReasonSnapshotMinVersionUnmet:     "snapshot_min_version_unmet",
+	ReasonSnapshotMinVersionMalformed: "snapshot_min_version_malformed",
+	ReasonSnapshotValidationFailed:    "snapshot_validation_failed",
+	ReasonSnapshotPersistFailed:       "snapshot_persist_failed",
+	ReasonSnapshotSignerUnavailable:   "snapshot_signer_unavailable",
+	ReasonDistributionWriteAuthority:  "distribution_write_authority",
+	ReasonAckInvalid:                  "ack_invalid",
+	ReasonAckUnauthenticated:          "ack_unauthenticated",
+	ReasonRollbackTargetMissing:       "rollback_target_missing",
+	ReasonRollbackTargetCorrupt:       "rollback_target_corrupt",
+	ReasonRollbackDirectiveInvalid:    "rollback_directive_invalid",
 }
 
 // Code returns the stable machine string for the reason (e.g. "malformed_json").
