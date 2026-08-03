@@ -1,5 +1,5 @@
 /* Shared shell for the MCP target prototypes. Renders the Culvert sidebar +
-   topbar + the mandatory "DESIGN PROTOTYPE — NOT IMPLEMENTED" banner. No network,
+   topbar + the mandatory "DESIGN PROTOTYPE - NOT IMPLEMENTED" banner. No network,
    no production code. Pure static rendering from synthetic data. */
 
 function qp(name, def) {

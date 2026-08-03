@@ -2,85 +2,88 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>MCP Investigations — prototype</title>
+<title>MCP Investigations - prototype</title>
 <link rel="stylesheet" href="_prototype.css">
 </head>
 <body>
   <div id="sidebar"></div>
   <div id="main">
-    <div class="proto-banner">Design prototype — not implemented</div>
+    <div class="proto-banner">Design prototype - not implemented</div>
     <div class="topbar" id="topbar"></div>
     <div class="content" id="content"></div>
   </div>
 
 <script src="_shell.js"></script>
 <script>
-// Synthetic decision rows. eff = [label, kind]; hard/shadow flags drive styling.
+// Synthetic decision rows. Every field maps to a real GET /api/mcp/decisions
+// field; effective/override are DERIVED from action + execution_state (no new
+// telemetry). See the source caption under the table.
 const ROWS = [
   {id:'evt_9f1a', t:'13:52:03', res:['block?','warn'], eval:'DENY', eff:['exec (shadow)','warn'], shadow:true,
-   who:'svc-agent-billing · a42', st:'srv-github / create_issue', reason:'out_of_scope', dur:'142ms'},
+   who:'svc-agent-billing', st:'srv-github / create_issue', reason:'out_of_scope', exec:'shadow_recorded'},
   {id:'evt_9f22', t:'13:52:01', res:['ok','ok'], eval:'ALLOW', eff:['executed','ok'], shadow:false,
-   who:'u-jdoe · a42', st:'srv-github / list_issues', reason:'observe_only', dur:'88ms'},
+   who:'u-jdoe', st:'srv-github / list_issues', reason:'observe_only', exec:'executed'},
   {id:'evt_hf01', t:'13:51:47', res:['block','crit'], eval:'DENY', eff:['blocked','crit'], hard:true,
-   who:'svc-agent-x · aX', st:'srv-github / create_issue', reason:'sender_constraint_required', dur:'11ms'},
+   who:'svc-agent-x', st:'srv-github / create_issue', reason:'sender_constraint_required', exec:'blocked'},
   {id:'evt_dlp1', t:'13:51:30', res:['block','crit'], eval:'DENY', eff:['blocked','crit'], dlp:true,
-   who:'svc-agent-support · a9', st:'srv-crm / update_contact', reason:'secret_detected', dur:'23ms'},
-  {id:'evt_rd1', t:'13:51:12', res:['redacted','info'], eval:'ALLOW_WITH_REDACTION', eff:['executed · redacted','info'], dlp:true,
-   who:'u-jdoe · a2', st:'srv-crm / get_contact', reason:'pii_detected', dur:'204ms'},
+   who:'svc-agent-support', st:'srv-crm / update_contact', reason:'secret_detected', exec:'blocked'},
+  {id:'evt_rd1', t:'13:51:12', res:['redacted','info'], eval:'ALLOW_WITH_REDACTION', eff:['executed','info'], dlp:true,
+   who:'u-jdoe', st:'srv-crm / get_contact', reason:'pii_detected', exec:'executed'},
   {id:'evt_9f2f', t:'13:50:58', res:['block?','warn'], eval:'DENY', eff:['exec (shadow)','warn'], shadow:true,
-   who:'svc-agent-deploy · a7', st:'srv-k8s / delete_pod', reason:'credential_power_exceeded', dur:'166ms'},
+   who:'svc-agent-deploy', st:'srv-k8s / delete_pod', reason:'credential_power_exceeded', exec:'shadow_recorded'},
 ];
 
+// Drawer content: ONLY fields present on ExplanationView (verified against
+// internal/mcp/adminapi/decisions.go). Fabricated per-call telemetry (latency,
+// upstream HTTP status, DP node, environment) is intentionally NOT shown.
 const DRAWERS = {
   shadow: {
     sel:'evt_9f1a',
     header:{result:['EXECUTED IN SHADOW','warn'], eval:['DENY','crit'], st:'srv-github / create_issue', time:'13:52:03', mode:'Shadow'},
-    why:[['Policy action (evaluated)','DENY'],['Effective action','allow — executed in shadow'],
-         ['Shadow override','yes ⚠'],['Reason','out_of_scope (rollout)'],['Matched rule','rule-write-guard ↳'],
-         ['Decisive condition','cond-scope-write ↳'],['Hard failure','none']],
-    ctx:[['Tenant','acme-prod ↳'],['Principal','svc-agent-billing ↳'],['Agent','agent-42 ↳'],
-         ['Client','app-desktop ↳'],['Server','srv-github ↳'],['Tool fingerprint','fp-9a1b2c ↳'],
-         ['Environment','prod'],['Destination','approved']],
-    exec:[['Approval / allowance','n/a (shadow)'],['Credential profile','cp-github-rw ↳'],
-          ['Power ceiling','write'],['Upstream outcome','200 · created (shadow-executed)'],['Latency','142 ms'],
-          ['Request inspection','pass'],['Response inspection','pass']],
-    evid:[['Snapshot','sha256:…009988 ⧉'],['Policy / catalog rev','12 / 6'],['Config / cred rev','8 / 3'],
-          ['Durable event','evt_9f1a ⧉'],['DP / node','dp-us-1']],
-    related:['3 other shadow-overrides for this tool in 10m','2 blocks on srv-github/create_issue today'],
-    actions:['Related calls →','Simulate policy →','Quarantine tool','Demote mode','Rollback snapshot'],
+    why:[['Policy action (evaluated)','DENY'],['Effective action','allow (executed in shadow)'],
+         ['Shadow override','yes'],['Reason code','out_of_scope'],['Matched rule','rule-write-guard'],
+         ['Decisive condition','cond-scope-write'],['Hard failure','none']],
+    ctx:[['Tenant','acme-prod'],['Principal','svc-agent-billing'],['Agent','agent-42'],
+         ['Client','app-desktop'],['Server','srv-github'],['Tool fingerprint','fp-9a1b2c'],
+         ['Destination class','approved'],['Assurance','medium']],
+    exec:[['Credential profile','cp-github-rw'],['Power ceiling','write'],['Operation class','write'],
+          ['Risk class','high'],['Inspection status','valid'],['DLP disposition','pass']],
+    evid:[['Snapshot','sha256:...009988'],['Policy rev','12'],['Catalog rev','6'],['Inspection rev','3'],
+          ['Durable event','evt_9f1a'],['Correlation id','corr_7788']],
+    related:[['Related calls for this tool','tool:fp-9a1b2c'],['Same principal','principal:svc-agent-billing'],['Same rule','rule:rule-write-guard']],
+    actions:[['Related calls','pivot'],['Simulate policy','pivot'],['Demote mode','warn'],['Rollback snapshot','warn']],
   },
   hardfail: {
     sel:'evt_hf01',
     header:{result:['BLOCKED','crit'], eval:['DENY','crit'], st:'srv-github / create_issue', time:'13:51:47', mode:'Canary'},
     why:[['Policy action (evaluated)','DENY'],['Effective action','blocked'],['Shadow override','no'],
-         ['Reason','sender_constraint_required'],['Hard failure class','auth_identity ⚠'],
-         ['Decisive condition','cond-sender-dpop ↳'],['Overridable','no — hard failure always blocks']],
-    ctx:[['Tenant','acme-prod ↳'],['Principal','svc-agent-x ↳'],['Agent','agent-x ↳'],
-         ['Client','—'],['Server','srv-github ↳'],['Tool fingerprint','fp-9a1b2c ↳'],
-         ['Assurance','low'],['Destination','approved']],
-    exec:[['Approval / allowance','—'],['Credential profile','— (never reached)'],['Power ceiling','—'],
-          ['Upstream outcome','not attempted'],['Latency','11 ms'],['Request inspection','n/a']],
-    evid:[['Snapshot','sha256:…009988 ⧉'],['Policy / catalog rev','12 / 6'],['Durable event','evt_hf01 ⧉'],
-          ['DP / node','dp-us-2']],
-    related:['auth_identity ×3 in 10m from agent-x','See identity-binding events for this session'],
-    actions:['Related calls →','View identity chain →','Quarantine server','Revoke allowance'],
+         ['Reason code','sender_constraint_required'],['Hard failure class','auth_identity'],
+         ['Decisive condition','cond-sender-dpop'],['Overridable','no (hard failure always blocks)']],
+    ctx:[['Tenant','acme-prod'],['Principal','svc-agent-x'],['Agent','agent-x'],
+         ['Client','(none)'],['Server','srv-github'],['Tool fingerprint','fp-9a1b2c'],
+         ['Destination class','approved'],['Assurance','low']],
+    exec:[['Credential profile','(never reached)'],['Power ceiling','(none)'],['Operation class','write'],
+          ['Risk class','high'],['Inspection status','n/a'],['DLP disposition','n/a']],
+    evid:[['Snapshot','sha256:...009988'],['Policy rev','12'],['Catalog rev','6'],['Registry rev','4'],
+          ['Durable event','evt_hf01'],['Correlation id','corr_2210']],
+    related:[['Related calls for this principal','principal:svc-agent-x'],['Same reason (auth_identity)','reason:sender_constraint_required']],
+    actions:[['Related calls','pivot'],['Simulate policy','pivot']],
   },
   dlp: {
     sel:'evt_dlp1',
     header:{result:['BLOCKED (DLP)','crit'], eval:['DENY','crit'], st:'srv-crm / update_contact', time:'13:51:30', mode:'Canary'},
     why:[['Policy action (evaluated)','DENY'],['Effective action','blocked'],['Shadow override','no'],
-         ['Reason','secret_detected'],['Hard failure class','inspection_privacy'],
+         ['Reason code','secret_detected'],['Hard failure class','inspection_privacy'],
          ['DLP disposition','block'],['Finding classes','credential_secret, bearer_token'],['Max severity','high']],
-    ctx:[['Tenant','acme-prod ↳'],['Principal','svc-agent-support ↳'],['Agent','agent-9 ↳'],
-         ['Client','app-desktop ↳'],['Server','srv-crm ↳'],['Tool fingerprint','fp-9a1b2c ↳'],
-         ['Environment','prod'],['Destination','approved']],
-    exec:[['Approval / allowance','—'],['Credential profile','cp-crm-rw ↳'],['Power ceiling','write'],
-          ['Upstream outcome','not attempted (blocked at request-DLP)'],['Latency','23 ms'],
-          ['Request inspection','block — secret in args'],['Response inspection','n/a']],
-    evid:[['Snapshot','sha256:…009988 ⧉'],['Inspection rev','3'],['Durable event','evt_dlp1 ⧉'],
-          ['DP / node','dp-us-1']],
-    related:['1 prior secret_detected on srv-crm today','No token/secret value is ever stored or shown'],
-    actions:['Related calls →','Simulate policy →','Quarantine tool','Revoke credential profile'],
+    ctx:[['Tenant','acme-prod'],['Principal','svc-agent-support'],['Agent','agent-9'],
+         ['Client','app-desktop'],['Server','srv-crm'],['Tool fingerprint','fp-9a1b2c'],
+         ['Destination class','approved'],['Assurance','medium']],
+    exec:[['Credential profile','cp-crm-rw'],['Power ceiling','write'],['Operation class','write'],
+          ['Risk class','high'],['Inspection status','block (secret in args)'],['DLP disposition','block']],
+    evid:[['Snapshot','sha256:...009988'],['Policy rev','12'],['Inspection rev','3'],
+          ['Durable event','evt_dlp1'],['Correlation id','corr_5561']],
+    related:[['Related calls for this tool','tool:fp-9a1b2c'],['Prior secret findings on srv-crm','server:srv-crm']],
+    actions:[['Related calls','pivot'],['Simulate policy','pivot']],
   },
 };
 
@@ -88,14 +91,14 @@ function chip(t,k){return `<span class="chip ${k}">${t}</span>`;}
 
 function tableHTML(selId){
   return `<table class="act"><thead><tr>
-    <th>Time</th><th>Result</th><th>Evaluated → Effective</th><th>Principal / Agent</th>
-    <th>Server / Tool</th><th>Reason</th><th>Dur</th></tr></thead><tbody>
-    ${ROWS.map(r=>`<tr class="${r.id===selId?'sel':''}">
+    <th class="nw">Time</th><th>Result</th><th>Evaluated to effective</th><th class="who">Principal</th>
+    <th class="st">Server / tool</th><th>Reason</th></tr></thead><tbody>
+    ${ROWS.map(r=>`<tr tabindex="0" class="${r.id===selId?'sel':''}">
       <td class="mono nw">${r.t}</td>
       <td>${chip(r.res[0],r.res[1])}</td>
       <td><span class="evaleff">${chip(r.eval,r.eval.startsWith('ALLOW')?(r.eval.includes('REDACTION')?'info':'ok'):'crit')}
-        <span class="arw">→</span>${chip(r.eff[0],r.eff[1])}${r.shadow?' <span class="chip warn" title="shadow override">⚠ override</span>':''}</span></td>
-      <td>${r.who}</td><td>${r.st}</td><td class="mono">${r.reason}</td><td class="mono nw">${r.dur}</td></tr>`).join('')}
+        <span class="arw">to</span>${chip(r.eff[0],r.eff[1])}${r.shadow?' <span class="chip warn" title="policy evaluated DENY but shadow executed and recorded it">! override</span>':''}</span></td>
+      <td class="who" title="${r.who}">${r.who}</td><td class="st" title="${r.st}">${r.st}</td><td class="mono rsn" title="${r.reason}">${r.reason}</td></tr>`).join('')}
   </tbody></table>`;
 }
 
@@ -103,46 +106,46 @@ function drawerHTML(d){
   const sec=(title,rows)=>`<div class="dsec"><div class="dsec-h">${title}</div>
     ${rows.map(r=>`<div class="row"><span class="k">${r[0]}</span><span class="v">${r[1]}</span></div>`).join('')}</div>`;
   const h=d.header;
-  return `<div class="drawer">
-    <div class="drawer-top"><div class="dt-h"><div>${chip('Decision','muted')} <span class="mono">${d.sel}</span></div><button class="btn ghost sm">×</button></div>
-      <div class="dt-title">${chip('Evaluated: '+h.eval[0],h.eval[1])} &nbsp;→&nbsp; ${chip(h.result[0],h.result[1])}</div>
-      <div class="dt-meta">${h.st} · ${h.time} · mode ${h.mode}</div></div>
+  const pivots=d.related.map(r=>`<button class="chip pivot" title="${r[1]}">${r[0]}</button>`).join(' ');
+  const acts=d.actions.map((a,i)=>`<button class="btn sm ${i===0?'primary':(a[1]==='warn'?'':'')}">${a[0]}</button>`).join('');
+  return `<div class="drawer overlay">
+    <div class="drawer-top"><div class="dt-h"><div>${chip('Decision','muted')} <span class="mono">${d.sel}</span></div><button class="btn ghost sm" aria-label="close">x</button></div>
+      <div class="dt-title">${chip('Evaluated: '+h.eval[0],h.eval[1])} &nbsp;to&nbsp; ${chip(h.result[0],h.result[1])}</div>
+      <div class="dt-meta">${h.st} &middot; ${h.time} &middot; mode ${h.mode}</div></div>
     <div class="drawer-secs">
       ${sec('Why',d.why)}
       ${sec('Context',d.ctx)}
       ${sec('Execution',d.exec)}
       ${sec('Evidence',d.evid)}
-      <div class="dsec"><div class="dsec-h">Related activity</div>
-        ${d.related.map(x=>`<div class="row"><span class="k" style="text-align:left">• ${x}</span></div>`).join('')}</div>
-      <div class="dsec"><div class="dsec-h">Safe actions</div>
-        <div class="actions">${d.actions.map((a,i)=>`<button class="btn sm ${i===0?'primary':(a.includes('Quarantine')||a.includes('Revoke')||a.includes('Rollback')?'danger':'')}">${a}</button>`).join('')}</div></div>
+      <div class="dsec"><div class="dsec-h">Related activity (pivots)</div><div class="pivots">${pivots}</div></div>
+      <div class="dsec"><div class="dsec-h">Safe actions</div><div class="actions">${acts}</div>
+        <div class="source">Actions shown map to existing routes only. Quarantine and revoke are not offered (no endpoint in V1).</div></div>
     </div></div>`;
 }
 
 function render(){
   const st=qp('state','shadow');
   renderShell({active:'activity', title:'MCP Investigations',
-    sub:'Activity as a story — what happened, why, and what related context matters', asof:'13:52:45'});
+    sub:'Activity as a story: what happened, why, and what related context matters', asof:'13:52:45'});
   const filter=`<div class="filterbar">
     <span class="fld">tenant: acme-prod</span><span class="fld">principal: any</span>
     <span class="fld">server: any</span><span class="fld">tool: any</span>
     <span class="fld">action: all</span><span class="fld">reason: all</span>
-    <span class="toggle">☑ shadow-override only is off</span>
+    <span class="toggle">shadow-override only: off</span>
     <span style="margin-left:auto" class="trunc">as-of 13:52:45</span></div>`;
+  const caption=`<div class="source">Backed by <code>GET /api/mcp/decisions</code> and <code>/decision-explain</code>. <b>effective</b> and <b>shadow override</b> are derived from the stored <code>action</code> + <code>execution_state</code> (no new telemetry). Latency, upstream HTTP status, DP node and environment are not shown because the durable event store does not keep them.</div>`;
 
   let body;
   if(st==='table'){
-    body=`<div style="border:1px solid var(--border);border-radius:var(--radius);overflow:hidden">
-      ${filter}${tableHTML('')}</div>`;
+    body=`<div class="act-wrap">${filter}${tableHTML('')}</div>${caption}`;
   } else {
     const d=DRAWERS[st]||DRAWERS.shadow;
-    body=`<div class="workbench" style="grid-column:1 / -1">
-      <div>${filter}${tableHTML(d.sel)}</div>
-      ${drawerHTML(d)}</div>`;
+    body=`<div class="act-wrap has-drawer">${filter}${tableHTML(d.sel)}<div class="scrim-l"></div>${drawerHTML(d)}</div>${caption}`;
   }
   document.getElementById('content').innerHTML=
     `<h1 class="page">MCP Investigations</h1>
-     <p class="lede">${st==='shadow'?'A Shadow-executed policy DENY is shown as <b>DENY → exec (shadow) ⚠</b> — it can never read as a plain ALLOW.':'Select a call to follow the full evidence chain in the drawer; every entity is a pivot.'}</p>
+     <p class="lede">${st==='shadow'?'A Shadow-executed policy DENY is shown as <b>DENY to exec (shadow) ! override</b>: it can never read as a plain ALLOW.':'Select a call to follow the evidence chain in the drawer; every entity is a pivot.'}</p>
+     <div aria-live="polite" class="d-none" id="live"></div>
      ${body}`;
   shellReady();
 }

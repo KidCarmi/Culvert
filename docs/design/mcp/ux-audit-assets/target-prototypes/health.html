@@ -2,13 +2,13 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>MCP Health &amp; Distribution — prototype</title>
+<title>MCP Health and Distribution - prototype</title>
 <link rel="stylesheet" href="_prototype.css">
 </head>
 <body>
   <div id="sidebar"></div>
   <div id="main">
-    <div class="proto-banner">Design prototype — not implemented</div>
+    <div class="proto-banner">Design prototype - not implemented</div>
     <div class="topbar" id="topbar"></div>
     <div class="content" id="content"></div>
   </div>
@@ -16,43 +16,54 @@
 <script>
 function chip(t,k){return `<span class="chip ${k}">${t}</span>`;}
 const DPS=[
-  ['dp-us-1',['applied','ok'],'…009988','8','1','—'],
-  ['dp-us-2',['applied','ok'],'…009988','8','1','—'],
-  ['dp-us-3',['applied','ok'],'…009988','8','1','—'],
-  ['dp-ap-1',['validated','info'],'…009988','8','1','ack pending'],
-  ['dp-eu-1',['rejected','crit'],'—','8','—','snapshot_min_version_unmet'],
+  ['dp-us-1',['applied','ok'],'...009988','8','1','-'],
+  ['dp-us-2',['applied','ok'],'...009988','8','1','-'],
+  ['dp-us-3',['applied','ok'],'...009988','8','1','-'],
+  ['dp-ap-1',['validated','info'],'...009988','8','1','ack pending'],
+  ['dp-eu-1',['rejected','crit'],'-','8','-','snapshot_min_version_unmet'],
 ];
 function meter(label,val,pct,kind){
   return `<div style="margin:9px 0"><div class="kv" style="border:0;padding:2px 0">
     <span class="k">${label}</span><span class="v">${chip(val,kind)}</span></div>
     <div class="prog"><span style="width:${pct}%;background:var(--${kind==='crit'?'crit':kind==='warn'?'warn':'accent'})"></span></div></div>`;
 }
+function matrixCard(local){
+  if(local){
+    return `<div class="card"><div class="card-h"><div class="card-title">DP acknowledgement matrix</div>${chip('local only','muted')}</div>
+      <div class="empty"><b>Local only:</b> no CP to DP distribution is configured. Data-plane nodes appear here once a fleet is enrolled.</div>
+      <div class="source">Backed by <code>GET /api/mcp/distribution/acks</code> (additive, per-node, bounded, redacted).</div></div>`;
+  }
+  return `<div class="card"><div class="card-h"><div class="card-title">DP acknowledgement matrix</div>${chip('4 applied, 1 incompatible','warn')}</div>
+    <table class="mtx"><thead><tr><th scope="col">Node</th><th scope="col">Ack state</th><th scope="col">Hash</th><th scope="col">Epoch</th><th scope="col">Ver</th><th scope="col">Reject reason</th></tr></thead>
+    <tbody>${DPS.map(d=>`<tr><td class="mono">${d[0]}</td><td>${chip(d[1][0],d[1][1])}</td><td class="trunc">${d[2]}</td>
+      <td class="mono">${d[3]}</td><td class="mono">${d[4]}</td>
+      <td style="${d[5].includes('unmet')?'color:var(--crit);font-weight:600':'color:var(--muted)'}">${d[5]}</td></tr>`).join('')}</tbody></table>
+    <div class="kv" style="margin-top:8px"><span class="k">Desired snapshot</span><span class="v mono">...009988 (epoch 8)</span></div>
+    <div class="kv"><span class="k">Rollback target</span><span class="v mono">...998877 (epoch 7)</span></div>
+    <div class="source">Rows backed by <code>GET /api/mcp/distribution/acks</code>. Rollback target is shown only when <code>capStatus.previous_hash</code> is populated (rollback available); otherwise the row is hidden, never faked.</div></div>`;
+}
 function render(){
-  renderShell({active:'health', title:'MCP Health & Distribution',
-    sub:'Is the fleet converged and durable — and where is it not?', asof:'13:52:45'});
-  const dura=`<div class="card"><div class="card-h"><div class="card-title">Gateway durability</div>${chip('degraded · high','crit')}</div>
+  const local=qp('fleet','')==='local';
+  renderShell({active:'health', title:'MCP Health and Distribution',
+    sub:'Is the fleet converged and durable, and where is it not?', asof:'13:52:45'});
+  const dura=`<div class="card"><div class="card-h"><div class="card-title">Gateway durability</div>${chip('degraded, high','crit')}</div>
     ${meter('Critical spool','1.04 MB / 1.05 MB',99,'crit')}
     ${meter('Ordered spool','4.10 MB / 4.19 MB',98,'warn')}
     ${meter('Denial lane','260 KB / 262 KB',99,'crit')}
     <div class="metric-row" style="flex-wrap:wrap;gap:12px;margin-top:12px">
       <span>commit failures <b>37</b></span><span>sync failures <b>9</b></span>
-      <span>denial loss <b>118</b></span><span>recovery <b>recovering</b></span><span>exporter lag <b>42s</b></span></div></div>`;
+      <span>denial loss <b>118</b></span><span>recovery <b>recovering</b></span><span>exporter lag <b>42s</b></span></div>
+    <div class="source">All fields backed by <code>DurabilityHealth</code> in <code>GET /api/mcp/health</code>.</div></div>`;
   const runtime=`<div class="card"><div class="card-h"><div class="card-title">Runtime</div>${chip('ready','ok')}</div>
-    <div class="kv"><span class="k">Listener</span><span class="v">ready · bound 127.0.0.1:8091</span></div>
-    <div class="kv"><span class="k">Sessions</span><span class="v">7 active · 3 in-flight</span></div>
-    <div class="kv"><span class="k">Connections</span><span class="v">2,201 accepted · 142 rejected</span></div>
-    <div class="kv"><span class="k">Servers / tools</span><span class="v">4 servers · 1 quarantined · 2 drifted</span></div></div>`;
-  const mtx=`<div class="card"><div class="card-h"><div class="card-title">DP acknowledgement matrix</div>${chip('4 applied · 1 incompatible','warn')}</div>
-    <table class="mtx"><thead><tr><th>Node</th><th>Ack state</th><th>Hash</th><th>Epoch</th><th>Ver</th><th>Reason</th></tr></thead>
-    <tbody>${DPS.map(d=>`<tr><td class="mono">${d[0]}</td><td>${chip(d[1][0],d[1][1])}</td><td class="trunc">${d[2]}</td>
-      <td class="mono">${d[3]}</td><td class="mono">${d[4]}</td>
-      <td style="${d[5].includes('unmet')?'color:var(--crit);font-weight:600':'color:var(--muted)'}">${d[5]}</td></tr>`).join('')}</tbody></table>
-    <div class="kv" style="margin-top:8px"><span class="k">Desired snapshot</span><span class="v mono">…009988 (epoch 8)</span></div>
-    <div class="kv"><span class="k">Rollback target</span><span class="v mono">…998877 (epoch 7)</span></div></div>`;
+    <div class="kv"><span class="k">Listener</span><span class="v">ready</span></div>
+    <div class="kv"><span class="k">Sessions</span><span class="v">7 active, 3 in-flight</span></div>
+    <div class="kv"><span class="k">Connections</span><span class="v">2,201 accepted, 142 rejected</span></div>
+    <div class="kv"><span class="k">Servers / tools</span><span class="v">4 servers, 1 quarantined, 2 drifted</span></div>
+    <div class="source">Backed by <code>RuntimeStateHealth</code> in <code>GET /api/mcp/health</code>. Bind address is not shown (not a health field).</div></div>`;
   document.getElementById('content').innerHTML=
-    `<h1 class="page">MCP Health &amp; Distribution</h1>
-     <p class="lede">Durability as labeled meters, and a per-node acknowledgement matrix that names the one incompatible DP holding an old snapshot — not a 25-field JSON object.</p>
-     <div class="grid grid-2" style="gap:16px">${dura}${runtime}</div><div class="spacer"></div>${mtx}`;
+    `<h1 class="page">MCP Health and Distribution</h1>
+     <p class="lede">Durability as labeled meters, and a per-node acknowledgement matrix that names the one incompatible DP holding an old snapshot, not a 25-field JSON object.</p>
+     <div class="grid grid-2" style="gap:16px">${dura}${runtime}</div><div class="spacer"></div>${matrixCard(local)}`;
   shellReady();
 }
 render();

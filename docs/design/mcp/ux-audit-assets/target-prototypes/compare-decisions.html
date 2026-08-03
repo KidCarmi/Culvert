@@ -1,7 +1,7 @@
 <!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
-<title>MCP Decisions JSON → Activity experience — current vs proposed</title>
+<title>MCP Decisions JSON → Activity experience - current vs proposed</title>
 <link rel="stylesheet" href="_comparison.css"></head><body>
-<div class="proto-banner">Design prototype — not implemented · current-vs-proposed comparison</div>
+<div class="proto-banner">Design prototype - not implemented · current-vs-proposed comparison</div>
 <h1>MCP Decisions JSON → Activity experience</h1><p class="sub">A Shadow-executed policy DENY. Today it is a JSON row; the fact that it executed anyway is only visible by reading execution_state. Proposed: an activity story with a detail drawer.</p>
 <div class="cols">
   <div class="col now"><div class="col-h"><span class="tag now">Current</span>MCP Decisions (raw JSON)</div>
@@ -9,7 +9,7 @@
   <div class="col next"><div class="col-h"><span class="tag next">Proposed</span>Investigations + drawer<span class="cap">design prototype</span></div>
     <img class="shot" src="renders/activity-shadow-drawer.png"></div>
 </div>
-<div class="col next" style="margin-top:16px"><div class="note">The proposed row renders <b>DENY → exec (shadow) ⚠ override</b> as two chips — it can never read as a plain ALLOW. The drawer reconstructs the full evidence chain (Why · Context · Execution · Evidence · Related · Safe actions) with entity pivots, without leaving the view.</div></div>
+<div class="col next" style="margin-top:16px"><div class="note">The proposed row renders <b>DENY → exec (shadow) ⚠ override</b> as two chips - it can never read as a plain ALLOW. The drawer reconstructs the full evidence chain (Why · Context · Execution · Evidence · Related · Safe actions) with entity pivots, without leaving the view.</div></div>
 <script>
 // mark ready only after both images have loaded so the screenshot is complete
 const imgs=[...document.querySelectorAll('img.shot')];

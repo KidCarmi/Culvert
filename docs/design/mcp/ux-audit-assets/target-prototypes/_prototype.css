@@ -1,4 +1,4 @@
-/* MCP target-prototype stylesheet — DESIGN PROTOTYPE, NOT PRODUCTION.
+/* MCP target-prototype stylesheet - DESIGN PROTOTYPE, NOT PRODUCTION.
    Token values are copied field-for-field from static/index.html
    (docs/design/DESIGN-SYSTEM.md) so the mockups read as an evolved Culvert
    product. This file is never imported by production; it only renders the
@@ -294,3 +294,45 @@ table.gate td { padding:9px 10px; border-bottom:1px solid var(--border); }
 h1.page { font-size:1.1rem; font-weight:700; margin-bottom:3px; }
 p.lede { font-size:.8rem; color:var(--muted); margin-bottom:16px; max-width:70ch; }
 .spacer { height:16px; }
+
+/* ── Review round 1 refinements ── */
+/* Accessibility: real focus ring on every interactive element (was unused). */
+a, button, [role="button"], [tabindex] { outline:none; }
+a:focus-visible, button:focus-visible, [role="button"]:focus-visible,
+[tabindex]:focus-visible, .nav-item:focus-visible, .attn-item:focus-visible,
+table.act tr:focus-visible { box-shadow:var(--focus-ring); border-radius:6px; }
+.nav-item { text-decoration:none; }
+
+/* Non-color severity token beside the dot (colorblind-safe). */
+.sevtag { font-size:.58rem; font-weight:800; letter-spacing:.06em; padding:1px 5px;
+  border-radius:4px; flex-shrink:0; }
+.sevtag.crit { background:var(--crit-tint); color:var(--crit); }
+.sevtag.warn { background:var(--warn-tint); color:var(--warn); }
+.sevtag.info { background:var(--info-tint); color:var(--info); }
+.sevtag.ok   { background:var(--ok-tint); color:var(--green); }
+
+/* Honest empty-state (used when no fleet / no real rows exist). */
+.empty { border:1px dashed var(--border-hi); border-radius:10px; padding:18px 20px;
+  background:var(--surface1); color:var(--muted); font-size:.82rem; text-align:center; }
+.empty b { color:var(--text); }
+/* Source caption: names the real/additive backing for a component. */
+.source { font-size:.64rem; color:var(--muted); margin-top:8px; font-style:italic; }
+.source code { font-family:var(--font-mono); font-size:.62rem; color:var(--accent2); font-style:normal; }
+
+/* Neutral "not measured in this build" badge for unbacked qual gates. */
+.badge.na { background:var(--surface2); color:var(--muted); border:1px solid var(--border-hi); }
+.na-state { color:var(--muted); font-weight:600; }
+
+/* Activity: overlay drawer so the table keeps full width and never wraps
+   mid-token at 1280/1440. */
+.act-wrap { position:relative; border:1px solid var(--border); border-radius:var(--radius);
+  overflow:hidden; }
+.act-wrap.has-drawer { min-height:1088px; }
+/* Only the free-text columns ellipsize; the eval-to-effective column keeps both
+   chips + the override marker at full width (never truncated). */
+table.act td { white-space:nowrap; }
+table.act td.who, table.act td.st, table.act td.rsn {
+  overflow:hidden; text-overflow:ellipsis; max-width:170px; }
+.drawer.overlay { position:absolute; top:0; right:0; bottom:0; width:366px;
+  box-shadow:var(--shadow-2); z-index:5; overflow-y:auto; }
+.scrim-l { position:absolute; inset:0 366px 0 0; background:rgba(0,0,0,.28); z-index:4; }

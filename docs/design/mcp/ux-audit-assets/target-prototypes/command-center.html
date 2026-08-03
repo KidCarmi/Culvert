@@ -2,113 +2,128 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>MCP Command Center — prototype</title>
+<title>MCP Command Center - prototype</title>
 <link rel="stylesheet" href="_prototype.css">
 </head>
 <body>
   <div id="sidebar"></div>
   <div id="main">
-    <div class="proto-banner">Design prototype — not implemented</div>
+    <div class="proto-banner">Design prototype - not implemented</div>
     <div class="topbar" id="topbar"></div>
     <div class="content" id="content"></div>
   </div>
 
 <script src="_shell.js"></script>
 <script>
+// attn item: [sev, text, go]. sev drives both a labeled token and a dot.
 const S = {
   healthy: {
-    stale:false, attn:2, killed:false,
+    stale:false, attn:2, killed:false, fleet:'distributed',
     posture:[['Gateway: Canary','accent'],['Mgmt: Observe','muted'],['Hard fails: 0','ok'],
-             ['Fleet: 5/5 DPs','ok'],['Durability: OK','ok'],['Snapshot: fresh','ok'],
+             ['Fleet: 5/5 DPs','ok'],['Durability: OK','ok'],['Snapshot 009988','muted'],
              ['Production: LOCKED','warn'],['Needs attention: 2','info']],
-    gwFleet:['5/5 converged','ok'], gwKilled:false, dura:['Normal','ok'], fleet:'5 / 5',
-    attnList:[
-      ['info','Canary window 3d of 7d — evidence gate open','Qualify →'],
-      ['info','2 approvals pending (1 destructive)','Approvals →']],
+    gwFleet:['5/5 applied','ok'], gwKilled:false, dura:['Normal','ok'],
+    attnList:[['info','Canary window 3d of 7d: evidence gate open','Qualify'],
+              ['info','2 approvals pending (1 destructive)','Approvals']],
   },
   'needs-attention': {
-    stale:false, attn:4, killed:false,
-    posture:[['Gateway: Canary','accent'],['Mgmt: Observe','muted'],['Hard fails: 3 ⚠','warn'],
-             ['Fleet: 4/5 DPs','warn'],['Durability: OK','ok'],['Snapshot: fresh','ok'],
+    stale:false, attn:4, killed:false, fleet:'distributed',
+    posture:[['Gateway: Canary','accent'],['Mgmt: Observe','muted'],['Hard fails: 3','warn'],
+             ['Fleet: 4/5 DPs','warn'],['Durability: OK','ok'],['Snapshot 009988','muted'],
              ['Production: LOCKED','warn'],['Needs attention: 4','warn']],
-    gwFleet:['4/5 · 1 incompatible','warn'], gwKilled:false, dura:['Normal','ok'], fleet:'4 / 5',
-    attnList:[
-      ['crit','1 DP incompatible (min-version) holding an old snapshot','Health →'],
-      ['warn','Hard-failure spike: auth_identity ×3 in 10m','Investigate →'],
-      ['info','2 approvals pending (1 destructive)','Approvals →'],
-      ['info','Canary window 3d of 7d — evidence gate open','Qualify →']],
+    gwFleet:['4/5 applied, 1 incompatible','warn'], gwKilled:false, dura:['Normal','ok'],
+    attnList:[['crit','1 DP incompatible (min-version) holding an old snapshot','Health'],
+              ['warn','Hard-failure spike: auth_identity x3 in 10m','Investigate'],
+              ['info','2 approvals pending (1 destructive)','Approvals'],
+              ['info','Canary window 3d of 7d: evidence gate open','Qualify']],
+  },
+  'local-only': {
+    stale:false, attn:1, killed:false, fleet:'local',
+    posture:[['Gateway: Shadow','accent'],['Mgmt: Observe','muted'],['Hard fails: 0','ok'],
+             ['Fleet: local only','muted'],['Durability: OK','ok'],['Snapshot 009988','muted'],
+             ['Production: LOCKED','warn'],['Needs attention: 1','info']],
+    gwFleet:['local only','muted'], gwKilled:false, dura:['Normal','ok'],
+    attnList:[['info','Shadow window 6d of 14d: evidence gate open','Qualify']],
   },
   killswitch: {
-    stale:false, attn:1, killed:true,
+    stale:false, attn:1, killed:true, fleet:'distributed',
     posture:[['Gateway: Canary','accent'],['Admission: STOPPED','crit'],['Hard fails: 5,200','crit'],
-             ['Fleet: 5/5 DPs','ok'],['Durability: OK','ok'],['Snapshot: fresh','ok'],
+             ['Fleet: 5/5 DPs','ok'],['Durability: OK','ok'],['Snapshot 009988','muted'],
              ['Production: LOCKED','warn'],['Needs attention: 1','crit']],
-    gwFleet:['5/5 converged','ok'], gwKilled:true, dura:['Normal','ok'], fleet:'5 / 5',
-    attnList:[
-      ['crit','Emergency kill switch ACTIVE on gateway — all admission stopped (node-local)','Rollout →']],
+    gwFleet:['5/5 applied','ok'], gwKilled:true, dura:['Normal','ok'],
+    attnList:[['crit','Emergency kill switch ACTIVE on gateway: all admission stopped (node-local)','Rollout']],
   },
   durability: {
-    stale:false, attn:2, killed:false,
+    stale:false, attn:2, killed:false, fleet:'distributed',
     posture:[['Gateway: Canary','accent'],['Mgmt: Observe','muted'],['Hard fails: 0','ok'],
-             ['Fleet: 5/5 DPs','ok'],['Durability: DEGRADED','crit'],['Snapshot: fresh','ok'],
+             ['Fleet: 5/5 DPs','ok'],['Durability: DEGRADED','crit'],['Snapshot 009988','muted'],
              ['Production: LOCKED','warn'],['Needs attention: 2','warn']],
-    gwFleet:['5/5 converged','ok'], gwKilled:false, dura:['Degraded · high','crit'], fleet:'5 / 5',
-    attnList:[
-      ['crit','Durability degraded (severity high): 37 commit failures, denial-lane recovering','Health →'],
-      ['info','Canary window 3d of 7d — evidence gate open','Qualify →']],
+    gwFleet:['5/5 applied','ok'], gwKilled:false, dura:['Degraded, high','crit'],
+    attnList:[['crit','Durability degraded (severity high): 37 commit failures, denial-lane recovering','Health'],
+              ['info','Canary window 3d of 7d: evidence gate open','Qualify']],
   },
   dpincompat: {
-    stale:true, attn:2, killed:false,
+    stale:true, attn:2, killed:false, fleet:'distributed',
     posture:[['Gateway: Canary','accent'],['Mgmt: Observe','muted'],['Hard fails: 0','ok'],
-             ['Fleet: 4/5 · 1 incompat','warn'],['Durability: OK','ok'],['Snapshot: fresh','ok'],
+             ['Fleet: 4/5, 1 incompat','warn'],['Durability: OK','ok'],['Snapshot 009988','muted'],
              ['Production: LOCKED','warn'],['Needs attention: 2','warn']],
-    gwFleet:['4/5 · dp-eu-1 rejected','warn'], gwKilled:false, dura:['Normal','ok'], fleet:'4 / 5',
-    attnList:[
-      ['warn','dp-eu-1 rejected snapshot: minimum DP version not met — running previous policy','Health →'],
-      ['info','2 approvals pending','Approvals →']],
+    gwFleet:['4/5 applied, dp-eu-1 rejected','warn'], gwKilled:false, dura:['Normal','ok'],
+    attnList:[['warn','dp-eu-1 rejected snapshot: minimum DP version not met, running previous policy','Health'],
+              ['info','2 approvals pending','Approvals']],
   },
   prodlocked: {
-    stale:false, attn:1, killed:false,
+    stale:false, attn:1, killed:false, fleet:'distributed',
     posture:[['Gateway: Canary','accent'],['Mgmt: Observe','muted'],['Hard fails: 0','ok'],
-             ['Fleet: 5/5 DPs','ok'],['Durability: OK','ok'],['Snapshot: fresh','ok'],
+             ['Fleet: 5/5 DPs','ok'],['Durability: OK','ok'],['Snapshot 009988','muted'],
              ['Production: LOCKED','warn'],['Needs attention: 1','info']],
-    gwFleet:['5/5 converged','ok'], gwKilled:false, dura:['Normal','ok'], fleet:'5 / 5',
-    attnList:[
-      ['info','Production qualification: 3 of 8 gates NO-GO (Canary 3d/7d, soak synthetic, ops readiness) — no issuer in build','Qualify →']],
+    gwFleet:['5/5 applied','ok'], gwKilled:false, dura:['Normal','ok'],
+    attnList:[['info','Production qualification: 3 of 6 gates NO-GO (Canary 3d/7d, soak synthetic, defects) - no issuer in build','Qualify']],
   },
 };
 
+// Recent important changes: rollout transitions + rehearsals only (backed by an
+// additive projection of rollout.State.History). No "tool quarantined" row: that
+// action does not exist.
 const recent = [
-  ['13:41','mode Shadow → Canary','four-eyes: a.smith'],
+  ['13:41','mode Shadow to Canary','four-eyes: a.smith'],
   ['13:12','scope widened +srv-k8s','a.smith'],
   ['12:58','rollback rehearsed (gateway)','system'],
-  ['12:30','tool quarantined srv-shell/sudo_exec','j.doe'],
+  ['11:20','mode Observe to Shadow','four-eyes: a.smith'],
 ];
 
 function chip(text, kind){ return `<span class="chip ${kind}">${text}</span>`; }
+const SEVLBL={crit:'CRIT',warn:'WARN',info:'INFO',ok:'OK'};
 
 function render(){
   const st = qp('state','needs-attention');
   const d = S[st] || S['needs-attention'];
   renderShell({active:'command-center', title:'MCP Command Center',
-    sub:'MCP gateway posture · one place to decide if you need to act',
+    sub:'MCP gateway posture: one place to decide if you need to act',
     asof:'13:52:45', stale:d.stale, attn:d.attn, killed:d.killed});
 
   const posture = `<div class="posture">
       ${d.posture.map(p=>chip(p[0],p[1])).join('')}
-      <span class="asof ${d.stale?'stale':''}">${d.stale?'⚠ stale — ':''}as-of 13:52:45 · refresh</span>
+      <span class="asof ${d.stale?'stale':''}">${d.stale?'stale: ':''}as-of 13:52:45 &middot; refresh</span>
     </div>`;
 
+  const fleetTri = d.fleet==='local'
+    ? `<div class="tri"><div class="tl">Fleet-effective</div><div class="tv">${chip('local only','muted')}</div></div>`
+    : `<div class="tri ${d.gwFleet[1]!=='ok'?'warn':''}"><div class="tl">Fleet-effective</div><div class="tv">${chip(d.gwFleet[0],d.gwFleet[1])}</div></div>`;
+
+  const gwMode = st==='local-only' ? 'Shadow' : 'Canary';
   const gwCard = `<div class="card cap">
       <div class="card-h"><div class="card-title">Gateway</div>
-        ${d.gwKilled?chip('ADMISSION STOPPED','crit'):chip('Canary','accent')}</div>
+        ${d.gwKilled?chip('ADMISSION STOPPED','crit'):chip(gwMode,'accent')}</div>
       <div class="triplet">
-        <div class="tri"><div class="tl">Desired</div><div class="tv">Canary</div></div>
-        <div class="tri"><div class="tl">Locally active</div><div class="tv">${d.gwKilled?'Canary (stopped)':'Canary'}</div></div>
-        <div class="tri ${d.gwFleet[1]!=='ok'?'warn':''}"><div class="tl">Fleet-effective</div><div class="tv">${chip(d.gwFleet[0],d.gwFleet[1])}</div></div>
+        <div class="tri"><div class="tl">Desired</div><div class="tv">${st==='local-only'?'Shadow':'Canary'}</div></div>
+        <div class="tri"><div class="tl">Locally active</div><div class="tv">${d.gwKilled?'Canary (stopped)':(st==='local-only'?'Shadow':'Canary')}</div></div>
+        ${fleetTri}
       </div>
       <div class="metric-row"><span>sessions <b>7</b></span><span>in-flight <b>3</b></span>
         <span>durability ${chip(d.dura[0],d.dura[1])}</span><span>connector <b>local-client</b></span></div>
+      <div class="source">${d.fleet==='local'
+        ? 'Fleet-effective shows <b>local only</b> because no CP to DP distribution is configured (distribution_state = local_only).'
+        : 'Fleet-effective is backed by <code>GET /api/mcp/distribution/acks</code> (additive, per-node). It renders local only when no fleet is configured; node counts are never invented.'}</div>
     </div>`;
 
   const mgmtCard = `<div class="card cap">
@@ -116,7 +131,7 @@ function render(){
       <div class="triplet">
         <div class="tri"><div class="tl">Desired</div><div class="tv">Observe</div></div>
         <div class="tri"><div class="tl">Locally active</div><div class="tv">Observe</div></div>
-        <div class="tri"><div class="tl">Fleet-effective</div><div class="tv">${chip('ok','ok')}</div></div>
+        <div class="tri"><div class="tl">Fleet-effective</div><div class="tv">${chip(d.fleet==='local'?'local only':'ok',d.fleet==='local'?'muted':'ok')}</div></div>
       </div>
       <div class="metric-row"><span>mutation <b>off</b></span><span>tools <b>14 read-only</b></span><span>default role <b>viewer</b></span></div>
     </div>`;
@@ -124,14 +139,17 @@ function render(){
   const attn = `<div class="card">
       <div class="card-h"><div class="card-title">Needs attention</div><div class="card-sub">${d.attnList.length} items</div></div>
       <div class="attn">${d.attnList.map(a=>`
-        <div class="attn-item"><span class="sev ${a[0]}"></span><span>${a[1]}</span><span class="go">${a[2]}</span></div>`).join('')}
+        <button class="attn-item" style="width:100%;text-align:left;background:none;border:0;cursor:pointer;color:var(--text)">
+          <span class="sev ${a[0]}"></span><span class="sevtag ${a[0]}">${SEVLBL[a[0]]}</span>
+          <span>${a[1]}</span><span class="go">${a[2]} &rsaquo;</span></button>`).join('')}
       </div></div>`;
 
   const rec = `<div class="card">
-      <div class="card-h"><div class="card-title">Recent important changes</div><a class="card-sub" style="color:var(--accent2)">Investigations →</a></div>
+      <div class="card-h"><div class="card-title">Recent important changes</div><a class="card-sub" href="#" style="color:var(--accent2)">Investigations &rsaquo;</a></div>
       <div class="recent">${recent.map(r=>`
         <div class="recent-row"><span class="t">${r[0]}</span><span style="flex:1">${r[1]}</span><span class="trunc">${r[2]}</span></div>`).join('')}
       </div>
+      <div class="source">Backed by an additive projection of <code>rollout.State.History()</code> (actor, from to mode, timestamp). Pending-approval count comes from <code>GET /api/mcp/approvals</code>.</div>
       <div class="spacer"></div>
       <div class="actions">
         <button class="btn primary sm">Investigate hard failures</button>
@@ -141,7 +159,8 @@ function render(){
 
   document.getElementById('content').innerHTML =
     `<h1 class="page">MCP Command Center</h1>
-     <p class="lede">Do I need to act right now — and on what? Posture first, then the short list of things that need a human.</p>
+     <p class="lede">Do I need to act right now, and on what? Posture first, then the short list of things that need a human.</p>
+     <div aria-live="polite" class="d-none" id="live"></div>
      ${posture}
      <div class="grid grid-cc">
        <div class="grid" style="gap:16px">${gwCard}${mgmtCard}</div>

@@ -30,6 +30,7 @@ type protoSpec struct {
 	theme string // dark|light
 	out   string // output png name
 	dir   string // output subdir under protoRoot (default "renders")
+	w     int    // viewport width (default 1440)
 }
 
 func renderProto(t *testing.T, browser playwright.Browser, s protoSpec) {
@@ -42,8 +43,12 @@ func renderProto(t *testing.T, browser playwright.Browser, s protoSpec) {
 		t.Logf("SKIP %s (not present yet)", s.file)
 		return
 	}
+	w := s.w
+	if w == 0 {
+		w = 1440
+	}
 	ctx, err := browser.NewContext(playwright.BrowserNewContextOptions{
-		Viewport: &playwright.Size{Width: 1440, Height: 900},
+		Viewport: &playwright.Size{Width: w, Height: 900},
 	})
 	if err != nil {
 		t.Fatalf("context: %v", err)
@@ -101,36 +106,42 @@ func renderProto(t *testing.T, browser playwright.Browser, s protoSpec) {
 func protoSpecs() []protoSpec {
 	return []protoSpec{
 		// 1. Command Center — six states (dark) + one light.
-		{"command-center.html", "state=healthy", "dark", "command-center-healthy.png", ""},
-		{"command-center.html", "state=needs-attention", "dark", "command-center-needs-attention.png", ""},
-		{"command-center.html", "state=killswitch", "dark", "command-center-killswitch.png", ""},
-		{"command-center.html", "state=durability", "dark", "command-center-durability.png", ""},
-		{"command-center.html", "state=dpincompat", "dark", "command-center-dpincompat.png", ""},
-		{"command-center.html", "state=prodlocked", "dark", "command-center-prodlocked.png", ""},
-		{"command-center.html", "state=needs-attention", "light", "command-center-needs-attention-light.png", ""},
+		{"command-center.html", "state=healthy", "dark", "command-center-healthy.png", "", 0},
+		{"command-center.html", "state=needs-attention", "dark", "command-center-needs-attention.png", "", 0},
+		{"command-center.html", "state=killswitch", "dark", "command-center-killswitch.png", "", 0},
+		{"command-center.html", "state=durability", "dark", "command-center-durability.png", "", 0},
+		{"command-center.html", "state=dpincompat", "dark", "command-center-dpincompat.png", "", 0},
+		{"command-center.html", "state=prodlocked", "dark", "command-center-prodlocked.png", "", 0},
+		{"command-center.html", "state=local-only", "dark", "command-center-local-only.png", "", 0},
+		{"command-center.html", "state=needs-attention", "light", "command-center-needs-attention-light.png", "", 0},
 		// 2. Activity / execution — table + drawers (dark) + one light.
-		{"activity.html", "state=table", "dark", "activity-table.png", ""},
-		{"activity.html", "state=shadow", "dark", "activity-shadow-drawer.png", ""},
-		{"activity.html", "state=hardfail", "dark", "activity-hardfail-drawer.png", ""},
-		{"activity.html", "state=dlp", "dark", "activity-dlp-drawer.png", ""},
-		{"activity.html", "state=shadow", "light", "activity-shadow-drawer-light.png", ""},
+		{"activity.html", "state=table", "dark", "activity-table.png", "", 0},
+		{"activity.html", "state=shadow", "dark", "activity-shadow-drawer.png", "", 0},
+		{"activity.html", "state=hardfail", "dark", "activity-hardfail-drawer.png", "", 0},
+		{"activity.html", "state=dlp", "dark", "activity-dlp-drawer.png", "", 0},
+		{"activity.html", "state=shadow", "light", "activity-shadow-drawer-light.png", "", 0},
 		// 3. Rollout & Exposure — main + blast-radius modal.
-		{"rollout.html", "state=main", "dark", "rollout-main.png", ""},
-		{"rollout.html", "state=main&modal=blast", "dark", "rollout-blast-radius.png", ""},
+		{"rollout.html", "state=main", "dark", "rollout-main.png", "", 0},
+		{"rollout.html", "state=main&modal=blast", "dark", "rollout-blast-radius.png", "", 0},
+		{"rollout.html", "state=main&fleet=local", "dark", "rollout-local-only.png", "", 0},
 		// 4. Production Qualification.
-		{"qualification.html", "", "dark", "qualification-locked.png", ""},
+		{"qualification.html", "", "dark", "qualification-locked.png", "", 0},
 		// 5. Emergency response — hierarchy + typed-confirm dialog.
-		{"emergency.html", "state=hierarchy", "dark", "emergency-hierarchy.png", ""},
-		{"emergency.html", "state=hierarchy&dialog=stop", "dark", "emergency-typed-confirm.png", ""},
+		{"emergency.html", "state=hierarchy", "dark", "emergency-hierarchy.png", "", 0},
+		{"emergency.html", "state=hierarchy&dialog=stop", "dark", "emergency-typed-confirm.png", "", 0},
 		// Health & Distribution (used by the comparison sheet).
-		{"health.html", "", "dark", "health-distribution.png", ""},
+		{"health.html", "", "dark", "health-distribution.png", "", 0},
+		{"health.html", "fleet=local", "dark", "health-local-only.png", "", 0},
+		// 1280px density proofs (reviewer required-change #6).
+		{"activity.html", "state=shadow", "dark", "activity-shadow-1280.png", "", 1280},
+		{"command-center.html", "state=needs-attention", "dark", "command-center-1280.png", "", 1280},
 		// Current-vs-proposed comparison sheets (rendered AFTER the prototypes
 		// above exist, since they embed those PNGs).
-		{"compare-overview.html", "", "dark", "compare-overview.png", "comparisons"},
-		{"compare-decisions.html", "", "dark", "compare-decisions.png", "comparisons"},
-		{"compare-rollout.html", "", "dark", "compare-rollout.png", "comparisons"},
-		{"compare-health.html", "", "dark", "compare-health.png", "comparisons"},
-		{"compare-qualification.html", "", "dark", "compare-qualification.png", "comparisons"},
+		{"compare-overview.html", "", "dark", "compare-overview.png", "comparisons", 0},
+		{"compare-decisions.html", "", "dark", "compare-decisions.png", "comparisons", 0},
+		{"compare-rollout.html", "", "dark", "compare-rollout.png", "comparisons", 0},
+		{"compare-health.html", "", "dark", "compare-health.png", "comparisons", 0},
+		{"compare-qualification.html", "", "dark", "compare-qualification.png", "comparisons", 0},
 	}
 }
 
