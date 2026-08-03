@@ -1574,6 +1574,7 @@ a.mcpx-link:focus-visible,button.mcpx-attn-item:focus-visible,.mcpx-pivot:focus-
               <input type="number" class="input" id="connlimit-max" value="1024" style="width:100px" min="1">
             </div>
             <span style="font-size:.8rem;color:var(--muted)">Active IPs: <strong id="connlimit-active">-</strong></span>
+            <span style="font-size:.8rem;color:var(--muted)">Rejected (total): <strong id="connlimit-rejected">-</strong></span>
             <button class="btn sm" data-click="saveConnLimit">Save</button>
           </div>
         </div>
@@ -17281,6 +17282,8 @@ async function loadConnLimit() {
   if (en) en.checked = !!r.enabled;
   const ips = document.getElementById('connlimit-active');
   if (ips) ips.textContent = r.activeIPs || 0;
+  const rej = document.getElementById('connlimit-rejected');
+  if (rej) rej.textContent = r.rejectedTotal || 0;
 }
 
 async function saveConnLimit() {

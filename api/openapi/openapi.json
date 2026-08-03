@@ -800,12 +800,18 @@
           },
           "maxPerIP": {
             "type": "integer"
+          },
+          "rejectedTotal": {
+            "description": "Cumulative connections refused for exceeding the per-IP cap (process lifetime; never reset).",
+            "format": "int64",
+            "type": "integer"
           }
         },
         "required": [
           "enabled",
           "maxPerIP",
-          "activeIPs"
+          "activeIPs",
+          "rejectedTotal"
         ],
         "type": "object"
       },
