@@ -1,0 +1,98 @@
+name: Renew SaaS URL-Category Feed (re-sign)
+
+# Weekly FRESHNESS renewal DISPATCHER for the public SaaS feed (F6).
+#
+# The signed feed has a 14-day validity window; to keep it fresh this workflow
+# re-triggers `publish-feeds.yml` at the operator-pinned protected tag on a weekly
+# cadence. Re-running the SAME tag mints a NEW, strictly-greater Unix-second
+# `feed_version` (the dispatched run captures `date -u` at its own job start) and a
+# fresh 14-day window — a new immutable artifact + a CAS-fenced envelope promote.
+#
+# ─── THIS WORKFLOW CANNOT SIGN OR PUBLISH ANYTHING ITSELF ──────────────────────
+# It holds `contents: read` + `actions: write` ONLY. It has NO `id-token` (cannot
+# mint an OIDC signing identity — the pinned SAN requires `publish-feeds.yml`
+# anyway), NO R2/Cloudflare credential, and NO `feeds-production` environment. Its
+# sole side effect is to DISPATCH `publish-feeds.yml` at the pinned tag; ALL signing,
+# verification, and publication happen inside THAT run, whose Job B is still bound to
+# the protected `feeds-production` environment. So — for the pre-GA posture — every
+# weekly renewal still pauses for the SAME required-reviewer approval: this dispatcher
+# introduces NO unattended production publication.
+#
+# ─── FAIL-CLOSED ───────────────────────────────────────────────────────────────
+# When the master gate `vars.FEEDS_PUBLISH_ENABLED` is not exactly 'true', renewal is
+# a clean no-op (the dormant feed is never re-published). When the gate IS enabled the
+# pins are HARD-required: `vars.FEEDS_SIGNING_TAG` must be an exact feeds-vX.Y.Z tag,
+# `vars.FEEDS_SIGNING_TAG_SHA` an exact 40-hex commit, and the tag must be a LIGHTWEIGHT
+# tag resolving to that exact SHA — else the job fails and dispatches nothing.
+#
+# INVARIANTS pinned by feeds_publish_workflow_test.go (TestResignFeedsWorkflowInvariants).
+
+on:
+  schedule:
+    - cron: "17 4 * * 1"   # Mondays 04:17 UTC (off-peak; odd minute avoids the top-of-hour herd)
+  workflow_dispatch: {}
+
+# Renewal dispatcher: read the repo + trigger a workflow_dispatch. NOTHING else.
+permissions:
+  contents: read
+  actions: write     # dispatch publish-feeds.yml. NO id-token, NO R2/CF, NO environment.
+
+# Serialize renewals so two overlapping schedules/dispatches cannot race a double publish.
+concurrency:
+  group: feeds-resign
+  cancel-in-progress: false
+
+jobs:
+  dispatch-renewal:
+    name: Validate pins + dispatch publish-feeds at the protected tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      # Only api.github.com/github.com are contacted (gh api + gh workflow run).
+      - name: Harden runner (egress block)
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            github.com:443
+            api.github.com:443
+      - name: Validate master gate + signing-ref pin, then dispatch (NO local signing)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GATE: ${{ vars.FEEDS_PUBLISH_ENABLED }}
+          SIGNING_TAG: ${{ vars.FEEDS_SIGNING_TAG }}
+          SIGNING_TAG_SHA: ${{ vars.FEEDS_SIGNING_TAG_SHA }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Master gate: a dormant feed is never re-published. Clean no-op (green) so the
+          # weekly cron does not go red while the feed is disabled.
+          if [ "$GATE" != "true" ]; then
+            echo "master gate FEEDS_PUBLISH_ENABLED != 'true' — renewal is a no-op (feed dormant)"; exit 0
+          fi
+          # Gate enabled ⇒ the pins are HARD requirements (fail-closed on missing/malformed).
+          printf '%s' "$SIGNING_TAG" | grep -Eq '^feeds-v[0-9]+\.[0-9]+\.[0-9]+$' \
+            || { echo "FATAL: FEEDS_SIGNING_TAG '$SIGNING_TAG' is not an exact feeds-vX.Y.Z tag"; exit 1; }
+          printf '%s' "$SIGNING_TAG_SHA" | grep -Eq '^[0-9a-f]{40}$' \
+            || { echo "FATAL: FEEDS_SIGNING_TAG_SHA is not a 40-char hex commit SHA"; exit 1; }
+          # The tag must EXIST, be a LIGHTWEIGHT tag (object.type=commit — never moved/annotated),
+          # and resolve to the pinned SHA. Anything else ⇒ refuse to dispatch.
+          REF_JSON="$(gh api "repos/$REPO/git/refs/tags/$SIGNING_TAG")" \
+            || { echo "FATAL: tag $SIGNING_TAG does not exist"; exit 1; }
+          OBJ_TYPE="$(printf '%s' "$REF_JSON" | jq -r '.object.type')"
+          OBJ_SHA="$(printf '%s' "$REF_JSON" | jq -r '.object.sha')"
+          [ "$OBJ_TYPE" = "commit" ] \
+            || { echo "FATAL: $SIGNING_TAG must be a LIGHTWEIGHT tag (object.type=commit); got '$OBJ_TYPE'"; exit 1; }
+          [ "$OBJ_SHA" = "$SIGNING_TAG_SHA" ] \
+            || { echo "FATAL: $SIGNING_TAG resolves to '$OBJ_SHA' != pinned FEEDS_SIGNING_TAG_SHA '$SIGNING_TAG_SHA'"; exit 1; }
+          # Dispatch the REAL publisher at the pinned tag. It signs + verifies + publishes
+          # there; its Job B still requires feeds-production approval. Preserve the normal
+          # 336-hour (14-day) validity window explicitly. This dispatcher NEVER runs cosign.
+          # --repo is REQUIRED: this job has no checkout, so gh cannot infer the repo from a
+          # git remote and would fail to dispatch. $REPO (= github.repository) is set above and
+          # already used for the tag-resolution gh api call; mirrors resign-catalog.yml.
+          gh workflow run publish-feeds.yml --repo "$REPO" --ref "$SIGNING_TAG" -f validity_hours=336
+          echo "dispatched publish-feeds.yml @ $SIGNING_TAG (validity 336h); publication awaits feeds-production approval"
