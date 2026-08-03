@@ -9,11 +9,20 @@ the **same shared Control-Plane publication mechanism** (per the platform doctri
 boundaries) — this document defines that shared mechanism once. It also inventories what the existing
 Culvert SWG CP/DP implementation already provides as reusable prior art, and what is net-new for MCP.
 
-**Status:** PR-0 design artifact (Proposed). No runtime change. Repository facts are cited from
-[`VERIFIED-REPOSITORY-CONTEXT.md`](VERIFIED-REPOSITORY-CONTEXT.md); everything else is marked `[INFER]`,
-`[REC]`, or `[EXT]` per the claim legend below. Requirement IDs (`MCP-CPDP-###`, `MCP-HA-###`) are
-canonical in [`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md) and are only referenced, not
-renumbered, here. Threat IDs (`MCP-T-###`) are canonical in [`THREAT-MODEL.md`](THREAT-MODEL.md).
+**Status:** PR-0 design artifact (Proposed) — **IMPLEMENTED in PR-10.** The gap this document inventoried
+(the MISSING fields `catalog_revision`, `credential_revision`, `minimum_dp_version`, `content_hash`,
+`signature`, and a hash-keyed `acknowledgement`, plus a genuine whole-snapshot validator and snapshot
+signing) is now delivered in `internal/mcp/cpdp` (+ `apply`, `publication`): an immutable **signed** envelope
+carried as two OPTIONAL `*cpdp.Envelope` fields on the existing `ConfigSnapshot` (presence semantics; absence
+never wipes DP-local MCP state; MCP disabled ⇒ byte-identical SWG snapshot), whole-snapshot
+signature/schema/caps/revisions/min-version validation with **no partial apply**, the `CheckEpoch`/
+`CommitObservedEpoch` split reusing the ADR-0005 lease epoch, persist-before-swap atomic DP activation with
+current+previous retention and fail-static last-known-good, hash-bound acknowledgements, and operator
+rollback via a signed hash-bound directive through the PR-9 four-eyes workflow with a PR-8 P-CRIT
+commit-before-sign/push/swap. Requirement IDs (`MCP-CPDP-###`, `MCP-HA-###`) are canonical in
+[`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md). Threat IDs (`MCP-T-###`) are canonical in
+[`THREAT-MODEL.md`](THREAT-MODEL.md). Original `[FACT]`/`[INFER]`/`[REC]`/`[EXT]` prior-art citations below
+are retained as the design record.
 
 ## Claim legend
 
