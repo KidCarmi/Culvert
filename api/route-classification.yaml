@@ -3282,3 +3282,93 @@ routes:
     audit_expected: true
     danger_level: high
     documented: true
+  - route: "/api/mcp/rollout"
+    method: "GET"
+    handler: "apiMCPRollout"
+    domain: "mcp"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
+  - route: "/api/mcp/rollout/transition"
+    method: "POST"
+    handler: "apiMCPRolloutTransition"
+    domain: "mcp"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: true
+    audit_expected: true
+    danger_level: high
+    documented: true
+  - route: "/api/mcp/rollout/scope"
+    method: "GET"
+    handler: "apiMCPRolloutScope"
+    domain: "mcp"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
+  - route: "/api/mcp/rollout/scope"
+    method: "PUT"
+    handler: "apiMCPRolloutScope"
+    domain: "mcp"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: true
+    audit_expected: true
+    danger_level: high
+    documented: true
+  - route: "/api/mcp/rollout/evidence"
+    method: "GET"
+    handler: "apiMCPRolloutEvidence"
+    domain: "mcp"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
+  - route: "/api/mcp/rollout/emergency"
+    method: "POST"
+    handler: "apiMCPRolloutEmergency"
+    domain: "mcp"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: true
+    audit_expected: true
+    danger_level: high
+    documented: true
+  - route: "/api/mcp/rollout/rehearse-rollback"
+    method: "POST"
+    handler: "apiMCPRolloutRehearse"
+    domain: "mcp"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: true
+    audit_expected: true
+    danger_level: medium
+    documented: true
+  - route: "/api/mcp/executions"
+    method: "GET"
+    handler: "apiMCPExecutions"
+    domain: "mcp"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
+  - route: "/api/mcp/upstream-health"
+    method: "GET"
+    handler: "apiMCPUpstreamHealth"
+    domain: "mcp"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
