@@ -120,6 +120,23 @@ type Store struct {
 	hooks    []Webhook
 	filePath string
 
+	// saveMu serializes persistence so that disk I/O happens with mu RELEASED.
+	// mu guards the in-memory hook set that HasSubscriber reads on the proxy
+	// request path; save() fsyncs both the file and its directory, so holding mu
+	// across it would stall every blocked request and DNS-failure subscriber
+	// check for the duration of a disk write — unbounded on a degraded volume.
+	// saveMu is taken only AFTER mu is released, so a mutation never waits on an
+	// in-flight fsync while holding the lock readers need either.
+	//
+	// Letting writers reach the disk out of order is the price of that: each
+	// snapshot carries a monotonic sequence number (saveSeq, guarded by mu) and
+	// the writer drops any snapshot older than the last one persisted (savedSeq,
+	// guarded by saveMu). The newest snapshot always wins, so disk converges to
+	// the latest state rather than to whichever writer happened to finish last.
+	saveMu   sync.Mutex
+	saveSeq  uint64 // guarded by mu
+	savedSeq uint64 // guarded by saveMu
+
 	histMu  sync.Mutex
 	history []Delivery // ring buffer, newest last
 
@@ -193,15 +210,67 @@ func (as *Store) Init(path string) {
 	}
 }
 
-func (as *Store) save() {
+// noopSave is the persistence step for a mutation that had nothing to write
+// (no configured file path, or no matching webhook).
+var noopSave = func() {}
+
+// beginSaveLocked snapshots the state persistence needs and returns the closure
+// that performs the actual disk I/O. Callers hold mu on entry and MUST release
+// it before invoking the returned closure.
+//
+// This split is what keeps fsync off the read path. save() encrypts each secret
+// (which may read a key file) and calls fileutil.AtomicWrite, which fsyncs the
+// temp file AND the parent directory. Previously that ran under mu, so an
+// operator adding a webhook blocked every concurrent reader — including
+// HasSubscriber, which the proxy now consults synchronously on the block and
+// DNS-failure paths. The returned closure touches no shared state until mu is
+// released, so neither the write nor the wait for a preceding write can stall a
+// reader. Ordering is restored by sequence number rather than by lock order (see
+// the saveMu/saveSeq comment on Store).
+func (as *Store) beginSaveLocked() func() {
 	if as.filePath == "" {
+		return noopSave
+	}
+	as.saveSeq++
+	seq := as.saveSeq
+	path := as.filePath
+	hooks := make([]Webhook, len(as.hooks))
+	copy(hooks, as.hooks)
+	return func() {
+		if saveBarrier != nil {
+			saveBarrier()
+		}
+		as.saveMu.Lock()
+		defer as.saveMu.Unlock()
+		if seq < as.savedSeq {
+			return // a newer snapshot already reached disk; this one is stale
+		}
+		as.savedSeq = seq
+		as.save(path, hooks)
+	}
+}
+
+// saveBarrier is a test-only seam invoked at the very start of the persist
+// closure — that is, at the first instant persistence runs. Production leaves it
+// nil (a nil check, no behavior). It exists because the mu-is-released invariant
+// is otherwise untestable without a scheduling race: a test cannot otherwise know
+// when a mutation has reached persistence, so a reader might complete before the
+// writer ever took the lock and pass a broken implementation. Mirrors the
+// existing retryFile test seam in this file.
+var saveBarrier func()
+
+// save encrypts and writes the given hook snapshot. It must be called with mu
+// RELEASED and saveMu held (see beginSaveLocked) — it performs fsync-backed
+// disk I/O and must never block a reader.
+func (as *Store) save(path string, hooks []Webhook) {
+	if path == "" {
 		return
 	}
 	// RISK-003: encrypt each secret before it touches disk. The in-memory
 	// as.hooks keeps the cleartext (needed for HMAC signing), so encrypt a copy.
-	dir := filepath.Dir(as.filePath)
-	encHooks := make([]Webhook, len(as.hooks))
-	copy(encHooks, as.hooks)
+	dir := filepath.Dir(path)
+	encHooks := make([]Webhook, len(hooks))
+	copy(encHooks, hooks)
 	for i := range encHooks {
 		enc, err := encryptWebhookSecret(encHooks[i].Secret, dir)
 		if err != nil {
@@ -215,8 +284,8 @@ func (as *Store) save() {
 	// RISK-017 closure made this path live in production for the first time,
 	// so it was upgraded from the pre-Bucket-4 WriteFile+Rename to the
 	// fsynced atomic writer in the same change.
-	if err := fileutil.AtomicWrite(as.filePath, data, 0o600); err != nil {
-		obs.Printf("AlertStore: write %s: %v", as.filePath, err)
+	if err := fileutil.AtomicWrite(path, data, 0o600); err != nil {
+		obs.Printf("AlertStore: write %s: %v", path, err)
 	}
 }
 
@@ -261,9 +330,10 @@ func (as *Store) HasSubscriber(event string) bool {
 func (as *Store) Add(h Webhook) Webhook {
 	h.ID = fmt.Sprintf("%d", time.Now().UnixNano())
 	as.mu.Lock()
-	defer as.mu.Unlock()
 	as.hooks = append(as.hooks, h)
-	as.save()
+	persist := as.beginSaveLocked()
+	as.mu.Unlock()
+	persist() // fsync-backed disk I/O, deliberately outside mu
 	sanitised := h
 	sanitised.Secret = ""
 	return sanitised
@@ -273,34 +343,38 @@ func (as *Store) Add(h Webhook) Webhook {
 // preserves the existing secret.
 func (as *Store) Update(id string, upd Webhook) bool {
 	as.mu.Lock()
-	defer as.mu.Unlock()
-	for i, h := range as.hooks {
-		if h.ID != id {
+	persist, ok := noopSave, false
+	for i := range as.hooks {
+		if as.hooks[i].ID != id {
 			continue
 		}
 		upd.ID = id
 		if upd.Secret == "" {
-			upd.Secret = h.Secret // preserve existing secret if not updated
+			upd.Secret = as.hooks[i].Secret // preserve existing secret if not updated
 		}
 		as.hooks[i] = upd
-		as.save()
-		return true
+		persist, ok = as.beginSaveLocked(), true
+		break
 	}
-	return false
+	as.mu.Unlock()
+	persist() // fsync-backed disk I/O, deliberately outside mu
+	return ok
 }
 
 // Delete removes the webhook with the given ID.
 func (as *Store) Delete(id string) bool {
 	as.mu.Lock()
-	defer as.mu.Unlock()
-	for i, h := range as.hooks {
-		if h.ID == id {
+	persist, ok := noopSave, false
+	for i := range as.hooks {
+		if as.hooks[i].ID == id {
 			as.hooks = append(as.hooks[:i], as.hooks[i+1:]...)
-			as.save()
-			return true
+			persist, ok = as.beginSaveLocked(), true
+			break
 		}
 	}
-	return false
+	as.mu.Unlock()
+	persist() // fsync-backed disk I/O, deliberately outside mu
+	return ok
 }
 
 // GetByID returns the webhook with the given ID (secret included — callers
