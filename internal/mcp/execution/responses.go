@@ -62,7 +62,7 @@ func errorResult(id jsonrpc.ID, reason mcperr.Reason) []byte {
 func executedResult(id jsonrpc.ID, result json.RawMessage) []byte {
 	env := map[string]any{"jsonrpc": "2.0"}
 	if len(result) > 0 {
-		env["result"] = json.RawMessage(result)
+		env["result"] = result
 	} else {
 		env["result"] = map[string]any{}
 	}

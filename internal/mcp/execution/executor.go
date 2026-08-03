@@ -82,7 +82,7 @@ func New(cfg Config) (*Executor, error) {
 func (e *Executor) Execute(ctx context.Context, in runtime.ExecInput) runtime.ExecOutput {
 	// A capability-local kill switch stops all admission immediately.
 	if e.cfg.State.Killed() {
-		return e.blocked(in, mcperr.ReasonRolloutEmergencyActive, mapAction(in.Decision.Action), false)
+		return e.blocked(in, mcperr.ReasonRolloutEmergencyActive, false)
 	}
 	subj := subjectFor(in)
 	action := mapAction(in.Decision.Action)
@@ -98,16 +98,23 @@ func (e *Executor) Execute(ctx context.Context, in runtime.ExecInput) runtime.Ex
 	case rollout.EffectRecordOnly:
 		return e.recordOnly(in, res)
 	case rollout.EffectBlock:
-		return e.blocked(in, res.BlockReason, res.EvaluatedAction, res.ShadowOverride)
+		return e.blocked(in, res.BlockReason, res.ShadowOverride)
 	case rollout.EffectExecute:
+		if action == rollout.ActionKindRedaction {
+			// ALLOW_WITH_REDACTION requires a re-validated request-argument transform
+			// before egress; the guarded-execute path performs NO request redaction, so
+			// fail closed rather than send untransformed arguments upstream (mirrors the
+			// decision-only path's fail-closed redaction guard in runtime/policy.go).
+			return e.blocked(in, mcperr.ReasonRedactionFailed, false)
+		}
 		if needsAllowance(action) {
 			if !e.allowances.consume(in, action, e.cfg.Clock()) {
-				return e.blocked(in, mcperr.ReasonAllowanceConsumed, action, false)
+				return e.blocked(in, mcperr.ReasonAllowanceConsumed, false)
 			}
 		}
 		return e.runExecute(ctx, in, subj, res)
 	default:
-		return e.blocked(in, mcperr.ReasonRolloutModeInvalid, action, false)
+		return e.blocked(in, mcperr.ReasonRolloutModeInvalid, false)
 	}
 }
 
@@ -126,8 +133,9 @@ func (e *Executor) recordOnly(in runtime.ExecInput, res rollout.Resolution) runt
 	}
 }
 
-// blocked returns a terminal JSON-RPC error result.
-func (e *Executor) blocked(in runtime.ExecInput, reason mcperr.Reason, evaluated rollout.ActionKind, shadowOverride bool) runtime.ExecOutput {
+// blocked returns a terminal JSON-RPC error result. The evaluated policy action is
+// read from in.Decision (never softened), so it is not a parameter.
+func (e *Executor) blocked(in runtime.ExecInput, reason mcperr.Reason, shadowOverride bool) runtime.ExecOutput {
 	e.cfg.Metrics.ObserveBlock(in.Capability.String(), reason)
 	return runtime.ExecOutput{
 		Status:          200,
@@ -146,8 +154,9 @@ func (e *Executor) blocked(in runtime.ExecInput, reason mcperr.Reason, evaluated
 func subjectFor(in runtime.ExecInput) rollout.Subject {
 	s := rollout.Subject{
 		Capability:  rollout.CapabilityGateway,
-		Tenant:      string(in.Input.Principal.Tenant),
+		Tenant:      in.Input.Principal.Tenant,
 		PrincipalID: in.Input.Principal.SubjectID,
+		Groups:      in.Input.Principal.Groups,
 		Operation:   mapRisk(in.Input.Operation.Class),
 	}
 	if in.Input.Server != nil {

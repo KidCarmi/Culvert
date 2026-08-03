@@ -60,6 +60,16 @@ func DefaultLimits() Limits { l, _ := NewLimits(LimitConfig{}); return l }
 
 // NewLimits validates and freezes a bounds set, filling zero fields with defaults.
 func NewLimits(c LimitConfig) (Limits, error) {
+	out := fillLimitDefaults(c)
+	if limitConfigHasNegative(out) {
+		return Limits{}, mcperr.New(mcperr.ReasonListenerConfigInvalid, "upstreamclient.limits", "negative limit")
+	}
+	return Limits{c: out, valid: true}, nil
+}
+
+// fillLimitDefaults replaces each zero field with its safe default. MaxRedirects is
+// intentionally omitted — its zero value (reject redirects) IS the intended default.
+func fillLimitDefaults(c LimitConfig) LimitConfig {
 	out := c
 	if out.MaxConnsPerServer == 0 {
 		out.MaxConnsPerServer = defMaxConnsPerServer
@@ -73,7 +83,6 @@ func NewLimits(c LimitConfig) (Limits, error) {
 	if out.MaxResponseBytes == 0 {
 		out.MaxResponseBytes = defMaxResponseBytes
 	}
-	// MaxRedirects default is 0 (reject) — a zero value is the intended default.
 	if out.ConnectTimeout == 0 {
 		out.ConnectTimeout = defConnectTimeout
 	}
@@ -89,12 +98,14 @@ func NewLimits(c LimitConfig) (Limits, error) {
 	if out.MaxReadRetries == 0 {
 		out.MaxReadRetries = defMaxReadRetries
 	}
-	if out.MaxConnsPerServer < 0 || out.MaxQueuePerServer < 0 || out.MaxInFlight < 0 ||
-		out.MaxResponseBytes < 0 || out.MaxRedirects < 0 || out.MaxReadRetries < 0 ||
-		out.ConnectTimeout < 0 || out.TLSTimeout < 0 || out.RequestTimeout < 0 || out.PinTTL < 0 {
-		return Limits{}, mcperr.New(mcperr.ReasonListenerConfigInvalid, "upstreamclient.limits", "negative limit")
-	}
-	return Limits{c: out, valid: true}, nil
+	return out
+}
+
+// limitConfigHasNegative reports whether any bound is negative (a fail-closed error).
+func limitConfigHasNegative(c LimitConfig) bool {
+	return c.MaxConnsPerServer < 0 || c.MaxQueuePerServer < 0 || c.MaxInFlight < 0 ||
+		c.MaxResponseBytes < 0 || c.MaxRedirects < 0 || c.MaxReadRetries < 0 ||
+		c.ConnectTimeout < 0 || c.TLSTimeout < 0 || c.RequestTimeout < 0 || c.PinTTL < 0
 }
 
 // Valid reports whether the limits were constructed.

@@ -153,7 +153,18 @@ func apiMCPRolloutEmergency(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
+	// Honor the capability from the JSON body (the documented API + UI contract). A
+	// present-but-invalid value fails closed; an omitted value falls back to the
+	// query-string capability for backward compatibility.
 	capab := mcpRolloutCapability(r)
+	if req.Capability != "" {
+		parsed, err := rollout.ParseCapability(req.Capability)
+		if err != nil {
+			http.Error(w, "rollout_capability_invalid", http.StatusBadRequest)
+			return
+		}
+		capab = parsed
+	}
 	switch req.Action {
 	case "clear":
 		getMCPRollout().clearEmergency(capab)

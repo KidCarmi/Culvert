@@ -121,7 +121,7 @@ func elapsed(startUnix int64, now time.Time) time.Duration {
 // REPORTING gate only — it never authorizes Production (the qualification verifier
 // does). It returns (met, reason) where reason is a fail-closed classification when
 // not met.
-func (e EvidenceSummary) PromotionEvidenceMet(from, to Mode, now time.Time) (bool, string) {
+func (e EvidenceSummary) PromotionEvidenceMet(from, to Mode, now time.Time) (met bool, reason string) {
 	if e.OpenCriticalHighDefects > 0 {
 		return false, "open critical/high defects"
 	}

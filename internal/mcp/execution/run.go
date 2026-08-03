@@ -29,13 +29,13 @@ import (
 func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollout.Subject, res rollout.Resolution) runtime.ExecOutput {
 	if e.cfg.Events == nil {
 		// No durability seam ⇒ fail closed (commit-before-side-effect is mandatory).
-		return e.blocked(in, mcperr.ReasonEventDurabilityDegraded, mapAction(in.Decision.Action), false)
+		return e.blocked(in, mcperr.ReasonEventDurabilityDegraded, false)
 	}
 	if in.Server == nil {
-		return e.blocked(in, mcperr.ReasonUpstreamServerUnusable, mapAction(in.Decision.Action), false)
+		return e.blocked(in, mcperr.ReasonUpstreamServerUnusable, false)
 	}
 	if !in.Server.Usable() {
-		return e.blocked(in, mcperr.ReasonUpstreamServerUnusable, mapAction(in.Decision.Action), false)
+		return e.blocked(in, mcperr.ReasonUpstreamServerUnusable, false)
 	}
 	target := upstreamclient.Target{
 		ServerID:       string(in.Server.ID),
@@ -65,16 +65,16 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 		if err := e.cfg.Events.CommitThenAct(decisionFacts(in), func(spool.CommitReceipt) error {
 			return callUpstream("")
 		}); err != nil {
-			return e.blocked(in, mcperr.ReasonOf(err), mapAction(in.Decision.Action), false)
+			return e.blocked(in, mcperr.ReasonOf(err), false)
 		}
 	}
 
 	if upErr != nil {
 		e.cfg.Metrics.ObserveUpstream(in.Capability.String(), "error")
-		return e.blocked(in, mcperr.ReasonOf(upErr), mapAction(in.Decision.Action), false)
+		return e.blocked(in, mcperr.ReasonOf(upErr), false)
 	}
 	if upResp == nil {
-		return e.blocked(in, mcperr.ReasonUpstreamCallFailed, mapAction(in.Decision.Action), false)
+		return e.blocked(in, mcperr.ReasonUpstreamCallFailed, false)
 	}
 	e.cfg.Metrics.ObserveUpstream(in.Capability.String(), "success")
 	if upResp.Error != nil {
@@ -91,7 +91,16 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 	}, in.Now)
 	if ir.HardFail {
 		e.cfg.Metrics.ObserveDLPBlock(in.Capability.String(), true)
-		return e.blocked(in, ir.HardReason, mapAction(in.Decision.Action), false)
+		return e.blocked(in, ir.HardReason, false)
+	}
+	// A non-hard redact/block disposition (e.g. the default profile classifies
+	// financial data as DispRedact) still requires transformation before egress. The
+	// guarded-execute path performs no response redaction, so anything but a
+	// pass/label disposition fails closed rather than forwarding the untransformed
+	// result to the client.
+	if disp := ir.Summary.Disposition; disp != inspection.DispPass && disp != inspection.DispLabel {
+		e.cfg.Metrics.ObserveDLPBlock(in.Capability.String(), true)
+		return e.blocked(in, mcperr.ReasonRedactionFailed, false)
 	}
 
 	// Best-effort outcome event (ordinary criticality; never blocks the response).
@@ -116,14 +125,14 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 func (e *Executor) materializeAndCall(ctx context.Context, in runtime.ExecInput, profileRef string, callUpstream func(string) error) (runtime.ExecOutput, bool) {
 	plan, err := e.cfg.Broker.Plan(planInput(in, profileRef))
 	if err != nil {
-		return e.blocked(in, mcperr.ReasonOf(err), mapAction(in.Decision.Action), false), true
+		return e.blocked(in, mcperr.ReasonOf(err), false), true
 	}
 	gate := e.cfg.Events.NewCredentialGate()
 	_, mErr := e.cfg.Broker.Materialize(ctx, plan, gate, func(kind profile.CredentialKind, m *provider.Material) error {
 		return callUpstream(authFromMaterial(kind, m))
 	})
 	if mErr != nil {
-		return e.blocked(in, mcperr.ReasonOf(mErr), mapAction(in.Decision.Action), false), true
+		return e.blocked(in, mcperr.ReasonOf(mErr), false), true
 	}
 	return runtime.ExecOutput{}, false
 }

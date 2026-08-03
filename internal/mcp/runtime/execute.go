@@ -96,11 +96,12 @@ func (p *pipeline) dispatchExecute(rb *recBuilder, req Request, msg jsonrpc.Mess
 	if out.ExecutionState != "" {
 		rb.rec.ExecutionState = out.ExecutionState
 	}
-	if out.Executed {
+	switch {
+	case out.Executed:
 		p.ctr.requestsExecuted.Add(1)
-	} else if out.Disposition == DispRejected {
+	case out.Disposition == DispRejected:
 		p.ctr.requestsRejected.Add(1)
-	} else {
+	default:
 		p.ctr.observeOnly.Add(1)
 	}
 	return p.finish(rb, Outcome{Status: out.Status, Disposition: out.Disposition, Reason: out.Reason, ResponseBody: out.ResponseBody})

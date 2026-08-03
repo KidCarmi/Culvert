@@ -133,5 +133,7 @@ func EmergencyTarget(from Mode, disable bool) Mode {
 	if disable || !from.Valid() || from == ModeDisabled {
 		return ModeDisabled
 	}
-	return Mode(from.Rank() - 1)
+	// Modes are contiguous (Rank == raw value) and from > Disabled here, so the
+	// prior rung is from-1 with no underflow — stays in the Mode type (no int cast).
+	return from - 1
 }
