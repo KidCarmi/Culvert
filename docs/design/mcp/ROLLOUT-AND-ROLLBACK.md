@@ -12,10 +12,18 @@ Culvert Management MCP Server and the MCP Security Gateway — keep **separate**
 kill switches, and separate quarantine/rollback state; nothing below merges their enforcement engines or
 trust boundaries.
 
-**Status: PR-0 design artifact (Proposed).** Nothing described here is implemented. No listener, mode
-switch, rollback mechanism, or runbook below exists in the repository today. Duration figures (shadow
-≥14 days, canary ≥7 days, soak ≥24 hours) and the rollback-time figure are **design targets**, never
-measured results, until a PR-11 / Production Qualification evidence pack says otherwise. Claim legend:
+**Status: PR-11 IMPLEMENTED (guarded execution / Shadow / Canary), disabled by default.** The mode ladder
+(Disabled → Observe → Shadow → Canary → Production), the capability-local rollout state + kill switch, the
+central hard-failure classifier, the immutable revisioned scope, the bounded Model-A upstream client, the
+guarded execution pipeline (commit-before-side-effect, DLP-before-egress, credential containment), and the
+signed CP→DP rollout distribution now exist in `internal/mcp/rollout`, `internal/mcp/upstreamclient`,
+`internal/mcp/execution`, and the `package main` composition (all disabled by default; the SWG request path
+is unaffected when off). **Observe remains non-executing; Shadow and Canary execute only inside an exact
+approved scope for Model A (local-client); Production remains qualification-locked** and is unreachable
+without a machine-verifiable receipt from the separate Production Qualification gate (this build ships no
+issuer). Duration figures (shadow ≥14 days, canary ≥7 days, soak ≥24 hours) and the rollback-time figure
+are **measurable targets with live machinery, NOT completed rollout evidence** — the Production
+Qualification evidence pack, not this PR, supplies real evidence. Claim legend:
 **[FACT]** (verified by repository read, traced to [VERIFIED-REPOSITORY-CONTEXT.md](VERIFIED-REPOSITORY-CONTEXT.md)),
 **[INFER]** (architectural inference), **[REC]** (recommendation), **[EXT]** (externally unverified).
 
