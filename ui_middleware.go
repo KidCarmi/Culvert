@@ -219,29 +219,35 @@ func isSameOrigin(r *http.Request, origin string) bool {
 	return false
 }
 
+// isPublicUIAuthPath reports whether path is always public in uiAuthMiddleware:
+// setup bootstrap, specific auth endpoints (login/logout/status), IdP
+// callbacks, /proxy.pac (Windows clients need it without credentials), and
+// the cluster node-bootstrap dispatch (apiBootstrapRouter): its own
+// single-use, time-limited enrollment token IS the auth (see bootstrap.go
+// and the uiRoutes "gating delegated to handler" note) — the generated
+// onboarding `curl` runs from a brand-new host that has no session cookie or
+// credentials, so this must stay reachable even after cfg.IsConfigured() is
+// true.
+// NOTE: /api/auth/users is intentionally NOT in this list — it requires admin role.
+func isPublicUIAuthPath(path string) bool {
+	return strings.HasPrefix(path, "/api/setup") ||
+		path == "/api/auth/login" ||
+		path == "/api/auth/logout" ||
+		path == "/api/auth/status" ||
+		strings.HasPrefix(path, "/api/auth/totp") ||
+		strings.HasPrefix(path, "/auth/") ||
+		path == "/proxy.pac" ||
+		strings.HasPrefix(path, "/pac/") ||
+		strings.HasPrefix(path, "/api/cluster/bootstrap/")
+}
+
 // uiAuthMiddleware gates /api/ endpoints with session-cookie auth and injects
 // the authenticated user's UIRole into the request context for RBAC checks.
 // Static assets (/) and bootstrap + auth endpoints are always public.
 // HTTP Basic Auth is accepted as a fallback for CLI / API clients.
 func uiAuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Always public: setup bootstrap, specific auth endpoints (login/logout/status),
-		// IdP callbacks, /proxy.pac (Windows clients need it without credentials), and
-		// the cluster node-bootstrap dispatch (apiBootstrapRouter): its own single-use,
-		// time-limited enrollment token IS the auth (see bootstrap.go and the
-		// uiRoutes "gating delegated to handler" note) — the generated onboarding
-		// `curl` runs from a brand-new host that has no session cookie or credentials,
-		// so this must stay reachable even after cfg.IsConfigured() is true.
-		// NOTE: /api/auth/users is intentionally NOT in this list — it requires admin role.
-		if strings.HasPrefix(r.URL.Path, "/api/setup") ||
-			r.URL.Path == "/api/auth/login" ||
-			r.URL.Path == "/api/auth/logout" ||
-			r.URL.Path == "/api/auth/status" ||
-			strings.HasPrefix(r.URL.Path, "/api/auth/totp") ||
-			strings.HasPrefix(r.URL.Path, "/auth/") ||
-			r.URL.Path == "/proxy.pac" ||
-			strings.HasPrefix(r.URL.Path, "/pac/") ||
-			strings.HasPrefix(r.URL.Path, "/api/cluster/bootstrap/") {
+		if isPublicUIAuthPath(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}
