@@ -1,0 +1,218 @@
+// Package execution implements the PR-11 guarded Model-A execution path — the
+// runtime.ExecutionProvider that turns the decision-only Gateway into a bounded,
+// rollout-mode-gated executor. It is wired ONLY for the Gateway capability and
+// ONLY when rollout distribution arms it (disabled by default). It composes the
+// existing engines without weakening any of them: rollout (mode/scope/hard-failure),
+// the PR-6 policy decision (already computed), PR-7 inspection/DLP for the response,
+// the PR-4 credential broker (materialization with no token passthrough), the PR-8
+// events manager (commit-before-side-effect), and the PR-11 upstream client.
+package execution
+
+import (
+	"context"
+	"encoding/json"
+	"time"
+
+	"github.com/KidCarmi/Culvert/internal/mcp/credentials/broker"
+	"github.com/KidCarmi/Culvert/internal/mcp/events"
+	"github.com/KidCarmi/Culvert/internal/mcp/inspection"
+	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
+	"github.com/KidCarmi/Culvert/internal/mcp/policy"
+	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
+	"github.com/KidCarmi/Culvert/internal/mcp/runtime"
+	"github.com/KidCarmi/Culvert/internal/mcp/upstreamclient"
+)
+
+// UpstreamCaller is the injected upstream client (interface for testability).
+type UpstreamCaller interface {
+	Call(ctx context.Context, target upstreamclient.Target, method string, params json.RawMessage, opts upstreamclient.CallOptions) (*upstreamclient.Response, error)
+}
+
+// Config wires an Executor for the Gateway capability.
+type Config struct {
+	// State is the capability-local rollout state (Gateway). Required.
+	State *rollout.State
+	// Broker materializes the approved-server credential (nil ⇒ no credential is
+	// attached; the upstream call carries no Authorization).
+	Broker *broker.Broker
+	// Events is the PR-8 durable-event manager. Required for the commit-before-
+	// side-effect guarantee; a nil Events fails every execution closed.
+	Events *events.Manager
+	// Upstream is the bounded upstream MCP client. Required.
+	Upstream UpstreamCaller
+	// ResponseProfile is the PR-7 inspection profile used to inspect + DLP the
+	// upstream response before returning it to the client.
+	ResponseProfile inspection.Profile
+	// Metrics is the optional rollout telemetry sink.
+	Metrics Metrics
+	// Clock is injected for tests; nil ⇒ time.Now.
+	Clock func() time.Time
+	// Actor labels events emitted by this executor.
+	Actor string
+}
+
+// Executor implements runtime.ExecutionProvider.
+type Executor struct {
+	cfg        Config
+	allowances *allowanceStore
+}
+
+var _ runtime.ExecutionProvider = (*Executor)(nil)
+
+// New constructs an Executor. It fails closed if the required collaborators are
+// missing.
+func New(cfg Config) (*Executor, error) {
+	if cfg.State == nil {
+		return nil, mcperr.New(mcperr.ReasonListenerConfigInvalid, "execution", "nil rollout state")
+	}
+	if cfg.Upstream == nil {
+		return nil, mcperr.New(mcperr.ReasonListenerConfigInvalid, "execution", "nil upstream client")
+	}
+	if cfg.Clock == nil {
+		cfg.Clock = time.Now
+	}
+	if cfg.Metrics == nil {
+		cfg.Metrics = noopMetrics{}
+	}
+	return &Executor{cfg: cfg, allowances: newAllowanceStore()}, nil
+}
+
+// Execute is the runtime.ExecutionProvider entry. It resolves the effective
+// rollout disposition and dispatches record-only / block / execute.
+func (e *Executor) Execute(ctx context.Context, in runtime.ExecInput) runtime.ExecOutput {
+	// A capability-local kill switch stops all admission immediately.
+	if e.cfg.State.Killed() {
+		return e.blocked(in, mcperr.ReasonRolloutEmergencyActive, mapAction(in.Decision.Action), false)
+	}
+	subj := subjectFor(in)
+	action := mapAction(in.Decision.Action)
+	hardFail, hardReason := hardFailure(in)
+
+	// Resolve optimistically (obligations satisfied) to learn the disposition; only
+	// consume an allowance when we would actually execute (so a failed pre-execution
+	// hard control never consumes it).
+	res := e.cfg.State.ResolveFor(subj, action, hardFail, hardReason, true)
+	e.cfg.Metrics.ObserveResolution(in.Capability.String(), res)
+
+	switch res.Disposition {
+	case rollout.EffectRecordOnly:
+		return e.recordOnly(in, res)
+	case rollout.EffectBlock:
+		return e.blocked(in, res.BlockReason, res.EvaluatedAction, res.ShadowOverride)
+	case rollout.EffectExecute:
+		if needsAllowance(action) {
+			if !e.allowances.consume(in, action, e.cfg.Clock()) {
+				return e.blocked(in, mcperr.ReasonAllowanceConsumed, action, false)
+			}
+		}
+		return e.runExecute(ctx, in, subj, res)
+	default:
+		return e.blocked(in, mcperr.ReasonRolloutModeInvalid, action, false)
+	}
+}
+
+// recordOnly returns the decision-only (observe) result: the true policy action is
+// recorded, no upstream call is made.
+func (e *Executor) recordOnly(in runtime.ExecInput, res rollout.Resolution) runtime.ExecOutput {
+	return runtime.ExecOutput{
+		Status:          200,
+		Disposition:     dispObserve,
+		Reason:          mcperr.ReasonObserveOnly,
+		ResponseBody:    observeResult(in.MessageID, in.Decision),
+		ExecutionState:  "not_implemented",
+		EvaluatedAction: in.Decision.Action.String(),
+		EffectiveAction: "record_only",
+		ShadowOverride:  res.ShadowOverride,
+	}
+}
+
+// blocked returns a terminal JSON-RPC error result.
+func (e *Executor) blocked(in runtime.ExecInput, reason mcperr.Reason, evaluated rollout.ActionKind, shadowOverride bool) runtime.ExecOutput {
+	e.cfg.Metrics.ObserveBlock(in.Capability.String(), reason)
+	return runtime.ExecOutput{
+		Status:          200,
+		Disposition:     dispReject,
+		Reason:          reason,
+		ResponseBody:    errorResult(in.MessageID, reason),
+		ExecutionState:  "blocked",
+		EvaluatedAction: in.Decision.Action.String(),
+		EffectiveAction: "block",
+		HardFailure:     rollout.IsHardFailure(reason),
+		ShadowOverride:  shadowOverride,
+	}
+}
+
+// subjectFor builds the rollout.Subject from the resolved policy input.
+func subjectFor(in runtime.ExecInput) rollout.Subject {
+	s := rollout.Subject{
+		Capability:  rollout.CapabilityGateway,
+		Tenant:      string(in.Input.Principal.Tenant),
+		PrincipalID: in.Input.Principal.SubjectID,
+		Operation:   mapRisk(in.Input.Operation.Class),
+	}
+	if in.Input.Server != nil {
+		s.ServerID = in.Input.Server.ServerID
+	}
+	if in.Input.Tool != nil {
+		s.ToolName = in.Input.Tool.Name
+		s.ToolFingerprint = in.Input.Tool.FingerprintHash
+	}
+	if in.Input.Agent != nil {
+		s.AgentID = in.Input.Agent.AgentID
+	}
+	s.ClientID = in.Input.Client.ClientID
+	return s
+}
+
+// mapRisk maps a policy operation class to a rollout risk class.
+func mapRisk(c policy.OperationClass) rollout.RiskClass {
+	switch c {
+	case policy.OpWrite:
+		return rollout.RiskWrite
+	case policy.OpDestructive:
+		return rollout.RiskDestructive
+	default:
+		// Read/Discovery/Control are treated as read-only/reversible for scoping.
+		return rollout.RiskRead
+	}
+}
+
+// hardFailure reports whether a fixed hard failure fired for this request (a policy
+// hard override or a PR-7 inspection hard block).
+func hardFailure(in runtime.ExecInput) (bool, mcperr.Reason) {
+	if in.Inspection != nil && in.Inspection.HardFail {
+		return true, in.Inspection.HardReason
+	}
+	if in.Decision.HardOverride {
+		return true, policyHardReason(in.Decision)
+	}
+	return false, mcperr.ReasonNone
+}
+
+// policyHardReason maps a policy hard-override decision to a classified reason for
+// the hard-failure taxonomy.
+func policyHardReason(d policy.Decision) mcperr.Reason {
+	switch d.Reason {
+	case policy.ReasonTenantMismatch:
+		return mcperr.ReasonTenantMismatch
+	case policy.ReasonServerIdentityChanged:
+		return mcperr.ReasonServerIdentityMismatch
+	case policy.ReasonServerDisabled:
+		return mcperr.ReasonUnregisteredServer
+	case policy.ReasonToolUnknown:
+		return mcperr.ReasonUnknownTool
+	case policy.ReasonToolPrivilegeExpansion:
+		return mcperr.ReasonPrivilegeExpansion
+	case policy.ReasonManagementMutationNotApproved:
+		return mcperr.ReasonManagementToolUnauthorized
+	case policy.ReasonIdentityAmbiguous:
+		return mcperr.ReasonSessionIdentityBound
+	default:
+		return mcperr.ReasonExecutionNotPermitted
+	}
+}
+
+// needsAllowance reports whether the action consumes a per-call/session allowance.
+func needsAllowance(a rollout.ActionKind) bool {
+	return a == rollout.ActionKindAllowOnce || a == rollout.ActionKindAllowSession
+}
