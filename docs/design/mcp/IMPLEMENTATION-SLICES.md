@@ -239,6 +239,27 @@ rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted AD
 - **Acceptance:** production-readiness evidence complete; hard failures blocked even in Shadow.
 - **Rollback:** emergency disable → Observe/Disabled; snapshot rollback.
 - **Owner:** SRE/Sec. **Reviewer:** Ops Readiness. **Release gate:** rollout guardrails green.
+- **Implementation status (code PR):** IMPLEMENTED, disabled by default. Engines: `internal/mcp/rollout`
+  (capability-local mode ladder + one-stage-promote/multi-stage-demote transitions, immutable deterministic
+  revisioned scope with stable keyed-hash percentage bucketing + exclusions-only-narrow + high-risk gate,
+  one central hard-failure classifier over every `mcperr` reason with a completeness+disjointness parity
+  test, `ProductionQualificationVerifier` fail-closed lockout with **no in-binary issuer**, kill switch,
+  evidence windows with an injected clock, `local-client`-only connector validation); `internal/mcp/upstreamclient`
+  (bounded Streamable-HTTP client reusing the PR-1 kernel + PR-7 destination pinning/redirect controls,
+  registered-endpoint-only, pinned TLS identity, **no client-token passthrough**, at-most-once writes);
+  `internal/mcp/execution` + a `runtime.ExecutionProvider` seam (mode-aware execution, PR-8
+  commit-before-materialization/upstream, scoped broker callback + zeroization, response DLP, bounded
+  allowances, real `tools/list` discovery → PR-2 catalog ingestion; a nil provider preserves the
+  decision-only path byte-identically). `package main` composition: signed rollout config rides the PR-10
+  CP→DP payload; isolated Gateway/Management state; emergency kill switch (narrows only); bounded
+  metrics; safe status. Admin surface: 8 `/api/mcp/rollout*` + executions/upstream-health routes with full
+  `uiRoutes`/route-classification/OpenAPI parity (count-locks 207→**217**) and an MCP Rollout & Execution
+  SPA panel (safe rendering; explicit "Production locked — qualification required"; no generic
+  Production-enable control). **Observe stays non-executing; Shadow/Canary execute only inside an exact
+  approved scope for Model A; Production stays qualification-locked** (no config/env/CLI/API bypass; test
+  verifier only via injection; synthetic clock windows labeled test evidence). NO Model-B connector, NO
+  Model-C DMZ, NO endpoint bridge, NO transparent discovery, NO Management mutation. Production
+  Qualification remains the separate gate; **there is no PR-12.**
 
 ## PR-C (post-V1) — Outbound Connector (Model B) *(D-8 — not in V1; own design gate)*
 - **Objective:** the outbound-only connector for approved cloud-AI vendors — **only** after a named vendor
