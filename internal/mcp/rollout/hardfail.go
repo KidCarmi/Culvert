@@ -45,6 +45,8 @@ const (
 	HardInspectionPrivacy
 )
 
+// #nosec G101 -- these are hard-failure CLASS LABELS (e.g. "credential_safety"),
+// not credentials; the "credential" token in a label name trips the G101 heuristic.
 var hardClassLabel = map[HardClass]string{
 	HardNone:               "none",
 	HardAuthIdentity:       "auth_identity",
