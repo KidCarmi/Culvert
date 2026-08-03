@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>MCP Rollout &amp; Exposure — prototype</title>
+<link rel="stylesheet" href="_prototype.css">
+</head>
+<body>
+  <div id="sidebar"></div>
+  <div id="main">
+    <div class="proto-banner">Design prototype — not implemented</div>
+    <div class="topbar" id="topbar"></div>
+    <div class="content" id="content"></div>
+  </div>
+
+<script src="_shell.js"></script>
+<script>
+function chip(t,k){return `<span class="chip ${k}">${t}</span>`;}
+
+const DPS=[
+  ['dp-us-1','gateway',['applied','ok'],'…009988','8','1','—'],
+  ['dp-us-2','gateway',['applied','ok'],'…009988','8','1','—'],
+  ['dp-us-3','gateway',['applied','ok'],'…009988','8','1','—'],
+  ['dp-ap-1','gateway',['validated','info'],'…009988','8','1','ack pending'],
+  ['dp-eu-1','gateway',['rejected','crit'],'—','8','—','snapshot_min_version_unmet'],
+];
+
+function ladder(){
+  const rungs=[['Disabled','done'],['Observe','done'],['Shadow','done'],['Canary','active'],['Production','locked']];
+  return `<div class="ladder">${rungs.map(r=>`
+    <div class="rung ${r[1]}"><div class="node"></div><div class="lbl">${r[0]}${r[1]==='locked'?' 🔒':''}</div></div>`).join('')}</div>`;
+}
+
+function matrix(){
+  return `<table class="mtx"><thead><tr><th>Node</th><th>Cap</th><th>Ack state</th><th>Hash</th><th>Epoch</th><th>Ver</th><th>Reason</th></tr></thead>
+    <tbody>${DPS.map(d=>`<tr><td class="mono">${d[0]}</td><td>${d[1]}</td><td>${chip(d[2][0],d[2][1])}</td>
+      <td class="trunc">${d[3]}</td><td class="mono">${d[4]}</td><td class="mono">${d[5]}</td>
+      <td class="${d[6].includes('unmet')?'':'text-muted'}" style="${d[6].includes('unmet')?'color:var(--crit);font-weight:600':''}">${d[6]}</td></tr>`).join('')}</tbody></table>`;
+}
+
+function blastModal(){
+  return `<div class="modal-wrap"><div class="scrim"></div>
+   <div class="modal"><div class="modal-h"><div class="mt">Promote Gateway: Canary → Production</div>${chip('LOCKED 🔒','warn')}</div>
+    <div class="modal-b">
+      <div class="section-title">Blast radius of this promotion</div>
+      <div class="blast-grid">
+        <div><div class="bl">Tenants</div><div class="bv">3 · acme-prod, acme-eu, acme-lab</div></div>
+        <div><div class="bl">Affected subjects</div><div class="bv">~180 principals</div></div>
+        <div><div class="bl">Agents</div><div class="bv">12</div></div>
+        <div><div class="bl">Clients / applications</div><div class="bv">4</div></div>
+        <div><div class="bl">Servers</div><div class="bv">2 · srv-github, srv-k8s</div></div>
+        <div><div class="bl">Tool fingerprints</div><div class="bv">12</div></div>
+        <div><div class="bl">Operation classes</div><div class="bv">read, write, destructive</div></div>
+        <div><div class="bl">Affected DPs</div><div class="bv">5 nodes (4 ready · 1 incompatible)</div></div>
+      </div>
+      <div class="warnbox">⚠ Newly executable: <b>write, destructive</b> on 2 servers / 12 tools — credential power raised to <b>destructive</b> on srv-k8s</div>
+      <div class="section-title" style="margin-top:14px">Rollback target</div>
+      <div class="kv"><span class="k">Snapshot</span><span class="v mono">sha256:…998877 (epoch 7)</span></div>
+      <div class="section-title" style="margin-top:14px">Evidence</div>
+      <div class="metric-row" style="flex-wrap:wrap;gap:10px">
+        ${chip('Shadow 14d ✓','ok')}${chip('Canary 3d / 7d ✗','crit')}${chip('Soak synthetic ✗','warn')}
+        ${chip('Defects 0 ✓','ok')}${chip('Rollback rehearsed ✓','ok')}${chip('Ops readiness ✗','crit')}</div>
+      <div class="lockbox">Production is <b>LOCKED</b> — no qualification issuer exists in this build. This preview is informational; there is no control that unlocks Production.</div>
+    </div>
+    <div class="modal-f"><button class="btn ghost">Close</button>
+      <button class="btn" disabled style="opacity:.5">Request promotion (four-eyes) — locked</button></div>
+   </div></div>`;
+}
+
+function render(){
+  const modal=qp('modal','');
+  renderShell({active:'rollout', title:'MCP Rollout & Exposure',
+    sub:'Desired vs locally-active vs fleet-effective — and what widening would expose', asof:'13:52:45'});
+
+  const scope=`<div class="card">
+    <div class="card-h"><div class="card-title">Rollout · Gateway</div><span class="trunc">fleet as-of 13:52:45</span></div>
+    ${ladder()}
+    <div class="triplet">
+      <div class="tri"><div class="tl">Desired (CP)</div><div class="tv">Canary</div></div>
+      <div class="tri"><div class="tl">Locally active</div><div class="tv">Canary</div></div>
+      <div class="tri warn"><div class="tl">Fleet-effective</div><div class="tv">${chip('4/5 · 1 incompatible','warn')}</div></div>
+    </div>
+    <div class="kv"><span class="k">Scope</span><span class="v">3 tenants · 2 servers · 12 tool-fps · ops[read,write] · 25% (bucket: principal)</span></div>
+    <div class="spacer"></div>
+    <div class="actions">
+      <button class="btn primary sm" data-modal>Preview blast radius → promote</button>
+      <button class="btn sm">Edit / narrow scope</button>
+      <button class="btn ghost sm">Simulate</button>
+      <button class="btn ghost sm">Demote to Shadow</button></div>
+  </div>`;
+
+  const dp=`<div class="card">
+    <div class="card-h"><div class="card-title">DP acknowledgement matrix</div>${chip('1 incompatible','warn')}</div>
+    ${matrix()}</div>`;
+
+  const emer=`<div class="card">
+    <div class="card-h"><div class="card-title">Emergency controls</div><span class="trunc">local-only · narrows only</span></div>
+    <p class="lede" style="margin:0 0 10px">Emergency actions stop new admission on this node immediately (no CP round-trip) and can never promote, widen scope, or enable execution.</p>
+    <div class="actions">
+      <button class="btn danger sm">Emergency disable</button>
+      <button class="btn sm">Clear</button>
+      <button class="btn ghost sm">Rehearse rollback</button></div></div>`;
+
+  document.getElementById('content').innerHTML=
+    `<h1 class="page">MCP Rollout &amp; Exposure</h1>
+     <p class="lede">One capability at a time on the ladder. The triplet always separates what you set, what is live locally, and what the fleet has actually applied.</p>
+     <div class="grid" style="gap:16px">${scope}<div class="grid grid-2" style="gap:16px">${dp}${emer}</div></div>
+     ${modal==='blast'?blastModal():''}`;
+  shellReady();
+}
+render();
+</script>
+</body>
+</html>

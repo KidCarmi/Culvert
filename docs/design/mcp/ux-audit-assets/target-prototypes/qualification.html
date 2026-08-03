@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>MCP Production Qualification — prototype</title>
+<link rel="stylesheet" href="_prototype.css">
+</head>
+<body>
+  <div id="sidebar"></div>
+  <div id="main">
+    <div class="proto-banner">Design prototype — not implemented</div>
+    <div class="topbar" id="topbar"></div>
+    <div class="content" id="content"></div>
+  </div>
+
+<script src="_shell.js"></script>
+<script>
+function chip(t,k){return `<span class="chip ${k}">${t}</span>`;}
+// gate: [name, go(bool), target, current, origin('real'|'synthetic'|'')]
+const GATES=[
+  ['Shadow window',            true,  '≥ 14d', '14d',        'real'],
+  ['Canary window',            false, '≥ 7d',  '3d',         'real'],
+  ['Soak window',              false, '≥ 24h', '6h',         'synthetic'],
+  ['Open critical / high defects', true, '0',   '0',          'real'],
+  ['Rollback rehearsal',       true,  'done',  'done',       'real'],
+  ['Durability proof',         true,  'normal','normal',     'real'],
+  ['Supply-chain evidence',    true,  'signed','signed',     'real'],
+  ['Privacy / support / ops readiness', false, '—', 'pending','' ],
+];
+const PROG=[['Shadow window',100],['Canary window',43],['Soak window',25]];
+
+function render(){
+  renderShell({active:'qualification', title:'MCP Production Qualification',
+    sub:'What evidence is still missing — and is that evidence real?', asof:'13:52:45'});
+
+  const go=GATES.filter(g=>g[1]).length;
+  const banner=`<div class="lockbox" style="display:flex;align-items:center;gap:10px;font-size:.82rem">
+     <b style="font-size:1rem">🔒 PRODUCTION LOCKED</b>
+     <span>qualification required · no issuer in this build · ${go} of ${GATES.length} gates GO</span></div>`;
+
+  const table=`<div class="card"><div class="card-h"><div class="card-title">Qualification gates</div>
+    <div class="card-sub">GO / NO-GO · real vs synthetic evidence</div></div>
+    <table class="gate"><thead><tr><th>Gate</th><th>State</th><th>Target</th><th>Current</th><th>Evidence origin</th></tr></thead>
+    <tbody>${GATES.map(g=>`<tr>
+      <td>${g[0]}</td>
+      <td>${g[1]?'<span class="go">● GO</span>':'<span class="nogo">● NO-GO</span>'}</td>
+      <td class="mono">${g[2]}</td><td class="mono">${g[3]}</td>
+      <td>${g[4]==='real'?'<span class="badge real">real</span>':g[4]==='synthetic'?'<span class="badge synth">synthetic · does not qualify ⚠</span>':'<span class="trunc">—</span>'}</td>
+    </tr>`).join('')}</tbody></table></div>`;
+
+  const windows=`<div class="card"><div class="card-h"><div class="card-title">Window progress</div></div>
+    ${PROG.map(p=>`<div style="margin:8px 0"><div class="kv" style="border:0;padding:2px 0"><span class="k">${p[0]}</span><span class="v mono">${p[1]}%</span></div>
+      <div class="prog"><span style="width:${p[1]}%"></span></div></div>`).join('')}
+    <div class="spacer"></div>
+    <div class="section-title">Readiness</div>
+    <div class="metric-row" style="flex-wrap:wrap;gap:8px">
+      ${chip('Durability ✓','ok')}${chip('Defects 0 ✓','ok')}${chip('Supply-chain signed ✓','ok')}
+      ${chip('Privacy pending','warn')}${chip('Support pending','warn')}${chip('Ops pending','crit')}</div>
+    <div class="spacer"></div>
+    <div class="section-title">Receipt</div>
+    <div class="kv"><span class="k">Qualification receipt</span><span class="v">none — issuer absent</span></div>
+    <div class="actions" style="margin-top:10px">
+      <button class="btn sm">Rehearse rollback</button>
+      <button class="btn ghost sm" disabled style="opacity:.45">No “qualify” action exists</button></div></div>`;
+
+  document.getElementById('content').innerHTML=
+    `<h1 class="page">MCP Production Qualification</h1>
+     <p class="lede">Production is a real mode but is unreachable without a machine-verifiable qualification receipt from a separate issuer — this build ships none. Synthetic / injected-clock evidence is badged so a program can never look complete on fake evidence.</p>
+     ${banner}<div class="spacer"></div>
+     <div class="grid grid-cc" style="gap:16px">${table}${windows}</div>`;
+  shellReady();
+}
+render();
+</script>
+</body>
+</html>

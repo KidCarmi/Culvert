@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>MCP Emergency Response — prototype</title>
+<link rel="stylesheet" href="_prototype.css">
+</head>
+<body>
+  <div id="sidebar"></div>
+  <div id="main">
+    <div class="proto-banner">Design prototype — not implemented</div>
+    <div class="topbar" id="topbar"></div>
+    <div class="content" id="content"></div>
+  </div>
+
+<script src="_shell.js"></script>
+<script>
+function chip(t,k){return `<span class="chip ${k}">${t}</span>`;}
+// safe-action hierarchy, least-drastic first
+const ACTIONS=[
+  ['Stop admission','local now · narrows only · reversible · fleet: node-local', true],
+  ['Demote mode','Canary → Shadow · four-eyes · fleet: converges on ack', false],
+  ['Quarantine tool','one tool · reversible · fleet: on next snapshot', false],
+  ['Quarantine server','all its tools · reversible', false],
+  ['Revoke allowance','one allowance · immediate', false],
+  ['Revoke credential profile','raises ceiling to none · high impact', false],
+  ['Rollback snapshot','target …998877 · four-eyes · fleet: re-distributes', false],
+];
+
+function dialog(){
+  return `<div class="modal-wrap"><div class="scrim"></div>
+   <div class="modal dialog"><div class="modal-h"><div class="mt">Stop admission · Gateway</div>${chip('reversible','ok')}</div>
+    <div class="modal-b">
+      <div class="impact">
+        <span class="il">Immediate local effect</span><span>New admissions stop on <b>this node</b> now</span>
+        <span class="il">Expected fleet</span><span>Node-local only — no CP round-trip</span>
+        <span class="il">Impact</span><span>In-flight calls drain; new tool calls rejected</span>
+        <span class="il">Reversibility</span><span><b>Clear</b> restores admission immediately</span>
+        <span class="il">Evidence created</span><span>audit <span class="mono">mcp.rollout.emergency.disable</span></span>
+      </div>
+      <div class="typed"><span class="trunc">Type <b>DISABLE</b> to confirm</span><input placeholder="DISABLE"></div>
+    </div>
+    <div class="modal-f"><button class="btn ghost">Cancel</button><button class="btn danger">Confirm — stop admission</button></div>
+   </div></div>`;
+}
+
+function render(){
+  const dlg=qp('dialog','');
+  renderShell({active:'rollout', title:'MCP Emergency Response',
+    sub:'Pick the least-drastic action that resolves the risk', asof:'13:52:45'});
+
+  const esc=`<div class="esc">Safe-action hierarchy — least drastic first: <b>investigate</b> → <b>simulate</b> → <b>narrow scope</b> →
+    <b>quarantine</b> → <b>revoke</b> → <b>demote</b> → <b>emergency disable</b> → <b>rollback</b></div>`;
+
+  const list=`<div class="hierarchy">${ACTIONS.map((a,i)=>`
+    <div class="haction ${a[2]?'sel':''}"><span class="step">${i+1}</span>
+      <span class="hn">${a[0]}</span><span class="hd">${a[1]}</span>
+      <span style="margin-left:auto">${a[2]?chip('selected','accent'):'<button class="btn ghost sm">Choose</button>'}</span></div>`).join('')}</div>`;
+
+  document.getElementById('content').innerHTML=
+    `<h1 class="page">MCP Emergency Response</h1>
+     <p class="lede">Every action states its immediate local effect, expected fleet convergence, reversibility, impact, and the evidence it creates — before you confirm.</p>
+     ${esc}${list}${dlg==='stop'?dialog():''}`;
+  shellReady();
+}
+render();
+</script>
+</body>
+</html>

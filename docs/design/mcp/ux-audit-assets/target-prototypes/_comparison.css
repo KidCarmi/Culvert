@@ -1,0 +1,24 @@
+/* Comparison-sheet styling — DESIGN PROTOTYPE. Places the CURRENT product
+   screenshot next to the PROPOSED prototype render. No production impact. */
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,-apple-system,'Segoe UI',Roboto,Arial,sans-serif;
+  background:#0b0f1a;color:#e2e8f0;padding:22px 26px;}
+.proto-banner{background:repeating-linear-gradient(45deg,rgba(234,179,8,.12),
+  rgba(234,179,8,.12) 12px,transparent 12px,transparent 24px);
+  border:1px solid #eab308;color:#eab308;font-size:.7rem;font-weight:800;
+  letter-spacing:.14em;text-align:center;padding:6px;text-transform:uppercase;
+  border-radius:8px;margin-bottom:16px;}
+h1{font-size:1.15rem;font-weight:700;margin-bottom:4px}
+p.sub{font-size:.82rem;color:#8892a8;margin-bottom:18px;max-width:80ch}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:start}
+.col{background:#151d2e;border:1px solid #1e2d42;border-radius:12px;overflow:hidden}
+.col.now{border-color:#3a2530}
+.col.next{border-color:#14b8a6}
+.col-h{display:flex;align-items:center;gap:8px;padding:11px 14px;border-bottom:1px solid #1e2d42;font-size:.82rem;font-weight:700}
+.tag{font-size:.62rem;font-weight:800;letter-spacing:.08em;text-transform:uppercase;padding:2px 8px;border-radius:5px}
+.tag.now{background:rgba(239,68,68,.12);color:#ef4444;border:1px solid rgba(239,68,68,.3)}
+.tag.next{background:rgba(20,184,166,.12);color:#2dd4bf;border:1px solid #14b8a6}
+.col-h .cap{color:#8892a8;font-weight:500;font-size:.74rem;margin-left:auto}
+.shot{display:block;width:100%;height:auto;background:#0b0f1a}
+.note{font-size:.76rem;color:#8892a8;padding:10px 14px;border-top:1px solid #1e2d42;line-height:1.5}
+.note b{color:#e2e8f0}

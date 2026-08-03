@@ -1,0 +1,18 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<title>MCP Rollout JSON → Rollout &amp; Exposure — current vs proposed</title>
+<link rel="stylesheet" href="_comparison.css"></head><body>
+<div class="proto-banner">Design prototype — not implemented · current-vs-proposed comparison</div>
+<h1>MCP Rollout JSON → Rollout &amp; Exposure</h1><p class="sub">Rollout mode, scope, fleet acknowledgement and emergency controls. Today: six stacked JSON panels, kill-switch buried as killed:true. Proposed: a mode ladder, state triplet, DP matrix and framed emergency controls.</p>
+<div class="cols">
+  <div class="col now"><div class="col-h"><span class="tag now">Current</span>MCP Rollout (raw JSON ×6)</div>
+    <img class="shot" src="../current/admin-dark/mcp-rollout-killswitch.png"></div>
+  <div class="col next"><div class="col-h"><span class="tag next">Proposed</span>Rollout &amp; Exposure<span class="cap">design prototype</span></div>
+    <img class="shot" src="renders/rollout-main.png"></div>
+</div>
+<div class="col next" style="margin-top:16px"><div class="note">The proposed screen separates <b>desired / locally-active / fleet-effective</b> as a triplet, names the one incompatible DP in an acknowledgement matrix, and puts the blast-radius preview in front of promotion. Emergency controls are framed as local-only and reversible.</div></div>
+<script>
+// mark ready only after both images have loaded so the screenshot is complete
+const imgs=[...document.querySelectorAll('img.shot')];
+Promise.all(imgs.map(i=>i.complete?1:new Promise(r=>{i.onload=r;i.onerror=r;}))).then(()=>document.body.setAttribute('data-ready','1'));
+</script>
+</body></html>

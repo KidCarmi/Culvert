@@ -1,0 +1,18 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<title>MCP Health JSON → Health &amp; Distribution — current vs proposed</title>
+<link rel="stylesheet" href="_comparison.css"></head><body>
+<div class="proto-banner">Design prototype — not implemented · current-vs-proposed comparison</div>
+<h1>MCP Health JSON → Health &amp; Distribution</h1><p class="sub">Runtime and durability health plus CP→DP acknowledgement. Today: a flat 25-field JSON object with severity buried. Proposed: labeled durability meters and a per-node acknowledgement matrix.</p>
+<div class="cols">
+  <div class="col now"><div class="col-h"><span class="tag now">Current</span>MCP Health (raw JSON)</div>
+    <img class="shot" src="../current/admin-dark/mcp-health-partialack.png"></div>
+  <div class="col next"><div class="col-h"><span class="tag next">Proposed</span>Health &amp; Distribution<span class="cap">design prototype</span></div>
+    <img class="shot" src="renders/health-distribution.png"></div>
+</div>
+<div class="col next" style="margin-top:16px"><div class="note">The proposed presentation shows durability as meters (severity high is unmistakable) and a DP acknowledgement matrix that distinguishes an <b>incompatible</b> node (min-version unmet) from a merely lagging one — the distinction the current DTO doesn't even surface.</div></div>
+<script>
+// mark ready only after both images have loaded so the screenshot is complete
+const imgs=[...document.querySelectorAll('img.shot')];
+Promise.all(imgs.map(i=>i.complete?1:new Promise(r=>{i.onload=r;i.onerror=r;}))).then(()=>document.body.setAttribute('data-ready','1'));
+</script>
+</body></html>

@@ -17,6 +17,7 @@ qualification issuer was added.**
 | [PRODUCTION-QUALIFICATION-UX-BACKLOG.md](PRODUCTION-QUALIFICATION-UX-BACKLOG.md) | 7 | PQ-BLOCKER / P0 / P1 / P2 with current screenshot · operator risk · target · affected views · backend impact · Playwright test · effort · dependency · prod-change flag. |
 | [PRODUCTION-QUALIFICATION-UX-IMPLEMENTATION-SLICES.md](PRODUCTION-QUALIFICATION-UX-IMPLEMENTATION-SLICES.md) | 8 | 11 small reviewable slices — files · routes · selectors preserved · Playwright tests · API/OpenAPI/GUI-parity · rollback. No framework rewrite. |
 | [ux-audit-assets/README.md](ux-audit-assets/README.md) | 2 | Screenshot contact sheet (49 images) + ledger. |
+| [ux-audit-assets/target-prototypes/README.md](ux-audit-assets/target-prototypes/README.md) | rendered target | Medium-fidelity **rendered** target-UI prototypes (23 PNGs: 18 screens + 5 current-vs-proposed comparison sheets). Static HTML/CSS, synthetic data, `DESIGN PROTOTYPE — NOT IMPLEMENTED`. |
 
 ## Top findings (see current-state §9–§13)
 1. Eight of nine MCP views render server JSON into a `<pre>` — a developer console, not a product.

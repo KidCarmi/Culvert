@@ -1,0 +1,18 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<title>MCP Overview → Command Center — current vs proposed</title>
+<link rel="stylesheet" href="_comparison.css"></head><body>
+<div class="proto-banner">Design prototype — not implemented · current-vs-proposed comparison</div>
+<h1>MCP Overview → Command Center</h1><p class="sub">The first MCP screen an operator sees. Today: a Refresh button above a JSON blob. Proposed: posture-first, with a short needs-attention list and clear next actions.</p>
+<div class="cols">
+  <div class="col now"><div class="col-h"><span class="tag now">Current</span>MCP Overview (raw JSON)</div>
+    <img class="shot" src="../current/admin-dark/mcp-overview.png"></div>
+  <div class="col next"><div class="col-h"><span class="tag next">Proposed</span>MCP Command Center<span class="cap">design prototype</span></div>
+    <img class="shot" src="renders/command-center-needs-attention.png"></div>
+</div>
+<div class="col next" style="margin-top:16px"><div class="note">Today the operator must read a nested JSON health object to infer posture. The proposed Command Center surfaces mode per capability, hard failures, fleet convergence, durability, Production lock, and a ranked <b>needs-attention</b> list — the exact questions the brief asks — with no charts or alert wall.</div></div>
+<script>
+// mark ready only after both images have loaded so the screenshot is complete
+const imgs=[...document.querySelectorAll('img.shot')];
+Promise.all(imgs.map(i=>i.complete?1:new Promise(r=>{i.onload=r;i.onerror=r;}))).then(()=>document.body.setAttribute('data-ready','1'));
+</script>
+</body></html>
