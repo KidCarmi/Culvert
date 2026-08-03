@@ -1,0 +1,1082 @@
+{
+  "generated_note": "UX-audit browser console + API failure ledger (advisory).",
+  "observation_count": 48,
+  "observations": [
+    {
+      "shot": "admin-dark/1280px/mcp-overview-healthy.png",
+      "role": "admin",
+      "theme": "dark",
+      "width": 1280,
+      "view": "mcp-overview",
+      "scenario": "healthy",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "admin-dark/1280px/mcp-rollout-healthy.png",
+      "role": "admin",
+      "theme": "dark",
+      "width": 1280,
+      "view": "mcp-rollout",
+      "scenario": "healthy",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "admin-dark/1440px/mcp-overview-healthy.png",
+      "role": "admin",
+      "theme": "dark",
+      "width": 1440,
+      "view": "mcp-overview",
+      "scenario": "healthy",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "admin-dark/1440px/mcp-rollout-healthy.png",
+      "role": "admin",
+      "theme": "dark",
+      "width": 1440,
+      "view": "mcp-rollout",
+      "scenario": "healthy",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "admin-dark/1920px/audit.png",
+      "role": "admin",
+      "theme": "dark",
+      "width": 1920,
+      "view": "audit",
+      "scenario": "current",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "admin-dark/1920px/dashboard.png",
+      "role": "admin",
+      "theme": "dark",
+      "width": 1920,
+      "view": "dashboard",
+      "scenario": "current",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "admin-dark/1920px/livefeed.png",
+      "role": "admin",
+      "theme": "dark",
+      "width": 1920,
+      "view": "livefeed",
+      "scenario": "current",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "admin-dark/1920px/mcp-approvals-approvals.png",
+      "role": "admin",
+      "theme": "dark",
+      "width": 1920,
+      "view": "mcp-approvals",
+      "scenario": "approvals",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "admin-dark/1920px/mcp-approvals.png",
+      "role": "admin",
+      "theme": "dark",
+      "width": 1920,
+      "view": "mcp-approvals",
+      "scenario": "current",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "admin-dark/1920px/mcp-decisions-canary.png",
+      "role": "admin",
+      "theme": "dark",
+      "width": 1920,
+      "view": "mcp-decisions",
+      "scenario": "canary",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "admin-dark/1920px/mcp-decisions-dlpblock.png",
+      "role": "admin",
+      "theme": "dark",
+      "width": 1920,
+      "view": "mcp-decisions",
+      "scenario": "dlpblock",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "admin-dark/1920px/mcp-decisions-dlpredact.png",
+      "role": "admin",
+      "theme": "dark",
+      "width": 1920,
+      "view": "mcp-decisions",
+      "scenario": "dlpredact",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "admin-dark/1920px/mcp-decisions-hardfail.png",
+      "role": "admin",
+      "theme": "dark",
+      "width": 1920,
+      "view": "mcp-decisions",
+      "scenario": "hardfail",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "admin-dark/1920px/mcp-decisions-shadow.png",
+      "role": "admin",
+      "theme": "dark",
+      "width": 1920,
+      "view": "mcp-decisions",
+      "scenario": "shadow",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "admin-dark/1920px/mcp-decisions.png",
+      "role": "admin",
+      "theme": "dark",
+      "width": 1920,
+      "view": "mcp-decisions",
+      "scenario": "current",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "admin-dark/1920px/mcp-health-dpincompat.png",
+      "role": "admin",
+      "theme": "dark",
+      "width": 1920,
+      "view": "mcp-health",
+      "scenario": "dpincompat",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "admin-dark/1920px/mcp-health-durability.png",
+      "role": "admin",
+      "theme": "dark",
+      "width": 1920,
+      "view": "mcp-health",
+      "scenario": "durability",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "admin-dark/1920px/mcp-health-healthy.png",
+      "role": "admin",
+      "theme": "dark",
+      "width": 1920,
+      "view": "mcp-health",
+      "scenario": "healthy",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "admin-dark/1920px/mcp-health-partialack.png",
+      "role": "admin",
+      "theme": "dark",
+      "width": 1920,
+      "view": "mcp-health",
+      "scenario": "partialack",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "admin-dark/1920px/mcp-health-rollback.png",
+      "role": "admin",
+      "theme": "dark",
+      "width": 1920,
+      "view": "mcp-health",
+      "scenario": "rollback",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "admin-dark/1920px/mcp-health.png",
+      "role": "admin",
+      "theme": "dark",
+      "width": 1920,
+      "view": "mcp-health",
+      "scenario": "current",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "admin-dark/1920px/mcp-management.png",
+      "role": "admin",
+      "theme": "dark",
+      "width": 1920,
+      "view": "mcp-management",
+      "scenario": "current",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "admin-dark/1920px/mcp-overview-apifail.png",
+      "role": "admin",
+      "theme": "dark",
+      "width": 1920,
+      "view": "mcp-overview",
+      "scenario": "apifail",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/mcp/overview",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "admin-dark/1920px/mcp-overview-durability.png",
+      "role": "admin",
+      "theme": "dark",
+      "width": 1920,
+      "view": "mcp-overview",
+      "scenario": "durability",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "admin-dark/1920px/mcp-overview-healthy.png",
+      "role": "admin",
+      "theme": "dark",
+      "width": 1920,
+      "view": "mcp-overview",
+      "scenario": "healthy",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "admin-dark/1920px/mcp-overview.png",
+      "role": "admin",
+      "theme": "dark",
+      "width": 1920,
+      "view": "mcp-overview",
+      "scenario": "current",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "admin-dark/1920px/mcp-policies.png",
+      "role": "admin",
+      "theme": "dark",
+      "width": 1920,
+      "view": "mcp-policies",
+      "scenario": "current",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "admin-dark/1920px/mcp-rollout-canary.png",
+      "role": "admin",
+      "theme": "dark",
+      "width": 1920,
+      "view": "mcp-rollout",
+      "scenario": "canary",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "admin-dark/1920px/mcp-rollout-healthy.png",
+      "role": "admin",
+      "theme": "dark",
+      "width": 1920,
+      "view": "mcp-rollout",
+      "scenario": "healthy",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "admin-dark/1920px/mcp-rollout-killswitch.png",
+      "role": "admin",
+      "theme": "dark",
+      "width": 1920,
+      "view": "mcp-rollout",
+      "scenario": "killswitch",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "admin-dark/1920px/mcp-rollout-observe.png",
+      "role": "admin",
+      "theme": "dark",
+      "width": 1920,
+      "view": "mcp-rollout",
+      "scenario": "observe",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "admin-dark/1920px/mcp-rollout-prodlocked.png",
+      "role": "admin",
+      "theme": "dark",
+      "width": 1920,
+      "view": "mcp-rollout",
+      "scenario": "prodlocked",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "admin-dark/1920px/mcp-rollout-shadow.png",
+      "role": "admin",
+      "theme": "dark",
+      "width": 1920,
+      "view": "mcp-rollout",
+      "scenario": "shadow",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "admin-dark/1920px/mcp-rollout.png",
+      "role": "admin",
+      "theme": "dark",
+      "width": 1920,
+      "view": "mcp-rollout",
+      "scenario": "current",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "admin-dark/1920px/mcp-servers-unknowntool.png",
+      "role": "admin",
+      "theme": "dark",
+      "width": 1920,
+      "view": "mcp-servers",
+      "scenario": "unknowntool",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "admin-dark/1920px/mcp-servers.png",
+      "role": "admin",
+      "theme": "dark",
+      "width": 1920,
+      "view": "mcp-servers",
+      "scenario": "current",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "admin-dark/1920px/mcp-settings.png",
+      "role": "admin",
+      "theme": "dark",
+      "width": 1920,
+      "view": "mcp-settings",
+      "scenario": "current",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "admin-light/1920px/dashboard.png",
+      "role": "admin",
+      "theme": "light",
+      "width": 1920,
+      "view": "dashboard",
+      "scenario": "current",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "admin-light/1920px/livefeed.png",
+      "role": "admin",
+      "theme": "light",
+      "width": 1920,
+      "view": "livefeed",
+      "scenario": "current",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "admin-light/1920px/mcp-decisions-shadow.png",
+      "role": "admin",
+      "theme": "light",
+      "width": 1920,
+      "view": "mcp-decisions",
+      "scenario": "shadow",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "admin-light/1920px/mcp-overview-healthy.png",
+      "role": "admin",
+      "theme": "light",
+      "width": 1920,
+      "view": "mcp-overview",
+      "scenario": "healthy",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "admin-light/1920px/mcp-rollout-healthy.png",
+      "role": "admin",
+      "theme": "light",
+      "width": 1920,
+      "view": "mcp-rollout",
+      "scenario": "healthy",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "operator-dark/1920px/mcp-overview-healthy.png",
+      "role": "operator",
+      "theme": "dark",
+      "width": 1920,
+      "view": "mcp-overview",
+      "scenario": "healthy",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+        "Error: forbidden\n\n    at api (http://127.0.0.1:34825/:7435:20)\n    at async loadSettings (http://127.0.0.1:34825/:9782:16)",
+        "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+        "Error: forbidden\n\n    at api (http://127.0.0.1:34825/:7435:20)\n    at async loadSettings (http://127.0.0.1:34825/:9804:16)",
+        "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+        "Error: forbidden\n\n    at api (http://127.0.0.1:34825/:7435:20)\n    at async loadOTLPConfig (http://127.0.0.1:34825/:10073:15)",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "403 http://127.0.0.1:34825/api/syslog",
+        "403 http://127.0.0.1:34825/api/ui-allow-ips",
+        "403 http://127.0.0.1:34825/api/otlp",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "operator-dark/1920px/mcp-rollout-healthy.png",
+      "role": "operator",
+      "theme": "dark",
+      "width": 1920,
+      "view": "mcp-rollout",
+      "scenario": "healthy",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+        "Error: forbidden\n\n    at api (http://127.0.0.1:34825/:7435:20)\n    at async loadSettings (http://127.0.0.1:34825/:9782:16)",
+        "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+        "Error: forbidden\n\n    at api (http://127.0.0.1:34825/:7435:20)\n    at async loadSettings (http://127.0.0.1:34825/:9804:16)",
+        "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+        "Error: forbidden\n\n    at api (http://127.0.0.1:34825/:7435:20)\n    at async loadOTLPConfig (http://127.0.0.1:34825/:10073:15)",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "403 http://127.0.0.1:34825/api/syslog",
+        "403 http://127.0.0.1:34825/api/ui-allow-ips",
+        "403 http://127.0.0.1:34825/api/otlp",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "operator-dark/1920px/mcp-settings.png",
+      "role": "operator",
+      "theme": "dark",
+      "width": 1920,
+      "view": "mcp-settings",
+      "scenario": "current",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+        "Error: forbidden\n\n    at api (http://127.0.0.1:34825/:7435:20)\n    at async loadSettings (http://127.0.0.1:34825/:9782:16)",
+        "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+        "Error: forbidden\n\n    at api (http://127.0.0.1:34825/:7435:20)\n    at async loadSettings (http://127.0.0.1:34825/:9804:16)",
+        "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+        "Error: forbidden\n\n    at api (http://127.0.0.1:34825/:7435:20)\n    at async loadOTLPConfig (http://127.0.0.1:34825/:10073:15)",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "403 http://127.0.0.1:34825/api/syslog",
+        "403 http://127.0.0.1:34825/api/ui-allow-ips",
+        "403 http://127.0.0.1:34825/api/otlp",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "viewer-dark/1920px/mcp-overview-healthy.png",
+      "role": "viewer",
+      "theme": "dark",
+      "width": 1920,
+      "view": "mcp-overview",
+      "scenario": "healthy",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+        "Error: forbidden\n\n    at api (http://127.0.0.1:34825/:7435:20)\n    at async loadSettings (http://127.0.0.1:34825/:9782:16)",
+        "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+        "Error: forbidden\n\n    at api (http://127.0.0.1:34825/:7435:20)\n    at async loadSettings (http://127.0.0.1:34825/:9804:16)",
+        "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+        "Error: forbidden\n\n    at api (http://127.0.0.1:34825/:7435:20)\n    at async loadOTLPConfig (http://127.0.0.1:34825/:10073:15)",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "403 http://127.0.0.1:34825/api/syslog",
+        "403 http://127.0.0.1:34825/api/ui-allow-ips",
+        "403 http://127.0.0.1:34825/api/otlp",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "viewer-dark/1920px/mcp-rollout-healthy.png",
+      "role": "viewer",
+      "theme": "dark",
+      "width": 1920,
+      "view": "mcp-rollout",
+      "scenario": "healthy",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+        "Error: forbidden\n\n    at api (http://127.0.0.1:34825/:7435:20)\n    at async loadSettings (http://127.0.0.1:34825/:9782:16)",
+        "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+        "Error: forbidden\n\n    at api (http://127.0.0.1:34825/:7435:20)\n    at async loadSettings (http://127.0.0.1:34825/:9804:16)",
+        "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+        "Error: forbidden\n\n    at api (http://127.0.0.1:34825/:7435:20)\n    at async loadOTLPConfig (http://127.0.0.1:34825/:10073:15)",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "403 http://127.0.0.1:34825/api/syslog",
+        "403 http://127.0.0.1:34825/api/ui-allow-ips",
+        "403 http://127.0.0.1:34825/api/otlp",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    },
+    {
+      "shot": "viewer-dark/1920px/mcp-settings-viewer-denied.png",
+      "role": "viewer",
+      "theme": "dark",
+      "width": 1920,
+      "view": "mcp-settings",
+      "scenario": "viewer-denied",
+      "console_errors": [
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+        "Error: forbidden\n\n    at api (http://127.0.0.1:34825/:7435:20)\n    at async loadSettings (http://127.0.0.1:34825/:9782:16)",
+        "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+        "Error: forbidden\n\n    at api (http://127.0.0.1:34825/:7435:20)\n    at async loadSettings (http://127.0.0.1:34825/:9804:16)",
+        "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+        "Error: forbidden\n\n    at api (http://127.0.0.1:34825/:7435:20)\n    at async loadOTLPConfig (http://127.0.0.1:34825/:10073:15)",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON",
+        "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "SyntaxError: Unexpected token 'C', \"CA not initialised\n\" is not valid JSON"
+      ],
+      "http_4xx_5xx": [
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "403 http://127.0.0.1:34825/api/syslog",
+        "403 http://127.0.0.1:34825/api/ui-allow-ips",
+        "403 http://127.0.0.1:34825/api/otlp",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert",
+        "503 http://127.0.0.1:34825/api/ca-cert"
+      ]
+    }
+  ]
+}
