@@ -51,7 +51,7 @@ const fxExplainShadow = `{"event_id":"evt_9f1a","correlation_id":"corr_7788","ca
 	`"server_id":"srv-github","tool_name":"create_issue","tool_fingerprint":"fp-9a1b2c","resource_ref":"github://issue","assurance":"medium",` +
 	`"action":"DENY","reason_code":"out_of_scope","matched_rule_id":"rule-write-guard","decisive_condition_id":"cond-scope-write","remediation":"narrow scope or promote",` +
 	`"operation_class":"write","risk_class":"high","execution_state":"shadow_recorded","policy_revision":12,"catalog_revision":6,"registry_revision":4,` +
-	`"inspection_revision":3,"runtime_revision":2,"config_epoch":8,"policy_snapshot_hash":"sha256:11aa22bb33cc44dd55ee66ff77009988",` +
+	`"inspection_revision":3,"runtime_revision":2,"policy_snapshot_hash":"sha256:11aa22bb33cc44dd55ee66ff77009988",` +
 	`"inspection_schema_status":"valid","dlp_disposition":"pass","credential_profile_ref":"cp-github-rw","credential_power_ceiling":"write","source":"historical"}`
 
 // mcpuxRoute installs interception: /api/mcp/* -> synthetic fixtures; external ->

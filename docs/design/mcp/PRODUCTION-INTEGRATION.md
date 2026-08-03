@@ -67,6 +67,20 @@ Regression: build clean; route/metadata parity (C1, C1.5), RBAC/enforcement (C2,
 C4), D0 baseline, and MCP handler tests pass. Em-dash scan of new copy: 0. No
 secrets in the diff.
 
+### Independent PR review
+Verdict: `APPROVED WITH REQUIRED CHANGES` (2 low-severity, presentation-only).
+Confirmed: no fabricated data reaches the production path; evaluated-to-effective
+is correctly derived and a shadow DENY cannot read as ALLOW; removed-fabrication
+and deferral claims hold; XSS/CSP/RBAC/single-binary preserved; Culvert identity
+intact. Required changes applied in the same branch:
+- R1: the drawer read `config_epoch`, which is not an `ExplanationView` field
+  (null-guarded, so nothing shipped, but the screenshot/doc was inaccurate). The
+  row and the test fixture field were removed; drawer now shows only real
+  `ExplanationView` fields.
+- R2: the two `aria-live` regions used `display:none` (not announced by screen
+  readers). Replaced with a visually-hidden `.mcpx-sr` utility so announcements
+  reach assistive tech. Escape now also closes the evidence drawer.
+
 ### Rollback
 Revert this commit. The change is additive presentation over unchanged handlers
 and routes; there is no data migration, no API change, and no behavior change to

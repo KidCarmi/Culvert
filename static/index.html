@@ -551,6 +551,7 @@ table.mcpx-act tbody tr:focus-visible{box-shadow:var(--focus-ring);outline:none}
 a.mcpx-link:focus-visible,button.mcpx-attn-item:focus-visible,.mcpx-pivot:focus-visible{box-shadow:var(--focus-ring);outline:none;border-radius:6px}
 .mcpx-legacy{margin-top:14px}
 .mcpx-legacy > summary{font-size:.72rem;color:var(--muted);cursor:pointer}
+.mcpx-sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);border:0;white-space:nowrap}
 </style>
 </head>
 <body>
@@ -3497,7 +3498,7 @@ Firefox (all platforms):
       <div class="panel"><h3>MCP Command Center</h3>
         <p class="muted">MCP gateway posture: one place to decide if you need to act. All values below come from live <code>/api/mcp/*</code> responses.</p>
         <button class="btn" data-click="renderMCPCommandCenter">Refresh</button>
-        <div aria-live="polite" id="mcpx-cc-live" class="d-none"></div>
+        <div aria-live="polite" id="mcpx-cc-live" class="mcpx-sr"></div>
         <div id="mcpx-overview-root"></div>
         <details class="mcpx-legacy">
           <summary>Raw overview JSON</summary>
@@ -3522,7 +3523,7 @@ Firefox (all platforms):
         <label>Event ID <input id="mcp-dec-event" placeholder="event_id (for explain)" /></label>
         <button class="btn" data-click="renderMCPActivity">Search</button>
         <button class="btn" data-click="loadMCPExplain">Explain (raw)</button>
-        <div aria-live="polite" id="mcpx-act-live" class="d-none"></div>
+        <div aria-live="polite" id="mcpx-act-live" class="mcpx-sr"></div>
         <div id="mcpx-decisions-root"></div>
         <details class="mcpx-legacy">
           <summary>Raw decisions / explain JSON</summary>
@@ -17946,7 +17947,7 @@ async function mcpxOpenDecision(eventId){
     ['Snapshot', mcpxShortHash(ex.policy_snapshot_hash)],['Policy rev', ex.policy_revision],
     ['Catalog rev', ex.catalog_revision],['Registry rev', ex.registry_revision],
     ['Inspection rev', ex.inspection_revision],['Runtime rev', ex.runtime_revision],
-    ['Config epoch', ex.config_epoch],['Durable event', ex.event_id],['Correlation id', ex.correlation_id]
+    ['Durable event', ex.event_id],['Correlation id', ex.correlation_id]
   ]);
   var sa=mcpxEl('div','mcpx-dsec'); sa.appendChild(mcpxEl('div','mcpx-dsec-h','Safe actions'));
   var sar=mcpxEl('div','mcpx-btnrow');
@@ -17960,6 +17961,7 @@ async function mcpxOpenDecision(eventId){
 function mcpxCloseDrawer(){ var d=document.getElementById('mcpx-drawer'), s=document.getElementById('mcpx-scrim'); if(d){ d.classList.remove('open'); d.textContent=''; } if(s) s.classList.remove('open'); }
 
 document.addEventListener('keydown', function(e){
+  if(e.key==='Escape'){ var d=document.getElementById('mcpx-drawer'); if(d && d.classList.contains('open')){ mcpxCloseDrawer(); return; } }
   if(e.key!=='Enter' && e.key!==' ') return;
   var tr=e.target && e.target.closest && e.target.closest('table.mcpx-act tbody tr'); if(!tr) return;
   e.preventDefault(); mcpxOpenDecision(tr.dataset.arg);
