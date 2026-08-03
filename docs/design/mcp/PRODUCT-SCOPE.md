@@ -1,5 +1,16 @@
 # MCP Security Gateway — Product Scope
 
+> **PR-11 status (guarded execution / Shadow / Canary) — IMPLEMENTED, disabled by default.** The mode
+> ladder, immutable revisioned scope, central hard-failure classifier, bounded Model-A upstream client,
+> guarded execution (commit-before-side-effect, DLP-before-egress, credential containment, no client-token
+> passthrough), and signed CP→DP rollout distribution now ship in `internal/mcp/{rollout,upstreamclient,execution}`
+> and the `package main` composition. **Observe is non-executing; Shadow/Canary execute only inside an exact
+> approved scope for Model A (local-client); Production remains qualification-locked** (no config/env/CLI/API
+> bypass; no in-binary issuer). `outbound-connector`/`dmz-endpoint`, endpoint bridge, transparent discovery,
+> and Management mutation remain excluded. Duration targets (14d/7d/24h) are measurable machinery, not
+> completed evidence; Production Qualification is the separate gate. There is no PR-12.
+
+
 Purpose: this document defines what Culvert's MCP capabilities are, who they are for, why an enterprise
 would pay for them, and — just as importantly — what they explicitly are **not** in V1. It is the
 scope-of-record for the PR-0 package: [`THREAT-MODEL.md`](THREAT-MODEL.md) and

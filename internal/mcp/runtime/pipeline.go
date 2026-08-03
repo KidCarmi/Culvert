@@ -117,6 +117,10 @@ type pipeline struct {
 	// When nil the pipeline commits no event and routes no denial (byte-identical).
 	events EventProvider
 
+	// executor is the OPTIONAL PR-11 guarded-execution provider. When nil the
+	// pipeline keeps the decision-only path (execution_state not_implemented).
+	executor ExecutionProvider
+
 	// boundMu guards boundIDs — the set of session ids this pipeline has bound an
 	// identity to. It lets reconcileBindings unbind identities for sessions the
 	// kernel sweeper reclaimed (which has no per-binding hook), so the binding store
@@ -162,6 +166,9 @@ func newPipeline(cfg ListenerConfig, deps Deps, listenerID string, ctr *counters
 	}
 	if deps.Events != nil {
 		p.events = deps.Events
+	}
+	if deps.Executor != nil {
+		p.executor = deps.Executor
 	}
 	return p, nil
 }

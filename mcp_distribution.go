@@ -177,6 +177,10 @@ func applySnapshotMCP(snap ConfigSnapshot) {
 		if a := d.dpApplierFor(cpdp.CapabilityGateway); a != nil {
 			if _, err := a.Apply(gw); err != nil {
 				logger.Printf("MCP gateway snapshot rejected (SWG unaffected): %v", err)
+			} else {
+				// PR-11: apply the (validated) signed rollout config into the isolated
+				// Gateway rollout state. Absence keeps local rollout state.
+				getMCPRollout().applyRolloutConfig(rolloutFromEnvelope(gw), "cp-snapshot")
 			}
 		}
 	}
@@ -184,6 +188,8 @@ func applySnapshotMCP(snap ConfigSnapshot) {
 		if a := d.dpApplierFor(cpdp.CapabilityManagement); a != nil {
 			if _, err := a.Apply(mg); err != nil {
 				logger.Printf("MCP management snapshot rejected (SWG unaffected): %v", err)
+			} else {
+				getMCPRollout().applyRolloutConfig(rolloutFromEnvelope(mg), "cp-snapshot")
 			}
 		}
 	}

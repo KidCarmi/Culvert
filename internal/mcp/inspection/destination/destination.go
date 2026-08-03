@@ -111,6 +111,24 @@ type Canonical struct {
 // Origin returns the canonical scheme://host:port origin string (safe evidence).
 func (c Canonical) Origin() string { return c.Scheme + "://" + c.Host + ":" + c.Port }
 
+// RequestURL returns the full canonical request URL (origin + path + optional
+// query) a client must POST to. Unlike Origin() this is NOT evidence — it is the
+// validated destination the pinned transport connects to, so it preserves any path
+// a Streamable-HTTP server was mounted under (e.g. /mcp). A path-less endpoint
+// yields the origin with a single "/" (the pre-existing default). The path/query
+// stay unexported for evidence; RequestURL is the ONLY sanctioned surface that
+// reconstructs them, for the connect leg only.
+func (c Canonical) RequestURL() string {
+	path := c.path
+	if path == "" {
+		path = "/"
+	}
+	if c.HasQuery && c.query != "" {
+		return c.Origin() + path + "?" + c.query
+	}
+	return c.Origin() + path
+}
+
 // fullKey is the internal loop-detection key: origin + path + query. It is never
 // exposed as evidence.
 func (c Canonical) fullKey() string { return c.Origin() + c.path + "?" + c.query }

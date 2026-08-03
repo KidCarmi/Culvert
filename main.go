@@ -217,6 +217,7 @@ func main() {
 	initSOCKS5(s)
 	initPersistentAdminState(s)
 	initMCPRuntime(s) // PR-5: disabled-by-default MCP listener runtime (no SWG effect when off)
+	initMCPRollout(s) // PR-11: disabled-by-default rollout composition (Gateway/Management isolated)
 	loadReleaseManagement(resolveReleaseStartupConfig())
 	startAdminUI(s)
 

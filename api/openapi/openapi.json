@@ -11790,6 +11790,46 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/mcp/executions": {
+      "get": {
+        "description": "Bounded, safe execution history — counts only (executed, upstream ok/err, DLP blocks, hard-failure blocks, shadow overrides, commit failures). Never a tenant, subject, argument, URL, or token.",
+        "operationId": "getMCPExecutions",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Execution history"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Bounded MCP execution history",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/mcp/health": {
       "get": {
         "description": "Capability-isolated MCP health — Gateway/Management runtime and PR-8 durability state, distribution_state local_only, and Management access surface.",
@@ -12281,6 +12321,380 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/mcp/rollout": {
+      "get": {
+        "description": "Safe, read-only PR-11 rollout status per capability — desired, locally-active, and fleet-effective mode, scope revision/hash, bounded low-cardinality metrics, DP acknowledgement counts, and the Production qualification lock. Never exposes a tenant, subject, token, credential, or raw request/response. Production is always locked (this build ships no qualification issuer).",
+        "operationId": "getMCPRollout",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Rollout status"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "MCP rollout status",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/mcp/rollout/emergency": {
+      "post": {
+        "description": "Engages or clears the capability-local emergency kill switch (immediate admission stop). Node-local — no CP round trip. Emergency actions NARROW only; they can never promote, widen scope, or enable execution.",
+        "operationId": "createMCPRolloutEmergency",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "action": {
+                    "enum": [
+                      "disable",
+                      "clear"
+                    ],
+                    "type": "string"
+                  },
+                  "capability": {
+                    "enum": [
+                      "gateway",
+                      "management"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "capability"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Emergency state"
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Emergency kill switch (narrows only)",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-audit-event": "mcp.rollout.emergency.disable",
+        "x-culvert-danger-level": "high",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/mcp/rollout/evidence": {
+      "get": {
+        "description": "Measured evidence-window progress (shadow ≥14d, canary ≥7d, soak ≥24h) with a synthetic/production origin label. Reporting only — never asserts Production qualification, which remains locked behind the separate gate.",
+        "operationId": "getMCPRolloutEvidence",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Rollout evidence"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Rollout evidence-window progress",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/mcp/rollout/rehearse-rollback": {
+      "post": {
+        "description": "Records a rollback rehearsal as local evidence. The live signed rollback runs through the PR-10 coordinator; this marks the rehearsal-performed evidence flag only.",
+        "operationId": "createMCPRolloutRehearse",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Rehearsal recorded"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Record a rollback rehearsal",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-audit-event": "mcp.rollout.rehearse-rollback",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/mcp/rollout/scope": {
+      "get": {
+        "description": "Returns the current rollout scope revision + content hash + connector mode + high-risk flag for a capability. Safe fields only.",
+        "operationId": "getMCPRolloutScope",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Rollout scope"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Current rollout scope",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "put": {
+        "description": "Updates the rollout scope via the PR-10 signed publication path with four-eyes approval for widening. Fails closed with distribution_not_configured when the signed path is not active.",
+        "operationId": "updateMCPRolloutScope",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Scope update accepted (pending signed publication)"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/PlainConflict"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Update (widen/narrow) the rollout scope",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-audit-event": "mcp.rollout.scope.update",
+        "x-culvert-danger-level": "high",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/mcp/rollout/transition": {
+      "post": {
+        "description": "Requests a one-stage promotion (Disabled→Observe→Shadow→Canary→Production) or a multi-stage demotion. A promotion/widening rides the PR-10 signed publication path (four-eyes + PR-8 durable commit + sign + distribute + DP-ack); a CP-side accepted transition is not fleet-effective until acknowledged. Production is rejected without an externally-verified qualification receipt — no config/env/CLI/API can bypass it. Fails closed with distribution_not_configured when the signed path is not active on this node.",
+        "operationId": "createMCPRolloutTransition",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "base_revision": {
+                    "type": "integer"
+                  },
+                  "capability": {
+                    "enum": [
+                      "gateway",
+                      "management"
+                    ],
+                    "type": "string"
+                  },
+                  "to_mode": {
+                    "enum": [
+                      "disabled",
+                      "observe",
+                      "shadow",
+                      "canary",
+                      "production"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "capability",
+                  "to_mode"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Transition accepted (pending signed publication + DP acknowledgement)"
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/PlainConflict"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Request a one-stage rollout mode transition",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-audit-event": "mcp.rollout.transition.request",
+        "x-culvert-danger-level": "high",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/mcp/servers": {
       "get": {
         "description": "Tenant-scoped, redacted server inventory. Requires the tenant query parameter. A server_id parameter returns one server. No raw endpoint or credential material.",
@@ -12430,6 +12844,46 @@
         "x-culvert-permission": "viewer",
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "tenant",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/mcp/upstream-health": {
+      "get": {
+        "description": "Bounded upstream-leg health (success/error counts; enabled flag). Disabled-by-default (no upstream pool bound).",
+        "operationId": "getMCPUpstreamHealth",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Upstream health"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Upstream MCP leg health",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"
       }
     },
