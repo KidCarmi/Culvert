@@ -1,6 +1,9 @@
 package cpdp
 
-import "github.com/KidCarmi/Culvert/internal/mcp/mcperr"
+import (
+	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
+	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
+)
 
 // Payload carries exactly ONE capability's reviewed state. Exactly one of the two
 // pointers is non-nil, and it MUST match the envelope's signed capability. This
@@ -73,6 +76,11 @@ type GatewayPayload struct {
 	PolicySource       string                  `json:"policy_source"` // strictly serializable PR-6 policy document
 	InspectionProfiles []InspectionProfileMeta `json:"inspection_profiles"`
 	CredentialProfiles []CredentialProfileMeta `json:"credential_profiles"`
+	// Rollout is the OPTIONAL PR-11 signed rollout config (mode + scope + connector
+	// mode). nil ⇒ no rollout change (an older/rolled-back CP that predates PR-11
+	// never wipes a DP's rollout state). It rides the content hash + signature with
+	// no extra plumbing and is validated + applied on the DP whole-or-nothing.
+	Rollout *rollout.SignedConfig `json:"rollout,omitempty"`
 }
 
 // ManagementListener is the reviewed Management listener/access configuration.
@@ -98,6 +106,10 @@ type ManagementPayload struct {
 	Listener                ManagementListener `json:"listener"`
 	OperationCatalogVersion uint64             `json:"operation_catalog_version"`
 	PolicyReadScope         string             `json:"policy_read_scope"`
+	// Rollout is the OPTIONAL PR-11 signed rollout config for the Management
+	// capability (mode + scope; Management never executes, so its mode gates only
+	// listener presence + read behavior). nil ⇒ no rollout change.
+	Rollout *rollout.SignedConfig `json:"rollout,omitempty"`
 }
 
 // checkCapabilityIsolation verifies that a payload carries exactly the state of
