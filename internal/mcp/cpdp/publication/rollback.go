@@ -34,23 +34,9 @@ func (c *Coordinator) Rollback(in RollbackInput) (RollbackResult, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// 1: validate target + current hash.
-	if c.cpCurrent == nil {
-		return RollbackResult{}, mcperr.New(mcperr.ReasonRollbackTargetMissing, "cpdp.pub.rollback", "no current snapshot")
-	}
-	if c.cpPrevious == nil || c.cpPrevious.ContentHash != in.TargetHash {
-		return RollbackResult{}, mcperr.New(mcperr.ReasonRollbackTargetMissing, "cpdp.pub.rollback", "target is not the retained previous snapshot")
-	}
-	// 2: four-eyes approval + expiry.
-	if in.VerifyApproval == nil || !in.VerifyApproval() {
-		return RollbackResult{}, mcperr.New(mcperr.ReasonSnapshotValidationFailed, "cpdp.pub.rollback", "rollback approval does not bind the command")
-	}
-	if in.ExpiryUnixNano != 0 && c.cfg.Clock() > in.ExpiryUnixNano {
-		return RollbackResult{}, mcperr.New(mcperr.ReasonRollbackDirectiveInvalid, "cpdp.pub.rollback", "rollback request expired")
-	}
-	// 3: CP lease/write authority.
-	if !c.cfg.Auth.WriteAllowed() {
-		return RollbackResult{}, mcperr.New(mcperr.ReasonDistributionWriteAuthority, "cpdp.pub.rollback", "not write-authoritative")
+	// 1-3: validate target + current hash, four-eyes approval + expiry, write authority.
+	if err := c.validateRollback(in); err != nil {
+		return RollbackResult{}, err
 	}
 	curHash := c.cpCurrent.ContentHash
 	epoch := c.cfg.Auth.CurrentEpoch()
@@ -58,7 +44,7 @@ func (c *Coordinator) Rollback(in RollbackInput) (RollbackResult, error) {
 	// 4-6: durably commit the PR-8 rollback event FIRST; sign/push/swap ONLY inside act.
 	var result RollbackResult
 	commitErr := c.cfg.Committer.CommitThenAct(
-		PublicationFact{Capability: c.cfg.Capability, ContentHash: curHash, Rollback: true, TargetHash: in.TargetHash},
+		Fact{Capability: c.cfg.Capability, ContentHash: curHash, Rollback: true, TargetHash: in.TargetHash},
 		func() error {
 			d, serr := cpdp.SignRollback(cpdp.RollbackDirective{
 				Capability: c.cfg.Capability, Epoch: epoch, CurrentActiveHash: curHash,
@@ -69,12 +55,12 @@ func (c *Coordinator) Rollback(in RollbackInput) (RollbackResult, error) {
 				return serr
 			}
 			// Atomically swap the CP store: current <- previous target, previous <- old current.
-			old := c.cpCurrent
-			c.cpCurrent = c.cpPrevious
-			c.cpPrevious = old
-			// Push the directive + collect rolled_back acknowledgements.
+			c.cpCurrent, c.cpPrevious = c.cpPrevious, c.cpCurrent
+			// Deliver the reverted (now-current) envelope + the signed directive to each
+			// DP, and collect rolled_back acknowledgements.
+			reverted := c.cpCurrent
 			for _, node := range c.cfg.Dist.Nodes() {
-				ack, err := c.cfg.Dist.PushRollback(node, d)
+				ack, err := c.cfg.Dist.PushRollback(node, d, reverted)
 				if err != nil || ack == nil {
 					continue
 				}
@@ -82,7 +68,7 @@ func (c *Coordinator) Rollback(in RollbackInput) (RollbackResult, error) {
 			}
 			counts := c.tracker.Counts(in.TargetHash, c.cfg.Dist.Nodes())
 			state := StateRollbackPending
-			if counts.Intended > 0 && counts.Applied == counts.Intended {
+			if counts.Intended > 0 && counts.RolledBack == counts.Intended {
 				state = StateRolledBack
 			}
 			result = RollbackResult{State: state, TargetHash: in.TargetHash, Epoch: epoch, Counts: counts}
@@ -95,4 +81,27 @@ func (c *Coordinator) Rollback(in RollbackInput) (RollbackResult, error) {
 	}
 	c.lastState = result.State
 	return result, nil
+}
+
+// validateRollback runs the pre-commit rollback checks: the target must be the
+// retained previous snapshot, the four-eyes approval must bind and not be expired,
+// and the CP must hold write authority. Split out to keep Rollback under the
+// cyclomatic-complexity bound.
+func (c *Coordinator) validateRollback(in RollbackInput) error {
+	if c.cpCurrent == nil {
+		return mcperr.New(mcperr.ReasonRollbackTargetMissing, "cpdp.pub.rollback", "no current snapshot")
+	}
+	if c.cpPrevious == nil || c.cpPrevious.ContentHash != in.TargetHash {
+		return mcperr.New(mcperr.ReasonRollbackTargetMissing, "cpdp.pub.rollback", "target is not the retained previous snapshot")
+	}
+	if in.VerifyApproval == nil || !in.VerifyApproval() {
+		return mcperr.New(mcperr.ReasonSnapshotValidationFailed, "cpdp.pub.rollback", "rollback approval does not bind the command")
+	}
+	if in.ExpiryUnixNano != 0 && c.cfg.Clock() > in.ExpiryUnixNano {
+		return mcperr.New(mcperr.ReasonRollbackDirectiveInvalid, "cpdp.pub.rollback", "rollback request expired")
+	}
+	if !c.cfg.Auth.WriteAllowed() {
+		return mcperr.New(mcperr.ReasonDistributionWriteAuthority, "cpdp.pub.rollback", "not write-authoritative")
+	}
+	return nil
 }

@@ -40,25 +40,17 @@ type PreparedState struct {
 }
 
 // ServerCount / ToolCount expose bounded prepared-index sizes for health/tests.
+// ServerCount returns the number of prepared server records.
 func (p *PreparedState) ServerCount() int { return len(p.servers) }
-func (p *PreparedState) ToolCount() int   { return len(p.tools) }
+
+// ToolCount returns the number of prepared tool records.
+func (p *PreparedState) ToolCount() int { return len(p.tools) }
 
 // Server returns a prepared server record by id (index lookup), off the active
 // path.
 func (p *PreparedState) Server(id string) (cpdp.ServerRecord, bool) {
 	s, ok := p.servers[id]
 	return s, ok
-}
-
-func policyCapability(c cpdp.Capability) (policy.Capability, bool) {
-	switch c {
-	case cpdp.CapabilityGateway:
-		return policy.CapGateway, true
-	case cpdp.CapabilityManagement:
-		return policy.CapManagement, true
-	default:
-		return 0, false
-	}
 }
 
 // Prepare builds the immutable runtime candidate for a validated envelope OFF the

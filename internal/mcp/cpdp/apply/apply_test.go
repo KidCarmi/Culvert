@@ -80,10 +80,10 @@ func (m *memStore) Load() (*PersistedState, error) {
 
 var idc atomic.Int64
 
-func newApplier(t *testing.T, cap cpdp.Capability, ts *cpdp.TrustStore, store SnapStore) *Applier {
+func newApplier(t *testing.T, capab cpdp.Capability, ts *cpdp.TrustStore, store SnapStore) *Applier {
 	t.Helper()
 	a, err := New(Config{
-		Capability: cap, Trust: ts, DPVersion: cpdp.DPCompatVersion, Limits: cpdp.DefaultLimits(),
+		Capability: capab, Trust: ts, DPVersion: cpdp.DPCompatVersion, Limits: cpdp.DefaultLimits(),
 		NodeID: "node-1", Store: store,
 		Clock: func() int64 { return 42 },
 		IDGen: func() string { return "ack-" + strconv.FormatInt(idc.Add(1), 10) },
@@ -201,6 +201,38 @@ func TestApply_PersistFailureLeavesActiveUnchanged(t *testing.T) {
 	}
 	if a.TrustedEpoch() != beforeEpoch {
 		t.Fatal("epoch advanced after persist failure (must not ratchet before persist)")
+	}
+}
+
+// TestApply_SameRevDiffHashNotPersisted proves a same-epoch+same-config-revision
+// candidate with a DIFFERENT content hash is rejected BEFORE persistence, so a
+// subsequent restart never recovers the rejected candidate (rejection atomicity).
+func TestApply_SameRevDiffHashNotPersisted(t *testing.T) {
+	s, ts := mkSigner(t, "k1")
+	store := &memStore{}
+	a := newApplier(t, cpdp.CapabilityGateway, ts, store)
+	e1 := gwEnv(t, s, 5, 2)
+	a.Apply(e1)
+	if store.persists.Load() != 1 {
+		t.Fatalf("first apply persists = %d", store.persists.Load())
+	}
+	// Same manifest (epoch 5, config 2) but a different payload ⇒ different hash.
+	p2 := gwEnv(t, s, 5, 2)
+	p2.Payload.Gateway.Tools[0].Name = "different"
+	dup, _ := cpdp.Sign(p2.Manifest, p2.Payload, s, cpdp.DefaultLimits())
+	if _, err := a.Apply(dup); err == nil {
+		t.Fatal("same-revision different-content must be rejected")
+	}
+	if store.persists.Load() != 1 {
+		t.Fatalf("rejected candidate was persisted: persists=%d", store.persists.Load())
+	}
+	// Restart restores e1, NOT the rejected candidate.
+	a2 := newApplier(t, cpdp.CapabilityGateway, ts, store)
+	if err := a2.Recover(); err != nil {
+		t.Fatal(err)
+	}
+	if a2.Active().ContentHash != e1.ContentHash {
+		t.Fatal("restart recovered a rejected candidate")
 	}
 }
 

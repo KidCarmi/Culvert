@@ -17,10 +17,10 @@ type WriteAuthority interface {
 	CurrentEpoch() int64
 }
 
-// PublicationFact is the durable P-CRIT event fact for a config-publication or
-// rollback decision. The adapter (Leg 3) maps it to the PR-8 events.Manager with
+// Fact is the durable P-CRIT event fact for a config-publication or rollback
+// decision. The adapter maps it to the PR-8 events.Manager with
 // ActionClassConfigPublication + CritCritical.
-type PublicationFact struct {
+type Fact struct {
 	Capability  cpdp.Capability
 	ContentHash string
 	Revision    uint64
@@ -34,7 +34,7 @@ type PublicationFact struct {
 // spool-commit failure) it MUST return an error and NOT run act. This mirrors
 // events.Manager.CommitThenAct.
 type DurableCommitter interface {
-	CommitThenAct(fact PublicationFact, act func() error) error
+	CommitThenAct(fact Fact, act func() error) error
 }
 
 // Distributor is the injected CP→DP transport. Nodes returns the intended DP node
@@ -43,7 +43,10 @@ type DurableCommitter interface {
 type Distributor interface {
 	Nodes() []string
 	Push(node string, env *cpdp.Envelope) (*cpdp.Acknowledgement, error)
-	PushRollback(node string, d *cpdp.RollbackDirective) (*cpdp.Acknowledgement, error)
+	// PushRollback delivers the signed rollback directive AND the reverted (target)
+	// envelope to a node, so a pull-based transport can install the reverted snapshot
+	// on the wire while the directive remains the audited command.
+	PushRollback(node string, d *cpdp.RollbackDirective, reverted *cpdp.Envelope) (*cpdp.Acknowledgement, error)
 }
 
 // Config wires a capability-local Coordinator.
@@ -89,8 +92,10 @@ type PublishInput struct {
 	MinDPVersion  cpdp.CompatVersion
 	PayloadType   string
 	CandidateHash string // the exact approved candidate hash (PR-9)
-	// VerifyApproval re-checks the four-eyes receipt binds to this exact candidate.
-	VerifyApproval func() bool
+	// VerifyApproval re-checks the four-eyes receipt binds to THIS exact candidate.
+	// It receives the candidate hash the coordinator recomputed from the payload it
+	// is about to sign, so the receipt cannot be satisfied by a different payload.
+	VerifyApproval func(candidateHash string) bool
 	// VerifyBase re-checks the live base revision still matches (optimistic concurrency).
 	VerifyBase func() bool
 }
@@ -114,8 +119,18 @@ func (c *Coordinator) Publish(in PublishInput) (PublishResult, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// 1-2: resolve + re-verify the exact approved candidate + live base.
-	if in.VerifyApproval == nil || !in.VerifyApproval() {
+	// 1-2: resolve + re-verify the EXACT approved candidate + live base. The
+	// candidate hash is recomputed from the payload about to be signed and must match
+	// the approved candidate; the four-eyes receipt is then checked against that same
+	// hash, so a caller cannot approve one candidate and sign a different payload.
+	candHash, err := cpdp.CandidateHash(c.cfg.Capability, in.Payload, c.cfg.Limits.CanonicalBounds())
+	if err != nil {
+		return PublishResult{}, err
+	}
+	if in.CandidateHash != "" && in.CandidateHash != candHash {
+		return PublishResult{}, mcperr.New(mcperr.ReasonSnapshotValidationFailed, "cpdp.pub", "payload does not match the approved candidate hash")
+	}
+	if in.VerifyApproval == nil || !in.VerifyApproval(candHash) {
 		return PublishResult{}, mcperr.New(mcperr.ReasonSnapshotValidationFailed, "cpdp.pub", "approval receipt does not bind the candidate")
 	}
 	if in.VerifyBase == nil || !in.VerifyBase() {
@@ -148,7 +163,7 @@ func (c *Coordinator) Publish(in PublishInput) (PublishResult, error) {
 	// happen ONLY inside act, i.e. only after a confirmed commit.
 	var result PublishResult
 	commitErr := c.cfg.Committer.CommitThenAct(
-		PublicationFact{Capability: c.cfg.Capability, ContentHash: contentHash, Revision: in.Revisions.Config},
+		Fact{Capability: c.cfg.Capability, ContentHash: contentHash, Revision: in.Revisions.Config},
 		func() error {
 			env, serr := cpdp.Sign(m, in.Payload, c.cfg.Signer, c.cfg.Limits)
 			if serr != nil {
@@ -197,7 +212,7 @@ func (c *Coordinator) buildResult(env *cpdp.Envelope) PublishResult {
 	}
 }
 
-// CurrentHash / PreviousHash expose the CP publication-store pointers.
+// CurrentHash returns the CP publication store's current content hash, or "".
 func (c *Coordinator) CurrentHash() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -207,6 +222,7 @@ func (c *Coordinator) CurrentHash() string {
 	return c.cpCurrent.ContentHash
 }
 
+// PreviousHash returns the CP publication store's previous content hash, or "".
 func (c *Coordinator) PreviousHash() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()

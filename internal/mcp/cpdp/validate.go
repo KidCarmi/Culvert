@@ -72,7 +72,7 @@ func Validate(env *Envelope, in ValidateInput) error {
 		return err
 	}
 	// 13: payload consistency, safe configuration, references, no secret-bearing.
-	if err := validatePayloadConsistency(env, in.Limits); err != nil {
+	if err := validatePayloadConsistency(env); err != nil {
 		return err
 	}
 	return nil
@@ -103,7 +103,7 @@ func ValidateCandidate(m Manifest, p Payload, in ValidateInput) error {
 	if err := validateBounds(tmp, in.Limits); err != nil {
 		return err
 	}
-	return validatePayloadConsistency(tmp, in.Limits)
+	return validatePayloadConsistency(tmp)
 }
 
 // validateBounds enforces the per-section entry caps and the aggregate byte
@@ -117,22 +117,26 @@ func validateBounds(env *Envelope, l Limits) error {
 	if len(raw) > l.MaxEnvelopeBytes() {
 		return mcperr.New(mcperr.ReasonSnapshotTooLarge, "cpdp.validate", "envelope exceeds byte bound")
 	}
-	if g := env.Payload.Gateway; g != nil {
-		if len(g.Servers) > l.MaxRegistryServers() {
-			return mcperr.New(mcperr.ReasonSnapshotTooLarge, "cpdp.validate", "too many servers")
-		}
-		if len(g.Tools) > l.MaxCatalogTools() {
-			return mcperr.New(mcperr.ReasonSnapshotTooLarge, "cpdp.validate", "too many tools")
-		}
-		if len(g.CredentialProfiles) > l.MaxCredentialProfiles() {
-			return mcperr.New(mcperr.ReasonSnapshotTooLarge, "cpdp.validate", "too many credential profiles")
-		}
-		if len(g.InspectionProfiles) > l.MaxInspectionProfiles() {
-			return mcperr.New(mcperr.ReasonSnapshotTooLarge, "cpdp.validate", "too many inspection profiles")
-		}
-		if len(g.PolicySource) > l.MaxPayloadSectionBytes() {
-			return mcperr.New(mcperr.ReasonSnapshotTooLarge, "cpdp.validate", "policy source exceeds section bound")
-		}
+	return validateGatewayBounds(env.Payload.Gateway, l)
+}
+
+// validateGatewayBounds enforces the Gateway per-section entry/byte caps. A nil
+// payload (Management snapshot) is a no-op.
+func validateGatewayBounds(g *GatewayPayload, l Limits) error {
+	if g == nil {
+		return nil
+	}
+	switch {
+	case len(g.Servers) > l.MaxRegistryServers():
+		return mcperr.New(mcperr.ReasonSnapshotTooLarge, "cpdp.validate", "too many servers")
+	case len(g.Tools) > l.MaxCatalogTools():
+		return mcperr.New(mcperr.ReasonSnapshotTooLarge, "cpdp.validate", "too many tools")
+	case len(g.CredentialProfiles) > l.MaxCredentialProfiles():
+		return mcperr.New(mcperr.ReasonSnapshotTooLarge, "cpdp.validate", "too many credential profiles")
+	case len(g.InspectionProfiles) > l.MaxInspectionProfiles():
+		return mcperr.New(mcperr.ReasonSnapshotTooLarge, "cpdp.validate", "too many inspection profiles")
+	case len(g.PolicySource) > l.MaxPayloadSectionBytes():
+		return mcperr.New(mcperr.ReasonSnapshotTooLarge, "cpdp.validate", "policy source exceeds section bound")
 	}
 	return nil
 }
@@ -140,10 +144,10 @@ func validateBounds(env *Envelope, l Limits) error {
 // validatePayloadConsistency enforces payload-internal integrity: required
 // references, safe configuration, and the no-secret-bearing invariant. It never
 // mutates the envelope.
-func validatePayloadConsistency(env *Envelope, l Limits) error {
+func validatePayloadConsistency(env *Envelope) error {
 	switch env.Manifest.Capability {
 	case CapabilityGateway:
-		return validateGatewayPayload(env.Payload.Gateway, l)
+		return validateGatewayPayload(env.Payload.Gateway)
 	case CapabilityManagement:
 		return validateManagementPayload(env.Payload.Management)
 	default:
@@ -151,7 +155,7 @@ func validatePayloadConsistency(env *Envelope, l Limits) error {
 	}
 }
 
-func validateGatewayPayload(g *GatewayPayload, l Limits) error {
+func validateGatewayPayload(g *GatewayPayload) error {
 	if g == nil {
 		return mcperr.New(mcperr.ReasonSnapshotValidationFailed, "cpdp.validate", "nil gateway payload")
 	}

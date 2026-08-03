@@ -46,7 +46,7 @@ func newMCPEventsCommitter(mgr *events.Manager, actor string) *mcpEventsCommitte
 	return &mcpEventsCommitter{mgr: mgr, actor: actor}
 }
 
-func (e *mcpEventsCommitter) CommitThenAct(fact publication.PublicationFact, act func() error) error {
+func (e *mcpEventsCommitter) CommitThenAct(fact publication.Fact, act func() error) error {
 	if e.mgr == nil {
 		// No durable event manager wired ⇒ fail closed: nothing is published.
 		return mcperr.New(mcperr.ReasonPublicationDurabilityRequired, "mcp.commit", "event manager not wired")
@@ -88,11 +88,14 @@ func (mcpPullDistributor) Push(_ string, env *cpdp.Envelope) (*cpdp.Acknowledgem
 	return nil, nil                           // async ack model — no synchronous ack
 }
 
-func (mcpPullDistributor) PushRollback(_ string, _ *cpdp.RollbackDirective) (*cpdp.Acknowledgement, error) {
-	// A rollback's DP-visible effect rides the same pull channel: the coordinator
-	// re-installs the reverted (previous) envelope as the CP-published current via
-	// setCPPublished after the swap. The signed directive is the audited command;
-	// its DP delivery is the reverted ConfigSnapshot. Async ack.
+func (mcpPullDistributor) PushRollback(_ string, _ *cpdp.RollbackDirective, reverted *cpdp.Envelope) (*cpdp.Acknowledgement, error) {
+	// A rollback's DP-visible effect rides the same pull channel: install the reverted
+	// (target) envelope as the CP-published current so the next captured ConfigSnapshot
+	// carries it to every DP. The signed directive is the audited command; the reverted
+	// ConfigSnapshot is its DP delivery. Async ack via mcpIngestAck.
+	if reverted != nil {
+		globalMCPDistribution.setCPPublished(reverted)
+	}
 	return nil, nil
 }
 

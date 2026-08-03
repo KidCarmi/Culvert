@@ -60,6 +60,7 @@ func NewFileStore(dir string, capability cpdp.Capability) SnapStore {
 	return &fileStore{path: filepath.Join(dir, name)}
 }
 
+// Persist writes the state atomically (temp + fsync + rename + parent-dir sync).
 func (f *fileStore) Persist(st *PersistedState) error {
 	raw, err := json.Marshal(st)
 	if err != nil {
@@ -73,6 +74,8 @@ func (f *fileStore) Persist(st *PersistedState) error {
 	return nil
 }
 
+// Load reads the persisted state, returning (nil, nil) when no file exists and an
+// error (never a permissive empty state) when the file is unreadable or corrupt.
 func (f *fileStore) Load() (*PersistedState, error) {
 	raw, err := os.ReadFile(f.path) // #nosec G304 -- path is a fixed capability file under the data dir
 	if err != nil {

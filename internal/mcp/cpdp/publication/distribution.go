@@ -42,6 +42,7 @@ const (
 type DistributionCounts struct {
 	Intended     int `json:"intended"`
 	Applied      int `json:"applied"`
+	RolledBack   int `json:"rolled_back"`
 	Rejected     int `json:"rejected"`
 	Incompatible int `json:"incompatible"`
 	Unavailable  int `json:"unavailable"`
@@ -170,6 +171,8 @@ func (t *AckTracker) Counts(contentHash string, intended []string) DistributionC
 		switch a.State {
 		case cpdp.AckApplied:
 			c.Applied++
+		case cpdp.AckRolledBack:
+			c.RolledBack++
 		case cpdp.AckRejected:
 			c.Rejected++
 			if a.RejectReason == mcperr.ReasonSnapshotMinVersionUnmet.Code() {

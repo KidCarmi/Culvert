@@ -87,10 +87,16 @@ func GenerateLocalSigner(keyID string) (Signer, error) {
 	return &localSigner{keyID: keyID, priv: priv}, nil
 }
 
-func (s *localSigner) KeyID() string             { return s.keyID }
-func (s *localSigner) Algorithm() string         { return SigAlgEd25519 }
+// KeyID returns the signing key id.
+func (s *localSigner) KeyID() string { return s.keyID }
+
+// Algorithm returns the signature algorithm identifier ("ed25519").
+func (s *localSigner) Algorithm() string { return SigAlgEd25519 }
+
+// Public returns the ed25519 public key (safe to distribute as a trust root).
 func (s *localSigner) Public() ed25519.PublicKey { return s.priv.Public().(ed25519.PublicKey) }
 
+// Sign signs msg with the ed25519 private key; it never exposes the private key.
 func (s *localSigner) Sign(msg []byte) ([]byte, error) {
 	if len(s.priv) != ed25519.PrivateKeySize {
 		return nil, mcperr.New(mcperr.ReasonSnapshotSignerUnavailable, "cpdp.sign", "signer unavailable")
@@ -212,11 +218,11 @@ func Sign(m Manifest, p Payload, s Signer, l Limits) (*Envelope, error) {
 // An unknown algorithm, unknown key, malformed hash, or malformed/oversized
 // signature rejects the whole snapshot. A key carried inside the snapshot never
 // authorizes itself — only the trust store is consulted.
-func VerifySignature(env *Envelope, trust *TrustStore, l Limits) error {
-	if env == nil || trust == nil {
-		return mcperr.New(mcperr.ReasonSnapshotMalformed, "cpdp.verify", "nil envelope or trust store")
-	}
-	// 1. structural header presence + bounds.
+// verifyEnvelopeHeader checks the bounded structural header fields of an envelope
+// (schema version, capability, key id, signature length, algorithm) without
+// consulting the trust store or recomputing the hash. Split out to keep
+// VerifySignature under the cyclomatic-complexity bound.
+func verifyEnvelopeHeader(env *Envelope, l Limits) error {
 	if !schemaSupported(env.Manifest.SchemaVersion) {
 		// A present-but-unknown schema is a schema rejection, not a generic malform.
 		return mcperr.New(mcperr.ReasonSnapshotSchemaUnknown, "cpdp.verify", "unsupported envelope schema version")
@@ -227,12 +233,23 @@ func VerifySignature(env *Envelope, trust *TrustStore, l Limits) error {
 	if env.KeyID == "" || len(env.KeyID) > l.MaxKeyIDBytes() {
 		return mcperr.New(mcperr.ReasonSnapshotKeyUntrusted, "cpdp.verify", "missing or oversized key id")
 	}
-	if len(env.Signature) == 0 || len(env.Signature) > l.MaxSignatureBytes() {
+	if env.Signature == "" || len(env.Signature) > l.MaxSignatureBytes() {
 		return mcperr.New(mcperr.ReasonSnapshotSignatureInvalid, "cpdp.verify", "missing or oversized signature")
 	}
-	// 3. known algorithm — an unknown alg is NEVER treated as ed25519.
+	// An unknown alg is NEVER treated as ed25519.
 	if env.SigAlg != SigAlgEd25519 {
 		return mcperr.New(mcperr.ReasonSnapshotAlgUnknown, "cpdp.verify", "unsupported signature algorithm")
+	}
+	return nil
+}
+
+func VerifySignature(env *Envelope, trust *TrustStore, l Limits) error {
+	if env == nil || trust == nil {
+		return mcperr.New(mcperr.ReasonSnapshotMalformed, "cpdp.verify", "nil envelope or trust store")
+	}
+	// 1-3. structural header presence + bounds + known algorithm.
+	if err := verifyEnvelopeHeader(env, l); err != nil {
+		return err
 	}
 	// 4. trusted key.
 	pub, ok := trust.lookup(env.KeyID)

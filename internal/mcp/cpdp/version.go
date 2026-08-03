@@ -41,12 +41,12 @@ func (v CompatVersion) ValidMinVersion() bool {
 //   - ReasonSnapshotMinVersionUnmet if the DP is below the required minimum
 //     (the DP MUST NOT apply and keeps its prior valid snapshot);
 //   - nil if the DP is at or above the minimum and may continue validation.
-func CheckMinVersion(min, dp CompatVersion) error {
-	if !min.ValidMinVersion() {
+func CheckMinVersion(minVer, dp CompatVersion) error {
+	if !minVer.ValidMinVersion() {
 		return mcperr.New(mcperr.ReasonSnapshotMinVersionMalformed, "cpdp.version",
 			"minimum_dp_version absent or out of range")
 	}
-	if dp < min {
+	if dp < minVer {
 		return mcperr.New(mcperr.ReasonSnapshotMinVersionUnmet, "cpdp.version",
 			"data-plane compatibility version below snapshot minimum")
 	}
