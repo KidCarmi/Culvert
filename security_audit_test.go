@@ -207,7 +207,7 @@ func TestUIAuthMiddleware_ClusterBootstrapIsTokenAuthed(t *testing.T) {
 	} {
 		// No session cookie, no Basic Auth — exactly what the generated
 		// onboarding `curl` command sends from a fresh, unenrolled host.
-		r := httptest.NewRequest(http.MethodGet, path, nil)
+		r := httptest.NewRequest(http.MethodGet, path, http.NoBody)
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, r)
 		if w.Code != http.StatusOK {
