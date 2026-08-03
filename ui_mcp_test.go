@@ -39,6 +39,36 @@ func TestMCP_MethodRejection(t *testing.T) {
 	}
 }
 
+func TestMCP_PR10DistributionAndRollback(t *testing.T) {
+	// Viewer may read distribution status; it reports local_only when disabled.
+	rec := mcpReq(http.MethodGet, "/api/mcp/distribution", RoleViewer, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("viewer GET distribution = %d, want 200", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "local_only") {
+		t.Fatalf("distribution status missing local_only: %s", rec.Body.String())
+	}
+	// The safe status never exposes a private key or raw signature field name.
+	if strings.Contains(rec.Body.String(), "private") || strings.Contains(rec.Body.String(), "\"signature\"") {
+		t.Fatalf("distribution status leaked sensitive field: %s", rec.Body.String())
+	}
+	// Viewer/operator may NOT roll back (needs admin).
+	if got := mcpReq(http.MethodPost, "/api/mcp/rollback", RoleViewer, `{"capability":"gateway","target_hash":"h"}`).Code; got != http.StatusForbidden {
+		t.Fatalf("viewer POST rollback = %d, want 403", got)
+	}
+	if got := mcpReq(http.MethodPost, "/api/mcp/rollback", RoleOperator, `{"capability":"gateway","target_hash":"h"}`).Code; got != http.StatusForbidden {
+		t.Fatalf("operator POST rollback = %d, want 403", got)
+	}
+	// Admin rollback when distribution is disabled ⇒ truthful conflict, not a fake success.
+	if got := mcpReq(http.MethodPost, "/api/mcp/rollback", RoleAdmin, `{"capability":"gateway","target_hash":"h"}`).Code; got != http.StatusConflict {
+		t.Fatalf("admin POST rollback (disabled) = %d, want 409", got)
+	}
+	// Missing target hash ⇒ bad request.
+	if got := mcpReq(http.MethodPost, "/api/mcp/rollback", RoleAdmin, `{"capability":"gateway"}`).Code; got != http.StatusBadRequest {
+		t.Fatalf("admin POST rollback (no target) = %d, want 400", got)
+	}
+}
+
 func TestMCP_RBAC(t *testing.T) {
 	// Viewer may read overview.
 	if got := mcpReq(http.MethodGet, "/api/mcp/overview", RoleViewer, "").Code; got != http.StatusOK {

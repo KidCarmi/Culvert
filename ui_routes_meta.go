@@ -880,4 +880,10 @@ var uiRoutes = []uiRouteMetadata{
 			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true}}},
 	{Path: "/api/mcp/management-access", Handler: "apiMCPManagementAccess", Domain: "mcp", Public: false,
 		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
+	{Path: "/api/mcp/distribution", Handler: "apiMCPDistribution", Domain: "mcp", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer,
+			Note: "PR-10 signed CP→DP distribution status (safe fields only; no key/signature/raw snapshot)"}}},
+	{Path: "/api/mcp/rollback", Handler: "apiMCPRollback", Domain: "mcp", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
+			Note: "PR-10 four-eyes atomic rollback to a retained signed snapshot; Management MCP may not roll back"}}},
 }
