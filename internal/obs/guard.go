@@ -77,6 +77,18 @@ func reportPanic(component string, v any) {
 	}
 }
 
+// ReportPanic hands an already-recovered value to the sink. Use it when the
+// caller must run its own cleanup in the same deferred function that recovers —
+// recover() only works when called DIRECTLY by the deferred func, so such a
+// caller cannot delegate to Guard. internal/reqlog's drain does this: it has to
+// discard a poisoned write buffer before reporting.
+func ReportPanic(component string, v any) {
+	if v == nil {
+		return
+	}
+	reportPanic(component, v)
+}
+
 // Guard is the deferred one-liner for a worker loop body:
 //
 //	func (w *worker) tick() {

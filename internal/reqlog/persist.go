@@ -3,6 +3,7 @@ package reqlog
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"io"
 	"sync"
 	"sync/atomic"
@@ -229,15 +230,86 @@ func drainLoop(ch chan Entry, flush chan chan struct{}, stop chan struct{}) {
 	// A single reused encoder writes compact JSON + '\n' straight into the
 	// buffer. Byte-identical to the previous json.Marshal(e)+'\n', minus the
 	// per-entry intermediate slice.
-	bw := bufio.NewWriterSize(asyncSink{}, persistBufSize)
-	enc := json.NewEncoder(bw)
+	b := newBatch()
 
 	for {
-		if stopped := drainRound(bw, enc, ch, flush, stop); stopped {
+		if stopped := drainRound(b, ch, flush, stop); stopped {
 			return
 		}
 	}
 }
+
+// batch owns the drain goroutine's write buffer AND the number of records
+// currently buffered but not yet flushed.
+//
+// The count has to live outside a single round so the panic-recovery path can
+// charge and discard exactly what was lost — see drainRound.
+type batch struct {
+	bw  *bufio.Writer
+	enc *json.Encoder
+	n   int // records buffered, not yet flushed
+}
+
+func newBatch() *batch {
+	bw := bufio.NewWriterSize(asyncSink{}, persistBufSize)
+	return &batch{bw: bw, enc: json.NewEncoder(bw)}
+}
+
+// encode buffers one record. The count is incremented BEFORE the encode: if
+// Encode panics part-way, the buffer may already hold a partial record, and
+// that record is lost either way — counting first keeps the discard honest.
+func (b *batch) encode(e Entry) {
+	b.n++
+	if err := b.enc.Encode(e); err != nil {
+		countWriteError(1, err)
+		b.n--
+	}
+}
+
+// takePending buffers every entry currently queued. It never blocks.
+func (b *batch) takePending(ch chan Entry) {
+	for {
+		select {
+		case e := <-ch:
+			b.encode(e)
+		default:
+			return
+		}
+	}
+}
+
+func (b *batch) flush() {
+	flushBatch(b.bw, b.n)
+	b.n = 0
+}
+
+// discard drops a buffer left poisoned by a recovered panic.
+//
+// This is load-bearing, not hygiene. bufio.Writer.Flush clears its buffer only
+// AFTER the underlying Write RETURNS (`b.n = 0` is the last statement), so a
+// Write that PANICS unwinds with the batch still buffered. Reusing that writer
+// replays the same poisoned bytes on every later flush: with a deterministic,
+// content-triggered fault the drain goroutine stays alive and healthy-looking
+// while nothing ever reaches the durable audit file again — a silent, permanent
+// loss of the compliance record, which is exactly the failure class the panic
+// guard exists to remove.
+//
+// So the batch is dropped and its records are charged to WriteErrors. The loss
+// is then BOUNDED (one batch) and VISIBLE, instead of unbounded and silent.
+// Reset also clears bufio's latched error, so a transient fault resumes
+// logging — the same contract flushBatch applies to a failed flush.
+func (b *batch) discard() {
+	if b.n > 0 {
+		countWriteError(int64(b.n), errPoisonedBatch)
+		b.n = 0
+	}
+	b.bw.Reset(asyncSink{})
+}
+
+// errPoisonedBatch explains a discard in the (once-only) write-error log line.
+// The panic VALUE is deliberately not folded in here — obs.ReportPanic routes
+// it to the crash sink, which owns the bounded, scrubbed, redacted record.
+var errPoisonedBatch = errors.New("batch discarded after a recovered panic in the request-log sink")
 
 // drainRound runs ONE select round of the drain loop, reporting whether stop
 // was observed.
@@ -251,16 +323,26 @@ func drainLoop(ch chan Entry, flush chan chan struct{}, stop chan struct{}) {
 // the consumer alive, so a panicking entry costs at most the batch it was in
 // and the queue keeps draining.
 //
+// The recovery path discards the (possibly poisoned) buffer before reporting —
+// see batch.discard for why continuing with it would wedge the log silently.
+// recover() only works when called directly by the deferred function, which is
+// why this reports via obs.ReportPanic instead of deferring obs.Guard.
+//
 // On a recovered panic the named return keeps its zero value (false), so the
 // loop simply continues. That is also correct on the stop branch: `stop` is
 // closed, so the next round's select observes it immediately and returns true.
-func drainRound(bw *bufio.Writer, enc *json.Encoder, ch chan Entry, flush chan chan struct{}, stop chan struct{}) (stopped bool) {
-	defer obs.Guard("reqlog_drain")
+func drainRound(b *batch, ch chan Entry, flush chan chan struct{}, stop chan struct{}) (stopped bool) {
+	defer func() {
+		if v := recover(); v != nil {
+			b.discard()
+			obs.ReportPanic("reqlog_drain", v)
+		}
+	}()
 	select {
 	case e := <-ch:
-		batch := encodeEntry(enc, e)
-		batch += drainPending(enc, ch)
-		flushBatch(bw, batch)
+		b.encode(e)
+		b.takePending(ch)
+		b.flush()
 	case done := <-flush:
 		// close(done) runs through a defer so a panic mid-flush still RELEASES
 		// the Sync waiter. Sync is bounded, so the alternative is "only" a
@@ -268,32 +350,20 @@ func drainRound(bw *bufio.Writer, enc *json.Encoder, ch chan Entry, flush chan c
 		// every admin request-log read for as long as the fault persists.
 		func() {
 			defer close(done)
-			flushBatch(bw, drainPending(enc, ch))
+			b.takePending(ch)
+			b.flush()
 		}()
 	case <-stop:
 		// Final drain: entries already queued must still reach the file. If
 		// this panics the round returns false and the loop re-enters, but
-		// drainPending has already consumed those entries — an empty batch
-		// short-circuits in flushBatch — so shutdown still converges (pinned by
+		// takePending has already consumed those entries and discard clears the
+		// buffer — so shutdown still converges (pinned by
 		// TestDrain_StopStillTerminatesAfterPanic).
-		flushBatch(bw, drainPending(enc, ch))
+		b.takePending(ch)
+		b.flush()
 		return true
 	}
 	return false
-}
-
-// drainPending encodes every entry currently queued, returning how many it
-// buffered. It never blocks.
-func drainPending(enc *json.Encoder, ch chan Entry) int {
-	n := 0
-	for {
-		select {
-		case e := <-ch:
-			n += encodeEntry(enc, e)
-		default:
-			return n
-		}
-	}
 }
 
 // encodeEntry buffers one JSONL record, returning 1 if the record is pending a

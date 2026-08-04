@@ -161,3 +161,86 @@ func TestDrain_StopStillTerminatesAfterPanic(t *testing.T) {
 		t.Fatal("REGRESSION: shutdown did not join the drain goroutine after a panicking round")
 	}
 }
+
+// poisonSink panics on any write whose payload contains a marker — a
+// DETERMINISTIC, content-triggered fault, which is the realistic shape of a
+// latent bug reached by one particular entry.
+type poisonSink struct {
+	mu     sync.Mutex
+	buf    []byte
+	panics atomic.Int64
+}
+
+func (p *poisonSink) Write(b []byte) (int, error) {
+	if bytesContains(b, "POISON") {
+		p.panics.Add(1)
+		panic("simulated content-triggered sink fault")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.buf = append(p.buf, b...)
+	return len(b), nil
+}
+
+func (p *poisonSink) lineCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n := 0
+	for _, c := range p.buf {
+		if c == '\n' {
+			n++
+		}
+	}
+	return n
+}
+
+func bytesContains(b []byte, sub string) bool {
+	for i := 0; i+len(sub) <= len(b); i++ {
+		if string(b[i:i+len(sub)]) == sub {
+			return true
+		}
+	}
+	return false
+}
+
+// TestDrain_PoisonedBufferIsDiscarded is the follow-up gate to the anti-wedge
+// test. Containing the panic is not enough: bufio.Writer.Flush only clears its
+// buffer AFTER the underlying Write returns, so a panicking Write leaves the
+// poisoned bytes buffered. Continuing with the same writer replays that batch
+// on every later flush — the drain goroutine stays alive and healthy-looking
+// while NOTHING reaches the durable audit file ever again.
+//
+// The recovery path must therefore DISCARD the poisoned batch and charge the
+// lost records to WriteErrors, so the loss is bounded and visible.
+func TestDrain_PoisonedBufferIsDiscarded(t *testing.T) {
+	isolate(t)
+	sink := &poisonSink{}
+	restore := SetWriterForTest(sink)
+	defer restore()
+
+	before := WriteErrors()
+
+	Add(Entry{TS: 1, Host: "POISON.example.com", Status: "OK"})
+	Sync()
+	if sink.panics.Load() == 0 {
+		t.Fatal("harness: the poison entry never reached the sink")
+	}
+
+	// Everything after the poison entry must still reach the file.
+	const after = 25
+	for i := 0; i < after; i++ {
+		Add(Entry{TS: int64(100 + i), Host: "clean.example.com", Status: "OK"})
+	}
+	Sync()
+
+	if got := sink.lineCount(); got < after {
+		t.Fatalf("REGRESSION: only %d of %d post-poison entries reached the sink. The poisoned "+
+			"bufio batch was replayed instead of discarded, so the durable request log is "+
+			"permanently wedged while the drain goroutine still looks alive.", got, after)
+	}
+	// The discarded record must be accounted for, not silently dropped.
+	if WriteErrors() <= before {
+		t.Errorf("discarded entries were not charged to WriteErrors (before=%d after=%d)",
+			before, WriteErrors())
+	}
+}

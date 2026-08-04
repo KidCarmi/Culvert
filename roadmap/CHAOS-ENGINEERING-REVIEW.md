@@ -442,6 +442,17 @@ restart, no alert, just a proxy that stops answering. A goroutine-level guard th
 recoverable crash for an unrecoverable hang. The guard is per round, and `drainRound`'s named
 return keeps its zero value on panic so the loop always continues.
 
+**Keeping the goroutine alive is necessary but not sufficient** (P1 from external review of the
+first cut). `bufio.Writer.Flush` clears its buffer only *after* the underlying `Write` returns
+(`b.n = 0` is its last statement), so a `Write` that **panics** unwinds with the batch still
+buffered. Reusing that writer replays the poisoned bytes on every later flush — with a
+deterministic, content-triggered fault the drain goroutine stays alive and healthy-looking while
+**nothing ever reaches the durable audit file again.** That is the same silent-permanent-loss class
+the guard exists to remove, just relocated. The recovery path therefore **discards** the batch
+(`batch.discard`) and charges its records to `WriteErrors`, so the loss is bounded to one batch and
+visible instead of unbounded and silent. Pinned by `TestDrain_PoisonedBufferIsDiscarded`, which
+fails against the un-discarded version with *0 of 25* post-poison entries reaching the sink.
+
 ### 12.4 What shipped
 
 - `internal/obs/guard.go` — `Guard` / `SafeCall` / `SetPanicSink`, mirroring the existing `SetSink`
@@ -470,6 +481,7 @@ return keeps its zero value on panic so the loop always continues.
 | **Split-brain gate** — panicking keepalive self-fences, does not keep write authority | `TestChaos24_LeaseKeepalivePanic_FailsClosed` |
 | Fail-closed is not trigger-happy — a panic inside a valid window does not fence | `TestChaos24_LeaseWindowStillValid_PanicDoesNotFence`, `TestChaos24_LeaseFenceRespectsWriteMargin` |
 | **Anti-wedge gate** — drain keeps consuming; producers never block | `internal/reqlog/persist_panic_test.go` `TestDrain_*` |
+| **Anti-poison gate** — a panicking flush discards its batch instead of replaying it forever | `TestDrain_PoisonedBufferIsDiscarded` |
 | Primitive semantics, sink-panic containment, nil-sink cannot silence | `internal/obs/guard_test.go` |
 
 Both regression gates were verified to **fail without the fix**: removing the drain guard
