@@ -10503,8 +10503,17 @@ paths:
       x-culvert-introduced-version: 1.0.0
       x-culvert-danger-level: medium
       x-culvert-audit-event: mcp.rollout.rehearse-rollback
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                capability: { type: string, enum: [gateway, management] }
       responses:
         '200': { description: Rehearsal recorded, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
   /api/mcp/executions:
     get:

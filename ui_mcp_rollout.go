@@ -179,6 +179,12 @@ func apiMCPRolloutEmergency(w http.ResponseWriter, r *http.Request) {
 // apiMCPRolloutRehearse records a rollback rehearsal (evidence). The live signed
 // rollback runs through the PR-10 coordinator (not wired in the disabled-default
 // posture); the rehearsal marker is a local evidence update only.
+//
+// Capability is bound from the JSON body (present-but-invalid fails closed; an
+// omitted value falls back to the query-string capability) - identical to
+// apiMCPRolloutEmergency so a rehearsal recorded for one capability can never land
+// on the other (capability isolation). Nothing else about the action changes: it
+// still records evidence only and never rolls back traffic or unlocks Production.
 func apiMCPRolloutRehearse(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		mcpMethodNotAllowed(w)
@@ -187,7 +193,26 @@ func apiMCPRolloutRehearse(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleAdmin) {
 		return
 	}
+	var req struct {
+		Capability string `json:"capability"`
+	}
+	// The body is optional; a decode failure on a non-empty body is a real client
+	// error, but an empty body must degrade to the query-string capability (back-compat).
+	if r.ContentLength != 0 {
+		if err := decodeJSON(r, &req); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+	}
 	capab := mcpRolloutCapability(r)
+	if req.Capability != "" {
+		parsed, err := rollout.ParseCapability(req.Capability)
+		if err != nil {
+			http.Error(w, "rollout_capability_invalid", http.StatusBadRequest)
+			return
+		}
+		capab = parsed
+	}
 	getMCPRollout().stateFor(capab).UpdateEvidence(func(e *rollout.EvidenceSummary) { e.RollbackRehearsed = true })
 	auditEvent(r, "mcp.rollout.rehearse-rollback", capab.String(), "")
 	jsonOK(w, map[string]any{"capability": capab.String(), "rollback_rehearsed": true})

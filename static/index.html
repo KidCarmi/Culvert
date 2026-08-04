@@ -569,6 +569,39 @@ a.mcpx-link:focus-visible,button.mcpx-attn-item:focus-visible,.mcpx-pivot:focus-
 .mcpx-legacy{margin-top:14px}
 .mcpx-legacy > summary{font-size:.72rem;color:var(--muted);cursor:pointer}
 .mcpx-sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);border:0;white-space:nowrap}
+/* ── PR-UX-4 shared MCP dangerous-action dialog (mcpxDangerDialog) ──
+   Calm, compact, restrained status color. No warning-wall, no decorative risk
+   score, no oversized red modal. Every value is rendered from a real /api/mcp/*
+   response by the JS; nothing is fabricated. */
+.mcpx-dlg-ov{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:none;align-items:center;justify-content:center;padding:20px}
+.mcpx-dlg{background:var(--card);border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow-2);width:100%;max-width:520px;max-height:calc(100vh - 40px);display:flex;flex-direction:column}
+.mcpx-dlg-head{padding:18px 22px 10px;border-bottom:1px solid var(--border)}
+.mcpx-dlg-title{margin:0 0 8px;font-size:1.02rem;font-weight:700}
+.mcpx-dlg-chips{display:flex;flex-wrap:wrap;gap:6px}
+.mcpx-dlg-body{padding:14px 22px;overflow-y:auto}
+.mcpx-dlg-explain{margin:0 0 12px;font-size:.84rem;color:var(--text);line-height:1.55}
+.mcpx-dlg-facts{margin:0;display:grid;grid-template-columns:auto 1fr;gap:6px 14px}
+.mcpx-dlg-facts dt{font-size:.7rem;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);font-weight:700;padding-top:1px}
+.mcpx-dlg-facts dd{margin:0;font-size:.79rem;color:var(--text);line-height:1.5;word-break:break-word}
+.mcpx-dlg-facts dd.warn{color:var(--warn)}
+.mcpx-dlg-target{margin:12px 0 0;padding:10px 12px;border-radius:8px;background:var(--surface2);border:1px solid var(--border);font-size:.76rem;line-height:1.5;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.mcpx-dlg-target code{font-family:var(--mono,monospace);word-break:break-all}
+.mcpx-dlg-typed{margin:14px 0 0}
+.mcpx-dlg-typed label{display:block;font-size:.78rem;color:var(--muted);margin-bottom:5px}
+.mcpx-dlg-typed .mcpx-dlg-phrase{color:var(--text);font-weight:700;letter-spacing:.04em}
+.mcpx-dlg-result{margin:12px 0 0}
+.mcpx-dlg-result.on{padding:10px 12px;border-radius:8px;border:1px solid var(--border);background:var(--surface2)}
+.mcpx-dlg-result.on.ok{border-color:rgba(34,197,94,.4);background:var(--ok-tint)}
+.mcpx-dlg-result.on.crit{border-color:rgba(239,68,68,.4);background:var(--crit-tint)}
+.mcpx-dlg-result.on.warn{border-color:rgba(234,179,8,.4);background:var(--warn-tint)}
+.mcpx-dlg-rtitle{font-size:.8rem;font-weight:700;margin-bottom:3px}
+.mcpx-dlg-rdetail{font-size:.76rem;color:var(--text);line-height:1.5}
+.mcpx-dlg-rtech{margin-top:6px}
+.mcpx-dlg-rtech > summary{font-size:.68rem;color:var(--muted);cursor:pointer}
+.mcpx-dlg-rtech code{font-size:.7rem;color:var(--muted);word-break:break-all}
+.mcpx-dlg-note{margin:12px 0 0;font-size:.76rem;color:var(--muted);line-height:1.5}
+.mcpx-dlg-foot{padding:12px 22px 18px;border-top:1px solid var(--border);display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap}
+.mcpx-dlg-foot .btn:focus-visible{box-shadow:var(--focus-ring);outline:none}
 </style>
 </head>
 <body>
@@ -3585,9 +3618,9 @@ Firefox (all platforms):
         <pre class="mono" id="mcp-distribution-out" style="white-space:pre-wrap"></pre>
         <div data-min-role="admin">
           <h4>Rollback to a retained snapshot</h4>
+          <p class="muted" style="margin:0 0 8px">The confirmation binds the exact retained target from the signed-distribution status &#8212; a target hash is never typed in by hand or fabricated. When no retained target exists on this node, rollback is not offered.</p>
           <select id="mcp-rollback-capability"><option value="gateway">gateway</option><option value="management">management</option></select>
-          <input id="mcp-rollback-target" type="text" placeholder="target content hash" style="width:60%">
-          <button class="btn" data-min-role="admin" data-click="mcpRollback">Request rollback (four-eyes)</button>
+          <button class="btn" data-min-role="admin" data-click="mcpxOpenRollback">Request rollback&#8230;</button>
         </div>
       </div>
     </div>
@@ -3618,16 +3651,16 @@ Firefox (all platforms):
       <div class="panel" data-min-role="admin"><h3>Mode Transition (promotion / demotion)</h3>
         <p class="muted">A promotion is one stage at a time and rides the signed publication path (four-eyes approval + durable commit + sign + distribute + DP-ack). Widening discloses the exact scope delta, newly executable/enforced operation classes, ServerIDs/tool fingerprints, credential-power implications, base/snapshot revision, rollback target, and satisfied/missing evidence. There is no generic Production-enable control.</p>
         <select id="mcp-rollout-cap"><option value="gateway">gateway</option><option value="management">management</option></select>
-        <select id="mcp-rollout-tomode"><option value="observe">observe</option><option value="shadow">shadow</option><option value="canary">canary</option><option value="disabled">disabled</option></select>
-        <button class="btn" data-min-role="admin" data-click="mcpRolloutTransition">Request transition (four-eyes)</button>
+        <select id="mcp-rollout-tomode"><option value="observe">observe</option><option value="shadow">shadow</option><option value="canary">canary</option><option value="production">production</option><option value="disabled">disabled</option></select>
+        <button class="btn" data-min-role="admin" data-click="mcpxOpenTransition">Request transition&#8230;</button>
         <span id="mcp-transition-out" class="muted"></span>
       </div>
       <div class="panel" data-min-role="admin"><h3>Emergency Controls</h3>
-        <p class="muted">Emergency actions <strong>narrow only</strong> &#8212; they immediately stop new admission (node-local, no CP round trip) and can never promote, widen scope, or enable execution.</p>
+        <p class="muted">Emergency actions <strong>narrow only</strong> &#8212; they immediately stop new admission (node-local, no CP round trip) and can never promote, widen scope, or enable execution. Each control opens a confirmation that states the exact effect before you commit.</p>
         <select id="mcp-emergency-cap"><option value="gateway">gateway</option><option value="management">management</option></select>
-        <button class="btn danger" data-min-role="admin" data-click="mcpEmergencyDisable">Emergency disable</button>
-        <button class="btn" data-min-role="admin" data-click="mcpEmergencyClear">Clear</button>
-        <button class="btn" data-min-role="admin" data-click="mcpRehearseRollback">Record rollback rehearsal</button>
+        <button class="btn danger" data-min-role="admin" data-click="mcpxOpenEmergencyDisable">Emergency disable&#8230;</button>
+        <button class="btn" data-min-role="admin" data-click="mcpxOpenEmergencyClear">Clear&#8230;</button>
+        <button class="btn" data-min-role="admin" data-click="mcpxOpenRehearse">Record rollback rehearsal&#8230;</button>
         <span id="mcp-emergency-out" class="muted"></span>
       </div>
     </div>
@@ -4850,6 +4883,36 @@ Firefox (all platforms):
   </div>
 </div>
 
+<!-- PR-UX-4: shared MCP dangerous-action dialog. One truthful, accessible confirm +
+     result pattern for every MCP mutation control. Capability is bound at open time;
+     server-derived text is set via textContent only (never innerHTML). -->
+<div id="mcpx-danger-dialog" class="mcpx-dlg-ov" role="dialog" aria-modal="true"
+     aria-labelledby="mcpx-dlg-title" aria-describedby="mcpx-dlg-explain">
+  <div class="mcpx-dlg" role="document">
+    <div class="mcpx-dlg-head">
+      <h3 id="mcpx-dlg-title" class="mcpx-dlg-title"></h3>
+      <div id="mcpx-dlg-chips" class="mcpx-dlg-chips"></div>
+    </div>
+    <div class="mcpx-dlg-body">
+      <p id="mcpx-dlg-explain" class="mcpx-dlg-explain"></p>
+      <dl id="mcpx-dlg-facts" class="mcpx-dlg-facts"></dl>
+      <div id="mcpx-dlg-target" class="mcpx-dlg-target" style="display:none"></div>
+      <p id="mcpx-dlg-note" class="mcpx-dlg-note" style="display:none"></p>
+      <div id="mcpx-dlg-typedwrap" class="mcpx-dlg-typed" style="display:none">
+        <label id="mcpx-dlg-typed-label" for="mcpx-dlg-typed"></label>
+        <input id="mcpx-dlg-typed" class="input w-full" autocomplete="off" spellcheck="false" autocapitalize="off">
+      </div>
+      <!-- aria-live result region: populated after submission. Never hidden with
+           display:none while it carries a result (accessibility scenario 20). -->
+      <div id="mcpx-dlg-result" class="mcpx-dlg-result" role="status" aria-live="polite" aria-atomic="true"></div>
+    </div>
+    <div class="mcpx-dlg-foot">
+      <button class="btn ghost" id="mcpx-dlg-cancel" data-click="mcpxDangerCancel">Cancel</button>
+      <button class="btn danger" id="mcpx-dlg-confirm" data-click="mcpxDangerConfirm">Confirm</button>
+    </div>
+  </div>
+</div>
+
 <!-- Where-Used modal (P1 policy-refs): generic dependency list for a shared object -->
 <div id="where-used-dialog" role="dialog" aria-modal="true" aria-labelledby="where-used-title"
      style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;align-items:center;justify-content:center">
@@ -4943,15 +5006,18 @@ document.addEventListener('click', e => {
     case 'mcpRejectReq':      mcpApprovalDecide(arg, 'reject'); break;
     case 'loadMCPHealth':     loadMCPHealth(); break;
     case 'loadMCPDistribution': loadMCPDistribution(); break;
-    case 'mcpRollback':       mcpRollback(); break;
     case 'loadMCPRollout':    loadMCPRollout(); break;
     case 'loadMCPExecutions': loadMCPExecutions(); break;
     case 'loadMCPUpstreamHealth': loadMCPUpstreamHealth(); break;
     case 'loadMCPRolloutEvidence': loadMCPRolloutEvidence(); break;
-    case 'mcpRolloutTransition': mcpRolloutTransition(); break;
-    case 'mcpEmergencyDisable': mcpEmergency('disable'); break;
-    case 'mcpEmergencyClear':  mcpEmergency('clear'); break;
-    case 'mcpRehearseRollback': mcpRehearseRollback(); break;
+    // PR-UX-4: dangerous MCP mutations route through the shared danger dialog.
+    case 'mcpxOpenTransition': mcpxOpenTransition(); break;
+    case 'mcpxOpenEmergencyDisable': mcpxOpenEmergencyDisable(); break;
+    case 'mcpxOpenEmergencyClear': mcpxOpenEmergencyClear(); break;
+    case 'mcpxOpenRehearse':  mcpxOpenRehearse(); break;
+    case 'mcpxOpenRollback':  mcpxOpenRollback(); break;
+    case 'mcpxDangerConfirm': mcpxDangerConfirm(); break;
+    case 'mcpxDangerCancel':  mcpxDangerCancel(); break;
     case 'loadMCPManagement': loadMCPManagement(); break;
     case 'loadMCPConfig':     loadMCPConfig(); break;
     case 'mcpSaveConfig':     mcpSaveConfig(); break;
@@ -5612,51 +5678,14 @@ function mcpTenantVal(id) { const e = document.getElementById(id); return e ? en
 function loadMCPOverview() { mcpGet('/api/mcp/overview', 'mcp-overview-status', 'mcp-overview-out'); }
 function loadMCPHealth() { mcpGet('/api/mcp/health', 'mcp-health-status', 'mcp-health-out'); }
 function loadMCPDistribution() { mcpGet('/api/mcp/distribution', 'mcp-distribution-status', 'mcp-distribution-out'); }
-function mcpRollback() {
-  var cap = document.getElementById('mcp-rollback-capability').value;
-  var target = (document.getElementById('mcp-rollback-target').value || '').trim();
-  if (!target) { mcpSetStatus('mcp-distribution-status', 'Enter a target content hash.'); return; }
-  fetch('/api/mcp/rollback', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': (window.csrfToken || '') }, body: JSON.stringify({ capability: cap, target_hash: target }) })
-    .then(function (r) {
-      if (r.status === 403) { mcpSetStatus('mcp-distribution-status', 'Permission denied.'); return null; }
-      if (r.status === 409) { mcpSetStatus('mcp-distribution-status', 'Signed distribution is not configured on this node.'); return null; }
-      return r.json();
-    })
-    .then(function (j) { if (j) { mcpSetStatus('mcp-distribution-status', 'Rollback requested: ' + (j.rollback_state || '')); } })
-    .catch(function () { mcpSetStatus('mcp-distribution-status', 'Request failed.'); });
-}
-
-// PR-11 rollout GUI consumers (safe read-only rendering via mcpGet; POSTs are CSRF-guarded).
+// PR-11 rollout GUI consumers (safe read-only rendering via mcpGet). All MCP
+// MUTATION controls (transition / emergency disable+clear / rehearsal / rollback)
+// route through the shared PR-UX-4 danger dialog (mcpxOpen* → mcpxDangerDialog)
+// defined near the end of this file; they are CSRF-guarded and admin-only.
 function loadMCPRollout() { mcpGet('/api/mcp/rollout', 'mcp-rollout-status', 'mcp-rollout-out'); }
 function loadMCPExecutions() { mcpGet('/api/mcp/executions', 'mcp-executions-status', 'mcp-executions-out'); }
 function loadMCPUpstreamHealth() { mcpGet('/api/mcp/upstream-health', 'mcp-upstream-status', 'mcp-upstream-out'); }
 function loadMCPRolloutEvidence() { mcpGet('/api/mcp/rollout/evidence', 'mcp-evidence-status', 'mcp-evidence-out'); }
-function mcpRolloutTransition() {
-  var cap = document.getElementById('mcp-rollout-cap').value;
-  var to = document.getElementById('mcp-rollout-tomode').value;
-  fetch('/api/mcp/rollout/transition', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': (window.csrfToken || '') }, body: JSON.stringify({ capability: cap, to_mode: to }) })
-    .then(function (r) {
-      var el = document.getElementById('mcp-transition-out');
-      if (r.status === 403) { el.textContent = 'Permission denied / Production is qualification-locked.'; return; }
-      if (r.status === 409) { el.textContent = 'Signed distribution is not configured on this node.'; return; }
-      el.textContent = 'Transition accepted (pending signed publication + DP acknowledgement).';
-    })
-    .catch(function () { document.getElementById('mcp-transition-out').textContent = 'Request failed.'; });
-}
-function mcpEmergency(action) {
-  var cap = document.getElementById('mcp-emergency-cap').value;
-  fetch('/api/mcp/rollout/emergency', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': (window.csrfToken || '') }, body: JSON.stringify({ capability: cap, action: action }) })
-    .then(function (r) { return r.status === 200 ? r.json() : null; })
-    .then(function (j) { document.getElementById('mcp-emergency-out').textContent = j ? (cap + ' killed=' + j.killed) : 'Request failed / denied.'; })
-    .catch(function () { document.getElementById('mcp-emergency-out').textContent = 'Request failed.'; });
-}
-function mcpRehearseRollback() {
-  var cap = document.getElementById('mcp-emergency-cap').value;
-  fetch('/api/mcp/rollout/rehearse-rollback', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': (window.csrfToken || '') }, body: JSON.stringify({ capability: cap }) })
-    .then(function (r) { return r.status === 200 ? r.json() : null; })
-    .then(function (j) { document.getElementById('mcp-emergency-out').textContent = j ? (cap + ' rollback_rehearsed=' + j.rollback_rehearsed) : 'Request failed / denied.'; })
-    .catch(function () { document.getElementById('mcp-emergency-out').textContent = 'Request failed.'; });
-}
 function loadMCPManagement() { mcpGet('/api/mcp/management-access', 'mcp-management-status', 'mcp-management-out'); }
 function loadMCPServers() { const t = mcpTenantVal('mcp-srv-tenant'); if (!t) { mcpSetStatus('mcp-servers-status', 'Enter a tenant.'); return; } mcpGet('/api/mcp/servers?tenant=' + t, 'mcp-servers-status', 'mcp-servers-out'); }
 function loadMCPTools() { const t = mcpTenantVal('mcp-srv-tenant'); if (!t) { mcpSetStatus('mcp-servers-status', 'Enter a tenant.'); return; } mcpGet('/api/mcp/tools?tenant=' + t, 'mcp-servers-status', 'mcp-servers-out'); }
@@ -18319,6 +18348,372 @@ document.addEventListener('keydown', function(e){
   var tr=e.target && e.target.closest && e.target.closest('table.mcpx-act tbody tr'); if(!tr) return;
   e.preventDefault(); mcpxOpenDecision(tr.dataset.arg);
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PR-UX-4: shared MCP dangerous-action dialog (mcpxDangerDialog)
+// One truthful, accessible confirm + result pattern for every MCP mutation. The
+// dialog owns the network mechanics - pending state, double-submit prevention,
+// stale-response guarding, and a forced real-state refresh after every attempt.
+// Per-action config supplies the truthful copy, the exact request, and a
+// classify() that maps the REAL backend response. Nothing is fabricated:
+// success / pending / failure text comes only from what the backend returned.
+// Server-derived text is set via textContent only (never innerHTML).
+// Focus trap, stack, background-inert and focus-restore reuse the shared
+// modalOpen/modalClose mechanics (PR #1030/#1031 accessibility contract).
+// ═══════════════════════════════════════════════════════════════════════════
+var mcpxDlg = { cfg:null, committing:false, ticket:0, done:false };
+function mcpxDlgEl(id){ return document.getElementById(id); }
+function mcpxCapUpper(c){ return String(c||'gateway').toUpperCase(); }
+function mcpxDangerRefreshRollout(){ if(typeof loadMCPRollout==='function') loadMCPRollout(); }
+
+// Read the REAL per-capability rollout state (mode + kill switch). Never assumes
+// a benign default: an unreadable state is reported as unknown/unavailable.
+async function mcpxReadRolloutCap(cap){
+  try{
+    var r = await fetch('/api/mcp/rollout', {credentials:'same-origin', headers:{'X-CSRF-Token':(window.csrfToken||'')}});
+    if(r.ok){ var j=await r.json(); if(j && j[cap]){ return {mode:j[cap].mode, killed:!!j[cap].killed, known:true}; } }
+  }catch(e){}
+  return {mode:'unavailable', killed:null, known:false};
+}
+
+// Map a known safe reason code to friendly text; the raw code is retained in the
+// dialog's technical-detail expander.
+function mcpxReasonText(text){
+  var t=(text||'').trim();
+  var map={
+    'rollout_mode_invalid':'invalid target mode',
+    'rollout_capability_invalid':'invalid capability',
+    'admin_request_invalid':'missing capability or target hash',
+    'invalid JSON':'malformed request body',
+    'distribution_not_configured':'signed distribution not configured',
+    'rollout_production_locked':'Production is qualification-locked'
+  };
+  for(var k in map){ if(t.indexOf(k)>=0) return map[k]; }
+  return t.slice(0,80) || 'request rejected';
+}
+
+function mcpxDangerFacts(rows){
+  var dl=mcpxDlgEl('mcpx-dlg-facts'); dl.textContent='';
+  rows.forEach(function(row){
+    if(row[1]==null || row[1]==='') return;
+    dl.appendChild(mcpxEl('dt', null, row[0]));
+    dl.appendChild(mcpxEl('dd', row[2]||null, String(row[1])));
+  });
+}
+function mcpxDangerSetResult(kind, title, detail, rawCode){
+  var box=mcpxDlgEl('mcpx-dlg-result'); box.textContent='';
+  box.className='mcpx-dlg-result on '+(kind||'');
+  if(title) box.appendChild(mcpxEl('div','mcpx-dlg-rtitle', title));
+  if(detail) box.appendChild(mcpxEl('div','mcpx-dlg-rdetail', detail));
+  if(rawCode){
+    var d=mcpxEl('details','mcpx-dlg-rtech');
+    d.appendChild(mcpxEl('summary', null, 'Technical detail'));
+    d.appendChild(mcpxEl('code', null, rawCode));
+    box.appendChild(d);
+  }
+}
+function mcpxDangerClearResult(){ var b=mcpxDlgEl('mcpx-dlg-result'); b.textContent=''; b.className='mcpx-dlg-result'; }
+
+function mcpxDangerDialog(cfg){
+  mcpxDlg.cfg=cfg; mcpxDlg.committing=false; mcpxDlg.done=false;
+  mcpxDlgEl('mcpx-dlg-title').textContent=cfg.title||'Confirm action';
+  var chips=mcpxDlgEl('mcpx-dlg-chips'); chips.textContent='';
+  if(cfg.capability) chips.appendChild(mcpxChip('capability: '+cfg.capability, 'muted'));
+  if(cfg.riskChip) chips.appendChild(mcpxChip(cfg.riskChip.label, cfg.riskChip.kind||'muted'));
+  mcpxDlgEl('mcpx-dlg-explain').textContent=cfg.explain||'';
+  mcpxDangerFacts(cfg.facts||[]);
+  var tgt=mcpxDlgEl('mcpx-dlg-target'); tgt.textContent='';
+  if(cfg.target && cfg.target.hash){
+    tgt.style.display='';
+    tgt.appendChild(mcpxEl('span', null, 'Rollback target'));
+    tgt.appendChild(mcpxEl('code', null, mcpxShortHash(cfg.target.hash)));
+    tgt.appendChild(mcpxCopyBtn(cfg.target.hash));
+    if(cfg.target.source) tgt.appendChild(mcpxEl('span','mcpx-dlg-note', cfg.target.source));
+  } else { tgt.style.display='none'; }
+  var note=mcpxDlgEl('mcpx-dlg-note');
+  if(cfg.note){ note.style.display=''; note.textContent=cfg.note; } else { note.style.display='none'; note.textContent=''; }
+  var typedWrap=mcpxDlgEl('mcpx-dlg-typedwrap'), typed=mcpxDlgEl('mcpx-dlg-typed');
+  typed.value=''; typed.disabled=false;
+  if(cfg.confirmPhrase){
+    typedWrap.style.display='';
+    var lbl=mcpxDlgEl('mcpx-dlg-typed-label'); lbl.textContent='';
+    lbl.appendChild(document.createTextNode('Type '));
+    lbl.appendChild(mcpxEl('span','mcpx-dlg-phrase', cfg.confirmPhrase));
+    lbl.appendChild(document.createTextNode(' to confirm:'));
+  } else { typedWrap.style.display='none'; }
+  mcpxDangerClearResult();
+  var confirm=mcpxDlgEl('mcpx-dlg-confirm'), cancel=mcpxDlgEl('mcpx-dlg-cancel');
+  cancel.textContent='Cancel';
+  confirm.textContent=cfg.confirmLabel||'Confirm';
+  confirm.className='btn '+(cfg.confirmStyle||'danger');
+  confirm.style.display='';
+  if(cfg.confirmDisabled) confirm.disabled=true;
+  else if(cfg.confirmPhrase) confirm.disabled=true;   // enabled only on exact typed match
+  else confirm.disabled=false;
+  var focusSel=cfg.confirmDisabled ? '#mcpx-dlg-cancel' : cfg.confirmPhrase ? '#mcpx-dlg-typed' : '#mcpx-dlg-confirm';
+  modalOpen(mcpxDlgEl('mcpx-danger-dialog'), focusSel, mcpxDangerEscapeClose);
+}
+
+// Registered stack close fn (Escape): blocked while a request is committing.
+function mcpxDangerEscapeClose(){ if(mcpxDlg.committing) return; mcpxDangerClose(); }
+function mcpxDangerClose(){ modalClose(mcpxDlgEl('mcpx-danger-dialog')); mcpxDlg.cfg=null; mcpxDlg.committing=false; }
+
+// Explicit Cancel. During commit this is the only safe way out: it advances the
+// ticket so the in-flight response is dropped, forces a real-state refresh, then
+// closes. Otherwise it just closes.
+function mcpxDangerCancel(){
+  if(mcpxDlg.committing){
+    mcpxDlg.ticket++; mcpxDlg.committing=false;
+    var cfg=mcpxDlg.cfg; mcpxDangerClose();
+    if(cfg && cfg.onDone) cfg.onDone({kind:'cancelled'});
+    return;
+  }
+  mcpxDangerClose();
+}
+function mcpxDangerConfirm(){
+  var cfg=mcpxDlg.cfg; if(!cfg) return;
+  if(mcpxDlg.committing) return;                        // double-submit guard → one request
+  if(cfg.confirmDisabled) return;
+  if(cfg.confirmPhrase){ if((mcpxDlgEl('mcpx-dlg-typed').value||'').trim()!==cfg.confirmPhrase) return; }
+  mcpxDangerSubmit(cfg);
+}
+function mcpxDangerSubmit(cfg){
+  mcpxDlg.committing=true; mcpxDlg.done=false;
+  var myTicket=++mcpxDlg.ticket;
+  var confirm=mcpxDlgEl('mcpx-dlg-confirm'), typed=mcpxDlgEl('mcpx-dlg-typed');
+  confirm.disabled=true; typed.disabled=true;
+  mcpxDangerSetResult('', 'Submitting…', 'Contacting the appliance. Do not close until the result returns.');
+  fetch(cfg.request.url, { method:'POST', credentials:'same-origin',
+      headers:{ 'Content-Type':'application/json', 'X-CSRF-Token':(window.csrfToken||'') },
+      body: JSON.stringify(cfg.request.body||{}) })
+    .then(function(r){ return r.text().then(function(t){ return {status:r.status, text:t}; }); })
+    .then(function(res){
+      if(myTicket!==mcpxDlg.ticket) return;             // superseded by explicit cancel / reopen
+      mcpxDlg.committing=false; typed.disabled=false;
+      var out=cfg.classify(res.status, res.text)||{kind:'crit', title:'Unexpected response', detail:'', retryable:true};
+      mcpxDangerRenderResult(cfg, out, res, myTicket);
+    })
+    .catch(function(){
+      if(myTicket!==mcpxDlg.ticket) return;
+      mcpxDlg.committing=false; typed.disabled=false;
+      mcpxDangerRenderResult(cfg, {kind:'crit', title:'Request failed', detail:'Network error - the action state is UNKNOWN. Refresh the rollout status to see the real state; do not assume it did or did not take effect.', retryable:true}, {status:0, text:'network_error'}, myTicket);
+    });
+}
+function mcpxDangerRenderResult(cfg, out, res, myTicket){
+  mcpxDlg.done=true;
+  var kind = out.kind==='success' ? 'ok' : (out.kind==='warn' ? 'warn' : 'crit');
+  var rawCode=(res && res.status ? ('HTTP '+res.status+' · ') : '')+((res && res.text ? res.text : '')||'').slice(0,200);
+  mcpxDangerSetResult(kind, out.title, out.detail, rawCode);
+  var confirm=mcpxDlgEl('mcpx-dlg-confirm'), cancel=mcpxDlgEl('mcpx-dlg-cancel');
+  cancel.textContent='Close';
+  if(out.kind==='success'){ confirm.style.display='none'; }
+  else if(out.retryable){ confirm.style.display=''; confirm.disabled=false; confirm.textContent='Retry'; }
+  else { confirm.style.display='none'; }
+  if(cfg.resultCardId) mcpxDangerCardWrite(cfg.resultCardId, myTicket, out.title);
+  if(cfg.onDone) cfg.onDone(out);                       // forced real-state refresh
+}
+// Seq-guarded card mirror: a late / lower-ticket response can never overwrite a
+// newer action's result on the page card.
+function mcpxDangerCardWrite(elId, ticket, text){
+  var el=document.getElementById(elId); if(!el) return;
+  var prev=parseInt(el.dataset.mcpxSeq||'0',10)||0;
+  if(ticket<prev) return;
+  el.dataset.mcpxSeq=String(ticket); el.textContent=text;
+}
+
+// ── Per-action openers (capability bound at open time) ──
+async function mcpxOpenEmergencyDisable(){
+  var cap=(document.getElementById('mcp-emergency-cap')||{}).value||'gateway';
+  var cur=await mcpxReadRolloutCap(cap);
+  mcpxDangerDialog({
+    action:'emergency-disable', capability:cap, title:'Emergency disable admission',
+    riskChip:{label:'Stops admission', kind:'warn'},
+    explain:'Immediately stops NEW '+cap+' admission on THIS node. It narrows only - it can never promote, widen scope, or enable execution.',
+    facts:[
+      ['Immediate local effect','Stops new '+cap+' admission on this node immediately.'],
+      ['Expected fleet effect','None - node-local. Other nodes are unaffected.'],
+      ['CP / DP round trip','No - node-local kill switch.'],
+      ['Reversibility','Reversible by clearing the emergency state (clearing may increase exposure).'],
+      ['Operational impact','New '+cap+' admission is refused until the emergency state is cleared.'],
+      ['Audit evidence','mcp.rollout.emergency.disable'],
+      ['Current kill switch', cur.known ? (cur.killed?'engaged':'clear') : 'unavailable'],
+      ['Supported now','Yes - node-local and immediate.']
+    ],
+    confirmPhrase:'DISABLE '+mcpxCapUpper(cap), confirmLabel:'Disable '+cap,
+    request:{ url:'/api/mcp/rollout/emergency', body:{capability:cap, action:'disable'} },
+    classify:mcpxClassifyEmergency(cap,'disable'), resultCardId:'mcp-emergency-out', onDone:mcpxDangerRefreshRollout
+  });
+}
+async function mcpxOpenEmergencyClear(){
+  var cap=(document.getElementById('mcp-emergency-cap')||{}).value||'gateway';
+  var cur=await mcpxReadRolloutCap(cap);
+  mcpxDangerDialog({
+    action:'emergency-clear', capability:cap, title:'Clear emergency kill switch',
+    riskChip:{label:'Restores admission', kind:'warn'},
+    explain:'Restores NEW '+cap+' admission on THIS node. This is NOT a harmless reset - it may increase exposure compared with the current stopped state.',
+    facts:[
+      ['Immediate local effect','Restores new '+cap+' admission on this node.'],
+      ['Expected fleet effect','None - node-local. Other nodes are unaffected.'],
+      ['CP / DP round trip','No - node-local.'],
+      ['Reversibility','Reversible by disabling again.'],
+      ['Operational impact','May increase exposure vs the current stopped state.'],
+      ['Audit evidence','mcp.rollout.emergency.clear'],
+      ['Current kill switch', cur.known ? (cur.killed?'engaged':'clear') : 'unavailable'],
+      ['Supported now','Yes - node-local and immediate.']
+    ],
+    confirmPhrase:'CLEAR '+mcpxCapUpper(cap), confirmLabel:'Clear '+cap,
+    request:{ url:'/api/mcp/rollout/emergency', body:{capability:cap, action:'clear'} },
+    classify:mcpxClassifyEmergency(cap,'clear'), resultCardId:'mcp-emergency-out', onDone:mcpxDangerRefreshRollout
+  });
+}
+function mcpxOpenRehearse(){
+  var cap=(document.getElementById('mcp-emergency-cap')||{}).value||'gateway';
+  mcpxDangerDialog({
+    action:'rehearse', capability:cap, title:'Record rollback rehearsal',
+    riskChip:{label:'Evidence only', kind:'info'},
+    explain:'Records a rollback rehearsal as local evidence for '+cap+'. It does NOT roll back traffic, change the active snapshot, or unlock Production.',
+    facts:[
+      ['Immediate local effect','Sets the rollback-rehearsed evidence flag for '+cap+'.'],
+      ['Expected fleet effect','None - local evidence only.'],
+      ['CP / DP round trip','No.'],
+      ['Reversibility','Evidence flag; no traffic or snapshot change to reverse.'],
+      ['Operational impact','None to live traffic. Records rehearsal evidence only.'],
+      ['Does NOT','Perform a rollback · change the active snapshot · unlock Production.'],
+      ['Audit evidence','mcp.rollout.rehearse-rollback'],
+      ['Supported now','Yes - records local evidence.']
+    ],
+    confirmLabel:'Record rehearsal', confirmStyle:'primary',
+    request:{ url:'/api/mcp/rollout/rehearse-rollback', body:{capability:cap} },
+    classify:mcpxClassifyRehearse(cap), resultCardId:'mcp-emergency-out', onDone:mcpxDangerRefreshRollout
+  });
+}
+async function mcpxOpenTransition(){
+  var cap=(document.getElementById('mcp-rollout-cap')||{}).value||'gateway';
+  var to=(document.getElementById('mcp-rollout-tomode')||{}).value||'observe';
+  var order={disabled:0,observe:1,shadow:2,canary:3,production:4};
+  var cur=await mcpxReadRolloutCap(cap);
+  var toProd=(to==='production');
+  // Promotion (widening) ⇒ typed confirm. Unknown current mode ⇒ treat as
+  // promotion (conservative - never assume a lower/benign current mode).
+  var promotion = toProd || !cur.known || (order[to]>order[cur.mode]);
+  mcpxDangerDialog({
+    action:'transition', capability:cap, title:'Request rollout mode transition',
+    riskChip: promotion ? {label:'Widens exposure', kind:'crit'} : {label:'Narrows', kind:'warn'},
+    explain: toProd
+      ? 'Production is a real mode but is unreachable without a machine-verifiable qualification receipt; this build ships no issuer. This request is expected to be rejected.'
+      : 'Requests a one-stage '+(promotion?'promotion':'demotion')+' to '+to+' for '+cap+'. A successful request rides the signed publication path and is NOT fleet-effective until published and DP-acknowledged.',
+    facts:[
+      ['Current mode', cur.known ? cur.mode : 'unavailable - could not read rollout state'],
+      ['Requested mode', to],
+      ['Direction', promotion ? 'Promotion (widens execution exposure)' : 'Demotion / lateral (narrows)'],
+      ['Production lock', toProd ? 'Production is qualification-locked (this build ships no issuer).' : 'n/a for this target'],
+      ['CP / DP round trip','Yes - four-eyes approval + durable commit + sign + distribute + DP-ack.'],
+      ['Distribution configured','No on this node (disabled-default). A successful request is NOT fleet-effective until the signed path and DP acknowledgements complete.'],
+      ['Reversibility','Nothing is fleet-effective yet; reversible via a later demotion.'],
+      ['Audit evidence', toProd ? 'mcp.rollout.transition.rejected' : 'mcp.rollout.transition.request'],
+      ['Supported now', toProd ? 'No - Production requires a qualification receipt this build cannot issue.' : 'Request-only - expected to return distribution_not_configured in this posture.']
+    ],
+    confirmPhrase: promotion ? ('PROMOTE '+mcpxCapUpper(cap)) : null,
+    confirmLabel: promotion ? ('Request promotion to '+to) : ('Request transition to '+to),
+    request:{ url:'/api/mcp/rollout/transition', body:{capability:cap, to_mode:to} },
+    classify:mcpxClassifyTransition(cap,to), resultCardId:'mcp-transition-out', onDone:mcpxDangerRefreshRollout
+  });
+}
+async function mcpxOpenRollback(){
+  var cap=(document.getElementById('mcp-rollback-capability')||{}).value||'gateway';
+  var target=null, note=null, disabled=false, readErr=false;
+  try{
+    var r=await fetch('/api/mcp/distribution', {credentials:'same-origin', headers:{'X-CSRF-Token':(window.csrfToken||'')}});
+    if(r.ok){ var j=await r.json(); var c=j&&j[cap]; if(c && c.rollback_available && c.previous_hash){ target={hash:c.previous_hash, source:'Retained target from /api/mcp/distribution ('+cap+' previous_hash).'}; } }
+    else { readErr=true; }
+  }catch(e){ readErr=true; }
+  if(!target){
+    disabled=true;
+    note = readErr
+      ? 'Rollback target unavailable - the distribution status could not be read, so no target can be bound. Rollback cannot be requested; refresh and retry.'
+      : 'No retained rollback target is available on this node (signed distribution is not configured). There is nothing to roll back to, so rollback cannot be requested - a target is never fabricated.';
+  }
+  mcpxDangerDialog({
+    action:'rollback', capability:cap, title:'Roll back to a retained snapshot',
+    riskChip:{label: disabled?'Unavailable':'Trust-breaking', kind: disabled?'muted':'crit'},
+    explain: disabled
+      ? 'A rollback reverts '+cap+' to a previously retained signed snapshot. It is not available in the current posture.'
+      : 'Reverts '+cap+' to the exact retained signed snapshot shown below, via the four-eyes publication workflow.',
+    facts:[
+      ['Requested capability', cap],
+      ['Rollback available', disabled ? 'No' : 'Yes - retained target present'],
+      ['CP / DP round trip','Yes - four-eyes + durable commit + sign + distribute + DP-ack.'],
+      ['Distribution configured', (disabled&&!readErr) ? 'No (disabled-default).' : (readErr?'Unknown - status read failed.':'Reported available.')],
+      ['Reversibility','Replaces the active snapshot; recover by rolling forward to a newer retained snapshot.'],
+      ['Audit evidence','mcp.rollback.request'],
+      ['Supported now', disabled ? 'No - no retained target / distribution not configured.' : 'Request rides the signed path.']
+    ],
+    target:target, note:note,
+    confirmPhrase: disabled ? null : ('ROLLBACK '+mcpxCapUpper(cap)),
+    confirmDisabled: disabled, confirmLabel:'Request rollback',
+    request: target ? { url:'/api/mcp/rollback', body:{capability:cap, target_hash:target.hash} } : { url:'/api/mcp/rollback', body:{capability:cap} },
+    classify:mcpxClassifyRollback(cap), resultCardId:'mcp-distribution-status', onDone:mcpxDangerRefreshRollout
+  });
+}
+
+// ── Per-action classifiers: map the REAL backend response, never fabricate ──
+function mcpxClassifyEmergency(cap, action){
+  return function(status, text){
+    if(status===200){
+      var killed=null; try{ killed=(JSON.parse(text)||{}).killed; }catch(e){}
+      if(action==='disable') return {kind:'success', title:'Admission stopped on '+cap, detail:'The appliance returned killed = '+String(killed)+'. Node-local; no CP round trip. Reversible by clearing the emergency state.'};
+      return {kind:'success', title:'Admission restored on '+cap, detail:'The appliance returned killed = '+String(killed)+'. Exposure may now be higher than the stopped state.'};
+    }
+    if(status===403) return {kind:'crit', title:'Permission denied', detail:'This action requires the admin role.', retryable:false};
+    if(status===400) return {kind:'crit', title:'Request rejected', detail:'The appliance rejected the request ('+mcpxReasonText(text)+').', retryable:false};
+    return {kind:'crit', title:'Action failed', detail:'The appliance returned an unexpected status. The kill-switch state is unknown; refresh to confirm.', retryable:true};
+  };
+}
+function mcpxClassifyRehearse(cap){
+  return function(status, text){
+    if(status===200){
+      var r=null; try{ r=(JSON.parse(text)||{}).rollback_rehearsed; }catch(e){}
+      return {kind:'success', title:'Rollback rehearsal recorded', detail:'The appliance returned rollback_rehearsed = '+String(r)+' for '+cap+'. No rollback was performed; the active snapshot is unchanged and Production stays locked.'};
+    }
+    if(status===403) return {kind:'crit', title:'Permission denied', detail:'Recording a rehearsal requires the admin role.', retryable:false};
+    if(status===400) return {kind:'crit', title:'Request rejected', detail:'The appliance rejected the request ('+mcpxReasonText(text)+').', retryable:false};
+    return {kind:'crit', title:'Action failed', detail:'Unexpected status; refresh to confirm the evidence flag.', retryable:true};
+  };
+}
+function mcpxClassifyTransition(cap, to){
+  return function(status, text){
+    if(status===202) return {kind:'warn', title:'Transition accepted (pending publication)', detail:'Recorded on the control plane. NOT fleet-effective until the signed snapshot is published and DP-acknowledged. No node has changed mode yet.'};
+    if(status===403){
+      if(/production_locked/.test(text)) return {kind:'crit', title:'Production is qualification-locked', detail:'rollout_production_locked. This build ships no qualification issuer; no flag, env var, CLI, API, or GUI control can bypass it.', retryable:false};
+      return {kind:'crit', title:'Permission denied', detail:'This action requires the admin role.', retryable:false};
+    }
+    if(status===409) return {kind:'crit', title:'Not fleet-effective: distribution not configured', detail:'distribution_not_configured. The request was recorded but NOT accepted, published, pending, or effective - no mode changed. A 409 is a posture fact; retrying will not change it until signed distribution is wired.', retryable:false};
+    if(status===400) return {kind:'crit', title:'Request rejected', detail:'The appliance rejected the request ('+mcpxReasonText(text)+').', retryable:false};
+    return {kind:'crit', title:'Transition failed', detail:'Unexpected status; the mode is unchanged unless the refresh shows otherwise.', retryable:true};
+  };
+}
+function mcpxClassifyRollback(cap){
+  return function(status, text){
+    if(status===200){ var st=''; try{ st=(JSON.parse(text)||{}).rollback_state||''; }catch(e){} return {kind:'success', title:'Rollback initiated', detail:'The appliance returned rollback_state = '+(st||'(unspecified)')+'.'}; }
+    if(status===403) return {kind:'crit', title:'Permission denied', detail:'Rollback requires the admin role.', retryable:false};
+    if(status===409) return {kind:'crit', title:'Rollback not started', detail:'distribution_not_configured. No rollback began; the active snapshot is unchanged. A 409 is not a pending or completed rollback.', retryable:false};
+    if(status===400) return {kind:'crit', title:'Request rejected', detail:'The appliance rejected the request ('+mcpxReasonText(text)+').', retryable:false};
+    return {kind:'crit', title:'Rollback failed', detail:'Unexpected status; refresh distribution status to confirm nothing changed.', retryable:true};
+  };
+}
+
+// Typed-confirmation gate + Enter-to-submit (bound once).
+(function(){
+  var typed=document.getElementById('mcpx-dlg-typed'); if(!typed) return;
+  typed.addEventListener('input', function(){
+    var cfg=mcpxDlg.cfg; if(!cfg || !cfg.confirmPhrase) return;
+    document.getElementById('mcpx-dlg-confirm').disabled = ((typed.value||'').trim()!==cfg.confirmPhrase) || mcpxDlg.committing;
+  });
+  typed.addEventListener('keydown', function(e){
+    if(e.key!=='Enter') return; e.preventDefault();
+    var c=document.getElementById('mcpx-dlg-confirm'); if(!c.disabled) mcpxDangerConfirm();
+  });
+})();
 </script>
 </body>
 </html>
