@@ -523,7 +523,8 @@ tr.dragging  { opacity: .4; }
 .mcpx-empty{border:1px dashed var(--border-hi);border-radius:10px;padding:16px 18px;background:var(--surface1);color:var(--muted);font-size:.82rem;text-align:center}
 .mcpx-source{font-size:.66rem;color:var(--muted);margin-top:8px;font-style:italic}
 .mcpx-actwrap{position:relative;border:1px solid var(--border);border-radius:var(--radius);overflow:hidden}
-.mcpx-actwrap.has-drawer{min-height:1080px}
+.mcpx-actwrap.has-drawer{min-height:640px}
+.mcpx-actwrap.drawer-open table.mcpx-act{width:calc(100% - 372px)}
 table.mcpx-act{width:100%;border-collapse:collapse;font-size:.76rem}
 table.mcpx-act th{text-align:left;font-size:.6rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:700;padding:8px 12px;border-bottom:1px solid var(--border)}
 table.mcpx-act td{padding:9px 12px;border-bottom:1px solid var(--border);white-space:nowrap}
@@ -545,10 +546,26 @@ table.mcpx-act tbody tr:focus-visible{box-shadow:var(--focus-ring);outline:none}
 .mcpx-dsec-h{font-size:.62rem;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:7px}
 .mcpx-row{display:flex;justify-content:space-between;font-size:.75rem;padding:3px 0;gap:10px}
 .mcpx-row .k{color:var(--muted)}.mcpx-row .v{font-weight:600;text-align:right;word-break:break-word}
-.mcpx-pivot{display:inline-block;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:999px;padding:3px 9px;font-size:.7rem;cursor:pointer;margin:2px 4px 2px 0}
+.mcpx-pivot{display:inline-flex;align-items:center;gap:5px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:999px;padding:3px 9px;font-size:.7rem;cursor:pointer;margin:2px 4px 2px 0}
+.mcpx-pivot:hover{border-color:var(--accent)}
+.mcpx-pvt-type{color:var(--muted);font-weight:600;text-transform:lowercase}
+.mcpx-pvt-val{font-weight:600;word-break:break-word}
+.mcpx-copy{background:none;border:1px solid var(--border);border-radius:5px;color:var(--muted);font-size:.62rem;padding:1px 6px;cursor:pointer;margin-left:6px}
+.mcpx-copy:hover{color:var(--text);border-color:var(--accent)}
 .mcpx-filterbar{display:flex;flex-wrap:wrap;gap:8px;padding:10px 12px;background:var(--surface1);border-bottom:1px solid var(--border);align-items:center;font-size:.74rem}
+.mcpx-filttag{display:inline-flex;gap:4px;align-items:center}
 .mcpx-btnrow{display:flex;flex-wrap:wrap;gap:7px;margin-top:6px}
-a.mcpx-link:focus-visible,button.mcpx-attn-item:focus-visible,.mcpx-pivot:focus-visible{box-shadow:var(--focus-ring);outline:none;border-radius:6px}
+.mcpx-dh-left{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.mcpx-dh-sub{font-size:.72rem;color:var(--muted)}
+.mcpx-evc-stage{border-bottom:1px solid var(--border);padding:10px 16px}
+.mcpx-evc-h{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.mcpx-evc-n{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:50%;background:var(--surface2);border:1px solid var(--border);color:var(--muted);font-size:.62rem;font-weight:700;flex-shrink:0}
+.mcpx-evc-t{font-size:.66rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:700}
+.mcpx-evc-sum{display:flex;flex-wrap:wrap;gap:5px;align-items:center;font-size:.75rem}
+.mcpx-evc-det{margin-top:7px}
+.mcpx-evc-det > summary{font-size:.68rem;color:var(--muted);cursor:pointer;margin-bottom:4px}
+.mcpx-row .v.muted{color:var(--muted);font-weight:500}
+a.mcpx-link:focus-visible,button.mcpx-attn-item:focus-visible,.mcpx-pivot:focus-visible,.mcpx-copy:focus-visible,.mcpx-back:focus-visible,.mcpx-evc-det > summary:focus-visible{box-shadow:var(--focus-ring);outline:none;border-radius:6px}
 .mcpx-legacy{margin-top:14px}
 .mcpx-legacy > summary{font-size:.72rem;color:var(--muted);cursor:pointer}
 .mcpx-sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);border:0;white-space:nowrap}
@@ -17871,120 +17888,433 @@ async function renderMCPCommandCenter(){
   var live=document.getElementById('mcpx-cc-live'); if(live) live.textContent='MCP posture refreshed as of '+mcpxNow();
 }
 
-async function renderMCPActivity(){
+// ── PR-UX-3: entity pivots, Server/Tool drawers, evidence chain, bounded nav ──
+// Two bounded stacks keep context without a page reload: mcpxNavBack remembers
+// prior Activity filters (so "related decisions" has a back path), and mcpxFrames
+// is the contextual drawer stack (Decision -> Server/Tool). Depth is capped at 3.
+var mcpxMaxDepth=3;
+var mcpxNav=null;      // {tenant, filter:{}, label, selEvent}
+var mcpxNavBack=[];    // prior Activity filter states (bounded)
+var mcpxFrames=[];     // drawer frame stack (bounded; frames[0] is always the Decision)
+var mcpxActReq=0;      // latest-request ticket for the Activity table fetch
+
+function mcpxShort(v){ v=String(v==null?'':v); return v.length>22 ? v.slice(0,12)+'...'+v.slice(-6) : v; }
+function mcpxCapBack(){ while(mcpxNavBack.length>mcpxMaxDepth) mcpxNavBack.shift(); }
+// Cap the drawer stack while ALWAYS preserving the base Decision (back-to-activity).
+function mcpxCapFrames(){ while(mcpxFrames.length>mcpxMaxDepth) mcpxFrames.splice(1,1); }
+
+function mcpxFilterKeyLabel(k){
+  return ({tenant:'tenant',principal_id:'principal',agent_id:'agent',client_id:'client',server_id:'server',
+    tool_name:'tool',tool_fingerprint:'tool fingerprint',rule_id:'rule',reason_code:'reason',action:'action',
+    execution_state:'execution',policy_snapshot_hash:'snapshot',credential_profile_ref:'credential profile'})[k]||k;
+}
+function mcpxFilterLabel(filter){
+  var keys=Object.keys(filter||{}).filter(function(k){ return filter[k]!=null && filter[k]!==''; });
+  if(!keys.length) return '';
+  return keys.map(function(k){ return mcpxFilterKeyLabel(k)+' = '+mcpxShort(filter[k]); }).join(', ');
+}
+function mcpxDecQuery(tenant, filter){
+  var q='/api/mcp/decisions?tenant='+encodeURIComponent(tenant);
+  Object.keys(filter||{}).forEach(function(k){ var v=filter[k]; if(v!=null && v!=='') q+='&'+encodeURIComponent(k)+'='+encodeURIComponent(v); });
+  return q;
+}
+
+// mcpxCopyBtn gives copy support for hashes/fingerprints (no color-only semantics).
+function mcpxCopyBtn(value){
+  var b=mcpxEl('button','mcpx-copy','copy'); b.type='button'; b.setAttribute('aria-label','copy value');
+  b.addEventListener('click', function(e){ e.stopPropagation();
+    try{ if(navigator.clipboard){ navigator.clipboard.writeText(String(value)); b.textContent='copied'; setTimeout(function(){ b.textContent='copy'; },1200); } }catch(_){}
+  });
+  return b;
+}
+// mcpxPivot builds one reusable entity chip. It is created ONLY when a real
+// destination exists; entities with no destination are rendered as plain values.
+function mcpxPivot(typeLabel, value, onClick, opts){
+  opts=opts||{};
+  var b=mcpxEl('button','mcpx-pivot'); b.type='button';
+  b.appendChild(mcpxEl('span','mcpx-pvt-type', typeLabel));
+  b.appendChild(mcpxEl('span','mcpx-pvt-val', opts.short?mcpxShort(value):value));
+  b.title=String(value);
+  b.setAttribute('aria-label', typeLabel+': '+value+(opts.verb?(' - '+opts.verb):''));
+  b.addEventListener('click', function(e){ e.stopPropagation(); onClick(); });
+  return b;
+}
+// mcpxPivotDecisions re-filters the Activity table by an exact entity, preserving
+// a back path to the current view (and the currently-open decision).
+function mcpxPivotDecisions(patch){
+  if(!mcpxNav) return;
+  mcpxNavBack.push({tenant:mcpxNav.tenant, filter:mcpxNav.filter, label:mcpxNav.label, selEvent:mcpxNav.selEvent});
+  mcpxCapBack();
+  mcpxCloseAllDrawers();
+  patch.tenant=undefined; // tenant is the scope, carried separately; never a filter that could widen it
+  mcpxNav={tenant:mcpxNav.tenant, filter:patch, label:mcpxFilterLabel(patch), selEvent:null};
+  mcpxRenderActivity();
+}
+function mcpxNavBackPop(){
+  if(!mcpxNavBack.length) return;
+  var prev=mcpxNavBack.pop();
+  mcpxNav=prev;
+  mcpxRenderActivity(function(){ if(prev.selEvent) mcpxOpenDecision(prev.selEvent); });
+}
+
+// renderMCPActivity is the Search entry point: it resets navigation to a
+// tenant-only base filter and renders. (Name preserved for the data-click table.)
+function renderMCPActivity(){
   var root=document.getElementById('mcpx-decisions-root'); if(!root) return;
   var tenantEl=document.getElementById('mcp-dec-tenant'), tenant=((tenantEl&&tenantEl.value)||'').trim();
-  mcpxCloseDrawer(); root.textContent='';
-  if(!tenant){ root.appendChild(mcpxEl('div','mcpx-empty','Enter a tenant, then Search, to load decisions.')); return; }
+  mcpxNavBack=[]; mcpxFrames=[]; mcpxDrawerReq++;
+  if(!tenant){ mcpxNav=null; root.textContent=''; root.appendChild(mcpxEl('div','mcpx-empty','Enter a tenant, then Search, to load decisions.')); return; }
+  mcpxNav={tenant:tenant, filter:{}, label:'', selEvent:null};
+  mcpxRenderActivity();
+}
+
+// mcpxRenderActivity renders the Activity table for the current mcpxNav state.
+async function mcpxRenderActivity(afterCb){
+  var root=document.getElementById('mcpx-decisions-root'); if(!root||!mcpxNav) return;
+  mcpxCloseAllDrawers(); root.textContent='';
+  var tenant=mcpxNav.tenant, filter=mcpxNav.filter||{};
+  var hasFilter=Object.keys(filter).some(function(k){ return filter[k]!=null && filter[k]!==''; });
   root.appendChild(mcpxEl('div','mcpx-source','Loading decisions...'));
-  var data=await mcpxFetchJSON('/api/mcp/decisions?tenant='+encodeURIComponent(tenant));
+  // Latest-request guard: a slower earlier Search/Back/clear-filter response must
+  // not overwrite a newer navigation (or fire a stale afterCb that reopens the
+  // wrong event). Same discipline as the drawer reads.
+  var myReq=++mcpxActReq;
+  var data=await mcpxFetchJSON(mcpxDecQuery(tenant, filter));
+  if(myReq!==mcpxActReq) return;
   root.textContent='';
   if(data && data.__err==='forbidden'){ root.appendChild(mcpxEl('div','mcpx-empty','Permission denied.')); return; }
   if(mcpxIsErr(data)){ root.appendChild(mcpxEl('div','mcpx-empty','Could not load decisions ('+(data.status||data.__err)+').')); return; }
   var rows=data.decisions||[];
-  if(!rows.length){ root.appendChild(mcpxEl('div','mcpx-empty','No decisions for tenant "'+tenant+'".')); return; }
 
   var wrap=mcpxEl('div','mcpx-actwrap has-drawer');
   var fb=mcpxEl('div','mcpx-filterbar');
-  fb.appendChild(mcpxEl('span','','tenant: '+tenant)); fb.appendChild(mcpxEl('span','','count: '+rows.length));
+  if(mcpxNavBack.length){
+    var back=mcpxEl('button','btn ghost sm mcpx-back','< Back'); back.setAttribute('aria-label','Back to previous decisions');
+    back.addEventListener('click', function(){ mcpxNavBackPop(); }); fb.appendChild(back);
+  }
+  fb.appendChild(mcpxEl('span','','tenant: '+tenant));
+  if(hasFilter){
+    var ft=mcpxEl('span','mcpx-filttag'); ft.appendChild(mcpxEl('span','','filter: ')); ft.appendChild(mcpxEl('b',null,mcpxNav.label)); fb.appendChild(ft);
+    var clr=mcpxEl('button','btn ghost sm','clear filter');
+    clr.addEventListener('click', function(){ mcpxNavBack=[]; mcpxNav={tenant:tenant,filter:{},label:'',selEvent:null}; mcpxRenderActivity(); }); fb.appendChild(clr);
+  }
+  fb.appendChild(mcpxEl('span','','count: '+rows.length));
   fb.appendChild(mcpxEl('span','mcpx-asof','as-of '+mcpxNow())); wrap.appendChild(fb);
 
-  var tbl=mcpxEl('table','mcpx-act'), thead=mcpxEl('thead'), htr=mcpxEl('tr');
-  ['Time','Result','Evaluated to effective','Principal','Server / tool','Reason'].forEach(function(h){ htr.appendChild(mcpxEl('th',null,h)); });
-  thead.appendChild(htr); tbl.appendChild(thead);
-  var tb=mcpxEl('tbody');
-  rows.forEach(function(row){
-    var tr=mcpxEl('tr'); tr.tabIndex=0; tr.dataset.click='mcpxOpenDecision'; tr.dataset.arg=row.event_id||'';
-    var t=new Date((row.time_unix_nano||0)/1e6), p=function(n){return String(n).padStart(2,'0');};
-    tr.appendChild(mcpxEl('td','',p(t.getHours())+':'+p(t.getMinutes())+':'+p(t.getSeconds())));
-    var rc=mcpxEl('td'); rc.appendChild(mcpxResultChip(row.action,row.execution_state)); tr.appendChild(rc);
-    var ee=mcpxEl('td'), span=mcpxEl('span','mcpx-evaleff');
-    span.appendChild(mcpxChip(row.action||'-', (row.action&&row.action.indexOf('ALLOW')===0)?'ok':'crit'));
-    span.appendChild(mcpxEl('span','arw','to'));
-    var eff=mcpxDeriveEffective(row.action,row.execution_state);
-    span.appendChild(mcpxChip(eff.label, eff.kind));
-    if(eff.override) span.appendChild(mcpxChip('! override','warn'));
-    ee.appendChild(span); tr.appendChild(ee);
-    var pc=mcpxEl('td','free',row.principal_id||'-'); pc.title=row.principal_id||''; tr.appendChild(pc);
-    var sc=mcpxEl('td','free',(row.server_id||'-')+' / '+(row.tool_name||'-')); sc.title=(row.server_id||'')+' / '+(row.tool_name||''); tr.appendChild(sc);
-    var rn=mcpxEl('td','free',mcpxReasonLabel(row.reason_code)); rn.title=row.reason_code||''; tr.appendChild(rn);
-    tb.appendChild(tr);
-  });
-  tbl.appendChild(tb); wrap.appendChild(tbl);
-  var scrim=mcpxEl('div','mcpx-scrim'); scrim.id='mcpx-scrim'; scrim.dataset.click='mcpxCloseDrawer'; wrap.appendChild(scrim);
-  var drawer=mcpxEl('div','mcpx-drawer'); drawer.id='mcpx-drawer'; wrap.appendChild(drawer);
+  if(!rows.length){
+    // Truthful emptiness: a filtered search can exhaust the bounded scan window
+    // before finding a match and still return next_cursor. Do not report that as a
+    // definitive "no matches" - say the window was scanned and more may exist.
+    var emptyMsg = hasFilter?('No decisions match this filter for tenant "'+tenant+'".'):('No decisions for tenant "'+tenant+'".');
+    if(data.next_cursor) emptyMsg = 'No matches in the scanned window'+(hasFilter?' for this filter':'')+'; more results may exist beyond it. Narrow the filter (for example a time range) to reach them.';
+    wrap.appendChild(mcpxEl('div','mcpx-empty', emptyMsg));
+  } else {
+    var tbl=mcpxEl('table','mcpx-act'), thead=mcpxEl('thead'), htr=mcpxEl('tr');
+    ['Time','Result','Evaluated to effective','Principal','Server / tool','Reason'].forEach(function(h){ htr.appendChild(mcpxEl('th',null,h)); });
+    thead.appendChild(htr); tbl.appendChild(thead);
+    var tb=mcpxEl('tbody');
+    rows.forEach(function(row){
+      var tr=mcpxEl('tr'); tr.tabIndex=0; tr.dataset.click='mcpxOpenDecision'; tr.dataset.arg=row.event_id||'';
+      var t=new Date((row.time_unix_nano||0)/1e6), p=function(n){return String(n).padStart(2,'0');};
+      tr.appendChild(mcpxEl('td','',p(t.getHours())+':'+p(t.getMinutes())+':'+p(t.getSeconds())));
+      var rc=mcpxEl('td'); rc.appendChild(mcpxResultChip(row.action,row.execution_state)); tr.appendChild(rc);
+      var ee=mcpxEl('td'), span=mcpxEl('span','mcpx-evaleff');
+      span.appendChild(mcpxChip(row.action||'-', (row.action&&row.action.indexOf('ALLOW')===0)?'ok':'crit'));
+      span.appendChild(mcpxEl('span','arw','to'));
+      var eff=mcpxDeriveEffective(row.action,row.execution_state);
+      span.appendChild(mcpxChip(eff.label, eff.kind));
+      if(eff.override) span.appendChild(mcpxChip('! override','warn'));
+      ee.appendChild(span); tr.appendChild(ee);
+      var pc=mcpxEl('td','free',row.principal_id||'-'); pc.title=row.principal_id||''; tr.appendChild(pc);
+      var sc=mcpxEl('td','free',(row.server_id||'-')+' / '+(row.tool_name||'-')); sc.title=(row.server_id||'')+' / '+(row.tool_name||''); tr.appendChild(sc);
+      var rn=mcpxEl('td','free',mcpxReasonLabel(row.reason_code)); rn.title=row.reason_code||''; tr.appendChild(rn);
+      tb.appendChild(tr);
+    });
+    tbl.appendChild(tb); wrap.appendChild(tbl);
+    // Completeness: the search is one deterministic page. When more results exist
+    // (next_cursor present), say so, so a page-capped filtered list is never
+    // mistaken for the complete set.
+    if(data.next_cursor) wrap.appendChild(mcpxEl('div','mcpx-source','Showing the first '+rows.length+' results for this view; more exist. Narrow the filter to see the rest.'));
+  }
+  // No modal scrim: this is a CONTEXTUAL side drawer, so the Activity table stays
+  // interactive underneath (select another row, switch decisions) while it is open.
+  var drawer=mcpxEl('div','mcpx-drawer'); drawer.id='mcpx-drawer'; drawer.tabIndex=-1; drawer.setAttribute('role','region'); drawer.setAttribute('aria-label','evidence drawer'); wrap.appendChild(drawer);
   root.appendChild(wrap); root.dataset.tenant=tenant;
-  root.appendChild(mcpxEl('div','mcpx-source','Backed by /api/mcp/decisions and /decision-explain. effective and shadow override are derived from the stored action + execution_state (no new telemetry). Latency, upstream status, DP node and environment are not shown: the durable event store does not keep them.'));
+  root.appendChild(mcpxEl('div','mcpx-source','Backed by /api/mcp/decisions, /decision-explain, /servers and /tools. Effective action and shadow override are derived from the stored action + execution_state (no new telemetry). Entity pivots filter this table or open a real inventory drawer; upstream HTTP status, latency, DP node and environment are not shown because the durable event store does not keep them.'));
+  if(afterCb) afterCb();
 }
 
-async function mcpxOpenDecision(eventId){
-  var drawer=document.getElementById('mcpx-drawer'), scrim=document.getElementById('mcpx-scrim'), root=document.getElementById('mcpx-decisions-root');
-  if(!drawer||!root) return;
-  var tenant=root.dataset.tenant||'';
-  Array.prototype.forEach.call(root.querySelectorAll('tr.sel'), function(x){ x.classList.remove('sel'); });
-  var rows=root.querySelectorAll('table.mcpx-act tbody tr');
-  Array.prototype.forEach.call(rows, function(x){ if(x.dataset.arg===eventId) x.classList.add('sel'); });
-  drawer.classList.add('open'); if(scrim) scrim.classList.add('open');
-  // Guard against a slower earlier request overwriting a newer selection (or a close):
-  // each open takes a ticket; only the latest ticket is allowed to render its response.
+// ── drawer frame stack ──
+function mcpxOpenDecision(eventId){
+  var root=document.getElementById('mcpx-decisions-root'); if(!root) return;
+  if(mcpxNav) mcpxNav.selEvent=eventId;
+  var opener=null, rows=root.querySelectorAll('table.mcpx-act tbody tr');
+  Array.prototype.forEach.call(rows, function(x){ x.classList.remove('sel'); if(x.dataset.arg===eventId){ x.classList.add('sel'); opener=x; } });
+  var tenant=(mcpxNav&&mcpxNav.tenant)||root.dataset.tenant||'';
+  mcpxFrames=[{type:'decision', title:'Decision', tenant:tenant,
+    url:'/api/mcp/decision-explain?tenant='+encodeURIComponent(tenant)+'&event_id='+encodeURIComponent(eventId),
+    params:{eventId:eventId}, opener:opener}];
+  mcpxRenderFrames();
+}
+function mcpxPushFrame(frame){
+  if(!mcpxFrames.length) return;
+  frame.opener=document.activeElement;
+  mcpxFrames.push(frame); mcpxCapFrames();
+  mcpxRenderFrames();
+}
+function mcpxPopFrame(){
+  if(mcpxFrames.length<=1){ mcpxCloseAllDrawers(); return; }
+  var popped=mcpxFrames.pop(); mcpxDrawerReq++;
+  mcpxRenderFrames();
+  if(popped && popped.opener && popped.opener.focus){ try{ popped.opener.focus(); }catch(e){} }
+}
+function mcpxCloseAllDrawers(){
+  mcpxDrawerReq++;
+  var base=mcpxFrames[0]; mcpxFrames=[];
+  var d=document.getElementById('mcpx-drawer');
+  if(d){ d.classList.remove('open'); d.textContent=''; var wrap=d.closest('.mcpx-actwrap'); if(wrap) wrap.classList.remove('drawer-open'); }
+  if(base && base.opener && base.opener.focus){ try{ base.opener.focus(); }catch(e){} }
+}
+// Backward-compatible alias (data-click table + any external caller).
+function mcpxCloseDrawer(){ mcpxCloseAllDrawers(); }
+
+async function mcpxRenderFrames(){
+  var drawer=document.getElementById('mcpx-drawer');
+  if(!drawer || !mcpxFrames.length) return;
+  drawer.classList.add('open');
+  var wrap=drawer.closest('.mcpx-actwrap'); if(wrap) wrap.classList.add('drawer-open');
+  var top=mcpxFrames[mcpxFrames.length-1];
+  if(top.data!==undefined){ mcpxPaintFrame(drawer, top); return; }
+  // Each fetch takes a ticket; a slower earlier request (or a close/pop) is
+  // discarded before it can overwrite a newer frame (the 796ce167 race guard,
+  // extended to every drawer read).
   var myReq=++mcpxDrawerReq;
-  drawer.textContent=''; drawer.appendChild(mcpxEl('div','mcpx-source','Loading evidence...'));
-  var ex=await mcpxFetchJSON('/api/mcp/decision-explain?tenant='+encodeURIComponent(tenant)+'&event_id='+encodeURIComponent(eventId));
+  drawer.textContent=''; drawer.appendChild(mcpxEl('div','mcpx-source','Loading '+top.title.toLowerCase()+'...'));
+  var data=await mcpxFetchJSON(top.url);
   if(myReq!==mcpxDrawerReq) return;
+  if(mcpxFrames[mcpxFrames.length-1]!==top) return;
+  top.data=data;
+  mcpxPaintFrame(drawer, top);
+}
+
+function mcpxFrameHeader(frame){
+  var top=mcpxEl('div','mcpx-drawer-top'), th=mcpxEl('div','mcpx-card-h'), left=mcpxEl('div','mcpx-dh-left');
+  if(mcpxFrames.length>1){
+    var prev=mcpxFrames[mcpxFrames.length-2];
+    var back=mcpxEl('button','btn ghost sm mcpx-back','< '+prev.title);
+    back.setAttribute('aria-label','Back to '+prev.title);
+    back.addEventListener('click', function(){ mcpxPopFrame(); });
+    left.appendChild(back);
+  }
+  left.appendChild(mcpxChip(frame.title, frame.chipKind||'muted'));
+  if(frame.subtitle) left.appendChild(mcpxEl('span','mcpx-dh-sub', frame.subtitle));
+  th.appendChild(left);
+  var close=mcpxEl('button','btn ghost sm','x'); close.setAttribute('aria-label','close all');
+  close.addEventListener('click', function(){ mcpxCloseAllDrawers(); });
+  th.appendChild(close); top.appendChild(th);
+  return top;
+}
+function mcpxFocusDrawer(drawer, label){
+  try{ drawer.focus(); }catch(e){}
+  var live=document.getElementById('mcpx-act-live'); if(live) live.textContent=(label||'Drawer')+' opened';
+}
+function mcpxPaintFrame(drawer, frame){
   drawer.textContent='';
-  var top=mcpxEl('div','mcpx-drawer-top'), th=mcpxEl('div','mcpx-card-h'), idw=mcpxEl('div','');
-  idw.appendChild(mcpxChip('Decision','muted')); idw.appendChild(mcpxEl('span','',' '+eventId)); th.appendChild(idw);
-  var xb=mcpxEl('button','btn ghost sm','x'); xb.dataset.click='mcpxCloseDrawer'; xb.setAttribute('aria-label','close'); th.appendChild(xb); top.appendChild(th);
-  if(mcpxIsErr(ex)){ top.appendChild(mcpxEl('div','mcpx-dt-meta', ex.__err==='forbidden'?'Permission denied.':'Could not load explanation.')); drawer.appendChild(top); return; }
-  var eff=mcpxDeriveEffective(ex.action, ex.execution_state);
+  drawer.appendChild(mcpxFrameHeader(frame));
+  if(mcpxIsErr(frame.data)){
+    var msg = frame.data.__err==='forbidden' ? 'Permission denied.' : (frame.title+' unavailable: a required read failed.');
+    drawer.appendChild(mcpxEl('div','mcpx-dt-meta', msg)); mcpxFocusDrawer(drawer, frame.title); return;
+  }
+  if(frame.type==='decision') mcpxPaintDecision(drawer, frame);
+  else if(frame.type==='server') mcpxPaintServer(drawer, frame);
+  else if(frame.type==='tool') mcpxPaintTool(drawer, frame);
+  mcpxFocusDrawer(drawer, frame.title);
+}
+
+// Row helpers: mcpxKvNR shows "not recorded" when the event schema could carry a
+// value but this event does not; a field entirely absent from the DTO is omitted.
+function mcpxKvNR(k, v){
+  var r=mcpxEl('div','mcpx-row'); r.appendChild(mcpxEl('span','k',k));
+  r.appendChild((v==null||v==='') ? mcpxEl('span','v muted','not recorded') : mcpxEl('span','v', String(v)));
+  return r;
+}
+function mcpxStageBlock(n, title, summaryNodes, detailRows){
+  var s=mcpxEl('div','mcpx-evc-stage');
+  var h=mcpxEl('div','mcpx-evc-h'); h.appendChild(mcpxEl('span','mcpx-evc-n', String(n))); h.appendChild(mcpxEl('span','mcpx-evc-t', title)); s.appendChild(h);
+  var sum=mcpxEl('div','mcpx-evc-sum'); (summaryNodes||[]).forEach(function(nd){ if(nd) sum.appendChild(nd); }); s.appendChild(sum);
+  var rows=(detailRows||[]).filter(Boolean);
+  if(rows.length){
+    var det=mcpxEl('details','mcpx-evc-det'); det.appendChild(mcpxEl('summary',null,'Details'));
+    rows.forEach(function(r){ det.appendChild(r); }); s.appendChild(det);
+  }
+  return s;
+}
+
+// ── evidence chain (decision frame) ──
+function mcpxPaintDecision(drawer, frame){
+  var ex=frame.data, tenant=frame.tenant, eff=mcpxDeriveEffective(ex.action, ex.execution_state);
+  // Title: Evaluated -> Effective. A Shadow-executed DENY stays unmistakable.
   var title=mcpxEl('div','mcpx-dt-title');
   title.appendChild(mcpxChip('Evaluated: '+(ex.action||'-'), (ex.action&&ex.action.indexOf('ALLOW')===0)?'ok':'crit'));
-  title.appendChild(mcpxEl('span','arw','to')); title.appendChild(mcpxChip(eff.label, eff.kind)); top.appendChild(title);
-  top.appendChild(mcpxEl('div','mcpx-dt-meta',(ex.server_id||'-')+' / '+(ex.tool_name||'-'))); drawer.appendChild(top);
-  function sec(t, rowdefs){ var s=mcpxEl('div','mcpx-dsec'); s.appendChild(mcpxEl('div','mcpx-dsec-h',t)); rowdefs.forEach(function(rd){ if(rd[1]==null||rd[1]==='') return; s.appendChild(mcpxKv(rd[0], rd[1])); }); drawer.appendChild(s); }
+  title.appendChild(mcpxEl('span','arw','to')); title.appendChild(mcpxChip(eff.label, eff.kind));
+  if(eff.override) title.appendChild(mcpxChip('! override','warn'));
+  drawer.appendChild(title);
+  drawer.appendChild(mcpxEl('div','mcpx-dt-meta', 'event '+(ex.event_id||'-')));
+
+  // 1. Identity - principal / agent / client pivots (related decisions).
+  var idSum=[];
+  if(ex.principal_id) idSum.push(mcpxPivot('principal', ex.principal_id, function(){ mcpxPivotDecisions({principal_id:ex.principal_id}); }, {verb:'related decisions', short:true}));
+  if(ex.agent_id) idSum.push(mcpxPivot('agent', ex.agent_id, function(){ mcpxPivotDecisions({agent_id:ex.agent_id}); }, {verb:'related decisions', short:true}));
+  if(ex.client_id) idSum.push(mcpxPivot('client', ex.client_id, function(){ mcpxPivotDecisions({client_id:ex.client_id}); }, {verb:'related decisions', short:true}));
+  if(!idSum.length) idSum.push(mcpxEl('span','v muted','not recorded'));
+  drawer.appendChild(mcpxStageBlock(1,'Identity', idSum, [ mcpxKvNR('Principal type', ex.principal_type) ]));
+
+  // 2. Server and Tool - real inventory drawers + destination/assurance.
+  var stSum=[];
+  if(ex.server_id) stSum.push(mcpxPivot('server', ex.server_id, function(){ mcpxOpenServer(tenant, ex.server_id); }, {verb:'open server', short:true}));
+  if(ex.tool_name){
+    // The Tool inventory drawer needs (server_id, tool_name); GetTool rejects an
+    // empty server_id. Without a server binding, pivot to related decisions by
+    // tool name (a real destination) rather than an always-unavailable drawer.
+    if(ex.server_id) stSum.push(mcpxPivot('tool', ex.tool_name, function(){ mcpxOpenTool(tenant, ex.server_id, ex.tool_name); }, {verb:'open tool', short:true}));
+    else stSum.push(mcpxPivot('tool', ex.tool_name, function(){ mcpxPivotDecisions({tool_name:ex.tool_name}); }, {verb:'related decisions', short:true}));
+  }
+  if(!stSum.length) stSum.push(mcpxEl('span','v muted','not recorded'));
+  var stDet=[];
+  if(ex.tool_fingerprint){ var fpr=mcpxEl('div','mcpx-row'); fpr.appendChild(mcpxEl('span','k','Tool fingerprint')); var fv=mcpxEl('span','v',mcpxShort(ex.tool_fingerprint)); fpr.appendChild(fv); fpr.appendChild(mcpxCopyBtn(ex.tool_fingerprint)); stDet.push(fpr); }
+  stDet.push(mcpxKvNR('Resource', ex.resource_ref));
+  stDet.push(mcpxKvNR('Resource hash', ex.resource_hash?mcpxShort(ex.resource_hash):''));
+  stDet.push(mcpxKvNR('Destination class', ex.destination_class));
+  stDet.push(mcpxKvNR('Assurance', ex.assurance));
+  drawer.appendChild(mcpxStageBlock(2,'Server and tool', stSum, stDet));
+
+  // 3. Input inspection - request schema validation.
+  drawer.appendChild(mcpxStageBlock(3,'Input inspection',
+    [ mcpxEl('span','v', ex.inspection_schema_status||'not recorded') ], []));
+
+  // 4. Policy decision - reason / rule (pivot) / condition / class.
+  var polSum=[ mcpxChip(mcpxReasonLabel(ex.reason_code),'muted') ];
+  if(ex.matched_rule_id) polSum.push(mcpxPivot('rule', ex.matched_rule_id, function(){ mcpxPivotDecisions({rule_id:ex.matched_rule_id}); }, {verb:'related decisions', short:true}));
   var hardClass=mcpxHardClass[ex.reason_code];
-  sec('Why', [
-    ['Policy action (evaluated)', ex.action],
-    ['Effective action', eff.label + (eff.override?' (shadow override)':'')],
-    ['Shadow override (derived)', eff.override?'yes':'no'],
-    ['Reason', mcpxReasonLabel(ex.reason_code)],
-    ['Matched rule', ex.matched_rule_id],
-    ['Decisive condition', ex.decisive_condition_id],
-    hardClass?['Hard failure class (derived from reason_code)', hardClass]:['Hard failure','none'],
-    ['Remediation', ex.remediation]
-  ]);
-  sec('Context', [
-    ['Tenant', ex.tenant],['Principal', ex.principal_id],['Principal type', ex.principal_type],
-    ['Agent', ex.agent_id],['Client', ex.client_id],['Server', ex.server_id],
-    ['Tool fingerprint', ex.tool_fingerprint],['Resource', ex.resource_ref],
-    ['Destination class', ex.destination_class],['Assurance', ex.assurance]
-  ]);
-  sec('Execution', [
-    ['Credential profile', ex.credential_profile_ref],['Power ceiling', ex.credential_power_ceiling],
-    ['Operation class', ex.operation_class],['Risk class', ex.risk_class],
-    ['Execution state', ex.execution_state],['Inspection status', ex.inspection_schema_status],
-    ['DLP disposition', ex.dlp_disposition],['Max severity', ex.max_severity],
-    ['Finding classes', (ex.finding_classes&&ex.finding_classes.join(', '))]
-  ]);
-  sec('Evidence', [
-    ['Snapshot', mcpxShortHash(ex.policy_snapshot_hash)],['Policy rev', ex.policy_revision],
-    ['Catalog rev', ex.catalog_revision],['Registry rev', ex.registry_revision],
-    ['Inspection rev', ex.inspection_revision],['Runtime rev', ex.runtime_revision],
-    ['Durable event', ex.event_id],['Correlation id', ex.correlation_id]
-  ]);
-  var sa=mcpxEl('div','mcpx-dsec'); sa.appendChild(mcpxEl('div','mcpx-dsec-h','Safe actions'));
-  var sar=mcpxEl('div','mcpx-btnrow');
-  function nav(label,arg){ var b=mcpxEl('button','btn sm',label); b.dataset.click='switchView'; b.dataset.arg=arg; return b; }
-  sar.appendChild(nav('Simulate policy','mcp-policies')); sar.appendChild(nav('Open rollout','mcp-rollout')); sar.appendChild(nav('Open health','mcp-health'));
-  sa.appendChild(sar);
-  sa.appendChild(mcpxEl('div','mcpx-source','Actions navigate to existing MCP views. Quarantine and revoke are not offered: no endpoint exists in V1.'));
-  drawer.appendChild(sa);
-  var live=document.getElementById('mcpx-act-live'); if(live) live.textContent='Opened decision '+eventId;
+  drawer.appendChild(mcpxStageBlock(4,'Policy decision', polSum, [
+    mcpxKvNR('Decisive condition', ex.decisive_condition_id),
+    mcpxKvNR('Operation class', ex.operation_class),
+    mcpxKvNR('Risk class', ex.risk_class),
+    hardClass?mcpxKv('Hard failure class (derived from reason_code)', hardClass):null,
+    mcpxKvNR('Remediation', ex.remediation),
+    (ex.obligations&&ex.obligations.length)?mcpxKv('Obligations', ex.obligations.join(', ')):null
+  ]));
+
+  // 5. Rollout mode and effective action - derived; rollout mode is not on the event.
+  drawer.appendChild(mcpxStageBlock(5,'Rollout mode and effective action', [
+    mcpxChip('evaluated '+(ex.action||'-'), (ex.action&&ex.action.indexOf('ALLOW')===0)?'ok':'crit'),
+    mcpxChip('effective '+eff.label, eff.kind),
+    eff.override?mcpxChip('shadow override','warn'):mcpxChip('no override','muted')
+  ], [ mcpxKv('Shadow override (derived)', eff.override?'yes':'no') ]));
+
+  // 7. Durable event.
+  drawer.appendChild(mcpxStageBlock(7,'Durable event',
+    [ mcpxEl('span','v', ex.source||'historical') ], [
+    mcpxKvNR('Event id', ex.event_id), mcpxKvNR('Correlation id', ex.correlation_id),
+    mcpxKvNR('Replay id', ex.replay_id), mcpxKvNR('Partition', ex.partition), mcpxKvNR('Capability', ex.capability)
+  ]));
+
+  // 8. Credential-profile metadata - safe reference only, with a related filter.
+  if(ex.credential_profile_ref){
+    drawer.appendChild(mcpxStageBlock(8,'Credential-profile metadata',
+      [ mcpxPivot('credential profile', ex.credential_profile_ref, function(){ mcpxPivotDecisions({credential_profile_ref:ex.credential_profile_ref}); }, {verb:'related decisions', short:true}) ],
+      [ mcpxKv('Credential profile', ex.credential_profile_ref), mcpxKvNR('Power ceiling', ex.credential_power_ceiling) ]));
+  }
+
+  // 9. Upstream execution outcome - the recorded disposition only. Upstream HTTP
+  // status and latency have no DTO slot, so they are OMITTED (not shown as a
+  // "not recorded" row, which the contract reserves for schema-present fields);
+  // the drawer footer states they are not kept.
+  drawer.appendChild(mcpxStageBlock(9,'Upstream execution outcome',
+    [ mcpxEl('span','v', ex.execution_state||'not recorded') ], []));
+
+  // 10. Response inspection and DLP.
+  var dlpSum=[];
+  if(ex.dlp_disposition) dlpSum.push(mcpxChip('DLP '+ex.dlp_disposition, ex.dlp_disposition==='pass'?'ok':'warn'));
+  if(ex.max_severity) dlpSum.push(mcpxChip('max '+ex.max_severity,'muted'));
+  if(!dlpSum.length) dlpSum.push(mcpxEl('span','v muted','not recorded'));
+  drawer.appendChild(mcpxStageBlock(10,'Response inspection and DLP', dlpSum, [
+    (ex.finding_classes&&ex.finding_classes.length)?mcpxKv('Finding classes', ex.finding_classes.join(', ')):null
+  ]));
+
+  // 11. Snapshot and revisions - snapshot pivot filters by exact hash.
+  var snSum=[];
+  if(ex.policy_snapshot_hash){
+    snSum.push(mcpxPivot('snapshot', ex.policy_snapshot_hash, function(){ mcpxPivotDecisions({policy_snapshot_hash:ex.policy_snapshot_hash}); }, {verb:'related decisions', short:true}));
+    snSum.push(mcpxCopyBtn(ex.policy_snapshot_hash));
+  } else snSum.push(mcpxEl('span','v muted','not recorded'));
+  drawer.appendChild(mcpxStageBlock(11,'Snapshot and revisions', snSum, [
+    mcpxKvNR('Policy rev', ex.policy_revision), mcpxKvNR('Catalog rev', ex.catalog_revision),
+    mcpxKvNR('Registry rev', ex.registry_revision), mcpxKvNR('Inspection rev', ex.inspection_revision),
+    mcpxKvNR('Runtime rev', ex.runtime_revision)
+  ]));
+
+  drawer.appendChild(mcpxEl('div','mcpx-source','Evidence stages render only when the committed event carries the field; rollout mode, upstream HTTP status and latency are not recorded on it, and approval/allowance is not on the decision event, so those are omitted. Quarantine and revoke are not offered: no endpoint exists in V1.'));
 }
-function mcpxCloseDrawer(){ mcpxDrawerReq++; var d=document.getElementById('mcpx-drawer'), s=document.getElementById('mcpx-scrim'); if(d){ d.classList.remove('open'); d.textContent=''; } if(s) s.classList.remove('open'); }
+
+function mcpxOpenServer(tenant, serverId){
+  if(!serverId) return;
+  mcpxPushFrame({type:'server', title:'Server', subtitle:mcpxShort(serverId), tenant:tenant,
+    url:'/api/mcp/servers?tenant='+encodeURIComponent(tenant)+'&server_id='+encodeURIComponent(serverId),
+    params:{serverId:serverId}});
+}
+function mcpxOpenTool(tenant, serverId, toolName){
+  if(!toolName) return;
+  var u='/api/mcp/tools?tenant='+encodeURIComponent(tenant)+'&tool_name='+encodeURIComponent(toolName);
+  if(serverId) u+='&server_id='+encodeURIComponent(serverId);
+  mcpxPushFrame({type:'tool', title:'Tool', subtitle:mcpxShort(toolName), tenant:tenant, url:u, params:{serverId:serverId, toolName:toolName}});
+}
+
+function mcpxPaintServer(drawer, frame){
+  var s=frame.data||{}, tenant=frame.tenant;
+  drawer.appendChild(mcpxEl('div','mcpx-dt-title', 'Server '+(s.server_id||frame.params.serverId||'-')));
+  var sum=mcpxEl('div','mcpx-evc-sum');
+  sum.appendChild(mcpxChip(s.enabled?'enabled':'disabled', s.enabled?'ok':'muted'));
+  if(s.verification) sum.appendChild(mcpxChip(s.verification, s.verification==='verified'?'ok':'warn'));
+  if(s.identity_changed) sum.appendChild(mcpxChip('identity changed','warn'));
+  drawer.appendChild(sum);
+  var sec=mcpxEl('div','mcpx-dsec');
+  sec.appendChild(mcpxKvNR('Server id', s.server_id));
+  sec.appendChild(mcpxKvNR('Revision', s.revision));
+  sec.appendChild(mcpxKvNR('Endpoint configured', s.endpoint_configured?'yes':'no'));
+  if(s.credential_profile_ref) sec.appendChild(mcpxKvNR('Credential profile', s.credential_profile_ref));
+  drawer.appendChild(sec);
+  var actions=mcpxEl('div','mcpx-btnrow');
+  var vr=mcpxEl('button','btn sm','View related decisions'); vr.setAttribute('aria-label','View decisions for server '+(s.server_id||frame.params.serverId));
+  vr.addEventListener('click', function(){ mcpxPivotDecisions({server_id:s.server_id||frame.params.serverId}); }); actions.appendChild(vr);
+  drawer.appendChild(actions);
+  drawer.appendChild(mcpxEl('div','mcpx-source','From /api/mcp/servers (real inventory). No environment, destination class or tool-count field is returned for a server; only the fields above exist. No quarantine action (no endpoint in V1).'));
+}
+function mcpxPaintTool(drawer, frame){
+  var tl=frame.data||{}, tenant=frame.tenant;
+  drawer.appendChild(mcpxEl('div','mcpx-dt-title', 'Tool '+(tl.name||frame.params.toolName||'-')));
+  var sum=mcpxEl('div','mcpx-evc-sum');
+  if(tl.disposition) sum.appendChild(mcpxChip(tl.disposition, tl.disposition==='usable'?'ok':'warn'));
+  if(tl.quarantined) sum.appendChild(mcpxChip('quarantined','crit'));
+  if(tl.review_required) sum.appendChild(mcpxChip('review required','warn'));
+  if(tl.destination_class) sum.appendChild(mcpxChip('dest '+tl.destination_class,'muted'));
+  drawer.appendChild(sum);
+  var sec=mcpxEl('div','mcpx-dsec');
+  if(tl.server_id) sec.appendChild((function(){ var r=mcpxEl('div','mcpx-row'); r.appendChild(mcpxEl('span','k','Server binding')); var v=mcpxEl('span','v'); v.appendChild(mcpxPivot('server', tl.server_id, function(){ mcpxOpenServer(tenant, tl.server_id); }, {verb:'open server', short:true})); r.appendChild(v); return r; })());
+  sec.appendChild(mcpxKvNR('Tool name', tl.name));
+  if(tl.fingerprint){ var fr=mcpxEl('div','mcpx-row'); fr.appendChild(mcpxEl('span','k','Fingerprint')); var fv=mcpxEl('span','v',mcpxShort(tl.fingerprint)); fr.appendChild(fv); fr.appendChild(mcpxCopyBtn(tl.fingerprint)); sec.appendChild(fr); }
+  sec.appendChild(mcpxKvNR('Revision (catalog)', tl.revision));
+  drawer.appendChild(sec);
+  var actions=mcpxEl('div','mcpx-btnrow');
+  if(tl.fingerprint){ var vf=mcpxEl('button','btn sm','View related decisions'); vf.setAttribute('aria-label','View decisions for this tool fingerprint');
+    vf.addEventListener('click', function(){ mcpxPivotDecisions({tool_fingerprint:tl.fingerprint}); }); actions.appendChild(vf); }
+  var vn=mcpxEl('button','btn sm ghost','By tool name'); vn.addEventListener('click', function(){ mcpxPivotDecisions({tool_name:tl.name||frame.params.toolName}); }); actions.appendChild(vn);
+  drawer.appendChild(actions);
+  drawer.appendChild(mcpxEl('div','mcpx-source','From /api/mcp/tools (real inventory). "View related decisions" applies the exact tool fingerprint + current tenant. No quarantine action (no endpoint in V1).'));
+}
 
 document.addEventListener('keydown', function(e){
-  if(e.key==='Escape'){ var d=document.getElementById('mcpx-drawer'); if(d && d.classList.contains('open')){ mcpxCloseDrawer(); return; } }
+  if(e.key==='Escape'){ var od=document.getElementById('mcpx-drawer'); if(mcpxFrames.length && od && od.classList.contains('open')){ mcpxPopFrame(); return; } }
   if(e.key!=='Enter' && e.key!==' ') return;
   var tr=e.target && e.target.closest && e.target.closest('table.mcpx-act tbody tr'); if(!tr) return;
   e.preventDefault(); mcpxOpenDecision(tr.dataset.arg);

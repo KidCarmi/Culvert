@@ -102,6 +102,24 @@ func TestMCP_TenantRequired(t *testing.T) {
 	}
 }
 
+// TestMCP_DecisionFilterParamsAccepted proves the PR-UX-3 additive decision
+// filter params are recognized by the handler (viewer-readable, tenant-scoped)
+// and never widen the tenant scope. In the disabled-default posture the source
+// is unwired so the page is empty; the assertion is that the params are accepted
+// (200), not rejected, and that tenant is still mandatory.
+func TestMCP_DecisionFilterParamsAccepted(t *testing.T) {
+	q := "/api/mcp/decisions?tenant=acme&client_id=app-desktop&tool_fingerprint=fp-1&execution_state=executed&policy_snapshot_hash=sha256:ab&credential_profile_ref=cp-1&server_id=s1&tool_name=t1&principal_id=u&agent_id=a1&rule_id=R1&reason_code=x&action=DENY"
+	if got := mcpReq(http.MethodGet, q, RoleViewer, "").Code; got != http.StatusOK {
+		t.Fatalf("decisions with additive filters = %d, want 200", got)
+	}
+	// The same filters without a tenant remain a 400 - a filter can never stand in
+	// for tenant scope.
+	noTenant := "/api/mcp/decisions?client_id=app-desktop&principal_id=u"
+	if got := mcpReq(http.MethodGet, noTenant, RoleViewer, "").Code; got != http.StatusBadRequest {
+		t.Fatalf("filters without tenant = %d, want 400", got)
+	}
+}
+
 // TestMCP_DisabledDefaults proves the shipped admin singleton is dormant: no
 // inventory/decision sources are wired (empty results), and durable
 // approval/publication commit fails closed rather than fabricating evidence.
