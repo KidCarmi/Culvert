@@ -48,6 +48,12 @@ type DistributionCounts struct {
 	Unavailable  int `json:"unavailable"`
 }
 
+// DeriveState maps distribution counts for a specific published hash to a truthful
+// DistributionState. It is the exported entry point for read-only admin models
+// (e.g. the acknowledgement read model); it never infers a state from anything but
+// the real counts.
+func DeriveState(c DistributionCounts) DistributionState { return deriveState(c) }
+
 // deriveState maps the counts for a specific published hash to a truthful state.
 func deriveState(c DistributionCounts) DistributionState {
 	if c.Intended == 0 {
@@ -183,4 +189,17 @@ func (t *AckTracker) Counts(contentHash string, intended []string) DistributionC
 		}
 	}
 	return c
+}
+
+// AckFor returns the latest recorded acknowledgement for (node, contentHash) and
+// whether one exists. It is a bounded, read-only accessor (a defensive copy of the
+// stored value) so an admin read model can render per-DP rows without mutating or
+// exposing the tracker's internal maps. The ABSENCE of an ack (ok=false) is the
+// truthful "no acknowledgement yet" state - the caller must render it as such
+// (e.g. "unavailable"), never as a benign default.
+func (t *AckTracker) AckFor(node, contentHash string) (cpdp.Acknowledgement, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	a, ok := t.acks[ackKey(node, contentHash)]
+	return a, ok
 }

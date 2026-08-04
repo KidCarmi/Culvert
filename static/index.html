@@ -602,6 +602,29 @@ a.mcpx-link:focus-visible,button.mcpx-attn-item:focus-visible,.mcpx-pivot:focus-
 .mcpx-dlg-note{margin:12px 0 0;font-size:.76rem;color:var(--muted);line-height:1.5}
 .mcpx-dlg-foot{padding:12px 22px 18px;border-top:1px solid var(--border);display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap}
 .mcpx-dlg-foot .btn:focus-visible{box-shadow:var(--focus-ring);outline:none}
+/* ── PR-UX-5 truthful Rollout & Fleet screen ── */
+.mcpx-rf-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+.mcpx-rf-caps{display:inline-flex;border:1px solid var(--border);border-radius:8px;overflow:hidden}
+.mcpx-rf-captab{background:var(--surface1);color:var(--muted);border:0;padding:6px 14px;font-size:.78rem;font-weight:600;cursor:pointer}
+.mcpx-rf-captab+.mcpx-rf-captab{border-left:1px solid var(--border)}
+.mcpx-rf-captab.active{background:var(--accent-tint);color:var(--accent2)}
+.mcpx-rf-captab:focus-visible{box-shadow:var(--focus-ring);outline:none}
+.mcpx-rf-dl{display:grid;grid-template-columns:auto 1fr;gap:5px 14px;margin:4px 0 0}
+.mcpx-rf-dl dt{font-size:.68rem;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);font-weight:700;padding-top:1px}
+.mcpx-rf-dl dd{margin:0;font-size:.78rem;word-break:break-word}
+.mcpx-rf-dd-muted{color:var(--muted)}
+.mcpx-rf-counts{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+.mcpx-rf-count{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:6px 10px;min-width:64px}
+.mcpx-rf-count .n{font-size:.95rem;font-weight:700}
+.mcpx-rf-count .l{font-size:.58rem;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.mcpx-rf-count.warn .n{color:var(--warn)}.mcpx-rf-count.crit .n{color:var(--crit)}.mcpx-rf-count.ok .n{color:var(--ok)}
+table.mcpx-rf-acks{width:100%;border-collapse:collapse;font-size:.74rem;margin-top:10px}
+table.mcpx-rf-acks th{text-align:left;font-size:.58rem;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);font-weight:700;padding:6px 10px;border-bottom:1px solid var(--border)}
+table.mcpx-rf-acks td{padding:6px 10px;border-bottom:1px solid var(--border);white-space:nowrap}
+.mcpx-rf-editor{width:100%;min-height:110px;font-family:var(--mono,monospace);font-size:.74rem;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);padding:9px 11px;resize:vertical}
+.mcpx-rf-editor:focus{border-color:var(--accent);box-shadow:var(--focus-ring);outline:none}
+.mcpx-rf-diff{margin-top:10px}
+.mcpx-rf-diff .add{color:var(--ok)}.mcpx-rf-diff .rem{color:var(--crit)}
 </style>
 </head>
 <body>
@@ -3626,6 +3649,21 @@ Firefox (all platforms):
       </div>
     </div>
     <div class="view" id="view-mcp-rollout">
+      <!-- PR-UX-5 truthful Rollout & Fleet: structured mode triad, scope, candidate
+           validation preview, and real per-DP acknowledgement / fleet state. The
+           legacy raw-JSON panels remain under a collapsed diagnostics section. -->
+      <div class="mcpx-rf-bar">
+        <span class="mcpx-rf-caps" role="tablist" aria-label="Capability">
+          <button type="button" class="mcpx-rf-captab active" data-click="mcpxRfSelectCap" data-arg="gateway" role="tab" aria-selected="true">Gateway</button>
+          <button type="button" class="mcpx-rf-captab" data-click="mcpxRfSelectCap" data-arg="management" role="tab" aria-selected="false">Management</button>
+        </span>
+        <input type="hidden" id="mcpx-rf-cap" value="gateway">
+        <button class="btn sm ghost" data-click="mcpxRenderRolloutFleet">Refresh</button>
+        <span id="mcpx-rf-asof" class="mcpx-asof"></span>
+      </div>
+      <div id="mcpx-rf-root" aria-live="polite"></div>
+      <details class="mcpx-legacy">
+        <summary>Raw diagnostics &amp; legacy panels</summary>
       <div class="panel"><h3>Rollout Overview &amp; Mode &amp; Scope</h3>
         <button class="btn" data-click="loadMCPRollout">Refresh</button>
         <p class="muted">PR-11 guarded execution (Model A / local-client only). Disabled &#8594; Observe &#8594; Shadow &#8594; Canary &#8594; Production. Observe never executes; Shadow/Canary execute only inside an exact approved scope; Production is qualification-locked. Shows desired / local / fleet-effective mode, scope revision + hash, signed snapshot hash/epoch, and DP acknowledgement counts.</p>
@@ -3653,17 +3691,14 @@ Firefox (all platforms):
         <p class="muted">A promotion is one stage at a time and rides the signed publication path (four-eyes approval + durable commit + sign + distribute + DP-ack). Widening discloses the exact scope delta, newly executable/enforced operation classes, ServerIDs/tool fingerprints, credential-power implications, base/snapshot revision, rollback target, and satisfied/missing evidence. There is no generic Production-enable control.</p>
         <select id="mcp-rollout-cap"><option value="gateway">gateway</option><option value="management">management</option></select>
         <select id="mcp-rollout-tomode"><option value="observe">observe</option><option value="shadow">shadow</option><option value="canary">canary</option><option value="production">production</option><option value="disabled">disabled</option></select>
-        <button class="btn" data-min-role="admin" data-click="mcpxOpenTransition">Request transition&#8230;</button>
         <span id="mcp-transition-out" class="muted"></span>
       </div>
       <div class="panel" data-min-role="admin"><h3>Emergency Controls</h3>
         <p class="muted">Emergency actions <strong>narrow only</strong> &#8212; they immediately stop new admission (node-local, no CP round trip) and can never promote, widen scope, or enable execution. Each control opens a confirmation that states the exact effect before you commit.</p>
         <select id="mcp-emergency-cap"><option value="gateway">gateway</option><option value="management">management</option></select>
-        <button class="btn danger" data-min-role="admin" data-click="mcpxOpenEmergencyDisable">Emergency disable&#8230;</button>
-        <button class="btn" data-min-role="admin" data-click="mcpxOpenEmergencyClear">Clear&#8230;</button>
-        <button class="btn" data-min-role="admin" data-click="mcpxOpenRehearse">Record rollback rehearsal&#8230;</button>
         <span id="mcp-emergency-out" class="muted"></span>
       </div>
+      </details>
     </div>
     <div class="view" id="view-mcp-management">
       <div class="panel"><h3>Management MCP Access</h3>
@@ -4996,6 +5031,10 @@ document.addEventListener('click', e => {
     case 'loadMCPExplain':    loadMCPExplain(); break;
     case 'renderMCPCommandCenter': renderMCPCommandCenter(); break;
     case 'renderMCPActivity': renderMCPActivity(); break;
+    // PR-UX-5 Rollout & Fleet screen
+    case 'mcpxRenderRolloutFleet': mcpxRenderRolloutFleet(); break;
+    case 'mcpxRfSelectCap': mcpxRfSelectCap(arg); break;
+    case 'mcpxRfValidateScope': mcpxRfValidateScope(); break;
     case 'mcpxOpenDecision':  mcpxOpenDecision(arg); break;
     case 'mcpxCloseDrawer':   mcpxCloseDrawer(); break;
     case 'loadMCPPolicy':     loadMCPPolicy(); break;
@@ -5801,6 +5840,7 @@ function switchView(name) {
   if (name === 'ca-mgmt')        loadCAMgmt();
   if (name === 'mcp-overview')   { renderMCPCommandCenter(); loadMCPOverview(); }
   if (name === 'mcp-servers')    loadMCPServers();
+  if (name === 'mcp-rollout')    mcpxRenderRolloutFleet();
   if (name === 'mcp-decisions')  { renderMCPActivity(); /* awaits tenant input */ }
   if (name === 'mcp-policies')   loadMCPPolicy();
   if (name === 'mcp-approvals')  { /* awaits tenant input */ }
@@ -18377,6 +18417,10 @@ function mcpxDangerRefreshRollout(){ if(typeof loadMCPRollout==='function') load
 var mcpxReconcileSeq=0;
 function mcpxReconcileEmergencyCard(){
   if(typeof loadMCPRollout==='function') loadMCPRollout();
+  // PR-UX-5: re-render the structured Rollout & Fleet screen so the Mode card's
+  // authoritative kill-switch state reflects the settled action (converges even
+  // after a cancelled/late in-flight response).
+  if(document.getElementById('mcpx-rf-root') && typeof mcpxRenderRolloutFleet==='function') mcpxRenderRolloutFleet();
   var mySeq=++mcpxReconcileSeq;
   fetch('/api/mcp/rollout', {credentials:'same-origin', headers:{'X-CSRF-Token':(window.csrfToken||'')}})
     .then(function(r){ return r.ok ? r.json() : null; })
@@ -18553,7 +18597,7 @@ function mcpxDangerCardWrite(elId, ticket, text){
 
 // ── Per-action openers (capability bound at open time) ──
 async function mcpxOpenEmergencyDisable(){
-  var cap=(document.getElementById('mcp-emergency-cap')||{}).value||'gateway';
+  var cap=mcpxActionCap('mcp-emergency-cap');
   var cur=await mcpxReadRolloutCap(cap);
   mcpxDangerDialog({
     action:'emergency-disable', capability:cap, title:'Emergency disable admission',
@@ -18575,7 +18619,7 @@ async function mcpxOpenEmergencyDisable(){
   });
 }
 async function mcpxOpenEmergencyClear(){
-  var cap=(document.getElementById('mcp-emergency-cap')||{}).value||'gateway';
+  var cap=mcpxActionCap('mcp-emergency-cap');
   var cur=await mcpxReadRolloutCap(cap);
   mcpxDangerDialog({
     action:'emergency-clear', capability:cap, title:'Clear emergency kill switch',
@@ -18597,7 +18641,7 @@ async function mcpxOpenEmergencyClear(){
   });
 }
 function mcpxOpenRehearse(){
-  var cap=(document.getElementById('mcp-emergency-cap')||{}).value||'gateway';
+  var cap=mcpxActionCap('mcp-emergency-cap');
   mcpxDangerDialog({
     action:'rehearse', capability:cap, title:'Record rollback rehearsal',
     riskChip:{label:'Evidence only', kind:'info'},
@@ -18618,8 +18662,8 @@ function mcpxOpenRehearse(){
   });
 }
 async function mcpxOpenTransition(){
-  var cap=(document.getElementById('mcp-rollout-cap')||{}).value||'gateway';
-  var to=(document.getElementById('mcp-rollout-tomode')||{}).value||'observe';
+  var cap=mcpxActionCap('mcp-rollout-cap');
+  var to=(document.getElementById('mcpx-rf-tomode')||document.getElementById('mcp-rollout-tomode')||{}).value||'observe';
   var order={disabled:0,observe:1,shadow:2,canary:3,production:4};
   var cur=await mcpxReadRolloutCap(cap);
   var toProd=(to==='production');
@@ -18650,7 +18694,7 @@ async function mcpxOpenTransition(){
   });
 }
 async function mcpxOpenRollback(){
-  var cap=(document.getElementById('mcp-rollback-capability')||{}).value||'gateway';
+  var cap=mcpxActionCap('mcp-rollback-capability');
   var target=null, note=null, disabled=false, readErr=false;
   try{
     var r=await fetch('/api/mcp/distribution', {credentials:'same-origin', headers:{'X-CSRF-Token':(window.csrfToken||'')}});
@@ -18746,6 +18790,276 @@ function mcpxClassifyRollback(cap){
     var c=document.getElementById('mcpx-dlg-confirm'); if(!c.disabled) mcpxDangerConfirm();
   });
 })();
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PR-UX-5 truthful Rollout & Fleet screen
+// Renders the REAL rollout mode triad (desired / locally-active / fleet-effective),
+// the exact configured scope, a read-only candidate-scope validation preview, and
+// per-DP acknowledgement / fleet state - all bound to ONE capability. Fleet state
+// is shown ONLY from real acknowledgements; when no signed distribution is
+// configured it renders "local only / unavailable", never a benign default. A
+// request-ticket guards capability isolation: a stale response for one capability
+// can never overwrite a newer selection of the other. Server-derived text is set
+// via textContent only (never innerHTML).
+// ═══════════════════════════════════════════════════════════════════════════
+var mcpxRfTicket = 0;
+function mcpxRfCap(){ var e=document.getElementById('mcpx-rf-cap'); return (e&&e.value)||'gateway'; }
+// mcpxActionCap: the PR-UX-4 action dialogs bind to the PR-UX-5 capability tab when
+// present (single authoritative selector across the Rollout & Fleet surface),
+// falling back to a legacy per-panel select otherwise.
+function mcpxActionCap(fallbackId){ var rf=document.getElementById('mcpx-rf-cap'); if(rf&&rf.value) return rf.value; var f=fallbackId&&document.getElementById(fallbackId); return (f&&f.value)||'gateway'; }
+function mcpxRfErr(o){ return !!(o && o.__err); }
+async function mcpxRfFetch(url){
+  try{
+    var r=await fetch(url,{credentials:'same-origin',headers:{'X-CSRF-Token':(window.csrfToken||'')}});
+    if(r.status===403) return {__err:'permission denied'};
+    if(!r.ok) return {__err:'unavailable (HTTP '+r.status+')'};
+    return await r.json();
+  }catch(e){ return {__err:'unavailable (request failed)'}; }
+}
+async function mcpxRfPost(url, body){
+  try{
+    var r=await fetch(url,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-CSRF-Token':(window.csrfToken||'')},body:JSON.stringify(body||{})});
+    if(r.status===403) return {__err:'permission denied'};
+    var t=await r.text();
+    if(!r.ok) return {__err:'rejected (HTTP '+r.status+'): '+t.slice(0,120)};
+    try{ return JSON.parse(t); }catch(e){ return {__err:'malformed response'}; }
+  }catch(e){ return {__err:'request failed'}; }
+}
+function mcpxRfSelectCap(cap){
+  var e=document.getElementById('mcpx-rf-cap'); if(e) e.value=cap;
+  Array.prototype.forEach.call(document.querySelectorAll('.mcpx-rf-captab'), function(t){
+    var on=t.dataset.arg===cap; t.classList.toggle('active',on); t.setAttribute('aria-selected', on?'true':'false');
+  });
+  mcpxRenderRolloutFleet();
+}
+function mcpxRfCard(title, sub){
+  var c=mcpxEl('div','mcpx-card');
+  var h=mcpxEl('div','mcpx-card-h'); h.appendChild(mcpxEl('div','mcpx-card-title', title)); c.appendChild(h);
+  if(sub){ c.appendChild(mcpxEl('div','mcpx-dh-sub', sub)); }
+  return c;
+}
+function mcpxRfDL(){ return mcpxEl('dl','mcpx-rf-dl'); }
+function mcpxRfKv(dl, k, v, cls){
+  dl.appendChild(mcpxEl('dt', null, k));
+  dl.appendChild(mcpxEl('dd','mcpx-rf-dd'+(cls?(' '+cls):''), (v==null||v==='')?'-':String(v)));
+}
+function mcpxRfKvHash(dl, k, hash){
+  dl.appendChild(mcpxEl('dt', null, k));
+  var dd=mcpxEl('dd','mcpx-rf-dd');
+  if(!hash){ dd.appendChild(document.createTextNode('none')); dd.className='mcpx-rf-dd mcpx-rf-dd-muted'; }
+  else { dd.appendChild(mcpxEl('code', null, mcpxShortHash(hash))); dd.appendChild(mcpxCopyBtn(hash)); }
+  dl.appendChild(dd);
+}
+
+// Mode triad: desired / locally-active / fleet-effective. Fleet-effective is
+// derived ONLY from real acknowledgement truth; with no configured distribution it
+// reads "local only (no fleet)", never an inferred fleet mode.
+function mcpxRfModeCard(cap, roll, dist, acks){
+  var card=mcpxRfCard('Rollout mode - '+cap, 'Desired is CP intent; locally-active is this node; fleet-effective comes only from real DP acknowledgements.');
+  if(mcpxRfErr(roll)){ card.appendChild(mcpxEl('div','mcpx-empty','Rollout status unavailable - '+roll.__err+'.')); return card; }
+  var c=roll[cap]||{};
+  var trip=mcpxEl('div','mcpx-triplet');
+  function tri(label, val, warn){ var t=mcpxEl('div','mcpx-tri'+(warn?' warn':'')); t.appendChild(mcpxEl('div','mcpx-tl',label)); t.appendChild(mcpxEl('div','mcpx-tv',val)); return t; }
+  var desired=c.desired||'-', local=c.mode||'-';
+  // Fleet-effective: truthful only.
+  var fleet='local only (no fleet)';
+  if(mcpxRfErr(dist)){ fleet='unavailable'; }
+  else if(dist.enabled && acks && acks.configured){
+    if(acks.distribution_state==='fully_acknowledged'){ fleet=local; }
+    else { fleet='pending - '+(acks.distribution_state||'unknown'); }
+  } else if(dist.enabled && (mcpxRfErr(acks) || !acks || !acks.configured)){
+    fleet='unavailable';
+  }
+  trip.appendChild(tri('Desired', desired, false));
+  trip.appendChild(tri('Locally active', local, false));
+  trip.appendChild(tri('Fleet-effective', fleet, fleet.indexOf('local only')!==0 && fleet!==local));
+  card.appendChild(trip);
+  var chips=mcpxEl('div','mcpx-btnrow');
+  chips.appendChild(mcpxChip('Production: LOCKED', 'muted'));
+  if(c.killed){ chips.appendChild(mcpxChip('Admission STOPPED (kill switch)', 'crit')); }
+  if(c.connector){ chips.appendChild(mcpxChip('connector: '+c.connector, 'muted')); }
+  card.appendChild(chips);
+  card.appendChild(mcpxEl('div','mcpx-source','From /api/mcp/rollout (+ /api/mcp/distribution/acks for fleet). Production is qualification-locked; this build ships no issuer.'));
+  return card;
+}
+
+// Scope card: exact configured scope + kind classification.
+function mcpxRfScopeCard(cap, scope){
+  var card=mcpxRfCard('Scope - '+cap, 'The exact configured rollout scope for this capability.');
+  if(mcpxRfErr(scope)){ card.appendChild(mcpxEl('div','mcpx-empty','Scope unavailable - '+scope.__err+'.')); return card; }
+  var chips=mcpxEl('div','mcpx-btnrow');
+  chips.appendChild(mcpxChip('kind: '+(scope.kind||'-'), 'accent'));
+  if(scope.high_risk){ chips.appendChild(mcpxChip('high-risk', 'crit')); }
+  if(scope.enumerable){ chips.appendChild(mcpxChip('enumerable', 'ok')); }
+  if(scope.matches_nothing){ chips.appendChild(mcpxChip('matches nothing', 'muted')); }
+  if(scope.exclusion_based){ chips.appendChild(mcpxChip('exclusion-based', 'warn')); }
+  if(scope.percent){ chips.appendChild(mcpxChip('percentage: '+scope.percent+'%', 'info')); }
+  card.appendChild(chips);
+  var dl=mcpxRfDL();
+  mcpxRfKvHash(dl, 'Scope hash', scope.scope_hash);
+  mcpxRfKv(dl, 'Scope revision', scope.scope_revision);
+  mcpxRfKv(dl, 'Connector mode', scope.connector_mode||'(none)');
+  mcpxRfKv(dl, 'Operations', (scope.operations&&scope.operations.length)?scope.operations.join(', '):'read-only');
+  var sc=scope.selector_counts||{}, incl=[];
+  Object.keys(sc).forEach(function(k){ if(sc[k]>0) incl.push(k+': '+sc[k]); });
+  mcpxRfKv(dl, 'Selectors', incl.length?incl.join(' · '):'(none - matches nothing)', incl.length?'':'mcpx-rf-dd-muted');
+  var ec=scope.exclusion_counts||{}, exc=[];
+  Object.keys(ec).forEach(function(k){ if(ec[k]>0) exc.push(k+': '+ec[k]); });
+  if(exc.length){ mcpxRfKv(dl, 'Exclusions', exc.join(' · ')); }
+  card.appendChild(dl);
+  // Progressive disclosure of the exact serializable spec.
+  var det=mcpxEl('details','mcpx-evc-det');
+  det.appendChild(mcpxEl('summary', null, 'Exact scope spec (JSON)'));
+  var pre=mcpxEl('pre','mono'); pre.style.whiteSpace='pre-wrap'; pre.style.fontSize='.72rem';
+  pre.textContent=JSON.stringify(scope.spec||{}, null, 2);
+  det.appendChild(pre);
+  card.appendChild(det);
+  card.appendChild(mcpxEl('div','mcpx-source','From /api/mcp/rollout/scope (safe config identifiers only; no secret/token/raw content).'));
+  return card;
+}
+
+// Fleet card: distribution status + real per-DP acknowledgements + rollback target.
+function mcpxRfFleetCard(cap, dist, capDist, acks){
+  var card=mcpxRfCard('Fleet distribution - '+cap, 'Per-DP acknowledgement of the current signed content hash. Never inferred from a hash, a request, or elapsed time.');
+  if(mcpxRfErr(dist)){ card.appendChild(mcpxEl('div','mcpx-empty','Distribution status unavailable - '+dist.__err+'.')); return card; }
+  var chips=mcpxEl('div','mcpx-btnrow');
+  var dstate=(acks&&!mcpxRfErr(acks)&&acks.distribution_state)|| dist.distribution_state || 'unavailable';
+  chips.appendChild(mcpxChip('state: '+dstate, dstate==='fully_acknowledged'?'ok':(dstate==='local_only'?'muted':'warn')));
+  if(!dist.enabled){ chips.appendChild(mcpxChip('signed distribution: not configured', 'muted')); }
+  card.appendChild(chips);
+  var dl=mcpxRfDL();
+  mcpxRfKvHash(dl, 'Current signed hash', capDist.current_hash);
+  // Rollback target: only a REAL retained target counts.
+  if(capDist.rollback_available && capDist.previous_hash){ mcpxRfKvHash(dl, 'Retained rollback target', capDist.previous_hash); }
+  else { mcpxRfKv(dl, 'Retained rollback target', 'none retained on this node', 'mcpx-rf-dd-muted'); }
+  if(acks && !mcpxRfErr(acks) && acks.as_of_unix_nano){ mcpxRfKv(dl, 'As of', mcpxNow()); }
+  card.appendChild(dl);
+  // Acknowledgement truth.
+  if(mcpxRfErr(acks) || !acks){ card.appendChild(mcpxEl('div','mcpx-empty','Fleet acknowledgements unavailable - '+((acks&&acks.__err)||'no data')+'.')); }
+  else if(!acks.configured){
+    card.appendChild(mcpxEl('div','mcpx-empty','Fleet acknowledgements: not configured - signed CP→DP distribution is not active on this node (node-local only). No DP set, no counts.'));
+  } else {
+    var cts=acks.counts||{};
+    var row=mcpxEl('div','mcpx-rf-counts');
+    function ct(label, n, cls){ var b=mcpxEl('div','mcpx-rf-count'+(cls&&n>0?(' '+cls):'')); b.appendChild(mcpxEl('div','n', String(n||0))); b.appendChild(mcpxEl('div','l', label)); return b; }
+    row.appendChild(ct('intended', cts.intended, ''));
+    row.appendChild(ct('applied', cts.applied, 'ok'));
+    row.appendChild(ct('rejected', cts.rejected, 'crit'));
+    row.appendChild(ct('rolled back', cts.rolled_back, 'warn'));
+    row.appendChild(ct('incompatible', cts.incompatible, 'warn'));
+    row.appendChild(ct('unavailable', cts.unavailable, 'warn'));
+    card.appendChild(row);
+    if(acks.rows && acks.rows.length){
+      var tbl=mcpxEl('table','mcpx-rf-acks');
+      var thead=mcpxEl('thead'); var htr=mcpxEl('tr');
+      ['DP node','state','active hash','dp ver','health','reason'].forEach(function(h){ htr.appendChild(mcpxEl('th', null, h)); });
+      thead.appendChild(htr); tbl.appendChild(thead);
+      var tb=mcpxEl('tbody');
+      acks.rows.forEach(function(rw){
+        var tr=mcpxEl('tr');
+        tr.appendChild(mcpxEl('td', null, rw.node_id||'-'));
+        var std=mcpxEl('td'); std.appendChild(mcpxChip(rw.state||'-', rw.state==='applied'?'ok':(rw.state==='rejected'?'crit':(rw.state==='unavailable'?'muted':'warn')))); tr.appendChild(std);
+        tr.appendChild(mcpxEl('td', null, rw.active_hash?mcpxShortHash(rw.active_hash):'-'));
+        tr.appendChild(mcpxEl('td', null, rw.dp_version!=null?String(rw.dp_version):'-'));
+        tr.appendChild(mcpxEl('td', null, rw.health||'-'));
+        tr.appendChild(mcpxEl('td', null, (rw.incompatible?'incompatible':'')||rw.reject_reason||'-'));
+        tb.appendChild(tr);
+      });
+      tbl.appendChild(tb); card.appendChild(tbl);
+    }
+  }
+  card.appendChild(mcpxEl('div','mcpx-source','From /api/mcp/distribution + /api/mcp/distribution/acks. A hash, a stored envelope, a successful request, or elapsed time is NEVER treated as a fleet acknowledgement.'));
+  return card;
+}
+
+// Candidate-scope editor + read-only validation preview (never applies anything).
+function mcpxRfCandidateCard(cap){
+  var card=mcpxRfCard('Candidate scope - validate & preview', 'Read-only: compiles a candidate scope through the same validator the DP uses and previews the diff. It applies nothing.');
+  var ta=mcpxEl('textarea','mcpx-rf-editor'); ta.id='mcpx-rf-cand'; ta.setAttribute('spellcheck','false'); ta.setAttribute('aria-label','Candidate scope JSON');
+  ta.placeholder='{"servers":["srv-1"],"operations":[1]}';
+  card.appendChild(ta);
+  var bar=mcpxEl('div','mcpx-btnrow');
+  var btn=mcpxEl('button','btn sm','Validate & preview'); btn.type='button'; btn.setAttribute('data-click','mcpxRfValidateScope'); bar.appendChild(btn);
+  card.appendChild(bar);
+  card.appendChild(mcpxEl('div','mcpx-rf-diff', '')).id='mcpx-rf-cand-out';
+  return card;
+}
+async function mcpxRfValidateScope(){
+  var ta=document.getElementById('mcpx-rf-cand'); var out=document.getElementById('mcpx-rf-cand-out');
+  if(!ta||!out) return; out.textContent='';
+  var cand;
+  try{ cand=JSON.parse(ta.value||'{}'); }catch(e){ out.appendChild(mcpxEl('div','mcpx-dlg-rdetail','Candidate is not valid JSON.')); return; }
+  var cap=mcpxRfCap();
+  var res=await mcpxRfPost('/api/mcp/rollout/scope/validate?capability='+encodeURIComponent(cap), {scope:cand});
+  if(mcpxRfErr(res)){ out.appendChild(mcpxEl('div','mcpx-dlg-rdetail','Validation '+res.__err)); return; }
+  var head=mcpxEl('div','mcpx-btnrow');
+  head.appendChild(mcpxChip(res.valid?'valid candidate':'invalid candidate', res.valid?'ok':'crit'));
+  if(!res.valid && res.error_code){ head.appendChild(mcpxChip(res.error_code, 'muted')); }
+  out.appendChild(head);
+  if(!res.valid){ out.appendChild(mcpxEl('div','mcpx-dlg-rdetail','The candidate would be rejected by the DP validator; nothing changed.')); return; }
+  var d=res.diff||{}; var dl=mcpxRfDL();
+  mcpxRfKv(dl, 'Hash', (d.hash_changed?'changes ':'unchanged ')+mcpxShortHash(d.hash_from||'')+' → '+mcpxShortHash(d.hash_to||''), d.hash_changed?'':'mcpx-rf-dd-muted');
+  if(d.percent_from!==d.percent_to){ mcpxRfKv(dl, 'Percentage', d.percent_from+'% → '+d.percent_to+'%', 'mcpx-rf-diff'); }
+  if(d.high_risk_from!==d.high_risk_to){ mcpxRfKv(dl, 'High-risk', String(d.high_risk_from)+' → '+String(d.high_risk_to), 'add'); }
+  if(d.enumerable_from!==d.enumerable_to){ mcpxRfKv(dl, 'Enumerable', String(d.enumerable_from)+' → '+String(d.enumerable_to)); }
+  var dims=d.dimensions||{}, dk=Object.keys(dims);
+  if(dk.length){
+    dk.forEach(function(k){ var v=dims[k]; var dd=[]; if(v.added) dd.push('+'+v.added); if(v.removed) dd.push('-'+v.removed); mcpxRfKv(dl, k, dd.join(' ')); });
+  } else { mcpxRfKv(dl, 'Selectors', 'no dimension changes', 'mcpx-rf-dd-muted'); }
+  out.appendChild(dl);
+}
+
+// Actions card: the PR-UX-4 dangerous-action dialog, bound to the selected
+// capability. Admin-only (hidden for viewers via data-min-role).
+function mcpxRfActionsCard(cap, roll, capDist){
+  var card=mcpxRfCard('Actions - '+cap, 'Every action opens a confirmation stating its exact effect before you commit. Transition/rollback are request-only until signed distribution is configured.');
+  card.setAttribute('data-min-role','admin');
+  var row1=mcpxEl('div','mcpx-btnrow');
+  var lbl=mcpxEl('label',null,'Transition to '); lbl.style.fontSize='.78rem';
+  var sel=mcpxEl('select'); sel.id='mcpx-rf-tomode';
+  ['observe','shadow','canary','production','disabled'].forEach(function(m){ var o=mcpxEl('option',null,m); o.value=m; sel.appendChild(o); });
+  lbl.appendChild(sel); row1.appendChild(lbl);
+  var tb=mcpxEl('button','btn sm','Request transition…'); tb.type='button'; tb.setAttribute('data-click','mcpxOpenTransition'); row1.appendChild(tb);
+  card.appendChild(row1);
+  var row2=mcpxEl('div','mcpx-btnrow');
+  var db=mcpxEl('button','btn sm danger','Emergency disable…'); db.type='button'; db.setAttribute('data-click','mcpxOpenEmergencyDisable'); row2.appendChild(db);
+  var cb=mcpxEl('button','btn sm','Clear kill switch…'); cb.type='button'; cb.setAttribute('data-click','mcpxOpenEmergencyClear'); row2.appendChild(cb);
+  var rb=mcpxEl('button','btn sm','Record rollback rehearsal…'); rb.type='button'; rb.setAttribute('data-click','mcpxOpenRehearse'); row2.appendChild(rb);
+  var rbk=mcpxEl('button','btn sm','Request rollback…'); rbk.type='button'; rbk.setAttribute('data-click','mcpxOpenRollback'); row2.appendChild(rbk);
+  card.appendChild(row2);
+  // The dialog itself shows each action's result; the authoritative kill state is
+  // reflected in the Mode card, which re-renders after every emergency settlement
+  // (see mcpxReconcileEmergencyCard). No duplicate result span here.
+  return card;
+}
+
+async function mcpxRenderRolloutFleet(){
+  var root=document.getElementById('mcpx-rf-root'); if(!root) return;
+  var cap=mcpxRfCap();
+  var myTicket=++mcpxRfTicket;
+  root.textContent=''; root.appendChild(mcpxEl('div','mcpx-source','Loading '+cap+' rollout & fleet…'));
+  var roll=await mcpxRfFetch('/api/mcp/rollout');
+  if(myTicket!==mcpxRfTicket) return;
+  var scope=await mcpxRfFetch('/api/mcp/rollout/scope?capability='+encodeURIComponent(cap));
+  if(myTicket!==mcpxRfTicket) return;
+  var dist=await mcpxRfFetch('/api/mcp/distribution');
+  if(myTicket!==mcpxRfTicket) return;
+  var capDist=(!mcpxRfErr(dist) && dist[cap]) || {};
+  var hash=capDist.current_hash||'';
+  var acks=await mcpxRfFetch('/api/mcp/distribution/acks?capability='+encodeURIComponent(cap)+(hash?('&content_hash='+encodeURIComponent(hash)):''));
+  if(myTicket!==mcpxRfTicket) return;   // a newer capability selection supersedes this render
+  root.textContent='';
+  var cards=mcpxEl('div','mcpx-cards2'); cards.style.display='grid'; cards.style.gap='16px';
+  cards.appendChild(mcpxRfModeCard(cap, roll, dist, acks));
+  cards.appendChild(mcpxRfScopeCard(cap, scope));
+  cards.appendChild(mcpxRfFleetCard(cap, dist, capDist, acks));
+  cards.appendChild(mcpxRfCandidateCard(cap));
+  cards.appendChild(mcpxRfActionsCard(cap, roll, capDist));
+  root.appendChild(cards);
+  applySessionRoleVisibilityScope('#mcpx-rf-root'); // hide admin-only Actions for viewers
+  var asof=document.getElementById('mcpx-rf-asof'); if(asof) asof.textContent='as of '+mcpxNow();
+}
 </script>
 </body>
 </html>

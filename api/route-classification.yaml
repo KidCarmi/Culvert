@@ -3272,6 +3272,16 @@ routes:
     audit_expected: false
     danger_level: none
     documented: true
+  - route: "/api/mcp/distribution/acks"
+    method: "GET"
+    handler: "apiMCPDistributionAcks"
+    domain: "mcp"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
   - route: "/api/mcp/rollback"
     method: "POST"
     handler: "apiMCPRollback"
@@ -3321,6 +3331,16 @@ routes:
     mutating: true
     audit_expected: true
     danger_level: high
+    documented: true
+  - route: "/api/mcp/rollout/scope/validate"
+    method: "POST"
+    handler: "apiMCPRolloutScopeValidate"
+    domain: "mcp"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: true
+    audit_expected: false
+    danger_level: none
     documented: true
   - route: "/api/mcp/rollout/evidence"
     method: "GET"

@@ -140,11 +140,15 @@ func registerMCPRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/mcp/config", apiMCPConfig)
 	mux.HandleFunc("/api/mcp/management-access", apiMCPManagementAccess)
 	mux.HandleFunc("/api/mcp/distribution", apiMCPDistribution)
+	// PR-UX-5 additive read-only acknowledgement read model (capability-scoped).
+	mux.HandleFunc("/api/mcp/distribution/acks", apiMCPDistributionAcks)
 	mux.HandleFunc("/api/mcp/rollback", apiMCPRollback)
 	// PR-11 rollout surface.
 	mux.HandleFunc("/api/mcp/rollout", apiMCPRollout)
 	mux.HandleFunc("/api/mcp/rollout/transition", apiMCPRolloutTransition)
 	mux.HandleFunc("/api/mcp/rollout/scope", apiMCPRolloutScope)
+	// PR-UX-5 additive read-only candidate-scope validation + diff preview.
+	mux.HandleFunc("/api/mcp/rollout/scope/validate", apiMCPRolloutScopeValidate)
 	mux.HandleFunc("/api/mcp/rollout/evidence", apiMCPRolloutEvidence)
 	mux.HandleFunc("/api/mcp/rollout/emergency", apiMCPRolloutEmergency)
 	mux.HandleFunc("/api/mcp/rollout/rehearse-rollback", apiMCPRolloutRehearse)

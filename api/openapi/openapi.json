@@ -11877,6 +11877,68 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/mcp/distribution/acks": {
+      "get": {
+        "description": "PR-UX-5 bounded, read-only acknowledgement read model for one capability and content hash. Returns the truthful per-DP acknowledgement rows (applied/rejected/rolled_back/received/validated, or unavailable when a node has not acknowledged the hash) and the derived distribution counts (intended/applied/rolled_back/rejected/incompatible/unavailable). Fleet state is derived ONLY from real acknowledgements, never from a stored envelope, a signed hash, a successful request, the desired/local mode, or elapsed time. When no signed distribution is configured on this node (the disabled-default posture, no publication coordinator is wired), configured is false, counts is null, and rows is empty (unavailable / not configured), never a benign zero-as-healthy default.",
+        "operationId": "getMCPDistributionAcks",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "capability",
+            "required": false,
+            "schema": {
+              "enum": [
+                "gateway",
+                "management"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "content_hash",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Acknowledgement read model"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Capability-scoped per-DP acknowledgement read model",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/mcp/executions": {
       "get": {
         "description": "Bounded, safe execution history — counts only (executed, upstream ok/err, DLP blocks, hard-failure blocks, shadow overrides, commit failures). Never a tenant, subject, argument, URL, or token.",
@@ -12628,7 +12690,7 @@
     },
     "/api/mcp/rollout/scope": {
       "get": {
-        "description": "Returns the current rollout scope revision + content hash + connector mode + high-risk flag for a capability. Safe fields only.",
+        "description": "Returns the current rollout scope for a capability. PR-UX-5 enriches it beyond revision/hash/connector/high-risk with a safe structured summary: kind (enumerated / percentage / matches-nothing), enumerable + matches-nothing flags, percent, operations, per-dimension selector and exclusion counts, and the exact serializable scope spec (reviewed config identifiers only; no secret, token, or raw request/response).",
         "operationId": "getMCPRolloutScope",
         "responses": {
           "200": {
@@ -12715,6 +12777,80 @@
         "x-culvert-idempotency": "idempotent",
         "x-culvert-introduced-version": "1.0.0",
         "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/mcp/rollout/scope/validate": {
+      "post": {
+        "description": "PR-UX-5 read-only candidate-scope validation preview. Compiles a candidate scope spec through the SAME pure validator the DP uses (bounds, no-wildcard, high-risk gate, percentage well-formedness) and returns valid/invalid with a classified error code, a safe summary of the candidate and the current active scope, and a per-dimension diff (add/remove counts, percentage, high-risk, enumerable and content-hash transitions). It is a PREVIEW only: viewer-readable, non-mutating, no publication, no state change, no audit. The candidate capability is bound to the requested capability (capability isolation).",
+        "operationId": "validateMCPRolloutScope",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "capability",
+            "required": false,
+            "schema": {
+              "enum": [
+                "gateway",
+                "management"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "scope": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Validation + diff preview"
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Validate a candidate rollout scope and preview its diff",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-danger-level": "none",
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"
