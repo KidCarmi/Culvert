@@ -2278,6 +2278,10 @@ Firefox (all platforms):
               <span class="info-key">Log Persistence</span>
               <span class="info-val" id="s-log-persist">-</span>
             </div>
+            <div class="info-item" title="Requests that had to wait for the async request-log write queue to drain, e.g. because storage is slow or contended. No log entry is ever lost - a full queue blocks the caller rather than drop the write - but sustained backpressure means disk I/O is adding latency to proxied requests.">
+              <span class="info-key">Log I/O Backpressure</span>
+              <span class="info-val" id="s-log-backpressure">-</span>
+            </div>
           </div>
         </div>
 
@@ -7666,6 +7670,12 @@ async function fetchStats() {
     slp.textContent = describeLogPersistence(s);
     const slpPaths = [s.requestLogPath, s.auditLogPath].filter(Boolean);
     slp.title = slpPaths.length ? 'Path(s): ' + slpPaths.join(', ') : '';
+    const slbp = document.getElementById('s-log-backpressure');
+    if (slbp) {
+      const bp = s.logBackpressure || 0;
+      slbp.textContent = bp > 0 ? fmt(bp) + ' requests delayed' : 'None';
+      slbp.style.color = bp > 0 ? 'var(--warn,#b8860b)' : '';
+    }
     // nav badge
     const nb = document.getElementById('nav-blocked-count');
     if (s.blocked > 0) { nb.textContent = fmt(s.blocked); nb.style.display = ''; }
@@ -7696,6 +7706,8 @@ async function fetchStats() {
       const which = logFallback.req && logFallback.audit ? 'Request+audit log'
         : logFallback.req ? 'Request log' : 'Audit log';
       setPosture('logging', 'warn', which + ' in-memory only (restart wipes)');
+    } else if ((s.logBackpressure || 0) > 0) {
+      setPosture('logging', 'warn', fmt(s.logBackpressure) + ' requests delayed by log I/O');
     } else {
       setPosture('logging', 'ok', 'Persisting');
     }
