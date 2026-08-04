@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/fileutil"
+	"github.com/KidCarmi/Culvert/internal/logsink"
 	"github.com/KidCarmi/Culvert/internal/obs"
 )
 
@@ -92,6 +93,47 @@ func logWarnf(format string, args ...any) {
 func logErrorf(format string, args ...any) {
 	// Error is always logged regardless of level.
 	logger.Print("ERROR " + sanitizeLog(fmt.Sprintf(format, args...)))
+}
+
+// ── Fatal exit ───────────────────────────────────────────────────────────────
+
+// logFatalf logs at fatal severity, FLUSHES the async log sink, and exits(1).
+//
+// It replaces logger.Fatalf everywhere. log.Logger.Fatalf writes and then calls
+// os.Exit immediately, which is fine for a synchronous writer but would discard
+// whatever is still queued behind the asynchronous sink installed by
+// setupLogger — and the one line that must never be lost is the one explaining
+// why the process is exiting. flushLogSink is a no-op before setupLogger has
+// run (bootstrap failures, tests), so the pre-async behavior is preserved
+// wherever the sink does not exist yet.
+func logFatalf(format string, args ...any) {
+	logger.Printf(format, args...)
+	flushLogSink()
+	os.Exit(1)
+}
+
+// logSink holds the process log's asynchronous sink so the fatal-exit path can
+// flush it. Published once by setupLogger; nil until then.
+var logSink atomic.Pointer[logsink.Writer]
+
+// flushLogSink blocks until every line already logged has reached the
+// destination writer. Bounded internally, so a wedged log volume degrades the
+// exit path rather than hanging it. Safe to call before setupLogger.
+func flushLogSink() {
+	if w := logSink.Load(); w != nil {
+		w.Sync()
+	}
+}
+
+// logSinkBackpressure reports how many log lines had to wait for room in the
+// sink queue — non-zero means the log volume is not keeping up with the request
+// rate and request latency is coupled to it again. Zero when no async sink is
+// installed.
+func logSinkBackpressure() int64 {
+	if w := logSink.Load(); w != nil {
+		return w.Backpressure()
+	}
+	return 0
 }
 
 // ── Rotating file writer ─────────────────────────────────────────────────────
@@ -199,9 +241,21 @@ func (j *jsonLogWriter) Write(p []byte) (int, error) {
 // setupLogger builds a *log.Logger that writes to stdout and optionally a
 // rotating file. format controls output style: "" or "text" → plain text,
 // "json" → one JSON object per line.
+//
+// The composed destination is wrapped in internal/logsink so the write(2)s
+// happen on a dedicated drain goroutine instead of the proxy request goroutine.
+// handleRequest emits one line per proxied request, and both underlying writers
+// are unbuffered behind mutexes held across the syscall (log.Logger's own, and
+// fileutil.RotatingFile's), so the pre-wrap sink serialized every request in the
+// process and got SLOWER as cores were added. See the internal/logsink package
+// doc for the measurements and the never-worse-than-synchronous contract.
+//
+// The returned Closer flushes the sink before closing the file, so the orderly
+// shutdown path loses nothing. It is now always non-nil — even with no log file
+// there is a sink to flush — where it used to be nil for the stdout-only case.
 func setupLogger(logPath string, maxMB int, format string) (*log.Logger, io.Closer, error) {
 	var fileWriter io.Writer
-	var closer io.Closer
+	var fileCloser io.Closer
 
 	if logPath != "" {
 		rf, err := newRotatingFile(logPath, maxMB)
@@ -209,24 +263,41 @@ func setupLogger(logPath string, maxMB int, format string) (*log.Logger, io.Clos
 			return nil, nil, err
 		}
 		fileWriter = rf
-		closer = rf
+		fileCloser = rf
 	}
 
+	prefix, flags := "[Culvert] ", log.LstdFlags
+	writers := []io.Writer{os.Stdout}
 	if format == "json" {
-		// JSON mode: no flags (we add our own timestamp), no prefix.
-		writers := []io.Writer{&jsonLogWriter{dst: os.Stdout}}
+		// JSON mode: no flags (we add our own timestamp), no prefix. The JSON
+		// encoding moves onto the drain goroutine along with the syscall.
+		prefix, flags = "", 0
+		writers = []io.Writer{&jsonLogWriter{dst: os.Stdout}}
 		if fileWriter != nil {
 			writers = append(writers, &jsonLogWriter{dst: fileWriter})
 		}
-		l := log.New(io.MultiWriter(writers...), "", 0)
-		return l, closer, nil
-	}
-
-	// Plain-text mode (default).
-	writers := []io.Writer{os.Stdout}
-	if fileWriter != nil {
+	} else if fileWriter != nil {
 		writers = append(writers, fileWriter)
 	}
-	l := log.New(io.MultiWriter(writers...), "[Culvert] ", log.LstdFlags)
-	return l, closer, nil
+
+	sink := logsink.New(io.MultiWriter(writers...))
+	logSink.Store(sink)
+	return log.New(sink, prefix, flags), &logCloser{sink: sink, file: fileCloser}, nil
+}
+
+// logCloser flushes the async sink and then releases the log file descriptor,
+// in that order — closing the file first would strand the queued lines.
+type logCloser struct {
+	sink *logsink.Writer
+	file io.Closer
+}
+
+func (c *logCloser) Close() error {
+	if c.sink != nil {
+		_ = c.sink.Close() // drains and flushes; bounded, never hangs shutdown
+	}
+	if c.file != nil {
+		return c.file.Close()
+	}
+	return nil
 }

@@ -720,7 +720,7 @@ func initPolicy(s *startupState) {
 	polPath := firstStr(*s.policyFile, s.fc.Proxy.PolicyFile)
 	if polPath != "" {
 		if err := policyStore.Load(polPath); err != nil {
-			logger.Fatalf("Cannot load policy file: %v", err)
+			logFatalf("Cannot load policy file: %v", err)
 		}
 		logger.Printf("Policy: %d rule(s) loaded from %s", len(policyStore.List()), polPath)
 	} else {
@@ -778,7 +778,7 @@ func initFileBlocking(s *startupState) {
 // semantics are unchanged — the loader returns errors, main fails fast.
 func initSSLBypassAndDPI(s *startupState) {
 	if err := loadInspectionRules(resolveInspectionRulesConfig(s.fc)); err != nil {
-		logger.Fatalf("inspection rules: %v", err)
+		logFatalf("inspection rules: %v", err)
 	}
 }
 
@@ -1019,7 +1019,7 @@ func installSignalHandlers(s *startupState) (quit, sighup chan os.Signal) {
 func runProxyUntilShutdown(s *startupState, proxySrv *http.Server, quit chan os.Signal) {
 	go func() {
 		if err := proxySrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Fatalf("Proxy error: %v", err)
+			logFatalf("Proxy error: %v", err)
 		}
 	}()
 
