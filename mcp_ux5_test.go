@@ -154,6 +154,11 @@ func TestMCPUX5_ScopeValidate(t *testing.T) {
 	if !strings.Contains(inv, `"valid":false`) || !strings.Contains(inv, `"error_code"`) {
 		t.Fatalf("validate(invalid) must report valid:false + error_code: %s", inv)
 	}
+	// An invalid candidate must not be mislabeled as a real scope shape: kind is
+	// "invalid" (the reason is carried by error_code), never "matches-nothing".
+	if !strings.Contains(inv, `"kind":"invalid"`) {
+		t.Fatalf("validate(invalid) candidate summary must report kind:invalid: %s", inv)
+	}
 	// GET is not allowed.
 	if got := mcpReq(http.MethodGet, "/api/mcp/rollout/scope/validate", RoleViewer, "").Code; got != http.StatusMethodNotAllowed {
 		t.Fatalf("GET validate = %d, want 405", got)

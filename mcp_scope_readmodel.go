@@ -34,6 +34,11 @@ func mcpScopeSummary(spec rollout.ScopeSpec, lim rollout.Limits) map[string]any 
 		hash = compiled.Hash()
 	}
 	switch {
+	case !valid:
+		// A candidate that fails to compile is neither enumerable nor
+		// matches-nothing; report it as invalid (error_code carries the reason)
+		// rather than mislabeling it with a shape it does not truthfully have.
+		kind = "invalid"
 	case matchesNothing:
 		kind = "matches-nothing"
 	case spec.Percent > 0 && !enumerable:

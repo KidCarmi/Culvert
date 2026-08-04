@@ -18866,6 +18866,12 @@ function mcpxRfModeCard(cap, roll, dist, acks){
   var fleet='local only (no fleet)';
   if(mcpxRfErr(dist)){ fleet='unavailable'; }
   else if(dist.enabled && acks && acks.configured){
+    // fully_acknowledged is derived from REAL acks (never inferred). Labeling the
+    // fleet-effective mode with the locally-active mode is exact only while the
+    // local mode equals the mode in the acknowledged content_hash; that always
+    // holds in this build (the publication path is dormant, so no divergence is
+    // possible). If a future PR wires the coordinator, carry the acked mode in the
+    // ack DTO and label from that instead of from local.
     if(acks.distribution_state==='fully_acknowledged'){ fleet=local; }
     else { fleet='pending - '+(acks.distribution_state||'unknown'); }
   } else if(dist.enabled && (mcpxRfErr(acks) || !acks || !acks.configured)){
