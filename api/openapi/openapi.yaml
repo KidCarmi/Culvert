@@ -10327,6 +10327,33 @@ paths:
       responses:
         '200': { description: Distribution status, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/mcp/distribution/acks:
+    get:
+      operationId: getMCPDistributionAcks
+      tags: [mcp]
+      summary: Capability-scoped per-DP acknowledgement read model
+      description: >-
+        PR-UX-5 bounded, read-only acknowledgement read model for one capability and content hash.
+        Returns the truthful per-DP acknowledgement rows (applied/rejected/rolled_back/received/validated,
+        or unavailable when a node has not acknowledged the hash) and the derived distribution counts
+        (intended/applied/rolled_back/rejected/incompatible/unavailable). Fleet state is derived ONLY from
+        real acknowledgements, never from a stored envelope, a signed hash, a successful request, the
+        desired/local mode, or elapsed time. When no signed distribution is configured on this node
+        (the disabled-default posture, no publication coordinator is wired), configured is false, counts
+        is null, and rows is empty (unavailable / not configured), never a benign zero-as-healthy default.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      parameters:
+        - { name: capability, in: query, required: false, schema: { type: string, enum: [gateway, management] } }
+        - { name: content_hash, in: query, required: false, schema: { type: string } }
+      responses:
+        '200': { description: Acknowledgement read model, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
   /api/mcp/rollback:
     post:
       operationId: createMCPRollback
@@ -10410,7 +10437,12 @@ paths:
       operationId: getMCPRolloutScope
       tags: [mcp]
       summary: Current rollout scope
-      description: Returns the current rollout scope revision + content hash + connector mode + high-risk flag for a capability. Safe fields only.
+      description: >-
+        Returns the current rollout scope for a capability. PR-UX-5 enriches it beyond
+        revision/hash/connector/high-risk with a safe structured summary: kind (enumerated /
+        percentage / matches-nothing), enumerable + matches-nothing flags, percent, operations,
+        per-dimension selector and exclusion counts, and the exact serializable scope spec
+        (reviewed config identifiers only; no secret, token, or raw request/response).
       security: [ { sessionCookie: [] }, { basicAuth: [] } ]
       x-culvert-visibility: admin-supported
       x-culvert-permission: viewer
@@ -10444,6 +10476,41 @@ paths:
         '202': { description: Scope update accepted (pending signed publication), content: { application/json: { schema: { type: object, additionalProperties: true } } } }
         '403': { $ref: '#/components/responses/PlainForbidden' }
         '409': { $ref: '#/components/responses/PlainConflict' }
+  /api/mcp/rollout/scope/validate:
+    post:
+      operationId: validateMCPRolloutScope
+      tags: [mcp]
+      summary: Validate a candidate rollout scope and preview its diff
+      description: >-
+        PR-UX-5 read-only candidate-scope validation preview. Compiles a candidate scope spec through
+        the SAME pure validator the DP uses (bounds, no-wildcard, high-risk gate, percentage
+        well-formedness) and returns valid/invalid with a classified error code, a safe summary of the
+        candidate and the current active scope, and a per-dimension diff (add/remove counts, percentage,
+        high-risk, enumerable and content-hash transitions). It is a PREVIEW only: viewer-readable,
+        non-mutating, no publication, no state change, no audit. The candidate capability is bound to the
+        requested capability (capability isolation).
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-danger-level: none
+      x-culvert-introduced-version: 1.0.0
+      parameters:
+        - { name: capability, in: query, required: false, schema: { type: string, enum: [gateway, management] } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                scope: { type: object, additionalProperties: true }
+      responses:
+        '200': { description: Validation + diff preview, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
   /api/mcp/rollout/evidence:
     get:
       operationId: getMCPRolloutEvidence

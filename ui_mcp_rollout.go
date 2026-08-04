@@ -89,15 +89,25 @@ func apiMCPRolloutScope(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleViewer) {
 			return
 		}
-		st := getMCPRollout().stateFor(mcpRolloutCapability(r))
+		capab := mcpRolloutCapability(r)
+		st := getMCPRollout().stateFor(capab)
 		cfg := st.CurrentConfig()
-		jsonOK(w, map[string]any{
-			"capability":     mcpRolloutCapability(r).String(),
-			"scope_hash":     st.ScopeHash(),
-			"scope_revision": cfg.ScopeRevision,
-			"connector_mode": cfg.ConnectorMode,
-			"high_risk":      cfg.Scope.HighRisk,
-		})
+		// PR-UX-5: enrich the scope view with the full safe summary (kind /
+		// enumerable / percentage / high-risk / per-dimension selector + exclusion
+		// counts / the exact serializable spec) so the UI can present the exact
+		// configured scope, not just a hash. Backward-compatible: the original five
+		// fields are retained.
+		spec := cfg.Scope
+		spec.Capability = capab
+		// Compile at the config's real ScopeRevision so the summary hash matches
+		// st.ScopeHash() (both fold the revision into the content hash).
+		out := mcpScopeSummary(spec, cfg.ScopeRevision, rollout.DefaultLimits())
+		out["capability"] = capab.String()
+		out["mode"] = st.CurrentMode().String()
+		out["scope_hash"] = st.ScopeHash()
+		out["scope_revision"] = cfg.ScopeRevision
+		out["connector_mode"] = cfg.ConnectorMode
+		jsonOK(w, out)
 	case http.MethodPut:
 		if !requireRole(w, r, RoleAdmin) {
 			return

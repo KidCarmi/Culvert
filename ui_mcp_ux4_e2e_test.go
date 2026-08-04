@@ -330,7 +330,7 @@ func TestMCPUX4_EmergencyDialog(t *testing.T) {
 	must(page.Locator("#mcpx-dlg-cancel").Click(), "close after disable") // now labelled Close
 
 	// (4) Management disable posts management only.
-	ux4Sel(t, page, "#mcp-emergency-cap", "management")
+	must(page.Locator(`[data-click="mcpxRfSelectCap"][data-arg="management"]`).Click(), "select mgmt capability tab")
 	must(page.Locator(`[data-click="mcpxOpenEmergencyDisable"]`).First().Click(), "open mgmt disable")
 	tct(dlg, "capability: management", "mgmt chip")
 	must(typed.Fill("DISABLE MANAGEMENT"), "mgmt phrase")
@@ -341,7 +341,7 @@ func TestMCPUX4_EmergencyDialog(t *testing.T) {
 		t.Fatalf("management disable POST body wrong: %q", req.body)
 	}
 	must(page.Locator("#mcpx-dlg-cancel").Click(), "close mgmt")
-	ux4Sel(t, page, "#mcp-emergency-cap", "gateway")
+	must(page.Locator(`[data-click="mcpxRfSelectCap"][data-arg="gateway"]`).Click(), "reset gateway capability tab")
 
 	// (6)+(7) Emergency clear WARNS admission is restored and requires its own phrase.
 	must(page.Locator(`[data-click="mcpxOpenEmergencyClear"]`).First().Click(), "open clear")
@@ -435,7 +435,7 @@ func TestMCPUX4_TransitionAndRollback(t *testing.T) {
 	must(page.Locator(`.nav-item[data-view="mcp-rollout"]`).First().Click(), "nav rollout")
 
 	// (8) Transition to Production surfaces the lock and handles 403 truthfully.
-	ux4Sel(t, page, "#mcp-rollout-tomode", "production")
+	ux4Sel(t, page, "#mcpx-rf-tomode", "production")
 	must(page.Locator(`[data-click="mcpxOpenTransition"]`).First().Click(), "open transition prod")
 	tct(dlg, "Production is qualification-locked", "prod lock fact")
 	tct(dlg, "expected to be rejected", "prod honest explain")
@@ -450,7 +450,7 @@ func TestMCPUX4_TransitionAndRollback(t *testing.T) {
 	must(page.Locator("#mcpx-dlg-cancel").Click(), "close prod")
 
 	// (9) Transition returning distribution_not_configured shows failure, not pending.
-	ux4Sel(t, page, "#mcp-rollout-tomode", "canary")
+	ux4Sel(t, page, "#mcpx-rf-tomode", "canary")
 	must(page.Locator(`[data-click="mcpxOpenTransition"]`).First().Click(), "open transition canary")
 	must(typed.Fill("PROMOTE GATEWAY"), "promote phrase canary")
 	must(confirm.Click(), "confirm canary")

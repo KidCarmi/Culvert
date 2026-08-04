@@ -66,7 +66,7 @@ type uiRouteMetadata struct {
 	Methods []uiRouteMethod // per-method contract (length ≥ 1)
 }
 
-// uiRoutes is the alphabetised metadata table for all 137 admin-UI routes.
+// uiRoutes is the alphabetised metadata table for all admin-UI routes (count locked by TestC1_RouteMetadata_Locked141).
 //
 // MIGRATION BUCKETS (per the C1.5 schema-evolution decision):
 //
@@ -883,6 +883,9 @@ var uiRoutes = []uiRouteMetadata{
 	{Path: "/api/mcp/distribution", Handler: "apiMCPDistribution", Domain: "mcp", Public: false,
 		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer,
 			Note: "PR-10 signed CP→DP distribution status (safe fields only; no key/signature/raw snapshot)"}}},
+	{Path: "/api/mcp/distribution/acks", Handler: "apiMCPDistributionAcks", Domain: "mcp", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer,
+			Note: "PR-UX-5 capability-scoped per-DP acknowledgement read model (counts + rows; not-configured when no distribution)"}}},
 	{Path: "/api/mcp/rollback", Handler: "apiMCPRollback", Domain: "mcp", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
 			Note: "PR-10 four-eyes atomic rollback to a retained signed snapshot; Management MCP may not roll back"}}},
@@ -895,9 +898,12 @@ var uiRoutes = []uiRouteMetadata{
 			Note: "PR-11 one-stage promotion / demotion via the signed publication path; Production rejected without a qualification receipt"}}},
 	{Path: "/api/mcp/rollout/scope", Handler: "apiMCPRolloutScope", Domain: "mcp", Public: false,
 		Methods: []uiRouteMethod{
-			{Method: "GET", MinRole: RoleViewer, Note: "PR-11 current rollout scope + revision/hash (safe)"},
+			{Method: "GET", MinRole: RoleViewer, Note: "PR-11 current rollout scope + revision/hash (safe); PR-UX-5 enriched with kind/enumerable/percent/counts/spec"},
 			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
 				Note: "PR-11 scope widening via the signed publication path (four-eyes)"}}},
+	{Path: "/api/mcp/rollout/scope/validate", Handler: "apiMCPRolloutScopeValidate", Domain: "mcp", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleViewer, Mutating: true,
+			Note: "PR-UX-5 read-only candidate-scope validation + diff preview; POST by method convention but runs a pure Compile, publishes nothing, and is not audited (danger-level none)"}}},
 	{Path: "/api/mcp/rollout/evidence", Handler: "apiMCPRolloutEvidence", Domain: "mcp", Public: false,
 		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer,
 			Note: "PR-11 measured evidence-window progress; production remains qualification-locked"}}},
