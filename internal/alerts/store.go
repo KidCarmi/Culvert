@@ -625,7 +625,11 @@ func StartRetryLoop(ctx context.Context, current func() *Store) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			processRetryQueue(current())
+			// CHAOS-24: contain the ROUND. This loop is the only thing that
+			// re-delivers failed webhooks, so letting a panic kill the process
+			// would turn a bad queue entry into a gateway outage; letting it
+			// kill the goroutine would silently strand every retry forever.
+			obs.SafeCall("alerts_retry", func() { processRetryQueue(current()) })
 		}
 	}
 }

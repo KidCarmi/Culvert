@@ -263,7 +263,10 @@ func startHitCounterPersistence(ctx context.Context, path string) <-chan struct{
 				saveHitCounters(path)
 				return
 			case <-t.C:
-				saveHitCounters(path)
+				// CHAOS-24: contain the ROUND so a marshal fault costs one
+				// checkpoint rather than the process, and the loop survives to
+				// take the next one (and the ctx.Done final save).
+				runGuarded("metrics_persist", func() { saveHitCounters(path) })
 			}
 		}
 	}()

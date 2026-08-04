@@ -233,20 +233,53 @@ func drainLoop(ch chan Entry, flush chan chan struct{}, stop chan struct{}) {
 	enc := json.NewEncoder(bw)
 
 	for {
-		select {
-		case e := <-ch:
-			batch := encodeEntry(enc, e)
-			batch += drainPending(enc, ch)
-			flushBatch(bw, batch)
-		case done := <-flush:
-			flushBatch(bw, drainPending(enc, ch))
-			close(done)
-		case <-stop:
-			// Final drain: entries already queued must still reach the file.
-			flushBatch(bw, drainPending(enc, ch))
+		if stopped := drainRound(bw, enc, ch, flush, stop); stopped {
 			return
 		}
 	}
+}
+
+// drainRound runs ONE select round of the drain loop, reporting whether stop
+// was observed.
+//
+// CHAOS-24: the guard is deliberately here, around the round, and NOT at the
+// top of drainLoop. This goroutine owns a BLOCKING queue — Add parks the caller
+// when the channel is full rather than discarding the durable audit record (see
+// Add above) — so a drain goroutine that EXITS is worse than one that crashes:
+// the process keeps running while every request goroutine piles up in Add,
+// forever, with no panic, no restart, and no alert. Recovering per round keeps
+// the consumer alive, so a panicking entry costs at most the batch it was in
+// and the queue keeps draining.
+//
+// On a recovered panic the named return keeps its zero value (false), so the
+// loop simply continues. That is also correct on the stop branch: `stop` is
+// closed, so the next round's select observes it immediately and returns true.
+func drainRound(bw *bufio.Writer, enc *json.Encoder, ch chan Entry, flush chan chan struct{}, stop chan struct{}) (stopped bool) {
+	defer obs.Guard("reqlog_drain")
+	select {
+	case e := <-ch:
+		batch := encodeEntry(enc, e)
+		batch += drainPending(enc, ch)
+		flushBatch(bw, batch)
+	case done := <-flush:
+		// close(done) runs through a defer so a panic mid-flush still RELEASES
+		// the Sync waiter. Sync is bounded, so the alternative is "only" a
+		// timeout — but ReadPersistent calls Sync, so that would put a stall on
+		// every admin request-log read for as long as the fault persists.
+		func() {
+			defer close(done)
+			flushBatch(bw, drainPending(enc, ch))
+		}()
+	case <-stop:
+		// Final drain: entries already queued must still reach the file. If
+		// this panics the round returns false and the loop re-enters, but
+		// drainPending has already consumed those entries — an empty batch
+		// short-circuits in flushBatch — so shutdown still converges (pinned by
+		// TestDrain_StopStillTerminatesAfterPanic).
+		flushBatch(bw, drainPending(enc, ch))
+		return true
+	}
+	return false
 }
 
 // drainPending encodes every entry currently queued, returning how many it

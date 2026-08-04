@@ -69,10 +69,20 @@ func StartCAAutoRotation(ctx context.Context, caPath, passphrase string) {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				certMgr.RotateIfNeeded(caPath, passphrase)
-				certMgr.CleanupSecondaryCA()
-				globalClusterCA.RotateIfNeeded()
-				globalClusterCA.CleanupSecondary()
+				// CHAOS-24: contain the ROUND. A panic here would otherwise
+				// kill the gateway; a guard that let the goroutine exit would
+				// be worse still — the CA would silently never rotate again
+				// and the failure would only surface at expiry, as a
+				// fleet-wide inspected-HTTPS outage. Each CA is guarded
+				// separately so a fault in one still lets the other rotate.
+				runGuarded("ca_rotation", func() {
+					certMgr.RotateIfNeeded(caPath, passphrase)
+					certMgr.CleanupSecondaryCA()
+				})
+				runGuarded("cluster_ca_rotation", func() {
+					globalClusterCA.RotateIfNeeded()
+					globalClusterCA.CleanupSecondary()
+				})
 			}
 		}
 	}()
