@@ -652,14 +652,14 @@ routes:
     handler: "apiBootstrapRouter"
     domain: "cluster"
     visibility: intentionally-undocumented
-    min_role: "viewer"
+    min_role: "public"
     mutating: false
     audit_expected: false
     danger_level: medium
     documented: false
     exemption:
       owner: platform-team
-      reason: dynamic bootstrap sub-router (token-gated onboarding); per-sub-action ops out of scope until enumerated (MED-HIGH-4)
+      reason: dynamic bootstrap sub-router, public on uiAuthMiddleware's allowlist — its own single-use, time-limited enrollment token is the auth, not a session role; per-sub-action ops out of scope until enumerated (MED-HIGH-4)
       security_class: non-rest-surface
       expires: *baseline
   - route: "/api/cluster/ca"

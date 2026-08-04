@@ -671,8 +671,8 @@ var uiRoutes = []uiRouteMetadata{
 			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
 			{Method: "DELETE", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
 		}},
-	{Path: "/api/cluster/bootstrap/", Handler: "apiBootstrapRouter", Domain: "cluster", Public: false,
-		Methods: []uiRouteMethod{{Method: MethodAny, MinRole: RoleViewer, Note: "token-authed bootstrap dispatch; gating delegated to handler"}}},
+	{Path: "/api/cluster/bootstrap/", Handler: "apiBootstrapRouter", Domain: "cluster", Public: true,
+		Methods: []uiRouteMethod{{Method: MethodAny, MinRole: RolePublic, Note: "on uiAuthMiddleware's public allowlist; its own single-use, time-limited enrollment token is the auth (bootstrap.go)"}}},
 
 	// ── CDR (Sluice) integration ──────────────────────────────────────────
 	{Path: "/api/cdr/config", Handler: "apiCDRConfig", Domain: "cdr", Public: false,
