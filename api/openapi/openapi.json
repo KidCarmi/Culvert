@@ -12566,6 +12566,25 @@
       "post": {
         "description": "Records a rollback rehearsal as local evidence. The live signed rollback runs through the PR-10 coordinator; this marks the rehearsal-performed evidence flag only.",
         "operationId": "createMCPRolloutRehearse",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "capability": {
+                    "enum": [
+                      "gateway",
+                      "management"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
         "responses": {
           "200": {
             "content": {
@@ -12577,6 +12596,9 @@
               }
             },
             "description": "Rehearsal recorded"
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
