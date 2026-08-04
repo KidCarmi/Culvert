@@ -99,7 +99,9 @@ func apiMCPRolloutScope(w http.ResponseWriter, r *http.Request) {
 		// fields are retained.
 		spec := cfg.Scope
 		spec.Capability = capab
-		out := mcpScopeSummary(spec, rollout.DefaultLimits())
+		// Compile at the config's real ScopeRevision so the summary hash matches
+		// st.ScopeHash() (both fold the revision into the content hash).
+		out := mcpScopeSummary(spec, cfg.ScopeRevision, rollout.DefaultLimits())
 		out["capability"] = capab.String()
 		out["mode"] = st.CurrentMode().String()
 		out["scope_hash"] = st.ScopeHash()

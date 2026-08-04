@@ -18840,6 +18840,15 @@ function mcpxRfCard(title, sub){
   return c;
 }
 function mcpxRfDL(){ return mcpxEl('dl','mcpx-rf-dl'); }
+// mcpxRfFmtNano formats the SERVER-supplied observation timestamp (unix nanos)
+// truthfully. It never substitutes the browser clock: an absent/zero value is the
+// honest "unavailable", so a delayed or skewed client cannot make a stale
+// acknowledgement snapshot look freshly observed.
+function mcpxRfFmtNano(nano){
+  if(!nano){ return 'unavailable'; }
+  var d=new Date(Math.floor(nano/1e6));
+  return isNaN(d.getTime()) ? 'unavailable' : d.toLocaleString();
+}
 function mcpxRfKv(dl, k, v, cls){
   dl.appendChild(mcpxEl('dt', null, k));
   dl.appendChild(mcpxEl('dd','mcpx-rf-dd'+(cls?(' '+cls):''), (v==null||v==='')?'-':String(v)));
@@ -18939,7 +18948,7 @@ function mcpxRfFleetCard(cap, dist, capDist, acks){
   // Rollback target: only a REAL retained target counts.
   if(capDist.rollback_available && capDist.previous_hash){ mcpxRfKvHash(dl, 'Retained rollback target', capDist.previous_hash); }
   else { mcpxRfKv(dl, 'Retained rollback target', 'none retained on this node', 'mcpx-rf-dd-muted'); }
-  if(acks && !mcpxRfErr(acks) && acks.as_of_unix_nano){ mcpxRfKv(dl, 'As of', mcpxNow()); }
+  if(acks && !mcpxRfErr(acks)){ mcpxRfKv(dl, 'As of', mcpxRfFmtNano(acks.as_of_unix_nano)); }
   card.appendChild(dl);
   // Acknowledgement truth.
   if(mcpxRfErr(acks) || !acks){ card.appendChild(mcpxEl('div','mcpx-empty','Fleet acknowledgements unavailable - '+((acks&&acks.__err)||'no data')+'.')); }

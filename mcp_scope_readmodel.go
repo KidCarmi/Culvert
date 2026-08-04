@@ -20,13 +20,17 @@ import (
 // compiles the spec (pure) to derive enumerable / matches-nothing / content hash;
 // a spec that fails to compile is reported with valid=false and a classified code
 // (the current active scope always compiles, so that path is for candidates).
-func mcpScopeSummary(spec rollout.ScopeSpec, lim rollout.Limits) map[string]any {
+func mcpScopeSummary(spec rollout.ScopeSpec, revision uint64, lim rollout.Limits) map[string]any {
 	ops := make([]string, 0, len(spec.Operations))
 	for _, o := range spec.Operations {
 		ops = append(ops, o.String())
 	}
 	kind := "enumerated"
-	compiled, cerr := rollout.Compile(spec, 0, lim)
+	// Compile at the scope's REAL revision: computeHash folds the revision in, so a
+	// revision-0 compile would produce a hash that matches neither the active
+	// scope_hash (current revision) nor the hash an applied candidate would receive
+	// (next revision).
+	compiled, cerr := rollout.Compile(spec, revision, lim)
 	enumerable, matchesNothing, hash, valid := false, true, "", cerr == nil
 	if cerr == nil {
 		enumerable = compiled.Enumerable()
@@ -132,7 +136,7 @@ func toolSetDelta(from, to []rollout.ToolSel) (added, removed int) {
 // mcpScopeDiff summarizes what a candidate scope would change vs the current one:
 // per-dimension add/remove counts, percentage, high-risk, enumerable and hash
 // transitions. It is pure and read-only.
-func mcpScopeDiff(from, to rollout.ScopeSpec, lim rollout.Limits) map[string]any {
+func mcpScopeDiff(from rollout.ScopeSpec, fromRev uint64, to rollout.ScopeSpec, toRev uint64, lim rollout.Limits) map[string]any {
 	dims := map[string]map[string]int{}
 	addDim := func(name string, a, r int) {
 		if a != 0 || r != 0 {
@@ -164,8 +168,8 @@ func mcpScopeDiff(from, to rollout.ScopeSpec, lim rollout.Limits) map[string]any
 	if a, r := toolSetDelta(from.ExcludeTools, to.ExcludeTools); a != 0 || r != 0 {
 		addDim("exclude_tools", a, r)
 	}
-	fromC, _ := rollout.Compile(from, 0, lim)
-	toC, _ := rollout.Compile(to, 0, lim)
+	fromC, _ := rollout.Compile(from, fromRev, lim)
+	toC, _ := rollout.Compile(to, toRev, lim)
 	return map[string]any{
 		"hash_from":            fromC.Hash(),
 		"hash_to":              toC.Hash(),
@@ -208,18 +212,22 @@ func apiMCPRolloutScopeValidate(w http.ResponseWriter, r *http.Request) {
 	req.Scope.Capability = capab
 	lim := rollout.DefaultLimits()
 	st := getMCPRollout().stateFor(capab)
+	curRev := st.CurrentConfig().ScopeRevision
+	candRev := curRev + 1
 	cur := st.CurrentConfig().Scope
 	cur.Capability = capab
-	_, cerr := rollout.Compile(req.Scope, st.CurrentConfig().ScopeRevision+1, lim)
+	_, cerr := rollout.Compile(req.Scope, candRev, lim)
 	resp := map[string]any{
 		"capability": capab.String(),
 		"valid":      cerr == nil,
 		"error_code": scopeErrCode(cerr),
-		"current":    mcpScopeSummary(cur, lim),
-		"candidate":  mcpScopeSummary(req.Scope, lim),
+		// current is hashed at its real revision; candidate at the revision it would
+		// receive if applied (curRev+1), so both hashes match reality.
+		"current":   mcpScopeSummary(cur, curRev, lim),
+		"candidate": mcpScopeSummary(req.Scope, candRev, lim),
 	}
 	if cerr == nil {
-		resp["diff"] = mcpScopeDiff(cur, req.Scope, lim)
+		resp["diff"] = mcpScopeDiff(cur, curRev, req.Scope, candRev, lim)
 	}
 	jsonOK(w, resp)
 }

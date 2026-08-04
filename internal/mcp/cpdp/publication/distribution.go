@@ -59,6 +59,19 @@ func deriveState(c DistributionCounts) DistributionState {
 	if c.Intended == 0 {
 		return StateLocalOnly
 	}
+	// Rollback outcomes the forward branches below cannot represent (they would
+	// fold an all-rolled-back fleet into pending_distribution). A forward publish of
+	// a hash never yields rolled_back acks for that same hash, so RolledBack==0 on
+	// the forward path and this block is byte-identical there; it only fires for a
+	// hash a rollback has targeted. A rolled_back ack mixed with competing
+	// applies/rejects is NOT a clean rollback, so it falls through to the
+	// degraded/partial branches rather than masking them.
+	if c.RolledBack == c.Intended {
+		return StateRolledBack
+	}
+	if c.RolledBack > 0 && c.Applied == 0 && c.Rejected == 0 {
+		return StateRollbackPending
+	}
 	if c.Applied == c.Intended {
 		return StateFullyAcknowledged
 	}

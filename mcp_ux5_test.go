@@ -8,6 +8,7 @@ import (
 	"github.com/KidCarmi/Culvert/internal/mcp/cpdp"
 	"github.com/KidCarmi/Culvert/internal/mcp/cpdp/publication"
 	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
+	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 )
 
 // PR-UX-5 backend contracts for the truthful rollout / scope / fleet read models.
@@ -91,6 +92,53 @@ func TestMCPUX5_AckDTO_RealTracker(t *testing.T) {
 	}
 	if byNode["n4"].State != "unavailable" {
 		t.Fatalf("n4 (no ack) row state = %q, want unavailable", byNode["n4"].State)
+	}
+}
+
+// TestMCPUX5_DeriveStateRollback proves the derived distribution state reports
+// rollback truthfully instead of folding it into the forward branches: an
+// all-rolled-back fleet is rolled_back (not pending_distribution), a partial
+// rollback is rollback_pending, and a rollback-free fleet is byte-identical to the
+// forward derivation.
+func TestMCPUX5_DeriveStateRollback(t *testing.T) {
+	cases := []struct {
+		name string
+		c    publication.DistributionCounts
+		want publication.DistributionState
+	}{
+		{"all rolled back", publication.DistributionCounts{Intended: 3, RolledBack: 3}, publication.StateRolledBack},
+		{"clean rollback in progress", publication.DistributionCounts{Intended: 3, RolledBack: 1, Unavailable: 2}, publication.StateRollbackPending},
+		{"rollback mixed with applies stays degraded", publication.DistributionCounts{Intended: 4, RolledBack: 1, Applied: 1, Rejected: 1, Unavailable: 1}, publication.StateDistributionDegraded},
+		{"forward all applied (unchanged)", publication.DistributionCounts{Intended: 3, Applied: 3}, publication.StateFullyAcknowledged},
+		{"forward pending (unchanged)", publication.DistributionCounts{Intended: 3}, publication.StatePendingDistribution},
+	}
+	for _, tc := range cases {
+		if got := publication.DeriveState(tc.c); got != tc.want {
+			t.Fatalf("%s: DeriveState=%q want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestMCPUX5_ScopeSummaryHashRevisioned proves the summary hash is computed at the
+// requested revision (the scope content hash folds the revision in), so it matches
+// the active scope_hash and an applied candidate's hash rather than a revision-0
+// stand-in.
+func TestMCPUX5_ScopeSummaryHashRevisioned(t *testing.T) {
+	spec := rollout.ScopeSpec{Capability: rollout.CapabilityGateway, Servers: []string{"srv-1"}}
+	lim := rollout.DefaultLimits()
+	for _, rev := range []uint64{0, 5} {
+		compiled, err := rollout.Compile(spec, rev, lim)
+		if err != nil {
+			t.Fatalf("compile rev %d: %v", rev, err)
+		}
+		got := mcpScopeSummary(spec, rev, lim)["hash"]
+		if got != compiled.Hash() {
+			t.Fatalf("summary hash at rev %d = %v, want %q", rev, got, compiled.Hash())
+		}
+	}
+	// A different revision must yield a different hash (the revision is bound in).
+	if mcpScopeSummary(spec, 0, lim)["hash"] == mcpScopeSummary(spec, 5, lim)["hash"] {
+		t.Fatal("summary hash must change with revision")
 	}
 }
 
