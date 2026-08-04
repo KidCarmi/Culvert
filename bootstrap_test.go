@@ -88,7 +88,7 @@ func TestBootstrapCompose_EmptyToken(t *testing.T) {
 // slice expression is path[23:22], which panics with "slice bounds out of
 // range" instead of returning the intended empty/invalid token.
 func TestBootstrapCompose_BareComposePath(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/api/cluster/bootstrap/compose", http.NoBody)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/cluster/bootstrap/compose", http.NoBody)
 	w := httptest.NewRecorder()
 	apiBootstrapCompose(w, req)
 	if w.Code != http.StatusBadRequest {
