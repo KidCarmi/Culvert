@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"io"
 	"net/http"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
@@ -196,13 +198,13 @@ func apiMCPRolloutRehearse(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Capability string `json:"capability"`
 	}
-	// The body is optional; a decode failure on a non-empty body is a real client
-	// error, but an empty body must degrade to the query-string capability (back-compat).
-	if r.ContentLength != 0 {
-		if err := decodeJSON(r, &req); err != nil {
-			http.Error(w, "invalid JSON", http.StatusBadRequest)
-			return
-		}
+	// The body is OPTIONAL. An absent/empty body decodes to io.EOF — treat that as
+	// "no body" and fall back to the query-string capability (back-compat). Do NOT
+	// gate on Content-Length: a bodyless chunked POST sets it to -1, which must not
+	// be misread as a malformed body. Only a genuinely malformed body is a 400.
+	if err := decodeJSON(r, &req); err != nil && !errors.Is(err, io.EOF) {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
 	}
 	capab := mcpRolloutCapability(r)
 	if req.Capability != "" {

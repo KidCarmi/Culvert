@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -131,6 +133,26 @@ func TestMCPUX4_RehearseRBACAndValidation(t *testing.T) {
 	// An empty body still works (back-compat: falls back to the query capability).
 	if got := mcpReq(http.MethodPost, "/api/mcp/rollout/rehearse-rollback?capability=gateway", RoleAdmin, "").Code; got != http.StatusOK {
 		t.Fatalf("rehearse empty body = %d, want 200", got)
+	}
+}
+
+// TestMCPUX4_RehearseChunkedBodylessPOST pins the Codex-P2 fix: a bodyless POST
+// sent with chunked transfer encoding has ContentLength == -1, which must NOT be
+// misread as a malformed body. The empty body decodes to io.EOF and falls back to
+// the query-string capability (here: management), returning 200 — not a 400.
+func TestMCPUX4_RehearseChunkedBodylessPOST(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/api/mcp/rollout/rehearse-rollback?capability=management", http.NoBody)
+	r.ContentLength = -1 // simulate chunked transfer encoding (no Content-Length)
+	r = r.WithContext(context.WithValue(r.Context(), uiRoleKey{}, RoleAdmin))
+	w := httptest.NewRecorder()
+	mux := http.NewServeMux()
+	registerMCPRoutes(mux)
+	mux.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("chunked bodyless rehearse = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"capability":"management"`) {
+		t.Fatalf("chunked bodyless rehearse must honor the query capability: %s", w.Body.String())
 	}
 }
 

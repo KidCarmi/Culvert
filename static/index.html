@@ -18365,6 +18365,26 @@ var mcpxDlg = { cfg:null, committing:false, ticket:0, done:false };
 function mcpxDlgEl(id){ return document.getElementById(id); }
 function mcpxCapUpper(c){ return String(c||'gateway').toUpperCase(); }
 function mcpxDangerRefreshRollout(){ if(typeof loadMCPRollout==='function') loadMCPRollout(); }
+// Authoritative reconciliation of the shared emergency card. Reads the REAL
+// per-capability kill-switch state and writes it, seq-guarded so the freshest
+// read wins even when actions settle out of order. Invoked after EVERY emergency
+// settlement (success, failure, or a superseded/cancelled in-flight response), so
+// the card converges to true server state and can NEVER be left asserting a stale
+// "Admission restored" while the switch is actually engaged (and vice-versa).
+var mcpxReconcileSeq=0;
+function mcpxReconcileEmergencyCard(){
+  if(typeof loadMCPRollout==='function') loadMCPRollout();
+  var mySeq=++mcpxReconcileSeq;
+  fetch('/api/mcp/rollout', {credentials:'same-origin', headers:{'X-CSRF-Token':(window.csrfToken||'')}})
+    .then(function(r){ return r.ok ? r.json() : null; })
+    .then(function(j){
+      var txt = j
+        ? ('Kill switch - gateway: '+((j.gateway&&j.gateway.killed)?'engaged':'clear')+' · management: '+((j.management&&j.management.killed)?'engaged':'clear'))
+        : 'Kill-switch state unavailable - refresh to confirm.';
+      mcpxDangerCardWrite('mcp-emergency-out', mySeq, txt);
+    })
+    .catch(function(){ mcpxDangerCardWrite('mcp-emergency-out', mySeq, 'Kill-switch state unavailable - refresh to confirm.'); });
+}
 // After a rollback attempt the RELEVANT read is the signed-distribution status
 // (rollback availability + active snapshot), so refresh that panel to real state.
 function mcpxDangerRefreshDistribution(){ if(typeof loadMCPDistribution==='function') loadMCPDistribution(); }
@@ -18491,13 +18511,17 @@ function mcpxDangerSubmit(cfg){
       body: JSON.stringify(cfg.request.body||{}) })
     .then(function(r){ return r.text().then(function(t){ return {status:r.status, text:t}; }); })
     .then(function(res){
-      if(myTicket!==mcpxDlg.ticket) return;             // superseded by explicit cancel / reopen
+      // Superseded by an explicit cancel / reopen: do NOT render into the (now
+      // different) dialog, but STILL reconcile - a late response must never be
+      // silently dropped, or the card could keep asserting a state the server no
+      // longer holds. onDone reads authoritative state.
+      if(myTicket!==mcpxDlg.ticket){ if(cfg.onDone) cfg.onDone({kind:'superseded'}); return; }
       mcpxDlg.committing=false; typed.disabled=false;
       var out=cfg.classify(res.status, res.text)||{kind:'crit', title:'Unexpected response', detail:'', retryable:true};
       mcpxDangerRenderResult(cfg, out, res, myTicket);
     })
     .catch(function(){
-      if(myTicket!==mcpxDlg.ticket) return;
+      if(myTicket!==mcpxDlg.ticket){ if(cfg.onDone) cfg.onDone({kind:'superseded'}); return; }
       mcpxDlg.committing=false; typed.disabled=false;
       mcpxDangerRenderResult(cfg, {kind:'crit', title:'Request failed', detail:'Network error - the action state is UNKNOWN. Refresh the rollout status to see the real state; do not assume it did or did not take effect.', retryable:true}, {status:0, text:'network_error'}, myTicket);
     });
@@ -18544,7 +18568,7 @@ async function mcpxOpenEmergencyDisable(){
     ],
     confirmPhrase:'DISABLE '+mcpxCapUpper(cap), confirmLabel:'Disable '+cap,
     request:{ url:'/api/mcp/rollout/emergency', body:{capability:cap, action:'disable'} },
-    classify:mcpxClassifyEmergency(cap,'disable'), resultCardId:'mcp-emergency-out', onDone:mcpxDangerRefreshRollout
+    classify:mcpxClassifyEmergency(cap,'disable'), onDone:mcpxReconcileEmergencyCard
   });
 }
 async function mcpxOpenEmergencyClear(){
@@ -18566,7 +18590,7 @@ async function mcpxOpenEmergencyClear(){
     ],
     confirmPhrase:'CLEAR '+mcpxCapUpper(cap), confirmLabel:'Clear '+cap,
     request:{ url:'/api/mcp/rollout/emergency', body:{capability:cap, action:'clear'} },
-    classify:mcpxClassifyEmergency(cap,'clear'), resultCardId:'mcp-emergency-out', onDone:mcpxDangerRefreshRollout
+    classify:mcpxClassifyEmergency(cap,'clear'), onDone:mcpxReconcileEmergencyCard
   });
 }
 function mcpxOpenRehearse(){
@@ -18587,7 +18611,7 @@ function mcpxOpenRehearse(){
     ],
     confirmLabel:'Record rehearsal', confirmStyle:'primary',
     request:{ url:'/api/mcp/rollout/rehearse-rollback', body:{capability:cap} },
-    classify:mcpxClassifyRehearse(cap), resultCardId:'mcp-emergency-out', onDone:mcpxDangerRefreshRollout
+    classify:mcpxClassifyRehearse(cap), onDone:mcpxReconcileEmergencyCard
   });
 }
 async function mcpxOpenTransition(){

@@ -82,7 +82,29 @@ type ux4Cfg struct {
 	emgStatus     int    // POST emergency override (0 ⇒ echo 200 based on action)
 	delayDisable  bool   // delay the disable POST (race proof)
 	passthrough   bool   // do NOT intercept /api/mcp/* - hit the REAL handler (RBAC proof)
-	log           *ux4Log
+	// stateful: the emergency POST APPLIES a per-capability kill state and the
+	// rollout GET reflects it, so a reconcile reads the true server state. Used to
+	// prove a late/cancelled disable converges the card to the real kill state.
+	stateful bool
+	mu       sync.Mutex
+	killedGW bool
+	killedMG bool
+	log      *ux4Log
+}
+
+func ux4Bool(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
+}
+
+// ux4RolloutBody renders the /api/mcp/rollout GET body reflecting the current
+// per-capability kill state (stateful mode).
+func ux4RolloutBody(killedGW, killedMG bool) string {
+	return `{"gateway":{"mode":"observe","desired":"observe","killed":` + ux4Bool(killedGW) + `,"connector":"local-client","history_len":1},` +
+		`"management":{"mode":"disabled","desired":"disabled","killed":` + ux4Bool(killedMG) + `,"connector":"","history_len":0},` +
+		`"metrics":{"hard_blocks":0},"production_locked":true,"distribution":{"enabled":false,"distribution_state":"local_only"}}`
 }
 
 func ux4Install(t *testing.T, ctx playwright.BrowserContext, cfg *ux4Cfg) {
@@ -132,16 +154,30 @@ func ux4Install(t *testing.T, ctx playwright.BrowserContext, cfg *ux4Cfg) {
 				plain(cfg.emgStatus, "boom")
 				return
 			}
-			killed := "true"
-			if strings.Contains(body, `"clear"`) {
-				killed = "false"
+			isMgmt := strings.Contains(body, "management")
+			isClear := strings.Contains(body, `"clear"`)
+			respond := func() {
+				capName := "gateway"
+				if isMgmt {
+					capName = "management"
+				}
+				killed := !isClear
+				if cfg.stateful { // apply the kill state so a later rollout GET reflects it
+					cfg.mu.Lock()
+					if isMgmt {
+						cfg.killedMG = killed
+					} else {
+						cfg.killedGW = killed
+					}
+					cfg.mu.Unlock()
+				}
+				json(200, `{"capability":"`+capName+`","killed":`+ux4Bool(killed)+`}`)
 			}
-			resp := `{"capability":"gateway","killed":` + killed + `}`
-			if cfg.delayDisable && strings.Contains(body, `"disable"`) {
-				go func() { time.Sleep(600 * time.Millisecond); json(200, resp) }()
+			if cfg.delayDisable && !isClear {
+				go func() { time.Sleep(600 * time.Millisecond); respond() }()
 				return
 			}
-			json(200, resp)
+			respond()
 		case strings.Contains(u, "/api/mcp/rollout/transition"):
 			if strings.Contains(body, "production") {
 				plain(403, "rollout_production_locked")
@@ -155,6 +191,13 @@ func ux4Install(t *testing.T, ctx playwright.BrowserContext, cfg *ux4Cfg) {
 		case strings.Contains(u, "/api/mcp/rollout") && method == "GET":
 			if cfg.rolloutStatus != 200 {
 				plain(cfg.rolloutStatus, "boom")
+				return
+			}
+			if cfg.stateful {
+				cfg.mu.Lock()
+				gw, mg := cfg.killedGW, cfg.killedMG
+				cfg.mu.Unlock()
+				json(200, ux4RolloutBody(gw, mg))
 				return
 			}
 			json(200, fxUX4Rollout)
@@ -508,12 +551,14 @@ func TestMCPUX4_RBACAndRaces(t *testing.T) {
 		t.Fatalf("forced viewer POST must be 403 server-side, got %v", got)
 	}
 
-	// (17) Late action response cannot overwrite a newer result. Disable is delayed;
-	// we explicitly Cancel during commit (advancing the ticket), then a fast Clear
-	// completes. The late disable response must be dropped, so the card shows Clear.
+	// (17) A late/cancelled in-flight response must never leave the card asserting a
+	// state the server no longer holds. The backend is STATEFUL here: a slow disable
+	// is cancelled mid-commit, then a fast clear completes (card reconciles to
+	// "clear"); when the delayed disable finally lands (applied LAST → kill switch
+	// engaged), the card must RECONCILE to "engaged", not stay on the clear result.
 	log := &ux4Log{}
 	var pageErrs []string
-	page := ux4Page(t, browser, srv.URL, RoleAdmin, &ux4Cfg{log: log, delayDisable: true}, &pageErrs)
+	page := ux4Page(t, browser, srv.URL, RoleAdmin, &ux4Cfg{log: log, delayDisable: true, stateful: true}, &pageErrs)
 	if err := page.Locator(`.nav-item[data-view="mcp-rollout"]`).First().Click(); err != nil {
 		t.Fatalf("nav: %v", err)
 	}
@@ -527,18 +572,22 @@ func TestMCPUX4_RBACAndRaces(t *testing.T) {
 	must(page.Locator("#mcpx-dlg-confirm").Click(), "confirm disable race")
 	// Explicit cancel while the disable is still in flight (safe cancellation).
 	must(page.Locator("#mcpx-dlg-cancel").Click(), "cancel during commit")
-	// Now a fast Clear completes and writes the card.
+	// A fast Clear completes; the card reconciles to the authoritative state.
 	must(page.Locator(`[data-click="mcpxOpenEmergencyClear"]`).First().Click(), "open clear race")
 	must(page.Locator("#mcpx-dlg-typed").Fill("CLEAR GATEWAY"), "clear phrase race")
 	must(page.Locator("#mcpx-dlg-confirm").Click(), "confirm clear race")
-	if err := assert.Locator(page.Locator("#mcp-emergency-out")).ToContainText("Admission restored on gateway", playwright.LocatorAssertionsToContainTextOptions{Timeout: playwright.Float(6000)}); err != nil {
-		t.Fatalf("card must show the newer Clear result: %v", err)
+	if err := assert.Locator(page.Locator("#mcp-emergency-out")).ToContainText("gateway: clear", playwright.LocatorAssertionsToContainTextOptions{Timeout: playwright.Float(6000)}); err != nil {
+		t.Fatalf("card must reconcile to the authoritative clear state: %v", err)
 	}
-	// Wait past the delayed disable response; it must NOT overwrite the card.
-	time.Sleep(800 * time.Millisecond)
+	// The delayed disable now lands (applied last ⇒ kill switch engaged). The card
+	// MUST converge to the true engaged state, not silently drop the late response.
+	if err := assert.Locator(page.Locator("#mcp-emergency-out")).ToContainText("gateway: engaged", playwright.LocatorAssertionsToContainTextOptions{Timeout: playwright.Float(6000)}); err != nil {
+		t.Fatalf("card must reconcile to engaged after the late disable lands: %v", err)
+	}
+	// The card is authoritative kill-state, never a stale action title.
 	ctext, _ := page.Locator("#mcp-emergency-out").TextContent()
-	if strings.Contains(ctext, "stopped") {
-		t.Fatalf("late disable response overwrote the newer clear result: %q", ctext)
+	if strings.Contains(ctext, "Admission") {
+		t.Fatalf("card must show authoritative kill state, not a stale action title: %q", ctext)
 	}
 
 	// (18) Failed POST followed by failed refresh renders state as unavailable,
