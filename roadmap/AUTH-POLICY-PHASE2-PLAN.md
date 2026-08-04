@@ -1,6 +1,9 @@
 # Authentication Policy — Phase 2 Plan: `CredentialRequired`
 
-Status: **APPROVED — pre-Phase-2 corrections shipped; slices not yet implemented.**
+Status: **SHIPPED** — `CredentialRequired` is live on the Stage-1 request path
+(`authpolicy.go` `OutcomeCredentialRequired`, `proxy.go`, `statAuthCredentialRequired`
+— "Phase 2 Slice 3: wired onto the runtime path" — `ui_authpolicy.go`, and
+`diagnostics.go`'s `authCredentialRequiredDiagnostics`).
 Predecessors: `AUTHENTICATION-POLICY-SPEC.md` (Phase 0 seams), `AUTH-POLICY-PHASE1-PLAN.md`
 (Exempt, Slices 1–8, shipped through PR #443).
 
