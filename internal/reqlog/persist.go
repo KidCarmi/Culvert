@@ -366,16 +366,6 @@ func drainRound(b *batch, ch chan Entry, flush chan chan struct{}, stop chan str
 	return false
 }
 
-// encodeEntry buffers one JSONL record, returning 1 if the record is pending a
-// flush. A marshal failure is charged immediately — it never reaches the file.
-func encodeEntry(enc *json.Encoder, e Entry) int {
-	if err := enc.Encode(e); err != nil {
-		countWriteError(1, err)
-		return 0
-	}
-	return 1
-}
-
 // flushBatch pushes the buffered records to the sink. n is the number of
 // records in the buffer so a failed flush is charged per lost entry, keeping
 // WriteErrors() a count of entries that did not reach the file — the same
