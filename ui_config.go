@@ -1831,9 +1831,10 @@ func apiConnLimit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		jsonOK(w, map[string]any{
-			"enabled":   connLimiter.Enabled(),
-			"maxPerIP":  connLimiter.MaxPerIP(),
-			"activeIPs": connLimiter.ActiveIPs(),
+			"enabled":       connLimiter.Enabled(),
+			"maxPerIP":      connLimiter.MaxPerIP(),
+			"activeIPs":     connLimiter.ActiveIPs(),
+			"rejectedTotal": connLimiter.Rejected(),
 		})
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {

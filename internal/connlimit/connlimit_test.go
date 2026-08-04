@@ -77,6 +77,9 @@ func TestAcquireRelease_LimitAndCleanup(t *testing.T) {
 	if cl.ActiveIPs() != 1 {
 		t.Errorf("ActiveIPs = %d, want 1", cl.ActiveIPs())
 	}
+	if got := cl.Rejected(); got != 1 {
+		t.Errorf("Rejected() = %d, want 1 (the third, over-cap acquire)", got)
+	}
 
 	cl.Release("ip")
 	cl.Release("ip")
@@ -86,6 +89,54 @@ func TestAcquireRelease_LimitAndCleanup(t *testing.T) {
 	if cl.ActiveIPs() != 0 {
 		t.Errorf("ActiveIPs after cleanup = %d, want 0", cl.ActiveIPs())
 	}
+}
+
+// TestRejected_OnlyCountsOverCapAcquires is the sole signal an admin has that a
+// configured per-IP cap is actually rejecting live traffic (see Rejected's
+// doc) — it must stay at zero for admitted connections (enabled or not) and
+// increment exactly once per over-cap Acquire, accumulating across distinct
+// IPs and surviving Release/re-Acquire cycles.
+func TestRejected_OnlyCountsOverCapAcquires(t *testing.T) {
+	cl := New()
+
+	// Disabled: never rejects, so never counts.
+	for i := 0; i < 5; i++ {
+		cl.Acquire("disabled-ip")
+	}
+	if got := cl.Rejected(); got != 0 {
+		t.Fatalf("Rejected() while disabled = %d, want 0", got)
+	}
+	for i := 0; i < 5; i++ {
+		cl.Release("disabled-ip")
+	}
+
+	cl.Enable(1)
+
+	// Admitted acquires (at or under cap) must not count.
+	if !cl.Acquire("a") {
+		t.Fatal("first acquire for ip a should be admitted")
+	}
+	if got := cl.Rejected(); got != 0 {
+		t.Fatalf("Rejected() after an admitted acquire = %d, want 0", got)
+	}
+
+	// Over-cap acquires on two different IPs each count once.
+	if cl.Acquire("a") {
+		t.Fatal("second acquire for ip a should be rejected (cap=1)")
+	}
+	if !cl.Acquire("b") {
+		t.Fatal("ip b's first acquire should be admitted (cap=1, no prior connections)")
+	}
+	if cl.Acquire("b") {
+		t.Fatal("ip b's second acquire should be rejected (cap=1)")
+	}
+
+	if got := cl.Rejected(); got != 2 {
+		t.Fatalf("Rejected() = %d, want 2 (one over-cap rejection for ip a, one for ip b)", got)
+	}
+
+	cl.Release("a")
+	cl.Release("b")
 }
 
 // TestConcurrent_NoLeak races Acquire/Release with a live Enable reconfigure,
