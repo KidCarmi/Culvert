@@ -711,13 +711,13 @@ table.mcpx-rf-acks td{padding:6px 10px;border-bottom:1px solid var(--border);whi
 
     <div class="nav-section" data-min-role="viewer">MCP Gateway</div>
     <div class="nav-item" data-view="mcp-overview" data-min-role="viewer" role="button" tabindex="0">
-      <svg class="ico" aria-hidden="true"><use href="#i-shield"/></svg> MCP Overview
+      <svg class="ico" aria-hidden="true"><use href="#i-shield"/></svg> MCP Command Center
     </div>
     <div class="nav-item" data-view="mcp-servers" data-min-role="viewer" role="button" tabindex="0">
       <svg class="ico" aria-hidden="true"><use href="#i-list"/></svg> MCP Servers &amp; Tools
     </div>
     <div class="nav-item" data-view="mcp-decisions" data-min-role="viewer" role="button" tabindex="0">
-      <svg class="ico" aria-hidden="true"><use href="#i-list"/></svg> MCP Decisions &amp; Explain
+      <svg class="ico" aria-hidden="true"><use href="#i-list"/></svg> MCP Activity
     </div>
     <div class="nav-item" data-view="mcp-policies" data-min-role="viewer" role="button" tabindex="0">
       <svg class="ico" aria-hidden="true"><use href="#i-flask"/></svg> MCP Policies &amp; Simulator
@@ -3591,7 +3591,7 @@ Firefox (all platforms):
       </div>
     </div>
     <div class="view" id="view-mcp-decisions">
-      <div class="panel"><h3>MCP Investigations</h3>
+      <div class="panel"><h3>MCP Activity</h3>
         <p class="muted">Activity as a story: a Shadow-executed policy DENY is shown as <b>DENY to executed (shadow)</b> and can never read as a plain ALLOW. Select a row to open the evidence drawer.</p>
         <label>Tenant <input id="mcp-dec-tenant" placeholder="tenant" /></label>
         <label>Event ID <input id="mcp-dec-event" placeholder="event_id (for explain)" /></label>
@@ -5618,7 +5618,7 @@ let rwRules = [];
 const viewMeta = {
   'mcp-overview':   { title: 'MCP Command Center', meta: 'MCP gateway posture: modes, hard failures, distribution and durability at a glance' },
   'mcp-servers':    { title: 'MCP Servers & Tools', meta: 'Tenant-scoped, redacted server & tool inventory' },
-  'mcp-decisions':  { title: 'MCP Investigations', meta: 'Historical decisions as a story: evaluated to effective action, with an evidence drawer (not re-evaluated)' },
+  'mcp-decisions':  { title: 'MCP Activity', meta: 'Historical decisions as a story: evaluated to effective action, with an evidence drawer (not re-evaluated)' },
   'mcp-policies':   { title: 'MCP Policies & Simulator', meta: 'Current policy + validate/simulate/compare a candidate (publishes nothing)' },
   'mcp-approvals':  { title: 'MCP Approvals', meta: 'Four-eyes operational approvals — never executes' },
   'mcp-health':     { title: 'MCP Health & Durability', meta: 'Capability-isolated runtime & PR-8 durability health' },
