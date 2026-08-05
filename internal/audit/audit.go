@@ -24,6 +24,7 @@ import (
 	"sync/atomic"
 
 	"github.com/KidCarmi/Culvert/internal/fileutil"
+	"github.com/KidCarmi/Culvert/internal/obs"
 )
 
 // Entry captures every configuration change made through the UI/API so
@@ -55,6 +56,80 @@ var (
 	persistC    io.Closer // closed on shutdown via Close
 	persistPath string    // path for paginated reads
 )
+
+// ─── Durable-write health (CHAOS-24 / register item ST-8) ────────────────────
+//
+// The JSONL file is the DURABLE compliance record — the in-memory ring holds
+// only the newest MaxRing entries and is wiped on every restart. Until this
+// counter existed, Add discarded the write error outright, so a full disk, a
+// read-only remount, an EIO, or a failed post-rotation reopen destroyed the
+// "who changed what" trail with NO counter, NO metric, NO alert and NO log
+// line, while the admin UI kept rendering entries from the volatile ring. An
+// attacker who can fill the volume could therefore switch off durable audit
+// logging and then act with the record surviving only in a 500-entry buffer
+// they can evict by generating further events (CWE-778, OWASP A09:2021).
+//
+// The contract mirrors internal/reqlog exactly: count EVERY failure, log only
+// the FIRST (a failing disk fails every write, and this runs on the admin-API
+// goroutine). Persistence stays best-effort — a failing disk must not make the
+// admin API reject configuration changes — but it is no longer silent.
+var (
+	writeErrors    int64       // entries that never reached the JSONL file
+	writeErrLogged atomic.Bool // one-shot gate for the log line
+)
+
+// writeFailObserver is the durable-write failure seam. package main publishes
+// the process-wide storage-health observer here (storage_health.go), which
+// owns the rate-limited log line, the degraded operator-contract row, the
+// Prometheus series and the `storage_write_failed` alert.
+//
+// CONTRACT: the observer runs SYNCHRONOUSLY on the goroutine whose audit write
+// just failed and MUST NOT call Add (directly or transitively). Re-entering Add
+// from the observer would recurse without bound on a persistently failing disk
+// — every recovery write failing and re-invoking the observer. The production
+// observer (noteStorageWriteFailure) writes no audit entry; it only records
+// counters and dispatches a webhook alert, which is audit-free by construction.
+var writeFailObserver atomic.Pointer[func(path string, err error)]
+
+// SetWriteFailureObserver publishes the durable-write failure observer. A nil
+// fn clears it (the counter and the one-shot log line still apply), so a
+// mis-wired or un-wired startup can never silence the loss entirely.
+func SetWriteFailureObserver(fn func(path string, err error)) {
+	if fn == nil {
+		writeFailObserver.Store(nil)
+		return
+	}
+	writeFailObserver.Store(&fn)
+}
+
+// WriteErrors returns the cumulative count of audit entries that did NOT reach
+// the persistent JSONL file (process lifetime; never reset). Non-zero means the
+// durable audit trail is incomplete — surfaced on GET /api/stats, /healthz and
+// /metrics so the gap is never silent.
+func WriteErrors() int64 { return atomic.LoadInt64(&writeErrors) }
+
+// countWriteError charges n lost entries, logs the first failure only, and
+// notifies the observer. Never panics on a panicking observer: audit loss must
+// not take down the admin plane it is recording.
+func countWriteError(n int64, path string, err error) {
+	atomic.AddInt64(&writeErrors, n)
+	if writeErrLogged.CompareAndSwap(false, true) {
+		// CWE-117: the error text embeds the operator-configured path and, for
+		// a wrapped syscall error, arbitrary OS-supplied bytes. Sanitise it
+		// before it reaches the log line, per the project logging convention.
+		detail := ""
+		if err != nil {
+			detail = obs.Sanitize(err.Error())
+		}
+		obs.Printf("ERROR audit log: persistent write failed — the durable audit trail is incomplete (further failures counted silently): %q", detail)
+	}
+	if p := writeFailObserver.Load(); p != nil {
+		func() {
+			defer func() { _ = recover() }()
+			(*p)(path, err)
+		}()
+	}
+}
 
 // siem is the SIEM-forwarding hook (nil = disabled). Set once at main's init;
 // the closure is responsible for its own nil/runtime checks.
@@ -126,13 +201,35 @@ func Add(e Entry) {
 		ring = ring[len(ring)-MaxRing:]
 	}
 	f := persist
+	path := persistPath
 	mu.Unlock()
 
 	// Persist to JSONL file (outside the lock to avoid blocking callers).
+	// Persistence remains best-effort — a failing disk must not make an admin
+	// configuration change fail — but every lost entry is now COUNTED, so the
+	// gap in the durable compliance record is visible instead of silent.
 	if f != nil {
-		if b, err := json.Marshal(e); err == nil {
+		b, err := json.Marshal(e)
+		switch {
+		case err != nil:
+			// Defensive: Entry is all scalars today, so this cannot fail in
+			// practice. It was nevertheless a silent-drop branch — the entry
+			// never reaches the file — so it is charged like any other loss.
+			countWriteError(1, path, fmt.Errorf("marshal audit entry: %w", err))
+		default:
 			b = append(b, '\n')
-			f.Write(b) //nolint:errcheck // best-effort persistence, matches pre-extraction behavior
+			n, werr := f.Write(b)
+			// A short write with a nil error leaves a TRUNCATED JSON line in
+			// the file: the entry is lost and the next append concatenates
+			// onto the fragment. os.File.Write reports this as io.ErrShortWrite,
+			// but the persist sink is an io.Writer seam, so check explicitly
+			// rather than trusting every implementation to do so.
+			switch {
+			case werr != nil:
+				countWriteError(1, path, werr)
+			case n < len(b):
+				countWriteError(1, path, io.ErrShortWrite)
+			}
 		}
 	}
 	// Forward to syslog/SIEM if configured.
@@ -318,6 +415,36 @@ func SetPersistForTest(w io.Writer) (restore func()) {
 	return func() {
 		mu.Lock()
 		persist, persistC = oldW, oldC
+		mu.Unlock()
+	}
+}
+
+// ResetWriteErrorsForTest zeroes the durable-write failure counter, the
+// one-shot log gate and the observer, returning a restore func. Test-only:
+// the production counters are process-lifetime and never reset.
+func ResetWriteErrorsForTest() (restore func()) {
+	oldN := atomic.SwapInt64(&writeErrors, 0)
+	oldLogged := writeErrLogged.Swap(false)
+	oldObs := writeFailObserver.Swap(nil)
+	return func() {
+		atomic.StoreInt64(&writeErrors, oldN)
+		writeErrLogged.Store(oldLogged)
+		writeFailObserver.Store(oldObs)
+	}
+}
+
+// setPersistPathForTest sets the configured path reported to the write-failure
+// observer, returning a restore func. Unexported: SetPersistForTest keeps the
+// path empty (so reads stay on the ring), but the observer contract carries the
+// path, so the failure tests need to set it independently.
+func setPersistPathForTest(path string) (restore func()) {
+	mu.Lock()
+	old := persistPath
+	persistPath = path
+	mu.Unlock()
+	return func() {
+		mu.Lock()
+		persistPath = old
 		mu.Unlock()
 	}
 }

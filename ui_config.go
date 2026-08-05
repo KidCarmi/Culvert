@@ -87,6 +87,12 @@ func apiStats(w http.ResponseWriter, r *http.Request) {
 		// Persistent request-log health: non-zero means writes are failing
 		// (e.g. disk full) and the on-disk history is incomplete.
 		"logWriteErrors": reqlog.WriteErrors(),
+		// Persistent AUDIT-log health. Non-zero means admin-action entries did
+		// not reach the durable JSONL file (disk full, read-only remount, failed
+		// post-rotation reopen), so the compliance record is incomplete — the
+		// in-memory ring keeps only the newest 500 entries and is wiped on
+		// restart, so this is the only way an operator can see the gap.
+		"auditLogWriteErrors": auditWriteErrors(),
 		// Non-zero means the async JSONL persistence queue saturated: no
 		// entry was lost, but request goroutines waited on the disk.
 		"logBackpressure": reqlog.Backpressure(),

@@ -140,7 +140,7 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | ST-5 | **`admin_settings.json`: concurrent goroutine writers to a fixed `.tmp`, no fsync.** `adminSettingsSave()` launches each save in a goroutine and releases the mutex before writing → interleaved bytes → corrupt JSON → next boot silently reverts **all** admin settings to defaults. | GAP → **CLOSED** (`fileutil.AtomicWrite`, `admin_settings.go:660`) | H | `admin_settings.go:407-421,327-329,132-134` |
 | ST-6 | **`ui_users.json`: non-atomic write (no fsync) + fail-open-to-empty roster on corruption.** Power loss mid-save loses the entire admin roster + TOTP secrets + `default_auth_outcome`; loader starts empty with no quarantine → potential admin lockout. | GAP → **CLOSED** (`fileutil.AtomicWrite`, `store.go:887`) | H | `store.go:759-763,691-693`, `auth_startup.go:39-40` |
 | ST-7 | Persistent request-log JSONL write is **synchronous + globally serialized** under one mutex on the hot path → slow disk collapses proxy throughput (head-of-line). Disk-*full* is handled (counted, once-logged). | GAP → **CLOSED** (async bounded queue + single drainer, `internal/reqlog/persist.go`) | M | `internal/reqlog/reqlog.go:154-167`, `internal/fileutil/rotating.go:40-61` |
-| ST-8 | Audit write **silently drops on I/O failure** (`//nolint:errcheck`, no counter) — compliance "who changed what" vanishes on full/RO disk; `GetPersistent` re-reads the whole file per query. | GAP | M/H | `internal/audit/audit.go:131-135,173-199` |
+| ST-8 | Audit write **silently drops on I/O failure** (`//nolint:errcheck`, no counter) — compliance "who changed what" vanishes on full/RO disk; `GetPersistent` re-reads the whole file per query. | GAP → **CLOSED (silent-loss half)** — every lost entry counted (`audit.WriteErrors()`), first failure logged, wired into the storage-health plane (degraded contract row + `storage_write_failed` alert), surfaced on `/api/stats`, `/metrics`, `/healthz` and the dashboard. Residual: persistence stays best-effort (an admin change still succeeds over a failing disk) and the `GetPersistent` full-file re-read is untouched — see §13 | M/H | `internal/audit/audit.go` (`countWriteError`, `SetWriteFailureObserver`), `storage_health.go` init |
 | ST-9 | Startup `logger.Fatalf` on blocklist/URL-category read errors (any non-`IsNotExist`) → **crash-loop** on permission/EIO faults. | GAP | M | `blocklist_startup.go:48-60`, `urlcategories_startup.go:22,46` |
 | ST-10 | Backup is not a consistent cross-file snapshot (inputs read at different instants); residual non-atomic writers (`cdrpolicy.go:195`, `internal/scanexcl/scanexcl.go:93`, `update_cluster.go:193`). | GAP | L/M | backup pack loop `backup.go:~280`; flagged by `cluster_persistence_atomic_test.go:8` |
 | ST-11 | RotatingFile keeps one archive; reopen failure after rename leaves logging wedged until restart (bounded-growth design otherwise correct). | ✓ (edge) | L | `internal/fileutil/rotating.go:44-56` |
@@ -201,7 +201,7 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | R10 | AU-1 / AU-13 no OIDC introspection cache | High (every request) | Medium (latency + IdP amplification) | **P2** |
 | R11 | WK-9 syslog blocking on hot path | Medium (slow SIEM) | Medium (latency) | **P2** |
 | R12 | WK-13 / HA-11 no ticker jitter | Medium (rollout) | Medium (self-DDoS / herd) | **P2** |
-| R13 | ST-8 silent audit-trail loss | Low | Medium-High (compliance) | **P2** |
+| R13 | ST-8 silent audit-trail loss | Low | Medium-High (compliance) | **CLOSED (silent-loss half)** — see §13 |
 | R14 | HA-9 enrollment nil-deref panic | Low (corrupted state) | Low (RPC-scoped) | **FIXED** |
 
 ---
@@ -242,7 +242,7 @@ they cannot see fail. Concretely, add alerts + metrics for:
 - Per-feed `last_success` + staleness alert at >2× interval (WK-5, WK-6).
 - GeoIP DB load-failure / age alert (WK-4).
 - `idp.unreachable` distinct from auth-failure (AU-7).
-- Audit write-failure counter surfaced on `/healthz` (ST-8), matching reqlog.
+- ~~Audit write-failure counter surfaced on `/healthz` (ST-8), matching reqlog.~~ **Shipped — see §13.**
 
 Add **jitter** to every feed/poll ticker (WK-13, HA-11) to stop fleet self-DDoS on rollout.
 
@@ -501,3 +501,97 @@ swallow-and-retry keepalive guard trips the split-brain assertion.
 - The `crashThrottleEvery` (1s per component) flood guard means a tight panic loop reports a
   fraction of its rounds to the SIEM. The unthrottled `culvert_crash_records_total` counter is the
   lossless signal, by design (anti-forensics-DoS trade-off inherited from M1).
+
+---
+
+## 13. ST-8 — Silent audit-trail loss on a failing volume
+
+**Date:** 2026-08-05 · **Closes:** ST-8 / risk **R13** (silent-loss half). Found by the standing
+security-regression review of the CHAOS-24 window.
+
+### 13.1 Failure scenario
+
+`audit.Add` persisted each admin-action entry to the JSONL file with
+`f.Write(b) //nolint:errcheck` and discarded the result. That file is the **durable** compliance
+record; the in-memory ring the admin UI renders from holds only the newest `MaxRing` (500) entries
+and is wiped on every restart.
+
+So on a full volume, a read-only remount, an EIO, or a failed post-rotation reopen
+(`fileutil.RotatingFile.Write` returns the open error), every admin action was recorded **nowhere
+durable**, with:
+
+- no counter, no Prometheus series, no `/healthz` annotation,
+- no alert (the audit log is an append-only `RotatingFile`, so it never passes through
+  `fileutil.AtomicWrite` and the CHAOS-45 durable-write chokepoint observer never saw it),
+- no log line,
+- and an admin UI that kept rendering entries from the volatile ring, so the operator's own
+  evidence said logging was fine.
+
+A `json.Marshal` failure took the same silent path.
+
+**Why this is a security finding, not only an observability one.** The audit trail is the control
+that answers "who changed what". An attacker who can fill the data volume — directly, or by
+driving request-log/history growth — can switch off durable audit logging, act, and then evict the
+volatile 500-entry ring by generating further events or forcing a restart. Nothing in the product
+would report the gap. CWE-778 (Insufficient Logging); OWASP **A09:2021 — Security Logging and
+Monitoring Failures**.
+
+**Why it surfaced now.** The CHAOS-24 sweep made the request-log drain (`internal/reqlog`,
+`WriteErrors`/`Backpressure`) and the syslog drain (`internal/syslog`, `Drops`/`Panics`) count and
+surface every lost record. That left the audit log — the most compliance-critical of the three
+durable log planes — as the only one still discarding its error, an inconsistency an operator
+would reasonably read the other way round.
+
+### 13.2 Fix
+
+Persistence stays **best-effort by design** — a failing disk must not make an admin configuration
+change fail, which would turn a storage incident into an administrative lockout — but the loss is
+no longer silent:
+
+- `internal/audit` counts every entry that did not reach the file (write error, **short write with
+  a nil error** — the truncated-JSON-line case — and the defensive marshal branch), logs only the
+  first (a failing disk fails every write; the counter carries the magnitude), and exposes
+  `WriteErrors()`. Contract mirrors `internal/reqlog` exactly.
+- A `SetWriteFailureObserver` seam lets `package main` route the failure into the existing
+  CHAOS-45 storage-health plane (`storage_health.go` init → `noteStorageWriteFailure`): degraded
+  operator-contract row, rate-limited log, and the `storage_write_failed` alert, with the same
+  path-redaction barrier. The observer is documented as **MUST NOT call `Add`** (unbounded
+  recursion on a persistently failing disk); the production observer is audit-free by
+  construction, and a panicking observer is contained so audit loss can never take down the admin
+  plane it records.
+- Surfaced on `GET /api/stats` (`auditLogWriteErrors`), `/metrics`
+  (`culvert_audit_write_errors_total`), `/healthz` (`auditLogWriteErrors`, present only when
+  non-zero so healthy probe bodies are unchanged, and never failing the probe), and the dashboard
+  — where audit loss **outranks** request-log loss in the logging posture tile, because those
+  entries are already gone for good.
+
+### 13.3 Regression gates
+
+| Property | Test |
+|---|---|
+| Every lost entry counted; ring still populated | `TestWriteErrors_CountedOnFailingSink` |
+| Healthy sink never charges a loss | `TestWriteErrors_ZeroOnHealthySink` |
+| Truncated line (short write, nil error) charged | `TestWriteErrors_ShortWriteIsCharged` |
+| Unconfigured persistence is not a failure | `TestWriteErrors_NoSinkIsNotAFailure` |
+| Observer gets the real path + cause | `TestWriteFailureObserver_ReceivesPathAndError` |
+| Nil / panicking observer cannot silence or crash | `TestWriteFailureObserver_NilIsSafe`, `_PanicDoesNotPropagate` |
+| Exactly-once accounting under concurrency (`-race`) | `TestWriteErrors_Concurrent` |
+| Observer not called under the audit lock (deadlock guard) | `TestWriteErrors_ObserverIsNotCalledUnderTheRingLock` |
+| Wiring reaches storage health + alert, path redacted | `TestAuditWriteFailure_ReachesStorageHealthPlane` |
+| Healthy persist does not degrade the contract | `TestAuditWriteFailure_HealthyPersistDoesNotDegrade` |
+| `/api/stats`, `/metrics`, `/healthz` surfaces | `TestAPIStats_SurfacesAuditWriteErrors`, `TestMetrics_ExposesAuditWriteErrors`, `TestHealthz_AnnotatesAuditWriteErrors` |
+
+### 13.4 Residual risk
+
+- **Best-effort persistence is unchanged.** An admin mutation still returns 200 while its audit
+  entry is being lost. Making the admin API fail closed on audit-write failure is the stronger
+  posture and is *deliberately not* taken here: it converts a storage incident into a total
+  administrative outage, and it diverges from the sibling log planes. It should be a separate,
+  explicitly opted-in control (`audit.fail_closed`), not a silent behavior change.
+- **Rotation still destroys the older archive** (`os.Remove(path+".1")` at the 50 MB cap). Bounded
+  by design; a high-churn CP can age entries out of the durable file faster than an operator ships
+  them off-box. The SIEM forwarder is the intended durable sink for that case.
+- **`GetPersistent` still re-reads the whole file per query** — the unchanged half of ST-8, an
+  admin-plane DoS amplifier on a large audit file. Tracked separately.
+- The counter is process-lifetime and resets on restart, matching `reqlog`. The alert and the
+  degraded contract row are the durable signals.

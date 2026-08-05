@@ -7800,6 +7800,17 @@ function logPersistFallback(s) {
 // logPersistFallback plus which logs are configured at all.
 function describeLogPersistence(s) {
   const f = logPersistFallback(s);
+  // A configured, successfully-opened audit log whose WRITES are failing is a
+  // distinct fault from the open-time fallback below, and a worse one: the
+  // durable compliance record has gaps that no restart or reconfiguration
+  // recovers. Report it first, and never let a "Persisting" string hide it.
+  // Plain text, no markup: the only caller assigns the result via textContent,
+  // so any tag would render as literal characters (and markup here would be a
+  // needless XSS surface on a server-derived number).
+  const auditLost = s.auditLogWriteErrors || 0;
+  if (auditLost > 0) {
+    return 'Degraded: ' + fmt(auditLost) + ' audit entries never reached disk - compliance record incomplete';
+  }
   if (f.req || f.audit) {
     const parts = [];
     if (f.req) parts.push('request log');
@@ -7866,7 +7877,13 @@ async function fetchStats() {
     // Posture: API reachable + request-log write health (real fields only)
     setPosture('proxy', 'ok', 'Operational · :' + s.proxyPort);
     const logFallback = logPersistFallback(s);
-    if ((s.logWriteErrors || 0) > 0) {
+    // Audit-log loss outranks request-log loss: the audit JSONL is the durable
+    // compliance record ("who changed what"), and the ring the UI renders from
+    // holds only the newest 500 entries and is wiped on restart — so a
+    // non-zero count means admin actions have already vanished for good.
+    if ((s.auditLogWriteErrors || 0) > 0) {
+      setPosture('logging', 'crit', fmt(s.auditLogWriteErrors) + ' audit entries lost (compliance record incomplete)');
+    } else if ((s.logWriteErrors || 0) > 0) {
       setPosture('logging', 'warn', fmt(s.logWriteErrors) + ' write errors');
     } else if (logFallback.req || logFallback.audit) {
       const which = logFallback.req && logFallback.audit ? 'Request+audit log'
