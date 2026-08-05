@@ -170,6 +170,16 @@ func TestMCPUX8_History(t *testing.T) {
 		t.Fatalf("history navigation must not replay any MCP POST; got %d", n)
 	}
 
+	// Leaving MCP for a non-MCP view drops the stale #mcp/ fragment, so a reload
+	// shows the non-MCP view instead of resurrecting the MCP route.
+	ux8Must(t, p.Locator(`.nav-item[data-view="dashboard"]`).First().Click(), "nav dashboard", &pageErrs)
+	if err := assert.Locator(p.Locator(`.nav-item[data-view="dashboard"].active`)).ToBeVisible(); err != nil {
+		t.Fatalf("dashboard nav must activate: %v", err)
+	}
+	if h := p.URL(); strings.Contains(h, "#mcp/") {
+		t.Fatalf("leaving MCP must drop the #mcp/ fragment; url still %q", h)
+	}
+
 	// (13) Reload never restores a policy candidate draft (candidate bytes are never
 	// serialized to URL/history/storage).
 	ux8Must(t, p.Locator(`.nav-item[data-view="mcp-policies"]`).First().Click(), "nav policies", &pageErrs)

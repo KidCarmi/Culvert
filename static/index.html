@@ -5764,7 +5764,11 @@ const viewLeaveGuards = {
 
 function switchView(name) {
   var mcpxPrevView = currentView;   // PR-UX-8: for MCP route push/replace decision
-  if (name !== currentView) {
+  // PR-UX-8: a READ-ONLY route restore (Back/Forward/deep link) is navigation the
+  // user already committed; do not gate it behind a view leave-guard discard
+  // prompt. The deferred re-entry would run with mcpxRouteApplying cleared and
+  // both double-load and push a spurious history entry.
+  if (name !== currentView && !mcpxRouteApplying) {
     const guard = viewLeaveGuards[currentView];
     if (guard) {
       const res = guard();
@@ -5807,6 +5811,10 @@ function switchView(name) {
   // suppressed: mcpxRestoreRoute owns loading, and the route is already in the URL.
   if (mcpxIsMcpView(name)) {
     if (!mcpxRouteApplying) { mcpxViewAutoLoad(name); mcpxSyncRouteFromNav(name, mcpxPrevView); }
+  } else if (!mcpxRouteApplying && String(location.hash || '').indexOf('#mcp/') === 0) {
+    // Leaving MCP for a non-MCP view: drop the stale #mcp/ fragment so a reload or
+    // bookmark shows this non-MCP view, not the previous MCP route.
+    try { history.replaceState(null, '', location.pathname + location.search); } catch (_) {}
   }
   if (name === 'upstream')       loadUpstream();
   if (name === 'cluster')        loadCluster();
@@ -17958,7 +17966,6 @@ function mcpxCapFrames(){ while(mcpxFrames.length>mcpxMaxDepth) mcpxFrames.splic
 // throwing. Candidate policy source, simulation corpus, config drafts, tokens,
 // credentials, raw errors and free-form text are NEVER serialized. Non-MCP views
 // are untouched by this router.
-var MCPX_ROUTE_VER=1;   // versioned contract; unknown future keys are dropped, not fatal
 var MCPX_V2S={'mcp-overview':'overview','mcp-decisions':'activity','mcp-servers':'servers','mcp-policies':'policy','mcp-approvals':'approvals','mcp-health':'health','mcp-rollout':'rollout','mcp-management':'management','mcp-settings':'settings'};
 var MCPX_S2V={}; Object.keys(MCPX_V2S).forEach(function(k){ MCPX_S2V[MCPX_V2S[k]]=k; });
 var mcpxRouteApplying=false;   // reentrancy guard: switchView must not re-push while restoring
@@ -18852,8 +18859,9 @@ async function mcpxOpenRollback(){
     confirmPhrase: disabled ? null : ('ROLLBACK '+mcpxCapUpper(cap)),
     confirmDisabled: disabled, confirmLabel:'Request rollback',
     request: target ? { url:'/api/mcp/rollback', body:{capability:cap, target_hash:target.hash} } : { url:'/api/mcp/rollback', body:{capability:cap} },
-    // No card mirror here: the refresh below repaints mcp-distribution-status with
-    // the real distribution state, which is more truthful than echoing the title.
+    // No card mirror here: the refresh below re-renders the structured Rollout &
+    // Fleet screen with the real distribution state, which is more truthful than
+    // echoing the title.
     classify:mcpxClassifyRollback(cap), onDone:mcpxDangerRefreshDistribution
   });
 }
@@ -20076,6 +20084,7 @@ async function mcpxPolRefreshActive(){
   if(myTicket!==mcpxPol.ticket) return;
   mcpxPol.activeErr=mcpxRfErr(d); mcpxPol.active=mcpxPol.activeErr?null:d;
   mcpxPolRender();
+  mcpxAnnounce(mcpxPol.activeErr?('Active '+mcpxPol.cap+' policy unavailable'):('Active '+mcpxPol.cap+' policy loaded'));
   var asof=document.getElementById('mcpx-pol-asof'); if(asof) asof.textContent='as of '+mcpxNow();
 }
 function mcpxPolStateChip(){
