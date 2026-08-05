@@ -108,11 +108,14 @@ func SetWriteFailureObserver(fn func(path string, err error)) {
 // /metrics so the gap is never silent.
 func WriteErrors() int64 { return atomic.LoadInt64(&writeErrors) }
 
-// countWriteError charges n lost entries, logs the first failure only, and
+// countWriteError charges ONE lost entry, logs the first failure only, and
 // notifies the observer. Never panics on a panicking observer: audit loss must
 // not take down the admin plane it is recording.
-func countWriteError(n int64, path string, err error) {
-	atomic.AddInt64(&writeErrors, n)
+//
+// Unlike internal/reqlog's batched equivalent, this always charges exactly one:
+// audit persistence is per-entry and unbuffered, so there is no batch to lose.
+func countWriteError(path string, err error) {
+	atomic.AddInt64(&writeErrors, 1)
 	if writeErrLogged.CompareAndSwap(false, true) {
 		// CWE-117: the error text embeds the operator-configured path and, for
 		// a wrapped syscall error, arbitrary OS-supplied bytes. Sanitise it
@@ -215,7 +218,7 @@ func Add(e Entry) {
 			// Defensive: Entry is all scalars today, so this cannot fail in
 			// practice. It was nevertheless a silent-drop branch — the entry
 			// never reaches the file — so it is charged like any other loss.
-			countWriteError(1, path, fmt.Errorf("marshal audit entry: %w", err))
+			countWriteError(path, fmt.Errorf("marshal audit entry: %w", err))
 		default:
 			b = append(b, '\n')
 			n, werr := f.Write(b)
@@ -226,9 +229,9 @@ func Add(e Entry) {
 			// rather than trusting every implementation to do so.
 			switch {
 			case werr != nil:
-				countWriteError(1, path, werr)
+				countWriteError(path, werr)
 			case n < len(b):
-				countWriteError(1, path, io.ErrShortWrite)
+				countWriteError(path, io.ErrShortWrite)
 			}
 		}
 	}

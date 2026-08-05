@@ -275,12 +275,13 @@ func TestCountWriteError_LogsOnlyTheFirst(t *testing.T) {
 	}
 	writeErrLogged.Store(false)
 
-	countWriteError(1, "/data/audit.jsonl", io.ErrShortWrite)
+	countWriteError("/data/audit.jsonl", io.ErrShortWrite)
 	if !writeErrLogged.Load() {
 		t.Fatal("first failure did not consume the one-shot log gate")
 	}
-	countWriteError(4, "/data/audit.jsonl", io.ErrShortWrite)
-	if got := WriteErrors(); got != 5 {
-		t.Fatalf("WriteErrors() = %d; want 5 (every failure counted, only the first logged)", got)
+	countWriteError("/data/audit.jsonl", io.ErrShortWrite)
+	countWriteError("/data/audit.jsonl", io.ErrShortWrite)
+	if got := WriteErrors(); got != 3 {
+		t.Fatalf("WriteErrors() = %d; want 3 (every failure counted, only the first logged)", got)
 	}
 }
