@@ -18054,7 +18054,7 @@ async function mcpxApplyRoute(route){
 }
 // mcpxPreseedRoute: set input values + capability state BEFORE the loader runs.
 // Capability is set DIRECTLY (never via mcpxPolSelectCap) so restore never triggers
-// the draft-discard confirm() and never early-returns.
+// the draft-discard confirmation prompt and never early-returns.
 function mcpxPreseedRoute(slug, p){
   var setv=function(id,v){ var e=document.getElementById(id); if(e) e.value=(v==null?'':v); };
   if(slug==='activity'){
