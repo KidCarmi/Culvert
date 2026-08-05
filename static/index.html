@@ -653,6 +653,50 @@ table.mcpx-appr-tbl tr.mcpx-appr-row:focus-visible{outline:2px solid var(--accen
 .mcpx-appr-unavail{color:var(--warn);font-size:.74rem;font-weight:600}
 .mcpx-actwrap.drawer-open table.mcpx-appr-tbl{width:calc(100% - 372px)}
 .mcpx-drawer-body dl.mcpx-rf-dl{margin-bottom:2px}
+table.mcpx-inv-tbl{width:100%;border-collapse:collapse;font-size:.74rem;margin:6px 0 14px}
+table.mcpx-inv-tbl caption{text-align:left;font-size:.66rem;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);font-weight:700;padding:4px 0}
+table.mcpx-inv-tbl th{text-align:left;font-size:.58rem;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);font-weight:700;padding:6px 10px;border-bottom:1px solid var(--border)}
+table.mcpx-inv-tbl td{padding:6px 10px;border-bottom:1px solid var(--border);white-space:nowrap}
+table.mcpx-inv-tbl tr.mcpx-inv-row{cursor:pointer}
+table.mcpx-inv-tbl tr.mcpx-inv-row:hover,table.mcpx-inv-tbl tr.mcpx-inv-row.sel{background:var(--surface2)}
+table.mcpx-inv-tbl tr.mcpx-inv-row:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.mcpx-actwrap.drawer-open table.mcpx-inv-tbl{width:calc(100% - 372px)}
+.mcpx-inv-flt{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:8px 0}
+.mcpx-inv-flt input,.mcpx-inv-flt select{font-size:.74rem;padding:3px 6px;border:1px solid var(--border);border-radius:6px;background:var(--surface2);color:var(--text)}
+.mcpx-cards2{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px}
+.mcpx-meter{display:flex;align-items:center;gap:10px;margin:3px 0}
+.mcpx-meter-lbl{font-size:.7rem;color:var(--muted);min-width:120px}
+.mcpx-meter-track{flex:1;height:7px;background:var(--surface2);border:1px solid var(--border);border-radius:999px;overflow:hidden;min-width:90px}
+.mcpx-meter-fill{height:100%;background:var(--ok);border-radius:999px}
+.mcpx-meter-fill.warn{background:var(--warn)}.mcpx-meter-fill.crit{background:var(--crit)}
+.mcpx-meter-val{font-size:.68rem;color:var(--muted);white-space:nowrap;min-width:96px;text-align:right}
+.mcpx-meter-na{font-size:.7rem;color:var(--muted)}
+table.mcpx-cat-tbl{width:100%;border-collapse:collapse;font-size:.74rem;margin-top:8px}
+table.mcpx-cat-tbl th{text-align:left;font-size:.58rem;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);font-weight:700;padding:6px 10px;border-bottom:1px solid var(--border)}
+table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
+.mcpx-cfg-fs{border:1px solid var(--border);border-radius:var(--radius);padding:12px 16px;margin-bottom:14px}
+.mcpx-cfg-fs legend{font-size:.72rem;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);padding:0 6px}
+.mcpx-cfg-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px 18px}
+.mcpx-cfg-f{display:flex;flex-direction:column;gap:3px}
+.mcpx-cfg-f label{font-size:.68rem;letter-spacing:.03em;text-transform:uppercase;color:var(--muted);font-weight:700}
+.mcpx-cfg-f input,.mcpx-cfg-f select{font-size:.78rem;padding:5px 8px;border:1px solid var(--border);border-radius:6px;background:var(--surface2);color:var(--text)}
+.mcpx-cfg-f input:disabled,.mcpx-cfg-f select:disabled{opacity:.6;cursor:not-allowed}
+.mcpx-cfg-f .mcpx-cfg-hint{font-size:.66rem;color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0}
+.mcpx-cfg-f.err input,.mcpx-cfg-f.err select{border-color:var(--crit)}
+.mcpx-cfg-nonloop{font-size:.7rem;color:var(--warn);font-weight:700}
+.mcpx-pol-src{width:100%;min-height:150px;font-family:var(--mono,monospace);font-size:.74rem;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);padding:9px 11px;resize:vertical}
+.mcpx-pol-src:focus{border-color:var(--accent);box-shadow:var(--focus-ring);outline:none}
+.mcpx-pol-state{font-size:.66rem;text-transform:uppercase;letter-spacing:.05em;font-weight:700;padding:2px 8px;border-radius:6px;border:1px solid var(--border);color:var(--muted)}
+.mcpx-pol-state.valid{color:var(--ok);border-color:var(--ok)}
+.mcpx-pol-state.invalid,.mcpx-pol-state.stale{color:var(--crit);border-color:var(--crit)}
+.mcpx-pol-case{border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin:6px 0;background:var(--surface2)}
+.mcpx-pol-case-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:6px 12px}
+.mcpx-pol-case-f{display:flex;flex-direction:column;gap:2px}
+.mcpx-pol-case-f label{font-size:.62rem;text-transform:uppercase;letter-spacing:.03em;color:var(--muted);font-weight:700}
+.mcpx-pol-case-f input,.mcpx-pol-case-f select{font-size:.74rem;padding:4px 6px;border:1px solid var(--border);border-radius:6px;background:var(--surface1);color:var(--text)}
+.mcpx-pol-cmp{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0}
+.mcpx-pol-cmp .mcpx-rf-count.newallow{border-color:var(--crit)}
+.mcpx-pol-cmp .mcpx-rf-count.newallow .n{color:var(--crit)}
 </style>
 </head>
 <body>
@@ -3615,11 +3659,24 @@ Firefox (all platforms):
     </div>
     <div class="view" id="view-mcp-servers">
       <div class="panel"><h3>MCP Servers &amp; Tools</h3>
-        <label>Tenant <input id="mcp-srv-tenant" placeholder="tenant" /></label>
-        <button class="btn" data-click="loadMCPServers">Load servers</button>
-        <button class="btn" data-click="loadMCPTools">Load tools</button>
-        <div id="mcp-servers-status" class="muted"></div>
-        <pre class="mono" id="mcp-servers-out" style="white-space:pre-wrap"></pre>
+        <p class="muted">Read-only inventory for one tenant. Only safe identity and lifecycle fields are shown; raw endpoints, pinned identity material, credentials, and full tool schemas are never exposed. There are no inventory mutation actions in V1.</p>
+        <div class="mcpx-rf-bar">
+          <label>Tenant <input id="mcp-srv-tenant" placeholder="tenant" /></label>
+          <button class="btn sm" data-click="mcpxInvLoad">Load</button>
+          <span id="mcpx-inv-asof" class="mcpx-asof"></span>
+        </div>
+        <div id="mcpx-inv-src" class="muted" aria-live="polite"></div>
+        <div class="mcpx-actwrap has-drawer" id="mcpx-inv-wrap">
+          <div id="mcpx-inv-root" aria-live="polite"></div>
+          <div class="mcpx-drawer" id="mcpx-inv-drawer" tabindex="-1" role="region" aria-label="inventory detail"></div>
+        </div>
+        <details class="mcpx-legacy">
+          <summary>Raw diagnostics &amp; legacy inventory</summary>
+          <button class="btn" data-click="loadMCPServers">Load servers (raw)</button>
+          <button class="btn" data-click="loadMCPTools">Load tools (raw)</button>
+          <div id="mcp-servers-status" class="muted"></div>
+          <pre class="mono" id="mcp-servers-out" style="white-space:pre-wrap"></pre>
+        </details>
       </div>
     </div>
     <div class="view" id="view-mcp-decisions">
@@ -3639,16 +3696,31 @@ Firefox (all platforms):
       </div>
     </div>
     <div class="view" id="view-mcp-policies">
-      <div class="panel"><h3>MCP Policies &amp; Simulator</h3>
-        <label>Capability
-          <select id="mcp-pol-cap"><option>gateway</option><option>management</option></select></label>
-        <button class="btn" data-click="loadMCPPolicy">Current policy</button>
-        <div><textarea id="mcp-pol-candidate" rows="6" style="width:100%" placeholder='candidate policy JSON'></textarea></div>
-        <button class="btn" data-min-role="operator" data-click="mcpValidate">Validate</button>
-        <button class="btn" data-min-role="operator" data-click="mcpSimulate">Simulate (candidate)</button>
-        <button class="btn" data-min-role="operator" data-click="mcpCompare">Compare active&rarr;candidate</button>
-        <div id="mcp-policies-status" class="muted"></div>
-        <pre class="mono" id="mcp-policies-out" style="white-space:pre-wrap"></pre>
+      <div class="panel"><h3>MCP Policy &amp; Simulator</h3>
+        <p class="muted">A staged candidate workflow: review the active policy summary, draft a candidate, validate it, simulate a bounded test corpus, compare it against the active policy, and (Gateway only) create a publication request. A candidate is never active, validation is never publication, and a publication request is never approved or published.</p>
+        <div class="mcpx-rf-bar">
+          <span class="mcpx-rf-caps" role="tablist" aria-label="Capability">
+            <button type="button" class="mcpx-rf-captab active" data-click="mcpxPolSelectCap" data-arg="gateway" role="tab" aria-selected="true">Gateway</button>
+            <button type="button" class="mcpx-rf-captab" data-click="mcpxPolSelectCap" data-arg="management" role="tab" aria-selected="false">Management</button>
+          </span>
+          <input type="hidden" id="mcpx-pol-cap" value="gateway">
+          <label>Tenant <input id="mcpx-pol-tenant" placeholder="tenant (for publication)" /></label>
+          <button class="btn sm ghost" data-click="mcpxPolRefreshActive">Refresh active</button>
+          <span id="mcpx-pol-asof" class="mcpx-asof"></span>
+        </div>
+        <div id="mcpx-pol-root" aria-live="polite"></div>
+        <details class="mcpx-legacy">
+          <summary>Raw diagnostics &amp; legacy JSON editor</summary>
+          <label>Capability
+            <select id="mcp-pol-cap"><option>gateway</option><option>management</option></select></label>
+          <button class="btn" data-click="loadMCPPolicy">Current policy</button>
+          <div><textarea id="mcp-pol-candidate" rows="6" style="width:100%" placeholder='candidate policy JSON'></textarea></div>
+          <button class="btn" data-min-role="operator" data-click="mcpValidate">Validate</button>
+          <button class="btn" data-min-role="operator" data-click="mcpSimulate">Simulate (candidate)</button>
+          <button class="btn" data-min-role="operator" data-click="mcpCompare">Compare active&rarr;candidate</button>
+          <div id="mcp-policies-status" class="muted"></div>
+          <pre class="mono" id="mcp-policies-out" style="white-space:pre-wrap"></pre>
+        </details>
       </div>
     </div>
     <div class="view" id="view-mcp-approvals">
@@ -3684,12 +3756,20 @@ Firefox (all platforms):
     </div>
     <div class="view" id="view-mcp-health">
       <div class="panel"><h3>MCP Health &amp; Durability</h3>
-        <button class="btn" data-click="loadMCPHealth">Refresh</button>
-        <p class="muted">Gateway and Management health are capability-isolated. distribution_state is <code>local_only</code>.</p>
-        <div id="mcp-health-status" class="muted"></div>
-        <pre class="mono" id="mcp-health-out" style="white-space:pre-wrap"></pre>
+        <p class="muted">Gateway and Management runtime and durability are capability-isolated and shown independently. Detailed fleet acknowledgement lives on the Rollout &amp; Fleet screen; this view links to it rather than duplicating it.</p>
+        <div class="mcpx-rf-bar">
+          <button class="btn sm" data-click="mcpxHealthLoad">Refresh</button>
+          <span id="mcpx-health-asof" class="mcpx-asof"></span>
+        </div>
+        <div id="mcpx-health-root" aria-live="polite"></div>
+        <details class="mcpx-legacy">
+          <summary>Raw diagnostics &amp; legacy health JSON</summary>
+          <button class="btn" data-click="loadMCPHealth">Refresh (raw)</button>
+          <div id="mcp-health-status" class="muted"></div>
+          <pre class="mono" id="mcp-health-out" style="white-space:pre-wrap"></pre>
+        </details>
       </div>
-      <div class="panel"><h3>Signed CP&#8594;DP Distribution &amp; Rollback</h3>
+      <details class="mcpx-legacy panel"><summary>Signed CP&#8594;DP Distribution &amp; Rollback (admin)</summary>
         <button class="btn" data-click="loadMCPDistribution">Refresh status</button>
         <p class="muted">Read-only signed-distribution status per capability: content hash, epoch, revision tuple, signing key id, minimum DP version, rollback availability. No private key, raw signature, or full raw snapshot is exposed. Rollback uses the four-eyes publication workflow (admin only); Management MCP may read this health but never publish or roll back.</p>
         <div id="mcp-distribution-status" class="muted"></div>
@@ -3700,7 +3780,7 @@ Firefox (all platforms):
           <select id="mcp-rollback-capability"><option value="gateway">gateway</option><option value="management">management</option></select>
           <button class="btn" data-min-role="admin" data-click="mcpxOpenRollback">Request rollback&#8230;</button>
         </div>
-      </div>
+      </details>
     </div>
     <div class="view" id="view-mcp-rollout">
       <!-- PR-UX-5 truthful Rollout & Fleet: structured mode triad, scope, candidate
@@ -3756,19 +3836,38 @@ Firefox (all platforms):
     </div>
     <div class="view" id="view-mcp-management">
       <div class="panel"><h3>Management MCP Access</h3>
-        <button class="btn" data-click="loadMCPManagement">Refresh</button>
-        <p class="muted">Fixed read-only tool catalog. No mutation tools are exposed.</p>
-        <div id="mcp-management-status" class="muted"></div>
-        <pre class="mono" id="mcp-management-out" style="white-space:pre-wrap"></pre>
+        <p class="muted">Management MCP is non-mutating in V1. This is an access and capability inventory, not an MCP client console: there are no tool-invocation, mutation, publication, or activation controls.</p>
+        <div class="mcpx-rf-bar">
+          <button class="btn sm" data-click="mcpxMgmtLoad">Refresh</button>
+          <span id="mcpx-mgmt-asof" class="mcpx-asof"></span>
+        </div>
+        <div id="mcpx-mgmt-root" aria-live="polite"></div>
+        <details class="mcpx-legacy">
+          <summary>Raw diagnostics &amp; legacy access</summary>
+          <button class="btn" data-click="loadMCPManagement">Refresh (raw)</button>
+          <div id="mcp-management-status" class="muted"></div>
+          <pre class="mono" id="mcp-management-out" style="white-space:pre-wrap"></pre>
+        </details>
       </div>
     </div>
     <div class="view" id="view-mcp-settings">
       <div class="panel"><h3>MCP Listener Settings</h3>
-        <p class="muted">Gateway and Management are separate and default disabled. No wildcard bind, no shared port; Management mutation stays disabled in V1. Local node only (<code>distribution_not_implemented</code>).</p>
-        <button class="btn" data-click="loadMCPConfig">Load current</button>
-        <div><textarea id="mcp-cfg-json" rows="16" style="width:100%" placeholder="MCP config JSON"></textarea></div>
-        <button class="btn" data-min-role="admin" data-click="mcpSaveConfig">Apply (local only)</button>
-        <div id="mcp-settings-status" class="muted"></div>
+        <p class="muted">Gateway and Management are separate and default disabled. Storing configuration is node-local only: it does NOT bind, activate, or restart a live listener, and it never distributes CP to DP. Management mutation stays disabled in V1 and cannot be enabled here. No wildcard bind and no shared endpoint; the appliance validates and replaces the complete configuration atomically.</p>
+        <div class="mcpx-rf-bar">
+          <button class="btn sm" data-click="mcpxCfgLoad">Load current</button>
+          <button class="btn sm primary" data-min-role="admin" data-click="mcpxCfgSave">Store node-local configuration</button>
+          <span id="mcpx-cfg-asof" class="mcpx-asof"></span>
+        </div>
+        <div id="mcpx-cfg-src" class="muted" aria-live="polite"></div>
+        <div id="mcpx-cfg-root" aria-live="polite"></div>
+        <div id="mcpx-cfg-result" class="mcpx-dlg-result" role="status" aria-live="polite" aria-atomic="true"></div>
+        <details class="mcpx-legacy">
+          <summary>Raw diagnostics &amp; legacy JSON editor</summary>
+          <button class="btn" data-click="loadMCPConfig">Load current (raw)</button>
+          <div><textarea id="mcp-cfg-json" rows="16" style="width:100%" placeholder="MCP config JSON"></textarea></div>
+          <button class="btn" data-min-role="admin" data-click="mcpSaveConfig">Apply raw (local only)</button>
+          <div id="mcp-settings-status" class="muted"></div>
+        </details>
       </div>
     </div>
 
@@ -5101,6 +5200,20 @@ document.addEventListener('click', e => {
     case 'mcpxApprLoad':      mcpxApprLoad(); break;
     case 'mcpxApprSetFilter': mcpxApprSetFilter(arg); break;
     case 'mcpxApprCloseDrawer': mcpxApprCloseDrawer(); break;
+    case 'mcpxInvLoad':       mcpxInvLoad(); break;
+    case 'mcpxInvCloseDrawer': mcpxInvCloseDrawer(); break;
+    case 'mcpxMgmtLoad':      mcpxMgmtLoad(); break;
+    case 'mcpxHealthLoad':    mcpxHealthLoad(); break;
+    case 'mcpxCfgLoad':       mcpxCfgLoad(); break;
+    case 'mcpxCfgSave':       mcpxCfgSave(); break;
+    case 'mcpxPolSelectCap':  mcpxPolSelectCap(arg); break;
+    case 'mcpxPolRefreshActive': mcpxPolRefreshActive(); break;
+    case 'mcpxPolValidate':   mcpxPolValidate(); break;
+    case 'mcpxPolAddCase':    mcpxPolAddCase(); break;
+    case 'mcpxPolResetCorpus': mcpxPolResetCorpus(); break;
+    case 'mcpxPolSimulate':   mcpxPolSimulate(); break;
+    case 'mcpxPolCompare':    mcpxPolCompare(); break;
+    case 'mcpxPolCreateRequest': mcpxPolCreateRequest(); break;
     case 'loadMCPHealth':     loadMCPHealth(); break;
     case 'loadMCPDistribution': loadMCPDistribution(); break;
     case 'loadMCPRollout':    loadMCPRollout(); break;
@@ -5896,14 +6009,14 @@ function switchView(name) {
   if (name === 'policy-tester')  loadPolicyProviderOptions();
   if (name === 'ca-mgmt')        loadCAMgmt();
   if (name === 'mcp-overview')   { renderMCPCommandCenter(); loadMCPOverview(); }
-  if (name === 'mcp-servers')    loadMCPServers();
   if (name === 'mcp-rollout')    mcpxRenderRolloutFleet();
   if (name === 'mcp-decisions')  { renderMCPActivity(); /* awaits tenant input */ }
-  if (name === 'mcp-policies')   loadMCPPolicy();
   if (name === 'mcp-approvals')  { if (mcpxApprTenant()) mcpxApprLoad(); /* else awaits tenant input */ }
-  if (name === 'mcp-health')     loadMCPHealth();
-  if (name === 'mcp-management') loadMCPManagement();
-  if (name === 'mcp-settings')   loadMCPConfig();
+  if (name === 'mcp-servers')    { if (mcpxInvTenant()) mcpxInvLoad(); /* else awaits tenant input */ }
+  if (name === 'mcp-health')     mcpxHealthLoad();
+  if (name === 'mcp-management')  mcpxMgmtLoad();
+  if (name === 'mcp-settings')    mcpxCfgLoad();
+  if (name === 'mcp-policies')    mcpxPolRefreshActive();
   if (name === 'upstream')       loadUpstream();
   if (name === 'cluster')        loadCluster();
   if (name === 'cdr')            loadCDRData();
@@ -18452,6 +18565,7 @@ function mcpxPaintTool(drawer, frame){
 
 document.addEventListener('keydown', function(e){
   if(e.key==='Escape'){
+    var iv=document.getElementById('mcpx-inv-drawer'); if(iv && iv.classList.contains('open')){ mcpxInvCloseDrawer(); return; }
     var ad=document.getElementById('mcpx-appr-drawer'); if(ad && ad.classList.contains('open')){ mcpxApprCloseDrawer(); return; }
     var od=document.getElementById('mcpx-drawer'); if(mcpxFrames.length && od && od.classList.contains('open')){ mcpxPopFrame(); return; }
   }
@@ -18623,7 +18737,7 @@ function mcpxDangerSubmit(cfg){
   mcpxDangerSetResult('', 'Submitting…', 'Contacting the appliance. Do not close until the result returns.');
   fetch(cfg.request.url, { method:'POST', credentials:'same-origin',
       headers:{ 'Content-Type':'application/json', 'X-CSRF-Token':(window.csrfToken||'') },
-      body: JSON.stringify(cfg.request.body||{}) })
+      body: (cfg.request.rawBody!=null ? cfg.request.rawBody : JSON.stringify(cfg.request.body||{})) })
     .then(function(r){ return r.text().then(function(t){ return {status:r.status, text:t}; }); })
     .then(function(res){
       // Superseded by an explicit cancel / reopen: do NOT render into the (now
@@ -19474,6 +19588,859 @@ function mcpxClassifyApproval(a, action){
     if(status===400) return {kind:'crit', title:'Request rejected', detail:'The appliance rejected the request ('+mcpxReasonText(text)+').', retryable:false};
     return {kind:'crit', title:'Decision failed', detail:'Unexpected status; the request state is unchanged unless a refresh shows otherwise.', retryable:true};
   };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PR-UX-7 Servers & Tools structured inventory
+// Structured tables over the REAL /api/mcp/servers and /api/mcp/tools, one tenant
+// at a time. Only safe ServerView/ToolView fields are shown; raw endpoints, pinned
+// identity material, credentials and full tool schemas are never surfaced. Servers
+// and tools load INDEPENDENTLY: a tool-read failure never erases loaded servers, and
+// a failed read renders "unavailable" (never an empty inventory). A request ticket
+// guards tenant isolation. No inventory mutation actions exist in V1. textContent only.
+// ═══════════════════════════════════════════════════════════════════════════
+var mcpxInvTicket=0, mcpxInvData={srv:null,tool:null,tenant:''}, mcpxInvOpener=null, mcpxInvFlt={cap:'',disp:'',q:''};
+function mcpxInvTenant(){ var e=document.getElementById('mcp-srv-tenant'); return ((e&&e.value)||'').trim(); }
+async function mcpxInvLoad(){
+  var root=document.getElementById('mcpx-inv-root'); if(!root) return;
+  var t=mcpxInvTenant(), src=document.getElementById('mcpx-inv-src');
+  mcpxInvCloseDrawer();
+  if(!t){ root.textContent=''; if(src) src.textContent='Enter a tenant, then Load.'; return; }
+  var myTicket=++mcpxInvTicket;
+  root.textContent=''; root.appendChild(mcpxEl('div','mcpx-source','Loading inventory for '+t+'…'));
+  var srv=await mcpxRfFetch('/api/mcp/servers?tenant='+encodeURIComponent(t));
+  if(myTicket!==mcpxInvTicket) return;
+  var tool=await mcpxRfFetch('/api/mcp/tools?tenant='+encodeURIComponent(t));
+  if(myTicket!==mcpxInvTicket) return;   // a newer tenant load supersedes this render
+  mcpxInvData={srv:srv, tool:tool, tenant:t};
+  mcpxInvRender();
+  var asof=document.getElementById('mcpx-inv-asof'); if(asof) asof.textContent='as of '+mcpxNow();
+}
+function mcpxInvSrcLine(){
+  var parts=[], s=mcpxInvData.srv, tl=mcpxInvData.tool;
+  if(s!=null){ parts.push(mcpxRfErr(s) ? ('Servers unavailable ('+s.__err+')') : ('Servers: '+(Array.isArray(s)?s.length:0))); }
+  if(tl!=null){ parts.push(mcpxRfErr(tl) ? ('Tools unavailable ('+tl.__err+')') : ('Tools: '+(Array.isArray(tl)?tl.length:0))); }
+  return parts.join(' · ');
+}
+function mcpxInvSetFlt(which, val){ mcpxInvFlt[which]=val; mcpxInvRender(); }
+function mcpxInvRender(){
+  var root=document.getElementById('mcpx-inv-root'); if(!root) return;
+  var src=document.getElementById('mcpx-inv-src'); if(src) src.textContent=mcpxInvSrcLine();
+  root.textContent='';
+  // Filter bar (operates on already-returned rows only; never implies server auth).
+  var flt=mcpxEl('div','mcpx-inv-flt');
+  flt.appendChild(mcpxEl('span','mcpx-rf-dd-muted','Filter:'));
+  var q=mcpxEl('input'); q.type='search'; q.placeholder='name / id contains'; q.value=mcpxInvFlt.q;
+  q.setAttribute('aria-label','filter by name or id'); q.addEventListener('input', function(){ mcpxInvFlt.q=q.value; mcpxInvRenderTables(); });
+  flt.appendChild(q);
+  var disp=mcpxEl('select'); disp.setAttribute('aria-label','tool disposition filter');
+  [['','tool: any'],['usable','usable'],['quarantined','quarantined'],['review_required','review required']].forEach(function(o){ var op=mcpxEl('option',null,o[1]); op.value=o[0]; if(o[0]===mcpxInvFlt.disp) op.selected=true; disp.appendChild(op); });
+  disp.addEventListener('change', function(){ mcpxInvFlt.disp=disp.value; mcpxInvRenderTables(); });
+  flt.appendChild(disp);
+  root.appendChild(flt);
+  var tables=mcpxEl('div'); tables.id='mcpx-inv-tables'; root.appendChild(tables);
+  mcpxInvRenderTables();
+}
+function mcpxInvMatchQ(s){ var q=(mcpxInvFlt.q||'').toLowerCase(); return !q || String(s||'').toLowerCase().indexOf(q)>=0; }
+function mcpxInvRenderTables(){
+  var host=document.getElementById('mcpx-inv-tables'); if(!host) return;
+  host.textContent='';
+  // Servers table (independent state).
+  var s=mcpxInvData.srv;
+  if(mcpxRfErr(s)){ host.appendChild(mcpxEl('div','mcpx-empty','Servers unavailable - '+s.__err+'.')); }
+  else if(Array.isArray(s)){
+    var rows=s.filter(function(x){ return mcpxInvMatchQ(x.server_id); });
+    if(!rows.length){ host.appendChild(mcpxEl('div','mcpx-empty', s.length?'No servers match the filter.':'No servers for this tenant.')); }
+    else host.appendChild(mcpxInvServerTable(rows));
+  }
+  // Tools table (independent state).
+  var tl=mcpxInvData.tool;
+  if(mcpxRfErr(tl)){ host.appendChild(mcpxEl('div','mcpx-empty','Tools unavailable - '+tl.__err+'.')); }
+  else if(Array.isArray(tl)){
+    var trows=tl.filter(function(x){ return mcpxInvMatchQ(x.name)||mcpxInvMatchQ(x.server_id); }).filter(function(x){ return !mcpxInvFlt.disp || x.disposition===mcpxInvFlt.disp; });
+    if(!trows.length){ host.appendChild(mcpxEl('div','mcpx-empty', tl.length?'No tools match the filter.':'No tools for this tenant.')); }
+    else host.appendChild(mcpxInvToolTable(trows));
+  }
+  applySessionRoleVisibilityScope('#mcpx-inv-root');
+}
+function mcpxInvServerTable(rows){
+  var tbl=mcpxEl('table','mcpx-inv-tbl'); tbl.appendChild(mcpxEl('caption',null,'Servers'));
+  var thead=mcpxEl('thead'), htr=mcpxEl('tr');
+  ['Server','Capability','Enabled','Verification','Revision','Endpoint'].forEach(function(h){ htr.appendChild(mcpxEl('th',null,h)); });
+  thead.appendChild(htr); tbl.appendChild(thead);
+  var tb=mcpxEl('tbody');
+  rows.forEach(function(sv){
+    var tr=mcpxEl('tr','mcpx-inv-row'); tr.tabIndex=0; tr.dataset.kind='server'; tr.dataset.arg=sv.server_id;
+    tr.appendChild(mcpxEl('td',null, mcpxShortHash(sv.server_id||'-')));
+    tr.appendChild(mcpxEl('td',null, sv.capability||'-'));
+    var en=mcpxEl('td'); en.appendChild(mcpxChip(sv.enabled?'enabled':'disabled', sv.enabled?'ok':'muted')); tr.appendChild(en);
+    var vr=mcpxEl('td'); vr.appendChild(mcpxChip(sv.verification||'unknown', sv.verification==='verified'?'ok':'warn')); if(sv.identity_changed){ vr.appendChild(mcpxChip('identity changed','warn')); } tr.appendChild(vr);
+    tr.appendChild(mcpxEl('td',null, String(sv.revision!=null?sv.revision:'-')));
+    tr.appendChild(mcpxEl('td',null, sv.endpoint_configured?'configured':'not configured'));
+    tr.addEventListener('click', function(){ mcpxInvOpenServer(sv); });
+    tr.addEventListener('keydown', function(e){ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); mcpxInvOpenServer(sv); } });
+    tb.appendChild(tr);
+  });
+  tbl.appendChild(tb); return tbl;
+}
+function mcpxInvToolTable(rows){
+  var tbl=mcpxEl('table','mcpx-inv-tbl'); tbl.appendChild(mcpxEl('caption',null,'Tools'));
+  var thead=mcpxEl('thead'), htr=mcpxEl('tr');
+  ['Tool','Server','Disposition','Flags','Destination','Revision'].forEach(function(h){ htr.appendChild(mcpxEl('th',null,h)); });
+  thead.appendChild(htr); tbl.appendChild(thead);
+  var tb=mcpxEl('tbody');
+  rows.forEach(function(tl){
+    var tr=mcpxEl('tr','mcpx-inv-row'); tr.tabIndex=0; tr.dataset.kind='tool'; tr.dataset.arg=tl.name;
+    tr.appendChild(mcpxEl('td',null, tl.name||'-'));
+    tr.appendChild(mcpxEl('td',null, mcpxShortHash(tl.server_id||'-')));
+    var dp=mcpxEl('td'); dp.appendChild(mcpxChip(tl.disposition||'-', tl.disposition==='usable'?'ok':'warn')); tr.appendChild(dp);
+    var fl=mcpxEl('td'); if(tl.quarantined){ fl.appendChild(mcpxChip('quarantined','crit')); } if(tl.review_required){ fl.appendChild(mcpxChip('review required','warn')); } if(!tl.quarantined&&!tl.review_required){ fl.appendChild(mcpxEl('span','mcpx-rf-dd-muted','-')); } tr.appendChild(fl);
+    tr.appendChild(mcpxEl('td',null, tl.destination_class||'-'));
+    tr.appendChild(mcpxEl('td',null, String(tl.revision!=null?tl.revision:'-')));
+    tr.addEventListener('click', function(){ mcpxInvOpenTool(tl); });
+    tr.addEventListener('keydown', function(e){ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); mcpxInvOpenTool(tl); } });
+    tb.appendChild(tr);
+  });
+  tbl.appendChild(tb); return tbl;
+}
+function mcpxInvDrawerHead(title, sub){
+  var top=mcpxEl('div','mcpx-drawer-top'), h=mcpxEl('div','mcpx-card-h');
+  h.appendChild(mcpxEl('div','mcpx-card-title', title));
+  var cb=mcpxEl('button','btn ghost sm','Close'); cb.type='button'; cb.setAttribute('data-click','mcpxInvCloseDrawer'); h.appendChild(cb);
+  top.appendChild(h); if(sub){ top.appendChild(mcpxEl('div','mcpx-dh-sub', sub)); }
+  return top;
+}
+function mcpxInvShowDrawer(){ var d=document.getElementById('mcpx-inv-drawer'), w=document.getElementById('mcpx-inv-wrap'); if(w) w.classList.add('drawer-open'); d.classList.add('open'); applySessionRoleVisibilityScope('#mcpx-inv-drawer'); try{ d.focus(); }catch(e){} }
+function mcpxInvOpenServer(sv){
+  var d=document.getElementById('mcpx-inv-drawer'); if(!d||!sv) return;
+  mcpxInvOpener=document.activeElement; d.textContent='';
+  Array.prototype.forEach.call(document.querySelectorAll('#mcpx-inv-root tr.mcpx-inv-row'), function(x){ x.classList.toggle('sel', x.dataset.kind==='server'&&x.dataset.arg===sv.server_id); });
+  d.appendChild(mcpxInvDrawerHead('Server', mcpxShortHash(sv.server_id||'-')));
+  var body=mcpxEl('div','mcpx-drawer-body'); body.style.padding='12px 16px';
+  var chips=mcpxEl('div','mcpx-btnrow');
+  chips.appendChild(mcpxChip(sv.enabled?'enabled':'disabled', sv.enabled?'ok':'muted'));
+  chips.appendChild(mcpxChip(sv.verification||'unknown', sv.verification==='verified'?'ok':'warn'));
+  if(sv.identity_changed){ chips.appendChild(mcpxChip('identity changed','warn')); }
+  body.appendChild(chips);
+  var dl=mcpxRfDL();
+  mcpxRfKv(dl,'Server id', sv.server_id); mcpxRfKv(dl,'Tenant', sv.tenant); mcpxRfKv(dl,'Capability', sv.capability);
+  mcpxRfKv(dl,'Revision', sv.revision); mcpxRfKv(dl,'Endpoint', sv.endpoint_configured?'configured':'not configured');
+  if(sv.credential_profile_ref) mcpxRfKv(dl,'Credential profile', sv.credential_profile_ref);
+  body.appendChild(dl);
+  var act=mcpxEl('div','mcpx-btnrow');
+  var vr=mcpxEl('button','btn sm','View related activity'); vr.type='button';
+  vr.addEventListener('click', function(){ mcpxInvPivotDecisions(sv.tenant||mcpxInvData.tenant, {server_id:sv.server_id}); }); act.appendChild(vr);
+  body.appendChild(act);
+  body.appendChild(mcpxEl('div','mcpx-source','From /api/mcp/servers. Only safe identity/lifecycle fields; no raw endpoint, pinned identity, credential material, IP, or liveness is exposed. No mutation action in V1.'));
+  d.appendChild(body); mcpxInvShowDrawer();
+}
+function mcpxInvOpenTool(tl){
+  var d=document.getElementById('mcpx-inv-drawer'); if(!d||!tl) return;
+  mcpxInvOpener=document.activeElement; d.textContent='';
+  Array.prototype.forEach.call(document.querySelectorAll('#mcpx-inv-root tr.mcpx-inv-row'), function(x){ x.classList.toggle('sel', x.dataset.kind==='tool'&&x.dataset.arg===tl.name); });
+  d.appendChild(mcpxInvDrawerHead('Tool', tl.name||'-'));
+  var body=mcpxEl('div','mcpx-drawer-body'); body.style.padding='12px 16px';
+  var chips=mcpxEl('div','mcpx-btnrow');
+  chips.appendChild(mcpxChip(tl.disposition||'-', tl.disposition==='usable'?'ok':'warn'));
+  if(tl.quarantined){ chips.appendChild(mcpxChip('quarantined','crit')); }
+  if(tl.review_required){ chips.appendChild(mcpxChip('review required','warn')); }
+  if(tl.destination_class){ chips.appendChild(mcpxChip('dest '+tl.destination_class,'muted')); }
+  body.appendChild(chips);
+  var dl=mcpxRfDL();
+  mcpxRfKv(dl,'Tool name', tl.name); mcpxRfKv(dl,'Server', tl.server_id);
+  mcpxRfKvHash(dl,'Fingerprint', tl.fingerprint);
+  mcpxRfKv(dl,'Disposition', tl.disposition); mcpxRfKv(dl,'Destination class', tl.destination_class);
+  mcpxRfKv(dl,'Revision', tl.revision);
+  body.appendChild(dl);
+  var act=mcpxEl('div','mcpx-btnrow');
+  if(tl.server_id){ var os=mcpxEl('button','btn sm ghost','Open server'); os.type='button'; os.addEventListener('click', function(){ var sv=(Array.isArray(mcpxInvData.srv)?mcpxInvData.srv:[]).filter(function(x){ return x.server_id===tl.server_id; })[0]; if(sv) mcpxInvOpenServer(sv); else mcpxInvPivotDecisions(mcpxInvData.tenant,{server_id:tl.server_id}); }); act.appendChild(os); }
+  if(tl.fingerprint){ var vf=mcpxEl('button','btn sm','View related activity'); vf.type='button'; vf.addEventListener('click', function(){ mcpxInvPivotDecisions(mcpxInvData.tenant, {tool_fingerprint:tl.fingerprint}); }); act.appendChild(vf); }
+  body.appendChild(act);
+  body.appendChild(mcpxEl('div','mcpx-source','From /api/mcp/tools. Only the fingerprint digest, disposition and destination class; no full schema, arguments, or output is exposed. No mutation action in V1.'));
+  d.appendChild(body); mcpxInvShowDrawer();
+}
+function mcpxInvCloseDrawer(){
+  var d=document.getElementById('mcpx-inv-drawer'); if(!d) return;
+  d.classList.remove('open'); d.textContent='';
+  var w=document.getElementById('mcpx-inv-wrap'); if(w) w.classList.remove('drawer-open');
+  Array.prototype.forEach.call(document.querySelectorAll('#mcpx-inv-root tr.mcpx-inv-row.sel'), function(x){ x.classList.remove('sel'); });
+  if(mcpxInvOpener && mcpxInvOpener.focus){ try{ mcpxInvOpener.focus(); }catch(e){} }
+}
+function mcpxInvPivotDecisions(tenant, patch){
+  if(!tenant) return;
+  mcpxInvCloseDrawer();
+  var te=document.getElementById('mcp-dec-tenant'); if(te) te.value=tenant;
+  if(typeof switchView==='function') switchView('mcp-decisions');
+  mcpxNavBack=[]; mcpxFrames=[]; mcpxDrawerReq++;
+  mcpxNav={tenant:tenant, filter:patch||{}, label:(typeof mcpxFilterLabel==='function'?mcpxFilterLabel(patch||{}):''), selEvent:null};
+  mcpxRenderActivity();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PR-UX-7 Management MCP Access (read-only posture + fixed tool catalog)
+// A failed read renders "unavailable" - NEVER "mutation off". Mutation is shown
+// prominently as text. There is no invoke, mutation, publication, or activation
+// control (Management is non-mutating in V1). textContent only.
+// ═══════════════════════════════════════════════════════════════════════════
+var mcpxMgmtTicket=0, mcpxMgmtFlt={role:'',cls:'',q:''};
+async function mcpxMgmtLoad(){
+  var root=document.getElementById('mcpx-mgmt-root'); if(!root) return;
+  var myTicket=++mcpxMgmtTicket;
+  root.textContent=''; root.appendChild(mcpxEl('div','mcpx-source','Loading management access…'));
+  var d=await mcpxRfFetch('/api/mcp/management-access');
+  if(myTicket!==mcpxMgmtTicket) return;
+  root.textContent='';
+  if(mcpxRfErr(d)){ root.appendChild(mcpxEl('div','mcpx-empty','Management access unavailable - '+d.__err+'. (This is an unavailable read, NOT a mutation-off state.)')); return; }
+  var acc=d.access||{};
+  var card=mcpxRfCard('Access posture','Read-only. Endpoint-bound reflects a complete bind configuration, not public reachability, liveness, or health.');
+  var chips=mcpxEl('div','mcpx-btnrow');
+  chips.appendChild(mcpxChip(acc.enabled?'enabled':'disabled', acc.enabled?'ok':'muted'));
+  chips.appendChild(mcpxChip('Mutation: '+(acc.mutation_enabled?'ENABLED':'OFF'), acc.mutation_enabled?'crit':'ok'));
+  chips.appendChild(mcpxChip('endpoint '+(acc.endpoint_bound?'bound':'not bound'),'muted'));
+  card.appendChild(chips);
+  var dl=mcpxRfDL();
+  mcpxRfKv(dl,'Default minimum role', acc.default_min_role);
+  mcpxRfKv(dl,'Maximum output bytes', acc.output_max_bytes!=null?mcpxFmtBytes(acc.output_max_bytes):'-');
+  mcpxRfKv(dl,'Mutation enabled', acc.mutation_enabled?'true':'false (Management is non-mutating in V1)');
+  card.appendChild(dl);
+  card.appendChild(mcpxEl('div','mcpx-source','From /api/mcp/management-access. mutation_tools: '+(d.mutation_tools!=null?d.mutation_tools:0)+' (the catalog exposes no mutation tools).'));
+  root.appendChild(card);
+  root.appendChild(mcpxMgmtCatalog(Array.isArray(d.tools)?d.tools:[]));
+  var asof=document.getElementById('mcpx-mgmt-asof'); if(asof) asof.textContent='as of '+mcpxNow();
+}
+function mcpxMgmtCatalog(tools){
+  var card=mcpxRfCard('Management tool catalog','Fixed read-only capability inventory. Every tool is read-only or draft/validate/simulate; there is no mutation class and no tool-invocation control.');
+  var flt=mcpxEl('div','mcpx-inv-flt'); flt.appendChild(mcpxEl('span','mcpx-rf-dd-muted','Filter:'));
+  var q=mcpxEl('input'); q.type='search'; q.placeholder='name / scope contains'; q.value=mcpxMgmtFlt.q; q.setAttribute('aria-label','filter management tools');
+  q.addEventListener('input', function(){ mcpxMgmtFlt.q=q.value; mcpxMgmtCatBody(card, tools); }); flt.appendChild(q);
+  var roles=['','viewer','operator','admin','none'];
+  var rs=mcpxEl('select'); rs.setAttribute('aria-label','min role filter');
+  roles.forEach(function(r){ var o=mcpxEl('option',null, r?('role: '+r):'role: any'); o.value=r; if(r===mcpxMgmtFlt.role) o.selected=true; rs.appendChild(o); });
+  rs.addEventListener('change', function(){ mcpxMgmtFlt.role=rs.value; mcpxMgmtCatBody(card, tools); }); flt.appendChild(rs);
+  var cs=mcpxEl('select'); cs.setAttribute('aria-label','class filter');
+  [['','class: any'],['read-only','read-only'],['draft','draft']].forEach(function(o){ var op=mcpxEl('option',null,o[1]); op.value=o[0]; if(o[0]===mcpxMgmtFlt.cls) op.selected=true; cs.appendChild(op); });
+  cs.addEventListener('change', function(){ mcpxMgmtFlt.cls=cs.value; mcpxMgmtCatBody(card, tools); }); flt.appendChild(cs);
+  card.appendChild(flt);
+  var body=mcpxEl('div'); body.id='mcpx-mgmt-catbody'; card.appendChild(body);
+  mcpxMgmtCatBody(card, tools);
+  return card;
+}
+function mcpxMgmtCatBody(card, tools){
+  var body=card.querySelector('#mcpx-mgmt-catbody'); if(!body) return; body.textContent='';
+  var q=(mcpxMgmtFlt.q||'').toLowerCase();
+  var rows=tools.filter(function(t){
+    if(mcpxMgmtFlt.role && t.min_role!==mcpxMgmtFlt.role) return false;
+    if(mcpxMgmtFlt.cls && t.class!==mcpxMgmtFlt.cls) return false;
+    if(q && String(t.name||'').toLowerCase().indexOf(q)<0 && String(t.scope||'').toLowerCase().indexOf(q)<0) return false;
+    return true;
+  });
+  if(!rows.length){ body.appendChild(mcpxEl('div','mcpx-empty', tools.length?'No tools match the filter.':'Empty catalog.')); return; }
+  var tbl=mcpxEl('table','mcpx-cat-tbl'); var thead=mcpxEl('thead'), htr=mcpxEl('tr');
+  ['Tool','Minimum role','Scope','Class'].forEach(function(h){ htr.appendChild(mcpxEl('th',null,h)); });
+  thead.appendChild(htr); tbl.appendChild(thead);
+  var tb=mcpxEl('tbody');
+  rows.forEach(function(t){
+    var tr=mcpxEl('tr');
+    tr.appendChild(mcpxEl('td',null,t.name||'-'));
+    tr.appendChild(mcpxEl('td',null,t.min_role||'-'));
+    tr.appendChild(mcpxEl('td',null,t.scope||'-'));
+    var cl=mcpxEl('td'); cl.appendChild(mcpxChip(t.class||'-', t.class==='draft'?'warn':'muted')); tr.appendChild(cl);
+    tb.appendChild(tr);
+  });
+  tbl.appendChild(tb); body.appendChild(tbl);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PR-UX-7 MCP Health & Durability (capability-isolated cards + durability meters)
+// A failed read renders "unavailable" - NEVER zero sessions / zero durability use.
+// Gateway and Management are independent. Durability meters guard zero/absent quota
+// (no divide-by-zero) and use text + meter (never color alone). Detailed fleet ack
+// lives on the Rollout & Fleet screen (single interpretation); this view links to it.
+// ═══════════════════════════════════════════════════════════════════════════
+var mcpxHealthTicket=0;
+function mcpxFmtBytes(n){
+  n=Number(n)||0; if(n<1024) return n+' B';
+  var u=['KiB','MiB','GiB','TiB'], i=-1; do{ n/=1024; i++; }while(n>=1024 && i<u.length-1);
+  return n.toFixed(n<10?1:0)+' '+u[i];
+}
+async function mcpxHealthLoad(){
+  var root=document.getElementById('mcpx-health-root'); if(!root) return;
+  var myTicket=++mcpxHealthTicket;
+  root.textContent=''; root.appendChild(mcpxEl('div','mcpx-source','Loading health…'));
+  var d=await mcpxRfFetch('/api/mcp/health');
+  if(myTicket!==mcpxHealthTicket) return;
+  root.textContent='';
+  if(mcpxRfErr(d)){ root.appendChild(mcpxEl('div','mcpx-empty','Health unavailable - '+d.__err+'. (Unavailable read - not zero sessions and not zero durability use.)')); return; }
+  var cards=mcpxEl('div','mcpx-cards2');
+  cards.appendChild(mcpxHealthCard('Gateway', d.gateway));
+  cards.appendChild(mcpxHealthCard('Management', d.management));
+  root.appendChild(cards);
+  var link=mcpxEl('div','mcpx-source');
+  link.appendChild(document.createTextNode('Fleet distribution_state: '+(d.distribution_state||'unavailable')+'. Detailed per-DP acknowledgement is on the Rollout & Fleet screen. '));
+  var b=mcpxEl('button','btn sm ghost','View fleet distribution'); b.type='button'; b.addEventListener('click', function(){ if(typeof switchView==='function') switchView('mcp-rollout'); });
+  link.appendChild(b); root.appendChild(link);
+  var asof=document.getElementById('mcpx-health-asof'); if(asof) asof.textContent='as of '+mcpxNow();
+}
+function mcpxMeter(label, used, quota){
+  var wrap=mcpxEl('div','mcpx-meter'); wrap.appendChild(mcpxEl('span','mcpx-meter-lbl',label));
+  if(quota==null || Number(quota)<=0){
+    wrap.appendChild(mcpxEl('span','mcpx-meter-na',(used!=null?mcpxFmtBytes(used):'-')+' / no quota'));
+    return wrap;
+  }
+  var pct=Math.max(0,Math.min(100,Math.round((Number(used||0)/Number(quota))*100)));
+  var cls=pct>=90?'crit':(pct>=70?'warn':'');
+  var track=mcpxEl('div','mcpx-meter-track'); var fill=mcpxEl('div','mcpx-meter-fill'+(cls?(' '+cls):''));
+  fill.style.width=pct+'%'; fill.setAttribute('role','progressbar'); fill.setAttribute('aria-valuenow',String(pct));
+  fill.setAttribute('aria-valuemin','0'); fill.setAttribute('aria-valuemax','100'); fill.setAttribute('aria-label',label+': '+pct+' percent of quota');
+  track.appendChild(fill); wrap.appendChild(track);
+  wrap.appendChild(mcpxEl('span','mcpx-meter-val', mcpxFmtBytes(used)+' / '+mcpxFmtBytes(quota)+' ('+pct+'%)'));
+  return wrap;
+}
+function mcpxHealthCard(name, cap){
+  cap=cap||{}; var rt=cap.runtime||{}, dur=cap.durability||{};
+  var card=mcpxRfCard(name+' health','Runtime and durability for '+name+' only (capability-isolated).');
+  var chips=mcpxEl('div','mcpx-btnrow');
+  var stCls=rt.state==='ready'?'ok':(rt.state==='degraded'?'crit':(rt.state==='draining'?'warn':'muted'));
+  chips.appendChild(mcpxChip('runtime: '+(rt.state||'unavailable'), stCls));
+  chips.appendChild(mcpxChip('listener '+(rt.listener_ready?'ready':'not ready'), rt.listener_ready?'ok':'muted'));
+  if(rt.draining){ chips.appendChild(mcpxChip('draining','warn')); }
+  card.appendChild(chips);
+  var dl=mcpxRfDL();
+  mcpxRfKv(dl,'Active sessions', rt.active_sessions);
+  mcpxRfKv(dl,'Accepted conns', rt.accepted_conns);
+  mcpxRfKv(dl,'Rejected conns', rt.rejected_conns);
+  mcpxRfKv(dl,'In flight', rt.in_flight);
+  mcpxRfKv(dl,'Servers', cap.servers);
+  mcpxRfKv(dl,'Quarantined tools', cap.quarantined_tools);
+  mcpxRfKv(dl,'Drifted tools', cap.drifted_tools);
+  mcpxRfKv(dl,'Policy revision', cap.policy_revision);
+  mcpxRfKvHash(dl,'Policy snapshot', cap.policy_snapshot_hash);
+  mcpxRfKv(dl,'Pending approvals', cap.pending_approvals);
+  mcpxRfKv(dl,'Pending publications', cap.pending_publications);
+  card.appendChild(dl);
+  var dh=mcpxEl('div','mcpx-appr-sec'); dh.appendChild(mcpxEl('h5',null,'Durability'));
+  var dchips=mcpxEl('div','mcpx-btnrow');
+  var sev=dur.severity||'unknown';
+  dchips.appendChild(mcpxChip('severity: '+sev, sev==='none'?'ok':(sev==='critical'?'crit':(sev==='unknown'?'muted':'warn'))));
+  dchips.appendChild(mcpxChip('critical: '+(dur.critical_state||'-'), dur.critical_state==='normal'?'ok':'warn'));
+  dchips.appendChild(mcpxChip('denial: '+(dur.denial_state||'-'), dur.denial_state==='normal'?'ok':'warn'));
+  dchips.appendChild(mcpxChip('recovery: '+(dur.recovery_state||'-'),'muted'));
+  dh.appendChild(dchips);
+  dh.appendChild(mcpxMeter('Critical store', dur.crit_bytes, dur.crit_quota));
+  dh.appendChild(mcpxMeter('Ordinary store', dur.ord_bytes, dur.ord_quota));
+  dh.appendChild(mcpxMeter('Denial store', dur.den_bytes, dur.den_quota));
+  var ddl=mcpxRfDL();
+  mcpxRfKv(ddl,'Critical reserve free', dur.critical_reserve_free!=null?mcpxFmtBytes(dur.critical_reserve_free):'-');
+  mcpxRfKv(ddl,'Commit failures', dur.commit_failures);
+  mcpxRfKv(ddl,'Sync failures', dur.sync_failures);
+  mcpxRfKv(ddl,'Encryption failures', dur.encryption_failures);
+  mcpxRfKv(ddl,'Denial loss', dur.denial_loss);
+  mcpxRfKv(ddl,'Critical degradations', dur.critical_degradations);
+  mcpxRfKv(ddl,'Exporter lag', dur.exporter_lag);
+  dh.appendChild(ddl); card.appendChild(dh);
+  card.appendChild(mcpxEl('div','mcpx-source','From /api/mcp/health ('+name.toLowerCase()+'). Capability-isolated; values are the real snapshot for this capability only.'));
+  return card;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PR-UX-7 MCP Listener Settings (structured Gateway/Management config form)
+// Storing is node-local only and never activates a listener (the PUT response says
+// listener_activation: not_implemented). mutation_enabled stays false and is never
+// editable. Full-candidate preservation: every field from the last successful GET is
+// kept and re-sent, so a save can never drop a hidden/unedited field. A config-GET
+// failure disables saving (the full authoritative candidate cannot be preserved).
+// ═══════════════════════════════════════════════════════════════════════════
+var mcpxCfgTicket=0, mcpxCfgData=null, mcpxCfgLoadFailed=false;
+var mcpxCfgGatewayFields=[
+  {k:'enabled',t:'bool',l:'Enabled'},
+  {k:'bind_address',t:'text',l:'Bind address'},
+  {k:'port',t:'int',l:'Port'},
+  {k:'protocol_version_policy',t:'text',l:'Protocol version policy',hint:'no discovery list; exact value preserved'},
+  {k:'origin_host_allowlist',t:'list',l:'Origin host allowlist',hint:'one host per line'},
+  {k:'tls_profile_ref',t:'text',l:'TLS profile reference',hint:'opaque reference; no discovery list'},
+  {k:'client_cert_mode',t:'sel',l:'Client cert mode',opts:['none','request','require']},
+  {k:'unknown_tool_default_action',t:'sel',l:'Unknown-tool default action',opts:['deny','quarantine']},
+  {k:'policy_default_action',t:'text',l:'Policy default action',hint:'deny'},
+  {k:'rate_limit_rps',t:'int',l:'Rate limit RPS'},
+  {k:'rate_limit_burst',t:'int',l:'Rate limit burst'}
+];
+var mcpxCfgMgmtFields=[
+  {k:'enabled',t:'bool',l:'Enabled'},
+  {k:'bind_address',t:'text',l:'Bind address'},
+  {k:'port',t:'int',l:'Port'},
+  {k:'protocol_version_policy',t:'text',l:'Protocol version policy',hint:'no discovery list; exact value preserved'},
+  {k:'origin_host_allowlist',t:'list',l:'Origin host allowlist',hint:'one host per line'},
+  {k:'tls_profile_ref',t:'text',l:'TLS profile reference',hint:'opaque reference; no discovery list'},
+  {k:'client_cert_mode',t:'sel',l:'Client cert mode',opts:['none','request','require']},
+  {k:'auth_mode',t:'sel',l:'Auth mode',opts:['oauth-token']},
+  {k:'default_min_role',t:'sel',l:'Default minimum role',opts:['viewer','operator','admin']},
+  {k:'mutation_enabled',t:'boolro',l:'Mutation enabled',hint:'V1: always false, not editable'},
+  {k:'tenant_scope_mode',t:'sel',l:'Tenant scope mode',opts:['strict','explicit-global']},
+  {k:'output_max_bytes',t:'int',l:'Output maximum bytes'},
+  {k:'output_redaction_profile',t:'text',l:'Output redaction profile',hint:'required, non-empty'},
+  {k:'rate_limit_rps',t:'int',l:'Rate limit RPS'},
+  {k:'rate_limit_burst',t:'int',l:'Rate limit burst'}
+];
+function mcpxCfgClearResult(){ var r=document.getElementById('mcpx-cfg-result'); if(r){ r.textContent=''; r.className='mcpx-dlg-result'; } }
+function mcpxCfgSetResult(kind, title, detail){
+  var r=document.getElementById('mcpx-cfg-result'); if(!r) return;
+  r.textContent=''; r.className='mcpx-dlg-result on '+(kind||'');
+  r.appendChild(mcpxEl('strong',null,title)); if(detail){ r.appendChild(mcpxEl('div',null,detail)); }
+}
+async function mcpxCfgLoad(){
+  var root=document.getElementById('mcpx-cfg-root'), src=document.getElementById('mcpx-cfg-src'); if(!root) return;
+  var myTicket=++mcpxCfgTicket; mcpxCfgClearResult();
+  root.textContent=''; root.appendChild(mcpxEl('div','mcpx-source','Loading configuration…'));
+  var d=await mcpxRfFetch('/api/mcp/config');
+  if(myTicket!==mcpxCfgTicket) return;
+  root.textContent='';
+  if(mcpxRfErr(d)){
+    mcpxCfgData=null; mcpxCfgLoadFailed=true;
+    if(src) src.textContent='Configuration unavailable ('+d.__err+'). Saving is disabled: the complete authoritative candidate cannot be preserved.';
+    root.appendChild(mcpxEl('div','mcpx-empty','Configuration unavailable - '+d.__err+'.'));
+    mcpxCfgSyncSaveEnabled(); return;
+  }
+  mcpxCfgData=d; mcpxCfgLoadFailed=false;
+  if(src) src.textContent='Loaded the authoritative config. Every supported field is preserved and re-sent on save.';
+  mcpxCfgRenderForm(d);
+  mcpxCfgSyncSaveEnabled();
+  var asof=document.getElementById('mcpx-cfg-asof'); if(asof) asof.textContent='as of '+mcpxNow();
+}
+function mcpxCfgSyncSaveEnabled(){
+  Array.prototype.forEach.call(document.querySelectorAll('[data-click="mcpxCfgSave"]'), function(b){
+    b.disabled = mcpxCfgLoadFailed || !mcpxCfgData;
+    if(b.disabled){ b.title='Load a valid config first; saving is disabled until the full authoritative config is available.'; } else { b.removeAttribute('title'); }
+  });
+}
+function mcpxCfgField(section, spec, val){
+  var f=mcpxEl('div','mcpx-cfg-f'); var id='mcpx-cfg-'+section+'-'+spec.k;
+  var lab=mcpxEl('label',null,spec.l); lab.setAttribute('for',id); f.appendChild(lab);
+  var el;
+  if(spec.t==='bool'||spec.t==='boolro'){ el=mcpxEl('select'); ['false','true'].forEach(function(o){ var op=mcpxEl('option',null,o); op.value=o; if(String(!!val)===o) op.selected=true; el.appendChild(op); }); if(spec.t==='boolro'){ el.disabled=true; el.value='false'; } }
+  else if(spec.t==='sel'){ el=mcpxEl('select'); var opts=(spec.opts||[]).slice(); if(val!=null && opts.indexOf(String(val))<0) opts.unshift(String(val)); opts.forEach(function(o){ var op=mcpxEl('option',null,o); op.value=o; if(String(val)===o) op.selected=true; el.appendChild(op); }); }
+  else if(spec.t==='list'){ el=mcpxEl('textarea'); el.rows=2; el.value=(Array.isArray(val)?val.join('\n'):''); }
+  else { el=mcpxEl('input'); el.type=(spec.t==='int')?'number':'text'; el.value=(val==null?'':String(val)); }
+  el.id=id; el.dataset.k=spec.k; el.dataset.t=spec.t;
+  if(spec.k==='bind_address'){ el.addEventListener('input', function(){ mcpxCfgNonLoopHint(f, el.value); }); }
+  f.appendChild(el);
+  if(spec.hint){ f.appendChild(mcpxEl('div','mcpx-cfg-hint',spec.hint)); }
+  if(spec.k==='bind_address'){ mcpxCfgNonLoopHint(f, val); }
+  return f;
+}
+function mcpxCfgIsLoopback(a){ a=String(a||'').trim().toLowerCase(); return a==='127.0.0.1'||a==='::1'||a==='localhost'||a.indexOf('127.')===0; }
+function mcpxCfgNonLoopHint(f, val){
+  var old=f.querySelector('.mcpx-cfg-nonloop'); if(old) old.remove();
+  if(val && !mcpxCfgIsLoopback(val)){ f.appendChild(mcpxEl('div','mcpx-cfg-nonloop','Non-loopback bind. Storing does not activate a listener or open a public endpoint; this is not DMZ or public-exposure support.')); }
+}
+function mcpxCfgSection(title, section, fields, cfg){
+  var fs=mcpxEl('fieldset','mcpx-cfg-fs'); fs.appendChild(mcpxEl('legend',null,title));
+  var grid=mcpxEl('div','mcpx-cfg-grid');
+  fields.forEach(function(sp){ grid.appendChild(mcpxCfgField(section, sp, cfg?cfg[sp.k]:undefined)); });
+  fs.appendChild(grid); return fs;
+}
+function mcpxCfgRenderForm(d){
+  var root=document.getElementById('mcpx-cfg-root'); if(!root) return; root.textContent='';
+  var wrap=mcpxEl('div'); wrap.setAttribute('data-min-role','admin');
+  wrap.appendChild(mcpxCfgSection('Gateway listener','gateway', mcpxCfgGatewayFields, d.gateway||{}));
+  wrap.appendChild(mcpxCfgSection('Management listener','management', mcpxCfgMgmtFields, d.management||{}));
+  root.appendChild(wrap);
+  root.appendChild(mcpxEl('div','mcpx-source','Storing replaces the complete configuration atomically and validates server-side (valid ports, no wildcard bind, separate Gateway/Management endpoints, client-cert mode, Management auth/role/output/redaction, mutation disabled). It does not bind or activate a live listener.'));
+  applySessionRoleVisibilityScope('#mcpx-cfg-root');
+}
+function mcpxCfgCollect(section, fields, base){
+  var out={}; for(var kk in base){ if(Object.prototype.hasOwnProperty.call(base,kk)) out[kk]=base[kk]; } // preserve every field
+  fields.forEach(function(sp){
+    var el=document.getElementById('mcpx-cfg-'+section+'-'+sp.k); if(!el) return;
+    if(sp.t==='boolro'){ out[sp.k]=false; return; }
+    if(sp.t==='bool'){ out[sp.k]=(el.value==='true'); return; }
+    if(sp.t==='int'){ out[sp.k]=parseInt(el.value,10)||0; return; }
+    if(sp.t==='list'){ out[sp.k]=(el.value||'').split('\n').map(function(x){ return x.trim(); }).filter(function(x){ return x; }); return; }
+    out[sp.k]=el.value;
+  });
+  return out;
+}
+async function mcpxCfgSave(){
+  if(mcpxCfgLoadFailed || !mcpxCfgData){ mcpxCfgSetResult('crit','Cannot save','Load a valid config first; the complete authoritative candidate is required.'); return; }
+  var btn=document.querySelector('[data-click="mcpxCfgSave"]'); if(btn){ if(btn.dataset.busy==='1') return; btn.dataset.busy='1'; btn.disabled=true; }
+  mcpxCfgSetResult('', 'Storing…', 'Validating and replacing the complete configuration.');
+  // Full-candidate preservation: overlay form edits onto a deep copy of the last GET.
+  var candidate={
+    gateway: mcpxCfgCollect('gateway', mcpxCfgGatewayFields, mcpxCfgData.gateway||{}),
+    management: mcpxCfgCollect('management', mcpxCfgMgmtFields, mcpxCfgData.management||{})
+  };
+  candidate.management.mutation_enabled=false; // never settable true from this UI
+  var res=null;
+  try{
+    var r=await fetch('/api/mcp/config',{method:'PUT',credentials:'same-origin',headers:{'Content-Type':'application/json','X-CSRF-Token':(window.csrfToken||'')},body:JSON.stringify(candidate)});
+    var text=await r.text();
+    if(r.status===403){ mcpxCfgSetResult('crit','Permission denied','Storing configuration requires the admin role. The authoritative config is unchanged.'); }
+    else if(!r.ok){ mcpxCfgSetResult('crit','Not stored','The appliance rejected the configuration ('+mcpxReasonText(text)+'). The previous authoritative config is retained unchanged.'); }
+    else {
+      try{ res=JSON.parse(text); }catch(e){ res={}; }
+      var la=res.listener_activation||'unknown';
+      mcpxCfgSetResult('ok','Stored node-local configuration','Stored: '+(res.stored?'yes':'no')+'. listener_activation: '+la+' (a stored config is not a running listener; use Health for real listener readiness). distribution_state: '+(res.distribution_state||'local_only')+'.');
+      if(res.config){ mcpxCfgData=res.config; mcpxCfgRenderForm(res.config); } // adopt the authoritative echoed config
+    }
+  }catch(e){ mcpxCfgSetResult('crit','Request failed','The network request failed; the authoritative config is unchanged. Reload before retrying.'); }
+  if(btn){ btn.dataset.busy=''; } mcpxCfgSyncSaveEnabled();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PR-UX-7 MCP Policy & Simulator staged workflow + Gateway publication handoff
+// Explicit candidate state machine bound to EXACT candidate bytes and the
+// SERVER-returned candidate hash. A candidate is never active; validation is never
+// publication; a publication request is never approved or published. Any candidate
+// edit invalidates the prior hash / validation / simulation / comparison / publish
+// eligibility. Compare counts are labelled "changes in the submitted test corpus"
+// (never fleet/user blast radius). The Gateway handoff creates a pending four-eyes
+// request only (POST /api/mcp/publications); Management has no publish control and is
+// rejected server-side. textContent only. Candidate bytes never enter localStorage,
+// history, or a URL.
+// ═══════════════════════════════════════════════════════════════════════════
+var MCPX_POL_CAPINT={gateway:1, management:2};   // policy.Capability (uint8)
+var MCPX_POL_SUBJ={human:1, workload:2};         // policy.SubjectKind
+var MCPX_POL_OPCLASS={read:1, write:2, destructive:3, discovery:4, control:5}; // policy.OperationClass
+var MCPX_POL_MAXCAND=1048576;                     // MaxCandidateBytes default (1 MiB)
+var MCPX_POL_MAXCASES=50;                         // UI bound; backend enforces the real cap
+var mcpxPol={cap:'gateway', active:null, activeErr:false, validate:null, sim:null, compare:null, cases:[], state:'empty', ticket:0, caseSeq:0, created:null};
+function mcpxPolCap(){ var e=document.getElementById('mcpx-pol-cap'); return (e&&e.value)||'gateway'; }
+function mcpxPolCandidateText(){ var e=document.getElementById('mcpx-pol-src'); return e?(e.value||''):''; }
+function mcpxPolTenant(){ var e=document.getElementById('mcpx-pol-tenant'); return ((e&&e.value)||'').trim(); }
+function mcpxPolSelectCap(cap){
+  if(cap===mcpxPol.cap) return;
+  if(mcpxPolCandidateText().trim() && !window.confirm('Switching capability discards the current candidate draft and results. Continue?')) return;
+  mcpxPol.cap=cap;
+  var e=document.getElementById('mcpx-pol-cap'); if(e) e.value=cap;
+  Array.prototype.forEach.call(document.querySelectorAll('.mcpx-rf-caps .mcpx-rf-captab'), function(t){ var on=t.dataset.arg===cap; t.classList.toggle('active',on); t.setAttribute('aria-selected',on?'true':'false'); });
+  mcpxPol.validate=null; mcpxPol.sim=null; mcpxPol.compare=null; mcpxPol.cases=[]; mcpxPol.created=null; mcpxPol.state='empty';
+  mcpxPolCandidateSaved=''; // discard the draft source (the confirm promised this)
+  var srcEl=document.getElementById('mcpx-pol-src'); if(srcEl) srcEl.value='';
+  mcpxPolRefreshActive();
+}
+function mcpxPolInvalidateDownstream(){
+  mcpxPol.validate=null; mcpxPol.sim=null; mcpxPol.compare=null; mcpxPol.created=null;
+  mcpxPol.state = mcpxPolCandidateText().trim()? 'edited' : 'empty';
+}
+async function mcpxPolRefreshActive(){
+  var myTicket=++mcpxPol.ticket;
+  var d=await mcpxRfFetch('/api/mcp/policy?capability='+encodeURIComponent(mcpxPol.cap));
+  if(myTicket!==mcpxPol.ticket) return;
+  mcpxPol.activeErr=mcpxRfErr(d); mcpxPol.active=mcpxPol.activeErr?null:d;
+  mcpxPolRender();
+  var asof=document.getElementById('mcpx-pol-asof'); if(asof) asof.textContent='as of '+mcpxNow();
+}
+function mcpxPolStateChip(){
+  var s=mcpxPol.state; var cls=(s==='valid')?'valid':((s==='invalid'||s==='stale')?'invalid':'');
+  return mcpxEl('span','mcpx-pol-state'+(cls?(' '+cls):''), 'candidate: '+s);
+}
+function mcpxPolActiveCard(){
+  var card=mcpxRfCard('Active policy - '+mcpxPol.cap, 'The current active policy summary. This build does not return the active rule list, so the workspace is a NEW candidate, not an edit of the active policy.');
+  if(mcpxPol.activeErr){ card.appendChild(mcpxEl('div','mcpx-empty','Active policy unavailable.')); return card; }
+  var a=mcpxPol.active||{};
+  var dl=mcpxRfDL();
+  mcpxRfKv(dl,'Capability', a.capability||mcpxPol.cap);
+  mcpxRfKv(dl,'Revision', a.revision);
+  if(a.hash!=null) mcpxRfKvHash(dl,'Hash', a.hash); else mcpxRfKv(dl,'Hash','none published yet','mcpx-rf-dd-muted');
+  if(a.rule_count!=null) mcpxRfKv(dl,'Rule count', a.rule_count); else mcpxRfKv(dl,'Rule count','n/a (nothing published)','mcpx-rf-dd-muted');
+  if(a.default_action!=null) mcpxRfKv(dl,'Default action', a.default_action); else mcpxRfKv(dl,'Default action','deny (default)','mcpx-rf-dd-muted');
+  mcpxRfKv(dl,'Distribution state', a.distribution_state||'local_only');
+  card.appendChild(dl);
+  card.appendChild(mcpxEl('div','mcpx-source','From /api/mcp/policy. Summary only; no active rules are reconstructed.'));
+  return card;
+}
+function mcpxPolCandidateCard(){
+  var card=mcpxRfCard('Candidate source - '+mcpxPol.cap, 'Unvalidated until the appliance validates it. Not prefilled from the active policy, never stored in the browser or a URL. The appliance computes the authoritative candidate hash.');
+  var head=mcpxEl('div','mcpx-btnrow'); head.id='mcpx-pol-statechip'; head.appendChild(mcpxPolStateChip()); card.appendChild(head);
+  var ta=mcpxEl('textarea','mcpx-pol-src'); ta.id='mcpx-pol-src'; ta.setAttribute('aria-label','candidate policy source'); ta.spellcheck=false;
+  ta.setAttribute('placeholder','{ "schema_version": 1, "capability": "'+mcpxPol.cap+'", "policy_revision": <base+1>, "default_action": "DENY", "rules": [] }');
+  ta.value=mcpxPolCandidateSaved||'';
+  ta.addEventListener('input', function(){ mcpxPolCandidateSaved=ta.value; if(ta.value.length>MCPX_POL_MAXCAND){ /* bound: server enforces */ } mcpxPolInvalidateDownstream(); mcpxPolRenderResults(); });
+  card.appendChild(ta);
+  var bar=mcpxEl('div','mcpx-btnrow'); bar.setAttribute('data-min-role','operator');
+  var vb=mcpxEl('button','btn sm','Validate'); vb.type='button'; vb.setAttribute('data-click','mcpxPolValidate'); bar.appendChild(vb);
+  var len=mcpxEl('span','mcpx-rf-dd-muted'); len.id='mcpx-pol-len'; bar.appendChild(len);
+  card.appendChild(bar);
+  var vout=mcpxEl('div'); vout.id='mcpx-pol-validate-out'; card.appendChild(vout);
+  return card;
+}
+var mcpxPolCandidateSaved='';
+function mcpxPolRenderValidate(){
+  var out=document.getElementById('mcpx-pol-validate-out'); if(!out) return; out.textContent='';
+  var len=document.getElementById('mcpx-pol-len'); if(len) len.textContent=(mcpxPolCandidateText().length)+' bytes'+(mcpxPolCandidateText().length>MCPX_POL_MAXCAND?' (over the 1 MiB limit; the appliance will reject it)':'');
+  var v=mcpxPol.validate; if(!v) return;
+  if(v.__err){ out.appendChild(mcpxEl('div','mcpx-empty','Validation unavailable - '+v.__err+'.')); return; }
+  if(v.ok){
+    var dl=mcpxRfDL();
+    mcpxRfKvHash(dl,'Candidate hash (server)', v.candidate_hash);
+    mcpxRfKv(dl,'Rule count', v.rule_count); mcpxRfKv(dl,'Default action', v.default_action); mcpxRfKv(dl,'Schema version', v.schema_version);
+    out.appendChild(mcpxEl('div','mcpx-rf-dd','Valid candidate (not published, not active).')); out.appendChild(dl);
+  } else {
+    out.appendChild(mcpxEl('div','mcpx-appr-unavail','Invalid candidate: '+(v.reason||'validation failed')+'. The active policy is unchanged.'));
+  }
+}
+async function mcpxPolValidate(){
+  var text=mcpxPolCandidateText();
+  if(!text.trim()){ mcpxPol.validate={__err:'empty candidate'}; mcpxPolRenderValidate(); return; }
+  try{ JSON.parse(text); }catch(e){ mcpxPol.validate={ok:false, reason:'candidate is not valid JSON (client check; the appliance is authoritative)'}; mcpxPol.state='invalid'; mcpxPolRenderResults(); return; }
+  var myTicket=++mcpxPol.ticket;
+  var res=await mcpxPolPost('validate', '[]');
+  if(myTicket!==mcpxPol.ticket) return; // a newer candidate edit supersedes this validation
+  mcpxPol.validate=res; mcpxPol.sim=null; mcpxPol.compare=null; mcpxPol.created=null;
+  mcpxPol.state=(res && !res.__err && res.ok)?'valid':'invalid';
+  mcpxPolRenderResults();
+}
+function mcpxPolPost(mode, casesJson){
+  var body='{"mode":'+JSON.stringify(mode)+',"capability":'+JSON.stringify(mcpxPol.cap)+',"candidate":'+mcpxPolCandidateText()+',"cases":'+(casesJson||'[]')+'}';
+  return (async function(){
+    try{
+      var r=await fetch('/api/mcp/policy-simulate',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-CSRF-Token':(window.csrfToken||'')},body:body});
+      if(r.status===403) return {__err:'permission denied (operator role required)'};
+      var t=await r.text();
+      if(!r.ok){ try{ var j=JSON.parse(t); if(j&&j.reason){ return {ok:false, reason:j.reason}; } }catch(e){} return {ok:false, reason:mcpxReasonText(t)}; }
+      try{ return JSON.parse(t); }catch(e){ return {__err:'malformed response'}; }
+    }catch(e){ return {__err:'request failed'}; }
+  })();
+}
+// ── Simulation corpus (structured case builder; auto-assembles VALID cases) ──
+function mcpxPolRefreshCorpus(){
+  var slot=document.getElementById('mcpx-pol-corpus-slot'); if(slot){ slot.textContent=''; slot.appendChild(mcpxPolCorpusCard()); }
+  mcpxPolRenderResults();
+}
+function mcpxPolAddCase(){
+  if(mcpxPol.cases.length>=MCPX_POL_MAXCASES){ return; }
+  mcpxPol.caseSeq++;
+  mcpxPol.cases.push({localId:'case-'+mcpxPol.caseSeq, subj:'human', subjectId:'', tenant:mcpxPolTenant(), method:'tools/list', op:'discovery', serverId:'', toolName:'', fingerprint:''});
+  mcpxPol.sim=null; mcpxPol.compare=null; mcpxPolRefreshCorpus();
+}
+function mcpxPolRemoveCase(localId){ mcpxPol.cases=mcpxPol.cases.filter(function(c){ return c.localId!==localId; }); mcpxPol.sim=null; mcpxPol.compare=null; mcpxPolRefreshCorpus(); }
+function mcpxPolResetCorpus(){ mcpxPol.cases=[]; mcpxPol.sim=null; mcpxPol.compare=null; mcpxPolRefreshCorpus(); }
+function mcpxPolDupIds(){ var seen={}, dups={}; mcpxPol.cases.forEach(function(c){ if(seen[c.localId]) dups[c.localId]=true; seen[c.localId]=true; }); return dups; }
+function mcpxPolBuildCases(){
+  var capInt=MCPX_POL_CAPINT[mcpxPol.cap]||1, now=new Date().toISOString();
+  return mcpxPol.cases.map(function(c){
+    var input={ Capability:capInt, PolicyRevision:1, CatalogRevision:1, EvalTime:now,
+      Principal:{ Kind:MCPX_POL_SUBJ[c.subj]||1, SubjectID:c.subjectId, Tenant:c.tenant },
+      Client:{ Capability:capInt, Tenant:c.tenant },
+      Operation:{ Method:c.method, Class:MCPX_POL_OPCLASS[c.op]||4, Namespace:capInt } };
+    if(mcpxPol.cap==='gateway'){
+      input.Server={ ServerID:c.serverId, Verification:1 }; // ServerVerified
+      if(c.op!=='discovery' && (c.toolName||c.fingerprint)){
+        input.Tool={ Name:c.toolName, ServerID:c.serverId, Disposition:5, Drift:1, FingerprintHash:c.fingerprint }; // usable / no-material-change
+      }
+    }
+    return { ID:c.localId, Input:input };
+  });
+}
+function mcpxPolCorpusCard(){
+  var card=mcpxRfCard('Simulation corpus - '+mcpxPol.cap, 'A bounded set of test cases you build. Empty means empty - no default corpus is invented. Each case is validated by the appliance on Simulate/Compare.');
+  var bar=mcpxEl('div','mcpx-btnrow'); bar.setAttribute('data-min-role','operator');
+  var ab=mcpxEl('button','btn sm','Add case'); ab.type='button'; ab.setAttribute('data-click','mcpxPolAddCase'); bar.appendChild(ab);
+  var rb=mcpxEl('button','btn sm ghost','Reset corpus'); rb.type='button'; rb.setAttribute('data-click','mcpxPolResetCorpus'); bar.appendChild(rb);
+  var cnt=mcpxEl('span','mcpx-rf-dd-muted', mcpxPol.cases.length+' / '+MCPX_POL_MAXCASES+' cases'); bar.appendChild(cnt);
+  card.appendChild(bar);
+  var dups=mcpxPolDupIds();
+  mcpxPol.cases.forEach(function(c){ card.appendChild(mcpxPolCaseRow(c, dups[c.localId])); });
+  var sbar=mcpxEl('div','mcpx-btnrow'); sbar.setAttribute('data-min-role','operator');
+  var sb=mcpxEl('button','btn sm','Simulate'); sb.type='button'; sb.setAttribute('data-click','mcpxPolSimulate'); if(!mcpxPol.cases.length) sb.disabled=true; sbar.appendChild(sb);
+  var cb=mcpxEl('button','btn sm','Compare active to candidate'); cb.type='button'; cb.setAttribute('data-click','mcpxPolCompare'); if(!mcpxPol.cases.length) cb.disabled=true; sbar.appendChild(cb);
+  card.appendChild(sbar);
+  var sout=mcpxEl('div'); sout.id='mcpx-pol-sim-out'; card.appendChild(sout);
+  return card;
+}
+function mcpxPolCaseField(c, key, label, type, opts){
+  var f=mcpxEl('div','mcpx-pol-case-f'); f.appendChild(mcpxEl('label',null,label));
+  var el;
+  if(type==='sel'){ el=mcpxEl('select'); opts.forEach(function(o){ var op=mcpxEl('option',null,o); op.value=o; if(c[key]===o) op.selected=true; el.appendChild(op); }); }
+  else { el=mcpxEl('input'); el.type='text'; el.value=c[key]||''; }
+  el.addEventListener('input', function(){ c[key]=el.value; mcpxPol.sim=null; mcpxPol.compare=null; }); el.addEventListener('change', function(){ c[key]=el.value; mcpxPol.sim=null; mcpxPol.compare=null; if(key==='localId'||key==='op') mcpxPolRefreshCorpus(); });
+  f.appendChild(el); return f;
+}
+function mcpxPolCaseRow(c, dup){
+  var box=mcpxEl('div','mcpx-pol-case');
+  var grid=mcpxEl('div','mcpx-pol-case-grid');
+  grid.appendChild(mcpxPolCaseField(c,'localId','Case ID','text'));
+  grid.appendChild(mcpxPolCaseField(c,'subj','Subject kind','sel',['human','workload']));
+  grid.appendChild(mcpxPolCaseField(c,'subjectId','Subject ID','text'));
+  grid.appendChild(mcpxPolCaseField(c,'tenant','Tenant','text'));
+  grid.appendChild(mcpxPolCaseField(c,'method','Operation method','text'));
+  grid.appendChild(mcpxPolCaseField(c,'op','Operation class','sel',['read','write','destructive','discovery','control']));
+  if(mcpxPol.cap==='gateway'){
+    grid.appendChild(mcpxPolCaseField(c,'serverId','Server ID','text'));
+    grid.appendChild(mcpxPolCaseField(c,'toolName','Tool name (non-discovery)','text'));
+    grid.appendChild(mcpxPolCaseField(c,'fingerprint','Tool fingerprint','text'));
+  }
+  box.appendChild(grid);
+  var foot=mcpxEl('div','mcpx-btnrow');
+  if(dup){ foot.appendChild(mcpxEl('span','mcpx-pol-state invalid','duplicate case id')); }
+  var rm=mcpxEl('button','btn sm ghost','Remove'); rm.type='button'; rm.addEventListener('click', function(){ mcpxPolRemoveCase(c.localId); }); foot.appendChild(rm);
+  box.appendChild(foot);
+  return box;
+}
+async function mcpxPolSimulate(){
+  if(!mcpxPol.cases.length) return;
+  var myTicket=++mcpxPol.ticket;
+  var res=await mcpxPolPost('simulate', JSON.stringify(mcpxPolBuildCases()));
+  if(myTicket!==mcpxPol.ticket) return;
+  mcpxPol.sim=res; if(res && !res.__err && !res.reason) mcpxPol.state='simulated';
+  mcpxPolRenderResults();
+}
+async function mcpxPolCompare(){
+  if(!mcpxPol.cases.length) return;
+  var myTicket=++mcpxPol.ticket;
+  var res=await mcpxPolPost('compare', JSON.stringify(mcpxPolBuildCases()));
+  if(myTicket!==mcpxPol.ticket) return;
+  mcpxPol.compare=res; if(res && !res.__err && !res.reason) mcpxPol.state='compared';
+  mcpxPolRenderResults();
+}
+function mcpxPolRenderSim(){
+  var out=document.getElementById('mcpx-pol-sim-out'); if(!out) return; out.textContent='';
+  var s=mcpxPol.sim;
+  if(s){
+    if(s.__err){ out.appendChild(mcpxEl('div','mcpx-empty','Simulation unavailable - '+s.__err+'.')); }
+    else if(s.reason){ out.appendChild(mcpxEl('div','mcpx-appr-unavail','Simulation rejected: '+s.reason+'.')); }
+    else {
+      out.appendChild(mcpxEl('div','mcpx-rf-dd-muted','Simulation result (publishes nothing, executes nothing).'));
+      var tbl=mcpxEl('table','mcpx-cat-tbl'); var thead=mcpxEl('thead'), htr=mcpxEl('tr');
+      ['Case','Action','Reason','Matched rule'].forEach(function(h){ htr.appendChild(mcpxEl('th',null,h)); });
+      thead.appendChild(htr); tbl.appendChild(thead); var tb=mcpxEl('tbody');
+      (s.cases||[]).forEach(function(rc){ var tr=mcpxEl('tr'); tr.appendChild(mcpxEl('td',null,rc.id)); var ac=mcpxEl('td'); ac.appendChild(mcpxChip(rc.action||'-', rc.action==='allow'?'ok':(rc.action==='deny'?'crit':'warn'))); tr.appendChild(ac); tr.appendChild(mcpxEl('td',null,rc.reason||'-')); tr.appendChild(mcpxEl('td',null,rc.matched_rule||'-')); tb.appendChild(tr); });
+      tbl.appendChild(tb); out.appendChild(tbl);
+    }
+  }
+}
+function mcpxPolCompareCard(){
+  var card=mcpxRfCard('Comparison - '+mcpxPol.cap, 'Changes in the submitted test corpus only. These are NOT affected users, agents, fleet blast radius, or a percentage of production traffic.');
+  var c=mcpxPol.compare;
+  if(!c){ card.appendChild(mcpxEl('div','mcpx-rf-dd-muted','Run Compare on a non-empty corpus to see the changes in the submitted test corpus.')); return card; }
+  if(c.__err){ card.appendChild(mcpxEl('div','mcpx-empty','Comparison unavailable - '+c.__err+'.')); return card; }
+  if(c.reason){ card.appendChild(mcpxEl('div','mcpx-appr-unavail','Comparison rejected: '+c.reason+'.')); return card; }
+  var row=mcpxEl('div','mcpx-pol-cmp');
+  function ct(label,n,cls){ var b=mcpxEl('div','mcpx-rf-count'+(cls?(' '+cls):'')); b.appendChild(mcpxEl('div','n', String(n||0))); b.appendChild(mcpxEl('div','l', label)); return b; }
+  row.appendChild(ct('new allow', c.new_allow, 'newallow'));
+  row.appendChild(ct('new deny', c.new_deny, ''));
+  row.appendChild(ct('new quarantine', c.new_quarantine, ''));
+  row.appendChild(ct('new approval-required', c.new_approval_required, ''));
+  row.appendChild(ct('submitted cases', (mcpxPol.cases||[]).length, ''));
+  card.appendChild(row);
+  card.appendChild(mcpxEl('div','mcpx-rf-dd-muted','new allow is the security-sensitive expansion class (previously not allowed, now allowed in the submitted corpus).'));
+  var dl=mcpxRfDL();
+  mcpxRfKvHash(dl,'Candidate hash', c.candidate_hash); mcpxRfKv(dl,'Base revision', c.base_revision);
+  mcpxRfKv(dl,'Affected rules', (c.affected_rules||[]).length); mcpxRfKv(dl,'Sample case ids', (c.sample_case_ids||[]).join(', ')||'-');
+  card.appendChild(dl);
+  return card;
+}
+function mcpxPolCanPublish(){
+  if(mcpxPol.cap!=='gateway') return false;
+  if(!mcpxPolTenant()) return false;
+  var v=mcpxPol.validate, c=mcpxPol.compare, a=mcpxPol.active;
+  if(!v || v.__err || !v.ok) return false;
+  if(!c || c.__err || c.reason) return false;
+  if(mcpxPol.state==='stale') return false;
+  if(v.candidate_hash!==c.candidate_hash) return false;
+  if(!a || a.revision==null || a.revision!==c.base_revision) return false;
+  return true;
+}
+function mcpxPolHandoffCard(){
+  var card=mcpxRfCard('Publication request - '+mcpxPol.cap, 'Creates a pending four-eyes publication request only. It does not approve, publish, activate, distribute, change any mode, or unlock Production.');
+  if(mcpxPol.cap!=='gateway'){
+    card.appendChild(mcpxEl('div','mcpx-appr-unavail','Management MCP is non-mutating in V1: there is no publication-request control for Management (rejected server-side).'));
+    return card;
+  }
+  var reasons=[];
+  if(!mcpxPol.validate || !mcpxPol.validate.ok) reasons.push('a valid candidate');
+  if(!mcpxPol.compare || mcpxPol.compare.reason || mcpxPol.compare.__err) reasons.push('a successful compare');
+  if(mcpxPol.validate && mcpxPol.compare && mcpxPol.validate.candidate_hash!==(mcpxPol.compare||{}).candidate_hash) reasons.push('matching validate/compare hashes');
+  if(mcpxPol.active && mcpxPol.compare && mcpxPol.active.revision!==mcpxPol.compare.base_revision) reasons.push('a compare against the current active revision');
+  if(mcpxPol.state==='stale') reasons.push('a fresh compare (the active revision advanced)');
+  if(!mcpxPolTenant()) reasons.push('a tenant');
+  var dl=mcpxRfDL();
+  mcpxRfKvHash(dl,'Candidate hash', (mcpxPol.validate||{}).candidate_hash);
+  mcpxRfKv(dl,'Base revision', (mcpxPol.compare||{}).base_revision);
+  mcpxRfKv(dl,'Proposed revision', (mcpxPol.compare||{}).base_revision!=null?((mcpxPol.compare.base_revision)+1):'-');
+  mcpxRfKv(dl,'Tenant', mcpxPolTenant()||'-');
+  card.appendChild(dl);
+  var bar=mcpxEl('div','mcpx-btnrow'); bar.setAttribute('data-min-role','operator');
+  var pb=mcpxEl('button','btn sm primary','Create publication request'); pb.type='button'; pb.setAttribute('data-click','mcpxPolCreateRequest');
+  if(reasons.length){ pb.disabled=true; pb.title='Requires: '+reasons.join(', ')+'.'; }
+  bar.appendChild(pb);
+  if(reasons.length){ bar.appendChild(mcpxEl('span','mcpx-rf-dd-muted','Requires: '+reasons.join(', ')+'.')); }
+  card.appendChild(bar);
+  if(mcpxPol.created){
+    var cr=mcpxEl('div','mcpx-appr-sec'); cr.appendChild(mcpxEl('h5',null,'Request created'));
+    var cdl=mcpxRfDL(); mcpxRfKv(cdl,'Request ID', mcpxPol.created.request_id); mcpxRfKv(cdl,'Distribution state', mcpxPol.created.distribution_state||'local_only'); cr.appendChild(cdl);
+    cr.appendChild(mcpxEl('div','mcpx-rf-dd-muted','A request was created (not approved, not published). The candidate workspace remains non-active.'));
+    var ob=mcpxEl('button','btn sm','Open in Approvals'); ob.type='button'; ob.addEventListener('click', function(){ mcpxPolOpenInApprovals(mcpxPol.created); }); cr.appendChild(ob);
+    card.appendChild(cr);
+  }
+  card.appendChild(mcpxEl('div','mcpx-source','POST /api/mcp/publications creates a pending request. Actual publication is unavailable in this runtime (event durability not enabled).'));
+  return card;
+}
+function mcpxPolOpenInApprovals(created){
+  var te=document.getElementById('mcp-appr-tenant'); if(te) te.value=mcpxPolTenant();
+  if(typeof switchView==='function') switchView('mcp-approvals');
+  if(typeof mcpxApprLoad==='function') mcpxApprLoad().then(function(){ if(created&&created.request_id){ mcpxApprSetFilter('publication'); if(typeof mcpxApprOpenDrawer==='function') mcpxApprOpenDrawer(created.request_id); } });
+}
+async function mcpxPolCreateRequest(){
+  if(!mcpxPolCanPublish()){ return; }
+  // Re-read the active policy immediately before creation: if the active revision
+  // advanced past the compare base, mark stale and require a new compare.
+  var fresh=await mcpxRfFetch('/api/mcp/policy?capability=gateway');
+  if(!mcpxRfErr(fresh)){ mcpxPol.active=fresh; if(fresh.revision!==mcpxPol.compare.base_revision){ mcpxPol.state='stale'; mcpxPolRender(); return; } }
+  // Defensive: an edit during the await may have invalidated eligibility; re-check
+  // before reading the (now possibly null) validate/compare bindings.
+  if(!mcpxPolCanPublish()){ mcpxPolRender(); return; }
+  var tenant=mcpxPolTenant(), base=mcpxPol.compare.base_revision, hash=mcpxPol.validate.candidate_hash;
+  var candText=mcpxPolCandidateText();
+  mcpxDangerDialog({
+    action:'publish-request', capability:'gateway', title:'Create Gateway publication request',
+    riskChip:{label:'Creates a request only', kind:'warn'},
+    explain:'Creates a pending four-eyes publication request for the Gateway candidate in tenant '+tenant+'. This does NOT approve, publish, activate, distribute, change any mode, or unlock Production. Actual publication is unavailable in this runtime.',
+    facts:[
+      ['Capability','gateway'],['Tenant',tenant],
+      ['Candidate hash', mcpxShortHash(hash)],['Base revision', String(base)],['Proposed revision', String(base+1)],
+      ['Rule count', String((mcpxPol.validate||{}).rule_count!=null?mcpxPol.validate.rule_count:'-')],
+      ['Default action', String((mcpxPol.validate||{}).default_action||'-')],
+      ['Corpus changes','new allow '+((mcpxPol.compare||{}).new_allow||0)+', deny '+((mcpxPol.compare||{}).new_deny||0)+', quarantine '+((mcpxPol.compare||{}).new_quarantine||0)+', approval-required '+((mcpxPol.compare||{}).new_approval_required||0)+' (submitted corpus)'],
+      ['Four-eyes rule','A requester may not approve their own request.'],
+      ['This action','Creates a request only. Actual publication is unavailable in this runtime.']
+    ],
+    confirmLabel:'Create publication request', confirmStyle:'primary',
+    request:{ url:'/api/mcp/publications', rawBody:'{"capability":"gateway","tenant":'+JSON.stringify(tenant)+',"candidate":'+candText+',"expected_base":'+base+'}' },
+    classify:mcpxPolClassifyCreate(base), onDone:function(){ /* result handled by classify + refresh below */ }
+  });
+}
+function mcpxPolClassifyCreate(base){
+  return function(status, text){
+    if(status===200){
+      var j={}; try{ j=JSON.parse(text)||{}; }catch(e){}
+      mcpxPol.created={request_id:j.request_id, distribution_state:j.distribution_state}; mcpxPol.state='created'; mcpxPolRender();
+      return {kind:'success', title:'Publication request created', detail:'Request '+(j.request_id||'')+' created (not approved, not published). Use Open in Approvals to review it.'};
+    }
+    if(status===403) return {kind:'crit', title:'Not permitted', detail:'Creating a publication request requires the operator role, and Management publication is rejected (non-mutating in V1).', retryable:false};
+    if(status===409) return {kind:'crit', title:'Stale base revision', detail:'The active policy advanced; no request was created. Re-run Compare against the new base, then retry.', retryable:false};
+    if(status===400) return {kind:'crit', title:'Request rejected', detail:'The appliance rejected the candidate ('+mcpxReasonText(text)+'). No request was created.', retryable:false};
+    return {kind:'crit', title:'Request failed', detail:'Unexpected result; refresh the publication list before retrying to avoid a duplicate.', retryable:true};
+  };
+}
+function mcpxPolRenderResults(){ mcpxPolRenderValidate(); mcpxPolRenderSim(); mcpxPolRefreshDynamic(); }
+function mcpxPolRefreshDynamic(){
+  // Re-render compare + handoff cards in place (state changed without a full reload).
+  var cmp=document.getElementById('mcpx-pol-compare-slot'); if(cmp){ cmp.textContent=''; cmp.appendChild(mcpxPolCompareCard()); }
+  var ho=document.getElementById('mcpx-pol-handoff-slot'); if(ho){ ho.textContent=''; ho.appendChild(mcpxPolHandoffCard()); }
+  var head=document.getElementById('mcpx-pol-statechip'); if(head){ head.textContent=''; head.appendChild(mcpxPolStateChip()); }
+  applySessionRoleVisibilityScope('#mcpx-pol-root');
+}
+function mcpxPolRender(){
+  var root=document.getElementById('mcpx-pol-root'); if(!root) return; root.textContent='';
+  var cards=mcpxEl('div'); cards.style.display='grid'; cards.style.gap='16px';
+  cards.appendChild(mcpxPolActiveCard());
+  cards.appendChild(mcpxPolCandidateCard());
+  var corpusSlot=mcpxEl('div'); corpusSlot.id='mcpx-pol-corpus-slot'; corpusSlot.appendChild(mcpxPolCorpusCard()); cards.appendChild(corpusSlot);
+  var cmpSlot=mcpxEl('div'); cmpSlot.id='mcpx-pol-compare-slot'; cmpSlot.appendChild(mcpxPolCompareCard()); cards.appendChild(cmpSlot);
+  var hoSlot=mcpxEl('div'); hoSlot.id='mcpx-pol-handoff-slot'; hoSlot.appendChild(mcpxPolHandoffCard()); cards.appendChild(hoSlot);
+  root.appendChild(cards);
+  mcpxPolRenderResults();
+  applySessionRoleVisibilityScope('#mcpx-pol-root');
 }
 </script>
 </body>
