@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/playwright-community/playwright-go"
 )
@@ -28,6 +29,7 @@ type ux7Cfg struct {
 	servers, tools  string // inventory fixture bodies ("" => real handler / empty)
 	srv500, tool500 bool
 	srvEmpty        bool
+	delayValidate   bool // delay the policy validate response (in-flight stale-race proof)
 }
 
 func ux7Install(t *testing.T, ctx playwright.BrowserContext, cfg *ux7Cfg) {
@@ -57,6 +59,18 @@ func ux7Install(t *testing.T, ctx playwright.BrowserContext, cfg *ux7Cfg) {
 				_ = route.Fulfill(playwright.RouteFulfillOptions{Status: playwright.Int(500), Body: playwright.String("boom")})
 			} else {
 				json(nonEmpty7(cfg.tools, fxU7Tools))
+			}
+		case m == "POST" && cfg.delayValidate && strings.Contains(u, "/api/mcp/policy-simulate"):
+			pd, _ := req.PostData()
+			if strings.Contains(pd, `"mode":"validate"`) {
+				// Delayed OK for the ORIGINAL bytes; the test edits during the delay so
+				// this stale response must be dropped by the advanced ticket.
+				go func() {
+					time.Sleep(400 * time.Millisecond)
+					json(`{"ok":true,"capability":"gateway","candidate_hash":"sha256:stalehash","rule_count":0,"default_action":"DENY","schema_version":1}`)
+				}()
+			} else {
+				_ = route.Continue()
 			}
 		default:
 			_ = route.Continue() // real handler for policy / health / management / config / publications
@@ -271,6 +285,41 @@ func TestMCPUX7_CapabilitySwitchDiscardsDraft(t *testing.T) {
 	}
 	if strings.TrimSpace(val) != "" {
 		t.Fatalf("capability switch must discard the draft; editor still has %q", val)
+	}
+	if len(pageErrs) != 0 {
+		t.Fatalf("page exceptions: %v", pageErrs)
+	}
+}
+
+// TestMCPUX7_StaleValidateDropped proves an in-flight validate response for the
+// pre-edit bytes cannot land and re-enable publication after the candidate changes:
+// editing during the in-flight validate advances the ticket, so the stale response
+// is dropped and the state never becomes valid.
+func TestMCPUX7_StaleValidateDropped(t *testing.T) {
+	mcpuxSeed(t)
+	srv := httptest.NewServer(newAdminUIHandler())
+	t.Cleanup(srv.Close)
+	browser := uiE2EBrowser(t)
+	var pageErrs []string
+	page := ux7Page(t, browser, srv.URL, RoleAdmin, &ux7Cfg{delayValidate: true}, &pageErrs)
+	must := func(err error, c string) {
+		if err != nil {
+			t.Fatalf("%s: %v | %v", c, err, pageErrs)
+		}
+	}
+	must(page.Locator(`.nav-item[data-view="mcp-policies"]`).First().Click(), "nav policies")
+	must(page.Locator("#mcpx-pol-src").Fill(`{"schema_version":1,"capability":"gateway","policy_revision":1,"default_action":"DENY","rules":[]}`), "fill candidate A")
+	must(page.Locator(`[data-click="mcpxPolValidate"]`).First().Click(), "validate A (delayed)")
+	// Edit to different bytes while validate-A is still in flight.
+	must(page.Locator("#mcpx-pol-src").Fill(`{"schema_version":1,"capability":"gateway","policy_revision":1,"default_action":"ALLOW","rules":[]}`), "edit to candidate B")
+	page.WaitForTimeout(800) // allow the delayed validate-A response to arrive
+	res, err := page.Evaluate(`() => ({ state: mcpxPol.state, hasValidate: !!mcpxPol.validate })`)
+	if err != nil {
+		t.Fatalf("evaluate mcpxPol: %v", err)
+	}
+	m, _ := res.(map[string]interface{})
+	if m["state"] == "valid" || m["hasValidate"] == true {
+		t.Fatalf("stale validate must be dropped after an edit; got state=%v hasValidate=%v", m["state"], m["hasValidate"])
 	}
 	if len(pageErrs) != 0 {
 		t.Fatalf("page exceptions: %v", pageErrs)

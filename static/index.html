@@ -20119,6 +20119,11 @@ function mcpxPolSelectCap(cap){
 }
 function mcpxPolInvalidateDownstream(){
   mcpxPol.validate=null; mcpxPol.sim=null; mcpxPol.compare=null; mcpxPol.created=null;
+  // Advance the ticket so any in-flight validate/simulate/compare response is
+  // dropped by its own guard: without this, a response for the pre-edit bytes could
+  // land after the edit and write a stale hash/result back, re-enabling Create with
+  // evidence from different candidate bytes (exact-bytes-binding violation).
+  ++mcpxPol.ticket;
   mcpxPol.state = mcpxPolCandidateText().trim()? 'edited' : 'empty';
 }
 async function mcpxPolRefreshActive(){
