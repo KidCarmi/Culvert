@@ -465,6 +465,9 @@ func TestMCPUX4_TransitionAndRollback(t *testing.T) {
 	// (10) Rollback with NO real target: Confirm disabled, truthful note, no typed
 	// field. The rollback control lives in the MCP Health & Distribution view.
 	must(page.Locator(`.nav-item[data-view="mcp-health"]`).First().Click(), "nav health")
+	// PR-UX-7 moved the signed-distribution + rollback panel under a collapsed
+	// diagnostics <details>; expand it before driving the rollback control.
+	must(page.Locator("#view-mcp-health summary:has-text('Distribution')").First().Click(), "expand distribution details")
 	must(page.Locator(`[data-click="mcpxOpenRollback"]`).First().Click(), "open rollback no-target")
 	tct(dlg, "No retained rollback target", "no target note")
 	if err := assert.Locator(confirm).ToBeDisabled(playwright.LocatorAssertionsToBeDisabledOptions{Timeout: playwright.Float(4000)}); err != nil {
@@ -481,6 +484,7 @@ func TestMCPUX4_TransitionAndRollback(t *testing.T) {
 	log2 := &ux4Log{}
 	page2 := ux4Page(t, browser, srv.URL, RoleAdmin, &ux4Cfg{log: log2, distBody: fxUX4DistWithTarget}, &pageErrs)
 	must(page2.Locator(`.nav-item[data-view="mcp-health"]`).First().Click(), "nav health p2")
+	must(page2.Locator("#view-mcp-health summary:has-text('Distribution')").First().Click(), "expand distribution details p2")
 	must(page2.Locator(`[data-click="mcpxOpenRollback"]`).First().Click(), "open rollback target")
 	dlg2 := page2.Locator("#mcpx-danger-dialog")
 	tct(dlg2, "Rollback target", "target label")

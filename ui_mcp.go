@@ -522,6 +522,13 @@ func apiMCPPublications(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
+		// Management MCP is non-mutating in V1: reject a Management policy publication
+		// fail-closed at the boundary (the service layer rejects it too, defense in
+		// depth). This blocks a Management publication workflow, never creates one.
+		if strings.EqualFold(strings.TrimSpace(req.Capability), "management") {
+			mcpErr(w, mcperr.New(mcperr.ReasonAdminForbidden, "mcp", "management MCP is non-mutating in V1; policy publication is not permitted for the management capability"))
+			return
+		}
 		m := getMCPAdmin()
 		if m.publication == nil {
 			mcpErr(w, mcperr.New(mcperr.ReasonAdminNotFound, "mcp", "publication unavailable"))
