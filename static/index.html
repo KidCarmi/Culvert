@@ -495,10 +495,10 @@ tr.dragging  { opacity: .4; }
 .mcpx-asof{margin-left:auto;font-size:.72rem;color:var(--muted)}
 .mcpx-asof.stale{color:var(--warn)}
 .mcpx-chip{display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border-radius:999px;font-size:.7rem;font-weight:600;border:1px solid transparent;white-space:nowrap}
-.mcpx-chip.ok{background:var(--ok-tint);color:var(--ok);border-color:rgba(34,197,94,.3)}
-.mcpx-chip.warn{background:var(--warn-tint);color:var(--warn);border-color:rgba(234,179,8,.35)}
-.mcpx-chip.crit{background:var(--crit-tint);color:var(--crit);border-color:rgba(239,68,68,.35)}
-.mcpx-chip.info{background:var(--info-tint);color:var(--info);border-color:rgba(96,165,250,.3)}
+.mcpx-chip.ok{background:var(--ok-tint);color:var(--ok);border-color:color-mix(in srgb,var(--ok) 30%,transparent)}
+.mcpx-chip.warn{background:var(--warn-tint);color:var(--warn);border-color:color-mix(in srgb,var(--warn) 35%,transparent)}
+.mcpx-chip.crit{background:var(--crit-tint);color:var(--crit);border-color:color-mix(in srgb,var(--crit) 35%,transparent)}
+.mcpx-chip.info{background:var(--info-tint);color:var(--info);border-color:color-mix(in srgb,var(--info) 30%,transparent)}
 .mcpx-chip.accent{background:var(--accent-tint);color:var(--accent2);border-color:var(--accent)}
 .mcpx-chip.muted{background:var(--surface2);color:var(--muted);border-color:var(--border)}
 .mcpx-cards{display:grid;grid-template-columns:1.15fr 1fr;gap:16px;align-items:start}
@@ -508,7 +508,7 @@ tr.dragging  { opacity: .4; }
 .mcpx-card-title{font-size:.86rem;font-weight:700}
 .mcpx-triplet{display:flex;gap:8px;margin:10px 0 6px}
 .mcpx-tri{flex:1;background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:8px 10px}
-.mcpx-tri.warn{border-color:rgba(234,179,8,.4)}
+.mcpx-tri.warn{border-color:color-mix(in srgb,var(--warn) 40%,transparent)}
 .mcpx-tl{font-size:.6rem;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);margin-bottom:4px}
 .mcpx-tv{font-size:.82rem;font-weight:700}
 .mcpx-metric{display:flex;gap:16px;flex-wrap:wrap;margin-top:8px;font-size:.74rem;color:var(--muted)}
@@ -535,7 +535,7 @@ table.mcpx-act tbody tr{cursor:pointer}
 table.mcpx-act tbody tr:focus-visible{box-shadow:var(--focus-ring);outline:none}
 .mcpx-evaleff{display:inline-flex;align-items:center;gap:5px}
 .mcpx-evaleff .arw{color:var(--muted)}
-.mcpx-drawer{position:absolute;top:0;right:0;bottom:0;width:366px;background:var(--surface);border-left:1px solid var(--border);box-shadow:var(--shadow-2);z-index:5;overflow-y:auto;display:none}
+.mcpx-drawer{max-width:92vw;position:absolute;top:0;right:0;bottom:0;width:366px;background:var(--surface);border-left:1px solid var(--border);box-shadow:var(--shadow-2);z-index:5;overflow-y:auto;display:none}
 .mcpx-drawer.open{display:block}
 .mcpx-scrim{position:absolute;inset:0 366px 0 0;background:rgba(0,0,0,.28);z-index:4;display:none}
 .mcpx-scrim.open{display:block}
@@ -591,9 +591,9 @@ a.mcpx-link:focus-visible,button.mcpx-attn-item:focus-visible,.mcpx-pivot:focus-
 .mcpx-dlg-typed .mcpx-dlg-phrase{color:var(--text);font-weight:700;letter-spacing:.04em}
 .mcpx-dlg-result{margin:12px 0 0}
 .mcpx-dlg-result.on{padding:10px 12px;border-radius:8px;border:1px solid var(--border);background:var(--surface2)}
-.mcpx-dlg-result.on.ok{border-color:rgba(34,197,94,.4);background:var(--ok-tint)}
-.mcpx-dlg-result.on.crit{border-color:rgba(239,68,68,.4);background:var(--crit-tint)}
-.mcpx-dlg-result.on.warn{border-color:rgba(234,179,8,.4);background:var(--warn-tint)}
+.mcpx-dlg-result.on.ok{border-color:color-mix(in srgb,var(--ok) 40%,transparent);background:var(--ok-tint)}
+.mcpx-dlg-result.on.crit{border-color:color-mix(in srgb,var(--crit) 40%,transparent);background:var(--crit-tint)}
+.mcpx-dlg-result.on.warn{border-color:color-mix(in srgb,var(--warn) 40%,transparent);background:var(--warn-tint)}
 .mcpx-dlg-rtitle{font-size:.8rem;font-weight:700;margin-bottom:3px}
 .mcpx-dlg-rdetail{font-size:.76rem;color:var(--text);line-height:1.5}
 .mcpx-dlg-rtech{margin-top:6px}
@@ -619,6 +619,7 @@ a.mcpx-link:focus-visible,button.mcpx-attn-item:focus-visible,.mcpx-pivot:focus-
 .mcpx-rf-count .l{font-size:.58rem;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
 .mcpx-rf-count.warn .n{color:var(--warn)}.mcpx-rf-count.crit .n{color:var(--crit)}.mcpx-rf-count.ok .n{color:var(--ok)}
 table.mcpx-rf-acks{width:100%;border-collapse:collapse;font-size:.74rem;margin-top:10px}
+.mcpx-tscroll{overflow-x:auto;max-width:100%}
 table.mcpx-rf-acks th{text-align:left;font-size:.58rem;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);font-weight:700;padding:6px 10px;border-bottom:1px solid var(--border)}
 table.mcpx-rf-acks td{padding:6px 10px;border-bottom:1px solid var(--border);white-space:nowrap}
 .mcpx-rf-editor{width:100%;min-height:110px;font-family:var(--mono,monospace);font-size:.74rem;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);padding:9px 11px;resize:vertical}
@@ -3644,10 +3645,14 @@ Firefox (all platforms):
     </div>
 
     <!-- ── MCP Admin (PR-9) ────────────────────────────────────────────── -->
+    <!-- PR-UX-8: one shared, concise MCP live region. Loaders announce a short
+         status here instead of the old per-view aria-live on whole-table roots,
+         which re-announced entire tables on every filter keystroke / refresh. -->
+    <div id="mcpx-live" class="mcpx-sr" role="status" aria-live="polite" aria-atomic="true"></div>
     <div class="view" id="view-mcp-overview">
       <div class="panel"><h3>MCP Command Center</h3>
         <p class="muted">MCP gateway posture: one place to decide if you need to act. All values below come from live <code>/api/mcp/*</code> responses.</p>
-        <button class="btn" data-click="renderMCPCommandCenter">Refresh</button>
+        <button class="btn" data-click="renderMCPCommandCenter" aria-label="Refresh MCP Command Center">Refresh</button>
         <div aria-live="polite" id="mcpx-cc-live" class="mcpx-sr"></div>
         <div id="mcpx-overview-root"></div>
         <details class="mcpx-legacy">
@@ -3662,12 +3667,12 @@ Firefox (all platforms):
         <p class="muted">Read-only inventory for one tenant. Only safe identity and lifecycle fields are shown; raw endpoints, pinned identity material, credentials, and full tool schemas are never exposed. There are no inventory mutation actions in V1.</p>
         <div class="mcpx-rf-bar">
           <label>Tenant <input id="mcp-srv-tenant" placeholder="tenant" /></label>
-          <button class="btn sm" data-click="mcpxInvLoad">Load</button>
+          <button class="btn sm" data-click="mcpxInvLoad" aria-label="Load servers and tools for tenant">Load</button>
           <span id="mcpx-inv-asof" class="mcpx-asof"></span>
         </div>
         <div id="mcpx-inv-src" class="muted" aria-live="polite"></div>
         <div class="mcpx-actwrap has-drawer" id="mcpx-inv-wrap">
-          <div id="mcpx-inv-root" aria-live="polite"></div>
+          <div id="mcpx-inv-root"></div>
           <div class="mcpx-drawer" id="mcpx-inv-drawer" tabindex="-1" role="region" aria-label="inventory detail"></div>
         </div>
         <details class="mcpx-legacy">
@@ -3708,7 +3713,7 @@ Firefox (all platforms):
           <button class="btn sm ghost" data-click="mcpxPolRefreshActive">Refresh active</button>
           <span id="mcpx-pol-asof" class="mcpx-asof"></span>
         </div>
-        <div id="mcpx-pol-root" aria-live="polite"></div>
+        <div id="mcpx-pol-root"></div>
         <details class="mcpx-legacy">
           <summary>Raw diagnostics &amp; legacy JSON editor</summary>
           <label>Capability
@@ -3728,7 +3733,7 @@ Firefox (all platforms):
         <p class="muted">One list for operational and publication approvals. Each item keeps its real kind and state. Decisions are four-eyes (a requester may not approve their own request) and require durable event storage; publication of an approved candidate is a separate step from approving it.</p>
         <div class="mcpx-rf-bar">
           <label>Tenant <input id="mcp-appr-tenant" placeholder="tenant" /></label>
-          <button class="btn sm" data-click="mcpxApprLoad">Load</button>
+          <button class="btn sm" data-click="mcpxApprLoad" aria-label="Load approvals for tenant">Load</button>
           <span id="mcpx-appr-asof" class="mcpx-asof"></span>
         </div>
         <div class="mcpx-appr-filters" role="tablist" aria-label="Approval filter">
@@ -3742,7 +3747,7 @@ Firefox (all platforms):
         </div>
         <div id="mcpx-appr-src" class="muted" aria-live="polite"></div>
         <div class="mcpx-actwrap has-drawer" id="mcpx-appr-wrap">
-          <div id="mcpx-appr-root" aria-live="polite"></div>
+          <div id="mcpx-appr-root"></div>
           <div class="mcpx-drawer" id="mcpx-appr-drawer" tabindex="-1" role="region" aria-label="approval detail"></div>
         </div>
         <details class="mcpx-legacy">
@@ -3758,10 +3763,10 @@ Firefox (all platforms):
       <div class="panel"><h3>MCP Health &amp; Durability</h3>
         <p class="muted">Gateway and Management runtime and durability are capability-isolated and shown independently. Detailed fleet acknowledgement lives on the Rollout &amp; Fleet screen; this view links to it rather than duplicating it.</p>
         <div class="mcpx-rf-bar">
-          <button class="btn sm" data-click="mcpxHealthLoad">Refresh</button>
+          <button class="btn sm" data-click="mcpxHealthLoad" aria-label="Refresh MCP health">Refresh</button>
           <span id="mcpx-health-asof" class="mcpx-asof"></span>
         </div>
-        <div id="mcpx-health-root" aria-live="polite"></div>
+        <div id="mcpx-health-root"></div>
         <details class="mcpx-legacy">
           <summary>Raw diagnostics &amp; legacy health JSON</summary>
           <button class="btn" data-click="loadMCPHealth">Refresh (raw)</button>
@@ -3792,10 +3797,10 @@ Firefox (all platforms):
           <button type="button" class="mcpx-rf-captab" data-click="mcpxRfSelectCap" data-arg="management" role="tab" aria-selected="false">Management</button>
         </span>
         <input type="hidden" id="mcpx-rf-cap" value="gateway">
-        <button class="btn sm ghost" data-click="mcpxRenderRolloutFleet">Refresh</button>
+        <button class="btn sm ghost" data-click="mcpxRenderRolloutFleet" aria-label="Refresh rollout and fleet state">Refresh</button>
         <span id="mcpx-rf-asof" class="mcpx-asof"></span>
       </div>
-      <div id="mcpx-rf-root" aria-live="polite"></div>
+      <div id="mcpx-rf-root"></div>
       <details class="mcpx-legacy">
         <summary>Raw diagnostics &amp; legacy panels</summary>
       <div class="panel"><h3>Rollout Overview &amp; Mode &amp; Scope</h3>
@@ -3838,10 +3843,10 @@ Firefox (all platforms):
       <div class="panel"><h3>Management MCP Access</h3>
         <p class="muted">Management MCP is non-mutating in V1. This is an access and capability inventory, not an MCP client console: there are no tool-invocation, mutation, publication, or activation controls.</p>
         <div class="mcpx-rf-bar">
-          <button class="btn sm" data-click="mcpxMgmtLoad">Refresh</button>
+          <button class="btn sm" data-click="mcpxMgmtLoad" aria-label="Refresh management access">Refresh</button>
           <span id="mcpx-mgmt-asof" class="mcpx-asof"></span>
         </div>
-        <div id="mcpx-mgmt-root" aria-live="polite"></div>
+        <div id="mcpx-mgmt-root"></div>
         <details class="mcpx-legacy">
           <summary>Raw diagnostics &amp; legacy access</summary>
           <button class="btn" data-click="loadMCPManagement">Refresh (raw)</button>
@@ -3854,12 +3859,12 @@ Firefox (all platforms):
       <div class="panel"><h3>MCP Listener Settings</h3>
         <p class="muted">Gateway and Management are separate and default disabled. Storing configuration is node-local only: it does NOT bind, activate, or restart a live listener, and it never distributes CP to DP. Management mutation stays disabled in V1 and cannot be enabled here. No wildcard bind and no shared endpoint; the appliance validates and replaces the complete configuration atomically.</p>
         <div class="mcpx-rf-bar">
-          <button class="btn sm" data-click="mcpxCfgLoad">Load current</button>
+          <button class="btn sm" data-click="mcpxCfgLoad" aria-label="Load current listener configuration">Load current</button>
           <button class="btn sm primary" data-min-role="admin" data-click="mcpxCfgSave">Store node-local configuration</button>
           <span id="mcpx-cfg-asof" class="mcpx-asof"></span>
         </div>
         <div id="mcpx-cfg-src" class="muted" aria-live="polite"></div>
-        <div id="mcpx-cfg-root" aria-live="polite"></div>
+        <div id="mcpx-cfg-root"></div>
         <div id="mcpx-cfg-result" class="mcpx-dlg-result" role="status" aria-live="polite" aria-atomic="true"></div>
         <details class="mcpx-legacy">
           <summary>Raw diagnostics &amp; legacy JSON editor</summary>
@@ -5838,6 +5843,26 @@ document.querySelectorAll('.nav-item').forEach(el => {
 // in this inline script has executed, so restore sees a fully-wired surface.
 window.addEventListener('popstate', function(){ var r = mcpxRouteParse(location.hash); if (r) mcpxApplyRoute(r); });
 document.addEventListener('DOMContentLoaded', function(){ var r = mcpxRouteParse(location.hash); if (r) mcpxApplyRoute(r); });
+
+// PR-UX-8 a11y: ARIA tablist keyboard model for the MCP capability/filter tablists.
+// Arrow/Home/End move focus and activate (activation-follows-focus); Enter/Space
+// already activate because the tabs are <button>s. Scoped to MCP tablists only.
+document.addEventListener('keydown', function(e){
+  var t = e.target;
+  if (!t || !t.getAttribute || t.getAttribute('role') !== 'tab') return;
+  var list = t.closest && t.closest('[role="tablist"]');
+  if (!list || (!list.classList.contains('mcpx-rf-caps') && !list.classList.contains('mcpx-appr-filters'))) return;
+  var tabs = Array.prototype.slice.call(list.querySelectorAll('[role="tab"]'));
+  var i = tabs.indexOf(t); if (i < 0) return;
+  var ni = -1;
+  if (e.key === 'ArrowRight' || e.key === 'ArrowDown') ni = (i + 1) % tabs.length;
+  else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') ni = (i - 1 + tabs.length) % tabs.length;
+  else if (e.key === 'Home') ni = 0;
+  else if (e.key === 'End') ni = tabs.length - 1;
+  else return;
+  e.preventDefault();
+  var nt = tabs[ni]; if (nt) { nt.focus(); nt.click(); }
+});
 
 // Per-view unsaved-changes guards (M3 S3): a view registers a beforeLeave
 // hook that returns `true` synchronously when there is nothing to protect
@@ -17998,6 +18023,12 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
    declarations so the CSP-safe delegated dispatch resolves them. */
 
 function mcpxEl(tag, cls, txt){ var e=document.createElement(tag); if(cls) e.className=cls; if(txt!=null) e.textContent=txt; return e; }
+// PR-UX-8: concise announcement into the single shared MCP live region. Replaces the
+// old per-view aria-live on whole-table roots (which re-announced entire tables).
+function mcpxAnnounce(msg){ var e=document.getElementById('mcpx-live'); if(!e) return; e.textContent=''; e.textContent=String(msg==null?'':msg); }
+// PR-UX-8 responsive: give a wide card-hosted table its own horizontal scroll so it
+// never forces page-level horizontal overflow at 1280 and narrower.
+function mcpxScrollWrap(tbl){ var w=mcpxEl('div','mcpx-tscroll'); w.appendChild(tbl); return w; }
 function mcpxChip(txt, kind){ return mcpxEl('span','mcpx-chip '+(kind||'muted'), txt); }
 function mcpxKv(k, v){ var r=mcpxEl('div','mcpx-row'); r.appendChild(mcpxEl('span','k',k)); r.appendChild(mcpxEl('span','v', (v==null||v==='')?'-':String(v))); return r; }
 function mcpxNow(){ var d=new Date(), p=function(n){return String(n).padStart(2,'0');}; return p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds()); }
@@ -19316,7 +19347,7 @@ function mcpxRfFleetCard(cap, dist, capDist, acks){
         tr.appendChild(mcpxEl('td', null, (rw.incompatible?'incompatible':'')||rw.reject_reason||'-'));
         tb.appendChild(tr);
       });
-      tbl.appendChild(tb); card.appendChild(tbl);
+      tbl.appendChild(tb); card.appendChild(mcpxScrollWrap(tbl));
     }
   }
   card.appendChild(mcpxEl('div','mcpx-source','From /api/mcp/distribution + /api/mcp/distribution/acks. A hash, a stored envelope, a successful request, or elapsed time is NEVER treated as a fleet acknowledgement.'));
@@ -19459,7 +19490,7 @@ function mcpxRfQualCard(cap, ev){
       barTd.appendChild(mcpxRfQualBar(rq)); barTr.appendChild(barTd); tb.appendChild(barTr);
     }
   });
-  tbl.appendChild(tb); card.appendChild(tbl);
+  tbl.appendChild(tb); card.appendChild(mcpxScrollWrap(tbl));
   var s=ev.summary||{};
   card.appendChild(mcpxEl('div','mcpx-rf-dd-muted','Measured requirements: '+(s.measured_total||0)+' total, '+(s.met||0)+' met, '+(s.not_met||0)+' not met, '+(s.not_started||0)+' not started, '+(s.synthetic_non_qualifying||0)+' synthetic non-qualifying, '+(s.unavailable||0)+' unavailable. This is not a qualification decision.'));
   if(ev.unsupported_categories && ev.unsupported_categories.length){
@@ -19498,6 +19529,7 @@ async function mcpxRenderRolloutFleet(){
   cards.appendChild(mcpxRfCandidateCard(cap));
   cards.appendChild(mcpxRfActionsCard(cap, roll, capDist));
   root.appendChild(cards);
+  mcpxAnnounce(cap+' rollout and fleet state loaded');
   applySessionRoleVisibilityScope('#mcpx-rf-root'); // hide admin-only Actions for viewers
   var asof=document.getElementById('mcpx-rf-asof'); if(asof) asof.textContent='as of '+mcpxNow();
 }
@@ -19940,7 +19972,8 @@ async function mcpxMgmtLoad(){
   var d=await mcpxRfFetch('/api/mcp/management-access');
   if(myTicket!==mcpxMgmtTicket) return;
   root.textContent='';
-  if(mcpxRfErr(d)){ root.appendChild(mcpxEl('div','mcpx-empty','Management access unavailable - '+d.__err+'. (This is an unavailable read, NOT a mutation-off state.)')); return; }
+  if(mcpxRfErr(d)){ root.appendChild(mcpxEl('div','mcpx-empty','Management access unavailable - '+d.__err+'. (This is an unavailable read, NOT a mutation-off state.)')); mcpxAnnounce('Management access unavailable'); return; }
+  mcpxAnnounce('Management access loaded');
   var acc=d.access||{};
   var card=mcpxRfCard('Access posture','Read-only. Endpoint-bound reflects a complete bind configuration, not public reachability, liveness, or health.');
   var chips=mcpxEl('div','mcpx-btnrow');
@@ -20020,11 +20053,12 @@ async function mcpxHealthLoad(){
   var d=await mcpxRfFetch('/api/mcp/health');
   if(myTicket!==mcpxHealthTicket) return;
   root.textContent='';
-  if(mcpxRfErr(d)){ root.appendChild(mcpxEl('div','mcpx-empty','Health unavailable - '+d.__err+'. (Unavailable read - not zero sessions and not zero durability use.)')); return; }
+  if(mcpxRfErr(d)){ root.appendChild(mcpxEl('div','mcpx-empty','Health unavailable - '+d.__err+'. (Unavailable read - not zero sessions and not zero durability use.)')); mcpxAnnounce('MCP health unavailable'); return; }
   var cards=mcpxEl('div','mcpx-cards2');
   cards.appendChild(mcpxHealthCard('Gateway', d.gateway));
   cards.appendChild(mcpxHealthCard('Management', d.management));
   root.appendChild(cards);
+  mcpxAnnounce('MCP health loaded');
   var link=mcpxEl('div','mcpx-source');
   link.appendChild(document.createTextNode('Fleet distribution_state: '+(d.distribution_state||'unavailable')+'. Detailed per-DP acknowledgement is on the Rollout & Fleet screen. '));
   var b=mcpxEl('button','btn sm ghost','View fleet distribution'); b.type='button'; b.setAttribute('aria-label','View fleet distribution on the Rollout and Fleet screen'); b.addEventListener('click', function(){ mcpxNavigate('rollout', {}); });
@@ -20402,11 +20436,17 @@ function mcpxPolCorpusCard(){
   var sout=mcpxEl('div'); sout.id='mcpx-pol-sim-out'; card.appendChild(sout);
   return card;
 }
+var mcpxFieldSeq=0;
 function mcpxPolCaseField(c, key, label, type, opts){
-  var f=mcpxEl('div','mcpx-pol-case-f'); f.appendChild(mcpxEl('label',null,label));
+  // PR-UX-8 a11y: programmatically associate every corpus field with its label via
+  // for/id (previously unlabeled edit fields to a screen reader). The id is unique
+  // per build; the DOM is fully replaced each render so it never collides.
+  var fid='mcpx-polcasef-'+(++mcpxFieldSeq);
+  var f=mcpxEl('div','mcpx-pol-case-f'); var lb=mcpxEl('label',null,label); lb.setAttribute('for',fid); f.appendChild(lb);
   var el;
   if(type==='sel'){ el=mcpxEl('select'); opts.forEach(function(o){ var op=mcpxEl('option',null,o); op.value=o; if(c[key]===o) op.selected=true; el.appendChild(op); }); }
   else { el=mcpxEl('input'); el.type='text'; el.value=c[key]||''; }
+  el.id=fid;
   el.addEventListener('input', function(){ c[key]=el.value; mcpxPol.sim=null; mcpxPol.compare=null; }); el.addEventListener('change', function(){ c[key]=el.value; mcpxPol.sim=null; mcpxPol.compare=null; if(key==='localId'||key==='op') mcpxPolRefreshCorpus(); });
   f.appendChild(el); return f;
 }
