@@ -2172,6 +2172,10 @@
           "reason": {
             "type": "string"
           },
+          "sigstore_warn": {
+            "description": "Present only when a Sigstore trust override (identity/trusted-root) did not take effect.",
+            "type": "string"
+          },
           "verify_mode": {
             "type": "string"
           }
