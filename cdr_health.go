@@ -67,13 +67,17 @@ func startCDRHealthPoller(ctx context.Context) {
 		t := time.NewTicker(cdrHealthInterval)
 		defer t.Stop()
 		// Fire once right away so the GUI has data before the first tick.
-		probeCDRHealth(ctx)
+		// CHAOS-24: contain the ROUND — a panic probing one CDR member must
+		// not kill the gateway, and must not silently stop the poller (the
+		// health snapshot would freeze at its last value and the GUI would
+		// keep showing a stale "healthy" long after the pool went down).
+		runGuarded("cdr_health", func() { probeCDRHealth(ctx) })
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				probeCDRHealth(ctx)
+				runGuarded("cdr_health", func() { probeCDRHealth(ctx) })
 			}
 		}
 	}()

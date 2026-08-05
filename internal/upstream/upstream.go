@@ -509,7 +509,10 @@ func RunHealthCheckLoop(ctx context.Context, pool *Pool, interval time.Duration)
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			pool.HealthCheck()
+			// CHAOS-24: contain the ROUND. This loop is what closes a tripped
+			// breaker, so if it dies the pool can never recover a parent proxy
+			// and egress stays on the direct fail-open path indefinitely.
+			obs.SafeCall("upstream_health", pool.HealthCheck)
 		}
 	}
 }

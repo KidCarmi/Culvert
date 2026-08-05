@@ -9,9 +9,22 @@ inferred without reading the code path. Failure modes were assessed against the 
 posture — **default deny, fail closed when recovery is impossible, graceful degradation otherwise.**
 
 This document is a standing register. It records where Culvert already survives failure safely
-(and *why*, by code path) and where it does not. The one code change shipped alongside this review
-is a fail-closed fix for a latent nil-deref panic in the enrollment path (Finding HA-9); everything
-else is triaged below with a suggested PR and required tests for follow-up.
+(and *why*, by code path) and where it does not. The one code change shipped alongside the original
+review is a fail-closed fix for a latent nil-deref panic in the enrollment path (Finding HA-9);
+everything else is triaged below with a suggested PR and required tests for follow-up.
+
+---
+
+## 0. Revision log
+
+**2026-08-04 — CHAOS-24 sweep (background-worker panic containment).**
+
+Re-verified the standing register against current `main`. Several original findings have since
+shipped and are marked **CLOSED** in place below (WK-5 threat-feed stale-erase, ST-5/ST-6 atomic
+writes, ST-7 async request log, WK-9 async syslog, PX-3 idle-bounded relays, PX-2 observable
+direct-egress fallback). The register's **only remaining Critical item — WK-8 — was still open**,
+and this revision closes it. See §12 for the new finding, the split-brain hazard it uncovered in
+the *obvious* fix, and what is deliberately left for follow-up.
 
 ---
 
@@ -61,8 +74,8 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | # | Scenario | Verdict | Sev | Evidence |
 |---|----------|---------|-----|----------|
 | PX-1 | HTTPS CONNECT, WebSocket, and SOCKS5 dial the origin **directly** — the upstream parent-proxy pool is only wired into the plain-HTTP transport. Parent-proxy chaining silently applies to HTTP only. | GAP | H | `proxy.go:1374,1466`, `socks5.go:320`; pool only via `applyUpstreamProxy`→`getUpstreamTransport()` in `handleHTTP` `proxy.go:928` |
-| PX-2 | Circuit breaker / all-upstreams-down **fails open to direct** egress, bypassing the parent-proxy control. | GAP (by design, security-relevant) | H | `internal/upstream/upstream.go:240,267` (`// all upstreams down — fall back to direct`) |
-| PX-3 | Raw relays (CONNECT bypass, WebSocket, non-TLS fallback) have **no idle/read deadline** — a half-open peer leaks a goroutine + FD + 128KB pooled buffer indefinitely. Only the SSL-inspect *request loop* arms a deadline. | GAP | H | `bidiRelayCounted` `proxy.go:1431,1262`; contrast deadline at `proxy.go:1621` |
+| PX-2 | Circuit breaker / all-upstreams-down **fails open to direct** egress, bypassing the parent-proxy control. | GAP → **PARTLY CLOSED** (CHAOS-11: still fail-open by design, now counted + alerted + surfaced) | H | `internal/upstream/upstream.go:240,267` (`// all upstreams down — fall back to direct`) |
+| PX-3 | Raw relays (CONNECT bypass, WebSocket, non-TLS fallback) have **no idle/read deadline** — a half-open peer leaks a goroutine + FD + 128KB pooled buffer indefinitely. Only the SSL-inspect *request loop* arms a deadline. | GAP → **CLOSED** (CHAOS-03 `idleCopyCounted`, `proxy_tunnel.go`) | H | `bidiRelayCounted` `proxy.go:1431,1262`; contrast deadline at `proxy.go:1621` |
 | PX-4 | Spawned relay/async goroutines have **no `recover()`** — a panic in any propagates to the runtime and kills the process, dropping every in-flight tunnel. | GAP | M | `go relayCounted(...)` `proxy.go:1290`, inline relays `proxy.go:1565,1747`, `go trackDestinationCountry` `proxy.go:696` |
 | PX-5 | SOCKS5 connections **bypass the per-IP connection limiter** entirely. | GAP | M | `handleSOCKS5` `socks5.go:251` never calls `connLimiter.Acquire`; HTTP path does at `proxy.go:627` |
 | PX-6 | **No global connection cap**; per-IP map is unbounded in cardinality; limiter ships **disabled by default**. Distributed flood → FD/memory exhaustion. | GAP | H | `internal/connlimit/connlimit.go:12,67` (default disabled, `Acquire`→true when off) |
@@ -124,9 +137,9 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | ST-2 | History store (Badger) non-blocking on the hot path: bounded `select … default → drop+count`, batched flush, disk-pressure `minimal` mode drops LOW-priority but keeps security events. | ✓ | — | `internal/logstore/logstore.go:328-401` |
 | ST-3 | Config-version retention cap (50) enforced on every `Save`; serialized capture→save prevents stale-under-higher-version; corrupt snapshots → `ErrCorrupt`→HTTP 500, skipped in `List`. | ✓ | — | `internal/configver/configver.go:132-150`, `configversion.go:89-112,159-169` |
 | ST-4 | SIGHUP reload fail-safe: bad YAML → "keeping current config"; blocklist swaps maps only after successful open+scan. | ✓ | — | `main.go:979-985,1938-1990`, `internal/blocklist/blocklist.go:188-202` |
-| ST-5 | **`admin_settings.json`: concurrent goroutine writers to a fixed `.tmp`, no fsync.** `adminSettingsSave()` launches each save in a goroutine and releases the mutex before writing → interleaved bytes → corrupt JSON → next boot silently reverts **all** admin settings to defaults. | GAP | H | `admin_settings.go:407-421,327-329,132-134` |
-| ST-6 | **`ui_users.json`: non-atomic write (no fsync) + fail-open-to-empty roster on corruption.** Power loss mid-save loses the entire admin roster + TOTP secrets + `default_auth_outcome`; loader starts empty with no quarantine → potential admin lockout. | GAP | H | `store.go:759-763,691-693`, `auth_startup.go:39-40` |
-| ST-7 | Persistent request-log JSONL write is **synchronous + globally serialized** under one mutex on the hot path → slow disk collapses proxy throughput (head-of-line). Disk-*full* is handled (counted, once-logged). | GAP (slow-disk) | M | `internal/reqlog/reqlog.go:154-167`, `internal/fileutil/rotating.go:40-61` |
+| ST-5 | **`admin_settings.json`: concurrent goroutine writers to a fixed `.tmp`, no fsync.** `adminSettingsSave()` launches each save in a goroutine and releases the mutex before writing → interleaved bytes → corrupt JSON → next boot silently reverts **all** admin settings to defaults. | GAP → **CLOSED** (`fileutil.AtomicWrite`, `admin_settings.go:660`) | H | `admin_settings.go:407-421,327-329,132-134` |
+| ST-6 | **`ui_users.json`: non-atomic write (no fsync) + fail-open-to-empty roster on corruption.** Power loss mid-save loses the entire admin roster + TOTP secrets + `default_auth_outcome`; loader starts empty with no quarantine → potential admin lockout. | GAP → **CLOSED** (`fileutil.AtomicWrite`, `store.go:887`) | H | `store.go:759-763,691-693`, `auth_startup.go:39-40` |
+| ST-7 | Persistent request-log JSONL write is **synchronous + globally serialized** under one mutex on the hot path → slow disk collapses proxy throughput (head-of-line). Disk-*full* is handled (counted, once-logged). | GAP → **CLOSED** (async bounded queue + single drainer, `internal/reqlog/persist.go`) | M | `internal/reqlog/reqlog.go:154-167`, `internal/fileutil/rotating.go:40-61` |
 | ST-8 | Audit write **silently drops on I/O failure** (`//nolint:errcheck`, no counter) — compliance "who changed what" vanishes on full/RO disk; `GetPersistent` re-reads the whole file per query. | GAP | M/H | `internal/audit/audit.go:131-135,173-199` |
 | ST-9 | Startup `logger.Fatalf` on blocklist/URL-category read errors (any non-`IsNotExist`) → **crash-loop** on permission/EIO faults. | GAP | M | `blocklist_startup.go:48-60`, `urlcategories_startup.go:22,46` |
 | ST-10 | Backup is not a consistent cross-file snapshot (inputs read at different instants); residual non-atomic writers (`cdrpolicy.go:195`, `internal/scanexcl/scanexcl.go:93`, `update_cluster.go:193`). | GAP | L/M | backup pack loop `backup.go:~280`; flagged by `cluster_persistence_atomic_test.go:8` |
@@ -159,11 +172,11 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | WK-2 | Remote scan sidecar down → fail-open, **but** alerted (`scan_svc_down`) + counted. Posture not admin-selectable; 30s per-request timeout stacks latency when hard-down. | ✓ (risky) | H | `internal/secscan/remote.go:95-155,84-90,105` |
 | WK-3 | GeoIP cache-miss on the policy hot path fails **closed** (country allow-rule cannot match unknown country); `LookupCached` never blocks on DB/DNS. | ✓ | — | `policy.go:831-839`, `geoip.go:84-93`; tests `final_coverage_test.go:203` |
 | WK-4 | GeoIP DB missing/corrupt: reader stays nil, feature degrades to "no country data" — safe, but **no staleness/health signal** (MMDBs expire silently). | GAP (obs) | M | `internal/geoip/geoip.go:23-36,71` |
-| WK-5 | **Threat-feed timeout → stale-erase.** On partial failure `Sync` unconditionally replaces the maps with only what succeeded, discarding prior good entries; stamps `lastSync=now` even on failure; no backoff, no staleness alert → coverage silently shrinks for up to 6h. | GAP | H | `internal/threatfeed/threatfeed.go:150-183` |
+| WK-5 | **Threat-feed timeout → stale-erase.** On partial failure `Sync` unconditionally replaces the maps with only what succeeded, discarding prior good entries; stamps `lastSync=now` even on failure; no backoff, no staleness alert → coverage silently shrinks for up to 6h. | GAP → **CLOSED** (per-source `replacedSources` replacement, `threatfeed.go` `applySync`) | H | `internal/threatfeed/threatfeed.go:150-183` |
 | WK-6 | UT1 category feed failures counted but **never alerted**; fixed 24h retry, no backoff. Stale-serve is safe (last-good BadgerDB). | GAP (obs) | M | `internal/feedsync/feedsync.go:192-213,176` |
 | WK-7 | Category DB (Badger) corruption: read errors → "not found" (fail-open for category-block, no crash); value-log truncate/replay on restart. | ✓ | — | `internal/catdb/catdb.go:37-50,84-100` |
-| WK-8 | **Background workers have NO panic recovery.** `threatfeed.Start`, `feedsync.Start`, blocklistfeed scheduler, `startCDRHealthPoller`, `startAlertRetryLoop`, `sseBroadcaster.run` all run their loop body with no `recover()`. One panic (bad feed line, nil-map deref, a `.(time.Time)` assertion) **terminates the whole in-line proxy.** | GAP | **C** | `threatfeed.go:131-145`, `feedsync.go:171-187,224`, `cdr_health.go:65-80`, `alerts.go:46`→`store.go:511`, `events.go:75` (zero `recover()`) |
-| WK-9 | Syslog on the hot path: `writeMsg` holds `s.mu` and does a **blocking 5s dial** while locked; TCP writes have **no write deadline** → a slow SIEM can stall proxy goroutines. UDP is non-blocking (acceptable). | GAP | M | `internal/syslog/syslog.go:117-146,68` |
+| WK-8 | **Background workers have NO panic recovery.** `threatfeed.Start`, `feedsync.Start`, blocklistfeed scheduler, `startCDRHealthPoller`, `startAlertRetryLoop` all run their loop body with no `recover()`. One panic (bad feed line, nil-map deref, a `.(time.Time)` assertion) **terminates the whole in-line proxy.** | GAP → **CLOSED (CHAOS-24)** | **C** | was: `threatfeed.go:131-145`, `feedsync.go:171-187`, `cdr_health.go:65-80`, `alerts.go:46`→`store.go:511`. Now guarded per ROUND — see §12 |
+| WK-9 | Syslog on the hot path: `writeMsg` holds `s.mu` and does a **blocking 5s dial** while locked; TCP writes have **no write deadline** → a slow SIEM can stall proxy goroutines. UDP is non-blocking (acceptable). | GAP → **CLOSED** (async drain goroutine owns the socket, `internal/syslog`) | M | `internal/syslog/syslog.go:117-146,68` |
 | WK-10 | Webhook alert delivery: never blocks the producer, 30s dedup, bounded semaphore (10) → enqueue not spawn, bounded retry (3× exp backoff), 500-cap queue drop-on-full, SSRF-guarded, atomic persist. | ✓ | — | `internal/alerts/store.go:298-343,392-500` |
 | WK-11 | SSE slow client: non-blocking `select … default → close+evict`, 256-client cap, runs off the request path. | ✓ | — | `internal/sse/sse.go:66-78,46` |
 | WK-12 | YARA compile failure loads remaining rules (never disables engine); regex timeout + saturation cap with admin-selectable fail-closed/open posture + alerts. Residual: abandoned regex goroutines are counted but never cancelled (memory held until they finish). | ✓ (+leak caveat) | L/M | `internal/yara/yara.go:98-130,584-602,540` |
@@ -358,3 +371,133 @@ The bright spots — the fencing lease, KEK-at-rest, atomic-write foundation, bo
 history/alert/SSE paths, and geo/OCSP fail-closed posture — show the codebase already knows how to
 fail safely. The work ahead is applying that same discipline (alert + metric + fail-closed toggle +
 atomic write + panic recovery) uniformly across the paths that still degrade in silence.
+
+---
+
+## 12. CHAOS-24 — Background-worker panic containment (fail-closed)
+
+**Date:** 2026-08-04 · **Closes:** WK-8 / risk **R1**, the register's only Critical item.
+
+### 12.1 Failure scenario
+
+Go terminates the process on an unrecovered panic in **any** goroutine. Culvert is an in-line
+security appliance, so a panic in a long-lived background worker is a **total gateway outage** —
+every in-flight tunnel dropped — and several of those workers parse **third-party data the
+operator does not control** (URLhaus/OpenPhish bodies, the UT1 tarball, operator-configured
+blocklist feeds). A malformed feed row was a remote availability trigger.
+
+The M1 crash plane (`crashguard.go`) already covered the proxy plane, the admin plane, and four
+detached go-sites (`alert`, `geo`, `socks5`, relay). It did **not** reach the long-lived worker
+loops, and `internal/*` leaf packages cannot import `package main` (ADR-0003), so the workers that
+live in `internal/` had no way to reach the sink at all.
+
+**Verified unguarded before this change** (zero `recover()` on the loop body):
+
+| Worker | Consequence of the panic |
+|--------|--------------------------|
+| `internal/threatfeed` sync loop | process death, triggered by feed content |
+| `internal/feedsync` UT1 sync loop | process death, triggered by remote tarball content |
+| `internal/blocklistfeed` scheduler | process death, triggered by feed content |
+| `internal/saasfeed` sync loop | process death |
+| `internal/alerts` retry loop | process death; alert re-delivery stops |
+| `internal/reqlog` drain goroutine | process death — **and see §12.3** |
+| `internal/syslog` drain goroutine | process death over a SIEM write |
+| `internal/upstream` health loop | process death; tripped breakers never close |
+| `ca.go` CA auto-rotation | process death; CA silently never rotates again |
+| `cdr_health.go` poller | process death; health snapshot freezes green |
+| `dp_enrollment.go` cert renewal | process death; node's mTLS identity expires |
+| `connlimit_startup.go` cleanup | process death; limiter maps grow unbounded |
+| `logstore.go` retention janitor | process death; volume fills |
+| `metrics.go` counter checkpoint | process death |
+| `ha_lease.go` fencing keepalive | process death — **and see §12.2** |
+
+### 12.2 The finding inside the finding: the obvious fix creates a split brain
+
+The reflexive fix — `defer recover()` at the top of each worker goroutine — is **worse than the
+bug** on two of these paths, because it converts a loud crash into a *silent permanent stall*
+while the process keeps reporting healthy.
+
+On the **fencing-lease keepalive** it is actively dangerous. If that goroutine returns, the node
+keeps `role=leader` and `leaseEpoch != 0`, so `WriteAllowed()` stays **true** — but nothing renews
+the etcd lease. The lease expires, a standby legitimately acquires it, and two nodes now believe
+they hold write authority. Panic containment would have **manufactured the exact split brain
+ADR-0005 exists to make impossible.** Swallow-and-retry is unsafe for the same reason: if the
+panic is deterministic, every round dies *before* the validity-window check in `leaseRenewOnce`,
+so the node holds authority forever on the strength of an ever-staler confirmation.
+
+Adopted semantics: **guard the round, never the goroutine** — and where "keep going" is not the
+safe answer, the caller branches on the panic and fails closed. `leaseRenewRound` treats a
+panicking round as exactly what it is — a round that did **not** confirm the lease, the same
+epistemic state as a transport failure — and charges it against the last etcd-confirmed validity
+window (`fenceIfLeaseWindowElapsed`, including `haLeaseWriteMargin`). Containment therefore cannot
+extend a node's write authority by even one tick.
+
+### 12.3 Why the request-log drain is the other special case
+
+`reqlog.Add` **blocks** the caller when the queue is full — the JSONL file is the durable audit
+record, so a saturated queue parks the producer rather than discarding it. That makes the drain
+goroutine load-bearing for the **proxy request path**, not just for logging. If it ever stops
+consuming, every request goroutine eventually parks in `Add` and the gateway wedges: no crash, no
+restart, no alert, just a proxy that stops answering. A goroutine-level guard there would trade a
+recoverable crash for an unrecoverable hang. The guard is per round, and `drainRound`'s named
+return keeps its zero value on panic so the loop always continues.
+
+**Keeping the goroutine alive is necessary but not sufficient** (P1 from external review of the
+first cut). `bufio.Writer.Flush` clears its buffer only *after* the underlying `Write` returns
+(`b.n = 0` is its last statement), so a `Write` that **panics** unwinds with the batch still
+buffered. Reusing that writer replays the poisoned bytes on every later flush — with a
+deterministic, content-triggered fault the drain goroutine stays alive and healthy-looking while
+**nothing ever reaches the durable audit file again.** That is the same silent-permanent-loss class
+the guard exists to remove, just relocated. The recovery path therefore **discards** the batch
+(`batch.discard`) and charges its records to `WriteErrors`, so the loss is bounded to one batch and
+visible instead of unbounded and silent. Pinned by `TestDrain_PoisonedBufferIsDiscarded`, which
+fails against the un-discarded version with *0 of 25* post-poison entries reaching the sink.
+
+### 12.4 What shipped
+
+- `internal/obs/guard.go` — `Guard` / `SafeCall` / `SetPanicSink`, mirroring the existing `SetSink`
+  seam. `package main` publishes `recordCrash` as the sink (`crashguard.go` `init`), so a leaf
+  worker panic lands in the **same** pipeline as a proxy/admin panic:
+  `culvert_crash_records_total{component}`, the system-actor audit entry, the bounded redacted
+  `lastCrash` record. **No new observability surface was introduced.**
+- `crashguard.go` — `runGuarded(component, fn) (panicked bool)` for the `package main` loops. The
+  bool exists for the fail-closed callers.
+- Per-round guards applied to all 15 workers in the §12.1 table.
+- `ha_lease.go` — `leaseRenewRound` + `fenceIfLeaseWindowElapsed` (fail-closed, §12.2).
+- `internal/syslog` — guarded locally with a `panics` counter rather than importing `obs`: that
+  package's header declares it a stdlib-only leaf, and a panicked line is counted as the drop it
+  actually is.
+- `dp_enrollment.go` — a panicking renewal round raises the **same operator alert** as a renewal
+  error, because operationally it is one: the renewal did not happen. The panic *value* is never
+  put in the alert (it can embed attacker-shaped text or a secret); `recordCrash` owns the bounded,
+  redacted record.
+
+### 12.5 Tests
+
+| Gate | Test |
+|------|------|
+| Contained round is recorded, loop survives, panic text scrubbed (CWE-117) | `chaos_worker_panic_test.go` `TestChaos24_RunGuarded_*`, `TestChaos24_ContainedPanicTextIsScrubbedForLogInjection` |
+| Leaf-package panic reaches main's crash pipeline (seam wiring) | `TestChaos24_ObsSeamRoutesLeafPanicsIntoTheCrashPipeline` |
+| **Split-brain gate** — panicking keepalive self-fences, does not keep write authority | `TestChaos24_LeaseKeepalivePanic_FailsClosed` |
+| Fail-closed is not trigger-happy — a panic inside a valid window does not fence | `TestChaos24_LeaseWindowStillValid_PanicDoesNotFence`, `TestChaos24_LeaseFenceRespectsWriteMargin` |
+| **Anti-wedge gate** — drain keeps consuming; producers never block | `internal/reqlog/persist_panic_test.go` `TestDrain_*` |
+| **Anti-poison gate** — a panicking flush discards its batch instead of replaying it forever | `TestDrain_PoisonedBufferIsDiscarded` |
+| Primitive semantics, sink-panic containment, nil-sink cannot silence | `internal/obs/guard_test.go` |
+
+Both regression gates were verified to **fail without the fix**: removing the drain guard
+reproduces process death (`panic: simulated sink fault during flush`), and substituting the naive
+swallow-and-retry keepalive guard trips the split-brain assertion.
+
+### 12.6 Residual risk
+
+- **Containment is not repair.** A worker whose round panics *every* tick is contained and counted
+  but makes no progress — the feed goes stale, the CA does not rotate. The signal is
+  `culvert_crash_records_total{component}` being non-zero, which is 0 in a healthy process; an
+  alert rule on it is the operator-facing follow-up (not shipped here).
+- **Deliberately still unguarded:** the HA standby/leader sync loops (`ha.go`), the MCP runtime
+  listener, and `internal/yara`'s per-match goroutine. Each needs its own fail-closed analysis of
+  the kind §12.2 required — they are *not* mechanical, and bundling them would have hidden the
+  lease change in a large diff. Tracked as CHAOS-25.
+- The `crashThrottleEvery` (1s per component) flood guard means a tight panic loop reports a
+  fraction of its rounds to the SIEM. The unthrottled `culvert_crash_records_total` counter is the
+  lossless signal, by design (anti-forensics-DoS trade-off inherited from M1).

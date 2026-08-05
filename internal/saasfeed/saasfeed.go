@@ -207,7 +207,10 @@ func (s *Syncer) SetFeedURLForTest(feedURL string) {
 
 func (s *Syncer) syncLoop(ctx context.Context) {
 	// Sync immediately on start, then on interval.
-	s.Sync(ctx)
+	// CHAOS-24: Sync parses a remote signed feed; contain the ROUND so a
+	// malformed payload costs one window, not the process. The goroutine must
+	// survive so the interval keeps firing (self-heals on the next good feed).
+	obs.SafeCall("saasfeed", func() { s.Sync(ctx) })
 	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()
 	for {
@@ -215,7 +218,7 @@ func (s *Syncer) syncLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			s.Sync(ctx)
+			obs.SafeCall("saasfeed", func() { s.Sync(ctx) })
 		}
 	}
 }
