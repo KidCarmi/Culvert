@@ -19449,14 +19449,15 @@ function mcpxApprDecide(a, action){
 }
 function mcpxClassifyApproval(a, action){
   return function(status, text){
+    // Self-approval is rejected server-side regardless of the HTTP status the error
+    // maps to (it currently surfaces as 400 approval_self_approval), so key on the
+    // reason token, not the status, to keep the four-eyes message reachable.
+    if(/self_approval/.test(text||'')) return {kind:'crit', title:'Self-approval is not permitted', detail:'A requester may not approve their own request (four-eyes). This decision was rejected server-side; nothing was committed.', retryable:false};
     if(status===200){
       return {kind:'success', title:(action==='approve'?'Approved':'Rejected'), detail:'The appliance committed the decision. Refreshing the request to show its authoritative state.'};
     }
     if(status===503) return {kind:'crit', title:'Not committed - durability unavailable', detail:'Event durability is not enabled in this build, so the decision was NOT committed. The request keeps its prior authoritative state (not approved, not rejected, not pending-changed). Refreshing to confirm.', retryable:false};
-    if(status===403){
-      if(/self_approval/.test(text)) return {kind:'crit', title:'Self-approval is not permitted', detail:'A requester may not approve their own request (four-eyes). This decision was rejected server-side.', retryable:false};
-      return {kind:'crit', title:'Permission denied', detail:'Deciding a request requires the admin role.', retryable:false};
-    }
+    if(status===403) return {kind:'crit', title:'Permission denied', detail:'Deciding a request requires the admin role.', retryable:false};
     if(status===409) return {kind:'crit', title:'Request is terminal', detail:'The request is already decided or expired; it cannot be '+action+'ed. Refreshing to show its authoritative state.', retryable:false};
     if(status===400) return {kind:'crit', title:'Request rejected', detail:'The appliance rejected the request ('+mcpxReasonText(text)+').', retryable:false};
     return {kind:'crit', title:'Decision failed', detail:'Unexpected status; the request state is unchanged unless a refresh shows otherwise.', retryable:true};
