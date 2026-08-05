@@ -821,6 +821,13 @@ func initUpstreamProxy(s *startupState) {
 // (cdr_startup*.go). CLI flag values are packed here; the runtime
 // enable-sentinel is read by the loader (filesystem side effect).
 func initCDR(s *startupState) {
+	// Mirror config.yaml's cdr.fail_mode validation (validateCDR, config.go)
+	// on the CLI path: an invalid -cdr-fail-mode value must fail loud at
+	// startup, not silently reach CDRFailOpen() — which treats any value
+	// other than the exact string "closed" as fail-OPEN.
+	if fm := *s.cdrFailModeFlag; !validCDRFailMode(fm) {
+		log.Fatalf("Invalid -cdr-fail-mode %q: must be \"open\" or \"closed\"", fm)
+	}
 	loadCDR(
 		resolveCDRStartupConfig(s.fc, cdrCLIFlags{
 			Enabled:     *s.cdrEnabledFlag,
