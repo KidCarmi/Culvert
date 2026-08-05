@@ -90,7 +90,7 @@ func TestWriter_NoLossUnderSaturation(t *testing.T) {
 		go func(g int) {
 			defer wg.Done()
 			for i := 0; i < n/8; i++ {
-				_, _ = w.Write([]byte(fmt.Sprintf("g%d-%d\n", g, i)))
+				_, _ = fmt.Fprintf(w, "g%d-%d\n", g, i)
 			}
 		}(g)
 	}
