@@ -76,6 +76,10 @@ var (
 var (
 	writeErrors    int64       // entries that never reached the JSONL file
 	writeErrLogged atomic.Bool // one-shot gate for the log line
+
+	// needsBoundaryRepair records that the last write left a LINE FRAGMENT on
+	// disk (bytes accepted, record incomplete). See persistEntry.
+	needsBoundaryRepair atomic.Bool
 )
 
 // writeFailObserver is the durable-write failure seam. package main publishes
@@ -100,6 +104,37 @@ func SetWriteFailureObserver(fn func(path string, err error)) {
 		return
 	}
 	writeFailObserver.Store(&fn)
+}
+
+// writeSuccessObserver is the durable-write SUCCESS seam, and it is not
+// optional bookkeeping: the storage-health plane clears its degraded state only
+// on an OBSERVED successful write ("silence is not recovery"). A failure
+// producer without a matching success producer therefore pins the node
+// degraded forever after one transient blip — reproducible on a node whose only
+// durable writes are audit entries (an audited diagnostic or download action
+// performs no fileutil.AtomicWrite of its own). package main wires
+// noteStorageWriteSuccess here, which short-circuits on a single atomic load
+// until the first failure, so the healthy path stays cheap.
+var writeSuccessObserver atomic.Pointer[func(path string)]
+
+// SetWriteSuccessObserver publishes the durable-write success observer. A nil
+// fn clears it. Same re-entrancy contract as SetWriteFailureObserver: the
+// observer MUST NOT call Add.
+func SetWriteSuccessObserver(fn func(path string)) {
+	if fn == nil {
+		writeSuccessObserver.Store(nil)
+		return
+	}
+	writeSuccessObserver.Store(&fn)
+}
+
+// noteWriteSuccess reports a fully-written record. Contained like the failure
+// path: a panicking observer must not take down the admin plane.
+func noteWriteSuccess(path string) {
+	if p := writeSuccessObserver.Load(); p != nil {
+		defer func() { _ = recover() }()
+		(*p)(path)
+	}
 }
 
 // WriteErrors returns the cumulative count of audit entries that did NOT reach
@@ -195,6 +230,64 @@ func Close() error {
 	return err
 }
 
+// persistEntry writes one JSONL record to the durable sink, keeping the file's
+// line boundary intact and charging every entry that does not reach it.
+//
+// The boundary is the subtle part. A PARTIAL write — the sink accepted some
+// bytes and then failed, or returned a short count — leaves a fragment with no
+// terminating newline. Appending the next record straight onto it produces a
+// single unparseable line, so GetPersistent (and the startup ring load) skip it
+// and BOTH entries are lost while only the first was ever counted: the very
+// under-reporting this counter exists to prevent. So a pending fragment is
+// closed with a leading newline before the next record, which leaves the
+// fragment standing alone as its own already-charged invalid line and lets the
+// new record land intact. Blank lines are skipped by every reader, so the
+// repair is harmless when it turns out not to have been needed.
+func persistEntry(f io.Writer, path string, e Entry) {
+	b, err := json.Marshal(e)
+	if err != nil {
+		// Defensive: Entry is all scalars today, so this cannot fail in
+		// practice. It was nevertheless a silent-drop branch — the entry never
+		// reaches the file — so it is charged like any other loss.
+		countWriteError(path, fmt.Errorf("marshal audit entry: %w", err))
+		return
+	}
+	b = append(b, '\n')
+	// Only one concurrent Add wins the CAS, so the repair newline is written
+	// once. Audit writes come from the admin plane, where concurrency is low.
+	repaired := needsBoundaryRepair.CompareAndSwap(true, false)
+	if repaired {
+		b = append([]byte{'\n'}, b...)
+	}
+
+	n, werr := f.Write(b)
+
+	// Re-derive the pending-fragment state from what actually reached the file,
+	// rather than assuming the repair succeeded: a write that moved zero bytes
+	// left the on-disk boundary exactly as it was, so a repair we consumed must
+	// be handed back or the fragment would never be closed.
+	switch {
+	case n == 0:
+		if repaired {
+			needsBoundaryRepair.Store(true)
+		}
+	case n < len(b):
+		needsBoundaryRepair.Store(true)
+	}
+
+	// A short write with a NIL error is a real loss too. os.File.Write reports
+	// it as io.ErrShortWrite, but the sink is an io.Writer seam, so check the
+	// count explicitly rather than trusting every implementation to do so.
+	switch {
+	case werr != nil:
+		countWriteError(path, werr)
+	case n < len(b):
+		countWriteError(path, io.ErrShortWrite)
+	default:
+		noteWriteSuccess(path)
+	}
+}
+
 // Add appends an entry to the in-memory ring and, when configured, to the
 // persistent JSONL file, the SIEM hook, and the DP push queue.
 func Add(e Entry) {
@@ -212,28 +305,7 @@ func Add(e Entry) {
 	// configuration change fail — but every lost entry is now COUNTED, so the
 	// gap in the durable compliance record is visible instead of silent.
 	if f != nil {
-		b, err := json.Marshal(e)
-		switch {
-		case err != nil:
-			// Defensive: Entry is all scalars today, so this cannot fail in
-			// practice. It was nevertheless a silent-drop branch — the entry
-			// never reaches the file — so it is charged like any other loss.
-			countWriteError(path, fmt.Errorf("marshal audit entry: %w", err))
-		default:
-			b = append(b, '\n')
-			n, werr := f.Write(b)
-			// A short write with a nil error leaves a TRUNCATED JSON line in
-			// the file: the entry is lost and the next append concatenates
-			// onto the fragment. os.File.Write reports this as io.ErrShortWrite,
-			// but the persist sink is an io.Writer seam, so check explicitly
-			// rather than trusting every implementation to do so.
-			switch {
-			case werr != nil:
-				countWriteError(path, werr)
-			case n < len(b):
-				countWriteError(path, io.ErrShortWrite)
-			}
-		}
+		persistEntry(f, path, e)
 	}
 	// Forward to syslog/SIEM if configured.
 	if siem != nil {
@@ -428,11 +500,15 @@ func SetPersistForTest(w io.Writer) (restore func()) {
 func ResetWriteErrorsForTest() (restore func()) {
 	oldN := atomic.SwapInt64(&writeErrors, 0)
 	oldLogged := writeErrLogged.Swap(false)
+	oldRepair := needsBoundaryRepair.Swap(false)
 	oldObs := writeFailObserver.Swap(nil)
+	oldOK := writeSuccessObserver.Swap(nil)
 	return func() {
 		atomic.StoreInt64(&writeErrors, oldN)
 		writeErrLogged.Store(oldLogged)
+		needsBoundaryRepair.Store(oldRepair)
 		writeFailObserver.Store(oldObs)
+		writeSuccessObserver.Store(oldOK)
 	}
 }
 

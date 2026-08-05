@@ -559,6 +559,8 @@ no longer silent:
   recursion on a persistently failing disk); the production observer is audit-free by
   construction, and a panicking observer is contained so audit loss can never take down the admin
   plane it records.
+- **The file's line boundary is repaired.** A PARTIAL write (bytes accepted, record incomplete) leaves a fragment with no terminating newline; appending the next record onto it yields one unparseable line that every reader skips, so TWO entries are lost while only the first was counted. `persistEntry` therefore opens a fresh line before the next record, leaving the fragment as its own already-charged invalid line. The pending repair is re-derived from the bytes that actually reached the file, so a zero-byte write hands it back instead of leaking it.
+- **The SUCCESS half is wired too** (`SetWriteSuccessObserver` → `noteStorageWriteSuccess`). `storageDegraded()` clears only on an OBSERVED successful write ("silence is not recovery"), so a failure producer without a matching success producer would pin a node degraded forever after one transient blip — reproducible on a node whose only durable writes are audit entries.
 - Surfaced on `GET /api/stats` (`auditLogWriteErrors`), `/metrics`
   (`culvert_audit_write_errors_total`), `/healthz` (`auditLogWriteErrors`, present only when
   non-zero so healthy probe bodies are unchanged, and never failing the probe), and the dashboard
@@ -580,6 +582,11 @@ no longer silent:
 | Wiring reaches storage health + alert, path redacted | `TestAuditWriteFailure_ReachesStorageHealthPlane` |
 | Healthy persist does not degrade the contract | `TestAuditWriteFailure_HealthyPersistDoesNotDegrade` |
 | `/api/stats`, `/metrics`, `/healthz` surfaces | `TestAPIStats_SurfacesAuditWriteErrors`, `TestMetrics_ExposesAuditWriteErrors`, `TestHealthz_AnnotatesAuditWriteErrors` |
+| Partial write does not corrupt the NEXT entry (counter stays truthful) | `TestPartialWrite_DoesNotCorruptTheNextEntry` |
+| Pending boundary repair survives a zero-byte write | `TestPartialWrite_RepairSurvivesATotallyFailedWrite` |
+| Repair is inert on a healthy node (no stray blank line) | `TestHealthyWrites_NeedNoRepair` |
+| Success observer fires only on a COMPLETE write (recovery signal) | `TestWriteSuccessObserver_FiresOnlyOnACompleteWrite` |
+| Nil / panicking success observer costs no record | `TestWriteSuccessObserver_NilAndPanicAreSafe` |
 
 ### 13.4 Residual risk
 

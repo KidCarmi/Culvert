@@ -119,7 +119,7 @@ func TestAPIStats_SurfacesAuditWriteErrors(t *testing.T) {
 	injectAuditWriteFailures(t, 3)
 
 	w := httptest.NewRecorder()
-	r := adminCtx(httptest.NewRequest(http.MethodGet, "/api/stats", http.NoBody))
+	r := adminCtx(httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/stats", http.NoBody))
 	r.RemoteAddr = "198.51.100.7:9999"
 	apiStats(w, r)
 

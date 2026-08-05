@@ -128,6 +128,11 @@ func init() {
 	// contract: noteStorageWriteFailure writes no audit entry, and the alert
 	// it dispatches is audit-free (internal/alerts never calls audit.Add).
 	audit.SetWriteFailureObserver(noteStorageWriteFailure)
+	// The success half is not optional: storageDegraded() clears only on an
+	// OBSERVED successful write ("silence is not recovery"). Wiring the failure
+	// producer alone would pin a node degraded forever after one transient
+	// blip, on any node whose only durable writes are audit entries.
+	audit.SetWriteSuccessObserver(noteStorageWriteSuccess)
 }
 
 // noteStorageWriteFailure is the fileutil observer. It runs synchronously on

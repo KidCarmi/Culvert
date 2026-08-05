@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
@@ -258,6 +259,184 @@ func TestWriteErrors_ObserverIsNotCalledUnderTheRingLock(t *testing.T) {
 		}
 	default:
 		t.Fatal("observer never completed — Add appears to hold the audit lock across the observer call")
+	}
+}
+
+// recordingWriter is a sink whose per-call behavior is programmable, capturing
+// exactly the bytes that "reached the file". A negative accept means "accept
+// everything"; otherwise it accepts min(accept, len(p)) bytes and reports err.
+type recordingWriter struct {
+	mu     sync.Mutex
+	buf    []byte
+	accept int
+	err    error
+}
+
+func (w *recordingWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	n := len(p)
+	if w.accept >= 0 && w.accept < n {
+		n = w.accept
+	}
+	w.buf = append(w.buf, p[:n]...)
+	return n, w.err
+}
+
+func (w *recordingWriter) set(accept int, err error) {
+	w.mu.Lock()
+	w.accept, w.err = accept, err
+	w.mu.Unlock()
+}
+
+func (w *recordingWriter) contents() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return string(w.buf)
+}
+
+// parseableLines decodes every non-blank line of a JSONL blob, returning how
+// many parsed and how many did not. This is the same tolerance GetPersistent
+// applies, so it measures what an operator would actually be able to read back.
+func parseableLines(t *testing.T, blob string) (ok, bad int) {
+	t.Helper()
+	for _, line := range strings.Split(strings.TrimSpace(blob), "\n") {
+		if line == "" {
+			continue
+		}
+		var e Entry
+		if json.Unmarshal([]byte(line), &e) == nil {
+			ok++
+		} else {
+			bad++
+		}
+	}
+	return ok, bad
+}
+
+// TestPartialWrite_DoesNotCorruptTheNextEntry is the boundary-repair
+// regression. A partial write leaves a line fragment with no terminating
+// newline. Appending the next record straight onto it yields ONE unparseable
+// line, so every reader skips it and TWO entries are lost while only the first
+// was counted — the counter silently under-reports the compliance gap it exists
+// to measure. The recovered entry must land on its own readable line.
+func TestPartialWrite_DoesNotCorruptTheNextEntry(t *testing.T) {
+	w := &recordingWriter{accept: -1}
+	withCleanAuditState(t, w)
+
+	// Round 1: the disk accepts a prefix and then fails mid-record.
+	w.set(12, errors.New("no space left on device"))
+	Add(Entry{TS: 1, Actor: "10.0.0.1", Action: "policy.add", Object: "first"})
+
+	// Round 2: the disk has recovered and accepts everything.
+	w.set(-1, nil)
+	Add(Entry{TS: 2, Actor: "10.0.0.1", Action: "policy.add", Object: "second"})
+
+	ok, bad := parseableLines(t, w.contents())
+	if ok != 1 {
+		t.Fatalf("%d readable entries on disk; want exactly 1 (the recovered entry must not be swallowed by the fragment).\nfile=%q", ok, w.contents())
+	}
+	if bad != 1 {
+		t.Errorf("%d unreadable lines; want exactly 1 (the isolated fragment)", bad)
+	}
+	// Exactly one entry was lost, and exactly one was charged. Under-counting
+	// here is the actual defect: it would report a smaller gap than reality.
+	if got := WriteErrors(); got != 1 {
+		t.Errorf("WriteErrors() = %d; want 1 — the counter must match the entries actually lost", got)
+	}
+}
+
+// TestPartialWrite_RepairSurvivesATotallyFailedWrite is the boundary case of
+// the repair itself: if the write that carries the repair newline moves ZERO
+// bytes, the on-disk fragment is still open. Consuming the pending repair there
+// would leak it, and the NEXT entry would concatenate onto the fragment after
+// all. The repair must be handed back and applied on the next attempt.
+func TestPartialWrite_RepairSurvivesATotallyFailedWrite(t *testing.T) {
+	w := &recordingWriter{accept: -1}
+	withCleanAuditState(t, w)
+
+	w.set(12, errors.New("no space left on device")) // fragment
+	Add(Entry{TS: 1, Actor: "10.0.0.1", Action: "policy.add", Object: "first"})
+	w.set(0, errors.New("no space left on device")) // nothing reaches the file
+	Add(Entry{TS: 2, Actor: "10.0.0.1", Action: "policy.add", Object: "second"})
+	w.set(-1, nil) // recovered
+	Add(Entry{TS: 3, Actor: "10.0.0.1", Action: "policy.add", Object: "third"})
+
+	ok, _ := parseableLines(t, w.contents())
+	if ok != 1 {
+		t.Fatalf("%d readable entries on disk; want exactly 1 (the pending repair must survive a zero-byte write).\nfile=%q", ok, w.contents())
+	}
+	if got := WriteErrors(); got != 2 {
+		t.Errorf("WriteErrors() = %d; want 2 (the fragment entry and the fully-failed entry)", got)
+	}
+}
+
+// TestHealthyWrites_NeedNoRepair proves the repair is inert on a healthy node:
+// consecutive successful writes must produce consecutive readable lines with no
+// stray blank line, so the file an operator reads back is unchanged.
+func TestHealthyWrites_NeedNoRepair(t *testing.T) {
+	w := &recordingWriter{accept: -1}
+	withCleanAuditState(t, w)
+
+	for i := 0; i < 3; i++ {
+		Add(Entry{TS: int64(i), Actor: "10.0.0.1", Action: "policy.add", Object: "rule"})
+	}
+	if got := w.contents(); strings.Contains(got, "\n\n") {
+		t.Errorf("healthy writes produced a blank line: %q", got)
+	}
+	ok, bad := parseableLines(t, w.contents())
+	if ok != 3 || bad != 0 {
+		t.Errorf("readable=%d unreadable=%d; want 3/0", ok, bad)
+	}
+}
+
+// TestWriteSuccessObserver_FiresOnlyOnACompleteWrite is the recovery-signal
+// regression. The storage-health plane clears its degraded state only on an
+// OBSERVED successful write, so a failure producer with no matching success
+// producer pins a node degraded forever after one transient blip. The success
+// observer must fire on a complete write — and must NOT fire on a partial one,
+// which would falsely declare the volume recovered.
+func TestWriteSuccessObserver_FiresOnlyOnACompleteWrite(t *testing.T) {
+	w := &recordingWriter{accept: -1}
+	withCleanAuditState(t, w)
+
+	var successes, failures int
+	SetWriteSuccessObserver(func(string) { successes++ })
+	SetWriteFailureObserver(func(string, error) { failures++ })
+
+	w.set(12, nil) // short write, nil error — a loss, not a recovery
+	Add(sampleEntry())
+	if successes != 0 {
+		t.Fatalf("success observer fired %d times on a SHORT write; want 0 (that would falsely clear the degraded state)", successes)
+	}
+	if failures != 1 {
+		t.Fatalf("failure observer fired %d times on a short write; want 1", failures)
+	}
+
+	w.set(-1, nil) // recovered
+	Add(sampleEntry())
+	if successes != 1 {
+		t.Fatalf("success observer fired %d times after recovery; want 1 — without it the node stays degraded forever", successes)
+	}
+}
+
+// TestWriteSuccessObserver_NilAndPanicAreSafe: an un-wired observer must not
+// break persistence, and a panicking one must not take down the admin plane.
+func TestWriteSuccessObserver_NilAndPanicAreSafe(t *testing.T) {
+	w := &recordingWriter{accept: -1}
+	withCleanAuditState(t, w)
+
+	SetWriteSuccessObserver(nil)
+	Add(sampleEntry()) // must not panic
+
+	SetWriteSuccessObserver(func(string) { panic("observer exploded") })
+	Add(sampleEntry()) // must not panic
+
+	if got := WriteErrors(); got != 0 {
+		t.Fatalf("WriteErrors() = %d; want 0 — observer behavior must not manufacture write errors", got)
+	}
+	if ok, _ := parseableLines(t, w.contents()); ok != 2 {
+		t.Errorf("readable entries = %d; want 2 — a panicking observer must not cost a record", ok)
 	}
 }
 
