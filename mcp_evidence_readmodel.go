@@ -205,21 +205,31 @@ func buildMCPEvidenceDTO(capability, mode string, ev rollout.EvidenceSummary, no
 		UnsupportedCategories: mcpUnsupportedQualificationCategories,
 	}
 
+	dto.Requirements = buildMCPEvidenceRequirements(ev, now, shadowState, canaryState, soakState, zeroDefectState, rehearsalState)
+	dto.Summary = summarizeMCPRequirements(dto.Requirements)
+	return dto
+}
+
+// buildMCPEvidenceRequirements assembles the ordered measured-requirement rows from
+// the pre-classified states. Only requirements backed by a real runtime source are
+// included; false-positive reviews is a recorded count (not_applicable), never a
+// pass/fail requirement.
+func buildMCPEvidenceRequirements(ev rollout.EvidenceSummary, now time.Time, shadowState, canaryState, soakState, zeroDefectState, rehearsalState mcpReqState) []mcpEvidenceRequirement {
 	origin := ev.Origin.String()
-	dto.Requirements = []mcpEvidenceRequirement{
+	return []mcpEvidenceRequirement{
 		{
 			Key: "shadow_window", Label: "Shadow window floor", State: shadowState, Origin: origin,
-			MeasuredSeconds: i64ptr(secs(shadowElapsed)), TargetSeconds: i64ptr(secs(rollout.ShadowWindowTarget)),
+			MeasuredSeconds: i64ptr(secs(ev.ShadowElapsed(now))), TargetSeconds: i64ptr(secs(rollout.ShadowWindowTarget)),
 			StartUnix: ev.ShadowStartUnix, NextAction: windowNextAction("shadow", shadowState),
 		},
 		{
 			Key: "canary_window", Label: "Canary window floor", State: canaryState, Origin: origin,
-			MeasuredSeconds: i64ptr(secs(canaryElapsed)), TargetSeconds: i64ptr(secs(rollout.CanaryWindowTarget)),
+			MeasuredSeconds: i64ptr(secs(ev.CanaryElapsed(now))), TargetSeconds: i64ptr(secs(rollout.CanaryWindowTarget)),
 			StartUnix: ev.CanaryStartUnix, NextAction: windowNextAction("canary", canaryState),
 		},
 		{
 			Key: "soak_window", Label: "Stable soak floor", State: soakState, Origin: origin,
-			MeasuredSeconds: i64ptr(secs(soakElapsed)), TargetSeconds: i64ptr(secs(rollout.SoakTarget)),
+			MeasuredSeconds: i64ptr(secs(ev.SoakElapsed(now))), TargetSeconds: i64ptr(secs(rollout.SoakTarget)),
 			StartUnix: ev.SoakStartUnix, NextAction: windowNextAction("soak", soakState),
 		},
 		{
@@ -237,8 +247,6 @@ func buildMCPEvidenceDTO(capability, mode string, ev rollout.EvidenceSummary, no
 			Count: intptr(ev.FalsePositiveReviews), NextAction: "Informational: recorded reviews (no defined threshold).",
 		},
 	}
-	dto.Summary = summarizeMCPRequirements(dto.Requirements)
-	return dto
 }
 
 // summarizeMCPRequirements tallies only the measured requirements (not_applicable
