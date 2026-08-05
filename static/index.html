@@ -5832,6 +5832,13 @@ document.querySelectorAll('.nav-item').forEach(el => {
   });
 });
 
+// PR-UX-8: MCP deep-link + browser Back/Forward. popstate re-applies the parsed
+// MCP route (READ-ONLY restore; never replays a POST or reopens an action dialog).
+// The initial apply runs on DOMContentLoaded, after every mcpx state initializer
+// in this inline script has executed, so restore sees a fully-wired surface.
+window.addEventListener('popstate', function(){ var r = mcpxRouteParse(location.hash); if (r) mcpxApplyRoute(r); });
+document.addEventListener('DOMContentLoaded', function(){ var r = mcpxRouteParse(location.hash); if (r) mcpxApplyRoute(r); });
+
 // Per-view unsaved-changes guards (M3 S3): a view registers a beforeLeave
 // hook that returns `true` synchronously when there is nothing to protect
 // (clean navigation stays synchronous) or a Promise<boolean> after asking
@@ -5970,6 +5977,7 @@ async function mcpSaveConfig() {
 }
 
 function switchView(name) {
+  var mcpxPrevView = currentView;   // PR-UX-8: for MCP route push/replace decision
   if (name !== currentView) {
     const guard = viewLeaveGuards[currentView];
     if (guard) {
@@ -6008,15 +6016,12 @@ function switchView(name) {
   if (name === 'pac')            loadPACConfig();
   if (name === 'policy-tester')  loadPolicyProviderOptions();
   if (name === 'ca-mgmt')        loadCAMgmt();
-  if (name === 'mcp-overview')   { renderMCPCommandCenter(); loadMCPOverview(); }
-  if (name === 'mcp-rollout')    mcpxRenderRolloutFleet();
-  if (name === 'mcp-decisions')  { renderMCPActivity(); /* awaits tenant input */ }
-  if (name === 'mcp-approvals')  { if (mcpxApprTenant()) mcpxApprLoad(); /* else awaits tenant input */ }
-  if (name === 'mcp-servers')    { if (mcpxInvTenant()) mcpxInvLoad(); /* else awaits tenant input */ }
-  if (name === 'mcp-health')     mcpxHealthLoad();
-  if (name === 'mcp-management')  mcpxMgmtLoad();
-  if (name === 'mcp-settings')    mcpxCfgLoad();
-  if (name === 'mcp-policies')    mcpxPolRefreshActive();
+  // PR-UX-8: MCP views load + URL-sync through the shared navigation-state model.
+  // During a route restore (mcpxRouteApplying) the auto-load and the URL push are
+  // suppressed: mcpxRestoreRoute owns loading, and the route is already in the URL.
+  if (mcpxIsMcpView(name)) {
+    if (!mcpxRouteApplying) { mcpxViewAutoLoad(name); mcpxSyncRouteFromNav(name, mcpxPrevView); }
+  }
   if (name === 'upstream')       loadUpstream();
   if (name === 'cluster')        loadCluster();
   if (name === 'cdr')            loadCDRData();
@@ -18153,6 +18158,154 @@ function mcpxCapBack(){ while(mcpxNavBack.length>mcpxMaxDepth) mcpxNavBack.shift
 // Cap the drawer stack while ALWAYS preserving the base Decision (back-to-activity).
 function mcpxCapFrames(){ while(mcpxFrames.length>mcpxMaxDepth) mcpxFrames.splice(1,1); }
 
+// ═══ PR-UX-8: MCP navigation-state model (deep links + browser history) ═══════
+// One namespaced, allowlisted URL-fragment router for the MCP surface ONLY. Every
+// serialized value is allowlisted, length-bounded, type-validated, encoded, and
+// defensively decoded. Restoration performs READS ONLY and never executes an
+// action; malformed / oversized / unknown state falls back to a safe view without
+// throwing. Candidate policy source, simulation corpus, config drafts, tokens,
+// credentials, raw errors and free-form text are NEVER serialized. Non-MCP views
+// are untouched by this router.
+var MCPX_ROUTE_VER=1;   // versioned contract; unknown future keys are dropped, not fatal
+var MCPX_V2S={'mcp-overview':'overview','mcp-decisions':'activity','mcp-servers':'servers','mcp-policies':'policy','mcp-approvals':'approvals','mcp-health':'health','mcp-rollout':'rollout','mcp-management':'management','mcp-settings':'settings'};
+var MCPX_S2V={}; Object.keys(MCPX_V2S).forEach(function(k){ MCPX_S2V[MCPX_V2S[k]]=k; });
+var mcpxRouteApplying=false;   // reentrancy guard: switchView must not re-push while restoring
+var mcpxActFilterKeys=['principal_id','agent_id','client_id','tool_name','tool_fingerprint','server_id','rule_id','credential_profile_ref','policy_snapshot_hash'];
+function mcpxIsMcpView(name){ return !!MCPX_V2S[name]; }
+// Bounded validators: return the clean value or null (which drops the key).
+function mcpxvId(v,max){ v=String(v==null?'':v); if(!v||v.length>(max||128)) return null; return /^[A-Za-z0-9._:@/\-]+$/.test(v)?v:null; }
+function mcpxvEnum(v,set){ v=String(v==null?'':v); return set.indexOf(v)>=0?v:null; }
+// Per-slug allowlist. A key absent here is never serialized and never restored.
+var MCPX_ALLOW={
+  overview:{},
+  activity:(function(){ var a={tenant:function(v){return mcpxvId(v,128);}, event:function(v){return mcpxvId(v,160);}}; mcpxActFilterKeys.forEach(function(k){ a[k]=function(v){return mcpxvId(v,200);}; }); return a; })(),
+  servers:{tenant:function(v){return mcpxvId(v,128);}, server:function(v){return mcpxvId(v,200);}, tool:function(v){return mcpxvId(v,200);}, drawer:function(v){return mcpxvEnum(v,['server','tool']);}, disp:function(v){return mcpxvEnum(v,['','usable','quarantined','review_required']);}},
+  policy:{capability:function(v){return mcpxvEnum(v,['gateway','management']);}, tenant:function(v){return mcpxvId(v,128);}},
+  approvals:{tenant:function(v){return mcpxvId(v,128);}, apprfilter:function(v){return mcpxvEnum(v,['all','operational','publication','pending','approved','rejected','expired']);}, request:function(v){return mcpxvId(v,160);}},
+  health:{section:function(v){return mcpxvEnum(v,['gateway','management','distribution']);}},
+  rollout:{capability:function(v){return mcpxvEnum(v,['gateway','management']);}, section:function(v){return mcpxvEnum(v,['mode','fleet','qualification']);}, hash:function(v){return mcpxvId(v,80);}, req:function(v){return mcpxvId(v,80);}},
+  management:{role:function(v){return mcpxvEnum(v,['','viewer','operator','admin']);}, cls:function(v){return mcpxvId(v,64);}},
+  settings:{tab:function(v){return mcpxvEnum(v,['gateway','management']);}}
+};
+// mcpxRouteParse: defensively parse a "#mcp/<slug>?k=v" fragment. Returns
+// {slug,view,params} or null (not-MCP / unknown-slug). Never throws.
+function mcpxRouteParse(hash){
+  hash=String(hash||''); var i=hash.indexOf('#mcp/'); if(i<0) return null;
+  var rest=hash.slice(i+5), q=rest.indexOf('?'), slug=(q<0?rest:rest.slice(0,q));
+  slug=slug.replace(/[#/].*$/,'');
+  if(!MCPX_S2V[slug]) return null;
+  var allow=MCPX_ALLOW[slug]||{}, params={};
+  if(q>=0){ rest.slice(q+1).split('&').forEach(function(pair){
+    if(!pair) return; var e=pair.indexOf('='), k=e<0?pair:pair.slice(0,e), raw=e<0?'':pair.slice(e+1);
+    if(k.length>32) return; var val; try{ val=decodeURIComponent(raw.replace(/\+/g,' ')); }catch(_){ return; }
+    var fn=allow[k]; if(!fn) return; var clean=fn(val); if(clean==null) return; params[k]=clean;
+  }); }
+  return {slug:slug, view:MCPX_S2V[slug], params:params};
+}
+function mcpxRouteBuild(slug, params){
+  var allow=MCPX_ALLOW[slug]||{}, out=[];
+  Object.keys(params||{}).forEach(function(k){ var fn=allow[k]; if(!fn) return; var clean=fn(params[k]); if(clean==null) return; out.push(encodeURIComponent(k)+'='+encodeURIComponent(clean)); });
+  return '#mcp/'+slug+(out.length?('?'+out.join('&')):'');
+}
+// mcpxNavigate: the single explicit-navigation entry. PUSH by default (a distinct
+// context the user can Back out of); pass {replace:true} for transient state.
+function mcpxNavigate(slug, params, opts){
+  opts=opts||{}; if(!MCPX_S2V[slug]) return;
+  var url=mcpxRouteBuild(slug, params);
+  try{ if(opts.replace) history.replaceState(null,'',url); else history.pushState(null,'',url); }catch(_){ try{ location.hash=url; }catch(__){} }
+  mcpxApplyRoute({slug:slug, view:MCPX_S2V[slug], params:params||{}});
+}
+// mcpxSyncRouteFromNav: reflect a plain sidebar nav-item click into the URL.
+// Entering MCP from a non-MCP view REPLACES (no orphan trap); intra-MCP PUSHES.
+function mcpxSyncRouteFromNav(name, prevView){
+  if(mcpxRouteApplying) return; var slug=MCPX_V2S[name]; if(!slug) return;
+  var url=mcpxRouteBuild(slug, mcpxCurrentViewParams(slug));
+  var entering=!mcpxIsMcpView(prevView);
+  try{ if(entering) history.replaceState(null,'',url); else history.pushState(null,'',url); }catch(_){ try{ location.hash=url; }catch(__){} }
+}
+// mcpxCurrentViewParams: minimal safe params already present in the DOM, so a nav
+// click deep-links to the real current context (capability/tenant only).
+function mcpxCurrentViewParams(slug){
+  var p={}, g=function(id){ var e=document.getElementById(id); return e?String(e.value||'').trim():''; };
+  if(slug==='rollout'){ var rc=g('mcpx-rf-cap'); if(rc) p.capability=rc; }
+  else if(slug==='policy'){ var pc=g('mcpx-pol-cap'); if(pc) p.capability=pc; var pt=g('mcpx-pol-tenant'); if(pt) p.tenant=pt; }
+  else if(slug==='activity'){ var at=g('mcp-dec-tenant'); if(at) p.tenant=at; }
+  else if(slug==='servers'){ var st=g('mcp-srv-tenant'); if(st) p.tenant=st; }
+  else if(slug==='approvals'){ var ap=g('mcp-appr-tenant'); if(ap) p.tenant=ap; }
+  return p;
+}
+// mcpxViewAutoLoad: the standard per-view loader for a plain nav click (extracted
+// from switchView so route-restore can OWN loading during apply).
+function mcpxViewAutoLoad(name){
+  if(name==='mcp-overview')       renderMCPCommandCenter();
+  else if(name==='mcp-rollout')   mcpxRenderRolloutFleet();
+  else if(name==='mcp-decisions') renderMCPActivity();
+  else if(name==='mcp-approvals'){ if(mcpxApprTenant()) mcpxApprLoad(); }
+  else if(name==='mcp-servers'){ if(mcpxInvTenant()) mcpxInvLoad(); }
+  else if(name==='mcp-health')    mcpxHealthLoad();
+  else if(name==='mcp-management')mcpxMgmtLoad();
+  else if(name==='mcp-settings')  mcpxCfgLoad();
+  else if(name==='mcp-policies')  mcpxPolRefreshActive();
+}
+// mcpxApplyRoute: READ-ONLY restore. Pre-seed inputs, show the view (its auto-load
+// is suppressed while applying), then drive real loads + entity selection. Never
+// executes an action; never throws.
+async function mcpxApplyRoute(route){
+  if(!route || !route.view) return;
+  mcpxRouteApplying=true;
+  try{
+    mcpxPreseedRoute(route.slug, route.params||{});
+    if(typeof switchView==='function') switchView(route.view);
+    await mcpxRestoreRoute(route.slug, route.params||{});
+  }catch(_){ /* restore must fail safe, never throw */ }
+  finally{ mcpxRouteApplying=false; }
+}
+// mcpxPreseedRoute: set input values + capability state BEFORE the loader runs.
+// Capability is set DIRECTLY (never via mcpxPolSelectCap) so restore never triggers
+// the draft-discard confirm() and never early-returns.
+function mcpxPreseedRoute(slug, p){
+  var setv=function(id,v){ var e=document.getElementById(id); if(e) e.value=(v==null?'':v); };
+  if(slug==='activity'){
+    setv('mcp-dec-tenant', p.tenant||''); setv('mcp-dec-event', p.event||'');
+    var f={}; mcpxActFilterKeys.forEach(function(k){ if(p[k]) f[k]=p[k]; });
+    mcpxNavBack=[]; mcpxFrames=[]; mcpxDrawerReq++;
+    mcpxNav=p.tenant?{tenant:p.tenant, filter:f, label:mcpxFilterLabel(f), selEvent:p.event||null}:null;
+  } else if(slug==='servers'){ setv('mcp-srv-tenant', p.tenant||''); if(typeof mcpxInvFlt==='object') mcpxInvFlt.disp=p.disp||''; }
+  else if(slug==='approvals'){ setv('mcp-appr-tenant', p.tenant||''); if(p.apprfilter && typeof mcpxApprFilter!=='undefined') mcpxApprFilter=p.apprfilter; }
+  else if(slug==='policy'){ if(p.capability){ mcpxPol.cap=p.capability; setv('mcpx-pol-cap', p.capability); mcpxSyncCapTabs('#view-mcp-policies .mcpx-rf-captab', p.capability); } if(p.tenant) setv('mcpx-pol-tenant', p.tenant); }
+  else if(slug==='rollout'){ if(p.capability){ setv('mcpx-rf-cap', p.capability); mcpxSyncCapTabs('#view-mcp-rollout .mcpx-rf-captab', p.capability); } }
+  else if(slug==='management'){ if(typeof mcpxMgmtFlt==='object'){ if(p.role!=null) mcpxMgmtFlt.role=p.role; if(p.cls!=null) mcpxMgmtFlt.cls=p.cls; } }
+}
+function mcpxSyncCapTabs(sel, cap){ Array.prototype.forEach.call(document.querySelectorAll(sel), function(t){ var on=t.dataset.arg===cap; t.classList.toggle('active',on); t.setAttribute('aria-selected', on?'true':'false'); }); }
+// mcpxRestoreRoute: drive the real loaders and re-read the selected entity from the
+// authoritative endpoint. A selected entity that no longer exists yields a truthful
+// "no longer available" note; another entity is NEVER silently selected.
+async function mcpxRestoreRoute(slug, p){
+  if(slug==='overview'){ renderMCPCommandCenter(); }
+  else if(slug==='activity'){
+    if(!p.tenant){ renderMCPActivity(); return; }
+    await mcpxRenderActivity(function(){ if(p.event) mcpxOpenDecision(p.event); });
+  }
+  else if(slug==='servers'){
+    if(!mcpxInvTenant()) return; await mcpxInvLoad();
+    if(p.drawer==='server' && p.server){ var sv=mcpxRouteFindServer(p.server); if(sv) mcpxInvOpenServer(sv); else mcpxRouteMiss('mcpx-inv-src','Server "'+p.server+'" is no longer in this tenant inventory.'); }
+    else if(p.drawer==='tool' && p.tool){ var tl=mcpxRouteFindTool(p.tool); if(tl) mcpxInvOpenTool(tl); else mcpxRouteMiss('mcpx-inv-src','Tool "'+p.tool+'" is no longer in this tenant inventory.'); }
+  }
+  else if(slug==='policy'){ mcpxPolRefreshActive(); }
+  else if(slug==='approvals'){
+    if(typeof mcpxApprSetFilter==='function') mcpxApprSetFilter(p.apprfilter||mcpxApprFilter||'all');
+    if(!mcpxApprTenant()) return; await mcpxApprLoad();
+    if(p.request){ if(mcpxApprFind(p.request)) mcpxApprOpenDrawer(p.request); else mcpxRouteMiss('mcpx-appr-src','Approval request is no longer available; it may have expired or been decided.'); }
+  }
+  else if(slug==='health'){ mcpxHealthLoad(); }
+  else if(slug==='rollout'){ mcpxRenderRolloutFleet(); }
+  else if(slug==='management'){ mcpxMgmtLoad(); }
+  else if(slug==='settings'){ mcpxCfgLoad(); }
+}
+function mcpxRouteFindServer(id){ var a=(mcpxInvData&&Array.isArray(mcpxInvData.srv))?mcpxInvData.srv:[]; for(var i=0;i<a.length;i++){ if(a[i] && a[i].server_id===id) return a[i]; } return null; }
+function mcpxRouteFindTool(name){ var a=(mcpxInvData&&Array.isArray(mcpxInvData.tool))?mcpxInvData.tool:[]; for(var i=0;i<a.length;i++){ if(a[i] && a[i].name===name) return a[i]; } return null; }
+function mcpxRouteMiss(nodeId, msg){ var e=document.getElementById(nodeId); if(e){ var s=mcpxEl('span','mcpx-route-miss', ' '+msg); e.appendChild(s); } }
+
 function mcpxFilterKeyLabel(k){
   return ({tenant:'tenant',principal_id:'principal',agent_id:'agent',client_id:'client',server_id:'server',
     tool_name:'tool',tool_fingerprint:'tool fingerprint',rule_id:'rule',reason_code:'reason',action:'action',
@@ -19543,11 +19696,9 @@ function mcpxApprCloseDrawer(){
 function mcpxApprPivotDecision(tenant, eventId){
   if(!tenant || !eventId) return;
   mcpxApprCloseDrawer();
-  var te=document.getElementById('mcp-dec-tenant'); if(te) te.value=tenant;
-  if(typeof switchView==='function') switchView('mcp-decisions');
-  mcpxNavBack=[]; mcpxFrames=[]; mcpxDrawerReq++;
-  mcpxNav={tenant:tenant, filter:{}, label:'', selEvent:null};
-  mcpxRenderActivity(function(){ mcpxOpenDecision(eventId); });
+  // PR-UX-8: route through the shared nav-state model so this pivot is a real
+  // deep link + history entry; restore re-reads the exact event truthfully.
+  mcpxNavigate('activity', {tenant:tenant, event:eventId});
 }
 function mcpxApprDecide(a, action){
   var url = a.kind==='publication' ? '/api/mcp/publication-decision' : '/api/mcp/approval-decision';
@@ -19769,11 +19920,10 @@ function mcpxInvCloseDrawer(){
 function mcpxInvPivotDecisions(tenant, patch){
   if(!tenant) return;
   mcpxInvCloseDrawer();
-  var te=document.getElementById('mcp-dec-tenant'); if(te) te.value=tenant;
-  if(typeof switchView==='function') switchView('mcp-decisions');
-  mcpxNavBack=[]; mcpxFrames=[]; mcpxDrawerReq++;
-  mcpxNav={tenant:tenant, filter:patch||{}, label:(typeof mcpxFilterLabel==='function'?mcpxFilterLabel(patch||{}):''), selEvent:null};
-  mcpxRenderActivity();
+  // PR-UX-8: carry only the allowlisted filter keys into a real Activity deep link.
+  var params={tenant:tenant}; patch=patch||{};
+  mcpxActFilterKeys.forEach(function(k){ if(patch[k]) params[k]=patch[k]; });
+  mcpxNavigate('activity', params);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -19877,7 +20027,7 @@ async function mcpxHealthLoad(){
   root.appendChild(cards);
   var link=mcpxEl('div','mcpx-source');
   link.appendChild(document.createTextNode('Fleet distribution_state: '+(d.distribution_state||'unavailable')+'. Detailed per-DP acknowledgement is on the Rollout & Fleet screen. '));
-  var b=mcpxEl('button','btn sm ghost','View fleet distribution'); b.type='button'; b.addEventListener('click', function(){ if(typeof switchView==='function') switchView('mcp-rollout'); });
+  var b=mcpxEl('button','btn sm ghost','View fleet distribution'); b.type='button'; b.setAttribute('aria-label','View fleet distribution on the Rollout and Fleet screen'); b.addEventListener('click', function(){ mcpxNavigate('rollout', {}); });
   link.appendChild(b); root.appendChild(link);
   var asof=document.getElementById('mcpx-health-asof'); if(asof) asof.textContent='as of '+mcpxNow();
 }
@@ -20381,9 +20531,11 @@ function mcpxPolHandoffCard(){
   return card;
 }
 function mcpxPolOpenInApprovals(created){
-  var te=document.getElementById('mcp-appr-tenant'); if(te) te.value=mcpxPolTenant();
-  if(typeof switchView==='function') switchView('mcp-approvals');
-  if(typeof mcpxApprLoad==='function') mcpxApprLoad().then(function(){ if(created&&created.request_id){ mcpxApprSetFilter('publication'); if(typeof mcpxApprOpenDrawer==='function') mcpxApprOpenDrawer(created.request_id); } });
+  // PR-UX-8: deep link to Approvals carrying only the real publication REQUEST ID
+  // (never the candidate source); restore opens the exact request truthfully.
+  var params={tenant:mcpxPolTenant(), apprfilter:'publication'};
+  if(created && created.request_id) params.request=created.request_id;
+  mcpxNavigate('approvals', params);
 }
 async function mcpxPolCreateRequest(){
   if(!mcpxPolCanPublish()){ return; }
