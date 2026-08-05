@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 )
@@ -119,9 +120,15 @@ func apiMCPRolloutScope(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// apiMCPRolloutEvidence returns the measured evidence-window progress (shadow ≥14d,
-// canary ≥7d, soak ≥24h) with the synthetic/production origin label. It is a
-// reporting surface; it never asserts Production qualification.
+// apiMCPRolloutEvidence returns the measured Production Qualification evidence read
+// model (shadow >=14d, canary >=7d, soak >=24h windows, zero open critical/high
+// defects, rollback rehearsal) with per-requirement typed states, server-computed
+// elapsed durations, and the synthetic/production origin label. PR-UX-6 enriches the
+// original response additively (every original key is retained) with start
+// timestamps, elapsed seconds, typed requirement states, a bounded summary, and the
+// broader unsupported categories. It is a pure reporting surface: it performs NO
+// mutation (Evidence() returns a copy, no window is stamped on read) and never
+// asserts Production qualification, which remains locked behind the separate gate.
 func apiMCPRolloutEvidence(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		mcpMethodNotAllowed(w)
@@ -130,20 +137,11 @@ func apiMCPRolloutEvidence(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleViewer) {
 		return
 	}
-	st := getMCPRollout().stateFor(mcpRolloutCapability(r))
+	capab := mcpRolloutCapability(r)
+	st := getMCPRollout().stateFor(capab)
 	ev := st.Evidence()
-	jsonOK(w, map[string]any{
-		"capability":              mcpRolloutCapability(r).String(),
-		"origin":                  ev.Origin.String(),
-		"open_critical_high":      ev.OpenCriticalHighDefects,
-		"rollback_rehearsed":      ev.RollbackRehearsed,
-		"false_positive_reviews":  ev.FalsePositiveReviews,
-		"shadow_window_target_h":  int(rollout.ShadowWindowTarget.Hours()),
-		"canary_window_target_h":  int(rollout.CanaryWindowTarget.Hours()),
-		"soak_target_h":           int(rollout.SoakTarget.Hours()),
-		"production_locked":       true,
-		"production_lock_message": "Production locked — qualification required",
-	})
+	now := time.Now()
+	jsonOK(w, buildMCPEvidenceDTO(capab.String(), st.CurrentMode().String(), ev, now, now.UnixNano()))
 }
 
 // apiMCPRolloutEmergency engages the capability-local kill switch (immediate
