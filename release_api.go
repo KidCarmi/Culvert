@@ -55,6 +55,14 @@ type releaseManager struct {
 	// schemes ("ed25519", "sigstore", "ed25519+sigstore", or "none"), surfaced
 	// read-only on GET /api/releases (P2b). Empty ⇒ omitted.
 	trustSchemes string
+	// sigstoreWarn is a loud one-line note that a Sigstore trust override
+	// (CULVERT_RELEASE_SIGSTORE_IDENTITY/_TRUSTED_ROOT) did not take effect —
+	// e.g. an identity override set with no trusted root, leaving the keyless
+	// scheme dormant. Previously logged once at startup and otherwise
+	// invisible; surfaced read-only on GET /api/releases so an operator who
+	// believes they pinned a custom identity can see it silently didn't
+	// without SSH/log access. Empty ⇒ omitted.
+	sigstoreWarn string
 	// refresh re-fetches the catalog from the configured origin (P1.7 auto-seed,
 	// when CULVERT_RELEASE_CATALOG_URL is set + enforce) and reloads the on-disk
 	// catalog, so a release published AFTER startup appears without restarting the
@@ -341,6 +349,9 @@ func apiReleases(w http.ResponseWriter, r *http.Request) {
 		if rm.trustSchemes != "" {
 			unavail["trust_schemes"] = rm.trustSchemes
 		}
+		if rm.sigstoreWarn != "" {
+			unavail["sigstore_warn"] = rm.sigstoreWarn
+		}
 		rm.addRefreshFields(unavail)
 		// Provenance is independent of the current catalog — surface it even when no
 		// catalog is published (an appliance whose catalog lapsed still knows how it
@@ -358,6 +369,9 @@ func apiReleases(w http.ResponseWriter, r *http.Request) {
 	}
 	if rm.trustSchemes != "" {
 		out["trust_schemes"] = rm.trustSchemes
+	}
+	if rm.sigstoreWarn != "" {
+		out["sigstore_warn"] = rm.sigstoreWarn
 	}
 	if v := cat.Version(); v > 0 {
 		out["catalog_version"] = v

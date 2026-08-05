@@ -352,6 +352,39 @@ func TestLoadReleaseManagement_PublishesAndGraceful(t *testing.T) {
 	}
 }
 
+// TestLoadReleaseManagement_SigstoreWarnSurfacedOnAPI proves a Sigstore trust
+// misconfiguration (identity override set without a trusted root) reaches
+// GET /api/releases instead of only the startup log — previously an operator
+// who believed they'd pinned a custom Sigstore identity had no way to
+// discover from the GUI/API that it silently didn't take effect.
+func TestLoadReleaseManagement_SigstoreWarnSurfacedOnAPI(t *testing.T) {
+	t.Cleanup(func() { setReleaseManager(nil) })
+	setReleaseManager(nil)
+
+	const wantWarn = "release catalog: test sigstore misconfiguration"
+	loadReleaseManagement(releaseStartupConfig{
+		proxyRepo: defaultReleaseProxyRepo, catalogDir: "/tmp/nonexistent-catalog", maintURL: "",
+		verifyMode:   VerifyPermissive,
+		sigstoreWarn: wantWarn,
+	})
+	rm := currentReleaseManager()
+	if rm == nil {
+		t.Fatal("valid config must publish a release manager")
+	}
+	if rm.sigstoreWarn != wantWarn {
+		t.Fatalf("releaseManager.sigstoreWarn = %q, want %q", rm.sigstoreWarn, wantWarn)
+	}
+
+	rec := httptest.NewRecorder()
+	apiReleases(rec, releaseReq(http.MethodGet, "/api/releases", nil, RoleViewer))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/releases = %d %s; want 200", rec.Code, rec.Body.String())
+	}
+	if got := decodeBody(t, rec)["sigstore_warn"]; got != wantWarn {
+		t.Fatalf("GET /api/releases sigstore_warn = %v, want %q", got, wantWarn)
+	}
+}
+
 // ─── M1-2 product revision: baked default catalog origin ──────────────────────
 // Owner-required behaviors: default resolution, override precedence, empty
 // fallback, mirror URLs verbatim, the trust-safe disable sentinel, and origin

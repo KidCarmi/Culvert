@@ -377,6 +377,7 @@ func loadReleaseManagement(cfg releaseStartupConfig) {
 	rm := newReleaseManager(svc, resolve)
 	rm.verifyMode = cfg.verifyMode
 	rm.trustSchemes = trustSchemes(cfg)
+	rm.sigstoreWarn = cfg.sigstoreWarn
 	rm.catalogURLSource = cfg.catalogURLSource
 	if cfg.catalogURL != "" {
 		// Host only (never the full override URL — it may carry presigned creds).
