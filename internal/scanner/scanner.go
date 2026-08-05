@@ -334,7 +334,7 @@ func (s *ContentScanner) Scan(data []byte) (string, bool) {
 // prefix and match in a few hundred nanoseconds, so for them the timeout harness
 // cost more than the work it guarded (measured 26–35% of total Scan time on small
 // bodies). Hoisting it makes the overhead CONSTANT in pattern count: 7 allocs /
-// 464 B at 1, 10, 20 and 50 patterns, pinned by TestBenchGate_DPIScanAllocs*.
+// 480 B at 1, 10, 20 and 50 patterns, pinned by TestBenchGate_DPIScanAllocs*.
 //
 // The PER-PATTERN budget is preserved exactly — this is a cost change, not a
 // policy change. The worker stamps a start time before each match; when the timer
@@ -357,13 +357,19 @@ func (ps *patternSet) scan(data []byte, budget time.Duration) (string, bool) {
 	// heap objects and give back part of the win at low pattern counts.
 	st := &scanState{done: make(chan scanVerdict, 1)}
 	st.startedAt.Store(time.Now().UnixNano())
-	go ps.match(data, st)
+	go ps.match(data, st, budget)
 
 	timer := time.NewTimer(budget)
 	defer timer.Stop()
 	for {
 		select {
 		case v := <-st.done:
+			if v.timedOut {
+				// The worker caught its own overrun (see match): a match that blew the
+				// budget but finished before this goroutine got scheduled. Same verdict
+				// as the timer branch below.
+				obs.Warnf("DPI: regex timeout after %s on pattern %q", budget, obs.Sanitize(v.pattern))
+			}
 			return v.pattern, v.hit
 		case <-timer.C:
 			// The timer is armed against the whole scan, but the budget belongs to
@@ -407,17 +413,42 @@ func budgetRemaining(budget time.Duration, startedAt, now int64) (remaining time
 // the parent can attribute the budget to the pattern actually running. It may
 // outlive its scan (re.Match cannot be interrupted), which is why it reads only
 // the immutable patternSet and its own scanState.
-func (ps *patternSet) match(data []byte, st *scanState) {
+//
+// The worker also enforces the budget on matches it has ALREADY finished, which
+// the parent structurally cannot. The parent decides "did this overrun" by
+// inspecting the currently-running match; if it is descheduled (GC pause, CPU
+// contention) past the moment the overrunning match completes and the worker
+// advances, startedAt now belongs to the NEXT pattern, budgetRemaining re-arms,
+// and the overrun is forgotten — suspicious input would be admitted instead of
+// failing closed. Timing each match here removes that window: whether a match
+// stayed inside its budget is decided by the goroutine that ran it, and so does
+// not depend on when the parent happens to be scheduled. The two halves are
+// complementary — the parent catches a match still RUNNING past budget (the
+// genuine-hang case, where the worker never gets to report anything), the worker
+// catches one that FINISHED past budget.
+func (ps *patternSet) match(data []byte, st *scanState, budget time.Duration) {
+	// One clock read per pattern, not two: a match ends where the next one begins,
+	// so the reading that closes pattern i also opens pattern i+1. The sliver of
+	// loop overhead this folds into the next pattern's elapsed time is charged
+	// AGAINST that pattern, i.e. conservatively (toward failing closed), never in
+	// favour of admitting an overrun.
+	started := time.Now()
 	for i, re := range ps.compiled {
 		if st.abandoned.Load() {
 			return // parent already failed closed; don't scan the rest
 		}
 		st.current.Store(int64(i))
-		st.startedAt.Store(time.Now().UnixNano())
+		st.startedAt.Store(started.UnixNano())
 		if ps.matchOne(re, data) {
 			st.done <- scanVerdict{pattern: ps.raw[i], hit: true}
 			return
 		}
+		finished := time.Now()
+		if finished.Sub(started) >= budget {
+			st.done <- scanVerdict{pattern: ps.raw[i], hit: true, timedOut: true}
+			return
+		}
+		started = finished
 	}
 	st.done <- scanVerdict{}
 }
@@ -436,10 +467,14 @@ type scanState struct {
 	abandoned atomic.Bool  // set when the parent has given up (fail-closed)
 }
 
-// scanVerdict is the worker → parent result for patternSet.scan.
+// scanVerdict is the worker → parent result for patternSet.scan. timedOut marks
+// a hit the worker produced because the match overran its budget rather than
+// because the pattern actually matched; the verdict is identical (fail closed),
+// it only changes the log line.
 type scanVerdict struct {
-	pattern string
-	hit     bool
+	pattern  string
+	hit      bool
+	timedOut bool
 }
 
 // MatchRegexWithTimeout runs re.Match(data) with a deadline.

@@ -134,6 +134,69 @@ func TestScan_TimeoutFailsClosed(t *testing.T) {
 	}
 }
 
+// TestMatch_WorkerCatchesItsOwnOverrun closes the window where an overrun that
+// has already COMPLETED gets forgotten.
+//
+// The parent decides "did this pattern overrun" by inspecting the currently
+// running match. If it is descheduled (GC pause, CPU contention) past the moment
+// the overrunning match finishes and the worker advances, startedAt belongs to
+// the next pattern, budgetRemaining re-arms, and the overrun leaves no trace —
+// suspicious input would be admitted instead of failing closed.
+//
+// This drives the worker DIRECTLY, with no parent timer at all, which is exactly
+// the "parent never observed it" case and makes the assertion deterministic: the
+// verdict must still be fail-closed and name the pattern that overran.
+func TestMatch_WorkerCatchesItsOwnOverrun(t *testing.T) {
+	const budget = 20 * time.Millisecond
+
+	// Pattern 0 overruns but RETURNS (it does not hang); patterns 1+ are instant.
+	ps := fakeSet(5, func(idx int) bool {
+		if idx == 0 {
+			time.Sleep(3 * budget)
+		}
+		return false
+	})
+
+	st := &scanState{done: make(chan scanVerdict, 1)}
+	st.startedAt.Store(time.Now().UnixNano())
+	ps.match(nil, st, budget) // synchronous: no parent, no timer
+
+	v := <-st.done
+	if !v.hit {
+		t.Fatal("a match that finished OVER budget must still fail closed — otherwise a " +
+			"descheduled parent silently converts an overrun into an allow")
+	}
+	if !v.timedOut {
+		t.Error("verdict should be marked timedOut so the overrun is logged as a timeout, not a match")
+	}
+	if want := ps.raw[0]; v.pattern != want {
+		t.Errorf("verdict named pattern %q, want the overrunning pattern %q", v.pattern, want)
+	}
+	// It must also stop there rather than continuing through the remaining patterns.
+	if got := st.current.Load(); got != 0 {
+		t.Errorf("worker advanced to pattern %d after an overrun, want it to stop at 0", got)
+	}
+}
+
+// TestMatch_WithinBudgetIsNotATimeout is the other side of the above: a match
+// that stays inside its budget must not be turned into a fail-closed verdict.
+func TestMatch_WithinBudgetIsNotATimeout(t *testing.T) {
+	const budget = 200 * time.Millisecond
+	ps := fakeSet(4, func(int) bool {
+		time.Sleep(5 * time.Millisecond) // comfortably inside budget
+		return false
+	})
+
+	st := &scanState{done: make(chan scanVerdict, 1)}
+	st.startedAt.Store(time.Now().UnixNano())
+	ps.match(nil, st, budget)
+
+	v := <-st.done
+	if v.hit || v.timedOut {
+		t.Errorf("clean in-budget scan produced verdict %+v, want no hit and no timeout", v)
+	}
+}
+
 // TestScan_AbandonedWorkerStopsEarly proves the abandoned flag is honoured: once
 // the parent has failed closed, the orphaned worker must not go on to evaluate the
 // REMAINING patterns. re.Match cannot be interrupted, so the overrunning match
