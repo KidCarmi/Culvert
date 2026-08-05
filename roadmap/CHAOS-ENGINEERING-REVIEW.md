@@ -17,6 +17,13 @@ everything else is triaged below with a suggested PR and required tests for foll
 
 ## 0. Revision log
 
+**2026-08-05 — CHAOS-25 sweep (the three deferred goroutine families).** Closes the CHAOS-24 §12.6
+deferral: the HA standby sync loop, the MCP runtime session sweeper, and `internal/yara`'s
+per-match goroutine are now contained per ROUND with a per-path fail-closed analysis. The HA path
+required it — the mechanical guard manufactures a split brain (§13.3) — and reading that path
+surfaced **HA-16**, a pre-existing High: a promotion that does not take silently ended replication
+forever (§13.4). See §13.
+
 **2026-08-04 — CHAOS-24 sweep (background-worker panic containment).**
 
 Re-verified the standing register against current `main`. Several original findings have since
@@ -501,3 +508,165 @@ swallow-and-retry keepalive guard trips the split-brain assertion.
 - The `crashThrottleEvery` (1s per component) flood guard means a tight panic loop reports a
   fraction of its rounds to the SIEM. The unthrottled `culvert_crash_records_total` counter is the
   lossless signal, by design (anti-forensics-DoS trade-off inherited from M1).
+
+---
+
+## 13. CHAOS-25 — The three deferred goroutine families (fail-closed)
+
+**Date:** 2026-08-05 · **Closes:** the CHAOS-24 §12.6 deferral (HA sync loop, MCP runtime,
+`internal/yara` per-match goroutine) · **New finding:** HA-16.
+
+CHAOS-24 deliberately did not guard these three. Each needed the §12.2 analysis — *what does a
+faulted round MEAN here* — before a `recover()` could be called safe. On the HA loop that analysis
+found that the mechanical fix manufactures a split brain, and looking at that path closely
+surfaced a second, pre-existing stall (HA-16) that had nothing to do with panics.
+
+### 13.1 `internal/yara` — the per-match goroutine
+
+`matchRegexWithTimeout` spawns a goroutine **per regex match**, on the content-scan path, over
+attacker-supplied bytes. An unrecovered fault there (a corrupt compiled rule, a nil `*Regexp`, an
+engine fault) is a total gateway outage triggered by scanned content.
+
+Containment alone is not the fix — **the verdict is.** A faulted match produced no answer, so
+returning "no match" would turn an engine fault into a silent **clean** verdict and pass the
+object. A faulted match is epistemically identical to a **timed-out** match, so it takes the same
+admin-controlled `on_timeout` posture: fail closed unless the admin explicitly chose
+`fail_open_with_alert`. Reusing that posture rather than adding a knob is deliberate — it keeps the
+operator's one decision about "inspection could not complete" in one place, and adds no CLI/API/GUI
+surface.
+
+Two details that are load-bearing:
+
+- The guard is on the **call**, not the goroutine. The goroutine must still deliver a verdict on
+  `ch`; a guard that let it return silently would park every scan for the FULL timeout on a
+  deterministic fault — 5s per regex per object, a DoS in its own right.
+- The recovery path **never touches `re`.** The panic may itself be a nil/corrupt `*Regexp`, and
+  `(*Regexp).String()` on such a value panics *again* — inside the recovery, where nothing is left
+  to contain it. The pattern is therefore omitted from the log line; `obs.SafeCall` has already
+  routed the value + stack to the crash pipeline, which is where the detail belongs.
+
+### 13.2 MCP runtime — the session sweeper
+
+`sweepLoop` (`internal/mcp/runtime/listener.go`) runs session expiry and binding reconciliation on
+a ticker. A panic there kills the whole Secure Web Gateway for a fault in a **disabled-by-default**
+subsystem's housekeeping tick.
+
+A goroutine-level recover is the dangerous shape here: the sweeper is what **enforces session
+expiry.** If it returns, MCP sessions outlive their TTL forever, bindings are never reclaimed, both
+stores grow unbounded — and the listener still reports `PhaseReady`. That trades a loud crash for a
+silent **security** regression (expired sessions remain usable). Guarded per round.
+
+The panic value is **counted, not routed to a sink**: `internal/mcp` is a self-contained subtree
+that imports no other `internal/*` package and does no logging by design (records leave only
+through the observe `Sink`). The counter is this subtree's idiom — the same trade `internal/syslog`
+made in CHAOS-24. `sweepPanics` is carried on the typed `HealthSnapshot`.
+
+### 13.3 HA standby loop — where the obvious guard manufactures a split brain
+
+The standby round parses and applies a state bundle served by **another node**. Both obvious
+containments are worse than the crash, in opposite directions:
+
+- **Goroutine-level recover** → the loop returns. The node keeps `role="standby"` and keeps
+  serving, but never syncs again: `sync_fail_count` frozen, `last_sync_ok` frozen, admin UI green.
+  It diverges silently from the leader for as long as it runs, and a later legitimate failover
+  promotes a node holding arbitrarily stale policy. Silent state divergence — strictly worse than a
+  restart, which would have resynced from scratch.
+
+- **Per-round recover that charges the failure streak** (the mechanical CHAOS-24 shape) →
+  **manufactures a split brain.** `failCount` is not an error tally; it is evidence that *the
+  leader is unreachable*, and at `haStandbyMaxFail` it promotes this node with no fence in legacy
+  `--ha-auto-failover` mode. A panic in the local apply path is evidence about **this** node, and
+  it is typically **deterministic** (a poisoned bundle field faults every round), so it would reach
+  the threshold in a reliable ~15s and promote a standby while a healthy leader is still serving
+  writes. Verified: the naive variant trips the split-brain assertion with
+  `promoteCalls=1, isLeader=true`.
+
+**Adopted semantics — a faulted round is a round that produced NO EVIDENCE.** It never resets the
+streak (not a success — and it cannot reach `markSyncOK`, so the lease-mode freshness gate keeps
+ageing and correctly refuses to auto-promote a standby that cannot apply state), never advances the
+streak (not evidence about the leader, so it can never trip `onMaxFail`), never exits the loop (an
+exit is indistinguishable from "promoted"), and is counted **separately** as `sync_round_faults`.
+
+That separation forces a matching change in the health verdict: a faulted standby has
+`sync_fail_count == 0` *by design*, so `clusterRoleAndOK` would have reported it perfectly healthy.
+It now reports degraded with "state is stale and this node will not auto-promote", and the HA panel
+shows the fault count in red beside the failure streak.
+
+#### 13.3.1 The promotion latch
+
+`promote()` latches `promoted` before doing any work; every error branch clears it so a later
+attempt can retry. A panic left it **set**, which — once the caller contains the panic — would
+**permanently disable every promotion path on this node** (auto-failover, `PromoteManually`, and
+the planned handoff all funnel through that CAS), silently, on a node that still reports a healthy
+standby. Losing failover capability in silence is exactly the class this codebase treats as worse
+than a crash. The promotion sequence is now contained *inside* `promote()`, which hands the latch
+back unless leadership was actually committed.
+
+The recovery reads a local `assumed` flag rather than `h.IsLeader()`: `IsLeader()` takes `h.mu`,
+and a panic raised while the role-commit section held that lock would deadlock the recovery itself.
+The latch is an atomic, so releasing it needs no lock.
+
+### 13.4 HA-16 — a failed promotion silently ends replication (pre-existing, High)
+
+Found while reading the promotion path, **not** a panic issue. The legacy auto-failover branch of
+`onMaxFail` returned `true` **unconditionally** after calling `promote()` — while `promote()` has
+three branches that log "staying as standby" and return: no promote context, a denied fencing
+lease, and an `onPromote` error (the CP gRPC server failing to start — a bound port, an unreadable
+cert). `true` ends `standbyLoop`, the **only** goroutine that syncs state or ever retries failover.
+
+Failure mode: a leader flap (15s) plus one transient promotion failure leaves the node serving as a
+standby that **never resyncs when the leader returns and never attempts failover again** — no
+alert, `sync_fail_count` stuck at 3. A later manual failover then promotes arbitrarily stale
+policy. The lease path already had this right (`return h.IsLeader()`); the legacy path now mirrors
+it.
+
+### 13.5 What shipped
+
+| Path | Change |
+|------|--------|
+| `internal/yara/yara.go` | `matchGuarded` + `yaraPanicResult` — contained match takes the `on_timeout` posture; recovery never touches `re` |
+| `internal/mcp/runtime/listener.go`, `health.go` | `sweepRound` per-round guard; `sweepPanics` counter on `HealthSnapshot` |
+| `ha.go` | `syncOnceGuarded`/`tickGuarded`/`noteRoundFault`; `syncRoundFaults` on `HAState`/`HAStatus`/`GET /api/cluster/ha` |
+| `ha.go` | `promote()` split into a latch-owning wrapper + `promoteHoldingLatch`; `containPromotionPanic` |
+| `ha.go` | **HA-16**: legacy auto-failover returns `IsLeader()`, not `true` |
+| `diagnose.go` | standby health verdict accounts for round faults (was reported healthy) |
+| `static/index.html` | HA panel + cluster diagnosis surface `sync_round_faults` |
+
+### 13.6 Tests
+
+| Gate | Test |
+|------|------|
+| **Split-brain gate** — contained local faults never promote | `chaos_ha_standby_panic_test.go` `TestChaos25_StandbyRoundPanic_DoesNotAdvanceLeaderUnreachableStreak` |
+| A faulted round is neither success nor failure; never marks state fresh | `TestChaos25_StandbyRoundPanic_NeverMarksStateFresh` |
+| Containment + record + loop survives a deterministic fault | `TestChaos25_StandbyRoundPanic_IsContainedAndRecorded`, `TestChaos25_StandbyLoopSurvivesDeterministicRoundFault` |
+| **Latch gate** — a faulted promotion stays retryable | `TestChaos25_PromotePanic_ReleasesLatchSoFailoverStaysPossible` |
+| **HA-16 gate** — a failed promotion does not end the sync loop (and a successful one still does) | `TestChaos25_FailedPromotionDoesNotEndTheStandbySyncLoop`, `TestChaos25_SuccessfulPromotionStillExitsTheStandbyLoop` |
+| Panic text scrubbed (CWE-117) on a leader-supplied value | `TestChaos25_ContainedStandbyPanicTextIsScrubbed` |
+| YARA: faulted match fails closed / honours fail-open / does not stall / leaks no inflight slot / healthy verdicts unchanged | `internal/yara/chaos_match_panic_test.go` `TestChaos25_Yara*` |
+| MCP: sweep contained + counted, survives, surfaces on health, healthy path untouched | `internal/mcp/runtime/chaos_sweep_panic_test.go` `TestChaos25_Sweep*` |
+
+Every gate was verified to **fail against the pre-fix code**: the naive per-round HA guard promotes
+the standby (split brain reproduced), the pre-fix `return true` ends the sync loop, the
+contained-in-the-caller promotion leaves the latch set, and both the YARA and MCP pre-fix variants
+kill the test binary with the raw panic.
+
+### 13.7 Residual risk
+
+- **Containment is still not repair.** A standby whose round faults every tick is contained,
+  counted, and now visibly degraded — but it makes no progress and holds stale state. That is the
+  SAFE direction here (read-only, visibly stale, never promoted), and recovery is an operator
+  restart.
+- **A panic inside `promote()`'s role-commit section would leave `h.mu` held**, wedging later
+  `Status()` reads. That region is pure field assignment with no fallible call; the realistic panic
+  sites (`onPromote`, `acquireLeaseForLeadership`) are outside it. Containment does not change this
+  hazard, and the recovery path is written so it cannot itself deadlock on that lock.
+- **MCP `sweepPanics` is not yet reachable from the admin API** — `Runtime.Health()` has no
+  consumer in `package main` today. The counter is correct and typed; surfacing the MCP runtime
+  health snapshot is a separate, pre-existing gap.
+- **The MCP accept-loop goroutine** (`serve()`) is analysed and deliberately unchanged: a
+  `Serve` error sets `PhaseDegraded` and the listener stops accepting, which for a gateway is
+  fail-closed (agents cannot reach MCP servers). It has no recovery path, which is the same
+  pre-existing observability gap as above.
+- **`internal/yara`'s abandoned-goroutine accounting is unchanged**: a match that panics after the
+  caller has already timed out still decrements `yaraInflight` and writes to a buffered channel, so
+  neither the gauge nor the goroutine leaks.

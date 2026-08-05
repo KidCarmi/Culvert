@@ -610,22 +610,23 @@ func tlsResult(d tlsDiagnosis) string {
 // surfaced so the diagnostic answers "is the cluster posture healthy?" without
 // re-exposing anything an operator can't already see on /api/cluster/ha.
 type clusterDiagnosis struct {
-	SchemaVersion  int    `json:"schema_version"`
-	GeneratedAt    string `json:"generated_at"`
-	Role           string `json:"role"` // standalone|control-plane|leader|standby|data-plane
-	OK             bool   `json:"ok"`
-	HAEnabled      bool   `json:"ha_enabled"`
-	Term           uint64 `json:"term,omitempty"`
-	AutoFailover   bool   `json:"auto_failover"`
-	LeaseMode      string `json:"lease_mode"` // none|lease
-	LeaseValid     bool   `json:"lease_valid,omitempty"`
-	Epoch          int64  `json:"epoch,omitempty"`
-	WriteAuthority bool   `json:"write_authority"`
-	NodesTotal     int    `json:"nodes_total"`
-	NodesConnected int    `json:"nodes_connected"`
-	SyncFailCount  int    `json:"sync_fail_count,omitempty"`
-	LastSyncOK     string `json:"last_sync_ok,omitempty"`
-	Detail         string `json:"detail,omitempty"`
+	SchemaVersion   int    `json:"schema_version"`
+	GeneratedAt     string `json:"generated_at"`
+	Role            string `json:"role"` // standalone|control-plane|leader|standby|data-plane
+	OK              bool   `json:"ok"`
+	HAEnabled       bool   `json:"ha_enabled"`
+	Term            uint64 `json:"term,omitempty"`
+	AutoFailover    bool   `json:"auto_failover"`
+	LeaseMode       string `json:"lease_mode"` // none|lease
+	LeaseValid      bool   `json:"lease_valid,omitempty"`
+	Epoch           int64  `json:"epoch,omitempty"`
+	WriteAuthority  bool   `json:"write_authority"`
+	NodesTotal      int    `json:"nodes_total"`
+	NodesConnected  int    `json:"nodes_connected"`
+	SyncFailCount   int    `json:"sync_fail_count,omitempty"`
+	SyncRoundFaults int    `json:"sync_round_faults,omitempty"` // CHAOS-25: contained standby rounds (stale state, never promotes)
+	LastSyncOK      string `json:"last_sync_ok,omitempty"`
+	Detail          string `json:"detail,omitempty"`
 }
 
 // clusterInputs is the pure snapshot the diagnosis core consumes. Keeping the
@@ -704,6 +705,13 @@ func haRoleAndOK(in clusterInputs, nodesOK bool) (role string, ok bool, detail s
 		if in.haStatus.SyncFailCount != 0 {
 			return "standby", false, "standby sync loop is failing"
 		}
+		// CHAOS-25: a standby whose rounds fault has sync_fail_count == 0 by
+		// design (a local fault is not evidence about the leader, so it never
+		// advances the promotion streak). Without this branch it would report
+		// perfectly healthy while holding frozen, diverging state.
+		if in.haStatus.SyncRoundFaults != 0 {
+			return "standby", false, "standby sync rounds are faulting — state is stale and this node will not auto-promote"
+		}
 		return "standby", true, ""
 	default:
 		return "control-plane", nodesOK, ""
@@ -734,6 +742,7 @@ func diagnoseClusterFrom(in clusterInputs, now time.Time) clusterDiagnosis {
 	}
 	if in.haStatus.Role == "standby" {
 		d.SyncFailCount = in.haStatus.SyncFailCount
+		d.SyncRoundFaults = in.haStatus.SyncRoundFaults
 		d.LastSyncOK = in.haStatus.LastSyncOK
 	}
 	return d

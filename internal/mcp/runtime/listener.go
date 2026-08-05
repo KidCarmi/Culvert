@@ -136,12 +136,45 @@ func (l *Listener) sweepLoop() {
 		case <-l.stopCh:
 			return
 		case <-t.C:
-			l.pipe.sessions.Sweep()
-			// Unbind identities whose sessions the sweep reclaimed (the binding store
-			// has no per-session sweep hook), so it tracks the live session set.
-			l.pipe.reconcileBindings()
+			l.sweepRound()
 		}
 	}
+}
+
+// sweepRound performs ONE sweep under a panic guard (CHAOS-25).
+//
+// Go terminates the process on an unrecovered panic in any goroutine, so a
+// fault in the sweeper would take the whole in-line gateway down — every
+// in-flight tunnel on the Secure Web Gateway included, for a fault in a
+// disabled-by-default subsystem's housekeeping tick.
+//
+// The guard is per ROUND, never on sweepLoop's goroutine. A goroutine-level
+// recover would let the sweeper RETURN on the first fault, and the sweeper is
+// what enforces session expiry: sessions would then outlive their TTL forever,
+// bindings would never be reclaimed, and both stores would grow unbounded —
+// with the listener still reporting PhaseReady. That converts a loud crash into
+// a silent security regression (expired sessions remain usable), which is
+// strictly worse. Guarding the round keeps the ticker alive, so a transient
+// fault costs one interval and self-heals.
+//
+// The panic value is counted rather than routed to a sink: internal/mcp is a
+// self-contained subtree that imports no other internal/* package and does no
+// logging by design (records leave through the observe Sink only), so the
+// counter is this package's idiom — the same trade internal/syslog made in
+// CHAOS-24. sweepPanics is non-zero only in an unhealthy process, and it is
+// carried on the typed HealthSnapshot.
+func (l *Listener) sweepRound() {
+	defer func() {
+		// The count is the signal; the panic value is deliberately not retained
+		// (it is unbounded and can carry request-shaped text).
+		if recover() != nil {
+			l.ctr.sweepPanics.Add(1)
+		}
+	}()
+	l.pipe.sessions.Sweep()
+	// Unbind identities whose sessions the sweep reclaimed (the binding store
+	// has no per-session sweep hook), so it tracks the live session set.
+	l.pipe.reconcileBindings()
 }
 
 // stop drains in-flight requests (bounded by ctx), stops the sweeper, and closes the

@@ -97,6 +97,14 @@ type HAState struct {
 	// loop goroutine — previously an operator had no warning before a standby
 	// silently hit the auto-failover/self-fence threshold (see setSyncFailCount).
 	syncFailCount int
+
+	// syncRoundFaults counts standby sync rounds contained by the CHAOS-25
+	// panic guard. Kept SEPARATE from syncFailCount on purpose: a failed sync
+	// is evidence the leader is unreachable (and at haStandbyMaxFail it
+	// promotes), whereas a faulted round is evidence about THIS node and must
+	// never promote. Non-zero means this standby is stalled locally and its
+	// state is stale while the leader may be perfectly healthy.
+	syncRoundFaults int
 }
 
 // promoteContext holds the parameters StartAsStandby threads into the sync loop,
@@ -120,6 +128,11 @@ type HAStatus struct {
 	StandbyAddr   string `json:"standby_addr,omitempty"`    // leader-side failback target (ADR-0005 S0)
 	SyncFailCount int    `json:"sync_fail_count,omitempty"` // standby-side: consecutive HASync failures since last success
 	LastSyncOK    string `json:"last_sync_ok,omitempty"`    // standby-side: RFC3339 of the last successful HASync apply
+	// SyncRoundFaults is the standby-side count of sync rounds contained by the
+	// CHAOS-25 panic guard. Distinct from SyncFailCount: it never promotes, and
+	// it means this node cannot apply state (stale, read-only) even while the
+	// leader is reachable.
+	SyncRoundFaults int `json:"sync_round_faults,omitempty"`
 }
 
 func (h *HAState) Status() HAStatus {
@@ -143,11 +156,22 @@ func (h *HAState) Status() HAStatus {
 	// struct verbatim).
 	if h.role == "standby" {
 		s.SyncFailCount = h.syncFailCount
+		s.SyncRoundFaults = h.syncRoundFaults
 		if !h.lastSyncOK.IsZero() {
 			s.LastSyncOK = h.lastSyncOK.Format(time.RFC3339)
 		}
 	}
 	return s
+}
+
+// noteStandbyRoundFault records one contained standby sync round (CHAOS-25) and
+// returns the running total. Called from the standby loop goroutine; safe from
+// any goroutine.
+func (h *HAState) noteStandbyRoundFault() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.syncRoundFaults++
+	return h.syncRoundFaults
 }
 
 // setSyncFailCount records the standby sync loop's current consecutive-failure
@@ -434,7 +458,7 @@ func (h *HAState) standbyLoop(ctx context.Context, stopCh chan struct{}, leaderA
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
-	s.syncOnce() // try immediately
+	s.syncOnceGuarded() // try immediately
 
 	for {
 		select {
@@ -443,11 +467,86 @@ func (h *HAState) standbyLoop(ctx context.Context, stopCh chan struct{}, leaderA
 		case <-stopCh:
 			return
 		case <-ticker.C:
-			if s.tick() {
+			if s.tickGuarded() {
 				return
 			}
 		}
 	}
+}
+
+// ── CHAOS-25: standby-round panic containment ────────────────────────────────
+//
+// The standby sync round parses and APPLIES a state bundle served by another
+// node (syncFromLeader → applyHABundle), so its inputs are not this process's
+// own. An unrecovered panic there kills an in-line security gateway. But on
+// this loop the two obvious containments are each worse than the crash, and in
+// opposite ways:
+//
+//   - Recovering at the GOROUTINE level lets the loop return. The node keeps
+//     role="standby" and keeps serving, but never syncs again — syncFailCount
+//     frozen at its last value, last_sync_ok frozen, admin UI green. It then
+//     diverges silently from the leader for as long as it runs, and a later
+//     legitimate failover promotes a node holding arbitrarily stale policy.
+//     That is silent state divergence: strictly worse than a loud restart,
+//     which would have resynced from scratch.
+//
+//   - Recovering per round and charging the panic to the failure streak
+//     (the mechanical CHAOS-24 shape) MANUFACTURES A SPLIT BRAIN in legacy
+//     --ha-auto-failover mode. failCount is not a generic error counter: it is
+//     evidence that THE LEADER IS UNREACHABLE, and at haStandbyMaxFail it
+//     promotes this node with no fence. A panic in the local apply path is
+//     evidence about THIS node, not about the leader — and it is typically
+//     DETERMINISTIC (a poisoned bundle field faults on every round), so it
+//     would reach the threshold in a reliable ~15s and promote a standby while
+//     a perfectly healthy leader is still serving writes. Panic containment
+//     would have created the exact dual-write ADR-0004/ADR-0005 exist to
+//     prevent.
+//
+// Adopted semantics — the same rule CHAOS-24 §12.2 applied to the fencing
+// lease: guard the ROUND, and let the caller decide what a faulted round means.
+// A faulted round is a round that produced NO EVIDENCE. It therefore:
+//   - never resets the streak (it is not a successful sync, and it cannot reach
+//     markSyncOK, so the lease-mode freshness gate keeps ageing — a standby that
+//     cannot apply state is correctly refused automatic promotion),
+//   - never advances the streak (it is not evidence about the leader, so it can
+//     never trip onMaxFail),
+//   - never exits the loop (an exit is indistinguishable from "promoted"), and
+//   - is counted and surfaced separately (sync_round_faults) so "this standby is
+//     stalled locally" is never mistaken for "the leader is fine".
+//
+// The residual — a deterministically faulting round is contained but makes no
+// progress, so the standby stays read-only on last-good state — is the
+// containment-is-not-repair trade CHAOS-24 §12.6 already owns. Here it is the
+// SAFE direction: read-only and visibly stale, never promoted.
+
+// syncOnceGuarded runs the loop's immediate first attempt under the guard. It is
+// separate from the ticker path only because it has no exit decision to make.
+func (s *standbyLoopState) syncOnceGuarded() {
+	if runGuarded("ha-standby", s.syncOnce) {
+		s.noteRoundFault()
+	}
+}
+
+// tickGuarded runs one ticker round under the guard. exit stays false on a
+// faulted round: the named return is only assigned when tick() returns normally.
+func (s *standbyLoopState) tickGuarded() (exit bool) {
+	if runGuarded("ha-standby", func() { exit = s.tick() }) {
+		s.noteRoundFault()
+		return false
+	}
+	return exit
+}
+
+// noteRoundFault records a contained round so an operator can tell a locally
+// stalled standby from an unreachable leader. It deliberately does NOT touch
+// failCount — see the block comment above.
+func (s *standbyLoopState) noteRoundFault() {
+	n := s.h.noteStandbyRoundFault()
+	logger.Printf("HA: standby sync round faulted and was contained (%d total) — NOT counted toward the "+
+		"leader-unreachable streak (%d/%d) and NOT promoting: a local fault is evidence about this node, "+
+		"not about the leader. This standby stays read-only and its state is now STALE until a round "+
+		"succeeds. See sync_round_faults and culvert_crash_records_total{component=\"ha-standby\"}.",
+		n, s.failCount, haStandbyMaxFail)
 }
 
 // onMaxFail handles the leader-unreachable threshold. Returns true when the loop
@@ -467,6 +566,22 @@ func (s *standbyLoopState) onMaxFail() bool {
 	}
 	if s.h.autoFailoverEnabled() {
 		s.h.promote("leader unreachable")
+		// Exit ONLY if the promotion actually took — mirroring the lease path's
+		// `return h.IsLeader()` above (CHAOS-25 / HA-16). promote() has three
+		// branches that log "staying as standby" and return while this node is
+		// still a standby: no promote context, a denied fencing lease, and an
+		// onPromote error (the CP gRPC server failing to start — a bound port,
+		// an unreadable cert). Returning true there ended standbyLoop, the only
+		// goroutine that syncs state or ever retries failover: the node kept
+		// role="standby" and kept serving, but froze on last-good config
+		// forever — no resync when the leader returned, no second promotion
+		// attempt, no alert, sync_fail_count stuck at 3. A later manual
+		// failover would then promote a node holding arbitrarily stale policy.
+		if !s.h.IsLeader() {
+			logger.Printf("HA: promotion attempt did not take — staying standby, continuing to sync and retry " +
+				"(a promotion that fails must not end the sync loop)")
+			return false
+		}
 		return true
 	}
 	if !s.manualWarned {
@@ -710,6 +825,50 @@ func (h *HAState) promote(reason string) {
 	if !h.promoted.CompareAndSwap(false, true) {
 		return // already promoted (or another trigger won the race)
 	}
+	// CHAOS-25: contain a panic in the promotion sequence and hand the latch
+	// back. Every error branch below clears `promoted` so a later attempt can
+	// retry; a faulted attempt is just another failed attempt and must be
+	// treated identically. Without this, containing the panic in the caller
+	// would leave the latch stuck true and PERMANENTLY disable every promotion
+	// path on this node — auto-failover, PromoteManually, and the planned
+	// handoff all funnel through this CAS — while the node reports a healthy
+	// standby. Losing failover capability in silence is precisely the failure
+	// this codebase treats as worse than a crash.
+	//
+	// `assumed` is the panic path's non-blocking read of "did we actually reach
+	// leadership": h.IsLeader() would take h.mu, and a panic raised while the
+	// role-commit section held that lock would then deadlock the recovery
+	// itself. The latch is an atomic, so releasing it needs no lock.
+	assumed := false
+	defer func() {
+		if v := recover(); v != nil {
+			h.containPromotionPanic(reason, assumed, v)
+		}
+	}()
+	h.promoteHoldingLatch(reason, &assumed)
+}
+
+// containPromotionPanic is the recovery half of promote(). It never re-panics
+// and never takes h.mu.
+func (h *HAState) containPromotionPanic(reason string, assumed bool, v any) {
+	if !assumed {
+		// Leadership was never committed: release the latch so auto-failover,
+		// a manual promotion, or a planned handoff can try again.
+		h.promoted.Store(false)
+	}
+	recordCrash("ha-promote", "", v)
+	logger.Printf("HA: promotion (%s) faulted and was contained — leadership %s; "+
+		"the promotion latch was %s. See culvert_crash_records_total{component=\"ha-promote\"}.",
+		sanitizeLog(reason),
+		map[bool]string{true: "HAD already been committed before the fault", false: "was NOT assumed"}[assumed],
+		map[bool]string{true: "left set (this node is leader)", false: "released so a later attempt can retry"}[assumed])
+}
+
+// promoteHoldingLatch runs the promotion sequence with the `promoted` latch
+// already held by the caller. It sets *assumed once the role commit is durable
+// in memory, so the caller's recovery can tell a half-done attempt (release the
+// latch) from a completed one (keep it).
+func (h *HAState) promoteHoldingLatch(reason string, assumed *bool) {
 	h.mu.RLock()
 	pc := h.pc
 	h.mu.RUnlock()
@@ -755,6 +914,10 @@ func (h *HAState) promote(reason string) {
 	newTerm := h.term
 	promoteEpoch := h.leaseEpoch // fencing epoch in effect (0 in legacy mode)
 	h.mu.Unlock()
+	// Leadership is committed from here on: a fault in the bookkeeping below
+	// must NOT release the promotion latch (this node IS the leader; releasing
+	// it would let a second promotion run and bump the term again). CHAOS-25.
+	*assumed = true
 	statHAFailovers.Add(1) // CL-9 PR3: count standby→leader promotions only
 	// M5: record the promotion in the failover ring. promote() is the single
 	// path every promotion funnels through — auto-failover, planned handoff, and
@@ -997,6 +1160,12 @@ func apiClusterHA(w http.ResponseWriter, r *http.Request) {
 			// haStandbyMaxFail and self-fenced/failed-over (ADR-0004/RISK-001).
 			resp["sync_fail_count"] = status.SyncFailCount
 			resp["sync_max_fail"] = haStandbyMaxFail
+			// CHAOS-25: a locally faulted round is NOT a leader-unreachable
+			// failure and never promotes, so it is reported separately —
+			// without it, a standby whose apply path faults every round shows
+			// sync_fail_count=0 and reads as perfectly healthy while its state
+			// is frozen and silently diverging from the leader.
+			resp["sync_round_faults"] = status.SyncRoundFaults
 			if status.LastSyncOK != "" {
 				resp["last_sync_ok"] = status.LastSyncOK
 			}

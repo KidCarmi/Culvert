@@ -59,6 +59,11 @@ type counters struct {
 	admissionRejected  atomic.Int64
 	shutdownCancels    atomic.Int64
 	observeDrops       atomic.Int64
+	// sweepPanics counts session-sweeper rounds contained by the CHAOS-25 guard
+	// (see Listener.sweepRound). Zero in a healthy process; non-zero means the
+	// listener is up but session/binding expiry is faulting, so sessions may be
+	// outliving their TTL.
+	sweepPanics atomic.Int64
 }
 
 func (c *counters) setPhase(p Phase) { c.phase.Store(uint32(p)) }
@@ -85,6 +90,7 @@ type HealthSnapshot struct {
 	AdmissionRejected  int64
 	ShutdownCancels    int64
 	ObserveDrops       int64
+	SweepPanics        int64
 }
 
 func (c *counters) snapshot(capability, listenerID string) HealthSnapshot {
@@ -98,5 +104,6 @@ func (c *counters) snapshot(capability, listenerID string) HealthSnapshot {
 		Timeouts: c.timeouts.Load(), AuthFailures: c.authFailures.Load(),
 		HostOriginFailures: c.hostOriginFailures.Load(), AdmissionRejected: c.admissionRejected.Load(),
 		ShutdownCancels: c.shutdownCancels.Load(), ObserveDrops: c.observeDrops.Load(),
+		SweepPanics: c.sweepPanics.Load(),
 	}
 }

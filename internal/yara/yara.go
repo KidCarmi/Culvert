@@ -611,10 +611,42 @@ func yaraTimeoutResult(timeout time.Duration, pattern string) bool {
 	return GetOnTimeout() != FailOpenWithAlert
 }
 
+// yaraPanicResult is the posture-controlled decision for a match round that
+// PANICKED (CHAOS-25). A panicking match produced no verdict — epistemically
+// the same state as a timeout — so it takes the on_timeout posture: fail closed
+// (treat as suspicious) unless the admin explicitly chose fail_open_with_alert.
+// Returning "no match" instead would turn an engine fault into a silent clean
+// verdict, which is exactly the fail-open-in-silence class this posture exists
+// to prevent.
+//
+// The pattern is deliberately NOT logged here. The panic may itself be a nil or
+// corrupt *Regexp, and (*Regexp).String() on such a value panics AGAIN — this
+// time inside the recovery path, where nothing is left to contain it, killing
+// the process the guard exists to protect. obs.SafeCall has already routed the
+// panic value and stack to the crash pipeline (culvert_crash_records_total
+// {component="yara"}), which is where the detail belongs.
+func yaraPanicResult() bool {
+	obs.Warnf("YARA: regex match faulted and was contained — applying the on_timeout posture " +
+		"(fail-closed unless the admin selected fail_open_with_alert); see the crash record for detail")
+	return GetOnTimeout() != FailOpenWithAlert
+}
+
+// matchGuarded runs the match under a panic guard so a fault in the regexp
+// engine cannot terminate an in-line security gateway. The guard is on the
+// CALL, not the goroutine: the goroutine's only job is this one match, and it
+// must always deliver a verdict on ch — a guard that let it return silently
+// would park the caller until the full timeout elapsed on every scan.
+func matchGuarded(re *regexp.Regexp, data []byte) (result bool) {
+	if obs.SafeCall("yara", func() { result = re.Match(data) }) {
+		return yaraPanicResult()
+	}
+	return result
+}
+
 // matchRegexWithTimeout runs re.Match(data) in a goroutine. Returns true
-// (fail-closed / suspicious) when the match does not complete within timeout
-// or when the inflight cap is reached, unless the admin has explicitly chosen
-// fail_open_with_alert for that posture.
+// (fail-closed / suspicious) when the match does not complete within timeout,
+// when the match faults, or when the inflight cap is reached — unless the admin
+// has explicitly chosen fail_open_with_alert for that posture.
 // Abandoned goroutines are tracked via yaraInflight to prevent unbounded leaks.
 func matchRegexWithTimeout(re *regexp.Regexp, data []byte, timeout time.Duration) bool {
 	inflight := yaraInflight.Load()
@@ -626,7 +658,7 @@ func matchRegexWithTimeout(re *regexp.Regexp, data []byte, timeout time.Duration
 	yaraInflight.Add(1)
 	go func() {
 		defer yaraInflight.Add(-1)
-		ch <- re.Match(data)
+		ch <- matchGuarded(re, data)
 	}()
 	select {
 	case matched := <-ch:

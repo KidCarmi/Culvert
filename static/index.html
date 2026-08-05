@@ -15228,6 +15228,9 @@ function renderDiagnoseCluster(d) {
   rows.push(['Enrolled nodes', escHtml(String(d.nodes_connected || 0)) + '/' + escHtml(String(d.nodes_total || 0)) + ' connected']);
   if (d.role === 'standby') {
     rows.push(['Sync failures', escHtml(String(d.sync_fail_count || 0))]);
+    if (d.sync_round_faults) {
+      rows.push(['Sync round faults', '<span style="color:#ef4444">' + escHtml(String(d.sync_round_faults)) + ' (state STALE)</span>']);
+    }
     if (d.last_sync_ok) rows.push(['Last sync OK', escHtml(String(d.last_sync_ok))]);
   }
   const body = rows.map(r => '<tr><td class="hint">' + r[0] + '</td><td>' + r[1] + '</td></tr>').join('');
@@ -17240,8 +17243,16 @@ async function loadHA(isCP) {
         // escHtml on the interpolated fields: they come from another cluster
         // node's status payload - never render peer-supplied data unescaped.
         const lastOk = r.last_sync_ok ? `<br><span style="font-size:.65rem;color:var(--muted)">last ok ${escHtml(timeAgo(new Date(r.last_sync_ok)))}</span>` : '';
+        // CHAOS-25: contained sync-round faults are a DIFFERENT condition from
+        // sync failures - they never promote, and they mean this node cannot
+        // apply state (frozen, silently diverging) even while the leader is
+        // reachable. Shown separately so it is never read as "0 failures = OK".
+        const roundFaults = r.sync_round_faults || 0;
+        const faults = roundFaults > 0
+          ? `<br><span style="font-size:.65rem;color:#ef4444">${escHtml(String(roundFaults))} sync round fault(s) - state is STALE, not promoting</span>`
+          : '';
         document.getElementById('ha-sync-val').innerHTML =
-          `<span style="color:${syncColor}">${escHtml(String(failCount))}/${escHtml(String(r.sync_max_fail))} failed</span>${lastOk}`;
+          `<span style="color:${syncColor}">${escHtml(String(failCount))}/${escHtml(String(r.sync_max_fail))} failed</span>${lastOk}${faults}`;
       } else {
         syncCard.style.display = 'none';
         syncNote.style.display = 'none';
