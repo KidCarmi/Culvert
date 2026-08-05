@@ -83,6 +83,22 @@ func TestMCPUX8_DeepLinks(t *testing.T) {
 		t.Fatalf("server drawer must re-open from the route: %v | %v", err, e2)
 	}
 
+	// (5b) A tool deep link resolves by (server, name): two servers in one tenant may
+	// expose the same tool name, so the route's server must disambiguate and never
+	// open the wrong server's fingerprint.
+	sameName := `[{"server_id":"srv-alpha","name":"shared","fingerprint":"sha256:fp-alpha-aaa","disposition":"usable","revision":1},` +
+		`{"server_id":"srv-beta","name":"shared","fingerprint":"sha256:fp-beta-bbb","disposition":"usable","revision":1}]`
+	var e2b []string
+	p2b := ux8Page(t, browser, srv.URL, RoleAdmin, &ux7Cfg{tools: sameName}, "/#mcp/servers?tenant=acme&drawer=tool&server=srv-beta&tool=shared", &e2b)
+	// The drawer shows the full server id + the truncated fingerprint (…-bbb); the
+	// route resolved the srv-beta tool, never srv-alpha's same-named tool.
+	if err := assert.Locator(p2b.Locator("#mcpx-inv-drawer")).ToContainText("srv-beta", playwright.LocatorAssertionsToContainTextOptions{Timeout: playwright.Float(6000)}); err != nil {
+		t.Fatalf("tool deep link must open the server-scoped tool: %v | %v", err, e2b)
+	}
+	if txt, _ := p2b.Locator("#mcpx-inv-drawer").TextContent(); strings.Contains(txt, "srv-alpha") || strings.Contains(txt, "-aaa") {
+		t.Fatalf("tool deep link must not open the other server's same-named tool: %q", txt)
+	}
+
 	// (3) A selected entity that no longer exists is truthful, and no other entity
 	// is silently selected.
 	var e3 []string
@@ -119,7 +135,7 @@ func TestMCPUX8_DeepLinks(t *testing.T) {
 		t.Fatalf("unknown slug must fall back to the default view without throwing: %v", err)
 	}
 
-	for i, e := range [][]string{e1, e2, e3, e4, e5, e6} {
+	for i, e := range [][]string{e1, e2, e2b, e3, e4, e5, e6} {
 		if len(e) != 0 {
 			t.Fatalf("page %d threw exceptions: %v", i+1, e)
 		}

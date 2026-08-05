@@ -18051,13 +18051,16 @@ function mcpxViewAutoLoad(name){
 // executes an action; never throws.
 async function mcpxApplyRoute(route){
   if(!route || !route.view) return;
+  // The guard is held ONLY around the SYNCHRONOUS preseed + switchView (so that one
+  // switchView does not re-push the route or auto-load). It is cleared BEFORE the
+  // async entity load, so a nav click during an in-flight restore is a normal user
+  // navigation again (its loader + URL sync + hash cleanup run). mcpxRestoreRoute
+  // calls loaders directly, never switchView, so it needs no suppression.
   mcpxRouteApplying=true;
-  try{
-    mcpxPreseedRoute(route.slug, route.params||{});
-    if(typeof switchView==='function') switchView(route.view);
-    await mcpxRestoreRoute(route.slug, route.params||{});
-  }catch(_){ /* restore must fail safe, never throw */ }
+  try{ mcpxPreseedRoute(route.slug, route.params||{}); if(typeof switchView==='function') switchView(route.view); }
   finally{ mcpxRouteApplying=false; }
+  try{ await mcpxRestoreRoute(route.slug, route.params||{}); }
+  catch(_){ /* restore must fail safe, never throw */ }
 }
 // mcpxPreseedRoute: set input values + capability state BEFORE the loader runs.
 // Capability is set DIRECTLY (never via mcpxPolSelectCap) so restore never triggers
@@ -18088,7 +18091,7 @@ async function mcpxRestoreRoute(slug, p){
   else if(slug==='servers'){
     if(!mcpxInvTenant()) return; await mcpxInvLoad();
     if(p.drawer==='server' && p.server){ var sv=mcpxRouteFindServer(p.server); if(sv) mcpxInvOpenServer(sv); else mcpxRouteMiss('mcpx-inv-src','Server "'+p.server+'" is no longer in this tenant inventory.'); }
-    else if(p.drawer==='tool' && p.tool){ var tl=mcpxRouteFindTool(p.tool); if(tl) mcpxInvOpenTool(tl); else mcpxRouteMiss('mcpx-inv-src','Tool "'+p.tool+'" is no longer in this tenant inventory.'); }
+    else if(p.drawer==='tool' && p.tool){ var tl=mcpxRouteFindTool(p.server, p.tool); if(tl) mcpxInvOpenTool(tl); else mcpxRouteMiss('mcpx-inv-src','Tool "'+p.tool+'" is no longer in this tenant inventory.'); }
   }
   else if(slug==='policy'){ mcpxPolRefreshActive(); }
   else if(slug==='approvals'){
@@ -18102,7 +18105,11 @@ async function mcpxRestoreRoute(slug, p){
   else if(slug==='settings'){ mcpxCfgLoad(); }
 }
 function mcpxRouteFindServer(id){ var a=(mcpxInvData&&Array.isArray(mcpxInvData.srv))?mcpxInvData.srv:[]; for(var i=0;i<a.length;i++){ if(a[i] && a[i].server_id===id) return a[i]; } return null; }
-function mcpxRouteFindTool(name){ var a=(mcpxInvData&&Array.isArray(mcpxInvData.tool))?mcpxInvData.tool:[]; for(var i=0;i<a.length;i++){ if(a[i] && a[i].name===name) return a[i]; } return null; }
+// Tool identity is (server_id, name): two servers in one tenant can expose the same
+// tool name (internal/mcp/catalog TestSameNameDifferentServersDistinct), so a
+// name-only match could open the wrong server's fingerprint/disposition. When the
+// route carries a server, require BOTH; without it, fall back to name-only.
+function mcpxRouteFindTool(server, name){ var a=(mcpxInvData&&Array.isArray(mcpxInvData.tool))?mcpxInvData.tool:[]; for(var i=0;i<a.length;i++){ if(a[i] && a[i].name===name && (!server || a[i].server_id===server)) return a[i]; } return null; }
 function mcpxRouteMiss(nodeId, msg){ var e=document.getElementById(nodeId); if(e){ var s=mcpxEl('span','mcpx-route-miss', ' '+msg); e.appendChild(s); } }
 
 function mcpxFilterKeyLabel(k){
