@@ -625,6 +625,34 @@ table.mcpx-rf-acks td{padding:6px 10px;border-bottom:1px solid var(--border);whi
 .mcpx-rf-editor:focus{border-color:var(--accent);box-shadow:var(--focus-ring);outline:none}
 .mcpx-rf-diff{margin-top:10px}
 .mcpx-rf-diff .add{color:var(--ok)}.mcpx-rf-diff .rem{color:var(--crit)}
+.mcpx-qual-bar{display:flex;align-items:center;gap:10px;padding:2px 0}
+.mcpx-qual-track{flex:1;height:7px;background:var(--surface2);border:1px solid var(--border);border-radius:999px;overflow:hidden;min-width:120px}
+.mcpx-qual-fill{height:100%;background:var(--muted);border-radius:999px}
+.mcpx-qual-fill.met{background:var(--ok)}
+.mcpx-qual-fill.synthetic{background:repeating-linear-gradient(45deg,var(--warn),var(--warn) 5px,var(--surface2) 5px,var(--surface2) 10px)}
+.mcpx-qual-barlbl{font-size:.7rem;color:var(--muted);white-space:nowrap}
+.mcpx-qual-unsup{margin:6px 0 0;padding-left:18px}
+.mcpx-qual-unsup li{font-size:.74rem;color:var(--muted);margin:2px 0}
+.mcpx-qual-syn{font-size:.68rem;color:var(--warn);font-weight:700}
+table.mcpx-qual-tbl{width:100%;border-collapse:collapse;font-size:.74rem;margin-top:10px}
+table.mcpx-qual-tbl th{text-align:left;font-size:.58rem;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);font-weight:700;padding:6px 10px;border-bottom:1px solid var(--border)}
+table.mcpx-qual-tbl td{padding:6px 10px;border-bottom:1px solid var(--border);white-space:nowrap}
+table.mcpx-qual-tbl td.mcpx-qual-wrapcell{white-space:normal}
+.mcpx-appr-filters{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0}
+table.mcpx-appr-tbl{width:100%;border-collapse:collapse;font-size:.74rem;margin-top:6px}
+table.mcpx-appr-tbl th{text-align:left;font-size:.58rem;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);font-weight:700;padding:6px 10px;border-bottom:1px solid var(--border)}
+table.mcpx-appr-tbl td{padding:6px 10px;border-bottom:1px solid var(--border);white-space:nowrap}
+table.mcpx-appr-tbl tr.mcpx-appr-row{cursor:pointer}
+table.mcpx-appr-tbl tr.mcpx-appr-row:hover{background:var(--surface2)}
+table.mcpx-appr-tbl tr.mcpx-appr-row.sel{background:var(--surface2)}
+table.mcpx-appr-tbl tr.mcpx-appr-row:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.mcpx-appr-kind{font-size:.6rem;text-transform:uppercase;letter-spacing:.05em;font-weight:700;padding:1px 6px;border-radius:6px;border:1px solid var(--border)}
+.mcpx-appr-kind.publication{color:var(--accent)}
+.mcpx-appr-sec{margin:10px 0 0}
+.mcpx-appr-sec h5{margin:0 0 4px;font-size:.62rem;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.mcpx-appr-unavail{color:var(--warn);font-size:.74rem;font-weight:600}
+.mcpx-actwrap.drawer-open table.mcpx-appr-tbl{width:calc(100% - 372px)}
+.mcpx-drawer-body dl.mcpx-rf-dl{margin-bottom:2px}
 </style>
 </head>
 <body>
@@ -3621,11 +3649,33 @@ Firefox (all platforms):
     </div>
     <div class="view" id="view-mcp-approvals">
       <div class="panel"><h3>MCP Approvals</h3>
-        <label>Tenant <input id="mcp-appr-tenant" placeholder="tenant" /></label>
-        <button class="btn" data-click="loadMCPApprovals">Load approvals</button>
-        <div id="mcp-approvals-status" class="muted"></div>
-        <div id="mcp-approvals-list"></div>
-        <div id="mcp-approval-dialog" style="display:none;border:1px solid var(--border,#ccc);padding:10px;margin-top:10px"></div>
+        <p class="muted">One list for operational and publication approvals. Each item keeps its real kind and state. Decisions are four-eyes (a requester may not approve their own request) and require durable event storage; publication of an approved candidate is a separate step from approving it.</p>
+        <div class="mcpx-rf-bar">
+          <label>Tenant <input id="mcp-appr-tenant" placeholder="tenant" /></label>
+          <button class="btn sm" data-click="mcpxApprLoad">Load</button>
+          <span id="mcpx-appr-asof" class="mcpx-asof"></span>
+        </div>
+        <div class="mcpx-appr-filters" role="tablist" aria-label="Approval filter">
+          <button type="button" class="mcpx-rf-captab active" data-click="mcpxApprSetFilter" data-arg="all" role="tab" aria-selected="true">All</button>
+          <button type="button" class="mcpx-rf-captab" data-click="mcpxApprSetFilter" data-arg="operational" role="tab" aria-selected="false">Operational</button>
+          <button type="button" class="mcpx-rf-captab" data-click="mcpxApprSetFilter" data-arg="publication" role="tab" aria-selected="false">Publication</button>
+          <button type="button" class="mcpx-rf-captab" data-click="mcpxApprSetFilter" data-arg="pending" role="tab" aria-selected="false">Pending</button>
+          <button type="button" class="mcpx-rf-captab" data-click="mcpxApprSetFilter" data-arg="approved" role="tab" aria-selected="false">Approved</button>
+          <button type="button" class="mcpx-rf-captab" data-click="mcpxApprSetFilter" data-arg="rejected" role="tab" aria-selected="false">Rejected</button>
+          <button type="button" class="mcpx-rf-captab" data-click="mcpxApprSetFilter" data-arg="expired" role="tab" aria-selected="false">Expired</button>
+        </div>
+        <div id="mcpx-appr-src" class="muted" aria-live="polite"></div>
+        <div class="mcpx-actwrap has-drawer" id="mcpx-appr-wrap">
+          <div id="mcpx-appr-root" aria-live="polite"></div>
+          <div class="mcpx-drawer" id="mcpx-appr-drawer" tabindex="-1" role="region" aria-label="approval detail"></div>
+        </div>
+        <details class="mcpx-legacy">
+          <summary>Raw diagnostics &amp; legacy operational list</summary>
+          <button class="btn" data-click="loadMCPApprovals">Load (legacy operational list)</button>
+          <div id="mcp-approvals-status" class="muted"></div>
+          <div id="mcp-approvals-list"></div>
+          <div id="mcp-approval-dialog" style="display:none;border:1px solid var(--border,#ccc);padding:10px;margin-top:10px"></div>
+        </details>
       </div>
     </div>
     <div class="view" id="view-mcp-health">
@@ -5044,6 +5094,9 @@ document.addEventListener('click', e => {
     case 'loadMCPApprovals':  loadMCPApprovals(); break;
     case 'mcpApproveReq':     mcpApprovalDecide(arg, 'approve'); break;
     case 'mcpRejectReq':      mcpApprovalDecide(arg, 'reject'); break;
+    case 'mcpxApprLoad':      mcpxApprLoad(); break;
+    case 'mcpxApprSetFilter': mcpxApprSetFilter(arg); break;
+    case 'mcpxApprCloseDrawer': mcpxApprCloseDrawer(); break;
     case 'loadMCPHealth':     loadMCPHealth(); break;
     case 'loadMCPDistribution': loadMCPDistribution(); break;
     case 'loadMCPRollout':    loadMCPRollout(); break;
@@ -5843,7 +5896,7 @@ function switchView(name) {
   if (name === 'mcp-rollout')    mcpxRenderRolloutFleet();
   if (name === 'mcp-decisions')  { renderMCPActivity(); /* awaits tenant input */ }
   if (name === 'mcp-policies')   loadMCPPolicy();
-  if (name === 'mcp-approvals')  { /* awaits tenant input */ }
+  if (name === 'mcp-approvals')  { if (mcpxApprTenant()) mcpxApprLoad(); /* else awaits tenant input */ }
   if (name === 'mcp-health')     loadMCPHealth();
   if (name === 'mcp-management') loadMCPManagement();
   if (name === 'mcp-settings')   loadMCPConfig();
@@ -18386,7 +18439,10 @@ function mcpxPaintTool(drawer, frame){
 }
 
 document.addEventListener('keydown', function(e){
-  if(e.key==='Escape'){ var od=document.getElementById('mcpx-drawer'); if(mcpxFrames.length && od && od.classList.contains('open')){ mcpxPopFrame(); return; } }
+  if(e.key==='Escape'){
+    var ad=document.getElementById('mcpx-appr-drawer'); if(ad && ad.classList.contains('open')){ mcpxApprCloseDrawer(); return; }
+    var od=document.getElementById('mcpx-drawer'); if(mcpxFrames.length && od && od.classList.contains('open')){ mcpxPopFrame(); return; }
+  }
   if(e.key!=='Enter' && e.key!==' ') return;
   var tr=e.target && e.target.closest && e.target.closest('table.mcpx-act tbody tr'); if(!tr) return;
   e.preventDefault(); mcpxOpenDecision(tr.dataset.arg);
@@ -19049,6 +19105,94 @@ function mcpxRfActionsCard(cap, roll, capDist){
   return card;
 }
 
+// ── PR-UX-6 Production Qualification evidence card ─────────────────────────
+// Truthful measured-evidence rendering. Every value comes from the real evidence
+// DTO; a synthetic origin is always marked non-qualifying (never shown met); a
+// window that never started renders "Not started" (never an empty green bar); a
+// failed read renders the whole card unavailable (the ticket re-render never
+// preserves a stale green). Production stays LOCKED regardless of any met row.
+var mcpxQualStateText={met:'met', not_met:'not met', not_started:'not started', synthetic_non_qualifying:'synthetic - does not qualify', unavailable:'unavailable', not_applicable:'recorded (no threshold)'};
+var mcpxQualStateCls={met:'ok', not_met:'warn', not_started:'muted', synthetic_non_qualifying:'warn', unavailable:'warn', not_applicable:'muted'};
+function mcpxRfFmtDur(sec){
+  sec=Math.max(0, Math.floor(sec||0));
+  var d=Math.floor(sec/86400); sec-=d*86400;
+  var h=Math.floor(sec/3600); sec-=h*3600;
+  var m=Math.floor(sec/60);
+  var parts=[];
+  if(d) parts.push(d+'d');
+  if(h) parts.push(h+'h');
+  if(m && !d) parts.push(m+'m');
+  if(!parts.length) parts.push('0m');
+  return parts.join(' ');
+}
+function mcpxRfQualBar(rq){
+  var wrap=mcpxEl('div','mcpx-qual-bar');
+  if(!rq.start_unix){ wrap.appendChild(mcpxEl('span','mcpx-rf-dd-muted','Not started')); return wrap; }
+  var tgt=Math.max(1, rq.target_seconds||1);
+  var pct=Math.max(0, Math.min(100, Math.round((rq.measured_seconds/tgt)*100)));
+  var track=mcpxEl('div','mcpx-qual-track');
+  var syn=rq.state==='synthetic_non_qualifying';
+  var fill=mcpxEl('div','mcpx-qual-fill'+(syn?' synthetic':(rq.state==='met'?' met':'')));
+  fill.style.width=pct+'%';
+  fill.setAttribute('role','progressbar'); fill.setAttribute('aria-valuenow',String(pct));
+  fill.setAttribute('aria-valuemin','0'); fill.setAttribute('aria-valuemax','100');
+  fill.setAttribute('aria-label',(rq.label||'')+': '+pct+'% of floor'+(syn?' (synthetic, does not qualify)':''));
+  track.appendChild(fill); wrap.appendChild(track);
+  wrap.appendChild(mcpxEl('span','mcpx-qual-barlbl', mcpxRfFmtDur(rq.measured_seconds)+' / '+mcpxRfFmtDur(rq.target_seconds)));
+  if(syn){ wrap.appendChild(mcpxEl('span','mcpx-qual-syn','Synthetic - does not qualify')); }
+  return wrap;
+}
+function mcpxRfQualCard(cap, ev){
+  var card=mcpxRfCard('Production Qualification - '+cap, 'Measured evidence only. A met requirement does not qualify Production. This build ships no qualification issuer, so Production stays locked.');
+  if(mcpxRfErr(ev)){ card.appendChild(mcpxEl('div','mcpx-empty','Qualification evidence unavailable - '+ev.__err+'.')); return card; }
+  var chips=mcpxEl('div','mcpx-btnrow');
+  chips.appendChild(mcpxChip('Production: LOCKED','warn'));
+  chips.appendChild(mcpxChip('External qualification required','muted'));
+  chips.appendChild(mcpxChip('origin: '+(ev.origin||'unset'), ev.origin==='synthetic'?'warn':'muted'));
+  card.appendChild(chips);
+  var dl=mcpxRfDL();
+  mcpxRfKv(dl, 'Mode', ev.mode||'-');
+  mcpxRfKv(dl, 'As of', mcpxRfFmtNano(ev.as_of_unix_nano));
+  card.appendChild(dl);
+  card.appendChild(mcpxEl('div','mcpx-rf-dd-muted', ev.lock_reason||'External qualification required.'));
+  var tbl=mcpxEl('table','mcpx-qual-tbl');
+  var thead=mcpxEl('thead'), htr=mcpxEl('tr');
+  ['Requirement','Measurement','Target','State','Origin','Next action'].forEach(function(h){ htr.appendChild(mcpxEl('th',null,h)); });
+  thead.appendChild(htr); tbl.appendChild(thead);
+  var tb=mcpxEl('tbody');
+  (ev.requirements||[]).forEach(function(rq){
+    var tr=mcpxEl('tr');
+    tr.appendChild(mcpxEl('td',null, rq.label||rq.key));
+    var meas='-';
+    if(rq.measured_seconds!=null){ meas=rq.start_unix?mcpxRfFmtDur(rq.measured_seconds):'not started'; }
+    else if(rq.count!=null){ meas=String(rq.count); }
+    tr.appendChild(mcpxEl('td',null, meas));
+    tr.appendChild(mcpxEl('td',null, rq.target_seconds!=null?mcpxRfFmtDur(rq.target_seconds):'-'));
+    var stTd=mcpxEl('td'); var stTxt=mcpxQualStateText[rq.state]||rq.state;
+    var stChip=mcpxChip(stTxt, mcpxQualStateCls[rq.state]||'muted');
+    stChip.setAttribute('aria-label','state: '+stTxt);
+    stTd.appendChild(stChip); tr.appendChild(stTd);
+    tr.appendChild(mcpxEl('td',null, rq.origin||'-'));
+    var naTd=mcpxEl('td','mcpx-qual-wrapcell', rq.next_action||'-'); tr.appendChild(naTd);
+    tb.appendChild(tr);
+    if(rq.target_seconds!=null && rq.measured_seconds!=null){
+      var barTr=mcpxEl('tr'); var barTd=mcpxEl('td','mcpx-qual-wrapcell'); barTd.colSpan=6;
+      barTd.appendChild(mcpxRfQualBar(rq)); barTr.appendChild(barTd); tb.appendChild(barTr);
+    }
+  });
+  tbl.appendChild(tb); card.appendChild(tbl);
+  var s=ev.summary||{};
+  card.appendChild(mcpxEl('div','mcpx-rf-dd-muted','Measured requirements: '+(s.measured_total||0)+' total, '+(s.met||0)+' met, '+(s.not_met||0)+' not met, '+(s.not_started||0)+' not started, '+(s.synthetic_non_qualifying||0)+' synthetic non-qualifying, '+(s.unavailable||0)+' unavailable. This is not a qualification decision.'));
+  if(ev.unsupported_categories && ev.unsupported_categories.length){
+    var det=mcpxEl('details'); det.appendChild(mcpxEl('summary',null,'Not represented by this runtime evidence source'));
+    var ul=mcpxEl('ul','mcpx-qual-unsup');
+    ev.unsupported_categories.forEach(function(c){ ul.appendChild(mcpxEl('li',null,c)); });
+    det.appendChild(ul); card.appendChild(det);
+  }
+  card.appendChild(mcpxEl('div','mcpx-source','From /api/mcp/rollout/evidence. A met requirement does not qualify Production; this build ships no issuer.'));
+  return card;
+}
+
 async function mcpxRenderRolloutFleet(){
   var root=document.getElementById('mcpx-rf-root'); if(!root) return;
   var cap=mcpxRfCap();
@@ -19064,16 +19208,260 @@ async function mcpxRenderRolloutFleet(){
   var hash=capDist.current_hash||'';
   var acks=await mcpxRfFetch('/api/mcp/distribution/acks?capability='+encodeURIComponent(cap)+(hash?('&content_hash='+encodeURIComponent(hash)):''));
   if(myTicket!==mcpxRfTicket) return;   // a newer capability selection supersedes this render
+  var evid=await mcpxRfFetch('/api/mcp/rollout/evidence?capability='+encodeURIComponent(cap));
+  if(myTicket!==mcpxRfTicket) return;
   root.textContent='';
   var cards=mcpxEl('div','mcpx-cards2'); cards.style.display='grid'; cards.style.gap='16px';
   cards.appendChild(mcpxRfModeCard(cap, roll, dist, acks));
   cards.appendChild(mcpxRfScopeCard(cap, scope));
   cards.appendChild(mcpxRfFleetCard(cap, dist, capDist, acks));
+  cards.appendChild(mcpxRfQualCard(cap, evid));
   cards.appendChild(mcpxRfCandidateCard(cap));
   cards.appendChild(mcpxRfActionsCard(cap, roll, capDist));
   root.appendChild(cards);
   applySessionRoleVisibilityScope('#mcpx-rf-root'); // hide admin-only Actions for viewers
   var asof=document.getElementById('mcpx-rf-asof'); if(asof) asof.textContent='as of '+mcpxNow();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PR-UX-6 unified approvals
+// One structured list combining operational (/api/mcp/approvals) and publication
+// (/api/mcp/publications) approvals. Each source has an INDEPENDENT state; a failed
+// source is shown as unavailable and NEVER erases the other (a failed source is never
+// substituted with an empty array). Decisions run through the PR-UX-4 danger dialog
+// and are classified truthfully: a durability failure (503) is NOT approved/rejected/
+// pending - the request keeps its prior authoritative state. Approving a publication
+// is a separate step from publishing it (publication is unavailable in this runtime).
+// All server-derived text is set via textContent only.
+// ═══════════════════════════════════════════════════════════════════════════
+var mcpxApprTicket=0, mcpxApprFilter='all', mcpxApprData={op:null,pub:null,tenant:''}, mcpxApprOpener=null;
+function mcpxApprTenant(){ var e=document.getElementById('mcp-appr-tenant'); return ((e&&e.value)||'').trim(); }
+async function mcpxApprFetchList(url){
+  try{
+    var r=await fetch(url,{credentials:'same-origin',headers:{'X-CSRF-Token':(window.csrfToken||'')}});
+    if(r.status===403) return {ok:false, err:'permission denied'};
+    if(!r.ok) return {ok:false, err:'unavailable (HTTP '+r.status+')'};
+    var j=await r.json();
+    return {ok:true, items:Array.isArray(j)?j:[]};
+  }catch(e){ return {ok:false, err:'unavailable (request failed)'}; }
+}
+async function mcpxApprLoad(){
+  var root=document.getElementById('mcpx-appr-root'); if(!root) return;
+  var t=mcpxApprTenant(), src=document.getElementById('mcpx-appr-src');
+  mcpxApprCloseDrawer();
+  if(!t){ root.textContent=''; if(src) src.textContent='Enter a tenant, then Load.'; return; }
+  var myTicket=++mcpxApprTicket;
+  root.textContent=''; root.appendChild(mcpxEl('div','mcpx-source','Loading approvals for '+t+'…'));
+  var op=await mcpxApprFetchList('/api/mcp/approvals?tenant='+encodeURIComponent(t));
+  if(myTicket!==mcpxApprTicket) return;
+  var pub=await mcpxApprFetchList('/api/mcp/publications?tenant='+encodeURIComponent(t));
+  if(myTicket!==mcpxApprTicket) return;   // a newer Load supersedes this render
+  mcpxApprData={op:op, pub:pub, tenant:t};
+  mcpxApprRender();
+  var asof=document.getElementById('mcpx-appr-asof'); if(asof) asof.textContent='as of '+mcpxNow();
+}
+function mcpxApprSetFilter(f){
+  mcpxApprFilter=f;
+  Array.prototype.forEach.call(document.querySelectorAll('.mcpx-appr-filters .mcpx-rf-captab'), function(t){
+    var on=t.dataset.arg===f; t.classList.toggle('active',on); t.setAttribute('aria-selected', on?'true':'false');
+  });
+  mcpxApprRender();
+}
+function mcpxApprItems(){
+  var out=[];
+  if(mcpxApprData.op && mcpxApprData.op.ok){ mcpxApprData.op.items.forEach(function(a){ out.push(a); }); }
+  if(mcpxApprData.pub && mcpxApprData.pub.ok){ mcpxApprData.pub.items.forEach(function(a){ out.push(a); }); }
+  return out;
+}
+function mcpxApprMatches(a){
+  switch(mcpxApprFilter){
+    case 'operational': return a.kind==='operational';
+    case 'publication': return a.kind==='publication';
+    case 'pending': return a.state==='pending';
+    case 'approved': return a.state==='approved';
+    case 'rejected': return a.state==='rejected';
+    case 'expired': return a.state==='expired';
+    default: return true;
+  }
+}
+function mcpxApprSrcLine(){
+  var parts=[], op=mcpxApprData.op, pub=mcpxApprData.pub;
+  if(op){ parts.push(op.ok ? ('Operational: '+op.items.length) : ('Operational approvals unavailable ('+op.err+')')); }
+  if(pub){ parts.push(pub.ok ? ('Publication: '+pub.items.length) : ('Publication approvals unavailable ('+pub.err+')')); }
+  return parts.join(' · ');
+}
+function mcpxApprRender(){
+  var root=document.getElementById('mcpx-appr-root'); if(!root) return;
+  var src=document.getElementById('mcpx-appr-src'); if(src) src.textContent=mcpxApprSrcLine();
+  root.textContent='';
+  var items=mcpxApprItems().filter(mcpxApprMatches);
+  items.sort(function(a,b){ return (b.created_unix_nano||0)-(a.created_unix_nano||0); });
+  var opFail=mcpxApprData.op && !mcpxApprData.op.ok, pubFail=mcpxApprData.pub && !mcpxApprData.pub.ok;
+  if(!items.length){
+    root.appendChild(mcpxEl('div','mcpx-empty', (opFail||pubFail) ? 'No approvals in the available source. See the status line for the unavailable source.' : 'No approvals.'));
+    return;
+  }
+  var tbl=mcpxEl('table','mcpx-appr-tbl');
+  var thead=mcpxEl('thead'), htr=mcpxEl('tr');
+  ['Kind','State','Capability','Requester','Action / candidate','Risk','Expiry'].forEach(function(h){ htr.appendChild(mcpxEl('th',null,h)); });
+  thead.appendChild(htr); tbl.appendChild(thead);
+  var tb=mcpxEl('tbody');
+  items.slice(0,500).forEach(function(a){
+    var tr=mcpxEl('tr','mcpx-appr-row'); tr.tabIndex=0; tr.dataset.arg=a.id;
+    var kindTd=mcpxEl('td'); kindTd.appendChild(mcpxEl('span','mcpx-appr-kind'+(a.kind==='publication'?' publication':''), a.kind||'-')); tr.appendChild(kindTd);
+    tr.appendChild(mcpxEl('td',null, a.state||'-'));
+    tr.appendChild(mcpxEl('td',null, a.capability||'-'));
+    tr.appendChild(mcpxEl('td',null, a.requester||'-'));
+    tr.appendChild(mcpxEl('td',null, a.kind==='publication' ? (a.candidate_hash?mcpxShortHash(a.candidate_hash):'(candidate)') : (a.action||'-')));
+    tr.appendChild(mcpxEl('td',null, a.risk_class||a.operation_class||'-'));
+    tr.appendChild(mcpxEl('td',null, a.expiry_unix_nano?mcpxRfFmtNano(a.expiry_unix_nano):'-'));
+    tr.addEventListener('click', function(){ mcpxApprOpenDrawer(a.id); });
+    tr.addEventListener('keydown', function(e){ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); mcpxApprOpenDrawer(a.id); } });
+    tb.appendChild(tr);
+  });
+  tbl.appendChild(tb); root.appendChild(tbl);
+  applySessionRoleVisibilityScope('#mcpx-appr-root');
+}
+function mcpxApprFind(id){
+  var all=mcpxApprItems();
+  for(var i=0;i<all.length;i++){ if(all[i].id===id) return all[i]; }
+  return null;
+}
+function mcpxApprSection(title){ var s=mcpxEl('div','mcpx-appr-sec'); s.appendChild(mcpxEl('h5',null,title)); return s; }
+function mcpxApprOpenDrawer(id){
+  var a=mcpxApprFind(id), drawer=document.getElementById('mcpx-appr-drawer'); if(!a||!drawer) return;
+  mcpxApprOpener=document.activeElement;
+  Array.prototype.forEach.call(document.querySelectorAll('#mcpx-appr-root tr.mcpx-appr-row'), function(x){ x.classList.toggle('sel', x.dataset.arg===id); });
+  drawer.textContent='';
+  var wrap=document.getElementById('mcpx-appr-wrap'); if(wrap) wrap.classList.add('drawer-open');
+  var top=mcpxEl('div','mcpx-drawer-top'), h=mcpxEl('div','mcpx-card-h');
+  h.appendChild(mcpxEl('div','mcpx-card-title', (a.kind==='publication'?'Publication approval':'Operational approval')));
+  var cb=mcpxEl('button','btn ghost sm','Close'); cb.type='button'; cb.setAttribute('data-click','mcpxApprCloseDrawer'); h.appendChild(cb);
+  top.appendChild(h);
+  top.appendChild(mcpxEl('div','mcpx-dh-sub','ID '+mcpxShortHash(a.id)+' · state '+(a.state||'-')));
+  drawer.appendChild(top);
+  var body=mcpxEl('div','mcpx-drawer-body'); body.style.padding='12px 16px';
+  var reqS=mcpxApprSection('Request'), dl=mcpxRfDL();
+  mcpxRfKv(dl,'Kind',a.kind); mcpxRfKv(dl,'State',a.state); mcpxRfKv(dl,'Capability',a.capability);
+  if(a.action) mcpxRfKv(dl,'Action',a.action);
+  if(a.resource) mcpxRfKv(dl,'Resource',a.resource);
+  reqS.appendChild(dl); body.appendChild(reqS);
+  var rqS=mcpxApprSection('Requester'), rdl=mcpxRfDL();
+  mcpxRfKv(rdl,'Requester',a.requester); if(a.approver) mcpxRfKv(rdl,'Approver',a.approver);
+  rqS.appendChild(rdl); body.appendChild(rqS);
+  if(a.server_id||a.tool_fingerprint){
+    var brS=mcpxApprSection('Bound resource'), bdl=mcpxRfDL();
+    if(a.server_id) mcpxRfKv(bdl,'Server',a.server_id);
+    if(a.tool_fingerprint) mcpxRfKvHash(bdl,'Tool fingerprint',a.tool_fingerprint);
+    brS.appendChild(bdl); body.appendChild(brS);
+  }
+  if(a.operation_class||a.risk_class){
+    var roS=mcpxApprSection('Risk and operation'), rodl=mcpxRfDL();
+    if(a.operation_class) mcpxRfKv(rodl,'Operation class',a.operation_class);
+    if(a.risk_class) mcpxRfKv(rodl,'Risk class',a.risk_class);
+    roS.appendChild(rodl); body.appendChild(roS);
+  }
+  if(a.credential_profile_ref||a.power_ceiling){
+    var cS=mcpxApprSection('Credential metadata'), cdl=mcpxRfDL();
+    if(a.credential_profile_ref) mcpxRfKv(cdl,'Profile reference',a.credential_profile_ref);
+    if(a.power_ceiling) mcpxRfKv(cdl,'Power ceiling',a.power_ceiling);
+    cS.appendChild(cdl); body.appendChild(cS);
+  }
+  if(a.candidate_hash||a.base_revision||a.proposed_revision||a.policy_revision||a.catalog_revision){
+    var caS=mcpxApprSection('Candidate and revisions'), cadl=mcpxRfDL();
+    if(a.candidate_hash) mcpxRfKvHash(cadl,'Candidate hash',a.candidate_hash);
+    if(a.base_revision) mcpxRfKv(cadl,'Base revision',a.base_revision);
+    if(a.proposed_revision) mcpxRfKv(cadl,'Proposed revision',a.proposed_revision);
+    if(a.policy_revision) mcpxRfKv(cadl,'Policy revision',a.policy_revision);
+    if(a.catalog_revision) mcpxRfKv(cadl,'Catalog revision',a.catalog_revision);
+    caS.appendChild(cadl);
+    caS.appendChild(mcpxEl('div','mcpx-rf-dd-muted','A candidate hash is a binding reference, not a policy diff.'));
+    body.appendChild(caS);
+  }
+  var tS=mcpxApprSection('Created and expiry'), tdl=mcpxRfDL();
+  mcpxRfKv(tdl,'Created', mcpxRfFmtNano(a.created_unix_nano));
+  mcpxRfKv(tdl,'Expiry', mcpxRfFmtNano(a.expiry_unix_nano));
+  tS.appendChild(tdl); body.appendChild(tS);
+  if(a.decision_event_id){
+    var dS=mcpxApprSection('Decision-event link');
+    var pv=mcpxEl('button','btn sm','Open decision evidence'); pv.type='button';
+    pv.addEventListener('click', function(){ mcpxApprPivotDecision(a.tenant||mcpxApprData.tenant, a.decision_event_id); });
+    dS.appendChild(pv); body.appendChild(dS);
+  }
+  if(a.reason){ var rsS=mcpxApprSection('Decision reason'); rsS.appendChild(mcpxEl('div','mcpx-rf-dd', a.reason)); body.appendChild(rsS); }
+  var actS=mcpxApprSection('Actions');
+  if(a.kind==='publication'){
+    actS.appendChild(mcpxEl('div','mcpx-appr-unavail','Publication unavailable in this runtime: event durability is not enabled, so an approved publication cannot be published from this build. Approving a publication does not publish it.'));
+  }
+  if(a.state==='pending'){
+    var actRow=mcpxEl('div','mcpx-btnrow'); actRow.setAttribute('data-min-role','admin');
+    var apb=mcpxEl('button','btn sm','Approve…'); apb.type='button'; apb.addEventListener('click', function(){ mcpxApprDecide(a,'approve'); }); actRow.appendChild(apb);
+    var rjb=mcpxEl('button','btn sm danger','Reject…'); rjb.type='button'; rjb.addEventListener('click', function(){ mcpxApprDecide(a,'reject'); }); actRow.appendChild(rjb);
+    actS.appendChild(actRow);
+  } else {
+    actS.appendChild(mcpxEl('div','mcpx-rf-dd-muted','This request is '+(a.state||'terminal')+'; no decision control is available.'));
+  }
+  body.appendChild(actS);
+  drawer.appendChild(body);
+  drawer.classList.add('open');
+  applySessionRoleVisibilityScope('#mcpx-appr-drawer');
+  try{ drawer.focus(); }catch(e){}
+}
+function mcpxApprCloseDrawer(){
+  var drawer=document.getElementById('mcpx-appr-drawer'); if(!drawer) return;
+  drawer.classList.remove('open'); drawer.textContent='';
+  var wrap=document.getElementById('mcpx-appr-wrap'); if(wrap) wrap.classList.remove('drawer-open');
+  Array.prototype.forEach.call(document.querySelectorAll('#mcpx-appr-root tr.mcpx-appr-row.sel'), function(x){ x.classList.remove('sel'); });
+  if(mcpxApprOpener && mcpxApprOpener.focus){ try{ mcpxApprOpener.focus(); }catch(e){} }
+}
+function mcpxApprPivotDecision(tenant, eventId){
+  if(!tenant || !eventId) return;
+  mcpxApprCloseDrawer();
+  var te=document.getElementById('mcp-dec-tenant'); if(te) te.value=tenant;
+  if(typeof switchView==='function') switchView('mcp-decisions');
+  mcpxNavBack=[]; mcpxFrames=[]; mcpxDrawerReq++;
+  mcpxNav={tenant:tenant, filter:{}, label:'', selEvent:null};
+  mcpxRenderActivity(function(){ mcpxOpenDecision(eventId); });
+}
+function mcpxApprDecide(a, action){
+  var url = a.kind==='publication' ? '/api/mcp/publication-decision' : '/api/mcp/approval-decision';
+  var destructive = a.risk_class==='destructive' || a.operation_class==='destructive';
+  mcpxDangerDialog({
+    action:'approval', capability:a.capability||'',
+    title:(action==='approve'?'Approve':'Reject')+' '+(a.kind==='publication'?'publication':'operational')+' request',
+    riskChip: action==='approve' ? (destructive?{label:'Destructive action',kind:'crit'}:{label:'Four-eyes approval',kind:'warn'}) : {label:'Reject',kind:'warn'},
+    explain:(action==='approve'?'Grants four-eyes approval for ':'Rejects ')+(a.kind==='publication'?'publication ':'operational ')+'request '+mcpxShortHash(a.id)+' in '+(a.capability||'-')+'. A requester may not approve their own request.'+((action==='approve'&&a.kind==='publication')?' Approval does NOT publish; publication is a separate, currently-unavailable step.':''),
+    facts:[
+      ['Kind', a.kind||'-'],
+      ['Capability', a.capability||'-'],
+      ['Requester', a.requester||'-'],
+      [a.kind==='publication'?'Candidate':'Bound resource', a.kind==='publication'?(a.candidate_hash?mcpxShortHash(a.candidate_hash):'(candidate)'):(a.resource||a.server_id||a.action||'-')],
+      ['Risk', a.risk_class||a.operation_class||'-'],
+      ['Credential power ceiling', a.power_ceiling||'n/a'],
+      ['Four-eyes rule','A requester may not approve their own request (enforced server-side).'],
+      ['Durable behavior','The decision must be durably committed before any state change.'],
+      ['Supported now','Event durability is NOT enabled in this build; the decision is expected to return not-committed (503). Nothing is approved, rejected, or pending-changed unless the appliance confirms it.']
+    ],
+    confirmLabel:(action==='approve'?'Approve request':'Reject request'), confirmStyle:(action==='approve'?'primary':'danger'),
+    request:{ url:url, body:{request_id:a.id, tenant:(a.tenant||mcpxApprData.tenant), action:action, reason:''} },
+    classify:mcpxClassifyApproval(a, action), onDone:function(){ mcpxApprLoad(); }
+  });
+}
+function mcpxClassifyApproval(a, action){
+  return function(status, text){
+    // Self-approval is rejected server-side regardless of the HTTP status the error
+    // maps to (it currently surfaces as 400 approval_self_approval), so key on the
+    // reason token, not the status, to keep the four-eyes message reachable.
+    if(/self_approval/.test(text||'')) return {kind:'crit', title:'Self-approval is not permitted', detail:'A requester may not approve their own request (four-eyes). This decision was rejected server-side; nothing was committed.', retryable:false};
+    if(status===200){
+      return {kind:'success', title:(action==='approve'?'Approved':'Rejected'), detail:'The appliance committed the decision. Refreshing the request to show its authoritative state.'};
+    }
+    if(status===503) return {kind:'crit', title:'Not committed - durability unavailable', detail:'Event durability is not enabled in this build, so the decision was NOT committed. The request keeps its prior authoritative state (not approved, not rejected, not pending-changed). Refreshing to confirm.', retryable:false};
+    if(status===403) return {kind:'crit', title:'Permission denied', detail:'Deciding a request requires the admin role.', retryable:false};
+    if(status===409) return {kind:'crit', title:'Request is terminal', detail:'The request is already decided or expired; it cannot be '+action+'ed. Refreshing to show its authoritative state.', retryable:false};
+    if(status===400) return {kind:'crit', title:'Request rejected', detail:'The appliance rejected the request ('+mcpxReasonText(text)+').', retryable:false};
+    return {kind:'crit', title:'Decision failed', detail:'Unexpected status; the request state is unchanged unless a refresh shows otherwise.', retryable:true};
+  };
 }
 </script>
 </body>

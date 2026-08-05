@@ -10516,7 +10516,17 @@ paths:
       operationId: getMCPRolloutEvidence
       tags: [mcp]
       summary: Rollout evidence-window progress
-      description: Measured evidence-window progress (shadow ≥14d, canary ≥7d, soak ≥24h) with a synthetic/production origin label. Reporting only — never asserts Production qualification, which remains locked behind the separate gate.
+      description: >-
+        Measured Production Qualification evidence read model for a capability: window
+        floors (shadow 14d, canary 7d, soak 24h), zero open critical/high defects, and
+        rollback rehearsal, each with a typed requirement state
+        (met/not_met/not_started/synthetic_non_qualifying/not_applicable), server-computed
+        elapsed seconds, start timestamps, a production/synthetic origin label, a bounded
+        summary, and the broader qualification categories NOT represented by runtime
+        evidence. PR-UX-6 enriches the original response additively (all original keys
+        retained). Reporting only, read-only (no mutation, no window is stamped on read):
+        it never asserts Production qualification, which remains locked behind the
+        separate external gate.
       security: [ { sessionCookie: [] }, { basicAuth: [] } ]
       x-culvert-visibility: admin-supported
       x-culvert-permission: viewer
