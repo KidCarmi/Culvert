@@ -15752,11 +15752,21 @@ function renderReleaseTrustBadge(d) {
   badge.style.background = breakGlass ? 'rgba(239,68,68,.15)' : 'rgba(34,197,94,.15)';
   badge.style.color = breakGlass ? 'var(--red)' : 'var(--green)';
   if (!warn) return;
-  if (!breakGlass) { warn.style.display = 'none'; warn.textContent = ''; return; }
-  const detail = mode === 'disabled'
-    ? 'Signature verification is DISABLED - catalogs load without any authenticity check.'
-    : 'Signature verification is PERMISSIVE - unsigned catalogs are accepted (a present-but-invalid signature is still rejected).';
-  warn.innerHTML = '<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> ' + escHtml(detail) + ' Set CULVERT_RELEASE_CATALOG_VERIFY=enforce (and configure trust roots) to restore full verification.';
+  const lines = [];
+  if (breakGlass) {
+    const detail = mode === 'disabled'
+      ? 'Signature verification is DISABLED - catalogs load without any authenticity check.'
+      : 'Signature verification is PERMISSIVE - unsigned catalogs are accepted (a present-but-invalid signature is still rejected).';
+    lines.push(escHtml(detail) + ' Set CULVERT_RELEASE_CATALOG_VERIFY=enforce (and configure trust roots) to restore full verification.');
+  }
+  // A Sigstore trust override (CULVERT_RELEASE_SIGSTORE_IDENTITY/_TRUSTED_ROOT)
+  // that didn't take effect - previously logged once at startup and otherwise
+  // invisible from the GUI.
+  if (d && d.sigstore_warn) {
+    lines.push(escHtml(d.sigstore_warn));
+  }
+  if (!lines.length) { warn.style.display = 'none'; warn.textContent = ''; return; }
+  warn.innerHTML = '<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> ' + lines.join(' ');
   warn.style.display = '';
 }
 
