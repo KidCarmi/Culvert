@@ -77,8 +77,13 @@ services:
     # Wait for ClamAV to pass its health check before starting the proxy.
     # The proxy still handles transient ClamAV unavailability gracefully
     # (per-request retry), so this just avoids "unreachable" log noise on startup.
+    # Long-form `condition: service_healthy` is required here — the short-form
+    # list (`- clamav`) only waits for the clamav container to START, not for
+    # its healthcheck to pass, which would silently break this comment's
+    # promise during the ~2-5 min first-boot signature-download window.
     depends_on:
-      - clamav
+      clamav:
+        condition: service_healthy
     ports:
       - "8080:8080"   # Proxy (configure browsers / PAC file to point here)
       - "9090:9090"   # Admin Web UI (HTTPS — accept the self-signed cert on first visit)
