@@ -137,8 +137,10 @@ func (c mcpInventoryCounts) Counts(capability string) (servers, quarantined, dri
 		return 0, 0, 0
 	}
 	servers = c.reg.Current().Len()
-	for _, tr := range c.cat.Current().Records() {
-		switch tr.Eligibility {
+	// Index-based range: ToolRecord is a wide struct (gocritic rangeValCopy).
+	tools := c.cat.Current().Records()
+	for i := range tools {
+		switch tools[i].Eligibility {
 		case catalog.Quarantined:
 			quarantined++
 		case catalog.ReviewRequired:
@@ -189,17 +191,21 @@ func inventoryStatus() InventoryStatus {
 
 	st := InventoryStatus{State: string(state), Reason: reason, ExecutionEnabled: false}
 	if reg != nil {
-		for _, s := range reg.Current().Servers() {
-			st.Servers++
-			if s.Usable() {
+		// Index-based range: ServerRecord is a wide struct; avoid the per-iteration
+		// value copy (gocritic rangeValCopy).
+		servers := reg.Current().Servers()
+		st.Servers = len(servers)
+		for i := range servers {
+			if servers[i].Usable() {
 				st.VerifiedServers++
 			}
 		}
 	}
 	if cat != nil {
-		for _, tr := range cat.Current().Records() {
-			st.Tools++
-			switch tr.Eligibility {
+		tools := cat.Current().Records()
+		st.Tools = len(tools)
+		for i := range tools {
+			switch tools[i].Eligibility {
 			case catalog.Quarantined:
 				st.QuarantinedTools++
 			case catalog.ReviewRequired:
@@ -375,6 +381,15 @@ func seedServer(reg *registry.Registry, cat *catalog.Catalog, s qualServerEntry,
 	if err := validateOpaqueField(s.ServerID, "server_id"); err != nil {
 		return err
 	}
+	// Route round-trip safety: the server id is carried as a SINGLE path segment in
+	// `/mcp/gateway/<server-id>`, and the runtime's parseGatewayServerID stops at the
+	// first '/'. An id containing '/' (or the path-canonicalization-sensitive '.'/'..',
+	// or a percent/query/fragment byte) would be registered but permanently
+	// unreachable via the route (silently 404). Reject it at seed time so a seeded
+	// server is always resolvable (raised in review).
+	if err := validateRouteSafeSegment(s.ServerID); err != nil {
+		return err
+	}
 	if s.Capability != "" && s.Capability != protocol.Gateway.String() {
 		// Only Gateway is seedable; a Management (or arbitrary) capability fails closed.
 		return errInventory("server capability must be gateway")
@@ -462,11 +477,11 @@ func seedTools(reg *registry.Registry, cat *catalog.Catalog, s qualServerEntry, 
 		}
 		wire.Tools = append(wire.Tools, toolWire{
 			Name:         t.Name,
-			InputSchema:  json.RawMessage(t.InputSchema),
-			OutputSchema: json.RawMessage(t.OutputSchema),
+			InputSchema:  t.InputSchema,
+			OutputSchema: t.OutputSchema,
 			Description:  t.Description,
 			Title:        t.Title,
-			Annotations:  json.RawMessage(t.Annotations),
+			Annotations:  t.Annotations,
 		})
 	}
 	rawList, err := json.Marshal(wire)
@@ -532,6 +547,26 @@ func validateOpaqueField(s, name string) error {
 	for i := 0; i < len(s); i++ {
 		if s[i] < 0x20 || s[i] == 0x7f {
 			return errInventory(name + " contains a control character")
+		}
+	}
+	return nil
+}
+
+// validateRouteSafeSegment rejects a server id that cannot round-trip as a single
+// URL path segment in `/mcp/gateway/<server-id>`: no '/' (the route splits on it),
+// not '.'/'..' (HTTP path canonicalization rewrites them), and no byte that would be
+// percent-encoded or reinterpreted by URL parsing ('%', '?', '#', '\\', space). The
+// broader opaque-token charset the registry accepts is intentionally narrowed HERE
+// for the route-embedded id only; tool names (carried in the JSON-RPC body, never the
+// path) keep the wider charset.
+func validateRouteSafeSegment(id string) error {
+	if id == "." || id == ".." {
+		return errInventory("server_id must not be '.' or '..' (route-unsafe)")
+	}
+	for i := 0; i < len(id); i++ {
+		switch id[i] {
+		case '/', '%', '?', '#', '\\', ' ':
+			return errInventory("server_id must be a single route-safe path segment")
 		}
 	}
 	return nil
