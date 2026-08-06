@@ -154,6 +154,7 @@ func buildOperatorContract() OperatorContract {
 		checkConfigSnapshotValidator(),
 		checkConfigVersionsPresent(cv),
 		checkConfigVersionsReadable(cv),
+		checkConfigVersionsIntegrity(),
 		checkConfigRollbackValidation(cv),
 		checkKeyAtRest(),
 		checkAuditPersistence(),
@@ -835,6 +836,36 @@ func checkConfigVersionsReadable(s configVersionSummary) OperatorContractCheck {
 		Code:    "config_versions_readable",
 		Status:  diagOK,
 		Message: fmt.Sprintf("latest config version v%d parses cleanly", s.LatestVersion),
+	}
+}
+
+// checkConfigVersionsIntegrity scans the FULL version history, not just the
+// latest snapshot: checkConfigVersionsReadable only inspects the most recent
+// v{N}.json, so a corrupt file anywhere else in the retained window (disk
+// fault, external tampering, an older-build bug) is silently dropped by
+// List/ListMeta and never appears in this check — the rollback list just
+// looks shorter, indistinguishable from normal retention pruning.
+func checkConfigVersionsIntegrity() OperatorContractCheck {
+	present, readable := configVersions.Integrity()
+	if present == 0 {
+		return OperatorContractCheck{
+			Code:    "config_versions_integrity",
+			Status:  diagOK,
+			Message: "no version history to check",
+		}
+	}
+	if readable < present {
+		return OperatorContractCheck{
+			Code:           "config_versions_integrity",
+			Status:         diagWarn,
+			Message:        fmt.Sprintf("%d of %d config version file(s) on disk are corrupt or unreadable and are hidden from the rollback list", present-readable, present),
+			OperatorAction: "Inspect the config versions directory for truncated or invalid v{N}.json files; remove any that are unusable (other intact versions remain usable) or restore the directory from a /data backup.",
+		}
+	}
+	return OperatorContractCheck{
+		Code:    "config_versions_integrity",
+		Status:  diagOK,
+		Message: fmt.Sprintf("all %d config version file(s) on disk parse cleanly", present),
 	}
 }
 
