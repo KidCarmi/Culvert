@@ -11,7 +11,11 @@ package alerts
 // queue.
 //
 // Supported events:
-//   "threat_detected"       — ClamAV / YARA / threat-feed block
+//   "threat_detected"       — a request was blocked by ClamAV, YARA, or the DPI/threat-feed
+//                             scanner (log status THREAT_BLOCKED/SCAN_BLOCKED/DPI_BLOCKED;
+//                             metrics culvert_{clamav,yara,dpi,threat_feed}_blocked_total).
+//                             Event name kept as "detected" rather than renamed to "blocked"
+//                             to preserve existing webhook subscriptions.
 //   "policy_block"          — PBAC policy blocked a request
 //   "auth_lockout"          — admin UI brute-force lockout
 //   "cert_expiry"           — CA certificate nearing expiry (fired on startup if ≤30 days)

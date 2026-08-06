@@ -17506,7 +17506,7 @@ function resetBlockPage() {
     <div class="form-group">
       <label class="form-label">Events</label>
       <div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:6px">
-        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="threat_detected"> Threat detected</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="threat_detected" title="Fires when ClamAV, YARA, or the DPI/threat-feed scanner blocks a request (log status THREAT_BLOCKED / SCAN_BLOCKED / DPI_BLOCKED)."> Threat blocked</label>
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="policy_block"> Policy block</label>
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="auth_lockout"> Auth lockout</label>
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="cert_expiry"> Cert expiry</label>
