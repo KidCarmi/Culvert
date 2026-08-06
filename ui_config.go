@@ -96,6 +96,14 @@ func apiStats(w http.ResponseWriter, r *http.Request) {
 		// Non-zero means the async JSONL persistence queue saturated: no
 		// entry was lost, but request goroutines waited on the disk.
 		"logBackpressure": reqlog.Backpressure(),
+		// Non-zero means the async PROCESS-log queue (internal/logsink; every
+		// POLICY_ALLOW/BLOCK/DROP line plus general logger.Printf output)
+		// saturated: no line was lost, but the caller waited for queue room.
+		// A distinct subsystem from logBackpressure above (request-log JSONL
+		// persistence) — previously visible only via the culvert_logsink_
+		// backpressure_total Prometheus metric, invisible to an operator
+		// without a metrics scraper wired up.
+		"processLogBackpressure": logSinkBackpressure(),
 		// Audit/request-log persistence state: if the operator configured a
 		// file path but the engine could not open it at startup (bad
 		// permissions, missing directory, full disk), both silently fall
