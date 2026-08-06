@@ -381,7 +381,16 @@ func checkSyslogFeed() OperatorContractCheck {
 			Message: "not configured — no remote syslog/SIEM forwarding",
 		}
 	}
-	if globalSyslog == nil {
+	// Healthy only when the target we actually connected to (syslogConfigured,
+	// set SOLELY on a successful InitSyslog) matches the operator's current
+	// intent (syslogConfiguredAddr, recorded regardless of outcome). A bare
+	// globalSyslog != nil check is not enough: observability inits from
+	// YAML/flags BEFORE admin settings apply a persisted override, so if the
+	// first target connects and a later re-init to a new target fails,
+	// globalSyslog stays non-nil pointing at the PREVIOUS collector while intent
+	// has moved on — the persisted SIEM target is silently down but a nil-check
+	// would still report OK.
+	if globalSyslog == nil || syslogConfigured != syslogConfiguredAddr {
 		return OperatorContractCheck{
 			Code:           "syslog_feed",
 			Status:         diagFail,

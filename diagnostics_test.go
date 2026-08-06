@@ -1102,18 +1102,21 @@ func TestApiDiagnostics_SyslogFeedFail(t *testing.T) {
 // path. UDP construction never blocks on a handshake, so it stands in for a
 // live feed without a real collector.
 func TestApiDiagnostics_SyslogFeedOK(t *testing.T) {
-	prevAddr, prevSW := syslogConfiguredAddr, globalSyslog
+	prevAddr, prevOK, prevSW := syslogConfiguredAddr, syslogConfigured, globalSyslog
 	t.Cleanup(func() {
 		if globalSyslog != nil && globalSyslog != prevSW {
 			globalSyslog.Close()
 		}
-		syslogConfiguredAddr, globalSyslog = prevAddr, prevSW
+		syslogConfiguredAddr, syslogConfigured, globalSyslog = prevAddr, prevOK, prevSW
 	})
 	sw, err := newSyslogWriter("udp", "127.0.0.1:514", "rfc3164")
 	if err != nil {
 		t.Fatalf("newSyslogWriter: %v", err)
 	}
-	syslogConfiguredAddr, globalSyslog = "udp://127.0.0.1:514", sw
+	// Success path: the live writer's target IS the operator's intent, so the
+	// intent (syslogConfiguredAddr) and the last-successful-connect tracker
+	// (syslogConfigured) agree.
+	syslogConfiguredAddr, syslogConfigured, globalSyslog = "udp://127.0.0.1:514", "udp://127.0.0.1:514", sw
 
 	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
 	w := httptest.NewRecorder()
@@ -1123,5 +1126,41 @@ func TestApiDiagnostics_SyslogFeedOK(t *testing.T) {
 	found := findSyslogFeedCheck(t, c)
 	if found.Status != diagOK {
 		t.Errorf("syslog_feed status = %q, want ok when feed is active", found.Status)
+	}
+}
+
+// TestApiDiagnostics_SyslogFeedStalePreviousTarget is the regression test for
+// the stale-writer hole: observability inits from YAML/flags and connects the
+// first target (globalSyslog non-nil, syslogConfigured == that target), then a
+// persisted admin-settings override re-inits to a NEW target that fails, moving
+// intent (syslogConfiguredAddr) without moving the live writer. A bare
+// globalSyslog != nil check reported OK; the feed to the intended collector is
+// actually down.
+func TestApiDiagnostics_SyslogFeedStalePreviousTarget(t *testing.T) {
+	prevAddr, prevOK, prevSW := syslogConfiguredAddr, syslogConfigured, globalSyslog
+	t.Cleanup(func() {
+		if globalSyslog != nil && globalSyslog != prevSW {
+			globalSyslog.Close()
+		}
+		syslogConfiguredAddr, syslogConfigured, globalSyslog = prevAddr, prevOK, prevSW
+	})
+	sw, err := newSyslogWriter("udp", "127.0.0.1:514", "rfc3164")
+	if err != nil {
+		t.Fatalf("newSyslogWriter: %v", err)
+	}
+	// Live writer + last-successful connect are the FIRST target; intent has
+	// since moved to a second target whose re-init failed.
+	globalSyslog = sw
+	syslogConfigured = "udp://127.0.0.1:514"
+	syslogConfiguredAddr = "tcp://collector.invalid:601"
+
+	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+	w := httptest.NewRecorder()
+	apiDiagnostics(w, r)
+
+	c := decodeContract(t, w)
+	found := findSyslogFeedCheck(t, c)
+	if found.Status != diagFail {
+		t.Errorf("syslog_feed status = %q, want fail when the intended target is not the connected one (stale writer)", found.Status)
 	}
 }
