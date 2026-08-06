@@ -209,6 +209,13 @@ mcp:
     min_assurance: "high"          # "low" | "medium" | "high"
     trusted_jwks_file: ""          # static JWKS (PUBLIC keys only) seeding the trusted-key resolver
     resource_name: ""              # optional public display label for the RFC 9728 metadata document
+    # QUAL-2 static qualification inventory (node-local JSON; loaded once at startup, no
+    # hot reload, no admin upload). Absent = empty registry/catalog (QUAL-1 behavior).
+    # Seeds one Gateway tenant's servers + tools through the existing Registry/Catalog
+    # contracts and shares them with the read-only Servers/Tools Admin API. NO secret
+    # material (no raw credentials/tokens/keys) may appear in this file; a present-but-
+    # invalid file fails activation closed. Schema: docs/operator/mcp-qualification-inventory.md
+    qualification_inventory_file: ""
 
 # ── Admin UI ──────────────────────────────────────────────────────────────
 

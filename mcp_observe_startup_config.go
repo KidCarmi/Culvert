@@ -36,6 +36,10 @@ type mcpObserveStartupConfig struct {
 	MinAssurance      string
 	TrustedJWKSFile   string
 	ResourceName      string
+
+	// QualificationInventoryFile is the static, node-local qualification inventory
+	// path (QUAL-2). Empty ⇒ no inventory (QUAL-1 empty-registry behavior).
+	QualificationInventoryFile string
 }
 
 // Fail-closed defaults for the security-load-bearing knobs. A blank value in the
@@ -82,6 +86,8 @@ func resolveMCPObserveStartupConfig(fc *FileConfig) mcpObserveStartupConfig {
 		MinAssurance:      firstStr(g.MinAssurance, mcpDefaultMinAssurance),
 		TrustedJWKSFile:   g.TrustedJWKSFile,
 		ResourceName:      g.ResourceName,
+
+		QualificationInventoryFile: g.QualificationInventoryFile,
 	}
 }
 

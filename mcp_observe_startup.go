@@ -73,8 +73,12 @@ type mcpObserveActivation struct {
 // binds nothing and the health surface reports the truthful reason.
 func loadMCPObserveRuntime(sc mcpObserveStartupConfig) (mcpruntime.Config, mcpObserveActivation) {
 	if !sc.Enabled {
+		publishMCPInventory(mcpInvNotConfigured, "", nil, nil)
 		return mcpruntime.Config{}, mcpObserveActivation{State: mcpObserveDisabled}
 	}
+	// Reset the node-local inventory holder until this activation succeeds, so a
+	// failed enable never leaves a stale "loaded" fleet visible to the Admin API.
+	publishMCPInventory(mcpInvNotConfigured, "", nil, nil)
 	act := mcpObserveActivation{
 		State: mcpObserveInvalid, EnableRequested: true,
 		BindAddress: sc.BindAddress, Port: sc.Port, ClientCertMode: sc.ClientCertMode,
@@ -136,13 +140,25 @@ func loadMCPObserveRuntime(sc mcpObserveStartupConfig) (mcpruntime.Config, mcpOb
 		return invalid("tls_material_unavailable", err)
 	}
 
-	cfg := assembleGatewayConfig(sc, modes, tlsCfg, authCfg, meta, keys)
+	// QUAL-2: resolve the static qualification inventory (empty when no file) and
+	// fail activation closed on a present-but-invalid file — nothing binds and no
+	// partially-seeded fleet is ever published.
+	reg, cat, invState, err := loadQualificationInventory(sc)
+	if err != nil {
+		publishMCPInventory(mcpInvInvalid, "qualification_inventory_invalid", nil, nil)
+		return invalid("qualification_inventory_invalid", err)
+	}
+
+	cfg := assembleGatewayConfig(sc, modes, tlsCfg, authCfg, meta, keys, reg, cat)
 	// Classify the transactional runtime validation (bind/port/wildcard/TLS/hosts) as
 	// an activation outcome rather than a hard failure, so an invalid listener config
 	// fails closed to "invalid" instead of aborting startup.
 	if err := cfg.Validate(); err != nil {
 		return invalid("listener_config_invalid", err)
 	}
+	// Publish the seeded inventory as the single source of truth ONLY after the whole
+	// activation is valid, so the Admin API and runtime observe the identical pair.
+	publishMCPInventory(invState, "", reg, cat)
 	act.State = mcpObserveConfigured
 	return cfg, act
 }
@@ -151,11 +167,11 @@ func loadMCPObserveRuntime(sc mcpObserveStartupConfig) (mcpruntime.Config, mcpOb
 // resolved pieces. Deps deliberately carry ONLY the read paths (trusted keys, empty
 // read-only registry/catalog, and a DPoP replay cache when required) — no executor,
 // policy, inspection, or event provider, so the listener can never execute upstream.
-func assembleGatewayConfig(sc mcpObserveStartupConfig, modes gatewayModes, tlsCfg *tls.Config, authCfg authn.CapabilityAuthConfig, meta *mcpruntime.ProtectedResourceMetadata, keys authn.KeyResolver) mcpruntime.Config {
+func assembleGatewayConfig(sc mcpObserveStartupConfig, modes gatewayModes, tlsCfg *tls.Config, authCfg authn.CapabilityAuthConfig, meta *mcpruntime.ProtectedResourceMetadata, keys authn.KeyResolver, reg *registry.Registry, cat *catalog.Catalog) mcpruntime.Config {
 	deps := mcpruntime.Deps{
 		Keys:     keys,
-		Registry: registry.New(limits.DefaultCatalog()), // empty read-only inventory (population is a later slice)
-		Catalog:  catalog.New(limits.DefaultCatalog()),
+		Registry: reg, // QUAL-2: shared read-only inventory (empty when no qualification file)
+		Catalog:  cat, // the SAME instances back the MCP Servers/Tools Admin API
 	}
 	if modes.senderProfile.RequiresDPoP() {
 		deps.Replay = senderconstraint.NewReplayCache(limits.DefaultAuth(), nil)
