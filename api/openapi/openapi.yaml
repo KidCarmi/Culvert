@@ -1401,10 +1401,13 @@ components:
         host: { type: string }
     AlertHistory:
       type: object
-      required: [deliveries]
+      required: [deliveries, retry_queue_depth, retry_exhausted_total, retry_dropped_total]
       additionalProperties: false
       properties:
         deliveries: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
+        retry_queue_depth: { type: integer, description: "Failed webhook deliveries currently queued for retry." }
+        retry_exhausted_total: { type: integer, description: "Deliveries that used up all retry attempts and were permanently dropped." }
+        retry_dropped_total: { type: integer, description: "Deliveries dropped because the retry queue was at capacity." }
     PACExceptionsList:
       type: object
       required: [exceptions]

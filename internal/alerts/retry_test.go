@@ -31,7 +31,9 @@ func snapshotRetryQueue(t *testing.T) {
 
 func TestEnqueueRetry_MaxAttempts(t *testing.T) {
 	snapshotRetryQueue(t)
+	snapshotRetryCounters(t)
 
+	before := RetryExhaustedTotal()
 	// Should not enqueue when attempt >= max.
 	enqueueRetry("hook-1", Payload{Event: "test"}, retryMax)
 	retryMu.Lock()
@@ -39,6 +41,40 @@ func TestEnqueueRetry_MaxAttempts(t *testing.T) {
 	retryMu.Unlock()
 	if count != 0 {
 		t.Errorf("expected 0 entries after max attempts, got %d", count)
+	}
+	if got := RetryExhaustedTotal(); got != before+1 {
+		t.Errorf("expected RetryExhaustedTotal to increment by 1, got %d -> %d", before, got)
+	}
+}
+
+// snapshotRetryCounters saves/restores the package-level retry counters so
+// tests observing exhaustion/drop counts don't leak into each other.
+func snapshotRetryCounters(t *testing.T) {
+	t.Helper()
+	origExhausted := retryExhaustedTotal.Load()
+	origDropped := retryDroppedTotal.Load()
+	t.Cleanup(func() {
+		retryExhaustedTotal.Store(origExhausted)
+		retryDroppedTotal.Store(origDropped)
+	})
+}
+
+func TestEnqueueRetry_QueueFull(t *testing.T) {
+	snapshotRetryQueue(t)
+	snapshotRetryCounters(t)
+
+	retryMu.Lock()
+	retryQueue = make([]retryEntry, retryQueueMax)
+	retryMu.Unlock()
+
+	before := RetryDroppedTotal()
+	enqueueRetry("hook-overflow", Payload{Event: "test"}, 0)
+
+	if depth := RetryQueueDepth(); depth != retryQueueMax {
+		t.Errorf("expected queue depth to stay at cap %d, got %d", retryQueueMax, depth)
+	}
+	if got := RetryDroppedTotal(); got != before+1 {
+		t.Errorf("expected RetryDroppedTotal to increment by 1, got %d -> %d", before, got)
 	}
 }
 

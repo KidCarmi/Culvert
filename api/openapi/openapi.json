@@ -192,10 +192,25 @@
             },
             "nullable": true,
             "type": "array"
+          },
+          "retry_dropped_total": {
+            "description": "Deliveries dropped because the retry queue was at capacity.",
+            "type": "integer"
+          },
+          "retry_exhausted_total": {
+            "description": "Deliveries that used up all retry attempts and were permanently dropped.",
+            "type": "integer"
+          },
+          "retry_queue_depth": {
+            "description": "Failed webhook deliveries currently queued for retry.",
+            "type": "integer"
           }
         },
         "required": [
-          "deliveries"
+          "deliveries",
+          "retry_queue_depth",
+          "retry_exhausted_total",
+          "retry_dropped_total"
         ],
         "type": "object"
       },

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/alerts"
 	"github.com/KidCarmi/Culvert/internal/geoip"
 )
 
@@ -139,7 +140,9 @@ func apiAlertsWebhookTest(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]any{"ok": ok2, "delivered": ok2})
 }
 
-// GET /api/alerts/webhooks/history — delivery history (Finding 8.1).
+// GET /api/alerts/webhooks/history — delivery history (Finding 8.1), plus
+// retry-queue health so an admin can see alerting degradation (queued
+// retries, permanently exhausted/dropped deliveries) without grepping logs.
 func apiAlertsDeliveryHist(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -148,7 +151,12 @@ func apiAlertsDeliveryHist(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleViewer) {
 		return
 	}
-	jsonOK(w, map[string]any{"deliveries": globalAlertStore.DeliveryHistory()})
+	jsonOK(w, map[string]any{
+		"deliveries":            globalAlertStore.DeliveryHistory(),
+		"retry_queue_depth":     alerts.RetryQueueDepth(),
+		"retry_exhausted_total": alerts.RetryExhaustedTotal(),
+		"retry_dropped_total":   alerts.RetryDroppedTotal(),
+	})
 }
 
 func apiSecurity(w http.ResponseWriter, r *http.Request) {

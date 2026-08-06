@@ -2608,6 +2608,7 @@ Firefox (all platforms):
           <!-- Delivery History (Finding 8.1) -->
           <details style="margin-top:12px">
             <summary style="cursor:pointer;font-size:.85rem;font-weight:600;color:var(--accent)">Delivery History</summary>
+            <div id="alert-retry-health" style="font-size:.78rem;color:var(--muted);margin-top:8px"></div>
             <div class="tbl-wrap" style="margin-top:8px">
               <table id="delivery-hist-table" style="font-size:.78rem">
                 <thead><tr><th>Time</th><th>Webhook</th><th>Event</th><th>Status</th><th>Attempt</th><th>Error</th></tr></thead>
@@ -5825,6 +5826,7 @@ function switchView(name) {
   if (name === 'releases')       loadReleases();
   if (name === 'support')        loadSupport();
   if (name !== 'releases')       releaseStopStatusPoll(); // stop polling when leaving the panel
+  if (name !== 'settings')       stopDeliveryHistoryPoll(); // stop delivery-history polling when leaving Settings
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -10343,6 +10345,7 @@ async function loadWebhooks() {
       </td>
     </tr>`).join('');
     loadDeliveryHistory();
+    startDeliveryHistoryPoll();
   } catch(e) { console.error(e); }
 }
 
@@ -10419,9 +10422,32 @@ async function testWebhook(id) {
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
 
+// _deliveryHistoryTimer polls the delivery history + retry-queue health while
+// the Settings panel is open, so the live health indicator reflects an outage
+// that begins AFTER the panel was loaded instead of showing a stale "healthy"
+// until the next manual reload. Started by loadWebhooks, stopped on view-leave.
+let _deliveryHistoryTimer = null;
+function startDeliveryHistoryPoll() {
+  stopDeliveryHistoryPoll();
+  _deliveryHistoryTimer = setInterval(loadDeliveryHistory, 15000);
+}
+function stopDeliveryHistoryPoll() {
+  if (_deliveryHistoryTimer) { clearInterval(_deliveryHistoryTimer); _deliveryHistoryTimer = null; }
+}
+
 async function loadDeliveryHistory() {
+  const health = document.getElementById('alert-retry-health');
+  if (!health) { stopDeliveryHistoryPoll(); return; } // panel not mounted (a tick after leaving Settings)
   try {
     const d = await api('/api/alerts/webhooks/history');
+    const queued = d.retry_queue_depth || 0;
+    const exhausted = d.retry_exhausted_total || 0;
+    const dropped = d.retry_dropped_total || 0;
+    const degraded = exhausted > 0 || dropped > 0;
+    health.style.color = degraded ? 'var(--red)' : 'var(--muted)';
+    health.textContent = `Retry queue: ${queued} pending` +
+      (exhausted ? ` · ${exhausted} gave up after max retries` : '') +
+      (dropped ? ` · ${dropped} dropped (queue full)` : '');
     const tbody = document.getElementById('delivery-hist-tbody');
     const items = d.deliveries || [];
     if (!items.length) { tbody.innerHTML = '<tr><td colspan="6" style="color:var(--muted)">No deliveries yet</td></tr>'; return; }
