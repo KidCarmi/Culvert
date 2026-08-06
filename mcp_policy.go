@@ -189,6 +189,28 @@ func (h *mcpPolicyHolder) storeFor(capability string) (*policy.Store, bool) {
 // stores returns the adminapi.PolicyStores adapter over this holder.
 func (h *mcpPolicyHolder) stores() *mcpPolicyStores { return &mcpPolicyStores{h: h} }
 
+// invalidateForStartupFailure clears a published snapshot when the listener fails to
+// construct or start AFTER the loader published the policy, so a fail-closed startup
+// never advertises an active policy for a listener that is not running. It sets the
+// state to invalid AND replaces the Gateway store with an empty one, so BOTH the
+// holder-status surface (/api/mcp/overview) and the store-backed read (/api/mcp/policy)
+// report no active snapshot. A not-loaded holder is left untouched. Safe: the listener
+// never bound, so no hot path reads the store; the admin adapter reads h.gw live.
+func (h *mcpPolicyHolder) invalidateForStartupFailure() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.state != mcpPolLoaded {
+		return
+	}
+	h.state, h.reason = mcpPolInvalid, "runtime_start_failed"
+	h.revision, h.hash, h.ruleCount, h.defaultAction = 0, "", 0, ""
+	h.gw = policy.NewStore(policy.CapGateway) // clears store.Current() for apiMCPPolicy
+}
+
+// invalidateMCPPolicyOnStartupFailure clears the process-wide node-local policy when
+// the listener fails to construct/start after the loader published it.
+func invalidateMCPPolicyOnStartupFailure() { mcpPolicy.invalidateForStartupFailure() }
+
 // resetForTest re-initializes the holder's stores + metadata IN PLACE (TEST-ONLY),
 // without replacing the holder pointer, so a test starts from an empty active
 // snapshot while a singleton that captured this holder (getMCPAdmin, which reads the

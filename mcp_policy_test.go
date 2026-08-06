@@ -404,6 +404,44 @@ func TestMCPPolicy_LoadRuntimeAbsentIsPendingPolicy(t *testing.T) {
 	}
 }
 
+// ── startup-failure invalidation (Codex P2) ──────────────────────────────────
+
+// A published snapshot must be cleared when the listener fails to construct/start, so
+// the admin surface never advertises an active policy (holder status AND the
+// store-backed /api/mcp/policy read) for a listener that is not running.
+func TestMCPPolicy_InvalidateOnStartupFailure(t *testing.T) {
+	h := newMCPPolicyHolder()
+	s, _, ls, lr, err := h.compose(scWithPolicy(writeMCPPolicyFile(t, gwPolicyDoc(1, allowDiscoveryRule))))
+	if err != nil {
+		t.Fatalf("compose: %v", err)
+	}
+	if err := h.publish(ls, lr, s); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	if !h.composed() || h.gw.Current() == nil {
+		t.Fatal("precondition: snapshot must be active")
+	}
+	h.invalidateForStartupFailure()
+	// Holder status (/api/mcp/overview) reports invalid, not loaded.
+	if h.composed() || h.status().State != string(mcpPolInvalid) || h.status().EvaluationEnabled {
+		t.Fatalf("holder must be invalid after startup failure: %+v", h.status())
+	}
+	if h.status().Reason != "runtime_start_failed" {
+		t.Fatalf("reason = %q, want runtime_start_failed", h.status().Reason)
+	}
+	// Store-backed read (/api/mcp/policy) also reports no active snapshot.
+	gwStore, _ := h.stores().Store("gateway")
+	if gwStore.Current() != nil {
+		t.Fatal("store must be cleared so apiMCPPolicy shows no active snapshot")
+	}
+	// A not-loaded holder is untouched (idempotent / safe).
+	h2 := newMCPPolicyHolder()
+	h2.invalidateForStartupFailure()
+	if h2.status().State != string(mcpPolNotConfigured) {
+		t.Fatalf("not-loaded holder must stay not_configured, got %q", h2.status().State)
+	}
+}
+
 // ── the provider satisfies the runtime seam ──────────────────────────────────
 
 func TestMCPPolicy_ProviderImplementsSeam(t *testing.T) {
