@@ -64,6 +64,13 @@ type ListenerConfig struct {
 	// weakens an enabled TLS config and is documented as the ownership boundary for
 	// the (later-slice) production TLS wiring.
 	AllowInsecure bool
+	// Metadata is the OPTIONAL published OAuth 2.0 Protected Resource Metadata (RFC
+	// 9728) for this capability. When set, the listener serves the bounded PUBLIC
+	// document at its well-known path and advertises it in the WWW-Authenticate
+	// challenge on a 401. Nil ⇒ no metadata document and no challenge header (the
+	// pre-QUAL-1 behavior, byte-identical). It never carries a secret — only the
+	// public resource identifier and authorization-server issuer URLs.
+	Metadata *ProtectedResourceMetadata
 }
 
 // Addr returns the host:port bind address.
