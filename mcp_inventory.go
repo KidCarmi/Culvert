@@ -34,6 +34,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/KidCarmi/Culvert/internal/mcp/adminapi"
 	"github.com/KidCarmi/Culvert/internal/mcp/catalog"
 	"github.com/KidCarmi/Culvert/internal/mcp/limits"
 	"github.com/KidCarmi/Culvert/internal/mcp/protocol"
@@ -145,6 +146,22 @@ func (c mcpInventoryCounts) Counts(capability string) (servers, quarantined, dri
 		}
 	}
 	return servers, quarantined, drifted
+}
+
+// mcpAdminInventorySources returns the adminapi read seams over the SHARED
+// inventory, or (nil, nil, nil) when no inventory is loaded. getMCPAdmin consumes
+// this so the read-only Servers/Tools Admin API reads the identical
+// registry/catalog the runtime pipeline resolves against — the single source of
+// truth. Both-nil ⇒ the adminapi Inventory service stays disabled (empty views),
+// byte-identical to the QUAL-1 default. Isolating the wiring here makes the
+// single-source contract directly testable (see mcp_inventory_test.go), instead of
+// only through the lazily-built admin singleton.
+func mcpAdminInventorySources() (adminapi.RegistrySource, adminapi.CatalogSource, adminapi.InventoryCounts) {
+	reg, cat := mcpInventory.sharedInventory()
+	if reg == nil || cat == nil {
+		return nil, nil, nil
+	}
+	return mcpRegistrySource{reg: reg}, mcpCatalogSource{cat: cat}, mcpInventoryCounts{reg: reg, cat: cat}
 }
 
 // InventoryStatus is the safe, read-only inventory readiness surfaced on the admin

@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/adminapi"
@@ -435,6 +436,105 @@ func TestInventory_DisabledServerRegisteredButNotUsable(t *testing.T) {
 	if cat.Current().Len() != 1 {
 		t.Fatal("tools of a disabled server are still ingested + visible")
 	}
+}
+
+// TestInventory_AdminSourcesReflectSharedHolder proves the exact wiring getMCPAdmin
+// uses: when a loaded inventory is published, mcpAdminInventorySources returns the
+// shared read seams, an adminapi.Service built from them enumerates the seeded fleet
+// tenant-scoped, and its health counts reflect the fleet. When nothing is loaded the
+// sources are nil and the Service Inventory stays disabled (empty views).
+func TestInventory_AdminSourcesReflectSharedHolder(t *testing.T) {
+	resetInventory(t)
+	// Not loaded ⇒ nil sources ⇒ disabled Inventory service.
+	publishMCPInventory(mcpInvNotConfigured, "", nil, nil)
+	if rs, cs, ic := mcpAdminInventorySources(); rs != nil || cs != nil || ic != nil {
+		t.Fatal("no inventory loaded must yield nil admin sources")
+	}
+	if buildAdminService(nil, nil, nil).Inventory != nil {
+		t.Fatal("Service.Inventory must be nil when no source is wired")
+	}
+
+	// Load + publish a fleet, then assert the admin sources reflect it.
+	doc, err := decodeInventory([]byte(validInventoryJSON()))
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	reg, cat, err := seedInventory(doc, limits.DefaultCatalog())
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	publishMCPInventory(mcpInvLoaded, "", reg, cat)
+
+	rs, cs, ic := mcpAdminInventorySources()
+	if rs == nil || cs == nil || ic == nil {
+		t.Fatal("loaded inventory must yield non-nil admin sources")
+	}
+	svc := buildAdminService(rs, cs, ic)
+	if svc.Inventory == nil {
+		t.Fatal("Service.Inventory must be wired when a fleet is loaded")
+	}
+	servers, err := svc.Inventory.ListServers(qualTenant, 0)
+	if err != nil || len(servers) != 1 || servers[0].ServerID != "srv-1" {
+		t.Fatalf("admin ListServers = %+v err=%v", servers, err)
+	}
+	if got, _ := svc.Inventory.ListServers("other-tenant", 0); len(got) != 0 {
+		t.Fatalf("wrong tenant must see no servers, got %+v", got)
+	}
+	if s, _, _ := ic.Counts("gateway"); s != 1 {
+		t.Fatalf("gateway server count = %d, want 1", s)
+	}
+}
+
+// buildAdminService mirrors getMCPAdmin's service construction for the sources under
+// test, without the sync.Once singleton (so the wiring can be asserted directly).
+func buildAdminService(rs adminapi.RegistrySource, cs adminapi.CatalogSource, ic adminapi.InventoryCounts) *adminapi.Service {
+	p := adminapi.Params{Limits: adminapi.DefaultLimits()}
+	if rs != nil {
+		p.Registry, p.Catalog = rs, cs
+		p.Health = adminapi.HealthSources{Inventory: ic}
+	}
+	return adminapi.NewService(p)
+}
+
+// TestInventory_GetMCPAdminBindsSharedInventory drives the ACTUAL getMCPAdmin
+// singleton path: after an inventory is published, a freshly built admin singleton
+// must expose a non-nil, tenant-scoped Inventory backed by the seeded fleet. It
+// resets the singleton so the assertion is order-independent and restores it on
+// cleanup so no other admin test is polluted.
+func TestInventory_GetMCPAdminBindsSharedInventory(t *testing.T) {
+	resetInventory(t)
+	resetMCPAdminSingleton()
+	t.Cleanup(resetMCPAdminSingleton) // rebuild fresh (disabled) for later tests
+
+	doc, err := decodeInventory([]byte(validInventoryJSON()))
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	reg, cat, err := seedInventory(doc, limits.DefaultCatalog())
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	publishMCPInventory(mcpInvLoaded, "", reg, cat)
+
+	m := getMCPAdmin() // builds the singleton AFTER publish
+	if m.svc.Inventory == nil {
+		t.Fatal("getMCPAdmin must wire Inventory from the published holder (single source)")
+	}
+	servers, err := m.svc.Inventory.ListServers(qualTenant, 0)
+	if err != nil || len(servers) != 1 || servers[0].ServerID != "srv-1" {
+		t.Fatalf("singleton ListServers = %+v err=%v", servers, err)
+	}
+	// Health counts flow from the same shared source.
+	if g := m.svc.Health.Snapshot().Gateway; g.Servers != 1 {
+		t.Fatalf("gateway health servers = %d, want 1", g.Servers)
+	}
+}
+
+// resetMCPAdminSingleton clears the lazily-built admin singleton so the next
+// getMCPAdmin rebuilds it from the current inventory holder (whitebox test seam).
+func resetMCPAdminSingleton() {
+	mcpAdmin = nil
+	mcpAdminOnce = sync.Once{}
 }
 
 func TestInventory_GatewayNotVisibleAsManagement(t *testing.T) {

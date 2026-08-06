@@ -117,10 +117,16 @@ func getMCPAdmin() *mcpAdminServer {
 		// the read-only Servers/Tools Admin API is the single source of truth. Both stay
 		// nil when no qualification inventory is loaded (Inventory service stays disabled,
 		// returning empty views — byte-identical to the QUAL-1 disabled default).
-		if reg, cat := mcpInventory.sharedInventory(); reg != nil && cat != nil {
-			params.Registry = mcpRegistrySource{reg: reg}
-			params.Catalog = mcpCatalogSource{cat: cat}
-			health.Inventory = mcpInventoryCounts{reg: reg, cat: cat}
+		//
+		// Ordering contract: this singleton snapshots the inventory holder ONCE. It must
+		// be built AFTER initMCPRuntime has published the holder. initMCPRuntime enforces
+		// this by eagerly binding the singleton once a loaded inventory is published (see
+		// mcp_runtime.go), so a first admin request can never capture a pre-publish
+		// (empty) holder while the pipeline resolves the seeded fleet.
+		if rs, cs, ic := mcpAdminInventorySources(); rs != nil {
+			params.Registry = rs
+			params.Catalog = cs
+			health.Inventory = ic
 			params.Health = health
 		}
 		svc := adminapi.NewService(params)
