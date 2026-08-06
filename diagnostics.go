@@ -157,6 +157,7 @@ func buildOperatorContract() OperatorContract {
 		checkConfigRollbackValidation(cv),
 		checkKeyAtRest(),
 		checkAuditPersistence(),
+		checkSyslogFeed(),
 		checkMemoryBackstop(),
 	}
 	// Auth Exempt risk diagnostics (Slice 8): WARN-only rows for risky Stage-1
@@ -388,6 +389,49 @@ func checkAuditPersistence() OperatorContractCheck {
 		Code:    "audit_log_persistence",
 		Status:  diagOK,
 		Message: "audit trail is persisting to the configured log file",
+	}
+}
+
+// checkSyslogFeed reports whether the operator-configured syslog/SIEM feed is
+// actually delivering. A silent connect failure at startup (unreachable
+// collector, bad host/port, TCP refused) leaves globalSyslog nil while the
+// /api/syslog readback reports the feed as "not configured" — indistinguishable
+// from an intentional no-op — so a compliance/SIEM feed can be down with only a
+// single startup log line ("Syslog: connect failed …") as signal. This surfaces
+// that state as an explicit operator-contract verdict. syslogConfiguredAddr
+// records operator intent regardless of InitSyslog's outcome, so it
+// distinguishes "not configured" from "configured but silently down". Mirrors
+// checkAuditPersistence. Side-effect-free: reads process state only, never
+// dials the collector (use POST /api/syslog/test for an active probe).
+func checkSyslogFeed() OperatorContractCheck {
+	if syslogConfiguredAddr == "" {
+		return OperatorContractCheck{
+			Code:    "syslog_feed",
+			Status:  diagOK,
+			Message: "not configured — no remote syslog/SIEM forwarding",
+		}
+	}
+	// Healthy only when the target we actually connected to (syslogConfigured,
+	// set SOLELY on a successful InitSyslog) matches the operator's current
+	// intent (syslogConfiguredAddr, recorded regardless of outcome). A bare
+	// globalSyslog != nil check is not enough: observability inits from
+	// YAML/flags BEFORE admin settings apply a persisted override, so if the
+	// first target connects and a later re-init to a new target fails,
+	// globalSyslog stays non-nil pointing at the PREVIOUS collector while intent
+	// has moved on — the persisted SIEM target is silently down but a nil-check
+	// would still report OK.
+	if globalSyslog == nil || syslogConfigured != syslogConfiguredAddr {
+		return OperatorContractCheck{
+			Code:           "syslog_feed",
+			Status:         diagFail,
+			Message:        "configured but failed to connect — remote syslog/SIEM forwarding is silently down, events are not reaching the collector",
+			OperatorAction: "Verify the collector host/port and network path, then re-save the syslog target (POST /api/syslog) or restart the proxy; use POST /api/syslog/test to confirm connectivity.",
+		}
+	}
+	return OperatorContractCheck{
+		Code:    "syslog_feed",
+		Status:  diagOK,
+		Message: "remote syslog/SIEM forwarding is active",
 	}
 }
 
