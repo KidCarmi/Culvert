@@ -58,6 +58,21 @@ type Store struct {
 	dir string
 	max int
 	seq int
+
+	// integrity caches the last full-history integrity scan. That scan reads
+	// and parses every retained v{N}.json (up to `max`, each potentially a full
+	// config snapshot), so running it on every /api/diagnostics call let any
+	// viewer force ~max × snapshot-size of disk+CPU per request — a DoS on the
+	// lightweight health endpoints. The result only changes when a version is
+	// written or pruned, so it is computed at most once per Save and served
+	// from cache otherwise. integrityMu is independent of mu; to avoid a lock
+	// inversion Integrity captures dir via dirSnapshot (releasing mu) BEFORE
+	// taking integrityMu and never re-acquires mu while holding it, so the only
+	// nesting is Save's mu→integrityMu invalidation, never the reverse.
+	integrityMu       sync.Mutex
+	integrityValid    bool
+	integrityPresent  int
+	integrityReadable int
 }
 
 // New returns a store rooted at dir keeping at most maxVersions versions
@@ -133,6 +148,7 @@ func (s *Store) SaveWithNote(actor, action, createdAt, note string, config json.
 	}
 
 	s.pruneLocked()
+	s.invalidateIntegrity()
 	return seq, nil
 }
 
@@ -202,6 +218,15 @@ func (s *Store) listMetas(decode func([]byte) (Meta, error)) []Meta {
 			obs.Printf("Loader: config_versions: skipping unparseable %q: %v (D1.2-flag-F5)", obs.Sanitize(fullPath), derr)
 			continue
 		}
+		// A file that is valid JSON but carries no populated meta block decodes
+		// to a zero-valued Meta (Version 0). It is not a usable rollback target
+		// — mirror the latest-only summarizer's Meta.Version <= 0 invariant and
+		// drop it, so a malformed envelope is hidden from the rollback list and
+		// counted against integrity rather than silently presented as valid.
+		if meta.Version <= 0 {
+			obs.Printf("Loader: config_versions: skipping malformed (non-positive version) %q (D1.2-flag-F5)", obs.Sanitize(fullPath))
+			continue
+		}
 		metas = append(metas, meta)
 	}
 	sort.Slice(metas, func(i, j int) bool { return metas[i].Version > metas[j].Version })
@@ -249,18 +274,61 @@ func (s *Store) ListMeta() []Meta {
 // this to raise an operator-visible diagnostic instead of relying on the
 // obs.Printf skip lines, which are invisible without log/SSH access.
 func (s *Store) Integrity() (present, readable int) {
+	// Capture dir under mu and RELEASE it before taking integrityMu: the scan
+	// must never hold both, or it inverts Save's mu→integrityMu order.
 	dir := s.dirSnapshot()
+
+	s.integrityMu.Lock()
+	defer s.integrityMu.Unlock()
+	if s.integrityValid {
+		return s.integrityPresent, s.integrityReadable
+	}
+	present, readable = scanIntegrity(dir)
+	s.integrityPresent, s.integrityReadable, s.integrityValid = present, readable, true
+	return present, readable
+}
+
+// scanIntegrity counts candidate version files (present) and how many parse
+// into a well-formed envelope with a positive version (readable), in ONE pass
+// that reads each file at most once. A file that is unreadable, unparseable, or
+// carries a non-positive version (a malformed envelope that is still valid JSON,
+// e.g. {"config":{}}) is not counted readable — the same invariant List/ListMeta
+// and the latest-only summarizer enforce. Read-only; takes no locks so the
+// caller can run it while holding only integrityMu.
+func scanIntegrity(dir string) (present, readable int) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return 0, 0
 	}
 	for _, e := range entries {
-		if _, ok := versionOf(e.Name()); ok {
-			present++
+		if _, ok := versionOf(e.Name()); !ok {
+			continue
 		}
+		present++
+		data, rerr := os.ReadFile(filepath.Join(dir, e.Name()))
+		if rerr != nil {
+			continue
+		}
+		var env metaEnvelope
+		if json.Unmarshal(data, &env) != nil {
+			continue
+		}
+		if env.Meta.Version <= 0 {
+			continue
+		}
+		readable++
 	}
-	readable = len(s.ListMeta())
 	return present, readable
+}
+
+// invalidateIntegrity drops the cached integrity scan so the next Integrity
+// call recomputes it. Called after every write/prune. Safe to call while
+// holding mu (Save does): it acquires only integrityMu, and Integrity never
+// holds mu while holding integrityMu, so there is no inversion.
+func (s *Store) invalidateIntegrity() {
+	s.integrityMu.Lock()
+	s.integrityValid = false
+	s.integrityMu.Unlock()
 }
 
 // Seq returns the current sequence counter (the last assigned version).
@@ -284,6 +352,9 @@ func (s *Store) SetDirForTest(dir string) {
 	s.mu.Lock()
 	s.dir = dir
 	s.mu.Unlock()
+	// The cached integrity scan is keyed to the old dir; pointing the store at a
+	// new one must recompute it (the package's tests share the global store).
+	s.invalidateIntegrity()
 }
 
 // SetSeqForTest overrides the sequence counter. Test isolation only.

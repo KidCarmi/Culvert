@@ -238,6 +238,56 @@ func TestIntegrity_MissingDirReturnsZeroZero(t *testing.T) {
 	}
 }
 
+// TestIntegrity_MalformedEnvelopeNotReadable pins that a file which is valid
+// JSON but carries no populated meta block (version 0) is counted present but
+// NOT readable, and is hidden from the rollback list — the same Meta.Version<=0
+// invariant the latest-only summarizer enforces. Before the fix it decoded to a
+// zero-valued Meta and was silently counted as a usable version.
+func TestIntegrity_MalformedEnvelopeNotReadable(t *testing.T) {
+	dir := t.TempDir()
+	s := New(dir, 0)
+	s.Init()
+	writeVersion(t, dir, 1, `{"meta":{"version":1,"actor":"a"}}`)
+	writeVersion(t, dir, 2, `{"config":{}}`) // valid JSON, no meta → version 0
+
+	present, readable := s.Integrity()
+	if present != 2 || readable != 1 {
+		t.Fatalf("present=%d readable=%d, want 2, 1 (v2 is a malformed envelope)", present, readable)
+	}
+	if metas := s.List(); len(metas) != 1 || metas[0].Version != 1 {
+		t.Fatalf("List = %+v, want only v1 (malformed v2 hidden from rollback list)", metas)
+	}
+}
+
+// TestIntegrity_CachedUntilSaveInvalidates pins the DoS guard: Integrity reads
+// and parses every retained snapshot, so it must be cached and recomputed only
+// when a version is written — a viewer hammering /api/diagnostics must not be
+// able to force a full re-read of every snapshot per request.
+func TestIntegrity_CachedUntilSaveInvalidates(t *testing.T) {
+	dir := t.TempDir()
+	s := New(dir, 0)
+	s.Init()
+	if _, err := s.Save("t", "seed", "2026-01-01T00:00:00Z", json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("Save v1: %v", err)
+	}
+	if p, r := s.Integrity(); p != 1 || r != 1 {
+		t.Fatalf("first Integrity = %d,%d, want 1,1", p, r)
+	}
+	// Corrupt an out-of-band file (high version so Save's sequential counter
+	// never reuses it). Without a Save the cache must serve the prior result.
+	writeVersion(t, dir, 99, "not json")
+	if p, r := s.Integrity(); p != 1 || r != 1 {
+		t.Fatalf("cached Integrity = %d,%d, want 1,1 (served from cache, no rescan)", p, r)
+	}
+	// A Save invalidates the cache; the rescan now sees v1 + v2 + the corrupt v99.
+	if _, err := s.Save("t", "change", "2026-01-01T00:00:00Z", json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("Save v2: %v", err)
+	}
+	if p, r := s.Integrity(); p != 3 || r != 2 {
+		t.Fatalf("post-Save Integrity = %d,%d, want 3,2 (cache invalidated, rescanned)", p, r)
+	}
+}
+
 // ─── Load: not-found vs corrupt ──────────────────────────────────────────────
 
 func TestLoad_NotFoundIsOSError(t *testing.T) {
