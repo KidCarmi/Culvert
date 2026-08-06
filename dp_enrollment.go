@@ -325,6 +325,43 @@ func checkDPCertExpiry(certFile string) error {
 // dpCertRenewalLoop checks cert expiry periodically and requests a new cert
 // from the CP before the current one expires. Also listens for CA rotation
 // notifications to trigger immediate renewal (zero-touch CA rotation).
+// CHAOS-28: caRotationNotify is signaled exactly once per CA fingerprint change
+// (lastSeenCAFingerprint advances immediately in applySnapshotClusterRuntime),
+// so a failed rotation-triggered renewal used to get no second chance — a node
+// with a fresh cert coasted on the dual-CA overlap until the 30-day expiry
+// window and bricked early if the CP retired the old CA first. A failed rotation
+// renewal now re-arms itself with bounded exponential backoff until one attempt
+// succeeds. Vars (not consts) are test seams only; the values carry no config
+// surface (same recorded deferral class as the CHAOS-12 alert thresholds).
+var (
+	dpRotationRetryInitial = time.Minute
+	dpRotationRetryMax     = time.Hour
+)
+
+// nextRotationRetryDelay doubles the current rotation-renewal backoff, bounded
+// to [dpRotationRetryInitial, dpRotationRetryMax]; cur <= 0 means "first retry".
+func nextRotationRetryDelay(cur time.Duration) time.Duration {
+	minD := dpRotationRetryInitial
+	maxD := dpRotationRetryMax
+	if minD <= 0 {
+		minD = time.Millisecond
+	}
+	if maxD < minD {
+		maxD = minD
+	}
+	if cur <= 0 {
+		return minD
+	}
+	next := cur * 2
+	if next < minD {
+		next = minD
+	}
+	if next > maxD {
+		return maxD
+	}
+	return next
+}
+
 func dpCertRenewalLoop(ctx context.Context, client *DataPlaneClient, nodeID, certFile, keyFile, caFile string) {
 	// CHAOS-24: every round runs under runGuarded. This loop is the ONLY thing
 	// keeping this node's mTLS identity valid — if it stops, nothing reports it
@@ -343,6 +380,44 @@ func dpCertRenewalLoop(ctx context.Context, client *DataPlaneClient, nodeID, cer
 		}
 	}
 
+	// CHAOS-28 retry state, loop-local: retryC is non-nil exactly while a
+	// rotation-triggered renewal is still owed.
+	var (
+		retryTimer *time.Timer
+		retryC     <-chan time.Time
+		retryDelay time.Duration
+	)
+	defer func() {
+		if retryTimer != nil {
+			retryTimer.Stop()
+		}
+	}()
+	// renewForRotation force-renews for a CA rotation and, on failure — an error
+	// OR a contained panic, operationally identical because the renewal did not
+	// happen — re-arms itself with bounded exponential backoff until one attempt
+	// succeeds. CHAOS-24 panic containment is preserved via runGuarded.
+	renewForRotation := func(reason string) {
+		if retryTimer != nil {
+			retryTimer.Stop()
+			retryTimer, retryC = nil, nil
+		}
+		var renewErr error
+		if panicked := runGuarded("dp_cert_renewal", func() {
+			renewErr = renewDPCert(ctx, client, nodeID, certFile, keyFile, caFile, reason)
+		}); panicked {
+			renewErr = errDPRenewalPanic
+		}
+		if renewErr != nil {
+			retryDelay = nextRotationRetryDelay(retryDelay)
+			logger.Printf("DataPlane: %s renewal failed (next retry in %s): %v", reason, retryDelay, renewErr)
+			alertDPCertRenewalFailure(nodeID, certFile, renewErr)
+			retryTimer = time.NewTimer(retryDelay)
+			retryC = retryTimer.C
+			return
+		}
+		retryDelay = 0
+	}
+
 	// CHAOS-12: check once immediately — a node powered off past its renewal
 	// window must not sit on a nearly-expired cert for another 6 hours.
 	renew()
@@ -354,18 +429,25 @@ func dpCertRenewalLoop(ctx context.Context, client *DataPlaneClient, nodeID, cer
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if retryC != nil {
+				// A rotation-triggered renewal is still owed — the regular tick
+				// must force-renew (tryRenew would skip a still-valid cert and
+				// silently drop the pending rotation).
+				renewForRotation("CA rotation (scheduled tick)")
+				continue
+			}
 			renew()
 		case <-caRotationNotify:
 			// CP rotated its CA — renew immediately regardless of cert expiry.
+			// A fresh rotation event restarts the backoff ladder (and supersedes
+			// any retry pending from the previous one).
 			logger.Printf("DataPlane: CA rotation detected — initiating immediate cert renewal")
-			if panicked := runGuarded("dp_cert_renewal", func() {
-				if err := forceRenewDPCert(ctx, client, nodeID, certFile, keyFile, caFile); err != nil {
-					logger.Printf("DataPlane: CA rotation renewal failed: %v", err)
-					alertDPCertRenewalFailure(nodeID, certFile, err)
-				}
-			}); panicked {
-				alertDPCertRenewalFailure(nodeID, certFile, errDPRenewalPanic)
-			}
+			retryDelay = 0
+			renewForRotation("CA rotation")
+		case <-retryC:
+			retryTimer, retryC = nil, nil // fired and drained
+			logger.Printf("DataPlane: retrying CA-rotation cert renewal")
+			renewForRotation("CA rotation (retry)")
 		}
 	}
 }
