@@ -174,6 +174,42 @@ cluster:
   etcd_ca_file: ""        # CA cert for etcd server validation (optional)
   lease_ttl_seconds: 10   # fencing lease TTL (default 10, minimum 3)
 
+# ── MCP Agent Security Gateway (ADR-0024) ─────────────────────────────────
+#
+# DISABLED BY DEFAULT. With this whole block absent (or mcp.gateway.enabled
+# false), NO MCP listener binds, no socket opens, no goroutine starts, and the
+# Secure Web Gateway path is byte-identical. QUAL-1 supports ONLY the Gateway
+# capability in Observe posture: an explicitly configured listener parses,
+# identifies, authenticates and records, but performs NO upstream tool execution
+# (no executor, credential broker, or upstream client is composed). Management
+# MCP cannot be activated here. Read once at startup. Any incomplete/invalid
+# security field fails closed (nothing binds); see /api/mcp/health for the
+# truthful state. Model A (local enterprise client) only — a connector/DMZ mode
+# is rejected.
+mcp:
+  gateway:
+    enabled: false                 # master switch; false = disabled (default)
+    bind_address: ""               # interface/IP to bind (e.g. "127.0.0.1"); wildcard/empty rejected
+    port: 0                        # listener port (required when enabled)
+    protocol_version: ""           # empty = frozen primary baseline; must be a supported version
+    allowed_hosts: []              # Host/:authority allowlist (mandatory, non-empty when enabled)
+    allowed_origins: []            # Origin allowlist (optional)
+    require_origin: false          # require an Origin header
+    connector_mode: "local-client" # only "local-client"/"" accepted (Model A); connector/dmz rejected
+    tls_cert_file: ""              # server TLS certificate (PEM) — required when enabled
+    tls_key_file: ""               # server TLS private key (PEM) — required when enabled
+    client_ca_file: ""             # client-CA bundle (PEM) — required for require/request client-cert mode
+    client_cert_mode: "require"    # "require" (default, mTLS) | "request" | "none"
+    canonical_resource: ""         # exact token audience/resource (absolute https URL, required)
+    trusted_issuers: []            # accepted OAuth token issuer identifiers (>=1 required)
+    accepted_client_ids: []        # accepted OAuth client ids (>=1 required)
+    required_scopes: []            # required scopes (>=1; no blanket scope)
+    allowed_scopes: []             # additional permitted scopes (optional)
+    sender_constraint: "mtls"      # "mtls" | "dpop" | "mtls-or-dpop" | "bearer" (fail-closed default: mtls)
+    min_assurance: "high"          # "low" | "medium" | "high"
+    trusted_jwks_file: ""          # static JWKS (PUBLIC keys only) seeding the trusted-key resolver
+    resource_name: ""              # optional public display label for the RFC 9728 metadata document
+
 # ── Admin UI ──────────────────────────────────────────────────────────────
 
 ui_allow_ips: []        # CIDRs allowed to access admin panel (empty = all)

@@ -177,6 +177,52 @@ type FileConfig struct {
 		LeaseTTLSeconds int    `yaml:"lease_ttl_seconds"` // fencing lease TTL (default 10, minimum 3; failover latency ≈ TTL)
 	} `yaml:"cluster"`
 
+	// MCP configures the dedicated MCP (Model Context Protocol) Agent Security
+	// Gateway listener (ADR-0024). DISABLED BY DEFAULT: with mcp.gateway.enabled
+	// unset, NO listener binds, NO socket opens, NO goroutine starts, and the Secure
+	// Web Gateway path is byte-identical. QUAL-1 supports ONLY the Gateway capability
+	// in Observe posture — the listener parses/identifies/authenticates and records,
+	// but performs NO upstream tool execution (no executor, broker, or upstream
+	// client is composed). Management MCP has NO startup-activation config here and
+	// cannot be activated by this block. Read once at startup (node-local,
+	// startup-scoped — recorded GUI-parity deferral, same class as cluster/HA config).
+	MCP struct {
+		Gateway struct {
+			Enabled     bool   `yaml:"enabled"`      // master switch; unset ⇒ disabled (default)
+			BindAddress string `yaml:"bind_address"` // interface/IP to bind (e.g. "127.0.0.1"); wildcard rejected
+			Port        int    `yaml:"port"`         // listener port (required when enabled)
+			// ProtocolVersion, when set, must be in the frozen supported allowlist
+			// (2025-11-25 primary / 2025-06-18 floor); empty ⇒ the primary baseline. An
+			// unsupported/unknown value fails activation closed.
+			ProtocolVersion string   `yaml:"protocol_version"`
+			AllowedHosts    []string `yaml:"allowed_hosts"`   // Host/:authority allowlist (mandatory, non-empty when enabled)
+			AllowedOrigins  []string `yaml:"allowed_origins"` // Origin allowlist (optional)
+			RequireOrigin   bool     `yaml:"require_origin"`  // require an Origin header
+			ConnectorMode   string   `yaml:"connector_mode"`  // only "local-client"/"" accepted (Model A); connector/dmz rejected
+			// TLS material — file paths resolved at startup (never stored in the admin
+			// API). A production listener requires a server cert+key; client-cert mode
+			// "require" (the qualification posture) also requires a client-CA bundle.
+			TLSCertFile    string `yaml:"tls_cert_file"`
+			TLSKeyFile     string `yaml:"tls_key_file"`
+			ClientCAFile   string `yaml:"client_ca_file"`
+			ClientCertMode string `yaml:"client_cert_mode"` // "require" (default) | "request" | "none"
+			// OAuth resource-server configuration.
+			CanonicalResource string   `yaml:"canonical_resource"`  // exact expected token audience/resource id (required)
+			TrustedIssuers    []string `yaml:"trusted_issuers"`     // accepted token issuer identifiers (>=1)
+			AcceptedClientIDs []string `yaml:"accepted_client_ids"` // accepted OAuth client ids (>=1)
+			RequiredScopes    []string `yaml:"required_scopes"`     // required scopes (>=1; no blanket)
+			AllowedScopes     []string `yaml:"allowed_scopes"`      // additional permitted scopes (optional)
+			SenderConstraint  string   `yaml:"sender_constraint"`   // "mtls" | "dpop" | "mtls-or-dpop" | "bearer" (fail-closed default: mtls)
+			MinAssurance      string   `yaml:"min_assurance"`       // "low" | "medium" | "high" (default high)
+			// TrustedJWKSFile is a static JWKS document (PUBLIC keys only) that seeds the
+			// in-memory trusted-key resolver. authn performs no JWKS fetch, so keys are
+			// operator-supplied trust anchors. Keys are registered under every trusted
+			// issuer. Private-key material in the JWKS fails activation closed.
+			TrustedJWKSFile string `yaml:"trusted_jwks_file"`
+			ResourceName    string `yaml:"resource_name"` // optional public display label for the metadata document
+		} `yaml:"gateway"`
+	} `yaml:"mcp"`
+
 	// SecurityScan configures the local security scanning stack:
 	// ClamAV antivirus, YARA rule-based detection, and threat-intelligence
 	// feed lookups — all running locally with no external API dependency.

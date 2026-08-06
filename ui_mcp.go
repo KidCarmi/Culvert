@@ -104,9 +104,7 @@ func getMCPAdmin() *mcpAdminServer {
 			Policy:    stores,
 			Approvals: mcpApprovalCounts{store: appr},
 			Config:    cfg,
-			Runtime: func(string) adminapi.RuntimeStateHealth {
-				return adminapi.RuntimeStateHealth{State: "disabled"}
-			},
+			Runtime:   mcpObserveRuntimeHealth,
 			Durability: func(string) adminapi.DurabilityHealth {
 				return adminapi.DurabilityHealth{CriticalState: "normal", DenialState: "normal", Severity: "none", RecoveryState: "n/a"}
 			},

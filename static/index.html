@@ -19876,10 +19876,17 @@ function mcpxHealthCard(name, cap){
   cap=cap||{}; var rt=cap.runtime||{}, dur=cap.durability||{};
   var card=mcpxRfCard(name+' health','Runtime and durability for '+name+' only (capability-isolated).');
   var chips=mcpxEl('div','mcpx-btnrow');
-  var stCls=rt.state==='ready'?'ok':(rt.state==='degraded'?'crit':(rt.state==='draining'?'warn':'muted'));
+  var stCls=rt.state==='ready'?'ok':((rt.state==='degraded'||rt.state==='invalid')?'crit':(rt.state==='draining'?'warn':'muted'));
   chips.appendChild(mcpxChip('runtime: '+(rt.state||'unavailable'), stCls));
   chips.appendChild(mcpxChip('listener '+(rt.listener_ready?'ready':'not ready'), rt.listener_ready?'ok':'muted'));
   if(rt.draining){ chips.appendChild(mcpxChip('draining','warn')); }
+  // QUAL-1 observe posture: truthful stored-vs-active and no-execution surface. A
+  // stored admin config never implies an active listener; active state is the
+  // runtime snapshot above. An enable request that failed validation shows the
+  // bounded reason and is never shown as disabled or healthy.
+  if(rt.state==='invalid' && rt.reason){ chips.appendChild(mcpxChip('config invalid: '+rt.reason, 'crit')); }
+  if(rt.posture){ chips.appendChild(mcpxChip('posture: '+rt.posture, 'muted')); }
+  if(rt.posture==='observe'){ chips.appendChild(mcpxChip('upstream execution: disabled', 'ok')); }
   card.appendChild(chips);
   var dl=mcpxRfDL();
   mcpxRfKv(dl,'Active sessions', rt.active_sessions);
