@@ -304,6 +304,19 @@ func (c CDRConfig) CDRFailOpen() bool {
 	return !strings.EqualFold(strings.TrimSpace(c.FailMode), "closed")
 }
 
+// validCDRFailMode reports whether fm is a recognized cdr.fail_mode /
+// -cdr-fail-mode value: "" (unset — defaults to open), "open", or "closed".
+// Shared by FileConfig.validateCDR (the config.yaml path, which fails the
+// whole config load on an unrecognized value) and initCDR in main.go (the
+// CLI-flag path). Without this shared gate, a typo in -cdr-fail-mode was
+// stored verbatim and silently interpreted by CDRFailOpen as fail-OPEN (any
+// value other than the exact string "closed" is open) — the opposite of
+// what an operator hardening CDR to fail-closed intended, with no startup
+// warning. The same typo in config.yaml already refused to start.
+func validCDRFailMode(fm string) bool {
+	return fm == "" || fm == "open" || fm == "closed"
+}
+
 func loadFileConfig(path string) (*FileConfig, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -481,7 +494,7 @@ func (fc *FileConfig) validateCDR() []string { //nolint:cyclop // flat switch-st
 	if fc.CDR.Endpoint == "" {
 		errs = append(errs, "cdr.endpoint is required when cdr.enabled is true")
 	}
-	if fm := fc.CDR.FailMode; fm != "" && fm != "open" && fm != "closed" {
+	if fm := fc.CDR.FailMode; !validCDRFailMode(fm) {
 		errs = append(errs, fmt.Sprintf("cdr.fail_mode: must be \"open\" or \"closed\", got %q", fm))
 	}
 	if m := fc.CDR.DefaultMode; m != "" && m != "ENFORCE" && m != "REPORT_ONLY" && m != "BYPASS_WITH_REPORT" {

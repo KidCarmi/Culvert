@@ -192,3 +192,42 @@ func TestLoadFileConfigAndFlags_PortCollision_ResolvedByCLIOverride(t *testing.T
 		t.Errorf("s.pPort=%d s.uPort=%d, want 8080/9090 (CLI -ui-port override resolving the config.yaml collision)", s.pPort, s.uPort)
 	}
 }
+
+// ── CDR fail_mode CLI/YAML validation parity (validCDRFailMode) ─────────────
+//
+// config.yaml's cdr.fail_mode is validated by FileConfig.validateCDR: an
+// unrecognized value (e.g. a typo like "clsoed") fails the whole config load
+// with a clear error, so the operator sees the mistake immediately.
+//
+// The CLI flag -cdr-fail-mode reaches the SAME field (merged in
+// cdr_startup_config.go's resolveCDRStartupConfig, CLI wins over config.yaml)
+// but had no equivalent gate: an invalid CLI value was stored verbatim into
+// CDRConfig.FailMode with no error. CDRFailOpen() (config.go) treats ANY
+// value other than the exact string "closed" as fail-OPEN — the LESS safe
+// posture — so a typo in an operator's attempt to harden CDR to fail-closed
+// (e.g. "-cdr-fail-mode clsoed") would silently run fail-OPEN instead, with
+// no startup warning, error, or log line pointing at the mistake. The same
+// typo in config.yaml refuses to start.
+//
+// validCDRFailMode is the shared predicate: used by validateCDR (config.go)
+// for the YAML path and by initCDR (main.go) for the CLI path, so both
+// channels reject the same invalid values instead of only one of them.
+func TestValidCDRFailMode(t *testing.T) {
+	tests := []struct {
+		fm   string
+		want bool
+	}{
+		{"", true},        // unset — default (open)
+		{"open", true},    // explicit open
+		{"closed", true},  // explicit closed
+		{"clsoed", false}, // typo — must be rejected, not silently treated as open
+		{"OPEN", false},   // config.yaml's validateCDR is case-sensitive; CLI must match
+		{"Closed", false},
+		{"bogus", false},
+	}
+	for _, tt := range tests {
+		if got := validCDRFailMode(tt.fm); got != tt.want {
+			t.Errorf("validCDRFailMode(%q) = %v, want %v", tt.fm, got, tt.want)
+		}
+	}
+}
