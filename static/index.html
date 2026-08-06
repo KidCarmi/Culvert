@@ -495,10 +495,10 @@ tr.dragging  { opacity: .4; }
 .mcpx-asof{margin-left:auto;font-size:.72rem;color:var(--muted)}
 .mcpx-asof.stale{color:var(--warn)}
 .mcpx-chip{display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border-radius:999px;font-size:.7rem;font-weight:600;border:1px solid transparent;white-space:nowrap}
-.mcpx-chip.ok{background:var(--ok-tint);color:var(--ok);border-color:rgba(34,197,94,.3)}
-.mcpx-chip.warn{background:var(--warn-tint);color:var(--warn);border-color:rgba(234,179,8,.35)}
-.mcpx-chip.crit{background:var(--crit-tint);color:var(--crit);border-color:rgba(239,68,68,.35)}
-.mcpx-chip.info{background:var(--info-tint);color:var(--info);border-color:rgba(96,165,250,.3)}
+.mcpx-chip.ok{background:var(--ok-tint);color:var(--ok);border-color:color-mix(in srgb,var(--ok) 30%,transparent)}
+.mcpx-chip.warn{background:var(--warn-tint);color:var(--warn);border-color:color-mix(in srgb,var(--warn) 35%,transparent)}
+.mcpx-chip.crit{background:var(--crit-tint);color:var(--crit);border-color:color-mix(in srgb,var(--crit) 35%,transparent)}
+.mcpx-chip.info{background:var(--info-tint);color:var(--info);border-color:color-mix(in srgb,var(--info) 30%,transparent)}
 .mcpx-chip.accent{background:var(--accent-tint);color:var(--accent2);border-color:var(--accent)}
 .mcpx-chip.muted{background:var(--surface2);color:var(--muted);border-color:var(--border)}
 .mcpx-cards{display:grid;grid-template-columns:1.15fr 1fr;gap:16px;align-items:start}
@@ -508,7 +508,7 @@ tr.dragging  { opacity: .4; }
 .mcpx-card-title{font-size:.86rem;font-weight:700}
 .mcpx-triplet{display:flex;gap:8px;margin:10px 0 6px}
 .mcpx-tri{flex:1;background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:8px 10px}
-.mcpx-tri.warn{border-color:rgba(234,179,8,.4)}
+.mcpx-tri.warn{border-color:color-mix(in srgb,var(--warn) 40%,transparent)}
 .mcpx-tl{font-size:.6rem;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);margin-bottom:4px}
 .mcpx-tv{font-size:.82rem;font-weight:700}
 .mcpx-metric{display:flex;gap:16px;flex-wrap:wrap;margin-top:8px;font-size:.74rem;color:var(--muted)}
@@ -535,7 +535,7 @@ table.mcpx-act tbody tr{cursor:pointer}
 table.mcpx-act tbody tr:focus-visible{box-shadow:var(--focus-ring);outline:none}
 .mcpx-evaleff{display:inline-flex;align-items:center;gap:5px}
 .mcpx-evaleff .arw{color:var(--muted)}
-.mcpx-drawer{position:absolute;top:0;right:0;bottom:0;width:366px;background:var(--surface);border-left:1px solid var(--border);box-shadow:var(--shadow-2);z-index:5;overflow-y:auto;display:none}
+.mcpx-drawer{max-width:92vw;position:absolute;top:0;right:0;bottom:0;width:366px;background:var(--surface);border-left:1px solid var(--border);box-shadow:var(--shadow-2);z-index:5;overflow-y:auto;display:none}
 .mcpx-drawer.open{display:block}
 .mcpx-scrim{position:absolute;inset:0 366px 0 0;background:rgba(0,0,0,.28);z-index:4;display:none}
 .mcpx-scrim.open{display:block}
@@ -566,8 +566,6 @@ table.mcpx-act tbody tr:focus-visible{box-shadow:var(--focus-ring);outline:none}
 .mcpx-evc-det > summary{font-size:.68rem;color:var(--muted);cursor:pointer;margin-bottom:4px}
 .mcpx-row .v.muted{color:var(--muted);font-weight:500}
 a.mcpx-link:focus-visible,button.mcpx-attn-item:focus-visible,.mcpx-pivot:focus-visible,.mcpx-copy:focus-visible,.mcpx-back:focus-visible,.mcpx-evc-det > summary:focus-visible{box-shadow:var(--focus-ring);outline:none;border-radius:6px}
-.mcpx-legacy{margin-top:14px}
-.mcpx-legacy > summary{font-size:.72rem;color:var(--muted);cursor:pointer}
 .mcpx-sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);border:0;white-space:nowrap}
 /* ── PR-UX-4 shared MCP dangerous-action dialog (mcpxDangerDialog) ──
    Calm, compact, restrained status color. No warning-wall, no decorative risk
@@ -591,9 +589,9 @@ a.mcpx-link:focus-visible,button.mcpx-attn-item:focus-visible,.mcpx-pivot:focus-
 .mcpx-dlg-typed .mcpx-dlg-phrase{color:var(--text);font-weight:700;letter-spacing:.04em}
 .mcpx-dlg-result{margin:12px 0 0}
 .mcpx-dlg-result.on{padding:10px 12px;border-radius:8px;border:1px solid var(--border);background:var(--surface2)}
-.mcpx-dlg-result.on.ok{border-color:rgba(34,197,94,.4);background:var(--ok-tint)}
-.mcpx-dlg-result.on.crit{border-color:rgba(239,68,68,.4);background:var(--crit-tint)}
-.mcpx-dlg-result.on.warn{border-color:rgba(234,179,8,.4);background:var(--warn-tint)}
+.mcpx-dlg-result.on.ok{border-color:color-mix(in srgb,var(--ok) 40%,transparent);background:var(--ok-tint)}
+.mcpx-dlg-result.on.crit{border-color:color-mix(in srgb,var(--crit) 40%,transparent);background:var(--crit-tint)}
+.mcpx-dlg-result.on.warn{border-color:color-mix(in srgb,var(--warn) 40%,transparent);background:var(--warn-tint)}
 .mcpx-dlg-rtitle{font-size:.8rem;font-weight:700;margin-bottom:3px}
 .mcpx-dlg-rdetail{font-size:.76rem;color:var(--text);line-height:1.5}
 .mcpx-dlg-rtech{margin-top:6px}
@@ -619,6 +617,7 @@ a.mcpx-link:focus-visible,button.mcpx-attn-item:focus-visible,.mcpx-pivot:focus-
 .mcpx-rf-count .l{font-size:.58rem;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
 .mcpx-rf-count.warn .n{color:var(--warn)}.mcpx-rf-count.crit .n{color:var(--crit)}.mcpx-rf-count.ok .n{color:var(--ok)}
 table.mcpx-rf-acks{width:100%;border-collapse:collapse;font-size:.74rem;margin-top:10px}
+.mcpx-tscroll{overflow-x:auto;max-width:100%}
 table.mcpx-rf-acks th{text-align:left;font-size:.58rem;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);font-weight:700;padding:6px 10px;border-bottom:1px solid var(--border)}
 table.mcpx-rf-acks td{padding:6px 10px;border-bottom:1px solid var(--border);white-space:nowrap}
 .mcpx-rf-editor{width:100%;min-height:110px;font-family:var(--mono,monospace);font-size:.74rem;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);padding:9px 11px;resize:vertical}
@@ -3644,17 +3643,16 @@ Firefox (all platforms):
     </div>
 
     <!-- ── MCP Admin (PR-9) ────────────────────────────────────────────── -->
+    <!-- PR-UX-8: one shared, concise MCP live region. Loaders announce a short
+         status here instead of the old per-view aria-live on whole-table roots,
+         which re-announced entire tables on every filter keystroke / refresh. -->
+    <div id="mcpx-live" class="mcpx-sr" role="status" aria-live="polite" aria-atomic="true"></div>
     <div class="view" id="view-mcp-overview">
       <div class="panel"><h3>MCP Command Center</h3>
         <p class="muted">MCP gateway posture: one place to decide if you need to act. All values below come from live <code>/api/mcp/*</code> responses.</p>
-        <button class="btn" data-click="renderMCPCommandCenter">Refresh</button>
+        <button class="btn" data-click="renderMCPCommandCenter" aria-label="Refresh MCP Command Center">Refresh</button>
         <div aria-live="polite" id="mcpx-cc-live" class="mcpx-sr"></div>
         <div id="mcpx-overview-root"></div>
-        <details class="mcpx-legacy">
-          <summary>Raw overview JSON</summary>
-          <div id="mcp-overview-status" class="muted"></div>
-          <pre class="mono" id="mcp-overview-out" style="white-space:pre-wrap"></pre>
-        </details>
       </div>
     </div>
     <div class="view" id="view-mcp-servers">
@@ -3662,21 +3660,14 @@ Firefox (all platforms):
         <p class="muted">Read-only inventory for one tenant. Only safe identity and lifecycle fields are shown; raw endpoints, pinned identity material, credentials, and full tool schemas are never exposed. There are no inventory mutation actions in V1.</p>
         <div class="mcpx-rf-bar">
           <label>Tenant <input id="mcp-srv-tenant" placeholder="tenant" /></label>
-          <button class="btn sm" data-click="mcpxInvLoad">Load</button>
+          <button class="btn sm" data-click="mcpxInvLoad" aria-label="Load servers and tools for tenant">Load</button>
           <span id="mcpx-inv-asof" class="mcpx-asof"></span>
         </div>
         <div id="mcpx-inv-src" class="muted" aria-live="polite"></div>
         <div class="mcpx-actwrap has-drawer" id="mcpx-inv-wrap">
-          <div id="mcpx-inv-root" aria-live="polite"></div>
+          <div id="mcpx-inv-root"></div>
           <div class="mcpx-drawer" id="mcpx-inv-drawer" tabindex="-1" role="region" aria-label="inventory detail"></div>
         </div>
-        <details class="mcpx-legacy">
-          <summary>Raw diagnostics &amp; legacy inventory</summary>
-          <button class="btn" data-click="loadMCPServers">Load servers (raw)</button>
-          <button class="btn" data-click="loadMCPTools">Load tools (raw)</button>
-          <div id="mcp-servers-status" class="muted"></div>
-          <pre class="mono" id="mcp-servers-out" style="white-space:pre-wrap"></pre>
-        </details>
       </div>
     </div>
     <div class="view" id="view-mcp-decisions">
@@ -3685,14 +3676,8 @@ Firefox (all platforms):
         <label>Tenant <input id="mcp-dec-tenant" placeholder="tenant" /></label>
         <label>Event ID <input id="mcp-dec-event" placeholder="event_id (for explain)" /></label>
         <button class="btn" data-click="renderMCPActivity">Search</button>
-        <button class="btn" data-click="loadMCPExplain">Explain (raw)</button>
         <div aria-live="polite" id="mcpx-act-live" class="mcpx-sr"></div>
         <div id="mcpx-decisions-root"></div>
-        <details class="mcpx-legacy">
-          <summary>Raw decisions / explain JSON</summary>
-          <div id="mcp-decisions-status" class="muted"></div>
-          <pre class="mono" id="mcp-decisions-out" style="white-space:pre-wrap"></pre>
-        </details>
       </div>
     </div>
     <div class="view" id="view-mcp-policies">
@@ -3708,19 +3693,7 @@ Firefox (all platforms):
           <button class="btn sm ghost" data-click="mcpxPolRefreshActive">Refresh active</button>
           <span id="mcpx-pol-asof" class="mcpx-asof"></span>
         </div>
-        <div id="mcpx-pol-root" aria-live="polite"></div>
-        <details class="mcpx-legacy">
-          <summary>Raw diagnostics &amp; legacy JSON editor</summary>
-          <label>Capability
-            <select id="mcp-pol-cap"><option>gateway</option><option>management</option></select></label>
-          <button class="btn" data-click="loadMCPPolicy">Current policy</button>
-          <div><textarea id="mcp-pol-candidate" rows="6" style="width:100%" placeholder='candidate policy JSON'></textarea></div>
-          <button class="btn" data-min-role="operator" data-click="mcpValidate">Validate</button>
-          <button class="btn" data-min-role="operator" data-click="mcpSimulate">Simulate (candidate)</button>
-          <button class="btn" data-min-role="operator" data-click="mcpCompare">Compare active&rarr;candidate</button>
-          <div id="mcp-policies-status" class="muted"></div>
-          <pre class="mono" id="mcp-policies-out" style="white-space:pre-wrap"></pre>
-        </details>
+        <div id="mcpx-pol-root"></div>
       </div>
     </div>
     <div class="view" id="view-mcp-approvals">
@@ -3728,7 +3701,7 @@ Firefox (all platforms):
         <p class="muted">One list for operational and publication approvals. Each item keeps its real kind and state. Decisions are four-eyes (a requester may not approve their own request) and require durable event storage; publication of an approved candidate is a separate step from approving it.</p>
         <div class="mcpx-rf-bar">
           <label>Tenant <input id="mcp-appr-tenant" placeholder="tenant" /></label>
-          <button class="btn sm" data-click="mcpxApprLoad">Load</button>
+          <button class="btn sm" data-click="mcpxApprLoad" aria-label="Load approvals for tenant">Load</button>
           <span id="mcpx-appr-asof" class="mcpx-asof"></span>
         </div>
         <div class="mcpx-appr-filters" role="tablist" aria-label="Approval filter">
@@ -3742,45 +3715,20 @@ Firefox (all platforms):
         </div>
         <div id="mcpx-appr-src" class="muted" aria-live="polite"></div>
         <div class="mcpx-actwrap has-drawer" id="mcpx-appr-wrap">
-          <div id="mcpx-appr-root" aria-live="polite"></div>
+          <div id="mcpx-appr-root"></div>
           <div class="mcpx-drawer" id="mcpx-appr-drawer" tabindex="-1" role="region" aria-label="approval detail"></div>
         </div>
-        <details class="mcpx-legacy">
-          <summary>Raw diagnostics &amp; legacy operational list</summary>
-          <button class="btn" data-click="loadMCPApprovals">Load (legacy operational list)</button>
-          <div id="mcp-approvals-status" class="muted"></div>
-          <div id="mcp-approvals-list"></div>
-          <div id="mcp-approval-dialog" style="display:none;border:1px solid var(--border,#ccc);padding:10px;margin-top:10px"></div>
-        </details>
       </div>
     </div>
     <div class="view" id="view-mcp-health">
       <div class="panel"><h3>MCP Health &amp; Durability</h3>
         <p class="muted">Gateway and Management runtime and durability are capability-isolated and shown independently. Detailed fleet acknowledgement lives on the Rollout &amp; Fleet screen; this view links to it rather than duplicating it.</p>
         <div class="mcpx-rf-bar">
-          <button class="btn sm" data-click="mcpxHealthLoad">Refresh</button>
+          <button class="btn sm" data-click="mcpxHealthLoad" aria-label="Refresh MCP health">Refresh</button>
           <span id="mcpx-health-asof" class="mcpx-asof"></span>
         </div>
-        <div id="mcpx-health-root" aria-live="polite"></div>
-        <details class="mcpx-legacy">
-          <summary>Raw diagnostics &amp; legacy health JSON</summary>
-          <button class="btn" data-click="loadMCPHealth">Refresh (raw)</button>
-          <div id="mcp-health-status" class="muted"></div>
-          <pre class="mono" id="mcp-health-out" style="white-space:pre-wrap"></pre>
-        </details>
+        <div id="mcpx-health-root"></div>
       </div>
-      <details class="mcpx-legacy panel"><summary>Signed CP&#8594;DP Distribution &amp; Rollback (admin)</summary>
-        <button class="btn" data-click="loadMCPDistribution">Refresh status</button>
-        <p class="muted">Read-only signed-distribution status per capability: content hash, epoch, revision tuple, signing key id, minimum DP version, rollback availability. No private key, raw signature, or full raw snapshot is exposed. Rollback uses the four-eyes publication workflow (admin only); Management MCP may read this health but never publish or roll back.</p>
-        <div id="mcp-distribution-status" class="muted"></div>
-        <pre class="mono" id="mcp-distribution-out" style="white-space:pre-wrap"></pre>
-        <div data-min-role="admin">
-          <h4>Rollback to a retained snapshot</h4>
-          <p class="muted" style="margin:0 0 8px">The confirmation binds the exact retained target from the signed-distribution status &#8212; a target hash is never typed in by hand or fabricated. When no retained target exists on this node, rollback is not offered.</p>
-          <select id="mcp-rollback-capability"><option value="gateway">gateway</option><option value="management">management</option></select>
-          <button class="btn" data-min-role="admin" data-click="mcpxOpenRollback">Request rollback&#8230;</button>
-        </div>
-      </details>
     </div>
     <div class="view" id="view-mcp-rollout">
       <!-- PR-UX-5 truthful Rollout & Fleet: structured mode triad, scope, candidate
@@ -3792,82 +3740,37 @@ Firefox (all platforms):
           <button type="button" class="mcpx-rf-captab" data-click="mcpxRfSelectCap" data-arg="management" role="tab" aria-selected="false">Management</button>
         </span>
         <input type="hidden" id="mcpx-rf-cap" value="gateway">
-        <button class="btn sm ghost" data-click="mcpxRenderRolloutFleet">Refresh</button>
+        <button class="btn sm ghost" data-click="mcpxRenderRolloutFleet" aria-label="Refresh rollout and fleet state">Refresh</button>
         <span id="mcpx-rf-asof" class="mcpx-asof"></span>
       </div>
-      <div id="mcpx-rf-root" aria-live="polite"></div>
-      <details class="mcpx-legacy">
-        <summary>Raw diagnostics &amp; legacy panels</summary>
-      <div class="panel"><h3>Rollout Overview &amp; Mode &amp; Scope</h3>
-        <button class="btn" data-click="loadMCPRollout">Refresh</button>
-        <p class="muted">PR-11 guarded execution (Model A / local-client only). Disabled &#8594; Observe &#8594; Shadow &#8594; Canary &#8594; Production. Observe never executes; Shadow/Canary execute only inside an exact approved scope; Production is qualification-locked. Shows desired / local / fleet-effective mode, scope revision + hash, signed snapshot hash/epoch, and DP acknowledgement counts.</p>
-        <div id="mcp-rollout-status" class="muted"></div>
-        <pre class="mono" id="mcp-rollout-out" style="white-space:pre-wrap"></pre>
-      </div>
-      <div class="panel"><h3>Shadow Decisions &amp; Canary Health &amp; Hard Failures</h3>
-        <p class="muted">Shadow records the evaluated policy action separately from the effective (allow-and-record) action; the fixed hard-failure set always blocks. Canary enforces all nine policy actions inside scope. Counts only — never a raw request/response, token, credential, or matched secret.</p>
-        <div id="mcp-executions-status" class="muted"></div>
-        <pre class="mono" id="mcp-executions-out" style="white-space:pre-wrap"></pre>
-        <button class="btn" data-click="loadMCPExecutions">Refresh executions</button>
-      </div>
-      <div class="panel"><h3>Executions &amp; Upstream Health</h3>
-        <button class="btn" data-click="loadMCPUpstreamHealth">Refresh upstream</button>
-        <div id="mcp-upstream-status" class="muted"></div>
-        <pre class="mono" id="mcp-upstream-out" style="white-space:pre-wrap"></pre>
-      </div>
-      <div class="panel"><h3>Production Qualification Status</h3>
-        <p class="muted"><strong>Production locked &#8212; qualification required.</strong> Production is a real mode semantic but is unreachable without a machine-verifiable qualification receipt issued by the separate Production Qualification gate; this build ships no issuer. No config flag, environment variable, CLI flag, API parameter, or GUI control can bypass it. The evidence windows below are measurable targets, not completed rollout evidence.</p>
-        <button class="btn" data-click="loadMCPRolloutEvidence">Refresh evidence</button>
-        <div id="mcp-evidence-status" class="muted"></div>
-        <pre class="mono" id="mcp-evidence-out" style="white-space:pre-wrap"></pre>
-      </div>
-      <div class="panel" data-min-role="admin"><h3>Mode Transition (promotion / demotion)</h3>
-        <p class="muted">A promotion is one stage at a time and rides the signed publication path (four-eyes approval + durable commit + sign + distribute + DP-ack). Widening discloses the exact scope delta, newly executable/enforced operation classes, ServerIDs/tool fingerprints, credential-power implications, base/snapshot revision, rollback target, and satisfied/missing evidence. There is no generic Production-enable control.</p>
-        <select id="mcp-rollout-cap"><option value="gateway">gateway</option><option value="management">management</option></select>
-        <select id="mcp-rollout-tomode"><option value="observe">observe</option><option value="shadow">shadow</option><option value="canary">canary</option><option value="production">production</option><option value="disabled">disabled</option></select>
-        <span id="mcp-transition-out" class="muted"></span>
-      </div>
-      <div class="panel" data-min-role="admin"><h3>Emergency Controls</h3>
-        <p class="muted">Emergency actions <strong>narrow only</strong> &#8212; they immediately stop new admission (node-local, no CP round trip) and can never promote, widen scope, or enable execution. Each control opens a confirmation that states the exact effect before you commit.</p>
-        <select id="mcp-emergency-cap"><option value="gateway">gateway</option><option value="management">management</option></select>
-        <span id="mcp-emergency-out" class="muted"></span>
-      </div>
-      </details>
+      <div id="mcpx-rf-root"></div>
+      <!-- PR-UX-8: raw rollout/executions/upstream/evidence dumps and the duplicate
+           legacy transition/emergency panels removed; the structured Rollout & Fleet
+           cards are the product surface. The two action status lines below persist a
+           card re-render and remain the write targets of the structured danger dialogs. -->
+      <div class="mcpx-source" style="margin-top:8px"><span id="mcp-transition-out" class="muted"></span> <span id="mcp-emergency-out" class="muted"></span></div>
     </div>
     <div class="view" id="view-mcp-management">
       <div class="panel"><h3>Management MCP Access</h3>
         <p class="muted">Management MCP is non-mutating in V1. This is an access and capability inventory, not an MCP client console: there are no tool-invocation, mutation, publication, or activation controls.</p>
         <div class="mcpx-rf-bar">
-          <button class="btn sm" data-click="mcpxMgmtLoad">Refresh</button>
+          <button class="btn sm" data-click="mcpxMgmtLoad" aria-label="Refresh management access">Refresh</button>
           <span id="mcpx-mgmt-asof" class="mcpx-asof"></span>
         </div>
-        <div id="mcpx-mgmt-root" aria-live="polite"></div>
-        <details class="mcpx-legacy">
-          <summary>Raw diagnostics &amp; legacy access</summary>
-          <button class="btn" data-click="loadMCPManagement">Refresh (raw)</button>
-          <div id="mcp-management-status" class="muted"></div>
-          <pre class="mono" id="mcp-management-out" style="white-space:pre-wrap"></pre>
-        </details>
+        <div id="mcpx-mgmt-root"></div>
       </div>
     </div>
     <div class="view" id="view-mcp-settings">
       <div class="panel"><h3>MCP Listener Settings</h3>
         <p class="muted">Gateway and Management are separate and default disabled. Storing configuration is node-local only: it does NOT bind, activate, or restart a live listener, and it never distributes CP to DP. Management mutation stays disabled in V1 and cannot be enabled here. No wildcard bind and no shared endpoint; the appliance validates and replaces the complete configuration atomically.</p>
         <div class="mcpx-rf-bar">
-          <button class="btn sm" data-click="mcpxCfgLoad">Load current</button>
+          <button class="btn sm" data-click="mcpxCfgLoad" aria-label="Load current listener configuration">Load current</button>
           <button class="btn sm primary" data-min-role="admin" data-click="mcpxCfgSave">Store node-local configuration</button>
           <span id="mcpx-cfg-asof" class="mcpx-asof"></span>
         </div>
         <div id="mcpx-cfg-src" class="muted" aria-live="polite"></div>
-        <div id="mcpx-cfg-root" aria-live="polite"></div>
+        <div id="mcpx-cfg-root"></div>
         <div id="mcpx-cfg-result" class="mcpx-dlg-result" role="status" aria-live="polite" aria-atomic="true"></div>
-        <details class="mcpx-legacy">
-          <summary>Raw diagnostics &amp; legacy JSON editor</summary>
-          <button class="btn" data-click="loadMCPConfig">Load current (raw)</button>
-          <div><textarea id="mcp-cfg-json" rows="16" style="width:100%" placeholder="MCP config JSON"></textarea></div>
-          <button class="btn" data-min-role="admin" data-click="mcpSaveConfig">Apply raw (local only)</button>
-          <div id="mcp-settings-status" class="muted"></div>
-        </details>
       </div>
     </div>
 
@@ -5177,11 +5080,6 @@ document.addEventListener('click', e => {
   // No eval, no Function(), fully CSP-compliant.
   switch (fn) {
     // ── MCP admin (PR-9) ──
-    case 'loadMCPOverview':   loadMCPOverview(); break;
-    case 'loadMCPServers':    loadMCPServers(); break;
-    case 'loadMCPTools':      loadMCPTools(); break;
-    case 'loadMCPDecisions':  loadMCPDecisions(); break;
-    case 'loadMCPExplain':    loadMCPExplain(); break;
     case 'renderMCPCommandCenter': renderMCPCommandCenter(); break;
     case 'renderMCPActivity': renderMCPActivity(); break;
     // PR-UX-5 Rollout & Fleet screen
@@ -5190,13 +5088,6 @@ document.addEventListener('click', e => {
     case 'mcpxRfValidateScope': mcpxRfValidateScope(); break;
     case 'mcpxOpenDecision':  mcpxOpenDecision(arg); break;
     case 'mcpxCloseDrawer':   mcpxCloseDrawer(); break;
-    case 'loadMCPPolicy':     loadMCPPolicy(); break;
-    case 'mcpValidate':       mcpPolicyAction('validate'); break;
-    case 'mcpSimulate':       mcpPolicyAction('simulate'); break;
-    case 'mcpCompare':        mcpPolicyAction('compare'); break;
-    case 'loadMCPApprovals':  loadMCPApprovals(); break;
-    case 'mcpApproveReq':     mcpApprovalDecide(arg, 'approve'); break;
-    case 'mcpRejectReq':      mcpApprovalDecide(arg, 'reject'); break;
     case 'mcpxApprLoad':      mcpxApprLoad(); break;
     case 'mcpxApprSetFilter': mcpxApprSetFilter(arg); break;
     case 'mcpxApprCloseDrawer': mcpxApprCloseDrawer(); break;
@@ -5214,12 +5105,6 @@ document.addEventListener('click', e => {
     case 'mcpxPolSimulate':   mcpxPolSimulate(); break;
     case 'mcpxPolCompare':    mcpxPolCompare(); break;
     case 'mcpxPolCreateRequest': mcpxPolCreateRequest(); break;
-    case 'loadMCPHealth':     loadMCPHealth(); break;
-    case 'loadMCPDistribution': loadMCPDistribution(); break;
-    case 'loadMCPRollout':    loadMCPRollout(); break;
-    case 'loadMCPExecutions': loadMCPExecutions(); break;
-    case 'loadMCPUpstreamHealth': loadMCPUpstreamHealth(); break;
-    case 'loadMCPRolloutEvidence': loadMCPRolloutEvidence(); break;
     // PR-UX-4: dangerous MCP mutations route through the shared danger dialog.
     case 'mcpxOpenTransition': mcpxOpenTransition(); break;
     case 'mcpxOpenEmergencyDisable': mcpxOpenEmergencyDisable(); break;
@@ -5228,9 +5113,6 @@ document.addEventListener('click', e => {
     case 'mcpxOpenRollback':  mcpxOpenRollback(); break;
     case 'mcpxDangerConfirm': mcpxDangerConfirm(); break;
     case 'mcpxDangerCancel':  mcpxDangerCancel(); break;
-    case 'loadMCPManagement': loadMCPManagement(); break;
-    case 'loadMCPConfig':     loadMCPConfig(); break;
-    case 'mcpSaveConfig':     mcpSaveConfig(); break;
 
     // ── Global / nav ──
     case 'toggleTheme':       toggleTheme(); break;
@@ -5832,6 +5714,33 @@ document.querySelectorAll('.nav-item').forEach(el => {
   });
 });
 
+// PR-UX-8: MCP deep-link + browser Back/Forward. popstate re-applies the parsed
+// MCP route (READ-ONLY restore; never replays a POST or reopens an action dialog).
+// The initial apply runs on DOMContentLoaded, after every mcpx state initializer
+// in this inline script has executed, so restore sees a fully-wired surface.
+window.addEventListener('popstate', function(){ var r = mcpxRouteParse(location.hash); if (r) mcpxApplyRoute(r); });
+document.addEventListener('DOMContentLoaded', function(){ var r = mcpxRouteParse(location.hash); if (r) mcpxApplyRoute(r); });
+
+// PR-UX-8 a11y: ARIA tablist keyboard model for the MCP capability/filter tablists.
+// Arrow/Home/End move focus and activate (activation-follows-focus); Enter/Space
+// already activate because the tabs are <button>s. Scoped to MCP tablists only.
+document.addEventListener('keydown', function(e){
+  var t = e.target;
+  if (!t || !t.getAttribute || t.getAttribute('role') !== 'tab') return;
+  var list = t.closest && t.closest('[role="tablist"]');
+  if (!list || (!list.classList.contains('mcpx-rf-caps') && !list.classList.contains('mcpx-appr-filters'))) return;
+  var tabs = Array.prototype.slice.call(list.querySelectorAll('[role="tab"]'));
+  var i = tabs.indexOf(t); if (i < 0) return;
+  var ni = -1;
+  if (e.key === 'ArrowRight' || e.key === 'ArrowDown') ni = (i + 1) % tabs.length;
+  else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') ni = (i - 1 + tabs.length) % tabs.length;
+  else if (e.key === 'Home') ni = 0;
+  else if (e.key === 'End') ni = tabs.length - 1;
+  else return;
+  e.preventDefault();
+  var nt = tabs[ni]; if (nt) { nt.focus(); nt.click(); }
+});
+
 // Per-view unsaved-changes guards (M3 S3): a view registers a beforeLeave
 // hook that returns `true` synchronously when there is nothing to protect
 // (clean navigation stays synchronous) or a Promise<boolean> after asking
@@ -5853,124 +5762,13 @@ const viewLeaveGuards = {
   },
 };
 
-// ── MCP admin (PR-9) ─────────────────────────────────────────────────────────
-// All rendering is textContent-based (XSS-safe). Every fetch handles loading,
-// permission-denied (403), bounded error, and empty states. No raw HTML from
-// server-controlled values; no secrets/arguments/output are ever requested.
-function mcpSetStatus(id, msg) { const e = document.getElementById(id); if (e) e.textContent = msg || ''; }
-function mcpShow(id, obj) { const e = document.getElementById(id); if (e) e.textContent = (obj == null) ? '' : JSON.stringify(obj, null, 2); }
-async function mcpGet(url, statusId, outId) {
-  mcpSetStatus(statusId, 'Loading…'); if (outId) mcpShow(outId, null);
-  try {
-    const r = await fetch(url, { credentials: 'same-origin' });
-    if (r.status === 403) { mcpSetStatus(statusId, 'Permission denied.'); return null; }
-    const txt = await r.text();
-    if (!r.ok) { mcpSetStatus(statusId, 'Error (' + r.status + '): ' + txt.slice(0, 200)); return null; }
-    let data; try { data = JSON.parse(txt); } catch (e) { mcpSetStatus(statusId, 'Malformed response'); return null; }
-    const empty = Array.isArray(data) ? data.length === 0 : (data && Object.keys(data).length === 0);
-    mcpSetStatus(statusId, empty ? 'No results.' : '');
-    if (outId) mcpShow(outId, data);
-    return data;
-  } catch (e) { mcpSetStatus(statusId, 'Request failed.'); return null; }
-}
-async function mcpPost(url, body, statusId) {
-  mcpSetStatus(statusId, 'Working…');
-  try {
-    const r = await fetch(url, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': (window.csrfToken || '') }, body: JSON.stringify(body) });
-    if (r.status === 403) { mcpSetStatus(statusId, 'Permission denied.'); return null; }
-    const txt = await r.text();
-    if (!r.ok) { mcpSetStatus(statusId, 'Error (' + r.status + '): ' + txt.slice(0, 200)); return null; }
-    mcpSetStatus(statusId, 'Done.');
-    try { return JSON.parse(txt); } catch (e) { return {}; }
-  } catch (e) { mcpSetStatus(statusId, 'Request failed.'); return null; }
-}
-function mcpTenantVal(id) { const e = document.getElementById(id); return e ? encodeURIComponent((e.value || '').trim()) : ''; }
-function loadMCPOverview() { mcpGet('/api/mcp/overview', 'mcp-overview-status', 'mcp-overview-out'); }
-function loadMCPHealth() { mcpGet('/api/mcp/health', 'mcp-health-status', 'mcp-health-out'); }
-function loadMCPDistribution() { mcpGet('/api/mcp/distribution', 'mcp-distribution-status', 'mcp-distribution-out'); }
-// PR-11 rollout GUI consumers (safe read-only rendering via mcpGet). All MCP
-// MUTATION controls (transition / emergency disable+clear / rehearsal / rollback)
-// route through the shared PR-UX-4 danger dialog (mcpxOpen* → mcpxDangerDialog)
-// defined near the end of this file; they are CSRF-guarded and admin-only.
-function loadMCPRollout() { mcpGet('/api/mcp/rollout', 'mcp-rollout-status', 'mcp-rollout-out'); }
-function loadMCPExecutions() { mcpGet('/api/mcp/executions', 'mcp-executions-status', 'mcp-executions-out'); }
-function loadMCPUpstreamHealth() { mcpGet('/api/mcp/upstream-health', 'mcp-upstream-status', 'mcp-upstream-out'); }
-function loadMCPRolloutEvidence() { mcpGet('/api/mcp/rollout/evidence', 'mcp-evidence-status', 'mcp-evidence-out'); }
-function loadMCPManagement() { mcpGet('/api/mcp/management-access', 'mcp-management-status', 'mcp-management-out'); }
-function loadMCPServers() { const t = mcpTenantVal('mcp-srv-tenant'); if (!t) { mcpSetStatus('mcp-servers-status', 'Enter a tenant.'); return; } mcpGet('/api/mcp/servers?tenant=' + t, 'mcp-servers-status', 'mcp-servers-out'); }
-function loadMCPTools() { const t = mcpTenantVal('mcp-srv-tenant'); if (!t) { mcpSetStatus('mcp-servers-status', 'Enter a tenant.'); return; } mcpGet('/api/mcp/tools?tenant=' + t, 'mcp-servers-status', 'mcp-servers-out'); }
-function loadMCPDecisions() { const t = mcpTenantVal('mcp-dec-tenant'); if (!t) { mcpSetStatus('mcp-decisions-status', 'Enter a tenant.'); return; } mcpGet('/api/mcp/decisions?tenant=' + t, 'mcp-decisions-status', 'mcp-decisions-out'); }
-function loadMCPExplain() { const t = mcpTenantVal('mcp-dec-tenant'); const ev = document.getElementById('mcp-dec-event'); const id = ev ? encodeURIComponent((ev.value || '').trim()) : ''; if (!t || !id) { mcpSetStatus('mcp-decisions-status', 'Enter tenant and event id.'); return; } mcpGet('/api/mcp/decision-explain?tenant=' + t + '&event_id=' + id, 'mcp-decisions-status', 'mcp-decisions-out'); }
-function loadMCPPolicy() { const c = document.getElementById('mcp-pol-cap'); const cap = c ? c.value : 'gateway'; mcpGet('/api/mcp/policy?capability=' + encodeURIComponent(cap), 'mcp-policies-status', 'mcp-policies-out'); }
-async function mcpPolicyAction(mode) {
-  const c = document.getElementById('mcp-pol-cap'); const cap = c ? c.value : 'gateway';
-  const ta = document.getElementById('mcp-pol-candidate'); let cand;
-  try { cand = JSON.parse(ta.value || 'null'); } catch (e) { mcpSetStatus('mcp-policies-status', 'Candidate is not valid JSON.'); return; }
-  const res = await mcpPost('/api/mcp/policy-simulate', { mode: mode, capability: cap, candidate: cand, cases: [] }, 'mcp-policies-status');
-  if (res) mcpShow('mcp-policies-out', res);
-}
-async function loadMCPApprovals() {
-  const t = mcpTenantVal('mcp-appr-tenant'); const list = document.getElementById('mcp-approvals-list');
-  if (list) list.textContent = '';
-  if (!t) { mcpSetStatus('mcp-approvals-status', 'Enter a tenant.'); return; }
-  const data = await mcpGet('/api/mcp/approvals?tenant=' + t, 'mcp-approvals-status', null);
-  if (!Array.isArray(data)) return;
-  if (data.length === 0) { mcpSetStatus('mcp-approvals-status', 'No approvals.'); return; }
-  data.slice(0, 500).forEach(function (a) {
-    const row = document.createElement('div'); row.style.borderBottom = '1px solid var(--border,#ccc)'; row.style.padding = '6px 0';
-    // MCP-POLICY-007 dialog fields, all rendered via textContent (safe).
-    const fields = [['action', a.action], ['resource', a.resource], ['server', a.server_id], ['tool', a.tool_fingerprint],
-      ['op-class', a.operation_class], ['risk', a.risk_class], ['requester', a.requester], ['cred-profile', a.credential_profile_ref],
-      ['power-ceiling', a.power_ceiling], ['policy-rev', a.policy_revision], ['catalog-rev', a.catalog_revision],
-      ['event-id', a.decision_event_id], ['state', a.state], ['expiry', a.expiry_unix_nano]];
-    const line = document.createElement('div'); line.className = 'mono'; line.style.fontSize = '.82rem';
-    line.textContent = fields.filter(function (f) { return f[1] != null && f[1] !== ''; }).map(function (f) { return f[0] + '=' + f[1]; }).join('  ');
-    row.appendChild(line);
-    if (a.state === 'pending') {
-      const ap = document.createElement('button'); ap.className = 'btn'; ap.textContent = 'Approve'; ap.dataset.click = 'mcpApproveReq'; ap.dataset.arg = a.id;
-      const rj = document.createElement('button'); rj.className = 'btn'; rj.textContent = 'Reject'; rj.dataset.click = 'mcpRejectReq'; rj.dataset.arg = a.id;
-      ap.dataset.destructive = (a.risk_class === 'destructive' || a.operation_class === 'destructive') ? '1' : '';
-      row.appendChild(ap); row.appendChild(rj);
-    }
-    list.appendChild(row);
-  });
-}
-async function mcpApprovalDecide(id, action) {
-  if (action === 'approve') {
-    const btn = document.querySelector('[data-click="mcpApproveReq"][data-arg="' + id + '"]');
-    if (btn && btn.dataset.destructive === '1') {
-      const ok = window.confirm('Approve DESTRUCTIVE request ' + id + '? This names a destructive/production action.');
-      if (!ok) return;
-    }
-  }
-  const t = mcpTenantVal('mcp-appr-tenant');
-  const res = await mcpPost('/api/mcp/approval-decision', { request_id: id, tenant: decodeURIComponent(t), action: action, reason: '' }, 'mcp-approvals-status');
-  if (res) loadMCPApprovals();
-}
-function loadMCPConfig() {
-  fetch('/api/mcp/config', { credentials: 'same-origin' }).then(function (r) {
-    if (r.status === 403) { mcpSetStatus('mcp-settings-status', 'Permission denied.'); return null; }
-    return r.text();
-  }).then(function (txt) {
-    if (txt == null) return;
-    const ta = document.getElementById('mcp-cfg-json'); if (ta) { try { ta.value = JSON.stringify(JSON.parse(txt), null, 2); } catch (e) { ta.value = txt; } }
-    mcpSetStatus('mcp-settings-status', 'Loaded (local_only).');
-  }).catch(function () { mcpSetStatus('mcp-settings-status', 'Request failed.'); });
-}
-async function mcpSaveConfig() {
-  const ta = document.getElementById('mcp-cfg-json'); let cfg;
-  try { cfg = JSON.parse(ta.value || '{}'); } catch (e) { mcpSetStatus('mcp-settings-status', 'Config is not valid JSON.'); return; }
-  mcpSetStatus('mcp-settings-status', 'Applying (local only)…');
-  try {
-    const r = await fetch('/api/mcp/config', { method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': (window.csrfToken || '') }, body: JSON.stringify(cfg) });
-    const txt = await r.text();
-    if (r.status === 403) { mcpSetStatus('mcp-settings-status', 'Permission denied.'); return; }
-    mcpSetStatus('mcp-settings-status', r.ok ? 'Applied locally (distribution_not_implemented).' : ('Error (' + r.status + '): ' + txt.slice(0, 200)));
-  } catch (e) { mcpSetStatus('mcp-settings-status', 'Request failed.'); }
-}
-
 function switchView(name) {
-  if (name !== currentView) {
+  var mcpxPrevView = currentView;   // PR-UX-8: for MCP route push/replace decision
+  // PR-UX-8: a READ-ONLY route restore (Back/Forward/deep link) is navigation the
+  // user already committed; do not gate it behind a view leave-guard discard
+  // prompt. The deferred re-entry would run with mcpxRouteApplying cleared and
+  // both double-load and push a spurious history entry.
+  if (name !== currentView && !mcpxRouteApplying) {
     const guard = viewLeaveGuards[currentView];
     if (guard) {
       const res = guard();
@@ -6008,15 +5806,16 @@ function switchView(name) {
   if (name === 'pac')            loadPACConfig();
   if (name === 'policy-tester')  loadPolicyProviderOptions();
   if (name === 'ca-mgmt')        loadCAMgmt();
-  if (name === 'mcp-overview')   { renderMCPCommandCenter(); loadMCPOverview(); }
-  if (name === 'mcp-rollout')    mcpxRenderRolloutFleet();
-  if (name === 'mcp-decisions')  { renderMCPActivity(); /* awaits tenant input */ }
-  if (name === 'mcp-approvals')  { if (mcpxApprTenant()) mcpxApprLoad(); /* else awaits tenant input */ }
-  if (name === 'mcp-servers')    { if (mcpxInvTenant()) mcpxInvLoad(); /* else awaits tenant input */ }
-  if (name === 'mcp-health')     mcpxHealthLoad();
-  if (name === 'mcp-management')  mcpxMgmtLoad();
-  if (name === 'mcp-settings')    mcpxCfgLoad();
-  if (name === 'mcp-policies')    mcpxPolRefreshActive();
+  // PR-UX-8: MCP views load + URL-sync through the shared navigation-state model.
+  // During a route restore (mcpxRouteApplying) the auto-load and the URL push are
+  // suppressed: mcpxRestoreRoute owns loading, and the route is already in the URL.
+  if (mcpxIsMcpView(name)) {
+    if (!mcpxRouteApplying) { mcpxViewAutoLoad(name); mcpxSyncRouteFromNav(name, mcpxPrevView); }
+  } else if (!mcpxRouteApplying && String(location.hash || '').indexOf('#mcp/') === 0) {
+    // Leaving MCP for a non-MCP view: drop the stale #mcp/ fragment so a reload or
+    // bookmark shows this non-MCP view, not the previous MCP route.
+    try { history.replaceState(null, '', location.pathname + location.search); } catch (_) {}
+  }
   if (name === 'upstream')       loadUpstream();
   if (name === 'cluster')        loadCluster();
   if (name === 'cdr')            loadCDRData();
@@ -17993,6 +17792,12 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
    declarations so the CSP-safe delegated dispatch resolves them. */
 
 function mcpxEl(tag, cls, txt){ var e=document.createElement(tag); if(cls) e.className=cls; if(txt!=null) e.textContent=txt; return e; }
+// PR-UX-8: concise announcement into the single shared MCP live region. Replaces the
+// old per-view aria-live on whole-table roots (which re-announced entire tables).
+function mcpxAnnounce(msg){ var e=document.getElementById('mcpx-live'); if(!e) return; e.textContent=''; e.textContent=String(msg==null?'':msg); }
+// PR-UX-8 responsive: give a wide card-hosted table its own horizontal scroll so it
+// never forces page-level horizontal overflow at 1280 and narrower.
+function mcpxScrollWrap(tbl){ var w=mcpxEl('div','mcpx-tscroll'); w.appendChild(tbl); return w; }
 function mcpxChip(txt, kind){ return mcpxEl('span','mcpx-chip '+(kind||'muted'), txt); }
 function mcpxKv(k, v){ var r=mcpxEl('div','mcpx-row'); r.appendChild(mcpxEl('span','k',k)); r.appendChild(mcpxEl('span','v', (v==null||v==='')?'-':String(v))); return r; }
 function mcpxNow(){ var d=new Date(), p=function(n){return String(n).padStart(2,'0');}; return p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds()); }
@@ -18152,6 +17957,160 @@ function mcpxShort(v){ v=String(v==null?'':v); return v.length>22 ? v.slice(0,12
 function mcpxCapBack(){ while(mcpxNavBack.length>mcpxMaxDepth) mcpxNavBack.shift(); }
 // Cap the drawer stack while ALWAYS preserving the base Decision (back-to-activity).
 function mcpxCapFrames(){ while(mcpxFrames.length>mcpxMaxDepth) mcpxFrames.splice(1,1); }
+
+// ═══ PR-UX-8: MCP navigation-state model (deep links + browser history) ═══════
+// One namespaced, allowlisted URL-fragment router for the MCP surface ONLY. Every
+// serialized value is allowlisted, length-bounded, type-validated, encoded, and
+// defensively decoded. Restoration performs READS ONLY and never executes an
+// action; malformed / oversized / unknown state falls back to a safe view without
+// throwing. Candidate policy source, simulation corpus, config drafts, tokens,
+// credentials, raw errors and free-form text are NEVER serialized. Non-MCP views
+// are untouched by this router.
+var MCPX_V2S={'mcp-overview':'overview','mcp-decisions':'activity','mcp-servers':'servers','mcp-policies':'policy','mcp-approvals':'approvals','mcp-health':'health','mcp-rollout':'rollout','mcp-management':'management','mcp-settings':'settings'};
+var MCPX_S2V={}; Object.keys(MCPX_V2S).forEach(function(k){ MCPX_S2V[MCPX_V2S[k]]=k; });
+var mcpxRouteApplying=false;   // reentrancy guard: switchView must not re-push while restoring
+var mcpxActFilterKeys=['principal_id','agent_id','client_id','tool_name','tool_fingerprint','server_id','rule_id','credential_profile_ref','policy_snapshot_hash'];
+function mcpxIsMcpView(name){ return !!MCPX_V2S[name]; }
+// Bounded validators: return the clean value or null (which drops the key).
+function mcpxvId(v,max){ v=String(v==null?'':v); if(!v||v.length>(max||128)) return null; return /^[A-Za-z0-9._:@/\-]+$/.test(v)?v:null; }
+function mcpxvEnum(v,set){ v=String(v==null?'':v); return set.indexOf(v)>=0?v:null; }
+// Per-slug allowlist. A key absent here is never serialized and never restored.
+var MCPX_ALLOW={
+  overview:{},
+  activity:(function(){ var a={tenant:function(v){return mcpxvId(v,128);}, event:function(v){return mcpxvId(v,160);}}; mcpxActFilterKeys.forEach(function(k){ a[k]=function(v){return mcpxvId(v,200);}; }); return a; })(),
+  servers:{tenant:function(v){return mcpxvId(v,128);}, server:function(v){return mcpxvId(v,200);}, tool:function(v){return mcpxvId(v,200);}, drawer:function(v){return mcpxvEnum(v,['server','tool']);}, disp:function(v){return mcpxvEnum(v,['','usable','quarantined','review_required']);}},
+  policy:{capability:function(v){return mcpxvEnum(v,['gateway','management']);}, tenant:function(v){return mcpxvId(v,128);}},
+  approvals:{tenant:function(v){return mcpxvId(v,128);}, apprfilter:function(v){return mcpxvEnum(v,['all','operational','publication','pending','approved','rejected','expired']);}, request:function(v){return mcpxvId(v,160);}},
+  health:{section:function(v){return mcpxvEnum(v,['gateway','management','distribution']);}},
+  rollout:{capability:function(v){return mcpxvEnum(v,['gateway','management']);}, section:function(v){return mcpxvEnum(v,['mode','fleet','qualification']);}, hash:function(v){return mcpxvId(v,80);}, req:function(v){return mcpxvId(v,80);}},
+  management:{role:function(v){return mcpxvEnum(v,['','viewer','operator','admin']);}, cls:function(v){return mcpxvId(v,64);}},
+  settings:{tab:function(v){return mcpxvEnum(v,['gateway','management']);}}
+};
+// mcpxRouteParse: defensively parse a "#mcp/<slug>?k=v" fragment. Returns
+// {slug,view,params} or null (not-MCP / unknown-slug). Never throws.
+function mcpxRouteParse(hash){
+  hash=String(hash||''); var i=hash.indexOf('#mcp/'); if(i<0) return null;
+  var rest=hash.slice(i+5), q=rest.indexOf('?'), slug=(q<0?rest:rest.slice(0,q));
+  slug=slug.replace(/[#/].*$/,'');
+  if(!MCPX_S2V[slug]) return null;
+  var allow=MCPX_ALLOW[slug]||{}, params={};
+  if(q>=0){ rest.slice(q+1).split('&').forEach(function(pair){
+    if(!pair) return; var e=pair.indexOf('='), k=e<0?pair:pair.slice(0,e), raw=e<0?'':pair.slice(e+1);
+    if(k.length>32) return; var val; try{ val=decodeURIComponent(raw.replace(/\+/g,' ')); }catch(_){ return; }
+    var fn=allow[k]; if(!fn) return; var clean=fn(val); if(clean==null) return; params[k]=clean;
+  }); }
+  return {slug:slug, view:MCPX_S2V[slug], params:params};
+}
+function mcpxRouteBuild(slug, params){
+  var allow=MCPX_ALLOW[slug]||{}, out=[];
+  Object.keys(params||{}).forEach(function(k){ var fn=allow[k]; if(!fn) return; var clean=fn(params[k]); if(clean==null) return; out.push(encodeURIComponent(k)+'='+encodeURIComponent(clean)); });
+  return '#mcp/'+slug+(out.length?('?'+out.join('&')):'');
+}
+// mcpxNavigate: the single explicit-navigation entry. PUSH by default (a distinct
+// context the user can Back out of); pass {replace:true} for transient state.
+function mcpxNavigate(slug, params, opts){
+  opts=opts||{}; if(!MCPX_S2V[slug]) return;
+  var url=mcpxRouteBuild(slug, params);
+  try{ if(opts.replace) history.replaceState(null,'',url); else history.pushState(null,'',url); }catch(_){ try{ location.hash=url; }catch(__){} }
+  mcpxApplyRoute({slug:slug, view:MCPX_S2V[slug], params:params||{}});
+}
+// mcpxSyncRouteFromNav: reflect a plain sidebar nav-item click into the URL.
+// Entering MCP from a non-MCP view REPLACES (no orphan trap); intra-MCP PUSHES.
+function mcpxSyncRouteFromNav(name, prevView){
+  if(mcpxRouteApplying) return; var slug=MCPX_V2S[name]; if(!slug) return;
+  var url=mcpxRouteBuild(slug, mcpxCurrentViewParams(slug));
+  var entering=!mcpxIsMcpView(prevView);
+  try{ if(entering) history.replaceState(null,'',url); else history.pushState(null,'',url); }catch(_){ try{ location.hash=url; }catch(__){} }
+}
+// mcpxCurrentViewParams: minimal safe params already present in the DOM, so a nav
+// click deep-links to the real current context (capability/tenant only).
+function mcpxCurrentViewParams(slug){
+  var p={}, g=function(id){ var e=document.getElementById(id); return e?String(e.value||'').trim():''; };
+  if(slug==='rollout'){ var rc=g('mcpx-rf-cap'); if(rc) p.capability=rc; }
+  else if(slug==='policy'){ var pc=g('mcpx-pol-cap'); if(pc) p.capability=pc; var pt=g('mcpx-pol-tenant'); if(pt) p.tenant=pt; }
+  else if(slug==='activity'){ var at=g('mcp-dec-tenant'); if(at) p.tenant=at; }
+  else if(slug==='servers'){ var st=g('mcp-srv-tenant'); if(st) p.tenant=st; }
+  else if(slug==='approvals'){ var ap=g('mcp-appr-tenant'); if(ap) p.tenant=ap; }
+  return p;
+}
+// mcpxViewAutoLoad: the standard per-view loader for a plain nav click (extracted
+// from switchView so route-restore can OWN loading during apply).
+function mcpxViewAutoLoad(name){
+  if(name==='mcp-overview')       renderMCPCommandCenter();
+  else if(name==='mcp-rollout')   mcpxRenderRolloutFleet();
+  else if(name==='mcp-decisions') renderMCPActivity();
+  else if(name==='mcp-approvals'){ if(mcpxApprTenant()) mcpxApprLoad(); }
+  else if(name==='mcp-servers'){ if(mcpxInvTenant()) mcpxInvLoad(); }
+  else if(name==='mcp-health')    mcpxHealthLoad();
+  else if(name==='mcp-management')mcpxMgmtLoad();
+  else if(name==='mcp-settings')  mcpxCfgLoad();
+  else if(name==='mcp-policies')  mcpxPolRefreshActive();
+}
+// mcpxApplyRoute: READ-ONLY restore. Pre-seed inputs, show the view (its auto-load
+// is suppressed while applying), then drive real loads + entity selection. Never
+// executes an action; never throws.
+async function mcpxApplyRoute(route){
+  if(!route || !route.view) return;
+  // The guard is held ONLY around the SYNCHRONOUS preseed + switchView (so that one
+  // switchView does not re-push the route or auto-load). It is cleared BEFORE the
+  // async entity load, so a nav click during an in-flight restore is a normal user
+  // navigation again (its loader + URL sync + hash cleanup run). mcpxRestoreRoute
+  // calls loaders directly, never switchView, so it needs no suppression.
+  mcpxRouteApplying=true;
+  try{ mcpxPreseedRoute(route.slug, route.params||{}); if(typeof switchView==='function') switchView(route.view); }
+  finally{ mcpxRouteApplying=false; }
+  try{ await mcpxRestoreRoute(route.slug, route.params||{}); }
+  catch(_){ /* restore must fail safe, never throw */ }
+}
+// mcpxPreseedRoute: set input values + capability state BEFORE the loader runs.
+// Capability is set DIRECTLY (never via mcpxPolSelectCap) so restore never triggers
+// the draft-discard confirmation prompt and never early-returns.
+function mcpxPreseedRoute(slug, p){
+  var setv=function(id,v){ var e=document.getElementById(id); if(e) e.value=(v==null?'':v); };
+  if(slug==='activity'){
+    setv('mcp-dec-tenant', p.tenant||''); setv('mcp-dec-event', p.event||'');
+    var f={}; mcpxActFilterKeys.forEach(function(k){ if(p[k]) f[k]=p[k]; });
+    mcpxNavBack=[]; mcpxFrames=[]; mcpxDrawerReq++;
+    mcpxNav=p.tenant?{tenant:p.tenant, filter:f, label:mcpxFilterLabel(f), selEvent:p.event||null}:null;
+  } else if(slug==='servers'){ setv('mcp-srv-tenant', p.tenant||''); if(typeof mcpxInvFlt==='object') mcpxInvFlt.disp=p.disp||''; }
+  else if(slug==='approvals'){ setv('mcp-appr-tenant', p.tenant||''); if(p.apprfilter && typeof mcpxApprFilter!=='undefined') mcpxApprFilter=p.apprfilter; }
+  else if(slug==='policy'){ if(p.capability){ mcpxPol.cap=p.capability; setv('mcpx-pol-cap', p.capability); mcpxSyncCapTabs('#view-mcp-policies .mcpx-rf-captab', p.capability); } if(p.tenant) setv('mcpx-pol-tenant', p.tenant); }
+  else if(slug==='rollout'){ if(p.capability){ setv('mcpx-rf-cap', p.capability); mcpxSyncCapTabs('#view-mcp-rollout .mcpx-rf-captab', p.capability); } }
+  else if(slug==='management'){ if(typeof mcpxMgmtFlt==='object'){ if(p.role!=null) mcpxMgmtFlt.role=p.role; if(p.cls!=null) mcpxMgmtFlt.cls=p.cls; } }
+}
+function mcpxSyncCapTabs(sel, cap){ Array.prototype.forEach.call(document.querySelectorAll(sel), function(t){ var on=t.dataset.arg===cap; t.classList.toggle('active',on); t.setAttribute('aria-selected', on?'true':'false'); }); }
+// mcpxRestoreRoute: drive the real loaders and re-read the selected entity from the
+// authoritative endpoint. A selected entity that no longer exists yields a truthful
+// "no longer available" note; another entity is NEVER silently selected.
+async function mcpxRestoreRoute(slug, p){
+  if(slug==='overview'){ renderMCPCommandCenter(); }
+  else if(slug==='activity'){
+    if(!p.tenant){ renderMCPActivity(); return; }
+    await mcpxRenderActivity(function(){ if(p.event) mcpxOpenDecision(p.event); });
+  }
+  else if(slug==='servers'){
+    if(!mcpxInvTenant()) return; await mcpxInvLoad();
+    if(p.drawer==='server' && p.server){ var sv=mcpxRouteFindServer(p.server); if(sv) mcpxInvOpenServer(sv); else mcpxRouteMiss('mcpx-inv-src','Server "'+p.server+'" is no longer in this tenant inventory.'); }
+    else if(p.drawer==='tool' && p.tool){ var tl=mcpxRouteFindTool(p.server, p.tool); if(tl) mcpxInvOpenTool(tl); else mcpxRouteMiss('mcpx-inv-src','Tool "'+p.tool+'" is no longer in this tenant inventory.'); }
+  }
+  else if(slug==='policy'){ mcpxPolRefreshActive(); }
+  else if(slug==='approvals'){
+    if(typeof mcpxApprSetFilter==='function') mcpxApprSetFilter(p.apprfilter||mcpxApprFilter||'all');
+    if(!mcpxApprTenant()) return; await mcpxApprLoad();
+    if(p.request){ if(mcpxApprFind(p.request)) mcpxApprOpenDrawer(p.request); else mcpxRouteMiss('mcpx-appr-src','Approval request is no longer available; it may have expired or been decided.'); }
+  }
+  else if(slug==='health'){ mcpxHealthLoad(); }
+  else if(slug==='rollout'){ mcpxRenderRolloutFleet(); }
+  else if(slug==='management'){ mcpxMgmtLoad(); }
+  else if(slug==='settings'){ mcpxCfgLoad(); }
+}
+function mcpxRouteFindServer(id){ var a=(mcpxInvData&&Array.isArray(mcpxInvData.srv))?mcpxInvData.srv:[]; for(var i=0;i<a.length;i++){ if(a[i] && a[i].server_id===id) return a[i]; } return null; }
+// Tool identity is (server_id, name): two servers in one tenant can expose the same
+// tool name (internal/mcp/catalog TestSameNameDifferentServersDistinct), so a
+// name-only match could open the wrong server's fingerprint/disposition. When the
+// route carries a server, require BOTH; without it, fall back to name-only.
+function mcpxRouteFindTool(server, name){ var a=(mcpxInvData&&Array.isArray(mcpxInvData.tool))?mcpxInvData.tool:[]; for(var i=0;i<a.length;i++){ if(a[i] && a[i].name===name && (!server || a[i].server_id===server)) return a[i]; } return null; }
+function mcpxRouteMiss(nodeId, msg){ var e=document.getElementById(nodeId); if(e){ var s=mcpxEl('span','mcpx-route-miss', ' '+msg); e.appendChild(s); } }
 
 function mcpxFilterKeyLabel(k){
   return ({tenant:'tenant',principal_id:'principal',agent_id:'agent',client_id:'client',server_id:'server',
@@ -18589,7 +18548,7 @@ document.addEventListener('keydown', function(e){
 var mcpxDlg = { cfg:null, committing:false, ticket:0, done:false };
 function mcpxDlgEl(id){ return document.getElementById(id); }
 function mcpxCapUpper(c){ return String(c||'gateway').toUpperCase(); }
-function mcpxDangerRefreshRollout(){ if(typeof loadMCPRollout==='function') loadMCPRollout(); }
+function mcpxDangerRefreshRollout(){ if(document.getElementById('mcpx-rf-root') && typeof mcpxRenderRolloutFleet==='function') mcpxRenderRolloutFleet(); }
 // Authoritative reconciliation of the shared emergency card. Reads the REAL
 // per-capability kill-switch state and writes it, seq-guarded so the freshest
 // read wins even when actions settle out of order. Invoked after EVERY emergency
@@ -18598,7 +18557,6 @@ function mcpxDangerRefreshRollout(){ if(typeof loadMCPRollout==='function') load
 // "Admission restored" while the switch is actually engaged (and vice-versa).
 var mcpxReconcileSeq=0;
 function mcpxReconcileEmergencyCard(){
-  if(typeof loadMCPRollout==='function') loadMCPRollout();
   // PR-UX-5: re-render the structured Rollout & Fleet screen so the Mode card's
   // authoritative kill-switch state reflects the settled action (converges even
   // after a cancelled/late in-flight response).
@@ -18616,7 +18574,7 @@ function mcpxReconcileEmergencyCard(){
 }
 // After a rollback attempt the RELEVANT read is the signed-distribution status
 // (rollback availability + active snapshot), so refresh that panel to real state.
-function mcpxDangerRefreshDistribution(){ if(typeof loadMCPDistribution==='function') loadMCPDistribution(); }
+function mcpxDangerRefreshDistribution(){ if(document.getElementById('mcpx-rf-root') && typeof mcpxRenderRolloutFleet==='function') mcpxRenderRolloutFleet(); }
 
 // Read the REAL per-capability rollout state (mode + kill switch). Never assumes
 // a benign default: an unreadable state is reported as unknown/unavailable.
@@ -18908,8 +18866,9 @@ async function mcpxOpenRollback(){
     confirmPhrase: disabled ? null : ('ROLLBACK '+mcpxCapUpper(cap)),
     confirmDisabled: disabled, confirmLabel:'Request rollback',
     request: target ? { url:'/api/mcp/rollback', body:{capability:cap, target_hash:target.hash} } : { url:'/api/mcp/rollback', body:{capability:cap} },
-    // No card mirror here: the refresh below repaints mcp-distribution-status with
-    // the real distribution state, which is more truthful than echoing the title.
+    // No card mirror here: the refresh below re-renders the structured Rollout &
+    // Fleet screen with the real distribution state, which is more truthful than
+    // echoing the title.
     classify:mcpxClassifyRollback(cap), onDone:mcpxDangerRefreshDistribution
   });
 }
@@ -19163,7 +19122,7 @@ function mcpxRfFleetCard(cap, dist, capDist, acks){
         tr.appendChild(mcpxEl('td', null, (rw.incompatible?'incompatible':'')||rw.reject_reason||'-'));
         tb.appendChild(tr);
       });
-      tbl.appendChild(tb); card.appendChild(tbl);
+      tbl.appendChild(tb); card.appendChild(mcpxScrollWrap(tbl));
     }
   }
   card.appendChild(mcpxEl('div','mcpx-source','From /api/mcp/distribution + /api/mcp/distribution/acks. A hash, a stored envelope, a successful request, or elapsed time is NEVER treated as a fleet acknowledgement.'));
@@ -19306,7 +19265,7 @@ function mcpxRfQualCard(cap, ev){
       barTd.appendChild(mcpxRfQualBar(rq)); barTr.appendChild(barTd); tb.appendChild(barTr);
     }
   });
-  tbl.appendChild(tb); card.appendChild(tbl);
+  tbl.appendChild(tb); card.appendChild(mcpxScrollWrap(tbl));
   var s=ev.summary||{};
   card.appendChild(mcpxEl('div','mcpx-rf-dd-muted','Measured requirements: '+(s.measured_total||0)+' total, '+(s.met||0)+' met, '+(s.not_met||0)+' not met, '+(s.not_started||0)+' not started, '+(s.synthetic_non_qualifying||0)+' synthetic non-qualifying, '+(s.unavailable||0)+' unavailable. This is not a qualification decision.'));
   if(ev.unsupported_categories && ev.unsupported_categories.length){
@@ -19345,6 +19304,7 @@ async function mcpxRenderRolloutFleet(){
   cards.appendChild(mcpxRfCandidateCard(cap));
   cards.appendChild(mcpxRfActionsCard(cap, roll, capDist));
   root.appendChild(cards);
+  mcpxAnnounce(cap+' rollout and fleet state loaded');
   applySessionRoleVisibilityScope('#mcpx-rf-root'); // hide admin-only Actions for viewers
   var asof=document.getElementById('mcpx-rf-asof'); if(asof) asof.textContent='as of '+mcpxNow();
 }
@@ -19543,11 +19503,9 @@ function mcpxApprCloseDrawer(){
 function mcpxApprPivotDecision(tenant, eventId){
   if(!tenant || !eventId) return;
   mcpxApprCloseDrawer();
-  var te=document.getElementById('mcp-dec-tenant'); if(te) te.value=tenant;
-  if(typeof switchView==='function') switchView('mcp-decisions');
-  mcpxNavBack=[]; mcpxFrames=[]; mcpxDrawerReq++;
-  mcpxNav={tenant:tenant, filter:{}, label:'', selEvent:null};
-  mcpxRenderActivity(function(){ mcpxOpenDecision(eventId); });
+  // PR-UX-8: route through the shared nav-state model so this pivot is a real
+  // deep link + history entry; restore re-reads the exact event truthfully.
+  mcpxNavigate('activity', {tenant:tenant, event:eventId});
 }
 function mcpxApprDecide(a, action){
   var url = a.kind==='publication' ? '/api/mcp/publication-decision' : '/api/mcp/approval-decision';
@@ -19769,11 +19727,10 @@ function mcpxInvCloseDrawer(){
 function mcpxInvPivotDecisions(tenant, patch){
   if(!tenant) return;
   mcpxInvCloseDrawer();
-  var te=document.getElementById('mcp-dec-tenant'); if(te) te.value=tenant;
-  if(typeof switchView==='function') switchView('mcp-decisions');
-  mcpxNavBack=[]; mcpxFrames=[]; mcpxDrawerReq++;
-  mcpxNav={tenant:tenant, filter:patch||{}, label:(typeof mcpxFilterLabel==='function'?mcpxFilterLabel(patch||{}):''), selEvent:null};
-  mcpxRenderActivity();
+  // PR-UX-8: carry only the allowlisted filter keys into a real Activity deep link.
+  var params={tenant:tenant}; patch=patch||{};
+  mcpxActFilterKeys.forEach(function(k){ if(patch[k]) params[k]=patch[k]; });
+  mcpxNavigate('activity', params);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -19790,7 +19747,8 @@ async function mcpxMgmtLoad(){
   var d=await mcpxRfFetch('/api/mcp/management-access');
   if(myTicket!==mcpxMgmtTicket) return;
   root.textContent='';
-  if(mcpxRfErr(d)){ root.appendChild(mcpxEl('div','mcpx-empty','Management access unavailable - '+d.__err+'. (This is an unavailable read, NOT a mutation-off state.)')); return; }
+  if(mcpxRfErr(d)){ root.appendChild(mcpxEl('div','mcpx-empty','Management access unavailable - '+d.__err+'. (This is an unavailable read, NOT a mutation-off state.)')); mcpxAnnounce('Management access unavailable'); return; }
+  mcpxAnnounce('Management access loaded');
   var acc=d.access||{};
   var card=mcpxRfCard('Access posture','Read-only. Endpoint-bound reflects a complete bind configuration, not public reachability, liveness, or health.');
   var chips=mcpxEl('div','mcpx-btnrow');
@@ -19870,14 +19828,15 @@ async function mcpxHealthLoad(){
   var d=await mcpxRfFetch('/api/mcp/health');
   if(myTicket!==mcpxHealthTicket) return;
   root.textContent='';
-  if(mcpxRfErr(d)){ root.appendChild(mcpxEl('div','mcpx-empty','Health unavailable - '+d.__err+'. (Unavailable read - not zero sessions and not zero durability use.)')); return; }
+  if(mcpxRfErr(d)){ root.appendChild(mcpxEl('div','mcpx-empty','Health unavailable - '+d.__err+'. (Unavailable read - not zero sessions and not zero durability use.)')); mcpxAnnounce('MCP health unavailable'); return; }
   var cards=mcpxEl('div','mcpx-cards2');
   cards.appendChild(mcpxHealthCard('Gateway', d.gateway));
   cards.appendChild(mcpxHealthCard('Management', d.management));
   root.appendChild(cards);
+  mcpxAnnounce('MCP health loaded');
   var link=mcpxEl('div','mcpx-source');
   link.appendChild(document.createTextNode('Fleet distribution_state: '+(d.distribution_state||'unavailable')+'. Detailed per-DP acknowledgement is on the Rollout & Fleet screen. '));
-  var b=mcpxEl('button','btn sm ghost','View fleet distribution'); b.type='button'; b.addEventListener('click', function(){ if(typeof switchView==='function') switchView('mcp-rollout'); });
+  var b=mcpxEl('button','btn sm ghost','View fleet distribution'); b.type='button'; b.setAttribute('aria-label','View fleet distribution on the Rollout and Fleet screen'); b.addEventListener('click', function(){ mcpxNavigate('rollout', {}); });
   link.appendChild(b); root.appendChild(link);
   var asof=document.getElementById('mcpx-health-asof'); if(asof) asof.textContent='as of '+mcpxNow();
 }
@@ -20132,6 +20091,7 @@ async function mcpxPolRefreshActive(){
   if(myTicket!==mcpxPol.ticket) return;
   mcpxPol.activeErr=mcpxRfErr(d); mcpxPol.active=mcpxPol.activeErr?null:d;
   mcpxPolRender();
+  mcpxAnnounce(mcpxPol.activeErr?('Active '+mcpxPol.cap+' policy unavailable'):('Active '+mcpxPol.cap+' policy loaded'));
   var asof=document.getElementById('mcpx-pol-asof'); if(asof) asof.textContent='as of '+mcpxNow();
 }
 function mcpxPolStateChip(){
@@ -20252,11 +20212,17 @@ function mcpxPolCorpusCard(){
   var sout=mcpxEl('div'); sout.id='mcpx-pol-sim-out'; card.appendChild(sout);
   return card;
 }
+var mcpxFieldSeq=0;
 function mcpxPolCaseField(c, key, label, type, opts){
-  var f=mcpxEl('div','mcpx-pol-case-f'); f.appendChild(mcpxEl('label',null,label));
+  // PR-UX-8 a11y: programmatically associate every corpus field with its label via
+  // for/id (previously unlabeled edit fields to a screen reader). The id is unique
+  // per build; the DOM is fully replaced each render so it never collides.
+  var fid='mcpx-polcasef-'+(++mcpxFieldSeq);
+  var f=mcpxEl('div','mcpx-pol-case-f'); var lb=mcpxEl('label',null,label); lb.setAttribute('for',fid); f.appendChild(lb);
   var el;
   if(type==='sel'){ el=mcpxEl('select'); opts.forEach(function(o){ var op=mcpxEl('option',null,o); op.value=o; if(c[key]===o) op.selected=true; el.appendChild(op); }); }
   else { el=mcpxEl('input'); el.type='text'; el.value=c[key]||''; }
+  el.id=fid;
   el.addEventListener('input', function(){ c[key]=el.value; mcpxPol.sim=null; mcpxPol.compare=null; }); el.addEventListener('change', function(){ c[key]=el.value; mcpxPol.sim=null; mcpxPol.compare=null; if(key==='localId'||key==='op') mcpxPolRefreshCorpus(); });
   f.appendChild(el); return f;
 }
@@ -20381,9 +20347,11 @@ function mcpxPolHandoffCard(){
   return card;
 }
 function mcpxPolOpenInApprovals(created){
-  var te=document.getElementById('mcp-appr-tenant'); if(te) te.value=mcpxPolTenant();
-  if(typeof switchView==='function') switchView('mcp-approvals');
-  if(typeof mcpxApprLoad==='function') mcpxApprLoad().then(function(){ if(created&&created.request_id){ mcpxApprSetFilter('publication'); if(typeof mcpxApprOpenDrawer==='function') mcpxApprOpenDrawer(created.request_id); } });
+  // PR-UX-8: deep link to Approvals carrying only the real publication REQUEST ID
+  // (never the candidate source); restore opens the exact request truthfully.
+  var params={tenant:mcpxPolTenant(), apprfilter:'publication'};
+  if(created && created.request_id) params.request=created.request_id;
+  mcpxNavigate('approvals', params);
 }
 async function mcpxPolCreateRequest(){
   if(!mcpxPolCanPublish()){ return; }

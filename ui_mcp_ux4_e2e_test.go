@@ -463,11 +463,9 @@ func TestMCPUX4_TransitionAndRollback(t *testing.T) {
 	must(page.Locator("#mcpx-dlg-cancel").Click(), "close canary")
 
 	// (10) Rollback with NO real target: Confirm disabled, truthful note, no typed
-	// field. The rollback control lives in the MCP Health & Distribution view.
-	must(page.Locator(`.nav-item[data-view="mcp-health"]`).First().Click(), "nav health")
-	// PR-UX-7 moved the signed-distribution + rollback panel under a collapsed
-	// diagnostics <details>; expand it before driving the rollback control.
-	must(page.Locator("#view-mcp-health summary:has-text('Distribution')").First().Click(), "expand distribution details")
+	// field. PR-UX-8 removed the legacy health Distribution diagnostics panel; the
+	// rollback control now lives in the structured Rollout & Fleet actions card.
+	must(page.Locator(`.nav-item[data-view="mcp-rollout"]`).First().Click(), "nav rollout")
 	must(page.Locator(`[data-click="mcpxOpenRollback"]`).First().Click(), "open rollback no-target")
 	tct(dlg, "No retained rollback target", "no target note")
 	if err := assert.Locator(confirm).ToBeDisabled(playwright.LocatorAssertionsToBeDisabledOptions{Timeout: playwright.Float(4000)}); err != nil {
@@ -483,8 +481,7 @@ func TestMCPUX4_TransitionAndRollback(t *testing.T) {
 	// (11)+(12) Rollback WITH a retained target binds the exact hash; 409 is not "started".
 	log2 := &ux4Log{}
 	page2 := ux4Page(t, browser, srv.URL, RoleAdmin, &ux4Cfg{log: log2, distBody: fxUX4DistWithTarget}, &pageErrs)
-	must(page2.Locator(`.nav-item[data-view="mcp-health"]`).First().Click(), "nav health p2")
-	must(page2.Locator("#view-mcp-health summary:has-text('Distribution')").First().Click(), "expand distribution details p2")
+	must(page2.Locator(`.nav-item[data-view="mcp-rollout"]`).First().Click(), "nav rollout p2")
 	must(page2.Locator(`[data-click="mcpxOpenRollback"]`).First().Click(), "open rollback target")
 	dlg2 := page2.Locator("#mcpx-danger-dialog")
 	tct(dlg2, "Rollback target", "target label")
@@ -615,11 +612,13 @@ func TestMCPUX4_RBACAndRaces(t *testing.T) {
 	if err := assert.Locator(page3.Locator("#mcpx-dlg-confirm")).ToContainText("Retry", playwright.LocatorAssertionsToContainTextOptions{Timeout: playwright.Float(4000)}); err != nil {
 		t.Fatalf("failed POST must offer Retry: %v", err)
 	}
-	// The forced refresh also failed ⇒ the rollout card shows an error, not a benign killed=false.
-	rstat, _ := page3.Locator("#mcp-rollout-status").TextContent()
-	rout, _ := page3.Locator("#mcp-rollout-out").TextContent()
-	if strings.Contains(rout, `"killed": false`) || strings.Contains(rout, `"killed":false`) {
-		t.Fatalf("failed refresh must not render a benign killed=false default: status=%q out=%q", rstat, rout)
+	// PR-UX-8: the raw rollout JSON dump was removed. The forced refresh also failed,
+	// so the persistent kill-switch status line must show an unavailable read (never a
+	// benign killed=false default). This is the truthful structured surface that
+	// replaced the raw #mcp-rollout-out pre.
+	if err := assert.Locator(page3.Locator("#mcp-emergency-out")).ToContainText("unavailable", playwright.LocatorAssertionsToContainTextOptions{Timeout: playwright.Float(6000)}); err != nil {
+		estat, _ := page3.Locator("#mcp-emergency-out").TextContent()
+		t.Fatalf("failed refresh must show kill-switch unavailable, not a benign default: emergency=%q err=%v", estat, err)
 	}
 
 	if len(pageErrs) != 0 || len(viewerErrs) != 0 {
