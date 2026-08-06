@@ -21,7 +21,7 @@ import (
 // stash it on startupState.
 func loadURLCategories(cfg urlCategoriesStartupConfig, ctx context.Context) *FeedSyncer {
 	if err := catStore.Load(cfg.CatPath); err != nil {
-		logger.Fatalf("Cannot load URL categories: %v", err)
+		logFatalf("Cannot load URL categories: %v", err)
 	}
 	logger.Printf("URLCat: %d categories loaded from %s", len(catStore.All()), cfg.CatPath)
 
@@ -74,7 +74,7 @@ func loadURLCategories(cfg urlCategoriesStartupConfig, ctx context.Context) *Fee
 	var dbErr error
 	communityDB, dbErr = openCommunityDB(cfg.FeedDBPath)
 	if dbErr != nil {
-		logger.Fatalf("CatFeedDB → cannot open BadgerDB at %s: %v", cfg.FeedDBPath, dbErr)
+		logFatalf("CatFeedDB → cannot open BadgerDB at %s: %v", cfg.FeedDBPath, dbErr)
 	}
 	syncer := newFeedSyncer(communityDB, cfg.FeedURL, cfg.FeedSyncInterval)
 	globalUT1FeedSyncer = syncer // UC-6: expose Stats() to /metrics

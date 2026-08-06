@@ -263,7 +263,7 @@ func startDataPlane(ctx context.Context, addr, nodeID, certFile, keyFile, caFile
 	// Fails closed if an encrypted key is present but unreadable.
 	if keyFile != "" {
 		if err := maybeMigrateDPNodeKey(keyFile); err != nil {
-			logger.Fatalf("DataPlane: DP node key at-rest: %v", err)
+			logFatalf("DataPlane: DP node key at-rest: %v", err)
 		}
 	}
 	// Version facts of the cached config the node is about to enforce, so the
@@ -286,7 +286,7 @@ func startDataPlane(ctx context.Context, addr, nodeID, certFile, keyFile, caFile
 	}
 	dpClient, err := NewDataPlaneClient(nodeID, addr, certFile, keyFile, caFile)
 	if err != nil {
-		logger.Fatalf("DataPlane client: %v", err)
+		logFatalf("DataPlane client: %v", err)
 	}
 	dpClient.lastVersion.Store(cachedConfigVersion)
 	dpClient.lastPolicyVersion.Store(cachedPolicyVersion)

@@ -254,6 +254,8 @@ func liveFeedWritePrometheus(w *strings.Builder) {
 	fmt.Fprintf(w, "# TYPE culvert_logstore_dropped_total counter\nculvert_logstore_dropped_total %d\n", logstore.Dropped())
 	fmt.Fprintf(w, "\n# HELP culvert_logstore_pruned_total History-store entries deleted by the size-retention janitor\n")
 	fmt.Fprintf(w, "# TYPE culvert_logstore_pruned_total counter\nculvert_logstore_pruned_total %d\n", logstore.Pruned())
+	fmt.Fprintf(w, "\n# HELP culvert_logsink_backpressure_total Process-log lines that had to wait for room in the async log queue (stdout/log file not keeping up, so request latency is coupled to it again)\n")
+	fmt.Fprintf(w, "# TYPE culvert_logsink_backpressure_total counter\nculvert_logsink_backpressure_total %d\n", logSinkBackpressure())
 }
 
 // apiCountryTraffic returns the top destination countries for the dashboard.
