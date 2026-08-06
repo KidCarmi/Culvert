@@ -109,10 +109,27 @@ func getMCPAdmin() *mcpAdminServer {
 				return adminapi.DurabilityHealth{CriticalState: "normal", DenialState: "normal", Severity: "none", RecoveryState: "n/a"}
 			},
 		}
-		svc := adminapi.NewService(adminapi.Params{
+		params := adminapi.Params{
 			PolicyStores: stores, PolicyLimits: policy.DefaultLimits(), Approvals: appr,
 			PubCommitter: committer, IDGen: mcpIDGen, Health: health, ConfigStore: cfg, Limits: lim,
-		})
+		}
+		// QUAL-2: wire the SAME shared Registry/Catalog the runtime pipeline reads, so
+		// the read-only Servers/Tools Admin API is the single source of truth. Both stay
+		// nil when no qualification inventory is loaded (Inventory service stays disabled,
+		// returning empty views — byte-identical to the QUAL-1 disabled default).
+		//
+		// Ordering contract: this singleton snapshots the inventory holder ONCE. It must
+		// be built AFTER initMCPRuntime has published the holder. initMCPRuntime enforces
+		// this by eagerly binding the singleton once a loaded inventory is published (see
+		// mcp_runtime.go), so a first admin request can never capture a pre-publish
+		// (empty) holder while the pipeline resolves the seeded fleet.
+		if rs, cs, ic := mcpAdminInventorySources(); rs != nil {
+			params.Registry = rs
+			params.Catalog = cs
+			health.Inventory = ic
+			params.Health = health
+		}
+		svc := adminapi.NewService(params)
 		disp := management.NewDispatcher(adminapi.NewManagementBackend(svc), lim.MaxMgmtInputBytes(), lim.MaxMgmtOutputBytes())
 		mcpAdmin = &mcpAdminServer{svc: svc, disp: disp, appCommit: committer, publication: svc.Publication}
 	})
@@ -219,6 +236,10 @@ func apiMCPOverview(w http.ResponseWriter, r *http.Request) {
 		"execution_state":              "not_implemented",
 		"management_tools":             len(management.Catalog()),
 		"health":                       m.svc.Health.Snapshot(),
+		// QUAL-2: safe, read-only qualification-inventory readiness. It distinguishes
+		// not_configured / loaded / invalid and reports counts — it NEVER labels the
+		// subsystem Observe-/qualification-/production-ready (inventory is one dependency).
+		"inventory": inventoryStatus(),
 	})
 }
 

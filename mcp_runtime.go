@@ -57,6 +57,16 @@ func initMCPRuntime(s *startupState) {
 		logger.Printf("MCP gateway observe listener active on %s:%d (client_cert=%s, sender=%s, protocol=%s)",
 			sanitizeLog(act.BindAddress), act.Port, act.ClientCertMode, act.SenderProfile, act.ProtocolVersion)
 	}
+	// QUAL-2 single-source ordering guard: the loader has now published the shared
+	// inventory holder. When a qualification inventory is loaded, eagerly bind the
+	// admin singleton HERE — after publication — so the read-only Servers/Tools Admin
+	// API is guaranteed to snapshot the SAME populated registry/catalog the pipeline
+	// resolves against, regardless of when the first admin request arrives. Without a
+	// loaded inventory this stays lazy (byte-identical to QUAL-1), so the disabled
+	// default is unchanged.
+	if reg, _ := mcpInventory.sharedInventory(); reg != nil {
+		_ = getMCPAdmin()
+	}
 }
 
 // setMCPObserveStatus publishes the activation summary for the health surface.

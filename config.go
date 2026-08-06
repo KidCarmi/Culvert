@@ -220,6 +220,18 @@ type FileConfig struct {
 			// issuer. Private-key material in the JWKS fails activation closed.
 			TrustedJWKSFile string `yaml:"trusted_jwks_file"`
 			ResourceName    string `yaml:"resource_name"` // optional public display label for the metadata document
+			// QualificationInventoryFile is a static, node-local JSON document (QUAL-2)
+			// describing exactly one Gateway qualification fleet: a dedicated tenant, its
+			// registered servers (opaque id, endpoint reference, pinned verified identity,
+			// credential-profile REFERENCE only — never raw credentials) and their known
+			// tools. It is loaded ONCE at startup (no hot reload, no admin upload), seeded
+			// atomically through the existing Registry/Catalog contracts, and shared as the
+			// single source of truth by the Gateway runtime pipeline AND the read-only MCP
+			// Servers/Tools Admin API. Absent ⇒ QUAL-1 behavior (empty registry/catalog).
+			// A present-but-invalid file fails activation closed (nothing binds); it never
+			// partially seeds and never enables MCP on its own (mcp.gateway.enabled still
+			// gates the listener). No secret material may appear in this file.
+			QualificationInventoryFile string `yaml:"qualification_inventory_file"`
 		} `yaml:"gateway"`
 	} `yaml:"mcp"`
 
