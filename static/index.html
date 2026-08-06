@@ -15072,6 +15072,11 @@ function renderDiagnoseCluster(d) {
   if (d.role === 'standby') {
     rows.push(['Sync failures', escHtml(String(d.sync_fail_count || 0))]);
     if (d.last_sync_ok) rows.push(['Last sync OK', escHtml(String(d.last_sync_ok))]);
+    // CHAOS-25: contained sync-round panics are deliberately kept OUT of the
+    // failure streak (they must not trigger failover on this node's own fault),
+    // so they need their own row — otherwise a standby whose apply path panics
+    // every tick reads as healthy at sync_fail_count=0 while replication is dead.
+    if (d.sync_panics) rows.push(['Sync faults (contained)', '<span style="color:var(--warn,#e0a800)">' + escHtml(String(d.sync_panics)) + ' — replication stalled, auto-failover suppressed</span>']);
   }
   const body = rows.map(r => '<tr><td class="hint">' + r[0] + '</td><td>' + r[1] + '</td></tr>').join('');
   const detail = d.detail ? '<p class="hint">' + escHtml(String(d.detail)) + '</p>' : '';
@@ -17575,6 +17580,10 @@ function resetBlockPage() {
         <!-- P1 commit-time validation: the CP refused to publish an over-cap config
              to the fleet (fleet stays on the last valid snapshot until trimmed). -->
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="config_snapshot_rejected"> Config publish rejected (over cap)</label>
+        <!-- CHAOS-25: a standby HA sync round panicked and was contained. State
+             replication from the leader is stalled and this node deliberately
+             will NOT auto-promote on its own fault (manual promotion available). -->
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="ha_sync_panic"> HA standby sync fault (replication stalled)</label>
       </div>
     </div>
     <div class="form-group">

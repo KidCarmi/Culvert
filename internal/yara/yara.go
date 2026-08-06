@@ -568,6 +568,24 @@ func matchYARAString(s *yaraStringDef, ctx *scanCtx) bool {
 // yaraInflight tracks abandoned regex goroutines to prevent unbounded accumulation.
 var yaraInflight atomic.Int64
 
+// yaraMatchComponent labels contained per-match panics in the crash plane;
+// yaraMatchPanics is the local counter (MatchPanics()).
+const yaraMatchComponent = "yara-match"
+
+var yaraMatchPanics atomic.Int64
+
+// yaraMatchFn is the regex-match call itself, indirected so the CHAOS-25
+// fault-injection test can make a match panic — a real *regexp.Regexp cannot be
+// coerced into panicking, so without this seam the guard below would be
+// unpinnable. Production never replaces it.
+var yaraMatchFn = func(re *regexp.Regexp, data []byte) bool { return re.Match(data) }
+
+// MatchPanics reports how many regex-match rounds were contained by the
+// CHAOS-25 guard. Non-zero means some scan verdicts were decided by the
+// on-timeout posture rather than by the rule itself, so it is a correctness
+// signal, not only a liveness one.
+func MatchPanics() int64 { return yaraMatchPanics.Load() }
+
 // yaraSaturationCheck returns (saturated, result). When saturated is true, the
 // caller must return result immediately without attempting the regex match.
 // Posture is controlled by yaraOnSaturationVar: fail_closed returns true (block),
@@ -626,7 +644,23 @@ func matchRegexWithTimeout(re *regexp.Regexp, data []byte, timeout time.Duration
 	yaraInflight.Add(1)
 	go func() {
 		defer yaraInflight.Add(-1)
-		ch <- re.Match(data)
+		// CHAOS-25: this goroutine runs attacker-supplied bytes through a
+		// compiled regexp on the response-scanning path. A panic here would
+		// terminate an in-line gateway, and unlike a worker loop there is no
+		// "next round" to keep alive — so the guard is on the whole (one-shot)
+		// body. A contained panic yields NO scan verdict, which is exactly the
+		// epistemic state a timeout leaves, so it resolves through the SAME
+		// admin-selectable posture (fail_closed ⇒ block, fail_open_with_alert
+		// ⇒ allow) instead of defaulting to "clean". It answers immediately
+		// rather than leaving the parent to wait out the full timeout: the
+		// panic already proved the match will never complete.
+		var matched bool
+		if obs.SafeCall(yaraMatchComponent, func() { matched = yaraMatchFn(re, data) }) {
+			yaraMatchPanics.Add(1)
+			ch <- GetOnTimeout() != FailOpenWithAlert
+			return
+		}
+		ch <- matched
 	}()
 	select {
 	case matched := <-ch:

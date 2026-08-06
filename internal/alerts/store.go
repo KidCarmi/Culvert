@@ -27,6 +27,8 @@ package alerts
 //   "storage_write_failed"  — a durable write to the data directory failed: persisted state is being lost (CHAOS-45)
 //   "state_file_corrupt"    — corrupt state file quarantined at startup (CHAOS-05/07)
 //   "cluster_node_reenrolled" — expired-but-registered node re-enrolled with a fresh token (CHAOS-12)
+//   "ha_sync_panic"         — a standby HA sync round panicked and was contained: state replication
+//                             is stalled and this node's automatic failover is suppressed (CHAOS-25)
 //
 // Each webhook is stored in an in-memory list backed by a JSON file.
 // Delivery is async, never blocks the request path.
