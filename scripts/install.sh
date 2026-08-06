@@ -512,6 +512,13 @@ else
 fi
 
 cd "$INSTALL_DIR"
+# Canonicalize to the absolute path `cd` just resolved. INSTALL_DIR can still
+# hold a relative CULVERT_DIR override (e.g. "culvert-stack") at this point,
+# and every later use of $INSTALL_DIR — including agent_ancestors_traversable,
+# which walks dirname($INSTALL_DIR) upward — assumes an absolute path. Passing
+# a relative one there would resolve to "$PWD/$INSTALL_DIR", double-counting
+# the leaf we already cd'd into instead of naming it once.
+INSTALL_DIR="$PWD"
 
 ###############################################################################
 # 6. Seed the pinned proxy image tag (P1.4)
@@ -1759,8 +1766,14 @@ MAINT_AGENT_WIRED=0
 # searchable, or the agent could never chdir in. A system path like /srv/culvert
 # passes (/, /srv are 0755); a 0700 home or /root is rejected at an ancestor.
 agent_ancestors_traversable() {
-  local p mode
-  p="$(dirname "$1")"
+  local target="$1" p mode
+  # $1 (INSTALL_DIR) can be a relative CULVERT_DIR override with no leading
+  # "/". dirname() on a relative, single-segment path (e.g. "culvert-stack")
+  # returns ".", and dirname(".") is ALSO "." forever — the walk below would
+  # never reach "/" and spin forever. Anchor to an absolute path first so the
+  # loop terminates exactly like it does for an already-absolute $1.
+  [[ "$target" == /* ]] || target="${PWD}/${target}"
+  p="$(dirname "$target")"
   while :; do
     [[ -d "$p" ]] || return 1
     mode="$(stat -c '%a' "$p" 2>/dev/null)" || return 1
