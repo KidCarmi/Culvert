@@ -13,6 +13,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -138,7 +139,8 @@ func TestSetupLogger_PreservesOrderAndContent(t *testing.T) {
 }
 
 // TestSetupLogger_JSONModeStillEncodes pins that JSON mode survives the wrap:
-// the encoding now happens on the drain goroutine instead of the caller's.
+// each record is encoded once, before the async sink, so the fields land as
+// top-level JSON keys.
 func TestSetupLogger_JSONModeStillEncodes(t *testing.T) {
 	path := withSetupLogger(t, "json")
 
@@ -154,6 +156,59 @@ func TestSetupLogger_JSONModeStillEncodes(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("JSON log output missing %s: %q", want, out)
 		}
+	}
+}
+
+// TestSetupLogger_JSONModeBatchingPreservesRecordBoundaries is the regression
+// test for the record-boundary bug: with JSON encoding BEHIND the batching
+// sink, a backlog flush coalesced several queued lines into one downstream
+// Write, and the encoder folded them into a single JSON object with embedded
+// newlines. Encoding now happens once per log.Logger call, before the sink, so
+// every output line must be exactly one well-formed JSON object regardless of
+// how the sink batched. A high volume with no intervening flush forces the
+// drain goroutine to batch.
+func TestSetupLogger_JSONModeBatchingPreservesRecordBoundaries(t *testing.T) {
+	path := withSetupLogger(t, "json")
+
+	const n = 2000
+	for i := 0; i < n; i++ {
+		logger.Printf("POLICY_ALLOW seq=%d", i)
+	}
+	flushLogSink()
+
+	f, err := os.Open(path) //nolint:gosec // test-controlled temp path
+	if err != nil {
+		t.Fatalf("open log: %v", err)
+	}
+	defer f.Close() //nolint:errcheck // test cleanup
+
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	seq := 0
+	for sc.Scan() {
+		line := sc.Bytes()
+		var rec struct {
+			Time  string `json:"time"`
+			Level string `json:"level"`
+			Msg   string `json:"msg"`
+		}
+		if err := json.Unmarshal(line, &rec); err != nil {
+			t.Fatalf("output line %d is not a standalone JSON object (record boundaries broken): %v\nline=%q", seq, err, line)
+		}
+		want := "POLICY_ALLOW seq=" + strconv.Itoa(seq)
+		if rec.Msg != want {
+			t.Fatalf("line %d msg=%q, want %q — records were merged or reordered", seq, rec.Msg, want)
+		}
+		if strings.Contains(rec.Msg, "\n") {
+			t.Fatalf("line %d msg contains an embedded newline — a batch was folded into one record", seq)
+		}
+		seq++
+	}
+	if err := sc.Err(); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if seq != n {
+		t.Fatalf("log holds %d JSON records, want %d — records were merged or lost", seq, n)
 	}
 }
 

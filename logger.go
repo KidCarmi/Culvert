@@ -268,21 +268,34 @@ func setupLogger(logPath string, maxMB int, format string) (*log.Logger, io.Clos
 
 	prefix, flags := "[Culvert] ", log.LstdFlags
 	writers := []io.Writer{os.Stdout}
-	if format == "json" {
-		// JSON mode: no flags (we add our own timestamp), no prefix. The JSON
-		// encoding moves onto the drain goroutine along with the syscall.
-		prefix, flags = "", 0
-		writers = []io.Writer{&jsonLogWriter{dst: os.Stdout}}
-		if fileWriter != nil {
-			writers = append(writers, &jsonLogWriter{dst: fileWriter})
-		}
-	} else if fileWriter != nil {
+	if fileWriter != nil {
 		writers = append(writers, fileWriter)
 	}
 
+	// The async sink batches: under backlog its bufio coalesces several queued
+	// lines into ONE downstream Write. That is correct for the raw stdout/file
+	// byte streams, but a record-oriented writer — jsonLogWriter turns each
+	// Write into exactly one JSON object — would then fold several log records
+	// into a single object with embedded newlines, breaking record boundaries
+	// for downstream JSON ingestion. So in JSON mode the encoding must happen
+	// BEFORE the sink: once per log.Logger call, i.e. once per record. The sink
+	// then only ever transports complete `{...}\n` lines, whose concatenation
+	// is valid newline-delimited JSON. This also encodes once total rather than
+	// once per destination. The expensive per-request work the async sink exists
+	// to remove — the log.Logger and RotatingFile mutexes held across the
+	// write(2) and the rotation stall — still runs on the drain goroutine; JSON
+	// marshalling is pure CPU that scales with cores (the package doc's "format
+	// only" row), so keeping it on the caller does not reintroduce the ceiling.
 	sink := logsink.New(io.MultiWriter(writers...))
 	logSink.Store(sink)
-	return log.New(sink, prefix, flags), &logCloser{sink: sink, file: fileCloser}, nil
+
+	var loggerDst io.Writer = sink
+	if format == "json" {
+		// JSON mode: no flags (we add our own timestamp), no prefix.
+		prefix, flags = "", 0
+		loggerDst = &jsonLogWriter{dst: sink}
+	}
+	return log.New(loggerDst, prefix, flags), &logCloser{sink: sink, file: fileCloser}, nil
 }
 
 // logCloser flushes the async sink and then releases the log file descriptor,
