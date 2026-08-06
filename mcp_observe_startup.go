@@ -15,6 +15,7 @@ package main
 // returned for the health surface; the Secure Web Gateway path is never affected.
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"os"
@@ -66,6 +67,23 @@ type mcpObserveActivation struct {
 	TrustedKeyCount int
 }
 
+// composeGatewayTelemetry builds the QUAL-3 durable telemetry plane and returns the
+// runtime EventProvider to inject into Deps. Disabled ⇒ (nil, not_configured, nil, nil)
+// so the caller keeps QUAL-2 behavior; enabled-but-invalid ⇒ (nil, invalid, nil, err)
+// so the caller fails activation closed. Returning the concrete *events.Manager as the
+// provider only when non-nil avoids the nil-interface trap.
+func composeGatewayTelemetry(tc mcpTelemetryStartupConfig) (*telemetryRuntime, mcpTelemetryState, mcpruntime.EventProvider, error) {
+	tel, telState, err := buildMCPTelemetry(tc)
+	if err != nil {
+		return nil, mcpTelemInvalid, nil, err
+	}
+	var ev mcpruntime.EventProvider
+	if tel != nil {
+		ev = tel.Manager()
+	}
+	return tel, telState, ev, nil
+}
+
 // loadMCPObserveRuntime builds the runtime config + activation summary from the
 // resolved startup config. A disabled config returns an empty runtime config
 // (byte-identical disabled-by-default behavior). An enabled-but-invalid config
@@ -74,11 +92,14 @@ type mcpObserveActivation struct {
 func loadMCPObserveRuntime(sc mcpObserveStartupConfig) (mcpruntime.Config, mcpObserveActivation) {
 	if !sc.Enabled {
 		publishMCPInventory(mcpInvNotConfigured, "", nil, nil)
+		publishMCPTelemetry(mcpTelemNotConfigured, "", nil)
 		return mcpruntime.Config{}, mcpObserveActivation{State: mcpObserveDisabled}
 	}
-	// Reset the node-local inventory holder until this activation succeeds, so a
-	// failed enable never leaves a stale "loaded" fleet visible to the Admin API.
+	// Reset the node-local inventory + telemetry holders until this activation
+	// succeeds, so a failed enable never leaves a stale fleet/telemetry runtime
+	// visible to the Admin API.
 	publishMCPInventory(mcpInvNotConfigured, "", nil, nil)
+	publishMCPTelemetry(mcpTelemNotConfigured, "", nil)
 	act := mcpObserveActivation{
 		State: mcpObserveInvalid, EnableRequested: true,
 		BindAddress: sc.BindAddress, Port: sc.Port, ClientCertMode: sc.ClientCertMode,
@@ -149,16 +170,30 @@ func loadMCPObserveRuntime(sc mcpObserveStartupConfig) (mcpruntime.Config, mcpOb
 		return invalid("qualification_inventory_invalid", err)
 	}
 
-	cfg := assembleGatewayConfig(sc, modes, tlsCfg, authCfg, meta, keys, reg, cat)
+	// QUAL-3: compose the durable telemetry plane (KEK + encrypted spool + archive
+	// exporter). Disabled ⇒ nil manager (QUAL-2 behavior). An enabled-but-invalid block
+	// fails activation closed — nothing binds, no partial manager/exporter, no fallback.
+	tel, telState, ev, terr := composeGatewayTelemetry(sc.Telemetry)
+	if terr != nil {
+		publishMCPTelemetry(mcpTelemInvalid, "qualification_telemetry_invalid", nil)
+		return invalid("qualification_telemetry_invalid", terr)
+	}
+
+	cfg := assembleGatewayConfig(sc, modes, tlsCfg, authCfg, meta, keys, reg, cat, ev)
 	// Classify the transactional runtime validation (bind/port/wildcard/TLS/hosts) as
 	// an activation outcome rather than a hard failure, so an invalid listener config
 	// fails closed to "invalid" instead of aborting startup.
 	if err := cfg.Validate(); err != nil {
+		// tel.Close is nil-safe (nil receiver ⇒ no-op); closing the opened
+		// spool/exporter so an invalid listener leaks nothing.
+		_ = tel.Close(context.Background())
 		return invalid("listener_config_invalid", err)
 	}
-	// Publish the seeded inventory as the single source of truth ONLY after the whole
-	// activation is valid, so the Admin API and runtime observe the identical pair.
+	// Publish the seeded inventory + telemetry as the single sources of truth ONLY
+	// after the whole activation is valid, so the Admin API and runtime observe the
+	// identical instances.
 	publishMCPInventory(invState, "", reg, cat)
+	publishMCPTelemetry(telState, "", tel)
 	act.State = mcpObserveConfigured
 	return cfg, act
 }
@@ -167,11 +202,15 @@ func loadMCPObserveRuntime(sc mcpObserveStartupConfig) (mcpruntime.Config, mcpOb
 // resolved pieces. Deps deliberately carry ONLY the read paths (trusted keys, empty
 // read-only registry/catalog, and a DPoP replay cache when required) — no executor,
 // policy, inspection, or event provider, so the listener can never execute upstream.
-func assembleGatewayConfig(sc mcpObserveStartupConfig, modes gatewayModes, tlsCfg *tls.Config, authCfg authn.CapabilityAuthConfig, meta *mcpruntime.ProtectedResourceMetadata, keys authn.KeyResolver, reg *registry.Registry, cat *catalog.Catalog) mcpruntime.Config {
+func assembleGatewayConfig(sc mcpObserveStartupConfig, modes gatewayModes, tlsCfg *tls.Config, authCfg authn.CapabilityAuthConfig, meta *mcpruntime.ProtectedResourceMetadata, keys authn.KeyResolver, reg *registry.Registry, cat *catalog.Catalog, ev mcpruntime.EventProvider) mcpruntime.Config {
 	deps := mcpruntime.Deps{
 		Keys:     keys,
 		Registry: reg, // QUAL-2: shared read-only inventory (empty when no qualification file)
 		Catalog:  cat, // the SAME instances back the MCP Servers/Tools Admin API
+		// QUAL-3: the durable event manager (nil unless telemetry is composed). When set,
+		// denial-lane events commit on live requests; decision events stay pending-policy
+		// (Policy is still absent). Still NO executor/upstream/broker — Observe-only.
+		Events: ev,
 	}
 	if modes.senderProfile.RequiresDPoP() {
 		deps.Replay = senderconstraint.NewReplayCache(limits.DefaultAuth(), nil)

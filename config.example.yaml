@@ -216,6 +216,23 @@ mcp:
     # material (no raw credentials/tokens/keys) may appear in this file; a present-but-
     # invalid file fails activation closed. Schema: docs/operator/mcp-qualification-inventory.md
     qualification_inventory_file: ""
+    # QUAL-3 durable Observe telemetry (disabled by default; absence preserves QUAL-2
+    # behavior). When enabled it composes the encrypted, capability-isolated MCP event
+    # spool + a node-local qualification archive exporter. Observe-only: no tool
+    # executes; with Policy absent only the denial lane commits (decision telemetry is
+    # "pending_policy"). The KEK is a model-B random 0600 key FILE — never a raw key in
+    # YAML/CLI/env. Schema + operation: docs/operator/mcp-qualification-telemetry.md
+    qualification_telemetry:
+      enabled: false
+      node_id: ""              # stable node identity stamped into every event (required)
+      data_dir: ""             # canonical telemetry durable root: spool + export cursors (required)
+      kek_file: ""             # model-B KEK file path (random 0600 key, auto-generated; required)
+      export:
+        type: "local-qualification-archive"  # only supported sink (no network SIEM/bus)
+        directory: ""          # node-local archive root (required)
+        batch_size: 0          # events per export batch (0 = default 256; max 4096)
+        max_retries: 0         # export retry bound per batch (0 = default 3; max 16)
+        max_bytes: 0           # archive total-size cap in bytes (0 = default 1 GiB)
 
 # ── Admin UI ──────────────────────────────────────────────────────────────
 
