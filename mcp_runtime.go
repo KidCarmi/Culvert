@@ -118,13 +118,13 @@ func shutdownMCPRuntime(ctx context.Context) error {
 // export, and closes the encrypted spool (QUAL-3). A no-op while disabled. It runs
 // AFTER the MCP listener stops (so no new events are produced) and clears the holder
 // so a post-shutdown health read reports not-configured rather than a closed spool.
-func shutdownMCPTelemetry(_ context.Context) error {
+func shutdownMCPTelemetry(ctx context.Context) error {
 	tel := sharedTelemetry()
 	if tel == nil {
 		return nil
 	}
 	publishMCPTelemetry(mcpTelemNotConfigured, "", nil)
-	return tel.Close()
+	return tel.Close(ctx) // honor the shutdown budget so later hooks are never starved
 }
 
 // closeMCPTelemetryOnStartupFailure closes a telemetry runtime that the loader
@@ -133,6 +133,6 @@ func shutdownMCPTelemetry(_ context.Context) error {
 func closeMCPTelemetryOnStartupFailure() {
 	if tel := sharedTelemetry(); tel != nil {
 		publishMCPTelemetry(mcpTelemInvalid, "runtime_start_failed", nil)
-		_ = tel.Close()
+		_ = tel.Close(context.Background())
 	}
 }

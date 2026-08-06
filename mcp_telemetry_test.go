@@ -43,7 +43,7 @@ func buildReadyTelemetry(t *testing.T) *telemetryRuntime {
 	if err != nil || state != mcpTelemReady || rt == nil {
 		t.Fatalf("buildMCPTelemetry = state %q err %v", state, err)
 	}
-	t.Cleanup(func() { _ = rt.Close(); publishMCPTelemetry(mcpTelemNotConfigured, "", nil) })
+	t.Cleanup(func() { _ = rt.Close(context.Background()); publishMCPTelemetry(mcpTelemNotConfigured, "", nil) })
 	return rt
 }
 
@@ -177,7 +177,7 @@ func TestTelemetry_SpoolIsEncrypted(t *testing.T) {
 	if committed, _ := rt.mgr.FlushDenials(evmodel.CapGateway); committed == 0 {
 		t.Fatal("expected a committed denial aggregate")
 	}
-	_ = rt.Close()
+	_ = rt.Close(context.Background())
 
 	// Walk every spool segment/checkpoint file: the marker must never appear in
 	// plaintext (the spool is AES-GCM encrypted under the model-B KEK).
@@ -186,7 +186,7 @@ func TestTelemetry_SpoolIsEncrypted(t *testing.T) {
 		if info == nil || info.IsDir() {
 			return nil
 		}
-		b, _ := os.ReadFile(p) //nolint:errcheck // best-effort scan
+		b, _ := os.ReadFile(p) //nolint:errcheck,gosec // #nosec G304,G122 -- test scan of a self-created temp spool dir; no untrusted symlinks
 		if strings.Contains(string(b), marker) {
 			found = true
 		}
@@ -205,14 +205,14 @@ func TestTelemetry_CorrectProviderRecoversWrongFailsClosed(t *testing.T) {
 	}
 	rt.mgr.ObserveDenial(events.DenialInput{Capability: evmodel.CapGateway, Reason: "x"})
 	rt.mgr.FlushDenials(evmodel.CapGateway)
-	_ = rt.Close()
+	_ = rt.Close(context.Background())
 
 	// Correct provider (same kek file + data dir) reopens and recovers.
 	rt2, state, err := buildMCPTelemetry(cfg)
 	if err != nil || state != mcpTelemReady {
 		t.Fatalf("recover with correct KEK: state %q err %v", state, err)
 	}
-	_ = rt2.Close()
+	_ = rt2.Close(context.Background())
 
 	// Wrong provider: point kek_file at a DIFFERENT 32-byte key ⇒ the sealed DEK
 	// cannot be opened ⇒ fail closed (no plaintext fallback).
@@ -344,7 +344,7 @@ func TestTelemetry_LiveDenialCommitsAndExports(t *testing.T) {
 	if err := rt.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	t.Cleanup(func() { _ = rt.Shutdown(ctxWithTimeout(t)); _ = tel.Close() })
+	t.Cleanup(func() { _ = rt.Shutdown(ctxWithTimeout(t)); _ = tel.Close(context.Background()) })
 
 	// A seeded server + initialize + no token → auth denial (routes into the lane).
 	base := "https://" + rt.Addr(false)

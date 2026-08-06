@@ -66,7 +66,7 @@ const (
 // mcpTelemetryClock is the events-manager clock. It defaults to the wall clock and is
 // overridable in tests to advance deterministically past the bounded (up to 1h)
 // denial-aggregation window — production always uses time.Now.
-var mcpTelemetryClock = func() time.Time { return time.Now() }
+var mcpTelemetryClock = time.Now
 
 // ── state / holder ────────────────────────────────────────────────────────────
 
@@ -306,27 +306,59 @@ func (t *telemetryRuntime) Start(parent context.Context) {
 	}
 }
 
-// Close stops the loops, performs a final denial flush + export drain, and closes
-// the manager (which does its own final per-domain flush + spool close). Bounded by
-// the caller's shutdown context.
-func (t *telemetryRuntime) Close() error {
+// Close stops the loops, performs a final denial flush + FULL export drain, and
+// closes the manager (which does its own final per-domain flush + spool close). The
+// entire sequence is bounded by the caller's shutdown context: if that budget is
+// exhausted (e.g. a stuck archive/cursor volume) Close returns promptly so the later
+// shutdown hooks (admin, proxy, log) still run — the committed events stay durable in
+// the encrypted spool and export on the next start. A nil ctx means "unbounded".
+func (t *telemetryRuntime) Close(ctx context.Context) error {
 	if t == nil {
 		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	if t.cancel != nil {
 		t.cancel()
 	}
-	t.wg.Wait()
-	// Best-effort final flush + export so a graceful shutdown loses no committed
-	// denial aggregate that could still be archived. Force-flush here (unlike the
-	// periodic loop) so the still-open current denial window becomes durable BEFORE
-	// the export drain runs — otherwise it would commit only inside mgr.Close(),
-	// after this drain, and stay unarchived until the next start.
-	t.mgr.FlushDenialsForce(evmodel.CapGateway)
-	for _, part := range gatewayPartitions {
-		t.exportStep(context.Background(), part)
+	done := make(chan error, 1)
+	go func() {
+		t.wg.Wait()
+		// Force-flush here (unlike the periodic loop) so the still-open current denial
+		// window becomes durable BEFORE the export drain runs — otherwise it would
+		// commit only inside mgr.Close(), after this drain, and stay unarchived until
+		// the next start.
+		t.mgr.FlushDenialsForce(evmodel.CapGateway)
+		for _, part := range gatewayPartitions {
+			t.drainPartition(ctx, part)
+		}
+		done <- t.mgr.Close()
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	return t.mgr.Close()
+}
+
+// drainPartition exports EVERY currently-committed batch for one partition (unlike
+// the periodic loop's single step), so a graceful shutdown archives all pending
+// evidence rather than one batch. It stops on no cursor progress (queue empty, or a
+// failure that leaves the cursor unadvanced) and on ctx cancellation, so it can never
+// spin unboundedly — new events are not produced after the listener stops.
+func (t *telemetryRuntime) drainPartition(ctx context.Context, part evmodel.Partition) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		before := t.cursors.get(part)
+		t.exportStep(ctx, part)
+		if t.cursors.get(part) <= before {
+			return
+		}
+	}
 }
 
 // flushLoop periodically commits closed denial-aggregate windows into P-DEN so they
@@ -618,31 +650,29 @@ func (e *qualArchiveExporter) Export(_ context.Context, batch []evmodel.Event) (
 		if existing.ContentHash == rec.ContentHash {
 			return len(batch), nil // idempotent retry
 		}
-		e.failures++
 		e.lastReason = "conflict"
 		return 0, errTelemetry("conflicting duplicate batch identity")
 	}
-	if e.maxBytes > 0 && e.bytesUsed+int64(len(body)) > e.maxBytes {
-		e.failures++
+	// If a file already occupies this path (an unreadable/corrupt prior write —
+	// readExisting returned false above), its bytes were already counted at open by
+	// dirSize (or by an earlier successful write). Discount the old on-disk size FIRST
+	// so both the capacity check and the running total treat this as a replacement,
+	// not an addition — otherwise repairing a corrupt batch near the cap would wrongly
+	// saturate and could never advance the cursor.
+	var priorSize int64
+	if fi, statErr := os.Stat(path); statErr == nil {
+		priorSize = fi.Size()
+	}
+	if e.maxBytes > 0 && e.bytesUsed-priorSize+int64(len(body)) > e.maxBytes {
 		e.saturated = true
 		e.lastReason = "saturated"
 		return 0, errTelemetry("archive capacity saturated") // no silent drop; spool retained
 	}
 	if err := e.ensureDir(dir); err != nil {
-		e.failures++
 		e.lastReason = "write_error"
 		return 0, errTelemetry("archive directory is not usable")
 	}
-	// If a file already occupies this path (an unreadable/corrupt prior write —
-	// readExisting returned false above), its bytes were already counted at open by
-	// dirSize (or by an earlier successful write). Discount the old on-disk size so
-	// the overwrite does not double-count capacity (which would saturate early).
-	var priorSize int64
-	if fi, statErr := os.Stat(path); statErr == nil {
-		priorSize = fi.Size()
-	}
 	if err := fileutil.AtomicWrite(path, body, telemFilePerm); err != nil {
-		e.failures++
 		e.lastReason = "write_error"
 		return 0, errTelemetry("archive batch write failed")
 	}

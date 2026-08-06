@@ -206,7 +206,7 @@ func (t *telemetryRuntime) maxExportLag() uint64 {
 // real path — never a fabricated row.
 type mcpEventReader struct{ mgr *events.Manager }
 
-func (r mcpEventReader) CommittedEvents(capability, partition string, afterSeq uint64, max int) ([]evmodel.Event, []uint64, uint64, error) {
+func (r mcpEventReader) CommittedEvents(capability, partition string, afterSeq uint64, limit int) ([]evmodel.Event, []uint64, uint64, error) {
 	if capability != "gateway" {
 		return nil, nil, afterSeq, nil // Management is not composed here
 	}
@@ -218,7 +218,7 @@ func (r mcpEventReader) CommittedEvents(capability, partition string, afterSeq u
 	if !ok {
 		return nil, nil, afterSeq, nil
 	}
-	return sp.CommittedForExport(part, afterSeq, max)
+	return sp.CommittedForExport(part, afterSeq, limit)
 }
 
 // parseTelemPartition maps the adminapi partition label to the model partition.

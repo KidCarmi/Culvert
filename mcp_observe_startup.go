@@ -15,6 +15,7 @@ package main
 // returned for the health surface; the Secure Web Gateway path is never affected.
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"os"
@@ -64,6 +65,23 @@ type mcpObserveActivation struct {
 	CanonicalURL    string // the advertised canonical resource (public, non-secret)
 	MetadataURL     string // the RFC 9728 metadata URL (public, non-secret)
 	TrustedKeyCount int
+}
+
+// composeGatewayTelemetry builds the QUAL-3 durable telemetry plane and returns the
+// runtime EventProvider to inject into Deps. Disabled ⇒ (nil, not_configured, nil, nil)
+// so the caller keeps QUAL-2 behavior; enabled-but-invalid ⇒ (nil, invalid, nil, err)
+// so the caller fails activation closed. Returning the concrete *events.Manager as the
+// provider only when non-nil avoids the nil-interface trap.
+func composeGatewayTelemetry(tc mcpTelemetryStartupConfig) (*telemetryRuntime, mcpTelemetryState, mcpruntime.EventProvider, error) {
+	tel, telState, err := buildMCPTelemetry(tc)
+	if err != nil {
+		return nil, mcpTelemInvalid, nil, err
+	}
+	var ev mcpruntime.EventProvider
+	if tel != nil {
+		ev = tel.Manager()
+	}
+	return tel, telState, ev, nil
 }
 
 // loadMCPObserveRuntime builds the runtime config + activation summary from the
@@ -155,14 +173,10 @@ func loadMCPObserveRuntime(sc mcpObserveStartupConfig) (mcpruntime.Config, mcpOb
 	// QUAL-3: compose the durable telemetry plane (KEK + encrypted spool + archive
 	// exporter). Disabled ⇒ nil manager (QUAL-2 behavior). An enabled-but-invalid block
 	// fails activation closed — nothing binds, no partial manager/exporter, no fallback.
-	tel, telState, terr := buildMCPTelemetry(sc.Telemetry)
+	tel, telState, ev, terr := composeGatewayTelemetry(sc.Telemetry)
 	if terr != nil {
 		publishMCPTelemetry(mcpTelemInvalid, "qualification_telemetry_invalid", nil)
 		return invalid("qualification_telemetry_invalid", terr)
-	}
-	var ev mcpruntime.EventProvider
-	if tel != nil {
-		ev = tel.Manager() // non-nil concrete manager (avoids the nil-interface trap)
 	}
 
 	cfg := assembleGatewayConfig(sc, modes, tlsCfg, authCfg, meta, keys, reg, cat, ev)
@@ -170,9 +184,9 @@ func loadMCPObserveRuntime(sc mcpObserveStartupConfig) (mcpruntime.Config, mcpOb
 	// an activation outcome rather than a hard failure, so an invalid listener config
 	// fails closed to "invalid" instead of aborting startup.
 	if err := cfg.Validate(); err != nil {
-		if tel != nil {
-			_ = tel.Close() // close the opened spool/exporter so an invalid listener leaks nothing
-		}
+		// tel.Close is nil-safe (nil receiver ⇒ no-op); closing the opened
+		// spool/exporter so an invalid listener leaks nothing.
+		_ = tel.Close(context.Background())
 		return invalid("listener_config_invalid", err)
 	}
 	// Publish the seeded inventory + telemetry as the single sources of truth ONLY
