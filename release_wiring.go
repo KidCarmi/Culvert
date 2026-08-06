@@ -307,6 +307,26 @@ func loadReleaseManagement(cfg releaseStartupConfig) {
 	trust, err := NewTrustStoreWithSigstore(cfg.trustKeys, cfg.verifyMode, cfg.sigstore)
 	if err != nil {
 		logger.Printf("release management disabled: %v (configure CULVERT_RELEASE_CATALOG_TRUST_KEYS, ship baked roots, or set CULVERT_RELEASE_CATALOG_VERIFY=permissive for break-glass)", err)
+		// The empty-enforce-ring failure IS the case the Sigstore warning
+		// describes: an operator who set a custom identity (…_SIGSTORE_IDENTITY)
+		// with no trusted root leaves the keyless scheme dormant, so with no
+		// ed25519 roots either the enforce ring is empty and construction fails
+		// here. Publish a warning-only manager (no dispatch service, no catalog)
+		// so GET /api/releases surfaces available:false + sigstore_warn instead
+		// of a blank 503 the operator cannot diagnose without log access — the
+		// exact misconfiguration this warning exists to make visible.
+		if cfg.sigstoreWarn != "" {
+			setReleaseManager(&releaseManager{
+				verifyMode:   cfg.verifyMode,
+				trustSchemes: trustSchemes(cfg),
+				sigstoreWarn: cfg.sigstoreWarn,
+				// A non-nil store keeps the dispatch-status read (which does not
+				// gate on svc) safe; it stays empty, so that endpoint reports
+				// "phase: none" for a disabled manager. Every dispatch/refresh
+				// handler already gates on svc == nil and returns 503.
+				store: newDispatchStore(),
+			})
+		}
 		return
 	}
 

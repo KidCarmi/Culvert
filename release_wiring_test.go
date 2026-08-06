@@ -385,6 +385,49 @@ func TestLoadReleaseManagement_SigstoreWarnSurfacedOnAPI(t *testing.T) {
 	}
 }
 
+// TestLoadReleaseManagement_SigstoreWarnSurfacedWhenTrustFails covers the case
+// the warning actually exists for: enforce mode with no ed25519 roots and an
+// inactive Sigstore scheme (a custom identity set without a trusted root). The
+// trust store then fails to build with an empty enforce ring, so the normal
+// wiring returns before publishing a manager and GET /api/releases would 503 —
+// leaving the operator no way to see WHY. A warning-only manager must be
+// published so the reason surfaces. The sibling test above uses VerifyPermissive,
+// where trust construction succeeds and never exercises this path.
+func TestLoadReleaseManagement_SigstoreWarnSurfacedWhenTrustFails(t *testing.T) {
+	t.Cleanup(func() { setReleaseManager(nil) })
+	setReleaseManager(nil)
+
+	const wantWarn = "release catalog: sigstore identity override set without a trusted root"
+	loadReleaseManagement(releaseStartupConfig{
+		proxyRepo: defaultReleaseProxyRepo, catalogDir: "/tmp/nonexistent-catalog", maintURL: "",
+		verifyMode:   VerifyEnforce, // enforce + empty ring → NewTrustStoreWithSigstore fails
+		trustKeys:    nil,
+		sigstore:     nil,
+		sigstoreWarn: wantWarn,
+	})
+
+	rm := currentReleaseManager()
+	if rm == nil {
+		t.Fatal("a warning-only manager must be published when trust construction fails with a sigstore warning, else the operator gets a blank 503")
+	}
+	if rm.svc != nil {
+		t.Fatal("warning-only manager must carry no dispatch service (release management is disabled)")
+	}
+
+	rec := httptest.NewRecorder()
+	apiReleases(rec, releaseReq(http.MethodGet, "/api/releases", nil, RoleViewer))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/releases = %d %s; want 200 (available:false + warning, not 503)", rec.Code, rec.Body.String())
+	}
+	body := decodeBody(t, rec)
+	if body["available"] != false {
+		t.Errorf("available = %v, want false", body["available"])
+	}
+	if got := body["sigstore_warn"]; got != wantWarn {
+		t.Fatalf("GET /api/releases sigstore_warn = %v, want %q", got, wantWarn)
+	}
+}
+
 // ─── M1-2 product revision: baked default catalog origin ──────────────────────
 // Owner-required behaviors: default resolution, override precedence, empty
 // fallback, mirror URLs verbatim, the trust-safe disable sentinel, and origin
