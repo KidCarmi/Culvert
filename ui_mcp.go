@@ -105,13 +105,21 @@ func getMCPAdmin() *mcpAdminServer {
 			Approvals: mcpApprovalCounts{store: appr},
 			Config:    cfg,
 			Runtime:   mcpObserveRuntimeHealth,
-			Durability: func(string) adminapi.DurabilityHealth {
-				return adminapi.DurabilityHealth{CriticalState: "normal", DenialState: "normal", Severity: "none", RecoveryState: "n/a"}
-			},
+			// QUAL-3: the real per-capability durability snapshot. Evaluated per request,
+			// so it reflects live telemetry state; reports the truthful not-configured
+			// baseline when telemetry is not composed.
+			Durability: mcpTelemetryDurability,
 		}
 		params := adminapi.Params{
 			PolicyStores: stores, PolicyLimits: policy.DefaultLimits(), Approvals: appr,
 			PubCommitter: committer, IDGen: mcpIDGen, Health: health, ConfigStore: cfg, Limits: lim,
+		}
+		// QUAL-3: wire the committed-event read seam to the SAME durable spool the
+		// runtime commits to, so decision reads use the real EventReader (nil ⇒ the
+		// DecisionService stays disabled, QUAL-2 behavior). Snapshotted once — see the
+		// ordering contract below.
+		if er := mcpAdminEventReader(); er != nil {
+			params.Events = er
 		}
 		// QUAL-2: wire the SAME shared Registry/Catalog the runtime pipeline reads, so
 		// the read-only Servers/Tools Admin API is the single source of truth. Both stay
@@ -240,6 +248,10 @@ func apiMCPOverview(w http.ResponseWriter, r *http.Request) {
 		// not_configured / loaded / invalid and reports counts — it NEVER labels the
 		// subsystem Observe-/qualification-/production-ready (inventory is one dependency).
 		"inventory": inventoryStatus(),
+		// QUAL-3: safe, read-only durable-telemetry readiness (state, per-partition
+		// committed counts, exporter state + lag, saturation). Decision telemetry is
+		// truthfully "pending_policy" (Policy is not composed); execution stays disabled.
+		"telemetry": mcpTelemetryStatus(),
 	})
 }
 

@@ -232,6 +232,33 @@ type FileConfig struct {
 			// partially seeds and never enables MCP on its own (mcp.gateway.enabled still
 			// gates the listener). No secret material may appear in this file.
 			QualificationInventoryFile string `yaml:"qualification_inventory_file"`
+			// QualificationTelemetry (QUAL-3) composes the existing MCP durable-events
+			// machinery into the Gateway Observe runtime: an encrypted, capability-isolated
+			// event spool (KEK from a model-B secret.Provider file — never a raw key in
+			// YAML/CLI/env), a durable node-local qualification archive exporter, restart-safe
+			// export cursors, truthful telemetry health, and low-cardinality metrics.
+			// DISABLED BY DEFAULT: absence preserves QUAL-2 behavior (no event manager, no
+			// spool). An enabled-but-invalid block fails activation closed (nothing binds; no
+			// partial manager/exporter; no plaintext or memory-only fallback). Observe-only:
+			// no tool executes. This is a telemetry FOUNDATION — with Policy still absent only
+			// the denial lane commits on live requests; decision telemetry stays pending-policy.
+			QualificationTelemetry struct {
+				Enabled bool   `yaml:"enabled"`  // master switch; unset ⇒ disabled (default)
+				NodeID  string `yaml:"node_id"`  // stable node identity stamped into every event (required)
+				DataDir string `yaml:"data_dir"` // canonical telemetry durable root (spool + cursors); required
+				// KEKFile is the model-B key-at-rest file (secret.FileProvider): a random
+				// 32-byte KEK auto-generated 0600 on first use, stable across restarts. The KEK
+				// is NEVER in YAML/CLI/env and never derived from node id/password/config. A
+				// wrong/unavailable KEK fails closed (the spool cannot decrypt). Required.
+				KEKFile string `yaml:"kek_file"`
+				Export  struct {
+					Type       string `yaml:"type"`        // only "local-qualification-archive" (no network sink)
+					Directory  string `yaml:"directory"`   // node-local archive root (required)
+					BatchSize  int    `yaml:"batch_size"`  // max events per export batch (bounded; 0 ⇒ default)
+					MaxRetries int    `yaml:"max_retries"` // export retry bound per batch (bounded; 0 ⇒ default)
+					MaxBytes   int64  `yaml:"max_bytes"`   // archive total-size cap in bytes (bounded; 0 ⇒ default)
+				} `yaml:"export"`
+			} `yaml:"qualification_telemetry"`
 		} `yaml:"gateway"`
 	} `yaml:"mcp"`
 
