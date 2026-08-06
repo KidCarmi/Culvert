@@ -1208,7 +1208,13 @@ func scanInspectBody(r, req *http.Request, resp *http.Response, br blockResponde
 	}
 
 	origBody := resp.Body
-	body, readErr := io.ReadAll(io.LimitReader(origBody, maxScanBufferBytes()))
+	// Buffer the scan window and learn in the same read whether the decrypted
+	// body runs past it. This path has no Content-Length pre-check, so before
+	// this probe an over-limit download was partially scanned and the remainder
+	// forwarded with no counter, no log line and no alert — the primary SWG
+	// path was the blind one.
+	scanLimit := maxScanBufferBytes()
+	body, overflow, truncated, readErr := readScanPrefix(origBody, scanLimit)
 	if readErr != nil {
 		origBody.Close()
 		logger.Printf("SSL_INSPECT: body read error for %q: %v", sanitizeLog(hostOnly), readErr)
@@ -1280,8 +1286,18 @@ func scanInspectBody(r, req *http.Request, resp *http.Response, br blockResponde
 		return scanBlocked
 	}
 
-	// No match: reassemble the body (buffered prefix + remaining bytes).
-	resp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(body), origBody))
+	// No match in the window we could see. If the body ran past that window the
+	// remainder is about to be delivered uninspected — record it (counter + log
+	// + deduped scan_skipped alert), the same signal the plain-HTTP path emits.
+	// Deliberately NOT emitted on the block paths above: those never deliver the
+	// tail, so "forwarded unscanned" would be false.
+	if truncated {
+		logScanLimitExceeded(hostOnly, clientIP, scanLimit)
+	}
+	// Reassemble: buffered prefix + the overflow probe + remaining bytes.
+	// Dropping overflow here would corrupt the client's copy by exactly one
+	// byte.
+	resp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(body), bytes.NewReader(overflow), origBody))
 	return scanClean
 }
 

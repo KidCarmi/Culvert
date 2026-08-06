@@ -231,7 +231,12 @@ func scanHTTPResponseBody(w http.ResponseWriter, r *http.Request, resp *http.Res
 		return false, nil
 	}
 
-	buffered, readErr := io.ReadAll(io.LimitReader(resp.Body, globalSecScanner.MaxBytes()))
+	// Buffer the scan window and learn in the same read whether the body runs
+	// past it. An origin that omits Content-Length (chunked) skips the
+	// pre-check above entirely, so this is the ONLY place the plain-HTTP path
+	// can observe that it is about to forward bytes no scanner inspected.
+	scanLimit := globalSecScanner.MaxBytes()
+	buffered, overflow, truncated, readErr := readScanPrefix(resp.Body, scanLimit)
 	if readErr != nil {
 		// Fail closed (CHAOS-17): before this fix the error path returned
 		// false, silently forwarding the response unscanned AND truncated
@@ -284,7 +289,18 @@ func scanHTTPResponseBody(w http.ResponseWriter, r *http.Request, resp *http.Res
 		scanBlock(w, r.Host, scanResult.Reason, scanResult.Source)
 		return true, nil
 	}
-	// Reassemble: buffered prefix + any remaining bytes beyond the limit.
-	resp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(buffered), resp.Body))
+	// Nothing matched in the window we could see. If the body ran past that
+	// window the remainder is about to be streamed to the client uninspected —
+	// record it (counter + log + deduped scan_skipped alert) exactly as the
+	// declared-Content-Length pre-check does, so an origin cannot suppress the
+	// signal just by using chunked transfer encoding.
+	if truncated {
+		cip, _, _ := net.SplitHostPort(r.RemoteAddr)
+		logScanLimitExceeded(r.Host, cip, scanLimit)
+	}
+	// Reassemble: buffered prefix + the overflow probe + any remaining bytes
+	// beyond the limit. Dropping overflow here would corrupt the client's copy
+	// by exactly one byte.
+	resp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(buffered), bytes.NewReader(overflow), resp.Body))
 	return false, nil
 }

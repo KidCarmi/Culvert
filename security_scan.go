@@ -10,6 +10,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 
@@ -143,11 +144,50 @@ func maxScanBufferBytes() int64 {
 	return dpi
 }
 
+// readScanPrefix buffers the bytes a scanner may inspect and, in the SAME
+// read, learns whether the body continues past that window.
+//
+// It returns exactly the bytes io.ReadAll(io.LimitReader(body, limit)) would
+// have produced (so scan semantics are byte-identical to the pre-existing call
+// it replaces), plus an `overflow` probe holding any byte read beyond the
+// window. `truncated` is true only when the body genuinely has more content
+// than the scanner saw — a body whose length is EXACTLY limit is not truncated,
+// which a bare len(buf) == limit heuristic cannot distinguish.
+//
+// Callers MUST forward `overflow` ahead of the unread remainder when
+// reassembling the body, or the probe byte is silently dropped from the
+// client's copy. A non-positive limit means there is no scan window at all:
+// nothing is read and nothing is reported, matching LimitReader(body, 0).
+//
+// A read error is never laundered into a truncation: it is propagated and
+// `truncated` is false, preserving the CHAOS-17 fail-closed contract exactly.
+func readScanPrefix(body io.Reader, limit int64) (scan, overflow []byte, truncated bool, err error) {
+	if limit <= 0 {
+		return []byte{}, nil, false, nil
+	}
+	raw, err := io.ReadAll(io.LimitReader(body, limit+1))
+	if err != nil {
+		return nil, nil, false, err
+	}
+	if int64(len(raw)) > limit {
+		return raw[:limit], raw[limit:], true, nil
+	}
+	return raw, nil, false, nil
+}
+
 // logScanLimitExceeded logs a warning and fires a "scan_skipped" alert when a
 // response body exceeds the scan buffer limit and is therefore forwarded
 // without ClamAV/YARA/DPI inspection (Finding 4.2).
 // Tier 1.2: also increments the scan-skipped counter so the status API
 // exposes size-skipped events without grepping logs.
+//
+// Every path that forwards bytes the scanners never saw MUST call this — not
+// only the declared-Content-Length pre-check. A response body is truncated to
+// the scan window on the SSL-inspect path (scanInspectBody) and on the
+// plain-HTTP path whenever the length is not declared up front (chunked
+// transfer encoding), and both forward the unscanned remainder to the client.
+// Signalling only the declared-length case leaves the operator blind in exactly
+// the shape an origin chooses for itself.
 func logScanLimitExceeded(host, clientIP string, maxBytes int64) {
 	secscan.AddScanSkipped()
 	if logger != nil {
