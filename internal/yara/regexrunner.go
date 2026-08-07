@@ -36,14 +36,14 @@ import (
 // (BenchmarkMatch_Regex*, n=10):
 //
 //	regex strings │  before  │  after   │
-//	      1       │  2.42us  │  3.18us  │  +31%   (5 -> 8 allocs)
-//	      2       │  5.03us  │  5.52us  │  +10%   (10 -> 8 allocs)
-//	      3       │  7.80us  │  6.92us  │  -11%   (15 -> 8 allocs)
-//	     10       │  23.99us │  16.28us │  -32%   (50 -> 8 allocs)
-//	     20       │  47.99us │  30.29us │  -37%   (100 -> 8 allocs)
-//	     50       │ 118.83us │  72.81us │  -39%   (250 -> 8 allocs)
+//	      1       │  2.42us  │  4.29us  │  +77%   (5 -> 8 allocs)
+//	      2       │  5.03us  │  5.39us  │   +7%   (10 -> 8 allocs)
+//	      3       │  7.80us  │  6.11us  │  -22%   (15 -> 8 allocs)
+//	     10       │  23.99us │  16.76us │  -30%   (50 -> 8 allocs)
+//	     20       │  47.99us │  31.54us │  -34%   (100 -> 8 allocs)
+//	     50       │ 118.83us │  75.69us │  -36%   (250 -> 8 allocs)
 //
-// So a rule set with ONE regex string is ~750 ns slower per scanned body; the
+// So a rule set with ONE regex string is ~1.9 us slower per scanned body; the
 // break-even is three, and everything past it wins by a growing margin. That is
 // accepted deliberately rather than papered over: the shipped starter rule set
 // already carries ten, real deployments only add rules, and the alternative —
@@ -62,16 +62,15 @@ import (
 //     on_timeout posture, via the unchanged yaraTimeoutResult.
 //   - A timeout still affects only the string that overran. The scan continues
 //     with the remaining strings and rules; it is not aborted.
-//   - Saturation still fails closed by default via the unchanged
-//     yaraSaturationCheck, and abandoned goroutines are still counted by
-//     yaraInflight so they cannot accumulate unbounded.
+//   - Saturation is still checked per MATCH via the unchanged
+//     yaraSaturationCheck, still fails closed by default, and abandoned
+//     goroutines are still counted by yaraInflight so they cannot accumulate.
 //
-// yaraInflight's magnitude is unchanged. It never counted regex strings: a scan
-// evaluates its strings SEQUENTIALLY, waiting for each, so a healthy scan only
-// ever had one live regex goroutine at a time. It counted concurrent scans plus
-// abandoned (hung) matches, and it still does — one worker per in-flight scan,
-// released when the worker exits, which for an abandoned worker is when its
-// runaway match finally returns.
+// yaraInflight keeps its exact old meaning: the number of regex matches
+// currently running, plus abandoned ones still burning CPU. It is booked when a
+// match starts and given back when it returns — NOT held for the lifetime of the
+// worker. See charge/releaseCharge for why that distinction is load-bearing;
+// getting it wrong blocks clean traffic under the default fail-closed posture.
 
 // regexJob is one match request handed from a scan to its worker.
 type regexJob struct {
@@ -96,37 +95,50 @@ type regexRunner struct {
 	// beyond it.
 	abandoned atomic.Bool
 
-	// released guards the yaraInflight decrement so it happens exactly once,
-	// whichever side gets there first — see release.
-	released atomic.Bool
+	// charged is true while a yaraInflight slot is booked for the match that is
+	// currently outstanding — see charge/releaseCharge.
+	charged atomic.Bool
 }
 
-// release returns this worker's yaraInflight slot, at most once.
+// charge books a yaraInflight slot for the match about to start, and
+// releaseCharge gives it back. Exactly one release happens per charge: the CAS
+// makes it whichever side gets there first.
 //
-// Which side calls it is the whole accounting rule. The cap exists to bound
-// goroutines the engine can no longer control, so the slot must be held for
-// exactly as long as the goroutine is out of the scan's hands:
+// The slot tracks the MATCH, not the worker. That distinction is the whole
+// accounting rule, and getting it wrong is a fail-closed availability bug in
+// both directions:
 //
-//   - Normal end of scan: the worker is IDLE, parked on jobs with no work left
-//     and guaranteed to exit as soon as it is scheduled. The parent releases
-//     SYNCHRONOUSLY in close, so the slot is free the instant the scan ends.
-//   - Timeout: the worker is WEDGED in a match that cannot be interrupted. Only
-//     the worker itself knows when that ends, so it releases on the way out.
+//   - Hold it for the worker's LIFETIME and a scan that has finished its regex
+//     strings keeps occupying the cap while it evaluates literal strings and
+//     later rules. Concurrent clean scans then trip yaraSaturationCheck and are
+//     blocked under the default fail-closed posture, with no regex work
+//     actually running. The old per-string code never did this, because each
+//     match's goroutine released as soon as that match returned.
+//     (Reported on PR #1067; pinned by TestRegexRunner_IdleWorkerHoldsNoSlot
+//     and TestRegexRunner_IdleWorkerDoesNotSaturatePeers.)
+//   - Release it ASYNCHRONOUSLY, from the worker's exit, and short scans retire
+//     slots slower than they book them; under concurrent load the counter
+//     drifts up on already-finished work, reaches the cap, and blocks clean
+//     traffic just the same. (Pinned by TestRegexRunner_ConcurrentScans.)
 //
-// Releasing synchronously on the healthy path matters more than it looks. The
-// worker now spans a whole scan rather than a single match, so leaving the
-// decrement to the goroutine's exit lets short scans retire slower than they
-// are created: under concurrent load the counter drifts up on workers that are
-// already finished, reaches the cap, and starts failing scans closed — blocking
-// clean traffic for no reason. Caught by TestRegexRunner_ConcurrentScans.
-func (r *regexRunner) release() {
-	if r.released.CompareAndSwap(false, true) {
+// So the parent books before handing off a job and releases the moment the
+// result arrives. The one case it must NOT release is a timeout: the worker is
+// still wedged inside a match that cannot be interrupted, which is precisely
+// the runaway goroutine the cap exists to count. There the charge is handed to
+// the worker, which releases it on the way out.
+func (r *regexRunner) charge() {
+	r.charged.Store(true)
+	yaraInflight.Add(1)
+}
+
+func (r *regexRunner) releaseCharge() {
+	if r.charged.CompareAndSwap(true, false) {
 		yaraInflight.Add(-1)
 	}
 }
 
 // newRegexRunner starts a worker with the timer already armed for the caller's
-// first match, and registers it in yaraInflight.
+// first match. It does not book an inflight slot — charge does that per match.
 func newRegexRunner(timeout time.Duration) *regexRunner {
 	r := &regexRunner{
 		// Both buffered so neither side can be wedged by the other: the parent
@@ -136,7 +148,6 @@ func newRegexRunner(timeout time.Duration) *regexRunner {
 		results: make(chan bool, 1),
 		timer:   time.NewTimer(timeout),
 	}
-	yaraInflight.Add(1)
 	go r.run()
 	return r
 }
@@ -146,8 +157,11 @@ func newRegexRunner(timeout time.Duration) *regexRunner {
 // It may outlive its scan — that is the whole point of the timeout — which is
 // why it touches nothing but its own regexRunner and the immutable arguments in
 // the job.
+// The deferred releaseCharge is the abandoned case: on a normal scan the parent
+// has already released each match's charge, so the CAS finds nothing to give
+// back and this is a no-op.
 func (r *regexRunner) run() {
-	defer r.release()
+	defer r.releaseCharge()
 	for j := range r.jobs {
 		if r.abandoned.Load() {
 			return
@@ -156,19 +170,19 @@ func (r *regexRunner) run() {
 	}
 }
 
-// close shuts down an IDLE worker at the end of a scan, freeing its inflight
-// slot immediately. Callers must have collected the result of every job they
-// submitted; a wedged worker is retired with abandon instead.
+// close shuts down an IDLE worker at the end of a scan. Callers must have
+// collected the result of every job they submitted — so no charge is
+// outstanding — and a wedged worker is retired with abandon instead.
 func (r *regexRunner) close() {
 	r.timer.Stop()
 	r.abandoned.Store(true)
-	r.release()
 	close(r.jobs)
 }
 
 // abandon retires a worker still stuck inside a match that blew its budget. The
-// match cannot be interrupted, so the worker keeps its inflight slot — that is
-// exactly the goroutine the cap exists to count — and releases it on exit.
+// match cannot be interrupted, so the worker inherits the outstanding charge —
+// that is exactly the goroutine the cap exists to count — and releases it when
+// the match finally returns.
 func (r *regexRunner) abandon() {
 	r.timer.Stop()
 	r.abandoned.Store(true)
@@ -182,18 +196,18 @@ func (r *regexRunner) abandon() {
 // within timeout or when the in-flight cap is reached, unless the admin has
 // selected fail_open_with_alert for that posture.
 func (c *scanCtx) matchRegex(re *regexp.Regexp, data []byte, timeout time.Duration) bool {
+	// Saturation is evaluated per MATCH, exactly as the old per-string code did:
+	// the cap governs concurrent regex work, and this is the point where this
+	// scan is about to add some. Checking it once per scan instead would let a
+	// scan that started before the engine saturated keep matching afterwards.
+	inflight := yaraInflight.Load()
+	if saturated, result := yaraSaturationCheck(inflight); saturated {
+		return result
+	}
+	yaraDegradedCheck(inflight)
+
 	r := c.runner
 	if r == nil {
-		// Saturation and the approaching-saturation alert are evaluated where a
-		// goroutine is actually about to be created. Reusing this scan's existing
-		// worker adds no goroutine, so it cannot push the process over the cap and
-		// is deliberately not re-checked (which also stops the degraded-mode alert
-		// from firing once per regex string per scan while saturated).
-		inflight := yaraInflight.Load()
-		if saturated, result := yaraSaturationCheck(inflight); saturated {
-			return result
-		}
-		yaraDegradedCheck(inflight)
 		r = newRegexRunner(timeout)
 		c.runner = r
 	} else {
@@ -204,16 +218,18 @@ func (c *scanCtx) matchRegex(re *regexp.Regexp, data []byte, timeout time.Durati
 		r.timer.Reset(timeout)
 	}
 
+	r.charge()
 	r.jobs <- regexJob{re: re, data: data}
 
 	select {
 	case matched := <-r.results:
 		r.timer.Stop()
+		r.releaseCharge()
 		return matched
 	case <-r.timer.C:
 		// The worker is wedged in this match and cannot be reused. Drop it — it
-		// releases its yaraInflight slot when the match finally returns — and let
-		// the next regex string in this scan start a fresh one.
+		// inherits the charge and releases it when the match finally returns —
+		// and let the next regex string in this scan start a fresh one.
 		r.abandon()
 		c.runner = nil
 		return yaraTimeoutResult(timeout, re.String())

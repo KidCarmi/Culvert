@@ -34,7 +34,7 @@ func filler(n int) []byte {
 // simulate saturation, which clobbers concurrent accounting, and -shuffle can
 // place them anywhere. Absolute assertions turn that into a phantom failure in
 // this file (observed: "inflight = -1"). The per-runner accounting itself is
-// exact — release() is CAS-guarded, so a runner increments and decrements
+// exact — each match's charge is CAS-guarded, so it is booked and given back
 // exactly once — which is what these deltas actually test.
 func inflightBaseline(t *testing.T) int64 {
 	t.Helper()
@@ -61,11 +61,11 @@ func waitInflight(t *testing.T, want int64) int64 {
 }
 
 // waitReleased waits for one specific abandoned worker to finish its runaway
-// match and give back its slot. Deterministic, unlike waiting on the counter.
+// match and give back its charge. Deterministic, unlike waiting on the counter.
 func waitReleased(t *testing.T, r *regexRunner) {
 	t.Helper()
 	for i := 0; i < 500; i++ {
-		if r.released.Load() {
+		if !r.charged.Load() {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -104,8 +104,68 @@ func TestRegexRunner_ReusesOneWorkerPerScan(t *testing.T) {
 			t.Fatalf("string %d: worker was replaced — the harness is being paid per string again", i)
 		}
 	}
-	if got := yaraInflight.Load() - base; got != 1 {
-		t.Errorf("inflight delta = %d after 26 regex strings in one scan, want 1 (one worker per scan)", got)
+	// The worker is reused, but it is IDLE now, so it must not be occupying the
+	// saturation cap — the slot tracks the running match, not the goroutine.
+	if got := yaraInflight.Load() - base; got != 0 {
+		t.Errorf("inflight delta = %d with the worker idle between strings, want 0", got)
+	}
+}
+
+// TestRegexRunner_IdleWorkerHoldsNoSlot pins the accounting boundary directly:
+// once a match returns, its inflight slot is given back immediately, even though
+// the worker stays alive and reusable for the rest of the scan.
+func TestRegexRunner_IdleWorkerHoldsNoSlot(t *testing.T) {
+	base := inflightBaseline(t)
+
+	ctx := &scanCtx{}
+	defer ctx.closeRegexRunner()
+
+	if ctx.matchRegex(regexp.MustCompile(`nomatch-zzz`), []byte("clean body"), time.Second) {
+		t.Fatal("clean body must not match")
+	}
+	if got := yaraInflight.Load() - base; got != 0 {
+		t.Errorf("inflight delta = %d after the match returned, want 0 — an idle worker "+
+			"must not occupy the saturation cap while the scan does non-regex work", got)
+	}
+	if ctx.runner == nil {
+		t.Error("the worker should still be alive and reusable for the next regex string")
+	}
+}
+
+// TestRegexRunner_IdleWorkerDoesNotSaturatePeers is the end-to-end form of the
+// same contract, and the regression test for the bug this design first shipped
+// with (reported on PR #1067).
+//
+// A scan holds its worker from its first regex string until the scan ends, so if
+// the inflight slot tracked the WORKER rather than the MATCH, a scan that had
+// finished its regex strings and moved on to literal strings and later rules
+// would keep occupying the cap while doing no regex work at all. Concurrent
+// clean scans would then be failed CLOSED under the default posture. max_inflight
+// is set to its minimum supported value to make that deterministic; the same
+// effect appears at the default cap of 50 under enough concurrency.
+func TestRegexRunner_IdleWorkerDoesNotSaturatePeers(t *testing.T) {
+	inflightBaseline(t)
+
+	oldMax := GetMaxInflight()
+	defer SetMaxInflight(oldMax)
+	SetMaxInflight(1)
+
+	re := regexp.MustCompile(`nomatch-zzz`)
+	body := []byte("clean body")
+
+	// Scan A evaluates one regex string, then carries on with non-regex work.
+	a := &scanCtx{}
+	defer a.closeRegexRunner()
+	if a.matchRegex(re, body, time.Second) {
+		t.Fatal("scan A: clean body must not match")
+	}
+
+	// Scan B starts its first regex while A is still open.
+	b := &scanCtx{}
+	defer b.closeRegexRunner()
+	if b.matchRegex(re, body, time.Second) {
+		t.Error("scan B failed CLOSED on a clean body: scan A's idle worker is occupying " +
+			"the saturation cap while no regex match is running")
 	}
 }
 
@@ -203,7 +263,7 @@ func TestRegexRunner_TimeoutFailsClosedAndScanContinues(t *testing.T) {
 	}
 	// The abandoned worker keeps its slot while its runaway match is still
 	// running — that is exactly the goroutine the cap exists to count.
-	if doomed.released.Load() {
+	if !doomed.charged.Load() {
 		t.Error("an abandoned worker must hold its inflight slot until its match returns")
 	}
 	defer waitReleased(t, doomed)
