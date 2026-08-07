@@ -85,9 +85,9 @@ func TestAuthoritativeEnvConsumption_Live(t *testing.T) {
 	_ = os.WriteFile(tokF, []byte(testMetricsMaterial), 0o600)
 	telRoot := t.TempDir() // operator-owned; outside the harness work root
 
-	gwPort, _ := freePort()
-	adminPort, _ := freePort()
-	metricsPort, _ := freePort()
+	gwPort, _ := freePortOn("127.0.0.1")
+	adminPort, _ := freePortOn("127.0.0.1")
+	metricsPort, _ := freePortOn("127.0.0.1")
 
 	env := &EnvSpec{
 		BindHost: "127.0.0.1", OAuthIssuer: "https://idp.acceptance.test/issuer",

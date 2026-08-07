@@ -251,9 +251,6 @@ func freePortOn(host string) (int, error) {
 	return l.Addr().(*net.TCPAddr).Port, nil
 }
 
-// freePort allocates a free loopback port (the dev default and the tripwire path).
-func freePort() (int, error) { return freePortOn("127.0.0.1") }
-
 // NewFixture builds a complete ephemeral two-tenant fixture under root.
 func NewFixture(root string, secrets *SecretScan) (*Fixture, error) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
