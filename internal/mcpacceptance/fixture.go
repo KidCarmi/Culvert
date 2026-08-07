@@ -378,21 +378,59 @@ func (f *Fixture) resolvePorts(pc *procConfig, role procRole) error {
 		pc.uiPort = f.operator.adminPort
 		return nil
 	}
-	// Allocate the MCP port on the actual bind interface so it cannot collide with a
-	// non-loopback primary Gateway bound on that same interface. The admin UI and
-	// proxy/metrics listeners bind all interfaces, so their ports are visible to a
-	// loopback probe.
+	// Non-primary/auxiliary processes get ephemeral ports, but must NOT reuse the
+	// operator-selected primary ports (gateway/admin/metrics): the primary may not have
+	// bound them yet when an auxiliary allocates, so a naive free-port probe could hand
+	// out a port the primary will later bind, deterministically failing that process.
+	// Avoid the operator's fixed ports explicitly. The MCP port is probed on the actual
+	// bind interface so it cannot collide with a non-loopback primary Gateway either.
+	avoid := f.operatorReservedPorts()
 	var err error
-	if pc.mcpPort, err = freePortOn(f.bindHost); err != nil {
+	if pc.mcpPort, err = freePortAvoiding(f.bindHost, avoid); err != nil {
 		return err
 	}
-	if pc.proxyPort, err = freePort(); err != nil {
+	avoid[pc.mcpPort] = true
+	if pc.proxyPort, err = freePortAvoiding("127.0.0.1", avoid); err != nil {
 		return err
 	}
-	if pc.uiPort, err = freePort(); err != nil {
+	avoid[pc.proxyPort] = true
+	if pc.uiPort, err = freePortAvoiding("127.0.0.1", avoid); err != nil {
 		return err
 	}
 	return nil
+}
+
+// operatorReservedPorts returns the set of operator-selected primary ports auxiliary
+// processes must not reuse (empty in dev mode).
+func (f *Fixture) operatorReservedPorts() map[int]bool {
+	avoid := map[int]bool{}
+	if f.operator != nil {
+		avoid[f.operator.gatewayPort] = true
+		avoid[f.operator.adminPort] = true
+		avoid[f.operator.metricsPort] = true
+	}
+	return avoid
+}
+
+// freePortAvoiding allocates a free port on host that is not in the avoid set,
+// retrying a bounded number of times (the avoid set is tiny, so collisions are rare
+// and clear quickly). It never loops unboundedly.
+func freePortAvoiding(host string, avoid map[int]bool) (int, error) {
+	var lastErr error
+	for attempt := 0; attempt < 20; attempt++ {
+		p, err := freePortOn(host)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if !avoid[p] {
+			return p, nil
+		}
+	}
+	if lastErr != nil {
+		return 0, lastErr
+	}
+	return 0, fmt.Errorf("acceptance: could not allocate a free port avoiding the operator ports")
 }
 
 // resolveCreds assigns the admin user/password + metrics token. Authoritative runs
@@ -545,12 +583,21 @@ func (f *Fixture) setPolicy(pc procConfig, doc map[string]any) error {
 }
 
 func (f *Fixture) renderConfig(pc procConfig, enabled bool) error {
+	// The app-layer Host allowlist always carries the canonical vhost the clients use
+	// ("gw.test") and loopback. In authoritative mode it also carries the operator bind
+	// host so the network authority advertised in the supervision descriptor
+	// (bind_host:port) is accepted — the runtime host check strips the port before
+	// matching, so the host-only entry suffices.
+	allowedHosts := []any{"127.0.0.1", "gw.test"}
+	if pc.bindHost != "" && pc.bindHost != "127.0.0.1" {
+		allowedHosts = append(allowedHosts, pc.bindHost)
+	}
 	gw := map[string]any{
 		"enabled":                      enabled,
 		"bind_address":                 pc.bindHost,
 		"port":                         pc.mcpPort,
 		"protocol_version":             "2025-11-25",
-		"allowed_hosts":                []any{"127.0.0.1", "gw.test"},
+		"allowed_hosts":                allowedHosts,
 		"connector_mode":               "local-client",
 		"tls_cert_file":                f.serverCertFile,
 		"tls_key_file":                 f.serverKeyFile,

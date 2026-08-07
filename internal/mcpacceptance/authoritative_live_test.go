@@ -81,8 +81,8 @@ func TestAuthoritativeEnvConsumption_Live(t *testing.T) {
 	tokF := filepath.Join(matDir, "metrics.tok")
 	// The admin password must satisfy the product complexity policy (upper/lower/digit);
 	// this is an operator responsibility in a real run.
-	_ = os.WriteFile(passF, []byte("LiveAdminPass1word"), 0o600)
-	_ = os.WriteFile(tokF, []byte("LiveMetricsToken1abcdef"), 0o600)
+	_ = os.WriteFile(passF, []byte(testAdminMaterial), 0o600)
+	_ = os.WriteFile(tokF, []byte(testMetricsMaterial), 0o600)
 	telRoot := t.TempDir() // operator-owned; outside the harness work root
 
 	gwPort, _ := freePort()

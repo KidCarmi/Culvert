@@ -1,6 +1,7 @@
 package mcpacceptance
 
 import (
+	"bytes"
 	"crypto/x509"
 	"encoding/pem"
 	"os"
@@ -31,8 +32,8 @@ func localOperatorEnv(t *testing.T) (*EnvSpec, string) {
 		t.Fatal(err)
 	}
 	polF := writeFileT(t, dir, "policy.json", string(validOperatorPolicy()))
-	passF := writeFileT(t, dir, "admin.pass", "supersecret-admin-password-123")
-	tokF := writeFileT(t, dir, "metrics.tok", "supersecret-metrics-token-456")
+	passF := writeFileT(t, dir, "admin.pass", testAdminMaterial)
+	tokF := writeFileT(t, dir, "metrics.tok", testMetricsMaterial)
 	telRoot := t.TempDir() // operator-owned, deliberately NOT under the work root
 	env := &EnvSpec{
 		BindHost:                "127.0.0.1",
@@ -82,7 +83,7 @@ func TestBuildProc_AuthoritativePrimaryConsumesOperatorControls(t *testing.T) {
 	if pa.policyOwner != ownerOperator || pa.policyPath != fx.operator.policyFile {
 		t.Fatalf("primary did not consume operator policy: owner=%s path=%s", pa.policyOwner, pa.policyPath)
 	}
-	if pa.adminUser != env.Supervision.AdminUser || pa.adminPass != "supersecret-admin-password-123" || pa.metricsToken != "supersecret-metrics-token-456" {
+	if pa.adminUser != env.Supervision.AdminUser || pa.adminPass != testAdminMaterial || pa.metricsToken != testMetricsMaterial {
 		t.Fatal("primary did not consume operator credentials")
 	}
 }
@@ -128,7 +129,7 @@ func TestSetPolicy_RefusesOperatorOwned(t *testing.T) {
 		t.Fatal("setPolicy must refuse to rewrite an operator-owned policy file")
 	}
 	after, _ := os.ReadFile(fx.operator.policyFile)
-	if string(before) != string(after) {
+	if !bytes.Equal(before, after) {
 		t.Fatal("operator policy file was mutated despite the refusal")
 	}
 }
