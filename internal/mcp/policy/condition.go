@@ -253,7 +253,23 @@ func compileTimeCond(rc rawCondition, id string) (compiledCond, error) {
 
 func condErrCond(detail string) (compiledCond, error) { return compiledCond{}, condErr(detail) }
 
+// boundStr validates a scalar condition value: NON-EMPTY and within the byte bound.
+//
+// The non-empty requirement is load-bearing, not cosmetic. An empty value is
+// vacuous for every scalar operator, but its vacuity is NOT uniformly fail-closed:
+// `exact ""` and `contains ""` can never match (the field accessors report a
+// present=false for an empty field), whereas `prefix ""` is vacuously TRUE for
+// every present value — strings.HasPrefix(v, "") is always true. So an omitted or
+// empty `value` on a `prefix` condition silently WIDENS its rule to match-all,
+// turning a scope-limited ALLOW into an unconditional one. Rejecting the empty
+// value at compile time closes that fail-open asymmetry and makes the whole scalar
+// operator family behave like `one_of` (non-empty set required) and `glob` (empty
+// pattern rejected): a malformed condition is a compile error, never a silently
+// broader rule.
 func boundStr(s string, lim Limits) error {
+	if s == "" {
+		return condErr("condition value must be non-empty (an empty value is vacuous and would widen the rule)")
+	}
 	if len(s) > lim.MaxStringBytes() {
 		return condErr("condition string value exceeds the byte bound")
 	}
@@ -269,6 +285,12 @@ func boundSet(values []string, lim Limits) (map[string]struct{}, error) {
 	}
 	set := make(map[string]struct{}, len(values))
 	for _, v := range values {
+		// An empty member is never a legitimate matcher value (no field accessor yields
+		// a present empty scalar) and, on a set field, would match an empty element that
+		// leaked in from an upstream identity source. Reject it like an empty scalar.
+		if v == "" {
+			return nil, condErr("condition set value must be non-empty")
+		}
 		if len(v) > lim.MaxStringBytes() {
 			return nil, condErr("condition set value exceeds the byte bound")
 		}

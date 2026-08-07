@@ -34,6 +34,11 @@ type Listener struct {
 	srv   *http.Server
 	netln net.Listener
 
+	// challenge is the precomputed WWW-Authenticate value emitted on a 401 when the
+	// capability publishes OAuth Protected Resource Metadata (RFC 9728). Empty ⇒ no
+	// challenge header (byte-identical to the pre-metadata behavior).
+	challenge string
+
 	// sem bounds concurrent in-flight requests; queue bounds admitted-but-waiting
 	// requests beyond the workers. Both are per-listener, so one capability's queue
 	// filling up never blocks the other.
@@ -66,6 +71,7 @@ func newListener(cfg ListenerConfig, deps Deps, listenerID string, rev uint64) (
 		queue:      make(chan struct{}, cfg.Limits.QueueDepth()),
 		stopCh:     make(chan struct{}),
 		done:       make(chan struct{}),
+		challenge:  cfg.Metadata.challenge(),
 	}
 	l.srv = &http.Server{
 		Handler:           l,
@@ -179,10 +185,26 @@ func (l *Listener) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer release()
 
+	// Protected Resource Metadata (RFC 9728): a GET to the capability's well-known
+	// path returns the bounded PUBLIC document. It is served over the (already
+	// TLS/mTLS-terminated) connection but requires no bearer token — it is precisely
+	// the document a token-less client reads to learn how to obtain one. It never
+	// runs the request pipeline, opens a stream, mutates a session, or reads a body.
+	// Match on the ESCAPED path: WellKnownPath is derived from the resource's
+	// EscapedPath, so a resource whose path carries percent-encoding still resolves
+	// (comparing the decoded r.URL.Path would miss it).
+	if r.Method == http.MethodGet && l.cfg.Metadata.servesWellKnown(r.URL.EscapedPath()) {
+		l.writeProtectedResourceMetadata(w)
+		return
+	}
+
 	// Steps 2–3 + transport extraction.
 	req, status := l.extractRequest(w, r)
 	if status != 0 {
 		l.ctr.requestsRejected.Add(1)
+		if status == http.StatusUnauthorized && l.challenge != "" {
+			w.Header().Set("WWW-Authenticate", l.challenge)
+		}
 		writeStatus(w, status)
 		return
 	}
@@ -263,6 +285,13 @@ func (l *Listener) writeOutcome(w http.ResponseWriter, out Outcome) {
 	if out.NewSession && out.SessionID != "" {
 		w.Header().Set("Mcp-Session-Id", out.SessionID)
 	}
+	// RFC 9728 §5.1: a 401 from an authentication failure advertises where the
+	// client can discover the resource's authorization server(s). Emitted only when
+	// the capability publishes metadata; never on a non-401 or an unconfigured
+	// listener, and it carries no token, tenant, or credential data.
+	if out.Status == http.StatusUnauthorized && l.challenge != "" {
+		w.Header().Set("WWW-Authenticate", l.challenge)
+	}
 	if len(out.ResponseBody) > 0 {
 		w.Header().Set("Content-Type", "application/json")
 	}
@@ -270,6 +299,18 @@ func (l *Listener) writeOutcome(w http.ResponseWriter, out Outcome) {
 	if len(out.ResponseBody) > 0 {
 		_, _ = w.Write(out.ResponseBody) //nolint:errcheck // client disconnect is not actionable
 	}
+}
+
+// writeProtectedResourceMetadata writes the bounded PUBLIC RFC 9728 document. The
+// body is precomputed from operator config (never from the request), so the Host
+// header cannot influence the advertised resource or authorization servers. It
+// opens no stream and never touches a session.
+func (l *Listener) writeProtectedResourceMetadata(w http.ResponseWriter) {
+	body := l.cfg.Metadata.documentJSON()
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body) //nolint:errcheck // client disconnect is not actionable
 }
 
 // health returns this listener's typed health snapshot (active-session count read

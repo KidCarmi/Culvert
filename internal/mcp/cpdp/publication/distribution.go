@@ -48,10 +48,29 @@ type DistributionCounts struct {
 	Unavailable  int `json:"unavailable"`
 }
 
+// DeriveState maps distribution counts for a specific published hash to a truthful
+// DistributionState. It is the exported entry point for read-only admin models
+// (e.g. the acknowledgement read model); it never infers a state from anything but
+// the real counts.
+func DeriveState(c DistributionCounts) DistributionState { return deriveState(c) }
+
 // deriveState maps the counts for a specific published hash to a truthful state.
 func deriveState(c DistributionCounts) DistributionState {
 	if c.Intended == 0 {
 		return StateLocalOnly
+	}
+	// Rollback outcomes the forward branches below cannot represent (they would
+	// fold an all-rolled-back fleet into pending_distribution). A forward publish of
+	// a hash never yields rolled_back acks for that same hash, so RolledBack==0 on
+	// the forward path and this block is byte-identical there; it only fires for a
+	// hash a rollback has targeted. A rolled_back ack mixed with competing
+	// applies/rejects is NOT a clean rollback, so it falls through to the
+	// degraded/partial branches rather than masking them.
+	if c.RolledBack == c.Intended {
+		return StateRolledBack
+	}
+	if c.RolledBack > 0 && c.Applied == 0 && c.Rejected == 0 {
+		return StateRollbackPending
 	}
 	if c.Applied == c.Intended {
 		return StateFullyAcknowledged
@@ -183,4 +202,17 @@ func (t *AckTracker) Counts(contentHash string, intended []string) DistributionC
 		}
 	}
 	return c
+}
+
+// AckFor returns the latest recorded acknowledgement for (node, contentHash) and
+// whether one exists. It is a bounded, read-only accessor (a defensive copy of the
+// stored value) so an admin read model can render per-DP rows without mutating or
+// exposing the tracker's internal maps. The ABSENCE of an ack (ok=false) is the
+// truthful "no acknowledgement yet" state - the caller must render it as such
+// (e.g. "unavailable"), never as a benign default.
+func (t *AckTracker) AckFor(node, contentHash string) (cpdp.Acknowledgement, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	a, ok := t.acks[ackKey(node, contentHash)]
+	return a, ok
 }

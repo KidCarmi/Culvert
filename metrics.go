@@ -263,7 +263,10 @@ func startHitCounterPersistence(ctx context.Context, path string) <-chan struct{
 				saveHitCounters(path)
 				return
 			case <-t.C:
-				saveHitCounters(path)
+				// CHAOS-24: contain the ROUND so a marshal fault costs one
+				// checkpoint rather than the process, and the loop survives to
+				// take the next one (and the ctx.Done final save).
+				runGuarded("metrics_persist", func() { saveHitCounters(path) })
 			}
 		}
 	}()
@@ -757,7 +760,8 @@ culvert_decrypt_autoexclude_surge_total %d
 	liveFeedWritePrometheus(&ruleMetBuf)
 	releaseCatalogWritePrometheus(&ruleMetBuf)
 	pacWritePrometheus(&ruleMetBuf)
-	supportWritePrometheus(&ruleMetBuf)  // culvert_support_bundle_retention_* (M5 retention observability)
-	saasFeedWritePrometheus(&ruleMetBuf) // culvert_saasfeed_* (F3b-4 signed-feed observability)
-	fmt.Fprint(w, ruleMetBuf.String())   //nolint:errcheck // writes to http.ResponseWriter; an error only means the client disconnected
+	supportWritePrometheus(&ruleMetBuf)   // culvert_support_bundle_retention_* (M5 retention observability)
+	saasFeedWritePrometheus(&ruleMetBuf)  // culvert_saasfeed_* (F3b-4 signed-feed observability)
+	writeMCPTelemetryMetrics(&ruleMetBuf) // culvert_mcp_* (QUAL-3 durable telemetry, low-cardinality)
+	fmt.Fprint(w, ruleMetBuf.String())    //nolint:errcheck // writes to http.ResponseWriter; an error only means the client disconnected
 }

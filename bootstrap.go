@@ -68,7 +68,14 @@ func apiBootstrapCompose(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 	const prefix = "/api/cluster/bootstrap/"
 	const suffix = "/compose"
-	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+	// The bare path "/api/cluster/bootstrap/compose" (no token segment) has
+	// prefix and suffix overlapping on the separating slash: it satisfies
+	// both HasPrefix and HasSuffix, but len(path) < len(prefix)+len(suffix),
+	// which would make the slice below start past its end and panic. Reject
+	// it here instead — this path is reachable without session auth (its
+	// own token is meant to be the auth), so a malformed/attacker request
+	// must not be able to crash the handler goroutine.
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) || len(path) < len(prefix)+len(suffix) {
 		http.Error(w, "invalid path", http.StatusBadRequest)
 		return
 	}

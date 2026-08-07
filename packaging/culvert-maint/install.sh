@@ -102,24 +102,77 @@ sudoers_escape_colon() {
     printf '%s' "$1" | sed -e 's/:/\\:/g' -e 's/,/\\,/g'
 }
 
-# Read a TOML basic-string value:  key = "value"  (any leading whitespace,
-# any spacing around =). Ignores commented lines. Prints empty if absent.
-# Strips everything from the FIRST "=" (not FS="="'s second field) so an "="
-# embedded in the value itself is not truncated, and cuts the value at its
-# closing quote so a trailing inline "# comment" after the string does not
-# leak into the extracted value.
+# Read a TOML basic ("value") OR literal ('value') string value:  key = "value"
+# / key = 'value'  (any leading whitespace, any spacing around =). Ignores
+# commented lines. Prints empty if absent. Strips everything from the FIRST
+# "=" (not FS="="'s second field) so an "=" embedded in the value itself is
+# not truncated, and cuts the value at its closing quote so a trailing inline
+# "# comment" after the string does not leak into the extracted value.
+#
+# MUST handle single-quoted (literal) strings, not just double-quoted: TOML
+# literal strings are how a value containing a backslash — e.g.
+# image_allowlist's regex, '^ghcr\.io/...' — is written so the backslash is
+# NOT interpreted as an escape. Handling only "..." left a single-quoted
+# value's surrounding quote CHARACTERS attached to the extracted output
+# (e.g. "'^ghcr\.io/...$'" instead of "^ghcr\.io/...$"), which silently
+# broke anchored regex matching against it (a leading/trailing stray quote
+# defeats a ^...$-anchored pattern).
 extract_toml_string() {
     awk -v k="$1" '
+        BEGIN { q = sprintf("%c", 39) }
         /^[[:space:]]*#/ { next }
         $0 ~ "^[[:space:]]*"k"[[:space:]]*=" {
             line=$0
             sub("^[[:space:]]*"k"[[:space:]]*=[[:space:]]*", "", line)
-            sub(/^"/, "", line)
-            sub(/".*$/, "", line)
+            if (substr(line, 1, 1) == q) {
+                line = substr(line, 2)
+                idx = index(line, q)
+                if (idx > 0) line = substr(line, 1, idx - 1)
+            } else {
+                sub(/^"/, "", line)
+                sub(/".*$/, "", line)
+            }
             print line
             exit
         }
     ' "$CONFIG_DEST"
+}
+
+# check_proxy_repo_matches_allowlist REPO ALLOWLIST — proxy_repo and
+# image_allowlist MUST describe the same repository (P1.4 §3.1): a mismatch
+# lets install.sh complete successfully while the agent's OWN image_allowlist
+# gate (cmd/culvert-maint/internal/config) then rejects every upgrade/rollback
+# dispatch forever, silently, because the requested <proxy_repo>@sha256:...
+# ref never matches. An empty ALLOWLIST previously SKIPPED this check
+# entirely, on the assumption that "empty means the Go default, which matches
+# the proxy_repo default" — but that assumption only holds when proxy_repo is
+# ALSO left at its default. The common real-world case is the opposite: an
+# operator customizes proxy_repo (e.g. a private mirror) and never touches
+# image_allowlist, so it silently defaults to a pattern anchored to
+# ghcr.io/kidcarmi/culvert that can never match the custom repo. Default an
+# empty ALLOWLIST to that same Go-side pattern (config.go's
+# defaultImageAllowlist) so the comparison always runs, catching exactly that
+# case at install time instead of at every future dispatch.
+#
+# The match itself is a REAL regex test against a synthetic digest-pinned ref
+# (<repo>@sha256:<64 zeros>) — mirroring exactly what the agent's own
+# ImageAllowlist.MatchString(req.ImageRef) does at dispatch time, since a
+# pinned upgrade/rollback ref is always digest form. A plain substring check
+# (an earlier version of this function used one) would wrongly PASS a REPO
+# that is merely a substring of the allowlist pattern's literal text — e.g.
+# "kidcarmi/culvert" against the ghcr.io/kidcarmi/culvert-anchored default —
+# even though that repo can never actually match the anchored regex.
+check_proxy_repo_matches_allowlist() {
+    _repo=$1; _allowlist=$2
+    if [ -z "$_allowlist" ]; then
+        _allowlist='^ghcr\.io/kidcarmi/culvert(:[A-Za-z0-9._-]+|@sha256:[a-f0-9]{64})$'
+    fi
+    _zeros64=$(awk 'BEGIN{for(i=0;i<64;i++)printf "0"}')
+    _test_ref="${_repo}@sha256:${_zeros64}"
+    if printf '%s' "$_test_ref" | grep -Eq -- "$_allowlist"; then
+        return 0
+    fi
+    die "proxy_repo '$_repo' is not matched by image_allowlist (tested as '$_test_ref') — they MUST describe the same repository (P1.4). Set image_allowlist in config.toml to a regex matching '$_repo' (an unset image_allowlist defaults to a pattern anchored to ghcr.io/kidcarmi/culvert, which will never match a custom proxy_repo) and re-run."
 }
 
 # ── 1. Pre-flight ────────────────────────────────────────────────────────────
@@ -358,17 +411,11 @@ case "$PROXY_REPO" in
 esac
 reject_unsafe "proxy_repo" "$PROXY_REPO"
 
-# proxy_repo and image_allowlist MUST describe the same repository (P1.4 §3.1).
-# Heuristic: the allowlist regex (backslashes stripped) must contain the
-# proxy_repo literal. Only checked when image_allowlist is explicitly set; an
-# empty value means the Go default is used, which matches the proxy_repo default.
-if [ -n "$IMAGE_ALLOWLIST" ]; then
-    AL_NORM=$(printf '%s' "$IMAGE_ALLOWLIST" | sed 's/\\//g')
-    case "$AL_NORM" in
-        *"$PROXY_REPO"*) : ;;
-        *) die "proxy_repo '$PROXY_REPO' is not referenced by image_allowlist — they MUST describe the same repository (P1.4). Reconcile config.toml and re-run." ;;
-    esac
-fi
+# proxy_repo and image_allowlist MUST describe the same repository (P1.4 §3.1),
+# checked as a real regex match against a synthetic digest-pinned ref — runs
+# even when image_allowlist is left unset. See check_proxy_repo_matches_allowlist's
+# doc comment for the full rationale.
+check_proxy_repo_matches_allowlist "$PROXY_REPO" "$IMAGE_ALLOWLIST"
 
 # Validate compose_project_dir: present, absolute, no unsafe chars.
 [ -n "$PROJECT_DIR" ] || die "compose_project_dir not found in $CONFIG_DEST — edit it first, then re-run"

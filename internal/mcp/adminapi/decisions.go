@@ -24,17 +24,47 @@ type EventReader interface {
 }
 
 // DecisionFilter carries the safe, bounded query filters. A zero field is "any".
+// Every string field is matched by EXACT equality against the persisted event
+// (never substring/regex), so no filter can scan into secret or raw-content
+// fields; the searchable surface is exactly the fields projected into
+// DecisionView/ExplanationView.
 type DecisionFilter struct {
-	Action          string
-	ReasonCode      string
-	RuleID          string
-	ServerID        string
-	ToolName        string
-	ToolFingerprint string
-	PrincipalID     string
-	AgentID         string
-	StartUnixNano   int64
-	EndUnixNano     int64
+	Action               string
+	ReasonCode           string
+	RuleID               string
+	ServerID             string
+	ToolName             string
+	ToolFingerprint      string
+	PrincipalID          string
+	AgentID              string
+	ClientID             string
+	ExecutionState       string
+	PolicySnapshotHash   string
+	CredentialProfileRef string
+	StartUnixNano        int64
+	EndUnixNano          int64
+}
+
+// maxFilterValueLen bounds each exact-match filter value. Canonical IDs and hex
+// hashes/fingerprints are short; a value beyond this is a malformed/oversized
+// query and is rejected with a 400 rather than silently matching nothing.
+const maxFilterValueLen = 256
+
+// validateFilterBounds rejects oversized filter values with a request-invalid
+// (HTTP 400) error. Exact-match already makes an oversized value harmless (it
+// cannot match), but bounding the input keeps the query surface strict.
+func validateFilterBounds(f DecisionFilter) error {
+	vals := [...]string{
+		f.Action, f.ReasonCode, f.RuleID, f.ServerID, f.ToolName, f.ToolFingerprint,
+		f.PrincipalID, f.AgentID, f.ClientID, f.ExecutionState, f.PolicySnapshotHash,
+		f.CredentialProfileRef,
+	}
+	for _, v := range vals {
+		if len(v) > maxFilterValueLen {
+			return mcperr.New(mcperr.ReasonAdminRequestInvalid, "adminapi.decisions", "filter value too long")
+		}
+	}
+	return nil
 }
 
 // DecisionView is a safe, bounded search-result summary of one committed event.
@@ -180,6 +210,9 @@ func (s *DecisionService) Search(capability, tenant, cursor string, limit int, f
 		return SearchResult{}, err
 	}
 	if err := s.validateRange(f); err != nil {
+		return SearchResult{}, err
+	}
+	if err := validateFilterBounds(f); err != nil {
 		return SearchResult{}, err
 	}
 	cur, err := decodeCursor(cursor)
@@ -336,6 +369,10 @@ func matchFilter(e *evmodel.Event, f DecisionFilter) bool {
 		{f.ToolFingerprint, e.Identity.ToolFingerprint},
 		{f.PrincipalID, e.Identity.PrincipalID},
 		{f.AgentID, e.Identity.AgentID},
+		{f.ClientID, e.Identity.ClientID},
+		{f.ExecutionState, e.Decision.ExecutionState},
+		{f.PolicySnapshotHash, e.Decision.PolicySnapshotHash},
+		{f.CredentialProfileRef, e.Credential.ProfileID},
 	}
 	for _, p := range eq {
 		if p[0] != "" && p[1] != p[0] {

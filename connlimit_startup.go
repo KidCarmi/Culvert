@@ -89,11 +89,16 @@ func rateLimitCleanupLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			rl.Cleanup()
-			ssrf.CacheCleanup()
-			loginLimiter.Cleanup()
-			apiLimiter.Cleanup()
-			enrollRateLimitCleanup()
+			// CHAOS-24: contain the ROUND. If this loop dies, every limiter
+			// map grows without bound (per-IP entries are never reclaimed) —
+			// a slow memory exhaustion with no crash and no signal.
+			runGuarded("ratelimit_cleanup", func() {
+				rl.Cleanup()
+				ssrf.CacheCleanup()
+				loginLimiter.Cleanup()
+				apiLimiter.Cleanup()
+				enrollRateLimitCleanup()
+			})
 		}
 	}
 }

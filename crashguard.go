@@ -35,8 +35,20 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/obs"
 	"github.com/KidCarmi/Culvert/internal/redaction"
 )
+
+// CHAOS-24: publish the crash sink to the internal/* seam so a panic recovered
+// inside a leaf-package background worker (feed sync, log drain, health poller)
+// lands in the SAME pipeline as a recovered proxy/admin panic — the
+// culvert_crash_records_total{component} counter, the system-actor audit entry,
+// and the bounded lastCrash record. internal/* cannot import package main
+// (ADR-0003), so obs carries the indirection. No correlation ID: a background
+// worker has no request context.
+func init() {
+	obs.SetPanicSink(func(component string, v any) { recordCrash(component, "", v) })
+}
 
 const (
 	crashMsgMax        = 512         // bound the (attacker-shaped) panic value
@@ -187,6 +199,34 @@ func recoverGoroutine(component string) {
 	if v := recover(); v != nil {
 		recordCrash(component, "", v)
 	}
+}
+
+// runGuarded is the BACKGROUND-WORKER plane (CHAOS-24): it runs one round of a
+// long-lived loop under a panic guard and reports whether that round panicked.
+//
+// It is deliberately per-ROUND, not per-goroutine. Deferring a recover at the
+// top of a worker goroutine would let the worker RETURN on panic, converting a
+// loud crash into a silent permanent stall — the CA never rotates again, the
+// health poller never probes again, the cert never renews again — with the
+// process still up and every dashboard green. Guarding the round instead keeps
+// the ticker alive, so a transient fault costs one interval and self-heals.
+//
+// The bool return exists for the fail-closed callers: a worker whose safety
+// depends on completing its round (the fencing-lease keepalive) must treat a
+// panicking round as a FAILED round, never as a silent success. See
+// leaseKeepaliveLoop in ha_lease.go.
+//
+// It calls recordCrash directly rather than routing through obs so main's crash
+// plane stays self-contained (no dependency on sink wiring order at startup).
+func runGuarded(component string, fn func()) (panicked bool) {
+	defer func() {
+		if v := recover(); v != nil {
+			panicked = true
+			recordCrash(component, "", v)
+		}
+	}()
+	fn()
+	return false
 }
 
 // proxyCrashGuard is the PROXY plane backstop. RECORD-ONLY — it never writes an

@@ -1,7 +1,10 @@
 package main
 
 import (
+	"errors"
+	"io"
 	"net/http"
+	"time"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 )
@@ -87,15 +90,25 @@ func apiMCPRolloutScope(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleViewer) {
 			return
 		}
-		st := getMCPRollout().stateFor(mcpRolloutCapability(r))
+		capab := mcpRolloutCapability(r)
+		st := getMCPRollout().stateFor(capab)
 		cfg := st.CurrentConfig()
-		jsonOK(w, map[string]any{
-			"capability":     mcpRolloutCapability(r).String(),
-			"scope_hash":     st.ScopeHash(),
-			"scope_revision": cfg.ScopeRevision,
-			"connector_mode": cfg.ConnectorMode,
-			"high_risk":      cfg.Scope.HighRisk,
-		})
+		// PR-UX-5: enrich the scope view with the full safe summary (kind /
+		// enumerable / percentage / high-risk / per-dimension selector + exclusion
+		// counts / the exact serializable spec) so the UI can present the exact
+		// configured scope, not just a hash. Backward-compatible: the original five
+		// fields are retained.
+		spec := cfg.Scope
+		spec.Capability = capab
+		// Compile at the config's real ScopeRevision so the summary hash matches
+		// st.ScopeHash() (both fold the revision into the content hash).
+		out := mcpScopeSummary(spec, cfg.ScopeRevision, rollout.DefaultLimits())
+		out["capability"] = capab.String()
+		out["mode"] = st.CurrentMode().String()
+		out["scope_hash"] = st.ScopeHash()
+		out["scope_revision"] = cfg.ScopeRevision
+		out["connector_mode"] = cfg.ConnectorMode
+		jsonOK(w, out)
 	case http.MethodPut:
 		if !requireRole(w, r, RoleAdmin) {
 			return
@@ -107,9 +120,15 @@ func apiMCPRolloutScope(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// apiMCPRolloutEvidence returns the measured evidence-window progress (shadow ≥14d,
-// canary ≥7d, soak ≥24h) with the synthetic/production origin label. It is a
-// reporting surface; it never asserts Production qualification.
+// apiMCPRolloutEvidence returns the measured Production Qualification evidence read
+// model (shadow >=14d, canary >=7d, soak >=24h windows, zero open critical/high
+// defects, rollback rehearsal) with per-requirement typed states, server-computed
+// elapsed durations, and the synthetic/production origin label. PR-UX-6 enriches the
+// original response additively (every original key is retained) with start
+// timestamps, elapsed seconds, typed requirement states, a bounded summary, and the
+// broader unsupported categories. It is a pure reporting surface: it performs NO
+// mutation (Evidence() returns a copy, no window is stamped on read) and never
+// asserts Production qualification, which remains locked behind the separate gate.
 func apiMCPRolloutEvidence(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		mcpMethodNotAllowed(w)
@@ -118,20 +137,11 @@ func apiMCPRolloutEvidence(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleViewer) {
 		return
 	}
-	st := getMCPRollout().stateFor(mcpRolloutCapability(r))
+	capab := mcpRolloutCapability(r)
+	st := getMCPRollout().stateFor(capab)
 	ev := st.Evidence()
-	jsonOK(w, map[string]any{
-		"capability":              mcpRolloutCapability(r).String(),
-		"origin":                  ev.Origin.String(),
-		"open_critical_high":      ev.OpenCriticalHighDefects,
-		"rollback_rehearsed":      ev.RollbackRehearsed,
-		"false_positive_reviews":  ev.FalsePositiveReviews,
-		"shadow_window_target_h":  int(rollout.ShadowWindowTarget.Hours()),
-		"canary_window_target_h":  int(rollout.CanaryWindowTarget.Hours()),
-		"soak_target_h":           int(rollout.SoakTarget.Hours()),
-		"production_locked":       true,
-		"production_lock_message": "Production locked — qualification required",
-	})
+	now := time.Now()
+	jsonOK(w, buildMCPEvidenceDTO(capab.String(), st.CurrentMode().String(), ev, now, now.UnixNano()))
 }
 
 // apiMCPRolloutEmergency engages the capability-local kill switch (immediate
@@ -179,6 +189,12 @@ func apiMCPRolloutEmergency(w http.ResponseWriter, r *http.Request) {
 // apiMCPRolloutRehearse records a rollback rehearsal (evidence). The live signed
 // rollback runs through the PR-10 coordinator (not wired in the disabled-default
 // posture); the rehearsal marker is a local evidence update only.
+//
+// Capability is bound from the JSON body (present-but-invalid fails closed; an
+// omitted value falls back to the query-string capability) - identical to
+// apiMCPRolloutEmergency so a rehearsal recorded for one capability can never land
+// on the other (capability isolation). Nothing else about the action changes: it
+// still records evidence only and never rolls back traffic or unlocks Production.
 func apiMCPRolloutRehearse(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		mcpMethodNotAllowed(w)
@@ -187,7 +203,26 @@ func apiMCPRolloutRehearse(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleAdmin) {
 		return
 	}
+	var req struct {
+		Capability string `json:"capability"`
+	}
+	// The body is OPTIONAL. An absent/empty body decodes to io.EOF — treat that as
+	// "no body" and fall back to the query-string capability (back-compat). Do NOT
+	// gate on Content-Length: a bodyless chunked POST sets it to -1, which must not
+	// be misread as a malformed body. Only a genuinely malformed body is a 400.
+	if err := decodeJSON(r, &req); err != nil && !errors.Is(err, io.EOF) {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
 	capab := mcpRolloutCapability(r)
+	if req.Capability != "" {
+		parsed, err := rollout.ParseCapability(req.Capability)
+		if err != nil {
+			http.Error(w, "rollout_capability_invalid", http.StatusBadRequest)
+			return
+		}
+		capab = parsed
+	}
 	getMCPRollout().stateFor(capab).UpdateEvidence(func(e *rollout.EvidenceSummary) { e.RollbackRehearsed = true })
 	auditEvent(r, "mcp.rollout.rehearse-rollback", capab.String(), "")
 	jsonOK(w, map[string]any{"capability": capab.String(), "rollback_rehearsed": true})

@@ -1,6 +1,7 @@
 package adminapi
 
 import (
+	"strings"
 	"sync"
 	"time"
 
@@ -66,9 +67,24 @@ func NewPublicationService(ps *PolicyService, stores PolicyStores, approvals *ap
 	}
 }
 
+// isManagementCapability reports whether a capability string denotes Management MCP.
+// It matches the backend's exact "management" token (capToPolicy) and, fail-closed,
+// any case/whitespace variant so a Management publication can never slip through.
+func isManagementCapability(capability string) bool {
+	return strings.EqualFold(strings.TrimSpace(capability), "management")
+}
+
 // Create compiles+validates the candidate, checks the expected base revision,
 // and records a pending four-eyes publication request. It publishes nothing.
+//
+// Management MCP is non-mutating in V1: a Management policy publication is a
+// mutating workflow and is rejected here fail-closed (defense-in-depth; the admin
+// UI never offers the control, and the handler rejects it too). This guard blocks a
+// Management policy-publication workflow; it does not introduce one.
 func (s *PublicationService) Create(capability, tenant string, requester approval.PrincipalID, raw []byte, expectedBase uint64) (approval.ID, error) {
+	if isManagementCapability(capability) {
+		return "", mcperr.New(mcperr.ReasonAdminForbidden, "adminapi.publish", "management MCP is non-mutating in V1; policy publication is not permitted for the management capability")
+	}
 	s.sweepPending() // release snapshots of rejected/expired requests before adding
 	snap, err := s.policySvc.compile(capability, raw)
 	if err != nil {

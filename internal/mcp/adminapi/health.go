@@ -25,13 +25,25 @@ type DurabilityHealth struct {
 
 // RuntimeStateHealth is the safe per-capability listener/runtime snapshot.
 type RuntimeStateHealth struct {
-	State          string `json:"state"` // disabled|starting|ready|degraded|draining|stopped
+	State          string `json:"state"` // disabled|invalid|configured_not_started|starting|ready|degraded|draining|stopped
 	ListenerReady  bool   `json:"listener_ready"`
 	Draining       bool   `json:"draining"`
 	ActiveSessions int    `json:"active_sessions"`
 	AcceptedConns  uint64 `json:"accepted_conns"`
 	RejectedConns  uint64 `json:"rejected_conns"`
 	InFlight       int    `json:"in_flight"`
+	// EnableRequested reports whether the operator explicitly asked to activate this
+	// capability's listener (QUAL-1). It distinguishes "disabled by default" (false)
+	// from "enable requested but configuration invalid" (true with State=="invalid").
+	EnableRequested bool `json:"enable_requested"`
+	// Reason is a bounded, secret-free classification when State is "invalid" (e.g.
+	// "tls_material_unavailable", "no_trusted_keys"); never a raw error or path.
+	Reason string `json:"reason,omitempty"`
+	// Posture is "observe" when the listener is active in the QUAL-1 Observe posture.
+	Posture string `json:"posture,omitempty"`
+	// ExecutionEnabled reports whether upstream tool execution is composed. QUAL-1
+	// ships NO executor, so a bound Gateway observe listener always reports false.
+	ExecutionEnabled bool `json:"execution_enabled"`
 }
 
 // CapabilityHealth is the composed safe health of one MCP capability.

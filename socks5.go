@@ -50,7 +50,7 @@ func startSOCKS5(port int) *socks5Server {
 	lc := &net.ListenConfig{}
 	ln, err := lc.Listen(context.Background(), "tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
-		logger.Fatalf("SOCKS5 listen error: %v", err)
+		logFatalf("SOCKS5 listen error: %v", err)
 	}
 	srv := newSOCKS5Server(ln)
 	srv.Start()

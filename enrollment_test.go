@@ -9,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -476,6 +477,38 @@ func TestClusterCA_InitOrLoad(t *testing.T) {
 	}
 	if ca2.CACertFingerprint() != ca.CACertFingerprint() {
 		t.Fatal("reloaded CA should have same fingerprint")
+	}
+}
+
+// TestClusterCA_RotationFailure_SurfacedInInfo proves the Product Experience
+// fix: an auto-rotation failure (previously logger.Printf-only, invisible
+// until the CA actually expired) is now readable via Info() — the same
+// accessor GET /api/cluster/ca and the Cluster CA GUI panel already use —
+// and a subsequent successful ImportCA clears it.
+func TestClusterCA_RotationFailure_SurfacedInInfo(t *testing.T) {
+	dir := t.TempDir()
+	ca := &clusterCA{}
+	if err := ca.InitOrLoad(dir); err != nil {
+		t.Fatalf("InitOrLoad: %v", err)
+	}
+
+	ca.recordRotationFailure(errors.New("disk full"))
+
+	info := ca.Info()
+	if got := info["lastRotationError"]; got != "disk full" {
+		t.Fatalf("lastRotationError = %v, want %q", got, "disk full")
+	}
+	if at, _ := info["lastRotationErrorAt"].(string); at == "" {
+		t.Fatal("lastRotationErrorAt should be set")
+	}
+
+	certPEM, keyPEM := seedClusterCAFiles(t)
+	if err := ca.ImportCA(certPEM, keyPEM); err != nil {
+		t.Fatalf("ImportCA: %v", err)
+	}
+	info = ca.Info()
+	if _, ok := info["lastRotationError"]; ok {
+		t.Fatal("lastRotationError should be cleared after a successful ImportCA")
 	}
 }
 

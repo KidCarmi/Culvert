@@ -121,7 +121,7 @@ func startUI(port int, certFile, keyFile string, noTLS bool) *http.Server {
 		logger.Printf("UITLS: https://localhost:%d (custom cert)", port)
 		go func() {
 			if err := srv.ListenAndServeTLS(certFile, keyFile); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				logger.Fatalf("UI TLS error: %v", err)
+				logFatalf("UI TLS error: %v", err)
 			}
 		}()
 		return srv
@@ -137,7 +137,7 @@ func startUI(port int, certFile, keyFile string, noTLS bool) *http.Server {
 			logger.Printf("UITLS: https://localhost:%d (self-signed)", port)
 			go func() {
 				if err := srv.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
-					logger.Fatalf("UI TLS error: %v", err)
+					logFatalf("UI TLS error: %v", err)
 				}
 			}()
 			return srv
@@ -147,7 +147,7 @@ func startUI(port int, certFile, keyFile string, noTLS bool) *http.Server {
 	logger.Printf("UIHTTP: http://localhost:%d", port)
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Fatalf("UI server error: %v", err)
+			logFatalf("UI server error: %v", err)
 		}
 	}()
 	return srv

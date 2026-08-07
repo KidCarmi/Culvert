@@ -154,10 +154,12 @@ func buildOperatorContract() OperatorContract {
 		checkConfigSnapshotValidator(),
 		checkConfigVersionsPresent(cv),
 		checkConfigVersionsReadable(cv),
+		checkConfigVersionsIntegrity(),
 		checkConfigRollbackValidation(cv),
 		checkKeyAtRest(),
 		checkAuditPersistence(),
 		checkIdentityBackend(),
+		checkSyslogFeed(),
 		checkMemoryBackstop(),
 	}
 	// Auth Exempt risk diagnostics (Slice 8): WARN-only rows for risky Stage-1
@@ -430,6 +432,49 @@ func checkIdentityBackend() OperatorContractCheck {
 		Message: fmt.Sprintf("identity backend %q was unreachable earlier in this process and has since answered (%d outage(s), %d request(s) denied during them; last at %s)",
 			s.Backend, s.Unavailable, s.GatedDenials, last),
 		OperatorAction: "Authentication has recovered. Users who authenticated during the window saw 407s; investigate the transient directory/IdP outage on the host or the identity service itself.",
+	}
+}
+
+// checkSyslogFeed reports whether the operator-configured syslog/SIEM feed is
+// actually delivering. A silent connect failure at startup (unreachable
+// collector, bad host/port, TCP refused) leaves globalSyslog nil while the
+// /api/syslog readback reports the feed as "not configured" — indistinguishable
+// from an intentional no-op — so a compliance/SIEM feed can be down with only a
+// single startup log line ("Syslog: connect failed …") as signal. This surfaces
+// that state as an explicit operator-contract verdict. syslogConfiguredAddr
+// records operator intent regardless of InitSyslog's outcome, so it
+// distinguishes "not configured" from "configured but silently down". Mirrors
+// checkAuditPersistence. Side-effect-free: reads process state only, never
+// dials the collector (use POST /api/syslog/test for an active probe).
+func checkSyslogFeed() OperatorContractCheck {
+	if syslogConfiguredAddr == "" {
+		return OperatorContractCheck{
+			Code:    "syslog_feed",
+			Status:  diagOK,
+			Message: "not configured — no remote syslog/SIEM forwarding",
+		}
+	}
+	// Healthy only when the target we actually connected to (syslogConfigured,
+	// set SOLELY on a successful InitSyslog) matches the operator's current
+	// intent (syslogConfiguredAddr, recorded regardless of outcome). A bare
+	// globalSyslog != nil check is not enough: observability inits from
+	// YAML/flags BEFORE admin settings apply a persisted override, so if the
+	// first target connects and a later re-init to a new target fails,
+	// globalSyslog stays non-nil pointing at the PREVIOUS collector while intent
+	// has moved on — the persisted SIEM target is silently down but a nil-check
+	// would still report OK.
+	if globalSyslog == nil || syslogConfigured != syslogConfiguredAddr {
+		return OperatorContractCheck{
+			Code:           "syslog_feed",
+			Status:         diagFail,
+			Message:        "configured but failed to connect — remote syslog/SIEM forwarding is silently down, events are not reaching the collector",
+			OperatorAction: "Verify the collector host/port and network path, then re-save the syslog target (POST /api/syslog) or restart the proxy; use POST /api/syslog/test to confirm connectivity.",
+		}
+	}
+	return OperatorContractCheck{
+		Code:    "syslog_feed",
+		Status:  diagOK,
+		Message: "remote syslog/SIEM forwarding is active",
 	}
 }
 
@@ -833,6 +878,36 @@ func checkConfigVersionsReadable(s configVersionSummary) OperatorContractCheck {
 		Code:    "config_versions_readable",
 		Status:  diagOK,
 		Message: fmt.Sprintf("latest config version v%d parses cleanly", s.LatestVersion),
+	}
+}
+
+// checkConfigVersionsIntegrity scans the FULL version history, not just the
+// latest snapshot: checkConfigVersionsReadable only inspects the most recent
+// v{N}.json, so a corrupt file anywhere else in the retained window (disk
+// fault, external tampering, an older-build bug) is silently dropped by
+// List/ListMeta and never appears in this check — the rollback list just
+// looks shorter, indistinguishable from normal retention pruning.
+func checkConfigVersionsIntegrity() OperatorContractCheck {
+	present, readable := configVersions.Integrity()
+	if present == 0 {
+		return OperatorContractCheck{
+			Code:    "config_versions_integrity",
+			Status:  diagOK,
+			Message: "no version history to check",
+		}
+	}
+	if readable < present {
+		return OperatorContractCheck{
+			Code:           "config_versions_integrity",
+			Status:         diagWarn,
+			Message:        fmt.Sprintf("%d of %d config version file(s) on disk are corrupt or unreadable and are hidden from the rollback list", present-readable, present),
+			OperatorAction: "Inspect the config versions directory for truncated or invalid v{N}.json files; remove any that are unusable (other intact versions remain usable) or restore the directory from a /data backup.",
+		}
+	}
+	return OperatorContractCheck{
+		Code:    "config_versions_integrity",
+		Status:  diagOK,
+		Message: fmt.Sprintf("all %d config version file(s) on disk parse cleanly", present),
 	}
 }
 

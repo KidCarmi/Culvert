@@ -137,6 +137,120 @@ func TestDecisions_TenantRequired(t *testing.T) {
 	}
 }
 
+// decEventRich builds an event that also populates the fields the PR-UX-3
+// additive filters match against (client, fingerprint, execution state, snapshot
+// hash, credential profile). These are real persisted event fields - the same
+// ones ExplanationView projects - so an exact-match filter over them is truthful.
+func decEventRich(tenant, id string, mut func(*evmodel.Event)) evmodel.Event {
+	e := decEvent(tenant, id, "DENY", "MCP.POLICY.RESOURCE_SCOPE", "R-block")
+	e.Identity.ClientID = "app-desktop"
+	e.Identity.ToolFingerprint = "fp-aaaa"
+	e.Decision.ExecutionState = "shadow_recorded"
+	e.Decision.PolicySnapshotHash = "sha256:deadbeef"
+	e.Credential.ProfileID = "cp-github-rw"
+	if mut != nil {
+		mut(&e)
+	}
+	return e
+}
+
+func decSvcRich() *DecisionService {
+	r := &fakeReader{byPart: map[string][]evmodel.Event{
+		partitionCrit: {
+			decEventRich("acme", "evt-a", nil),
+			decEventRich("acme", "evt-b", func(e *evmodel.Event) {
+				e.Identity.ClientID = "app-mobile"
+				e.Identity.ToolFingerprint = "fp-bbbb"
+				e.Decision.ExecutionState = "executed"
+				e.Decision.PolicySnapshotHash = "sha256:feedface"
+				e.Credential.ProfileID = "cp-readonly"
+			}),
+		},
+	}}
+	return NewDecisionService(r, DefaultLimits())
+}
+
+// TestDecisions_SearchNewFilters proves every PR-UX-3 additive filter matches by
+// exact equality against the persisted event and never widens the result set.
+func TestDecisions_SearchNewFilters(t *testing.T) {
+	s := decSvcRich()
+	cases := []struct {
+		name string
+		f    DecisionFilter
+		want string // sole expected event id
+	}{
+		{"client_id", DecisionFilter{ClientID: "app-desktop"}, "evt-a"},
+		{"tool_fingerprint", DecisionFilter{ToolFingerprint: "fp-bbbb"}, "evt-b"},
+		{"execution_state", DecisionFilter{ExecutionState: "executed"}, "evt-b"},
+		{"policy_snapshot_hash", DecisionFilter{PolicySnapshotHash: "sha256:deadbeef"}, "evt-a"},
+		{"credential_profile_ref", DecisionFilter{CredentialProfileRef: "cp-readonly"}, "evt-b"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			res, err := s.Search("gateway", "acme", "", 100, c.f)
+			if err != nil {
+				t.Fatalf("Search: %v", err)
+			}
+			if len(res.Decisions) != 1 || res.Decisions[0].EventID != c.want {
+				t.Fatalf("%s filter: want sole %s, got %+v", c.name, c.want, res.Decisions)
+			}
+		})
+	}
+}
+
+// TestDecisions_SearchFilterCombination proves filters are AND-ed: a combination
+// that no single event satisfies returns nothing (no widening).
+func TestDecisions_SearchFilterCombination(t *testing.T) {
+	s := decSvcRich()
+	// evt-a has client app-desktop but execution shadow_recorded; asking for
+	// app-desktop AND executed matches neither event.
+	res, err := s.Search("gateway", "acme", "", 100, DecisionFilter{ClientID: "app-desktop", ExecutionState: "executed"})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(res.Decisions) != 0 {
+		t.Fatalf("AND of non-co-occurring filters must be empty, got %+v", res.Decisions)
+	}
+	// The consistent pair on evt-b matches exactly one.
+	res, _ = s.Search("gateway", "acme", "", 100, DecisionFilter{ClientID: "app-mobile", ExecutionState: "executed"})
+	if len(res.Decisions) != 1 || res.Decisions[0].EventID != "evt-b" {
+		t.Fatalf("consistent AND should match evt-b, got %+v", res.Decisions)
+	}
+}
+
+// TestDecisions_SearchFilterEmptyResult proves a well-formed filter that matches
+// nothing returns an empty page and no error (not a 400).
+func TestDecisions_SearchFilterEmptyResult(t *testing.T) {
+	s := decSvcRich()
+	res, err := s.Search("gateway", "acme", "", 100, DecisionFilter{ClientID: "app-nonexistent"})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(res.Decisions) != 0 || res.NextCursor != "" {
+		t.Fatalf("no-match filter must be empty with no cursor, got %+v", res)
+	}
+}
+
+// TestDecisions_FilterValueTooLong proves an oversized filter value is rejected
+// with a request-invalid (HTTP 400) error rather than silently matching nothing.
+func TestDecisions_FilterValueTooLong(t *testing.T) {
+	s := decSvcRich()
+	huge := strings.Repeat("x", maxFilterValueLen+1)
+	for _, f := range []DecisionFilter{
+		{PrincipalID: huge}, {ClientID: huge}, {ToolFingerprint: huge},
+		{PolicySnapshotHash: huge}, {CredentialProfileRef: huge},
+	} {
+		if _, err := s.Search("gateway", "acme", "", 10, f); mcperr.ReasonOf(err) != mcperr.ReasonAdminRequestInvalid {
+			t.Fatalf("oversized filter must be request-invalid, got %v", err)
+		}
+	}
+	// A value exactly at the bound is accepted (boundary is inclusive).
+	atBound := DecisionFilter{ClientID: strings.Repeat("x", maxFilterValueLen)}
+	if _, err := s.Search("gateway", "acme", "", 10, atBound); err != nil {
+		t.Fatalf("value at the length bound must be accepted, got %v", err)
+	}
+}
+
 // TestDecisions_NoSecretFields proves the serialized explanation carries no
 // argument/output/secret/token key, by construction.
 func TestDecisions_NoSecretFields(t *testing.T) {

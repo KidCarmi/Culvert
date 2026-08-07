@@ -907,13 +907,19 @@ func generateHAToken() string {
 // ── Health Endpoint ─────────────────────────────────────────────────────────
 
 // addRequestLogHealth annotates a healthy /healthz response when persistent
-// request-log writes are failing (e.g. disk full). The field is added only
-// when non-zero so existing health-probe consumers see an unchanged body in
-// the normal case; the node stays "ok" — degraded logging must not pull it
-// out of the load balancer.
+// request-log or audit-log writes are failing (e.g. disk full). Each field is
+// added only when non-zero so existing health-probe consumers see an unchanged
+// body in the normal case; the node stays "ok" — degraded logging must not
+// pull it out of the load balancer.
 func addRequestLogHealth(resp map[string]any) {
 	if n := reqlog.WriteErrors(); n > 0 {
 		resp["requestLogWriteErrors"] = n
+	}
+	// Audit-log loss is the compliance-critical half of the same fault: the
+	// durable "who changed what" record is incomplete, and the in-memory ring
+	// that the UI renders from is volatile and capped at 500 entries.
+	if n := auditWriteErrors(); n > 0 {
+		resp["auditLogWriteErrors"] = n
 	}
 	// Saturation of the async JSONL queue: no entry is lost, but request
 	// goroutines are waiting on the disk again, so latency is affected.

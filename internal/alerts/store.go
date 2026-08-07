@@ -11,7 +11,11 @@ package alerts
 // queue.
 //
 // Supported events:
-//   "threat_detected"       — ClamAV / YARA / threat-feed block
+//   "threat_detected"       — a request was blocked by ClamAV, YARA, or the DPI/threat-feed
+//                             scanner (log status THREAT_BLOCKED/SCAN_BLOCKED/DPI_BLOCKED;
+//                             metrics culvert_{clamav,yara,dpi,threat_feed}_blocked_total).
+//                             Event name kept as "detected" rather than renamed to "blocked"
+//                             to preserve existing webhook subscriptions.
 //   "policy_block"          — PBAC policy blocked a request
 //   "auth_lockout"          — admin UI brute-force lockout
 //   "cert_expiry"           — CA certificate nearing expiry (fired on startup if ≤30 days)
@@ -46,6 +50,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/fileutil"
@@ -580,11 +585,39 @@ type retryEntry struct {
 var (
 	retryMu    sync.Mutex
 	retryQueue []retryEntry
+
+	// retryExhaustedTotal / retryDroppedTotal count deliveries that were
+	// permanently given up on (all attempts used, or the queue was full) so
+	// an admin can see alerting degradation on the delivery-history API
+	// instead of only in the log line below.
+	retryExhaustedTotal atomic.Int64
+	retryDroppedTotal   atomic.Int64
 )
+
+// RetryQueueDepth returns the number of failed deliveries currently queued
+// for retry.
+func RetryQueueDepth() int {
+	retryMu.Lock()
+	defer retryMu.Unlock()
+	return len(retryQueue)
+}
+
+// RetryExhaustedTotal returns the count of deliveries that used up all retry
+// attempts and were permanently dropped.
+func RetryExhaustedTotal() int64 {
+	return retryExhaustedTotal.Load()
+}
+
+// RetryDroppedTotal returns the count of deliveries dropped because the
+// retry queue was at capacity (retryQueueMax).
+func RetryDroppedTotal() int64 {
+	return retryDroppedTotal.Load()
+}
 
 // enqueueRetry adds a failed delivery to the retry queue.
 func enqueueRetry(hookID string, payload Payload, attempt int) {
 	if attempt >= retryMax {
+		retryExhaustedTotal.Add(1)
 		obs.Printf("Alert retry exhausted for webhook %q event %q after %d attempts",
 			obs.Sanitize(hookID), obs.Sanitize(payload.Event), attempt)
 		return
@@ -602,6 +635,10 @@ func enqueueRetry(hookID string, payload Payload, attempt int) {
 	retryMu.Lock()
 	if len(retryQueue) < retryQueueMax {
 		retryQueue = append(retryQueue, entry)
+	} else {
+		retryDroppedTotal.Add(1)
+		obs.Printf("Alert retry queue full (%d entries), dropping retry for webhook %q event %q",
+			retryQueueMax, obs.Sanitize(hookID), obs.Sanitize(payload.Event))
 	}
 	saveRetryQueueLocked()
 	retryMu.Unlock()
@@ -626,7 +663,11 @@ func StartRetryLoop(ctx context.Context, current func() *Store) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			processRetryQueue(current())
+			// CHAOS-24: contain the ROUND. This loop is the only thing that
+			// re-delivers failed webhooks, so letting a panic kill the process
+			// would turn a bad queue entry into a gateway outage; letting it
+			// kill the goroutine would silently strand every retry forever.
+			obs.SafeCall("alerts_retry", func() { processRetryQueue(current()) })
 		}
 	}
 }

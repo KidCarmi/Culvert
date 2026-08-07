@@ -150,8 +150,13 @@ func (tf *Feed) Start(ctx context.Context) {
 	tf.mu.RUnlock()
 
 	go func() {
+		// CHAOS-24: Sync parses third-party feed bodies (URLhaus/OpenPhish), so
+		// its panic surface is attacker-adjacent input this operator does not
+		// control. Guard the ROUND, not the goroutine: a bad feed pass costs
+		// one sync, not the whole gateway, and the ticker keeps running so the
+		// next window can recover on its own.
 		if needSync {
-			tf.Sync()
+			obs.SafeCall("threatfeed", tf.Sync)
 		}
 		ticker := time.NewTicker(tf.syncInterval)
 		defer ticker.Stop()
@@ -160,7 +165,7 @@ func (tf *Feed) Start(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				tf.Sync()
+				obs.SafeCall("threatfeed", tf.Sync)
 			}
 		}
 	}()
