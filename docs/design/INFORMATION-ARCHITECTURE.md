@@ -7,6 +7,18 @@ Grounding: every entry below maps to an existing `data-view` and existing
 functionality. Items marked **(merge)** consolidate existing views; items marked
 **(relocate)** move existing panels between views.
 
+> **Correction (post-2026-07-11): the `Updates` nav item described below no
+> longer exists.** DEBT-008 closed the same day this document was dated,
+> deleting the legacy `updater/` module, the 11 `/api/update/*` routes, and
+> the Updates admin-UI panel outright (see
+> `docs/engineering/TECHNICAL-DEBT-REGISTER.md` DEBT-008). The "Releases and
+> Updates stay separate items in M1 ... legacy updater is not demoted yet"
+> rationale below and the `Updates → updates` nav/migration rows are
+> historical and describe a state that was superseded before this plan
+> shipped — `releases` is now the only Platform item for software delivery.
+> Treat the rest of this document (grouping, other items, rationale) as
+> otherwise current; only the Updates/updater passages are stale.
+
 ---
 
 ## 1. Design intent
