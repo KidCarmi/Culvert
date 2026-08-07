@@ -276,10 +276,13 @@ func readTarball(path, backupPassphrase string) (map[string][]byte, []string, er
 			return nil, nil, fmt.Errorf("restore: tarball entry has absolute path: %q", hdr.Name)
 		}
 		// Path-traversal guard: reject any entry whose path contains "..".
-		// The strings.Contains check is deliberately simple — CodeQL
-		// recognises it as a zip-slip sanitiser (CWE-22). The per-component
-		// split would be equivalent but is not traced across function
-		// boundaries by the static analyser.
+		// strings.Contains is the pattern CodeQL recognises as a zip-slip
+		// sanitiser (CWE-22); the previous per-component split was
+		// semantically equivalent but not traced across function boundaries
+		// by the static analyser. Backup artifact names are controlled
+		// system filenames (e.g. "ui_users.json", "ca.bundle") so the
+		// slightly broader rejection of any ".." substring is intentional
+		// and safe.
 		if strings.Contains(hdr.Name, "..") {
 			return nil, nil, fmt.Errorf("restore: tarball entry has path traversal: %q", hdr.Name)
 		}
