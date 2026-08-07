@@ -45,13 +45,13 @@ func initMCPRuntime(s *startupState) {
 		// fires on an unexpected internal error. Fail closed: record it, never block SWG.
 		logger.Printf("MCP runtime init skipped: %v", sanitizeLog(err.Error()))
 		markMCPObserveInvalid("runtime_init_failed")
-		closeMCPTelemetryOnStartupFailure()
+		invalidateMCPActivationOnStartupFailure()
 		return
 	}
 	if err := rt.Start(); err != nil {
 		logger.Printf("MCP runtime start skipped: %v", sanitizeLog(err.Error()))
 		markMCPObserveInvalid("runtime_start_failed")
-		closeMCPTelemetryOnStartupFailure()
+		invalidateMCPActivationOnStartupFailure()
 		return
 	}
 	mcpRuntime = rt
@@ -135,4 +135,18 @@ func closeMCPTelemetryOnStartupFailure() {
 		publishMCPTelemetry(mcpTelemInvalid, "runtime_start_failed", nil)
 		_ = tel.Close(context.Background())
 	}
+}
+
+// invalidateMCPActivationOnStartupFailure clears every node-local holder the loader
+// published as active — the policy snapshot, the seeded inventory, and the telemetry
+// runtime — when the listener then fails to construct or start. Without it, a bind
+// failure (e.g. an occupied address) would leave the admin surface advertising an
+// active, evaluation-enabled policy and a loaded inventory for a listener that is not
+// running. The Secure Web Gateway path is never affected.
+func invalidateMCPActivationOnStartupFailure() {
+	invalidateMCPPolicyOnStartupFailure()
+	if reg, cat := mcpInventory.sharedInventory(); reg != nil || cat != nil {
+		publishMCPInventory(mcpInvInvalid, "runtime_start_failed", nil, nil)
+	}
+	closeMCPTelemetryOnStartupFailure()
 }

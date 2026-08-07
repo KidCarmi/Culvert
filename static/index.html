@@ -20167,6 +20167,15 @@ async function mcpxPolRefreshActive(){
   var d=await mcpxRfFetch('/api/mcp/policy?capability='+encodeURIComponent(mcpxPol.cap));
   if(myTicket!==mcpxPol.ticket) return;
   mcpxPol.activeErr=mcpxRfErr(d); mcpxPol.active=mcpxPol.activeErr?null:d;
+  // QUAL-4: the node-local Observe policy posture (source/evaluation/enforcement/
+  // execution/telemetry completeness) is a read-only projection on /api/mcp/overview.
+  // Gateway only — the Management surface is never armed from the qualification source.
+  mcpxPol.qual=null; mcpxPol.decTel=null;
+  if(mcpxPol.cap==='gateway'){
+    var ov=await mcpxRfFetch('/api/mcp/overview');
+    if(myTicket!==mcpxPol.ticket) return;
+    if(!mcpxRfErr(ov)){ mcpxPol.qual=ov.policy||null; mcpxPol.decTel=(ov.telemetry&&ov.telemetry.decision_telemetry)||null; }
+  }
   mcpxPolRender();
   mcpxAnnounce(mcpxPol.activeErr?('Active '+mcpxPol.cap+' policy unavailable'):('Active '+mcpxPol.cap+' policy loaded'));
   var asof=document.getElementById('mcpx-pol-asof'); if(asof) asof.textContent='as of '+mcpxNow();
@@ -20187,7 +20196,24 @@ function mcpxPolActiveCard(){
   if(a.default_action!=null) mcpxRfKv(dl,'Default action', a.default_action); else mcpxRfKv(dl,'Default action','deny (default)','mcpx-rf-dd-muted');
   mcpxRfKv(dl,'Distribution state', a.distribution_state||'local_only');
   card.appendChild(dl);
-  card.appendChild(mcpxEl('div','mcpx-source','From /api/mcp/policy. Summary only; no active rules are reconstructed.'));
+  // QUAL-4 node-local Observe posture: the active snapshot's source + evaluate-only
+  // truth. Enforcement/execution/fleet are all disabled; decision telemetry states
+  // whether an evaluated decision is durably recorded. Real data only.
+  var q=mcpxPol.qual;
+  if(q){
+    var qdl=mcpxRfDL();
+    var srcLabel=(q.state==='loaded')?'qualification startup (local Observe evaluation snapshot; not fleet distributed)'
+      :(q.state==='invalid')?('unavailable - '+(q.reason||'invalid'))
+      :'not configured';
+    mcpxRfKv(qdl,'Snapshot source', srcLabel, (q.state==='loaded')?'':'mcpx-rf-dd-muted');
+    mcpxRfKv(qdl,'Observe evaluation', q.evaluation_enabled?'enabled':'disabled', q.evaluation_enabled?'':'mcpx-rf-dd-muted');
+    mcpxRfKv(qdl,'Enforcement', 'disabled (Observe)','mcpx-rf-dd-muted');
+    mcpxRfKv(qdl,'Execution', 'disabled (no upstream executor)','mcpx-rf-dd-muted');
+    mcpxRfKv(qdl,'Fleet distributed', 'no (node-local)','mcpx-rf-dd-muted');
+    if(mcpxPol.decTel) mcpxRfKv(qdl,'Decision telemetry', mcpxPol.decTel, (mcpxPol.decTel==='ready')?'':'mcpx-rf-dd-muted');
+    card.appendChild(qdl);
+  }
+  card.appendChild(mcpxEl('div','mcpx-source','From /api/mcp/policy (+ /api/mcp/overview for the node-local Observe posture). Summary only; no active rules are reconstructed. The qualification startup snapshot is EVALUATED for decision evidence only - it never enforces, never executes an upstream call, and is never fleet-published.'));
   return card;
 }
 function mcpxPolCandidateCard(){

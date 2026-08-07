@@ -31,21 +31,16 @@ import (
 // Durable approval/publication commits require the MCP runtime's PR-8 event
 // manager; until that is enabled they fail closed (durability_required).
 
-// mcpPolicyStores holds the two capability-local PR-6 policy stores.
-type mcpPolicyStores struct {
-	gw  *policy.Store
-	mgt *policy.Store
-}
+// mcpPolicyStores is the adminapi.PolicyStores adapter over the node-local policy
+// holder (mcp_policy.go). It reads the capability-local stores LIVE from the holder,
+// so the runtime PolicyProvider (which reads the SAME Gateway store) and the read-only
+// Policy Admin API can never diverge — a snapshot the startup path publishes is
+// visible here even though getMCPAdmin captured the holder earlier (single source of
+// truth). The Management store is never published to (capability isolation).
+type mcpPolicyStores struct{ h *mcpPolicyHolder }
 
 func (s *mcpPolicyStores) Store(capability string) (*policy.Store, bool) {
-	switch capability {
-	case "gateway":
-		return s.gw, true
-	case "management":
-		return s.mgt, true
-	default:
-		return nil, false
-	}
+	return s.h.storeFor(capability)
 }
 
 // mcpDisabledCommitter fails closed for both approval-decision and
@@ -96,7 +91,14 @@ func mcpIDGen() approval.ID {
 func getMCPAdmin() *mcpAdminServer {
 	mcpAdminOnce.Do(func() {
 		lim := adminapi.DefaultLimits()
-		stores := &mcpPolicyStores{gw: policy.NewStore(policy.CapGateway), mgt: policy.NewStore(policy.CapManagement)}
+		// QUAL-4: the SHARED capability-local policy stores owned by the node-local
+		// policy holder. The runtime PolicyProvider evaluates against the SAME Gateway
+		// store this admin singleton reads, so the /api/mcp/policy active read, the
+		// simulator Compare baseline, and the runtime evaluator observe the identical
+		// compiled snapshot (single source of truth). The Management store is never
+		// published to (capability isolation). When no policy source is composed both
+		// stores are empty — byte-identical to the QUAL-3 disabled default.
+		stores := mcpPolicy.stores()
 		appr := approval.NewStore(approval.Config{MaxPending: lim.MaxPendingApprovals(), MaxPerTenant: lim.MaxApprovalsPerTenant(), TTL: lim.ApprovalTTL()})
 		cfg := adminapi.NewConfigStore(lim.MaxMgmtOutputBytes())
 		committer := mcpDisabledCommitter{}
@@ -249,9 +251,16 @@ func apiMCPOverview(w http.ResponseWriter, r *http.Request) {
 		// subsystem Observe-/qualification-/production-ready (inventory is one dependency).
 		"inventory": inventoryStatus(),
 		// QUAL-3: safe, read-only durable-telemetry readiness (state, per-partition
-		// committed counts, exporter state + lag, saturation). Decision telemetry is
-		// truthfully "pending_policy" (Policy is not composed); execution stays disabled.
+		// committed counts, exporter state + lag, saturation). Decision telemetry flips
+		// to "ready" only when a QUAL-4 policy snapshot is composed AND telemetry is
+		// active; execution stays disabled.
 		"telemetry": mcpTelemetryStatus(),
+		// QUAL-4: safe, read-only node-local policy readiness. It distinguishes
+		// not_configured / loaded / invalid and reports the active Observe evaluation
+		// snapshot's revision + canonical hash + rule count + default action, with
+		// enforcement/execution/fleet-distribution all truthfully false. The active
+		// snapshot detail is also on /api/mcp/policy (the same shared store).
+		"policy": mcpPolicyStatus(),
 	})
 }
 
