@@ -138,8 +138,7 @@ func (h *Harness) runTLS(ctx context.Context) {
 			if err != nil {
 				return fail("client build", "client")
 			}
-			res := mcpPost(ctx, cli, pc.mcpPort, h.fixture.serverA, h.tokenA, "", "gw.test",
-				`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}`)
+			res := mcpPost(ctx, cli, pc.mcpPort, h.fixture.serverA, h.tokenA, "", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}`)
 			if res.tlsError {
 				return pass("no-client-cert handshake rejected: " + res.transportErr)
 			}
@@ -159,7 +158,7 @@ func (h *Harness) runOAuth(ctx context.Context) {
 			if sid == "" {
 				return fail("no session", "auth_failed")
 			}
-			res := mcpPost(ctx, h.mcpBearer, mp, sv, h.tokenA, sid, "gw.test", `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
+			res := mcpPost(ctx, h.mcpBearer, mp, sv, h.tokenA, sid, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
 			if res.status == 200 {
 				return pass("tools/list reached policy (200)")
 			}
@@ -200,8 +199,7 @@ func (h *Harness) runOAuth(ctx context.Context) {
 		h.runCriterion(n.id, n.name, "auth", true, "authentication is rejected (non-2xx)", func() (Status, string, string, []string) {
 			tok := n.token()
 			// initialize is kernel-terminal but still requires auth; a bad token must fail there.
-			res := mcpPost(ctx, h.mcpBearer, mp, sv, tok, "", "gw.test",
-				`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}`)
+			res := mcpPost(ctx, h.mcpBearer, mp, sv, tok, "", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}`)
 			if res.status >= 400 && res.status < 500 {
 				return pass(fmt.Sprintf("rejected status=%d", res.status))
 			}
@@ -267,7 +265,7 @@ func (h *Harness) runProtocol(ctx context.Context) {
 			if sid == "" || init.status != 200 {
 				return fail(fmt.Sprintf("init status %d", init.status), "lifecycle_failed")
 			}
-			ping := mcpPost(ctx, h.mcpBearer, mp, sv, h.tokenA, sid, "gw.test", `{"jsonrpc":"2.0","id":9,"method":"ping"}`)
+			ping := mcpPost(ctx, h.mcpBearer, mp, sv, h.tokenA, sid, `{"jsonrpc":"2.0","id":9,"method":"ping"}`)
 			if ping.status == 200 {
 				return pass("ping 200")
 			}
@@ -275,7 +273,7 @@ func (h *Harness) runProtocol(ctx context.Context) {
 		})
 	h.runCriterion("protocol.malformed", "malformed JSON-RPC rejected", "protocol", true,
 		"a malformed body is a 400", func() (Status, string, string, []string) {
-			res := mcpPost(ctx, h.mcpBearer, mp, sv, h.tokenA, "", "gw.test", `{not valid json`)
+			res := mcpPost(ctx, h.mcpBearer, mp, sv, h.tokenA, "", `{not valid json`)
 			if res.status == 400 {
 				return pass("malformed 400")
 			}
@@ -301,7 +299,7 @@ func (h *Harness) runProtocol(ctx context.Context) {
 		"a body over the byte cap is rejected (413 or an early connection close)", func() (Status, string, string, []string) {
 			big := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","pad":"` +
 				strings.Repeat("A", 2<<20) + `"}}`
-			res := mcpPost(ctx, h.mcpBearer, mp, sv, h.tokenA, "", "gw.test", big)
+			res := mcpPost(ctx, h.mcpBearer, mp, sv, h.tokenA, "", big)
 			// A clean 413, OR the server enforcing the cap by closing the connection
 			// before the client finishes uploading (status 0 with a non-timeout
 			// transport error) both prove the oversized body was NOT admitted. A 200 or
@@ -330,8 +328,7 @@ func (h *Harness) runInventory(ctx context.Context) {
 		})
 	h.runCriterion("inventory.unknown", "unknown server fails closed", "inventory", true,
 		"an unregistered server id is a 404", func() (Status, string, string, []string) {
-			res := mcpPost(ctx, h.mcpBearer, mp, "srv-nonexistent", h.tokenA, "", "gw.test",
-				`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}`)
+			res := mcpPost(ctx, h.mcpBearer, mp, "srv-nonexistent", h.tokenA, "", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}`)
 			if res.status == 404 {
 				return pass("unknown server 404")
 			}
@@ -397,7 +394,7 @@ func (h *Harness) runTenantMatrix(ctx context.Context) {
 				if sid == "" {
 					return fail(fmt.Sprintf("init status %d", init.status), "init_failed")
 				}
-				res := mcpPost(ctx, h.mcpBearer, c.mp, c.server, c.token, sid, "gw.test", `{"jsonrpc":"2.0","id":5,"method":"tools/list"}`)
+				res := mcpPost(ctx, h.mcpBearer, c.mp, c.server, c.token, sid, `{"jsonrpc":"2.0","id":5,"method":"tools/list"}`)
 				reason := reasonOf(res.body)
 				cell := TenantMatrixCell{Token: c.tokenLabel, Server: c.serverLabel, CrossTenant: c.cross, Expected: expected}
 				if c.cross {
@@ -442,8 +439,7 @@ func (h *Harness) runTenantMatrix(ctx context.Context) {
 	h.runCriterion("tenant.no_leak", "no foreign-tenant leak in denial", "tenant", true,
 		"a cross-tenant denial exposes no owner/endpoint/tool state", func() (Status, string, string, []string) {
 			sid, _ := initSession(ctx, h.mcpBearer, h.procB.pc.mcpPort, h.fixture.serverB, h.tokenA)
-			res := mcpPost(ctx, h.mcpBearer, h.procB.pc.mcpPort, h.fixture.serverB, h.tokenA, sid, "gw.test",
-				`{"jsonrpc":"2.0","id":7,"method":"tools/list"}`)
+			res := mcpPost(ctx, h.mcpBearer, h.procB.pc.mcpPort, h.fixture.serverB, h.tokenA, sid, `{"jsonrpc":"2.0","id":7,"method":"tools/list"}`)
 			body := string(res.body)
 			if strings.Contains(body, "upstream") || strings.Contains(body, "spiffe") || strings.Contains(body, "127.0.0.1") {
 				return fail("response leaked server state", "foreign_leak")
@@ -486,7 +482,7 @@ func (h *Harness) runPolicy(ctx context.Context) {
 	h.runCriterion("policy.discovery_allow", "same-tenant discovery reaches user ALLOW", "policy", true,
 		"tools/list on A->A is a non-executing ALLOW", func() (Status, string, string, []string) {
 			sid, _ := initSession(ctx, h.mcpBearer, mp, sv, h.tokenA)
-			res := mcpPost(ctx, h.mcpBearer, mp, sv, h.tokenA, sid, "gw.test", `{"jsonrpc":"2.0","id":8,"method":"tools/list"}`)
+			res := mcpPost(ctx, h.mcpBearer, mp, sv, h.tokenA, sid, `{"jsonrpc":"2.0","id":8,"method":"tools/list"}`)
 			if res.status == 200 && strings.Contains(string(res.body), "not_implemented") {
 				return pass("ALLOW discovery, execution_state=not_implemented")
 			}
@@ -495,8 +491,7 @@ func (h *Harness) runPolicy(ctx context.Context) {
 	h.runCriterion("policy.quarantine_beats_allow", "quarantined tools/call denied under ALLOW", "policy", true,
 		"tools/call on a quarantined tool is a hard QUARANTINE, never executed", func() (Status, string, string, []string) {
 			sid, _ := initSession(ctx, h.mcpBearer, mp, sv, h.tokenA)
-			res := mcpPost(ctx, h.mcpBearer, mp, sv, h.tokenA, sid, "gw.test",
-				`{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"echo"}}`)
+			res := mcpPost(ctx, h.mcpBearer, mp, sv, h.tokenA, sid, `{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"echo"}}`)
 			if reasonOf(res.body) != "" && !hasResult(res.body) && !strings.Contains(string(res.body), `"execution_state":"executed"`) {
 				return pass("quarantined tools/call denied: " + reasonOf(res.body))
 			}
@@ -527,7 +522,7 @@ func (h *Harness) checkDefaultDeny(ctx context.Context) (Status, string, string,
 	}
 	defer func() { _ = proc.stop(h.spec.Run.shutdown()) }()
 	sid, _ := initSession(ctx, h.mcpBearer, pc.mcpPort, h.fixture.serverA, h.tokenA)
-	res := mcpPost(ctx, h.mcpBearer, pc.mcpPort, h.fixture.serverA, h.tokenA, sid, "gw.test", `{"jsonrpc":"2.0","id":11,"method":"tools/list"}`)
+	res := mcpPost(ctx, h.mcpBearer, pc.mcpPort, h.fixture.serverA, h.tokenA, sid, `{"jsonrpc":"2.0","id":11,"method":"tools/list"}`)
 	if reasonOf(res.body) == "MCP.POLICY.NO_MATCH_DEFAULT_DENY" {
 		return pass("default-deny reason observed")
 	}
@@ -542,7 +537,7 @@ func (h *Harness) runDurableEvidence(ctx context.Context) {
 			// Generate a fresh ALLOW discovery then read it back through the Admin API,
 			// polling briefly for the synchronous commit to surface.
 			sid, _ := initSession(ctx, h.mcpBearer, h.procA.pc.mcpPort, h.fixture.serverA, h.tokenA)
-			_ = mcpPost(ctx, h.mcpBearer, h.procA.pc.mcpPort, h.fixture.serverA, h.tokenA, sid, "gw.test", `{"jsonrpc":"2.0","id":12,"method":"tools/list"}`)
+			_ = mcpPost(ctx, h.mcpBearer, h.procA.pc.mcpPort, h.fixture.serverA, h.tokenA, sid, `{"jsonrpc":"2.0","id":12,"method":"tools/list"}`)
 			deadline := h.now().Add(h.spec.Run.request())
 			for h.now().Before(deadline) {
 				res := adminGet(ctx, h.uiClient, h.procA.pc.uiPort, h.procA.pc.adminUser, h.procA.pc.adminPass,
@@ -567,7 +562,7 @@ func (h *Harness) runDurableEvidence(ctx context.Context) {
 	h.runCriterion("evidence.denial_aggregated", "cross-tenant denial aggregated (advisory)", "evidence", false,
 		"a cross-tenant denial eventually increments the denial-lane metric", func() (Status, string, string, []string) {
 			sid, _ := initSession(ctx, h.mcpBearer, h.procB.pc.mcpPort, h.fixture.serverB, h.tokenA)
-			_ = mcpPost(ctx, h.mcpBearer, h.procB.pc.mcpPort, h.fixture.serverB, h.tokenA, sid, "gw.test", `{"jsonrpc":"2.0","id":13,"method":"tools/list"}`)
+			_ = mcpPost(ctx, h.mcpBearer, h.procB.pc.mcpPort, h.fixture.serverB, h.tokenA, sid, `{"jsonrpc":"2.0","id":13,"method":"tools/list"}`)
 			m := metricsGet(ctx, h.metricsClient, h.procB.pc.proxyPort, h.procB.pc.metricsToken)
 			if m.status == 200 && metricValueAtLeast(m.body, "culvert_mcp_denial_aggregates_total", 1) {
 				h.summary.TelemetrySummary.DenialAggregated = true

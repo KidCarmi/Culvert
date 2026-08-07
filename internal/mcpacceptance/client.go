@@ -65,14 +65,14 @@ type jsonrpcEnvelope struct {
 }
 
 // mcpPost issues one authenticated MCP POST to a server over the real TLS
-// listener. host is the application Host header (must be in allowed_hosts).
-func mcpPost(ctx context.Context, cli *http.Client, mcpPort int, serverID, token, sessionID, host, body string) httpResult {
+// listener with the allowed application Host. Host-rejection cases use mcpPostRaw.
+func mcpPost(ctx context.Context, cli *http.Client, mcpPort int, serverID, token, sessionID, body string) httpResult {
 	url := fmt.Sprintf("https://127.0.0.1:%d/mcp/gateway/%s", mcpPort, serverID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader([]byte(body)))
 	if err != nil {
 		return httpResult{transportErr: "build_request"}
 	}
-	req.Host = host
+	req.Host = "gw.test"
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
@@ -141,13 +141,12 @@ func mcpGet(ctx context.Context, cli *http.Client, mcpPort int, path, host strin
 // initSession runs initialize + notifications/initialized against a server (with
 // the allowed application Host) and returns the negotiated session id.
 func initSession(ctx context.Context, cli *http.Client, mcpPort int, serverID, token string) (string, httpResult) {
-	const host = "gw.test"
-	init := mcpPost(ctx, cli, mcpPort, serverID, token, "", host,
+	init := mcpPost(ctx, cli, mcpPort, serverID, token, "",
 		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}`)
 	if init.status != 200 || init.sessionID == "" {
 		return "", init
 	}
-	_ = mcpPost(ctx, cli, mcpPort, serverID, token, init.sessionID, host,
+	_ = mcpPost(ctx, cli, mcpPort, serverID, token, init.sessionID,
 		`{"jsonrpc":"2.0","method":"notifications/initialized"}`)
 	return init.sessionID, init
 }

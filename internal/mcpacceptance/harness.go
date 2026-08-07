@@ -94,19 +94,28 @@ func NewHarness(spec *Spec, opts Options) (*Harness, error) {
 func (h *Harness) Run(ctx context.Context) (*Summary, error) {
 	h.start = h.now()
 	defer h.cleanup()
+	if err := h.setup(ctx); err != nil {
+		return nil, err
+	}
+	h.runScenarios(ctx)
+	return h.finalize()
+}
 
-	// 1. Artifact binding — pre-traffic gate (authoritative fails here on mismatch).
+// setup performs the pre-scenario prologue: the pre-traffic artifact-binding gate,
+// the pinned binary copy, the two-tenant fixture, tripwires, clients, tokens, and
+// the two readiness-gated artifact processes. Any failure aborts before traffic.
+func (h *Harness) setup(ctx context.Context) error {
 	artifact, err := bindArtifact(h.spec)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	cfgHash, err := h.spec.ConfigHash()
 	if err != nil {
-		return nil, err
+		return err
 	}
 	runID, err := randToken(12)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	h.summary = &Summary{
 		SchemaVersion:        EvidenceSchemaVersion,
@@ -118,60 +127,62 @@ func (h *Harness) Run(ctx context.Context) (*Summary, error) {
 		RunID:                runID,
 		StartUTC:             utcStamp(h.start),
 	}
-
 	// Pin the exact hashed bytes: copy the binary to a harness-owned path and run
-	// THAT for every process/restart, so a deployment, updater, or attacker
-	// replacing binary_path after the hash cannot make the bundle report one digest
-	// while different bytes are tested. The copy's digest must equal the recorded one.
+	// THAT for every process/restart, so a deployment, updater, or attacker replacing
+	// binary_path after the hash cannot make the bundle report one digest while
+	// different bytes are tested. The copy's digest must equal the recorded one.
 	pinned, err := pinBinary(h.spec.Artifact.BinaryPath, filepath.Join(h.workDir, "pinned-culvert"), artifact.Digest)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	h.binary = pinned
-
-	// 2. Environment: dev generates an ephemeral fixture; authoritative ingests
-	//    operator material (same renderer, one code path).
 	if err := h.prepareFixture(); err != nil {
-		return nil, err
+		return err
 	}
+	pa, pb, err := h.buildProcesses()
+	if err != nil {
+		return err
+	}
+	if err := h.buildClients(); err != nil {
+		return err
+	}
+	if err := h.mintTokens(); err != nil {
+		return err
+	}
+	if h.procA, err = h.startProcess(ctx, pa); err != nil {
+		return fmt.Errorf("start process A: %w", err)
+	}
+	if h.procB, err = h.startProcess(ctx, pb); err != nil {
+		return fmt.Errorf("start process B: %w", err)
+	}
+	h.recordArtifactVersion(ctx)
+	return nil
+}
 
-	// 3. Tripwires (non-execution) + per-process fixtures pointed at them.
-	h.tripwireA, err = startTripwire()
-	if err != nil {
-		return nil, err
+// buildProcesses starts the non-execution tripwires and renders the tenant-A and
+// tenant-B process fixtures pointed at them.
+func (h *Harness) buildProcesses() (procConfig, procConfig, error) {
+	var err error
+	if h.tripwireA, err = startTripwire(); err != nil {
+		return procConfig{}, procConfig{}, err
 	}
-	h.tripwireB, err = startTripwire()
-	if err != nil {
-		return nil, err
+	if h.tripwireB, err = startTripwire(); err != nil {
+		return procConfig{}, procConfig{}, err
 	}
 	pa, err := h.fixture.buildProc("A", h.fixture.tenantA, h.fixture.serverA, "none", tripEndpoint(h.tripwireA))
 	if err != nil {
-		return nil, err
+		return procConfig{}, procConfig{}, err
 	}
 	pb, err := h.fixture.buildProc("B", h.fixture.tenantB, h.fixture.serverB, "none", tripEndpoint(h.tripwireB))
 	if err != nil {
-		return nil, err
+		return procConfig{}, procConfig{}, err
 	}
+	return pa, pb, nil
+}
 
-	// 4. Clients + tokens.
-	if err := h.buildClients(); err != nil {
-		return nil, err
-	}
-	if err := h.mintTokens(); err != nil {
-		return nil, err
-	}
-
-	// 5. Start both artifact processes (real listeners, readiness-gated).
-	h.procA, err = h.startProcess(ctx, pa)
-	if err != nil {
-		return nil, fmt.Errorf("start process A: %w", err)
-	}
-	h.procB, err = h.startProcess(ctx, pb)
-	if err != nil {
-		return nil, fmt.Errorf("start process B: %w", err)
-	}
-
-	// Record the artifact version now that a listener is up (post-start confirm).
+// recordArtifactVersion probes the running binary's version and, in authoritative
+// mode, records a failed criterion on a mismatch with the expected version.
+func (h *Harness) recordArtifactVersion(ctx context.Context) {
 	h.summary.Artifact.Version = probeVersion(ctx, h.uiClient, h.procA.pc.uiPort)
 	if h.spec.Mode == ModeAuthoritative && h.spec.Artifact.ExpectedVersion != "" &&
 		h.summary.Artifact.Version != h.spec.Artifact.ExpectedVersion {
@@ -179,12 +190,6 @@ func (h *Harness) Run(ctx context.Context) (*Summary, error) {
 			Required: true, Status: StatusFail, Expected: h.spec.Artifact.ExpectedVersion, Observed: h.summary.Artifact.Version,
 			Reason: "version_mismatch"})
 	}
-
-	// 6. Scenarios (all at the real binary boundary).
-	h.runScenarios(ctx)
-
-	// 7. Finalize.
-	return h.finalize()
 }
 
 // runScenarios executes every acceptance scenario at the real binary boundary, in
