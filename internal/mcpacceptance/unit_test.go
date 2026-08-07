@@ -65,7 +65,7 @@ func TestRunControl_TimeoutsBoundedAndDefaulted(t *testing.T) {
 
 // ── Artifact binding ─────────────────────────────────────────────────────────
 
-func writeBinary(t *testing.T, content string) (string, string) {
+func writeBinary(t *testing.T, content string) (binPath, digest string) {
 	t.Helper()
 	dir := t.TempDir()
 	p := filepath.Join(dir, "culvert")
