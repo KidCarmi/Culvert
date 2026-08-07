@@ -10710,11 +10710,12 @@ function cdrRenderOverview() {
   const health = cdrState.health || {};
   tbody.innerHTML = instances.map(i => {
     const healthy = (cfg.clientActive && health.healthy) ? '<span class="badge allow">healthy</span>' : '<span class="badge drop">-</span>';
+    const cb = cdrBreakerBadge(i);
     return `<tr>
       <td>${escHtml(i.name)}</td>
       <td><code>${escHtml(i.endpoint)}</code></td>
       <td>${healthy}</td>
-      <td>-</td>
+      <td>${cb}</td>
       <td>${escHtml(i.version || health.version || '')}</td>
       <td>${(health.queueDepth ?? '')}</td>
       <td>${(health.filesProcessed ?? '')}</td>
@@ -10745,7 +10746,16 @@ async function cdrToggleEnabled() {
 
 async function cdrRefreshHealth() {
   try {
-    cdrState.health = await api('/api/cdr/health');
+    // Refetch instances alongside health so the breaker-state badge
+    // (driven by cdrState.instances) doesn't go stale - otherwise a
+    // breaker that opened/recovered since the tab loaded would show
+    // outdated state despite the admin explicitly clicking Refresh.
+    const [health, instances] = await Promise.all([
+      api('/api/cdr/health'),
+      api('/api/cdr/instances').catch(() => null),
+    ]);
+    cdrState.health = health;
+    if (instances) cdrState.instances = instances.instances || [];
     cdrRenderOverview();
     toast('Health refreshed', 'success');
   } catch (e) { toast('Refresh failed: ' + e.message, 'error'); }
@@ -10812,6 +10822,20 @@ function cdrCertExpiryBadge(inst) {
   if (d <= 14) return `<span class="badge drop" title="${escHtml(inst.clientCertNotAfter || '')}">${d}d left - renew now</span>`;
   if (d <= 60) return `<span class="badge inspect" title="${escHtml(inst.clientCertNotAfter || '')}">${d}d left</span>`;
   return `<span class="badge allow" title="${escHtml(inst.clientCertNotAfter || '')}">${d}d left</span>`;
+}
+
+// cdrBreakerBadge shows the per-instance circuit-breaker state so an
+// admin can see WHY the proxy is routing around (or, if every instance
+// is open, silently skipping) CDR sanitization - without needing
+// Prometheus or SSH access.
+function cdrBreakerBadge(inst) {
+  const state = inst.cbState;
+  if (!state) return '<span class="muted">-</span>';
+  const title = `${inst.cbConsecFails ?? 0} consecutive failure(s), tripped open ${inst.cbTotalOpens ?? 0} time(s), ${inst.cbTotalTrips ?? 0} request(s) denied while open`;
+  if (state === 'open') return `<span class="badge drop" title="${escHtml(title)}">open</span>`;
+  if (state === 'half_open') return `<span class="badge warn" title="${escHtml(title)}">half-open</span>`;
+  if (state === 'closed') return `<span class="badge allow" title="${escHtml(title)}">closed</span>`;
+  return `<span class="badge info" title="${escHtml(title)}">${escHtml(state)}</span>`;
 }
 
 async function cdrRefreshInstances() {
