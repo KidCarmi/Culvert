@@ -91,24 +91,7 @@ func TestMCPTenant_E2E_CrossTenantDeniedAtRequestTime(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			st, _, body := e2ePost(t, cli, base, token, sid, tc.body)
-			if st != 200 {
-				t.Fatalf("%s: status=%d body=%s", tc.name, st, body)
-			}
-			// Typed TENANT_MISMATCH error, no result member (never executed).
-			if !bodyHasAll(body, `"error"`, "MCP.AUTH.TENANT_MISMATCH", `"DENY"`) {
-				t.Fatalf("%s cross-tenant must be a TENANT_MISMATCH DENY: %s", tc.name, body)
-			}
-			if bodyHasAll(body, `"result"`) || bodyHasAll(body, "execution_state") {
-				t.Fatalf("%s cross-tenant must carry no result (never executed): %s", tc.name, body)
-			}
-			// No foreign-tenant leak: the owning tenant, the server endpoint, the tool
-			// name, and any matched-rule id must never appear in the response.
-			if strings.Contains(string(body), "qualification") {
-				t.Fatalf("%s response leaked the foreign owner scope: %s", tc.name, body)
-			}
-			if bodyHasAll(body, "upstream.example") || bodyHasAll(body, `"matched_rule":"BROAD"`) {
-				t.Fatalf("%s response leaked foreign server/rule state: %s", tc.name, body)
-			}
+			assertCrossTenantDenied(t, tc.name, st, body)
 		})
 	}
 
@@ -135,5 +118,29 @@ func TestMCPTenant_E2E_CrossTenantDeniedAtRequestTime(t *testing.T) {
 	}
 	if h := tel.mgr.Health().Domains[evmodel.CapGateway]; h.DenialAggregates == 0 {
 		t.Fatal("cross-tenant denial must be counted in the denial lane")
+	}
+}
+
+// assertCrossTenantDenied asserts one decision-point response is the QUAL-5
+// cross-tenant denial: a typed TENANT_MISMATCH DENY, no result member (never
+// executed), and no foreign-tenant leak (owner scope / endpoint / matched rule).
+func assertCrossTenantDenied(t *testing.T, method string, st int, body []byte) {
+	t.Helper()
+	if st != 200 {
+		t.Fatalf("%s: status=%d body=%s", method, st, body)
+	}
+	if !bodyHasAll(body, `"error"`, "MCP.AUTH.TENANT_MISMATCH", `"DENY"`) {
+		t.Fatalf("%s cross-tenant must be a TENANT_MISMATCH DENY: %s", method, body)
+	}
+	if bodyHasAll(body, `"result"`) || bodyHasAll(body, "execution_state") {
+		t.Fatalf("%s cross-tenant must carry no result (never executed): %s", method, body)
+	}
+	// No foreign-tenant leak: the owning tenant, the server endpoint, the tool name,
+	// and any matched-rule id must never appear in the response.
+	if strings.Contains(string(body), "qualification") {
+		t.Fatalf("%s response leaked the foreign owner scope: %s", method, body)
+	}
+	if bodyHasAll(body, "upstream.example") || bodyHasAll(body, `"matched_rule":"BROAD"`) {
+		t.Fatalf("%s response leaked foreign server/rule state: %s", method, body)
 	}
 }
