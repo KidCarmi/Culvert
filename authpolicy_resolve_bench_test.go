@@ -144,6 +144,22 @@ func BenchmarkResolveAuthOutcome_PureListBaseline(b *testing.B) {
 //
 //   go test -run '^$' -bench 'BenchmarkResolveAuthOutcome_(Scheduled|WideCIDR)|BenchmarkAuthScheduleParseable' -benchmem .
 
+// assertFullAuthScan fails the benchmark unless the fixture resolves to
+// Default — i.e. NO rule matched, so every auth rule was actually evaluated.
+//
+// Every benchmark below reports a per-request cost premised on a FULL scan. A
+// fixture that accidentally matches returns on the first hit, so the number
+// would silently describe one rule instead of the whole tranche. That is worse
+// than a failing benchmark: it reads as a real measurement. Asserting the
+// premise before ResetTimer keeps the fixtures honest and, for the scheduled
+// rules, keeps them independent of wall-clock time.
+func assertFullAuthScan(b *testing.B, ps *PolicyStore, ctx RequestContext) {
+	b.Helper()
+	if d := resolveAuthOutcomeSnapshot(ps.evaluationSnapshot(), ctx); d.Outcome != OutcomeDefault {
+		b.Fatalf("fixture matched a rule (outcome %q) — the benchmark would measure a partial scan, not the full rule tranche", d.Outcome)
+	}
+}
+
 // benchScheduledAuthRules returns nAuth MATCHING-subject auth rules that each
 // carry a timezone-scoped schedule, so every rule reaches authScheduleParseable.
 // This is the shape that made an uncached time.LoadLocation catastrophic: the
@@ -159,12 +175,24 @@ func benchScheduledAuthRules(nAuth int) []PolicyRule {
 			SubjectMatch: &SubjectMatch{SchemaVersion: 1, All: []SubjectPredicate{
 				{Type: subjectPredicateCIDR, Values: []string{"203.0.113.0/24"}},
 			}},
-			// Matches the benchmark client's subject and host, but the schedule
-			// excludes every day — so the rule is reached, evaluated, and rejected
-			// on the schedule, exercising the timezone path on every request.
+			// Matches the benchmark client's subject and host so the scan reaches
+			// the schedule, then is rejected there — exercising the timezone path
+			// on every rule of every request.
+			//
+			// The window must be EMPTY, not merely narrow: scheduleTimeMatch
+			// evaluates start<=end as `cur >= start && cur < end`, so
+			// "00:00"–"00:00" can never match at ANY instant, in any timezone. A
+			// narrow-but-real window (e.g. Sun 00:00–00:01) would match inside it,
+			// the first rule would return early, and the benchmark would silently
+			// measure ONE rule instead of nAuth — a wall-clock-dependent result.
 			DestFQDN: "target.example.com",
-			Schedule: &PolicySchedule{Timezone: "America/New_York", Days: []string{"Sun"}, TimeStart: "00:00", TimeEnd: "00:01"},
-			Auth:     &AuthRuleSpec{Outcome: OutcomeCredentialRequired, Owner: "bench", Reason: "bench"},
+			Schedule: &PolicySchedule{
+				Timezone:  "America/New_York",
+				Days:      []string{"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"},
+				TimeStart: "00:00",
+				TimeEnd:   "00:00",
+			},
+			Auth: &AuthRuleSpec{Outcome: OutcomeCredentialRequired, Owner: "bench", Reason: "bench"},
 		})
 	}
 	return rules
@@ -179,6 +207,7 @@ func BenchmarkResolveAuthOutcome_ScheduledAuthRules(b *testing.B) {
 		b.Run(fmt.Sprintf("sched-auth-%d", n), func(b *testing.B) {
 			ps := buildAuthResolveStore(100, benchScheduledAuthRules(n)...)
 			ctx := benchNoCredCtx()
+			assertFullAuthScan(b, ps, ctx)
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
@@ -228,6 +257,7 @@ func BenchmarkResolveAuthOutcome_WideCIDRPredicates(b *testing.B) {
 			}
 			ps := buildAuthResolveStore(100, auth...)
 			ctx := benchNoCredCtx()
+			assertFullAuthScan(b, ps, ctx)
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
@@ -255,6 +285,7 @@ func BenchmarkResolveAuthOutcome_WideCIDRParallel(b *testing.B) {
 	}}
 	ps := buildAuthResolveStore(100, auth...)
 	ctx := benchNoCredCtx()
+	assertFullAuthScan(b, ps, ctx)
 	b.ReportAllocs()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
