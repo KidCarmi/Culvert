@@ -139,6 +139,10 @@ func testDeps(t testing.TB, k *esKey, sink Sink) Deps {
 	if _, err := reg.Register(registry.Registration{
 		ID: testServerID, Endpoint: "https://upstream.example/mcp",
 		PinnedIdentity: "spiffe://upstream/srv-1", Capability: protocol.Gateway,
+		// OwnerScope MUST equal the token tenant so the default fixture is a valid
+		// same-tenant request (QUAL-5 Gateway tenant isolation denies a cross-tenant
+		// request as a hard override before any user rule or tool override).
+		OwnerScope: testTenant,
 	}); err != nil {
 		t.Fatalf("register srv-1: %v", err)
 	}
