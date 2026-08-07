@@ -581,7 +581,16 @@ func (s *standbyLoopState) onMaxFail() bool {
 	}
 	if s.h.autoFailoverEnabled() {
 		s.h.promote("leader unreachable")
-		return true
+		// Report whether promotion ACTUALLY happened, mirroring the lease path
+		// above. promote() is not infallible: onPromote can return an error, or
+		// (CHAOS-25) panic and be contained — both reset the once-guard and
+		// leave this node a standby. Returning an unconditional true there told
+		// standbyLoop to exit, permanently ending BOTH replication and leader
+		// monitoring on a node that never became a leader — the silent-stall
+		// outcome the per-round guard exists to prevent, reached one level up.
+		// Returning IsLeader() keeps the loop ticking so the next round retries
+		// the promotion, exactly as lease mode already does.
+		return s.h.IsLeader()
 	}
 	if !s.manualWarned {
 		s.h.warnManualFailoverRequired(s.leaderAddr)

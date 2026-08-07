@@ -736,6 +736,7 @@ the posture rather than by the rule, which is a **correctness** signal, not only
 | Startup try (cold local state, largest bundle) contained | `TestChaos25_ImmediateSyncPanicIsContained` |
 | Fire-once alert re-arms; cumulative counter does not reset | `TestChaos25_SuccessRearmsThePanicAlert` |
 | `onPromote` panic ⇒ stays standby, guard reset, retry succeeds | `TestChaos25_PromotePanicStaysStandby` |
+| Failed/panicking promote keeps the loop alive (see §14.8) | `TestChaos25_FailedPromoteKeepsTheLoopAlive` |
 | Scanner: contained panic fails CLOSED by default | `TestChaos25_MatchPanic_FailsClosedByDefault` |
 | Scanner: honours the operator's fail-open posture | `TestChaos25_MatchPanic_HonoursFailOpenPosture` |
 | Scanner: answers immediately, does not wait out the timeout | `TestChaos25_MatchPanic_AnswersImmediately` |
@@ -773,3 +774,33 @@ binary terminated).
 - The `crashThrottleEvery` (1s per component) flood guard still means a tight panic loop reports a
   fraction of its rounds to the SIEM; the unthrottled counter is the lossless signal (inherited
   from M1).
+
+### 14.8 Review follow-up — the silent stall one level up
+
+External review of the first cut (Codex, PR #1066) found the containment could still be defeated
+by the caller. `onMaxFail`'s legacy branch reported loop-exit **unconditionally** after calling
+`promote()`:
+
+```go
+if s.h.autoFailoverEnabled() {
+    s.h.promote("leader unreachable")
+    return true          // <- regardless of whether promotion happened
+}
+```
+
+`promote()` is not infallible, and now has two ways to decline: `onPromote` can return an error
+(pre-existing) or panic and be contained (added by §14.5). Both reset the once-guard and leave the
+node a **standby** — and `return true` then told `standbyLoop` to exit for good. The node stopped
+replicating **and** stopped watching the leader while still reporting `role="standby"`: exactly the
+Trap-1 silent stall of §14.2, reached one level above the guard that prevents it. The reset
+once-guard was never retried, so recovery required an operator restart.
+
+The lease branch immediately above already returns `leaseAutoPromote()` (→ `IsLeader()`), so the
+fix is to make the legacy branch report the same fact: `return s.h.IsLeader()`. The loop then keeps
+ticking and the next round retries the promotion, matching lease mode.
+
+Worth recording that this was **pre-existing** — an `onPromote` error alone (a CP gRPC port already
+in use, say) permanently ended a legacy standby's sync loop before this PR. The panic guard added a
+second way in, and the review surfaced both. `TestChaos25_FailedPromoteKeepsTheLoopAlive` drives an
+error, then a contained panic, then a success, and fails against the old code at round 2
+(`loop exited before a promotion succeeded`).

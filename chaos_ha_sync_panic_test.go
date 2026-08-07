@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -280,5 +281,69 @@ func TestChaos25_LeaseModePanicIsAlsoFenced(t *testing.T) {
 	}
 	if h.IsLeader() {
 		t.Fatal("a contained panic must not acquire the fencing lease and promote")
+	}
+}
+
+// TestChaos25_FailedPromoteKeepsTheLoopAlive covers the level above the guard
+// (Codex review, PR #1066): legacy auto-failover mode used to report loop-exit
+// unconditionally after calling promote(), so a promotion that did NOT happen —
+// an onPromote error, or a CHAOS-25-contained panic — ended standbyLoop for
+// good. The node then stopped replicating AND stopped watching the leader while
+// still reporting role="standby": the exact silent stall the per-round guard
+// exists to prevent, reached one level up.
+//
+// The loop must keep ticking until a promotion actually succeeds.
+func TestChaos25_FailedPromoteKeepsTheLoopAlive(t *testing.T) {
+	resetCrashGuardStateForTest()
+	t.Cleanup(resetCrashGuardStateForTest)
+	tempHADir(t)
+
+	h := &HAState{}
+	attempts := 0
+	h.mu.Lock()
+	h.role = "standby"
+	h.token = "test-token"
+	h.autoFailover = true // legacy unfenced auto-failover
+	h.pc = promoteContext{set: true, onPromote: func() error {
+		attempts++
+		switch attempts {
+		case 1:
+			return fmt.Errorf("CP gRPC listener: address already in use")
+		case 2:
+			panic("CP gRPC listener blew up")
+		}
+		return nil
+	}}
+	h.mu.Unlock()
+	t.Cleanup(h.Stop)
+
+	s := loopState(h, func() bool { return false }) // the leader really is gone
+
+	// Drive past the threshold: rounds 1..3 trip onMaxFail (error), then the
+	// next rounds retry (panic, then success).
+	for i := 0; i < haStandbyMaxFail; i++ {
+		if s.guardedTick() {
+			t.Fatalf("round %d: loop exited before a promotion succeeded", i)
+		}
+	}
+	if attempts != 1 || h.IsLeader() {
+		t.Fatalf("expected one FAILED promote attempt and no leadership, attempts=%d leader=%v", attempts, h.IsLeader())
+	}
+
+	if s.guardedTick() { // attempt 2: panics, contained
+		t.Fatal("loop exited after a CONTAINED promote panic — replication and leader monitoring would stop")
+	}
+	if h.IsLeader() {
+		t.Fatal("a contained promote panic must not leave the node believing it is leader")
+	}
+
+	if !s.guardedTick() { // attempt 3: succeeds
+		t.Fatal("loop must exit once the promotion actually succeeds")
+	}
+	if !h.IsLeader() {
+		t.Fatal("node should be leader after the successful retry")
+	}
+	if attempts != 3 {
+		t.Errorf("expected the promotion to be retried on every round, attempts=%d", attempts)
 	}
 }
