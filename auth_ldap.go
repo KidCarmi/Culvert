@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -10,6 +11,65 @@ import (
 
 	ldap "github.com/go-ldap/ldap/v3"
 )
+
+// errLDAPAccountRejected marks a user-bind the directory ANSWERED but did not
+// accept for a reason that is not "wrong password" — a locked, disabled or
+// expired account, an entry with no bindable credential, a referral. It is the
+// LDAP twin of auth_oidc.go's errIntrospectClient and exists for the same
+// reason: the directory is demonstrably REACHABLE, so such a rejection must
+// never arm the provider-wide unreachable cooldown.
+//
+// Without this split an unauthenticated attacker who knows a single username —
+// or who simply brute-forces one account past the directory's own lockout
+// threshold — can make every subsequent bind for that account answer with a
+// non-49 result code, arming the CHAOS-47 gate on every attempt and denying
+// authentication for EVERY OTHER USER without the proxy ever dialing the
+// directory. On an in-line Secure Web Gateway that is a full egress outage
+// driven from outside the trust boundary. See ldapUserBindIsUnreachable.
+var errLDAPAccountRejected = errors.New("ldap: directory rejected the account (not a reachability failure)")
+
+// go-ldap reports its OWN client-side faults (dial failure, malformed packet,
+// unexpected message) as *ldap.Error values in a reserved high code space
+// beginning at ErrorNetwork. RFC 4511 result codes a server can actually put on
+// the wire are all below it, so the range is the reliable "did the directory
+// answer at all?" discriminator.
+const (
+	ldapClientErrorFloor = ldap.ErrorNetwork       // 200
+	ldapClientErrorCeil  = ldap.ErrorEmptyPassword // 206
+)
+
+// ldapUserBindIsUnreachable reports whether a step-2 user-bind error means the
+// DIRECTORY could not be reached, as opposed to the directory answering with a
+// verdict about that one account.
+//
+// The distinction decides whether the error is allowed to arm the CHAOS-47
+// provider-wide cooldown (auth_backend_health.go), so it is a blast-radius
+// control, not a cosmetic classification:
+//
+//   - Not an *ldap.Error at all (context cancellation, a raw net error) ⇒
+//     unreachable. Fail safe: an unclassifiable fault is treated as the backend's.
+//   - A go-ldap client-space code (200–206, incl. ErrorNetwork) ⇒ unreachable.
+//     Nothing came back from the server.
+//   - LDAPResultBusy (51) / LDAPResultUnavailable (52) ⇒ unreachable. The server
+//     answered, but only to say it cannot serve — the exact analogue of the
+//     HTTP 429/408 carve-out isIntrospectClientError makes on the OIDC leg, and
+//     not something a single account's state can provoke.
+//   - Every other result code ⇒ REACHABLE. 49 (invalidCredentials) is a wrong
+//     password; 19 (constraintViolation), 48 (inappropriateAuthentication) and
+//     53 (unwillingToPerform) are how OpenLDAP/ppolicy, FreeIPA and AD report a
+//     locked, disabled, expired or non-bindable account. All of them are
+//     attacker-provokable per account, so none may gate.
+func ldapUserBindIsUnreachable(err error) bool {
+	var le *ldap.Error
+	if !errors.As(err, &le) {
+		return true
+	}
+	switch le.ResultCode {
+	case ldap.LDAPResultBusy, ldap.LDAPResultUnavailable:
+		return true
+	}
+	return le.ResultCode >= ldapClientErrorFloor && le.ResultCode <= ldapClientErrorCeil
+}
 
 // LDAPConfig holds all settings needed to authenticate against an LDAP/AD server.
 // Supported directory services: Microsoft Active Directory, OpenLDAP, FreeIPA.
@@ -132,8 +192,7 @@ func (a *LDAPAuth) Verify(username, password string) bool {
 
 	ok, err := a.verify(username, password)
 	if err != nil {
-		a.gate.recordUnavailable()
-		noteAuthBackendUnavailable("ldap", err.Error())
+		a.noteVerifyError(err)
 		return false
 	}
 	a.gate.recordReachable()
@@ -146,6 +205,23 @@ func (a *LDAPAuth) Verify(username, password string) bool {
 		logger.Printf("LDAP auth FAIL: user=%q", sanitizeLog(username))
 	}
 	return ok
+}
+
+// noteVerifyError applies the CHAOS-47 gating policy to a verify() failure.
+//
+// Every path here denies the in-flight request — the posture is fail-closed and
+// unconditional. What is decided is only whether OTHER users pay for it: an
+// account-scoped rejection is the directory answering, so it must not arm the
+// provider-wide cooldown nor be reported as an outage, exactly as
+// ResolveIdentity does for errIntrospectClient on the OIDC leg. It is also not
+// cached, so a since-unlocked account authenticates on its very next attempt.
+func (a *LDAPAuth) noteVerifyError(err error) {
+	if errors.Is(err, errLDAPAccountRejected) {
+		logger.Printf("LDAP auth DENY (directory rejected the account) — not a backend outage, cooldown not armed")
+		return
+	}
+	a.gate.recordUnavailable()
+	noteAuthBackendUnavailable("ldap", err.Error())
 }
 
 // verify performs one directory round trip.
@@ -213,18 +289,31 @@ func (a *LDAPAuth) verify(username, password string) (bool, error) {
 	userDN := res.Entries[0].DN
 
 	// Step 2: bind with user DN + password to verify credential.
-	// Only result code 49 (invalidCredentials) is the directory REJECTING the
-	// password. Anything else here — the connection dropped mid-bind, the
-	// server returned unavailable/busy — is infrastructure and must not be
-	// remembered as a bad password.
+	//
+	// Three outcomes, and the split between the last two is a blast-radius
+	// control (see ldapUserBindIsUnreachable):
+	//
+	//  1. code 49 (invalidCredentials): the directory rejected the password.
+	//     Authoritative, cacheable, unremarkable.
+	//  2. any other code the SERVER produced — 19/48/53 and friends, i.e. a
+	//     locked, disabled, expired or non-bindable account: the directory
+	//     answered, so it is demonstrably reachable. Deny closed, but do NOT
+	//     let it arm the provider-wide unreachable cooldown, because the
+	//     account state behind it is chosen by whoever is attempting the bind.
+	//  3. a transport/client fault or a busy/unavailable server: genuine
+	//     infrastructure. Deny closed AND gate.
 	if err := conn.Bind(userDN, password); err != nil {
-		if !ldap.IsErrorWithCode(err, ldap.LDAPResultInvalidCredentials) {
-			// The directory's diagnostic text is server-controlled, so it goes
-			// through the CWE-117 barrier before it reaches the log.
-			logger.Printf("LDAP user bind error: %q", sanitizeLog(err.Error()))
-			return false, fmt.Errorf("user bind: %w", err)
+		if ldap.IsErrorWithCode(err, ldap.LDAPResultInvalidCredentials) {
+			return false, nil // wrong password — not logged to avoid credential leakage
 		}
-		return false, nil // wrong password — not logged to avoid credential leakage
+		// The directory's diagnostic text is server-controlled, so it goes
+		// through the CWE-117 barrier before it reaches the log.
+		if !ldapUserBindIsUnreachable(err) {
+			logger.Printf("LDAP user bind rejected by the directory: %q", sanitizeLog(err.Error()))
+			return false, fmt.Errorf("%w: %w", errLDAPAccountRejected, err)
+		}
+		logger.Printf("LDAP user bind error: %q", sanitizeLog(err.Error()))
+		return false, fmt.Errorf("user bind: %w", err)
 	}
 
 	// Optional group membership check.
