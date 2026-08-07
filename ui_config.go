@@ -1153,7 +1153,17 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	// absent/empty fields skip in both modes; merge upserts by ID; replace
 	// replaces the whole set. Pre-validated above; tolerant Set here.
 	if len(b.PACProfiles) > 0 || len(b.PACPools) > 0 {
+		// Serialize the read-modify-write with the CRUD / publish path
+		// (pacProfilesAPIMu, pac_profiles_api.go): merge mode computes the
+		// candidate from a live pacProfiles.Get(), so without the lock a
+		// concurrent profile mutation could interleave between this Get and Set —
+		// losing that update, or reintroducing a DIRECT (full-security-path
+		// bypass) path the interactive confirmDirect guard had just rejected
+		// (PAC-import TOCTOU). The CRUD handlers already hold this mutex across
+		// their own Get→guard→Set; the import path must too.
+		pacProfilesAPIMu.Lock()
 		_ = pacProfiles.Set(importPACProfilesCandidate(pacProfiles.Get(), &b, replaceMode))
+		pacProfilesAPIMu.Unlock()
 	}
 
 	// Alert webhooks (Finding 10.3).
