@@ -4,9 +4,10 @@
 #   docker compose up -d
 #
 # ClamAV downloads its virus definition database on first boot (~250 MB).
-# The proxy starts immediately; ClamAV scanning activates once the daemon
-# is ready (~2–5 min on first run, instant on subsequent starts because the
-# definitions are persisted in the clamav-db volume).
+# The proxy waits for ClamAV's health check before starting (ports 8080/9090
+# are not reachable until then), so first boot takes ~2–5 min; subsequent
+# starts are instant because the definitions are persisted in the
+# clamav-db volume.
 # Watch progress: docker compose logs -f clamav
 #
 # Persistent data (volume "proxy-data"):
@@ -77,8 +78,13 @@ services:
     # Wait for ClamAV to pass its health check before starting the proxy.
     # The proxy still handles transient ClamAV unavailability gracefully
     # (per-request retry), so this just avoids "unreachable" log noise on startup.
+    # Long-form `condition: service_healthy` is required here — the short-form
+    # list (`- clamav`) only waits for the clamav container to START, not for
+    # its healthcheck to pass, which would silently break this comment's
+    # promise during the ~2-5 min first-boot signature-download window.
     depends_on:
-      - clamav
+      clamav:
+        condition: service_healthy
     ports:
       - "8080:8080"   # Proxy (configure browsers / PAC file to point here)
       - "9090:9090"   # Admin Web UI (HTTPS — accept the self-signed cert on first visit)
