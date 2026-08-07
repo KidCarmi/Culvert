@@ -289,20 +289,20 @@ func TestOIDC_UnreachableIdPFiresAlert(t *testing.T) {
 	// and does not race the process-global alert sink.
 	var mu sync.Mutex
 	var fired []string
-	orig := fireIdPUnreachableAlert
-	fireIdPUnreachableAlert = func(backend, detail string) {
+	orig := fireIdentityBackendUnreachableAlert
+	fireIdentityBackendUnreachableAlert = func(backend, detail string) {
 		mu.Lock()
 		fired = append(fired, backend+": "+detail)
 		mu.Unlock()
 	}
-	t.Cleanup(func() { fireIdPUnreachableAlert = orig })
+	t.Cleanup(func() { fireIdentityBackendUnreachableAlert = orig })
 
 	noteAuthBackendUnavailable("oidc", "introspection request: connection refused")
 
 	mu.Lock()
 	defer mu.Unlock()
 	if len(fired) != 1 {
-		t.Fatalf("want exactly one idp_unreachable alert, got %d", len(fired))
+		t.Fatalf("want exactly one identity_backend_unreachable alert, got %d", len(fired))
 	}
 	// Rate limiting is what keeps a down IdP from emitting one alert per
 	// request; the counter carries the magnitude.
