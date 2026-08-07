@@ -13,7 +13,7 @@ import (
 // readable CA, a valid EC signing key, existing policy + credential files) plus
 // operator telemetry paths under a dedicated root OUTSIDE the harness work root. It
 // returns the EnvSpec and the operator telemetry root.
-func localOperatorEnv(t *testing.T) (*EnvSpec, string) {
+func localOperatorEnv(t *testing.T) (env *EnvSpec, telemetryRoot string) {
 	t.Helper()
 	dir := t.TempDir()
 	// A readable CA file (content is not parsed by NewFixtureFromEnv).
@@ -34,8 +34,8 @@ func localOperatorEnv(t *testing.T) (*EnvSpec, string) {
 	polF := writeFileT(t, dir, "policy.json", string(validOperatorPolicy()))
 	passF := writeFileT(t, dir, "admin.pass", testAdminMaterial)
 	tokF := writeFileT(t, dir, "metrics.tok", testMetricsMaterial)
-	telRoot := t.TempDir() // operator-owned, deliberately NOT under the work root
-	env := &EnvSpec{
+	telemetryRoot = t.TempDir() // operator-owned, deliberately NOT under the work root
+	env = &EnvSpec{
 		BindHost:                "127.0.0.1",
 		OAuthIssuer:             "https://idp.example/issuer",
 		CanonicalResource:       "https://gw.example/mcp/gateway",
@@ -53,10 +53,10 @@ func localOperatorEnv(t *testing.T) (*EnvSpec, string) {
 		SigningKID:              "kid-1",
 		GatewayPort:             19443,
 		QualificationPolicyFile: polF,
-		Telemetry:               &TelemetryEnv{NodeID: "op-node", DataDir: filepath.Join(telRoot, "data"), KEKFile: filepath.Join(telRoot, "kek", "t.kek"), ArchiveDir: filepath.Join(telRoot, "arch")},
+		Telemetry:               &TelemetryEnv{NodeID: "op-node", DataDir: filepath.Join(telemetryRoot, "data"), KEKFile: filepath.Join(telemetryRoot, "kek", "t.kek"), ArchiveDir: filepath.Join(telemetryRoot, "arch")},
 		Supervision:             &SupervisionEnv{AdminPort: 19090, MetricsPort: 19091, AdminUser: "acc-admin", AdminPasswordFile: passF, MetricsTokenFile: tokF},
 	}
-	return env, telRoot
+	return env, telemetryRoot
 }
 
 func TestBuildProc_AuthoritativePrimaryConsumesOperatorControls(t *testing.T) {
