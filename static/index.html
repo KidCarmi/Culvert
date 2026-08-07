@@ -2353,6 +2353,10 @@ Firefox (all platforms):
               <span class="info-key">Log I/O Backpressure</span>
               <span class="info-val" id="s-log-backpressure">-</span>
             </div>
+            <div class="info-item" title="Lines that had to wait for the async process-log queue to drain (console + process log file, e.g. POLICY_ALLOW/BLOCK/DROP entries). No line is ever lost - a full queue blocks the caller rather than drop the write - but sustained backpressure means log I/O is adding latency to proxied requests. A separate subsystem from Log I/O Backpressure above (which covers the persistent request-log JSONL).">
+              <span class="info-key">Process Log I/O Backpressure</span>
+              <span class="info-val" id="s-process-log-backpressure">-</span>
+            </div>
           </div>
         </div>
 
@@ -7655,6 +7659,12 @@ async function fetchStats() {
       slbp.textContent = bp > 0 ? fmt(bp) + ' requests delayed' : 'None';
       slbp.style.color = bp > 0 ? 'var(--warn,#b8860b)' : '';
     }
+    const splbp = document.getElementById('s-process-log-backpressure');
+    if (splbp) {
+      const pbp = s.processLogBackpressure || 0;
+      splbp.textContent = pbp > 0 ? fmt(pbp) + ' lines delayed' : 'None';
+      splbp.style.color = pbp > 0 ? 'var(--warn,#b8860b)' : '';
+    }
     // nav badge
     const nb = document.getElementById('nav-blocked-count');
     if (s.blocked > 0) { nb.textContent = fmt(s.blocked); nb.style.display = ''; }
@@ -7693,6 +7703,8 @@ async function fetchStats() {
       setPosture('logging', 'warn', which + ' in-memory only (restart wipes)');
     } else if ((s.logBackpressure || 0) > 0) {
       setPosture('logging', 'warn', fmt(s.logBackpressure) + ' requests delayed by log I/O');
+    } else if ((s.processLogBackpressure || 0) > 0) {
+      setPosture('logging', 'warn', fmt(s.processLogBackpressure) + ' process-log lines delayed by log I/O');
     } else {
       setPosture('logging', 'ok', 'Persisting');
     }

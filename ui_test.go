@@ -607,6 +607,23 @@ func TestAPIStats_LogPersistenceFields(t *testing.T) {
 	}
 }
 
+// TestAPIStats_ProcessLogBackpressureField proves the operator-blind-spot fix:
+// GET /api/stats surfaces the async process-log queue's backpressure counter
+// (internal/logsink, driving culvert_logsink_backpressure_total), which was
+// previously visible only via /metrics — invisible to an operator without a
+// Prometheus scraper wired up.
+func TestAPIStats_ProcessLogBackpressureField(t *testing.T) {
+	w := httptest.NewRecorder()
+	apiStats(w, getReq("/api/stats"))
+	m := assertJSON(t, w)
+	if _, ok := m["processLogBackpressure"]; !ok {
+		t.Fatal("stats response missing 'processLogBackpressure' field")
+	}
+	if got := m["processLogBackpressure"]; got != float64(0) {
+		t.Errorf("processLogBackpressure = %v; want 0 with no logsink installed in the test process", got)
+	}
+}
+
 // apiStats accepts any HTTP method — no method restriction.
 
 // ─── /api/timeseries ─────────────────────────────────────────────────────────
