@@ -183,6 +183,16 @@ func (as *Store) DeliveryHistory() []Delivery {
 	return cp
 }
 
+// legacyEventNames maps a retired event name to its current replacement, so a
+// webhook persisted under the old name keeps firing after the rename instead
+// of silently losing its subscription (Init migrates on load; see the
+// "threat_detected" precedent in the event catalog above, which chose to keep
+// an outdated name rather than break subscriptions — this achieves the same
+// non-breaking outcome while still letting the wire name read correctly).
+var legacyEventNames = map[string]string{
+	"idp_unreachable": "identity_backend_unreachable",
+}
+
 // Init sets the persistence path and loads any persisted webhooks.
 func (as *Store) Init(path string) {
 	as.filePath = path
@@ -201,6 +211,19 @@ func (as *Store) Init(path string) {
 	if err := json.Unmarshal(data, &as.hooks); err != nil {
 		obs.Printf("AlertStore: parse %s: %v", path, err)
 		return
+	}
+	// Event-name migration: a webhook persisted before an alert event was
+	// renamed must keep firing under its new name, or the subscription is
+	// silently dropped (HasSubscriber compares names exactly) and the admin
+	// UI stops recognizing the checked box. Migrated in memory on every load
+	// — like the legacy-cleartext-secret migration below, this does not force
+	// an immediate resave; the next legitimate mutation persists the new name.
+	for i := range as.hooks {
+		for j, ev := range as.hooks[i].Events {
+			if renamed, ok := legacyEventNames[ev]; ok {
+				as.hooks[i].Events[j] = renamed
+			}
+		}
 	}
 	// RISK-003: secrets are AES-GCM encrypted at rest. Decrypt into the
 	// in-memory cleartext form used for HMAC signing. Legacy cleartext (no

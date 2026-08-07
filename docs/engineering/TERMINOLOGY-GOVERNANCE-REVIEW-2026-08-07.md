@@ -188,6 +188,22 @@ finding.
   explanatory line distinguishing it from the IdP-registry vocabulary so this collision cannot silently
   recur), the GUI checkbox's `value` attribute (`static/index.html:17620` — the visible label text was
   already correct and unchanged), `diagnostics.go:409`'s comment, and CLAUDE.md's CHAOS-47 section.
+- **Review addendum (same day):** a PR reviewer correctly pointed out that "no deployed webhook
+  subscription" is an assumption, not a guarantee — any installation running off a build between the
+  08-06 baseline and this pass could already have a webhook persisted under `idp_unreachable` in
+  `alert_webhooks.json`, and `Store.Init`/`HasSubscriber` compare event names exactly, so an unmediated
+  rename would silently stop delivering that subscriber's alerts after upgrade (and the GUI checkbox would
+  stop recognizing it as checked). This codebase already has exactly this precedent — the event catalog's
+  `"threat_detected"` entry (`internal/alerts/store.go:14-18`) was deliberately *kept* under an outdated
+  name rather than renamed to `"blocked"`, specifically "to preserve existing webhook subscriptions."
+  Rather than reverting to that same never-rename posture (which would leave the misleading "IdP" word
+  live), `internal/alerts/store.go` gained a `legacyEventNames` migration map that `Init` applies to every
+  loaded webhook's `Events` list on every process start — matching the store's existing legacy-cleartext
+  secret-migration pattern one function below it. A subscriber persisted under `idp_unreachable` now
+  migrates transparently to `identity_backend_unreachable` in memory on load (and is written back under
+  the new name on its next legitimate save), so both the delivery gate and the GUI's checkbox state stay
+  correct across the rename with no admin action required. Pinned by
+  `TestStore_Init_MigratesLegacyEventNames` (`internal/alerts/store_persist_test.go`).
 - **Priority:** was High-if-unfixed (a live, admin-configurable webhook event name actively misleading
   about scope). **Migration risk:** None (pre-release string, no test/doc dependency, verified by build +
   targeted test run). **Est. PR size:** Trivial (already applied this pass).
