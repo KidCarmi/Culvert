@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -214,6 +216,37 @@ func TestOIDCAuth_Verify_IDPReturns500(t *testing.T) {
 	a, _ := NewOIDCAuth(OIDCConfig{IntrospectionURL: srv.URL, ClientID: "id"})
 	if a.Verify("alice", "tok") {
 		t.Error("expected Verify=false when IDP returns 500")
+	}
+}
+
+// TestOIDCAuth_Verify_4xxDoesNotArmCooldown is the regression test for the
+// CHAOS-47 review's Codex P1: a 4xx from the introspection endpoint is a
+// client/token-side rejection, not a backend outage, so it must NOT arm the
+// provider-wide unreachable cooldown. The gate arms after a single outage, so
+// without this fix one malformed-token 400 would fail-close every OTHER user's
+// authentication until a probe succeeded — an unauthenticated DoS. Each request
+// must still reach the IdP (the gate never arms); contrast
+// TestOIDCAuth_Verify_IDPReturns500, where one 5xx legitimately arms it.
+func TestOIDCAuth_Verify_4xxDoesNotArmCooldown(t *testing.T) {
+	allowLoopbackSSRF(t) // NewOIDCAuth installs the SSRF dial guard (RISK-002); permit the loopback test IdP
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		http.Error(w, "bad token", http.StatusBadRequest) // 400 — an RFC-noncompliant IdP's answer to a malformed token
+	}))
+	defer srv.Close()
+
+	a, _ := NewOIDCAuth(OIDCConfig{IntrospectionURL: srv.URL, ClientID: "id"})
+	const n = 5
+	for i := 0; i < n; i++ {
+		// Distinct tokens so the (uncached) 4xx path is exercised each time and
+		// this is purely a test of the provider-wide gate, not the token cache.
+		if a.Verify("alice", fmt.Sprintf("malformed-%d", i)) {
+			t.Fatalf("request %d: expected deny on a 400 introspection", i)
+		}
+	}
+	if got := atomic.LoadInt32(&calls); got != n {
+		t.Fatalf("IdP was called %d times, want %d — a 4xx armed the provider-wide cooldown (one malformed token gated everyone)", got, n)
 	}
 }
 

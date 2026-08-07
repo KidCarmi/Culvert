@@ -166,7 +166,7 @@ func (a *LDAPAuth) verify(username, password string) (bool, error) {
 		logger.Printf("LDAP dial error: %v", err)
 		return false, fmt.Errorf("dial: %w", err)
 	}
-	defer conn.Close()
+	defer conn.Close() //nolint:errcheck // best-effort close of a bind connection
 
 	// Optional STARTTLS upgrade.
 	if a.cfg.StartTLS && !strings.HasPrefix(strings.ToLower(a.cfg.URL), "ldaps") {

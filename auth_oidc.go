@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,25 @@ import (
 	"sync"
 	"time"
 )
+
+// errIntrospectClient marks a 4xx from the introspection endpoint — a
+// client/token-side rejection, NOT an endpoint outage. It must never arm the
+// unreachable cooldown, or an unauthenticated caller could trip the
+// provider-wide gate with a single malformed token (CHAOS-47 review). See
+// isIntrospectClientError and ResolveIdentity.
+var errIntrospectClient = errors.New("introspection endpoint returned a 4xx (client/token error)")
+
+// isIntrospectClientError reports whether a non-200 introspection status is a
+// caller/config-side rejection (a 4xx an unauthenticated request can provoke)
+// rather than a backend reachability problem. 429 (Too Many Requests) and 408
+// (Request Timeout) are 4xx but are transient "back off / retry" signals, so
+// they DO count as reachability failures and are allowed to arm the cooldown.
+func isIntrospectClientError(code int) bool {
+	if code == http.StatusTooManyRequests || code == http.StatusRequestTimeout {
+		return false
+	}
+	return code >= 400 && code < 500
+}
 
 // OIDCConfig holds settings for OAuth2 / OIDC token-introspection auth.
 //
@@ -190,6 +210,15 @@ func (a *OIDCAuth) ResolveIdentity(_ string, token string) (*Identity, bool) {
 
 	id, ok, exp, err := a.introspect(token)
 	if err != nil {
+		if errors.Is(err, errIntrospectClient) {
+			// A 4xx is a client/token-side rejection, not a backend outage: deny
+			// THIS request closed but do NOT record an outage or arm the cooldown,
+			// so a malformed token cannot trip the provider-wide gate for everyone
+			// else. Not cached — a 4xx may reflect a fixable client-credential
+			// misconfiguration rather than a stable verdict about the token.
+			logger.Printf("OIDC auth DENY (introspection 4xx) — client/token error, not a backend outage")
+			return nil, false
+		}
 		// Could not reach the IdP, or it did not answer coherently. Deny this
 		// request, but never cache it: a cached infrastructure failure keeps
 		// denying a valid token for the full TTL after the IdP recovers.
@@ -252,6 +281,14 @@ func (a *OIDCAuth) introspect(token string) (identity *Identity, active bool, to
 
 	if resp.StatusCode != http.StatusOK {
 		logger.Printf("OIDC introspect HTTP %d", resp.StatusCode)
+		if isIntrospectClientError(resp.StatusCode) {
+			// A 4xx is a client/token-side rejection, not an endpoint outage —
+			// classifying it as one would let an unauthenticated caller arm the
+			// provider-wide unreachable cooldown with one malformed token. Fail
+			// this request closed via a distinguishable error; the caller does not
+			// gate on it.
+			return nil, false, nil, fmt.Errorf("%w: HTTP %d", errIntrospectClient, resp.StatusCode)
+		}
 		return nil, false, nil, fmt.Errorf("introspection endpoint returned HTTP %d", resp.StatusCode)
 	}
 
