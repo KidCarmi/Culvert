@@ -947,3 +947,45 @@ configuration under test is production's; only the dial target differs.
   the one worth converging on the shared-client idiom opportunistically.
 - `webhookSem` is package-global, so all Stores in a process share the 10 slots. Production has
   one Store; noted, not a defect.
+
+### 15.8 Review follow-up — the phantom saturation signal
+
+External review of the first cut (Codex, PR #1078) found a case where the two triggers disagree.
+The expiry prune is scheduled by **inserts** (`dedupPruneEvery`), but entries expire with **time**
+— and a quiet period has no inserts. So a flood that fills the map to the cap and then stops
+leaves 4096 entirely stale keys sitting there. The next alert to arrive:
+
+- finds the map over cap, and
+- evicts a random key and **charges it to `dedupEvicted`** — even though every entry is dead and
+  nothing is saturated. It could also evict the key it had just inserted, letting an immediate
+  duplicate through.
+
+That counter is monotonic and drives an amber "dedup window saturated" state in the admin UI, so
+one flood followed by silence produced a **permanently sticky, false degradation indicator** —
+defeating the exact observability contract §15.5 added it for. Worse than useless: it teaches the
+operator to ignore the signal.
+
+Fixed on both axes:
+
+- **Time-based prune trigger** on the over-cap path (`dedupPruneMinInterval`, 1s), so a map full
+  of stale keys is reclaimed before its size is read as saturation. Rate-limited, so a *sustained*
+  flood — where the scan would find nothing to reclaim — still does not pay `O(len)` per alert
+  (measured: 745 → 783 ns/op, still ~295× better than the 230,603 ns/op pre-fix baseline).
+- **Expired keys are deleted but never charged** (`evictOverCapLocked` compares each key's stamp
+  against `dedupTTL`). Dropping a dead key is reclamation, not saturation. This makes the counter
+  exact even inside the ≤1s window between an entry expiring and the next prune reclaiming it,
+  rather than merely approximately right.
+
+`evictOverCapLocked` also now skips the key just inserted, so the alert that triggered the
+eviction is never the one dropped.
+
+`TestChaos27_QuietPeriodCountsNoPhantomEvictions` drives the exact sequence — fill to cap, let the
+window pass, insert one key — and fails against the first cut (`charged 1 eviction(s) against a
+map holding only EXPIRED keys`). It asserts three things: no eviction charged, the fresh key
+survives, and the stale entries are actually reclaimed.
+
+Worth recording the general shape, because it is the same lesson as §12.2 and §14.8: **a
+correctness fix that is scheduled on one clock and validated on another will disagree with itself
+at the boundary.** The memory bound was right, the CPU bound was right, and the counter that made
+both observable was wrong in precisely the state — quiet after a storm — that an operator is most
+likely to be looking at it.

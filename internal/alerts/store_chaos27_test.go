@@ -159,6 +159,56 @@ func BenchmarkDedupSuppressedUnderFlood(b *testing.B) {
 	}
 }
 
+// TestChaos27_QuietPeriodCountsNoPhantomEvictions covers the case where the
+// count-based prune schedule and the time-based expiry disagree (Codex review
+// on PR #1078).
+//
+// A flood fills the map to the cap and then stops. Entries expire with TIME,
+// but the prune is triggered by INSERTS — and a quiet period has none. So the
+// map sits full of entirely stale keys, and the next insert finds itself over
+// cap and charges an eviction: a phantom saturation signal, on a monotonic
+// counter that drives a sticky "degraded" state in the admin UI. It can also
+// evict the key just inserted, letting an immediate duplicate through.
+//
+// Nothing is saturated here. Every entry is dead.
+func TestChaos27_QuietPeriodCountsNoPhantomEvictions(t *testing.T) {
+	as := &Store{}
+	for i := 0; i < maxDedupEntries; i++ {
+		as.dedupSuppressed(fmt.Sprintf("policy_block:flood-%d.example", i))
+	}
+
+	// The flood ends and the window passes with no traffic. Real elapsed time
+	// ages the prune stamp exactly as it ages the entries, so the test moves
+	// both — advancing only the entries would model a clock that stopped.
+	as.dedupMu.Lock()
+	stale := time.Now().Add(-2 * dedupTTL)
+	for k := range as.dedupMap {
+		as.dedupMap[k] = stale
+	}
+	as.dedupLastPrune = stale
+	as.dedupMu.Unlock()
+
+	before := DedupEvictionsTotal()
+	if as.dedupSuppressed("cert_expiry:ca") {
+		t.Fatal("a fresh key was reported as a duplicate")
+	}
+
+	if got := DedupEvictionsTotal() - before; got != 0 {
+		t.Fatalf("charged %d eviction(s) against a map holding only EXPIRED keys — "+
+			"a quiet period after a flood fabricates a permanent saturation warning", got)
+	}
+	as.dedupMu.Lock()
+	size := len(as.dedupMap)
+	_, kept := as.dedupMap["cert_expiry:ca"]
+	as.dedupMu.Unlock()
+	if !kept {
+		t.Fatal("the just-inserted key was evicted, so its immediate duplicate would deliver again")
+	}
+	if size > 1 {
+		t.Fatalf("map still holds %d entries after every key expired — stale keys are not being reclaimed", size)
+	}
+}
+
 // TestChaos27_DedupStillSuppressesDuplicates proves the bound did not break
 // the Q17 contract it guards: an identical event+detail inside the window is
 // still suppressed, and a distinct one is not.

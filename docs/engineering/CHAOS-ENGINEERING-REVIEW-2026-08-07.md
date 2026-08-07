@@ -254,6 +254,35 @@ untouched.
 
 ---
 
+## Review Follow-up — the phantom saturation signal
+
+External review of the first cut (Codex, PR #1078) found the two triggers disagreeing. The expiry
+prune is scheduled by **inserts**; entries expire with **time**; a quiet period has neither. A
+flood that fills the map and then stops leaves 4096 stale keys in place, and the next alert to
+arrive evicts one and **charges it** — a saturation signal fabricated from an entirely dead map,
+on a monotonic counter driving a sticky amber state in the admin UI. It could also evict the key
+it had just inserted.
+
+That is worse than a missing signal: it trains the operator to ignore the one indicator this
+change added.
+
+Fixed on both axes — a time-based prune trigger on the over-cap path (`dedupPruneMinInterval`,
+1s, rate-limited so a sustained flood still does not pay `O(len)` per alert; 745 → 783 ns/op,
+still ~295× better than the 230,603 ns/op baseline), and expired keys deleted but never charged,
+which makes the counter exact rather than approximately right. `evictOverCapLocked` also skips the
+just-inserted key.
+
+`TestChaos27_QuietPeriodCountsNoPhantomEvictions` drives fill-to-cap → window passes → one insert,
+and fails against the first cut with `charged 1 eviction(s) against a map holding only EXPIRED
+keys`.
+
+The general lesson, and the same one as the CHAOS-24/25 sweeps: **a fix scheduled on one clock and
+validated on another disagrees with itself at the boundary.** Both bounds were right; the counter
+that made them observable was wrong in exactly the state — quiet after a storm — where an operator
+is most likely to read it.
+
+---
+
 ## Residual Risk
 
 - **`maxDedupEntries` / `dedupPruneEvery` are compile-time constants**, matching the

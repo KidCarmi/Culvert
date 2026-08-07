@@ -78,6 +78,12 @@ const (
 	// dedupPruneEvery amortises the O(len) expiry scan: it used to run on
 	// every dispatch while holding the process-wide dedup mutex.
 	dedupPruneEvery = 256
+	// dedupPruneMinInterval bounds how often the over-cap path may fall back
+	// to that scan. The insert-counted schedule above cannot see a QUIET
+	// period — entries expire with time, not with inserts — so the cap check
+	// needs a time-based trigger too, rate-limited so a sustained flood does
+	// not pay the scan per alert. One O(cap) scan per second is ~40µs.
+	dedupPruneMinInterval = time.Second
 )
 
 // dedupEvicted counts dedup keys dropped by the cap, so a flooded alert key
@@ -177,6 +183,7 @@ type Store struct {
 	dedupMu         sync.Mutex
 	dedupMap        map[string]time.Time
 	dedupSincePrune int
+	dedupLastPrune  time.Time
 	// dedupPruneRuns counts O(len) expiry scans. It exists so the amortisation
 	// contract is testable: a regression that restores the scan-every-dispatch
 	// behaviour is a memory-safe change that silently reintroduces the CPU
@@ -520,17 +527,30 @@ func (as *Store) dedupSuppressed(dedupKey string) bool {
 	// sustained flood pay a full scan PER alert: bounded memory, but the same
 	// quadratic CPU under the same process-wide mutex.
 	if as.dedupSincePrune >= dedupPruneEvery {
-		as.dedupSincePrune = 0
 		as.pruneExpiredLocked(now)
 	}
-	as.evictOverCapLocked()
+	if len(as.dedupMap) > maxDedupEntries {
+		// Over cap. Before charging an eviction, make sure the excess is LIVE.
+		// The prune schedule counts INSERTS but entries expire with TIME, and a
+		// quiet period has no inserts — so a map left full by a finished flood
+		// sits there entirely stale, and evicting from it would fabricate a
+		// saturation signal on a monotonic counter (and could drop the key just
+		// inserted). Rate-limited by time so a SUSTAINED flood, where the scan
+		// finds nothing to reclaim, still does not pay O(len) per alert.
+		if now.Sub(as.dedupLastPrune) >= dedupPruneMinInterval {
+			as.pruneExpiredLocked(now)
+		}
+		as.evictOverCapLocked(now, dedupKey)
+	}
 	return false
 }
 
-// pruneExpiredLocked drops keys older than dedupTTL. O(len); amortised by the
-// caller. Caller holds dedupMu.
+// pruneExpiredLocked drops keys older than dedupTTL and re-arms both prune
+// triggers. O(len); amortised by the caller. Caller holds dedupMu.
 func (as *Store) pruneExpiredLocked(now time.Time) {
 	as.dedupPruneRuns++
+	as.dedupSincePrune = 0
+	as.dedupLastPrune = now
 	for k, t := range as.dedupMap {
 		if now.Sub(t) > dedupTTL {
 			delete(as.dedupMap, k)
@@ -540,24 +560,40 @@ func (as *Store) pruneExpiredLocked(now time.Time) {
 
 // evictOverCapLocked enforces maxDedupEntries. Expiry alone is rate-bound,
 // not size-bound: a fast enough flood adds keys faster than dedupTTL retires
-// them. Go randomises map iteration order, so this is a random eviction and
-// not an oldest-first one — under a flood every live entry is inside the same
-// 30s window anyway, and the cost of evicting the wrong one is one duplicate
-// delivery, never a missed alert. Caller holds dedupMu.
-func (as *Store) evictOverCapLocked() {
+// them. The caller guarantees the map has been pruned recently, so anything
+// evicted here is a LIVE key and the eviction counter means what it says.
+//
+// keep is the key just inserted, skipped so the alert that triggered this
+// call is never the one dropped. Go randomises map iteration order, so the
+// rest is a random eviction and not an oldest-first one — under a flood every
+// live entry is inside the same 30s window anyway, and the cost of evicting
+// the wrong one is one duplicate delivery, never a missed alert.
+//
+// A key that has already expired is deleted but NOT charged: it was dead, so
+// dropping it is reclamation, not saturation. That keeps the counter exact
+// even in the window between an entry expiring and the next prune reclaiming
+// it, so `dedup_evictions_total` only ever means "live keys arrived faster
+// than the window could hold them". Caller holds dedupMu.
+func (as *Store) evictOverCapLocked(now time.Time, keep string) {
 	over := len(as.dedupMap) - maxDedupEntries
 	if over <= 0 {
 		return
 	}
-	evicted := 0
-	for k := range as.dedupMap {
+	deleted, charged := 0, 0
+	for k, t := range as.dedupMap {
+		if k == keep {
+			continue
+		}
 		delete(as.dedupMap, k)
-		evicted++
-		if evicted >= over {
+		deleted++
+		if now.Sub(t) <= dedupTTL {
+			charged++
+		}
+		if deleted >= over {
 			break
 		}
 	}
-	dedupEvicted.Add(int64(evicted))
+	dedupEvicted.Add(int64(charged))
 }
 
 // DedupEvictionsTotal reports how many dedup keys were evicted by the
