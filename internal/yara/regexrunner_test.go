@@ -19,7 +19,7 @@ import (
 // slowRe has no literal prefix and is case-insensitive, so RE2 cannot use its
 // memchr fast path and the match cost scales with the body — which is what lets
 // these tests exercise the timeout path with real regex work rather than a fake.
-var slowRe = regexp.MustCompile(`(?i)([a-z]|[0-9])+(zz|qq)(xx|yy)[0-9]{3}[a-f]+`)
+var slowRe = regexp.MustCompile(`(?i)([a-z]|\d)+(zz|qq)(xx|yy)\d{3}[a-f]+`)
 
 func filler(n int) []byte {
 	unit := []byte("the quick brown fox jumps over the lazy dog 0123456789 ")
@@ -136,7 +136,7 @@ func TestRegexRunner_NoWorkerWithoutRegexStrings(t *testing.T) {
 func TestRegexRunner_BudgetIsPerString(t *testing.T) {
 	inflightBaseline(t)
 
-	const strings = 20
+	const stringCount = 20
 	body := filler(64 << 10)
 
 	// Calibrate against this machine rather than hardcoding a duration: -race
@@ -158,7 +158,7 @@ func TestRegexRunner_BudgetIsPerString(t *testing.T) {
 	defer ctx.closeRegexRunner()
 
 	start := time.Now()
-	for i := 0; i < strings; i++ {
+	for i := 0; i < stringCount; i++ {
 		if ctx.matchRegex(slowRe, body, perString) {
 			t.Fatalf("string %d failed closed after %v with a %v per-string budget: "+
 				"the per-string budget has become a whole-scan budget", i, time.Since(start), perString)
@@ -169,7 +169,7 @@ func TestRegexRunner_BudgetIsPerString(t *testing.T) {
 		t.Skipf("scan took %v, still under the %v per-string budget — cannot prove the distinction here", total, perString)
 	}
 	t.Logf("%d strings in %v with a %v per-string budget (one match ~%v) — no string failed closed",
-		strings, total, perString, one)
+		stringCount, total, perString, one)
 }
 
 // TestRegexRunner_TimeoutFailsClosedAndScanContinues pins both halves of the

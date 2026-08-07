@@ -99,7 +99,7 @@ func BenchmarkMatch_RegexStress(b *testing.B) {
 // in ~420 ns with zero allocations. Anything this benchmark reports above that
 // is the timeout harness.
 func BenchmarkMatchRegex_HarnessOnly(b *testing.B) {
-	re := regexp.MustCompile(`ZZMALWARE0_0[0-9]{3}`)
+	re := regexp.MustCompile(`ZZMALWARE0_0\d{3}`)
 	body := filler(16 << 10)
 	ctx := &scanCtx{}
 	defer ctx.closeRegexRunner()
@@ -115,7 +115,7 @@ func BenchmarkMatchRegex_HarnessOnly(b *testing.B) {
 // BenchmarkMatchRegex_RawNoHarness is the floor the benchmark above is measured
 // against: the same match with no timeout guard at all.
 func BenchmarkMatchRegex_RawNoHarness(b *testing.B) {
-	re := regexp.MustCompile(`ZZMALWARE0_0[0-9]{3}`)
+	re := regexp.MustCompile(`ZZMALWARE0_0\d{3}`)
 	body := filler(16 << 10)
 	b.ReportAllocs()
 	b.ResetTimer()
