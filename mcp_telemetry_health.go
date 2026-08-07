@@ -24,7 +24,7 @@ type TelemetryStatus struct {
 	Reason              string                 `json:"reason,omitempty"`
 	NodeID              string                 `json:"node_id,omitempty"`
 	EncryptionAvailable bool                   `json:"encryption_available"`
-	DecisionTelemetry   string                 `json:"decision_telemetry"` // always "pending_policy" in QUAL-3
+	DecisionTelemetry   string                 `json:"decision_telemetry"` // pending_policy | pending_telemetry | ready (QUAL-4)
 	ExecutionEnabled    bool                   `json:"execution_enabled"`  // always false
 	Gateway             *TelemetryDomainStatus `json:"gateway,omitempty"`
 }
@@ -78,9 +78,13 @@ func mcpTelemetryStatus() TelemetryStatus {
 	mcpTelem.mu.RUnlock()
 
 	st := TelemetryStatus{
-		State:             string(state),
-		Reason:            reason,
-		DecisionTelemetry: "pending_policy", // Policy is not composed in QUAL-3
+		State:  string(state),
+		Reason: reason,
+		// QUAL-4: decision telemetry is "ready" only when a node-local policy snapshot
+		// is composed AND the durable telemetry plane is active (so an evaluated
+		// decision is actually committed durably); otherwise it truthfully reports what
+		// is missing. It NEVER claims ready without a real snapshot + a live spool.
+		DecisionTelemetry: decisionTelemetryLabel(rt != nil),
 		ExecutionEnabled:  false,
 	}
 	if rt == nil {

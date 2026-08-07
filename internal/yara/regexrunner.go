@@ -4,6 +4,8 @@ import (
 	"regexp"
 	"sync/atomic"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/obs"
 )
 
 // ── Per-scan regex worker ─────────────────────────────────────────────────────
@@ -160,13 +162,35 @@ func newRegexRunner(timeout time.Duration) *regexRunner {
 // The deferred releaseCharge is the abandoned case: on a normal scan the parent
 // has already released each match's charge, so the CAS finds nothing to give
 // back and this is a no-op.
+//
+// CHAOS-25 containment is per JOB rather than around the whole loop. The match
+// runs attacker-supplied bytes through a compiled regexp on the response-scanning
+// path, so an unrecovered panic would take down an in-line gateway. A contained
+// panic yields NO verdict about the content — the same epistemic state a timeout
+// leaves — so it resolves through the SAME admin-selectable posture instead of
+// defaulting to "clean", and answers immediately rather than making the parent
+// wait out the budget it already knows will never be met.
+//
+// Where this differs from the one-shot form it replaced: that goroutine had no
+// "next round", so its guard covered the whole body and the goroutine ended with
+// the panic. A worker DOES have a next round, and the panic is contained inside
+// a single match with no runner state left inconsistent, so the worker keeps
+// serving the rest of the scan — every later string independently guarded.
+// Killing the worker instead would fail the remaining strings closed and turn
+// one bad match into a whole-scan block.
 func (r *regexRunner) run() {
 	defer r.releaseCharge()
 	for j := range r.jobs {
 		if r.abandoned.Load() {
 			return
 		}
-		r.results <- j.re.Match(j.data)
+		var matched bool
+		if obs.SafeCall(yaraMatchComponent, func() { matched = yaraMatchFn(j.re, j.data) }) {
+			yaraMatchPanics.Add(1)
+			r.results <- GetOnTimeout() != FailOpenWithAlert
+			continue
+		}
+		r.results <- matched
 	}
 }
 

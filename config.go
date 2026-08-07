@@ -232,6 +232,19 @@ type FileConfig struct {
 			// partially seeds and never enables MCP on its own (mcp.gateway.enabled still
 			// gates the listener). No secret material may appear in this file.
 			QualificationInventoryFile string `yaml:"qualification_inventory_file"`
+			// QualificationPolicyFile is a static, node-local policy source document (QUAL-4)
+			// in the EXISTING accepted Gateway policy format (schema_version 1, capability
+			// "gateway", default_action DENY, rules[]). It is loaded ONCE at startup (no hot
+			// reload, no admin upload, no CLI/env policy body), compiled through the EXISTING
+			// policy compiler + limits, and published as the node-local ACTIVE Observe
+			// evaluation snapshot into the SAME capability-local policy Store the read-only
+			// Policy Admin API and simulator read (single source of truth). Absent ⇒ QUAL-3
+			// behavior (no snapshot; decision telemetry stays pending-policy). A present-but-
+			// invalid file fails activation closed (nothing binds; no partial snapshot). This
+			// is a LOCAL qualification Observe snapshot — never fleet-published, never
+			// Production-enforced; the policy is EVALUATED for evidence only and never
+			// executes an upstream effect. No secret material may appear in this file.
+			QualificationPolicyFile string `yaml:"qualification_policy_file"`
 			// QualificationTelemetry (QUAL-3) composes the existing MCP durable-events
 			// machinery into the Gateway Observe runtime: an encrypted, capability-isolated
 			// event spool (KEK from a model-B secret.Provider file — never a raw key in

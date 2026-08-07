@@ -41,7 +41,7 @@ jobs:
     name: "API · breaking-change (blocking)"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
       - name: Detect contract changes
@@ -115,7 +115,7 @@ jobs:
     name: "API · client-generation (blocking)"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
       - name: Detect contract changes

@@ -10710,11 +10710,12 @@ function cdrRenderOverview() {
   const health = cdrState.health || {};
   tbody.innerHTML = instances.map(i => {
     const healthy = (cfg.clientActive && health.healthy) ? '<span class="badge allow">healthy</span>' : '<span class="badge drop">-</span>';
+    const cb = cdrBreakerBadge(i);
     return `<tr>
       <td>${escHtml(i.name)}</td>
       <td><code>${escHtml(i.endpoint)}</code></td>
       <td>${healthy}</td>
-      <td>-</td>
+      <td>${cb}</td>
       <td>${escHtml(i.version || health.version || '')}</td>
       <td>${(health.queueDepth ?? '')}</td>
       <td>${(health.filesProcessed ?? '')}</td>
@@ -10745,7 +10746,16 @@ async function cdrToggleEnabled() {
 
 async function cdrRefreshHealth() {
   try {
-    cdrState.health = await api('/api/cdr/health');
+    // Refetch instances alongside health so the breaker-state badge
+    // (driven by cdrState.instances) doesn't go stale - otherwise a
+    // breaker that opened/recovered since the tab loaded would show
+    // outdated state despite the admin explicitly clicking Refresh.
+    const [health, instances] = await Promise.all([
+      api('/api/cdr/health'),
+      api('/api/cdr/instances').catch(() => null),
+    ]);
+    cdrState.health = health;
+    if (instances) cdrState.instances = instances.instances || [];
     cdrRenderOverview();
     toast('Health refreshed', 'success');
   } catch (e) { toast('Refresh failed: ' + e.message, 'error'); }
@@ -10812,6 +10822,20 @@ function cdrCertExpiryBadge(inst) {
   if (d <= 14) return `<span class="badge drop" title="${escHtml(inst.clientCertNotAfter || '')}">${d}d left - renew now</span>`;
   if (d <= 60) return `<span class="badge inspect" title="${escHtml(inst.clientCertNotAfter || '')}">${d}d left</span>`;
   return `<span class="badge allow" title="${escHtml(inst.clientCertNotAfter || '')}">${d}d left</span>`;
+}
+
+// cdrBreakerBadge shows the per-instance circuit-breaker state so an
+// admin can see WHY the proxy is routing around (or, if every instance
+// is open, silently skipping) CDR sanitization - without needing
+// Prometheus or SSH access.
+function cdrBreakerBadge(inst) {
+  const state = inst.cbState;
+  if (!state) return '<span class="muted">-</span>';
+  const title = `${inst.cbConsecFails ?? 0} consecutive failure(s), tripped open ${inst.cbTotalOpens ?? 0} time(s), ${inst.cbTotalTrips ?? 0} request(s) denied while open`;
+  if (state === 'open') return `<span class="badge drop" title="${escHtml(title)}">open</span>`;
+  if (state === 'half_open') return `<span class="badge warn" title="${escHtml(title)}">half-open</span>`;
+  if (state === 'closed') return `<span class="badge allow" title="${escHtml(title)}">closed</span>`;
+  return `<span class="badge info" title="${escHtml(title)}">${escHtml(state)}</span>`;
 }
 
 async function cdrRefreshInstances() {
@@ -15072,6 +15096,11 @@ function renderDiagnoseCluster(d) {
   if (d.role === 'standby') {
     rows.push(['Sync failures', escHtml(String(d.sync_fail_count || 0))]);
     if (d.last_sync_ok) rows.push(['Last sync OK', escHtml(String(d.last_sync_ok))]);
+    // CHAOS-25: contained sync-round panics are deliberately kept OUT of the
+    // failure streak (they must not trigger failover on this node's own fault),
+    // so they need their own row — otherwise a standby whose apply path panics
+    // every tick reads as healthy at sync_fail_count=0 while replication is dead.
+    if (d.sync_panics) rows.push(['Sync faults (contained)', '<span style="color:var(--warn,#e0a800)">' + escHtml(String(d.sync_panics)) + ' — replication stalled, auto-failover suppressed</span>']);
   }
   const body = rows.map(r => '<tr><td class="hint">' + r[0] + '</td><td>' + r[1] + '</td></tr>').join('');
   const detail = d.detail ? '<p class="hint">' + escHtml(String(d.detail)) + '</p>' : '';
@@ -17575,6 +17604,10 @@ function resetBlockPage() {
         <!-- P1 commit-time validation: the CP refused to publish an over-cap config
              to the fleet (fleet stays on the last valid snapshot until trimmed). -->
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="config_snapshot_rejected"> Config publish rejected (over cap)</label>
+        <!-- CHAOS-25: a standby HA sync round panicked and was contained. State
+             replication from the leader is stalled and this node deliberately
+             will NOT auto-promote on its own fault (manual promotion available). -->
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="ha_sync_panic"> HA standby sync fault (replication stalled)</label>
       </div>
     </div>
     <div class="form-group">
@@ -20167,6 +20200,15 @@ async function mcpxPolRefreshActive(){
   var d=await mcpxRfFetch('/api/mcp/policy?capability='+encodeURIComponent(mcpxPol.cap));
   if(myTicket!==mcpxPol.ticket) return;
   mcpxPol.activeErr=mcpxRfErr(d); mcpxPol.active=mcpxPol.activeErr?null:d;
+  // QUAL-4: the node-local Observe policy posture (source/evaluation/enforcement/
+  // execution/telemetry completeness) is a read-only projection on /api/mcp/overview.
+  // Gateway only — the Management surface is never armed from the qualification source.
+  mcpxPol.qual=null; mcpxPol.decTel=null;
+  if(mcpxPol.cap==='gateway'){
+    var ov=await mcpxRfFetch('/api/mcp/overview');
+    if(myTicket!==mcpxPol.ticket) return;
+    if(!mcpxRfErr(ov)){ mcpxPol.qual=ov.policy||null; mcpxPol.decTel=(ov.telemetry&&ov.telemetry.decision_telemetry)||null; }
+  }
   mcpxPolRender();
   mcpxAnnounce(mcpxPol.activeErr?('Active '+mcpxPol.cap+' policy unavailable'):('Active '+mcpxPol.cap+' policy loaded'));
   var asof=document.getElementById('mcpx-pol-asof'); if(asof) asof.textContent='as of '+mcpxNow();
@@ -20187,7 +20229,24 @@ function mcpxPolActiveCard(){
   if(a.default_action!=null) mcpxRfKv(dl,'Default action', a.default_action); else mcpxRfKv(dl,'Default action','deny (default)','mcpx-rf-dd-muted');
   mcpxRfKv(dl,'Distribution state', a.distribution_state||'local_only');
   card.appendChild(dl);
-  card.appendChild(mcpxEl('div','mcpx-source','From /api/mcp/policy. Summary only; no active rules are reconstructed.'));
+  // QUAL-4 node-local Observe posture: the active snapshot's source + evaluate-only
+  // truth. Enforcement/execution/fleet are all disabled; decision telemetry states
+  // whether an evaluated decision is durably recorded. Real data only.
+  var q=mcpxPol.qual;
+  if(q){
+    var qdl=mcpxRfDL();
+    var srcLabel=(q.state==='loaded')?'qualification startup (local Observe evaluation snapshot; not fleet distributed)'
+      :(q.state==='invalid')?('unavailable - '+(q.reason||'invalid'))
+      :'not configured';
+    mcpxRfKv(qdl,'Snapshot source', srcLabel, (q.state==='loaded')?'':'mcpx-rf-dd-muted');
+    mcpxRfKv(qdl,'Observe evaluation', q.evaluation_enabled?'enabled':'disabled', q.evaluation_enabled?'':'mcpx-rf-dd-muted');
+    mcpxRfKv(qdl,'Enforcement', 'disabled (Observe)','mcpx-rf-dd-muted');
+    mcpxRfKv(qdl,'Execution', 'disabled (no upstream executor)','mcpx-rf-dd-muted');
+    mcpxRfKv(qdl,'Fleet distributed', 'no (node-local)','mcpx-rf-dd-muted');
+    if(mcpxPol.decTel) mcpxRfKv(qdl,'Decision telemetry', mcpxPol.decTel, (mcpxPol.decTel==='ready')?'':'mcpx-rf-dd-muted');
+    card.appendChild(qdl);
+  }
+  card.appendChild(mcpxEl('div','mcpx-source','From /api/mcp/policy (+ /api/mcp/overview for the node-local Observe posture). Summary only; no active rules are reconstructed. The qualification startup snapshot is EVALUATED for decision evidence only - it never enforces, never executes an upstream call, and is never fleet-published.'));
   return card;
 }
 function mcpxPolCandidateCard(){
