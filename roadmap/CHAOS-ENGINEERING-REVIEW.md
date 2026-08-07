@@ -17,6 +17,14 @@ everything else is triaged below with a suggested PR and required tests for foll
 
 ## 0. Revision log
 
+**2026-08-06 — CHAOS-25 sweep (HA sync-loop + scanner-goroutine panic containment).**
+
+Closes two of the three paths CHAOS-24 explicitly left unguarded (§12.6): the **HA standby sync
+loop** and **`internal/yara`'s per-match goroutine**. Both needed the fail-closed analysis §12.2
+demanded rather than a mechanical guard — and the HA one turned out to hold a **split-brain
+hazard in the obvious fix**, in the mirror image of the lease-keepalive case. See §14. The MCP
+runtime listener remains open and is re-scoped there.
+
 **2026-08-04 — CHAOS-24 sweep (background-worker panic containment).**
 
 Re-verified the standing register against current `main`. Several original findings have since
@@ -497,7 +505,10 @@ swallow-and-retry keepalive guard trips the split-brain assertion.
 - **Deliberately still unguarded:** the HA standby/leader sync loops (`ha.go`), the MCP runtime
   listener, and `internal/yara`'s per-match goroutine. Each needs its own fail-closed analysis of
   the kind §12.2 required — they are *not* mechanical, and bundling them would have hidden the
-  lease change in a large diff. Tracked as CHAOS-25.
+  lease change in a large diff. Tracked as CHAOS-25. → **The HA sync loop and the YARA match
+  goroutine are now CLOSED (CHAOS-25, §14)** — the HA one did indeed hold a split-brain hazard in
+  the obvious fix, in the mirror image of §12.2. The MCP runtime listener remains open as
+  **CHAOS-26** (§14.7).
 - The `crashThrottleEvery` (1s per component) flood guard means a tight panic loop reports a
   fraction of its rounds to the SIEM. The unthrottled `culvert_crash_records_total` counter is the
   lossless signal, by design (anti-forensics-DoS trade-off inherited from M1).
@@ -602,3 +613,194 @@ no longer silent:
   admin-plane DoS amplifier on a large audit file. Tracked separately.
 - The counter is process-lifetime and resets on restart, matching `reqlog`. The alert and the
   degraded contract row are the durable signals.
+
+---
+
+## 14. CHAOS-25 — HA sync-loop and scanner-goroutine panic containment (fail-closed)
+
+**Date:** 2026-08-06 · **Closes:** two of the three paths CHAOS-24 deferred in §12.6 (the HA
+standby/leader sync loops, and `internal/yara`'s per-match goroutine). The MCP runtime listener
+stays open — re-scoped in §14.6.
+
+### 14.1 Failure scenario
+
+CHAOS-24 guarded 15 background workers per round and stopped, deliberately, at three paths whose
+containment semantics were not mechanical. Two of them are on the **critical path of an in-line
+appliance** and both process input the operator does not control:
+
+| Path | Input it parses | Consequence of a panic (before this change) |
+|---|---|---|
+| `standbyLoop` → `tick` → `syncFromLeader` → `applyHABundle` | the **leader-supplied HA state bundle** (cluster state, replicated CA PEM + wrapped key, full ConfigSnapshot) | process death on the standby CP — the node that exists to survive the leader's death |
+| `matchRegexWithTimeout`'s match goroutine (`internal/yara`) | **attacker-supplied response bodies** on the SSL-inspected scan path | process death of the gateway, remotely triggerable per request |
+
+The HA bundle is the larger hazard. It is decoded and applied on every 5s tick, so a panic anywhere
+under `applyHABundle` — a nil map, a slice index, a type assertion in the config-apply tree — is
+**deterministic and repeats forever**: crash, restart, re-enter standby, sync, crash. The standby is
+in a crash-loop precisely while its whole reason for existing (being ready when the leader dies) is
+unavailable.
+
+### 14.2 The finding inside the finding: the obvious fix is a split brain (again)
+
+§12.2 found that the reflexive `defer recover()` was *worse than the bug* on the lease keepalive.
+The HA sync loop has the same shape, and then a second trap behind it.
+
+**Trap 1 — goroutine-level containment kills failover silently.** If `standbyLoop` returns on a
+panic, the node keeps `role="standby"` and a live process, but it has stopped replicating **and**
+stopped watching the leader. `failCount` freezes, `onMaxFail` is never reached, and the leader can
+die with nothing left to notice. HA is gone; `/api/cluster/ha` still says `standby`, `sync_fail_count: 0`.
+That is the CHAOS-24 rule (guard the round, never the goroutine) applying unchanged.
+
+**Trap 2 — the natural per-round guard promotes on this node's own fault.** Guard the round and the
+obvious next step is to charge a panicking round as a failed sync, exactly as `ha_lease.go` charges
+a panicking renew round. **Here that is inverted, and unsafe.** The lease keepalive charges a
+panicking round because *failing to confirm* is the fail-closed reading — the round produced no
+evidence that the node still holds authority. In the standby loop the streak drives the opposite
+transition: it **acquires** authority. Three panicking rounds (15s) would auto-promote a standby
+whose only problem is its own parser, against a leader that is alive, healthy, and still serving.
+In legacy (`--ha-auto-failover`, no witness) mode nothing else stops it, so the containment would
+manufacture a **remotely-triggerable split brain** — strictly worse than the crash it replaced,
+because today's crash-loop is at least loud and single-writer.
+
+The rule this PR adopts, stated once:
+
+> **A contained panic is evidence that THIS node is broken, not that the leader is gone.**
+
+So the guard wraps the whole round, which puts the unwind *before* `tick`'s
+`setFail(failCount+1)`: the promotion streak is untouched by construction, and `guardedTick`
+additionally refuses to report loop-exit on a panicking round. Ordering that matters is pinned by
+test, not left to comment. A panic raised *later* — inside `promote()`, after a genuine sync
+failure already advanced the streak — keeps that (correct) increment and just leaves the node a
+standby, retryable next tick.
+
+In **lease mode** the fence is the backstop: a live leader holds the lease, so `Acquire` denies the
+promotion anyway. The rule is still enforced there (`TestChaos25_LeaseModePanicIsAlsoFenced`) as
+defense in depth — the node must not even *attempt* leadership on the strength of its own fault.
+
+### 14.3 What "not counting" costs, and how it is paid for
+
+Suppressing the streak means a permanently panicking standby never escalates on its own. Left
+there, containment would have traded a loud failure for a silent one — the exact class §13 was
+about. It is paid for three ways, all pre-existing planes:
+
+- **Crash plane** — `culvert_crash_records_total{component="ha-standby-sync"}` (and `"ha-promote"`),
+  the system-actor audit entry, the bounded redacted `lastCrash`. No new observability surface.
+- **Status** — `sync_panics` on `HAStatus` → `GET /api/cluster/ha` → a warn-coloured
+  "Sync faults (contained)" row in the HA panel, next to the failure streak it is deliberately
+  absent from.
+- **Alert** — `ha_sync_panic`, fired **once per streak** and re-armed by the next healthy sync, so
+  a later stall is not swallowed by the first. The cumulative counter never resets.
+
+The lease-mode freshness gate composes correctly with no change: a stalled standby's `lastSyncOK`
+ages out, and `leaseAutoPromote` already refuses to auto-promote on stale state while leaving
+`PromoteManually` as the operator break-glass. That is the intended recovery path when the leader
+really is down and this node cannot parse its bundle.
+
+### 14.4 The scanner goroutine
+
+`matchRegexWithTimeout` is a one-shot detached goroutine, not a loop, so there is no "next round" to
+keep alive — the guard covers the whole body. The decision that mattered is what to hand the
+caller: a contained panic yields **no verdict about the content**, which is exactly the epistemic
+state a *timeout* leaves. So it resolves through the same admin-selectable posture
+(`fail_closed` ⇒ block, `fail_open_with_alert` ⇒ allow) rather than defaulting to "clean", and it
+answers **immediately** instead of letting the parent wait out the full timeout — the panic already
+proved the match will never complete, and stalling every scan for the timeout window would turn a
+contained fault into a throughput collapse. The deferred `yaraInflight.Add(-1)` still runs, so
+containment cannot leak the saturation budget into a permanent degradation (pinned by test).
+
+`internal/yara` already imports `obs`, so the panic lands in the same crash pipeline via the
+CHAOS-24 seam. `MatchPanics()` is the local counter; non-zero means some verdicts were decided by
+the posture rather than by the rule, which is a **correctness** signal, not only a liveness one.
+
+### 14.5 What shipped
+
+- `ha.go` — `guardedTick` / `guardedSyncOnce` (per-round, streak-preserving, exit-suppressing),
+  `notePanicRound` / `clearSyncPanicAlert`, `syncPanics` + `SyncPanics` on `HAStatus`, and a
+  `syncFn` seam so a round can be made to panic without standing up a gRPC leader.
+- `ha.go` — `promote()`'s `onPromote` hook (CP gRPC server startup, reached from the sync loop, the
+  planned handoff, **and** the admin `PromoteManually` API) is guarded and a panic is treated
+  exactly like the error it already handles: reset the once-guard, stay standby, stay retryable.
+- `internal/yara/yara.go` — per-match containment resolving through the on-timeout posture, plus
+  `MatchPanics()` and the `yaraMatchFn` fault-injection seam.
+- `internal/alerts/store.go`, `static/index.html` — the `ha_sync_panic` event and the contained-fault
+  status row (GUI parity).
+
+### 14.6 Tests
+
+| Gate | Test |
+|------|------|
+| **Split-brain gate** — panicking rounds never promote, streak untouched | `TestChaos25_PanickingRoundsDoNotPromote` |
+| Fence-mode defense in depth — no promote attempt even with a free lease | `TestChaos25_LeaseModePanicIsAlsoFenced` |
+| Not trigger-happy — genuine leader silence still fails over | `TestChaos25_GenuineFailuresStillPromote` |
+| Suppression is not a latch — panics then a real outage still fails over | `TestChaos25_PanicDoesNotMaskARealOutage` |
+| Round contained, loop survives, attributed in the crash plane | `TestChaos25_PanickingRoundContained` |
+| Startup try (cold local state, largest bundle) contained | `TestChaos25_ImmediateSyncPanicIsContained` |
+| Fire-once alert re-arms; cumulative counter does not reset | `TestChaos25_SuccessRearmsThePanicAlert` |
+| `onPromote` panic ⇒ stays standby, guard reset, retry succeeds | `TestChaos25_PromotePanicStaysStandby` |
+| Failed/panicking promote keeps the loop alive (see §14.8) | `TestChaos25_FailedPromoteKeepsTheLoopAlive` |
+| Scanner: contained panic fails CLOSED by default | `TestChaos25_MatchPanic_FailsClosedByDefault` |
+| Scanner: honours the operator's fail-open posture | `TestChaos25_MatchPanic_HonoursFailOpenPosture` |
+| Scanner: answers immediately, does not wait out the timeout | `TestChaos25_MatchPanic_AnswersImmediately` |
+| Scanner: containment does not leak the saturation budget | `TestChaos25_MatchPanic_ReleasesTheInflightSlot` |
+| Scanner: healthy matching byte-identical, charges no panic | `TestChaos25_HealthyMatchIsUnchanged` |
+
+Both regression gates were verified to **fail without the fix**. Substituting the naive
+count-the-panic-as-a-failure guard trips the split-brain assertion at round 2
+(`contained panic promoted the standby — split brain against a live leader`), and removing the
+scanner guard reproduces process death (`panic: simulated fault inside the regex match`, test
+binary terminated).
+
+### 14.7 Residual risk
+
+- **Containment is still not repair.** A standby that panics every tick is contained, counted, and
+  alerted, but replicates nothing. Its recovery path is an operator promoting it manually (if the
+  leader is genuinely down) or fixing the fault. The alert says so explicitly.
+- **Suppressing the streak is a deliberate availability trade.** If a standby's apply path breaks
+  *and* the leader dies during the same window, no automatic failover happens. That is the intended
+  ordering: an un-fenced promotion by a node that cannot parse the cluster's state is the worse
+  outcome, and manual promotion remains one API call away.
+- **A failed or panicking `promote()` leaves an unkept lease grant.** Pre-existing and already
+  documented on the error branch (it expires after its TTL). Worth noting precisely: `WriteAllowed()`
+  keys on the grant, not the role, so such a node reports write authority on `/healthz` and
+  `diagnose` for the rest of the window. It is **cosmetic, not an authority leak** —
+  `haIssuanceAllowed` gates on `Role == "leader"` first, so a standby holding a stale grant issues
+  nothing, and the lease's exclusivity means no other node can promote during that window either.
+  Zeroing the local epoch on a failed promote would tighten the reporting; it touches fence
+  semantics and is deliberately **not** bundled into a panic-containment change (§12.2's own lesson).
+- **Still unguarded: the MCP runtime listener** (`internal/mcp/runtime`). Left open on purpose: it
+  is disabled-by-default with a different blast radius (its own listener, not the SWG request path),
+  it spans 25 subpackages, and ADR-0024's rollout ladder means "contain and continue" has to be
+  reconciled with the Observe/Shadow/Canary semantics before a guard is correct. Tracked as
+  **CHAOS-26**.
+- The `crashThrottleEvery` (1s per component) flood guard still means a tight panic loop reports a
+  fraction of its rounds to the SIEM; the unthrottled counter is the lossless signal (inherited
+  from M1).
+
+### 14.8 Review follow-up — the silent stall one level up
+
+External review of the first cut (Codex, PR #1066) found the containment could still be defeated
+by the caller. `onMaxFail`'s legacy branch reported loop-exit **unconditionally** after calling
+`promote()`:
+
+```go
+if s.h.autoFailoverEnabled() {
+    s.h.promote("leader unreachable")
+    return true          // <- regardless of whether promotion happened
+}
+```
+
+`promote()` is not infallible, and now has two ways to decline: `onPromote` can return an error
+(pre-existing) or panic and be contained (added by §14.5). Both reset the once-guard and leave the
+node a **standby** — and `return true` then told `standbyLoop` to exit for good. The node stopped
+replicating **and** stopped watching the leader while still reporting `role="standby"`: exactly the
+Trap-1 silent stall of §14.2, reached one level above the guard that prevents it. The reset
+once-guard was never retried, so recovery required an operator restart.
+
+The lease branch immediately above already returns `leaseAutoPromote()` (→ `IsLeader()`), so the
+fix is to make the legacy branch report the same fact: `return s.h.IsLeader()`. The loop then keeps
+ticking and the next round retries the promotion, matching lease mode.
+
+Worth recording that this was **pre-existing** — an `onPromote` error alone (a CP gRPC port already
+in use, say) permanently ended a legacy standby's sync loop before this PR. The panic guard added a
+second way in, and the review surfaced both. `TestChaos25_FailedPromoteKeepsTheLoopAlive` drives an
+error, then a contained panic, then a success, and fails against the old code at round 2
+(`loop exited before a promotion succeeded`).
