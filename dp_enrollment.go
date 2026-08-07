@@ -552,10 +552,6 @@ func resetDPCertExpiryAlert() {
 	clearDPCertRenewalFailure() // CHAOS-09: /ready node_cert row recovers too
 }
 
-// forceRenewDPCert renews the DP cert unconditionally (triggered by CA rotation).
-func forceRenewDPCert(ctx context.Context, client *DataPlaneClient, nodeID, certFile, keyFile, caFile string) error {
-	return renewDPCert(ctx, client, nodeID, certFile, keyFile, caFile, "CA rotation")
-}
 
 // tryRenewDPCert renews the DP cert if it expires within 30 days.
 func tryRenewDPCert(ctx context.Context, client *DataPlaneClient, nodeID, certFile, keyFile, caFile string) error {
