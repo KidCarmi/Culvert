@@ -224,7 +224,7 @@ func StripHostPort(host string) string {
 // than a walk of the whole hostname. net.SplitHostPort locates it the same way,
 // so this costs one already-warm pass. No allocation, no tables.
 func hasHostPortSyntax(host string) bool {
-	if len(host) == 0 {
+	if host == "" {
 		return false
 	}
 	return strings.LastIndexByte(host, ':') >= 0 ||
