@@ -39,7 +39,7 @@ only gained two additive cross-reference lines.
 **Two new findings, both on code that shipped in this window's MCP Qualification feature (T-38, T-39).**
 **T-38 (High)** is the most concrete collision this program has found to date: `GET /api/mcp/overview`
 returns the identical `catalog.ReviewRequired` tool count under **two different field names in the same
-JSON response** — `health.drifted_tools` (pre-existing `adminapi.CapabilityHealth` field, tested, now wired
+JSON response** — `health.gateway.drifted_tools` (pre-existing `adminapi.CapabilityHealth` field, tested, now wired
 to real data for the first time this window) and `inventory.review_required_tools` (brand-new
 `InventoryStatus` field, this window). The same author, same file (`mcp_inventory.go`), same window, names
 one local accumulator `drifted` and the sibling struct field `ReviewRequiredTools` — because "drifted" was
@@ -52,7 +52,7 @@ bootstrap fleet — landing in the same window from two independent PR streams t
 each other; the qualification-inventory doc's own text already needs a footnote disclaiming the collision.
 
 **Neither finding clears this program's same-day-fix bar.** T-38 looks superficially cheap (it reads like
-T-35 — a same-file, same-window naming slip) but `health.drifted_tools` is not new: it is a pre-existing,
+T-35 — a same-file, same-window naming slip) but `health.gateway.drifted_tools` is not new: it is a pre-existing,
 tested REST API field (`ui_mcp_ux_e2e_test.go` asserts the literal string, introduced in `cf5e0c9e`, well
 before this window) now carrying real data for the first time. Per this program's standing compatibility
 bar for live, externally-visible wire fields with an existing test assertion (the same bar T-31/T-34/T-37
@@ -130,10 +130,13 @@ different screens, and never adjacent in the GUI today — noted as a soft/no-ac
   fingerprint and now needs human review — `catalog.ReviewRequired` (`internal/mcp/catalog/catalog.go:23`,
   `:42` → `"review_required"`).
 - **Current names / collision:** `apiMCPOverview` (`ui_mcp.go:232-256`) returns one JSON object carrying
-  BOTH:
-  - `"health"` → `m.svc.Health.Snapshot()`, a pre-existing `adminapi.CapabilityHealth` struct whose
-    `DriftedTools int \`json:"drifted_tools"\`` field (`internal/mcp/adminapi/health.go:56`) this window's
-    new `mcpInventoryCounts.Counts()` (`mcp_inventory.go:135-151`) populates for the first time with real
+  BOTH (and `apiMCPHealth`, `ui_mcp.go:258-267`, serves the `"health"` side directly at `GET /api/mcp/health`
+  under the same field name):
+  - `"health"` → `m.svc.Health.Snapshot()`, a `HealthView` (`internal/mcp/adminapi/health.go:75-80`) whose
+    `Gateway CapabilityHealth \`json:"gateway"\`` field nests `DriftedTools int \`json:"drifted_tools"\``
+    (`internal/mcp/adminapi/health.go:56`) — the wire path is `health.gateway.drifted_tools`, confirmed
+    against the pinned fixture in `ui_mcp_ux_e2e_test.go:30-33`. This window's new
+    `mcpInventoryCounts.Counts()` (`mcp_inventory.go:135-151`) populates it for the first time with real
     data — the local accumulator is literally named `drifted` (line 147: `case catalog.ReviewRequired:
     drifted++`), inherited from the pre-existing `adminapi.InventoryCounts` interface signature
     (`internal/mcp/adminapi/health.go:88`, `Counts(capability string) (servers, quarantined, drifted int)`)
@@ -153,29 +156,34 @@ different screens, and never adjacent in the GUI today — noted as a soft/no-ac
   the *same API response* naming the identical undelying count two different things in sibling top-level
   keys, authored by the same change in the same file. An admin or a support engineer building tooling
   against `/api/mcp/overview` (or just reading it in a browser devtools tab while triaging MCP tool health)
-  has to already know these are the same number to correlate `health.drifted_tools` with
+  has to already know these are the same number to correlate `health.gateway.drifted_tools` with
   `inventory.review_required_tools` — nothing in the response says so. "review_required" is unambiguously
   the codebase's established name for this state (five independent sites predate or land alongside this
   window using it); "drifted" is the outlier, present only in the older `CapabilityHealth` field, its one
   GUI label, and the test that pins it.
-- **Why not fixed this pass:** `health.drifted_tools` is not new. It is a pre-existing, tested REST API
-  field — `ui_mcp_ux_e2e_test.go:32` asserts the literal string `"drifted_tools":2`, introduced in `cf5e0c9e`
-  well before this window's `3d13f7a` baseline. This window is what makes the field carry real (non-zero)
-  data for the first time, not what introduced the name. Per this program's standing compatibility bar for
-  live, externally-visible wire fields with an existing test assertion (the same bar T-31, T-34, and T-37
-  were held to), a rename needs the field, its one GUI label (`static/index.html:19951`), and the one test
-  assertion updated together in a dedicated change — not folded into a governance pass. (`drifted_tools`
-  also does not appear in `api/openapi/openapi.json`/`.yaml` at all — the field predates OpenAPI-spec
-  coverage for this endpoint, a smaller, related documentation gap worth closing in the same follow-up.)
-- **Recommended canonical name / fix:** rename `CapabilityHealth.DriftedTools` → `ReviewRequiredTools` and
-  its JSON tag `drifted_tools` → `review_required_tools` (matching the newer, more consistent name — not
-  the reverse) in `internal/mcp/adminapi/health.go`; update the `drifted` local variable/switch case in
-  `mcp_inventory.go:135-151` to match; update `static/index.html:19951`'s GUI label "Drifted tools" →
-  "Review-required tools"; update `ui_mcp_ux_e2e_test.go:32`'s literal fixture string in the same change;
-  add the field to the OpenAPI spec while touching it.
+- **Why not fixed this pass:** `health.gateway.drifted_tools` is not new. It is a pre-existing, tested REST
+  API field, live on both `GET /api/mcp/overview` and `GET /api/mcp/health` — `ui_mcp_ux_e2e_test.go:32`
+  asserts the literal string `"drifted_tools":2`, introduced in `cf5e0c9e` well before this window's
+  `3d13f7a` baseline. This window is what makes the field carry real (non-zero) data for the first time,
+  not what introduced the name. Per this program's standing compatibility bar for live, externally-visible
+  wire fields (the same bar T-31, T-34, and T-37 were held to), an outright rename is not the right
+  same-day move even setting the test aside: `CapabilityHealth` is a stable, already-shipped response shape
+  with no documented consumer inventory, so a straight field removal risks breaking any external tooling
+  built against it, however unlikely — the same reasoning this report already applies to T-29/T-30's
+  YAML/wire aliasing recommendations.
+- **Recommended canonical name / fix:** dual-emit rather than rename: keep `CapabilityHealth.DriftedTools`/
+  `drifted_tools` (`internal/mcp/adminapi/health.go:56`) for wire compatibility and add a second field
+  `ReviewRequiredTools int \`json:"review_required_tools"\`` alongside it, populated from the same
+  `mcpInventoryCounts.Counts()` value (`mcp_inventory.go:135-151`) — mirroring what
+  `mcp_inventory.go`'s own `InventoryStatus.ReviewRequiredTools` already does one struct over. Update
+  `static/index.html:19951`'s GUI label "Drifted tools" → "Review-required tools" to read the new field
+  (cosmetic, no wire dependency) and add both fields to the OpenAPI spec, which currently documents neither.
+  Deprecate `drifted_tools` in a doc comment; a hard removal, if ever justified, is a separate,
+  compatibility-reviewed change — not this program's call to make unilaterally.
 - **Priority:** High (a live, wired, admin-visible collision inside a single API response an operator reads
-  directly). **Migration risk:** Low (mechanical rename, one test file to update, no external API consumers
-  documented — the field isn't even in the OpenAPI spec yet). **Est. PR size:** Small.
+  directly, present on two endpoints). **Migration risk:** Low for the dual-emit addition itself (purely
+  additive, no existing field or test touched); a future removal of `drifted_tools` would be a separate,
+  higher-risk, dedicated compatibility decision. **Est. PR size:** Small.
 
 ### T-39 — "Qualification" now names two unrelated concepts inside the same `mcp.gateway.*` config namespace and `/api/mcp/*` admin surface (new — queued, not fixed)
 
@@ -272,7 +280,7 @@ different screens, and never adjacent in the GUI today — noted as a soft/no-ac
 
 | Priority | Finding | Action | Migration risk | Est. PR size |
 |---|---|---|---|---|
-| High | T-38 (new) | Rename `CapabilityHealth.DriftedTools`/`drifted_tools` → `ReviewRequiredTools`/`review_required_tools`; update `mcp_inventory.go`'s `drifted` accumulator, the GUI label, `ui_mcp_ux_e2e_test.go`'s literal, and add the field to the OpenAPI spec | Low | Small |
+| High | T-38 (new) | Dual-emit `CapabilityHealth.ReviewRequiredTools`/`review_required_tools` alongside the existing `DriftedTools`/`drifted_tools` (keep the old field for wire compatibility); update the GUI label; add both fields to the OpenAPI spec | Low (additive) | Small |
 | Medium | T-18 (carried over) | Rename `internal/sealbox.Seal`/`Open` to name the trust property; relabel GUI; rename the audit-event string | Low | Small-Medium |
 | Medium | T-16 (carried over) | Renumber the Supportability-track's colliding ADRs (0008–0011 → 0019–0022) | Low (docs only) | Medium |
 | Medium | T-21 + T-32 (carried pairing) | Rename Cluster panel's `cp_version` and F3b's `snapshot_sha256` to unambiguous, non-colliding names | Low | Small |
