@@ -153,10 +153,15 @@ func TestBenchGate_AuthResolveAllocs(t *testing.T) {
 				rules, allocs, maxAllocsAccessOnly)
 		}
 	}
-	// (b) fixed 8-auth-rule tranche across growing access rulebases: measured 33
-	// allocs/op (8 rules × ParseCIDR + one client-IP parse), CONSTANT in access
-	// count. Bound adds headroom while still failing an O(access-rules) return.
-	const maxAllocsWithAuth = 48
+	// (b) fixed 8-auth-rule tranche across growing access rulebases. This was 33
+	// allocs/op (8 rules × 4 for net.ParseCIDR + one client-IP parse) until the
+	// subject-CIDR precompute (precomputeSubjectNets, run by sortLocked) moved
+	// the parse to publication time; the scan now allocates ONLY the single
+	// per-request client-IP parse — measured 1 alloc/op, constant in BOTH access
+	// and auth rule count. The bound keeps a little headroom but is far below
+	// the per-rule shape: 8 auth rules re-parsing their CIDRs would land at ~33
+	// and fail here immediately.
+	const maxAllocsWithAuth = 4
 	for _, rules := range []int{10, 1000, 10000} {
 		ps := buildAuthResolveStore(rules, benchAuthRules(8)...)
 		res := testing.Benchmark(func(b *testing.B) {
@@ -170,9 +175,50 @@ func TestBenchGate_AuthResolveAllocs(t *testing.T) {
 			rules, allocs, maxAllocsWithAuth, res.NsPerOp())
 		if allocs > maxAllocsWithAuth {
 			t.Errorf("REGRESSION: auth resolve over %d access + 8 auth rules allocates %d/op, exceeds constant bound %d — "+
-				"allocation is scaling with rulebase size again (List() clone, per-rule host normalization, or per-rule IP parse)",
+				"allocation is scaling with rulebase size again (List() clone, per-rule host normalization, or per-rule IP parse), "+
+				"or the subject-CIDR precompute (precomputeSubjectNets) is no longer reaching the resolver",
 				rules, allocs, maxAllocsWithAuth)
 		}
+	}
+}
+
+// TestBenchGate_AuthScheduleTZAllocs locks the Stage-1 schedule gate onto the
+// process-wide timezone cache. time.LoadLocation is NOT cached by the stdlib —
+// it re-reads and re-parses the tzdata file on every call (~8.6 µs and ~8.6 KB
+// per call measured on CI hardware). authScheduleParseable runs per scheduled
+// auth rule per request, so calling it directly put a disk read and 8.6 KB of
+// garbage on the proxy hot path for every scheduled rule of every request.
+// Stage-2 fixed the identical bug; this pins the Stage-1 half.
+//
+// The gate is allocation-keyed (hardware-independent): the cached resolution is
+// 0 allocs/op, the uncached one is 13.
+func TestBenchGate_AuthScheduleTZAllocs(t *testing.T) {
+	const maxAllocs = 2 // measured 0; uncached time.LoadLocation is 13
+	sched := &PolicySchedule{
+		Timezone:  "America/New_York",
+		Days:      []string{"Mon", "Tue", "Wed", "Thu", "Fri"},
+		TimeStart: "09:00",
+		TimeEnd:   "17:00",
+	}
+	// Warm the cache once so the benchmark measures the steady state (the first
+	// resolution legitimately reads tzdata; every later one must not).
+	if !authScheduleParseable(sched) {
+		t.Fatalf("fixture timezone %q did not resolve", sched.Timezone)
+	}
+	res := testing.Benchmark(func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_ = authScheduleParseable(sched)
+		}
+	})
+	allocs := res.AllocsPerOp()
+	t.Logf("authScheduleParseable tz=%s: %d allocs/op (bound %d), %d ns/op",
+		sched.Timezone, allocs, maxAllocs, res.NsPerOp())
+	if allocs > maxAllocs {
+		t.Errorf("REGRESSION: authScheduleParseable allocates %d/op, exceeds bound %d — "+
+			"the Stage-1 schedule gate is calling time.LoadLocation directly again instead of "+
+			"resolving through scheduleLocationResolved, putting a tzdata disk read on the request path",
+			allocs, maxAllocs)
 	}
 }
 
