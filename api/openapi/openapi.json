@@ -185,6 +185,14 @@
       "AlertHistory": {
         "additionalProperties": false,
         "properties": {
+          "dedup_evictions_total": {
+            "description": "Dedup keys evicted at the cap. Non-zero means the alert key space is being flooded with unique details, so duplicate suppression is degraded — alerts may deliver more than once per window, never fewer.",
+            "type": "integer"
+          },
+          "dedup_tracked": {
+            "description": "Alert dedup keys currently held inside the 30s suppression window (bounded).",
+            "type": "integer"
+          },
           "deliveries": {
             "items": {
               "additionalProperties": true,
@@ -210,7 +218,9 @@
           "deliveries",
           "retry_queue_depth",
           "retry_exhausted_total",
-          "retry_dropped_total"
+          "retry_dropped_total",
+          "dedup_tracked",
+          "dedup_evictions_total"
         ],
         "type": "object"
       },

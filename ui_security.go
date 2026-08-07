@@ -156,6 +156,12 @@ func apiAlertsDeliveryHist(w http.ResponseWriter, r *http.Request) {
 		"retry_queue_depth":     alerts.RetryQueueDepth(),
 		"retry_exhausted_total": alerts.RetryExhaustedTotal(),
 		"retry_dropped_total":   alerts.RetryDroppedTotal(),
+		// CHAOS-27: dedup-window health. Evictions mean the alert key space is
+		// being flooded with unique details, so duplicate suppression is
+		// degraded (more deliveries, never fewer) — the operator-visible
+		// signature of a scanning wave reaching the alert plane.
+		"dedup_tracked":         globalAlertStore.DedupTracked(),
+		"dedup_evictions_total": alerts.DedupEvictionsTotal(),
 	})
 }
 

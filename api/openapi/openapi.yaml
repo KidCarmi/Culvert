@@ -1401,13 +1401,15 @@ components:
         host: { type: string }
     AlertHistory:
       type: object
-      required: [deliveries, retry_queue_depth, retry_exhausted_total, retry_dropped_total]
+      required: [deliveries, retry_queue_depth, retry_exhausted_total, retry_dropped_total, dedup_tracked, dedup_evictions_total]
       additionalProperties: false
       properties:
         deliveries: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
         retry_queue_depth: { type: integer, description: "Failed webhook deliveries currently queued for retry." }
         retry_exhausted_total: { type: integer, description: "Deliveries that used up all retry attempts and were permanently dropped." }
         retry_dropped_total: { type: integer, description: "Deliveries dropped because the retry queue was at capacity." }
+        dedup_tracked: { type: integer, description: "Alert dedup keys currently held inside the 30s suppression window (bounded)." }
+        dedup_evictions_total: { type: integer, description: "Dedup keys evicted at the cap. Non-zero means the alert key space is being flooded with unique details, so duplicate suppression is degraded — alerts may deliver more than once per window, never fewer." }
     PACExceptionsList:
       type: object
       required: [exceptions]

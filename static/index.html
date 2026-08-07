@@ -10455,11 +10455,15 @@ async function loadDeliveryHistory() {
     const queued = d.retry_queue_depth || 0;
     const exhausted = d.retry_exhausted_total || 0;
     const dropped = d.retry_dropped_total || 0;
+    const dedupEvicted = d.dedup_evictions_total || 0;
     const degraded = exhausted > 0 || dropped > 0;
-    health.style.color = degraded ? 'var(--red)' : 'var(--muted)';
+    health.style.color = degraded ? 'var(--red)' : (dedupEvicted ? 'var(--amber)' : 'var(--muted)');
     health.textContent = `Retry queue: ${queued} pending` +
       (exhausted ? ` · ${exhausted} gave up after max retries` : '') +
-      (dropped ? ` · ${dropped} dropped (queue full)` : '');
+      (dropped ? ` · ${dropped} dropped (queue full)` : '') +
+      // CHAOS-27: evictions mean unique-detail alerts are arriving faster than
+      // the 30s window can hold, so duplicates may deliver more than once.
+      (dedupEvicted ? ` · dedup window saturated (${dedupEvicted} keys evicted, duplicate suppression degraded)` : '');
     const tbody = document.getElementById('delivery-hist-tbody');
     const items = d.deliveries || [];
     if (!items.length) { tbody.innerHTML = '<tr><td colspan="6" style="color:var(--muted)">No deliveries yet</td></tr>'; return; }

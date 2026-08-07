@@ -17,6 +17,21 @@ everything else is triaged below with a suggested PR and required tests for foll
 
 ## 0. Revision log
 
+**2026-08-07 — CHAOS-27 sweep (the alert plane under an alert storm).**
+
+Row **WK-10** marked webhook delivery resilient, and every bound it cites is real — but all of
+them bound *delivery*, and the two defects found here are in front of delivery. (1) The delivery
+client was built **per attempt**, so every delivered alert abandoned an `http.Transport` holding
+a keep-alive socket with a zero-value `IdleConnTimeout` (= never expires): one FD + two
+goroutines leaked per alert, until the *receiver* closed. (2) The Q17 dedup map was unbounded on
+an **attacker-controlled key space** (the key embeds the requested host) and fully rescanned
+under a process-wide mutex on **every** dispatch — 230,603 ns/op of mutex-held work per alert at
+the flood steady state, growing. Both amplify with the security controls working (more blocks →
+more alerts), so the alerting plane degraded the gateway hardest while it was under attack, and
+FS-1's terminal state is the *proxy* plane running out of descriptors. Both fixed with gates
+proven to fail against the pre-fix code. See §15 and
+`docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-07.md`.
+
 **2026-08-06 — CHAOS-25 sweep (HA sync-loop + scanner-goroutine panic containment).**
 
 Closes two of the three paths CHAOS-24 explicitly left unguarded (§12.6): the **HA standby sync
@@ -185,7 +200,9 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | WK-7 | Category DB (Badger) corruption: read errors → "not found" (fail-open for category-block, no crash); value-log truncate/replay on restart. | ✓ | — | `internal/catdb/catdb.go:37-50,84-100` |
 | WK-8 | **Background workers have NO panic recovery.** `threatfeed.Start`, `feedsync.Start`, blocklistfeed scheduler, `startCDRHealthPoller`, `startAlertRetryLoop` all run their loop body with no `recover()`. One panic (bad feed line, nil-map deref, a `.(time.Time)` assertion) **terminates the whole in-line proxy.** | GAP → **CLOSED (CHAOS-24)** | **C** | was: `threatfeed.go:131-145`, `feedsync.go:171-187`, `cdr_health.go:65-80`, `alerts.go:46`→`store.go:511`. Now guarded per ROUND — see §12 |
 | WK-9 | Syslog on the hot path: `writeMsg` holds `s.mu` and does a **blocking 5s dial** while locked; TCP writes have **no write deadline** → a slow SIEM can stall proxy goroutines. UDP is non-blocking (acceptable). | GAP → **CLOSED** (async drain goroutine owns the socket, `internal/syslog`) | M | `internal/syslog/syslog.go:117-146,68` |
-| WK-10 | Webhook alert delivery: never blocks the producer, 30s dedup, bounded semaphore (10) → enqueue not spawn, bounded retry (3× exp backoff), 500-cap queue drop-on-full, SSRF-guarded, atomic persist. | ✓ | — | `internal/alerts/store.go:298-343,392-500` |
+| WK-10 | Webhook alert delivery: never blocks the producer, 30s dedup, bounded semaphore (10) → enqueue not spawn, bounded retry (3× exp backoff), 500-cap queue drop-on-full, SSRF-guarded, atomic persist. | ✓ **for delivery**; the two bounds MISSING in front of delivery are CHAOS-27 → **CLOSED** (§15) | — | `internal/alerts/store.go` |
+| WK-11 | Alert **socket** cost: the delivery client was built per attempt, abandoning an `http.Transport` whose zero-value `IdleConnTimeout` never expires — one FD + two goroutines leaked per delivered alert. The semaphore bounds concurrent deliveries, not cumulative sockets. Terminal state: `accept: too many open files` in the PROXY plane. | GAP → **CLOSED** (CHAOS-27, shared pooled `deliveryClient`) | **H** | was: `internal/alerts/store.go` `deliverAttempt`; see §15 |
+| WK-12 | Alert **dedup bookkeeping**: unbounded map on an attacker-controlled key space (key embeds the requested host, same input `topHosts` is capped for), rescanned `O(n)` under a process-wide mutex on every dispatch (230,603 ns/op at the flood steady state, growing). Dedup runs *before* the semaphore and the retry queue, so neither bounds it. | GAP → **CLOSED** (CHAOS-27, 4096 cap + amortised prune + eviction counter) | **H** | was: `internal/alerts/store.go` `dedupSuppressed`; see §15 |
 | WK-11 | SSE slow client: non-blocking `select … default → close+evict`, 256-client cap, runs off the request path. | ✓ | — | `internal/sse/sse.go:66-78,46` |
 | WK-12 | YARA compile failure loads remaining rules (never disables engine); regex timeout + saturation cap with admin-selectable fail-closed/open posture + alerts. Residual: abandoned regex goroutines are counted but never cancelled (memory held until they finish). | ✓ (+leak caveat) | L/M | `internal/yara/yara.go:98-130,584-602,540` |
 | WK-13 | Ticker loops have **no jitter** + immediate sync-on-boot → fleet-wide thundering herd against public feeds (URLhaus/OpenPhish/NethServer mirror) on rollout and every interval. | GAP | M | `threatfeed.go:132-135`, `feedsync.go:173-176`, blocklistfeed 60s / cdr_health 15s |
@@ -804,3 +821,129 @@ in use, say) permanently ended a legacy standby's sync loop before this PR. The 
 second way in, and the review surfaced both. `TestChaos25_FailedPromoteKeepsTheLoopAlive` drives an
 error, then a contained panic, then a success, and fails against the old code at round 2
 (`loop exited before a promotion succeeded`).
+
+---
+
+## 15. CHAOS-27 — The alert plane under an alert storm
+
+**Date:** 2026-08-07 · **Closes:** WK-11, WK-12 · **Detail:**
+`docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-07.md`
+
+### 15.1 The shape of the miss
+
+WK-10 is not wrong. Webhook *delivery* is bounded four different ways — a 10-slot concurrency
+semaphore, a 3-attempt retry with exponential backoff, a 500-cap drop-on-full retry queue, and
+SSRF-guarded egress. What this pass asked is a different question: **what does the alert
+subsystem cost the appliance when the thing it reports on is happening at volume?**
+
+Two costs sat *in front of* every one of those bounds, so none of them applied.
+
+### 15.2 WK-11 — one leaked FD + two goroutines per delivered alert
+
+`deliverAttempt` constructed its client, and with it a fresh `http.Transport`, per attempt. On
+success the keep-alive connection went back into *that* Transport's idle pool — a pool nothing
+holds a reference to afterwards, that net/http does not finalize, and whose **zero-value
+`IdleConnTimeout` means "never expire"** (unlike `http.DefaultTransport`, which sets 90s). The
+`persistConn` read/write goroutines keep the Transport and the socket alive, so the connection
+survives until the **receiver** closes it. Culvert had no timer that would ever reclaim it.
+
+`webhookSem` does not bound this: it caps deliveries *in flight* (10), and says nothing about
+the sockets those slots opened over the preceding hour.
+
+The blast radius crosses planes. File descriptors are a process limit, so the alerting
+subsystem exhausts the descriptors the **proxy** needs to `accept(2)`. A subsystem whose only
+job is to report trouble becomes the cause of a data-plane outage, and the visible symptom
+(proxy refusing connections) points the operator at the wrong subsystem.
+
+Fixed with one shared pooled `deliveryClient` (`MaxIdleConns: 32`, `MaxIdleConnsPerHost: 4`,
+`IdleConnTimeout: 90s`), matching the pooled-client idiom already used in
+`internal/blocklistfeed` and `internal/otlp`. Per-attempt deadlines are unchanged.
+
+**Reuse does not weaken the SSRF guard.** `ssrf.SafeDialContext` runs on every *dial*, and a
+pooled connection is by definition one to an address that already passed `ssrf.Control`
+immediately before `connect(2)`; reuse cannot reach an address that was never validated. What
+it extends is how long a validated-then-rebound host stays reachable on an open socket —
+bounded by `IdleConnTimeout`, and strictly better than the pre-fix state where an abandoned
+pool's socket had *no* timeout at all.
+
+### 15.3 WK-12 — unbounded dedup map, rescanned per dispatch
+
+The Q17 dedup key is `event + ":" + detail`, and the request-path producers
+(`threat_detected`, `policy_block`) put the **requested host** in `Detail`. So a scan across
+50,000 hostnames produces 50,000 distinct keys that the window cannot suppress *by
+construction* — the same attacker-controlled input that `topHosts` (store.go) is already
+hard-capped at 10k for, with the same memory-DoS reasoning, unguarded here.
+
+Worse, the expiry scan ran on **every** dispatch, `O(len(map))`, under the process-wide
+`dedupMu`. Producers reach `Dispatch` via `go fireAlert(...)`, so a slow critical section does
+not stall the request path directly — it piles up *goroutines* waiting on the mutex instead.
+
+Measured at the flood steady state (`BenchmarkDedupSuppressedUnderFlood`, 4-core):
+**230,603 ns/op → 745 ns/op**, ≈310×, and the pre-fix number *grows with the map* while the
+post-fix number is flat. 0.23 ms of mutex-held work per alert is ~23% of a core serialized at
+only 100 alerts/s.
+
+Fixed with a 4096-key hard cap plus an amortised prune. The two costs are deliberately kept
+apart: the `O(len)` expiry scan runs at most once per 256 inserts (`pruneExpiredLocked`), while
+the cap is checked every insert but costs `O(entries over cap)` — one deletion at steady state
+(`evictOverCapLocked`). Coupling the cap to the scan would have fixed memory while leaving the
+CPU failure mode fully intact.
+
+**Eviction fails toward MORE alerts, never fewer.** Dropping a live key costs at most one
+duplicate delivery of an alert already firing, still bounded by the semaphore and the retry
+queue. Silencing a real security alert to save memory is not on the table for a security
+control.
+
+### 15.4 The 2026-07-26 residual, revisited
+
+That review already saw this trigger — a producer emitting unique `Detail` text per request —
+and accepted it because *"bounded by the store's 500-cap queue and 10-slot delivery
+semaphore."* That reasoning was correct about **delivery** and silently assumed the
+bookkeeping in front of delivery inherited the same bounds. It did not. The note still stands
+for delivery fan-out; the cost of the dedup pass is now bounded too, and counted.
+
+### 15.5 Observability
+
+Loss must not be silent: `dedup_evictions_total` + `dedup_tracked` on
+`GET /api/alerts/webhooks/history`, `culvert_alert_dedup_evictions_total` (counter) +
+`culvert_alert_dedup_tracked` (gauge) on `/metrics`, and an amber "dedup window saturated"
+state on the webhook health line in Settings. Non-zero evictions are themselves a useful
+signal: they are the signature of a scanning wave reaching the alert plane. OpenAPI
+`AlertHistory` extended and the bundle regenerated.
+
+WK-11 gets no counter by design — the leak is gone, and a gauge for a state that can no longer
+occur is noise.
+
+### 15.6 Regression gates (all verified to FAIL against the pre-fix code)
+
+| Gate | Property |
+|---|---|
+| `TestChaos27_DeliveryReusesConnections` | N sequential deliveries open ≤2 sockets (pre-fix: 8 for 8) |
+| `TestChaos27_DedupMapIsBounded` | 3× cap unique keys leave the map at ≤ cap (pre-fix: 12288), evictions counted |
+| `TestChaos27_DedupPruneIsAmortised` | scans ≤ inserts/256 + 1 — the CPU half, invisible to the memory gate |
+| `TestChaos27_DedupStillSuppressesDuplicates` | Q17 semantics intact |
+| `TestChaos27_DedupPrunesExpiredEntries` | a key past `dedupTTL` fires again — the cap never silences permanently |
+
+The connection-reuse gate builds its client through the **production constructor**
+(`newDeliveryTransport`) with a plain dialer substituted, because `ssrf.SafeDialContext`
+correctly refuses the loopback address an `httptest.Server` listens on. The pooling
+configuration under test is production's; only the dial target differs.
+
+### 15.7 Residual risk
+
+- `maxDedupEntries` / `dedupPruneEvery` are compile-time constants (the `topHosts` precedent).
+  Making them tunable would add a config surface, a durability row and a CP→DP question for a
+  value nobody has had cause to change. Deliberate deferral.
+- Eviction order is random (Go map iteration), not oldest-first. Under a flood every live entry
+  is inside the same 30s window, so ordering buys nothing for its cost.
+- Dedup is still keyed on `event:detail`, so a producer with unbounded `Detail` cardinality
+  still defeats *suppression* by design. The cap bounds the **cost** of that, not the
+  behaviour — now with an eviction counter that makes it visible.
+- Other per-call `http.Transport` sites were audited: `auth_oidc_flow.go` (once per provider
+  construction), `auth_saml.go` (metadata fetch), `internal/supportupload` (per upload), and
+  `internal/blocklistfeed` (per fetch, but with a 90s `IdleConnTimeout`, so it self-heals).
+  `internal/upstream`'s health check sets `DisableKeepAlives: true` and pools nothing. None is
+  on an attacker-driven rate path, so none is a WK-11-class leak; the blocklistfeed shape is
+  the one worth converging on the shared-client idiom opportunistically.
+- `webhookSem` is package-global, so all Stores in a process share the 10 slots. Production has
+  one Store; noted, not a defect.
