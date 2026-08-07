@@ -41,7 +41,7 @@ jobs:
     name: "API · verify contract (Go-native, offline)"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
