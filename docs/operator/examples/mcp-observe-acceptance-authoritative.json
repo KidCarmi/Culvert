@@ -29,7 +29,23 @@
     "client_key_file": "<DECISION_REQUIRED_MODEL_A_CLIENT_KEY_FILE>",
     "trusted_jwks_file": "<DECISION_REQUIRED_TRUSTED_JWKS_FILE>",
     "signing_key_file": "<DECISION_REQUIRED_SIGNING_KEY_FILE>",
-    "signing_kid": "<DECISION_REQUIRED_SIGNING_KID>"
+    "signing_kid": "<DECISION_REQUIRED_SIGNING_KID>",
+    "gateway_port": 9443,
+    "tls_server_name": "<DECISION_REQUIRED_TLS_SERVER_NAME_OR_OMIT>",
+    "qualification_policy_file": "<DECISION_REQUIRED_QUALIFICATION_POLICY_FILE>",
+    "telemetry": {
+      "node_id": "<DECISION_REQUIRED_TELEMETRY_NODE_ID>",
+      "data_dir": "<DECISION_REQUIRED_TELEMETRY_DATA_DIR>",
+      "kek_file": "<DECISION_REQUIRED_TELEMETRY_KEK_FILE>",
+      "archive_dir": "<DECISION_REQUIRED_TELEMETRY_ARCHIVE_DIR>"
+    },
+    "supervision": {
+      "admin_port": 9090,
+      "metrics_port": 9091,
+      "admin_user": "<DECISION_REQUIRED_ADMIN_USER>",
+      "admin_password_file": "<DECISION_REQUIRED_ADMIN_PASSWORD_FILE>",
+      "metrics_token_file": "<DECISION_REQUIRED_METRICS_TOKEN_FILE>"
+    }
   },
   "run": {
     "startup_timeout": "60s",

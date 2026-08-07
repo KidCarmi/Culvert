@@ -8,22 +8,30 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"time"
 )
 
-// mcpTLSClient builds an HTTPS client that trusts the fixture CA and, when
+// mcpTLSClient builds an HTTPS client that trusts the operator/fixture CA and, when
 // withClientCert is set, presents the mTLS client certificate. It NEVER disables
-// certificate verification (no InsecureSkipVerify) — the fixture trust root is
-// explicit.
-func mcpTLSClient(caPEM []byte, clientCert, clientKey string, withClientCert bool, timeout time.Duration) (*http.Client, error) {
+// certificate verification (no InsecureSkipVerify) — the trust root is explicit.
+//
+// dialHost is the reachable address the transport actually connects to (the
+// operator-selected bind host in authoritative mode, "127.0.0.1" in dev). The MCP
+// request URLs carry a placeholder authority; a custom DialContext rewrites the
+// connection target to dialHost:port so the client genuinely connects to the
+// selected network boundary and never falls back to loopback. serverName is the TLS
+// name the listener cert is validated against (the operator cert SAN, or "127.0.0.1"
+// in dev).
+func mcpTLSClient(caPEM []byte, clientCert, clientKey string, withClientCert bool, timeout time.Duration, dialHost, serverName string) (*http.Client, error) {
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(caPEM) {
 		return nil, fmt.Errorf("acceptance: could not load fixture CA")
 	}
 	tc := &tls.Config{
 		RootCAs:    pool,
-		ServerName: "127.0.0.1",
+		ServerName: serverName,
 		MinVersion: tls.VersionTLS12,
 	}
 	if withClientCert {
@@ -33,9 +41,19 @@ func mcpTLSClient(caPEM []byte, clientCert, clientKey string, withClientCert boo
 		}
 		tc.Certificates = []tls.Certificate{cert}
 	}
+	// Rewrite the dial target to the reachable host while preserving the requested
+	// port, so a non-loopback operator bind host is genuinely connected to.
+	var d net.Dialer
+	dialCtx := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		_, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		return d.DialContext(ctx, network, net.JoinHostPort(dialHost, port))
+	}
 	return &http.Client{
 		Timeout:   timeout,
-		Transport: &http.Transport{TLSClientConfig: tc, DisableKeepAlives: true},
+		Transport: &http.Transport{TLSClientConfig: tc, DisableKeepAlives: true, DialContext: dialCtx},
 	}, nil
 }
 

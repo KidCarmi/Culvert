@@ -5,8 +5,14 @@ package mcpacceptance
 // could not run at all) makes the overall result FAIL — there is no "best-effort
 // PASS". Advisory criteria (e.g. evidence.denial_aggregated) are intentionally
 // excluded.
-func expectedRequiredIDs() []string {
-	return []string{
+//
+// In authoritative mode the set is EXTENDED with the QUAL-6.1 effective-environment
+// criteria that prove the operator-selected controls were actually consumed at
+// runtime (policy, bind host, telemetry ownership, Admin/metrics supervision). These
+// have no meaning in dev (no operator environment), so they are required only when
+// authoritative.
+func expectedRequiredIDs(authoritative bool) []string {
+	ids := []string{
 		"startup.ready", "startup.tls_reachable", "startup.oauth_metadata", "startup.disabled_binds_nothing",
 		"tls.mtls_accept", "tls.mtls_reject",
 		"oauth.valid", "oauth.missing", "oauth.malformed", "oauth.expired", "oauth.wrong_issuer", "oauth.wrong_audience", "oauth.missing_scope",
@@ -22,6 +28,16 @@ func expectedRequiredIDs() []string {
 		"emergency.disable",
 		"nonexec.tripwire", "nonexec.health",
 	}
+	if authoritative {
+		ids = append(ids,
+			"environment.policy_operator_selected",
+			"environment.bind_host_effective",
+			"environment.telemetry_operator_owned",
+			"supervision.admin_reachable",
+			"supervision.metrics_reachable",
+		)
+	}
+	return ids
 }
 
 // computeOverall returns PASS only when every required criterion is present AND

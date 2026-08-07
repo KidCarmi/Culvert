@@ -71,6 +71,14 @@ func TestDocsPack_NoInventedOperatorValues(t *testing.T) {
 		"<DECISION_REQUIRED_SERVER_B_ID>",
 		"<DECISION_REQUIRED_SIGNING_KEY_FILE>",
 		"<DECISION_REQUIRED_EVIDENCE_DIR>",
+		// QUAL-6.1 authoritative controls must also remain operator decisions.
+		"<DECISION_REQUIRED_QUALIFICATION_POLICY_FILE>",
+		"<DECISION_REQUIRED_TELEMETRY_NODE_ID>",
+		"<DECISION_REQUIRED_TELEMETRY_DATA_DIR>",
+		"<DECISION_REQUIRED_TELEMETRY_KEK_FILE>",
+		"<DECISION_REQUIRED_TELEMETRY_ARCHIVE_DIR>",
+		"<DECISION_REQUIRED_ADMIN_PASSWORD_FILE>",
+		"<DECISION_REQUIRED_METRICS_TOKEN_FILE>",
 	} {
 		if !strings.Contains(content, ph) {
 			t.Errorf("example spec is missing placeholder %q (operator value must not be invented)", ph)

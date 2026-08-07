@@ -30,7 +30,13 @@ import (
 
 // EvidenceSchemaVersion is the schema version of the acceptance evidence bundle.
 // Bump only on a breaking change to the on-disk bundle shape.
-const EvidenceSchemaVersion = 1
+//
+// v2 (QUAL-6.1) adds the effective-environment proof fields to the summary:
+// effective_bind_host, operator_policy_digest, telemetry ownership/node id, and the
+// supervision descriptor. These are additive, safe (secret-free) fields; a v1 reader
+// simply does not see them. The interpretation of the existing v1 fields is
+// unchanged.
+const EvidenceSchemaVersion = 2
 
 // Status is the outcome of a single acceptance criterion.
 type Status string
@@ -103,10 +109,40 @@ type Summary struct {
 	RestartResult        Status             `json:"restart_result"`
 	EmergencyDisable     Status             `json:"emergency_disable_result"`
 	NonExecution         Status             `json:"non_execution_result"`
-	Criteria             []CriterionResult  `json:"criteria"`
+	// ── QUAL-6.1 effective-environment proof (v2; safe, secret-free) ──────────────
+	// EffectiveBindHost is the host the harness successfully connected the MCP
+	// listener on (the operator-selected bind host in authoritative mode). It is
+	// recorded only AFTER a successful TLS connection to that host, so it reflects the
+	// environment that actually ran, never merely a config value.
+	EffectiveBindHost string `json:"effective_bind_host,omitempty"`
+	// OperatorPolicyDigest is sha256:<hex> of the operator-supplied qualification
+	// policy FILE (authoritative mode only). It binds the operator's policy source to
+	// the runtime revision/snapshot-hash without copying the policy bytes into
+	// evidence.
+	OperatorPolicyDigest string `json:"operator_policy_digest,omitempty"`
+	// Supervision is the safe live-supervision descriptor: reachable Admin/metrics/
+	// Gateway URLs and credential PATH references (never secret values).
+	Supervision *SupervisionInfo  `json:"supervision,omitempty"`
+	Criteria    []CriterionResult `json:"criteria"`
 	// Notes carries bounded, non-authoritative operator notes (e.g. a documented
 	// known limitation such as the absent live user-rule ALLOW tools/call path).
 	Notes []string `json:"notes,omitempty"`
+}
+
+// SupervisionInfo is the safe runtime-supervision descriptor for the operator. It
+// carries reachable endpoint URLs, credential PATH references (never the values),
+// and the run id — everything an external supervisor needs to observe the run, and
+// nothing sensitive. It is also written standalone to supervision.json.
+type SupervisionInfo struct {
+	RunID                string `json:"run_id"`
+	GatewayURL           string `json:"gateway_url"`
+	AdminURL             string `json:"admin_url"`
+	MetricsURL           string `json:"metrics_url"`
+	AdminUser            string `json:"admin_user"`
+	AdminCredentialRef   string `json:"admin_credential_ref"`   // file path only, never the password
+	MetricsCredentialRef string `json:"metrics_credential_ref"` // file path only, never the token
+	AdminReachable       bool   `json:"admin_reachable"`
+	MetricsReachable     bool   `json:"metrics_reachable"`
 }
 
 // TelemetrySummary is the bounded telemetry/spool/export health snapshot.
@@ -117,6 +153,11 @@ type TelemetrySummary struct {
 	Committed            bool   `json:"decision_committed"`
 	DenialAggregated     bool   `json:"denial_aggregated"`
 	ExportedAfterRestart bool   `json:"evidence_survived_restart"`
+	// Ownership classifies the primary's telemetry custody boundary: "operator" in an
+	// authoritative run (operator-owned data_dir/KEK/archive, preserved on cleanup),
+	// "harness" in dev (ephemeral, removable). NodeID is the safe logical node id.
+	Ownership string `json:"ownership,omitempty"`
+	NodeID    string `json:"node_id,omitempty"`
 }
 
 // canonicalJSON marshals v deterministically: encoding/json emits struct fields
