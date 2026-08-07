@@ -203,7 +203,7 @@ func (h *Harness) startProcessRaw(ctx context.Context, pc procConfig) (*Process,
 }
 
 // health fetches the current health view (for evidence).
-func (p *Process) health(ctx context.Context, cli *http.Client) (healthView, httpResult) {
+func (p *Process) health(ctx context.Context, cli *http.Client) (view healthView, out httpResult) {
 	res := adminGet(ctx, cli, p.pc.uiPort, p.pc.adminUser, p.pc.adminPass, "/api/mcp/health")
 	var hv healthView
 	if res.status == 200 {

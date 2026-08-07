@@ -28,7 +28,7 @@ func expectedRequiredIDs() []string {
 // passed, the artifact identity is authoritative when the mode demands it, and no
 // required criterion failed. It returns the list of missing required IDs so the
 // caller can record them.
-func computeOverall(criteria []CriterionResult, expected []string, authoritative bool, wantAuthoritative bool) (Status, []string) {
+func computeOverall(criteria []CriterionResult, expected []string, authoritative bool, wantAuthoritative bool) (status Status, absent []string) {
 	present := map[string]Status{}
 	for i := range criteria {
 		present[criteria[i].ID] = criteria[i].Status

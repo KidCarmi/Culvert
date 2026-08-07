@@ -140,7 +140,7 @@ func mcpGet(ctx context.Context, cli *http.Client, mcpPort int, path, host strin
 
 // initSession runs initialize + notifications/initialized against a server (with
 // the allowed application Host) and returns the negotiated session id.
-func initSession(ctx context.Context, cli *http.Client, mcpPort int, serverID, token string) (string, httpResult) {
+func initSession(ctx context.Context, cli *http.Client, mcpPort int, serverID, token string) (sid string, result httpResult) {
 	init := mcpPost(ctx, cli, mcpPort, serverID, token, "",
 		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}`)
 	if init.status != 200 || init.sessionID == "" {
