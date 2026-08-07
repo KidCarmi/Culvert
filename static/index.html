@@ -7697,6 +7697,8 @@ async function fetchStats() {
       setPosture('logging', 'crit', fmt(s.auditLogWriteErrors) + ' audit entries lost (compliance record incomplete)');
     } else if ((s.logWriteErrors || 0) > 0) {
       setPosture('logging', 'warn', fmt(s.logWriteErrors) + ' write errors');
+    } else if ((s.processLogWriteErrors || 0) > 0) {
+      setPosture('logging', 'warn', fmt(s.processLogWriteErrors) + ' process-log lines lost');
     } else if (logFallback.req || logFallback.audit) {
       const which = logFallback.req && logFallback.audit ? 'Request+audit log'
         : logFallback.req ? 'Request log' : 'Audit log';
