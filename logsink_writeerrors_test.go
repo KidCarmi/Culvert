@@ -18,6 +18,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/KidCarmi/Culvert/internal/logsink"
 )
@@ -101,6 +102,41 @@ func TestMetrics_ExposesLogSinkWriteErrors(t *testing.T) {
 	}
 	if strings.Contains(out, "culvert_logsink_write_errors_total 0\n") {
 		t.Error("culvert_logsink_write_errors_total reported 0 after an injected failure")
+	}
+}
+
+// TestAPIHealthz_Standby_AnnotatesProcessLogWriteErrors exercises the real
+// /healthz endpoint (not just the addRequestLogHealth helper) on the standby
+// response path, which builds its body separately from the leader/standalone
+// path and previously never called addRequestLogHealth at all — so this
+// whole field family (including the pre-existing requestLogWriteErrors/
+// auditLogWriteErrors/requestLogBackpressure) was invisible on a standby
+// node's health probe.
+func TestAPIHealthz_Standby_AnnotatesProcessLogWriteErrors(t *testing.T) {
+	defer swapGlobalHA(t)()
+	globalHA.mu.Lock()
+	globalHA.role = "standby"
+	globalHA.since = time.Now()
+	globalHA.mu.Unlock()
+	installFailingLogSink(t, 1)
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	w := httptest.NewRecorder()
+	apiHealthz(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", w.Code)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode /healthz: %v", err)
+	}
+	n, present := resp["processLogWriteErrors"].(float64)
+	if !present {
+		t.Fatal("standby /healthz does not annotate processLogWriteErrors while process-log writes are failing")
+	}
+	if n < 1 {
+		t.Errorf("processLogWriteErrors = %v; want >= 1", n)
 	}
 }
 

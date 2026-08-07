@@ -1125,6 +1125,7 @@ func apiHealthz(w http.ResponseWriter, r *http.Request) {
 		"term": status.Term, "write_authority": false, "auto_failover": status.AutoFailover,
 	}
 	addLeaseHealth(standbyResp, globalHA)
+	addRequestLogHealth(standbyResp)
 	resp, _ := json.Marshal(standbyResp)
 	_, _ = w.Write(resp)
 }
