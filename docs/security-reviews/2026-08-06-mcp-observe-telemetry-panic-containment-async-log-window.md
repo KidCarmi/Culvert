@@ -58,7 +58,8 @@ The window is dominated by **defensive work**, and most of it is a net security
   storage-health plane; a partial write now repairs the line boundary instead of
   corrupting the following record. This directly closes an anti-forensics
   primitive: an attacker able to fill the volume could previously switch off
-  durable audit logging with no counter, metric, alert or log line.
+  durable audit logging with no counter, metric, alert or log line. (The
+  guarantee is single-writer only — **F-4** records the concurrent gap.)
 - **CHAOS-24 panic containment is correctly scoped.** Every one of the 22 call
   sites guards a *loop body*, never a goroutine, and none is on the request path.
   The one place where containment is a safety rather than an availability
@@ -86,9 +87,13 @@ The window is dominated by **defensive work**, and most of it is a net security
   `RequireAndVerifyClientCert`. Every failure yields an empty runtime config
   (nothing binds) plus a bounded, secret-free classification code.
 
-**Three LOW findings and one carried-forward MEDIUM are recorded below.** None
+**Five LOW findings and one carried-forward MEDIUM are recorded below.** None
 is exploitable by an unauthenticated remote attacker against a default
-deployment.
+deployment. Two of the five (**F-4**, **F-5**) were surfaced by automated review
+of this report and confirmed against the code: in each, a durability guarantee
+the window set out to establish holds in the single-threaded or steady-state
+case but reports a loss to the caller as a success at its edges — a concurrent
+audit write, and a log line enqueued after the sink stops draining.
 
 The most important item in this report is **not new**: the MEDIUM
 `matchCategory` narrowing found in the previous window (F-1) was re-verified
@@ -104,9 +109,17 @@ here and is **still unremediated**.
 | **F-1** | Operator-supplied registry value written into the maintenance-agent `image_allowlist` regex with only `.` escaped, and validated only *after* the privileged config is rewritten | **LOW** | New in window | Local operator misconfiguration (no privilege boundary crossed) |
 | **F-2** | QUAL-3 archive exporter writes event envelopes in plaintext while the source spool is KEK-encrypted | **LOW** | New in window | Local read of the archive directory; forward-looking exposure grows when Policy is composed |
 | **F-3** | CHAOS-24 containment converts a repeatable background-worker panic from a loud process crash into a metric-only condition — no alert | **LOW** | New in window | Attacker-influenced third-party feed content (threat feed / blocklist / SaaS category feed) |
+| **F-4** | Audit boundary-repair state is published outside the writer's mutex, so a concurrent `Add` can corrupt a record and be counted as a **success** | **LOW** | New in window | Requires a failing volume plus concurrent admin-plane writes |
+| **F-5** | `logsink.Writer.Write` reports success for lines enqueued after the drain goroutine has stopped — a silent post-`Close` drop | **LOW** | New in window | Shutdown-window only |
 | **I-1** | `initCDR` uses stdlib `log.Fatalf` instead of `logFatalf` | INFO | New in window | n/a |
 | **I-2** | `syslog.Writer.Panics()` counter added but surfaced nowhere | INFO | New in window | n/a |
 | **I-3** | Process-log lines in flight are lost on abrupt process death (SIGKILL/OOM) | INFO | Accepted, documented | n/a |
+
+> **F-4 and F-5 were raised by automated review on this report and confirmed
+> against the code.** Both are narrow, but both are cases where a loss is
+> reported to the caller as a success — the precise property the window's
+> durability work set out to establish — so they are recorded as findings
+> rather than as corrections to the prose.
 
 ---
 
@@ -373,6 +386,135 @@ Failures. **Regression risk of the fix:** low — additive observability only.
 
 ---
 
+### F-4 — LOW (new): audit boundary-repair state is published outside the writer's mutex
+
+**Files.** `internal/audit/audit.go` — `persistEntry`, `Add`;
+`internal/fileutil/rotating.go:40` — `RotatingFile.Write`.
+
+**What changed.** The window added a line-boundary repair so that a partial
+write (a fragment with no terminating newline) is closed off with a leading
+newline before the next record, rather than having the next record concatenated
+onto it into one unparseable line. The repair itself is correct, and the flag is
+honestly re-derived from the bytes actually written. **The publication of that
+flag is not serialized with the write it describes.**
+
+**The race.** `Add` deliberately calls `persistEntry` *outside* the package
+mutex (`mu` is released before the persist call, so a failing disk cannot block
+admin callers), so two `Add`s can be inside `persistEntry` concurrently.
+`RotatingFile.Write` serializes the *file* writes under its own mutex — but it
+releases that mutex on return, and `needsBoundaryRepair.Store(true)` happens
+*after* `f.Write` returns:
+
+```
+A: CAS(true→false) = false  →  no repair prefix
+A: f.Write(b) → n < len(b)  →  FRAGMENT on disk, RotatingFile mutex RELEASED
+                            ←── window ──→
+B: CAS(true→false) = false  →  no repair prefix   (A has not stored yet)
+B: f.Write(b) → n == len(b) →  complete record appended ONTO A's fragment
+B: noteWriteSuccess(path)   →  counted as a SUCCESS
+A: needsBoundaryRepair.Store(true)   (too late — B already wrote)
+```
+
+**Impact.** The file now contains one unparseable line holding A's fragment plus
+B's whole record. A is charged to `WriteErrors()` (short write). **B is not** —
+it is reported as a successful durable write and additionally clears the
+storage-health degraded state via `noteWriteSuccess`. So an entry is lost from
+the durable compliance record while the counter says nothing was lost: exactly
+the under-reporting the ST-8 work exists to eliminate, surviving in the
+concurrent case.
+
+**Preconditions / exploitability.** Requires (a) a partial write — i.e. the
+failing-volume condition the feature targets, where writes fail repeatedly and
+the window recurs — and (b) a second `Add` landing inside the window. Audit
+writes come from the admin plane, where concurrency is genuinely low, but not
+zero: `recordCrash` writes a system-actor entry from arbitrary goroutines, and
+the DP push path and API handlers can overlap. Not remotely triggerable on its
+own; it degrades the integrity guarantee of the anti-forensics fix under load.
+
+**Suggested fix (safe implementation).** Serialize the *decision and the write*
+as one critical section, rather than serializing only the write. A dedicated
+persist mutex in `internal/audit` held across `CAS → f.Write → re-derive` is the
+minimal change; it must **not** be the existing `mu` (that would put a failing
+disk back in front of the ring and the admin callers, which the current design
+deliberately avoids). Reusing the writer's own mutex is not sufficient, because
+the flag update has to be inside the same critical section as the write.
+
+**Required tests.**
+- *Concurrency:* N goroutines calling `Add` against an `io.Writer` seam that
+  returns a short write on a chosen call; assert every entry is either present
+  and parseable in the file **or** charged to `WriteErrors()` — never neither.
+  This is the regression test the current implementation fails.
+- *Positive:* single-writer partial write followed by a normal write still yields
+  a standalone (already-charged) fragment line plus an intact record.
+- *Negative:* a zero-byte write hands the repair back (existing behavior).
+- *Boundary:* repair applied exactly once when several writers observe the flag.
+
+**CWE / OWASP.** CWE-362 (Race Condition) · CWE-778 (Insufficient Logging) ·
+OWASP A09:2021. **Regression risk of the fix:** low, provided the new mutex is
+distinct from `mu` so persistence stays off the caller-blocking path.
+
+---
+
+### F-5 — LOW (new): `logsink.Writer.Write` reports success for lines dropped after shutdown
+
+**Files.** `internal/logsink/logsink.go` — `Write`, `drainLoop`, `Close`.
+
+**What changed.** The process log became asynchronous, with an explicit contract:
+the queue is a shock absorber and **not** a load shedder — a full queue blocks
+the caller and *no line is ever dropped*. That holds while the sink is running.
+It does not hold across shutdown, and the API does not tell the caller so.
+
+**Two paths lose a line while returning `(len(p), nil)`:**
+
+1. **Fast path after the drain goroutine has exited.** `Write`'s first
+   `select` sends on the buffered channel and returns success; it never checks
+   `stop`. Once `Close` has closed `stop` and `drainLoop` has taken its final
+   `drainPending` and returned, a line enqueued afterwards sits in the channel
+   forever, unwritten — reported as written.
+2. **Queue-full path.** The second `select` has an explicit `case <-w.stop`
+   arm that abandons the send (correctly — waiting would hang the caller
+   forever) and then falls through to `return len(p), nil`.
+
+Neither path increments `WriteErrors()`, so the loss is invisible on
+`culvert_logsink_backpressure_total` and on the write-error surface alike. The
+same gap widens if `Close` hits its 5s timeout and abandons a wedged drain
+goroutine: every subsequent line is silently dropped for the remainder of the
+process's life.
+
+**Impact.** Correctly ordered shutdown is mostly safe — `logCloser` runs last in
+the shutdown sequence, so hooks that log before it are drained. The exposure is
+anything that logs *after* that point: still-winding-down guarded background
+workers, the crash sink recording a panic during shutdown, and detached tunnel
+goroutines. Losing a `PANIC_RECOVERED` line or a final hook error during a
+shutdown that is itself being investigated is the case that matters.
+
+**Correction to this report and to `CLAUDE.md`.** The "no loss" claim should read
+*no loss while the sink is running*; the residual is not only SIGKILL/OOM
+(recorded as I-3) but also any line logged after the sink stops draining.
+
+**Suggested fix.** Have `Write` observe `stop` on both paths and charge an
+abandoned line to `WriteErrors()` (or a dedicated `Dropped()` counter) so a
+post-shutdown drop is counted rather than silent. Keep returning a nil error —
+`log.Logger` discards Write errors and a short write would make it retry — so the
+counter, not the return value, is the honest signal. Optionally have the drain
+goroutine perform one final non-blocking sweep after observing `stop`, narrowing
+(though not closing) the window.
+
+**Required tests.**
+- *Concurrency:* writers racing `Close`; assert every line is either written or
+  counted — never silently absent.
+- *Negative:* a line written after `Close` returns is counted as dropped.
+- *Boundary:* a wedged sink that trips the `closeTimeout` counts subsequent
+  writes rather than reporting success.
+- *Regression:* the steady-state no-loss, FIFO and blocking-backpressure
+  guarantees are unchanged.
+
+**CWE / OWASP.** CWE-778 (Insufficient Logging) · CWE-392 (Missing Report of
+Error Condition) · OWASP A09:2021. **Regression risk of the fix:** low —
+counter-only; no change to the steady-state path.
+
+---
+
 ### I-1 — INFO: `initCDR` uses stdlib `log.Fatalf`
 
 `main.go` — the new `-cdr-fail-mode` CLI validation calls `log.Fatalf`, while the
@@ -442,23 +584,29 @@ buffered and would replay the poisoned bytes forever. Discarding + charging the
 loss bounds it to one batch and makes it visible. The `stop` branch still
 converges after a panic because `takePending` has already consumed the entries.
 
-**Audit persistence (`internal/audit/audit.go`).** Every loss path is charged —
-write error, **short write with a nil error** (the truncated-line case an
-`io.Writer` seam can produce), and the defensive marshal branch. The
-line-boundary repair is the subtle and correct part: a fragment is closed with a
-leading newline so the *next* record lands intact rather than concatenating into
-one unparseable line that would lose two entries while counting one. The repair
-flag is re-derived from bytes actually written (a zero-byte write hands the
-repair back). Observers are re-entrancy-guarded and panic-contained, and the
+**Audit persistence (`internal/audit/audit.go`).** Every loss path *on the
+writing goroutine* is charged — write error, **short write with a nil error**
+(the truncated-line case an `io.Writer` seam can produce), and the defensive
+marshal branch. The line-boundary repair closes a fragment with a leading newline
+so the next record lands intact rather than concatenating into one unparseable
+line, and the repair flag is honestly re-derived from bytes actually written (a
+zero-byte write hands the repair back). **This holds for a single writer only —
+see F-4**: the flag is published after `RotatingFile.Write` has released its
+mutex, so a concurrent `Add` can slip between the fragment and the repair and be
+counted as a success. Observers are re-entrancy-guarded and panic-contained, and the
 documented "observer must not call `Add`" contract is satisfied by the production
 observer (`noteStorageWriteFailure` writes no audit entry and dispatches an
 audit-free alert). The success observer is correctly wired too — without it, a
 node whose only durable writes are audit entries would pin degraded forever after
 one transient blip.
 
-**Async process log (`internal/logsink`, `logger.go`).** No loss, no reorder,
-blocking backpressure with a counter, `Close` and `Sync` both bounded so a wedged
-volume degrades the exit path instead of hanging it. The JSON-mode record
+**Async process log (`internal/logsink`, `logger.go`).** While the sink is
+running: no loss, no reorder, blocking backpressure with a counter. `Close` and
+`Sync` are both bounded so a wedged volume degrades the exit path instead of
+hanging it — but that bound is also where the guarantee ends, and **the "no loss"
+contract does not extend across shutdown (see F-5)**: `Write`'s fast path never
+observes `stop`, so a line enqueued after the drain goroutine exits is reported
+as written and never is. The JSON-mode record
 boundary is correct: `jsonLogWriter` encodes **before** the sink, so the sink only
 ever transports complete `{...}\n` lines whose concatenation is valid NDJSON —
 had the wrapping been the other way around, batching would have folded several
@@ -664,6 +812,16 @@ applies to F-1's output).
    a SIGKILL during an incident can cost the last in-flight batch of
    POLICY_* lines. Operators relying on the process log for forensics should
    prefer the request log (blocking, no loss) or the SIEM feed.
+7. **F-4 and F-5 share a shape worth naming**, because it is likely to recur as
+   more of the codebase moves to counted, asynchronous durability: the guarantee
+   is established on the happy path and at the single-writer boundary, and the
+   *counter* — not the return value — is where a loss is supposed to become
+   visible. In both cases the edge case returns success and increments nothing,
+   so the loss is invisible on precisely the surface built to reveal it. When
+   auditing the next durability change, the question to ask first is not "is a
+   loss counted?" but "can any path return success without either writing or
+   counting?" Both fixes are small; neither is urgent; both should land before
+   the durability contracts in `CLAUDE.md` are cited as guarantees elsewhere.
 
 ---
 
