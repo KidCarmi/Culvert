@@ -16,8 +16,15 @@ functionality. Items marked **(merge)** consolidate existing views; items marked
 > rationale below and the `Updates → updates` nav/migration rows are
 > historical and describe a state that was superseded before this plan
 > shipped — `releases` is now the only Platform item for software delivery.
-> Treat the rest of this document (grouping, other items, rationale) as
-> otherwise current; only the Updates/updater passages are stale.
+> More broadly, this whole document is a **Phase 2, 2026-07-11 snapshot**
+> and predates several nav items shipped since: the MCP Gateway section
+> (`mcp-overview`/`mcp-servers`/`mcp-decisions`/`mcp-policies`/
+> `mcp-approvals`/`mcp-health`/`mcp-rollout`/`mcp-settings`), the
+> `decexclusions`/`dechealth`/`decprofiles` Decryption items, and `support`
+> (see `static/index.html`) — none of these appear in the target navigation
+> or migration table below. Treat this document as a historical planning
+> record of its stated grouping/rationale, not a current inventory of the
+> admin console's nav.
 
 ---
 
