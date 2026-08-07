@@ -400,26 +400,71 @@ func (s *Store) LookupHostAdmin(host string) (category, matchedBy string, ok boo
 // built-ins). It is the initial effective-view baseline for the signed feed:
 // building it from the live store — not the compiled DefaultEntries — preserves
 // any admin host-additions to built-in categories and any legacy-merged SaaS
-// hosts already persisted, so the pre-signed-activation policy result is
-// byte-identical to today's full-store match. Empty-host entries (e.g. UT1
-// name-seeds) contribute nothing. Later keys win on collision (deterministic;
-// callers hold no ordering contract on duplicate host keys across categories).
+// hosts already persisted. Empty-host entries (e.g. UT1 name-seeds) contribute
+// nothing.
+//
+// A host that appears under SEVERAL built-in categories (the shipped taxonomy
+// has such hosts — e.g. linkedin.com is both "Social Media" and
+// "HR & Recruiting") collapses to ONE category here, because the map shape
+// admits only one. FIRST entry wins, matching the entry-order precedence
+// LookupHost applies when it scans s.entries top-down — so the collapsed value
+// is the same category the pre-effective-view classification path returned.
+// (It used to be LAST-wins, which silently changed which category a
+// multi-category host classified as once the effective view went on the policy
+// path.)
+//
+// This map is a CLASSIFICATION view ("what is this host?") and is lossy by
+// construction. Never answer a MEMBERSHIP question ("is this host in category
+// C?") from it — use BuiltInHostMemberships, which keeps every category.
 func (s *Store) BuiltInHostCategories() map[string]string {
+	out := make(map[string]string)
+	for h, cats := range s.BuiltInHostMemberships() {
+		out[h] = cats[0]
+	}
+	return out
+}
+
+// BuiltInHostMemberships returns a normalized host→categories map over the
+// BuiltIn=true entries, keeping EVERY category a host belongs to rather than
+// collapsing to one. Per-host category lists are in s.entries order (so index 0
+// is the classification winner BuiltInHostCategories reports) and deduplicated.
+//
+// It is the membership source for the signed-feed effective view: MatchesHost
+// answers "is host in category C?" across the full many-to-many taxonomy, and
+// an effective view built from the collapsed single-category map cannot answer
+// that question without losing a category — which drops a policy rule keyed on
+// the losing category (a fail-open). Empty-host entries contribute nothing.
+func (s *Store) BuiltInHostMemberships() map[string][]string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := make(map[string]string)
+	out := make(map[string][]string)
 	for _, e := range s.entries {
 		if !e.BuiltIn {
 			continue
 		}
 		for _, h := range e.Hosts {
 			nh := hostutil.NormalizeHost(strings.TrimSpace(h))
-			if nh != "" {
-				out[nh] = e.Name
+			if nh == "" {
+				continue
+			}
+			if !containsFold(out[nh], e.Name) {
+				out[nh] = append(out[nh], e.Name)
 			}
 		}
 	}
 	return out
+}
+
+// containsFold reports whether cats already holds name (case-insensitively —
+// category comparison everywhere else in the taxonomy is case-insensitive, so
+// two entries differing only in case must not both be recorded).
+func containsFold(cats []string, name string) bool {
+	for _, c := range cats {
+		if strings.EqualFold(c, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // LookupHost resolves a hostname to its category by scanning entries

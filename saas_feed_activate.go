@@ -249,8 +249,11 @@ func overridesEmpty(ov catoverride.Overrides) bool {
 
 // rawEmbeddedView is the embedded baseline with the unchanged "compiled" provenance (no
 // overrides applied).
+// The embedded baseline is many-to-many (catStore's BuiltIn taxonomy), so it carries its
+// membership index alongside the classification map — see embeddedBaselineMemberships.
 func rawEmbeddedView() *effectiveCategoryView {
-	return newEffectiveView(embeddedBaselineEntries(), effectiveCategoryView{Source: sourceEmbedded, ConfigRevision: "compiled"})
+	return newEffectiveViewWithMembership(embeddedBaselineEntries(), embeddedBaselineMemberships(),
+		effectiveCategoryView{Source: sourceEmbedded, ConfigRevision: "compiled"})
 }
 
 // composeEmbeddedForOverrides builds the embedded-baseline effective view with the CURRENT
@@ -271,7 +274,12 @@ func (c *activationCoordinator) composeEmbeddedForOverrides() (*effectiveCategor
 	if verr := validateEffectiveComposition(composed); verr != nil {
 		return nil, fmt.Errorf("%w: %v", errActivateStore, verr)
 	}
-	return newEffectiveView(composed, effectiveCategoryView{Source: sourceEmbedded, ConfigRevision: rev}), nil
+	// ComposeMembership applies the SAME tombstone/assert suppression over the
+	// many-to-many baseline, so an override still governs its whole subtree — a
+	// tombstoned host cannot survive through one of its other categories.
+	composedMembers := catoverride.ComposeMembership(embeddedBaselineMemberships(), ov)
+	return newEffectiveViewWithMembership(composed, composedMembers,
+		effectiveCategoryView{Source: sourceEmbedded, ConfigRevision: rev, sealed: catoverride.SealedKeys(ov)}), nil
 }
 
 // buildEmbeddedComposedView is the FAIL-SAFE embedded view builder for recovery's
@@ -302,6 +310,7 @@ func (c *activationCoordinator) buildEffectiveView(rg *reverifiedGeneration, ov 
 		ExpiresAt:      rg.ExpiresAt,
 		ConfigRevision: rev,
 		Stale:          stale,
+		sealed:         catoverride.SealedKeys(ov),
 	}), nil
 }
 

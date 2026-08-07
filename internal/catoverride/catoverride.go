@@ -254,6 +254,65 @@ func ComposeView(feed map[string]string, o Overrides) map[string]string {
 	return out
 }
 
+// ComposeMembership is ComposeView over a host→CATEGORIES map: the membership
+// companion used when the baseline taxonomy is many-to-many (a host in several
+// categories at once). Suppression and insertion semantics are IDENTICAL to
+// ComposeView — same tombstone/assert-key suffix suppression, same override
+// insertion — so the two compositions always agree on which keys survive.
+//
+// An override key is the sole authority over its subtree, so an inserted
+// recategorization/addition replaces the WHOLE membership list for its key with
+// the single override category. A tombstone removes every category for the
+// covered subtree. That keeps a removal a real removal: a multi-category host
+// cannot survive a tombstone through one of its other categories.
+// SealedKeys returns the set of override boundary keys — the hosts an override
+// makes AUTHORITATIVE for their whole subtree (recategorizations, additions, and
+// tombstones). A membership suffix-walk that reaches one of these keys must STOP
+// there rather than climbing to an ancestor baseline category: the override is
+// the sole authority for the key and its subdomains, so an ancestor category it
+// did not assert must not leak back in. This mirrors the keys ComposeMembership
+// makes authoritative (out[host] replacement + subtree suppression), so the two
+// stay consistent by construction.
+func SealedKeys(o Overrides) map[string]bool {
+	sealed := make(map[string]bool, len(o.Recategorized)+len(o.Added)+len(o.Tombstones))
+	for host := range o.Recategorized {
+		sealed[host] = true
+	}
+	for host := range o.Added {
+		sealed[host] = true
+	}
+	for _, host := range o.Tombstones {
+		sealed[host] = true
+	}
+	return sealed
+}
+
+func ComposeMembership(feed map[string][]string, o Overrides) map[string][]string {
+	assertKeys := make([]string, 0, len(o.Recategorized)+len(o.Added))
+	for host := range o.Recategorized {
+		assertKeys = append(assertKeys, host)
+	}
+	for host := range o.Added {
+		assertKeys = append(assertKeys, host)
+	}
+	out := make(map[string][]string, len(feed))
+	for host, cats := range feed {
+		if suffixSuppressed(host, o.Tombstones) || suffixSuppressed(host, assertKeys) {
+			continue
+		}
+		cp := make([]string, len(cats))
+		copy(cp, cats)
+		out[host] = cp
+	}
+	for host, cat := range o.Recategorized {
+		out[host] = []string{cat}
+	}
+	for host, cat := range o.Added {
+		out[host] = []string{cat}
+	}
+	return out
+}
+
 // suffixSuppressed reports whether host is covered by any tombstone (equal to it
 // or a subdomain of it) — the host+subdomain scope of an override key (F0 §7.5).
 func suffixSuppressed(host string, tombstones []string) bool {

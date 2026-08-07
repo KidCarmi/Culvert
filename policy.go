@@ -1579,10 +1579,19 @@ func matchCategory(cat URLCategory, host string) bool {
 		if catStore.MatchesHostAdmin(cat, host) {
 			return true
 		}
-		// Membership check (not a short-circuit): a view classification under a DIFFERENT
-		// category must still fall through to the UT1 layer, matching the original
-		// cross-layer OR semantics.
-		if c, ok := view.LookupHost(host); ok && strings.EqualFold(c, string(cat)) {
+		// MEMBERSHIP, not classification. The view's LookupHost answers "what is this
+		// host?" — one category, taken from the most specific key. matchCategory asks
+		// "is this host in category C?", which the classification answer cannot decide:
+		// the baseline taxonomy is many-to-many (linkedin.com is both "Social Media"
+		// and "HR & Recruiting"), so comparing against the single classified category
+		// dropped every other category the host belongs to, and with it any policy rule
+		// keyed on one of them. MatchesCategory reproduces catStore.MatchesHost exactly
+		// — exact key then every suffix key, no shadowing by a more specific key in a
+		// different category.
+		//
+		// Still not a short-circuit: a non-match must fall through to the UT1 layer,
+		// matching the original cross-layer OR semantics.
+		if view.MatchesCategory(string(cat), host) {
 			return true
 		}
 	} else if catStore.MatchesHost(cat, host) {
