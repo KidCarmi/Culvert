@@ -229,8 +229,8 @@ func (s *SecretScan) Scan(dir string) ([]Violation, error) {
 	return viols, err
 }
 
-// sha256File returns sha256:<hex> of a file.
-func sha256File(path string) (string, int64, error) {
+// sha256File returns sha256:<hex> of a file plus its byte length.
+func sha256File(path string) (digest string, size int64, err error) {
 	b, err := os.ReadFile(path) // #nosec G304 G122 -- harness-owned evidence directory, not attacker-controlled
 	if err != nil {
 		return "", 0, err

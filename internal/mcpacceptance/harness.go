@@ -161,20 +161,17 @@ func (h *Harness) setup(ctx context.Context) error {
 
 // buildProcesses starts the non-execution tripwires and renders the tenant-A and
 // tenant-B process fixtures pointed at them.
-func (h *Harness) buildProcesses() (procConfig, procConfig, error) {
-	var err error
+func (h *Harness) buildProcesses() (pa, pb procConfig, err error) {
 	if h.tripwireA, err = startTripwire(); err != nil {
 		return procConfig{}, procConfig{}, err
 	}
 	if h.tripwireB, err = startTripwire(); err != nil {
 		return procConfig{}, procConfig{}, err
 	}
-	pa, err := h.fixture.buildProc("A", h.fixture.tenantA, h.fixture.serverA, "none", tripEndpoint(h.tripwireA))
-	if err != nil {
+	if pa, err = h.fixture.buildProc("A", h.fixture.tenantA, h.fixture.serverA, "none", tripEndpoint(h.tripwireA)); err != nil {
 		return procConfig{}, procConfig{}, err
 	}
-	pb, err := h.fixture.buildProc("B", h.fixture.tenantB, h.fixture.serverB, "none", tripEndpoint(h.tripwireB))
-	if err != nil {
+	if pb, err = h.fixture.buildProc("B", h.fixture.tenantB, h.fixture.serverB, "none", tripEndpoint(h.tripwireB)); err != nil {
 		return procConfig{}, procConfig{}, err
 	}
 	return pa, pb, nil

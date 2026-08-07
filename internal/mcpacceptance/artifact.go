@@ -17,7 +17,7 @@ func hashBinary(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer f.Close() //nolint:errcheck
+	defer f.Close() //nolint:errcheck // best-effort close of a read-only handle
 	hsh := sha256.New()
 	if _, err := io.Copy(hsh, f); err != nil {
 		return "", err
@@ -77,7 +77,7 @@ func pinBinary(src, dst, expectedDigest string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("pin artifact open: %w", err)
 	}
-	defer in.Close()                                                        //nolint:errcheck
+	defer in.Close()                                                        //nolint:errcheck // best-effort close of a read-only handle
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o500) // #nosec G304 -- harness-owned work dir
 	if err != nil {
 		return "", fmt.Errorf("pin artifact create: %w", err)
@@ -103,7 +103,7 @@ func pinBinary(src, dst, expectedDigest string) (string, error) {
 // surface that exposes it). Returns "" if unavailable.
 func probeVersion(ctx context.Context, cli *http.Client, uiPort int) string {
 	url := fmt.Sprintf("http://127.0.0.1:%d/healthz", uiPort)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
 	if err != nil {
 		return ""
 	}
@@ -111,7 +111,7 @@ func probeVersion(ctx context.Context, cli *http.Client, uiPort int) string {
 	if err != nil {
 		return ""
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // best-effort close of a read-only handle
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
 	var hv struct {
 		Version string `json:"version"`

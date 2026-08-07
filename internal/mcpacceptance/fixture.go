@@ -1,6 +1,7 @@
 package mcpacceptance
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -110,8 +111,9 @@ func genCA(dir string) (*x509.Certificate, *ecdsa.PrivateKey, []byte, error) {
 	return cert, key, caPEM, nil
 }
 
-// genLeaf issues a leaf cert (server or client) signed by ca.
-func genLeaf(dir, name, cn string, serial int64, server bool, ca *x509.Certificate, caKey *ecdsa.PrivateKey) (string, string, error) {
+// genLeaf issues a leaf cert (server or client) signed by ca and returns the
+// written cert and key paths.
+func genLeaf(dir, name, cn string, serial int64, server bool, ca *x509.Certificate, caKey *ecdsa.PrivateKey) (certPath, keyPath string, err error) {
 	key, err := genEC()
 	if err != nil {
 		return "", "", err
@@ -134,8 +136,8 @@ func genLeaf(dir, name, cn string, serial int64, server bool, ca *x509.Certifica
 	if err != nil {
 		return "", "", err
 	}
-	certPath := filepath.Join(dir, name+".crt")
-	keyPath := filepath.Join(dir, name+".key")
+	certPath = filepath.Join(dir, name+".crt")
+	keyPath = filepath.Join(dir, name+".key")
 	if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
 		return "", "", err
 	}
@@ -162,11 +164,12 @@ func randToken(n int) (string, error) {
 // inherent race between release and reuse; the harness binds promptly and treats a
 // startup failure as a criterion failure (never an unbounded retry).
 func freePort() (int, error) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	var lc net.ListenConfig
+	l, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		return 0, err
 	}
-	defer l.Close() //nolint:errcheck
+	defer l.Close() //nolint:errcheck // best-effort close of a read-only handle
 	return l.Addr().(*net.TCPAddr).Port, nil
 }
 

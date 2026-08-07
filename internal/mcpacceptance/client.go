@@ -86,7 +86,7 @@ func mcpPost(ctx context.Context, cli *http.Client, mcpPort int, serverID, token
 		// A TLS/handshake failure (e.g. mTLS reject) surfaces here.
 		return httpResult{tlsError: true, transportErr: classifyTransport(err)}
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // best-effort close of a read-only handle
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	return httpResult{status: resp.StatusCode, body: raw, sessionID: resp.Header.Get("Mcp-Session-Id")}
 }
@@ -116,7 +116,7 @@ func mcpPostRaw(ctx context.Context, cli *http.Client, mcpPort int, path, token,
 	if err != nil {
 		return httpResult{tlsError: true, transportErr: classifyTransport(err)}
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // best-effort close of a read-only handle
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	return httpResult{status: resp.StatusCode, body: raw, sessionID: resp.Header.Get("Mcp-Session-Id")}
 }
@@ -124,7 +124,7 @@ func mcpPostRaw(ctx context.Context, cli *http.Client, mcpPort int, path, token,
 // mcpGet issues a GET (e.g. protected-resource metadata) over the real listener.
 func mcpGet(ctx context.Context, cli *http.Client, mcpPort int, path, host string) httpResult {
 	url := fmt.Sprintf("https://127.0.0.1:%d%s", mcpPort, path)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
 	if err != nil {
 		return httpResult{transportErr: "build_request"}
 	}
@@ -133,7 +133,7 @@ func mcpGet(ctx context.Context, cli *http.Client, mcpPort int, path, host strin
 	if err != nil {
 		return httpResult{tlsError: true, transportErr: classifyTransport(err)}
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // best-effort close of a read-only handle
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	return httpResult{status: resp.StatusCode, body: raw}
 }
@@ -154,7 +154,7 @@ func initSession(ctx context.Context, cli *http.Client, mcpPort int, serverID, t
 // adminGet issues an authenticated GET to the admin API (plain HTTP, -ui-no-tls).
 func adminGet(ctx context.Context, cli *http.Client, uiPort int, user, pass, path string) httpResult {
 	url := fmt.Sprintf("http://127.0.0.1:%d%s", uiPort, path)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
 	if err != nil {
 		return httpResult{transportErr: "build_request"}
 	}
@@ -165,7 +165,7 @@ func adminGet(ctx context.Context, cli *http.Client, uiPort int, user, pass, pat
 	if err != nil {
 		return httpResult{transportErr: classifyTransport(err)}
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // best-effort close of a read-only handle
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	return httpResult{status: resp.StatusCode, body: raw}
 }
@@ -175,7 +175,7 @@ func adminGet(ctx context.Context, cli *http.Client, uiPort int, user, pass, pat
 // during emergency-disable of the MCP listener.
 func proxyHealth(ctx context.Context, cli *http.Client, proxyPort int) httpResult {
 	url := fmt.Sprintf("http://127.0.0.1:%d/health", proxyPort)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
 	if err != nil {
 		return httpResult{transportErr: "build_request"}
 	}
@@ -183,7 +183,7 @@ func proxyHealth(ctx context.Context, cli *http.Client, proxyPort int) httpResul
 	if err != nil {
 		return httpResult{transportErr: classifyTransport(err)}
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // best-effort close of a read-only handle
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
 	return httpResult{status: resp.StatusCode, body: raw}
 }
@@ -191,7 +191,7 @@ func proxyHealth(ctx context.Context, cli *http.Client, proxyPort int) httpResul
 // metricsGet scrapes /metrics from the proxy port with the bearer token.
 func metricsGet(ctx context.Context, cli *http.Client, proxyPort int, token string) httpResult {
 	url := fmt.Sprintf("http://127.0.0.1:%d/metrics", proxyPort)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
 	if err != nil {
 		return httpResult{transportErr: "build_request"}
 	}
@@ -202,7 +202,7 @@ func metricsGet(ctx context.Context, cli *http.Client, proxyPort int, token stri
 	if err != nil {
 		return httpResult{transportErr: classifyTransport(err)}
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // best-effort close of a read-only handle
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	return httpResult{status: resp.StatusCode, body: raw}
 }

@@ -96,7 +96,8 @@ func (h *Harness) checkDisabledBindsNothing(ctx context.Context) (Status, string
 		return fail(fmt.Sprintf("health state=%s status=%d", hv.Gateway.Runtime.State, res.status), "not_disabled")
 	}
 	// The MCP port must not be accepting connections.
-	conn, derr := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", pc.mcpPort), h.spec.Run.request())
+	dialer := net.Dialer{Timeout: h.spec.Run.request()}
+	conn, derr := dialer.DialContext(ctx, "tcp", fmt.Sprintf("127.0.0.1:%d", pc.mcpPort))
 	if derr == nil {
 		_ = conn.Close()
 		return fail("mcp port accepted a connection", "port_bound")
@@ -690,7 +691,8 @@ func (h *Harness) checkEmergencyDisable(ctx context.Context) (Status, string, st
 	defer func() { _ = proc2.stop(h.spec.Run.shutdown()) }()
 	h.summary.EmergencyDisable = StatusFail
 	// MCP must no longer admit.
-	conn, derr := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", pc.mcpPort), h.spec.Run.request())
+	dialer := net.Dialer{Timeout: h.spec.Run.request()}
+	conn, derr := dialer.DialContext(ctx, "tcp", fmt.Sprintf("127.0.0.1:%d", pc.mcpPort))
 	if derr == nil {
 		_ = conn.Close()
 		return fail("mcp port still bound after disable", "still_admitting")
