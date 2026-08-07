@@ -35,11 +35,21 @@
 
 ## Executive Summary
 
-**One HIGH severity regression was found and is fixed in this change.** It is an
-unauthenticated, remotely-triggerable denial of service against the **entire
-proxy authentication plane** on deployments using LDAP/Active Directory proxy
-auth, introduced by the otherwise-sound CHAOS-47 identity-backend availability
-work (PRs #1064 / #1061).
+**Three findings, all fixed in this change:**
+
+- **SR-…-01 (HIGH)** — an unauthenticated, remotely-triggerable denial of
+  service against the **entire proxy authentication plane** on deployments
+  using LDAP/Active Directory proxy auth, introduced by the otherwise-sound
+  CHAOS-47 identity-backend availability work (PRs #1064 / #1061).
+- **SR-…-01b (HIGH)** — the same gate held **open** rather than armed: an
+  answered-but-rejected credential consumed each half-open recovery probe
+  without clearing the cooldown, so one attacker could hold a *recovered*
+  backend in a permanent outage. Present on the **OIDC** leg as shipped in
+  `fdc62fc`, and on the first version of this PR's LDAP fix. Found by Codex
+  review on PR #1077.
+- **SR-…-02 (MEDIUM, detection)** — the **CodeQL SAST gate has executed zero
+  queries** since `4251a13`, failing as a configuration error rather than a
+  finding.
 
 Everything else in the window is either neutral or a net security improvement.
 There is **no authentication bypass, no authorization bypass, no default-allow,
@@ -53,7 +63,17 @@ with a single malformed token"). That commit **also touched `auth_ldap.go`** —
 but only to silence an `errcheck` lint on a `defer Close`. The structurally
 identical hole one file over was not carried across. This is the classic
 asymmetric-hardening failure: a class fixed on one instance and left open on its
-twin.
+twin. SR-…-01b then demonstrated the same lesson in the other direction — the
+first fix for the LDAP leg was itself incomplete, and completing it exposed the
+matching gap in the OIDC code that had been treated as the reference
+implementation.
+
+SR-…-02 is a different kind of finding: nothing in the product regressed, but
+the mechanism that would have *caught* a regression stopped running silently.
+PRs #1069 and #1070 in this same window were merged as fixes for CodeQL alerts
+#265 and #219; both are genuine tightenings on manual review, but the scanner
+meant to confirm them never executed. Re-run CodeQL on `main` after this lands
+to re-baseline the alert set.
 
 ---
 
@@ -179,6 +199,55 @@ this account", mirroring `errIntrospectClient` on the OIDC leg exactly:
 The fail-closed posture is unchanged on every path: **every** branch still
 denies the in-flight request. Only the *blast radius* changed.
 
+#### SR-2026-08-07-01b — the same gate, held open instead of armed
+
+Found by Codex review on PR #1077, on the first version of the fix above.
+**Severity HIGH; affects the OIDC leg as shipped in `fdc62fc` as well.**
+
+Declining to *arm* the gate is only half the contract. The gate is half-open:
+after the cooldown elapses it grants exactly **one** probe and immediately
+re-arms. The attacker is by construction the caller generating the most
+traffic, so they are also the one most likely to **win that probe**.
+
+If a directory-answered rejection merely avoided arming the gate — without
+recording the reachability it proves — then:
+
+1. a genuine outage (or blip) arms the gate;
+2. the directory recovers;
+3. the cooldown elapses and the attacker's locked-account bind takes the probe;
+4. the rejection leaves `down` still set, and step 3's grant has already
+   re-armed `until`;
+5. every other user is denied for another full cooldown — and it repeats.
+
+A three-second network blip becomes an **indefinite** outage, sustained by a
+client looping on one locked account. The precondition is weaker than it looks:
+a transient reachability failure is inevitable in production, and the attacker
+only needs to be attempting authentication when it happens.
+
+**The OIDC leg had the identical defect.** `ResolveIdentity`'s
+`errIntrospectClient` branch returned without `recordReachable`, so a caller
+with one malformed token could hold a recovered IdP gated the same way. That
+code shipped in `fdc62fc` and is therefore a **pre-existing** defect this PR
+also closes — fixing only LDAP would have repeated exactly the asymmetric
+hardening failure this whole report is about.
+
+**Fix.** Both legs now call `recordReachable()` + `noteAuthBackendReachable()`
+on the answered-but-rejected path. This is precisely what `recordReachable` is
+documented for — *"the backend answered — authoritatively, in either direction
+— so it is up"*. An HTTP status code and an LDAP result code are both answers.
+
+No security property is relaxed: clearing the gate only means subsequent
+requests dial a backend that has demonstrably just responded, which is the
+normal pre-CHAOS-47 behaviour. If the backend is only partially healthy (binds
+answer, searches fail), the next search failure re-arms the gate immediately, so
+the state is self-correcting.
+
+Pinned by `TestLDAP_AccountRejectionClearsAnArmedCooldown`,
+`TestLDAP_AttackerCannotHoldTheGateOpen` and
+`TestOIDCAuth_4xxClearsAnArmedCooldown` — all three drive the cooldown from the
+`authProbeGate.now` injected clock rather than sleeping, and all three fail
+without the fix.
+
 #### Deliberately left gating (reviewed, accepted)
 
 The **service-bind** and **search** branches still arm the gate. Neither is
@@ -186,6 +255,48 @@ attacker-account-scoped: the service credential is operator-owned, and the
 search filter is built with `ldap.EscapeFilter(username)`, so a client cannot
 inject filter metacharacters to provoke a search fault. A wrong service password
 is a configuration fault where the anti-stampede gate is the desired behaviour.
+
+---
+
+### SR-2026-08-07-02 — MEDIUM — The CodeQL SAST gate has run no queries since `4251a13`
+
+| | |
+|---|---|
+| **Severity** | **MEDIUM** (detection capability, not a product defect) |
+| **CWE** | CWE-1127 (Compilation with Insufficient Warnings or Errors) — analogue for a disabled analysis gate |
+| **OWASP** | A09:2021 Security Logging and Monitoring Failures |
+| **Regression risk** | **Introduced in this window** (PR #1024, commit `4251a13`) |
+| **Status** | **Fixed in this change** |
+
+`github/codeql-action` is a monorepo: `init`, `analyze` and `upload-sarif` ship
+from one release and are **not** cross-compatible — `analyze` refuses a database
+a different version initialised. Dependabot treats each sub-action *path* as its
+own ecosystem, so PR #1024 bumped **only `analyze`** (`e4fba86` → `f205ea1`) and
+left `init` behind. Every run since ends:
+
+```
+Loaded a configuration file for version '4.37.3', but running version '4.37.4'
+CodeQL job status was configuration error.
+```
+
+The job dies **before running a single query**. It is red, so it is not
+invisible — but it is red for a reason that reads as infrastructure flake, and
+no finding it would have produced was ever produced. `7130f66` (*"ci: align
+CodeQL action revisions"*) shows the same split had already happened once and
+was corrected by hand, so it recurs on its own.
+
+**Fix.** `init` realigned to `f205ea1c`, plus `codeql_action_pin_test.go` as an
+anti-drift wall in the repo's established idiom:
+`TestCodeQLActionRevisionsAreAligned` (every `github/codeql-action/*` pin in the
+workflow must resolve to one commit SHA — verified to fail on the pre-fix file)
+and `TestCodeQLActionPinsAreImmutable` (no CodeQL step may regress to a mutable
+`@v3`/`@main` ref; these jobs hold `security-events: write`). The invariant is
+pinned on the **SHA**, not the version, because the trailing `# v3` comments
+Dependabot leaves are stale and disagree with the actual release.
+
+**Not done here (policy, not defect):** grouping the three `codeql-action` paths
+in `.github/dependabot.yml` so they cannot split at the source. Flagged on the
+PR for the maintainer's decision.
 
 ---
 
@@ -337,11 +448,11 @@ signing keys, trusted roots or pinned identities were touched.
 | Property | Before window | After window (+ this fix) |
 |---|---|---|
 | LDAP: wrong password | deny, cached | deny, cached (unchanged) |
-| LDAP: locked/disabled/non-bindable account | deny, cached for that credential | deny, **not** cached, **no** provider-wide gate |
+| LDAP: locked/disabled/non-bindable account | deny, cached for that credential | deny, **not** cached, **no** provider-wide gate, **clears** an armed gate |
 | LDAP: directory unreachable | deny, **cached** (stale lockout for full TTL) | deny, not cached, provider-wide gate + probe |
 | LDAP: server busy/unavailable | deny, cached | deny, not cached, gate |
 | OIDC: inactive token | deny, cached | deny, cached (unchanged) |
-| OIDC: 4xx introspection | deny, cached | deny, not cached, **no** gate |
+| OIDC: 4xx introspection | deny, cached | deny, not cached, **no** gate, **clears** an armed gate |
 | OIDC: IdP unreachable / 5xx | deny, **cached** | deny, not cached, gate |
 | Cross-tenant MCP server address | (no check) | **DENY** `MCP.AUTH.TENANT_MISMATCH` |
 | Tarball entry containing `..` | rejected per-component | rejected on any substring |
@@ -358,7 +469,11 @@ is restored by this change.
 | File | Change |
 |---|---|
 | `auth_ldap.go` | `errLDAPAccountRejected`, `ldapUserBindIsUnreachable`, `noteVerifyError`; step-2 bind branch reclassified |
+| `auth_oidc.go` | `errIntrospectClient` branch now records observed reachability (SR-…-01b) |
 | `auth_ldap_gate_test.go` | **new** — classifier, boundary, wiring, concurrency and regression tests |
+| `auth_oidc_test.go` | `TestOIDCAuth_4xxClearsAnArmedCooldown` |
+| `.github/workflows/codeql.yml` | `init` realigned to the analyze/upload-sarif revision (SR-…-02) |
+| `codeql_action_pin_test.go` | **new** — CodeQL action pin alignment + immutability walls |
 | `docs/security-reviews/2026-08-07-…-window.md` | this report |
 
 ---
@@ -374,6 +489,8 @@ is restored by this change.
 | Malformed / unclassifiable input | `TestLDAPUserBindIsUnreachable_Classification` — plain `net.OpError`, `context.Canceled`, opaque `errors.New` all default to the conservative branch |
 | Error-wrapping integrity | `TestLDAPUserBindIsUnreachable_ThroughWrapping` — single and double `%w` wrapping preserves the decision |
 | Concurrency | `TestLDAP_ConcurrentAccountRejectionsNeverGate` — 8 attackers × 8 victims × 200 rounds under `-race` |
+| Half-open recovery (01b) | `TestLDAP_AccountRejectionClearsAnArmedCooldown`, `TestLDAP_AttackerCannotHoldTheGateOpen` (10 cooldown windows), `TestOIDCAuth_4xxClearsAnArmedCooldown` — injected clock, all three fail without the fix |
+| CI trust surface (02) | `TestCodeQLActionRevisionsAreAligned` (fails on the pre-fix workflow), `TestCodeQLActionPinsAreImmutable` |
 | Authentication | `TestLDAP_EmptyPasswordStillShortCircuits`, `TestLDAP_AccountRejectionIsNotCached`, `TestLDAP_GateRecoversOnObservedReach` |
 
 `go test -race -count=1` green on the auth surface; full `main` package suite
@@ -405,7 +522,13 @@ shuffled `-count=2` re-run green.
    window: a user who fixes their password waits out `CacheTTL` (default 5 min)
    for the *wrong-password* entry to expire. Pre-existing, unchanged.
 
-5. **`ldapUserBindIsUnreachable` depends on go-ldap's code space.** If a future
+5. **A partially-healthy backend oscillates.** After SR-…-01b, a backend that
+   answers binds but fails searches will have its gate cleared by each bind and
+   re-armed by each search failure. The state is self-correcting and always
+   fails closed, but the `culvert_auth_backend_unavailable` gauge will flap
+   under that specific fault. Accepted; noted so it is not mistaken for a bug.
+
+6. **`ldapUserBindIsUnreachable` depends on go-ldap's code space.** If a future
    go-ldap release adds client-side error codes outside 200–206, they would be
    misclassified as "server answered". The failure mode is a lost gate (a
    stampede), never a bypass; the boundary test will not catch it automatically.

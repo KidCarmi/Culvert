@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	ldap "github.com/go-ldap/ldap/v3"
 )
@@ -250,6 +252,91 @@ func TestLDAP_GateRecoversOnObservedReach(t *testing.T) {
 	a.noteVerifyError(fmt.Errorf("%w: %w", errLDAPAccountRejected, ldapErr(ldap.LDAPResultUnwillingToPerform)))
 	if a.gate.gated() {
 		t.Error("account rejection re-armed the gate after recovery")
+	}
+}
+
+// TestLDAP_AccountRejectionClearsAnArmedCooldown pins the second half of the
+// blast-radius contract, found by Codex review on PR #1077.
+//
+// Not arming the gate is not enough. Once a GENUINE outage has armed it, the
+// half-open probe that follows recovery may well be the attacker's — they are
+// generating far more traffic than anyone else. If a directory-answered account
+// rejection merely declined to arm the gate, it would consume that probe and
+// leave `down` set, so the gate re-arms for another cooldown and every other
+// user keeps being denied. Looping on one locked account would then hold a fully
+// recovered directory in a permanent outage.
+//
+// The answer IS the evidence of reachability, so it must clear the gate.
+func TestLDAP_AccountRejectionClearsAnArmedCooldown(t *testing.T) {
+	resetAuthBackendHealthForTest()
+	t.Cleanup(resetAuthBackendHealthForTest)
+
+	a, err := NewLDAPAuth(LDAPConfig{URL: "ldap://127.0.0.1:1", BaseDN: "dc=corp,dc=com"})
+	if err != nil {
+		t.Fatalf("NewLDAPAuth: %v", err)
+	}
+
+	// Drive the cooldown from an injected clock rather than sleeping.
+	var nowNS atomic.Int64
+	nowNS.Store(time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC).UnixNano())
+	a.gate.now = func() time.Time { return time.Unix(0, nowNS.Load()).UTC() }
+
+	// 1. A real outage arms the gate.
+	a.noteVerifyError(fmt.Errorf("dial: %w", errors.New("connection refused")))
+	if !a.gate.gated() {
+		t.Fatal("outage did not arm the gate")
+	}
+
+	// 2. The directory recovers and the cooldown elapses.
+	nowNS.Add(int64(authBackendProbeCooldown + time.Second))
+
+	// 3. The attacker wins the single half-open probe with their locked account.
+	if !a.gate.allow() {
+		t.Fatal("cooldown elapsed but no probe was granted")
+	}
+	a.noteVerifyError(fmt.Errorf("%w: %w", errLDAPAccountRejected, ldapErr(ldap.LDAPResultUnwillingToPerform)))
+
+	// 4. Every other user must now get through. Without the clear, `down` is
+	//    still set and `until` was just re-armed by step 3's grant, so this is
+	//    false and the outage continues indefinitely.
+	if a.gate.gated() {
+		t.Fatal("a directory-answered account rejection consumed the recovery probe without clearing the gate — " +
+			"an attacker looping on one locked account holds a healthy directory in a permanent outage")
+	}
+	if !a.gate.allow() {
+		t.Error("legitimate authentication still gated after the directory demonstrably answered")
+	}
+	if snap := authBackendHealthStatus(); snap.Degraded {
+		t.Error("backend still reported degraded after the directory answered")
+	}
+}
+
+// TestLDAP_AttackerCannotHoldTheGateOpen is the same finding expressed as the
+// attack: after one genuine outage, a client hammering a locked account across
+// many cooldown windows must never keep other users gated.
+func TestLDAP_AttackerCannotHoldTheGateOpen(t *testing.T) {
+	resetAuthBackendHealthForTest()
+	t.Cleanup(resetAuthBackendHealthForTest)
+
+	a, err := NewLDAPAuth(LDAPConfig{URL: "ldap://127.0.0.1:1", BaseDN: "dc=corp,dc=com"})
+	if err != nil {
+		t.Fatalf("NewLDAPAuth: %v", err)
+	}
+	var nowNS atomic.Int64
+	nowNS.Store(time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC).UnixNano())
+	a.gate.now = func() time.Time { return time.Unix(0, nowNS.Load()).UTC() }
+
+	a.noteVerifyError(fmt.Errorf("dial: %w", errors.New("connection refused"))) // the one real blip
+	rejection := fmt.Errorf("%w: %w", errLDAPAccountRejected, ldapErr(ldap.LDAPResultConstraintViolation))
+
+	for round := 0; round < 10; round++ {
+		nowNS.Add(int64(authBackendProbeCooldown + time.Second))
+		a.gate.allow() // the attacker takes the probe
+		a.noteVerifyError(rejection)
+		if a.gate.gated() {
+			t.Fatalf("round %d: gate still armed after the directory answered — "+
+				"a three-second blip has become an indefinite outage", round)
+		}
 	}
 }
 

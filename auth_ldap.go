@@ -215,9 +215,23 @@ func (a *LDAPAuth) Verify(username, password string) bool {
 // provider-wide cooldown nor be reported as an outage, exactly as
 // ResolveIdentity does for errIntrospectClient on the OIDC leg. It is also not
 // cached, so a since-unlocked account authenticates on its very next attempt.
+//
+// An account rejection is also POSITIVE evidence of reachability, and must be
+// recorded as such — not merely excused from arming the gate. Skipping the
+// clear leaves a second, subtler denial of service: once a genuine outage has
+// armed the gate, the attacker's rejection consumes each half-open probe
+// without ever clearing it, so the gate re-arms for another cooldown and every
+// other user stays denied. A client attempting one locked account in a loop
+// would then hold a fully recovered directory in a permanent outage — turning a
+// three-second network blip into an indefinite one. `recordReachable` is
+// documented as "the backend answered, authoritatively, in either direction",
+// and this is exactly that. (Found by Codex review on PR #1077.)
 func (a *LDAPAuth) noteVerifyError(err error) {
 	if errors.Is(err, errLDAPAccountRejected) {
-		logger.Printf("LDAP auth DENY (directory rejected the account) — not a backend outage, cooldown not armed")
+		a.gate.recordReachable()
+		noteAuthBackendReachable("ldap")
+		logger.Printf("LDAP auth DENY (directory rejected the account) — not a backend outage; " +
+			"the answer is evidence the directory is reachable, so any cooldown is cleared")
 		return
 	}
 	a.gate.recordUnavailable()

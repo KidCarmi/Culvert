@@ -216,7 +216,18 @@ func (a *OIDCAuth) ResolveIdentity(_ string, token string) (*Identity, bool) {
 			// so a malformed token cannot trip the provider-wide gate for everyone
 			// else. Not cached — a 4xx may reflect a fixable client-credential
 			// misconfiguration rather than a stable verdict about the token.
-			logger.Printf("OIDC auth DENY (introspection 4xx) — client/token error, not a backend outage")
+			//
+			// The endpoint returned an HTTP status, so it is demonstrably up, and
+			// that must CLEAR a cooldown a previous outage armed rather than merely
+			// avoid arming one. Otherwise the 4xx silently eats each half-open probe
+			// and the gate re-arms behind it, letting a caller with one malformed
+			// token hold a recovered IdP in a permanent outage for every other user.
+			// (Found by Codex review on PR #1077; same defect fixed on the LDAP leg
+			// in noteVerifyError.)
+			a.gate.recordReachable()
+			noteAuthBackendReachable("oidc")
+			logger.Printf("OIDC auth DENY (introspection 4xx) — client/token error, not a backend outage; " +
+				"the endpoint answered, so any cooldown is cleared")
 			return nil, false
 		}
 		// Could not reach the IdP, or it did not answer coherently. Deny this
