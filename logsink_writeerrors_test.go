@@ -120,7 +120,7 @@ func TestAPIHealthz_Standby_AnnotatesProcessLogWriteErrors(t *testing.T) {
 	globalHA.mu.Unlock()
 	installFailingLogSink(t, 1)
 
-	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	req := httptest.NewRequest(http.MethodGet, "/healthz", http.NoBody)
 	w := httptest.NewRecorder()
 	apiHealthz(w, req)
 
