@@ -290,7 +290,7 @@ func TestScanInspectBody_OverLimitSignalsScanSkipped(t *testing.T) {
 	withScanLimit(t, testScanLimit)
 
 	content := append(bytes.Repeat([]byte("E"), testScanLimit), []byte("MALWARE-PAST-THE-WINDOW")...)
-	resp, out, delta := inspectScanFixture(t, content)
+	resp, out, delta := inspectScanFixture(t, content) //nolint:bodyclose // body closed via t.Cleanup on the next line
 	t.Cleanup(func() { _ = resp.Body.Close() })
 
 	if out != scanClean {
@@ -313,7 +313,7 @@ func TestScanInspectBody_UnderLimitDoesNotSignal(t *testing.T) {
 	withScanLimit(t, testScanLimit)
 
 	content := bytes.Repeat([]byte("F"), testScanLimit-1)
-	resp, out, delta := inspectScanFixture(t, content)
+	resp, out, delta := inspectScanFixture(t, content) //nolint:bodyclose // body closed via t.Cleanup on the next line
 	t.Cleanup(func() { _ = resp.Body.Close() })
 
 	if out != scanClean {
@@ -332,7 +332,7 @@ func TestScanInspectBody_ExactlyAtLimitDoesNotSignal(t *testing.T) {
 	withScanLimit(t, testScanLimit)
 
 	content := bytes.Repeat([]byte("G"), testScanLimit)
-	resp, out, delta := inspectScanFixture(t, content)
+	resp, out, delta := inspectScanFixture(t, content) //nolint:bodyclose // body closed via t.Cleanup on the next line
 	t.Cleanup(func() { _ = resp.Body.Close() })
 
 	if out != scanClean {
@@ -393,7 +393,7 @@ func TestScanLimitSignal_ConcurrentResponsesEachCountedOnce(t *testing.T) {
 				defer wg.Done()
 				r := httptest.NewRequest(http.MethodGet, "http://files.example.com/race.bin", http.NoBody)
 				r.RemoteAddr = "198.51.100.13:6000"
-				resp := newChunkedResponse(content)
+				resp := newChunkedResponse(content) //nolint:bodyclose // test NopCloser body; the reassembled body is read below
 				handled, _ := scanHTTPResponseBody(httptest.NewRecorder(), r, resp)
 				if handled {
 					t.Error("clean prefix must not be blocked")
