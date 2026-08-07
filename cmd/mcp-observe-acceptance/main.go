@@ -30,7 +30,12 @@ import (
 	"github.com/KidCarmi/Culvert/internal/mcpacceptance"
 )
 
-func main() {
+func main() { os.Exit(run()) }
+
+// run performs the acceptance and returns a process exit code (0 PASS, 1 FAIL, 2
+// usage/error). Keeping os.Exit out of any deferred scope lets the deferred
+// context cleanups run normally on return.
+func run() int {
 	specPath := flag.String("spec", "", "path to the acceptance spec JSON (required)")
 	sourceSHA := flag.String("source-sha", "", "harness source commit, recorded in the bundle")
 	timeout := flag.Duration("timeout", 15*time.Minute, "overall bounded run timeout")
@@ -38,17 +43,17 @@ func main() {
 
 	if *specPath == "" {
 		fmt.Fprintln(os.Stderr, "mcp-observe-acceptance: -spec is required")
-		os.Exit(2)
+		return 2
 	}
 	spec, err := mcpacceptance.LoadSpec(*specPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "mcp-observe-acceptance: %v\n", err)
-		os.Exit(2)
+		return 2
 	}
 	h, err := mcpacceptance.NewHarness(spec, mcpacceptance.Options{SourceSHA: *sourceSHA})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "mcp-observe-acceptance: %v\n", err)
-		os.Exit(2)
+		return 2
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
@@ -59,16 +64,18 @@ func main() {
 	summary, err := h.Run(ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "mcp-observe-acceptance: run error: %v\n", err)
-		os.Exit(2)
+		return 2
 	}
 	fmt.Printf("acceptance run %s: overall=%s authoritative=%v evidence=%s\n",
 		summary.RunID, summary.Overall, summary.Authoritative, spec.EvidenceDir)
-	for _, c := range summary.Criteria {
+	for i := range summary.Criteria {
+		c := &summary.Criteria[i]
 		if c.Status != mcpacceptance.StatusPass {
 			fmt.Printf("  %-28s %-6s %s\n", c.ID, c.Status, c.Reason)
 		}
 	}
 	if summary.Overall != mcpacceptance.StatusPass {
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }

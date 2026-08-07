@@ -138,9 +138,10 @@ func mcpGet(ctx context.Context, cli *http.Client, mcpPort int, path, host strin
 	return httpResult{status: resp.StatusCode, body: raw}
 }
 
-// initSession runs initialize + notifications/initialized against a server and
-// returns the negotiated session id.
-func initSession(ctx context.Context, cli *http.Client, mcpPort int, serverID, token, host string) (string, httpResult) {
+// initSession runs initialize + notifications/initialized against a server (with
+// the allowed application Host) and returns the negotiated session id.
+func initSession(ctx context.Context, cli *http.Client, mcpPort int, serverID, token string) (string, httpResult) {
+	const host = "gw.test"
 	init := mcpPost(ctx, cli, mcpPort, serverID, token, "", host,
 		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}`)
 	if init.status != 200 || init.sessionID == "" {
@@ -167,6 +168,24 @@ func adminGet(ctx context.Context, cli *http.Client, uiPort int, user, pass, pat
 	}
 	defer resp.Body.Close() //nolint:errcheck
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return httpResult{status: resp.StatusCode, body: raw}
+}
+
+// proxyHealth probes the SWG forward proxy's own /health endpoint on the proxy
+// port (distinct from the admin UI on the ui-port). Used to prove the SWG stays up
+// during emergency-disable of the MCP listener.
+func proxyHealth(ctx context.Context, cli *http.Client, proxyPort int) httpResult {
+	url := fmt.Sprintf("http://127.0.0.1:%d/health", proxyPort)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return httpResult{transportErr: "build_request"}
+	}
+	resp, err := cli.Do(req)
+	if err != nil {
+		return httpResult{transportErr: classifyTransport(err)}
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
 	return httpResult{status: resp.StatusCode, body: raw}
 }
 

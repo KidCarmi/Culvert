@@ -56,6 +56,7 @@ func (b *boundedFile) Write(p []byte) (int, error) {
 	return len(p), err
 }
 
+// Close closes the underlying log file.
 func (b *boundedFile) Close() error { return b.f.Close() }
 
 // startProcess launches the built binary for one process config and blocks until
@@ -75,7 +76,7 @@ func (h *Harness) startProcess(ctx context.Context, pc procConfig) (*Process, er
 		return nil, err
 	}
 	// #nosec G204 -- binary path and flags are harness-controlled, not user input.
-	cmd := exec.Command(h.binary,
+	cmd := exec.CommandContext(ctx, h.binary,
 		"-config", pc.configPath,
 		"-ui-no-tls",
 		"-port", itoa(pc.proxyPort),
@@ -165,7 +166,7 @@ func (h *Harness) startProcessRaw(ctx context.Context, pc procConfig) (*Process,
 		return nil, err
 	}
 	// #nosec G204 -- binary path and flags are harness-controlled, not user input.
-	cmd := exec.Command(h.binary,
+	cmd := exec.CommandContext(ctx, h.binary,
 		"-config", pc.configPath, "-ui-no-tls",
 		"-port", itoa(pc.proxyPort), "-ui-port", itoa(pc.uiPort),
 		"-user", pc.adminUser, "-pass", pc.adminPass, "-metrics-token", pc.metricsToken,

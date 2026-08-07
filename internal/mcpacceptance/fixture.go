@@ -52,6 +52,7 @@ type Fixture struct {
 
 	caPEM          []byte
 	caFile         string
+	clientCAFile   string // mTLS client CA the listener requires (== caFile in dev)
 	serverCertFile string
 	serverKeyFile  string
 	clientCertFile string
@@ -68,9 +69,6 @@ type Fixture struct {
 
 	tenantA, tenantB string
 	serverA, serverB string
-
-	procA procConfig
-	procB procConfig
 
 	secrets *SecretScan
 }
@@ -200,7 +198,11 @@ func NewFixture(root string, secrets *SecretScan) (*Fixture, error) {
 	kid := "acc-kid"
 	issuer := "https://idp.acceptance.test/issuer"
 	jwksFile := filepath.Join(pkiDir, "jwks.json")
-	jwks := map[string]any{"keys": []any{jwkPublic(&signer.PublicKey, kid)}}
+	jwk, err := jwkPublic(&signer.PublicKey, kid)
+	if err != nil {
+		return nil, err
+	}
+	jwks := map[string]any{"keys": []any{jwk}}
 	jb, _ := json.MarshalIndent(jwks, "", "  ")
 	if err := os.WriteFile(jwksFile, jb, 0o600); err != nil {
 		return nil, err
@@ -210,6 +212,7 @@ func NewFixture(root string, secrets *SecretScan) (*Fixture, error) {
 		root:              root,
 		caPEM:             caPEM,
 		caFile:            filepath.Join(pkiDir, "ca.crt"),
+		clientCAFile:      filepath.Join(pkiDir, "ca.crt"), // dev: one CA issues server + client certs
 		serverCertFile:    serverCert,
 		serverKeyFile:     serverKey,
 		clientCertFile:    clientCert,
@@ -375,7 +378,7 @@ func (f *Fixture) renderConfig(pc procConfig, enabled bool) error {
 		"connector_mode":               "local-client",
 		"tls_cert_file":                f.serverCertFile,
 		"tls_key_file":                 f.serverKeyFile,
-		"client_ca_file":               f.serverCAFile(),
+		"client_ca_file":               f.clientCAFile,
 		"client_cert_mode":             pc.clientCertMode,
 		"canonical_resource":           f.canonicalResource,
 		"trusted_issuers":              []any{f.issuer},
@@ -408,10 +411,6 @@ func (f *Fixture) renderConfig(pc procConfig, enabled bool) error {
 	}
 	return os.WriteFile(pc.configPath, b, 0o600)
 }
-
-// serverCAFile returns the CA path (the server's issuing CA, reused as the mTLS
-// client CA in the mTLS scenario).
-func (f *Fixture) serverCAFile() string { return f.caFile }
 
 // NewFixtureFromEnv builds a fixture from operator-supplied material (authoritative
 // mode). It reuses the SAME inventory/policy/config renderers as the ephemeral dev
@@ -447,10 +446,17 @@ func NewFixtureFromEnv(root string, env *EnvSpec, secrets *SecretScan) (*Fixture
 	if err != nil {
 		return nil, err
 	}
+	// The mTLS client CA the listener requires defaults to the server CA when the
+	// operator supplies a single trust root, but honors a distinct client_ca_file.
+	clientCA := env.ClientCAFile
+	if clientCA == "" {
+		clientCA = env.ServerCAFile
+	}
 	f := &Fixture{
 		root:              root,
 		caPEM:             caPEM,
 		caFile:            env.ServerCAFile,
+		clientCAFile:      clientCA,
 		serverCertFile:    env.TLSCertFile,
 		serverKeyFile:     env.TLSKeyFile,
 		clientCertFile:    env.ClientCertFile,

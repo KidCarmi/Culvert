@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -82,15 +83,20 @@ func mintExpired(signer *ecdsa.PrivateKey, p tokenParams) (string, error) {
 }
 
 // jwkPublic renders the ES256 public key as a JWKS entry the trusted_jwks_file
-// loader accepts (EC/P-256, x/y as the 32-byte coordinate halves, base64url).
-func jwkPublic(pub *ecdsa.PublicKey, kid string) map[string]any {
-	byteLen := (pub.Curve.Params().BitSize + 7) / 8
-	x := make([]byte, byteLen)
-	y := make([]byte, byteLen)
-	pub.X.FillBytes(x)
-	pub.Y.FillBytes(y)
+// loader accepts (EC/P-256, x/y as the 32-byte coordinate halves, base64url). It
+// derives x/y from the uncompressed ECDH encoding (0x04 || X(32) || Y(32)) rather
+// than the deprecated big.Int coordinate fields.
+func jwkPublic(pub *ecdsa.PublicKey, kid string) (map[string]any, error) {
+	ep, err := pub.ECDH()
+	if err != nil {
+		return nil, err
+	}
+	raw := ep.Bytes() // 0x04 || X || Y for an uncompressed P-256 point
+	if len(raw) != 65 || raw[0] != 0x04 {
+		return nil, fmt.Errorf("unexpected uncompressed point length %d", len(raw))
+	}
 	return map[string]any{
 		"kty": "EC", "crv": "P-256", "kid": kid, "use": "sig", "alg": "ES256",
-		"x": b64u(x), "y": b64u(y),
-	}
+		"x": b64u(raw[1:33]), "y": b64u(raw[33:65]),
+	}, nil
 }

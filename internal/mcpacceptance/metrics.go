@@ -42,15 +42,14 @@ func scanHighCardinality(body []byte) string {
 	return ""
 }
 
-// metricValueAtLeast reports whether any sample of the named metric is >= min.
-func metricValueAtLeast(body []byte, name string, min float64) bool {
-	prefix := name
+// metricValueAtLeast reports whether any sample of the named metric is >= threshold.
+func metricValueAtLeast(body []byte, name string, threshold float64) bool {
 	for _, line := range strings.Split(string(body), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		if !strings.HasPrefix(line, prefix) {
+		if !strings.HasPrefix(line, name) {
 			continue
 		}
 		// The value is the last space-separated field.
@@ -62,7 +61,7 @@ func metricValueAtLeast(body []byte, name string, min float64) bool {
 		if err != nil {
 			continue
 		}
-		if v >= min {
+		if v >= threshold {
 			return true
 		}
 	}

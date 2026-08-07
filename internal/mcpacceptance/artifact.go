@@ -67,6 +67,38 @@ func bindArtifact(spec *Spec) (ArtifactIdentity, error) {
 	return id, nil
 }
 
+// pinBinary copies the exact bytes that were hashed to a harness-owned path and
+// verifies the copy's digest equals expectedDigest, then returns the copy path.
+// Running the copy binds the reported digest to the bytes actually executed
+// (closing the hash-then-exec TOCTOU on the caller-supplied path). The copy is
+// mode 0500 (owner read+exec only).
+func pinBinary(src, dst, expectedDigest string) (string, error) {
+	in, err := os.Open(src) // #nosec G304 -- operator-supplied artifact path
+	if err != nil {
+		return "", fmt.Errorf("pin artifact open: %w", err)
+	}
+	defer in.Close()                                                        //nolint:errcheck
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o500) // #nosec G304 -- harness-owned work dir
+	if err != nil {
+		return "", fmt.Errorf("pin artifact create: %w", err)
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return "", fmt.Errorf("pin artifact copy: %w", err)
+	}
+	if err := out.Close(); err != nil {
+		return "", fmt.Errorf("pin artifact close: %w", err)
+	}
+	got, err := hashBinary(dst)
+	if err != nil {
+		return "", fmt.Errorf("pin artifact rehash: %w", err)
+	}
+	if got != expectedDigest {
+		return "", fmt.Errorf("pinned copy digest %s != expected %s", got, expectedDigest)
+	}
+	return dst, nil
+}
+
 // probeVersion reads the binary's embedded version from GET /healthz (the only
 // surface that exposes it). Returns "" if unavailable.
 func probeVersion(ctx context.Context, cli *http.Client, uiPort int) string {

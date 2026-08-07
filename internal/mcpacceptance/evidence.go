@@ -158,7 +158,7 @@ var secretPatterns = []struct {
 	name string
 	re   *regexp.Regexp
 }{
-	{"private_key_pem", regexp.MustCompile(`-----BEGIN (?:EC |RSA |OPENSSH |PGP )?PRIVATE KEY-----`)},
+	{"private_key_pem", regexp.MustCompile(`-{5}BEGIN (?:EC |RSA |OPENSSH |PGP )?PRIVATE KEY-{5}`)},
 	{"bearer_jwt", jwtRE},
 }
 
@@ -201,7 +201,7 @@ func (s *SecretScan) Scan(dir string) ([]Violation, error) {
 		if d.IsDir() {
 			return nil
 		}
-		b, err := os.ReadFile(path) // #nosec G304 -- harness-owned evidence directory
+		b, err := os.ReadFile(path) // #nosec G304 G122 -- harness-owned evidence directory, not attacker-controlled
 		if err != nil {
 			return err
 		}
@@ -231,7 +231,7 @@ func (s *SecretScan) Scan(dir string) ([]Violation, error) {
 
 // sha256File returns sha256:<hex> of a file.
 func sha256File(path string) (string, int64, error) {
-	b, err := os.ReadFile(path) // #nosec G304 -- harness-owned evidence directory
+	b, err := os.ReadFile(path) // #nosec G304 G122 -- harness-owned evidence directory, not attacker-controlled
 	if err != nil {
 		return "", 0, err
 	}
@@ -287,15 +287,14 @@ func buildManifest(dir string) (*Manifest, error) {
 func utcStamp(t time.Time) string { return t.UTC().Format(time.RFC3339) }
 
 // writeFile writes b to dir/name with 0600 (evidence may reference bounded state).
-func writeFile(dir, name string, b []byte) (string, error) {
+// dir and name are harness-owned constants (never operator/network input), so the
+// join is not an untrusted path.
+func writeFile(dir, name string, b []byte) error {
 	p := filepath.Join(dir, name)
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
-		return "", err
+		return err
 	}
-	if err := os.WriteFile(p, b, 0o600); err != nil {
-		return "", err
-	}
-	return name, nil
+	return os.WriteFile(p, b, 0o600) // #nosec G304 -- harness-owned evidence path, not attacker-controlled
 }
 
 // FinalizeError classifies why bundle finalization failed.

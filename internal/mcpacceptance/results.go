@@ -30,24 +30,18 @@ func expectedRequiredIDs() []string {
 // caller can record them.
 func computeOverall(criteria []CriterionResult, expected []string, authoritative bool, wantAuthoritative bool) (Status, []string) {
 	present := map[string]Status{}
-	for _, c := range criteria {
-		present[c.ID] = c.Status
+	for i := range criteria {
+		present[criteria[i].ID] = criteria[i].Status
 	}
 	var missing []string
 	for _, id := range expected {
-		st, ok := present[id]
-		if !ok {
+		if _, ok := present[id]; !ok {
 			missing = append(missing, id)
-			continue
-		}
-		if st != StatusPass {
-			// A present-but-failed required criterion is captured by the loop below.
-			_ = st
 		}
 	}
 	overall := StatusPass
-	for _, c := range criteria {
-		if c.Required && c.Status != StatusPass {
+	for i := range criteria {
+		if criteria[i].Required && criteria[i].Status != StatusPass {
 			overall = StatusFail
 		}
 	}

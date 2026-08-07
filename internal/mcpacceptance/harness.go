@@ -63,6 +63,14 @@ func NewHarness(spec *Spec, opts Options) (*Harness, error) {
 	if err := os.MkdirAll(spec.EvidenceDir, 0o700); err != nil {
 		return nil, err
 	}
+	// Require a fresh evidence directory: a reused directory could leave a prior
+	// run's secret_scan_violations.json or logs beside a new PASS summary, mixing
+	// evidence across runs. The harness never deletes operator data — it refuses.
+	if entries, err := os.ReadDir(spec.EvidenceDir); err != nil {
+		return nil, err
+	} else if len(entries) > 0 {
+		return nil, fmt.Errorf("acceptance: evidence_dir %q is not empty; provide a fresh directory per run", spec.EvidenceDir)
+	}
 	work, err := os.MkdirTemp("", "mcp-acceptance-work-")
 	if err != nil {
 		return nil, err
@@ -110,6 +118,16 @@ func (h *Harness) Run(ctx context.Context) (*Summary, error) {
 		RunID:                runID,
 		StartUTC:             utcStamp(h.start),
 	}
+
+	// Pin the exact hashed bytes: copy the binary to a harness-owned path and run
+	// THAT for every process/restart, so a deployment, updater, or attacker
+	// replacing binary_path after the hash cannot make the bundle report one digest
+	// while different bytes are tested. The copy's digest must equal the recorded one.
+	pinned, err := pinBinary(h.spec.Artifact.BinaryPath, filepath.Join(h.workDir, "pinned-culvert"), artifact.Digest)
+	if err != nil {
+		return nil, err
+	}
+	h.binary = pinned
 
 	// 2. Environment: dev generates an ephemeral fixture; authoritative ingests
 	//    operator material (same renderer, one code path).
@@ -163,6 +181,15 @@ func (h *Harness) Run(ctx context.Context) (*Summary, error) {
 	}
 
 	// 6. Scenarios (all at the real binary boundary).
+	h.runScenarios(ctx)
+
+	// 7. Finalize.
+	return h.finalize()
+}
+
+// runScenarios executes every acceptance scenario at the real binary boundary, in
+// order. Kept separate from Run so each stays a small, testable unit.
+func (h *Harness) runScenarios(ctx context.Context) {
 	h.runStartup(ctx)
 	h.runTLS(ctx)
 	h.runOAuth(ctx)
@@ -177,9 +204,6 @@ func (h *Harness) Run(ctx context.Context) (*Summary, error) {
 	h.runRestart(ctx)
 	h.runEmergencyDisable(ctx)
 	h.runNonExecution(ctx)
-
-	// 7. Finalize.
-	return h.finalize(ctx)
 }
 
 // prepareFixture builds the two-tenant environment (dev) or ingests operator
@@ -267,7 +291,7 @@ func (h *Harness) elapsedMS() int64 { return h.now().Sub(h.start).Milliseconds()
 
 // finalize computes derived summary fields, writes the evidence bundle, runs the
 // secret scan, builds the tamper manifest, and returns the summary.
-func (h *Harness) finalize(ctx context.Context) (*Summary, error) {
+func (h *Harness) finalize() (*Summary, error) {
 	// Non-execution tripwire assertion folds into the summary.
 	h.summary.EndUTC = utcStamp(h.now())
 
@@ -289,7 +313,7 @@ func (h *Harness) finalize(ctx context.Context) (*Summary, error) {
 	if err != nil {
 		return h.summary, err
 	}
-	if _, err := writeFile(h.evidenceDir, "summary.json", sumJSON); err != nil {
+	if err := writeFile(h.evidenceDir, "summary.json", sumJSON); err != nil {
 		return h.summary, err
 	}
 	viols, err := h.secrets.Scan(h.evidenceDir)
@@ -301,10 +325,10 @@ func (h *Harness) finalize(ctx context.Context) (*Summary, error) {
 		// never the offending value. Re-serialize the summary with the FAIL verdict.
 		h.summary.Overall = StatusFail
 		vb, _ := canonicalJSON(viols)
-		_, _ = writeFile(h.evidenceDir, "secret_scan_violations.json", vb)
+		_ = writeFile(h.evidenceDir, "secret_scan_violations.json", vb)
 		h.summary.Notes = append(h.summary.Notes, fmt.Sprintf("secret_scan_failed: %d bounded violation(s)", len(viols)))
 		sumJSON, _ = canonicalJSON(h.summary)
-		_, _ = writeFile(h.evidenceDir, "summary.json", sumJSON)
+		_ = writeFile(h.evidenceDir, "summary.json", sumJSON)
 	}
 
 	// Tamper-evidence manifest over the whole bundle (excludes itself).
@@ -316,7 +340,7 @@ func (h *Harness) finalize(ctx context.Context) (*Summary, error) {
 	if err != nil {
 		return h.summary, err
 	}
-	if _, err := writeFile(h.evidenceDir, "manifest.json", mj); err != nil {
+	if err := writeFile(h.evidenceDir, "manifest.json", mj); err != nil {
 		return h.summary, err
 	}
 	return h.summary, nil
@@ -336,7 +360,7 @@ func (h *Harness) copyLogs() {
 		if int64(len(b)) > maxLogBytes {
 			b = b[:maxLogBytes]
 		}
-		_, _ = writeFile(h.evidenceDir, filepath.Join("logs", "proc-"+p.pc.name+".stderr.log"), b)
+		_ = writeFile(h.evidenceDir, filepath.Join("logs", "proc-"+p.pc.name+".stderr.log"), b)
 	}
 }
 

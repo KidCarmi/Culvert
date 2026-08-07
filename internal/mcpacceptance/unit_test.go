@@ -1,6 +1,7 @@
 package mcpacceptance
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -184,7 +185,7 @@ func TestCanonicalJSON_Deterministic(t *testing.T) {
 	s := Summary{RunID: "r", Overall: StatusPass, Criteria: []CriterionResult{{ID: "x", Status: StatusPass}}}
 	a, _ := canonicalJSON(s)
 	b, _ := canonicalJSON(s)
-	if string(a) != string(b) {
+	if !bytes.Equal(a, b) {
 		t.Fatal("canonical JSON must be byte-stable")
 	}
 }

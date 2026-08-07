@@ -108,6 +108,7 @@ type RunControl struct {
 // Duration is a JSON-friendly time.Duration ("30s", "2m").
 type Duration time.Duration
 
+// UnmarshalJSON accepts a duration string ("30s", "2m") or a bare number of seconds.
 func (d *Duration) UnmarshalJSON(b []byte) error {
 	var s string
 	if err := json.Unmarshal(b, &s); err != nil {
@@ -131,16 +132,17 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// MarshalJSON renders the duration as its string form ("30s").
 func (d Duration) MarshalJSON() ([]byte, error) { return json.Marshal(time.Duration(d).String()) }
 
 // resolved applies the default when zero and clamps to the strict maximum.
-func resolved(v Duration, def, max time.Duration) time.Duration {
+func resolved(v Duration, def, maxD time.Duration) time.Duration {
 	d := time.Duration(v)
 	if d <= 0 {
 		return def
 	}
-	if d > max {
-		return max
+	if d > maxD {
+		return maxD
 	}
 	return d
 }

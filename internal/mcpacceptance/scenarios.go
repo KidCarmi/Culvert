@@ -54,7 +54,7 @@ func (h *Harness) runStartup(ctx context.Context) {
 	h.runCriterion("startup.tls_reachable", "TLS listener reachable", "startup", true,
 		"TLS handshake succeeds on the MCP listener", func() (Status, string, string, []string) {
 			// A bare initialize proves the TLS listener terminates and serves.
-			sid, init := initSession(ctx, h.mcpBearer, h.procA.pc.mcpPort, h.fixture.serverA, h.tokenA, "gw.test")
+			sid, init := initSession(ctx, h.mcpBearer, h.procA.pc.mcpPort, h.fixture.serverA, h.tokenA)
 			if sid != "" && init.status == 200 {
 				return pass("initialize over TLS returned a session")
 			}
@@ -125,7 +125,7 @@ func (h *Harness) runTLS(ctx context.Context) {
 			if err != nil {
 				return fail("client build", "client")
 			}
-			sid, init := initSession(ctx, cli, pc.mcpPort, h.fixture.serverA, h.tokenA, "gw.test")
+			sid, init := initSession(ctx, cli, pc.mcpPort, h.fixture.serverA, h.tokenA)
 			if sid != "" && init.status == 200 {
 				return pass("mTLS handshake + initialize succeeded")
 			}
@@ -155,7 +155,7 @@ func (h *Harness) runOAuth(ctx context.Context) {
 	// A valid token must reach a decision point (proves the positive path).
 	h.runCriterion("oauth.valid", "valid token authenticates", "auth", true,
 		"a valid Model-A token reaches policy evaluation (200)", func() (Status, string, string, []string) {
-			sid, _ := initSession(ctx, h.mcpBearer, mp, sv, h.tokenA, "gw.test")
+			sid, _ := initSession(ctx, h.mcpBearer, mp, sv, h.tokenA)
 			if sid == "" {
 				return fail("no session", "auth_failed")
 			}
@@ -263,7 +263,7 @@ func (h *Harness) runProtocol(ctx context.Context) {
 	sv := h.fixture.serverA
 	h.runCriterion("protocol.lifecycle", "initialize/initialized/ping accepted", "protocol", true,
 		"the kernel-terminal lifecycle completes", func() (Status, string, string, []string) {
-			sid, init := initSession(ctx, h.mcpBearer, mp, sv, h.tokenA, "gw.test")
+			sid, init := initSession(ctx, h.mcpBearer, mp, sv, h.tokenA)
 			if sid == "" || init.status != 200 {
 				return fail(fmt.Sprintf("init status %d", init.status), "lifecycle_failed")
 			}
@@ -282,16 +282,20 @@ func (h *Harness) runProtocol(ctx context.Context) {
 			return fail(fmt.Sprintf("status %d (expected 400)", res.status), "malformed_admitted")
 		})
 	h.runCriterion("protocol.bad_version", "unsupported MCP version rejected", "protocol", true,
-		"an unsupported MCP-Protocol-Version is rejected", func() (Status, string, string, []string) {
-			res := mcpPostRaw(ctx, h.mcpBearer, mp, "/mcp/gateway/"+sv, h.tokenA,
-				`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}`,
-				map[string]string{"Host": "gw.test", "MCP-Protocol-Version": "1999-01-01", "Authorization": "Bearer " + h.tokenA})
-			// A present-but-unsupported version header is a terminal 400 on a non-initialize;
-			// on initialize the server negotiates. We send a version header the transport rejects.
-			if res.status == 400 {
-				return pass("bad version 400")
+		"a present-but-unsupported MCP-Protocol-Version on a session request is a terminal 400", func() (Status, string, string, []string) {
+			// initialize negotiates the version, so exercise rejection on a SESSION
+			// request: a present-but-unsupported version header there is a terminal 400.
+			sid, init := initSession(ctx, h.mcpBearer, mp, sv, h.tokenA)
+			if sid == "" {
+				return fail(fmt.Sprintf("init status %d", init.status), "init_failed")
 			}
-			return pass(fmt.Sprintf("version negotiated (status %d)", res.status)) // negotiation is acceptable
+			res := mcpPostRaw(ctx, h.mcpBearer, mp, "/mcp/gateway/"+sv, h.tokenA,
+				`{"jsonrpc":"2.0","id":9,"method":"tools/list"}`,
+				map[string]string{"Host": "gw.test", "Mcp-Session-Id": sid, "MCP-Protocol-Version": "1999-01-01", "Authorization": "Bearer " + h.tokenA})
+			if res.status == 400 {
+				return pass("unsupported version 400")
+			}
+			return fail(fmt.Sprintf("status %d (expected 400)", res.status), "bad_version_admitted")
 		})
 	h.runCriterion("protocol.oversized", "oversized body rejected", "protocol", true,
 		"a body over the byte cap is rejected (413 or an early connection close)", func() (Status, string, string, []string) {
@@ -318,7 +322,7 @@ func (h *Harness) runInventory(ctx context.Context) {
 	mp := h.procA.pc.mcpPort
 	h.runCriterion("inventory.known", "known server resolves", "inventory", true,
 		"the seeded server resolves at the listener", func() (Status, string, string, []string) {
-			sid, init := initSession(ctx, h.mcpBearer, mp, h.fixture.serverA, h.tokenA, "gw.test")
+			sid, init := initSession(ctx, h.mcpBearer, mp, h.fixture.serverA, h.tokenA)
 			if sid != "" && init.status == 200 {
 				return pass("known server initialize 200")
 			}
@@ -389,7 +393,7 @@ func (h *Harness) runTenantMatrix(ctx context.Context) {
 		}
 		h.runCriterion(c.id, fmt.Sprintf("tenant %s token -> tenant %s server", c.tokenLabel, c.serverLabel), "tenant", true,
 			expected, func() (Status, string, string, []string) {
-				sid, init := initSession(ctx, h.mcpBearer, c.mp, c.server, c.token, "gw.test")
+				sid, init := initSession(ctx, h.mcpBearer, c.mp, c.server, c.token)
 				if sid == "" {
 					return fail(fmt.Sprintf("init status %d", init.status), "init_failed")
 				}
@@ -421,7 +425,7 @@ func (h *Harness) runTenantMatrix(ctx context.Context) {
 	// tenant (query + header) cannot replace the authenticated tenant.
 	h.runCriterion("tenant.spoof_ignored", "client tenant spoof ignored", "tenant", true,
 		"?tenant / X-Tenant do not override the authenticated tenant", func() (Status, string, string, []string) {
-			sid, _ := initSession(ctx, h.mcpBearer, h.procB.pc.mcpPort, h.fixture.serverB, h.tokenA, "gw.test")
+			sid, _ := initSession(ctx, h.mcpBearer, h.procB.pc.mcpPort, h.fixture.serverB, h.tokenA)
 			if sid == "" {
 				return fail("init", "init_failed")
 			}
@@ -437,7 +441,7 @@ func (h *Harness) runTenantMatrix(ctx context.Context) {
 
 	h.runCriterion("tenant.no_leak", "no foreign-tenant leak in denial", "tenant", true,
 		"a cross-tenant denial exposes no owner/endpoint/tool state", func() (Status, string, string, []string) {
-			sid, _ := initSession(ctx, h.mcpBearer, h.procB.pc.mcpPort, h.fixture.serverB, h.tokenA, "gw.test")
+			sid, _ := initSession(ctx, h.mcpBearer, h.procB.pc.mcpPort, h.fixture.serverB, h.tokenA)
 			res := mcpPost(ctx, h.mcpBearer, h.procB.pc.mcpPort, h.fixture.serverB, h.tokenA, sid, "gw.test",
 				`{"jsonrpc":"2.0","id":7,"method":"tools/list"}`)
 			body := string(res.body)
@@ -481,7 +485,7 @@ func (h *Harness) runPolicy(ctx context.Context) {
 		})
 	h.runCriterion("policy.discovery_allow", "same-tenant discovery reaches user ALLOW", "policy", true,
 		"tools/list on A->A is a non-executing ALLOW", func() (Status, string, string, []string) {
-			sid, _ := initSession(ctx, h.mcpBearer, mp, sv, h.tokenA, "gw.test")
+			sid, _ := initSession(ctx, h.mcpBearer, mp, sv, h.tokenA)
 			res := mcpPost(ctx, h.mcpBearer, mp, sv, h.tokenA, sid, "gw.test", `{"jsonrpc":"2.0","id":8,"method":"tools/list"}`)
 			if res.status == 200 && strings.Contains(string(res.body), "not_implemented") {
 				return pass("ALLOW discovery, execution_state=not_implemented")
@@ -490,7 +494,7 @@ func (h *Harness) runPolicy(ctx context.Context) {
 		})
 	h.runCriterion("policy.quarantine_beats_allow", "quarantined tools/call denied under ALLOW", "policy", true,
 		"tools/call on a quarantined tool is a hard QUARANTINE, never executed", func() (Status, string, string, []string) {
-			sid, _ := initSession(ctx, h.mcpBearer, mp, sv, h.tokenA, "gw.test")
+			sid, _ := initSession(ctx, h.mcpBearer, mp, sv, h.tokenA)
 			res := mcpPost(ctx, h.mcpBearer, mp, sv, h.tokenA, sid, "gw.test",
 				`{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"echo"}}`)
 			if reasonOf(res.body) != "" && !hasResult(res.body) && !strings.Contains(string(res.body), `"execution_state":"executed"`) {
@@ -522,7 +526,7 @@ func (h *Harness) checkDefaultDeny(ctx context.Context) (Status, string, string,
 		return fail("aux start", "aux_start")
 	}
 	defer func() { _ = proc.stop(h.spec.Run.shutdown()) }()
-	sid, _ := initSession(ctx, h.mcpBearer, pc.mcpPort, h.fixture.serverA, h.tokenA, "gw.test")
+	sid, _ := initSession(ctx, h.mcpBearer, pc.mcpPort, h.fixture.serverA, h.tokenA)
 	res := mcpPost(ctx, h.mcpBearer, pc.mcpPort, h.fixture.serverA, h.tokenA, sid, "gw.test", `{"jsonrpc":"2.0","id":11,"method":"tools/list"}`)
 	if reasonOf(res.body) == "MCP.POLICY.NO_MATCH_DEFAULT_DENY" {
 		return pass("default-deny reason observed")
@@ -537,7 +541,7 @@ func (h *Harness) runDurableEvidence(ctx context.Context) {
 		"the ALLOW discovery decision is readable via /api/mcp/decisions", func() (Status, string, string, []string) {
 			// Generate a fresh ALLOW discovery then read it back through the Admin API,
 			// polling briefly for the synchronous commit to surface.
-			sid, _ := initSession(ctx, h.mcpBearer, h.procA.pc.mcpPort, h.fixture.serverA, h.tokenA, "gw.test")
+			sid, _ := initSession(ctx, h.mcpBearer, h.procA.pc.mcpPort, h.fixture.serverA, h.tokenA)
 			_ = mcpPost(ctx, h.mcpBearer, h.procA.pc.mcpPort, h.fixture.serverA, h.tokenA, sid, "gw.test", `{"jsonrpc":"2.0","id":12,"method":"tools/list"}`)
 			deadline := h.now().Add(h.spec.Run.request())
 			for h.now().Before(deadline) {
@@ -562,7 +566,7 @@ func (h *Harness) runDurableEvidence(ctx context.Context) {
 	// aggregation contract itself is pinned by internal/mcp/events composed tests.
 	h.runCriterion("evidence.denial_aggregated", "cross-tenant denial aggregated (advisory)", "evidence", false,
 		"a cross-tenant denial eventually increments the denial-lane metric", func() (Status, string, string, []string) {
-			sid, _ := initSession(ctx, h.mcpBearer, h.procB.pc.mcpPort, h.fixture.serverB, h.tokenA, "gw.test")
+			sid, _ := initSession(ctx, h.mcpBearer, h.procB.pc.mcpPort, h.fixture.serverB, h.tokenA)
 			_ = mcpPost(ctx, h.mcpBearer, h.procB.pc.mcpPort, h.fixture.serverB, h.tokenA, sid, "gw.test", `{"jsonrpc":"2.0","id":13,"method":"tools/list"}`)
 			m := metricsGet(ctx, h.metricsClient, h.procB.pc.proxyPort, h.procB.pc.metricsToken)
 			if m.status == 200 && metricValueAtLeast(m.body, "culvert_mcp_denial_aggregates_total", 1) {
@@ -632,7 +636,7 @@ func (h *Harness) runRestart(ctx context.Context) {
 			// Historical evidence committed BEFORE the restart (by evidence.allow_committed)
 			// must remain readable AND non-empty after a real process restart — proving the
 			// durable spool persisted the decision, not merely that the endpoint recovered.
-			deadline := h.now().Add(h.spec.Run.request())
+			deadline := h.now().Add(h.spec.Run.restart())
 			for h.now().Before(deadline) {
 				res := adminGet(ctx, h.uiClient, h.procA.pc.uiPort, h.procA.pc.adminUser, h.procA.pc.adminPass,
 					"/api/mcp/decisions?tenant="+h.fixture.tenantA)
@@ -672,7 +676,7 @@ func (h *Harness) checkEmergencyDisable(ctx context.Context) (Status, string, st
 		return fail("aux start", "aux_start")
 	}
 	// Prove a known-good request first.
-	sid, init := initSession(ctx, h.mcpBearer, pc.mcpPort, h.fixture.serverA, h.tokenA, "gw.test")
+	sid, init := initSession(ctx, h.mcpBearer, pc.mcpPort, h.fixture.serverA, h.tokenA)
 	if sid == "" || init.status != 200 {
 		_ = proc.stop(h.spec.Run.shutdown())
 		return fail("pre-disable known-good failed", "pre_disable")
@@ -696,10 +700,12 @@ func (h *Harness) checkEmergencyDisable(ctx context.Context) (Status, string, st
 		_ = conn.Close()
 		return fail("mcp port still bound after disable", "still_admitting")
 	}
-	// SWG (proxy port /health) must remain up.
-	swg := adminGet(ctx, h.uiClient, pc.uiPort, pc.adminUser, pc.adminPass, "/healthz")
+	// The SWG forward proxy must remain up — probe ITS own /health endpoint on the
+	// PROXY port (the admin UI on the ui-port is a different service). An artifact
+	// that killed the SWG proxy while leaving the UI up must fail here.
+	swg := proxyHealth(ctx, h.uiClient, pc.proxyPort)
 	if swg.status != 200 {
-		return fail(fmt.Sprintf("SWG health %d", swg.status), "swg_down")
+		return fail(fmt.Sprintf("SWG proxy /health %d", swg.status), "swg_down")
 	}
 	// Rollout must not have advanced (overview execution still not_implemented).
 	ov := adminGet(ctx, h.uiClient, pc.uiPort, pc.adminUser, pc.adminPass, "/api/mcp/overview")
@@ -724,10 +730,16 @@ func (h *Harness) runNonExecution(ctx context.Context) {
 			return fail(fmt.Sprintf("tripwire inbound A=%d B=%d", a, b), "execution_detected")
 		})
 	h.runCriterion("nonexec.health", "health reports execution disabled", "nonexec", true,
-		"gateway.runtime.execution_enabled is false", func() (Status, string, string, []string) {
-			hv, _ := h.procA.health(ctx, h.uiClient)
+		"gateway.runtime.execution_enabled is false on a reachable, ready gateway", func() (Status, string, string, []string) {
+			hv, res := h.procA.health(ctx, h.uiClient)
+			// A successful, ready health response is required before the boolean is
+			// meaningful — an unreachable gateway must not read as "execution disabled".
+			if res.status != 200 || hv.Gateway.Runtime.State != "ready" {
+				h.summary.NonExecution = StatusFail
+				return fail(fmt.Sprintf("health status=%d state=%s", res.status, hv.Gateway.Runtime.State), "health_unreachable")
+			}
 			if !hv.Gateway.Runtime.ExecutionEnabled {
-				return pass("execution_enabled=false")
+				return pass("execution_enabled=false (gateway ready)")
 			}
 			h.summary.NonExecution = StatusFail
 			return fail("execution_enabled=true", "execution_enabled")
