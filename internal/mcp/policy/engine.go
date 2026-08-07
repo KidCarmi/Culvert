@@ -25,15 +25,16 @@ func NewEngine(lim Limits) *Engine { return &Engine{lim: lim} }
 //
 //  1. snapshot available + capability match
 //  2. structural input validity
-//  3. cross-tenant reference        → DENY  MCP.AUTH.TENANT_MISMATCH
+//  3. cross-tenant resource reference → DENY MCP.AUTH.TENANT_MISMATCH
 //  4. missing/ambiguous identity on write/high-risk → DENY MCP.AUTH.IDENTITY_AMBIGUOUS (MCP-ID-005)
 //  5. Management mutation/activation → DENY  MCP.MANAGEMENT.MUTATION_NOT_APPROVED
-//  6. server identity changed       → DENY  MCP.SERVER.IDENTITY_CHANGED
-//  7. server disabled               → DENY  MCP.SERVER.DISABLED
-//  8. unknown tool                  → QUARANTINE MCP.TOOL.UNKNOWN
-//  9. privilege expansion           → QUARANTINE MCP.TOOL.PRIVILEGE_EXPANSION
-//  10. ordered first-match over enabled rules (+ destructive contract)
-//  11. default deny                 → DENY  MCP.POLICY.NO_MATCH_DEFAULT_DENY
+//  6. Gateway cross-tenant server    → DENY  MCP.AUTH.TENANT_MISMATCH (QUAL-5 tenant isolation)
+//  7. server identity changed       → DENY  MCP.SERVER.IDENTITY_CHANGED
+//  8. server disabled               → DENY  MCP.SERVER.DISABLED
+//  9. unknown tool                  → QUARANTINE MCP.TOOL.UNKNOWN
+//  10. privilege expansion           → QUARANTINE MCP.TOOL.PRIVILEGE_EXPANSION
+//  11. ordered first-match over enabled rules (+ destructive contract)
+//  12. default deny                 → DENY  MCP.POLICY.NO_MATCH_DEFAULT_DENY
 func (e *Engine) Evaluate(snap *Snapshot, in *DecisionInput) (Decision, ExplainTrace, error) {
 	tb := newTraceBuilder(e.lim.MaxTraceEntries())
 	if in == nil {
@@ -96,8 +97,24 @@ func (e *Engine) subjectOverride(snap *Snapshot, in *DecisionInput, tb *traceBui
 
 // serverToolOverride evaluates the Gateway server + tool fail-closed overrides.
 func (e *Engine) serverToolOverride(snap *Snapshot, in *DecisionInput, tb *traceBuilder) (Decision, bool) {
-	// 6/7. Server-level fail-closed (Gateway).
+	// 6. Gateway tenant isolation (QUAL-5): the authenticated tenant MUST own the
+	// addressed server. The binding is EXACT — the authenticated tenant string must
+	// equal the registry OwnerScope byte-for-byte; no prefix/substring/case-fold/
+	// wildcard/global tenant. An empty OwnerScope fails CLOSED: an unscoped server is
+	// NEVER treated as "owned by every tenant". This is the FIRST server-level
+	// override, so it dominates every server/tool signal below AND every user rule —
+	// a cross-tenant request can never be laundered into an ALLOW and never learns the
+	// foreign server's verification or enabled state (no foreign-tenant leak). The
+	// principal tenant is guaranteed non-empty here (structural validation ran first),
+	// so only an empty/mismatched server owner can trip this. Management inputs carry
+	// no Server, so this is Gateway-only by construction.
 	if in.Server != nil {
+		if in.Server.Owner == "" || in.Server.Owner != in.Principal.Tenant {
+			tb.add(TraceHardOverride, "", "server.owner", false, "authenticated tenant does not own the addressed server")
+			return hard(ActionDeny, ReasonTenantMismatch, RemediationUseCorrectResource, in, snap), true
+		}
+		// 7/8. Server-level fail-closed (Gateway), evaluated only AFTER tenant isolation
+		// so a cross-tenant request never reaches these server-state checks.
 		if in.Server.Verification == ServerIdentityMismatch || in.Tool != nil && in.Tool.Drift == DriftIdentityChange {
 			tb.add(TraceHardOverride, "", "server.verification", false, "server identity changed")
 			return hard(ActionDeny, ReasonServerIdentityChanged, RemediationVerifyServerIdentity, in, snap), true
@@ -107,7 +124,7 @@ func (e *Engine) serverToolOverride(snap *Snapshot, in *DecisionInput, tb *trace
 			return hard(ActionDeny, ReasonServerDisabled, RemediationVerifyServerIdentity, in, snap), true
 		}
 	}
-	// 8/9. Tool-level quarantine overrides. A quarantined disposition is an
+	// 9/10. Tool-level quarantine overrides. A quarantined disposition is an
 	// authoritative catalog signal and quarantines INDEPENDENT of drift — it is not
 	// shadowed by the input validator's drift requirement, so a catalog-quarantined
 	// tool (which carries an unresolved drift class) still fails closed here.
