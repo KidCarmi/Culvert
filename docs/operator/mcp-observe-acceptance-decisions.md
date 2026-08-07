@@ -42,7 +42,7 @@ The right-hand column names where the value is authoritative, not a suggested va
 
 | Value | Spec field | Status | Source of truth |
 | --- | --- | --- | --- |
-| Bind address | `environment.bind_host` | DECISION REQUIRED | Qualification environment definition |
+| Bind address | `environment.bind_host` | DECISION REQUIRED (recorded, not bound) | Recorded in the config hash; the current harness binds `127.0.0.1`. A real network boundary requires a harness change. |
 | Port | derived by the harness per process | DECISION REQUIRED | Harness assigns bounded local ports; operator confirms no conflict |
 | Canonical resource | `environment.canonical_resource` | DECISION REQUIRED | Gateway resource identifier for the run |
 | Accepted MCP protocol versions | fixed by the artifact | DECISION REQUIRED (confirm) | Product build under test |
@@ -95,6 +95,12 @@ The right-hand column names where the value is authoritative, not a suggested va
 
 ## Policy
 
+Not consumed by the current harness: it generates a fixed revision-1 fixture policy
+(default DENY plus one `ALLOW_DISCOVERY` rule on `tools/list`). Record the intended
+policy for the qualification record, but the run exercises the fixture policy until a
+harness change accepts an operator policy. See the runbook "Harness scope and current
+limitations".
+
 | Value | Status | Source of truth |
 | --- | --- | --- |
 | Source file | DECISION REQUIRED | Qualification policy selection; see `docs/operator/mcp-qualification-policy.md` |
@@ -103,6 +109,11 @@ The right-hand column names where the value is authoritative, not a suggested va
 | Expected snapshot revision / hash after startup | DECISION REQUIRED | Read from `gateway.policy_revision` and `gateway.policy_snapshot_hash` on `/api/mcp/health` after startup |
 
 ## Telemetry
+
+Not consumed by the current harness: the data root, KEK, and archive are generated
+under the harness temporary work root and removed on cleanup. There is no operator-owned
+telemetry location or operator KEK today. These rows apply once a harness change accepts
+operator-owned locations. See the runbook "Harness scope and current limitations".
 
 | Value | Status | Source of truth |
 | --- | --- | --- |

@@ -25,6 +25,56 @@ execution, does not change rollout mode, and does not unlock Production.
 An acceptance PASS is evidence for a later, separate Post-Acceptance Observe
 Readiness Decision. It is not that decision.
 
+## Harness scope and current limitations (read before section 1)
+
+The QUAL-6 acceptance harness runs a fixed internal two-process fixture. Read what it
+consumes from the operator versus what it generates itself, so this runbook is not
+misread as offering controls the current harness does not expose. Every item below is
+confirmed against the harness source (`internal/mcpacceptance/fixture.go`,
+`process.go`, `harness.go`).
+
+Authoritative mode consumes only identity material from the operator:
+`tls_cert_file`, `tls_key_file`, `server_ca_file`, `client_ca_file`,
+`client_cert_file`, `client_key_file`, `trusted_jwks_file`, `signing_key_file`,
+`signing_kid`, `oauth_issuer`, `canonical_resource`, `required_scopes`,
+`accepted_client_ids`, `tenant_a`, `tenant_b`, `server_a`, `server_b`, plus the
+artifact identity and `evidence_dir`.
+
+The harness generates the following itself, the same way in dev and authoritative
+mode, and does NOT take them from the operator:
+
+- Policy. `Fixture.writePolicy` writes a fixed revision-1 policy (default DENY plus a
+  single `ALLOW_DISCOVERY` rule on `tools/list`) for every process. There is no spec
+  field for an operator policy, so the `policy.*` criteria and the recorded
+  `policy_revision` and `policy_snapshot_hash` describe this fixture policy, not an
+  operator-selected qualification policy.
+- Network boundary. `buildProc` binds every process to `127.0.0.1` on ephemeral
+  ports. `bind_host` is recorded in the spec and folded into the config hash, but the
+  current harness does not bind it. Authoritative evidence covers a loopback listener,
+  not a selected network boundary.
+- Telemetry storage and KEK. `buildProc` places the data directory, archive
+  directory, and KEK under the harness temporary work root, and `Harness.cleanup`
+  removes that whole root after the run. There is no operator-owned telemetry location
+  or operator KEK in the current harness; these are harness-owned ephemeral state.
+- Admin and metrics endpoints. Each process gets ephemeral loopback ports and
+  harness-generated admin and metrics credentials, registered as secrets and not
+  exposed to the operator during the run. The current harness provides no supported
+  way to scrape `/metrics` or the Admin API live while the processes are alive; the
+  harness polls them internally.
+
+Consequence: the bounded-run supervision the operator actually has is the harness's own
+pass/fail criteria and the evidence bundle it writes (section 13), plus the process
+exit code, not live external scraping. The metric and health tables in section 10
+document what the harness asserts internally and what a future harness change would
+need to expose for live external supervision.
+
+These four items are recorded product gaps, not settled behavior. A fully
+operator-controlled authoritative run (operator-selected policy, a real network
+boundary, operator-owned telemetry and KEK custody, and live external supervision)
+requires a harness change and is out of scope for this documentation. Until that change
+lands, treat those operator inputs as recorded-but-not-consumed and rely on the
+evidence bundle for supervision.
+
 ## Phase order
 
 Run the phases in this exact order. Do not proceed to a phase until the previous
@@ -108,18 +158,24 @@ hosts, issuers, tenants, thresholds, or paths. Use the decision worksheet as the
 checklist. Confirm, at minimum:
 
 - Node: host, OS, architecture, telemetry node ID, clock synchronization.
-- Gateway: bind address (`environment.bind_host`), canonical resource
-  (`environment.canonical_resource`), accepted protocol versions.
+- Gateway: canonical resource (`environment.canonical_resource`) and accepted
+  protocol versions are consumed. `environment.bind_host` is recorded but the current
+  harness binds `127.0.0.1` (see Harness scope and current limitations); the selected
+  network boundary is not exercised.
 - TLS and mTLS: server certificate and key, client CA, server CA the harness
   trusts, and the Model-A client certificate and key. All are file-path references.
 - OAuth: issuer, JWKS file, accepted client ids, required scopes, audience or
   resource, sender-constraint posture, and the token signing key file and kid.
 - Tenant A and tenant B: tenant ids, ServerIDs, OwnerScopes, and that seeded tools
   remain Quarantined.
-- Policy: source, intended ALLOW discovery rule, expected deny case, expected
-  snapshot revision and hash after startup.
-- Telemetry: data root, KEK provider and location, archive root, retention, quota,
-  and custody boundary.
+- Policy: NOT consumed by the current harness. It generates a fixed fixture policy
+  (see Harness scope and current limitations). Record the intended qualification
+  policy in the worksheet for the record, but understand the run exercises the fixture
+  policy until a harness change accepts an operator policy.
+- Telemetry: data root, KEK, and archive are NOT operator-supplied in the current
+  harness; it generates them under its temporary work root (see Harness scope and
+  current limitations). Operator-owned telemetry and KEK custody requires a harness
+  change.
 
 Secret-bearing files are referenced by path only and their bytes never enter the
 evidence bundle. Confirm the harness process can read each referenced file.
@@ -152,9 +208,10 @@ true on the gateway runtime:
 - `gateway.runtime.execution_enabled` is `false`.
 
 The harness also records the binary version from `GET /healthz` and records
-`gateway.policy_revision` and `gateway.policy_snapshot_hash` for the evidence.
-Confirm the recorded policy revision and snapshot hash match the expected values
-from the worksheet.
+`gateway.policy_revision` and `gateway.policy_snapshot_hash` for the evidence. These
+describe the harness's fixed fixture policy (revision 1), not an operator-selected
+policy (see Harness scope and current limitations), so treat them as evidence of the
+fixture that ran, not as verification of a chosen qualification policy.
 
 The startup criteria in the bundle are `startup.ready`, `startup.tls_reachable`,
 `startup.oauth_metadata`, and `startup.disabled_binds_nothing` (a disabled Gateway
@@ -226,12 +283,22 @@ ready, or a critical durability signal fails (see the watch-list).
 
 ## 10. Monitoring supervision
 
-Supervise the bounded run with the signals below. All are present on current main.
-Bounded acceptance supervision is possible with these signals. This is not the same
-as sustained Observe monitoring: dashboards, alert rules, and numeric thresholds
-remain a later sustained-Observe requirement and are not delivered by this runbook.
-This runbook does not claim the current monitoring package is sufficient for
-sustained Observe.
+The signals below are present on current main. IMPORTANT: the current harness runs
+each process on ephemeral loopback ports with harness-generated admin and metrics
+credentials that are not exposed to the operator during the run, so live external
+scraping of `/metrics` and the Admin API is NOT available today (see Harness scope and
+current limitations). The bounded-run supervision the operator actually has is the
+harness's own pass/fail criteria and the evidence bundle (section 13), plus the process
+exit code. The harness itself polls the health and metrics signals internally and folds
+the durability outcome into `summary.json` (`telemetry_summary`, the `metrics.*`
+criteria, restart and non-execution results).
+
+The table therefore documents two things: what the harness asserts internally on your
+behalf during the bounded run, and the exact fields and metric names a future harness
+change would need to expose for live external operator supervision. It is not a claim
+that the operator can scrape these live today. This is also not sustained Observe
+monitoring: dashboards, alert rules, and numeric thresholds remain a later
+sustained-Observe requirement and are not delivered by this runbook.
 
 Numeric thresholds are operator decisions and are marked `DECISION REQUIRED`. The
 fail-closed direction for the critical durability signals is that they do not
@@ -370,23 +437,29 @@ generated fixtures, temporary keys, temporary tripwire state, and temporary proc
 state). It preserves the evidence bundle and never deletes operator-owned state
 outside its work root.
 
+In the current harness the telemetry data directory, archive, and KEK are created
+under the harness temporary work root and are removed by `Harness.cleanup`; they are
+harness-owned ephemeral state, not operator-owned artifacts (see Harness scope and
+current limitations). There is no operator KEK to preserve today. Operator-owned
+telemetry, archive, and KEK preservation becomes applicable only after a harness change
+places them under operator-owned locations.
+
 The operator must preserve, and must not auto-delete:
 
 - The authoritative evidence bundle (`summary.json`, `manifest.json`, the bounded
-  `logs/`).
+  `logs/`) in `evidence_dir`, which the harness does not delete.
 - The artifact-verification evidence.
 - The completed decision worksheet.
-- The operator KEK.
-- The authoritative spool and archive.
 - The signed artifact.
 - The evidence destination.
 
-The operator may safely remove or rotate ephemeral material that lived outside the
-harness work root: any operator-generated temporary tokens, temporary private keys,
-temporary fixture files, and temporary process state created for the run. Do not
-remove the KEK, the authoritative spool or archive, the signed artifact, or the
-evidence destination unless the runbook has an explicit, operator-approved retention
-action for that item.
+The operator may safely remove or rotate ephemeral material that the operator created
+outside the harness work root: any operator-generated temporary tokens, temporary
+private keys, temporary fixture files, and temporary process state created for the run.
+Do not remove the signed artifact or the evidence destination unless the runbook has an
+explicit, operator-approved retention action for that item. Once a harness change
+introduces operator-owned telemetry, archive, and KEK locations, add them to this
+preserve list.
 
 Record any cleanup failure with the evidence. Cleanup failure is itself an item to
 escalate.

@@ -54,6 +54,17 @@ no credentials, and no signed-artifact claims.
 schema changes and this template is not updated, that test fails. The template is
 therefore kept in lockstep with the code, not by hand.
 
+## Current harness limitations
+
+Some fields are recorded but not yet consumed by the current harness. `bind_host` is
+recorded in the config hash, but the harness binds `127.0.0.1`. The qualification
+policy and the telemetry data / KEK / archive locations have no spec fields at all: the
+harness generates a fixed fixture policy and its own temporary telemetry state. Admin
+and metrics endpoints run on ephemeral loopback ports with harness-generated
+credentials that are not exposed during the run. See "Harness scope and current
+limitations" in `docs/operator/mcp-observe-acceptance-runbook.md` before relying on any
+of these as operator controls.
+
 ## What this template is not
 
 Filling the placeholders does not authorize an acceptance run. A run is authorized

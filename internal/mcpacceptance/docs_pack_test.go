@@ -105,6 +105,7 @@ func TestDocsPack_RunbookHasAllSixteenSections(t *testing.T) {
 	}
 	content := string(b)
 	sections := []string{
+		"## Harness scope and current limitations (read before section 1)",
 		"## 1. Prerequisites",
 		"## 2. Artifact verification",
 		"## 3. Environment inventory",
