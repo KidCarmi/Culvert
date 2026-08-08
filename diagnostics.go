@@ -147,6 +147,7 @@ func buildOperatorContract() OperatorContract {
 		checkCDR(),
 		checkClusterPosture(),
 		checkDPLastGoodConfigSnapshot(),
+		checkConfigSnapshotApply(),
 		checkSAMLStatePosture(),
 		checkSAMLBaseURLPosture(),
 		checkDefaultAuthOpen(),
@@ -226,6 +227,37 @@ func checkDPLastGoodConfigSnapshot() OperatorContractCheck {
 		Status:         diagFail,
 		Message:        "control plane unreachable and no last-known-good local config is available",
 		OperatorAction: "Restore control plane connectivity or re-enroll/restart this DP after it has successfully received a config snapshot.",
+	}
+}
+
+// checkConfigSnapshotApply covers a failure mode dp_last_known_good_config
+// does not: the control plane is reachable and polling succeeds, but the
+// CONTENT of the last snapshot/delta it sent was rejected (malformed
+// payload, over-cap validation failure, IdP-profile sync failure, or an
+// applyConfigSnapshot/applyBlocklistDeltaSnapshot rejection — see
+// configsnapshot_apply_health.go). Without this check that state reads as a
+// plain "control plane polling healthy" ok, even though this node is
+// silently stuck on stale policy/auth config.
+func checkConfigSnapshotApply() OperatorContractCheck {
+	if !audit.DPMode() {
+		return OperatorContractCheck{
+			Code:    "dp_config_snapshot_apply",
+			Status:  diagOK,
+			Message: "not running as a data plane",
+		}
+	}
+	if !lastConfigSnapshotApplyOK() {
+		return OperatorContractCheck{
+			Code:           "dp_config_snapshot_apply",
+			Status:         diagFail,
+			Message:        "control plane reachable, but the last config snapshot/delta it sent was rejected — this node is not applying new policy/auth config",
+			OperatorAction: "Check data plane logs for \"rejecting config snapshot\" / \"apply rejected\" and fix the control-plane-side config that keeps failing validation.",
+		}
+	}
+	return OperatorContractCheck{
+		Code:    "dp_config_snapshot_apply",
+		Status:  diagOK,
+		Message: "last config snapshot/delta applied successfully",
 	}
 }
 
