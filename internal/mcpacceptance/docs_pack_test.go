@@ -9,6 +9,10 @@ package mcpacceptance
 //   - no secret-like literal material leaked into the example or the docs;
 //   - the operator values in the template were NOT invented (placeholders remain);
 //   - the runbook carries all sixteen required operator sections;
+//   - the runbook's Final cleanup section states the QUAL-6.1 authoritative
+//     preservation contract (operator-owned telemetry + KEK, preserved on cleanup,
+//     reused across the authoritative restart) and no longer carries the stale QUAL-6
+//     "harness-owned / no operator KEK / deleted on cleanup" claims;
 //   - the runbook contains no call-form BeginWindow / rollout-transition invocation;
 //   - the new docs contain no em-dash (repository operator-doc convention).
 //
@@ -134,6 +138,92 @@ func TestDocsPack_RunbookHasAllSixteenSections(t *testing.T) {
 	for _, s := range sections {
 		if !strings.Contains(content, s) {
 			t.Errorf("runbook is missing required section heading %q", s)
+		}
+	}
+}
+
+// collapseWS normalizes all runs of whitespace (including newlines) to a single space
+// so a stale-wording check is not defeated by a line wrap.
+func collapseWS(s string) string { return strings.Join(strings.Fields(s), " ") }
+
+// sectionBody returns the text of the runbook section starting at heading, up to the
+// next "## " heading (or end of file). It lets the positive cleanup-contract checks be
+// scoped to section 16 without matching a dev-mode mention elsewhere.
+func sectionBody(content, heading string) string {
+	i := strings.Index(content, heading)
+	if i < 0 {
+		return ""
+	}
+	rest := content[i+len(heading):]
+	if j := strings.Index(rest, "\n## "); j >= 0 {
+		return rest[:j]
+	}
+	return rest
+}
+
+// TestDocsPack_RunbookAuthoritativeCleanupContract pins the QUAL-6.1 Final cleanup
+// truthfulness contract so the section can never drift back to the stale QUAL-6 claims.
+// It asserts, on concepts rather than large exact prose blocks, that section 16 states
+// the authoritative preservation model, and that the stale statements are absent from
+// the whole runbook. Runtime behavior is already correct (fixture.go / authoritative.go
+// and TestCleanup_PreservesOperatorOwnedTelemetry); this only keeps the doc honest.
+func TestDocsPack_RunbookAuthoritativeCleanupContract(t *testing.T) {
+	b, err := os.ReadFile(docRunbook)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(b)
+
+	sec := sectionBody(content, "## 16. Final cleanup")
+	if sec == "" {
+		t.Fatal("runbook is missing the Final cleanup section body")
+	}
+	secWS := collapseWS(sec)
+	secLower := strings.ToLower(secWS)
+
+	// Positive: the authoritative preservation contract must be present (concept-level).
+	for _, want := range []string{
+		"authoritative kek is operator-owned",             // operator-owned KEK
+		"does not generate a replacement kek",             // no harness KEK substitution in authoritative mode
+		"cleanup must not delete the operator kek",        // preserved on cleanup
+		"uses the same kek",                               // restart reuses the KEK
+		"operator-owned and must survive harness cleanup", // telemetry preserved on cleanup
+	} {
+		if !strings.Contains(secLower, want) {
+			t.Errorf("Final cleanup section is missing the authoritative-contract concept %q", want)
+		}
+	}
+	// The operator telemetry data_dir and archive_dir must be named as preserved.
+	for _, want := range []string{
+		"environment.telemetry.data_dir",
+		"environment.telemetry.kek_file",
+		"environment.telemetry.archive_dir",
+	} {
+		if !strings.Contains(secWS, want) {
+			t.Errorf("Final cleanup section must name the operator-owned telemetry field %q", want)
+		}
+	}
+	// The reuse-across-restart concept must be stated.
+	if !strings.Contains(secLower, "reused across") {
+		t.Error("Final cleanup section must state that authoritative telemetry/KEK/archive are reused across the restart scenario")
+	}
+	// The dev-versus-authoritative distinction must be explicit in the section.
+	for _, want := range []string{`mode: "authoritative"`, `mode: "dev"`} {
+		if !strings.Contains(sec, want) {
+			t.Errorf("Final cleanup section must distinguish %s", want)
+		}
+	}
+
+	// Negative: the stale QUAL-6 claims must be absent from the WHOLE runbook.
+	fullWS := collapseWS(content)
+	fullLower := strings.ToLower(fullWS)
+	for _, stale := range []string{
+		"there is no operator kek to preserve",              // "no operator KEK exists"
+		"harness-owned ephemeral state, not operator-owned", // authoritative telemetry mislabeled harness-owned
+		"archive, and kek are created under the harness",    // telemetry always under the work root + deleted
+	} {
+		if strings.Contains(fullLower, stale) {
+			t.Errorf("runbook still contains stale QUAL-6 cleanup wording: %q", stale)
 		}
 	}
 }
