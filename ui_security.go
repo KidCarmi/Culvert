@@ -1093,7 +1093,9 @@ func apiCAStatus(w http.ResponseWriter, r *http.Request) {
 	info["cacheSize"] = certMgr.CertCacheLen()
 	info["cacheMax"] = 10_000
 	info["cacheTTL"] = "1h"
-	info["leafValidity"] = "24h"
+	// CHAOS-30: leaves are clamped so they never outlive the issuing CA, so
+	// the nominal validity is an upper bound, not a promise.
+	info["leafValidity"] = "24h (capped at CA expiry)"
 	info["autoRotation"] = true
 	info["rotationOverlapDays"] = 30
 	info["keyProvider"] = certMgr.KeyProviderName()

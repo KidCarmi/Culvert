@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"strings"
 	"sync/atomic"
+	"time"
 )
 
 // CA rotation counters (CA-2 PR3). Label-free; incremented only on real
@@ -51,4 +52,25 @@ func caWritePrometheus(w *strings.Builder) {
 	w.WriteString("\n# HELP culvert_cluster_ca_rotations_total Cluster CA rotations/imports (auto-renewal and manual import)\n")
 	w.WriteString("# TYPE culvert_cluster_ca_rotations_total counter\n")
 	fmt.Fprintf(w, "culvert_cluster_ca_rotations_total %d\n", statClusterCARotations.Load())
+
+	// CHAOS-30. Root CA expiry was previously alertable only through
+	// /health's ca_expires_days, which folds "no CA loaded" and "expired" into
+	// the same -1. A signed gauge states both facts unambiguously and lets an
+	// operator alert on the slope, not just the threshold. Omitted entirely
+	// when no CA is loaded — an absent series is honest about "SSL inspection
+	// is not configured"; a 0 or -1 would not be (same posture as
+	// culvert_release_catalog_expires_in_seconds).
+	if expiry := certMgr.CAExpiry(); !expiry.IsZero() {
+		w.WriteString("\n# HELP culvert_ca_expires_in_seconds Seconds until the SSL-inspection Root CA expires (negative once expired)\n")
+		w.WriteString("# TYPE culvert_ca_expires_in_seconds gauge\n")
+		fmt.Fprintf(w, "culvert_ca_expires_in_seconds %d\n", int64(time.Until(expiry).Seconds()))
+	}
+
+	// Any non-zero value means an inspected TLS handshake could not be served
+	// a leaf — the fail-closed refusals (expired / absent CA) plus genuine
+	// signing errors. This is the server-side signal that used to exist only
+	// as an opaque client-side chain error.
+	w.WriteString("\n# HELP culvert_ca_sign_failures_total Leaf-certificate signs refused or failed (expired/absent Root CA, signing errors)\n")
+	w.WriteString("# TYPE culvert_ca_sign_failures_total counter\n")
+	fmt.Fprintf(w, "culvert_ca_sign_failures_total %d\n", certMgr.SignFailures())
 }

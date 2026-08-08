@@ -64,26 +64,47 @@ func StartCAAutoRotation(ctx context.Context, caPath, passphrase string) {
 	go func() {
 		t := time.NewTicker(ca.RotationCheckInterval)
 		defer t.Stop()
+		// CHAOS-30: run the first round IMMEDIATELY. The loop used to wait a
+		// full RotationCheckInterval (24h) before its first check, so a node
+		// that booted with a CA already inside the rotation window — restored
+		// from an old backup, powered off for a long maintenance window, or
+		// restarted after a clock jump — spent its first day neither rotating
+		// nor alerting. The blind spot was widest exactly when the CA was in
+		// the worst shape, since a node whose CA is already expired reboots
+		// into a total inspected-HTTPS outage and learns nothing for 24h.
+		caRotationRound(caPath, passphrase)
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				// CHAOS-24: contain the ROUND. A panic here would otherwise
-				// kill the gateway; a guard that let the goroutine exit would
-				// be worse still — the CA would silently never rotate again
-				// and the failure would only surface at expiry, as a
-				// fleet-wide inspected-HTTPS outage. Each CA is guarded
-				// separately so a fault in one still lets the other rotate.
-				runGuarded("ca_rotation", func() {
-					certMgr.RotateIfNeeded(caPath, passphrase)
-					certMgr.CleanupSecondaryCA()
-				})
-				runGuarded("cluster_ca_rotation", func() {
-					globalClusterCA.RotateIfNeeded()
-					globalClusterCA.CleanupSecondary()
-				})
+				caRotationRound(caPath, passphrase)
 			}
 		}
 	}()
+}
+
+// caRotationRound is one tick of the rotation loop: rotate-if-needed and clean
+// up the overlap for both CAs, then evaluate the inspection CA's expiry clock.
+//
+// Ordering is deliberate — expiry is evaluated AFTER the rotation attempt, so
+// a healthy node resolves the condition before it can alert and a fired
+// cert_expiry alert means "rotation did not fix this" (see ca_expiry.go).
+func caRotationRound(caPath, passphrase string) {
+	// CHAOS-24: contain the ROUND. A panic here would otherwise kill the
+	// gateway; a guard that let the goroutine exit would be worse still — the
+	// CA would silently never rotate again and the failure would only surface
+	// at expiry, as a fleet-wide inspected-HTTPS outage. Each CA is guarded
+	// separately so a fault in one still lets the other rotate, and the
+	// expiry check is guarded separately again so a fault in the alerting
+	// path cannot suppress rotation itself.
+	runGuarded("ca_rotation", func() {
+		certMgr.RotateIfNeeded(caPath, passphrase)
+		certMgr.CleanupSecondaryCA()
+	})
+	runGuarded("cluster_ca_rotation", func() {
+		globalClusterCA.RotateIfNeeded()
+		globalClusterCA.CleanupSecondary()
+	})
+	runGuarded("ca_expiry_check", checkCAExpiry)
 }

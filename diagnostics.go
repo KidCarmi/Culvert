@@ -339,6 +339,27 @@ func checkRootCA() OperatorContractCheck {
 			OperatorAction: "Provide CULVERT_CA_PASSPHRASE and a -ca-bundle path to enable SSL inspection, or ignore if SSL inspection is not used.",
 		}
 	}
+	// CHAOS-30: "initialised" is not the same as "usable". Past NotAfter the
+	// CA can no longer produce a leaf any client will accept (signLeaf refuses,
+	// fail-closed), and inside the rotation window a CA that is STILL here
+	// means auto-rotation did not replace it. Both used to report diagOK.
+	days, ready := caExpiryState()
+	switch {
+	case ready && days < 0:
+		return OperatorContractCheck{
+			Code:           "root_ca",
+			Status:         diagFail,
+			Message:        fmt.Sprintf("root CA EXPIRED %d day(s) ago — leaf signing refused, every inspected HTTPS session is failing", -days),
+			OperatorAction: "Rotate the Root CA (Security → CA Management → Rotate) and distribute the new root to endpoint trust stores; until endpoints trust it, put affected destinations on an SSL-bypass rule.",
+		}
+	case ready && days <= caExpiryWarnDays:
+		return OperatorContractCheck{
+			Code:           "root_ca",
+			Status:         diagWarn,
+			Message:        fmt.Sprintf("root CA expires in %d day(s) and auto-rotation has not replaced it", days),
+			OperatorAction: "Check the CA bundle path/passphrase and data-directory writability so auto-rotation can persist a new CA, then distribute the new root to endpoint trust stores before the current one expires.",
+		}
+	}
 	return OperatorContractCheck{
 		Code:    "root_ca",
 		Status:  diagOK,

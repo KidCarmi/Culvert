@@ -68,6 +68,20 @@ var RotationObserver func(oldExpiry, newExpiry time.Time)
 // dual-CA-overlap-specific and does not fire on InitCA/LoadCustomCA.
 var CAChangedObserver func()
 
+// Signing refusals (CHAOS-30). signLeaf is the MITM trust chokepoint: every
+// inspected HTTPS connection mints a leaf here. Both conditions below make the
+// leaf unusable by construction — a client cannot validate a chain rooted at a
+// CA that does not exist or has expired — so the engine refuses to issue one
+// rather than emitting a certificate it knows will be rejected. Fail-closed,
+// and (unlike an opaque client-side chain error) it gives the proxy a
+// server-side event to count, log and alert on.
+var (
+	// ErrCANotReady is returned when no Root CA is installed.
+	ErrCANotReady = errors.New("ca: no Root CA loaded")
+	// ErrCAExpired is returned when the Root CA certificate is past NotAfter.
+	ErrCAExpired = errors.New("ca: Root CA certificate has expired")
+)
+
 // certCacheEntry pairs a leaf certificate with its creation timestamp for TTL.
 type certCacheEntry struct {
 	cert      *tls.Certificate
@@ -75,8 +89,10 @@ type certCacheEntry struct {
 }
 
 const (
-	certCacheMaxSize = 10_000        // LRU eviction threshold
-	certCacheTTL     = 1 * time.Hour // per-entry time-to-live
+	certCacheMaxSize = 10_000          // LRU eviction threshold
+	certCacheTTL     = 1 * time.Hour   // per-entry time-to-live
+	leafLifetime     = 24 * time.Hour  // nominal leaf validity (clamped to the CA's NotAfter)
+	leafBackdate     = 5 * time.Minute // clock-skew tolerance on NotBefore
 )
 
 // Manager manages the Root CA used for SSL inspection (MITM).
@@ -105,6 +121,10 @@ type Manager struct {
 	// Leaf-cache effectiveness counters (CA-2). Lock-free; no identity data.
 	cacheHits   atomic.Int64
 	cacheMisses atomic.Int64
+	// signFailures counts leaf signs refused or failed (CHAOS-30). Non-zero
+	// means inspected HTTPS is failing at the trust layer; main surfaces it as
+	// culvert_ca_sign_failures_total. Lock-free; no host or identity data.
+	signFailures atomic.Int64
 
 	// Dual-CA overlap: secondary (old) CA kept during rotation window.
 	// Leaf certs include both CAs in the chain so clients trusting either
@@ -442,13 +462,20 @@ func (cm *Manager) CACertInfo() map[string]any {
 		fpParts[i] = fmt.Sprintf("%02X", b)
 	}
 	fingerprint := strings.Join(fpParts, ":")
+	// CHAOS-30: expiry is reported as an explicit state, not left to be
+	// re-derived from the date-truncated notAfter string. "expired" and
+	// "expires in N days" are the two facts an operator needs, and a negative
+	// expiresInDays is unambiguous where a parsed date is not.
+	expiresIn := time.Until(cm.caCert.NotAfter)
 	return map[string]any{
-		"ready":       true,
-		"subject":     cm.caCert.Subject.CommonName,
-		"issuer":      cm.caCert.Issuer.CommonName,
-		"notBefore":   cm.caCert.NotBefore.Format("2006-01-02"),
-		"notAfter":    cm.caCert.NotAfter.Format("2006-01-02"),
-		"fingerprint": fingerprint,
+		"ready":         true,
+		"subject":       cm.caCert.Subject.CommonName,
+		"issuer":        cm.caCert.Issuer.CommonName,
+		"notBefore":     cm.caCert.NotBefore.Format("2006-01-02"),
+		"notAfter":      cm.caCert.NotAfter.Format("2006-01-02"),
+		"fingerprint":   fingerprint,
+		"expiresInDays": int(expiresIn.Hours() / 24),
+		"expired":       expiresIn <= 0,
 	}
 }
 
@@ -739,6 +766,12 @@ func (cm *Manager) CacheStats() (hits, misses int64, size int) {
 	return cm.cacheHits.Load(), cm.cacheMisses.Load(), size
 }
 
+// SignFailures returns the number of leaf signs refused or failed since start
+// (CHAOS-30). Any non-zero value means at least one inspected TLS handshake
+// could not be served a certificate — the counter main exports as
+// culvert_ca_sign_failures_total.
+func (cm *Manager) SignFailures() int64 { return cm.signFailures.Load() }
+
 // ClearCache removes all cached leaf certificates.
 func (cm *Manager) ClearCache() {
 	cm.mu.Lock()
@@ -773,40 +806,69 @@ func (cm *Manager) sharedLeafKey() (*ecdsa.PrivateKey, error) {
 // When dual-CA overlap is active, the secondary (old) CA cert is included in
 // the certificate chain so clients trusting either CA can validate.
 func (cm *Manager) signLeaf(host string) (*tls.Certificate, error) {
+	now := time.Now()
 	cm.mu.RLock()
 	caCert := cm.caCert
 	caKey := cm.caKey
 	secondaryCert := cm.secondaryCACert
-	secondaryActive := secondaryCert != nil && time.Now().Before(cm.secondaryExpiry)
+	secondaryActive := secondaryCert != nil && now.Before(cm.secondaryExpiry)
 	var secondaryCertRaw []byte
 	if secondaryActive {
 		secondaryCertRaw = secondaryCert.Raw
 	}
 	cm.mu.RUnlock()
 
+	// CHAOS-30 fail-closed gate. Without it an expired Root CA kept minting
+	// leaves that every client rejects (`certificate has expired` against the
+	// ISSUER), turning a recoverable CA-lifecycle fault into a fleet-wide
+	// inspected-HTTPS outage whose only symptom was on the client side. The
+	// refusal is also the only place the proxy can learn it is happening.
+	if caCert == nil || caKey == nil {
+		cm.signFailures.Add(1)
+		return nil, ErrCANotReady
+	}
+	if now.After(caCert.NotAfter) {
+		cm.signFailures.Add(1)
+		return nil, fmt.Errorf("%w on %s", ErrCAExpired, caCert.NotAfter.UTC().Format(time.RFC3339))
+	}
+
 	leafKey, err := cm.sharedLeafKey()
 	if err != nil {
+		cm.signFailures.Add(1)
 		return nil, err
 	}
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
+		cm.signFailures.Add(1)
 		return nil, err
+	}
+	// Never issue a leaf that outlives its issuer: a leaf valid past the CA's
+	// NotAfter still fails chain validation, and GetCert's cache would keep
+	// serving it (its expiry check is on the LEAF) for up to certCacheTTL past
+	// the moment the CA died. Clamping makes leaf expiry the honest signal —
+	// and, with the gate above, bounds the window in which a cached leaf can
+	// outlast the trust that backs it.
+	notAfter := now.Add(leafLifetime)
+	if notAfter.After(caCert.NotAfter) {
+		notAfter = caCert.NotAfter
 	}
 	template := &x509.Certificate{
 		SerialNumber: serial,
 		Subject:      pkix.Name{CommonName: host},
-		NotBefore:    time.Now().Add(-5 * time.Minute),
-		NotAfter:     time.Now().Add(24 * time.Hour),
+		NotBefore:    now.Add(-leafBackdate),
+		NotAfter:     notAfter,
 		DNSNames:     []string{host},
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}
 	certDER, err := x509.CreateCertificate(rand.Reader, template, caCert, &leafKey.PublicKey, caKey)
 	if err != nil {
+		cm.signFailures.Add(1)
 		return nil, err
 	}
 	leaf, err := x509.ParseCertificate(certDER)
 	if err != nil {
+		cm.signFailures.Add(1)
 		return nil, err
 	}
 

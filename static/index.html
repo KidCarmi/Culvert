@@ -16172,7 +16172,11 @@ async function loadCAMgmt() {
     api('/api/ocsp'),
   ]);
   if (!ca || ca.error) return;
-  document.getElementById('ca-status').textContent = ca.ready ? 'Ready' : 'Not Initialized';
+  // CHAOS-30: an expired CA is loaded but unusable — signLeaf refuses, so
+  // every inspected HTTPS session is failing. "Ready" would be a lie here.
+  const caStatusEl = document.getElementById('ca-status');
+  caStatusEl.textContent = !ca.ready ? 'Not Initialized' : (ca.expired ? 'EXPIRED — inspection failing' : 'Ready');
+  caStatusEl.style.color = ca.ready && ca.expired ? '#ef4444' : '';
   document.getElementById('ca-expiry').textContent = ca.expiresIn || '-';
   document.getElementById('ca-provider').textContent = ca.keyProvider || 'local';
   const det = document.getElementById('ca-details');

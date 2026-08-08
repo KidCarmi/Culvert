@@ -153,8 +153,12 @@ it **auto-rolls-back and verifies the revert** (revert + digest + health).
 
 **Operator actions:** (1) protect `CULVERT_CA_PASSPHRASE` — its loss silently disables inspection on
 the next reboot; (2) if a DP was disconnected from the CP for weeks, restart it after reconnect to pick
-up any renewed cert; (3) monitor `ca_expires_days` on the proxy `/health` and set up an external alert well
-before the 30-day mark (Culvert's own proactive CA-expiry alert is not yet wired — CHAOS-30).
+up any renewed cert; (3) subscribe a webhook to `cert_expiry` — since CHAOS-30 Culvert fires it
+proactively for the inspection Root CA (≤30d / ≤7d / expired, latched per escalation, evaluated at
+startup and after every rotation attempt), alongside `culvert_ca_expires_in_seconds` and
+`culvert_ca_sign_failures_total` on `/metrics`, `ca_expired` + `ssl_inspection:"expired"` on
+`/health`, and a failing (report-only) `ca` row on `/ready`. Note that an expired Root CA now
+fails **closed**: leaf signing is refused rather than emitting certificates no client can validate.
 
 ---
 

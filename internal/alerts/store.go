@@ -18,7 +18,13 @@ package alerts
 //                             to preserve existing webhook subscriptions.
 //   "policy_block"          — PBAC policy blocked a request
 //   "auth_lockout"          — admin UI brute-force lockout
-//   "cert_expiry"           — CA certificate nearing expiry (fired on startup if ≤30 days)
+//   "cert_expiry"           — a certificate is nearing expiry or has expired. Three producers,
+//                             each latched per escalation level so a periodic loop cannot
+//                             re-fire the same alert every tick: the inspection Root CA
+//                             (≤30d/≤7d/expired, evaluated at startup and after every rotation
+//                             attempt — ca_expiry.go, CHAOS-30), a failing DP node-cert renewal
+//                             (dp_enrollment.go, CHAOS-12), and a completed Root CA rotation
+//                             (RotationObserver, ca.go)
 //   "ca_load_failed"        — Root CA load/init failed at startup: SSL inspection disabled (fail-open)
 //   "scan_timeout"          — ClamAV / YARA scan timeout (infrastructure issue)
 //   "scan_clam_error"       — ClamAV scan error mid-request: content forwarded unscanned (fail-open, CHAOS-10)

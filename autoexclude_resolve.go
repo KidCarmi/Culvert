@@ -417,6 +417,19 @@ func maybeFailOpenClient(host string, match *PolicyMatch, id ProxyIdentity, err 
 	if !resolveFailOpen(match) {
 		return ""
 	}
+	// CHAOS-30: a client-leg handshake failure while OUR OWN Root CA is expired
+	// is not evidence about the host. signLeaf refuses in that state, so the
+	// handshake fails for EVERY host at once — learning from it would let one
+	// CA-lifecycle fault silently promote the whole fail-open traffic set into
+	// bypass, exactly when inspection is already broken. This is a STATE check,
+	// not a string match on the error, so it cannot be defeated by rewording
+	// ErrCAExpired (whose text sits one word away from the classifier's
+	// "certificate expired" token). Scoped to EXPIRED only: "no CA loaded" is
+	// not this fault — handleTunnelInspect is gated on Ready(), so inspection
+	// is not running at all in that state.
+	if days, ready := caExpiryState(); ready && days < 0 {
+		return ""
+	}
 	reason, learn := classifyClientInspectFailure(err)
 	if !learn {
 		return ""

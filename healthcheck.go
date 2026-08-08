@@ -12,11 +12,17 @@ import (
 // collected into sections/health.json. Status/version/uptime are PUBLIC; the
 // subsystem-posture fields are INTERNAL (operationally revealing, not secret).
 type healthReport struct {
-	Status            string `json:"status" redact:"public"`
-	Uptime            string `json:"uptime" redact:"public"`
-	Version           string `json:"version" redact:"public"`
-	ClamAV            string `json:"clamav" redact:"internal"`
-	CAExpiresDays     int    `json:"ca_expires_days" redact:"internal"`
+	Status        string `json:"status" redact:"public"`
+	Uptime        string `json:"uptime" redact:"public"`
+	Version       string `json:"version" redact:"public"`
+	ClamAV        string `json:"clamav" redact:"internal"`
+	CAExpiresDays int    `json:"ca_expires_days" redact:"internal"`
+	// CAExpired disambiguates ca_expires_days (CHAOS-30). That field returns
+	// -1 both when no CA is loaded and when the CA expired a day ago — the two
+	// states an operator most needs to tell apart, since one is "inspection is
+	// off" and the other is "inspection is broken right now". Additive and
+	// omitempty, so the existing field's contract is untouched.
+	CAExpired         bool   `json:"ca_expired,omitempty" redact:"internal"`
 	SSLInspection     string `json:"ssl_inspection" redact:"internal"`
 	ThreatFeedEntries int64  `json:"threat_feed_entries" redact:"internal"`
 }
@@ -26,6 +32,8 @@ type healthReport struct {
 func computeHealth() healthReport {
 	// CA cert expiry
 	caExpiresDays := caExpiryDaysRemaining()
+	caDays, caReady := caExpiryState()
+	caExpired := caReady && caDays < 0
 
 	// Threat feed entry count
 	tfEntries, _, _ := globalThreatFeed.Stats()
@@ -46,11 +54,19 @@ func computeHealth() healthReport {
 	// failure while Ready() stays true. Reporting "ready" there would hide a CA
 	// bundle that never persisted — the configured inspection material is not
 	// actually usable across a restart.
+	//
+	// CHAOS-30: an EXPIRED CA is reported as "expired", not "ready". Ready()
+	// only means a CA is installed; past NotAfter the CA can no longer sign a
+	// usable leaf (signLeaf refuses, fail-closed), so every inspected HTTPS
+	// session on the node is failing while the field said "ready".
 	sslInspection := "ready"
-	if sslInspectionLoadFailure() != "" {
+	switch {
+	case sslInspectionLoadFailure() != "":
 		sslInspection = "load_failed"
-	} else if !certMgr.Ready() {
+	case !certMgr.Ready():
 		sslInspection = "unavailable"
+	case caExpired:
+		sslInspection = "expired"
 	}
 
 	return healthReport{
@@ -59,6 +75,7 @@ func computeHealth() healthReport {
 		Version:           version,
 		ClamAV:            clamStatus,
 		CAExpiresDays:     caExpiresDays,
+		CAExpired:         caExpired,
 		SSLInspection:     sslInspection,
 		ThreatFeedEntries: tfEntries,
 	}
@@ -139,10 +156,22 @@ func computeReadiness() (report readinessReport, code int) {
 	// InitCA() (Ready() → true) before SaveCA(), so a SaveCA failure leaves a
 	// recorded failure while Ready() stays true. Reporting "ok" there would hide
 	// a configured CA bundle that never persisted.
+	//
+	// CHAOS-30: an EXPIRED CA also fails the row. It stays report-only (a
+	// probe that should eject such a node opts in via /ready?strict=1) because
+	// the node is still a working plain forward proxy — but the row must not
+	// say "ok" while leaf signing is refusing every inspected handshake. The
+	// detail is fixed, non-path text: /ready is served unauthenticated on the
+	// proxy port, so it must not fingerprint the node beyond the operator
+	// signal itself.
 	if detail := sslInspectionLoadFailure(); detail != "" {
 		checks["ca"] = &readinessCheck{Status: "fail", Detail: detail}
 	} else if certMgr.Ready() {
-		checks["ca"] = &readinessCheck{Status: "ok"}
+		if days, ready := caExpiryState(); ready && days < 0 {
+			checks["ca"] = &readinessCheck{Status: "fail", Detail: "root CA expired; SSL inspection is failing closed"}
+		} else {
+			checks["ca"] = &readinessCheck{Status: "ok"}
+		}
 	}
 
 	// 2. ClamAV: if scanner is initialised, verify connectivity.
