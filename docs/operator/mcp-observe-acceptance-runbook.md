@@ -461,40 +461,87 @@ construction.
 
 ## 16. Final cleanup
 
-Distinguish harness-owned ephemeral material from operator-owned material.
+Cleanup ownership follows the QUAL-6.1 model: harness-owned ephemeral material is
+removed automatically, and operator-owned state is preserved. The harness never
+deletes operator-owned state, and in authoritative mode the operator telemetry custody
+boundary lives OUTSIDE the harness work root, so removing the work root cannot touch
+it.
 
-The harness, on success or failure, terminates its child processes, closes the
-tripwire servers, releases ports, and removes its own temporary work root (its
-generated fixtures, temporary keys, temporary tripwire state, and temporary process
-state). It preserves the evidence bundle and never deletes operator-owned state
-outside its work root.
+On success or failure the harness terminates its child processes, closes the tripwire
+servers, releases the ports it allocated, and removes ONLY its own harness-owned work
+root (`Harness.cleanup` calls `os.RemoveAll` on that root and on nothing else). What it
+removes is limited to harness-owned ephemeral material, for example:
 
-In the current harness the telemetry data directory, archive, and KEK are created
-under the harness temporary work root and are removed by `Harness.cleanup`; they are
-harness-owned ephemeral state, not operator-owned artifacts (see Harness scope and
-current limitations). There is no operator KEK to preserve today. Operator-owned
-telemetry, archive, and KEK preservation becomes applicable only after a harness change
-places them under operator-owned locations.
+- the generated negative-control fixture material (the dev/self-test CA and leaf
+  certs, and the deny-only default-deny probe policy rendered under the work root);
+- ephemeral tokens and private keys the harness itself generated for the run;
+- the harness-owned pinned copy of the binary under test;
+- temporary process state and per-process scratch, including the isolated
+  harness-owned telemetry of the tenant-B and negative-control auxiliaries, which by
+  construction never share the operator custody boundary.
 
-The operator must preserve, and must not auto-delete:
+### Authoritative mode: operator-owned state (never auto-deleted)
 
-- The authoritative evidence bundle (`summary.json`, `manifest.json`, the bounded
-  `logs/`) in `evidence_dir`, which the harness does not delete.
-- The artifact-verification evidence.
-- The completed decision worksheet.
-- The signed artifact.
-- The evidence destination.
+In `mode: "authoritative"` the operator-selected telemetry storage and KEK are
+operator-owned and MUST survive harness cleanup. The harness does not delete, move, or
+rotate any of the following, and preserves them across cleanup:
 
-The operator may safely remove or rotate ephemeral material that the operator created
-outside the harness work root: any operator-generated temporary tokens, temporary
-private keys, temporary fixture files, and temporary process state created for the run.
-Do not remove the signed artifact or the evidence destination unless the runbook has an
-explicit, operator-approved retention action for that item. Once a harness change
-introduces operator-owned telemetry, archive, and KEK locations, add them to this
-preserve list.
+- the telemetry data directory (`environment.telemetry.data_dir`);
+- the telemetry KEK file (`environment.telemetry.kek_file`);
+- the telemetry archive directory (`environment.telemetry.archive_dir`);
+- the evidence directory (`evidence_dir`);
+- the signed qualification artifact;
+- the artifact-verification evidence;
+- the completed decision worksheet (the operational decision record).
 
-Record any cleanup failure with the evidence. Cleanup failure is itself an item to
-escalate.
+The same telemetry data directory, KEK, and archive are intentionally REUSED across
+the restart / recovery acceptance scenario (section 12) to prove durable persistence
+across a real process restart. Their retention and custody remain operator decisions;
+do not auto-delete them, and do not treat their reuse across restart as a defect.
+
+KEK handling in authoritative mode, stated exactly:
+
+- the authoritative KEK is operator-owned;
+- the harness consumes the configured `kek_file` path as-is;
+- the harness does not generate a replacement KEK in authoritative mode;
+- the harness does not read or expose KEK contents, and no key material enters the
+  evidence bundle or any log;
+- cleanup must not delete the operator KEK;
+- the restart / recovery scenario uses the same KEK.
+
+### Dev mode: harness-owned telemetry
+
+In `mode: "dev"` (self-test, evidence marked `authoritative: false`, never
+qualification evidence) the telemetry data directory, KEK, and archive MAY be
+harness-generated temporary material under the harness work root, and the harness MAY
+remove them according to the dev fixture contract. Do not blur the two modes: a
+dev-mode cleanup statement does not describe authoritative mode, and an operator-owned
+authoritative path is never removable merely because dev mode generates its own under
+the work root.
+
+### Operator-created temporary secrets outside the work root
+
+Temporary identity material the operator created for the run outside the harness work
+root (for example operator-generated temporary tokens, temporary private keys, or
+temporary fixture files) is handled according to the operator's own retention and
+rotation decision. The harness does not own it and does not auto-delete it. Do not
+remove the signed artifact or the evidence destination unless the runbook records an
+explicit, operator-approved retention action for that item.
+
+### Evidence preservation
+
+Always preserve the evidence bundle in `evidence_dir` (the harness never deletes it):
+
+- `summary.json`;
+- `manifest.json`;
+- the bounded `logs/`;
+- the supervision and effective-environment metadata that is part of the bundle
+  (`supervision.json`, and the `effective_bind_host`, `operator_policy_digest`, and
+  telemetry-ownership fields in `summary.json`);
+- the artifact identity verification evidence.
+
+Record any cleanup failure with the evidence. A cleanup failure is itself an
+acceptance finding: escalate it per section 14 and do not discard the evidence bundle.
 
 ## Harness invocation
 
