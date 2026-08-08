@@ -174,8 +174,61 @@ func MatchFQDNNorm(pattern, host string) bool {
 // LastIndex(host, ":") cut corrupts bare IPv6 literals (already de-bracketed
 // by net.SplitHostPort upstream) — "2001:db8::1" would become "2001:db8:".
 func StripHostPort(host string) string {
+	// ── Already-portless fast path ────────────────────────────────────────────
+	// A host carrying neither ':' nor a bracket is returned VERBATIM by the body
+	// below — and the body pays an allocation to discover that. net.SplitHostPort
+	// builds a *net.AddrError ("missing port in address") for every portless
+	// host, and that error is discarded on the very next line. So the COMMON
+	// shape was the expensive one, exactly inverted:
+	//
+	//	StripHostPort("www.example.com")      41.3 ns/op   32 B/op   1 allocs/op
+	//	StripHostPort("www.example.com:443")  19.6 ns/op    0 B/op   0 allocs/op
+	//
+	// After: 9.3 ns/op and 0 allocs for the portless shape. Full before/after
+	// table, including the shapes that got marginally slower, in
+	// hostutil_striphostport_test.go.
+	//
+	// That is the shape this function actually sees on the request path: the
+	// dispatch gate splits the port off r.Host before any engine looks at the
+	// destination, so the threat feed, DPI scanner, scan-exclusion matcher,
+	// autoexclude cache and traffic redactor each re-strip a port that is
+	// already gone — several discarded errors per proxied request, on every
+	// protocol.
+	//
+	// The equivalence is exact, not approximate. Without a ':' SplitHostPort
+	// cannot succeed, so `host` is never reassigned; without a '[' or ']'
+	// strings.Trim(host, "[]") is the identity. Both statements therefore leave
+	// the input unchanged, which is what this returns. Pinned by
+	// FuzzStripHostPort against the pre-fast-path body.
+	if !hasHostPortSyntax(host) {
+		return host
+	}
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
 	}
 	return strings.Trim(host, "[]")
 }
+
+// hasHostPortSyntax reports whether StripHostPort's body can transform host.
+// It is the exact negation of "both statements below are no-ops":
+//
+//   - net.SplitHostPort can only SUCCEED on a value containing ':' — it locates
+//     the port by the last colon and otherwise reports "missing port in
+//     address". So without a colon, `host` is never reassigned.
+//   - strings.Trim(host, "[]") cuts only from the ENDS, so it is the identity
+//     unless the first or last byte is a bracket.
+//
+// Scanning for the colon from the RIGHT is deliberate: in every shape that has
+// one it sits near the end ("host:443", "[v6]:443"), so the port-carrying
+// shapes — which still take the full body — pay only a few bytes of scan rather
+// than a walk of the whole hostname. net.SplitHostPort locates it the same way,
+// so this costs one already-warm pass. No allocation, no tables.
+func hasHostPortSyntax(host string) bool {
+	if host == "" {
+		return false
+	}
+	return strings.LastIndexByte(host, ':') >= 0 ||
+		isBracket(host[0]) || isBracket(host[len(host)-1])
+}
+
+func isBracket(c byte) bool { return c == '[' || c == ']' }
