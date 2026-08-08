@@ -54,16 +54,20 @@ no credentials, and no signed-artifact claims.
 schema changes and this template is not updated, that test fails. The template is
 therefore kept in lockstep with the code, not by hand.
 
-## Current harness limitations
+## Authoritative controls consumed (QUAL-6.1)
 
-Some fields are recorded but not yet consumed by the current harness. `bind_host` is
-recorded in the config hash, but the harness binds `127.0.0.1`. The qualification
-policy and the telemetry data / KEK / archive locations have no spec fields at all: the
-harness generates a fixed fixture policy and its own temporary telemetry state. Admin
-and metrics endpoints run on ephemeral loopback ports with harness-generated
-credentials that are not exposed during the run. See "Harness scope and current
-limitations" in `docs/operator/mcp-observe-acceptance-runbook.md` before relying on any
-of these as operator controls.
+In authoritative mode the primary process consumes the operator-selected environment
+and proves each control at runtime: `bind_host` + `gateway_port` (the listener binds
+them; loopback proven absent when non-loopback), `qualification_policy_file` (passed
+verbatim; preflight-gated; digest + runtime revision recorded), `telemetry.*`
+(operator-owned data/KEK/archive, preserved on cleanup, reused across the restart), and
+`supervision.*` (operator-accessible Admin + metrics listeners + credentials, with a
+safe `supervision.json` descriptor for live external supervision). Credentials are
+supplied by file PATH only, never inline, and never re-emitted into evidence.
+
+The second tenant process and the negative-control auxiliaries remain harness-owned
+(ephemeral ports, isolated telemetry). See "Harness scope and current limitations" in
+`docs/operator/mcp-observe-acceptance-runbook.md` for the full boundary.
 
 ## What this template is not
 

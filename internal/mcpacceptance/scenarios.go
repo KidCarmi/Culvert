@@ -79,7 +79,8 @@ func (h *Harness) runStartup(ctx context.Context) {
 // checkDisabledBindsNothing spins an auxiliary process with the Gateway disabled
 // and asserts health==disabled and the configured MCP port is not listening.
 func (h *Harness) checkDisabledBindsNothing(ctx context.Context) (st Status, obs, rsn string, evi []string) {
-	pc, err := h.fixture.buildProc("disabled", h.fixture.tenantA, h.fixture.serverA, "none", tripEndpoint(h.tripwireA))
+	pc, err := h.fixture.buildProc(procRole{name: "disabled", tenant: h.fixture.tenantA, serverID: h.fixture.serverA,
+		clientCertMode: "none", tripwireEndpoint: tripEndpoint(h.tripwireA), operatorPolicy: true})
 	if err != nil {
 		return fail("build aux", "aux_build")
 	}
@@ -97,7 +98,7 @@ func (h *Harness) checkDisabledBindsNothing(ctx context.Context) (st Status, obs
 	}
 	// The MCP port must not be accepting connections.
 	dialer := net.Dialer{Timeout: h.spec.Run.request()}
-	conn, derr := dialer.DialContext(ctx, "tcp", fmt.Sprintf("127.0.0.1:%d", pc.mcpPort))
+	conn, derr := dialer.DialContext(ctx, "tcp", net.JoinHostPort(pc.bindHost, itoa(pc.mcpPort)))
 	if derr == nil {
 		_ = conn.Close()
 		return fail("mcp port accepted a connection", "port_bound")
@@ -108,7 +109,8 @@ func (h *Harness) checkDisabledBindsNothing(ctx context.Context) (st Status, obs
 // ── TLS / mTLS ───────────────────────────────────────────────────────────────
 
 func (h *Harness) runTLS(ctx context.Context) {
-	pc, err := h.fixture.buildProc("mtls", h.fixture.tenantA, h.fixture.serverA, "require", tripEndpoint(h.tripwireA))
+	pc, err := h.fixture.buildProc(procRole{name: "mtls", tenant: h.fixture.tenantA, serverID: h.fixture.serverA,
+		clientCertMode: "require", tripwireEndpoint: tripEndpoint(h.tripwireA), operatorPolicy: true})
 	if err != nil {
 		h.record(CriterionResult{ID: "tls.mtls", Name: "mTLS accept/reject", Group: "tls", Required: true, Status: StatusFail, Reason: "aux_build"})
 		return
@@ -122,7 +124,7 @@ func (h *Harness) runTLS(ctx context.Context) {
 
 	h.runCriterion("tls.mtls_accept", "trusted client cert accepted", "tls", true,
 		"mTLS with the fixture client cert reaches the auth layer", func() (st Status, obs, rsn string, evi []string) {
-			cli, err := mcpTLSClient(h.fixture.caPEM, h.fixture.clientCertFile, h.fixture.clientKeyFile, true, h.spec.Run.request())
+			cli, err := mcpTLSClient(h.fixture.caPEM, h.fixture.clientCertFile, h.fixture.clientKeyFile, true, h.spec.Run.request(), h.fixture.dialHost, h.fixture.serverName)
 			if err != nil {
 				return fail("client build", "client")
 			}
@@ -135,7 +137,7 @@ func (h *Harness) runTLS(ctx context.Context) {
 
 	h.runCriterion("tls.mtls_reject", "missing client cert rejected", "tls", true,
 		"mTLS handshake without a client cert is rejected", func() (st Status, obs, rsn string, evi []string) {
-			cli, err := mcpTLSClient(h.fixture.caPEM, "", "", false, h.spec.Run.request())
+			cli, err := mcpTLSClient(h.fixture.caPEM, "", "", false, h.spec.Run.request(), h.fixture.dialHost, h.fixture.serverName)
 			if err != nil {
 				return fail("client build", "client")
 			}
@@ -507,7 +509,11 @@ func (h *Harness) runPolicy(ctx context.Context) {
 // checkDefaultDeny spins an auxiliary process with a deny-only policy and asserts a
 // discovery request produces the default-deny reason.
 func (h *Harness) checkDefaultDeny(ctx context.Context) (st Status, obs, rsn string, evi []string) {
-	pc, err := h.fixture.buildProc("denyonly", h.fixture.tenantA, h.fixture.serverA, "none", tripEndpoint(h.tripwireA))
+	// operatorPolicy:false — the deny-only default-deny probe is a harness-owned
+	// negative control on a work-root policy path; it never claims or mutates the
+	// operator policy.
+	pc, err := h.fixture.buildProc(procRole{name: "denyonly", tenant: h.fixture.tenantA, serverID: h.fixture.serverA,
+		clientCertMode: "none", tripwireEndpoint: tripEndpoint(h.tripwireA), operatorPolicy: false})
 	if err != nil {
 		return fail("aux build", "aux_build")
 	}
@@ -663,7 +669,8 @@ func (h *Harness) runEmergencyDisable(ctx context.Context) {
 }
 
 func (h *Harness) checkEmergencyDisable(ctx context.Context) (st Status, obs, rsn string, evi []string) {
-	pc, err := h.fixture.buildProc("emergency", h.fixture.tenantA, h.fixture.serverA, "none", tripEndpoint(h.tripwireA))
+	pc, err := h.fixture.buildProc(procRole{name: "emergency", tenant: h.fixture.tenantA, serverID: h.fixture.serverA,
+		clientCertMode: "none", tripwireEndpoint: tripEndpoint(h.tripwireA), operatorPolicy: true})
 	if err != nil {
 		return fail("aux build", "aux_build")
 	}
@@ -692,7 +699,7 @@ func (h *Harness) checkEmergencyDisable(ctx context.Context) (st Status, obs, rs
 	h.summary.EmergencyDisable = StatusFail
 	// MCP must no longer admit.
 	dialer := net.Dialer{Timeout: h.spec.Run.request()}
-	conn, derr := dialer.DialContext(ctx, "tcp", fmt.Sprintf("127.0.0.1:%d", pc.mcpPort))
+	conn, derr := dialer.DialContext(ctx, "tcp", net.JoinHostPort(pc.bindHost, itoa(pc.mcpPort)))
 	if derr == nil {
 		_ = conn.Close()
 		return fail("mcp port still bound after disable", "still_admitting")

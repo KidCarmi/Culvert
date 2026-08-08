@@ -42,8 +42,9 @@ The right-hand column names where the value is authoritative, not a suggested va
 
 | Value | Spec field | Status | Source of truth |
 | --- | --- | --- | --- |
-| Bind address | `environment.bind_host` | DECISION REQUIRED (recorded, not bound) | Recorded in the config hash; the current harness binds `127.0.0.1`. A real network boundary requires a harness change. |
-| Port | derived by the harness per process | DECISION REQUIRED | Harness assigns bounded local ports; operator confirms no conflict |
+| Bind address | `environment.bind_host` | DECISION REQUIRED (consumed + bound) | The interface the primary Gateway binds; proven at runtime (`environment.bind_host_effective`). Wildcard/invalid fails before traffic. |
+| Gateway port | `environment.gateway_port` | DECISION REQUIRED | The primary MCP listener port; a fixed, operator-known port. Auxiliary processes use ephemeral ports. |
+| TLS server name | `environment.tls_server_name` | DECISION REQUIRED (optional) | The name the harness validates the listener cert against; defaults to `bind_host`. The server cert SAN must cover it. |
 | Canonical resource | `environment.canonical_resource` | DECISION REQUIRED | Gateway resource identifier for the run |
 | Accepted MCP protocol versions | fixed by the artifact | DECISION REQUIRED (confirm) | Product build under test |
 
@@ -95,34 +96,48 @@ The right-hand column names where the value is authoritative, not a suggested va
 
 ## Policy
 
-Not consumed by the current harness: it generates a fixed revision-1 fixture policy
-(default DENY plus one `ALLOW_DISCOVERY` rule on `tools/list`). Record the intended
-policy for the qualification record, but the run exercises the fixture policy until a
-harness change accepts an operator policy. See the runbook "Harness scope and current
-limitations".
+Consumed by the primary verbatim in authoritative mode: `environment
+.qualification_policy_file` is the operator-owned qualification policy (production
+format). A preflight rejects a policy that cannot support the required scenarios
+(`POLICY_SCENARIO_REQUIREMENT_UNSATISFIED`): it must be `capability: gateway`,
+`default_action: DENY`, `policy_revision >= 1`, and carry an ALLOW rule for
+`operation.method == tools/list`.
 
-| Value | Status | Source of truth |
-| --- | --- | --- |
-| Source file | DECISION REQUIRED | Qualification policy selection; see `docs/operator/mcp-qualification-policy.md` |
-| Intended ALLOW discovery rule | DECISION REQUIRED | Qualification policy; proven live via `tools/list` |
-| Expected deny case | DECISION REQUIRED | Qualification policy; default-deny or explicit deny |
-| Expected snapshot revision / hash after startup | DECISION REQUIRED | Read from `gateway.policy_revision` and `gateway.policy_snapshot_hash` on `/api/mcp/health` after startup |
+| Value | Spec field | Status | Source of truth |
+| --- | --- | --- | --- |
+| Source file | `environment.qualification_policy_file` | DECISION REQUIRED | Qualification policy selection; see `docs/operator/mcp-qualification-policy.md` |
+| ALLOW discovery rule | in the policy file | DECISION REQUIRED | Required by preflight; proven live via `tools/list` |
+| Default-deny posture | in the policy file | DECISION REQUIRED | Required by preflight (`default_action: DENY`) |
+| Declared revision | in the policy file | DECISION REQUIRED | Matched at runtime; recorded as `operator_policy_digest` + `gateway.policy_revision` |
 
 ## Telemetry
 
-Not consumed by the current harness: the data root, KEK, and archive are generated
-under the harness temporary work root and removed on cleanup. There is no operator-owned
-telemetry location or operator KEK today. These rows apply once a harness change accepts
-operator-owned locations. See the runbook "Harness scope and current limitations".
+Consumed by the primary EXACTLY in authoritative mode and classified operator-owned:
+the paths are never auto-deleted on cleanup and are reused across the real restart. The
+harness never generates or reads the KEK (the binary owns it at the operator path).
 
-| Value | Status | Source of truth |
-| --- | --- | --- |
-| Data root | DECISION REQUIRED | Node configuration; see `docs/operator/mcp-qualification-telemetry.md` |
-| KEK file / provider | DECISION REQUIRED | Operator key custody |
-| Archive root | DECISION REQUIRED | Node configuration |
-| Retention | DECISION REQUIRED | Operator retention policy |
-| Quota | DECISION REQUIRED | Node configuration |
-| Backup / custody boundary | DECISION REQUIRED | Operator custody policy |
+| Value | Spec field | Status | Source of truth |
+| --- | --- | --- | --- |
+| Node ID | `environment.telemetry.node_id` | DECISION REQUIRED | Node configuration |
+| Data root | `environment.telemetry.data_dir` | DECISION REQUIRED | Node configuration; see `docs/operator/mcp-qualification-telemetry.md` |
+| KEK file / provider | `environment.telemetry.kek_file` | DECISION REQUIRED | Operator key custody (owned by the binary at this path) |
+| Archive root | `environment.telemetry.archive_dir` | DECISION REQUIRED | Node configuration |
+| Retention / quota / backup | not in spec | DECISION REQUIRED | Operator retention/custody policy |
+
+## Supervision
+
+The operator-accessible Admin and metrics boundary for live supervision of the primary
+during the run. Credentials are supplied by PATH only (never inline). The endpoints bind
+all interfaces (product behavior) and are protected by their own auth; front them with
+operator TLS or a trusted management network for untrusted-network exposure.
+
+| Value | Spec field | Status | Source of truth |
+| --- | --- | --- | --- |
+| Admin port | `environment.supervision.admin_port` | DECISION REQUIRED | Operator-known port for live Admin supervision |
+| Metrics port | `environment.supervision.metrics_port` | DECISION REQUIRED | Operator-known port for live `/metrics` scraping |
+| Admin user | `environment.supervision.admin_user` | DECISION REQUIRED | Operator credential (username) |
+| Admin password file | `environment.supervision.admin_password_file` | DECISION REQUIRED | Operator credential (file path only) |
+| Metrics token file | `environment.supervision.metrics_token_file` | DECISION REQUIRED | Operator credential (file path only) |
 
 ## Evidence
 
