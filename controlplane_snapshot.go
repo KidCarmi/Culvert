@@ -828,7 +828,7 @@ func applySnapshotTrafficExceptBlocklist(snap ConfigSnapshot) {
 	// populated→replace — mirrors the config-version rollback surface
 	// (configversion.go applyConfigBackup). CurrentConfigSnapshot always
 	// sends a non-nil slice, so a steady-state CP push keeps DP exemptions in
-	// lock-step with the CP whitelist instead of silently leaving DP nodes
+	// lock-step with the CP exempt list instead of silently leaving DP nodes
 	// enforcing rate limits the operator exempted on the CP.
 	if snap.RateLimitExempt != nil {
 		rl.ReplaceExemptions(snap.RateLimitExempt)

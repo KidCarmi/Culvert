@@ -404,7 +404,7 @@ func checkAuditPersistence() OperatorContractCheck {
 // state clears when a backend is observed to answer, never on elapsed time.
 // Memory-only read; no probe is issued from the diagnostics path. The cause
 // text is deliberately NOT reproduced here: it names the configured endpoint
-// (an LDAP URL, an IdP host), and this contract is a VIEWER-role surface with a
+// (an LDAP URL, an OIDC introspection host), and this contract is a VIEWER-role surface with a
 // standing no-sensitive-values guardrail. The cause goes to the admin-scoped
 // sinks — the log line and the identity_backend_unreachable alert.
 func checkIdentityBackend() OperatorContractCheck {

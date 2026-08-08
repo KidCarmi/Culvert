@@ -215,7 +215,7 @@ var _ syscall.RawConn = dummyRawConn{}
 // regression in the HTTP transport path.
 func TestSSRFSafeDialer_RejectsLoopbackDial(t *testing.T) {
 	// Start a tiny listener on loopback. Even though the port is open, the
-	// dialer must refuse because loopback is blacklisted.
+	// dialer must refuse because loopback is a blocked private address.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Skipf("cannot bind loopback listener: %v", err)
