@@ -406,7 +406,7 @@ func checkAuditPersistence() OperatorContractCheck {
 // text is deliberately NOT reproduced here: it names the configured endpoint
 // (an LDAP URL, an IdP host), and this contract is a VIEWER-role surface with a
 // standing no-sensitive-values guardrail. The cause goes to the admin-scoped
-// sinks — the log line and the idp_unreachable alert.
+// sinks — the log line and the identity_backend_unreachable alert.
 func checkIdentityBackend() OperatorContractCheck {
 	s := authBackendHealthStatus()
 	if s.Unavailable == 0 {

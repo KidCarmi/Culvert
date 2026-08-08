@@ -38,9 +38,9 @@ package main
 // Observability mirrors storage_health.go (CHAOS-45): a counter for the
 // magnitude, an evidence-based gauge for "is a backend unreachable right now",
 // a counter for the blast radius (requests denied without a probe), and a
-// rate-limited `idp_unreachable` alert. This also closes the long-standing
-// AU-7 gap — an IdP outage was previously indistinguishable from a
-// brute-force spike, because both showed up only as auth failures.
+// rate-limited `identity_backend_unreachable` alert. This also closes the
+// long-standing AU-7 gap — an IdP outage was previously indistinguishable
+// from a brute-force spike, because both showed up only as auth failures.
 
 import (
 	"sync"
@@ -55,9 +55,9 @@ const (
 	// after the fault clears is the cost; the pre-fix behaviour was minutes.
 	authBackendProbeCooldown = 3 * time.Second
 
-	// authBackendAlertInterval rate-limits the idp_unreachable alert and its
-	// log line. A down directory fails EVERY authentication, so an ungated
-	// producer would emit one alert per request.
+	// authBackendAlertInterval rate-limits the identity_backend_unreachable
+	// alert and its log line. A down directory fails EVERY authentication, so
+	// an ungated producer would emit one alert per request.
 	authBackendAlertInterval = 5 * time.Minute
 )
 
@@ -158,9 +158,9 @@ type authBackendHealthRecord struct {
 
 var authBackendHealth authBackendHealthRecord
 
-// fireIdPUnreachableAlert delivers the idp_unreachable alert. Package-level
-// seam so tests observe the transition synchronously instead of racing the
-// process-global sink.
+// fireIdentityBackendUnreachableAlert delivers the identity_backend_unreachable
+// alert. Package-level seam so tests observe the transition synchronously
+// instead of racing the process-global sink.
 //
 // The HasSubscriber gate is mandatory, not cosmetic: this producer sits on the
 // proxy request path and its rate is set by an EXTERNAL fault. During a
@@ -168,11 +168,11 @@ var authBackendHealth authBackendHealthRecord
 // a node with no webhooks configured — the default posture, and the state of
 // every test binary — would spawn a delivery goroutine per request for an alert
 // with no recipient, adding goroutine churn on top of the outage.
-var fireIdPUnreachableAlert = func(backend, detail string) {
-	if !globalAlertStore.HasSubscriber("idp_unreachable") {
+var fireIdentityBackendUnreachableAlert = func(backend, detail string) {
+	if !globalAlertStore.HasSubscriber("identity_backend_unreachable") {
 		return
 	}
-	go fireAlert("idp_unreachable", AlertPayload{
+	go fireAlert("identity_backend_unreachable", AlertPayload{
 		Detail: detail,
 		Source: backend,
 	})
@@ -217,7 +217,7 @@ func noteAuthBackendUnavailable(backend, detail string) {
 			backend, total, detail)
 	}
 	if doAlert {
-		fireIdPUnreachableAlert(backend,
+		fireIdentityBackendUnreachableAlert(backend,
 			"identity backend "+backend+" unreachable ("+detail+") — authentication failing closed")
 	}
 }
