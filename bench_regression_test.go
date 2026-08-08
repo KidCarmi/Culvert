@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/KidCarmi/Culvert/internal/sslbypass"
+	"github.com/KidCarmi/Culvert/internal/urlcat"
 )
 
 // TestBenchGate_PolicyEvalAllocs locks in the O(1)-allocation policy hot path.
@@ -519,5 +520,80 @@ func TestBenchGate_DNSFailureAlertAllocs(t *testing.T) {
 		t.Errorf("REGRESSION: fireDNSFailureAlert allocates %d/op with NO webhook subscribed, exceeds bound %d — "+
 			"the HasSubscriber gate has been bypassed; a DNS brownout will now spawn a goroutine per request. "+
 			"See alerts.go fireDNSFailureAlert.", allocs, maxAllocs)
+	}
+}
+
+// TestBenchGate_HostCategoryLookupScaling guards the host→category resolution
+// that package main's lookupHostCategory performs, once per category-group rule
+// per request.
+//
+// Unlike the gates above, this one cannot key on allocations: the linear scan it
+// replaced was already allocation-free (the "."+pattern concatenation it built
+// per pattern does not escape, so it lands on the stack). The regression was
+// pure CPU, and it scaled with the size of the configured TAXONOMY — a
+// dimension nothing else on the hot path depends on.
+//
+// So the invariant under test is SHAPE, not speed: resolving a host must cost
+// about the same whether 657 or ~50k host patterns are configured, because the
+// reverse index probes once per LABEL in the queried host and never walks the
+// configuration. Comparing two measurements taken on the same runner makes this
+// hardware-independent in a way a raw ns/op bound could never be.
+//
+// Measured with the index: ~1x (113 ns at both sizes). With the linear scan the
+// large taxonomy was ~77x the small one (23 us → ~1.8 ms). The bound sits far
+// below that and far above the noise.
+func TestBenchGate_HostCategoryLookupScaling(t *testing.T) {
+	const maxRatio = 8.0
+	// A host in no category: a miss cannot short-circuit, so the old scan had to
+	// walk every configured pattern. It is also the common case in real traffic.
+	const probeHost = "api.internal.corp.example.invalid"
+
+	build := func(nCats, hostsPer int) []*urlcat.Entry {
+		entries := urlcat.DefaultEntries()
+		for c := 0; c < nCats; c++ {
+			hosts := make([]string, hostsPer)
+			for h := 0; h < hostsPer; h++ {
+				hosts[h] = fmt.Sprintf("h%d-%d.synthetic%d.test", c, h, c)
+			}
+			entries = append(entries, &urlcat.Entry{Name: fmt.Sprintf("Synthetic-%d", c), Hosts: hosts})
+		}
+		return entries
+	}
+
+	orig := catStore
+	defer func() { catStore = orig }()
+
+	measure := func(entries []*urlcat.Entry) (int64, int) {
+		patterns := 0
+		for _, e := range entries {
+			patterns += len(e.Hosts)
+		}
+		catStore = urlcat.New(entries)
+		res := testing.Benchmark(func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				if cat, _, _ := lookupHostCategory(probeHost); cat != "" {
+					b.Fatalf("probe host unexpectedly categorized as %q", cat)
+				}
+			}
+		})
+		return res.NsPerOp(), patterns
+	}
+
+	smallNs, smallN := measure(build(0, 0))
+	largeNs, largeN := measure(build(200, 250))
+	if smallNs <= 0 {
+		t.Skip("benchmark produced no timing signal")
+	}
+
+	ratio := float64(largeNs) / float64(smallNs)
+	t.Logf("lookupHostCategory: %d patterns=%d ns/op, %d patterns=%d ns/op — ratio %.2fx (bound %.1fx)",
+		smallN, smallNs, largeN, largeNs, ratio, maxRatio)
+	if ratio > maxRatio {
+		t.Errorf("REGRESSION: host→category resolution cost grew %.2fx when the taxonomy grew %dx "+
+			"(%d→%d patterns), exceeding the %.1fx bound. Resolution is scanning the configured "+
+			"categories again instead of probing urlcat's reverse host index; at %d patterns the old "+
+			"scan cost ~1.8 ms, and lookupHostCategory runs once per category-group rule per request. "+
+			"See internal/urlcat LookupHost.",
+			ratio, largeN/smallN, smallN, largeN, maxRatio, largeN)
 	}
 }
