@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"fmt"
 	"os"
 	"strings"
@@ -614,6 +615,15 @@ func (fc *FileConfig) validateCDR() []string { //nolint:cyclop // flat switch-st
 		fp = strings.ReplaceAll(fp, ":", "")
 		if len(fp) != 64 {
 			errs = append(errs, fmt.Sprintf("cdr.server_fingerprint: expected 64 hex chars (SHA-256), got %d", len(fp)))
+		} else if _, err := hex.DecodeString(fp); err != nil {
+			// Length alone isn't enough: a 64-character value that isn't valid
+			// hex would otherwise sail through startup validation and only
+			// surface later as a non-fatal CDR client-dial failure (loadCDR,
+			// cdr_startup.go) — CDR silently never comes up instead of a clear
+			// startup error naming the bad field. buildCDRTLSConfig (cdr.go)
+			// enforces the same hex requirement at connect time; this mirrors
+			// it at config-load time so the failure is loud and immediate.
+			errs = append(errs, "cdr.server_fingerprint: expected 64 hex chars (SHA-256), got non-hex characters")
 		}
 	}
 	if p := fc.CDR.CertsDir; p != "" && strings.Contains(p, "..") {
