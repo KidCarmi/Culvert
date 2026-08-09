@@ -355,7 +355,10 @@ func checkRootCA() OperatorContractCheck {
 			OperatorAction: "Rotate the Root CA (CA Management → Force Rotation) and redistribute the new CA certificate to clients.",
 		}
 	}
-	if caUsabilityFailures().PersistFailures > 0 {
+	// Keyed on the CURRENT persistence state, not the cumulative counter: an
+	// operator who restores the volume and force-rotates has fixed this, and a
+	// row latched on the counter would keep contradicting them until restart.
+	if caRotationPersistDegraded() {
 		return OperatorContractCheck{
 			Code:           "root_ca",
 			Status:         diagWarn,

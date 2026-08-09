@@ -16196,9 +16196,11 @@ async function loadCAMgmt() {
     document.getElementById('ca-unusable-counts').textContent =
       ' (' + (ca.inspectBlocked ?? 0) + ' connections blocked since boot.)';
   }
+  // Keyed on the CURRENT state, not the cumulative counter — the banner must
+  // clear once a rotation actually persists, not latch until process restart.
   const persistBanner = document.getElementById('ca-persist-banner');
-  persistBanner.style.display = (ca.rotationPersistFailures > 0) ? '' : 'none';
-  if (ca.rotationPersistFailures > 0) {
+  persistBanner.style.display = ca.rotationPersistDegraded ? '' : 'none';
+  if (ca.rotationPersistDegraded) {
     document.getElementById('ca-persist-reason').textContent = ca.rotationPersistError || '';
   }
   document.getElementById('ca-expiry').textContent = ca.expiresIn || '-';

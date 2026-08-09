@@ -53,11 +53,19 @@ type caUsabilityHealth struct {
 	lastOK     time.Time // most recent OBSERVED usable verification
 
 	// persistFailures counts rotations that generated a new CA but could not
-	// write it to the bundle path (register row CA-2). Latched separately: it
-	// survives the CA becoming usable again, because a rotation that did not
-	// persist stays a live problem until the operator fixes the volume.
+	// write it to the bundle path (register row CA-2). It is CUMULATIVE — the
+	// right shape for a Prometheus counter and the wrong shape for a status
+	// row, so the two are tracked separately. lastPersistFail/lastPersistOK
+	// carry the CURRENT state: an operator who restores the volume and
+	// force-rotates has fixed the problem, and a warning keyed on the
+	// cumulative counter would keep contradicting them until process restart.
+	//
+	// Same "recovery on evidence" rule as the connection-fault record above:
+	// only an observed successful bundle write clears it, never elapsed time.
 	persistFailures int64
 	lastPersistErr  string
+	lastPersistFail time.Time
+	lastPersistOK   time.Time
 
 	logAt   time.Time
 	alertAt time.Time
@@ -91,6 +99,7 @@ var fireCAUnusableAlert = func(detail string) {
 func init() {
 	ca.UnusableObserver = noteCAUnusable
 	ca.RotationPersistFailureObserver = noteCARotationPersistFailure
+	ca.RotationPersistSuccessObserver = noteCARotationPersisted
 }
 
 // noteCAUnusable is the engine observer for a refused leaf sign. It runs
@@ -151,9 +160,11 @@ func recordCAUsabilityFault(safeReason string, engineRefusal bool) {
 // attempt (a 24h cadence), so it is bounded by construction and needs no gate.
 func noteCARotationPersistFailure(reason string) {
 	safe := sanitizeLog(reason)
+	now := time.Now()
 	caUsability.mu.Lock()
 	caUsability.persistFailures++
 	caUsability.lastPersistErr = safe
+	caUsability.lastPersistFail = now
 	n := caUsability.persistFailures
 	caUsability.mu.Unlock()
 
@@ -171,6 +182,32 @@ func noteCARotationPersistFailure(reason string) {
 	}
 }
 
+// noteCARotationPersisted records an OBSERVED successful bundle write. It is
+// what clears the persistence warning — see caRotationPersistDegraded. The
+// cumulative counter is deliberately NOT decremented: it feeds a Prometheus
+// counter, which must never go backwards, and the historical fact that a save
+// once failed stays worth knowing.
+func noteCARotationPersisted() {
+	now := time.Now()
+	caUsability.mu.Lock()
+	caUsability.lastPersistOK = now
+	caUsability.mu.Unlock()
+}
+
+// caRotationPersistDegraded reports whether the CURRENTLY-active Root CA may be
+// memory-only: a bundle write has failed and no successful one has been observed
+// since. This is what the diagnostics row, /api/ca/status and the admin panel
+// key on — not the cumulative counter, which would latch the warning for the
+// life of the process even after the operator fixed the volume and re-rotated.
+func caRotationPersistDegraded() bool {
+	caUsability.mu.Lock()
+	defer caUsability.mu.Unlock()
+	if caUsability.lastPersistFail.IsZero() {
+		return false
+	}
+	return !caUsability.lastPersistOK.After(caUsability.lastPersistFail)
+}
+
 // noteCAUsable records an OBSERVED successful usability verification. This is
 // the only thing that clears the degraded state: silence is not recovery. A CA
 // that is still expired looks exactly like a healthy one if nothing happens to
@@ -186,7 +223,9 @@ func noteCAUsable() {
 	caUsability.mu.Unlock()
 }
 
-// caUsabilitySnapshot is a consistent read of the fault record.
+// caUsabilitySnapshot is a consistent read of the fault record. PersistFailures
+// is CUMULATIVE (the counter); PersistDegraded is the CURRENT state (the status
+// row) — see caRotationPersistDegraded for why they must not be conflated.
 type caUsabilitySnapshot struct {
 	Refusals        int64
 	Blocks          int64
@@ -194,6 +233,7 @@ type caUsabilitySnapshot struct {
 	Reason          string
 	PersistFailures int64
 	PersistErr      string
+	PersistDegraded bool
 }
 
 func caUsabilityFailures() caUsabilitySnapshot {
@@ -206,6 +246,8 @@ func caUsabilityFailures() caUsabilitySnapshot {
 		Reason:          caUsability.lastReason,
 		PersistFailures: caUsability.persistFailures,
 		PersistErr:      caUsability.lastPersistErr,
+		PersistDegraded: !caUsability.lastPersistFail.IsZero() &&
+			!caUsability.lastPersistOK.After(caUsability.lastPersistFail),
 	}
 }
 
@@ -244,6 +286,8 @@ func resetCAUsabilityHealthForTest() {
 	caUsability.lastOK = time.Time{}
 	caUsability.persistFailures = 0
 	caUsability.lastPersistErr = ""
+	caUsability.lastPersistFail = time.Time{}
+	caUsability.lastPersistOK = time.Time{}
 	caUsability.logAt = time.Time{}
 	caUsability.alertAt = time.Time{}
 	caEverUnusable.Store(false)

@@ -23,7 +23,10 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"math/big"
+	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -103,7 +106,7 @@ func TestHandleTunnel_ExpiredCAFailsClosedNotBypass(t *testing.T) {
 	match := &PolicyMatch{Rule: &PolicyRule{ID: "r-ca", Name: "inspect-all"}}
 	id := ProxyIdentity{ClientIP: "198.51.100.77"}
 
-	r := httptest.NewRequest("CONNECT", "http://"+host+":443", nil)
+	r := httptest.NewRequest("CONNECT", "http://"+host+":443", http.NoBody)
 	r.Host = host + ":443"
 	rr := httptest.NewRecorder()
 
@@ -159,7 +162,7 @@ func TestHandleTunnel_ValidCAIsUnaffected(t *testing.T) {
 	// 203.0.113.0/24 is TEST-NET-3: routable-looking, never answers.
 	const host = "203.0.113.9"
 	dec := sslResolution{Action: SSLInspect, Source: decryptobs.DecisionPolicyInspect}
-	r := httptest.NewRequest("CONNECT", "http://"+host+":443", nil)
+	r := httptest.NewRequest("CONNECT", "http://"+host+":443", http.NoBody)
 	r.Host = host + ":443"
 	rr := httptest.NewRecorder()
 
@@ -210,7 +213,7 @@ func TestReadyz_ExpiredCARowIsReportOnly(t *testing.T) {
 	}
 
 	rr := httptest.NewRecorder()
-	handleReady(rr, httptest.NewRequest("GET", "/readyz", nil))
+	handleReady(rr, httptest.NewRequest("GET", "/readyz", http.NoBody))
 	got := decode(rr)
 	row, ok := got.Checks["ca"]
 	if !ok {
@@ -226,7 +229,7 @@ func TestReadyz_ExpiredCARowIsReportOnly(t *testing.T) {
 
 	// Strict mode is the opt-in that DOES gate.
 	rrStrict := httptest.NewRecorder()
-	handleReady(rrStrict, httptest.NewRequest("GET", "/readyz?strict=1", nil))
+	handleReady(rrStrict, httptest.NewRequest("GET", "/readyz?strict=1", http.NoBody))
 	if rrStrict.Code != 503 {
 		t.Fatalf("/readyz?strict=1 with an expired CA returned %d, want 503", rrStrict.Code)
 	}
@@ -413,5 +416,104 @@ func TestOperatorContract_RootCARowReflectsUsability(t *testing.T) {
 	}
 	if !strings.Contains(warn.Message, "lost on restart") {
 		t.Fatalf("persist-failure row does not state the consequence: %q", warn.Message)
+	}
+}
+
+// TestCARotationPersistWarning_ClearsOnEvidence pins the Codex review finding:
+// the persistence warning must key on the CURRENT state, not the cumulative
+// counter. An operator who restores the volume and force-rotates has fixed the
+// problem; a row latched on the counter would keep telling them the active CA
+// is memory-only until the process restarts — the opposite of the
+// recovery-on-evidence rule the rest of this plane follows.
+func TestCARotationPersistWarning_ClearsOnEvidence(t *testing.T) {
+	installCAWithWindow(t, time.Now().Add(-time.Hour), time.Now().Add(365*24*time.Hour))
+
+	noteCARotationPersistFailure("no space left on device")
+	if !caRotationPersistDegraded() {
+		t.Fatal("persist state not degraded right after a failed save")
+	}
+	if checkRootCA().Status != diagWarn {
+		t.Fatal("root_ca row did not warn after a failed save")
+	}
+
+	// Elapsed time alone must not clear it.
+	if !caRotationPersistDegraded() {
+		t.Fatal("persist state cleared without an observed successful save")
+	}
+
+	// The operator fixes the volume and force-rotates: a successful save.
+	noteCARotationPersisted()
+	if caRotationPersistDegraded() {
+		t.Fatal("persist state stayed degraded after an observed successful save")
+	}
+	if got := checkRootCA(); got.Status != diagOK {
+		t.Fatalf("root_ca status = %q after a successful re-save, want %q — the warning latched", got.Status, diagOK)
+	}
+
+	snap := caUsabilityFailures()
+	if snap.PersistDegraded {
+		t.Fatal("snapshot still reports PersistDegraded after recovery")
+	}
+	// The cumulative counter must NOT go backwards: it feeds a Prometheus
+	// counter, and the historical fact stays worth knowing.
+	if snap.PersistFailures != 1 {
+		t.Fatalf("cumulative persist-failure counter = %d after recovery, want 1 (counters never decrease)",
+			snap.PersistFailures)
+	}
+
+	// A later failure re-arms the warning.
+	noteCARotationPersistFailure("read-only file system")
+	if !caRotationPersistDegraded() {
+		t.Fatal("a new save failure did not re-arm the warning")
+	}
+}
+
+// TestForceRotate_UnpersistedRotationDoesNotReportSuccess pins the manual half
+// of CA-2. The force-rotate handler carried the same swallowed-save defect as
+// auto-rotation: it logged the error, then answered 200 and bumped
+// culvert_ca_rotations_total for a CA that lives only in RAM. The operator
+// running this command is very often the one trying to RECOVER from an expiry
+// outage, so a false success here costs them the whole incident.
+func TestForceRotate_UnpersistedRotationDoesNotReportSuccess(t *testing.T) {
+	installCAWithWindow(t, time.Now().Add(-time.Hour), time.Now().Add(365*24*time.Hour))
+
+	// A path whose parent is a regular file — every write fails ENOTDIR.
+	blocker := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatalf("seed blocker: %v", err)
+	}
+	prevPath, prevPass := caRuntime.path, caRuntime.passphrase
+	caRuntime.path, caRuntime.passphrase = filepath.Join(blocker, "ca.bundle"), "pw"
+	t.Cleanup(func() { caRuntime.path, caRuntime.passphrase = prevPath, prevPass })
+
+	before := statCARotations.Load()
+	if persistRotatedCA() {
+		t.Fatal("persistRotatedCA reported success writing through a regular file")
+	}
+	if statCARotations.Load() != before {
+		t.Fatal("an unpersisted rotation advanced culvert_ca_rotations_total")
+	}
+	if !caRotationPersistDegraded() {
+		t.Fatal("a failed force-rotate save did not degrade the persistence state")
+	}
+
+	// A writable path recovers it.
+	caRuntime.path = filepath.Join(t.TempDir(), "ca.bundle")
+	if !persistRotatedCA() {
+		t.Fatal("persistRotatedCA failed on a writable path")
+	}
+	if caRotationPersistDegraded() {
+		t.Fatal("persistence state stayed degraded after a successful save")
+	}
+
+	// No bundle path configured: nothing is written, so there is no durability
+	// claim to fail and neither observer should fire.
+	resetCAUsabilityHealthForTest()
+	caRuntime.path = ""
+	if !persistRotatedCA() {
+		t.Fatal("persistRotatedCA reported failure with no bundle path configured")
+	}
+	if caRotationPersistDegraded() {
+		t.Fatal("no-bundle-path invented a degraded persistence state")
 	}
 }

@@ -301,3 +301,88 @@ func TestRotateIfNeeded_SuccessfulPersistIsSilent(t *testing.T) {
 		t.Fatalf("persist-failure observer fired %d times on a successful save", fired)
 	}
 }
+
+// TestRotateIfNeeded_SuccessSignalIsGatedOnPersistence pins the Codex review
+// finding: a rotation whose bundle write failed must not fire the SUCCESS
+// observer. Package main wires that observer to a "Root CA rotated (dual-CA
+// overlap active)" alert and to culvert_ca_rotations_total, so firing it
+// alongside the persist-failure signal sends two contradictory pages for one
+// event and advances a counter documented as counting successful rotations for
+// a CA the next restart will discard.
+func TestRotateIfNeeded_SuccessSignalIsGatedOnPersistence(t *testing.T) {
+	cm := New()
+	cert, key := mkCA(t, time.Now().Add(-24*time.Hour), time.Now().Add(5*24*time.Hour))
+	cm.SetCAForTest(cert, key)
+
+	success, failure := 0, 0
+	RotationObserver = func(time.Time, time.Time) { success++ }
+	RotationPersistFailureObserver = func(string) { failure++ }
+	t.Cleanup(func() { RotationObserver = nil; RotationPersistFailureObserver = nil })
+
+	blocker := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatalf("seed blocker: %v", err)
+	}
+	if !cm.RotateIfNeeded(filepath.Join(blocker, "ca.bundle"), "passphrase") {
+		t.Fatal("rotation should still happen in memory")
+	}
+	if failure != 1 {
+		t.Fatalf("persist-failure observer fired %d times, want 1", failure)
+	}
+	if success != 0 {
+		t.Fatalf("success observer fired %d times for a rotation that did not persist — "+
+			"that is a contradictory alert plus a false culvert_ca_rotations_total increment", success)
+	}
+}
+
+// TestRotateIfNeeded_PersistSuccessIsObserved is the other half: a clean save
+// must fire the success-persist observer, because that is the ONLY thing that
+// clears the "may be memory-only" warning. Without it the warning latches for
+// the life of the process even after the operator fixes the volume.
+func TestRotateIfNeeded_PersistSuccessIsObserved(t *testing.T) {
+	cm := New()
+	cert, key := mkCA(t, time.Now().Add(-24*time.Hour), time.Now().Add(5*24*time.Hour))
+	cm.SetCAForTest(cert, key)
+
+	persisted, success := 0, 0
+	RotationPersistSuccessObserver = func() { persisted++ }
+	RotationObserver = func(time.Time, time.Time) { success++ }
+	t.Cleanup(func() { RotationPersistSuccessObserver = nil; RotationObserver = nil })
+
+	if !cm.RotateIfNeeded(filepath.Join(t.TempDir(), "ca.bundle"), "passphrase") {
+		t.Fatal("near-expiry CA should rotate")
+	}
+	if persisted != 1 {
+		t.Fatalf("persist-success observer fired %d times on a clean save, want 1", persisted)
+	}
+	if success != 1 {
+		t.Fatalf("success observer fired %d times on a fully successful rotation, want 1", success)
+	}
+}
+
+// TestRotateIfNeeded_NoBundlePathFiresNeitherPersistObserver: with no bundle
+// path configured nothing is written, so there is nothing to be degraded — or
+// recovered — about. Firing either observer would invent a state.
+func TestRotateIfNeeded_NoBundlePathFiresNeitherPersistObserver(t *testing.T) {
+	cm := New()
+	cert, key := mkCA(t, time.Now().Add(-24*time.Hour), time.Now().Add(5*24*time.Hour))
+	cm.SetCAForTest(cert, key)
+
+	fail, ok, success := 0, 0, 0
+	RotationPersistFailureObserver = func(string) { fail++ }
+	RotationPersistSuccessObserver = func() { ok++ }
+	RotationObserver = func(time.Time, time.Time) { success++ }
+	t.Cleanup(func() {
+		RotationPersistFailureObserver, RotationPersistSuccessObserver, RotationObserver = nil, nil, nil
+	})
+
+	if !cm.RotateIfNeeded("", "") {
+		t.Fatal("rotation should happen with no bundle path")
+	}
+	if fail != 0 || ok != 0 {
+		t.Fatalf("persist observers fired (fail=%d ok=%d) with no bundle path configured", fail, ok)
+	}
+	if success != 1 {
+		t.Fatalf("success observer fired %d times, want 1 — no save was attempted, so nothing was withheld", success)
+	}
+}

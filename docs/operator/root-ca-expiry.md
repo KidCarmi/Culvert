@@ -53,10 +53,12 @@ Any one of these is conclusive:
    needed rotation at every startup and every 24 hours, and rotates automatically inside the
    30-day pre-expiry window.
 3. **Confirm the rotation persisted.** If you see an amber banner *"Root CA rotated but not
-   saved"* — or `culvert_ca_rotation_persist_failures_total > 0` — the replacement CA exists
-   **in memory only** and will be lost on the next restart, which will then rotate again to a
-   *different* CA. Fix the data volume (space, mount flags, permissions on the `-ca-path`
-   bundle) and force another rotation before doing anything else.
+   saved"* — or the `root_ca` row on `/api/diagnostics` warns, or `POST /api/ca/rotate`
+   answered with `"persisted": false` — the replacement CA exists **in memory only** and will
+   be lost on the next restart, which will then rotate again to a *different* CA. Fix the data
+   volume (space, mount flags, permissions on the `-ca-path` bundle) and force another rotation
+   before doing anything else. Those three surfaces clear as soon as a rotation actually
+   writes; `culvert_ca_rotation_persist_failures_total` is a cumulative counter and does not.
 4. **Redistribute the new Root CA to clients.** This step cannot be automated from inside the
    gateway: a new root is untrusted by definition. Download it from *CA Management → Download
    CA*, or `GET /api/ca/download`, and push it through your existing trust-store channel
@@ -79,7 +81,12 @@ and a hard backstop on the outage itself:
 
 ```promql
 culvert_ca_usable == 0
-culvert_ca_rotation_persist_failures_total > 0
+
+# Cumulative counter — use a rate/increase window, not `> 0`, or the rule latches
+# forever after a single historical failure. The live "is the active CA durable?"
+# state is the `root_ca` row on /api/diagnostics and the CA panel banner, both of
+# which clear once a rotation actually persists.
+increase(culvert_ca_rotation_persist_failures_total[1h]) > 0
 ```
 
 The `culvert_ca_expires_in_seconds` series is omitted entirely on a node with no Root CA

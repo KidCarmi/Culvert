@@ -60,6 +60,18 @@ var UnusableObserver func(reason string)
 // under them. Publish-once, wired by package main. nil ⇒ no-op.
 var RotationPersistFailureObserver func(reason string)
 
+// RotationPersistSuccessObserver is the other half of the pair: it fires when a
+// rotation's bundle write SUCCEEDED. It exists because the persistence warning
+// must clear on EVIDENCE — an operator who restores the volume and force-rotates
+// has fixed the problem, and a warning that stays latched until process restart
+// would keep telling them otherwise. A cumulative counter is the right shape for
+// the metric and the wrong shape for a status row; the two are tracked
+// separately. Publish-once, wired by package main. nil ⇒ no-op.
+//
+// Neither observer fires when no bundle path is configured: nothing was written,
+// so there is nothing to be degraded — or recovered — about.
+var RotationPersistSuccessObserver func()
+
 // Usable reports whether the Root CA can currently sign a leaf that a client
 // will accept. nil means yes. The returned error wraps ErrCAUnusable and is
 // safe to log or surface to an admin-role API (no key material, no path).
@@ -110,7 +122,7 @@ func (cm *Manager) SignRefusals() int64 { return cm.signRefusals.Load() }
 // path validation evaluates every certificate in the chain at the time of use,
 // so an issuer-outliving leaf is never more useful than one clamped to the
 // issuer — it is only harder to diagnose.
-func clampLeafValidity(notBefore, notAfter time.Time, ca *x509.Certificate) (time.Time, time.Time) {
+func clampLeafValidity(notBefore, notAfter time.Time, ca *x509.Certificate) (leafNotBefore, leafNotAfter time.Time) {
 	if ca == nil {
 		return notBefore, notAfter
 	}

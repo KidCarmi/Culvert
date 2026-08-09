@@ -553,6 +553,8 @@ func (cm *Manager) RotateIfNeeded(caPath, passphrase string) bool {
 			if RotationPersistFailureObserver != nil {
 				RotationPersistFailureObserver(err.Error())
 			}
+		} else if RotationPersistSuccessObserver != nil {
+			RotationPersistSuccessObserver()
 		}
 	}
 	newExpiry := cm.CAExpiry()
@@ -568,7 +570,16 @@ func (cm *Manager) RotateIfNeeded(caPath, passphrase string) bool {
 	// fires the cert-rotation alert and bumps culvert_ca_rotations_total.
 	// Keeping this on RotateIfNeeded itself (not the loop) preserves the
 	// contract that a direct RotateIfNeeded call counts as a rotation.
-	if RotationObserver != nil {
+	//
+	// GATED ON PERSISTENCE. A rotation that could not be written is not a
+	// successful rotation: firing the success observer here would send the
+	// operator a "Root CA rotated (dual-CA overlap active)" alert alongside the
+	// "NOT PERSISTED" one from the branch above — two contradictory pages for
+	// one event — and would advance culvert_ca_rotations_total, which is
+	// documented as counting successful rotations, for a CA that the next
+	// restart will discard. The in-memory CA IS now the active one, so the
+	// function still returns true; only the success SIGNAL is withheld.
+	if persisted && RotationObserver != nil {
 		RotationObserver(expiry, newExpiry)
 	}
 	return true

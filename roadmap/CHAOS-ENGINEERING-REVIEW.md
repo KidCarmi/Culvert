@@ -1040,6 +1040,12 @@ component whose failure is the widest.
 2. **Leaf validity was not clamped to the issuer's** (`NotAfter: now+24h`, unconditional).
 3. **A rotation that could not persist reported success** (CA-2) — so the only recovery
    path defect 1 has could silently not survive a restart, minting a different root each boot.
+   Three sub-defects, all surfaced in PR review: the SUCCESS observer fired even when the save
+   failed (two contradictory alerts for one event, plus a false `culvert_ca_rotations_total`
+   increment); the warning was keyed on the CUMULATIVE counter, so it latched until process
+   restart even after the operator fixed the volume and re-rotated; and the MANUAL
+   force-rotate path (`apiCARotate`) had the identical swallowed save — the worse of the two
+   sites, since force-rotate is exactly what an operator runs to recover from defect 1.
 4. **The rotation loop's first check was 24h after boot** (CA-4) — skipped precisely when
    an operator restarts to recover from the outage.
 5. **`cacheOrder` grew on every TTL refresh** (CA-16, previously unrecorded) — an unbounded

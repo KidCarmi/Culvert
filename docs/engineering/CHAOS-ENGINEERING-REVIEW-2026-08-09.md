@@ -174,6 +174,30 @@ amber banner. Rotation still returns `true` (the in-memory CA *is* now the activ
 lying in the other direction would suppress the observer that reports it), but nothing
 downstream can any longer mistake it for a durable rotation.
 
+Three details, all of which came out of PR review and each of which the first cut got wrong:
+
+1. **The SUCCESS signal is gated on persistence.** `RotationObserver` is wired in package
+   main to the "Root CA rotated (dual-CA overlap active)" alert *and* to
+   `culvert_ca_rotations_total`. Firing it unconditionally sent the operator two
+   contradictory pages for one event and advanced a counter documented as counting
+   *successful* rotations for a CA the next restart discards. It now fires only when the
+   bundle actually landed.
+2. **The warning clears on EVIDENCE, not on process restart.** The first cut keyed the
+   diagnostics row, `/api/ca/status` and the panel banner on the cumulative failure counter,
+   so an operator who restored the volume and force-rotated kept being told the active CA was
+   memory-only until the process restarted — the exact inversion of the recovery rule the rest
+   of this plane follows, and worse here because the operator had *just produced* the
+   evidence. `RotationPersistSuccessObserver` now clears it; the cumulative counter stays
+   monotonic for Prometheus and is no longer the status source.
+3. **The manual force-rotate path had the identical defect** (`apiCARotate`, ui_security.go):
+   it logged the save error, then answered 200 and bumped the success counter. That is the
+   worse of the two sites, because the person running a force-rotate is very often the one
+   trying to recover from FS-1. It now feeds the same observers, withholds the success
+   counter, returns `persisted: false` with a warning, and audits distinctly.
+
+Neither persist observer fires when no bundle path is configured: nothing was written, so
+there is no durability claim to fail — or to recover.
+
 ### FS-4 — The cache-order slice that grew with uptime
 
 **Current behavior (pre-fix).** `GetCert` appended to `cacheOrder` on **every** miss:
@@ -324,6 +348,9 @@ output is quoted in the PR description.
 - `TestGetCert_CacheOrderDoesNotGrowOnRefresh` + `TestGetCert_CacheOrderTracksDistinctHosts`.
 - `TestRotateIfNeeded_PersistFailureIsReported` (parent path is a regular file ⇒ every write
   fails `ENOTDIR`) + `TestRotateIfNeeded_SuccessfulPersistIsSilent` (no crying wolf).
+- `TestRotateIfNeeded_SuccessSignalIsGatedOnPersistence` — a non-durable rotation must not
+  fire the success observer (no contradictory alert, no false `culvert_ca_rotations_total`).
+- `TestRotateIfNeeded_PersistSuccessIsObserved` + `TestRotateIfNeeded_NoBundlePathFiresNeitherPersistObserver`.
 
 **`ca_expiry_failclosed_test.go`** (package main)
 - `TestHandleTunnel_ExpiredCAFailsClosedNotBypass` — **the security gate**: 502, no CA detail
@@ -336,7 +363,13 @@ output is quoted in the PR description.
   entirely with no CA loaded.
 - `TestCAUnusable_AlertAndLogAreRateLimited` — 500 faults ⇒ 1 alert, counter still 500.
 - `TestCAUsabilityDegraded_RecoveryNeedsEvidence` — clears only on an observed verification.
-- `TestCAUnusableOutcome_Projection`, `TestCARotationPersistFailure_IsAlerted`.
+- `TestCAUnusableOutcome_Projection`, `TestCARotationPersistFailure_IsAlerted`,
+  `TestOperatorContract_RootCARowReflectsUsability`.
+- `TestCARotationPersistWarning_ClearsOnEvidence` — the warning clears on an observed
+  successful save, re-arms on a later failure, and the cumulative counter never decreases.
+- `TestForceRotate_UnpersistedRotationDoesNotReportSuccess` — the manual path withholds the
+  success counter, degrades on failure, recovers on a writable path, and invents nothing when
+  no bundle path is configured.
 
 ---
 

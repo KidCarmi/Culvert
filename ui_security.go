@@ -1113,8 +1113,12 @@ func apiCAStatus(w http.ResponseWriter, r *http.Request) {
 	caFaults := caUsabilityFailures()
 	info["inspectBlocked"] = caFaults.Blocks
 	info["signRefused"] = certMgr.SignRefusals()
+	// rotationPersistFailures is the CUMULATIVE history; rotationPersistDegraded
+	// is whether the ACTIVE CA may be memory-only right now. The panel banner
+	// keys on the latter so it clears once a rotation actually persists.
 	info["rotationPersistFailures"] = caFaults.PersistFailures
-	if caFaults.PersistErr != "" {
+	info["rotationPersistDegraded"] = caFaults.PersistDegraded
+	if caFaults.PersistDegraded && caFaults.PersistErr != "" {
 		info["rotationPersistError"] = caFaults.PersistErr
 	}
 	// Dual-CA overlap status.
@@ -1123,6 +1127,28 @@ func apiCAStatus(w http.ResponseWriter, r *http.Request) {
 		info["secondaryCA"] = secInfo
 	}
 	jsonOK(w, info)
+}
+
+// persistRotatedCA writes the freshly-rotated Root CA to the configured bundle
+// path and reports whether it landed. It is the manual force-rotate half of the
+// CHAOS-28 / CA-2 fix: this path carried the same swallowed-save defect as
+// auto-rotation — it logged the error, then answered 200 and bumped the success
+// counter for a CA that lives only in RAM. An operator force-rotating to RECOVER
+// from an expiry outage is exactly the person who must not be told it worked.
+//
+// Returns true when nothing needed writing (no bundle path configured), because
+// there is no durability claim to fail in that configuration.
+func persistRotatedCA() bool {
+	if caRuntime.path == "" {
+		return true
+	}
+	if err := certMgr.SaveCA(caRuntime.path, caRuntime.passphrase); err != nil {
+		logger.Printf("CA force-rotate: save failed: %v", err)
+		noteCARotationPersistFailure(err.Error())
+		return false
+	}
+	noteCARotationPersisted()
+	return true
 }
 
 func apiCADownload(w http.ResponseWriter, r *http.Request) {
@@ -1234,14 +1260,20 @@ func apiCARotate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "rotation failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if caRuntime.path != "" {
-		if err := certMgr.SaveCA(caRuntime.path, caRuntime.passphrase); err != nil {
-			logger.Printf("CA force-rotate: save failed: %v", err)
-		}
+	info := certMgr.CACertInfo()
+	if !persistRotatedCA() {
+		// Still 200: the rotation DID happen and the new CA is active, so
+		// reporting an error would be wrong in the other direction. The caller
+		// is told what did not happen instead.
+		info["persisted"] = false
+		info["warning"] = "The new Root CA could not be written to disk — it exists in memory only and will be LOST on restart. Restore write access to the CA bundle path and rotate again."
+		auditEvent(r, "ca.rotate", "root_ca", "force rotation via admin API (confirmed) — NOT PERSISTED, in-memory only")
+		jsonOK(w, info)
+		return
 	}
 	statCARotations.Add(1)
 	auditEvent(r, "ca.rotate", "root_ca", "force rotation via admin API (confirmed)")
-	jsonOK(w, certMgr.CACertInfo())
+	jsonOK(w, info)
 }
 
 // apiCAKeyProvider returns the current key provider status for HSM/KMS UI.
