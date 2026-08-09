@@ -339,6 +339,30 @@ func checkRootCA() OperatorContractCheck {
 			OperatorAction: "Provide CULVERT_CA_PASSPHRASE and a -ca-bundle path to enable SSL inspection, or ignore if SSL inspection is not used.",
 		}
 	}
+	// CHAOS-28: "initialised" is not the same as "usable". A Root CA outside its
+	// own validity window is initialised, signs nothing a client will accept,
+	// and used to report diagOK through a total inspected-HTTPS outage. The
+	// message carries the impact and a count, never the raw cause — this row is
+	// a VIEWER-role surface with a standing no-sensitive-values guardrail, and
+	// the cause names the appliance's exact certificate state. Full detail stays
+	// in the logs, the alert, and the admin-role CA API.
+	if certMgr.Usable() != nil {
+		return OperatorContractCheck{
+			Code:   "root_ca",
+			Status: diagFail,
+			Message: fmt.Sprintf("root CA outside its validity window — SSL inspection is BLOCKED (%d connections refused since boot)",
+				caUsabilityFailures().Blocks),
+			OperatorAction: "Rotate the Root CA (CA Management → Force Rotation) and redistribute the new CA certificate to clients.",
+		}
+	}
+	if caUsabilityFailures().PersistFailures > 0 {
+		return OperatorContractCheck{
+			Code:           "root_ca",
+			Status:         diagWarn,
+			Message:        "root CA rotated but could not be saved — the replacement exists in memory only and will be lost on restart",
+			OperatorAction: "Restore write access to the data directory, then force a Root CA rotation so the new CA is persisted.",
+		}
+	}
 	return OperatorContractCheck{
 		Code:    "root_ca",
 		Status:  diagOK,

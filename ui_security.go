@@ -1101,6 +1101,22 @@ func apiCAStatus(w http.ResponseWriter, r *http.Request) {
 	if !expiry.IsZero() {
 		info["expiresIn"] = time.Until(expiry).Round(time.Hour).String()
 	}
+	// CHAOS-28 usability posture. `ready` only says a CA is LOADED; a CA outside
+	// its own validity window is loaded, signs nothing a client accepts, and
+	// used to render as a perfectly healthy panel. These fields are what an
+	// operator sees when inspected HTTPS stops working fleet-wide.
+	usabilityErr := certMgr.Usable()
+	info["usable"] = usabilityErr == nil
+	if usabilityErr != nil {
+		info["unusableReason"] = usabilityErr.Error()
+	}
+	caFaults := caUsabilityFailures()
+	info["inspectBlocked"] = caFaults.Blocks
+	info["signRefused"] = certMgr.SignRefusals()
+	info["rotationPersistFailures"] = caFaults.PersistFailures
+	if caFaults.PersistErr != "" {
+		info["rotationPersistError"] = caFaults.PersistErr
+	}
 	// Dual-CA overlap status.
 	info["dualCAActive"] = certMgr.SecondaryCAActive()
 	if secInfo := certMgr.SecondaryCAInfo(); secInfo != nil {

@@ -106,6 +106,10 @@ type Manager struct {
 	cacheHits   atomic.Int64
 	cacheMisses atomic.Int64
 
+	// signRefusals counts leaf-sign attempts refused because the Root CA was
+	// outside its own validity window (CHAOS-28). Lock-free; no identity data.
+	signRefusals atomic.Int64
+
 	// Dual-CA overlap: secondary (old) CA kept during rotation window.
 	// Leaf certs include both CAs in the chain so clients trusting either
 	// CA can validate. Secondary is cleared after overlap window expires.
@@ -533,14 +537,33 @@ func (cm *Manager) RotateIfNeeded(caPath, passphrase string) bool {
 	cm.secondaryExpiry = expiry
 	cm.mu.Unlock()
 
+	// Persistence is what makes rotation a RECOVERY rather than a reprieve. If
+	// the bundle does not land (disk full, read-only remount, permission
+	// denied), the replacement CA lives only in RAM: the next restart reloads
+	// the OLD near-expiry bundle, rotates again, and mints a DIFFERENT root —
+	// so every reboot re-breaks the trust an operator just finished
+	// distributing. Reporting that as a clean rotation is the silent-failure
+	// pattern this register exists to eliminate, so it gets its own observer and
+	// its own log wording (CHAOS-28, register row CA-2).
+	persisted := true
 	if caPath != "" {
 		if err := cm.SaveCA(caPath, passphrase); err != nil {
+			persisted = false
 			obs.Printf("CA auto-rotation: save failed: %v", err)
+			if RotationPersistFailureObserver != nil {
+				RotationPersistFailureObserver(err.Error())
+			}
 		}
 	}
 	newExpiry := cm.CAExpiry()
-	obs.Printf("CA auto-rotation: new CA generated (expires %s), old CA retained until %s",
-		newExpiry.Format("2006-01-02"), expiry.Format("2006-01-02"))
+	if persisted {
+		obs.Printf("CA auto-rotation: new CA generated (expires %s), old CA retained until %s",
+			newExpiry.Format("2006-01-02"), expiry.Format("2006-01-02"))
+	} else {
+		obs.Printf("CA auto-rotation: new CA generated (expires %s) but NOT PERSISTED — it exists in memory only; "+
+			"the next restart will reload the old bundle and rotate to a different CA",
+			newExpiry.Format("2006-01-02"))
+	}
 	// Observability crosses the boundary via the publish-once hook: main
 	// fires the cert-rotation alert and bumps culvert_ca_rotations_total.
 	// Keeping this on RotateIfNeeded itself (not the loop) preserves the
@@ -698,8 +721,21 @@ func (cm *Manager) GetCert(hello *tls.ClientHelloInfo) (*tls.Certificate, error)
 		SignLatencyObserver(time.Since(signStart).Seconds())
 	}
 	cm.mu.Lock()
+	// Track eviction order only for a host that is NOT already tracked
+	// (CHAOS-28). Appending unconditionally leaked: a TTL-expired REFRESH
+	// overwrites the map entry, so len(cache) does not change, the eviction
+	// branch below never fires, and cacheOrder grows by one string per refresh
+	// forever — an unbounded slice on a bounded map. A gateway with a stable
+	// working set of W hosts added W entries per certCacheTTL indefinitely
+	// (W=5,000 ⇒ ~120k strings/day), so the leak scaled with UPTIME, which is
+	// exactly the axis an appliance is supposed to be good at. The duplicates
+	// were also dead weight for eviction itself: the second and later copies of
+	// a host always resolved to "already gone" and were skipped, so dropping
+	// them changes no eviction decision — the first insertion still governs.
+	if _, tracked := cm.cache[host]; !tracked {
+		cm.cacheOrder = append(cm.cacheOrder, host)
+	}
 	cm.cache[host] = &certCacheEntry{cert: cert, createdAt: now}
-	cm.cacheOrder = append(cm.cacheOrder, host)
 	// LRU eviction: when cache exceeds max size, evict oldest 10% of entries.
 	if len(cm.cache) > certCacheMaxSize {
 		evictCount := certCacheMaxSize / 10
@@ -784,6 +820,21 @@ func (cm *Manager) signLeaf(host string) (*tls.Certificate, error) {
 	}
 	cm.mu.RUnlock()
 
+	// CHAOS-28 / CA-1: refuse to sign with a Root CA that is outside its own
+	// validity window. x509.CreateCertificate does not check the parent's
+	// NotBefore/NotAfter, so without this the engine happily mints leaves that
+	// every client rejects — a silent, fleet-wide inspected-HTTPS outage. Fail
+	// closed here so the condition is one countable event with an operator
+	// signal, not N opaque client-side certificate warnings. See validity.go.
+	now := time.Now()
+	if err := caUsable(caCert, now); err != nil {
+		cm.signRefusals.Add(1)
+		if UnusableObserver != nil {
+			UnusableObserver(err.Error())
+		}
+		return nil, err
+	}
+
 	leafKey, err := cm.sharedLeafKey()
 	if err != nil {
 		return nil, err
@@ -792,11 +843,15 @@ func (cm *Manager) signLeaf(host string) (*tls.Certificate, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A leaf must never outlive (or predate) its issuer — see clampLeafValidity.
+	// The guard above guarantees now < caCert.NotAfter, so the clamped window is
+	// always non-empty.
+	notBefore, notAfter := clampLeafValidity(now.Add(-5*time.Minute), now.Add(24*time.Hour), caCert)
 	template := &x509.Certificate{
 		SerialNumber: serial,
 		Subject:      pkix.Name{CommonName: host},
-		NotBefore:    time.Now().Add(-5 * time.Minute),
-		NotAfter:     time.Now().Add(24 * time.Hour),
+		NotBefore:    notBefore,
+		NotAfter:     notAfter,
 		DNSNames:     []string{host},
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
@@ -858,8 +913,10 @@ func (cm *Manager) HasKeyProviderForTest() bool {
 // time so cache TTL / LRU-eviction behavior can be exercised deterministically.
 func (cm *Manager) SeedCacheEntryForTest(host string, cert *tls.Certificate, createdAt time.Time) {
 	cm.mu.Lock()
+	if _, tracked := cm.cache[host]; !tracked { // same no-duplicate rule as GetCert
+		cm.cacheOrder = append(cm.cacheOrder, host)
+	}
 	cm.cache[host] = &certCacheEntry{cert: cert, createdAt: createdAt}
-	cm.cacheOrder = append(cm.cacheOrder, host)
 	cm.mu.Unlock()
 }
 
