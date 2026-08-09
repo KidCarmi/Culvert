@@ -193,3 +193,43 @@ func TestInstallScript_PatchAllowPeers_DefaultArrayWithTrailingCommentReplaced(t
 		t.Fatalf("patched config does not contain %q (comment must be preserved); got:\n%s", want, content)
 	}
 }
+
+// TestInstallScript_PatchAllowPeers_HashInsideQuotedPeerNotTreatedAsComment
+// proves the comment-splitting fix above does not itself misfire on a "#"
+// that is part of a quoted peer value rather than a comment marker. TOML
+// permits "#" inside a basic string, and the maintenance agent's config
+// loader accepts any username user.Lookup resolves (it does not reject "#"),
+// so `allow_peers = ["svc#prod"]` is a legitimate existing entry. A
+// quote-blind split at the first "#" would truncate `code` mid-string,
+// leave it without a closing "]", and misclassify the line as spanning
+// multiple lines (patched=2 -> exit 42 -> return 1), silently skipping
+// Release Management auto-wiring for this operator's config too.
+func TestInstallScript_PatchAllowPeers_HashInsideQuotedPeerNotTreatedAsComment(t *testing.T) {
+	content, exitCode := runPatchAllowPeers(t, `allow_peers = ["svc#prod"]`, "1000")
+
+	if exitCode != 0 {
+		t.Fatalf("patch_allow_peers_numeric_uid returned failure (exit %d) against a quoted peer value containing "+
+			"'#'; resulting config:\n%s", exitCode, content)
+	}
+	want := `allow_peers = ["svc#prod", "1000"]`
+	if !strings.Contains(content, want) {
+		t.Fatalf("patched config does not contain %q; got:\n%s", want, content)
+	}
+}
+
+// TestInstallScript_PatchAllowPeers_HashInsideQuotedPeerPlusTrailingComment
+// combines both: a quoted peer containing "#" AND a genuine trailing
+// comment on the same line. Only the unquoted "#" must be treated as the
+// comment marker.
+func TestInstallScript_PatchAllowPeers_HashInsideQuotedPeerPlusTrailingComment(t *testing.T) {
+	content, exitCode := runPatchAllowPeers(t, `allow_peers = ["svc#prod"]  # notes`, "1000")
+
+	if exitCode != 0 {
+		t.Fatalf("patch_allow_peers_numeric_uid returned failure (exit %d) against a quoted peer containing '#' "+
+			"plus a trailing comment; resulting config:\n%s", exitCode, content)
+	}
+	want := `allow_peers = ["svc#prod", "1000"]  # notes`
+	if !strings.Contains(content, want) {
+		t.Fatalf("patched config does not contain %q; got:\n%s", want, content)
+	}
+}
