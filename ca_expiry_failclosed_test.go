@@ -159,8 +159,13 @@ func TestHandleTunnel_ValidCAIsUnaffected(t *testing.T) {
 	installCAWithWindow(t, time.Now().Add(-time.Hour), time.Now().Add(365*24*time.Hour))
 	muteCAAlerts(t)
 
-	// 203.0.113.0/24 is TEST-NET-3: routable-looking, never answers.
-	const host = "203.0.113.9"
+	// Loopback: handleTunnelInspect's SSRF guard rejects it with 403 BEFORE any
+	// dial, so the test proves the request reached the inspect path without
+	// touching the network. Distinguishing 403 (got past the CA gate, blocked by
+	// SSRF) from 502 (blocked by the CA gate) is the whole assertion — and an
+	// unroutable-but-real address would instead sit on the 10s dial timeout and
+	// show up as egress in CI.
+	const host = "127.0.0.1"
 	dec := sslResolution{Action: SSLInspect, Source: decryptobs.DecisionPolicyInspect}
 	r := httptest.NewRequestWithContext(t.Context(), http.MethodConnect, "http://"+host+":443", http.NoBody)
 	r.Host = host + ":443"
@@ -168,6 +173,10 @@ func TestHandleTunnel_ValidCAIsUnaffected(t *testing.T) {
 
 	handleTunnel(rr, r, dec, nil, ProxyIdentity{ClientIP: "198.51.100.78"})
 
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("valid-CA CONNECT returned %d, want 403 (reached handleTunnelInspect and hit the SSRF guard) — "+
+			"502 would mean the CA gate fired on a perfectly good CA", rr.Code)
+	}
 	if snap := caUsabilityFailures(); snap.Blocks != 0 || snap.Refusals != 0 {
 		t.Fatalf("a valid CA recorded a usability fault: %+v", snap)
 	}
