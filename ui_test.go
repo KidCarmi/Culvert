@@ -975,6 +975,22 @@ func TestAPISyslogConfig_Get(t *testing.T) {
 	assertStatus(t, w, http.StatusOK)
 }
 
+// A panic recovered in the syslog drain goroutine is a distinct failure mode
+// from an ordinary drop (unreachable/slow collector) - the GET response must
+// surface it so the GUI can tell the two apart instead of only logging it.
+func TestAPISyslogConfig_Get_ExposesPanicsCount(t *testing.T) {
+	w := httptest.NewRecorder()
+	apiSyslogConfig(w, getReq("/api/syslog"))
+	assertStatus(t, w, http.StatusOK)
+	var body map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if _, ok := body["panics"]; !ok {
+		t.Fatalf("expected \"panics\" field in /api/syslog response, got %v", body)
+	}
+}
+
 func TestAPISyslogConfig_Disable(t *testing.T) {
 	w := httptest.NewRecorder()
 	apiSyslogConfig(w, jsonReq(http.MethodPost, "/api/syslog", map[string]string{

@@ -9962,7 +9962,7 @@ async function loadSettings() {
       const fmtLabel = sl.format === 'rfc5424' ? 'RFC 5424' : 'RFC 3164';
       el.textContent = '✓ Forwarding to ' + sl.addr + ' (' + fmtLabel + ')';
       el.style.color = 'var(--green)';
-      renderSyslogDrops(sl.drops);
+      renderSyslogDrops(sl.drops, sl.panics);
     } else {
       // No forwarding configured - never leave a stale drop warning visible.
       hideSyslogDrops();
@@ -10124,12 +10124,19 @@ async function saveUIAllowIPs() {
 // renderSyslogDrops / hideSyslogDrops keep the drop-count row in sync with the
 // forwarding state so a stale amber warning can't survive a reconfigure/disable
 // (a new collector starts a fresh writer at Drops()==0; disabling clears it).
-function renderSyslogDrops(drops) {
+function renderSyslogDrops(drops, panics) {
   const dropsEl = document.getElementById('s-syslog-drops');
   const n = drops || 0;
+  const p = panics || 0;
   dropsEl.style.display = '';
   if (n > 0) {
-    dropsEl.innerHTML = '<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> ' + n + ' message' + (n === 1 ? '' : 's') + ' dropped since forwarding started - check collector connectivity/capacity';
+    let msg = '<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> ' + n + ' message' + (n === 1 ? '' : 's') + ' dropped since forwarding started';
+    // panics is a subset of drops - a recurring formatting bug reads very
+    // differently from an unreachable/slow collector, so call it out.
+    msg += p > 0
+      ? ' (' + p + ' due to a recurring internal error, not collector capacity - check the process log) - check collector connectivity/capacity'
+      : ' - check collector connectivity/capacity';
+    dropsEl.innerHTML = msg;
     dropsEl.style.color = 'var(--warn,#b8860b)';
   } else {
     dropsEl.textContent = 'No delivery drops since forwarding started';

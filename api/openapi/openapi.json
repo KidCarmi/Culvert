@@ -3581,6 +3581,9 @@
           },
           "format": {
             "type": "string"
+          },
+          "panics": {
+            "type": "integer"
           }
         },
         "required": [

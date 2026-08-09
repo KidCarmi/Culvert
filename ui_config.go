@@ -1539,12 +1539,13 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		format := "rfc3164"
-		var drops uint64
+		var drops, panics uint64
 		if globalSyslog != nil {
 			format = globalSyslog.Format()
 			drops = globalSyslog.Drops()
+			panics = globalSyslog.Panics()
 		}
-		jsonOK(w, map[string]any{"addr": syslogConfigured, "format": format, "drops": drops})
+		jsonOK(w, map[string]any{"addr": syslogConfigured, "format": format, "drops": drops, "panics": panics})
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {
 			return

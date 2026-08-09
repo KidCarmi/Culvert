@@ -1325,6 +1325,7 @@ components:
         addr: { type: string }
         format: { type: string }
         drops: { type: integer }
+        panics: { type: integer }
     SetSyslogBody:
       type: object
       additionalProperties: false
