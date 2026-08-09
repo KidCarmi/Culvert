@@ -20,6 +20,8 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"testing"
 
@@ -519,5 +521,40 @@ func TestBenchGate_DNSFailureAlertAllocs(t *testing.T) {
 		t.Errorf("REGRESSION: fireDNSFailureAlert allocates %d/op with NO webhook subscribed, exceeds bound %d — "+
 			"the HasSubscriber gate has been bypassed; a DNS brownout will now spawn a goroutine per request. "+
 			"See alerts.go fireDNSFailureAlert.", allocs, maxAllocs)
+	}
+}
+
+// TestBenchGate_RequestLogEntryAllocs locks in the allocation-free per-request
+// request-log record. persistLogEntry is the chokepoint every logged request
+// flows through — HTTP, CONNECT, WebSocket, SOCKS5, TUNNEL_CLOSED accounting
+// rows and SSL-inspected inner requests — so an allocation here is an
+// allocation on 100% of logged traffic.
+//
+// The only allocation it ever had was time.Now().Format("15:04:05"), a
+// one-second-resolution render re-derived per request. It is now memoised per
+// wall-clock second (store_logclock.go), which took the record build from
+// 277 ns/1 alloc to 150 ns/0 allocs serially. This gate fails if a per-request
+// format, an fmt.Sprintf, or any other allocating field build returns to the
+// path.
+func TestBenchGate_RequestLogEntryAllocs(t *testing.T) {
+	const maxAllocs int64 = 0 // steady state 0; the clock render alone was 1
+
+	if logger == nil {
+		logger = log.New(io.Discard, "", log.LstdFlags)
+	}
+	res := testing.Benchmark(func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			persistLogEntry("203.0.113.7", "GET", "benchgate.example.com", "OK",
+				"allow-corp-saas", "Allow", "alice@corp.example", 0, 0, 0, "", "", AuthLogFields{})
+		}
+	})
+	allocs := res.AllocsPerOp()
+	t.Logf("persistLogEntry: %d allocs/op (bound %d), %d ns/op", allocs, maxAllocs, res.NsPerOp())
+	if allocs > maxAllocs {
+		t.Errorf("REGRESSION: persistLogEntry allocates %d/op, exceeds bound %d — "+
+			"per-request allocation has returned to the request-log chokepoint "+
+			"(a re-introduced time.Format, or an allocating field build). "+
+			"See store.go persistLogEntry and store_logclock.go.", allocs, maxAllocs)
 	}
 }
