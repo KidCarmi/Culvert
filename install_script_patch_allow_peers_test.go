@@ -148,3 +148,48 @@ func TestInstallScript_PatchAllowPeers_NonDefaultArrayAppended(t *testing.T) {
 		t.Fatalf("patched config does not contain %q; got:\n%s", want, content)
 	}
 }
+
+// TestInstallScript_PatchAllowPeers_TrailingCommentStillPatched proves that a
+// single-line allow_peers array followed by a trailing inline TOML comment
+// (e.g. an operator's own note on who is authorized — an entirely normal
+// TOML habit, and the exact line config.example.toml itself documents right
+// above the default) is still recognized as a single-line array and patched.
+//
+// The array-continues-onto-later-lines detector used to test whether the RAW
+// line ended in "]" (`line !~ /\][[:space:]]*$/`). A trailing comment after
+// the closing bracket ("...]  # note") means the line does NOT end in "]",
+// so a perfectly patchable single-line array was misclassified as spanning
+// multiple lines and the function bailed out (exit 42 -> return 1) without
+// touching the file — silently skipping Release Management auto-wiring
+// (wire_release_agent_for_compose treats this failure as "skip", not fatal)
+// on any config an operator had annotated.
+func TestInstallScript_PatchAllowPeers_TrailingCommentStillPatched(t *testing.T) {
+	content, exitCode := runPatchAllowPeers(t, `allow_peers = ["alice"]  # ops-managed peers`, "1000")
+
+	if exitCode != 0 {
+		t.Fatalf("patch_allow_peers_numeric_uid returned failure (exit %d) against a single-line array with a "+
+			"trailing comment; resulting config:\n%s", exitCode, content)
+	}
+	want := `allow_peers = ["alice", "1000"]  # ops-managed peers`
+	if !strings.Contains(content, want) {
+		t.Fatalf("patched config does not contain %q (comment must be preserved); got:\n%s", want, content)
+	}
+}
+
+// TestInstallScript_PatchAllowPeers_DefaultArrayWithTrailingCommentReplaced
+// covers the same misclassification against the default-array replacement
+// branch: a trailing comment on the exact packaged default line
+// (`allow_peers = ["culvert-cp"]  # ...`) must still be recognized as the
+// default and replaced, with the comment preserved.
+func TestInstallScript_PatchAllowPeers_DefaultArrayWithTrailingCommentReplaced(t *testing.T) {
+	content, exitCode := runPatchAllowPeers(t, `allow_peers = ["culvert-cp"]  # default peer, see docs`, "1000")
+
+	if exitCode != 0 {
+		t.Fatalf("patch_allow_peers_numeric_uid returned failure (exit %d) against the default array with a "+
+			"trailing comment; resulting config:\n%s", exitCode, content)
+	}
+	want := `allow_peers = ["1000"]  # default peer, see docs`
+	if !strings.Contains(content, want) {
+		t.Fatalf("patched config does not contain %q (comment must be preserved); got:\n%s", want, content)
+	}
+}

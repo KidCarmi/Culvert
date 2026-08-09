@@ -1888,32 +1888,46 @@ patch_allow_peers_numeric_uid() {
     BEGIN { patched=0 }
     /^[[:space:]]*allow_peers[[:space:]]*=/ && patched == 0 {
       line=$0
-      if (line ~ /^[[:space:]]*allow_peers[[:space:]]*=[[:space:]]*\["culvert-cp"\][[:space:]]*$/) {
-        print "allow_peers = [\"" uid "\"]"
+      # Split off a trailing inline TOML comment before classifying the line,
+      # so an operator-added "  # ..." note on the allow_peers line (a normal
+      # TOML habit) is not mistaken for the array spilling onto later lines —
+      # the array-closing checks below must see the actual code, not comment
+      # text. code is what gets rewritten; comment (if any) is reattached
+      # unchanged on every branch that prints a modified line. Like
+      # maint_toml_string()/extract_toml_string(), this does not understand a
+      # "#" inside a quoted value — not a concern here since UIDs/usernames
+      # never contain one.
+      code=line; comment=""
+      if (match(line, /[[:space:]]*#.*$/)) {
+        comment=substr(line, RSTART)
+        code=substr(line, 1, RSTART-1)
+      }
+      if (code ~ /^[[:space:]]*allow_peers[[:space:]]*=[[:space:]]*\["culvert-cp"\][[:space:]]*$/) {
+        print "allow_peers = [\"" uid "\"]" comment
         patched=1
         next
       }
-      if (line ~ "\"" uid "\"") {
+      if (code ~ "\"" uid "\"") {
         print line
         patched=1
         next
       }
-      if (line !~ /\][[:space:]]*$/) {
+      if (code !~ /\][[:space:]]*$/) {
         print line
         patched=2
         next
       }
-      if (line ~ /\[[[:space:]]*\][[:space:]]*$/) {
+      if (code ~ /\[[[:space:]]*\][[:space:]]*$/) {
         # Empty array (e.g. "allow_peers = []"): the generic append below
         # always prepends a comma, which would leave a leading ", " with no
         # preceding element ("[, \"uid\"]") — invalid TOML.
-        sub(/\[[[:space:]]*\][[:space:]]*$/, "[\"" uid "\"]", line)
-        print line
+        sub(/\[[[:space:]]*\][[:space:]]*$/, "[\"" uid "\"]", code)
+        print code comment
         patched=1
         next
       }
-      sub(/[[:space:]]*\][[:space:]]*$/, ", \"" uid "\"]", line)
-      print line
+      sub(/[[:space:]]*\][[:space:]]*$/, ", \"" uid "\"]", code)
+      print code comment
       patched=1
       next
     }
