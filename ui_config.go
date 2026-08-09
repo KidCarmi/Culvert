@@ -1542,8 +1542,14 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 		var drops, panics uint64
 		if globalSyslog != nil {
 			format = globalSyslog.Format()
-			drops = globalSyslog.Drops()
+			// Read panics before drops: deliverGuarded's recover branch always
+			// increments panics first, then drops (independent atomics, no
+			// combined snapshot). Reading in the same order means a report can
+			// only ever lag panics behind drops, never the reverse — so the
+			// UI's `drops > 0` gate can never hide a real panic behind a
+			// stale-looking drops==0.
 			panics = globalSyslog.Panics()
+			drops = globalSyslog.Drops()
 		}
 		jsonOK(w, map[string]any{"addr": syslogConfigured, "format": format, "drops": drops, "panics": panics})
 	case http.MethodPost:
