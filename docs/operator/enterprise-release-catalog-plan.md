@@ -154,23 +154,34 @@ baked-ed25519 model Phase 1 shipped — see
 - ✅ Attach the generated bundle (`index.json`, manifests, `checksums.txt`) to
   the run as an artifact. The bundle is **UNSIGNED in P2a** — the gate's ephemeral
   ed25519 key is in-process/discarded and is NOT the official trust signature.
-- Catalog is NOT yet trusted by a shipped Control Plane (no baked official root) —
-  that is P2b.
+- The P2a-generated bundle itself carries no official signature (see above) —
+  the shipped Control Plane's baked-root trust for the *published* catalog
+  comes from the keyless signing added in P2b, below.
 
-### Phase 2b — Control-Plane keyless catalog trust (separate, reviewed)
+### Phase 2b — Control-Plane keyless catalog trust — ✅ shipped
 
-- Sign the catalog with the chosen keyless backend (Sigstore identity).
-- Add the in-binary verifier (Fulcio root + pinned `KidCarmi/Culvert`
-  release-workflow identity, Rekor), bundle offline roots for air-gap.
-- Ship the official root and publish the trusted official catalog so end-users
-  can update through Release Management.
-- CI gate: image signature verifies against the expected workflow identity.
+- ✅ In-binary verifier (Fulcio root + pinned `KidCarmi/Culvert` `ci.yml`
+  release-workflow identity, Rekor), offline-verifiable via a baked
+  `trusted_root.json` (P2b-1). See
+  [`sigstore-trusted-root-lifecycle.md`](sigstore-trusted-root-lifecycle.md).
+- ✅ Official root baked and active by **default** — a build with no operator
+  trust config now enters enforce mode with the Sigstore scheme (P2b-2a).
+- ✅ Release CI keyless-signs the catalog index on tagged releases (`cosign
+  sign-blob --bundle index.json.sigstore`) and proves it end-to-end against
+  the real in-binary verifier before the tag ships (P2b-2b).
+- ✅ CI gate: catalog and image signatures both verify against the same
+  pinned workflow identity (`release_identity.env`, kept byte-equal to the
+  in-binary constants by `TestReleaseIdentitySSOT`).
+- ✅ Catalog freshness without a version bump: a weekly re-sign cron
+  (M1-4) re-signs the same `catalog_version` with a renewed `expires_at`.
+  See [`catalog-resign-runbook.md`](catalog-resign-runbook.md).
 
 Acceptance:
 - 2a: a release cannot attach a catalog unless generation + digest-match +
   freshness/schema + image signing + provenance all pass.
 - 2b: a shipped Control Plane trusts the official keyless-signed catalog and
-  fails closed on identity/signature/freshness/rollback violations.
+  fails closed on identity/signature/freshness/rollback violations. **Met** —
+  this is the default-posture behavior as of P2b-2a/P2b-2b.
 
 ## Phase 3: Rollback and Freeze Protection
 
