@@ -106,7 +106,7 @@ func TestHandleTunnel_ExpiredCAFailsClosedNotBypass(t *testing.T) {
 	match := &PolicyMatch{Rule: &PolicyRule{ID: "r-ca", Name: "inspect-all"}}
 	id := ProxyIdentity{ClientIP: "198.51.100.77"}
 
-	r := httptest.NewRequest("CONNECT", "http://"+host+":443", http.NoBody)
+	r := httptest.NewRequestWithContext(t.Context(), http.MethodConnect, "http://"+host+":443", http.NoBody)
 	r.Host = host + ":443"
 	rr := httptest.NewRecorder()
 
@@ -162,7 +162,7 @@ func TestHandleTunnel_ValidCAIsUnaffected(t *testing.T) {
 	// 203.0.113.0/24 is TEST-NET-3: routable-looking, never answers.
 	const host = "203.0.113.9"
 	dec := sslResolution{Action: SSLInspect, Source: decryptobs.DecisionPolicyInspect}
-	r := httptest.NewRequest("CONNECT", "http://"+host+":443", http.NoBody)
+	r := httptest.NewRequestWithContext(t.Context(), http.MethodConnect, "http://"+host+":443", http.NoBody)
 	r.Host = host + ":443"
 	rr := httptest.NewRecorder()
 
@@ -213,7 +213,7 @@ func TestReadyz_ExpiredCARowIsReportOnly(t *testing.T) {
 	}
 
 	rr := httptest.NewRecorder()
-	handleReady(rr, httptest.NewRequest("GET", "/readyz", http.NoBody))
+	handleReady(rr, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/readyz", http.NoBody))
 	got := decode(rr)
 	row, ok := got.Checks["ca"]
 	if !ok {
@@ -229,7 +229,7 @@ func TestReadyz_ExpiredCARowIsReportOnly(t *testing.T) {
 
 	// Strict mode is the opt-in that DOES gate.
 	rrStrict := httptest.NewRecorder()
-	handleReady(rrStrict, httptest.NewRequest("GET", "/readyz?strict=1", http.NoBody))
+	handleReady(rrStrict, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/readyz?strict=1", http.NoBody))
 	if rrStrict.Code != 503 {
 		t.Fatalf("/readyz?strict=1 with an expired CA returned %d, want 503", rrStrict.Code)
 	}
