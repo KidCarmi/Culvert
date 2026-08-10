@@ -1519,6 +1519,34 @@ gen_passphrase() {
   printf '%s' "$p"
 }
 
+# validate_passphrase_for_env_file LABEL PASS — enforces the same length +
+# character-safety contract on a passphrase regardless of where it came from
+# (operator-typed or host-env-supplied) before it is ever written to .env.
+# Exits via error() on failure; returns silently on success.
+validate_passphrase_for_env_file() {
+  local label="$1" pass="$2"
+  # This passphrase is PBKDF2-SHA256'd (600k iterations, internal/ca/ca.go)
+  # straight into the AES-256-GCM key that protects the SSL-inspection Root
+  # CA private key and saved request logs — a short passphrase is brute-
+  # forceable regardless of the iteration count. gen_passphrase's
+  # auto-generated default is 40 characters; require anything else supplied
+  # to be long enough to meaningfully resist an offline attack.
+  if [[ "${#pass}" -lt 12 ]]; then
+    error "$label too short (${#pass} characters) — must be at least 12. This encrypts the SSL-inspection CA key and saved logs at rest, so it must resist offline brute-force."
+  fi
+  # The passphrase is stored in .env, which docker compose interpolates
+  # ($VAR), treats # as a comment, etc. Restrict to characters that survive
+  # that round-trip intact so the value reaching the container is exact — a
+  # raw "$" is the sharpest edge here: Compose treats "$Foo" in a .env value
+  # as ITS OWN variable reference and can resolve it to something else
+  # entirely (often empty, under the very same sudo-reset environment this
+  # whole function works around), silently storing a different passphrase
+  # than the one supplied.
+  if printf '%s' "$pass" | LC_ALL=C grep -q '[^A-Za-z0-9._@%^!*()+=:,-]'; then
+    error "$label has characters unsafe for the .env file. Use letters, digits, and simple punctuation (no \$, quotes, backslash, #, /, or spaces)."
+  fi
+}
+
 # Encrypts data at rest (AES-256), value(s) stored in $INSTALL_DIR/.env which
 # docker-compose.yml reads as ${CULVERT_*_PASSPHRASE:-}. We never overwrite an
 # existing value. On a FRESH deployment (no data volume yet) we can safely also
@@ -1538,11 +1566,17 @@ setup_at_rest_encryption() {
   # invoked this script). Persist it into .env now, BEFORE the "already
   # configured" short-circuit below, so it actually survives to `compose up`.
   # env_put itself never overwrites a pre-existing .env value, so an operator
-  # value already on disk still wins over a differing host-env one.
+  # value already on disk still wins over a differing host-env one. Validated
+  # first — same length/character-safety contract as an operator-typed
+  # passphrase (choice 2 below) — so an unsafe or too-short host-env value
+  # fails closed instead of being written raw (see validate_passphrase_for_
+  # env_file's "$" interpolation note) or accepted at brute-forceable strength.
   if [[ -n "${CULVERT_LOG_PASSPHRASE:-}" ]] && ! grep -Eq '^CULVERT_LOG_PASSPHRASE=.+' "$envfile" 2>/dev/null; then
+    validate_passphrase_for_env_file "CULVERT_LOG_PASSPHRASE" "$CULVERT_LOG_PASSPHRASE"
     env_put CULVERT_LOG_PASSPHRASE "$CULVERT_LOG_PASSPHRASE" "$envfile"
   fi
   if [[ -n "${CULVERT_CA_PASSPHRASE:-}" ]] && ! grep -Eq '^CULVERT_CA_PASSPHRASE=.+' "$envfile" 2>/dev/null; then
+    validate_passphrase_for_env_file "CULVERT_CA_PASSPHRASE" "$CULVERT_CA_PASSPHRASE"
     env_put CULVERT_CA_PASSPHRASE "$CULVERT_CA_PASSPHRASE" "$envfile"
   fi
   if secret_already_set CULVERT_LOG_PASSPHRASE "$envfile" || secret_already_set CULVERT_CA_PASSPHRASE "$envfile"; then
@@ -1576,21 +1610,7 @@ setup_at_rest_encryption() {
       local pass2=""; read -rsp "Confirm passphrase: " pass2; echo ""
       [[ -n "$pass" ]] || error "Empty passphrase."
       [[ "$pass" == "$pass2" ]] || error "Passphrases did not match."
-      # This passphrase is PBKDF2-SHA256'd (600k iterations, internal/ca/ca.go)
-      # straight into the AES-256-GCM key that protects the SSL-inspection Root
-      # CA private key and saved request logs — a short passphrase is brute-
-      # forceable regardless of the iteration count. gen_passphrase's
-      # auto-generated default is 40 characters; require an operator-chosen one
-      # to be long enough to meaningfully resist an offline attack.
-      if [[ "${#pass}" -lt 12 ]]; then
-        error "Passphrase too short (${#pass} characters) — must be at least 12. This encrypts the SSL-inspection CA key and saved logs at rest, so it must resist offline brute-force."
-      fi
-      # The passphrase is stored in .env, which docker compose interpolates
-      # ($VAR), treats # as a comment, etc. Restrict to characters that survive
-      # that round-trip intact so the value reaching the container is exact.
-      if printf '%s' "$pass" | LC_ALL=C grep -q '[^A-Za-z0-9._@%^!*()+=:,-]'; then
-        error "Passphrase has characters unsafe for the .env file. Use letters, digits, and simple punctuation (no \$, quotes, backslash, #, /, or spaces)."
-      fi
+      validate_passphrase_for_env_file "Passphrase" "$pass"
       ;;
     3)
       warn "Skipping encryption at rest. Enable later by setting CULVERT_LOG_PASSPHRASE"

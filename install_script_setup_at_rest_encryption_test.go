@@ -42,6 +42,7 @@ func runSetupAtRestEncryptionChoice2(t *testing.T, passphrase string) (output st
 	t.Helper()
 	setupFn := extractShellFunctionBraceAware(t, "scripts/install.sh", "setup_at_rest_encryption")
 	envPutFn := extractShellFunction(t, "scripts/install.sh", "env_put")
+	validateFn := extractShellFunction(t, "scripts/install.sh", "validate_passphrase_for_env_file")
 
 	// setup_at_rest_encryption only reaches the "own passphrase" branch when
 	// stdin is a TTY (`[[ -t 0 ]]`) and the operator types "2" at the prompt.
@@ -60,7 +61,7 @@ is_fresh_deployment() { return 1; }
 secret_already_set() { return 1; }
 ` + "INSTALL_DIR=" + dir + "\n"
 
-	script := stubs + envPutFn + "\n" + setupFn + "\n" + "setup_at_rest_encryption\n"
+	script := stubs + validateFn + "\n" + envPutFn + "\n" + setupFn + "\n" + "setup_at_rest_encryption\n"
 
 	cmd := exec.CommandContext(t.Context(), "bash", "-c", script) // #nosec G204 -- fixed test script content, not external/user input
 	cmd.Stdin = bytes.NewBufferString(passphrase + "\n" + passphrase + "\n")
