@@ -143,6 +143,7 @@ func buildOperatorContract() OperatorContract {
 		checkStorage(),
 		checkPolicyLoaded(),
 		checkRootCA(),
+		checkClusterCA(),
 		checkSessionSecret(),
 		checkCDR(),
 		checkClusterPosture(),
@@ -406,6 +407,49 @@ func checkRootCA() OperatorContractCheck {
 		Code:    "root_ca",
 		Status:  diagOK,
 		Message: "root CA initialised",
+	}
+}
+
+// checkClusterCA is the cluster-CA half of checkRootCA (CHAOS-29, register row
+// CA-13). Same rule about the message: this row is a VIEWER-role surface, so it
+// carries the impact and a count, never the raw cause — full detail stays in the
+// logs, the alert, and the admin-role cluster CA API.
+//
+// A node with no cluster CA is the majority deployment (standalone proxy), so
+// the not-initialised case is silent here rather than a standing warn; the
+// cluster posture check already covers whether a node should have one.
+func checkClusterCA() OperatorContractCheck {
+	if !globalClusterCA.Ready() {
+		return OperatorContractCheck{
+			Code:    "cluster_ca",
+			Status:  diagOK,
+			Message: "cluster CA not in use (standalone node)",
+		}
+	}
+	if globalClusterCA.Usable() != nil {
+		return OperatorContractCheck{
+			Code:   "cluster_ca",
+			Status: diagFail,
+			Message: fmt.Sprintf("cluster CA outside its validity window — node enrollment and cert renewal are BLOCKED (%d signings refused since boot)",
+				clusterCAHealthFailures().SignRefusals),
+			OperatorAction: "Import a replacement cluster CA (Cluster → Cluster CA), then re-enroll every Data Plane node.",
+		}
+	}
+	// Keyed on the CURRENT rotation state, not the cumulative counter, so an
+	// operator who fixed the CA directory and saw the next rotation succeed
+	// stops being told rotation is broken.
+	if clusterCARotationDegraded() {
+		return OperatorContractCheck{
+			Code:           "cluster_ca",
+			Status:         diagWarn,
+			Message:        "cluster CA auto-rotation is failing — the CA is inside its 30-day expiry window and did not renew",
+			OperatorAction: "Restore write access to the cluster CA directory, or import a replacement cluster CA before it expires.",
+		}
+	}
+	return OperatorContractCheck{
+		Code:    "cluster_ca",
+		Status:  diagOK,
+		Message: "cluster CA initialised",
 	}
 }
 

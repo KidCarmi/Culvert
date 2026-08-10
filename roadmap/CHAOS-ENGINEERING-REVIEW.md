@@ -17,6 +17,32 @@ everything else is triaged below with a suggested PR and required tests for foll
 
 ## 0. Revision log
 
+**2026-08-10 — CHAOS-29 sweep (the cluster CA across its lifecycle).**
+
+The sweep row **CA-13** called for: the same defect class as CHAOS-28, in the OTHER CA. It was
+that, and the blast radius is worse in one specific way — the cluster CA's failure is
+SELF-SUSTAINING THROUGH ITS OWN RECOVERY PATH. (1) `SignCSR` had no validity check on its own
+CA, so an expired cluster CA kept issuing well-formed node certs that fail mTLS path validation
+at both ends — verified against the pre-fix engine, where the sign SUCCEEDED — and because
+re-enrollment is the documented fix for a broken node cert, the CP re-signed with the same dead
+CA every time: the runbook ran, reported success, and changed nothing (**fake recovery**).
+(2) Node certs were a flat `now+365d`, unclamped to the issuer — and the node cert is the CLOCK
+`certNeedsRenewal`/`dpCertRenewalLoop` run on, so a DP enrolled against a CA with 45 days left
+stayed correctly, confidently quiet for 335 days while its trust anchor died; the CHAOS-12
+renewal hardening was all sound and all reading the wrong certificate. (3) newly found:
+`ImportCA` dereferenced `ca.secondaryCert` unconditionally though it is assigned only in the
+`cert != nil` branch — reachable because `initClusterCA` LOGS AND CONTINUES when `InitOrLoad`
+fails, so a read-only CA directory leaves a running node at `cert == nil`, which is exactly the
+state in which an admin imports a CA; the panic landed AFTER the CA was persisted and published
+and BEFORE the config-store bump, so the admin saw a failed request, the CA was installed, and
+no DP was told. (4) rotation failures were log-only plus a pull-only `Info()` field, and
+`culvert_cluster_ca_rotations_total` counts only successes — so a CA that stopped rotating
+produced a FLAT counter, structurally incapable of showing the failure. (5) newly found:
+`parseAndValidateCACert` rejected an expired CA but never checked `NotBefore`, accepting a
+future-dated CA that signs unusable certs while every surface reports it healthy. All five
+fixed, fail-closed, each gate proven to fail against a tree with only the fixes reverted. See
+§17 and `docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-10.md`.
+
 **2026-08-09 — CHAOS-28 sweep (the Root CA across its lifecycle).**
 
 The inspection CA is the one control whose failure produces no error anywhere INSIDE the
@@ -152,7 +178,10 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | CA-11 | Leaf-cert cache has **no single-flight** — N concurrent misses for one host each sign independently; TTL expiry is synchronized (thundering herd). | GAP (re-scoped by CHAOS-28: the perf-F3 shared leaf key removed the dominant per-miss cost — P-256 keygen — so the herd is materially cheaper than when first recorded) | M → L/M | `internal/ca/ca.go` `GetCert` |
 | CA-16 | Leaf-cache **`cacheOrder` slice grew on every TTL REFRESH** while the map entry was overwritten. `len(cache)` never changed, so the eviction branch never fired: an unbounded slice behind a bounded map, growing with UPTIME on an ordinary steady working set (W=5,000 hosts ⇒ ~120k strings/day). Invisible to `culvert_cert_cache_size`, which reports the bounded map. | NEW → **CLOSED** (CHAOS-28: append only for an untracked host; behavior-preserving for eviction — duplicate entries always resolved to "already gone") | M | was: `internal/ca/ca.go` `GetCert`; see §16 |
 | CA-12 | Upstream & client MITM handshakes inherit only `r.Context()` (no explicit handshake deadline); a slowloris handshake ties up the goroutine. Good: uses `HandshakeContext`, not `Handshake()`. | GAP | M | `proxy.go:1503,1591` |
-| CA-13 | Cluster CA rotation mirrors CA-2: every failure branch logs-and-returns with no alert/metric. Silent failure → cluster-wide enrollment break at expiry. | GAP (**next sweep** — CHAOS-28 closed the inspection-CA half as CA-2; this is the same defect class in the OTHER CA, with a different lifecycle and blast radius) | M | `enrollment.go:1189-1245` |
+| CA-13 | **Expired/not-yet-valid cluster CA keeps signing node certs** — no validity guard on `SignCSR`, so the CP issues credentials that fail mTLS at both ends. Worse than the inspection-CA analogue because re-enrollment (the documented recovery) re-signs with the same dead CA: the runbook runs, reports success, and changes nothing. Rotation failures were also log-only + a pull-only `Info()` field, and the one metric counts successes so a stalled rotation reads as a FLAT counter. | GAP → **CLOSED** (CHAOS-29: `Usable()`/`ErrClusterCAUnusable` gate on `SignCSR` + `culvert_cluster_ca_{usable,expires_in_seconds,sign_refused_total,rotation_failures_total}` + `cert_expiry` alert + `cluster_ca` diagnostics row + panel banner) | **H** | was: `enrollment.go` `SignCSR`/`RotateIfNeeded`; now `cluster_ca_validity.go`, `cluster_ca_health.go` — see §17 |
+| CA-18 | **Node cert `NotAfter` was not clamped to the issuer's** — a flat `now+365d`. The node cert is the CLOCK the DP renewal loop runs on (`certNeedsRenewal`), so a node enrolled against a CA with 45 days left had a cert that looked healthy for a year and stayed quiet for 335 days while its trust anchor expired underneath it. CHAOS-12's renewal hardening was reading the wrong certificate. | NEW → **CLOSED** (CHAOS-29, `clampNodeCertValidity`, both ends — pulls the DP's 30-day window in front of the CA's expiry so dual-CA overlap has something to hand it) | **H** | was: `enrollment.go` `SignCSR` `notAfter: now+365d`; see §17 |
+| CA-17 | **`ImportCA` nil-dereferences `ca.secondaryCert`** when no CA was previously loaded (assigned only in the `cert != nil` branch, read unconditionally). Reachable: `initClusterCA` logs-and-continues on `InitOrLoad` failure, so a read-only/permission-denied CA dir leaves a RUNNING node at `cert == nil` — exactly the state in which an admin imports a CA. The panic lands AFTER the CA is persisted + published and BEFORE the config-store bump: request reported failed, CA actually installed, fleet never told. | NEW → **CLOSED** (CHAOS-29: tracking guarded on a real predecessor — a first install has no overlap to track) | M/H | was: `enrollment.go` `ImportCA`; see §17 |
+| CA-19 | **`parseAndValidateCACert` never checked `NotBefore`** — an expired CA was rejected, a future-dated one accepted. It then signs certs that fail path validation exactly like an expired CA, with the extra confusion that every surface reports it healthy and "expiring in ten years". Reached via an offline-PKI forward-dated window or a clock rollback at import time. | NEW → **CLOSED** (CHAOS-29, `NotBefore` check with the same ±5 min skew tolerance the sign gate uses) | M | was: `enrollment.go` `parseAndValidateCACert`; see §17 |
 | CA-14 | Revocation persistence uses `os.WriteFile`+rename with **no fsync** (unlike the CA bundle's `AtomicWrite`) — a revoked token can be honored again after crash/disk-full. | GAP | L/M | `internal/session/session.go:272-276`, caller `session.go:106-108` |
 | CA-15 | CA loader **accepts a plain-PEM bundle even when a passphrase is set** (magic absent) — a downgrade footgun; logged, not alerted/rejected. | GAP (minor) | L | `internal/ca/ca.go:221-229` |
 
@@ -1102,3 +1131,92 @@ reason: a still-expired CA looks exactly like a healthy one if nothing happens t
   inspect; it cannot make clients trust a new root. Nothing in-band can. That is why this
   change invests most heavily in making the condition visible *before* the cliff
   (`culvert_ca_expires_in_seconds`) rather than only at it.
+
+---
+
+## 17. CHAOS-29 — The cluster CA across its lifecycle (fail-closed)
+
+**Date:** 2026-08-10 · **Closes:** the standing sweep row **CA-13**; adds and closes **CA-17**,
+**CA-18**, **CA-19**.
+**Full write-up:** `docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-10.md`
+
+### 17.1 The theme
+
+CHAOS-28 closed the inspection CA and left CA-13 open with an explicit prediction: the same
+defect class, in the other CA, with a different lifecycle and blast radius. The prediction held
+for the class and understated the radius.
+
+The inspection CA fails toward *inspected HTTPS is down*. The cluster CA fails toward *the fleet
+cannot talk to its Control Plane* — every DP↔CP mTLS handshake fails path validation at the dead
+root, so config sync, heartbeat, and centralised audit stop together. But the property with no
+analogue in CHAOS-28 is that the cluster CA's failure **survives its own recovery path**:
+
+> A DP whose cert stopped working re-enrolls. The CP signs a fresh cert with the same expired
+> CA. The new cert fails exactly as the old one did.
+
+Enrollment is the documented recovery for a broken node certificate. Against an expired CA it
+ran to completion, reported success, and made no progress. An operator can execute the correct
+runbook, watch every step succeed, and stay broken. That is why the guard is on the **signing
+path** and not only on a health probe: a probe informs someone already looking, while the sign
+gate stops the appliance from manufacturing credentials it knows cannot authenticate.
+
+### 17.2 The five defects
+
+| # | Defect | Proof against pre-fix code |
+|---|---|---|
+| 1 | `SignCSR` had no validity check on its own CA | the sign SUCCEEDED, returning a 1-year node cert from a CA expired an hour earlier |
+| 2 | node cert `NotAfter` unclamped — and it is the DP renewal clock | node cert outlived its issuer by 320 days |
+| 3 | `ImportCA` nil-deref with no prior CA | SIGSEGV at `enrollment.go` `ImportCA`, *after* the "imported custom CA" success log |
+| 4 | rotation failure log-only; success-only counter | flat `culvert_cluster_ca_rotations_total` through a stalled rotation |
+| 5 | `parseAndValidateCACert` ignored `NotBefore` | accepted a CA 72h in the future |
+
+\#1 and \#2 compose: \#2 guarantees the fleet holds long-lived node certs that hide \#1 until
+the CA is already dead. \#3 is what happens to the operator who tries to recover. \#4 is why
+nobody was told the clock was running.
+
+### 17.3 The load-bearing decisions
+
+- **`Usable()` is separate from `Ready()`**, for the reason CHAOS-28 recorded in the other CA:
+  `Ready()` answers *is a CA installed*, and callers use it to decide whether enrollment is
+  offered at all. Folding validity in would report an expired CA as "enrollment not configured"
+  and send the operator to the wrong subsystem.
+- **The gate is evaluated before taking `ca.mu`**, so the observer runs unlocked — the engine
+  convention `internal/ca` established.
+- **`recordRotationFailure` is the health-plane chokepoint.** Every failure branch already
+  routed through it, so a future branch cannot forget to report.
+- **Both new gauges are omitted when no cluster CA is loaded.** Most deployments are standalone
+  proxies; `culvert_cluster_ca_usable 0` on every one would read as a fleet-wide outage. An
+  absent series is honest, a `0` is not — and the rule an operator writes must be safe to deploy
+  without first enumerating which nodes are Control Planes.
+- **No fail-open branch.** Deliberately unlike the decryption-profile `fail-open` posture, whose
+  confirm-count contract is scoped to per-origin incompatibility and is meaningless against an
+  appliance-wide fault.
+
+### 17.4 Observability added
+
+| Surface | Signal |
+|---|---|
+| `/metrics` | `culvert_cluster_ca_usable`, `culvert_cluster_ca_expires_in_seconds` (both omitted when no cluster CA), `culvert_cluster_ca_sign_refused_total`, `culvert_cluster_ca_rotation_failures_total` |
+| `/api/diagnostics` | `cluster_ca` operator-contract row — `fail` on unusable, `warn` on degraded rotation, silent on standalone nodes |
+| `/api/cluster/ca` | `usable`, `unusableReason`, `expiresInDays` (was: `initialized`, and an expired CA is initialized) |
+| Alerts | `cert_expiry` from `culvert-cluster-ca` — usability 5-min gated on an independent gate from the log; rotation failure ungated (bounded by the 24h cadence) |
+| GUI | Cluster CA panel: `UNUSABLE` status, red banner with the operator action, day countdown that turns red inside 30 days |
+
+Recovery is reported on **evidence** — an observed successful signing, or an observed successful
+rotation/import — never on elapsed time. The viewer-role diagnostics row carries impact and a
+count, never the raw cause (which names the appliance's exact certificate state).
+
+### 17.5 What is deliberately left
+
+- **Rotation retry/backoff (shared with CA-4).** A failed cluster-CA rotation still waits 24h.
+  Both CAs share `StartCAAutoRotation`, so one bounded-retry change closes both halves — worth
+  doing as a single scoped change rather than twice.
+- **`ImportCA` two-file commit.** A crash between the cert and key writes leaves a mismatch,
+  detected at next startup by cross-validation and failing closed. Fail-closed is correct; the
+  window remains, by existing design.
+- **Cluster CA is not on `/healthz`.** Covered on diagnostics and metrics; adding a probe row is
+  a schema change, not a defect.
+- **Recovery stays manual by design.** An expired cluster CA needs an import plus fleet
+  re-enrollment. Automating it would mean accepting unauthenticated re-enrollment — trading an
+  availability incident for a security one. The investment is in making the condition impossible
+  to miss *before* it arrives.
