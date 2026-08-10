@@ -147,6 +147,7 @@ func buildOperatorContract() OperatorContract {
 		checkCDR(),
 		checkClusterPosture(),
 		checkDPLastGoodConfigSnapshot(),
+		checkConfigSnapshotApply(),
 		checkSAMLStatePosture(),
 		checkSAMLBaseURLPosture(),
 		checkDefaultAuthOpen(),
@@ -226,6 +227,41 @@ func checkDPLastGoodConfigSnapshot() OperatorContractCheck {
 		Status:         diagFail,
 		Message:        "control plane unreachable and no last-known-good local config is available",
 		OperatorAction: "Restore control plane connectivity or re-enroll/restart this DP after it has successfully received a config snapshot.",
+	}
+}
+
+// checkConfigSnapshotApply covers a failure mode dp_last_known_good_config
+// does not: the CONTENT of the last snapshot/delta received from the
+// control plane was rejected (malformed payload, over-cap validation
+// failure, IdP-profile sync failure, or an
+// applyConfigSnapshot/applyBlocklistDeltaSnapshot rejection — see
+// configsnapshot_apply_health.go), even though CP polling itself is
+// succeeding. Without this check that state reads as a plain "control plane
+// polling healthy" ok, even though this node is silently stuck on stale
+// policy/auth config. Deliberately silent on CP reachability — that is
+// dp_last_known_good_config's claim to make (via dpControlPlanePollFailing),
+// and configSnapshotApplyFailing can still be latched from a rejection that
+// happened before a later, unrelated poll outage.
+func checkConfigSnapshotApply() OperatorContractCheck {
+	if !audit.DPMode() {
+		return OperatorContractCheck{
+			Code:    "dp_config_snapshot_apply",
+			Status:  diagOK,
+			Message: "not running as a data plane",
+		}
+	}
+	if !lastConfigSnapshotApplyOK() {
+		return OperatorContractCheck{
+			Code:           "dp_config_snapshot_apply",
+			Status:         diagFail,
+			Message:        "the last config snapshot/delta received from the control plane was rejected — this node is not applying new policy/auth config",
+			OperatorAction: "Check data plane logs for the most recent \"DataPlane: parse config error\", \"DataPlane: rejecting config snapshot\", \"DataPlane: config snapshot ... apply incomplete\", \"DataPlane: config snapshot ... apply rejected\", \"DataPlane: parse delta remainder\", \"DataPlane: rejecting delta remainder\", or \"DataPlane: delta ... apply failed\" line and fix the control-plane-side config that keeps failing validation.",
+		}
+	}
+	return OperatorContractCheck{
+		Code:    "dp_config_snapshot_apply",
+		Status:  diagOK,
+		Message: "last config snapshot/delta applied successfully",
 	}
 }
 
