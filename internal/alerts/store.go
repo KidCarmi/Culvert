@@ -218,13 +218,61 @@ func (as *Store) DeliveryHistory() []Delivery {
 }
 
 // legacyEventNames maps a retired event name to its current replacement, so a
-// webhook persisted under the old name keeps firing after the rename instead
-// of silently losing its subscription (Init migrates on load; see the
-// "threat_detected" precedent in the event catalog above, which chose to keep
-// an outdated name rather than break subscriptions — this achieves the same
-// non-breaking outcome while still letting the wire name read correctly).
+// webhook subscribed under the old name keeps firing after the rename instead
+// of silently losing its subscription (see the "threat_detected" precedent in
+// the event catalog above, which chose to keep an outdated name rather than
+// break subscriptions — this achieves the same non-breaking outcome while
+// still letting the wire name read correctly).
 var legacyEventNames = map[string]string{
 	"idp_unreachable": "identity_backend_unreachable",
+}
+
+// normalizeEventNames rewrites retired event names to their current
+// replacements. It is applied at EVERY ingress into the store — Init (disk),
+// Add and Update (admin API, config import) — because a subscription that
+// misses the rename is not a cosmetic defect: HasSubscriber compares names
+// exactly, so the webhook stops firing, the admin UI stops recognizing the
+// checked box, and the failure mode is a security alert that silently never
+// arrives. Detection loss is the one kind of loss an operator cannot notice.
+//
+// Migrating only on load is not enough, because disk is not the only ingress:
+//
+//   - `POST /api/config/import` reconstructs webhooks through Add. A config
+//     exported before the rename — the exact artifact a disaster-recovery
+//     restore or an upgrade rehearsal replays — carries the retired name, and
+//     without normalization here it is written straight back into the live
+//     store, permanently unsubscribed.
+//   - `POST/PUT /api/alerts/webhooks` accepts whatever event list the caller
+//     sends. Operator automation written against the documented pre-rename
+//     name would silently unsubscribe itself on its next apply.
+//
+// The mapping is one-way and closed: it can only carry a subscription forward
+// to the SAME event under its current name. It never adds an event the caller
+// did not ask for and never removes one, so it cannot widen or narrow what a
+// webhook receives.
+//
+// Duplicates that the migration itself creates (a hook listing both the
+// retired and the current name) are collapsed, order-preserving, so List and
+// the admin UI show one checkbox rather than two aliases of one event.
+// Dispatch already stops at the first match, so this changes no delivery
+// behaviour — only what the operator sees.
+func normalizeEventNames(events []string) []string {
+	if len(events) == 0 {
+		return events
+	}
+	out := make([]string, 0, len(events))
+	seen := make(map[string]struct{}, len(events))
+	for _, ev := range events {
+		if renamed, ok := legacyEventNames[ev]; ok {
+			ev = renamed
+		}
+		if _, dup := seen[ev]; dup {
+			continue
+		}
+		seen[ev] = struct{}{}
+		out = append(out, ev)
+	}
+	return out
 }
 
 // Init sets the persistence path and loads any persisted webhooks.
@@ -247,17 +295,12 @@ func (as *Store) Init(path string) {
 		return
 	}
 	// Event-name migration: a webhook persisted before an alert event was
-	// renamed must keep firing under its new name, or the subscription is
-	// silently dropped (HasSubscriber compares names exactly) and the admin
-	// UI stops recognizing the checked box. Migrated in memory on every load
-	// — like the legacy-cleartext-secret migration below, this does not force
-	// an immediate resave; the next legitimate mutation persists the new name.
+	// renamed must keep firing under its new name (see normalizeEventNames).
+	// Migrated in memory on every load — like the legacy-cleartext-secret
+	// migration below, this does not force an immediate resave; the next
+	// legitimate mutation persists the new name.
 	for i := range as.hooks {
-		for j, ev := range as.hooks[i].Events {
-			if renamed, ok := legacyEventNames[ev]; ok {
-				as.hooks[i].Events[j] = renamed
-			}
-		}
+		as.hooks[i].Events = normalizeEventNames(as.hooks[i].Events)
 	}
 	// RISK-003: secrets are AES-GCM encrypted at rest. Decrypt into the
 	// in-memory cleartext form used for HMAC signing. Legacy cleartext (no
@@ -395,7 +438,13 @@ func (as *Store) HasSubscriber(event string) bool {
 }
 
 // Add stores a new webhook and returns it (secret redacted).
+//
+// Retired event names are migrated on the way in (normalizeEventNames): this
+// is the ingress used by both the admin API and `POST /api/config/import`, so
+// a pre-rename config export replayed by a restore keeps its subscription
+// instead of coming back permanently unsubscribed.
 func (as *Store) Add(h Webhook) Webhook {
+	h.Events = normalizeEventNames(h.Events)
 	h.ID = fmt.Sprintf("%d", time.Now().UnixNano())
 	as.mu.Lock()
 	as.hooks = append(as.hooks, h)
@@ -409,7 +458,12 @@ func (as *Store) Add(h Webhook) Webhook {
 
 // Update replaces the webhook with the given ID. An empty Secret in upd
 // preserves the existing secret.
+//
+// Retired event names are migrated on the way in (normalizeEventNames), so an
+// API client still sending a pre-rename name does not silently unsubscribe the
+// hook it is editing.
 func (as *Store) Update(id string, upd Webhook) bool {
+	upd.Events = normalizeEventNames(upd.Events)
 	as.mu.Lock()
 	persist, ok := noopSave, false
 	for i := range as.hooks {
