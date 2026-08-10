@@ -2,10 +2,10 @@
 
 **Domain:** the **cluster CA** across its full lifecycle — expiry, clock rollback, import
 validation, auto-rotation, and the node-certificate renewal clock that hangs off it.
-**Register items:** CHAOS-29 (new) · closes standing row **CA-13**; adds and closes three
-previously unrecorded defects (**CA-17**, **CA-18**, **CA-19**).
-**Verdict:** four confirmed defects, all fixed, every regression gate proven to fail against
-the pre-fix code.
+**Register items:** CHAOS-29 (new) · closes standing row **CA-13**; adds and closes four
+previously unrecorded defects (**CA-17**, **CA-18**, **CA-19**, **CA-20**).
+**Verdict:** six confirmed defects, all fixed, every regression gate proven to fail against
+the pre-fix code. (**CA-20** was surfaced in review of PR #1110 — see FS-6.)
 
 ---
 
@@ -42,7 +42,10 @@ manufacturing certificates it knows cannot work.
 
 \#1 and \#2 are the outage — and they compose: \#2 guarantees the fleet is holding
 long-lived node certs that hide \#1 until the CA is already dead. \#3 is what happens to the
-operator who tries to recover. \#4 is why nobody was told the clock was running.
+operator who tries to recover. \#4 is why nobody was told the clock was running. FS-5 and FS-6
+below carry two more: a not-yet-valid CA accepted at import, and — the one review surfaced —
+a refused enrollment that **spent the node's one-use token**, so the fix for the outage
+consumed the credential needed to apply it.
 
 Everything here is now fail-closed, counted, alerted, and visible on `/metrics`,
 `/api/diagnostics`, `/api/cluster/ca` and the Cluster CA panel.
@@ -253,6 +256,40 @@ tolerance the sign gate uses, so a CA minted moments ago on a slightly fast peer
 
 ---
 
+### FS-6 — The refused enrollment that spent the node's token (CA-20)
+
+Raised in review of PR #1110, and a genuine extension of FS-1's theme one layer up.
+
+`Enroll` (controlplane_server.go) calls `admitEnrollment` first, which validates and
+**consumes** the one-use enrollment token. Every CA check — the pre-existing `Ready()` one and
+the new usability gate — sat *after* it. So a node enrolling against a CA that cannot issue
+spent its credential, received nothing, and **could not retry once an operator replaced the
+CA**: it needed a freshly minted token, which it has no authenticated channel to request.
+
+This is FS-1's failure shape reflected into the credential layer. FS-1 is "the recovery action
+runs and changes nothing"; FS-6 is "the recovery action consumes the thing you needed to
+recover." An enrollment outage that also destroys the credential needed to recover from it is
+strictly worse than the outage.
+
+**Fix.** `clusterCAIssuanceRefusal` runs as a precondition beside the existing HA fencing check
+— already the "fail before consuming anything" position in that function — and ahead of
+`admitEnrollment`. Restoring the token atomically was considered and rejected: un-consuming a
+one-use token is a replay-adjacent operation, and not spending it is simpler than giving it
+back correctly. The sign-path gate stays as the backstop that cannot be bypassed; the
+precondition governs *when* we fail, not whether. Both paths share one helper so failing
+earlier costs no observability.
+
+**Honest scoping.** This predates the CHAOS-29 gate — the old `Ready()` check had the same
+placement, so an uninitialised CA burned tokens before this sweep. The usability gate widened
+the window materially (an unusable CA is far longer-lived than an uninitialised one), which is
+what makes it this sweep's to fix. `RenewCert` needs no equivalent: it consumes no token,
+authenticating via the node's existing certificate.
+
+Pinned by `TestEnroll_UnusableCADoesNotConsumeToken`, verified to fail with the precondition
+removed.
+
+---
+
 ## Risk Matrix
 
 | ID | Failure mode | Likelihood | Impact | Detect (pre) | Detect (post) | Residual |
@@ -262,6 +299,7 @@ tolerance the sign gate uses, so a CA minted moments ago on a slightly fast peer
 | CA-17 | `ImportCA` panics with no prior CA; state divergence | Med — reached by the exact recovery action for a failed `InitOrLoad` | High — operator misled during an incident | Panic in logs only | Guarded; import completes and announces | Low |
 | CA-13b | Auto-rotation stops silently | Med | High — becomes CA-13a in ≤30 days | Log line + panel field | Counter + alert + degraded status row | Low |
 | CA-19 | Not-yet-valid CA imported | Low | High | None | Rejected at import | Low |
+| CA-20 | A refused enrollment **consumes the one-use token**, so the node cannot retry after the CA is fixed | Med (fires on every refused enrollment) | High — the recovery action destroys the credential needed to apply it | None | Refused as a precondition, before anything is consumed | Low |
 
 ---
 
@@ -368,6 +406,7 @@ are Control Planes. Pinned by `TestClusterCA_MetricsOmittedWithoutCA`.
 | `TestClusterCA_MetricsOmittedWithoutCA` / `_MetricsReportUnusable` | standalone-node posture |
 | `TestClusterCA_DiagnosticsRowFailsClosed` / `_SilentOnStandalone` | operator contract + viewer guardrail |
 | `TestClusterCA_InfoSurfacesUsability` | admin API |
+| `TestEnroll_UnusableCADoesNotConsumeToken` | FS-6 — the token survives a refused enrollment, and failing early still counts |
 
 **Evidence of gate strength.** Each defect gate was executed against a copy of the tree with
 *only the four fixes* reverted (observability scaffolding retained, so the failures isolate the
