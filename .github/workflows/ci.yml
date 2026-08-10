@@ -832,6 +832,15 @@ jobs:
 
       - uses: ./.github/actions/setup-go-cache
 
+      # Release-identity fail-closed guard: an OFFICIAL signed binary MUST carry a
+      # real vX.Y.Z tag stamped into main.version. Refuse to build/sign if the ref
+      # name is empty or not a semver tag; never fall back to empty/dev/latest/SHA.
+      # (env-indirection: never interpolate ${{ github.ref_name }} into run: text.)
+      - name: Assert release version identity
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: .github/scripts/assert-release-ref.sh "$REF_NAME"
+
       # Build the release binaries via the shared composite — the SAME action the
       # verify-reproducible job calls, so an independent tag rebuild can never
       # drift from this build. Proxy on every leg; culvert-maint on linux only.
@@ -843,6 +852,19 @@ jobs:
           ext: ${{ matrix.ext || '' }}
           ref-name: ${{ github.ref_name }}
           include-maint: ${{ matrix.goos == 'linux' }}
+
+      # Runtime version-identity GATE (native linux/amd64 leg only): start the EXACT
+      # binary that will be signed/published, probe /healthz, and assert it
+      # self-reports the release tag. This is the gate that would have caught the
+      # v1.0.202 defect (signed binary whose /healthz reported an empty version).
+      # Foreign-platform legs cannot execute here; the shared composite guarantees
+      # every leg uses the identical linker value, and this native leg proves the
+      # bytes-under-signature actually surface it at runtime.
+      - name: Gate runtime version identity (linux/amd64)
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: .github/scripts/assert-runtime-version.sh "./culvert-linux-amd64" "$REF_NAME"
 
       # Install cosign for keyless signing via Sigstore OIDC (no secrets needed).
       - name: Install cosign
@@ -1035,6 +1057,15 @@ jobs:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-go-cache
+
+      # SAME fail-closed release-identity guard as the release job: the reproducible
+      # rebuild must not silently accept a non-tag version input either (else the
+      # two paths could drift on the version stamp while still hash-matching an
+      # equally-wrong build).
+      - name: Assert release version identity
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: .github/scripts/assert-release-ref.sh "$REF_NAME"
 
       # SAME composite + SAME inputs as the release job → an independent rebuild
       # that cannot drift from the real build.

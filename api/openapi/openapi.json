@@ -1387,6 +1387,10 @@
             ],
             "type": "string"
           },
+          "version": {
+            "description": "Build-time release identity (linker-injected `main.version`, e.g.\n`v1.0.203`; `dev` for local/untagged builds). Signed release binaries\nself-report their exact tag here so runtime identity is verifiable.\n",
+            "type": "string"
+          },
           "write_authority": {
             "type": "boolean"
           }
@@ -20345,6 +20349,7 @@
                   "leader": true,
                   "role": "standalone",
                   "status": "ok",
+                  "version": "v1.0.203",
                   "write_authority": true
                 },
                 "schema": {
@@ -20364,6 +20369,7 @@
                   "leader": false,
                   "role": "standby",
                   "status": "standby",
+                  "version": "v1.0.203",
                   "write_authority": false
                 },
                 "schema": {
