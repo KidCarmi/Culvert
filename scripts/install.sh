@@ -1527,6 +1527,24 @@ gen_passphrase() {
 # leave the CA passphrase to the operator.
 setup_at_rest_encryption() {
   local envfile="$INSTALL_DIR/.env"
+  # An operator scripting a non-interactive install may export
+  # CULVERT_LOG_PASSPHRASE/CULVERT_CA_PASSPHRASE as HOST env vars instead of
+  # pre-seeding .env — secret_already_set()'s "${!var:-}" branch exists
+  # specifically to recognize that. But every docker compose invocation below
+  # runs as plain `sudo docker compose ...`, and sudo's default env_reset
+  # policy strips arbitrary inherited variables from the child process — a
+  # host-env-only value never reaches docker compose's ${VAR:-} substitution
+  # (which reads its own process env + $INSTALL_DIR/.env, not the shell that
+  # invoked this script). Persist it into .env now, BEFORE the "already
+  # configured" short-circuit below, so it actually survives to `compose up`.
+  # env_put itself never overwrites a pre-existing .env value, so an operator
+  # value already on disk still wins over a differing host-env one.
+  if [[ -n "${CULVERT_LOG_PASSPHRASE:-}" ]] && ! grep -Eq '^CULVERT_LOG_PASSPHRASE=.+' "$envfile" 2>/dev/null; then
+    env_put CULVERT_LOG_PASSPHRASE "$CULVERT_LOG_PASSPHRASE" "$envfile"
+  fi
+  if [[ -n "${CULVERT_CA_PASSPHRASE:-}" ]] && ! grep -Eq '^CULVERT_CA_PASSPHRASE=.+' "$envfile" 2>/dev/null; then
+    env_put CULVERT_CA_PASSPHRASE "$CULVERT_CA_PASSPHRASE" "$envfile"
+  fi
   if secret_already_set CULVERT_LOG_PASSPHRASE "$envfile" || secret_already_set CULVERT_CA_PASSPHRASE "$envfile"; then
     info "Encryption passphrase already configured — keeping existing values."
     return
