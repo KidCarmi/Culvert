@@ -152,6 +152,12 @@ components:
           enum: [standalone, leader, standby]
         leader: { type: boolean }
         write_authority: { type: boolean }
+        version:
+          type: string
+          description: |
+            Build-time release identity (linker-injected `main.version`, e.g.
+            `v1.0.203`; `dev` for local/untagged builds). Signed release binaries
+            self-report their exact tag here so runtime identity is verifiable.
 
     # ── Setup ───────────────────────────────────────────────────────────────────
     SetupStatus:
@@ -1836,13 +1842,13 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/HealthStatus' }
-              example: { status: ok, role: standalone, leader: true, write_authority: true }
+              example: { status: ok, role: standalone, leader: true, write_authority: true, version: v1.0.203 }
         '503':
           description: HA standby node — not currently the writable leader.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/HealthStatus' }
-              example: { status: standby, role: standby, leader: false, write_authority: false }
+              example: { status: standby, role: standby, leader: false, write_authority: false, version: v1.0.203 }
         '405': { $ref: '#/components/responses/PlainMethodNotAllowed' }
 
   /api/setup/status:
