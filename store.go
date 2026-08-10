@@ -1263,9 +1263,15 @@ func persistLogEntry(ip, method, host, status, ruleMatched, actionTaken, identit
 	// three destination fields share one contract. redactedHost is computed once and
 	// threaded into the URI redactor so the host is HMAC'd a single time per record.
 	redactedHost := redactDestinationHost(host)
+	// One clock read for the whole record. Two reads not only cost twice as
+	// much, they could straddle a second boundary and emit a TS and a Time that
+	// disagree. The human-readable field is memoised per wall-clock second
+	// (store_logclock.go) — byte-identical output, and it removes the only
+	// remaining allocation on this per-request path.
+	now := time.Now()
 	entry := LogEntry{
-		TS:          time.Now().UnixMilli(),
-		Time:        time.Now().Format("15:04:05"),
+		TS:          now.UnixMilli(),
+		Time:        logClockStamp(now),
 		IP:          ip,
 		Identity:    identity,
 		Method:      method,
