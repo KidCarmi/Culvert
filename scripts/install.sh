@@ -1885,35 +1885,71 @@ patch_allow_peers_numeric_uid() {
   esac
   tmp="$(mktemp)" || return 1
   if ! sudo awk -v uid="$uid" '
+    # find_comment_start returns the index of the first "#" that lies OUTSIDE
+    # a double-quoted TOML string, or 0 if none. A naive regex split at the
+    # first "#" would misfire on a legitimate quoted peer value that itself
+    # contains "#" (TOML allows it, and the maint-agent config loader accepts
+    # any username user.Lookup resolves, e.g. allow_peers = ["svc#prod"]) —
+    # that "#" is not a comment marker and must not truncate the array. Walks
+    # back over any whitespace immediately preceding the "#" so that
+    # whitespace is treated as part of the comment (preserved on reattach).
+    # Does not handle escaped quotes inside a TOML string (\"); not a concern
+    # for the usernames/UIDs this array holds.
+    function find_comment_start(s,    i, n, inquote, ch) {
+      n = length(s)
+      inquote = 0
+      for (i = 1; i <= n; i++) {
+        ch = substr(s, i, 1)
+        if (ch == "\"") {
+          inquote = !inquote
+        } else if (ch == "#" && !inquote) {
+          while (i > 1 && substr(s, i - 1, 1) ~ /[[:space:]]/) i--
+          return i
+        }
+      }
+      return 0
+    }
     BEGIN { patched=0 }
     /^[[:space:]]*allow_peers[[:space:]]*=/ && patched == 0 {
       line=$0
-      if (line ~ /^[[:space:]]*allow_peers[[:space:]]*=[[:space:]]*\["culvert-cp"\][[:space:]]*$/) {
-        print "allow_peers = [\"" uid "\"]"
+      # Split off a trailing inline TOML comment before classifying the line,
+      # so an operator-added "  # ..." note on the allow_peers line (a normal
+      # TOML habit) is not mistaken for the array spilling onto later lines —
+      # the array-closing checks below must see the actual code, not comment
+      # text. code is what gets rewritten; comment (if any) is reattached
+      # unchanged on every branch that prints a modified line.
+      code=line; comment=""
+      cstart=find_comment_start(line)
+      if (cstart > 0) {
+        comment=substr(line, cstart)
+        code=substr(line, 1, cstart-1)
+      }
+      if (code ~ /^[[:space:]]*allow_peers[[:space:]]*=[[:space:]]*\["culvert-cp"\][[:space:]]*$/) {
+        print "allow_peers = [\"" uid "\"]" comment
         patched=1
         next
       }
-      if (line ~ "\"" uid "\"") {
+      if (code ~ "\"" uid "\"") {
         print line
         patched=1
         next
       }
-      if (line !~ /\][[:space:]]*$/) {
+      if (code !~ /\][[:space:]]*$/) {
         print line
         patched=2
         next
       }
-      if (line ~ /\[[[:space:]]*\][[:space:]]*$/) {
+      if (code ~ /\[[[:space:]]*\][[:space:]]*$/) {
         # Empty array (e.g. "allow_peers = []"): the generic append below
         # always prepends a comma, which would leave a leading ", " with no
         # preceding element ("[, \"uid\"]") — invalid TOML.
-        sub(/\[[[:space:]]*\][[:space:]]*$/, "[\"" uid "\"]", line)
-        print line
+        sub(/\[[[:space:]]*\][[:space:]]*$/, "[\"" uid "\"]", code)
+        print code comment
         patched=1
         next
       }
-      sub(/[[:space:]]*\][[:space:]]*$/, ", \"" uid "\"]", line)
-      print line
+      sub(/[[:space:]]*\][[:space:]]*$/, ", \"" uid "\"]", code)
+      print code comment
       patched=1
       next
     }
