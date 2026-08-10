@@ -108,7 +108,7 @@ jobs:
         run: CGO_ENABLED=0 go build -o /dev/null .
 
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@f205ea1c3313d32999d8d6a48b4f6530d4437b38 # v3
+        uses: github/codeql-action/analyze@5595ccaf912efad79be6eef63a5619ff05969be3 # v3
         with:
           category: codeql-go
           # Separate upload step handles graceful failure for repos without
