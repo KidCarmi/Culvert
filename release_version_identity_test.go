@@ -95,10 +95,15 @@ func TestHealthz_VersionWiredInHandlerAndSchema(t *testing.T) {
 		t.Error("apiHealthz (ha.go) must surface `\"version\": version` on /healthz")
 	}
 	spec := readRepoFile(t, "api/openapi/openapi.yaml")
-	// HealthStatus schema documents version.
-	hs := spec[strings.Index(spec, "HealthStatus:"):]
-	if i := strings.Index(hs, "SetupStatus:"); i >= 0 {
-		hs = hs[:i]
+	// HealthStatus schema documents version. Bound the slice safely (strings.Index
+	// can return -1; using it directly as a slice index would panic; gocritic offBy1).
+	start := strings.Index(spec, "HealthStatus:")
+	if start < 0 {
+		t.Fatal("openapi.yaml is missing the HealthStatus schema")
+	}
+	hs := spec[start:]
+	if end := strings.Index(hs, "SetupStatus:"); end >= 0 {
+		hs = hs[:end]
 	}
 	if !strings.Contains(hs, "version:") {
 		t.Error("OpenAPI HealthStatus schema must document the `version` property")
