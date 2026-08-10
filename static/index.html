@@ -2641,6 +2641,7 @@ Firefox (all platforms):
               <span class="info-val" id="geoip-path" style="font-size:.78rem;word-break:break-all">-</span>
             </div>
           </div>
+          <div id="geoip-error" style="display:none;margin-top:10px;color:var(--red);font-size:.82rem"></div>
         </div>
       </div>
 
@@ -10203,9 +10204,17 @@ async function disableSyslog() {
 async function loadGeoIPStatus() {
   try {
     const g = await api('/api/geoip');
-    setText('geoip-status', g.enabled ? 'Enabled' : 'Disabled');
-    document.getElementById('geoip-status').style.color = g.enabled ? 'var(--green)' : 'var(--muted)';
+    setText('geoip-status', g.enabled ? 'Enabled' : (g.lastError ? 'Failed to load' : 'Disabled'));
+    document.getElementById('geoip-status').style.color = g.enabled ? 'var(--green)' : (g.lastError ? 'var(--red)' : 'var(--muted)');
     setText('geoip-path', g.dbPath || '(not configured)');
+    const errEl = document.getElementById('geoip-error');
+    if (g.lastError) {
+      const when = g.lastErrorAt ? new Date(g.lastErrorAt).toLocaleString() : '';
+      errEl.textContent = 'destCountry policy rules will not match: ' + g.lastError + (when ? ' (' + when + ')' : '');
+      errEl.style.display = '';
+    } else {
+      errEl.style.display = 'none';
+    }
   } catch(_) {}
 }
 
