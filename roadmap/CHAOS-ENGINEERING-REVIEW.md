@@ -17,6 +17,28 @@ everything else is triaged below with a suggested PR and required tests for foll
 
 ## 0. Revision log
 
+**2026-08-09 — CHAOS-28 sweep (the Root CA across its lifecycle).**
+
+The inspection CA is the one control whose failure produces no error anywhere INSIDE the
+process. Row **CA-1** was still live on `main`, and worse than recorded: (1) `signLeaf` signed
+with an expired CA because `x509.CreateCertificate` does not check the parent's validity and
+nothing else did either — verified by running the new gate against the pre-fix engine, where
+the sign SUCCEEDED — while `handleTunnel`'s `Ready()` gate (`caCert != nil`) admitted the
+session, so every inspected client got a leaf chained to a dead issuer and `/healthz` reported
+`ssl_inspection: ready` throughout; (2) leaf `NotAfter` was an unconditional `now+24h`, so
+leaves minted in the CA's last day OUTLIVED their issuer; (3) **CA-2** — a rotation whose
+`SaveCA` failed still logged and alerted success, so the only recovery path FS-1 has could
+silently not persist and mint a different root on every boot; (4) **CA-4** — the rotation loop
+made its FIRST check 24h after boot, i.e. never at the moment an operator restarts to recover;
+and (5) newly found, unrecorded: `cacheOrder` was appended on every TTL REFRESH while the map
+entry was overwritten, so the eviction branch (keyed on map length) never fired and the slice
+grew unbounded behind a bounded map — a leak that scales with UPTIME on an ordinary steady
+working set. All five fixed. The load-bearing decision was to fail **CLOSED** (502 before the
+CONNECT 200) rather than fold expiry into `Ready()`: the one-word fix would have converted an
+availability outage into a silent, fleet-wide UNINSPECTED-egress outage — the §1 theme — and is
+now blocked by an executable negative assertion. See §16 and
+`docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-09.md`.
+
 **2026-08-07 — CHAOS-27 sweep (the alert plane under an alert storm).**
 
 Row **WK-10** marked webhook delivery resilient, and every bound it cites is real — but all of
@@ -116,19 +138,21 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 
 | # | Scenario | Verdict | Sev | Evidence |
 |---|----------|---------|-----|----------|
-| CA-1 | **Expired Root CA keeps signing leaves** — no `time.Now().After(caCert.NotAfter)` guard on the sign path. Every inspected client then sees an opaque expired-issuer TLS error (site-wide inspected-HTTPS outage) with no fast-fail signal. | GAP | H | `internal/ca/ca.go:724-753` (`signLeaf`), `GetCert` `ca.go:639-695` |
-| CA-2 | Rotation `SaveCA` failure (disk full / read-only) is **swallowed** — logged, still returns `true`, still fires the "rotated successfully" alert. New CA lives only in RAM; next restart reloads the old near-expiry bundle. | GAP | H | `internal/ca/ca.go:508-510,519-522` |
+| CA-1 | **Expired Root CA keeps signing leaves** — no `time.Now().After(caCert.NotAfter)` guard on the sign path. Every inspected client then sees an opaque expired-issuer TLS error (site-wide inspected-HTTPS outage) with no fast-fail signal. | GAP → **CLOSED** (CHAOS-28: fail-closed 502 at dispatch + `ErrCAUnusable` at the sign path + `culvert_ca_usable`/`_expires_in_seconds` + `ssl_inspection: expired`) | H | was: `internal/ca/ca.go` `signLeaf`; now `internal/ca/validity.go`, `proxy_tunnel.go` `failClosedUnusableCA` — see §16 |
+| CA-1b | **Forged leaf `NotAfter` was not clamped to the issuer's** — leaves minted in the CA's final 24h claimed validity past their own issuer, the state that makes an expiry incident hardest to diagnose (leaf looks valid, only the chain fails). | GAP → **CLOSED** (CHAOS-28, `clampLeafValidity`, both ends) | M | was: `internal/ca/ca.go` `signLeaf` `NotAfter: now+24h`; see §16 |
+| CA-2 | Rotation `SaveCA` failure (disk full / read-only) is **swallowed** — logged, still returns `true`, still fires the "rotated successfully" alert. New CA lives only in RAM; next restart reloads the old near-expiry bundle. | GAP → **CLOSED** (CHAOS-28, `RotationPersistFailureObserver` + distinct log wording + `culvert_ca_rotation_persist_failures_total` + CA-panel banner) | H | was: `internal/ca/ca.go` `RotateIfNeeded`; see §16 |
 | CA-3 | Corrupt bundle / wrong `CULVERT_CA_PASSPHRASE` / expired-at-rest CA at startup → **fail OPEN**: inspection silently disabled, traffic falls through to SSL-bypass (no DPI/CDR/file-blocking). Log line only, no alert, no `ssl_inspection_ready` gauge. | GAP (silent) | H | `rootca_startup.go:40-44`; `handleTunnel` gate `proxy.go:1335`; `ImportBundle` `ca.go:286` |
-| CA-4 | Auto-rotation loop: **no immediate startup check** (24h blind spot after boot), **no retry/backoff** on failure (waits a fixed 24h). | GAP | M/H | `internal/ca/ca.go:460,64-73` |
+| CA-4 | Auto-rotation loop: **no immediate startup check** (24h blind spot after boot), **no retry/backoff** on failure (waits a fixed 24h). | GAP → **PARTLY CLOSED** (CHAOS-28: the startup blind spot is closed — one guarded round runs before the ticker, sharing the CHAOS-24 guard. Retry/backoff on a FAILED rotation still waits the full 24h) | M/H | `ca.go` `StartCAAutoRotation`; see §16 |
 | CA-5 | `cert_expiry` alert only fires **on rotation**, not as an early warning — contract says "fired on startup if ≤30 days" but the only producer is the rotation observer. | GAP (contract mismatch) | M | producer `ca.go:45-53`; contract `internal/alerts/store.go:17` |
 | CA-6 | OCSP fails **closed** when a cert lists responders and none answer; `VerifyConnection` re-checks resumed sessions. Caveats: nil-issuer → fail-open; OCSP client has no SSRF guard on the peer-controlled responder URL. | ✓ (+2 caveats) | L/M | `internal/ocsp/ocsp.go:177-181`, `ocsp.go:41-56`; caveats `ocsp.go:139-142,187-206` |
 | CA-7 | KEK-at-rest: rejects too-permissive/wrong-size files (never chmod-fixes, never silently regenerates), uses `os.Link` EEXIST to avoid racing mints, fails closed on decrypt error. | ✓ | — | `kek.go:174-239`, `cluster_ca_keyatrest.go:95-181` |
 | CA-8 | Session HMAC key is **random per-restart by default** (no env/config secret) → all admin sessions invalidated on every single-node restart. | GAP | M | `session.go:38-49`, `internal/session/session.go:80-86` |
 | CA-9 | Session HMAC runtime rotation / cluster sync is race-safe (lock-guarded set/read, hex+len validation before install, redacted on export). | ✓ | — | `internal/session/session.go:51-55,422-429`, `controlplane.go:1848-1862` |
 | CA-10 | Clock skew/rollback: sessions use wall-clock `time.Now()`; leaf certs backdate only 5 min (`ca.go:747`) vs the UI cert's 1h — >5 min skew makes fresh leaves "not yet valid" to clients. | GAP | M | `internal/session/session.go:408`, `internal/ca/ca.go:747` vs `internal/uitls/uitls.go:52` |
-| CA-11 | Leaf-cert cache has **no single-flight** — N concurrent misses for one host each sign independently; TTL expiry is synchronized (thundering herd). | GAP | M | `internal/ca/ca.go:656-694,650-651` |
+| CA-11 | Leaf-cert cache has **no single-flight** — N concurrent misses for one host each sign independently; TTL expiry is synchronized (thundering herd). | GAP (re-scoped by CHAOS-28: the perf-F3 shared leaf key removed the dominant per-miss cost — P-256 keygen — so the herd is materially cheaper than when first recorded) | M → L/M | `internal/ca/ca.go` `GetCert` |
+| CA-16 | Leaf-cache **`cacheOrder` slice grew on every TTL REFRESH** while the map entry was overwritten. `len(cache)` never changed, so the eviction branch never fired: an unbounded slice behind a bounded map, growing with UPTIME on an ordinary steady working set (W=5,000 hosts ⇒ ~120k strings/day). Invisible to `culvert_cert_cache_size`, which reports the bounded map. | NEW → **CLOSED** (CHAOS-28: append only for an untracked host; behavior-preserving for eviction — duplicate entries always resolved to "already gone") | M | was: `internal/ca/ca.go` `GetCert`; see §16 |
 | CA-12 | Upstream & client MITM handshakes inherit only `r.Context()` (no explicit handshake deadline); a slowloris handshake ties up the goroutine. Good: uses `HandshakeContext`, not `Handshake()`. | GAP | M | `proxy.go:1503,1591` |
-| CA-13 | Cluster CA rotation mirrors CA-2: every failure branch logs-and-returns with no alert/metric. Silent failure → cluster-wide enrollment break at expiry. | GAP | M | `enrollment.go:1189-1245` |
+| CA-13 | Cluster CA rotation mirrors CA-2: every failure branch logs-and-returns with no alert/metric. Silent failure → cluster-wide enrollment break at expiry. | GAP (**next sweep** — CHAOS-28 closed the inspection-CA half as CA-2; this is the same defect class in the OTHER CA, with a different lifecycle and blast radius) | M | `enrollment.go:1189-1245` |
 | CA-14 | Revocation persistence uses `os.WriteFile`+rename with **no fsync** (unlike the CA bundle's `AtomicWrite`) — a revoked token can be honored again after crash/disk-full. | GAP | L/M | `internal/session/session.go:272-276`, caller `session.go:106-108` |
 | CA-15 | CA loader **accepts a plain-PEM bundle even when a passphrase is set** (magic absent) — a downgrade footgun; logged, not alerted/rejected. | GAP (minor) | L | `internal/ca/ca.go:221-229` |
 
@@ -989,3 +1013,92 @@ correctness fix that is scheduled on one clock and validated on another will dis
 at the boundary.** The memory bound was right, the CPU bound was right, and the counter that made
 both observable was wrong in precisely the state — quiet after a storm — that an operator is most
 likely to be looking at it.
+
+---
+
+## 16. CHAOS-28 — The Root CA across its lifecycle (fail-closed)
+
+**Date:** 2026-08-09 · **Closes:** CA-1, CA-1b, CA-2, CA-16 · **Partly closes:** CA-4 ·
+**Re-scopes:** CA-11 · **Hands off:** CA-13
+**Full write-up:** `docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-09.md`
+
+### 16.1 Why this domain
+
+Every other security control in Culvert fails in a way the process can observe — a dial
+fails, a scanner times out, a write returns `ENOSPC`. The inspection CA is the exception:
+it expires, and *nothing inside the appliance changes*. The only entity that notices is
+the client, which reports it as a per-site certificate warning that reads like a website
+problem rather than a gateway problem. That is the definition of a silent failure, on the
+component whose failure is the widest.
+
+### 16.2 The five defects
+
+1. **Expired CA kept signing.** `x509.CreateCertificate` does not check the parent's
+   `NotBefore`/`NotAfter` — verified empirically by running the new gate against the
+   pre-fix engine, where the sign succeeded. `handleTunnel` did not help either: its gate
+   is `certMgr.Ready()`, which is `caCert != nil`, so an expired CA is "ready".
+2. **Leaf validity was not clamped to the issuer's** (`NotAfter: now+24h`, unconditional).
+3. **A rotation that could not persist reported success** (CA-2) — so the only recovery
+   path defect 1 has could silently not survive a restart, minting a different root each boot.
+   Three sub-defects, all surfaced in PR review: the SUCCESS observer fired even when the save
+   failed (two contradictory alerts for one event, plus a false `culvert_ca_rotations_total`
+   increment); the warning was keyed on the CUMULATIVE counter, so it latched until process
+   restart even after the operator fixed the volume and re-rotated; and the MANUAL
+   force-rotate path (`apiCARotate`) had the identical swallowed save — the worse of the two
+   sites, since force-rotate is exactly what an operator runs to recover from defect 1.
+4. **The rotation loop's first check was 24h after boot** (CA-4) — skipped precisely when
+   an operator restarts to recover from the outage.
+5. **`cacheOrder` grew on every TTL refresh** (CA-16, previously unrecorded) — an unbounded
+   slice behind a bounded map, growing with uptime on an ordinary steady working set.
+
+### 16.3 The decision that mattered: fail closed, not bypass
+
+The tempting fix is one word — fold validity into `Ready()`. That routes an expired CA into
+the existing `inspect_unavailable` **bypass** branch and keeps traffic flowing. It also means
+that at the instant the CA expires, **the whole fleet silently stops inspecting**: DLP,
+ClamAV, YARA, CDR, file-blocking and DPI all dark, at once, with the gateway reporting itself
+healthy. That is trading an availability failure for a security-control failure, and it is the
+exact §1 theme this register calls its worst.
+
+The same reasoning rules out honouring a decryption profile's `OnInspectError=fail-open`. That
+contract is scoped to **per-origin** incompatibility and gated behind a confirm-count of
+distinct client evidence for exactly that reason. An expired CA is **host-independent**:
+routing it through the learner would promote every host requested during the outage into a
+durable bypass — poisoning the entire cache from one appliance-level fault.
+
+So the unusable-CA path **never bypasses, never learns, never rescues**, and the negative
+assertion is executable: `TestHandleTunnel_ExpiredCAFailsClosedNotBypass` fails if the session
+is ever recorded as any flavour of bypass instead of
+`failed`/`no_fail_open_502`/`client_hello`/`certificate`.
+
+Failing closed costs no availability relative to the pre-fix state — a leaf chained to an
+expired issuer already fails path validation in every mainstream client. The traffic was dead
+either way. What changed is that the appliance now knows, says so, and names the remediation.
+
+### 16.4 Observability added
+
+| Surface | Signal |
+|---|---|
+| `/metrics` | `culvert_ca_usable`, `culvert_ca_expires_in_seconds` (omitted when no CA — 0 would read as "expires now"), `culvert_ca_sign_refused_total`, `culvert_ca_inspect_blocked_total`, `culvert_ca_rotation_persist_failures_total` |
+| `/healthz` | `ssl_inspection: expired` (was `ready` throughout the outage) |
+| `/readyz` | `ca` row → `fail`, **report-only** by default (an expired CA is fleet-wide; gating would eject every node at once and take working plain-HTTP/bypass traffic with it). `?strict=1` opts in. Fixed detail string — the surface is unauthenticated on the proxy port |
+| Alerts | `cert_expiry`, rate-limited (5 min) on an independent gate from the log line, `HasSubscriber`-gated per the per-request producer contract |
+| Admin API / GUI | `GET /api/ca/status` gains `usable` / `unusableReason` / `inspectBlocked` / `signRefused` / `rotationPersistFailures`; the CA panel gains a red outage banner and an amber not-persisted banner |
+
+Recovery is reported on **evidence** (an observed usable verification via
+`caInspectionUsable`), never on elapsed time — the `storage_health.go` contract, for the same
+reason: a still-expired CA looks exactly like a healthy one if nothing happens to need a leaf.
+
+### 16.5 What is deliberately left
+
+- **CA-13** — cluster-CA rotation still logs-and-returns on every failure branch. Same defect
+  class as CA-2 in the *other* CA; different lifecycle and blast radius (enrollment, not
+  inspection). Suggested as the next sweep.
+- **CA-11** — no single-flight on the leaf cache. Re-scoped down: the perf-F3 shared leaf key
+  already removed the dominant per-miss cost (P-256 keygen), so the herd is much cheaper than
+  when first recorded.
+- **CA-4's retry half** — a rotation that FAILS still waits a full 24h before retrying.
+- **Client trust redistribution stays manual.** Rotation restores the appliance's ability to
+  inspect; it cannot make clients trust a new root. Nothing in-band can. That is why this
+  change invests most heavily in making the condition visible *before* the cliff
+  (`culvert_ca_expires_in_seconds`) rather than only at it.

@@ -64,6 +64,28 @@ func StartCAAutoRotation(ctx context.Context, caPath, passphrase string) {
 	go func() {
 		t := time.NewTicker(ca.RotationCheckInterval)
 		defer t.Stop()
+		// CHAOS-28 / CA-4: check IMMEDIATELY, before the first tick. The loop
+		// used to wait a full RotationCheckInterval (24h) after boot, which put
+		// a 24-hour blind spot in front of the one recovery path this failure
+		// has. It is reached exactly when it matters most — an appliance that
+		// was powered off through its rotation window, or restarted to recover
+		// from the expiry outage itself, would sit there for another day doing
+		// nothing while every inspected HTTPS request failed. RotateIfNeeded is
+		// a no-op outside the 30-day window, so on a healthy node this costs one
+		// expiry comparison at startup.
+		checkRound := func() {
+			// Each CA is guarded separately so a fault in one still lets the
+			// other rotate.
+			runGuarded("ca_rotation", func() {
+				certMgr.RotateIfNeeded(caPath, passphrase)
+				certMgr.CleanupSecondaryCA()
+			})
+			runGuarded("cluster_ca_rotation", func() {
+				globalClusterCA.RotateIfNeeded()
+				globalClusterCA.CleanupSecondary()
+			})
+		}
+		checkRound()
 		for {
 			select {
 			case <-ctx.Done():
@@ -75,14 +97,7 @@ func StartCAAutoRotation(ctx context.Context, caPath, passphrase string) {
 				// and the failure would only surface at expiry, as a
 				// fleet-wide inspected-HTTPS outage. Each CA is guarded
 				// separately so a fault in one still lets the other rotate.
-				runGuarded("ca_rotation", func() {
-					certMgr.RotateIfNeeded(caPath, passphrase)
-					certMgr.CleanupSecondaryCA()
-				})
-				runGuarded("cluster_ca_rotation", func() {
-					globalClusterCA.RotateIfNeeded()
-					globalClusterCA.CleanupSecondary()
-				})
+				checkRound()
 			}
 		}
 	}()

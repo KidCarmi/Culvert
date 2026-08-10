@@ -46,11 +46,19 @@ func computeHealth() healthReport {
 	// failure while Ready() stays true. Reporting "ready" there would hide a CA
 	// bundle that never persisted — the configured inspection material is not
 	// actually usable across a restart.
+	// CHAOS-28: an installed-but-expired (or not-yet-valid) CA is reported as
+	// "expired", NOT "ready". Ready() only asks whether a CA is loaded, so
+	// before this the probe stayed green through a total inspected-HTTPS outage
+	// — the single least-visible failure in the appliance. Checked after the
+	// load failure (which is the more specific fault) and before Ready().
 	sslInspection := "ready"
-	if sslInspectionLoadFailure() != "" {
+	switch {
+	case sslInspectionLoadFailure() != "":
 		sslInspection = "load_failed"
-	} else if !certMgr.Ready() {
+	case !certMgr.Ready():
 		sslInspection = "unavailable"
+	case certMgr.Usable() != nil:
+		sslInspection = "expired"
 	}
 
 	return healthReport{
@@ -118,6 +126,49 @@ func appendStateFileChecks(checks map[string]*readinessCheck) {
 	}
 }
 
+// appendCAReadinessCheck adds the report-only `ca` row.
+//
+// Report status but don't fail readiness — the proxy still works as a plain
+// forward proxy if the CA didn't load. A configured-but-failed load is surfaced
+// as a failing (non-gating) check so the degradation is visible to probes
+// instead of the row silently disappearing (CHAOS-06); posture (report-only)
+// mirrors policy_loaded.
+//
+// The recorded load failure is checked BEFORE Ready(): LoadOrInitCA runs
+// InitCA() (Ready() → true) before SaveCA(), so a SaveCA failure leaves a
+// recorded failure while Ready() stays true. Reporting "ok" there would hide a
+// configured CA bundle that never persisted.
+//
+// CHAOS-28 adds the unusable-CA branch (loaded, but outside its own validity
+// window — so it signs nothing a client accepts). It stays REPORT-ONLY like the
+// rest of this check, and that is a deliberate availability choice: an expired
+// CA is typically fleet-wide (every node was provisioned from the same bundle
+// at the same time), so gating readiness on it would eject the entire fleet
+// from the load balancer simultaneously and take plain HTTP and bypassed HTTPS
+// — which still work — down with it. An operator who wants those nodes ejected
+// opts in via /ready?strict=1.
+//
+// The detail is a FIXED string. /ready is served unauthenticated on the proxy
+// port, and the underlying error names the CA's exact NotAfter — an
+// unauthenticated "this gateway's inspection CA expired at T" is a fingerprint
+// of a security-degraded node. The full detail stays in the logs, the alert,
+// /healthz (internal) and the role-gated admin API.
+func appendCAReadinessCheck(checks map[string]*readinessCheck) {
+	switch {
+	case sslInspectionLoadFailure() != "":
+		checks["ca"] = &readinessCheck{Status: "fail", Detail: sslInspectionLoadFailure()}
+	case !certMgr.Ready():
+		// Not configured yet — no row at all (pre-CHAOS-06 baseline behavior).
+	case certMgr.Usable() != nil:
+		checks["ca"] = &readinessCheck{
+			Status: "fail",
+			Detail: "root CA outside its validity window; SSL inspection is blocked — see server logs",
+		}
+	default:
+		checks["ca"] = &readinessCheck{Status: "ok"}
+	}
+}
+
 // computeReadiness builds the readiness snapshot and the HTTP status code (200
 // when all gating checks pass, 503 otherwise). Shared by handleReady and the
 // readiness support collector. The verdict returned here is the DEFAULT
@@ -129,21 +180,8 @@ func computeReadiness() (report readinessReport, code int) {
 	checks := map[string]*readinessCheck{}
 	allOK := true
 
-	// 1. CA: report status but don't fail readiness — proxy still works as a
-	// plain forward proxy if the CA didn't load. A configured-but-failed load is
-	// surfaced as a failing (non-gating) check so the degradation is visible to
-	// probes instead of the row silently disappearing (CHAOS-06); posture
-	// (report-only) mirrors policy_loaded.
-	//
-	// The recorded load failure is checked BEFORE Ready(): LoadOrInitCA runs
-	// InitCA() (Ready() → true) before SaveCA(), so a SaveCA failure leaves a
-	// recorded failure while Ready() stays true. Reporting "ok" there would hide
-	// a configured CA bundle that never persisted.
-	if detail := sslInspectionLoadFailure(); detail != "" {
-		checks["ca"] = &readinessCheck{Status: "fail", Detail: detail}
-	} else if certMgr.Ready() {
-		checks["ca"] = &readinessCheck{Status: "ok"}
-	}
+	// 1. CA — see appendCAReadinessCheck. Report-only: never gates.
+	appendCAReadinessCheck(checks)
 
 	// 2. ClamAV: if scanner is initialised, verify connectivity.
 	if globalSecScanner != nil {

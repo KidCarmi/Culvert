@@ -4145,6 +4145,17 @@ Firefox (all platforms):
           <span class="panel-title">CA Management</span>
           <button class="btn ghost sm" data-click="loadCAMgmt"><svg class="ico" aria-hidden="true"><use href="#i-refresh"/></svg> Refresh</button>
         </div>
+        <div id="ca-unusable-banner" style="display:none;margin:0 0 12px;padding:10px 12px;border-radius:6px;background:rgba(220,53,69,.12);border:1px solid var(--red,#dc3545);font-size:.86rem">
+          <strong>SSL inspection is DOWN.</strong> The Root CA cannot sign a certificate clients will accept, so every
+          inspect-matched HTTPS connection is being refused (fail closed). <span id="ca-unusable-reason"></span>
+          <span id="ca-unusable-counts" style="color:var(--muted)"></span>
+          Rotate the Root CA below and redistribute it to your clients.
+        </div>
+        <div id="ca-persist-banner" style="display:none;margin:0 0 12px;padding:10px 12px;border-radius:6px;background:rgba(255,193,7,.12);border:1px solid var(--yellow,#ffc107);font-size:.86rem">
+          <strong>Root CA rotated but not saved.</strong> <span id="ca-persist-reason"></span>
+          The replacement CA exists in memory only — a restart will discard it and rotate again to a different CA.
+          Fix the data volume, then force a rotation.
+        </div>
         <div class="cards" id="ca-cards" style="grid-template-columns:repeat(3,1fr)">
           <div class="card"><div class="card-label">Status</div><div class="card-value" id="ca-status">-</div></div>
           <div class="card"><div class="card-label">Expires</div><div class="card-value" id="ca-expiry">-</div></div>
@@ -16172,7 +16183,26 @@ async function loadCAMgmt() {
     api('/api/ocsp'),
   ]);
   if (!ca || ca.error) return;
-  document.getElementById('ca-status').textContent = ca.ready ? 'Ready' : 'Not Initialized';
+  // CHAOS-28: a loaded-but-unusable CA is NOT "Ready" — reporting it as such is
+  // what made a fleet-wide inspected-HTTPS outage invisible from this panel.
+  const caUnusable = ca.ready && ca.usable === false;
+  document.getElementById('ca-status').textContent =
+    !ca.ready ? 'Not Initialized' : caUnusable ? 'Expired — inspection blocked' : 'Ready';
+  document.getElementById('ca-status').style.color = caUnusable ? 'var(--red,#dc3545)' : '';
+  const unusableBanner = document.getElementById('ca-unusable-banner');
+  unusableBanner.style.display = caUnusable ? '' : 'none';
+  if (caUnusable) {
+    document.getElementById('ca-unusable-reason').textContent = ca.unusableReason || '';
+    document.getElementById('ca-unusable-counts').textContent =
+      ' (' + (ca.inspectBlocked ?? 0) + ' connections blocked since boot.)';
+  }
+  // Keyed on the CURRENT state, not the cumulative counter — the banner must
+  // clear once a rotation actually persists, not latch until process restart.
+  const persistBanner = document.getElementById('ca-persist-banner');
+  persistBanner.style.display = ca.rotationPersistDegraded ? '' : 'none';
+  if (ca.rotationPersistDegraded) {
+    document.getElementById('ca-persist-reason').textContent = ca.rotationPersistError || '';
+  }
   document.getElementById('ca-expiry').textContent = ca.expiresIn || '-';
   document.getElementById('ca-provider').textContent = ca.keyProvider || 'local';
   const det = document.getElementById('ca-details');
