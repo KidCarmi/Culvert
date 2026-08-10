@@ -966,12 +966,9 @@ func (ca *clusterCA) SignCSR(csrPEM []byte, nodeID string) (certPEM []byte, seri
 	//
 	// Evaluated BEFORE the signing lock so the observer runs with ca.mu not
 	// held, matching the engine-observer convention in internal/ca.
-	if uerr := ca.Usable(); uerr != nil {
-		statClusterCASignRefused.Add(1)
-		noteClusterCAUnusable(uerr.Error())
+	if uerr := clusterCAIssuanceRefusal(ca); uerr != nil {
 		return nil, "", time.Time{}, uerr
 	}
-	noteClusterCAUsable()
 
 	ca.mu.RLock()
 	defer ca.mu.RUnlock()

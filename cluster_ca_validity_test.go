@@ -10,11 +10,13 @@ package main
 // nothing about a failure mode whose whole signature is "looks fine".
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"math/big"
@@ -406,5 +408,64 @@ func TestClusterCA_InfoSurfacesUsability(t *testing.T) {
 	}
 	if days, ok := hinfo["expiresInDays"].(int); !ok || days < 3000 {
 		t.Errorf("Info() expiresInDays = %v, want ~3650", hinfo["expiresInDays"])
+	}
+}
+
+// TestEnroll_UnusableCADoesNotConsumeToken pins the recovery property behind
+// the pre-admission gate (CHAOS-29, raised in review of PR #1110).
+//
+// `admitEnrollment` validates and CONSUMES the one-use enrollment token. With
+// the usability refusal only on the sign path, an enrollment against an
+// unusable CA failed *after* the token was spent — so the node could not retry
+// once an operator replaced the CA, and needed a freshly minted token it has no
+// authenticated channel to request. An enrollment outage that also destroys the
+// credential needed to recover from it is strictly worse than the outage.
+//
+// The assertion is the one that matters operationally: after the refusal, the
+// token is still usable.
+func TestEnroll_UnusableCADoesNotConsumeToken(t *testing.T) {
+	resetClusterCAHealthForTest()
+	origCA := globalClusterCA
+	origStore := globalClusterStore
+	t.Cleanup(func() {
+		globalClusterCA = origCA
+		globalClusterStore = origStore
+		resetClusterCAHealthForTest()
+	})
+
+	globalClusterStore = newTestClusterStore(t)
+	token, err := globalClusterStore.GenerateToken("dp-node", "", "test", time.Hour)
+	if err != nil {
+		t.Fatalf("GenerateToken: %v", err)
+	}
+	if !globalClusterStore.TokenExists(token) {
+		t.Fatal("precondition: token should exist before the enroll attempt")
+	}
+
+	// A cluster CA that expired an hour ago.
+	globalClusterCA = loadTestClusterCA(t, time.Now().Add(-48*time.Hour), time.Now().Add(-time.Hour))
+
+	raw, err := json.Marshal(EnrollRequest{
+		Token:  token,
+		CSR:    string(newTestNodeCSR(t, "dp-node-1")),
+		NodeID: "dp-node-1",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	srv := &controlPlaneServer{}
+	if _, err := srv.Enroll(context.Background(), raw); err == nil {
+		t.Fatal("Enroll succeeded against an expired cluster CA")
+	}
+
+	// The whole point: the operator replaces the CA, the node retries, and the
+	// token it was issued still works.
+	if !globalClusterStore.TokenExists(token) {
+		t.Error("the refused enrollment consumed the one-use token — the node cannot retry after the CA is replaced")
+	}
+	// The refusal is still observable; failing early must not cost the signal.
+	if got := statClusterCASignRefused.Load(); got == 0 {
+		t.Error("pre-admission refusal was not counted")
 	}
 }

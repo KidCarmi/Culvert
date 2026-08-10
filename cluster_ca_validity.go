@@ -103,7 +103,7 @@ func clusterCAUsable(cert *x509.Certificate, now time.Time) error {
 // something to hand it. RFC 5280 path validation evaluates every certificate in
 // the chain at the time of use, so an issuer-outliving node cert was never more
 // useful than a clamped one — only harder to diagnose.
-func clampNodeCertValidity(notBefore, notAfter time.Time, caCert *x509.Certificate) (time.Time, time.Time) {
+func clampNodeCertValidity(notBefore, notAfter time.Time, caCert *x509.Certificate) (nodeNotBefore, nodeNotAfter time.Time) {
 	if caCert == nil {
 		return notBefore, notAfter
 	}
@@ -114,4 +114,27 @@ func clampNodeCertValidity(notBefore, notAfter time.Time, caCert *x509.Certifica
 		notAfter = caCert.NotAfter
 	}
 	return notBefore, notAfter
+}
+
+// clusterCAIssuanceRefusal returns the error to refuse a certificate-issuance
+// request with, or nil when the CA can sign. It records the refusal on the
+// health plane, so every path that declines to issue funds the same counter and
+// alert regardless of where in the request it decided.
+//
+// It exists because the refusal has to happen at TWO points, and only one of
+// them is the sign path. `Enroll` calls `admitEnrollment` first, which validates
+// and CONSUMES the one-use enrollment token — so refusing at the sign path alone
+// took the node's token, gave back nothing, and left it unable to retry once an
+// operator replaced the CA. An enrollment outage that also destroys the
+// credentials needed to recover from it is worse than the outage; the
+// precondition therefore runs BEFORE anything is consumed, and the sign-path
+// gate stays as the backstop that cannot be bypassed.
+func clusterCAIssuanceRefusal(ca *clusterCA) error {
+	if err := ca.Usable(); err != nil {
+		statClusterCASignRefused.Add(1)
+		noteClusterCAUnusable(err.Error())
+		return err
+	}
+	noteClusterCAUsable()
+	return nil
 }

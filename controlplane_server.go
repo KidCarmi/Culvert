@@ -392,6 +392,18 @@ func (s *controlPlaneServer) Enroll(ctx context.Context, raw json.RawMessage) (j
 	if ok, reason := haIssuanceAllowed(); !ok {
 		return nil, status.Errorf(codes.FailedPrecondition, "enrollment fenced: %s", reason)
 	}
+	// CHAOS-29: refuse BEFORE admitEnrollment, which validates and CONSUMES the
+	// one-use enrollment token. A CA that cannot issue makes this request fail
+	// either way, but failing after admission spends the node's token and gives
+	// back nothing — so once an operator replaces the CA, the node cannot retry
+	// and needs a freshly minted token it has no way to ask for. An enrollment
+	// outage that also destroys the credential needed to recover from it is
+	// worse than the outage. This subsumes the previous post-admission
+	// `Ready()` check (Usable() also reports an uninitialized CA), and
+	// SignCSR's own gate remains the backstop that cannot be bypassed.
+	if err := clusterCAIssuanceRefusal(globalClusterCA); err != nil {
+		return nil, status.Errorf(codes.FailedPrecondition, "cluster CA cannot issue certificates: %v", err)
+	}
 	req, tokInfo, priorNode, err := admitEnrollment(ctx, raw)
 	if err != nil {
 		return nil, err
@@ -401,9 +413,6 @@ func (s *controlPlaneServer) Enroll(ctx context.Context, raw json.RawMessage) (j
 	}
 
 	// Sign the CSR.
-	if !globalClusterCA.Ready() {
-		return nil, status.Errorf(codes.FailedPrecondition, "cluster CA not initialized")
-	}
 	certPEM, serial, expiry, err := globalClusterCA.SignCSR([]byte(req.CSR), req.NodeID)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "sign CSR: %v", err)
