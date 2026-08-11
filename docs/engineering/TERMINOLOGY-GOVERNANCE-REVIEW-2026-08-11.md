@@ -22,32 +22,52 @@
 > decision rather than a mechanical rename (unchanged reasoning from 08-06/08-07). This report is a
 > re-verification pass, consistent with this program's practice of publishing evidence on unchanged windows
 > rather than only on windows with a fix to ship.
+> **Correction (post-publish, same day):** a PR reviewer correctly flagged two errors in the first cut of
+> this report. (1) T-9's Wave 1 row said its dependency surface was untouched; it missed that this window's
+> new `alerts_event_rename_import_test.go` (commit `bea241e`) adds a fresh literal `"exportedAt"` field
+> (line 47, in the `preRenameBackup` fixture) — a new, if minor, addition to the surface a future
+> `capturedAt` migration must update. (2) The T-39 write-up claimed business concept D ("qualification
+> environment") crystallized from speculative doc language into shipped Go *this window*. It did not: the
+> `EnvSpec` struct and its "operator-provided qualification environment" doc comment were introduced by
+> commit `107b5e8`, which predates this review's own baseline (`d2c5a51`) by 20 commits — it shipped during
+> the *prior* (08-06→08-07) window's QUAL-6 work, and the 08-07 report itself already listed
+> `internal/mcpacceptance` as new that window. Both errors are corrected in place below (Wave 1, Findings,
+> and the carried-over tables); the corrected facts are reflected in the Executive Summary and Health Score
+> reasoning that follow.
 
 ---
 
 ## Executive Summary
 
-**Seventeen of nineteen carried-over findings are byte-for-byte unchanged.** T-37's dependent file
-(`ui_security.go`) was touched this window (64 lines), but the touch is entirely CHAOS-27/28 work landing in
-the same file — the three cited literal audit-action strings (`security.feeds_sync`, `blocklist.feed.sync`,
-`saasfeed.refresh`) are untouched. No finding regressed and no finding was fixed.
+**Seventeen of nineteen carried-over findings are byte-for-byte unchanged; one (T-9) has a minor new test
+dependency and one (T-39) has updated evidence.** T-37's dependent file (`ui_security.go`) was touched this
+window (64 lines), but the touch is entirely CHAOS-27/28 work landing in the same file — the three cited
+literal audit-action strings (`security.feeds_sync`, `blocklist.feed.sync`, `saasfeed.refresh`) are
+untouched. T-9's dependency surface gained a new consumer: `bea241e` added
+`alerts_event_rename_import_test.go`, whose `preRenameBackup` fixture (line 47) round-trips a config export
+containing the literal field `"exportedAt": "2026-08-01T00:00:00Z"` to test the CHAOS-47 legacy-event-name
+migration. This doesn't change T-9's substance (still open, still unfixed) but is a genuine new item a
+future `exportedAt`→`capturedAt` migration would need to touch — the Wave 1 table below has been corrected
+to reflect it. No finding regressed and no finding was fixed.
 
-**T-39 did not gain a fifth independent concept, but its fourth (previously speculative) sense shipped as
-real code.** The 08-07 review noted that `docs/operator/mcp-qualification-telemetry.md:150`'s "a defined
-qualification environment" was still aspirational doc language (business concept D). This window's QUAL-6.1
-acceptance-harness work (`internal/mcpacceptance/spec.go`, commits `07322ca` through `86ec811` plus the
-reconcile commit `8562433`) makes it literal, shipped Go: `spec.go:74`'s doc comment reads *"EnvSpec is the
-operator-provided **qualification environment**."* The same harness references concepts B (QUAL-2/3's
-`Telemetry`, described in its own doc comment as "the operator-owned QUAL-3 durable-telemetry custody
-boundary") and C (QUAL-4's `QualificationPolicyFile`, described as "the SAME production format the binary
-consumes at `mcp.gateway.qualification_policy_file`") by direct reference rather than renaming them, so no
-new collision was introduced — but for the first time one artifact (`EnvSpec`) sits at the intersection of
-three of the four senses, which is evidence the accumulating overload is real infrastructure now, not just
-parallel documentation drift. The harness also introduces "authoritative" (`ModeAuthoritative`/`ModeDev`) as
-a source-of-truth modifier distinguishing real-operator-infra acceptance runs from dev-fixture ones; this is
-the same generic, already-tolerated sense of the word used elsewhere in the codebase (`admin_settings.go`,
-`store.go`), not a new collision. No GUI surface was touched by this work, so T-39's "no same-screen
-collision" mitigating factor still holds.
+**T-39 did not gain a fifth independent concept, and its fourth sense did not newly crystallize this
+window — that already happened one window earlier.** The 08-07 review's own summary already listed a "QUAL-6
+MCP Observe acceptance-test harness (`internal/mcpacceptance`)" as new in *its* window (6a2960eb→d2c5a51);
+that harness's `EnvSpec` struct and its "operator-provided qualification environment" doc comment
+(business concept D) were introduced by commit `107b5e8`, which is 20 commits before this review's own
+baseline `d2c5a51` — i.e. concept D already existed, as shipped code, before this window began. What this
+window's QUAL-6.1 work (`internal/mcpacceptance/spec.go`, commits `07322ca` through `86ec811` plus the
+reconcile commit `8562433`) actually did was extend that pre-existing `EnvSpec` struct with new typed fields
+that directly hold concept C (`QualificationPolicyFile`, doc-commented as "the SAME production format the
+binary consumes at `mcp.gateway.qualification_policy_file`") and concept B (`Telemetry`, doc-commented as
+"the operator-owned QUAL-3 durable-telemetry custody boundary"). So no new sense was introduced and no
+timing claim about "crystallization" holds — but the fact pattern is still worth recording: this window is
+the first time concepts B, C, and D became co-resident as literal typed struct fields (not just prose
+cross-references) inside one artifact. The harness also introduces "authoritative"
+(`ModeAuthoritative`/`ModeDev`) as a source-of-truth modifier distinguishing real-operator-infra acceptance
+runs from dev-fixture ones; this is the same generic, already-tolerated sense of the word used elsewhere in
+the codebase (`admin_settings.go`, `store.go`), not a new collision. No GUI surface was touched by this work,
+so T-39's "no same-screen collision" mitigating factor still holds.
 
 **No new terminology drift found anywhere else in the 58-commit window.** The alert-storm/dedup work
 (CHAOS-27), the CA fail-closed-when-unusable + rotation-persistence-gating implementation (CHAOS-28), the
@@ -61,8 +81,9 @@ narrative already promised (`Usable()`, `ErrCAUnusable`, `failClosedUnusableCA`,
 narrative-to-code handoff, not drift.
 
 **Terminology Health Score: 8.4 / 10** (unchanged from 08-07 — zero regressions across a 58-commit window
-and zero new drift found, but T-39's fourth sense crystallizing from speculative doc language into shipped,
-cross-referenced code is a reminder that the pending naming decision is not getting cheaper to defer).
+and zero new drift found; T-39's three senses becoming co-resident as typed struct fields in one artifact
+this window is a reminder that the pending naming decision is not getting cheaper to defer, even though no
+new sense was introduced).
 
 ---
 
@@ -74,7 +95,7 @@ file.
 
 | Finding | Files it depends on | Touched this window? | Collision status |
 |---|---|---|---|
-| T-9 | export/import + parity-test surface (`exportedAt`) | No | Unchanged |
+| T-9 | export/import + parity-test surface (`exportedAt`) | Yes — new `alerts_event_rename_import_test.go` (`bea241e`) adds a fresh `"exportedAt"` literal (line 47) | New test-only consumer added to the surface; core finding unchanged/unfixed |
 | T-11 | `policy.go`'s default-action vocabulary, `ui_policy.go` core | No | Unchanged |
 | T-12 | Maintenance-Agent `/v1/upgrades/*` wire routes | No | Unchanged |
 | T-13 residual | README/enterprise-doc "TLS Inspection" vs. in-app "SSL" | No | Unchanged |
@@ -92,7 +113,7 @@ file.
 | T-36 | `config.rollback` audit token vs. freeform config-version-history action string | No | Unchanged |
 | T-37 | "Manual feed sync" naming split across blocklist/SaaS/threat feeds | `ui_security.go` touched (64 lines, CHAOS-27/28) | Touch is unrelated CHAOS-27/28 code; the three cited literal action strings are byte-identical — unchanged |
 | T-38 | `ui_mcp.go`, `internal/mcp/adminapi/health.go`, `mcp_inventory.go`, `static/index.html` (`drifted_tools`/`review_required_tools`) | `static/index.html` touched (55 lines: CA/alerts/syslog GUI) | Zero MCP-panel hits in the touched lines; the three Go files are untouched — unchanged |
-| T-39 | `internal/mcp/rollout` (Production Qualification), QUAL-2/3/4 config/docs | QUAL-6.1 (`internal/mcpacceptance`) lands adjacent, referencing B/C by name and crystallizing D | **Evidence updated — see Findings below, not newly compounded by a fifth concept** |
+| T-39 | `internal/mcp/rollout` (Production Qualification), QUAL-2/3/4 config/docs | QUAL-6.1 (`internal/mcpacceptance`) extends the pre-existing `EnvSpec` (concept D, shipped one window earlier) with new fields directly holding concepts B and C | **Evidence updated — see Findings below, not newly compounded by a fifth concept; concept D did not newly crystallize this window** |
 
 ## Wave 2 — New territory audited this pass (58 commits since `d2c5a51`)
 
@@ -117,9 +138,9 @@ relation to T-21's unrelated `cp_version` overload.
 **QUAL-6.1 (`internal/mcpacceptance`) is a CI/test acceptance-harness package with no GUI/API/metric
 surface.** Its internal vocabulary (`operator_policy_digest`, `POLICY_SCENARIO_REQUIREMENT_UNSATISFIED`,
 `environment.bind_host_effective`, `ModeAuthoritative`/`ModeDev`) is self-contained and does not collide with
-anything else in the codebase. Its effect on T-39 (crystallizing concept D, cross-referencing B and C) is
-covered above and in the Findings section — worth tracking as evolving evidence, not a new standalone
-finding.
+anything else in the codebase. Its effect on T-39 (extending the pre-existing concept-D `EnvSpec` struct with
+new fields for concepts B and C) is covered above and in the Findings section — worth tracking as evolving
+evidence, not a new standalone finding.
 
 **No dependency-bump commit in this window (`getkin/kin-openapi`, `klauspost/compress`, `dgraph-io/badger`,
 `step-security/harden-runner`, `docker/login-action`) touches any product-facing terminology surface** —
@@ -140,25 +161,31 @@ verified each is a version bump only.
 - **Business concept C (QUAL-4, carried over from 08-07):** a node-local, Observe-only policy source file,
   never fleet-published and never Production-enforced (`qualification_policy_file`/`QualificationPolicyFile`,
   `mcp_policy.go`).
-- **Business concept D — crystallized this window:** as of 08-06/08-07 this was speculative doc language
-  ("a defined qualification environment," `docs/operator/mcp-qualification-telemetry.md:150`). This window's
-  QUAL-6.1 acceptance harness makes it real, shipped code: `internal/mcpacceptance/spec.go:74`'s doc comment
-  — *"EnvSpec is the operator-provided **qualification environment**"* — backs a real Go struct
-  (`EnvSpec`) that is constructed, validated, and consumed by the acceptance-test runner.
-- **What changed this window:** `EnvSpec` doesn't invent a new concept collision on its own — it explicitly
-  documents itself as consuming concept C's `QualificationPolicyFile` in "the SAME production format the
-  binary consumes at `mcp.gateway.qualification_policy_file`" and concept B's `Telemetry` as "the
-  operator-owned QUAL-3 durable-telemetry custody boundary." So this is reference, not renaming — no fifth
-  independent sense was introduced, and no GUI surface was touched (T-39's "no same-screen collision"
-  mitigating factor still holds, unchanged from 08-07). What did change: a single artifact now sits at the
-  intersection of three of the four senses of "qualification" (B, C, and the newly-real D), and layers a
-  fourth modifier ("authoritative" vs. "dev") on top to distinguish real-operator-infra acceptance runs from
-  fixture-backed ones. "Authoritative" itself reuses the codebase's existing generic, tolerated
-  source-of-truth sense of the word (`admin_settings.go`, `store.go`) and is not a new collision.
+- **Business concept D — pre-existing, NOT newly crystallized this window (corrected):** the first cut of
+  this report claimed `internal/mcpacceptance/spec.go`'s `EnvSpec` — *"the operator-provided **qualification
+  environment**"* — shipped as real code for the first time this window. That was wrong: `EnvSpec` and that
+  exact doc comment were introduced by commit `107b5e8`, which is 20 commits *before* this review's own
+  baseline (`d2c5a51`) — i.e. it shipped during the *prior* (08-06→08-07) window's QUAL-6 work, which the
+  08-07 report itself already listed as new that window. Concept D was already live, shipped Go before this
+  window began; the "speculative doc language" the 08-07 report cited
+  (`docs/operator/mcp-qualification-telemetry.md:150`, "a defined qualification environment") was a stale,
+  separate doc reference that the 08-07 pass had not yet connected to the already-shipped `EnvSpec` struct.
+- **What changed this window:** `EnvSpec` doesn't invent a new concept collision — this window's QUAL-6.1
+  work (commits `07322ca` through `86ec811`, reconcile commit `8562433`) extended the *pre-existing* struct
+  with new typed fields that directly hold concept C (`QualificationPolicyFile`, doc-commented as "the SAME
+  production format the binary consumes at `mcp.gateway.qualification_policy_file`") and concept B
+  (`Telemetry`, doc-commented as "the operator-owned QUAL-3 durable-telemetry custody boundary"). So this is
+  reference via struct field, not renaming — no fifth independent sense was introduced, and no GUI surface
+  was touched (T-39's "no same-screen collision" mitigating factor still holds, unchanged from 08-07). What
+  did change: this is the first window where concepts B, C, and D became co-resident as literal typed struct
+  fields (not just prose cross-references) inside one artifact, and the harness layers a fourth modifier
+  ("authoritative" vs. "dev") on top to distinguish real-operator-infra acceptance runs from fixture-backed
+  ones. "Authoritative" itself reuses the codebase's existing generic, tolerated source-of-truth sense of the
+  word (`admin_settings.go`, `store.go`) and is not a new collision.
 - **Why this still isn't fixed:** unchanged reasoning from 08-06/08-07 — this needs a real product-naming
   decision (what to call the QUAL-2/3 bootstrap fleet and the QUAL-4 node-local policy source; whether to
   reserve bare "Qualification" exclusively for the Production receipt gate), not a mechanical rename. The
-  acceptance harness adding a cross-referencing consumer of three senses at once is a signal that a naming
+  acceptance harness's `EnvSpec` now holding three senses as direct struct fields is a signal that a naming
   decision is becoming more valuable, not a reason to attempt one unilaterally in a terminology-review pass.
 - **Recommended canonical name / fix:** unchanged from 08-07 — rename the QUAL-2/3/4 config keys and
   operator-doc titles to an environment-scoped vocabulary (e.g. "staging"/"pilot"/"bootstrap fleet" for
@@ -166,8 +193,8 @@ verified each is a version bump only.
   "Qualification"/"qualification-locked" exclusively for the Production-promotion receipt gate, matching
   `internal/mcp/rollout`'s usage.
 - **Priority:** held at **Medium-High** (unchanged from 08-07 — the underlying design ambiguity has not
-  worsened by a new independent stream this window, but the fact that a cross-referencing consumer now spans
-  three senses at once means the eventual rename's blast radius keeps growing). **Migration risk:** Medium
+  worsened by a new independent stream this window, but the fact that one struct now holds three senses as
+  direct fields means the eventual rename's blast radius keeps growing). **Migration risk:** Medium
   (unchanged). **Est. PR size:** Small-Medium, needs a naming decision first (unchanged).
 
 ---
@@ -176,7 +203,7 @@ verified each is a version bump only.
 
 | Finding | Business concept | Status |
 |---|---|---|
-| T-9 | `exportedAt` → `capturedAt` rename | Open since 07-07. Unchanged. |
+| T-9 | `exportedAt` → `capturedAt` rename | Open since 07-07. Core finding unchanged; gained one new test-only consumer this window (`alerts_event_rename_import_test.go:47`). |
 | T-11 | `allow`/`deny` default-action vocabulary vs. 4-value `PolicyAction` | Open since 07-16. Unchanged. |
 | T-12 | Maintenance-Agent wire API "upgrade" vs. GUI/API "update"/"Dispatch" | Open since 07-16. Unchanged. |
 | T-13 residual | README/enterprise-doc "TLS Inspection" vs. in-app "SSL" | Open since 07-24 (soft/low). Unchanged. |
@@ -194,7 +221,7 @@ verified each is a version bump only.
 | T-36 | `config.rollback` audit token vs. freeform config-version-history action string | Open since 08-04. Unchanged. |
 | T-37 | "Manual feed sync" audit-action naming split across blocklist/SaaS/threat feeds | Open since 08-04. Unchanged. |
 | T-38 | `drifted_tools` vs. `review_required_tools` — same count, same API response, two names | Open since 08-06. Unchanged. |
-| T-39 | "Qualification" names four unrelated concepts in the same config/admin namespace | Open since 08-06, compounded 08-07. **Evidence updated this pass** — see Findings; concept D crystallized from speculative doc language into shipped, cross-referencing code, no fifth concept introduced. |
+| T-39 | "Qualification" names four unrelated concepts in the same config/admin namespace | Open since 08-06, compounded 08-07. **Evidence updated this pass** — see Findings; concept D was already shipped code before this window (corrected from this report's first cut), but concepts B/C/D became co-resident as direct struct fields in one artifact for the first time, no fifth concept introduced. |
 
 *T-40 is not listed here — fixed 08-07, see that report.*
 
@@ -242,11 +269,14 @@ Unchanged from 08-07 — no findings were added, fixed, or reprioritized this pa
 
 Terminology is **not** fully consistent. This pass re-confirmed, via a cited-line diff against every one of
 nineteen previously-open findings, that seventeen are unchanged across a 58-commit window, one (T-37) had its
-dependent file touched by unrelated code with the cited literals untouched, and one (T-39) had its evidence
-meaningfully updated — a previously-speculative fourth sense of "qualification" shipped as real,
-cross-referencing code — without introducing a fifth independent concept or a same-screen collision. No new
-terminology drift was found in a targeted read of every notable new-code area this window (CHAOS-27 alert
-dedup, CHAOS-28 CA fail-closed, CHAOS-47 auth-backend cooldown hardening, syslog panic-loss, config-snapshot
-diagnostics, MCP QUAL-6.1). Nothing crossed into same-day-fixable territory this pass — T-39 continues to
-require a product-naming decision, and every other open finding is unchanged from its prior assessment. No
+dependent file touched by unrelated code with the cited literals untouched, one (T-9) gained a minor new
+test-only dependency, and one (T-39) had its evidence updated — concepts B, C, and D became co-resident as
+direct typed struct fields in one artifact for the first time — without introducing a fifth independent
+concept or a same-screen collision. No new terminology drift was found in a targeted read of every notable
+new-code area this window (CHAOS-27 alert dedup, CHAOS-28 CA fail-closed, CHAOS-47 auth-backend cooldown
+hardening, syslog panic-loss, config-snapshot diagnostics, MCP QUAL-6.1). Nothing crossed into
+same-day-fixable territory this pass — T-39 continues to require a product-naming decision, and every other
+open finding is unchanged from its prior assessment. **Post-publish correction:** a PR reviewer identified
+that this report's first cut mis-timed T-39's concept D (claiming it crystallized this window when it in
+fact shipped one window earlier) and missed T-9's new test dependency; both are corrected in place above. No
 cosmetic or preference-driven renames are proposed.
