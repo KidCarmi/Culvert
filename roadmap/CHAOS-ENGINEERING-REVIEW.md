@@ -17,6 +17,36 @@ everything else is triaged below with a suggested PR and required tests for foll
 
 ## 0. Revision log
 
+**2026-08-11 — CHAOS-49 sweep (the multi-IdP registry auth path under IdP failure).**
+
+CHAOS-47 gave the LEGACY identity backends a three-part contract (an infrastructure failure is
+never cached as a verdict; an unreachable backend arms a half-open probe gate; both are reported
+on the `identity_backend` row) and closed by naming the newer **IdP-registry** path as having
+none of it. This sweep confirms that and finds the domain is worse than recorded in three ways
+that are not about introspection at all — all three in the **JWKS cache**, the component that
+distributes the public keys every ID-token validation depends on. (1) `refresh()` installed
+whatever it parsed, so an HTTP **200 carrying no usable keys** — a rate-limiter body, an edge
+stub, a full rotation to EC — **WIPED the key cache**, and because the wipe happens on the
+SUCCESS path it also destroys the explicit "return the stale key rather than failing" fallback
+that exists to survive exactly this: a silent, fleet-wide SSO outage with no log, metric, or
+health signal. (2) `resp.StatusCode` was never checked, so a JSON error body behind a 503 took
+the same wipe path — a 500 returning HTML was *safer* than a well-behaved JSON 503. (3) The
+refetch decision keyed on cache MEMBERSHIP, so an **unknown `kid` re-fetched the JWKS on every
+request, forever**; the kid is read from an UNVERIFIED token header, making this an
+unauthenticated amplifier (gain = number of configured providers) pointed at the customer's own
+IdP — and it fires without an attacker in any 2-IdP estate, because the dispatch loop asks every
+provider about every other provider's token. Plus (4) no single-flight: 40 concurrent misses ⇒
+40 fetches. And CHAOS-49 as recorded: (5) no introspection result cache — 20 authenticated
+requests ⇒ 20 round trips; (6) no probe gate and no health reporting — 11 requests against a
+DOWN IdP ⇒ 11 full round trips with `degraded=false`, `gatedDenials=0`, and, because providers
+are tried SEQUENTIALLY, up to N × 10 s of serialized dial timeouts per request holding a
+goroutine, a connection, and a per-IP slot. All six fixed, each reproduced empirically against
+`main` first. The load-bearing decision was to REUSE the CHAOS-47 primitives (`authProbeGate`,
+`noteAuthBackend*`, `cacheKey`, `errIntrospectClient`) rather than write a second dialect, so the
+new backend lands on the existing `identity_backend` row, metrics, and alert with no new
+operator vocabulary and no new config. See
+`docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-11.md`.
+
 **2026-08-09 — CHAOS-28 sweep (the Root CA across its lifecycle).**
 
 The inspection CA is the one control whose failure produces no error anywhere INSIDE the
