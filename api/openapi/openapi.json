@@ -1348,6 +1348,15 @@
       "GeoIPStatus": {
         "additionalProperties": true,
         "properties": {
+          "dbAgeDays": {
+            "description": "Days since dbBuildDate; omitted when no database is loaded.",
+            "type": "integer"
+          },
+          "dbBuildDate": {
+            "description": "MaxMind build timestamp embedded in the loaded .mmdb; omitted when no database is loaded.",
+            "format": "date-time",
+            "type": "string"
+          },
           "dbPath": {
             "type": "string"
           },
