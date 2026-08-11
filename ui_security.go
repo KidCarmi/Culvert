@@ -1365,10 +1365,15 @@ func apiGeoIPConfig(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleViewer) {
 		return
 	}
-	jsonOK(w, map[string]any{
+	resp := map[string]any{
 		"enabled": geoip.Enabled(),
 		"dbPath":  uiCfgGeoIPDB,
-	})
+	}
+	if built, ok := geoip.BuildTime(); ok && !built.IsZero() {
+		resp["dbBuildDate"] = built.Format(time.RFC3339)
+		resp["dbAgeDays"] = int(time.Since(built).Hours() / 24)
+	}
+	jsonOK(w, resp)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

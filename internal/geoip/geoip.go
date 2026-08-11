@@ -9,13 +9,15 @@ package geoip
 import (
 	"net"
 	"sync"
+	"time"
 
 	"github.com/oschwald/geoip2-golang"
 )
 
 var (
-	geoDBMu sync.RWMutex
-	geoDB   *geoip2.Reader // nil = disabled
+	geoDBMu    sync.RWMutex
+	geoDB      *geoip2.Reader // nil = disabled
+	geoDBBuilt time.Time      // MaxMind build timestamp of the loaded .mmdb; zero when not loaded
 )
 
 // InitGeoDB opens the GeoLite2-Country .mmdb file.
@@ -25,9 +27,11 @@ func InitGeoDB(path string) error {
 	if err != nil {
 		return err
 	}
+	built := time.Unix(int64(r.Metadata().BuildEpoch), 0).UTC()
 	geoDBMu.Lock()
 	old := geoDB
 	geoDB = r
+	geoDBBuilt = built
 	geoDBMu.Unlock()
 	if old != nil {
 		_ = old.Close()
@@ -41,6 +45,21 @@ func Enabled() bool {
 	ok := geoDB != nil
 	geoDBMu.RUnlock()
 	return ok
+}
+
+// BuildTime returns the loaded database's MaxMind build timestamp — embedded
+// in the .mmdb file's own metadata, not the file's mtime — and whether a
+// database is currently loaded. Culvert never auto-refreshes this file, and
+// GeoLite2 country data degrades in accuracy over time, so callers use this
+// to surface staleness to the operator (there is otherwise no signal that
+// the loaded database predates a country's IP allocations).
+func BuildTime() (built time.Time, ok bool) {
+	geoDBMu.RLock()
+	defer geoDBMu.RUnlock()
+	if geoDB == nil {
+		return time.Time{}, false
+	}
+	return geoDBBuilt, true
 }
 
 type geoResult struct {

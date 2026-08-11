@@ -2640,6 +2640,10 @@ Firefox (all platforms):
               <span class="info-label">Database Path</span>
               <span class="info-val" id="geoip-path" style="font-size:.78rem;word-break:break-all">-</span>
             </div>
+            <div class="info-item" style="flex:1;min-width:140px">
+              <span class="info-label">Database Age</span>
+              <span class="info-val" id="geoip-age" style="color:var(--muted)">-</span>
+            </div>
           </div>
         </div>
       </div>
@@ -10206,6 +10210,17 @@ async function loadGeoIPStatus() {
     setText('geoip-status', g.enabled ? 'Enabled' : 'Disabled');
     document.getElementById('geoip-status').style.color = g.enabled ? 'var(--green)' : 'var(--muted)';
     setText('geoip-path', g.dbPath || '(not configured)');
+    const ageEl = document.getElementById('geoip-age');
+    if (typeof g.dbAgeDays === 'number') {
+      // MaxMind GeoLite2 country data degrades in accuracy as IP allocations
+      // shift; Culvert never auto-refreshes the file, so flag a stale build.
+      const stale = g.dbAgeDays > 90;
+      ageEl.textContent = g.dbAgeDays + ' day(s) (built ' + g.dbBuildDate.slice(0, 10) + ')' + (stale ? ' - stale, consider updating' : '');
+      ageEl.style.color = stale ? 'var(--warn,#f59e0b)' : 'var(--muted)';
+    } else {
+      ageEl.textContent = '-';
+      ageEl.style.color = 'var(--muted)';
+    }
   } catch(_) {}
 }
 
