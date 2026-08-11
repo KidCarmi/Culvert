@@ -231,7 +231,10 @@ func scanHTTPResponseBody(w http.ResponseWriter, r *http.Request, resp *http.Res
 		return false, nil
 	}
 
-	buffered, readErr := io.ReadAll(io.LimitReader(resp.Body, globalSecScanner.MaxBytes()))
+	// The ContentLength > MaxBytes case already returned above, so the
+	// declaration here is either absent (-1, chunked) or within the limit; it
+	// sizes the buffer only — the read still runs to EOF or to the limit.
+	buffered, readErr := readScanBuffer(resp.Body, globalSecScanner.MaxBytes(), resp.ContentLength)
 	if readErr != nil {
 		// Fail closed (CHAOS-17): before this fix the error path returned
 		// false, silently forwarding the response unscanned AND truncated
