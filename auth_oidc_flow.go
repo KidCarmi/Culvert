@@ -248,7 +248,7 @@ func (j *jwksCache) refreshOnce() error {
 func (j *jwksCache) refresh() error {
 	ctx, cancel := context.WithTimeout(context.Background(), jwksFetchTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, j.jwksURI, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, j.jwksURI, http.NoBody)
 	if err != nil {
 		return fmt.Errorf("jwks request: %w", err)
 	}
