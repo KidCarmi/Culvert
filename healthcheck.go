@@ -148,15 +148,39 @@ func appendStateFileChecks(checks map[string]*readinessCheck) {
 // — which still work — down with it. An operator who wants those nodes ejected
 // opts in via /ready?strict=1.
 //
-// The detail is a FIXED string. /ready is served unauthenticated on the proxy
-// port, and the underlying error names the CA's exact NotAfter — an
-// unauthenticated "this gateway's inspection CA expired at T" is a fingerprint
-// of a security-degraded node. The full detail stays in the logs, the alert,
-// /healthz (internal) and the role-gated admin API.
+// Neither failing detail is served raw. /ready is served unauthenticated on
+// the PROXY port (routeProxyListenerBuiltin), i.e. to every client on the
+// network an SWG sits in front of, and both underlying causes carry material a
+// caller on that network has no business reading:
+//
+//   - the unusable-CA error names the CA's exact NotAfter, so an
+//     unauthenticated "this gateway's inspection CA expired at T" identifies a
+//     security-degraded node and dates the window;
+//   - the load-failure detail is built by noteSSLInspectionUnavailable as
+//     "Root CA load/init failed for <path>: <err>", so it carries the ABSOLUTE
+//     bundle path plus the OS error. Raw filesystem paths are what the
+//     project's standing guardrail (TestApiDiagnostics_NoSensitiveValues)
+//     forbids even on the VIEWER-role diagnostics surface, and this one is
+//     unauthenticated — it named the /data layout to anyone who could reach
+//     the proxy port. Here the CAUSE is kept and only the path is reduced to a
+//     base name (redactWritePath, the storage_health.go barrier), because the
+//     cause is what CHAOS-06 put on this row and it is not itself sensitive:
+//     "bad passphrase" survives, "/data/ca.bundle" does not.
+//
+// caRuntime.path is the redaction anchor: loadRootCA assigns it from the same
+// cfg.Path that initInspectionCA just failed on, so it is populated well before
+// any probe is served. With no bundle path configured the message carries no
+// path either, and redactWritePath is a no-op — the two conditions coincide.
+//
+// The unreduced detail still reaches the logs, the ca_load_failed alert, the
+// support bundle, and the role-gated admin API.
 func appendCAReadinessCheck(checks map[string]*readinessCheck) {
 	switch {
 	case sslInspectionLoadFailure() != "":
-		checks["ca"] = &readinessCheck{Status: "fail", Detail: sslInspectionLoadFailure()}
+		checks["ca"] = &readinessCheck{
+			Status: "fail",
+			Detail: redactWritePath(sslInspectionLoadFailure(), caRuntime.path),
+		}
 	case !certMgr.Ready():
 		// Not configured yet — no row at all (pre-CHAOS-06 baseline behavior).
 	case certMgr.Usable() != nil:

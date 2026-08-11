@@ -158,8 +158,29 @@ func recordCAUsabilityFault(safeReason string, engineRefusal bool) {
 // could not persist it (register row CA-2). Always logged and always alerted:
 // unlike the per-connection fault above it fires at most once per rotation
 // attempt (a 24h cadence), so it is bounded by construction and needs no gate.
+//
+// Two barriers are applied ONCE here, where the value enters shared state, so
+// every downstream sink (log line, alert detail, /api/ca/status) is fed clean
+// text and a future consumer of the record cannot reintroduce the hazard —
+// the same recording-boundary discipline noteStorageWriteFailure established:
+//
+//  1. CWE-117 — sanitizeLog is the project-standard control-character barrier.
+//  2. Path redaction — `reason` is a SaveCA error, and SaveCA wraps
+//     fileutil.AtomicWrite, whose text embeds the absolute bundle path AND the
+//     temp file beside it ("atomic write /data/ca.bundle: create temp: open
+//     /data/ca.bundle.tmp.24: permission denied"). It surfaces on
+//     /api/ca/status, which is a VIEWER-role route, and raw filesystem paths on
+//     a viewer surface are exactly what TestApiDiagnostics_NoSensitiveValues
+//     forbids. Only base names survive; the file and the errno — the
+//     operator-actionable part — are preserved.
+//
+// caRuntime.path is the right anchor for BOTH producers: rootca_startup.go
+// assigns caRuntime.path = cfg.Path and passes that same cfg.Path to
+// StartCAAutoRotation, so the auto-rotation observer and persistRotatedCA
+// always fail on the one configured bundle. With no bundle path configured
+// neither producer fires, and redactWritePath is a no-op on "" regardless.
 func noteCARotationPersistFailure(reason string) {
-	safe := sanitizeLog(reason)
+	safe := sanitizeLog(redactWritePath(reason, caRuntime.path))
 	now := time.Now()
 	caUsability.mu.Lock()
 	caUsability.persistFailures++
