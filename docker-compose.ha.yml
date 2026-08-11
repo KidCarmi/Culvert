@@ -81,6 +81,11 @@ services:
       - CP_CA=${CP_CA:-}             # e.g. /certs/grpc-ca.pem
       - CULVERT_CA_PASSPHRASE=${CULVERT_CA_PASSPHRASE:-}
       - CULVERT_LOG_PASSPHRASE=${CULVERT_LOG_PASSPHRASE:-} # encrypts saved request logs (/data/logstore); falls back to the CA passphrase
+      # Session-cookie HMAC signing key — REQUIRED on every node in this
+      # multi-node/HA file so admin sessions stay valid cluster-wide
+      # (docs/OPERATIONS.md §3); leave unset to let each node generate its
+      # own (sessions will not carry over between nodes/restarts).
+      - CULVERT_SESSION_SECRET=${CULVERT_SESSION_SECRET:-}
     command: >
       sh -c '
         ARGS="-port 8080
