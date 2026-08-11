@@ -879,6 +879,11 @@ func (p *OIDCFlowProvider) introspect(token string) (identity *Identity, active 
 		if isIntrospectClientError(resp.StatusCode) {
 			return nil, false, nil, fmt.Errorf("%w: HTTP %d", errIntrospectClient, resp.StatusCode)
 		}
+		// A 401 is a provider-wide client-credential fault, not a token verdict —
+		// it arms the gate and is reported as an outage. See isIntrospectClientError.
+		if resp.StatusCode == http.StatusUnauthorized {
+			return nil, false, nil, fmt.Errorf("%w", errIntrospectClientAuth)
+		}
 		return nil, false, nil, fmt.Errorf("introspection endpoint returned HTTP %d", resp.StatusCode)
 	}
 

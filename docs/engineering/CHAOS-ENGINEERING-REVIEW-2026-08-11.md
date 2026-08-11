@@ -5,8 +5,9 @@ identity-provider failure — JWKS key distribution, RFC 7662 introspection, and
 per-request dispatch loop that fans a single credential across every enabled provider.
 **Register items:** **CHAOS-49** (open since 2026-08-03, marked "next run's top candidate")
 · adds and closes three previously unrecorded defects in the JWKS cache.
-**Verdict:** six confirmed defects, all fixed, every one reproduced empirically against
-`main` before the fix was written.
+**Verdict:** seven confirmed defects, all fixed. Six were reproduced empirically against
+`main` before the fix was written; the seventh (FS-7) was found by review *of the fix* and
+is recorded here because it is the same silent-failure shape.
 
 ---
 
@@ -33,6 +34,7 @@ from ordinary traffic and two of them reachable **without any credential**.
 | 4 | Concurrent misses produce **N concurrent fetches** | Thundering herd | no single-flight |
 | 5 | Introspection has **no result cache** | Latency + IdP load, per request per provider | CHAOS-49 as recorded |
 | 6 | An unreachable IdP costs a **full dial timeout per request, per provider**, and is invisible | Recovery failure + silent failure | CHAOS-49 as recorded — no probe gate, no health reporting, infra failure indistinguishable from "token invalid" |
+| 7 | A rejected **client credential** (HTTP 401) classified as a caller/token error | Silent failure | the shared 4xx classifier could not distinguish "your token is bad" from "*our* client secret is bad" — RFC 7662 can (§2.2 vs §2.3) |
 
 Defects 1 and 2 are the most serious finding in this review and were **not** in the register.
 They are a *silent, self-inflicted, fleet-wide outage of browser SSO* triggered by a transient
@@ -211,6 +213,42 @@ outage.
   it, holding a recovered IdP in a permanent outage. The same defect was found and fixed on
   the LDAP and legacy-OIDC legs in CHAOS-47; it would have been reintroduced here verbatim.)
 
+### FS-7 — A rejected client credential looked like a caller error (review follow-up)
+
+Found by Codex review on PR #1117, on the fix itself, and it is the same
+silent-failure shape the rest of this review is about — so it is recorded here rather
+than deferred.
+
+`isIntrospectClientError` classified **every** 4xx except 429/408 as a caller/token-side
+rejection. That is right for a 400 and wrong for a **401**, and RFC 7662 is what makes the
+difference crisp:
+
+- §2.2 — an unknown or inactive **token** is reported as HTTP **200** with `active:false`.
+- §2.3 — a **401** means the authorization server rejected *our* client credentials: the
+  `client_id`/`client_secret` this node authenticates the introspection call with.
+
+The caller's token travels in the POST body, so it **cannot** provoke a 401. A 401 is
+therefore never caller-attributable — it is a **provider-wide** fault (a rotated secret, a
+mistyped one, a revoked introspection grant) under which *every* token fails.
+
+Classified as a caller error, that produced exactly the pattern this review exists to catch:
+100% of authentications failing, one full round trip burned per request because 4xx is
+deliberately not cached, and the `identity_backend` contract row reporting **healthy**
+throughout. A rotated client secret is an ordinary operational event, not an exotic one.
+
+**Fix.** 401 joins 429/408 outside the caller-error class, so it arms the gate and is
+reported as an outage, carrying a cause string that names the remediation
+(`errIntrospectClientAuth`). The defect was in the **shared** classifier, so the legacy
+backend had it too — both legs are fixed together, which is the point of the two paths
+sharing one contract.
+
+**403 is deliberately left in the caller-error bucket.** RFC 7662 does not specify it, so a
+non-conformant IdP could plausibly emit it per-token — and treating an attacker-reachable
+status as provider-wide would hand an unauthenticated caller a lever to arm the gate for
+everyone. The asymmetry decides it: mis-classifying 401 costs observability, mis-classifying
+403 would cost availability. Pinned per-status by
+`TestIsIntrospectClientError_StatusClassification`.
+
 ---
 
 ## Risk Matrix
@@ -223,6 +261,7 @@ outage.
 | FS-4 | No single-flight on refresh | Medium | Medium — burst amplification | P2 | **FIXED** |
 | FS-5 | No introspection cache | **High** (every request) | Medium — latency + IdP load | P2 | **FIXED** |
 | FS-6 | No probe gate / no health reporting | Medium | **High** — N × 10 s per request, invisible | P1 | **FIXED** |
+| FS-7 | A rejected client credential (401) classified as a caller error | Medium | **High** — 100% auth failure, per-request round trip, contract row green | P1 | **FIXED** (review follow-up) |
 
 ---
 
@@ -301,6 +340,8 @@ All in `auth_oidc_flow_chaos_test.go`, and all corresponding to a proof that rep
 | `TestOIDCFlow_InfraFailureIsNotCachedAsADenial` | the recovery half — a valid token works again once the IdP answers |
 | `TestOIDCFlow_IntrospectionClientErrorDoesNotArmTheGate` | a 4xx must not arm the gate, and must clear a prior cooldown |
 | `TestOIDCFlow_InactiveTokenVerdictIsCached` | the converse — an authoritative verdict *is* cacheable |
+| `TestOIDCFlow_ClientCredentialRejectionIsProviderWide` | FS-7 — a 401 arms the gate, is reported, and names the remediation |
+| `TestIsIntrospectClientError_StatusClassification` | FS-7 — per-status: 400/403/404 caller-side; 401/408/429/5xx provider-side |
 | `TestOIDCFlow_ForeignProviderTokenDoesNotStormJWKS` | the end-to-end multi-IdP shape: 25 requests carrying another provider's token ⇒ ≤1 JWKS fetch |
 
 The gate tests drive the cooldown from an injected clock (`gate.now`), matching the

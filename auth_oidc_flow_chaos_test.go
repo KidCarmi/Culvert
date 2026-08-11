@@ -397,6 +397,77 @@ func TestOIDCFlow_IntrospectionClientErrorDoesNotArmTheGate(t *testing.T) {
 	}
 }
 
+// FS-7 — a 401 is a PROVIDER-WIDE client-credential fault, not a token verdict.
+//
+// RFC 7662 §2.2 reports an unknown/inactive token as HTTP 200 + active:false,
+// and §2.3 reserves 401 for the authorization server rejecting the credentials
+// the introspection call itself authenticates with. A caller's token rides in
+// the POST body and cannot provoke it. So a rotated or mistyped client secret
+// fails EVERY token — and, classified as a caller error, did so while
+// re-introspecting on every request with identity_backend reporting healthy.
+// (Found by Codex review on PR #1117; the same defect existed on the legacy leg
+// and is fixed in the shared classifier.)
+func TestOIDCFlow_ClientCredentialRejectionIsProviderWide(t *testing.T) {
+	resetAuthBackendHealthForTest()
+
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		http.Error(w, "invalid_client", http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	p := oidcFlowIntrospectProvider("idp-a", srv.URL)
+
+	if _, ok := p.ResolveIdentity("alice", "token-abc"); ok {
+		t.Fatal("authenticated despite rejected client credentials")
+	}
+	if !p.gate.gated() {
+		t.Fatal("a 401 (our client credentials rejected) did not arm the gate — " +
+			"every request re-introspects for the whole outage")
+	}
+	for i := 0; i < 10; i++ {
+		if _, ok := p.ResolveIdentity("bob", "token-xyz"); ok {
+			t.Fatal("authenticated while the gate was armed")
+		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("11 requests against a 401-ing endpoint produced %d round trips, want 1", got)
+	}
+
+	snap := authBackendHealthStatus()
+	if !snap.Degraded {
+		t.Fatal("a provider-wide client-credential outage is not reported on identity_backend")
+	}
+	if !strings.Contains(snap.Err, "client_id/client_secret") {
+		t.Fatalf("cause text should name the remediation, got %q", snap.Err)
+	}
+}
+
+// The converse, and the reason 403 is deliberately left in the caller-error
+// bucket: only statuses that a caller's token cannot provoke may arm the
+// provider-wide gate.
+func TestIsIntrospectClientError_StatusClassification(t *testing.T) {
+	for _, tc := range []struct {
+		code       int
+		callerSide bool
+		why        string
+	}{
+		{http.StatusBadRequest, true, "400 can be provoked by a malformed token parameter"},
+		{http.StatusForbidden, true, "403 is unspecified by RFC 7662 and could be emitted per-token"},
+		{http.StatusNotFound, true, "404 is a config/caller-side rejection"},
+		{http.StatusUnauthorized, false, "401 is RFC 7662 §2.3 — OUR client credentials, provider-wide"},
+		{http.StatusTooManyRequests, false, "429 is a transient back-off signal"},
+		{http.StatusRequestTimeout, false, "408 is a transient back-off signal"},
+		{http.StatusInternalServerError, false, "5xx is an endpoint fault"},
+		{http.StatusBadGateway, false, "5xx is an endpoint fault"},
+	} {
+		if got := isIntrospectClientError(tc.code); got != tc.callerSide {
+			t.Errorf("isIntrospectClientError(%d) = %v, want %v — %s", tc.code, got, tc.callerSide, tc.why)
+		}
+	}
+}
+
 // An authoritative "this token is inactive" IS cacheable — that is the whole
 // point of splitting infrastructure failure from a verdict.
 func TestOIDCFlow_InactiveTokenVerdictIsCached(t *testing.T) {
