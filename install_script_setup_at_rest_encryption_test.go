@@ -116,3 +116,63 @@ func TestInstallScript_SetupAtRestEncryption_AcceptsStrongPassphrase(t *testing.
 		t.Fatalf(".env does not contain the expected passphrase; .env content:\n%s", envContent)
 	}
 }
+
+// TestInstallScript_SetupAtRestEncryption_FreshDeployWithPriorLogPassphraseStillEncryptsCA
+// proves that a FRESH deployment (is_fresh_deployment == true) whose .env
+// already carries a CULVERT_LOG_PASSPHRASE — e.g. exported by an automated/
+// scripted install, or left over from an interrupted prior run — still ends
+// up with the SSL-inspection Root CA private key encrypted at rest.
+//
+// This uses the REAL secret_already_set() (not stubbed), because the bug
+// this guards against lives in how setup_at_rest_encryption()'s early-return
+// guard combines secret_already_set for BOTH variables: on a fresh
+// deployment with only CULVERT_LOG_PASSPHRASE pre-set, the guard used to
+// treat encryption as "already configured" and return immediately, printing
+// a message that implies encryption is configured while silently leaving
+// CULVERT_CA_PASSPHRASE unset — so the CA private key generated on this
+// fresh install is stored unencrypted, with no warning at all (roadmap:
+// CA-at-rest encryption is a documented security surface, see CLAUDE.md).
+func TestInstallScript_SetupAtRestEncryption_FreshDeployWithPriorLogPassphraseStillEncryptsCA(t *testing.T) {
+	setupFn := extractShellFunctionBraceAware(t, "scripts/install.sh", "setup_at_rest_encryption")
+	envPutFn := extractShellFunction(t, "scripts/install.sh", "env_put")
+	secretFn := extractShellFunction(t, "scripts/install.sh", "secret_already_set")
+
+	dir := t.TempDir()
+	envFile := filepath.Join(dir, ".env")
+	const priorLogPass = "already-set-log-passphrase-1234"
+	if err := os.WriteFile(envFile, []byte("CULVERT_LOG_PASSPHRASE="+priorLogPass+"\n"), 0o600); err != nil {
+		t.Fatalf("seed .env: %v", err)
+	}
+
+	stubs := `
+info() { :; }
+warn() { :; }
+error() { echo "ERROR: $*" >&2; exit 7; }
+is_fresh_deployment() { return 0; }
+` + "INSTALL_DIR=" + dir + "\n"
+
+	script := stubs + secretFn + "\n" + envPutFn + "\n" + setupFn + "\n" + "setup_at_rest_encryption\n"
+
+	cmd := exec.CommandContext(t.Context(), "bash", "-c", script) // #nosec G204 -- fixed test script content, not external/user input
+	cmd.Stdin = bytes.NewReader(nil)                              // non-interactive: stdin is not a TTY
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("setup_at_rest_encryption failed: %v\n%s", err, out)
+	}
+
+	got, rerr := os.ReadFile(envFile)
+	if rerr != nil {
+		t.Fatalf("read %s: %v", envFile, rerr)
+	}
+	envContent := string(got)
+
+	if !strings.Contains(envContent, "CULVERT_LOG_PASSPHRASE="+priorLogPass) {
+		t.Fatalf("the pre-existing CULVERT_LOG_PASSPHRASE was lost/changed; .env content:\n%s", envContent)
+	}
+	if !strings.Contains(envContent, "CULVERT_CA_PASSPHRASE=") {
+		t.Fatalf("fresh deployment left the SSL-inspection CA private key UNENCRYPTED at rest: "+
+			"CULVERT_LOG_PASSPHRASE was already configured, so setup_at_rest_encryption() bailed out "+
+			"entirely without ever setting CULVERT_CA_PASSPHRASE. output:\n%s\n.env content:\n%s",
+			out, envContent)
+	}
+}
