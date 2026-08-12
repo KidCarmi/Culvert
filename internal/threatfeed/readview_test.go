@@ -16,140 +16,146 @@ import (
 //     mutator that forgets leaves the request path serving a stale generation —
 //     a threat entry that was synced but never blocks, or an allowlist entry the
 //     admin removed that keeps suppressing hits. That is a silent security
-//     failure, not a performance one, so it is pinned per mutator below.
+//     failure, not a performance one, so it is pinned per mutator by the
+//     TestReadView_Republishes_* family below.
 //   - NO IN-PLACE MUTATION. A map reachable from a published view is read
 //     without any lock, so writing into it is a data race. The writers that used
 //     to edit in place (allowlist add/remove, SeedForTest) copy-then-swap; the
 //     race detector is the enforcement, via TestReadView_ConcurrentReadersAndWriters.
 
-// TestReadView_EveryMutatorRepublishes walks every method that changes
-// enabled / urls / domains / domainAllowlist and asserts the change is visible
-// through the lock-free lookups. Adding a mutator without a publishLocked call
-// fails here.
-func TestReadView_EveryMutatorRepublishes(t *testing.T) {
-	t.Run("Init enables", func(t *testing.T) {
-		tf := New()
-		if tf.Enabled() {
-			t.Fatal("New() feed reports enabled")
-		}
-		tf.Init("", time.Hour)
-		if !tf.Enabled() {
-			t.Error("Init did not republish the enabled flag")
-		}
-	})
+// The TestReadView_Republishes_* family is the per-mutator publication wall:
+// between them they cover every method that changes enabled / urls / domains /
+// domainAllowlist, and each asserts the change through the LOCK-FREE lookups
+// rather than through the field. Adding a mutator without a publishLocked call
+// fails whichever of these covers it.
+//
+// They are separate top-level functions rather than subtests of one table so
+// each stays small (gocognit) and names its own mutator in the failure output.
 
-	t.Run("applySync installs tables", func(t *testing.T) {
-		tf := New()
-		tf.Init("", time.Hour)
-		tf.applySync(
-			map[string]entry{"http://fresh.example/x": {Source: sourceURLhaus}},
-			map[string]entry{"fresh.example": {Source: sourceURLhaus}},
-			nil, map[string]bool{sourceURLhaus: true, sourceOpenPhish: true}, time.Now(),
-		)
-		if mal, _ := tf.CheckURL("http://fresh.example/x"); !mal {
-			t.Error("applySync did not republish urls")
-		}
-		if mal, _ := tf.CheckDomain("fresh.example"); !mal {
-			t.Error("applySync did not republish domains")
-		}
-	})
+// viewFeed returns an enabled, persistence-free feed carrying one threat domain.
+func viewFeed(t *testing.T, threatDomain string) *Feed {
+	t.Helper()
+	tf := New()
+	tf.Init("", time.Hour)
+	if threatDomain != "" {
+		tf.SeedForTest(nil, map[string]string{threatDomain: sourceURLhaus})
+	}
+	return tf
+}
 
-	t.Run("ImportFeedData installs tables", func(t *testing.T) {
-		tf := New()
-		tf.Init("", time.Hour)
-		tf.ImportFeedData(
-			map[string]int64{"http://cp.example/mal": time.Now().Unix()},
-			map[string]int64{"cp.example": time.Now().Unix()},
-		)
-		if mal, _ := tf.CheckDomain("cp.example"); !mal {
-			t.Error("ImportFeedData did not republish domains")
-		}
-	})
+func TestReadView_Republishes_Init(t *testing.T) {
+	tf := New()
+	if tf.Enabled() {
+		t.Fatal("New() feed reports enabled")
+	}
+	tf.Init("", time.Hour)
+	if !tf.Enabled() {
+		t.Error("Init did not republish the enabled flag")
+	}
+}
 
-	t.Run("SeedForTest installs tables", func(t *testing.T) {
-		tf := New()
-		tf.Init("", time.Hour)
-		tf.SeedForTest(nil, map[string]string{"seeded.example": sourceURLhaus})
-		if mal, _ := tf.CheckDomain("seeded.example"); !mal {
-			t.Error("SeedForTest did not republish domains")
-		}
-	})
+func TestReadView_Republishes_ApplySync(t *testing.T) {
+	tf := viewFeed(t, "")
+	tf.applySync(
+		map[string]entry{"http://fresh.example/x": {Source: sourceURLhaus}},
+		map[string]entry{"fresh.example": {Source: sourceURLhaus}},
+		nil, map[string]bool{sourceURLhaus: true, sourceOpenPhish: true}, time.Now(),
+	)
+	if mal, _ := tf.CheckURL("http://fresh.example/x"); !mal {
+		t.Error("applySync did not republish urls")
+	}
+	if mal, _ := tf.CheckDomain("fresh.example"); !mal {
+		t.Error("applySync did not republish domains")
+	}
+}
 
-	// The allowlist mutators are the security-critical half: a stale view here
-	// means the admin's exemption edit does not take effect on the request path.
-	t.Run("allowlist add then remove", func(t *testing.T) {
-		tf := New()
-		tf.Init("", time.Hour)
-		tf.SeedForTest(nil, map[string]string{"threat.example": sourceURLhaus})
-		if mal, _ := tf.CheckDomain("threat.example"); !mal {
-			t.Fatal("seeded threat domain does not block")
-		}
+func TestReadView_Republishes_ImportFeedData(t *testing.T) {
+	tf := viewFeed(t, "")
+	tf.ImportFeedData(
+		map[string]int64{"http://cp.example/mal": time.Now().Unix()},
+		map[string]int64{"cp.example": time.Now().Unix()},
+	)
+	if mal, _ := tf.CheckDomain("cp.example"); !mal {
+		t.Error("ImportFeedData did not republish domains")
+	}
+}
 
-		if err := tf.AddDomainAllowlist("threat.example"); err != nil {
-			t.Fatalf("AddDomainAllowlist: %v", err)
-		}
-		if mal, _ := tf.CheckDomain("threat.example"); mal {
-			t.Error("AddDomainAllowlist did not republish — the exemption is not in force on the request path")
-		}
+func TestReadView_Republishes_SeedForTest(t *testing.T) {
+	tf := viewFeed(t, "seeded.example")
+	if mal, _ := tf.CheckDomain("seeded.example"); !mal {
+		t.Error("SeedForTest did not republish domains")
+	}
+}
 
-		if err := tf.RemoveDomainAllowlist("threat.example"); err != nil {
-			t.Fatalf("RemoveDomainAllowlist: %v", err)
-		}
-		if mal, _ := tf.CheckDomain("threat.example"); !mal {
-			t.Error("RemoveDomainAllowlist did not republish — a revoked exemption still suppresses the block")
-		}
-	})
+// The allowlist mutators are the security-critical half: a stale view here means
+// the admin's exemption edit does not take effect on the request path — either a
+// granted exemption that still blocks, or a REVOKED one that still suppresses.
+func TestReadView_Republishes_AllowlistAddRemove(t *testing.T) {
+	tf := viewFeed(t, "threat.example")
+	if mal, _ := tf.CheckDomain("threat.example"); !mal {
+		t.Fatal("seeded threat domain does not block")
+	}
 
-	t.Run("SetDomainAllowlist replaces", func(t *testing.T) {
-		tf := New()
-		tf.Init("", time.Hour)
-		tf.SeedForTest(nil, map[string]string{"threat.example": sourceURLhaus})
-		if err := tf.SetDomainAllowlist([]string{"threat.example"}); err != nil {
-			t.Fatalf("SetDomainAllowlist: %v", err)
-		}
-		if mal, _ := tf.CheckDomain("threat.example"); mal {
-			t.Error("SetDomainAllowlist did not republish")
-		}
-		if err := tf.SetDomainAllowlist(nil); err != nil {
-			t.Fatalf("SetDomainAllowlist(nil): %v", err)
-		}
-		if mal, _ := tf.CheckDomain("threat.example"); !mal {
-			t.Error("SetDomainAllowlist(nil) did not republish the cleared allowlist")
-		}
-	})
+	if err := tf.AddDomainAllowlist("threat.example"); err != nil {
+		t.Fatalf("AddDomainAllowlist: %v", err)
+	}
+	if mal, _ := tf.CheckDomain("threat.example"); mal {
+		t.Error("AddDomainAllowlist did not republish — the exemption is not in force on the request path")
+	}
 
-	t.Run("SetEnabledForTest toggles", func(t *testing.T) {
-		tf := New()
-		tf.Init("", time.Hour)
-		tf.SeedForTest(nil, map[string]string{"threat.example": sourceURLhaus})
-		tf.SetEnabledForTest(false)
-		if tf.Enabled() {
-			t.Error("SetEnabledForTest(false) did not republish")
-		}
-		if mal, _ := tf.CheckDomain("threat.example"); mal {
-			t.Error("a disabled feed still blocked")
-		}
-		tf.SetEnabledForTest(true)
-		if mal, _ := tf.CheckDomain("threat.example"); !mal {
-			t.Error("SetEnabledForTest(true) did not republish")
-		}
-	})
+	if err := tf.RemoveDomainAllowlist("threat.example"); err != nil {
+		t.Fatalf("RemoveDomainAllowlist: %v", err)
+	}
+	if mal, _ := tf.CheckDomain("threat.example"); !mal {
+		t.Error("RemoveDomainAllowlist did not republish — a revoked exemption still suppresses the block")
+	}
+}
 
-	t.Run("loadFromDisk installs tables", func(t *testing.T) {
-		dir := t.TempDir()
-		src := New()
-		src.Init(dir+"/feed.json", time.Hour)
-		src.SeedForTest(nil, map[string]string{"persisted.example": sourceURLhaus})
-		if err := src.saveToDisk(); err != nil {
-			t.Fatalf("saveToDisk: %v", err)
-		}
+func TestReadView_Republishes_SetDomainAllowlist(t *testing.T) {
+	tf := viewFeed(t, "threat.example")
+	if err := tf.SetDomainAllowlist([]string{"threat.example"}); err != nil {
+		t.Fatalf("SetDomainAllowlist: %v", err)
+	}
+	if mal, _ := tf.CheckDomain("threat.example"); mal {
+		t.Error("SetDomainAllowlist did not republish")
+	}
+	if err := tf.SetDomainAllowlist(nil); err != nil {
+		t.Fatalf("SetDomainAllowlist(nil): %v", err)
+	}
+	if mal, _ := tf.CheckDomain("threat.example"); !mal {
+		t.Error("SetDomainAllowlist(nil) did not republish the cleared allowlist")
+	}
+}
 
-		dst := New()
-		dst.Init(dir+"/feed.json", time.Hour) // Init calls loadFromDisk
-		if mal, _ := dst.CheckDomain("persisted.example"); !mal {
-			t.Error("loadFromDisk did not republish domains")
-		}
-	})
+func TestReadView_Republishes_SetEnabled(t *testing.T) {
+	tf := viewFeed(t, "threat.example")
+	tf.SetEnabledForTest(false)
+	if tf.Enabled() {
+		t.Error("SetEnabledForTest(false) did not republish")
+	}
+	if mal, _ := tf.CheckDomain("threat.example"); mal {
+		t.Error("a disabled feed still blocked")
+	}
+	tf.SetEnabledForTest(true)
+	if mal, _ := tf.CheckDomain("threat.example"); !mal {
+		t.Error("SetEnabledForTest(true) did not republish")
+	}
+}
+
+func TestReadView_Republishes_LoadFromDisk(t *testing.T) {
+	dir := t.TempDir()
+	src := New()
+	src.Init(dir+"/feed.json", time.Hour)
+	src.SeedForTest(nil, map[string]string{"persisted.example": sourceURLhaus})
+	if err := src.saveToDisk(); err != nil {
+		t.Fatalf("saveToDisk: %v", err)
+	}
+
+	dst := New()
+	dst.Init(dir+"/feed.json", time.Hour) // Init calls loadFromDisk
+	if mal, _ := dst.CheckDomain("persisted.example"); !mal {
+		t.Error("loadFromDisk did not republish domains")
+	}
 }
 
 // TestReadView_StructLiteralFeedResolves covers the lazy branch of readState:
