@@ -3882,6 +3882,7 @@ Firefox (all platforms):
               <div class="card"><div class="card-label">Fail mode</div><div id="cdr-ov-failmode" class="card-value">-</div></div>
               <div class="card"><div class="card-label">Max file size</div><div id="cdr-ov-maxsize" class="card-value">-</div></div>
               <div class="card"><div class="card-label">Client active</div><div id="cdr-ov-active" class="card-value">-</div></div>
+              <div class="card"><div class="card-label">Last probe</div><div id="cdr-ov-lastprobe" class="card-value">-</div></div>
             </div>
           </div>
         </div>
@@ -10711,9 +10712,25 @@ function cdrRenderOverview() {
   set('cdr-ov-maxsize',  cfg.maxFileSizeMB ? cfg.maxFileSizeMB + ' MB' : '50 MB (default)');
   set('cdr-ov-active',   cfg.clientActive ? 'yes' : 'no');
 
+  // consecutiveFailures comes from the background health poller (cdr_health.go),
+  // which keeps probing every 15s even while /api/cdr/health still serves a
+  // cached "last known good" response - the cache is only cleared after several
+  // failed ticks. Surfacing the raw count here means a pool that just went
+  // unreachable shows "degraded" immediately instead of a stale "active" badge
+  // for up to ~30s with no visible indication anything is wrong.
+  const health = cdrState.health || {};
+  const failing = (health.consecutiveFailures || 0) > 0;
+  set('cdr-ov-lastprobe', health.lastSeen
+    ? new Date(health.lastSeen).toLocaleString() + (failing ? ` (${health.consecutiveFailures} failed probes since)` : '')
+    : '-');
+
   const badge = document.getElementById('cdr-status-badge');
   if (badge) {
     if (!cfg.enabled) { badge.textContent = 'disabled'; badge.className = 'badge'; }
+    else if (cfg.clientActive && failing) {
+      badge.textContent = `degraded (${health.consecutiveFailures} consecutive probe failures)`;
+      badge.className = 'badge warn';
+    }
     else if (cfg.clientActive) { badge.textContent = 'active'; badge.className = 'badge allow'; }
     else { badge.textContent = 'not connected'; badge.className = 'badge drop'; }
   }
@@ -10741,9 +10758,10 @@ function cdrRenderOverview() {
     tbody.innerHTML = '<tr><td colspan="8" class="muted">No instances enrolled - go to the Instances tab to add one.</td></tr>';
     return;
   }
-  const health = cdrState.health || {};
   tbody.innerHTML = instances.map(i => {
-    const healthy = (cfg.clientActive && health.healthy) ? '<span class="badge allow">healthy</span>' : '<span class="badge drop">-</span>';
+    const healthy = !(cfg.clientActive && health.healthy) ? '<span class="badge drop">-</span>'
+      : failing ? '<span class="badge warn">degraded</span>'
+      : '<span class="badge allow">healthy</span>';
     const cb = cdrBreakerBadge(i);
     return `<tr>
       <td>${escHtml(i.name)}</td>

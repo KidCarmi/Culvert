@@ -45,6 +45,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/KidCarmi/Sluice/pkg/sluiceauth"
@@ -734,6 +735,7 @@ func apiCDRHealth(w http.ResponseWriter, r *http.Request) {
 	if cached := cdrHealthSnapshot(); cached != nil {
 		out := healthToJSON(cached)
 		out["lastSeen"] = cdrHealthLastSeenAt().UTC().Format("2006-01-02T15:04:05Z07:00")
+		addCDRLiveHealthFields(out)
 		jsonOK(w, out)
 		return
 	}
@@ -749,7 +751,23 @@ func apiCDRHealth(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("health probe failed: %v", err), http.StatusBadGateway)
 		return
 	}
-	jsonOK(w, healthToJSON(resp))
+	out := healthToJSON(resp)
+	addCDRLiveHealthFields(out)
+	jsonOK(w, out)
+}
+
+// addCDRLiveHealthFields annotates a health response with the background
+// poller's real-time view, independent of how stale the cached snapshot
+// above it is. The poller (cdr_health.go) keeps polling every 15s even
+// while serving a cached "last known good" response, and only clears the
+// cache after cdrHealthFailStaleAfter consecutive failures - so a pool
+// that has been unreachable for up to ~30s would otherwise still report
+// "healthy": true here with no visible sign anything is wrong.
+// consecutiveFailures lets the admin GUI show a degraded warning instead
+// of stale reassurance during that window.
+func addCDRLiveHealthFields(out map[string]any) {
+	out["consecutiveFailures"] = atomic.LoadInt64(&cdrHealthFailures)
+	out["liveHealthy"] = atomic.LoadInt64(&statCDRInstanceHealthy) == 1
 }
 
 // healthToJSON flattens the proto response into a GUI-friendly JSON map.
