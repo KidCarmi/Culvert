@@ -4392,6 +4392,7 @@ Firefox (all platforms):
               <div class="stat-card"><div class="stat-val" id="cca-expires">-</div><div class="stat-label">Expires</div></div>
               <div class="stat-card"><div class="stat-val" id="cca-fingerprint" style="font-size:.65rem;word-break:break-all">-</div><div class="stat-label">SHA-256 Fingerprint</div></div>
             </div>
+            <div id="cca-unusable-warning" style="display:none;margin-top:12px;padding:10px 12px;border-radius:8px;background:rgba(239,68,68,.12);color:var(--danger);font-size:.8rem;line-height:1.5"></div>
             <div id="cca-rotation-warning" style="display:none;margin-top:12px;padding:10px 12px;border-radius:8px;background:rgba(239,68,68,.12);color:var(--danger);font-size:.8rem;line-height:1.5"></div>
           </div>
           <details style="margin-top:12px">
@@ -16670,9 +16671,14 @@ async function loadClusterCA() {
   try {
     const r = await api('/api/cluster/ca');
     if (!r) return;
-    const status = r.dualCAActive ? 'Active (Dual-CA Overlap)' : r.initialized ? 'Active' : 'Not Initialized';
+    // CHAOS-29: "initialized" is not "usable". A cluster CA outside its own
+    // validity window is loaded, signs node certs no peer will accept, and used
+    // to show a green "Active" here throughout a cluster-wide enrollment outage.
+    const unusable = r.initialized && r.usable === false;
+    const status = unusable ? 'EXPIRED — enrollment blocked'
+      : r.dualCAActive ? 'Active (Dual-CA Overlap)' : r.initialized ? 'Active' : 'Not Initialized';
     document.getElementById('cca-status').textContent = status;
-    document.getElementById('cca-status').style.color = r.initialized ? '#22c55e' : 'var(--muted)';
+    document.getElementById('cca-status').style.color = unusable ? 'var(--danger)' : r.initialized ? '#22c55e' : 'var(--muted)';
     document.getElementById('cca-subject').textContent = r.subject || '-';
     document.getElementById('cca-expires').textContent = r.expires ? new Date(r.expires).toLocaleDateString() : '-';
     const fpText = r.fingerprint || '-';
@@ -16684,6 +16690,18 @@ async function loadClusterCA() {
     // before expiry) - if it keeps failing (e.g. a read-only CA directory), the
     // only prior signal was a log line, discovered only once nodes actually lost
     // trust at expiry. Surface the last failure here instead.
+    const unusableEl = document.getElementById('cca-unusable-warning');
+    if (unusableEl) {
+      if (unusable) {
+        unusableEl.style.display = '';
+        unusableEl.innerHTML = '<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> <strong>Cluster CA is outside its validity window</strong> (' +
+          escHtml(r.unusableReason || '') + '). Node enrollment and certificate renewal are BLOCKED: the Control Plane refuses to issue certificates ' +
+          'that no peer would accept. Import a replacement cluster CA below, then re-enroll every Data Plane node — certificates issued by the old CA are no longer trusted.';
+      } else {
+        unusableEl.style.display = 'none';
+        unusableEl.textContent = '';
+      }
+    }
     const warnEl = document.getElementById('cca-rotation-warning');
     if (warnEl) {
       if (r.lastRotationError) {

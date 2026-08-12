@@ -38,6 +38,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/secret"
@@ -763,6 +764,12 @@ func (cs *ClusterStore) ImportFullState(data json.RawMessage) error {
 // It is auto-generated on first use and persisted alongside cluster.json.
 
 type clusterCA struct {
+	// publishMu serialises whole install→publish sequences (ImportCA,
+	// CleanupSecondary) against each other. It is NOT a substitute for mu: mu
+	// guards the fields, publishMu guards the ORDER in which two concurrent
+	// rotations reach the TLS pool and the config store. Ordering is always
+	// publishMu → mu, never the reverse.
+	publishMu     sync.Mutex
 	mu            sync.RWMutex
 	cert          *x509.Certificate
 	key           *ecdsa.PrivateKey
@@ -779,6 +786,12 @@ type clusterCA struct {
 	// Cleared on the next successful ImportCA (auto-rotation or manual).
 	lastRotationErr   string
 	lastRotationErrAt time.Time
+	// signRefusals counts CSR signings refused because the CA was outside its
+	// own validity window (CHAOS-29 / CA-13). Atomic rather than mu-guarded so
+	// the metrics writer can read it at scrape time without contending with the
+	// enrollment path — and so the count survives a refusal recorded while the
+	// read lock is held in SignCSR.
+	signRefusals atomic.Int64
 }
 
 var globalClusterCA = &clusterCA{}
@@ -965,6 +978,18 @@ func (ca *clusterCA) SignCSR(csrPEM []byte, nodeID string) (certPEM []byte, seri
 		return nil, "", time.Time{}, fmt.Errorf("cluster CA not initialized")
 	}
 
+	// CHAOS-29 / CA-13: refuse to sign with a CA that is outside its OWN
+	// validity window. x509.CreateCertificate does not check the parent, so
+	// without this the CP happily issued node certificates that no peer can
+	// validate and reported the enrollment as a success. Checked BEFORE the CSR
+	// is parsed so a malformed CSR cannot mask the appliance-level fault, and
+	// before any randomness is drawn.
+	if err := clusterCAUsable(ca.cert, time.Now()); err != nil {
+		ca.signRefusals.Add(1)
+		noteClusterCAUnusable(err.Error())
+		return nil, "", time.Time{}, err
+	}
+
 	block, _ := pem.Decode(csrPEM)
 	if block == nil {
 		return nil, "", time.Time{}, fmt.Errorf("no PEM CSR block found")
@@ -983,11 +1008,20 @@ func (ca *clusterCA) SignCSR(csrPEM []byte, nodeID string) (certPEM []byte, seri
 		return nil, "", time.Time{}, fmt.Errorf("generate serial: %w", err)
 	}
 
-	notAfter := time.Now().Add(365 * 24 * time.Hour) // 1 year
+	// CHAOS-29 / CA-13: clamp the node cert to the issuer's window on BOTH ends
+	// so it can never outlive — or predate — the cluster CA. Node certs are
+	// issued for a fixed year and the CA rotates with 30 days left, so every
+	// cert signed in a CA's final month used to outlive its issuer by up to
+	// eleven. See clampNodeCertValidity.
+	notBefore, notAfter := clampNodeCertValidity(
+		time.Now().Add(-5*time.Minute),
+		time.Now().Add(365*24*time.Hour), // 1 year
+		ca.cert,
+	)
 	template := &x509.Certificate{
 		SerialNumber: serialNum,
 		Subject:      pkix.Name{CommonName: nodeID, Organization: []string{"Culvert Data Plane"}},
-		NotBefore:    time.Now().Add(-5 * time.Minute),
+		NotBefore:    notBefore,
 		NotAfter:     notAfter,
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
@@ -1043,13 +1077,6 @@ func (ca *clusterCA) Ready() bool {
 	return ca.cert != nil && ca.key != nil
 }
 
-// ImportCA validates and replaces the cluster CA with user-provided PEM cert+key.
-//
-// Dual-CA overlap: the old CA is preserved as a secondary so that existing
-// enrolled nodes (whose certs were signed by the old CA) continue to be
-// accepted until their certificates expire. New enrollments get certs
-// signed by the new CA. The secondary is auto-cleaned when the old CA
-// certificate expires.
 // backupCAFiles copies the current CA cert and key to .bak files.
 // Uses in-memory key to avoid any file reads (eliminates gosec G703/G304).
 // Best-effort, errors ignored.
@@ -1115,6 +1142,44 @@ func parseAndValidateCAKey(keyPEM []byte, certPub *ecdsa.PublicKey) (*ecdsa.Priv
 	return key, nil
 }
 
+// caPublication is what the locked half of an import hands to the unlocked
+// half. Every field is captured while ca.mu is held so the publication steps —
+// all of which re-enter the cluster CA — can run with the lock RELEASED.
+type caPublication struct {
+	onRotate     func()
+	hasSecondary bool
+	newFP        string
+	oldFP        string
+	secondaryExp time.Time
+}
+
+// ImportCA validates and replaces the cluster CA with the given PEM cert+key,
+// then publishes the change.
+//
+// Dual-CA overlap: the old CA is preserved as a secondary so that existing
+// enrolled nodes (whose certs were signed by the old CA) continue to be
+// accepted until their certificates expire. New enrollments get certs signed by
+// the new CA. The secondary is auto-cleaned when the old CA certificate expires
+// (CleanupSecondary).
+//
+// CHAOS-29 — the lock discipline here is load-bearing, not stylistic. Every
+// publication step below RE-ENTERS the cluster CA:
+//
+//	onRotate    → rebuildCPCertPool → AllCACertsPEM  → ca.mu.RLock
+//	Update(...) → CurrentConfigSnapshot → CACertFingerprint → ca.mu.RLock
+//
+// sync.RWMutex is not reentrant, and an RLock taken by the goroutine already
+// holding the write lock blocks forever. Running them under ca.mu — which is
+// what this function used to do — therefore did not "risk" a deadlock, it WAS
+// one, on every rotation and every admin import, reproduced against unmodified
+// main. It is also the worst possible way to fail: the goroutine hangs holding
+// the WRITE lock, so it takes the whole cluster CA down with it — SignCSR
+// (enrollment and renewal), Ready(), Info(), the TLS pool rebuild and the
+// /healthz row all block forever behind it, with no panic, no error and no
+// process exit. The rotation goroutine's runGuarded wrapper does not help: a
+// deadlock is not a panic.
+//
+// So: mutate under the lock, capture what the rest needs, release, publish.
 func (ca *clusterCA) ImportCA(certPEM, keyPEM []byte) error {
 	cert, err := parseAndValidateCACert(certPEM)
 	if err != nil {
@@ -1125,6 +1190,51 @@ func (ca *clusterCA) ImportCA(certPEM, keyPEM []byte) error {
 		return err
 	}
 
+	// publishMu serialises whole import→publish sequences against each other
+	// (the admin API and the rotation tick are independent goroutines). Without
+	// it, two imports could interleave between the unlock and the publish and
+	// leave the TLS pool rebuilt from the older of the two. Ordering is
+	// publishMu → mu, never the reverse.
+	ca.publishMu.Lock()
+	defer ca.publishMu.Unlock()
+
+	pub, err := ca.installCA(cert, key, certPEM, keyPEM)
+	if err != nil {
+		return err
+	}
+
+	// ── ca.mu is RELEASED from here down. Nothing below may be moved up. ──
+
+	// Notify the TLS layer to rebuild the client cert pool with both CAs.
+	if pub.onRotate != nil {
+		pub.onRotate()
+	}
+	// Start CA rotation tracking. Only meaningful when there IS a predecessor:
+	// rotation tracking describes an overlap between an old CA and a new one,
+	// and a bootstrap import has no old one. This line used to dereference the
+	// absent secondary unconditionally and PANIC — late, after the new CA had
+	// already been written to disk and installed in memory, so the operator saw
+	// the admin request fail while the import had in fact happened.
+	if pub.hasSecondary {
+		globalClusterStore.StartCARotation(pub.newFP, pub.oldFP, pub.secondaryExp)
+	}
+	// Bump config version so DP nodes pick up the new CA fingerprint on next
+	// poll. A commit-time rejection (config over a cap) is logged + alerted and
+	// surfaced via LastPublishError; the CA rotation itself already succeeded.
+	_ = globalConfigStore.Update(CurrentConfigSnapshot())
+
+	statClusterCARotations.Add(1)
+	// CHAOS-29: an OBSERVED successful rotation/import is what clears the
+	// rotation-degraded state. Recovery is reported on evidence, never on
+	// elapsed time — see noteClusterCARotationFailure.
+	noteClusterCARotated()
+	return nil
+}
+
+// installCA is the locked half of ImportCA: validate paths, back up and
+// preserve the outgoing CA, persist the new pair, and swap it in. It returns
+// the values the caller needs to publish the change AFTER releasing ca.mu.
+func (ca *clusterCA) installCA(cert *x509.Certificate, key *ecdsa.PrivateKey, certPEM, keyPEM []byte) (caPublication, error) {
 	ca.mu.Lock()
 	defer ca.mu.Unlock()
 
@@ -1134,11 +1244,11 @@ func (ca *clusterCA) ImportCA(certPEM, keyPEM []byte) error {
 	}
 	certFile, pathErr := safeCAPath(dir, "cluster-ca.crt")
 	if pathErr != nil {
-		return pathErr
+		return caPublication{}, pathErr
 	}
 	keyFile, pathErr := safeCAPath(dir, "cluster-ca.key")
 	if pathErr != nil {
-		return pathErr
+		return caPublication{}, pathErr
 	}
 
 	// ── Backup old CA before overwriting ──
@@ -1162,11 +1272,11 @@ func (ca *clusterCA) ImportCA(certPEM, keyPEM []byte) error {
 	// the next startup by loadFromPEM cross-validation (D1.1f) and fails
 	// closed; auto-repair is intentionally out of scope.
 	if err := atomicWriteFile(certFile, certPEM, 0o600); err != nil {
-		return fmt.Errorf("write cluster CA cert: %w", err)
+		return caPublication{}, fmt.Errorf("write cluster CA cert: %w", err)
 	}
 	// CA-3: encrypt the key at rest when enabled; plaintext otherwise.
 	if err := writeClusterCAKey(dir, keyFile, keyPEM); err != nil {
-		return fmt.Errorf("write cluster CA key: %w", err)
+		return caPublication{}, fmt.Errorf("write cluster CA key: %w", err)
 	}
 
 	ca.cert = cert
@@ -1181,27 +1291,19 @@ func (ca *clusterCA) ImportCA(certPEM, keyPEM []byte) error {
 	logger.Printf("ClusterCA: imported custom CA (expires %s, fingerprint %s)",
 		cert.NotAfter.Format("2006-01-02"), sanitizeLog(hex.EncodeToString(fp[:])))
 
-	// Notify TLS layer to rebuild cert pool with both CAs.
-	if ca.onRotate != nil {
-		ca.onRotate()
+	// Capture — do not invoke — everything the publication half needs. The
+	// callback is read here because ca.onRotate is itself written under ca.mu
+	// (controlplane_tls.go); calling it here is what deadlocked.
+	pub := caPublication{onRotate: ca.onRotate}
+	if ca.secondaryCert != nil {
+		oldFP := sha256.Sum256(ca.secondaryCert.Raw)
+		newFP := sha256.Sum256(cert.Raw)
+		pub.hasSecondary = true
+		pub.oldFP = hex.EncodeToString(oldFP[:])
+		pub.newFP = hex.EncodeToString(newFP[:])
+		pub.secondaryExp = ca.secondaryExp
 	}
-
-	// Start CA rotation tracking (old fingerprint from secondary).
-	oldFP := sha256.Sum256(ca.secondaryCert.Raw)
-	newFP := sha256.Sum256(cert.Raw)
-	globalClusterStore.StartCARotation(
-		hex.EncodeToString(newFP[:]),
-		hex.EncodeToString(oldFP[:]),
-		ca.secondaryExp,
-	)
-
-	// Bump config version so DP nodes pick up the new CA fingerprint on next poll.
-	// A commit-time rejection (config over a cap) is logged + alerted + surfaced
-	// via LastPublishError; CA rotation itself already succeeded above.
-	_ = globalConfigStore.Update(CurrentConfigSnapshot())
-
-	statClusterCARotations.Add(1)
-	return nil
+	return pub, nil
 }
 
 // SecondaryActive returns true if a secondary (old) CA is still in the overlap period.
@@ -1212,20 +1314,38 @@ func (ca *clusterCA) SecondaryActive() bool {
 }
 
 // CleanupSecondary removes the secondary CA if it has expired.
+//
+// CHAOS-29: same lock discipline as ImportCA, and the same bug before it —
+// ca.onRotate (rebuildCPCertPool) re-enters via AllCACertsPEM's RLock, so
+// invoking it under the write lock deadlocked. This one is the more dangerous of
+// the two because of WHERE it runs: on the StartCAAutoRotation tick, in the
+// shared rotation goroutine. A deadlock there is not a panic, so runGuarded does
+// not contain it — the rotation goroutine is lost for the life of the process
+// AND it holds the cluster CA's write lock, which then blocks enrollment, cert
+// renewal, Info(), the TLS pool rebuild and the health probe. It fires the first
+// time a dual-CA overlap window closes on a Control Plane with mTLS wired.
 func (ca *clusterCA) CleanupSecondary() {
+	ca.publishMu.Lock()
+	defer ca.publishMu.Unlock()
+
 	ca.mu.Lock()
-	defer ca.mu.Unlock()
-	if ca.secondaryCert != nil && time.Now().After(ca.secondaryExp) {
-		logger.Printf("ClusterCA: secondary CA expired, removing overlap")
-		ca.secondaryCert = nil
-		ca.secondaryPEM = nil
-		ca.secondaryExp = time.Time{}
-		if ca.onRotate != nil {
-			ca.onRotate()
-		}
-		// Clear rotation tracking — overlap period is over.
-		globalClusterStore.ClearCARotation()
+	if ca.secondaryCert == nil || !time.Now().After(ca.secondaryExp) {
+		ca.mu.Unlock()
+		return
 	}
+	ca.secondaryCert = nil
+	ca.secondaryPEM = nil
+	ca.secondaryExp = time.Time{}
+	onRotate := ca.onRotate
+	ca.mu.Unlock()
+
+	// ── ca.mu is RELEASED from here down. Nothing below may be moved up. ──
+	logger.Printf("ClusterCA: secondary CA expired, removing overlap")
+	if onRotate != nil {
+		onRotate()
+	}
+	// Clear rotation tracking — overlap period is over.
+	globalClusterStore.ClearCARotation()
 }
 
 // AllCACertsPEM returns PEM blocks for all active CAs (primary + secondary if overlapping).
@@ -1245,11 +1365,19 @@ func (ca *clusterCA) AllCACertsPEM() []byte {
 
 // recordRotationFailure records the most recent auto-rotation failure for
 // Info() to surface. err is an internal crypto/x509 error, never user input.
+//
+// CHAOS-29 / CA-13: it now also reaches the health plane — counter, log line and
+// cert_expiry alert. The Info() field alone was a pull-only signal on an admin
+// page nobody opens while the cluster looks healthy, which is precisely the
+// month in which this failure has to be caught: auto-rotation is the cluster
+// CA's only automatic recovery, it gets one attempt per day, and the window is
+// thirty days wide.
 func (ca *clusterCA) recordRotationFailure(err error) {
 	ca.mu.Lock()
 	ca.lastRotationErr = err.Error()
 	ca.lastRotationErrAt = time.Now()
 	ca.mu.Unlock()
+	noteClusterCARotationFailure(err.Error())
 }
 
 // RotateIfNeeded checks cluster CA expiry and auto-rotates if it expires
@@ -1332,6 +1460,17 @@ func (ca *clusterCA) Info() map[string]any {
 		"expires":     ca.cert.NotAfter.Format(time.RFC3339),
 		"fingerprint": hex.EncodeToString(fp[:]),
 		"serial":      ca.cert.SerialNumber.Text(16),
+	}
+	// CHAOS-29: "initialized" is not the same as "usable". A cluster CA outside
+	// its own validity window is initialized, signs nothing a peer will accept,
+	// and reported nothing but a green panel. The reason names the violated
+	// bound and its timestamp — which this same viewer-role payload already
+	// exposes as `expires`, so it discloses nothing new.
+	if err := clusterCAUsable(ca.cert, time.Now()); err != nil {
+		info["usable"] = false
+		info["unusableReason"] = err.Error()
+	} else {
+		info["usable"] = true
 	}
 	if ca.secondaryCert != nil && time.Now().Before(ca.secondaryExp) {
 		sfp := sha256.Sum256(ca.secondaryCert.Raw)

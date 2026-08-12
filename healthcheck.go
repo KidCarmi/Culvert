@@ -18,6 +18,7 @@ type healthReport struct {
 	ClamAV            string `json:"clamav" redact:"internal"`
 	CAExpiresDays     int    `json:"ca_expires_days" redact:"internal"`
 	SSLInspection     string `json:"ssl_inspection" redact:"internal"`
+	ClusterCA         string `json:"cluster_ca" redact:"internal"`
 	ThreatFeedEntries int64  `json:"threat_feed_entries" redact:"internal"`
 }
 
@@ -61,6 +62,23 @@ func computeHealth() healthReport {
 		sslInspection = "expired"
 	}
 
+	// Cluster CA posture (CHAOS-29 / CA-13). The same distinction the
+	// ssl_inspection row draws for the inspection CA: Ready() only asks whether
+	// a CA is loaded, so an expired cluster CA left this probe with nothing to
+	// report while node enrollment and cert renewal were blocked cluster-wide.
+	//
+	// "not_initialized" is the normal, healthy state of a standalone or Data
+	// Plane node — it is reported rather than omitted so the field's shape does
+	// not change with the node's role, which is what a monitoring rule keys on.
+	clusterCAState := "not_initialized"
+	switch {
+	case !globalClusterCA.Ready():
+	case globalClusterCA.Usable() != nil:
+		clusterCAState = "expired"
+	default:
+		clusterCAState = "ready"
+	}
+
 	return healthReport{
 		Status:            "ok",
 		Uptime:            uptime(),
@@ -68,6 +86,7 @@ func computeHealth() healthReport {
 		ClamAV:            clamStatus,
 		CAExpiresDays:     caExpiresDays,
 		SSLInspection:     sslInspection,
+		ClusterCA:         clusterCAState,
 		ThreatFeedEntries: tfEntries,
 	}
 }

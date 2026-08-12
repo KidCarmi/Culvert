@@ -163,6 +163,14 @@ func buildOperatorContract() OperatorContract {
 		checkSyslogFeed(),
 		checkMemoryBackstop(),
 	}
+	// Cluster CA health (CHAOS-29 / CA-13). Contributed ONLY by a node that
+	// actually holds a cluster CA — a standalone or Data Plane node has none by
+	// design, and a row saying so would be permanent noise on the majority of a
+	// fleet. checkClusterPosture already covers the "is clustering configured"
+	// question this row would otherwise duplicate.
+	if globalClusterCA.Ready() {
+		checks = append(checks, checkClusterCA())
+	}
 	// Auth Exempt risk diagnostics (Slice 8): WARN-only rows for risky Stage-1
 	// exemption postures. Contributes nothing when no exempt rules exist.
 	checks = append(checks, authExemptDiagnostics(policyStore.List(), policyActionFromDefault())...)
@@ -406,6 +414,43 @@ func checkRootCA() OperatorContractCheck {
 		Code:    "root_ca",
 		Status:  diagOK,
 		Message: "root CA initialised",
+	}
+}
+
+// checkClusterCA reports cluster-CA usability and auto-rotation health
+// (CHAOS-29, register row CA-13). Only reached on a node that holds a cluster
+// CA — see the call site.
+//
+// Like checkRootCA, the message carries the IMPACT and a count, never the raw
+// cause: this is a VIEWER-role surface with a standing no-sensitive-values
+// guardrail. The full detail stays in the logs, the alert and the cluster CA
+// admin API.
+func checkClusterCA() OperatorContractCheck {
+	if globalClusterCA.Usable() != nil {
+		return OperatorContractCheck{
+			Code:   "cluster_ca",
+			Status: diagFail,
+			Message: fmt.Sprintf("cluster CA outside its validity window — node enrollment and cert renewal are BLOCKED (%d signings refused since boot)",
+				clusterCAUsabilityFailures().Refusals),
+			OperatorAction: "Import a replacement cluster CA (Cluster → CA Management), then re-enroll every Data Plane node: certificates issued by the old CA are no longer trusted.",
+		}
+	}
+	// Keyed on the CURRENT rotation state, not the cumulative counter: an
+	// operator who restores write access and sees the next check succeed has
+	// fixed this, and a row latched on the counter would keep contradicting them
+	// until the process restarts.
+	if clusterCARotationDegraded() {
+		return OperatorContractCheck{
+			Code:           "cluster_ca",
+			Status:         diagWarn,
+			Message:        "cluster CA auto-rotation is failing — the CA is still the expiring one",
+			OperatorAction: "Restore write access to the cluster CA directory so the next rotation check can persist a replacement, or import a new cluster CA before the current one expires.",
+		}
+	}
+	return OperatorContractCheck{
+		Code:    "cluster_ca",
+		Status:  diagOK,
+		Message: "cluster CA initialised and within its validity window",
 	}
 }
 
