@@ -176,3 +176,52 @@ is_fresh_deployment() { return 0; }
 			out, envContent)
 	}
 }
+
+// TestInstallScript_SetupAtRestEncryption_FreshDeployWithUnsafeHostLogPassphraseSkipsCA
+// proves that when CULVERT_LOG_PASSPHRASE is supplied only via the host
+// environment and contains characters that are unsafe to persist verbatim in
+// .env (docker compose re-interpolates $-references when reading .env — the
+// exact class of characters the choice=2 "enter my own passphrase" path
+// below already rejects for this reason), setup_at_rest_encryption() must
+// NOT blindly copy it into CULVERT_CA_PASSPHRASE. Doing so risks docker
+// compose resolving the persisted CA passphrase to a DIFFERENT string than
+// the actual (host-env, unmangled) log passphrase, silently splitting one
+// intended shared key into two different ones.
+func TestInstallScript_SetupAtRestEncryption_FreshDeployWithUnsafeHostLogPassphraseSkipsCA(t *testing.T) {
+	setupFn := extractShellFunctionBraceAware(t, "scripts/install.sh", "setup_at_rest_encryption")
+	envPutFn := extractShellFunction(t, "scripts/install.sh", "env_put")
+	secretFn := extractShellFunction(t, "scripts/install.sh", "secret_already_set")
+
+	dir := t.TempDir()
+	envFile := filepath.Join(dir, ".env")
+
+	const unsafeLogPass = `abc$def`
+	stubs := `
+info() { :; }
+warn() { :; }
+error() { echo "ERROR: $*" >&2; exit 7; }
+is_fresh_deployment() { return 0; }
+export CULVERT_LOG_PASSPHRASE='` + unsafeLogPass + `'
+` + "INSTALL_DIR=" + dir + "\n"
+
+	script := stubs + secretFn + "\n" + envPutFn + "\n" + setupFn + "\n" + "setup_at_rest_encryption\n"
+
+	cmd := exec.CommandContext(t.Context(), "bash", "-c", script) // #nosec G204 -- fixed test script content, not external/user input
+	cmd.Stdin = bytes.NewReader(nil)                              // non-interactive: stdin is not a TTY
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("setup_at_rest_encryption failed: %v\n%s", err, out)
+	}
+
+	envContent := ""
+	if b, rerr := os.ReadFile(envFile); rerr == nil {
+		envContent = string(b)
+	}
+
+	if strings.Contains(envContent, "CULVERT_CA_PASSPHRASE=") {
+		t.Fatalf("an unsafe-charset host CULVERT_LOG_PASSPHRASE (%q) was copied verbatim into "+
+			"CULVERT_CA_PASSPHRASE in .env — docker compose's own .env interpolation could resolve this "+
+			"to a DIFFERENT value than the real log passphrase, silently mismatching the two encryption "+
+			"keys; output:\n%s\n.env content:\n%s", unsafeLogPass, out, envContent)
+	}
+}
