@@ -86,14 +86,24 @@ func TestReadyz_CADetailWithholdsPathAndCause(t *testing.T) {
 	if row.Status != "fail" {
 		t.Fatalf("ca status = %q, want fail (visibility must survive the redaction)", row.Status)
 	}
+	// Case-INSENSITIVE. Matching the producer's exact capitalisation
+	// ("SSL inspection DISABLED") would let a replacement string reintroduce the
+	// same statement in different case and still pass — which is precisely what
+	// the first cut of this fix did ("SSL inspection is disabled").
 	for _, leak := range []string{
-		"/data/ca.bundle",         // filesystem path
-		"permission denied",       // OS-level cause
-		"tunnel-only",             // explicit "controls are off" advertisement
-		"no scanning/DLP/CDR",     // ditto, machine-readable
-		"SSL inspection DISABLED", // ditto
+		"/data/ca.bundle",     // filesystem path
+		"permission denied",   // OS-level cause
+		"tunnel-only",         // explicit "controls are off" advertisement
+		"no scanning/dlp/cdr", // ditto, machine-readable
+		// The enforcement POSTURE itself. "ca: fail" says a subsystem is
+		// degraded; it must not say which way it fails, because a load failure
+		// degrades to uninspected BYPASS and saying so hands an unauthenticated
+		// observer the exfiltration window.
+		"inspection",
+		"disabled",
+		"dlp",
 	} {
-		if strings.Contains(row.Detail, leak) {
+		if strings.Contains(strings.ToLower(row.Detail), leak) {
 			t.Errorf("ca detail leaks %q on the unauthenticated /ready surface: %q", leak, row.Detail)
 		}
 	}
@@ -124,12 +134,21 @@ func TestReadyz_ClamAVDetailWithholdsDaemonAddress(t *testing.T) {
 		t.Fatalf("clamav status = %q, want fail", row.Status)
 	}
 	for _, leak := range []string{"10.42.7.13", "3310", "connection refused", "dial tcp"} {
-		if strings.Contains(row.Detail, leak) {
+		if strings.Contains(strings.ToLower(row.Detail), leak) {
 			t.Errorf("clamav detail leaks %q on the unauthenticated /ready surface: %q", leak, row.Detail)
 		}
 	}
-	if !strings.Contains(row.Detail, "see server logs") {
-		t.Errorf("clamav detail = %q, want it to point the operator at the logs", row.Detail)
+	// Deliberately the ADMIN UI, not the log: ClamAV's ping error is logged only
+	// by Scanner.Init, so a daemon that dies at runtime produces this row with no
+	// log line to find. Pointing at a source that need not record the condition
+	// is a dead end for the operator, so it is pinned here.
+	if !strings.Contains(row.Detail, "admin UI") {
+		t.Errorf("clamav detail = %q, want it to point the operator at the role-gated admin surface "+
+			"(the runtime cause is not logged — see Scanner.Init)", row.Detail)
+	}
+	if strings.Contains(row.Detail, "see server logs") {
+		t.Errorf("clamav detail = %q, must not send the operator to the log: a runtime ClamAV outage "+
+			"is never logged, only the startup one is", row.Detail)
 	}
 }
 

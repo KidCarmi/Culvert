@@ -204,14 +204,40 @@ same function already uses for the quarantined-state-file and expired-CA rows:
 // healthcheck.go — after
 checks["ca"] = &readinessCheck{
     Status: "fail",
-    Detail: "configured root CA failed to load; SSL inspection is disabled — see server logs",
+    Detail: "configured root CA is unavailable — see server logs",
 }
 ...
 checks["clamav"] = &readinessCheck{
     Status: "fail",
-    Detail: "ClamAV unreachable — see server logs",
+    Detail: "ClamAV unreachable — see Security Scanning status in the admin UI",
 }
 ```
+
+Two details of that wording were corrected in review (Codex, PR #1122) and are
+worth recording, because both are mistakes the obvious fix invites:
+
+1. **The redaction must drop the enforcement POSTURE, not just the cause.** The
+   first cut read `"configured root CA failed to load; SSL inspection is
+   disabled — see server logs"`. That removes the path and the OS error but
+   *keeps the exfiltration oracle* — the sentence still tells an unauthenticated
+   observer that inspection is off right now, which is the whole prize. The
+   distinction that matters is between the row and the posture: `ca: fail` says a
+   named subsystem is degraded and does not say **which way** it fails, and the
+   two directions are opposite — a load failure degrades to tunnel-only
+   **bypass** (traffic flows uninspected, an attacker's window), whereas the
+   CHAOS-28 validity branch fails **closed** (traffic refused, no window). Naming
+   the posture is only hazardous in the first case, which is exactly the branch
+   that was doing it.
+2. **"See server logs" has to be true of the *runtime* condition.** It is, for
+   the `ca` row: `sslInspectionLoadError` is written only by
+   `noteSSLInspectionUnavailable` from `loadRootCA`, so the condition is
+   startup-scoped and the startup log records it. It is **not** true for ClamAV:
+   `Scanner.Init` logs the ping error at startup and reconfigure only, while
+   `ClamAVStatus` caches it and logs nothing — so a daemon that dies at runtime
+   (restart, OOM, crashed container — the ordinary case) yields a failing row
+   with no matching log line. That row therefore points at the role-gated
+   `/api/security-scan/status`, which re-pings on cache miss and always carries
+   the live cause.
 
 **Nothing is lost to the operator.** The full CA cause remains in the process
 log and in the `ca_load_failed` alert payload; the full ClamAV status remains on
@@ -243,8 +269,8 @@ Verified live after the fix:
 
 | Test | Class | What it pins |
 |---|---|---|
-| `TestReadyz_CADetailWithholdsPathAndCause` | Negative / malformed-input | The real producer's verbatim string is stored, and the response must contain neither the bundle path, the OS cause, nor any of the three "controls are off" phrasings |
-| `TestReadyz_ClamAVDetailWithholdsDaemonAddress` | Negative | Daemon host, port, and dial-error text absent from the row |
+| `TestReadyz_CADetailWithholdsPathAndCause` | Negative / malformed-input | The real producer's verbatim string is stored, and the response must contain neither the bundle path, the OS cause, nor any enforcement-posture wording. Matching is **case-insensitive**: the first cut compared against the producer's exact capitalisation (`SSL inspection DISABLED`) and therefore passed vacuously against its own replacement (`SSL inspection is disabled`) — the test was strengthened and confirmed to fail against that string before being accepted |
+| `TestReadyz_ClamAVDetailWithholdsDaemonAddress` | Negative | Daemon host, port, and dial-error text absent; **and** the row points at the admin surface rather than the log, since a runtime ClamAV outage is never logged |
 | `TestReadyz_ClamAVFailureStillGates` | Positive / boundary | Redaction did not weaken the verdict — an unreachable AV daemon still returns 503 |
 | `TestReadyz_NoDetailCarriesRawInternals` | Regression sweep | **Every** row present in the process, not just the two fixed, is checked for raw-error markers (`dial tcp`, `connect: `, `permission denied`, absolute paths) — so a row added later cannot quietly reintroduce the class |
 | `TestHandleReady_SurfacesCALoadFailure` (updated) | Positive + negative | The failing row is still present and still report-only, with a redacted detail |

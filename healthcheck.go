@@ -168,12 +168,22 @@ func appendStateFileChecks(checks map[string]*readinessCheck) {
 // unchanged ("fail", still report-only), so probe and monitoring behaviour is
 // byte-identical — only the operator-only cause is withheld from the
 // unauthenticated surface.
+//
+// The detail also does not state the ENFORCEMENT POSTURE, which is the part
+// that actually arms an attacker. "ca: fail" alone says a named subsystem is
+// degraded; it does not say which way it fails, and the two directions are
+// opposite. A load failure degrades to tunnel-only BYPASS — traffic flows
+// UNINSPECTED — so spelling that out hands an unauthenticated observer the
+// exfiltration window directly. (The validity branch below fails CLOSED, i.e.
+// refuses traffic, which is why naming its posture is not the same hazard.)
+// Withholding it costs the operator nothing: they are being pointed at the log,
+// which carries the cause and the consequence in full.
 func appendCAReadinessCheck(checks map[string]*readinessCheck) {
 	switch {
 	case sslInspectionLoadFailure() != "":
 		checks["ca"] = &readinessCheck{
 			Status: "fail",
-			Detail: "configured root CA failed to load; SSL inspection is disabled — see server logs",
+			Detail: "configured root CA is unavailable — see server logs",
 		}
 	case !certMgr.Ready():
 		// Not configured yet — no row at all (pre-CHAOS-06 baseline behavior).
@@ -209,10 +219,18 @@ func computeReadiness() (report readinessReport, code int) {
 	// failed: dial tcp 10.0.1.5:3310: connect: connection refused") that
 	// publishes the internal address and port of the AV daemon — internal
 	// network topology, handed to any client that can reach the proxy, together
-	// with the fact that AV scanning is currently down. The raw status stays
-	// available to operators on the role-gated /api/security-scan/status
-	// (`clamav_status`). The gating verdict is unchanged: this row still fails
-	// readiness, exactly as before.
+	// with the fact that AV scanning is currently down. The gating verdict is
+	// unchanged: this row still fails readiness, exactly as before.
+	//
+	// It points at the ADMIN SURFACE rather than at the log, unlike the `ca` row
+	// above, and the difference is not cosmetic. ClamAV's ping error is logged
+	// only by Scanner.Init (startup and reconfigure); ClamAVStatus caches it and
+	// logs nothing. A daemon that dies at RUNTIME — a restart, an OOM, a crashed
+	// container, which is the ordinary case — therefore produces a failing row
+	// with no corresponding log line at all, so "see server logs" would send an
+	// operator to a source that need not mention the outage. The live cause is
+	// always on the role-gated /api/security-scan/status (`clamav_status`),
+	// which re-pings on cache miss.
 	if globalSecScanner != nil {
 		st := globalSecScanner.ClamAVStatus()
 		switch st {
@@ -223,7 +241,7 @@ func computeReadiness() (report readinessReport, code int) {
 		default:
 			checks["clamav"] = &readinessCheck{
 				Status: "fail",
-				Detail: "ClamAV unreachable — see server logs",
+				Detail: "ClamAV unreachable — see Security Scanning status in the admin UI",
 			}
 			allOK = false
 		}
