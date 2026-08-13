@@ -156,11 +156,12 @@ type AuthLogFields struct {
 	// profile source ("oidc:<id>" / "saml:<id>" / bare profile ID from
 	// identityAuthSource). Populated ONLY from the server-side resolved auth
 	// state (resolveRequestAuth's source / ProxyIdentity.AuthSource) — never
-	// from any client-supplied header or request field. Empty on rows with no
-	// auth context (pre-auth blocks like IP_BLOCKED/RATE_LIMITED, AUTH_FAIL
-	// where no backend authenticated the credentials, SOCKS5's boolean auth,
-	// and the inner scanner block rows pending the M2 typed identity plumbing)
-	// — empty means "unattributed", never "unauthenticated" (that is "unauth").
+	// from any client-supplied header or request field (F6 removed the internal
+	// X-User-Identity transport entirely; identity travels as typed values).
+	// Empty on rows with no auth context (pre-auth blocks like
+	// IP_BLOCKED/RATE_LIMITED, AUTH_FAIL where no backend authenticated the
+	// credentials, and SOCKS5's boolean auth) — empty means "unattributed",
+	// never "unauthenticated" (that is "unauth").
 	// Maps to LogEntry.AuthSource (omitempty ⇒ wire byte-identical when empty).
 	AuthSource string
 }

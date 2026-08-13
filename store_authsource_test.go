@@ -11,9 +11,10 @@ package main
 //
 // Deliberately-unattributed rows (empty AuthSource, documented on the
 // AuthLogFields.AuthSource contract): pre-auth blocks (IP_BLOCKED /
-// RATE_LIMITED), AUTH_FAIL (no backend authenticated the credentials), SOCKS5
-// (boolean auth), and the inner scanner block rows (pending the M2 typed
-// identity plumbing). Empty means "unattributed", never "unauthenticated".
+// RATE_LIMITED), AUTH_FAIL (no backend authenticated the credentials), and
+// SOCKS5 (boolean auth). The scanner/file-block rows are attributed via the
+// typed ProxyIdentity plumbing since F6 (see authsource_typed_test.go).
+// Empty means "unattributed", never "unauthenticated".
 
 import (
 	"encoding/json"

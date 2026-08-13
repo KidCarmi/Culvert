@@ -67,7 +67,7 @@ func TestScanHTTPResponseBody_ReadErrorFailsClosed(t *testing.T) {
 	}
 	w := httptest.NewRecorder()
 
-	handled, upstreamReadErr := scanHTTPResponseBody(w, r, resp)
+	handled, upstreamReadErr := scanHTTPResponseBody(w, r, resp, ProxyIdentity{})
 	if !handled {
 		t.Fatal("body read error must be handled fail-closed (pre-fix: returned false → forwarded unscanned + truncated)")
 	}
@@ -96,7 +96,7 @@ func TestScanHTTPResponseBody_CleanBodyReassembled(t *testing.T) {
 	}
 	w := httptest.NewRecorder()
 
-	handled, upstreamReadErr := scanHTTPResponseBody(w, r, resp)
+	handled, upstreamReadErr := scanHTTPResponseBody(w, r, resp, ProxyIdentity{})
 	if handled {
 		t.Fatalf("clean body must not be blocked; recorder: %d %q", w.Code, w.Body.String())
 	}

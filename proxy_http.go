@@ -73,7 +73,9 @@ func (t *readErrTracker) Read(p []byte) (int, error) {
 	return n, err
 }
 
-func handleHTTP(w http.ResponseWriter, r *http.Request) {
+// handleHTTP forwards a plain-HTTP request. id is the TYPED server-resolved
+// identity context (F6) — identity/provenance never rides a header.
+func handleHTTP(w http.ResponseWriter, r *http.Request, id ProxyIdentity) {
 	if r.Body != nil {
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 	}
@@ -138,7 +140,7 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Response-header file blocking (Content-Disposition filename + Content-Type
 	// MIME). Catches downloads whose URL hides the real type.
-	if blockedByResponseHeaders(w, r, resp) {
+	if blockedByResponseHeaders(w, r, resp, id) {
 		// Policy outcome, not a parent failure: the parent delivered valid
 		// headers and the body is unread by design.
 		upstreamAtt.Record(nil)
@@ -146,7 +148,7 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Security body scan (magic/polyglot + ClamAV/YARA) for non-tunnel responses.
-	if handled, scanReadErr := scanHTTPResponseBody(w, r, resp); handled {
+	if handled, scanReadErr := scanHTTPResponseBody(w, r, resp, id); handled {
 		// scanReadErr is non-nil only when the parent-side body read failed
 		// while buffering (the CHAOS-17 fail-closed 502) — charge that;
 		// block-page outcomes are parent successes.
@@ -177,11 +179,11 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 // serveHTTPFileBlock records a response-header file block and serves the block
 // page. source is the short tag used in the log line ("resp cd"/"resp ct").
-func serveHTTPFileBlock(w http.ResponseWriter, r *http.Request, ext, source string) {
+func serveHTTPFileBlock(w http.ResponseWriter, r *http.Request, ext, source string, id ProxyIdentity) {
 	cip, _, _ := net.SplitHostPort(r.RemoteAddr)
 	atomic.AddInt64(&statFileBlocked, 1)
 	atomic.AddInt64(&statBlocked, 1)
-	recordRequest(cip, r.Method, r.Host, "FILE_BLOCKED", ext, "", r.Header.Get("X-User-Identity"), "inspect")
+	recordRequestAuthURI(cip, r.Method, r.Host, "FILE_BLOCKED", ext, "", id.Identity, "inspect", "", AuthLogFields{AuthSource: id.AuthSource})
 	logger.Printf("FILE_BLOCKED (%s) %s -> %q%q (ext=%q)", source, cip, sanitizeLog(r.Host), sanitizeLog(r.URL.Path), sanitizeLog(ext))
 	serveBlockPage(w, r.Host+r.URL.Path, "File Block", ext)
 }
@@ -190,13 +192,13 @@ func serveHTTPFileBlock(w http.ResponseWriter, r *http.Request, ext, source stri
 // download extensions) and Content-Type (dangerous MIME types — catches renamed
 // executables). Returns true if the response was blocked (block page served;
 // caller must return).
-func blockedByResponseHeaders(w http.ResponseWriter, r *http.Request, resp *http.Response) bool {
+func blockedByResponseHeaders(w http.ResponseWriter, r *http.Request, resp *http.Response, id ProxyIdentity) bool {
 	if ext := fileBlocker.CheckContentDisposition(resp.Header.Get("Content-Disposition")); ext != "" {
-		serveHTTPFileBlock(w, r, ext, "resp cd")
+		serveHTTPFileBlock(w, r, ext, "resp cd", id)
 		return true
 	}
 	if ext := fileBlocker.CheckContentType(resp.Header.Get("Content-Type")); ext != "" {
-		serveHTTPFileBlock(w, r, ext, "resp ct")
+		serveHTTPFileBlock(w, r, ext, "resp ct", id)
 		return true
 	}
 	return false
@@ -214,7 +216,7 @@ func blockedByResponseHeaders(w http.ResponseWriter, r *http.Request, resp *http
 // inspect path's scanReadError contract (proxy_tunnel.go). That read error is
 // also returned (upstreamReadErr) so the caller can charge the upstream
 // breaker attribution (CHAOS-11); it is nil for every other outcome.
-func scanHTTPResponseBody(w http.ResponseWriter, r *http.Request, resp *http.Response) (handled bool, upstreamReadErr error) {
+func scanHTTPResponseBody(w http.ResponseWriter, r *http.Request, resp *http.Response, id ProxyIdentity) (handled bool, upstreamReadErr error) {
 	// Skip buffering if Content-Length signals the response exceeds the scan
 	// limit — avoids wasting memory and I/O on oversized bodies.
 	scanActive := globalRemoteScanner.Enabled() || globalSecScanner.BodyScanEnabled()
@@ -250,7 +252,7 @@ func scanHTTPResponseBody(w http.ResponseWriter, r *http.Request, resp *http.Res
 		cip, _, _ := net.SplitHostPort(r.RemoteAddr)
 		atomic.AddInt64(&statFileBlocked, 1)
 		atomic.AddInt64(&statBlocked, 1)
-		recordRequest(cip, r.Method, r.Host, "FILE_BLOCKED", "magic:"+archType, "", r.Header.Get("X-User-Identity"), "inspect")
+		recordRequestAuthURI(cip, r.Method, r.Host, "FILE_BLOCKED", "magic:"+archType, "", id.Identity, "inspect", "", AuthLogFields{AuthSource: id.AuthSource})
 		logger.Printf("FILE_BLOCKED (magic) %s -> %q (type=%s)", cip, sanitizeLog(r.Host), archType)
 		serveBlockPage(w, r.Host+r.URL.Path, "File Block", "magic:"+archType)
 		return true, nil
@@ -261,7 +263,7 @@ func scanHTTPResponseBody(w http.ResponseWriter, r *http.Request, resp *http.Res
 		cip, _, _ := net.SplitHostPort(r.RemoteAddr)
 		atomic.AddInt64(&statFileBlocked, 1)
 		atomic.AddInt64(&statBlocked, 1)
-		recordRequest(cip, r.Method, r.Host, "POLYGLOT_BLOCKED", reason, "", r.Header.Get("X-User-Identity"), "inspect")
+		recordRequestAuthURI(cip, r.Method, r.Host, "POLYGLOT_BLOCKED", reason, "", id.Identity, "inspect", "", AuthLogFields{AuthSource: id.AuthSource})
 		logger.Printf("POLYGLOT_BLOCKED %s -> %q (%s)", cip, sanitizeLog(r.Host), sanitizeLog(reason))
 		serveBlockPage(w, r.Host+r.URL.Path, "Polyglot Detection", reason)
 		return true, nil
@@ -279,7 +281,7 @@ func scanHTTPResponseBody(w http.ResponseWriter, r *http.Request, resp *http.Res
 				Source: "scan_timeout",
 			})
 		}
-		recordRequest(cip, r.Method, r.Host, "SCAN_BLOCKED", scanResult.Source, scanResult.Reason, r.Header.Get("X-User-Identity"), "inspect")
+		recordRequestAuthURI(cip, r.Method, r.Host, "SCAN_BLOCKED", scanResult.Source, scanResult.Reason, id.Identity, "inspect", "", AuthLogFields{AuthSource: id.AuthSource})
 		logger.Printf("SCAN_BLOCKED %s -> %q (%q: %q)", cip, sanitizeLog(r.Host), sanitizeLog(scanResult.Source), sanitizeLog(scanResult.Reason))
 		scanBlock(w, r.Host, scanResult.Reason, scanResult.Source)
 		return true, nil

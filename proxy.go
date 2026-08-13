@@ -105,9 +105,11 @@ func policyLogURI(host, path string) string {
 // LogFullURI — so a blocked download keeps its full URL, the events that matter
 // most for investigation. Blocks are always logged (no LogTraffic gate); only
 // the URI is conditional. Counting matches the prior recordRequest path.
-func recordInspectBlock(clientIP, status, ruleMatched, actionTaken, hostOnly, path string, match *PolicyMatch, dec *DecryptionBlock) {
+// id is the typed server-resolved identity context (F6): the row carries the
+// authenticated identity and auth-source provenance — never a header value.
+func recordInspectBlock(id ProxyIdentity, status, ruleMatched, actionTaken, hostOnly, path string, match *PolicyMatch, dec *DecryptionBlock) {
 	uri := ""
-	auth := AuthLogFields{Dec: dec} // ADR-0011: block rows carry the inspected dec block too
+	auth := AuthLogFields{Dec: dec, AuthSource: id.AuthSource} // ADR-0011: block rows carry the inspected dec block too
 	if match != nil && match.Rule != nil {
 		if match.Rule.LogFullURI {
 			uri = policyLogURI(hostOnly, path)
@@ -121,7 +123,7 @@ func recordInspectBlock(clientIP, status, ruleMatched, actionTaken, hostOnly, pa
 			auth.RuleID = match.Rule.ID
 		}
 	}
-	recordRequestAuthURI(clientIP, "CONNECT", hostOnly, status, ruleMatched, actionTaken, "", "inspect", uri, auth)
+	recordRequestAuthURI(id.ClientIP, "CONNECT", hostOnly, status, ruleMatched, actionTaken, id.Identity, "inspect", uri, auth)
 }
 
 // authOutcome carries the Stage-1 adaptive-auth result from
@@ -864,19 +866,10 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	// produces. Server-side resolved state only — never a header value.
 	authLog.AuthSource = authenticatedSource
 
-	// Set internal identity headers — scrubForwardedHeaders removes them
-	// before forwarding upstream. This server-stamped header is TRANSPORT for
-	// the existing plain-HTTP logging consumers (proxy_http.go reads it for
-	// FILE_BLOCKED/SCAN_BLOCKED/POLYGLOT_BLOCKED attribution), not an authority
-	// boundary: policy evaluation below consumes authenticatedIdentity
-	// directly, and the ingress scrub at the top of handleRequest guarantees no
-	// client-supplied value can be observed here. Follow-up (recorded technical
-	// debt): replace this header channel with explicit typed identity plumbing
-	// when the HTTP forward path is next touched — likely during the Learning
-	// Mode observation wiring (M2). Do not add new readers.
-	if authenticatedIdentity != "" {
-		r.Header.Set("X-User-Identity", authenticatedIdentity)
-	}
+	// F6: identity travels as TYPED server-side values only (ProxyIdentity /
+	// authOutcome) — the internal X-User-Identity header transport is removed.
+	// The ingress delete above and the egress scrubForwardedHeaders remain as
+	// defense-in-depth; nothing internal stamps or reads the header anymore.
 
 	host := r.Host
 	if h, _, err := net.SplitHostPort(host); err == nil {
@@ -941,7 +934,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	case isWebSocketUpgrade(r):
 		handleWebSocket(w, r, match, proxyID)
 	default:
-		handleHTTP(w, r)
+		handleHTTP(w, r, proxyID)
 	}
 
 	recordRequestTelemetry(r, start, sslAction, match, host, clientIP)
