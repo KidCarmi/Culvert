@@ -128,3 +128,88 @@ func TestInstallScript_EnvPut_PreservesFileOnRealGrepFailure(t *testing.T) {
 		t.Errorf("a real grep failure while setting CULVERT_MAINT_GID lost the pre-existing EXISTING_VAR entry — the temp file must not be promoted over the original on a genuine error; .env content:\n%s", content)
 	}
 }
+
+// TestInstallScript_EnvPut_ConcurrentInvocationsDoNotLeaveStaleDuplicate
+// proves that two env_put calls racing against the SAME .env file — e.g. an
+// operator re-running install.sh (automation retry, or a second admin)
+// against a shared /srv/culvert install while a still-running instance is
+// mid-setup — do not corrupt it.
+//
+// env_put stages its edit through a FIXED path, "$file.tmp", shared by every
+// invocation regardless of which process is running it. When a second,
+// concurrent env_put finishes first, its "mv "$file.tmp" "$file"" replaces
+// "$file" out from under the first invocation's still-open write handle to
+// the OLD "$file.tmp" inode — which is now the SAME inode as the (just
+// replaced) "$file". The first invocation's own `grep -vE "^VAR=" "$file" >
+// "$file.tmp"` then has its output redirect alias its own input file, so GNU
+// grep refuses with "input file is also the output" (exit 2) — a real,
+// observable failure this test surfaces directly by capturing it, not just
+// inferring it from the resulting content. env_put treats any exit other
+// than 0/1 as a hard error and discards the (never-produced) filtered
+// output via `rm -f "$file.tmp"` instead of promoting it — which means the
+// "drop the old VAR= line" step never happens. The unconditional final
+// `printf ... >> "$file"` still runs, so the NEW value is appended anyway —
+// leaving BOTH the stale old line and the new line in the file, silently
+// violating env_put's documented "set/replace VAR=VALUE" contract (compare
+// TestInstallScript_EnvPut_ReplacesExistingValue above, which pins that same
+// contract for the uncontended, sequential case).
+//
+// This reproduces the real race deterministically — via the same
+// command-shadowing technique as TestInstallScript_EnvPut_PreservesFileOnRealGrepFailure
+// above — rather than relying on real OS scheduling timing, which was tried
+// first and confirmed to reproduce with real concurrent processes but was too
+// flaky (timing-dependent) for a reliable regression test.
+func TestInstallScript_EnvPut_ConcurrentInvocationsDoNotLeaveStaleDuplicate(t *testing.T) {
+	fn := extractShellFunction(t, "scripts/install.sh", "env_put")
+
+	dir := t.TempDir()
+	envFile := filepath.Join(dir, ".env")
+	if err := os.WriteFile(envFile, []byte("EXISTING=original\nVARA=oldvalue\n"), 0o600); err != nil {
+		t.Fatalf("seed %s: %v", envFile, err)
+	}
+
+	// The outer env_put call (VARA=newvalue, simulating this installer run)
+	// is mid-flight when its `grep` step is reached. At exactly that point —
+	// before the real grep runs — a second, concurrent env_put call
+	// (VARB=valueB, simulating a second overlapping installer run) is
+	// injected and runs to completion first, exactly as a genuinely
+	// concurrent process finishing first would. The FIRST guard prevents the
+	// injected call's own grep step from recursing into this same shadow.
+	script := fn + "\n" +
+		`envfile="$1"` + "\n" +
+		`FIRST=1` + "\n" +
+		`grep() {` + "\n" +
+		`  if [[ "$FIRST" -eq 1 ]]; then` + "\n" +
+		`    FIRST=0` + "\n" +
+		`    env_put VARB valueB "$envfile"` + "\n" +
+		`  fi` + "\n" +
+		`  command grep "$@"` + "\n" +
+		`}` + "\n" +
+		`env_put VARA newvalue "$envfile"` + "\n"
+
+	runShellScript(t, script, envFile)
+
+	got, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatalf("read %s: %v", envFile, err)
+	}
+	content := string(got)
+
+	if n := strings.Count(content, "VARA="); n != 1 {
+		t.Errorf("env_put left %d VARA= lines in .env after a concurrent env_put raced it, want 1 (value replaced, "+
+			"not duplicated) — env_put's own doc comment promises \"set/replace VAR=VALUE in FILE\"; .env content:\n%s", n, content)
+	}
+	if strings.Contains(content, "VARA=oldvalue") {
+		t.Errorf(".env still contains the stale VARA=oldvalue line after a concurrent env_put raced the update to "+
+			"VARA=newvalue; .env content:\n%s", content)
+	}
+	if !strings.Contains(content, "VARA=newvalue") {
+		t.Errorf(".env does not contain the updated VARA=newvalue; .env content:\n%s", content)
+	}
+	if !strings.Contains(content, "VARB=valueB") {
+		t.Errorf("the concurrent env_put's own VARB=valueB write was lost; .env content:\n%s", content)
+	}
+	if !strings.Contains(content, "EXISTING=original") {
+		t.Errorf("pre-existing EXISTING var lost to the concurrent env_put race; .env content:\n%s", content)
+	}
+}

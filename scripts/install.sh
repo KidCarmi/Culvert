@@ -1498,14 +1498,27 @@ env_put() {
   # pattern being dropped — including the common case where $file contains
   # only this one VAR=... line. Treat ONLY that "no lines survived" case (1)
   # as benign and promote the filtered file; a real error (e.g. ENOSPC while
-  # writing $file.tmp) gets a higher exit code and must NOT clobber the
-  # existing $file with a truncated/empty temp file.
+  # writing $tmp) gets a higher exit code and must NOT clobber the existing
+  # $file with a truncated/empty temp file.
+  #
+  # $tmp MUST be unique per invocation, not a fixed "$file.tmp" — install.sh
+  # is designed to be safely re-run against an existing deployment (e.g. an
+  # automation retry racing a still-running instance, or two admins running
+  # it at once), and a shared path lets a second, concurrent env_put "mv" it
+  # away underneath this one. When that happens, this call's own `grep ...
+  # > "$file.tmp"` output redirect ends up aliasing "$file" (the other
+  # invocation just renamed its OWN tmp file onto "$file"), which GNU grep
+  # refuses to do ("input file is also the output") — so the "drop the old
+  # VAR= line" step silently never runs, while the unconditional append
+  # below still does, leaving a stale duplicate VAR= line behind.
+  local tmp
+  tmp="$(mktemp "${file}.XXXXXX" 2>/dev/null)" || tmp="${file}.tmp.$$"
   local rc=0
-  grep -vE "^${var}=" "$file" > "$file.tmp" 2>/dev/null && rc=0 || rc=$?
+  grep -vE "^${var}=" "$file" > "$tmp" 2>/dev/null && rc=0 || rc=$?
   if [[ $rc -eq 0 || $rc -eq 1 ]]; then
-    mv "$file.tmp" "$file"
+    mv "$tmp" "$file"
   else
-    rm -f "$file.tmp"
+    rm -f "$tmp"
   fi
   printf '%s=%s\n' "$var" "$val" >> "$file"
   chmod 600 "$file"
