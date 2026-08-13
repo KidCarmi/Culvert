@@ -62,7 +62,14 @@ func dpMarkCPPollHealthy() {
 // dpNodeCertRenewal is the probe-facing state of the DP cert-renewal loop.
 // Unlike the dpCertExpiryAlert latch (which fires each escalation once), this
 // is overwritten on every failed attempt so the /ready row always shows the
-// current days-left and last error, and cleared on successful renewal.
+// current days-left, and cleared on successful renewal.
+//
+// lastErr is recorded but deliberately NOT published on /ready — that surface is
+// unauthenticated and the error carries the control-plane address or an absolute
+// cert/key path (see appendDPHealthChecks). It is kept because the operator-facing
+// copy of the cause is already carried by the process log and the cert_expiry
+// alert, and because a future ROLE-GATED surface is the right place for it; any
+// new reader must be authenticated.
 var dpNodeCertRenewal struct {
 	mu      sync.Mutex
 	failing bool
@@ -119,15 +126,32 @@ func appendDPHealthChecks(checks map[string]*readinessCheck) {
 	}
 	checks["cp_poll"] = cp
 
+	// The last renewal error is deliberately NOT published here. /ready is served
+	// by routeProxyListenerBuiltin on the proxy listener with no authentication
+	// and no IP guard, and renewDPCert's error is not a sanitised string: the
+	// "RenewCert RPC: %w" branch wraps a gRPC dial failure that names the
+	// CONTROL PLANE's address and port, and the "write cert:"/"write key:"
+	// branches wrap an *os.PathError carrying the absolute node cert/key path.
+	// Publishing either hands an unauthenticated client the cluster's internal
+	// topology and the appliance's on-disk layout — the same class that was
+	// removed from the ca and clamav rows, on the same surface.
+	//
+	// The row, its "fail" status and the days-remaining count all stay: that is
+	// the CHAOS-09 visibility contract, and days-left is this node's own
+	// certificate lifecycle rather than internal topology. Only the cause is
+	// withheld, and unlike the clamav row it is genuinely recoverable from the
+	// log — both renewal call sites log it verbatim ("DataPlane: cert renewal
+	// check: %v" / "DataPlane: CA rotation renewal failed: %v"), and the latched
+	// cert_expiry alert carries it in full.
 	cert := &readinessCheck{Status: "ok"}
-	if failing, days, lastErr := dpCertRenewalFailureSnapshot(); failing {
+	if failing, days, _ := dpCertRenewalFailureSnapshot(); failing {
 		cert.Status = "fail"
 		if days < 0 {
 			cert.Detail = fmt.Sprintf(
-				"node certificate EXPIRED %d day(s) ago and renewal is failing (last error: %s)", -days, lastErr)
+				"node certificate EXPIRED %d day(s) ago and renewal is failing — see server logs", -days)
 		} else {
 			cert.Detail = fmt.Sprintf(
-				"node certificate expires in %d day(s) and renewal is failing (last error: %s)", days, lastErr)
+				"node certificate expires in %d day(s) and renewal is failing — see server logs", days)
 		}
 	}
 	checks["node_cert"] = cert
