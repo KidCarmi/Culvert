@@ -191,22 +191,30 @@ func (r *mcpRollout) commitRolloutTransitionAt(cfg *rollout.SignedConfig, actor 
 	if err := st.SetConfig(*cfg, actor, now.UnixNano()); err != nil {
 		return err
 	}
-	// (3a) Scope-change continuity (security-critical): a MATERIAL scope change while
-	// staying in the same executing mode must NOT inherit the prior continuous window
-	// — a newly expanded/altered Shadow scope cannot qualify on time accrued under the
-	// old scope. Reset the window start so BeginWindow restamps a fresh window.
-	if cfg.Mode.Executes() && prevMode == cfg.Mode && prevScopeHash != st.ScopeHash() {
+	// (3) Couple the evidence window to the accepted transition.
+	//
+	// An IDEMPOTENT re-apply (same mode AND same scope) must touch NO window/soak
+	// timer — the DP applier accepts same-revision same-content envelopes idempotently,
+	// so ordinary repeated ConfigSnapshot delivery would otherwise reset the soak (and
+	// on a genuine change, must restart the window). A real transition (a mode change
+	// or a material scope change) resets the ENTERED executing mode's continuous window
+	// first — so re-entering Shadow from Canary, or entering under a materially changed
+	// scope, starts a fresh window and cannot inherit prior time — then BeginWindow
+	// stamps the fresh window + soak.
+	sameModeSameScope := prevMode == cfg.Mode && prevScopeHash == st.ScopeHash()
+	if !sameModeSameScope {
 		st.UpdateEvidence(func(e *rollout.EvidenceSummary) {
-			switch cfg.Mode {
-			case rollout.ModeShadow:
-				e.ShadowStartUnix = 0
-			case rollout.ModeCanary, rollout.ModeProduction:
-				e.CanaryStartUnix = 0
+			if cfg.Mode.Executes() {
+				switch cfg.Mode {
+				case rollout.ModeShadow:
+					e.ShadowStartUnix = 0
+				case rollout.ModeCanary, rollout.ModeProduction:
+					e.CanaryStartUnix = 0
+				}
 			}
+			e.BeginWindow(cfg.Mode, now.Unix(), origin)
 		})
 	}
-	// (3b) Couple the evidence window to the accepted transition (idempotent per mode).
-	st.UpdateEvidence(func(e *rollout.EvidenceSummary) { e.BeginWindow(cfg.Mode, now.Unix(), origin) })
 	// (4) Persist before acknowledging; roll back in memory on failure.
 	if err := persistRolloutState(st); err != nil {
 		// Revert the in-memory install to the prior config. prevCfg was previously
@@ -256,43 +264,54 @@ func (r *mcpRollout) restore() {
 
 // emergencyDisable engages the capability-local kill switch immediately (admission
 // stop) without a CP round trip. It never widens access. The kill-switch state is
-// restart-durable: it is persisted after engaging so a restart cannot silently
-// re-admit traffic an operator emergency-disabled. A persist failure is logged but
-// never un-does the (narrowing, safe) in-memory disable.
-func (r *mcpRollout) emergencyDisable(capb rollout.Capability, actor string) {
+// restart-durable: it is persisted after engaging. The in-memory disable is ALWAYS in
+// effect (narrowing, safe) even if persistence fails — but a persist failure is
+// RETURNED so the caller does not report a durable success the operator would trust
+// while a restart could silently re-admit traffic. The disable is never un-done.
+func (r *mcpRollout) emergencyDisable(capb rollout.Capability, actor string) error {
 	r.durableMu.Lock()
 	defer r.durableMu.Unlock()
 	st := r.stateFor(capb)
 	st.EngageKillSwitch(actor, time.Now().UnixNano())
 	r.metrics.emergencies.Add(1)
 	if err := persistRolloutState(st); err != nil {
-		logger.Printf("MCP rollout emergency-disable persist for %s failed (disable still in effect): %v", capb.String(), err)
+		r.setPersistStatus(capb, "write_failed")
+		logger.Printf("MCP rollout emergency-disable persist for %s failed (disable in effect in memory, NOT restart-durable): %v", capb.String(), err)
+		return fmt.Errorf("%w: %v", errRolloutPersistFailed, err)
 	}
+	return nil
 }
 
 // clearEmergency clears the capability-local kill switch (does not change mode) and
 // persists the cleared state so the restart-recovered state matches the operator's
 // last action.
-func (r *mcpRollout) clearEmergency(capb rollout.Capability) {
+func (r *mcpRollout) clearEmergency(capb rollout.Capability) error {
 	r.durableMu.Lock()
 	defer r.durableMu.Unlock()
 	st := r.stateFor(capb)
 	st.ClearKillSwitch()
 	if err := persistRolloutState(st); err != nil {
+		r.setPersistStatus(capb, "write_failed")
 		logger.Printf("MCP rollout emergency-clear persist for %s failed: %v", capb.String(), err)
+		return fmt.Errorf("%w: %v", errRolloutPersistFailed, err)
 	}
+	return nil
 }
 
 // recordRehearsal records a rollback rehearsal (durable evidence) and persists it,
-// serialized against other durable mutations.
-func (r *mcpRollout) recordRehearsal(capb rollout.Capability) {
+// serialized against other durable mutations. A persist failure is returned so the
+// caller does not report durable success while a restart could lose the evidence.
+func (r *mcpRollout) recordRehearsal(capb rollout.Capability) error {
 	r.durableMu.Lock()
 	defer r.durableMu.Unlock()
 	st := r.stateFor(capb)
 	st.UpdateEvidence(func(e *rollout.EvidenceSummary) { e.RollbackRehearsed = true })
 	if err := persistRolloutState(st); err != nil {
+		r.setPersistStatus(capb, "write_failed")
 		logger.Printf("MCP rollout rehearsal persist for %s failed: %v", capb.String(), err)
+		return fmt.Errorf("%w: %v", errRolloutPersistFailed, err)
 	}
+	return nil
 }
 
 // mcpRolloutStatus returns a bounded, safe status view for the admin surface. It

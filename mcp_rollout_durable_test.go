@@ -424,3 +424,89 @@ func TestDurable_ManagementExecDepsGate(t *testing.T) {
 		t.Fatalf("gateway must stay Disabled (isolation), got %s", r.gateway.CurrentMode())
 	}
 }
+
+func gwCanaryCfg(rev uint64, servers ...string) *rollout.SignedConfig {
+	if len(servers) == 0 {
+		servers = []string{"s1"}
+	}
+	return &rollout.SignedConfig{
+		SelectorSchema: 1, Capability: rollout.CapabilityGateway, Mode: rollout.ModeCanary,
+		ScopeRevision: rev,
+		Scope:         rollout.ScopeSpec{Capability: rollout.CapabilityGateway, Servers: servers},
+		ConnectorMode: rollout.ConnectorLocalClient,
+	}
+}
+
+// Test (Codex P1 #1): re-entering Shadow from Canary starts a FRESH Shadow window;
+// two disjoint Shadow periods are never treated as one continuous window.
+func TestDurable_ShadowWindowRestartsAfterCanaryDemotion(t *testing.T) {
+	withTempDataDir(t)
+	withExecDepsReady(t)
+	r := newTestRollout()
+	// Shadow at t=1000.
+	if err := r.commitRolloutTransition(gwShadowCfg(1), "admin", time.Unix(1000, 0)); err != nil {
+		t.Fatal(err)
+	}
+	// Promote to Canary at t=2000: Shadow evidence preserved for the promotion gate.
+	if err := r.commitRolloutTransition(gwCanaryCfg(2), "admin", time.Unix(2000, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if r.gateway.Evidence().ShadowStartUnix != 1000 {
+		t.Fatalf("Shadow evidence must be preserved across Shadow->Canary, got %d", r.gateway.Evidence().ShadowStartUnix)
+	}
+	// Demote back to Shadow at t=9000: the Shadow window MUST restart (not inherit 1000).
+	if err := r.commitRolloutTransition(gwShadowCfg(3), "admin", time.Unix(9000, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.gateway.Evidence().ShadowStartUnix; got != 9000 {
+		t.Fatalf("re-entering Shadow from Canary must start a fresh window (9000), got %d", got)
+	}
+	if got := r.gateway.Evidence().CanaryStartUnix; got != 0 {
+		t.Fatalf("Canary window must clear when demoting to Shadow, got %d", got)
+	}
+}
+
+// Test (Codex P2 #3): an idempotent same-mode same-scope re-apply preserves the soak
+// timer (repeated ConfigSnapshot delivery must not reset the 24h soak).
+func TestDurable_SoakPreservedOnIdempotentReapply(t *testing.T) {
+	withTempDataDir(t)
+	withExecDepsReady(t)
+	r := newTestRollout()
+	if err := r.commitRolloutTransition(gwShadowCfg(1), "admin", time.Unix(1000, 0)); err != nil {
+		t.Fatal(err)
+	}
+	soak0 := r.gateway.Evidence().SoakStartUnix
+	if soak0 != 1000 {
+		t.Fatalf("soak start should be 1000, got %d", soak0)
+	}
+	// Repeated idempotent delivery at much later times must NOT reset the soak.
+	for _, ts := range []int64{2000, 50000, 90000} {
+		if err := r.commitRolloutTransition(gwShadowCfg(1), "admin", time.Unix(ts, 0)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := r.gateway.Evidence().SoakStartUnix; got != soak0 {
+		t.Fatalf("idempotent re-apply must preserve soak start %d, got %d", soak0, got)
+	}
+	if got := r.gateway.Evidence().ShadowStartUnix; got != 1000 {
+		t.Fatalf("idempotent re-apply must preserve shadow window, got %d", got)
+	}
+}
+
+// Test (Codex P1 #2): an emergency-disable persist failure is reported, not silently
+// treated as durable success; the in-memory disable stays engaged.
+func TestDurable_EmergencyDisablePersistFailureReported(t *testing.T) {
+	fileutil.SetWriteFailureObserver(func(string, error) {})
+	t.Cleanup(func() { fileutil.SetWriteFailureObserver(noteStorageWriteFailure) })
+	prev := dataDir
+	dataDir = "/proc/1/cannot-write-here"
+	t.Cleanup(func() { dataDir = prev })
+	r := newTestRollout()
+	err := r.emergencyDisable(rollout.CapabilityGateway, "oncall")
+	if err == nil {
+		t.Fatal("emergency-disable with failed persistence must return an error (not silent success)")
+	}
+	if !r.gateway.Killed() {
+		t.Fatal("the in-memory disable must remain engaged even when persistence fails (fail-safe)")
+	}
+}

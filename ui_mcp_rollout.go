@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -192,15 +193,27 @@ func apiMCPRolloutEmergency(w http.ResponseWriter, r *http.Request) {
 		}
 		capab = parsed
 	}
+	var perr error
 	switch req.Action {
 	case "clear":
-		getMCPRollout().clearEmergency(capab)
+		perr = getMCPRollout().clearEmergency(capab)
 		auditEvent(r, "mcp.rollout.emergency.clear", capab.String(), "")
 	default:
-		getMCPRollout().emergencyDisable(capab, r.RemoteAddr)
+		perr = getMCPRollout().emergencyDisable(capab, r.RemoteAddr)
 		auditEvent(r, "mcp.rollout.emergency.disable", capab.String(), "")
 	}
-	jsonOK(w, map[string]any{"capability": capab.String(), "killed": getMCPRollout().stateFor(capab).Killed()})
+	killed := getMCPRollout().stateFor(capab).Killed()
+	if perr != nil {
+		// The in-memory action took effect (kill switch is engaged/cleared) but could
+		// not be made restart-durable. Report it truthfully so the operator does not
+		// trust a durable success: a restart may not preserve this action. 500 with the
+		// current in-memory state and persisted:false.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]any{"capability": capab.String(), "killed": killed, "persisted": false, "error": "rollout_persist_failed"})
+		return
+	}
+	jsonOK(w, map[string]any{"capability": capab.String(), "killed": killed, "persisted": true})
 }
 
 // apiMCPRolloutRehearse records a rollback rehearsal (evidence). The live signed
@@ -241,10 +254,16 @@ func apiMCPRolloutRehearse(w http.ResponseWriter, r *http.Request) {
 		capab = parsed
 	}
 	// Rehearsal is durable evidence; record + persist under the durable-mutation lock
-	// so a restart preserves it.
-	getMCPRollout().recordRehearsal(capab)
+	// so a restart preserves it. A persist failure is surfaced truthfully.
+	if err := getMCPRollout().recordRehearsal(capab); err != nil {
+		auditEvent(r, "mcp.rollout.rehearse-rollback", capab.String(), "")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]any{"capability": capab.String(), "rollback_rehearsed": true, "persisted": false, "error": "rollout_persist_failed"})
+		return
+	}
 	auditEvent(r, "mcp.rollout.rehearse-rollback", capab.String(), "")
-	jsonOK(w, map[string]any{"capability": capab.String(), "rollback_rehearsed": true})
+	jsonOK(w, map[string]any{"capability": capab.String(), "rollback_rehearsed": true, "persisted": true})
 }
 
 // apiMCPExecutions returns the bounded, safe execution history (counts only — no
