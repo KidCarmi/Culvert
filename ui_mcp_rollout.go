@@ -76,6 +76,23 @@ func apiMCPRolloutTransition(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	auditEvent(r, "mcp.rollout.transition.request", req.Capability+":"+req.ToMode, "")
+	// Execution-dependency precondition (Shadow execution safety gate): a transition
+	// to an executing mode (Shadow/Canary) cannot be honored while the guarded-
+	// execution plane is not composed. Surface that fail-closed reason truthfully
+	// rather than the generic distribution message, so the operator sees the real
+	// blocker. Production was already rejected above.
+	if to.Executes() {
+		capbManagement := mcpRolloutCapability(r) == rollout.CapabilityManagement
+		if req.Capability != "" {
+			if parsed, perr := rollout.ParseCapability(req.Capability); perr == nil {
+				capbManagement = parsed == rollout.CapabilityManagement
+			}
+		}
+		if !execDepsConfigured(capbManagement) {
+			http.Error(w, "shadow_execution_dependencies_not_configured", http.StatusConflict)
+			return
+		}
+	}
 	// A CP-side accepted transition is not fleet-effective until it is published +
 	// acknowledged; that signed path is not wired in the disabled-default posture.
 	http.Error(w, "distribution_not_configured", http.StatusConflict)
@@ -223,7 +240,9 @@ func apiMCPRolloutRehearse(w http.ResponseWriter, r *http.Request) {
 		}
 		capab = parsed
 	}
-	getMCPRollout().stateFor(capab).UpdateEvidence(func(e *rollout.EvidenceSummary) { e.RollbackRehearsed = true })
+	// Rehearsal is durable evidence; record + persist under the durable-mutation lock
+	// so a restart preserves it.
+	getMCPRollout().recordRehearsal(capab)
 	auditEvent(r, "mcp.rollout.rehearse-rollback", capab.String(), "")
 	jsonOK(w, map[string]any{"capability": capab.String(), "rollback_rehearsed": true})
 }

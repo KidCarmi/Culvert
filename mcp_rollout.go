@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -8,6 +10,15 @@ import (
 	"github.com/KidCarmi/Culvert/internal/mcp/cpdp"
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 )
+
+// errShadowExecDepsNotConfigured is returned when a transition to an executing mode
+// (Shadow/Canary/Production) is attempted but the guarded-execution plane is not
+// composed (the shipped Observe-only posture). Fail-closed: no partial Shadow state.
+var errShadowExecDepsNotConfigured = errors.New("shadow_execution_dependencies_not_configured")
+
+// errRolloutPersistFailed wraps a durable-persistence failure so callers can reject a
+// transition rather than acknowledge a RAM-only mode change.
+var errRolloutPersistFailed = errors.New("rollout_persist_failed")
 
 // mcpRollout is the process-wide, DISABLED-BY-DEFAULT PR-11 rollout composition.
 // It owns the two capability-local rollout states (Gateway + Management) and the
@@ -24,6 +35,47 @@ type mcpRollout struct {
 	gateway    *rollout.State
 	management *rollout.State
 	metrics    mcpRolloutMetrics
+
+	// durableMu serializes the whole read-modify-write-persist sequence of every
+	// durable rollout mutation (config commit, kill-switch engage/clear, rehearsal
+	// record) so two concurrent mutators can never interleave and persist a stale or
+	// half-applied snapshot. State.swapMu only serializes the atomic in-memory swap;
+	// this guards the surrounding evidence-window + persistence steps too.
+	durableMu sync.Mutex
+
+	// persistState records, per capability, the outcome of the last durable-state
+	// restore/persist so the admin surface can distinguish recovered vs fresh-default
+	// vs degraded persistence. Guarded by persistMu. Values: "fresh" (no durable file
+	// yet), "recovered" (restored from disk), "degraded" (corrupt/invalid — kept
+	// Disabled, fail-closed), "write_failed" (a persist write failed).
+	persistMu       sync.Mutex
+	persistGateway  string
+	persistManageme string
+}
+
+// setPersistStatus records the durable-state health for a capability (admin surface).
+func (r *mcpRollout) setPersistStatus(capb rollout.Capability, status string) {
+	r.persistMu.Lock()
+	defer r.persistMu.Unlock()
+	if capb == rollout.CapabilityManagement {
+		r.persistManageme = status
+	} else {
+		r.persistGateway = status
+	}
+}
+
+// persistStatus returns the recorded durable-state health for a capability.
+func (r *mcpRollout) persistStatus(capb rollout.Capability) string {
+	r.persistMu.Lock()
+	defer r.persistMu.Unlock()
+	s := r.persistGateway
+	if capb == rollout.CapabilityManagement {
+		s = r.persistManageme
+	}
+	if s == "" {
+		return "fresh"
+	}
+	return s
 }
 
 // mcpRolloutMetrics are bounded, low-cardinality counters. No tenant/subject/
@@ -61,10 +113,11 @@ func getMCPRollout() *mcpRollout {
 }
 
 // initMCPRollout is the startup shim (disabled-by-default): it constructs the
-// isolated capability states and (best-effort) recovers node-local rollout state
-// from durable storage. It binds no socket and starts no worker.
+// isolated capability states and recovers node-local rollout state from durable
+// storage (mode/kill-switch/evidence window), fail-closed to Disabled on corrupt or
+// invalid state. It binds no socket and starts no worker.
 func initMCPRollout(_ *startupState) {
-	_ = getMCPRollout()
+	getMCPRollout().restore()
 }
 
 // stateFor returns the capability-local rollout state (never shared).
@@ -78,46 +131,171 @@ func (r *mcpRollout) stateFor(capb rollout.Capability) *rollout.State {
 }
 
 // applyRolloutConfig validates and installs a signed rollout config into the
-// matching capability state. It is called from the DP snapshot-apply path AFTER
-// the envelope's whole-snapshot validation succeeds. A validation failure leaves
-// the current rollout state unchanged (fail closed).
+// matching capability state through the durable commit path. It is called from the
+// DP snapshot-apply path AFTER the envelope's whole-snapshot validation succeeds. A
+// validation, execution-dependency, or persistence failure leaves the current
+// rollout state unchanged (fail closed).
 func (r *mcpRollout) applyRolloutConfig(cfg *rollout.SignedConfig, actor string) {
 	if cfg == nil {
 		return // absence is not deletion — keep local rollout state
 	}
-	st := r.stateFor(cfg.Capability)
-	if err := st.SetConfig(*cfg, actor, time.Now().UnixNano()); err != nil {
+	if err := r.commitRolloutTransition(cfg, actor, time.Now()); err != nil {
 		logger.Printf("MCP rollout config rejected for %s (state unchanged): %v",
 			cfg.Capability.String(), err)
-		return
 	}
+}
+
+// commitRolloutTransition applies a validated signed rollout config with the full
+// durable-transition contract (B-MECH-1/2/3):
+//
+//  1. Execution-dependency precondition — an executing target mode (Shadow/Canary/
+//     Production) is REJECTED fail-closed unless the guarded-execution plane is
+//     composed (never today; see mcp_rollout_execdeps.go). No partial Shadow state.
+//  2. Atomic in-memory install via State.SetConfig (mode/scope authoritative).
+//  3. Evidence-window coupling — BeginWindow is called at the accepted-transition
+//     point (idempotent per mode: a continuous Shadow/Canary window is preserved
+//     across idempotent re-applies of the same mode; a demotion resets it).
+//  4. Restart-durable persistence BEFORE acknowledgement — if the state cannot be
+//     durably persisted the transition is ROLLED BACK in memory and rejected, so no
+//     externally-acknowledged transition ever exists only in RAM.
+//
+// It never calls BeginWindow with a synthetic origin; production transitions record
+// OriginProduction. Tests inject a clock/origin via commitRolloutTransitionAt.
+func (r *mcpRollout) commitRolloutTransition(cfg *rollout.SignedConfig, actor string, now time.Time) error {
+	return r.commitRolloutTransitionAt(cfg, actor, now, rollout.OriginProduction)
+}
+
+// commitRolloutTransitionAt is commitRolloutTransition with an explicit evidence
+// origin so deterministic tests can assert that synthetic elapsed time is labeled
+// OriginSynthetic and can never masquerade as OriginProduction evidence.
+func (r *mcpRollout) commitRolloutTransitionAt(cfg *rollout.SignedConfig, actor string, now time.Time, origin rollout.EvidenceOrigin) error {
+	if cfg == nil {
+		return nil
+	}
+	// Serialize the whole read-modify-write-persist sequence against other durable
+	// mutations (kill switch, rehearsal, another commit).
+	r.durableMu.Lock()
+	defer r.durableMu.Unlock()
+	st := r.stateFor(cfg.Capability)
+	// (1) Execution-dependency precondition: fail closed for an executing mode.
+	if cfg.Mode.Executes() && !execDepsConfigured(cfg.Capability == rollout.CapabilityManagement) {
+		return errShadowExecDepsNotConfigured
+	}
+	// Snapshot the prior state for a fail-closed rollback if persistence fails, and
+	// for the scope-change continuity check below.
+	prevCfg := st.CurrentConfig()
+	prevMode := st.CurrentMode()
+	prevScopeHash := st.ScopeHash()
+	prevEvidence := st.Evidence()
+	// (2) Atomic in-memory install.
+	if err := st.SetConfig(*cfg, actor, now.UnixNano()); err != nil {
+		return err
+	}
+	// (3a) Scope-change continuity (security-critical): a MATERIAL scope change while
+	// staying in the same executing mode must NOT inherit the prior continuous window
+	// — a newly expanded/altered Shadow scope cannot qualify on time accrued under the
+	// old scope. Reset the window start so BeginWindow restamps a fresh window.
+	if cfg.Mode.Executes() && prevMode == cfg.Mode && prevScopeHash != st.ScopeHash() {
+		st.UpdateEvidence(func(e *rollout.EvidenceSummary) {
+			switch cfg.Mode {
+			case rollout.ModeShadow:
+				e.ShadowStartUnix = 0
+			case rollout.ModeCanary, rollout.ModeProduction:
+				e.CanaryStartUnix = 0
+			}
+		})
+	}
+	// (3b) Couple the evidence window to the accepted transition (idempotent per mode).
+	st.UpdateEvidence(func(e *rollout.EvidenceSummary) { e.BeginWindow(cfg.Mode, now.Unix(), origin) })
+	// (4) Persist before acknowledging; roll back in memory on failure.
+	if err := persistRolloutState(st); err != nil {
+		_ = st.SetConfig(prevCfg, actor, now.UnixNano())
+		st.UpdateEvidence(func(e *rollout.EvidenceSummary) { *e = prevEvidence })
+		r.setPersistStatus(cfg.Capability, "write_failed")
+		return fmt.Errorf("%w: %v", errRolloutPersistFailed, err)
+	}
+	r.setPersistStatus(cfg.Capability, "recovered")
 	r.metrics.transitions.Add(1)
+	return nil
+}
+
+// restore re-establishes both capabilities' node-local rollout state from durable
+// storage at startup. A missing file is a fresh state (kept Disabled). A corrupt or
+// invalid file fails closed to Disabled and is logged (never a silent promotion).
+func (r *mcpRollout) restore() {
+	for _, st := range []*rollout.State{r.gateway, r.management} {
+		if ok, err := restoreRolloutState(st); err != nil {
+			r.setPersistStatus(st.Capability(), "degraded")
+			logger.Printf("MCP rollout restore for %s: %v", st.Capability().String(), err)
+		} else if ok {
+			r.setPersistStatus(st.Capability(), "recovered")
+			logger.Printf("MCP rollout restore for %s: mode=%s (recovered)", st.Capability().String(), st.CurrentMode().String())
+		} else {
+			r.setPersistStatus(st.Capability(), "fresh")
+		}
+	}
 }
 
 // emergencyDisable engages the capability-local kill switch immediately (admission
-// stop) without a CP round trip. It never widens access. The signed-publication
-// convergence of the fleet is a separate step.
+// stop) without a CP round trip. It never widens access. The kill-switch state is
+// restart-durable: it is persisted after engaging so a restart cannot silently
+// re-admit traffic an operator emergency-disabled. A persist failure is logged but
+// never un-does the (narrowing, safe) in-memory disable.
 func (r *mcpRollout) emergencyDisable(capb rollout.Capability, actor string) {
-	r.stateFor(capb).EngageKillSwitch(actor, time.Now().UnixNano())
+	r.durableMu.Lock()
+	defer r.durableMu.Unlock()
+	st := r.stateFor(capb)
+	st.EngageKillSwitch(actor, time.Now().UnixNano())
 	r.metrics.emergencies.Add(1)
+	if err := persistRolloutState(st); err != nil {
+		logger.Printf("MCP rollout emergency-disable persist for %s failed (disable still in effect): %v", capb.String(), err)
+	}
 }
 
-// clearEmergency clears the capability-local kill switch (does not change mode).
+// clearEmergency clears the capability-local kill switch (does not change mode) and
+// persists the cleared state so the restart-recovered state matches the operator's
+// last action.
 func (r *mcpRollout) clearEmergency(capb rollout.Capability) {
-	r.stateFor(capb).ClearKillSwitch()
+	r.durableMu.Lock()
+	defer r.durableMu.Unlock()
+	st := r.stateFor(capb)
+	st.ClearKillSwitch()
+	if err := persistRolloutState(st); err != nil {
+		logger.Printf("MCP rollout emergency-clear persist for %s failed: %v", capb.String(), err)
+	}
+}
+
+// recordRehearsal records a rollback rehearsal (durable evidence) and persists it,
+// serialized against other durable mutations.
+func (r *mcpRollout) recordRehearsal(capb rollout.Capability) {
+	r.durableMu.Lock()
+	defer r.durableMu.Unlock()
+	st := r.stateFor(capb)
+	st.UpdateEvidence(func(e *rollout.EvidenceSummary) { e.RollbackRehearsed = true })
+	if err := persistRolloutState(st); err != nil {
+		logger.Printf("MCP rollout rehearsal persist for %s failed: %v", capb.String(), err)
+	}
 }
 
 // mcpRolloutStatus returns a bounded, safe status view for the admin surface. It
 // never includes a tenant/subject/token/secret.
 func (r *mcpRollout) status() map[string]any {
 	capView := func(st *rollout.State) map[string]any {
+		ev := st.Evidence()
 		return map[string]any{
-			"mode":        st.CurrentMode().String(),
-			"desired":     st.Desired().String(),
-			"scope_hash":  st.ScopeHash(),
-			"killed":      st.Killed(),
-			"connector":   st.CurrentConfig().ConnectorMode,
-			"history_len": len(st.History()),
+			"mode":               st.CurrentMode().String(),
+			"desired":            st.Desired().String(),
+			"scope_hash":         st.ScopeHash(),
+			"scope_revision":     st.CurrentConfig().ScopeRevision,
+			"killed":             st.Killed(),
+			"connector":          st.CurrentConfig().ConnectorMode,
+			"history_len":        len(st.History()),
+			"evidence_origin":    ev.Origin.String(),
+			"shadow_start_unix":  ev.ShadowStartUnix,
+			"canary_start_unix":  ev.CanaryStartUnix,
+			"soak_start_unix":    ev.SoakStartUnix,
+			"rollback_rehearsed": ev.RollbackRehearsed,
+			"persistence":        r.persistStatus(st.Capability()),
 		}
 	}
 	return map[string]any{
