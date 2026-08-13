@@ -1,9 +1,14 @@
 # Policy Draft — Candidate/Commit for Rule Content (G2 / `policy-draft`)
 
-Status: **design record, pre-implementation.** Authority for the P3
-`policy-draft` work item in `POLICY-ARCHITECTURE-FUTURE.md` §6 and gap **G2**
-in `M3-POLICY-ARCH-REVIEW.md`. Nothing here is implemented yet; this document
-is the contract the slices below implement against.
+Status: **IMPLEMENTED** (S1+S2+S3 shipped — `policy_draft.go`, `policy_draft_test.go`,
+`ui_policy_draft_e2e_test.go`; SPA wiring in `static/index.html`). Authority for
+the P3 `policy-draft` work item in `POLICY-ARCHITECTURE-FUTURE.md` §6 and gap
+**G2** in `M3-POLICY-ARCH-REVIEW.md`. This document was the pre-implementation
+contract; it now records the shipped design. Two deltas from the original draft:
+`BaseGeneration` is `int64` (not `uint64`), and the settings surface collapsed
+from `GET/PUT /api/policy/draft/settings` to `PUT /api/policy/draft`. See also
+ADR-0026, which closes the related GAP-POL-03 (the Policy Tester now evaluates
+the draft candidate via `effectivePolicyList()`).
 
 Date: 2026-07-13.
 

@@ -2,7 +2,7 @@
 
 Deploying egress policy safely: the model, staged rollout, validation, rollback, and test→prod promotion — with the gaps that shape a safe rollout.
 
-> **Enterprise-readiness verdict:** **Policy engine, dry-run testing, rollback, and export/import promotion are production-ready. Safe staged rollout is weak** — there is no monitor-only enforcement mode and no node-scoped targeting, so pilots must be expressed as user/IP populations and enforcement is all-or-nothing per rule.
+> **Enterprise-readiness verdict:** **Policy engine, candidate/commit Draft Mode, draft-aware dry-run testing, rollback, and export/import promotion are production-ready. Safe staged rollout is still weak** — there is no monitor-only enforcement mode (GAP-POL-01) and no node-scoped targeting (GAP-POL-02), so pilots must be expressed as user/IP populations and enforcement is all-or-nothing per rule. A non-enforcing **Security Policy Learning Mode** to close GAP-POL-01 is planned (ADR-0025, not yet implemented).
 
 ---
 
@@ -32,9 +32,15 @@ Deploying egress policy safely: the model, staged rollout, validation, rollback,
 
 ## 4. Validation before enforce
 
-- **Policy Tester** (`POST /api/policy/test`, viewer role; GUI "Policy Tester") dry-runs a synthetic request `{sourceIP, identity, authSource, groups, host, protocol, method}` against the **live** ruleset with no side effects, returning the first-match rule, action, a per-rule trace with skip reasons, and the Stage-1 auth outcome.
+- **Policy Tester** (`POST /api/policy/test`, viewer role; GUI "Policy Tester") dry-runs a synthetic request `{sourceIP, identity, authSource, groups, host, protocol, method}` with no side effects, returning the first-match rule, action, a per-rule trace with skip reasons, and the Stage-1 auth outcome. It evaluates the **effective** ruleset — the draft candidate when Draft Mode is engaged, otherwise the running store — and the response carries a `rulebase: "draft" | "running"` indicator (see GAP-POL-03 below).
 
-> **GAP-POL-03 — live-only simulation.** The tester evaluates the *current* store, not a candidate/unsaved ruleset. To validate a proposed set, apply it on a **test appliance**, run the tester there, then export→import to prod.
+> **GAP-POL-03 — RESOLVED (ADR-0026 / F4).** The tester previously evaluated only the *running* store. It now evaluates `effectivePolicyList()`, so a candidate authored under Draft Mode is validated in place before commit; the `rulebase` field states which set was evaluated. The tester also adopts the canonical one-instant-per-evaluation schedule semantics (ADR-0026), fixing a narrow schedule-boundary divergence from the enforcement evaluator.
+
+## 4a. Draft Mode — candidate/commit for rule content
+
+- **Opt-in, per instance:** `PUT /api/policy/draft {require_commit: true}` (admin) arms Draft Mode. Default is off — behavior is byte-identical to the pre-draft direct-write model when disarmed.
+- **Candidate/commit lifecycle:** while armed, every mutating policy handler writes to a **candidate** rulebase (a separate `policy_draft.json`), not the live store. Review the pending diff and any advisory rule-shadow findings on the draft panel, then `POST /api/policy/draft/commit` (operator, requires a comment) to atomically publish the candidate to the live store and record it as a config version; `POST /api/policy/draft/revert` discards it. See `docs/design/POLICY-DRAFT-DESIGN.md`.
+- **Learning Mode (future, ADR-0025):** accepted policy-learning recommendations land in this same candidate as disabled `Allow`/`Inspect` rules — commit remains the sole activation step.
 
 ## 5. Rollback
 

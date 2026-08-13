@@ -1,9 +1,12 @@
 # PAC Exception Intelligence — R&D Report & Target Architecture
 
-> Status: **R&D / architecture review complete. GO WITH CONDITIONS. No implementation started.**
-> Authored from a 9-reviewer independent fleet (+ a verified current-state code map). Every reviewer's
-> raw findings live in the fleet working set; per-reviewer verdicts and unresolved disagreements are in
-> §10. This document is the authority for the initiative; PRs may not begin until §8/§9 scope is approved.
+> Status: **PARTIALLY IMPLEMENTED.** P0 (config-derived DIRECT inventory, `internal/pac/inventory.go`),
+> P2 (governance/exception records, `internal/pac/exceptions.go`), and P3 change-diff have shipped with
+> admin APIs (`pac_posture_api.go`, `pac_exceptions_api.go`) and behavioral tests. P1 telemetry, P4
+> endpoint-agent evidence, and P5 fleet analytics remain **not started**. The evidence-class taxonomy
+> (§2), the de-scalarisation rule (§7), and "absence of evidence is never evidence" (AC-2) are the
+> reusable doctrine cited by ADR-0025 (Policy Learning). Originally authored from a 9-reviewer
+> independent fleet; per-reviewer verdicts are in §10.
 
 ---
 
