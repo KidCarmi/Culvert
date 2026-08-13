@@ -95,6 +95,7 @@ func (e *Engine) StartSession(actor string) (Session, error) {
 	if e.cfg.CategoryEpoch != nil {
 		base.CategoryEpoch = e.cfg.CategoryEpoch() // pinned at Start (M3)
 	}
+	base.GuardrailsHash = e.guardrailsHash // recommendable-allowlist identity pinned at Start (M4)
 	s := &Session{
 		ID:              newID(),
 		State:           StateLearning,
@@ -150,8 +151,8 @@ func (e *Engine) finishActive(actor, terminalState string) (Session, error) {
 	s.State = terminalState
 	s.StoppedAt = rfc3339(now)
 	s.StoppedBy = actor
-	e.checkEpochLocked(s, now)  // final churn check for the window
-	e.syncTransportLocked()     // fold the session-window transport deltas
+	e.checkEpochLocked(s, now) // final churn check for the window
+	e.syncTransportLocked()    // fold the session-window transport deltas
 	e.pruneLocked()
 	e.learningActive.Store(false)
 	if err := e.saveLocked(); err != nil {

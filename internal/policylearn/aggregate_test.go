@@ -327,8 +327,8 @@ func TestAggregate_PersistedAcrossRestartNoRawSubjects(t *testing.T) {
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		t.Fatal(err)
 	}
-	if doc["schema_version"] != float64(2) {
-		t.Fatalf("schema_version = %v, want 2", doc["schema_version"])
+	if doc["schema_version"] != float64(SchemaVersion) {
+		t.Fatalf("schema_version = %v, want %d", doc["schema_version"], SchemaVersion)
 	}
 
 	// Restart: aggregate + tokens recover; the SAME subject maps to the SAME

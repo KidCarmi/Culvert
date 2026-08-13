@@ -19,9 +19,11 @@ import (
 // fail-closed posture (ErrStoreReadOnly) so a downgraded binary can never
 // clobber newer state. Version history: 1 = M1 sessions; 2 = M3 aggregation
 // (subject_key_id / category_churn / transport / agg / baseline
-// category_epoch). v1 documents load cleanly on a v2 binary (pure field
-// additions, all omitempty); saves always write the current version.
-const SchemaVersion = 2
+// category_epoch); 3 = M4 recommendations (top-level recommendations array +
+// baseline guardrails_hash). Older documents load cleanly on a newer binary
+// (pure field additions, all omitempty); saves always write the current
+// version.
+const SchemaVersion = 3
 
 // minReadableSchemaVersion: every version in [min, current] loads.
 const minReadableSchemaVersion = 1
@@ -30,8 +32,9 @@ const minReadableSchemaVersion = 1
 // trailing data are corruption (quarantine), not tolerated drift — schema
 // evolution goes through SchemaVersion, matching the catoverride precedent.
 type persistEnvelope struct {
-	SchemaVersion int        `json:"schema_version"`
-	Sessions      []*Session `json:"sessions"`
+	SchemaVersion   int               `json:"schema_version"`
+	Sessions        []*Session        `json:"sessions"`
+	Recommendations []*Recommendation `json:"recommendations,omitempty"` // M4 (schema v3)
 }
 
 // load reads the store fail-closed:
@@ -64,6 +67,11 @@ func (e *Engine) load() error {
 		return nil
 	}
 	e.sessions = env.Sessions
+	e.recs = env.Recommendations
+	if pruned := pruneRecommendations(e.recs); len(pruned) != len(e.recs) {
+		e.recs = pruned
+		e.dirty = true
+	}
 	// Restart recovery: an active session survives a restart but records the
 	// gap (never silent — ADR-0025 §8), then the ordinary lazy-expiry rule
 	// applies (an overdue session completes deterministically). Observations
@@ -136,6 +144,16 @@ func decodeEnvelope(raw []byte) (*persistEnvelope, error) {
 			return nil, fmt.Errorf("decode session store: unknown session state %q", s.State)
 		}
 	}
+	for _, r := range env.Recommendations {
+		if r == nil || r.ID == "" || r.SessionID == "" {
+			return nil, errors.New("decode session store: malformed recommendation record")
+		}
+		switch r.State {
+		case RecStateGenerated, RecStateSuperseded:
+		default:
+			return nil, fmt.Errorf("decode session store: unknown recommendation state %q", r.State)
+		}
+	}
 	return &env, nil
 }
 
@@ -147,7 +165,7 @@ func (e *Engine) saveLocked() error {
 		e.dirty = false
 		return nil
 	}
-	env := persistEnvelope{SchemaVersion: SchemaVersion, Sessions: e.sessions}
+	env := persistEnvelope{SchemaVersion: SchemaVersion, Sessions: e.sessions, Recommendations: e.recs}
 	raw, err := json.Marshal(env)
 	if err != nil {
 		return fmt.Errorf("policylearn: marshal session store: %w", err)
@@ -161,12 +179,13 @@ func (e *Engine) saveLocked() error {
 
 // Stats is the M1 posture snapshot (bounded scalars only).
 type Stats struct {
-	Sessions      int
-	Active        bool
-	ReadOnly      bool
-	MaxRetained   int
-	MaxDuration   time.Duration
-	SchemaVersion int
+	Sessions        int
+	Recommendations int
+	Active          bool
+	ReadOnly        bool
+	MaxRetained     int
+	MaxDuration     time.Duration
+	SchemaVersion   int
 }
 
 // Snapshot returns the engine posture.
@@ -175,11 +194,12 @@ func (e *Engine) Snapshot() Stats {
 	defer e.mu.Unlock()
 	e.maybeExpireLocked(e.cfg.Now())
 	return Stats{
-		Sessions:      len(e.sessions),
-		Active:        e.activeLocked() != nil,
-		ReadOnly:      e.readOnly,
-		MaxRetained:   e.cfg.MaxRetainedSessions,
-		MaxDuration:   e.cfg.MaxSessionDuration,
-		SchemaVersion: SchemaVersion,
+		Sessions:        len(e.sessions),
+		Recommendations: len(e.recs),
+		Active:          e.activeLocked() != nil,
+		ReadOnly:        e.readOnly,
+		MaxRetained:     e.cfg.MaxRetainedSessions,
+		MaxDuration:     e.cfg.MaxSessionDuration,
+		SchemaVersion:   SchemaVersion,
 	}
 }

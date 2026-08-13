@@ -61,12 +61,12 @@ type Cell struct {
 	ThreatBlocked int64 `json:"threat_blocked"` // pre-dispatch threat/blocklist/plugin blocks
 
 	// Allowed-evidence sets (updated by ALLOWED observations only).
-	Subjects        map[string]bool `json:"subjects,omitempty"` // pseudonymous tokens — never raw subjects
-	SubjectOverflow int64           `json:"subject_overflow,omitempty"`
-	Days            map[string]bool `json:"days,omitempty"` // distinct UTC dates (YYYY-MM-DD)
-	DayOverflow     int64           `json:"day_overflow,omitempty"`
-	FirstSeen       int64           `json:"first_seen,omitempty"` // unix seconds, allowed evidence
-	LastSeen        int64           `json:"last_seen,omitempty"`
+	Subjects        map[string]bool  `json:"subjects,omitempty"` // pseudonymous tokens — never raw subjects
+	SubjectOverflow int64            `json:"subject_overflow,omitempty"`
+	Days            map[string]bool  `json:"days,omitempty"` // distinct UTC dates (YYYY-MM-DD)
+	DayOverflow     int64            `json:"day_overflow,omitempty"`
+	FirstSeen       int64            `json:"first_seen,omitempty"` // unix seconds, allowed evidence
+	LastSeen        int64            `json:"last_seen,omitempty"`
 	TopHosts        map[string]int64 `json:"top_hosts,omitempty"` // admission-bounded representative destinations
 	OtherHosts      int64            `json:"other_hosts,omitempty"`
 
@@ -193,7 +193,7 @@ func (c *Cell) apply(agg *Aggregate, o *Observation, cls evidenceClass, token, d
 	// Attribution breakdowns (all directions, bounded).
 	ruleKey := o.RuleID
 	if ruleKey == "" {
-		ruleKey = "_default_"
+		ruleKey = DefaultActionRuleKey
 	}
 	boundedCount(&c.RuleHits, &c.OtherRules, ruleKey, maxRuleHits)
 	boundedCount(&c.TierHits, &c.OtherTiers, tier, maxTierHits)

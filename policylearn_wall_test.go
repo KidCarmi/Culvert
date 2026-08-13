@@ -73,6 +73,32 @@ func TestPolicyLearnWall_ImportSurface(t *testing.T) {
 	}
 }
 
+// TestPolicyLearnWall_NoPolicyMutationTokens (M4): the import-surface wall
+// already makes reaching enforcement state impossible at compile-graph level;
+// this pins the intent at the identifier level too — recommendation generation
+// must never grow a call path toward the policy write pipeline (ADR-0025: M5
+// translates accepted recommendations into draft rules OUTSIDE this package,
+// at the trust boundary). ProposedRule is an engine-owned DTO, never the root
+// PolicyRule type.
+func TestPolicyLearnWall_NoPolicyMutationTokens(t *testing.T) {
+	forbidden := []string{
+		"policyWriteStore", "PolicyStore", "PolicyRule",
+		"commitDraft", "applyConfigBackup", "ReplaceAll(",
+	}
+	for _, file := range policylearnSourceFiles(t, false) {
+		raw, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		src := string(raw)
+		for _, tok := range forbidden {
+			if strings.Contains(src, tok) {
+				t.Errorf("%s references %q — recommendation generation must have no path toward policy mutation (ADR-0025 M4 wall)", file, tok)
+			}
+		}
+	}
+}
+
 // TestPolicyLearnWall_NoWallClock: the engine never reads the wall clock —
 // time.Now is banned in non-test files (Config.Now is the injected clock).
 func TestPolicyLearnWall_NoWallClock(t *testing.T) {

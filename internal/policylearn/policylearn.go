@@ -10,7 +10,7 @@
 //   - ADVISORY ONLY. Learning has no authority over active policy or any
 //     enforcement subsystem. This package's import surface is walled to the
 //     standard library + internal/fileutil + internal/obs (root wall test);
-//     it cannot import or mutate PolicyStore, TLS/decryption, PAC, CDR,
+//     it cannot import or mutate the policy store, TLS/decryption, PAC, CDR,
 //     default-action, or any other enforcement state. Everything it needs
 //     from the outside arrives through injected function values on Config.
 //   - INJECTED CLOCK. The engine never reads the wall clock; Config.Now is
@@ -70,7 +70,8 @@ type Baseline struct {
 	PolicyGeneration int64  `json:"policy_generation"`
 	DefaultAction    string `json:"default_action,omitempty"`
 	CapturedAt       string `json:"captured_at,omitempty"`     // RFC3339 UTC
-	CategoryEpoch    string `json:"category_epoch,omitempty"` // opaque category-generation identity pinned at Start (M3)
+	CategoryEpoch    string `json:"category_epoch,omitempty"`  // opaque category-generation identity pinned at Start (M3)
+	GuardrailsHash   string `json:"guardrails_hash,omitempty"` // recommendable-category allowlist identity pinned at Start (M4)
 }
 
 // Config wires the engine. Now is REQUIRED; everything else has safe defaults.
@@ -112,6 +113,16 @@ type Config struct {
 	// into the session baseline at Start; a mid-session change is recorded as
 	// churn. nil = epoch tracking disabled.
 	CategoryEpoch func() string
+	// RecommendableCategories is the fail-closed ALLOWLIST of categories the
+	// M4 generator may recommend (never a denylist): a cell whose category is
+	// not on this list can never produce a recommendation, and an EMPTY list
+	// means NOTHING is recommendable. Canonicalized deterministically at New
+	// (trim/dedupe/sort, exact-match semantics); its identity (GuardrailsHash)
+	// is pinned into every session Baseline at Start.
+	RecommendableCategories []string
+	// Recommend holds the explicit confidence-predicate thresholds (M4). Zero
+	// fields take the package defaults.
+	Recommend Thresholds
 }
 
 // Engine owns the Learning Session lifecycle and (M2) the observation
@@ -136,6 +147,14 @@ type Engine struct {
 	sinceFlush   int         // observations since the last aggregate persist
 	sinceEpoch   int         // observations since the last category-epoch check
 	tPin         ObservationStats
+
+	// M4 recommendation state. allowlist/allowSet/guardrailsHash/th are
+	// immutable after New (read without mu); recs is guarded by mu.
+	allowlist      []string
+	allowSet       map[string]bool
+	guardrailsHash string
+	th             Thresholds
+	recs           []*Recommendation
 }
 
 // New constructs the engine and loads the store (fail-closed; see load).
@@ -156,6 +175,13 @@ func New(cfg Config) (*Engine, error) {
 		cfg.MaxSessionDuration = minSessionDuration
 	}
 	e := &Engine{cfg: cfg}
+	e.allowlist = canonicalizeCategories(cfg.RecommendableCategories)
+	e.allowSet = make(map[string]bool, len(e.allowlist))
+	for _, c := range e.allowlist {
+		e.allowSet[c] = true
+	}
+	e.guardrailsHash = guardrailsHashFor(e.allowlist)
+	e.th = cfg.Recommend.withDefaults()
 	sk, err := loadOrCreateSubjectKey(cfg.SubjectKeyPath)
 	if err != nil {
 		return nil, err

@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -135,6 +136,28 @@ func DefaultEntries() []*Entry {
 		}
 	}
 	return entries
+}
+
+// DefaultBusinessCategoryNames returns the sorted names of the embedded SaaS
+// BUSINESS category seed list ONLY (default_categories.json) — deliberately
+// excluding the hardcoded non-business built-ins (Social Media, Malicious,
+// News, Streaming, Gambling, Adult). This is the fail-closed seed for the
+// policy-learning recommendable-category allowlist (ADR-0025 M4): a category
+// must be on this list (or a future governed surface's) before the learning
+// engine may propose an Allow rule for it.
+func DefaultBusinessCategoryNames() []string {
+	var saas []Entry
+	if json.Unmarshal(defaultCategoriesJSON, &saas) != nil {
+		return nil // fail closed: no parse ⇒ nothing recommendable
+	}
+	names := make([]string, 0, len(saas))
+	for i := range saas {
+		if saas[i].Name != "" {
+			names = append(names, saas[i].Name)
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 // Load reads categories from a JSON file. If the file does not exist the

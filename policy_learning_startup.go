@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/policylearn"
+	"github.com/KidCarmi/Culvert/internal/urlcat"
 )
 
 // loadPolicyLearning wires the learning engine. ORDER IS THE CONTRACT:
@@ -43,6 +44,12 @@ func loadPolicyLearning(cfg policyLearningStartupConfig) {
 			return category, tier
 		},
 		CategoryEpoch: learnCategoryEpoch,
+		// M4: the fail-closed recommendable-category ALLOWLIST, seeded from the
+		// embedded business-category set. Engine-config only — no admin surface
+		// exists yet (that lands with GUI parity in a later slice). The engine's
+		// default community-tier cap ("community") matches lookupHostCategory's
+		// tier taxonomy.
+		RecommendableCategories: urlcat.DefaultBusinessCategoryNames(),
 		Quarantine: func(path string, err error) {
 			quarantineCorruptStateFile("policy_learning", path, err)
 		},
