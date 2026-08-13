@@ -1492,36 +1492,41 @@ env_put() {
     warn "Set $var manually in $file if you need it, then restart the stack."
     return 0
   fi
-  touch "$file"; chmod 600 "$file"
-  sed -i 's/\r$//' "$file" 2>/dev/null || true # normalize to LF so compose parses cleanly
-  # grep -v exits 1 (not just erroring) whenever EVERY line matched the
-  # pattern being dropped — including the common case where $file contains
-  # only this one VAR=... line. Treat ONLY that "no lines survived" case (1)
-  # as benign and promote the filtered file; a real error (e.g. ENOSPC while
-  # writing $tmp) gets a higher exit code and must NOT clobber the existing
-  # $file with a truncated/empty temp file.
-  #
-  # $tmp MUST be unique per invocation, not a fixed "$file.tmp" — install.sh
-  # is designed to be safely re-run against an existing deployment (e.g. an
-  # automation retry racing a still-running instance, or two admins running
-  # it at once), and a shared path lets a second, concurrent env_put "mv" it
-  # away underneath this one. When that happens, this call's own `grep ...
-  # > "$file.tmp"` output redirect ends up aliasing "$file" (the other
-  # invocation just renamed its OWN tmp file onto "$file"), which GNU grep
-  # refuses to do ("input file is also the output") — so the "drop the old
-  # VAR= line" step silently never runs, while the unconditional append
-  # below still does, leaving a stale duplicate VAR= line behind.
-  local tmp
-  tmp="$(mktemp "${file}.XXXXXX" 2>/dev/null)" || tmp="${file}.tmp.$$"
-  local rc=0
-  grep -vE "^${var}=" "$file" > "$tmp" 2>/dev/null && rc=0 || rc=$?
-  if [[ $rc -eq 0 || $rc -eq 1 ]]; then
-    mv "$tmp" "$file"
-  else
-    rm -f "$tmp"
-  fi
-  printf '%s=%s\n' "$var" "$val" >> "$file"
-  chmod 600 "$file"
+  # The full read (grep) / write (mv|rm) / append sequence below must run as
+  # ONE atomic transaction — install.sh is designed to be safely re-run
+  # against an existing deployment (e.g. an automation retry racing a
+  # still-running instance, or two admins running it at once), and two
+  # concurrent env_put calls both reading "$file" before either has written
+  # it back can otherwise interleave: whichever "mv" runs LAST wins
+  # unconditionally, silently discarding the other invocation's already-
+  # applied update (a lost-update race — unique-per-invocation staging files
+  # alone stop the two calls' writes from colliding, but not their reads
+  # and writes from interleaving with each other). A dedicated lock file
+  # (not $file itself, which gets replaced out from under an flock held on
+  # its old inode by the very "mv" below) held for the whole transaction
+  # serializes concurrent env_put calls against the same $file into a strict
+  # queue, so this reasons about $file exactly as a sequential caller would.
+  (
+    flock -x 9
+    touch "$file"; chmod 600 "$file"
+    sed -i 's/\r$//' "$file" 2>/dev/null || true # normalize to LF so compose parses cleanly
+    # grep -v exits 1 (not just erroring) whenever EVERY line matched the
+    # pattern being dropped — including the common case where $file contains
+    # only this one VAR=... line. Treat ONLY that "no lines survived" case (1)
+    # as benign and promote the filtered file; a real error (e.g. ENOSPC
+    # while writing $tmp) gets a higher exit code and must NOT clobber the
+    # existing $file with a truncated/empty temp file.
+    tmp="$(mktemp "${file}.XXXXXX" 2>/dev/null)" || tmp="${file}.tmp.$$"
+    rc=0
+    grep -vE "^${var}=" "$file" > "$tmp" 2>/dev/null && rc=0 || rc=$?
+    if [[ $rc -eq 0 || $rc -eq 1 ]]; then
+      mv "$tmp" "$file"
+    else
+      rm -f "$tmp"
+    fi
+    printf '%s=%s\n' "$var" "$val" >> "$file"
+    chmod 600 "$file"
+  ) 9>"$file.lock"
 }
 
 gen_passphrase() {
