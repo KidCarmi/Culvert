@@ -70,7 +70,11 @@ const (
 	shutdownOrderMCPRuntimeStop = 65
 	// QUAL-3: drain + close the MCP telemetry spool/exporter AFTER the listeners stop
 	// (so no new events are produced), before the admin UI. A no-op while disabled.
-	shutdownOrderMCPTelemetryDrain   = 66
+	shutdownOrderMCPTelemetryDrain = 66
+	// ADR-0025 M1: flush the policy-learning session store (lazy-expiry flips)
+	// before the admin plane quiesces. A nil singleton (disabled — the M1
+	// production posture) makes this a no-op.
+	shutdownOrderPolicyLearnFlush    = 67
 	shutdownOrderAdminUIShutdown     = 70
 	shutdownOrderSOCKS5ListenerStop  = 80
 	shutdownOrderProxyServerShutdown = 90
@@ -209,6 +213,16 @@ func registerLateShutdownHooks(reg *shutdownRegistry, s *startupState, proxySrv 
 	reg.Register("mcp-telemetry-drain", shutdownOrderMCPTelemetryDrain, func(ctx context.Context) error {
 		if err := shutdownMCPTelemetry(ctx); err != nil {
 			logger.Printf("MCP telemetry shutdown error: %v", err)
+		}
+		return nil
+	})
+	// ADR-0025 M1: persist any lazily-flipped learning-session state. No-op on
+	// the nil singleton (learning disabled — the M1 production posture).
+	reg.Register("policy-learning-flush", shutdownOrderPolicyLearnFlush, func(context.Context) error {
+		if eng := policyLearnEngine.Load(); eng != nil {
+			if err := eng.Close(); err != nil {
+				logger.Printf("Policy learning store flush error: %v", err)
+			}
 		}
 		return nil
 	})

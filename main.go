@@ -216,8 +216,9 @@ func main() {
 	initBackgroundServices(s)
 	initSOCKS5(s)
 	initPersistentAdminState(s)
-	initMCPRuntime(s) // PR-5: disabled-by-default MCP listener runtime (no SWG effect when off)
-	initMCPRollout(s) // PR-11: disabled-by-default rollout composition (Gateway/Management isolated)
+	initPolicyLearning(s) // ADR-0025 M1: disabled-by-default learning skeleton (constant-off; no effect)
+	initMCPRuntime(s)     // PR-5: disabled-by-default MCP listener runtime (no SWG effect when off)
+	initMCPRollout(s)     // PR-11: disabled-by-default rollout composition (Gateway/Management isolated)
 	loadReleaseManagement(resolveReleaseStartupConfig())
 	startAdminUI(s)
 
@@ -881,6 +882,14 @@ func initSOCKS5(s *startupState) {
 // → admin settings LAST).
 func initPersistentAdminState(_ *startupState) {
 	loadPersistentAdminState(resolvePersistentAdminStateStartupConfig(dataDir), appLifecycleCtx)
+}
+
+// initPolicyLearning resolves the policy-learning slice config and hands it to
+// the loader (policy_learning_startup*.go). M1: Enabled is a constant false, so
+// this is a guaranteed no-op in production builds (ADR-0025 dead infrastructure
+// until M2+ lands the admin surface with GUI parity).
+func initPolicyLearning(s *startupState) {
+	loadPolicyLearning(resolvePolicyLearningStartupConfig(s.fc, dataDir))
 }
 
 // startAdminUI wires UI globals and launches the admin UI server.
