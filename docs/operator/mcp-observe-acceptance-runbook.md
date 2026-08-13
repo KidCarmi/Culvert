@@ -202,8 +202,38 @@ checklist. Confirm, at minimum:
 Secret-bearing files are referenced by path only and their bytes never enter the
 evidence bundle. Confirm the harness process can read each referenced file.
 
+Immediately before every authoritative run, the harness itself validates the
+operator X.509 identity material as a pre-run gate, before any Culvert child
+process, tripwire, or MCP traffic (the v1.0.203 failure class: certificates that
+expired between preflight and execution):
+
+- certificate validity: every relevant certificate must satisfy
+  `NotBefore <= now <= NotAfter` under standard `crypto/x509` verification, with
+  no added skew;
+- certificate lifetime must also cover the requested bounded run: every chain must
+  still verify at `now + <the -timeout value>`, so material that would expire
+  during the run is rejected up front;
+- chain and server identity: the server certificate must verify against the
+  configured server CA for server authentication and for the configured
+  `tls_server_name` (falling back to `bind_host`); the client certificate, when
+  configured, must verify against the configured client CA (falling back to the
+  server CA) for client authentication;
+- certificate/key pairing: `tls_cert_file`/`tls_key_file` and
+  `client_cert_file`/`client_key_file` must each be a matching pair.
+
+Expired, not-yet-valid, wrong-name, wrong-chain, mismatched, or
+insufficient-lifetime PKI is a pre-run hard stop: the command exits with the
+harness-error code and no evidence bundle claiming a live run is produced.
+
+Preflight readiness is time-sensitive. A green preflight from days earlier is NOT
+sufficient authorization on its own: identity material can age out between
+preflight and execution, and the acceptance command therefore repeats the full PKI
+validation immediately before launch, at every invocation. This is acceptance-run
+safety only; it sets no production certificate-lifetime policy.
+
 ABORT if: any environment value is missing, or a referenced file is unreadable, or
-the platform of the artifact does not match the node.
+the platform of the artifact does not match the node, or the pre-run PKI
+validation rejects the identity material.
 
 ## 4. Startup configuration
 

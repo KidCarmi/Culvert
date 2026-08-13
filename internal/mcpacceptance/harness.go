@@ -21,6 +21,7 @@ type Harness struct {
 	workDir     string // holds fixtures/secrets/logs; NEVER the evidence dir
 	evidenceDir string
 	sourceSHA   string
+	runHorizon  time.Duration // requested bounded run timeout; the PKI validity horizon
 
 	fixture       *Fixture
 	uiClient      *http.Client
@@ -54,6 +55,12 @@ type Options struct {
 	SourceSHA string
 	// Now injects a clock for deterministic tests. Defaults to time.Now.
 	Now func() time.Time
+	// RunHorizon is the requested overall bounded run timeout (the CLI -timeout).
+	// Authoritative pre-run PKI validation requires every qualification certificate
+	// chain to remain valid through now+RunHorizon, so material that would expire
+	// DURING the bounded run is rejected before any child process starts. Zero
+	// means no added horizon (chains are still required to be valid at `now`).
+	RunHorizon time.Duration
 }
 
 // NewHarness validates the spec and prepares a harness. The evidence directory is
@@ -87,6 +94,7 @@ func NewHarness(spec *Spec, opts Options) (*Harness, error) {
 		workDir:     work,
 		evidenceDir: spec.EvidenceDir,
 		sourceSHA:   opts.SourceSHA,
+		runHorizon:  opts.RunHorizon,
 		secrets:     NewSecretScan(),
 		now:         opts.Now,
 	}, nil
