@@ -33,6 +33,8 @@
 | RISK-013 | LOW | ✅ CLOSED | `normalizeHost` IDNA failure is fail-open | fail-closed `NormalizeHostStrict` gate at proxy+SOCKS5 dispatch (2026-07-05); adversarially reviewed |
 | RISK-020 | LOW | OPEN | Native HTTP/2 inspection: deferred hardening on the opt-in path | `proxy_tunnel_h2.go` — see below |
 | RISK-023 | LOW | ✅ ACCEPTED | `diagnose tls` probe uses `InsecureSkipVerify` to inspect invalid/expired chains | `diagnose.go` `tlsHandshakeProbe`; bounded, SSRF-guarded, never carries traffic — see below |
+| RISK-024 | MEDIUM | ✅ CLOSED | Client-supplied `X-User-Identity` reached policy evaluation + log attribution on identity-free paths (Exempt / no-backend); the ingress scrub was egress-only | fail-closed ingress `Del` + evaluation reads `authenticatedIdentity` directly + trailer scrub (`proxy.go`, 2026-08-13); security review `docs/security-reviews/2026-08-13-x-user-identity-ingress-trust.md`; residual DEBT — server-stamped header transport for HTTP logging remains, to be replaced by typed identity plumbing at M2 |
+| RISK-024 | MEDIUM | ✅ CLOSED | Inbound `X-User-Identity` unscrubbed on ingress: on identity-free paths (default-Exempt / scoped exempt / no-backend) a client-supplied value reached `policyStore.Evaluate` as `SourceIdentity` and the HTTP-path log attribution (CWE-290/807) | unconditional ingress delete + direct `authenticatedIdentity` evaluation + trailer scrub (2026-08-13); pinned by `authz_identity_ingress_test.go`; residual header transport = recorded debt (typed identity plumbing at M2) — see `docs/security-reviews/2026-08-13-x-user-identity-ingress-trust.md` |
 
 ---
 

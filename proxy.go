@@ -70,6 +70,16 @@ func scrubForwardedHeaders(r *http.Request) {
 
 	// Always remove internal identity header before forwarding.
 	r.Header.Del("X-User-Identity")
+
+	// Trailer hardening: Go forwards declared request trailers on r.Write, and
+	// the scrub above touches r.Header only (noted in the 2026-07-11 security
+	// review). The same identity/topology keys must not ride through as
+	// trailers either.
+	if r.Trailer != nil {
+		r.Trailer.Del("X-Forwarded-For")
+		r.Trailer.Del("X-Real-IP")
+		r.Trailer.Del("X-User-Identity")
+	}
 }
 
 // policyLogURI builds the URL stored in LogEntry.URI for the per-rule "log full
@@ -797,6 +807,16 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	reqID := setupRequestTracing(w, r)
 
+	// ── Ingress trust boundary (security review 2026-08-13) ─────────────────
+	// X-User-Identity is an INTERNAL header: the auth layer below re-stamps it
+	// for the plain-HTTP logging consumers (proxy_http.go). A client-supplied
+	// value must never survive into authentication, policy evaluation, or log
+	// attribution — on the identity-free paths (default-Exempt, scoped exempt,
+	// no-backend inert) nothing below overwrites it, so delete it here
+	// unconditionally, fail-closed for every downstream branch. The egress
+	// scrubForwardedHeaders still strips it before any upstream forward.
+	r.Header.Del("X-User-Identity")
+
 	// PROXY-plane panic backstop (record-only; never writes an HTTP status, so a
 	// hijacked CONNECT/WS tunnel is never corrupted and the happy path is
 	// byte-identical). See crashguard.go.
@@ -839,7 +859,15 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	authLog := auth.log
 
 	// Set internal identity headers — scrubForwardedHeaders removes them
-	// before forwarding upstream.
+	// before forwarding upstream. This server-stamped header is TRANSPORT for
+	// the existing plain-HTTP logging consumers (proxy_http.go reads it for
+	// FILE_BLOCKED/SCAN_BLOCKED/POLYGLOT_BLOCKED attribution), not an authority
+	// boundary: policy evaluation below consumes authenticatedIdentity
+	// directly, and the ingress scrub at the top of handleRequest guarantees no
+	// client-supplied value can be observed here. Follow-up (recorded technical
+	// debt): replace this header channel with explicit typed identity plumbing
+	// when the HTTP forward path is next touched — likely during the Learning
+	// Mode observation wiring (M2). Do not add new readers.
 	if authenticatedIdentity != "" {
 		r.Header.Set("X-User-Identity", authenticatedIdentity)
 	}
@@ -870,11 +898,12 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// ── Policy engine (PBAC) pre-check ───────────────────────────────────────
-	// X-User-Identity is the authenticated identity set by the auth layer
-	// (OIDC/LDAP); scrubForwardedHeaders already stripped any client-supplied
-	// value, so this value is safe to use for policy matching.
-	identity := r.Header.Get("X-User-Identity")
-	match := policyStore.Evaluate(clientIP, identity, authenticatedSource, host, authenticatedGroups)
+	// The identity comes from the resolved auth context DIRECTLY — never from
+	// the X-User-Identity request header. The header was deleted at ingress
+	// above and re-stamped only when authentication produced an identity; it is
+	// transport for the internal HTTP logging consumers, not an authority
+	// boundary (see the note at the stamping site above).
+	match := policyStore.Evaluate(clientIP, authenticatedIdentity, authenticatedSource, host, authenticatedGroups)
 
 	// ── Policy action dispatch ──────────────────────────────────────────────
 	// Extracted to applyPolicyDecision (DEBT-002). Returns true if it wrote a
