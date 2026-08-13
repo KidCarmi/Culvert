@@ -816,6 +816,9 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
     <div class="nav-item" data-view="authpolicy" role="button" tabindex="0">
       <svg class="ico" aria-hidden="true"><use href="#i-key"/></svg> Authentication Rules
     </div>
+    <div class="nav-item" data-view="policylearn" data-min-role="viewer" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-shield"/></svg> Policy Learning
+    </div>
     <div class="nav-item" data-view="blocklist" data-min-role="operator" role="button" tabindex="0">
       <svg class="ico" aria-hidden="true"><use href="#i-ban"/></svg> Blocklist
     </div>
@@ -3525,6 +3528,72 @@ Firefox (all platforms):
     </div>
 
     <!-- ── DECRYPTION EXCLUSIONS (auto-learned fail-open cache) ─────────── -->
+    <div class="view" id="view-policylearn">
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Policy Learning</span>
+          <button class="btn sm ghost" data-click="fetchPolicyLearn">Refresh</button>
+        </div>
+        <div class="panel-body">
+          <p class="hint">
+            Policy Learning is <strong>advisory only</strong> - it observes traffic and proposes
+            born-disabled Allow rules with their evidence; it <strong>cannot alter enforcement policy</strong>.
+            Scope is <strong>node-local</strong>: sessions, evidence, and recommendations are collected on
+            this node only and are never aggregated across the fleet. Enabling the feature does
+            <em>not</em> start observation - observation runs only while a Learning session you
+            explicitly start is active. Identities are pseudonymized before anything is stored.
+          </p>
+          <div id="pl-status" class="hint" style="margin-bottom:12px">Loading…</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:4px">
+            <button class="btn sm" id="pl-enable-btn" data-min-role="admin" data-click="plToggleEnabled">Enable Policy Learning</button>
+            <button class="btn sm" id="pl-start-btn" data-min-role="operator" data-click="plSession" data-arg="start" style="display:none">Start Learning</button>
+            <button class="btn sm" id="pl-complete-btn" data-min-role="operator" data-click="plSession" data-arg="complete" style="display:none">Complete Learning</button>
+            <button class="btn sm ghost" id="pl-cancel-btn" data-min-role="operator" data-click="plSession" data-arg="cancel" style="display:none">Cancel Session</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel" style="margin-top:16px">
+        <div class="panel-header"><span class="panel-title">Learning Sessions</span></div>
+        <div class="panel-body">
+          <p class="hint">Retained sessions on this node. Generate recommendations from a <em>completed</em> session; observation loss, category churn, and restart gaps are shown as operational facts.</p>
+          <div id="pl-sessions"><p class="hint">-</p></div>
+        </div>
+      </div>
+
+      <div class="panel" style="margin-top:16px">
+        <div class="panel-header"><span class="panel-title">Recommendations (advisory)</span></div>
+        <div class="panel-body">
+          <p class="hint">
+            Each recommendation proposes ONE born-disabled <code>Allow + Inspect</code> rule for an observed
+            group x category pair, with its evidence copied at generation time. <strong>Confidence</strong>
+            (named predicates) and <strong>Coverage</strong> (facts about what was observed) are separate;
+            membership percentages are never computed - the membership denominator unavailable state is
+            shown instead. Staleness is computed by the server against the current policy, category, guardrail,
+            and decision-policy identities. There is no Accept action in this release.
+          </p>
+          <div id="pl-recs"><p class="hint">-</p></div>
+        </div>
+      </div>
+
+      <div class="panel" data-min-role="admin" style="margin-top:16px">
+        <div class="panel-header"><span class="panel-title">Recommendable Categories (guardrail)</span></div>
+        <div class="panel-body">
+          <p class="hint">
+            Fail-closed allowlist: only these exact category names may ever be recommended (empty = nothing
+            recommendable). Seeded from the embedded business-category set until governed here. Changing the
+            list changes the guardrail identity, so existing recommendations surface as stale; the change is
+            refused while a Learning session is active.
+          </p>
+          <textarea id="pl-cats" rows="8" style="width:100%;font-family:monospace" placeholder="One category per line"></textarea>
+          <div style="margin-top:8px">
+            <button class="btn sm" data-min-role="admin" data-click="plSaveCategories">Save Guardrail</button>
+            <span id="pl-cats-msg" class="hint"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="view" id="view-decexclusions">
       <div class="panel">
         <div class="panel-header">
@@ -5330,6 +5399,13 @@ document.addEventListener('click', e => {
     case 'editDecProf':       editDecProf(arg); break;
     case 'deleteDecProf':     deleteDecProf(arg); break;
     case 'fetchDecExclusions': fetchDecExclusions(); break;
+    // ── Policy Learning (ADR-0025 M5A) ──
+    case 'fetchPolicyLearn': fetchPolicyLearn(); break;
+    case 'plToggleEnabled': plToggleEnabled(); break;
+    case 'plSession': plSession(arg); break;
+    case 'plGenerate': plGenerate(arg); break;
+    case 'plSaveCategories': plSaveCategories(); break;
+    case 'plShowRec': plShowRec(arg); break;
     case 'saveDecTunables':   saveDecTunables(); break;
     case 'resetDecTunables':  resetDecTunables(); break;
     case 'evictDecExclusion': evictDecExclusion(arg, arg2); break;
@@ -5701,6 +5777,7 @@ const viewMeta = {
   urlcat:       { title: 'URL Categories', meta: 'Manage host lists for each URL category used in policy rules' },
   catgroups:    { title: 'Category Groups', meta: 'Bundle multiple URL categories into named groups for policy rules' },
   decprofiles:  { title: 'Decryption Profiles', meta: 'PAN-OS-style "how to decrypt" profiles referenced per policy rule (Inspect-as-HTTP/2, cert-verification, TLS floor/cap)' },
+  policylearn: { title: 'Policy Learning', meta: 'Advisory, node-local learning - observes traffic during an explicit session and proposes born-disabled Allow rules with evidence; cannot alter enforcement policy' },
   decexclusions: { title: 'Decryption Exclusions', meta: 'Hosts inspection was auto-disabled for (fail-open learn cache) - volatile, per-node, expiring; every entry reduces inspection coverage' },
   dechealth: { title: 'Decryption Health', meta: 'Inspection coverage, outcome mix, and failure taxonomy for this node (ADR-0011) - click any slice to drill into the Live Feed' },
   fileblock:    { title: 'File Control',  meta: 'Block file downloads by extension - Executables, Scripts, Installers' },
@@ -5814,6 +5891,7 @@ function switchView(name) {
   if (name === 'policy')         { fetchPolicy(); loadFileProfileDropdown(); fetchCatGroups(); loadDecryptionProfileDropdown(); }
   if (name === 'decprofiles')    fetchDecProfiles();
   if (name === 'decexclusions')  fetchDecExclusions();
+  if (name === 'policylearn')    fetchPolicyLearn();
   if (name === 'dechealth')      fetchDecHealth();
   if (name === 'authpolicy')     loadAuthPolicy();
   if (name === 'urlcat')         loadURLCategories();
@@ -6480,6 +6558,168 @@ let _decExclusions = [];
 let _decExclScopeRules = {};
 let _decExclScopeNames = {};
 let _decExclLoaded = false;
+// ── Policy Learning (ADR-0025 M5A) - advisory, node-local; read-only recommendations ──
+let _plStatus = null, _plConfig = null, _plRecs = [];
+
+async function fetchPolicyLearn() {
+  try {
+    const [st, cfg, sess, recs] = await Promise.all([
+      api('/api/policy-learning'),
+      api('/api/policy-learning/config'),
+      api('/api/policy-learning/sessions'),
+      api('/api/policy-learning/recommendations'),
+    ]);
+    _plStatus = st; _plConfig = cfg; _plRecs = recs.recommendations || [];
+    renderPLStatus(st);
+    renderPLSessions(sess.sessions || []);
+    renderPLRecs(_plRecs);
+    const ta = document.getElementById('pl-cats');
+    if (ta && document.activeElement !== ta) ta.value = (cfg.recommendable_categories || []).join('\n');
+  } catch (e) {
+    console.error(e);
+    const el = document.getElementById('pl-status');
+    if (el) el.innerHTML = `<span style="color:var(--red)">Could not load policy learning status: ${escHtml(e.message || 'request failed')}</span>`;
+  }
+}
+
+function renderPLStatus(st) {
+  const el = document.getElementById('pl-status');
+  if (!el) return;
+  const bits = [];
+  bits.push(st.enabled ? '<strong>Feature: enabled</strong>' : '<strong>Feature: disabled</strong>');
+  bits.push(st.learning_active ? '<span style="color:var(--accent2)">Learning session ACTIVE - observing</span>'
+                               : 'no active session (observation idle)');
+  bits.push('scope: node-local');
+  if (st.runtime_error) bits.push(`<span style="color:var(--red)">runtime error: ${escHtml(st.runtime_error)}</span>`);
+  if (st.engine) bits.push(`sessions: ${st.engine.sessions}, recommendations: ${st.engine.recommendations}` + (st.engine.read_only ? ', <span style="color:var(--red)">store READ-ONLY (newer schema)</span>' : ''));
+  if (st.observation && st.observation.degraded) {
+    bits.push(`<span style="color:var(--amber,orange)">observation loss: dropped=${st.observation.dropped} rejected=${st.observation.rejected} panics=${st.observation.consumer_panics}</span>`);
+  }
+  if (st.recommendation_policy) {
+    const rp = st.recommendation_policy;
+    bits.push(`decision policy (read-only): high &ge; ${rp.high_min_allowed_requests} observed allowed requests / ${rp.high_min_subjects} observed identities / ${rp.high_min_days} days`);
+  }
+  el.innerHTML = bits.join(' &middot; ');
+
+  const enableBtn = document.getElementById('pl-enable-btn');
+  if (enableBtn) enableBtn.textContent = st.enabled ? 'Disable Policy Learning' : 'Enable Policy Learning';
+  const show = (id, on) => { const b = document.getElementById(id); if (b) b.style.display = on ? '' : 'none'; };
+  show('pl-start-btn', st.enabled && !st.learning_active);
+  show('pl-complete-btn', st.enabled && st.learning_active);
+  show('pl-cancel-btn', st.enabled && st.learning_active);
+}
+
+function renderPLSessions(sessions) {
+  const el = document.getElementById('pl-sessions');
+  if (!el) return;
+  if (!sessions.length) { el.innerHTML = '<p class="hint">No learning sessions on this node yet.</p>'; return; }
+  const rows = sessions.slice().reverse().map(s => {
+    const facts = [];
+    facts.push(`observed (accepted): ${s.transport.accepted}`);
+    if (s.transport.degraded) facts.push(`<span style="color:var(--amber,orange)">loss: dropped=${s.transport.dropped} rejected=${s.transport.rejected} panics=${s.transport.consumer_panics}</span>`);
+    if (s.churn_events > 0) facts.push(`category churn events: ${s.churn_events}`);
+    if (s.subject_key_changed) facts.push('<span style="color:var(--red)">subject key changed mid-session (identity evidence unsound)</span>');
+    (s.gaps || []).forEach(g => facts.push(`gap: ${escHtml(g.reason)}`));
+    facts.push(`evidence cells: ${s.cells}`);
+    const roleLevel = { admin: 3, operator: 2, viewer: 1 };
+    const canOperate = (roleLevel[window.currentRole] || 0) >= 2;
+    const gen = (s.state === 'completed' && canOperate)
+      ? `<button class="btn sm" data-click="plGenerate" data-arg="${escHtml(s.id)}">Generate Recommendations</button>` : '';
+    return `<tr><td><code>${escHtml(s.id)}</code></td><td>${escHtml(s.state)}</td>` +
+      `<td>${escHtml(s.started_at || '')}<br>${escHtml(s.stopped_at || '')}</td>` +
+      `<td class="hint">${facts.join('<br>')}</td><td>${gen}</td></tr>`;
+  }).join('');
+  el.innerHTML = `<table class="tbl"><thead><tr><th>Session</th><th>State</th><th>Window (start / stop)</th><th>Observed facts</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function plConfBadge(c) {
+  const col = c === 'high' ? 'var(--accent2)' : (c === 'medium' ? 'var(--amber,orange)' : 'var(--muted)');
+  return `<span style="color:${col};font-weight:600">${escHtml((c || '').toUpperCase())}</span>`;
+}
+
+function renderPLRecs(recs) {
+  const el = document.getElementById('pl-recs');
+  if (!el) return;
+  if (!recs.length) { el.innerHTML = '<p class="hint">No recommendations. Complete a learning session, then generate.</p>'; return; }
+  el.innerHTML = recs.map(r => {
+    const ev = r.evidence || {}, cov = r.coverage || {};
+    const stale = (r.stale_reasons || []).length
+      ? `<div><span style="color:var(--amber,orange)">STALE:</span> ${r.stale_reasons.map(escHtml).join(', ')}</div>` : '';
+    const superseded = r.state === 'superseded' ? ' <span class="hint">(superseded)</span>' : '';
+    const subjects = `${ev.observed_allowed_subjects}${ev.subjects_is_lower_bound ? '+ (lower bound)' : ''}`;
+    const hosts = (ev.top_allowed_hosts || []).map(h => `${escHtml(h.host)} (${h.count})`).join(', ');
+    const ruleHits = (ev.rule_hits || []).map(a => `${a.key === '_default_' ? 'default action' : escHtml(a.key)}: ${a.count}`).join(', ');
+    return `<div class="panel" style="margin-bottom:12px"><div class="panel-body">
+      <div><strong>${escHtml(r.group)}</strong> &rarr; <strong>${escHtml(r.category)}</strong>${superseded}
+        &nbsp; would match as: <code>Allow + Inspect (born disabled)</code></div>
+      ${stale}
+      <div style="margin-top:6px">Confidence: ${plConfBadge(r.confidence)}
+        ${(r.confidence_reasons || []).length ? '<span class="hint">because ' + r.confidence_reasons.map(escHtml).join('; ') + '</span>' : ''}</div>
+      ${(r.confidence_limits || []).length ? `<div class="hint">limits: ${r.confidence_limits.map(escHtml).join('; ')}</div>` : ''}
+      <div style="margin-top:6px" class="hint">
+        Coverage (facts): observed identities: ${subjects} &middot; observed days: ${cov.observation_days}
+        &middot; session window: ${cov.session_window_days}d
+        &middot; membership denominator unavailable
+        ${cov.transport_degraded ? ' &middot; <span style="color:var(--amber,orange)">observation loss occurred</span>' : ''}
+      </div>
+      <div style="margin-top:6px" class="hint">
+        Evidence: ${ev.allowed_requests} observed allowed requests
+        ${ev.policy_blocked_requests ? ` &middot; policy-blocked requests: ${ev.policy_blocked_requests}` : ''}
+        ${ev.threat_blocked_requests ? ` &middot; threat-blocked requests: ${ev.threat_blocked_requests}` : ''}
+        ${hosts ? `<br>top observed hosts: ${hosts}` : ''}
+        ${ruleHits ? `<br>matched during observation by: ${ruleHits}` : ''}
+      </div>
+    </div></div>`;
+  }).join('');
+}
+
+async function plToggleEnabled() {
+  if (!_plStatus) return;
+  const target = !_plStatus.enabled;
+  if (!target) {
+    const ok = await confirmAction('Disable Policy Learning?',
+      'Node-local sessions and recommendations stay on disk; a running session must be completed or cancelled first.', 'Disable');
+    if (!ok) return;
+  }
+  try {
+    await api('/api/policy-learning/config', { method: 'PUT', body: { enabled: target } });
+    toast(target ? 'Policy learning enabled (observation stays idle until you start a session)' : 'Policy learning disabled');
+    fetchPolicyLearn();
+  } catch (e) { toast('Config change failed: ' + (e.message || e), 'error'); }
+}
+
+async function plSession(action) {
+  try {
+    await api('/api/policy-learning/session', { method: 'POST', body: { action } });
+    toast('Session ' + action + ' OK');
+    fetchPolicyLearn();
+  } catch (e) { toast('Session ' + action + ' failed: ' + (e.message || e), 'error'); }
+}
+
+async function plGenerate(sessionID) {
+  try {
+    const res = await api('/api/policy-learning/recommendations/generate', { method: 'POST', body: { session_id: sessionID } });
+    toast(`Generated: ${ (res.recommendations || []).length } recommendation(s); eligible cells: ${res.eligible_cells}`);
+    fetchPolicyLearn();
+  } catch (e) { toast('Generate failed: ' + (e.message || e), 'error'); }
+}
+
+async function plSaveCategories() {
+  const ta = document.getElementById('pl-cats');
+  const msg = document.getElementById('pl-cats-msg');
+  if (!ta) return;
+  const cats = ta.value.split('\n').map(x => x.trim()).filter(Boolean);
+  try {
+    await api('/api/policy-learning/config', { method: 'PUT', body: { recommendable_categories: cats } });
+    if (msg) msg.textContent = 'Guardrail saved. Existing recommendations may now show as stale.';
+    fetchPolicyLearn();
+  } catch (e) {
+    if (msg) msg.textContent = 'Save failed: ' + (e.message || e);
+  }
+}
+
+function plShowRec() { /* detail rendering is inline; reserved for future drill-down */ }
+
 async function fetchDecExclusions() {
   const el = document.getElementById('decexcl-list');
   if (el && !_decExclLoaded) el.innerHTML = '<p class="hint">Loading exclusions…</p>';

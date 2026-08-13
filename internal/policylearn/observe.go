@@ -79,6 +79,17 @@ type transport struct {
 	delivered atomic.Int64
 }
 
+// LearningActive reports whether a session is currently Learning (the same
+// lock-free gate Observe checks). The M5A adapters consult it BEFORE building
+// an Observation, so the enabled-but-idle posture does no per-request work
+// beyond two atomic loads — no DTO construction, no group copy, no enqueue.
+func (e *Engine) LearningActive() bool { return e.learningActive.Load() }
+
+// SubjectKeyID exposes the pseudonym key's stable identity (hex of a hash
+// prefix — reveals nothing of the key). Server-side staleness input; not for
+// client DTOs.
+func (e *Engine) SubjectKeyID() string { return e.subjKey.keyID }
+
 // Observe emits one observation. Non-blocking under every condition; safe from
 // any goroutine. Ignored (uncounted — "not learning" is not loss) when no
 // session is Learning.

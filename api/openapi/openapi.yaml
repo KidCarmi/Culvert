@@ -6537,6 +6537,170 @@ paths:
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
 
+  /api/policy-learning:
+    get:
+      operationId: getPolicyLearningStatus
+      tags: [policy]
+      summary: Policy Learning status
+      description: Factual node-local Policy Learning status — enablement, learning-active state, active session summary, observation loss accounting, and the read-only recommendation-policy metadata. Advisory feature; no enforcement effect.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200': { description: Status, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/policy-learning/config:
+    get:
+      operationId: getPolicyLearningConfig
+      tags: [policy]
+      summary: Policy Learning configuration
+      description: Governed enablement + the fail-closed recommendable-category guardrail + read-only recommendation-policy (threshold) metadata.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200': { description: Configuration, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    put:
+      operationId: setPolicyLearningConfig
+      tags: [policy]
+      summary: Set Policy Learning configuration
+      description: Enable/disable Policy Learning and govern the recommendable-category allowlist. Enabling does NOT start observation (a session start does). Refused with 409 while a Learning session is active (disable or guardrail change); node-local AdminSettings-durable, off the config-rollback surface.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: policy_learning.enable
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled: { type: boolean }
+                recommendable_categories: { type: array, items: { type: string } }
+      responses:
+        '200': { description: 'Applied configuration.', content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '409': { description: 'A Learning session is active — complete or cancel it first.' }
+  /api/policy-learning/session:
+    post:
+      operationId: policyLearningSessionAction
+      tags: [policy]
+      summary: Start/complete/cancel the Learning session
+      description: Drives the Learning session state machine (action start|complete|cancel). Invalid transitions return deterministic 409s; the one-active-session invariant is engine-enforced.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: none
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: low
+      x-culvert-audit-event: policy_learning.session.start
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action: { type: string, enum: [start, complete, cancel] }
+      responses:
+        '200': { description: 'The transitioned session.', content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '409': { description: 'Invalid transition (already active / none active / feature disabled / store read-only).' }
+  /api/policy-learning/sessions:
+    get:
+      operationId: listPolicyLearningSessions
+      tags: [policy]
+      summary: Retained Learning sessions
+      description: Retained session listing (?id= for one) — factual node-local summaries only (no subject tokens, no aggregation cell contents).
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      parameters:
+        - name: id
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200': { description: 'Sessions (or one session with ?id= filter).', content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404': { description: 'Session not found.' }
+  /api/policy-learning/recommendations:
+    get:
+      operationId: listPolicyLearningRecommendations
+      tags: [policy]
+      summary: Advisory recommendations
+      description: Recommendation listing (?id= for one) with evidence, confidence reasons/limits, coverage facts, and SERVER-computed staleness reasons. Advisory only — nothing here can alter enforcement policy.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      parameters:
+        - name: id
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200': { description: 'Recommendations (or one with ?id= filter).', content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404': { description: 'Recommendation not found.' }
+  /api/policy-learning/recommendations/generate:
+    post:
+      operationId: generatePolicyLearningRecommendations
+      tags: [policy]
+      summary: Generate recommendations
+      description: Deterministically generates advisory recommendations from a COMPLETED Learning session. 404 for an unknown session; 409 for not-completed, changed guardrails, changed subject key, or a read-only store.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: low
+      x-culvert-audit-event: policy_learning.recommendations.generate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [session_id]
+              properties:
+                session_id: { type: string }
+      responses:
+        '200': { description: 'Generation result + current recommendations for the session.', content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404': { description: 'Session not found.' }
+        '409': { description: 'Session not completed, guardrails/subject key changed, or store read-only.' }
+
   /api/config/diff:
     get:
       operationId: getConfigDiff

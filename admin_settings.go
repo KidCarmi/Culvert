@@ -170,6 +170,22 @@ type AdminSettings struct {
 	SupportRetentionSaved      bool `json:"support_retention_saved"`
 	SupportRetentionKeep       int  `json:"support_retention_keep,omitempty"`
 	SupportRetentionMaxAgeDays int  `json:"support_retention_max_age_days,omitempty"`
+
+	// Policy Learning Mode (ADR-0025 M5A). PolicyLearningSaved is a sentinel
+	// (AutoExcludeTunablesSaved pattern): when false the fields below are not
+	// applied on load, so a settings file predating this feature keeps the
+	// shipped default (disabled). Governance state ONLY — the node-local
+	// learning state itself (sessions/aggregates/recommendations + subject key)
+	// lives in its own files and is deliberately OFF every config surface.
+	// These fields too are node-local: OFF export/import, version-rollback, and
+	// CP→DP (learning is per-node advisory observation, and a rollback that
+	// silently re-enabled observation or swapped the recommendable guardrail
+	// would be a governance hazard). NO omitempty on the category list: once
+	// governed, an explicitly EMPTY allowlist (nothing recommendable — the
+	// fail-closed choice) must survive the round trip.
+	PolicyLearningSaved                   bool     `json:"policy_learning_saved"`
+	PolicyLearningEnabled                 bool     `json:"policy_learning_enabled"`
+	PolicyLearningRecommendableCategories []string `json:"policy_learning_recommendable_categories"`
 }
 
 var (
@@ -243,6 +259,7 @@ func LoadAdminSettings(path string) {
 	applyAdminYARA(&s)
 	applyAdminAutoExcludeTunables(&s)
 	applyAdminSupportRetention(&s)             // Slice B: configurable support-bundle retention caps
+	applyAdminPolicyLearning(&s)               // ADR-0025 M5A: record governed desired state (materialized by loadPolicyLearning)
 	setDecRedactHosts(s.DecryptionRedactHosts) // ADR-0011 §4 host/SNI redaction posture
 
 	logger.Printf("AdminSettings: loaded from %s", path)
@@ -484,6 +501,40 @@ func applyAdminAutoExcludeTunables(s *AdminSettings) {
 	autoExclude().Reconfigure(resolved.engineConfig())
 }
 
+// applyAdminPolicyLearning RECORDS the governed Policy Learning desired state
+// (ADR-0025 M5A). Sentinel-gated; intent only — LoadAdminSettings runs before
+// the policy-learning startup slice resolves its paths, so the engine is
+// materialized later by loadPolicyLearning (startup) or the config PUT
+// (runtime). A nil persisted category list can only mean a hand-edited file
+// (the snapshot always writes the materialized list once saved) and resolves
+// to the embedded business seed — fail-safe, never fail-open.
+func applyAdminPolicyLearning(s *AdminSettings) {
+	if !s.PolicyLearningSaved {
+		return
+	}
+	policyLearnSetState(policyLearnSettings{
+		Enabled:    s.PolicyLearningEnabled,
+		Categories: s.PolicyLearningRecommendableCategories,
+	}, true)
+}
+
+// snapshotPolicyLearning copies the governed desired state into s (omnibus
+// save — any admin mutation). Never-governed (sentinel false) writes nothing,
+// keeping feature-off byte-compatible with pre-M5A settings files.
+func snapshotPolicyLearning(s *AdminSettings, override *policyLearnSettings) {
+	st, saved := policyLearnSnapshotState()
+	if override != nil {
+		st = *override
+		saved = true
+	}
+	if !saved {
+		return
+	}
+	s.PolicyLearningSaved = true
+	s.PolicyLearningEnabled = st.Enabled
+	s.PolicyLearningRecommendableCategories = policyLearnEffectiveCategories(st) // materialized: nil never persists once governed
+}
+
 // snapshotAdminEndpoints copies the external-URL / SANs, syslog, and OTLP endpoint
 // settings into s. Extracted to keep SaveAdminSettings under the funlen cap (mirrors
 // snapshotBlocklistFeeds / snapshotAutoExcludeTunables); no behavior change.
@@ -559,6 +610,7 @@ func snapshotBlocklistFeeds(s *AdminSettings) {
 type adminSaveOverrides struct {
 	autoExclude      *autoExcludeTunables
 	supportRetention *supportRetentionConfig
+	policyLearning   *policyLearnSettings
 	// applyOnSuccess, when set, is the runtime apply for a persist-before-apply PUT.
 	// It runs INSIDE the save's adminSettingsMu critical section, immediately after a
 	// successful write — so no concurrent omnibus save can snapshot the pre-apply
@@ -649,6 +701,7 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 
 	snapshotAutoExcludeTunables(&s, ov.autoExclude)
 	snapshotSupportRetention(&s, ov.supportRetention) // Slice B: configurable retention caps
+	snapshotPolicyLearning(&s, ov.policyLearning)     // ADR-0025 M5A: governed enablement + recommendable guardrail
 	s.DecryptionRedactHosts = decRedactHosts()        // ADR-0011 §4 / PR3 Option B destination-privacy posture
 	s.TrafficPseudonymKey = getTrafficPseudonymKey()  // PR3 Option B node-local pseudonym key (nil when unset)
 

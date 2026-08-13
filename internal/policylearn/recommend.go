@@ -385,6 +385,14 @@ func guardrailsHashFor(canonical []string) string {
 // GuardrailsHash exposes the engine's current guardrail identity (read-only).
 func (e *Engine) GuardrailsHash() string { return e.guardrailsHash }
 
+// GuardrailsHashForCategories computes the guardrail identity a config with
+// the given RecommendableCategories would carry — the same canonicalization +
+// hash New applies. Pure; lets root wiring detect a no-op allowlist change
+// without constructing an engine.
+func GuardrailsHashForCategories(cats []string) string {
+	return guardrailsHashFor(canonicalizeCategories(cats))
+}
+
 // RecommendationPolicyHash exposes the engine's current decision-policy
 // identity (read-only; immutable after New).
 func (e *Engine) RecommendationPolicyHash() string { return e.recPolicyHash }
@@ -852,6 +860,10 @@ type StaleInputs struct {
 	// it (no claim); non-empty ⇒ compared fail-closed, so a recommendation
 	// with a missing pin (pre-M4.1 object) is stale, never assumed current.
 	RecommendationPolicyHash string
+	// PolicyContentHash is the CURRENT canonical content identity of the
+	// running access policy (root-computed). Same claim semantics: empty ⇒ no
+	// claim; asserted ⇒ compared fail-closed against the pinned baseline.
+	PolicyContentHash string
 }
 
 // StaleReasons is the pure staleness computation: the named pin mismatches
@@ -877,6 +889,12 @@ func StaleReasons(r *Recommendation, cur StaleInputs) []string {
 		// (pre-M4.1) recommendation cannot prove which decision policy produced
 		// it, so it can never be presented as current.
 		out = append(out, "recommendation_policy_changed")
+	}
+	if cur.PolicyContentHash != "" && r.Baseline.PolicyContentHash != cur.PolicyContentHash {
+		// Content identity of the running access policy (M5A): robust where the
+		// generation counter is weak (counter resets, same-content re-imports).
+		// Same fail-closed posture for unpinned (pre-M5A) objects.
+		out = append(out, "policy_content_changed")
 	}
 	return out
 }

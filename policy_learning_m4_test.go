@@ -41,16 +41,20 @@ func TestRecommendableSeed_BusinessCategoriesOnly(t *testing.T) {
 	}
 }
 
-// TestRecommendableSeed_WiredIntoLoader: the loader passes the business seed as
-// the engine's fail-closed allowlist (source pin — the loader itself is
-// disabled in production, so wiring is asserted at the source level like the
-// wall tests).
-func TestRecommendableSeed_WiredIntoLoader(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join(pkgSourceDir(), "policy_learning_startup.go"))
+// TestRecommendableSeed_WiredIntoLifecycle: the ungoverned default allowlist
+// is the embedded business seed (source pin on the M5A lifecycle resolver —
+// policyLearnEffectiveCategories — plus a behavioral check).
+func TestRecommendableSeed_WiredIntoLifecycle(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(pkgSourceDir(), "policy_learning_admin.go"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(raw), "RecommendableCategories: urlcat.DefaultBusinessCategoryNames()") {
-		t.Fatal("loader no longer seeds RecommendableCategories from the embedded business-category set — if deliberate, update this pin with the design change")
+	if !strings.Contains(string(raw), "urlcat.DefaultBusinessCategoryNames()") {
+		t.Fatal("lifecycle no longer seeds the recommendable allowlist from the embedded business-category set — if deliberate, update this pin with the design change")
+	}
+	got := policyLearnEffectiveCategories(policyLearnSettings{}) // never governed ⇒ seed
+	want := urlcat.DefaultBusinessCategoryNames()
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("ungoverned effective allowlist != business seed:\n%v\n%v", got, want)
 	}
 }

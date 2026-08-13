@@ -21,10 +21,11 @@ import (
 // (subject_key_id / category_churn / transport / agg / baseline
 // category_epoch); 3 = M4 recommendations (top-level recommendations array +
 // baseline guardrails_hash); 4 = M4.1 recommendation-policy identity
-// (policy / policy_hash embedded per recommendation). Older documents load
-// cleanly on a newer binary (pure field additions, all omitempty); saves
-// always write the current version.
-const SchemaVersion = 4
+// (policy / policy_hash embedded per recommendation); 5 = M5A baseline
+// policy_content_hash (canonical access-policy content identity). Older
+// documents load cleanly on a newer binary (pure field additions, all
+// omitempty); saves always write the current version.
+const SchemaVersion = 5
 
 // minReadableSchemaVersion: every version in [min, current] loads.
 const minReadableSchemaVersion = 1

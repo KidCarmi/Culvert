@@ -72,6 +72,12 @@ type Baseline struct {
 	CapturedAt       string `json:"captured_at,omitempty"`     // RFC3339 UTC
 	CategoryEpoch    string `json:"category_epoch,omitempty"`  // opaque category-generation identity pinned at Start (M3)
 	GuardrailsHash   string `json:"guardrails_hash,omitempty"` // recommendable-category allowlist identity pinned at Start (M4)
+	// PolicyContentHash is the canonical CONTENT identity of the running access
+	// policy at session start (M5A): unlike PolicyGeneration (a persisted
+	// counter — robust to restarts but not to counter resets or same-content
+	// re-imports), this is a deterministic hash of the policy content itself,
+	// captured by root wiring. Opaque to the engine; compared for staleness.
+	PolicyContentHash string `json:"policy_content_hash,omitempty"`
 }
 
 // Config wires the engine. Now is REQUIRED; everything else has safe defaults.

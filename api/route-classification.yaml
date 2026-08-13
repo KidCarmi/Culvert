@@ -1092,6 +1092,76 @@ routes:
     audit_expected: true
     danger_level: medium
     documented: true
+  - route: "/api/policy-learning"
+    method: "GET"
+    handler: "apiPolicyLearningStatus"
+    domain: "policy"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
+  - route: "/api/policy-learning/config"
+    method: "GET"
+    handler: "apiPolicyLearningConfig"
+    domain: "policy"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
+  - route: "/api/policy-learning/config"
+    method: "PUT"
+    handler: "apiPolicyLearningConfig"
+    domain: "policy"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: true
+    audit_expected: true
+    danger_level: medium
+    documented: true
+  - route: "/api/policy-learning/session"
+    method: "POST"
+    handler: "apiPolicyLearningSession"
+    domain: "policy"
+    visibility: admin-supported
+    min_role: "operator"
+    mutating: true
+    audit_expected: true
+    danger_level: low
+    documented: true
+  - route: "/api/policy-learning/sessions"
+    method: "GET"
+    handler: "apiPolicyLearningSessions"
+    domain: "policy"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
+  - route: "/api/policy-learning/recommendations"
+    method: "GET"
+    handler: "apiPolicyLearningRecommendations"
+    domain: "policy"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
+  - route: "/api/policy-learning/recommendations/generate"
+    method: "POST"
+    handler: "apiPolicyLearningGenerate"
+    domain: "policy"
+    visibility: admin-supported
+    min_role: "operator"
+    mutating: true
+    audit_expected: true
+    danger_level: low
+    documented: true
   - route: "/api/decryption-profiles"
     method: "GET"
     handler: "apiDecryptionProfiles"

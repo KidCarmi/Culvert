@@ -451,6 +451,20 @@ var configSurfaces = []configSurfaceRow{
 	{ID: "autoexclude_max_entries", Kind: kindConfig, Owner: "autoExclude", AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "AutoExcludeMaxEntries"}}},
 
+	// Policy Learning Mode governance (ADR-0025 M5A) — deliberately AdminDurable-ONLY:
+	// OFF export/import, version-rollback, and CP→DP. Learning is node-local advisory
+	// observation; a config rollback or cross-node import that silently re-enabled
+	// observation or swapped the recommendable-category guardrail would be a governance
+	// hazard (the learned/tunable-state-is-node-local precedent). The node-local
+	// learning STATE (sessions/aggregates/recommendations + subject key) is off every
+	// config surface entirely — it is engine-owned files, not configuration.
+	{ID: "policy_learning_enabled", Kind: kindConfig, Owner: "policyLearn", AdminDurable: true,
+		Note:     "gated by policy_learning_saved sentinel; enable ≠ start learning (observation arms only via an explicit session start)",
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "PolicyLearningEnabled"}}},
+	{ID: "policy_learning_recommendable_categories", Kind: kindConfig, Owner: "policyLearn", AdminDurable: true,
+		Note:     "fail-closed allowlist (M4 guardrail); no omitempty — a governed EMPTY list must survive the round trip; identity = GuardrailsHash",
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "PolicyLearningRecommendableCategories"}}},
+
 	// ADR-0011 §4 host/SNI redaction posture — a node-local privacy choice, durable in
 	// admin_settings.json but OFF export/import, version-rollback, and CP→DP (like the
 	// autoexclude tunables). Plain bool: default false is both "off" and "unset", so no
@@ -488,6 +502,8 @@ var configSurfaces = []configSurfaceRow{
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "YARASettingsSaved"}}},
 	{ID: "autoexclude_tunables_saved", Kind: kindSentinel, AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "AutoExcludeTunablesSaved"}}},
+	{ID: "policy_learning_saved", Kind: kindSentinel, AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "PolicyLearningSaved"}}},
 	{ID: "support_retention_saved", Kind: kindSentinel, AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "SupportRetentionSaved"}}},
 	{ID: "blocklist_feed_url_legacy", Kind: kindLegacyMigration,

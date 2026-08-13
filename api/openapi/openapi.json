@@ -14844,6 +14844,399 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/policy-learning": {
+      "get": {
+        "description": "Factual node-local Policy Learning status — enablement, learning-active state, active session summary, observation loss accounting, and the read-only recommendation-policy metadata. Advisory feature; no enforcement effect.",
+        "operationId": "getPolicyLearningStatus",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Status"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Policy Learning status",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/policy-learning/config": {
+      "get": {
+        "description": "Governed enablement + the fail-closed recommendable-category guardrail + read-only recommendation-policy (threshold) metadata.",
+        "operationId": "getPolicyLearningConfig",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Configuration"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Policy Learning configuration",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "put": {
+        "description": "Enable/disable Policy Learning and govern the recommendable-category allowlist. Enabling does NOT start observation (a session start does). Refused with 409 while a Learning session is active (disable or guardrail change); node-local AdminSettings-durable, off the config-rollback surface.",
+        "operationId": "setPolicyLearningConfig",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "recommendable_categories": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Applied configuration."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "description": "A Learning session is active — complete or cancel it first."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Set Policy Learning configuration",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-audit-event": "policy_learning.enable",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/policy-learning/recommendations": {
+      "get": {
+        "description": "Recommendation listing (?id= for one) with evidence, confidence reasons/limits, coverage facts, and SERVER-computed staleness reasons. Advisory only — nothing here can alter enforcement policy.",
+        "operationId": "listPolicyLearningRecommendations",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Recommendations (or one with ?id= filter)."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "description": "Recommendation not found."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Advisory recommendations",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/policy-learning/recommendations/generate": {
+      "post": {
+        "description": "Deterministically generates advisory recommendations from a COMPLETED Learning session. 404 for an unknown session; 409 for not-completed, changed guardrails, changed subject key, or a read-only store.",
+        "operationId": "generatePolicyLearningRecommendations",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "session_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "session_id"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Generation result + current recommendations for the session."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "description": "Session not found."
+          },
+          "409": {
+            "description": "Session not completed, guardrails/subject key changed, or store read-only."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Generate recommendations",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-audit-event": "policy_learning.recommendations.generate",
+        "x-culvert-danger-level": "low",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "operator",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/policy-learning/session": {
+      "post": {
+        "description": "Drives the Learning session state machine (action start|complete|cancel). Invalid transitions return deterministic 409s; the one-active-session invariant is engine-enforced.",
+        "operationId": "policyLearningSessionAction",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "action": {
+                    "enum": [
+                      "start",
+                      "complete",
+                      "cancel"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "action"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The transitioned session."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "description": "Invalid transition (already active / none active / feature disabled / store read-only)."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Start/complete/cancel the Learning session",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-audit-event": "policy_learning.session.start",
+        "x-culvert-danger-level": "low",
+        "x-culvert-idempotency": "none",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "operator",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/policy-learning/sessions": {
+      "get": {
+        "description": "Retained session listing (?id= for one) — factual node-local summaries only (no subject tokens, no aggregation cell contents).",
+        "operationId": "listPolicyLearningSessions",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Sessions (or one session with ?id= filter)."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "description": "Session not found."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Retained Learning sessions",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/policy/draft": {
       "get": {
         "description": "Returns require-commit mode and active policy-draft state (diff/version when active).",

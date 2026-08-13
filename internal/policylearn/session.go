@@ -232,6 +232,40 @@ func (e *Engine) maybeExpireLocked(now time.Time) {
 	}
 }
 
+// AggregateOverview is the bounded factual summary of one session's
+// aggregation state, safe for operator surfaces: counts and degradation flags
+// only — no cell contents, no subject tokens, no hosts (M5A API boundary).
+type AggregateOverview struct {
+	Cells             int   `json:"cells"`
+	CellsDropped      int64 `json:"cells_dropped"`
+	SubjectBudgetUsed int64 `json:"subject_budget_used"`
+	ChurnOverflow     int64 `json:"churn_overflow"`
+	SubjectKeyChanged bool  `json:"subject_key_changed"`
+}
+
+// SessionOverview returns the aggregate overview for one session by ID.
+func (e *Engine) SessionOverview(id string) (AggregateOverview, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, s := range e.sessions {
+		if s.ID != id {
+			continue
+		}
+		var o AggregateOverview
+		if s.Agg != nil {
+			o = AggregateOverview{
+				Cells:             len(s.Agg.Cells),
+				CellsDropped:      s.Agg.CellsDropped,
+				SubjectBudgetUsed: s.Agg.SubjectBudgetUsed,
+				ChurnOverflow:     s.Agg.ChurnOverflow,
+				SubjectKeyChanged: s.Agg.SubjectKeyChanged,
+			}
+		}
+		return o, true
+	}
+	return AggregateOverview{}, false
+}
+
 // pruneLocked enforces the retained-terminal-sessions bound: oldest-first
 // (creation order) eviction of TERMINAL sessions down to the cap. The active
 // session is never evicted. Eviction only ever discards history, never

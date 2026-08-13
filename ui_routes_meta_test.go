@@ -98,7 +98,7 @@ import (
 //   - 189 — Added /api/urlcat/feed-status (GET viewer: UT1 + SaaS category
 //     feed freshness/failure counts, previously Prometheus-only).
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 219 // + 14 /api/mcp/* (PR-9) + 2 distribution/rollback (PR-10) + 8 rollout (PR-11) + 2 PR-UX-5 (distribution/acks + rollout/scope/validate)
+	const want = 225 // + 14 /api/mcp/* (PR-9) + 2 distribution/rollback (PR-10) + 8 rollout (PR-11) + 2 PR-UX-5 (distribution/acks + rollout/scope/validate) + 6 /api/policy-learning/* (ADR-0025 M5A)
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}
@@ -207,6 +207,7 @@ var helperSourceFiles = []string{
 	"ui_support.go",
 	"diagnose.go",
 	"ui_mcp.go",
+	"ui_policy_learning.go",
 }
 
 // scanRegisteredRoutes returns every route path registered by a

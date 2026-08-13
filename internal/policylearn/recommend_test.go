@@ -712,7 +712,7 @@ func TestGenerate_PersistedV3RoundTripNoRawSubjects(t *testing.T) {
 func TestGenerate_NewerSchemaStoreStaysReadOnly(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "policy_learning.json")
-	newer := `{"schema_version":5,"sessions":[],"future":true}`
+	newer := `{"schema_version":6,"sessions":[],"future":true}`
 	if err := os.WriteFile(path, []byte(newer), 0o600); err != nil {
 		t.Fatal(err)
 	}

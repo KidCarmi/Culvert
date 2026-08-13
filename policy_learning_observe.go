@@ -26,8 +26,10 @@ import (
 // these by their status and they can never contribute positive ALLOW evidence.
 func learnObservePreDispatch(auth authOutcome, host, method, status string) {
 	eng := policyLearnEngine.Load()
-	if eng == nil {
-		return // learning disabled — zero-cost gate
+	if eng == nil || !eng.LearningActive() {
+		// Disabled (nil) or enabled-but-idle: gate BEFORE any Observation is
+		// built — no DTO, no group copy, no enqueue (M5A §1; benchgate-pinned).
+		return
 	}
 	eng.Observe(policylearn.Observation{
 		Subject:    auth.identity,
@@ -56,8 +58,10 @@ func learnCategoryEpoch() string {
 
 func learnObserveDecision(auth authOutcome, host, method string, match *PolicyMatch, status, sslAction string) {
 	eng := policyLearnEngine.Load()
-	if eng == nil {
-		return // learning disabled — zero-cost gate
+	if eng == nil || !eng.LearningActive() {
+		// Disabled (nil) or enabled-but-idle: gate BEFORE any Observation is
+		// built — no DTO, no group copy, no enqueue (M5A §1; benchgate-pinned).
+		return
 	}
 	ruleID := ""
 	var action string
