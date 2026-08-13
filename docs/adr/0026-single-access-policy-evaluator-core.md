@@ -101,6 +101,15 @@ GAP-POL-03), so there is no way to validate a draft before commit.
   (`policy_bench_test`, `bench_regression_test`) and the full policy/e2e/race/
   determinism suite before merge; the `trace` callback must be provably free on
   the nil path (no closure allocation on the runtime path).
+  **Measured (2026-08-13 performance qualification,
+  `roadmap/F3-EVALUATOR-PERF-QUALIFICATION.md`):** the non-inlinable core
+  boundary costs ~+4.5% geomean on the isolated `Evaluate` microbenchmark
+  (worst +8.2% on long scans; diffuse call-frame overhead, allocations
+  identical). End-to-end through the real proxy dispatch the cost is
+  statistically indistinguishable from zero (throughput +0.43% n.s.,
+  CPU/request −0.20% n.s., p95 n.s., allocations identical; n=16 interleaved
+  builds). Accepted within the ≤2% end-to-end budget; the microbenchmark
+  residual is the recorded price of the single-evaluator guarantee.
 - **Risk:** subtle behavior deltas during extraction — mitigated by landing the
   byte-identical extraction (F3) separately from the tester behavior change +
   draft awareness (F4), each independently revertible.
