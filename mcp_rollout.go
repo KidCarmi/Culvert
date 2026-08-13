@@ -209,7 +209,14 @@ func (r *mcpRollout) commitRolloutTransitionAt(cfg *rollout.SignedConfig, actor 
 	st.UpdateEvidence(func(e *rollout.EvidenceSummary) { e.BeginWindow(cfg.Mode, now.Unix(), origin) })
 	// (4) Persist before acknowledging; roll back in memory on failure.
 	if err := persistRolloutState(st); err != nil {
-		_ = st.SetConfig(prevCfg, actor, now.UnixNano())
+		// Revert the in-memory install to the prior config. prevCfg was previously
+		// valid, so this should never fail — but if it ever did, we must NOT leave the
+		// advanced (new) mode active while telling the caller the transition was
+		// rejected: force Disabled, fail-closed and loud.
+		if rerr := st.SetConfig(prevCfg, actor, now.UnixNano()); rerr != nil {
+			_ = st.SetConfig(rollout.DisabledConfig(cfg.Capability), actor, now.UnixNano())
+			logger.Printf("MCP rollout: rollback of %s failed after persist error; forced Disabled (fail-closed): %v", cfg.Capability.String(), rerr)
+		}
 		st.UpdateEvidence(func(e *rollout.EvidenceSummary) { *e = prevEvidence })
 		r.setPersistStatus(cfg.Capability, "write_failed")
 		return fmt.Errorf("%w: %v", errRolloutPersistFailed, err)
@@ -228,6 +235,17 @@ func (r *mcpRollout) restore() {
 			r.setPersistStatus(st.Capability(), "degraded")
 			logger.Printf("MCP rollout restore for %s: %v", st.Capability().String(), err)
 		} else if ok {
+			// Defense-in-depth: a restored EXECUTING mode (Shadow/Canary/Production)
+			// must not stand while the guarded-execution plane is not composed. In the
+			// shipped build the exec-deps gate blocks such a state from ever being
+			// persisted, so this only fires against a hand-crafted state file — clamp it
+			// to Disabled (fail-closed) rather than surface a misleading executing label.
+			if st.CurrentMode().Executes() && !execDepsConfigured(st.Capability() == rollout.CapabilityManagement) {
+				_ = st.SetConfig(rollout.DisabledConfig(st.Capability()), "restore-clamp", time.Now().UnixNano())
+				r.setPersistStatus(st.Capability(), "degraded")
+				logger.Printf("MCP rollout restore for %s: refused executing mode without execution deps; clamped to Disabled", st.Capability().String())
+				continue
+			}
 			r.setPersistStatus(st.Capability(), "recovered")
 			logger.Printf("MCP rollout restore for %s: mode=%s (recovered)", st.Capability().String(), st.CurrentMode().String())
 		} else {

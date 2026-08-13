@@ -339,3 +339,58 @@ func TestDurable_ConcurrentCommitsSerialized(t *testing.T) {
 		t.Fatalf("recovered window start %d != persisted %d", got, start)
 	}
 }
+
+// Test (Finding A): a concurrent kill-switch toggle storm plus restart never loses a
+// final emergency-disable. durableMu serializes the whole mutate+persist of every
+// durable path, so the last durable write reflects the last-acquiring writer.
+func TestDurable_KillSwitchToggleStormThenRestart(t *testing.T) {
+	withTempDataDir(t)
+	r := newTestRollout()
+	var wg sync.WaitGroup
+	for i := 0; i < 40; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			if n%2 == 0 {
+				r.emergencyDisable(rollout.CapabilityGateway, "oncall")
+			} else {
+				r.clearEmergency(rollout.CapabilityGateway)
+			}
+		}(i)
+	}
+	wg.Wait()
+	// Drive a definitive final state: engage last, serialized by durableMu.
+	r.emergencyDisable(rollout.CapabilityGateway, "oncall")
+	if !r.gateway.Killed() {
+		t.Fatal("final in-memory state must be killed")
+	}
+	// The durable file must match the final in-memory state (no stale last-write).
+	r2 := newTestRollout()
+	r2.restore()
+	if !r2.gateway.Killed() {
+		t.Fatal("Finding A: restart must recover the final emergency-disable, not a stale clear")
+	}
+}
+
+// Test (Finding C): a hand-crafted state file claiming an executing mode is clamped
+// to Disabled at restore when execution deps are not configured.
+func TestDurable_RestoreClampsExecutingModeWithoutDeps(t *testing.T) {
+	withTempDataDir(t)
+	withExecDepsReady(t) // allow persisting a Shadow state first
+	r := newTestRollout()
+	if err := r.commitRolloutTransition(gwShadowCfg(1), "admin", time.Unix(1000, 0)); err != nil {
+		t.Fatal(err)
+	}
+	// Now simulate the shipped build (no exec deps) and restart: the persisted Shadow
+	// mode must be clamped to Disabled (fail-closed), not surfaced as executing.
+	globalExecDeps.gateway.Store(false)
+	r2 := newTestRollout()
+	r2.restore()
+	if r2.gateway.CurrentMode() != rollout.ModeDisabled {
+		t.Fatalf("restored executing mode must be clamped to Disabled without exec deps, got %s", r2.gateway.CurrentMode())
+	}
+	gw := r2.status()["gateway"].(map[string]any)
+	if gw["persistence"] != "degraded" {
+		t.Fatalf("clamped restore should report degraded persistence, got %v", gw["persistence"])
+	}
+}
