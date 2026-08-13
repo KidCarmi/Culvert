@@ -69,7 +69,8 @@ var (
 type Baseline struct {
 	PolicyGeneration int64  `json:"policy_generation"`
 	DefaultAction    string `json:"default_action,omitempty"`
-	CapturedAt       string `json:"captured_at,omitempty"` // RFC3339 UTC
+	CapturedAt       string `json:"captured_at,omitempty"`     // RFC3339 UTC
+	CategoryEpoch    string `json:"category_epoch,omitempty"` // opaque category-generation identity pinned at Start (M3)
 }
 
 // Config wires the engine. Now is REQUIRED; everything else has safe defaults.
@@ -98,6 +99,19 @@ type Config struct {
 	// the single drain goroutine, with per-event panic containment. Fixed at
 	// construction; never called after Close returns.
 	Sink func(Observation)
+	// SubjectKeyPath is the durable pseudonymization key (M3), stored
+	// SEPARATELY from StorePath. Empty = ephemeral in-memory key (memory-only
+	// engines; tokens are not restart-stable there by construction).
+	SubjectKeyPath string
+	// Categories resolves a destination host to (category, tier). Called ONLY
+	// from the drain goroutine (never the request hot path). nil = everything
+	// aggregates as uncategorized ("", tier "none").
+	Categories func(host string) (category, tier string)
+	// CategoryEpoch returns the current opaque category-generation identity
+	// (feed generation + overrides revision + admin taxonomy sequence). Pinned
+	// into the session baseline at Start; a mid-session change is recorded as
+	// churn. nil = epoch tracking disabled.
+	CategoryEpoch func() string
 }
 
 // Engine owns the Learning Session lifecycle and (M2) the observation
@@ -113,6 +127,15 @@ type Engine struct {
 
 	learningActive atomic.Bool // M2: lock-free Observe gate, maintained on every state change
 	tr             *transport  // M2: bounded observation queue + single drain
+
+	// M3 aggregation state (all mutated under mu; drain-owned cadence counters
+	// are also only touched under mu inside consumeGuarded).
+	subjKey      *subjectKey // durable pseudonymization key
+	aggSession   *Session    // the session observations are attributed to (the one Learning when accepted)
+	scopeScratch []string    // reusable scope buffer for the drain
+	sinceFlush   int         // observations since the last aggregate persist
+	sinceEpoch   int         // observations since the last category-epoch check
+	tPin         ObservationStats
 }
 
 // New constructs the engine and loads the store (fail-closed; see load).
@@ -133,6 +156,11 @@ func New(cfg Config) (*Engine, error) {
 		cfg.MaxSessionDuration = minSessionDuration
 	}
 	e := &Engine{cfg: cfg}
+	sk, err := loadOrCreateSubjectKey(cfg.SubjectKeyPath)
+	if err != nil {
+		return nil, err
+	}
+	e.subjKey = sk
 	if err := e.load(); err != nil {
 		// load only returns unexpected I/O errors (corrupt/newer-schema are
 		// handled fail-closed inside); surface them to the caller.
@@ -162,6 +190,7 @@ func (e *Engine) Close() error {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	e.syncTransportLocked() // fold the final window deltas before the flush
 	if !e.dirty {
 		return nil
 	}

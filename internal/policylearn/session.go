@@ -37,12 +37,38 @@ type Session struct {
 	Baseline  Baseline `json:"baseline"`
 	Gaps      []Gap    `json:"gaps,omitempty"`
 
+	// M3 — bounded factual aggregation + degradation metadata.
+	SubjectKeyID  string          `json:"subject_key_id,omitempty"` // pseudonym-key identity the tokens were minted under
+	CategoryChurn []EpochChurn    `json:"category_churn,omitempty"` // bounded mid-session category-generation changes
+	Transport     TransportWindow `json:"transport,omitempty"`      // session-window transport-counter deltas (loss accounting)
+	Agg           *Aggregate      `json:"agg,omitempty"`            // bounded Group × Category cells
+
 	startedAtParsed time.Time // cached parse for expiry math; not serialized
+}
+
+// TransportWindow is the persisted per-session accumulation of transport-
+// counter DELTAS (pinned at session start / restart-load and advanced at every
+// flush) — never lifetime process totals.
+type TransportWindow struct {
+	Accepted       int64 `json:"accepted,omitempty"`
+	Dropped        int64 `json:"dropped,omitempty"`
+	Rejected       int64 `json:"rejected,omitempty"`
+	ConsumerPanics int64 `json:"consumer_panics,omitempty"`
+}
+
+// Degraded reports whether the session window lost any observations.
+func (w TransportWindow) Degraded() bool {
+	return w.Dropped > 0 || w.Rejected > 0 || w.ConsumerPanics > 0
 }
 
 func (s *Session) clone() Session {
 	c := *s
 	c.Gaps = append([]Gap(nil), s.Gaps...)
+	c.CategoryChurn = append([]EpochChurn(nil), s.CategoryChurn...)
+	// Agg is intentionally shared read-only in clones only via deep accessors;
+	// external callers get a nil Agg to keep session copies cheap and to keep
+	// the mutable aggregate encapsulated (AggregateSnapshot is the read API).
+	c.Agg = nil
 	return c
 }
 
@@ -66,6 +92,9 @@ func (e *Engine) StartSession(actor string) (Session, error) {
 	if base.CapturedAt == "" {
 		base.CapturedAt = rfc3339(now)
 	}
+	if e.cfg.CategoryEpoch != nil {
+		base.CategoryEpoch = e.cfg.CategoryEpoch() // pinned at Start (M3)
+	}
 	s := &Session{
 		ID:              newID(),
 		State:           StateLearning,
@@ -73,15 +102,21 @@ func (e *Engine) StartSession(actor string) (Session, error) {
 		StartedAt:       rfc3339(now),
 		CreatedBy:       actor,
 		Baseline:        base,
+		SubjectKeyID:    e.subjKey.keyID,
+		Agg:             newAggregate(),
 		startedAtParsed: now,
 	}
 	e.sessions = append(e.sessions, s)
 	e.pruneLocked()
+	prevAggSession := e.aggSession
+	e.aggSession = s
+	e.pinTransportLocked()
 	e.learningActive.Store(true)
 	if err := e.saveLocked(); err != nil {
 		// Persist-before-return: a failed durable write must not leave a
 		// phantom active session that a restart would forget.
 		e.sessions = e.sessions[:len(e.sessions)-1]
+		e.aggSession = prevAggSession
 		e.learningActive.Store(false)
 		return Session{}, err
 	}
@@ -115,6 +150,8 @@ func (e *Engine) finishActive(actor, terminalState string) (Session, error) {
 	s.State = terminalState
 	s.StoppedAt = rfc3339(now)
 	s.StoppedBy = actor
+	e.checkEpochLocked(s, now)  // final churn check for the window
+	e.syncTransportLocked()     // fold the session-window transport deltas
 	e.pruneLocked()
 	e.learningActive.Store(false)
 	if err := e.saveLocked(); err != nil {

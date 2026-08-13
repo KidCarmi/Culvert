@@ -35,6 +35,10 @@ func newTestEngine(t *testing.T, dir string, clk *testClock, mutate func(*Config
 	cfg := Config{Now: clk.now}
 	if dir != "" {
 		cfg.StorePath = filepath.Join(dir, "policy_learning.json")
+		// Mirror production wiring: the durable pseudonym key lives alongside
+		// (but separate from) the session store, so restarts keep subject-token
+		// identity. Key-loss semantics are covered by a dedicated test.
+		cfg.SubjectKeyPath = filepath.Join(dir, "policy_learning_subject.key")
 	}
 	if mutate != nil {
 		mutate(&cfg)
@@ -172,7 +176,7 @@ func TestCorruptStore_UnknownFieldAndBadState(t *testing.T) {
 func TestNewerSchema_FailClosedReadOnly(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "policy_learning.json")
-	newer := `{"schema_version":2,"sessions":[],"future_field":{"x":1}}`
+	newer := `{"schema_version":3,"sessions":[],"future_field":{"x":1}}`
 	if err := os.WriteFile(path, []byte(newer), 0o600); err != nil {
 		t.Fatal(err)
 	}

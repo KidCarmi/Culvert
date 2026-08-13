@@ -12,11 +12,19 @@ import (
 	"github.com/KidCarmi/Culvert/internal/fileutil"
 )
 
-// SchemaVersion is the session-store document schema. Bump on any incompatible
-// shape change; a store carrying a HIGHER version puts the engine into the
-// read-only fail-closed posture (ErrStoreReadOnly) so a downgraded binary can
-// never clobber newer state.
-const SchemaVersion = 1
+// SchemaVersion is the session-store document schema. Bump on any shape
+// change that an OLDER binary's strict decoder would reject (added fields
+// count — DisallowUnknownFields makes them corruption to an old reader); a
+// store carrying a HIGHER version puts the engine into the read-only
+// fail-closed posture (ErrStoreReadOnly) so a downgraded binary can never
+// clobber newer state. Version history: 1 = M1 sessions; 2 = M3 aggregation
+// (subject_key_id / category_churn / transport / agg / baseline
+// category_epoch). v1 documents load cleanly on a v2 binary (pure field
+// additions, all omitempty); saves always write the current version.
+const SchemaVersion = 2
+
+// minReadableSchemaVersion: every version in [min, current] loads.
+const minReadableSchemaVersion = 1
 
 // persistEnvelope is the on-disk document. Strict-decoded: unknown fields or
 // trailing data are corruption (quarantine), not tolerated drift — schema
@@ -58,11 +66,26 @@ func (e *Engine) load() error {
 	e.sessions = env.Sessions
 	// Restart recovery: an active session survives a restart but records the
 	// gap (never silent — ADR-0025 §8), then the ordinary lazy-expiry rule
-	// applies (an overdue session completes deterministically).
+	// applies (an overdue session completes deterministically). Observations
+	// drained after this point attribute to the recovered session; the
+	// transport baseline re-pins at zero (fresh process counters), which the
+	// recorded restart gap makes honest.
 	now := e.cfg.Now()
 	for _, s := range e.sessions {
 		if s.State == StateLearning {
 			s.Gaps = append(s.Gaps, Gap{At: rfc3339(now), Reason: "process_restart"})
+			// M3: subject-key continuity is part of distinct-subject identity.
+			// A different key after restart (deleted/rotated) makes pre/post
+			// token populations DISJOINT — record it, never merge silently.
+			if s.SubjectKeyID != "" && s.SubjectKeyID != e.subjKey.keyID {
+				s.Gaps = append(s.Gaps, Gap{At: rfc3339(now), Reason: "subject_key_changed"})
+				if s.Agg == nil {
+					s.Agg = newAggregate()
+				}
+				s.Agg.SubjectKeyChanged = true
+				s.SubjectKeyID = e.subjKey.keyID // re-pin so the flag fires once per change
+			}
+			e.aggSession = s
 			e.dirty = true
 		}
 	}
@@ -97,10 +120,10 @@ func decodeEnvelope(raw []byte) (*persistEnvelope, error) {
 	if dec.More() {
 		return nil, errors.New("decode session store: trailing data")
 	}
-	if env.SchemaVersion != SchemaVersion {
-		if env.SchemaVersion > SchemaVersion {
-			return nil, errSchemaTooNew
-		}
+	if env.SchemaVersion > SchemaVersion {
+		return nil, errSchemaTooNew
+	}
+	if env.SchemaVersion < minReadableSchemaVersion {
 		return nil, fmt.Errorf("decode session store: unsupported schema_version %d", env.SchemaVersion)
 	}
 	for _, s := range env.Sessions {

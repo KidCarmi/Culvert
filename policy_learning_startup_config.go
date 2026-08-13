@@ -17,6 +17,7 @@ import (
 type policyLearningStartupConfig struct {
 	Enabled             bool          // M1: constant false (see header)
 	StorePath           string        // <dataDir>/policy_learning.json
+	SubjectKeyPath      string        // <dataDir>/policy_learning_subject.key (M3 pseudonym key; separate from the store)
 	MaxRetainedSessions int           // engine default when 0
 	MaxSessionDuration  time.Duration // engine default when 0
 }
@@ -27,7 +28,8 @@ type policyLearningStartupConfig struct {
 // nothing from it (no config surface exists yet — see header).
 func resolvePolicyLearningStartupConfig(_ *FileConfig, dataDirVal string) policyLearningStartupConfig {
 	return policyLearningStartupConfig{
-		Enabled:   false, // M1 invariant: learning cannot be enabled in production builds
-		StorePath: filepath.Join(dataDirVal, "policy_learning.json"),
+		Enabled:        false, // M1 invariant: learning cannot be enabled in production builds
+		StorePath:      filepath.Join(dataDirVal, "policy_learning.json"),
+		SubjectKeyPath: filepath.Join(dataDirVal, "policy_learning_subject.key"),
 	}
 }

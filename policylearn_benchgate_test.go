@@ -30,6 +30,11 @@ func TestBenchGate_LearnObserveDisabledZeroAlloc(t *testing.T) {
 	if allocs != 0 {
 		t.Fatalf("disabled learnObserveDecision allocates %.1f/op, want 0 — the off posture must be free", allocs)
 	}
+	if allocs := testing.AllocsPerRun(2000, func() {
+		learnObservePreDispatch(auth, "host.example", "GET", "BLOCKED")
+	}); allocs != 0 {
+		t.Fatalf("disabled learnObservePreDispatch allocates %.1f/op, want 0", allocs)
+	}
 }
 
 func TestBenchGate_LearnObserveEnabledBoundedAllocs(t *testing.T) {

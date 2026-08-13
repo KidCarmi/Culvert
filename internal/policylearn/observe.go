@@ -115,14 +115,7 @@ func (e *Engine) Observe(o Observation) {
 
 // ObservationStats snapshots the transport counters.
 func (e *Engine) ObservationStats() ObservationStats {
-	t := e.tr
-	return ObservationStats{
-		Accepted:       t.accepted.Load(),
-		Dropped:        t.dropped.Load(),
-		Rejected:       t.rejected.Load(),
-		ConsumerPanics: t.panics.Load(),
-		Delivered:      t.delivered.Load(),
-	}
+	return e.observationStatsRaw()
 }
 
 // startTransport wires the queue and the single drain goroutine. Called from
@@ -160,17 +153,81 @@ func (e *Engine) drainLoop(t *transport) {
 	}
 }
 
-// consumeGuarded hands one observation to the sink with per-event panic
-// containment: a panicking consumer loses THAT event (accounted) and the drain
-// keeps running — the queue must never wedge (CHAOS-24 pattern).
+// consumeGuarded aggregates one observation (M3) and hands it to the sink,
+// with per-event panic containment: a panicking consumer loses THAT event
+// (accounted) and the drain keeps running — the queue must never wedge
+// (CHAOS-24 pattern). The mutex-holding section is an inner closure so a panic
+// can never leak a held lock.
 func (e *Engine) consumeGuarded(t *transport, o Observation) {
 	defer func() {
 		if r := recover(); r != nil {
 			t.panics.Add(1)
 		}
 	}()
+	func() {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		sess := e.aggSession
+		if sess == nil {
+			return // no attributable session (cannot happen for accepted events; defensive)
+		}
+		e.aggregateLocked(sess, &o)
+		e.sinceEpoch++
+		if e.sinceEpoch >= epochCheckEvery {
+			e.sinceEpoch = 0
+			e.checkEpochLocked(sess, e.cfg.Now())
+		}
+		e.sinceFlush++
+		if e.sinceFlush >= flushEvery {
+			e.sinceFlush = 0
+			e.syncTransportLocked()
+			if err := e.saveLocked(); err != nil {
+				e.dirty = true // retry at the next flush/Close; AtomicWrite already notified storage health
+			}
+		} else {
+			e.dirty = true
+		}
+	}()
 	if s := e.cfg.Sink; s != nil {
 		s(o)
 	}
 	t.delivered.Add(1)
+}
+
+// pinTransportLocked pins the session-window transport baseline at the current
+// counters (session start / restart load). Callers hold e.mu.
+func (e *Engine) pinTransportLocked() {
+	e.tPin = e.observationStatsRaw()
+}
+
+// syncTransportLocked folds the counter deltas since the last pin into the
+// attributed session's TransportWindow and re-pins. Per-session DELTAS, never
+// lifetime totals. Callers hold e.mu.
+func (e *Engine) syncTransportLocked() {
+	sess := e.aggSession
+	if sess == nil {
+		return
+	}
+	cur := e.observationStatsRaw()
+	sess.Transport.Accepted += cur.Accepted - e.tPin.Accepted
+	sess.Transport.Dropped += cur.Dropped - e.tPin.Dropped
+	sess.Transport.Rejected += cur.Rejected - e.tPin.Rejected
+	sess.Transport.ConsumerPanics += cur.ConsumerPanics - e.tPin.ConsumerPanics
+	e.tPin = cur
+}
+
+// observationStatsRaw reads the transport counters without locking (they are
+// atomics); nil-transport-safe for constructor-time use.
+func (e *Engine) observationStatsRaw() ObservationStats {
+	t := e.tr
+	if t == nil {
+		return ObservationStats{}
+	}
+	return ObservationStats{
+		Accepted:       t.accepted.Load(),
+		Dropped:        t.dropped.Load(),
+		Rejected:       t.rejected.Load(),
+		ConsumerPanics: t.panics.Load(),
+		Delivered:      t.delivered.Load(),
+	}
 }

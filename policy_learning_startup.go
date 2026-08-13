@@ -23,8 +23,9 @@ func loadPolicyLearning(cfg policyLearningStartupConfig) {
 		return
 	}
 	eng, err := policylearn.New(policylearn.Config{
-		StorePath: cfg.StorePath,
-		Now:       time.Now,
+		StorePath:      cfg.StorePath,
+		SubjectKeyPath: cfg.SubjectKeyPath,
+		Now:            time.Now,
 		Baseline: func() policylearn.Baseline {
 			gen, _ := policyStore.policyVersion()
 			return policylearn.Baseline{
@@ -32,6 +33,16 @@ func loadPolicyLearning(cfg policyLearningStartupConfig) {
 				DefaultAction:    defaultPolicyAction(),
 			}
 		},
+		// M3: category resolution runs ONLY in the learning drain — never the
+		// request hot path. The two-tier lookup is read-only against the live
+		// category stores (the same semantic environment the policy engine
+		// consults); the session's CategoryEpoch pin makes generation drift
+		// visible rather than silently blended.
+		Categories: func(host string) (string, string) {
+			category, tier, _ := lookupHostCategory(host)
+			return category, tier
+		},
+		CategoryEpoch: learnCategoryEpoch,
 		Quarantine: func(path string, err error) {
 			quarantineCorruptStateFile("policy_learning", path, err)
 		},

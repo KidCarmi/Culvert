@@ -17,6 +17,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/hostutil"
@@ -55,7 +56,14 @@ type Store struct {
 	index      map[string]map[string]bool // lowercase cat → lowercase host set (ALL entries)
 	adminIndex map[string]map[string]bool // same, BuiltIn=false entries only
 	path       string
+	rev        atomic.Int64 // taxonomy revision: bumped on every index rebuild (load/mutation)
 }
+
+// Revision returns the monotonic admin-taxonomy revision. It changes whenever
+// the store's entries are (re)built — load, replace, set/delete, host add/
+// remove — so callers can cheaply detect "the admin taxonomy changed" without
+// diffing content (used by the policy-learning category epoch, ADR-0025 §6).
+func (s *Store) Revision() int64 { return s.rev.Load() }
 
 // New builds a store over entries and its derived host index.
 func New(entries []*Entry) *Store {
@@ -64,9 +72,11 @@ func New(entries []*Entry) *Store {
 	return s
 }
 
-// rebuildIndex reconstructs the category→hosts indices from s.entries.
+// rebuildIndex reconstructs the category→hosts indices from s.entries and
+// bumps the taxonomy revision.
 // Caller must hold s.mu (write or be the sole owner).
 func (s *Store) rebuildIndex() {
+	s.rev.Add(1)
 	idx := make(map[string]map[string]bool, len(s.entries))
 	admin := make(map[string]map[string]bool)
 	for _, e := range s.entries {
@@ -223,6 +233,7 @@ func (s *Store) Set(name string, hosts []string, builtIn bool) error {
 		} else {
 			s.adminIndex[key] = set
 		}
+		s.rev.Add(1)
 		s.mu.Unlock()
 		s.Save()
 		return nil
@@ -234,6 +245,7 @@ func (s *Store) Set(name string, hosts []string, builtIn bool) error {
 	} else {
 		s.adminIndex[key] = set
 	}
+	s.rev.Add(1)
 	s.mu.Unlock()
 	s.Save()
 	return nil
@@ -250,6 +262,7 @@ func (s *Store) Delete(name string) error {
 		s.entries = append(s.entries[:i], s.entries[i+1:]...)
 		delete(s.index, key)
 		delete(s.adminIndex, key)
+		s.rev.Add(1)
 		s.mu.Unlock()
 		s.Save()
 		return nil
@@ -273,6 +286,7 @@ func (s *Store) AddHost(category, host string) error {
 		}
 		e.Hosts = append(e.Hosts, host)
 		s.index[key][host] = true
+		s.rev.Add(1)
 		s.mu.Unlock()
 		s.Save()
 		return nil
@@ -294,6 +308,7 @@ func (s *Store) RemoveHost(category, host string) error {
 				}
 				e.Hosts = append(e.Hosts[:i], e.Hosts[i+1:]...)
 				delete(s.index[key], host)
+				s.rev.Add(1)
 				s.mu.Unlock()
 				s.Save()
 				return nil

@@ -413,14 +413,18 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 // already-authenticated request. It returns true if it has written a terminal
 // block response (403 / block page) and the caller must return. Behaviour is
 // identical to the previously-inlined gates (DEBT-002 extraction; no logic change).
-func preDispatchBlocked(w http.ResponseWriter, r *http.Request, clientIP, host, reqID, authenticatedIdentity string, authLog AuthLogFields) bool {
+// preDispatchBlocked returns the status it recorded ("" when nothing blocked)
+// and whether it wrote a terminal block response — the status return is the
+// single source of truth for the M3 pre-dispatch learning observation
+// (negative/context evidence). Enforcement behavior is unchanged.
+func preDispatchBlocked(w http.ResponseWriter, r *http.Request, clientIP, host, reqID, authenticatedIdentity string, authLog AuthLogFields) (string, bool) {
 	// Legacy blocklist check (still active alongside policy engine).
 	if bl.IsBlocked(host) {
 		atomic.AddInt64(&statBlocked, 1)
 		http.Error(w, "Forbidden by Culvert", http.StatusForbidden)
 		recordRequestAuth(clientIP, r.Method, r.Host, "BLOCKED", "blocklist", "", authenticatedIdentity, authLog)
 		logger.Printf("BLOCKED %s -> %q {req_id=%s identity=%s action=block source=blocklist}", clientIP, sanitizeLog(host), reqID, sanitizeLog(authenticatedIdentity))
-		return true
+		return "BLOCKED", true
 	}
 
 	// Threat intelligence feed check — covers both plain HTTP destinations
@@ -432,7 +436,7 @@ func preDispatchBlocked(w http.ResponseWriter, r *http.Request, clientIP, host, 
 			recordRequestAuth(clientIP, r.Method, r.Host, "THREAT_BLOCKED", result.Source, result.Reason, authenticatedIdentity, authLog)
 			logger.Printf("THREAT_BLOCKED domain %s -> %q (%q)", clientIP, sanitizeLog(host), sanitizeLog(result.Reason))
 			serveBlockPage(w, r.Host, "Threat Intelligence", result.Reason)
-			return true
+			return "THREAT_BLOCKED", true
 		}
 		// Full-URL check for non-CONNECT (plain HTTP) requests.
 		if r.Method != http.MethodConnect && !isWebSocketUpgrade(r) {
@@ -441,7 +445,7 @@ func preDispatchBlocked(w http.ResponseWriter, r *http.Request, clientIP, host, 
 				recordRequestAuth(clientIP, r.Method, r.Host, "THREAT_BLOCKED", result.Source, result.Reason, authenticatedIdentity, authLog)
 				logger.Printf("THREAT_BLOCKED url %s -> %q (%q)", clientIP, sanitizeLog(r.Host), sanitizeLog(result.Reason))
 				serveBlockPage(w, r.Host, "Threat Intelligence", result.Reason)
-				return true
+				return "THREAT_BLOCKED", true
 			}
 		}
 	}
@@ -451,7 +455,7 @@ func preDispatchBlocked(w http.ResponseWriter, r *http.Request, clientIP, host, 
 		atomic.AddInt64(&statBlocked, 1)
 		http.Error(w, "Forbidden by plugin", http.StatusForbidden)
 		recordRequestAuth(clientIP, r.Method, r.Host, "BLOCKED", "plugin", "", authenticatedIdentity, authLog)
-		return true
+		return "BLOCKED", true
 	}
 
 	// File block profile — check URL path extension for non-tunnel requests.
@@ -464,10 +468,10 @@ func preDispatchBlocked(w http.ResponseWriter, r *http.Request, clientIP, host, 
 			recordRequestAuth(clientIP, r.Method, r.Host, "FILE_BLOCKED", ext, "", authenticatedIdentity, authLog)
 			logger.Printf("FILE_BLOCKED %s -> %q%q (ext=%q)", clientIP, sanitizeLog(host), sanitizeLog(r.URL.Path), sanitizeLog(ext))
 			serveBlockPage(w, r.Host+r.URL.Path, "File Block", ext)
-			return true
+			return "FILE_BLOCKED", true
 		}
 	}
-	return false
+	return "", false
 }
 
 // applyPolicyDecision dispatches the matched policy action (drop / block page
@@ -896,9 +900,12 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// ── Pre-policy content blocks (blocklist / threat / plugin / file) ──────
-	// Extracted to preDispatchBlocked (DEBT-002). Returns true if it already
+	// Extracted to preDispatchBlocked (DEBT-002). blocked=true means it already
 	// wrote a terminal block response.
-	if preDispatchBlocked(w, r, clientIP, host, reqID, authenticatedIdentity, authLog) {
+	if preStatus, blocked := preDispatchBlocked(w, r, clientIP, host, reqID, authenticatedIdentity, authLog); blocked {
+		// M3: pre-dispatch blocks are context/negative learning evidence (a
+		// nil engine costs one atomic load; never blocks the request).
+		learnObservePreDispatch(auth, host, r.Method, preStatus)
 		return
 	}
 
@@ -910,15 +917,28 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	// boundary (see the note at the stamping site above).
 	match := policyStore.Evaluate(clientIP, authenticatedIdentity, authenticatedSource, host, authenticatedGroups)
 
+	// M3 (H2-drop gap closure): the ActionDrop branch's HTTP/2 fallback aborts
+	// via panic(http.ErrAbortHandler) BEFORE applyPolicyDecision returns, which
+	// would lose the observation. The Drop branch's recorded status is
+	// deterministic (always POLICY_DROP), so emit it pre-abort here and skip
+	// the duplicate on the normal terminal path below. Enforcement untouched.
+	isDrop := match != nil && match.Rule != nil && match.Action == ActionDrop
+	if isDrop {
+		learnObserveDecision(auth, host, r.Method, match, "POLICY_DROP", "")
+	}
+
 	// ── Policy action dispatch ──────────────────────────────────────────────
 	// Extracted to applyPolicyDecision (DEBT-002). terminal=true means it wrote
 	// a terminal drop / block / redirect / deny response.
 	decisionStatus, terminal := applyPolicyDecision(w, r, clientIP, host, reqID, authenticatedIdentity, authLog, match)
 	if terminal {
-		// M2: one learning observation per policy decision (blocked branch).
-		// Non-blocking, drop-on-full; a nil (disabled) engine costs one atomic
-		// load. Learning has zero authority here — see ADR-0025.
-		learnObserveDecision(auth, host, r.Method, match, decisionStatus, "")
+		// M2: one learning observation per policy decision (blocked branch;
+		// the Drop case was already emitted pre-abort above). Non-blocking,
+		// drop-on-full; a nil (disabled) engine costs one atomic load.
+		// Learning has zero authority here — see ADR-0025.
+		if !isDrop {
+			learnObserveDecision(auth, host, r.Method, match, decisionStatus, "")
+		}
 		return
 	}
 
