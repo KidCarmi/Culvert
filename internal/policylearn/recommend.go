@@ -72,7 +72,15 @@ const (
 	defaultCommunityTier    = "community" // tier string the root resolver uses for the UT1/community DB
 	guardrailsHashDomainTag = "policylearn-guardrails-v1"
 	recIDDomainTag          = "policylearn-rec-v1"
+	recPolicyHashDomainTag  = "policylearn-recpolicy-v1"
 )
+
+// recommendAlgorithmVersion identifies the recommendation ALGORITHM semantics —
+// the eligibility gates, confidence predicates, cap logic, and the package
+// bounds they run under (per-generation/retention caps are code constants, not
+// config). Bump it with any change to that logic so the semantic shift is
+// visible in RecommendationPolicyHash even when no configurable knob moved.
+const recommendAlgorithmVersion = 1
 
 // Recommendation bounds.
 const (
@@ -121,6 +129,58 @@ type Thresholds struct {
 	CommunityTiers []string
 }
 
+// RecommendationPolicy is the by-value snapshot of the DECISION POLICY a
+// recommendation was generated under (M4.1): every engine-configuration value
+// that can change eligibility, confidence, or the confidence caps, plus the
+// algorithm version standing in for the non-configurable logic and bounds.
+// Deliberately DISJOINT from GuardrailsHash: guardrails say WHICH categories
+// are eligible; this says HOW evidence becomes a recommendation and a
+// confidence tier. Embedded by value in every Recommendation so historical
+// decisions stay fully explainable without the runtime configuration that
+// produced them.
+type RecommendationPolicy struct {
+	AlgorithmVersion         int      `json:"algorithm_version"`
+	HighMinAllowedRequests   int64    `json:"high_min_allowed_requests"`
+	HighMinSubjects          int      `json:"high_min_subjects"`
+	HighMinDays              int      `json:"high_min_days"`
+	MediumMinAllowedRequests int64    `json:"medium_min_allowed_requests"`
+	MediumMinSubjects        int      `json:"medium_min_subjects"`
+	MediumMinDays            int      `json:"medium_min_days"`
+	CommunityTiers           []string `json:"community_tiers"` // canonical form (trimmed/deduped/sorted)
+}
+
+// policySnapshot derives the canonical policy snapshot from resolved
+// thresholds (call on a withDefaults() result — CommunityTiers is already
+// canonical there, so incidental configuration ordering can never leak into
+// the snapshot or its hash).
+func (t Thresholds) policySnapshot() RecommendationPolicy {
+	return RecommendationPolicy{
+		AlgorithmVersion:         recommendAlgorithmVersion,
+		HighMinAllowedRequests:   t.HighMinAllowedRequests,
+		HighMinSubjects:          t.HighMinSubjects,
+		HighMinDays:              t.HighMinDays,
+		MediumMinAllowedRequests: t.MediumMinAllowedRequests,
+		MediumMinSubjects:        t.MediumMinSubjects,
+		MediumMinDays:            t.MediumMinDays,
+		CommunityTiers:           append([]string(nil), t.CommunityTiers...),
+	}
+}
+
+// recommendationPolicyHashFor is the deterministic identity of a canonical
+// policy snapshot. Semantic equality ⇒ identical hash (fixed struct, canonical
+// slice, deterministic marshal); any material semantic change — a threshold,
+// the community-tier classification, the algorithm version — changes it.
+func recommendationPolicyHashFor(p RecommendationPolicy) string {
+	raw, err := json.Marshal(p)
+	if err != nil {
+		return "marshal-error" // structurally impossible; mirrors evidenceHash
+	}
+	h := sha256.New()
+	h.Write([]byte(recPolicyHashDomainTag))
+	h.Write(raw)
+	return hex.EncodeToString(h.Sum(nil)[:16])
+}
+
 func (t Thresholds) withDefaults() Thresholds {
 	if t.HighMinAllowedRequests <= 0 {
 		t.HighMinAllowedRequests = 30
@@ -140,6 +200,9 @@ func (t Thresholds) withDefaults() Thresholds {
 	if t.MediumMinDays <= 0 {
 		t.MediumMinDays = 2
 	}
+	// Canonicalize BEFORE the empty check: a configuration of blank/duplicate
+	// entries collapses to the default rather than silently disabling the cap.
+	t.CommunityTiers = canonicalizeCategories(t.CommunityTiers)
 	if len(t.CommunityTiers) == 0 {
 		t.CommunityTiers = []string{defaultCommunityTier}
 	}
@@ -243,9 +306,16 @@ type Recommendation struct {
 	// was minted under; EngineSchema pins the store schema at generation.
 	Baseline     Baseline `json:"baseline"`
 	SubjectKeyID string   `json:"subject_key_id,omitempty"`
-	EvidenceHash string   `json:"evidence_hash"` // canonical content hash (identity/idempotency anchor)
-	EngineSchema int      `json:"engine_schema"`
-	GeneratedAt  string   `json:"generated_at"` // RFC3339 UTC (injected clock)
+	// Policy/PolicyHash pin the recommendation DECISION POLICY (M4.1): the
+	// snapshot is embedded by value so the decision stays explainable after the
+	// runtime configuration changes; the hash is the identity a future
+	// acceptance surface compares (a mismatch is an explicit stale reason and
+	// must refuse acceptance).
+	Policy       RecommendationPolicy `json:"policy"`
+	PolicyHash   string               `json:"policy_hash"`
+	EvidenceHash string               `json:"evidence_hash"` // canonical content hash (identity/idempotency anchor)
+	EngineSchema int                  `json:"engine_schema"`
+	GeneratedAt  string               `json:"generated_at"` // RFC3339 UTC (injected clock)
 }
 
 func (r *Recommendation) clone() Recommendation {
@@ -255,6 +325,7 @@ func (r *Recommendation) clone() Recommendation {
 	c.Evidence.TopAllowedHosts = append([]HostCount(nil), r.Evidence.TopAllowedHosts...)
 	c.Evidence.RuleHits = append([]AttributionCount(nil), r.Evidence.RuleHits...)
 	c.Evidence.TierHits = append([]AttributionCount(nil), r.Evidence.TierHits...)
+	c.Policy.CommunityTiers = append([]string(nil), r.Policy.CommunityTiers...)
 	return c
 }
 
@@ -313,6 +384,18 @@ func guardrailsHashFor(canonical []string) string {
 
 // GuardrailsHash exposes the engine's current guardrail identity (read-only).
 func (e *Engine) GuardrailsHash() string { return e.guardrailsHash }
+
+// RecommendationPolicyHash exposes the engine's current decision-policy
+// identity (read-only; immutable after New).
+func (e *Engine) RecommendationPolicyHash() string { return e.recPolicyHash }
+
+// CurrentRecommendationPolicy returns a copy of the canonical decision-policy
+// snapshot the engine generates under.
+func (e *Engine) CurrentRecommendationPolicy() RecommendationPolicy {
+	p := e.recPolicy
+	p.CommunityTiers = append([]string(nil), e.recPolicy.CommunityTiers...)
+	return p
+}
 
 // RecommendableCategories returns the canonical allowlist (copy).
 func (e *Engine) RecommendableCategories() []string {
@@ -455,6 +538,8 @@ func buildRecommendations(sess *Session, allowSet map[string]bool, th Thresholds
 	if sess.Agg == nil || len(sess.Agg.Cells) == 0 {
 		return nil
 	}
+	pol := th.policySnapshot() // one canonical snapshot + identity per generation
+	polHash := recommendationPolicyHashFor(pol)
 	keys := make([]string, 0, len(sess.Agg.Cells))
 	for k := range sess.Agg.Cells {
 		keys = append(keys, k)
@@ -482,7 +567,7 @@ func buildRecommendations(sess *Session, allowSet map[string]bool, th Thresholds
 			res.TruncatedCells++ // counted, never silent; deterministic sorted-order selection
 			continue
 		}
-		out = append(out, newRecommendation(sess, strings.TrimPrefix(scope, scopeGroupPrefix), category, cell, th, now))
+		out = append(out, newRecommendation(sess, strings.TrimPrefix(scope, scopeGroupPrefix), category, cell, th, pol, polHash, now))
 	}
 	return out
 }
@@ -490,7 +575,7 @@ func buildRecommendations(sess *Session, allowSet map[string]bool, th Thresholds
 // newRecommendation assembles one immutable recommendation from one eligible
 // cell — evidence copied by value, confidence from named predicates, identity
 // content-derived.
-func newRecommendation(sess *Session, group, category string, cell *Cell, th Thresholds, now time.Time) *Recommendation {
+func newRecommendation(sess *Session, group, category string, cell *Cell, th Thresholds, pol RecommendationPolicy, polHash string, now time.Time) *Recommendation {
 	level, reasons, limits := confidenceFor(sess, cell, th)
 	r := &Recommendation{
 		SessionID: sess.ID,
@@ -538,6 +623,8 @@ func newRecommendation(sess *Session, group, category string, cell *Cell, th Thr
 		},
 		Baseline:     sess.Baseline,
 		SubjectKeyID: sess.SubjectKeyID,
+		Policy:       pol,
+		PolicyHash:   polHash,
 		EngineSchema: SchemaVersion,
 		GeneratedAt:  rfc3339(now),
 	}
@@ -680,22 +767,24 @@ func sortedAttribution(m map[string]int64) []AttributionCount {
 // content always hashes identically — the idempotency/supersession anchor.
 func evidenceHash(r *Recommendation) string {
 	content := struct {
-		SessionID         string           `json:"sid"`
-		Group             string           `json:"g"`
-		Category          string           `json:"c"`
-		ProposedRule      ProposedRule     `json:"rule"`
-		Confidence        string           `json:"conf"`
-		ConfidenceReasons []string         `json:"reasons"`
-		ConfidenceLimits  []string         `json:"limits"`
-		Coverage          CoverageEvidence `json:"cov"`
-		Evidence          Evidence         `json:"ev"`
-		Baseline          Baseline         `json:"base"`
-		SubjectKeyID      string           `json:"skid"`
-		EngineSchema      int              `json:"schema"`
+		SessionID         string               `json:"sid"`
+		Group             string               `json:"g"`
+		Category          string               `json:"c"`
+		ProposedRule      ProposedRule         `json:"rule"`
+		Confidence        string               `json:"conf"`
+		ConfidenceReasons []string             `json:"reasons"`
+		ConfidenceLimits  []string             `json:"limits"`
+		Coverage          CoverageEvidence     `json:"cov"`
+		Evidence          Evidence             `json:"ev"`
+		Baseline          Baseline             `json:"base"`
+		SubjectKeyID      string               `json:"skid"`
+		Policy            RecommendationPolicy `json:"pol"` // policy identity is content: a policy change supersedes, never rewrites
+		PolicyHash        string               `json:"polh"`
+		EngineSchema      int                  `json:"schema"`
 	}{
 		r.SessionID, r.Group, r.Category, r.ProposedRule, r.Confidence,
 		r.ConfidenceReasons, r.ConfidenceLimits, r.Coverage, r.Evidence,
-		r.Baseline, r.SubjectKeyID, r.EngineSchema,
+		r.Baseline, r.SubjectKeyID, r.Policy, r.PolicyHash, r.EngineSchema,
 	}
 	raw, err := json.Marshal(content)
 	if err != nil {
@@ -758,6 +847,11 @@ type StaleInputs struct {
 	CategoryEpoch    string
 	GuardrailsHash   string
 	SubjectKeyID     string
+	// RecommendationPolicyHash is the CURRENT decision-policy identity
+	// (Engine.RecommendationPolicyHash). Empty ⇒ the caller is not asserting
+	// it (no claim); non-empty ⇒ compared fail-closed, so a recommendation
+	// with a missing pin (pre-M4.1 object) is stale, never assumed current.
+	RecommendationPolicyHash string
 }
 
 // StaleReasons is the pure staleness computation: the named pin mismatches
@@ -777,6 +871,12 @@ func StaleReasons(r *Recommendation, cur StaleInputs) []string {
 	}
 	if r.SubjectKeyID != "" && cur.SubjectKeyID != "" && r.SubjectKeyID != cur.SubjectKeyID {
 		out = append(out, "subject_key_changed")
+	}
+	if cur.RecommendationPolicyHash != "" && r.PolicyHash != cur.RecommendationPolicyHash {
+		// Deliberately fail-closed on an EMPTY pinned hash: an unpinned
+		// (pre-M4.1) recommendation cannot prove which decision policy produced
+		// it, so it can never be presented as current.
+		out = append(out, "recommendation_policy_changed")
 	}
 	return out
 }

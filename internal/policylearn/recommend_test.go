@@ -155,8 +155,8 @@ func TestGenerate_SyntheticScopesAreEvidenceOnly(t *testing.T) {
 	clk := newTestClock()
 	e := newRecEngine(t, "", clk, nil)
 	s, _ := e.StartSession("op")
-	recFeed(t, e, clk, "", nil, "code.example", "r1", "OK")                    // s:unauth
-	recFeed(t, e, clk, "bob@corp.example", nil, "code.example", "r1", "OK")    // s:groupless
+	recFeed(t, e, clk, "", nil, "code.example", "r1", "OK")                 // s:unauth
+	recFeed(t, e, clk, "bob@corp.example", nil, "code.example", "r1", "OK") // s:groupless
 	if _, err := e.StopSession("op"); err != nil {
 		t.Fatal(err)
 	}
@@ -323,7 +323,7 @@ func TestGenerate_CommunityTierMinorityDoesNotCap(t *testing.T) {
 	clk := newTestClock()
 	e := newRecEngine(t, "", clk, nil)
 	s, _ := e.StartSession("op")
-	feedHighEvidence(t, e, clk) // 36 admin-tier
+	feedHighEvidence(t, e, clk)                                                          // 36 admin-tier
 	recFeed(t, e, clk, "user0@corp.example", []string{"eng"}, "ut1.example", "r1", "OK") // 1 community-tier
 	if _, err := e.StopSession("op"); err != nil {
 		t.Fatal(err)
@@ -411,7 +411,7 @@ func TestGenerate_DefaultActionAttributionDistinguishable(t *testing.T) {
 	clk := newTestClock()
 	e := newRecEngine(t, "", clk, nil)
 	s, _ := e.StartSession("op")
-	feedHighEvidence(t, e, clk)                                                     // RuleID rule-ulid-1
+	feedHighEvidence(t, e, clk)                                                         // RuleID rule-ulid-1
 	recFeed(t, e, clk, "user0@corp.example", []string{"eng"}, "code.example", "", "OK") // default action
 	if _, err := e.StopSession("op"); err != nil {
 		t.Fatal(err)
@@ -686,8 +686,8 @@ func TestGenerate_PersistedV3RoundTripNoRawSubjects(t *testing.T) {
 	if err := json.Unmarshal(raw, &env); err != nil {
 		t.Fatal(err)
 	}
-	if env["schema_version"] != float64(3) {
-		t.Fatalf("schema_version = %v, want 3", env["schema_version"])
+	if env["schema_version"] != float64(SchemaVersion) {
+		t.Fatalf("schema_version = %v, want %d", env["schema_version"], SchemaVersion)
 	}
 	if _, ok := env["recommendations"]; !ok {
 		t.Fatal("recommendations absent from the v3 envelope")
@@ -712,7 +712,7 @@ func TestGenerate_PersistedV3RoundTripNoRawSubjects(t *testing.T) {
 func TestGenerate_NewerSchemaStoreStaysReadOnly(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "policy_learning.json")
-	newer := `{"schema_version":4,"sessions":[],"future":true}`
+	newer := `{"schema_version":5,"sessions":[],"future":true}`
 	if err := os.WriteFile(path, []byte(newer), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -797,4 +797,187 @@ func TestGenerate_ConcurrentWithObserveAndReads(t *testing.T) {
 		_ = e.Sessions()
 	}
 	<-done
+}
+
+// ── M4.1: recommendation-policy identity ─────────────────────────────────────
+
+func TestRecommendationPolicyHash_OrderingIndependentAndDefaultEquivalent(t *testing.T) {
+	// Incidental configuration ordering/spacing/duplication must not change the
+	// identity.
+	a := Thresholds{CommunityTiers: []string{"community", "ut1"}}.withDefaults()
+	b := Thresholds{CommunityTiers: []string{"ut1", " community ", "ut1"}}.withDefaults()
+	ha := recommendationPolicyHashFor(a.policySnapshot())
+	hb := recommendationPolicyHashFor(b.policySnapshot())
+	if ha != hb || ha == "" {
+		t.Fatalf("ordering/spacing changed the policy hash: %q vs %q", ha, hb)
+	}
+	// Explicit values equal to the defaults are the SAME semantics ⇒ same hash.
+	c := Thresholds{HighMinAllowedRequests: 30, HighMinSubjects: 5, HighMinDays: 5,
+		MediumMinAllowedRequests: 5, MediumMinSubjects: 2, MediumMinDays: 2,
+		CommunityTiers: []string{"community"}}.withDefaults()
+	d := Thresholds{}.withDefaults()
+	if recommendationPolicyHashFor(c.policySnapshot()) != recommendationPolicyHashFor(d.policySnapshot()) {
+		t.Fatal("explicit-default configuration hashed differently from implicit defaults")
+	}
+}
+
+func TestRecommendationPolicyHash_MaterialChangesChangeHash(t *testing.T) {
+	base := recommendationPolicyHashFor(Thresholds{}.withDefaults().policySnapshot())
+	mutations := map[string]Thresholds{
+		"high_requests":   {HighMinAllowedRequests: 31},
+		"high_subjects":   {HighMinSubjects: 6},
+		"high_days":       {HighMinDays: 6},
+		"medium_requests": {MediumMinAllowedRequests: 6},
+		"medium_subjects": {MediumMinSubjects: 3},
+		"medium_days":     {MediumMinDays: 3},
+		"community_tiers": {CommunityTiers: []string{"community", "ut1"}},
+	}
+	seen := map[string]string{"": base}
+	for name, th := range mutations {
+		h := recommendationPolicyHashFor(th.withDefaults().policySnapshot())
+		if h == base {
+			t.Errorf("%s change did not change the policy hash", name)
+		}
+		for prev, ph := range seen {
+			if ph == h {
+				t.Errorf("%s collides with %q", name, prev)
+			}
+		}
+		seen[name] = h
+	}
+}
+
+func TestRecommendationPolicyHash_UnrelatedConfigCannotChangeIt(t *testing.T) {
+	clk := newTestClock()
+	e1 := newRecEngine(t, "", clk, nil)
+	// Different store, retention, allowlist (guardrails), resolver — none of it
+	// is recommendation-decision policy.
+	e2 := newRecEngine(t, t.TempDir(), clk, func(c *Config) {
+		c.RecommendableCategories = []string{"AI"}
+		c.MaxRetainedSessions = 3
+		c.Categories = nil
+	})
+	if e1.RecommendationPolicyHash() != e2.RecommendationPolicyHash() {
+		t.Fatal("non-policy configuration changed the recommendation-policy hash")
+	}
+	if e1.GuardrailsHash() == e2.GuardrailsHash() {
+		t.Fatal("allowlist change must still move GuardrailsHash (separate identities)")
+	}
+}
+
+func TestGenerate_PinsPolicySnapshotAndSurvivesRestart(t *testing.T) {
+	clk := newTestClock()
+	dir := t.TempDir()
+	e := newRecEngine(t, dir, clk, nil)
+	s, _ := e.StartSession("op")
+	feedHighEvidence(t, e, clk)
+	if _, err := e.StopSession("op"); err != nil {
+		t.Fatal(err)
+	}
+	r := mustGenerate(t, e, s.ID).Recommendations[0]
+	if r.PolicyHash != e.RecommendationPolicyHash() || r.PolicyHash == "" {
+		t.Fatalf("policy hash not pinned: %q vs %q", r.PolicyHash, e.RecommendationPolicyHash())
+	}
+	want := e.CurrentRecommendationPolicy()
+	if fmt.Sprint(r.Policy) != fmt.Sprint(want) {
+		t.Fatalf("policy snapshot not embedded by value: %+v vs %+v", r.Policy, want)
+	}
+	if r.Policy.AlgorithmVersion != recommendAlgorithmVersion || r.Policy.HighMinSubjects != 5 {
+		t.Fatalf("snapshot content: %+v", r.Policy)
+	}
+	if err := e.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Restart with the SAME config: identity identical, object byte-identical.
+	e2 := newRecEngine(t, dir, clk, nil)
+	if e2.RecommendationPolicyHash() != r.PolicyHash {
+		t.Fatal("policy identity not stable across restart")
+	}
+	got := e2.Recommendations()[0]
+	b1, _ := json.Marshal(r)
+	b2, _ := json.Marshal(got)
+	if !bytes.Equal(b1, b2) {
+		t.Fatalf("recommendation changed across restart:\n%s\n%s", b1, b2)
+	}
+}
+
+func TestGenerate_PolicyChangeSupersedesNeverRewrites(t *testing.T) {
+	clk := newTestClock()
+	dir := t.TempDir()
+	e := newRecEngine(t, dir, clk, nil)
+	s, _ := e.StartSession("op")
+	feedHighEvidence(t, e, clk)
+	if _, err := e.StopSession("op"); err != nil {
+		t.Fatal(err)
+	}
+	orig := mustGenerate(t, e, s.ID).Recommendations[0]
+	if err := e.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reopen under a changed decision policy (community tiers extended — a
+	// semantic cap change even though this cell's confidence outcome may not
+	// move).
+	e2 := newRecEngine(t, dir, clk, func(c *Config) {
+		c.Recommend = Thresholds{CommunityTiers: []string{"community", "ut1"}}
+	})
+	if e2.RecommendationPolicyHash() == orig.PolicyHash {
+		t.Fatal("policy change did not move the engine identity")
+	}
+	res := mustGenerate(t, e2, s.ID)
+	if res.SupersededCount != 1 || len(res.Recommendations) != 1 {
+		t.Fatalf("policy change must supersede: %+v", res)
+	}
+	if res.Recommendations[0].PolicyHash != e2.RecommendationPolicyHash() {
+		t.Fatal("new recommendation not pinned to the new policy identity")
+	}
+	// The historical object is preserved verbatim (state latch aside): its
+	// evidence, snapshot, and hash still describe the ORIGINAL decision.
+	var old Recommendation
+	for _, r := range e2.Recommendations() {
+		if r.ID == orig.ID {
+			old = r
+		}
+	}
+	if old.ID == "" || old.State != RecStateSuperseded {
+		t.Fatalf("original object missing/not superseded: %+v", old)
+	}
+	old.State = orig.State // undo the one permitted mutation for the comparison
+	b1, _ := json.Marshal(orig)
+	b2, _ := json.Marshal(old)
+	if !bytes.Equal(b1, b2) {
+		t.Fatalf("policy change rewrote historical evidence:\n%s\n%s", b1, b2)
+	}
+	// And the pure staleness helper flags the old object against the new
+	// engine identity.
+	reasons := StaleReasons(&old, StaleInputs{
+		PolicyGeneration:         old.Baseline.PolicyGeneration,
+		CategoryEpoch:            old.Baseline.CategoryEpoch,
+		GuardrailsHash:           old.Baseline.GuardrailsHash,
+		SubjectKeyID:             old.SubjectKeyID,
+		RecommendationPolicyHash: e2.RecommendationPolicyHash(),
+	})
+	if fmt.Sprint(reasons) != fmt.Sprint([]string{"recommendation_policy_changed"}) {
+		t.Fatalf("stale reasons = %v, want [recommendation_policy_changed]", reasons)
+	}
+}
+
+func TestStaleReasons_RecommendationPolicyClaims(t *testing.T) {
+	r := &Recommendation{PolicyHash: "p1"}
+	if got := StaleReasons(r, StaleInputs{RecommendationPolicyHash: "p1"}); len(got) != 0 {
+		t.Fatalf("matching policy hash reported stale: %v", got)
+	}
+	if got := StaleReasons(r, StaleInputs{RecommendationPolicyHash: "p2"}); fmt.Sprint(got) != fmt.Sprint([]string{"recommendation_policy_changed"}) {
+		t.Fatalf("changed policy hash: %v", got)
+	}
+	// No current identity supplied ⇒ no claim.
+	if got := StaleReasons(r, StaleInputs{}); len(got) != 0 {
+		t.Fatalf("no-claim case reported stale: %v", got)
+	}
+	// Unpinned (pre-M4.1) object vs a current identity ⇒ stale, fail-closed.
+	unpinned := &Recommendation{}
+	if got := StaleReasons(unpinned, StaleInputs{RecommendationPolicyHash: "p1"}); fmt.Sprint(got) != fmt.Sprint([]string{"recommendation_policy_changed"}) {
+		t.Fatalf("unpinned object not failed closed: %v", got)
+	}
 }

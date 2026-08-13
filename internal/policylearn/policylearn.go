@@ -154,6 +154,8 @@ type Engine struct {
 	allowSet       map[string]bool
 	guardrailsHash string
 	th             Thresholds
+	recPolicy      RecommendationPolicy // M4.1: canonical decision-policy snapshot (immutable after New)
+	recPolicyHash  string               // M4.1: its deterministic identity
 	recs           []*Recommendation
 }
 
@@ -182,6 +184,8 @@ func New(cfg Config) (*Engine, error) {
 	}
 	e.guardrailsHash = guardrailsHashFor(e.allowlist)
 	e.th = cfg.Recommend.withDefaults()
+	e.recPolicy = e.th.policySnapshot()
+	e.recPolicyHash = recommendationPolicyHashFor(e.recPolicy)
 	sk, err := loadOrCreateSubjectKey(cfg.SubjectKeyPath)
 	if err != nil {
 		return nil, err

@@ -20,10 +20,11 @@ import (
 // clobber newer state. Version history: 1 = M1 sessions; 2 = M3 aggregation
 // (subject_key_id / category_churn / transport / agg / baseline
 // category_epoch); 3 = M4 recommendations (top-level recommendations array +
-// baseline guardrails_hash). Older documents load cleanly on a newer binary
-// (pure field additions, all omitempty); saves always write the current
-// version.
-const SchemaVersion = 3
+// baseline guardrails_hash); 4 = M4.1 recommendation-policy identity
+// (policy / policy_hash embedded per recommendation). Older documents load
+// cleanly on a newer binary (pure field additions, all omitempty); saves
+// always write the current version.
+const SchemaVersion = 4
 
 // minReadableSchemaVersion: every version in [min, current] loads.
 const minReadableSchemaVersion = 1
