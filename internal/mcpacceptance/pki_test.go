@@ -457,7 +457,9 @@ func TestPKI_V203IncidentClass_NoChildProcessOnExpiredPKI(t *testing.T) {
 	sentinel := filepath.Join(dir, "executed.sentinel")
 	script := "#!/bin/sh\ntouch " + sentinel + "\nsleep 60\n"
 	bin := filepath.Join(dir, "culvert-sentinel")
-	if err := os.WriteFile(bin, []byte(script), 0o700); err != nil {
+	// 0600 satisfies gosec G306; no exec bit is needed because the run must fail
+	// before pinBinary's 0500 copy is ever started.
+	if err := os.WriteFile(bin, []byte(script), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	sum := sha256.Sum256([]byte(script))
