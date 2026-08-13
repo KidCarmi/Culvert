@@ -204,8 +204,19 @@ func TestHandleReady_NodeCertRenewalFailing_FailRowAndRecovery(t *testing.T) {
 	if row == nil || row.Status != "fail" {
 		t.Fatalf("node_cert row = %+v, want fail while renewal is failing inside the window", row)
 	}
-	if !strings.Contains(row.Detail, "connection refused") || !strings.Contains(row.Detail, "day") {
-		t.Errorf("node_cert detail should carry days-left and the last error, got %q", row.Detail)
+	// The detail carries days-left and points at the logs, but NOT the renewal
+	// cause: /ready is unauthenticated on the proxy listener and renewDPCert's
+	// error names the control-plane address or an absolute cert/key path (see
+	// appendDPHealthChecks and readyz_detail_disclosure_test.go). This assertion
+	// previously required the cause to be present, which pinned the leak.
+	if !strings.Contains(row.Detail, "day") {
+		t.Errorf("node_cert detail should carry days-left, got %q", row.Detail)
+	}
+	if !strings.Contains(row.Detail, "see server logs") {
+		t.Errorf("node_cert detail should point the operator at the logs, got %q", row.Detail)
+	}
+	if strings.Contains(row.Detail, "connection refused") || strings.Contains(row.Detail, "RenewCert RPC") {
+		t.Errorf("node_cert detail must not publish the renewal cause on the unauthenticated /ready surface, got %q", row.Detail)
 	}
 	if code != http.StatusOK || status != "ready" {
 		t.Fatalf("default verdict changed: code=%d status=%q, want 200/ready (report-only contract)", code, status)
