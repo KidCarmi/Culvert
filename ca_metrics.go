@@ -98,4 +98,55 @@ func caWriteUsabilityPrometheus(w *strings.Builder) {
 	w.WriteString("\n# HELP culvert_ca_rotation_persist_failures_total Rotations that generated a new Root CA but could not write it to disk\n")
 	w.WriteString("# TYPE culvert_ca_rotation_persist_failures_total counter\n")
 	fmt.Fprintf(w, "culvert_ca_rotation_persist_failures_total %d\n", snap.PersistFailures)
+
+	clusterCAWriteUsabilityPrometheus(w)
+}
+
+// clusterCAWriteUsabilityPrometheus appends the CHAOS-50 cluster-CA usability
+// series — the CA-13 half of what caWriteUsabilityPrometheus does for the
+// inspection CA.
+//
+// The gap these close: `culvert_cluster_ca_rotations_total` counts only
+// SUCCESSES, so a cluster CA whose auto-rotation had been failing every day for
+// a month was indistinguishable on /metrics from one that simply had not
+// reached its rotation window yet. Both read as a flat zero. The expiry gauge is
+// the one to alert on, well before the cliff; the rest confirm the cliff was hit
+// and how much of the fleet it took with it.
+//
+// Label-free, per the CA-2 metrics contract: no node ID, subject, serial,
+// fingerprint or key material — counts and one time delta only.
+func clusterCAWriteUsabilityPrometheus(w *strings.Builder) {
+	snap := clusterCAUsabilityFailures()
+
+	w.WriteString("\n# HELP culvert_cluster_ca_usable Whether the cluster CA can currently sign a node certificate peers will accept (1 = yes)\n")
+	w.WriteString("# TYPE culvert_cluster_ca_usable gauge\n")
+	usable := 0
+	if globalClusterCA.Usable() == nil {
+		usable = 1
+	}
+	fmt.Fprintf(w, "culvert_cluster_ca_usable %d\n", usable)
+
+	// Omitted entirely when no cluster CA is loaded — an absent series is
+	// honest, whereas 0 would read as "expires now" on every standalone node.
+	if exp := globalClusterCA.Expiry(); !exp.IsZero() {
+		w.WriteString("\n# HELP culvert_cluster_ca_expires_in_seconds Seconds until the cluster CA certificate expires (negative once expired)\n")
+		w.WriteString("# TYPE culvert_cluster_ca_expires_in_seconds gauge\n")
+		fmt.Fprintf(w, "culvert_cluster_ca_expires_in_seconds %d\n", int64(time.Until(exp).Seconds()))
+	}
+
+	w.WriteString("\n# HELP culvert_cluster_ca_sign_refused_total Node-certificate signings refused because the cluster CA was outside its validity window\n")
+	w.WriteString("# TYPE culvert_cluster_ca_sign_refused_total counter\n")
+	fmt.Fprintf(w, "culvert_cluster_ca_sign_refused_total %d\n", snap.SignRefusals)
+
+	w.WriteString("\n# HELP culvert_cluster_ca_rotation_failures_total Cluster CA auto-rotation attempts that failed\n")
+	w.WriteString("# TYPE culvert_cluster_ca_rotation_failures_total counter\n")
+	fmt.Fprintf(w, "culvert_cluster_ca_rotation_failures_total %d\n", snap.RotationFailures)
+
+	// Non-zero means node certs are being shortened to fit inside the issuer —
+	// i.e. the cluster CA is within one node-cert lifetime of its own expiry.
+	// That is the EARLY warning, and it moves long before the expiry gauge gets
+	// close to zero.
+	w.WriteString("\n# HELP culvert_cluster_ca_cert_clamped_total Node certificates whose validity was clamped to the cluster CA's expiry\n")
+	w.WriteString("# TYPE culvert_cluster_ca_cert_clamped_total counter\n")
+	fmt.Fprintf(w, "culvert_cluster_ca_cert_clamped_total %d\n", snap.Clamps)
 }

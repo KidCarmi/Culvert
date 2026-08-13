@@ -18,6 +18,7 @@ type healthReport struct {
 	ClamAV            string `json:"clamav" redact:"internal"`
 	CAExpiresDays     int    `json:"ca_expires_days" redact:"internal"`
 	SSLInspection     string `json:"ssl_inspection" redact:"internal"`
+	ClusterCA         string `json:"cluster_ca" redact:"internal"`
 	ThreatFeedEntries int64  `json:"threat_feed_entries" redact:"internal"`
 }
 
@@ -61,6 +62,18 @@ func computeHealth() healthReport {
 		sslInspection = "expired"
 	}
 
+	// Cluster CA posture (CHAOS-50). Same shape and same reason as the branch
+	// above: Ready() only asks whether a CA is loaded, so before this the probe
+	// stayed silent through a total cluster-PKI outage. "not_configured" is the
+	// ordinary standalone case and is not a degradation.
+	clusterCAState := "not_configured"
+	if globalClusterCA.Ready() {
+		clusterCAState = "ready"
+		if globalClusterCA.Usable() != nil {
+			clusterCAState = "expired"
+		}
+	}
+
 	return healthReport{
 		Status:            "ok",
 		Uptime:            uptime(),
@@ -68,6 +81,7 @@ func computeHealth() healthReport {
 		ClamAV:            clamStatus,
 		CAExpiresDays:     caExpiresDays,
 		SSLInspection:     sslInspection,
+		ClusterCA:         clusterCAState,
 		ThreatFeedEntries: tfEntries,
 	}
 }
@@ -197,6 +211,34 @@ func appendCAReadinessCheck(checks map[string]*readinessCheck) {
 	}
 }
 
+// appendClusterCAReadinessCheck adds the cluster-CA row (CHAOS-50 / CA-13).
+//
+// REPORT-ONLY, like the `ca` row above and for a sharper version of the same
+// reason: an expired cluster CA is a property of the CONTROL PLANE's PKI, not of
+// this node's ability to proxy traffic. Gating on it would eject a control plane
+// from its load balancer at exactly the moment an operator needs to reach its
+// admin UI to import a replacement CA. Probes that want the stricter verdict opt
+// in via /readyz?strict=1.
+//
+// The detail string is FIXED, per the unauthenticated-surface rule the `ca` row
+// documents: the live cause (which end of the window, and when) carries the CA's
+// expiry date, and it is available on the role-gated /api/cluster/ca instead.
+func appendClusterCAReadinessCheck(checks map[string]*readinessCheck) {
+	if !globalClusterCA.Ready() {
+		// No cluster CA on this node — no row at all, matching the `ca` row's
+		// "not configured yet" behaviour.
+		return
+	}
+	if globalClusterCA.Usable() != nil {
+		checks["cluster_ca"] = &readinessCheck{
+			Status: "fail",
+			Detail: "cluster CA outside its validity window; node enrollment and renewal are blocked — see server logs",
+		}
+		return
+	}
+	checks["cluster_ca"] = &readinessCheck{Status: "ok"}
+}
+
 // computeReadiness builds the readiness snapshot and the HTTP status code (200
 // when all gating checks pass, 503 otherwise). Shared by handleReady and the
 // readiness support collector. The verdict returned here is the DEFAULT
@@ -210,6 +252,8 @@ func computeReadiness() (report readinessReport, code int) {
 
 	// 1. CA — see appendCAReadinessCheck. Report-only: never gates.
 	appendCAReadinessCheck(checks)
+	// 1b. Cluster CA (CHAOS-50) — report-only: never gates. See the function.
+	appendClusterCAReadinessCheck(checks)
 
 	// 2. ClamAV: if scanner is initialised, verify connectivity.
 	//

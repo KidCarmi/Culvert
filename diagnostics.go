@@ -143,6 +143,7 @@ func buildOperatorContract() OperatorContract {
 		checkStorage(),
 		checkPolicyLoaded(),
 		checkRootCA(),
+		checkClusterCA(),
 		checkSessionSecret(),
 		checkCDR(),
 		checkClusterPosture(),
@@ -406,6 +407,49 @@ func checkRootCA() OperatorContractCheck {
 		Code:    "root_ca",
 		Status:  diagOK,
 		Message: "root CA initialised",
+	}
+}
+
+// checkClusterCA is the CHAOS-50 operator-contract row for the CLUSTER CA — the
+// authority behind CP↔DP mTLS, distinct from checkRootCA's inspection CA.
+//
+// Same viewer-role guardrail as root_ca: the message carries the impact and a
+// count, never the raw cause. The exact validity window names the appliance's
+// certificate state and stays on the admin-role /api/cluster/ca.
+func checkClusterCA() OperatorContractCheck {
+	if !globalClusterCA.Ready() {
+		// Standalone appliances have no cluster CA at all, which is the
+		// ordinary case and not a degradation.
+		return OperatorContractCheck{
+			Code:    "cluster_ca",
+			Status:  diagOK,
+			Message: "cluster CA not initialised — node enrollment not in use",
+		}
+	}
+	if globalClusterCA.Usable() != nil {
+		return OperatorContractCheck{
+			Code:   "cluster_ca",
+			Status: diagFail,
+			Message: fmt.Sprintf("cluster CA outside its validity window — node enrollment and renewal are BLOCKED (%d requests refused since boot)",
+				clusterCAUsabilityFailures().SignRefusals),
+			OperatorAction: "Import a replacement cluster CA (Cluster → CA), then re-enroll data-plane nodes. See docs/operator/cluster-ca-expiry.md.",
+		}
+	}
+	// A failing auto-rotation is the state in which the row above becomes
+	// inevitable, so it is worth a warning while there is still time to act.
+	if snap := clusterCAUsabilityFailures(); snap.RotationFailures > 0 {
+		return OperatorContractCheck{
+			Code:   "cluster_ca",
+			Status: diagWarn,
+			Message: fmt.Sprintf("cluster CA auto-rotation is failing (%d attempts since boot) — the CA still expires on schedule",
+				snap.RotationFailures),
+			OperatorAction: "Restore write access to the data directory so rotation can persist the new CA, or import a replacement cluster CA (Cluster → CA).",
+		}
+	}
+	return OperatorContractCheck{
+		Code:    "cluster_ca",
+		Status:  diagOK,
+		Message: "cluster CA initialised",
 	}
 }
 

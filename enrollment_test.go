@@ -492,7 +492,7 @@ func TestClusterCA_RotationFailure_SurfacedInInfo(t *testing.T) {
 		t.Fatalf("InitOrLoad: %v", err)
 	}
 
-	ca.recordRotationFailure(errors.New("disk full"))
+	ca.recordRotationFailure("import", errors.New("disk full"))
 
 	info := ca.Info()
 	if got := info["lastRotationError"]; got != "disk full" {

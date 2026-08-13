@@ -134,6 +134,7 @@ func TestApiDiagnostics_DefaultOK(t *testing.T) {
 		"storage_path":               false,
 		"policy_loaded":              false,
 		"root_ca":                    false,
+		"cluster_ca":                 false,
 		"session_secret":             false,
 		"cdr":                        false,
 		"cluster_posture":            false,
@@ -972,6 +973,11 @@ func resetDiagVerdictGlobals(t *testing.T) {
 	// (one rule to remember, per the CHAOS-45 precedent).
 	resetAuthBackendHealthForTest()
 	t.Cleanup(resetAuthBackendHealthForTest)
+	// CHAOS-50: cluster-CA usability health is another process-global that
+	// folds into the verdict (a leaked sign refusal or rotation failure flips
+	// cluster_ca to fail/warn under -shuffle/-count). Same rule, same place.
+	resetClusterCAHealthForTest()
+	t.Cleanup(resetClusterCAHealthForTest)
 	policyStore.mu.Lock()
 	prevRules := policyStore.rules
 	prevVersion := policyStore.version

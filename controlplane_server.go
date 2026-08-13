@@ -392,6 +392,19 @@ func (s *controlPlaneServer) Enroll(ctx context.Context, raw json.RawMessage) (j
 	if ok, reason := haIssuanceAllowed(); !ok {
 		return nil, status.Errorf(codes.FailedPrecondition, "enrollment fenced: %s", reason)
 	}
+	// CHAOS-50 / CA-13: check the CA can actually issue BEFORE admitEnrollment,
+	// which consumes the one-time token. Signing later fails closed either way
+	// (SignCSR carries the same guard as defense-in-depth), but doing it here
+	// means an operator retrying against an expired CA is not also burning a
+	// fresh enrollment token on every attempt.
+	if !globalClusterCA.Ready() {
+		return nil, status.Errorf(codes.FailedPrecondition, "cluster CA not initialized")
+	}
+	if err := globalClusterCA.Usable(); err != nil {
+		noteClusterCASignRefused(err.Error())
+		return nil, status.Errorf(codes.FailedPrecondition,
+			"cluster CA cannot issue node certificates: %v — import or rotate the cluster CA", err)
+	}
 	req, tokInfo, priorNode, err := admitEnrollment(ctx, raw)
 	if err != nil {
 		return nil, err
@@ -401,11 +414,11 @@ func (s *controlPlaneServer) Enroll(ctx context.Context, raw json.RawMessage) (j
 	}
 
 	// Sign the CSR.
-	if !globalClusterCA.Ready() {
-		return nil, status.Errorf(codes.FailedPrecondition, "cluster CA not initialized")
-	}
 	certPEM, serial, expiry, err := globalClusterCA.SignCSR([]byte(req.CSR), req.NodeID)
 	if err != nil {
+		if errors.Is(err, errClusterCAUnusable) {
+			return nil, status.Errorf(codes.FailedPrecondition, "sign CSR: %v", err)
+		}
 		return nil, status.Errorf(codes.Internal, "sign CSR: %v", err)
 	}
 
@@ -604,7 +617,12 @@ func (s *controlPlaneServer) RenewCert(ctx context.Context, raw json.RawMessage)
 		return nil, fmt.Errorf("RenewCert: %w", err)
 	}
 
-	// Sign the new CSR.
+	// Sign the new CSR. CHAOS-50: an unusable CA is refused here rather than
+	// handing back a certificate the node cannot use. The node keeps its current
+	// certificate and keeps retrying on its renewal cadence, so the fleet
+	// self-heals the moment the operator rotates — which is strictly better than
+	// the pre-fix behaviour, where the node PERSISTED the dead replacement and
+	// lost its still-valid one.
 	certPEM, serial, expiry, err := globalClusterCA.SignCSR([]byte(req.CSR), req.NodeID)
 	if err != nil {
 		return nil, fmt.Errorf("sign CSR: %w", err)

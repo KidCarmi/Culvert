@@ -50,9 +50,21 @@ func loadRootCA(cfg rootCAStartupConfig, ctx context.Context) {
 	caRuntime.path = cfg.Path
 	caRuntime.passphrase = cfg.Passphrase
 	// Start CA auto-rotation background check.
-	if certMgr.Ready() {
-		StartCAAutoRotation(ctx, cfg.Path, cfg.Passphrase)
-	}
+	//
+	// CHAOS-50 / CA-13: started UNCONDITIONALLY. The loop drives BOTH CAs —
+	// the inspection CA and the cluster CA (see StartCAAutoRotation) — so the
+	// old `if certMgr.Ready()` guard coupled two subsystems that share nothing
+	// but a ticker. A corrupt bundle, a wrong CULVERT_CA_PASSPHRASE or an
+	// unwritable CA directory leaves certMgr not-ready, which is already an
+	// accepted degradation for inspection (register row CA-3, fail-open to
+	// tunnel-only) — but it ALSO silently switched off cluster-CA auto-rotation
+	// on a control plane, whose only consequence appears years later as a
+	// fleet-wide CP↔DP mTLS outage with no rotation ever having been attempted.
+	//
+	// Running the loop with no inspection CA costs one zero-expiry comparison
+	// per 24h: certMgr.RotateIfNeeded returns immediately when CAExpiry() is
+	// zero, and each CA is guarded separately inside the round.
+	StartCAAutoRotation(ctx, cfg.Path, cfg.Passphrase)
 }
 
 // initInspectionCA performs the load-or-init half of loadRootCA: persisted
