@@ -28,7 +28,7 @@ var policylearnAllowedImports = map[string]bool{
 
 func policylearnSourceFiles(t *testing.T, includeTests bool) []string {
 	t.Helper()
-	dir := filepath.Join("internal", "policylearn")
+	dir := filepath.Join(pkgSourceDir(), "internal", "policylearn")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("read %s: %v", dir, err)
@@ -87,18 +87,36 @@ func TestPolicyLearnWall_NoWallClock(t *testing.T) {
 	}
 }
 
-// TestPolicyLearnWall_MainNeverEvaluatesThroughLearning: no enforcement-path
-// file references the learning singleton. The learning engine is observed BY
-// root wiring; nothing on the request path may consult it in M1 (it is dead
-// infrastructure until M2's explicit observation wiring).
-func TestPolicyLearnWall_RequestPathUntouched(t *testing.T) {
-	for _, file := range []string{"proxy.go", "proxy_http.go", "proxy_tunnel.go", "proxy_tunnel_h2.go", "socks5.go", "policy.go", "store.go"} {
-		raw, err := os.ReadFile(file)
+// TestPolicyLearnWall_RequestPathOneWayTransport: the runtime→learning
+// coupling is exactly ONE narrow adapter (M2). proxy.go may call
+// learnObserveDecision and nothing else of the learning subsystem — never the
+// singleton or the package directly; every other request-path/enforcement file
+// references nothing of it. The transport is one-way: runtime → observation →
+// learning. Learning has no path back into enforcement (the import-surface
+// test above makes the reverse direction impossible at compile-graph level).
+func TestPolicyLearnWall_RequestPathOneWayTransport(t *testing.T) {
+	// proxy.go: the adapter call only.
+	raw, err := os.ReadFile(filepath.Join(pkgSourceDir(), "proxy.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "policyLearnEngine") || strings.Contains(string(raw), "policylearn.") {
+		t.Error("proxy.go touches the learning singleton/package directly — only the learnObserveDecision adapter is permitted (M2)")
+	}
+	if !strings.Contains(string(raw), "learnObserveDecision(") {
+		t.Error("proxy.go no longer emits the M2 observation — if deliberate, update this wall test with the design change")
+	}
+	// Every other enforcement/request-path file: zero learning references.
+	for _, file := range []string{"proxy_http.go", "proxy_tunnel.go", "proxy_tunnel_h2.go", "socks5.go", "policy.go", "policy_draft.go", "store.go"} {
+		raw, err := os.ReadFile(filepath.Join(pkgSourceDir(), file))
 		if err != nil {
 			t.Fatalf("read %s: %v", file, err)
 		}
-		if strings.Contains(string(raw), "policyLearn") || strings.Contains(string(raw), "policylearn") {
-			t.Errorf("%s references the learning engine — M1 forbids any request-path or policy-engine coupling (observation wiring is M2)", file)
+		src := string(raw)
+		for _, tok := range []string{"policyLearn", "policylearn", "learnObserve"} {
+			if strings.Contains(src, tok) {
+				t.Errorf("%s references the learning subsystem (%q) — only proxy.go's single adapter call is permitted", file, tok)
+			}
 		}
 	}
 }

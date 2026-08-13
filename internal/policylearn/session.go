@@ -77,10 +77,12 @@ func (e *Engine) StartSession(actor string) (Session, error) {
 	}
 	e.sessions = append(e.sessions, s)
 	e.pruneLocked()
+	e.learningActive.Store(true)
 	if err := e.saveLocked(); err != nil {
 		// Persist-before-return: a failed durable write must not leave a
 		// phantom active session that a restart would forget.
 		e.sessions = e.sessions[:len(e.sessions)-1]
+		e.learningActive.Store(false)
 		return Session{}, err
 	}
 	return s.clone(), nil
@@ -114,8 +116,10 @@ func (e *Engine) finishActive(actor, terminalState string) (Session, error) {
 	s.StoppedAt = rfc3339(now)
 	s.StoppedBy = actor
 	e.pruneLocked()
+	e.learningActive.Store(false)
 	if err := e.saveLocked(); err != nil {
 		s.State, s.StoppedAt, s.StoppedBy = prevState, prevStopAt, prevStopBy
+		e.learningActive.Store(true)
 		return Session{}, err
 	}
 	return s.clone(), nil
@@ -174,6 +178,7 @@ func (e *Engine) maybeExpireLocked(now time.Time) {
 			s.StoppedAt = rfc3339(now)
 			s.StoppedBy = "system:invalid-start-stamp"
 			e.dirty = true
+			e.learningActive.Store(false)
 			e.pruneLocked()
 			return
 		}
@@ -184,6 +189,7 @@ func (e *Engine) maybeExpireLocked(now time.Time) {
 		s.StoppedAt = rfc3339(now)
 		s.StoppedBy = "system:max-duration"
 		e.dirty = true
+		e.learningActive.Store(false)
 		e.pruneLocked()
 	}
 }

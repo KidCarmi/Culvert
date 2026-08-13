@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -35,7 +36,7 @@ func newHeaderServingBackend(t *testing.T, contentDisposition string) *httptest.
 
 func mustReadFile(t *testing.T, path string) string {
 	t.Helper()
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(filepath.Join(pkgSourceDir(), path))
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
 	}

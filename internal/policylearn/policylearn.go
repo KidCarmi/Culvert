@@ -1,8 +1,9 @@
-// Package policylearn is the Security Policy Learning Mode engine skeleton
-// (ADR-0025, slice M1): the Learning Session lifecycle with schema-versioned,
-// bounded, fail-closed node-local persistence. It is deliberately DEAD
-// infrastructure until slice M2 wires observations — this package contains no
-// observation intake, no aggregation, no recommendations, and no API surface.
+// Package policylearn is the Security Policy Learning Mode engine (ADR-0025):
+// the Learning Session lifecycle (M1) with schema-versioned, bounded,
+// fail-closed node-local persistence, plus the observation TRANSPORT (M2) — a
+// bounded drop-on-full queue with a single drain goroutine (see observe.go).
+// Aggregation, recommendations, and any API/GUI surface are deliberately
+// absent until M3+.
 //
 // Design contract (ADR-0025 — every clause is test-pinned):
 //
@@ -24,7 +25,9 @@
 //     write (read-only) — a downgrade can never clobber newer state.
 //   - BOUNDED. Terminal sessions are pruned FIFO to MaxRetainedSessions; an
 //     active session auto-completes at MaxSessionDuration (lazily, on the
-//     next engine operation — the engine owns no goroutines and no timers).
+//     next engine operation — no timers). The engine's ONLY goroutine is the
+//     M2 observation drain, started at construction and stopped
+//     deterministically by Close.
 //   - EXPLICIT OFF STATE. Disabled means this engine is simply never
 //     constructed: no file, no goroutine, no allocation (the root singleton
 //     stays nil).
@@ -36,6 +39,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -89,16 +93,26 @@ type Config struct {
 	// MaxSessionDuration auto-completes an overdue active session (lazily).
 	// 0 ⇒ DefaultMaxSessionDuration; clamped up to minSessionDuration.
 	MaxSessionDuration time.Duration
+	// Sink consumes drained observations (M2: tests / the M3 aggregator).
+	// nil = validated observations are counted and discarded. Called ONLY from
+	// the single drain goroutine, with per-event panic containment. Fixed at
+	// construction; never called after Close returns.
+	Sink func(Observation)
 }
 
-// Engine owns the Learning Session lifecycle. All state is guarded by one
-// mutex; accessors return copies, never internal pointers.
+// Engine owns the Learning Session lifecycle and (M2) the observation
+// transport. Session state is guarded by one mutex; accessors return copies,
+// never internal pointers. learningActive mirrors "a session is Learning" as
+// an atomic so the request-path Observe gate is lock-free.
 type Engine struct {
 	mu       sync.Mutex
 	cfg      Config
 	sessions []*Session // insertion order = creation order
 	readOnly bool       // ErrSchemaTooNew posture: never write
 	dirty    bool       // lazy-expiry flipped state in memory; persisted on next mutation/Close
+
+	learningActive atomic.Bool // M2: lock-free Observe gate, maintained on every state change
+	tr             *transport  // M2: bounded observation queue + single drain
 }
 
 // New constructs the engine and loads the store (fail-closed; see load).
@@ -124,6 +138,8 @@ func New(cfg Config) (*Engine, error) {
 		// handled fail-closed inside); surface them to the caller.
 		return nil, fmt.Errorf("policylearn: load store: %w", err)
 	}
+	e.learningActive.Store(e.activeLocked() != nil) // constructor: no concurrency yet
+	e.startTransport()
 	return e, nil
 }
 
@@ -134,8 +150,16 @@ func (e *Engine) ReadOnly() bool {
 	return e.readOnly
 }
 
-// Close flushes any lazily-flipped state. Safe on a read-only engine (no-op).
+// Close stops the observation transport (draining everything already queued —
+// deterministic shutdown), then flushes any lazily-flipped session state. Safe
+// to call more than once and on a read-only engine.
 func (e *Engine) Close() error {
+	if t := e.tr; t != nil {
+		t.stopOnce.Do(func() {
+			close(t.stop)
+			<-t.done
+		})
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if !e.dirty {
