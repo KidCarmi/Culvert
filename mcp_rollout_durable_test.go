@@ -45,11 +45,13 @@ func gwObserveCfg() *rollout.SignedConfig {
 }
 
 // withExecDepsReady flips the Gateway execution-dependency flag for the duration of a
-// test so an executing-mode transition can be exercised, then restores it.
+// test so an executing-mode transition can be exercised, then restores it. It uses the
+// real production hook (markGatewayExecDepsReady) so the future guarded-execution
+// composition is exercised end to end.
 func withExecDepsReady(t *testing.T) {
 	t.Helper()
 	prev := globalExecDeps.gateway.Load()
-	globalExecDeps.gateway.Store(true)
+	markGatewayExecDepsReady()
 	t.Cleanup(func() { globalExecDeps.gateway.Store(prev) })
 }
 
@@ -392,5 +394,33 @@ func TestDurable_RestoreClampsExecutingModeWithoutDeps(t *testing.T) {
 	gw := r2.status()["gateway"].(map[string]any)
 	if gw["persistence"] != "degraded" {
 		t.Fatalf("clamped restore should report degraded persistence, got %v", gw["persistence"])
+	}
+}
+
+// Test: the Management capability exec-deps gate works via its real production hook.
+func TestDurable_ManagementExecDepsGate(t *testing.T) {
+	withTempDataDir(t)
+	r := newTestRollout()
+	mgShadow := &rollout.SignedConfig{
+		SelectorSchema: 1, Capability: rollout.CapabilityManagement, Mode: rollout.ModeShadow,
+		ScopeRevision: 1, Scope: rollout.ScopeSpec{Capability: rollout.CapabilityManagement, Servers: []string{"m1"}},
+	}
+	// Without management exec deps: fail closed.
+	if err := r.commitRolloutTransition(mgShadow, "cp", time.Unix(1000, 0)); err != errShadowExecDepsNotConfigured {
+		t.Fatalf("management shadow must fail closed without deps, got %v", err)
+	}
+	// With management exec deps (real hook): the transition proceeds.
+	prev := globalExecDeps.management.Load()
+	markManagementExecDepsReady()
+	t.Cleanup(func() { globalExecDeps.management.Store(prev) })
+	if err := r.commitRolloutTransition(mgShadow, "cp", time.Unix(2000, 0)); err != nil {
+		t.Fatalf("management shadow with deps: %v", err)
+	}
+	if r.management.CurrentMode() != rollout.ModeShadow {
+		t.Fatalf("management mode should be Shadow, got %s", r.management.CurrentMode())
+	}
+	// Gateway stays Disabled (isolation).
+	if r.gateway.CurrentMode() != rollout.ModeDisabled {
+		t.Fatalf("gateway must stay Disabled (isolation), got %s", r.gateway.CurrentMode())
 	}
 }
