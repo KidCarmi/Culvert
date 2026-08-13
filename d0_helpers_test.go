@@ -173,6 +173,9 @@ var d0KnownRoutes = func() []string {
 //   - 178 — reconcile parallel-merge drift: Supportability M5 added
 //     /api/diagnose/support (bundle-store health self-check) but its lock bump
 //     collided with the /api/decryption/redaction merge; the true count is 178.
+//   - 220 — Added /api/cluster/ha/planned-handoff (POST admin: arm/disarm the
+//     ADR-0004 Slice 1e coordinated-handoff flag, previously wired end-to-end
+//     but unreachable from any admin surface).
 //
 // POST-C1 FAILURE MATRIX (the table below is the FULL contract; the
 // reverse-direction gap that existed in pre-C1 D0 is now closed by
@@ -189,7 +192,7 @@ var d0KnownRoutes = func() []string {
 //   - Remove an entry from uiRoutes only             → fails C1 reverse
 //     (helper-registered route has no metadata) AND this D0 count test.
 func TestD0_RouteInventory_Locked141(t *testing.T) {
-	const want = 219 // + 14 /api/mcp/* (PR-9) + 2 distribution/rollback (PR-10) + 8 rollout (PR-11) + 2 PR-UX-5 (distribution/acks + rollout/scope/validate)
+	const want = 220 // + 14 /api/mcp/* (PR-9) + 2 distribution/rollback (PR-10) + 8 rollout (PR-11) + 2 PR-UX-5 (distribution/acks + rollout/scope/validate) + 1 planned-handoff
 	if got := len(d0KnownRoutes); got != want {
 		t.Fatalf("d0KnownRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}

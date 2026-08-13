@@ -7578,6 +7578,36 @@ paths:
               schema: { type: object, additionalProperties: true }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/cluster/ha/planned-handoff:
+    post:
+      operationId: plannedHandoffHA
+      tags: [cluster]
+      summary: Arm/disarm planned handoff
+      description: Arms or disarms a coordinated HA handoff on the leader — the next config sync instructs the standby to promote, for draining the leader ahead of planned maintenance.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: cluster.ha-planned-handoff-arm
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        '200':
+          description: Planned handoff armed/disarmed.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
   /api/cluster/ha/promote:
     post:
       operationId: promoteHA

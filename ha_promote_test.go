@@ -9,6 +9,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -160,5 +161,118 @@ func TestPlannedPromotion_Flag(t *testing.T) {
 	h.ClearPlannedPromotion()
 	if h.plannedPromotion.Load() {
 		t.Error("ClearPlannedPromotion should disarm the flag")
+	}
+}
+
+// leaderWith returns a leader HAState for exercising the planned-handoff endpoint.
+func leaderWith() *HAState {
+	h := &HAState{}
+	h.mu.Lock()
+	h.role = "leader"
+	h.mu.Unlock()
+	return h
+}
+
+func plannedHandoffRequest(armed bool) *http.Request {
+	body := `{"armed":false}`
+	if armed {
+		body = `{"armed":true}`
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/cluster/ha/planned-handoff", strings.NewReader(body))
+	req = req.WithContext(context.WithValue(req.Context(), uiRoleKey{}, RoleAdmin))
+	return req
+}
+
+// Before this endpoint existed, RequestPlannedPromotion/ClearPlannedPromotion
+// had no caller anywhere in the binary — the coordinated-handoff design was
+// fully wired end to end (leader stamps PromoteRequested into the HASync
+// bundle, standby consumes it in syncFromLeader) but unreachable from any
+// admin surface. These tests pin the endpoint that closes that gap.
+func TestApiClusterHAPlannedHandoff_ArmsOnLeader(t *testing.T) {
+	defer swapGlobalHA(t)()
+	globalHA = leaderWith()
+
+	w := httptest.NewRecorder()
+	apiClusterHAPlannedHandoff(w, plannedHandoffRequest(true))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("arm = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	if !globalHA.plannedPromotion.Load() {
+		t.Error("expected plannedPromotion armed after arm request")
+	}
+	if got := globalHA.Status().PlannedHandoff; !got {
+		t.Error("Status().PlannedHandoff should reflect the armed flag")
+	}
+}
+
+func TestApiClusterHAPlannedHandoff_Disarms(t *testing.T) {
+	defer swapGlobalHA(t)()
+	h := leaderWith()
+	h.RequestPlannedPromotion()
+	globalHA = h
+
+	w := httptest.NewRecorder()
+	apiClusterHAPlannedHandoff(w, plannedHandoffRequest(false))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("disarm = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	if globalHA.plannedPromotion.Load() {
+		t.Error("expected plannedPromotion disarmed after disarm request")
+	}
+}
+
+func TestApiClusterHAPlannedHandoff_RejectsNonLeader(t *testing.T) {
+	defer swapGlobalHA(t)()
+	globalHA = standbyWith(func() error { return nil })
+
+	w := httptest.NewRecorder()
+	apiClusterHAPlannedHandoff(w, plannedHandoffRequest(true))
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("arm on a standby = %d, want 409", w.Code)
+	}
+	if globalHA.plannedPromotion.Load() {
+		t.Error("a standby must not be able to arm planned handoff")
+	}
+}
+
+func TestApiClusterHAPlannedHandoff_RejectsHADisabled(t *testing.T) {
+	defer swapGlobalHA(t)()
+	globalHA = &HAState{}
+
+	w := httptest.NewRecorder()
+	apiClusterHAPlannedHandoff(w, plannedHandoffRequest(true))
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("arm with HA disabled = %d, want 409", w.Code)
+	}
+}
+
+func TestApiClusterHAPlannedHandoff_MethodNotAllowed(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/cluster/ha/planned-handoff", http.NoBody)
+	req = req.WithContext(context.WithValue(req.Context(), uiRoleKey{}, RoleAdmin))
+	w := httptest.NewRecorder()
+	apiClusterHAPlannedHandoff(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET = %d, want 405", w.Code)
+	}
+}
+
+func TestApiClusterHAPlannedHandoff_RequiresAdmin(t *testing.T) {
+	defer swapGlobalHA(t)()
+	globalHA = leaderWith()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/cluster/ha/planned-handoff", strings.NewReader(`{"armed":true}`))
+	req = req.WithContext(context.WithValue(req.Context(), uiRoleKey{}, RoleViewer))
+	w := httptest.NewRecorder()
+	apiClusterHAPlannedHandoff(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("viewer role = %d, want 403", w.Code)
+	}
+	if globalHA.plannedPromotion.Load() {
+		t.Error("a viewer must not be able to arm planned handoff")
 	}
 }

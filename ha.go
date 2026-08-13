@@ -120,16 +120,17 @@ var globalHA = &HAState{}
 
 // HAStatus returns a snapshot of the current HA state for API/UI consumption.
 type HAStatus struct {
-	Enabled       bool   `json:"enabled"`
-	Role          string `json:"role"`                      // "leader", "standby", or ""
-	Since         string `json:"since,omitempty"`           // RFC3339
-	PeerAddr      string `json:"peer_addr,omitempty"`       // other CP address
-	AutoFailover  bool   `json:"auto_failover"`             // standby self-promotes on leader loss (ADR-0004)
-	Term          uint64 `json:"term"`                      // leadership epoch (ADR-0004 Slice 1c)
-	StandbyAddr   string `json:"standby_addr,omitempty"`    // leader-side failback target (ADR-0005 S0)
-	SyncFailCount int    `json:"sync_fail_count,omitempty"` // standby-side: consecutive HASync failures since last success
-	LastSyncOK    string `json:"last_sync_ok,omitempty"`    // standby-side: RFC3339 of the last successful HASync apply
-	SyncPanics    int    `json:"sync_panics,omitempty"`     // standby-side: sync rounds contained by the panic guard (CHAOS-25)
+	Enabled        bool   `json:"enabled"`
+	Role           string `json:"role"`                      // "leader", "standby", or ""
+	Since          string `json:"since,omitempty"`           // RFC3339
+	PeerAddr       string `json:"peer_addr,omitempty"`       // other CP address
+	AutoFailover   bool   `json:"auto_failover"`             // standby self-promotes on leader loss (ADR-0004)
+	Term           uint64 `json:"term"`                      // leadership epoch (ADR-0004 Slice 1c)
+	StandbyAddr    string `json:"standby_addr,omitempty"`    // leader-side failback target (ADR-0005 S0)
+	SyncFailCount  int    `json:"sync_fail_count,omitempty"` // standby-side: consecutive HASync failures since last success
+	LastSyncOK     string `json:"last_sync_ok,omitempty"`    // standby-side: RFC3339 of the last successful HASync apply
+	SyncPanics     int    `json:"sync_panics,omitempty"`     // standby-side: sync rounds contained by the panic guard (CHAOS-25)
+	PlannedHandoff bool   `json:"planned_handoff"`           // leader-side: coordinated handoff armed (ADR-0004 Slice 1e) — the next HASync instructs the standby to promote
 }
 
 func (h *HAState) Status() HAStatus {
@@ -145,6 +146,11 @@ func (h *HAState) Status() HAStatus {
 	}
 	if !h.since.IsZero() {
 		s.Since = h.since.Format(time.RFC3339)
+	}
+	// Leader-only: plannedPromotion only has meaning on the leader (it's what
+	// the leader stamps into the next HASync bundle); a standby never arms it.
+	if h.role == "leader" {
+		s.PlannedHandoff = h.plannedPromotion.Load()
 	}
 	// Standby-only: on auto-promotion setFail(N) can run just before promote()
 	// flips h.role to "leader" (nothing else resets syncFailCount), so gate
@@ -1149,6 +1155,12 @@ func apiClusterHA(w http.ResponseWriter, r *http.Request) {
 		resp["failover_events"] = globalHAFailoverRing.Load().list()
 		if status.Enabled && status.Role == "leader" {
 			resp["deploy_cmd"] = haDeployCommand()
+			// ADR-0004 Slice 1e: surface whether a coordinated planned handoff is
+			// armed. Previously the leader could arm plannedPromotion internally
+			// with no admin-visible way to see (or set) it — an operator taking
+			// the leader down for planned maintenance had no signal the standby
+			// would promote cleanly on the next sync.
+			resp["planned_handoff"] = status.PlannedHandoff
 		}
 		if status.Enabled && status.Role == "standby" {
 			// Previously invisible outside the "HA: sync failed (N/3)" log line —
@@ -1273,6 +1285,56 @@ func apiClusterHAPromote(w http.ResponseWriter, r *http.Request) {
 		Action: "cluster.ha-promote",
 		Object: "self",
 		Detail: fmt.Sprintf("manual standby→leader promotion (term=%d)", status.Term),
+	})
+}
+
+// apiClusterHAPlannedHandoff handles POST /api/cluster/ha/planned-handoff —
+// arms or disarms the coordinated-handoff flag (ADR-0004 Slice 1e) on this
+// node, the HA leader. When armed, the next HASync bundle instructs the
+// standby to promote immediately on receipt — even with auto-failover off —
+// so an admin can drain the leader for planned maintenance (OS patch,
+// Culvert upgrade, planned reboot) without either an unattended
+// failure-detection window (killing the leader outright) or an
+// unsynchronized manual "/promote" on the standby (which doesn't confirm the
+// standby is caught up or tell the old leader to step down). Prior to this,
+// RequestPlannedPromotion/ClearPlannedPromotion had no caller anywhere in the
+// binary — the coordinated-handoff design existed but was unreachable.
+func apiClusterHAPlannedHandoff(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleAdmin) {
+		return
+	}
+	var req struct {
+		Armed bool `json:"armed"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	status := globalHA.Status()
+	if !status.Enabled || status.Role != "leader" {
+		http.Error(w, "planned handoff can only be armed on the HA leader", http.StatusConflict)
+		return
+	}
+	action := "cluster.ha-planned-handoff-disarm"
+	if req.Armed {
+		globalHA.RequestPlannedPromotion()
+		action = "cluster.ha-planned-handoff-arm"
+	} else {
+		globalHA.ClearPlannedPromotion()
+	}
+	jsonOK(w, map[string]any{"ok": true, "armed": req.Armed})
+
+	auditAdd(AuditEntry{
+		TS:     time.Now().UnixMilli(),
+		Time:   time.Now().Format("2006-01-02 15:04:05"),
+		Actor:  sessionAdmin(r),
+		Action: action,
+		Object: "self",
+		Detail: fmt.Sprintf("coordinated planned handoff armed=%v (next HASync instructs the standby to promote)", req.Armed),
 	})
 }
 

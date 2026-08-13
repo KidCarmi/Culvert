@@ -4356,6 +4356,15 @@ Firefox (all platforms):
               <button class="btn warn" id="ha-promote-btn" data-click="promoteHA">Promote this Control Plane to Leader</button>
               <span style="font-size:.75rem;color:var(--muted);margin-left:8px">Use when the leader is down and automatic failover is off. Confirm the leader is truly gone first - promoting while the leader still serves causes split-brain.</span>
             </div>
+            <!-- Planned handoff: shown only when this Control Plane is the leader. Arms a
+                 coordinated promotion the standby performs on the next sync, so a leader can
+                 be drained for maintenance without an unattended failure-detection window or
+                 an unsynchronized manual promote on the standby (ADR-0004 Slice 1e). -->
+            <div id="ha-planned-handoff-row" style="display:none;margin-bottom:16px">
+              <span id="ha-planned-handoff-badge" style="font-size:.75rem;font-weight:600;margin-right:8px">-</span>
+              <button class="btn" id="ha-planned-handoff-btn" data-click="togglePlannedHandoff">Arm Planned Handoff</button>
+              <span style="font-size:.75rem;color:var(--muted);margin-left:8px">Before planned maintenance (OS patch, upgrade, reboot), arm this so the standby promotes cleanly on the next sync instead of waiting for failure detection. Disarm if you change your mind.</span>
+            </div>
             <!-- Recent role transitions (M5): promotions + self-fences, newest first. Status-only, volatile (cleared on restart). -->
             <div id="ha-failover-events" style="display:none;margin-top:12px">
               <div style="font-size:.8rem;font-weight:600;color:var(--muted);margin-bottom:6px">Recent role transitions</div>
@@ -17144,6 +17153,37 @@ async function promoteHA() {
   }
 }
 
+async function togglePlannedHandoff() {
+  const btn = document.getElementById('ha-planned-handoff-btn');
+  const arming = !btn.dataset.armed;
+  if (arming) {
+    const ok = await confirmDanger({
+      title: 'Arm planned HA handoff',
+      msg: 'The standby will promote itself to leader as soon as the next config sync reaches it - even with automatic failover off. Use this right before taking this leader down for planned maintenance.',
+      impact: 'If you leave this armed and this leader later restarts or resyncs the standby unexpectedly, the standby will promote itself even though no real maintenance is happening.',
+      rollback: 'Disarm at any time before the standby has synced to cancel the pending handoff.',
+      confirmWord: 'ARM',
+      okLabel: 'Arm handoff',
+    });
+    if (!ok) return;
+  }
+  btn.disabled = true;
+  try {
+    const r = await api('/api/cluster/ha/planned-handoff', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ armed: arming })
+    });
+    if (!r) return;
+    toast(arming ? 'Planned handoff armed - the standby will promote on its next sync' : 'Planned handoff disarmed', 'success');
+    loadCluster();
+  } catch(e) {
+    toast('Failed to update planned handoff: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 async function loadHA(isCP) {
   const panel = document.getElementById('cluster-ha-panel');
   if (!isCP) { panel.style.display = 'none'; return; }
@@ -17178,6 +17218,25 @@ async function loadHA(isCP) {
       }
       // Manual-failover button: only a standby can be promoted.
       document.getElementById('ha-promote-row').style.display = (r.role === 'standby') ? '' : 'none';
+      // Planned handoff: only the leader can arm/disarm it. Previously this
+      // flag could only be armed by calling internal Go methods with no HTTP
+      // path to reach them - the standby-side consumption existed, but an
+      // operator had no way to see or trigger it from the GUI.
+      const handoffRow = document.getElementById('ha-planned-handoff-row');
+      if (r.role === 'leader') {
+        handoffRow.style.display = '';
+        const armed = !!r.planned_handoff;
+        const badge = document.getElementById('ha-planned-handoff-badge');
+        badge.innerHTML = armed
+          ? '<span style="color:#f59e0b">● Planned handoff ARMED</span>'
+          : '<span style="color:var(--muted)">○ Planned handoff disarmed</span>';
+        const handoffBtn = document.getElementById('ha-planned-handoff-btn');
+        handoffBtn.textContent = armed ? 'Disarm Planned Handoff' : 'Arm Planned Handoff';
+        handoffBtn.className = armed ? 'btn warn' : 'btn';
+        handoffBtn.dataset.armed = armed ? '1' : '';
+      } else {
+        handoffRow.style.display = 'none';
+      }
       // Standby sync health: previously only visible as an "HA: sync failed
       // (N/3)" log line - surface the same streak here so an operator can see
       // a standby approaching the auto-failover/self-fence threshold.

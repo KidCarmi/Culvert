@@ -97,8 +97,11 @@ import (
 //     egress — no sender exists yet).
 //   - 189 — Added /api/urlcat/feed-status (GET viewer: UT1 + SaaS category
 //     feed freshness/failure counts, previously Prometheus-only).
+//   - 220 — Added /api/cluster/ha/planned-handoff (POST admin: arm/disarm the
+//     ADR-0004 Slice 1e coordinated-handoff flag, previously wired end-to-end
+//     but unreachable from any admin surface).
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 219 // + 14 /api/mcp/* (PR-9) + 2 distribution/rollback (PR-10) + 8 rollout (PR-11) + 2 PR-UX-5 (distribution/acks + rollout/scope/validate)
+	const want = 220 // + 14 /api/mcp/* (PR-9) + 2 distribution/rollback (PR-10) + 8 rollout (PR-11) + 2 PR-UX-5 (distribution/acks + rollout/scope/validate) + 1 planned-handoff
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}

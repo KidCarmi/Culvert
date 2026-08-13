@@ -7564,6 +7564,62 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/cluster/ha/planned-handoff": {
+      "post": {
+        "description": "Arms or disarms a coordinated HA handoff on the leader — the next config sync instructs the standby to promote, for draining the leader ahead of planned maintenance.",
+        "operationId": "plannedHandoffHA",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Planned handoff armed/disarmed."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Arm/disarm planned handoff",
+        "tags": [
+          "cluster"
+        ],
+        "x-culvert-audit-event": "cluster.ha-planned-handoff-arm",
+        "x-culvert-danger-level": "high",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/cluster/ha/promote": {
       "post": {
         "description": "Promotes this node to HA leader (break-glass).",
