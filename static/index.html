@@ -14180,6 +14180,15 @@ async function runPolicyTest() {
 
   // Result banner
   const rb = document.getElementById('pt-result-body');
+  // Rulebase indicator — which set was simulated (GAP-POL-03). A draft-mode
+  // test evaluates the unsaved candidate, NOT live policy; make that explicit so
+  // it is never mistaken for a test of the running rulebase.
+  let rulebaseBadge = '';
+  if (data.rulebase === 'draft') {
+    rulebaseBadge = `<div class="pt-sub" style="margin-bottom:8px"><span style="background:rgba(251,191,36,.15);color:#fbbf24;padding:2px 8px;border-radius:12px;font-size:.78rem;font-weight:600"><svg class="ico" aria-hidden="true"><use href="#i-file"/></svg> Evaluated the DRAFT candidate</span> <span style="color:var(--text-muted);font-size:.75rem">unsaved — not live policy until committed</span></div>`;
+  } else if (data.rulebase === 'running') {
+    rulebaseBadge = `<div class="pt-sub" style="margin-bottom:8px"><span style="color:var(--text-muted);font-size:.75rem">Evaluated the running rulebase</span></div>`;
+  }
   // Build the resolved-category badge (shown for both match and no-match).
   let catBadge = '';
   if (data.hostCategory && data.hostCategory.tier !== 'none') {
@@ -14248,7 +14257,7 @@ async function runPolicyTest() {
 
   if (data.matched) {
     const r = data.rule;
-    rb.innerHTML = authHtml + `<div class="pt-match">
+    rb.innerHTML = rulebaseBadge + authHtml + `<div class="pt-match">
       <div class="pt-sub" style="font-weight:600;margin-bottom:4px">Stage-2 Access Decision:</div>
       <div class="pt-action">✓ ${escHtml(String(r.action))}</div>
       <div class="pt-sub">Matched rule <strong>#${r.priority} - ${escHtml(r.name)}</strong></div>
@@ -14257,7 +14266,7 @@ async function runPolicyTest() {
       ${catBadge}
     </div>`;
   } else {
-    rb.innerHTML = authHtml + `<div class="pt-nomatch">
+    rb.innerHTML = rulebaseBadge + authHtml + `<div class="pt-nomatch">
       <div class="pt-sub" style="font-weight:600;margin-bottom:4px">Stage-2 Access Decision:</div>
       <div class="pt-action"><svg class="ico" aria-hidden="true"><use href="#i-ban"/></svg> No rule matched</div>
       <div class="pt-sub">Default action: <strong>${escHtml(data.defaultAction)}</strong></div>

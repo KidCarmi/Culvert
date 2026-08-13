@@ -15138,7 +15138,7 @@
     },
     "/api/policy/test": {
       "post": {
-        "description": "Test policy evaluation.",
+        "description": "Dry-run policy evaluation with no side effects (no hit counts). Evaluates the effective rulebase — the draft candidate when Draft Mode is engaged, otherwise the running store — through the same evaluator the proxy enforcement path uses. The response includes a `rulebase` field (\"draft\" | \"running\") identifying which set was simulated.",
         "operationId": "testPolicy",
         "requestBody": {
           "content": {
