@@ -1013,7 +1013,7 @@ func logInspectedInnerRequest(clientIP string, req *http.Request, hostOnly strin
 	if match == nil || match.Rule == nil || !match.Rule.LogFullURI || !ruleLogsTraffic(match.Rule) {
 		return
 	}
-	recordRequestLogOnly(clientIP, req.Method, hostOnly, "OK", match.Rule.Name, string(ActionAllow), id.Identity, "inspect", policyLogURI(hostOnly, req.URL.Path), AuthLogFields{RuleID: match.Rule.ID, Dec: decBlock})
+	recordRequestLogOnly(clientIP, req.Method, hostOnly, "OK", match.Rule.Name, string(ActionAllow), id.Identity, "inspect", policyLogURI(hostOnly, req.URL.Path), AuthLogFields{RuleID: match.Rule.ID, Dec: decBlock, AuthSource: id.AuthSource})
 }
 
 // exchangeOutcomeKind is the result of one protocol-neutral inspection exchange.

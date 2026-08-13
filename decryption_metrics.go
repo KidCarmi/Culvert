@@ -242,7 +242,7 @@ func recordDecryptFailureEntry(o *DecryptionOutcome, id ProxyIdentity, hostOnly 
 		ruleName = match.Rule.Name
 		ruleID = match.Rule.ID
 	}
-	auth := AuthLogFields{RuleID: ruleID, Dec: o.toBlock(redact)}
+	auth := AuthLogFields{RuleID: ruleID, Dec: o.toBlock(redact), AuthSource: id.AuthSource}
 	// CONNECT method, "inspect" SSLAction, no bytes/duration/uri — a terminal
 	// handshake failure, mirroring recordInspectBlock's block row minus the stats.
 	persistLogEntry(id.ClientIP, "CONNECT", hostOnly, decFailedStatus, ruleName, "", id.Identity, 0, 0, 0, "inspect", "", auth)

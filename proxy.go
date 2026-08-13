@@ -268,6 +268,7 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 					// Proxy-Authorization header is present, so malformed
 					// credentials keep today's 407 below.
 					authLog = authLogFieldsFor(d)
+					authLog.AuthSource = authenticatedSource // F5: server-side source (still "unauth" pre-credential)
 					authenticatedSource = authSourceExempt
 					incAuthExempt()
 					logger.Printf("AUTH_EXEMPT rule=%q id=%q %s -> %q {req_id=%s}",
@@ -297,6 +298,7 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 					// Default whenever a Proxy-Authorization header is present). The
 					// kill switch does NOT disable CR.
 					authLog = authLogFieldsFor(d)
+					authLog.AuthSource = authenticatedSource // F5: server-side source (still "unauth" pre-credential)
 					atomic.AddInt64(&statAuthFail, 1)
 					incAuthCredentialRequired()
 					w.Header().Set("Proxy-Authenticate", `Basic realm="Culvert"`)
@@ -317,6 +319,7 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 					// resolveNoCredAuthOutcome returns Default whenever a
 					// Proxy-Authorization header is present).
 					authLog = authLogFieldsFor(d)
+					authLog.AuthSource = authenticatedSource // F5: server-side source (still "unauth" pre-credential)
 					// Only a browser can complete an interactive SSO flow. Resolving the
 					// portal URL can ALLOCATE IdP callback state (PKCE / SAML stores) as a
 					// side effect, so it is done ONLY for browser clients: a non-browser or
@@ -857,6 +860,9 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	authenticatedGroups := auth.groups
 	authenticatedSource := auth.source
 	authLog := auth.log
+	// F5: stamp the categorical auth source onto every log row this request
+	// produces. Server-side resolved state only — never a header value.
+	authLog.AuthSource = authenticatedSource
 
 	// Set internal identity headers — scrubForwardedHeaders removes them
 	// before forwarding upstream. This server-stamped header is TRANSPORT for
