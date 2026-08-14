@@ -100,8 +100,60 @@ clients trusting either the old or the new root keep validating while you roll t
 out. The CA Management panel shows the overlap window and its end date. Use that window to
 redistribute; once it closes, only the new root works.
 
-## 6. Related
+## 6. The other failure: the Root CA never LOADED
 
-- Design and evidence: `docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-09.md` (CHAOS-28)
-- Standing register rows: CA-1, CA-1b, CA-2, CA-4, CA-16 in
+An expired CA and a CA that failed to load are different incidents with **opposite
+postures**, so confirm which one you have before acting.
+
+| | Root CA expired | Root CA failed to load |
+|---|---|---|
+| `/healthz` `ssl_inspection` | `expired` | `load_failed` |
+| `/metrics` | `culvert_ca_usable 0`, `culvert_ca_inspect_blocked_total` climbing | `culvert_ca_load_failed 1`, `culvert_ca_inspect_bypassed_total` climbing |
+| What happens to inspect-matched traffic | **Refused** (502) | **Forwarded as a plain tunnel — UNINSPECTED** |
+| Security consequence | Availability loss | DLP, AV, YARA, CDR and DPI are **off** for those sessions |
+
+Causes: wrong `CULVERT_CA_PASSPHRASE`, a corrupt or truncated `ca.bundle`, a data volume that
+had not mounted when the container started, a permissions problem on the bundle or its parent
+directory, or a full disk when the bundle was first written.
+
+**Culvert retries by itself first.** A recorded load failure arms a bounded recovery campaign
+— 10 attempts on a 5 s → 5 min backoff, roughly 25 minutes of coverage — which **re-reads the
+configured bundle**. Watch it on `GET /api/ca/status`:
+
+```
+"loadFailed": true,
+"loadFailureReason": "Root CA load/init failed for /data/ca.bundle: ...",
+"loadRecoveryAttempts": 4,
+"loadRecoveryGaveUp": false,
+"inspectBypassed": 137
+```
+
+If the underlying fault was transient (the volume attached late, you fixed ownership, you
+freed disk), inspection comes back on its own — `loadFailed` clears, `/healthz` returns to
+`ready`, and the log says `SSLCA: Root CA recovered …`. No restart needed.
+
+> **The retry never generates a new Root CA.** If the bundle path is missing — for example
+> because the data volume is gone — Culvert fails the attempt rather than minting a
+> replacement root. Minting would swap your fleet's trust anchor for one no client has been
+> told to trust, and write it to storage that may not survive the next restart. Creating a new
+> root is always an explicit operator action.
+
+Once `loadRecoveryGaveUp` is `true`, the fault needs you:
+
+1. **Wrong passphrase** — fix `CULVERT_CA_PASSPHRASE` and restart. Nothing on disk is damaged.
+2. **Corrupt bundle** — restore it from backup and restart.
+3. **Genuinely lost bundle** — force-rotate a new Root CA (CA Management → *Force Rotate Now*,
+   §3) and redistribute it to clients. This changes your trust anchor; treat it as a
+   provisioning event, not a repair.
+
+Uploading a custom MITM CA (`POST /api/certs/upload`, `target=mitm`) is also a valid recovery
+and now **persists** the uploaded bundle. If the write fails, the response carries
+`"persisted": false` and a warning — the CA is active but will be lost on restart, so fix the
+volume and upload again.
+
+## 7. Related
+
+- Design and evidence: `docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-09.md` (CHAOS-28),
+  `docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-14.md` (CHAOS-50 — §6 above)
+- Standing register rows: CA-1, CA-1b, CA-2, CA-3, CA-3b, CA-4, CA-16 in
   `roadmap/CHAOS-ENGINEERING-REVIEW.md` §16

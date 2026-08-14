@@ -301,8 +301,26 @@ func apiCertsUpload(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid CA cert/key pair", http.StatusBadRequest)
 			return
 		}
+		// CHAOS-50: PERSIST the uploaded CA. It used to be installed in memory
+		// only, so an admin who uploaded their enterprise MITM CA got a gateway
+		// that silently reverted to the previous (or no) CA on the next restart —
+		// the same swallowed-durability shape CHAOS-28 fixed for rotation, on the
+		// other CA-install path. The response now states which happened, and the
+		// recorded load failure is cleared only when the bundle actually landed.
+		if !persistRotatedCA() {
+			auditEvent(r, "certs.upload_mitm", "custom MITM CA", "NOT PERSISTED — in-memory only")
+			jsonOK(w, map[string]any{
+				"status":    "ok",
+				"target":    "mitm",
+				"persisted": false,
+				"warning": "The uploaded CA is active but could not be written to the CA bundle path — " +
+					"it exists in memory only and will be LOST on restart. Restore write access and upload again.",
+			})
+			return
+		}
+		noteSSLInspectionRecovered("custom MITM CA uploaded via admin API")
 		auditEvent(r, "certs.upload_mitm", "custom MITM CA", "")
-		jsonOK(w, map[string]string{"status": "ok", "target": "mitm"})
+		jsonOK(w, map[string]any{"status": "ok", "target": "mitm", "persisted": true})
 		return
 	}
 	// UI cert — validate only; actual rotation requires restart.
@@ -1121,6 +1139,23 @@ func apiCAStatus(w http.ResponseWriter, r *http.Request) {
 	if caFaults.PersistDegraded && caFaults.PersistErr != "" {
 		info["rotationPersistError"] = caFaults.PersistErr
 	}
+	// CHAOS-50 load/recovery posture. `ready:false` alone does not distinguish
+	// "no CA configured on this node" from "the configured CA could not be
+	// loaded and every inspect-matched CONNECT is being forwarded UNINSPECTED" —
+	// opposite operator instructions from the same field. `inspectBypassed` is
+	// the fail-OPEN counterpart to `inspectBlocked` above.
+	loadFailure := sslInspectionLoadFailure()
+	info["loadFailed"] = loadFailure != ""
+	if loadFailure != "" {
+		info["loadFailureReason"] = loadFailure
+	}
+	info["inspectBypassed"] = caInspectBypassCount()
+	rec := caLoadRecoveryStatus()
+	info["loadRecoveryAttempts"] = rec.Attempts
+	info["loadRecoveryGaveUp"] = rec.GaveUp
+	if rec.LastErr != "" {
+		info["loadRecoveryError"] = rec.LastErr
+	}
 	// Dual-CA overlap status.
 	info["dualCAActive"] = certMgr.SecondaryCAActive()
 	if secInfo := certMgr.SecondaryCAInfo(); secInfo != nil {
@@ -1272,6 +1307,14 @@ func apiCARotate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	statCARotations.Add(1)
+	// CHAOS-50: a force-rotate is the documented manual recovery from a failed CA
+	// load, and it is the EVIDENCE that clears the recorded failure. Without this
+	// the operator fixes inspection and /healthz, /readyz?strict=1 and the
+	// support-telemetry readiness row keep reporting it broken until the process
+	// restarts — a red probe that outlives the fault it describes. Deliberately
+	// AFTER the persist check: a rotation that did not reach disk resolves the
+	// load half and not the durability half, so the failure must stay recorded.
+	noteSSLInspectionRecovered("force rotation via admin API")
 	auditEvent(r, "ca.rotate", "root_ca", "force rotation via admin API (confirmed)")
 	jsonOK(w, info)
 }
