@@ -1287,3 +1287,31 @@ what happens next, and the answer was nothing.
   change).
 - **CA-13** — still open; this sweep went to `enrollment.go` for the deadlock and did not
   widen into the rotation-observability half.
+
+### 17.4 Review follow-ups (raised against the fix, fixed in the same PR)
+
+Both are the SAME SHAPE as the bug this sweep is about — a multi-step operation whose steps
+are individually atomic and jointly not — so they are recorded rather than deferred.
+
+- **FS-9 / row CA-18 — automatic and manual Root-CA recovery could overwrite each other.**
+  Installing a CA is read/generate → install → persist → clear-the-latch. The retry loop and
+  the admin force-rotate both perform it and nothing serialized them: a retry could read the
+  OLD bundle, the admin could install AND persist a NEW one, and the retry would then install
+  its buffered old CA on top. The API reports `persisted:true` — true, ON DISK — while the
+  LIVE process signs with the superseded root, so every client the operator just provisioned
+  with the new root rejects every leaf until a restart. Not remote: the retry window is
+  ~25 min and force-rotate is the documented manual recovery, so these are the two actors an
+  operator runs during the same incident. Fixed with `caMutationMu` (an OUTER lock across
+  install + persist + latch-clear in all three paths); the "already fixed by hand?" check
+  moved INSIDE the lock, because outside it that was a check-then-act with the same gap.
+  Pinned by `TestChaos50_ManualRecoveryIsNotOverwrittenByRetry`.
+- **FS-10 / row CA-19 — the cluster-CA publish phase could interleave.** Releasing `ca.mu`
+  before the publish is what removes the deadlock, but on its own it lets a second import land
+  between the state swap and the publish: two imports can run `StartCARotation` out of order
+  (persisted rotation record describes the OLDER CA) or a cleanup can clear a newer import's
+  record. Fixed with `clusterCA.installMu`, an OPERATION-level lock spanning `installLocked` +
+  the publish, taken by `ImportCA` and `CleanupSecondary`. The two locks are not
+  interchangeable: `mu` guards the fields and must not be held across the publish; `installMu`
+  orders the operations and is never taken by anything the publish reaches. Lock order
+  `installMu` → `mu`, never the reverse, so the CHAOS-51 cycle is not reintroduced. Pinned by
+  `TestChaos51_ConcurrentImportsKeepRotationRecordConsistent`.

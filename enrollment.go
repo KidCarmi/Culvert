@@ -763,6 +763,23 @@ func (cs *ClusterStore) ImportFullState(data json.RawMessage) error {
 // It is auto-generated on first use and persisted alongside cluster.json.
 
 type clusterCA struct {
+	// installMu serializes whole CA-install OPERATIONS (ImportCA,
+	// CleanupSecondary), as distinct from mu, which guards the fields.
+	//
+	// The two are not interchangeable and both are needed. mu cannot be held
+	// across the publish phase — that is the CHAOS-51 deadlock, because the
+	// publish calls re-enter this object — but releasing it mid-operation would
+	// otherwise let a second import interleave between the state swap and the
+	// publish. Two concurrent imports could then run StartCARotation out of
+	// order and leave the persisted rotation record describing the OLDER import,
+	// or a cleanup could clear a newer import's record: renewal progress and
+	// cluster-CA status would track the wrong fingerprints while the newest CA
+	// is the one actually active.
+	//
+	// Lock order is installMu → mu, never the reverse, and nothing reachable
+	// from the publish phase takes installMu.
+	installMu sync.Mutex
+
 	mu            sync.RWMutex
 	cert          *x509.Certificate
 	key           *ecdsa.PrivateKey
@@ -1166,12 +1183,17 @@ func (ca *clusterCA) ImportCA(certPEM, keyPEM []byte) error {
 		return err
 	}
 
+	// installMu spans the state swap AND the publish, so concurrent imports stay
+	// ordered even though ca.mu is released between them (see the struct field).
+	ca.installMu.Lock()
+	defer ca.installMu.Unlock()
+
 	eff, err := ca.installLocked(cert, key, certPEM, keyPEM)
 	if err != nil {
 		return err
 	}
 
-	// ── Post-lock: notify the TLS layer, then publish ──
+	// ── ca.mu released; still under installMu: notify the TLS layer, then publish ──
 	if eff.onRotate != nil {
 		eff.onRotate()
 	}
@@ -1276,6 +1298,12 @@ func (ca *clusterCA) SecondaryActive() bool {
 // auto-rotation loop with no operator present, so the deadlock it produced had
 // no human in the loop at all.
 func (ca *clusterCA) CleanupSecondary() {
+	// Same operation-level lock as ImportCA: without it, a cleanup can clear the
+	// rotation record of an import that is still between its state swap and its
+	// publish.
+	ca.installMu.Lock()
+	defer ca.installMu.Unlock()
+
 	ca.mu.Lock()
 	expired := ca.secondaryCert != nil && time.Now().After(ca.secondaryExp)
 	var onRotate func()

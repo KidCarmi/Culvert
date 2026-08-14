@@ -28,6 +28,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"math/big"
+	"sync"
 	"testing"
 	"time"
 )
@@ -268,4 +269,67 @@ func TestChaos51_ConcurrentReadersProgressDuringImport(t *testing.T) {
 		_ = globalClusterCA.AllCACertsPEM()
 		_ = globalClusterCA.Info()
 	})
+}
+
+// TestChaos51_ConcurrentImportsKeepRotationRecordConsistent is the review
+// follow-up (Codex P2). Releasing ca.mu before the publish phase is what removes
+// the deadlock, but on its own it would let a second import interleave between
+// the state swap and the publish: two imports could run StartCARotation out of
+// order and leave the persisted rotation record describing the OLDER CA, while
+// the newer one is the CA actually in use. installMu keeps the whole operation
+// ordered.
+//
+// The invariant: whatever CA ends up active, the rotation record's new
+// fingerprint must be that CA's, never a superseded one.
+func TestChaos51_ConcurrentImportsKeepRotationRecordConsistent(t *testing.T) {
+	cca := installGlobalClusterCA(t)
+
+	prevStore := globalClusterStore
+	globalClusterStore = &ClusterStore{st: ClusterState{
+		Nodes:   make(map[string]*EnrolledNode),
+		Tokens:  make(map[string]*EnrollToken),
+		Revoked: []RevokedCert{},
+	}}
+	t.Cleanup(func() { globalClusterStore = prevStore })
+
+	seedCert, seedKey, _ := newClusterCAPair(t, "Culvert Cluster CA (seed)", 365*24*time.Hour)
+	runBounded(t, "seed ImportCA", func() {
+		if err := cca.ImportCA(seedCert, seedKey); err != nil {
+			t.Errorf("seed ImportCA: %v", err)
+		}
+	})
+
+	const importers = 6
+	pairs := make([][2][]byte, importers)
+	for i := range pairs {
+		c, k, _ := newClusterCAPair(t, "Culvert Cluster CA (concurrent)", time.Duration(i+2)*365*24*time.Hour)
+		pairs[i] = [2][]byte{c, k}
+	}
+
+	runBounded(t, "concurrent ImportCA", func() {
+		var wg sync.WaitGroup
+		for i := range pairs {
+			wg.Add(1)
+			go func(p [2][]byte) {
+				defer wg.Done()
+				if err := globalClusterCA.ImportCA(p[0], p[1]); err != nil {
+					t.Errorf("concurrent ImportCA: %v", err)
+				}
+			}(pairs[i])
+		}
+		wg.Wait()
+	})
+
+	activeFP := globalClusterCA.CACertFingerprint()
+	if activeFP == "" {
+		t.Fatal("no active cluster CA after concurrent imports")
+	}
+	rot := globalClusterStore.CARotationStatus()
+	if rot == nil {
+		t.Fatal("no CA rotation record after concurrent imports")
+	}
+	if rot.NewFingerprint != activeFP {
+		t.Errorf("rotation record tracks %s but the ACTIVE CA is %s — the publish phase was interleaved",
+			rot.NewFingerprint, activeFP)
+	}
 }

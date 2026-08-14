@@ -84,6 +84,35 @@ type caLoadRecoveryState struct {
 
 var caLoadRecovery caLoadRecoveryState
 
+// caMutationMu serializes every path that INSTALLS or PERSISTS the inspection
+// Root CA: the automatic recovery attempt, the admin force-rotate, and the
+// custom-CA upload.
+//
+// It is not about protecting certMgr's own fields — the engine has its own lock
+// for those. It is about the fact that installing a CA is a MULTI-STEP operation
+// (read/generate → install → persist → clear the failure latch) whose steps are
+// individually atomic and jointly not. Interleave two of them and the process
+// ends up disagreeing with its own disk:
+//
+//	recovery: LoadCA reads the OLD bundle bytes
+//	          ↓                       admin:  InitCA installs a NEW CA
+//	          ↓                       admin:  SaveCA persists the NEW bundle
+//	          ↓                       admin:  200 "rotated, persisted: true"
+//	recovery: ImportBundle installs the OLD CA   ← overwrites the operator
+//
+// The admin has been told the rotation landed, and it did — on disk. The LIVE
+// process is signing with the superseded root. They then distribute the new root
+// to the fleet, and every client that trusts it rejects every leaf until someone
+// restarts the process. This is not a remote interleaving: the retry window is
+// ~25 minutes and force-rotate is the documented manual recovery, so the two
+// actors are precisely the ones an operator runs during the same incident.
+//
+// Lock-order rule, given what this PR is about: caMutationMu is an OUTER lock.
+// Take it before certMgr's internal lock (which every certMgr method takes for
+// itself) and never take it from anything reachable underneath one — nothing
+// under it may call back into a recovery or install path.
+var caMutationMu sync.Mutex
+
 // caInspectBypassed counts CONNECTs that policy selected for INSPECTION but
 // which proceeded as an unscanned tunnel because no Root CA was loaded.
 //
@@ -180,31 +209,73 @@ func attemptInspectionCARecovery(cfg rootCAStartupConfig) error {
 	}
 }
 
+// tryInspectionCARecovery runs one attempt under caMutationMu, together with the
+// two things that must not be separated from it: the "has someone already fixed
+// this?" check and the latch clear.
+//
+// The check has to be INSIDE the lock. Outside it, it is a check-then-act — the
+// operator's force-rotate can land in the gap, and the attempt then proceeds to
+// install whatever the bundle happened to contain on top of it.
+//
+// Returns attempted=false when the fault was already resolved by an operator, so
+// the caller stops rather than burning its budget on a problem that is gone.
+func tryInspectionCARecovery(cfg rootCAStartupConfig, attempt int) (attempted bool, err error) {
+	caMutationMu.Lock()
+	defer caMutationMu.Unlock()
+
+	if sslInspectionLoadFailure() == "" {
+		return false, nil
+	}
+	if err := attemptInspectionCARecovery(cfg); err != nil {
+		return true, err
+	}
+	noteSSLInspectionRecovered(fmt.Sprintf("automatic recovery succeeded on attempt %d", attempt))
+	return true, nil
+}
+
+// caRetrySchedule is the retry campaign's timing, resolved ONCE and carried by
+// value into the loop.
+//
+// The loop deliberately does not read caLoadRetry* itself. Those are test seams,
+// and a goroutine that read them on every iteration would race any test that
+// restores them in cleanup while the loop is still running — which is a real
+// `-race` failure, not a theoretical one. Snapshotting on the caller's goroutine
+// removes the shared mutable state instead of synchronising it.
+type caRetrySchedule struct {
+	initial time.Duration
+	max     time.Duration
+	budget  int
+}
+
 // startInspectionCARecoveryLoop arms the bounded retry campaign. It is a no-op
 // when no failure was recorded, so a healthy boot spawns no goroutine.
 func startInspectionCARecoveryLoop(ctx context.Context, cfg rootCAStartupConfig) {
 	if sslInspectionLoadFailure() == "" {
 		return
 	}
-	go runInspectionCARecoveryLoop(ctx, cfg)
+	sched := caRetrySchedule{
+		initial: caLoadRetryInitial,
+		max:     caLoadRetryMax,
+		budget:  caLoadRetryBudget,
+	}
+	go runInspectionCARecoveryLoop(ctx, cfg, sched)
 }
 
-func runInspectionCARecoveryLoop(ctx context.Context, cfg rootCAStartupConfig) {
-	backoff := caLoadRetryInitial
-	for attempt := 1; attempt <= caLoadRetryBudget; attempt++ {
+func runInspectionCARecoveryLoop(ctx context.Context, cfg rootCAStartupConfig, sched caRetrySchedule) {
+	backoff := sched.initial
+	for attempt := 1; attempt <= sched.budget; attempt++ {
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(backoff):
 		}
 
-		// The operator may have fixed it by hand in the meantime (force-rotate,
-		// custom-CA upload). Nothing left to recover.
-		if sslInspectionLoadFailure() == "" {
-			return
+		// The attempt, the "already fixed by hand?" check and the latch clear all
+		// happen together under caMutationMu — see tryInspectionCARecovery.
+		attempted, err := tryInspectionCARecovery(cfg, attempt)
+		if !attempted {
+			return // an operator recovered it (force-rotate / custom-CA upload)
 		}
-
-		err := attemptInspectionCARecovery(cfg)
 
 		caLoadRecovery.mu.Lock()
 		caLoadRecovery.attempts++
@@ -214,17 +285,16 @@ func runInspectionCARecoveryLoop(ctx context.Context, cfg rootCAStartupConfig) {
 		caLoadRecovery.mu.Unlock()
 
 		if err == nil {
-			noteSSLInspectionRecovered(fmt.Sprintf("automatic recovery succeeded on attempt %d", attempt))
 			return
 		}
 		if logger != nil {
 			logger.Printf("SSLCA: Root CA recovery attempt %d/%d failed: %q — retrying in %s",
-				attempt, caLoadRetryBudget, sanitizeLog(err.Error()), backoff)
+				attempt, sched.budget, sanitizeLog(err.Error()), backoff)
 		}
 
 		backoff *= 2
-		if backoff > caLoadRetryMax {
-			backoff = caLoadRetryMax
+		if backoff > sched.max {
+			backoff = sched.max
 		}
 	}
 
@@ -234,7 +304,7 @@ func runInspectionCARecoveryLoop(ctx context.Context, cfg rootCAStartupConfig) {
 	if logger != nil {
 		logger.Printf("SSLCA: Root CA recovery gave up after %d attempts — SSL inspection stays DISABLED "+
 			"(inspect-matched TLS is forwarded UNINSPECTED). Fix the bundle/passphrase and restart, "+
-			"or rotate a new Root CA from the admin UI and redistribute it.", caLoadRetryBudget)
+			"or rotate a new Root CA from the admin UI and redistribute it.", sched.budget)
 	}
 }
 

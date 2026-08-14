@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -47,6 +48,11 @@ func swapInspectionCA(t *testing.T) {
 
 // fastCARetries compresses the retry schedule so a test exercises the campaign
 // without sleeping the real one.
+//
+// The loop SNAPSHOTS these on the caller's goroutine (see caRetrySchedule), so
+// restoring them in cleanup cannot race a still-running loop. Every test that
+// arms the loop must still call awaitCARecoveryTerminal before returning — the
+// loop reads OTHER process globals (certMgr) that cleanup also restores.
 func fastCARetries(t *testing.T, budget int) {
 	t.Helper()
 	pi, pm, pb := caLoadRetryInitial, caLoadRetryMax, caLoadRetryBudget
@@ -56,6 +62,38 @@ func fastCARetries(t *testing.T, budget int) {
 	t.Cleanup(func() {
 		caLoadRetryInitial, caLoadRetryMax, caLoadRetryBudget = pi, pm, pb
 	})
+}
+
+// awaitCARecoveryTerminal blocks until the recovery campaign has reached a state
+// after which it touches no swapped global — it has either recovered or given up,
+// and both are set after the last certMgr access.
+func awaitCARecoveryTerminal(t *testing.T) {
+	t.Helper()
+	waitForCA(t, "the recovery campaign to reach a terminal state", 15*time.Second, func() bool {
+		rec := caLoadRecoveryStatus()
+		return rec.Recovered || rec.GaveUp
+	})
+}
+
+// awaitFirstRotationRound arms the round observer BEFORE the loop starts (it is
+// snapshotted at StartCAAutoRotation) and returns a wait function. Without it a
+// test that swaps globalClusterCA/certMgr would restore them while the round is
+// still reading them.
+func awaitFirstRotationRound(t *testing.T) func() {
+	t.Helper()
+	prev := caRotationRoundObserver
+	done := make(chan struct{})
+	var once sync.Once
+	caRotationRoundObserver = func() { once.Do(func() { close(done) }) }
+	t.Cleanup(func() { caRotationRoundObserver = prev })
+	return func() {
+		t.Helper()
+		select {
+		case <-done:
+		case <-time.After(15 * time.Second):
+			t.Fatal("auto-rotation round did not complete")
+		}
+	}
 }
 
 func writeCorruptBundle(t *testing.T) string {
@@ -100,6 +138,7 @@ func TestChaos50_RotationLoopStartsDespiteInspectionCAFailure(t *testing.T) {
 	fastCARetries(t, 1)
 
 	cca := installGlobalClusterCA(t)
+	awaitRound := awaitFirstRotationRound(t)
 	// A cluster CA inside its 30-day rotation window: the loop must rotate it.
 	certPEM, keyPEM, cert := newClusterCAPair(t, "Culvert Cluster CA", 10*24*time.Hour)
 	key, err := parseAndValidateCAKey(keyPEM, cert.PublicKey.(*ecdsa.PublicKey))
@@ -121,6 +160,10 @@ func TestChaos50_RotationLoopStartsDespiteInspectionCAFailure(t *testing.T) {
 		defer cca.mu.RUnlock()
 		return !cca.cert.NotAfter.Equal(was)
 	})
+	// Both spawned loops must be done touching the swapped globals before this
+	// test returns and cleanup restores them.
+	awaitRound()
+	awaitCARecoveryTerminal(t)
 }
 
 // TestChaos50_TransientLoadFailureSelfHeals: the bundle becomes readable again
@@ -146,6 +189,7 @@ func TestChaos50_TransientLoadFailureSelfHeals(t *testing.T) {
 	waitForCA(t, "recorded failure to clear", 10*time.Second, func() bool {
 		return sslInspectionLoadFailure() == ""
 	})
+	awaitCARecoveryTerminal(t)
 	if rec := caLoadRecoveryStatus(); !rec.Recovered || rec.Attempts == 0 {
 		t.Errorf("recovery not recorded: %+v", rec)
 	}
@@ -365,5 +409,60 @@ func TestChaos50_CAStatusSurfacesLoadPosture(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("missing %q in /api/ca/status:\n%s", want, body)
 		}
+	}
+}
+
+// TestChaos50_ManualRecoveryIsNotOverwrittenByRetry is the review follow-up
+// (Codex P1). Installing a CA is a multi-step operation — read/generate, install,
+// persist, clear the latch — and the automatic retry and the admin force-rotate
+// both perform it. Un-serialized, the retry can read the OLD bundle, the admin
+// can install and persist a NEW one, and the retry then installs its buffered old
+// CA on top: the API reports "persisted: true" (true, on disk) while the LIVE
+// process signs with the superseded root, so every client the operator just
+// provisioned with the new root rejects every leaf until a restart.
+//
+// The invariant asserted here is exactly that disagreement: the in-memory CA and
+// the on-disk bundle must never diverge, however the two paths interleave.
+func TestChaos50_ManualRecoveryIsNotOverwrittenByRetry(t *testing.T) {
+	swapInspectionCA(t)
+	captureStartupAlerts(t)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ca.bundle")
+	writeGoodBundle(t, path) // a readable bundle, so LoadCA succeeds and can race
+	cfg := rootCAStartupConfig{Path: path}
+	caRuntime.path = path
+	caRuntime.passphrase = ""
+
+	var wg sync.WaitGroup
+	for i := 0; i < 40; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// Keep a fault recorded so the attempt is never short-circuited.
+			noteSSLInspectionUnavailable(path, os.ErrPermission)
+			_, _ = tryInspectionCARecovery(cfg, 1)
+		}()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, _, err := installAndPersistRotatedCA(); err != nil {
+				t.Errorf("installAndPersistRotatedCA: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	// Whatever won, the process and its disk must agree.
+	onDisk := ca.New()
+	if err := onDisk.LoadCA(path, ""); err != nil {
+		t.Fatalf("bundle unreadable after the race: %v", err)
+	}
+	live := certMgr.CACertInfo()["fingerprint"]
+	persisted := onDisk.CACertInfo()["fingerprint"]
+	if live != persisted {
+		t.Errorf("live Root CA %v != persisted Root CA %v — a recovery attempt overwrote a manual one "+
+			"(the admin was told the rotation landed; the process is signing with a different root)",
+			live, persisted)
 	}
 }

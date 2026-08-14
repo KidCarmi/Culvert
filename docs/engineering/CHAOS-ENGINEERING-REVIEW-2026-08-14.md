@@ -401,6 +401,61 @@ lock (and why the trigger surviving the restart is the real problem).
 
 ---
 
+## Review follow-ups (found on the fix, fixed in the same PR)
+
+Two concurrency defects were raised against the fix itself during PR review. Both
+were real, both are the *same shape* as the bug this sweep is about — a
+multi-step operation whose steps are individually atomic and jointly not — so
+they are recorded here rather than deferred.
+
+### FS-9 — automatic and manual Root-CA recovery could overwrite each other
+
+Installing a CA is read/generate → install → persist → clear the latch. The
+retry loop and the admin force-rotate both perform it, and nothing serialized
+them:
+
+```
+recovery: LoadCA reads the OLD bundle bytes
+          ↓                       admin:  InitCA installs a NEW CA
+          ↓                       admin:  SaveCA persists the NEW bundle
+          ↓                       admin:  200 "rotated, persisted: true"
+recovery: ImportBundle installs the OLD CA   ← overwrites the operator
+```
+
+The admin is told the rotation landed, and it did — *on disk*. The live process
+is signing with the superseded root. They then distribute the new root, and every
+client that trusts it rejects every leaf until someone restarts. The retry window
+is ~25 minutes and force-rotate is the documented manual recovery, so these are
+precisely the two actors an operator runs during the same incident.
+
+**Fix.** `caMutationMu` (rootca_recovery.go) — an outer lock held across install
++ persist + latch-clear in all three paths: `tryInspectionCARecovery`,
+`installAndPersistRotatedCA`, `installAndPersistCustomMITMCA`. The "has an
+operator already fixed this?" check moved *inside* the lock; outside it, it was a
+check-then-act with the same gap. Pinned by
+`TestChaos50_ManualRecoveryIsNotOverwrittenByRetry`, which asserts the invariant
+directly — the in-memory CA and the on-disk bundle must never disagree.
+
+### FS-10 — the cluster-CA publish phase could interleave
+
+Releasing `ca.mu` before the publish is what removes the deadlock, but on its own
+it lets a second import land between the state swap and the publish: two imports
+can run `StartCARotation` out of order and leave the persisted rotation record
+describing the *older* CA, or a cleanup can clear a newer import's record. Node
+renewal progress and cluster-CA status then track fingerprints that are not the
+active CA's. (Pre-fix this was serialized by `ca.mu` — at the cost of
+deadlocking.)
+
+**Fix.** `clusterCA.installMu`, an operation-level lock spanning `installLocked`
+plus the publish, taken by `ImportCA` and `CleanupSecondary`. It is distinct from
+`mu` on purpose: `mu` guards the *fields* and must not be held across the publish;
+`installMu` orders the *operations* and is never taken by anything the publish
+reaches. Lock order is `installMu → mu`, never the reverse — so this does not
+reintroduce the cycle. Pinned by
+`TestChaos51_ConcurrentImportsKeepRotationRecordConsistent`.
+
+---
+
 ## Suggested Improvements (beyond this PR)
 
 1. **Take the CA-3b posture decision.** The data to take it on now exists
@@ -448,6 +503,7 @@ fail on a 20 s timeout, so a regression reports instead of wedging CI:
 | `TestChaos51_CleanupSecondaryDoesNotDeadlock` | FS-3 |
 | `TestChaos51_CleanupSecondaryNoOpWhenOverlapLive` | the restructure kept the guard — a live overlap is untouched |
 | `TestChaos51_ConcurrentReadersProgressDuringImport` | the blast radius: readers must progress after an import |
+| `TestChaos51_ConcurrentImportsKeepRotationRecordConsistent` | FS-10 — the rotation record's new fingerprint is always the ACTIVE CA's |
 
 `rootca_recovery_test.go`:
 
@@ -461,6 +517,7 @@ fail on a 20 s timeout, so a regression reports instead of wedging CI:
 | `TestChaos50_RecoveryClearsOnlyOnRealEvidence` | the converse — nothing fabricates a recovery |
 | `TestChaos50_InspectMatchedBypassIsCounted` | FS-8b — and that it is **not** counted as a fail-closed block |
 | `TestChaos50_MetricsExposeLoadPosture` / `TestChaos50_CAStatusSurfacesLoadPosture` | the operator surfaces |
+| `TestChaos50_ManualRecoveryIsNotOverwrittenByRetry` | FS-9 — the live CA and the persisted bundle never diverge under concurrent automatic + manual recovery |
 
 ---
 
