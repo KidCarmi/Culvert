@@ -1,6 +1,6 @@
 module github.com/KidCarmi/Culvert
 
-go 1.26
+go 1.26.6
 
 require (
 	github.com/KidCarmi/Sluice v0.2.0
