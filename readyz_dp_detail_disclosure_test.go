@@ -36,6 +36,7 @@ import (
 	"errors"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -152,16 +153,34 @@ func TestReadyz_DPRowsRawErrorNeverEntersProbeState(t *testing.T) {
 		t.Fatal("dpCertRenewalFailing() = false after a real in-window renewal failure — the row would vanish")
 	}
 
-	// Elem() rather than TypeOf(dpNodeCertRenewal): the struct embeds a mutex
-	// and must not be copied (go vet copylocks).
+	// An EXACT (name, type) allowlist, not a kind allowlist. Permitting every
+	// struct-typed field would admit a future time.Time, a url.URL, or any
+	// wrapper retaining the cause — leaving this guard green while the contract
+	// it claims to pin is broken. Over-broad matching is how the original class
+	// survived; the guard must not repeat it.
+	//
+	// TypeFor rather than TypeOf(sync.Mutex{}): no lock value is ever copied
+	// (go vet copylocks), and Elem() off the pointer avoids copying the struct.
+	want := map[string]reflect.Type{
+		"mu":      reflect.TypeFor[sync.Mutex](),
+		"failing": reflect.TypeFor[bool](),
+	}
 	st := reflect.TypeOf(&dpNodeCertRenewal).Elem()
+	if st.NumField() != len(want) {
+		t.Errorf("dpNodeCertRenewal has %d fields, want exactly %d", st.NumField(), len(want))
+	}
 	for i := range st.NumField() {
-		switch f := st.Field(i); f.Type.Kind() {
-		case reflect.Bool, reflect.Struct: // the failing flag and the mutex
-		default:
-			t.Errorf("dpNodeCertRenewal retains field %q of kind %s — the probe-facing state feeds an "+
+		f := st.Field(i)
+		expect, allowed := want[f.Name]
+		if !allowed {
+			t.Errorf("dpNodeCertRenewal retains unexpected field %q (%s) — the probe-facing state feeds an "+
 				"unauthenticated /ready detail, so it must carry no cause and no measurement; "+
-				"keep those in the log and the cert_expiry alert", f.Name, f.Type.Kind())
+				"keep those in the log and the cert_expiry alert", f.Name, f.Type)
+			continue
+		}
+		if f.Type != expect {
+			t.Errorf("dpNodeCertRenewal field %q has type %s, want %s — a widened type can retain "+
+				"a renewal cause or a lifetime that reaches the unauthenticated /ready detail", f.Name, f.Type, expect)
 		}
 	}
 }
