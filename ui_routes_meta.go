@@ -314,6 +314,7 @@ var uiRoutes = []uiRouteMetadata{
 	{Path: "/api/policy-learning/recommendations", Handler: "apiPolicyLearningRecommendations", Domain: "policy", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer, Note: "ADR-0025 M5A: recommendation listing/detail (?id=) with server-side staleness; advisory data only"},
+			{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true, Note: "ADR-0025 M5B: accept|reject decision. Operator floor = reject; the accept branch requires ADMIN via a second requireRole (documented C4 role-divergence, apiIdPRouter convention). Accept is DRAFT-ONLY (409 without RequireCommit) and creates one disabled draft rule fenced by if_version"},
 		}},
 	{Path: "/api/policy-learning/recommendations/generate", Handler: "apiPolicyLearningGenerate", Domain: "policy", Public: false,
 		Methods: []uiRouteMethod{

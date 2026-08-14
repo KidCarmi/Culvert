@@ -1152,6 +1152,16 @@ routes:
     audit_expected: false
     danger_level: none
     documented: true
+  - route: "/api/policy-learning/recommendations"
+    method: "POST"
+    handler: "apiPolicyLearningRecommendations"
+    domain: "policy"
+    visibility: admin-supported
+    min_role: "operator"
+    mutating: true
+    audit_expected: true
+    danger_level: medium
+    documented: true
   - route: "/api/policy-learning/recommendations/generate"
     method: "POST"
     handler: "apiPolicyLearningGenerate"

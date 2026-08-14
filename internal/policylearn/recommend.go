@@ -46,9 +46,27 @@ import (
 // mutation path that could rot or race. Superseded IS latched — it records the
 // historical fact that a later generation replaced this content, which no
 // current-state comparison could recover.
+//
+// M5B adds the DECISION states. The engine records lifecycle + acceptance
+// INTENT only — translation into a policy rule and every draft interaction
+// happen at the root trust boundary OUTSIDE this package (the wall):
+//
+//	generated ──BeginAccept──► accepting ──FinalizeAccept──► accepted (terminal)
+//	    │            ▲              │
+//	    │            └──────────────┘ AbortAccept (safe reconcile: rule absent + fences stale)
+//	    └───Reject──► rejected (terminal)
+//
+// accepting is the durable CROSS-STORE intent: it carries the preallocated
+// TargetRuleID so a crash at any instruction boundary leaves enough state to
+// reconcile deterministically (finalize if the exact rule exists, redo or
+// abort under current fences if it does not). generated→superseded remains the
+// only other latch; regeneration NEVER touches accepting/accepted/rejected.
 const (
 	RecStateGenerated  = "generated"
 	RecStateSuperseded = "superseded"
+	RecStateAccepting  = "accepting"
+	RecStateAccepted   = "accepted"
+	RecStateRejected   = "rejected"
 )
 
 // Confidence levels — a closed three-value set (never a score).
@@ -109,7 +127,18 @@ var (
 	// Ineligible (the safer disposition vs. a capped-LOW recommendation, whose
 	// subject figures would still be presented while known-unsound).
 	ErrSubjectKeyChanged = errors.New("policylearn: subject pseudonym key changed mid-session — distinct-subject evidence may double-count; session ineligible for recommendations")
+
+	// M5B decision-lifecycle sentinels — one per state so every invalid
+	// transition has an explicit, deterministic refusal.
+	ErrRecommendationNotFound   = errors.New("policylearn: recommendation not found")
+	ErrRecommendationSuperseded = errors.New("policylearn: recommendation superseded by a later generation — act on the current object")
+	ErrRecommendationAccepted   = errors.New("policylearn: recommendation already accepted")
+	ErrRecommendationRejected   = errors.New("policylearn: recommendation already rejected")
+	ErrRecommendationAccepting  = errors.New("policylearn: recommendation has an unresolved acceptance in progress")
 )
+
+// maxRejectReasonLen bounds the stored (and audited) reject reason.
+const maxRejectReasonLen = 256
 
 // Thresholds are the explicit, testable confidence predicates (spec: named
 // deterministic predicates, no composite scores). Zero fields take the defaults
@@ -316,6 +345,19 @@ type Recommendation struct {
 	EvidenceHash string               `json:"evidence_hash"` // canonical content hash (identity/idempotency anchor)
 	EngineSchema int                  `json:"engine_schema"`
 	GeneratedAt  string               `json:"generated_at"` // RFC3339 UTC (injected clock)
+
+	// M5B decision lifecycle (schema v6). TargetRuleID is preallocated by the
+	// root trust boundary at BeginAccept and persisted WITH the accepting
+	// intent — the crash-safe linkage between this recommendation and the one
+	// draft rule its acceptance may create. Kept on accepted (the created rule)
+	// and cleared by AbortAccept. Evidence fields above are never touched by
+	// any decision transition.
+	TargetRuleID string `json:"target_rule_id,omitempty"`
+	AcceptedAt   string `json:"accepted_at,omitempty"`
+	AcceptedBy   string `json:"accepted_by,omitempty"`
+	RejectedAt   string `json:"rejected_at,omitempty"`
+	RejectedBy   string `json:"rejected_by,omitempty"`
+	RejectReason string `json:"reject_reason,omitempty"` // bounded, control-chars stripped
 }
 
 func (r *Recommendation) clone() Recommendation {
@@ -474,12 +516,13 @@ func (e *Engine) GenerateRecommendations(sessionID string) (GenerateResult, erro
 		switch {
 		case builtByID[r.ID]:
 			// This exact content is the current generation output. Keep the
-			// original object (original GeneratedAt — idempotency); if a later
-			// generation had superseded it and the content is current again,
-			// restore it to generated so the triple has exactly one live object.
+			// original object (original GeneratedAt — idempotency). ONLY a
+			// superseded object is revived to generated; the decision states
+			// (accepting/accepted/rejected) are latches regeneration must
+			// never clobber — an accepted recommendation stays accepted.
 			satisfied[r.ID] = true
 			res.UnchangedCount++
-			if r.State != RecStateGenerated {
+			if r.State == RecStateSuperseded {
 				c := r.clone()
 				c.State = RecStateGenerated
 				merged = append(merged, &c)
@@ -822,27 +865,34 @@ func tripleKey(sessionID, group, category string) string {
 	return sessionID + cellKeySep + group + cellKeySep + category
 }
 
-// pruneRecommendations enforces the durable cap deterministically: superseded
-// objects are evicted first (store order = oldest first), then generated FIFO.
-// Eviction only ever discards history — it can never change a surviving
-// object's content or state.
+// pruneRecommendations enforces the durable cap deterministically, in
+// eviction-priority order (each pass oldest-first): superseded → rejected →
+// generated → accepted. An ACCEPTING recommendation is NEVER evicted — it is
+// an unresolved cross-store intent whose loss would strand reconciliation
+// (bounded in practice: intents are one-at-a-time admin operations that
+// resolve on retry). Eviction only ever discards history — it can never
+// change a surviving object's content or state.
 func pruneRecommendations(recs []*Recommendation) []*Recommendation {
 	over := len(recs) - maxRetainedRecommendations
 	if over <= 0 {
 		return recs
 	}
-	kept := make([]*Recommendation, 0, maxRetainedRecommendations)
-	for _, r := range recs { // pass 1: drop superseded, oldest first
-		if over > 0 && r.State == RecStateSuperseded {
-			over--
-			continue
+	kept := recs
+	for _, victim := range []string{RecStateSuperseded, RecStateRejected, RecStateGenerated, RecStateAccepted} {
+		if over <= 0 {
+			break
 		}
-		kept = append(kept, r)
+		next := make([]*Recommendation, 0, len(kept))
+		for _, r := range kept {
+			if over > 0 && r.State == victim {
+				over--
+				continue
+			}
+			next = append(next, r)
+		}
+		kept = next
 	}
-	if over > 0 { // pass 2: still over cap — FIFO on what remains
-		kept = kept[over:]
-	}
-	return kept
+	return kept // any residue over the cap is all accepting — retained by design
 }
 
 // ── Staleness (pure helper for M5 — deliberately unwired) ────────────────────
@@ -870,9 +920,27 @@ type StaleInputs struct {
 // between a recommendation's generation-time identities and the supplied
 // current ones. Empty ⇒ fresh. Computed on demand — never latched, never
 // persisted — so it cannot rot or race.
+// Policy-identity precedence (M5B §5, the exact contract):
+//
+//  1. When the caller asserts a CURRENT PolicyContentHash (cur non-empty) AND
+//     the recommendation carries a content pin, the CONTENT comparison is the
+//     sole policy-identity check — the generation counter is IGNORED, so a
+//     generation-only change (same enforced content: counter churn, meta
+//     resets, add-then-remove round trips) is NOT stale, while any actual
+//     rule/default-action content difference IS (policy_content_changed).
+//  2. When the caller asserts content but the recommendation has NO content
+//     pin (pre-M5A object), it cannot prove content identity: stale, fail
+//     closed (policy_content_changed) — generation again irrelevant.
+//  3. When the caller does NOT assert content (legacy caller), the generation
+//     comparison is the defense-in-depth fallback (policy_generation_changed).
 func StaleReasons(r *Recommendation, cur StaleInputs) []string {
 	var out []string
-	if r.Baseline.PolicyGeneration != cur.PolicyGeneration {
+	switch {
+	case cur.PolicyContentHash != "":
+		if r.Baseline.PolicyContentHash != cur.PolicyContentHash {
+			out = append(out, "policy_content_changed")
+		}
+	case r.Baseline.PolicyGeneration != cur.PolicyGeneration:
 		out = append(out, "policy_generation_changed")
 	}
 	if r.Baseline.CategoryEpoch != cur.CategoryEpoch {
@@ -889,12 +957,6 @@ func StaleReasons(r *Recommendation, cur StaleInputs) []string {
 		// (pre-M4.1) recommendation cannot prove which decision policy produced
 		// it, so it can never be presented as current.
 		out = append(out, "recommendation_policy_changed")
-	}
-	if cur.PolicyContentHash != "" && r.Baseline.PolicyContentHash != cur.PolicyContentHash {
-		// Content identity of the running access policy (M5A): robust where the
-		// generation counter is weak (counter resets, same-content re-imports).
-		// Same fail-closed posture for unpinned (pre-M5A) objects.
-		out = append(out, "policy_content_changed")
 	}
 	return out
 }

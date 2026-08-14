@@ -5406,6 +5406,8 @@ document.addEventListener('click', e => {
     case 'plGenerate': plGenerate(arg); break;
     case 'plSaveCategories': plSaveCategories(); break;
     case 'plShowRec': plShowRec(arg); break;
+    case 'plAccept': plAccept(arg); break;
+    case 'plReject': plReject(arg); break;
     case 'saveDecTunables':   saveDecTunables(); break;
     case 'resetDecTunables':  resetDecTunables(); break;
     case 'evictDecExclusion': evictDecExclusion(arg, arg2); break;
@@ -6560,6 +6562,7 @@ let _decExclScopeNames = {};
 let _decExclLoaded = false;
 // ── Policy Learning (ADR-0025 M5A) - advisory, node-local; read-only recommendations ──
 let _plStatus = null, _plConfig = null, _plRecs = [];
+let _plDraftArmed = false, _plPolicyVersion = 0;
 
 async function fetchPolicyLearn() {
   try {
@@ -6570,6 +6573,7 @@ async function fetchPolicyLearn() {
       api('/api/policy-learning/recommendations'),
     ]);
     _plStatus = st; _plConfig = cfg; _plRecs = recs.recommendations || [];
+    _plDraftArmed = !!recs.draft_mode_armed; _plPolicyVersion = recs.policy_version;
     renderPLStatus(st);
     renderPLSessions(sess.sessions || []);
     renderPLRecs(_plRecs);
@@ -6669,8 +6673,68 @@ function renderPLRecs(recs) {
         ${hosts ? `<br>top observed hosts: ${hosts}` : ''}
         ${ruleHits ? `<br>matched during observation by: ${ruleHits}` : ''}
       </div>
+      ${plDecisionRow(r)}
     </div></div>`;
   }).join('');
+}
+
+// plDecisionRow renders the M5B decision state/controls for one card.
+// Accept is admin-only and DRAFT-only; stale recommendations get no Accept.
+function plDecisionRow(r) {
+  const roleLevel = { admin: 3, operator: 2, viewer: 1 };
+  const lvl = roleLevel[window.currentRole] || 0;
+  const stale = (r.stale_reasons || []).length > 0;
+  if (r.state === 'accepted') {
+    return `<div style="margin-top:8px"><span style="color:var(--accent2)">ACCEPTED</span>
+      <span class="hint">&rarr; disabled draft rule <code>${escHtml(r.target_rule_id || '')}</code> by ${escHtml(r.accepted_by || '')}
+      &middot; <a href="#" data-click="switchView" data-arg="policy" style="color:var(--accent)">open Access Rules / Draft &rarr;</a></span></div>`;
+  }
+  if (r.state === 'rejected') {
+    return `<div style="margin-top:8px" class="hint">REJECTED by ${escHtml(r.rejected_by || '')}${r.reject_reason ? ` - ${escHtml(r.reject_reason)}` : ''}</div>`;
+  }
+  if (r.state === 'accepting') {
+    const retry = lvl >= 3 ? ` <button class="btn sm" data-click="plAccept" data-arg="${escHtml(r.id)}">Retry Accept</button>` : '';
+    return `<div style="margin-top:8px"><span style="color:var(--amber,orange)">acceptance in progress (unresolved)</span>${retry}</div>`;
+  }
+  if (r.state !== 'generated') return '';
+  const btns = [];
+  if (lvl >= 3 && !stale) {
+    if (_plDraftArmed) {
+      btns.push(`<button class="btn sm" data-click="plAccept" data-arg="${escHtml(r.id)}">Accept to Draft</button>`);
+    } else {
+      btns.push('<span class="hint">Accept requires Draft Mode (Require Commit) - arm it in Policy settings.</span>');
+    }
+  }
+  if (lvl >= 2) {
+    btns.push(`<button class="btn sm ghost" data-click="plReject" data-arg="${escHtml(r.id)}">Reject</button>`);
+  }
+  if (!btns.length) return '';
+  return `<div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">${btns.join(' ')}
+    <span class="hint">Accept creates a disabled rule in Policy Draft. It does not change enforcement.</span></div>`;
+}
+
+async function plAccept(recID) {
+  const ok = await confirmAction('Accept to Draft?',
+    'Creates a disabled rule in Policy Draft. It does not change enforcement. Review and commit the draft separately.', 'Accept to Draft');
+  if (!ok) return;
+  try {
+    const res = await api('/api/policy-learning/recommendations',
+      { method: 'POST', body: { id: recID, action: 'accept', if_version: _plPolicyVersion } });
+    toast('Accepted: disabled draft rule ' + (res.rule_id || ''));
+    fetchPolicyLearn();
+  } catch (e) { toast('Accept failed: ' + (e.message || e), 'error'); }
+}
+
+async function plReject(recID) {
+  const reason = await promptAction({title: 'Reject recommendation',
+    msg: 'Optional reason (kept with the record):', label: 'Reason', okLabel: 'Reject'});
+  if (reason === null) return;
+  try {
+    await api('/api/policy-learning/recommendations',
+      { method: 'POST', body: { id: recID, action: 'reject', reason: reason || '' } });
+    toast('Recommendation rejected');
+    fetchPolicyLearn();
+  } catch (e) { toast('Reject failed: ' + (e.message || e), 'error'); }
 }
 
 async function plToggleEnabled() {

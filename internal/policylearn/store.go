@@ -22,10 +22,12 @@ import (
 // category_epoch); 3 = M4 recommendations (top-level recommendations array +
 // baseline guardrails_hash); 4 = M4.1 recommendation-policy identity
 // (policy / policy_hash embedded per recommendation); 5 = M5A baseline
-// policy_content_hash (canonical access-policy content identity). Older
-// documents load cleanly on a newer binary (pure field additions, all
-// omitempty); saves always write the current version.
-const SchemaVersion = 5
+// policy_content_hash (canonical access-policy content identity); 6 = M5B
+// decision lifecycle (accepting/accepted/rejected states + target_rule_id /
+// accepted_* / rejected_* / reject_reason). Older documents load cleanly on a
+// newer binary (pure field additions, all omitempty); saves always write the
+// current version.
+const SchemaVersion = 6
 
 // minReadableSchemaVersion: every version in [min, current] loads.
 const minReadableSchemaVersion = 1
@@ -151,7 +153,14 @@ func decodeEnvelope(raw []byte) (*persistEnvelope, error) {
 			return nil, errors.New("decode session store: malformed recommendation record")
 		}
 		switch r.State {
-		case RecStateGenerated, RecStateSuperseded:
+		case RecStateGenerated, RecStateSuperseded, RecStateRejected:
+		case RecStateAccepting, RecStateAccepted:
+			// The cross-store linkage is load-bearing for these states: an
+			// intent or acceptance without its target identity cannot be
+			// reconciled and must be treated as corruption, not tolerated.
+			if r.TargetRuleID == "" {
+				return nil, fmt.Errorf("decode session store: %s recommendation without target_rule_id", r.State)
+			}
 		default:
 			return nil, fmt.Errorf("decode session store: unknown recommendation state %q", r.State)
 		}

@@ -15042,6 +15042,92 @@
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"
+      },
+      "post": {
+        "description": "M5B decision. accept (ADMIN only, despite the operator route floor — the handler enforces admin inside the branch) creates exactly ONE disabled rule in the Policy Draft, fenced by if_version and refused 409 unless Draft Mode (RequireCommit) is armed; enforcement never changes. reject (operator+) latches the recommendation with a bounded reason and mutates no policy state. No policy fields are accepted from the client.",
+        "operationId": "decidePolicyLearningRecommendation",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "action": {
+                    "enum": [
+                      "accept",
+                      "reject"
+                    ],
+                    "type": "string"
+                  },
+                  "id": {
+                    "description": "Exact recommendation ID.",
+                    "type": "string"
+                  },
+                  "if_version": {
+                    "description": "Required for accept: the policy_version fence echoed from the recommendations listing.",
+                    "format": "int64",
+                    "type": "integer"
+                  },
+                  "reason": {
+                    "description": "Optional bounded reject reason (reject only).",
+                    "maxLength": 256,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "action"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Decision result (accept: created draft rule ID)."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "description": "Recommendation not found."
+          },
+          "409": {
+            "description": "Stale/superseded/decided recommendation, draft mode not armed, version fence conflict, or target-rule integrity conflict."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Accept or reject a recommendation",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-audit-event": "policy_learning.accept",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "operator",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
       }
     },
     "/api/policy-learning/recommendations/generate": {

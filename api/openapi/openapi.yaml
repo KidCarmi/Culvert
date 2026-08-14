@@ -6670,6 +6670,38 @@ paths:
         '200': { description: 'Recommendations (or one with ?id= filter).', content: { application/json: { schema: { type: object, additionalProperties: true } } } }
         '403': { $ref: '#/components/responses/PlainForbidden' }
         '404': { description: 'Recommendation not found.' }
+    post:
+      operationId: decidePolicyLearningRecommendation
+      tags: [policy]
+      summary: Accept or reject a recommendation
+      description: 'M5B decision. accept (ADMIN only, despite the operator route floor — the handler enforces admin inside the branch) creates exactly ONE disabled rule in the Policy Draft, fenced by if_version and refused 409 unless Draft Mode (RequireCommit) is armed; enforcement never changes. reject (operator+) latches the recommendation with a bounded reason and mutates no policy state. No policy fields are accepted from the client.'
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: policy_learning.accept
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id, action]
+              properties:
+                id: { type: string, description: Exact recommendation ID. }
+                action: { type: string, enum: [accept, reject] }
+                if_version: { type: integer, format: int64, description: 'Required for accept: the policy_version fence echoed from the recommendations listing.' }
+                reason: { type: string, maxLength: 256, description: 'Optional bounded reject reason (reject only).' }
+      responses:
+        '200': { description: 'Decision result (accept: created draft rule ID).', content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404': { description: 'Recommendation not found.' }
+        '409': { description: 'Stale/superseded/decided recommendation, draft mode not armed, version fence conflict, or target-rule integrity conflict.' }
   /api/policy-learning/recommendations/generate:
     post:
       operationId: generatePolicyLearningRecommendations

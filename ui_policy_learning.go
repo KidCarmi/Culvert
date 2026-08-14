@@ -18,6 +18,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/KidCarmi/Culvert/internal/policylearn"
@@ -107,6 +108,14 @@ type plRecommendationDTO struct {
 	// subject key, recommendation policy). Empty = fresh. Historical evidence
 	// is never mutated by staleness.
 	StaleReasons []string `json:"stale_reasons"`
+	// M5B decision facts (administrative metadata — actor identities are the
+	// audit-actor strings, never subject evidence).
+	TargetRuleID string `json:"target_rule_id,omitempty"`
+	AcceptedAt   string `json:"accepted_at,omitempty"`
+	AcceptedBy   string `json:"accepted_by,omitempty"`
+	RejectedAt   string `json:"rejected_at,omitempty"`
+	RejectedBy   string `json:"rejected_by,omitempty"`
+	RejectReason string `json:"reject_reason,omitempty"`
 }
 
 func plBaselineToDTO(b policylearn.Baseline) plBaselineDTO {
@@ -173,6 +182,12 @@ func plRecommendationToDTO(r policylearn.Recommendation, cur policylearn.StaleIn
 		PolicyHash:        r.PolicyHash,
 		GeneratedAt:       r.GeneratedAt,
 		StaleReasons:      stale,
+		TargetRuleID:      r.TargetRuleID,
+		AcceptedAt:        r.AcceptedAt,
+		AcceptedBy:        r.AcceptedBy,
+		RejectedAt:        r.RejectedAt,
+		RejectedBy:        r.RejectedBy,
+		RejectReason:      r.RejectReason,
 	}
 }
 
@@ -447,38 +462,142 @@ func apiPolicyLearningSessions(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]any{"sessions": out, "enabled": true, "scope": "node-local"})
 }
 
-// apiPolicyLearningRecommendations (GET, viewer): recommendation listing
-// (?id= for one), staleness evaluated server-side at read time (§10).
+// apiPolicyLearningRecommendations — GET (viewer): recommendation listing
+// (?id= for one), staleness evaluated server-side at read time (§10);
+// POST (M5B): the accept|reject decision — accept is ADMIN-only inside the
+// branch (reject is operator+); route metadata declares the operator floor
+// with the stricter accept branch documented (the apiIdPRouter / C4
+// role-divergence convention).
 func apiPolicyLearningRecommendations(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		eng := policyLearnEngine.Load()
+		if eng == nil {
+			jsonOK(w, map[string]any{"recommendations": []plRecommendationDTO{}, "enabled": false, "scope": "node-local"})
+			return
+		}
+		cur := policyLearnStaleInputs(eng)
+		if id := r.URL.Query().Get("id"); id != "" {
+			for _, rec := range eng.Recommendations() {
+				if rec.ID == id {
+					jsonOK(w, plRecommendationToDTO(rec, cur))
+					return
+				}
+			}
+			http.Error(w, "recommendation not found", http.StatusNotFound)
+			return
+		}
+		list := eng.Recommendations()
+		out := make([]plRecommendationDTO, 0, len(list))
+		for _, rec := range list {
+			out = append(out, plRecommendationToDTO(rec, cur))
+		}
+		ver, _ := effectivePolicyVersion()
+		jsonOK(w, map[string]any{
+			"recommendations": out, "enabled": true, "scope": "node-local",
+			// M5B accept prerequisites, exposed as facts so the GUI can gate
+			// its controls (the server remains the authority via 409).
+			"draft_mode_armed": requireCommitEnabled(),
+			"policy_version":   ver,
+		})
+
+	case http.MethodPost:
+		apiPolicyLearningDecision(w, r)
+
+	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// apiPolicyLearningDecision is the M5B accept|reject POST. No policy fields
+// are accepted from the client — only the recommendation identity, the action,
+// the version fence (accept), and a bounded reject reason.
+func apiPolicyLearningDecision(w http.ResponseWriter, r *http.Request) { //nolint:cyclop,funlen // deterministic per-state refusal table is intentionally explicit
+	if !requireRole(w, r, RoleOperator) { // floor; accept re-checks admin below
 		return
 	}
-	if !requireRole(w, r, RoleViewer) {
+	var body struct {
+		ID        string `json:"id"`
+		Action    string `json:"action"`
+		IfVersion *int64 `json:"if_version"` // accept: REQUIRED optimistic fence
+		Reason    string `json:"reason"`     // reject only; bounded server-side
+	}
+	if err := decodeJSON(r, &body); err != nil || body.ID == "" {
+		http.Error(w, "id and action required", http.StatusBadRequest)
 		return
 	}
+	policyLearnAdminMu.Lock()
+	defer policyLearnAdminMu.Unlock()
 	eng := policyLearnEngine.Load()
 	if eng == nil {
-		jsonOK(w, map[string]any{"recommendations": []plRecommendationDTO{}, "enabled": false, "scope": "node-local"})
+		http.Error(w, errPolicyLearnDisabled.Error(), http.StatusConflict)
 		return
 	}
-	cur := policyLearnStaleInputs(eng)
-	if id := r.URL.Query().Get("id"); id != "" {
-		for _, rec := range eng.Recommendations() {
-			if rec.ID == id {
-				jsonOK(w, plRecommendationToDTO(rec, cur))
-				return
-			}
+	actor := auditActor(r)
+
+	switch body.Action {
+	case "accept":
+		if !requireRole(w, r, RoleAdmin) {
+			return
 		}
-		http.Error(w, "recommendation not found", http.StatusNotFound)
-		return
+		if body.IfVersion == nil {
+			http.Error(w, "if_version required for accept (read it from the recommendations listing)", http.StatusBadRequest)
+			return
+		}
+		out, err := plAcceptRecommendation(eng, body.ID, *body.IfVersion, actor)
+		if err != nil {
+			auditEvent(r, "policy_learning.accept.refused", body.ID, "accept refused: "+err.Error())
+			plDecisionError(w, err)
+			return
+		}
+		rec := out.Recommendation
+		auditEvent(r, "policy_learning.accept", rec.ID,
+			fmt.Sprintf("accepted to DRAFT: session=%s group=%s category=%s target_rule=%s idempotent=%t (disabled rule in Policy Draft; enforcement unchanged)",
+				rec.SessionID, rec.Group, rec.Category, out.RuleID, out.AlreadyDone))
+		jsonOK(w, map[string]any{
+			"recommendation": plRecommendationToDTO(rec, policyLearnStaleInputs(eng)),
+			"rule_id":        out.RuleID,
+			"already_done":   out.AlreadyDone,
+			"note":           "Created a DISABLED rule in the Policy Draft. Enforcement is unchanged until the draft is reviewed and committed.",
+		})
+
+	case "reject":
+		rec, err := eng.Reject(body.ID, actor, body.Reason)
+		if err != nil {
+			plDecisionError(w, err)
+			return
+		}
+		auditEvent(r, "policy_learning.reject", rec.ID,
+			fmt.Sprintf("rejected: session=%s group=%s category=%s reason=%q",
+				rec.SessionID, rec.Group, rec.Category, rec.RejectReason))
+		jsonOK(w, map[string]any{"recommendation": plRecommendationToDTO(rec, policyLearnStaleInputs(eng))})
+
+	default:
+		http.Error(w, "action must be accept or reject", http.StatusBadRequest)
 	}
-	list := eng.Recommendations()
-	out := make([]plRecommendationDTO, 0, len(list))
-	for _, rec := range list {
-		out = append(out, plRecommendationToDTO(rec, cur))
+}
+
+// plDecisionError maps decision errors to deterministic statuses.
+func plDecisionError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, policylearn.ErrRecommendationNotFound):
+		http.Error(w, err.Error(), http.StatusNotFound)
+	case errors.Is(err, policylearn.ErrRecommendationSuperseded),
+		errors.Is(err, policylearn.ErrRecommendationAccepted),
+		errors.Is(err, policylearn.ErrRecommendationRejected),
+		errors.Is(err, policylearn.ErrRecommendationAccepting),
+		errors.Is(err, policylearn.ErrStoreReadOnly),
+		errors.Is(err, errAcceptRequiresDraftMode),
+		errors.Is(err, errAcceptVersionConflict),
+		errors.Is(err, errAcceptIntegrityConflict),
+		errors.Is(err, errStaleRecommendation):
+		http.Error(w, err.Error(), http.StatusConflict)
+	default:
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
-	jsonOK(w, map[string]any{"recommendations": out, "enabled": true, "scope": "node-local"})
 }
 
 // apiPolicyLearningGenerate (POST, operator): deterministic recommendation

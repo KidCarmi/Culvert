@@ -99,6 +99,40 @@ func TestPolicyLearnWall_NoPolicyMutationTokens(t *testing.T) {
 	}
 }
 
+// TestPolicyLearnWall_RootTranslatorOwnership (M5B): translation of a
+// Recommendation into a real PolicyRule and EVERY draft/policy-store
+// interaction live in exactly ONE root trust-boundary file —
+// policy_learning_accept.go. No other policy-learning root file may reach the
+// policy write pipeline, and the DTO→PolicyRule conversion exists exactly once.
+func TestPolicyLearnWall_RootTranslatorOwnership(t *testing.T) {
+	// The non-boundary policy-learning root files must not touch the pipeline.
+	restricted := []string{
+		"ui_policy_learning.go", "policy_learning_admin.go",
+		"policy_learning_observe.go", "policy_learning_startup.go",
+		"policy_learning_startup_config.go",
+	}
+	for _, file := range restricted {
+		raw, err := os.ReadFile(filepath.Join(pkgSourceDir(), file))
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
+		}
+		src := string(raw)
+		for _, tok := range []string{"policyWriteStore", "policyDraft.", "PolicyRule{", "plTranslateRecommendation("} {
+			if strings.Contains(src, tok) {
+				t.Errorf("%s references %q — draft/policy interaction is owned exclusively by policy_learning_accept.go (M5B wall)", file, tok)
+			}
+		}
+	}
+	// The boundary file itself must exist and own the single translator.
+	raw, err := os.ReadFile(filepath.Join(pkgSourceDir(), "policy_learning_accept.go"))
+	if err != nil {
+		t.Fatalf("trust-boundary file missing: %v", err)
+	}
+	if !strings.Contains(string(raw), "func plTranslateRecommendation(") {
+		t.Error("policy_learning_accept.go no longer owns the DTO→PolicyRule translator — if deliberate, update this wall with the design change")
+	}
+}
+
 // TestPolicyLearnWall_NoWallClock: the engine never reads the wall clock —
 // time.Now is banned in non-test files (Config.Now is the injected clock).
 func TestPolicyLearnWall_NoWallClock(t *testing.T) {

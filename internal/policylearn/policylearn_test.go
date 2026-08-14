@@ -176,7 +176,7 @@ func TestCorruptStore_UnknownFieldAndBadState(t *testing.T) {
 func TestNewerSchema_FailClosedReadOnly(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "policy_learning.json")
-	newer := `{"schema_version":6,"sessions":[],"future_field":{"x":1}}`
+	newer := `{"schema_version":7,"sessions":[],"future_field":{"x":1}}`
 	if err := os.WriteFile(path, []byte(newer), 0o600); err != nil {
 		t.Fatal(err)
 	}
