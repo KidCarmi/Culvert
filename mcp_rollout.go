@@ -130,21 +130,6 @@ func (r *mcpRollout) stateFor(capb rollout.Capability) *rollout.State {
 	}
 }
 
-// applyRolloutConfig validates and installs a signed rollout config into the
-// matching capability state through the durable commit path. It is called from the
-// DP snapshot-apply path AFTER the envelope's whole-snapshot validation succeeds. A
-// validation, execution-dependency, or persistence failure leaves the current
-// rollout state unchanged (fail closed).
-func (r *mcpRollout) applyRolloutConfig(cfg *rollout.SignedConfig, actor string) {
-	if cfg == nil {
-		return // absence is not deletion — keep local rollout state
-	}
-	if err := r.commitRolloutTransition(cfg, actor, time.Now()); err != nil {
-		logger.Printf("MCP rollout config rejected for %s (state unchanged): %v",
-			cfg.Capability.String(), err)
-	}
-}
-
 // commitRolloutTransition applies a validated signed rollout config with the full
 // durable-transition contract (B-MECH-1/2/3):
 //

@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 )
@@ -25,12 +26,15 @@ func TestMCPRolloutCapabilityIsolation(t *testing.T) {
 		gateway:    rollout.NewState(rollout.CapabilityGateway, rollout.DefaultLimits()),
 		management: rollout.NewState(rollout.CapabilityManagement, rollout.DefaultLimits()),
 	}
+	withTempDataDir(t)
 	// A Gateway rollout config must never touch Management state.
 	cfg := &rollout.SignedConfig{
 		SelectorSchema: 1, Capability: rollout.CapabilityGateway, Mode: rollout.ModeObserve,
 		Scope: rollout.ScopeSpec{Capability: rollout.CapabilityGateway}, ConnectorMode: rollout.ConnectorLocalClient,
 	}
-	r.applyRolloutConfig(cfg, "test")
+	if err := r.commitRolloutTransition(cfg, "test", time.Unix(1000, 0)); err != nil {
+		t.Fatalf("gateway observe commit: %v", err)
+	}
 	if r.gateway.CurrentMode() != rollout.ModeObserve {
 		t.Fatal("gateway mode should advance to Observe")
 	}
@@ -62,12 +66,15 @@ func TestMCPRolloutRejectsBadConnector(t *testing.T) {
 		gateway:    rollout.NewState(rollout.CapabilityGateway, rollout.DefaultLimits()),
 		management: rollout.NewState(rollout.CapabilityManagement, rollout.DefaultLimits()),
 	}
+	withTempDataDir(t)
 	// An outbound-connector config must be rejected (state unchanged).
 	cfg := &rollout.SignedConfig{
 		SelectorSchema: 1, Capability: rollout.CapabilityGateway, Mode: rollout.ModeObserve,
 		Scope: rollout.ScopeSpec{Capability: rollout.CapabilityGateway}, ConnectorMode: rollout.ConnectorOutbound,
 	}
-	r.applyRolloutConfig(cfg, "test")
+	if err := r.commitRolloutTransition(cfg, "test", time.Unix(1000, 0)); err == nil {
+		t.Fatal("a rejected connector-mode config must return an error")
+	}
 	if r.gateway.CurrentMode() != rollout.ModeDisabled {
 		t.Fatal("a rejected connector-mode config must leave the state unchanged")
 	}

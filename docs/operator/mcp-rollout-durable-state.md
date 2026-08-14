@@ -27,6 +27,14 @@ started the evidence window. This change wires:
    (Shadow, Canary, Production) is rejected unless the guarded-execution plane is
    composed. The shipped Observe-only build composes none, so an attempted Shadow
    transition fails closed.
+4. Production composition of the signed CP to DP data-plane appliers (PR-12). When a
+   DP verify-trust is provisioned (`CULVERT_MCP_DISTRIBUTION_TRUST_KEYS`, PUBLIC
+   ed25519 roots), startup composes the Gateway and Management appliers so a signed
+   rollout envelope reaches the durable rollout commit path. With no trust configured
+   (the default) no applier is composed and the path stays inert.
+5. A single truthful transaction that couples distribution activation with the rollout
+   commit: an applied acknowledgement is impossible unless BOTH the distribution active
+   state and the local rollout state accepted the same rollout revision.
 
 ## Durable-transition contract
 
@@ -58,12 +66,35 @@ At startup each capability restores its durable state:
 The kill switch is restart-durable: an emergency disable survives a restart so a
 restart cannot silently re-admit traffic an operator disabled.
 
-## Operator transition path
+## Signed distribution composition and transaction (PR-12)
 
 The signed CP to DP distribution path is the only path that installs an executing
-mode; it remains signed, revisioned, and capability-isolated. The authenticated Admin
-transition endpoint (`POST /api/mcp/rollout/transition`) is truthful about why a
-transition cannot proceed in the current posture:
+mode; it remains signed, revisioned, and capability-isolated. In production it is
+composed by the startup shim `initMCPDistribution`, which runs after the rollout state
+is restored:
+
+- Trust is provisioned through `CULVERT_MCP_DISTRIBUTION_TRUST_KEYS`, a JSON array of
+  PUBLIC ed25519 roots (the same shape as the release-catalog trust keys). PUBLIC
+  material only; a private signing key is never provisioned to a data plane. Unset or
+  empty keeps distribution disabled and the apply path inert. A present-but-invalid
+  value fails closed to disabled.
+- When a valid trust store is present, the Gateway and Management appliers are composed
+  as physically isolated engines with their own durable state under
+  `<dataDir>/mcp_distribution/`, recovered at startup, then reconciled against the
+  rollout state.
+- Applying a signed envelope is one transaction. An executing target mode with the
+  guarded-execution plane not composed, or a capability-mismatched rollout, is rejected
+  before the distribution is ever activated, so no applied acknowledgement is produced
+  and no distribution-versus-rollout split is left behind. If the rollout commit fails
+  after the distribution activated (a rollout-state persistence failure), the
+  distribution activation is reverted and the acknowledgement becomes a rejection. The
+  effective composition state (`dp_composed`, `dp_compose_reason`, PUBLIC
+  `dp_trust_key_ids`) is surfaced read-only on `GET /api/mcp/distribution`.
+
+## Operator transition path
+
+The authenticated Admin transition endpoint (`POST /api/mcp/rollout/transition`) is
+truthful about why a transition cannot proceed in the current posture:
 
 - Production is always rejected with `rollout_production_locked` (403). This build
   ships no qualification issuer.
@@ -87,10 +118,12 @@ injected-clock figure is never reported as production evidence.
 
 ## Still required before Shadow (not delivered here)
 
-This change fixes rollout transport, persistence, and evidence-window mechanics only.
-It does not enable execution and does not authorize Shadow. Before a real Shadow
-phase can begin, separate work must provide: a stable host for the full continuous
-window, an operator-approved immutable real-traffic scope, the composed
-guarded-execution plane with credential containment, decision-parity evidence,
-sustained monitoring with a real alert destination, named ownership and on-call, and
-fresh identity material covering the window plus margin.
+This change fixes rollout transport, persistence, evidence-window, production
+DP-applier composition, and the distribution-plus-rollout transaction mechanics only.
+It does not enable execution and does not authorize Shadow. An executing-mode
+transition still fails closed at the execution-dependency gate. Before a real Shadow
+phase can begin, separate work must provide: the composed guarded-execution plane with
+credential containment, a stable host for the full continuous window, an
+operator-approved immutable real-traffic scope, decision-parity evidence, sustained
+monitoring with a real alert destination, named ownership and on-call, and fresh
+identity material covering the window plus margin.
