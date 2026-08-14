@@ -1,8 +1,17 @@
 # MCP Implementation Slices
 
 The delivery sequence: **PR-0 … PR-11, followed by a separate Production Qualification gate.** **No PR-12
-exists** — any reinstatement of a distinct connectivity/PR-12 slice is deferred to
-[`OPEN-DECISIONS.md`](OPEN-DECISIONS.md) (D-12). **Status: PR-0 design artifact (Proposed).** This is a
+exists** in this design-slice numbering — any reinstatement of a distinct connectivity/PR-12 slice is
+deferred to [`OPEN-DECISIONS.md`](OPEN-DECISIONS.md) (D-12).
+
+> **Naming note:** [`docs/operator/mcp-rollout-durable-state.md`](../../operator/mcp-rollout-durable-state.md)
+> and `CLAUDE.md` separately use **"PR-12"** as the label for the later-shipped CP/DP signed-distribution
+> composition + rollout-transaction work (`initMCPDistribution`, `applyMCPCapabilityEnvelope`). That is a
+> reused number from a different, later sequence (the shipped-change log), not a reinstatement of the
+> connectivity/shadow-canary "PR-12" slice this document rules out above — the two are unrelated pieces of
+> work that happen to share a number.
+
+**Status: PR-0 design artifact (Proposed).** This is a
 plan; **no slice is implemented.** Per-slice fields: objective, scope, non-goals, trust boundary,
 dependencies, security requirements, tests, acceptance criteria, rollback, owner, reviewer, release gate.
 
@@ -259,7 +268,8 @@ rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted AD
   approved scope for Model A; Production stays qualification-locked** (no config/env/CLI/API bypass; test
   verifier only via injection; synthetic clock windows labeled test evidence). NO Model-B connector, NO
   Model-C DMZ, NO endpoint bridge, NO transparent discovery, NO Management mutation. Production
-  Qualification remains the separate gate; **there is no PR-12.**
+  Qualification remains the separate gate; **there is no PR-12** in this design-slice sequence (see the
+  naming note near the top of this document re: the unrelated, later-shipped "PR-12" composition work).
 
 ## PR-C (post-V1) — Outbound Connector (Model B) *(D-8 — not in V1; own design gate)*
 - **Objective:** the outbound-only connector for approved cloud-AI vendors — **only** after a named vendor
