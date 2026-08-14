@@ -61,7 +61,12 @@ type plTransportDTO struct {
 	Dropped        int64 `json:"dropped"`
 	Rejected       int64 `json:"rejected"`
 	ConsumerPanics int64 `json:"consumer_panics"`
-	Degraded       bool  `json:"degraded"`
+	// GroupsTruncated (M5B.1): accepted observations whose identity carried
+	// more than the 16-group bound — group context is incomplete for those
+	// events (a coverage fact, not a Degraded trigger: omitted groups simply
+	// received no evidence).
+	GroupsTruncated int64 `json:"groups_truncated"`
+	Degraded        bool  `json:"degraded"`
 }
 
 type plSessionDTO struct {
@@ -140,11 +145,12 @@ func plSessionToDTO(eng *policylearn.Engine, s policylearn.Session) plSessionDTO
 		StoppedBy: s.StoppedBy,
 		Baseline:  plBaselineToDTO(s.Baseline),
 		Transport: plTransportDTO{
-			Accepted:       s.Transport.Accepted,
-			Dropped:        s.Transport.Dropped,
-			Rejected:       s.Transport.Rejected,
-			ConsumerPanics: s.Transport.ConsumerPanics,
-			Degraded:       s.Transport.Degraded(),
+			Accepted:        s.Transport.Accepted,
+			Dropped:         s.Transport.Dropped,
+			Rejected:        s.Transport.Rejected,
+			ConsumerPanics:  s.Transport.ConsumerPanics,
+			GroupsTruncated: s.Transport.GroupsTruncated,
+			Degraded:        s.Transport.Degraded(),
 		},
 		ChurnEvents: len(s.CategoryChurn),
 	}
@@ -235,8 +241,8 @@ func apiPolicyLearningStatus(w http.ResponseWriter, r *http.Request) {
 	obs := eng.ObservationStats()
 	resp["observation"] = plTransportDTO{
 		Accepted: obs.Accepted, Dropped: obs.Dropped, Rejected: obs.Rejected,
-		ConsumerPanics: obs.ConsumerPanics,
-		Degraded:       obs.Dropped > 0 || obs.Rejected > 0 || obs.ConsumerPanics > 0,
+		ConsumerPanics: obs.ConsumerPanics, GroupsTruncated: obs.GroupsTruncated,
+		Degraded: obs.Dropped > 0 || obs.Rejected > 0 || obs.ConsumerPanics > 0,
 	}
 	resp["recommendation_policy"] = eng.CurrentRecommendationPolicy() // read-only transparency (thresholds NOT editable in M5A)
 	resp["recommendation_policy_hash"] = eng.RecommendationPolicyHash()

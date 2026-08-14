@@ -16,6 +16,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -138,41 +139,160 @@ func (c *policyDraftCoordinator) candidateVersion() (version int64, updatedAt st
 // does not fail the API mutation (the in-memory draft is still authoritative
 // for this process).
 func (c *policyDraftCoordinator) persist() {
-	// Capture path, state, AND the candidate rules under the SAME lock. Reading
-	// c.cand.List() after releasing c.mu races a concurrent clear() (commit /
-	// revert by another admin): clear could empty the candidate and delete the
-	// file between the unlock and the read, so we'd re-create policy_draft.json
-	// with state.Active=true and zero rules — a corrupt draft that, on restart,
+	// Capture everything and write under the SAME lock (see persistLocked) —
+	// reading c.cand.List() after releasing c.mu races a concurrent clear()
+	// (commit / revert by another admin): clear could empty the candidate and
+	// delete the file in between, so we'd re-create policy_draft.json with
+	// state.Active=true and zero rules — a corrupt draft that, on restart,
 	// renders an empty rulebase and (baseGeneration permitting) lets a commit
-	// wipe running. Snapshotting rules under the lock closes that window.
+	// wipe running. This wrapper keeps the LEGACY best-effort posture (log,
+	// don't fail the mutation); durable callers use persistLocked directly.
 	c.mu.Lock()
-	path := c.path
-	active := c.state.Active
-	st := c.state
-	var rules []PolicyRule
-	if active {
-		rules = c.cand.List()
-	}
+	err := c.persistLocked()
 	c.mu.Unlock()
-	if path == "" {
-		return
+	if err != nil {
+		logger.Printf("PolicyDraft: %v", err)
 	}
-	if !active {
-		_ = os.Remove(path)
-		return
+}
+
+// persistLocked serializes state+candidate and writes atomically, RETURNING
+// the outcome (M5B.1: the durable-append primitive must know whether the
+// candidate is recoverable after a restart; the legacy persist() wrapper keeps
+// logging it away). Caller holds c.mu.
+func (c *policyDraftCoordinator) persistLocked() error {
+	if c.path == "" {
+		return nil // in-memory mode: no durable domain exists by configuration
+	}
+	if !c.state.Active {
+		_ = os.Remove(c.path)
+		return nil
 	}
 	p := struct {
 		State draftState   `json:"state"`
 		Rules []PolicyRule `json:"rules"`
-	}{State: st, Rules: rules}
+	}{State: c.state, Rules: c.cand.List()}
 	data, err := json.MarshalIndent(p, "", "  ")
 	if err != nil {
-		logger.Printf("PolicyDraft: marshal error: %v", err)
-		return
+		return fmt.Errorf("marshal error: %w", err)
 	}
-	if err := fileutil.AtomicWrite(path, data, 0o600); err != nil {
-		logger.Printf("PolicyDraft: write error: %v", err)
+	if err := fileutil.AtomicWrite(c.path, data, 0o600); err != nil {
+		return fmt.Errorf("write error: %w", err)
 	}
+	return nil
+}
+
+// ── M5B.1: durable check-and-mutate primitive ────────────────────────────────
+
+// Sentinel errors for stageDurableAppend callers.
+var (
+	errDraftVersionConflict = errors.New("draft/policy version changed since the fence was read")
+	errDraftPersistFailed   = errors.New("draft persistence failed — the mutation was rolled back, nothing durable changed")
+)
+
+// stageDurableAppend is the persist-before-publish / check-and-mutate
+// primitive (M5B.1): expected version → validate fence → append to the
+// candidate → DURABLE persist → success. All of it runs under ONE coordinator
+// lock, so for primitive callers the fence check and the mutation are atomic
+// (the legacy handlers' optimistic check→stageTarget→Add sequence keeps its
+// documented posture). A persist failure is returned to the caller and the
+// append is rolled back (compensating delete of the exact preallocated ID —
+// or, when this call opened the draft fork, the fork is discarded), so a
+// successful return means the rule is recoverable from policy_draft.json
+// after a process restart. In-memory mode (no persistence path) has no
+// durable domain by configuration; persistence is then vacuously successful.
+//
+// Reusable by any caller needing durable append semantics; the Learning
+// accept path (policy_learning_accept.go) is the first.
+func (c *policyDraftCoordinator) stageDurableAppend(actor string, expectedVersion int64, rule PolicyRule) (PolicyRule, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var cur int64
+	if c.state.Active {
+		cur, _ = c.cand.policyVersion()
+	} else {
+		cur, _ = policyStore.policyVersion()
+	}
+	if cur != expectedVersion {
+		return PolicyRule{}, fmt.Errorf("expected version %d, current %d: %w", expectedVersion, cur, errDraftVersionConflict)
+	}
+	opened := false
+	if !c.state.Active {
+		baseGen, _ := policyStore.policyVersion()
+		c.cand.ReplaceAll(policyStore.List())
+		c.state = draftState{
+			Active:         true,
+			Actor:          actor,
+			StartedAt:      time.Now().UTC().Format(time.RFC3339),
+			BaseGeneration: baseGen,
+		}
+		opened = true
+	}
+	added := c.cand.Add(rule)
+	if err := c.persistLocked(); err != nil {
+		if opened {
+			// This call opened the fork: discard it entirely (candidate back to
+			// "no draft"; the file write failed, so there is nothing on disk).
+			_ = c.clearLocked()
+		} else {
+			c.cand.DeleteByID(added.ID) // exact compensating rollback
+		}
+		return PolicyRule{}, fmt.Errorf("%v: %w", err, errDraftPersistFailed)
+	}
+	return added, nil
+}
+
+// durableTargetPresent reports whether ruleID is recoverable from the DURABLE
+// draft domain — the persisted policy_draft.json as it would be reloaded after
+// a process restart. Fail-closed on read/parse errors. In-memory mode (no
+// path) the candidate itself is the domain, so membership there answers.
+func (c *policyDraftCoordinator) durableTargetPresent(ruleID string) bool {
+	c.mu.Lock()
+	path := c.path
+	inMemory := false
+	if path == "" && c.state.Active {
+		for _, r := range c.cand.List() {
+			if r.ID == ruleID {
+				inMemory = true
+			}
+		}
+	}
+	c.mu.Unlock()
+	if path == "" {
+		return inMemory
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var p struct {
+		State draftState   `json:"state"`
+		Rules []PolicyRule `json:"rules"`
+	}
+	if json.Unmarshal(raw, &p) != nil || !p.State.Active {
+		return false
+	}
+	for i := range p.Rules {
+		if p.Rules[i].ID == ruleID {
+			return true
+		}
+	}
+	return false
+}
+
+// ensureDurableTarget guarantees ruleID is durably recoverable: if the
+// persisted document already carries it, done; otherwise (an earlier
+// best-effort persist failed after the rule reached candidate memory) the
+// candidate is re-persisted durably and the failure, if any, is returned.
+func (c *policyDraftCoordinator) ensureDurableTarget(ruleID string) error {
+	if c.durableTargetPresent(ruleID) {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.persistLocked(); err != nil {
+		return fmt.Errorf("%v: %w", err, errDraftPersistFailed)
+	}
+	return nil
 }
 
 // clearLocked resets the candidate + state; caller holds c.mu. Returns the

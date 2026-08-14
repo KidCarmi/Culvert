@@ -268,3 +268,46 @@ func TestObserve_CloseIsIdempotentAndBoundedTime(t *testing.T) {
 		t.Fatalf("delivered = %d, want 100", st.Delivered)
 	}
 }
+
+// TestObserve_GroupTruncationCounted (M5B.1): an accepted observation with
+// more groups than the bound keeps the first 16 and COUNTS the truncation —
+// never silent — and the loss folds into the session transport window.
+func TestObserve_GroupTruncationCounted(t *testing.T) {
+	clk := newTestClock()
+	e := newTestEngine(t, "", clk, nil)
+	t.Cleanup(func() { _ = e.Close() })
+	if _, err := e.StartSession("op"); err != nil {
+		t.Fatal(err)
+	}
+	groups := make([]string, MaxObservationGroups+9)
+	for i := range groups {
+		groups[i] = "g" + string(rune('a'+i))
+	}
+	e.Observe(Observation{Subject: "s", AuthSource: "idp", Groups: groups, Host: "h.example", Method: "GET", Status: "OK"})
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && e.ObservationStats().Delivered < 1 {
+		time.Sleep(time.Millisecond)
+	}
+	st := e.ObservationStats()
+	if st.Accepted != 1 || st.GroupsTruncated != 1 {
+		t.Fatalf("truncation not counted: %+v", st)
+	}
+	// Within-bound observations do not count.
+	e.Observe(Observation{Subject: "s", AuthSource: "idp", Groups: groups[:3], Host: "h.example", Method: "GET", Status: "OK"})
+	for time.Now().Before(deadline) && e.ObservationStats().Delivered < 2 {
+		time.Sleep(time.Millisecond)
+	}
+	if st := e.ObservationStats(); st.GroupsTruncated != 1 {
+		t.Fatalf("within-bound observation counted as truncated: %+v", st)
+	}
+	sess, err := e.StopSession("op")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.Transport.GroupsTruncated != 1 {
+		t.Fatalf("session window missing truncation delta: %+v", sess.Transport)
+	}
+	if sess.Transport.Degraded() {
+		t.Fatal("truncation must not flag Degraded (undercount-only)")
+	}
+}

@@ -54,9 +54,20 @@ type TransportWindow struct {
 	Dropped        int64 `json:"dropped,omitempty"`
 	Rejected       int64 `json:"rejected,omitempty"`
 	ConsumerPanics int64 `json:"consumer_panics,omitempty"`
+	// GroupsTruncated (M5B.1) counts accepted observations whose group list
+	// exceeded MaxObservationGroups: those events carry INCOMPLETE group
+	// context (only the first 16 groups received evidence). Carried on every
+	// recommendation via Coverage.TransportLoss so evidence can never imply
+	// complete group coverage.
+	GroupsTruncated int64 `json:"groups_truncated,omitempty"`
 }
 
-// Degraded reports whether the session window lost any observations.
+// Degraded reports whether the session window LOST whole observations.
+// GroupsTruncated is deliberately excluded: a truncated observation was
+// delivered and its retained cells are exact — the omitted groups simply
+// received no evidence (an undercount, the direction evidence is allowed to
+// err in), so it is surfaced as a coverage fact rather than capping
+// confidence for every cell in the session.
 func (w TransportWindow) Degraded() bool {
 	return w.Dropped > 0 || w.Rejected > 0 || w.ConsumerPanics > 0
 }

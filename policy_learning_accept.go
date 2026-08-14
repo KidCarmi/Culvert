@@ -132,6 +132,17 @@ func plAcceptRecommendation(eng *policylearn.Engine, recID string, ifVersion int
 			if !plRuleMatchesTranslation(existing, &rec) {
 				return plAcceptOutcome{}, errAcceptIntegrityConflict
 			}
+			// M5B.1 durability gate: the latch may only follow a target that is
+			// durably recoverable — already committed to running (the canonical
+			// commit path), or present in the persisted draft document. A rule
+			// that reached candidate MEMORY under a failed best-effort persist
+			// is re-persisted durably first; if that write fails too, the
+			// intent stays pending (retryable), never Accepted.
+			if policyStore.findByIDCopy(rec.TargetRuleID) == nil {
+				if err := policyDraft.ensureDurableTarget(rec.TargetRuleID); err != nil {
+					return plAcceptOutcome{}, err
+				}
+			}
 			fin, err := eng.FinalizeAccept(rec.ID, actor)
 			if err != nil {
 				return plAcceptOutcome{}, err
@@ -180,14 +191,20 @@ func plAcceptRecommendation(eng *policylearn.Engine, recID string, ifVersion int
 	}
 	stampRuleMetadataForWrite(&rule, nil, actor)
 
-	ws := policyWriteStore(actor)
-	if ws == policyStore {
-		// The write path is NOT the draft candidate (RequireCommit raced off
-		// between the check above and here, or wiring drift): refuse — a
-		// learning acceptance must never touch the running rulebase.
-		return plAcceptOutcome{}, errAcceptRequiresDraftMode
+	// M5B.1: the coordinator's durable check-and-mutate primitive — fence,
+	// append, and DURABLE persist under one lock. Structurally candidate-only
+	// (the primitive never touches the running store), and success means the
+	// rule is recoverable from policy_draft.json after a restart; a persist
+	// failure rolled the append back and is returned, so Learning is never
+	// told a durable rule exists when it does not. The intent stays pending
+	// (retryable); FinalizeAccept is unreachable on this path.
+	added, err := policyDraft.stageDurableAppend(actor, ifVersion, rule)
+	if err != nil {
+		if errors.Is(err, errDraftVersionConflict) {
+			return plAcceptOutcome{}, fmt.Errorf("%v: %w", err, errAcceptVersionConflict)
+		}
+		return plAcceptOutcome{}, err
 	}
-	added := ws.Add(rule)
 	if added.ID != rec.TargetRuleID {
 		// Add() re-mints on invalid/duplicate IDs; both are precluded (fresh
 		// ULID + presence check), so this is wiring drift — refuse loudly
@@ -195,7 +212,6 @@ func plAcceptRecommendation(eng *policylearn.Engine, recID string, ifVersion int
 		return plAcceptOutcome{}, fmt.Errorf("draft store assigned rule ID %s instead of the preallocated %s: %w",
 			added.ID, rec.TargetRuleID, errAcceptIntegrityConflict)
 	}
-	policyDraft.persist() // durable candidate (afterPolicyWrite's draft branch, minus the no-op reconcile that cannot apply to an append)
 
 	fin, err := eng.FinalizeAccept(rec.ID, actor)
 	if err != nil {

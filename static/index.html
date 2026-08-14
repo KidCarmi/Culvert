@@ -6621,6 +6621,7 @@ function renderPLSessions(sessions) {
     const facts = [];
     facts.push(`observed (accepted): ${s.transport.accepted}`);
     if (s.transport.degraded) facts.push(`<span style="color:var(--amber,orange)">loss: dropped=${s.transport.dropped} rejected=${s.transport.rejected} panics=${s.transport.consumer_panics}</span>`);
+    if (s.transport.groups_truncated > 0) facts.push(`<span style="color:var(--amber,orange)">group context truncated on ${s.transport.groups_truncated} observation(s) (identities with &gt;16 groups; omitted groups received no evidence)</span>`);
     if (s.churn_events > 0) facts.push(`category churn events: ${s.churn_events}`);
     if (s.subject_key_changed) facts.push('<span style="color:var(--red)">subject key changed mid-session (identity evidence unsound)</span>');
     (s.gaps || []).forEach(g => facts.push(`gap: ${escHtml(g.reason)}`));
@@ -6665,6 +6666,7 @@ function renderPLRecs(recs) {
         &middot; session window: ${cov.session_window_days}d
         &middot; membership denominator unavailable
         ${cov.transport_degraded ? ' &middot; <span style="color:var(--amber,orange)">observation loss occurred</span>' : ''}
+        ${(cov.transport_loss && cov.transport_loss.groups_truncated) ? ` &middot; <span style="color:var(--amber,orange)">group context incomplete for ${cov.transport_loss.groups_truncated} observation(s)</span>` : ''}
       </div>
       <div style="margin-top:6px" class="hint">
         Evidence: ${ev.allowed_requests} observed allowed requests

@@ -63,6 +63,14 @@ type ObservationStats struct {
 	Rejected       int64 // invalid (empty Host) — discarded
 	ConsumerPanics int64 // sink panicked — event lost, drain continued
 	Delivered      int64 // handed to the sink (or discarded clean when no sink)
+	// GroupsTruncated counts ACCEPTED observations whose identity carried more
+	// than MaxObservationGroups groups (M5B.1): the observation was kept but
+	// attributes to only the first 16 groups, so group context is INCOMPLETE
+	// for those events. Surfaced (never silent) so evidence can never imply
+	// complete group coverage; deliberately NOT a Degraded() trigger — the
+	// omitted groups simply receive no evidence (undercount, the safe
+	// direction), while the retained cells' counts are exact.
+	GroupsTruncated int64
 }
 
 // transport is the engine-owned queue + single drain goroutine.
@@ -72,11 +80,12 @@ type transport struct {
 	done     chan struct{}
 	stopOnce sync.Once
 
-	accepted  atomic.Int64
-	dropped   atomic.Int64
-	rejected  atomic.Int64
-	panics    atomic.Int64
-	delivered atomic.Int64
+	accepted        atomic.Int64
+	dropped         atomic.Int64
+	rejected        atomic.Int64
+	panics          atomic.Int64
+	delivered       atomic.Int64
+	groupsTruncated atomic.Int64
 }
 
 // LearningActive reports whether a session is currently Learning (the same
@@ -103,11 +112,13 @@ func (e *Engine) Observe(o Observation) {
 		return
 	}
 	// Bounded copy: the caller's slice is request-owned and must not cross the
-	// goroutine boundary; truncation beyond the cap is deterministic.
+	// goroutine boundary; truncation beyond the cap is deterministic AND
+	// counted (M5B.1) — group context beyond the bound is lost, never silently.
 	if len(o.Groups) > 0 {
 		n := len(o.Groups)
 		if n > MaxObservationGroups {
 			n = MaxObservationGroups
+			t.groupsTruncated.Add(1)
 		}
 		g := make([]string, n)
 		copy(g, o.Groups[:n])
@@ -224,6 +235,7 @@ func (e *Engine) syncTransportLocked() {
 	sess.Transport.Dropped += cur.Dropped - e.tPin.Dropped
 	sess.Transport.Rejected += cur.Rejected - e.tPin.Rejected
 	sess.Transport.ConsumerPanics += cur.ConsumerPanics - e.tPin.ConsumerPanics
+	sess.Transport.GroupsTruncated += cur.GroupsTruncated - e.tPin.GroupsTruncated
 	e.tPin = cur
 }
 
@@ -235,10 +247,11 @@ func (e *Engine) observationStatsRaw() ObservationStats {
 		return ObservationStats{}
 	}
 	return ObservationStats{
-		Accepted:       t.accepted.Load(),
-		Dropped:        t.dropped.Load(),
-		Rejected:       t.rejected.Load(),
-		ConsumerPanics: t.panics.Load(),
-		Delivered:      t.delivered.Load(),
+		Accepted:        t.accepted.Load(),
+		Dropped:         t.dropped.Load(),
+		Rejected:        t.rejected.Load(),
+		ConsumerPanics:  t.panics.Load(),
+		Delivered:       t.delivered.Load(),
+		GroupsTruncated: t.groupsTruncated.Load(),
 	}
 }
