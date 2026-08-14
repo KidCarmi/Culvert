@@ -261,6 +261,16 @@ func applyMCPCapabilityEnvelope(a *apply.Applier, env *cpdp.Envelope, capb cpdp.
 		return
 	}
 	// (3) Rollout commit — the coupled second half.
+	//
+	// NOTE (serialization requirement for a future DP→CP ack-return loop): between
+	// step 2's Apply (which sets a transient Applied pendingAck) and step 4's
+	// AbortApplied (which overwrites it with a Rejected ack), an Applied ack exists in
+	// memory. The whole transaction runs synchronously on the single config-apply
+	// thread and no production code reads PendingAck today, so the transient is never
+	// observed. When the ack-return path is wired, it MUST read/deliver PendingAck
+	// under the SAME serialization as this apply (never concurrently mid-transaction),
+	// or a delivered-then-superseded Applied ack could recreate the very split P1-B
+	// closes.
 	if err := getMCPRollout().commitRolloutTransition(cfg, "cp-snapshot", time.Now()); err != nil {
 		// (4) Compensate: the rollout half was rejected AFTER the distribution half
 		// activated. Revert distribution so the two never diverge and no AckApplied

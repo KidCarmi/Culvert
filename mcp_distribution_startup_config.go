@@ -90,13 +90,3 @@ func resolveMCPDistributionStartupConfig(trustJSON, nodeID, dataDir string) mcpD
 		Enabled: true, NodeID: nodeID, DataDir: dataDir, Trust: trust, TrustKeyIDs: ids, Reason: "ready",
 	}
 }
-
-// mcpDistributionTrustKeysToRoots is a small helper reused by tests that build a
-// trust-keys JSON payload from a signer's public key. It keeps the wire shape in one
-// place. (Non-secret: emits PUBLIC key material only.)
-func mcpDistributionTrustKeysJSON(keyID string, pub ed25519.PublicKey) string {
-	b, _ := json.Marshal([]mcpDistributionTrustKey{{
-		KeyID: keyID, Alg: cpdp.SigAlgEd25519, PublicKey: base64.StdEncoding.EncodeToString(pub),
-	}})
-	return string(b)
-}

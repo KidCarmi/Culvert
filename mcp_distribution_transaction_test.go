@@ -1,6 +1,9 @@
 package main
 
 import (
+	"crypto/ed25519"
+	"encoding/base64"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -8,6 +11,15 @@ import (
 	"github.com/KidCarmi/Culvert/internal/mcp/cpdp"
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 )
+
+// mcpDistributionTrustKeysJSON builds the env trust-keys JSON payload from a signer's
+// PUBLIC key (test-only; emits PUBLIC key material only, never a private key).
+func mcpDistributionTrustKeysJSON(keyID string, pub ed25519.PublicKey) string {
+	b, _ := json.Marshal([]mcpDistributionTrustKey{{
+		KeyID: keyID, Alg: cpdp.SigAlgEd25519, PublicKey: base64.StdEncoding.EncodeToString(pub),
+	}})
+	return string(b)
+}
 
 // These tests cover the two P1 findings closed before merge:
 //
@@ -47,18 +59,18 @@ func mcpResetGlobals(t *testing.T) {
 // fresh directory, provisions the DP trust from the signer's PUBLIC key via the env
 // surface, and runs initMCPDistribution. It returns the signer and the data dir. It
 // fails the test if composition did not enable the DP appliers.
-func mcpProdSetup(t *testing.T) (cpdp.Signer, string) {
+func mcpProdSetup(t *testing.T) (signer cpdp.Signer, dir string) {
 	t.Helper()
-	s, _ := mcpTestSigner(t)
-	dir := t.TempDir()
+	signer, _ = mcpTestSigner(t)
+	dir = t.TempDir()
 	setDataDirForTest(t, dir)
-	t.Setenv(envMCPDistributionTrustKeys, mcpDistributionTrustKeysJSON("mcp-k1", s.Public()))
+	t.Setenv(envMCPDistributionTrustKeys, mcpDistributionTrustKeysJSON("mcp-k1", signer.Public()))
 	mcpResetGlobals(t)
 	initMCPDistribution(nil)
 	if !globalMCPDistribution.enabled.Load() {
 		t.Fatalf("production composition did not enable DP appliers: %v", mcpDistributionStatus()["dp_compose_reason"])
 	}
-	return s, dir
+	return signer, dir
 }
 
 // setDataDirForTest sets the global dataDir and restores it on cleanup, WITHOUT the
@@ -284,6 +296,27 @@ func TestTxn_ProductionEnvelopeFailsClosed(t *testing.T) {
 	}
 }
 
+// TestTxn_CapabilityMismatchRejected proves the pre-check rejects a Gateway envelope
+// whose rollout config claims the Management capability (or vice versa) WHOLE, before
+// any distribution activation — capability isolation at the transaction boundary.
+func TestTxn_CapabilityMismatchRejected(t *testing.T) {
+	s, _ := mcpProdSetup(t)
+	a := globalMCPDistribution.dpApplierFor(cpdp.CapabilityGateway)
+	// A Gateway envelope carrying a Management rollout config.
+	env := mcpSignedGWEnv(t, s, 2, mcpObserveRollout(rollout.CapabilityManagement))
+	applySnapshotMCP(ConfigSnapshot{MCPGatewaySnapshot: env})
+	if a.Active() != nil {
+		t.Fatal("a capability-mismatched rollout must not activate distribution")
+	}
+	if getMCPRollout().gateway.CurrentMode() != rollout.ModeDisabled ||
+		getMCPRollout().management.CurrentMode() != rollout.ModeDisabled {
+		t.Fatal("a capability-mismatched rollout must not advance any rollout state")
+	}
+	if pa := a.PendingAck(); pa != nil && pa.State == cpdp.AckApplied {
+		t.Fatal("a capability-mismatched rollout must not produce an AckApplied")
+	}
+}
+
 // TestTxn_PersistFailureRevertsDistributionNoAck is the §12 proof: with distribution
 // persistence healthy but rollout-state persistence forced to fail, the apply fails,
 // the distribution activation is reverted to the prior revision, no AckApplied stands,
@@ -303,7 +336,7 @@ func TestTxn_PersistFailureRevertsDistributionNoAck(t *testing.T) {
 	// directory so its atomic write fails, while the distribution dir stays writable.
 	rollFile := filepath.Join(dir, "mcp_rollout_state_gateway.json")
 	_ = os.Remove(rollFile)
-	if err := os.Mkdir(rollFile, 0o755); err != nil {
+	if err := os.Mkdir(rollFile, 0o700); err != nil {
 		t.Fatalf("arm rollout persist failure: %v", err)
 	}
 
@@ -344,7 +377,7 @@ func TestTxn_CapabilityIsolation(t *testing.T) {
 	// Force ONLY Management rollout persistence to fail.
 	mgFile := filepath.Join(dir, "mcp_rollout_state_management.json")
 	_ = os.Remove(mgFile)
-	if err := os.Mkdir(mgFile, 0o755); err != nil {
+	if err := os.Mkdir(mgFile, 0o700); err != nil {
 		t.Fatalf("arm mgmt rollout persist failure: %v", err)
 	}
 	mgEnv := mcpSignedMGEnv(t, s, 2, mcpObserveRollout(rollout.CapabilityManagement))

@@ -198,6 +198,14 @@ func (a *Applier) AbortApplied(cause error) (*cpdp.Acknowledgement, error) {
 	}
 	target := a.store.Previous() // the snapshot active before the aborted Apply (may be nil)
 	ack := a.reject(aborted, cause)
+	// The reject ack reports the POST-revert active state (the target we restore to),
+	// not the aborted envelope, so a status/ack reader sees the truthful active hash.
+	targetHash := ""
+	if target != nil {
+		targetHash = target.ContentHash
+	}
+	ack.ActiveHash = targetHash
+	ack.PreviousHash = ""
 
 	revs := cpdp.Revisions{}
 	if target != nil {
