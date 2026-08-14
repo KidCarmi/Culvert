@@ -738,6 +738,7 @@ components:
       properties:
         role: { type: string }
         nodeID: { type: string }
+        grpcCompressionEnabled: { type: boolean, description: 'Resolved CULVERT_CLUSTER_GRPC_COMPRESSION value for this node (startup-scoped, read-only here).' }
     ClusterNodes:
       type: object
       required: [nodes]
