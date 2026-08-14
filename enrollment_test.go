@@ -925,6 +925,38 @@ func TestAPIClusterStatus_IncludesEnrollInfo(t *testing.T) {
 	}
 }
 
+// TestAPIClusterStatus_SurfacesGRPCCompression pins the operator-visible
+// read-only surfacing of the CULVERT_CLUSTER_GRPC_COMPRESSION startup flag
+// (see CLAUDE.md) so its effective value can never silently regress back to
+// invisible without a test failure.
+func TestAPIClusterStatus_SurfacesGRPCCompression(t *testing.T) {
+	orig := clusterGRPCCompression
+	defer func() { clusterGRPCCompression = orig }()
+
+	for _, want := range []bool{true, false} {
+		clusterGRPCCompression = want
+
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodGet, "/api/cluster/status", nil)
+		apiClusterStatus(w, r)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", w.Code)
+		}
+		var resp map[string]any
+		if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		got, ok := resp["grpcCompressionEnabled"].(bool)
+		if !ok {
+			t.Fatalf("grpcCompressionEnabled missing or not a bool: %v", resp["grpcCompressionEnabled"])
+		}
+		if got != want {
+			t.Fatalf("grpcCompressionEnabled = %v, want %v", got, want)
+		}
+	}
+}
+
 // ── End-to-End Enrollment Flow Test ─────────────────────────────────────────
 
 func TestEnrollmentFlow_TokenToCSRToNode(t *testing.T) {

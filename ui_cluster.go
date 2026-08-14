@@ -22,13 +22,14 @@ func apiClusterStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result := map[string]any{
-		"role":          clusterRole.role,
-		"nodeID":        clusterRole.nodeID,
-		"grpcAddr":      clusterRole.grpcAddr,
-		"uptime":        time.Since(startTime).Round(time.Second).String(),
-		"enrollEnabled": globalClusterCA.Ready(),
-		"caFingerprint": globalClusterCA.CACertFingerprint(),
-		"ha":            globalHA.Status(),
+		"role":                   clusterRole.role,
+		"nodeID":                 clusterRole.nodeID,
+		"grpcAddr":               clusterRole.grpcAddr,
+		"uptime":                 time.Since(startTime).Round(time.Second).String(),
+		"enrollEnabled":          globalClusterCA.Ready(),
+		"caFingerprint":          globalClusterCA.CACertFingerprint(),
+		"ha":                     globalHA.Status(),
+		"grpcCompressionEnabled": clusterGRPCCompression,
 	}
 	if clusterRole.role == "control-plane" {
 		result["nodes"] = NodeMetricsList()
