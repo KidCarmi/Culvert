@@ -452,6 +452,25 @@ func (c *Config) SetAuth(user, pass string) error {
 	return nil
 }
 
+// RollbackFailedSetupAuth undoes a SetAuth(user, ...) call whose result could
+// not be durably persisted (e.g. SaveUIUsersFile failed during first-time
+// setup): it clears the legacy c.user/passHash and removes the roster entry
+// SetAuth added, so IsConfigured() reverts to false and the setup wizard
+// stays retryable. Unlike DeleteUIUser, this never refuses on "last admin" —
+// there is no completed setup to protect, only an in-memory credential that
+// must not survive a failed persist (leaving it in place while telling the
+// operator setup failed would make a retry hit "setup already complete" with
+// no session and no durable credential — a dead end).
+func (c *Config) RollbackFailedSetupAuth(user string) {
+	c.mu.Lock()
+	c.user = ""
+	c.passHash = nil
+	c.authRevision++
+	delete(c.uiUsers, user)
+	c.cache.clear()
+	c.mu.Unlock()
+}
+
 // dummyBcryptHash is a fixed bcrypt hash (cost = DefaultCost, matching stored
 // credential hashes) used to equalise local-auth timing on a username miss
 // (RISK-008). Without it, a wrong username returns instantly while a correct
