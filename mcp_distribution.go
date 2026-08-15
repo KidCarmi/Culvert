@@ -7,7 +7,6 @@ import (
 
 	"github.com/KidCarmi/Culvert/internal/mcp/cpdp"
 	"github.com/KidCarmi/Culvert/internal/mcp/cpdp/apply"
-	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 )
 
 // mcpDistribution holds the node-local MCP CP→DP signed-snapshot distribution
@@ -236,7 +235,7 @@ func applyMCPCapabilityEnvelope(a *apply.Applier, env *cpdp.Envelope, capb cpdp.
 	mgmt := capb == cpdp.CapabilityManagement
 	// (1) Deterministic precondition pre-check, before distribution activation.
 	if cfg != nil {
-		if (cfg.Capability == rollout.CapabilityManagement) != mgmt {
+		if !rolloutCapabilityMatches(cfg, capb) {
 			// Capability isolation: a Gateway envelope must never carry a Management
 			// rollout (or vice versa). Reject WHOLE without staging distribution.
 			_ = a.RejectAck(env, errRolloutPersistFailed)

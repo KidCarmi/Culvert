@@ -158,6 +158,19 @@ func reconcileRolloutWithDistribution() {
 		if cfg == nil {
 			continue
 		}
+		// Capability isolation, re-checked at the commit point. commitRolloutTransition
+		// routes by cfg.Capability, so a recovered envelope whose inner rollout declares
+		// the OTHER capability would commit onto that capability's state — crossing the
+		// ADR-0024 boundary at startup, with no operator action and no CP round trip.
+		// The apply-time coordinator makes this unreachable through the live path, and
+		// cpdp validation now rejects such an envelope outright, but Applier.Recover
+		// re-verifies only signature/capability/min-version (NOT full payload
+		// validation), so this path must not inherit its safety from a check that ran in
+		// a different process lifetime. Fail closed and leave the restored state alone.
+		if !rolloutCapabilityMatches(cfg, capb) {
+			logger.Printf("MCP rollout reconcile for %s refused: recovered rollout declares a different capability (isolation, fail-closed)", capb.String())
+			continue
+		}
 		if err := getMCPRollout().commitRolloutTransition(cfg, "startup-reconcile", now); err != nil {
 			logger.Printf("MCP rollout reconcile for %s left rollout state unchanged: %v", capb.String(), sanitizeLog(err.Error()))
 		}
