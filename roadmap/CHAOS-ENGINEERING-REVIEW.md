@@ -17,6 +17,38 @@ everything else is triaged below with a suggested PR and required tests for foll
 
 ## 0. Revision log
 
+**2026-08-15 — CHAOS-50 sweep (the CLUSTER CA across its lifecycle). Closes CA-13.**
+
+CHAOS-28 closed the inspection Root CA and named the cluster CA as the next sweep, on the
+strength of CA-13: rotation logs-and-returns on every failure branch. That is true, and it is
+the least serious thing in the domain. **Every cluster-CA rotation permanently deadlocked the
+process.** `ImportCA` — the single chokepoint for both auto-rotation and the admin "import CA"
+button — held `ca.mu` for writing across side effects that re-enter the SAME `RWMutex` for
+reading (`onRotate` → `rebuildCPCertPool` → `AllCACertsPEM`; `CurrentConfigSnapshot` →
+`CACertFingerprint`). `sync.RWMutex` is not reentrant, so the goroutine parked forever WHILE
+HOLDING THE WRITER — freezing node enrollment (`SignCSR`), every DP config poll
+(`CACertFingerprint`), the admin API (`Info`), HA replication (`CAKeyPEM`), and — because one
+goroutine drives both CAs — Root CA auto-rotation too, which then rides to its own expiry.
+`CleanupSecondary` carries the identical shape, firing ~30 days later. The suite never saw it:
+all six existing `ImportCA` tests run against a LOCAL `&clusterCA{}`, a different mutex from the
+`globalClusterCA` the side effects re-enter, so the production path had no test at all. Four more
+defects, all previously unrecorded: an EXPIRED cluster CA kept signing node certs that no peer
+accepts (the CHAOS-28 defect class, in the other CA — `x509.CreateCertificate` does not check the
+parent's window); node certs were NOT clamped to the issuer, so a CA with 10 days left issued
+1-year certs and the DP's 30-day renewal trigger slept through the CA's expiry AND through the
+dual-CA overlap; `ImportCA` panicked on a FIRST install (nil secondary), reachable exactly where
+it hurts — after a fail-closed `InitOrLoad`, whose documented recovery is an admin import; and a
+failed persist left a live CA listed as its OWN secondary because the in-memory promotion
+happened before the durable write. All six reproduced against `main` first. Fixes: side effects
+moved out of the lock (serialized by a separate `importMu` no reader ever takes), `Usable()`
+introduced as distinct from `Ready()` with the Root CA's 5-min skew tolerance, node certs clamped
+to the issuer's window on both ends, write-then-swap ordering, and a health plane mirroring
+`ca_health.go` (`culvert_cluster_ca_{rotation_failures_total,sign_refused_total,usable,expires_in_seconds}`,
+a `HasSubscriber`-gated `cluster_ca_degraded` alert, recovery on EVIDENCE, and `usable`/
+`daysRemaining`/`signRefusals` on `/api/cluster/ca` + a panel banner). Full report:
+`docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-15.md`; runbook:
+`docs/operator/cluster-ca-expiry.md`.
+
 **2026-08-11 — CHAOS-49 sweep (the multi-IdP registry auth path under IdP failure).**
 
 CHAOS-47 gave the LEGACY identity backends a three-part contract (an infrastructure failure is
@@ -182,7 +214,12 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | CA-11 | Leaf-cert cache has **no single-flight** — N concurrent misses for one host each sign independently; TTL expiry is synchronized (thundering herd). | GAP (re-scoped by CHAOS-28: the perf-F3 shared leaf key removed the dominant per-miss cost — P-256 keygen — so the herd is materially cheaper than when first recorded) | M → L/M | `internal/ca/ca.go` `GetCert` |
 | CA-16 | Leaf-cache **`cacheOrder` slice grew on every TTL REFRESH** while the map entry was overwritten. `len(cache)` never changed, so the eviction branch never fired: an unbounded slice behind a bounded map, growing with UPTIME on an ordinary steady working set (W=5,000 hosts ⇒ ~120k strings/day). Invisible to `culvert_cert_cache_size`, which reports the bounded map. | NEW → **CLOSED** (CHAOS-28: append only for an untracked host; behavior-preserving for eviction — duplicate entries always resolved to "already gone") | M | was: `internal/ca/ca.go` `GetCert`; see §16 |
 | CA-12 | Upstream & client MITM handshakes inherit only `r.Context()` (no explicit handshake deadline); a slowloris handshake ties up the goroutine. Good: uses `HandshakeContext`, not `Handshake()`. | GAP | M | `proxy.go:1503,1591` |
-| CA-13 | Cluster CA rotation mirrors CA-2: every failure branch logs-and-returns with no alert/metric. Silent failure → cluster-wide enrollment break at expiry. | GAP (**next sweep** — CHAOS-28 closed the inspection-CA half as CA-2; this is the same defect class in the OTHER CA, with a different lifecycle and blast radius) | M | `enrollment.go:1189-1245` |
+| CA-13 | Cluster CA rotation mirrors CA-2: every failure branch logs-and-returns with no alert/metric. Silent failure → cluster-wide enrollment break at expiry. | **CLOSED** (CHAOS-50: rotation failures and sign refusals are counted, rate-limit-logged, and alerted via `cluster_ca_degraded`; recovery reported on evidence; `culvert_cluster_ca_*` series added) | M | was: `enrollment.go` `RotateIfNeeded`/`recordRotationFailure`; see §17 |
+| CA-17 | **`ImportCA` and `CleanupSecondary` self-deadlocked**: side effects (`onRotate` → `rebuildCPCertPool` → `AllCACertsPEM`, and `CurrentConfigSnapshot` → `CACertFingerprint`) re-entered `ca.mu` for READING while the same goroutine held it for WRITING. Permanent, unconditional, on EVERY rotation and every admin CA import — parked holding the writer, so enrollment, DP config sync, admin API, HA replication, and Root CA auto-rotation all froze for the life of the process. Invisible: no panic, no metric, no health row, listener still accepting. | NEW → **CLOSED** (CHAOS-50: state mutation split into `installLocked`; side effects run lock-free, serialized by a reader-free `importMu`) | **C** | was: `enrollment.go` `ImportCA`/`CleanupSecondary`; see §17 |
+| CA-18 | An **EXPIRED cluster CA kept signing node certificates** (`x509.CreateCertificate` does not check the parent's window) — enrollment "succeeded" and the node then failed every mTLS handshake, with nothing at the CP to explain it. `Ready()` only asked whether a CA was loaded. | NEW → **CLOSED** (CHAOS-50: `Usable()` split from `Ready()` with a 5-min skew tolerance; `SignCSR` fails closed with `errClusterCAUnusable`, counted + alerted) | H | was: `enrollment.go` `SignCSR`; see §17 |
+| CA-19 | **Node certs were not clamped to the issuer's window** — a CA with 10 days left issued 1-year node certs, so the DP renewal trigger (30 days on the NODE cert) slept through the CA's expiry, and the dual-CA overlap window was not a superset of the certs the old CA had issued. | NEW → **CLOSED** (CHAOS-50: `NotAfter` clamped to the issuer's, `NotBefore` floored at it) | M/H | was: `enrollment.go` `SignCSR`; see §17 |
+| CA-20 | `ImportCA` **panicked on a FIRST install** (rotation tracking dereferenced a nil secondary), and a **failed persist left a phantom dual-CA state** (the in-memory promotion happened before the durable write). Both reachable on the documented recovery path after a fail-closed `InitOrLoad`. | NEW → **CLOSED** (CHAOS-50: tracking skipped when there was no previous CA; write-then-swap ordering) | M | was: `enrollment.go` `ImportCA`; see §17 |
+| CA-21 | **Tests exercised a look-alike, not the production path.** All six pre-existing `ImportCA` tests ran against a local `&clusterCA{}`, whose mutex is not the one the side effects re-enter, so a guaranteed permanent deadlock sat on `main` behind a green suite. The class is not CA-specific: any global whose tests only touch local instances has the same hole. | NEW (CA-13's instance fixed by the CHAOS-50 gates, which drive `globalClusterCA`; a **sweep for other singletons** is open) | M | `cluster_ca_chaos_test.go`; see §17 |
 | CA-14 | Revocation persistence uses `os.WriteFile`+rename with **no fsync** (unlike the CA bundle's `AtomicWrite`) — a revoked token can be honored again after crash/disk-full. | GAP | L/M | `internal/session/session.go:272-276`, caller `session.go:106-108` |
 | CA-15 | CA loader **accepts a plain-PEM bundle even when a passphrase is set** (magic absent) — a downgrade footgun; logged, not alerted/rejected. | GAP (minor) | L | `internal/ca/ca.go:221-229` |
 
@@ -1132,3 +1169,71 @@ reason: a still-expired CA looks exactly like a healthy one if nothing happens t
   inspect; it cannot make clients trust a new root. Nothing in-band can. That is why this
   change invests most heavily in making the condition visible *before* the cliff
   (`culvert_ca_expires_in_seconds`) rather than only at it.
+
+---
+
+## 17. CHAOS-50 — The cluster CA across its lifecycle (deadlock + fail-closed)
+
+**Date:** 2026-08-15 · **Closes:** CA-13, CA-17, CA-18, CA-19, CA-20 · **Opens:** CA-21
+(singleton-vs-look-alike test sweep) · **Full report:**
+`docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-15.md` · **Runbook:**
+`docs/operator/cluster-ca-expiry.md`
+
+### 17.1 Why this domain
+
+CHAOS-28 closed the inspection Root CA and named CA-13 — the *other* CA's silent rotation
+failures — as the next sweep. The cluster CA signs the client certificate every Data Plane
+presents on the mTLS control channel, so its failure domain is enrollment and config
+distribution rather than inspection: a different blast radius, and one the proxy's own data-path
+metrics cannot see.
+
+### 17.2 The six defects
+
+1. **`ImportCA` self-deadlocked** (CA-17) — the write-lock region called back into the same
+   `RWMutex` for reading, twice over. Certain, unconditional, on every rotation and every admin
+   import. It parked holding the writer, so `SignCSR`, `CACertFingerprint`, `Info`,
+   `AllCACertsPEM`, and `CAKeyPEM` all blocked for the life of the process; and because
+   `StartCAAutoRotation` drives both CAs from one goroutine, Root CA rotation stopped too.
+2. **`CleanupSecondary` self-deadlocked** the same way (CA-17), ~30 days after any rotation.
+3. **An expired cluster CA kept signing** (CA-18) — the CHAOS-28 defect class in the other CA.
+4. **Node certs outlived their issuer** (CA-19) — defeating both the DP renewal trigger and the
+   dual-CA overlap's soundness.
+5. **First-install panic and phantom secondary** (CA-20).
+6. **CA-13 as recorded** — rotation failures invisible on `/metrics`, no alert, 24 h to the next
+   attempt.
+
+### 17.3 The decision that mattered: split `Usable()` from `Ready()`, again
+
+The same split CHAOS-28 made for the Root CA, for the same reason: "is a CA loaded" is not "can
+this CA issue something that will verify". Refusing to sign costs no availability that signing
+would have preserved — a cert chained to an expired issuer fails path validation everywhere — so
+the choice is only between one loud countable refusal at the CP and N silent handshake failures
+at N data planes.
+
+### 17.4 The lesson worth keeping (CA-21)
+
+A guaranteed permanent deadlock survived a green suite because all six `ImportCA` tests
+constructed their own `&clusterCA{}`. The re-entrant reads go through `globalClusterCA` — a
+different mutex — so the production path was, in effect, untested. The new gates drive the real
+singleton. Sweeping for other globals with the same test shape is open.
+
+### 17.5 Observability added
+
+`culvert_cluster_ca_rotation_failures_total`, `culvert_cluster_ca_sign_refused_total`,
+`culvert_cluster_ca_usable`, `culvert_cluster_ca_expires_in_seconds` (both gauges omitted on a
+node with no cluster CA); the `cluster_ca_degraded` alert (new event, `HasSubscriber`-gated,
+5-min rate limit, deliberately NOT `cert_expiry` — different CA, different lifecycle);
+`usable`/`usableError`/`daysRemaining`/`rotationFailures`/`signRefusals` on `/api/cluster/ca`;
+and a Cluster CA panel banner that outranks the rotation-failure banner. Recovery is reported on
+EVIDENCE (a rotation that actually installed a CA), never on elapsed time.
+
+### 17.6 What is deliberately left
+
+- **CA-4's retry half** — a failed rotation still waits 24 h, in both CAs. Now alerted from the
+  first failure, so it is a latency problem rather than a visibility one.
+- **No `/healthz` row for the cluster CA** — deliberate: `/healthz` is a restart signal to
+  orchestrators, and restarting a CP whose cluster CA expired does not renew it while dropping
+  config sync for the whole fleet.
+- **No structural defence against a third deadlock** — the Go race detector does not find
+  self-deadlocks and the repo has no lock-ordering check. Convention (`installLocked`'s doc
+  comment) plus singleton-driving tests is what shipped.

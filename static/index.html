@@ -16686,7 +16686,17 @@ async function loadClusterCA() {
     // trust at expiry. Surface the last failure here instead.
     const warnEl = document.getElementById('cca-rotation-warning');
     if (warnEl) {
-      if (r.lastRotationError) {
+      if (r.initialized && r.usable === false) {
+        // CHAOS-50: the CA is outside its OWN validity window, so it can no
+        // longer issue a node certificate any peer will accept. This outranks
+        // the rotation-failure banner because it is the terminal state that
+        // one predicts: enrollment and renewal are already refused.
+        warnEl.style.display = '';
+        warnEl.innerHTML = '<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> <strong>Cluster CA unusable:</strong> ' +
+          escHtml(r.usableError || '') + '. Node enrollment and Data Plane certificate renewal are being refused (' +
+          escHtml(String(r.signRefusals || 0)) + ' refused since boot) rather than issuing certificates that no node could use. ' +
+          'Import a replacement cluster CA below to restore enrollment.';
+      } else if (r.lastRotationError) {
         warnEl.style.display = '';
         warnEl.innerHTML = '<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> Cluster CA auto-rotation failed at ' +
           escHtml(new Date(r.lastRotationErrorAt).toLocaleString()) + ': ' + escHtml(r.lastRotationError) +
@@ -17666,6 +17676,12 @@ function resetBlockPage() {
              replication from the leader is stalled and this node deliberately
              will NOT auto-promote on its own fault (manual promotion available). -->
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="ha_sync_panic"> HA standby sync fault (replication stalled)</label>
+        <!-- CHAOS-50: the cluster CA (the node-enrollment trust root) could not
+             auto-rotate, or refused to sign because it is outside its own
+             validity window. Node enrollment and DP certificate renewal are
+             failing closed. Distinct from "CA certificate expiring", which
+             covers the MITM inspection Root CA. -->
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="cluster_ca_degraded"> Cluster CA degraded (enrollment failing closed)</label>
       </div>
     </div>
     <div class="form-group">

@@ -54,6 +54,7 @@ func caWritePrometheus(w *strings.Builder) {
 	fmt.Fprintf(w, "culvert_cluster_ca_rotations_total %d\n", statClusterCARotations.Load())
 
 	caWriteUsabilityPrometheus(w)
+	clusterCAWritePrometheus(w)
 }
 
 // caWriteUsabilityPrometheus appends the CHAOS-28 Root-CA usability series.
