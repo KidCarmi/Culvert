@@ -19,7 +19,7 @@ import (
 
 func seedFeed() *Feed {
 	tf := New()
-	tf.enabled = true
+	tf.enabled.Store(true)
 	tf.urls = map[string]entry{
 		"http://evil.example/mal.exe":  {Source: "urlhaus"},
 		"http://phish.example/login":   {Source: "openphish"},
@@ -117,7 +117,7 @@ func TestApplySync_CleanSync_FullyReplacesFeedOwnedEntries(t *testing.T) {
 
 func TestApplySync_ClusterSyncEntriesSurviveLocalSync(t *testing.T) {
 	tf := New()
-	tf.enabled = true
+	tf.enabled.Store(true)
 	// DP state: entries imported from the CP snapshot, not from a local fetch.
 	tf.ImportFeedData(
 		map[string]int64{"http://cp-known.example/mal": time.Now().Unix()},
@@ -167,7 +167,7 @@ func TestFetchFeedInto_ZeroEntrySuccessDoesNotReplace(t *testing.T) {
 	defer empty.Close()
 
 	tf := New()
-	tf.enabled = true
+	tf.enabled.Store(true)
 	urls, domains := map[string]entry{}, map[string]entry{}
 	replaced, failure := tf.fetchFeedInto(empty.URL, sourceURLhaus, "URLhaus", urls, domains)
 	if replaced {
@@ -201,7 +201,7 @@ func TestFetchFeedInto_ZeroEntrySuccessDoesNotReplace(t *testing.T) {
 func TestApplySync_MergeHoldsWriteLock_BlocksReaders(t *testing.T) {
 	const n = 100_000
 	tf := New()
-	tf.enabled = true
+	tf.enabled.Store(true)
 	urls := make(map[string]entry, n)
 	domains := make(map[string]entry, n)
 	for i := 0; i < n; i++ {

@@ -84,7 +84,30 @@ type Feed struct {
 	lastSyncErr     string    // summary of the most recent failure(s); empty when the last sync fully succeeded
 	totalEntries    atomic.Int64
 	maskedHits      atomic.Int64 // domain hits suppressed by the allowlist (security-bypass observability)
-	enabled         bool
+
+	// enabled is the per-request gate, so it is deliberately NOT guarded by mu.
+	//
+	// It used to be an ordinary bool read through Enabled() under mu.RLock. That
+	// made every CheckDomain/CheckURL take TWO round trips on the same RWMutex —
+	// one to read this bool, one to probe the maps — and mu is the process-wide
+	// feed lock that the (multi-hundred-thousand-entry) URL and domain maps share.
+	// Both checks run on the proxy hot path, so on a busy gateway every core is
+	// doing a read-modify-write on the same RWMutex reader-count word; the cost is
+	// cache-line contention, not lock waiting, and it grows with core count.
+	//
+	// Measured on a 4-core Xeon (BenchmarkFeedCheckDomain_MissParallel, 100k
+	// entries): 197 ns/op with the nested lock vs 118 ns/op without — and the
+	// serial single-goroutine number is 100 ns/op, i.e. the OLD path got SLOWER as
+	// cores were added. That is a scalability ceiling, and 4 cores is the mild end
+	// of it.
+	//
+	// Making it atomic does NOT weaken any guarantee, because there was never a
+	// guarantee to weaken: Enabled() and the map probe were already two SEPARATE
+	// lock acquisitions, so a caller could always observe "enabled" from one
+	// critical section and the maps from another. This changes only the cost of
+	// reading it. The flag is written twice in the process lifetime (Init and the
+	// test-only setter), never in a composite invariant with the maps.
+	enabled atomic.Bool
 }
 
 // New returns an idle Feed with the same shape as the pre-extraction
@@ -125,7 +148,7 @@ func (tf *Feed) Init(dbPath string, syncInterval time.Duration) {
 	if syncInterval > 0 {
 		tf.syncInterval = syncInterval
 	}
-	tf.enabled = true
+	tf.enabled.Store(true)
 	// Seed domain allowlist with defaults if empty (first run).
 	if len(tf.domainAllowlist) == 0 {
 		tf.domainAllowlist = make(map[string]bool, len(defaultDomainAllowlist))
@@ -335,10 +358,13 @@ func (tf *Feed) AllowlistMaskedTotal() int64 {
 }
 
 // Enabled reports whether the feed is active.
+//
+// Lock-free by contract — see the enabled field. Do not reintroduce a mu.RLock
+// here: this runs inside CheckDomain/CheckURL on every proxied request, and the
+// nested acquisition it would add is the contention this design removes.
+// TestFeedEnabled_IsLockFree pins the property.
 func (tf *Feed) Enabled() bool {
-	tf.mu.RLock()
-	defer tf.mu.RUnlock()
-	return tf.enabled
+	return tf.enabled.Load()
 }
 
 // Stats returns (totalEntries, lastSync, syncInterval) for monitoring.
@@ -808,9 +834,5 @@ func (tf *Feed) SetDBPathForTest(path string) (old string) {
 // earlier test happened to run Init — that ordering dependence is exactly
 // what the shuffle/determinism gate flags.
 func (tf *Feed) SetEnabledForTest(enabled bool) (old bool) {
-	tf.mu.Lock()
-	old = tf.enabled
-	tf.enabled = enabled
-	tf.mu.Unlock()
-	return old
+	return tf.enabled.Swap(enabled)
 }

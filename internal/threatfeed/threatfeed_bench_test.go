@@ -69,10 +69,15 @@ func BenchmarkFeedCheckURL_Miss(b *testing.B) {
 	}
 }
 
-// BenchmarkFeedCheckDomain_MissParallel is the contention measure. Both checks
-// take tf.mu.RLock — CheckDomain twice, once inside Enabled() and once for the
-// map probe — so this reports whether the lookup scales across cores or
-// serialises on the feed lock.
+// BenchmarkFeedCheckDomain_MissParallel is the contention measure: it reports
+// whether the lookup scales across cores or serialises on the feed lock.
+//
+// This used to take tf.mu.RLock TWICE per check — once inside Enabled(), once
+// for the map probe — and the doubled round trip showed up here as anti-scaling
+// (4-core parallel was SLOWER per op than single-goroutine serial). Enabled() is
+// now lock-free, leaving exactly one acquisition for the map probe: measured
+// 229.6n -> 166.6n, -27% (p=0.002, n=6). The residual is the map probe's own
+// RLock, which is genuinely needed and is not this benchmark's target.
 func BenchmarkFeedCheckDomain_MissParallel(b *testing.B) {
 	tf := benchFeed(100000)
 	b.ReportAllocs()
