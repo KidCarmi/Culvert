@@ -462,7 +462,16 @@ func apiSetupComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := cfg.SaveUIUsersFile(); err != nil {
+		// SetAuth already mutated in-memory state, so IsConfigured() is now
+		// true for the rest of this process's lifetime — but the credential
+		// was NOT durably saved. A restart before a later successful save
+		// would revert IsConfigured() to false on load, reopening the
+		// "one-time" setup wizard to any unauthenticated visitor. Fail the
+		// request instead of claiming success so the operator knows to
+		// retry rather than walking away believing setup is complete.
 		logger.Printf("UIUsers: failed to persist: %v", err)
+		http.Error(w, "internal error: admin credentials could not be saved to disk; setup did not complete — check disk space/permissions and retry", http.StatusInternalServerError)
+		return
 	}
 	// Auto-login after setup so the user lands directly in the dashboard.
 	_ = setUISessionCookie(w, r, body.User, RoleAdmin)

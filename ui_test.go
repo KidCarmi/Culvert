@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -290,6 +291,47 @@ func TestAPISetupComplete_UnauthMode(t *testing.T) {
 		"unauth": true,
 	}))
 	assertStatus(t, w, http.StatusOK)
+}
+
+// TestAPISetupComplete_PersistFailure_DoesNotClaimSuccess proves the
+// first-time setup wizard cannot report success to the browser when the
+// admin credential it just created could not be durably saved to disk.
+//
+// cfg.SetAuth only mutates in-memory state; cfg.IsConfigured() reads that
+// same in-memory state, not the file. If SaveUIUsersFile fails (disk full,
+// a misconfigured/read-only data volume — a realistic fresh-install fault)
+// and the handler still replies {"ok":true} + logs the operator in, the
+// operator walks away believing setup is complete. If the process restarts
+// before any later save succeeds, ui_users.json still doesn't exist,
+// IsConfigured() reverts to false on load, and the "one-time" setup wizard
+// reopens to ANY unauthenticated visitor — who can then claim the admin
+// account outright. The fix must fail the request instead.
+func TestAPISetupComplete_PersistFailure_DoesNotClaimSuccess(t *testing.T) {
+	resetSetupLockout()
+	t.Cleanup(resetSetupLockout)
+	snapshotAuthGlobals(t)
+	_ = cfg.SetAuth("", "") // ensure no auth configured
+
+	// Point uiUsersFile at a path whose parent directory does not exist, so
+	// SaveUIUsersFile's fileutil.AtomicWrite (os.CreateTemp in that dir)
+	// fails deterministically — simulating a disk/permission fault during
+	// first-time setup without needing real disk-full/permission tricks.
+	cfg.SetUIUsersFile(filepath.Join(t.TempDir(), "does-not-exist", "ui_users.json"))
+
+	w := httptest.NewRecorder()
+	initSecret(t)
+	apiSetupComplete(w, jsonReq(http.MethodPost, "/api/setup/complete", map[string]any{
+		"user": "admin", "pass": "Sup3rSecret1",
+	}))
+
+	if w.Code == http.StatusOK {
+		t.Fatalf("setup must not report success when the admin credential could not be durably persisted; got 200 body: %s", w.Body.String())
+	}
+	for _, c := range w.Result().Cookies() {
+		if c.Name == uiSessionCookieName {
+			t.Errorf("setup must not auto-login the operator when persistence failed; got session cookie %q", c.Name)
+		}
+	}
 }
 
 // TestAPISetupComplete_ConcurrentRequests_OnlyOneWins proves apiSetupComplete's
