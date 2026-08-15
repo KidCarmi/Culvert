@@ -60,13 +60,23 @@ classes of row exist:
 
 | Check                       | Class           | Behaviour                                                                 |
 |-----------------------------|-----------------|---------------------------------------------------------------------------|
-| `ca`                        | informational   | Present and `ok` once the root CA is initialised; absent otherwise (the proxy still works as a plain forward proxy). |
-| `clamav`                    | gating          | When ClamAV is configured, `fail` if the daemon is unreachable.           |
+| `ca`                        | informational   | `ok` once the root CA is initialised and inside its own validity window; absent when no CA is configured (the proxy still works as a plain forward proxy). `fail` on either of two conditions — the CA failed to load, or it loaded but is outside its validity window (CHAOS-28, e.g. expired). Both give a fixed, non-identifying detail (e.g. `"configured root CA is unavailable — see server logs"`); the CA bundle path and OS error never appear here — this row is unauthenticated on the proxy port, so the full cause stays in the server logs and the `ca_load_failed` alert. |
+| `clamav`                    | gating          | When ClamAV is configured, `fail` if the daemon is unreachable. The detail is a fixed string pointing at Security Scanning status in the admin UI — the AV daemon's address/port is not disclosed on this unauthenticated row. |
 | `geoip`                     | informational   | Present and `ok` when GeoIP is enabled.                                    |
 | `yara`                      | informational   | Present and `ok` when YARA is enabled.                                     |
 | `policy_loaded`             | informational   | `ok` when at least one policy rule has been recorded; `fail` when the ruleset is empty (default-deny is still in effect — fresh installs are expected to start here). |
 | `session_secret`            | gating          | `ok` when the admin session HMAC key is initialised; `fail` triggers `503` because signed admin cookies cannot be issued without it. |
 | `config_snapshot_validator` | gating          | `ok` when `validateConfigSnapshot` accepts the empty baseline (its identity contract); `fail` triggers `503` because the cluster control-plane apply path is unsafe. |
+| `state_file_admin_settings` / `state_file_ui_users` / `state_file_cluster` | informational | Present only when that on-disk state file was found corrupt and quarantined at startup (CHAOS-05/07) — absent on a healthy node. `fail` with a fixed detail (`"state file quarantined; running with a degraded store — see server logs"`); the node keeps serving with an empty roster/cluster store (survivable via env-fallback creds / re-enrollment), so the row never gates readiness. |
+| `cp_poll`                   | informational   | Data-plane nodes only (`audit.DPMode()`). `fail` once polling the control plane has been continuously failing for more than 5 minutes — a single missed poll or a CP rolling restart stays `ok`. Report-only (CHAOS-09): gating the default verdict would let a CP outage eject the whole DP fleet from the load balancer at once. |
+| `node_cert`                 | informational   | Data-plane nodes only. `fail` while the node's mTLS certificate is inside its renewal window (or already expired) and renewal keeps failing; clears on the next successful renewal. |
+| `saas_feed`                 | informational   | Present once the signed SaaS URL-category feed subsystem is initialised. `fail` when the local snapshot is stale/degraded, or (managed DP) waiting for upstream authority or found corrupted/equivocated (F3b-4). Never gates readiness — a valid embedded baseline always exists to serve from. |
+
+Rows marked **informational** above never gate the default verdict, no
+matter their status — they mirror the `ca` row's report-only posture.
+Any failing row (including the informational ones) can be made gating
+per-probe via the opt-in strict verdict, `/ready?strict=1`
+(`strictVerdictFails` in `healthcheck.go`).
 
 The new `policy_loaded` / `session_secret` / `config_snapshot_validator`
 rows are additive — existing fields, status semantics, and the rest of
