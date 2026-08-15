@@ -785,6 +785,13 @@ components:
       type: object
       description: Supportability status (debug level, bundle state, retention).
       additionalProperties: true
+    BackupsStatus:
+      type: object
+      description: >-
+        Backup archive listing read from the CP-local maintenance agent.
+        `available:false` means the agent could not be reached or is not
+        configured; `backups` is newest-first when available.
+      additionalProperties: true
     UpstreamConfig:
       type: object
       required: [enabled, proxies]
@@ -5230,6 +5237,34 @@ paths:
             application/json:
               schema: { type: object, additionalProperties: true }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
+  /api/backups:
+    get:
+      operationId: getBackups
+      tags: [support]
+      summary: Backup archive listing
+      description: >-
+        Read-only listing of the backup archive directory, sourced from the
+        CP-local maintenance agent's GET /v1/backups (the same scan the
+        --list-backups CLI performs). Lets an admin confirm a backup job
+        actually produced a file, its size, and how stale it is, without
+        SSH access to the host.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Backup archive listing.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BackupsStatus' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
 
   /api/support/status:
