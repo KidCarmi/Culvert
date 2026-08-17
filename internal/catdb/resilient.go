@@ -343,16 +343,20 @@ func beginAttempt(dir string) *openAttempt {
 	return &openAttempt{path: final, lock: &heldLock{f: f}}
 }
 
-// end releases and removes this attempt's marker. It touches no other process's
-// marker.
+// end removes this attempt's marker and then releases its lock, in that order.
+// Releasing first would leave a window in which our own still-present marker
+// reads as abandoned to a concurrently booting process. (The store lock would
+// still veto its quarantine, so the window was never destructive — but a
+// primitive that is only safe because a second one catches it is one refactor
+// away from not being safe at all.) It touches no other process's marker.
 func (a *openAttempt) end() {
 	if a == nil {
 		return
 	}
-	a.lock.release()
 	if a.path != "" {
 		_ = os.Remove(a.path)
 	}
+	a.lock.release()
 }
 
 // abandonedMarkers returns the markers of open attempts whose owning process is

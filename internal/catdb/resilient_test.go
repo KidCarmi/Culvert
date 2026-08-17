@@ -677,3 +677,21 @@ func TestQuarantineDir_RefusesWithoutAHeldLock(t *testing.T) {
 		t.Errorf("quarantineDir with a held lock: %v", err)
 	}
 }
+
+// An attempt must never make its OWN marker look abandoned. end() removes the
+// file before releasing the lock; the reverse order leaves a window in which a
+// concurrently booting process samples a marker that is present and unlocked.
+func TestOpenAttempt_EndRemovesTheMarkerBeforeReleasingIt(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "catfeeddb")
+	a := beginAttempt(dir)
+	if a.path == "" {
+		t.Fatal("could not arm a marker")
+	}
+	a.end()
+	if _, err := os.Stat(a.path); err == nil {
+		t.Error("marker still on disk after end()")
+	}
+	if got := abandonedMarkers(dir); len(got) != 0 {
+		t.Errorf("a finished attempt left an abandoned-looking marker: %v", got)
+	}
+}
