@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/KidCarmi/Culvert/internal/audit"
+	"github.com/KidCarmi/Culvert/internal/reqlog"
 	"github.com/KidCarmi/Culvert/internal/session"
 )
 
@@ -1114,6 +1115,96 @@ func TestApiDiagnostics_AuditPersistenceOK(t *testing.T) {
 	found := findAuditPersistenceCheck(t, c)
 	if found.Status != diagOK {
 		t.Errorf("audit_log_persistence status = %q, want ok when persisting", found.Status)
+	}
+}
+
+// findRequestLogPersistenceCheck locates the request_log_persistence row so
+// the three tests below don't each repeat the scan loop.
+func findRequestLogPersistenceCheck(t *testing.T, c OperatorContract) OperatorContractCheck {
+	t.Helper()
+	for i := range c.Checks {
+		if c.Checks[i].Code == "request_log_persistence" {
+			return c.Checks[i]
+		}
+	}
+	t.Fatal("request_log_persistence check missing from report")
+	return OperatorContractCheck{}
+}
+
+// TestApiDiagnostics_RequestLogPersistenceNotConfigured — request_log_file was
+// never set. This is a normal, valid posture (in-memory ring only) and must
+// report ok, not warn/fail.
+func TestApiDiagnostics_RequestLogPersistenceNotConfigured(t *testing.T) {
+	prev := requestLogConfiguredPath
+	requestLogConfiguredPath = ""
+	t.Cleanup(func() { requestLogConfiguredPath = prev })
+
+	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+	w := httptest.NewRecorder()
+	apiDiagnostics(w, r)
+
+	c := decodeContract(t, w)
+	found := findRequestLogPersistenceCheck(t, c)
+	if found.Status != diagOK {
+		t.Errorf("request_log_persistence status = %q, want ok when not configured", found.Status)
+	}
+}
+
+// TestApiDiagnostics_RequestLogPersistenceFail — request_log_file was
+// configured but initRequestLog never succeeded (bad path/permissions), so
+// reqlog.PersistActive() is false. This is the silent-fallback scenario: the
+// traffic log has degraded to the volatile in-memory ring, so it must
+// surface as fail.
+func TestApiDiagnostics_RequestLogPersistenceFail(t *testing.T) {
+	reqlog.ResetForTest()
+	t.Cleanup(reqlog.ResetForTest)
+	prev := requestLogConfiguredPath
+	requestLogConfiguredPath = "/data/request.log"
+	t.Cleanup(func() { requestLogConfiguredPath = prev })
+
+	if reqlog.PersistActive() {
+		t.Fatal("test setup: PersistActive() = true, want false after ResetForTest")
+	}
+
+	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+	w := httptest.NewRecorder()
+	apiDiagnostics(w, r)
+
+	c := decodeContract(t, w)
+	found := findRequestLogPersistenceCheck(t, c)
+	if found.Status != diagFail {
+		t.Errorf("request_log_persistence status = %q, want fail when configured-but-inactive", found.Status)
+	}
+	if found.OperatorAction == "" {
+		t.Error("request_log_persistence fail must include operator_action")
+	}
+}
+
+// TestApiDiagnostics_RequestLogPersistenceOK — request_log_file configured
+// and reqlog.Init succeeded against a real file, matching the production
+// success path in loadObservability.
+func TestApiDiagnostics_RequestLogPersistenceOK(t *testing.T) {
+	reqlog.ResetForTest()
+	t.Cleanup(func() {
+		_ = reqlog.Close()
+		reqlog.ResetForTest()
+	})
+	path := filepath.Join(t.TempDir(), "request.log")
+	if err := reqlog.Init(path, 10); err != nil {
+		t.Fatalf("reqlog.Init: %v", err)
+	}
+	prev := requestLogConfiguredPath
+	requestLogConfiguredPath = path
+	t.Cleanup(func() { requestLogConfiguredPath = prev })
+
+	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+	w := httptest.NewRecorder()
+	apiDiagnostics(w, r)
+
+	c := decodeContract(t, w)
+	found := findRequestLogPersistenceCheck(t, c)
+	if found.Status != diagOK {
+		t.Errorf("request_log_persistence status = %q, want ok when persisting", found.Status)
 	}
 }
 
