@@ -17,6 +17,43 @@ everything else is triaged below with a suggested PR and required tests for foll
 
 ## 0. Revision log
 
+**2026-08-17 — CHAOS-50 sweep (the boot path under a damaged data volume).**
+
+CHAOS-05/07 settled this question and wrote the answer into `state_corruption.go`
+— "refusing to boot could take down a fleet on a single bad sector" — then applied
+it to two JSON files and stopped. Row **ST-12** recorded the leftover as a
+low-severity doc/behaviour mismatch in `internal/catdb`; it is neither low nor a
+doc mismatch. The Layer-2 community category store is the ONLY store on the boot
+path that holds no authoritative state (it is a cache of a downloadable feed the
+syncer refills automatically) and it was the ONLY one that called `logFatalf` —
+so the appliance refused to boot over the one store whose loss costs nothing while
+continuing to boot over the admin roster and the revocation list. It is default-ON
+in the shipped `docker-compose.yml` (`-cat-feed-db /data/catfeeddb`) on a service
+with `restart: unless-stopped`, so a torn MANIFEST after one `docker kill` was an
+unattended crash-loop with no proxy, no admin UI, and no health endpoint —
+recoverable only by someone with shell access who knew which directory to delete.
+Then the domain turned out to be worse than any of that: a corrupt `.sst` does not
+make `badger.Open` return an error, it makes it **PANIC from a goroutine badger
+itself spawns** (`created by … newLevelsController`), so `recover()` at the call
+site never fires — proven live in a child process, and the obvious fix (return the
+error instead of exiting) would have left the worst instance untouched. ST-12's
+recorded remedy is also unavailable: badger v4 REMOVED `Options.Truncate`, and the
+doc comment promising crash-truncation was false. Fixed by `catdb.OpenResilient`:
+a marker armed around every open attempt turns "a previous process died inside
+badger.Open" into a signal the next boot can act on, the directory is quarantined
+(never deleted, `.corrupt.<unixnano>`, bounded at one copy) BEFORE badger touches
+it, and every quarantine is gated on a non-blocking `flock` of the directory —
+badger's own lock — so a concurrent boot can never rename a live store out from
+under its owner. Returned errors are classified against an environmental deny-list
+FIRST and a corruption allow-list second, with anything unrecognised degrading:
+the fail-safe default is to leave the disk alone. Note for future work in this
+area: NONE of these faults are reachable through `errors.Is` — badger wraps them
+with `y.Wrapf`, which implements no `Unwrap` — so the empirical fault → message
+table is itself a test. Visibility rides existing vocabulary (the `state_file_corrupt`
+alert, a new `category_feed_db` diagnostics row, `culvert_catfeeddb_*`), and is
+deliberately NOT wired into `/readyz`: Layer-1-only categorisation is a fully
+serving node. See §17 and `docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-17.md`.
+
 **2026-08-11 — CHAOS-49 sweep (the multi-IdP registry auth path under IdP failure).**
 
 CHAOS-47 gave the LEGACY identity backends a three-part contract (an infrastructure failure is
@@ -218,10 +255,10 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | ST-6 | **`ui_users.json`: non-atomic write (no fsync) + fail-open-to-empty roster on corruption.** Power loss mid-save loses the entire admin roster + TOTP secrets + `default_auth_outcome`; loader starts empty with no quarantine → potential admin lockout. | GAP → **CLOSED** (`fileutil.AtomicWrite`, `store.go:887`) | H | `store.go:759-763,691-693`, `auth_startup.go:39-40` |
 | ST-7 | Persistent request-log JSONL write is **synchronous + globally serialized** under one mutex on the hot path → slow disk collapses proxy throughput (head-of-line). Disk-*full* is handled (counted, once-logged). | GAP → **CLOSED** (async bounded queue + single drainer, `internal/reqlog/persist.go`) | M | `internal/reqlog/reqlog.go:154-167`, `internal/fileutil/rotating.go:40-61` |
 | ST-8 | Audit write **silently drops on I/O failure** (`//nolint:errcheck`, no counter) — compliance "who changed what" vanishes on full/RO disk; `GetPersistent` re-reads the whole file per query. | GAP → **CLOSED (silent-loss half)** — every lost entry counted (`audit.WriteErrors()`), first failure logged, wired into the storage-health plane (degraded contract row + `storage_write_failed` alert), surfaced on `/api/stats`, `/metrics`, `/healthz` and the dashboard. Residual: persistence stays best-effort (an admin change still succeeds over a failing disk) and the `GetPersistent` full-file re-read is untouched — see §13 | M/H | `internal/audit/audit.go` (`countWriteError`, `SetWriteFailureObserver`), `storage_health.go` init |
-| ST-9 | Startup `logger.Fatalf` on blocklist/URL-category read errors (any non-`IsNotExist`) → **crash-loop** on permission/EIO faults. | GAP | M | `blocklist_startup.go:48-60`, `urlcategories_startup.go:22,46` |
+| ST-9 | Startup `logger.Fatalf` on blocklist/URL-category read errors (any non-`IsNotExist`) → **crash-loop** on permission/EIO faults. | GAP → **PARTLY CLOSED** (CHAOS-50 closed the Layer-2 community-store half — the one load with no defensible reason to be fatal. The three remaining fatal loads — `catStore.Load`, the blocklist, the policy file — are a POSTURE decision recorded as R-F in §17: `ui_users.json` and `cluster.json` quarantine-and-continue on a corrupt file while `categories.json`, their closest analogue, exits) | M | `blocklist_startup.go:59`, `main.go:724`, `urlcategories_startup.go` (catStore.Load); Layer-2 half now `loadCommunityFeedDB` — see §17 |
 | ST-10 | Backup is not a consistent cross-file snapshot (inputs read at different instants); residual non-atomic writers (`cdrpolicy.go:195`, `internal/scanexcl/scanexcl.go:93`, `update_cluster.go:193`). | GAP | L/M | backup pack loop `backup.go:~280`; flagged by `cluster_persistence_atomic_test.go:8` |
 | ST-11 | RotatingFile keeps one archive; reopen failure after rename leaves logging wedged until restart (bounded-growth design otherwise correct). | ✓ (edge) | L | `internal/fileutil/rotating.go:44-56` |
-| ST-12 | catdb corruption-recovery comment claims Badger truncate-on-corruption but `Open` sets no such option; a corrupt community DB is fatal via ST-9 coupling. | GAP (doc/behavior) | L | `internal/catdb/catdb.go:35-50`, `urlcategories_startup.go:46` |
+| ST-12 | catdb corruption-recovery comment claims Badger truncate-on-corruption but `Open` sets no such option; a corrupt community DB is fatal via ST-9 coupling. **Re-scoped by CHAOS-50 and far worse than recorded:** the option does not exist to add (badger v4 REMOVED `Options.Truncate`), the store was default-ON in the shipped compose file behind `restart: unless-stopped` (⇒ unattended crash-loop, no admin UI to recover from), and the worst fault does not return an error at all — a corrupt `.sst` PANICS from a badger-spawned goroutine, so no caller-side `recover()` can contain it. | GAP (doc/behavior) → **CLOSED** (CHAOS-50: `catdb.OpenResilient` — poison marker + flock-gated quarantine + deny-list-first classifier; degrade, never exit) | L → **H** | was: `internal/catdb/catdb.go` `Open`; now `internal/catdb/resilient.go`, `loadCommunityFeedDB` — see §17 |
 
 ### 2.5 Authentication / Identity / Sessions
 
@@ -251,7 +288,7 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | WK-4 | GeoIP DB missing/corrupt: reader stays nil, feature degrades to "no country data" — safe, but **no staleness/health signal** (MMDBs expire silently). | GAP (obs) | M | `internal/geoip/geoip.go:23-36,71` |
 | WK-5 | **Threat-feed timeout → stale-erase.** On partial failure `Sync` unconditionally replaces the maps with only what succeeded, discarding prior good entries; stamps `lastSync=now` even on failure; no backoff, no staleness alert → coverage silently shrinks for up to 6h. | GAP → **CLOSED** (per-source `replacedSources` replacement, `threatfeed.go` `applySync`) | H | `internal/threatfeed/threatfeed.go:150-183` |
 | WK-6 | UT1 category feed failures counted but **never alerted**; fixed 24h retry, no backoff. Stale-serve is safe (last-good BadgerDB). | GAP (obs) | M | `internal/feedsync/feedsync.go:192-213,176` |
-| WK-7 | Category DB (Badger) corruption: read errors → "not found" (fail-open for category-block, no crash); value-log truncate/replay on restart. | ✓ | — | `internal/catdb/catdb.go:37-50,84-100` |
+| WK-7 | Category DB (Badger) corruption: read errors → "not found" (fail-open for category-block, no crash); value-log truncate/replay on restart. **The RUNTIME half is correct and unchanged; the claim about restart was not** — see ST-12/§17: a value log is indeed tolerated, but a torn MANIFEST used to be fatal at boot and a corrupt table panics uncatchably. | ✓ runtime / GAP boot → **boot half CLOSED** (CHAOS-50) | — | `internal/catdb/catdb.go` `Lookup`/`getExact`; boot path `internal/catdb/resilient.go` |
 | WK-8 | **Background workers have NO panic recovery.** `threatfeed.Start`, `feedsync.Start`, blocklistfeed scheduler, `startCDRHealthPoller`, `startAlertRetryLoop` all run their loop body with no `recover()`. One panic (bad feed line, nil-map deref, a `.(time.Time)` assertion) **terminates the whole in-line proxy.** | GAP → **CLOSED (CHAOS-24)** | **C** | was: `threatfeed.go:131-145`, `feedsync.go:171-187`, `cdr_health.go:65-80`, `alerts.go:46`→`store.go:511`. Now guarded per ROUND — see §12 |
 | WK-9 | Syslog on the hot path: `writeMsg` holds `s.mu` and does a **blocking 5s dial** while locked; TCP writes have **no write deadline** → a slow SIEM can stall proxy goroutines. UDP is non-blocking (acceptable). | GAP → **CLOSED** (async drain goroutine owns the socket, `internal/syslog`) | M | `internal/syslog/syslog.go:117-146,68` |
 | WK-10 | Webhook alert delivery: never blocks the producer, 30s dedup, bounded semaphore (10) → enqueue not spawn, bounded retry (3× exp backoff), 500-cap queue drop-on-full, SSRF-guarded, atomic persist. | ✓ **for delivery**; the two bounds MISSING in front of delivery are CHAOS-27 → **CLOSED** (§15) | — | `internal/alerts/store.go` |
@@ -1132,3 +1169,149 @@ reason: a still-expired CA looks exactly like a healthy one if nothing happens t
   inspect; it cannot make clients trust a new root. Nothing in-band can. That is why this
   change invests most heavily in making the condition visible *before* the cliff
   (`culvert_ca_expires_in_seconds`) rather than only at it.
+
+---
+
+## 17. CHAOS-50 — The boot path under a damaged data volume
+
+**Date:** 2026-08-17 · **Register rows touched:** ST-12 (re-scoped L → H, CLOSED),
+ST-9 (partly closed), WK-7 (boot half closed) ·
+**Full write-up:** `docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-17.md` ·
+**Runbook:** `docs/operator/category-store-recovery.md`
+
+### 17.1 The asymmetry
+
+CHAOS-05/07 already decided what a corrupt state file does at boot, and recorded
+the reasoning in `state_corruption.go`: quarantine the evidence, keep booting,
+because *"refusing to boot could take down a fleet on a single bad sector."* It
+was applied to `ui_users.json` and `cluster.json` and nowhere else.
+
+| | `ui_users.json` | `cluster.json` | community category store |
+|---|---|---|---|
+| Holds | admin accounts, TOTP secrets | node roster, revoked certs | **a cache of a downloadable feed** |
+| Authoritative | yes | yes | **no** |
+| Corrupt at boot | quarantine + continue | quarantine + continue | **`logFatalf` → exit(1)** |
+
+The appliance refused to boot over the one store whose loss costs nothing, and
+kept booting over the two that hold real state. `docker-compose.yml:152` sets
+`-cat-feed-db /data/catfeeddb` and the same service sets
+`restart: unless-stopped`, so this is the DEFAULT deployment and the fatal is an
+unattended crash-loop: no proxy, no admin UI, no health endpoint, and no path
+back through any interface the product ships.
+
+### 17.2 The fault the obvious fix does not reach
+
+A corrupt `.sst` does not make `badger.Open` return an error. It panics, from a
+goroutine badger itself spawns:
+
+```
+panic: runtime error: slice bounds out of range [-2779063644:] [recovered]
+	…
+created by github.com/dgraph-io/badger/v4.newLevelsController in goroutine 21
+```
+
+`recover()` at the call site is on a different goroutine and never fires —
+proven live in a child process whose `defer recover()` wraps the open and which
+still dies with exit status 2 having printed nothing. Changing `logFatalf` to
+`return err` would have closed the *recorded* gap and left the worst instance of
+it untouched. **The store had to stop being handed to badger at all.**
+
+ST-12's recorded remedy is also gone: badger v4 REMOVED `Options.Truncate`. The
+doc comment on `catdb.Open` promising crash-truncation was simply false, and it
+is why the row sat at severity L for six weeks.
+
+### 17.3 The empirical table (badger v4.9.6, the options `catdb.Open` uses)
+
+| Injected fault | Result |
+|---|---|
+| `MANIFEST` scrambled | error — `Manifest file might be corrupted` |
+| `MANIFEST` truncated / emptied | error — `manifest has bad magic` |
+| **`.sst` scrambled** | **PANIC, uncatchable, exit 2** |
+| `.sst` deleted | error — `file does not exist for table 1` |
+| `KEYREGISTRY` scrambled | error — `Encryption key mismatch` |
+| value log scrambled | opens cleanly (badger tolerates it) |
+| dir lock held | error — `Another process is using this Badger database` |
+| path is a regular file | error — `… not a directory` |
+
+**None of these are reachable through `errors.Is`.** badger wraps them with
+`y.Wrapf`, which implements no `Unwrap`, so `errors.Is` against
+`ErrTruncateNeeded` / `y.ErrChecksumMismatch` / `ErrEncryptionKeyMismatch`
+returns false for the faults that produce exactly those conditions. Message
+matching is the only mechanism available — which is why the table is itself a
+test (`TestClassifyOpenError_EmpiricalBadgerMessages`) and why it is never
+allowed to authorise a rename on its own.
+
+### 17.4 The fix — `catdb.OpenResilient`
+
+1. **A poison marker** (`<dir>.opening`, fsynced, a SIBLING so a quarantine
+   cannot carry it away) is armed around every open attempt and cleared however
+   the attempt returns. A marker found at startup means exactly one thing: a
+   previous process entered `badger.Open` and never came back out. That is the
+   only signal available for the panic, and it also covers SIGKILL/OOM.
+2. **Quarantine before badger, not after.** On a marker the directory is moved
+   aside (`.corrupt.<unixnano>`, the CHAOS-05/07 convention, **never deleted**,
+   pruned to one copy) before badger is touched.
+3. **Every quarantine is flock-gated.** A non-blocking exclusive `flock` of the
+   DIRECTORY — badger's own lock, `badger/dir_unix.go` — is probed first, so a
+   concurrent boot still inside its own open vetoes the rename. Pinned by
+   `TestOpenResilient_NeverQuarantinesAStoreAnotherProcessHolds`, which asserts
+   the holder's data survives.
+4. **Returned errors: deny-list first.** Environmental faults (lock held, not a
+   directory, EACCES, EROFS, ENOSPC, EMFILE, EIO) are matched BEFORE the
+   corruption allow-list, and anything unrecognised degrades. A rename fixes
+   none of them and on the lock case is destructive. Fail-safe default: leave
+   the disk alone.
+5. **Never fatal.** `loadCommunityFeedDB` degrades to `communityDB = nil`, which
+   every consumer already nil-guards (`policy.go:1592,1621`, `ui_policy.go:947`,
+   `main_shutdown.go:259`) — byte-identical to running without `-cat-feed-db`.
+
+Automatic re-creation is safe **only because this store holds no authoritative
+state**: `feedsync.Start` performs an immediate sync when it finds the store
+empty (`internal/feedsync/feedsync.go:177`), so recovery costs one feed sync.
+The same mechanism on a store with authoritative content would be data
+destruction — which is why the quarantine moves aside rather than deletes, and
+why it is deliberately NOT extended to `internal/logstore` here.
+
+### 17.5 Visibility
+
+No new flag, YAML key, env var, or API field — the GUI-parity rule is satisfied
+by surfaces that already exist:
+
+| Surface | Signal |
+|---|---|
+| `/api/diagnostics` | new `category_feed_db` row — `ok` when unconfigured or clean; `warn` for recovered / unreconciled evidence / unavailable; **never `fail`** |
+| `/metrics` | `culvert_catfeeddb_available`, `_recovered`, `_quarantined_copies` |
+| Alerts | **reuses** `state_file_corrupt` — the event already means "corrupt state quarantined at startup" and the operator action is identical (the CHAOS-49 lesson: do not invent a second dialect) |
+| Logs | quarantine detail via `sanitizeLog` + `%q`; degrade line names Layer-1-only |
+
+**Deliberately not on `/readyz`.** A node on Layer-1-only categorisation is
+fully able to serve — the posture of any node without `-cat-feed-db`. Failing
+readiness would pull a healthy gateway out of rotation over a degraded cache,
+which is this review's own mistake committed one layer up. The diagnostics row
+also carries no raw path or badger error (the CHAOS-28 viewer-role guardrail),
+pinned by `TestCheckCategoryFeedDB_RowCarriesNoRawCause`.
+
+### 17.6 What is deliberately left
+
+- **R-E — `internal/logstore` has the same uncatchable panic.** `OpenTTL`
+  (`internal/logstore/logstore.go:298`) calls `badger.Open` with the same options
+  and version. Bounded by being opt-in and already non-fatal on ERROR; made worse
+  by being reachable from the **admin API** (`enableLogStore` via the GUI toggle
+  and `LoadAdminSettings`), so an admin can kill the gateway by turning history
+  on. Not fixed here because its content is request history with retention
+  semantics: quarantining it silently is an evidence decision, not a cache
+  decision. **Next sweep candidate.**
+- **R-F — three fatal boot loads remain with no declared principle.**
+  `catStore.Load`, `blocklist_startup.go:59`, `main.go:724`. `categories.json` is
+  the closest analogue to the two files CHAOS-05/07 chose to quarantine, and it
+  exits instead. Whether "policy-load-bearing" justifies refuse-to-boot rather
+  than boot-and-deny is an owner call, not a patch.
+- **Panic recovery costs one restart.** The marker cannot act until the boot
+  after the crash. Zero-crash recovery means probing the store in a child process
+  first — better, and a reasonable follow-up, but larger than the fault warrants.
+- **A spurious quarantine is possible** when a kill lands inside `badger.Open`
+  for an unrelated reason: one feed re-sync, one bounded directory, both
+  reported. Accepted, and preferable to a default that never recovers.
+- **No circuit breaker on repeated quarantines.** A dying disk will re-download
+  the feed on every boot; `culvert_catfeeddb_quarantined_copies` and the
+  diagnostics row are the operator's signal, but nothing in the process gives up.

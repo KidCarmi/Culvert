@@ -11,11 +11,19 @@ import "github.com/KidCarmi/Culvert/internal/catdb"
 type CommunityDB = catdb.CommunityDB
 
 // communityDB is the process-wide community category store.
-// Nil when disabled (no --cat-feed-db flag supplied).
+//
+// Nil when disabled (no --cat-feed-db flag supplied) AND — since CHAOS-50 —
+// when the store could not be opened at startup. Every consumer must keep its
+// nil guard: a degraded Layer 2 is a supported runtime state, not a bug.
 var communityDB *CommunityDB
 
 // openCommunityDB is re-exposed unqualified (the package constructor is
 // catdb.Open, renamed from openCommunityDB for idiomatic catdb.Open usage).
+//
+// NOT the boot path. `loadCommunityFeedDB` calls catdb.OpenResilient, which
+// detects and quarantines a store a previous process died inside of — a plain
+// Open on a corrupt table panics uncatchably (CHAOS-50). This shim survives for
+// tests and callers that already know the directory is sound.
 func openCommunityDB(dir string) (*CommunityDB, error) {
 	return catdb.Open(dir)
 }

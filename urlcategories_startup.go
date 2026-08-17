@@ -9,10 +9,12 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/KidCarmi/Culvert/internal/catdb"
 	"github.com/KidCarmi/Culvert/internal/feedsync"
 )
 
@@ -71,16 +73,89 @@ func loadURLCategories(cfg urlCategoriesStartupConfig, ctx context.Context) *Fee
 		logger.Printf("CatFeedDB: disabled (set --cat-feed-db for community feed)")
 		return nil
 	}
-	var dbErr error
-	communityDB, dbErr = openCommunityDB(cfg.FeedDBPath)
-	if dbErr != nil {
-		logFatalf("CatFeedDB → cannot open BadgerDB at %s: %v", cfg.FeedDBPath, dbErr)
+	return loadCommunityFeedDB(cfg, ctx)
+}
+
+// loadCommunityFeedDB opens the Layer-2 community store and starts its syncer.
+//
+// CHAOS-50 — this used to be `logFatalf`. A damaged store directory (torn
+// MANIFEST after an unclean container kill, a corrupt table, a missing volume)
+// stopped the whole gateway from booting, permanently, over a store that holds
+// no authoritative state: Layer 2 is a cache of a downloadable feed, Layer 1
+// (catStore) is the admin-managed source of truth, and every consumer of
+// `communityDB` is already nil-tolerant, so a nil store is byte-identical to
+// running without `-cat-feed-db`. `-cat-feed-db /data/catfeeddb` is set by the
+// shipped docker-compose.yml, whose `restart: unless-stopped` turned the fatal
+// into an unattended crash-loop with no admin UI to recover from.
+//
+// The posture is now the one CHAOS-05/07 already established for corrupt state
+// on the boot path: quarantine the evidence, keep booting, make it visible.
+// OpenResilient additionally survives the case badger will not let a caller
+// catch — a corrupt `.sst` panics out of a goroutine badger spawns — by
+// refusing to hand it a directory a previous process died inside of.
+func loadCommunityFeedDB(cfg urlCategoriesStartupConfig, ctx context.Context) *FeedSyncer {
+	health := catFeedDBHealth{Configured: true, Path: cfg.FeedDBPath}
+
+	db, rec, dbErr := catdb.OpenResilient(cfg.FeedDBPath)
+	health.ResidualCopies = len(rec.ResidualQuarantines)
+	if rec.Trigger != catdb.TriggerNone {
+		reportCatFeedDBRecovery(cfg.FeedDBPath, rec)
+		health.Recovered = rec.Quarantined
+		if rec.Quarantined {
+			health.Quarantines = 1
+		}
 	}
+
+	if dbErr != nil {
+		// Degrade, never exit. The detail carries the cause for the log and the
+		// alert; the viewer-role diagnostics row carries only the impact.
+		health.Available = false
+		health.Detail = dbErr.Error()
+		noteCatFeedDBState(health)
+		logger.Printf("CatFeedDB: cannot open the community store at %s: %v — continuing with admin-managed categories only (Layer 1)",
+			cfg.FeedDBPath, dbErr)
+		deferStartupAlert("state_file_corrupt", AlertPayload{
+			Source: "storage",
+			Detail: fmt.Sprintf("community category store at %s could not be opened (%v) — the node is running with admin-managed categories only; category rules that depend on the community feed will not match", cfg.FeedDBPath, dbErr),
+		})
+		return nil
+	}
+
+	communityDB = db
+	health.Available = true
+	noteCatFeedDBState(health)
+
 	syncer := newFeedSyncer(communityDB, cfg.FeedURL, cfg.FeedSyncInterval)
 	globalUT1FeedSyncer = syncer // UC-6: expose Stats() to /metrics
 	syncer.Start(ctx)
 	logger.Printf("CatFeedDB: BadgerDB at %s, sync every %s", cfg.FeedDBPath, cfg.FeedSyncInterval)
 	return syncer
+}
+
+// reportCatFeedDBRecovery logs a recovery attempt and, when it actually moved a
+// damaged store aside, alerts on it.
+//
+// The alert reuses the CHAOS-05/07 `state_file_corrupt` event rather than
+// inventing a second name: the operator action is precisely the one that event
+// already means — corrupt state was quarantined at startup and there is evidence
+// on disk to reconcile.
+//
+// A SKIPPED quarantine is log-only. The commonest reason to skip is a live lock
+// holder, i.e. a concurrent boot, where alerting would page somebody about a
+// benign race; and every skip that matters is followed by a failed open, whose
+// own alert carries the impact. Alert on evidence or on impact, never on a
+// suspicion that resolved itself.
+func reportCatFeedDBRecovery(path string, rec catdb.Recovery) {
+	if !rec.Quarantined {
+		logger.Printf("CatFeedDB: %q", sanitizeLog(fmt.Sprintf(
+			"community category store at %s looks damaged (%s: %s) but was NOT quarantined (%s)",
+			path, rec.Trigger, rec.Cause, rec.Skipped)))
+		return
+	}
+	detail := fmt.Sprintf("community category store at %s was damaged (%s: %s) — quarantined to %s and re-created empty; the feed re-syncs automatically. Delete the quarantined copy once reconciled to reclaim disk",
+		path, rec.Trigger, rec.Cause, rec.QuarantinePath)
+	logger.Printf("CatFeedDB: %q", sanitizeLog(detail))
+	deferStartupAlert("state_file_corrupt", AlertPayload{Source: "storage", Detail: detail})
 }
 
 // seedUT1CategoryNames seeds empty catStore entries for all UT1 mapped

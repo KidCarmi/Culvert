@@ -159,6 +159,7 @@ func buildOperatorContract() OperatorContract {
 		checkConfigRollbackValidation(cv),
 		checkKeyAtRest(),
 		checkAuditPersistence(),
+		checkCategoryFeedDB(),
 		checkIdentityBackend(),
 		checkSyslogFeed(),
 		checkMemoryBackstop(),
