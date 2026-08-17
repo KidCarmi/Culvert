@@ -1547,7 +1547,14 @@ setup_at_rest_encryption() {
     # for a different trigger. Persist it now (same $-interpolation safety
     # guard as the reuse-for-CA branch below) so it actually survives.
     if [[ -n "${CULVERT_CA_PASSPHRASE:-}" ]] && ! grep -Eq '^CULVERT_CA_PASSPHRASE=.+' "$envfile" 2>/dev/null; then
-      if ! printf '%s' "$CULVERT_CA_PASSPHRASE" | LC_ALL=C grep -q '[^A-Za-z0-9._@%^!*()+=:,-]'; then
+      # `-z`/--null-data makes grep match the WHOLE value as one record
+      # (instead of splitting on newlines and checking each line against the
+      # charset separately) — without it, a value containing an embedded
+      # newline whose individual lines each happen to be charset-clean (e.g.
+      # a secret-manager value with a stray "\n") would pass this check, then
+      # env_put would append it as a SECOND, malformed .env line, silently
+      # corrupting the persisted passphrase (Codex review, PR #1156).
+      if ! printf '%s' "$CULVERT_CA_PASSPHRASE" | LC_ALL=C grep -qz '[^A-Za-z0-9._@%^!*()+=:,-]'; then
         env_put CULVERT_CA_PASSPHRASE "$CULVERT_CA_PASSPHRASE" "$envfile"
       else
         warn "CULVERT_CA_PASSPHRASE is set in the environment but contains characters unsafe to persist"
