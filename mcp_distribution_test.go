@@ -56,11 +56,17 @@ func mcpTestGWEnv(t *testing.T, s cpdp.Signer) *cpdp.Envelope {
 func TestMCP_SWGByteCompatWhenDisabled(t *testing.T) {
 	// No Skip guard: this invariant must hold unconditionally. It previously skipped
 	// whenever `enabled` was set, and since the DP composition sets that flag, any
-	// earlier test that composed a DP silently disarmed this gate under -shuffle=on.
-	// The CP capture path is now armed only by a real CP publication, so the disabled
-	// default is directly assertable.
+	// earlier test that composed a DP silently disarmed this gate under -shuffle=on —
+	// a skipped test reports green.
+	//
+	// Isolate the process-wide seam instead of guarding on it, so the assertion is
+	// hermetic under -shuffle/-count=2 rather than order-dependent. (Publishing tests
+	// happen not to arm the seam today only because the test binary has no enrolled
+	// nodes, so the coordinator never reaches setCPPublished — an incidental reason
+	// this gate must not depend on.)
+	mcpResetGlobals(t)
 	if globalMCPDistribution.cpEnabled.Load() {
-		t.Fatal("CP publication armed without a publication: the disabled default is broken")
+		t.Fatal("a freshly composed seam must not report the CP publication path armed")
 	}
 	snap := ConfigSnapshot{Version: 1}
 	snap.MCPGatewaySnapshot = mcpCapturedGateway()
