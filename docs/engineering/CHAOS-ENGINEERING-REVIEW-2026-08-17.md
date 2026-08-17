@@ -10,9 +10,11 @@ comment claims Badger truncate-on-corruption but `Open` sets no such option; a
 corrupt community DB is fatal via ST-9 coupling") · **ST-9** (fatal startup
 loads) · adds **CHAOS-50** and two previously unrecorded defects, one of which
 is not recoverable by any caller-side error handling.
-**Verdict:** four confirmed defects, all reproduced against `main` before a line
-of the fix was written. Three fixed; the fourth is a posture decision recorded
-for the owner.
+**Verdict:** four confirmed defects on `main`, all reproduced before a line of
+the fix was written, plus three found in review *of the fix* (FS-5/6/7) and
+recorded here because they are the same class — a protection that does not hold
+under the conditions it exists for. All seven fixed; two further items are
+posture decisions recorded for the owner.
 
 ---
 
@@ -90,6 +92,23 @@ reader that a failure mode is handled when it is not.
 | FS-2 | A corrupt `.sst` **panics out of a badger-spawned goroutine** | Uncatchable crash | No caller-side error handling can contain it; the only defence is not to open the directory |
 | FS-3 | `catdb.Open`'s comment claims crash-truncation that badger v4 removed | False resilience claim | ST-12 recorded the option as missing; the option no longer exists to add |
 | FS-4 | A degraded Layer-2 store is **invisible** — no metric, no diagnostics row, no alert | Silent failure | Nothing existed, because the store could never *be* degraded: it was fatal |
+
+Three further defects were found in review **of the fix**, and are recorded here
+rather than quietly patched because they are the same class the review is about
+— a protection that does not hold under the conditions it exists for:
+
+| # | Failure mode | Class | Why the first cut did not cover it |
+|---|---|---|---|
+| FS-5 | The store lock was **probed and released before the rename**, not held across it | TOCTOU / data loss | `rename(2)` does not consult flocks, so the gap let another process take badger's directory lock, start its own open, and have its live store renamed underneath it |
+| FS-6 | A **single shared marker path** could not survive concurrency | Recovery failure | With A inside `Open`, B correctly skipped the quarantine and then *removed A's breadcrumb*; if A then panicked, nothing survived and the next boot walked into the corrupt store again — the crash loop persisting through the mechanism meant to break it |
+| FS-7 | The recovery was **reported before the outcome was known** | Contradictory operator signal | A quarantine that succeeded followed by a replacement that would not open queued "re-created empty, the feed re-syncs automatically" and then contradicted it with "could not be opened" |
+
+FS-5 and FS-6 are the reason the marker is now **per-attempt and flock-owned**
+rather than a single path, and the reason the store lock is a *required
+argument* to the rename rather than a comment above it: a marker is treated as
+poison only when its flock can be taken, which the kernel permits only once its
+owner is gone, so a live opener's breadcrumb is never touched and a skipped
+quarantine leaves the condition visible for the next boot.
 
 FS-1 and FS-2 compose into the worst shape in the register's §1 taxonomy — a
 fault in an optional, non-authoritative component that takes down the whole
@@ -306,8 +325,8 @@ process died, which the marker cannot tell us — and the alternative default
 ## Suggested Improvements (ranked, and what this PR does)
 
 1. **Stop exiting over a cache** — done (FS-1).
-2. **Detect the fault badger will not report** — done (FS-2), via a marker armed
-   around every open attempt.
+2. **Detect the fault badger will not report** — done (FS-2), via a per-attempt,
+   flock-owned marker armed around every open attempt.
 3. **Make the degraded state visible** — done (FS-4).
 4. **Fix the comment that misdirected the register** — done (FS-3).
 5. **Extend the marker to `internal/logstore`** — *not* done. Same badger call,
@@ -322,8 +341,8 @@ process died, which the marker cannot tell us — and the alternative default
 ## Suggested PR (this PR)
 
 ```
-internal/catdb/resilient.go        OpenResilient + poison marker + classifier + quarantine
-internal/catdb/dirlock_unix.go     flock probe (mirrors badger/dir_unix.go)
+internal/catdb/resilient.go        OpenResilient + poison markers + classifier + quarantine
+internal/catdb/dirlock_unix.go     flock primitive (mirrors badger/dir_unix.go)
 internal/catdb/dirlock_other.go    fail-safe stub for non-unix builds
 internal/catdb/catdb.go            corrected Open doc (FS-3)
 urlcategories_startup.go           loadCommunityFeedDB — degrade, never exit
@@ -347,7 +366,12 @@ behaviour before being accepted.
 | `TestOpenResilient_SurvivesUncatchableOpenPanicOnNextBoot` | FS-2 end to end, in child processes: boot 1 dies with `recover()` never firing, the marker survives, boot 2 quarantines and comes up. Verified to fail (`boot 2 did not recover … exit status 2`) with the marker check stubbed out |
 | `TestOpenResilient_CorruptManifestQuarantinesAndRecoversInOneBoot` | FS-1 for the returned-error family; evidence is kept, the replacement is empty, the marker is cleared |
 | `TestOpenResilient_PoisonMarkerQuarantinesBeforeTouchingTheStore` | the marker acts *before* badger, and clears itself so it cannot re-fire |
-| `TestOpenResilient_NeverQuarantinesAStoreAnotherProcessHolds` | **the safety gate** — a live lock holder vetoes the rename and its data survives |
+| `TestOpenResilient_NeverQuarantinesAStoreAnotherProcessHolds` | **the safety gate** — a live lock holder vetoes the rename, its data survives, and its breadcrumb is left alone |
+| `TestQuarantineDir_RefusesWithoutAHeldLock` | FS-5 — the rename is unreachable without a held store lock, enforced by the signature and a runtime check |
+| `TestOpenResilient_HeldStoreLockRefusesACompetingOpen` | FS-5 — while the quarantine path holds the lock, badger itself is refused; released, it opens |
+| `TestOpenResilient_QuarantineReleasesTheStoreLock` | the lock is not leaked — the quarantined copy stays inspectable |
+| `TestOpenResilient_LiveAttemptMarkerIsNotAbandoned` | FS-6 — a marker whose owner is still inside Open is never poison; it becomes poison the moment the owner is gone |
+| `TestOpenResilient_LeakedTempMarkerIsReapedNotTreatedAsPoison` | a death during arming is litter, not a signal |
 | `TestOpenResilient_EnvironmentalFailureDegradesWithoutQuarantine` | a bad mount degrades and leaves the disk alone |
 | `TestOpenResilient_QuarantinedCopiesAreBounded` | four corruption rounds leave at most one copy |
 | `TestOpenResilient_ResidualQuarantinesAreReported` | evidence stays visible on the boot *after* the self-heal |
@@ -369,6 +393,8 @@ behaviour before being accepted.
 | `TestCheckCategoryFeedDB_UnreconciledQuarantineStaysVisible` | the incident outlives the process that handled it |
 | `TestCheckCategoryFeedDB_RowCarriesNoRawCause` | the viewer-role guardrail |
 | `TestMetrics_CatFeedDBSeries` | the three series are emitted, including `available 0` on an unconfigured node — an omitted series is not something an alerting rule can key on |
+| `TestReportCatFeedDBUnavailable_DoesNotClaimRecovery` | FS-7 — a quarantine followed by a failed replacement open reports ONE failure, never a contradictory pair |
+| `TestReportCatFeedDBOpened_WordsTheOutcome` | the converse — a store that came up after a quarantine gets the recovery wording; a skipped recovery on a healthy store is log-only |
 
 ---
 

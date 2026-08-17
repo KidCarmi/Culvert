@@ -32,6 +32,7 @@ detects this at startup and recovers automatically:
 |---|---|---|
 | Torn `MANIFEST`, missing table, damaged `KEYREGISTRY`, value log needing truncation | badger returns an error Culvert classifies as corruption | **Same boot.** The directory is quarantined and re-created; the feed re-syncs. |
 | Corrupt table (`.sst`) | badger **panics** during open — the process dies before it can report anything | **Next boot.** A marker left beside the store tells the next start that the previous one died inside the open, so the directory is quarantined *before* badger is touched. Under `restart: unless-stopped` this is automatic and takes seconds. |
+| Two Culvert processes racing on one data directory | the loser is refused by the store lock | **No quarantine, no interference.** A store another process is opening or using is never renamed, and its recovery breadcrumb is never cleared. The loser degrades to Layer 1 for that boot. |
 | Volume missing, wrong mount, no permission, read-only, full, or another process holding the store | classified as environmental | **No quarantine** — renaming fixes none of these, and on the lock case it would damage a live store. The node boots and serves with **Layer 1 only**. |
 
 **In no case does a damaged Layer-2 store stop the gateway from starting.**
@@ -117,8 +118,10 @@ day** — that is disk nobody has reclaimed and an incident nobody has looked at
 ## What it will not do
 
 - It will **not delete** a damaged store. Recovery always moves it aside first.
-- It will **not touch** a store another process holds open. A concurrent boot
-  that loses the race degrades instead of quarantining.
+- It will **not touch** a store another process holds open, and it holds that
+  lock for the whole rename rather than checking and letting go. A concurrent
+  boot that loses the race degrades instead of quarantining, and it leaves the
+  other process's recovery breadcrumb alone.
 - It will **not** quarantine on an error it does not positively recognise as
   corruption. Anything unclassified degrades and leaves the disk alone.
 

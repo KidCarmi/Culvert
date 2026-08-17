@@ -52,7 +52,18 @@ with `y.Wrapf`, which implements no `Unwrap` — so the empirical fault → mess
 table is itself a test. Visibility rides existing vocabulary (the `state_file_corrupt`
 alert, a new `category_feed_db` diagnostics row, `culvert_catfeeddb_*`), and is
 deliberately NOT wired into `/readyz`: Layer-1-only categorisation is a fully
-serving node. See §17 and `docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-17.md`.
+serving node. Three further defects were found in review OF THE FIX and are
+recorded in §17 rather than quietly patched, because they are the same class the
+sweep is about — a protection that does not hold under the conditions it exists
+for: the store lock was probed and RELEASED before the rename (rename(2) ignores
+flocks, so the gap let a concurrent boot's live store be renamed underneath it);
+a single shared marker path could not survive concurrency (process B correctly
+skipped the quarantine and then REMOVED process A's breadcrumb, so an A that
+subsequently panicked left nothing for the next boot — the crash loop persisting
+through its own remedy); and the recovery was reported BEFORE the outcome was
+known, so a quarantine followed by a failed replacement open emitted two alerts
+that contradicted each other. See §17 and
+`docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-17.md`.
 
 **2026-08-11 — CHAOS-49 sweep (the multi-IdP registry auth path under IdP failure).**
 
@@ -1243,19 +1254,34 @@ allowed to authorise a rename on its own.
 
 ### 17.4 The fix — `catdb.OpenResilient`
 
-1. **A poison marker** (`<dir>.opening`, fsynced, a SIBLING so a quarantine
-   cannot carry it away) is armed around every open attempt and cleared however
-   the attempt returns. A marker found at startup means exactly one thing: a
-   previous process entered `badger.Open` and never came back out. That is the
-   only signal available for the panic, and it also covers SIGKILL/OOM.
-2. **Quarantine before badger, not after.** On a marker the directory is moved
-   aside (`.corrupt.<unixnano>`, the CHAOS-05/07 convention, **never deleted**,
-   pruned to one copy) before badger is touched.
-3. **Every quarantine is flock-gated.** A non-blocking exclusive `flock` of the
-   DIRECTORY — badger's own lock, `badger/dir_unix.go` — is probed first, so a
-   concurrent boot still inside its own open vetoes the rename. Pinned by
-   `TestOpenResilient_NeverQuarantinesAStoreAnotherProcessHolds`, which asserts
-   the holder's data survives.
+1. **A per-attempt, flock-OWNED poison marker** (a SIBLING of the store, so a
+   quarantine cannot carry it away) is armed around every open attempt and
+   cleared however the attempt returns. A marker whose flock can be TAKEN
+   belongs to a process that is gone — the kernel releases flocks on death — so
+   it means exactly one thing: that process entered `badger.Open` and never came
+   back out. That is the only signal available for the panic, and it also covers
+   SIGKILL/OOM. It is per-attempt and flock-owned rather than a single shared
+   path because a shared one cannot survive concurrency: a second process
+   booting while the first was still inside `Open` would clear the first's
+   breadcrumb, and if the first then panicked the next boot would walk into the
+   corrupt store again — the crash loop persisting through the very mechanism
+   meant to break it. A live opener's marker is never touched, and a SKIPPED
+   quarantine leaves the breadcrumbs for the next boot.
+2. **Quarantine before badger, not after.** On a poison marker the directory is
+   moved aside (`.corrupt.<unixnano>`, the CHAOS-05/07 convention, **never
+   deleted**, pruned to one copy) before badger is touched.
+3. **Every quarantine holds the store lock ACROSS THE RENAME.** A non-blocking
+   exclusive `flock` of the DIRECTORY — badger's own lock, `badger/dir_unix.go`
+   — is taken and held until the move is done. Probing and releasing first would
+   leave a window in which another process acquires the lock and starts opening
+   a store that is about to be renamed underneath it: `rename(2)` does not
+   consult flocks. The invariant is carried by the TYPE — `quarantineDir` takes
+   the `*heldLock` as a required argument and refuses a nil or already-released
+   one (`errStoreLockNotHeld`) — so a refactor back to probe-then-let-go cannot
+   silently reopen it. Pinned by
+   `TestOpenResilient_NeverQuarantinesAStoreAnotherProcessHolds` (the holder's
+   data survives AND its breadcrumb is left alone) and
+   `TestQuarantineDir_RefusesWithoutAHeldLock`.
 4. **Returned errors: deny-list first.** Environmental faults (lock held, not a
    directory, EACCES, EROFS, ENOSPC, EMFILE, EIO) are matched BEFORE the
    corruption allow-list, and anything unrecognised degrades. A rename fixes
@@ -1264,6 +1290,13 @@ allowed to authorise a rename on its own.
 5. **Never fatal.** `loadCommunityFeedDB` degrades to `communityDB = nil`, which
    every consumer already nil-guards (`policy.go:1592,1621`, `ui_policy.go:947`,
    `main_shutdown.go:259`) — byte-identical to running without `-cat-feed-db`.
+6. **One outcome, one account.** The result is reported only after it is known.
+   A quarantine that succeeded followed by a replacement that would not open
+   (volume went full or read-only in between) is a FAILURE, not a recovery;
+   reporting the quarantine first queued "re-created empty, the feed re-syncs
+   automatically" and then contradicted it. `reportCatFeedDBUnavailable` folds
+   the quarantine in as CONTEXT so the operator learns the fault is with the
+   replacement store.
 
 Automatic re-creation is safe **only because this store holds no authoritative
 state**: `feedsync.Start` performs an immediate sync when it finds the store
