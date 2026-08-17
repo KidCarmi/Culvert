@@ -9,6 +9,7 @@ package catdb
 // TestOpenResilient_SurvivesUncatchableOpenPanicOnNextBoot.
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -79,6 +80,28 @@ func garbleTables(t *testing.T, dir string) int {
 	return n
 }
 
+// plantAbandonedMarker writes a marker with no live owner — the on-disk state a
+// process that died inside badger.Open leaves behind (the kernel releases its
+// flock, the file stays).
+func plantAbandonedMarker(t *testing.T, dir string) string {
+	t.Helper()
+	p := trimSep(dir) + markerSuffix + "1234-5678"
+	if err := os.WriteFile(p, []byte("pid=1234\n"), 0o600); err != nil {
+		t.Fatalf("plant marker: %v", err)
+	}
+	return p
+}
+
+// markerFiles lists every open-attempt marker beside dir, live or abandoned.
+func markerFiles(t *testing.T, dir string) []string {
+	t.Helper()
+	m, err := filepath.Glob(trimSep(dir) + markerSuffix + "*")
+	if err != nil {
+		t.Fatalf("glob markers: %v", err)
+	}
+	return m
+}
+
 // ── the core contract ────────────────────────────────────────────────────────
 
 func TestOpenResilient_CleanOpenLeavesNoTrace(t *testing.T) {
@@ -91,8 +114,8 @@ func TestOpenResilient_CleanOpenLeavesNoTrace(t *testing.T) {
 	if rec.Trigger != TriggerNone || rec.Quarantined {
 		t.Errorf("clean open recovered something: %+v", rec)
 	}
-	if _, err := os.Stat(markerPath(dir)); err == nil {
-		t.Error("poison marker was left armed after a successful open")
+	if m := markerFiles(t, dir); len(m) != 0 {
+		t.Errorf("open markers left behind after a successful open: %v", m)
 	}
 	if q := QuarantinedCopies(dir); len(q) != 0 {
 		t.Errorf("clean open quarantined %v", q)
@@ -142,8 +165,8 @@ func TestOpenResilient_CorruptManifestQuarantinesAndRecoversInOneBoot(t *testing
 	if _, ok := db.Lookup(hostFor(0)); ok {
 		t.Error("re-created store still serves data from the damaged copy")
 	}
-	if _, err := os.Stat(markerPath(dir)); err == nil {
-		t.Error("poison marker left armed after recovery")
+	if m := markerFiles(t, dir); len(m) != 0 {
+		t.Errorf("open markers left behind after recovery: %v", m)
 	}
 }
 
@@ -158,7 +181,7 @@ func TestOpenResilient_CorruptManifestQuarantinesAndRecoversInOneBoot(t *testing
 // copy is preserved rather than deleted.
 func TestOpenResilient_PoisonMarkerQuarantinesBeforeTouchingTheStore(t *testing.T) {
 	dir := seedStore(t, 50)
-	armMarker(markerPath(dir))
+	plantAbandonedMarker(t, dir)
 
 	db, rec, err := OpenResilient(dir)
 	if err != nil {
@@ -175,8 +198,8 @@ func TestOpenResilient_PoisonMarkerQuarantinesBeforeTouchingTheStore(t *testing.
 	if _, ok := db.Lookup(hostFor(0)); ok {
 		t.Error("store was not actually replaced")
 	}
-	if _, err := os.Stat(markerPath(dir)); err == nil {
-		t.Error("poison marker was not cleared — it would re-fire every boot")
+	if m := markerFiles(t, dir); len(m) != 0 {
+		t.Errorf("abandoned marker was not cleared — it would re-fire every boot: %v", m)
 	}
 }
 
@@ -192,7 +215,7 @@ func TestOpenResilient_NeverQuarantinesAStoreAnotherProcessHolds(t *testing.T) {
 	}
 	defer holder.Close() //nolint:errcheck // test cleanup
 
-	armMarker(markerPath(dir))
+	planted := plantAbandonedMarker(t, dir)
 
 	db, rec, err := OpenResilient(dir)
 	if err == nil {
@@ -211,6 +234,13 @@ func TestOpenResilient_NeverQuarantinesAStoreAnotherProcessHolds(t *testing.T) {
 	// The holder's data must be untouched.
 	if cat, ok := holder.Lookup(hostFor(0)); !ok || cat != "Social" {
 		t.Errorf("live store was damaged: %q %v", cat, ok)
+	}
+	// And the breadcrumb must SURVIVE. A skipped quarantine leaves the poison
+	// condition unresolved, so clearing the marker here would mean the next boot
+	// walks into the corrupt store again — the crash loop this file exists to
+	// break would persist through its own mechanism.
+	if _, err := os.Stat(planted); err != nil {
+		t.Errorf("abandoned marker was cleared despite the quarantine being skipped: %v", err)
 	}
 }
 
@@ -233,8 +263,8 @@ func TestOpenResilient_EnvironmentalFailureDegradesWithoutQuarantine(t *testing.
 	if q := QuarantinedCopies(p); len(q) != 0 {
 		t.Errorf("environmental failure created %v", q)
 	}
-	if _, err := os.Stat(markerPath(p)); err == nil {
-		t.Error("poison marker left armed after an environmental failure")
+	if m := markerFiles(t, p); len(m) != 0 {
+		t.Errorf("open markers left behind after an environmental failure: %v", m)
 	}
 }
 
@@ -266,12 +296,23 @@ func TestOpenResilient_QuarantinedCopiesAreBounded(t *testing.T) {
 // The marker is a SIBLING of the store, so a quarantine cannot carry it into
 // the moved-aside directory and lose the breadcrumb.
 func TestOpenResilient_MarkerIsASiblingNotAChild(t *testing.T) {
-	dir := "/data/catfeeddb"
-	if got := markerPath(dir); got != "/data/catfeeddb.opening" {
-		t.Errorf("markerPath = %q, want a sibling", got)
+	dir := filepath.Join(t.TempDir(), "catfeeddb")
+	a := beginAttempt(dir)
+	defer a.end()
+	if a.path == "" {
+		t.Fatal("marker could not be armed")
 	}
-	if got := markerPath("/data/catfeeddb/"); got != "/data/catfeeddb.opening" {
-		t.Errorf("markerPath with a trailing separator = %q", got)
+	if filepath.Dir(a.path) != filepath.Dir(dir) {
+		t.Errorf("marker %q is not a sibling of %q", a.path, dir)
+	}
+	if strings.HasPrefix(a.path, dir+string(filepath.Separator)) {
+		t.Errorf("marker %q lives INSIDE the store — a quarantine would carry it away", a.path)
+	}
+	// A trailing separator must not produce a nested marker either.
+	b := beginAttempt(dir + string(filepath.Separator))
+	defer b.end()
+	if filepath.Dir(b.path) != filepath.Dir(dir) {
+		t.Errorf("marker %q for a trailing-separator path is not a sibling", b.path)
 	}
 }
 
@@ -392,8 +433,11 @@ func TestOpenResilient_SurvivesUncatchableOpenPanicOnNextBoot(t *testing.T) {
 	if firstErr == nil || strings.Contains(first, "child: returned") {
 		t.Skipf("badger no longer panics on a corrupt table (returned instead): %s", first)
 	}
-	if _, err := os.Stat(markerPath(dir)); err != nil {
-		t.Fatalf("poison marker did not survive the panic (%v) — the next boot cannot recover", err)
+	// The dead child's marker must survive AND be recognised as abandoned: the
+	// kernel released its flock when the process died, which is exactly what
+	// distinguishes it from a marker a live opener still owns.
+	if got := abandonedMarkers(dir); len(got) != 1 {
+		t.Fatalf("abandoned markers after the panic = %v, want exactly 1 — the next boot cannot recover", got)
 	}
 
 	second, secondErr := runChildBoot(t, dir)
@@ -434,6 +478,9 @@ func runPanicRecoveryChild(dir string) {
 
 func runChildBoot(t *testing.T, dir string) (string, error) {
 	t.Helper()
+	// #nosec G204 -- re-exec of THIS test binary (os.Args[0]) with a fixed flag;
+	// the child process is the only way to observe a panic badger raises from
+	// its own goroutine without killing the parent.
 	cmd := exec.Command(os.Args[0], "-test.run", "TestOpenResilient_SurvivesUncatchableOpenPanicOnNextBoot")
 	cmd.Env = append(os.Environ(), "CULVERT_CATDB_PANIC_CHILD="+dir)
 	out, err := cmd.CombinedOutput()
@@ -445,7 +492,7 @@ func runChildBoot(t *testing.T, dir string) (string, error) {
 // forever — the opposite of the self-healing this file exists to provide.
 func TestOpenResilient_NonRegularMarkerIsIgnored(t *testing.T) {
 	dir := seedStore(t, 20)
-	if err := os.Mkdir(markerPath(dir), 0o700); err != nil {
+	if err := os.Mkdir(trimSep(dir)+markerSuffix+"adir", 0o700); err != nil {
 		t.Fatalf("mkdir marker: %v", err)
 	}
 	db, rec, err := OpenResilient(dir)
@@ -474,8 +521,8 @@ func TestOpenResilient_FreshNestedPathIsProtectedFromTheFirstBoot(t *testing.T) 
 		t.Fatalf("close: %v", err)
 	}
 	// Simulate the process dying inside the next open.
-	armMarker(markerPath(dir))
-	if !markerPresent(markerPath(dir)) {
+	plantAbandonedMarker(t, dir)
+	if len(abandonedMarkers(dir)) != 1 {
 		t.Fatal("marker could not be armed on a nested path — the first boot would run unprotected")
 	}
 	db2, rec, err := OpenResilient(dir)
@@ -485,5 +532,148 @@ func TestOpenResilient_FreshNestedPathIsProtectedFromTheFirstBoot(t *testing.T) 
 	defer db2.Close() //nolint:errcheck // test cleanup
 	if !rec.Quarantined {
 		t.Errorf("nested path did not recover: %+v", rec)
+	}
+}
+
+// The store lock must be HELD ACROSS THE RENAME, not probed and released before
+// it. Probing and letting go leaves a window in which another process acquires
+// badger's directory lock and begins opening, only to have its live directory
+// renamed underneath it — rename does not consult flocks. This pins the
+// primitive: while the handle is held, a competing open is refused; once
+// released, it succeeds.
+func TestOpenResilient_HeldStoreLockRefusesACompetingOpen(t *testing.T) {
+	dir := seedStore(t, 20)
+
+	lock, err := lockStore(dir)
+	if err != nil || lock == nil {
+		t.Fatalf("lockStore = (%v, %v), want a held lock", lock, err)
+	}
+
+	// A second attempt must see it as taken, not free.
+	other, oerr := lockStore(dir)
+	if oerr != nil || other != nil {
+		if other != nil {
+			other.release()
+		}
+		t.Fatalf("a held store lock was reported free: (%v, %v)", other, oerr)
+	}
+
+	// And badger itself must be refused for the whole window.
+	if db, derr := Open(dir); derr == nil {
+		_ = db.Close()
+		lock.release()
+		t.Fatal("badger opened a store whose lock the quarantine path was holding — the rename window is not closed")
+	}
+
+	lock.release()
+
+	db, derr := Open(dir)
+	if derr != nil {
+		t.Fatalf("store did not open after the lock was released: %v", derr)
+	}
+	_ = db.Close()
+}
+
+// applyQuarantine must not leak the lock it takes: the quarantined copy has to
+// be openable afterwards (an operator inspecting the evidence) and the
+// replacement has to be openable by this very process on the retry.
+func TestOpenResilient_QuarantineReleasesTheStoreLock(t *testing.T) {
+	dir := seedStore(t, 20)
+	garbleFile(t, filepath.Join(dir, "MANIFEST"), 8)
+
+	db, rec, err := OpenResilient(dir)
+	if err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if !rec.Quarantined {
+		t.Fatalf("expected a quarantine: %+v", rec)
+	}
+	lock, lerr := lockStore(rec.QuarantinePath)
+	if lerr != nil || lock == nil {
+		t.Fatalf("quarantined copy is still locked — the rename leaked its handle: (%v, %v)", lock, lerr)
+	}
+	lock.release()
+}
+
+// A marker whose owner is still inside badger.Open must never be treated as
+// abandoned: the flock is what distinguishes a live attempt from a dead one.
+func TestOpenResilient_LiveAttemptMarkerIsNotAbandoned(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "catfeeddb")
+
+	live := beginAttempt(dir)
+	if live.path == "" {
+		t.Fatal("could not arm a marker")
+	}
+	if got := abandonedMarkers(dir); len(got) != 0 {
+		t.Errorf("a LIVE attempt's marker was reported abandoned: %v", got)
+	}
+	// Once the owner is gone the same file becomes the poison signal.
+	live.lock.release()
+	if got := abandonedMarkers(dir); len(got) != 1 {
+		t.Errorf("abandoned markers after the owner released = %v, want 1", got)
+	}
+	_ = os.Remove(live.path)
+}
+
+// Temp markers left by a death during arming are litter, not a poison signal:
+// their owner never reached badger.Open.
+func TestOpenResilient_LeakedTempMarkerIsReapedNotTreatedAsPoison(t *testing.T) {
+	dir := seedStore(t, 20)
+	leaked := trimSep(dir) + markerTempSuffix + "999-1"
+	if err := os.WriteFile(leaked, []byte("pid=999\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	db, rec, err := OpenResilient(dir)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close() //nolint:errcheck // test cleanup
+
+	if rec.Quarantined || rec.Trigger != TriggerNone {
+		t.Errorf("a leaked temp marker triggered a recovery: %+v", rec)
+	}
+	if _, err := os.Stat(leaked); err == nil {
+		t.Error("leaked temp marker was not reaped")
+	}
+	if cat, ok := db.Lookup(hostFor(0)); !ok || cat != "Social" {
+		t.Errorf("healthy store was replaced: %q %v", cat, ok)
+	}
+}
+
+// The "lock held across the rename" invariant is carried by the type, not by a
+// comment: quarantineDir refuses a lock that has already been released, so a
+// refactor that goes back to probe-then-let-go cannot silently reopen the
+// window in which a live store gets renamed out from under its owner.
+func TestQuarantineDir_RefusesWithoutAHeldLock(t *testing.T) {
+	dir := seedStore(t, 10)
+
+	if _, err := quarantineDir(nil, dir); !errors.Is(err, errStoreLockNotHeld) {
+		t.Errorf("quarantineDir(nil) = %v, want errStoreLockNotHeld", err)
+	}
+
+	lock, err := lockStore(dir)
+	if err != nil || lock == nil {
+		t.Fatalf("lockStore = (%v, %v)", lock, err)
+	}
+	lock.release()
+	if _, err := quarantineDir(lock, dir); !errors.Is(err, errStoreLockNotHeld) {
+		t.Errorf("quarantineDir(released) = %v, want errStoreLockNotHeld", err)
+	}
+	if q := QuarantinedCopies(dir); len(q) != 0 {
+		t.Errorf("a rename happened without the lock: %v", q)
+	}
+
+	// The happy path still works while the lock is genuinely held.
+	lock2, err := lockStore(dir)
+	if err != nil || lock2 == nil {
+		t.Fatalf("re-lock = (%v, %v)", lock2, err)
+	}
+	defer lock2.release()
+	if _, err := quarantineDir(lock2, dir); err != nil {
+		t.Errorf("quarantineDir with a held lock: %v", err)
 	}
 }

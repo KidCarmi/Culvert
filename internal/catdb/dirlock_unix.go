@@ -2,16 +2,21 @@
 
 package catdb
 
-// dirlock_unix.go — CHAOS-50: is anybody else using this store right now?
+// dirlock_unix.go — CHAOS-50: the one primitive the recovery path trusts.
 //
-// Quarantine renames the store directory. Doing that to a directory another
-// process has open is destructive, so every quarantine is gated on this probe.
-// It mirrors badger's own mechanism exactly (badger/dir_unix.go
-// acquireDirectoryLock): a non-blocking exclusive flock on the DIRECTORY, not
-// on a file inside it. Acquiring and immediately releasing it is enough to know
-// no live badger holds the store — a flock is released by the kernel when its
-// owner dies, so a process that was SIGKILLed inside Open leaves no lock behind,
-// which is precisely the case we DO want to recover.
+// Two questions have to be answered before a damaged store can be moved aside,
+// and both reduce to "is a live process holding this?":
+//
+//   - is anybody using the store directory right now? Quarantine renames it, and
+//     doing that to a directory a live badger owns is destructive.
+//   - does an open-attempt marker belong to a process that is still running, or
+//     to one that died inside badger.Open?
+//
+// flock answers both, because the kernel releases it when its owner dies — a
+// process SIGKILLed inside Open leaves no lock behind, which is exactly the case
+// we want to recover, while a live opener is unmistakably alive. This mirrors
+// badger's own mechanism (badger/dir_unix.go acquireDirectoryLock), which flocks
+// the DIRECTORY rather than a file inside it.
 
 import (
 	"errors"
@@ -20,27 +25,24 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// dirLockFree reports whether the store directory is currently unlocked.
-// An error means "could not determine" and callers must treat that as
-// not-free — the fail-safe default is to leave the disk alone.
-func dirLockFree(dir string) (bool, error) {
-	f, err := os.Open(dir)
-	if err != nil {
-		return false, err
-	}
-	defer f.Close() //nolint:errcheck // read-only probe handle; close error is not actionable
-
+// flockFile takes a non-blocking exclusive flock on an already-open file or
+// directory. It returns (false, nil) when a live holder has it, and an error
+// when the lock state cannot be determined — callers must treat BOTH as
+// "not free": the fail-safe default is to leave the disk alone.
+func flockFile(f *os.File) (bool, error) {
 	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		// EWOULDBLOCK (== EAGAIN on Linux) means a live holder. Any other errno
-		// is an environment we cannot reason about. Both answers are "not free",
-		// so neither can authorise a quarantine.
+		// EWOULDBLOCK (== EAGAIN on Linux) means a live holder.
 		if errors.Is(err, unix.EWOULDBLOCK) {
 			return false, nil
 		}
 		return false, err
 	}
-	// Release immediately: the caller is about to rename this directory, and
-	// holding a lock on it while doing so would serve no purpose.
-	_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
 	return true, nil
+}
+
+// unlockFile releases a lock taken by flockFile. Closing the file would also
+// release it; this makes the hand-off explicit at the call sites that keep the
+// handle open across a rename.
+func unlockFile(f *os.File) {
+	_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
 }

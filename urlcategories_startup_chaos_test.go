@@ -10,6 +10,8 @@ package main
 // and `restart: unless-stopped`) an unattended crash-loop.
 
 import (
+	"bytes"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -33,6 +35,14 @@ func swapCommunityDBGlobals(t *testing.T) {
 		resetCatFeedDBHealthForTest()
 	})
 	communityDB, globalUT1FeedSyncer = nil, nil
+}
+
+// noNetworkFeedCfg builds a loader config whose feed URL cannot be parsed into a
+// request, so the syncer's boot sync fails immediately without leaving the box.
+// Without this the tests reach the real UT1 mirror: slow, flaky, and a live
+// dependency in a suite that is testing local disk faults.
+func noNetworkFeedCfg(dir string) urlCategoriesStartupConfig {
+	return urlCategoriesStartupConfig{FeedDBPath: dir, FeedURL: "\x7f://invalid"}
 }
 
 func seedCorruptStore(t *testing.T) string {
@@ -67,8 +77,7 @@ func seedCorruptStore(t *testing.T) string {
 // actually is, rather than silently taking the whole test binary down.
 func TestLoadCommunityFeedDB_DamagedStoreDoesNotKillTheProcess(t *testing.T) {
 	if dir := os.Getenv("CULVERT_CATFEEDDB_BOOT_CHILD"); dir != "" {
-		cfg := urlCategoriesStartupConfig{FeedDBPath: dir}
-		syncer := loadCommunityFeedDB(cfg, t.Context())
+		syncer := loadCommunityFeedDB(noNetworkFeedCfg(dir), t.Context())
 		_ = syncer
 		if communityDB != nil {
 			_ = communityDB.Close()
@@ -78,6 +87,9 @@ func TestLoadCommunityFeedDB_DamagedStoreDoesNotKillTheProcess(t *testing.T) {
 	}
 
 	dir := seedCorruptStore(t)
+	// #nosec G204 -- re-exec of THIS test binary (os.Args[0]) with a fixed flag;
+	// the child is how an os.Exit regression is observed instead of silently
+	// taking the parent down.
 	cmd := exec.Command(os.Args[0], "-test.run", "TestLoadCommunityFeedDB_DamagedStoreDoesNotKillTheProcess")
 	cmd.Env = append(os.Environ(), "CULVERT_CATFEEDDB_BOOT_CHILD="+dir)
 	out, err := cmd.CombinedOutput()
@@ -98,7 +110,7 @@ func TestLoadCommunityFeedDB_EnvironmentalFailureDegradesToLayer1(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	syncer := loadCommunityFeedDB(urlCategoriesStartupConfig{FeedDBPath: notADir}, t.Context())
+	syncer := loadCommunityFeedDB(noNetworkFeedCfg(notADir), t.Context())
 	if syncer != nil {
 		t.Error("a feed syncer was started against a store that never opened")
 	}
@@ -123,7 +135,7 @@ func TestLoadCommunityFeedDB_CorruptStoreSelfHealsAndKeepsServing(t *testing.T) 
 	swapCommunityDBGlobals(t)
 	dir := seedCorruptStore(t)
 
-	syncer := loadCommunityFeedDB(urlCategoriesStartupConfig{FeedDBPath: dir}, t.Context())
+	syncer := loadCommunityFeedDB(noNetworkFeedCfg(dir), t.Context())
 	if syncer == nil || communityDB == nil {
 		t.Fatal("a recoverable store did not come up")
 	}
@@ -147,7 +159,7 @@ func TestLoadCommunityFeedDB_HealthyStoreIsQuiet(t *testing.T) {
 	swapCommunityDBGlobals(t)
 	dir := filepath.Join(t.TempDir(), "catfeeddb")
 
-	if syncer := loadCommunityFeedDB(urlCategoriesStartupConfig{FeedDBPath: dir}, t.Context()); syncer == nil {
+	if syncer := loadCommunityFeedDB(noNetworkFeedCfg(dir), t.Context()); syncer == nil {
 		t.Fatal("healthy store did not come up")
 	}
 	if got := checkCategoryFeedDB(); got.Status != diagOK {
@@ -213,11 +225,11 @@ func TestLoadCommunityFeedDB_SourceHasNoFatalExit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read source: %v", err)
 	}
-	start := strings.Index(string(src), "func loadCommunityFeedDB(")
+	start := bytes.Index(src, []byte("func loadCommunityFeedDB("))
 	if start < 0 {
 		t.Fatal("loadCommunityFeedDB not found — update this guard alongside the rename")
 	}
-	body := string(src)[start:]
+	body := string(src[start:])
 	if end := strings.Index(body, "\nfunc "); end > 0 {
 		body = body[:end]
 	}
@@ -258,5 +270,60 @@ func TestMetrics_CatFeedDBSeries(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("%q missing from /metrics after a recovery", want)
 		}
+	}
+}
+
+// A quarantine that succeeds followed by a replacement that will not open —
+// the volume went full or read-only in between — is a FAILURE, not a recovery.
+// Reporting the quarantine before the outcome is known produced two alerts that
+// disagreed: "re-created empty, the feed re-syncs automatically" immediately
+// contradicted by "could not be opened". One outcome, one account.
+func TestReportCatFeedDBUnavailable_DoesNotClaimRecovery(t *testing.T) {
+	rec := catdb.Recovery{
+		Trigger:        catdb.TriggerOpenError,
+		Cause:          "manifest has bad magic",
+		Quarantined:    true,
+		QuarantinePath: "/data/catfeeddb.corrupt.1",
+	}
+	out := captureLogger(t, func() {
+		reportCatFeedDBUnavailable("/data/catfeeddb", rec, errors.New("no space left on device"))
+	})
+	if !strings.Contains(out, "could not be opened") {
+		t.Errorf("failure report does not state the failure: %q", out)
+	}
+	if strings.Contains(out, "re-syncs automatically") {
+		t.Errorf("failure report claims a successful recovery: %q", out)
+	}
+	if !strings.Contains(out, "REPLACEMENT") {
+		t.Errorf("failure report does not tell the operator the fault is with the replacement: %q", out)
+	}
+}
+
+// The converse: a store that came up after a quarantine gets the recovery
+// wording, and a triggered-but-skipped recovery on a store that opened fine is
+// log-only — no page for a race that resolved itself.
+func TestReportCatFeedDBOpened_WordsTheOutcome(t *testing.T) {
+	recovered := catdb.Recovery{
+		Trigger:        catdb.TriggerPoisonMarker,
+		Cause:          "died inside the open",
+		Quarantined:    true,
+		QuarantinePath: "/data/catfeeddb.corrupt.1",
+	}
+	out := captureLogger(t, func() { reportCatFeedDBOpened("/data/catfeeddb", recovered) })
+	if !strings.Contains(out, "re-syncs automatically") {
+		t.Errorf("recovery report missing: %q", out)
+	}
+
+	skipped := catdb.Recovery{
+		Trigger: catdb.TriggerPoisonMarker,
+		Cause:   "died inside the open",
+		Skipped: "another process holds the store lock",
+	}
+	out = captureLogger(t, func() { reportCatFeedDBOpened("/data/catfeeddb", skipped) })
+	if !strings.Contains(out, "NOT quarantined") || !strings.Contains(out, "opened normally") {
+		t.Errorf("skipped-recovery report should say what happened without claiming a recovery: %q", out)
+	}
+	if strings.Contains(out, "re-syncs automatically") {
+		t.Errorf("a skipped recovery was reported as a recovery: %q", out)
 	}
 }

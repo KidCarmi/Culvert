@@ -9,8 +9,13 @@ package catdb
 // determine" makes every quarantine refuse on such a platform: the store still
 // degrades safely, it just never self-heals.
 
-import "errors"
+import (
+	"errors"
+	"os"
+)
 
-func dirLockFree(string) (bool, error) {
-	return false, errors.New("store lock state is not observable on this platform")
+func flockFile(*os.File) (bool, error) {
+	return false, errors.New("lock state is not observable on this platform")
 }
+
+func unlockFile(*os.File) {}

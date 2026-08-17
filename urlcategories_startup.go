@@ -98,32 +98,30 @@ func loadCommunityFeedDB(cfg urlCategoriesStartupConfig, ctx context.Context) *F
 
 	db, rec, dbErr := catdb.OpenResilient(cfg.FeedDBPath)
 	health.ResidualCopies = len(rec.ResidualQuarantines)
-	if rec.Trigger != catdb.TriggerNone {
-		reportCatFeedDBRecovery(cfg.FeedDBPath, rec)
-		health.Recovered = rec.Quarantined
-		if rec.Quarantined {
-			health.Quarantines = 1
-		}
+	if rec.Quarantined {
+		health.Quarantines = 1
 	}
 
+	// The outcome is reported ONCE, after it is known. A quarantine that
+	// succeeded followed by a replacement that would not open (volume went full
+	// or read-only in between) is a FAILURE, not a recovery: reporting the
+	// quarantine first would queue "re-created empty, the feed re-syncs
+	// automatically" and then contradict it with "could not be opened".
 	if dbErr != nil {
 		// Degrade, never exit. The detail carries the cause for the log and the
 		// alert; the viewer-role diagnostics row carries only the impact.
 		health.Available = false
 		health.Detail = dbErr.Error()
 		noteCatFeedDBState(health)
-		logger.Printf("CatFeedDB: cannot open the community store at %s: %v — continuing with admin-managed categories only (Layer 1)",
-			cfg.FeedDBPath, dbErr)
-		deferStartupAlert("state_file_corrupt", AlertPayload{
-			Source: "storage",
-			Detail: fmt.Sprintf("community category store at %s could not be opened (%v) — the node is running with admin-managed categories only; category rules that depend on the community feed will not match", cfg.FeedDBPath, dbErr),
-		})
+		reportCatFeedDBUnavailable(cfg.FeedDBPath, rec, dbErr)
 		return nil
 	}
 
 	communityDB = db
 	health.Available = true
+	health.Recovered = rec.Quarantined
 	noteCatFeedDBState(health)
+	reportCatFeedDBOpened(cfg.FeedDBPath, rec)
 
 	syncer := newFeedSyncer(communityDB, cfg.FeedURL, cfg.FeedSyncInterval)
 	globalUT1FeedSyncer = syncer // UC-6: expose Stats() to /metrics
@@ -132,28 +130,46 @@ func loadCommunityFeedDB(cfg urlCategoriesStartupConfig, ctx context.Context) *F
 	return syncer
 }
 
-// reportCatFeedDBRecovery logs a recovery attempt and, when it actually moved a
-// damaged store aside, alerts on it.
+// reportCatFeedDBOpened reports a store that came up, alerting only when this
+// boot actually moved a damaged copy aside.
 //
 // The alert reuses the CHAOS-05/07 `state_file_corrupt` event rather than
 // inventing a second name: the operator action is precisely the one that event
 // already means — corrupt state was quarantined at startup and there is evidence
 // on disk to reconcile.
 //
-// A SKIPPED quarantine is log-only. The commonest reason to skip is a live lock
-// holder, i.e. a concurrent boot, where alerting would page somebody about a
-// benign race; and every skip that matters is followed by a failed open, whose
-// own alert carries the impact. Alert on evidence or on impact, never on a
-// suspicion that resolved itself.
-func reportCatFeedDBRecovery(path string, rec catdb.Recovery) {
+// A recovery that was TRIGGERED but skipped, on a store that then opened fine,
+// is log-only. The commonest reason to skip is a live lock holder, i.e. a
+// concurrent boot, where alerting would page somebody about a benign race.
+// Alert on evidence or on impact, never on a suspicion that resolved itself.
+func reportCatFeedDBOpened(path string, rec catdb.Recovery) {
 	if !rec.Quarantined {
-		logger.Printf("CatFeedDB: %q", sanitizeLog(fmt.Sprintf(
-			"community category store at %s looks damaged (%s: %s) but was NOT quarantined (%s)",
-			path, rec.Trigger, rec.Cause, rec.Skipped)))
+		if rec.Trigger != catdb.TriggerNone {
+			logger.Printf("CatFeedDB: %q", sanitizeLog(fmt.Sprintf(
+				"community category store at %s looked damaged (%s: %s) but was NOT quarantined (%s); it opened normally",
+				path, rec.Trigger, rec.Cause, rec.Skipped)))
+		}
 		return
 	}
 	detail := fmt.Sprintf("community category store at %s was damaged (%s: %s) — quarantined to %s and re-created empty; the feed re-syncs automatically. Delete the quarantined copy once reconciled to reclaim disk",
 		path, rec.Trigger, rec.Cause, rec.QuarantinePath)
+	logger.Printf("CatFeedDB: %q", sanitizeLog(detail))
+	deferStartupAlert("state_file_corrupt", AlertPayload{Source: "storage", Detail: detail})
+}
+
+// reportCatFeedDBUnavailable emits the SINGLE alert for a store that did not
+// come up, folding in the quarantine (or the reason one was not attempted) so
+// the operator gets one coherent account instead of two that disagree.
+func reportCatFeedDBUnavailable(path string, rec catdb.Recovery, dbErr error) {
+	context := ""
+	switch {
+	case rec.Quarantined:
+		context = fmt.Sprintf(" A damaged copy was quarantined to %s first, so the failure is with the REPLACEMENT store — check the volume for space, permissions, and mount state.", rec.QuarantinePath)
+	case rec.Trigger != catdb.TriggerNone:
+		context = fmt.Sprintf(" It looked damaged (%s) but could not be quarantined (%s).", rec.Trigger, rec.Skipped)
+	}
+	detail := fmt.Sprintf("community category store at %s could not be opened (%v) — the node is running with admin-managed categories only; category rules that depend on the community feed will not match.%s",
+		path, dbErr, context)
 	logger.Printf("CatFeedDB: %q", sanitizeLog(detail))
 	deferStartupAlert("state_file_corrupt", AlertPayload{Source: "storage", Detail: detail})
 }

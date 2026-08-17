@@ -27,14 +27,21 @@ package catdb
 //
 // HOW
 //
-// A marker file is armed beside the directory for the duration of every open
-// attempt and cleared when the attempt returns — success or error. A marker
-// found at startup therefore means exactly one thing: a previous process
-// entered badger.Open on this directory and never came back out. That is the
-// only signal available for the uncatchable-panic case, and it also covers a
-// SIGKILL/OOM landing inside Open. On that signal the directory is quarantined
-// BEFORE badger is allowed near it again, so the second boot succeeds where the
-// first one died.
+// Every open attempt arms its OWN marker file beside the directory and holds an
+// flock on it for the duration of the attempt. A marker whose flock can be taken
+// belongs to a process that is gone — the kernel releases flocks on death — so
+// it means exactly one thing: that process entered badger.Open on this directory
+// and never came back out. That is the only signal available for the
+// uncatchable-panic case, and it also covers a SIGKILL/OOM landing inside Open.
+// On that signal the directory is quarantined BEFORE badger is allowed near it
+// again, so the second boot succeeds where the first one died.
+//
+// The marker is per-attempt and flock-owned rather than a single shared path
+// because a shared one cannot survive concurrency: a second process booting
+// while the first is still inside Open would clear the first process's
+// breadcrumb, and if the first then hit the panic, nothing would be left for the
+// next boot to act on — the crash loop would persist through the very mechanism
+// meant to break it.
 //
 // Quarantine is deliberately hard to trigger:
 //
@@ -43,9 +50,10 @@ package catdb
 //     permission, read-only volume, no space, not a directory) degrade instead.
 //     Renaming the directory would not fix any of them, and on the lock case it
 //     would move a live store out from under its owner.
-//   - the store's flock is probed before ANY quarantine, so a concurrent boot
-//     that is still inside its own Open is never quarantined by the loser of
-//     the race.
+//   - the store's own flock is HELD ACROSS THE RENAME, not merely probed before
+//     it. Probing and releasing leaves a window in which another process can
+//     start its own open and have its live directory renamed underneath it —
+//     rename succeeds regardless of who holds an flock.
 //   - anything unclassified degrades. The fail-safe default is to leave the
 //     disk alone.
 //
@@ -55,7 +63,7 @@ package catdb
 // returns false for all of them, verified empirically. String matching is the
 // only mechanism available, so it is used only to WIDEN recovery, never to
 // authorise destruction on its own: the environmental deny-list is consulted
-// first and the lock probe gates the rename.
+// first and the directory lock gates the rename.
 
 import (
 	"errors"
@@ -74,6 +82,14 @@ import (
 // the CHAOS-05/07 state-file quarantine already uses, so operators learn one
 // naming rule for the whole data directory.
 const quarantineSuffix = ".corrupt."
+
+// markerSuffix / markerTempSuffix name the per-attempt open markers. The temp
+// form is deliberately NOT a prefix match of the final form (no dot after
+// "opening"), so the sweep's glob cannot pick up a marker still being armed.
+const (
+	markerSuffix     = ".opening."
+	markerTempSuffix = ".openingtmp."
+)
 
 // maxQuarantinedCopies bounds how many damaged copies are kept. The store can
 // be gigabytes, and a host that keeps producing corruption must not fill the
@@ -128,19 +144,23 @@ type Recovery struct {
 // self-inflicted outage.
 func OpenResilient(dir string) (*CommunityDB, Recovery, error) {
 	var rec Recovery
-	marker := markerPath(dir)
 
-	if markerPresent(marker) {
+	if poison := abandonedMarkers(dir); len(poison) > 0 {
 		rec.Trigger = TriggerPoisonMarker
 		rec.Cause = "a previous start entered the store open and never returned (corrupt table, kill, or out-of-memory)"
 		applyQuarantine(dir, &rec)
-		// Clear the marker even when the quarantine was skipped: leaving it
-		// armed would re-trigger on every subsequent boot and could eventually
-		// quarantine a healthy store once the real holder exits.
-		_ = os.Remove(marker)
+		if rec.Quarantined {
+			// Clear only markers this call acted on. A skipped quarantine
+			// leaves the condition unresolved, so the breadcrumbs must survive
+			// for the next boot — and markers belonging to a LIVE opener are
+			// never in this list to begin with.
+			for _, m := range poison {
+				_ = os.Remove(m)
+			}
+		}
 	}
 
-	db, err := openGuarded(dir, marker)
+	db, err := openGuarded(dir)
 	if err == nil {
 		rec.ResidualQuarantines = QuarantinedCopies(dir)
 		return db, rec, nil
@@ -164,7 +184,7 @@ func OpenResilient(dir string) (*CommunityDB, Recovery, error) {
 	}
 	// Exactly one retry — a fresh directory. No loop: if this fails the fault
 	// is environmental and retrying cannot help.
-	db, err = openGuarded(dir, marker)
+	db, err = openGuarded(dir)
 	rec.ResidualQuarantines = QuarantinedCopies(dir)
 	if err != nil {
 		return nil, rec, err
@@ -176,6 +196,12 @@ func OpenResilient(dir string) (*CommunityDB, Recovery, error) {
 // when the directory is absent, when another process holds the store lock, or
 // when the lock state cannot be determined — the fail-safe default is to leave
 // the disk alone.
+//
+// The store lock is HELD ACROSS THE RENAME. Probing it and letting go first
+// would leave a window in which another process acquires badger's directory
+// lock and starts opening, only to have its live directory renamed underneath
+// it: rename does not consult flocks, so the probe has to remain in force until
+// the move is done.
 func applyQuarantine(dir string, rec *Recovery) {
 	if _, err := os.Stat(dir); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -185,16 +211,18 @@ func applyQuarantine(dir string, rec *Recovery) {
 		}
 		return
 	}
-	free, err := dirLockFree(dir)
+	lock, err := lockStore(dir)
 	switch {
 	case err != nil:
 		rec.Skipped = "cannot determine whether the store is in use: " + err.Error()
 		return
-	case !free:
+	case lock == nil:
 		rec.Skipped = "another process holds the store lock"
 		return
 	}
-	qpath, err := quarantineDir(dir)
+	defer lock.release()
+
+	qpath, err := quarantineDir(lock, dir)
 	if err != nil {
 		rec.Skipped = "could not move the damaged store aside: " + err.Error()
 		return
@@ -203,60 +231,213 @@ func applyQuarantine(dir string, rec *Recovery) {
 	rec.QuarantinePath = qpath
 }
 
-// openGuarded arms the poison marker for the duration of one badger.Open and
-// clears it whichever way the call returns. If the call does NOT return — the
-// uncatchable panic — the marker survives into the next boot, which is the
-// entire point.
-func openGuarded(dir, marker string) (*CommunityDB, error) {
-	armMarker(marker)
+// openGuarded arms this attempt's marker for the duration of one badger.Open
+// and clears it whichever way the call returns. If the call does NOT return —
+// the uncatchable panic — the marker survives into the next boot with its flock
+// released by the kernel, which is the entire point.
+func openGuarded(dir string) (*CommunityDB, error) {
+	attempt := beginAttempt(dir)
 	db, err := Open(dir)
-	_ = os.Remove(marker)
+	attempt.end()
 	return db, err
 }
 
-// markerPath is a SIBLING of the store directory, not a file inside it, so
-// quarantining the directory never carries the marker along with it.
-func markerPath(dir string) string {
-	return strings.TrimSuffix(dir, string(os.PathSeparator)) + ".opening"
+// ── locking ──────────────────────────────────────────────────────────────────
+
+// heldLock is an flock the caller is responsible for releasing. It is passed to
+// quarantineDir so the "lock is held across the rename" invariant is carried by
+// the type rather than by a comment: there is no way to reach the rename
+// without producing one, and a released handle is refused.
+type heldLock struct {
+	f        *os.File
+	released bool
 }
 
-// markerPresent requires a REGULAR file. Anything else at that path (a
-// directory an operator or a bad mount left behind) is ignored rather than
-// treated as a poison signal: os.Remove could not clear it, so it would
-// quarantine a healthy store on every boot forever.
-func markerPresent(marker string) bool {
-	fi, err := os.Stat(marker)
-	return err == nil && fi.Mode().IsRegular()
+func (h *heldLock) release() {
+	if !h.held() {
+		return
+	}
+	unlockFile(h.f)
+	_ = h.f.Close()
+	h.released = true
 }
 
-// armMarker writes and fsyncs the marker, then fsyncs its parent directory, so
-// the breadcrumb survives a power loss as well as a panic. Best-effort: the
-// marker is a safety net, and failing to write one must not stop the store from
-// opening (that would be the refuse-to-boot posture this file exists to remove).
-func armMarker(marker string) {
+func (h *heldLock) held() bool { return h != nil && h.f != nil && !h.released }
+
+// errStoreLockNotHeld guards the rename against a future refactor that probes
+// the lock and lets go before moving the directory. That ordering looks
+// harmless and is not: rename does not consult flocks, so the window lets
+// another process acquire badger's directory lock and start opening a store
+// that is about to be renamed out from under it.
+var errStoreLockNotHeld = errors.New("refusing to quarantine without holding the store lock")
+
+// lockStore takes badger's directory lock. (nil, nil) means a live process
+// holds it; (nil, err) means the lock state could not be determined. Only a
+// non-nil handle authorises a quarantine.
+func lockStore(dir string) (*heldLock, error) {
+	f, err := os.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	locked, lerr := flockFile(f)
+	if lerr != nil || !locked {
+		_ = f.Close()
+		return nil, lerr
+	}
+	return &heldLock{f: f}, nil
+}
+
+// ── open-attempt markers ─────────────────────────────────────────────────────
+
+// openAttempt is one in-flight badger.Open, represented on disk by a marker
+// file this process holds an flock on.
+type openAttempt struct {
+	path string
+	lock *heldLock
+}
+
+// beginAttempt arms a marker for this attempt. Best-effort: the marker is a
+// safety net, and failing to write one must not stop the store from opening —
+// that would be the refuse-to-boot posture this file exists to remove. A
+// zero-value attempt is safe to end().
+//
+// The marker is created under a temporary name, flocked, and only then renamed
+// into place, so it can never be observed existing-but-unlocked. Without that
+// ordering a concurrent boot could catch the microsecond gap between create and
+// flock and mistake a live attempt for a dead one.
+func beginAttempt(dir string) *openAttempt {
+	base := trimSep(dir)
+	if base == "" {
+		return &openAttempt{}
+	}
+	parent := filepath.Dir(base)
 	// badger MkdirAll's the store directory itself, but the marker is a sibling
 	// and is written FIRST — without this, the very first boot on a fresh volume
 	// would run unprotected.
-	_ = os.MkdirAll(filepath.Dir(marker), 0o700)
-	f, err := os.OpenFile(marker, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	_ = os.MkdirAll(parent, 0o700)
+
+	stamp := fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano())
+	tmp := base + markerTempSuffix + stamp
+	final := base + markerSuffix + stamp
+
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return &openAttempt{}
+	}
+	locked, lerr := flockFile(f)
+	if lerr != nil || !locked {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return &openAttempt{}
+	}
+	_, _ = fmt.Fprintf(f, "pid=%d ts=%s\n", os.Getpid(), time.Now().UTC().Format(time.RFC3339Nano))
+	_ = f.Sync()
+	// rename keeps the inode, so the flock taken above stays in force.
+	if err := os.Rename(tmp, final); err != nil {
+		unlockFile(f)
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return &openAttempt{}
+	}
+	syncDir(parent)
+	return &openAttempt{path: final, lock: &heldLock{f: f}}
+}
+
+// end releases and removes this attempt's marker. It touches no other process's
+// marker.
+func (a *openAttempt) end() {
+	if a == nil {
+		return
+	}
+	a.lock.release()
+	if a.path != "" {
+		_ = os.Remove(a.path)
+	}
+}
+
+// abandonedMarkers returns the markers of open attempts whose owning process is
+// gone — the poison signal. A marker whose flock cannot be taken belongs to a
+// LIVE opener and is never returned: clearing or acting on it would destroy the
+// breadcrumb of an attempt still in progress.
+//
+// It also reaps temp markers left by a death during arming. Those are not a
+// poison signal (the owner never reached badger.Open), just litter.
+func abandonedMarkers(dir string) []string {
+	base := trimSep(dir)
+	if base == "" {
+		return nil
+	}
+	var dead []string
+	for _, m := range globAll(base + markerSuffix + "*") {
+		if lockableRegularFile(m) {
+			dead = append(dead, m)
+		}
+	}
+	for _, tmp := range globAll(base + markerTempSuffix + "*") {
+		if lockableRegularFile(tmp) {
+			_ = os.Remove(tmp)
+		}
+	}
+	sort.Strings(dead)
+	return dead
+}
+
+// lockableRegularFile reports whether path is a regular file no live process
+// holds an flock on. Anything else — a directory an operator or a bad mount left
+// behind, an unreadable path, an undeterminable lock state — is left strictly
+// alone: os.Remove could not clear a directory, so treating one as a signal
+// would quarantine a healthy store on every boot forever.
+func lockableRegularFile(path string) bool {
+	fi, err := os.Lstat(path)
+	if err != nil || !fi.Mode().IsRegular() {
+		return false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close() //nolint:errcheck // read-only probe handle; close error is not actionable
+	locked, lerr := flockFile(f)
+	if lerr != nil || !locked {
+		return false
+	}
+	unlockFile(f)
+	return true
+}
+
+func globAll(pattern string) []string {
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return nil
+	}
+	return matches
+}
+
+func trimSep(p string) string { return strings.TrimSuffix(p, string(os.PathSeparator)) }
+
+func syncDir(dir string) {
+	d, err := os.Open(dir)
 	if err != nil {
 		return
 	}
-	_, _ = f.WriteString(fmt.Sprintf("pid=%d ts=%s\n", os.Getpid(), time.Now().UTC().Format(time.RFC3339Nano)))
-	_ = f.Sync()
-	_ = f.Close()
-	if d, derr := os.Open(filepath.Dir(marker)); derr == nil {
-		_ = d.Sync()
-		_ = d.Close()
-	}
+	_ = d.Sync()
+	_ = d.Close()
 }
+
+// ── quarantine ───────────────────────────────────────────────────────────────
 
 // quarantineDir renames dir aside and prunes older copies down to
 // maxQuarantinedCopies. The rename is within the same parent directory, so it
 // is an atomic metadata operation on one filesystem — never a copy, and it
 // needs no free space for the data.
-func quarantineDir(dir string) (string, error) {
-	base := strings.TrimSuffix(dir, string(os.PathSeparator))
+//
+// The store lock is a REQUIRED argument and must still be held: see
+// errStoreLockNotHeld.
+func quarantineDir(lock *heldLock, dir string) (string, error) {
+	if !lock.held() {
+		return "", errStoreLockNotHeld
+	}
+	base := trimSep(dir)
 	qpath := fmt.Sprintf("%s%s%d", base, quarantineSuffix, time.Now().UnixNano())
 	if err := os.Rename(base, qpath); err != nil {
 		return "", err
@@ -271,12 +452,12 @@ func quarantineDir(dir string) (string, error) {
 // self-healed store looks pristine on the next restart while the evidence — and
 // the disk it occupies — is still sitting there.
 func QuarantinedCopies(dir string) []string {
-	base := strings.TrimSuffix(dir, string(os.PathSeparator))
+	base := trimSep(dir)
 	if base == "" {
 		return nil
 	}
-	matches, err := filepath.Glob(base + quarantineSuffix + "*")
-	if err != nil || len(matches) == 0 {
+	matches := globAll(base + quarantineSuffix + "*")
+	if len(matches) == 0 {
 		return nil
 	}
 	sort.Strings(matches) // fixed-width unixnano suffix ⇒ lexical == chronological
