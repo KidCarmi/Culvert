@@ -90,7 +90,7 @@ func TestLoadCommunityFeedDB_DamagedStoreDoesNotKillTheProcess(t *testing.T) {
 	// #nosec G204,G702 -- re-exec of THIS test binary (os.Args[0]) with a fixed,
 	// literal flag and no external input; the child is how an os.Exit regression is
 	// observed instead of silently taking the parent down.
-	cmd := exec.Command(os.Args[0], "-test.run", "TestLoadCommunityFeedDB_DamagedStoreDoesNotKillTheProcess")
+	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run", "TestLoadCommunityFeedDB_DamagedStoreDoesNotKillTheProcess")
 	cmd.Env = append(os.Environ(), "CULVERT_CATFEEDDB_BOOT_CHILD="+dir)
 	out, err := cmd.CombinedOutput()
 	if err != nil || !strings.Contains(string(out), "child: boot completed") {

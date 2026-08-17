@@ -481,7 +481,7 @@ func runChildBoot(t *testing.T, dir string) (string, error) {
 	// #nosec G204,G702 -- re-exec of THIS test binary (os.Args[0]) with a fixed,
 	// literal flag and no external input; the child process is the only way to
 	// observe a panic badger raises from its own goroutine without killing the parent.
-	cmd := exec.Command(os.Args[0], "-test.run", "TestOpenResilient_SurvivesUncatchableOpenPanicOnNextBoot")
+	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run", "TestOpenResilient_SurvivesUncatchableOpenPanicOnNextBoot")
 	cmd.Env = append(os.Environ(), "CULVERT_CATDB_PANIC_CHILD="+dir)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
