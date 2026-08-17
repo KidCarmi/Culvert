@@ -220,9 +220,13 @@ func markerPath(dir string) string {
 	return strings.TrimSuffix(dir, string(os.PathSeparator)) + ".opening"
 }
 
+// markerPresent requires a REGULAR file. Anything else at that path (a
+// directory an operator or a bad mount left behind) is ignored rather than
+// treated as a poison signal: os.Remove could not clear it, so it would
+// quarantine a healthy store on every boot forever.
 func markerPresent(marker string) bool {
-	_, err := os.Stat(marker)
-	return err == nil
+	fi, err := os.Stat(marker)
+	return err == nil && fi.Mode().IsRegular()
 }
 
 // armMarker writes and fsyncs the marker, then fsyncs its parent directory, so
@@ -230,6 +234,10 @@ func markerPresent(marker string) bool {
 // marker is a safety net, and failing to write one must not stop the store from
 // opening (that would be the refuse-to-boot posture this file exists to remove).
 func armMarker(marker string) {
+	// badger MkdirAll's the store directory itself, but the marker is a sibling
+	// and is written FIRST — without this, the very first boot on a fresh volume
+	// would run unprotected.
+	_ = os.MkdirAll(filepath.Dir(marker), 0o700)
 	f, err := os.OpenFile(marker, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		return

@@ -439,3 +439,51 @@ func runChildBoot(t *testing.T, dir string) (string, error) {
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
+
+// A directory at the marker path is not a poison signal. os.Remove cannot clear
+// one, so treating it as a signal would quarantine a healthy store on every boot
+// forever — the opposite of the self-healing this file exists to provide.
+func TestOpenResilient_NonRegularMarkerIsIgnored(t *testing.T) {
+	dir := seedStore(t, 20)
+	if err := os.Mkdir(markerPath(dir), 0o700); err != nil {
+		t.Fatalf("mkdir marker: %v", err)
+	}
+	db, rec, err := OpenResilient(dir)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close() //nolint:errcheck // test cleanup
+	if rec.Quarantined || rec.Trigger != TriggerNone {
+		t.Errorf("a directory at the marker path was treated as poison: %+v", rec)
+	}
+	if cat, ok := db.Lookup(hostFor(0)); !ok || cat != "Social" {
+		t.Errorf("healthy store was replaced: %q %v", cat, ok)
+	}
+}
+
+// A store on a path whose parent does not exist yet must still be protected on
+// its very first open: the marker is a sibling and is written before badger
+// gets a chance to MkdirAll the store directory.
+func TestOpenResilient_FreshNestedPathIsProtectedFromTheFirstBoot(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "nested", "deeper", "catfeeddb")
+	db, _, err := OpenResilient(dir)
+	if err != nil {
+		t.Fatalf("first open on a nested path: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	// Simulate the process dying inside the next open.
+	armMarker(markerPath(dir))
+	if !markerPresent(markerPath(dir)) {
+		t.Fatal("marker could not be armed on a nested path — the first boot would run unprotected")
+	}
+	db2, rec, err := OpenResilient(dir)
+	if err != nil {
+		t.Fatalf("recovery open: %v", err)
+	}
+	defer db2.Close() //nolint:errcheck // test cleanup
+	if !rec.Quarantined {
+		t.Errorf("nested path did not recover: %+v", rec)
+	}
+}
