@@ -109,13 +109,30 @@ an eviction counter (`dedupEvicted`/`DedupEvictionsTotal()`), and pruning
 (`dedupPruneEvery`/`dedupPruneMinInterval`) — no collision with the unrelated, unambiguous "dedup" usages
 elsewhere (`support_tac_trust.go`, `internal/blocklist/delta.go`, `internal/mcp/limits/events.go`).
 
-**`store_logclock.go`'s new `logClockStamp`/`logEntryTimeLayout` memoization: no collision.** The only other
-"clock" compound in the tree, `catalogClockSkew` (`release_catalog_freshness.go`), names an unrelated
-tolerance-duration constant for release-catalog freshness — different kind of object, no shared surface.
+**`store_logclock.go`'s new `logClockStamp`/`logEntryTimeLayout` memoization: no collision, on a corrected
+full-tree accounting.** *Correction: an earlier draft of this section understated the "clock" compounds in
+the tree to a single example — a fuller grep surfaces `catalogClockSkew` (`release_catalog_freshness.go`),
+`caClockSkewTolerance` (`internal/ca/validity.go`, new this window), `capClockSkew`/`ClockSkew`
+(`internal/mcp/limits/auth.go`), and the DI clock-seam pattern `schedClock`/`realSchedClock`
+(`saas_feed_scheduler.go`) / `mcpTelemetryClock` (`mcp_telemetry.go`).* On inspection these split into two
+pre-existing, internally consistent, non-colliding idioms — permitted-clock-skew tolerance constants
+(`catalogClockSkew`/`caClockSkewTolerance`/`capClockSkew`, all naming the identical generic concept across
+three unrelated subsystems) and injectable time-source seams for testability
+(`schedClock`/`mcpTelemetryClock`, the standard Go DI pattern) — neither of which shares any surface,
+meaning, or reader with `logClockStamp`'s per-request timestamp-render memoization. None of these
+identifiers reach an API field, GUI label, config key, or audit/metric name, so there is no admin/support-
+facing collision; still worth naming precisely rather than asserting exhaustiveness from a narrow grep, per
+review feedback on this report.
 
-**T-40 re-verified live under a fresh full-repo grep:** the sole surviving reference to `idp_unreachable`
-outside test/historical-doc files is `internal/alerts/store.go`'s `legacyEventNames` migration-map entry
-itself — the rename holds with zero regressions eleven days later.
+**T-40 re-verified live under a fresh full-repo grep — correction to scope this precisely.** No production
+code path fires, checks, or exposes `idp_unreachable` as a live event value: the wire alert-event string,
+its `HasSubscriber` gate, and every webhook `Events` entry (via `legacyEventNames`, `internal/alerts/store.go:227`)
+are `identity_backend_unreachable`. The string `idp_unreachable` does still appear — correctly — as
+explanatory text in three places: `internal/alerts/store.go:29`'s catalog comment (documenting why the name
+was deliberately avoided), CLAUDE.md:174's CHAOS-47 section (same explanation), and several dated
+`docs/security-reviews/`/`docs/engineering/` files predating or documenting the 08-07 rename itself. None of
+these are live values a webhook or client would match against; the earlier "sole surviving reference"
+phrasing overstated this and is corrected here.
 
 **CHAOS-49 (`auth_oidc_flow.go`, `auth_ldap.go`, `auth_oidc.go`) and the `/readyz` info-disclosure
 reduction:** both confirmed clean — CHAOS-49 reuses the `identity_backend`/`culvert_auth_backend_*`
