@@ -368,6 +368,7 @@ behaviour before being accepted.
 | `TestCheckCategoryFeedDB_UnconfiguredIsOK` | most deployments never enable Layer 2 and must not see a row that looks like a problem |
 | `TestCheckCategoryFeedDB_UnreconciledQuarantineStaysVisible` | the incident outlives the process that handled it |
 | `TestCheckCategoryFeedDB_RowCarriesNoRawCause` | the viewer-role guardrail |
+| `TestMetrics_CatFeedDBSeries` | the three series are emitted, including `available 0` on an unconfigured node — an omitted series is not something an alerting rule can key on |
 
 ---
 

@@ -227,3 +227,36 @@ func TestLoadCommunityFeedDB_SourceHasNoFatalExit(t *testing.T) {
 		}
 	}
 }
+
+// The three exposition series. Pinned because they are the only signal an
+// operator has that a node quietly dropped to Layer-1-only categorisation, and
+// `available 0` must be emitted (not omitted) so an alerting rule can key on it.
+func TestMetrics_CatFeedDBSeries(t *testing.T) {
+	resetCatFeedDBHealthForTest()
+	t.Cleanup(resetCatFeedDBHealthForTest)
+
+	body := renderMetrics(t)
+	for _, want := range []string{
+		"culvert_catfeeddb_available 0",
+		"culvert_catfeeddb_recovered 0",
+		"culvert_catfeeddb_quarantined_copies 0",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("%q missing from /metrics on an unconfigured node", want)
+		}
+	}
+
+	noteCatFeedDBState(catFeedDBHealth{
+		Configured: true, Available: true, Recovered: true, Quarantines: 1, ResidualCopies: 2,
+	})
+	body = renderMetrics(t)
+	for _, want := range []string{
+		"culvert_catfeeddb_available 1",
+		"culvert_catfeeddb_recovered 1",
+		"culvert_catfeeddb_quarantined_copies 2",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("%q missing from /metrics after a recovery", want)
+		}
+	}
+}
