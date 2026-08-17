@@ -60,7 +60,7 @@ classes of row exist:
 
 | Check                       | Class           | Behaviour                                                                 |
 |-----------------------------|-----------------|---------------------------------------------------------------------------|
-| `ca`                        | informational   | Present and `ok` once the root CA is initialised; absent otherwise (the proxy still works as a plain forward proxy). |
+| `ca`                        | informational   | Present when a root CA is configured. `ok` once initialised and inside its validity window; `fail` if the configured CA failed to load (CHAOS-06) or is outside its validity window — expired or not-yet-valid (CHAOS-28); absent if no CA is configured (the proxy still works as a plain forward proxy). Always report-only — a `fail` here never triggers `503` (opt in via `/ready?strict=1`). Detail text is a fixed, redacted string on both fail branches — the CA bundle path and the OS error stay in the server logs only. |
 | `clamav`                    | gating          | When ClamAV is configured, `fail` if the daemon is unreachable.           |
 | `geoip`                     | informational   | Present and `ok` when GeoIP is enabled.                                    |
 | `yara`                      | informational   | Present and `ok` when YARA is enabled.                                     |
