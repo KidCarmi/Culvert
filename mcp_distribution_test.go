@@ -54,8 +54,13 @@ func mcpTestGWEnv(t *testing.T, s cpdp.Signer) *cpdp.Envelope {
 // disabled (the default) carries NO mcp_* fields on the wire — byte-compatible with
 // the pre-PR-10 SWG snapshot.
 func TestMCP_SWGByteCompatWhenDisabled(t *testing.T) {
-	if globalMCPDistribution.enabled.Load() {
-		t.Skip("MCP distribution unexpectedly enabled")
+	// No Skip guard: this invariant must hold unconditionally. It previously skipped
+	// whenever `enabled` was set, and since the DP composition sets that flag, any
+	// earlier test that composed a DP silently disarmed this gate under -shuffle=on.
+	// The CP capture path is now armed only by a real CP publication, so the disabled
+	// default is directly assertable.
+	if globalMCPDistribution.cpEnabled.Load() {
+		t.Fatal("CP publication armed without a publication: the disabled default is broken")
 	}
 	snap := ConfigSnapshot{Version: 1}
 	snap.MCPGatewaySnapshot = mcpCapturedGateway()
