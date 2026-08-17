@@ -161,15 +161,15 @@ func reportCatFeedDBOpened(path string, rec catdb.Recovery) {
 // come up, folding in the quarantine (or the reason one was not attempted) so
 // the operator gets one coherent account instead of two that disagree.
 func reportCatFeedDBUnavailable(path string, rec catdb.Recovery, dbErr error) {
-	context := ""
+	recoveryNote := ""
 	switch {
 	case rec.Quarantined:
-		context = fmt.Sprintf(" A damaged copy was quarantined to %s first, so the failure is with the REPLACEMENT store — check the volume for space, permissions, and mount state.", rec.QuarantinePath)
+		recoveryNote = fmt.Sprintf(" A damaged copy was quarantined to %s first, so the failure is with the REPLACEMENT store — check the volume for space, permissions, and mount state.", rec.QuarantinePath)
 	case rec.Trigger != catdb.TriggerNone:
-		context = fmt.Sprintf(" It looked damaged (%s) but could not be quarantined (%s).", rec.Trigger, rec.Skipped)
+		recoveryNote = fmt.Sprintf(" It looked damaged (%s) but could not be quarantined (%s).", rec.Trigger, rec.Skipped)
 	}
 	detail := fmt.Sprintf("community category store at %s could not be opened (%v) — the node is running with admin-managed categories only; category rules that depend on the community feed will not match.%s",
-		path, dbErr, context)
+		path, dbErr, recoveryNote)
 	logger.Printf("CatFeedDB: %q", sanitizeLog(detail))
 	deferStartupAlert("state_file_corrupt", AlertPayload{Source: "storage", Detail: detail})
 }
