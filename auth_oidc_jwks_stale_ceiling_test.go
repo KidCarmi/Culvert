@@ -217,11 +217,11 @@ func TestJWKS_FreshKeySetNeverRefused(t *testing.T) {
 // strictly below it, or the cache would either fail closed on every ordinary
 // refresh cycle or never retry inside its own trust window.
 func TestJWKS_TrustWindowConstantsAreOrdered(t *testing.T) {
-	if !(jwksMinRefreshInterval < jwksCacheTTL) {
+	if jwksMinRefreshInterval >= jwksCacheTTL {
 		t.Fatalf("jwksMinRefreshInterval (%s) must stay well under jwksCacheTTL (%s) "+
 			"or a genuine key rotation is never picked up", jwksMinRefreshInterval, jwksCacheTTL)
 	}
-	if !(jwksCacheTTL < jwksStaleMaxAge) {
+	if jwksCacheTTL >= jwksStaleMaxAge {
 		t.Fatalf("jwksStaleMaxAge (%s) must exceed jwksCacheTTL (%s) or an ordinary "+
 			"refresh cycle would fail closed", jwksStaleMaxAge, jwksCacheTTL)
 	}
