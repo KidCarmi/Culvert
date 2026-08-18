@@ -63,7 +63,21 @@ func apiAuthLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	role, ok := cfg.VerifyUIUser(body.User, body.Pass)
-	if !cfg.IsConfigured() {
+	// Pre-setup bootstrap window: uiAuthMiddleware and apiAuthStatus already
+	// grant RoleAdmin to every request with no credentials at all while
+	// !cfg.IsConfigured(), so this branch never needs a persisted cookie to
+	// function — the setup wizard itself never even calls this endpoint pre-
+	// setup (static/index.html only wires the login form for the "setup
+	// already done" branch). But the endpoint is public and reachable
+	// directly, so without this a caller can POST any credentials here
+	// before setup, mint a real signed session for an ATTACKER-CHOSEN
+	// username, and keep it: once the real operator later runs first-time
+	// setup with that same username (e.g. the wizard's own suggested default
+	// "admin"), the session cookie now names an existing user and remains a
+	// valid admin session for its full TTL — uiAuthMiddleware's only check on
+	// a local session is that the named user still exists.
+	preSetup := !cfg.IsConfigured()
+	if preSetup {
 		role, ok = RoleAdmin, true
 	}
 	if ok {
@@ -108,6 +122,15 @@ func apiAuthLogin(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		loginLimiter.RecordSuccess(clientIP, body.User)
+		if preSetup {
+			// See the comment on preSetup above: issuing a real session here
+			// would outlive first-time setup if the operator later creates a
+			// user with this same name, so skip it — the bootstrap window
+			// already grants full access without one.
+			auditEvent(r, "auth.login", body.User, "admin UI login (pre-setup bootstrap, no session issued)")
+			jsonOK(w, map[string]any{"ok": true, "user": body.User, "role": role})
+			return
+		}
 		// Clear any pre-existing session cookie before issuing a new one
 		// to prevent session fixation attacks (defense-in-depth).
 		clearUISessionCookie(w, r)
