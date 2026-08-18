@@ -14,6 +14,7 @@ import (
 	"errors"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/fileutil"
@@ -177,6 +178,36 @@ var (
 	adminSettingsPath string
 )
 
+// adminSettingsDurablySaved tracks whether admin_settings.json has been
+// durably written at least once, either found already saved at startup
+// (LoadAdminSettings) or written since (SaveAdminSettings). Every omnibus
+// save marks ALL sentinel-gated surfaces (log retention, log-store enable,
+// trusted-proxy CIDRs, blocklist feeds, upstream proxy pool, YARA settings,
+// decryption auto-exclusion tunables, support-bundle retention) authoritative
+// together — see saveAdminSettingsWithOverrides — so this single flag
+// accurately reflects all of them without re-deriving each sentinel at read
+// time. Diagnostics-only; never consulted by load/apply/save logic itself.
+var adminSettingsDurablySaved atomic.Bool
+
+// AdminSettingsDurablyOverridden reports whether the sentinel-gated settings
+// above are currently sourced from a GUI/API-saved admin_settings.json
+// (true) rather than from config.yaml/CLI flags (false). Race-free, no I/O;
+// safe for the read-only diagnostics handler.
+func AdminSettingsDurablyOverridden() bool {
+	return adminSettingsDurablySaved.Load()
+}
+
+// adminSettingsHasSavedSentinel reports whether any of the sentinel-gated
+// surfaces snapshotted by saveAdminSettingsWithOverrides is marked saved —
+// i.e. whether loading s would make those surfaces durably authoritative
+// over config.yaml/CLI. Pure; shared by LoadAdminSettings so the field list
+// lives in exactly one place.
+func adminSettingsHasSavedSentinel(s AdminSettings) bool {
+	return s.LogRetentionSaved || s.LogStoreEnabledSaved || s.TrustedProxyCIDRsSaved ||
+		s.BlocklistFeedsSaved || s.UpstreamProxiesSaved || s.YARASettingsSaved ||
+		s.AutoExcludeTunablesSaved || s.SupportRetentionSaved
+}
+
 // LoadAdminSettings reads the settings file and applies each field to its
 // respective component. Called once in main() after all components init.
 // Missing file = first run; each component keeps its config/default value.
@@ -244,6 +275,10 @@ func LoadAdminSettings(path string) {
 	applyAdminAutoExcludeTunables(&s)
 	applyAdminSupportRetention(&s)             // Slice B: configurable support-bundle retention caps
 	setDecRedactHosts(s.DecryptionRedactHosts) // ADR-0011 §4 host/SNI redaction posture
+
+	if adminSettingsHasSavedSentinel(s) {
+		adminSettingsDurablySaved.Store(true)
+	}
 
 	logger.Printf("AdminSettings: loaded from %s", path)
 }
@@ -664,6 +699,7 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 		logger.Printf("AdminSettings: write error: %v", err)
 		return err
 	}
+	adminSettingsDurablySaved.Store(true)
 	// Persist-before-apply: the durable write succeeded, so apply the target to the
 	// live runtime now — still under adminSettingsMu, so the (disk, runtime) pair
 	// moves atomically w.r.t. every other save.

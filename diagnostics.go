@@ -152,6 +152,7 @@ func buildOperatorContract() OperatorContract {
 		checkSAMLBaseURLPosture(),
 		checkDefaultAuthOpen(),
 		checkYARAEnginePosture(),
+		checkConfigSourcePrecedence(),
 		checkConfigSnapshotValidator(),
 		checkConfigVersionsPresent(cv),
 		checkConfigVersionsReadable(cv),
@@ -780,6 +781,38 @@ func checkYARAEnginePosture() OperatorContractCheck {
 		Code:    "yara_engine_posture",
 		Status:  diagOK,
 		Message: "YARA engine posture: fail-closed on timeout and saturation",
+	}
+}
+
+// checkConfigSourcePrecedence surfaces the DEBT-009 residual gap: config.yaml
+// and CLI flags for a specific group of settings (log retention, log-store
+// enable, trusted-proxy CIDRs, blocklist feeds, upstream proxy pool, YARA
+// engine settings, decryption auto-exclusion tunables, support-bundle
+// retention) are silently superseded the moment ANY admin GUI/API mutation
+// is saved — saveAdminSettingsWithOverrides always snapshots the full set
+// together, so an operator who only meant to change an unrelated setting
+// (e.g. the session timeout) unknowingly pins all of these to their current
+// values, and a later config.yaml edit for any of them has no effect after
+// restart. This is intended persistence behavior, not a fault, so it always
+// reports "ok" — the point is visibility, not a warning.
+func checkConfigSourcePrecedence() OperatorContractCheck {
+	if !AdminSettingsDurablyOverridden() {
+		return OperatorContractCheck{
+			Code:   "config_source_precedence",
+			Status: diagOK,
+			Message: "No admin settings saved yet — log retention, log-store enable, trusted-proxy CIDRs, " +
+				"blocklist feeds, upstream proxy pool, YARA engine settings, decryption auto-exclusion tunables, " +
+				"and support-bundle retention are all sourced from config.yaml/CLI flags.",
+		}
+	}
+	return OperatorContractCheck{
+		Code:   "config_source_precedence",
+		Status: diagOK,
+		Message: "Admin settings have been saved from the GUI/API at least once. Log retention, log-store enable, " +
+			"trusted-proxy CIDRs, blocklist feeds, upstream proxy pool, YARA engine settings, decryption " +
+			"auto-exclusion tunables, and support-bundle retention are now durable admin overrides — future " +
+			"edits to config.yaml or CLI flags for these settings are ignored on restart.",
+		OperatorAction: "Manage these settings from the admin GUI or REST API going forward; config.yaml/CLI edits to them take effect again only after they are changed via the GUI/API.",
 	}
 }
 
