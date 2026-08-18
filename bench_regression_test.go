@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/KidCarmi/Culvert/internal/sslbypass"
+	"github.com/KidCarmi/Culvert/internal/urlcat"
 )
 
 // TestBenchGate_PolicyEvalAllocs locks in the O(1)-allocation policy hot path.
@@ -556,5 +557,86 @@ func TestBenchGate_RequestLogEntryAllocs(t *testing.T) {
 			"per-request allocation has returned to the request-log chokepoint "+
 			"(a re-introduced time.Format, or an allocating field build). "+
 			"See store.go persistLogEntry and store_logclock.go.", allocs, maxAllocs)
+	}
+}
+
+// TestBenchGate_CategoryLookupConstantInTaxonomySize locks in the
+// SIZE-INDEPENDENCE contract on host→category resolution.
+//
+// catStore.LookupHost sits on the request path: lookupHostCategory (policy.go)
+// calls it, and categoryGroupMatchesHostRule (categorygroup.go) calls THAT once
+// per proxied request for every enabled access rule carrying a
+// DestCategoryGroup. It used to be a nested scan over every host pattern of
+// every category, so the cost was O(taxonomy) per rule per request — measured
+// ~24 us on the SHIPPED default taxonomy (657 patterns) and ~252 us at 5657, or
+// ~497 us of pure CPU per request for a 20-rule category posture. It is now a
+// bounded probe per host label (internal/urlcat lookupIn).
+//
+// This gate is keyed on the RATIO between two taxonomy sizes measured on the
+// SAME machine in the same run, not on absolute ns/op — that is what keeps it
+// hardware-independent, the same property the alloc-keyed gates above rely on.
+// A return to the linear scan shows up as a ~10x ratio and fails immediately;
+// the indexed lookup's ratio is ~1, with the remaining slack being map/cache
+// effects from the larger index.
+//
+// Allocation cannot gate this one: the old scan was already 0 allocs/op (the
+// "."+pattern concatenation is stack-allocated because it never escapes
+// strings.HasSuffix). The regression this guards is pure CPU.
+func TestBenchGate_CategoryLookupConstantInTaxonomySize(t *testing.T) {
+	// Ratio bound. Measured ~1.05x indexed (76 ns at 657 patterns, 80 ns at
+	// 6570); the linear scan measured ~10x (24 us → 250 us). 4 leaves generous
+	// room for a noisy shared runner while staying far below the failure mode.
+	const maxRatio = 4.0
+
+	// A host in NO category: the clean-traffic case, and the worst case for the
+	// old scan since a miss cannot short-circuit.
+	const probe = "uncategorized.example.invalid"
+
+	measure := func(patterns int) (int64, int) {
+		entries := urlcat.DefaultEntries()
+		base := 0
+		for _, e := range entries {
+			base += len(e.Hosts)
+		}
+		if patterns > base {
+			hosts := make([]string, 0, patterns-base)
+			for i := 0; i < patterns-base; i++ {
+				hosts = append(hosts, fmt.Sprintf("pad-%d.corp.invalid", i))
+			}
+			entries = append(entries, &urlcat.Entry{Name: "Padding", Hosts: hosts})
+			base = patterns
+		}
+		s := urlcat.New(entries)
+		if _, _, ok := s.LookupHost(probe); ok {
+			t.Fatalf("patterns=%d: probe host matched — the benchmark is not measuring the miss path", base)
+		}
+		// Two rounds, keep the faster: damps a scheduler hiccup on a shared
+		// runner without weakening the bound.
+		best := int64(0)
+		for round := 0; round < 2; round++ {
+			ns := testing.Benchmark(func(b *testing.B) {
+				for i := 0; i < b.N; i++ {
+					_, _, _ = s.LookupHost(probe)
+				}
+			}).NsPerOp()
+			if best == 0 || ns < best {
+				best = ns
+			}
+		}
+		return best, base
+	}
+
+	smallNs, smallN := measure(0)     // the shipped default taxonomy
+	largeNs, largeN := measure(10000) // a deployment that grew its own categories
+
+	ratio := float64(largeNs) / float64(smallNs)
+	t.Logf("LookupHost: %d ns/op at %d patterns, %d ns/op at %d patterns — ratio %.2fx (bound %.1fx)",
+		smallNs, smallN, largeNs, largeN, ratio, maxRatio)
+	if ratio > maxRatio {
+		t.Errorf("REGRESSION: LookupHost cost grew %.2fx when the taxonomy grew %.1fx, exceeding the %.1fx bound — "+
+			"host→category resolution is scaling with taxonomy size again instead of with the host's label count. "+
+			"That cost is paid inside the request goroutine, once per category-group rule, on every proxied request. "+
+			"See internal/urlcat lookupIn and the hostIndex/adminHostIndex construction in rebuildIndex.",
+			ratio, float64(largeN)/float64(smallN), maxRatio)
 	}
 }

@@ -54,7 +54,31 @@ type Store struct {
 	entries    []*Entry
 	index      map[string]map[string]bool // lowercase cat → lowercase host set (ALL entries)
 	adminIndex map[string]map[string]bool // same, BuiltIn=false entries only
-	path       string
+	// hostIndex / adminHostIndex are the REVERSE direction: lowercase host
+	// pattern → the position of the first entry that declares it. They serve
+	// LookupHost / LookupHostAdmin; see patternRef.
+	hostIndex      map[string]patternRef
+	adminHostIndex map[string]patternRef
+	path           string
+}
+
+// patternRef locates one host pattern inside s.entries: entry position, then
+// position within that entry's Hosts. Positions — not the resolved strings —
+// because the ORDER is the resolution rule (see lookupIn), and because two
+// int32s per pattern keeps the index small on a taxonomy with tens of
+// thousands of hosts.
+type patternRef struct {
+	entry int32
+	host  int32
+}
+
+// less reports whether r precedes o in the entry-then-host scan order that
+// LookupHost's original nested loop walked.
+func (r patternRef) less(o patternRef) bool {
+	if r.entry != o.entry {
+		return r.entry < o.entry
+	}
+	return r.host < o.host
 }
 
 // New builds a store over entries and its derived host index.
@@ -64,16 +88,47 @@ func New(entries []*Entry) *Store {
 	return s
 }
 
-// rebuildIndex reconstructs the category→hosts indices from s.entries.
+// rebuildIndex reconstructs every derived index from s.entries.
 // Caller must hold s.mu (write or be the sole owner).
+//
+// It is the SINGLE maintenance path: the mutators call it wholesale rather
+// than patching individual index keys. A full rebuild is O(total patterns),
+// but every mutator that reaches here also calls Save(), which marshals the
+// entire store to JSON and atomically rewrites the file — so the rebuild is
+// noise next to the work already being done, and the positional hostIndex
+// below cannot be patched incrementally anyway (deleting a category shifts
+// every later entry position).
 func (s *Store) rebuildIndex() {
 	idx := make(map[string]map[string]bool, len(s.entries))
 	admin := make(map[string]map[string]bool)
-	for _, e := range s.entries {
+	hostIdx := make(map[string]patternRef)
+	adminHostIdx := make(map[string]patternRef)
+	for ei, e := range s.entries {
 		key := strings.ToLower(e.Name)
 		set := make(map[string]bool, len(e.Hosts))
-		for _, h := range e.Hosts {
+		for hi, h := range e.Hosts {
 			set[strings.ToLower(strings.TrimSuffix(h, "."))] = true
+
+			// NOTE the deliberately DIFFERENT key normalization: the
+			// category→hosts set above trims a trailing dot, the reverse
+			// index does not. That mirrors LookupHost's original comparison
+			// (strings.ToLower(p), no TrimSuffix) exactly. The two matchers
+			// have disagreed on a "example.com."-shaped pattern since before
+			// this index existed; reproducing the difference keeps this a
+			// pure cost change. Reconciling them is a separate decision.
+			ref := patternRef{entry: int32(ei), host: int32(hi)}
+			pk := strings.ToLower(h)
+			// First declaration wins: entries are walked in order, so an
+			// already-present key was declared by an earlier (entry, host)
+			// position and therefore outranks this one.
+			if _, dup := hostIdx[pk]; !dup {
+				hostIdx[pk] = ref
+			}
+			if !e.BuiltIn {
+				if _, dup := adminHostIdx[pk]; !dup {
+					adminHostIdx[pk] = ref
+				}
+			}
 		}
 		idx[key] = set
 		if !e.BuiltIn {
@@ -82,6 +137,8 @@ func (s *Store) rebuildIndex() {
 	}
 	s.index = idx
 	s.adminIndex = admin
+	s.hostIndex = hostIdx
+	s.adminHostIndex = adminHostIdx
 }
 
 // defaultCategoriesJSON is the embedded SaaS category seed list.
@@ -207,33 +264,18 @@ func (s *Store) Set(name string, hosts []string, builtIn bool) error {
 		hosts = []string{}
 	}
 	s.mu.Lock()
-	key := strings.ToLower(name)
-	set := make(map[string]bool, len(hosts))
-	for _, h := range hosts {
-		set[strings.ToLower(strings.TrimSuffix(h, "."))] = true
-	}
 	for _, e := range s.entries {
 		if !strings.EqualFold(e.Name, name) {
 			continue
 		}
 		e.Hosts = hosts
-		s.index[key] = set
-		if e.BuiltIn {
-			delete(s.adminIndex, key)
-		} else {
-			s.adminIndex[key] = set
-		}
+		s.rebuildIndex()
 		s.mu.Unlock()
 		s.Save()
 		return nil
 	}
 	s.entries = append(s.entries, &Entry{Name: name, Hosts: hosts, BuiltIn: builtIn})
-	s.index[key] = set
-	if builtIn {
-		delete(s.adminIndex, key)
-	} else {
-		s.adminIndex[key] = set
-	}
+	s.rebuildIndex()
 	s.mu.Unlock()
 	s.Save()
 	return nil
@@ -242,14 +284,12 @@ func (s *Store) Set(name string, hosts []string, builtIn bool) error {
 // Delete removes a category by name. Returns an error if not found.
 func (s *Store) Delete(name string) error {
 	s.mu.Lock()
-	key := strings.ToLower(name)
 	for i, e := range s.entries {
 		if !strings.EqualFold(e.Name, name) {
 			continue
 		}
 		s.entries = append(s.entries[:i], s.entries[i+1:]...)
-		delete(s.index, key)
-		delete(s.adminIndex, key)
+		s.rebuildIndex()
 		s.mu.Unlock()
 		s.Save()
 		return nil
@@ -272,7 +312,7 @@ func (s *Store) AddHost(category, host string) error {
 			return nil // already present
 		}
 		e.Hosts = append(e.Hosts, host)
-		s.index[key][host] = true
+		s.rebuildIndex()
 		s.mu.Unlock()
 		s.Save()
 		return nil
@@ -284,7 +324,6 @@ func (s *Store) AddHost(category, host string) error {
 // RemoveHost deletes a host from the named category.
 func (s *Store) RemoveHost(category, host string) error {
 	s.mu.Lock()
-	key := strings.ToLower(category)
 	for _, e := range s.entries {
 		if strings.EqualFold(e.Name, category) {
 			host = hostutil.NormalizeHost(strings.TrimSpace(host))
@@ -293,7 +332,7 @@ func (s *Store) RemoveHost(category, host string) error {
 					continue
 				}
 				e.Hosts = append(e.Hosts[:i], e.Hosts[i+1:]...)
-				delete(s.index[key], host)
+				s.rebuildIndex()
 				s.mu.Unlock()
 				s.Save()
 				return nil
@@ -378,21 +417,9 @@ func (s *Store) MatchesHostAdmin(cat Category, host string) bool {
 // categories (the admin layer of the F3b-4 source-aware resolution). Same
 // exact-or-subdomain grammar as LookupHost.
 func (s *Store) LookupHostAdmin(host string) (category, matchedBy string, ok bool) {
-	h := hostutil.NormalizeHost(host)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	for _, e := range s.entries {
-		if e.BuiltIn {
-			continue
-		}
-		for _, p := range e.Hosts {
-			pl := strings.ToLower(p)
-			if h == pl || strings.HasSuffix(h, "."+pl) {
-				return e.Name, p, true
-			}
-		}
-	}
-	return "", "", false
+	return s.lookupIn(s.adminHostIndex, host)
 }
 
 // BuiltInHostCategories returns a normalized host→category map over the
@@ -422,24 +449,66 @@ func (s *Store) BuiltInHostCategories() map[string]string {
 	return out
 }
 
-// LookupHost resolves a hostname to its category by scanning entries
-// (exact + suffix match), returning the original-case category name and the
-// pattern that matched. Deliberately scans the entry lists — not the
-// lowercase index — so matchedBy reports the admin's configured pattern
-// verbatim (admin URL-lookup API contract).
+// LookupHost resolves a hostname to its category (exact + suffix match),
+// returning the original-case category name and the pattern that matched.
+// matchedBy is the admin's configured pattern verbatim, not a normalized form
+// (admin URL-lookup API contract) — hence the index resolves back through
+// s.entries rather than answering from a lowercase key.
 func (s *Store) LookupHost(host string) (category, matchedBy string, ok bool) {
-	h := hostutil.NormalizeHost(host)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	for _, e := range s.entries {
-		for _, p := range e.Hosts {
-			pl := strings.ToLower(p)
-			if h == pl || strings.HasSuffix(h, "."+pl) {
-				return e.Name, p, true
-			}
+	return s.lookupIn(s.hostIndex, host)
+}
+
+// lookupIn resolves host against one of the reverse pattern indices. Caller
+// must hold s.mu.
+//
+// Why this is not the nested scan it replaced: LookupHost is not an
+// admin-API-only call. package main's lookupHostCategory (policy.go) reaches
+// it, and categoryGroupMatchesHostRule (categorygroup.go) reaches THAT once
+// per proxied request for every enabled access rule carrying a
+// DestCategoryGroup — so its cost was O(every pattern in the taxonomy) on the
+// request path, and the clean-traffic MISS is the worst case because it walks
+// all of them. Measured on the SHIPPED default taxonomy (657 patterns, 27
+// categories) that was ~24 us per lookup per rule, growing linearly:
+// ~69 us at 1657 patterns, ~252 us at 5657.
+//
+// The set of patterns that can match h is fixed and tiny — h itself, plus the
+// remainder after each '.' — so the scan is replaced by probing exactly those
+// keys. Cost becomes O(labels in h) and independent of taxonomy size.
+//
+// The RESULT is unchanged, which is the load-bearing part: the old loop
+// returned the first (entry, host) position whose lowercased pattern matched,
+// and hostIndex records, per pattern, the first position declaring it. Taking
+// the minimum position over the matching keys is therefore the same winner —
+// including the case where a LESS specific pattern in an EARLIER category
+// beats a more specific one in a later category, which a plain
+// most-specific-suffix walk would silently invert. matchedBy stays the
+// admin's verbatim configured pattern.
+func (s *Store) lookupIn(idx map[string]patternRef, host string) (category, matchedBy string, ok bool) {
+	h := hostutil.NormalizeHost(host)
+	var best patternRef
+	found := false
+	consider := func(key string) {
+		if r, hit := idx[key]; hit && (!found || r.less(best)) {
+			best, found = r, true
 		}
 	}
-	return "", "", false
+	consider(h)
+	// Every suffix of h that starts just past a '.' — the exact set the old
+	// strings.HasSuffix(h, "."+pattern) test accepted. Byte iteration is safe:
+	// '.' is ASCII, and UTF-8 continuation bytes are all >= 0x80, so no
+	// multi-byte rune can contain this byte.
+	for i := 0; i < len(h); i++ {
+		if h[i] == '.' {
+			consider(h[i+1:])
+		}
+	}
+	if !found {
+		return "", "", false
+	}
+	e := s.entries[best.entry]
+	return e.Name, e.Hosts[best.host], true
 }
 
 // Path reports the persistence path ("" = persistence disabled).
