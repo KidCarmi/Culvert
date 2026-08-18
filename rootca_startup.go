@@ -50,9 +50,24 @@ func loadRootCA(cfg rootCAStartupConfig, ctx context.Context) {
 	caRuntime.path = cfg.Path
 	caRuntime.passphrase = cfg.Passphrase
 	// Start CA auto-rotation background check.
-	if certMgr.Ready() {
-		StartCAAutoRotation(ctx, cfg.Path, cfg.Passphrase)
-	}
+	//
+	// CHAOS-50: this used to be gated on certMgr.Ready(). The loop drives TWO
+	// unrelated CAs — the inspection CA AND the cluster CA that signs Data-Plane
+	// node certificates — so gating it on the inspection CA's health made a
+	// wrong CULVERT_CA_PASSPHRASE, a corrupt bundle, or an unwritable bundle
+	// path silently disable cluster-CA rotation as well, permanently and with no
+	// signal. The two failures then compound on a schedule: the appliance loses
+	// SSL inspection today (loudly, via ca_load_failed) and loses the ability to
+	// enroll or renew ANY node in ten years' time (silently), and nothing
+	// connects the two events.
+	//
+	// The gate bought nothing: RotateIfNeeded returns immediately when its CA
+	// has no expiry (internal/ca/ca.go — CAExpiry().IsZero()), and
+	// CleanupSecondaryCA is nil-safe, so on a node with no inspection CA the
+	// loop costs one zero-check per 24h tick. StartCAAutoRotation is idempotent,
+	// so calling it unconditionally here is also what makes a later runtime
+	// Control-Plane promotion safe to cover.
+	StartCAAutoRotation(ctx, cfg.Path, cfg.Passphrase)
 }
 
 // initInspectionCA performs the load-or-init half of loadRootCA: persisted

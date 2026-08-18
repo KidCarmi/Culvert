@@ -197,6 +197,48 @@ func appendCAReadinessCheck(checks map[string]*readinessCheck) {
 	}
 }
 
+// appendClusterCAReadinessCheck adds the CHAOS-50 cluster-CA row. Report-only,
+// exactly like the `ca` row above: an expired cluster CA does not stop this node
+// serving proxy traffic, and gating readiness on it would take a healthy
+// gateway out of a load-balancer rotation over a control-plane fault.
+//
+// No row at all on a node with no cluster CA — a Data Plane, or a proxy that was
+// never promoted — so the row's presence is itself the "this node issues node
+// certificates" signal.
+//
+// The detail follows the same rule as the `ca` validity branch: this failure
+// fails CLOSED (issuance is refused), so naming it hands an unauthenticated
+// observer no exfiltration window. It still carries no path, fingerprint, or
+// timestamp — the operator-actionable cause is in the log, the cert_expiry
+// alert, and the role-gated /api/cluster/ca surface.
+func appendClusterCAReadinessCheck(checks map[string]*readinessCheck) {
+	if !globalClusterCA.Ready() {
+		return
+	}
+	if globalClusterCA.Usable() != nil {
+		checks["cluster_ca"] = &readinessCheck{
+			Status: "fail",
+			Detail: "cluster CA outside its validity window; node enrollment and renewal are blocked — see server logs",
+		}
+		return
+	}
+	// A failing rotation is NOT a readiness failure: the CA can still issue
+	// today, and flipping the row to "fail" would pull a healthy gateway out of
+	// a load-balancer rotation over a fault whose deadline is months away. It
+	// rides an "ok" row's detail instead, so the status vocabulary stays the
+	// ok/fail pair every consumer of this endpoint already handles. The paging
+	// signal for it is the cert_expiry alert and
+	// culvert_cluster_ca_rotation_failures_total, not this probe.
+	if clusterCARotationDegraded() {
+		checks["cluster_ca"] = &readinessCheck{
+			Status: "ok",
+			Detail: "cluster CA is usable but auto-rotation is failing — see server logs",
+		}
+		return
+	}
+	checks["cluster_ca"] = &readinessCheck{Status: "ok"}
+}
+
 // computeReadiness builds the readiness snapshot and the HTTP status code (200
 // when all gating checks pass, 503 otherwise). Shared by handleReady and the
 // readiness support collector. The verdict returned here is the DEFAULT
@@ -210,6 +252,9 @@ func computeReadiness() (report readinessReport, code int) {
 
 	// 1. CA — see appendCAReadinessCheck. Report-only: never gates.
 	appendCAReadinessCheck(checks)
+	// 1b. Cluster CA (CHAOS-50) — see appendClusterCAReadinessCheck.
+	// Report-only: never gates.
+	appendClusterCAReadinessCheck(checks)
 
 	// 2. ClamAV: if scanner is initialised, verify connectivity.
 	//

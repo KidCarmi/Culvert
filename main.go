@@ -1175,6 +1175,17 @@ func enableControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath strin
 	// the CP still serves locally, so boot continues.
 	_ = globalConfigStore.Update(CurrentConfigSnapshot())
 	initClusterCA(clusterDBPath)
+	// CHAOS-50: a node promoted to Control Plane at RUNTIME has just acquired a
+	// cluster CA that nothing was scheduled to rotate — the startup call in
+	// loadRootCA ran before this node had one to rotate, and on a node with no
+	// inspection CA the pre-fix build skipped that call entirely. The loop is
+	// idempotent, so claiming it here is free when it is already running.
+	// resolveLifecycleCtx, not appLifecycleCtx directly: this function is
+	// reachable from the admin API and from tests that never ran main(), where
+	// the lifecycle context is still nil. The loop only reads ctx.Done() inside
+	// its goroutine, so a nil would surface as an asynchronous crash in an
+	// unrelated test rather than at this call.
+	StartCAAutoRotation(resolveLifecycleCtx(), caRuntime.path, caRuntime.passphrase)
 	if err := StartControlPlaneGRPC(grpcAddr, certFile, keyFile, caFile); err != nil {
 		return err
 	}

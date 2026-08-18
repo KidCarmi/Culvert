@@ -953,6 +953,22 @@ func (ca *clusterCA) loadFromPEM(certPEM, keyPEM []byte) error {
 	ca.key = key
 	ca.certPEM = certPEM
 	logger.Printf("ClusterCA: loaded existing cluster CA (expires %s)", cert.NotAfter.Format("2006-01-02"))
+
+	// CHAOS-50: an out-of-window CA is LOADED, not rejected — refusing here
+	// would brick the one node that can repair the situation, and rotation is
+	// the recovery path (RotateIfNeeded treats a negative remaining lifetime as
+	// due, and the auto-rotation loop now runs a round immediately at startup).
+	// But it must not load SILENTLY: pre-fix the boot line above was the entire
+	// signal, and it reads like success. Recording it here arms the counter, the
+	// alert, and every status surface from the first second of uptime rather
+	// than from the first node that fails to enroll.
+	//
+	// Note the asymmetry this closes on the other side too: ImportCA has always
+	// REFUSED an expired CA (parseAndValidateCACert), so an operator could not
+	// install one deliberately while the loader accepted one silently on boot.
+	if err := clusterCAUsable(cert, time.Now()); err != nil {
+		noteClusterCAUnusable(err.Error())
+	}
 	return nil
 }
 
@@ -963,6 +979,20 @@ func (ca *clusterCA) SignCSR(csrPEM []byte, nodeID string) (certPEM []byte, seri
 
 	if ca.cert == nil || ca.key == nil {
 		return nil, "", time.Time{}, fmt.Errorf("cluster CA not initialized")
+	}
+
+	// CHAOS-50 / CA-13: refuse to issue from a CA that is outside its OWN
+	// validity window. x509.CreateCertificate does not check the parent's
+	// NotBefore/NotAfter, so without this the CP hands the node a perfectly
+	// well-formed certificate that fails path validation in every TLS stack —
+	// enrollment reports success and the node can never connect. Refusing costs
+	// no availability that signing would have preserved; it just makes the
+	// failure a single counted, alerted event on the node that can fix it
+	// instead of an opaque handshake error on every node that cannot.
+	// See cluster_ca_validity.go.
+	if err := clusterCAUsable(ca.cert, time.Now()); err != nil {
+		noteClusterCAUnusable(err.Error())
+		return nil, "", time.Time{}, err
 	}
 
 	block, _ := pem.Decode(csrPEM)
@@ -983,11 +1013,23 @@ func (ca *clusterCA) SignCSR(csrPEM []byte, nodeID string) (certPEM []byte, seri
 		return nil, "", time.Time{}, fmt.Errorf("generate serial: %w", err)
 	}
 
-	notAfter := time.Now().Add(365 * 24 * time.Hour) // 1 year
+	// CHAOS-50 / CA-13: clamp the node certificate to the issuer's window on
+	// BOTH ends so a leaf can never outlive the CA that signed it. Unclamped,
+	// a node enrolled shortly before the cluster CA expires received a
+	// full-year certificate, and the DP's own renewal trigger (certNeedsRenewal,
+	// dp_enrollment.go) reads exactly that NotAfter — so the node sat still,
+	// believing it had a year left, through the entire window in which it had
+	// to renew. The clamp makes the node's view of its own expiry TRUE, which
+	// is what drives it to renew while the CP can still issue.
+	notBefore, notAfter := clampNodeCertValidity(
+		time.Now().Add(-5*time.Minute),
+		time.Now().Add(365*24*time.Hour), // 1 year
+		ca.cert,
+	)
 	template := &x509.Certificate{
 		SerialNumber: serialNum,
 		Subject:      pkix.Name{CommonName: nodeID, Organization: []string{"Culvert Data Plane"}},
-		NotBefore:    time.Now().Add(-5 * time.Minute),
+		NotBefore:    notBefore,
 		NotAfter:     notAfter,
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
@@ -1146,27 +1188,42 @@ func (ca *clusterCA) ImportCA(certPEM, keyPEM []byte) error {
 		backupCAFiles(dir, ca.certPEM, ca.key)
 	}
 
-	// ── Dual-CA overlap: preserve old CA as secondary ──
-	if ca.cert != nil {
-		ca.secondaryCert = ca.cert
-		ca.secondaryPEM = ca.certPEM
-		ca.secondaryExp = ca.cert.NotAfter
-		logger.Printf("ClusterCA: old CA preserved as secondary (expires %s)",
-			ca.cert.NotAfter.Format("2006-01-02"))
-	}
-
-	// Persist new CA via atomicWriteFile (per-file durability: unique tmp +
-	// chmod + fsync + rename + parent-dir fsync). NOT a true two-file
-	// commit — a crash between the cert and key writes can leave the new
-	// cert with the old key on disk (mismatch). That state is detected on
-	// the next startup by loadFromPEM cross-validation (D1.1f) and fails
-	// closed; auto-repair is intentionally out of scope.
+	// ── Persist BEFORE any in-memory swap (CHAOS-50) ──
+	//
+	// The dual-CA overlap assignment below used to run FIRST, so a write that
+	// failed (full or read-only volume, a path that is not a regular file)
+	// returned an error having already installed the CURRENT CA as its own
+	// secondary: SecondaryActive() flipped true, AllCACertsPEM() emitted the
+	// same certificate twice into the client pool, and the next
+	// CleanupSecondary fired onRotate and cleared the cluster store's rotation
+	// tracking for a rotation that never happened. Persist-before-swap makes a
+	// failed import a true no-op on live state.
+	//
+	// Per-file durability via atomicWriteFile (unique tmp + chmod + fsync +
+	// rename + parent-dir fsync). Still NOT a true two-file commit — a crash
+	// between the cert and key writes can leave the new cert with the old key
+	// on disk (mismatch). That state is detected on the next startup by
+	// loadFromPEM cross-validation (D1.1f) and fails closed; auto-repair is
+	// intentionally out of scope.
 	if err := atomicWriteFile(certFile, certPEM, 0o600); err != nil {
 		return fmt.Errorf("write cluster CA cert: %w", err)
 	}
 	// CA-3: encrypt the key at rest when enabled; plaintext otherwise.
 	if err := writeClusterCAKey(dir, keyFile, keyPEM); err != nil {
 		return fmt.Errorf("write cluster CA key: %w", err)
+	}
+
+	// ── Dual-CA overlap: preserve old CA as secondary ──
+	// hadPrior distinguishes a ROTATION (there is an outgoing CA whose
+	// certificates must keep validating through the overlap) from a first
+	// INSTALL (nothing to overlap with) — see the rotation-tracking guard below.
+	hadPrior := ca.cert != nil
+	if hadPrior {
+		ca.secondaryCert = ca.cert
+		ca.secondaryPEM = ca.certPEM
+		ca.secondaryExp = ca.cert.NotAfter
+		logger.Printf("ClusterCA: old CA preserved as secondary (expires %s)",
+			ca.cert.NotAfter.Format("2006-01-02"))
 	}
 
 	ca.cert = cert
@@ -1187,13 +1244,22 @@ func (ca *clusterCA) ImportCA(certPEM, keyPEM []byte) error {
 	}
 
 	// Start CA rotation tracking (old fingerprint from secondary).
-	oldFP := sha256.Sum256(ca.secondaryCert.Raw)
-	newFP := sha256.Sum256(cert.Raw)
-	globalClusterStore.StartCARotation(
-		hex.EncodeToString(newFP[:]),
-		hex.EncodeToString(oldFP[:]),
-		ca.secondaryExp,
-	)
+	//
+	// CHAOS-50: guarded on hadPrior. This dereferenced ca.secondaryCert
+	// unconditionally, so importing into a CP whose cluster CA had failed to
+	// load — which is EXACTLY the state an operator imports a CA to repair —
+	// panicked on a nil pointer, half-way through the import and after onRotate
+	// had already fired. A first install is not a rotation: there is no old
+	// fingerprint for nodes to migrate off, so there is nothing to track.
+	if hadPrior {
+		oldFP := sha256.Sum256(ca.secondaryCert.Raw)
+		newFP := sha256.Sum256(cert.Raw)
+		globalClusterStore.StartCARotation(
+			hex.EncodeToString(newFP[:]),
+			hex.EncodeToString(oldFP[:]),
+			ca.secondaryExp,
+		)
+	}
 
 	// Bump config version so DP nodes pick up the new CA fingerprint on next poll.
 	// A commit-time rejection (config over a cap) is logged + alerted + surfaced
@@ -1244,12 +1310,21 @@ func (ca *clusterCA) AllCACertsPEM() []byte {
 }
 
 // recordRotationFailure records the most recent auto-rotation failure for
-// Info() to surface. err is an internal crypto/x509 error, never user input.
+// Info() to surface, and reports it to the health plane. err is an internal
+// crypto/x509 or filesystem error, never user input.
+//
+// CHAOS-50 / CA-13: the Info() string used to be the ONLY record. Nothing
+// counted a failed rotation, nothing alerted on it, and no probe moved — so a
+// rotation that had been failing every day for a month first became visible as
+// the cluster-wide enrollment outage at expiry, which is the one moment the
+// operator has no time to diagnose it. The inspection CA got this plane in
+// CHAOS-28; this is the same plane for the CA whose expiry costs more.
 func (ca *clusterCA) recordRotationFailure(err error) {
 	ca.mu.Lock()
 	ca.lastRotationErr = err.Error()
 	ca.lastRotationErrAt = time.Now()
 	ca.mu.Unlock()
+	noteClusterCARotationFailure(err.Error())
 }
 
 // RotateIfNeeded checks cluster CA expiry and auto-rotates if it expires
@@ -1314,6 +1389,11 @@ func (ca *clusterCA) RotateIfNeeded() {
 		ca.recordRotationFailure(err)
 		return
 	}
+	// Success is recorded on the ROTATION path only, and only after ImportCA
+	// returned nil — which now means the new pair reached disk (persist-before-
+	// swap). A rotation that lived only in RAM would otherwise clear the
+	// operator's warning while the next restart reloaded the expiring CA.
+	noteClusterCARotated()
 	logger.Printf("ClusterCA: auto-rotated successfully (new CA expires %s)",
 		template.NotAfter.Format("2006-01-02"))
 }
@@ -1346,6 +1426,24 @@ func (ca *clusterCA) Info() map[string]any {
 		info["lastRotationError"] = ca.lastRotationErr
 		info["lastRotationErrorAt"] = ca.lastRotationErrAt.UTC().Format(time.RFC3339)
 	}
+	// CHAOS-50: report ISSUANCE capability, not just presence. "initialized"
+	// stayed true through a total enrollment outage, so the admin panel showed a
+	// healthy cluster CA while every node that tried to enroll or renew was
+	// being refused. usable is computed from the same predicate the sign path
+	// uses, so the panel and the RPC can never disagree.
+	//
+	// mu is already held (RLock, by the caller) — clusterCAUsable is the pure
+	// predicate precisely so this does not have to re-enter Usable() and
+	// deadlock on a non-reentrant lock.
+	usableErr := clusterCAUsable(ca.cert, time.Now())
+	info["usable"] = usableErr == nil
+	if usableErr != nil {
+		info["usableError"] = usableErr.Error()
+	}
+	snap := clusterCAHealthFailures()
+	info["signRefusals"] = snap.SignRefusals
+	info["rotationFailures"] = snap.RotationFailures
+	info["rotationDegraded"] = snap.RotationDegraded
 	return info
 }
 

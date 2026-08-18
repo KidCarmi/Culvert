@@ -54,6 +54,49 @@ func caWritePrometheus(w *strings.Builder) {
 	fmt.Fprintf(w, "culvert_cluster_ca_rotations_total %d\n", statClusterCARotations.Load())
 
 	caWriteUsabilityPrometheus(w)
+	clusterCAWriteUsabilityPrometheus(w)
+}
+
+// clusterCAWriteUsabilityPrometheus appends the CHAOS-50 cluster-CA usability
+// series — the CA-13 counterpart of caWriteUsabilityPrometheus.
+//
+// The gap these close: before them, `culvert_cluster_ca_rotations_total` counted
+// only SUCCESSES, so a cluster CA whose rotation had failed every day for a
+// month was indistinguishable from one that simply was not due yet — the series
+// is flat in both cases. There was no expiry series at all, which matters more
+// here than for the inspection CA: cluster-CA expiry is a hard cliff at which no
+// Data-Plane node can enroll or renew, and `culvert_cluster_ca_expires_in_seconds`
+// is the one an operator should alert on months ahead of it.
+//
+// Label-free, per the CA-2 metrics contract: no node ID, subject, serial,
+// fingerprint, or key material — counts and one time delta only.
+func clusterCAWriteUsabilityPrometheus(w *strings.Builder) {
+	snap := clusterCAHealthFailures()
+
+	w.WriteString("\n# HELP culvert_cluster_ca_usable Whether the cluster CA can currently issue node certificates that will authenticate (1 = yes)\n")
+	w.WriteString("# TYPE culvert_cluster_ca_usable gauge\n")
+	usable := 0
+	if globalClusterCA.Usable() == nil {
+		usable = 1
+	}
+	fmt.Fprintf(w, "culvert_cluster_ca_usable %d\n", usable)
+
+	// Omitted entirely when no cluster CA is loaded — an absent series is
+	// honest, whereas 0 would read as "expires now" and page on every node that
+	// is not a Control Plane.
+	if exp := globalClusterCA.Expiry(); !exp.IsZero() {
+		w.WriteString("\n# HELP culvert_cluster_ca_expires_in_seconds Seconds until the cluster CA certificate expires (negative once expired)\n")
+		w.WriteString("# TYPE culvert_cluster_ca_expires_in_seconds gauge\n")
+		fmt.Fprintf(w, "culvert_cluster_ca_expires_in_seconds %d\n", int64(time.Until(exp).Seconds()))
+	}
+
+	w.WriteString("\n# HELP culvert_cluster_ca_sign_refused_total Node-certificate issuances refused because the cluster CA was outside its validity window\n")
+	w.WriteString("# TYPE culvert_cluster_ca_sign_refused_total counter\n")
+	fmt.Fprintf(w, "culvert_cluster_ca_sign_refused_total %d\n", snap.SignRefusals)
+
+	w.WriteString("\n# HELP culvert_cluster_ca_rotation_failures_total Cluster CA auto-rotation rounds that could not install a replacement CA\n")
+	w.WriteString("# TYPE culvert_cluster_ca_rotation_failures_total counter\n")
+	fmt.Fprintf(w, "culvert_cluster_ca_rotation_failures_total %d\n", snap.RotationFailures)
 }
 
 // caWriteUsabilityPrometheus appends the CHAOS-28 Root-CA usability series.

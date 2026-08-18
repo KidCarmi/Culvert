@@ -12,6 +12,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/ca"
@@ -60,7 +61,19 @@ func init() {
 // certificate expiry and triggers rotation when needed — for BOTH the
 // inspection CA (internal/ca) and the cluster CA (enrollment.go). The loop
 // lives here, not in the package, because it spans both CAs.
+// caAutoRotationStarted makes StartCAAutoRotation idempotent. The loop drives
+// TWO CAs with different owners, and the cluster CA's owner (a Control Plane)
+// can come into existence at runtime — enableControlPlane is callable from the
+// admin API — long after the startup call. Rather than teach every future
+// promotion path to remember the loop, the call is safe to repeat and every
+// caller simply makes it.
+var caAutoRotationStarted atomic.Bool
+
+// StartCAAutoRotation is idempotent: the second and later calls are no-ops.
 func StartCAAutoRotation(ctx context.Context, caPath, passphrase string) {
+	if !caAutoRotationStarted.CompareAndSwap(false, true) {
+		return
+	}
 	go func() {
 		t := time.NewTicker(ca.RotationCheckInterval)
 		defer t.Stop()

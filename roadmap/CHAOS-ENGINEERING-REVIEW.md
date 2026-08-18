@@ -17,6 +17,37 @@ everything else is triaged below with a suggested PR and required tests for foll
 
 ## 0. Revision log
 
+**2026-08-18 — CHAOS-50 sweep (the cluster CA across its lifecycle).**
+
+CHAOS-28 hardened the INSPECTION CA against its own expiry and closed by naming what it had not
+touched: the **cluster CA** — the one that signs Data-Plane node certificates — has none of it
+(register row CA-13). This sweep confirms CA-13 and finds five more defects in the same domain,
+five of the six reproduced empirically against `main` first. The blast radius is worse than the
+inspection CA's in a way that is easy to understate: a DP node certificate is the credential for
+the mTLS channel that carries every `ConfigSnapshot`, and when it stops validating the Data Plane
+does not fail or alarm — it **keeps serving traffic under the last policy it received,
+indefinitely**, while the CP believes it is publishing. An inspection-CA expiry is a loud outage;
+a cluster-CA expiry is a silent fleet-wide CONFIGURATION FREEZE. (1) `SignCSR` had no validity
+guard, so an expired cluster CA **kept issuing** node certs and the CP returned enrollment success
+and registered the node as connected, while every cert failed path validation (CA-17). (2) The only
+driver of cluster-CA rotation was started **`if certMgr.Ready()`** — gated on the unrelated
+INSPECTION CA — so the already-recorded CA-3 fault (wrong `CULVERT_CA_PASSPHRASE`, corrupt bundle;
+`Ready()` stays false because `LoadOrInitCA` routes an existing bundle straight to `LoadCA`) also
+disabled cluster-CA rotation permanently and silently, and a runtime CP promotion never started it
+at all: one operator mistake, two failures on wildly different fuses, nothing connecting them
+(CA-18). (3) Node certs were **not clamped to their issuer**, so a node enrolled near CA expiry got
+a full-year cert and its own renewal trigger reported a year of runway through the entire window in
+which it had to renew — the node's view of its health exactly inverted from the truth (CA-19).
+(4) `ImportCA` mutated live dual-CA state **before** persisting, and dereferenced a nil secondary
+on a first install — so the documented recovery path for a broken cluster CA *panicked* (CA-20).
+(5) An expired CA on disk **loaded silently** behind a success-shaped log line (CA-21). (6) CA-13
+as recorded. All fixed. The load-bearing decision was to mirror CHAOS-28's plane rather than invent
+a second dialect — `Usable()` distinct from `Ready()`, fail-closed at the sign path, clamp to the
+issuer, evidence-driven recovery, and the EXISTING `cert_expiry` event name (distinguished by
+`Host`) so an operator already subscribed to certificate-lifecycle events does not have to discover
+a new one to hear about the CA whose expiry takes the whole cluster down. See
+`docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-18.md`.
+
 **2026-08-11 — CHAOS-49 sweep (the multi-IdP registry auth path under IdP failure).**
 
 CHAOS-47 gave the LEGACY identity backends a three-part contract (an infrastructure failure is
@@ -182,7 +213,12 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | CA-11 | Leaf-cert cache has **no single-flight** — N concurrent misses for one host each sign independently; TTL expiry is synchronized (thundering herd). | GAP (re-scoped by CHAOS-28: the perf-F3 shared leaf key removed the dominant per-miss cost — P-256 keygen — so the herd is materially cheaper than when first recorded) | M → L/M | `internal/ca/ca.go` `GetCert` |
 | CA-16 | Leaf-cache **`cacheOrder` slice grew on every TTL REFRESH** while the map entry was overwritten. `len(cache)` never changed, so the eviction branch never fired: an unbounded slice behind a bounded map, growing with UPTIME on an ordinary steady working set (W=5,000 hosts ⇒ ~120k strings/day). Invisible to `culvert_cert_cache_size`, which reports the bounded map. | NEW → **CLOSED** (CHAOS-28: append only for an untracked host; behavior-preserving for eviction — duplicate entries always resolved to "already gone") | M | was: `internal/ca/ca.go` `GetCert`; see §16 |
 | CA-12 | Upstream & client MITM handshakes inherit only `r.Context()` (no explicit handshake deadline); a slowloris handshake ties up the goroutine. Good: uses `HandshakeContext`, not `Handshake()`. | GAP | M | `proxy.go:1503,1591` |
-| CA-13 | Cluster CA rotation mirrors CA-2: every failure branch logs-and-returns with no alert/metric. Silent failure → cluster-wide enrollment break at expiry. | GAP (**next sweep** — CHAOS-28 closed the inspection-CA half as CA-2; this is the same defect class in the OTHER CA, with a different lifecycle and blast radius) | M | `enrollment.go:1189-1245` |
+| CA-13 | Cluster CA rotation mirrors CA-2: every failure branch logs-and-returns with no alert/metric. Silent failure → cluster-wide enrollment break at expiry. | GAP → **CLOSED** (CHAOS-50: counted + alerted + `culvert_cluster_ca_rotation_failures_total` + `rotationDegraded` on `/api/cluster/ca`, keyed on current state not the cumulative counter) | M | was: `enrollment.go` `recordRotationFailure`; now `cluster_ca_validity.go` — see §17 |
+| CA-17 | **Expired cluster CA keeps signing DP node certs** — no validity guard on `SignCSR`. The CP returns enrollment success and registers the node as connected while every issued cert fails path validation, so no node can enroll or renew: a SILENT fleet-wide config freeze (a DP keeps serving the last policy it received, indefinitely). CA-1 in the OTHER CA. | NEW → **CLOSED** (CHAOS-50: `Usable()` distinct from `Ready()`, `ErrClusterCAUnusable` at the sign path, counted + alerted + `culvert_cluster_ca_usable`/`_expires_in_seconds` + `/readyz cluster_ca`) | **H** | was: `enrollment.go` `SignCSR`; see §17 |
+| CA-18 | **Cluster-CA auto-rotation was gated on the INSPECTION CA loading** (`if certMgr.Ready()` around the only `StartCAAutoRotation` call). One loop drives two unrelated CAs, so the CA-3 fault — wrong `CULVERT_CA_PASSPHRASE`/corrupt bundle, which leaves `Ready()` false because `LoadOrInitCA` routes an existing bundle straight to `LoadCA` — ALSO disabled cluster-CA rotation permanently and silently. A runtime CP promotion (`enableControlPlane`) never started it at all. | NEW → **CLOSED** (CHAOS-50: unconditional + idempotent start, claimed by both startup and promotion) | **H** | was: `rootca_startup.go:53`; see §17 |
+| CA-19 | **Node certs were not clamped to the issuer** (`now+1y` unconditionally), so the DP's own renewal trigger (`certNeedsRenewal`) read a false deadline and sat still through the exact window in which it had to renew. CA-1b in the OTHER CA. | NEW → **CLOSED** (CHAOS-50, `clampNodeCertValidity`, both ends; returned expiry, stored `CertExpiry`, and the on-disk cert all agree) | M/H | was: `enrollment.go` `SignCSR`; see §17 |
+| CA-20 | **`ImportCA` mutated live dual-CA state before persisting** (a failed write left the active CA installed as its own secondary → duplicated in the CP client CA pool, spurious `ClearCARotation`), and **dereferenced a nil secondary on a first install** — the exact state an operator imports a CA to REPAIR (`initClusterCA` failed at boot), so the documented recovery path panicked half-way through. | NEW → **CLOSED** (CHAOS-50: persist-before-swap + `hadPrior` guard) | M/H | was: `enrollment.go` `ImportCA`; see §17 |
+| CA-21 | **`loadFromPEM`/`InitOrLoad` accept an already-expired cluster CA silently** — the success-shaped boot line was the entire signal. Asymmetric with `ImportCA`, which has always REFUSED one. | NEW → **CLOSED** (CHAOS-50: still loads — rotation is the recovery and refusing would brick the node that can perform it — but the fault is recorded, so counters/alert/probes are armed from boot) | M | was: `enrollment.go` `loadFromPEM`; see §17 |
 | CA-14 | Revocation persistence uses `os.WriteFile`+rename with **no fsync** (unlike the CA bundle's `AtomicWrite`) — a revoked token can be honored again after crash/disk-full. | GAP | L/M | `internal/session/session.go:272-276`, caller `session.go:106-108` |
 | CA-15 | CA loader **accepts a plain-PEM bundle even when a passphrase is set** (magic absent) — a downgrade footgun; logged, not alerted/rejected. | GAP (minor) | L | `internal/ca/ca.go:221-229` |
 
@@ -1123,7 +1159,8 @@ reason: a still-expired CA looks exactly like a healthy one if nothing happens t
 
 - **CA-13** — cluster-CA rotation still logs-and-returns on every failure branch. Same defect
   class as CA-2 in the *other* CA; different lifecycle and blast radius (enrollment, not
-  inspection). Suggested as the next sweep.
+  inspection). Suggested as the next sweep. **→ taken up and CLOSED by CHAOS-50 (§17), which
+  also found five further defects in that CA (CA-17 … CA-21).**
 - **CA-11** — no single-flight on the leaf cache. Re-scoped down: the perf-F3 shared leaf key
   already removed the dominant per-miss cost (P-256 keygen), so the herd is much cheaper than
   when first recorded.
@@ -1132,3 +1169,84 @@ reason: a still-expired CA looks exactly like a healthy one if nothing happens t
   inspect; it cannot make clients trust a new root. Nothing in-band can. That is why this
   change invests most heavily in making the condition visible *before* the cliff
   (`culvert_ca_expires_in_seconds`) rather than only at it.
+
+---
+
+## 17. CHAOS-50 — The cluster CA across its lifecycle (fail-closed)
+
+**Closes:** CA-13 · **Adds and closes:** CA-17, CA-18, CA-19, CA-20, CA-21
+**Full write-up:** `docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-18.md`
+
+CHAOS-28 hardened the inspection CA and named the surviving half. This is that half: the
+**cluster CA**, which signs Data-Plane node certificates and therefore owns the credential
+for every CP↔DP mTLS channel in the fleet.
+
+### 17.1 Why the blast radius is worse than the inspection CA's
+
+An inspection-CA expiry is a loud outage — every inspected HTTPS request fails visibly. A
+cluster-CA expiry is not an outage at all, at first. A DP whose certificate stops validating
+does not fail, alarm, or stop: it **keeps serving traffic under whatever policy it last
+received, indefinitely**, while the Control Plane believes it is publishing. The terminal
+state is a silent, fleet-wide **configuration freeze** — a policy change an operator makes to
+stop an active incident never arrives, and nothing anywhere says so.
+
+### 17.2 The two that compound
+
+`SignCSR` had no validity guard (CA-17), and the only driver of cluster-CA rotation was
+gated on the *inspection* CA (CA-18):
+
+```go
+if certMgr.Ready() {                                    // ← rootca_startup.go, pre-fix
+    StartCAAutoRotation(ctx, cfg.Path, cfg.Passphrase)  //   drives BOTH CAs
+}
+```
+
+`certMgr.Ready()` is false in exactly the state register row **CA-3** already describes, and
+specifically on the existing-bundle path, because `LoadOrInitCA` routes an existing file
+straight to `LoadCA` without ever calling `InitCA`. So restoring a backup with the wrong
+`CULVERT_CA_PASSPHRASE` — an ordinary operations event — took SSL inspection down **today**,
+loudly, and took the fleet's ability to enroll or renew any node down **in ten years**,
+silently, with nothing connecting the two. When that second fuse burns, CA-17 means nothing
+refuses, nothing counts, and nothing alerts: the CP hands every node a certificate that
+cannot work and reports success.
+
+### 17.3 The fix, mirroring CHAOS-28 rather than inventing a second dialect
+
+| Rule | Applied here |
+|---|---|
+| `Usable()` distinct from `Ready()` | `Ready()` still answers "is a CA installed" (what the enrollment surfaces use to decide whether to OFFER enrollment); `Usable()` answers "can it issue something that will authenticate". Merging them would report "cluster CA not initialized" for a CA that is very much initialized — the wrong runbook at the worst moment |
+| Fail closed at the sign path | `ErrClusterCAUnusable`, 5-min skew tolerance matching the inspection CA. Costs no availability: the cert was already dead in every TLS stack — it just makes the appliance *know* |
+| Clamp the leaf to its issuer | `clampNodeCertValidity`, both ends. Returned expiry, stored `EnrolledNode.CertExpiry`, and the on-disk cert now agree |
+| Persist before swap | a failed `ImportCA` is a true no-op on live state; a first install no longer panics |
+| Recovery on evidence | an observed successful rotation / verification, never elapsed time |
+| Counter cumulative, status row current | `rotationFailures` never decrements (Prometheus); `rotationDegraded` is what the surfaces key on |
+
+### 17.4 Surfaces
+
+| Surface | Signal |
+|---|---|
+| `/metrics` | `culvert_cluster_ca_usable`, `culvert_cluster_ca_expires_in_seconds` (**omitted** when no cluster CA — 0 would page on every Data Plane), `culvert_cluster_ca_sign_refused_total`, `culvert_cluster_ca_rotation_failures_total` |
+| `/readyz` | `cluster_ca` row — report-only, absent on nodes with no cluster CA. A failing *rotation* rides an `ok` row's detail rather than introducing a third status value |
+| `/api/cluster/ca` | `usable`, `usableError`, `signRefusals`, `rotationFailures`, `rotationDegraded` |
+| Alerts | `cert_expiry` from `culvert-cluster-ca` — the EXISTING event name, so an operator already subscribed to certificate-lifecycle events does not have to discover a new one to hear about the CA whose expiry takes the whole cluster down |
+
+`culvert_cluster_ca_expires_in_seconds` is the one to alert on, months ahead of the cliff.
+
+### 17.5 What is deliberately left
+
+- **Renewal churn near CA expiry (accepted).** The clamp makes DPs renew every 6h tick
+  through the CA's final days. That is the system reacting correctly to a deadline it
+  previously could not see, and it is the pressure that migrates every node onto the new CA.
+- **`ImportCASilent` (HA replication) stays unguarded** — the leader is the authority, and a
+  standby that refused the leader's CA would diverge rather than converge. The fault is still
+  recorded via `loadFromPEM`.
+- **CA-4's retry half** — a failed rotation still waits 24h. Now counted and alerted, so the
+  operator learns immediately; backoff applies to both CAs and is its own change.
+- **CA-3's primary behaviour** — inspection-CA load failure is still fail-open for inspection
+  itself. This sweep removed only its *collateral* effect on the cluster CA.
+
+### 17.6 Suggested next sweep
+
+The lens that produced CA-17 and CA-18 — *does this predicate answer the question its caller
+is actually asking?* — has an obvious next target: every other caller of a `Ready()`-shaped
+predicate in the enrollment and HA paths.

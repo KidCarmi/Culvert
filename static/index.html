@@ -4392,6 +4392,7 @@ Firefox (all platforms):
               <div class="stat-card"><div class="stat-val" id="cca-expires">-</div><div class="stat-label">Expires</div></div>
               <div class="stat-card"><div class="stat-val" id="cca-fingerprint" style="font-size:.65rem;word-break:break-all">-</div><div class="stat-label">SHA-256 Fingerprint</div></div>
             </div>
+            <div id="cca-unusable-banner" style="display:none;margin-top:12px;padding:10px 12px;border-radius:8px;background:rgba(239,68,68,.12);color:var(--danger);font-size:.8rem;line-height:1.5"></div>
             <div id="cca-rotation-warning" style="display:none;margin-top:12px;padding:10px 12px;border-radius:8px;background:rgba(239,68,68,.12);color:var(--danger);font-size:.8rem;line-height:1.5"></div>
           </div>
           <details style="margin-top:12px">
@@ -16670,9 +16671,35 @@ async function loadClusterCA() {
   try {
     const r = await api('/api/cluster/ca');
     if (!r) return;
-    const status = r.dualCAActive ? 'Active (Dual-CA Overlap)' : r.initialized ? 'Active' : 'Not Initialized';
+    // CHAOS-50: report ISSUANCE capability, not mere presence. "initialized"
+    // stayed true — and this card stayed green — through a total enrollment
+    // outage, because a CA outside its own validity window is still loaded. The
+    // `usable` field comes from the same predicate the signing path uses, so the
+    // panel and the Control Plane can never disagree.
+    const unusable = r.initialized && r.usable === false;
+    const status = unusable ? 'EXPIRED — issuance blocked'
+      : r.dualCAActive ? 'Active (Dual-CA Overlap)'
+      : r.initialized ? 'Active' : 'Not Initialized';
     document.getElementById('cca-status').textContent = status;
-    document.getElementById('cca-status').style.color = r.initialized ? '#22c55e' : 'var(--muted)';
+    document.getElementById('cca-status').style.color = unusable ? 'var(--danger)'
+      : r.initialized ? '#22c55e' : 'var(--muted)';
+
+    const unusableEl = document.getElementById('cca-unusable-banner');
+    if (unusableEl) {
+      if (unusable) {
+        unusableEl.style.display = '';
+        unusableEl.innerHTML = '<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> <b>Node enrollment and renewal are blocked.</b> ' +
+          'The cluster CA is outside its own validity window (' + escHtml(r.usableError || 'unusable') + '), so it can no longer issue ' +
+          'certificates that Data-Plane nodes can authenticate with. Nodes already enrolled keep serving traffic under the policy they ' +
+          'last received, but they will stop receiving configuration updates once their own certificates lapse. ' +
+          'Auto-rotation repairs this on its next check; import a replacement CA below to repair it now. ' +
+          'Nodes whose certificates were signed by the expired CA must re-enroll.' +
+          (r.signRefusals ? ' (' + escHtml(String(r.signRefusals)) + ' issuance attempts refused since restart.)' : '');
+      } else {
+        unusableEl.style.display = 'none';
+        unusableEl.textContent = '';
+      }
+    }
     document.getElementById('cca-subject').textContent = r.subject || '-';
     document.getElementById('cca-expires').textContent = r.expires ? new Date(r.expires).toLocaleDateString() : '-';
     const fpText = r.fingerprint || '-';
