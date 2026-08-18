@@ -1129,8 +1129,15 @@ func parseAndValidateCACert(certPEM []byte) (*x509.Certificate, error) {
 	if !cert.IsCA {
 		return nil, fmt.Errorf("certificate is not a CA (BasicConstraints.IsCA = false)")
 	}
-	if time.Now().After(cert.NotAfter) {
-		return nil, fmt.Errorf("certificate has already expired (%s)", cert.NotAfter.Format("2006-01-02"))
+	// CHAOS-50: validate against the SAME predicate the sign path enforces, so
+	// an import can never succeed and immediately disable issuance. This
+	// previously checked only NotAfter, which let a CA whose NotBefore is in the
+	// future import cleanly, persist, and go live — after which every enrollment
+	// hit the sign-path guard and was refused, even though the import had just
+	// replaced a perfectly usable CA. One predicate, checked at admission and at
+	// use, is the only way those two answers cannot drift apart.
+	if err := clusterCAUsable(cert, time.Now()); err != nil {
+		return nil, err
 	}
 	return cert, nil
 }
@@ -1157,6 +1164,38 @@ func parseAndValidateCAKey(keyPEM []byte, certPub *ecdsa.PublicKey) (*ecdsa.Priv
 	return key, nil
 }
 
+// importCommit is what ImportCA learned while holding the lock and must act on
+// after releasing it. See ImportCA for why the split exists.
+type importCommit struct {
+	hadPrior     bool
+	oldFP, newFP string
+	secondaryExp time.Time
+	onRotate     func()
+}
+
+// ImportCA validates, persists, and activates a replacement cluster CA.
+//
+// CHAOS-50 — the lock split. Every side effect that leaves this type runs AFTER
+// ca.mu is released, because two of them re-enter it and sync.RWMutex is not
+// reentrant:
+//
+//	onRotate  → rebuildCPCertPool → globalClusterCA.AllCACertsPEM() → ca.mu.RLock()
+//	Current…  → CurrentConfigSnapshot → globalClusterCA.CACertFingerprint() → ca.mu.RLock()
+//
+// Both used to be called with ca.mu.Lock() held. On any instance OTHER than the
+// process-global one they resolve to a different mutex and are harmless, which
+// is exactly why the whole existing test suite never caught it: every test
+// constructs a local &clusterCA{}. On a real Control Plane — where
+// globalClusterCA IS the receiver and buildServerTLS has wired onRotate — the
+// first cluster-CA rotation or manual import deadlocked permanently, holding the
+// CA WRITE lock, so every subsequent SignCSR (RLock) blocked forever and the
+// entire node enrollment and renewal plane hung with it.
+//
+// It fires precisely when the CA is being replaced, i.e. the recovery path for
+// cluster-CA expiry deadlocked the thing it was recovering.
+//
+// Keeping the epilogue outside the lock is therefore a CORRECTNESS requirement,
+// not a tidiness preference: nothing reachable from it may be moved back in.
 func (ca *clusterCA) ImportCA(certPEM, keyPEM []byte) error {
 	cert, err := parseAndValidateCACert(certPEM)
 	if err != nil {
@@ -1167,6 +1206,40 @@ func (ca *clusterCA) ImportCA(certPEM, keyPEM []byte) error {
 		return err
 	}
 
+	commit, err := ca.importLocked(cert, key, certPEM, keyPEM)
+	if err != nil {
+		return err
+	}
+
+	// ── Epilogue: lock RELEASED. Re-entrant calls live here. ──
+
+	// Notify the TLS layer to rebuild the client CA pool with both CAs.
+	if commit.onRotate != nil {
+		commit.onRotate()
+	}
+	// Start CA rotation tracking (old fingerprint from the secondary).
+	//
+	// CHAOS-50: guarded on hadPrior. This dereferenced ca.secondaryCert
+	// unconditionally, so importing into a CP whose cluster CA had failed to
+	// load — which is EXACTLY the state an operator imports a CA to repair —
+	// panicked on a nil pointer, half-way through the import and after onRotate
+	// had already fired. A first install is not a rotation: there is no old
+	// fingerprint for nodes to migrate off, so there is nothing to track.
+	if commit.hadPrior {
+		globalClusterStore.StartCARotation(commit.newFP, commit.oldFP, commit.secondaryExp)
+	}
+	// Bump config version so DP nodes pick up the new CA fingerprint on next poll.
+	// A commit-time rejection (config over a cap) is logged + alerted + surfaced
+	// via LastPublishError; the CA import itself already succeeded above.
+	_ = globalConfigStore.Update(CurrentConfigSnapshot())
+
+	statClusterCARotations.Add(1)
+	return nil
+}
+
+// importLocked is the half that owns ca.mu: validate paths, persist, then swap
+// in-memory state. It performs NO call that can re-enter the receiver.
+func (ca *clusterCA) importLocked(cert *x509.Certificate, key *ecdsa.PrivateKey, certPEM, keyPEM []byte) (importCommit, error) {
 	ca.mu.Lock()
 	defer ca.mu.Unlock()
 
@@ -1176,11 +1249,11 @@ func (ca *clusterCA) ImportCA(certPEM, keyPEM []byte) error {
 	}
 	certFile, pathErr := safeCAPath(dir, "cluster-ca.crt")
 	if pathErr != nil {
-		return pathErr
+		return importCommit{}, pathErr
 	}
 	keyFile, pathErr := safeCAPath(dir, "cluster-ca.key")
 	if pathErr != nil {
-		return pathErr
+		return importCommit{}, pathErr
 	}
 
 	// ── Backup old CA before overwriting ──
@@ -1206,22 +1279,25 @@ func (ca *clusterCA) ImportCA(certPEM, keyPEM []byte) error {
 	// loadFromPEM cross-validation (D1.1f) and fails closed; auto-repair is
 	// intentionally out of scope.
 	if err := atomicWriteFile(certFile, certPEM, 0o600); err != nil {
-		return fmt.Errorf("write cluster CA cert: %w", err)
+		return importCommit{}, fmt.Errorf("write cluster CA cert: %w", err)
 	}
 	// CA-3: encrypt the key at rest when enabled; plaintext otherwise.
 	if err := writeClusterCAKey(dir, keyFile, keyPEM); err != nil {
-		return fmt.Errorf("write cluster CA key: %w", err)
+		return importCommit{}, fmt.Errorf("write cluster CA key: %w", err)
 	}
 
 	// ── Dual-CA overlap: preserve old CA as secondary ──
 	// hadPrior distinguishes a ROTATION (there is an outgoing CA whose
 	// certificates must keep validating through the overlap) from a first
-	// INSTALL (nothing to overlap with) — see the rotation-tracking guard below.
-	hadPrior := ca.cert != nil
-	if hadPrior {
+	// INSTALL (nothing to overlap with).
+	commit := importCommit{hadPrior: ca.cert != nil}
+	if commit.hadPrior {
+		oldFP := sha256.Sum256(ca.cert.Raw)
+		commit.oldFP = hex.EncodeToString(oldFP[:])
 		ca.secondaryCert = ca.cert
 		ca.secondaryPEM = ca.certPEM
 		ca.secondaryExp = ca.cert.NotAfter
+		commit.secondaryExp = ca.cert.NotAfter
 		logger.Printf("ClusterCA: old CA preserved as secondary (expires %s)",
 			ca.cert.NotAfter.Format("2006-01-02"))
 	}
@@ -1233,41 +1309,24 @@ func (ca *clusterCA) ImportCA(certPEM, keyPEM []byte) error {
 	// auto-rotation failure that Info() was surfacing.
 	ca.lastRotationErr = ""
 	ca.lastRotationErrAt = time.Time{}
+	// CHAOS-50: a persisted import IS the recovery evidence, whoever triggered
+	// it. Recording it only on the auto-rotation path meant an operator who
+	// repaired a failing rotation the documented way — importing a replacement
+	// CA — left clusterCARotationDegraded() latched until process restart, so
+	// /readyz and the admin API kept insisting auto-rotation was failing after
+	// they had fixed it. That is the precise failure the "recovery on evidence,
+	// not elapsed time" rule exists to prevent, applied to the wrong event.
+	// Safe under the lock: the health record is a separate mutex, and nothing
+	// it touches re-enters the CA.
+	noteClusterCARotated()
 
 	fp := sha256.Sum256(cert.Raw)
+	commit.newFP = hex.EncodeToString(fp[:])
+	commit.onRotate = ca.onRotate
 	logger.Printf("ClusterCA: imported custom CA (expires %s, fingerprint %s)",
-		cert.NotAfter.Format("2006-01-02"), sanitizeLog(hex.EncodeToString(fp[:])))
+		cert.NotAfter.Format("2006-01-02"), sanitizeLog(commit.newFP))
 
-	// Notify TLS layer to rebuild cert pool with both CAs.
-	if ca.onRotate != nil {
-		ca.onRotate()
-	}
-
-	// Start CA rotation tracking (old fingerprint from secondary).
-	//
-	// CHAOS-50: guarded on hadPrior. This dereferenced ca.secondaryCert
-	// unconditionally, so importing into a CP whose cluster CA had failed to
-	// load — which is EXACTLY the state an operator imports a CA to repair —
-	// panicked on a nil pointer, half-way through the import and after onRotate
-	// had already fired. A first install is not a rotation: there is no old
-	// fingerprint for nodes to migrate off, so there is nothing to track.
-	if hadPrior {
-		oldFP := sha256.Sum256(ca.secondaryCert.Raw)
-		newFP := sha256.Sum256(cert.Raw)
-		globalClusterStore.StartCARotation(
-			hex.EncodeToString(newFP[:]),
-			hex.EncodeToString(oldFP[:]),
-			ca.secondaryExp,
-		)
-	}
-
-	// Bump config version so DP nodes pick up the new CA fingerprint on next poll.
-	// A commit-time rejection (config over a cap) is logged + alerted + surfaced
-	// via LastPublishError; CA rotation itself already succeeded above.
-	_ = globalConfigStore.Update(CurrentConfigSnapshot())
-
-	statClusterCARotations.Add(1)
-	return nil
+	return commit, nil
 }
 
 // SecondaryActive returns true if a secondary (old) CA is still in the overlap period.
@@ -1278,20 +1337,34 @@ func (ca *clusterCA) SecondaryActive() bool {
 }
 
 // CleanupSecondary removes the secondary CA if it has expired.
+//
+// CHAOS-50: same lock split as ImportCA, for the same reason — onRotate
+// re-enters the receiver through rebuildCPCertPool → AllCACertsPEM → RLock, so
+// calling it under ca.mu.Lock() self-deadlocks on the process-global instance.
+// This one is reached on EVERY auto-rotation tick once an overlap has ended, so
+// it would wedge the CA lock on a schedule rather than only on rotation.
 func (ca *clusterCA) CleanupSecondary() {
 	ca.mu.Lock()
-	defer ca.mu.Unlock()
-	if ca.secondaryCert != nil && time.Now().After(ca.secondaryExp) {
+	expired := ca.secondaryCert != nil && time.Now().After(ca.secondaryExp)
+	var onRotate func()
+	if expired {
 		logger.Printf("ClusterCA: secondary CA expired, removing overlap")
 		ca.secondaryCert = nil
 		ca.secondaryPEM = nil
 		ca.secondaryExp = time.Time{}
-		if ca.onRotate != nil {
-			ca.onRotate()
-		}
-		// Clear rotation tracking — overlap period is over.
-		globalClusterStore.ClearCARotation()
+		onRotate = ca.onRotate
 	}
+	ca.mu.Unlock()
+
+	if !expired {
+		return
+	}
+	// ── Lock RELEASED: re-entrant calls only below this line. ──
+	if onRotate != nil {
+		onRotate()
+	}
+	// Clear rotation tracking — the overlap period is over.
+	globalClusterStore.ClearCARotation()
 }
 
 // AllCACertsPEM returns PEM blocks for all active CAs (primary + secondary if overlapping).
@@ -1389,11 +1462,9 @@ func (ca *clusterCA) RotateIfNeeded() {
 		ca.recordRotationFailure(err)
 		return
 	}
-	// Success is recorded on the ROTATION path only, and only after ImportCA
-	// returned nil — which now means the new pair reached disk (persist-before-
-	// swap). A rotation that lived only in RAM would otherwise clear the
-	// operator's warning while the next restart reloaded the expiring CA.
-	noteClusterCARotated()
+	// The recovery evidence is recorded inside ImportCA, which is the single
+	// point every successful rotation and import passes through — and the only
+	// place that knows the new pair actually reached disk.
 	logger.Printf("ClusterCA: auto-rotated successfully (new CA expires %s)",
 		template.NotAfter.Format("2006-01-02"))
 }
@@ -1444,6 +1515,14 @@ func (ca *clusterCA) Info() map[string]any {
 	info["signRefusals"] = snap.SignRefusals
 	info["rotationFailures"] = snap.RotationFailures
 	info["rotationDegraded"] = snap.RotationDegraded
+	// The historical cause, which the live `usableError` above cannot answer
+	// once a rotation has made the CA usable again: an operator investigating
+	// "why did node enrollment fail overnight?" needs the reason that was true
+	// at the time, not the reason that is true now (there is none).
+	if snap.SignRefusals > 0 {
+		info["lastRefusalReason"] = snap.Reason
+		info["lastRefusalAt"] = snap.Last.UTC().Format(time.RFC3339)
+	}
 	return info
 }
 

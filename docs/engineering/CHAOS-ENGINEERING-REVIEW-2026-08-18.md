@@ -7,9 +7,11 @@ channel in the fleet.
 of the last two reviews ("the CHAOS-28 defect class in the *other* CA"). This sweep
 confirms CA-13 and finds the domain is worse than recorded in four further ways, none of
 which are about rotation reporting at all.
-**Verdict:** six confirmed defects, all fixed. Five were reproduced empirically against
-unmodified `main` before any fix was written; the sixth (FS-6) was found while restructuring
-the code the fifth lives in, and is recorded here because it is the same silent-failure shape.
+**Verdict:** **seven** confirmed defects, all fixed. Five were reproduced empirically against
+unmodified `main` before any fix was written; FS-6 was found while restructuring the code the
+fifth lives in; **FS-7 — a self-deadlock that wedges the entire enrollment plane on every real
+Control Plane — was found by the tests written for this change, and is the most severe finding
+in the sweep.**
 
 ---
 
@@ -42,6 +44,7 @@ a cluster-CA expiry is a silent, fleet-wide **configuration freeze**.
 | 4 | An **expired CA on disk loads silently** at boot | Silent failure | `loadFromPEM` has no validity check, and its success log reads like success |
 | 5 | A **failed rotation** is recorded only in an admin-API JSON field | Silent failure | `recordRotationFailure` fed `Info()` and nothing else — no counter, no alert, no probe |
 | 6 | A **failed `ImportCA` mutates live dual-CA state**, and importing into an uninitialised CA **panics** | State corruption + crash on the recovery path | in-memory swap ran before persistence; rotation tracking dereferenced a secondary that need not exist |
+| **7** | **`ImportCA`/`CleanupSecondary` self-deadlock on the process-global CA**, permanently wedging the CA write lock | **Deadlock → total enrollment-plane hang** | re-entrant callbacks (`onRotate`, `CurrentConfigSnapshot`) were invoked while `ca.mu.Lock()` was held; every existing test uses a LOCAL `&clusterCA{}`, where the re-entrant read lands on a different mutex |
 
 Defects 1 and 2 are the serious pair, and they compound. Defect 2 means the appliance can
 silently stop rotating the cluster CA; defect 1 means that when the CA then expires,
@@ -258,6 +261,70 @@ The pre-existing two-file non-atomicity is unchanged and still documented in pla
 *between* the cert and key writes can leave a mismatched pair on disk, which the next
 startup detects via `loadFromPEM` cross-validation and fails closed on.
 
+### FS-7 — `ImportCA` and `CleanupSecondary` self-deadlock the cluster CA
+
+**The most severe finding in this sweep, and the one nothing was looking for.** It was found
+by the tests written for FS-1..FS-6, not by review.
+
+**Current behavior (pre-fix).** `ImportCA` holds `ca.mu.Lock()` for its whole body, and from
+inside that critical section calls out to two things that read the CA again:
+
+```go
+ca.mu.Lock()
+defer ca.mu.Unlock()
+...
+ca.onRotate()                                   // → rebuildCPCertPool
+                                                //   → globalClusterCA.AllCACertsPEM() → ca.mu.RLock()
+...
+_ = globalConfigStore.Update(CurrentConfigSnapshot())
+                                                // → globalClusterCA.CACertFingerprint() → ca.mu.RLock()
+```
+
+`sync.RWMutex` is not reentrant. Taking `RLock` while the same goroutine holds `Lock` blocks
+forever. `CleanupSecondary` has the identical shape.
+
+**Why it fires only in production.** The re-entrant calls do not go through the receiver —
+they go through the package-level `globalClusterCA`. On any *other* instance those resolve
+to a different mutex and are completely harmless. Every test in this repository constructs a
+local `&clusterCA{}`, and `buildServerTLS` — which installs the `onRotate` callback — never
+runs in them. So the deadlock requires exactly the production configuration:
+`globalClusterCA` as the receiver, with mTLS wired. That is why a suite of 1300+ tests,
+including ones specifically covering cluster-CA rotation and import, never saw it.
+
+**Impact.** On a Control Plane, the first cluster-CA rotation or manual import hangs
+forever **while holding the CA write lock**. `SignCSR` takes `RLock`, so from that instant
+every node enrollment and every certificate renewal blocks permanently. The admin API
+request that triggered a manual import never returns. Nothing recovers without a restart —
+and a restart re-enters the same path if the CA is still inside its rotation window.
+
+It fires precisely when the CA is being replaced. The recovery path for cluster-CA expiry
+deadlocks the very subsystem it exists to recover.
+
+**Interaction with FS-2 — why this had to ship in the same change.** FS-2's fix makes
+rotation *actually run* on nodes where it previously never did (an inspection-CA fault no
+longer disables it, and a runtime promotion now schedules it). Shipping FS-2 without FS-7
+would have converted a silent failure-to-rotate into a hard hang, on more nodes than before.
+The two are one change.
+
+**Fix.** Both methods are split: a locked core that persists and swaps in-memory state and
+performs **no** call that can re-enter the receiver, and an epilogue that runs after the
+lock is released and owns every outward-facing side effect (`onRotate`,
+`StartCARotation`, the config-snapshot republish, the metric). The `onRotate` function
+pointer is captured under the lock and invoked outside it.
+
+Keeping the epilogue outside the lock is a **correctness requirement, not a style
+preference**, and is commented as such at both sites — the failure mode is a silent hang,
+and the next person to "tidy up" by folding a call back inside would reintroduce it with no
+test failure to warn them, unless they hit the new global-instance tests below.
+
+**How the tests differ from every other test in the file.** The three FS-7 tests operate on
+the **global** instance with `onRotate` wired, because that is the only configuration that
+reproduces it. Each runs its subject on a goroutine under an explicit timeout, because a
+regression here manifests as a hang rather than a failed assertion — without the watchdog
+the whole package would simply time out with no indication of the cause. Each also asserts
+that `onRotate` actually fired, so the test cannot pass vacuously by never taking the
+re-entrant path at all.
+
 ---
 
 ## Risk Matrix
@@ -270,6 +337,7 @@ startup detects via `loadFromPEM` cross-validation and fails closed on.
 | FS-4 | Expired CA loads silently at boot | Low | Medium — removes the last chance to notice before impact | Log line reading as success | CLOSED |
 | FS-5 | Failed rotation invisible | Medium | High — removes the only recovery path, silently | `/api/cluster/ca` JSON field | CLOSED |
 | FS-6 | Failed import corrupts state / first install panics | Medium — both are repair-path operations | High — corrupts the CP client CA pool; crashes the recovery | **None** | CLOSED |
+| **FS-7** | **Self-deadlock on rotation/import** | **Certain** on any CP that rotates or imports | **Critical** — CA write lock held forever; all enrollment and renewal hang; no self-recovery | **None** (a hang, not an error) | CLOSED |
 
 ---
 
@@ -378,7 +446,16 @@ All in `cluster_ca_validity_test.go`. Every one of them failed on the commit bef
 | `TestClusterCA_RefusalAlertIsRateLimitedButCountsAreNot` | FS-5 — a 25-attempt storm ⇒ 25 counted, 1 alert |
 | `TestClusterCA_UsabilityRecoveryRequiresObservedEvidence` | FS-5 — silence is not recovery |
 | `TestClusterCA_RotationLoopIsNotGatedOnTheInspectionCA` | FS-2 — the anti-regression wall on the coupling |
-| `TestClusterCA_AutoRotationStartIsIdempotent` | FS-2 — repeat claims are no-ops, not racing goroutines |
+| `TestClusterCA_AutoRotationStartIsIdempotent` | FS-2 — repeat claims start at most one ticker |
+| `TestClusterCA_RepeatStartStillRunsARotationCheck` | FS-2 — a repeat call still runs a round, so a runtime promotion's newly-loaded CA is not left unrotated for up to 24h |
+| `TestClusterCA_RotationRoundRotatesNearExpiryCA` | FS-2 — the round itself rotates a CA inside its window |
+| `TestClusterCA_ImportRejectsNotYetValidCA` | admission and use share one predicate, so an import cannot succeed and immediately disable issuance |
+| `TestClusterCA_ManualImportClearsRotationDegraded` | the documented manual recovery clears the degraded state |
+| `TestClusterCA_FailedImportDoesNotClearRotationDegraded` | …but only a PERSISTED import is evidence |
+| `TestClusterCA_StateGaugesOmittedOnNodesWithoutAClusterCA` | the gauges are absent on non-issuers, so a `== 0` alert cannot fire fleet-wide |
+| `TestClusterCA_ImportOnGlobalInstanceDoesNotSelfDeadlock` | **FS-7** — the production configuration, bounded by a watchdog |
+| `TestClusterCA_CleanupSecondaryOnGlobalInstanceDoesNotSelfDeadlock` | **FS-7** — the same shape on the tick path |
+| `TestClusterCA_AutoRotationOnGlobalInstanceDoesNotSelfDeadlock` | **FS-7** — the full production rotation round |
 
 The health record is reset per test via `resetClusterCAHealthForTest`, and alerts are
 observed through the `fireClusterCAAlert` seam rather than the process-global alert store,
@@ -410,6 +487,18 @@ so nothing here depends on webhook wiring or survives into another test under
 - **The two-file CA write is still not atomic.** A crash between the cert and key writes
   leaves a mismatched pair, detected and failed closed at next startup. Auto-repair remains
   out of scope, as recorded in the original code.
+
+- **The lock split is enforced by comment and test, not by the type system.** Nothing
+  prevents a future change from moving a call back inside `importLocked`. The three
+  global-instance tests are the wall; the comments at both sites say explicitly that the
+  epilogue's position is a correctness requirement. A stronger guarantee would need the
+  callback plumbing restructured so re-entry is impossible by construction, which is a
+  larger refactor than this fix should carry.
+
+- **Other callers of `globalClusterCA` under a held lock were not audited exhaustively.**
+  This change fixed the two that the tests reached. A systematic sweep for "package-global
+  read reached from inside that same object's critical section" is the natural follow-up,
+  and is recorded as the suggested next run.
 
 - **`clusterCAClockSkewTolerance` is a constant.** Five minutes, matching the inspection
   CA. An estate with worse clock discipline than that has larger problems, but this is a
@@ -447,3 +536,16 @@ alone and obvious the moment the question is stated out loud.
 
 Applied to this codebase the lens has an obvious next target, recorded above: every other
 caller of a `Ready()`-shaped predicate in the enrollment and HA paths.
+
+FS-7 came from somewhere else entirely, and the lesson is worth recording separately because
+it is about method rather than about code. It was not found by reading — it was found because
+a test exercised the **production configuration** (the process-global singleton, with its
+callback wired) instead of the convenient one (a fresh local instance). Every existing test
+of this subsystem used a local `&clusterCA{}`, which is faster, isolated, and correct-looking,
+and which silently made the bug unreachable: the re-entrant read landed on a different mutex.
+
+The generalisable question is therefore: *for every singleton with registered callbacks, does
+any test exercise it as the singleton, with the callbacks installed?* Where the answer is no,
+a whole class of re-entrancy and initialisation-order faults is structurally invisible to the
+suite no matter how thorough it looks. That question is worth asking of `certMgr`, the alert
+store, and the config store next.

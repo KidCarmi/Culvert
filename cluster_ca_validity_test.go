@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -487,23 +488,47 @@ func TestClusterCA_RefusalAlertIsRateLimitedButCountsAreNot(t *testing.T) {
 	}
 }
 
-// Recovery of the usability state is likewise evidence-driven.
-func TestClusterCA_UsabilityRecoveryRequiresObservedEvidence(t *testing.T) {
+// Usability deliberately has no sticky "recovered" timestamp — Usable() reads
+// the CA's own validity window live and exactly, so a second source of truth
+// could only disagree with it. What the record DOES keep is the historical
+// cause, because that is the one question the live predicate cannot answer once
+// a rotation has made the CA usable again: "why did enrollment fail overnight?"
+func TestClusterCA_RefusalCauseSurvivesRecoveryForDiagnosis(t *testing.T) {
 	resetClusterCAHealthForTest()
 	_ = captureClusterCAAlerts(t)
 
-	noteClusterCAUnusable("expired at 2020-01-01T00:00:00Z")
-	if !clusterCAEverUnusable.Load() {
-		t.Fatal("precondition: a fault was recorded")
+	ca := loadTestClusterCA(t, time.Now().Add(-3*365*24*time.Hour), time.Now().Add(-time.Hour))
+	resetClusterCAHealthForTest()
+	if _, _, _, err := ca.SignCSR(newTestNodeCSR(t, "dp-hist"), "dp-hist"); err == nil {
+		t.Fatal("precondition: the issuance must be refused")
 	}
-	before := clusterCAHealthFailures()
-	if !before.Last.IsZero() && before.Reason == "" {
-		t.Error("the fault record must carry a reason")
+
+	snap := clusterCAHealthFailures()
+	if snap.Reason == "" || snap.Last.IsZero() {
+		t.Fatal("the fault record must carry a reason and a timestamp")
 	}
-	noteClusterCAUsable()
-	after := clusterCAHealthFailures()
-	if after.SignRefusals != before.SignRefusals {
-		t.Error("recovery must not rewrite the refusal count")
+	if !strings.Contains(snap.Reason, "expired at") {
+		t.Errorf("the recorded reason must name the violated bound, got %q", snap.Reason)
+	}
+
+	// Rotate to a healthy CA: the CA is usable again, and the historical cause
+	// must still be reachable on the admin surface.
+	certPEM, keyPEM := newTestClusterCAPEM(t, time.Now().Add(-time.Hour), time.Now().Add(10*365*24*time.Hour))
+	if err := ca.ImportCA(certPEM, keyPEM); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if err := ca.Usable(); err != nil {
+		t.Fatalf("the rotated CA must be usable: %v", err)
+	}
+	info := ca.Info()
+	if info["usable"] != true {
+		t.Error("Info() must report the live state as usable after rotation")
+	}
+	if info["lastRefusalReason"] == nil || info["lastRefusalAt"] == nil {
+		t.Error("Info() must still carry the historical refusal cause after recovery")
+	}
+	if got := clusterCAHealthFailures().SignRefusals; got != 1 {
+		t.Errorf("recovery must not rewrite the refusal count, got %d", got)
 	}
 }
 
@@ -562,4 +587,343 @@ func TestClusterCA_AutoRotationStartIsIdempotent(t *testing.T) {
 	// process-global CAs.
 	StartCAAutoRotation(ctx, "", "")
 	StartCAAutoRotation(ctx, "", "")
+}
+
+// ─── Review follow-ups (Codex, PR #1166) ─────────────────────────────────────
+
+// An import must not be able to SUCCEED and immediately disable issuance.
+// parseAndValidateCACert checked only NotAfter, so a CA whose NotBefore is in
+// the future imported cleanly, persisted, went live — and then every enrollment
+// hit the sign-path guard, even though the import had just replaced a usable CA.
+// Admission and use must share one predicate or the two answers drift apart.
+func TestClusterCA_ImportRejectsNotYetValidCA(t *testing.T) {
+	ca := &clusterCA{dir: t.TempDir()}
+	good, goodKey := newTestClusterCAPEM(t, time.Now().Add(-time.Hour), time.Now().Add(10*365*24*time.Hour))
+	if err := ca.ImportCA(good, goodKey); err != nil {
+		t.Fatalf("precondition: a usable CA must import: %v", err)
+	}
+	beforeFP := ca.CACertFingerprint()
+
+	future, futureKey := newTestClusterCAPEM(t,
+		time.Now().Add(2*clusterCAClockSkewTolerance), time.Now().Add(10*365*24*time.Hour))
+	err := ca.ImportCA(future, futureKey)
+	if err == nil {
+		t.Fatal("a not-yet-valid CA must be refused at import, not accepted and then refused at every issuance")
+	}
+	if !errors.Is(err, ErrClusterCAUnusable) {
+		t.Errorf("rejection should use the shared predicate's sentinel, got %v", err)
+	}
+	if ca.CACertFingerprint() != beforeFP {
+		t.Error("a rejected import must leave the previously usable CA in place")
+	}
+	if ca.Usable() != nil {
+		t.Error("issuance must still work after the rejected import")
+	}
+}
+
+// The documented recovery for a failing auto-rotation is a manual import. That
+// import must clear the degraded state: recording recovery only on the
+// auto-rotation path left /readyz and the admin API insisting rotation was
+// failing long after the operator had fixed it.
+func TestClusterCA_ManualImportClearsRotationDegraded(t *testing.T) {
+	resetClusterCAHealthForTest()
+	_ = captureClusterCAAlerts(t)
+
+	ca := &clusterCA{dir: t.TempDir()}
+	old, oldKey := newTestClusterCAPEM(t, time.Now().Add(-time.Hour), time.Now().Add(20*24*time.Hour))
+	if err := ca.loadFromPEM(old, oldKey); err != nil {
+		t.Fatal(err)
+	}
+	ca.recordRotationFailure(errors.New("write cluster CA cert: read-only file system"))
+	if !clusterCARotationDegraded() {
+		t.Fatal("precondition: rotation is degraded")
+	}
+
+	fresh, freshKey := newTestClusterCAPEM(t, time.Now().Add(-time.Hour), time.Now().Add(10*365*24*time.Hour))
+	if err := ca.ImportCA(fresh, freshKey); err != nil {
+		t.Fatalf("manual import: %v", err)
+	}
+	if clusterCARotationDegraded() {
+		t.Error("a persisted manual import is the recovery evidence and must clear the degraded state")
+	}
+	if info := ca.Info(); info["rotationDegraded"] != false {
+		t.Errorf("Info() must agree, got %v", info["rotationDegraded"])
+	}
+	// The cumulative counter still records that a rotation once failed.
+	if snap := clusterCAHealthFailures(); snap.RotationFailures != 1 {
+		t.Errorf("the counter must not be rewound, got %d", snap.RotationFailures)
+	}
+}
+
+// A FAILED import must not clear the degraded state — only a persisted one is
+// evidence.
+func TestClusterCA_FailedImportDoesNotClearRotationDegraded(t *testing.T) {
+	resetClusterCAHealthForTest()
+	_ = captureClusterCAAlerts(t)
+
+	dir := t.TempDir()
+	ca := &clusterCA{dir: dir}
+	old, oldKey := newTestClusterCAPEM(t, time.Now().Add(-time.Hour), time.Now().Add(20*24*time.Hour))
+	if err := ca.loadFromPEM(old, oldKey); err != nil {
+		t.Fatal(err)
+	}
+	ca.recordRotationFailure(errors.New("disk full"))
+	if err := os.Mkdir(filepath.Join(dir, "cluster-ca.crt"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fresh, freshKey := newTestClusterCAPEM(t, time.Now().Add(-time.Hour), time.Now().Add(10*365*24*time.Hour))
+	if err := ca.ImportCA(fresh, freshKey); err == nil {
+		t.Fatal("precondition: the import must fail")
+	}
+	if !clusterCARotationDegraded() {
+		t.Error("a FAILED import is not recovery evidence — the degraded state must persist")
+	}
+}
+
+// The state gauges must be ABSENT on a node that owns no cluster CA. Usable()
+// errors when nothing is loaded, so an unconditional gauge read 0 — "this
+// node's cluster CA is broken" — on every Data Plane in the fleet, which is
+// exactly what an operator's `== 0` alert would fire on.
+func TestClusterCA_StateGaugesOmittedOnNodesWithoutAClusterCA(t *testing.T) {
+	orig := globalClusterCA
+	t.Cleanup(func() { globalClusterCA = orig })
+
+	globalClusterCA = &clusterCA{} // a Data Plane: no cluster CA at all
+	var sb strings.Builder
+	clusterCAWriteUsabilityPrometheus(&sb)
+	out := sb.String()
+	if strings.Contains(out, "culvert_cluster_ca_usable ") {
+		t.Error("culvert_cluster_ca_usable must be omitted on a node with no cluster CA")
+	}
+	if strings.Contains(out, "culvert_cluster_ca_expires_in_seconds ") {
+		t.Error("culvert_cluster_ca_expires_in_seconds must be omitted on a node with no cluster CA")
+	}
+	// The counters stay, so rate()/increase() queries do not break when a series
+	// springs into existence mid-incident.
+	if !strings.Contains(out, "culvert_cluster_ca_sign_refused_total ") {
+		t.Error("the cumulative counters must still be emitted")
+	}
+
+	// On a Control Plane the gauges are present and report the live state.
+	cp := &clusterCA{dir: t.TempDir()}
+	certPEM, keyPEM := newTestClusterCAPEM(t, time.Now().Add(-time.Hour), time.Now().Add(10*365*24*time.Hour))
+	if err := cp.loadFromPEM(certPEM, keyPEM); err != nil {
+		t.Fatal(err)
+	}
+	globalClusterCA = cp
+	sb.Reset()
+	clusterCAWriteUsabilityPrometheus(&sb)
+	if !strings.Contains(sb.String(), "culvert_cluster_ca_usable 1") {
+		t.Errorf("a Control Plane with a healthy CA must report usable=1, got:\n%s", sb.String())
+	}
+}
+
+// A repeat StartCAAutoRotation call must still run a check round. The repeat
+// caller is a runtime Control-Plane promotion, which has just loaded a cluster
+// CA the running loop has never seen; returning early would leave a CA that is
+// already inside its rotation window unrotated until the existing ticker fires,
+// up to 24h later — reintroducing on the promotion path the exact blind spot
+// CHAOS-28 removed from the startup path.
+func TestClusterCA_RepeatStartStillRunsARotationCheck(t *testing.T) {
+	origCA := globalClusterCA
+	prevStarted := caAutoRotationStarted.Load()
+	t.Cleanup(func() {
+		globalClusterCA = origCA
+		caAutoRotationStarted.Store(prevStarted)
+	})
+
+	// A cluster CA already inside the 30-day rotation window.
+	ca := &clusterCA{dir: t.TempDir()}
+	certPEM, keyPEM := newTestClusterCAPEM(t, time.Now().Add(-time.Hour), time.Now().Add(10*24*time.Hour))
+	if err := ca.loadFromPEM(certPEM, keyPEM); err != nil {
+		t.Fatal(err)
+	}
+	globalClusterCA = ca
+	beforeFP := ca.CACertFingerprint()
+
+	// Simulate "the loop is already running" — the promotion path.
+	caAutoRotationStarted.Store(true)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	StartCAAutoRotation(ctx, "", "")
+
+	// The round runs on its own goroutine (the caller holds clusterRoleMu), so
+	// poll rather than assume it has landed.
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if ca.CACertFingerprint() != beforeFP {
+			return // rotated — the repeat call did its job
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Error("a repeat StartCAAutoRotation must run a check round; the near-expiry cluster CA was never rotated")
+}
+
+// caRotationRound itself is synchronous and rotates a near-expiry cluster CA.
+func TestClusterCA_RotationRoundRotatesNearExpiryCA(t *testing.T) {
+	orig := globalClusterCA
+	t.Cleanup(func() { globalClusterCA = orig })
+
+	ca := &clusterCA{dir: t.TempDir()}
+	certPEM, keyPEM := newTestClusterCAPEM(t, time.Now().Add(-time.Hour), time.Now().Add(5*24*time.Hour))
+	if err := ca.loadFromPEM(certPEM, keyPEM); err != nil {
+		t.Fatal(err)
+	}
+	globalClusterCA = ca
+	before := ca.CACertFingerprint()
+
+	caRotationRound("", "")
+
+	if ca.CACertFingerprint() == before {
+		t.Fatal("a cluster CA inside its rotation window must be rotated")
+	}
+	if err := ca.Usable(); err != nil {
+		t.Errorf("the rotated CA must be usable: %v", err)
+	}
+	if !ca.SecondaryActive() {
+		t.Error("the outgoing CA must be retained as secondary for overlap")
+	}
+}
+
+// ─── Re-entrancy: the deadlock the whole suite used to miss ──────────────────
+
+// ImportCA and CleanupSecondary call back out to code that reads the CA again —
+// onRotate → rebuildCPCertPool → AllCACertsPEM → RLock, and
+// CurrentConfigSnapshot → CACertFingerprint → RLock. Both used to run while
+// ca.mu.Lock() was held, and sync.RWMutex is not reentrant.
+//
+// Every other test in this repo constructs a LOCAL &clusterCA{}, so those
+// re-entrant reads land on globalClusterCA — a DIFFERENT mutex — and never
+// deadlock. That is precisely why 1300+ tests missed a hang that fires on every
+// real Control Plane the first time its cluster CA rotates, wedging the CA write
+// lock so that every subsequent SignCSR blocks forever.
+//
+// These tests therefore operate on the GLOBAL instance with onRotate wired,
+// which is the only configuration that reproduces it. They are bounded by an
+// explicit timeout: a regression here is a hang, not a failed assertion, so
+// without the watchdog the whole package would time out with no clue why.
+func withGlobalClusterCA(t *testing.T, ca *clusterCA) {
+	t.Helper()
+	orig := globalClusterCA
+	t.Cleanup(func() { globalClusterCA = orig })
+	globalClusterCA = ca
+}
+
+// runBounded fails the test if fn has not returned within d, naming the
+// deadlock. It deliberately does not try to recover — a wedged CA lock cannot be
+// unwedged — so the goroutine is left parked and the package exits after.
+func runBounded(t *testing.T, d time.Duration, what string, fn func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn()
+	}()
+	select {
+	case <-done:
+	case <-time.After(d):
+		t.Fatalf("%s did not return within %s — the cluster CA lock is almost certainly "+
+			"self-deadlocked by a re-entrant call made while ca.mu was held", what, d)
+	}
+}
+
+func TestClusterCA_ImportOnGlobalInstanceDoesNotSelfDeadlock(t *testing.T) {
+	ca := &clusterCA{dir: t.TempDir()}
+	certPEM, keyPEM := newTestClusterCAPEM(t, time.Now().Add(-time.Hour), time.Now().Add(365*24*time.Hour))
+	if err := ca.loadFromPEM(certPEM, keyPEM); err != nil {
+		t.Fatal(err)
+	}
+	// Wire a callback that reads the CA back, exactly as buildServerTLS does on
+	// a Control Plane with mTLS configured.
+	var rotated atomic.Bool
+	ca.onRotate = func() {
+		rotated.Store(true)
+		if len(globalClusterCA.AllCACertsPEM()) == 0 {
+			t.Error("onRotate must see the rebuilt CA pool")
+		}
+	}
+	withGlobalClusterCA(t, ca)
+
+	fresh, freshKey := newTestClusterCAPEM(t, time.Now().Add(-time.Hour), time.Now().Add(10*365*24*time.Hour))
+	runBounded(t, 30*time.Second, "ImportCA on the global cluster CA", func() {
+		if err := ca.ImportCA(fresh, freshKey); err != nil {
+			t.Errorf("import: %v", err)
+		}
+	})
+	// Guards against the test passing vacuously: if onRotate were never invoked,
+	// the re-entrant path this test exists to cover would not have been taken.
+	if !rotated.Load() {
+		t.Fatal("onRotate was never invoked — this test did not exercise the re-entrant path")
+	}
+
+	// And the CA is still usable afterwards — the lock was released, not leaked.
+	runBounded(t, 10*time.Second, "SignCSR after the import", func() {
+		if _, _, _, err := ca.SignCSR(newTestNodeCSR(t, "dp-after"), "dp-after"); err != nil {
+			t.Errorf("sign after import: %v", err)
+		}
+	})
+}
+
+func TestClusterCA_CleanupSecondaryOnGlobalInstanceDoesNotSelfDeadlock(t *testing.T) {
+	ca := &clusterCA{dir: t.TempDir()}
+	certPEM, keyPEM := newTestClusterCAPEM(t, time.Now().Add(-time.Hour), time.Now().Add(10*365*24*time.Hour))
+	if err := ca.loadFromPEM(certPEM, keyPEM); err != nil {
+		t.Fatal(err)
+	}
+	// An overlap whose window has already closed, which is what makes
+	// CleanupSecondary do its work (and fire onRotate).
+	secCert, _ := newTestClusterCAPEM(t, time.Now().Add(-2*time.Hour), time.Now().Add(-time.Hour))
+	blk, _ := pem.Decode(secCert)
+	parsed, err := x509.ParseCertificate(blk.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca.secondaryCert = parsed
+	ca.secondaryPEM = secCert
+	ca.secondaryExp = parsed.NotAfter
+	var rotated atomic.Bool
+	ca.onRotate = func() {
+		rotated.Store(true)
+		_ = globalClusterCA.AllCACertsPEM()
+	}
+	withGlobalClusterCA(t, ca)
+
+	runBounded(t, 30*time.Second, "CleanupSecondary on the global cluster CA", func() {
+		ca.CleanupSecondary()
+	})
+	if !rotated.Load() {
+		t.Fatal("onRotate was never invoked — this test did not exercise the re-entrant path")
+	}
+	if ca.SecondaryActive() {
+		t.Error("the expired secondary must have been removed")
+	}
+}
+
+// The full auto-rotation round against the global instance — the exact
+// production path: the ticker fires, the CA is inside its window, rotation
+// imports a replacement, onRotate rebuilds the pool, and the config snapshot is
+// republished. This is the shape that hung on every real Control Plane.
+func TestClusterCA_AutoRotationOnGlobalInstanceDoesNotSelfDeadlock(t *testing.T) {
+	ca := &clusterCA{dir: t.TempDir()}
+	certPEM, keyPEM := newTestClusterCAPEM(t, time.Now().Add(-time.Hour), time.Now().Add(10*24*time.Hour))
+	if err := ca.loadFromPEM(certPEM, keyPEM); err != nil {
+		t.Fatal(err)
+	}
+	var rotated atomic.Bool
+	ca.onRotate = func() {
+		rotated.Store(true)
+		_ = globalClusterCA.AllCACertsPEM()
+	}
+	withGlobalClusterCA(t, ca)
+	before := ca.CACertFingerprint()
+
+	runBounded(t, 30*time.Second, "caRotationRound on the global cluster CA", func() {
+		caRotationRound("", "")
+	})
+	if ca.CACertFingerprint() == before {
+		t.Error("a cluster CA inside its rotation window must be rotated")
+	}
+	if !rotated.Load() {
+		t.Fatal("onRotate was never invoked — this test did not exercise the re-entrant path")
+	}
 }

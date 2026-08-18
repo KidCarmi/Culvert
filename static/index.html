@@ -16718,6 +16718,16 @@ async function loadClusterCA() {
         warnEl.innerHTML = '<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> Cluster CA auto-rotation failed at ' +
           escHtml(new Date(r.lastRotationErrorAt).toLocaleString()) + ': ' + escHtml(r.lastRotationError) +
           '. It will keep retrying automatically on each rotation check; if this persists until the CA expires, enrolled nodes will lose mTLS trust. Import a replacement CA below, or resolve the underlying error (e.g. disk space/permissions on the CA directory).';
+      } else if (r.rotationDegraded) {
+        // The CA is currently usable but a rotation has failed with no success
+        // since. Distinct from the branch above, which shows the error text
+        // still latched on the CA object; this keys on the health record, which
+        // is what /readyz and the metrics report.
+        warnEl.style.display = '';
+        warnEl.innerHTML = '<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> Cluster CA auto-rotation has failed ' +
+          escHtml(String(r.rotationFailures || 0)) + ' time(s) since restart and has not succeeded since. ' +
+          'The CA can still issue certificates today, but if this persists until it expires, no node will be able to enroll or renew. ' +
+          'Resolve the underlying error (typically disk space or permissions on the CA directory), or import a replacement CA below.';
       } else {
         warnEl.style.display = 'none';
         warnEl.textContent = '';

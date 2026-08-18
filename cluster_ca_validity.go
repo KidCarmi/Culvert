@@ -40,15 +40,15 @@ package main
 //      never renews, while every handshake it makes has been failing since the
 //      day its issuer expired.
 //
-// Recovery is reported on EVIDENCE — an observed successful verification —
-// never on elapsed time, matching storage_health.go and ca_health.go.
+// Rotation recovery is reported on EVIDENCE — an observed successful rotation —
+// never on elapsed time, matching storage_health.go and ca_health.go. Usability
+// deliberately needs no such tracking; see the note on clusterCAHealthRecord.
 
 import (
 	"crypto/x509"
 	"errors"
 	"fmt"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -115,7 +115,7 @@ func clusterCAUsable(cert *x509.Certificate, now time.Time) error {
 // It is only harder to diagnose, and here it is actively harmful: the DP's
 // renewal trigger reads the leaf's own NotAfter, so an unclamped leaf teaches
 // the node to sit still through the exact window in which it needed to renew.
-func clampNodeCertValidity(notBefore, notAfter time.Time, issuer *x509.Certificate) (time.Time, time.Time) {
+func clampNodeCertValidity(notBefore, notAfter time.Time, issuer *x509.Certificate) (leafNotBefore, leafNotAfter time.Time) {
 	if issuer == nil {
 		return notBefore, notAfter
 	}
@@ -143,9 +143,12 @@ func (ca *clusterCA) Expiry() time.Time {
 // ─── Health plane ────────────────────────────────────────────────────────────
 
 // clusterCAHealthRecord is the process-wide record of cluster-CA faults. It
-// mirrors caUsabilityHealth (ca_health.go) field for field, because the two
-// failures have the same shape: an external condition that fires from arbitrary
-// goroutines at arbitrary rates, for as long as the condition lasts.
+// follows caUsabilityHealth's (ca_health.go) contract — count every event,
+// rate-limit the log and the alert on independent gates, never lose magnitude to
+// rate limiting — because the failure has the same shape: an external condition
+// that fires from arbitrary goroutines at arbitrary rates, for as long as the
+// condition lasts. It is not a field-for-field copy; see the note below on why
+// usability needs no sticky recovery timestamp here.
 type clusterCAHealthRecord struct {
 	mu sync.Mutex
 
@@ -157,7 +160,20 @@ type clusterCAHealthRecord struct {
 
 	last       time.Time // most recent observed usability fault
 	lastReason string    // sanitised, key-material-free detail
-	lastOK     time.Time // most recent OBSERVED usable verification
+
+	// There is deliberately NO lastOK counterpart for usability, unlike
+	// ca_health.go. The two faults need different machinery because they leave
+	// different traces. A failed ROTATION leaves none — nothing about the CA
+	// tells you it was supposed to be replaced and wasn't — so it needs the
+	// sticky lastRotFail/lastRotOK pair below to answer "is this still broken?".
+	// Usability leaves the clearest trace there is: the CA's own validity
+	// window, which Usable() reads live and exactly, every time anyone asks. A
+	// sticky "recovered" timestamp for it would be state nothing can consume
+	// that the live predicate does not already answer better.
+	//
+	// last/lastReason are kept because they answer a different question the live
+	// predicate cannot — WHY issuance was refused, after a rotation has since
+	// made the CA usable again — and are surfaced on /api/cluster/ca.
 
 	// rotationFailures is CUMULATIVE — the right shape for a Prometheus counter
 	// and the wrong shape for a status row, so the CURRENT state is tracked
@@ -174,10 +190,6 @@ type clusterCAHealthRecord struct {
 }
 
 var clusterCAHealth clusterCAHealthRecord
-
-// clusterCAEverUnusable short-circuits the recovery observer so the healthy
-// path stays a single relaxed atomic load.
-var clusterCAEverUnusable atomic.Bool
 
 // fireClusterCAAlert delivers the cert_expiry alert for a cluster-CA fault.
 // Package-level seam so tests observe the transition synchronously instead of
@@ -209,7 +221,6 @@ var fireClusterCAAlert = func(detail string) {
 func noteClusterCAUnusable(reason string) {
 	safe := sanitizeLog(reason)
 	now := time.Now()
-	clusterCAEverUnusable.Store(true)
 
 	clusterCAHealth.mu.Lock()
 	clusterCAHealth.signRefusals++
@@ -239,21 +250,6 @@ func noteClusterCAUnusable(reason string) {
 				"Data-Plane nodes cannot enroll or renew and will stop receiving configuration at their own expiry",
 			safe, refusals))
 	}
-}
-
-// noteClusterCAUsable records an OBSERVED successful usability verification.
-// This is the only thing that clears the degraded state: silence is not
-// recovery. A CA that is still expired looks exactly like a healthy one if
-// nothing happens to need a certificate, so an elapsed-time heuristic would
-// report a node recovered without a single successful issuance behind it.
-func noteClusterCAUsable() {
-	if !clusterCAEverUnusable.Load() {
-		return
-	}
-	now := time.Now()
-	clusterCAHealth.mu.Lock()
-	clusterCAHealth.lastOK = now
-	clusterCAHealth.mu.Unlock()
 }
 
 // noteClusterCARotationFailure records an auto-rotation round that could not
@@ -334,18 +330,6 @@ func clusterCAHealthFailures() clusterCAHealthSnapshot {
 	}
 }
 
-// clusterCAIssuanceUsable is the single live predicate for "can this Control
-// Plane issue node certificates right now". It also feeds the recovery
-// observer, so every caller that asks the question contributes the evidence
-// that clears a past fault.
-func clusterCAIssuanceUsable() bool {
-	if err := globalClusterCA.Usable(); err != nil {
-		return false
-	}
-	noteClusterCAUsable()
-	return true
-}
-
 // resetClusterCAHealthForTest clears the process-global record so tests do not
 // inherit each other's faults under -count=2 -shuffle=on.
 func resetClusterCAHealthForTest() {
@@ -356,7 +340,6 @@ func resetClusterCAHealthForTest() {
 	clusterCAHealth.signRefusals = 0
 	clusterCAHealth.last = time.Time{}
 	clusterCAHealth.lastReason = ""
-	clusterCAHealth.lastOK = time.Time{}
 	clusterCAHealth.rotationFailures = 0
 	clusterCAHealth.lastRotErr = ""
 	clusterCAHealth.lastRotFail = time.Time{}
@@ -364,5 +347,4 @@ func resetClusterCAHealthForTest() {
 	clusterCAHealth.logAt = time.Time{}
 	clusterCAHealth.alertAt = time.Time{}
 	clusterCAHealth.mu.Unlock()
-	clusterCAEverUnusable.Store(false)
 }

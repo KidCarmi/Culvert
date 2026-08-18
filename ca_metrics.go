@@ -73,22 +73,33 @@ func caWritePrometheus(w *strings.Builder) {
 func clusterCAWriteUsabilityPrometheus(w *strings.Builder) {
 	snap := clusterCAHealthFailures()
 
-	w.WriteString("\n# HELP culvert_cluster_ca_usable Whether the cluster CA can currently issue node certificates that will authenticate (1 = yes)\n")
-	w.WriteString("# TYPE culvert_cluster_ca_usable gauge\n")
-	usable := 0
-	if globalClusterCA.Usable() == nil {
-		usable = 1
+	// BOTH state gauges are omitted entirely on a node that owns no cluster CA
+	// — a Data Plane, or a proxy that was never promoted. An absent series is
+	// honest; a present one is actively harmful here, because the obvious alert
+	// an operator writes against each (`culvert_cluster_ca_usable == 0`, or an
+	// expiry approaching zero) would fire for every non-Control-Plane node in
+	// the fleet, none of which are issuers. `Usable()` returns an error when no
+	// CA is loaded, so the gauge would have read 0 — "this node's cluster CA is
+	// broken" — on exactly the nodes that are supposed not to have one.
+	if globalClusterCA.Ready() {
+		w.WriteString("\n# HELP culvert_cluster_ca_usable Whether the cluster CA can currently issue node certificates that will authenticate (1 = yes)\n")
+		w.WriteString("# TYPE culvert_cluster_ca_usable gauge\n")
+		usable := 0
+		if globalClusterCA.Usable() == nil {
+			usable = 1
+		}
+		fmt.Fprintf(w, "culvert_cluster_ca_usable %d\n", usable)
 	}
-	fmt.Fprintf(w, "culvert_cluster_ca_usable %d\n", usable)
-
-	// Omitted entirely when no cluster CA is loaded — an absent series is
-	// honest, whereas 0 would read as "expires now" and page on every node that
-	// is not a Control Plane.
 	if exp := globalClusterCA.Expiry(); !exp.IsZero() {
 		w.WriteString("\n# HELP culvert_cluster_ca_expires_in_seconds Seconds until the cluster CA certificate expires (negative once expired)\n")
 		w.WriteString("# TYPE culvert_cluster_ca_expires_in_seconds gauge\n")
 		fmt.Fprintf(w, "culvert_cluster_ca_expires_in_seconds %d\n", int64(time.Until(exp).Seconds()))
 	}
+
+	// The COUNTERS below stay unconditional. A cumulative counter sitting at
+	// zero is never a false alarm, and keeping it present avoids a series that
+	// springs into existence mid-incident — which is the shape that breaks
+	// rate() and increase() queries exactly when they are being read.
 
 	w.WriteString("\n# HELP culvert_cluster_ca_sign_refused_total Node-certificate issuances refused because the cluster CA was outside its validity window\n")
 	w.WriteString("# TYPE culvert_cluster_ca_sign_refused_total counter\n")

@@ -41,7 +41,17 @@ which it had to renew — the node's view of its health exactly inverted from th
 (4) `ImportCA` mutated live dual-CA state **before** persisting, and dereferenced a nil secondary
 on a first install — so the documented recovery path for a broken cluster CA *panicked* (CA-20).
 (5) An expired CA on disk **loaded silently** behind a success-shaped log line (CA-21). (6) CA-13
-as recorded. All fixed. The load-bearing decision was to mirror CHAOS-28's plane rather than invent
+as recorded. (7) **CA-22, the most severe and the one nothing was looking for: `ImportCA` and
+`CleanupSecondary` SELF-DEADLOCK.** Both invoked re-entrant callbacks (`onRotate` →
+`AllCACertsPEM`, `CurrentConfigSnapshot` → `CACertFingerprint`) while holding `ca.mu.Lock()`, and
+`sync.RWMutex` is not reentrant — so on a real Control Plane the first cluster-CA rotation or
+manual import hangs forever WHILE HOLDING THE WRITE LOCK, blocking every subsequent `SignCSR` and
+wedging the entire enrollment plane with no self-recovery. It fires exactly when the CA is being
+replaced, i.e. the recovery path deadlocks the thing it recovers. It was invisible to 1300+ tests
+because every test constructs a LOCAL `&clusterCA{}` (the re-entrant read then lands on a
+different mutex) and never wires `onRotate` — only the production singleton deadlocks. CA-22 also
+made CA-18 unshippable alone: making rotation actually RUN on nodes where it silently never did
+would have converted a silent no-rotation into a hard hang. All fixed. The load-bearing decision was to mirror CHAOS-28's plane rather than invent
 a second dialect — `Usable()` distinct from `Ready()`, fail-closed at the sign path, clamp to the
 issuer, evidence-driven recovery, and the EXISTING `cert_expiry` event name (distinguished by
 `Host`) so an operator already subscribed to certificate-lifecycle events does not have to discover
@@ -218,6 +228,7 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | CA-18 | **Cluster-CA auto-rotation was gated on the INSPECTION CA loading** (`if certMgr.Ready()` around the only `StartCAAutoRotation` call). One loop drives two unrelated CAs, so the CA-3 fault — wrong `CULVERT_CA_PASSPHRASE`/corrupt bundle, which leaves `Ready()` false because `LoadOrInitCA` routes an existing bundle straight to `LoadCA` — ALSO disabled cluster-CA rotation permanently and silently. A runtime CP promotion (`enableControlPlane`) never started it at all. | NEW → **CLOSED** (CHAOS-50: unconditional + idempotent start, claimed by both startup and promotion) | **H** | was: `rootca_startup.go:53`; see §17 |
 | CA-19 | **Node certs were not clamped to the issuer** (`now+1y` unconditionally), so the DP's own renewal trigger (`certNeedsRenewal`) read a false deadline and sat still through the exact window in which it had to renew. CA-1b in the OTHER CA. | NEW → **CLOSED** (CHAOS-50, `clampNodeCertValidity`, both ends; returned expiry, stored `CertExpiry`, and the on-disk cert all agree) | M/H | was: `enrollment.go` `SignCSR`; see §17 |
 | CA-20 | **`ImportCA` mutated live dual-CA state before persisting** (a failed write left the active CA installed as its own secondary → duplicated in the CP client CA pool, spurious `ClearCARotation`), and **dereferenced a nil secondary on a first install** — the exact state an operator imports a CA to REPAIR (`initClusterCA` failed at boot), so the documented recovery path panicked half-way through. | NEW → **CLOSED** (CHAOS-50: persist-before-swap + `hadPrior` guard) | M/H | was: `enrollment.go` `ImportCA`; see §17 |
+| CA-22 | **`ImportCA` and `CleanupSecondary` SELF-DEADLOCK on the process-global cluster CA.** Both called re-entrant code while holding `ca.mu.Lock()` — `onRotate`→`rebuildCPCertPool`→`AllCACertsPEM`→`RLock`, and `CurrentConfigSnapshot`→`CACertFingerprint`→`RLock` — and `sync.RWMutex` is not reentrant. On a Control Plane the first cluster-CA rotation or manual import hangs FOREVER holding the CA WRITE lock, so every subsequent `SignCSR` (RLock) blocks and the whole enrollment/renewal plane wedges with no self-recovery. Invisible to 1300+ tests because every test uses a LOCAL `&clusterCA{}`, where the re-entrant read hits a different mutex, and `onRotate` is never wired. | NEW → **CLOSED** (CHAOS-50: locked core + unlocked epilogue in both methods; pinned by three GLOBAL-instance tests under watchdog timeouts) | **CRITICAL** | was: `enrollment.go` `ImportCA`/`CleanupSecondary`; see §17 |
 | CA-21 | **`loadFromPEM`/`InitOrLoad` accept an already-expired cluster CA silently** — the success-shaped boot line was the entire signal. Asymmetric with `ImportCA`, which has always REFUSED one. | NEW → **CLOSED** (CHAOS-50: still loads — rotation is the recovery and refusing would brick the node that can perform it — but the fault is recorded, so counters/alert/probes are armed from boot) | M | was: `enrollment.go` `loadFromPEM`; see §17 |
 | CA-14 | Revocation persistence uses `os.WriteFile`+rename with **no fsync** (unlike the CA bundle's `AtomicWrite`) — a revoked token can be honored again after crash/disk-full. | GAP | L/M | `internal/session/session.go:272-276`, caller `session.go:106-108` |
 | CA-15 | CA loader **accepts a plain-PEM bundle even when a passphrase is set** (magic absent) — a downgrade footgun; logged, not alerted/rejected. | GAP (minor) | L | `internal/ca/ca.go:221-229` |
@@ -1232,6 +1243,31 @@ cannot work and reports success.
 
 `culvert_cluster_ca_expires_in_seconds` is the one to alert on, months ahead of the cliff.
 
+### 17.4b CA-22 — the self-deadlock (found by the tests, not by review)
+
+`ImportCA` held `ca.mu.Lock()` across its whole body and, from inside it, called `onRotate()`
+(→ `rebuildCPCertPool` → `globalClusterCA.AllCACertsPEM()` → `RLock`) and
+`CurrentConfigSnapshot()` (→ `globalClusterCA.CACertFingerprint()` → `RLock`).
+`CleanupSecondary` had the same shape on the per-tick path.
+
+The re-entrant reads go through the package-level `globalClusterCA`, not the receiver — so on
+any OTHER instance they resolve to a different mutex and are harmless. Every test in the repo
+builds a local `&clusterCA{}`, and `buildServerTLS` (which installs `onRotate`) never runs in
+them. The deadlock therefore required precisely the production configuration, and precisely
+that configuration was the one nothing tested.
+
+Fixed by splitting both methods into a locked core (persist + swap, no re-entrant call) and an
+unlocked epilogue (callback, rotation tracking, snapshot republish, metric). Pinned by three
+tests that run against the GLOBAL instance with `onRotate` wired, each under a watchdog timeout
+— a regression is a hang, not an assertion failure — and each asserting `onRotate` actually
+fired so the test cannot pass vacuously.
+
+**The method lesson, which generalises past this subsystem:** a test that swaps in a fresh
+local instance is faster, isolated, and correct-looking, and it made this class of bug
+structurally unreachable. Worth asking of every singleton with registered callbacks —
+`certMgr`, the alert store, the config store — *does any test exercise it AS the singleton,
+with its callbacks installed?*
+
 ### 17.5 What is deliberately left
 
 - **Renewal churn near CA expiry (accepted).** The clamp makes DPs renew every 6h tick
@@ -1247,6 +1283,11 @@ cannot work and reports success.
 
 ### 17.6 Suggested next sweep
 
-The lens that produced CA-17 and CA-18 — *does this predicate answer the question its caller
+Two lenses, both cheap. First, from CA-22: *for every singleton with registered callbacks,
+does any test exercise it AS the singleton?* Where the answer is no, re-entrancy and
+init-order faults are invisible to the suite however thorough it looks. Related and concrete:
+audit every place a package-global is read from inside that same object's critical section.
+
+Second, the lens that produced CA-17 and CA-18 — *does this predicate answer the question its caller
 is actually asking?* — has an obvious next target: every other caller of a `Ready()`-shaped
 predicate in the enrollment and HA paths.

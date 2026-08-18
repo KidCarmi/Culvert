@@ -69,9 +69,36 @@ func init() {
 // caller simply makes it.
 var caAutoRotationStarted atomic.Bool
 
-// StartCAAutoRotation is idempotent: the second and later calls are no-ops.
+// caRotationRound runs one guarded expiry check across BOTH CAs. Each CA is
+// guarded separately so a fault in one still lets the other rotate.
+func caRotationRound(caPath, passphrase string) {
+	runGuarded("ca_rotation", func() {
+		certMgr.RotateIfNeeded(caPath, passphrase)
+		certMgr.CleanupSecondaryCA()
+	})
+	runGuarded("cluster_ca_rotation", func() {
+		globalClusterCA.RotateIfNeeded()
+		globalClusterCA.CleanupSecondary()
+	})
+}
+
+// StartCAAutoRotation is idempotent in the sense that it starts at most ONE
+// ticker goroutine — but a repeat call is NOT a no-op: it still runs a check
+// round.
+//
+// That distinction is load-bearing. The repeat caller is a runtime Control-Plane
+// promotion, which has just LOADED a cluster CA the running loop has never seen.
+// Returning early there would leave a CA that is expired, or already inside its
+// 30-day rotation window, sitting unrotated until the existing ticker happens to
+// fire — up to 24 hours of blocked enrollment and renewal, which is precisely
+// the blind spot CHAOS-28 removed from the startup path and would have
+// reintroduced here for the promotion path.
+//
+// The round runs on its own goroutine because rotation does keygen and disk I/O
+// under the CA lock, and the caller (enableControlPlane) holds clusterRoleMu.
 func StartCAAutoRotation(ctx context.Context, caPath, passphrase string) {
 	if !caAutoRotationStarted.CompareAndSwap(false, true) {
+		go caRotationRound(caPath, passphrase)
 		return
 	}
 	go func() {
@@ -86,18 +113,7 @@ func StartCAAutoRotation(ctx context.Context, caPath, passphrase string) {
 		// nothing while every inspected HTTPS request failed. RotateIfNeeded is
 		// a no-op outside the 30-day window, so on a healthy node this costs one
 		// expiry comparison at startup.
-		checkRound := func() {
-			// Each CA is guarded separately so a fault in one still lets the
-			// other rotate.
-			runGuarded("ca_rotation", func() {
-				certMgr.RotateIfNeeded(caPath, passphrase)
-				certMgr.CleanupSecondaryCA()
-			})
-			runGuarded("cluster_ca_rotation", func() {
-				globalClusterCA.RotateIfNeeded()
-				globalClusterCA.CleanupSecondary()
-			})
-		}
+		checkRound := func() { caRotationRound(caPath, passphrase) }
 		checkRound()
 		for {
 			select {
