@@ -147,7 +147,8 @@ type jwksCache struct {
 	refreshDone chan struct{}
 	refreshErr  error
 
-	logAt time.Time // rate-limits the refresh-failure log line
+	logAt      time.Time // rate-limits the refresh-failure log line
+	staleLogAt time.Time // rate-limits the stale-ceiling refusal log line
 }
 
 const (
@@ -159,6 +160,30 @@ const (
 	// rotation is still picked up promptly.
 	jwksMinRefreshInterval = time.Minute
 
+	// jwksStaleMaxAge is the HARD ceiling on how long getKey may keep
+	// authenticating with a key set it can no longer refresh (SEC-JWKS-1).
+	//
+	// Serving a stale key past the TTL is the right degradation for a blip, a
+	// rate-limiter body, or a multi-hour outage — wiping the cache instead is
+	// the CHAOS-49 silent-SSO-outage bug. But "stale" and "unbounded" are not
+	// the same posture. Withdrawing a signing key from the JWKS document is the
+	// IdP's ONLY revocation lever over tokens it has already minted, so a
+	// relying party that keeps a withdrawn key indefinitely has silently opted
+	// out of revocation — and the window closes only on a successful refresh,
+	// which is precisely what is broken in that scenario.
+	//
+	// The ceiling bounds the exposure without giving back the availability win:
+	// inside it, behaviour is byte-identical to before; past it, ID-token
+	// validation fails CLOSED and says so. It is deliberately generous (a day
+	// absorbs any realistic outage) and deliberately a CONSTANT — an operator
+	// override would be a knob whose only use is widening a trust window, and
+	// immutable beats configurable for a fail-closed bound.
+	//
+	// Recovery is on OBSERVED evidence only: one refresh that actually returns
+	// usable keys re-arms the full window (it advances fetchedAt). Elapsed time
+	// never does.
+	jwksStaleMaxAge = 24 * time.Hour
+
 	// jwksFetchTimeout bounds a single key-set fetch.
 	jwksFetchTimeout = 10 * time.Second
 )
@@ -167,21 +192,41 @@ const (
 // window. It is a deny for this lookup, never a statement about the IdP.
 var errJWKSThrottled = errors.New("jwks: refresh throttled (recent attempt)")
 
+// errJWKSStaleCeiling is returned when a cached key set is past jwksStaleMaxAge
+// and refreshes are still failing. It is a fail-CLOSED deny: the node can no
+// longer show that the IdP still vouches for these keys.
+var errJWKSStaleCeiling = errors.New("jwks: cached key set is past the stale-trust ceiling and cannot be refreshed")
+
 // getKey returns the public key for kid, refreshing the cache when stale.
 func (j *jwksCache) getKey(kid string) (interface{}, error) {
 	j.mu.RLock()
 	k, ok := j.keys[kid]
-	stale := time.Since(j.fetchedAt) > jwksCacheTTL
+	fetchedAt := j.fetchedAt
 	j.mu.RUnlock()
+	stale := time.Since(fetchedAt) > jwksCacheTTL
 
 	if ok && !stale {
 		return k, nil
 	}
 
-	// Re-fetch, rate-limited and single-flighted.
+	// Re-fetch, rate-limited and single-flighted. A failure leaves fetchedAt
+	// untouched, so the snapshot above still measures the last time the IdP
+	// actually vouched for this key set.
 	if err := j.refreshOnce(); err != nil {
+		if ok && j.staleServable(fetchedAt) {
+			return k, nil // serve the stale key rather than failing (inside the ceiling)
+		}
 		if ok {
-			return k, nil // return stale key rather than failing
+			// Past the ceiling: we hold a key the IdP has not re-affirmed for
+			// longer than we are willing to vouch for. Fail closed — a key
+			// withdrawn at the IdP must not keep authenticating here.
+			j.logStaleRefusal(fetchedAt)
+			// The cause is sanitised + %q because this error reaches a log via the
+			// callback handler, and the house rule is that anything crossing that
+			// boundary is sanitised at the site CodeQL can see (CWE-117).
+			return nil, fmt.Errorf("%w (last successful fetch %s ago, ceiling %s): %q",
+				errJWKSStaleCeiling, time.Since(fetchedAt).Truncate(time.Minute), jwksStaleMaxAge,
+				sanitizeLog(err.Error()))
 		}
 		return nil, err
 	}
@@ -193,6 +238,37 @@ func (j *jwksCache) getKey(kid string) (interface{}, error) {
 		return nil, fmt.Errorf("jwks: key %q not found", kid)
 	}
 	return k, nil
+}
+
+// staleServable reports whether a key set last successfully fetched at
+// fetchedAt may still authenticate a token. A zero fetchedAt means no fetch has
+// ever succeeded, so nothing is servable (fail closed — never trust a key set
+// whose provenance we cannot date).
+func (j *jwksCache) staleServable(fetchedAt time.Time) bool {
+	if fetchedAt.IsZero() {
+		return false
+	}
+	return time.Since(fetchedAt) <= jwksStaleMaxAge
+}
+
+// logStaleRefusal emits one rate-limited line when the stale-trust ceiling
+// starts refusing lookups. Without it, the transition from "degraded but
+// working" to "authentication is failing" is invisible: refreshOnce's own line
+// says the cached keys are still being served, which stops being true here.
+func (j *jwksCache) logStaleRefusal(fetchedAt time.Time) {
+	j.mu.Lock()
+	doLog := j.staleLogAt.IsZero() || time.Since(j.staleLogAt) >= jwksMinRefreshInterval
+	if doLog {
+		j.staleLogAt = time.Now()
+	}
+	uri := j.jwksURI
+	j.mu.Unlock()
+	if doLog && logger != nil {
+		logger.Printf("OIDC: JWKS for %q has been unrefreshable for %s (ceiling %s) — "+
+			"FAILING ID-token validation CLOSED. A signing key withdrawn at the IdP could "+
+			"otherwise keep authenticating here. Restore reachability to the JWKS endpoint.",
+			sanitizeLog(uri), time.Since(fetchedAt).Truncate(time.Minute), jwksStaleMaxAge)
+	}
 }
 
 // refreshOnce runs at most one refresh per jwksMinRefreshInterval and lets

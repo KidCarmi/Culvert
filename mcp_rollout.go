@@ -8,13 +8,26 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/cpdp"
+	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 )
 
 // errShadowExecDepsNotConfigured is returned when a transition to an executing mode
 // (Shadow/Canary/Production) is attempted but the guarded-execution plane is not
 // composed (the shipped Observe-only posture). Fail-closed: no partial Shadow state.
-var errShadowExecDepsNotConfigured = errors.New("shadow_execution_dependencies_not_configured")
+//
+// It carries an mcperr.Reason so that when it is used as a DP rejection cause the
+// resulting acknowledgement reaches the Control Plane with a truthful, alertable
+// code. A bare errors.New resolves to ReasonNone under mcperr.ReasonOf, which
+// renders a security-relevant nack indistinguishable from an unclassified one.
+var errShadowExecDepsNotConfigured = mcperr.New(mcperr.ReasonRolloutTransitionInvalid,
+	"rollout.transition", "shadow_execution_dependencies_not_configured")
+
+// errRolloutCapabilityMismatch marks a signed envelope whose embedded rollout config
+// names a different capability than the envelope itself — the capability-confusion
+// shape the Gateway/Management isolation boundary exists to reject.
+var errRolloutCapabilityMismatch = mcperr.New(mcperr.ReasonSnapshotCapabilityMismatch,
+	"rollout.transition", "rollout capability does not match the envelope capability")
 
 // errRolloutPersistFailed wraps a durable-persistence failure so callers can reject a
 // transition rather than acknowledge a RAM-only mode change.
@@ -208,7 +221,7 @@ func (r *mcpRollout) commitRolloutTransitionAt(cfg *rollout.SignedConfig, actor 
 		// rejected: force Disabled, fail-closed and loud.
 		if rerr := st.SetConfig(prevCfg, actor, now.UnixNano()); rerr != nil {
 			_ = st.SetConfig(rollout.DisabledConfig(cfg.Capability), actor, now.UnixNano())
-			logger.Printf("MCP rollout: rollback of %s failed after persist error; forced Disabled (fail-closed): %v", cfg.Capability.String(), rerr)
+			logger.Printf("MCP rollout: rollback of %s failed after persist error; forced Disabled (fail-closed): %q", cfg.Capability.String(), sanitizeLog(rerr.Error()))
 		}
 		st.UpdateEvidence(func(e *rollout.EvidenceSummary) { *e = prevEvidence })
 		r.setPersistStatus(cfg.Capability, "write_failed")
@@ -226,7 +239,7 @@ func (r *mcpRollout) restore() {
 	for _, st := range []*rollout.State{r.gateway, r.management} {
 		if ok, err := restoreRolloutState(st); err != nil {
 			r.setPersistStatus(st.Capability(), "degraded")
-			logger.Printf("MCP rollout restore for %s: %v", st.Capability().String(), err)
+			logger.Printf("MCP rollout restore for %s: %q", st.Capability().String(), sanitizeLog(err.Error()))
 		} else if ok {
 			// Defense-in-depth: a restored EXECUTING mode (Shadow/Canary/Production)
 			// must not stand while the guarded-execution plane is not composed. In the
@@ -261,7 +274,7 @@ func (r *mcpRollout) emergencyDisable(capb rollout.Capability, actor string) err
 	r.metrics.emergencies.Add(1)
 	if err := persistRolloutState(st); err != nil {
 		r.setPersistStatus(capb, "write_failed")
-		logger.Printf("MCP rollout emergency-disable persist for %s failed (disable in effect in memory, NOT restart-durable): %v", capb.String(), err)
+		logger.Printf("MCP rollout emergency-disable persist for %s failed (disable in effect in memory, NOT restart-durable): %q", capb.String(), sanitizeLog(err.Error()))
 		return fmt.Errorf("%w: %v", errRolloutPersistFailed, err)
 	}
 	return nil
@@ -277,7 +290,7 @@ func (r *mcpRollout) clearEmergency(capb rollout.Capability) error {
 	st.ClearKillSwitch()
 	if err := persistRolloutState(st); err != nil {
 		r.setPersistStatus(capb, "write_failed")
-		logger.Printf("MCP rollout emergency-clear persist for %s failed: %v", capb.String(), err)
+		logger.Printf("MCP rollout emergency-clear persist for %s failed: %q", capb.String(), sanitizeLog(err.Error()))
 		return fmt.Errorf("%w: %v", errRolloutPersistFailed, err)
 	}
 	return nil
@@ -293,7 +306,7 @@ func (r *mcpRollout) recordRehearsal(capb rollout.Capability) error {
 	st.UpdateEvidence(func(e *rollout.EvidenceSummary) { e.RollbackRehearsed = true })
 	if err := persistRolloutState(st); err != nil {
 		r.setPersistStatus(capb, "write_failed")
-		logger.Printf("MCP rollout rehearsal persist for %s failed: %v", capb.String(), err)
+		logger.Printf("MCP rollout rehearsal persist for %s failed: %q", capb.String(), sanitizeLog(err.Error()))
 		return fmt.Errorf("%w: %v", errRolloutPersistFailed, err)
 	}
 	return nil

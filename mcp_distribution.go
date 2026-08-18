@@ -239,7 +239,14 @@ func applyMCPCapabilityEnvelope(a *apply.Applier, env *cpdp.Envelope, capb cpdp.
 		if (cfg.Capability == rollout.CapabilityManagement) != mgmt {
 			// Capability isolation: a Gateway envelope must never carry a Management
 			// rollout (or vice versa). Reject WHOLE without staging distribution.
-			_ = a.RejectAck(env, errRolloutPersistFailed)
+			//
+			// The ack's reason code is the CP's only signal about WHY a node nacked,
+			// and this rejection is the exact shape of a capability-confusion attempt
+			// — the one class the Gateway/Management isolation boundary exists to
+			// stop. It must be reported as such: a plain sentinel carries no
+			// mcperr.Reason, so ReasonOf resolves to ReasonNone and the fleet sees an
+			// unclassified rejection it cannot alert on.
+			_ = a.RejectAck(env, errRolloutCapabilityMismatch)
 			logger.Printf("MCP %s snapshot rejected: rollout capability mismatch (distribution not applied)", capb.String())
 			return
 		}
