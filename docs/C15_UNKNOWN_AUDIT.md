@@ -134,10 +134,17 @@ modifies the data driving every block decision. No audit trail makes
 forensics harder if a sync was triggered at a suspicious time.
 
 **Recommendation (separate fix).** Add
-`auditEvent(r, "security.feeds_sync", "manual", "")` after a successful
+`auditEvent(r, "threatfeed.sync", "manual", "")` after a successful
 `globalThreatFeed.Sync()`. The metadata already declares
 `AuditExpected=false` (consistent with the current handler) — when the
 fix lands, the metadata flag flips to `true` in the same PR.
+
+**Status: fixed.** `apiSecFeedsSync` (`ui_security.go`) now emits
+`auditEvent(r, "threatfeed.sync", "manual", "")` — renamed from the
+originally-shipped `security.feeds_sync` to sit under the same
+`threatfeed.`-prefix convention as its sibling threat-feed audit
+actions (`threatfeed.allowlist.update`, etc.); see
+`docs/engineering/TERMINOLOGY-GOVERNANCE-REVIEW-2026-08-18.md` (T-37).
 
 ---
 
