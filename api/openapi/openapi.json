@@ -980,6 +980,14 @@
           },
           "sseClients": {
             "type": "integer"
+          },
+          "sseEvicted": {
+            "description": "Cumulative count of slow SSE clients evicted by the broadcast hub.",
+            "type": "integer"
+          },
+          "sseRejected": {
+            "description": "Cumulative count of SSE connections rejected at the hub client cap.",
+            "type": "integer"
           }
         },
         "required": [

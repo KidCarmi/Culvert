@@ -706,6 +706,8 @@ components:
         goroutines: { type: integer }
         numGC: { type: integer }
         sseClients: { type: integer }
+        sseEvicted: { type: integer, description: 'Cumulative count of slow SSE clients evicted by the broadcast hub.' }
+        sseRejected: { type: integer, description: 'Cumulative count of SSE connections rejected at the hub client cap.' }
         blocklistSize: { type: integer }
     DashboardThreats:
       type: object
