@@ -141,6 +141,8 @@ func apiDashboardHealth(w http.ResponseWriter, r *http.Request) {
 		"goroutines":    runtime.NumGoroutine(),
 		"numGC":         mem.NumGC,
 		"sseClients":    hub.ClientCount(),
+		"sseEvicted":    hub.Evicted(),
+		"sseRejected":   hub.Rejected(),
 		"blocklistSize": bl.Count(),
 		"logStore":      logStoreHealth(),
 	})
