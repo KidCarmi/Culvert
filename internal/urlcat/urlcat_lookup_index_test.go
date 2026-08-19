@@ -193,6 +193,9 @@ func TestLookupHost_ZeroValueStoreBuildsIndex(t *testing.T) {
 // cases miss: overlapping suffixes, duplicate patterns across categories, mixed
 // BuiltIn flags, and deep label chains.
 func TestLookupHost_RandomizedDifferential(t *testing.T) {
+	// #nosec G404 -- deterministic seeded generator for a reproducible
+	// differential test; a crypto/rand source would make a failure impossible
+	// to replay, which is the whole point of the oracle comparison.
 	rng := rand.New(rand.NewSource(20260819))
 	labels := []string{"a", "b", "c", "example", "corp", "net", "com", "api", "cdn"}
 

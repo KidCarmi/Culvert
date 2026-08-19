@@ -138,7 +138,12 @@ func (s *Store) rebuildLookupIndex() {
 			// that. A trailing-dot pattern must keep matching (or not) the
 			// way it always has.
 			pl := strings.ToLower(p)
-			hit := lookupHit{name: e.Name, pattern: p, order: uint64(ei)<<32 | uint64(uint32(hi))}
+			// ei and hi are range indices over slices, so both are provably
+			// non-negative; the uint32 masks keep a pathological host index
+			// from carrying into the entry bits and inverting precedence.
+			// #nosec G115 -- range indices: non-negative and bounded by len
+			order := uint64(uint32(ei))<<32 | uint64(uint32(hi))
+			hit := lookupHit{name: e.Name, pattern: p, order: order}
 			if cur, dup := all[pl]; !dup || hit.order < cur.order {
 				all[pl] = hit
 			}
