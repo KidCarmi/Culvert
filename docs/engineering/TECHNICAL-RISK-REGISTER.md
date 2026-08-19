@@ -32,6 +32,7 @@
 | RISK-018 | LOW | ✅ CLOSED | Leaked HA `standbyLoop` goroutine races test `logger` swaps (determinism-gate flake) | `resyncCtx(t)` cleanup-cancelled ctx (2026-07-04) |
 | RISK-013 | LOW | ✅ CLOSED | `normalizeHost` IDNA failure is fail-open | fail-closed `NormalizeHostStrict` gate at proxy+SOCKS5 dispatch (2026-07-05); adversarially reviewed |
 | RISK-020 | LOW | OPEN | Native HTTP/2 inspection: deferred hardening on the opt-in path | `proxy_tunnel_h2.go` — see below |
+| RISK-024 | MEDIUM | ✅ CLOSED | Unauthenticated flood evicts other users' in-flight SSO login state (PKCE/SAML capped stores evicted an arbitrary LIVE entry) | fair-share eviction `internal/authstate` + `authStateClientKey` (2026-08-19); gates `auth_login_state_flood_test.go`, RED against the prior policy |
 | RISK-023 | LOW | ✅ ACCEPTED | `diagnose tls` probe uses `InsecureSkipVerify` to inspect invalid/expired chains | `diagnose.go` `tlsHandshakeProbe`; bounded, SSRF-guarded, never carries traffic — see below |
 
 ---

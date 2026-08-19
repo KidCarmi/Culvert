@@ -728,7 +728,7 @@ func authOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Find provider by state (providerID is stored inside the PKCE entry).
-	entry, ok := globalPKCEStore.peek(state)
+	entry, ok := globalPKCEStore.Peek(state)
 	if !ok {
 		http.Error(w, "invalid or expired state", http.StatusBadRequest)
 		return
