@@ -60,6 +60,13 @@ func init() {
 // certificate expiry and triggers rotation when needed — for BOTH the
 // inspection CA (internal/ca) and the cluster CA (enrollment.go). The loop
 // lives here, not in the package, because it spans both CAs.
+//
+// CHAOS-50 / CA-13: because this ONE loop is the only rotation driver for TWO
+// independent trust roots, its start condition must not depend on the state of
+// either. Its caller (loadRootCA) used to start it only when the INSPECTION CA
+// was ready, which silently disabled cluster-CA rotation whenever the
+// inspection bundle failed to load. Both halves are individually no-ops when
+// their CA is absent, so the loop is safe to start on every node.
 func StartCAAutoRotation(ctx context.Context, caPath, passphrase string) {
 	go func() {
 		t := time.NewTicker(ca.RotationCheckInterval)

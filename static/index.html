@@ -4392,6 +4392,8 @@ Firefox (all platforms):
               <div class="stat-card"><div class="stat-val" id="cca-expires">-</div><div class="stat-label">Expires</div></div>
               <div class="stat-card"><div class="stat-val" id="cca-fingerprint" style="font-size:.65rem;word-break:break-all">-</div><div class="stat-label">SHA-256 Fingerprint</div></div>
             </div>
+            <div id="cca-unusable-banner" style="display:none;margin-top:12px;padding:10px 12px;border-radius:8px;background:rgba(239,68,68,.12);color:var(--danger);font-size:.8rem;line-height:1.5"></div>
+            <div id="cca-clamp-banner" style="display:none;margin-top:12px;padding:10px 12px;border-radius:8px;background:rgba(245,158,11,.12);color:#f59e0b;font-size:.8rem;line-height:1.5"></div>
             <div id="cca-rotation-warning" style="display:none;margin-top:12px;padding:10px 12px;border-radius:8px;background:rgba(239,68,68,.12);color:var(--danger);font-size:.8rem;line-height:1.5"></div>
           </div>
           <details style="margin-top:12px">
@@ -16670,9 +16672,14 @@ async function loadClusterCA() {
   try {
     const r = await api('/api/cluster/ca');
     if (!r) return;
-    const status = r.dualCAActive ? 'Active (Dual-CA Overlap)' : r.initialized ? 'Active' : 'Not Initialized';
+    // CHAOS-50: "initialized" and "usable" are different questions. An expired
+    // cluster CA is initialized, refuses every issuance, and used to render as a
+    // green "Active" while the whole fleet had lost mTLS trust.
+    const unusable = r.initialized && r.usable === false;
+    const status = unusable ? 'EXPIRED (enrollment blocked)'
+      : r.dualCAActive ? 'Active (Dual-CA Overlap)' : r.initialized ? 'Active' : 'Not Initialized';
     document.getElementById('cca-status').textContent = status;
-    document.getElementById('cca-status').style.color = r.initialized ? '#22c55e' : 'var(--muted)';
+    document.getElementById('cca-status').style.color = unusable ? 'var(--danger)' : r.initialized ? '#22c55e' : 'var(--muted)';
     document.getElementById('cca-subject').textContent = r.subject || '-';
     document.getElementById('cca-expires').textContent = r.expires ? new Date(r.expires).toLocaleDateString() : '-';
     const fpText = r.fingerprint || '-';
@@ -16684,6 +16691,37 @@ async function loadClusterCA() {
     // before expiry) - if it keeps failing (e.g. a read-only CA directory), the
     // only prior signal was a log line, discovered only once nodes actually lost
     // trust at expiry. Surface the last failure here instead.
+    // CHAOS-50: the outage banner. Unlike the rotation warning below, this is
+    // the cliff itself — issuance is already being refused, so it names the
+    // remediation (import a replacement CA) rather than saying it will retry.
+    const badEl = document.getElementById('cca-unusable-banner');
+    if (badEl) {
+      if (unusable) {
+        badEl.style.display = '';
+        badEl.innerHTML = '<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> Cluster CA is UNUSABLE: ' +
+          escHtml(r.unusableReason || 'outside its validity window') +
+          '. Node enrollment and certificate renewal are refused (' + escHtml(String(r.signRefused || 0)) +
+          ' refused since boot) and enrolled nodes cannot complete mTLS with this control plane. ' +
+          'Import a replacement cluster CA below — nodes renew automatically once trust is restored.';
+      } else {
+        badEl.style.display = 'none';
+        badEl.textContent = '';
+      }
+    }
+    // The warning shoulder: certs are being clamped to the CA's own expiry, so
+    // the CA is inside its final window and has not been replaced yet.
+    const clampEl = document.getElementById('cca-clamp-banner');
+    if (clampEl) {
+      if (!unusable && r.nodeCertsClamped > 0) {
+        clampEl.style.display = '';
+        clampEl.innerHTML = '<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> Cluster CA expires in ' +
+          escHtml(String(r.expiresInDays)) + ' day(s) and has not rotated. ' + escHtml(String(r.nodeCertsClamped)) +
+          ' node certificate(s) have been clamped to the CA’s own expiry, so affected nodes will keep renewing until it is replaced.';
+      } else {
+        clampEl.style.display = 'none';
+        clampEl.textContent = '';
+      }
+    }
     const warnEl = document.getElementById('cca-rotation-warning');
     if (warnEl) {
       if (r.lastRotationError) {

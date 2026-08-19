@@ -163,6 +163,9 @@ func buildOperatorContract() OperatorContract {
 		checkSyslogFeed(),
 		checkMemoryBackstop(),
 	}
+	// Cluster (enrollment) CA — CHAOS-50. Contributes nothing on a node with no
+	// cluster CA, so it never adds a row to a single-node appliance's report.
+	checks = append(checks, checkClusterCA()...)
 	// Auth Exempt risk diagnostics (Slice 8): WARN-only rows for risky Stage-1
 	// exemption postures. Contributes nothing when no exempt rules exist.
 	checks = append(checks, authExemptDiagnostics(policyStore.List(), policyActionFromDefault())...)
@@ -407,6 +410,67 @@ func checkRootCA() OperatorContractCheck {
 		Status:  diagOK,
 		Message: "root CA initialised",
 	}
+}
+
+// checkClusterCA is the cluster (enrollment) CA's operator-contract row —
+// CHAOS-50, register row CA-13.
+//
+// The cluster CA had no row at all, which is why its failure was silent: an
+// operator running the diagnostics report on a control plane whose CA had gone
+// unrotatable, or expired, got a clean bill of health for the trust root every
+// DP in the fleet authenticates with.
+//
+// Contributes NOTHING when no cluster CA is loaded — the ordinary single-node
+// appliance must not carry a permanently-degraded row for a feature it does not
+// use.
+//
+// Like root_ca, the message carries impact and counts, never the raw cause: this
+// is a VIEWER-role surface under the standing no-sensitive-values guardrail, and
+// the cause names the appliance's exact certificate state. Full detail stays in
+// the logs, the alert, and the admin-role GET /api/cluster/ca.
+func checkClusterCA() []OperatorContractCheck {
+	if globalClusterCA.Expiry().IsZero() {
+		return nil
+	}
+	snap := clusterCAFailures()
+	if globalClusterCA.Usable() != nil {
+		return []OperatorContractCheck{{
+			Code:   "cluster_ca",
+			Status: diagFail,
+			Message: fmt.Sprintf("cluster CA outside its validity window — node enrollment and certificate renewal are REFUSED "+
+				"and enrolled nodes cannot complete mTLS (%d issuances refused since boot)", snap.SignRefusals),
+			OperatorAction: "Import a replacement cluster CA (Cluster → Cluster CA → Import Custom Cluster CA). Nodes renew automatically once trust is restored.",
+		}}
+	}
+	// Keyed on the CURRENT rotation state, not the cumulative counter: an
+	// operator who restores write access and imports a new CA has fixed this,
+	// and a row latched on the counter would keep contradicting them until
+	// restart.
+	if snap.RotationDegraded {
+		return []OperatorContractCheck{{
+			Code:   "cluster_ca",
+			Status: diagFail,
+			Message: fmt.Sprintf("cluster CA auto-rotation is failing (%d failures since boot) — the CA will not be replaced "+
+				"and every enrolled node loses mTLS trust at its expiry", snap.RotationFailures),
+			OperatorAction: "Restore write access to the cluster CA directory, or import a replacement cluster CA under Cluster → Cluster CA.",
+		}}
+	}
+	// Clamped issuances mean the CA is inside its own final window and has not
+	// been replaced — the warning shoulder in front of the two failures above.
+	if snap.ClampedIssuances > 0 {
+		return []OperatorContractCheck{{
+			Code:   "cluster_ca",
+			Status: diagWarn,
+			Message: fmt.Sprintf("cluster CA is inside its final validity window and has not rotated — %d node certificate(s) "+
+				"clamped to the CA's own expiry, and affected nodes will renew repeatedly until it is replaced", snap.ClampedIssuances),
+			OperatorAction: "Check the Cluster CA panel for a rotation error, or import a replacement cluster CA.",
+		}}
+	}
+	return []OperatorContractCheck{{
+		Code:    "cluster_ca",
+		Status:  diagOK,
+		Message: "cluster CA initialised and within its validity window",
+	}}
 }
 
 func checkSessionSecret() OperatorContractCheck {
