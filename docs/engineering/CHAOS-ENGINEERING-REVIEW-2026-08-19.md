@@ -379,3 +379,49 @@ present, label-free, expiry gauge omitted when absent; admin API separating `usa
   standby replicating leader state has not rotated anything. A standby promoted mid-outage inherits
   the leader's CA and, with it, the leader's usability state — which the new surfaces will report
   correctly on the promoted node.
+
+
+---
+
+## 13. Review follow-up — two defects in the fix itself
+
+Both were found by automated review of the first cut and both were real. They belong in the record
+because they are the *same* mistake the sweep is about, made while fixing it.
+
+### 13.1 `culvert_cluster_ca_usable 0` on every node without a cluster CA
+
+`Usable()` returns "no cluster CA loaded" when there is no CA, so an unconditional gauge rendered
+`culvert_cluster_ca_usable 0` on every standalone appliance and every data-plane node —
+indistinguishable from an expired CA on a real control plane. §12's own recommended paging rule is
+literally `culvert_cluster_ca_usable == 0`, so the shipped runbook would have paged for the entire
+estate while promising, two paragraphs later, that these rules "do not fire outside a cluster."
+
+What makes it worth recording is that the neighbouring series got this exactly right:
+`culvert_cluster_ca_expires_in_seconds` was already omitted when no CA exists, with a comment
+explaining that `0` would read as "expires now." The reasoning was applied to one gauge and not to
+the one beside it. Both gauges are now omitted; the counters stay present at `0`, which is their
+normal non-alerting state and keeps `rate()`/`increase()` working from the first scrape.
+
+### 13.2 The `NotBefore` skew tolerance issued certificates this node's own verifier rejects
+
+The first cut mirrored the inspection CA's `caClockSkewTolerance`, allowing a `NotBefore` up to five
+minutes in the future. Inside that window `Usable()` said yes, `SignCSR` succeeded, and
+`clampNodeCertValidity` pinned the leaf's `NotBefore` to the CA's — so the CP issued a certificate
+that its **own** x509 verifier rejects, because the CP checks DP client certs against that same CA
+using that same clock.
+
+That is the failure mode this entire change exists to remove, reintroduced in miniature: a
+successful-looking enrollment producing a certificate that cannot authenticate. Milder than the
+expired case — bounded by the skew and self-clearing, and the DP's reconnect backoff covers it —
+which is why it is P2 rather than P1, but the shape is identical.
+
+The tolerance was copied without re-deriving its justification. On the inspection CA it absorbs
+disagreement between *two machines*: a CA generated seconds ago on a faster peer must not take the
+gateway down. Here the rejecting verifier is **co-located with the signer**, so the tolerance does
+not reconcile two clocks — it makes one node contradict itself. `NotBefore` is now strict, and clock
+rollback lands in the same branch with the same verdict, which is correct for it too: if this node
+believes the current time precedes the CA's start, its verifier will reject everything the CA signs.
+
+> **The generalisable rule:** a tolerance is only sound where the two parties it reconciles are
+> genuinely distinct. Copying one across a boundary where the verifier is the signer converts
+> "absorb disagreement" into "disagree with yourself."

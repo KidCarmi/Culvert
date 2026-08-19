@@ -55,8 +55,14 @@ Any one of these is conclusive:
 
 1. **Check the clock first.** If `unusableReason` says
    `not valid until <timestamp> (system clock may have rolled back)`, this is an NTP/RTC problem,
-   not a certificate problem. Fix time sync; issuance resumes on its own, with a 5-minute skew
-   tolerance already allowed for.
+   not a certificate problem. Fix time sync; issuance resumes on its own once this node's clock
+   reaches the CA's `NotBefore`.
+
+   There is deliberately **no** skew tolerance on this end. The control plane verifies node
+   certificates against this same CA using this same clock, so tolerating a future `NotBefore`
+   would let it hand out certificates its own verifier rejects — a "successful" enrollment that
+   cannot authenticate. Refusing is bounded and self-clearing; the data plane's reconnect backoff
+   covers the gap.
 
 2. **Import a replacement cluster CA.**
    Admin UI → **Cluster → Cluster CA → Import Custom Cluster CA**, or:
@@ -123,8 +129,10 @@ culvert_cluster_ca_expires_in_seconds < 30 * 86400
 increase(culvert_cluster_ca_rotation_failures_total[1h]) > 0
 ```
 
-`culvert_cluster_ca_expires_in_seconds` is **omitted entirely** on a node with no cluster CA (the
-ordinary single-node appliance), so these rules do not fire outside a cluster.
+Both `culvert_cluster_ca_usable` and `culvert_cluster_ca_expires_in_seconds` are **omitted
+entirely** on a node with no cluster CA (the ordinary single-node appliance, and every data-plane
+node), so these rules do not fire outside a cluster. The counters stay present at 0, which is their
+normal non-alerting state.
 
 ## 6. What this runbook does not cover
 

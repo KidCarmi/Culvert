@@ -162,36 +162,46 @@ func TestChaos50_ExpiredClusterCARefusesToSign(t *testing.T) {
 	}
 }
 
-// TestChaos50_ClockRollbackRefusesButSkewToleranceHolds pins both ends of the
-// NotBefore guard. A CP that boots with a bad RTC must not fence its own fleet
-// out over a few seconds of skew (the tolerance), but a genuine rollback past
-// the CA's start must fail closed.
-func TestChaos50_ClockRollbackRefusesButSkewToleranceHolds(t *testing.T) {
+// TestChaos50_NotYetValidCARefusesWithNoSkewTolerance pins the NotBefore guard
+// as STRICT — the deliberate divergence from the inspection CA's 5-minute
+// tolerance (PR review P2).
+//
+// A tolerance here would let the CP issue certificates its OWN x509 verifier
+// rejects: the CP checks DP client certs against this same CA, using this same
+// clock, and clampNodeCertValidity pins the leaf's NotBefore to the CA's. So a
+// CA whose NotBefore sits a minute in the future would produce a "successful"
+// enrollment whose certificate cannot authenticate for that minute — the
+// issue-something-that-cannot-work behaviour this whole change removes, in
+// miniature. Refusing costs only a bounded, self-clearing delay the DP's
+// reconnect backoff already handles.
+func TestChaos50_NotYetValidCARefusesWithNoSkewTolerance(t *testing.T) {
 	now := time.Now()
 
-	// Inside tolerance: NotBefore 1 minute in the future → still usable.
-	near := newClusterCAWithWindow(t, t.TempDir(), now.Add(1*time.Minute), now.Add(3650*24*time.Hour))
-	installClusterCA(t, near)
-	if err := near.Usable(); err != nil {
-		t.Fatalf("CA within the %s skew tolerance reported unusable: %v", clusterCAClockSkewTolerance, err)
+	// Already valid: usable, signs normally.
+	ok := newClusterCAWithWindow(t, t.TempDir(), now.Add(-time.Minute), now.Add(3650*24*time.Hour))
+	installClusterCA(t, ok)
+	if err := ok.Usable(); err != nil {
+		t.Fatalf("an already-valid CA reported unusable: %v", err)
 	}
-	if _, _, _, err := near.SignCSR(newTestCSR(t, "node-ok"), "node-ok"); err != nil {
-		t.Fatalf("sign refused inside the skew tolerance: %v", err)
+	if _, _, _, err := ok.SignCSR(newTestCSR(t, "node-ok"), "node-ok"); err != nil {
+		t.Fatalf("sign refused for an already-valid CA: %v", err)
 	}
 
-	// Beyond tolerance: a real rollback → refuse, and say why.
-	far := newClusterCAWithWindow(t, t.TempDir(),
-		now.Add(clusterCAClockSkewTolerance+time.Hour), now.Add(3650*24*time.Hour))
-	installClusterCA(t, far)
-	err := far.Usable()
-	if err == nil {
-		t.Fatal("a not-yet-valid CA beyond the skew tolerance reported usable")
-	}
-	if !strings.Contains(err.Error(), "clock") {
-		t.Fatalf("reason does not point at the clock: %v", err)
-	}
-	if _, _, _, err := far.SignCSR(newTestCSR(t, "node-bad"), "node-bad"); !errors.Is(err, errClusterCAUnusable) {
-		t.Fatalf("sign not refused beyond the skew tolerance: %v", err)
+	// Even a SMALL future NotBefore must refuse — this is the assertion that
+	// would fail if a skew tolerance were reintroduced.
+	for _, ahead := range []time.Duration{30 * time.Second, 2 * time.Minute, time.Hour} {
+		future := newClusterCAWithWindow(t, t.TempDir(), now.Add(ahead), now.Add(3650*24*time.Hour))
+		installClusterCA(t, future)
+		err := future.Usable()
+		if err == nil {
+			t.Fatalf("CA with NotBefore %s in the future reported usable — no skew tolerance is permitted here", ahead)
+		}
+		if !strings.Contains(err.Error(), "clock") {
+			t.Fatalf("reason does not point at the clock: %v", err)
+		}
+		if _, _, _, err := future.SignCSR(newTestCSR(t, "node-bad"), "node-bad"); !errors.Is(err, errClusterCAUnusable) {
+			t.Fatalf("sign not refused for a CA %s away from validity: %v", ahead, err)
+		}
 	}
 }
 
@@ -613,13 +623,29 @@ func TestChaos50_MetricsExposeUsabilityAndExpiry(t *testing.T) {
 		t.Fatalf("cluster CA metrics carry labels: %s", out)
 	}
 
-	// With no CA loaded the expiry gauge must be OMITTED, not rendered 0 —
-	// 0 reads as "expires now" and would page every non-cluster node.
+	// With no CA loaded BOTH gauges must be OMITTED (PR review P1). `usable` is
+	// the one that bites: Usable() returns "no cluster CA loaded" on a standalone
+	// or data-plane node, so an unconditional gauge reads
+	// `culvert_cluster_ca_usable 0` — identical to an expired CA on a real
+	// control plane — and the runbook's paging rule is exactly `== 0`, so every
+	// node in the estate with no signing CA would page.
 	installClusterCA(t, &clusterCA{})
 	sb.Reset()
 	clusterCAWritePrometheus(&sb)
-	if strings.Contains(sb.String(), "culvert_cluster_ca_expires_in_seconds") {
-		t.Fatalf("expiry gauge rendered with no CA loaded:\n%s", sb.String())
+	out = sb.String()
+	for _, absent := range []string{
+		"culvert_cluster_ca_usable",
+		"culvert_cluster_ca_expires_in_seconds",
+	} {
+		if strings.Contains(out, absent) {
+			t.Fatalf("%s rendered with no cluster CA loaded — an absent series is the honest encoding:\n%s", absent, out)
+		}
+	}
+	// The COUNTERS stay present at 0: a counter resting at zero is the normal,
+	// non-alerting state, and keeping the series means rate()/increase() work
+	// from the first scrape.
+	if !strings.Contains(out, "culvert_cluster_ca_sign_refused_total 0") {
+		t.Fatalf("counters must stay present with no cluster CA:\n%s", out)
 	}
 }
 

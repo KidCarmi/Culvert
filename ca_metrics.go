@@ -77,18 +77,36 @@ func caWritePrometheus(w *strings.Builder) {
 func clusterCAWritePrometheus(w *strings.Builder) {
 	snap := clusterCAFailures()
 
-	w.WriteString("\n# HELP culvert_cluster_ca_usable Whether the cluster CA can currently sign node certificates peers will accept (1 = yes)\n")
-	w.WriteString("# TYPE culvert_cluster_ca_usable gauge\n")
-	usable := 0
-	if globalClusterCA.Usable() == nil {
-		usable = 1
-	}
-	fmt.Fprintf(w, "culvert_cluster_ca_usable %d\n", usable)
-
-	// Omitted entirely when no cluster CA is loaded — the common case on a
-	// single-node appliance. An absent series is honest; 0 would read as
-	// "expires now" and page every non-cluster node in the estate.
+	// BOTH gauges are omitted entirely when no cluster CA is loaded — the common
+	// case on a single-node appliance or any data-plane node.
+	//
+	// The `usable` gauge needs this as much as the expiry one, and getting it
+	// wrong is worse: Usable() returns the "no cluster CA loaded" error on such a
+	// node, so an unconditional gauge reads `culvert_cluster_ca_usable 0` —
+	// indistinguishable from an expired CA on a real control plane. The runbook's
+	// recommended paging rule is literally `culvert_cluster_ca_usable == 0`, so
+	// that would page for every node in the estate that legitimately has no
+	// signing CA, exactly contradicting the runbook's promise that these rules do
+	// not fire outside a cluster.
+	//
+	// An absent series is the honest encoding of "this node has no cluster CA":
+	// the question does not apply, rather than having the answer "broken". Same
+	// reasoning as `culvert_ca_expires_in_seconds` in CHAOS-28, where 0 would
+	// have read as "expires now".
+	//
+	// The COUNTERS below stay unconditional on purpose: a counter resting at 0 is
+	// the normal, non-alerting state and keeping the series present means rate()
+	// and increase() work from the first scrape rather than starting on the first
+	// fault.
 	if exp := globalClusterCA.Expiry(); !exp.IsZero() {
+		w.WriteString("\n# HELP culvert_cluster_ca_usable Whether the cluster CA can currently sign node certificates peers will accept (1 = yes)\n")
+		w.WriteString("# TYPE culvert_cluster_ca_usable gauge\n")
+		usable := 0
+		if globalClusterCA.Usable() == nil {
+			usable = 1
+		}
+		fmt.Fprintf(w, "culvert_cluster_ca_usable %d\n", usable)
+
 		w.WriteString("\n# HELP culvert_cluster_ca_expires_in_seconds Seconds until the cluster CA certificate expires (negative once expired)\n")
 		w.WriteString("# TYPE culvert_cluster_ca_expires_in_seconds gauge\n")
 		fmt.Fprintf(w, "culvert_cluster_ca_expires_in_seconds %d\n", int64(time.Until(exp).Seconds()))

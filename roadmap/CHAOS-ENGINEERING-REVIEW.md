@@ -1299,3 +1299,29 @@ time-based heuristic would report recovery almost immediately and be wrong every
   re-enroll — which is why this change invests most in making the slide visible rather than the cliff.
 - **`ImportCASilent` (HA replication) records no rotation observation**, by design: a standby
   replicating leader state has not rotated anything.
+
+### 17.8 Review follow-up — two defects in the fix itself
+
+Both real, both the sweep's own mistake made while fixing it.
+
+**(1) `culvert_cluster_ca_usable 0` on every node WITHOUT a cluster CA.** `Usable()` errors when no
+CA is loaded, so the unconditional gauge read `0` on every standalone appliance and data-plane node —
+indistinguishable from an expired CA — while the shipped runbook recommends `== 0` as its paging rule
+and promises these rules do not fire outside a cluster. The series beside it
+(`culvert_cluster_ca_expires_in_seconds`) already had the correct guard, with a comment explaining
+why. Applied to one gauge, missed on its neighbour. Both gauges are now omitted when no CA exists;
+the counters stay at `0` so `rate()`/`increase()` work from the first scrape.
+
+**(2) The `NotBefore` skew tolerance issued certs this node's own verifier rejects.** The first cut
+copied the inspection CA's 5-minute `caClockSkewTolerance`. Inside that window `Usable()` said yes,
+`SignCSR` succeeded, and the clamp pinned the leaf's `NotBefore` to the CA's — so the CP handed out a
+certificate its OWN x509 verifier rejects, since it checks DP client certs against that same CA on
+that same clock. The exact failure this sweep removes, in miniature (milder: bounded by the skew,
+self-clearing, covered by the DP's reconnect backoff). `NotBefore` is now STRICT; clock rollback
+lands in the same branch and the same verdict is correct for it.
+
+> **Rule worth generalising:** a tolerance is only sound where the two parties it reconciles are
+> genuinely distinct. The inspection CA's tolerance absorbs disagreement between two MACHINES; here
+> the rejecting verifier is co-located with the signer, so the same constant turns "absorb
+> disagreement" into "disagree with yourself." A constant copied across a boundary needs its
+> justification re-derived, not just its value.

@@ -40,14 +40,6 @@ import (
 	"time"
 )
 
-// clusterCAClockSkewTolerance is how far the cluster CA's NotBefore may sit in
-// the future before the CA is treated as unusable. It matches the inspection
-// CA's caClockSkewTolerance and the -5m backdating SignCSR already applies to
-// node certs, so all three ends of the same window use one tolerance. Clock
-// rollback is in scope: a CP that boots with a bad RTC, or NTP stepping
-// backwards, must not fence its own fleet out over a few seconds of skew.
-const clusterCAClockSkewTolerance = 5 * time.Minute
-
 // clusterCARenewalWindow is the horizon inside which a cluster CA is treated as
 // expiring soon. It is deliberately the SAME 30 days as clusterCARotateWithin
 // (RotateIfNeeded) and as the DP-side certNeedsRenewal window, so "the CA is
@@ -74,9 +66,34 @@ func clusterCAUsable(cert *x509.Certificate, now time.Time) error {
 			cert.NotAfter.UTC().Format(time.RFC3339),
 			now.Sub(cert.NotAfter).Round(time.Second))
 	}
-	if now.Add(clusterCAClockSkewTolerance).Before(cert.NotBefore) {
-		return fmt.Errorf("%w: not valid until %s (system clock may have rolled back)", errClusterCAUnusable,
-			cert.NotBefore.UTC().Format(time.RFC3339))
+	// NotBefore is checked STRICTLY — no future-skew tolerance. This is the one
+	// place the cluster CA deliberately diverges from the inspection CA's
+	// caClockSkewTolerance, and the reason is that the verifier which rejects the
+	// certificate lives on THIS node, using THIS clock.
+	//
+	// The inspection CA's tolerance absorbs disagreement between two machines: a
+	// CA generated seconds ago on a peer with a faster clock should not take the
+	// gateway down. Here the CP verifies DP client certs against this very CA
+	// (buildServerTLS's ClientCAs pool), so tolerating a future NotBefore makes
+	// the node contradict ITSELF — its signer says "fine" while its own x509
+	// verifier says "not yet valid". clampNodeCertValidity then pins the leaf's
+	// NotBefore to the CA's, so the issued certificate is unusable for the whole
+	// skew window, on the node that just issued it. That is precisely the
+	// issue-something-that-cannot-work behaviour this file exists to remove;
+	// tolerating it here would have reintroduced it in miniature.
+	//
+	// Refusing instead costs a bounded, self-clearing delay that the DP's
+	// reconnect backoff already handles, and it produces a counted, alerted,
+	// operator-readable reason naming the clock. Clock ROLLBACK lands in the same
+	// branch and the same verdict is correct for it: if this node believes the
+	// current time precedes the CA's start, its own verifier will reject
+	// everything the CA signs, so "unusable" is the honest report.
+	//
+	// Self-generated CAs are unaffected: RotateIfNeeded backdates NotBefore by an
+	// hour, so only an imported or replicated CA can reach this branch.
+	if now.Before(cert.NotBefore) {
+		return fmt.Errorf("%w: not valid until %s (system clock may have rolled back, or the CA was issued by a host whose clock is ahead)",
+			errClusterCAUnusable, cert.NotBefore.UTC().Format(time.RFC3339))
 	}
 	return nil
 }
