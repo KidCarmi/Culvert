@@ -174,6 +174,116 @@ func TestLookupHost_InvalidatedByEveryMutator(t *testing.T) {
 	}
 }
 
+// TestAddHost_DoesNotInvalidateLookupIndex pins the O(1) append path.
+//
+// The legacy SaaS feed sync calls AddHost once per host, so if AddHost
+// invalidated the reverse index, a concurrent request-path lookup landing
+// between two additions would rebuild the entire taxonomy under the exclusive
+// lock — once per added host, stalling the request path for the length of the
+// feed update. Correctness alone is not enough here; the index must stay READY
+// across the batch.
+func TestAddHost_DoesNotInvalidateLookupIndex(t *testing.T) {
+	s := New([]*Entry{{Name: "Feed", Hosts: []string{"seed.example"}}})
+	if _, _, ok := s.LookupHost("seed.example"); !ok {
+		t.Fatal("seed lookup missed")
+	}
+
+	for i := 0; i < 50; i++ {
+		if err := s.AddHost("Feed", fmt.Sprintf("h%d.feed.example", i)); err != nil {
+			t.Fatalf("AddHost: %v", err)
+		}
+		s.mu.RLock()
+		ready := s.lookupReady
+		s.mu.RUnlock()
+		if !ready {
+			t.Fatalf("AddHost #%d invalidated the reverse index; a per-host feed "+
+				"merge would rebuild the whole taxonomy once per host", i)
+		}
+	}
+
+	probes := []string{"seed.example", "h0.feed.example", "h49.feed.example",
+		"sub.h7.feed.example", "absent.example"}
+	assertSameAsReference(t, s, probes)
+}
+
+// TestAddHost_IncrementalKeepsScanPrecedence is the correctness half of the O(1)
+// append: a host added to a LATER category must not displace an equal pattern
+// already claimed by an EARLIER one, and one added to an earlier category must.
+func TestAddHost_IncrementalKeepsScanPrecedence(t *testing.T) {
+	s := New([]*Entry{
+		{Name: "First", Hosts: []string{"a.example"}},
+		{Name: "Second", Hosts: []string{"b.example"}},
+	})
+	if _, _, ok := s.LookupHost("a.example"); !ok {
+		t.Fatal("seed lookup missed")
+	}
+
+	// Added to the LATER entry — First must keep the pattern.
+	if err := s.AddHost("Second", "a.example"); err != nil {
+		t.Fatalf("AddHost: %v", err)
+	}
+	if cat, _, _ := s.LookupHost("a.example"); cat != "First" {
+		t.Fatalf("category = %q; want First (earlier entry keeps precedence)", cat)
+	}
+
+	// Added to the EARLIER entry — First must now take it over.
+	if err := s.AddHost("First", "b.example"); err != nil {
+		t.Fatalf("AddHost: %v", err)
+	}
+	if cat, _, _ := s.LookupHost("b.example"); cat != "First" {
+		t.Fatalf("category = %q; want First (earlier entry wins)", cat)
+	}
+
+	assertSameAsReference(t, s, []string{"a.example", "b.example", "x.a.example", "x.b.example"})
+}
+
+// TestAddHost_IncrementalMatchesRebuild fuzzes interleaved appends against a
+// from-scratch rebuild, so the O(1) path can never drift from the full one.
+func TestAddHost_IncrementalMatchesRebuild(t *testing.T) {
+	// #nosec G404 -- deterministic seeded generator for a reproducible test
+	rng := rand.New(rand.NewSource(4242))
+	labels := []string{"a", "b", "example", "corp", "cdn"}
+	randomHost := func() string {
+		n := 1 + rng.Intn(3)
+		parts := make([]string, n)
+		for i := range parts {
+			parts[i] = labels[rng.Intn(len(labels))]
+		}
+		return strings.Join(parts, ".")
+	}
+
+	for iter := 0; iter < 60; iter++ {
+		s := New([]*Entry{
+			{Name: "Alpha", Hosts: []string{randomHost()}},
+			{Name: "Beta", BuiltIn: true, Hosts: []string{randomHost()}},
+			{Name: "Gamma", Hosts: []string{randomHost()}},
+		})
+		s.LookupHost("warm.example") // build the index so appends go incremental
+
+		names := []string{"Alpha", "Beta", "Gamma"}
+		for i := 0; i < 8; i++ {
+			_ = s.AddHost(names[rng.Intn(len(names))], randomHost())
+		}
+
+		probes := make([]string, 0, 8)
+		for i := 0; i < 8; i++ {
+			probes = append(probes, randomHost())
+		}
+
+		// First against the INCREMENTALLY maintained index — this is the path
+		// the appends actually exercised, and the one that could drift.
+		assertSameAsReference(t, s, probes)
+
+		// Then force a from-scratch rebuild and require the same answers, so a
+		// divergence between the two paths cannot hide behind a shared bug in
+		// the oracle comparison.
+		s.mu.Lock()
+		s.lookupReady = false
+		s.mu.Unlock()
+		assertSameAsReference(t, s, probes)
+	}
+}
+
 // TestLookupHost_ZeroValueStoreBuildsIndex covers the Store built as a struct
 // literal instead of through New. Nothing calls rebuildIndex on that path, so
 // a "stale" flag defaulting to false would leave the lookup reading a nil index

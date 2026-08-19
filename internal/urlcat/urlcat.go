@@ -159,6 +159,43 @@ func (s *Store) rebuildLookupIndex() {
 	s.lookupReady = true
 }
 
+// addToLookupIndex folds a single APPENDED host into the reverse indices in
+// O(1) instead of invalidating them. Caller must hold s.mu for writing, and
+// hostIdx must be the position p now occupies in entry.Hosts.
+//
+// Invalidating here instead would be correct but pathological: the legacy SaaS
+// feed sync calls AddHost once per host (saas_feed.go), so under concurrent
+// category-group traffic a request-path lookup can land between successive
+// additions and rebuild the WHOLE taxonomy under the exclusive lock — once per
+// added host. A large feed update would then stall the request path repeatedly,
+// which is worse than the linear scan this index replaced. Reported as P1 on
+// PR #1171 and pinned by TestAddHost_DoesNotInvalidateLookupIndex.
+//
+// O(1) is exact, not approximate, because an APPEND is uniquely well-behaved:
+// it adds one candidate at the END of one entry's host list, so no existing
+// entry index or host index shifts and no other pattern key's winner can
+// change. The only key affected is this host's, whose winner becomes
+// min(existing, new). Removal has no such property — a removed pattern's
+// replacement depends on candidates the index does not enumerate — which is why
+// RemoveHost/Delete/Set still invalidate.
+func (s *Store) addToLookupIndex(entryIdx, hostIdx int, e *Entry, p string) {
+	if !s.lookupReady {
+		return // a full rebuild is already pending; nothing to keep in sync
+	}
+	pl := strings.ToLower(p)
+	// #nosec G115 -- range/slice indices: non-negative and bounded by len
+	order := uint64(uint32(entryIdx))<<32 | uint64(uint32(hostIdx))
+	hit := lookupHit{name: e.Name, pattern: p, order: order}
+	if cur, dup := s.lookupIdx[pl]; !dup || hit.order < cur.order {
+		s.lookupIdx[pl] = hit
+	}
+	if !e.BuiltIn {
+		if cur, dup := s.adminLookupIdx[pl]; !dup || hit.order < cur.order {
+			s.adminLookupIdx[pl] = hit
+		}
+	}
+}
+
 // lookupIn resolves an already-normalized host against a reverse index using
 // the same grammar as the scan it replaces: a pattern matches when it equals
 // the host or is a dot-suffix of it. The candidate set is therefore the host
@@ -409,7 +446,8 @@ func (s *Store) Delete(name string) error {
 func (s *Store) AddHost(category, host string) error {
 	s.mu.Lock()
 	key := strings.ToLower(category)
-	for _, e := range s.entries {
+	for ei := range s.entries {
+		e := s.entries[ei]
 		if !strings.EqualFold(e.Name, category) {
 			continue
 		}
@@ -420,7 +458,7 @@ func (s *Store) AddHost(category, host string) error {
 		}
 		e.Hosts = append(e.Hosts, host)
 		s.index[key][host] = true
-		s.lookupReady = false
+		s.addToLookupIndex(ei, len(e.Hosts)-1, e, host)
 		s.mu.Unlock()
 		s.Save()
 		return nil
