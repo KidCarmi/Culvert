@@ -241,13 +241,15 @@ in-container `git status` sees those as deleted and the image binary ships
 `vcs.modified=true` (not tree-state reproducible). Disjoint provenance surface
 (the image has its own cosign signature), tracked separately.
 
-**F2 — runtime version identity (DONE).** Prompted by the first LIVE
+**F2 — runtime version stamp (DONE).** Prompted by the first LIVE
 authoritative MCP Observe Acceptance (v1.0.202), which failed its required
 `artifact.version` criterion: `main.version` was stamped correctly by the
 release build (`-X main.version=${REF_NAME}`), but the live `/healthz`
 handler omitted the `version` field entirely, so the release's runtime
-identity was unverifiable. Two fail-closed gates now guard this, both wired
-from `.github/scripts/`:
+version stamp was unverifiable. Two fail-closed gates now guard this, both
+wired from `.github/scripts/` (deliberately called a "version stamp", not a
+"release identity" — that term is reserved for the cosign/Sigstore
+signer-trust identity verified separately in this same pipeline):
 - **`assert-release-ref.sh`** runs on the `release` job (before
   `Build release binaries`) AND on `verify-reproducible` (before
   `Rebuild release binaries`) — it refuses to build/sign when `REF_NAME` is
@@ -258,8 +260,8 @@ from `.github/scripts/`:
   boots the exact just-built bytes-under-signature with `-ui-no-tls`, polls
   `GET /healthz` on the admin listener, and asserts the reported `version`
   field equals the release tag. This is the check that would have caught
-  v1.0.202 — it proves the signed binary surfaces its identity at runtime,
-  not just that the linker flag was set.
+  v1.0.202 — it proves the signed binary surfaces its version stamp at
+  runtime, not just that the linker flag was set.
 
 `api/openapi/openapi.yaml`'s `HealthStatus.version` documents the field
 these gates enforce. See `TestHealthz_ReportsRuntimeVersion` (handler) and

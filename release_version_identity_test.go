@@ -7,12 +7,17 @@ import (
 	"testing"
 )
 
-// Release runtime-version-identity invariants. These pin the release-integrity
+// Release runtime-version-stamp invariants. These pin the release-integrity
 // contract surfaced by the first LIVE authoritative MCP Observe Acceptance
 // (v1.0.202 signed binary reported an empty /healthz version). They test SEMANTIC
 // invariants of the release configuration, not a brittle YAML snapshot, so the
 // class cannot silently regress: tag ref == build input == main.version ==
 // /healthz version.
+//
+// NOTE: "version stamp" (what version the binary claims to be) is deliberately
+// distinct from "release identity" (who signed it — the Sigstore issuer/SAN trust
+// policy pinned in release_identity.env and verified by TestReleaseIdentitySSOT).
+// This file tests the former only.
 
 func readRepoFile(t *testing.T, path string) string {
 	t.Helper()
