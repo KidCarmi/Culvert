@@ -20,6 +20,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"math/big"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -433,7 +434,7 @@ func TestChaos50_HealthzAndReadyzSurfaceTheOutage(t *testing.T) {
 		t.Fatalf("default readiness code = %d, want 200 — the row must not gate", code)
 	}
 	// …but strict mode must pick it up.
-	if !strictVerdictFails(httptest.NewRequest("GET", "/readyz?strict=1", nil), report.Checks) {
+	if !strictVerdictFails(httptest.NewRequest("GET", "/readyz?strict=1", http.NoBody), report.Checks) {
 		t.Fatal("strict verdict does not fail on a failing cluster_ca row")
 	}
 
@@ -521,7 +522,7 @@ func TestChaos50_DiagnosticsRowFailsWithAnAction(t *testing.T) {
 	if row := report.Checks["cluster_ca"]; row == nil || row.Status != "ok" {
 		t.Fatalf("readiness cluster_ca = %+v, want ok — a dated problem must not eject a working node", row)
 	}
-	if strictVerdictFails(httptest.NewRequest("GET", "/readyz?strict=1", nil), report.Checks) {
+	if strictVerdictFails(httptest.NewRequest("GET", "/readyz?strict=1", http.NoBody), report.Checks) {
 		t.Fatal("strict readiness ejects a node whose CA is still usable")
 	}
 	if code != 200 {
@@ -773,6 +774,25 @@ func TestChaos50_ClusterRotationSurvivesInspectionCALoadFailure(t *testing.T) {
 	prevMgr := certMgr
 	certMgr = ca.New()
 	t.Cleanup(func() { certMgr = prevMgr })
+
+	// loadRootCA is the REAL startup loader, so it writes process-global startup
+	// state that outlives this test: sslInspectionLoadError (consulted by
+	// computeHealth and appendCAReadinessCheck — an unrestored value makes every
+	// later /healthz or /readyz assertion see ssl_inspection: load_failed), the
+	// deferred-startup-alert queue, and caRuntime. Restore all three, following
+	// the convention rootca_failure_visibility_test.go already establishes.
+	// Without this the gate poisons unrelated tests under -shuffle/-count=2,
+	// which is precisely the fence-pollution class installClusterCA guards against.
+	prevLoadErr := sslInspectionLoadFailure()
+	prevQueue, prevFlushed := startupAlertQueue, startupAlertFlushed
+	prevRuntime := caRuntime
+	t.Cleanup(func() {
+		sslInspectionLoadError.Store(prevLoadErr)
+		startupAlertMu.Lock()
+		startupAlertQueue, startupAlertFlushed = prevQueue, prevFlushed
+		startupAlertMu.Unlock()
+		caRuntime = prevRuntime
+	})
 
 	// A cluster CA inside its rotation window (expires in 10 days).
 	dir := t.TempDir()
