@@ -419,7 +419,7 @@ func TestChaos50_HealthzAndReadyzSurfaceTheOutage(t *testing.T) {
 		t.Fatalf("/healthz cluster_ca = %q, want %q", got, "expired")
 	}
 
-	report, code := computeReadiness()
+	report, codeWithFault := computeReadiness()
 	row := report.Checks["cluster_ca"]
 	if row == nil {
 		t.Fatal("/readyz has no cluster_ca row for an expired cluster CA")
@@ -427,14 +427,32 @@ func TestChaos50_HealthzAndReadyzSurfaceTheOutage(t *testing.T) {
 	if row.Status != "fail" {
 		t.Fatalf("cluster_ca row status = %q, want fail", row.Status)
 	}
-	// REPORT-ONLY: an expired cluster CA is fleet-wide by construction, so
-	// gating would eject every node at once and take working proxy traffic with
-	// it. The default verdict must be unchanged.
-	if code != 200 {
-		t.Fatalf("default readiness code = %d, want 200 — the row must not gate", code)
+
+	// REPORT-ONLY: an expired cluster CA is fleet-wide by construction, so gating
+	// would eject every node at once and take working proxy traffic with it.
+	//
+	// The claim is that THIS ROW does not change the gating verdict — which is
+	// not the same as "the verdict is 200". Other rows (clamav, state_file_*) key
+	// on process-global state that unrelated tests legitimately set, so asserting
+	// an absolute 200 makes this gate a hostage to whatever else ran first.
+	// Comparing the code with the failing row present against the code with no
+	// cluster CA at all isolates this row's own contribution.
+	prev := globalClusterCA
+	globalClusterCA = &clusterCA{} // no cluster CA ⇒ no row at all
+	_, codeWithoutRow := computeReadiness()
+	globalClusterCA = prev
+	if codeWithFault != codeWithoutRow {
+		t.Fatalf("cluster_ca row changed the gating verdict (%d with the row, %d without) — it must be report-only",
+			codeWithFault, codeWithoutRow)
 	}
-	// …but strict mode must pick it up.
-	if !strictVerdictFails(httptest.NewRequest("GET", "/readyz?strict=1", http.NoBody), report.Checks) {
+
+	// …but strict mode must pick it up. Evaluated over a map holding ONLY this
+	// row, so the assertion is about the cluster_ca row and cannot be satisfied
+	// (or broken) by an unrelated failing row.
+	if !strictVerdictFails(
+		httptest.NewRequest("GET", "/readyz?strict=1", http.NoBody),
+		map[string]*readinessCheck{"cluster_ca": row},
+	) {
 		t.Fatal("strict verdict does not fail on a failing cluster_ca row")
 	}
 
@@ -459,12 +477,13 @@ func TestChaos50_HealthzReportsDisabledWithoutAClusterCA(t *testing.T) {
 	if got := computeHealth().ClusterCA; got != "disabled" {
 		t.Fatalf("/healthz cluster_ca = %q, want %q on a node with no cluster CA", got, "disabled")
 	}
-	report, code := computeReadiness()
+	// Only the ABSENCE of the row is this test's business. The overall readiness
+	// code belongs to every other subsystem's row too, several of which key on
+	// process-global state unrelated tests set, so asserting it here would make
+	// this gate fail for reasons that have nothing to do with the cluster CA.
+	report, _ := computeReadiness()
 	if _, ok := report.Checks["cluster_ca"]; ok {
 		t.Fatal("/readyz carries a cluster_ca row on a node with no cluster CA")
-	}
-	if code != 200 {
-		t.Fatalf("readiness code = %d, want 200", code)
 	}
 	for _, row := range buildOperatorContract().Checks {
 		if row.Code == "cluster_ca" {
@@ -518,15 +537,26 @@ func TestChaos50_DiagnosticsRowFailsWithAnAction(t *testing.T) {
 	if got := computeHealth().ClusterCA; got != "rotation_failing" {
 		t.Fatalf("/healthz cluster_ca = %q, want %q", got, "rotation_failing")
 	}
-	report, code := computeReadiness()
-	if row := report.Checks["cluster_ca"]; row == nil || row.Status != "ok" {
-		t.Fatalf("readiness cluster_ca = %+v, want ok — a dated problem must not eject a working node", row)
+	// The readiness row stays OK: such a node still enrolls, renews and syncs, so
+	// failing it would let /ready?strict=1 eject a fully working fleet a month
+	// before anything actually breaks.
+	//
+	// Scoped to THIS ROW, not to the whole report. Asserting the global strict
+	// verdict here was the original form of this check and it was wrong: rows
+	// owned by other subsystems (the `ca` row keys on sslInspectionLoadError,
+	// which several unrelated tests set) can fail for reasons that have nothing
+	// to do with the cluster CA, so the assertion failed under -shuffle/-count=2
+	// on state this test neither sets nor controls.
+	report, _ := computeReadiness()
+	readyRow := report.Checks["cluster_ca"]
+	if readyRow == nil || readyRow.Status != "ok" {
+		t.Fatalf("readiness cluster_ca = %+v, want ok — a dated problem must not eject a working node", readyRow)
 	}
-	if strictVerdictFails(httptest.NewRequest("GET", "/readyz?strict=1", http.NoBody), report.Checks) {
-		t.Fatal("strict readiness ejects a node whose CA is still usable")
-	}
-	if code != 200 {
-		t.Fatalf("readiness code = %d, want 200", code)
+	if strictVerdictFails(
+		httptest.NewRequest("GET", "/readyz?strict=1", http.NoBody),
+		map[string]*readinessCheck{"cluster_ca": readyRow},
+	) {
+		t.Fatal("strict readiness ejects a node whose cluster CA is still usable")
 	}
 }
 
