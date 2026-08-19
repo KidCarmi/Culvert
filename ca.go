@@ -67,8 +67,17 @@ func init() {
 // was ready, which silently disabled cluster-CA rotation whenever the
 // inspection bundle failed to load. Both halves are individually no-ops when
 // their CA is absent, so the loop is safe to start on every node.
-func StartCAAutoRotation(ctx context.Context, caPath, passphrase string) {
+// The returned channel is closed when the loop goroutine has exited, so a
+// caller that cancels ctx can JOIN the worker instead of assuming it stopped.
+// Production ignores it (shutdown does not block on this loop), but a test that
+// starts the loop must be able to leave no goroutine behind: a background worker
+// still running after its test finished lands its goroutines in an unrelated
+// test's window, which is how a process-wide runtime.NumGoroutine() guardrail
+// elsewhere in this suite gets blamed for churn it did not cause.
+func StartCAAutoRotation(ctx context.Context, caPath, passphrase string) <-chan struct{} {
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		t := time.NewTicker(ca.RotationCheckInterval)
 		defer t.Stop()
 		// CHAOS-28 / CA-4: check IMMEDIATELY, before the first tick. The loop
@@ -108,4 +117,5 @@ func StartCAAutoRotation(ctx context.Context, caPath, passphrase string) {
 			}
 		}
 	}()
+	return done
 }

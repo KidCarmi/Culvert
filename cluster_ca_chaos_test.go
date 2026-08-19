@@ -856,8 +856,22 @@ func TestChaos50_ClusterRotationSurvivesInspectionCALoadFailure(t *testing.T) {
 	installClusterCA(t, expiring)
 	before := expiring.CACertFingerprint()
 
+	// Cancel AND JOIN the rotation loop on the way out. Cancelling alone is not
+	// enough: the loop runs one round immediately, and that round does real work
+	// (keygen, durable writes, a config-snapshot publish). A round still in
+	// flight after this test returns lands its goroutines inside an unrelated
+	// test's window — and this suite contains a guardrail that samples the
+	// process-wide runtime.NumGoroutine() over 50ms, which would then be blamed
+	// for churn it did not cause. Joining makes that structurally impossible.
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-caRotationLoopDone:
+		case <-time.After(10 * time.Second):
+			t.Error("CA auto-rotation loop did not exit after its context was cancelled")
+		}
+	})
 	loadRootCA(rootCAStartupConfig{Path: caPath, Passphrase: "wrong-passphrase"}, ctx)
 
 	if certMgr.Ready() {

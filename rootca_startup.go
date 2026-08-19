@@ -67,8 +67,17 @@ func loadRootCA(cfg rootCAStartupConfig, ctx context.Context) {
 	// The gate is not needed for the inspection half either: RotateIfNeeded and
 	// CleanupSecondaryCA both return immediately when no CA is loaded, so on a
 	// node with no inspection CA this costs one zero-time comparison per day.
-	StartCAAutoRotation(ctx, cfg.Path, cfg.Passphrase)
+	// The loop's done channel is published so a caller that cancels ctx can join
+	// the worker. Production never waits on it (shutdown does not block on a
+	// rotation check); it exists so a test driving this loader leaves no
+	// background goroutine running past its own completion.
+	caRotationLoopDone = StartCAAutoRotation(ctx, cfg.Path, cfg.Passphrase)
 }
+
+// caRotationLoopDone is closed when the auto-rotation loop started by the most
+// recent loadRootCA has exited. Written once per loadRootCA (startup, or a test),
+// read only after cancelling that loop's context.
+var caRotationLoopDone <-chan struct{}
 
 // initInspectionCA performs the load-or-init half of loadRootCA: persisted
 // bundle when a path is configured, ephemeral in-memory CA otherwise.
