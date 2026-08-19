@@ -54,7 +54,43 @@ type Store struct {
 	entries    []*Entry
 	index      map[string]map[string]bool // lowercase cat → lowercase host set (ALL entries)
 	adminIndex map[string]map[string]bool // same, BuiltIn=false entries only
-	path       string
+
+	// lookupIdx / adminLookupIdx are the REVERSE indices — lowercase host
+	// pattern → the entry that claims it — backing LookupHost /
+	// LookupHostAdmin. See lookupHit for why the precedence order is carried.
+	//
+	// They are rebuilt LAZILY: every mutator clears lookupReady instead of
+	// patching them, because AddHost is called once per host in the SaaS
+	// feed-sync merge loop (saas_feed.go) and an eager rebuild there would be
+	// O(hosts²). The first lookup after a mutation pays one rebuild.
+	//
+	// The flag is "ready", not "stale", so that the ZERO VALUE means "must
+	// rebuild". A Store built as a struct literal rather than through New —
+	// which tests do — would otherwise read a nil index and report every host
+	// as uncategorized instead of scanning its entries.
+	lookupIdx      map[string]lookupHit
+	adminLookupIdx map[string]lookupHit
+	lookupReady    bool
+
+	path string
+}
+
+// lookupHit is one reverse-index cell: which category claims a host pattern,
+// the pattern verbatim as the admin configured it, and the position that
+// pattern held in the linear entry scan LookupHost used to perform.
+//
+// order is what makes the index EXACTLY equivalent to that scan rather than
+// merely similar. The scan returned the first (entry, host) pair matching
+// either exactly or as a dot-suffix, so when several patterns match one host
+// — say "example.com" in an early category and "a.example.com" in a later one
+// — the EARLIER pattern won, even though the later one is the more specific
+// match. A plain host→category map would silently invert that and change which
+// policy rule fires. Keeping the scan position lets the lookup reproduce the
+// original winner by minimum order.
+type lookupHit struct {
+	name    string // Entry.Name, original case
+	pattern string // the configured pattern, verbatim (admin URL-lookup contract)
+	order   uint64 // entryIndex<<32 | hostIndex — the linear scan's precedence
 }
 
 // New builds a store over entries and its derived host index.
@@ -82,6 +118,108 @@ func (s *Store) rebuildIndex() {
 	}
 	s.index = idx
 	s.adminIndex = admin
+	s.lookupReady = false
+}
+
+// rebuildLookupIndex reconstructs the reverse host→category indices from
+// s.entries. Caller must hold s.mu for writing (or be the sole owner).
+func (s *Store) rebuildLookupIndex() {
+	n := 0
+	for _, e := range s.entries {
+		n += len(e.Hosts)
+	}
+	all := make(map[string]lookupHit, n)
+	admin := make(map[string]lookupHit)
+	for ei := range s.entries {
+		e := s.entries[ei]
+		for hi, p := range e.Hosts {
+			// strings.ToLower — NOT the forward index's ToLower+TrimSuffix
+			// key — because the scan this replaces compared against exactly
+			// that. A trailing-dot pattern must keep matching (or not) the
+			// way it always has.
+			pl := strings.ToLower(p)
+			hit := lookupHit{name: e.Name, pattern: p, order: uint64(ei)<<32 | uint64(uint32(hi))}
+			if cur, dup := all[pl]; !dup || hit.order < cur.order {
+				all[pl] = hit
+			}
+			if !e.BuiltIn {
+				if cur, dup := admin[pl]; !dup || hit.order < cur.order {
+					admin[pl] = hit
+				}
+			}
+		}
+	}
+	s.lookupIdx = all
+	s.adminLookupIdx = admin
+	s.lookupReady = true
+}
+
+// lookupIn resolves an already-normalized host against a reverse index using
+// the same grammar as the scan it replaces: a pattern matches when it equals
+// the host or is a dot-suffix of it. The candidate set is therefore the host
+// itself plus each of its label suffixes — O(labels) map probes instead of
+// O(total configured hosts) string comparisons — and the winner is the
+// candidate with the lowest scan order.
+func lookupIn(idx map[string]lookupHit, h string) (category, matchedBy string, ok bool) {
+	// An empty index is the common shape for the admin-only lookup on a stock
+	// appliance, where the whole taxonomy is BuiltIn. The scan this replaces
+	// skipped those entries without comparing anything, so probing once per
+	// label here would have made that case measurably slower (64 -> 94 ns)
+	// rather than faster.
+	if len(idx) == 0 {
+		return "", "", false
+	}
+
+	var best lookupHit
+	found := false
+	if hit, hitOK := idx[h]; hitOK {
+		best, found = hit, true
+	}
+	// Byte loop, not `range h`: '.' is ASCII, and no UTF-8 continuation byte
+	// can be 0x2E, so byte-wise scanning finds exactly the same label
+	// boundaries without decoding runes.
+	for i := 0; i < len(h); i++ {
+		if h[i] != '.' {
+			continue
+		}
+		if hit, hitOK := idx[h[i+1:]]; hitOK && (!found || hit.order < best.order) {
+			best, found = hit, true
+		}
+	}
+	if !found {
+		return "", "", false
+	}
+	return best.name, best.pattern, true
+}
+
+// resolveHost is the shared body of LookupHost and LookupHostAdmin. It reads
+// under RLock on the hot path and only takes the write lock when a mutation
+// has invalidated the reverse index.
+func (s *Store) resolveHost(adminOnly bool, host string) (category, matchedBy string, ok bool) {
+	h := hostutil.NormalizeHost(host)
+
+	s.mu.RLock()
+	if s.lookupReady {
+		idx := s.lookupIdx
+		if adminOnly {
+			idx = s.adminLookupIdx
+		}
+		name, pattern, found := lookupIn(idx, h)
+		s.mu.RUnlock()
+		return name, pattern, found
+	}
+	s.mu.RUnlock()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.lookupReady {
+		s.rebuildLookupIndex()
+	}
+	idx := s.lookupIdx
+	if adminOnly {
+		idx = s.adminLookupIdx
+	}
+	return lookupIn(idx, h)
 }
 
 // defaultCategoriesJSON is the embedded SaaS category seed list.
@@ -207,6 +345,9 @@ func (s *Store) Set(name string, hosts []string, builtIn bool) error {
 		hosts = []string{}
 	}
 	s.mu.Lock()
+	// Both branches below mutate the entry set, so the reverse index is stale
+	// either way.
+	s.lookupReady = false
 	key := strings.ToLower(name)
 	set := make(map[string]bool, len(hosts))
 	for _, h := range hosts {
@@ -250,6 +391,7 @@ func (s *Store) Delete(name string) error {
 		s.entries = append(s.entries[:i], s.entries[i+1:]...)
 		delete(s.index, key)
 		delete(s.adminIndex, key)
+		s.lookupReady = false
 		s.mu.Unlock()
 		s.Save()
 		return nil
@@ -273,6 +415,7 @@ func (s *Store) AddHost(category, host string) error {
 		}
 		e.Hosts = append(e.Hosts, host)
 		s.index[key][host] = true
+		s.lookupReady = false
 		s.mu.Unlock()
 		s.Save()
 		return nil
@@ -294,6 +437,7 @@ func (s *Store) RemoveHost(category, host string) error {
 				}
 				e.Hosts = append(e.Hosts[:i], e.Hosts[i+1:]...)
 				delete(s.index[key], host)
+				s.lookupReady = false
 				s.mu.Unlock()
 				s.Save()
 				return nil
@@ -378,21 +522,7 @@ func (s *Store) MatchesHostAdmin(cat Category, host string) bool {
 // categories (the admin layer of the F3b-4 source-aware resolution). Same
 // exact-or-subdomain grammar as LookupHost.
 func (s *Store) LookupHostAdmin(host string) (category, matchedBy string, ok bool) {
-	h := hostutil.NormalizeHost(host)
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for _, e := range s.entries {
-		if e.BuiltIn {
-			continue
-		}
-		for _, p := range e.Hosts {
-			pl := strings.ToLower(p)
-			if h == pl || strings.HasSuffix(h, "."+pl) {
-				return e.Name, p, true
-			}
-		}
-	}
-	return "", "", false
+	return s.resolveHost(true, host)
 }
 
 // BuiltInHostCategories returns a normalized host→category map over the
@@ -422,24 +552,23 @@ func (s *Store) BuiltInHostCategories() map[string]string {
 	return out
 }
 
-// LookupHost resolves a hostname to its category by scanning entries
-// (exact + suffix match), returning the original-case category name and the
-// pattern that matched. Deliberately scans the entry lists — not the
-// lowercase index — so matchedBy reports the admin's configured pattern
-// verbatim (admin URL-lookup API contract).
+// LookupHost resolves a hostname to its category (exact + dot-suffix match),
+// returning the original-case category name and the pattern that matched.
+//
+// matchedBy reports the admin's configured pattern VERBATIM (admin URL-lookup
+// API contract). That contract is why this used to scan the entry lists rather
+// than the lowercase forward index, which does not carry the original casing —
+// but the scan was O(total configured hosts) on the proxy hot path, because
+// categoryGroupMatchesHostRule reaches it through lookupHostCategory for every
+// request evaluated against a DestCategoryGroup rule. On the shipped default
+// taxonomy (~665 host patterns) an unmatched host cost 22.6 us of CPU per
+// request; the indexed sibling MatchesHost answered the same shape in 160 ns.
+//
+// It now reads a reverse index that stores the verbatim pattern alongside the
+// category, so the contract holds and the lookup is O(labels). See lookupHit
+// for how the original scan's match precedence is preserved exactly.
 func (s *Store) LookupHost(host string) (category, matchedBy string, ok bool) {
-	h := hostutil.NormalizeHost(host)
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for _, e := range s.entries {
-		for _, p := range e.Hosts {
-			pl := strings.ToLower(p)
-			if h == pl || strings.HasSuffix(h, "."+pl) {
-				return e.Name, p, true
-			}
-		}
-	}
-	return "", "", false
+	return s.resolveHost(false, host)
 }
 
 // Path reports the persistence path ("" = persistence disabled).
