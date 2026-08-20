@@ -35,7 +35,17 @@ var globalCategoryGroups = catgroup.New()
 // rule match a different group. Byte-identical to the name path for rules with
 // no DestCategoryGroupID.
 func categoryGroupMatchesHostRule(rule *PolicyRule, host string) bool {
-	hostCat, _, _ := lookupHostCategory(host)
+	sc := newHostCatScratch(host)
+	return categoryGroupMatchesHostScratch(rule, &sc)
+}
+
+// categoryGroupMatchesHostScratch is categoryGroupMatchesHostRule against a
+// scan-scoped scratch, so every category-group rule in one policy evaluation
+// shares ONE host→category resolution instead of repeating the two-tier fusion
+// per rule (policy_hostcat.go). Group membership stays the engine's O(1) catSet
+// lookup, evaluated per rule as before.
+func categoryGroupMatchesHostScratch(rule *PolicyRule, sc *hostCatScratch) bool {
+	hostCat, _, _ := sc.fusion()
 	if id := rule.DestCategoryGroupID; id != "" {
 		if matched, resolved := globalCategoryGroups.MatchesCategoryByID(id, hostCat); resolved {
 			return matched
