@@ -119,7 +119,10 @@ services:
       retries: 3
 
   # ── Data Plane worker (activate with --profile dp) ─────────────────────────
-  # Usage: ENROLL_URL=culvert://TOKEN@cp:50051 docker compose --profile dp up -d
+  # Usage: ENROLL_URL=culvert://enroll/cp:50051/TOKEN docker compose --profile dp up -d
+  # (the GUI's "Enable HA" / node-enrollment panel gives you the exact URL to
+  # paste here, including the ?ca-fp=sha256:... suffix — see parseEnrollURL
+  # in dp_enrollment.go for the format the `--enroll` flag actually expects.)
   dp:
     build: .
     container_name: culvert-dp
