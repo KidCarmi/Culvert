@@ -60,18 +60,38 @@ classes of row exist:
 
 | Check                       | Class           | Behaviour                                                                 |
 |-----------------------------|-----------------|---------------------------------------------------------------------------|
-| `ca`                        | informational   | Present and `ok` once the root CA is initialised; absent otherwise (the proxy still works as a plain forward proxy). |
+| `ca`                        | informational   | Absent if no CA is configured (the proxy still works as a plain forward proxy). Otherwise `ok`, or `fail` for either of two distinct causes: the configured bundle failed to load/persist, or a loaded CA is outside its own validity window (expired/not-yet-valid) and can no longer sign a leaf any client accepts. Both `fail` details are fixed, cause-free strings by design (`/ready` is unauthenticated on the proxy port) — see the server log, the `ca_load_failed` alert, or `/api/diagnostics` for the real cause. |
 | `clamav`                    | gating          | When ClamAV is configured, `fail` if the daemon is unreachable.           |
 | `geoip`                     | informational   | Present and `ok` when GeoIP is enabled.                                    |
 | `yara`                      | informational   | Present and `ok` when YARA is enabled.                                     |
 | `policy_loaded`             | informational   | `ok` when at least one policy rule has been recorded; `fail` when the ruleset is empty (default-deny is still in effect — fresh installs are expected to start here). |
 | `session_secret`            | gating          | `ok` when the admin session HMAC key is initialised; `fail` triggers `503` because signed admin cookies cannot be issued without it. |
 | `config_snapshot_validator` | gating          | `ok` when `validateConfigSnapshot` accepts the empty baseline (its identity contract); `fail` triggers `503` because the cluster control-plane apply path is unsafe. |
+| `state_file_<kind>`         | informational   | One row per quarantined state file (e.g. `state_file_ui_users`, `state_file_cluster`); present only when that store was corrupt at load and the node fell back to an empty store. Absent when nothing is quarantined. |
+| `cp_poll` *(DP nodes only)* | informational   | `ok` unless this data-plane node's poll to its control plane has been failing past a grace window, in which case `fail` — the node keeps serving its last-known-good config. Absent on CP/standalone nodes. |
+| `node_cert` *(DP nodes only)* | informational | `ok` unless this data-plane node's mTLS certificate renewal is failing, in which case `fail` (detail names days to/since expiry). Absent on CP/standalone nodes. |
+| `saas_feed`                 | informational   | `ok` while serving a fresh feed, the embedded baseline, or while syncing/recovering; `fail` when serving a stale/degraded last-known-good, or when a managed node has lost authority / hit a corruption state — the embedded baseline still serves either way, so this never gates by default. |
 
 The new `policy_loaded` / `session_secret` / `config_snapshot_validator`
 rows are additive — existing fields, status semantics, and the rest of
 the `checks` map are unchanged. Existing probes that look only at
 top-level `status` and HTTP code keep working as before.
+
+#### Opt-in strict verdict: `/ready?strict=1`
+
+By default, **informational** rows never flip the top-level `status` to
+`not_ready` / `503` — only **gating** rows do. This is a deliberate
+availability choice: a fleet-wide condition like an expired root CA
+(every node provisioned from the same bundle) or a control-plane outage
+would otherwise eject every affected node from the load balancer at once,
+taking down plain HTTP and bypassed HTTPS traffic that still works fine.
+
+Pass `?strict=1` (or `?strict=true`) to `/ready` to opt into a stricter
+verdict: **any** failing row, informational or gating, flips the response
+to `503`. Use this on a probe URL only if you specifically want the load
+balancer to eject nodes with a degraded-but-still-serving subsystem (e.g.
+expired inspection CA, DP running on stale config) rather than just the
+hard-down conditions the default verdict gates on.
 
 ### Readiness vs Diagnostics — when to look at which
 
