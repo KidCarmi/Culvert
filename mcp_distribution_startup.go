@@ -158,6 +158,21 @@ func reconcileRolloutWithDistribution() {
 		if cfg == nil {
 			continue
 		}
+		// Capability isolation, re-checked here and not inherited from the runtime
+		// apply path. The recovered envelope is signature- and epoch-verified by
+		// Recover, but neither that nor cpdp.Validate cross-checks the nested
+		// Rollout.Capability (see rolloutMatchesCapability), and
+		// commitRolloutTransition selects its target state by cfg.Capability — so an
+		// unchecked config here lets a Gateway-signed envelope write the MANAGEMENT
+		// rollout state at every startup. The shipped runtime pre-check means this
+		// build never persists such an envelope; this is the defense-in-depth half,
+		// for durable state written by any other producer (an older build, a future
+		// CP-side path, a restore).
+		if !rolloutMatchesCapability(cfg, capb) {
+			logger.Printf("MCP rollout reconcile for %s: rollout capability mismatch — refusing to commit (fail-closed)",
+				capb.String())
+			continue
+		}
 		if err := getMCPRollout().commitRolloutTransition(cfg, "startup-reconcile", now); err != nil {
 			logger.Printf("MCP rollout reconcile for %s left rollout state unchanged: %v", capb.String(), sanitizeLog(err.Error()))
 		}

@@ -17,6 +17,49 @@ everything else is triaged below with a suggested PR and required tests for foll
 
 ## 0. Revision log
 
+**2026-08-20 — security-regression sweep of the 2026-08-10 → 2026-08-14 merge window.**
+
+Reviewed PRs #1117/#1118/#1120/#1122 (CHAOS-49 IdP hardening, the `/ready` detail redaction,
+the installer at-rest-encryption fix) and #1125/#1126 (MCP acceptance PKI-lifetime guard, the
+PR-12 CP/DP composition + rollout transaction). The auth, trust-key, persistence, and RBAC
+changes in that window verify clean — the auth caches only authoritative verdicts, the
+distribution trust store fails closed on every malformed input, and every new rollout mutation
+is admin-gated and audited. Two gaps, both **incomplete application of a rule the window itself
+established**:
+
+**RZ-1 (the finding).** The `/ready` detail redaction landed on the `ca` and `clamav` rows and
+stated the rule for the surface — every detail is a fixed string, because `/ready` is served by
+`routeProxyListenerBuiltin` on the PROXY listener, unauthenticated and with no IP guard. The two
+CHAOS-09 **data-plane** rows were never brought under it and still interpolated internals:
+`node_cert` published the wrapped renewal error verbatim (the Control Plane's address and port
+out of the gRPC error, and `/data/node.crt: permission denied` out of `atomicWriteFile`) plus a
+precise days-to-expiry countdown; `cp_poll` published the outage duration and the sentence
+"policy/auth updates are not arriving" — the ENFORCEMENT-POSTURE disclosure
+`appendCAReadinessCheck`'s own contract comment forbids by name, telling an unauthenticated
+observer exactly when this node is serving stale policy. The standing sweep meant to catch this
+(`TestReadyz_NoDetailCarriesRawInternals`) never arranged DP mode, so the two rows it should
+have protected were outside its reach — that gap is what let the class survive the fix. Closed:
+both rows keep their key, status, and report-only/strict verdict split (probe and load-balancer
+behaviour byte-identical) with fixed details; the causes remain in the process log and the
+latched `cert_expiry` alert. The grace-window branch now publishes nothing at all, matching its
+own comment ("not yet a probe-visible failure").
+
+**RZ-2 (defense-in-depth).** `reconcileRolloutWithDistribution` (PR-12 §8 startup convergence)
+did not repeat the capability-isolation check its runtime counterpart performs. Neither
+`cpdp.Validate` step 8 nor `Recover` cross-checks the nested `Rollout.Capability` — step 8
+constrains the payload CONTAINER only — so a correctly signed **Gateway** envelope carrying
+`Rollout.Capability=management` is structurally, cryptographically and epoch-valid, and
+`commitRolloutTransition` picks its target state by that field. On restart it wrote the
+MANAGEMENT rollout state from a Gateway-signed envelope, crossing the boundary the two
+physically separate appliers exist to enforce. Not live-reachable in the shipped build (the
+runtime pre-check means such an envelope is never persisted, and no production build composed a
+DP applier before PR-12), but the invariant lived only in one caller while both reach the same
+durable commit. Closed by extracting it as a named predicate (`rolloutMatchesCapability`) and
+applying it on both paths.
+
+Both defects were reproduced against `main` before the fix; the gates are
+`readyz_dp_detail_disclosure_test.go` and `mcp_reconcile_capability_test.go`.
+
 **2026-08-11 — CHAOS-49 sweep (the multi-IdP registry auth path under IdP failure).**
 
 CHAOS-47 gave the LEGACY identity backends a three-part contract (an infrastructure failure is

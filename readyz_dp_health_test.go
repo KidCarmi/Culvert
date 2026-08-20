@@ -142,8 +142,13 @@ func TestHandleReady_CPPollFailingSustained_ReportOnlyFailRow(t *testing.T) {
 	if row == nil || row.Status != "fail" {
 		t.Fatalf("cp_poll row = %+v, want fail after sustained poll failure", row)
 	}
-	if !strings.Contains(row.Detail, "last-known-good") {
-		t.Errorf("cp_poll detail should explain the degraded mode, got %q", row.Detail)
+	// The detail points the operator at the log and says nothing else: /ready is
+	// unauthenticated on the proxy port, so the outage duration and the
+	// "policy/auth updates are not arriving" posture statement it used to carry
+	// are withheld (see appendDPHealthChecks and
+	// readyz_dp_detail_disclosure_test.go for the full contract).
+	if !strings.Contains(row.Detail, "see server logs") {
+		t.Errorf("cp_poll detail should point the operator at the logs, got %q", row.Detail)
 	}
 	// Report-only: the DEFAULT verdict must not gate on it — a CP outage
 	// must not eject the whole DP fleet from a default-configured LB.
@@ -204,19 +209,25 @@ func TestHandleReady_NodeCertRenewalFailing_FailRowAndRecovery(t *testing.T) {
 	if row == nil || row.Status != "fail" {
 		t.Fatalf("node_cert row = %+v, want fail while renewal is failing inside the window", row)
 	}
-	if !strings.Contains(row.Detail, "connection refused") || !strings.Contains(row.Detail, "day") {
-		t.Errorf("node_cert detail should carry days-left and the last error, got %q", row.Detail)
+	// The detail points the operator at the log and carries neither the renewal
+	// cause nor the days-left countdown — /ready is unauthenticated on the proxy
+	// port (see appendDPHealthChecks and readyz_dp_detail_disclosure_test.go).
+	// The full cause is in the process log and the latched cert_expiry alert.
+	if !strings.Contains(row.Detail, "see server logs") {
+		t.Errorf("node_cert detail should point the operator at the logs, got %q", row.Detail)
 	}
 	if code != http.StatusOK || status != "ready" {
 		t.Fatalf("default verdict changed: code=%d status=%q, want 200/ready (report-only contract)", code, status)
 	}
 
-	// An expired cert reports the EXPIRED wording.
+	// An expired cert still produces the failing row — with the same fixed
+	// detail, since separate wording would republish the posture the redaction
+	// withholds ("this node's cluster identity is already dead").
 	expiredFile := writeCertExpiringIn(t, -48*time.Hour)
 	alertDPCertRenewalFailure("dp-test", expiredFile, errors.New("RenewCert RPC: connection refused"))
 	_, _, checks = readyChecks(t, "/ready")
-	if row := checks["node_cert"]; row == nil || !strings.Contains(row.Detail, "EXPIRED") {
-		t.Fatalf("node_cert row = %+v, want EXPIRED wording for a past-NotAfter cert", row)
+	if row := checks["node_cert"]; row == nil || row.Status != "fail" {
+		t.Fatalf("node_cert row = %+v, want a failing row for a past-NotAfter cert", row)
 	}
 
 	// Successful renewal clears the row through the same reset the renewal

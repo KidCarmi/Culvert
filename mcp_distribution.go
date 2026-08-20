@@ -231,12 +231,34 @@ func applySnapshotMCP(snap ConfigSnapshot) {
 //     already rolled itself back to the prior config (commitRolloutTransition is
 //     atomic). A double persistence fault (compensating write also failing) is logged
 //     and converged at the next restart by reconcileRolloutWithDistribution.
+//
+// rolloutMatchesCapability reports whether a signed rollout config belongs to the
+// capability whose envelope carried it. It is the single expression of the
+// capability-isolation invariant for the rollout payload, shared by the runtime
+// apply path and the startup reconcile path — the two callers that reach the same
+// durable commit.
+//
+// It exists as a named predicate because the signed envelope's OWN validation does
+// not cover this: cpdp.Validate step 8 (Payload.checkCapabilityIsolation)
+// constrains which payload CONTAINER may be present, and nothing cross-checks the
+// nested Rollout.Capability field. A correctly signed Gateway envelope carrying
+// Rollout.Capability=management is therefore structurally, cryptographically and
+// epoch-valid — and commitRolloutTransition selects its target state by
+// cfg.Capability, so an unchecked config crosses the isolation boundary the two
+// physically separate appliers exist to enforce.
+func rolloutMatchesCapability(cfg *rollout.SignedConfig, capb cpdp.Capability) bool {
+	if cfg == nil {
+		return true // absence is not a mismatch — see applyMCPCapabilityEnvelope
+	}
+	return (cfg.Capability == rollout.CapabilityManagement) == (capb == cpdp.CapabilityManagement)
+}
+
 func applyMCPCapabilityEnvelope(a *apply.Applier, env *cpdp.Envelope, capb cpdp.Capability) {
 	cfg := rolloutFromEnvelope(env)
 	mgmt := capb == cpdp.CapabilityManagement
 	// (1) Deterministic precondition pre-check, before distribution activation.
 	if cfg != nil {
-		if (cfg.Capability == rollout.CapabilityManagement) != mgmt {
+		if !rolloutMatchesCapability(cfg, capb) {
 			// Capability isolation: a Gateway envelope must never carry a Management
 			// rollout (or vice versa). Reject WHOLE without staging distribution.
 			_ = a.RejectAck(env, errRolloutPersistFailed)

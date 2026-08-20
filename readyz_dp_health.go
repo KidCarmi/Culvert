@@ -25,7 +25,6 @@ package main
 // ejected opt in per probe with /ready?strict=1 (see handleReady).
 
 import (
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -98,6 +97,39 @@ func dpCertRenewalFailureSnapshot() (failing bool, days int, lastErr string) {
 // appendDPHealthChecks adds the cp_poll and node_cert rows to /ready when
 // running as a data plane. Contributes nothing on a CP/standalone node, so
 // every existing probe consumer outside DP mode is byte-identical.
+//
+// EVERY detail on these rows is a FIXED string, for the reason recorded on
+// appendCAReadinessCheck (healthcheck.go): /ready is served by
+// routeProxyListenerBuiltin on the PROXY listener, unauthenticated and with no
+// IP guard, so every client that can use the gateway reads whatever is written
+// here. Both rows used to interpolate:
+//
+//	cp_poll   → "control plane unreachable for 12m41s — serving last-known-good
+//	             config; policy/auth updates are not arriving"
+//	node_cert → "node certificate expires in 3 day(s) and renewal is failing
+//	             (last error: RenewCert RPC: ... dial tcp 10.0.1.5:9443: ...)"
+//
+// That published the Control Plane's internal address and port, raw
+// dial/x509/filesystem causes from the renewal path (renewDPCert wraps
+// atomicWriteFile, so an unwritable volume put "/data/node.crt: permission
+// denied" on the public surface), and a precise countdown to the moment this
+// node's cluster identity dies. It also stated the ENFORCEMENT POSTURE in the
+// plainest terms available — "policy/auth updates are not arriving" tells an
+// unauthenticated observer exactly when this node is serving stale policy, so a
+// destination blocked minutes ago, or an account just revoked at the IdP, is
+// knowably still honoured here. That is the disclosure appendCAReadinessCheck's
+// contract forbids by name, and the reason this rule is stated on both files.
+//
+// Nothing is lost to the operator. Every CP-poll failure is logged by
+// DataPlaneClient ("DataPlane: GetConfig error"), and every renewal failure is
+// logged by dpCertRenewalLoop AND raised as a latched cert_expiry alert with the
+// days-left escalation. The rows, their statuses, and the report-only/strict
+// verdict split are unchanged, so probe and load-balancer behaviour is
+// byte-identical — only the operator-only cause is withheld.
+//
+// The failure state itself (days-left, last error) is still RECORDED in
+// dpNodeCertRenewal for the role-gated surfaces; it is simply not published
+// here. See readyz_dp_detail_disclosure_test.go for the pinned contract.
 func appendDPHealthChecks(checks map[string]*readinessCheck) {
 	if !audit.DPMode() {
 		return
@@ -108,27 +140,23 @@ func appendDPHealthChecks(checks map[string]*readinessCheck) {
 		since := dpCPPollFailingSince.Load()
 		if since != 0 && time.Since(time.Unix(0, since)) >= dpCPPollFailGrace {
 			cp.Status = "fail"
-			cp.Detail = fmt.Sprintf(
-				"control plane unreachable for %s — serving last-known-good config; policy/auth updates are not arriving",
-				time.Since(time.Unix(0, since)).Round(time.Second))
-		} else {
-			// Failing but inside the grace window (or a bare flag with no
-			// transition stamp): not yet a probe-visible failure.
-			cp.Detail = "control plane poll failing (within grace window)"
+			cp.Detail = "control plane connectivity degraded — see server logs"
 		}
+		// Failing but inside the grace window (or a bare flag with no transition
+		// stamp): by this row's own definition "not yet a probe-visible failure",
+		// so it publishes NOTHING. The previous "(within grace window)" detail
+		// contradicted that — an ok row that still handed every client on the
+		// network the same degradation fingerprint the fail row is redacted for.
 	}
 	checks["cp_poll"] = cp
 
 	cert := &readinessCheck{Status: "ok"}
-	if failing, days, lastErr := dpCertRenewalFailureSnapshot(); failing {
+	// days/lastErr are deliberately not read: both branches collapse to one fixed
+	// string. Separate wording for the expired branch would leak the same posture
+	// ("this node's cluster identity is already dead") a status of "fail" does not.
+	if failing, _, _ := dpCertRenewalFailureSnapshot(); failing {
 		cert.Status = "fail"
-		if days < 0 {
-			cert.Detail = fmt.Sprintf(
-				"node certificate EXPIRED %d day(s) ago and renewal is failing (last error: %s)", -days, lastErr)
-		} else {
-			cert.Detail = fmt.Sprintf(
-				"node certificate expires in %d day(s) and renewal is failing (last error: %s)", days, lastErr)
-		}
+		cert.Detail = "node certificate renewal is failing — see server logs"
 	}
 	checks["node_cert"] = cert
 }
