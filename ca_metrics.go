@@ -90,7 +90,7 @@ func clusterCAWriteUsabilityPrometheus(w *strings.Builder) {
 		fmt.Fprintf(w, "culvert_cluster_ca_expires_in_seconds %d\n", int64(time.Until(exp).Seconds()))
 	}
 
-	w.WriteString("\n# HELP culvert_cluster_ca_sign_refused_total Node-cert sign attempts refused because the cluster CA was outside its validity window\n")
+	w.WriteString("\n# HELP culvert_cluster_ca_sign_refused_total Node-cert issuance attempts refused because the cluster CA was outside its validity window\n")
 	w.WriteString("# TYPE culvert_cluster_ca_sign_refused_total counter\n")
 	fmt.Fprintf(w, "culvert_cluster_ca_sign_refused_total %d\n", snap.Refusals)
 

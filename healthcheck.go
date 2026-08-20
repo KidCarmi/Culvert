@@ -29,15 +29,20 @@ type healthReport struct {
 // green throughout — the same blind spot CHAOS-28 closed for ssl_inspection.
 // "absent" is the normal state on a data-plane node and on any single-node
 // deployment; it is not a fault and never fails the probe.
+//
+// "expired" and "not_yet_valid" are reported separately because their
+// remediations are opposite: the first wants a rotation or an import, the
+// second wants the system clock corrected and specifically must NOT prompt a
+// fleet-wide trust-root rotation.
 func clusterCAHealthState() string {
-	switch {
-	case !globalClusterCA.Ready():
+	if !globalClusterCA.Ready() {
 		return "absent"
-	case globalClusterCA.Usable() != nil:
-		return "expired"
-	default:
+	}
+	err := globalClusterCA.Usable()
+	if err == nil {
 		return "ready"
 	}
+	return clusterCAUnusableKind(err)
 }
 
 // computeHealth builds the liveness/posture snapshot from side-effect-free reads.

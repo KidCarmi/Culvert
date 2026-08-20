@@ -16676,9 +16676,14 @@ async function loadClusterCA() {
     // enrollment and cert renewal it accepted produced a certificate that could
     // never complete an mTLS handshake.
     const unusable = r.initialized && r.usable === false;
-    const status = unusable ? 'EXPIRED - Enrollment Down'
-      : r.dualCAActive ? 'Active (Dual-CA Overlap)'
-      : r.initialized ? 'Active' : 'Not Initialized';
+    // "expired" and "not_yet_valid" have OPPOSITE remediations — the second is a
+    // clock fault on this Control Plane, and prompting a trust-root rotation for
+    // it would be an unnecessary fleet-wide operation that does not fix
+    // anything. The backend classifies; the panel never re-derives.
+    const clockFault = r.unusableKind === 'not_yet_valid';
+    const status = !unusable ? (r.dualCAActive ? 'Active (Dual-CA Overlap)' : r.initialized ? 'Active' : 'Not Initialized')
+      : clockFault ? 'CLOCK FAULT - Enrollment Down'
+      : 'EXPIRED - Enrollment Down';
     document.getElementById('cca-status').textContent = status;
     document.getElementById('cca-status').style.color = unusable ? 'var(--danger)' : r.initialized ? '#22c55e' : 'var(--muted)';
     const unusableEl = document.getElementById('cca-unusable-banner');
@@ -16689,7 +16694,8 @@ async function loadClusterCA() {
           escHtml(r.unusableReason || 'the cluster CA is outside its validity window') +
           '. The Control Plane is refusing to sign node certificates rather than issuing ones that cannot authenticate' +
           (r.signRefused ? ' (' + escHtml(String(r.signRefused)) + ' refused since boot)' : '') +
-          '. Import a replacement cluster CA below to restore enrollment; already-connected nodes keep working until their own certificates expire.';
+          '. ' + escHtml(r.unusableRemediation || 'Rotate or import a cluster CA below to restore enrollment.') +
+          ' Enrollment tokens are not consumed while the CA cannot issue, and already-connected nodes keep working until their own certificates expire.';
       } else {
         unusableEl.style.display = 'none';
         unusableEl.textContent = '';

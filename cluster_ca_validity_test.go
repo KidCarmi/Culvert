@@ -13,11 +13,13 @@ package main
 // for a ten-year CA to expire, so the clock is an input, not a dependency.
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"math/big"
@@ -174,6 +176,57 @@ func TestClusterCA_NotYetValidIssuerRefusesToSign(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "clock") {
 		t.Errorf("error should name the clock as the likely cause: %v", err)
+	}
+	// A clock fault and an expiry are NOT the same operator action. Reporting
+	// both as "expired" steers the operator into rotating a trust root that is
+	// perfectly fine — a fleet-wide operation that does not fix the fault.
+	if kind := clusterCAUnusableKind(err); kind != "not_yet_valid" {
+		t.Errorf("unusable kind = %q, want not_yet_valid", kind)
+	}
+	if errors.Is(err, errClusterCAExpired) {
+		t.Error("a not-yet-valid CA must not classify as expired")
+	}
+	fix := clusterCAUnusableRemediation(clusterCAUnusableKind(err))
+	if !strings.Contains(fix, "clock") || strings.Contains(fix, "Rotate or import") {
+		t.Errorf("remediation for a clock fault must point at the clock, not a rotation: %q", fix)
+	}
+}
+
+// The two unusable states are classified distinctly everywhere they surface.
+func TestClusterCA_UnusableKindsAreDistinct(t *testing.T) {
+	orig := globalClusterCA
+	t.Cleanup(func() { globalClusterCA = orig })
+
+	expired := loadTestClusterCA(t, time.Now().Add(-2*365*24*time.Hour), time.Now().Add(-24*time.Hour))
+	notYet := loadTestClusterCA(t, time.Now().Add(48*time.Hour), time.Now().Add(365*24*time.Hour))
+
+	if kind := clusterCAUnusableKind(expired.Usable()); kind != "expired" {
+		t.Errorf("expired CA kind = %q, want expired", kind)
+	}
+	if !errors.Is(expired.Usable(), errClusterCAExpired) {
+		t.Error("expired CA must wrap errClusterCAExpired")
+	}
+
+	globalClusterCA = notYet
+	if got := clusterCAHealthState(); got != "not_yet_valid" {
+		t.Errorf("/healthz cluster_ca = %q for a clock rollback, want not_yet_valid — "+
+			"reporting it as \"expired\" points the operator at an unnecessary CA rotation", got)
+	}
+	info := notYet.Info()
+	if info["unusableKind"] != "not_yet_valid" {
+		t.Errorf("Info() unusableKind = %v, want not_yet_valid", info["unusableKind"])
+	}
+	rem, _ := info["unusableRemediation"].(string)
+	if !strings.Contains(rem, "clock") {
+		t.Errorf("Info() remediation = %q, want it to name the clock", rem)
+	}
+
+	globalClusterCA = expired
+	if got := clusterCAHealthState(); got != "expired" {
+		t.Errorf("/healthz cluster_ca = %q, want expired", got)
+	}
+	if rem := expired.Info()["unusableRemediation"]; !strings.Contains(rem.(string), "Rotate or import") {
+		t.Errorf("expired remediation = %v, want a rotate/import instruction", rem)
 	}
 }
 
@@ -526,5 +579,90 @@ func TestClusterCA_HealthzRowTracksUsability(t *testing.T) {
 	if got := clusterCAHealthState(); got != "expired" {
 		t.Errorf("expired CA: cluster_ca = %q, want expired — the probe stayed "+
 			"green through a fleet-wide enrollment outage before this row existed", got)
+	}
+}
+
+// ─── Token preservation on an unusable-CA refusal ───────────────────────────
+
+// An enrollment token is single-use and its consumption is PERSISTED. A
+// precondition failure that is not the caller's fault must therefore not spend
+// it: burning a token on a CA that cannot sign leaves the node unable to retry
+// once the CA is repaired, and an admin has to mint and distribute a
+// replacement. Found in review of the CHAOS-50 fail-closed gate — the guard was
+// correct but sat downstream of ValidateAndConsumeToken.
+func TestEnroll_UnusableCADoesNotConsumeToken(t *testing.T) {
+	captureClusterCAAlerts(t)
+	origStore, origCA := globalClusterStore, globalClusterCA
+	t.Cleanup(func() {
+		globalClusterStore = origStore
+		globalClusterCA = origCA
+	})
+	globalClusterStore = newTestClusterStore(t)
+	globalClusterCA = loadTestClusterCA(t,
+		time.Now().Add(-2*365*24*time.Hour), time.Now().Add(-24*time.Hour))
+
+	token, err := globalClusterStore.GenerateToken("", "", "admin", 24*time.Hour)
+	if err != nil {
+		t.Fatalf("generate token: %v", err)
+	}
+	reqJSON, _ := json.Marshal(EnrollRequest{
+		Token: token, NodeID: "dp-1", CSR: string(newTestCSR(t, "dp-1")),
+	})
+
+	srv := &controlPlaneServer{}
+	if _, err := srv.Enroll(context.Background(), reqJSON); err == nil {
+		t.Fatal("enrollment against an expired cluster CA must be refused")
+	} else if !strings.Contains(err.Error(), "cannot issue") {
+		t.Errorf("refusal should name the cause: %v", err)
+	}
+
+	if !globalClusterStore.TokenExists(token) {
+		t.Fatal("the enrollment token was CONSUMED by a refusal that was not the " +
+			"caller's fault — after the CA is repaired the node cannot retry and an " +
+			"admin must mint and distribute a replacement")
+	}
+	if _, registered := globalClusterStore.GetNode("dp-1"); registered {
+		t.Error("a refused enrollment must not register the node")
+	}
+	if snap := clusterCAUsabilityFailures(); snap.Refusals != 1 {
+		t.Errorf("refusals = %d, want exactly 1 (the precondition returns before "+
+			"SignCSR, so the refusal must not be double-counted)", snap.Refusals)
+	}
+
+	// And the token still works once the CA is usable again — the whole point.
+	globalClusterCA = loadTestClusterCA(t, time.Now().Add(-time.Hour), time.Now().Add(365*24*time.Hour))
+	if _, err := srv.Enroll(context.Background(), reqJSON); err != nil {
+		t.Fatalf("the preserved token must enroll once the CA is repaired: %v", err)
+	}
+	if _, registered := globalClusterStore.GetNode("dp-1"); !registered {
+		t.Error("node should be registered after the successful retry")
+	}
+}
+
+// The same rule for the pre-existing "not initialized" precondition, which had
+// the identical shape.
+func TestEnroll_UninitializedCADoesNotConsumeToken(t *testing.T) {
+	origStore, origCA := globalClusterStore, globalClusterCA
+	t.Cleanup(func() {
+		globalClusterStore = origStore
+		globalClusterCA = origCA
+	})
+	globalClusterStore = newTestClusterStore(t)
+	globalClusterCA = &clusterCA{} // never initialized
+
+	token, err := globalClusterStore.GenerateToken("", "", "admin", 24*time.Hour)
+	if err != nil {
+		t.Fatalf("generate token: %v", err)
+	}
+	reqJSON, _ := json.Marshal(EnrollRequest{
+		Token: token, NodeID: "dp-2", CSR: string(newTestCSR(t, "dp-2")),
+	})
+
+	srv := &controlPlaneServer{}
+	if _, err := srv.Enroll(context.Background(), reqJSON); err == nil {
+		t.Fatal("enrollment with no cluster CA must be refused")
+	}
+	if !globalClusterStore.TokenExists(token) {
+		t.Error("an uninitialized cluster CA consumed the enrollment token")
 	}
 }

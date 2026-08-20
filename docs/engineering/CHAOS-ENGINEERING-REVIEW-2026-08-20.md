@@ -8,7 +8,9 @@ as the next sweep") · adds and closes three previously unrecorded defects, one 
 reachable process-level panic on the documented recovery path.
 **Verdict:** four confirmed defects, all fixed. All four were reproduced empirically against
 unmodified `main` before any fix was written, and every regression gate in this change was
-re-verified to FAIL against the pre-fix engine.
+re-verified to FAIL against the pre-fix engine. Two further defects (FS-5, FS-6) were found by
+review *of the fix* and are recorded below — one of them, the spent enrollment token, was
+already live on `main` through the pre-existing `Ready()` precondition.
 
 ---
 
@@ -210,6 +212,48 @@ The two-file write is still **not** a true atomic commit; a crash between the ce
 writes can leave a mismatched pair on disk. That is unchanged, deliberately: it is detected on
 the next startup by `loadFromPEM`'s cross-validation and fails closed (D1.1f).
 
+### FS-5 — The fail-closed gate spent the caller's one-time enrollment token
+
+**Found in review of the fix, not of `main`** — recorded here because it is the same class this
+sweep exists to catch: a guard that is correct in isolation and creates a new operational
+failure at its seam.
+
+`Enroll` calls `admitEnrollment` first, and the last thing `admitEnrollment` does is
+`ValidateAndConsumeToken` — which marks the single-use enrollment token consumed **and persists
+that**. The CA gate ran afterwards. So a node that attempted enrollment while the CA was expired
+(or the CP's clock was behind) lost a valid token and got no certificate; once the fault was
+repaired its retry was denied, and an admin had to mint and distribute a replacement token. The
+refusal was correct; the cost landed on the wrong party.
+
+The pre-existing `if !globalClusterCA.Ready()` check in `Enroll` had the **identical** shape, so
+this was live on `main` before this change — the new gate merely widened it from "CA never
+loaded" (rare on a running CP) to "CA expired or clock behind" (a long-lived state).
+
+`admitEnrollment` already states the invariant for its other deny path — *"the denial stays
+byte-identical and the token stays unconsumed on the deny path"* — so the fix is to honour the
+rule the file already keeps: `clusterCAIssuancePrecondition()` now runs **after** the per-IP rate
+limiter (so an unauthenticated flood cannot drive the refusal counter or the alert gate) and
+**before** the token is spent. `SignCSR` keeps its own guard as the authoritative backstop —
+`RenewCert` reaches it too, and no caller can bypass it — and because the precondition returns
+first, a refusal is still counted exactly once.
+
+### FS-6 — A clock fault was reported as an expiry, pointing at the wrong remediation
+
+Also found in review of the fix. `Usable()` fails for two reasons with **opposite** remediations:
+an expired CA needs a rotation or an import; a not-yet-valid one means this Control Plane's clock
+is behind and the trust root is fine. Reporting both as `expired` — which `/healthz` did, and
+which the GUI rendered as **"EXPIRED - Enrollment Down"** with an instruction to import a
+replacement — steers the operator into an unnecessary fleet-wide trust-root rotation that does
+not fix the actual fault, while the real cause (NTP) goes untouched.
+
+`clusterCAUsable` now wraps a second sentinel alongside the umbrella one (Go multi-`%w`), so
+`errClusterCAExpired` and `errClusterCANotYetValid` are distinguishable by `errors.Is`.
+`clusterCAUnusableKind` classifies; `clusterCAUnusableRemediation` is kept next to it so the two
+cannot drift. `/healthz` gains a distinct `not_yet_valid` state, `/api/cluster/ca` carries
+`unusableKind` + `unusableRemediation`, `/api/cluster` carries `caUnusableKind`, and the panel
+renders **"CLOCK FAULT - Enrollment Down"** with the clock remediation. The log line and the
+alert detail are reason-specific for the same reason.
+
 ---
 
 ## Risk Matrix
@@ -220,6 +264,8 @@ the next startup by `loadFromPEM`'s cross-validation and fails closed (D1.1f).
 | FS-2 unclamped node certs | **High** — every issuance inside the rotation window, every short imported CA | High — mass simultaneous mTLS loss; defeats the renewal trigger | None | Low — clamped; see residual on renewal cadence |
 | FS-3 ImportCA panic | Medium — needs a prior CA load failure, then the documented recovery | High — 500 + unaudited live CA; retry ⇒ fleet renewal storm | Panic in the HTTP log only | None |
 | FS-4 failed persist | Medium — read-only/full volume | Medium — phantom overlap until restart | `dualCAActive` reported the *wrong* thing | None |
+| FS-5 token spent on refusal | Medium — any refusal, and live on `main` via the `Ready()` check | Medium — a valid token is destroyed; enrollment blocked past the repair until an admin re-issues | None | None — refused before the token is spent |
+| FS-6 clock fault reported as expiry | Low/Medium — NTP step or bad RTC | Medium — operator performs an unnecessary fleet-wide CA rotation and does not fix the clock | Misleading, not absent | None |
 
 ---
 
@@ -299,6 +345,9 @@ All in `cluster_ca_validity_test.go`, all verified to **FAIL** against the pre-f
 | `TestClusterCA_InfoSurfacesUsability` | `usable` / `unusableReason` / `expiresInDays` on the admin API |
 | `TestClusterCA_MetricsSurfaceUsabilityAndExpiry` | the expiry series is **omitted** with no CA (0 would read as "expires now" and page every DP node) |
 | `TestClusterCA_HealthzRowTracksUsability` | `ready` / `expired` / `absent` |
+| `TestClusterCA_UnusableKindsAreDistinct` | expiry vs clock fault classified distinctly on `/healthz`, `Info()`, and the remediation text |
+| `TestEnroll_UnusableCADoesNotConsumeToken` | the token survives a refusal, the node is not registered, the refusal is counted **once**, and the preserved token enrolls once the CA is repaired |
+| `TestEnroll_UninitializedCADoesNotConsumeToken` | same rule for the pre-existing "not initialized" precondition |
 
 Verified under `-race -count=2 -shuffle=on`. The alert seam
 (`fireClusterCAUnusableAlert`) is a package-level variable so tests observe transitions

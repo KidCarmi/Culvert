@@ -40,6 +40,7 @@ func apiClusterStatus(w http.ResponseWriter, r *http.Request) {
 		if err := globalClusterCA.Usable(); err != nil {
 			result["caUsable"] = false
 			result["caUnusableReason"] = err.Error()
+			result["caUnusableKind"] = clusterCAUnusableKind(err)
 		} else {
 			result["caUsable"] = true
 		}

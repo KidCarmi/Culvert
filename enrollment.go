@@ -983,7 +983,7 @@ func (ca *clusterCA) SignCSR(csrPEM []byte, nodeID string) (certPEM []byte, seri
 	// (the chain was already dead) and turns N opaque per-node TLS errors into one
 	// countable, alertable event that names the remediation.
 	if err := clusterCAUsable(ca.cert, time.Now()); err != nil {
-		noteClusterCASignRefused(err.Error())
+		noteClusterCASignRefused(err.Error(), clusterCAUnusableKind(err))
 		return nil, "", time.Time{}, err
 	}
 
@@ -1410,7 +1410,14 @@ func (ca *clusterCA) Info() map[string]any {
 	usableErr := clusterCAUsable(ca.cert, time.Now())
 	info["usable"] = usableErr == nil
 	if usableErr != nil {
+		kind := clusterCAUnusableKind(usableErr)
 		info["unusableReason"] = usableErr.Error()
+		// Machine-readable so the GUI picks the remediation that actually
+		// applies: a not-yet-valid CA is a CLOCK fault, and telling the operator
+		// to import a replacement trust root would send them to rotate a CA that
+		// is perfectly fine.
+		info["unusableKind"] = kind
+		info["unusableRemediation"] = clusterCAUnusableRemediation(kind)
 	}
 	info["expiresInDays"] = int(time.Until(ca.cert.NotAfter).Hours() / 24)
 	snap := clusterCAUsabilityFailures()

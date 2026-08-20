@@ -60,11 +60,23 @@ const clusterCAClockSkewTolerance = 5 * time.Minute
 // per interval carries the page.
 const clusterCAUnusableAlertInterval = 5 * time.Minute
 
-// errClusterCAUnusable is the sentinel returned by clusterCA.Usable and by
-// SignCSR when the cluster CA cannot issue a certificate any peer will accept.
-// Callers match it with errors.Is; the wrapped text carries the
+// errClusterCAUnusable is the umbrella sentinel returned by clusterCA.Usable
+// and by SignCSR when the cluster CA cannot issue a certificate any peer will
+// accept. Callers match it with errors.Is; the wrapped text carries the
 // operator-actionable detail and contains no key material.
-var errClusterCAUnusable = errors.New("cluster CA unusable")
+//
+// errClusterCAExpired and errClusterCANotYetValid are wrapped ALONGSIDE it (Go
+// multi-%w) so a caller can tell the two apart. They are not cosmetic: the two
+// states have opposite remediations. An expired CA needs a rotation or an
+// import; a not-yet-valid one means this Control Plane's clock is behind, and
+// rotating the trust root in response would be an unnecessary, fleet-wide
+// operation that does not fix the actual fault. Reporting both as "expired"
+// steers the operator into exactly that mistake.
+var (
+	errClusterCAUnusable    = errors.New("cluster CA unusable")
+	errClusterCAExpired     = errors.New("expired")
+	errClusterCANotYetValid = errors.New("not yet valid")
+)
 
 // clusterCAUsable is the pure validity predicate, split out so tests can drive
 // it with an explicit clock instead of waiting ten years for a CA to expire.
@@ -73,15 +85,41 @@ func clusterCAUsable(cert *x509.Certificate, now time.Time) error {
 		return fmt.Errorf("%w: no cluster CA loaded", errClusterCAUnusable)
 	}
 	if now.After(cert.NotAfter) {
-		return fmt.Errorf("%w: expired at %s (%s ago)", errClusterCAUnusable,
+		return fmt.Errorf("%w: %w at %s (%s ago)", errClusterCAUnusable, errClusterCAExpired,
 			cert.NotAfter.UTC().Format(time.RFC3339),
 			now.Sub(cert.NotAfter).Round(time.Second))
 	}
 	if now.Add(clusterCAClockSkewTolerance).Before(cert.NotBefore) {
-		return fmt.Errorf("%w: not valid until %s (system clock may have rolled back)",
-			errClusterCAUnusable, cert.NotBefore.UTC().Format(time.RFC3339))
+		return fmt.Errorf("%w: %w until %s (system clock may have rolled back)",
+			errClusterCAUnusable, errClusterCANotYetValid,
+			cert.NotBefore.UTC().Format(time.RFC3339))
 	}
 	return nil
+}
+
+// clusterCAUnusableKind classifies an Usable() error into a stable, machine-
+// readable token for /healthz, the admin API, and the GUI's remediation text.
+// "" means usable.
+func clusterCAUnusableKind(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, errClusterCAExpired):
+		return "expired"
+	case errors.Is(err, errClusterCANotYetValid):
+		return "not_yet_valid"
+	default:
+		return "unavailable"
+	}
+}
+
+// clusterCAUnusableRemediation returns the operator action that actually fixes
+// the given kind. Kept next to the classifier so the two can never drift.
+func clusterCAUnusableRemediation(kind string) string {
+	if kind == "not_yet_valid" {
+		return "Correct this Control Plane's system clock (NTP) — the cluster CA is not yet valid by more than the allowed skew. Do NOT rotate the CA; the trust root is fine."
+	}
+	return "Rotate or import a cluster CA (Cluster → CA) to restore enrollment."
 }
 
 // Usable reports whether the cluster CA can currently issue a node certificate
@@ -123,7 +161,7 @@ func (ca *clusterCA) Expiry() time.Time {
 // Clamping makes that window self-correcting: inside the CA's own 30-day
 // rotation window, issued node certs are short, so the DP renewal loop keeps
 // checking back and picks up the rotated CA as soon as it lands.
-func clampNodeCertValidity(notBefore, notAfter time.Time, caCert *x509.Certificate) (time.Time, time.Time) {
+func clampNodeCertValidity(notBefore, notAfter time.Time, caCert *x509.Certificate) (leafNotBefore, leafNotAfter time.Time) {
 	if caCert == nil {
 		return notBefore, notAfter
 	}
@@ -211,8 +249,9 @@ var fireClusterCAUnusableAlert = func(detail string) {
 // noteClusterCASignRefused records a CSR sign refused because the cluster CA was
 // outside its validity window. Runs synchronously on the RPC's goroutine, so it
 // does memory-only work and hands the alert off.
-func noteClusterCASignRefused(reason string) {
+func noteClusterCASignRefused(reason, kind string) {
 	safe := sanitizeLog(reason)
+	fix := clusterCAUnusableRemediation(kind)
 	now := time.Now()
 	clusterCAEverUnusable.Store(true)
 
@@ -233,13 +272,13 @@ func noteClusterCASignRefused(reason string) {
 
 	if doLog && logger != nil {
 		logger.Printf("ClusterCA: node enrollment and cert renewal are DOWN — the cluster CA "+
-			"cannot issue a certificate peers will accept: %q (%d signs refused since boot). "+
-			"Rotate or import a cluster CA (Cluster → CA) to restore enrollment.", safe, refusals)
+			"cannot issue a certificate peers will accept: %q (%d issuances refused since boot). %s",
+			safe, refusals, fix)
 	}
 	if doAlert {
 		fireClusterCAUnusableAlert(fmt.Sprintf(
 			"Node enrollment and cert renewal are DOWN — the cluster CA cannot issue a usable "+
-				"certificate: %s (%d signs refused since boot)", safe, refusals))
+				"certificate: %s (%d issuances refused since boot). %s", safe, refusals, fix))
 	}
 }
 

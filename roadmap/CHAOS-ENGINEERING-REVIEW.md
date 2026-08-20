@@ -46,6 +46,17 @@ first attempt; every regression gate was re-verified to FAIL against the pre-fix
 backdating `SignCSR` already applies), `clampNodeCertValidity` on both bounds with the CLAMPED
 value returned as the node record's expiry, persist-before-swap in `ImportCA`, first-import and
 same-CA-re-import treated as not-a-rotation, and a `newFP == oldFP` guard in `StartCARotation`.
+Review of the fix added two more: (5) the fail-closed gate sat DOWNSTREAM of
+`ValidateAndConsumeToken`, so a refusal **spent the caller's single-use enrollment token** — the
+node could not retry after the CA was repaired and an admin had to mint and distribute a
+replacement (the pre-existing `Ready()` precondition had the identical shape, so this was live on
+`main`); fixed by running `clusterCAIssuancePrecondition()` after the per-IP rate limiter and
+BEFORE the token is spent, honouring the invariant `admitEnrollment` already records for its other
+deny path. (6) A **not-yet-valid CA was reported as `expired`** on `/healthz` and as "EXPIRED —
+import a replacement" in the GUI, steering the operator into an unnecessary fleet-wide trust-root
+rotation when the actual fault is this CP's clock; fixed with paired sentinels
+(`errClusterCAExpired`/`errClusterCANotYetValid`, Go multi-`%w`), a `not_yet_valid` health state,
+and reason-specific remediation text on the API, the panel, the log line and the alert.
 Observability: `culvert_cluster_ca_{usable,expires_in_seconds,sign_refused_total,node_cert_clamped_total}`,
 a `cluster_ca` row on `/healthz`, `usable`/`unusableReason`/`expiresInDays`/`signRefused` on
 `/api/cluster/ca` + `caUsable` on `/api/cluster`, a red Cluster-CA panel banner, and a
@@ -224,6 +235,8 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | CA-19 | **`ImportCA` panicked on a nil secondary CA** when no CA was installed — the documented recovery path after `InitOrLoad` fails — *after* persisting and swapping in the new CA but *before* rotation tracking, the config bump and the caller's `auditEvent`; the natural retry then opened a phantom overlap with `newFP == oldFP`, marking every enrolled node pending renewal. | NEW → **CLOSED** (CHAOS-50: explicit `prev` capture; first import and same-CA re-import are not rotations; `StartCARotation` rejects a self-rotation) | H | was: `enrollment.go` `ImportCA`; see §17 |
 | CA-20 | `ImportCA` recorded the **dual-CA overlap before its writes**, so a failed persist (read-only volume, ENOSPC) returned an error having installed the LIVE CA as its own secondary — `AllCACertsPEM` emitting it twice and `dualCAActive` reporting a rotation that had not happened, until restart. | NEW → **CLOSED** (CHAOS-50: persist-before-swap, matching `persistReplicatedKey`'s existing rule) | M | was: `enrollment.go` `ImportCA`; see §17 |
 | CA-17 | `ImportCASilent` (HA standby replication) does not clear a stale secondary CA when it installs a replicated pair — a divergence between the two import paths. Bounded by the old CA's own `NotAfter`. | NEW / GAP (opened by CHAOS-50) | L | `ha.go` `ImportCASilent` |
+| CA-21 | The CHAOS-50 fail-closed gate initially sat DOWNSTREAM of `ValidateAndConsumeToken`, so a refusal **spent the caller's single-use enrollment token** and the node could not retry after repair. The pre-existing `Ready()` precondition had the identical shape (live on `main`). | NEW → **CLOSED** (CHAOS-50 review: `clusterCAIssuancePrecondition()` runs after the per-IP rate limiter and before the token is spent; `SignCSR` keeps the authoritative guard) | M | was: `controlplane_server.go` `admitEnrollment`; see §17 |
+| CA-22 | A **not-yet-valid** cluster CA (clock rollback) was reported as `expired` on `/healthz` and in the GUI, pointing the operator at an unnecessary fleet-wide trust-root rotation instead of the system clock. | NEW → **CLOSED** (CHAOS-50 review: paired sentinels + `not_yet_valid` state + reason-specific remediation) | L/M | was: `healthcheck.go`, `static/index.html`; see §17 |
 | CA-18 | **Single dual-CA overlap slot**: two rotations inside one overlap window drop the first secondary immediately, ejecting nodes that had renewed against it. `RotateIfNeeded` cannot produce this; two rapid manual imports can. | NEW / GAP (opened by CHAOS-50) | L/M | `enrollment.go` `ImportCA` |
 | CA-14 | Revocation persistence uses `os.WriteFile`+rename with **no fsync** (unlike the CA bundle's `AtomicWrite`) — a revoked token can be honored again after crash/disk-full. | GAP | L/M | `internal/session/session.go:272-276`, caller `session.go:106-108` |
 | CA-15 | CA loader **accepts a plain-PEM bundle even when a passphrase is set** (magic absent) — a downgrade footgun; logged, not alerted/rejected. | GAP (minor) | L | `internal/ca/ca.go:221-229` |
@@ -1180,7 +1193,7 @@ reason: a still-expired CA looks exactly like a healthy one if nothing happens t
 
 ## 17. CHAOS-50 — The cluster CA across its lifecycle (fail-closed)
 
-**Date:** 2026-08-20 · **Closes:** CA-13, CA-19, CA-20 · **Opens:** CA-17, CA-18
+**Date:** 2026-08-20 · **Closes:** CA-13, CA-19, CA-20, CA-21, CA-22 · **Opens:** CA-17, CA-18
 **Full write-up:** `docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-20.md`
 
 ### 17.1 Why this domain
@@ -1209,6 +1222,10 @@ all — one of them a nil-pointer panic on the documented recovery path.
    inside the CA's own 30-day rotation window, and every custom CA imported with a shorter life.
 3. **`ImportCA` panicked on a nil secondary CA** (CA-19).
 4. **`ImportCA` mutated the overlap state before persisting** (CA-20).
+
+Review of the fix found two more, recorded as CA-21 and CA-22 — the fail-closed gate spending the
+caller's one-time enrollment token, and a clock fault reported as an expiry so the operator is
+pointed at a trust-root rotation instead of NTP. See §17.7.
 
 ### 17.3 The finding inside the finding: the unclamped cert disables its own recovery
 
@@ -1277,3 +1294,30 @@ recovering from an unrelated fault.
 - **The two-file CA write is still not atomic** — unchanged and deliberate; a crash between the
   cert and key writes is caught by `loadFromPEM` cross-validation on the next startup and fails
   closed (D1.1f).
+
+### 17.7 Review follow-up — the guard that charged the caller for the fault
+
+Two defects surfaced in review of the fix rather than of `main`, and both are the same shape as
+the sweep itself: a guard that is correct in isolation and wrong at its seam.
+
+**CA-21.** `Enroll` calls `admitEnrollment` first, and the last thing `admitEnrollment` does is
+`ValidateAndConsumeToken` — which marks the single-use token consumed and PERSISTS that. The new
+CA gate ran afterwards. So a node enrolling while the CA was unusable lost a valid token and got
+no certificate; after the fault was repaired its retry was denied and an admin had to mint and
+distribute a replacement. The refusal was right; the cost landed on the wrong party. The
+pre-existing `if !globalClusterCA.Ready()` check had the identical shape, so this was already live
+on `main` — the new gate widened it from "CA never loaded" to "CA expired or clock behind", a
+far more likely and far longer-lived state. `admitEnrollment` already states the rule for its
+other deny path ("the token stays unconsumed on the deny path"); the fix honours it, running the
+precondition after the per-IP rate limiter (so an unauthenticated flood cannot drive the refusal
+counter or the alert gate) and before the token is spent. `SignCSR` keeps its own guard as the
+authoritative backstop — `RenewCert` reaches it too — and because the precondition returns first,
+a refusal is still counted exactly once.
+
+**CA-22.** `Usable()` fails for two reasons with OPPOSITE remediations. An expired CA wants a
+rotation or an import. A not-yet-valid one means this CP's clock is behind and the trust root is
+fine — rotating it is an unnecessary fleet-wide operation that fixes nothing while the real cause
+goes untouched. Reporting both as `expired` (which `/healthz` did, and which the panel rendered as
+"EXPIRED - Enrollment Down · import a replacement") steers the operator into exactly that mistake.
+`clusterCAUsable` now wraps a second sentinel alongside the umbrella one, `clusterCAUnusableKind`
+classifies, and `clusterCAUnusableRemediation` sits next to it so the two cannot drift.
