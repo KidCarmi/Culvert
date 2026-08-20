@@ -39,4 +39,13 @@ func TestDockerComposeHA_EnrollURLExampleMatchesParser(t *testing.T) {
 		t.Errorf("documented example %q resolves to Token=%q, want %q",
 			example, info.Token, "TOKEN")
 	}
+	// callEnrollRPC connects over insecure gRPC (dp_enrollment.go), so the
+	// ca-fp fingerprint is the only defense against an impersonated Control
+	// Plane answering the enrollment call — the documented example must
+	// carry one, not just mention it's possible in prose.
+	if info.CAFingerprint == "" {
+		t.Errorf("documented example %q carries no ca-fp fingerprint — enrollment runs over insecure "+
+			"gRPC, so an example without it teaches operators to skip the only check against an "+
+			"impersonated Control Plane", example)
+	}
 }
