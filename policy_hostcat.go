@@ -82,11 +82,15 @@ func (sc *hostCatScratch) effectiveView() *effectiveCategoryView {
 	return sc.view
 }
 
-// viewLookup resolves the host against the effective view. Only ever called
-// when effectiveView() is non-nil.
+// viewLookup resolves the host against the effective view. Both callers reach
+// it only behind a non-nil effectiveView(), and effectiveView() is itself
+// memoized so its nil-ness is fixed for the scratch's lifetime — the nil branch
+// is defensive, and memoizing its miss is exactly right.
 func (sc *hostCatScratch) viewLookup() (string, bool) {
 	if !sc.viewLookupSet {
-		sc.viewLookupCat, sc.viewLookupOK = sc.effectiveView().LookupHost(sc.host)
+		if view := sc.effectiveView(); view != nil {
+			sc.viewLookupCat, sc.viewLookupOK = view.LookupHost(sc.host)
+		}
 		sc.viewLookupSet = true
 	}
 	return sc.viewLookupCat, sc.viewLookupOK
@@ -98,13 +102,21 @@ func (sc *hostCatScratch) viewLookup() (string, bool) {
 // and lookupHostCategory passed the normalized one: catdb.Lookup normalizes its
 // argument itself and normalization is idempotent, so both calls always
 // produced the same answer.
+//
+// A nil store is NOT memoized — the feed is opened during startup, so caching
+// "no Layer 2" from a scan that ran before it opened would be a stale answer
+// with no upside. The local binding also keeps the nil check and the call on
+// the SAME store, so a mid-scan swap cannot land between them.
 func (sc *hostCatScratch) communityLookup() (string, bool) {
-	if !sc.communitySet {
-		if communityDB != nil {
-			sc.communityCat, sc.communityOK = communityDB.Lookup(sc.host)
-		}
-		sc.communitySet = true
+	if sc.communitySet {
+		return sc.communityCat, sc.communityOK
 	}
+	db := communityDB
+	if db == nil {
+		return "", false
+	}
+	sc.communityCat, sc.communityOK = db.Lookup(sc.host)
+	sc.communitySet = true
 	return sc.communityCat, sc.communityOK
 }
 
