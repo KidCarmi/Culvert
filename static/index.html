@@ -4392,6 +4392,7 @@ Firefox (all platforms):
               <div class="stat-card"><div class="stat-val" id="cca-expires">-</div><div class="stat-label">Expires</div></div>
               <div class="stat-card"><div class="stat-val" id="cca-fingerprint" style="font-size:.65rem;word-break:break-all">-</div><div class="stat-label">SHA-256 Fingerprint</div></div>
             </div>
+            <div id="cca-unusable-banner" style="display:none;margin-top:12px;padding:10px 12px;border-radius:8px;background:rgba(239,68,68,.12);color:var(--danger);font-size:.8rem;line-height:1.5"></div>
             <div id="cca-rotation-warning" style="display:none;margin-top:12px;padding:10px 12px;border-radius:8px;background:rgba(239,68,68,.12);color:var(--danger);font-size:.8rem;line-height:1.5"></div>
           </div>
           <details style="margin-top:12px">
@@ -16670,9 +16671,30 @@ async function loadClusterCA() {
   try {
     const r = await api('/api/cluster/ca');
     if (!r) return;
-    const status = r.dualCAActive ? 'Active (Dual-CA Overlap)' : r.initialized ? 'Active' : 'Not Initialized';
+    // CHAOS-50: "installed" and "can issue" are different questions. An expired
+    // cluster CA used to render as a healthy green "Active" while every node
+    // enrollment and cert renewal it accepted produced a certificate that could
+    // never complete an mTLS handshake.
+    const unusable = r.initialized && r.usable === false;
+    const status = unusable ? 'EXPIRED - Enrollment Down'
+      : r.dualCAActive ? 'Active (Dual-CA Overlap)'
+      : r.initialized ? 'Active' : 'Not Initialized';
     document.getElementById('cca-status').textContent = status;
-    document.getElementById('cca-status').style.color = r.initialized ? '#22c55e' : 'var(--muted)';
+    document.getElementById('cca-status').style.color = unusable ? 'var(--danger)' : r.initialized ? '#22c55e' : 'var(--muted)';
+    const unusableEl = document.getElementById('cca-unusable-banner');
+    if (unusableEl) {
+      if (unusable) {
+        unusableEl.style.display = '';
+        unusableEl.innerHTML = '<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> <b>Node enrollment and certificate renewal are DOWN.</b> ' +
+          escHtml(r.unusableReason || 'the cluster CA is outside its validity window') +
+          '. The Control Plane is refusing to sign node certificates rather than issuing ones that cannot authenticate' +
+          (r.signRefused ? ' (' + escHtml(String(r.signRefused)) + ' refused since boot)' : '') +
+          '. Import a replacement cluster CA below to restore enrollment; already-connected nodes keep working until their own certificates expire.';
+      } else {
+        unusableEl.style.display = 'none';
+        unusableEl.textContent = '';
+      }
+    }
     document.getElementById('cca-subject').textContent = r.subject || '-';
     document.getElementById('cca-expires').textContent = r.expires ? new Date(r.expires).toLocaleDateString() : '-';
     const fpText = r.fingerprint || '-';

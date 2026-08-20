@@ -30,6 +30,20 @@ func apiClusterStatus(w http.ResponseWriter, r *http.Request) {
 		"caFingerprint": globalClusterCA.CACertFingerprint(),
 		"ha":            globalHA.Status(),
 	}
+	// CHAOS-50 / CA-13: enrollEnabled answers "is a cluster CA installed", which
+	// stays true through a total enrollment outage caused by an EXPIRED one.
+	// Rather than overload that flag (the GUI uses it to show/hide the
+	// enroll-token button, and hiding the button with no explanation is its own
+	// operational surprise), the usability verdict is reported alongside it so
+	// the panel can render a banner that names the fault and the remediation.
+	if globalClusterCA.Ready() {
+		if err := globalClusterCA.Usable(); err != nil {
+			result["caUsable"] = false
+			result["caUnusableReason"] = err.Error()
+		} else {
+			result["caUsable"] = true
+		}
+	}
 	if clusterRole.role == "control-plane" {
 		result["nodes"] = NodeMetricsList()
 		result["enrolledNodes"] = globalClusterStore.ListNodes()

@@ -19,6 +19,25 @@ type healthReport struct {
 	CAExpiresDays     int    `json:"ca_expires_days" redact:"internal"`
 	SSLInspection     string `json:"ssl_inspection" redact:"internal"`
 	ThreatFeedEntries int64  `json:"threat_feed_entries" redact:"internal"`
+	ClusterCA         string `json:"cluster_ca" redact:"internal"`
+}
+
+// clusterCAHealthState maps the cluster CA to one posture word for /healthz.
+//
+// CHAOS-50 / CA-13: this row did not exist. An expired cluster CA takes node
+// enrollment and cert renewal down for the whole fleet, and the probe stayed
+// green throughout — the same blind spot CHAOS-28 closed for ssl_inspection.
+// "absent" is the normal state on a data-plane node and on any single-node
+// deployment; it is not a fault and never fails the probe.
+func clusterCAHealthState() string {
+	switch {
+	case !globalClusterCA.Ready():
+		return "absent"
+	case globalClusterCA.Usable() != nil:
+		return "expired"
+	default:
+		return "ready"
+	}
 }
 
 // computeHealth builds the liveness/posture snapshot from side-effect-free reads.
@@ -69,6 +88,7 @@ func computeHealth() healthReport {
 		CAExpiresDays:     caExpiresDays,
 		SSLInspection:     sslInspection,
 		ThreatFeedEntries: tfEntries,
+		ClusterCA:         clusterCAHealthState(),
 	}
 }
 
