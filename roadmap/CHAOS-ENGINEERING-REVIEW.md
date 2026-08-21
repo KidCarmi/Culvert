@@ -17,6 +17,73 @@ everything else is triaged below with a suggested PR and required tests for foll
 
 ## 0. Revision log
 
+**2026-08-11 — CHAOS-49 sweep (the multi-IdP registry auth path under IdP failure).**
+
+CHAOS-47 gave the LEGACY identity backends a three-part contract (an infrastructure failure is
+never cached as a verdict; an unreachable backend arms a half-open probe gate; both are reported
+on the `identity_backend` row) and closed by naming the newer **IdP-registry** path as having
+none of it. This sweep confirms that and finds the domain is worse than recorded in three ways
+that are not about introspection at all — all three in the **JWKS cache**, the component that
+distributes the public keys every ID-token validation depends on. (1) `refresh()` installed
+whatever it parsed, so an HTTP **200 carrying no usable keys** — a rate-limiter body, an edge
+stub, a full rotation to EC — **WIPED the key cache**, and because the wipe happens on the
+SUCCESS path it also destroys the explicit "return the stale key rather than failing" fallback
+that exists to survive exactly this: a silent, fleet-wide SSO outage with no log, metric, or
+health signal. (2) `resp.StatusCode` was never checked, so a JSON error body behind a 503 took
+the same wipe path — a 500 returning HTML was *safer* than a well-behaved JSON 503. (3) The
+refetch decision keyed on cache MEMBERSHIP, so an **unknown `kid` re-fetched the JWKS on every
+request, forever**; the kid is read from an UNVERIFIED token header, making this an
+unauthenticated amplifier (gain = number of configured providers) pointed at the customer's own
+IdP — and it fires without an attacker in any 2-IdP estate, because the dispatch loop asks every
+provider about every other provider's token. Plus (4) no single-flight: 40 concurrent misses ⇒
+40 fetches. And CHAOS-49 as recorded: (5) no introspection result cache — 20 authenticated
+requests ⇒ 20 round trips; (6) no probe gate and no health reporting — 11 requests against a
+DOWN IdP ⇒ 11 full round trips with `degraded=false`, `gatedDenials=0`, and, because providers
+are tried SEQUENTIALLY, up to N × 10 s of serialized dial timeouts per request holding a
+goroutine, a connection, and a per-IP slot. All six fixed, each reproduced empirically against
+`main` first. The load-bearing decision was to REUSE the CHAOS-47 primitives (`authProbeGate`,
+`noteAuthBackend*`, `cacheKey`, `errIntrospectClient`) rather than write a second dialect, so the
+new backend lands on the existing `identity_backend` row, metrics, and alert with no new
+operator vocabulary and no new config. See
+`docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-11.md`.
+
+**2026-08-09 — CHAOS-28 sweep (the Root CA across its lifecycle).**
+
+The inspection CA is the one control whose failure produces no error anywhere INSIDE the
+process. Row **CA-1** was still live on `main`, and worse than recorded: (1) `signLeaf` signed
+with an expired CA because `x509.CreateCertificate` does not check the parent's validity and
+nothing else did either — verified by running the new gate against the pre-fix engine, where
+the sign SUCCEEDED — while `handleTunnel`'s `Ready()` gate (`caCert != nil`) admitted the
+session, so every inspected client got a leaf chained to a dead issuer and `/healthz` reported
+`ssl_inspection: ready` throughout; (2) leaf `NotAfter` was an unconditional `now+24h`, so
+leaves minted in the CA's last day OUTLIVED their issuer; (3) **CA-2** — a rotation whose
+`SaveCA` failed still logged and alerted success, so the only recovery path FS-1 has could
+silently not persist and mint a different root on every boot; (4) **CA-4** — the rotation loop
+made its FIRST check 24h after boot, i.e. never at the moment an operator restarts to recover;
+and (5) newly found, unrecorded: `cacheOrder` was appended on every TTL REFRESH while the map
+entry was overwritten, so the eviction branch (keyed on map length) never fired and the slice
+grew unbounded behind a bounded map — a leak that scales with UPTIME on an ordinary steady
+working set. All five fixed. The load-bearing decision was to fail **CLOSED** (502 before the
+CONNECT 200) rather than fold expiry into `Ready()`: the one-word fix would have converted an
+availability outage into a silent, fleet-wide UNINSPECTED-egress outage — the §1 theme — and is
+now blocked by an executable negative assertion. See §16 and
+`docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-09.md`.
+
+**2026-08-07 — CHAOS-27 sweep (the alert plane under an alert storm).**
+
+Row **WK-10** marked webhook delivery resilient, and every bound it cites is real — but all of
+them bound *delivery*, and the two defects found here are in front of delivery. (1) The delivery
+client was built **per attempt**, so every delivered alert abandoned an `http.Transport` holding
+a keep-alive socket with a zero-value `IdleConnTimeout` (= never expires): one FD + two
+goroutines leaked per alert, until the *receiver* closed. (2) The Q17 dedup map was unbounded on
+an **attacker-controlled key space** (the key embeds the requested host) and fully rescanned
+under a process-wide mutex on **every** dispatch — 230,603 ns/op of mutex-held work per alert at
+the flood steady state, growing. Both amplify with the security controls working (more blocks →
+more alerts), so the alerting plane degraded the gateway hardest while it was under attack, and
+FS-1's terminal state is the *proxy* plane running out of descriptors. Both fixed with gates
+proven to fail against the pre-fix code. See §15 and
+`docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-07.md`.
+
 **2026-08-06 — CHAOS-25 sweep (HA sync-loop + scanner-goroutine panic containment).**
 
 Closes two of the three paths CHAOS-24 explicitly left unguarded (§12.6): the **HA standby sync
@@ -101,19 +168,21 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 
 | # | Scenario | Verdict | Sev | Evidence |
 |---|----------|---------|-----|----------|
-| CA-1 | **Expired Root CA keeps signing leaves** — no `time.Now().After(caCert.NotAfter)` guard on the sign path. Every inspected client then sees an opaque expired-issuer TLS error (site-wide inspected-HTTPS outage) with no fast-fail signal. | GAP | H | `internal/ca/ca.go:724-753` (`signLeaf`), `GetCert` `ca.go:639-695` |
-| CA-2 | Rotation `SaveCA` failure (disk full / read-only) is **swallowed** — logged, still returns `true`, still fires the "rotated successfully" alert. New CA lives only in RAM; next restart reloads the old near-expiry bundle. | GAP | H | `internal/ca/ca.go:508-510,519-522` |
+| CA-1 | **Expired Root CA keeps signing leaves** — no `time.Now().After(caCert.NotAfter)` guard on the sign path. Every inspected client then sees an opaque expired-issuer TLS error (site-wide inspected-HTTPS outage) with no fast-fail signal. | GAP → **CLOSED** (CHAOS-28: fail-closed 502 at dispatch + `ErrCAUnusable` at the sign path + `culvert_ca_usable`/`_expires_in_seconds` + `ssl_inspection: expired`) | H | was: `internal/ca/ca.go` `signLeaf`; now `internal/ca/validity.go`, `proxy_tunnel.go` `failClosedUnusableCA` — see §16 |
+| CA-1b | **Forged leaf `NotAfter` was not clamped to the issuer's** — leaves minted in the CA's final 24h claimed validity past their own issuer, the state that makes an expiry incident hardest to diagnose (leaf looks valid, only the chain fails). | GAP → **CLOSED** (CHAOS-28, `clampLeafValidity`, both ends) | M | was: `internal/ca/ca.go` `signLeaf` `NotAfter: now+24h`; see §16 |
+| CA-2 | Rotation `SaveCA` failure (disk full / read-only) is **swallowed** — logged, still returns `true`, still fires the "rotated successfully" alert. New CA lives only in RAM; next restart reloads the old near-expiry bundle. | GAP → **CLOSED** (CHAOS-28, `RotationPersistFailureObserver` + distinct log wording + `culvert_ca_rotation_persist_failures_total` + CA-panel banner) | H | was: `internal/ca/ca.go` `RotateIfNeeded`; see §16 |
 | CA-3 | Corrupt bundle / wrong `CULVERT_CA_PASSPHRASE` / expired-at-rest CA at startup → **fail OPEN**: inspection silently disabled, traffic falls through to SSL-bypass (no DPI/CDR/file-blocking). Log line only, no alert, no `ssl_inspection_ready` gauge. | GAP (silent) | H | `rootca_startup.go:40-44`; `handleTunnel` gate `proxy.go:1335`; `ImportBundle` `ca.go:286` |
-| CA-4 | Auto-rotation loop: **no immediate startup check** (24h blind spot after boot), **no retry/backoff** on failure (waits a fixed 24h). | GAP | M/H | `internal/ca/ca.go:460,64-73` |
+| CA-4 | Auto-rotation loop: **no immediate startup check** (24h blind spot after boot), **no retry/backoff** on failure (waits a fixed 24h). | GAP → **PARTLY CLOSED** (CHAOS-28: the startup blind spot is closed — one guarded round runs before the ticker, sharing the CHAOS-24 guard. Retry/backoff on a FAILED rotation still waits the full 24h) | M/H | `ca.go` `StartCAAutoRotation`; see §16 |
 | CA-5 | `cert_expiry` alert only fires **on rotation**, not as an early warning — contract says "fired on startup if ≤30 days" but the only producer is the rotation observer. | GAP (contract mismatch) | M | producer `ca.go:45-53`; contract `internal/alerts/store.go:17` |
 | CA-6 | OCSP fails **closed** when a cert lists responders and none answer; `VerifyConnection` re-checks resumed sessions. Caveats: nil-issuer → fail-open; OCSP client has no SSRF guard on the peer-controlled responder URL. | ✓ (+2 caveats) | L/M | `internal/ocsp/ocsp.go:177-181`, `ocsp.go:41-56`; caveats `ocsp.go:139-142,187-206` |
 | CA-7 | KEK-at-rest: rejects too-permissive/wrong-size files (never chmod-fixes, never silently regenerates), uses `os.Link` EEXIST to avoid racing mints, fails closed on decrypt error. | ✓ | — | `kek.go:174-239`, `cluster_ca_keyatrest.go:95-181` |
 | CA-8 | Session HMAC key is **random per-restart by default** (no env/config secret) → all admin sessions invalidated on every single-node restart. | GAP | M | `session.go:38-49`, `internal/session/session.go:80-86` |
 | CA-9 | Session HMAC runtime rotation / cluster sync is race-safe (lock-guarded set/read, hex+len validation before install, redacted on export). | ✓ | — | `internal/session/session.go:51-55,422-429`, `controlplane.go:1848-1862` |
 | CA-10 | Clock skew/rollback: sessions use wall-clock `time.Now()`; leaf certs backdate only 5 min (`ca.go:747`) vs the UI cert's 1h — >5 min skew makes fresh leaves "not yet valid" to clients. | GAP | M | `internal/session/session.go:408`, `internal/ca/ca.go:747` vs `internal/uitls/uitls.go:52` |
-| CA-11 | Leaf-cert cache has **no single-flight** — N concurrent misses for one host each sign independently; TTL expiry is synchronized (thundering herd). | GAP | M | `internal/ca/ca.go:656-694,650-651` |
+| CA-11 | Leaf-cert cache has **no single-flight** — N concurrent misses for one host each sign independently; TTL expiry is synchronized (thundering herd). | GAP (re-scoped by CHAOS-28: the perf-F3 shared leaf key removed the dominant per-miss cost — P-256 keygen — so the herd is materially cheaper than when first recorded) | M → L/M | `internal/ca/ca.go` `GetCert` |
+| CA-16 | Leaf-cache **`cacheOrder` slice grew on every TTL REFRESH** while the map entry was overwritten. `len(cache)` never changed, so the eviction branch never fired: an unbounded slice behind a bounded map, growing with UPTIME on an ordinary steady working set (W=5,000 hosts ⇒ ~120k strings/day). Invisible to `culvert_cert_cache_size`, which reports the bounded map. | NEW → **CLOSED** (CHAOS-28: append only for an untracked host; behavior-preserving for eviction — duplicate entries always resolved to "already gone") | M | was: `internal/ca/ca.go` `GetCert`; see §16 |
 | CA-12 | Upstream & client MITM handshakes inherit only `r.Context()` (no explicit handshake deadline); a slowloris handshake ties up the goroutine. Good: uses `HandshakeContext`, not `Handshake()`. | GAP | M | `proxy.go:1503,1591` |
-| CA-13 | Cluster CA rotation mirrors CA-2: every failure branch logs-and-returns with no alert/metric. Silent failure → cluster-wide enrollment break at expiry. | GAP | M | `enrollment.go:1189-1245` |
+| CA-13 | Cluster CA rotation mirrors CA-2: every failure branch logs-and-returns with no alert/metric. Silent failure → cluster-wide enrollment break at expiry. | GAP (**next sweep** — CHAOS-28 closed the inspection-CA half as CA-2; this is the same defect class in the OTHER CA, with a different lifecycle and blast radius) | M | `enrollment.go:1189-1245` |
 | CA-14 | Revocation persistence uses `os.WriteFile`+rename with **no fsync** (unlike the CA bundle's `AtomicWrite`) — a revoked token can be honored again after crash/disk-full. | GAP | L/M | `internal/session/session.go:272-276`, caller `session.go:106-108` |
 | CA-15 | CA loader **accepts a plain-PEM bundle even when a passphrase is set** (magic absent) — a downgrade footgun; logged, not alerted/rejected. | GAP (minor) | L | `internal/ca/ca.go:221-229` |
 
@@ -185,7 +254,9 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | WK-7 | Category DB (Badger) corruption: read errors → "not found" (fail-open for category-block, no crash); value-log truncate/replay on restart. | ✓ | — | `internal/catdb/catdb.go:37-50,84-100` |
 | WK-8 | **Background workers have NO panic recovery.** `threatfeed.Start`, `feedsync.Start`, blocklistfeed scheduler, `startCDRHealthPoller`, `startAlertRetryLoop` all run their loop body with no `recover()`. One panic (bad feed line, nil-map deref, a `.(time.Time)` assertion) **terminates the whole in-line proxy.** | GAP → **CLOSED (CHAOS-24)** | **C** | was: `threatfeed.go:131-145`, `feedsync.go:171-187`, `cdr_health.go:65-80`, `alerts.go:46`→`store.go:511`. Now guarded per ROUND — see §12 |
 | WK-9 | Syslog on the hot path: `writeMsg` holds `s.mu` and does a **blocking 5s dial** while locked; TCP writes have **no write deadline** → a slow SIEM can stall proxy goroutines. UDP is non-blocking (acceptable). | GAP → **CLOSED** (async drain goroutine owns the socket, `internal/syslog`) | M | `internal/syslog/syslog.go:117-146,68` |
-| WK-10 | Webhook alert delivery: never blocks the producer, 30s dedup, bounded semaphore (10) → enqueue not spawn, bounded retry (3× exp backoff), 500-cap queue drop-on-full, SSRF-guarded, atomic persist. | ✓ | — | `internal/alerts/store.go:298-343,392-500` |
+| WK-10 | Webhook alert delivery: never blocks the producer, 30s dedup, bounded semaphore (10) → enqueue not spawn, bounded retry (3× exp backoff), 500-cap queue drop-on-full, SSRF-guarded, atomic persist. | ✓ **for delivery**; the two bounds MISSING in front of delivery are CHAOS-27 → **CLOSED** (§15) | — | `internal/alerts/store.go` |
+| WK-11 | Alert **socket** cost: the delivery client was built per attempt, abandoning an `http.Transport` whose zero-value `IdleConnTimeout` never expires — one FD + two goroutines leaked per delivered alert. The semaphore bounds concurrent deliveries, not cumulative sockets. Terminal state: `accept: too many open files` in the PROXY plane. | GAP → **CLOSED** (CHAOS-27, shared pooled `deliveryClient`) | **H** | was: `internal/alerts/store.go` `deliverAttempt`; see §15 |
+| WK-12 | Alert **dedup bookkeeping**: unbounded map on an attacker-controlled key space (key embeds the requested host, same input `topHosts` is capped for), rescanned `O(n)` under a process-wide mutex on every dispatch (230,603 ns/op at the flood steady state, growing). Dedup runs *before* the semaphore and the retry queue, so neither bounds it. | GAP → **CLOSED** (CHAOS-27, 4096 cap + amortised prune + eviction counter) | **H** | was: `internal/alerts/store.go` `dedupSuppressed`; see §15 |
 | WK-11 | SSE slow client: non-blocking `select … default → close+evict`, 256-client cap, runs off the request path. | ✓ | — | `internal/sse/sse.go:66-78,46` |
 | WK-12 | YARA compile failure loads remaining rules (never disables engine); regex timeout + saturation cap with admin-selectable fail-closed/open posture + alerts. Residual: abandoned regex goroutines are counted but never cancelled (memory held until they finish). | ✓ (+leak caveat) | L/M | `internal/yara/yara.go:98-130,584-602,540` |
 | WK-13 | Ticker loops have **no jitter** + immediate sync-on-boot → fleet-wide thundering herd against public feeds (URLhaus/OpenPhish/NethServer mirror) on rollout and every interval. | GAP | M | `threatfeed.go:132-135`, `feedsync.go:173-176`, blocklistfeed 60s / cdr_health 15s |
@@ -804,3 +875,260 @@ in use, say) permanently ended a legacy standby's sync loop before this PR. The 
 second way in, and the review surfaced both. `TestChaos25_FailedPromoteKeepsTheLoopAlive` drives an
 error, then a contained panic, then a success, and fails against the old code at round 2
 (`loop exited before a promotion succeeded`).
+
+---
+
+## 15. CHAOS-27 — The alert plane under an alert storm
+
+**Date:** 2026-08-07 · **Closes:** WK-11, WK-12 · **Detail:**
+`docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-07.md`
+
+### 15.1 The shape of the miss
+
+WK-10 is not wrong. Webhook *delivery* is bounded four different ways — a 10-slot concurrency
+semaphore, a 3-attempt retry with exponential backoff, a 500-cap drop-on-full retry queue, and
+SSRF-guarded egress. What this pass asked is a different question: **what does the alert
+subsystem cost the appliance when the thing it reports on is happening at volume?**
+
+Two costs sat *in front of* every one of those bounds, so none of them applied.
+
+### 15.2 WK-11 — one leaked FD + two goroutines per delivered alert
+
+`deliverAttempt` constructed its client, and with it a fresh `http.Transport`, per attempt. On
+success the keep-alive connection went back into *that* Transport's idle pool — a pool nothing
+holds a reference to afterwards, that net/http does not finalize, and whose **zero-value
+`IdleConnTimeout` means "never expire"** (unlike `http.DefaultTransport`, which sets 90s). The
+`persistConn` read/write goroutines keep the Transport and the socket alive, so the connection
+survives until the **receiver** closes it. Culvert had no timer that would ever reclaim it.
+
+`webhookSem` does not bound this: it caps deliveries *in flight* (10), and says nothing about
+the sockets those slots opened over the preceding hour.
+
+The blast radius crosses planes. File descriptors are a process limit, so the alerting
+subsystem exhausts the descriptors the **proxy** needs to `accept(2)`. A subsystem whose only
+job is to report trouble becomes the cause of a data-plane outage, and the visible symptom
+(proxy refusing connections) points the operator at the wrong subsystem.
+
+Fixed with one shared pooled `deliveryClient` (`MaxIdleConns: 32`, `MaxIdleConnsPerHost: 4`,
+`IdleConnTimeout: 90s`), matching the pooled-client idiom already used in
+`internal/blocklistfeed` and `internal/otlp`. Per-attempt deadlines are unchanged.
+
+**Reuse does not weaken the SSRF guard.** `ssrf.SafeDialContext` runs on every *dial*, and a
+pooled connection is by definition one to an address that already passed `ssrf.Control`
+immediately before `connect(2)`; reuse cannot reach an address that was never validated. What
+it extends is how long a validated-then-rebound host stays reachable on an open socket —
+bounded by `IdleConnTimeout`, and strictly better than the pre-fix state where an abandoned
+pool's socket had *no* timeout at all.
+
+### 15.3 WK-12 — unbounded dedup map, rescanned per dispatch
+
+The Q17 dedup key is `event + ":" + detail`, and the request-path producers
+(`threat_detected`, `policy_block`) put the **requested host** in `Detail`. So a scan across
+50,000 hostnames produces 50,000 distinct keys that the window cannot suppress *by
+construction* — the same attacker-controlled input that `topHosts` (store.go) is already
+hard-capped at 10k for, with the same memory-DoS reasoning, unguarded here.
+
+Worse, the expiry scan ran on **every** dispatch, `O(len(map))`, under the process-wide
+`dedupMu`. Producers reach `Dispatch` via `go fireAlert(...)`, so a slow critical section does
+not stall the request path directly — it piles up *goroutines* waiting on the mutex instead.
+
+Measured at the flood steady state (`BenchmarkDedupSuppressedUnderFlood`, 4-core):
+**230,603 ns/op → 745 ns/op**, ≈310×, and the pre-fix number *grows with the map* while the
+post-fix number is flat. 0.23 ms of mutex-held work per alert is ~23% of a core serialized at
+only 100 alerts/s.
+
+Fixed with a 4096-key hard cap plus an amortised prune. The two costs are deliberately kept
+apart: the `O(len)` expiry scan runs at most once per 256 inserts (`pruneExpiredLocked`), while
+the cap is checked every insert but costs `O(entries over cap)` — one deletion at steady state
+(`evictOverCapLocked`). Coupling the cap to the scan would have fixed memory while leaving the
+CPU failure mode fully intact.
+
+**Eviction fails toward MORE alerts, never fewer.** Dropping a live key costs at most one
+duplicate delivery of an alert already firing, still bounded by the semaphore and the retry
+queue. Silencing a real security alert to save memory is not on the table for a security
+control.
+
+### 15.4 The 2026-07-26 residual, revisited
+
+That review already saw this trigger — a producer emitting unique `Detail` text per request —
+and accepted it because *"bounded by the store's 500-cap queue and 10-slot delivery
+semaphore."* That reasoning was correct about **delivery** and silently assumed the
+bookkeeping in front of delivery inherited the same bounds. It did not. The note still stands
+for delivery fan-out; the cost of the dedup pass is now bounded too, and counted.
+
+### 15.5 Observability
+
+Loss must not be silent: `dedup_evictions_total` + `dedup_tracked` on
+`GET /api/alerts/webhooks/history`, `culvert_alert_dedup_evictions_total` (counter) +
+`culvert_alert_dedup_tracked` (gauge) on `/metrics`, and an amber "dedup window saturated"
+state on the webhook health line in Settings. Non-zero evictions are themselves a useful
+signal: they are the signature of a scanning wave reaching the alert plane. OpenAPI
+`AlertHistory` extended and the bundle regenerated.
+
+WK-11 gets no counter by design — the leak is gone, and a gauge for a state that can no longer
+occur is noise.
+
+### 15.6 Regression gates (all verified to FAIL against the pre-fix code)
+
+| Gate | Property |
+|---|---|
+| `TestChaos27_DeliveryReusesConnections` | N sequential deliveries open ≤2 sockets (pre-fix: 8 for 8) |
+| `TestChaos27_DedupMapIsBounded` | 3× cap unique keys leave the map at ≤ cap (pre-fix: 12288), evictions counted |
+| `TestChaos27_DedupPruneIsAmortised` | scans ≤ inserts/256 + 1 — the CPU half, invisible to the memory gate |
+| `TestChaos27_DedupStillSuppressesDuplicates` | Q17 semantics intact |
+| `TestChaos27_DedupPrunesExpiredEntries` | a key past `dedupTTL` fires again — the cap never silences permanently |
+
+The connection-reuse gate builds its client through the **production constructor**
+(`newDeliveryTransport`) with a plain dialer substituted, because `ssrf.SafeDialContext`
+correctly refuses the loopback address an `httptest.Server` listens on. The pooling
+configuration under test is production's; only the dial target differs.
+
+### 15.7 Residual risk
+
+- `maxDedupEntries` / `dedupPruneEvery` are compile-time constants (the `topHosts` precedent).
+  Making them tunable would add a config surface, a durability row and a CP→DP question for a
+  value nobody has had cause to change. Deliberate deferral.
+- Eviction order is random (Go map iteration), not oldest-first. Under a flood every live entry
+  is inside the same 30s window, so ordering buys nothing for its cost.
+- Dedup is still keyed on `event:detail`, so a producer with unbounded `Detail` cardinality
+  still defeats *suppression* by design. The cap bounds the **cost** of that, not the
+  behaviour — now with an eviction counter that makes it visible.
+- Other per-call `http.Transport` sites were audited: `auth_oidc_flow.go` (once per provider
+  construction), `auth_saml.go` (metadata fetch), `internal/supportupload` (per upload), and
+  `internal/blocklistfeed` (per fetch, but with a 90s `IdleConnTimeout`, so it self-heals).
+  `internal/upstream`'s health check sets `DisableKeepAlives: true` and pools nothing. None is
+  on an attacker-driven rate path, so none is a WK-11-class leak; the blocklistfeed shape is
+  the one worth converging on the shared-client idiom opportunistically.
+- `webhookSem` is package-global, so all Stores in a process share the 10 slots. Production has
+  one Store; noted, not a defect.
+
+### 15.8 Review follow-up — the phantom saturation signal
+
+External review of the first cut (Codex, PR #1078) found a case where the two triggers disagree.
+The expiry prune is scheduled by **inserts** (`dedupPruneEvery`), but entries expire with **time**
+— and a quiet period has no inserts. So a flood that fills the map to the cap and then stops
+leaves 4096 entirely stale keys sitting there. The next alert to arrive:
+
+- finds the map over cap, and
+- evicts a random key and **charges it to `dedupEvicted`** — even though every entry is dead and
+  nothing is saturated. It could also evict the key it had just inserted, letting an immediate
+  duplicate through.
+
+That counter is monotonic and drives an amber "dedup window saturated" state in the admin UI, so
+one flood followed by silence produced a **permanently sticky, false degradation indicator** —
+defeating the exact observability contract §15.5 added it for. Worse than useless: it teaches the
+operator to ignore the signal.
+
+Fixed on both axes:
+
+- **Time-based prune trigger** on the over-cap path (`dedupPruneMinInterval`, 1s), so a map full
+  of stale keys is reclaimed before its size is read as saturation. Rate-limited, so a *sustained*
+  flood — where the scan would find nothing to reclaim — still does not pay `O(len)` per alert
+  (measured: 745 → 783 ns/op, still ~295× better than the 230,603 ns/op pre-fix baseline).
+- **Expired keys are deleted but never charged** (`evictOverCapLocked` compares each key's stamp
+  against `dedupTTL`). Dropping a dead key is reclamation, not saturation. This makes the counter
+  exact even inside the ≤1s window between an entry expiring and the next prune reclaiming it,
+  rather than merely approximately right.
+
+`evictOverCapLocked` also now skips the key just inserted, so the alert that triggered the
+eviction is never the one dropped.
+
+`TestChaos27_QuietPeriodCountsNoPhantomEvictions` drives the exact sequence — fill to cap, let the
+window pass, insert one key — and fails against the first cut (`charged 1 eviction(s) against a
+map holding only EXPIRED keys`). It asserts three things: no eviction charged, the fresh key
+survives, and the stale entries are actually reclaimed.
+
+Worth recording the general shape, because it is the same lesson as §12.2 and §14.8: **a
+correctness fix that is scheduled on one clock and validated on another will disagree with itself
+at the boundary.** The memory bound was right, the CPU bound was right, and the counter that made
+both observable was wrong in precisely the state — quiet after a storm — that an operator is most
+likely to be looking at it.
+
+---
+
+## 16. CHAOS-28 — The Root CA across its lifecycle (fail-closed)
+
+**Date:** 2026-08-09 · **Closes:** CA-1, CA-1b, CA-2, CA-16 · **Partly closes:** CA-4 ·
+**Re-scopes:** CA-11 · **Hands off:** CA-13
+**Full write-up:** `docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-09.md`
+
+### 16.1 Why this domain
+
+Every other security control in Culvert fails in a way the process can observe — a dial
+fails, a scanner times out, a write returns `ENOSPC`. The inspection CA is the exception:
+it expires, and *nothing inside the appliance changes*. The only entity that notices is
+the client, which reports it as a per-site certificate warning that reads like a website
+problem rather than a gateway problem. That is the definition of a silent failure, on the
+component whose failure is the widest.
+
+### 16.2 The five defects
+
+1. **Expired CA kept signing.** `x509.CreateCertificate` does not check the parent's
+   `NotBefore`/`NotAfter` — verified empirically by running the new gate against the
+   pre-fix engine, where the sign succeeded. `handleTunnel` did not help either: its gate
+   is `certMgr.Ready()`, which is `caCert != nil`, so an expired CA is "ready".
+2. **Leaf validity was not clamped to the issuer's** (`NotAfter: now+24h`, unconditional).
+3. **A rotation that could not persist reported success** (CA-2) — so the only recovery
+   path defect 1 has could silently not survive a restart, minting a different root each boot.
+   Three sub-defects, all surfaced in PR review: the SUCCESS observer fired even when the save
+   failed (two contradictory alerts for one event, plus a false `culvert_ca_rotations_total`
+   increment); the warning was keyed on the CUMULATIVE counter, so it latched until process
+   restart even after the operator fixed the volume and re-rotated; and the MANUAL
+   force-rotate path (`apiCARotate`) had the identical swallowed save — the worse of the two
+   sites, since force-rotate is exactly what an operator runs to recover from defect 1.
+4. **The rotation loop's first check was 24h after boot** (CA-4) — skipped precisely when
+   an operator restarts to recover from the outage.
+5. **`cacheOrder` grew on every TTL refresh** (CA-16, previously unrecorded) — an unbounded
+   slice behind a bounded map, growing with uptime on an ordinary steady working set.
+
+### 16.3 The decision that mattered: fail closed, not bypass
+
+The tempting fix is one word — fold validity into `Ready()`. That routes an expired CA into
+the existing `inspect_unavailable` **bypass** branch and keeps traffic flowing. It also means
+that at the instant the CA expires, **the whole fleet silently stops inspecting**: DLP,
+ClamAV, YARA, CDR, file-blocking and DPI all dark, at once, with the gateway reporting itself
+healthy. That is trading an availability failure for a security-control failure, and it is the
+exact §1 theme this register calls its worst.
+
+The same reasoning rules out honouring a decryption profile's `OnInspectError=fail-open`. That
+contract is scoped to **per-origin** incompatibility and gated behind a confirm-count of
+distinct client evidence for exactly that reason. An expired CA is **host-independent**:
+routing it through the learner would promote every host requested during the outage into a
+durable bypass — poisoning the entire cache from one appliance-level fault.
+
+So the unusable-CA path **never bypasses, never learns, never rescues**, and the negative
+assertion is executable: `TestHandleTunnel_ExpiredCAFailsClosedNotBypass` fails if the session
+is ever recorded as any flavour of bypass instead of
+`failed`/`no_fail_open_502`/`client_hello`/`certificate`.
+
+Failing closed costs no availability relative to the pre-fix state — a leaf chained to an
+expired issuer already fails path validation in every mainstream client. The traffic was dead
+either way. What changed is that the appliance now knows, says so, and names the remediation.
+
+### 16.4 Observability added
+
+| Surface | Signal |
+|---|---|
+| `/metrics` | `culvert_ca_usable`, `culvert_ca_expires_in_seconds` (omitted when no CA — 0 would read as "expires now"), `culvert_ca_sign_refused_total`, `culvert_ca_inspect_blocked_total`, `culvert_ca_rotation_persist_failures_total` |
+| `/healthz` | `ssl_inspection: expired` (was `ready` throughout the outage) |
+| `/readyz` | `ca` row → `fail`, **report-only** by default (an expired CA is fleet-wide; gating would eject every node at once and take working plain-HTTP/bypass traffic with it). `?strict=1` opts in. Fixed detail string — the surface is unauthenticated on the proxy port |
+| Alerts | `cert_expiry`, rate-limited (5 min) on an independent gate from the log line, `HasSubscriber`-gated per the per-request producer contract |
+| Admin API / GUI | `GET /api/ca/status` gains `usable` / `unusableReason` / `inspectBlocked` / `signRefused` / `rotationPersistFailures`; the CA panel gains a red outage banner and an amber not-persisted banner |
+
+Recovery is reported on **evidence** (an observed usable verification via
+`caInspectionUsable`), never on elapsed time — the `storage_health.go` contract, for the same
+reason: a still-expired CA looks exactly like a healthy one if nothing happens to need a leaf.
+
+### 16.5 What is deliberately left
+
+- **CA-13** — cluster-CA rotation still logs-and-returns on every failure branch. Same defect
+  class as CA-2 in the *other* CA; different lifecycle and blast radius (enrollment, not
+  inspection). Suggested as the next sweep.
+- **CA-11** — no single-flight on the leaf cache. Re-scoped down: the perf-F3 shared leaf key
+  already removed the dominant per-miss cost (P-256 keygen), so the herd is much cheaper than
+  when first recorded.
+- **CA-4's retry half** — a rotation that FAILS still waits a full 24h before retrying.
+- **Client trust redistribution stays manual.** Rotation restores the appliance's ability to
+  inspect; it cannot make clients trust a new root. Nothing in-band can. That is why this
+  change invests most heavily in making the condition visible *before* the cliff
+  (`culvert_ca_expires_in_seconds`) rather than only at it.

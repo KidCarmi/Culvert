@@ -25,7 +25,10 @@ package alerts
 //   "scan_skipped"          — response body exceeds scan size limit, forwarded unscanned
 //   "upstream_pool_down"    — all parent proxies down: egress failing open to DIRECT (chain bypassed, CHAOS-11)
 //   "storage_write_failed"  — a durable write to the data directory failed: persisted state is being lost (CHAOS-45)
-//   "idp_unreachable"       — external identity backend (LDAP/OIDC) unreachable: authentication failing closed (CHAOS-47)
+//   "identity_backend_unreachable" — external identity backend (LDAP/OIDC) unreachable: authentication failing closed (CHAOS-47).
+//                             Deliberately not "idp_unreachable" — Culvert's "IdP" vocabulary is reserved for the
+//                             federated Identity Provider registry (auth_idp.go, the "Identity Providers" GUI panel),
+//                             a distinct, uncached subsystem (CHAOS-49) this alert does not cover.
 //   "state_file_corrupt"    — corrupt state file quarantined at startup (CHAOS-05/07)
 //   "cluster_node_reenrolled" — expired-but-registered node re-enrolled with a fresh token (CHAOS-12)
 //   "ha_sync_panic"         — a standby HA sync round panicked and was contained: state replication
@@ -46,6 +49,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -67,6 +71,27 @@ var webhookSem = make(chan struct{}, 10)
 // dedupTTL is the window within which duplicate event+detail alerts are
 // suppressed (Q17).
 const dedupTTL = 30 * time.Second
+
+const (
+	// maxDedupEntries hard-caps the Q17 dedup map (CHAOS-27). The key embeds
+	// the alert Detail, which on the request path carries the attacker-chosen
+	// host, so the key space is attacker-controlled — the same reason topHosts
+	// is capped. 4096 keys × 30s covers any realistic legitimate alert rate.
+	maxDedupEntries = 4096
+	// dedupPruneEvery amortises the O(len) expiry scan: it used to run on
+	// every dispatch while holding the process-wide dedup mutex.
+	dedupPruneEvery = 256
+	// dedupPruneMinInterval bounds how often the over-cap path may fall back
+	// to that scan. The insert-counted schedule above cannot see a QUIET
+	// period — entries expire with time, not with inserts — so the cap check
+	// needs a time-based trigger too, rate-limited so a sustained flood does
+	// not pay the scan per alert. One O(cap) scan per second is ~40µs.
+	dedupPruneMinInterval = time.Second
+)
+
+// dedupEvicted counts dedup keys dropped by the cap, so a flooded alert key
+// space is visible to operators instead of silently degrading suppression.
+var dedupEvicted atomic.Int64
 
 // ValidateURL checks that a webhook URL is well-formed (http/https with a
 // non-empty host). Unlike main's validateExternalURL, it does not perform DNS
@@ -153,8 +178,20 @@ type Store struct {
 	// (pre-extraction it was package-global in main; production has a single
 	// store, so behavior is unchanged — and tests that swap in a fresh store
 	// automatically get a fresh dedup window).
-	dedupMu  sync.Mutex
-	dedupMap map[string]time.Time
+	//
+	// CHAOS-27: the key embeds Detail, which for the request-path producers
+	// (threat_detected / policy_block) carries the attacker-supplied host, so
+	// the key space is attacker-controlled and the map is bounded by
+	// maxDedupEntries. dedupSincePrune amortises the O(len) expiry scan.
+	dedupMu         sync.Mutex
+	dedupMap        map[string]time.Time
+	dedupSincePrune int
+	dedupLastPrune  time.Time
+	// dedupPruneRuns counts O(len) expiry scans. It exists so the amortisation
+	// contract is testable: a regression that restores the scan-every-dispatch
+	// behaviour is a memory-safe change that silently reintroduces the CPU
+	// failure mode, and only this counter distinguishes the two.
+	dedupPruneRuns int
 }
 
 // RecordDelivery appends a delivery record to the in-memory history ring.
@@ -180,6 +217,64 @@ func (as *Store) DeliveryHistory() []Delivery {
 	return cp
 }
 
+// legacyEventNames maps a retired event name to its current replacement, so a
+// webhook subscribed under the old name keeps firing after the rename instead
+// of silently losing its subscription (see the "threat_detected" precedent in
+// the event catalog above, which chose to keep an outdated name rather than
+// break subscriptions — this achieves the same non-breaking outcome while
+// still letting the wire name read correctly).
+var legacyEventNames = map[string]string{
+	"idp_unreachable": "identity_backend_unreachable",
+}
+
+// normalizeEventNames rewrites retired event names to their current
+// replacements. It is applied at EVERY ingress into the store — Init (disk),
+// Add and Update (admin API, config import) — because a subscription that
+// misses the rename is not a cosmetic defect: HasSubscriber compares names
+// exactly, so the webhook stops firing, the admin UI stops recognizing the
+// checked box, and the failure mode is a security alert that silently never
+// arrives. Detection loss is the one kind of loss an operator cannot notice.
+//
+// Migrating only on load is not enough, because disk is not the only ingress:
+//
+//   - `POST /api/config/import` reconstructs webhooks through Add. A config
+//     exported before the rename — the exact artifact a disaster-recovery
+//     restore or an upgrade rehearsal replays — carries the retired name, and
+//     without normalization here it is written straight back into the live
+//     store, permanently unsubscribed.
+//   - `POST/PUT /api/alerts/webhooks` accepts whatever event list the caller
+//     sends. Operator automation written against the documented pre-rename
+//     name would silently unsubscribe itself on its next apply.
+//
+// The mapping is one-way and closed: it can only carry a subscription forward
+// to the SAME event under its current name. It never adds an event the caller
+// did not ask for and never removes one, so it cannot widen or narrow what a
+// webhook receives.
+//
+// Duplicates that the migration itself creates (a hook listing both the
+// retired and the current name) are collapsed, order-preserving, so List and
+// the admin UI show one checkbox rather than two aliases of one event.
+// Dispatch already stops at the first match, so this changes no delivery
+// behaviour — only what the operator sees.
+func normalizeEventNames(events []string) []string {
+	if len(events) == 0 {
+		return events
+	}
+	out := make([]string, 0, len(events))
+	seen := make(map[string]struct{}, len(events))
+	for _, ev := range events {
+		if renamed, ok := legacyEventNames[ev]; ok {
+			ev = renamed
+		}
+		if _, dup := seen[ev]; dup {
+			continue
+		}
+		seen[ev] = struct{}{}
+		out = append(out, ev)
+	}
+	return out
+}
+
 // Init sets the persistence path and loads any persisted webhooks.
 func (as *Store) Init(path string) {
 	as.filePath = path
@@ -198,6 +293,14 @@ func (as *Store) Init(path string) {
 	if err := json.Unmarshal(data, &as.hooks); err != nil {
 		obs.Printf("AlertStore: parse %s: %v", path, err)
 		return
+	}
+	// Event-name migration: a webhook persisted before an alert event was
+	// renamed must keep firing under its new name (see normalizeEventNames).
+	// Migrated in memory on every load — like the legacy-cleartext-secret
+	// migration below, this does not force an immediate resave; the next
+	// legitimate mutation persists the new name.
+	for i := range as.hooks {
+		as.hooks[i].Events = normalizeEventNames(as.hooks[i].Events)
 	}
 	// RISK-003: secrets are AES-GCM encrypted at rest. Decrypt into the
 	// in-memory cleartext form used for HMAC signing. Legacy cleartext (no
@@ -335,7 +438,13 @@ func (as *Store) HasSubscriber(event string) bool {
 }
 
 // Add stores a new webhook and returns it (secret redacted).
+//
+// Retired event names are migrated on the way in (normalizeEventNames): this
+// is the ingress used by both the admin API and `POST /api/config/import`, so
+// a pre-rename config export replayed by a restore keeps its subscription
+// instead of coming back permanently unsubscribed.
 func (as *Store) Add(h Webhook) Webhook {
+	h.Events = normalizeEventNames(h.Events)
 	h.ID = fmt.Sprintf("%d", time.Now().UnixNano())
 	as.mu.Lock()
 	as.hooks = append(as.hooks, h)
@@ -349,7 +458,12 @@ func (as *Store) Add(h Webhook) Webhook {
 
 // Update replaces the webhook with the given ID. An empty Secret in upd
 // preserves the existing secret.
+//
+// Retired event names are migrated on the way in (normalizeEventNames), so an
+// API client still sending a pre-rename name does not silently unsubscribe the
+// hook it is editing.
 func (as *Store) Update(id string, upd Webhook) bool {
+	upd.Events = normalizeEventNames(upd.Events)
 	as.mu.Lock()
 	persist, ok := noopSave, false
 	for i := range as.hooks {
@@ -453,25 +567,127 @@ func (as *Store) Dispatch(event string, payload Payload) {
 }
 
 // dedupSuppressed records the dedup key and reports whether an identical
-// event+detail fired within dedupTTL (Q17). Stale entries are pruned on
-// every pass to cap map growth.
+// event+detail fired within dedupTTL (Q17).
+//
+// CHAOS-27: the dedup key is "event:detail", and the request-path producers
+// put the requested host in Detail — so a scanning flood against thousands of
+// distinct hosts produces thousands of DISTINCT keys that the window cannot
+// suppress by construction. Two properties therefore have to hold under that
+// load, and neither did:
+//
+//   - Bounded memory. Growth was limited only by (alert rate × dedupTTL), on
+//     the same attacker-controlled key space that topHosts (store.go) is
+//     already hard-capped for.
+//   - Bounded CPU. The expiry scan ran on EVERY dispatch, O(len(map)) under a
+//     process-wide mutex — quadratic in the flood, with every other alert
+//     producer blocked behind the lock.
+//
+// The scan is now amortised (at most once per dedupPruneEvery inserts) and
+// the map is hard-capped by a separate O(over-cap) eviction. Eviction fails
+// toward MORE deliveries, never fewer: dropping a live key can only cost one
+// extra delivery of a duplicate, and that fan-out is still bounded by the
+// 10-slot delivery semaphore and the 500-cap retry queue. Silencing a real
+// alert to save memory would be the wrong trade for a security control.
 func (as *Store) dedupSuppressed(dedupKey string) bool {
 	as.dedupMu.Lock()
 	defer as.dedupMu.Unlock()
 	if as.dedupMap == nil {
 		as.dedupMap = map[string]time.Time{}
 	}
-	if last, ok := as.dedupMap[dedupKey]; ok && time.Since(last) < dedupTTL {
+	now := time.Now()
+	if last, ok := as.dedupMap[dedupKey]; ok && now.Sub(last) < dedupTTL {
 		return true
 	}
-	as.dedupMap[dedupKey] = time.Now()
-	// Prune stale entries (cap map growth).
+	as.dedupMap[dedupKey] = now
+	as.dedupSincePrune++
+	// Two different costs, deliberately kept apart. The expiry scan is O(len)
+	// and runs on a schedule; the cap is enforced every insert but costs only
+	// O(number over cap) — which, once the map is full, is one deletion. A
+	// single check of `len > cap` calling the O(len) scan would have made a
+	// sustained flood pay a full scan PER alert: bounded memory, but the same
+	// quadratic CPU under the same process-wide mutex.
+	if as.dedupSincePrune >= dedupPruneEvery {
+		as.pruneExpiredLocked(now)
+	}
+	if len(as.dedupMap) > maxDedupEntries {
+		// Over cap. Before charging an eviction, make sure the excess is LIVE.
+		// The prune schedule counts INSERTS but entries expire with TIME, and a
+		// quiet period has no inserts — so a map left full by a finished flood
+		// sits there entirely stale, and evicting from it would fabricate a
+		// saturation signal on a monotonic counter (and could drop the key just
+		// inserted). Rate-limited by time so a SUSTAINED flood, where the scan
+		// finds nothing to reclaim, still does not pay O(len) per alert.
+		if now.Sub(as.dedupLastPrune) >= dedupPruneMinInterval {
+			as.pruneExpiredLocked(now)
+		}
+		as.evictOverCapLocked(now, dedupKey)
+	}
+	return false
+}
+
+// pruneExpiredLocked drops keys older than dedupTTL and re-arms both prune
+// triggers. O(len); amortised by the caller. Caller holds dedupMu.
+func (as *Store) pruneExpiredLocked(now time.Time) {
+	as.dedupPruneRuns++
+	as.dedupSincePrune = 0
+	as.dedupLastPrune = now
 	for k, t := range as.dedupMap {
-		if time.Since(t) > dedupTTL {
+		if now.Sub(t) > dedupTTL {
 			delete(as.dedupMap, k)
 		}
 	}
-	return false
+}
+
+// evictOverCapLocked enforces maxDedupEntries. Expiry alone is rate-bound,
+// not size-bound: a fast enough flood adds keys faster than dedupTTL retires
+// them. The caller guarantees the map has been pruned recently, so anything
+// evicted here is a LIVE key and the eviction counter means what it says.
+//
+// keep is the key just inserted, skipped so the alert that triggered this
+// call is never the one dropped. Go randomises map iteration order, so the
+// rest is a random eviction and not an oldest-first one — under a flood every
+// live entry is inside the same 30s window anyway, and the cost of evicting
+// the wrong one is one duplicate delivery, never a missed alert.
+//
+// A key that has already expired is deleted but NOT charged: it was dead, so
+// dropping it is reclamation, not saturation. That keeps the counter exact
+// even in the window between an entry expiring and the next prune reclaiming
+// it, so `dedup_evictions_total` only ever means "live keys arrived faster
+// than the window could hold them". Caller holds dedupMu.
+func (as *Store) evictOverCapLocked(now time.Time, keep string) {
+	over := len(as.dedupMap) - maxDedupEntries
+	if over <= 0 {
+		return
+	}
+	deleted, charged := 0, 0
+	for k, t := range as.dedupMap {
+		if k == keep {
+			continue
+		}
+		delete(as.dedupMap, k)
+		deleted++
+		if now.Sub(t) <= dedupTTL {
+			charged++
+		}
+		if deleted >= over {
+			break
+		}
+	}
+	dedupEvicted.Add(int64(charged))
+}
+
+// DedupEvictionsTotal reports how many dedup keys were evicted by the
+// CHAOS-27 cap. Non-zero means the alert key space is being flooded (a
+// scanning/beaconing wave, or a producer emitting unique Detail text per
+// request) and that duplicate suppression is degraded — alerts may be
+// delivered more than once per window, never fewer.
+func DedupEvictionsTotal() int64 { return dedupEvicted.Load() }
+
+// DedupTracked reports how many dedup keys are currently held (≤ the cap).
+func (as *Store) DedupTracked() int {
+	as.dedupMu.Lock()
+	defer as.dedupMu.Unlock()
+	return len(as.dedupMap)
 }
 
 // ResetDedupForTest clears the Q17 dedup window so a test can fire the same
@@ -490,6 +706,54 @@ func (as *Store) ResetDedupForTest() {
 // go/request-forgery (CodeQL treats regexp.MatchString on the tainted value
 // as a sanitiser in both branches).
 var validWebhookURL = regexp.MustCompile(`^https?://[^/]`)
+
+// ── Delivery client (CHAOS-27) ────────────────────────────────────────────────
+//
+// ONE shared, pooled client for every webhook delivery. It used to be built
+// per attempt, inside deliverAttempt:
+//
+//	client := &http.Client{Timeout: 5s, Transport: &http.Transport{DialContext: ...}}
+//
+// which is the documented net/http footgun. After a successful POST the
+// keep-alive connection is returned to that Transport's idle pool — a pool
+// nothing holds a reference to any more, whose zero-value IdleConnTimeout
+// means "never expire", and which net/http does not finalize. Its persistConn
+// read/write goroutines keep the Transport (and the socket) alive until the
+// PEER decides to close. So every delivered alert cost one FD and two
+// goroutines, held for as long as the receiver tolerated an idle connection.
+//
+// The P4 semaphore did not bound this: it caps CONCURRENT deliveries (10),
+// not CUMULATIVE sockets. Neither did the Q17 dedup window, because its key
+// embeds the attacker-supplied host (see dedupSuppressed). A scanning flood
+// against a deployment with a webhook configured is therefore a slow FD leak
+// in the alerting plane that ends in `accept: too many open files` in the
+// PROXY plane — the alert path taking down the data path, and worst exactly
+// when alert volume peaks, i.e. while under attack.
+//
+// Reuse does not weaken the SSRF guard. ssrf.SafeDialContext runs on every
+// DIAL, and a pooled connection is a connection to an address that already
+// passed the check; reuse cannot reach an address that was never validated.
+// IdleConnTimeout bounds how long a validated-then-rebound host stays
+// reachable, matching the pooled clients already used for feed and OTLP
+// egress (internal/blocklistfeed, internal/otlp).
+func newDeliveryTransport(dial func(context.Context, string, string) (net.Conn, error)) *http.Transport {
+	return &http.Transport{
+		DialContext:           dial,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          32,
+		MaxIdleConnsPerHost:   4,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: time.Second,
+	}
+}
+
+// deliveryClient is the process-wide webhook delivery client. The per-attempt
+// deadline is unchanged: 5s here plus the caller's request context.
+var deliveryClient = &http.Client{
+	Timeout:   5 * time.Second,
+	Transport: newDeliveryTransport(ssrf.SafeDialContext),
+}
 
 // Deliver performs one delivery attempt (attempt=1) and records the result.
 // Exposed for main's webhook-test admin endpoint; Dispatch and the retry
@@ -538,13 +802,11 @@ func (as *Store) deliverAttempt(h Webhook, payload Payload, attempt int) bool {
 		mac.Write(body)
 		req.Header.Set("X-Culvert-Signature", "sha256="+hex.EncodeToString(mac.Sum(nil)))
 	}
-	// SSRF defence-in-depth: ssrf.SafeDialContext resolves DNS and rejects
-	// connections to private/loopback IPs at the dial level.
-	client := &http.Client{
-		Timeout:   5 * time.Second,
-		Transport: &http.Transport{DialContext: ssrf.SafeDialContext},
-	}
-	resp, err := client.Do(req)
+	// SSRF defence-in-depth: the shared client dials through
+	// ssrf.SafeDialContext, which resolves DNS and rejects connections to
+	// private/loopback IPs at the dial level (CHAOS-27: shared, not per
+	// attempt — see deliveryClient).
+	resp, err := deliveryClient.Do(req)
 	if err != nil {
 		obs.Printf("Alert webhook %q: delivery error: %v", h.Name, err)
 		record.Error = err.Error()

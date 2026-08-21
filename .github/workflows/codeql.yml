@@ -89,7 +89,14 @@ jobs:
 
       # Initialise CodeQL tooling — must happen before the build.
       - name: Initialise CodeQL
-        uses: github/codeql-action/init@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v3
+        # MUST stay on the same revision as analyze/upload-sarif below: the
+        # CodeQL action refuses to run a database initialised by a different
+        # version ("Loaded a configuration file for version X, but running
+        # version Y") and reports it as a CONFIGURATION ERROR, which is a
+        # silent loss of SAST coverage rather than a finding. Dependabot
+        # updates these three as separate ecosystems, so a bump can land on
+        # one and not the others; codeql_action_pin_test.go pins them equal.
+        uses: github/codeql-action/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v3
         with:
           languages: go
           # Use the extended security-and-quality query suite for maximum coverage.
@@ -101,7 +108,7 @@ jobs:
         run: CGO_ENABLED=0 go build -o /dev/null .
 
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@f205ea1c3313d32999d8d6a48b4f6530d4437b38 # v3
+        uses: github/codeql-action/analyze@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v3
         with:
           category: codeql-go
           # Separate upload step handles graceful failure for repos without
@@ -111,7 +118,7 @@ jobs:
 
       - name: Upload SARIF results
         continue-on-error: true   # skip gracefully if code scanning is not enabled
-        uses: github/codeql-action/upload-sarif@f205ea1c3313d32999d8d6a48b4f6530d4437b38 # v3
+        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v3
         with:
           sarif_file: sarif-results/go.sarif
           category: codeql-go

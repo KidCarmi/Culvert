@@ -1492,23 +1492,41 @@ env_put() {
     warn "Set $var manually in $file if you need it, then restart the stack."
     return 0
   fi
-  touch "$file"; chmod 600 "$file"
-  sed -i 's/\r$//' "$file" 2>/dev/null || true # normalize to LF so compose parses cleanly
-  # grep -v exits 1 (not just erroring) whenever EVERY line matched the
-  # pattern being dropped — including the common case where $file contains
-  # only this one VAR=... line. Treat ONLY that "no lines survived" case (1)
-  # as benign and promote the filtered file; a real error (e.g. ENOSPC while
-  # writing $file.tmp) gets a higher exit code and must NOT clobber the
-  # existing $file with a truncated/empty temp file.
-  local rc=0
-  grep -vE "^${var}=" "$file" > "$file.tmp" 2>/dev/null && rc=0 || rc=$?
-  if [[ $rc -eq 0 || $rc -eq 1 ]]; then
-    mv "$file.tmp" "$file"
-  else
-    rm -f "$file.tmp"
-  fi
-  printf '%s=%s\n' "$var" "$val" >> "$file"
-  chmod 600 "$file"
+  # The full read (grep) / write (mv|rm) / append sequence below must run as
+  # ONE atomic transaction — install.sh is designed to be safely re-run
+  # against an existing deployment (e.g. an automation retry racing a
+  # still-running instance, or two admins running it at once), and two
+  # concurrent env_put calls both reading "$file" before either has written
+  # it back can otherwise interleave: whichever "mv" runs LAST wins
+  # unconditionally, silently discarding the other invocation's already-
+  # applied update (a lost-update race — unique-per-invocation staging files
+  # alone stop the two calls' writes from colliding, but not their reads
+  # and writes from interleaving with each other). A dedicated lock file
+  # (not $file itself, which gets replaced out from under an flock held on
+  # its old inode by the very "mv" below) held for the whole transaction
+  # serializes concurrent env_put calls against the same $file into a strict
+  # queue, so this reasons about $file exactly as a sequential caller would.
+  (
+    flock -x 9
+    touch "$file"; chmod 600 "$file"
+    sed -i 's/\r$//' "$file" 2>/dev/null || true # normalize to LF so compose parses cleanly
+    # grep -v exits 1 (not just erroring) whenever EVERY line matched the
+    # pattern being dropped — including the common case where $file contains
+    # only this one VAR=... line. Treat ONLY that "no lines survived" case (1)
+    # as benign and promote the filtered file; a real error (e.g. ENOSPC
+    # while writing $tmp) gets a higher exit code and must NOT clobber the
+    # existing $file with a truncated/empty temp file.
+    tmp="$(mktemp "${file}.XXXXXX" 2>/dev/null)" || tmp="${file}.tmp.$$"
+    rc=0
+    grep -vE "^${var}=" "$file" > "$tmp" 2>/dev/null && rc=0 || rc=$?
+    if [[ $rc -eq 0 || $rc -eq 1 ]]; then
+      mv "$tmp" "$file"
+    else
+      rm -f "$tmp"
+    fi
+    printf '%s=%s\n' "$var" "$val" >> "$file"
+    chmod 600 "$file"
+  ) 9>"$file.lock"
 }
 
 gen_passphrase() {
@@ -1519,6 +1537,38 @@ gen_passphrase() {
   printf '%s' "$p"
 }
 
+# validate_passphrase_for_env_file LABEL PASS — enforces the same length +
+# character-safety contract on a passphrase regardless of where it came from
+# (operator-typed or host-env-supplied) before it is ever written to .env.
+# Exits via error() on failure; returns silently on success.
+validate_passphrase_for_env_file() {
+  local label="$1" pass="$2"
+  # This passphrase is PBKDF2-SHA256'd (600k iterations, internal/ca/ca.go)
+  # straight into the AES-256-GCM key that protects the SSL-inspection Root
+  # CA private key and saved request logs — a short passphrase is brute-
+  # forceable regardless of the iteration count. gen_passphrase's
+  # auto-generated default is 40 characters; require anything else supplied
+  # to be long enough to meaningfully resist an offline attack.
+  if [[ "${#pass}" -lt 12 ]]; then
+    error "$label too short (${#pass} characters) — must be at least 12. This encrypts the SSL-inspection CA key and saved logs at rest, so it must resist offline brute-force."
+  fi
+  # The passphrase is stored in .env, which docker compose interpolates
+  # ($VAR), treats # as a comment, etc. Restrict to characters that survive
+  # that round-trip intact so the value reaching the container is exact — a
+  # raw "$" is the sharpest edge here: Compose treats "$Foo" in a .env value
+  # as ITS OWN variable reference and can resolve it to something else
+  # entirely (often empty, under the very same sudo-reset environment this
+  # whole function works around), silently storing a different passphrase
+  # than the one supplied.
+  # -z/--null-data makes grep match the WHOLE value as one record: without it
+  # a value with an embedded newline whose individual lines are each charset-
+  # clean would pass, and env_put would then append it as a second, malformed
+  # .env line, silently corrupting the persisted passphrase (Codex, PR #1156).
+  if printf '%s' "$pass" | LC_ALL=C grep -qz '[^A-Za-z0-9._@%^!*()+=:,-]'; then
+    error "$label has characters unsafe for the .env file. Use letters, digits, and simple punctuation (no \$, quotes, backslash, #, /, newlines, or spaces)."
+  fi
+}
+
 # Encrypts data at rest (AES-256), value(s) stored in $INSTALL_DIR/.env which
 # docker-compose.yml reads as ${CULVERT_*_PASSPHRASE:-}. We never overwrite an
 # existing value. On a FRESH deployment (no data volume yet) we can safely also
@@ -1527,12 +1577,98 @@ gen_passphrase() {
 # leave the CA passphrase to the operator.
 setup_at_rest_encryption() {
   local envfile="$INSTALL_DIR/.env"
-  if secret_already_set CULVERT_LOG_PASSPHRASE "$envfile" || secret_already_set CULVERT_CA_PASSPHRASE "$envfile"; then
+
+  # A host-environment-only CULVERT_LOG_PASSPHRASE (exported by an automated,
+  # non-interactive install) has the same failure shape the CA branch below
+  # guards against: secret_already_set() counts it as "configured", but §7
+  # starts the stack with plain `sudo docker compose up` (no `-E`), which does
+  # not forward this shell's environment — so the value never reaches compose's
+  # ${VAR:-} substitution and saved-log encryption silently runs with an empty
+  # passphrase. Persist it into .env FIRST (env_put never overwrites an
+  # existing .env value, so an on-disk operator value still wins), with the
+  # same whole-value charset guard (grep -z: an embedded newline must not
+  # split into per-line checks and then corrupt .env — Codex review, PR #1156).
+  # Fail-closed via the shared validator — the same floor and charset contract
+  # the interactive choice-2 path enforces on an operator-typed passphrase; a
+  # host-env value is equally operator-supplied, and warn-and-continue here
+  # would run the install with the operator's encryption intent silently
+  # dropped.
+  if [[ -n "${CULVERT_LOG_PASSPHRASE:-}" ]] && ! grep -Eq '^CULVERT_LOG_PASSPHRASE=.+' "$envfile" 2>/dev/null; then
+    validate_passphrase_for_env_file "CULVERT_LOG_PASSPHRASE" "$CULVERT_LOG_PASSPHRASE"
+    env_put CULVERT_LOG_PASSPHRASE "$CULVERT_LOG_PASSPHRASE" "$envfile"
+  fi
+
+  local log_set=0 ca_set=0
+  secret_already_set CULVERT_LOG_PASSPHRASE "$envfile" && log_set=1
+  secret_already_set CULVERT_CA_PASSPHRASE "$envfile" && ca_set=1
+
+  # CA passphrase already set: nothing left for this function to do (we never
+  # overwrite an existing value, and a set CA passphrase means at-rest
+  # encryption was already decided one way or another).
+  if [[ "$ca_set" == 1 ]]; then
+    # secret_already_set() treats a host-environment-only value (e.g.
+    # exported by an automated, non-interactive install before running this
+    # script) as "already configured" too — but §7 below starts the stack
+    # with plain `sudo docker compose up` (no `-E`), which does NOT forward
+    # this shell's environment to the child process. A CULVERT_CA_PASSPHRASE
+    # that lives only here and never makes it into .env is silently dropped:
+    # docker compose resolves it to empty and the proxy persists its Root CA
+    # private key UNENCRYPTED — the same "proxy recreates with an empty
+    # passphrase" failure carry_forward_prior_secrets() above guards against
+    # for a different trigger. Persist it now (same $-interpolation safety
+    # guard as the reuse-for-CA branch below) so it actually survives.
+    # Fail-closed via the shared validator (12-char floor + whole-value charset
+    # check) — the same contract the interactive choice-2 path enforces, so an
+    # operator's explicit encryption intent is never silently dropped into an
+    # unencrypted-CA install (the earlier warn-and-skip posture contradicted
+    # the interactive path's error on the identical input).
+    if [[ -n "${CULVERT_CA_PASSPHRASE:-}" ]] && ! grep -Eq '^CULVERT_CA_PASSPHRASE=.+' "$envfile" 2>/dev/null; then
+      validate_passphrase_for_env_file "CULVERT_CA_PASSPHRASE" "$CULVERT_CA_PASSPHRASE"
+      env_put CULVERT_CA_PASSPHRASE "$CULVERT_CA_PASSPHRASE" "$envfile"
+    fi
     info "Encryption passphrase already configured — keeping existing values."
     return
   fi
 
   local fresh=0; is_fresh_deployment && fresh=1
+
+  # On an EXISTING deployment, a pre-set log passphrase is the full contract
+  # (the CA passphrase is deliberately left to the operator — see above).
+  if [[ "$log_set" == 1 && "$fresh" != 1 ]]; then
+    info "Encryption passphrase already configured — keeping existing values."
+    return
+  fi
+
+  # Fresh deployment with a log passphrase already set (e.g. exported in the
+  # host env by an automated install, or left over from an interrupted prior
+  # run) but no CA passphrase yet: reuse the existing log passphrase for the
+  # CA key rather than silently leaving the SSL-inspection CA private key
+  # unencrypted with no warning at all.
+  if [[ "$log_set" == 1 && "$ca_set" != 1 ]]; then
+    local existing_pass="${CULVERT_LOG_PASSPHRASE:-}"
+    if [[ -z "$existing_pass" && -f "$envfile" ]]; then
+      existing_pass="$(grep -E '^CULVERT_LOG_PASSPHRASE=' "$envfile" | tail -1 | cut -d= -f2-)"
+    fi
+    # .env values round-trip through docker compose's own interpolation (it
+    # expands $-references when resolving .env, same as the interactive
+    # choice=2 path guards against below) — writing a value containing those
+    # characters here could silently persist a DIFFERENT string than the one
+    # actually used as CULVERT_LOG_PASSPHRASE, so CA and log encryption keys
+    # would diverge instead of matching as intended.
+    if [[ -n "$existing_pass" ]] && ! printf '%s' "$existing_pass" | LC_ALL=C grep -q '[^A-Za-z0-9._@%^!*()+=:,-]'; then
+      env_put CULVERT_CA_PASSPHRASE "$existing_pass" "$envfile"
+      info "Fresh deployment — also encrypting the SSL-inspection CA key with the existing CULVERT_LOG_PASSPHRASE."
+    elif [[ -n "$existing_pass" ]]; then
+      warn "CULVERT_LOG_PASSPHRASE contains characters that are not safe to persist verbatim in $envfile"
+      warn "(docker compose re-interpolates \$-references when reading .env) — leaving"
+      warn "CULVERT_CA_PASSPHRASE unset rather than risk a silently mismatched key. Set it yourself in"
+      warn "$envfile if you need the CA key encrypted."
+    else
+      warn "CULVERT_LOG_PASSPHRASE is configured but its value could not be read to also encrypt the"
+      warn "SSL-inspection CA key — set CULVERT_CA_PASSPHRASE yourself in $envfile if you need it encrypted."
+    fi
+    return
+  fi
 
   local choice="1"
   if [[ -t 0 ]]; then
@@ -1558,21 +1694,7 @@ setup_at_rest_encryption() {
       local pass2=""; read -rsp "Confirm passphrase: " pass2; echo ""
       [[ -n "$pass" ]] || error "Empty passphrase."
       [[ "$pass" == "$pass2" ]] || error "Passphrases did not match."
-      # This passphrase is PBKDF2-SHA256'd (600k iterations, internal/ca/ca.go)
-      # straight into the AES-256-GCM key that protects the SSL-inspection Root
-      # CA private key and saved request logs — a short passphrase is brute-
-      # forceable regardless of the iteration count. gen_passphrase's
-      # auto-generated default is 40 characters; require an operator-chosen one
-      # to be long enough to meaningfully resist an offline attack.
-      if [[ "${#pass}" -lt 12 ]]; then
-        error "Passphrase too short (${#pass} characters) — must be at least 12. This encrypts the SSL-inspection CA key and saved logs at rest, so it must resist offline brute-force."
-      fi
-      # The passphrase is stored in .env, which docker compose interpolates
-      # ($VAR), treats # as a comment, etc. Restrict to characters that survive
-      # that round-trip intact so the value reaching the container is exact.
-      if printf '%s' "$pass" | LC_ALL=C grep -q '[^A-Za-z0-9._@%^!*()+=:,-]'; then
-        error "Passphrase has characters unsafe for the .env file. Use letters, digits, and simple punctuation (no \$, quotes, backslash, #, /, or spaces)."
-      fi
+      validate_passphrase_for_env_file "Passphrase" "$pass"
       ;;
     3)
       warn "Skipping encryption at rest. Enable later by setting CULVERT_LOG_PASSPHRASE"
@@ -1885,35 +2007,71 @@ patch_allow_peers_numeric_uid() {
   esac
   tmp="$(mktemp)" || return 1
   if ! sudo awk -v uid="$uid" '
+    # find_comment_start returns the index of the first "#" that lies OUTSIDE
+    # a double-quoted TOML string, or 0 if none. A naive regex split at the
+    # first "#" would misfire on a legitimate quoted peer value that itself
+    # contains "#" (TOML allows it, and the maint-agent config loader accepts
+    # any username user.Lookup resolves, e.g. allow_peers = ["svc#prod"]) —
+    # that "#" is not a comment marker and must not truncate the array. Walks
+    # back over any whitespace immediately preceding the "#" so that
+    # whitespace is treated as part of the comment (preserved on reattach).
+    # Does not handle escaped quotes inside a TOML string (\"); not a concern
+    # for the usernames/UIDs this array holds.
+    function find_comment_start(s,    i, n, inquote, ch) {
+      n = length(s)
+      inquote = 0
+      for (i = 1; i <= n; i++) {
+        ch = substr(s, i, 1)
+        if (ch == "\"") {
+          inquote = !inquote
+        } else if (ch == "#" && !inquote) {
+          while (i > 1 && substr(s, i - 1, 1) ~ /[[:space:]]/) i--
+          return i
+        }
+      }
+      return 0
+    }
     BEGIN { patched=0 }
     /^[[:space:]]*allow_peers[[:space:]]*=/ && patched == 0 {
       line=$0
-      if (line ~ /^[[:space:]]*allow_peers[[:space:]]*=[[:space:]]*\["culvert-cp"\][[:space:]]*$/) {
-        print "allow_peers = [\"" uid "\"]"
+      # Split off a trailing inline TOML comment before classifying the line,
+      # so an operator-added "  # ..." note on the allow_peers line (a normal
+      # TOML habit) is not mistaken for the array spilling onto later lines —
+      # the array-closing checks below must see the actual code, not comment
+      # text. code is what gets rewritten; comment (if any) is reattached
+      # unchanged on every branch that prints a modified line.
+      code=line; comment=""
+      cstart=find_comment_start(line)
+      if (cstart > 0) {
+        comment=substr(line, cstart)
+        code=substr(line, 1, cstart-1)
+      }
+      if (code ~ /^[[:space:]]*allow_peers[[:space:]]*=[[:space:]]*\["culvert-cp"\][[:space:]]*$/) {
+        print "allow_peers = [\"" uid "\"]" comment
         patched=1
         next
       }
-      if (line ~ "\"" uid "\"") {
+      if (code ~ "\"" uid "\"") {
         print line
         patched=1
         next
       }
-      if (line !~ /\][[:space:]]*$/) {
+      if (code !~ /\][[:space:]]*$/) {
         print line
         patched=2
         next
       }
-      if (line ~ /\[[[:space:]]*\][[:space:]]*$/) {
+      if (code ~ /\[[[:space:]]*\][[:space:]]*$/) {
         # Empty array (e.g. "allow_peers = []"): the generic append below
         # always prepends a comma, which would leave a leading ", " with no
         # preceding element ("[, \"uid\"]") — invalid TOML.
-        sub(/\[[[:space:]]*\][[:space:]]*$/, "[\"" uid "\"]", line)
-        print line
+        sub(/\[[[:space:]]*\][[:space:]]*$/, "[\"" uid "\"]", code)
+        print code comment
         patched=1
         next
       }
-      sub(/[[:space:]]*\][[:space:]]*$/, ", \"" uid "\"]", line)
-      print line
+      sub(/[[:space:]]*\][[:space:]]*$/, ", \"" uid "\"]", code)
+      print code comment
       patched=1
       next
     }

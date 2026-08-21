@@ -235,6 +235,14 @@ services:
     # Uncomment to build locally (mirrors the proxy service):
     # build: .
     profiles: ["cli"]
+    environment:
+      # Forwarded from the host/.env so --restore can decrypt an encrypted
+      # data/ca.bundle without an extra manual `-e` flag on every invocation.
+      # Any backup taken from an SSL-inspecting deployment (which requires
+      # this same var for the proxy service) has an encrypted ca.bundle, and
+      # restore validation — dry-run and commit alike — hard-fails without
+      # it (docs/operator/docker-compose-backup-restore.md §4-6).
+      - CULVERT_CA_PASSPHRASE=${CULVERT_CA_PASSPHRASE:-}
     volumes:
       - proxy-data:/data
       - culvert-backups:/backup

@@ -10,6 +10,33 @@ import (
 
 // ── Spec ─────────────────────────────────────────────────────────────────────
 
+// validAuthoritativeEnv returns a structurally complete authoritative EnvSpec (the
+// values are placeholders; Validate performs no filesystem access — file existence
+// is enforced later by the fixture loader).
+func validAuthoritativeEnv() *EnvSpec {
+	return &EnvSpec{
+		BindHost:                "127.0.0.1",
+		OAuthIssuer:             "https://idp.example/issuer",
+		CanonicalResource:       "https://gw.example/mcp/gateway",
+		RequiredScopes:          []string{"gateway.tools.call"},
+		AcceptedClientIDs:       []string{"client-gw"},
+		TenantA:                 "tenant-a",
+		TenantB:                 "tenant-b",
+		ServerA:                 "srv-a",
+		ServerB:                 "srv-b",
+		TLSCertFile:             "/env/tls.crt",
+		TLSKeyFile:              "/env/tls.key",
+		ServerCAFile:            "/env/ca.crt",
+		TrustedJWKS:             "/env/jwks.json",
+		SigningKeyFile:          "/env/signer.key",
+		SigningKID:              "kid-1",
+		GatewayPort:             9443,
+		QualificationPolicyFile: "/env/policy.json",
+		Telemetry:               &TelemetryEnv{NodeID: "node-a", DataDir: "/env/tel/data", KEKFile: "/env/tel/kek", ArchiveDir: "/env/tel/arch"},
+		Supervision:             &SupervisionEnv{AdminPort: 9090, MetricsPort: 9091, AdminUser: "acc-admin", AdminPasswordFile: "/env/admin.pass", MetricsTokenFile: "/env/metrics.tok"},
+	}
+}
+
 func TestSpec_AuthoritativeRequiresDigestAndProvenance(t *testing.T) {
 	base := Spec{Artifact: ArtifactSpec{BinaryPath: "/x/culvert"}, EvidenceDir: "/tmp/e", Mode: ModeAuthoritative}
 	if err := base.Validate(); err == nil {
@@ -24,8 +51,59 @@ func TestSpec_AuthoritativeRequiresDigestAndProvenance(t *testing.T) {
 		t.Fatal("authoritative without environment must fail")
 	}
 	base.Environment = &EnvSpec{}
+	if err := base.Validate(); err == nil {
+		t.Fatal("authoritative with an empty environment must fail (QUAL-6.1 strictness)")
+	}
+	base.Environment = validAuthoritativeEnv()
 	if err := base.Validate(); err != nil {
 		t.Fatalf("valid authoritative spec rejected: %v", err)
+	}
+}
+
+// TestSpec_AuthoritativeNoFallback pins QUAL-6.1 strictness: every authoritative
+// environment control is required, and removing any one fails validation before any
+// traffic (no fallback to a dev fixture).
+func TestSpec_AuthoritativeNoFallback(t *testing.T) {
+	base := func() Spec {
+		return Spec{Mode: ModeAuthoritative, EvidenceDir: "/tmp/e",
+			Artifact:    ArtifactSpec{BinaryPath: "/x/culvert", ExpectedDigest: "sha256:abc", ExpectedSourceCommit: "c", Provenance: &ProvenanceSpec{VerifiedDigest: "sha256:abc"}},
+			Environment: validAuthoritativeEnv()}
+	}
+	baseline := base()
+	if err := baseline.Validate(); err != nil {
+		t.Fatalf("baseline valid authoritative spec must pass: %v", err)
+	}
+	cases := []struct {
+		name string
+		mut  func(e *EnvSpec)
+	}{
+		{"missing_bind_host", func(e *EnvSpec) { e.BindHost = "" }},
+		{"wildcard_bind_host", func(e *EnvSpec) { e.BindHost = "0.0.0.0" }},
+		{"invalid_bind_host", func(e *EnvSpec) { e.BindHost = "not a host/x" }},
+		{"missing_gateway_port", func(e *EnvSpec) { e.GatewayPort = 0 }},
+		{"missing_policy", func(e *EnvSpec) { e.QualificationPolicyFile = "" }},
+		{"missing_telemetry", func(e *EnvSpec) { e.Telemetry = nil }},
+		{"missing_telemetry_kek", func(e *EnvSpec) { e.Telemetry.KEKFile = "" }},
+		{"missing_telemetry_data", func(e *EnvSpec) { e.Telemetry.DataDir = "" }},
+		{"missing_telemetry_archive", func(e *EnvSpec) { e.Telemetry.ArchiveDir = "" }},
+		{"missing_telemetry_node", func(e *EnvSpec) { e.Telemetry.NodeID = "" }},
+		{"missing_supervision", func(e *EnvSpec) { e.Supervision = nil }},
+		{"missing_admin_port", func(e *EnvSpec) { e.Supervision.AdminPort = 0 }},
+		{"missing_metrics_port", func(e *EnvSpec) { e.Supervision.MetricsPort = 0 }},
+		{"duplicate_ports", func(e *EnvSpec) { e.Supervision.MetricsPort = e.Supervision.AdminPort }},
+		{"missing_admin_user", func(e *EnvSpec) { e.Supervision.AdminUser = "" }},
+		{"missing_admin_password_file", func(e *EnvSpec) { e.Supervision.AdminPasswordFile = "" }},
+		{"missing_metrics_token_file", func(e *EnvSpec) { e.Supervision.MetricsTokenFile = "" }},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			s := base()
+			c.mut(s.Environment)
+			if err := s.Validate(); err == nil {
+				t.Fatalf("authoritative spec with %s must fail validation (no fallback)", c.name)
+			}
+		})
 	}
 }
 

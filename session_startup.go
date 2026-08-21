@@ -16,8 +16,13 @@ import (
 // existing entries, then apply the TTL. Returns a non-fatal error only
 // for the revocations-load path; callers typically log and continue.
 func loadSession(cfg sessionStartupConfig) error {
-	initSessionSecret()
-	initSessionSecretFromConfig(cfg.Secret) // overrides random if config provides one
+	// Only fall through to the config-file secret when CULVERT_SESSION_SECRET
+	// did not already supply the key — an explicit env value must win over
+	// config.yaml's session_secret, not the other way around (session.go's
+	// documented priority: env > config file > random).
+	if envSet := initSessionSecret(); !envSet {
+		initSessionSecretFromConfig(cfg.Secret)
+	}
 
 	if cfg.RevocationsFile != "" {
 		session.SetRevocationsPath(cfg.RevocationsFile)

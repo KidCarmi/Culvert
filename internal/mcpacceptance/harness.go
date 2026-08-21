@@ -21,6 +21,7 @@ type Harness struct {
 	workDir     string // holds fixtures/secrets/logs; NEVER the evidence dir
 	evidenceDir string
 	sourceSHA   string
+	runHorizon  time.Duration // requested bounded run timeout; the PKI validity horizon
 
 	fixture       *Fixture
 	uiClient      *http.Client
@@ -32,6 +33,12 @@ type Harness struct {
 
 	tokenA string
 	tokenB string
+
+	// operatorPolicyRevision is the policy_revision declared in the operator's
+	// qualification policy file (authoritative mode), captured at preflight and later
+	// compared against the runtime revision to prove the operator policy was the one
+	// actually loaded.
+	operatorPolicyRevision uint64
 
 	tripwireA *tripwire
 	tripwireB *tripwire
@@ -48,6 +55,12 @@ type Options struct {
 	SourceSHA string
 	// Now injects a clock for deterministic tests. Defaults to time.Now.
 	Now func() time.Time
+	// RunHorizon is the requested overall bounded run timeout (the CLI -timeout).
+	// Authoritative pre-run PKI validation requires every qualification certificate
+	// chain to remain valid through now+RunHorizon, so material that would expire
+	// DURING the bounded run is rejected before any child process starts. Zero
+	// means no added horizon (chains are still required to be valid at `now`).
+	RunHorizon time.Duration
 }
 
 // NewHarness validates the spec and prepares a harness. The evidence directory is
@@ -81,6 +94,7 @@ func NewHarness(spec *Spec, opts Options) (*Harness, error) {
 		workDir:     work,
 		evidenceDir: spec.EvidenceDir,
 		sourceSHA:   opts.SourceSHA,
+		runHorizon:  opts.RunHorizon,
 		secrets:     NewSecretScan(),
 		now:         opts.Now,
 	}, nil
@@ -139,6 +153,15 @@ func (h *Harness) setup(ctx context.Context) error {
 	if err := h.prepareFixture(); err != nil {
 		return err
 	}
+	// QUAL-6.1 authoritative preflight: bind the operator policy digest, validate the
+	// policy can support the required acceptance scenarios, and fold the digest into
+	// the acceptance config hash so it describes the environment that actually ran.
+	// A preflight failure aborts BEFORE any traffic (no fallback to a fixture).
+	if h.spec.Mode == ModeAuthoritative {
+		if err := h.preflightAuthoritative(); err != nil {
+			return err
+		}
+	}
 	pa, pb, err := h.buildProcesses()
 	if err != nil {
 		return err
@@ -156,6 +179,11 @@ func (h *Harness) setup(ctx context.Context) error {
 		return fmt.Errorf("start process B: %w", err)
 	}
 	h.recordArtifactVersion(ctx)
+	// QUAL-6.1: publish the safe live-supervision descriptor now that the primary is
+	// bound, so an operator can supervise the run at the advertised endpoints.
+	if h.spec.Mode == ModeAuthoritative {
+		h.buildSupervisionDescriptor()
+	}
 	return nil
 }
 
@@ -168,10 +196,16 @@ func (h *Harness) buildProcesses() (pa, pb procConfig, err error) {
 	if h.tripwireB, err = startTripwire(); err != nil {
 		return procConfig{}, procConfig{}, err
 	}
-	if pa, err = h.fixture.buildProc("A", h.fixture.tenantA, h.fixture.serverA, "none", tripEndpoint(h.tripwireA)); err != nil {
+	if pa, err = h.fixture.buildProc(procRole{
+		name: "A", tenant: h.fixture.tenantA, serverID: h.fixture.serverA, clientCertMode: "none",
+		tripwireEndpoint: tripEndpoint(h.tripwireA), primary: true, operatorPolicy: true,
+	}); err != nil {
 		return procConfig{}, procConfig{}, err
 	}
-	if pb, err = h.fixture.buildProc("B", h.fixture.tenantB, h.fixture.serverB, "none", tripEndpoint(h.tripwireB)); err != nil {
+	if pb, err = h.fixture.buildProc(procRole{
+		name: "B", tenant: h.fixture.tenantB, serverID: h.fixture.serverB, clientCertMode: "none",
+		tripwireEndpoint: tripEndpoint(h.tripwireB), primary: false, operatorPolicy: true,
+	}); err != nil {
 		return procConfig{}, procConfig{}, err
 	}
 	return pa, pb, nil
@@ -206,6 +240,9 @@ func (h *Harness) runScenarios(ctx context.Context) {
 	h.runRestart(ctx)
 	h.runEmergencyDisable(ctx)
 	h.runNonExecution(ctx)
+	if h.spec.Mode == ModeAuthoritative {
+		h.runAuthoritativeEnv(ctx)
+	}
 }
 
 // prepareFixture builds the two-tenant environment (dev) or ingests operator
@@ -235,7 +272,7 @@ func (h *Harness) buildClients() error {
 	rt := h.spec.Run.request()
 	h.uiClient = plainClient(rt)
 	h.metricsClient = plainClient(rt)
-	c, err := mcpTLSClient(h.fixture.caPEM, h.fixture.clientCertFile, h.fixture.clientKeyFile, false, rt)
+	c, err := mcpTLSClient(h.fixture.caPEM, h.fixture.clientCertFile, h.fixture.clientKeyFile, false, rt, h.fixture.dialHost, h.fixture.serverName)
 	if err != nil {
 		return err
 	}
@@ -300,7 +337,7 @@ func (h *Harness) finalize() (*Summary, error) {
 	// Overall = PASS only if every REQUIRED criterion is present AND passed, and the
 	// artifact is authoritative when the mode demands it. A missing required
 	// criterion is a FAIL (no best-effort PASS).
-	overall, missing := computeOverall(h.summary.Criteria, expectedRequiredIDs(),
+	overall, missing := computeOverall(h.summary.Criteria, expectedRequiredIDs(h.spec.Mode == ModeAuthoritative),
 		h.summary.Authoritative, h.spec.Mode == ModeAuthoritative)
 	for _, id := range missing {
 		h.summary.Notes = append(h.summary.Notes, "missing_required_criterion: "+id)

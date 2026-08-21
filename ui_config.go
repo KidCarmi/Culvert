@@ -1326,6 +1326,11 @@ func importCategoryTaxonomy(b *configBackup, replaceMode bool) {
 				func(e CategoryEntry) string { return e.Name }))
 		}
 		catStore.Save()
+		// The imported taxonomy's BuiltIn entries are served from the effective view, so
+		// the import only reaches policy evaluation after a recompose. importCategoryOverrides
+		// runs its own recompose but early-returns on an absent/empty override set, which is
+		// the common case for a taxonomy-only import.
+		recomposeSignedFeedTaxonomy()
 	}
 	if len(b.CategoryGroups) > 0 {
 		if replaceMode {
@@ -1545,12 +1550,19 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		format := "rfc3164"
-		var drops uint64
+		var drops, panics uint64
 		if globalSyslog != nil {
 			format = globalSyslog.Format()
+			// Read panics before drops: deliverGuarded's recover branch always
+			// increments panics first, then drops (independent atomics, no
+			// combined snapshot). Reading in the same order means a report can
+			// only ever lag panics behind drops, never the reverse — so the
+			// UI's `drops > 0` gate can never hide a real panic behind a
+			// stale-looking drops==0.
+			panics = globalSyslog.Panics()
 			drops = globalSyslog.Drops()
 		}
-		jsonOK(w, map[string]any{"addr": syslogConfigured, "format": format, "drops": drops})
+		jsonOK(w, map[string]any{"addr": syslogConfigured, "format": format, "drops": drops, "panics": panics})
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {
 			return

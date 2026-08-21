@@ -20,6 +20,7 @@ import (
 	"io"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/alerts"
@@ -44,7 +45,21 @@ type RemoteScanner struct {
 	mu      sync.RWMutex
 	baseURL string // e.g. "http://localhost:8484"
 	client  *http.Client
-	enabled bool
+
+	// enabled is atomic for the same reason as Scanner.enabled: Enabled() is
+	// consulted once per plain-HTTP response (proxy_http.go scanHTTPResponseBody)
+	// and the overwhelmingly common answer is "no remote scanner configured",
+	// which should not cost a round trip on this struct's RWMutex. The methods
+	// that need baseURL/client still take mu; they just read the flag atomically.
+	//
+	// This struct is small enough (56 B) that enabled lands on the same 64-byte
+	// line as mu, so an RLock elsewhere does invalidate it. Measured and accepted
+	// rather than padded: mu is taken ONLY when a sidecar is configured, and only
+	// by ScanBody/Health/Status, each of which then makes an HTTP round trip that
+	// dwarfs a cache miss. In the default posture mu is never taken at all.
+	// Scanner and threatfeed.Feed are large enough that their flags already sit
+	// on a separate line.
+	enabled atomic.Bool
 }
 
 // Init configures the remote scanner client.
@@ -60,15 +75,16 @@ func (rs *RemoteScanner) Init(baseURL string) {
 			IdleConnTimeout:     90 * time.Second,
 		},
 	}
-	rs.enabled = true
+	rs.enabled.Store(true)
 	obs.Printf("ScanSvc: remote scanner at %s", baseURL)
 }
 
 // Enabled reports whether remote scanning is configured.
+//
+// Lock-free by contract — see the enabled field.
+// TestRemoteScannerEnabled_IsLockFree pins the property.
 func (rs *RemoteScanner) Enabled() bool {
-	rs.mu.RLock()
-	defer rs.mu.RUnlock()
-	return rs.enabled
+	return rs.enabled.Load()
 }
 
 // URL returns the configured base URL.
@@ -94,7 +110,7 @@ func remoteScanFail(reason string) {
 // on network errors to avoid blocking all traffic when the sidecar is down).
 func (rs *RemoteScanner) ScanBody(data []byte, contentType string) *Result {
 	rs.mu.RLock()
-	if !rs.enabled {
+	if !rs.enabled.Load() {
 		rs.mu.RUnlock()
 		return nil
 	}
@@ -158,7 +174,7 @@ func (rs *RemoteScanner) ScanBody(data []byte, contentType string) *Result {
 // Health checks the remote scan service liveness.
 func (rs *RemoteScanner) Health() error {
 	rs.mu.RLock()
-	if !rs.enabled {
+	if !rs.enabled.Load() {
 		rs.mu.RUnlock()
 		return fmt.Errorf("remote scanner not configured")
 	}
@@ -187,7 +203,7 @@ func (rs *RemoteScanner) Health() error {
 // Status fetches the remote scanner status (mirrors /api/security-scan/status).
 func (rs *RemoteScanner) Status() (map[string]interface{}, error) {
 	rs.mu.RLock()
-	if !rs.enabled {
+	if !rs.enabled.Load() {
 		rs.mu.RUnlock()
 		return nil, fmt.Errorf("remote scanner not configured")
 	}
