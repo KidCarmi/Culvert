@@ -1,0 +1,71 @@
+# Frontend verification lane (FE-1A, ADR-FE-001).
+#
+# The ONLY CI lane that runs Node. The appliance runtime and every Go build
+# path stay Node-free: frontend/dist and src/api/types.gen.ts are COMMITTED
+# generated output, and this lane proves they are exactly what the pinned
+# toolchain regenerates (drift gate) and that the build is deterministic.
+#
+# The contract lives in repository scripts, not in this YAML — CI runs the
+# same commands a developer runs:
+#   npm run verify                      (frontend/scripts/verify.sh)
+#   sh scripts/verify-determinism.sh 2  (frontend/scripts/verify-determinism.sh)
+name: Frontend Verify
+
+on:
+  pull_request:
+    paths:
+      - "frontend/**"
+      - "api/openapi/openapi.json"
+      - ".github/workflows/frontend-verify.yml"
+  push:
+    branches: [main]
+    paths:
+      - "frontend/**"
+      - "api/openapi/openapi.json"
+      - ".github/workflows/frontend-verify.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: frontend-verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Frontend Verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: frontend/.node-version
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            frontend/tools/openapi-gen/package-lock.json
+
+      # The pinned toolchain identity is a contract (ADR-FE-001): never build
+      # with whatever Node the runner happens to provide. assert-toolchain.sh
+      # re-checks inside every script; this step fails fast and loudly.
+      - name: Toolchain identity
+        run: sh scripts/assert-toolchain.sh
+
+      # Canonical gate: clean install (lifecycle scripts disabled via .npmrc),
+      # OpenAPI type generation + drift, lint, format, strict typecheck, unit
+      # tests, production build + committed-dist drift, generated-bundle
+      # security scan, license policy, vulnerability policy.
+      - name: Verify (canonical contract)
+        run: npm run verify
+
+      # Two isolated clean builds must be byte-identical (full-tree inventory
+      # + SHA-256). The five-build evidence run is executed for release
+      # qualification; two catches nondeterminism regressions per PR.
+      - name: Determinism (2 isolated clean builds)
+        run: sh scripts/verify-determinism.sh 2
