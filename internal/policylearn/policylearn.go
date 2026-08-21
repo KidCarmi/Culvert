@@ -191,6 +191,11 @@ type Engine struct {
 	windowOwner map[uint64]string
 	finishing   bool // under mu: a finish holds the lifecycle between window-close and persist; lazy expiry must not race it
 
+	// persistArmed single-flights the background persist scheduled by
+	// counter-only late-loss charges (round 29; schedulePersistLocked) so a
+	// burst of request-goroutine charges coalesces into one AtomicWrite.
+	persistArmed atomic.Bool
+
 	// M3 aggregation state (all mutated under mu; drain-owned cadence counters
 	// are also only touched under mu inside consumeGuarded).
 	subjKey      *subjectKey // durable pseudonymization key

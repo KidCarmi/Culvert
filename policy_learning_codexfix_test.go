@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -749,4 +750,114 @@ func TestCodexFix_AcceptTransactionHoldsPolicyWriteGate(t *testing.T) {
 		t.Fatal("acceptance never completed after the gate was released")
 	}
 	assertAcceptedImpliesTarget(t, recID)
+}
+
+// ── Codex round 29: late-loss charge vs the acceptance transaction ─────────
+
+// plSeedRecWithWindow is plSeedRecommendation with the session's
+// acceptance-window generation captured while it is OPEN, so a test can
+// deliver a LATE captured-window decision after the session completes.
+func plSeedRecWithWindow(t *testing.T) (recID string, gen uint64) {
+	t.Helper()
+	if err := catStore.Set("m5b-cat", []string{"m5b.example"}, false); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = catStore.Delete("m5b-cat") })
+	if w := plDo(apiPolicyLearningConfig, http.MethodPut, "/api/policy-learning/config", RoleAdmin,
+		`{"enabled":true,"recommendable_categories":["m5b-cat"]}`); w.Code != 200 {
+		t.Fatalf("enable: %d %s", w.Code, w.Body.String())
+	}
+	plStartSession(t)
+	g, ok := policyLearnEngine.Load().CaptureWindow()
+	if !ok {
+		t.Fatal("CaptureWindow refused with an active session")
+	}
+	plObserve(t, "m5b-user@corp.example", []string{"m5b-team"}, "m5b.example")
+	sessID := plCompleteSession(t)
+	if w := plDo(apiPolicyLearningGenerate, http.MethodPost, "/api/policy-learning/recommendations/generate", RoleOperator,
+		`{"session_id":"`+sessID+`"}`); w.Code != 200 {
+		t.Fatalf("generate: %d %s", w.Code, w.Body.String())
+	}
+	recs := plRecsGET(t)
+	if len(recs.Recommendations) != 1 {
+		t.Fatalf("seed: %d recommendations", len(recs.Recommendations))
+	}
+	return recs.Recommendations[0].ID, g
+}
+
+// plLateDecision delivers one captured-window decision AFTER its window
+// closed, through the production Observe path (admission → charge — the same
+// route a request goroutine's stale learnDecisionCtx takes).
+func plLateDecision(t *testing.T, gen uint64) {
+	t.Helper()
+	policyLearnEngine.Load().Observe(policylearn.Observation{
+		WindowGen: gen, Host: "late.example", Method: "GET", Status: "OK", At: time.Now().Unix(),
+	})
+}
+
+// TestCodexFix_LateChargeInvalidatesAcceptingIntentBeforeMutation (round 29):
+// a late loss charge landing between BeginAccept and the draft mutation used
+// to be skipped by the supersession walk (accepting ≠ generated), so the
+// acceptance created and finalized a rule from evidence whose loss accounting
+// had just changed. The accept must refuse (409 family), the intent must
+// resolve to superseded, and NO draft rule may exist.
+func TestCodexFix_LateChargeInvalidatesAcceptingIntentBeforeMutation(t *testing.T) {
+	plDurableDraftHarness(t)
+	recID, gen := plSeedRecWithWindow(t)
+	setRequireCommit(true)
+	eng := policyLearnEngine.Load()
+	rec, err := eng.BeginAccept(recID, newRuleID())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	plLateDecision(t, gen)
+
+	ver, _ := effectivePolicyVersion()
+	if _, err := plAcceptRecommendation(eng, recID, ver, "codexfix"); !errors.Is(err, policylearn.ErrAcceptInvalidatedByLateLoss) {
+		t.Fatalf("accept after late-loss charge = %v, want ErrAcceptInvalidatedByLateLoss", err)
+	}
+	got, ok := eng.RecommendationByID(recID)
+	if !ok || got.State != policylearn.RecStateSuperseded {
+		t.Fatalf("invalidated intent state = %s, want superseded", got.State)
+	}
+	if plFindTargetRule(rec.TargetRuleID) != nil {
+		t.Fatalf("a draft rule %s exists for an invalidated intent", rec.TargetRuleID)
+	}
+}
+
+// TestCodexFix_LateChargeAfterAppendCompensatesDraftRule (round 29): the
+// charge lands AFTER the draft rule was durably staged but before the
+// finalize latch — the engine-atomic FinalizeAccept refusal must hold and the
+// root must compensate the candidate rule away (draft-only) before latching
+// superseded.
+func TestCodexFix_LateChargeAfterAppendCompensatesDraftRule(t *testing.T) {
+	plDurableDraftHarness(t)
+	recID, gen := plSeedRecWithWindow(t)
+	setRequireCommit(true)
+	eng := policyLearnEngine.Load()
+	rec, err := eng.BeginAccept(recID, newRuleID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rule := plTranslateRecommendation(&rec)
+	stampRuleMetadataForWrite(&rule, nil, "codexfix")
+	ver, _ := effectivePolicyVersion()
+	if _, err := policyDraft.stageDurableAppend("codexfix", ver, rule); err != nil {
+		t.Fatalf("stageDurableAppend: %v", err)
+	}
+
+	plLateDecision(t, gen)
+
+	ver2, _ := effectivePolicyVersion()
+	if _, err := plAcceptRecommendation(eng, recID, ver2, "codexfix"); !errors.Is(err, policylearn.ErrAcceptInvalidatedByLateLoss) {
+		t.Fatalf("resume after late-loss charge = %v, want ErrAcceptInvalidatedByLateLoss", err)
+	}
+	got, ok := eng.RecommendationByID(recID)
+	if !ok || got.State != policylearn.RecStateSuperseded {
+		t.Fatalf("invalidated intent state = %s, want superseded", got.State)
+	}
+	if plFindTargetRule(rec.TargetRuleID) != nil {
+		t.Fatalf("candidate still carries rule %s after the compensating removal", rec.TargetRuleID)
+	}
 }

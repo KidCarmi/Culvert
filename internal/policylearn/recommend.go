@@ -146,6 +146,13 @@ var (
 	ErrRecommendationAccepted   = errors.New("policylearn: recommendation already accepted")
 	ErrRecommendationRejected   = errors.New("policylearn: recommendation already rejected")
 	ErrRecommendationAccepting  = errors.New("policylearn: recommendation has an unresolved acceptance in progress")
+
+	// ErrAcceptInvalidatedByLateLoss (Codex round 29): the accepting intent's
+	// owning session was charged late transport loss after the intent latched —
+	// the evidence understates loss, so the finalize latch refuses and the root
+	// resolves the intent to superseded (regeneration produces honestly-degraded
+	// replacements).
+	ErrAcceptInvalidatedByLateLoss = errors.New("policylearn: acceptance invalidated — late transport loss was charged to the learning session after the intent; evidence understates loss")
 )
 
 // maxRejectReasonLen bounds the stored (and audited) reject reason.
@@ -371,6 +378,18 @@ type Recommendation struct {
 	RejectedAt   string `json:"rejected_at,omitempty"`
 	RejectedBy   string `json:"rejected_by,omitempty"`
 	RejectReason string `json:"reject_reason,omitempty"` // bounded, control-chars stripped
+
+	// LateLossInvalidated marks an ACCEPTING intent whose owning session was
+	// charged late transport loss AFTER the intent latched (Codex round 29):
+	// the evidence's loss accounting changed post-intent, so FinalizeAccept
+	// refuses (ErrAcceptInvalidatedByLateLoss) and the root trust boundary
+	// resolves the intent to superseded, compensating away any candidate draft
+	// rule it created. Generated recommendations are superseded directly by
+	// the charge and never carry this flag; the flag survives on superseded as
+	// history. Set only by the charge path, under the same e.mu FinalizeAccept
+	// mutates under — there is no interleaving in which a flagged intent
+	// latches accepted.
+	LateLossInvalidated bool `json:"late_loss_invalidated,omitempty"`
 }
 
 func (r *Recommendation) clone() Recommendation {

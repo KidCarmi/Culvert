@@ -600,6 +600,7 @@ func plDecisionError(w http.ResponseWriter, err error) {
 		errors.Is(err, policylearn.ErrRecommendationRejected),
 		errors.Is(err, policylearn.ErrRecommendationAccepting),
 		errors.Is(err, policylearn.ErrStoreReadOnly),
+		errors.Is(err, policylearn.ErrAcceptInvalidatedByLateLoss),
 		errors.Is(err, errAcceptRequiresDraftMode),
 		errors.Is(err, errAcceptVersionConflict),
 		errors.Is(err, errAcceptIntegrityConflict),

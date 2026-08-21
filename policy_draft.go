@@ -355,6 +355,45 @@ func (c *policyDraftCoordinator) durableTargetPresent(ruleID string) bool {
 	return false
 }
 
+// removeDurableTarget durably removes ruleID from the ACTIVE candidate — the
+// compensating half of stageDurableAppend for an acceptance whose intent was
+// invalidated AFTER the append (Codex round 29). Candidate-only by
+// construction (never the running store: a rule that reached RUNNING was
+// committed by an admin through the canonical path and is theirs). No active
+// draft or an absent target is success — nothing to compensate. matches, when
+// non-nil, guards admin work: a candidate rule whose content no longer
+// matches was edited by an admin after the append and is LEFT IN PLACE
+// (success — the rule is admin-owned now). A persist failure restores the
+// removed rule and returns the failure so the caller leaves the intent
+// pending for a deterministic retry.
+func (c *policyDraftCoordinator) removeDurableTarget(ruleID string, matches func(*PolicyRule) bool) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.state.Active {
+		return nil
+	}
+	rules := c.cand.List()
+	var removed *PolicyRule
+	for i := range rules { // index-based: PolicyRule is a large struct (rangeValCopy)
+		if rules[i].ID == ruleID {
+			removed = &rules[i]
+			break
+		}
+	}
+	if removed == nil {
+		return nil
+	}
+	if matches != nil && !matches(removed) {
+		return nil
+	}
+	c.cand.DeleteByID(ruleID)
+	if err := c.persistLocked(); err != nil {
+		c.cand.Add(*removed) // exact compensating restore (ID is free again, so Add preserves it)
+		return fmt.Errorf("%v: %w", err, errDraftPersistFailed)
+	}
+	return nil
+}
+
 // errDraftTargetMissing: the target rule is not a member of the ACTIVE
 // candidate at the locked moment of the durability proof — a concurrent
 // revert/delete/commit removed it after an earlier unlocked lookup saw it.

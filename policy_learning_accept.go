@@ -183,6 +183,9 @@ func plAcceptRecommendation(eng *policylearn.Engine, recID string, ifVersion int
 			}
 			fin, err := eng.FinalizeAccept(rec.ID, actor)
 			if err != nil {
+				if errors.Is(err, policylearn.ErrAcceptInvalidatedByLateLoss) {
+					return plAcceptOutcome{}, plResolveInvalidatedIntent(eng, &rec)
+				}
 				return plAcceptOutcome{}, err
 			}
 			return plAcceptOutcome{Recommendation: fin, RuleID: fin.TargetRuleID}, nil
@@ -218,6 +221,19 @@ func plAcceptRecommendation(eng *policylearn.Engine, recID string, ifVersion int
 	rec, err := eng.BeginAccept(rec.ID, newRuleID())
 	if err != nil {
 		return plAcceptOutcome{}, err
+	}
+
+	// Revalidate the intent at the last responsible moment before the draft
+	// mutation (Codex round 29): a late captured-window loss charged to the
+	// owning session between the generated-state read and here flags the
+	// accepting intent (chargeLateWindowLoss holds no draft lock, so the
+	// writeGate cannot exclude it). A flagged intent must never create a rule;
+	// resolve it to superseded now — no rule exists yet, so the compensation
+	// is a no-op. A charge landing AFTER this check is caught by the
+	// FinalizeAccept refusal below (the engine-atomic backstop under the same
+	// e.mu the charge mutates under).
+	if fresh, ok := eng.RecommendationByID(rec.ID); ok && fresh.LateLossInvalidated {
+		return plAcceptOutcome{}, plResolveInvalidatedIntent(eng, &fresh)
 	}
 
 	rule := plTranslateRecommendation(&rec)
@@ -260,11 +276,42 @@ func plAcceptRecommendation(eng *policylearn.Engine, recID string, ifVersion int
 
 	fin, err := eng.FinalizeAccept(rec.ID, actor)
 	if err != nil {
+		if errors.Is(err, policylearn.ErrAcceptInvalidatedByLateLoss) {
+			// The charge landed between the append and the latch: compensate
+			// the just-created candidate rule away and supersede (round 29).
+			return plAcceptOutcome{}, plResolveInvalidatedIntent(eng, &rec)
+		}
 		// The rule exists and the intent is durable: a retry finalizes
 		// idempotently. Surface the failure; nothing is lost.
 		return plAcceptOutcome{}, fmt.Errorf("draft rule %s created but the acceptance latch failed (retry to finalize): %w", rec.TargetRuleID, err)
 	}
 	return plAcceptOutcome{Recommendation: fin, RuleID: fin.TargetRuleID}, nil
+}
+
+// plResolveInvalidatedIntent resolves an accepting intent refused by the
+// engine's late-loss backstop (Codex round 29): compensate away the CANDIDATE
+// copy of the target rule if the intent created one (draft-only — a rule that
+// reached RUNNING was committed by an admin through the canonical path and
+// stays; a candidate rule an admin has since EDITED is theirs and stays too,
+// guarded by the translation match), then latch the recommendation
+// superseded. A compensation persist failure leaves the intent pending — the
+// next admin retry re-enters the same deterministic resolution. The returned
+// error wraps the engine sentinel so the API maps it to 409.
+func plResolveInvalidatedIntent(eng *policylearn.Engine, rec *policylearn.Recommendation) error {
+	if rec.TargetRuleID != "" {
+		recForMatch := *rec
+		if err := policyDraft.removeDurableTarget(rec.TargetRuleID, func(r *PolicyRule) bool {
+			return plRuleMatchesTranslation(r, &recForMatch)
+		}); err != nil {
+			return fmt.Errorf("late-loss invalidation of %s: compensating removal of draft rule %s failed (retry): %w",
+				rec.ID, rec.TargetRuleID, err)
+		}
+	}
+	if _, err := eng.SupersedeInvalidatedAccept(rec.ID); err != nil {
+		return err
+	}
+	return fmt.Errorf("recommendation %s superseded — regenerate from the session for honestly-degraded evidence: %w",
+		rec.ID, policylearn.ErrAcceptInvalidatedByLateLoss)
 }
 
 // errStaleRecommendation is the API-visible stale refusal.

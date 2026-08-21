@@ -1113,3 +1113,124 @@ func TestObserve_CapturedDecisionsNeverVanishAcrossStop(t *testing.T) {
 		t.Fatalf("captured decisions leaked to the GLOBAL drop counter (%d) — successor baselines would be contaminated", st.Dropped)
 	}
 }
+
+// TestFinalizeAccept_RefusedAfterLateLossCharge (round 29): a late
+// captured-window loss charged to the owning session between BeginAccept and
+// FinalizeAccept changes the loss accounting the accepting intent's evidence
+// claims — the pre-fix charge skipped accepting recommendations entirely, so
+// the acceptance latched and a rule was created from evidence whose loss had
+// just been invalidated. The finalize latch must refuse a flagged intent.
+func TestFinalizeAccept_RefusedAfterLateLossCharge(t *testing.T) {
+	clk := newTestClock()
+	e := newRecEngine(t, t.TempDir(), clk, nil)
+	if _, err := e.StartSession("op"); err != nil {
+		t.Fatal(err)
+	}
+	captured, ok := e.CaptureWindow()
+	if !ok {
+		t.Fatal("CaptureWindow refused with an active session")
+	}
+	feedHighEvidence(t, e, clk)
+	sess, err := e.StopSession("op")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := mustGenerate(t, e, sess.ID)
+	if len(res.Recommendations) == 0 {
+		t.Fatal("setup: no recommendation generated")
+	}
+	recID := res.Recommendations[0].ID
+	if _, err := e.BeginAccept(recID, "rule-target-r29"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The late decision from the session's window arrives after the intent.
+	e.chargeLateWindowLoss(captured)
+
+	if _, err := e.FinalizeAccept(recID, "op"); err == nil {
+		t.Fatal("FinalizeAccept latched accepted from evidence invalidated by a late loss charge")
+	}
+	// The resolution transition is available and terminal.
+	fin, err := e.SupersedeInvalidatedAccept(recID)
+	if err != nil {
+		t.Fatalf("SupersedeInvalidatedAccept: %v", err)
+	}
+	if fin.State != RecStateSuperseded || fin.TargetRuleID != "" {
+		t.Fatalf("resolved intent = %s/%q, want superseded with cleared target", fin.State, fin.TargetRuleID)
+	}
+}
+
+// TestChargeLateWindowLoss_InvalidationSurvivesCrash (round 29): the charge
+// used to mark the store dirty only — with the owning session COMPLETED there
+// is no observation flow, so absent another admin mutation or a graceful
+// Close, an abrupt exit reloaded the pre-charge store: clean loss accounting
+// and a GENERATED recommendation acceptance would honor. The decision-state
+// invalidation must be durable before the charge returns, and the
+// counter-only follow-up charges must reach disk promptly (async
+// single-flight).
+func TestChargeLateWindowLoss_InvalidationSurvivesCrash(t *testing.T) {
+	clk := newTestClock()
+	dir := t.TempDir()
+	e := newRecEngine(t, dir, clk, nil)
+	if _, err := e.StartSession("op"); err != nil {
+		t.Fatal(err)
+	}
+	captured, ok := e.CaptureWindow()
+	if !ok {
+		t.Fatal("CaptureWindow refused with an active session")
+	}
+	feedHighEvidence(t, e, clk)
+	sess, err := e.StopSession("op")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mustGenerate(t, e, sess.ID).Recommendations) == 0 {
+		t.Fatal("setup: no recommendation generated")
+	}
+
+	e.chargeLateWindowLoss(captured)
+
+	// Crash simulation: a SECOND engine loads the store from disk while the
+	// first is simply abandoned (no Close, no flush).
+	e2 := newRecEngine(t, dir, clk, nil)
+	for _, r := range e2.Recommendations() {
+		if r.SessionID == sess.ID && r.State == RecStateGenerated {
+			t.Fatalf("recommendation %s reloaded as GENERATED after a crash — the late-loss supersession was never persisted", r.ID)
+		}
+	}
+	dropped := func(eng *Engine) int64 {
+		eng.mu.Lock()
+		defer eng.mu.Unlock()
+		for _, s := range eng.sessions {
+			if s.ID == sess.ID {
+				return s.Transport.Dropped
+			}
+		}
+		t.Fatalf("session %s missing after reload", sess.ID)
+		return 0
+	}
+	if got := dropped(e2); got < 1 {
+		t.Fatalf("reloaded session Transport.Dropped = %d, want >= 1 (charged loss lost across the crash)", got)
+	}
+
+	// Counter-only follow-up (nothing left to invalidate): must reach disk via
+	// the async single-flight persist, not wait for an unbounded next flush.
+	e.chargeLateWindowLoss(captured)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		e.mu.Lock()
+		clean := !e.dirty
+		e.mu.Unlock()
+		if clean {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("counter-only late charge never persisted (async single-flight persist did not run)")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	e3 := newRecEngine(t, dir, clk, nil)
+	if got := dropped(e3); got < 2 {
+		t.Fatalf("reloaded session Transport.Dropped = %d, want >= 2 (async-persisted charge lost)", got)
+	}
+}

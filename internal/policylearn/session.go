@@ -401,13 +401,37 @@ func (e *Engine) chargeLateWindowLoss(gen uint64) {
 				// the PRE-charge transport loss into their immutable Coverage
 				// (Codex round 28): the loss they claim is now understated,
 				// so still-pending ones are SUPERSEDED — the existing durable
-				// generated→superseded latch, which acceptance refuses.
-				// Accepted/accepting/rejected states stay latched (their
-				// transitions already happened; the loss only weakens future
-				// claims). A regenerate from the session sees the charged
-				// window and produces honestly-degraded replacements.
-				e.supersedeGeneratedRecsLocked(id)
+				// generated→superseded latch, which acceptance refuses — and
+				// ACCEPTING intents are flagged LateLossInvalidated (round
+				// 29): their transition happened but their EFFECT (the draft
+				// rule) may not have, and FinalizeAccept refuses the flag
+				// under this same mutex, so a flagged intent can never latch
+				// accepted. Accepted/rejected stay latched (their effects are
+				// final; the loss only weakens future claims). A regenerate
+				// from the session sees the charged window and produces
+				// honestly-degraded replacements.
+				invalidated := e.invalidateSessionRecsLocked(id)
 				e.dirty = true
+				// Durability (round 29): a COMPLETED session has no later
+				// flush to ride — no observation flow reaches it, and absent
+				// another admin mutation or a graceful Close the dirty flag
+				// alone would let an abrupt exit reload the pre-charge store:
+				// clean loss accounting and a GENERATED recommendation that
+				// acceptance would honor. A decision-state change (supersede/
+				// flag — at most one per charge burst: later charges find
+				// nothing left to flip) persists SYNCHRONOUSLY before the
+				// charge returns; a counter-only charge schedules a
+				// single-flight async persist so a burst coalesces instead of
+				// paying one AtomicWrite per late decision on request
+				// goroutines. A failed save leaves dirty armed for the next
+				// flush/Close (drain precedent).
+				if invalidated {
+					if err := e.saveLocked(); err != nil {
+						e.dirty = true
+					}
+				} else {
+					e.schedulePersistLocked()
+				}
 				return
 			}
 		}
@@ -416,26 +440,61 @@ func (e *Engine) chargeLateWindowLoss(gen uint64) {
 	e.tr.dropped.Add(1)
 }
 
-// supersedeGeneratedRecsLocked marks every still-generated recommendation of
-// sessionID superseded (copy-on-write, matching the generation-path
-// supersession). Caller holds e.mu and owns the dirty flag.
-func (e *Engine) supersedeGeneratedRecsLocked(sessionID string) {
+// invalidateSessionRecsLocked applies the late-loss invalidation to every
+// still-pending recommendation of sessionID (copy-on-write, matching the
+// generation-path supersession): generated → superseded; accepting →
+// LateLossInvalidated (the state itself stays accepting — the durable intent
+// must survive for the root's deterministic reconcile). Returns whether any
+// object changed. Caller holds e.mu and owns the dirty flag.
+func (e *Engine) invalidateSessionRecsLocked(sessionID string) bool {
 	var swapped []*Recommendation
-	for i, r := range e.recs {
-		if r.SessionID != sessionID || r.State != RecStateGenerated {
-			continue
-		}
+	mutate := func(i int, f func(*Recommendation)) {
 		if swapped == nil {
 			swapped = make([]*Recommendation, len(e.recs))
 			copy(swapped, e.recs)
 		}
-		c := r.clone()
-		c.State = RecStateSuperseded
+		c := e.recs[i].clone()
+		f(&c)
 		swapped[i] = &c
 	}
-	if swapped != nil {
-		e.recs = swapped
+	for i, r := range e.recs {
+		if r.SessionID != sessionID {
+			continue
+		}
+		switch {
+		case r.State == RecStateGenerated:
+			mutate(i, func(c *Recommendation) { c.State = RecStateSuperseded })
+		case r.State == RecStateAccepting && !r.LateLossInvalidated:
+			mutate(i, func(c *Recommendation) { c.LateLossInvalidated = true })
+		}
 	}
+	if swapped == nil {
+		return false
+	}
+	e.recs = swapped
+	return true
+}
+
+// schedulePersistLocked arms ONE background best-effort persist of a dirty
+// store (single-flight). Used by charge paths that run on request goroutines:
+// the mutation must become durable promptly (round 29), but a request
+// goroutine must not pay a full-store AtomicWrite per event. The goroutine
+// re-acquires e.mu, so a burst of charges coalesces into one save; a charge
+// landing after the flag reset re-arms a fresh pass. Callers hold e.mu.
+func (e *Engine) schedulePersistLocked() {
+	if !e.persistArmed.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		e.persistArmed.Store(false)
+		if e.dirty {
+			if err := e.saveLocked(); err != nil {
+				e.dirty = true
+			}
+		}
+	}()
 }
 
 // AggregateOverview is the bounded factual summary of one session's

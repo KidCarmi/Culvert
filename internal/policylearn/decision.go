@@ -111,9 +111,41 @@ func (e *Engine) FinalizeAccept(id, actor string) (Recommendation, error) {
 		if r.State != RecStateAccepting {
 			return stateErr(r.State)
 		}
+		// Round 29: a late loss charge flagged this intent AFTER it latched —
+		// the evidence understates loss, so accepted must never latch from it.
+		// The flag is set under the same e.mu this mutation holds, so there is
+		// no interleaving in which a flagged intent slips through; the root
+		// resolves the refusal (compensating draft delete + supersede).
+		if r.LateLossInvalidated {
+			return ErrAcceptInvalidatedByLateLoss
+		}
 		r.State = RecStateAccepted
 		r.AcceptedAt = rfc3339(e.cfg.Now())
 		r.AcceptedBy = actor
+		return nil
+	})
+}
+
+// SupersedeInvalidatedAccept resolves an accepting intent whose evidence was
+// invalidated by a late loss charge (round 29): accepting+flag → superseded,
+// clearing TargetRuleID — the root calls this ONLY after compensating away any
+// candidate draft rule the intent created, so the linkage is dead. Idempotent
+// on superseded; every other state (including an UN-flagged accepting intent)
+// refuses with its state sentinel.
+func (e *Engine) SupersedeInvalidatedAccept(id string) (Recommendation, error) {
+	e.mu.Lock()
+	if cur := e.findRecLocked(id); cur != nil && cur.State == RecStateSuperseded {
+		out := cur.clone()
+		e.mu.Unlock()
+		return out, nil
+	}
+	e.mu.Unlock()
+	return e.mutateRecommendation(id, func(r *Recommendation) error {
+		if r.State != RecStateAccepting || !r.LateLossInvalidated {
+			return stateErr(r.State)
+		}
+		r.State = RecStateSuperseded
+		r.TargetRuleID = ""
 		return nil
 	})
 }
