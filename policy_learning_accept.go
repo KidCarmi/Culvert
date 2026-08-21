@@ -223,10 +223,17 @@ func plAcceptRecommendation(eng *policylearn.Engine, recID string, ifVersion int
 	// failure rolled the append back and is returned, so Learning is never
 	// told a durable rule exists when it does not. The intent stays pending
 	// (retryable); FinalizeAccept is unreachable on this path.
-	added, err := policyDraft.stageDurableAppend(actor, ifVersion, rule)
+	added, err := policyDraft.stageDurableAppendArmed(actor, ifVersion, rule)
 	if err != nil {
 		if errors.Is(err, errDraftVersionConflict) {
 			return plAcceptOutcome{}, fmt.Errorf("%v: %w", err, errAcceptVersionConflict)
+		}
+		if errors.Is(err, errDraftModeDisarmed) {
+			// The admin disarmed Require Commit between the earlier unlocked
+			// check and the locked mutation (Codex fix) — same refusal as an
+			// unarmed accept; the intent stays pending for a retry after
+			// re-arming.
+			return plAcceptOutcome{}, errAcceptRequiresDraftMode
 		}
 		return plAcceptOutcome{}, err
 	}

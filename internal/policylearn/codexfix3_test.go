@@ -364,6 +364,24 @@ func TestScopesFor_EqualFoldEquivalentsShareOneScope(t *testing.T) {
 	}
 }
 
+// TestScopesFor_DistinctFoldCyclesStayDistinct (round 11): the canonical fold
+// must never MERGE distinct EqualFold cycles — İ (U+0130) is a singleton
+// cycle (EqualFold("İ","i") is false), but an unconditional ToLower mapped it
+// onto ASCII i, so a group named İ would be recommended as (and authorize)
+// the different ASCII-I population.
+func TestScopesFor_DistinctFoldCyclesStayDistinct(t *testing.T) {
+	got := scopesFor(&Observation{Subject: "u", Groups: []string{"İT", "it"}}, nil)
+	if len(got) != 2 {
+		t.Fatalf("EqualFold-DISTINCT groups merged into one scope: %v", got)
+	}
+	for _, s := range got {
+		folded := s[len(scopeGroupPrefix):]
+		if folded != "it" && !strings.EqualFold(folded, "İT") {
+			t.Fatalf("scope %q is EqualFold-equal to neither source group", folded)
+		}
+	}
+}
+
 // TestClose_PersistsTransportOnlyDeltas (round 5): a transport-only counter
 // change after the last cadence save (an empty-host rejection, a consumer
 // panic) modifies the active session's TransportWindow at Close's final sync

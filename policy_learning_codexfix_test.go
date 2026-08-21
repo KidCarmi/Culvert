@@ -370,6 +370,45 @@ func TestCodexFix_DurableProofPersistsVerifiedSnapshot(t *testing.T) {
 	t.Fatalf("target %s missing from the durable draft", targetID)
 }
 
+// TestCodexFix_AcceptRefusedWhenDraftModeDisarmedAtStagingMoment (round 11):
+// the accept's unlocked Require-Commit check races the admin disarm path —
+// the mode must be re-verified INSIDE the durable append's critical section,
+// and the disarm must serialize on the same lock, so a staged rule can never
+// land in a draft behind a disarmed mode.
+func TestCodexFix_AcceptRefusedWhenDraftModeDisarmedAtStagingMoment(t *testing.T) {
+	plDurableDraftHarness(t)
+	setRequireCommit(true)
+
+	// The disarm landing between the handler's check and the staging moment,
+	// made deterministic: the locked primitive must refuse.
+	setRequireCommit(false)
+	disabled := false
+	rule := PolicyRule{
+		ID: newRuleID(), Name: "disarm-race", SourceGroup: "g", DestCategory: "m5b-cat",
+		Action: ActionAllow, SSLAction: SSLInspect, Enabled: &disabled,
+	}
+	stampRuleMetadataForWrite(&rule, nil, "codexfix")
+	ver, _ := effectivePolicyVersion()
+	if _, err := policyDraft.stageDurableAppendArmed("codexfix", ver, rule); !errors.Is(err, errDraftModeDisarmed) {
+		t.Fatalf("disarmed draft mode did not refuse the armed append (err=%v)", err)
+	}
+	if policyDraft.active() {
+		t.Fatal("refused append still opened a draft")
+	}
+
+	// And the disarm side: with an ACTIVE draft the atomic disarm refuses.
+	setRequireCommit(true)
+	if _, err := policyDraft.stageDurableAppendArmed("codexfix", ver, rule); err != nil {
+		t.Fatalf("armed append: %v", err)
+	}
+	if err := policyDraft.disarmRequireCommit(); err == nil {
+		t.Fatal("disarm succeeded with an active draft")
+	}
+	if !requireCommitEnabled() {
+		t.Fatal("failed disarm still cleared the flag")
+	}
+}
+
 // TestPolicyContentIdentity_IgnoresProvenanceStamps (Codex round 4): the
 // policy CONTENT hash pins what the policy SAYS — stampRuleMetadataForWrite
 // restamps ModifiedAt/By on EVERY save, so a semantically identical re-save

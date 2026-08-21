@@ -227,6 +227,48 @@ var (
 func (c *policyDraftCoordinator) stageDurableAppend(actor string, expectedVersion int64, rule PolicyRule) (PolicyRule, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.stageDurableAppendLocked(actor, expectedVersion, rule)
+}
+
+// errDraftModeDisarmed: a draft-mode-REQUIRING durable append found Require
+// Commit disarmed at the locked moment of the mutation (see
+// stageDurableAppendArmed).
+var errDraftModeDisarmed = errors.New("draft mode (Require Commit) is not armed")
+
+// stageDurableAppendArmed is stageDurableAppend for callers whose semantics
+// REQUIRE draft mode (the learning accept): Require Commit is re-verified
+// INSIDE the same critical section as the mutation (Codex fix) — the caller's
+// earlier unlocked check races the admin disarm path, which used to observe
+// "no active draft" before this append opened the fork, disarm the mode, and
+// leave the freshly staged rule in a draft hidden from effective policy
+// views. Disarm itself now serializes on c.mu (disarmRequireCommit), so
+// either the disarm wins (this refuses) or the append wins (the draft is
+// active and the disarm refuses).
+func (c *policyDraftCoordinator) stageDurableAppendArmed(actor string, expectedVersion int64, rule PolicyRule) (PolicyRule, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !requireCommitEnabled() {
+		return PolicyRule{}, errDraftModeDisarmed
+	}
+	return c.stageDurableAppendLocked(actor, expectedVersion, rule)
+}
+
+// disarmRequireCommit turns Require Commit off ATOMICALLY with the
+// active-draft check, under the same coordinator lock the durable-append
+// primitives hold (Codex fix): the handler's detached check-then-set could
+// interleave with an acceptance opening the first draft, stranding staged
+// changes behind a disarmed mode.
+func (c *policyDraftCoordinator) disarmRequireCommit() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.state.Active {
+		return errors.New("a draft with pending changes exists — commit or revert it before disabling commit mode")
+	}
+	setRequireCommit(false)
+	return nil
+}
+
+func (c *policyDraftCoordinator) stageDurableAppendLocked(actor string, expectedVersion int64, rule PolicyRule) (PolicyRule, error) {
 	var cur int64
 	if c.state.Active {
 		cur, _ = c.cand.policyVersion()
@@ -828,11 +870,17 @@ func apiPolicyDraft(w http.ResponseWriter, r *http.Request) {
 		}
 		// Disarming while a dirty draft is pending would strand staged changes
 		// the operator believed were in flight — force an explicit commit/revert.
-		if !body.RequireCommit && policyDraft.active() {
-			http.Error(w, "a draft with pending changes exists — commit or revert it before disabling commit mode", http.StatusConflict)
-			return
+		// The check and the flag flip are ONE critical section on the
+		// coordinator lock (Codex fix): a detached check could interleave with
+		// a learning acceptance opening the first draft.
+		if !body.RequireCommit {
+			if err := policyDraft.disarmRequireCommit(); err != nil {
+				http.Error(w, err.Error(), http.StatusConflict)
+				return
+			}
+		} else {
+			setRequireCommit(true)
 		}
-		setRequireCommit(body.RequireCommit)
 		adminSettingsSave()
 		mode := boolToOnOff(body.RequireCommit) // constant "on"/"off" — breaks the taint flow (CodeQL log-injection)
 		auditEvent(r, "policy.draft.mode", mode, "")

@@ -130,20 +130,35 @@ func classifyStatus(status string) evidenceClass {
 // strings.ToLower alone is NOT that equivalence for Unicode — Σ/ς/σ (and
 // S/ſ, K/U+212A) compare equal under EqualFold but lower to different
 // strings (Codex fix). EqualFold's per-rune equivalence classes are the
-// unicode.SimpleFold cycles, so the canonical rune is derived from the
-// cycle's minimum (a cycle invariant), lowercased so ASCII keeps its
-// familiar form: two strings map equal here exactly when EqualFold reports
+// unicode.SimpleFold cycles, so the canonical rune is a fixed member of the
+// cycle: the cycle's minimum, replaced by its ToLower form ONLY when that
+// form belongs to the SAME cycle (Codex round-11 fix — an unconditional
+// ToLower merged DISTINCT cycles: İ/U+0130 is a singleton cycle,
+// EqualFold("İ","i") is false, yet ToLower maps it onto ASCII i, so a group
+// named İ would be recommended as — and authorize — the different ASCII-I
+// population). The representative is always a member of its own cycle, so
+// distinct cycles keep distinct representatives, ASCII keeps its familiar
+// lowercase form, and two strings map equal exactly when EqualFold reports
 // them equal.
 func foldGroup(g string) string {
-	return strings.Map(func(r rune) rune {
-		low := r
-		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
-			if f < low {
-				low = f
+	return strings.Map(canonicalFoldRune, strings.TrimSpace(g))
+}
+
+func canonicalFoldRune(r rune) rune {
+	rep := r
+	for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+		if f < rep {
+			rep = f
+		}
+	}
+	if low := unicode.ToLower(rep); low != rep {
+		for f := unicode.SimpleFold(rep); f != rep; f = unicode.SimpleFold(f) {
+			if f == low {
+				return low
 			}
 		}
-		return unicode.ToLower(low)
-	}, strings.TrimSpace(g))
+	}
+	return rep
 }
 
 // scopesFor returns the population scopes an observation contributes to.
