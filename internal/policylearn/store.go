@@ -175,6 +175,18 @@ func decodeEnvelope(raw []byte) (*persistEnvelope, error) { //nolint:cyclop // o
 		default:
 			return nil, fmt.Errorf("decode session store: unknown session state %q", s.State)
 		}
+		// A syntactically valid store can still carry `"cells":{"…":null}`
+		// (corruption or a hand edit); the aggregate consumers dereference
+		// cell fields, so a nil cell would panic every later generation for
+		// the session (Codex fix) — corrupt stores go to quarantine, never
+		// partially honored.
+		if s.Agg != nil {
+			for key, c := range s.Agg.Cells {
+				if c == nil {
+					return nil, fmt.Errorf("decode session store: session %s carries a null aggregate cell %q", s.ID, key)
+				}
+			}
+		}
 	}
 	// One-active is a load-bearing invariant, so enforce it at decode (Codex
 	// fix): with two Learning records, load would aggregate into the LAST one

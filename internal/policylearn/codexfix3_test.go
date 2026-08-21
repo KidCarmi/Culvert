@@ -469,6 +469,33 @@ func TestLoad_LegacyUnpinnedSessionWithTokensRecordsDiscontinuity(t *testing.T) 
 	}
 }
 
+// TestLoad_RejectsNullAggregateCellToQuarantine (round 12): a syntactically
+// valid store carrying `"cells":{"…":null}` must quarantine at decode — the
+// aggregate consumers dereference cell fields, so a nil cell would panic
+// every later recommendation generation for the session.
+func TestLoad_RejectsNullAggregateCellToQuarantine(t *testing.T) {
+	dir := t.TempDir()
+	raw := `{"schema_version":7,"sessions":[` +
+		`{"id":"a","state":"completed","created_at":"2026-08-13T12:00:00Z","started_at":"2026-08-13T12:00:00Z",` +
+		`"stopped_at":"2026-08-13T13:00:00Z","created_by":"op","stopped_by":"op","baseline":{},` +
+		`"agg":{"cells":{"g:eng\\u001fBusiness":null}}}]}`
+	if err := os.WriteFile(filepath.Join(dir, "policy_learning.json"), []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var quarantined error
+	clk := newTestClock()
+	e := newTestEngine(t, dir, clk, func(c *Config) {
+		c.Quarantine = func(_ string, err error) { quarantined = err }
+	})
+	t.Cleanup(func() { _ = e.Close() })
+	if quarantined == nil || !strings.Contains(quarantined.Error(), "null aggregate cell") {
+		t.Fatalf("null-cell store not quarantined (err=%v)", quarantined)
+	}
+	if n := len(e.Sessions()); n != 0 {
+		t.Fatalf("corrupt store partially honored: %d sessions loaded", n)
+	}
+}
+
 // TestObserve_GroupTruncationCountedOnlyOnAcceptedEnqueue (round 4):
 // GroupsTruncated means "an ACCEPTED observation carries incomplete group
 // context" — an over-wide observation dropped at a full queue must count as a
