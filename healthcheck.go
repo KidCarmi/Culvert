@@ -72,10 +72,54 @@ func computeHealth() healthReport {
 	}
 }
 
-// handleHealth returns liveness + readiness details for monitoring tools.
+// coarseClamAVStatus collapses ClamAVStatus()'s value to a fixed enum for the
+// UNAUTHENTICATED surface.
+//
+// ClamAVStatus returns "disabled", "connected", or the free-text
+// fmt.Sprintf("unreachable: %v", err) built from a live dial error — in
+// practice "unreachable: clamav: connect failed: dial tcp 10.0.1.5:3310:
+// connect: connection refused". That publishes the internal address and port of
+// the AV daemon, i.e. internal network topology, to any client that can reach
+// the proxy port, together with the fact that malware scanning is currently
+// down. It is the same string, from the same producer, that was removed from
+// the /ready `clamav` row — /health is served by the same
+// routeProxyListenerBuiltin dispatcher on the same unauthenticated listener and
+// was left carrying it verbatim.
+//
+// The enum is chosen so no monitoring predicate changes meaning: "disabled" and
+// "connected" pass through untouched, and every failure value already began
+// with the "unreachable" prefix this collapses to. Only the operator-only cause
+// is withheld, and it is not lost — it stays on the role-gated
+// /api/security-scan/status (`clamav_status`, which re-pings on cache miss) and
+// in the support bundle, where computeHealth's redact:"internal" tag is
+// actually honoured by Redactor.Classify.
+func coarseClamAVStatus(status string) string {
+	switch status {
+	case "disabled", "connected":
+		return status
+	default:
+		return "unreachable"
+	}
+}
+
+// handleHealth returns liveness + posture for monitoring tools.
+//
+// This handler is reachable ONLY through routeProxyListenerBuiltin (pac.go) on
+// the PROXY listener, which main.go dispatches BEFORE handleRequest — so there
+// is no proxy authentication, no admin session, and no IP guard in front of it.
+// Every client that can use the gateway can read whatever is written here.
+//
+// computeHealth's other consumer is the support-bundle collector, which passes
+// the struct through Redactor.Classify and therefore honours the
+// redact:"internal" tags on ClamAV/CAExpiresDays/SSLInspection/
+// ThreatFeedEntries. This path has no such filter, so any narrowing for the
+// public surface belongs here rather than in computeHealth, which must keep
+// returning the full posture for the bundle.
 func handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(computeHealth()); err != nil {
+	report := computeHealth()
+	report.ClamAV = coarseClamAVStatus(report.ClamAV)
+	if err := json.NewEncoder(w).Encode(report); err != nil {
 		logger.Printf("handleHealth encode: %v", err)
 	}
 }
@@ -148,15 +192,43 @@ func appendStateFileChecks(checks map[string]*readinessCheck) {
 // — which still work — down with it. An operator who wants those nodes ejected
 // opts in via /ready?strict=1.
 //
-// The detail is a FIXED string. /ready is served unauthenticated on the proxy
-// port, and the underlying error names the CA's exact NotAfter — an
-// unauthenticated "this gateway's inspection CA expired at T" is a fingerprint
-// of a security-degraded node. The full detail stays in the logs, the alert,
-// /healthz (internal) and the role-gated admin API.
+// EVERY detail on this row is a FIXED string. /ready is served unauthenticated
+// on the proxy port — the same port every client on the network already dials —
+// so anything written here is readable by any user, not just an operator.
+//
+// That applies to BOTH failing branches, and the load-failure one is why this
+// paragraph is stated as a rule rather than a note about the validity branch.
+// It used to pass sslInspectionLoadFailure() through verbatim, which is
+// "Root CA load/init failed for <bundle path>: <OS error> — SSL inspection
+// DISABLED (TLS traffic is tunnel-only: no scanning/DLP/CDR)". That published
+// the CA bundle's filesystem path AND an explicit, machine-readable
+// announcement that the gateway's inspection controls are off, to anyone who
+// can reach the proxy. An attacker or insider polling /ready learns exactly
+// when DLP/AV/CDR/DPI are down and can time exfiltration for that window —
+// the fingerprint of a security-degraded node this row must not hand out.
+//
+// The full detail is not lost: it stays in the process log, the
+// `ca_load_failed` alert, and the role-gated admin surfaces. Status is
+// unchanged ("fail", still report-only), so probe and monitoring behaviour is
+// byte-identical — only the operator-only cause is withheld from the
+// unauthenticated surface.
+//
+// The detail also does not state the ENFORCEMENT POSTURE, which is the part
+// that actually arms an attacker. "ca: fail" alone says a named subsystem is
+// degraded; it does not say which way it fails, and the two directions are
+// opposite. A load failure degrades to tunnel-only BYPASS — traffic flows
+// UNINSPECTED — so spelling that out hands an unauthenticated observer the
+// exfiltration window directly. (The validity branch below fails CLOSED, i.e.
+// refuses traffic, which is why naming its posture is not the same hazard.)
+// Withholding it costs the operator nothing: they are being pointed at the log,
+// which carries the cause and the consequence in full.
 func appendCAReadinessCheck(checks map[string]*readinessCheck) {
 	switch {
 	case sslInspectionLoadFailure() != "":
-		checks["ca"] = &readinessCheck{Status: "fail", Detail: sslInspectionLoadFailure()}
+		checks["ca"] = &readinessCheck{
+			Status: "fail",
+			Detail: "configured root CA is unavailable — see server logs",
+		}
 	case !certMgr.Ready():
 		// Not configured yet — no row at all (pre-CHAOS-06 baseline behavior).
 	case certMgr.Usable() != nil:
@@ -184,6 +256,25 @@ func computeReadiness() (report readinessReport, code int) {
 	appendCAReadinessCheck(checks)
 
 	// 2. ClamAV: if scanner is initialised, verify connectivity.
+	//
+	// The detail is FIXED for the same reason as the `ca` row above: this
+	// endpoint is unauthenticated on the proxy port, and ClamAVStatus()'s
+	// non-connected value is a raw dial error ("unreachable: clamav: connect
+	// failed: dial tcp 10.0.1.5:3310: connect: connection refused") that
+	// publishes the internal address and port of the AV daemon — internal
+	// network topology, handed to any client that can reach the proxy, together
+	// with the fact that AV scanning is currently down. The gating verdict is
+	// unchanged: this row still fails readiness, exactly as before.
+	//
+	// It points at the ADMIN SURFACE rather than at the log, unlike the `ca` row
+	// above, and the difference is not cosmetic. ClamAV's ping error is logged
+	// only by Scanner.Init (startup and reconfigure); ClamAVStatus caches it and
+	// logs nothing. A daemon that dies at RUNTIME — a restart, an OOM, a crashed
+	// container, which is the ordinary case — therefore produces a failing row
+	// with no corresponding log line at all, so "see server logs" would send an
+	// operator to a source that need not mention the outage. The live cause is
+	// always on the role-gated /api/security-scan/status (`clamav_status`),
+	// which re-pings on cache miss.
 	if globalSecScanner != nil {
 		st := globalSecScanner.ClamAVStatus()
 		switch st {
@@ -192,7 +283,10 @@ func computeReadiness() (report readinessReport, code int) {
 		case "connected":
 			checks["clamav"] = &readinessCheck{Status: "ok"}
 		default:
-			checks["clamav"] = &readinessCheck{Status: "fail", Detail: st}
+			checks["clamav"] = &readinessCheck{
+				Status: "fail",
+				Detail: "ClamAV unreachable — see Security Scanning status in the admin UI",
+			}
 			allOK = false
 		}
 	}

@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -19,7 +20,36 @@ type IdPType string
 const (
 	IdPTypeOIDC IdPType = "oidc"
 	IdPTypeSAML IdPType = "saml"
+	IdPTypeLDAP IdPType = "ldap"
 )
+
+// ─── Provider capability model (ADR-0025) ────────────────────────────────────
+//
+// Capabilities are a pure function of the IdP type, declared ONCE here and
+// consumed by every SSO/credential predicate. Before LDAP joined the registry,
+// "enabled registry profile" and "interactive SSO provider" were the same set,
+// and several per-request predicates leaned on that coincidence
+// (ssoCapable := HasEnabledProviders(), credCapable via HasEnabledOIDC()).
+// With a non-interactive, credential-capable type in the registry those
+// equations are wrong in both directions, so security decisions must go
+// through these capability predicates — never through raw type switches
+// scattered across the proxy.
+
+// Interactive reports whether providers of this type can drive a browser SSO
+// flow (captive portal / IdP selector / SSORequired). LDAP is deliberately
+// NEVER interactive: it must not appear on the SSO selector, mint captive
+// login URLs, count toward ssoCapable, or satisfy an SSORequired providerRef.
+func (t IdPType) Interactive() bool {
+	return t == IdPTypeOIDC || t == IdPTypeSAML
+}
+
+// CredentialCapable reports whether providers of this type can validate a
+// PRESENTED Basic credential (proxy username/password or token). SAML is
+// browser-only and excluded — counting it would re-open the identity-spoofing
+// hazard documented at resolveRequestAuth's credCapable predicate.
+func (t IdPType) CredentialCapable() bool {
+	return t == IdPTypeOIDC || t == IdPTypeLDAP
+}
 
 // IdPProfile is the persistent configuration for one identity provider.
 // Profiles are stored in a JSON file (idp_profiles.json) and managed
@@ -38,9 +68,10 @@ type IdPProfile struct {
 	// the authoritative source.
 	KnownGroups []string `json:"knownGroups,omitempty"`
 
-	// Only one of OIDC/SAML is populated depending on Type.
+	// Only one of OIDC/SAML/LDAP is populated depending on Type.
 	OIDC *OIDCProfileConfig `json:"oidc,omitempty"`
 	SAML *SAMLProfileConfig `json:"saml,omitempty"`
+	LDAP *LDAPProfileConfig `json:"ldap,omitempty"`
 }
 
 // OIDCProfileConfig holds OIDC-specific settings for an IdP profile.
@@ -166,20 +197,42 @@ func (r *IdPRegistry) Load(path string) error {
 	return nil
 }
 
-// save persists current profiles to the JSON file (must be called under lock).
+// errIdPPersistFailed marks a registry mutation that failed at the PERSIST
+// step. The transactional mutation model (P1-3) guarantees nothing published
+// changed when this is returned; API handlers map it to 500 (the request was
+// valid — the appliance could not store it) rather than 400.
+var errIdPPersistFailed = errors.New("idp: persisting the profile registry failed; no change was applied")
+
+// persist writes the CANDIDATE profile set to the JSON file (called under
+// lock, BEFORE the candidate is published — see the mutation model below).
 // The write is atomic (temp file + fsync + rename) so a crash mid-write can
 // never truncate or corrupt the on-disk registry — Load fails startup on
 // corrupt JSON, so a torn write would brick the proxy at next boot.
-func (r *IdPRegistry) save() error {
+//
+// TRANSACTIONAL MUTATION MODEL (P1-3, shared by Upsert/Delete/ReplaceAll):
+//
+//	build next candidate profiles → validate → compile next live set
+//	    → persist(next) atomically
+//	    → ONLY on persist success: publish profiles+live under the lock
+//
+// A persistence failure therefore leaves the old profiles, old live
+// providers, and old credentials fully authoritative — the API reports
+// failure and nothing (audit success, cluster snapshot) is emitted for a
+// state that does not exist. In deliberate in-memory mode (path == "") the
+// warning is kept and the publish proceeds — explicit pre-existing behavior.
+func (r *IdPRegistry) persist(profiles []*IdPProfile) error {
 	if r.path == "" {
 		logger.Printf("IdP: WARNING — profile change is in-memory only and will be LOST on restart; set -idp-profiles-file (or proxy.idp_profiles_file) to persist")
 		return nil
 	}
-	data, err := json.MarshalIndent(r.profiles, "", "  ")
+	data, err := json.MarshalIndent(profiles, "", "  ")
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %v", errIdPPersistFailed, err)
 	}
-	return atomicWriteFile(r.path, data, 0o600)
+	if err := atomicWriteFile(r.path, data, 0o600); err != nil {
+		return fmt.Errorf("%w: %v", errIdPPersistFailed, err)
+	}
+	return nil
 }
 
 // Persisted reports whether profile changes are written to disk. False means
@@ -218,8 +271,8 @@ func validateUpsertProfile(p *IdPProfile) error {
 	if err := validateReservedIdPNaming(p); err != nil {
 		return err
 	}
-	if p.Type != IdPTypeOIDC && p.Type != IdPTypeSAML {
-		return fmt.Errorf("idp: type must be 'oidc' or 'saml'")
+	if p.Type != IdPTypeOIDC && p.Type != IdPTypeSAML && p.Type != IdPTypeLDAP {
+		return fmt.Errorf("idp: type must be 'oidc', 'saml', or 'ldap'")
 	}
 	// Security: validate issuer/metadata URLs before compiling.
 	if p.Type == IdPTypeOIDC && p.OIDC != nil {
@@ -232,7 +285,22 @@ func validateUpsertProfile(p *IdPProfile) error {
 			return fmt.Errorf("idp saml: %w", err)
 		}
 	}
+	if p.Type == IdPTypeLDAP {
+		if err := validateLDAPProfileConfig(p.LDAP); err != nil {
+			return fmt.Errorf("idp ldap: %w", err)
+		}
+	}
 	return nil
+}
+
+// normalizeIdPProfileWriteInput strips response-only metadata a client may
+// echo back on write (the GET projection is round-trippable by design). The
+// stored profile must never carry the derived BindCredentialConfigured bit —
+// publicIdPProfile recomputes it from the stored credential on every read.
+func normalizeIdPProfileWriteInput(p *IdPProfile) {
+	if p != nil && p.LDAP != nil {
+		p.LDAP.BindCredentialConfigured = false
+	}
 }
 
 func (r *IdPRegistry) Upsert(p *IdPProfile) error {
@@ -241,6 +309,7 @@ func (r *IdPRegistry) Upsert(p *IdPProfile) error {
 		rand.Read(b) //nolint:errcheck // crypto/rand.Read never returns an error on supported platforms
 		p.ID = hex.EncodeToString(b)
 	}
+	normalizeIdPProfileWriteInput(p)
 	if err := validateUpsertProfile(p); err != nil {
 		return err
 	}
@@ -257,27 +326,36 @@ func (r *IdPRegistry) Upsert(p *IdPProfile) error {
 		compiled = prov
 	}
 
-	// Replace or append.
+	// Build the CANDIDATE state on copies — the published slice/map must not
+	// be touched until persistence succeeds (P1-3 transactional model).
+	nextProfiles := make([]*IdPProfile, len(r.profiles))
+	copy(nextProfiles, r.profiles)
 	found := false
-	for i, existing := range r.profiles {
+	for i, existing := range nextProfiles {
 		if existing.ID == p.ID {
-			r.profiles[i] = p
+			nextProfiles[i] = p
 			found = true
 			break
 		}
 	}
 	if !found {
-		r.profiles = append(r.profiles, p)
+		nextProfiles = append(nextProfiles, p)
 	}
-
-	// Recompile live provider if enabled.
+	nextLive := make(map[string]IdentityProvider, len(r.live)+1)
+	for id, prov := range r.live {
+		nextLive[id] = prov
+	}
 	if p.Enabled {
-		r.live[p.ID] = compiled
+		nextLive[p.ID] = compiled
 	} else {
-		delete(r.live, p.ID)
+		delete(nextLive, p.ID)
 	}
 
-	return r.save()
+	if err := r.persist(nextProfiles); err != nil {
+		return err // old profiles + old live providers stay authoritative
+	}
+	r.profiles, r.live = nextProfiles, nextLive
+	return nil
 }
 
 func validateSAMLProfileConfig(cfg *SAMLProfileConfig) error {
@@ -310,21 +388,39 @@ func compileIdPProfile(p *IdPProfile) (IdentityProvider, error) {
 			return nil, fmt.Errorf("saml profile missing saml config")
 		}
 		return NewSAMLProvider(p)
+	case IdPTypeLDAP:
+		if p.LDAP == nil {
+			return nil, fmt.Errorf("ldap profile missing ldap config")
+		}
+		return NewLDAPIdPProvider(p)
 	default:
 		return nil, fmt.Errorf("unknown IdP type %q", p.Type)
 	}
 }
 
-// Delete removes a profile by ID.
+// Delete removes a profile by ID (transactional: persisted before published,
+// so a persist failure leaves the profile and its live provider active).
 func (r *IdPRegistry) Delete(id string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for i, p := range r.profiles {
-		if p.ID == id {
-			r.profiles = append(r.profiles[:i], r.profiles[i+1:]...)
-			delete(r.live, id)
-			return r.save()
+		if p.ID != id {
+			continue
 		}
+		nextProfiles := make([]*IdPProfile, 0, len(r.profiles)-1)
+		nextProfiles = append(nextProfiles, r.profiles[:i]...)
+		nextProfiles = append(nextProfiles, r.profiles[i+1:]...)
+		nextLive := make(map[string]IdentityProvider, len(r.live))
+		for lid, prov := range r.live {
+			if lid != id {
+				nextLive[lid] = prov
+			}
+		}
+		if err := r.persist(nextProfiles); err != nil {
+			return err // the profile stays stored AND live
+		}
+		r.profiles, r.live = nextProfiles, nextLive
+		return nil
 	}
 	return fmt.Errorf("idp %q not found", id)
 }
@@ -350,11 +446,14 @@ func (r *IdPRegistry) All() []*IdPProfile {
 
 // ReplaceAll atomically swaps the registry to match profiles. Enabled
 // providers are compiled before the swap so callers never observe a
-// half-applied IdP snapshot.
+// half-applied IdP snapshot, and the candidate is PERSISTED before it is
+// published (P1-3): a persistence failure rejects the whole replacement and
+// the previous set — including on a DP applying a CP snapshot — stays live.
 func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 	nextProfiles := cloneIdPProfiles(profiles)
 	nextLive := make(map[string]IdentityProvider)
 	for _, p := range nextProfiles {
+		normalizeIdPProfileWriteInput(p)
 		if err := validateIdPProfile(p); err != nil {
 			return err
 		}
@@ -370,9 +469,12 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if err := r.persist(nextProfiles); err != nil {
+		return err // the previous profile set + live providers stay authoritative
+	}
 	r.profiles = nextProfiles
 	r.live = nextLive
-	return r.save()
+	return nil
 }
 
 // validateReservedIdPNaming rejects IdP profile IDs and names that collide with
@@ -409,8 +511,8 @@ func validateIdPProfile(p *IdPProfile) error {
 	if err := validateReservedIdPNaming(p); err != nil {
 		return err
 	}
-	if p.Type != IdPTypeOIDC && p.Type != IdPTypeSAML {
-		return fmt.Errorf("idp: type must be 'oidc' or 'saml'")
+	if p.Type != IdPTypeOIDC && p.Type != IdPTypeSAML && p.Type != IdPTypeLDAP {
+		return fmt.Errorf("idp: type must be 'oidc', 'saml', or 'ldap'")
 	}
 	if p.Type == IdPTypeOIDC {
 		if p.OIDC == nil {
@@ -423,6 +525,11 @@ func validateIdPProfile(p *IdPProfile) error {
 	if p.Type == IdPTypeSAML {
 		if err := validateSAMLProfileConfig(p.SAML); err != nil {
 			return fmt.Errorf("idp saml: %w", err)
+		}
+	}
+	if p.Type == IdPTypeLDAP {
+		if err := validateLDAPProfileConfig(p.LDAP); err != nil {
+			return fmt.Errorf("idp ldap: %w", err)
 		}
 	}
 	return nil
@@ -447,33 +554,87 @@ func cloneIdPProfiles(profiles []*IdPProfile) []*IdPProfile {
 			saml := *p.SAML
 			cp.SAML = &saml
 		}
+		if p.LDAP != nil {
+			ldap := *p.LDAP
+			cp.LDAP = &ldap
+		}
 		out = append(out, &cp)
 	}
 	return out
 }
 
-// publicIdPProfile returns a response-safe copy. Client secrets and uploaded
-// SAML metadata XML are write-only API inputs and must not be exposed through
-// viewer/admin read responses.
+// publicIdPProfile returns a response-safe copy. Client secrets, uploaded
+// SAML metadata XML, and the LDAP bind credential are write-only API inputs
+// and must not be exposed through viewer/admin read responses.
+//
+// This is an explicit ALLOWLIST projection, deliberately not a struct copy
+// with the secret fields blanked afterwards: a copy still aliases (or is
+// derived from) secret-bearing memory, which both taint analysis (CodeQL
+// clear-text-logging, which does not strong-update pointer fields) and a
+// future refactor can trip over. Rebuilding every sub-config from named
+// non-secret fields makes the projection provably secret-free by
+// construction. Field-completeness is pinned by
+// TestPublicIdPProfile_ProjectionParity — adding a profile field means
+// adding it here (or to the declared redaction set) or that test fails.
 func publicIdPProfile(p *IdPProfile) *IdPProfile {
 	if p == nil {
 		return nil
 	}
-	cp := *p
-	cp.EmailDomains = append([]string(nil), p.EmailDomains...)
-	cp.KnownGroups = append([]string(nil), p.KnownGroups...)
+	cp := &IdPProfile{
+		ID:           p.ID,
+		Name:         p.Name,
+		Type:         p.Type,
+		EmailDomains: append([]string(nil), p.EmailDomains...),
+		Enabled:      p.Enabled,
+		Priority:     p.Priority,
+		KnownGroups:  append([]string(nil), p.KnownGroups...),
+	}
 	if p.OIDC != nil {
-		oidc := *p.OIDC
-		oidc.Scopes = append([]string(nil), p.OIDC.Scopes...)
-		oidc.ClientSecret = ""
-		cp.OIDC = &oidc
+		cp.OIDC = &OIDCProfileConfig{
+			Issuer:   p.OIDC.Issuer,
+			ClientID: p.OIDC.ClientID,
+			// ClientSecret: write-only input, redacted.
+			Scopes:                append([]string(nil), p.OIDC.Scopes...),
+			GroupsClaim:           p.OIDC.GroupsClaim,
+			RequiredScope:         p.OIDC.RequiredScope,
+			RequiredAudience:      p.OIDC.RequiredAudience,
+			TLSSkipVerify:         p.OIDC.TLSSkipVerify,
+			AuthorizationEndpoint: p.OIDC.AuthorizationEndpoint,
+			TokenEndpoint:         p.OIDC.TokenEndpoint,
+			IntrospectionEndpoint: p.OIDC.IntrospectionEndpoint,
+			UserinfoEndpoint:      p.OIDC.UserinfoEndpoint,
+			JWKsURI:               p.OIDC.JWKsURI,
+		}
 	}
 	if p.SAML != nil {
-		saml := *p.SAML
-		saml.MetadataXML = ""
-		cp.SAML = &saml
+		cp.SAML = &SAMLProfileConfig{
+			MetadataURL: p.SAML.MetadataURL,
+			// MetadataXML: write-only admin upload, redacted.
+			NameIDFormat:    p.SAML.NameIDFormat,
+			GroupsAttribute: p.SAML.GroupsAttribute,
+			EmailAttribute:  p.SAML.EmailAttribute,
+			NameAttribute:   p.SAML.NameAttribute,
+		}
 	}
-	return &cp
+	if p.LDAP != nil {
+		cp.LDAP = &LDAPProfileConfig{
+			URL:           p.LDAP.URL,
+			StartTLS:      p.LDAP.StartTLS,
+			TLSSkipVerify: p.LDAP.TLSSkipVerify,
+			BindDN:        p.LDAP.BindDN,
+			// BindPassword: write-only input, redacted. Read surfaces expose
+			// only the derived BindCredentialConfigured metadata bit.
+			BindCredentialConfigured: p.LDAP.BindPassword != "",
+			BaseDN:                   p.LDAP.BaseDN,
+			UserFilter:               p.LDAP.UserFilter,
+			EmailAttribute:           p.LDAP.EmailAttribute,
+			NameAttribute:            p.LDAP.NameAttribute,
+			GroupAttribute:           p.LDAP.GroupAttribute,
+			RequiredGroup:            p.LDAP.RequiredGroup,
+			CacheTTLSeconds:          p.LDAP.CacheTTLSeconds,
+		}
+	}
+	return cp
 }
 
 func publicIdPProfiles(profiles []*IdPProfile) []*IdPProfile {
@@ -489,13 +650,16 @@ func publicIdPProfiles(profiles []*IdPProfile) []*IdPProfile {
 // RouteByDomain returns the enabled provider whose email domain matches.
 // When multiple providers match the same domain, the one with the lowest
 // Priority value wins (0 is treated as default = max int for sorting).
+// Only INTERACTIVE providers are eligible: RouteByDomain exists to pick the
+// browser-SSO destination for a captive redirect, and a non-interactive type
+// (LDAP) can never fulfil one — matching it would swallow the redirect.
 func (r *IdPRegistry) RouteByDomain(domain string) IdentityProvider {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	var bestProfile *IdPProfile
 	var bestProv IdentityProvider
 	for _, p := range r.profiles {
-		if !p.Enabled {
+		if !p.Enabled || !p.Type.Interactive() {
 			continue
 		}
 		for _, d := range p.EmailDomains {
@@ -563,6 +727,97 @@ func (r *IdPRegistry) HasEnabledProviders() bool {
 			if _, ok := r.live[p.ID]; ok {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// EnabledInteractiveProviders returns the live providers that can drive a
+// browser SSO flow (OIDC/SAML), in profile order. This is the ONLY accessor
+// interactive surfaces (captive portal, /auth/select) may iterate — a
+// non-interactive provider (LDAP) must never be offered a browser flow.
+func (r *IdPRegistry) EnabledInteractiveProviders() []IdentityProvider {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var out []IdentityProvider
+	for _, p := range r.profiles {
+		if p != nil && p.Enabled && p.Type.Interactive() {
+			if prov, ok := r.live[p.ID]; ok {
+				out = append(out, prov)
+			}
+		}
+	}
+	return out
+}
+
+// EnabledCredentialProviders returns the live providers that can validate a
+// PRESENTED Basic credential (OIDC introspection, LDAP bind), in profile
+// order. The proxy's Basic-auth arm iterates this — not EnabledProviders — so
+// browser-only providers are structurally excluded from credential
+// validation rather than relying on their ResolveIdentity returning false.
+func (r *IdPRegistry) EnabledCredentialProviders() []IdentityProvider {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var out []IdentityProvider
+	for _, p := range r.profiles {
+		if p != nil && p.Enabled && p.Type.CredentialCapable() {
+			if prov, ok := r.live[p.ID]; ok {
+				out = append(out, prov)
+			}
+		}
+	}
+	return out
+}
+
+// HasEnabledInteractiveProvider is the allocation-free boolean probe behind
+// resolveRequestAuth's per-request ssoCapable predicate: at least one enabled
+// profile of an INTERACTIVE type (OIDC/SAML) with a live compiled provider.
+// Before ADR-0025 this was HasEnabledProviders — correct only while every
+// registry type was interactive; an enabled LDAP profile must NOT make the
+// proxy advertise an SSO/captive flow it can never fulfil.
+// Allocation-free (pinned by the benchgate).
+func (r *IdPRegistry) HasEnabledInteractiveProvider() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, p := range r.profiles {
+		if p != nil && p.Enabled && p.Type.Interactive() {
+			if _, ok := r.live[p.ID]; ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// HasEnabledCredentialProvider is the allocation-free boolean probe behind
+// hasCredentialCapableProvider's registry term (resolveRequestAuth's
+// credCapable, per request): at least one enabled profile of a
+// CREDENTIAL-CAPABLE type (OIDC/LDAP). Like HasEnabledOIDC before it, this is
+// deliberately profile-level and NOT gated on a live compiled instance — a
+// compile failure must not silently flip the deployment into the no-backend
+// inert path. Allocation-free (pinned by the benchgate).
+func (r *IdPRegistry) HasEnabledCredentialProvider() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, p := range r.profiles {
+		if p != nil && p.Enabled && p.Type.CredentialCapable() {
+			return true
+		}
+	}
+	return false
+}
+
+// HasEnabledLDAP reports whether any profile is enabled with Type LDAP —
+// consulted by the legacy-YAML shadowing rule (ADR-0025 §authority): when an
+// enabled registry LDAP profile exists, the registry is the sole operational
+// LDAP authority and the legacy FileConfig.LDAP provider is not wired /
+// deactivated. Profile-level (not live-gated), matching HasEnabledOIDC.
+func (r *IdPRegistry) HasEnabledLDAP() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, p := range r.profiles {
+		if p != nil && p.Enabled && p.Type == IdPTypeLDAP {
+			return true
 		}
 	}
 	return false

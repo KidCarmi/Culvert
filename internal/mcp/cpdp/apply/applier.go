@@ -152,6 +152,104 @@ func (a *Applier) Apply(env *cpdp.Envelope) (*cpdp.Acknowledgement, error) {
 	return ack, nil
 }
 
+// RejectAck builds a hash-bound REJECTED acknowledgement for env WITHOUT mutating
+// any state. It is used by a transaction coordinator that decides, on grounds
+// outside this applier's own validation (e.g. a coupled rollout precondition that
+// fails closed), to reject an envelope BEFORE it is ever applied — so the active
+// snapshot is never staged. It mirrors the ack Apply itself returns on its internal
+// rejections: the ack is returned but pendingAck is left untouched (a rejection is
+// not a durable delivery obligation).
+func (a *Applier) RejectAck(env *cpdp.Envelope, cause error) *cpdp.Acknowledgement {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if env == nil {
+		return a.reject(&cpdp.Envelope{}, cause)
+	}
+	return a.reject(env, cause)
+}
+
+// AbortApplied compensates a just-succeeded Apply: it atomically reverts the active
+// pointer to the snapshot that was active BEFORE that Apply, persists the reverted
+// state (persist-before-swap), and REPLACES the pending Applied acknowledgement with
+// a Rejected one so no AckApplied can ever be delivered for the aborted envelope.
+//
+// It exists for a two-store transaction where distribution activation is the FIRST
+// durable half and a coupled second half (the node-local rollout commit) then fails:
+// the task contract forbids leaving a new distribution revision active while the
+// rollout was rejected, so the coordinator calls AbortApplied to restore the prior
+// active distribution state before returning failure. cause names the rollout error
+// that triggered the abort (bounded reason only in the ack).
+//
+// abortedHash BINDS the compensation to the exact envelope the caller applied. The
+// abort is refused, non-mutating, unless the currently-active content hash equals
+// abortedHash. Without that binding the method would revert "whatever is active
+// right now", so any interleaving Apply between the caller's Apply and its
+// compensation would silently roll back an UNRELATED, newer, validly-signed
+// snapshot — a fail-OPEN config regression driven purely by timing. The engine's
+// callers are expected to be serialized, but a compensation primitive must not
+// depend on a caller-side invariant it cannot check: this is the check.
+//
+// Ordering matches the rest of the engine: the reverted state is durably persisted
+// BEFORE the in-memory swap, so a crash mid-abort recovers the reverted (prior)
+// snapshot, never a half-abort. A persistence failure here (the compensating write
+// itself failing on a still-degraded disk) is returned to the caller with the active
+// pointer left on the aborted envelope; startup recovery reconciliation is the
+// documented backstop for that double-fault. The trusted epoch is never moved
+// backwards.
+func (a *Applier) AbortApplied(abortedHash string, cause error) (*cpdp.Acknowledgement, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	aborted := a.store.Active()
+	if aborted == nil {
+		// Nothing was applied — nothing to abort. Fail-closed, non-mutating.
+		return nil, mcperr.New(mcperr.ReasonSnapshotMalformed, "cpdp.apply.abort", "no active snapshot to abort")
+	}
+	// Bind the compensation to the envelope the caller actually applied. An empty
+	// binding is rejected too: an unbound abort is never a safe operation.
+	if abortedHash == "" || aborted.ContentHash != abortedHash {
+		return nil, mcperr.New(mcperr.ReasonSnapshotHashMismatch, "cpdp.apply.abort",
+			"active snapshot is not the envelope being aborted")
+	}
+	target := a.store.Previous() // the snapshot active before the aborted Apply (may be nil)
+	ack := a.reject(aborted, cause)
+	// The reject ack reports the POST-revert active state (the target we restore to),
+	// not the aborted envelope, so a status/ack reader sees the truthful active hash.
+	targetHash := ""
+	if target != nil {
+		targetHash = target.ContentHash
+	}
+	ack.ActiveHash = targetHash
+	ack.PreviousHash = ""
+
+	revs := cpdp.Revisions{}
+	if target != nil {
+		revs = target.Manifest.Revisions
+	}
+	st := &PersistedState{
+		Version:    persistStateVersion,
+		Capability: a.cfg.Capability,
+		Current:    target,
+		Previous:   nil, // drop the aborted envelope from retention
+		Epoch:      a.ratchet.Last(),
+		Revisions:  revs,
+		PendingAck: ack,
+	}
+	if perr := a.cfg.Store.Persist(st); perr != nil {
+		// The compensating write itself failed: leave the active pointer on the aborted
+		// envelope (we cannot durably prove the revert) and surface the failure. Recovery
+		// reconciliation converges this on the next restart.
+		return ack, perr
+	}
+	if err := a.store.Restore(target, nil); err != nil {
+		return ack, err
+	}
+	a.curPrepared = a.prevPrepared
+	a.prevPrepared = nil
+	a.pendingAck = ack
+	return ack, nil
+}
+
 // Recover reads and re-verifies persisted state at startup. It restores the
 // current/previous snapshots, seeds the trusted epoch, and restores the pending
 // acknowledgement. A corrupt or unverifiable state returns an error and leaves the

@@ -1747,13 +1747,78 @@ components:
       properties:
         id: { type: string }
         name: { type: string }
-        type: { type: string, enum: [oidc, saml] }
+        type: { type: string, enum: [oidc, saml, ldap] }
         emailDomains: { type: array, items: { type: string }, nullable: true }
         enabled: { type: boolean }
         priority: { type: integer }
         knownGroups: { type: array, items: { type: string }, nullable: true }
         oidc: { type: object, additionalProperties: true, nullable: true }
         saml: { type: object, additionalProperties: true, nullable: true }
+        ldap: { $ref: '#/components/schemas/LDAPProfileConfigInput' }
+    LDAPProfileConfigInput:
+      type: object
+      description: |
+        LDAP/Active Directory profile settings (ADR-0025). bindPassword is a
+        WRITE-ONLY input: never returned by reads, preserved when omitted on
+        update, cleared only when present and empty. Read responses carry the
+        derived bindCredentialConfigured flag instead.
+      required: [url, baseDn]
+      additionalProperties: false
+      nullable: true
+      properties:
+        url: { type: string, description: "ldap://host[:port] or ldaps://host[:port] (host[:port] only — no credentials, path, or query)." }
+        startTls: { type: boolean, description: "Upgrade a plain ldap:// connection with StartTLS. Invalid together with ldaps://." }
+        tlsSkipVerify: { type: boolean, description: "UNSAFE — disable certificate verification (self-signed dev directories only)." }
+        bindDn: { type: string, description: "Service-account DN used to locate users; empty = anonymous bind." }
+        bindPassword: { type: string, description: "Write-only service-account credential." }
+        bindCredentialConfigured: { type: boolean, description: "Read-only response metadata; ignored on write." }
+        baseDn: { type: string }
+        userFilter: { type: string, description: "Search filter template with exactly one %s placeholder. Default (sAMAccountName=%s)." }
+        emailAttribute: { type: string, description: "Default mail." }
+        nameAttribute: { type: string, description: "Default displayName." }
+        groupAttribute: { type: string, description: "Default memberOf; values are kept verbatim (full group DNs)." }
+        requiredGroup: { type: string, description: "Legacy provider-level access gate (direct membership). Prefer Access Rules over identity groups." }
+        cacheTtlSeconds: { type: integer, description: "Authoritative auth-result cache TTL. 0 = default (300)." }
+    IdPTestRequest:
+      type: object
+      required: [profile]
+      additionalProperties: false
+      properties:
+        profile: { $ref: '#/components/schemas/IdPProfileInput' }
+        testUsername: { type: string, description: "Optional directory login to run the full identity test." }
+        testPassword: { type: string, description: "Transient test credential — never persisted, logged, or audited." }
+    IdPTestReport:
+      type: object
+      required: [ok, steps]
+      additionalProperties: false
+      properties:
+        ok: { type: boolean }
+        steps:
+          type: array
+          items:
+            type: object
+            required: [name, label, ok]
+            additionalProperties: false
+            properties:
+              name: { type: string }
+              label: { type: string }
+              ok: { type: boolean }
+              skipped: { type: boolean }
+              durationMs: { type: integer, format: int64 }
+              detail: { type: string }
+              error: { type: string, description: "Sanitized, length-bounded server error text." }
+              action: { type: string, description: "Actionable operator hint for a failed stage." }
+        identity:
+          type: object
+          nullable: true
+          additionalProperties: false
+          required: [sub, groupCount]
+          properties:
+            sub: { type: string }
+            email: { type: string }
+            name: { type: string }
+            groupCount: { type: integer }
+            groups: { type: array, items: { type: string }, description: "Bounded sample of resolved groups." }
     SetPolicyDraftBody:
       type: object
       required: [require_commit]
@@ -8472,6 +8537,107 @@ paths:
               schema: { type: object, additionalProperties: true }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+
+  /api/idp/test:
+    post:
+      operationId: testIdP
+      tags: [auth]
+      summary: Test IdP directory connection
+      description: |
+        Run the staged, candidate-based directory test for an LDAP/Active
+        Directory IdP profile BEFORE persisting it: server reachability,
+        transport security (LDAPS/StartTLS), service-account bind, Base DN
+        search, and — optionally, when a transient test username/password is
+        supplied — a full user lookup + authentication + identity mapping.
+        The candidate profile is never persisted; an empty ldap.bindPassword
+        on a candidate that names an existing profile id reuses the stored
+        credential so edits never require retyping the secret. Test-user
+        passwords are transient: never persisted, logged, cached, or audited.
+        Errors are sanitized and bounded; the HTTP call returns 200 with the
+        per-step report even when the directory test fails.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: non-idempotent
+      x-culvert-introduced-version: 1.2.0
+      x-culvert-danger-level: low
+      x-culvert-audit-event: idp.test
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/IdPTestRequest' }
+      responses:
+        '200':
+          description: Staged directory-test report (ok=false when any stage failed).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IdPTestReport' }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/idp/legacy-ldap:
+    get:
+      operationId: getLegacyLDAP
+      tags: [auth]
+      summary: Legacy YAML LDAP summary
+      description: |
+        Non-secret summary of the legacy bootstrap `ldap:` block from
+        config.yaml, plus its authority state (active / shadowed by an
+        enabled registry LDAP profile). The bind credential is never
+        returned — only a bindCredentialConfigured flag. Used by the
+        Identity Providers screen to offer the explicit one-time import.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.2.0
+      responses:
+        '200':
+          description: Legacy YAML LDAP summary.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/idp/legacy-ldap/import:
+    post:
+      operationId: importLegacyLDAP
+      tags: [auth]
+      summary: Import legacy YAML LDAP configuration
+      description: |
+        Create a DISABLED LDAP IdP profile from the legacy bootstrap `ldap:`
+        block, copying every security-effective field (including the stored
+        bind credential, which never transits the browser). The administrator
+        then tests and enables the profile — the explicit, downgrade-safe
+        migration path into the IdP registry. The YAML file is never
+        modified. 404 when no legacy ldap block is configured.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: non-idempotent
+      x-culvert-introduced-version: 1.2.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: idp.import
+      responses:
+        '200':
+          description: The imported (disabled) LDAP IdP profile, secret-redacted.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404': { $ref: '#/components/responses/PlainNotFound' }
 
   /api/syslog:
     get:

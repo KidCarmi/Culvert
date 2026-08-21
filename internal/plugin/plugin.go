@@ -65,13 +65,19 @@ func Replace(ps []Middleware) []Middleware {
 // Decide runs all plugins in order and returns DecisionBlock on the
 // first plugin that blocks, or DecisionAllow if all pass.
 // A panicking plugin is recovered and treated as a pass-through to avoid
-// bringing down the proxy.
+// bringing down the proxy — but the panic is also reported to obs.ReportPanic
+// (component "plugin:<name>") so it lands in the same crash-records
+// metric/audit pipeline as every other recovered panic in the process,
+// instead of being visible only in the process log. A silently panicking
+// plugin fails open on every request; an admin needs a way to notice that
+// without grepping stdout.
 func Decide(clientIP, method, host string) Decision {
 	for _, p := range chain {
 		decision := func() (d Decision) {
 			defer func() {
 				if r := recover(); r != nil {
 					obs.Printf("Plugin[%s] panicked: %v — treated as Allow", p.Name(), r)
+					obs.ReportPanic("plugin:"+p.Name(), r)
 					d = DecisionAllow
 				}
 			}()
@@ -92,6 +98,7 @@ func OnResponse(resp *http.Response) {
 			defer func() {
 				if r := recover(); r != nil {
 					obs.Printf("Plugin[%s] panicked in OnResponse: %v", p.Name(), r)
+					obs.ReportPanic("plugin:"+p.Name(), r)
 				}
 			}()
 			p.OnResponse(resp)

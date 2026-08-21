@@ -296,6 +296,14 @@ func (s *CDRPolicyStore) Evaluate(clientIP, identity, authSource, host string, g
 	rules := s.rules
 	s.mu.RUnlock()
 
+	// Same per-scan hoist as policyStore.Evaluate: the destination's category
+	// depends on the host, not the rule, so resolving it inside the loop would
+	// pay an O(taxonomy) lookup — and a BadgerDB read transaction per domain
+	// label on a feed-backed deployment — once per CDR rule. See
+	// policy_hostcat.go.
+	normHost := normalizeHost(host)
+	catScratch := newHostCatScratch(host)
+
 	for i := range rules {
 		rule := rules[i]
 		if !cdrRuleIsEnabled(rule) {
@@ -321,7 +329,7 @@ func (s *CDRPolicyStore) Evaluate(clientIP, identity, authSource, host string, g
 		if !matchSchedule(rule.Schedule) {
 			continue
 		}
-		if !matchDest(syn, host) {
+		if !matchDestNorm(syn, host, normHost, &catScratch) {
 			continue
 		}
 		atomic.AddInt64(&rule.HitCount, 1)

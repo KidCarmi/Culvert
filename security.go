@@ -200,7 +200,7 @@ type RateLimiter struct {
 	window  atomic.Int64 // nanoseconds
 	enabled atomic.Bool
 
-	// Whitelist — exempt IPs/CIDRs that bypass rate limiting (e.g. monitoring).
+	// Exempt list — exempt IPs/CIDRs that bypass rate limiting (e.g. monitoring).
 	exemptMu   sync.RWMutex
 	exemptNets []*net.IPNet
 	exemptIPs  map[string]bool

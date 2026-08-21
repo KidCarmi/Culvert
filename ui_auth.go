@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -25,6 +26,52 @@ import (
 // each one landing in the uiUsers RBAC roster as a permanent, independently
 // usable admin login.
 var setupCompleteMu sync.Mutex
+
+// verifyLoginTOTP checks TOTP enrollment/code as part of an already
+// credential-accepted login. Returns true when the caller should proceed to
+// issue a session; false means this function already wrote the HTTP
+// response (the "totp_required" first-step prompt, an invalid-code error, or
+// a lockout) and the caller must return without writing anything further.
+func verifyLoginTOTP(w http.ResponseWriter, r *http.Request, clientIP, user, code string) bool {
+	if !cfg.UserHasTOTP(user) {
+		return true
+	}
+	if code == "" {
+		// First step: tell the client TOTP is required (no session yet).
+		jsonOK(w, map[string]any{"totp_required": true})
+		return false
+	}
+	secret := cfg.GetTOTPSecret(user)
+	lastCounter := cfg.GetTOTPLastCounter(user)
+	totpOK, matchedCounter := totp.VerifyTOTPReturnCounter(secret, code, time.Now().Unix(), lastCounter)
+	if totpOK {
+		// Persist the matched counter to close the replay window for this
+		// step and all earlier steps within the skew tolerance.
+		cfg.SetTOTPLastCounter(user, matchedCounter)
+		cfg.SaveUIUsersFile() //nolint:errcheck // best-effort persist
+		return true
+	}
+	if cfg.ConsumeBackupCode(user, code) {
+		// Backup code consumed — persist removal.
+		cfg.SaveUIUsersFile() //nolint:errcheck // best-effort persist
+		return true
+	}
+	// TOTP failures MUST feed the lockout counter — otherwise an attacker
+	// who has (or guesses) a valid password can brute-force the 6-digit OTP
+	// (1M possibilities) with only the 300 ms delay as a barrier.
+	nowLocked := loginLimiter.RecordFailure(clientIP, user)
+	cfg.SaveUIUsersFile() //nolint:errcheck // best-effort persist
+	auditEvent(r, "auth.totp.fail", user,
+		fmt.Sprintf("invalid TOTP, locked=%v, attempts_left=%d", nowLocked, loginLimiter.AttemptsLeft(clientIP, user)))
+	time.Sleep(300 * time.Millisecond)
+	if nowLocked {
+		_, secs := loginLimiter.Check(clientIP, user)
+		http.Error(w, LockoutMsg(secs), http.StatusTooManyRequests)
+		return false
+	}
+	http.Error(w, "Invalid TOTP code", http.StatusUnauthorized)
+	return false
+}
 
 // POST /api/auth/login — validate admin credentials, set session cookie.
 // When TOTP is enrolled for the user, a first-pass response of {"totp_required":true}
@@ -63,51 +110,42 @@ func apiAuthLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	role, ok := cfg.VerifyUIUser(body.User, body.Pass)
-	if !cfg.IsConfigured() {
+	// Pre-setup bootstrap window: uiAuthMiddleware and apiAuthStatus already
+	// grant RoleAdmin to every request with no credentials at all while
+	// !cfg.IsConfigured(), so this branch never needs a persisted cookie to
+	// function — the setup wizard itself never even calls this endpoint pre-
+	// setup (static/index.html only wires the login form for the "setup
+	// already done" branch). But the endpoint is public and reachable
+	// directly, so without this a caller can POST any credentials here
+	// before setup, mint a real signed session for an ATTACKER-CHOSEN
+	// username, and keep it: once the real operator later runs first-time
+	// setup with that same username (e.g. the wizard's own suggested default
+	// "admin"), the session cookie now names an existing user and remains a
+	// valid admin session for its full TTL — uiAuthMiddleware's only check on
+	// a local session is that the named user still exists.
+	preSetup := !cfg.IsConfigured()
+	if preSetup {
 		role, ok = RoleAdmin, true
 	}
 	if ok {
-		// Credentials valid — check TOTP if enrolled.
-		if cfg.UserHasTOTP(body.User) {
-			if body.TOTP == "" {
-				// First step: tell the client TOTP is required (no session yet).
-				jsonOK(w, map[string]any{"totp_required": true})
-				return
-			}
-			secret := cfg.GetTOTPSecret(body.User)
-			lastCounter := cfg.GetTOTPLastCounter(body.User)
-			totpOK, matchedCounter := totp.VerifyTOTPReturnCounter(secret, body.TOTP, time.Now().Unix(), lastCounter)
-			if totpOK {
-				// Persist the matched counter to close the replay window for
-				// this step and all earlier steps within the skew tolerance.
-				cfg.SetTOTPLastCounter(body.User, matchedCounter)
-				cfg.SaveUIUsersFile() //nolint:errcheck // best-effort persist
-			} else {
-				// Try backup codes.
-				if !cfg.ConsumeBackupCode(body.User, body.TOTP) {
-					// TOTP failures MUST feed the lockout counter — otherwise
-					// an attacker who has (or guesses) a valid password can
-					// brute-force the 6-digit OTP (1M possibilities) with
-					// only the 300 ms delay as a barrier.
-					nowLocked := loginLimiter.RecordFailure(clientIP, body.User)
-					cfg.SaveUIUsersFile() //nolint:errcheck // best-effort persist
-					auditEvent(r, "auth.totp.fail", body.User,
-						fmt.Sprintf("invalid TOTP, locked=%v, attempts_left=%d",
-							nowLocked, loginLimiter.AttemptsLeft(clientIP, body.User)))
-					time.Sleep(300 * time.Millisecond)
-					if nowLocked {
-						_, secs := loginLimiter.Check(clientIP, body.User)
-						http.Error(w, LockoutMsg(secs), http.StatusTooManyRequests)
-						return
-					}
-					http.Error(w, "Invalid TOTP code", http.StatusUnauthorized)
-					return
-				}
-				// Backup code consumed — persist removal.
-				cfg.SaveUIUsersFile() //nolint:errcheck
-			}
+		// Credentials valid — check TOTP if enrolled. Runs regardless of
+		// preSetup: the bootstrap bypass above only forces role/ok, it does
+		// not imply no TOTP-enrolled user exists (e.g. an admin re-running
+		// setup after wiping the primary credential but not the RBAC
+		// roster) — must not skip this check.
+		if !verifyLoginTOTP(w, r, clientIP, body.User, body.TOTP) {
+			return
 		}
 		loginLimiter.RecordSuccess(clientIP, body.User)
+		if preSetup {
+			// See the comment on preSetup above: issuing a real session here
+			// would outlive first-time setup if the operator later creates a
+			// user with this same name, so skip it — the bootstrap window
+			// already grants full access without one.
+			auditEvent(r, "auth.login", body.User, "admin UI login (pre-setup bootstrap, no session issued)")
+			jsonOK(w, map[string]any{"ok": true, "user": body.User, "role": role})
+			return
+		}
 		// Clear any pre-existing session cookie before issuing a new one
 		// to prevent session fixation attacks (defense-in-depth).
 		clearUISessionCookie(w, r)
@@ -462,7 +500,20 @@ func apiSetupComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := cfg.SaveUIUsersFile(); err != nil {
+		// SetAuth already mutated in-memory state, which would otherwise make
+		// IsConfigured() true for the rest of this process's lifetime even
+		// though the credential was never durably saved — a restart before a
+		// later successful save would revert IsConfigured() to false on load
+		// and reopen the "one-time" setup wizard to any unauthenticated
+		// visitor. Roll the in-memory state back so IsConfigured() reverts to
+		// false NOW: the request fails instead of claiming success, and the
+		// operator's retry goes through the normal (retryable) setup path
+		// rather than hitting "setup already complete" with no session and no
+		// persisted credential.
 		logger.Printf("UIUsers: failed to persist: %v", err)
+		cfg.RollbackFailedSetupAuth(body.User)
+		http.Error(w, "internal error: admin credentials could not be saved to disk; setup did not complete — check disk space/permissions and retry", http.StatusInternalServerError)
+		return
 	}
 	// Auto-login after setup so the user lands directly in the dashboard.
 	_ = setUISessionCookie(w, r, body.User, RoleAdmin)
@@ -497,10 +548,17 @@ func apiIdPList(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		p.ID = "" // force generation of new ID
-		if err := idpRegistry.Upsert(&p); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+		// Optional safe-activation preflight (?preflight=connection): a live
+		// connection test must pass BEFORE anything persists (LDAP only).
+		if rep := ldapActivationPreflight(r, &p); rep != nil && !rep.OK {
+			writeLDAPPreflightFailure(w, rep)
 			return
 		}
+		if err := idpRegistry.Upsert(&p); err != nil {
+			http.Error(w, err.Error(), idpMutationErrorStatus(err))
+			return
+		}
+		enforceLegacyLDAPShadowing()
 		_ = publishCurrentConfigSnapshot()
 		auditEventDiff(r, "idp.create", p.ID, p.Name, nil, auditIdPProfile(&p))
 		logger.Printf("UI: IdP profile created id=%q name=%q type=%q", sanitizeLog(p.ID), sanitizeLog(p.Name), sanitizeLog(string(p.Type)))
@@ -558,11 +616,23 @@ func apiIdPItem(w http.ResponseWriter, r *http.Request, id string) {
 			return
 		}
 		p.ID = id
-		preserveWriteOnlyIdPFields(before, &p, oidcClientSecretPresent(body), samlMetadataXMLPresent(body))
-		if err := idpRegistry.Upsert(&p); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+		preserveWriteOnlyIdPFields(before, &p, writeOnlyIdPFieldPresence{
+			oidcClientSecret: oidcClientSecretPresent(body),
+			samlMetadataXML:  samlMetadataXMLPresent(body),
+			ldapBindPassword: ldapBindPasswordPresent(body),
+		})
+		// Optional safe-activation preflight (?preflight=connection): a broken
+		// candidate must never replace a working enabled provider — on failure
+		// nothing is mutated and the live provider stays untouched (LDAP only).
+		if rep := ldapActivationPreflight(r, &p); rep != nil && !rep.OK {
+			writeLDAPPreflightFailure(w, rep)
 			return
 		}
+		if err := idpRegistry.Upsert(&p); err != nil {
+			http.Error(w, err.Error(), idpMutationErrorStatus(err))
+			return
+		}
+		enforceLegacyLDAPShadowing()
 		_ = publishCurrentConfigSnapshot()
 		auditEventDiff(r, "idp.update", id, p.Name, auditIdPProfile(before), auditIdPProfile(&p))
 		logger.Printf("UI: IdP profile updated id=%q name=%q", sanitizeLog(id), sanitizeLog(p.Name))
@@ -573,7 +643,13 @@ func apiIdPItem(w http.ResponseWriter, r *http.Request, id string) {
 		}
 		p := idpRegistry.Get(id)
 		if err := idpRegistry.Delete(id); err != nil {
-			http.Error(w, err.Error(), http.StatusNotFound)
+			// A persist failure is NOT "not found": the profile still exists
+			// and its live provider is still authoritative (P1-3).
+			status := http.StatusNotFound
+			if errors.Is(err, errIdPPersistFailed) {
+				status = http.StatusInternalServerError
+			}
+			http.Error(w, err.Error(), status)
 			return
 		}
 		_ = publishCurrentConfigSnapshot()
@@ -585,13 +661,49 @@ func apiIdPItem(w http.ResponseWriter, r *http.Request, id string) {
 	}
 }
 
-func preserveWriteOnlyIdPFields(before, next *IdPProfile, oidcClientSecretProvided, samlMetadataXMLProvided bool) {
+// writeOnlyIdPFieldPresence records which write-only secret fields the update
+// request body actually carried (raw-body presence check, NOT decoded-value
+// emptiness): an OMITTED field preserves the stored secret, while a PRESENT
+// empty field is an explicit clear — the two must stay distinguishable.
+type writeOnlyIdPFieldPresence struct {
+	oidcClientSecret bool
+	samlMetadataXML  bool
+	ldapBindPassword bool
+}
+
+// idpMutationErrorStatus maps a registry mutation error to the HTTP status:
+// a persistence failure is a server-side fault (500) — the request was valid
+// and NOTHING changed (transactional registry, P1-3) — while every other
+// error is a validation/compile rejection of the caller's input (400).
+func idpMutationErrorStatus(err error) int {
+	if errors.Is(err, errIdPPersistFailed) {
+		return http.StatusInternalServerError
+	}
+	return http.StatusBadRequest
+}
+
+func preserveWriteOnlyIdPFields(before, next *IdPProfile, present writeOnlyIdPFieldPresence) {
 	if before == nil || next == nil {
 		return
 	}
-	preserveOIDCClientSecret(before, next, oidcClientSecretProvided)
+	preserveOIDCClientSecret(before, next, present.oidcClientSecret)
 	preserveOIDCDiscoveryEndpoints(before, next)
-	preserveSAMLMetadataXML(before, next, samlMetadataXMLProvided)
+	preserveSAMLMetadataXML(before, next, present.samlMetadataXML)
+	preserveLDAPBindPassword(before, next, present.ldapBindPassword)
+}
+
+// preserveLDAPBindPassword keeps the stored bind credential when an update
+// omits the write-only bindPassword field (the GET projection never returns
+// it, so an edit round-trip would otherwise wipe it). A request that carries
+// the field explicitly — even empty — wins: empty-with-field-present is the
+// deliberate clear path (e.g. switching to anonymous bind).
+func preserveLDAPBindPassword(before, next *IdPProfile, bindPasswordProvided bool) {
+	if before.Type != IdPTypeLDAP || next.Type != IdPTypeLDAP || before.LDAP == nil || next.LDAP == nil {
+		return
+	}
+	if before.LDAP.BindPassword != "" && !bindPasswordProvided && next.LDAP.BindPassword == "" {
+		next.LDAP.BindPassword = before.LDAP.BindPassword
+	}
 }
 
 func auditIdPProfile(p *IdPProfile) *IdPProfile {
@@ -646,6 +758,10 @@ func oidcClientSecretPresent(body []byte) bool {
 
 func samlMetadataXMLPresent(body []byte) bool {
 	return nestedJSONFieldPresent(body, "saml", "metadataXml")
+}
+
+func ldapBindPasswordPresent(body []byte) bool {
+	return nestedJSONFieldPresent(body, "ldap", "bindPassword")
 }
 
 func nestedJSONFieldPresent(body []byte, section, field string) bool {
@@ -728,7 +844,7 @@ func authOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Find provider by state (providerID is stored inside the PKCE entry).
-	entry, ok := globalPKCEStore.peek(state)
+	entry, ok := globalPKCEStore.Peek(state)
 	if !ok {
 		http.Error(w, "invalid or expired state", http.StatusBadRequest)
 		return
@@ -897,7 +1013,9 @@ func authSelectProvider(w http.ResponseWriter, r *http.Request) {
 	// Optional providers= filter (Phase 3 Slice 4) scopes the selection to a set
 	// of bare IdP profile IDs (used by an SSORequired rule's providerRefs); absent
 	// → all enabled providers (backward-compatible; Default flow unaffected).
-	providers := filterProvidersByID(idpRegistry.EnabledProviders(), r.URL.Query().Get("providers"))
+	// INTERACTIVE providers only (ADR-0025): the sign-in selector must never
+	// offer a credential-only provider (LDAP) — it has no browser flow.
+	providers := filterProvidersByID(idpRegistry.EnabledInteractiveProviders(), r.URL.Query().Get("providers"))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprintf(w, `<!DOCTYPE html><html><head>
 <meta charset="utf-8"><title>Culvert — Sign In</title>
@@ -947,9 +1065,12 @@ func registerAuthRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/auth/lockouts", apiAuthLockouts)              // list/clear active login lockouts (admin unlock)
 
 	// ── Generic IdP Framework ─────────────────────────────────────────────
-	mux.HandleFunc("/api/idp", apiIdPList)              // GET list / POST create
-	mux.HandleFunc("/api/idp/discover", apiIdPDiscover) // POST: run OIDC discovery (must be before /api/idp/)
-	mux.HandleFunc("/api/idp/", apiIdPRouter)           // GET|PUT|DELETE /api/idp/{id} + /api/idp/{id}/groups
+	mux.HandleFunc("/api/idp", apiIdPList)                                // GET list / POST create
+	mux.HandleFunc("/api/idp/discover", apiIdPDiscover)                   // POST: run OIDC discovery (must be before /api/idp/)
+	mux.HandleFunc("/api/idp/test", apiIdPTest)                           // POST: candidate-based LDAP directory test (ADR-0025)
+	mux.HandleFunc("/api/idp/legacy-ldap", apiIdPLegacyLDAP)              // GET: legacy YAML ldap summary
+	mux.HandleFunc("/api/idp/legacy-ldap/import", apiIdPLegacyLDAPImport) // POST: explicit legacy import
+	mux.HandleFunc("/api/idp/", apiIdPRouter)                             // GET|PUT|DELETE /api/idp/{id} + /api/idp/{id}/groups
 
 	// ── Auth callbacks (not behind UI auth middleware) ────────────────────
 	// These are reached by browser redirects from IdPs (not admin UI calls).
