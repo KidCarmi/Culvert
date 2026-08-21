@@ -1,6 +1,15 @@
 # LDAP / Active Directory IdP Modernization — Slice 0 Architecture Freeze
 
-Status: **FROZEN** (Slice 0 complete — verified against `main` @ b697cf3, 2026-08-21).
+Status: **PROGRAM COMPLETE** (Slices 0–6 shipped, 2026-08-21; Slice 0 frozen
+against `main` @ b697cf3). Recorded decisions made during implementation:
+CredentialRequired providerRefs activated for credential-capable (OIDC/LDAP)
+profiles with a fail-closed zero-eligible runtime gate (per-rule validator
+scoping inside the presented-credential arm remains a documented future
+seam); runtime legacy-YAML shadowing is guarded so `cfg.IsConfigured()` can
+never flip false (the no-local-admin anchor case keeps the legacy provider
+wired with registry precedence); the provider-list Edit button's broken
+double-JSON attribute encoding (pre-existing) was fixed after the new
+browser E2E exposed it.
 Authority: this document + `docs/adr/0025-ldap-first-class-idp.md`. Where roadmap
 status text and runtime code disagreed, the runtime code was treated as authoritative.
 
