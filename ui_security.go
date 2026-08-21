@@ -1375,6 +1375,10 @@ func apiGeoIPConfig(w http.ResponseWriter, r *http.Request) {
 		"enabled": geoip.Enabled(),
 		"dbPath":  uiCfgGeoIPDB,
 	}
+	if built, ok := geoip.BuildTime(); ok && !built.IsZero() {
+		resp["dbBuildDate"] = built.Format(time.RFC3339)
+		resp["dbAgeDays"] = int(time.Since(built).Hours() / 24)
+	}
 	// Surface a failed database load (bad path, corrupt/expired .mmdb) so an
 	// admin can tell "disabled — never configured" apart from "disabled — the
 	// configured database won't open" without reading the process log. See

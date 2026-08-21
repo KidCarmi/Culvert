@@ -7,6 +7,7 @@
 package geoip
 
 import (
+	"math"
 	"net"
 	"sync"
 	"time"
@@ -17,6 +18,7 @@ import (
 var (
 	geoDBMu    sync.RWMutex
 	geoDB      *geoip2.Reader // nil = disabled
+	geoDBBuilt time.Time      // MaxMind build timestamp of the loaded .mmdb; zero when not loaded
 	geoLoadErr string         // "" = no failure on record
 	geoLoadAt  time.Time      // when geoLoadErr was last set
 )
@@ -35,9 +37,15 @@ func InitGeoDB(path string) error {
 		geoDBMu.Unlock()
 		return err
 	}
+	epoch := r.Metadata().BuildEpoch
+	if epoch > math.MaxInt64 {
+		epoch = math.MaxInt64 // implausible (year 292e9); clamp for the G115 conversion bound
+	}
+	built := time.Unix(int64(epoch), 0).UTC() // #nosec G115 -- clamped above
 	geoDBMu.Lock()
 	old := geoDB
 	geoDB = r
+	geoDBBuilt = built
 	geoLoadErr = ""
 	geoLoadAt = time.Now()
 	geoDBMu.Unlock()
@@ -62,6 +70,21 @@ func Enabled() bool {
 	ok := geoDB != nil
 	geoDBMu.RUnlock()
 	return ok
+}
+
+// BuildTime returns the loaded database's MaxMind build timestamp — embedded
+// in the .mmdb file's own metadata, not the file's mtime — and whether a
+// database is currently loaded. Culvert never auto-refreshes this file, and
+// GeoLite2 country data degrades in accuracy over time, so callers use this
+// to surface staleness to the operator (there is otherwise no signal that
+// the loaded database predates a country's IP allocations).
+func BuildTime() (built time.Time, ok bool) {
+	geoDBMu.RLock()
+	defer geoDBMu.RUnlock()
+	if geoDB == nil {
+		return time.Time{}, false
+	}
+	return geoDBBuilt, true
 }
 
 type geoResult struct {

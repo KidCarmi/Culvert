@@ -1391,6 +1391,8 @@ components:
       properties:
         enabled: { type: boolean }
         dbPath: { type: string }
+        dbBuildDate: { type: string, format: date-time, description: "MaxMind build timestamp embedded in the loaded .mmdb; omitted when no database is loaded." }
+        dbAgeDays: { type: integer, description: "Days since dbBuildDate; omitted when no database is loaded." }
         lastError: { type: string, description: 'Most recent database-load failure, if any (e.g. bad path, corrupt/expired .mmdb). Present only when the last load attempt failed; destCountry policy rules do not match while this is set.' }
         lastErrorAt: { type: string, format: date-time, description: 'When lastError was recorded (RFC 3339). Present only alongside lastError.' }
 

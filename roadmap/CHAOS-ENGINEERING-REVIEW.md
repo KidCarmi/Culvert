@@ -248,7 +248,7 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | WK-1 | **ClamAV daemon down → files pass UNSCANNED (fail-open), no alert/counter.** Contradicts the same file's *timeout* path, which fails **closed**. Two infra-failure modes, opposite postures. | GAP | H | `internal/secscan/secscan.go:499-514` vs timeout `secscan.go:490-495` |
 | WK-2 | Remote scan sidecar down → fail-open, **but** alerted (`scan_svc_down`) + counted. Posture not admin-selectable; 30s per-request timeout stacks latency when hard-down. | ✓ (risky) | H | `internal/secscan/remote.go:95-155,84-90,105` |
 | WK-3 | GeoIP cache-miss on the policy hot path fails **closed** (country allow-rule cannot match unknown country); `LookupCached` never blocks on DB/DNS. | ✓ | — | `policy.go:831-839`, `geoip.go:84-93`; tests `final_coverage_test.go:203` |
-| WK-4 | GeoIP DB missing/corrupt: reader stays nil, feature degrades to "no country data" — safe, but **no staleness/health signal** (MMDBs expire silently). | GAP (obs) | M | `internal/geoip/geoip.go:23-36,71` |
+| WK-4 | GeoIP DB missing/corrupt: reader stays nil, feature degrades to "no country data" — safe, but **no staleness/health signal** (MMDBs expire silently). | GAP (obs) → **PARTIALLY CLOSED** (`BuildTime()` reads the `.mmdb`'s own `build_epoch`; `GET /api/geoip` returns `dbBuildDate`/`dbAgeDays`; GeoIP Database panel shows the age, warn-colored past 90 days; load failures surfaced via `lastError`. Residual: no PROACTIVE alert/metric — an operator must open the panel to notice) | M | `internal/geoip/geoip.go` `BuildTime`, `ui_security.go` `apiGeoIPConfig` |
 | WK-5 | **Threat-feed timeout → stale-erase.** On partial failure `Sync` unconditionally replaces the maps with only what succeeded, discarding prior good entries; stamps `lastSync=now` even on failure; no backoff, no staleness alert → coverage silently shrinks for up to 6h. | GAP → **CLOSED** (per-source `replacedSources` replacement, `threatfeed.go` `applySync`) | H | `internal/threatfeed/threatfeed.go:150-183` |
 | WK-6 | UT1 category feed failures counted but **never alerted**; fixed 24h retry, no backoff. Stale-serve is safe (last-good BadgerDB). | GAP (obs) | M | `internal/feedsync/feedsync.go:192-213,176` |
 | WK-7 | Category DB (Badger) corruption: read errors → "not found" (fail-open for category-block, no crash); value-log truncate/replay on restart. | ✓ | — | `internal/catdb/catdb.go:37-50,84-100` |
@@ -319,7 +319,7 @@ they cannot see fail. Concretely, add alerts + metrics for:
 - `culvert_ca_persist_failures_total` + alert (CA-2, CA-13).
 - ClamAV scan-error counter + `scan_svc_down`-style alert (WK-1), matching the remote-scanner path.
 - Per-feed `last_success` + staleness alert at >2× interval (WK-5, WK-6).
-- GeoIP DB load-failure / age alert (WK-4).
+- GeoIP DB load-failure / age **alert** (WK-4). The age/failure *surfacing* (API + panel) shipped; the proactive alert half is still open.
 - `idp.unreachable` distinct from auth-failure (AU-7).
 - ~~Audit write-failure counter surfaced on `/healthz` (ST-8), matching reqlog.~~ **Shipped — see §13.**
 

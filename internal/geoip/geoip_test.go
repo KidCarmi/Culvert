@@ -72,6 +72,14 @@ func TestLookupCachedByIP_MissAndNil(t *testing.T) {
 	}
 }
 
+func TestBuildTime_FalseBeforeInit(t *testing.T) {
+	// With no database loaded, BuildTime must report ok=false and a zero time
+	// rather than a stale/misleading value from a prior process state.
+	if built, ok := BuildTime(); ok || !built.IsZero() {
+		t.Fatalf("BuildTime() = (%v,%v), want (zero,false) when no GeoIP database is loaded", built, ok)
+	}
+}
+
 func TestLookupCachedByIP_Hit(t *testing.T) {
 	// A populated cache entry must be returned without consulting the database
 	// (this is the caching contract the hot policy path relies on). Whitebox:
