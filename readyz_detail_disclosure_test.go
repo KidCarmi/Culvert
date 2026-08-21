@@ -339,6 +339,10 @@ func TestHealth_RedactionHoldsUnderConcurrency(t *testing.T) {
 // withFailingDPCertRenewal puts the process in DP mode with a recorded renewal
 // failure and returns the resulting node_cert detail.
 func withFailingDPCertRenewal(t *testing.T, days int, renewErr error) string {
+	_ = days
+	_ = renewErr // #1139 reduced the recorder to boolean-only state — nothing
+	// leak-capable is recorded any more, which is the strongest form of the
+	// redaction these tests pin; they now assert the published detail directly.
 	t.Helper()
 	captureStartupAlerts(t)
 	sslInspectionLoadError.Store("")
@@ -347,7 +351,7 @@ func withFailingDPCertRenewal(t *testing.T, days int, renewErr error) string {
 		audit.SetDPMode(false)
 		clearDPCertRenewalFailure()
 	})
-	recordDPCertRenewalFailure(days, renewErr)
+	recordDPCertRenewalFailure()
 
 	row, ok := readyProbeRows(t)["node_cert"]
 	if !ok {
@@ -373,9 +377,11 @@ func TestReadyz_NodeCertDetailWithholdsControlPlaneAddress(t *testing.T) {
 			t.Errorf("node_cert detail leaks %q on the unauthenticated /ready surface: %q", leak, detail)
 		}
 	}
-	// The operational signal must survive: an expired cert still says so.
-	if !strings.Contains(detail, "EXPIRED 3 day(s) ago") {
-		t.Errorf("node_cert detail = %q, want it to keep the days-expired count", detail)
+	// #1139 withheld the countdown too (an attacker-usable expiry oracle);
+	// the operational signal that survives is the fixed failing detail, with
+	// the countdown on the authenticated surfaces.
+	if strings.Contains(detail, "day(s)") {
+		t.Errorf("node_cert detail = %q, want no expiry countdown on the unauthenticated surface", detail)
 	}
 	// Unlike clamav, this cause IS logged (both renewal call sites) and carried
 	// by the cert_expiry alert, so the log is a real destination.
@@ -395,8 +401,11 @@ func TestReadyz_NodeCertDetailWithholdsFilesystemPath(t *testing.T) {
 			t.Errorf("node_cert detail leaks %q on the unauthenticated /ready surface: %q", leak, detail)
 		}
 	}
-	if !strings.Contains(detail, "expires in 5 day(s)") {
-		t.Errorf("node_cert detail = %q, want it to keep the days-remaining count", detail)
+	if strings.Contains(detail, "day(s)") {
+		t.Errorf("node_cert detail = %q, want no expiry countdown on the unauthenticated surface", detail)
+	}
+	if !strings.Contains(detail, "see server logs") {
+		t.Errorf("node_cert detail = %q, want it to point the operator at the logs", detail)
 	}
 }
 
