@@ -392,9 +392,18 @@ func (ps *PolicyStore) saveMetaSnapshot(m policyMeta) {
 // does not carry a second persistence path.
 
 // Save persists the current rules to disk (skips HitCount — runtime only).
-func (ps *PolicyStore) Save() {
+// Best-effort legacy wrapper; callers that must know whether the durable
+// write landed (the draft-commit path) use SaveErr.
+func (ps *PolicyStore) Save() { _ = ps.SaveErr() }
+
+// SaveErr is the error-returning persistence core (Codex fix: the commit path
+// must not clear the draft when the running-policy write failed — a swallowed
+// error left the NEW policy in memory, the OLD policy on disk, and no draft,
+// so a restart silently reverted the commit and stranded a learning
+// acceptance with no durable target).
+func (ps *PolicyStore) SaveErr() error {
 	if ps.path == "" {
-		return
+		return nil
 	}
 	// Mutations may proceed while persistence runs, but saves themselves must be
 	// ordered end-to-end. Otherwise an older snapshot can rename after a newer
@@ -414,15 +423,16 @@ func (ps *PolicyStore) Save() {
 
 	data, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
-		return
+		return fmt.Errorf("marshal policy rules: %w", err)
 	}
 	// Atomic + durable write — temp file, fsync, rename, parent-dir fsync.
 	// Skip saveMeta on failure so the .meta sidecar can't record a newer
 	// version/timestamp than the rules actually on disk.
 	if err := atomicWriteFile(ps.path, data, 0o600); err != nil {
-		return
+		return fmt.Errorf("write policy rules: %w", err)
 	}
 	ps.saveMetaSnapshot(meta)
+	return nil
 }
 
 // List returns a copy of all rules (including live HitCount).

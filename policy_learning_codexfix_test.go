@@ -7,8 +7,11 @@ package main
 // commit interleavings.
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/KidCarmi/Culvert/internal/policylearn"
@@ -248,6 +251,116 @@ func TestCodexFix_CommitFenceRecheckedInsideActivation(t *testing.T) {
 	if policyStore.findByIDCopy(unseen.ID) == nil {
 		t.Fatal("committed rule missing from RUNNING")
 	}
+}
+
+// TestCodexFix_CommitRetainsDraftWhenRunningPersistFails (Codex round 8):
+// activation must be durable-or-nothing. A swallowed running-policy write
+// failure used to clear the draft anyway — new policy in memory, old policy
+// on disk, no draft — so a restart silently reverted the commit and a
+// learning acceptance finalized against a target with no durable home.
+func TestCodexFix_CommitRetainsDraftWhenRunningPersistFails(t *testing.T) {
+	draftDir := plDurableDraftHarness(t)
+	rulesDir := t.TempDir()
+	prevPath := policyStore.path
+	policyStore.path = filepath.Join(rulesDir, "policy_rules.json")
+	t.Cleanup(func() { policyStore.path = prevPath })
+	setRequireCommit(true)
+
+	disabled := false
+	rule := PolicyRule{
+		ID: newRuleID(), Name: "commit-durability", SourceGroup: "g", DestCategory: "m5b-cat",
+		Action: ActionAllow, SSLAction: SSLInspect, Enabled: &disabled,
+	}
+	stampRuleMetadataForWrite(&rule, nil, "codexfix")
+	ver, _ := effectivePolicyVersion()
+	added, err := policyDraft.stageDurableAppend("codexfix", ver, rule)
+	if err != nil {
+		t.Fatalf("stageDurableAppend: %v", err)
+	}
+
+	// Block the running-policy write: the target path becomes a non-empty
+	// directory, so the atomic rename fails.
+	if err := os.MkdirAll(filepath.Join(policyStore.path, "x"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := policyDraft.commitActivate(nil); !errors.Is(err, errDraftPersistFailed) {
+		t.Fatalf("failed running persist did not refuse the commit (err=%v)", err)
+	}
+	if !policyDraft.active() {
+		t.Fatal("failed commit cleared the draft")
+	}
+	if plFindTargetRule(added.ID) == nil {
+		t.Fatal("failed commit lost the staged rule")
+	}
+	if policyStore.findByIDCopy(added.ID) != nil {
+		t.Fatal("failed commit left the activation in the in-memory running store")
+	}
+	if _, err := os.Stat(filepath.Join(draftDir, "policy_draft.json")); err != nil {
+		t.Fatalf("failed commit removed policy_draft.json: %v", err)
+	}
+
+	// Fault cleared: the retried commit lands durably.
+	if err := os.RemoveAll(policyStore.path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := policyDraft.commitActivate(nil); err != nil {
+		t.Fatalf("retry after fault clears: %v", err)
+	}
+	if policyStore.findByIDCopy(added.ID) == nil {
+		t.Fatal("retried commit missing from running")
+	}
+	if _, err := os.Stat(policyStore.path); err != nil {
+		t.Fatalf("retried commit not durable: %v", err)
+	}
+}
+
+// TestCodexFix_DurableProofPersistsVerifiedSnapshot (Codex round 8): ordinary
+// draft CRUD mutates the candidate under its OWN store lock, not c.mu — a
+// writer landing between the durability proof and the persist used to get its
+// ALTERED content persisted under a proof that verified something else. The
+// proof and the durable bytes must be one consistent snapshot.
+func TestCodexFix_DurableProofPersistsVerifiedSnapshot(t *testing.T) {
+	draftDir := plDurableDraftHarness(t)
+	_, targetID := plAcceptingWithStagedRule(t)
+	verified := *plFindTargetRule(targetID)
+
+	err := policyDraft.ensureDurableTarget(targetID, func(r *PolicyRule) bool {
+		ok := r.Action == verified.Action
+		// The racing ordinary writer, made deterministic: it lands AFTER the
+		// proof read its snapshot and BEFORE the persist (it needs only the
+		// candidate store's lock, which is free here).
+		mutated := verified
+		mutated.Action = ActionBlockPage
+		if !policyDraft.cand.UpdateByID(targetID, mutated) {
+			t.Errorf("test setup: concurrent mutation failed")
+		}
+		return ok
+	})
+	if err != nil {
+		t.Fatalf("verified target reported not durable: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(draftDir, "policy_draft.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var p struct {
+		Rules []PolicyRule `json:"rules"`
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		t.Fatal(err)
+	}
+	for i := range p.Rules {
+		if p.Rules[i].ID != targetID {
+			continue
+		}
+		if p.Rules[i].Action != verified.Action {
+			t.Fatalf("durable file carries UNVERIFIED content (action %q, proof verified %q)",
+				p.Rules[i].Action, verified.Action)
+		}
+		return
+	}
+	t.Fatalf("target %s missing from the durable draft", targetID)
 }
 
 // TestPolicyContentIdentity_IgnoresProvenanceStamps (Codex round 4): the

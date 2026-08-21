@@ -160,6 +160,18 @@ func (c *policyDraftCoordinator) persist() {
 // candidate is recoverable after a restart; the legacy persist() wrapper keeps
 // logging it away). Caller holds c.mu.
 func (c *policyDraftCoordinator) persistLocked() error {
+	return c.persistSnapshotLocked(c.cand.List())
+}
+
+// persistSnapshotLocked writes ONE GIVEN candidate snapshot (Codex fix):
+// ordinary draft CRUD mutates the candidate store under its OWN lock, not
+// c.mu, so a persist that re-reads c.cand.List() can capture content that
+// changed after the caller verified it. Callers that prove content (the
+// durability proof) pass the exact snapshot they verified, making the proof
+// and the durable bytes one consistent view; a racing ordinary update's own
+// persist() follows serialized behind c.mu with its content, as a later
+// mutation. Caller holds c.mu.
+func (c *policyDraftCoordinator) persistSnapshotLocked(rules []PolicyRule) error {
 	if c.path == "" {
 		return nil // in-memory mode: no durable domain exists by configuration
 	}
@@ -170,7 +182,7 @@ func (c *policyDraftCoordinator) persistLocked() error {
 	p := struct {
 		State draftState   `json:"state"`
 		Rules []PolicyRule `json:"rules"`
-	}{State: c.state, Rules: c.cand.List()}
+	}{State: c.state, Rules: rules}
 	data, err := json.MarshalIndent(p, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal error: %w", err)
@@ -307,14 +319,19 @@ var errDraftTargetContentDrift = errors.New("draft target rule content changed s
 func (c *policyDraftCoordinator) ensureDurableTarget(ruleID string, matches func(*PolicyRule) bool) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if !c.state.Active {
+		return errDraftTargetMissing
+	}
+	// ONE consistent snapshot: membership and content are proven against it,
+	// and the SAME snapshot is persisted (Codex fix) — ordinary draft CRUD
+	// holds only the candidate store's own lock, so a persist that re-read
+	// the candidate could capture content altered AFTER the proof.
+	rules := c.cand.List()
 	var member *PolicyRule
-	if c.state.Active {
-		rules := c.cand.List()
-		for i := range rules { // index-based: PolicyRule is a large struct (rangeValCopy)
-			if rules[i].ID == ruleID {
-				member = &rules[i]
-				break
-			}
+	for i := range rules { // index-based: PolicyRule is a large struct (rangeValCopy)
+		if rules[i].ID == ruleID {
+			member = &rules[i]
+			break
 		}
 	}
 	if member == nil {
@@ -326,7 +343,7 @@ func (c *policyDraftCoordinator) ensureDurableTarget(ruleID string, matches func
 	if c.path == "" {
 		return nil // in-memory mode: locked membership is the domain
 	}
-	if err := c.persistLocked(); err != nil {
+	if err := c.persistSnapshotLocked(rules); err != nil {
 		return fmt.Errorf("%v: %w", err, errDraftPersistFailed)
 	}
 	return nil
@@ -371,8 +388,19 @@ func (c *policyDraftCoordinator) commitActivate(ifVersion *int64) (policyDraftDi
 		}
 	}
 	diff := c.diffVsRunning()
+	// Activation is durable-or-nothing (Codex fix): a swallowed running-policy
+	// write failure used to clear the draft anyway — new policy in memory, old
+	// policy on disk, no draft — so a restart silently reverted the commit
+	// (and a learning acceptance finalized against a target with no durable
+	// home). On persist failure the in-memory activation is reverted and the
+	// draft retained, so the operator can retry once the volume recovers.
+	prevRunning := policyStore.List()
 	policyStore.ReplaceAll(cand)
-	policyStore.Save()
+	if err := policyStore.SaveErr(); err != nil {
+		policyStore.ReplaceAll(prevRunning)
+		c.mu.Unlock()
+		return policyDraftDiff{}, fmt.Errorf("running-policy persist failed — draft retained, nothing committed: %v: %w", err, errDraftPersistFailed)
+	}
 	path := c.clearLocked()
 	c.mu.Unlock()
 	if path != "" {
@@ -836,11 +864,16 @@ func apiPolicyDraftCommit(w http.ResponseWriter, r *http.Request) {
 	// re-verified under the same lock.
 	diff, err := policyDraft.commitActivate(ifVersion)
 	if err != nil {
-		if errors.Is(err, errDraftVersionConflict) {
+		switch {
+		case errors.Is(err, errDraftVersionConflict):
 			http.Error(w, err.Error(), http.StatusConflict)
-			return
+		case errors.Is(err, errDraftPersistFailed):
+			// Durable-or-nothing: the draft is retained; the operator retries
+			// once the volume recovers.
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		default:
+			http.Error(w, err.Error(), http.StatusBadRequest)
 		}
-		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
