@@ -61,7 +61,20 @@ type Store struct {
 	adminIndex map[string]map[string]bool // same, BuiltIn=false entries only
 	path       string
 	fp         atomic.Value // string: cached semantic ContentFingerprint (recomputed under mu on every semantic change)
+
+	// rev counts semantic mutations (every path that recomputes the
+	// fingerprint). PROCESS-LOCAL change signal for memo/fence keys ONLY —
+	// never an identity (the QB-2 lesson: identities must be content-derived
+	// and restart-stable; this counter exists precisely because the content
+	// fingerprint is ABA-blind, an A→B→A round trip restoring the same
+	// string). Bumped INSIDE the write-lock critical section, so the unlock
+	// that publishes new content also publishes the advanced revision.
+	rev atomic.Uint64
 }
+
+// Revision returns the process-local semantic-mutation counter. Monotonic
+// within a process; resets on restart — a fence key, not an identity.
+func (s *Store) Revision() uint64 { return s.rev.Load() }
 
 // fingerprintDomain versions the ContentFingerprint framing. Bump it whenever
 // the framed field set or encoding changes — consumers pin the returned value
@@ -113,6 +126,7 @@ func (s *Store) ContentFingerprint() string {
 // unlocking, so readers never observe a stale identity for new content.
 func (s *Store) recomputeFingerprintLocked() {
 	s.fp.Store(computeFingerprint(s.entries))
+	s.rev.Add(1) // under s.mu: content and change signal publish together
 }
 
 // computeFingerprint derives the canonical content hash (see

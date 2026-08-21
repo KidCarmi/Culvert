@@ -92,35 +92,60 @@ func learnCategoryEpoch() string {
 	return epoch
 }
 
-// learnDecisionKeySnapshot captures the FULL policy identity key (rulebase
-// generation, category-group revision, packed default-action word — all
-// monotonic) for the decision-identity bracket, gated on learning being
-// active so the idle/disabled request path pays at most two atomic loads.
-// handleRequest calls it BEFORE policy evaluation; the adapter fences the
-// stamp against it AFTER the decision.
-func learnDecisionKeySnapshot() (policyContentKey, bool) {
-	eng := policyLearnEngine.Load()
-	if eng == nil || !eng.LearningActive() {
-		return policyContentKey{}, false
-	}
-	return policyContentKeyNow(), true
+// learnDecisionKey is the decision-identity fence: the policy identity key
+// (rulebase generation, category-group revision, packed default-action word)
+// PLUS the taxonomy the evaluation resolved host categories through — the
+// effective saas view POINTER (each view is immutable and the key holds the
+// pointer, so it cannot be recycled while captured: equality proves the same
+// view) and the admin urlcat store's monotonic semantic-mutation counter
+// (Codex round 22: the content fingerprint is ABA-blind — a taxonomy A→B→A
+// round trip inside the bracket restores the same string, so only a counter
+// can witness it). The community UT1 DB carries no change identity (recorded
+// M3 limitation — the category epoch has never represented it); its churn
+// remains outside this fence.
+type learnDecisionKey struct {
+	policy   policyContentKey
+	saasView *effectiveCategoryView
+	catRev   uint64
 }
 
-// pk is the full policy identity key captured BEFORE policy evaluation
+func learnDecisionKeyNow() learnDecisionKey {
+	return learnDecisionKey{
+		policy:   policyContentKeyNow(),
+		saasView: saasEffectiveView.Current(),
+		catRev:   catStore.Revision(),
+	}
+}
+
+// learnDecisionKeySnapshot captures the full decision key for the
+// evaluation→stamp bracket, gated on learning being active so the
+// idle/disabled request path pays at most two atomic loads. handleRequest
+// calls it BEFORE policy evaluation; the adapter fences both identity stamps
+// against it AFTER the decision.
+func learnDecisionKeySnapshot() (learnDecisionKey, bool) {
+	eng := policyLearnEngine.Load()
+	if eng == nil || !eng.LearningActive() {
+		return learnDecisionKey{}, false
+	}
+	return learnDecisionKeyNow(), true
+}
+
+// pk is the full decision key captured BEFORE policy evaluation
 // (havePK=false ⇒ no capture — falls back to the engine's enqueue-time seam
-// stamp). Codex rounds 20/21: stamping the policy identity from a
-// post-decision read let a full change-and-restore inside the
-// evaluation→stamp window pair transient-window evidence with the restored
-// baseline identity, latching no churn — and the decision depends on the
-// WHOLE config (rulebase, category groups, default action), not just the
-// default-action word, for matched and unmatched decisions alike. Every key
-// component is monotonic, so key equality with the current key PROVES no
-// config mutation intervened anywhere in the bracket — the current memoized
-// identity is then the decision identity; inequality proves one DID, and the
-// stamp becomes a unique change witness that can never equal any content
-// hash or baseline, so the consume-time comparison latches the churn we know
-// happened.
-func learnObserveDecision(auth authOutcome, host, method string, match *PolicyMatch, status, sslAction string, pk policyContentKey, havePK bool) {
+// stamps). Codex rounds 20–22: stamping the identities from post-decision
+// reads let a full change-and-restore inside the evaluation→stamp window
+// pair transient-window evidence with the restored baseline identities,
+// latching no churn — and the decision depends on the WHOLE config (rulebase,
+// category groups, default action, AND the taxonomy category resolution ran
+// through), for matched and unmatched decisions alike. Each fence half is
+// checked independently: sub-key equality with the current value PROVES no
+// mutation of that half intervened anywhere in the bracket — the current
+// memoized identity is then the decision identity; inequality proves one DID,
+// and the stamp becomes a unique change witness that can never equal any
+// content hash, epoch, or baseline, so the consume-time comparison latches
+// the churn we know happened. (Halves are fenced separately so a
+// default-action flip does not fabricate CATEGORY churn and vice versa.)
+func learnObserveDecision(auth authOutcome, host, method string, match *PolicyMatch, status, sslAction string, pk learnDecisionKey, havePK bool) {
 	eng := policyLearnEngine.Load()
 	if eng == nil || !eng.LearningActive() {
 		// Disabled (nil) or enabled-but-idle: gate BEFORE any Observation is
@@ -143,20 +168,31 @@ func learnObserveDecision(auth authOutcome, host, method string, match *PolicyMa
 	default:
 		action = "default:allow"
 	}
-	policyID := ""
+	policyID, catEpoch := "", ""
 	if havePK {
-		if policyContentKeyNow() == pk {
-			// No config mutation intervened since before evaluation: the
-			// memoized identity IS the decision identity (0-alloc — memoized
-			// string).
+		cur := learnDecisionKeyNow()
+		if cur.policy == pk.policy {
+			// No policy-config mutation intervened since before evaluation:
+			// the memoized identity IS the decision identity (0-alloc —
+			// memoized string).
 			policyID = policyContentIdentityCached()
 		} else {
 			// A mutation provably landed inside the evaluation→stamp bracket.
 			// The decision-time identity is unrecoverable, so stamp a witness
 			// unique to the captured key (allocates — config-change-rate
 			// only, never steady-state).
-			policyID = "policy-flip@" + strconv.FormatInt(pk.gen, 16) + ":" +
-				strconv.FormatUint(pk.catgroupRev, 16) + ":" + strconv.FormatUint(pk.defaultRev, 16)
+			policyID = "policy-flip@" + strconv.FormatInt(pk.policy.gen, 16) + ":" +
+				strconv.FormatUint(pk.policy.catgroupRev, 16) + ":" + strconv.FormatUint(pk.policy.defaultRev, 16)
+		}
+		if cur.saasView == pk.saasView && cur.catRev == pk.catRev {
+			// Taxonomy unchanged across the bracket: the memoized epoch is the
+			// one evaluation resolved through (0-alloc — memoized string).
+			catEpoch = learnCategoryEpoch()
+		} else {
+			// A taxonomy swap or admin-store mutation landed inside the
+			// bracket — the content-derived epoch is ABA-blind to a round
+			// trip, so stamp a witness unique to the captured taxonomy state.
+			catEpoch = "category-flip@" + strconv.FormatUint(pk.catRev, 16)
 		}
 	}
 	eng.Observe(policylearn.Observation{
@@ -170,5 +206,6 @@ func learnObserveDecision(auth authOutcome, host, method string, match *PolicyMa
 		Status:     status,
 		SSLAction:  sslAction,
 		PolicyID:   policyID, // "" ⇒ engine seam stamp at enqueue
+		CatEpoch:   catEpoch, // "" ⇒ engine seam stamp at enqueue
 	})
 }

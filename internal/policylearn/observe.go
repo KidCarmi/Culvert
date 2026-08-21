@@ -71,15 +71,16 @@ type Observation struct {
 	Status     string // the request-log Status taxonomy value for this decision
 	SSLAction  string // "Inspect"/"Bypass" when resolved; "" on blocked branches
 
-	// PolicyID is the caller-supplied DECISION-TIME policy identity (Codex
-	// round 20): the producer captured (or derived a change witness from) the
-	// state that actually determined enforcement, so the stamp cannot be a
-	// later value that a flip-and-restore already re-baselined. When empty,
-	// Observe stamps the current PolicyContent seam value at enqueue instead
-	// (the pre-round-20 behavior; still used by paths with no decision-time
-	// capture). Opaque to the engine — only compared for equality by the
-	// churn latch.
+	// PolicyID/CatEpoch are the caller-supplied DECISION-TIME identity stamps
+	// (Codex rounds 20/22): the producer captured (or derived a change
+	// witness from) the state that actually determined enforcement/category
+	// resolution, so the stamp cannot be a later value that a
+	// flip-and-restore already re-baselined. When empty, Observe stamps the
+	// corresponding seam's current value at enqueue instead (the prior
+	// behavior; still used by paths with no decision-time capture). Opaque to
+	// the engine — only compared for equality by the churn latch.
 	PolicyID string
+	CatEpoch string
 }
 
 // ObservationStats are the monotonic transport counters (loss accounting —
@@ -217,15 +218,17 @@ func (e *Engine) Observe(o Observation) {
 	// only while this window's session is still the aggregation target.
 	o.gen = e.windowGen.Load()
 	// Decision-time identity stamps (Codex round 15; see the field docs). The
-	// seams are memoized at the root, so these are cheap alloc-free reads.
-	if e.cfg.CategoryEpoch != nil {
+	// seams are memoized at the root, so these are cheap alloc-free reads. A
+	// producer-supplied stamp (captured at the enforcement decision itself,
+	// Codex rounds 20/22) is authoritative over any enqueue-time seam read.
+	switch {
+	case o.CatEpoch != "":
+		o.catEpoch = o.CatEpoch
+	case e.cfg.CategoryEpoch != nil:
 		o.catEpoch = e.cfg.CategoryEpoch()
 	}
 	switch {
 	case o.PolicyID != "":
-		// The producer captured the identity (or a change witness) at the
-		// enforcement decision itself (Codex round 20) — authoritative over
-		// any enqueue-time seam read.
 		o.policyID = o.PolicyID
 	case e.cfg.PolicyContent != nil:
 		o.policyID = e.cfg.PolicyContent()

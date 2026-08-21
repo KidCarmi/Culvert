@@ -800,3 +800,38 @@ func TestObserve_ExplicitPolicyStampAuthoritative(t *testing.T) {
 		t.Fatalf("explicit decision-time stamp did not reach the churn latch: churn=%v", sess.PolicyChurn)
 	}
 }
+
+// TestObserve_ExplicitCategoryStampAuthoritative (Codex round 22): the
+// category mirror of the explicit policy stamp — a producer that fenced the
+// taxonomy at the decision passes Observation.CatEpoch; the engine must use
+// it as the decision-time stamp instead of the enqueue-time seam read, so a
+// taxonomy witness latches CategoryChurn even when the seam claims the
+// baseline never moved.
+func TestObserve_ExplicitCategoryStampAuthoritative(t *testing.T) {
+	clk := newTestClock()
+	e := newTestEngine(t, t.TempDir(), clk, func(c *Config) {
+		c.Baseline = func() Baseline { return Baseline{CategoryEpoch: "A"} }
+		c.CategoryEpoch = func() string { return "A" } // seam: nothing ever changed
+	})
+	t.Cleanup(func() { _ = e.Close() })
+	if _, err := e.StartSession("op"); err != nil {
+		t.Fatal(err)
+	}
+	before := e.ObservationStats().Delivered
+	e.Observe(Observation{Subject: "u", AuthSource: "idp", Host: "x.example", Status: "OK",
+		CatEpoch: "category-flip@7"})
+	barrierWait(t, func() bool { return e.ObservationStats().Delivered > before }, "observation delivered")
+	sess, err := e.StopSession("op")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, c := range sess.CategoryChurn {
+		if c.To == "category-flip@7" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("explicit decision-time category stamp did not reach the churn latch: churn=%v", sess.CategoryChurn)
+	}
+}

@@ -270,10 +270,10 @@ func TestObservation_ActionDerivedFromEnforcementStatus(t *testing.T) {
 	// The enforcement decision ran under default-allow (status OK, no match);
 	// the atomic has since flipped to deny before the adapter observed it.
 	setDefaultPolicyAction("deny")
-	learnObserveDecision(authOutcome{identity: "alice", source: "local"}, "flip-action.example", "GET", nil, "OK", "Bypass", policyContentKey{}, false)
+	learnObserveDecision(authOutcome{identity: "alice", source: "local"}, "flip-action.example", "GET", nil, "OK", "Bypass", learnDecisionKey{}, false)
 	// And the mirror case: enforcement default-denied; atomic now says allow.
 	setDefaultPolicyAction("allow")
-	learnObserveDecision(authOutcome{identity: "alice", source: "local"}, "flip-deny.example", "GET", nil, "POLICY_DEFAULT_DENY", "", policyContentKey{}, false)
+	learnObserveDecision(authOutcome{identity: "alice", source: "local"}, "flip-deny.example", "GET", nil, "POLICY_DEFAULT_DENY", "", learnDecisionKey{}, false)
 	_ = eng.Close()
 
 	if o, ok := obsForHost(t, col, "flip-action.example"); !ok {
@@ -331,6 +331,19 @@ func TestObservation_DefaultDecisionCarriesDecisionTimeIdentity(t *testing.T) {
 		SourceGroup: "g", DestFQDN: "x.example", Action: ActionAllow, Enabled: &enabled}})
 	policyStore.ReplaceAll([]PolicyRule{blocker}) // ...and the original policy restored
 	learnObserveDecision(auth, "rulebase-flip.example", "GET", nil, "OK", "Bypass", stale2, true)
+
+	// Taxonomy round-trip case (round 22): the admin category store is edited
+	// and restored inside the bracket — the content fingerprint returns to
+	// its baseline (ABA-blind), but the mutation counter moved, so the
+	// CATEGORY stamp must be the witness, never the restored epoch.
+	stale3, _ := learnDecisionKeySnapshot()
+	if err := catStore.Set("transient-cat", []string{"transient.example"}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := catStore.Delete("transient-cat"); err != nil {
+		t.Fatal(err)
+	}
+	learnObserveDecision(auth, "taxonomy-flip.example", "GET", nil, "OK", "Bypass", stale3, true)
 	_ = eng.Close()
 
 	if o, ok := obsForHost(t, col, "steady.example"); !ok {
@@ -348,6 +361,13 @@ func TestObservation_DefaultDecisionCarriesDecisionTimeIdentity(t *testing.T) {
 	} else if !strings.HasPrefix(o.PolicyID, "policy-flip@") {
 		t.Errorf("rulebase round-trip stamp = %q, want a policy-flip witness — only the default-action word was fenced", o.PolicyID)
 	}
+	if o, ok := obsForHost(t, col, "taxonomy-flip.example"); !ok {
+		t.Fatalf("no taxonomy-flip observation (got %v)", col.all())
+	} else if !strings.HasPrefix(o.CatEpoch, "category-flip@") {
+		t.Errorf("taxonomy round-trip stamp = %q, want a category-flip witness — the ABA-blind fingerprint restored to baseline", o.CatEpoch)
+	} else if strings.HasPrefix(o.PolicyID, "policy-flip@") {
+		t.Errorf("taxonomy-only mutation fabricated a POLICY witness (%q) — the fence halves must be independent", o.PolicyID)
+	}
 }
 
 // TestObservationE2E_DisabledNilEngine: with the singleton nil the adapter is
@@ -356,5 +376,5 @@ func TestObservationE2E_DisabledNilEngine(t *testing.T) {
 	prev := policyLearnEngine.Load()
 	policyLearnEngine.Store(nil)
 	t.Cleanup(func() { policyLearnEngine.Store(prev) })
-	learnObserveDecision(authOutcome{identity: "x", source: "local"}, "h.example", "GET", nil, "OK", "Bypass", policyContentKey{}, false)
+	learnObserveDecision(authOutcome{identity: "x", source: "local"}, "h.example", "GET", nil, "OK", "Bypass", learnDecisionKey{}, false)
 }
