@@ -67,7 +67,10 @@ const (
 	shutdownOrderScanSvcShutdown   = 60
 	// PR-5: stop the MCP listeners (drain-bounded) before the admin UI + proxy
 	// drain. A disabled runtime makes this a no-op.
-	shutdownOrderMCPRuntimeStop      = 65
+	shutdownOrderMCPRuntimeStop = 65
+	// QUAL-3: drain + close the MCP telemetry spool/exporter AFTER the listeners stop
+	// (so no new events are produced), before the admin UI. A no-op while disabled.
+	shutdownOrderMCPTelemetryDrain   = 66
 	shutdownOrderAdminUIShutdown     = 70
 	shutdownOrderSOCKS5ListenerStop  = 80
 	shutdownOrderProxyServerShutdown = 90
@@ -200,6 +203,12 @@ func registerLateShutdownHooks(reg *shutdownRegistry, s *startupState, proxySrv 
 	reg.Register("mcp-runtime-stop", shutdownOrderMCPRuntimeStop, func(ctx context.Context) error {
 		if err := shutdownMCPRuntime(ctx); err != nil {
 			logger.Printf("MCP runtime shutdown error: %v", err)
+		}
+		return nil
+	})
+	reg.Register("mcp-telemetry-drain", shutdownOrderMCPTelemetryDrain, func(ctx context.Context) error {
+		if err := shutdownMCPTelemetry(ctx); err != nil {
+			logger.Printf("MCP telemetry shutdown error: %v", err)
 		}
 		return nil
 	})

@@ -162,7 +162,7 @@ func servePACFile(w http.ResponseWriter, r *http.Request) {
 	}, r.Host)
 	art := pacArtifactCache.Legacy(pacStore, reqHost)
 	writePACResponse(w, r, art, pacStore.ModTime(), pac.DefaultProfileID)
-	// #nosec G705 -- host is character-whitelisted above; PAC output is %q-quoted JS served as application/x-ns-proxy-autoconfig
+	// #nosec G705 -- host is character-allowlisted above; PAC output is %q-quoted JS served as application/x-ns-proxy-autoconfig
 }
 
 // servePACProfileFile handles GET /pac/{id}.pac — the stable per-profile PAC

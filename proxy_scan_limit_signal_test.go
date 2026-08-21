@@ -94,23 +94,36 @@ func TestReadScanPrefix_TruncationBoundary(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			scan, overflow, truncated, err := readScanPrefix(strings.NewReader(tc.body), limit)
+			fired := false
+			scan, rest, err := readScanPrefix(strings.NewReader(tc.body), limit, -1, func() { fired = true })
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if truncated != tc.truncated {
-				t.Errorf("truncated = %v, want %v", truncated, tc.truncated)
-			}
 			if string(scan) != tc.wantScan {
 				t.Errorf("scan window = %q, want %q", scan, tc.wantScan)
-			}
-			if string(overflow) != tc.wantOver {
-				t.Errorf("overflow probe = %q, want %q", overflow, tc.wantOver)
 			}
 			// The bytes handed to the scanner must be EXACTLY what the
 			// pre-existing io.LimitReader(body, limit) read produced.
 			if int64(len(scan)) > limit {
 				t.Errorf("scan window %d bytes exceeds limit %d — scanners would see more than configured", len(scan), limit)
+			}
+			if fired {
+				t.Error("the deferred signal must not fire before the remainder is forwarded")
+			}
+			// Forward the remainder, as the call sites do; the signal must
+			// fire exactly when a byte past the window is delivered — and
+			// never for a body of exactly the window size (the false positive
+			// a len == limit heuristic and a blocking limit+1 probe each get
+			// wrong in different ways).
+			tail, err := io.ReadAll(rest)
+			if err != nil {
+				t.Fatalf("forwarding remainder: %v", err)
+			}
+			if tc.wantScan+string(tail) != tc.body {
+				t.Errorf("reassembled body = %q, want %q (bytes lost or duplicated)", tc.wantScan+string(tail), tc.body)
+			}
+			if fired != tc.truncated {
+				t.Errorf("signal fired = %v, want %v", fired, tc.truncated)
 			}
 		})
 	}
@@ -122,15 +135,19 @@ func TestReadScanPrefix_TruncationBoundary(t *testing.T) {
 func TestReadScanPrefix_NonPositiveLimitReadsNothing(t *testing.T) {
 	for _, limit := range []int64{0, -1} {
 		body := strings.NewReader("content that must stay unread")
-		scan, overflow, truncated, err := readScanPrefix(body, limit)
+		fired := false
+		scan, rest, err := readScanPrefix(body, limit, -1, func() { fired = true })
 		if err != nil {
 			t.Fatalf("limit=%d: unexpected error: %v", limit, err)
 		}
-		if len(scan) != 0 || len(overflow) != 0 || truncated {
-			t.Errorf("limit=%d: want no read and no signal, got scan=%q overflow=%q truncated=%v", limit, scan, overflow, truncated)
+		if len(scan) != 0 {
+			t.Errorf("limit=%d: want no read, got scan=%q", limit, scan)
 		}
-		if rest, _ := io.ReadAll(body); string(rest) != "content that must stay unread" {
-			t.Errorf("limit=%d: body was consumed: %q", limit, rest)
+		if got, _ := io.ReadAll(rest); string(got) != "content that must stay unread" {
+			t.Errorf("limit=%d: remainder = %q, want the untouched body", limit, got)
+		}
+		if fired {
+			t.Errorf("limit=%d: no scan window means no signal, ever", limit)
 		}
 	}
 }
@@ -143,15 +160,16 @@ func TestReadScanPrefix_ReadErrorPropagatesAndIsNotTruncation(t *testing.T) {
 		prefix: strings.NewReader("partial"),
 		err:    errors.New("read tcp: connection reset by peer"),
 	}
-	scan, overflow, truncated, err := readScanPrefix(body, 1024)
+	fired := false
+	scan, _, err := readScanPrefix(body, 1024, -1, func() { fired = true })
 	if err == nil {
 		t.Fatal("read error must propagate so the caller can fail closed")
 	}
-	if truncated {
+	if fired {
 		t.Error("a failed read must not be reported as a scan-window truncation")
 	}
-	if scan != nil || overflow != nil {
-		t.Errorf("error return must yield no buffers, got scan=%q overflow=%q", scan, overflow)
+	if scan != nil {
+		t.Errorf("error return must yield no buffer, got scan=%q", scan)
 	}
 }
 
@@ -181,7 +199,16 @@ func TestScanHTTPResponseBody_ChunkedOverLimitSignalsScanSkipped(t *testing.T) {
 
 	var handled bool
 	var scanReadErr error
-	delta := scanSkippedDelta(func() { handled, scanReadErr = scanHTTPResponseBody(w, r, resp) })
+	var got []byte
+	var readErr error
+	// The signal is DEFERRED to the moment an uninspected byte is actually
+	// forwarded (so a pausing origin can never be blocked on by a probe read):
+	// the delta is measured across scan + forward, and must stay zero until
+	// the forward happens.
+	delta := scanSkippedDelta(func() {
+		handled, scanReadErr = scanHTTPResponseBody(w, r, resp)
+		got, readErr = io.ReadAll(resp.Body) // the forward
+	})
 
 	if handled {
 		t.Fatalf("clean prefix must not be blocked; recorder: %d %q", w.Code, w.Body.String())
@@ -193,8 +220,8 @@ func TestScanHTTPResponseBody_ChunkedOverLimitSignalsScanSkipped(t *testing.T) {
 		t.Errorf("scan_skipped delta = %d, want 1 — an over-limit chunked response was forwarded unscanned with no operator signal", delta)
 	}
 	// The signal must not cost correctness: the client's copy stays
-	// byte-identical, including the overflow probe byte.
-	got, err := io.ReadAll(resp.Body)
+	// byte-identical.
+	err := readErr
 	if err != nil {
 		t.Fatalf("reassembled body read: %v", err)
 	}
@@ -296,11 +323,18 @@ func TestScanInspectBody_OverLimitSignalsScanSkipped(t *testing.T) {
 	if out != scanClean {
 		t.Fatalf("clean prefix must yield scanClean, got %v", out)
 	}
-	if delta != 1 {
-		t.Errorf("scan_skipped delta = %d, want 1 — the SSL-inspect path forwarded %d unscanned bytes with no counter, log or alert",
-			delta, len(content)-testScanLimit)
+	if delta != 0 {
+		t.Errorf("scan_skipped delta = %d before the relay ran — the signal must be deferred to actual delivery", delta)
 	}
-	got, err := io.ReadAll(resp.Body)
+	// The relay delivering the tail is what makes "forwarded unscanned" true;
+	// the deferred signal must fire during it, exactly once.
+	var got []byte
+	var err error
+	relayDelta := scanSkippedDelta(func() { got, err = io.ReadAll(resp.Body) })
+	if relayDelta != 1 {
+		t.Errorf("scan_skipped delta = %d during delivery, want 1 — the SSL-inspect path forwarded %d unscanned bytes with no counter, log or alert",
+			relayDelta, len(content)-testScanLimit)
+	}
 	if err != nil {
 		t.Fatalf("reassembled body read: %v", err)
 	}

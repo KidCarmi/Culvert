@@ -147,6 +147,7 @@ func buildOperatorContract() OperatorContract {
 		checkCDR(),
 		checkClusterPosture(),
 		checkDPLastGoodConfigSnapshot(),
+		checkConfigSnapshotApply(),
 		checkSAMLStatePosture(),
 		checkSAMLBaseURLPosture(),
 		checkDefaultAuthOpen(),
@@ -158,6 +159,7 @@ func buildOperatorContract() OperatorContract {
 		checkConfigRollbackValidation(cv),
 		checkKeyAtRest(),
 		checkAuditPersistence(),
+		checkIdentityBackend(),
 		checkSyslogFeed(),
 		checkMemoryBackstop(),
 	}
@@ -165,6 +167,9 @@ func buildOperatorContract() OperatorContract {
 	// exemption postures. Contributes nothing when no exempt rules exist.
 	checks = append(checks, authExemptDiagnostics(policyStore.List(), policyActionFromDefault())...)
 	checks = append(checks, authCredentialRequiredDiagnostics(policyStore.List(), hasCredentialCapableProvider())...)
+	// LDAP profile hygiene diagnostics (ADR-0025). Report-only; contribute
+	// nothing when no LDAP profiles exist.
+	checks = append(checks, authLDAPProfileDiagnostics()...)
 	// SSORequired risk diagnostics + auth-rule shadow/overlap diagnostics (Phase 3
 	// Slice 5). Report-only; contribute nothing when no SSO/auth rules apply.
 	checks = append(checks, authSSORequiredDiagnostics(policyStore.List())...)
@@ -225,6 +230,41 @@ func checkDPLastGoodConfigSnapshot() OperatorContractCheck {
 		Status:         diagFail,
 		Message:        "control plane unreachable and no last-known-good local config is available",
 		OperatorAction: "Restore control plane connectivity or re-enroll/restart this DP after it has successfully received a config snapshot.",
+	}
+}
+
+// checkConfigSnapshotApply covers a failure mode dp_last_known_good_config
+// does not: the CONTENT of the last snapshot/delta received from the
+// control plane was rejected (malformed payload, over-cap validation
+// failure, IdP-profile sync failure, or an
+// applyConfigSnapshot/applyBlocklistDeltaSnapshot rejection — see
+// configsnapshot_apply_health.go), even though CP polling itself is
+// succeeding. Without this check that state reads as a plain "control plane
+// polling healthy" ok, even though this node is silently stuck on stale
+// policy/auth config. Deliberately silent on CP reachability — that is
+// dp_last_known_good_config's claim to make (via dpControlPlanePollFailing),
+// and configSnapshotApplyFailing can still be latched from a rejection that
+// happened before a later, unrelated poll outage.
+func checkConfigSnapshotApply() OperatorContractCheck {
+	if !audit.DPMode() {
+		return OperatorContractCheck{
+			Code:    "dp_config_snapshot_apply",
+			Status:  diagOK,
+			Message: "not running as a data plane",
+		}
+	}
+	if !lastConfigSnapshotApplyOK() {
+		return OperatorContractCheck{
+			Code:           "dp_config_snapshot_apply",
+			Status:         diagFail,
+			Message:        "the last config snapshot/delta received from the control plane was rejected — this node is not applying new policy/auth config",
+			OperatorAction: "Check data plane logs for the most recent \"DataPlane: parse config error\", \"DataPlane: rejecting config snapshot\", \"DataPlane: config snapshot ... apply incomplete\", \"DataPlane: config snapshot ... apply rejected\", \"DataPlane: parse delta remainder\", \"DataPlane: rejecting delta remainder\", or \"DataPlane: delta ... apply failed\" line and fix the control-plane-side config that keeps failing validation.",
+		}
+	}
+	return OperatorContractCheck{
+		Code:    "dp_config_snapshot_apply",
+		Status:  diagOK,
+		Message: "last config snapshot/delta applied successfully",
 	}
 }
 
@@ -338,6 +378,33 @@ func checkRootCA() OperatorContractCheck {
 			OperatorAction: "Provide CULVERT_CA_PASSPHRASE and a -ca-bundle path to enable SSL inspection, or ignore if SSL inspection is not used.",
 		}
 	}
+	// CHAOS-28: "initialised" is not the same as "usable". A Root CA outside its
+	// own validity window is initialised, signs nothing a client will accept,
+	// and used to report diagOK through a total inspected-HTTPS outage. The
+	// message carries the impact and a count, never the raw cause — this row is
+	// a VIEWER-role surface with a standing no-sensitive-values guardrail, and
+	// the cause names the appliance's exact certificate state. Full detail stays
+	// in the logs, the alert, and the admin-role CA API.
+	if certMgr.Usable() != nil {
+		return OperatorContractCheck{
+			Code:   "root_ca",
+			Status: diagFail,
+			Message: fmt.Sprintf("root CA outside its validity window — SSL inspection is BLOCKED (%d connections refused since boot)",
+				caUsabilityFailures().Blocks),
+			OperatorAction: "Rotate the Root CA (CA Management → Force Rotation) and redistribute the new CA certificate to clients.",
+		}
+	}
+	// Keyed on the CURRENT persistence state, not the cumulative counter: an
+	// operator who restores the volume and force-rotates has fixed this, and a
+	// row latched on the counter would keep contradicting them until restart.
+	if caRotationPersistDegraded() {
+		return OperatorContractCheck{
+			Code:           "root_ca",
+			Status:         diagWarn,
+			Message:        "root CA rotated but could not be saved — the replacement exists in memory only and will be lost on restart",
+			OperatorAction: "Restore write access to the data directory, then force a Root CA rotation so the new CA is persisted.",
+		}
+	}
 	return OperatorContractCheck{
 		Code:    "root_ca",
 		Status:  diagOK,
@@ -390,6 +457,47 @@ func checkAuditPersistence() OperatorContractCheck {
 		Code:    "audit_log_persistence",
 		Status:  diagOK,
 		Message: "audit trail is persisting to the configured log file",
+	}
+}
+
+// checkIdentityBackend reports external identity-backend (LDAP / OIDC)
+// reachability (CHAOS-47).
+//
+// This row exists because the only prior signal for "the directory is down"
+// was a rise in authentication failures — indistinguishable from a
+// brute-force spike, and the response to those two situations is opposite.
+// Like the storage row, recovery is reported on EVIDENCE only: the degraded
+// state clears when a backend is observed to answer, never on elapsed time.
+// Memory-only read; no probe is issued from the diagnostics path. The cause
+// text is deliberately NOT reproduced here: it names the configured endpoint
+// (an LDAP URL, an OIDC introspection host), and this contract is a VIEWER-role surface with a
+// standing no-sensitive-values guardrail. The cause goes to the admin-scoped
+// sinks — the log line and the identity_backend_unreachable alert.
+func checkIdentityBackend() OperatorContractCheck {
+	s := authBackendHealthStatus()
+	if s.Unavailable == 0 {
+		return OperatorContractCheck{
+			Code:    "identity_backend",
+			Status:  diagOK,
+			Message: "no external identity-backend outage observed since startup",
+		}
+	}
+	last := s.Last.UTC().Format(time.RFC3339)
+	if s.Degraded {
+		return OperatorContractCheck{
+			Code:   "identity_backend",
+			Status: diagFail,
+			Message: fmt.Sprintf("identity backend %q is UNREACHABLE — proxy authentication is failing closed (%d outage(s) since boot, %d request(s) denied without reaching it; last at %s)",
+				s.Backend, s.Unavailable, s.GatedDenials, last),
+			OperatorAction: "Users cannot authenticate until the directory/IdP answers again. Check reachability from this node (DNS, route, firewall, TLS) and the service account's credentials. No operator action is needed here once it recovers: the denials are not cached, so authentication resumes on the first successful reach.",
+		}
+	}
+	return OperatorContractCheck{
+		Code:   "identity_backend",
+		Status: diagWarn,
+		Message: fmt.Sprintf("identity backend %q was unreachable earlier in this process and has since answered (%d outage(s), %d request(s) denied during them; last at %s)",
+			s.Backend, s.Unavailable, s.GatedDenials, last),
+		OperatorAction: "Authentication has recovered. Users who authenticated during the window saw 407s; investigate the transient directory/IdP outage on the host or the identity service itself.",
 	}
 }
 
@@ -1074,11 +1182,12 @@ func hasCredentialCapableProvider() bool {
 			return true
 		}
 	}
-	// HasEnabledOIDC reads the profiles in place. This probe runs on EVERY
+	// HasEnabledCredentialProvider reads the profiles in place (OIDC or LDAP —
+	// the CREDENTIAL-capable types, ADR-0025). This probe runs on EVERY
 	// proxied request (resolveRequestAuth's credCapable), and the previous
 	// idpRegistry.All() loop deep-cloned every profile per call just to
 	// answer this boolean — pure per-request allocation on the hot path.
-	return idpRegistry != nil && idpRegistry.HasEnabledOIDC()
+	return idpRegistry != nil && idpRegistry.HasEnabledCredentialProvider()
 }
 
 // exemptRiskBuckets collects offending exempt-rule names per risk category.

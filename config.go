@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"fmt"
 	"os"
 	"strings"
@@ -232,6 +233,46 @@ type FileConfig struct {
 			// partially seeds and never enables MCP on its own (mcp.gateway.enabled still
 			// gates the listener). No secret material may appear in this file.
 			QualificationInventoryFile string `yaml:"qualification_inventory_file"`
+			// QualificationPolicyFile is a static, node-local policy source document (QUAL-4)
+			// in the EXISTING accepted Gateway policy format (schema_version 1, capability
+			// "gateway", default_action DENY, rules[]). It is loaded ONCE at startup (no hot
+			// reload, no admin upload, no CLI/env policy body), compiled through the EXISTING
+			// policy compiler + limits, and published as the node-local ACTIVE Observe
+			// evaluation snapshot into the SAME capability-local policy Store the read-only
+			// Policy Admin API and simulator read (single source of truth). Absent ⇒ QUAL-3
+			// behavior (no snapshot; decision telemetry stays pending-policy). A present-but-
+			// invalid file fails activation closed (nothing binds; no partial snapshot). This
+			// is a LOCAL qualification Observe snapshot — never fleet-published, never
+			// Production-enforced; the policy is EVALUATED for evidence only and never
+			// executes an upstream effect. No secret material may appear in this file.
+			QualificationPolicyFile string `yaml:"qualification_policy_file"`
+			// QualificationTelemetry (QUAL-3) composes the existing MCP durable-events
+			// machinery into the Gateway Observe runtime: an encrypted, capability-isolated
+			// event spool (KEK from a model-B secret.Provider file — never a raw key in
+			// YAML/CLI/env), a durable node-local qualification archive exporter, restart-safe
+			// export cursors, truthful telemetry health, and low-cardinality metrics.
+			// DISABLED BY DEFAULT: absence preserves QUAL-2 behavior (no event manager, no
+			// spool). An enabled-but-invalid block fails activation closed (nothing binds; no
+			// partial manager/exporter; no plaintext or memory-only fallback). Observe-only:
+			// no tool executes. This is a telemetry FOUNDATION — with Policy still absent only
+			// the denial lane commits on live requests; decision telemetry stays pending-policy.
+			QualificationTelemetry struct {
+				Enabled bool   `yaml:"enabled"`  // master switch; unset ⇒ disabled (default)
+				NodeID  string `yaml:"node_id"`  // stable node identity stamped into every event (required)
+				DataDir string `yaml:"data_dir"` // canonical telemetry durable root (spool + cursors); required
+				// KEKFile is the model-B key-at-rest file (secret.FileProvider): a random
+				// 32-byte KEK auto-generated 0600 on first use, stable across restarts. The KEK
+				// is NEVER in YAML/CLI/env and never derived from node id/password/config. A
+				// wrong/unavailable KEK fails closed (the spool cannot decrypt). Required.
+				KEKFile string `yaml:"kek_file"`
+				Export  struct {
+					Type       string `yaml:"type"`        // only "local-qualification-archive" (no network sink)
+					Directory  string `yaml:"directory"`   // node-local archive root (required)
+					BatchSize  int    `yaml:"batch_size"`  // max events per export batch (bounded; 0 ⇒ default)
+					MaxRetries int    `yaml:"max_retries"` // export retry bound per batch (bounded; 0 ⇒ default)
+					MaxBytes   int64  `yaml:"max_bytes"`   // archive total-size cap in bytes (bounded; 0 ⇒ default)
+				} `yaml:"export"`
+			} `yaml:"qualification_telemetry"`
 		} `yaml:"gateway"`
 	} `yaml:"mcp"`
 
@@ -574,6 +615,15 @@ func (fc *FileConfig) validateCDR() []string { //nolint:cyclop // flat switch-st
 		fp = strings.ReplaceAll(fp, ":", "")
 		if len(fp) != 64 {
 			errs = append(errs, fmt.Sprintf("cdr.server_fingerprint: expected 64 hex chars (SHA-256), got %d", len(fp)))
+		} else if _, err := hex.DecodeString(fp); err != nil {
+			// Length alone isn't enough: a 64-character value that isn't valid
+			// hex would otherwise sail through startup validation and only
+			// surface later as a non-fatal CDR client-dial failure (loadCDR,
+			// cdr_startup.go) — CDR silently never comes up instead of a clear
+			// startup error naming the bad field. buildCDRTLSConfig (cdr.go)
+			// enforces the same hex requirement at connect time; this mirrors
+			// it at config-load time so the failure is loud and immediate.
+			errs = append(errs, "cdr.server_fingerprint: expected 64 hex chars (SHA-256), got non-hex characters")
 		}
 	}
 	if p := fc.CDR.CertsDir; p != "" && strings.Contains(p, "..") {

@@ -607,6 +607,23 @@ func TestAPIStats_LogPersistenceFields(t *testing.T) {
 	}
 }
 
+// TestAPIStats_ProcessLogBackpressureField proves the operator-blind-spot fix:
+// GET /api/stats surfaces the async process-log queue's backpressure counter
+// (internal/logsink, driving culvert_logsink_backpressure_total), which was
+// previously visible only via /metrics — invisible to an operator without a
+// Prometheus scraper wired up.
+func TestAPIStats_ProcessLogBackpressureField(t *testing.T) {
+	w := httptest.NewRecorder()
+	apiStats(w, getReq("/api/stats"))
+	m := assertJSON(t, w)
+	if _, ok := m["processLogBackpressure"]; !ok {
+		t.Fatal("stats response missing 'processLogBackpressure' field")
+	}
+	if got := m["processLogBackpressure"]; got != float64(0) {
+		t.Errorf("processLogBackpressure = %v; want 0 with no logsink installed in the test process", got)
+	}
+}
+
 // apiStats accepts any HTTP method — no method restriction.
 
 // ─── /api/timeseries ─────────────────────────────────────────────────────────
@@ -956,6 +973,22 @@ func TestAPISyslogConfig_Get(t *testing.T) {
 	w := httptest.NewRecorder()
 	apiSyslogConfig(w, getReq("/api/syslog"))
 	assertStatus(t, w, http.StatusOK)
+}
+
+// A panic recovered in the syslog drain goroutine is a distinct failure mode
+// from an ordinary drop (unreachable/slow collector) - the GET response must
+// surface it so the GUI can tell the two apart instead of only logging it.
+func TestAPISyslogConfig_Get_ExposesPanicsCount(t *testing.T) {
+	w := httptest.NewRecorder()
+	apiSyslogConfig(w, getReq("/api/syslog"))
+	assertStatus(t, w, http.StatusOK)
+	var body map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if _, ok := body["panics"]; !ok {
+		t.Fatalf("expected \"panics\" field in /api/syslog response, got %v", body)
+	}
 }
 
 func TestAPISyslogConfig_Disable(t *testing.T) {

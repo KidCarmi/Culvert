@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"strings"
 	"sync/atomic"
+	"time"
 )
 
 // CA rotation counters (CA-2 PR3). Label-free; incremented only on real
@@ -51,4 +52,50 @@ func caWritePrometheus(w *strings.Builder) {
 	w.WriteString("\n# HELP culvert_cluster_ca_rotations_total Cluster CA rotations/imports (auto-renewal and manual import)\n")
 	w.WriteString("# TYPE culvert_cluster_ca_rotations_total counter\n")
 	fmt.Fprintf(w, "culvert_cluster_ca_rotations_total %d\n", statClusterCARotations.Load())
+
+	caWriteUsabilityPrometheus(w)
+}
+
+// caWriteUsabilityPrometheus appends the CHAOS-28 Root-CA usability series.
+//
+// The gap these close: before them, an expired inspection CA moved NOTHING an
+// operator could scrape. `culvert_ca_rotations_total` only counts successes,
+// the cache counters kept ticking (the engine happily signed unusable leaves),
+// and there was no expiry series at all — CA expiry was visible only as
+// `ca_expires_days` inside the proxy's /health JSON body, which no alerting rule
+// evaluates. `culvert_ca_expires_in_seconds` is the one an operator should
+// alert on WELL before the cliff; the rest are for confirming the cliff was hit.
+//
+// Label-free, per the CA-2 metrics contract: no SNI host, SAN, subject, serial,
+// fingerprint, or key material — counts and one time delta only.
+func caWriteUsabilityPrometheus(w *strings.Builder) {
+	snap := caUsabilityFailures()
+
+	w.WriteString("\n# HELP culvert_ca_usable Whether the Root CA can currently sign a leaf clients will accept (1 = yes)\n")
+	w.WriteString("# TYPE culvert_ca_usable gauge\n")
+	usable := 0
+	if certMgr.Usable() == nil {
+		usable = 1
+	}
+	fmt.Fprintf(w, "culvert_ca_usable %d\n", usable)
+
+	// Omitted entirely when no CA is loaded — an absent series is honest,
+	// whereas 0 would read as "expires now" and page on every CA-less node.
+	if exp := certMgr.CAExpiry(); !exp.IsZero() {
+		w.WriteString("\n# HELP culvert_ca_expires_in_seconds Seconds until the Root CA certificate expires (negative once expired)\n")
+		w.WriteString("# TYPE culvert_ca_expires_in_seconds gauge\n")
+		fmt.Fprintf(w, "culvert_ca_expires_in_seconds %d\n", int64(time.Until(exp).Seconds()))
+	}
+
+	w.WriteString("\n# HELP culvert_ca_sign_refused_total Leaf-sign attempts refused because the Root CA was outside its validity window\n")
+	w.WriteString("# TYPE culvert_ca_sign_refused_total counter\n")
+	fmt.Fprintf(w, "culvert_ca_sign_refused_total %d\n", certMgr.SignRefusals())
+
+	w.WriteString("\n# HELP culvert_ca_inspect_blocked_total CONNECTs failed closed because the Root CA could not produce a usable leaf\n")
+	w.WriteString("# TYPE culvert_ca_inspect_blocked_total counter\n")
+	fmt.Fprintf(w, "culvert_ca_inspect_blocked_total %d\n", snap.Blocks)
+
+	w.WriteString("\n# HELP culvert_ca_rotation_persist_failures_total Rotations that generated a new Root CA but could not write it to disk\n")
+	w.WriteString("# TYPE culvert_ca_rotation_persist_failures_total counter\n")
+	fmt.Fprintf(w, "culvert_ca_rotation_persist_failures_total %d\n", snap.PersistFailures)
 }

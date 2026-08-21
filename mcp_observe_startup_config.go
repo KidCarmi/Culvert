@@ -40,6 +40,32 @@ type mcpObserveStartupConfig struct {
 	// QualificationInventoryFile is the static, node-local qualification inventory
 	// path (QUAL-2). Empty ⇒ no inventory (QUAL-1 empty-registry behavior).
 	QualificationInventoryFile string
+
+	// QualificationPolicyFile is the static, node-local Gateway policy source path
+	// (QUAL-4). Empty ⇒ no policy composed (QUAL-3 behavior; decision telemetry stays
+	// pending-policy). Present ⇒ the file is compiled + published as the node-local
+	// active Observe evaluation snapshot; a present-but-invalid file fails activation
+	// closed. The policy is EVALUATED for evidence only and never executes.
+	QualificationPolicyFile string
+
+	// Telemetry is the resolved QUAL-3 durable-telemetry block. Disabled ⇒ QUAL-2
+	// behavior (no event manager). Pure value DTO; the side-effecting composition
+	// (KEK, spool, exporter) lives in the loader.
+	Telemetry mcpTelemetryStartupConfig
+}
+
+// mcpTelemetryStartupConfig is the resolved, side-effect-free view of the
+// mcp.gateway.qualification_telemetry block (QUAL-3).
+type mcpTelemetryStartupConfig struct {
+	Enabled          bool
+	NodeID           string
+	DataDir          string
+	KEKFile          string
+	ExportType       string
+	ExportDirectory  string
+	ExportBatchSize  int
+	ExportMaxRetries int
+	ExportMaxBytes   int64
 }
 
 // Fail-closed defaults for the security-load-bearing knobs. A blank value in the
@@ -88,6 +114,19 @@ func resolveMCPObserveStartupConfig(fc *FileConfig) mcpObserveStartupConfig {
 		ResourceName:      g.ResourceName,
 
 		QualificationInventoryFile: g.QualificationInventoryFile,
+		QualificationPolicyFile:    g.QualificationPolicyFile,
+
+		Telemetry: mcpTelemetryStartupConfig{
+			Enabled:          g.QualificationTelemetry.Enabled,
+			NodeID:           g.QualificationTelemetry.NodeID,
+			DataDir:          g.QualificationTelemetry.DataDir,
+			KEKFile:          g.QualificationTelemetry.KEKFile,
+			ExportType:       g.QualificationTelemetry.Export.Type,
+			ExportDirectory:  g.QualificationTelemetry.Export.Directory,
+			ExportBatchSize:  g.QualificationTelemetry.Export.BatchSize,
+			ExportMaxRetries: g.QualificationTelemetry.Export.MaxRetries,
+			ExportMaxBytes:   g.QualificationTelemetry.Export.MaxBytes,
+		},
 	}
 }
 

@@ -1,21 +1,24 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/authstate"
 )
 
 // ─── pkceStore ────────────────────────────────────────────────────────────────
 
 func TestPKCEStore_SetPeekPop(t *testing.T) {
-	s := &pkceStore{entries: make(map[string]*pkceEntry)}
+	s := newPKCEStore()
 
-	e := &pkceEntry{createdAt: time.Now(), providerID: "test-provider"}
-	s.set("state1", e)
+	e := &pkceEntry{providerID: "test-provider"}
+	s.Set("state1", "203.0.113.5", e)
 
-	got, ok := s.peek("state1")
+	got, ok := s.Peek("state1")
 	if !ok {
 		t.Fatal("peek should find entry after set")
 	}
@@ -23,7 +26,7 @@ func TestPKCEStore_SetPeekPop(t *testing.T) {
 		t.Errorf("peek providerID = %q, want test-provider", got.providerID)
 	}
 
-	popped, ok := s.pop("state1")
+	popped, ok := s.Pop("state1")
 	if !ok {
 		t.Fatal("pop should find entry")
 	}
@@ -31,69 +34,59 @@ func TestPKCEStore_SetPeekPop(t *testing.T) {
 		t.Errorf("pop providerID = %q, want test-provider", popped.providerID)
 	}
 
-	_, ok = s.peek("state1")
+	_, ok = s.Peek("state1")
 	if ok {
 		t.Error("peek after pop should not find entry")
 	}
 }
 
 func TestPKCEStore_Pop_Missing(t *testing.T) {
-	s := &pkceStore{entries: make(map[string]*pkceEntry)}
-	_, ok := s.pop("nonexistent")
-	if ok {
+	s := newPKCEStore()
+	if _, ok := s.Pop("nonexistent"); ok {
 		t.Error("pop nonexistent should return false")
 	}
 }
 
 func TestPKCEStore_Peek_Missing(t *testing.T) {
-	s := &pkceStore{entries: make(map[string]*pkceEntry)}
-	_, ok := s.peek("nonexistent")
-	if ok {
+	s := newPKCEStore()
+	if _, ok := s.Peek("nonexistent"); ok {
 		t.Error("peek nonexistent should return false")
 	}
 }
 
+// expiredPKCEStore returns a store holding one entry created outside the TTL.
+// The store owns entry creation time (internal/authstate), so expiry is driven
+// through an injected clock rather than by back-dating a struct field.
+func expiredPKCEStore(t *testing.T) *pkceStore {
+	t.Helper()
+	clock := time.Now().Add(-(pkceEntryTTL + time.Second))
+	s := authstate.NewWithClock[*pkceEntry](pkceEntryTTL, pkceStoreMax, func() time.Time { return clock })
+	s.Set("expired", "203.0.113.5", &pkceEntry{providerID: "test"})
+	clock = time.Now()
+	return s
+}
+
 func TestPKCEStore_Pop_Expired(t *testing.T) {
-	s := &pkceStore{entries: make(map[string]*pkceEntry)}
-	// Set an entry with a past creation time (expired)
-	s.entries["expired"] = &pkceEntry{
-		createdAt:  time.Now().Add(-(pkceEntryTTL + time.Second)),
-		providerID: "test",
-	}
-	_, ok := s.pop("expired")
-	if ok {
+	s := expiredPKCEStore(t)
+	if _, ok := s.Pop("expired"); ok {
 		t.Error("pop expired entry should return false")
 	}
 }
 
 func TestPKCEStore_Peek_Expired(t *testing.T) {
-	s := &pkceStore{entries: make(map[string]*pkceEntry)}
-	s.entries["expired"] = &pkceEntry{
-		createdAt:  time.Now().Add(-(pkceEntryTTL + time.Second)),
-		providerID: "test",
-	}
-	_, ok := s.peek("expired")
-	if ok {
+	s := expiredPKCEStore(t)
+	if _, ok := s.Peek("expired"); ok {
 		t.Error("peek expired entry should return false")
 	}
 }
 
 func TestPKCEStore_Set_Eviction(t *testing.T) {
-	s := &pkceStore{entries: make(map[string]*pkceEntry)}
-	// Fill up to max
+	s := newPKCEStore()
 	for i := 0; i < pkceStoreMax; i++ {
-		state := "state" + string(rune('a'+i%26)) + string(rune('0'+i%10))
-		s.entries[state+string(rune(i))] = &pkceEntry{
-			createdAt:  time.Now(),
-			providerID: "p",
-		}
+		s.Set(fmt.Sprintf("state-%d", i), "203.0.113.5", &pkceEntry{providerID: "p"})
 	}
-	// Adding one more should trigger eviction
-	s.set("overflow-state", &pkceEntry{createdAt: time.Now(), providerID: "overflow"})
-	s.mu.Lock()
-	size := len(s.entries)
-	s.mu.Unlock()
-	if size > pkceStoreMax+1 {
+	s.Set("overflow-state", "203.0.113.6", &pkceEntry{providerID: "overflow"})
+	if size := s.Len(); size > pkceStoreMax {
 		t.Errorf("pkceStore grew too large: %d entries (max %d)", size, pkceStoreMax)
 	}
 }

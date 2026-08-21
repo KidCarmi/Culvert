@@ -59,3 +59,31 @@ func TestStore_Persist_RestartRoundTripAndDurability(t *testing.T) {
 		t.Errorf("restored webhook mismatch: %+v", got)
 	}
 }
+
+// TestStore_Init_MigratesLegacyEventNames pins the CHAOS-47 rename
+// (idp_unreachable -> identity_backend_unreachable): a webhook persisted
+// under the retired name before the rename must keep firing under the new
+// name after an upgrade, not silently lose its subscription.
+func TestStore_Init_MigratesLegacyEventNames(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "alert_webhooks.json")
+
+	legacy := `[{"id":"1","name":"pre-rename-hook","url":"https://example.invalid/hook",` +
+		`"events":["threat_detected","idp_unreachable"],"enabled":true}]`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatalf("seed legacy store file: %v", err)
+	}
+
+	as := &Store{}
+	as.Init(path)
+
+	if !as.HasSubscriber("identity_backend_unreachable") {
+		t.Error("webhook persisted under the retired idp_unreachable name did not migrate to identity_backend_unreachable")
+	}
+	if as.HasSubscriber("idp_unreachable") {
+		t.Error("HasSubscriber still matches the retired event name after migration")
+	}
+	if !as.HasSubscriber("threat_detected") {
+		t.Error("migration must not disturb an unrelated, already-current event name")
+	}
+}

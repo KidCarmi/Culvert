@@ -60,7 +60,14 @@ auth:
   user: ""            # Local basic-auth username (empty = auth disabled)
   pass: ""            # Local basic-auth password (bcrypt hashed internally)
 
-# LDAP / Active Directory
+# LDAP / Active Directory — LEGACY / bootstrap compatibility only.
+# Normal deployments configure LDAP from the admin console:
+#   Objects → Identity Providers → Add provider → Microsoft Active Directory
+# The registry provider is managed without restarts, produces full identities
+# (user DN, email, name, directory groups for Access Rules), syncs across the
+# cluster, and supports test-then-enable. When an enabled LDAP identity
+# provider exists in the registry, this YAML block is IGNORED for
+# authentication (one warning is logged; the file is never modified).
 ldap:
   url: ""             # e.g. "ldaps://dc.corp.com:636"
   bind_dn: ""         # Service account DN: "CN=svc-proxy,OU=ServiceAccounts,DC=corp,DC=com"
@@ -216,6 +223,36 @@ mcp:
     # material (no raw credentials/tokens/keys) may appear in this file; a present-but-
     # invalid file fails activation closed. Schema: docs/operator/mcp-qualification-inventory.md
     qualification_inventory_file: ""
+    # QUAL-4 static node-local Gateway policy source (existing policy format:
+    # schema_version 1, capability "gateway", default_action DENY, rules[]). Loaded ONCE
+    # at startup (no hot reload, no admin upload, no CLI/env policy body), compiled by
+    # the existing policy compiler, and published as the node-local ACTIVE Observe
+    # evaluation snapshot into the SAME store the read-only Policy Admin API + simulator
+    # read (single source of truth). Absent = QUAL-3 behavior (no snapshot; decision
+    # telemetry "pending_policy"). A present-but-invalid file fails activation closed
+    # (nothing binds; no partial snapshot). The policy is EVALUATED for decision evidence
+    # only and NEVER executes an upstream effect: an evaluated ALLOW returns
+    # execution_state=not_implemented; this snapshot is node-local, never fleet-published
+    # or Production-enforced, and never bypasses the four-eyes publication workflow. NO
+    # secret material may appear. Schema + operation: docs/operator/mcp-qualification-policy.md
+    qualification_policy_file: ""
+    # QUAL-3 durable Observe telemetry (disabled by default; absence preserves QUAL-2
+    # behavior). When enabled it composes the encrypted, capability-isolated MCP event
+    # spool + a node-local qualification archive exporter. Observe-only: no tool
+    # executes; with Policy absent only the denial lane commits (decision telemetry is
+    # "pending_policy"). The KEK is a model-B random 0600 key FILE — never a raw key in
+    # YAML/CLI/env. Schema + operation: docs/operator/mcp-qualification-telemetry.md
+    qualification_telemetry:
+      enabled: false
+      node_id: ""              # stable node identity stamped into every event (required)
+      data_dir: ""             # canonical telemetry durable root: spool + export cursors (required)
+      kek_file: ""             # model-B KEK file path (random 0600 key, auto-generated; required)
+      export:
+        type: "local-qualification-archive"  # only supported sink (no network SIEM/bus)
+        directory: ""          # node-local archive root (required)
+        batch_size: 0          # events per export batch (0 = default 256; max 4096)
+        max_retries: 0         # export retry bound per batch (0 = default 3; max 16)
+        max_bytes: 0           # archive total-size cap in bytes (0 = default 1 GiB)
 
 # ── Admin UI ──────────────────────────────────────────────────────────────
 

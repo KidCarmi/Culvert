@@ -434,9 +434,11 @@ func alertDPCertRenewalFailure(nodeID, certFile string, renewErr error) {
 		return
 	}
 	// CHAOS-09: record for the /ready node_cert row. Unlike the alert latch
-	// below, the probe state is refreshed on every failed attempt so the row
-	// always shows the current days-left and last error.
-	recordDPCertRenewalFailure(days, renewErr)
+	// below, the probe state is refreshed on every failed attempt. It records
+	// only the BOOLEAN: /ready is unauthenticated on the proxy port, so neither
+	// days-left nor renewErr may reach it (see readyz_dp_health.go). Both are
+	// already in the log line the caller wrote and in the alert built below.
+	recordDPCertRenewalFailure()
 	level := dpCertAlertLevel(days)
 	dpCertExpiryAlert.mu.Lock()
 	latched := level <= dpCertExpiryAlert.level

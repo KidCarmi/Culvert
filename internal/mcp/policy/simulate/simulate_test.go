@@ -18,7 +18,9 @@ func gwInput(tool string) policy.DecisionInput {
 		Principal: policy.Principal{Kind: policy.SubjectHuman, SubjectID: "user-1", Tenant: "tenant-a",
 			Groups: []string{"developers"}, Assurance: policy.AssuranceHigh, Issuer: "https://idp"},
 		Client: policy.Client{ClientID: "client-g", Tenant: "tenant-a", Capability: policy.CapGateway, Trust: policy.TrustHigh},
-		Server: &policy.Server{ServerID: "srv-1", Owner: "team", Environment: "prod",
+		// Owner MUST equal Principal.Tenant so the fixture is a valid same-tenant request
+		// (QUAL-5 Gateway tenant isolation denies a cross-tenant tuple before any rule).
+		Server: &policy.Server{ServerID: "srv-1", Owner: "tenant-a", Environment: "prod",
 			Enabled: true, Verification: policy.ServerVerified},
 		Tool: &policy.Tool{Name: tool, ServerID: "srv-1", FingerprintHash: "abc123",
 			Disposition: policy.DispUsable, Drift: policy.DriftNoMaterialChange, Destination: policy.DestinationApproved,

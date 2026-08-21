@@ -15,6 +15,7 @@ package main
 // returned for the health surface; the Secure Web Gateway path is never affected.
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"os"
@@ -66,6 +67,23 @@ type mcpObserveActivation struct {
 	TrustedKeyCount int
 }
 
+// composeGatewayTelemetry builds the QUAL-3 durable telemetry plane and returns the
+// runtime EventProvider to inject into Deps. Disabled ⇒ (nil, not_configured, nil, nil)
+// so the caller keeps QUAL-2 behavior; enabled-but-invalid ⇒ (nil, invalid, nil, err)
+// so the caller fails activation closed. Returning the concrete *events.Manager as the
+// provider only when non-nil avoids the nil-interface trap.
+func composeGatewayTelemetry(tc mcpTelemetryStartupConfig) (*telemetryRuntime, mcpTelemetryState, mcpruntime.EventProvider, error) {
+	tel, telState, err := buildMCPTelemetry(tc)
+	if err != nil {
+		return nil, mcpTelemInvalid, nil, err
+	}
+	var ev mcpruntime.EventProvider
+	if tel != nil {
+		ev = tel.Manager()
+	}
+	return tel, telState, ev, nil
+}
+
 // loadMCPObserveRuntime builds the runtime config + activation summary from the
 // resolved startup config. A disabled config returns an empty runtime config
 // (byte-identical disabled-by-default behavior). An enabled-but-invalid config
@@ -74,11 +92,16 @@ type mcpObserveActivation struct {
 func loadMCPObserveRuntime(sc mcpObserveStartupConfig) (mcpruntime.Config, mcpObserveActivation) {
 	if !sc.Enabled {
 		publishMCPInventory(mcpInvNotConfigured, "", nil, nil)
+		publishMCPTelemetry(mcpTelemNotConfigured, "", nil)
+		_ = publishMCPPolicy(mcpPolNotConfigured, "", nil)
 		return mcpruntime.Config{}, mcpObserveActivation{State: mcpObserveDisabled}
 	}
-	// Reset the node-local inventory holder until this activation succeeds, so a
-	// failed enable never leaves a stale "loaded" fleet visible to the Admin API.
+	// Reset the node-local inventory + telemetry + policy holders until this
+	// activation succeeds, so a failed enable never leaves a stale fleet/telemetry/
+	// policy runtime visible to the Admin API.
 	publishMCPInventory(mcpInvNotConfigured, "", nil, nil)
+	publishMCPTelemetry(mcpTelemNotConfigured, "", nil)
+	_ = publishMCPPolicy(mcpPolNotConfigured, "", nil)
 	act := mcpObserveActivation{
 		State: mcpObserveInvalid, EnableRequested: true,
 		BindAddress: sc.BindAddress, Port: sc.Port, ClientCertMode: sc.ClientCertMode,
@@ -149,29 +172,78 @@ func loadMCPObserveRuntime(sc mcpObserveStartupConfig) (mcpruntime.Config, mcpOb
 		return invalid("qualification_inventory_invalid", err)
 	}
 
-	cfg := assembleGatewayConfig(sc, modes, tlsCfg, authCfg, meta, keys, reg, cat)
+	// QUAL-3: compose the durable telemetry plane (KEK + encrypted spool + archive
+	// exporter). Disabled ⇒ nil manager (QUAL-2 behavior). An enabled-but-invalid block
+	// fails activation closed — nothing binds, no partial manager/exporter, no fallback.
+	tel, telState, ev, terr := composeGatewayTelemetry(sc.Telemetry)
+	if terr != nil {
+		publishMCPTelemetry(mcpTelemInvalid, "qualification_telemetry_invalid", nil)
+		return invalid("qualification_telemetry_invalid", terr)
+	}
+
+	// QUAL-4: compile the node-local Gateway policy source (if any). Disabled/absent ⇒
+	// nil provider (Deps.Policy stays nil ⇒ decision-point path is observe-only and
+	// decision telemetry stays pending-policy). A present-but-invalid source fails
+	// activation closed — nothing binds and no partial snapshot is ever published.
+	polSnap, polProvider, polState, polReason, perr := composeGatewayPolicy(sc)
+	if perr != nil {
+		_ = publishMCPPolicy(mcpPolInvalid, polReason, nil)
+		_ = tel.Close(context.Background()) // nil-safe; release the opened spool/exporter
+		return invalid("qualification_policy_invalid", perr)
+	}
+
+	cfg := assembleGatewayConfig(sc, modes, tlsCfg, authCfg, meta, keys, reg, cat, ev, polProvider)
 	// Classify the transactional runtime validation (bind/port/wildcard/TLS/hosts) as
 	// an activation outcome rather than a hard failure, so an invalid listener config
 	// fails closed to "invalid" instead of aborting startup.
 	if err := cfg.Validate(); err != nil {
+		// tel.Close is nil-safe (nil receiver ⇒ no-op); closing the opened
+		// spool/exporter so an invalid listener leaks nothing. Policy stays reset to
+		// not_configured (never published), so no snapshot is left active.
+		_ = tel.Close(context.Background())
 		return invalid("listener_config_invalid", err)
 	}
-	// Publish the seeded inventory as the single source of truth ONLY after the whole
-	// activation is valid, so the Admin API and runtime observe the identical pair.
+	// Publish the compiled policy snapshot into the shared store FIRST (the single
+	// source of truth for the runtime evaluator, the /api/mcp/policy active read, the
+	// simulator Compare baseline, and the decision-evidence snapshot hash). For a fresh
+	// store + a validated Gateway snapshot this cannot fail; treat any error as
+	// fail-closed (nothing binds; inventory/telemetry stay reset to not_configured).
+	if err := publishMCPPolicy(polState, polReason, polSnap); err != nil {
+		_ = tel.Close(context.Background())
+		return invalid("qualification_policy_invalid", err)
+	}
+	// Publish the seeded inventory + telemetry as the single sources of truth ONLY
+	// after the whole activation is valid, so the Admin API and runtime observe the
+	// identical instances.
 	publishMCPInventory(invState, "", reg, cat)
+	publishMCPTelemetry(telState, "", tel)
 	act.State = mcpObserveConfigured
 	return cfg, act
 }
 
 // assembleGatewayConfig builds the disabled-nowhere Gateway runtime config from the
-// resolved pieces. Deps deliberately carry ONLY the read paths (trusted keys, empty
-// read-only registry/catalog, and a DPoP replay cache when required) — no executor,
-// policy, inspection, or event provider, so the listener can never execute upstream.
-func assembleGatewayConfig(sc mcpObserveStartupConfig, modes gatewayModes, tlsCfg *tls.Config, authCfg authn.CapabilityAuthConfig, meta *mcpruntime.ProtectedResourceMetadata, keys authn.KeyResolver, reg *registry.Registry, cat *catalog.Catalog) mcpruntime.Config {
+// resolved pieces. Deps carry the read paths (trusted keys, read-only
+// registry/catalog, DPoP replay cache when required), the QUAL-3 event provider, and
+// the QUAL-4 policy provider — but NO executor, upstream client, credential broker, or
+// inspection provider, so a decision-point method is EVALUATED (and its true decision
+// recorded) while the effective runtime stays Observe-only and can never execute an
+// upstream tool call.
+func assembleGatewayConfig(sc mcpObserveStartupConfig, modes gatewayModes, tlsCfg *tls.Config, authCfg authn.CapabilityAuthConfig, meta *mcpruntime.ProtectedResourceMetadata, keys authn.KeyResolver, reg *registry.Registry, cat *catalog.Catalog, ev mcpruntime.EventProvider, pol mcpruntime.PolicyProvider) mcpruntime.Config {
 	deps := mcpruntime.Deps{
 		Keys:     keys,
 		Registry: reg, // QUAL-2: shared read-only inventory (empty when no qualification file)
 		Catalog:  cat, // the SAME instances back the MCP Servers/Tools Admin API
+		// QUAL-3: the durable event manager (nil unless telemetry is composed). When set,
+		// denial-lane events commit on live requests, and (with QUAL-4 policy composed) an
+		// ALLOW-class decision durably commits a full decision event before the
+		// still-not-implemented response.
+		Events: ev,
+		// QUAL-4: the node-local Gateway policy provider (nil unless a policy source is
+		// composed). When set, decision-point methods are EVALUATED against the shared
+		// snapshot and the true result recorded; the evaluated action is NOT execution
+		// authorization — with no executor an ALLOW returns execution_state=not_implemented
+		// and no credential/upstream/broker/side-effect runs. Still Observe-only.
+		Policy: pol,
 	}
 	if modes.senderProfile.RequiresDPoP() {
 		deps.Replay = senderconstraint.NewReplayCache(limits.DefaultAuth(), nil)
