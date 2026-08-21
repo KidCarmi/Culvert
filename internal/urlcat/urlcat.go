@@ -11,7 +11,10 @@
 package urlcat
 
 import (
+	"crypto/sha256"
 	_ "embed"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -57,14 +60,108 @@ type Store struct {
 	index      map[string]map[string]bool // lowercase cat → lowercase host set (ALL entries)
 	adminIndex map[string]map[string]bool // same, BuiltIn=false entries only
 	path       string
-	rev        atomic.Int64 // taxonomy revision: bumped on every index rebuild (load/mutation)
+	fp         atomic.Value // string: cached semantic ContentFingerprint (recomputed under mu on every semantic change)
 }
 
-// Revision returns the monotonic admin-taxonomy revision. It changes whenever
-// the store's entries are (re)built — load, replace, set/delete, host add/
-// remove — so callers can cheaply detect "the admin taxonomy changed" without
-// diffing content (used by the policy-learning category epoch, ADR-0025 §6).
-func (s *Store) Revision() int64 { return s.rev.Load() }
+// fingerprintDomain versions the ContentFingerprint framing. Bump it whenever
+// the framed field set or encoding changes — consumers pin the returned value
+// as an identity, so two framings must never collide.
+const fingerprintDomain = "culvert-urlcat-content-fp-v1"
+
+// ContentFingerprint returns a deterministic semantic identity of the
+// taxonomy: equal iff the RESOLUTION-RELEVANT content is equal, stable across
+// restart/reload of identical persisted state (unlike a process-local
+// revision counter). Consumed by the policy-learning category epoch
+// (ADR-0025 §6, epoch scheme v2).
+//
+// Covered (exactly the state that can change a Lookup*/Matches* result):
+//   - every entry's Name in ORIGINAL case (the resolvers return it verbatim,
+//     and downstream consumers key on it),
+//   - the BuiltIn flag (it decides admin-tier membership: LookupHostAdmin /
+//     MatchesHostAdmin see only BuiltIn=false entries),
+//   - the entry's host patterns, lowercased (the resolver-input transform),
+//     de-duplicated and sorted.
+//
+// Excluded by contract: process-local counters, timestamps, mutation history,
+// map/insertion/iteration order (entries are canonically sorted by name;
+// LookupHost's first-match-wins entry order is deliberately NOT encoded — it
+// can only matter when two categories' patterns overlap, and encoding it
+// would turn every same-content reorder into a false identity change), host
+// pattern CASE and duplicate patterns (they affect only the matchedBy display
+// string, never the resolved category), empty patterns, and display-only or
+// metrics state. Framing is length-prefixed under fingerprintDomain, so field
+// boundaries are unambiguous.
+//
+// The value is cached; reads are one atomic load. Before the first
+// load/mutation (zero-value store) it is computed on demand.
+func (s *Store) ContentFingerprint() string {
+	if v, ok := s.fp.Load().(string); ok && v != "" {
+		return v
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return computeFingerprint(s.entries)
+}
+
+// recomputeFingerprintLocked refreshes the cached fingerprint. Caller must
+// hold s.mu (write) — every semantic mutation path calls this before
+// unlocking, so readers never observe a stale identity for new content.
+func (s *Store) recomputeFingerprintLocked() {
+	s.fp.Store(computeFingerprint(s.entries))
+}
+
+// computeFingerprint derives the canonical content hash (see
+// ContentFingerprint for the field contract). Pure function of entries.
+func computeFingerprint(entries []*Entry) string {
+	type frameEntry struct {
+		name    string
+		builtIn bool
+		hosts   []string
+	}
+	fes := make([]frameEntry, 0, len(entries))
+	for _, e := range entries {
+		hs := make([]string, 0, len(e.Hosts))
+		seen := make(map[string]bool, len(e.Hosts))
+		for _, h := range e.Hosts {
+			hl := strings.ToLower(h)
+			if hl != "" && !seen[hl] {
+				seen[hl] = true
+				hs = append(hs, hl)
+			}
+		}
+		sort.Strings(hs)
+		fes = append(fes, frameEntry{name: e.Name, builtIn: e.BuiltIn, hosts: hs})
+	}
+	sort.Slice(fes, func(i, j int) bool {
+		a, b := strings.ToLower(fes[i].name), strings.ToLower(fes[j].name)
+		if a != b {
+			return a < b
+		}
+		return fes[i].name < fes[j].name // exact-case tie-break: total order
+	})
+	h := sha256.New()
+	var n [8]byte
+	frame := func(v string) {
+		binary.BigEndian.PutUint64(n[:], uint64(len(v)))
+		h.Write(n[:])
+		h.Write([]byte(v))
+	}
+	frame(fingerprintDomain)
+	for i := range fes {
+		frame(fes[i].name)
+		if fes[i].builtIn {
+			h.Write([]byte{1})
+		} else {
+			h.Write([]byte{0})
+		}
+		binary.BigEndian.PutUint64(n[:], uint64(len(fes[i].hosts)))
+		h.Write(n[:])
+		for _, hh := range fes[i].hosts {
+			frame(hh)
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil)[:16])
+}
 
 // New builds a store over entries and its derived host index.
 func New(entries []*Entry) *Store {
@@ -74,10 +171,10 @@ func New(entries []*Entry) *Store {
 }
 
 // rebuildIndex reconstructs the category→hosts indices from s.entries and
-// bumps the taxonomy revision.
+// refreshes the cached content fingerprint.
 // Caller must hold s.mu (write or be the sole owner).
 func (s *Store) rebuildIndex() {
-	s.rev.Add(1)
+	s.recomputeFingerprintLocked()
 	idx := make(map[string]map[string]bool, len(s.entries))
 	admin := make(map[string]map[string]bool)
 	for _, e := range s.entries {
@@ -256,7 +353,7 @@ func (s *Store) Set(name string, hosts []string, builtIn bool) error {
 		} else {
 			s.adminIndex[key] = set
 		}
-		s.rev.Add(1)
+		s.recomputeFingerprintLocked()
 		s.mu.Unlock()
 		s.Save()
 		return nil
@@ -268,7 +365,7 @@ func (s *Store) Set(name string, hosts []string, builtIn bool) error {
 	} else {
 		s.adminIndex[key] = set
 	}
-	s.rev.Add(1)
+	s.recomputeFingerprintLocked()
 	s.mu.Unlock()
 	s.Save()
 	return nil
@@ -285,7 +382,7 @@ func (s *Store) Delete(name string) error {
 		s.entries = append(s.entries[:i], s.entries[i+1:]...)
 		delete(s.index, key)
 		delete(s.adminIndex, key)
-		s.rev.Add(1)
+		s.recomputeFingerprintLocked()
 		s.mu.Unlock()
 		s.Save()
 		return nil
@@ -309,7 +406,7 @@ func (s *Store) AddHost(category, host string) error {
 		}
 		e.Hosts = append(e.Hosts, host)
 		s.index[key][host] = true
-		s.rev.Add(1)
+		s.recomputeFingerprintLocked()
 		s.mu.Unlock()
 		s.Save()
 		return nil
@@ -331,7 +428,7 @@ func (s *Store) RemoveHost(category, host string) error {
 				}
 				e.Hosts = append(e.Hosts[:i], e.Hosts[i+1:]...)
 				delete(s.index[key], host)
-				s.rev.Add(1)
+				s.recomputeFingerprintLocked()
 				s.mu.Unlock()
 				s.Save()
 				return nil

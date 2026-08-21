@@ -95,13 +95,29 @@ trust boundary that prevents it, before any learning code is written.
 
 6. **Generation-pinned evidence.** Every session pins a `Baseline`: the policy
    rule-set content hash (ADR-0026), the category epoch (signed-feed
-   `GenerationID` / `SnapshotSHA256` / `ConfigRevision`, plus the catStore
-   config-version sequence; UT1 has no digest today and is flagged
-   lower-confidence), a guardrail-config hash (the allowlist), and an
+   `GenerationID` / `SnapshotSHA256` / `ConfigRevision`, plus the admin
+   taxonomy's semantic content identity; UT1 has no digest today and is
+   flagged lower-confidence), a guardrail-config hash (the allowlist), and an
    identity-config audit watermark. Every recommendation embeds a copy by
    value, so evidence survives feed refreshes, restarts, and upgrades. Any
    mismatch at read time renders the recommendation **Stale** (latched);
    a stale recommendation cannot be accepted, only regenerated.
+
+   *Amendment (2026-08-21, preview-qualification finding QB-2)*: the admin
+   taxonomy component was originally the process-local `urlcat` revision
+   COUNTER, which restarts reset — an unchanged taxonomy produced a different
+   epoch after every restart, staling every recommendation of any session
+   that spanned one. The epoch is now scheme **v2** (`"v2|"`-tagged): the
+   admin component is `urlcat.Store.ContentFingerprint()`, a cached
+   deterministic hash over exactly the resolution-relevant taxonomy content
+   (original-case names, BuiltIn tier flags, lowercased/deduped/sorted host
+   patterns; canonical entry ordering, length-prefixed domain-tagged
+   framing). Same effective taxonomy ⇒ same identity across restart/reload;
+   different ⇒ different. Old counter-scheme pins are NOT backfilled or
+   reinterpreted: the scheme tag guarantees they can never compare equal to a
+   v2 value, so sessions/recommendations created before the upgrade go stale
+   exactly once (`category_epoch_changed`) and are regenerated — historical
+   evidence is never rewritten.
 
 7. **Bounded, node-local, off every config surface.** Learned/session/
    recommendation state lives in node-local files under

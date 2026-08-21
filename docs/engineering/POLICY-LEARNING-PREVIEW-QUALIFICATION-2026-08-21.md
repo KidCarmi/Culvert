@@ -208,7 +208,44 @@ epoch derivation is a recorded ADR-0025 §6 identity contract.
    unreachable — but large estates may want warm-up pacing; noted for
    post-preview consideration.
 
-## 8. Verdict
+## 8. QB-2 corrective slice (same day) — restart-stable CategoryEpoch
+
+Implemented after review sign-off, scoped to exactly the reported slice:
+
+- `urlcat.Store.ContentFingerprint()` — a cached deterministic semantic
+  identity of the taxonomy covering exactly the resolution-relevant content
+  (original-case names, BuiltIn tier flags, lowercased/deduped/sorted host
+  patterns; canonical entry ordering; length-prefixed framing under the
+  `culvert-urlcat-content-fp-v1` domain tag). Excluded by contract:
+  process-local counters, timestamps, mutation history, map/insertion order,
+  host-pattern case and duplicates (matchedBy display only), empty patterns.
+  Cached: established on load/construction, recomputed under the store lock
+  after every semantic mutation; reads are one atomic load; a semantic no-op
+  leaves the value unchanged. The now-consumerless `Revision()` counter is
+  retired.
+- `learnCategoryEpoch()` scheme v2: `v2|saas:<gen:rev>|admin:<fingerprint>` —
+  SaaS components unchanged; the `v2|` tag makes old counter-scheme pins
+  structurally unequal to every v2 value, so pre-upgrade sessions and
+  recommendations go stale exactly once (`category_epoch_changed`) and are
+  regenerated; no backfill, no reinterpretation (ADR-0025 §6 amendment).
+- Pinned by `internal/urlcat/urlcat_fingerprint_test.go` (reload identity,
+  insertion/host-order independence, every semantic mutation changes it,
+  no-ops and add-then-remove restore it, save/load roundtrip, race-clean
+  concurrent reads/mutations) and `policy_learning_epoch_test.go` (root
+  composition: restart-equivalent rebuild leaves the epoch unchanged; scheme
+  tag; a real engine restarted mid-session records NO churn from the restart
+  alone; complete → generate → restart leaves the recommendation non-stale on
+  the category axis; a real taxonomy change stales it for the correct
+  reason).
+- Targeted requalification (real binary, real kill −9 restarts): the exact
+  QB-2 customer chain — Start → observations → restart (unchanged taxonomy)
+  → continue → Complete → Generate → restart → recommendation carries NO
+  category-related stale reason → Accept to Draft succeeds → durable
+  disabled rule verified → an admin taxonomy mutation then stales the same
+  recommendation with exactly `category_epoch_changed`. Results in the lab's
+  `requal_qb2.json` (summarized in the exit report).
+
+## 9. Verdict
 
 **SHIP PREVIEW after one bounded corrective slice (QB-2).** Every
 qualification surface the epoch pin does not touch is green: predeclared-

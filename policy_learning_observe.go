@@ -11,8 +11,6 @@ package main
 // predicted branch — no allocation, no goroutine, no I/O (benchgate-pinned).
 
 import (
-	"fmt"
-
 	"github.com/KidCarmi/Culvert/internal/policylearn"
 )
 
@@ -44,16 +42,29 @@ func learnObservePreDispatch(auth authOutcome, host, method, status string) {
 
 // learnCategoryEpoch composes the opaque category-generation identity the
 // learning engine pins per session (ADR-0025 §6): the signed SaaS feed's
-// generation + overrides revision (atomically-swapped immutable view) and the
-// admin taxonomy revision. Opaque — the engine only compares equality. The
-// community UT1 DB carries no generation identity today (recorded M3 finding);
-// its churn is NOT represented here.
+// generation + overrides revision (atomically-swapped immutable view,
+// unchanged from scheme v1) and the admin taxonomy's SEMANTIC content
+// fingerprint (urlcat.Store.ContentFingerprint — QB-2 corrective slice).
+// Opaque — the engine only compares equality. The community UT1 DB carries no
+// generation identity today (recorded M3 finding); its churn is NOT
+// represented here.
+//
+// Scheme v2 ("v2|" prefix): the admin component was previously the
+// process-local urlcat revision COUNTER, which restarts reset, so an
+// unchanged taxonomy produced a different epoch after every restart and
+// staled every recommendation of any session that spanned one (preview
+// qualification finding QB-2). The content fingerprint is restart-stable:
+// same effective admin taxonomy ⇒ same identity; different ⇒ different. The
+// "v2|" tag makes the scheme change explicit — a session or recommendation
+// pinned under the old counter scheme can never compare equal to a v2 value,
+// so pre-upgrade objects go stale exactly ONCE at upgrade (documented in the
+// preview qualification record) instead of being silently reinterpreted.
 func learnCategoryEpoch() string {
 	saas := "none"
 	if v := saasEffectiveView.Current(); v != nil {
 		saas = v.GenerationID + ":" + v.ConfigRevision
 	}
-	return fmt.Sprintf("saas:%s|admin:%d", saas, catStore.Revision())
+	return "v2|saas:" + saas + "|admin:" + catStore.ContentFingerprint()
 }
 
 func learnObserveDecision(auth authOutcome, host, method string, match *PolicyMatch, status, sslAction string) {
