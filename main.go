@@ -216,7 +216,7 @@ func main() {
 	initBackgroundServices(s)
 	initSOCKS5(s)
 	initPersistentAdminState(s)
-	initPolicyLearning(s)  // ADR-0025 M1: disabled-by-default learning skeleton (constant-off; no effect)
+	initPolicyLearning(s)  // ADR-0025: disabled-by-default advisory learning engine (governed via AdminSettings; no SWG effect when off)
 	initMCPRuntime(s)      // PR-5: disabled-by-default MCP listener runtime (no SWG effect when off)
 	initMCPRollout(s)      // PR-11: disabled-by-default rollout composition (Gateway/Management isolated)
 	initMCPDistribution(s) // PR-12: disabled-by-default DP applier composition (after rollout state is restored)
@@ -886,9 +886,11 @@ func initPersistentAdminState(_ *startupState) {
 }
 
 // initPolicyLearning resolves the policy-learning slice config and hands it to
-// the loader (policy_learning_startup*.go). M1: Enabled is a constant false, so
-// this is a guaranteed no-op in production builds (ADR-0025 dead infrastructure
-// until M2+ lands the admin surface with GUI parity).
+// the loader (policy_learning_startup*.go). Enablement is AdminSettings-governed
+// (ADR-0025 M5A) and OFF by default: with no admin ever having enabled the
+// feature this is a true no-op — no engine, no file, no goroutine. There is
+// deliberately no CLI/YAML/env enablement path, so the resolver reads only
+// node-local paths.
 func initPolicyLearning(s *startupState) {
 	loadPolicyLearning(resolvePolicyLearningStartupConfig(s.fc, dataDir))
 }
