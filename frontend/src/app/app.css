@@ -1,0 +1,39 @@
+/* FE-1A placeholder styling only. The real design-token system lands in FE-2
+   (docs/design/DESIGN-SYSTEM.md is the seed). All styling ships as external
+   CSS — inline styles are banned (FRONTEND-SECURITY-CONTRACT.md §4). */
+:root {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  background: #0d1117;
+  color: #e6edf3;
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
+}
+
+.foundation {
+  text-align: center;
+}
+
+.foundation-title {
+  margin: 0;
+  font-size: 2.5rem;
+  letter-spacing: 0.35em;
+  text-indent: 0.35em;
+  font-weight: 700;
+}
+
+.foundation-subtitle {
+  margin: 0.75rem 0 0;
+  color: #7d8590;
+  font-size: 1rem;
+  letter-spacing: 0.08em;
+}

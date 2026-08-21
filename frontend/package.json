@@ -1,0 +1,43 @@
+{
+  "name": "culvert-frontend",
+  "private": true,
+  "version": "0.0.0",
+  "description": "CULVERT admin UI frontend platform (FE-1A foundation; ADR-FE-001)",
+  "type": "module",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": "24.19.0",
+    "npm": "11.17.0"
+  },
+  "scripts": {
+    "generate": "sh scripts/generate-types.sh",
+    "lint": "eslint .",
+    "format:check": "prettier --check \"src/**/*.{ts,tsx,css}\" \"*.{ts,html}\" \"scripts/**/*.mjs\"",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "vite build",
+    "verify": "sh scripts/verify.sh"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "5.101.4",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "react-router": "8.3.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@playwright/test": "1.62.1",
+    "@types/node": "24.13.3",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
+    "@vitejs/plugin-react": "6.1.0",
+    "eslint": "10.9.0",
+    "jsdom": "30.0.1",
+    "license-checker-rseidelsohn": "5.0.1",
+    "prettier": "3.9.6",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.67.0",
+    "vite": "8.2.2",
+    "vitest": "4.1.11"
+  }
+}
