@@ -176,8 +176,8 @@ type OIDCAuth struct {
 	mu     sync.Mutex
 	cache  map[string]*oidcCacheEntry // key = cacheKey("", token)
 
-	// gate arms when the IdP is unreachable, so an outage denies without
-	// re-introspecting and recovers on one probe (CHAOS-47,
+	// gate arms when the identity backend is unreachable, so an outage denies
+	// without re-introspecting and recovers on one probe (CHAOS-47,
 	// auth_backend_health.go).
 	gate authProbeGate
 }
@@ -232,7 +232,7 @@ func (a *OIDCAuth) ResolveIdentity(_ string, token string) (*Identity, bool) {
 	}
 
 	if !a.gate.allow() {
-		// IdP is in its unreachable cooldown — deny without another round trip
+		// identity backend is in its unreachable cooldown — deny without another round trip
 		// (CHAOS-47). Fail-closed posture unchanged; the difference is that
 		// nothing about this denial is remembered.
 		noteAuthBackendGatedDenial()
@@ -252,7 +252,7 @@ func (a *OIDCAuth) ResolveIdentity(_ string, token string) (*Identity, bool) {
 			// that must CLEAR a cooldown a previous outage armed rather than merely
 			// avoid arming one. Otherwise the 4xx silently eats each half-open probe
 			// and the gate re-arms behind it, letting a caller with one malformed
-			// token hold a recovered IdP in a permanent outage for every other user.
+			// token hold a recovered identity backend in a permanent outage for every other user.
 			// (Found by Codex review on PR #1077; same defect fixed on the LDAP leg
 			// in noteVerifyError.)
 			a.gate.recordReachable()
@@ -261,9 +261,9 @@ func (a *OIDCAuth) ResolveIdentity(_ string, token string) (*Identity, bool) {
 				"the endpoint answered, so any cooldown is cleared")
 			return nil, false
 		}
-		// Could not reach the IdP, or it did not answer coherently. Deny this
-		// request, but never cache it: a cached infrastructure failure keeps
-		// denying a valid token for the full TTL after the IdP recovers.
+		// Could not reach the identity backend, or it did not answer coherently.
+		// Deny this request, but never cache it: a cached infrastructure failure
+		// keeps denying a valid token for the full TTL after the backend recovers.
 		a.gate.recordUnavailable()
 		noteAuthBackendUnavailable("oidc", err.Error())
 		logger.Printf("OIDC auth UNAVAILABLE (introspection endpoint unreachable) — failing closed, not cached")

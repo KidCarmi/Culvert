@@ -828,7 +828,7 @@ func applySnapshotTrafficExceptBlocklist(snap ConfigSnapshot) {
 	// populated→replace — mirrors the config-version rollback surface
 	// (configversion.go applyConfigBackup). CurrentConfigSnapshot always
 	// sends a non-nil slice, so a steady-state CP push keeps DP exemptions in
-	// lock-step with the CP whitelist instead of silently leaving DP nodes
+	// lock-step with the CP exempt list instead of silently leaving DP nodes
 	// enforcing rate limits the operator exempted on the CP.
 	if snap.RateLimitExempt != nil {
 		rl.ReplaceExemptions(snap.RateLimitExempt)
@@ -864,6 +864,12 @@ func applySnapshotTrafficExceptBlocklist(snap ConfigSnapshot) {
 		// P3.4 caller-side persist (Bucket-4 fsync-safe Save
 		// hardened in PR #246).
 		catStore.Save()
+		// The CP-pushed taxonomy's BuiltIn entries are served to policy from the
+		// effective view, not catStore, so without this recompose a CP taxonomy
+		// change that carries no override change is silently unenforced on EVERY
+		// data-plane node until it restarts. applySnapshotSaaSFeed's recompose is
+		// gated on an override-fingerprint change and does not cover this.
+		recomposeSignedFeedTaxonomy()
 	}
 
 	// File profiles.
@@ -1140,6 +1146,10 @@ func syncSnapshotIdPProfiles(snap ConfigSnapshot) error {
 	if err := idpRegistry.ReplaceAll(snap.IdPProfiles); err != nil {
 		return fmt.Errorf("idp profile sync: %w", err)
 	}
+	// A synced enabled LDAP profile makes the registry the sole operational
+	// LDAP authority on this DP too (ADR-0025) — a node-local legacy YAML
+	// ldap provider must not remain a second authenticator.
+	enforceLegacyLDAPShadowing()
 	logger.Printf("DataPlane: synced %d IdP profile(s) from control plane", len(snap.IdPProfiles))
 	return nil
 }
