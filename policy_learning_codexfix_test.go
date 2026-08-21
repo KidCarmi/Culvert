@@ -298,6 +298,13 @@ func TestCodexFix_CommitRetainsDraftWhenRunningPersistFails(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(draftDir, "policy_draft.json")); err != nil {
 		t.Fatalf("failed commit removed policy_draft.json: %v", err)
 	}
+	// Codex round 9: the rollback's ReplaceAll advances the running
+	// generation, so without a re-base the retained draft is base-stale and
+	// the HANDLER path 409s every retry — stranding the draft behind a
+	// discard-and-recreate.
+	if policyDraft.baseGenerationStale() {
+		t.Fatal("failed commit left the retained draft base-stale — the handler would 409 every retry")
+	}
 
 	// Fault cleared: the retried commit lands durably.
 	if err := os.RemoveAll(policyStore.path); err != nil {

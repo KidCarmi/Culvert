@@ -927,8 +927,15 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	// A destination that cannot be IDNA-normalized (invalid punycode label)
 	// would flow into every downstream matcher (blocklist, threat feed,
 	// policy FQDN, category) un-normalized. No legitimate client emits
-	// invalid punycode, so reject outright instead of failing open.
-	if _, ok := normalizeHostStrict(host); !ok {
+	// invalid punycode, so reject outright instead of failing open. The
+	// canonical form is kept for the learning observations below (Codex fix:
+	// spelling aliases like Example.COM / example.com. are ONE destination to
+	// policy and category resolution, so they must be ONE evidence key — the
+	// raw spelling made aliases consume separate TopHosts budget entries and
+	// perturb evidence hashes). Matchers keep receiving the raw host: each
+	// normalizes internally, and changing their input is out of scope here.
+	normHost, ok := normalizeHostStrict(host)
+	if !ok {
 		atomic.AddInt64(&statBlocked, 1)
 		http.Error(w, "Bad Request: invalid host", http.StatusBadRequest)
 		recordRequestAuth(clientIP, r.Method, r.Host, "INVALID_HOST", "idna", "", authenticatedIdentity, authLog)
@@ -942,7 +949,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	if preStatus, blocked := preDispatchBlocked(w, r, clientIP, host, reqID, authenticatedIdentity, authLog); blocked {
 		// M3: pre-dispatch blocks are context/negative learning evidence (a
 		// nil engine costs one atomic load; never blocks the request).
-		learnObservePreDispatch(auth, host, r.Method, preStatus)
+		learnObservePreDispatch(auth, normHost, r.Method, preStatus)
 		return
 	}
 
@@ -961,7 +968,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	// the duplicate on the normal terminal path below. Enforcement untouched.
 	isDrop := match != nil && match.Rule != nil && match.Action == ActionDrop
 	if isDrop {
-		learnObserveDecision(auth, host, r.Method, match, "POLICY_DROP", "")
+		learnObserveDecision(auth, normHost, r.Method, match, "POLICY_DROP", "")
 	}
 
 	// ── Policy action dispatch ──────────────────────────────────────────────
@@ -974,7 +981,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		// drop-on-full; a nil (disabled) engine costs one atomic load.
 		// Learning has zero authority here — see ADR-0025.
 		if !isDrop {
-			learnObserveDecision(auth, host, r.Method, match, decisionStatus, "")
+			learnObserveDecision(auth, normHost, r.Method, match, decisionStatus, "")
 		}
 		return
 	}
@@ -990,7 +997,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	// M2: one learning observation per policy decision (allowed branch, after
 	// the SSL decision so the observation carries it). Same non-blocking,
 	// advisory-only contract as the blocked branch above.
-	learnObserveDecision(auth, host, r.Method, match, decisionStatus, string(sslAction))
+	learnObserveDecision(auth, normHost, r.Method, match, decisionStatus, string(sslAction))
 
 	// Identity context forwarded to SSL-inspect (consumed by CDR today;
 	// future audit enrichment can read this without re-parsing headers).

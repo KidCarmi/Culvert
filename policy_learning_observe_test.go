@@ -136,6 +136,32 @@ func TestObservationE2E_SpoofCannotEnter(t *testing.T) {
 	}
 }
 
+// TestObservationE2E_HostCanonicalized (Codex round 9): spelling aliases like
+// ExAmPle.COM. are ONE destination to policy and category resolution, so the
+// observation must carry the canonical host from the ingress normalization
+// gate — the raw spelling made aliases consume separate TopHosts budget
+// entries and perturb evidence hashes.
+func TestObservationE2E_HostCanonicalized(t *testing.T) {
+	_, _ = startCountingBackend(t)
+	proxyURL := startAuthProxy(t, testProvider(), nil) // no rules; default deny — observed before any dial
+	cfg.SetDefaultAuthOutcome(OutcomeExempt)
+	t.Cleanup(func() { cfg.SetDefaultAuthOutcome(OutcomeDefault) })
+	col := &obsCollector{}
+	eng := swapPolicyLearnSink(t, col.sink)
+
+	if got := proxiedGet(t, proxyURL, "http://ExAmPle.COM./", "", "", nil); got != http.StatusForbidden {
+		t.Fatalf("GET: %d, want 403 (default deny)", got)
+	}
+	_ = eng.Close()
+
+	if _, raw := obsForHost(t, col, "ExAmPle.COM."); raw {
+		t.Fatal("observation carries the RAW host spelling, not the canonical form")
+	}
+	if _, ok := obsForHost(t, col, "example.com"); !ok {
+		t.Fatalf("no observation under the canonical host (got %v)", col.all())
+	}
+}
+
 // TestObservationE2E_DefaultDenyBlocked: a default-denied request emits a
 // blocked-branch observation (status POLICY_DEFAULT_DENY, action
 // default:deny, empty rule/SSL) and no URL/path ever appears (host only).

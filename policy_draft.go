@@ -398,6 +398,21 @@ func (c *policyDraftCoordinator) commitActivate(ifVersion *int64) (policyDraftDi
 	policyStore.ReplaceAll(cand)
 	if err := policyStore.SaveErr(); err != nil {
 		policyStore.ReplaceAll(prevRunning)
+		// Re-base the retained draft onto the RESTORED running (Codex fix):
+		// both ReplaceAlls advanced the running generation with NO semantic
+		// change — running is content-identical to the draft's fork point —
+		// so keeping the original BaseGeneration would make every handler
+		// RETRY 409 as base-stale, stranding the draft (and any accepted
+		// learning target) behind a discard-and-recreate. The base-stale
+		// guard's intent (detect an out-of-band import/rollback) is
+		// preserved: a real out-of-band change after this point still moves
+		// the generation past the re-based value.
+		c.state.BaseGeneration, _ = policyStore.policyVersion()
+		// Best-effort: keep the durable draft state consistent for a
+		// post-restart retry; if this write fails too (same volume), the
+		// on-disk draft keeps the old base and a post-restart retry is
+		// refused base-stale — fail-closed, the operator re-stages.
+		_ = c.persistLocked()
 		c.mu.Unlock()
 		return policyDraftDiff{}, fmt.Errorf("running-policy persist failed — draft retained, nothing committed: %v: %w", err, errDraftPersistFailed)
 	}

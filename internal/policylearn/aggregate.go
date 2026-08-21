@@ -138,6 +138,14 @@ func scopesFor(o *Observation, scratch []string) []string {
 	// an allow-for-everyone rule. Empty entries are skipped; an identity
 	// whose groups are ALL empty aggregates as groupless.
 	for _, g := range o.Groups {
+		// Canonical population key (Codex fix): enforcement compares groups
+		// TRIMMED and CASE-INSENSITIVELY (containsGroupCI), so case and
+		// whitespace variants of one group name are ONE population — folding
+		// here makes them share one cell across observations instead of
+		// splitting evidence (or minting duplicate, semantically identical
+		// recommendations; a generated rule's SourceGroup is the folded form,
+		// which enforcement matches case-insensitively).
+		g = strings.ToLower(strings.TrimSpace(g))
 		if g == "" {
 			continue
 		}
@@ -146,7 +154,7 @@ func scopesFor(o *Observation, scratch []string) []string {
 		// one scope (Codex fix): duplicate scope keys would apply the single
 		// observation repeatedly to the same cell, inflating counts — the one
 		// direction evidence must never err in. Bounded O(n²) over at most
-		// MaxObservationGroups entries; alloc-free.
+		// MaxObservationGroups entries.
 		dup := false
 		for _, s := range scratch {
 			if s[len(scopeGroupPrefix):] == g {

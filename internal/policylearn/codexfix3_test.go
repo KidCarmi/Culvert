@@ -323,6 +323,23 @@ func TestLoad_RejectsMultipleLearningSessionsToQuarantine(t *testing.T) {
 	}
 }
 
+// TestScopesFor_CaseAndWhitespaceVariantsShareOneScope (round 9): enforcement
+// compares groups trimmed and case-insensitively, so case/whitespace variants
+// of one group are ONE population — they must fold to one canonical scope,
+// not split evidence across cells or mint duplicate recommendations.
+func TestScopesFor_CaseAndWhitespaceVariantsShareOneScope(t *testing.T) {
+	got := scopesFor(&Observation{Subject: "u", Groups: []string{"Engineering", " engineering ", "ENGINEERING", "\tEngineering"}}, nil)
+	if len(got) != 1 || got[0] != "g:engineering" {
+		t.Fatalf("case/whitespace variants not folded to one canonical scope: %v", got)
+	}
+	// Whitespace-only entries fold to empty and are skipped (groupless when
+	// nothing else remains).
+	got = scopesFor(&Observation{Subject: "u", Groups: []string{"   ", "\t"}}, nil)
+	if len(got) != 1 || got[0] != ScopeGroupless {
+		t.Fatalf("whitespace-only groups did not aggregate as groupless: %v", got)
+	}
+}
+
 // TestClose_PersistsTransportOnlyDeltas (round 5): a transport-only counter
 // change after the last cadence save (an empty-host rejection, a consumer
 // panic) modifies the active session's TransportWindow at Close's final sync
