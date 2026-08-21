@@ -124,3 +124,24 @@ func TestCulvertMaintInstall_ExtractTomlString_NoComment(t *testing.T) {
 		t.Fatalf("extract_toml_string(compose_project_dir) = %q, want %q", got, want)
 	}
 }
+
+// TestCulvertMaintInstall_ExtractTomlString_SingleQuotedLiteral is a CI-caught
+// regression: extract_toml_string only stripped DOUBLE-quote delimiters, so a
+// TOML LITERAL string (single-quoted — required whenever the value contains a
+// backslash, e.g. image_allowlist's regex '^ghcr\.io/...') came back with its
+// surrounding single-quote characters still attached. That silently broke
+// check_proxy_repo_matches_allowlist's anchored regex match against the
+// DEFAULT config.example.toml (a stray leading/trailing quote defeats a
+// ^...$-anchored pattern) — install-lifecycle-e2e caught it as a real CI
+// failure on a plain default install ("Maintenance-agent installer lifecycle").
+func TestCulvertMaintInstall_ExtractTomlString_SingleQuotedLiteral(t *testing.T) {
+	toml := `image_allowlist = '^ghcr\.io/kidcarmi/culvert(:[A-Za-z0-9._-]+|@sha256:[a-f0-9]{64})$'` + "\n" +
+		"allow_peers = [\"1000\"]\n"
+
+	got := runExtractTomlString(t, toml, "image_allowlist")
+	want := `^ghcr\.io/kidcarmi/culvert(:[A-Za-z0-9._-]+|@sha256:[a-f0-9]{64})$`
+	if got != want {
+		t.Fatalf("extract_toml_string(image_allowlist) = %q, want %q — a single-quoted TOML literal string "+
+			"must have its delimiter quotes stripped just like a double-quoted basic string", got, want)
+	}
+}

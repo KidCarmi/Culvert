@@ -1,0 +1,57 @@
+{
+  "mode": "authoritative",
+  "artifact": {
+    "binary_path": "<DECISION_REQUIRED_ARTIFACT_BINARY_PATH>",
+    "expected_digest": "<DECISION_REQUIRED_ARTIFACT_SHA256_DIGEST>",
+    "expected_version": "<DECISION_REQUIRED_ARTIFACT_VERSION_TAG>",
+    "expected_source_commit": "<DECISION_REQUIRED_ARTIFACT_SOURCE_COMMIT>",
+    "provenance": {
+      "verifier": "cosign-keyless",
+      "identity": "<DECISION_REQUIRED_PINNED_ISSUER_AND_SAN>",
+      "verified_digest": "<DECISION_REQUIRED_OPERATOR_VERIFIED_SHA256_DIGEST>"
+    }
+  },
+  "environment": {
+    "bind_host": "<DECISION_REQUIRED_BIND_HOST>",
+    "oauth_issuer": "<DECISION_REQUIRED_OAUTH_ISSUER>",
+    "canonical_resource": "<DECISION_REQUIRED_CANONICAL_RESOURCE>",
+    "required_scopes": ["<DECISION_REQUIRED_REQUIRED_SCOPE>"],
+    "accepted_client_ids": ["<DECISION_REQUIRED_ACCEPTED_CLIENT_ID>"],
+    "tenant_a": "<DECISION_REQUIRED_TENANT_A>",
+    "tenant_b": "<DECISION_REQUIRED_TENANT_B>",
+    "server_a": "<DECISION_REQUIRED_SERVER_A_ID>",
+    "server_b": "<DECISION_REQUIRED_SERVER_B_ID>",
+    "tls_cert_file": "<DECISION_REQUIRED_TLS_CERT_FILE>",
+    "tls_key_file": "<DECISION_REQUIRED_TLS_KEY_FILE>",
+    "server_ca_file": "<DECISION_REQUIRED_SERVER_CA_FILE>",
+    "client_ca_file": "<DECISION_REQUIRED_CLIENT_CA_FILE>",
+    "client_cert_file": "<DECISION_REQUIRED_MODEL_A_CLIENT_CERT_FILE>",
+    "client_key_file": "<DECISION_REQUIRED_MODEL_A_CLIENT_KEY_FILE>",
+    "trusted_jwks_file": "<DECISION_REQUIRED_TRUSTED_JWKS_FILE>",
+    "signing_key_file": "<DECISION_REQUIRED_SIGNING_KEY_FILE>",
+    "signing_kid": "<DECISION_REQUIRED_SIGNING_KID>",
+    "gateway_port": 9443,
+    "tls_server_name": "<DECISION_REQUIRED_TLS_SERVER_NAME_OR_OMIT>",
+    "qualification_policy_file": "<DECISION_REQUIRED_QUALIFICATION_POLICY_FILE>",
+    "telemetry": {
+      "node_id": "<DECISION_REQUIRED_TELEMETRY_NODE_ID>",
+      "data_dir": "<DECISION_REQUIRED_TELEMETRY_DATA_DIR>",
+      "kek_file": "<DECISION_REQUIRED_TELEMETRY_KEK_FILE>",
+      "archive_dir": "<DECISION_REQUIRED_TELEMETRY_ARCHIVE_DIR>"
+    },
+    "supervision": {
+      "admin_port": 9090,
+      "metrics_port": 9091,
+      "admin_user": "<DECISION_REQUIRED_ADMIN_USER>",
+      "admin_password_file": "<DECISION_REQUIRED_ADMIN_PASSWORD_FILE>",
+      "metrics_token_file": "<DECISION_REQUIRED_METRICS_TOKEN_FILE>"
+    }
+  },
+  "run": {
+    "startup_timeout": "60s",
+    "request_timeout": "15s",
+    "shutdown_timeout": "20s",
+    "restart_timeout": "45s"
+  },
+  "evidence_dir": "<DECISION_REQUIRED_EVIDENCE_DIR>"
+}

@@ -51,7 +51,9 @@ type Writer struct {
 	pid           string    // cached PID string for RFC 5424 PROCID
 	lastReconnErr time.Time // backoff: suppress reconnect attempts for 5s after failure
 	drops         atomic.Uint64
-	dialFunc      func() (net.Conn, error) // test seam; nil = real dialer
+	panics        atomic.Uint64
+	panicObserver atomic.Pointer[func(recovered any)] // optional; see SetPanicObserver
+	dialFunc      func() (net.Conn, error)            // test seam; nil = real dialer
 
 	// Async delivery plumbing (nil/zero on a zero-value Writer → synchronous).
 	queue     chan string   // formatted lines awaiting delivery (bounded at queueCap)
@@ -129,14 +131,14 @@ func (s *Writer) drainLoop() {
 	for {
 		select {
 		case line := <-s.queue:
-			s.deliverLine(line)
+			s.deliverGuarded(line)
 		case <-s.stop:
 			deadline := time.Now().Add(flushTimeout)
 			for {
 				select {
 				case line := <-s.queue:
 					if time.Now().Before(deadline) {
-						s.deliverLine(line)
+						s.deliverGuarded(line)
 					} else {
 						s.drops.Add(1)
 					}
@@ -255,6 +257,58 @@ func (s *Writer) writeMsg(pri int, msg string) {
 // the reconnect/backoff state machine. Only the drain goroutine (or a
 // zero-value Writer's caller) enters here, so the mutex no longer serializes
 // request goroutines — it now only fences deliverLine against Close/Format.
+// deliverGuarded contains a panic raised while delivering one line.
+//
+// CHAOS-24: this drain goroutine is the sole owner of the collector socket, so
+// an unrecovered panic here would terminate the whole in-line gateway over a
+// SIEM write. Containment is per LINE, never per goroutine — an exited drain
+// would silently strand every subsequent line in the queue. A panicked line is
+// counted as a drop, which is exactly what it is (the line never reached the
+// collector) and keeps it visible through the existing Drops() surface, plus a
+// dedicated Panics() counter so a recurring formatting bug is distinguishable
+// from ordinary collector-down drops.
+//
+// The guard is deliberately local (no obs import): this package is a
+// self-contained stdlib-only leaf per its header contract, and deliverLine
+// releases s.mu through a defer, so unwinding never leaves the mutex held.
+// The recovered value is forwarded to the optional panicObserver (see
+// SetPanicObserver) rather than logged here, for the same no-obs-import
+// reason — without an observer wired, a recovered panic is visible only
+// through Panics().
+func (s *Writer) deliverGuarded(line string) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.panics.Add(1)
+			s.drops.Add(1)
+			if p := s.panicObserver.Load(); p != nil {
+				func() {
+					defer func() { _ = recover() }() // an observer must never crash the drain goroutine
+					(*p)(r)
+				}()
+			}
+		}
+	}()
+	s.deliverLine(line)
+}
+
+// SetPanicObserver publishes an optional observer notified synchronously, on
+// the drain goroutine, whenever deliverGuarded recovers a panic. This package
+// is a stdlib-only leaf with no logging dependency (see the package doc), so
+// without an observer a recovered panic is visible only through Panics() —
+// package main wires this to the process log (mirrors fileutil's and
+// internal/audit's SetWriteFailureObserver, the same leaf-package-can't-log
+// seam applied to a second chokepoint). A nil fn clears it. The observer runs
+// AFTER deliverLine's own deferred mutex unlock has already fired during
+// unwind, so it never needs s.mu, and is itself panic-contained so a bad
+// observer can never take down delivery.
+func (s *Writer) SetPanicObserver(fn func(recovered any)) {
+	if fn == nil {
+		s.panicObserver.Store(nil)
+		return
+	}
+	s.panicObserver.Store(&fn)
+}
+
 func (s *Writer) deliverLine(line string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -305,6 +359,11 @@ func (s *Writer) deliverLine(line string) {
 // was already closed. Monotonic per Writer; delivery is otherwise
 // silent-best-effort, so this is the only loss signal.
 func (s *Writer) Drops() uint64 { return s.drops.Load() }
+
+// Panics reports how many lines were lost to a recovered panic in the drain
+// goroutine (CHAOS-24). Always 0 in a healthy process; a non-zero value means
+// a delivery bug is being contained rather than crashing the gateway.
+func (s *Writer) Panics() uint64 { return s.panics.Load() }
 
 // Close stops the drain goroutine (flushing already-queued lines within
 // flushTimeout) and releases the connection. Idempotent; concurrent sends

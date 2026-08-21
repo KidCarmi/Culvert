@@ -9,7 +9,7 @@
 #     `repo@sha256:` via `docker tag`; the agent's resolve_target/pull/verify
 #     compare REAL registry digests, so the two versions must genuinely differ.
 #   - wget is present (alpine base) for the compose healthcheck.
-FROM golang:1.25-alpine AS builder
+FROM golang:1.26-alpine AS builder
 WORKDIR /app
 RUN apk add --no-cache git
 COPY go.mod go.sum ./

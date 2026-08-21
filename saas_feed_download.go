@@ -402,6 +402,13 @@ func (f *feedFetcher) do(ctx context.Context, u *url.URL, expectPath, priorETag 
 		if priorETag != "" {
 			req.Header.Set("If-None-Match", priorETag)
 		}
+		// Inline scheme+host guard so CodeQL can verify the SSRF contract at the call
+		// site (validateFeedURLContract is called before every hop but is a wrapper
+		// function the static analyser cannot trace through).
+		if cur.Scheme != saasFeedOfficialScheme || cur.Hostname() != saasFeedOfficialHost {
+			return nil, fmt.Errorf("%w: scheme/host constraint violated at dial: %q://%q", errFeedFetchSSRF,
+				strings.ReplaceAll(cur.Scheme, "\n", ""), strings.ReplaceAll(cur.Hostname(), "\n", ""))
+		}
 		resp, err := f.client.Do(req)
 		if err != nil {
 			if isFeedFetchCanceled(err) {

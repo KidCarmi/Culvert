@@ -92,7 +92,7 @@ jobs:
       # egress-policy: block with an allow-list of the static hosts; at activation the
       # owner appends their R2 S3 endpoint host and public-base host (see header).
       - name: Harden runner (egress block)
-        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
         with:
           egress-policy: block
           allowed-endpoints: >
@@ -112,7 +112,7 @@ jobs:
       # package main; checking out an attacker-controlled ref here would be code
       # execution with R2/CF secrets in scope (pwn-request). workflow_run already runs
       # the default-branch copy of this file; we keep the checked-out code in lock-step.
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-go-cache
@@ -386,28 +386,24 @@ jobs:
           CF_ZONE_ID: ${{ secrets.CF_ZONE_ID }}
           CF_CACHE_PURGE_TOKEN: ${{ secrets.CF_CACHE_PURGE_TOKEN }}
           R2_PUBLIC_BASE: ${{ vars.R2_PUBLIC_BASE }}
-          # Matches catalogUserAgent in release_catalog_http.go.
-          CATALOG_UA: "Culvert-ReleaseCatalog/1.0 (+https://github.com/KidCarmi/Culvert)"
         run: |
           set -euo pipefail
           WANT="$(cat stage/.index.sha256)"
+          # The cache purge (the real cache-bust; the bounded retry rides out edge
+          # eventual-consistency) still goes to the Cloudflare API over curl — that
+          # endpoint is not bot-managed. The live-object confirm fetch, however, must
+          # NOT use curl: the catalog zone's bot management fingerprints the TLS/HTTP2
+          # client and 403s curl even with the matching UA. cmd/catalogfetch uses the
+          # known-good Go client shape (see release_catalog_http.go) and prints the
+          # served index.json's SHA-256.
           curl -fsS -X POST "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/purge_cache" \
             -H "Authorization: Bearer $CF_CACHE_PURGE_TOKEN" \
             -H "Content-Type: application/json" \
             --data "{\"files\":[\"$R2_PUBLIC_BASE/release-catalog/index.json\",\"$R2_PUBLIC_BASE/release-catalog/index.json.sigstore\"]}" >/dev/null
+          go build -o "$RUNNER_TEMP/catalogfetch" ./cmd/catalogfetch
+          FETCH="$RUNNER_TEMP/catalogfetch"
           for i in 1 2 3 4 5; do
-            # -A: an unidentified curl UA is indistinguishable from bot traffic to
-            # a CDN/WAF fronting the catalog origin and gets 403'd (same class of
-            # issue fixed for the Go client in release_catalog_http.go).
-            #
-            # NO `Cache-Control: no-cache` request header: Cloudflare IGNORES it
-            # for edge bypass (the purge_cache call above is the real cache-bust,
-            # and the bounded retry rides out edge eventual-consistency), while the
-            # WAF on this orange-clouded zone treats the header as a scraper signal
-            # and 403s the request BEFORE the object is served — so it does nothing
-            # useful and actively breaks the confirm. Match the known-good Go client
-            # request shape (UA only); see release_catalog_http.go.
-            GOT="$(curl -fsS -A "$CATALOG_UA" "$R2_PUBLIC_BASE/release-catalog/index.json" | sha256sum | awk '{print $1}')" || GOT=""
+            GOT="$("$FETCH" "$R2_PUBLIC_BASE/release-catalog/index.json")" || GOT=""
             if [ "$GOT" = "$WANT" ]; then echo "live index confirmed ($WANT)"; exit 0; fi
             echo "confirm attempt $i: got '$GOT' want '$WANT' — retrying"; sleep $((i*i))
           done

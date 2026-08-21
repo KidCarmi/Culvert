@@ -50,6 +50,19 @@ func (m *Manager) FlushDenials(capNS model.Capability) (committed, lost int) {
 	return m.flushDomainDenials(d, false)
 }
 
+// FlushDenialsForce is FlushDenials with force=true: it commits every pending
+// denial aggregate INCLUDING the still-open current window. It is intended for a
+// graceful-shutdown drain, where a caller wants the last open window durable (and
+// thus exportable) before the manager closes. Same non-blocking, denial-lane-only
+// contract as FlushDenials.
+func (m *Manager) FlushDenialsForce(capNS model.Capability) (committed, lost int) {
+	d, err := m.domainFor(capNS)
+	if err != nil {
+		return 0, 0
+	}
+	return m.flushDomainDenials(d, true)
+}
+
 func (m *Manager) flushDomainDenials(d *domain, force bool) (committed, lost int) {
 	d.mu.Lock()
 	defer d.mu.Unlock()

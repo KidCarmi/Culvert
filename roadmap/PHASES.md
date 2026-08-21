@@ -89,7 +89,7 @@ Based on a three-reviewer expert architecture audit. Current score: **10/10** (P
 - [x] **Client certificate (mTLS)** — Mutual TLS client cert for upstream servers via `client_cert_file`/`client_key_file` config (main.go, config.go)
 - [x] **CA auto-rotation** — Background goroutine checks CA expiry daily; auto-rotates 30 days before expiry (ca.go)
 - [x] **HSM/KMS integration** — `KeyProvider` interface for external key management (AWS KMS, Azure Key Vault, PKCS#11 HSMs); default local in-memory provider (ca.go)
-- [x] **OCSP/CRL checking** — OCSP responder queries with 1h result cache and 5s timeout; configurable via `ocsp_check` (ocsp.go)
+- [x] **OCSP checking** — OCSP responder queries with 1h result cache and 5s timeout; configurable via `ocsp_check` (ocsp.go). CRL checking is not implemented — see README.md Limitations.
 
 ### P4 — Resilience & Observability Polish (✅)
 - [x] **P3 test coverage** — 30+ tests for upstream chaining, circuit breaker, OCSP checker, CA auto-rotation, per-rule metrics, byte counting, policy conflict detection, KeyProvider interface (upstream_test.go, ocsp_test.go, p4_test.go)

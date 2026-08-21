@@ -36,10 +36,17 @@ name: Publish SaaS URL-Category Feed
 # scope to a bucket, not a key prefix; F0 §11.4).
 #
 # ─── INVARIANTS (pinned by feeds_publish_workflow_test.go) ─────────────────────
-#   - Job A grants id-token but references NONE of the R2/CF secrets.
-#   - Job B references the R2/CF secrets but grants NO id-token (any level).
-#   - Job B is dormant-gated on `vars.FEEDS_PUBLISH_ENABLED` (never `secrets.*`, which
-#     is unavailable in `if:` anyway) and requires a feeds-v* tag context.
+#   - Job A grants id-token but references NONE of the R2/CF secrets; Job A has NO
+#     `environment:`.
+#   - Job B references the R2/CF secrets, binds the protected `feeds-production`
+#     environment (required-reviewer approval), and grants NO id-token (any level).
+#   - MASTER GATE DOMINANCE: every signing step (Job A) AND all of Job B are gated on
+#     `vars.FEEDS_PUBLISH_ENABLED == 'true'`. A feeds-v* tag push while the gate is
+#     disabled signs and publishes NOTHING. `vars.*` is empty when unset ⇒ fail-closed.
+#   - SIGNING-REF PIN: before any cosign call, the run proves it is executing at the
+#     operator-pinned `vars.FEEDS_SIGNING_TAG` (exact feeds-vX.Y.Z) and that the tag
+#     resolves to `vars.FEEDS_SIGNING_TAG_SHA` (exact 40-hex commit). Re-asserted on the
+#     Job B publication path.
 #   - Job B step order: re-verify(downloaded) -> stage create-only -> public-artifact
 #     re-verify -> CAS envelope promote -> public-envelope re-verify; every re-verify
 #     step carries the enforcing non-skip pass-proof (`go test -json` + `jq -e` on
@@ -48,8 +55,9 @@ name: Publish SaaS URL-Category Feed
 #   - `concurrency: feeds-publish, cancel-in-progress: false` serializes publications.
 #
 # OWNER ACTIVATION (full runbook: docs/operator/feeds-hosting-r2-activation.md, F6):
-#   vars: FEEDS_PUBLISH_ENABLED=true, FEEDS_PUBLIC_BASE=https://feeds.culvertlabs.com
-#   secrets: FEEDS_R2_S3_ENDPOINT, FEEDS_R2_S3_ACCESS_KEY_ID,
+#   vars: FEEDS_PUBLISH_ENABLED=true, FEEDS_PUBLIC_BASE=https://feeds.culvertlabs.com,
+#         FEEDS_SIGNING_TAG=feeds-v1.0.0, FEEDS_SIGNING_TAG_SHA=<40-hex commit>
+#   environment `feeds-production` secrets: FEEDS_R2_S3_ENDPOINT, FEEDS_R2_S3_ACCESS_KEY_ID,
 #            FEEDS_R2_S3_SECRET_ACCESS_KEY, FEEDS_R2_BUCKET,
 #            FEEDS_CF_ZONE_ID, FEEDS_CF_CACHE_PURGE_TOKEN
 
@@ -88,10 +96,10 @@ jobs:
       # Signing contacts Fulcio/Rekor/TUF; audit baseline (same posture as ci.yml's
       # catalog-pipeline signing job) — the block flip enumerates sigstore endpoints.
       - name: Harden runner (egress audit)
-        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
         with:
           egress-policy: audit
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-go-cache
@@ -120,19 +128,46 @@ jobs:
           test -s "$OUT/metadata.json" || { echo "FATAL: generator emitted no metadata.json"; exit 1; }
           test -s "$OUT/manifest-payload.json" || { echo "FATAL: generator emitted no manifest-payload.json"; exit 1; }
 
-      # ── Keyless signing (feeds-v* TAG path only) ──────────────────────────────
+      # ── MASTER GATE + signing-ref pinning — HARD PRECONDITION FOR ANY SIGNING ──
+      # The master gate `vars.FEEDS_PUBLISH_ENABLED == 'true'` dominates EVERY signing
+      # step below (each carries the identical `if:`), so a `feeds-v*` tag push while the
+      # gate is disabled — or ANY non-tag run — signs NOTHING: the steps skip, the upload
+      # carries only the unsigned generate output, and Job B is skipped. When the gate IS
+      # enabled on a tag, this step FAILS CLOSED (before cosign) unless the run is executing
+      # at the operator-pinned protected tag AND that tag resolves to the pinned commit SHA
+      # — the immutable signing-ref pin. `vars.*` is empty when unset ⇒ every check
+      # fail-closes on missing/malformed configuration.
+      - name: Prove master gate + signing-ref pinning (exact tag + 40-hex SHA)
+        if: ${{ vars.FEEDS_PUBLISH_ENABLED == 'true' && startsWith(github.ref, 'refs/tags/feeds-v') }}
+        env:
+          SIGNING_TAG: ${{ vars.FEEDS_SIGNING_TAG }}
+          SIGNING_TAG_SHA: ${{ vars.FEEDS_SIGNING_TAG_SHA }}
+          REF_NAME: ${{ github.ref_name }}
+          RUN_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$SIGNING_TAG" | grep -Eq '^feeds-v[0-9]+\.[0-9]+\.[0-9]+$' \
+            || { echo "FATAL: FEEDS_SIGNING_TAG '$SIGNING_TAG' is not an exact feeds-vX.Y.Z tag"; exit 1; }
+          printf '%s' "$SIGNING_TAG_SHA" | grep -Eq '^[0-9a-f]{40}$' \
+            || { echo "FATAL: FEEDS_SIGNING_TAG_SHA is not a 40-char hex commit SHA"; exit 1; }
+          [ "$REF_NAME" = "$SIGNING_TAG" ] \
+            || { echo "FATAL: running at '$REF_NAME' != pinned FEEDS_SIGNING_TAG '$SIGNING_TAG'"; exit 1; }
+          [ "$RUN_SHA" = "$SIGNING_TAG_SHA" ] \
+            || { echo "FATAL: tag commit '$RUN_SHA' != pinned FEEDS_SIGNING_TAG_SHA '$SIGNING_TAG_SHA'"; exit 1; }
+          echo "signing-ref pinning OK: $SIGNING_TAG @ $SIGNING_TAG_SHA"
+
+      # ── Keyless signing (gate ENABLED + pinned feeds-v* TAG only) ──────────────
       # Sign the RAW artifact bytes and the RAW manifest-payload bytes keyless (Fulcio
-      # + Rekor, no private key). The pinned SAN requires a feeds-v* tag ref, so these
-      # steps are inert on a branch/dispatch dry-run (which still proves determinism +
-      # the generator gate).
+      # + Rekor, no private key). Gated identically to the pinning proof above, so signing
+      # cannot occur unless the master gate is on and the pinning proof passed.
       - name: Install cosign
-        if: startsWith(github.ref, 'refs/tags/feeds-v')
+        if: ${{ vars.FEEDS_PUBLISH_ENABLED == 'true' && startsWith(github.ref, 'refs/tags/feeds-v') }}
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
           cosign-release: 'v3.0.6'
       - name: Sign artifact + manifest keyless, assemble + verify the envelope
         id: sign
-        if: startsWith(github.ref, 'refs/tags/feeds-v')
+        if: ${{ vars.FEEDS_PUBLISH_ENABLED == 'true' && startsWith(github.ref, 'refs/tags/feeds-v') }}
         env:
           COSIGN_EXPERIMENTAL: "1"
           OUT: ${{ steps.gen.outputs.out }}
@@ -155,7 +190,7 @@ jobs:
       # envelope + artifact + bundles, cross-checked against the just-generated result.
       # TestFeedGenKeylessVerify writes manifest.sigstore.json ONLY on a proven PASS.
       - name: Keyless end-to-end verify (baked root + pinned feed identity)
-        if: startsWith(github.ref, 'refs/tags/feeds-v')
+        if: ${{ vars.FEEDS_PUBLISH_ENABLED == 'true' && startsWith(github.ref, 'refs/tags/feeds-v') }}
         env:
           CULVERT_FEED_GEN_OUT: ${{ steps.gen.outputs.out }}
           CULVERT_FEED_GEN_GENERATED_AT: ${{ steps.gen.outputs.gen_at }}
@@ -192,6 +227,12 @@ jobs:
     if: >-
       ${{ vars.FEEDS_PUBLISH_ENABLED == 'true' &&
           startsWith(github.ref, 'refs/tags/feeds-v') }}
+    # B-1: publication is bound to the protected `feeds-production` environment. Its
+    # required-reviewer rule pauses the job for HUMAN APPROVAL before any R2 write, and
+    # its R2/Cloudflare secrets are exposed ONLY to this job. Job A has NO `environment:`
+    # and no R2/CF secret — so the environment gate applies to publication only.
+    environment:
+      name: feeds-production
     permissions:
       contents: read
       actions: read       # download the same-run workflow artifact. NO id-token.
@@ -201,7 +242,7 @@ jobs:
       # activation the owner appends their R2 S3 endpoint host if it is not already a
       # subdomain of r2.cloudflarestorage.com.
       - name: Harden runner (egress block)
-        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
         with:
           egress-policy: block
           allowed-endpoints: >
@@ -219,10 +260,32 @@ jobs:
       # compile + run package main; a feeds-v* tag is cut from a reviewed main commit,
       # but pinning to the default branch keeps the executed verifier code out of a
       # would-be attacker's reach regardless.
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-go-cache
+      # Defense-in-depth: re-assert the master gate + signing-ref pin on the PUBLICATION
+      # path too (Job A already proved it before signing, and Job B only runs via
+      # `needs: generate` after Job A succeeded — but the R2-writing job proves it itself
+      # so no publish path exists that skipped the pin). Fail-closed on any mismatch.
+      - name: Re-assert master gate + signing-ref pinning (publication path)
+        env:
+          SIGNING_TAG: ${{ vars.FEEDS_SIGNING_TAG }}
+          SIGNING_TAG_SHA: ${{ vars.FEEDS_SIGNING_TAG_SHA }}
+          GATE: ${{ vars.FEEDS_PUBLISH_ENABLED }}
+          REF_NAME: ${{ github.ref_name }}
+          RUN_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [ "$GATE" = "true" ] || { echo "FATAL: master gate FEEDS_PUBLISH_ENABLED != true"; exit 1; }
+          printf '%s' "$SIGNING_TAG" | grep -Eq '^feeds-v[0-9]+\.[0-9]+\.[0-9]+$' \
+            || { echo "FATAL: FEEDS_SIGNING_TAG '$SIGNING_TAG' is not an exact feeds-vX.Y.Z tag"; exit 1; }
+          printf '%s' "$SIGNING_TAG_SHA" | grep -Eq '^[0-9a-f]{40}$' \
+            || { echo "FATAL: FEEDS_SIGNING_TAG_SHA is not a 40-char hex commit SHA"; exit 1; }
+          [ "$REF_NAME" = "$SIGNING_TAG" ] \
+            || { echo "FATAL: publishing at '$REF_NAME' != pinned FEEDS_SIGNING_TAG '$SIGNING_TAG'"; exit 1; }
+          [ "$RUN_SHA" = "$SIGNING_TAG_SHA" ] \
+            || { echo "FATAL: tag commit '$RUN_SHA' != pinned FEEDS_SIGNING_TAG_SHA '$SIGNING_TAG_SHA'"; exit 1; }
       - name: Download signed feed bundle
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:

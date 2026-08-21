@@ -46,6 +46,16 @@ type Deps struct {
 	// fails closed — and auth/authorization denials are routed into the isolated
 	// denial lane. It never causes an upstream/credential/broker call.
 	Events EventProvider
+	// Executor is the OPTIONAL capability-local guarded-execution provider (PR-11).
+	// When nil, the pipeline keeps the PR-8 decision-only path byte-identically
+	// (execution_state stays not_implemented). When set — only for the Gateway
+	// capability, and only after rollout distribution arms it — a decision-point
+	// outcome is handed to the rollout-mode executor AFTER inspection + policy have
+	// run, which resolves the effective mode disposition (record-only / execute /
+	// block) and, for an in-scope executing mode, performs the real guarded upstream
+	// tools/call (credential broker + PR-8 commit-before-materialization + upstream
+	// client + response DLP). A nil executor is the disabled-by-default posture.
+	Executor ExecutionProvider
 	// Clock is injected for deterministic tests; nil ⇒ time.Now.
 	Clock func() time.Time
 }

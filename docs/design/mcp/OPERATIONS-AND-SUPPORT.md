@@ -1,5 +1,18 @@
 # MCP Operations and Support Model
 
+> **PR-11 status (guarded execution / Shadow / Canary) — IMPLEMENTED, disabled by default.** The mode
+> ladder, immutable revisioned scope, central hard-failure classifier, bounded Model-A upstream client,
+> guarded execution (commit-before-side-effect, DLP-before-egress, credential containment, no client-token
+> passthrough), and signed CP→DP rollout distribution now ship in `internal/mcp/{rollout,upstreamclient,execution}`
+> and the `package main` composition. **Observe is non-executing; Shadow/Canary execute only inside an exact
+> approved scope for Model A (local-client); Production remains qualification-locked** (no config/env/CLI/API
+> bypass; no in-binary issuer). `outbound-connector`/`dmz-endpoint`, endpoint bridge, transparent discovery,
+> and Management mutation remain excluded. Duration targets (14d/7d/24h) are measurable machinery, not
+> completed evidence; Production Qualification is the separate gate. There is no PR-12 in this
+> package's slice sequence — see [`IMPLEMENTATION-SLICES.md`](IMPLEMENTATION-SLICES.md) (not to be
+> confused with the unrelated fix CLAUDE.md separately labels "PR-12").
+
+
 **Status: PR-0 design artifact (Proposed)**
 
 This document defines the operational and support model for the Culvert MCP subsystem: service-level

@@ -74,13 +74,13 @@ func TestLDAPAuth_Name(t *testing.T) {
 func TestLDAPAuth_Cache_HitTrue(t *testing.T) {
 	a, _ := NewLDAPAuth(LDAPConfig{URL: "ldap://localhost:389", BaseDN: "dc=x,dc=com"})
 	k := cacheKey("alice", "secret")
-	a.cacheSet(k, true)
+	a.cacheSet(k, true, nil)
 
-	ok, hit := a.cacheGet(k)
+	e, hit := a.cacheGet(k)
 	if !hit {
 		t.Error("expected cache hit")
 	}
-	if !ok {
+	if !e.ok {
 		t.Error("expected ok=true from cache")
 	}
 }
@@ -88,13 +88,13 @@ func TestLDAPAuth_Cache_HitTrue(t *testing.T) {
 func TestLDAPAuth_Cache_HitFalse(t *testing.T) {
 	a, _ := NewLDAPAuth(LDAPConfig{URL: "ldap://localhost:389", BaseDN: "dc=x,dc=com"})
 	k := cacheKey("bob", "wrong")
-	a.cacheSet(k, false)
+	a.cacheSet(k, false, nil)
 
-	ok, hit := a.cacheGet(k)
+	e, hit := a.cacheGet(k)
 	if !hit {
 		t.Error("expected cache hit")
 	}
-	if ok {
+	if e.ok {
 		t.Error("expected ok=false from cache")
 	}
 }
@@ -114,7 +114,7 @@ func TestLDAPAuth_Cache_Expiry(t *testing.T) {
 		CacheTTL: 1 * time.Millisecond,
 	})
 	k := cacheKey("alice", "secret")
-	a.cacheSet(k, true)
+	a.cacheSet(k, true, nil)
 
 	time.Sleep(5 * time.Millisecond)
 
@@ -167,5 +167,31 @@ func TestLDAPAuth_CacheKeyIsHex(t *testing.T) {
 	_, err := hex.DecodeString(k)
 	if err != nil {
 		t.Errorf("cache key should be valid hex, got %q: %v", k, err)
+	}
+}
+
+// TestLDAPTLSConfig_ServerNameFromURL pins the StartTLS ServerName fix:
+// go-ldap's Conn.StartTLS passes the config verbatim to tls.Client, and
+// crypto/tls refuses ServerName=="" with InsecureSkipVerify==false — so the
+// secure StartTLS configuration depends on this derivation.
+func TestLDAPTLSConfig_ServerNameFromURL(t *testing.T) {
+	c := ldapTLSConfig("ldap://dc01.corp.example:389", false)
+	if c.ServerName != "dc01.corp.example" {
+		t.Errorf("ServerName = %q, want the URL hostname", c.ServerName)
+	}
+	if c.InsecureSkipVerify {
+		t.Error("InsecureSkipVerify must stay false when not opted in")
+	}
+	c = ldapTLSConfig("ldaps://dc02.corp.example:636", true)
+	if c.ServerName != "dc02.corp.example" {
+		t.Errorf("ServerName = %q for ldaps", c.ServerName)
+	}
+	if !c.InsecureSkipVerify {
+		t.Error("InsecureSkipVerify must honor the admin opt-in")
+	}
+	// Unparseable URL: no ServerName, config still usable (dial fails later
+	// with its own error; validation rejects such URLs at the write door).
+	if c := ldapTLSConfig("::not-a-url::", false); c.ServerName != "" {
+		t.Errorf("ServerName = %q for junk URL, want empty", c.ServerName)
 	}
 }

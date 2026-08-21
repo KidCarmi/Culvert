@@ -45,6 +45,17 @@
         },
         "description": "HTTP method not supported by this route. Body is plain text."
       },
+      "PlainNotFound": {
+        "content": {
+          "text/plain": {
+            "example": "admin_not_found",
+            "schema": {
+              "type": "string"
+            }
+          }
+        },
+        "description": "Resource not found within the caller's authorized scope (uniform across tenants). Body is plain text."
+      },
       "PlainTooManyRequests": {
         "content": {
           "text/plain": {
@@ -174,6 +185,14 @@
       "AlertHistory": {
         "additionalProperties": false,
         "properties": {
+          "dedup_evictions_total": {
+            "description": "Dedup keys evicted at the cap. Non-zero means the alert key space is being flooded with unique details, so duplicate suppression is degraded — alerts may deliver more than once per window, never fewer.",
+            "type": "integer"
+          },
+          "dedup_tracked": {
+            "description": "Alert dedup keys currently held inside the 30s suppression window (bounded).",
+            "type": "integer"
+          },
           "deliveries": {
             "items": {
               "additionalProperties": true,
@@ -181,10 +200,27 @@
             },
             "nullable": true,
             "type": "array"
+          },
+          "retry_dropped_total": {
+            "description": "Deliveries dropped because the retry queue was at capacity.",
+            "type": "integer"
+          },
+          "retry_exhausted_total": {
+            "description": "Deliveries that used up all retry attempts and were permanently dropped.",
+            "type": "integer"
+          },
+          "retry_queue_depth": {
+            "description": "Failed webhook deliveries currently queued for retry.",
+            "type": "integer"
           }
         },
         "required": [
-          "deliveries"
+          "deliveries",
+          "retry_queue_depth",
+          "retry_exhausted_total",
+          "retry_dropped_total",
+          "dedup_tracked",
+          "dedup_evictions_total"
         ],
         "type": "object"
       },
@@ -789,12 +825,18 @@
           },
           "maxPerIP": {
             "type": "integer"
+          },
+          "rejectedTotal": {
+            "description": "Cumulative connections refused for exceeding the per-IP cap (process lifetime; never reset).",
+            "format": "int64",
+            "type": "integer"
           }
         },
         "required": [
           "enabled",
           "maxPerIP",
-          "activeIPs"
+          "activeIPs",
+          "rejectedTotal"
         ],
         "type": "object"
       },
@@ -1345,6 +1387,10 @@
             ],
             "type": "string"
           },
+          "version": {
+            "description": "Build-time release identity (linker-injected `main.version`, e.g.\n`v1.0.203`; `dev` for local/untagged builds). Signed release binaries\nself-report their exact tag here so runtime identity is verifiable.\n",
+            "type": "string"
+          },
           "write_authority": {
             "type": "boolean"
           }
@@ -1418,6 +1464,9 @@
             "nullable": true,
             "type": "array"
           },
+          "ldap": {
+            "$ref": "#/components/schemas/LDAPProfileConfigInput"
+          },
           "name": {
             "type": "string"
           },
@@ -1437,7 +1486,8 @@
           "type": {
             "enum": [
               "oidc",
-              "saml"
+              "saml",
+              "ldap"
             ],
             "type": "string"
           }
@@ -1445,6 +1495,173 @@
         "required": [
           "name",
           "type"
+        ],
+        "type": "object"
+      },
+      "IdPTestReport": {
+        "additionalProperties": false,
+        "properties": {
+          "identity": {
+            "additionalProperties": false,
+            "nullable": true,
+            "properties": {
+              "email": {
+                "type": "string"
+              },
+              "groupCount": {
+                "type": "integer"
+              },
+              "groups": {
+                "description": "Bounded sample of resolved groups.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "name": {
+                "type": "string"
+              },
+              "sub": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "sub",
+              "groupCount"
+            ],
+            "type": "object"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "steps": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "action": {
+                  "description": "Actionable operator hint for a failed stage.",
+                  "type": "string"
+                },
+                "detail": {
+                  "type": "string"
+                },
+                "durationMs": {
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "error": {
+                  "description": "Sanitized, length-bounded server error text.",
+                  "type": "string"
+                },
+                "label": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "ok": {
+                  "type": "boolean"
+                },
+                "skipped": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "name",
+                "label",
+                "ok"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "ok",
+          "steps"
+        ],
+        "type": "object"
+      },
+      "IdPTestRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "$ref": "#/components/schemas/IdPProfileInput"
+          },
+          "testPassword": {
+            "description": "Transient test credential — never persisted, logged, or audited.",
+            "type": "string"
+          },
+          "testUsername": {
+            "description": "Optional directory login to run the full identity test.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "profile"
+        ],
+        "type": "object"
+      },
+      "LDAPProfileConfigInput": {
+        "additionalProperties": false,
+        "description": "LDAP/Active Directory profile settings (ADR-0025). bindPassword is a\nWRITE-ONLY input: never returned by reads, preserved when omitted on\nupdate, cleared only when present and empty. Read responses carry the\nderived bindCredentialConfigured flag instead.\n",
+        "nullable": true,
+        "properties": {
+          "baseDn": {
+            "type": "string"
+          },
+          "bindCredentialConfigured": {
+            "description": "Read-only response metadata; ignored on write.",
+            "type": "boolean"
+          },
+          "bindDn": {
+            "description": "Service-account DN used to locate users; empty = anonymous bind.",
+            "type": "string"
+          },
+          "bindPassword": {
+            "description": "Write-only service-account credential.",
+            "type": "string"
+          },
+          "cacheTtlSeconds": {
+            "description": "Authoritative auth-result cache TTL. 0 = default (300).",
+            "type": "integer"
+          },
+          "emailAttribute": {
+            "description": "Default mail.",
+            "type": "string"
+          },
+          "groupAttribute": {
+            "description": "Default memberOf; values are kept verbatim (full group DNs).",
+            "type": "string"
+          },
+          "nameAttribute": {
+            "description": "Default displayName.",
+            "type": "string"
+          },
+          "requiredGroup": {
+            "description": "Legacy provider-level access gate (direct membership). Prefer Access Rules over identity groups.",
+            "type": "string"
+          },
+          "startTls": {
+            "description": "Upgrade a plain ldap:// connection with StartTLS. Invalid together with ldaps://.",
+            "type": "boolean"
+          },
+          "tlsSkipVerify": {
+            "description": "UNSAFE — disable certificate verification (self-signed dev directories only).",
+            "type": "boolean"
+          },
+          "url": {
+            "description": "ldap://host[:port] or ldaps://host[:port] (host[:port] only — no credentials, path, or query).",
+            "type": "string"
+          },
+          "userFilter": {
+            "description": "Search filter template with exactly one %s placeholder. Default (sAMAccountName=%s).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "baseDn"
         ],
         "type": "object"
       },
@@ -2153,6 +2370,10 @@
             "type": "boolean"
           },
           "reason": {
+            "type": "string"
+          },
+          "sigstore_warn": {
+            "description": "Present only when a Sigstore trust override (identity/trusted-root) did not take effect.",
             "type": "string"
           },
           "verify_mode": {
@@ -3535,6 +3756,9 @@
           },
           "format": {
             "type": "string"
+          },
+          "panics": {
+            "type": "integer"
           }
         },
         "required": [
@@ -11079,6 +11303,148 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/idp/legacy-ldap": {
+      "get": {
+        "description": "Non-secret summary of the legacy bootstrap `ldap:` block from\nconfig.yaml, plus its authority state (active / shadowed by an\nenabled registry LDAP profile). The bind credential is never\nreturned — only a bindCredentialConfigured flag. Used by the\nIdentity Providers screen to offer the explicit one-time import.\n",
+        "operationId": "getLegacyLDAP",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Legacy YAML LDAP summary."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Legacy YAML LDAP summary",
+        "tags": [
+          "auth"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.2.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/idp/legacy-ldap/import": {
+      "post": {
+        "description": "Create a DISABLED LDAP IdP profile from the legacy bootstrap `ldap:`\nblock, copying every security-effective field (including the stored\nbind credential, which never transits the browser). The administrator\nthen tests and enables the profile — the explicit, downgrade-safe\nmigration path into the IdP registry. The YAML file is never\nmodified. 404 when no legacy ldap block is configured.\n",
+        "operationId": "importLegacyLDAP",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The imported (disabled) LDAP IdP profile, secret-redacted."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/PlainNotFound"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Import legacy YAML LDAP configuration",
+        "tags": [
+          "auth"
+        ],
+        "x-culvert-audit-event": "idp.import",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.2.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/idp/test": {
+      "post": {
+        "description": "Run the staged, candidate-based directory test for an LDAP/Active\nDirectory IdP profile BEFORE persisting it: server reachability,\ntransport security (LDAPS/StartTLS), service-account bind, Base DN\nsearch, and — optionally, when a transient test username/password is\nsupplied — a full user lookup + authentication + identity mapping.\nThe candidate profile is never persisted; an empty ldap.bindPassword\non a candidate that names an existing profile id reuses the stored\ncredential so edits never require retyping the secret. Test-user\npasswords are transient: never persisted, logged, cached, or audited.\nErrors are sanitized and bounded; the HTTP call returns 200 with the\nper-step report even when the directory test fails.\n",
+        "operationId": "testIdP",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IdPTestRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdPTestReport"
+                }
+              }
+            },
+            "description": "Staged directory-test report (ok=false when any stage failed)."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Test IdP directory connection",
+        "tags": [
+          "auth"
+        ],
+        "x-culvert-audit-event": "idp.test",
+        "x-culvert-danger-level": "low",
+        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.2.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/logger": {
       "get": {
         "description": "Returns the log file path, max size, and format.",
@@ -11323,6 +11689,1793 @@
         "x-culvert-idempotency": "idempotent",
         "x-culvert-introduced-version": "1.0.0",
         "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/mcp/approval-decision": {
+      "post": {
+        "description": "Four-eyes decision on an operational approval. Commits the PR-8 event before state change; never executes, calls upstream, or materializes a credential.",
+        "operationId": "decideMCPApproval",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Decision applied"
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/PlainNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/PlainConflict"
+          },
+          "503": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Durability not available; approval unchanged. Body is plain text."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Approve/reject an MCP operational approval",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-audit-event": "mcp.approval.decision",
+        "x-culvert-danger-level": "high",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "tenant",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/mcp/approvals": {
+      "get": {
+        "description": "Tenant-scoped operational approval requests. An id parameter returns one, with the full MCP-POLICY-007 dialog fields (no credential material).",
+        "operationId": "listMCPApprovals",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "tenant",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Approvals or one approval"
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/PlainNotFound"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "List MCP operational approvals",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "tenant",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/mcp/config": {
+      "get": {
+        "description": "Node-local Gateway/Management MCP listener+access configuration (references and metadata only; no secrets). distribution_state local_only.",
+        "operationId": "getMCPConfig",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "MCP config"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Get PR-9 MCP configuration",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "put": {
+        "description": "Transactional local apply — validate the complete candidate, retain the previous config on failure. Gateway/Management stay separate; no wildcard bind; no shared port; mutation stays disabled in V1. No CP→DP propagation (distribution_not_implemented).",
+        "operationId": "updateMCPConfig",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Applied locally"
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Update PR-9 MCP configuration (local only)",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-audit-event": "mcp.config.update",
+        "x-culvert-danger-level": "high",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/mcp/decision-explain": {
+      "get": {
+        "description": "Historical explanation projected exclusively from the committed PR-8 event (never re-evaluated against the current policy). Source is always \"historical\".",
+        "operationId": "explainMCPDecision",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "tenant",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "capability",
+            "required": false,
+            "schema": {
+              "enum": [
+                "gateway",
+                "management"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "event_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Historical explanation"
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/PlainNotFound"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "MCP historical decision explanation",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "tenant",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/mcp/decisions": {
+      "get": {
+        "description": "Bounded, tenant-scoped, cursor-paginated search over committed PR-8 decision events. Safe filters only; no raw arguments or output.",
+        "operationId": "searchMCPDecisions",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "tenant",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "capability",
+            "required": false,
+            "schema": {
+              "enum": [
+                "gateway",
+                "management"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "action",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "reason_code",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "rule_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "server_id",
+            "required": false,
+            "schema": {
+              "maxLength": 256,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tool_name",
+            "required": false,
+            "schema": {
+              "maxLength": 256,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tool_fingerprint",
+            "required": false,
+            "schema": {
+              "maxLength": 256,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "principal_id",
+            "required": false,
+            "schema": {
+              "maxLength": 256,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "agent_id",
+            "required": false,
+            "schema": {
+              "maxLength": 256,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "client_id",
+            "required": false,
+            "schema": {
+              "maxLength": 256,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "execution_state",
+            "required": false,
+            "schema": {
+              "maxLength": 256,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "policy_snapshot_hash",
+            "required": false,
+            "schema": {
+              "maxLength": 256,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "credential_profile_ref",
+            "required": false,
+            "schema": {
+              "maxLength": 256,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Decision page"
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "MCP decision search",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "tenant",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/mcp/distribution": {
+      "get": {
+        "description": "Safe, read-only signed CP→DP distribution status per capability (current/previous content hash, epoch, config/policy/catalog/credential revisions, signing key id, minimum DP version, rollback availability). Never exposes a private signing key, a raw signature, or a full raw snapshot. local_only when signed distribution is not active.",
+        "operationId": "getMCPDistribution",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Distribution status"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Signed CP→DP MCP distribution status",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/mcp/distribution/acks": {
+      "get": {
+        "description": "PR-UX-5 bounded, read-only acknowledgement read model for one capability and content hash. Returns the truthful per-DP acknowledgement rows (applied/rejected/rolled_back/received/validated, or unavailable when a node has not acknowledged the hash) and the derived distribution counts (intended/applied/rolled_back/rejected/incompatible/unavailable). Fleet state is derived ONLY from real acknowledgements, never from a stored envelope, a signed hash, a successful request, the desired/local mode, or elapsed time. When no signed distribution is configured on this node (the disabled-default posture, no publication coordinator is wired), configured is false, counts is null, and rows is empty (unavailable / not configured), never a benign zero-as-healthy default.",
+        "operationId": "getMCPDistributionAcks",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "capability",
+            "required": false,
+            "schema": {
+              "enum": [
+                "gateway",
+                "management"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "content_hash",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Acknowledgement read model"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Capability-scoped per-DP acknowledgement read model",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/mcp/executions": {
+      "get": {
+        "description": "Bounded, safe execution history — counts only (executed, upstream ok/err, DLP blocks, hard-failure blocks, shadow overrides, commit failures). Never a tenant, subject, argument, URL, or token.",
+        "operationId": "getMCPExecutions",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Execution history"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Bounded MCP execution history",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/mcp/health": {
+      "get": {
+        "description": "Capability-isolated MCP health — Gateway/Management runtime and PR-8 durability state, distribution_state local_only, and Management access surface.",
+        "operationId": "getMCPHealth",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Health snapshot"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "MCP health & durability",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/mcp/management-access": {
+      "get": {
+        "description": "Safe Management-access surface — enabled/bound/min-role/output-bound/mutation-off — plus the fixed read-only tool catalog and per-tool authorization (no mutation tools).",
+        "operationId": "getMCPManagementAccess",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Management access + tool catalog"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Management MCP access status",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/mcp/overview": {
+      "get": {
+        "description": "Safe MCP overview — distribution state (local_only), execution state (not_implemented), Management tool count and a health snapshot.",
+        "operationId": "getMCPOverview",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Overview"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "MCP admin overview",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/mcp/policy": {
+      "get": {
+        "description": "Active capability-local policy revision, hash, rule count and default action. distribution_state local_only.",
+        "operationId": "getMCPPolicy",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "capability",
+            "required": false,
+            "schema": {
+              "enum": [
+                "gateway",
+                "management"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Policy metadata"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/PlainNotFound"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Current MCP policy metadata",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/mcp/policy-simulate": {
+      "post": {
+        "description": "Runs a candidate policy through the SAME PR-6 engine (mode=validate|simulate|compare). Deterministic, I/O-free, publishes nothing.",
+        "operationId": "simulateMCPPolicy",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Validation/simulation/comparison result"
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Validate/simulate/compare a candidate MCP policy",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-danger-level": "none",
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "operator",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/mcp/publication-decision": {
+      "post": {
+        "description": "Four-eyes decision on a publication request. Publish commits the PR-8 P-CRIT event BEFORE the local store change (fail-closed, local_only). Never executes.",
+        "operationId": "decideMCPPublication",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Decision applied"
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/PlainNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/PlainConflict"
+          },
+          "503": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Durability not available; nothing published. Body is plain text."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Approve/reject/publish an MCP publication request",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-audit-event": "mcp.publication.decision",
+        "x-culvert-danger-level": "high",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "tenant",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/mcp/publications": {
+      "get": {
+        "description": "Tenant-scoped list of pending/terminal local policy-publication requests.",
+        "operationId": "listMCPPublications",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "tenant",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Publication requests"
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "List MCP publication requests",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "tenant",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "post": {
+        "description": "Compiles+validates a candidate, checks the expected base revision, and binds a four-eyes publication request. Publishes nothing.",
+        "operationId": "createMCPPublication",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Request created"
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Create an MCP publication request",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-audit-event": "mcp.publication.create",
+        "x-culvert-danger-level": "high",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "operator",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "tenant",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/mcp/rollback": {
+      "post": {
+        "description": "Initiates an operator-controlled atomic rollback of a capability's active signed snapshot to an exact retained target content hash, via the four-eyes publication workflow with a PR-8 durable commit before any signing/push/swap. Admin-only and CSRF-protected. Management MCP may read distribution health but never publish or roll back. Fails closed with distribution_not_configured when signed distribution is not active on this node.",
+        "operationId": "createMCPRollback",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "capability": {
+                    "enum": [
+                      "gateway",
+                      "management"
+                    ],
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": "string"
+                  },
+                  "target_hash": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "capability",
+                  "target_hash"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Rollback initiated"
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/PlainConflict"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Four-eyes atomic rollback to a retained signed snapshot",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-audit-event": "mcp.rollback.request",
+        "x-culvert-danger-level": "high",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/mcp/rollout": {
+      "get": {
+        "description": "Safe, read-only PR-11 rollout status per capability — desired, locally-active, and fleet-effective mode, scope revision/hash, bounded low-cardinality metrics, DP acknowledgement counts, and the Production qualification lock. Never exposes a tenant, subject, token, credential, or raw request/response. Production is always locked (this build ships no qualification issuer).",
+        "operationId": "getMCPRollout",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Rollout status"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "MCP rollout status",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/mcp/rollout/emergency": {
+      "post": {
+        "description": "Engages or clears the capability-local emergency kill switch (immediate admission stop). Node-local — no CP round trip. Emergency actions NARROW only; they can never promote, widen scope, or enable execution.",
+        "operationId": "createMCPRolloutEmergency",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "action": {
+                    "enum": [
+                      "disable",
+                      "clear"
+                    ],
+                    "type": "string"
+                  },
+                  "capability": {
+                    "enum": [
+                      "gateway",
+                      "management"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "capability"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Emergency state"
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Emergency kill switch (narrows only)",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-audit-event": "mcp.rollout.emergency.disable",
+        "x-culvert-danger-level": "high",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/mcp/rollout/evidence": {
+      "get": {
+        "description": "Measured Production Qualification evidence read model for a capability: window floors (shadow 14d, canary 7d, soak 24h), zero open critical/high defects, and rollback rehearsal, each with a typed requirement state (met/not_met/not_started/synthetic_non_qualifying/not_applicable), server-computed elapsed seconds, start timestamps, a production/synthetic origin label, a bounded summary, and the broader qualification categories NOT represented by runtime evidence. PR-UX-6 enriches the original response additively (all original keys retained). Reporting only, read-only (no mutation, no window is stamped on read): it never asserts Production qualification, which remains locked behind the separate external gate.",
+        "operationId": "getMCPRolloutEvidence",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Rollout evidence"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Rollout evidence-window progress",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/mcp/rollout/rehearse-rollback": {
+      "post": {
+        "description": "Records a rollback rehearsal as local evidence. The live signed rollback runs through the PR-10 coordinator; this marks the rehearsal-performed evidence flag only.",
+        "operationId": "createMCPRolloutRehearse",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "capability": {
+                    "enum": [
+                      "gateway",
+                      "management"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Rehearsal recorded"
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Record a rollback rehearsal",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-audit-event": "mcp.rollout.rehearse-rollback",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/mcp/rollout/scope": {
+      "get": {
+        "description": "Returns the current rollout scope for a capability. PR-UX-5 enriches it beyond revision/hash/connector/high-risk with a safe structured summary: kind (enumerated / percentage / matches-nothing), enumerable + matches-nothing flags, percent, operations, per-dimension selector and exclusion counts, and the exact serializable scope spec (reviewed config identifiers only; no secret, token, or raw request/response).",
+        "operationId": "getMCPRolloutScope",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Rollout scope"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Current rollout scope",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "put": {
+        "description": "Updates the rollout scope via the PR-10 signed publication path with four-eyes approval for widening. Fails closed with distribution_not_configured when the signed path is not active.",
+        "operationId": "updateMCPRolloutScope",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Scope update accepted (pending signed publication)"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/PlainConflict"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Update (widen/narrow) the rollout scope",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-audit-event": "mcp.rollout.scope.update",
+        "x-culvert-danger-level": "high",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/mcp/rollout/scope/validate": {
+      "post": {
+        "description": "PR-UX-5 read-only candidate-scope validation preview. Compiles a candidate scope spec through the SAME pure validator the DP uses (bounds, no-wildcard, high-risk gate, percentage well-formedness) and returns valid/invalid with a classified error code, a safe summary of the candidate and the current active scope, and a per-dimension diff (add/remove counts, percentage, high-risk, enumerable and content-hash transitions). It is a PREVIEW only: viewer-readable, non-mutating, no publication, no state change, no audit. The candidate capability is bound to the requested capability (capability isolation).",
+        "operationId": "validateMCPRolloutScope",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "capability",
+            "required": false,
+            "schema": {
+              "enum": [
+                "gateway",
+                "management"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "scope": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Validation + diff preview"
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Validate a candidate rollout scope and preview its diff",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-danger-level": "none",
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/mcp/rollout/transition": {
+      "post": {
+        "description": "Requests a one-stage promotion (Disabled→Observe→Shadow→Canary→Production) or a multi-stage demotion. A promotion/widening rides the PR-10 signed publication path (four-eyes + PR-8 durable commit + sign + distribute + DP-ack); a CP-side accepted transition is not fleet-effective until acknowledged. Production is rejected without an externally-verified qualification receipt — no config/env/CLI/API can bypass it. Fails closed with distribution_not_configured when the signed path is not active on this node.",
+        "operationId": "createMCPRolloutTransition",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "base_revision": {
+                    "type": "integer"
+                  },
+                  "capability": {
+                    "enum": [
+                      "gateway",
+                      "management"
+                    ],
+                    "type": "string"
+                  },
+                  "to_mode": {
+                    "enum": [
+                      "disabled",
+                      "observe",
+                      "shadow",
+                      "canary",
+                      "production"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "capability",
+                  "to_mode"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Transition accepted (pending signed publication + DP acknowledgement)"
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/PlainConflict"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Request a one-stage rollout mode transition",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-audit-event": "mcp.rollout.transition.request",
+        "x-culvert-danger-level": "high",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/mcp/servers": {
+      "get": {
+        "description": "Tenant-scoped, redacted server inventory. Requires the tenant query parameter. A server_id parameter returns one server. No raw endpoint or credential material.",
+        "operationId": "listMCPServers",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "tenant",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "server_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Server list or one server"
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/PlainNotFound"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "MCP server inventory",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "tenant",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/mcp/tools": {
+      "get": {
+        "description": "Tenant-scoped, redacted tool inventory. Quarantined/drifted tools stay visibly quarantined. No complete schemas, arguments or output.",
+        "operationId": "listMCPTools",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "tenant",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "server_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tool_name",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Tool list or one tool"
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/PlainNotFound"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "MCP tool inventory",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "tenant",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/mcp/upstream-health": {
+      "get": {
+        "description": "Bounded upstream-leg health (success/error counts; enabled flag). Disabled-by-default (no upstream pool bound).",
+        "operationId": "getMCPUpstreamHealth",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Upstream health"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Upstream MCP leg health",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"
@@ -18509,6 +20662,7 @@
                   "leader": true,
                   "role": "standalone",
                   "status": "ok",
+                  "version": "v1.0.203",
                   "write_authority": true
                 },
                 "schema": {
@@ -18528,6 +20682,7 @@
                   "leader": false,
                   "role": "standby",
                   "status": "standby",
+                  "version": "v1.0.203",
                   "write_authority": false
                 },
                 "schema": {

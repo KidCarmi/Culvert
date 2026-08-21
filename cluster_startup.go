@@ -41,7 +41,7 @@ func loadCluster(cfg clusterStartupConfig, ctx context.Context, enrolled *dpEnro
 	// operator asked for fencing would be an invisible safety downgrade.
 	if cfg.HAEtcdEndpoints != "" {
 		if err := armHALease(cfg); err != nil {
-			logger.Fatalf("HA lease: %v", err)
+			logFatalf("HA lease: %v", err)
 		}
 	}
 
@@ -93,7 +93,7 @@ func startControlPlaneWithHAResume(cfg clusterStartupConfig, ctx context.Context
 	}
 
 	if err := enableControlPlane(cfg.CPAddr, cfg.CPCert, cfg.CPKey, cfg.CPCA, cfg.ClusterDBPath); err != nil {
-		logger.Fatalf("ControlPlane gRPC: %v", err)
+		logFatalf("ControlPlane gRPC: %v", err)
 	}
 	// ADR-0005 S4: record resync material BEFORE any leadership assertion —
 	// an unfenced resume (or a later self-fence) re-enters standby with it.

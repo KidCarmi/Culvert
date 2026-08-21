@@ -71,6 +71,17 @@ func (p *pipeline) dispatchPolicy(rb *recBuilder, req Request, msg jsonrpc.Messa
 	rb.rec.MatchedRule = string(d.MatchedRule)
 	rb.rec.PolicyRevision = uint64(d.PolicyRevision)
 
+	// PR-11: when a guarded executor is wired (Gateway only, armed by rollout
+	// distribution), hand the fully-evaluated decision to it. The executor owns
+	// rollout-mode resolution (record-only / execute / block), the fixed
+	// hard-failure enforcement, obligations, and — for an in-scope executing mode —
+	// the real guarded upstream call with its own commit-before-side-effect. When no
+	// executor is wired this branch is skipped and the decision-only path below runs
+	// byte-identically.
+	if p.executor != nil {
+		return p.dispatchExecute(rb, req, msg, ctx, in, d, insp, snap.Hash(), now)
+	}
+
 	if d.Action.IsAllowClass() {
 		// An ALLOW_WITH_REDACTION decision requires a REAL, re-validated redaction
 		// transform (transformed hash) — otherwise it fails closed. No obligation, no

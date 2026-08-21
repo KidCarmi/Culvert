@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net"
 	"net/http"
@@ -14,6 +15,32 @@ import (
 // maxRequestBody is the largest body we'll forward for non-tunnel requests.
 // CONNECT tunnels and WebSocket upgrades bypass this limit (they stream raw TCP).
 const maxRequestBody = 64 << 20 // 64 MB
+
+// ── Why the forward path calls the transport directly ────────────────────────
+//
+// handleHTTP used to build an http.Client per request whose entire job was to
+// say "don't follow redirects" (CheckRedirect: ErrUseLastResponse) and to carry
+// a timeout. It paid for the redirect machinery regardless: Client.do sets that
+// up unconditionally BEFORE the first round trip, long before CheckRedirect is
+// consulted. Per proxied request that meant a full Header.Clone of the client's
+// header map (makeHeadersCopier), the body-rewind wrapper (setupRewindBody), a
+// cancelTimerBody wrapper around the response body, and the Client itself —
+// none of which a forward proxy can ever use, because a 3xx belongs to the
+// client and is passed straight back to it.
+//
+// Measured against a real *http.Transport and a local origin
+// (proxy_http_forward_bench_test.go): 90 -> 81 allocs/op, 11.5 KB -> 10.7 KB
+// per request; -12% ns/op on the 4-core parallel mix. Gated by
+// TestBenchGate_HTTPForwardAllocs; the behaviours http.Client was providing are
+// pinned individually in proxy_http_forward_test.go.
+
+// upstreamRequestTimeout bounds a whole plain-HTTP exchange with the origin —
+// dial, headers, and the response-body read. It was previously spelled as the
+// http.Client.Timeout of that per-request client. The value and the scope it
+// covers are unchanged: for a *http.Transport, net/http implements
+// Client.Timeout as exactly this, a context deadline on the request
+// (setRequestCancel's knownTransport branch).
+const upstreamRequestTimeout = 30 * time.Second
 
 // sslInspectBodyStallTimeout bounds the gap between successive bytes on a
 // decrypted SSL-inspected request body. A peer that pauses longer than this
@@ -98,14 +125,27 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	rewriter.ApplyRequest(host, r.Header)
 
-	client := &http.Client{
-		Transport: getUpstreamTransport(),
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-		Timeout: 30 * time.Second,
-	}
 	r.RequestURI = ""
+
+	// Forward through the transport, not through an http.Client: a forward proxy
+	// must never follow a redirect (a 3xx belongs to the client), so the only
+	// things the per-request client here provided were "don't redirect" and a
+	// timeout — while Client.do set up the redirect machinery unconditionally
+	// anyway, before CheckRedirect is ever consulted. Rationale and measurements
+	// are in the block above upstreamRequestTimeout.
+	tr := getUpstreamTransport()
+
+	// http.Client.send promotes URL userinfo to a Basic Authorization header
+	// before the round trip; the transport does not, and it drops userinfo from
+	// the request line. A client that sends an absolute-form request URI with
+	// credentials (GET http://user:pass@host/) would otherwise reach the origin
+	// with no credentials at all, so keep the promotion here.
+	if u := r.URL.User; u != nil && r.Header.Get("Authorization") == "" {
+		password, _ := u.Password()
+		r.SetBasicAuth(u.Username(), password)
+	}
+
+	ctx := r.Context()
 
 	// CHAOS-11: attribute this request's outcome to the parent proxy the
 	// transport selects, so real request failures trip the pool's circuit
@@ -116,17 +156,27 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// be charged, not credited (Codex P1 on the original wiring).
 	var upstreamAtt *upstream.Attribution
 	if upstreamPool.Enabled() {
-		ctx, att := upstream.WithAttribution(r.Context())
-		r = r.WithContext(ctx)
+		var att *upstream.Attribution
+		ctx, att = upstream.WithAttribution(ctx)
 		upstreamAtt = att
 	}
 
-	resp, err := client.Do(r)
+	// Registered BEFORE resp.Body.Close() below, so it runs AFTER it: the
+	// deadline covers the body read, and cancelling early would truncate it.
+	ctx, cancel := context.WithTimeout(ctx, upstreamRequestTimeout)
+	defer cancel()
+	r = r.WithContext(ctx)
+
+	resp, err := tr.RoundTrip(r)
 	if err != nil {
 		upstreamAtt.Record(err) // nil-safe
-		logger.Printf("upstream request error: %v", err)
+		// RoundTrip returns the bare error where Client.Do returned a *url.Error
+		// carrying the target; name the host explicitly so the line keeps its
+		// context. Host only, never the full URL — query strings routinely carry
+		// tokens and PII (same rule as policyLogURI).
+		logger.Printf("upstream request error for %q: %v", sanitizeLog(r.Host), err)
 		if isDNSError(err) {
-			go fireAlert("dns_failure", AlertPayload{Host: r.Host, Detail: err.Error(), Source: "proxy"})
+			fireDNSFailureAlert(r.Host, err)
 		}
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
@@ -231,7 +281,10 @@ func scanHTTPResponseBody(w http.ResponseWriter, r *http.Request, resp *http.Res
 		return false, nil
 	}
 
-	buffered, readErr := io.ReadAll(io.LimitReader(resp.Body, globalSecScanner.MaxBytes()))
+	// The ContentLength > MaxBytes case already returned above, so the
+	// declaration here is either absent (-1, chunked) or within the limit; it
+	// sizes the buffer only — the read still runs to EOF or to the limit.
+	buffered, readErr := readScanBuffer(resp.Body, globalSecScanner.MaxBytes(), resp.ContentLength)
 	if readErr != nil {
 		// Fail closed (CHAOS-17): before this fix the error path returned
 		// false, silently forwarding the response unscanned AND truncated

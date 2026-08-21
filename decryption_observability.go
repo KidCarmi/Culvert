@@ -294,6 +294,43 @@ func upstreamConnectFailureOutcome(err error, hostOnly string, dec sslResolution
 	return o
 }
 
+// caUnusableOutcome builds the ADR-0011 DecryptionOutcome for a session that
+// policy selected for inspection but that was failed CLOSED because this node's
+// own Root CA is outside its validity window (CHAOS-28).
+//
+// It reuses the frozen closed sets rather than extending them, and each choice
+// is load-bearing:
+//
+//   - DecisionNoFailOpen502 — the session was blocked with a 502 and no
+//     fail-open applied. That is literally what happened, and it keeps the
+//     appliance-wide fault out of the `inspect_unavailable` bucket, which means
+//     "bypassed because no CA was loaded" and must stay countable as a BYPASS.
+//   - FailStageClientHello — no forged leaf could be produced, so the failure
+//     lands on the client leg before any hello was answered.
+//   - FailCategoryCertificate — the defective certificate is ours, but the class
+//     an operator triages by is the same one.
+//
+// It never feeds the auto-exclusion learner: the fault is host-independent, so
+// learning from it would promote every host that happened to be requested
+// during the outage into a permanent bypass.
+func caUnusableOutcome(hostOnly string, dec sslResolution, match *PolicyMatch) *DecryptionOutcome {
+	o := &DecryptionOutcome{
+		Outcome:        decryptobs.OutcomeFailed,
+		DecisionSource: decryptobs.DecisionNoFailOpen502,
+		Host:           hostOnly,
+		CertVerify:     decryptobs.CertVerifyNotChecked,
+		FailStage:      decryptobs.FailStageClientHello,
+		FailCategory:   decryptobs.FailCategoryCertificate,
+		ProfileID:      dec.ScopeID,
+		CacheConsulted: dec.Consulted,
+	}
+	if match != nil && match.Rule != nil {
+		o.RuleID = match.Rule.ID
+		o.RuleName = match.Rule.Name
+	}
+	return o
+}
+
 // classifyOriginFailure maps an upstream (origin-leg) inspect-handshake error to the
 // bounded ADR-0011 (FailStage, FailCategory, DecisionSource). It reuses isOriginCertVerifyErr
 // for the certificate class (a Block decision) and matches the same narrow, deliberate TLS

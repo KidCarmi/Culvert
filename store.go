@@ -220,6 +220,7 @@ var (
 	drainPendingAuditEvents = audit.Drain
 	requeueAuditEvents      = audit.Requeue
 	auditPersistActive      = audit.PersistActive
+	auditWriteErrors        = audit.WriteErrors
 )
 
 // InitAuditLog opens path for append-only JSONL audit persistence.
@@ -551,10 +552,18 @@ func (c *Config) AuthEnabled() bool {
 // exists OR the operator deliberately chose the open default (Exempt). The admin
 // UI and setup flow gate on this — NOT AuthEnabled — so that open mode keeps the
 // admin UI gated and makes setup one-time (Slice 5).
+//
+// The legacyLDAPRetired term (ADR-0025 / P1-2) keeps the gate CLOSED for a
+// deployment whose only setup anchor was the legacy YAML LDAP provider: the
+// cutover to the IdP registry deactivates that provider, and without this
+// term the deactivation (or any later restart, with the durable sentinel but
+// no wired provider) would flip setup back to "incomplete" — which the admin
+// middleware treats as unauthenticated RoleAdmin for everyone. Retirement is
+// a deliberate, durable operator state, so it counts as configured.
 func (c *Config) IsConfigured() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.user != "" || c.provider != nil || c.defaultAuthOutcome == OutcomeExempt
+	return c.user != "" || c.provider != nil || c.defaultAuthOutcome == OutcomeExempt || legacyLDAPRetired()
 }
 
 // DefaultAuthOutcome returns the authoritative global Stage-1 default applied on
@@ -1113,15 +1122,30 @@ func recordStats(ip, host, status, ruleMatched, actionTaken string) {
 	// it twice cost a second keyed HMAC per request for a value already in hand.
 	// Off ⇒ plaintext, byte-identical.
 	redactedHost := redactDestinationHost(host)
+	// Nobody subscribed → do nothing at all, and in particular do not spawn a
+	// goroutine (the HasSubscriber contract; same rationale as the
+	// storage_write_failed producer in storage_health.go). This is the PER-REQUEST
+	// block path, so it is the hottest alert producer in the product and the one
+	// where the skip matters most: without the gate every blocked request pays a
+	// goroutine spawn, a payload allocation and a global dedup-mutex round trip to
+	// deliver an alert to nobody. That cost lands precisely when a gateway is under
+	// a scanning/beaconing flood — when block volume is highest and latency matters
+	// most — and it is paid on the default posture (no webhooks configured) and in
+	// every test binary. The gate is a pure fast path: when a subscriber does exist
+	// the dispatch below is byte-identical.
 	switch status {
 	case "THREAT_BLOCKED", "SCAN_BLOCKED", "DPI_BLOCKED":
-		go fireAlert("threat_detected", AlertPayload{
-			Actor: ip, Host: redactedHost, Detail: ruleMatched + " " + actionTaken, Source: ruleMatched,
-		})
+		if globalAlertStore.HasSubscriber("threat_detected") {
+			go fireAlert("threat_detected", AlertPayload{
+				Actor: ip, Host: redactedHost, Detail: ruleMatched + " " + actionTaken, Source: ruleMatched,
+			})
+		}
 	case "POLICY_BLOCK", "POLICY_DROP":
-		go fireAlert("policy_block", AlertPayload{
-			Actor: ip, Host: redactedHost, Detail: ruleMatched, Source: "policy",
-		})
+		if globalAlertStore.HasSubscriber("policy_block") {
+			go fireAlert("policy_block", AlertPayload{
+				Actor: ip, Host: redactedHost, Detail: ruleMatched, Source: "policy",
+			})
+		}
 	}
 	if status == "OK" || status == "POLICY_ALLOW" {
 		// Token cardinality is fixed (12 hex), so the bounded-map behavior is unchanged.
@@ -1247,9 +1271,15 @@ func persistLogEntry(ip, method, host, status, ruleMatched, actionTaken, identit
 	// three destination fields share one contract. redactedHost is computed once and
 	// threaded into the URI redactor so the host is HMAC'd a single time per record.
 	redactedHost := redactDestinationHost(host)
+	// One clock read for the whole record. Two reads not only cost twice as
+	// much, they could straddle a second boundary and emit a TS and a Time that
+	// disagree. The human-readable field is memoised per wall-clock second
+	// (store_logclock.go) — byte-identical output, and it removes the only
+	// remaining allocation on this per-request path.
+	now := time.Now()
 	entry := LogEntry{
-		TS:          time.Now().UnixMilli(),
-		Time:        time.Now().Format("15:04:05"),
+		TS:          now.UnixMilli(),
+		Time:        logClockStamp(now),
 		IP:          ip,
 		Identity:    identity,
 		Method:      method,

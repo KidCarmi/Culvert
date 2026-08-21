@@ -87,9 +87,23 @@ func apiStats(w http.ResponseWriter, r *http.Request) {
 		// Persistent request-log health: non-zero means writes are failing
 		// (e.g. disk full) and the on-disk history is incomplete.
 		"logWriteErrors": reqlog.WriteErrors(),
+		// Persistent AUDIT-log health. Non-zero means admin-action entries did
+		// not reach the durable JSONL file (disk full, read-only remount, failed
+		// post-rotation reopen), so the compliance record is incomplete — the
+		// in-memory ring keeps only the newest 500 entries and is wiped on
+		// restart, so this is the only way an operator can see the gap.
+		"auditLogWriteErrors": auditWriteErrors(),
 		// Non-zero means the async JSONL persistence queue saturated: no
 		// entry was lost, but request goroutines waited on the disk.
 		"logBackpressure": reqlog.Backpressure(),
+		// Non-zero means the async PROCESS-log queue (internal/logsink; every
+		// POLICY_ALLOW/BLOCK/DROP line plus general logger.Printf output)
+		// saturated: no line was lost, but the caller waited for queue room.
+		// A distinct subsystem from logBackpressure above (request-log JSONL
+		// persistence) — previously visible only via the culvert_logsink_
+		// backpressure_total Prometheus metric, invisible to an operator
+		// without a metrics scraper wired up.
+		"processLogBackpressure": logSinkBackpressure(),
 		// Audit/request-log persistence state: if the operator configured a
 		// file path but the engine could not open it at startup (bad
 		// permissions, missing directory, full disk), both silently fall
@@ -1491,8 +1505,21 @@ func apiUIAllowIPs(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// syslogConfigured tracks whether syslog was initialised so the UI can reflect it.
+// syslogConfigured tracks whether syslog was initialised SUCCESSFULLY so the UI
+// can reflect it AND so admin_settings persistence only re-saves a working addr
+// (see admin_settings.go:447 — never persist a connect-failed target).
 var syslogConfigured string // the addr string, empty = not configured
+
+// syslogConfiguredAddr records the operator-configured syslog/SIEM target
+// regardless of whether InitSyslog actually connected (mirrors
+// auditLogConfiguredPath). buildOperatorContract's checkSyslogFeed compares
+// it against the live globalSyslog handle so the Diagnostics panel can tell an
+// intentional "no SIEM feed" apart from a configured feed that silently failed
+// to connect at startup — the latter previously left only one startup log line
+// as signal while the /api/syslog readback reported the feed as "not
+// configured". Kept in sync at both startup paths (loadObservability,
+// applyAdminServices) and the runtime API (apiSyslogConfig enable/disable).
+var syslogConfiguredAddr string
 
 // auditLogConfiguredPath / requestLogConfiguredPath record the operator-
 // configured persistent-log path (set in loadObservability regardless of
@@ -1517,12 +1544,19 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		format := "rfc3164"
-		var drops uint64
+		var drops, panics uint64
 		if globalSyslog != nil {
 			format = globalSyslog.Format()
+			// Read panics before drops: deliverGuarded's recover branch always
+			// increments panics first, then drops (independent atomics, no
+			// combined snapshot). Reading in the same order means a report can
+			// only ever lag panics behind drops, never the reverse — so the
+			// UI's `drops > 0` gate can never hide a real panic behind a
+			// stale-looking drops==0.
+			panics = globalSyslog.Panics()
 			drops = globalSyslog.Drops()
 		}
-		jsonOK(w, map[string]any{"addr": syslogConfigured, "format": format, "drops": drops})
+		jsonOK(w, map[string]any{"addr": syslogConfigured, "format": format, "drops": drops, "panics": panics})
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {
 			return
@@ -1548,6 +1582,7 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 				globalSyslog = nil
 			}
 			syslogConfigured = ""
+			syslogConfiguredAddr = ""
 			auditEvent(r, "settings.syslog", "disabled", "")
 			adminSettingsSave()
 			jsonOK(w, map[string]any{"ok": true, "addr": "", "format": "rfc3164"})
@@ -1558,6 +1593,7 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		syslogConfigured = body.Addr
+		syslogConfiguredAddr = body.Addr
 		auditEvent(r, "settings.syslog", body.Addr, "syslog forwarding enabled (format="+globalSyslog.Format()+")")
 		adminSettingsSave()
 		jsonOK(w, map[string]any{"ok": true, "addr": body.Addr, "format": globalSyslog.Format()})
@@ -1836,9 +1872,10 @@ func apiConnLimit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		jsonOK(w, map[string]any{
-			"enabled":   connLimiter.Enabled(),
-			"maxPerIP":  connLimiter.MaxPerIP(),
-			"activeIPs": connLimiter.ActiveIPs(),
+			"enabled":       connLimiter.Enabled(),
+			"maxPerIP":      connLimiter.MaxPerIP(),
+			"activeIPs":     connLimiter.ActiveIPs(),
+			"rejectedTotal": connLimiter.Rejected(),
 		})
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {

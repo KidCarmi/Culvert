@@ -484,6 +484,278 @@ const (
 	// ReasonEventExportRangeExceeded — an export/read request exceeded its bounded
 	// range, record count or byte budget. Fails closed.
 	ReasonEventExportRangeExceeded
+
+	// ── PR-9 admin API / Management MCP / approval / publication reasons ──
+
+	// ReasonAdminRequestInvalid — a malformed admin/Management request: a bad
+	// cursor, identifier, enum value, sort direction or filter. Fails closed.
+	ReasonAdminRequestInvalid
+	// ReasonAdminRangeExceeded — an admin/Management request exceeded a bounded
+	// page size, time range, simulation corpus, comparison sample or record/byte
+	// budget. Fails closed.
+	ReasonAdminRangeExceeded
+	// ReasonAdminUnknownField — an admin/Management request carried an unknown
+	// query parameter or body field under the strict-decode contract. Fails closed.
+	ReasonAdminUnknownField
+	// ReasonAdminNotFound — the addressed admin/Management resource does not exist
+	// within the caller's authorized tenant scope. Returned uniformly so a caller
+	// cannot distinguish "absent" from "exists in another tenant".
+	ReasonAdminNotFound
+	// ReasonAdminForbidden — the resolved administrative or Management identity is
+	// not authorized for the requested operation (role, scope or tenant). Fails
+	// closed; never leaks the existence of the target.
+	ReasonAdminForbidden
+	// ReasonAdminTenantScope — a request attempted to read or act across a tenant
+	// boundary, or supplied a tenant hint not backed by the authenticated identity.
+	// Fails closed; no cross-tenant record, count, range or existence is revealed.
+	ReasonAdminTenantScope
+
+	// ReasonApprovalNotFound — the addressed approval or publication request does
+	// not exist within the caller's authorized tenant scope. Uniform not-found.
+	ReasonApprovalNotFound
+	// ReasonApprovalSelfApproval — four-eyes violation: the approver is the same
+	// authenticated principal as the requester. Rejected.
+	ReasonApprovalSelfApproval
+	// ReasonApprovalExpired — the approval/publication request is past its TTL and
+	// can no longer be approved. Rejected.
+	ReasonApprovalExpired
+	// ReasonApprovalStaleRevision — a bound policy, catalog, tool or credential
+	// revision changed since the request was created, invalidating it. Rejected.
+	ReasonApprovalStaleRevision
+	// ReasonApprovalTerminalState — the request is already in a terminal
+	// (approved/rejected) state; terminal states are immutable. A conflicting
+	// transition is rejected; an identical repeat is idempotent.
+	ReasonApprovalTerminalState
+	// ReasonApprovalBindingMismatch — the presented candidate/decision digest,
+	// tenant, capability, base revision or expiry does not match the immutable
+	// request binding (a TOCTOU guard). Rejected.
+	ReasonApprovalBindingMismatch
+
+	// ReasonPublicationValidationFailed — a candidate policy document failed
+	// compilation/validation and must not be published. Fails closed.
+	ReasonPublicationValidationFailed
+	// ReasonPublicationStaleBase — the expected base revision does not match the
+	// active local revision at publish time (optimistic-concurrency guard).
+	ReasonPublicationStaleBase
+	// ReasonPublicationNotApproved — a local publication was attempted without a
+	// matching four-eyes approval bound to the exact candidate. Fails closed.
+	ReasonPublicationNotApproved
+	// ReasonPublicationDurabilityRequired — the required PR-8 P-CRIT publication
+	// event did not durably commit, so nothing is published and the active policy
+	// is retained. Fails closed.
+	ReasonPublicationDurabilityRequired
+
+	// ReasonManagementToolUnknown — a tools/call named a tool outside the fixed
+	// Management catalog, or one the resolved identity was never authorized to see.
+	// A remembered-but-unauthorized name gains no authority. Fails closed.
+	ReasonManagementToolUnknown
+	// ReasonManagementToolUnauthorized — the resolved Management identity is not
+	// authorized for the selected tool (scope, role, capability or tenant). Each
+	// tools/call is re-authorized independently of any prior tools/list. Fails closed.
+	ReasonManagementToolUnauthorized
+	// ReasonManagementResultTooLarge — a Management result exceeded the bounded
+	// safe-result byte budget and could not be safely returned; the caller must
+	// page. Fails closed rather than truncating unsafely.
+	ReasonManagementResultTooLarge
+
+	// ReasonConfigInvalid — a candidate PR-9 listener/access configuration failed
+	// validation (missing reference, bad value, or Gateway/Management overlap of
+	// address, port, OAuth resource, client or scope). Current runtime retained.
+	ReasonConfigInvalid
+	// ReasonConfigApplyFailed — a validated local configuration could not be
+	// applied/bound; the previous running configuration is retained unchanged and
+	// no CP→DP propagation is claimed. Fails closed.
+	ReasonConfigApplyFailed
+
+	// ── PR-10 signed CP→DP snapshot / fencing / rollback reasons ──
+
+	// ReasonSnapshotMalformed — the snapshot envelope is structurally invalid:
+	// undecodable, truncated, a duplicate canonical field, or a bounded header
+	// field could not be located. Rejected whole; no partial apply.
+	ReasonSnapshotMalformed
+	// ReasonSnapshotSchemaUnknown — the snapshot declares a schema version outside
+	// the supported set (a newer/unknown schema a DP must not partially interpret).
+	// Rejected whole.
+	ReasonSnapshotSchemaUnknown
+	// ReasonSnapshotCapabilityMismatch — the snapshot's signed capability does not
+	// match the target store, or the payload carries a field belonging to the other
+	// capability (Gateway↔Management isolation). Fails closed.
+	ReasonSnapshotCapabilityMismatch
+	// ReasonSnapshotAlgUnknown — the signature algorithm identifier is not the one
+	// supported algorithm (ed25519). An unknown alg is never treated as ed25519.
+	ReasonSnapshotAlgUnknown
+	// ReasonSnapshotKeyUntrusted — the signing key ID is not present in the DP's
+	// trust store. A key carried inside the snapshot never authorizes itself.
+	ReasonSnapshotKeyUntrusted
+	// ReasonSnapshotHashMismatch — the recomputed content hash over the canonical
+	// unsigned manifest+payload does not equal the declared content_hash.
+	ReasonSnapshotHashMismatch
+	// ReasonSnapshotSignatureInvalid — the Ed25519 signature did not verify against
+	// the trusted public key over the domain-separated signing input.
+	ReasonSnapshotSignatureInvalid
+	// ReasonSnapshotTooLarge — an envelope, payload section, or aggregate byte/entry
+	// bound was exceeded. Rejected before any state mutation.
+	ReasonSnapshotTooLarge
+	// ReasonSnapshotRevisionInvalid — a revision in the tuple is negative, missing,
+	// out of bounds, or inconsistent with the payload actually included.
+	ReasonSnapshotRevisionInvalid
+	// ReasonSnapshotRevisionRegression — a lower revision arrived in the same or a
+	// lower epoch, or the same revision arrived with a different content hash.
+	// Rejected (never silently regresses component state).
+	ReasonSnapshotRevisionRegression
+	// ReasonSnapshotEpochStale — the snapshot's configuration epoch is below the
+	// DP's last-seen trusted epoch (a stale/zombie Control Plane). Rejected without
+	// ratcheting; the DP keeps serving its last valid snapshot.
+	ReasonSnapshotEpochStale
+	// ReasonSnapshotEpochInvalid — an unfenced/zero epoch after a positive epoch was
+	// already observed, or a higher epoch whose authenticity did not pass (so it
+	// must not ratchet the trusted epoch). Fails closed.
+	ReasonSnapshotEpochInvalid
+	// ReasonSnapshotMinVersionUnmet — the receiving DP's compatibility version is
+	// below the snapshot's minimum_dp_version; it must not apply semantics it cannot
+	// interpret. The DP keeps its prior valid snapshot.
+	ReasonSnapshotMinVersionUnmet
+	// ReasonSnapshotMinVersionMalformed — the minimum_dp_version is absent or not a
+	// valid monotonic compatibility value for a PR-10 MCP snapshot. Rejected.
+	ReasonSnapshotMinVersionMalformed
+	// ReasonSnapshotValidationFailed — a whole-snapshot semantic validation failed
+	// (registry/catalog/policy/credential/inspection consistency, required
+	// references, safe configuration). Rejected whole; active state unchanged.
+	ReasonSnapshotValidationFailed
+	// ReasonSnapshotPersistFailed — the DP could not durably persist the validated
+	// candidate before the atomic swap; activation is aborted and the current active
+	// snapshot is retained byte-unchanged. Fails closed.
+	ReasonSnapshotPersistFailed
+	// ReasonSnapshotSignerUnavailable — signing is required but the CP signer is
+	// unavailable; nothing is signed or published. Fails closed.
+	ReasonSnapshotSignerUnavailable
+	// ReasonDistributionWriteAuthority — the CP is not the write-authoritative
+	// lease holder at the irreversible publication boundary (lost/never-held lease
+	// or a fenced-out generation). Publication is refused.
+	ReasonDistributionWriteAuthority
+	// ReasonAckInvalid — a DP acknowledgement is malformed or does not bind to a
+	// known snapshot: wrong node identity, wrong capability, or an unknown content
+	// hash. An acknowledgement for one snapshot never satisfies another.
+	ReasonAckInvalid
+	// ReasonAckUnauthenticated — an acknowledgement arrived over an unauthenticated
+	// channel (no enrolled-node identity). Rejected.
+	ReasonAckUnauthenticated
+	// ReasonRollbackTargetMissing — the rollback directive references a retained
+	// target snapshot the DP does not hold. Refused; current snapshot retained.
+	ReasonRollbackTargetMissing
+	// ReasonRollbackTargetCorrupt — the retained rollback target failed
+	// re-verification (hash/signature) at rollback time. Refused; current retained.
+	ReasonRollbackTargetCorrupt
+	// ReasonRollbackDirectiveInvalid — the signed rollback directive is invalid:
+	// bad signature, expired, wrong current hash, or a capability/epoch mismatch.
+	ReasonRollbackDirectiveInvalid
+
+	// ─── PR-11 · guarded execution, shadow/canary rollout, upstream client ───
+	// These are appended (never reordered); the iota order above is frozen.
+
+	// ReasonRolloutModeInvalid — a rollout mode value is unknown/unparseable, or a
+	// zero/unset mode reached a place that requires a concrete mode. Fails closed
+	// (treated as Disabled — no execution).
+	ReasonRolloutModeInvalid
+	// ReasonRolloutTransitionInvalid — an illegal mode transition: a promotion that
+	// skips a stage (e.g. Disabled→Shadow, Observe→Canary), an unknown/future target
+	// mode, or a same-revision transition with different rollout content. Rejected.
+	ReasonRolloutTransitionInvalid
+	// ReasonRolloutProductionLocked — a transition into Production was attempted
+	// without a valid Production Qualification receipt. Production is fail-closed and
+	// unreachable in this build; no env/flag/API/snapshot field bypasses this.
+	ReasonRolloutProductionLocked
+	// ReasonRolloutQualificationInvalid — a supplied Production Qualification receipt
+	// failed verification, or is not bound to the exact target scope + snapshot hash.
+	// Rejected; Production stays locked.
+	ReasonRolloutQualificationInvalid
+	// ReasonRolloutScopeInvalid — a rollout scope is malformed: a wildcard "all"
+	// default, an over-limit selector/expansion count, a percentage bucket without a
+	// stable bound salt, or a non-deterministic selector. Fails closed (empty scope).
+	ReasonRolloutScopeInvalid
+	// ReasonRolloutScopeStaleBase — a scope/mode change was submitted against a base
+	// revision that is no longer current (optimistic-concurrency loss). Rejected.
+	ReasonRolloutScopeStaleBase
+	// ReasonRolloutConnectorModeRejected — a connector mode other than "local-client"
+	// (Model A) was supplied — "outbound-connector" (Model B) and "dmz-endpoint"
+	// (Model C) are reserved, unimplemented, and rejected on every surface in V1.
+	ReasonRolloutConnectorModeRejected
+	// ReasonRolloutEvidenceInsufficient — a promotion's evidence window (shadow/canary
+	// duration, soak, zero-open-defects) is not yet satisfied. Reporting-only gate;
+	// the promotion is not published until the evidence is present.
+	ReasonRolloutEvidenceInsufficient
+	// ReasonRolloutEmergencyActive — a capability-local kill switch (emergency disable)
+	// is engaged; new admission for that capability is refused until it is cleared.
+	ReasonRolloutEmergencyActive
+	// ReasonRolloutOutOfScope — a request is outside the active rollout scope for its
+	// capability. Informational disposition (Observe/Shadow behavior applies); never a
+	// hard failure by itself.
+	ReasonRolloutOutOfScope
+	// ReasonExecutionNotPermitted — real upstream execution is not permitted for this
+	// request in the current mode/scope (Disabled/Observe, or out-of-scope). The
+	// decision is recorded; no upstream call is made.
+	ReasonExecutionNotPermitted
+	// ReasonConfirmationRequired — the policy action is REQUIRE_CONFIRMATION and no
+	// valid exact-call confirmation obligation was satisfied. No execution.
+	ReasonConfirmationRequired
+	// ReasonApprovalRequired — the policy action is REQUIRE_APPROVAL and no valid exact
+	// approval receipt was satisfied (four-eyes). No execution.
+	ReasonApprovalRequired
+	// ReasonObligationReceiptInvalid — a confirmation/approval receipt is stale,
+	// expired, or does not bind the exact tenant/tool/args/destination/revisions/
+	// snapshot. Rejected; the allowance is not consumed.
+	ReasonObligationReceiptInvalid
+	// ReasonAllowanceConsumed — an ALLOW_ONCE grant was already consumed, or an
+	// ALLOW_FOR_SESSION grant exceeded its bound call count / TTL / session. No
+	// execution; a failed pre-execution hard control never consumes an allowance.
+	ReasonAllowanceConsumed
+	// ReasonAllowanceInvalid — an allowance grant is malformed or not bound to this
+	// exact session/call. Fails closed.
+	ReasonAllowanceInvalid
+	// ReasonUpstreamEndpointInvalid — the upstream endpoint was not resolved from the
+	// registered server record (e.g. a request-supplied arbitrary URL). Refused; no
+	// dial is attempted.
+	ReasonUpstreamEndpointInvalid
+	// ReasonUpstreamServerUnusable — the target server is unregistered, disabled, or
+	// its pinned identity no longer verifies. Refused before any connection.
+	ReasonUpstreamServerUnusable
+	// ReasonUpstreamVersionUnsupported — no mutually supported MCP protocol version
+	// could be negotiated with the upstream server (no legacy/downgrade path).
+	ReasonUpstreamVersionUnsupported
+	// ReasonUpstreamTransportRejected — the upstream leg attempted a rejected
+	// transport: legacy HTTP+SSE, a JSON-RPC batch, an automatic downgrade, or an
+	// arbitrary/extension method outside the admitted V1 set. Refused.
+	ReasonUpstreamTransportRejected
+	// ReasonUpstreamResponseInvalid — the upstream response failed strict kernel
+	// decoding or admitted-shape validation. The whole response is rejected.
+	ReasonUpstreamResponseInvalid
+	// ReasonUpstreamResponseTooLarge — the upstream response exceeded the configured
+	// header/body/result byte bound. Rejected before buffering the remainder.
+	ReasonUpstreamResponseTooLarge
+	// ReasonUpstreamConnectFailed — the connection to the upstream server could not be
+	// established (dial/TLS handshake failure). Sanitized; no raw network error text.
+	ReasonUpstreamConnectFailed
+	// ReasonUpstreamTLSIdentity — the connected upstream peer's TLS/workload identity
+	// did not match the server record's pinned identity (connect-time verification).
+	ReasonUpstreamTLSIdentity
+	// ReasonUpstreamTimeout — a connect, TLS-handshake, or response deadline/budget was
+	// exceeded on the upstream leg. Fails closed.
+	ReasonUpstreamTimeout
+	// ReasonUpstreamPoolExhausted — the bounded per-server connection pool or request
+	// queue was exhausted. Refused (availability bound), never unbounded.
+	ReasonUpstreamPoolExhausted
+	// ReasonUpstreamCancelled — the client cancelled or the request context was
+	// cancelled; cancellation was propagated to the upstream leg. Not a server fault.
+	ReasonUpstreamCancelled
+	// ReasonUpstreamRetryDenied — an ambiguous transport outcome on a write/destructive
+	// tools/call is never auto-retried (at-most-once). Refused rather than duplicated.
+	ReasonUpstreamRetryDenied
+	// ReasonUpstreamCallFailed — a generic, sanitized upstream tools/call failure that
+	// is not one of the more specific classes above. No raw upstream error is exposed.
+	ReasonUpstreamCallFailed
+	// ReasonUpstreamDiscoveryFailed — an upstream tools/list discovery failed (fetch,
+	// decode, or ingestion). The previous known-good catalog is retained unchanged.
+	ReasonUpstreamDiscoveryFailed
 )
 
 // reasonCode maps each Reason to its stable machine string. The strings are part
@@ -626,6 +898,90 @@ var reasonCode = map[Reason]string{ // #nosec G101 -- stable machine-readable er
 	ReasonEventReceiptInvalid:        "event_receipt_invalid",
 	ReasonEventExportUnauthorized:    "event_export_unauthorized",
 	ReasonEventExportRangeExceeded:   "event_export_range_exceeded",
+
+	// ── PR-9 admin API / Management MCP / approval / publication reasons ──
+	ReasonAdminRequestInvalid: "admin_request_invalid",
+	ReasonAdminRangeExceeded:  "admin_range_exceeded",
+	ReasonAdminUnknownField:   "admin_unknown_field",
+	ReasonAdminNotFound:       "admin_not_found",
+	ReasonAdminForbidden:      "admin_forbidden",
+	ReasonAdminTenantScope:    "admin_tenant_scope",
+
+	ReasonApprovalNotFound:        "approval_not_found",
+	ReasonApprovalSelfApproval:    "approval_self_approval",
+	ReasonApprovalExpired:         "approval_expired",
+	ReasonApprovalStaleRevision:   "approval_stale_revision",
+	ReasonApprovalTerminalState:   "approval_terminal_state",
+	ReasonApprovalBindingMismatch: "approval_binding_mismatch",
+
+	ReasonPublicationValidationFailed:   "publication_validation_failed",
+	ReasonPublicationStaleBase:          "publication_stale_base",
+	ReasonPublicationNotApproved:        "publication_not_approved",
+	ReasonPublicationDurabilityRequired: "publication_durability_required",
+
+	ReasonManagementToolUnknown:      "management_tool_unknown",
+	ReasonManagementToolUnauthorized: "management_tool_unauthorized",
+	ReasonManagementResultTooLarge:   "management_result_too_large",
+
+	ReasonConfigInvalid:     "config_invalid",
+	ReasonConfigApplyFailed: "config_apply_failed",
+
+	// ── PR-10 signed CP→DP snapshot / fencing / rollback reasons ──
+	ReasonSnapshotMalformed:           "snapshot_malformed",
+	ReasonSnapshotSchemaUnknown:       "snapshot_schema_unknown",
+	ReasonSnapshotCapabilityMismatch:  "snapshot_capability_mismatch",
+	ReasonSnapshotAlgUnknown:          "snapshot_alg_unknown",
+	ReasonSnapshotKeyUntrusted:        "snapshot_key_untrusted",
+	ReasonSnapshotHashMismatch:        "snapshot_hash_mismatch",
+	ReasonSnapshotSignatureInvalid:    "snapshot_signature_invalid",
+	ReasonSnapshotTooLarge:            "snapshot_too_large",
+	ReasonSnapshotRevisionInvalid:     "snapshot_revision_invalid",
+	ReasonSnapshotRevisionRegression:  "snapshot_revision_regression",
+	ReasonSnapshotEpochStale:          "snapshot_epoch_stale",
+	ReasonSnapshotEpochInvalid:        "snapshot_epoch_invalid",
+	ReasonSnapshotMinVersionUnmet:     "snapshot_min_version_unmet",
+	ReasonSnapshotMinVersionMalformed: "snapshot_min_version_malformed",
+	ReasonSnapshotValidationFailed:    "snapshot_validation_failed",
+	ReasonSnapshotPersistFailed:       "snapshot_persist_failed",
+	ReasonSnapshotSignerUnavailable:   "snapshot_signer_unavailable",
+	ReasonDistributionWriteAuthority:  "distribution_write_authority",
+	ReasonAckInvalid:                  "ack_invalid",
+	ReasonAckUnauthenticated:          "ack_unauthenticated",
+	ReasonRollbackTargetMissing:       "rollback_target_missing",
+	ReasonRollbackTargetCorrupt:       "rollback_target_corrupt",
+	ReasonRollbackDirectiveInvalid:    "rollback_directive_invalid",
+
+	// PR-11 — guarded execution, shadow/canary rollout, upstream client
+	ReasonRolloutModeInvalid:           "rollout_mode_invalid",
+	ReasonRolloutTransitionInvalid:     "rollout_transition_invalid",
+	ReasonRolloutProductionLocked:      "rollout_production_locked",
+	ReasonRolloutQualificationInvalid:  "rollout_qualification_invalid",
+	ReasonRolloutScopeInvalid:          "rollout_scope_invalid",
+	ReasonRolloutScopeStaleBase:        "rollout_scope_stale_base",
+	ReasonRolloutConnectorModeRejected: "rollout_connector_mode_rejected",
+	ReasonRolloutEvidenceInsufficient:  "rollout_evidence_insufficient",
+	ReasonRolloutEmergencyActive:       "rollout_emergency_active",
+	ReasonRolloutOutOfScope:            "rollout_out_of_scope",
+	ReasonExecutionNotPermitted:        "execution_not_permitted",
+	ReasonConfirmationRequired:         "confirmation_required",
+	ReasonApprovalRequired:             "approval_required",
+	ReasonObligationReceiptInvalid:     "obligation_receipt_invalid",
+	ReasonAllowanceConsumed:            "allowance_consumed",
+	ReasonAllowanceInvalid:             "allowance_invalid",
+	ReasonUpstreamEndpointInvalid:      "upstream_endpoint_invalid",
+	ReasonUpstreamServerUnusable:       "upstream_server_unusable",
+	ReasonUpstreamVersionUnsupported:   "upstream_version_unsupported",
+	ReasonUpstreamTransportRejected:    "upstream_transport_rejected",
+	ReasonUpstreamResponseInvalid:      "upstream_response_invalid",
+	ReasonUpstreamResponseTooLarge:     "upstream_response_too_large",
+	ReasonUpstreamConnectFailed:        "upstream_connect_failed",
+	ReasonUpstreamTLSIdentity:          "upstream_tls_identity",
+	ReasonUpstreamTimeout:              "upstream_timeout",
+	ReasonUpstreamPoolExhausted:        "upstream_pool_exhausted",
+	ReasonUpstreamCancelled:            "upstream_cancelled",
+	ReasonUpstreamRetryDenied:          "upstream_retry_denied",
+	ReasonUpstreamCallFailed:           "upstream_call_failed",
+	ReasonUpstreamDiscoveryFailed:      "upstream_discovery_failed",
 }
 
 // Code returns the stable machine string for the reason (e.g. "malformed_json").

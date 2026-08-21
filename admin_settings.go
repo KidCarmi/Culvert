@@ -73,6 +73,17 @@ type AdminSettings struct {
 	// LogCriticalDiskPct is the disk-protection threshold (%). 0 = use default.
 	LogCriticalDiskPct int `json:"log_critical_disk_pct,omitempty"`
 
+	// LegacyLDAPRetired is the durable LDAP-authority cutover sentinel
+	// (ADR-0025 / P1-2): once an enabled registry LDAP identity provider is
+	// observed on a node that carries a legacy YAML ldap block, the block is
+	// permanently retired as an operational authenticator — across registry
+	// disable/delete and every restart. Node-local + AdminDurable-only (never
+	// exported/imported, never rolled back, never CP→DP synced): authority
+	// ownership is per-node state, and a config restore must not resurrect a
+	// retired authenticator. Break-glass revert is an explicit offline edit
+	// (documented in docs/operator/ldap-identity-provider.md).
+	LegacyLDAPRetired bool `json:"legacy_ldap_retired"`
+
 	// Session
 	SessionTimeoutHours int `json:"session_timeout_hours,omitempty"`
 
@@ -239,6 +250,7 @@ func LoadAdminSettings(path string) {
 
 	applyAdminSecurity(&s)
 	applyAdminServices(&s)
+	applyLegacyLDAPRetirement(&s)
 	applyAdminNetwork(&s)
 	applyAdminYARA(&s)
 	applyAdminAutoExcludeTunables(&s)
@@ -284,6 +296,9 @@ func applyAdminSecurity(s *AdminSettings) {
 // applyAdminServices applies logging, monitoring, and session settings.
 func applyAdminServices(s *AdminSettings) {
 	if s.SyslogAddr != "" {
+		// Record intent even if the connect fails so checkSyslogFeed surfaces a
+		// silently-down SIEM feed (see syslogConfiguredAddr).
+		syslogConfiguredAddr = s.SyslogAddr
 		if err := InitSyslog(s.SyslogAddr, s.SyslogFormat); err == nil {
 			syslogConfigured = s.SyslogAddr
 		}
@@ -400,6 +415,24 @@ func applyBlocklistFeeds(s *AdminSettings) {
 			}
 		}
 		blFeedSyncer.SetFeed(feeds[i].URL, interval)
+	}
+}
+
+// applyLegacyLDAPRetirement applies the durable LDAP-authority cutover
+// sentinel (ADR-0025 / P1-2). LoadAdminSettings runs AFTER the legacy auth
+// providers wire (main.go init order), so a retired-but-still-wired legacy
+// provider from THIS boot is deactivated here via the shared enforcement
+// path. The reverse reconciliation also lives here: a cutover observed
+// earlier in boot (registry profile present before the settings path was
+// known) persists now.
+func applyLegacyLDAPRetirement(s *AdminSettings) {
+	if s.LegacyLDAPRetired {
+		legacyLDAPRetiredFlag.Store(true)
+	}
+	enforceLegacyLDAPShadowing()
+	if legacyLDAPRetired() && !s.LegacyLDAPRetired {
+		// In-memory cutover predates the settings load — make it durable.
+		adminSettingsSave()
 	}
 }
 
@@ -608,6 +641,7 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 		TrustForwardedHeaders:  trustForwardedHeaders,
 		TrustedProxyCIDRs:      ListTrustedProxyCIDRs(),
 		TrustedProxyCIDRsSaved: true, // once saved, the persisted list is authoritative (incl. empty)
+		LegacyLDAPRetired:      legacyLDAPRetired(),
 	}
 
 	snapshotAdminEndpoints(&s)

@@ -20,6 +20,7 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -118,15 +119,53 @@ type jwkKeyRaw struct {
 }
 
 // jwksCache caches the public keys fetched from the IdP's JWKs endpoint.
+//
+// Two of its fields exist only to bound failure (CHAOS-49):
+//
+//   - lastAttempt bounds the refresh RATE, not its freshness. The `kid` that
+//     drives a cache miss is read from an UNVERIFIED token header, so it is
+//     attacker-controlled and reachable without any credential. Keying the
+//     refetch decision on cache membership alone turned one unauthenticated
+//     request into one outbound JWKS GET, per configured provider, forever —
+//     an amplifier pointed at the customer's own IdP. lastAttempt advances on
+//     every attempt (success or failure) so an unknown kid costs at most one
+//     fetch per jwksMinRefreshInterval.
+//
+//   - refreshing/refreshDone coalesce concurrent misses. Without them a burst
+//     of N simultaneous requests carrying the same unknown kid produced N
+//     simultaneous fetches, which is precisely the shape of a reconnect storm.
 type jwksCache struct {
-	mu        sync.RWMutex
-	keys      map[string]interface{} // kid → *rsa.PublicKey or *ecdsa.PublicKey
-	fetchedAt time.Time
-	jwksURI   string
-	client    *http.Client
+	mu          sync.RWMutex
+	keys        map[string]interface{} // kid → *rsa.PublicKey or *ecdsa.PublicKey
+	fetchedAt   time.Time
+	lastAttempt time.Time
+	jwksURI     string
+	client      *http.Client
+
+	// single-flight state, guarded by mu
+	refreshing  bool
+	refreshDone chan struct{}
+	refreshErr  error
+
+	logAt time.Time // rate-limits the refresh-failure log line
 }
 
-const jwksCacheTTL = 15 * time.Minute
+const (
+	jwksCacheTTL = 15 * time.Minute
+
+	// jwksMinRefreshInterval is the floor between two refresh ATTEMPTS. It
+	// bounds both the amplification described above and the retry rate against
+	// a struggling IdP. It must stay well under jwksCacheTTL so a genuine key
+	// rotation is still picked up promptly.
+	jwksMinRefreshInterval = time.Minute
+
+	// jwksFetchTimeout bounds a single key-set fetch.
+	jwksFetchTimeout = 10 * time.Second
+)
+
+// errJWKSThrottled is returned when a refresh was suppressed by the negative
+// window. It is a deny for this lookup, never a statement about the IdP.
+var errJWKSThrottled = errors.New("jwks: refresh throttled (recent attempt)")
 
 // getKey returns the public key for kid, refreshing the cache when stale.
 func (j *jwksCache) getKey(kid string) (interface{}, error) {
@@ -139,8 +178,8 @@ func (j *jwksCache) getKey(kid string) (interface{}, error) {
 		return k, nil
 	}
 
-	// Re-fetch.
-	if err := j.refresh(); err != nil {
+	// Re-fetch, rate-limited and single-flighted.
+	if err := j.refreshOnce(); err != nil {
 		if ok {
 			return k, nil // return stale key rather than failing
 		}
@@ -156,12 +195,75 @@ func (j *jwksCache) getKey(kid string) (interface{}, error) {
 	return k, nil
 }
 
+// refreshOnce runs at most one refresh per jwksMinRefreshInterval and lets
+// concurrent callers share a single in-flight fetch.
+//
+// The leader publishes its error to followers rather than letting them return
+// success on an empty cache, so a failed refresh produces one diagnosable
+// reason for every caller instead of N "key not found"s.
+func (j *jwksCache) refreshOnce() error {
+	j.mu.Lock()
+	if j.refreshing {
+		done := j.refreshDone
+		j.mu.Unlock()
+		<-done
+		j.mu.RLock()
+		err := j.refreshErr
+		j.mu.RUnlock()
+		return err
+	}
+	if !j.lastAttempt.IsZero() && time.Since(j.lastAttempt) < jwksMinRefreshInterval {
+		j.mu.Unlock()
+		return errJWKSThrottled
+	}
+	j.refreshing = true
+	j.refreshDone = make(chan struct{})
+	j.lastAttempt = time.Now()
+	done := j.refreshDone
+	j.mu.Unlock()
+
+	err := j.refresh()
+
+	j.mu.Lock()
+	j.refreshing = false
+	j.refreshDone = nil
+	j.refreshErr = err
+	doLog := err != nil && (j.logAt.IsZero() || time.Since(j.logAt) >= jwksMinRefreshInterval)
+	if doLog {
+		j.logAt = time.Now()
+	}
+	j.mu.Unlock()
+	close(done)
+
+	if doLog && logger != nil {
+		// Serving the previously cached keys is the correct degradation here,
+		// but it is degradation: without a line, a JWKS endpoint that has been
+		// broken for hours is indistinguishable from a healthy one.
+		logger.Printf("OIDC: JWKS refresh FAILED for %q — serving previously cached keys: %v",
+			sanitizeLog(j.jwksURI), err)
+	}
+	return err
+}
+
 func (j *jwksCache) refresh() error {
-	resp, err := j.client.Get(j.jwksURI) //nolint:noctx
+	ctx, cancel := context.WithTimeout(context.Background(), jwksFetchTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, j.jwksURI, http.NoBody)
+	if err != nil {
+		return fmt.Errorf("jwks request: %w", err)
+	}
+	resp, err := j.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("jwks fetch: %w", err)
 	}
 	defer resp.Body.Close()
+
+	// A non-200 is not a key set. Decoding one anyway is how an HTTP 503 whose
+	// body happens to be JSON ("{"error":...}") became an empty key map that
+	// overwrote every good key in the cache.
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("jwks fetch: HTTP %d", resp.StatusCode)
+	}
 
 	var set jwkSet
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 256<<10)).Decode(&set); err != nil {
@@ -192,6 +294,16 @@ func (j *jwksCache) refresh() error {
 			E: int(eInt.Int64()),
 		}
 		keys[kh.Kid] = pub
+	}
+
+	// A response carrying no usable key is not evidence that the IdP has no
+	// keys — it is evidence that something is wrong with the response (an edge
+	// stub, a rate-limiter body, a rotation to key types this build cannot
+	// parse). Installing it destroys the cache AND the stale-key fallback that
+	// exists to survive exactly this, so every ID-token validation fails until
+	// a good refresh lands. Keep what we have and fail the lookup closed.
+	if len(keys) == 0 {
+		return fmt.Errorf("jwks fetch: response carried no usable keys (keeping cached key set)")
 	}
 
 	j.mu.Lock()
@@ -286,6 +398,72 @@ type OIDCFlowProvider struct {
 	disc    *oidcDiscoveryDoc
 	jwks    *jwksCache
 	client  *http.Client
+
+	// ── Introspection result cache + availability gate (CHAOS-49) ────────────
+	//
+	// The registry path authenticates on EVERY proxied request, and the
+	// dispatch loop in proxy.go asks every enabled provider in turn. Without a
+	// cache that is one RFC 7662 round trip per request per provider; without a
+	// gate, an IdP outage is one 10 s dial timeout per request per provider,
+	// serialized, while the request goroutine is held. The legacy single-provider
+	// backend (auth_oidc.go) has had both since CHAOS-47 — this is the same
+	// contract on the newer surface, reusing the same primitives.
+	mu    sync.Mutex
+	cache map[string]*oidcCacheEntry // key = cacheKey("", token)
+	ttl   time.Duration
+	gate  authProbeGate
+}
+
+// oidcFlowCacheTTL matches the legacy backend's default: short, because a token
+// can be revoked at the IdP at any moment and this cache is what delays the
+// proxy noticing.
+const oidcFlowCacheTTL = 2 * time.Minute
+
+func (p *OIDCFlowProvider) cacheTTL() time.Duration {
+	if p.ttl > 0 {
+		return p.ttl
+	}
+	return oidcFlowCacheTTL
+}
+
+// introspectCacheGet returns a cached verdict, if one is live.
+func (p *OIDCFlowProvider) introspectCacheGet(key string) (identity *Identity, ok, hit bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e, found := p.cache[key]; found && time.Now().Before(e.expiry) {
+		return cloneIdentity(e.identity), e.ok, true
+	}
+	return nil, false, false
+}
+
+// introspectCacheSet records an AUTHORITATIVE verdict. Infrastructure failures
+// never reach here — see ResolveIdentity.
+func (p *OIDCFlowProvider) introspectCacheSet(key string, identity *Identity, ok bool, tokenExp *int64) (*Identity, bool) {
+	if ok && (identity == nil || strings.TrimSpace(identity.Sub) == "") {
+		identity = nil
+		ok = false
+	}
+	now := time.Now()
+	ttl, stillValid := clampCacheTTLToTokenExpiry(p.cacheTTL(), tokenExp, now)
+	if ok && !stillValid {
+		identity = nil
+		ok = false
+	}
+	p.mu.Lock()
+	if p.cache == nil {
+		p.cache = map[string]*oidcCacheEntry{}
+	}
+	// Evict an arbitrary entry when full — the key space is token-derived and
+	// therefore caller-controlled, so the map must stay bounded.
+	if len(p.cache) >= maxAuthCacheSize {
+		for k := range p.cache {
+			delete(p.cache, k)
+			break
+		}
+	}
+	p.cache[key] = &oidcCacheEntry{ok: ok, identity: cloneIdentity(identity), expiry: now.Add(ttl)}
+	p.mu.Unlock()
+	return cloneIdentity(identity), ok
 }
 
 // NewOIDCFlowProvider validates the profile, runs OIDC discovery, and returns
@@ -321,6 +499,8 @@ func NewOIDCFlowProvider(p *IdPProfile) (*OIDCFlowProvider, error) {
 		cfg:     cfg,
 		disc:    disc,
 		client:  client,
+		cache:   map[string]*oidcCacheEntry{},
+		ttl:     oidcFlowCacheTTL,
 	}
 	if disc.JWKsURI != "" {
 		prov.jwks = &jwksCache{jwksURI: disc.JWKsURI, client: client, keys: make(map[string]interface{})}
@@ -368,7 +548,58 @@ func (p *OIDCFlowProvider) ResolveIdentity(username, token string) (*Identity, b
 	if p.disc.IntrospectionEndpoint == "" {
 		return nil, false
 	}
-	return p.introspect(username, token)
+	return p.resolveByIntrospection(token)
+}
+
+// resolveByIntrospection is the cached, gated, observable introspection path
+// (CHAOS-49). It mirrors OIDCAuth.ResolveIdentity exactly, including the rule
+// that makes the whole thing safe: only an AUTHORITATIVE answer from a reachable
+// endpoint is cacheable. A failure to REACH the IdP denies this request and is
+// then forgotten, so a one-second IdP blip cannot keep denying valid tokens for
+// the full cache TTL after the IdP is healthy again.
+func (p *OIDCFlowProvider) resolveByIntrospection(token string) (*Identity, bool) {
+	backend := p.Name()
+
+	// A bearer token has one canonical identity regardless of which Basic
+	// username accompanies it, so cache by token only. cacheKey HMACs the input,
+	// so no bearer token is held in the map.
+	k := cacheKey("", token)
+	if id, ok, hit := p.introspectCacheGet(k); hit {
+		return id, ok
+	}
+
+	if !p.gate.allow() {
+		// The IdP is in its unreachable cooldown — deny without another round
+		// trip. This is what collapses "N providers × 10 s dial timeout on
+		// every request" back to a constant during an outage.
+		noteAuthBackendGatedDenial()
+		return nil, false
+	}
+
+	id, ok, exp, err := p.introspect(token)
+	if err != nil {
+		if errors.Is(err, errIntrospectClient) {
+			// A 4xx is a client/token-side rejection, not an outage. It must not
+			// arm the provider-wide gate — otherwise one caller with a malformed
+			// token locks out every other user. And because the endpoint
+			// demonstrably answered, it must CLEAR a cooldown a previous outage
+			// armed, rather than silently eating each half-open probe.
+			p.gate.recordReachable()
+			noteAuthBackendReachable(backend)
+			logger.Printf("OIDC[%s] auth DENY (introspection 4xx) — client/token error, not a backend outage; "+
+				"the endpoint answered, so any cooldown is cleared", sanitizeLog(p.profile.ID))
+			return nil, false
+		}
+		p.gate.recordUnavailable()
+		noteAuthBackendUnavailable(backend, err.Error())
+		logger.Printf("OIDC[%s] auth UNAVAILABLE (introspection endpoint unreachable) — failing closed, not cached",
+			sanitizeLog(p.profile.ID))
+		return nil, false
+	}
+	p.gate.recordReachable()
+	noteAuthBackendReachable(backend)
+
+	return p.introspectCacheSet(k, id, ok, exp)
 }
 
 // CaptiveLoginURL builds an OIDC authorization URL with PKCE + state + nonce,
@@ -614,60 +845,83 @@ func (p *OIDCFlowProvider) enrichFromUserinfo(id *Identity, accessToken string) 
 // RFC 7662 introspection (non-browser path)
 // ---------------------------------------------------------------------------
 
-func (p *OIDCFlowProvider) introspect(_ string, token string) (*Identity, bool) {
+// introspect returns the canonical token identity and its declared Unix expiry.
+//
+// The returned error is reserved for INFRASTRUCTURE failure — the endpoint could
+// not be reached, or did not answer coherently. `(nil, false, nil, nil)` means
+// the endpoint answered and the answer was "this token is not valid". Only the
+// latter is cacheable; see resolveByIntrospection.
+//
+// RFC 7662 is what makes the split clean: an inactive token is reported as HTTP
+// 200 with `active:false`, so ANY non-200 is a problem with the endpoint or our
+// client credentials — never a verdict about the caller's token.
+func (p *OIDCFlowProvider) introspect(token string) (identity *Identity, active bool, tokenExp *int64, err error) {
 	form := url.Values{
 		"token":           {token},
 		"token_type_hint": {"access_token"},
 	}
 	intrCtx, intrCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer intrCancel()
-	req, err := http.NewRequestWithContext(intrCtx,
+	req, reqErr := http.NewRequestWithContext(intrCtx,
 		http.MethodPost, p.disc.IntrospectionEndpoint, strings.NewReader(form.Encode()))
-	if err != nil {
-		return nil, false
+	if reqErr != nil {
+		return nil, false, nil, fmt.Errorf("build request: %w", reqErr)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.SetBasicAuth(p.cfg.ClientID, p.cfg.ClientSecret)
 
-	resp, err := p.client.Do(req)
-	if err != nil {
-		return nil, false
+	resp, doErr := p.client.Do(req)
+	if doErr != nil {
+		return nil, false, nil, fmt.Errorf("introspection request: %w", doErr)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, false
+		if isIntrospectClientError(resp.StatusCode) {
+			return nil, false, nil, fmt.Errorf("%w: HTTP %d", errIntrospectClient, resp.StatusCode)
+		}
+		// A 401 is a provider-wide client-credential fault, not a token verdict —
+		// it arms the gate and is reported as an outage. See isIntrospectClientError.
+		if resp.StatusCode == http.StatusUnauthorized {
+			return nil, false, nil, fmt.Errorf("%w", errIntrospectClientAuth)
+		}
+		return nil, false, nil, fmt.Errorf("introspection endpoint returned HTTP %d", resp.StatusCode)
 	}
 
 	var claims map[string]interface{}
-	if err := decodeStrictJSON(resp.Body, 64<<10, &claims, true); err != nil {
-		return nil, false
+	if decErr := decodeStrictJSON(resp.Body, 64<<10, &claims, true); decErr != nil {
+		return nil, false, nil, fmt.Errorf("introspection response: %w", decErr)
 	}
-	return p.identityFromIntrospectionClaims(claims)
+	// From here on the endpoint has answered coherently: every remaining branch
+	// is an authoritative verdict about the token, and therefore cacheable.
+	id, exp, ok := p.identityFromIntrospectionClaims(claims)
+	return id, ok, exp, nil
 }
 
-func (p *OIDCFlowProvider) identityFromIntrospectionClaims(claims map[string]interface{}) (*Identity, bool) {
+func (p *OIDCFlowProvider) identityFromIntrospectionClaims(claims map[string]interface{}) (*Identity, *int64, bool) {
 	active, _ := claims["active"].(bool)
 	if !active {
-		return nil, false
+		return nil, nil, false
 	}
+	var tokenExp *int64
 	if rawExp, present := claims["exp"]; present {
 		expNumber, numeric := rawExp.(json.Number)
 		if !numeric {
-			return nil, false
+			return nil, nil, false
 		}
 		exp, valid := parseDeclaredExpiry(json.RawMessage(expNumber.String()))
 		if !valid || exp == nil || *exp <= time.Now().Unix() {
-			return nil, false
+			return nil, nil, false
 		}
+		tokenExp = exp
 	}
 	scope, _ := claims["scope"].(string)
 	if p.cfg.RequiredScope != "" {
 		if !strings.Contains(" "+scope+" ", " "+p.cfg.RequiredScope+" ") {
-			return nil, false
+			return nil, nil, false
 		}
 	}
 	if p.cfg.RequiredAudience != "" && !audienceContains(claims["aud"], p.cfg.RequiredAudience) {
-		return nil, false
+		return nil, nil, false
 	}
 
 	sub, _ := claims["sub"].(string)
@@ -675,7 +929,7 @@ func (p *OIDCFlowProvider) identityFromIntrospectionClaims(claims map[string]int
 		sub, _ = claims["username"].(string)
 	}
 	if strings.TrimSpace(sub) == "" {
-		return nil, false
+		return nil, nil, false
 	}
 	email, _ := claims["email"].(string)
 	name, _ := claims["name"].(string)
@@ -691,7 +945,7 @@ func (p *OIDCFlowProvider) identityFromIntrospectionClaims(claims map[string]int
 		Groups:   extractStringSliceClaim(claims, groupsClaim),
 		Provider: p.profile.ID,
 	}
-	return id, true
+	return id, tokenExp, true
 }
 
 // ---------------------------------------------------------------------------

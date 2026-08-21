@@ -20,6 +20,14 @@ dependencies, security requirements, tests, acceptance criteria, rollback, owner
 > evaluated **per request / per H2 stream after header parsing** — never once per connection, since
 > `Host`/`Origin` do not exist at socket accept — **E2E** rebinding proof **over a reused connection**) is **PR-5** for Model A / the Future DMZ gate for Model C. PR-1 binds
 > no listener.
+>
+> **Terminology note (2026-08-19):** "no PR-12" above is scoped to *this package's* PR-0…PR-11 slice
+> sequence — it means the source DOCX's distinct connectivity slice was folded (D-12) rather than
+> reinstated as its own numbered slice. It does **not** describe the unrelated, already-shipped fix that
+> root `CLAUDE.md` and [`docs/operator/mcp-rollout-durable-state.md`](../../operator/mcp-rollout-durable-state.md)
+> separately label "PR-12" (production DP-applier composition + rollout/distribution transaction,
+> `mcp_distribution_startup.go`) — that label was assigned later, outside this package's numbering, and
+> is not a slice in the sequence below.
 
 Delivery rule (BLUEPRINT §23): every slice needs a defined trust boundary, acceptance criteria, tests and
 rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted ADR under `docs/adr/`**
@@ -179,10 +187,43 @@ rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted AD
 - **Acceptance:** RBAC + OpenAPI + GUI parity; approval dialog complete; no mutation reachable.
 - **Rollback:** routes gated/removed; GUI panel hidden.
 - **Owner:** Eng. **Reviewer:** API governance. **Release gate:** OpenAPI + governance gates green.
+- **Implementation status (code PR):** IMPLEMENTED. Domain layer under `internal/mcp/adminapi` (inventory, decision search + historical explanation, policy validate/simulate/compare on the shared PR-6 engine, local publication workflow, health, config), `internal/mcp/approval` (four-eyes + TOCTOU state machine, commit-before-state-change, unforgeable receipt) and `internal/mcp/management` (fixed 14-tool read-only + draft/validate/simulate catalog with per-tool RBAC, independent `tools/call` re-authorization, tenant scoping, bounded/redacted output — no mutation tool). Admin HTTP surface is 14 thin `/api/mcp/*` handlers in `ui_mcp.go` with full `uiRoutes`/route-classification/OpenAPI parity (C1/C1.5/D0/route-coverage/Gate1-3 green, both route count-locks at 207), plus eight MCP SPA views in `static/index.html` (`textContent`-safe, loading/empty/error/permission states; the approval dialog shows the MCP-POLICY-007 fields and requires an explicit destructive/production confirmation; historical explanation is visibly distinct from candidate simulation). Decision-only: local policy publication reports `distribution_state: local_only`/`distribution_not_implemented`; an ALLOW-class decision still returns `execution_state: not_implemented`; durable approval/publication commit is gated on the PR-8 event manager (fail-closed while dormant). NO upstream MCP call, NO credential materialization, NO broker/provider contact, NO signed CP→DP publication, NO rollback/fencing, NO Shadow/Canary — those remain PR-10/PR-11. Node-local MCP listener config lives in a dedicated store (separate Gateway/Management, disabled defaults, no wildcard bind, no shared port, Management mutation off in V1); its export/import + restart-durability + rollback surface is a recorded follow-up. Covered by RBAC/method/tenant/no-execution HTTP tests plus domain unit/anti-weakening/property/fuzz/race suites.
 
 ## PR-10 — CP/DP & HA
 - **Objective:** immutable signed snapshots (epoch + revisions + min_dp_version + content_hash + signature),
   fencing, acknowledgements, rollback; **connector snapshot semantics**.
+- **Implementation status (code PR):** IMPLEMENTED under `internal/mcp/cpdp` (+ sub-packages `apply`, `publication`)
+  implementing `MCP-CPDP-001..003`, `MCP-HA-001,002` and the real configuration-publication leg of
+  `MCP-EVENT-002`. **D-10 CLOSED** (Ed25519; reuse of the release-catalog envelope pattern +
+  `internal/mcp/canonical` + SHA-256; domain separation `culvert-mcp-snapshot-v1 || 0x00 || content_hash`;
+  bounded overlapping trust roots; a snapshot never self-authorizes a carried key; scoped `Signer` with no
+  raw-key getter; private key never distributed to a DP; Sigstore keyless NOT used). The core kernel is a
+  leaf: an immutable **signed envelope** (schema/capability/epoch/independent config·policy·catalog·credential
+  revisions/min_dp_version/content_hash/ed25519 signature) over capability-isolated Gateway/Management
+  payloads (map-free, no secret-bearing field); a fail-closed `TrustStore`; a strict monotonic
+  `CompatVersion` minimum-version gate; the `CheckEpoch` (non-mutating) / `CommitObservedEpoch` (ratchet)
+  split; a **whole-snapshot validator** (verify → capability → isolation → epoch → revisions → min-version →
+  bounds → consistency; no partial apply); a hash-bound acknowledgement; and a signed hash-bound rollback
+  directive. `cpdp/apply` is the DP engine — off-path prepare with the EXACT PR-6 compiler + dry samples,
+  **persist-before-swap** (`fileutil.AtomicWrite`), atomic activation, current+previous retention, and
+  integrity-checked restart recovery that fails closed on corrupt metadata. `cpdp/publication` is the CP
+  coordinator — reuse of the PR-9 four-eyes approval + exact candidate binding, the `globalHA` write-authority
+  gate, and the PR-8 `CommitThenAct` so **sign/install/push/swap run only after a confirmed P-CRIT commit**;
+  truthful distribution states derived from acknowledgements; a bounded ack tracker keyed by
+  node×capability×content-hash. Wired into the existing SWG `ConfigSnapshot` channel as two OPTIONAL signed
+  `*cpdp.Envelope` fields (presence semantics; **absence never wipes DP-local MCP state**; MCP disabled ⇒
+  byte-identical SWG snapshot ⇒ no request-path work), applied AFTER and isolated from the SWG apply. Admin
+  surface adds `GET /api/mcp/distribution` (viewer, safe fields only) + `POST /api/mcp/rollback` (admin,
+  four-eyes) with full `uiRoutes`/route-classification/OpenAPI/GUI parity (route count-locks 207→**209**);
+  config anti-drift registers the two envelope fields (RC-5 snapshot-meta, `kindMeta`+`AppliesOnDP`, not
+  sensitive). Still DECISION-ONLY: NO upstream MCP call, NO credential materialization, NO Management
+  mutation, NO Shadow/Canary — an ALLOW-class decision still returns `execution_state: not_implemented`. The
+  BLOCKING PR-8 durability re-run is proven against the REAL `events.Manager` (forward: admission rejection
+  AND post-admission spool-commit failure → nothing signed/installed/pushed; rollback: post-admission commit
+  failure → **no swap, current snapshot retained**). Covered by signing/canonical/whole-validation/epoch/
+  compat/DP-apply/ack/forward-publication/rollback/mixed-version/failover/config-parity/no-execution tests,
+  anti-weakening + property tests, fuzz targets (envelope/rollback/ack/recover) and benchmarks (race+shuffle
+  green). PR-11 (Shadow/Canary), connector/DMZ and upstream execution remain out of scope.
 - **Scope:** MCP snapshot fields extending the CP/DP machinery; reuse `halease`/`dpObserveEpoch`/`configver`.
 - **Non-goals:** DP depending on CP per call.
 - **Trust boundary:** TB-3.
@@ -206,6 +247,28 @@ rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted AD
 - **Acceptance:** production-readiness evidence complete; hard failures blocked even in Shadow.
 - **Rollback:** emergency disable → Observe/Disabled; snapshot rollback.
 - **Owner:** SRE/Sec. **Reviewer:** Ops Readiness. **Release gate:** rollout guardrails green.
+- **Implementation status (code PR):** IMPLEMENTED, disabled by default. Engines: `internal/mcp/rollout`
+  (capability-local mode ladder + one-stage-promote/multi-stage-demote transitions, immutable deterministic
+  revisioned scope with stable keyed-hash percentage bucketing + exclusions-only-narrow + high-risk gate,
+  one central hard-failure classifier over every `mcperr` reason with a completeness+disjointness parity
+  test, `ProductionQualificationVerifier` fail-closed lockout with **no in-binary issuer**, kill switch,
+  evidence windows with an injected clock, `local-client`-only connector validation); `internal/mcp/upstreamclient`
+  (bounded Streamable-HTTP client reusing the PR-1 kernel + PR-7 destination pinning/redirect controls,
+  registered-endpoint-only, pinned TLS identity, **no client-token passthrough**, at-most-once writes);
+  `internal/mcp/execution` + a `runtime.ExecutionProvider` seam (mode-aware execution, PR-8
+  commit-before-materialization/upstream, scoped broker callback + zeroization, response DLP, bounded
+  allowances, real `tools/list` discovery → PR-2 catalog ingestion; a nil provider preserves the
+  decision-only path byte-identically). `package main` composition: signed rollout config rides the PR-10
+  CP→DP payload; isolated Gateway/Management state; emergency kill switch (narrows only); bounded
+  metrics; safe status. Admin surface: 8 `/api/mcp/rollout*` + executions/upstream-health routes with full
+  `uiRoutes`/route-classification/OpenAPI parity (count-locks 207→**217**) and an MCP Rollout & Execution
+  SPA panel (safe rendering; explicit "Production locked — qualification required"; no generic
+  Production-enable control). **Observe stays non-executing; Shadow/Canary execute only inside an exact
+  approved scope for Model A; Production stays qualification-locked** (no config/env/CLI/API bypass; test
+  verifier only via injection; synthetic clock windows labeled test evidence). NO Model-B connector, NO
+  Model-C DMZ, NO endpoint bridge, NO transparent discovery, NO Management mutation. Production
+  Qualification remains the separate gate; **there is no PR-12** in this package's slice sequence (see the
+  terminology note above — not to be confused with the unrelated fix CLAUDE.md separately labels "PR-12").
 
 ## PR-C (post-V1) — Outbound Connector (Model B) *(D-8 — not in V1; own design gate)*
 - **Objective:** the outbound-only connector for approved cloud-AI vendors — **only** after a named vendor

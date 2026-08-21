@@ -7,7 +7,7 @@ package main
 // The tests are grouped by defect they cover:
 //
 //   1. sanitizeLog control-byte strip         (proxy.go)
-//   2. privateCIDRs coverage expansion        (proxy.go)
+//   2. privateRanges coverage expansion       (internal/ssrf)
 //   3. SSRF ssrfControl Dialer.Control hook   (security.go)
 //   4. Config.TOTPLastCounter persistence     (store.go)
 //
@@ -67,7 +67,7 @@ func TestSanitizeLog_FastPathNoAlloc(t *testing.T) {
 	}
 }
 
-// ─── 6. privateCIDRs coverage expansion ─────────────────────────────────────
+// ─── 6. privateRanges coverage expansion ────────────────────────────────────
 
 func TestIsPrivateIP_ExpandedCoverage(t *testing.T) {
 	// Every entry below is explicitly required to be private after the
@@ -215,7 +215,7 @@ var _ syscall.RawConn = dummyRawConn{}
 // regression in the HTTP transport path.
 func TestSSRFSafeDialer_RejectsLoopbackDial(t *testing.T) {
 	// Start a tiny listener on loopback. Even though the port is open, the
-	// dialer must refuse because loopback is blacklisted.
+	// dialer must refuse because loopback is a blocked private address.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Skipf("cannot bind loopback listener: %v", err)

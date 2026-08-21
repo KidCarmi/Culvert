@@ -33,6 +33,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/audit"
 	"github.com/KidCarmi/Culvert/internal/fileutil"
 )
 
@@ -114,6 +115,24 @@ var storageEverFailed atomic.Bool
 func init() {
 	fileutil.SetWriteFailureObserver(noteStorageWriteFailure)
 	fileutil.SetWriteSuccessObserver(noteStorageWriteSuccess)
+	// The audit JSONL log does NOT go through fileutil.AtomicWrite — it is an
+	// append-only fileutil.RotatingFile — so the chokepoint observer above
+	// never saw it, and internal/audit discarded its write error outright.
+	// That made a failing volume able to silently destroy the durable
+	// "who changed what" record while the admin UI kept rendering entries
+	// from the volatile in-memory ring (register item ST-8). Route it into
+	// the SAME storage-health plane: counter, degraded operator-contract row,
+	// Prometheus series, and the rate-limited storage_write_failed alert.
+	//
+	// Safe against the recursion documented on internal/audit's observer
+	// contract: noteStorageWriteFailure writes no audit entry, and the alert
+	// it dispatches is audit-free (internal/alerts never calls audit.Add).
+	audit.SetWriteFailureObserver(noteStorageWriteFailure)
+	// The success half is not optional: storageDegraded() clears only on an
+	// OBSERVED successful write ("silence is not recovery"). Wiring the failure
+	// producer alone would pin a node degraded forever after one transient
+	// blip, on any node whose only durable writes are audit entries.
+	audit.SetWriteSuccessObserver(noteStorageWriteSuccess)
 }
 
 // noteStorageWriteFailure is the fileutil observer. It runs synchronously on

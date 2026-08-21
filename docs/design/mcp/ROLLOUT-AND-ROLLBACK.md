@@ -12,10 +12,18 @@ Culvert Management MCP Server and the MCP Security Gateway — keep **separate**
 kill switches, and separate quarantine/rollback state; nothing below merges their enforcement engines or
 trust boundaries.
 
-**Status: PR-0 design artifact (Proposed).** Nothing described here is implemented. No listener, mode
-switch, rollback mechanism, or runbook below exists in the repository today. Duration figures (shadow
-≥14 days, canary ≥7 days, soak ≥24 hours) and the rollback-time figure are **design targets**, never
-measured results, until a PR-11 / Production Qualification evidence pack says otherwise. Claim legend:
+**Status: PR-11 IMPLEMENTED (guarded execution / Shadow / Canary), disabled by default.** The mode ladder
+(Disabled → Observe → Shadow → Canary → Production), the capability-local rollout state + kill switch, the
+central hard-failure classifier, the immutable revisioned scope, the bounded Model-A upstream client, the
+guarded execution pipeline (commit-before-side-effect, DLP-before-egress, credential containment), and the
+signed CP→DP rollout distribution now exist in `internal/mcp/rollout`, `internal/mcp/upstreamclient`,
+`internal/mcp/execution`, and the `package main` composition (all disabled by default; the SWG request path
+is unaffected when off). **Observe remains non-executing; Shadow and Canary execute only inside an exact
+approved scope for Model A (local-client); Production remains qualification-locked** and is unreachable
+without a machine-verifiable receipt from the separate Production Qualification gate (this build ships no
+issuer). Duration figures (shadow ≥14 days, canary ≥7 days, soak ≥24 hours) and the rollback-time figure
+are **measurable targets with live machinery, NOT completed rollout evidence** — the Production
+Qualification evidence pack, not this PR, supplies real evidence. Claim legend:
 **[FACT]** (verified by repository read, traced to [VERIFIED-REPOSITORY-CONTEXT.md](VERIFIED-REPOSITORY-CONTEXT.md)),
 **[INFER]** (architectural inference), **[REC]** (recommendation), **[EXT]** (externally unverified).
 
@@ -244,9 +252,12 @@ Per the shared PR-0 editorial correction (see [BLUEPRINT.md](BLUEPRINT.md) §23 
 [IMPLEMENTATION-SLICES.md](IMPLEMENTATION-SLICES.md)): the rollout modes defined in this document map onto
 **PR-11 — Shadow / Canary** (modes, scope controls, dashboards, and rollout guardrails), which is followed
 by a **separate Production Qualification gate** (full evidence pack per §6 + Joint Go/No-Go Board
-sign-off). There is **no PR-12**. The source DOCX's separate connectivity slice is folded across PR-5
-(runtime/listener) and PR-10 (CP/DP); any reinstatement of a distinct connectivity or PR-12 slice is a
-tracked open decision in [OPEN-DECISIONS.md](OPEN-DECISIONS.md), not part of this rollout model.
+sign-off). There is **no PR-12** in this package's slice sequence. The source DOCX's separate connectivity
+slice is folded across PR-5 (runtime/listener) and PR-10 (CP/DP); any reinstatement of a distinct
+connectivity or PR-12 slice is a tracked open decision in [OPEN-DECISIONS.md](OPEN-DECISIONS.md), not part
+of this rollout model. (This is unrelated to the later, already-shipped fix that root `CLAUDE.md` and
+[`docs/operator/mcp-rollout-durable-state.md`](../../operator/mcp-rollout-durable-state.md) separately
+label "PR-12" — see [IMPLEMENTATION-SLICES.md](IMPLEMENTATION-SLICES.md) for the disambiguation.)
 
 Sequence, for reference: PR-0 (this design baseline) → PR-1 Protocol kernel → PR-2 Registry & catalog →
 PR-3 Identity principal → PR-4 Credential broker → PR-5 Observe runtime → PR-6 Policy engine →

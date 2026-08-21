@@ -42,7 +42,7 @@ pointer, publisher, or credential.
 | Item | Decision |
 |---|---|
 | Public origin | `https://feeds.culvertlabs.com` |
-| R2 bucket | dedicated `culvert-feeds` |
+| R2 bucket | dedicated `culvert-feeds-prod` (F6 reconciliation; `FEEDS_R2_BUCKET` must equal it) |
 | Path prefix | `/v1/url-categories/saas/` |
 | Feed protocol | **`signed_manifest_v1` only** (no unsigned mode, ever) |
 | SaaS signed feed | **on by default** (§3) |
@@ -554,6 +554,19 @@ signed tag context, `harden-runner egress: block` (allow `feeds.culvertlabs.com`
 > boundary is unchanged. Job B additionally requires `startsWith(github.ref,
 > 'refs/tags/feeds-v')` so a dry-run `workflow_dispatch` (which produces no signed
 > envelope) can never publish. Pinned by `feeds_publish_workflow_test.go`.
+>
+> **Amendment (F6 readiness):** the master gate `vars.FEEDS_PUBLISH_ENABLED == 'true'`
+> now dominates **BOTH** signing (Job A) and publication (Job B): every Job A signing
+> step carries the same gate, so a `feeds-v*` tag push while the gate is disabled signs
+> AND publishes nothing (no OIDC identity is even minted). Before any `cosign` call the
+> run also proves it is executing at the operator-pinned `vars.FEEDS_SIGNING_TAG` (exact
+> `feeds-vX.Y.Z`) resolving to `vars.FEEDS_SIGNING_TAG_SHA` (exact 40-hex commit) — the
+> immutable signing-ref pin, re-asserted on the Job B path. Job B binds the protected
+> `feeds-production` environment (required-reviewer approval). Weekly freshness renewal is
+> `resign-feeds.yml` (contents:read + actions:write only — no id-token/R2/CF/environment),
+> which merely dispatches `publish-feeds.yml` at the pinned tag and stays approval-gated.
+> All pinned by `feeds_publish_workflow_test.go` (`TestFeedsWorkflowInvariants`,
+> `TestResignFeedsWorkflowInvariants`). See `docs/operator/feeds-hosting-r2-activation.md`.
 
 ### 11.2 Publish sequence (fail-closed; no public staging prefix)
 
@@ -861,7 +874,7 @@ F0 starts until F0 is approved; each later gate is its own review.
 | **F3b** | client downloader: manifest-envelope-first, verify-before-parse, size/path/digest/sig, off-path build, **immutable-generation atomic activation** (§8), **record-driven crash recovery** (§9), freshness/replay (§10) | F2, F3a | activation transaction + recovery |
 | **F4** | URL migration (both) + enablement sentinel + protocol field + durable disable | F3b | migration matrix + sentinel |
 | **F5** | CI publisher (`publish-feeds.yml`, dormant): two-job privilege split + §11.2 sequence + CAS fencing; workflow-invariant tests | F1, F2 | privilege boundary + CAS |
-| **F6** | IaC (`cloudflare_r2_bucket "culvert-feeds"`) + `docs/operator/feeds-hosting-r2-activation.md` (DNS/domain/cache/purge/enable) | F5 | owner-applied activation |
+| **F6** | IaC (`cloudflare_r2_bucket "culvert-feeds-prod"`) + `docs/operator/feeds-hosting-r2-activation.md` (DNS/domain/cache/purge/enable; **created** — F6 readiness PR) + `resign-feeds.yml` weekly renewal | F5 | owner-applied activation |
 | **F7** | GUI/status: §14 state machine + fields + protocol; export/import/rollback/OpenAPI/CP-DP wiring for the protocol field | F3b, F4 | telemetry + parity |
 
 Suggested first PR after F0 approval: **F1 + F2** (generator + trust kernel; no

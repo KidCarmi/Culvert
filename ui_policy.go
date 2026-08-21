@@ -1994,6 +1994,11 @@ type policyTestTrace struct {
 func walkPolicyTestRules(rules []PolicyRule, sourceIP, identity, authSource, host string, groups []string) ([]policyTestTrace, *PolicyRule) {
 	var trace []policyTestTrace
 	var matched *PolicyRule
+	// Mirror Evaluate's per-scan hoists so the simulator resolves the
+	// destination's category exactly once, the same way the engine it is
+	// simulating does (policy_hostcat.go).
+	normHost := normalizeHost(host)
+	catScratch := newHostCatScratch(host)
 	for i := range rules {
 		r2 := rules[i] // copy (index-based range: PolicyRule is a large struct)
 		skip := ""
@@ -2004,7 +2009,7 @@ func walkPolicyTestRules(rules []PolicyRule, sourceIP, identity, authSource, hos
 			skip = "source mismatch"
 		case !matchSchedule(r2.Schedule):
 			skip = "schedule inactive"
-		case !matchDest(&r2, host):
+		case !matchDestNorm(&r2, host, normHost, &catScratch):
 			skip = "destination mismatch"
 		}
 		trace = append(trace, policyTestTrace{Priority: r2.Priority, Name: r2.Name, SkipReason: skip})
@@ -2273,7 +2278,7 @@ func registerPolicyRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/category-groups", apiCategoryGroups)                             // GET/POST/PUT/DELETE category groups
 	mux.HandleFunc("/api/decryption-profiles", apiDecryptionProfiles)                     // GET/POST/PUT/DELETE decryption profiles
 	mux.HandleFunc("/api/decryption/health", apiDecryptionHealth)                         // GET ADR-0011 coverage + failure aggregate (viewer, read-only)
-	mux.HandleFunc("/api/decryption/redaction", apiDecryptionRedaction)                   // GET viewer / PUT admin — ADR-0011 §4 host/SNI redaction toggle
+	mux.HandleFunc("/api/decryption/redaction", apiDecryptionRedaction)                   // GET viewer / PUT admin — ADR-0011 §4 traffic-log destination-privacy posture (host/URI/dec.*/top_hosts)
 	mux.HandleFunc("/api/decryption-exclusions", apiDecryptionExclusions)                 // GET list learned exclusions / DELETE evict one (?host=) or clear all
 	mux.HandleFunc("/api/decryption-exclusions/tunables", apiDecryptionExclusionTunables) // GET defaults+bounds / PUT admin runtime tunables (F10)
 	mux.HandleFunc("/api/urlcat", apiURLCat)                                              // GET/POST/PUT/DELETE categories
