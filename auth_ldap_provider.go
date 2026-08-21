@@ -22,7 +22,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/audit"
 )
 
 // LDAPProfileConfig holds LDAP/AD-specific settings for an IdP profile.
@@ -285,49 +288,88 @@ func validateLDAPAttrName(attr string) error {
 	return nil
 }
 
-// ─── Legacy YAML authority shadowing (ADR-0025) ─────────────────────────────
+// ─── Legacy YAML authority shadowing + durable cutover (ADR-0025 / P1-2) ─────
+//
+// AUTHORITY MODEL: there is exactly ONE operational LDAP authenticator.
+// Until cutover, the legacy YAML block is the bootstrap authenticator. The
+// moment an enabled registry LDAP profile is observed while a legacy YAML
+// block exists, the node CUTS OVER: the legacy provider is deactivated and
+// the durable, node-local `legacy_ldap_retired` sentinel is recorded in
+// admin_settings.json (the AdminDurable sentinel pattern —
+// BlocklistFeedsSaved et al.). After cutover the YAML block is bootstrap/
+// import SOURCE MATERIAL only — never an operational authenticator again,
+// across registry disable/delete, process restarts, and CP/DP restarts.
+// Authority is deliberately NOT keyed on HasEnabledLDAP() alone: enable/
+// disable is runtime state, not source-of-truth ownership.
+//
+// Break-glass revert (explicit, offline, documented in
+// docs/operator/ldap-identity-provider.md): stop the node, remove
+// `legacy_ldap_retired` from admin_settings.json, remove/disable the
+// registry LDAP profile, restart. There is intentionally no API for it.
 
-// legacyLDAPShadowWarnOnce dedupes the runtime shadow warning: one clear line,
-// no per-sync log spam (ReplaceAll runs on every CP→DP config poll).
+// legacyLDAPRetiredFlag is the in-memory view of the durable sentinel.
+var legacyLDAPRetiredFlag atomic.Bool
+
+// legacyLDAPShadowWarnOnce dedupes the cutover warning: one clear line, no
+// per-sync log spam (ReplaceAll runs on every CP→DP config poll).
 var legacyLDAPShadowWarnOnce sync.Once
 
-// canShadowLegacyLDAP reports whether deactivating the legacy YAML LDAP
-// provider is safe: cfg.IsConfigured() must remain true afterwards, because
-// the admin-UI middleware fails OPEN (grants RoleAdmin to everyone) while
-// setup is "incomplete". With a local admin account or the deliberate open
-// default, the gate stays anchored without the legacy provider.
-func canShadowLegacyLDAP() bool {
-	return cfg.GetUser() != "" || cfg.DefaultAuthOutcome() == OutcomeExempt
+// legacyLDAPRetired reports whether this node has durably cut over from the
+// legacy YAML LDAP block to the IdP registry. Also consulted by
+// cfg.IsConfigured(): a deployment whose only setup anchor was the YAML
+// provider stays "configured" across the cutover and every later restart, so
+// deactivating the proxy backend can never fail the admin-UI setup gate open.
+func legacyLDAPRetired() bool { return legacyLDAPRetiredFlag.Load() }
+
+// markLegacyLDAPRetired records the cutover: in-memory immediately, durable
+// via the admin-settings snapshot (best-effort, like every admin mutation;
+// re-recorded by any later save and re-observed from the registry at next
+// boot, so a lost write cannot resurrect the legacy authenticator while the
+// registry profile exists). Idempotent; audited once.
+func markLegacyLDAPRetired(reason string) {
+	if legacyLDAPRetiredFlag.Swap(true) {
+		return
+	}
+	audit.Add(audit.Entry{
+		TS:     time.Now().UnixMilli(),
+		Time:   time.Now().Format("2006-01-02 15:04:05"),
+		Actor:  "system",
+		Action: "idp.legacy_ldap.retired",
+		Object: "legacy-ldap",
+		Detail: "legacy YAML ldap block permanently retired as an operational authenticator (" + reason + "); registry is the sole LDAP authority",
+	})
+	// Synchronous persist: cutover is a once-ever authority transition, so the
+	// one bounded disk write on this path is worth durable-before-return
+	// semantics (error is logged inside SaveAdminSettings; a lost write is
+	// re-recorded by any later save and re-observed from the registry at boot).
+	_ = SaveAdminSettings()
 }
 
-// enforceLegacyLDAPShadowing deactivates the legacy YAML LDAP provider the
-// moment an enabled registry LDAP profile exists, so migration to the IdP
-// registry needs no restart and exactly one LDAP authority is ever active.
-// Called after every registry write ingress that can enable an LDAP profile
-// (admin API create/update, CP→DP snapshot sync). Deleting/disabling the
-// registry profile later does NOT silently re-arm the YAML provider — a
-// restart restores the YAML bootstrap behavior (no hidden rollback magic).
+// enforceLegacyLDAPShadowing enforces the single-authority rule at every
+// registry write ingress that can enable an LDAP profile (admin API create/
+// update, CP→DP snapshot sync) and after the durable sentinel loads at boot.
+// Unconditional: cfg.IsConfigured() counts the retirement sentinel, so
+// deactivating the legacy provider can never reopen first-time setup — there
+// is no "keep two authenticators" fallback under any deployment shape.
 func enforceLegacyLDAPShadowing() {
-	if idpRegistry == nil || !idpRegistry.HasEnabledLDAP() {
-		return
+	if legacyLDAPYAMLConfig() == nil {
+		return // no legacy block on this node — nothing to arbitrate
 	}
-	if _, isLegacyLDAP := cfg.snapshotAuthBackend().provider.(*LDAPAuth); !isLegacyLDAP {
-		return
+	if !legacyLDAPRetired() {
+		if idpRegistry == nil || !idpRegistry.HasEnabledLDAP() {
+			return // pre-cutover: the YAML bootstrap authenticator stays valid
+		}
+		markLegacyLDAPRetired("enabled LDAP identity provider observed in the IdP registry")
 	}
-	if !canShadowLegacyLDAP() {
+	// Retired (now or previously): the legacy provider must not stay wired.
+	if _, isLegacyLDAP := cfg.snapshotAuthBackend().provider.(*LDAPAuth); isLegacyLDAP {
+		cfg.SetProvider(nil)
 		legacyLDAPShadowWarnOnce.Do(func() {
-			logWarnf("Auth: an enabled registry LDAP identity provider exists alongside the legacy YAML ldap provider; " +
-				"the registry takes precedence for proxy authentication, but the legacy provider stays wired because " +
-				"deactivating it would reopen the admin-UI setup gate (no local admin account). Create one and restart")
+			logWarnf("Auth: legacy YAML ldap provider DEACTIVATED — the IdP registry is the sole operational LDAP " +
+				"authority on this node (durable cutover recorded). The YAML file is untouched; its ldap block is " +
+				"bootstrap/import source material only. Remove it at your convenience")
 		})
-		return
 	}
-	cfg.SetProvider(nil)
-	legacyLDAPShadowWarnOnce.Do(func() {
-		logWarnf("Auth: legacy YAML ldap provider DEACTIVATED — an enabled LDAP identity provider now exists in the " +
-			"IdP registry, which is the sole operational LDAP authority. The YAML file is untouched; remove its ldap " +
-			"block, or it will be ignored again at next startup")
-	})
 }
 
 // ldapProfileDefault returns v or def when v is empty.

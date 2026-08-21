@@ -19,18 +19,19 @@ func loadLegacyAuthProviders(c legacyAuthProvidersStartupConfig) error {
 		// Retain the resolved YAML block (read-only) so the admin API can
 		// summarize it and offer the explicit registry import (ADR-0025).
 		setLegacyLDAPYAMLConfig(c.LDAP)
-		// ADR-0025 authority rule: an enabled LDAP profile in the IdP registry
-		// (loaded by initUIAccessPolicy, which runs before this loader) is the
-		// SOLE operational LDAP authority. The legacy YAML block is then not
-		// wired at all — never merged field-by-field, never a second
-		// authenticator — and the customer's YAML file is left untouched.
-		// The one guarded exception (canShadowLegacyLDAP) keeps the legacy
-		// provider armed when deactivating it would flip cfg.IsConfigured()
-		// false and fail the admin-UI setup gate OPEN.
-		if idpRegistry != nil && idpRegistry.HasEnabledLDAP() && canShadowLegacyLDAP() {
-			logWarnf("Auth: legacy YAML ldap config is SHADOWED by an enabled LDAP identity provider in the IdP registry — " +
-				"the registry is authoritative and the YAML ldap block is ignored for authentication " +
-				"(remove it, or manage LDAP from Objects → Identity Providers)")
+		// ADR-0025 single-authority rule (P1-2): the legacy YAML block is
+		// never wired once the node has CUT OVER to the IdP registry — either
+		// durably (the legacy_ldap_retired sentinel; loaded from
+		// admin_settings.json later in boot and re-enforced there, or set by
+		// a prior test/boot in-process) or observed right now via an enabled
+		// registry LDAP profile (the registry loads before this shim; the
+		// observation marks the durable sentinel). The customer's YAML file
+		// is never modified; after cutover it is import source material only.
+		if legacyLDAPRetired() || (idpRegistry != nil && idpRegistry.HasEnabledLDAP()) {
+			markLegacyLDAPRetired("enabled LDAP identity provider present in the IdP registry at startup")
+			logWarnf("Auth: legacy YAML ldap block is RETIRED — the IdP registry is the sole operational LDAP " +
+				"authority (durable cutover). The ldap block is ignored for authentication; remove it, or manage " +
+				"LDAP from Objects → Identity Providers")
 			return nil
 		}
 		ldapProvider, err := NewLDAPAuth(c.LDAP)
@@ -38,16 +39,6 @@ func loadLegacyAuthProviders(c legacyAuthProvidersStartupConfig) error {
 			return fmt.Errorf("LDAP config error: %w", err)
 		}
 		cfg.SetProvider(ldapProvider)
-		if idpRegistry != nil && idpRegistry.HasEnabledLDAP() {
-			// canShadowLegacyLDAP was false: no local admin account and not the
-			// open default, so the legacy provider stays wired as the setup-gate
-			// / SOCKS5 anchor. The registry LDAP provider still takes precedence
-			// in the proxy's Basic-credential chain (registry providers are
-			// tried first), so the registry remains operationally authoritative.
-			logWarnf("Auth: an enabled registry LDAP identity provider exists alongside the legacy YAML ldap config; " +
-				"the registry takes precedence for proxy authentication. The legacy provider remains wired only because " +
-				"no local admin account exists — create one and restart to retire the YAML provider")
-		}
 		logger.Printf("Auth: LDAP (%s, base=%s)", c.LDAP.URL, c.LDAP.BaseDN)
 		return nil
 	}

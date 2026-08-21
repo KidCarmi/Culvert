@@ -9,6 +9,7 @@ package main
 //     unenrolled redaction).
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -203,26 +204,58 @@ func TestIdPRegistry_LDAPProfilePersistsAndReloads(t *testing.T) {
 	}
 }
 
-// ── Legacy YAML authority shadowing ──────────────────────────────────────────
+// ── Legacy YAML authority + durable cutover (ADR-0025 / P1-2) ────────────────
+//
+// SINGLE-AUTHORITY WALL: one operational LDAP authenticator, no hidden legacy
+// fallback, durable cutover across registry disable/delete and restarts, and
+// an admin console that stays gated with NO local admin account.
 
-// withLocalAdminUser gives cfg a local admin account (the canShadowLegacyLDAP
-// anchor) and restores the prior auth state afterwards.
-func withLocalAdminUser(t *testing.T) {
+// withLegacyLDAPAuthorityReset isolates the process-global cutover sentinel
+// and the retained YAML block, and points the admin-settings file at a temp
+// path so the cutover's best-effort persist cannot touch other tests' state.
+func withLegacyLDAPAuthorityReset(t *testing.T) {
 	t.Helper()
-	prevUser := cfg.GetUser()
-	if err := cfg.SetAuth("shadow-admin", "Shadow-admin-1!"); err != nil {
-		t.Fatalf("SetAuth: %v", err)
-	}
+	prev := legacyLDAPRetiredFlag.Load()
+	legacyLDAPRetiredFlag.Store(false)
+	t.Cleanup(func() { legacyLDAPRetiredFlag.Store(prev) })
+
+	adminSettingsMu.Lock()
+	prevPath := adminSettingsPath
+	adminSettingsPath = filepath.Join(t.TempDir(), "admin_settings.json")
+	adminSettingsMu.Unlock()
 	t.Cleanup(func() {
-		if prevUser == "" {
-			_ = cfg.SetAuth("", "")
-		}
+		adminSettingsMu.Lock()
+		adminSettingsPath = prevPath
+		adminSettingsMu.Unlock()
+	})
+
+	withLegacyLDAPYAML(t, &LDAPConfig{URL: "ldap://legacy.corp.example:389", BaseDN: "DC=legacy"})
+}
+
+// withNoLocalAdminAuth clears the legacy single-user credential so the test
+// runs in the "no local admin account" deployment shape, restoring afterwards.
+func withNoLocalAdminAuth(t *testing.T) {
+	t.Helper()
+	cfg.mu.Lock()
+	prevUser, prevHash := cfg.user, cfg.passHash
+	prevOutcome := cfg.defaultAuthOutcome
+	cfg.user, cfg.passHash = "", nil
+	cfg.defaultAuthOutcome = OutcomeDefault
+	cfg.authRevision++
+	cfg.mu.Unlock()
+	cfg.cache.clear()
+	t.Cleanup(func() {
+		cfg.mu.Lock()
+		cfg.user, cfg.passHash, cfg.defaultAuthOutcome = prevUser, prevHash, prevOutcome
+		cfg.authRevision++
+		cfg.mu.Unlock()
+		cfg.cache.clear()
 	})
 }
 
 func TestLegacyLDAP_StartupShadowedByRegistryProfile(t *testing.T) {
 	withTestIdPRegistry(t)
-	withLocalAdminUser(t)
+	withLegacyLDAPAuthorityReset(t)
 	if err := idpRegistry.Upsert(ldapTestProfile("ldap-authority", "Registry AD")); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
@@ -239,10 +272,14 @@ func TestLegacyLDAP_StartupShadowedByRegistryProfile(t *testing.T) {
 	if got := cfg.snapshotAuthBackend().provider; got != nil {
 		t.Fatalf("legacy YAML LDAP was wired (%T) despite an enabled registry LDAP profile — two authorities", got)
 	}
+	if !legacyLDAPRetired() {
+		t.Fatal("startup cutover observation must set the durable retirement sentinel")
+	}
 }
 
-func TestLegacyLDAP_StartupWiresWithoutRegistryProfile(t *testing.T) {
+func TestLegacyLDAP_StartupWiresWithoutRegistryProfileOrSentinel(t *testing.T) {
 	withTestIdPRegistry(t)
+	withLegacyLDAPAuthorityReset(t)
 	prevProvider := cfg.snapshotAuthBackend().provider
 	t.Cleanup(func() { cfg.SetProvider(prevProvider) })
 	cfg.SetProvider(nil)
@@ -254,13 +291,21 @@ func TestLegacyLDAP_StartupWiresWithoutRegistryProfile(t *testing.T) {
 		t.Fatalf("loadLegacyAuthProviders: %v", err)
 	}
 	if _, ok := cfg.snapshotAuthBackend().provider.(*LDAPAuth); !ok {
-		t.Fatal("legacy YAML LDAP must keep working when no registry LDAP profile exists")
+		t.Fatal("legacy YAML LDAP must keep working before cutover (no registry profile, no sentinel)")
+	}
+	if legacyLDAPRetired() {
+		t.Fatal("no cutover happened — the sentinel must not be set")
 	}
 }
 
-func TestLegacyLDAP_RuntimeDeactivatedOnRegistryCreate(t *testing.T) {
+// The core P1-2 wall: legacy YAML + registry LDAP + NO local admin account.
+// Cutover must be unconditional — only registry LDAP can authenticate proxy
+// traffic afterwards, and the admin console stays safely gated.
+func TestLegacyLDAP_NoLocalAdmin_UnconditionalCutoverKeepsConsoleGated(t *testing.T) {
 	withTestIdPRegistry(t)
-	withLocalAdminUser(t)
+	withLegacyLDAPAuthorityReset(t)
+	withNoLocalAdminAuth(t)
+
 	prevProvider := cfg.snapshotAuthBackend().provider
 	t.Cleanup(func() { cfg.SetProvider(prevProvider) })
 	legacy, err := NewLDAPAuth(LDAPConfig{URL: "ldap://legacy.corp.example:389", BaseDN: "DC=legacy"})
@@ -268,6 +313,9 @@ func TestLegacyLDAP_RuntimeDeactivatedOnRegistryCreate(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg.SetProvider(legacy)
+	if !cfg.IsConfigured() {
+		t.Fatal("precondition: the wired legacy provider anchors IsConfigured")
+	}
 
 	// Admin creates an enabled registry LDAP profile via the API.
 	w := httptest.NewRecorder()
@@ -277,17 +325,134 @@ func TestLegacyLDAP_RuntimeDeactivatedOnRegistryCreate(t *testing.T) {
 	assertStatus(t, w, http.StatusOK)
 
 	if got := cfg.snapshotAuthBackend().provider; got != nil {
-		t.Fatalf("legacy YAML LDAP provider still active (%T) after registry LDAP creation", got)
+		t.Fatalf("legacy YAML LDAP provider still active (%T) after registry LDAP creation — dual authority", got)
+	}
+	if !legacyLDAPRetired() {
+		t.Fatal("cutover must set the durable retirement sentinel")
+	}
+	if !cfg.IsConfigured() {
+		t.Fatal("IsConfigured flipped false after cutover — the admin console would fail OPEN (RoleAdmin for all)")
 	}
 }
 
-func TestLegacyLDAP_RuntimeShadowingGuardedWhenSetupWouldFailOpen(t *testing.T) {
+// Registry rejects a credential the legacy provider would have accepted:
+// after cutover the answer is DENY — never a legacy fallback.
+func TestLegacyLDAP_RegistryRejects_NeverLegacyFallback(t *testing.T) {
+	setupAuthGateTest(t)
+	withLegacyLDAPAuthorityReset(t)
+	withNoLocalAdminAuth(t)
+
+	// A legacy provider that WOULD accept eve's credential (pre-seeded
+	// authoritative cache — no directory needed).
+	prevProvider := cfg.snapshotAuthBackend().provider
+	t.Cleanup(func() { cfg.SetProvider(prevProvider) })
+	legacy, err := NewLDAPAuth(LDAPConfig{URL: "ldap://legacy.corp.example:389", BaseDN: "DC=legacy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy.cacheSet(cacheKey("eve", "eve-pass"), true, nil)
+	cfg.SetProvider(legacy)
+
+	// Registry LDAP that REJECTS eve.
+	installLDAPRegistry(t, "corp-ad", aliceStub())
+	withLegacyLDAPYAML(t, &LDAPConfig{URL: "ldap://legacy.corp.example:389", BaseDN: "DC=legacy"})
+	enforceLegacyLDAPShadowing()
+	if cfg.snapshotAuthBackend().provider != nil {
+		t.Fatal("cutover did not deactivate the legacy provider")
+	}
+
+	r := makeRequest("http://fallback.example.test/", nil)
+	r.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("eve:eve-pass")))
+	w := httptest.NewRecorder()
+	if _, proceed := resolveRequestAuth(w, r, "127.0.0.1", "no-fallback-test"); proceed {
+		t.Fatal("credential rejected by registry LDAP was accepted — hidden legacy fallback")
+	}
+	if w.Code != http.StatusProxyAuthRequired {
+		t.Fatalf("status = %d, want 407 deny", w.Code)
+	}
+}
+
+// Cutover is durable: registry disable and delete followed by a restart must
+// NOT reactivate the legacy YAML block.
+func TestLegacyLDAP_CutoverSurvivesDisableDeleteAndRestart(t *testing.T) {
 	withTestIdPRegistry(t)
-	// NO local admin user and Default outcome: deactivation would flip
-	// cfg.IsConfigured() false and the admin UI would fail open. The legacy
-	// provider must stay wired (registry still wins in the Basic chain).
-	if cfg.GetUser() != "" {
-		t.Skip("test requires no local user in cfg")
+	withLegacyLDAPAuthorityReset(t)
+	prof := ldapTestProfile("ldap-cutover", "Registry AD")
+	if err := idpRegistry.Upsert(prof); err != nil {
+		t.Fatal(err)
+	}
+	enforceLegacyLDAPShadowing()
+	if !legacyLDAPRetired() {
+		t.Fatal("cutover sentinel not set")
+	}
+
+	restartKeepsLegacyShadowed := func(step string) {
+		prevProvider := cfg.snapshotAuthBackend().provider
+		defer cfg.SetProvider(prevProvider)
+		cfg.SetProvider(nil)
+		if err := loadLegacyAuthProviders(legacyAuthProvidersStartupConfig{
+			LDAP: LDAPConfig{URL: "ldap://legacy.corp.example:389", BaseDN: "DC=legacy"},
+		}); err != nil {
+			t.Fatalf("%s: loadLegacyAuthProviders: %v", step, err)
+		}
+		if cfg.snapshotAuthBackend().provider != nil {
+			t.Fatalf("%s: restart re-wired the retired legacy YAML LDAP provider", step)
+		}
+		if !cfg.IsConfigured() {
+			t.Fatalf("%s: IsConfigured false after restart — setup gate would fail open", step)
+		}
+	}
+
+	// Disable the registry profile, then "restart".
+	disabled := ldapTestProfile("ldap-cutover", "Registry AD")
+	disabled.Enabled = false
+	if err := idpRegistry.Upsert(disabled); err != nil {
+		t.Fatal(err)
+	}
+	restartKeepsLegacyShadowed("after disable")
+
+	// Delete the registry profile, then "restart".
+	if err := idpRegistry.Delete("ldap-cutover"); err != nil {
+		t.Fatal(err)
+	}
+	restartKeepsLegacyShadowed("after delete")
+}
+
+// The sentinel round-trips through admin_settings.json, and loading a settings
+// file that carries it deactivates a still-wired legacy provider (the real
+// boot order: legacy providers wire before LoadAdminSettings runs).
+func TestLegacyLDAP_RetirementSentinelDurableRoundTrip(t *testing.T) {
+	withTestIdPRegistry(t)
+	withLegacyLDAPAuthorityReset(t)
+
+	adminSettingsMu.Lock()
+	path := adminSettingsPath
+	adminSettingsMu.Unlock()
+
+	markLegacyLDAPRetired("test cutover")
+	if err := SaveAdminSettings(); err != nil {
+		t.Fatalf("SaveAdminSettings: %v", err)
+	}
+
+	// Simulate the next boot: flag cleared, legacy provider wired (as the
+	// startup shim would have done before it could know about the sentinel
+	// in a pre-P1-2 world)… The file bytes are pinned and rewritten so a
+	// stale best-effort save goroutine from an unrelated test can never
+	// clobber the fixture between the flag reset and the load.
+	saved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read saved settings: %v", err)
+	}
+	var savedSettings AdminSettings
+	if err := json.Unmarshal(saved, &savedSettings); err != nil {
+		t.Fatalf("parse saved settings: %v", err)
+	}
+	if !savedSettings.LegacyLDAPRetired {
+		t.Fatal("saved settings do not carry the legacy_ldap_retired sentinel")
+	}
+	legacyLDAPRetiredFlag.Store(false)
+	if err := os.WriteFile(path, saved, 0o600); err != nil {
+		t.Fatalf("rewrite settings fixture: %v", err)
 	}
 	prevProvider := cfg.snapshotAuthBackend().provider
 	t.Cleanup(func() { cfg.SetProvider(prevProvider) })
@@ -296,16 +461,60 @@ func TestLegacyLDAP_RuntimeShadowingGuardedWhenSetupWouldFailOpen(t *testing.T) 
 		t.Fatal(err)
 	}
 	cfg.SetProvider(legacy)
-	if err := idpRegistry.Upsert(ldapTestProfile("ldap-guard", "Guard AD")); err != nil {
+
+	// …then the settings load applies the sentinel and unwires it.
+	LoadAdminSettings(path)
+	if !legacyLDAPRetired() {
+		t.Fatal("sentinel did not survive the admin_settings.json round trip")
+	}
+	if cfg.snapshotAuthBackend().provider != nil {
+		t.Fatal("settings load must deactivate a wired legacy provider on a retired node")
+	}
+}
+
+// CP→DP: a synced snapshot carrying an enabled LDAP profile performs the same
+// durable cutover on the DP (and last-known-good replay goes through the same
+// syncSnapshotIdPProfiles path, preserving the authority state).
+func TestLegacyLDAP_DPSnapshotSyncCutsOver(t *testing.T) {
+	withTestIdPRegistry(t)
+	withLegacyLDAPAuthorityReset(t)
+	prevProvider := cfg.snapshotAuthBackend().provider
+	t.Cleanup(func() { cfg.SetProvider(prevProvider) })
+	legacy, err := NewLDAPAuth(LDAPConfig{URL: "ldap://legacy.corp.example:389", BaseDN: "DC=legacy"})
+	if err != nil {
 		t.Fatal(err)
 	}
+	cfg.SetProvider(legacy)
 
-	enforceLegacyLDAPShadowing()
-	if _, ok := cfg.snapshotAuthBackend().provider.(*LDAPAuth); !ok {
-		t.Fatal("guarded shadowing removed the setup-gate anchor — admin UI would fail open")
+	snap := ConfigSnapshot{Version: 9, IdPProfiles: []*IdPProfile{ldapTestProfile("ldap-dp", "Synced AD")}}
+	if err := syncSnapshotIdPProfiles(snap); err != nil {
+		t.Fatalf("sync: %v", err)
 	}
+	if cfg.snapshotAuthBackend().provider != nil {
+		t.Fatal("DP sync left the legacy YAML provider active alongside the synced registry LDAP")
+	}
+	if !legacyLDAPRetired() {
+		t.Fatal("DP sync cutover must set the durable sentinel")
+	}
+}
+
+// IsConfigured semantics around the sentinel.
+func TestIsConfigured_LegacyLDAPRetiredCountsAsConfigured(t *testing.T) {
+	withNoLocalAdminAuth(t)
+	prevProvider := cfg.snapshotAuthBackend().provider
+	t.Cleanup(func() { cfg.SetProvider(prevProvider) })
+	cfg.SetProvider(nil)
+
+	prev := legacyLDAPRetiredFlag.Load()
+	t.Cleanup(func() { legacyLDAPRetiredFlag.Store(prev) })
+
+	legacyLDAPRetiredFlag.Store(false)
+	if cfg.IsConfigured() {
+		t.Fatal("no anchors at all: IsConfigured must be false (fresh-install setup gate)")
+	}
+	legacyLDAPRetiredFlag.Store(true)
 	if !cfg.IsConfigured() {
-		t.Fatal("IsConfigured flipped false")
+		t.Fatal("the durable retirement sentinel must count as configured")
 	}
 }
 

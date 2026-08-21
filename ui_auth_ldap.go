@@ -70,9 +70,13 @@ func apiIdPLegacyLDAP(w http.ResponseWriter, r *http.Request) {
 	}
 	_, legacyActive := cfg.snapshotAuthBackend().provider.(*LDAPAuth)
 	jsonOK(w, map[string]any{
-		"present":                  true,
-		"active":                   legacyActive,
-		"shadowed":                 idpRegistry != nil && idpRegistry.HasEnabledLDAP(),
+		"present": true,
+		"active":  legacyActive,
+		// retired = the DURABLE authority cutover (survives registry
+		// disable/delete + restarts); shadowed = retired or an enabled
+		// registry LDAP profile currently exists (the GUI banner condition).
+		"retired":                  legacyLDAPRetired(),
+		"shadowed":                 legacyLDAPRetired() || (idpRegistry != nil && idpRegistry.HasEnabledLDAP()),
 		"url":                      c.URL,
 		"baseDn":                   c.BaseDN,
 		"bindDn":                   c.BindDN,
