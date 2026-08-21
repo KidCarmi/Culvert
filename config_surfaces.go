@@ -516,7 +516,7 @@ var configSurfaces = []configSurfaceRow{
 		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "SessionHMAC", Apply: semValidatedSkip}}},
 	{ID: "idp_profiles", Kind: kindConfig, Owner: "idpRegistry", Sensitive: true,
 		ClusterSynced: true, SnapshotCap: maxSnapIdPProfiles,
-		Note:     "carries OIDC client secrets by design (DP-local auth); redacted for unenrolled callers; compile-validated ReplaceAll, rejection aborts extended state",
+		Note:     "carries OIDC client secrets and LDAP bind credentials by design (DP-local auth); redacted for unenrolled callers; compile-validated ReplaceAll, rejection aborts extended state",
 		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "IdPProfiles", Apply: semValidatedSkip}}},
 	{ID: "bandwidth_policies", Kind: kindConfig, Owner: "globalBandwidth",
 		ClusterSynced: true, SnapshotCap: maxSnapBandwidthPolicies,

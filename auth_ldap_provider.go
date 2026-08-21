@@ -21,6 +21,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -282,6 +283,51 @@ func validateLDAPAttrName(attr string) error {
 		}
 	}
 	return nil
+}
+
+// ─── Legacy YAML authority shadowing (ADR-0025) ─────────────────────────────
+
+// legacyLDAPShadowWarnOnce dedupes the runtime shadow warning: one clear line,
+// no per-sync log spam (ReplaceAll runs on every CP→DP config poll).
+var legacyLDAPShadowWarnOnce sync.Once
+
+// canShadowLegacyLDAP reports whether deactivating the legacy YAML LDAP
+// provider is safe: cfg.IsConfigured() must remain true afterwards, because
+// the admin-UI middleware fails OPEN (grants RoleAdmin to everyone) while
+// setup is "incomplete". With a local admin account or the deliberate open
+// default, the gate stays anchored without the legacy provider.
+func canShadowLegacyLDAP() bool {
+	return cfg.GetUser() != "" || cfg.DefaultAuthOutcome() == OutcomeExempt
+}
+
+// enforceLegacyLDAPShadowing deactivates the legacy YAML LDAP provider the
+// moment an enabled registry LDAP profile exists, so migration to the IdP
+// registry needs no restart and exactly one LDAP authority is ever active.
+// Called after every registry write ingress that can enable an LDAP profile
+// (admin API create/update, CP→DP snapshot sync). Deleting/disabling the
+// registry profile later does NOT silently re-arm the YAML provider — a
+// restart restores the YAML bootstrap behavior (no hidden rollback magic).
+func enforceLegacyLDAPShadowing() {
+	if idpRegistry == nil || !idpRegistry.HasEnabledLDAP() {
+		return
+	}
+	if _, isLegacyLDAP := cfg.snapshotAuthBackend().provider.(*LDAPAuth); !isLegacyLDAP {
+		return
+	}
+	if !canShadowLegacyLDAP() {
+		legacyLDAPShadowWarnOnce.Do(func() {
+			logWarnf("Auth: an enabled registry LDAP identity provider exists alongside the legacy YAML ldap provider; " +
+				"the registry takes precedence for proxy authentication, but the legacy provider stays wired because " +
+				"deactivating it would reopen the admin-UI setup gate (no local admin account). Create one and restart")
+		})
+		return
+	}
+	cfg.SetProvider(nil)
+	legacyLDAPShadowWarnOnce.Do(func() {
+		logWarnf("Auth: legacy YAML ldap provider DEACTIVATED — an enabled LDAP identity provider now exists in the " +
+			"IdP registry, which is the sole operational LDAP authority. The YAML file is untouched; remove its ldap " +
+			"block, or it will be ignored again at next startup")
+	})
 }
 
 // ldapProfileDefault returns v or def when v is empty.

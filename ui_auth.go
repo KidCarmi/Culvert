@@ -501,6 +501,7 @@ func apiIdPList(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		enforceLegacyLDAPShadowing()
 		_ = publishCurrentConfigSnapshot()
 		auditEventDiff(r, "idp.create", p.ID, p.Name, nil, auditIdPProfile(&p))
 		logger.Printf("UI: IdP profile created id=%q name=%q type=%q", sanitizeLog(p.ID), sanitizeLog(p.Name), sanitizeLog(string(p.Type)))
@@ -558,11 +559,16 @@ func apiIdPItem(w http.ResponseWriter, r *http.Request, id string) {
 			return
 		}
 		p.ID = id
-		preserveWriteOnlyIdPFields(before, &p, oidcClientSecretPresent(body), samlMetadataXMLPresent(body))
+		preserveWriteOnlyIdPFields(before, &p, writeOnlyIdPFieldPresence{
+			oidcClientSecret: oidcClientSecretPresent(body),
+			samlMetadataXML:  samlMetadataXMLPresent(body),
+			ldapBindPassword: ldapBindPasswordPresent(body),
+		})
 		if err := idpRegistry.Upsert(&p); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		enforceLegacyLDAPShadowing()
 		_ = publishCurrentConfigSnapshot()
 		auditEventDiff(r, "idp.update", id, p.Name, auditIdPProfile(before), auditIdPProfile(&p))
 		logger.Printf("UI: IdP profile updated id=%q name=%q", sanitizeLog(id), sanitizeLog(p.Name))
@@ -585,13 +591,38 @@ func apiIdPItem(w http.ResponseWriter, r *http.Request, id string) {
 	}
 }
 
-func preserveWriteOnlyIdPFields(before, next *IdPProfile, oidcClientSecretProvided, samlMetadataXMLProvided bool) {
+// writeOnlyIdPFieldPresence records which write-only secret fields the update
+// request body actually carried (raw-body presence check, NOT decoded-value
+// emptiness): an OMITTED field preserves the stored secret, while a PRESENT
+// empty field is an explicit clear — the two must stay distinguishable.
+type writeOnlyIdPFieldPresence struct {
+	oidcClientSecret bool
+	samlMetadataXML  bool
+	ldapBindPassword bool
+}
+
+func preserveWriteOnlyIdPFields(before, next *IdPProfile, present writeOnlyIdPFieldPresence) {
 	if before == nil || next == nil {
 		return
 	}
-	preserveOIDCClientSecret(before, next, oidcClientSecretProvided)
+	preserveOIDCClientSecret(before, next, present.oidcClientSecret)
 	preserveOIDCDiscoveryEndpoints(before, next)
-	preserveSAMLMetadataXML(before, next, samlMetadataXMLProvided)
+	preserveSAMLMetadataXML(before, next, present.samlMetadataXML)
+	preserveLDAPBindPassword(before, next, present.ldapBindPassword)
+}
+
+// preserveLDAPBindPassword keeps the stored bind credential when an update
+// omits the write-only bindPassword field (the GET projection never returns
+// it, so an edit round-trip would otherwise wipe it). A request that carries
+// the field explicitly — even empty — wins: empty-with-field-present is the
+// deliberate clear path (e.g. switching to anonymous bind).
+func preserveLDAPBindPassword(before, next *IdPProfile, bindPasswordProvided bool) {
+	if before.Type != IdPTypeLDAP || next.Type != IdPTypeLDAP || before.LDAP == nil || next.LDAP == nil {
+		return
+	}
+	if before.LDAP.BindPassword != "" && !bindPasswordProvided && next.LDAP.BindPassword == "" {
+		next.LDAP.BindPassword = before.LDAP.BindPassword
+	}
 }
 
 func auditIdPProfile(p *IdPProfile) *IdPProfile {
@@ -646,6 +677,10 @@ func oidcClientSecretPresent(body []byte) bool {
 
 func samlMetadataXMLPresent(body []byte) bool {
 	return nestedJSONFieldPresent(body, "saml", "metadataXml")
+}
+
+func ldapBindPasswordPresent(body []byte) bool {
+	return nestedJSONFieldPresent(body, "ldap", "bindPassword")
 }
 
 func nestedJSONFieldPresent(body []byte, section, field string) bool {

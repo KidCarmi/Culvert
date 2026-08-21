@@ -270,12 +270,23 @@ func validateUpsertProfile(p *IdPProfile) error {
 	return nil
 }
 
+// normalizeIdPProfileWriteInput strips response-only metadata a client may
+// echo back on write (the GET projection is round-trippable by design). The
+// stored profile must never carry the derived BindCredentialConfigured bit —
+// publicIdPProfile recomputes it from the stored credential on every read.
+func normalizeIdPProfileWriteInput(p *IdPProfile) {
+	if p != nil && p.LDAP != nil {
+		p.LDAP.BindCredentialConfigured = false
+	}
+}
+
 func (r *IdPRegistry) Upsert(p *IdPProfile) error {
 	if p.ID == "" {
 		b := make([]byte, 6)
 		rand.Read(b) //nolint:errcheck // crypto/rand.Read never returns an error on supported platforms
 		p.ID = hex.EncodeToString(b)
 	}
+	normalizeIdPProfileWriteInput(p)
 	if err := validateUpsertProfile(p); err != nil {
 		return err
 	}
@@ -395,6 +406,7 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 	nextProfiles := cloneIdPProfiles(profiles)
 	nextLive := make(map[string]IdentityProvider)
 	for _, p := range nextProfiles {
+		normalizeIdPProfileWriteInput(p)
 		if err := validateIdPProfile(p); err != nil {
 			return err
 		}
@@ -698,6 +710,22 @@ func (r *IdPRegistry) HasEnabledCredentialProvider() bool {
 	defer r.mu.RUnlock()
 	for _, p := range r.profiles {
 		if p != nil && p.Enabled && p.Type.CredentialCapable() {
+			return true
+		}
+	}
+	return false
+}
+
+// HasEnabledLDAP reports whether any profile is enabled with Type LDAP —
+// consulted by the legacy-YAML shadowing rule (ADR-0025 §authority): when an
+// enabled registry LDAP profile exists, the registry is the sole operational
+// LDAP authority and the legacy FileConfig.LDAP provider is not wired /
+// deactivated. Profile-level (not live-gated), matching HasEnabledOIDC.
+func (r *IdPRegistry) HasEnabledLDAP() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, p := range r.profiles {
+		if p != nil && p.Enabled && p.Type == IdPTypeLDAP {
 			return true
 		}
 	}
