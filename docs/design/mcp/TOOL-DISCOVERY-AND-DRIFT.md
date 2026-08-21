@@ -192,6 +192,14 @@ policy evaluation could resolve to `ALLOW` (§2 HARD RULE).
 The classification scheme in §2 and the canonicalization rules in §1 are only as trustworthy as the tests
 that pin them. As of this PR-0 package:
 
+> **Update (PR-2 code landed).** The three bullets below describe the PR-0 baseline and are now
+> superseded for the classification/canonicalization surface: canonicalization determinism tests, the six
+> §2 drift-class fixtures, the malicious/non-compliant server corpus, and three fuzz targets are
+> IMPLEMENTED under `internal/mcp/canonical`, `internal/mcp/registry` and `internal/mcp/catalog` (this
+> PR). The code remains listener-independent and dormant (no `package main` wiring). The QUARANTINE
+> **enforcement** for privilege-expansion/unknown-tool (MCP-TOOL-004/006) is still PR-6 — PR-2 records the
+> quarantined state and never auto-allows.
+
 - **No canonicalization tests exist in the current repository CI baseline.** There is no MCP tool
   fingerprinting code yet (no MCP listener exists in inspected paths — VERIFIED EVIDENCE), so there is
   necessarily no test proving the whitespace-/order-insensitivity behavior described in §1.

@@ -22,9 +22,10 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/hex"
+	"hash"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/KidCarmi/Culvert/internal/hostutil"
@@ -36,28 +37,45 @@ const (
 	trafficKeyLen    = 32
 )
 
+// trafficKeyState bundles the active key with a monotonic generation. The generation
+// is what lets a POOLED HMAC (see pseudonymHasher) prove it was built for the key that
+// is still current: a hasher carries the generation it was keyed with, and any hasher
+// whose generation differs from the loaded state is discarded rather than reused. One
+// atomic load yields key and generation together, so a rotation racing a redaction can
+// never pair a new generation with an old key.
+type trafficKeyState struct {
+	key []byte
+	gen uint64
+}
+
 // trafficPseudonymKey holds the node-local 32-byte HMAC key. atomic.Pointer so the
 // per-record redaction reads it lock-free; published once at settings load and on the
-// first enable. The pointee is never mutated after publish (a new slice is stored).
-var trafficPseudonymKey atomic.Pointer[[]byte]
+// first enable. The pointee is never mutated after publish (a new state is stored).
+var trafficPseudonymKey atomic.Pointer[trafficKeyState]
+
+// trafficKeyGen issues the generation stamped onto each published key. It only ever
+// increases, including across clear/re-publish, so a hasher pooled before a rotation
+// can never be mistaken for one keyed after it.
+var trafficKeyGen atomic.Uint64
 
 // setTrafficPseudonymKey publishes the key (copying the input so the caller's slice is
 // not aliased). An empty key clears it (⇒ fail-closed while the posture is on).
 func setTrafficPseudonymKey(k []byte) {
 	if len(k) == 0 {
+		trafficKeyGen.Add(1) // burn a generation so pooled hashers for the old key are stale
 		trafficPseudonymKey.Store(nil)
 		return
 	}
 	c := make([]byte, len(k))
 	copy(c, k)
-	trafficPseudonymKey.Store(&c)
+	trafficPseudonymKey.Store(&trafficKeyState{key: c, gen: trafficKeyGen.Add(1)})
 }
 
 // getTrafficPseudonymKey returns the active key (nil if unset). Callers must treat the
 // returned slice as read-only.
 func getTrafficPseudonymKey() []byte {
-	if p := trafficPseudonymKey.Load(); p != nil {
-		return *p
+	if s := trafficPseudonymKey.Load(); s != nil {
+		return s.key
 	}
 	return nil
 }
@@ -90,21 +108,91 @@ func ensureTrafficPseudonymKey() error {
 	return nil
 }
 
+// pseudonymHexLen is how many hex characters of the MAC the token keeps — i.e. its
+// first pseudonymHexLen/2 bytes. Load-bearing: it fixes the token's shape and its
+// collision domain, and is the sole reason the whole 32-byte digest is not emitted.
+const pseudonymHexLen = 12
+
+// pseudonymHexDigits is the lowercase alphabet encodePseudonym emits, matching what
+// encoding/hex produces (the token format is a persisted, correlatable identifier —
+// uppercase would silently break correlation against already-written records).
+const pseudonymHexDigits = "0123456789abcdef"
+
+// pseudonymHasher is a pooled, key-bound HMAC. Constructing an HMAC is the dominant
+// cost of pseudonymizeHost — hmac.New re-derives the ipad/opad key schedule (two SHA-256
+// block compressions) and allocates two hash states on EVERY call — while the actual
+// message is one short hostname. Reusing the hasher amortizes that schedule away:
+// hash.Hash.Reset on a marshalable inner hash restores the precomputed ipad state
+// instead of recomputing it.
+//
+// gen binds the hasher to the key generation it was constructed with, so a rotation
+// invalidates pooled hashers rather than silently producing tokens under a superseded
+// key. buf and sum are per-hasher scratch, which is what removes the remaining
+// per-call allocations (the []byte(host) conversion and the digest destination).
+type pseudonymHasher struct {
+	gen uint64
+	mac hash.Hash
+	buf []byte
+	sum [sha256.Size]byte
+}
+
+// pseudonymHasherScratchCap bounds the scratch buffer a pooled hasher may retain.
+// The normalized input is a hostname (≤255 bytes in practice) but is not length-
+// validated here, so a single outsized input must not pin an outsized buffer in the
+// pool for the process lifetime.
+const pseudonymHasherScratchCap = 512
+
+var pseudonymHasherPool = sync.Pool{New: func() any { return new(pseudonymHasher) }}
+
 // pseudonymizeHost returns the keyed-HMAC token for a host (host-only normalized so the
 // port/case/trailing-dot cannot vary the token), or the fail-closed sentinel when the
 // key is missing. Callers gate on the posture being ON, so this never returns the
 // plaintext. An empty input stays empty (nothing to redact).
+//
+// The token is byte-identical to the previous hmac.New-per-call form; only the cost of
+// producing it changed (pinned by TestTrafficRedaction_TokenMatchesReferenceHMAC).
 func pseudonymizeHost(host string) string {
 	if host == "" {
 		return host
 	}
-	key := getTrafficPseudonymKey()
-	if len(key) == 0 {
+	state := trafficPseudonymKey.Load()
+	if state == nil || len(state.key) == 0 {
 		return redactedSentinel // fail-closed: never plaintext
 	}
-	h := hmac.New(sha256.New, key)
-	h.Write([]byte(hostutil.NormalizeHost(hostutil.StripHostPort(host))))
-	return pseudonymPrefix + hex.EncodeToString(h.Sum(nil))[:12]
+	norm := hostutil.NormalizeHost(hostutil.StripHostPort(host))
+
+	ph, _ := pseudonymHasherPool.Get().(*pseudonymHasher)
+	if ph == nil {
+		ph = new(pseudonymHasher) // unreachable (the pool's New is typed); never nil-deref the hot path
+	}
+	if ph.mac == nil || ph.gen != state.gen {
+		// First use, or the key rotated under us: build a hasher for the CURRENT key.
+		ph.mac = hmac.New(sha256.New, state.key)
+		ph.gen = state.gen
+	} else {
+		ph.mac.Reset()
+	}
+	ph.buf = append(ph.buf[:0], norm...)
+	ph.mac.Write(ph.buf)
+	token := encodePseudonym(ph.mac.Sum(ph.sum[:0]))
+	if cap(ph.buf) > pseudonymHasherScratchCap {
+		ph.buf = nil
+	}
+	pseudonymHasherPool.Put(ph)
+	return token
+}
+
+// encodePseudonym renders the token prefix plus the first pseudonymHexLen hex
+// characters of mac. Equivalent to pseudonymPrefix+hex.EncodeToString(mac)[:12], but
+// without hex-encoding all 32 digest bytes just to discard 26 of them.
+func encodePseudonym(mac []byte) string {
+	var out [len(pseudonymPrefix) + pseudonymHexLen]byte
+	copy(out[:], pseudonymPrefix)
+	for i := 0; i < pseudonymHexLen/2; i++ {
+		out[len(pseudonymPrefix)+i*2] = pseudonymHexDigits[mac[i]>>4]
+		out[len(pseudonymPrefix)+i*2+1] = pseudonymHexDigits[mac[i]&0x0f]
+	}
+	return string(out[:])
 }
 
 // redactDestinationHost pseudonymizes a top-level host iff the posture is on; otherwise

@@ -151,11 +151,69 @@ func (h *HAState) leaseKeepaliveLoop(stop chan struct{}, tick time.Duration) {
 		case <-stop:
 			return
 		case <-t.C:
-			if fenced := h.leaseRenewOnce(); fenced {
+			if fenced := h.leaseRenewRound(); fenced {
 				return
 			}
 		}
 	}
+}
+
+// leaseRenewRound runs one keepalive round under a panic guard, returning true
+// when this node self-fenced (the loop must exit).
+//
+// CHAOS-24 — this is the one place where panic containment is a SAFETY decision
+// rather than an availability one, and getting it wrong manufactures the exact
+// failure ADR-0005 exists to prevent:
+//
+//   - Do nothing (the pre-CHAOS-24 state): a panic here kills the process.
+//     Ugly, but accidentally fail-closed — a dead node cannot dual-write.
+//   - Recover and let the goroutine EXIT: catastrophic. This node keeps
+//     role=leader and leaseEpoch!=0, so WriteAllowed() stays true, but nothing
+//     renews the etcd lease. The lease expires, a standby legitimately acquires
+//     it, and now TWO nodes believe they hold write authority — a split brain
+//     invented by the very guard that was supposed to make things safer.
+//   - Recover and retry blindly: also unsafe. If the panic is deterministic,
+//     every round dies before reaching the validity-window check in
+//     leaseRenewOnce, so the node holds write authority forever on the strength
+//     of a confirmation that keeps getting older.
+//
+// So a panicking round is treated as exactly what it is: a round that did NOT
+// confirm the lease — the same epistemic state as a transport failure, where
+// "the truth is unknown". It is charged against the last CONFIRMED validity
+// window and self-fences the moment that window closes. Containment therefore
+// never extends this node's write authority by even one tick.
+func (h *HAState) leaseRenewRound() (fenced bool) {
+	if panicked := runGuarded("ha_lease_keepalive", func() {
+		fenced = h.leaseRenewOnce()
+	}); panicked {
+		return h.fenceIfLeaseWindowElapsed(
+			"fencing lease unconfirmed: keepalive round aborted by a recovered panic")
+	}
+	return fenced
+}
+
+// fenceIfLeaseWindowElapsed self-fences when the last etcd-CONFIRMED validity
+// window has run out, mirroring the transport-failure branch of leaseRenewOnce
+// (including the haLeaseWriteMargin safety margin). Returns true when the loop
+// must exit — either because this node fenced, or because it no longer holds a
+// lease to renew.
+//
+// time.Since over the monotonic clock keeps this immune to wall-clock jumps,
+// same as the branch it mirrors: a clock rollback must not silently extend
+// write authority.
+func (h *HAState) fenceIfLeaseWindowElapsed(reason string) bool {
+	h.mu.RLock()
+	p, epoch := h.lease, h.leaseEpoch
+	confirmedAt, validFor := h.leaseConfirmedAt, h.leaseValidFor
+	h.mu.RUnlock()
+	if p == nil || epoch == 0 {
+		return true // no write authority left to protect; stop looping
+	}
+	if time.Since(confirmedAt) >= validFor-haLeaseWriteMargin {
+		h.selfFence(reason)
+		return true
+	}
+	return false
 }
 
 // leaseRenewOnce performs one keepalive round. Returns true when this node

@@ -11,6 +11,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"sync"
 	"time"
@@ -72,6 +73,17 @@ type AdminSettings struct {
 	// LogCriticalDiskPct is the disk-protection threshold (%). 0 = use default.
 	LogCriticalDiskPct int `json:"log_critical_disk_pct,omitempty"`
 
+	// LegacyLDAPRetired is the durable LDAP-authority cutover sentinel
+	// (ADR-0025 / P1-2): once an enabled registry LDAP identity provider is
+	// observed on a node that carries a legacy YAML ldap block, the block is
+	// permanently retired as an operational authenticator — across registry
+	// disable/delete and every restart. Node-local + AdminDurable-only (never
+	// exported/imported, never rolled back, never CP→DP synced): authority
+	// ownership is per-node state, and a config restore must not resurrect a
+	// retired authenticator. Break-glass revert is an explicit offline edit
+	// (documented in docs/operator/ldap-identity-provider.md).
+	LegacyLDAPRetired bool `json:"legacy_ldap_retired"`
+
 	// Session
 	SessionTimeoutHours int `json:"session_timeout_hours,omitempty"`
 
@@ -99,8 +111,20 @@ type AdminSettings struct {
 	BlocklistFeedURL      string                 `json:"blocklist_feed_url,omitempty"`
 	BlocklistFeedInterval string                 `json:"blocklist_feed_interval,omitempty"` // e.g. "24h"
 
-	// SaaS category feed
-	SaaSFeedURL string `json:"saas_feed_url,omitempty"`
+	// SaaS signed category feed (F3a-1). SaaSFeedManaged is the sentinel that
+	// distinguishes "operator never touched it" (false ⇒ on-by-default) from
+	// "explicitly configured"; SaaSFeedEnabled is authoritative only when managed.
+	// Empty URL ⇒ the built-in official endpoint. Protocol has one legal value
+	// today (signed_manifest_v1). SaaSStoreSchemaVersion is the durable migration
+	// marker (§A.5) — its absence triggers the one-time schema init; a value newer
+	// than this binary supports is refused. These fields are node-local and durable
+	// in F3a-1 (the CP→DP wire + *bool presence lands in F3a-2).
+	SaaSFeedURL            string `json:"saas_feed_url,omitempty"`
+	SaaSFeedManaged        bool   `json:"saas_feed_managed"`
+	SaaSFeedEnabled        bool   `json:"saas_feed_enabled"`
+	SaaSFeedProtocol       string `json:"saas_feed_protocol,omitempty"`
+	SaaSFeedRefreshSeconds int64  `json:"saas_feed_refresh_seconds,omitempty"`
+	SaaSStoreSchemaVersion int    `json:"saas_store_schema_version,omitempty"`
 
 	// Upstream proxy chaining. UpstreamProxiesSaved is a sentinel (mirroring
 	// BlocklistFeedsSaved): when true the persisted list is authoritative and
@@ -203,8 +227,30 @@ func LoadAdminSettings(path string) {
 		return
 	}
 
+	// F3a-1: initialize the SaaS feed-config schema boundary before applying admin
+	// services. Idempotent (marker-guarded), backed up before mutation, atomic, and
+	// fail-safe — a failure logs and this boot proceeds with the pre-migration
+	// (safe-default) resolution, retrying next boot. It does NOT change the persisted
+	// URL the legacy syncer reads, so there is no live behavior change here.
+	if rep, mErr := migrateSaaSFeedStore(&s, path, data, time.Now); mErr != nil {
+		if errors.Is(mErr, ErrSaaSSchemaTooNew) {
+			// A feed-store schema newer than this binary supports: fail CLOSED to the
+			// compiled baseline. Clear the persisted feed URL in memory so the legacy
+			// syncer below does NOT consume a field from a schema we just declared
+			// unsafe (the file is left untouched — the migration refused to write).
+			s.SaaSFeedURL = ""
+			logger.Printf("AdminSettings: SaaS feed store schema newer than supported (%v) — failing closed to the baseline feed config", mErr)
+		} else {
+			logger.Printf("AdminSettings: SaaS feed store migration not applied (%v); outcome=%s", mErr, rep.Outcome)
+		}
+	} else if rep.Outcome == "migrated" {
+		logger.Printf("AdminSettings: migrated SaaS feed store to schema %d (url_class=%s protocol_reset=%t backup=%q)",
+			rep.ToSchema, rep.URLClass, rep.ProtocolReset, sanitizeLog(rep.BackupPath))
+	}
+
 	applyAdminSecurity(&s)
 	applyAdminServices(&s)
+	applyLegacyLDAPRetirement(&s)
 	applyAdminNetwork(&s)
 	applyAdminYARA(&s)
 	applyAdminAutoExcludeTunables(&s)
@@ -250,6 +296,9 @@ func applyAdminSecurity(s *AdminSettings) {
 // applyAdminServices applies logging, monitoring, and session settings.
 func applyAdminServices(s *AdminSettings) {
 	if s.SyslogAddr != "" {
+		// Record intent even if the connect fails so checkSyslogFeed surfaces a
+		// silently-down SIEM feed (see syslogConfiguredAddr).
+		syslogConfiguredAddr = s.SyslogAddr
 		if err := InitSyslog(s.SyslogAddr, s.SyslogFormat); err == nil {
 			syslogConfigured = s.SyslogAddr
 		}
@@ -312,9 +361,22 @@ func applyAdminServices(s *AdminSettings) {
 		setCriticalDiskPct(s.LogCriticalDiskPct)
 	}
 	applyBlocklistFeeds(s)
-	if s.SaaSFeedURL != "" {
-		globalSaaSFeed.Configure(s.SaaSFeedURL, 24*time.Hour)
-	}
+	// F3a-2: the signed-feed URL is NO LONGER routed into the legacy additive
+	// syncer (globalSaaSFeed). The legacy syncer keeps whatever URL it was
+	// configured with at startup; the new signed-feed URL lives only in the
+	// durable holder below. This is the "critical separation" contract — a
+	// persisted signed URL (feeds.culvertlabs.com/…/manifest.sigstore.json) must
+	// never be handed to the raw-category syncer, which would misinterpret it and
+	// fetch it as a plain feed. No downloader consumes the holder in F3a-2; it is
+	// inert configuration until the F3b signed-feed client lands.
+	setSaaSFeedDurable(saasFeedDurable{
+		Managed:        s.SaaSFeedManaged,
+		Enabled:        s.SaaSFeedEnabled,
+		URL:            s.SaaSFeedURL,
+		Protocol:       s.SaaSFeedProtocol,
+		RefreshSeconds: s.SaaSFeedRefreshSeconds,
+		SchemaVersion:  s.SaaSStoreSchemaVersion,
+	})
 }
 
 // BlocklistFeedSetting is the persisted form of one blocklist feed.
@@ -353,6 +415,24 @@ func applyBlocklistFeeds(s *AdminSettings) {
 			}
 		}
 		blFeedSyncer.SetFeed(feeds[i].URL, interval)
+	}
+}
+
+// applyLegacyLDAPRetirement applies the durable LDAP-authority cutover
+// sentinel (ADR-0025 / P1-2). LoadAdminSettings runs AFTER the legacy auth
+// providers wire (main.go init order), so a retired-but-still-wired legacy
+// provider from THIS boot is deactivated here via the shared enforcement
+// path. The reverse reconciliation also lives here: a cutover observed
+// earlier in boot (registry profile present before the settings path was
+// known) persists now.
+func applyLegacyLDAPRetirement(s *AdminSettings) {
+	if s.LegacyLDAPRetired {
+		legacyLDAPRetiredFlag.Store(true)
+	}
+	enforceLegacyLDAPShadowing()
+	if legacyLDAPRetired() && !s.LegacyLDAPRetired {
+		// In-memory cutover predates the settings load — make it durable.
+		adminSettingsSave()
 	}
 }
 
@@ -561,6 +641,7 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 		TrustForwardedHeaders:  trustForwardedHeaders,
 		TrustedProxyCIDRs:      ListTrustedProxyCIDRs(),
 		TrustedProxyCIDRsSaved: true, // once saved, the persisted list is authoritative (incl. empty)
+		LegacyLDAPRetired:      legacyLDAPRetired(),
 	}
 
 	snapshotAdminEndpoints(&s)
@@ -570,10 +651,12 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 
 	snapshotBlocklistFeeds(&s)
 
-	// SaaS feed
-	if saasURL := globalSaaSFeed.FeedURL(); saasURL != "" {
-		s.SaaSFeedURL = saasURL
-	}
+	// SaaS feed (F3a-2). ALL durable feed-config fields — including the URL —
+	// are snapshotted from the holder (snapshotSaaSFeedDurable is the sole writer
+	// of s.SaaSFeedURL). The legacy syncer no longer owns the URL, so an unrelated
+	// admin mutation preserves the signed-feed config + schema marker without
+	// re-reading (and thereby coupling to) the legacy additive syncer.
+	snapshotSaaSFeedDurable(&s)
 
 	// Upstream proxy pool (raw entries — see field comment)
 	s.UpstreamProxiesSaved = true

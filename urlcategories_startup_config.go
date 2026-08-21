@@ -27,6 +27,12 @@ type urlCategoriesStartupConfig struct {
 	// rules reference by name).
 	DecryptionProfilesPath string
 
+	// CategoryOverridesPath is the admin category-override store (F3a-2). It lives
+	// under <dataDir>/saas_feed/ beside the (F3b) node-local feed generation state,
+	// but — unlike that state — it is CP-authoritative fleet policy (synced,
+	// exported, rollback-able). Its parent dir is created at load time.
+	CategoryOverridesPath string
+
 	// SaaSFeedURL / SaaSFeedInterval configure the curated SaaS category
 	// auto-sync (disabled by default; enabled via admin GUI).
 	SaaSFeedURL      string
@@ -62,6 +68,7 @@ func resolveURLCategoriesStartupConfig(fc *FileConfig, dataDirVal, catFeedDB, ca
 		CatPath:                catPath,
 		CategoryGroupsPath:     filepath.Join(dataDirVal, "category_groups.json"),
 		DecryptionProfilesPath: filepath.Join(dataDirVal, "decryption_profiles.json"),
+		CategoryOverridesPath:  filepath.Join(dataDirVal, "saas_feed", "overrides.json"),
 		SaaSFeedURL:            defaultSaaSFeedURL,
 		SaaSFeedInterval:       24 * time.Hour,
 		FeedDBPath:             catFeedDB,

@@ -108,6 +108,18 @@ components:
         text/plain:
           schema: { type: string }
           example: "Forbidden: insufficient role"
+    PlainConflict:
+      description: Request conflicts with the node's role (e.g. a control-plane-managed setting cannot be edited locally on a data-plane node). Body is plain text.
+      content:
+        text/plain:
+          schema: { type: string }
+          example: "saas feed config is control-plane managed on this data-plane node"
+    PlainNotFound:
+      description: Resource not found within the caller's authorized scope (uniform across tenants). Body is plain text.
+      content:
+        text/plain:
+          schema: { type: string }
+          example: "admin_not_found"
     PlainMethodNotAllowed:
       description: HTTP method not supported by this route. Body is plain text.
       content:
@@ -140,6 +152,12 @@ components:
           enum: [standalone, leader, standby]
         leader: { type: boolean }
         write_authority: { type: boolean }
+        version:
+          type: string
+          description: |
+            Build-time release identity (linker-injected `main.version`, e.g.
+            `v1.0.203`; `dev` for local/untagged builds). Signed release binaries
+            self-report their exact tag here so runtime identity is verifiable.
 
     # ── Setup ───────────────────────────────────────────────────────────────────
     SetupStatus:
@@ -403,12 +421,13 @@ components:
         exclusions: { type: array, items: { type: string }, nullable: true }
     ConnLimitStatus:
       type: object
-      required: [enabled, maxPerIP, activeIPs]
+      required: [enabled, maxPerIP, activeIPs, rejectedTotal]
       additionalProperties: false
       properties:
         enabled: { type: boolean }
         maxPerIP: { type: integer }
         activeIPs: { type: integer }
+        rejectedTotal: { type: integer, format: int64, description: "Cumulative connections refused for exceeding the per-IP cap (process lifetime; never reset)." }
     LoggerConfig:
       type: object
       required: [logFile, logMaxMB, logFormat]
@@ -656,6 +675,7 @@ components:
         available: { type: boolean }
         reason: { type: string }
         verify_mode: { type: string }
+        sigstore_warn: { type: string, description: "Present only when a Sigstore trust override (identity/trusted-root) did not take effect." }
     ObjectReferences:
       type: object
       description: Reverse references from named objects (categories, groups, profiles) to policy rules.
@@ -1311,6 +1331,7 @@ components:
         addr: { type: string }
         format: { type: string }
         drops: { type: integer }
+        panics: { type: integer }
     SetSyslogBody:
       type: object
       additionalProperties: false
@@ -1387,10 +1408,15 @@ components:
         host: { type: string }
     AlertHistory:
       type: object
-      required: [deliveries]
+      required: [deliveries, retry_queue_depth, retry_exhausted_total, retry_dropped_total, dedup_tracked, dedup_evictions_total]
       additionalProperties: false
       properties:
         deliveries: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
+        retry_queue_depth: { type: integer, description: "Failed webhook deliveries currently queued for retry." }
+        retry_exhausted_total: { type: integer, description: "Deliveries that used up all retry attempts and were permanently dropped." }
+        retry_dropped_total: { type: integer, description: "Deliveries dropped because the retry queue was at capacity." }
+        dedup_tracked: { type: integer, description: "Alert dedup keys currently held inside the 30s suppression window (bounded)." }
+        dedup_evictions_total: { type: integer, description: "Dedup keys evicted at the cap. Non-zero means the alert key space is being flooded with unique details, so duplicate suppression is degraded — alerts may deliver more than once per window, never fewer." }
     PACExceptionsList:
       type: object
       required: [exceptions]
@@ -1451,6 +1477,137 @@ components:
       properties:
         ut1: { $ref: '#/components/schemas/URLCatFeedStatusEntry' }
         saas: { $ref: '#/components/schemas/URLCatFeedStatusEntry' }
+    SaaSFeedSettings:
+      type: object
+      description: >-
+        Configured SaaS signed category-feed settings plus resolved effective
+        values. runtime_activation_available is always false until the signed-feed
+        client ships; this schema deliberately carries no last_success / active
+        version / freshness / provenance.
+      required: [managed, enabled, url, protocol, refresh_seconds, official_url, editable, runtime_activation_available]
+      additionalProperties: true
+      properties:
+        managed: { type: boolean, description: "true ⇒ enabled is authoritative; false ⇒ on-by-default (never explicitly configured)." }
+        enabled: { type: boolean }
+        url: { type: string, description: "Configured manifest URL ('' ⇒ the built-in official endpoint)." }
+        protocol: { type: string, enum: [signed_manifest_v1], description: "Signed-only; not downgradeable." }
+        refresh_seconds: { type: integer, format: int64, description: "Poll cadence in seconds (0 ⇒ the 24h default; effective min 1h)." }
+        official_url: { type: string, description: "The official built-in feed endpoint the empty URL resolves to and the only accepted origin." }
+        editable: { type: boolean, description: "false on a managed data-plane node (feed policy is control-plane-authoritative)." }
+        runtime_activation_available: { type: boolean, description: "Always false in this release — configuration is stored but no feed is fetched, verified, activated, or served yet." }
+        note: { type: string }
+        resolved:
+          type: object
+          additionalProperties: false
+          properties:
+            url: { type: string }
+            protocol: { type: string }
+            enabled: { type: boolean }
+            refresh_seconds: { type: integer, format: int64 }
+        resolve_error: { type: string }
+    SetSaaSFeedSettings:
+      type: object
+      description: SaaS feed configuration update. All fields optional.
+      additionalProperties: false
+      properties:
+        managed: { type: boolean, description: "Presence toggle: omit ⇒ managed becomes true (a PUT is explicit management)." }
+        enabled: { type: boolean, description: "Presence toggle: omit ⇒ enabled defaults true." }
+        url: { type: string, description: "Official-origin manifest URL; '' ⇒ the built-in official endpoint. Any non-official value is rejected (no generic mirror)." }
+        protocol: { type: string, enum: ['', signed_manifest_v1], description: "'' ⇒ signed_manifest_v1. No other value is accepted (no unsigned/raw fallback)." }
+        refresh: { type: string, description: "Go duration (e.g. '24h'); '' ⇒ default. Min-clamped to 1h." }
+    CategoryOverrides:
+      type: object
+      description: >-
+        Admin category overrides layered on the feed snapshot. Each key carries
+        host+subdomain suffix scope. A wholly-empty object clears every override.
+      additionalProperties: false
+      properties:
+        added:
+          type: object
+          description: "host → category to insert."
+          additionalProperties: { type: string }
+        recategorized:
+          type: object
+          description: "host → category to repoint."
+          additionalProperties: { type: string }
+        tombstones:
+          type: array
+          description: "hosts to suppress (self + subdomains)."
+          items: { type: string }
+    SaaSFeedOverridesResponse:
+      type: object
+      required: [overrides, editable]
+      additionalProperties: false
+      properties:
+        overrides: { $ref: '#/components/schemas/CategoryOverrides' }
+        editable: { type: boolean, description: "false on a managed data-plane node." }
+    SaaSFeedActivationDelta:
+      type: object
+      additionalProperties: false
+      description: "Host-count change of the last SUCCESSFUL activation. null in never_succeeded."
+      properties:
+        hosts_added: { type: integer }
+        hosts_removed: { type: integer }
+        hosts_changed: { type: integer }
+    SaaSFeedStatus:
+      type: object
+      additionalProperties: true
+      description: "Signed SaaS category-feed runtime status (read-only). Nullable fields render null when absent."
+      required: [state, configured, enabled, managed, authority, protocol, active_source, provenance, signature_status, compiled_trusted, stale, host_count, category_count, override_count, failures_since_start, consecutive_failures, never_succeeded]
+      properties:
+        state:
+          type: string
+          enum: [disabled, waiting_for_authority, recovering, embedded, fresh, stale, syncing, degraded, critical]
+        configured: { type: boolean }
+        enabled: { type: boolean }
+        managed: { type: boolean }
+        authority: { type: string, description: "standalone / control-plane / managed-dp" }
+        protocol: { type: string }
+        url: { type: string }
+        active_source: { type: string, enum: [embedded, downloaded, cached, resumed] }
+        provenance: { type: string, enum: [embedded, downloaded, cached] }
+        signature_status: { type: string, enum: [verified, failed, compiled_trusted] }
+        compiled_trusted: { type: boolean }
+        stale: { type: boolean }
+        host_count: { type: integer }
+        category_count: { type: integer }
+        override_count: { type: integer }
+        not_modified: { type: boolean }
+        failures_since_start: { type: integer }
+        consecutive_failures: { type: integer }
+        never_succeeded: { type: boolean }
+        syncing: { type: boolean }
+        waiting_for_authority: { type: boolean }
+        recovering: { type: boolean }
+        critical: { type: boolean }
+        active_feed_version: { type: integer, nullable: true }
+        config_revision: { type: string, nullable: true }
+        override_revision: { type: string, nullable: true }
+        generated_at: { type: string, format: date-time, nullable: true }
+        manifest_expires_at: { type: string, format: date-time, nullable: true }
+        expires_in_days: { type: integer, nullable: true }
+        last_attempt: { type: string, format: date-time, nullable: true }
+        last_successful_check: { type: string, format: date-time, nullable: true }
+        last_successful_activation: { type: string, format: date-time, nullable: true }
+        next_attempt: { type: string, format: date-time, nullable: true }
+        last_outcome: { type: string, nullable: true, enum: [ok, no_change, error, canceled, skipped] }
+        last_error_class: { type: string, nullable: true }
+        last_http_status: { type: integer, nullable: true }
+        last_activation_delta:
+          nullable: true
+          allOf: [ { $ref: '#/components/schemas/SaaSFeedActivationDelta' } ]
+        critical_reason: { type: string }
+        detail: { type: string }
+    SaaSFeedRefreshResult:
+      type: object
+      additionalProperties: false
+      required: [refreshed, status]
+      properties:
+        refreshed: { type: boolean, description: "true only when a strictly-greater generation activated." }
+        status:
+          type: string
+          enum: [activated, no_change, failed, skipped, canceled, in_progress, unavailable]
+        state: { type: string }
     SetClusterLabels:
       type: object
       required: [node_id]
@@ -1588,13 +1745,78 @@ components:
       properties:
         id: { type: string }
         name: { type: string }
-        type: { type: string, enum: [oidc, saml] }
+        type: { type: string, enum: [oidc, saml, ldap] }
         emailDomains: { type: array, items: { type: string }, nullable: true }
         enabled: { type: boolean }
         priority: { type: integer }
         knownGroups: { type: array, items: { type: string }, nullable: true }
         oidc: { type: object, additionalProperties: true, nullable: true }
         saml: { type: object, additionalProperties: true, nullable: true }
+        ldap: { $ref: '#/components/schemas/LDAPProfileConfigInput' }
+    LDAPProfileConfigInput:
+      type: object
+      description: |
+        LDAP/Active Directory profile settings (ADR-0025). bindPassword is a
+        WRITE-ONLY input: never returned by reads, preserved when omitted on
+        update, cleared only when present and empty. Read responses carry the
+        derived bindCredentialConfigured flag instead.
+      required: [url, baseDn]
+      additionalProperties: false
+      nullable: true
+      properties:
+        url: { type: string, description: "ldap://host[:port] or ldaps://host[:port] (host[:port] only — no credentials, path, or query)." }
+        startTls: { type: boolean, description: "Upgrade a plain ldap:// connection with StartTLS. Invalid together with ldaps://." }
+        tlsSkipVerify: { type: boolean, description: "UNSAFE — disable certificate verification (self-signed dev directories only)." }
+        bindDn: { type: string, description: "Service-account DN used to locate users; empty = anonymous bind." }
+        bindPassword: { type: string, description: "Write-only service-account credential." }
+        bindCredentialConfigured: { type: boolean, description: "Read-only response metadata; ignored on write." }
+        baseDn: { type: string }
+        userFilter: { type: string, description: "Search filter template with exactly one %s placeholder. Default (sAMAccountName=%s)." }
+        emailAttribute: { type: string, description: "Default mail." }
+        nameAttribute: { type: string, description: "Default displayName." }
+        groupAttribute: { type: string, description: "Default memberOf; values are kept verbatim (full group DNs)." }
+        requiredGroup: { type: string, description: "Legacy provider-level access gate (direct membership). Prefer Access Rules over identity groups." }
+        cacheTtlSeconds: { type: integer, description: "Authoritative auth-result cache TTL. 0 = default (300)." }
+    IdPTestRequest:
+      type: object
+      required: [profile]
+      additionalProperties: false
+      properties:
+        profile: { $ref: '#/components/schemas/IdPProfileInput' }
+        testUsername: { type: string, description: "Optional directory login to run the full identity test." }
+        testPassword: { type: string, description: "Transient test credential — never persisted, logged, or audited." }
+    IdPTestReport:
+      type: object
+      required: [ok, steps]
+      additionalProperties: false
+      properties:
+        ok: { type: boolean }
+        steps:
+          type: array
+          items:
+            type: object
+            required: [name, label, ok]
+            additionalProperties: false
+            properties:
+              name: { type: string }
+              label: { type: string }
+              ok: { type: boolean }
+              skipped: { type: boolean }
+              durationMs: { type: integer, format: int64 }
+              detail: { type: string }
+              error: { type: string, description: "Sanitized, length-bounded server error text." }
+              action: { type: string, description: "Actionable operator hint for a failed stage." }
+        identity:
+          type: object
+          nullable: true
+          additionalProperties: false
+          required: [sub, groupCount]
+          properties:
+            sub: { type: string }
+            email: { type: string }
+            name: { type: string }
+            groupCount: { type: integer }
+            groups: { type: array, items: { type: string }, description: "Bounded sample of resolved groups." }
     SetPolicyDraftBody:
       type: object
       required: [require_commit]
@@ -1686,13 +1908,13 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/HealthStatus' }
-              example: { status: ok, role: standalone, leader: true, write_authority: true }
+              example: { status: ok, role: standalone, leader: true, write_authority: true, version: v1.0.203 }
         '503':
           description: HA standby node — not currently the writable leader.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/HealthStatus' }
-              example: { status: standby, role: standby, leader: false, write_authority: false }
+              example: { status: standby, role: standby, leader: false, write_authority: false, version: v1.0.203 }
         '405': { $ref: '#/components/responses/PlainMethodNotAllowed' }
 
   /api/setup/status:
@@ -4067,12 +4289,31 @@ paths:
             schema: { $ref: '#/components/schemas/CreateConfigVersionBody' }
       responses:
         '200':
-          description: Create config snapshot.
+          description: |
+            Rollback applied, and every store it wrote reached disk
+            (`status:rolled_back`, `stores_persisted:true`).
+            `runtime_only_surfaces` lists the parts of the snapshot that are
+            restored to the RUNNING configuration but are not persisted by this
+            path — they are re-read from admin settings on restart and will
+            revert (CHAOS-46).
           content:
             application/json:
               schema: { type: object, additionalProperties: true }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+        '500':
+          description: |
+            Either the stored version could not be read, or (CHAOS-27) the
+            rollback was applied to the RUNNING configuration but one or more
+            stores could not be written to disk — `status:rolled_back_not_durable`
+            with `applied:true`, `stores_persisted:false`, and `persist_errors`
+            naming the files. The running config has already changed, so the
+            recovery is to fix the data directory and re-save, not to retry the
+            rollback.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+            text/plain: { schema: { type: string } }
 
   /api/decryption-profiles:
     get:
@@ -8295,6 +8536,107 @@ paths:
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
 
+  /api/idp/test:
+    post:
+      operationId: testIdP
+      tags: [auth]
+      summary: Test IdP directory connection
+      description: |
+        Run the staged, candidate-based directory test for an LDAP/Active
+        Directory IdP profile BEFORE persisting it: server reachability,
+        transport security (LDAPS/StartTLS), service-account bind, Base DN
+        search, and — optionally, when a transient test username/password is
+        supplied — a full user lookup + authentication + identity mapping.
+        The candidate profile is never persisted; an empty ldap.bindPassword
+        on a candidate that names an existing profile id reuses the stored
+        credential so edits never require retyping the secret. Test-user
+        passwords are transient: never persisted, logged, cached, or audited.
+        Errors are sanitized and bounded; the HTTP call returns 200 with the
+        per-step report even when the directory test fails.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: non-idempotent
+      x-culvert-introduced-version: 1.2.0
+      x-culvert-danger-level: low
+      x-culvert-audit-event: idp.test
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/IdPTestRequest' }
+      responses:
+        '200':
+          description: Staged directory-test report (ok=false when any stage failed).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IdPTestReport' }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/idp/legacy-ldap:
+    get:
+      operationId: getLegacyLDAP
+      tags: [auth]
+      summary: Legacy YAML LDAP summary
+      description: |
+        Non-secret summary of the legacy bootstrap `ldap:` block from
+        config.yaml, plus its authority state (active / shadowed by an
+        enabled registry LDAP profile). The bind credential is never
+        returned — only a bindCredentialConfigured flag. Used by the
+        Identity Providers screen to offer the explicit one-time import.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.2.0
+      responses:
+        '200':
+          description: Legacy YAML LDAP summary.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/idp/legacy-ldap/import:
+    post:
+      operationId: importLegacyLDAP
+      tags: [auth]
+      summary: Import legacy YAML LDAP configuration
+      description: |
+        Create a DISABLED LDAP IdP profile from the legacy bootstrap `ldap:`
+        block, copying every security-effective field (including the stored
+        bind credential, which never transits the browser). The administrator
+        then tests and enables the profile — the explicit, downgrade-safe
+        migration path into the IdP registry. The YAML file is never
+        modified. 404 when no legacy ldap block is configured.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: non-idempotent
+      x-culvert-introduced-version: 1.2.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: idp.import
+      responses:
+        '200':
+          description: The imported (disabled) LDAP IdP profile, secret-redacted.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404': { $ref: '#/components/responses/PlainNotFound' }
+
   /api/syslog:
     get:
       operationId: getSyslog
@@ -8875,6 +9217,198 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/URLCatFeedStatus' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/saas-feed/settings:
+    get:
+      operationId: getSaaSFeedSettings
+      tags: [policy]
+      summary: SaaS signed category-feed configuration
+      description: >-
+        Returns the CONFIGURED SaaS signed category-feed settings (url, protocol,
+        managed, enabled, refresh) and the resolved effective values. Clearly
+        separates configured state from runtime activation state — runtime
+        activation (download/verify/activate/serve) is not yet available, so this
+        endpoint never reports last_success, an active version, freshness, or
+        provenance.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: SaaS feed configuration.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SaaSFeedSettings' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    put:
+      operationId: setSaaSFeedSettings
+      tags: [policy]
+      summary: Set SaaS signed category-feed configuration
+      description: >-
+        Updates the SaaS signed category-feed configuration. The protocol is
+        signed-only (signed_manifest_v1); the URL is constrained to the official
+        Culvert feed origin (an empty URL resolves to the built-in official
+        endpoint). Configuration only — no feed is downloaded, verified, or
+        activated. Denied with 409 on a managed data-plane node (feed policy is
+        control-plane-authoritative).
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: saasfeed.settings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetSaaSFeedSettings' }
+      responses:
+        '200':
+          description: Updated SaaS feed configuration.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SaaSFeedSettings' }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '409': { $ref: '#/components/responses/PlainConflict' }
+  /api/saas-feed/overrides:
+    get:
+      operationId: getSaaSFeedOverrides
+      tags: [policy]
+      summary: Admin category overrides
+      description: >-
+        Returns the admin-owned category overrides (added, recategorized,
+        tombstones) layered on the SaaS feed snapshot.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Admin category overrides.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SaaSFeedOverridesResponse' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    put:
+      operationId: setSaaSFeedOverrides
+      tags: [policy]
+      summary: Replace admin category overrides
+      description: >-
+        Full-set replacement of the admin category overrides. Transmit the
+        complete desired set; an empty body ({}) is a deliberate clear of every
+        override (an explicit empty replacement that delete-propagates to the
+        fleet). Denied with 409 on a managed data-plane node.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: saasfeed.overrides
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CategoryOverrides' }
+      responses:
+        '200':
+          description: Updated overrides.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '409': { $ref: '#/components/responses/PlainConflict' }
+  /api/saas-feed/status:
+    get:
+      operationId: getSaaSFeedStatus
+      tags: [policy]
+      summary: SaaS signed category-feed runtime status
+      description: >-
+        Returns the signed SaaS category-feed's runtime status: the derived state
+        (disabled, waiting_for_authority, recovering, embedded, fresh, stale,
+        syncing, degraded, critical), serving provenance and signature trust, the
+        active feed version and freshness, the composed host/category/override
+        footprint, and attempt/failure bookkeeping. Nullable fields (active version,
+        timestamps, last activation delta, expires_in_days) render as null when
+        absent — never a fabricated zero. Read-only; never reports success before a
+        durable activation and live cutover complete.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: SaaS feed runtime status.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SaaSFeedStatus' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/saas-feed/refresh:
+    post:
+      operationId: refreshSaaSFeed
+      tags: [policy]
+      summary: Trigger a manual SaaS signed-feed refresh
+      description: >-
+        Triggers a manual refresh of the signed SaaS category feed. Shares the
+        runtime's serialized refresh path (singleflight): if a refresh is already in
+        flight it returns 202 with status=in_progress and does NOT start a second. A
+        manual refresh is an operational action (it mutates no configuration), so it
+        is permitted on a managed data-plane node; it is a deterministic no-op when
+        the feed is disabled or the node lacks authoritative configuration.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: low
+      x-culvert-audit-event: saasfeed.refresh
+      responses:
+        '200':
+          description: Refresh completed (see status for the outcome).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SaaSFeedRefreshResult' }
+        '202':
+          description: A refresh is already in flight (status=in_progress).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SaaSFeedRefreshResult' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '503':
+          description: The signed-feed runtime is not armed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SaaSFeedRefreshResult' }
   /api/alerts/webhooks/history:
     get:
       operationId: getAlertHistory
@@ -9607,3 +10141,666 @@ paths:
           description: Unknown profile. Body is plain text.
           content:
             text/plain: { schema: { type: string } }
+
+  # ── MCP admin API (PR-9) ─────────────────────────────────────────────────────
+  /api/mcp/overview:
+    get:
+      operationId: getMCPOverview
+      tags: [mcp]
+      summary: MCP admin overview
+      description: Safe MCP overview — distribution state (local_only), execution state (not_implemented), Management tool count and a health snapshot.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200': { description: Overview, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/mcp/health:
+    get:
+      operationId: getMCPHealth
+      tags: [mcp]
+      summary: MCP health & durability
+      description: Capability-isolated MCP health — Gateway/Management runtime and PR-8 durability state, distribution_state local_only, and Management access surface.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200': { description: Health snapshot, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/mcp/servers:
+    get:
+      operationId: listMCPServers
+      tags: [mcp]
+      summary: MCP server inventory
+      description: Tenant-scoped, redacted server inventory. Requires the tenant query parameter. A server_id parameter returns one server. No raw endpoint or credential material.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: tenant
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      parameters:
+        - { name: tenant, in: query, required: true, schema: { type: string } }
+        - { name: server_id, in: query, required: false, schema: { type: string } }
+        - { name: limit, in: query, required: false, schema: { type: integer } }
+      responses:
+        '200': { description: Server list or one server, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404': { $ref: '#/components/responses/PlainNotFound' }
+  /api/mcp/tools:
+    get:
+      operationId: listMCPTools
+      tags: [mcp]
+      summary: MCP tool inventory
+      description: Tenant-scoped, redacted tool inventory. Quarantined/drifted tools stay visibly quarantined. No complete schemas, arguments or output.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: tenant
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      parameters:
+        - { name: tenant, in: query, required: true, schema: { type: string } }
+        - { name: server_id, in: query, required: false, schema: { type: string } }
+        - { name: tool_name, in: query, required: false, schema: { type: string } }
+        - { name: limit, in: query, required: false, schema: { type: integer } }
+      responses:
+        '200': { description: Tool list or one tool, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404': { $ref: '#/components/responses/PlainNotFound' }
+  /api/mcp/decisions:
+    get:
+      operationId: searchMCPDecisions
+      tags: [mcp]
+      summary: MCP decision search
+      description: Bounded, tenant-scoped, cursor-paginated search over committed PR-8 decision events. Safe filters only; no raw arguments or output.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: tenant
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      parameters:
+        - { name: tenant, in: query, required: true, schema: { type: string } }
+        - { name: capability, in: query, required: false, schema: { type: string, enum: [gateway, management] } }
+        - { name: cursor, in: query, required: false, schema: { type: string } }
+        - { name: action, in: query, required: false, schema: { type: string } }
+        - { name: reason_code, in: query, required: false, schema: { type: string } }
+        - { name: rule_id, in: query, required: false, schema: { type: string } }
+        - { name: server_id, in: query, required: false, schema: { type: string, maxLength: 256 } }
+        - { name: tool_name, in: query, required: false, schema: { type: string, maxLength: 256 } }
+        - { name: tool_fingerprint, in: query, required: false, schema: { type: string, maxLength: 256 } }
+        - { name: principal_id, in: query, required: false, schema: { type: string, maxLength: 256 } }
+        - { name: agent_id, in: query, required: false, schema: { type: string, maxLength: 256 } }
+        - { name: client_id, in: query, required: false, schema: { type: string, maxLength: 256 } }
+        - { name: execution_state, in: query, required: false, schema: { type: string, maxLength: 256 } }
+        - { name: policy_snapshot_hash, in: query, required: false, schema: { type: string, maxLength: 256 } }
+        - { name: credential_profile_ref, in: query, required: false, schema: { type: string, maxLength: 256 } }
+        - { name: limit, in: query, required: false, schema: { type: integer } }
+      responses:
+        '200': { description: Decision page, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/mcp/decision-explain:
+    get:
+      operationId: explainMCPDecision
+      tags: [mcp]
+      summary: MCP historical decision explanation
+      description: Historical explanation projected exclusively from the committed PR-8 event (never re-evaluated against the current policy). Source is always "historical".
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: tenant
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      parameters:
+        - { name: tenant, in: query, required: true, schema: { type: string } }
+        - { name: capability, in: query, required: false, schema: { type: string, enum: [gateway, management] } }
+        - { name: event_id, in: query, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Historical explanation, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404': { $ref: '#/components/responses/PlainNotFound' }
+  /api/mcp/policy:
+    get:
+      operationId: getMCPPolicy
+      tags: [mcp]
+      summary: Current MCP policy metadata
+      description: Active capability-local policy revision, hash, rule count and default action. distribution_state local_only.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      parameters:
+        - { name: capability, in: query, required: false, schema: { type: string, enum: [gateway, management] } }
+      responses:
+        '200': { description: Policy metadata, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404': { $ref: '#/components/responses/PlainNotFound' }
+  /api/mcp/policy-simulate:
+    post:
+      operationId: simulateMCPPolicy
+      tags: [mcp]
+      summary: Validate/simulate/compare a candidate MCP policy
+      description: Runs a candidate policy through the SAME PR-6 engine (mode=validate|simulate|compare). Deterministic, I/O-free, publishes nothing.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: none
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        '200': { description: Validation/simulation/comparison result, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/mcp/publications:
+    get:
+      operationId: listMCPPublications
+      tags: [mcp]
+      summary: List MCP publication requests
+      description: Tenant-scoped list of pending/terminal local policy-publication requests.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: tenant
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      parameters:
+        - { name: tenant, in: query, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Publication requests, content: { application/json: { schema: { type: array, items: { type: object, additionalProperties: true } } } } }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: createMCPPublication
+      tags: [mcp]
+      summary: Create an MCP publication request
+      description: Compiles+validates a candidate, checks the expected base revision, and binds a four-eyes publication request. Publishes nothing.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: tenant
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: mcp.publication.create
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        '200': { description: Request created, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/mcp/publication-decision:
+    post:
+      operationId: decideMCPPublication
+      tags: [mcp]
+      summary: Approve/reject/publish an MCP publication request
+      description: Four-eyes decision on a publication request. Publish commits the PR-8 P-CRIT event BEFORE the local store change (fail-closed, local_only). Never executes.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: tenant
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: mcp.publication.decision
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        '200': { description: Decision applied, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404': { $ref: '#/components/responses/PlainNotFound' }
+        '409': { $ref: '#/components/responses/PlainConflict' }
+        '503': { description: Durability not available; nothing published. Body is plain text., content: { text/plain: { schema: { type: string } } } }
+  /api/mcp/approvals:
+    get:
+      operationId: listMCPApprovals
+      tags: [mcp]
+      summary: List MCP operational approvals
+      description: Tenant-scoped operational approval requests. An id parameter returns one, with the full MCP-POLICY-007 dialog fields (no credential material).
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: tenant
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      parameters:
+        - { name: tenant, in: query, required: true, schema: { type: string } }
+        - { name: id, in: query, required: false, schema: { type: string } }
+      responses:
+        '200': { description: Approvals or one approval, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404': { $ref: '#/components/responses/PlainNotFound' }
+  /api/mcp/approval-decision:
+    post:
+      operationId: decideMCPApproval
+      tags: [mcp]
+      summary: Approve/reject an MCP operational approval
+      description: Four-eyes decision on an operational approval. Commits the PR-8 event before state change; never executes, calls upstream, or materializes a credential.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: tenant
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: mcp.approval.decision
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        '200': { description: Decision applied, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404': { $ref: '#/components/responses/PlainNotFound' }
+        '409': { $ref: '#/components/responses/PlainConflict' }
+        '503': { description: Durability not available; approval unchanged. Body is plain text., content: { text/plain: { schema: { type: string } } } }
+  /api/mcp/config:
+    get:
+      operationId: getMCPConfig
+      tags: [mcp]
+      summary: Get PR-9 MCP configuration
+      description: Node-local Gateway/Management MCP listener+access configuration (references and metadata only; no secrets). distribution_state local_only.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200': { description: MCP config, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    put:
+      operationId: updateMCPConfig
+      tags: [mcp]
+      summary: Update PR-9 MCP configuration (local only)
+      description: Transactional local apply — validate the complete candidate, retain the previous config on failure. Gateway/Management stay separate; no wildcard bind; no shared port; mutation stays disabled in V1. No CP→DP propagation (distribution_not_implemented).
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: mcp.config.update
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        '200': { description: Applied locally, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/mcp/management-access:
+    get:
+      operationId: getMCPManagementAccess
+      tags: [mcp]
+      summary: Management MCP access status
+      description: Safe Management-access surface — enabled/bound/min-role/output-bound/mutation-off — plus the fixed read-only tool catalog and per-tool authorization (no mutation tools).
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200': { description: Management access + tool catalog, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/mcp/distribution:
+    get:
+      operationId: getMCPDistribution
+      tags: [mcp]
+      summary: Signed CP→DP MCP distribution status
+      description: Safe, read-only signed CP→DP distribution status per capability (current/previous content hash, epoch, config/policy/catalog/credential revisions, signing key id, minimum DP version, rollback availability). Never exposes a private signing key, a raw signature, or a full raw snapshot. local_only when signed distribution is not active.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200': { description: Distribution status, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/mcp/distribution/acks:
+    get:
+      operationId: getMCPDistributionAcks
+      tags: [mcp]
+      summary: Capability-scoped per-DP acknowledgement read model
+      description: >-
+        PR-UX-5 bounded, read-only acknowledgement read model for one capability and content hash.
+        Returns the truthful per-DP acknowledgement rows (applied/rejected/rolled_back/received/validated,
+        or unavailable when a node has not acknowledged the hash) and the derived distribution counts
+        (intended/applied/rolled_back/rejected/incompatible/unavailable). Fleet state is derived ONLY from
+        real acknowledgements, never from a stored envelope, a signed hash, a successful request, the
+        desired/local mode, or elapsed time. When no signed distribution is configured on this node
+        (the disabled-default posture, no publication coordinator is wired), configured is false, counts
+        is null, and rows is empty (unavailable / not configured), never a benign zero-as-healthy default.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      parameters:
+        - { name: capability, in: query, required: false, schema: { type: string, enum: [gateway, management] } }
+        - { name: content_hash, in: query, required: false, schema: { type: string } }
+      responses:
+        '200': { description: Acknowledgement read model, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/mcp/rollback:
+    post:
+      operationId: createMCPRollback
+      tags: [mcp]
+      summary: Four-eyes atomic rollback to a retained signed snapshot
+      description: Initiates an operator-controlled atomic rollback of a capability's active signed snapshot to an exact retained target content hash, via the four-eyes publication workflow with a PR-8 durable commit before any signing/push/swap. Admin-only and CSRF-protected. Management MCP may read distribution health but never publish or roll back. Fails closed with distribution_not_configured when signed distribution is not active on this node.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: mcp.rollback.request
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [capability, target_hash]
+              properties:
+                capability: { type: string, enum: [gateway, management] }
+                target_hash: { type: string }
+                reason: { type: string }
+      responses:
+        '200': { description: Rollback initiated, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '409': { $ref: '#/components/responses/PlainConflict' }
+  /api/mcp/rollout:
+    get:
+      operationId: getMCPRollout
+      tags: [mcp]
+      summary: MCP rollout status
+      description: Safe, read-only PR-11 rollout status per capability — desired, locally-active, and fleet-effective mode, scope revision/hash, bounded low-cardinality metrics, DP acknowledgement counts, and the Production qualification lock. Never exposes a tenant, subject, token, credential, or raw request/response. Production is always locked (this build ships no qualification issuer).
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200': { description: Rollout status, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/mcp/rollout/transition:
+    post:
+      operationId: createMCPRolloutTransition
+      tags: [mcp]
+      summary: Request a one-stage rollout mode transition
+      description: Requests a one-stage promotion (Disabled→Observe→Shadow→Canary→Production) or a multi-stage demotion. A promotion/widening rides the PR-10 signed publication path (four-eyes + PR-8 durable commit + sign + distribute + DP-ack); a CP-side accepted transition is not fleet-effective until acknowledged. Production is rejected without an externally-verified qualification receipt — no config/env/CLI/API can bypass it. Fails closed with distribution_not_configured when the signed path is not active on this node.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: mcp.rollout.transition.request
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [capability, to_mode]
+              properties:
+                capability: { type: string, enum: [gateway, management] }
+                to_mode: { type: string, enum: [disabled, observe, shadow, canary, production] }
+                base_revision: { type: integer }
+      responses:
+        '202': { description: Transition accepted (pending signed publication + DP acknowledgement), content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '409': { $ref: '#/components/responses/PlainConflict' }
+  /api/mcp/rollout/scope:
+    get:
+      operationId: getMCPRolloutScope
+      tags: [mcp]
+      summary: Current rollout scope
+      description: >-
+        Returns the current rollout scope for a capability. PR-UX-5 enriches it beyond
+        revision/hash/connector/high-risk with a safe structured summary: kind (enumerated /
+        percentage / matches-nothing), enumerable + matches-nothing flags, percent, operations,
+        per-dimension selector and exclusion counts, and the exact serializable scope spec
+        (reviewed config identifiers only; no secret, token, or raw request/response).
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200': { description: Rollout scope, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    put:
+      operationId: updateMCPRolloutScope
+      tags: [mcp]
+      summary: Update (widen/narrow) the rollout scope
+      description: Updates the rollout scope via the PR-10 signed publication path with four-eyes approval for widening. Fails closed with distribution_not_configured when the signed path is not active.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: mcp.rollout.scope.update
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        '202': { description: Scope update accepted (pending signed publication), content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '409': { $ref: '#/components/responses/PlainConflict' }
+  /api/mcp/rollout/scope/validate:
+    post:
+      operationId: validateMCPRolloutScope
+      tags: [mcp]
+      summary: Validate a candidate rollout scope and preview its diff
+      description: >-
+        PR-UX-5 read-only candidate-scope validation preview. Compiles a candidate scope spec through
+        the SAME pure validator the DP uses (bounds, no-wildcard, high-risk gate, percentage
+        well-formedness) and returns valid/invalid with a classified error code, a safe summary of the
+        candidate and the current active scope, and a per-dimension diff (add/remove counts, percentage,
+        high-risk, enumerable and content-hash transitions). It is a PREVIEW only: viewer-readable,
+        non-mutating, no publication, no state change, no audit. The candidate capability is bound to the
+        requested capability (capability isolation).
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-danger-level: none
+      x-culvert-introduced-version: 1.0.0
+      parameters:
+        - { name: capability, in: query, required: false, schema: { type: string, enum: [gateway, management] } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                scope: { type: object, additionalProperties: true }
+      responses:
+        '200': { description: Validation + diff preview, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/mcp/rollout/evidence:
+    get:
+      operationId: getMCPRolloutEvidence
+      tags: [mcp]
+      summary: Rollout evidence-window progress
+      description: >-
+        Measured Production Qualification evidence read model for a capability: window
+        floors (shadow 14d, canary 7d, soak 24h), zero open critical/high defects, and
+        rollback rehearsal, each with a typed requirement state
+        (met/not_met/not_started/synthetic_non_qualifying/not_applicable), server-computed
+        elapsed seconds, start timestamps, a production/synthetic origin label, a bounded
+        summary, and the broader qualification categories NOT represented by runtime
+        evidence. PR-UX-6 enriches the original response additively (all original keys
+        retained). Reporting only, read-only (no mutation, no window is stamped on read):
+        it never asserts Production qualification, which remains locked behind the
+        separate external gate.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200': { description: Rollout evidence, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/mcp/rollout/emergency:
+    post:
+      operationId: createMCPRolloutEmergency
+      tags: [mcp]
+      summary: Emergency kill switch (narrows only)
+      description: Engages or clears the capability-local emergency kill switch (immediate admission stop). Node-local — no CP round trip. Emergency actions NARROW only; they can never promote, widen scope, or enable execution.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: mcp.rollout.emergency.disable
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [capability]
+              properties:
+                capability: { type: string, enum: [gateway, management] }
+                action: { type: string, enum: [disable, clear] }
+      responses:
+        '200': { description: Emergency state, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/mcp/rollout/rehearse-rollback:
+    post:
+      operationId: createMCPRolloutRehearse
+      tags: [mcp]
+      summary: Record a rollback rehearsal
+      description: Records a rollback rehearsal as local evidence. The live signed rollback runs through the PR-10 coordinator; this marks the rehearsal-performed evidence flag only.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: mcp.rollout.rehearse-rollback
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                capability: { type: string, enum: [gateway, management] }
+      responses:
+        '200': { description: Rehearsal recorded, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/mcp/executions:
+    get:
+      operationId: getMCPExecutions
+      tags: [mcp]
+      summary: Bounded MCP execution history
+      description: Bounded, safe execution history — counts only (executed, upstream ok/err, DLP blocks, hard-failure blocks, shadow overrides, commit failures). Never a tenant, subject, argument, URL, or token.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200': { description: Execution history, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/mcp/upstream-health:
+    get:
+      operationId: getMCPUpstreamHealth
+      tags: [mcp]
+      summary: Upstream MCP leg health
+      description: Bounded upstream-leg health (success/error counts; enabled flag). Disabled-by-default (no upstream pool bound).
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200': { description: Upstream health, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '403': { $ref: '#/components/responses/PlainForbidden' }

@@ -6,6 +6,7 @@ package main
 // the logger/sanitizeLog coupling belongs.
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/KidCarmi/Culvert/internal/syslog"
@@ -18,8 +19,20 @@ type syslogWriter = syslog.Writer
 
 // newSyslogWriter constructs a syslog Writer. Thin wrapper over syslog.NewWriter
 // kept for InitSyslog and the integration test that builds a writer directly.
+// Wires the panic observer here (the internal/syslog package is a stdlib-only
+// leaf and cannot log for itself) so every Writer this process constructs —
+// startup and runtime reconfigure alike — reports a recovered delivery panic
+// to the process log, which is what the SIEM-forwarding admin panel's warning
+// tells the operator to check.
 func newSyslogWriter(network, addr, format string) (*syslogWriter, error) {
-	return syslog.NewWriter(network, addr, format)
+	sw, err := syslog.NewWriter(network, addr, format)
+	if err != nil {
+		return nil, err
+	}
+	sw.SetPanicObserver(func(recovered any) {
+		logger.Printf("ERROR syslog: recovered panic in delivery goroutine (line dropped): %q", sanitizeLog(fmt.Sprintf("%v", recovered)))
+	})
+	return sw, nil
 }
 
 // globalSyslog is the active syslog writer; nil when syslog is not configured.

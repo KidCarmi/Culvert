@@ -1,5 +1,18 @@
 # MCP Data-Flow Diagrams
 
+> **PR-11 status (guarded execution / Shadow / Canary) — IMPLEMENTED, disabled by default.** The mode
+> ladder, immutable revisioned scope, central hard-failure classifier, bounded Model-A upstream client,
+> guarded execution (commit-before-side-effect, DLP-before-egress, credential containment, no client-token
+> passthrough), and signed CP→DP rollout distribution now ship in `internal/mcp/{rollout,upstreamclient,execution}`
+> and the `package main` composition. **Observe is non-executing; Shadow/Canary execute only inside an exact
+> approved scope for Model A (local-client); Production remains qualification-locked** (no config/env/CLI/API
+> bypass; no in-binary issuer). `outbound-connector`/`dmz-endpoint`, endpoint bridge, transparent discovery,
+> and Management mutation remain excluded. Duration targets (14d/7d/24h) are measurable machinery, not
+> completed evidence; Production Qualification is the separate gate. There is no PR-12 in this
+> package's slice sequence — see [`IMPLEMENTATION-SLICES.md`](IMPLEMENTATION-SLICES.md) (not to be
+> confused with the unrelated fix CLAUDE.md separately labels "PR-12").
+
+
 Seventeen numbered data-flow diagrams (DFD-1 … DFD-17) for the MCP subsystem. Each marks its **trust
 boundaries** (TB-1 … TB-7 from [`THREAT-MODEL.md`](THREAT-MODEL.md)) and the dominant threats. **Status:
 PR-0 design artifact (Proposed).** These are design flows; no runtime exists. Diagrams are Mermaid so they
@@ -324,7 +337,7 @@ today**, and the PR-1 primitive alone does not make the listener safe.
 
 ## DFD-13 — Outbound-only connector (Model B)
 
-Crosses TB-6. Threats: MCP-T-051, MCP-T-052, MCP-T-010.
+Crosses TB-6. Threats: MCP-T-051, MCP-T-053, MCP-T-010.
 
 ```mermaid
 flowchart LR
@@ -473,8 +486,44 @@ The forbidden dashed edge (opening or holding an `endpoint`-awaiting SSE) is the
 | 10 | platform | TB-3, TB-5 | 047–050 |
 | 11 | platform | TB-3 | 047, 048 |
 | 12 | connectivity | TB-1, TB-6 | 036, 037, 030, 031/055 |
-| 13 | connectivity | TB-6 | 051, 052, 010 |
+| 13 | connectivity | TB-6 | 051, 053, 010 |
 | 14 | connectivity | TB-6, TB-1 | 036, 042, 052, 031 |
 | 15 | **A and B** (both listeners, PR-1 kernel) | **TB-1, TB-7** | 057–074 (parser/framing/version/state) |
 | 16 | **B** (both legs, PR-1 kernel) | **TB-1, TB-2** | 076, 077 (reverse-channel/direction confusion; admitted-but-unpoliced dispatch) |
 | 17 | **B** (transport rejection, PR-1/PR-5) | **TB-1** | 078 (security-rejection-path legacy fallback + retained unauthenticated stream) |
+
+## STRIDE-divergence reconciliation (predicate-21 advisory arm)
+
+`predicate-21` has two arms. Its **STRICT (gated)** arm proves that each DFD's own header threat/boundary
+declaration equals the coverage-summary row above — those two are the **authoritative per-flow
+enumeration** and are kept byte-parity-locked. Its **advisory (non-gated)** arm additionally compares each
+header against the [`THREAT-MODEL.md`](THREAT-MODEL.md) §9 *"Dominant STRIDE threats"* row, which is a
+**curated dominant-subset** summary — deliberately narrower than the full per-flow enumeration. A header ⊇
+§9 relationship is therefore expected and is **not** a defect. This subsection adjudicates every divergence
+the advisory arm reports, so none remains unexplained:
+
+- **DFD-6 (credential selection).** Header adds `MCP-T-005` (credential-substitution) to the §9 dominant
+  set `022–025`. **Intentional:** the credential-selection flow can be attacked by substitution, but §9
+  lists only the dominant credential-scoping threats. Header is the authoritative superset.
+- **DFD-7 (input inspection).** Header adds `MCP-T-040` to the §9 dominant set `026/036/037/041`.
+  **Intentional:** `040` is an inspection-adjacent threat carried in the full flow enumeration; §9 lists the
+  dominant subset.
+- **DFD-12 (local enterprise client connectivity).** Header adds the inbound-rebinding pair
+  `MCP-T-031/055` to the §9 dominant set `030/036/037`. **Intentional:** the local-client listener still
+  crosses TB-1, where inbound rebinding applies (validated per request by `MCP-INSP-009`); §9 lists the
+  connectivity-dominant subset.
+- **DFD-13 (outbound-only connector, Model B).** **Corrected — this was a genuine transposition, now
+  reconciled.** The connector's binding threats are the D-8 closure mapping (THREAT-MODEL §"decision→threat"
+  closure: `D-8 → MCP-T-051 / MCP-T-053 / MCP-T-010`): connector compromise (`051`), cloud data-residency
+  (`053`, residual R-5), and tenant-binding (`010`). The header, coverage row, **and** §9 now all read
+  `051, 053, 010`. The prior `MCP-T-052` (DMZ endpoint abuse) belonged to the DMZ flow (DFD-14), not the
+  connector — a connector has no unsolicited inbound port — and has been removed here.
+- **DFD-14 (hardened DMZ endpoint, Model C).** **Corrected + intentional superset.** The DMZ's own
+  endpoint-abuse threat is `MCP-T-052` (not the connector-compromise `MCP-T-051`), per the D-9 closure
+  mapping (`D-9 → MCP-T-052 / MCP-T-031`); §9 now reads `036, 042, 052`. The header additionally carries
+  `MCP-T-031` (inbound DNS-rebinding — a DMZ threat under D-9, enforced by `MCP-INSP-009`), so header ⊇ §9
+  by the same intentional dominant-subset rule as DFD-6/7/12.
+
+After this reconciliation the advisory arm reports only the three intentional header⊇§9 supersets
+(DFD-6/7/12) plus DFD-14's single intentional `031` superset; DFD-13 now matches exactly. No unexplained
+DFD-header vs THREAT-MODEL divergence remains.

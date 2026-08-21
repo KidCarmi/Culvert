@@ -157,13 +157,16 @@ func (bs *Syncer) Feeds() []Feed {
 // since its last attempt. Feeds with interval 0 are skipped.
 func (bs *Syncer) Start(ctx context.Context) {
 	go func() {
-		bs.syncDue()
+		// CHAOS-24: syncDue fetches and merges operator-configured remote
+		// blocklists. Guard the ROUND so one bad feed body costs a tick, not
+		// the process; the scheduler keeps waking and retries the next window.
+		obs.SafeCall("blocklistfeed", bs.syncDue)
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-time.After(tickInterval):
-				bs.syncDue()
+				obs.SafeCall("blocklistfeed", bs.syncDue)
 			}
 		}
 	}()

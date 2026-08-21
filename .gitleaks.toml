@@ -7,3 +7,14 @@
   # Test hex string used in TestInitSessionSecretFromConfig_Valid.
   # Not a real secret — repeating pattern used to exercise hex-decode path.
   commits = ["7778b3bae6b3e3e4d7cb898a89c1799ec80b162c"]
+
+  # M7 Slice 2.5-C3 sealed telemetry golden interoperability vector. The recipient
+  # "private key" here is a PUBLIC TEST VECTOR — a deliberately obvious 32×0x42
+  # scalar published so tac-platform can prove cross-repository sealed-box interop.
+  # It is not a secret, grants access to nothing, and is never loaded by production
+  # (TestSealedGoldenTestKeyIsConfinedToTestData pins that). Allowlisted by exact
+  # path so this cannot broaden into a blanket testdata exemption.
+  paths = [
+    '''testdata/telemetry/v1/sealed/recipient_private_key\.bin''',
+    '''testdata/telemetry/v1/sealed/recipient_public_key\.bin''',
+  ]

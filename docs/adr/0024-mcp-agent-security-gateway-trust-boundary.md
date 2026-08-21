@@ -1,8 +1,8 @@
 # ADR-0024: MCP Agent Security Gateway — trust boundaries, separation from the SWG, and PR-1 entry decisions
 
-- **Status:** Proposed (design decisions approved by the PR-0 facilitator on 2026-07-24; **awaiting formal ratification by the Architecture Review Board and Security Architecture** — see "Ratification" below). Do not treat as organizationally Accepted until that step is recorded.
-- **Date:** 2026-07-24
-- **Deciders:** Staff/Principal Engineer + Product Security Architect (proposer). **Ratifiers (pending):** Architecture Review Board (ARB) + Security Architecture, with domain approvers IAM/PAM (D-2), SRE/Security (D-5), Privacy/Legal + Network Security (D-8, D-9), Security Architecture (D-13).
+- **Status:** Accepted (2026-07-31). The accepted architecture baseline is the merged repository state — this ADR, the `docs/design/mcp/` package, the predicates, and the CI gates that enforce them. See "Acceptance" below.
+- **Date:** 2026-07-24 (decided); 2026-07-31 (accepted).
+- **How decided:** developed through independent, isolated AI architecture and security reviews plus adversarial red-team review, with every decision reduced to a recorded requirement, threat, config surface, or predicate. There is no external Architecture Review Board, Security Architecture team, IAM/PAM team, SRE team, or Privacy team in this project; it is developed by the repository owner using independent AI research, adversarial review, structural predicates, and CI. The domain labels retained below (identity, events, connectivity, dual-surface) name the *review lens*, not an organizational sign-off.
 - **Supersedes:** [`docs/design/mcp/ADR-PROPOSAL-mcp-trust-boundary.md`](../design/mcp/ADR-PROPOSAL-mcp-trust-boundary.md) (the in-package Option-B proposal, now a non-authoritative pointer to this ADR).
 - **Related:** ADR-0001 (record architecture decisions), ADR-0002 (flat `package main` → `internal/`), [`docs/adr/0018-openapi-contract.md`](0018-openapi-contract.md) (OpenAPI contract — renamed on `main` from the former `ADR-0007-openapi-contract.md`); the C1/C1.5/C2 admin-route metadata program; the PR-0 design package under [`docs/design/mcp/`](../design/mcp/README.md).
 - **Numbering:** `0024` is the **next free number across the repository-wide ADR/RFC allocation**, not merely "next in `docs/adr/`". As of `origin/main` `7791c706`, `docs/adr/` runs `0001–0018` (with legacy duplicate numbers at `0008`–`0011`); the OpenAPI-contract ADR was **renamed from the former `ADR-0007-openapi-contract.md` to [`docs/adr/0018-openapi-contract.md`](0018-openapi-contract.md)**, leaving `0007` solely the secret-containment ADR (`docs/adr/0007-secret-containment-boundary.md`). `docs/support/rfc/` holds `0012` and `0018`–`0022` (highest RFC `0022`). **`0023` is claimed by the unrelated Durable Configuration Publication ADR in open PR #854** (`docs/adr/0023-durable-config-publication.md`), wholly separate from MCP. This MCP ADR therefore takes **`0024`**, which is **unique across all `origin/main` refs and open PRs** (verified — no `0024` exists on `main`).
@@ -368,23 +368,32 @@ blueprint red line and a GO/NO-GO NO-GO condition.
 
 PR-1 (Protocol Kernel) may begin only when **all** of the following hold:
 
-1. This ADR is **Accepted** under `docs/adr/` (ARB + Security Architecture ratification recorded — see
-   "Ratification"). Until then it is `Proposed` and the gate is **not** satisfied.
-2. `PR0-REVIEW-CHECKLIST.md` is signed by all roles.
+1. This ADR is **Accepted** under `docs/adr/` (recorded above and in "Acceptance"). **Satisfied.**
+2. The PR-0 role-evidence review is complete — the eight review lenses in
+   [`PR0-REVIEW-CHECKLIST.md`](../design/mcp/PR0-REVIEW-CHECKLIST.md) each point to concrete documents,
+   RPRs, tests, or independent-verification evidence (no human role signatures are required — see #923
+   Gate 2). **Satisfied.**
 3. The Scope, Architecture, Dual-surface (D-13), Identity (D-2), Events (D-5) and Connectivity (D-8, D-9)
    domain gates are GO with no hard NO-GO line tripped ([`GO-NO-GO-CHECKLIST.md`](../design/mcp/GO-NO-GO-CHECKLIST.md)).
 4. Every blocking decision due at PR-1/PR-3 has a named owner.
-5. **D-1 (supported MCP protocol-version baseline and compatibility policy) is externally verified and
-   human-approved.** Because PR-1 *is* the Protocol Kernel — parser, lifecycle, transport and
-   compatibility behavior depend directly on D-1 — D-1 **must not** be left for closure during
-   implementation.
-6. The **current repository build and test baseline is run and recorded** before any PR-1 code change
-   begins (the PR-0 session did not run it — VRC §11).
+5. **D-1 (supported MCP protocol-version baseline and compatibility policy) is CLOSED** with the V1
+   baseline recorded in [`OPEN-DECISIONS.md`](../design/mcp/OPEN-DECISIONS.md) §D-1,
+   [`PROTOCOL-COMPATIBILITY.md`](../design/mcp/PROTOCOL-COMPATIBILITY.md),
+   [`TRANSPORT-FALLBACK-EVIDENCE.md`](../design/mcp/TRANSPORT-FALLBACK-EVIDENCE.md) and
+   [`PR1-ENTRY-CLOSURE.md`](../design/mcp/PR1-ENTRY-CLOSURE.md): primary `2025-11-25`, compatibility floor
+   `2025-06-18`, every other revision (incl. `2024-11-05`, `2025-03-26`, `2026-07-28`) rejected; Remote
+   Streamable HTTP only (no stdio, no legacy HTTP+SSE); batch rejected; the six-method admitted surface of
+   [`MCP-OPERATION-REGISTRY.md`](../design/mcp/MCP-OPERATION-REGISTRY.md). **Satisfied.**
+6. **D-15 (MCP config-surface registry integration) is CLOSED** — implementation contract accepted;
+   `MCP-CFG-001` and the config-surface matrix are authoritative (OPEN-DECISIONS §D-15). **Satisfied.**
+7. The **current repository build and test baseline is re-anchored to current `main`** and recorded in
+   #923 Gate 4 and [`PR1-ENTRY-CLOSURE.md`](../design/mcp/PR1-ENTRY-CLOSURE.md). **Satisfied.**
 
-This ADR closes **D-2, D-5, D-8, D-9, D-13**. **D-1** remains open and is elevated to a hard PR-1 entry
-gate (item 5). **D-3, D-4, D-6, D-10, D-12** remain slice-scoped; **D-7, D-11** remain post-V1 / GA. **D-14**
-(concrete protocol-kernel limit values + batch policy) is added slice-scoped to PR-1 — the `MCP-PROTO-*`
-requirements are defined; only their numeric values are open.
+This ADR closes **D-2, D-5, D-8, D-9, D-13**; **D-1** and **D-15** are now CLOSED (the two hard PR-1 entry
+gates — see [`OPEN-DECISIONS.md`](../design/mcp/OPEN-DECISIONS.md)). **D-3, D-4, D-6, D-10, D-12** remain
+slice-scoped; **D-7, D-11** remain post-V1 / GA. **D-14** (concrete protocol-kernel limit values + batch
+policy) is added slice-scoped to PR-1 — the `MCP-PROTO-*` requirements are defined and batch is rejected in
+V1; only the numeric limit values are open.
 
 **PR-1 Protocol-Kernel scope (post-remediation).** The PR-1 attack surface — MCP parser, JSON-RPC framing,
 version adapters and protocol state — is modeled by threats **MCP-T-057..074** (plus RPR-1 **MCP-T-076/077**),
@@ -397,10 +406,27 @@ negotiated-version method set (#928, MCP-PROTO-016).** (See `THREAT-MODEL.md`, `
 `CI-GATES.md`, and `PR1-READINESS-REMEDIATION.md`.) Item 8's `internal/mcp/*` decision ratifies the **namespace and boundary**;
 the exact leaf-package names remain `[REC]`, subject to implementation review (not fixed by this ADR).
 
-## Ratification
+## Acceptance
 
-This ADR is created as `Status: Proposed`. To move to `Accepted`, record here: the ratification date, the
-named ARB and Security Architecture approvers, and confirmation that the domain approvers (IAM/PAM for D-2,
-SRE/Security for D-5, Privacy/Legal + Network Security for D-8/D-9, Security Architecture for D-13) have
-signed. Per ADR-0001 practice, reference this ADR from the Technical Risk/Debt registers and the
-Engineering Dashboard on acceptance. Do not claim organizational approval that has not occurred.
+This ADR is **Accepted** as of 2026-07-31. Acceptance rests on the merged repository state, not on an
+organizational sign-off:
+
+- The design decisions were developed through **independent, isolated AI architecture and security
+  reviews** and **adversarial red-team review**. This project has no external ARB, Security Architecture,
+  IAM/PAM, SRE, or Privacy organization; those labels name review lenses, not approvers.
+- All **five board blockers** ([#925](https://github.com/KidCarmi/Culvert/issues/925),
+  [#926](https://github.com/KidCarmi/Culvert/issues/926),
+  [#927](https://github.com/KidCarmi/Culvert/issues/927),
+  [#928](https://github.com/KidCarmi/Culvert/issues/928),
+  [#929](https://github.com/KidCarmi/Culvert/issues/929)) were **remediated and independently verified**,
+  and are closed as completed.
+- **RPR-1 through RPR-4** (the four-PR remediation plan covering those blockers) are **complete**.
+- **D-1** (protocol baseline) and **D-15** (config-surface registry integration) — the two hard PR-1 entry
+  decisions — are **CLOSED** (see [`OPEN-DECISIONS.md`](../design/mcp/OPEN-DECISIONS.md)).
+- Implementation must satisfy the recorded requirements (`MCP-*`), the structural **predicates**
+  ([`predicates/`](../design/mcp/predicates/README.md), enforced by the required Fast PR Gate), and the CI
+  gates ([`CI-GATES.md`](../design/mcp/CI-GATES.md)).
+
+No separate signature block is required, and none is implied. Per ADR-0001 practice, this ADR is referenced
+from the closure record [`PR1-ENTRY-CLOSURE.md`](../design/mcp/PR1-ENTRY-CLOSURE.md) and the PR-1 entry
+tracker [#923](https://github.com/KidCarmi/Culvert/issues/923).

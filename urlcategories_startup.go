@@ -10,6 +10,7 @@ package main
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/KidCarmi/Culvert/internal/feedsync"
@@ -20,7 +21,7 @@ import (
 // stash it on startupState.
 func loadURLCategories(cfg urlCategoriesStartupConfig, ctx context.Context) *FeedSyncer {
 	if err := catStore.Load(cfg.CatPath); err != nil {
-		logger.Fatalf("Cannot load URL categories: %v", err)
+		logFatalf("Cannot load URL categories: %v", err)
 	}
 	logger.Printf("URLCat: %d categories loaded from %s", len(catStore.All()), cfg.CatPath)
 
@@ -43,10 +44,26 @@ func loadURLCategories(cfg urlCategoriesStartupConfig, ctx context.Context) *Fee
 		seedDefaultDecryptionProfiles()
 	}
 
-	// SaaS category feed (dynamic updates from GitHub). Additive merge: new
-	// domains added, admin removals preserved. Disabled by default; enabled
-	// via the admin GUI.
-	globalSaaSFeed.Configure(cfg.SaaSFeedURL, cfg.SaaSFeedInterval)
+	// Admin category overrides (F3a-2). CP-authoritative fleet policy, folded onto
+	// the feed snapshot only by the future downloader (F3b) — inert config here.
+	// Non-fatal: a missing file is the first-run state (empty overrides); a corrupt
+	// or schema-newer file leaves the store empty and is re-synced from the CP.
+	if cfg.CategoryOverridesPath != "" {
+		if err := os.MkdirAll(filepath.Dir(cfg.CategoryOverridesPath), 0o700); err != nil {
+			logger.Printf("CategoryOverrides: cannot create store dir: %v", err)
+		} else if err := globalCategoryOverrides.Load(cfg.CategoryOverridesPath); err != nil {
+			logger.Printf("CategoryOverrides: load error: %v", err)
+		}
+	}
+
+	// Signed SaaS URL-category feed (F3b-4). This RETIRES the legacy raw syncer from
+	// runtime authority: we no longer arm globalSaaSFeed (no fetch of the old raw GitHub
+	// URL, no dual scheduler/writer). The signed-feed lifecycle runs offline-first record
+	// recovery + arms the single refresh scheduler; the compiled embedded baseline in
+	// catStore preserves safe SaaS category behavior until the signed feed is explicitly
+	// enabled (disabled by default; no unsolicited requests). cfg.SaaSFeedURL/Interval are
+	// retained on the config struct for the migration/historical-URL contract only.
+	startSignedFeedLifecycle(filepath.Dir(cfg.CategoryOverridesPath), ctx)
 
 	// Community URL category feed (BadgerDB, Layer 2). Layer 1 (catStore)
 	// remains the priority; BadgerDB is the fallback.
@@ -57,7 +74,7 @@ func loadURLCategories(cfg urlCategoriesStartupConfig, ctx context.Context) *Fee
 	var dbErr error
 	communityDB, dbErr = openCommunityDB(cfg.FeedDBPath)
 	if dbErr != nil {
-		logger.Fatalf("CatFeedDB → cannot open BadgerDB at %s: %v", cfg.FeedDBPath, dbErr)
+		logFatalf("CatFeedDB → cannot open BadgerDB at %s: %v", cfg.FeedDBPath, dbErr)
 	}
 	syncer := newFeedSyncer(communityDB, cfg.FeedURL, cfg.FeedSyncInterval)
 	globalUT1FeedSyncer = syncer // UC-6: expose Stats() to /metrics

@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/feedsync"
-	"github.com/KidCarmi/Culvert/internal/saasfeed"
 )
 
 // globalUT1FeedSyncer is a package handle to the UT1 FeedSyncer created in
@@ -30,9 +29,10 @@ import (
 // renders 0/0 in that case.
 var globalUT1FeedSyncer *FeedSyncer
 
-// Failure counters are package-owned by the syncers: the UT1 counter by
-// internal/feedsync (feedsync.SyncFailures()) and the SaaS counter by
-// internal/saasfeed (saasfeed.SyncFailures()).
+// The UT1 failure counter is package-owned by internal/feedsync
+// (feedsync.SyncFailures()). The legacy raw SaaS syncer's metrics were RETIRED in
+// F3b-4 (the syncer is no longer armed); the signed SaaS feed's observability is the
+// culvert_saasfeed_* family (saas_feed_metrics.go).
 
 // unixOrZero renders t as Unix seconds, or 0 when t is the zero time
 // (never-synced), so a freshness alert can use `time() - <metric> > threshold`.
@@ -54,7 +54,6 @@ func urlcatWritePrometheus(w *strings.Builder) {
 	if globalUT1FeedSyncer != nil {
 		catEntries, catLastSync, _ = globalUT1FeedSyncer.Stats()
 	}
-	_, saasLastSync, saasEntries, _ := globalSaaSFeed.Stats()
 
 	w.WriteString("\n# HELP culvert_category_feed_last_sync_timestamp_seconds Unix time of the last successful UT1 category feed sync (0 = never)\n")
 	w.WriteString("# TYPE culvert_category_feed_last_sync_timestamp_seconds gauge\n")
@@ -64,19 +63,7 @@ func urlcatWritePrometheus(w *strings.Builder) {
 	w.WriteString("# TYPE culvert_category_feed_entries gauge\n")
 	fmt.Fprintf(w, "culvert_category_feed_entries %d\n", catEntries)
 
-	w.WriteString("\n# HELP culvert_saas_feed_last_sync_timestamp_seconds Unix time of the last successful SaaS category feed sync (0 = never)\n")
-	w.WriteString("# TYPE culvert_saas_feed_last_sync_timestamp_seconds gauge\n")
-	fmt.Fprintf(w, "culvert_saas_feed_last_sync_timestamp_seconds %d\n", unixOrZero(saasLastSync))
-
-	w.WriteString("\n# HELP culvert_saas_feed_entries Domains added by the last SaaS category feed sync\n")
-	w.WriteString("# TYPE culvert_saas_feed_entries gauge\n")
-	fmt.Fprintf(w, "culvert_saas_feed_entries %d\n", saasEntries)
-
 	w.WriteString("\n# HELP culvert_category_feed_sync_failures_total UT1 category feed sync failures (download/parse or bulk-write errors)\n")
 	w.WriteString("# TYPE culvert_category_feed_sync_failures_total counter\n")
 	fmt.Fprintf(w, "culvert_category_feed_sync_failures_total %d\n", feedsync.SyncFailures())
-
-	w.WriteString("\n# HELP culvert_saas_feed_sync_failures_total SaaS category feed sync failures (request/fetch/read/parse errors)\n")
-	w.WriteString("# TYPE culvert_saas_feed_sync_failures_total counter\n")
-	fmt.Fprintf(w, "culvert_saas_feed_sync_failures_total %d\n", saasfeed.SyncFailures())
 }

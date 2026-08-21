@@ -82,6 +82,7 @@ func TestInit(t *testing.T) {
 		TS: time.Now().UnixMilli(), Time: time.Now().Format("15:04:05"),
 		IP: "10.0.0.1", Method: "GET", Host: "example.com", Status: "OK", Level: "INFO",
 	})
+	Sync() // persistence is async; wait for the drain goroutine
 
 	data, err := os.ReadFile(path) // #nosec G304 -- test temp path
 	if err != nil {
@@ -114,6 +115,7 @@ func TestAdd_CountsWriteErrors(t *testing.T) {
 
 	before := WriteErrors()
 	Add(Entry{TS: 1, Method: "GET", Host: "x.example.com", Status: "OK"})
+	Sync() // persistence is async; wait for the drain goroutine
 	if got := WriteErrors(); got != before+1 {
 		t.Errorf("WriteErrors() = %d, want %d", got, before+1)
 	}

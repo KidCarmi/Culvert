@@ -1,5 +1,18 @@
 # MCP Test Traceability Matrix
 
+> **PR-11 status (guarded execution / Shadow / Canary) — IMPLEMENTED, disabled by default.** The mode
+> ladder, immutable revisioned scope, central hard-failure classifier, bounded Model-A upstream client,
+> guarded execution (commit-before-side-effect, DLP-before-egress, credential containment, no client-token
+> passthrough), and signed CP→DP rollout distribution now ship in `internal/mcp/{rollout,upstreamclient,execution}`
+> and the `package main` composition. **Observe is non-executing; Shadow/Canary execute only inside an exact
+> approved scope for Model A (local-client); Production remains qualification-locked** (no config/env/CLI/API
+> bypass; no in-binary issuer). `outbound-connector`/`dmz-endpoint`, endpoint bridge, transparent discovery,
+> and Management mutation remain excluded. Duration targets (14d/7d/24h) are measurable machinery, not
+> completed evidence; Production Qualification is the separate gate. There is no PR-12 in this
+> package's slice sequence — see [`IMPLEMENTATION-SLICES.md`](IMPLEMENTATION-SLICES.md) (not to be
+> confused with the unrelated fix CLAUDE.md separately labels "PR-12").
+
+
 `Threat → Security requirement → Control → Test → Evidence → Owner → Gate` for every Critical/High threat
 and the full test taxonomy. **Status: PR-0 design artifact (Proposed).** No test below exists today; each
 is a build target. Per [`VERIFIED-REPOSITORY-CONTEXT.md`](VERIFIED-REPOSITORY-CONTEXT.md), the MCP-specific
@@ -148,6 +161,34 @@ The **PR-1 gate proves structural / terminal / zero-stream properties only**; it
 runtime listener assertions (load, N-client zero-retention) are implemented, and it does **not** claim any
 `D-1 BLOCKED` fixture is green.
 
+> **PR-5 status (listener assertions IMPLEMENTED).** The listener-side rows above (`MCP-INSP-009` rebinding,
+> rows 20–24/28–29 terminal-405/zero-stream, `MCP-OPS-002` saturation) are now backed by
+> `internal/mcp/runtime`: `TestPipeline_TransportMethods` (GET/DELETE/other → 405, no body/stream),
+> `TestListener_HostRecheckedPerRequestH11` + `TestListener_HostRecheckedPerStreamH2` (E2E rebinding over a
+> reused H1.1 keep-alive and a multiplexed HTTP/2 connection — the per-request/per-stream revalidation proof),
+> `TestListener_AdmissionBounded` + `TestRuntime_ListenerIsolation` (per-listener bounds + cross-capability
+> isolation), and `TestAntiWeakening_RetainStreamAlwaysFalse` (the unconditional zero-retained-stream
+> invariant). Version-set-dependent rows (25, 27) stay **D-1 BLOCKED** as noted; the N-rejected-clients load
+> row (29) is discharged structurally — PR-5 opens no stream on any path, so N rejections retain zero streams
+> by construction. Observe-only disposition (decision-point methods) is `TestPipeline_DecisionPointObserveOnly`.
+
+> **PR-6 status (policy engine + simulator IMPLEMENTED).** `MCP-POLICY-001..006`, `MCP-TOOL-004/006`,
+> `MCP-ID-005/006` are backed by `internal/mcp/policy` + `internal/mcp/policy/simulate`. Default-deny +
+> action-matrix + first-match ordering: `engine_smoke_test.go`, `compile_test.go` (`TestCompile_AllNineActions`,
+> `TestCompile_ObligationMatrix`, `TestCompile_ManagementLegalActionsOnly`), `engine_test.go`
+> (`TestMatch_*`, `TestMatch_FirstByPriority`, `TestReasonAndRevisionAlwaysStamped`). Hard overrides + no
+> laundering + destructive contract + fail-closed: `antiweakening_test.go` (17 tripwires — unknown-tool,
+> privilege-expansion, server-identity/disabled, cross-tenant, ambiguous-identity, Management-mutation,
+> destructive-never-implicit), `engine_test.go` (`TestHardOverride_BeatsBroadAllow`,
+> `TestIdentityAmbiguous_WriteDenied`). Determinism + namespace isolation + I/O-freedom + input immutability:
+> `property_test.go`, `noio_test.go` (AST import-allowlist + clock-free wall), `input_test.go`. Explain-trace
+> safety/bounds: `engine_test.go` (`TestExplainTrace_SafeAndBounded`). Simulator ≡ same evaluator + blast
+> radius: `simulate_test.go` (`TestSingle_UsesSameEvaluator`, `TestCompare_NewAllowHighlighted`,
+> `TestShadow_Relation`). Runtime decision-only integration — never contacts an upstream server, a credential
+> provider, or the broker, an ALLOW-class decision returns an unimplemented execution state, and a missing
+> snapshot fails closed: `internal/mcp/runtime/policy_test.go`.
+> Fuzz: `FuzzCompile`/`FuzzEvaluate`/`FuzzGlob`. `MCP-POLICY-007` (approval UX) is deferred to PR-9.
+
 ### 1a. Requirement-specific coverage (completeness — do not rely on the "Unit | all" row)
 
 These requirements were previously reachable only via family/range shorthand or the catch-all "Unit | all"
@@ -213,24 +254,30 @@ test, evidence, owner and gate, per the completeness rule — a fake threat is N
 | Protocol structural limits (size/depth/field/string/number) | MCP-PROTO-006,007,008 | **Missing** — limit + resource-budget assertions | PR-1 |
 | Version negotiation / downgrade / adapter equivalence | MCP-PROTO-010,011 | **Missing** — D-1-gated fixtures | PR-1 (D-1-gated) |
 | Protocol-state / cancellation / duplicate-completion | MCP-PROTO-012 | **Missing** — protocol-state machine tests | PR-1 |
-| Malicious MCP server fixtures | MCP-SERVER-*, MCP-TOOL-* | **Missing** | PR-2 |
-| Non-compliant server fixtures | MCP-SERVER-*, protocol | **Missing** | PR-2 |
+| Malicious MCP server fixtures | MCP-SERVER-*, MCP-TOOL-* | **Present (PR-2)** | PR-2 |
+| Non-compliant server fixtures | MCP-SERVER-*, protocol | **Present (PR-2)** | PR-2 |
 | Fuzzing (protocol kernel: parser/framing/adapter/cancellation) | MCP-PROTO-009 (+006,008) | `fuzz-nightly.yml` exists but is **advisory/nightly — not a merge gate**; a **new bounded blocking PR-1 fuzz gate** is required ([`CI-GATES.md`](CI-GATES.md)) | PR-1 |
 | Race | concurrency invariants | `-race` gate exists | PR-1+ |
 | Config-surface matrix **parse validity + anti-vacuity** — valid GFM table (header == delimiter == every data-row width) with **every delimiter cell ≥ 3 hyphens**, **non-empty** parse, expected row count, no duplicate field IDs; **summary integrity** (every declared label exactly once, no duplicate member inside a row, forward parity plus reverse parity bound either to the class it enumerates exhaustively or to an explicit pinned name list for a bounded subset); and **two complete, unique censuses** (value kind *and* registry class — every token claimed exactly once incl. zero-valued `pinned-identity`/`RC-X`, no unknown tokens, plus row and sensitive-kind totals); **zero parsed rows is an unconditional failure**. Executable now as `predicates/predicate-26.py` with **22** seeded controls (delimiter cells of one/two hyphens and malformed alignment, 16-vs-17 delimiter, zero-row parse, dropped bounded-summary member, duplicate summary member, duplicate summary row, registry-class census omitted/wrong/duplicated/`RC-X`-nonzero, deleted value-kind claim, falsified zero-valued claim, falsified row total, RC-1 summary disagreement, `RC-0` row in the `RC-2` summary, missing summary member, `provider-ref → RC-6`, duplicate field, unknown value kind, live `RC-X` row) and 3 negative controls. | **MCP-CFG-001** | `predicate-26.py` **runs in the required Fast PR Gate** (`Gate · MCP design predicates`) for PRs touching the MCP design surface; a failure blocks the aggregate. This gates the **design matrix** only — the runtime `configSurfaces` parity below remains unenforced until PR-1. | PR-1 |
 | Config-surface anti-drift parity (MCP) — both omission cases (new field in a known type **and** an entirely new/nested type), redaction parity for `Sensitive` rows, **value-kind vocabulary + `sensitive-kind ⇒ RC-1|RC-2` invariant evaluated over REGISTRY ENTRIES, plus bidirectional registry↔matrix field-ID parity, with two seeded failure cases: `provider-ref → RC-6`, and a sensitive field registered with no matrix row**, capture/apply parity for every DP-affecting field (the **four** `RC-5` fields **and** DP-affecting `RC-7` rows such as `snapshot_sync_enabled` / `snapshot_min_dp_version`, which are covered by the every-DP-affecting-field rule rather than by `RC-5` membership), nested cap parity, wire-wipe ⇔ `omitempty`, GUI parity, `count(RC-X) == 0` | **MCP-CFG-001** | Existing `config_surfaces_test.go` covers **only** the three hard-coded non-MCP types at one level of reflection — **MCP coverage is Missing**; extension strategy is `D-15` | PR-1 |
 | Property tests | MCP-POLICY-002 (determinism) | **Missing** | PR-6 |
-| Authentication negative matrix | MCP-AUTH-001..004 | **Missing** | PR-3 |
+| Authentication negative matrix | MCP-AUTH-001..004 | **Present (PR-3)** — `internal/mcp/authn` JWT + opaque negative-auth matrix (alg=none/confusion/bad-sig/unknown-kid/wrong-issuer/missing-or-wrong-audience/expired/not-yet-valid/excessive-TTL/missing subject-client-tenant-scope) | PR-3 |
 | Authorization negative matrix | MCP-POLICY-*, MCP-MGMT-* | **Missing** | PR-6/PR-9 |
-| Replay | MCP-AUTH-006 | **Missing** | PR-3 |
-| Wrong audience / wrong resource | MCP-AUTH-002,003 | **Missing** | PR-3 |
-| SSRF (private-IP matrix) | MCP-INSP-004 | ssrf unit tests exist; MCP matrix **missing** | PR-7 |
-| DNS rebinding lab | MCP-INSP-005 | **Missing** | PR-7 |
-| Redirect chains | MCP-INSP-006 | per-client tests exist; shared MCP **missing** | PR-7 |
+| Replay | MCP-AUTH-006 | **Present (PR-3)** — `internal/mcp/senderconstraint` DPoP proof-`jti` replay cache: a repeated proof is rejected, a fresh proof for the same still-valid access token succeeds, per-capability partitions cannot exhaust one another, and a full cache fails closed | PR-3 |
+| Wrong audience / wrong resource | MCP-AUTH-002,003 | **Present (PR-3)** — `internal/mcp/authn` canonical-resource audience validation over JWT **and** opaque tokens; foreign `aud`, `client_id`-as-audience, upstream-server-as-audience, cross-capability resource, and absent audience all denied | PR-3 |
+| No client-token passthrough | MCP-AUTH-005, MCP-CRED-001 | **Present (PR-4)** — `internal/mcp/credentials/broker` consumes only the PR-3 `identity.ResolvedContext`; the provider request carries only the one-way correlation digest (no `RawSecret`/`ForwardToken`/`AuthorizationHeader` accessor exists) | PR-4 |
+| Credential scope / power validation | MCP-CRED-002 | **Present (PR-4)** — profile scope + provider-effective-scope subset/power-ceiling checks reject cross-tenant/server/tool/resource and over-privileged material; a read-only credential is rejected for a write op | PR-4 |
+| Credential rotation / revocation | MCP-CRED-003 | **Present (PR-4)** — validate-before-publish rotation state machine with bounded grace; immediate tombstone-and-cache-invalidate revocation (idempotent; racing materialization/rotation cannot revive a revoked version) | PR-4 |
+| Secret containment (broker) | MCP-CRED-004 | **Present (PR-4)** — opaque `secret.Sealed` handles only; scoped zeroize-on-success/error/panic callback; sanitized `SafeResult`; canary-proof provider-error sanitization; canary scans over errors/metadata/cache/snapshots. Event-redaction leg stays PR-8 | PR-4 (broker) / PR-8 (events) |
+| Encrypted bounded credential cache | MCP-CRED-005 | **Present (PR-4)** — bounded, partitioned, TTL, deterministic-eviction, stampede-coalesced cache holding only encrypted envelopes (no plaintext) | PR-4 |
+| Broker fail-closed semantics | MCP-CRED-006 | **Present (PR-4)** — high-risk always fails closed (no stale fallback); low-risk cached fallback only under explicit profile policy with a valid, fresh, non-revoked entry; gate failure leaves provider/cache untouched | PR-4 |
+| SSRF (private-IP matrix) | MCP-INSP-004 | **Present (PR-7)** — `internal/mcp/inspection/destination` canonicalization + private-IP matrix over the authoritative `internal/ssrf` table (loopback/RFC1918/link-local/metadata/multicast/reserved/mapped-bypass/non-canonical-numeric/userinfo/scheme) | PR-7 |
+| DNS rebinding lab | MCP-INSP-005 | **Present (PR-7)** — injected-resolver `Resolve` + immutable `PinnedDestination` + connect-time `VerifyPeer` (peer-in-pin, private-peer, mixed/empty answer, stale pin, real `ssrf.Control`) + fuzz | PR-7 |
+| Redirect chains | MCP-INSP-006 | **Present (PR-7)** — one shared request-local `RedirectGuard` (hop cap, loop, downgrade, cross-origin, public→private/metadata, credential URL, per-hop re-pin, cross-origin auth strip) + fuzz | PR-7 |
 | Origin/Host validation primitive (no listener) | MCP-INSP-008 | **Missing** | PR-1 |
 | Listener bind + host-allowlist + E2E rebinding enforcement | MCP-INSP-009 | **Missing** | PR-5 |
-| Tool canonicalization | MCP-TOOL-001 | **Missing** | PR-2 |
-| Tool drift / privilege expansion | MCP-TOOL-003,004 | **Missing** | PR-2/PR-6 |
+| Tool canonicalization | MCP-TOOL-001 | **Present (PR-2)** | PR-2 |
+| Tool drift / privilege expansion | MCP-TOOL-003,004 | **Present (PR-2 classify); enforcement PR-6** | PR-2/PR-6 |
 | Streaming / cancellation / reconnect | MCP-PROTO-012 (protocol-state, PR-1); MCP-OPS-002 (stream bounds under load, PR-5) | **Missing** | PR-1 (state) / PR-5 (load) |
 | Load / soak | MCP-OPS-002 | nightly load harness exists (not gate) | PR-5 |
 | Slow clients / queue saturation | MCP-OPS-002, MCP-EVENT-001 | **Missing** | PR-5/PR-8 |

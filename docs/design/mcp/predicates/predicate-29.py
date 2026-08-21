@@ -11,13 +11,14 @@ held stream per rejected client.  The remediation is documentation-only, so the
 only durable guard is a mechanical one: this predicate parses
 `TRANSPORT-FALLBACK-EVIDENCE.md` and fails CI when the evidence matrix, the
 status-terminal / zero-stream invariants, the legacy exclusion, the era
-separation, the Gate-3 amendment record, or the D-1-open governance drift.
+separation, the Gate-3 amendment record, or the D-1-closed governance drift.
 
 Authorities:
   * `TRANSPORT-FALLBACK-EVIDENCE.md` — the 14-column evidence matrix (§4) plus the
     binding invariants (§2 legacy exclusion, §3 no-pre-negotiation-stream, §6
     status posture, §7 sessionless D-1 ruling, §8 Gate-3 amendment, §9 fixtures).
-  * `OPEN-DECISIONS.md` — D-1 must remain OPEN.
+  * `OPEN-DECISIONS.md` — D-1 is now CLOSED (V1 baseline frozen); a silent reopen
+    of D-1 must fail this gate.
 
 Scope, stated so nobody over-reads it.  This parses ONE named table and a small,
 explicit set of normative sentences in ONE document, plus one cross-reference to
@@ -232,32 +233,37 @@ def check(texts):
     if re.search(r'C-7[^.\n]{0,60}every missing', ev, re.I):
         v.append('C-7 is broadened back to every missing header')
 
-    # (13-gov) D-1 must remain OPEN in the evidence doc AND in OPEN-DECISIONS.
-    # The evidence doc states it inline; OPEN-DECISIONS keeps D-1 in a structured
-    # `### D-1` block whose status lines are on SEPARATE lines from the heading,
-    # so a same-line proximity match would miss a `Still OPEN` → `STATUS: CLOSED`
-    # flip (Codex #977 review).  Parse the whole D-1 block and validate its status.
-    if not re.search(r'D-1 remains \*{0,2}OPEN', ev) or re.search(r'\bD-1\b[^.\n]{0,20}\bCLOSED\b', ev):
-        v.append('the evidence doc does not state that D-1 remains OPEN (or marks it closed)')
+    # (13-gov) D-1 is now CLOSED in the evidence doc AND in OPEN-DECISIONS — the
+    # V1 baseline is frozen (PR1-ENTRY-CLOSURE).  The evidence doc states it inline;
+    # OPEN-DECISIONS keeps D-1 in a structured `### D-1` block whose status lines are
+    # on SEPARATE lines from the heading, so a same-line proximity match would miss a
+    # `CLOSED` → `remains OPEN` reopen.  Parse the whole D-1 block and validate its
+    # status.  A silent reopen of D-1 must fail this gate.
+    if not re.search(r'D-1 is\s+(?:now\s+)?\*{0,2}CLOSED', ev) or re.search(r'D-1 remains \*{0,2}OPEN', ev):
+        v.append('the evidence doc does not state that D-1 is CLOSED (or reopens it)')
     block = _decision_block(op, 'D-1')
     if block is None:
         v.append('OPEN-DECISIONS.md has no `### D-1` decision block to validate')
     else:
-        # the block is CLOSED if it carries a closure marker the sibling closed
-        # decisions use (`CLOSED`, `Status: closed`) and is not still declared OPEN.
+        # the block is CLOSED if it carries the closure marker the sibling closed
+        # decisions use (`CLOSED`); an explicit reopen phrase must fail.
         closed = re.search(r'\bCLOSED\b', block) or re.search(r'status\s*[:=]\s*closed', block, re.I)
-        still_open = re.search(r'\bOPEN\b', block)
-        if closed or not still_open:
-            v.append('D-1 is not marked OPEN in its OPEN-DECISIONS `### D-1` block '
-                     '(a closure/removal of the OPEN status must fail this gate)')
+        reopened = re.search(r'remains \*{0,2}OPEN|Still OPEN|STATUS:\s*OPEN|\bOPEN\s+—\s+\[EXT\]', block)
+        if not closed or reopened:
+            v.append('D-1 is not marked CLOSED in its OPEN-DECISIONS `### D-1` block '
+                     '(a reopen of the CLOSED status must fail this gate)')
 
-    # (15) fixtures: version-set-dependent fixtures are D-1 BLOCKED and never pre-marked green
-    if ev.count('D-1 BLOCKED') < 1:
-        v.append('no fixture is marked D-1 BLOCKED (version-set-dependent fixtures must be)')
+    # (15) fixtures: with D-1 now CLOSED the version set is fixed, so version-set-
+    # dependent fixtures are no longer D-1-blocked but remain IMPL-PENDING (no MCP
+    # implementation exists) and MUST NOT be pre-marked green.
+    if ev.count('IMPL-PENDING') < 1:
+        v.append('no fixture is marked IMPL-PENDING (unimplemented fixtures must be, pending PR-1/PR-5)')
+    if re.search(r'\bD-1 BLOCKED\b', ev):
+        v.append('a fixture is still marked D-1 BLOCKED although D-1 is CLOSED (use IMPL-PENDING)')
     for ln in ev.splitlines():
-        if re.search(r'marked green|green before D-1|green — implemented|green -- implemented|green — implemented', ln, re.I):
+        if re.search(r'marked green|green before D-1|green — implemented|green -- implemented|IMPL-PENDING fixture is green', ln, re.I):
             if not re.search(r'\b(MUST NOT|must not|not|never|without|cannot|no)\b', ln):
-                v.append('a D-1-dependent fixture is marked green before D-1 closes')
+                v.append('an unimplemented fixture is marked green')
 
     # cross-reference: the owning requirement + threat must exist
     if 'MCP-PROTO-017' not in ev:
@@ -300,7 +306,7 @@ SEEDS = [
      lambda t: _mut(t, 'evidence', lambda s: s.replace('| VERIFIED | SPEC transports.mdx@2025-11-25 L137-141 |', '| VERIFIED |  |', 1)),
      'empty source locator'),
     ('UNRESOLVED row treated as normative',
-     lambda t: _mut(t, 'evidence', lambda s: s.replace('UNRESOLVED sessionless ruling (D-1); with session/context Culvert has another way and honoring is conformant; do NOT silently admit 2025-03-26',
+     lambda t: _mut(t, 'evidence', lambda s: s.replace('D-1 CLOSED: reject sessionless missing-header with 400 (do NOT silently admit 2025-03-26); with session/context Culvert has another way and honoring is conformant. Evidence status UNRESOLVED = spec SHOULD is ambiguous; Culvert decision is closed',
                     'Silently admit 2025-03-26 as the sessionless default (binding)', 1)),
      'presents a binding Culvert decision'),
     ('2025 and 2026 semantics merged',
@@ -320,12 +326,16 @@ SEEDS = [
     ('C-7 broadened back to every missing header',
      lambda t: _mut(t, 'evidence', lambda s: s.replace('**C-7 is NARROWED**', 'C-7 applies to every missing `MCP-Protocol-Version` header, C-7 NARROWED-NOT', 1)),
      'C-7 is broadened back to every missing header'),
-    ('D-1 marked closed',
-     lambda t: _mut(t, 'evidence', lambda s: s.replace('D-1 remains OPEN', 'D-1 is now CLOSED', 1)),
-     'marks it closed'),
-    ('D-1 closed in the OPEN-DECISIONS block (separate status line)',
-     lambda t: _mut(t, 'open', lambda s: s.replace('**Still OPEN.**', '**STATUS: CLOSED.**', 1)),
-     'not marked OPEN in its OPEN-DECISIONS'),
+    ('D-1 reopened in the evidence doc',
+     lambda t: _mut(t, 'evidence', lambda s: s.replace('D-1 is now **CLOSED**', 'D-1 remains OPEN', 1)),
+     'reopens it'),
+    ('D-1 reopened in the OPEN-DECISIONS block (separate status line)',
+     lambda t: _mut(t, 'open', lambda s: s.replace('**CLOSED — 2026-07-31. V1 protocol baseline frozen.**',
+                    'remains OPEN — pending external verification.', 1)),
+     'not marked CLOSED in its OPEN-DECISIONS'),
+    ('fixture still marked D-1 BLOCKED after D-1 closed',
+     lambda t: _mut(t, 'evidence', lambda s: s.replace('remain **`IMPL-PENDING`**', 'remain **`D-1 BLOCKED`**', 1)),
+     'still marked D-1 BLOCKED'),
     ('free-form fallback config added',
      lambda t: _mut(t, 'evidence', lambda s: s.replace('## Cross-references',
                     'Operators can set `mcp_transport_fallback_list: ["legacy-2024-sse"]` to re-enable legacy fallback.\n\n## Cross-references', 1)),
@@ -340,10 +350,10 @@ SEEDS = [
     ('first-match laundering (VERIFIED then a second status)',
      lambda t: _mut(t, 'evidence', lambda s: s.replace('| VERIFIED | SPEC lifecycle.mdx@2025-11-25 L165-171 |', '| VERIFIED then UNRESOLVED | SPEC lifecycle.mdx@2025-11-25 L165-171 |', 1)),
      'evidence status is not exactly one'),
-    ('fixture marked green before D-1',
+    ('unimplemented fixture marked green',
      lambda t: _mut(t, 'evidence', lambda s: s.replace('## Cross-references',
-                    'Fixture 8 (sessionless ruling) is marked green before D-1 closes.\n\n## Cross-references', 1)),
-     'marked green before D-1'),
+                    'Fixture 8 (sessionless ruling) is marked green — implemented.\n\n## Cross-references', 1)),
+     'unimplemented fixture is marked green'),
 ]
 
 NEGATIVE_CONTROLS = [
@@ -353,9 +363,9 @@ NEGATIVE_CONTROLS = [
     ('a 2026 comparison row clearly marked non-binding',
      lambda t: _mut(t, 'evidence', lambda s: s.replace('## Cross-references',
                     'For comparison only, the `2026-07-28` RC is non-binding and excluded from V1.\n\n## Cross-references', 1))),
-    ('a sourced unresolved conflict',
+    ('a sourced unresolved conflict (unrelated to D-1)',
      lambda t: _mut(t, 'evidence', lambda s: s.replace('## Cross-references',
-                    'One sourced open item remains UNRESOLVED: the sessionless-header ruling (SPEC transports.mdx@2025-11-25 L274-277) awaits D-1.\n\n## Cross-references', 1))),
+                    'One sourced open item remains UNRESOLVED: a 2026-era stateless detail (SPEC transports.mdx@2026-07-28 L274-277) awaits a future decision beyond V1.\n\n## Cross-references', 1))),
 ]
 
 
@@ -414,7 +424,7 @@ def main():
     if not bad:
         print('PASS: the transport-fallback evidence matrix parses non-vacuously; the legacy-2024 '
               'exclusion, terminal-status / zero-stream invariants, era separation, Gate-3 amendment '
-              'record and D-1-open governance all hold; all seeds fire; all negative controls silent.')
+              'record and D-1-closed governance all hold; all seeds fire; all negative controls silent.')
     return 1 if bad else 0
 
 

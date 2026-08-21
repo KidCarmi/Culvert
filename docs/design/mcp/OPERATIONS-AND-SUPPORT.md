@@ -1,5 +1,18 @@
 # MCP Operations and Support Model
 
+> **PR-11 status (guarded execution / Shadow / Canary) — IMPLEMENTED, disabled by default.** The mode
+> ladder, immutable revisioned scope, central hard-failure classifier, bounded Model-A upstream client,
+> guarded execution (commit-before-side-effect, DLP-before-egress, credential containment, no client-token
+> passthrough), and signed CP→DP rollout distribution now ship in `internal/mcp/{rollout,upstreamclient,execution}`
+> and the `package main` composition. **Observe is non-executing; Shadow/Canary execute only inside an exact
+> approved scope for Model A (local-client); Production remains qualification-locked** (no config/env/CLI/API
+> bypass; no in-binary issuer). `outbound-connector`/`dmz-endpoint`, endpoint bridge, transparent discovery,
+> and Management mutation remain excluded. Duration targets (14d/7d/24h) are measurable machinery, not
+> completed evidence; Production Qualification is the separate gate. There is no PR-12 in this
+> package's slice sequence — see [`IMPLEMENTATION-SLICES.md`](IMPLEMENTATION-SLICES.md) (not to be
+> confused with the unrelated fix CLAUDE.md separately labels "PR-12").
+
+
 **Status: PR-0 design artifact (Proposed)**
 
 This document defines the operational and support model for the Culvert MCP subsystem: service-level
@@ -16,6 +29,27 @@ one platform, shared Control Plane services, separate enforcement engines and tr
 > **[TARGET]**. Repository facts are labeled **[FACT]** with `path · symbol · lines`; architectural
 > inferences are **[INFER]**; human decisions are **[REC]**; anything needing a non-repository source is
 > **[EXT]**. See the legend in [`README.md`](README.md).
+
+> **PR-5 update.** An MCP listener runtime now EXISTS in the repository — `internal/mcp/runtime` — but is
+> **DISABLED BY DEFAULT** and **observe-only** (no policy/credential/upstream; decision-point methods return
+> a deterministic `observe_only` rejection). It exposes a typed, low-cardinality per-listener health/counter
+> surface (`HealthSnapshot` — phase, accepted/rejected conns, requests total/rejected, kernel-terminal vs
+> observe-only, active sessions, queued/in-flight, timeouts, auth + host/origin failures, admission rejects,
+> shutdown cancels, observe drops) that a later slice will wire to the `MCP-OPS-003` metrics/dashboards
+> surface. The SLO/capacity numbers below remain **unverified DESIGN TARGETS** — PR-5 ships the runtime and
+> its load/slowloris/queue-saturation + MCP-off benchmarks, not a production availability measurement.
+
+> **PR-6 update.** A deterministic, **I/O-free** MCP policy decision engine now EXISTS — `internal/mcp/policy`
+> (+ `internal/mcp/policy/simulate`) — and is wired into the PR-5 runtime as an **optional, decision-only**
+> provider. It changes NO operational surface in this slice: it is still **DISABLED BY DEFAULT** (nil provider ⇒
+> the observe-only path is byte-identical), performs no upstream/credential/broker/inspection work, and even an
+> ALLOW-class decision returns `execution_state: not_implemented` — so the "Policy regression" runbook (§4)
+> still governs *decision distribution* review, not execution. Two operationally load-bearing fail-closed
+> behaviors are now real and testable: **(a)** default-deny (`MCP.POLICY.NO_MATCH_DEFAULT_DENY`) on any
+> unmatched operation, and **(b)** a **missing/unpublished snapshot fails closed** with
+> `MCP.POLICY.SNAPSHOT_UNAVAILABLE` — never a permissive fall-back. The policy-bundle publication API, the
+> decision-metrics dashboards (`MCP-OPS-003`), and signed CP→DP policy distribution remain later slices
+> (PR-9/PR-10); the SLO/capacity numbers below stay **unverified DESIGN TARGETS**.
 
 ---
 

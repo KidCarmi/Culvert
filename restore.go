@@ -275,11 +275,16 @@ func readTarball(path, backupPassphrase string) (map[string][]byte, []string, er
 		if strings.HasPrefix(hdr.Name, "/") {
 			return nil, nil, fmt.Errorf("restore: tarball entry has absolute path: %q", hdr.Name)
 		}
-		// Path-traversal guard: reject any component equal to "..".
-		for _, part := range strings.Split(hdr.Name, "/") {
-			if part == ".." {
-				return nil, nil, fmt.Errorf("restore: tarball entry has path traversal: %q", hdr.Name)
-			}
+		// Path-traversal guard: reject any entry whose path contains "..".
+		// strings.Contains is the pattern CodeQL recognises as a zip-slip
+		// sanitiser (CWE-22); the previous per-component split was
+		// semantically equivalent but not traced across function boundaries
+		// by the static analyser. Backup artifact names are controlled
+		// system filenames (e.g. "ui_users.json", "ca.bundle") so the
+		// slightly broader rejection of any ".." substring is intentional
+		// and safe.
+		if strings.Contains(hdr.Name, "..") {
+			return nil, nil, fmt.Errorf("restore: tarball entry has path traversal: %q", hdr.Name)
 		}
 		// Duplicate-entry guard: tar format allows multiple headers with
 		// the same name; a map-based reader would silently overwrite the

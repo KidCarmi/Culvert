@@ -66,7 +66,7 @@ jobs:
       contents: read
     steps:
       - name: Harden runner (egress block)
-        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
         with:
           egress-policy: block
           allowed-endpoints: >
@@ -80,7 +80,7 @@ jobs:
             catalog.culvertlabs.com:443
             kidcarmi.github.io:443
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-go-cache
@@ -95,12 +95,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           IN_TAG: ${{ github.event.inputs.tag }}
-          # Matches catalogUserAgent in release_catalog_http.go. An unidentified
-          # curl UA is indistinguishable from bot traffic to a CDN/WAF fronting
-          # the R2 catalog origin and gets 403'd.
-          CATALOG_UA: "Culvert-ReleaseCatalog/1.0 (+https://github.com/KidCarmi/Culvert)"
         run: |
           set -euo pipefail
+          # Fetch catalog objects with the production Go client shape, NOT curl.
+          # The R2 origin (catalog.culvertlabs.com) is fronted by Cloudflare bot
+          # management, which fingerprints the TLS/HTTP2 client — not just the UA —
+          # and 403s curl even with the matching User-Agent (two prior CI fixes
+          # tuned the curl UA/headers and it still 403'd). cmd/catalogfetch uses the
+          # same net/http shape as release_catalog_http.go (the known-good, accepted
+          # client) and prints the body's SHA-256. Build once, reuse in the loop.
+          go build -o "$RUNNER_TEMP/catalogfetch" ./cmd/catalogfetch
+          FETCH="$RUNNER_TEMP/catalogfetch"
           for attempt in $(seq 1 24); do
             TAG="${IN_TAG:-}"
             if [ -z "$TAG" ]; then
@@ -127,8 +132,10 @@ jobs:
             test -s bundle/index.json          || { echo "FATAL: bundle missing index.json"; exit 1; }
             test -s bundle/index.json.sigstore || { echo "FATAL: bundle missing index.json.sigstore"; exit 1; }
             WANT="$(sha256sum bundle/index.json | awk '{print $1}')"
-            R2="$(curl -fsS -A "$CATALOG_UA" -H 'Cache-Control: no-cache' https://catalog.culvertlabs.com/release-catalog/index.json | sha256sum | awk '{print $1}')" || R2=""
-            PAGES="$(curl -fsS https://kidcarmi.github.io/Culvert/release-catalog/index.json | sha256sum | awk '{print $1}')" || PAGES=""
+            # catalogfetch returns the served index.json's SHA-256 (empty on any
+            # non-200 / transport error, so `|| VAR=""` keeps the loop retrying).
+            R2="$("$FETCH" https://catalog.culvertlabs.com/release-catalog/index.json)" || R2=""
+            PAGES="$("$FETCH" https://kidcarmi.github.io/Culvert/release-catalog/index.json)" || PAGES=""
             if [ "$R2" = "$WANT" ] && [ "$PAGES" = "$WANT" ]; then
               echo "Both origins match release $TAG ($WANT)"; exit 0
             fi
@@ -164,13 +171,12 @@ jobs:
       # fail an unrelated release verify).
       - name: Assert live catalog freshness age ≤ 2× re-sign cadence (weekly canary)
         if: github.event_name == 'schedule'
-        env:
-          # Matches catalogUserAgent in release_catalog_http.go (see the
-          # "Converge" step above for why this is required).
-          CATALOG_UA: "Culvert-ReleaseCatalog/1.0 (+https://github.com/KidCarmi/Culvert)"
         run: |
           set -euo pipefail
-          GEN="$(curl -fsS -A "$CATALOG_UA" -H 'Cache-Control: no-cache' https://catalog.culvertlabs.com/release-catalog/index.json | jq -r '.generated_at // empty')"
+          # Fetch via the Go client shape, not curl (Cloudflare bot management 403s
+          # curl even with the matching UA — see the Converge step / cmd/catalogfetch).
+          go build -o "$RUNNER_TEMP/catalogfetch" ./cmd/catalogfetch
+          GEN="$("$RUNNER_TEMP/catalogfetch" -raw https://catalog.culvertlabs.com/release-catalog/index.json | jq -r '.generated_at // empty')"
           test -n "$GEN" || { echo "FATAL: live index has no generated_at"; exit 1; }
           AGE=$(( $(date -u +%s) - $(date -u -d "$GEN" +%s) ))
           MAX=$(( 14 * 24 * 3600 ))

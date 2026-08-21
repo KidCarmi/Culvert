@@ -5,8 +5,8 @@
 Authoritative source: `api/route-classification.yaml` (enforced by the route-coverage gate).
 This file is generated and drift-checked; the totals below are counted from the manifest, not asserted by hand.
 
-- **Total method-entries:** 296
-- **Documented:** 287
+- **Total method-entries:** 334
+- **Documented:** 325
 - **Exempt:** 9 (all `intentionally-undocumented` non-REST surfaces)
 
 ## Intentionally-undocumented (non-REST) surfaces
@@ -27,14 +27,15 @@ This file is generated and drift-checked; the totals below are counted from the 
 
 | Domain | Entries | Documented |
 |---|---|---|
-| auth | 18 | 12 |
+| auth | 21 | 15 |
 | cdr | 11 | 11 |
 | cluster | 32 | 31 |
 | dashboard | 13 | 12 |
 | governance | 1 | 1 |
+| mcp | 29 | 29 |
 | observability | 2 | 2 |
 | pac | 23 | 23 |
-| policy | 66 | 66 |
+| policy | 72 | 72 |
 | release | 6 | 6 |
 | security | 51 | 51 |
 | settings | 30 | 30 |

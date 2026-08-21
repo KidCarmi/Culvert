@@ -39,6 +39,13 @@ var globalSaaSFeed = saasfeed.New(saasfeed.Deps{
 // hosts (additive merge — admin-removed domains are never re-added). Saves
 // the store when anything was added. Returns the number of hosts added.
 func mergeSaaSCategories(categories []saasfeed.Category) int {
+	// Single-writer guard (F3b-3): once the signed activation coordinator owns the live
+	// SaaS category store, the legacy RAW syncer must NOT write it — there is exactly one
+	// writer, no signed→raw fallback, and no dual writer. While the coordinator is
+	// dormant this flag is false and behavior is byte-identical to before.
+	if signedFeedOwnsLive() {
+		return 0
+	}
 	added := 0
 	for _, feedCat := range categories {
 		name := strings.TrimSpace(feedCat.Name)

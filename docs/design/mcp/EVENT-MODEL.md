@@ -1,5 +1,18 @@
 # MCP Security Gateway — Decision Event Model
 
+> **PR-11 status (guarded execution / Shadow / Canary) — IMPLEMENTED, disabled by default.** The mode
+> ladder, immutable revisioned scope, central hard-failure classifier, bounded Model-A upstream client,
+> guarded execution (commit-before-side-effect, DLP-before-egress, credential containment, no client-token
+> passthrough), and signed CP→DP rollout distribution now ship in `internal/mcp/{rollout,upstreamclient,execution}`
+> and the `package main` composition. **Observe is non-executing; Shadow/Canary execute only inside an exact
+> approved scope for Model A (local-client); Production remains qualification-locked** (no config/env/CLI/API
+> bypass; no in-binary issuer). `outbound-connector`/`dmz-endpoint`, endpoint bridge, transparent discovery,
+> and Management mutation remain excluded. Duration targets (14d/7d/24h) are measurable machinery, not
+> completed evidence; Production Qualification is the separate gate. There is no PR-12 in this
+> package's slice sequence — see [`IMPLEMENTATION-SLICES.md`](IMPLEMENTATION-SLICES.md) (not to be
+> confused with the unrelated fix CLAUDE.md separately labels "PR-12").
+
+
 Purpose: define the durable **decision-event** schema emitted by the Culvert MCP Security Gateway
 (Capability B) and the Culvert Management MCP Server (Capability A) — the required field categories,
 what is never stored by default, and the durability architecture (queues, backpressure, spool/export,
@@ -13,8 +26,11 @@ enforcement engines and trust boundaries, shared conventions only).
 > + replay IDs + pluggable asynchronous exporters; a message bus / SIEM is an **adapter**, never a
 > mandatory runtime dependency. The per-action durability-unavailable semantics are fixed in **§4a** below.
 
-**Status:** PR-0 design artifact (Proposed). No event pipeline described here is implemented; this
-document is normative input to PR-8 (Durable decision events) per
+**Status:** PR-0 design artifact, now IMPLEMENTED by PR-8 (Durable decision events) in
+`internal/mcp/events` (model / spool / denial / state / export + manager, gate adapters and the
+optional nil-safe runtime integration); it remains DORMANT (not wired into `package main`, decision-only,
+`execution_state` stays `not_implemented`). This document stays the normative specification for that
+pipeline per
 [`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md#mcp-event--durable-decision-events) and
 [`THREAT-MODEL.md`](THREAT-MODEL.md). Repository facts are cited from
 [`VERIFIED-REPOSITORY-CONTEXT.md`](VERIFIED-REPOSITORY-CONTEXT.md) using the `[FACT]` legend; everything

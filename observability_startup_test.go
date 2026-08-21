@@ -61,6 +61,7 @@ func snapshotObservabilityGlobals(t *testing.T) {
 
 	// Syslog forwarding (syslog.go + ui_config.go:648).
 	oldSyslogConfigured := syslogConfigured
+	oldSyslogConfiguredAddr := syslogConfiguredAddr
 	oldGlobalSyslog := globalSyslog
 
 	// Configured-path readback for GET /api/stats (ui_config.go).
@@ -79,6 +80,7 @@ func snapshotObservabilityGlobals(t *testing.T) {
 	restoreReqlog := reqlog.SwapPersistenceForTest()
 
 	syslogConfigured = ""
+	syslogConfiguredAddr = ""
 	globalSyslog = nil
 	globalOTLP = freshOTLPExporter()
 	globalOTLPTraces = freshOTLPSpanExporter()
@@ -95,6 +97,7 @@ func snapshotObservabilityGlobals(t *testing.T) {
 		globalOTLPTraces.Stop()
 		_ = audit.Close() // close any handle the test-under-test opened
 		syslogConfigured = oldSyslogConfigured
+		syslogConfiguredAddr = oldSyslogConfiguredAddr
 		globalSyslog = oldGlobalSyslog
 		globalOTLP = oldGlobalOTLP
 		globalOTLPTraces = oldGlobalOTLPTraces
@@ -311,6 +314,11 @@ func TestLoadObservability_SyslogUnreachableLogged(t *testing.T) {
 	}
 	if globalSyslog != nil {
 		t.Errorf("globalSyslog = %v; want nil after failed dial", globalSyslog)
+	}
+	// Intent must be recorded even though the connect failed, so
+	// checkSyslogFeed can surface the silently-down feed (vs "not configured").
+	if syslogConfiguredAddr != "tcp://127.0.0.1:1" {
+		t.Errorf("syslogConfiguredAddr = %q; want the configured addr recorded despite connect failure", syslogConfiguredAddr)
 	}
 }
 

@@ -1,11 +1,36 @@
 # MCP Policy Model
 
+> **PR-11 status (guarded execution / Shadow / Canary) — IMPLEMENTED, disabled by default.** The mode
+> ladder, immutable revisioned scope, central hard-failure classifier, bounded Model-A upstream client,
+> guarded execution (commit-before-side-effect, DLP-before-egress, credential containment, no client-token
+> passthrough), and signed CP→DP rollout distribution now ship in `internal/mcp/{rollout,upstreamclient,execution}`
+> and the `package main` composition. **Observe is non-executing; Shadow/Canary execute only inside an exact
+> approved scope for Model A (local-client); Production remains qualification-locked** (no config/env/CLI/API
+> bypass; no in-binary issuer). `outbound-connector`/`dmz-endpoint`, endpoint bridge, transparent discovery,
+> and Management mutation remain excluded. Duration targets (14d/7d/24h) are measurable machinery, not
+> completed evidence; Production Qualification is the separate gate. There is no PR-12 in this
+> package's slice sequence — see [`IMPLEMENTATION-SLICES.md`](IMPLEMENTATION-SLICES.md) (not to be
+> confused with the unrelated fix CLAUDE.md separately labels "PR-12").
+
+
 Defines the MCP Security Gateway policy engine: inputs, the nine decision actions, obligations, reason
 codes, and the policy lifecycle. **Status: PR-0 design artifact (Proposed).** This is a **separate**
 policy schema from the SWG `PolicyRule` — per [`VERIFIED-REPOSITORY-CONTEXT.md`](VERIFIED-REPOSITORY-CONTEXT.md),
 the SWG rule (`policy.go:91-188`, four actions `:19-27`) is a network-destination selector and **MUST NOT**
 be extended with MCP fields, and the SWG evaluator (which does DNS/disk I/O during a decision,
 `policy.go:1387`) **MUST NOT** be reused because MCP evaluation must be I/O-free.
+
+> **Implementation status (PR-6) — IMPLEMENTED (dormant).** This model is realized by `internal/mcp/policy`
+> (engine, immutable `DecisionInput` tuple, immutable capability-local compiled `Snapshot`, strict parser,
+> deterministic order-independent hash, bounded lock-free store, `Decision` + sanitized `ExplainTrace`) and
+> `internal/mcp/policy/simulate` (single/corpus/blast-radius/shadow over the SAME evaluator). The engine is a
+> pure, **I/O-free** function of `(snapshot, input)` — no network/fs/db/DNS/env/**clock**/secret/logging on the
+> eval path (explicit `EvalTime`, never `time.Now()`; enforced by an AST import-allowlist test) — exactly the
+> separation this section mandates from the SWG rule. It is a **separate** Go type set from SWG `PolicyRule` and
+> calls no SWG evaluator. Decision-only in this slice: wired into the PR-5 runtime as an optional provider, an
+> ALLOW-class decision returns `execution_state: not_implemented` (no upstream/credential/broker call). The
+> approval-UX lifecycle (`MCP-POLICY-007`) and the policy-bundle publication API/GUI + signed CP→DP distribution
+> are later slices (PR-9/PR-10). See [`IMPLEMENTATION-SLICES.md`](IMPLEMENTATION-SLICES.md) PR-6.
 
 Legend: **[FACT]** repo-verified · **[INFER]** · **[REC]** · **[EXT]**.
 

@@ -11,9 +11,18 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/catoverride"
+	"github.com/KidCarmi/Culvert/internal/mcp/cpdp"
 	"github.com/KidCarmi/Culvert/internal/pac"
 	"github.com/KidCarmi/Culvert/internal/session"
 )
+
+// categoryOverrideHostCount returns the aggregate number of host-keys in an
+// override set (added + recategorized + tombstones) — the DoS bound axis for
+// maxSnapCategoryOverrides.
+func categoryOverrideHostCount(o CategoryOverrides) int {
+	return len(o.Added) + len(o.Recategorized) + len(o.Tombstones)
+}
 
 // ─── ConfigSnapshot ───────────────────────────────────────────────────────────
 
@@ -109,6 +118,56 @@ type ConfigSnapshot struct {
 
 	// OTLP endpoint for metrics + traces export (day-3 audit CRIT-3).
 	OTLPEndpoint string `json:"otlp_endpoint,omitempty"`
+
+	// SaaS signed category-feed configuration (F3a-2). CP-authoritative,
+	// fleet-uniform: the CP resolves + validates the feed config and pushes it so
+	// the whole fleet agrees where the feed comes from and whether it is on. This
+	// is transport ADDRESSING + management policy only — the DP still verifies
+	// every fetched byte in-binary against the pinned identity + baked Sigstore
+	// root (no unsigned/raw fallback), so a hostile CP URL can only cause a verify
+	// failure, never unsigned data (design §A.0). SaaSFeedManaged/SaaSFeedEnabled
+	// are *bool PRESENCE fields (nil ⇒ absent ⇒ DP keeps its local resolution;
+	// non-nil ⇒ authoritative even when false). A plain bool could not tell a
+	// rolled-back/older CP that OMITTED the field from a CP that explicitly set
+	// false — and the latter would silently re-enable a durably-disabled DP (the
+	// §A.2.2 mixed-version hazard, Codex P1). A current CP always sets both
+	// pointers. The value fields keep omitempty (empty/0 ⇒ CP has not set it ⇒
+	// skip). Not secrets ⇒ not redacted.
+	SaaSFeedManaged        *bool  `json:"saas_feed_managed,omitempty"`
+	SaaSFeedEnabled        *bool  `json:"saas_feed_enabled,omitempty"`
+	SaaSFeedURL            string `json:"saas_feed_url,omitempty"`
+	SaaSFeedProtocol       string `json:"saas_feed_protocol,omitempty"`
+	SaaSFeedRefreshSeconds int64  `json:"saas_feed_refresh_seconds,omitempty"`
+
+	// Admin category overrides (F3a-2). CP-authoritative fleet policy layered on
+	// top of the feed snapshot. POINTER for presence + NO omitempty
+	// (WireWipeCapable): nil ⇒ absent (older/rolled-back CP ⇒ DP keeps local, never
+	// wiped — "absence is not deletion"); a non-nil value (even an empty
+	// Overrides{}) ⇒ authoritative replacement, so an admin CLEARING the last
+	// override propagates as an explicit wipe to every DP (a stale tombstone left
+	// on a DP would keep a host suppressed after the fleet un-suppressed it — the
+	// DecryptionProfiles delete-propagation rationale, §A.3.2). A current CP always
+	// sends non-nil. Bounded by maxSnapCategoryOverrides (host-aggregate, enforced
+	// in validateConfigSnapshot). Not a secret ⇒ not redacted.
+	CategoryOverrides *CategoryOverrides `json:"category_overrides"`
+
+	// MCPGatewaySnapshot / MCPManagementSnapshot are the OPTIONAL signed, immutable
+	// MCP CP→DP snapshots (PR-10, MCP-CPDP-001). They ride the existing SWG
+	// ConfigSnapshot channel but are independently signed + validated: presence
+	// (non-nil) means "an authoritative signed MCP snapshot for this capability is
+	// attached, apply it whole after signature/epoch/version validation"; absence
+	// (nil, omitempty ⇒ not on the wire) means "no MCP change — an older/rolled-back
+	// CP that predates MCP never wipes valid DP-local MCP state" (absence is not
+	// deletion; an intended MCP removal is an explicit signed rollback, not an empty
+	// snapshot). A malformed present envelope rejects the MCP capability WHOLE and
+	// never corrupts the SWG apply (the two are applied independently). The envelope
+	// carries only public integrity material (content hash + ed25519 signature) and
+	// secret-free reviewed payload — NO signing private key and NO credential value
+	// ever enter it, so it is not redacted. kindMeta / AppliesOnDP in the
+	// config-surface registry (like Epoch): a derived signed artifact, consumed on
+	// the DP but not applied as an operator config value.
+	MCPGatewaySnapshot    *cpdp.Envelope `json:"mcp_gateway_snapshot,omitempty"`
+	MCPManagementSnapshot *cpdp.Envelope `json:"mcp_management_snapshot,omitempty"`
 }
 
 // ConfigSnapshot per-slice size caps (H5 fix).
@@ -160,6 +219,13 @@ const (
 	maxSnapCategoryGroups      = 1_000
 	maxSnapDecryptionProfiles  = 1_000
 	maxSnapIdPProfiles         = 1_000
+	// maxSnapCategoryOverrides bounds the AGGREGATE host-keys across the admin
+	// override set (added + recategorized + tombstones). CategoryOverrides is a
+	// pointer-to-struct, not a len()-able slice, so it is NOT one of the
+	// configSnapshotSliceCaps rows (SnapshotCapParity counts only slice/map
+	// bindings); its cap is enforced by the dedicated host-aggregate check in
+	// validateConfigSnapshot, mirroring the maxSnapURLCategoryHosts inner bound.
+	maxSnapCategoryOverrides = 100_000
 )
 
 // maxClusterGRPCMsgSize is the CP↔DP gRPC max message size (send + recv on
@@ -275,6 +341,40 @@ func validateConfigSnapshot(snap ConfigSnapshot) error {
 	}
 	if urlCatHosts > maxSnapURLCategoryHosts {
 		return fmt.Errorf("config snapshot url_category_hosts=%d exceeds cap %d", urlCatHosts, maxSnapURLCategoryHosts)
+	}
+	// Category-override aggregate host-key bound (F3a-2). CategoryOverrides is a
+	// pointer-to-struct, not a capped slice, so bound its host-keys here (added +
+	// recategorized + tombstones), mirroring url_category_hosts. Also VALIDATE the
+	// CP-provided overrides on the DP before accepting them (design §A.3): a
+	// structurally-invalid override set (bad host/category, tombstone clash,
+	// ancestor/descendant conflict) rejects the WHOLE snapshot — never a partial
+	// apply. Protocol / URL / refresh are validated below.
+	if snap.CategoryOverrides != nil {
+		if n := categoryOverrideHostCount(*snap.CategoryOverrides); n > maxSnapCategoryOverrides {
+			return fmt.Errorf("config snapshot category_overrides host-keys=%d exceeds cap %d", n, maxSnapCategoryOverrides)
+		}
+		if _, err := catoverride.Normalize(*snap.CategoryOverrides); err != nil {
+			return fmt.Errorf("config snapshot category_overrides invalid: %w", err)
+		}
+	}
+	// SaaS feed configuration (F3a-2). Re-validate CP-provided feed config on the
+	// DP through the SAME F3a-1 boundary the CP write path uses (no weaker
+	// duplicate): reject an unsupported protocol, a non-official URL, or a
+	// malformed refresh interval so the whole snapshot is refused, never partially
+	// applied. Empty values are "CP has not set it" (skip at apply), so they are
+	// not validated here.
+	if snap.SaaSFeedProtocol != "" {
+		if _, err := resolveFeedProtocol(snap.SaaSFeedProtocol); err != nil {
+			return fmt.Errorf("config snapshot saas_feed_protocol invalid: %w", err)
+		}
+	}
+	if snap.SaaSFeedURL != "" {
+		if _, err := resolveFeedURL(snap.SaaSFeedURL); err != nil {
+			return fmt.Errorf("config snapshot saas_feed_url invalid: %w", err)
+		}
+	}
+	if _, err := resolveFeedRefresh(snap.SaaSFeedRefreshSeconds); err != nil {
+		return fmt.Errorf("config snapshot saas_feed_refresh_seconds invalid: %w", err)
 	}
 	// Aggregate bound: several individually-valid host-scale slices can together
 	// exceed the CP↔DP frame. Reject the sum here with a clear named error rather
@@ -666,6 +766,13 @@ func applyConfigSnapshot(snap ConfigSnapshot) error {
 	}
 
 	applySnapshotExtendedState(snap)
+	applySnapshotSaaSFeed(snap)
+
+	// Optional signed MCP CP→DP snapshots (PR-10). Applied AFTER the SWG apply and
+	// only touching MCP state: a malformed/rejected MCP envelope never corrupts the
+	// SWG config above, and each capability applies independently. A no-op when MCP
+	// distribution is disabled (the default).
+	applySnapshotMCP(snap)
 
 	logger.Printf("DataPlane: applied config v%d (%d blocked hosts, %d rules, ip_mode=%s, rate=%d rpm)",
 		snap.Version, len(snap.BlockedHosts), len(snap.PolicyRules), snap.IPFilterMode, snap.RateLimitRPM)
@@ -928,6 +1035,97 @@ func applySnapshotExtendedState(snap ConfigSnapshot) {
 	}
 }
 
+// applySnapshotSaaSFeed applies the CP-authoritative SaaS signed category-feed
+// configuration + admin category overrides on a Data Plane node (F3a-2). It is
+// pure configuration plumbing: it updates the node-local durable feed holder and
+// the override store — it NEVER fetches, verifies, activates, or arms any loop
+// (no downloader exists until F3b). The snapshot was already whole-validated in
+// validateConfigSnapshot, so applying here cannot fail or partially apply.
+//
+// Presence semantics (§A.2.2/§A.3.2): each feed field is nil/empty-skip so an
+// older or rolled-back CP that omits a field leaves the DP's local resolution
+// untouched (absence is never turned into false/default/deletion). The
+// *bool managed/enabled are the load-bearing case — a nil pointer keeps the DP's
+// durable state, a non-nil one is authoritative even when false. CategoryOverrides
+// is nil-skip / non-nil-replace: a non-nil (even empty) set is an authoritative
+// replacement so an admin clearing the last override wipes it fleet-wide.
+func applySnapshotSaaSFeed(snap ConfigSnapshot) {
+	// Feed config: overlay only the CP-set fields onto the DP's durable holder.
+	d := getSaaSFeedDurable()
+	changed := false
+	if snap.SaaSFeedManaged != nil {
+		d.Managed = *snap.SaaSFeedManaged
+		changed = true
+	}
+	if snap.SaaSFeedEnabled != nil {
+		d.Enabled = *snap.SaaSFeedEnabled
+		changed = true
+	}
+	if snap.SaaSFeedURL != "" {
+		d.URL = snap.SaaSFeedURL
+		changed = true
+	}
+	if snap.SaaSFeedProtocol != "" {
+		d.Protocol = snap.SaaSFeedProtocol
+		changed = true
+	}
+	if snap.SaaSFeedRefreshSeconds != 0 {
+		d.RefreshSeconds = snap.SaaSFeedRefreshSeconds
+		changed = true
+	}
+	if changed {
+		// A managed DP must not retain a conflicting local feed policy: publish the
+		// CP-overlaid state so it wins. In-memory only, BYTE-IDENTICAL to the
+		// existing ProxyBaseURL snapshot field (applyExternalAuthSnapshotSettings):
+		// the CP is authoritative and re-syncs on every version bump, and the DP
+		// re-applies the last-good snapshot on restart. A follower DP's node-local
+		// admin_settings.json is NOT the source of truth for CP-pushed config, so
+		// (like ProxyBaseURL) it is deliberately not written here — avoiding an
+		// admin-settings write on the hot sync path.
+		setSaaSFeedDurable(d)
+	}
+
+	// Category overrides: nil ⇒ CP did not send them (older/rolled-back) ⇒ keep
+	// the DP's local copy; non-nil ⇒ authoritative replacement (empty ⇒ wipe).
+	// ReplaceAll re-validates + persists overrides.json; the snapshot was already
+	// validated, so this cannot reject.
+	overridesChanged := false
+	if snap.CategoryOverrides != nil {
+		beforeFP := saasFeedOverridesFingerprint(globalCategoryOverrides.Get())
+		if err := globalCategoryOverrides.ReplaceAll(*snap.CategoryOverrides); err != nil {
+			logger.Printf("DataPlane: category overrides apply rejected: %v", err)
+		} else {
+			if serr := globalCategoryOverrides.Save(); serr != nil {
+				logger.Printf("DataPlane: category overrides save: %v", serr)
+			}
+			overridesChanged = saasFeedOverridesFingerprint(globalCategoryOverrides.Get()) != beforeFP
+		}
+	}
+
+	// F3b-4: close the deferred managed-DP persistence finding. The scalar overlay
+	// above stays in-memory only (like ProxyBaseURL), but the F3b lifecycle IS the
+	// runtime consumer, so on a managed DP we now durably mirror the last authoritative
+	// CP feed configuration + fencing identity to a node-local, off-every-config-surface
+	// record. This runs AFTER the durable holder + overrides are updated so the mirror
+	// (incl. the overrides fingerprint) reflects the just-accepted snapshot. The snapshot
+	// reached here only after dpObserveEpoch (fencing) + validateConfigSnapshot passed,
+	// so the mirror is written only for authenticated, fenced, validated authority. A
+	// no-op on a non-managed node or before the lifecycle wires the store.
+	persistSaaSFeedAuthorityMirror(snap)
+
+	// F3b-4 finding #5: when the CP snapshot changed ONLY the overrides (manifest unchanged),
+	// a scheduler wake would fetch and 304 without recomposing. Apply the new authoritative
+	// overrides to the policy hot path directly via a local, no-network recompose. Gated on a
+	// real fingerprint change so an unchanged-override snapshot does no needless work.
+	if overridesChanged {
+		recomposeSignedFeedOverrides()
+	}
+
+	// A fresh authoritative snapshot (new epoch / enable / interval change) requires the
+	// scheduler to re-evaluate now rather than waiting for its next tick.
+	wakeSignedFeedScheduler()
+}
+
 func applyExternalAuthSnapshotSettings(snap ConfigSnapshot) {
 	// These must be applied before IdP profiles compile so SAML SP metadata
 	// and OIDC redirect URIs use the same public origin on every DP.
@@ -942,6 +1140,10 @@ func syncSnapshotIdPProfiles(snap ConfigSnapshot) error {
 	if err := idpRegistry.ReplaceAll(snap.IdPProfiles); err != nil {
 		return fmt.Errorf("idp profile sync: %w", err)
 	}
+	// A synced enabled LDAP profile makes the registry the sole operational
+	// LDAP authority on this DP too (ADR-0025) — a node-local legacy YAML
+	// ldap provider must not remain a second authenticator.
+	enforceLegacyLDAPShadowing()
 	logger.Printf("DataPlane: synced %d IdP profile(s) from control plane", len(snap.IdPProfiles))
 	return nil
 }
@@ -1127,6 +1329,36 @@ func CurrentConfigSnapshot() ConfigSnapshot {
 
 	// OTLP endpoint (CRIT-3: DP nodes need the endpoint to export spans/metrics).
 	snap.OTLPEndpoint = globalOTLP.Endpoint()
+
+	// SaaS feed configuration (F3a-2). A current CP always sets both presence
+	// pointers (managed/enabled) from its resolved durable state, so a live fleet
+	// always propagates an explicit disable; only a pre-F3a-2 / rolled-back CP
+	// omits them, and then the DP correctly keeps its local durable resolution
+	// instead of re-enabling (§A.2.2). The URL is captured RESOLVED (built-in
+	// official envelope when unset / a historical URL rewritten), so the DP never
+	// re-derives it. Protocol canonicalizes to signed_manifest_v1.
+	feedDurable := getSaaSFeedDurable()
+	managed := feedDurable.Managed
+	enabled := feedDurable.Enabled
+	snap.SaaSFeedManaged = &managed
+	snap.SaaSFeedEnabled = &enabled
+	if resolved, err := resolvedSaaSFeedConfig(); err == nil {
+		snap.SaaSFeedURL = resolved.URL
+		snap.SaaSFeedProtocol = resolved.Protocol
+		snap.SaaSFeedRefreshSeconds = int64(resolved.Refresh / time.Second)
+	}
+
+	// Admin category overrides (F3a-2). Always non-nil on a current CP so an
+	// admin-cleared (empty) set propagates as an explicit wipe; a rolled-back CP
+	// that predates the field sends nothing and the DP keeps its local copy.
+	ov := globalCategoryOverrides.Get()
+	snap.CategoryOverrides = &ov
+
+	// Optional signed MCP CP→DP snapshots (PR-10). nil when MCP distribution is
+	// disabled (the default) ⇒ omitempty ⇒ the snapshot is byte-identical to the
+	// pre-PR-10 SWG snapshot. A published capability stamps its signed envelope here.
+	snap.MCPGatewaySnapshot = mcpCapturedGateway()
+	snap.MCPManagementSnapshot = mcpCapturedManagement()
 
 	return snap
 }
