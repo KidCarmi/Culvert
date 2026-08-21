@@ -342,17 +342,45 @@ func (r *mcpRollout) status() map[string]any {
 	}
 }
 
-// rolloutFromEnvelope extracts the signed rollout config from a validated cpdp
-// envelope's payload (Gateway or Management).
+// rolloutFromEnvelope extracts the signed rollout config from a cpdp envelope's
+// payload, selecting the block by the envelope's SIGNED capability rather than by
+// which block happens to be populated. Block presence is the wrong selector: it is
+// attacker/publisher-influenced data, whereas Manifest.Capability is covered by the
+// signature and is the same value the applier validated against. Selecting by
+// presence would let a stray foreign block decide which rollout config is read.
+//
+// It returns nil when the envelope carries no rollout change for its own capability.
 func rolloutFromEnvelope(env *cpdp.Envelope) *rollout.SignedConfig {
 	if env == nil {
 		return nil
 	}
-	if g := env.Payload.Gateway; g != nil {
-		return g.Rollout
-	}
-	if m := env.Payload.Management; m != nil {
-		return m.Rollout
+	switch env.Manifest.Capability {
+	case cpdp.CapabilityGateway:
+		if g := env.Payload.Gateway; g != nil {
+			return g.Rollout
+		}
+	case cpdp.CapabilityManagement:
+		if m := env.Payload.Management; m != nil {
+			return m.Rollout
+		}
 	}
 	return nil
+}
+
+// rolloutCapabilityMatches reports whether a rollout config's self-declared
+// capability agrees with the envelope capability it arrived under.
+//
+// This is load-bearing rather than redundant: commitRolloutTransition routes by
+// cfg.Capability (rollout.State is capability-local), so a disagreeing config would
+// commit onto the OTHER capability's state. cpdp now rejects such an envelope at
+// validation, but every path that COMMITS a rollout re-checks it locally so the
+// guarantee does not depend on validation having run at a different time, on a
+// different node, or in a different binary version — notably the startup reconcile
+// path, which commits from RECOVERED state whose re-verification deliberately skips
+// full payload validation.
+func rolloutCapabilityMatches(cfg *rollout.SignedConfig, capb cpdp.Capability) bool {
+	if cfg == nil {
+		return true
+	}
+	return (cfg.Capability == rollout.CapabilityManagement) == (capb == cpdp.CapabilityManagement)
 }
