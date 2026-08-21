@@ -860,14 +860,22 @@ func TestObserve_CapturedWindowRotatedResolvesAsDrop(t *testing.T) {
 	before := e.ObservationStats()
 	e.Observe(Observation{Subject: "u", AuthSource: "idp", Host: "late.example", Status: "OK",
 		WindowGen: captured})
-	barrierWait(t, func() bool {
-		st := e.ObservationStats()
-		return st.Dropped > before.Dropped || st.Delivered > before.Delivered
-	}, "observation resolved")
 
+	// Round 27: the late decision is charged to session A's OWN loss
+	// accounting — synchronously, session-local — never to the global drop
+	// counter (which would fold into B's pinned transport baselines).
 	st := e.ObservationStats()
-	if st.Dropped <= before.Dropped {
-		t.Fatalf("rotated-window observation was not counted as a drop: %+v", st)
+	if st.Dropped != before.Dropped || st.Delivered != before.Delivered {
+		t.Fatalf("late captured-window decision moved GLOBAL transport counters (%+v → %+v) — B's baselines contaminated", before, st)
+	}
+	var aDropped int64
+	for _, s := range e.Sessions() {
+		if s.State == StateCompleted {
+			aDropped = s.Transport.Dropped
+		}
+	}
+	if aDropped == 0 {
+		t.Fatal("rotated-window decision not charged to the closed session that owned the window")
 	}
 	ov, ok := e.SessionOverview(b.ID)
 	if !ok {
@@ -875,6 +883,41 @@ func TestObserve_CapturedWindowRotatedResolvesAsDrop(t *testing.T) {
 	}
 	if ov.Cells != 0 {
 		t.Fatalf("session B aggregated another window's decision (cells=%d)", ov.Cells)
+	}
+}
+
+// TestObserve_LateWindowChargedWithGateOff (round 27): with NO successor
+// session (gate off), a late captured-window decision must still be charged
+// to the closed session — the pre-fix gate returned silently, leaving the
+// session's terminal loss accounting falsely clean.
+func TestObserve_LateWindowChargedWithGateOff(t *testing.T) {
+	clk := newTestClock()
+	e := newTestEngine(t, t.TempDir(), clk, nil)
+	t.Cleanup(func() { _ = e.Close() })
+	if _, err := e.StartSession("op"); err != nil {
+		t.Fatal(err)
+	}
+	captured := e.WindowGeneration()
+	a, err := e.StopSession("op")
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseDropped := a.Transport.Dropped
+
+	e.Observe(Observation{Subject: "u", AuthSource: "idp", Host: "late.example", Status: "OK",
+		WindowGen: captured})
+
+	var got int64 = -1
+	for _, s := range e.Sessions() {
+		if s.ID == a.ID {
+			got = s.Transport.Dropped
+		}
+	}
+	if got != baseDropped+1 {
+		t.Fatalf("gate-off late decision not charged to its window's session (dropped=%d, want %d)", got, baseDropped+1)
+	}
+	if st := e.ObservationStats(); st.Dropped != 0 {
+		t.Fatalf("gate-off late decision moved the global drop counter (%+v)", st)
 	}
 }
 

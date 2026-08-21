@@ -181,7 +181,15 @@ type Engine struct {
 	// events accepted under an earlier window.
 	windowGen atomic.Uint64
 	aggGen    uint64 // under mu
-	finishing bool   // under mu: a finish holds the lifecycle between window-close and persist; lazy expiry must not race it
+	// windowOwner maps an acceptance-window generation to the session that
+	// opened it (under mu; in-memory only — generations are process-local).
+	// Consulted by chargeLateWindowLoss (Codex round 27) so a captured-window
+	// decision arriving after its window closed is charged to the session
+	// that owned the window instead of vanishing (gate off) or contaminating
+	// the successor's transport baselines (global drop counter). Entries for
+	// pruned sessions are swept opportunistically at registration.
+	windowOwner map[uint64]string
+	finishing   bool // under mu: a finish holds the lifecycle between window-close and persist; lazy expiry must not race it
 
 	// M3 aggregation state (all mutated under mu; drain-owned cadence counters
 	// are also only touched under mu inside consumeGuarded).

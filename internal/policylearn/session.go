@@ -140,6 +140,7 @@ func (e *Engine) StartSession(actor string) (Session, error) {
 	prevAggGen := e.aggGen
 	e.aggSession = s
 	e.aggGen = e.windowGen.Add(1) // open this session's acceptance window
+	e.registerWindowOwnerLocked(e.aggGen, s.ID)
 	e.pinTransportLocked()
 	e.learningActive.Store(true)
 	if err := e.saveLocked(); err != nil {
@@ -230,6 +231,7 @@ func (e *Engine) finishActive(actor, terminalState string) (Session, error) {
 		// Re-open the window under the CURRENT generation: learning resumes
 		// and new observations attribute to s again.
 		e.aggGen = e.windowGen.Load()
+		e.registerWindowOwnerLocked(e.aggGen, s.ID)
 		e.learningActive.Store(true)
 		return Session{}, err
 	}
@@ -354,6 +356,54 @@ func (e *Engine) closeWindowLocked() {
 	}
 	e.windowGen.Add(1)
 	e.aggSession = nil
+}
+
+// registerWindowOwnerLocked records gen → session ownership and sweeps
+// entries whose session has been pruned (the map stays bounded by session
+// retention). Caller holds e.mu.
+func (e *Engine) registerWindowOwnerLocked(gen uint64, sessionID string) {
+	if e.windowOwner == nil {
+		e.windowOwner = make(map[uint64]string)
+	}
+	live := make(map[string]bool, len(e.sessions))
+	for _, s := range e.sessions {
+		live[s.ID] = true
+	}
+	for g, id := range e.windowOwner {
+		if !live[id] {
+			delete(e.windowOwner, g)
+		}
+	}
+	e.windowOwner[gen] = sessionID
+}
+
+// chargeLateWindowLoss charges one captured-window decision that arrived
+// AFTER its acceptance window closed (Codex round 27) to the session that
+// owned the window: the decision was made while that session was Learning,
+// so ITS loss accounting must carry the miss — silently ignoring it left the
+// closed session's confidence falsely clean, and routing it through the
+// global drop counter degraded the SUCCESSOR's pinned transport baselines
+// with loss that was never its own. Terminal-aggregate immutability is
+// preserved: only the Transport LOSS counter moves, which can only ever
+// WEAKEN claims derived from that session (the loss-accounting invariant).
+// When the owner is unknown (pruned session, or a pre-restart generation),
+// the loss falls back to the global drop counter — counted, never silent.
+// Callers must NOT hold a producer registration (window-close paths wait on
+// the producer count while holding e.mu).
+func (e *Engine) chargeLateWindowLoss(gen uint64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if id, ok := e.windowOwner[gen]; ok {
+		for _, s := range e.sessions {
+			if s.ID == id {
+				s.Transport.Dropped++
+				e.dirty = true
+				return
+			}
+		}
+		delete(e.windowOwner, gen)
+	}
+	e.tr.dropped.Add(1)
 }
 
 // AggregateOverview is the bounded factual summary of one session's

@@ -133,6 +133,7 @@ func (e *Engine) recoverLearningSession(s *Session, now time.Time) {
 	}
 	e.aggSession = s
 	e.aggGen = e.windowGen.Add(1) // resumed window: post-restart events attribute here
+	e.registerWindowOwnerLocked(e.aggGen, s.ID)
 	e.dirty = true
 }
 

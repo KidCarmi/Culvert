@@ -430,21 +430,25 @@ func TestObservation_PreDispatchBoundToCapturedWindow(t *testing.T) {
 	}
 	before := eng.ObservationStats()
 	learnObservePreDispatch(auth, "stale-block.example", "GET", "BLOCKED", ctx, true)
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		st := eng.ObservationStats()
-		if st.Dropped > before.Dropped || st.Delivered > before.Delivered {
-			break
-		}
-		time.Sleep(time.Millisecond)
-	}
 	_ = eng.Close()
 
 	if _, leaked := obsForHost(t, col, "stale-block.example"); leaked {
 		t.Fatal("pre-dispatch block captured under session A was delivered into session B")
 	}
-	if st := eng.ObservationStats(); st.Dropped <= before.Dropped {
-		t.Fatalf("rotated-window pre-dispatch event not counted as a drop: %+v", st)
+	// Round 27: the late event is charged to session A's OWN loss accounting
+	// (synchronous, session-local) — never the global counter, which would
+	// contaminate B's pinned transport baselines.
+	if st := eng.ObservationStats(); st.Dropped != before.Dropped {
+		t.Fatalf("late pre-dispatch event moved the GLOBAL drop counter: %+v", st)
+	}
+	charged := false
+	for _, s := range eng.Sessions() {
+		if s.State == policylearn.StateCompleted && s.Transport.Dropped > 0 {
+			charged = true
+		}
+	}
+	if !charged {
+		t.Fatal("rotated-window pre-dispatch event not charged to the session that owned the window")
 	}
 
 	// And the no-capture path is a strict no-op (never a fresh engine load).

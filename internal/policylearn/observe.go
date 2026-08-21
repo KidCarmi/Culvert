@@ -209,6 +209,23 @@ func (e *Engine) Observe(o Observation) {
 	// there is no interleaving left in which an event lands with a rotated
 	// generation or beyond the shutdown sweep.
 	t.producers.Add(1)
+	// Late captured-window path (Codex round 27): a decision captured under a
+	// window that has since CLOSED must be charged to THAT window's session —
+	// returning on the gate left the closed session's loss accounting falsely
+	// clean, and enqueueing under a rotated generation resolved as a GLOBAL
+	// drop that degraded the successor's pinned transport baselines with loss
+	// that was never its own. The producer registration is released BEFORE
+	// the charge: chargeLateWindowLoss takes e.mu, and the window-close paths
+	// wait on the producer count while holding e.mu (registered producers
+	// must never take the lock). The gate/generation reads below race a
+	// concurrent close only in the safe direction — a decision that passes
+	// them stays registered, so the close waits for its enqueue.
+	if o.WindowGen != 0 && !e.closed.Load() &&
+		(!e.learningActive.Load() || o.WindowGen != e.windowGen.Load()) {
+		t.producers.Add(-1)
+		e.chargeLateWindowLoss(o.WindowGen)
+		return
+	}
 	defer t.producers.Add(-1)
 	if !e.learningActive.Load() {
 		return
