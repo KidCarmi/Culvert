@@ -5,6 +5,7 @@ package policylearn
 // session-gap confidence cap, and group-scope deduplication.
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -1232,5 +1233,64 @@ func TestChargeLateWindowLoss_InvalidationSurvivesCrash(t *testing.T) {
 	e3 := newRecEngine(t, dir, clk, nil)
 	if got := dropped(e3); got < 2 {
 		t.Fatalf("reloaded session Transport.Dropped = %d, want >= 2 (async-persisted charge lost)", got)
+	}
+}
+
+// TestLateLossFlag_PersistedUnderBumpedSchema (round 30): the
+// late_loss_invalidated field is written only as true, and a version-8
+// binary strict-decodes unknown fields as CORRUPTION (quarantine) when the
+// document's declared version is not newer — so the flag must ride a schema
+// bump: a store carrying it has to declare schema_version >= 9, making a
+// rolled-back binary enter the read-only newer-schema posture instead of
+// quarantining every persisted session and recommendation. Also proves the
+// flag survives a restart: a reloaded accepting intent still refuses the
+// finalize latch.
+func TestLateLossFlag_PersistedUnderBumpedSchema(t *testing.T) {
+	clk := newTestClock()
+	dir := t.TempDir()
+	e := newRecEngine(t, dir, clk, nil)
+	if _, err := e.StartSession("op"); err != nil {
+		t.Fatal(err)
+	}
+	captured, ok := e.CaptureWindow()
+	if !ok {
+		t.Fatal("CaptureWindow refused with an active session")
+	}
+	feedHighEvidence(t, e, clk)
+	sess, err := e.StopSession("op")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := mustGenerate(t, e, sess.ID)
+	if len(res.Recommendations) == 0 {
+		t.Fatal("setup: no recommendation generated")
+	}
+	recID := res.Recommendations[0].ID
+	if _, err := e.BeginAccept(recID, "rule-target-r30"); err != nil {
+		t.Fatal(err)
+	}
+	e.chargeLateWindowLoss(captured)
+
+	raw, err := os.ReadFile(filepath.Join(dir, "policy_learning.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"late_loss_invalidated":true`) {
+		t.Fatal("setup: the accepting intent's invalidation flag was not persisted")
+	}
+	var peek struct {
+		SchemaVersion int `json:"schema_version"`
+	}
+	if err := json.Unmarshal(raw, &peek); err != nil {
+		t.Fatal(err)
+	}
+	if peek.SchemaVersion < 9 {
+		t.Fatalf("store carries late_loss_invalidated under schema_version %d — a version-8 binary would QUARANTINE it as corrupt instead of the read-only newer-schema posture", peek.SchemaVersion)
+	}
+
+	// Restart: the flag must survive and keep refusing the latch.
+	e2 := newRecEngine(t, dir, clk, nil)
+	if _, err := e2.FinalizeAccept(recID, "op"); err == nil {
+		t.Fatal("FinalizeAccept latched accepted after a restart discarded the invalidation flag")
 	}
 }

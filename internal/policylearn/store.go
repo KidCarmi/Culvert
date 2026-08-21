@@ -27,10 +27,14 @@ import (
 // accepted_* / rejected_* / reject_reason); 7 = M5B.1 group-truncation loss
 // accounting (transport groups_truncated); 8 = policy-content churn (session
 // policy_churn + aggregate policy_churn_overflow — Codex round 13: transient
-// A→B→A policy changes latched as they happen). Older documents load cleanly
-// on a newer binary (pure field additions, all omitempty); saves always write
-// the current version.
-const SchemaVersion = 8
+// A→B→A policy changes latched as they happen); 9 = late-loss invalidation
+// (recommendation late_loss_invalidated — Codex round 29/30: the field is
+// only ever WRITTEN as true, and a version-8 binary strict-decodes unknown
+// fields as CORRUPTION, so persisting it under version 8 made a rollback
+// quarantine the whole store instead of entering the newer-schema read-only
+// posture). Older documents load cleanly on a newer binary (pure field
+// additions, all omitempty); saves always write the current version.
+const SchemaVersion = 9
 
 // minReadableSchemaVersion: every version in [min, current] loads.
 const minReadableSchemaVersion = 1
