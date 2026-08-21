@@ -10918,16 +10918,24 @@ function cdrRenderOverview() {
   // unreachable shows "degraded" immediately instead of a stale "active" badge
   // for up to ~30s with no visible indication anything is wrong.
   const health = cdrState.health || {};
-  const failing = (health.consecutiveFailures || 0) > 0;
+  // A missing/failed health response is itself a degraded signal: once the
+  // cached snapshot is cleared (3rd consecutive failure) /api/cdr/health
+  // starts 502ing, the fetch above catches to null — and without this check
+  // the badge would flip back to green exactly when the outage became
+  // persistent.
+  const healthUnavailable = cfg.clientActive && cdrState.health == null;
+  const failing = healthUnavailable || (health.consecutiveFailures || 0) > 0;
   set('cdr-ov-lastprobe', health.lastSeen
     ? new Date(health.lastSeen).toLocaleString() + (failing ? ` (${health.consecutiveFailures} failed probes since)` : '')
-    : '-');
+    : (healthUnavailable ? 'unavailable (health endpoint failing)' : '-'));
 
   const badge = document.getElementById('cdr-status-badge');
   if (badge) {
     if (!cfg.enabled) { badge.textContent = 'disabled'; badge.className = 'badge'; }
     else if (cfg.clientActive && failing) {
-      badge.textContent = `degraded (${health.consecutiveFailures} consecutive probe failures)`;
+      badge.textContent = healthUnavailable
+        ? 'degraded (health endpoint unavailable)'
+        : `degraded (${health.consecutiveFailures} consecutive probe failures)`;
       badge.className = 'badge warn';
     }
     else if (cfg.clientActive) { badge.textContent = 'active'; badge.className = 'badge allow'; }
