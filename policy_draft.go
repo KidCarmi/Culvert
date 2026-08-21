@@ -62,6 +62,11 @@ type policyDraftCoordinator struct {
 	cand  *PolicyStore // candidate rules; in-memory (path=""), persisted by this coordinator
 	state draftState
 	path  string // policy_draft.json ("" ⇒ in-memory, no persistence)
+
+	// writeGate serializes ORDINARY policy-write handler sequences (read
+	// side, via beginPolicyWrite/endPolicyWrite) with the commit/revert API
+	// entry points (exclusive side) — see beginPolicyWrite (Codex round 16).
+	writeGate sync.RWMutex
 }
 
 var policyDraft = &policyDraftCoordinator{cand: &PolicyStore{}}
@@ -677,6 +682,22 @@ func policyWriteStore(actor string) *PolicyStore {
 	return policyStore
 }
 
+// beginPolicyWrite/endPolicyWrite bracket an ORDINARY policy-write handler's
+// whole mutate-then-finalize sequence (Codex round 16): the handler mutates
+// the candidate under the store's OWN lock, so a commit's snapshot→clear
+// could land between the mutation and afterPolicyWrite — the cleared
+// candidate swallowed the edit while the handler returned success and
+// audited a change that reached neither running policy nor disk. The
+// coordinator's writeGate serializes them: commit/revert hold it EXCLUSIVE,
+// so an in-flight handler sequence completes first (its edit is included in
+// the commit or persists into the still-open draft), and a sequence starting
+// after a commit forks a fresh draft from the new running. Lock order:
+// writeGate → c.mu → PolicyStore.mu; internal coordinator functions never
+// touch writeGate (reconcile's auto-clear runs under a caller-held read
+// side, which is why the gate cannot live inside clear()).
+func beginPolicyWrite() { policyDraft.writeGate.RLock() }
+func endPolicyWrite()   { policyDraft.writeGate.RUnlock() }
+
 // policyDraftEngaged reports whether the draft actually intercepts the policy
 // read/write path: commit-mode armed AND a draft open. It must use the SAME
 // predicate family as policyWriteStore (requireCommitEnabled), not active()
@@ -918,6 +939,12 @@ func apiPolicyDraftCommit(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleOperator) {
 		return
 	}
+	// Exclusive side of the ordinary-write gate (Codex round 16): an in-flight
+	// CRUD handler sequence completes before the commit's snapshot, so its
+	// edit is either included or persists into the still-open draft — never
+	// swallowed by the clear while the handler reports success.
+	policyDraft.writeGate.Lock()
+	defer policyDraft.writeGate.Unlock()
 	if !policyDraft.active() {
 		http.Error(w, "no draft to commit", http.StatusBadRequest)
 		return
@@ -993,6 +1020,10 @@ func apiPolicyDraftRevert(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleOperator) {
 		return
 	}
+	// Exclusive side of the ordinary-write gate (Codex round 16; see the
+	// commit handler).
+	policyDraft.writeGate.Lock()
+	defer policyDraft.writeGate.Unlock()
 	if !policyDraft.active() {
 		http.Error(w, "no draft to revert", http.StatusBadRequest)
 		return

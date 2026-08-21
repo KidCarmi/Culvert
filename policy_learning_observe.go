@@ -104,10 +104,15 @@ func learnObserveDecision(auth authOutcome, host, method string, match *PolicyMa
 	case match != nil && match.Rule != nil:
 		ruleID = match.Rule.ID
 		action = string(match.Action)
-	case defaultPolicyAction() == "allow":
-		action = "default:allow" // static literals: no concat allocation on the hot path
-	default:
+	case status == "POLICY_DEFAULT_DENY":
+		// Derive the default-action label from the ENFORCEMENT's own recorded
+		// status, never a re-read of the atomic (Codex round 16): a default-
+		// action flip landing between applyPolicyDecision and this callback
+		// mislabeled the observation against the decision that actually ran.
+		// Static literals: no concat allocation on the hot path.
 		action = "default:deny"
+	default:
+		action = "default:allow"
 	}
 	eng.Observe(policylearn.Observation{
 		Subject:    auth.identity,

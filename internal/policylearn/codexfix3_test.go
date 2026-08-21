@@ -597,6 +597,54 @@ func TestChurn_QueuedTransientWindowLatchedFromDecisionTimeStamp(t *testing.T) {
 	}
 }
 
+// TestChurn_ResolutionMomentTransientLatched (round 16): the decision-time
+// stamp does not identify the taxonomy aggregateLocked actually RESOLVES
+// under — a transient change landing at the resolution moment paired
+// B-derived category evidence with an A stamp and latched nothing. The
+// consume-time reads now bracket the resolution, so an identity visible at
+// either bracket edge is latched. The flip is injected deterministically
+// from WITHIN the Categories resolver.
+func TestChurn_ResolutionMomentTransientLatched(t *testing.T) {
+	var epoch atomic.Value
+	epoch.Store("A")
+	clk := newTestClock()
+	e := newTestEngine(t, t.TempDir(), clk, func(c *Config) {
+		c.Baseline = func() Baseline { return Baseline{CategoryEpoch: "A"} }
+		c.CategoryEpoch = func() string { return epoch.Load().(string) }
+		c.Categories = func(host string) (string, string) {
+			if host == "flip.example" {
+				epoch.Store("B") // the transient lands exactly at resolution
+			}
+			return "cat", "tier"
+		}
+	})
+	t.Cleanup(func() { _ = e.Close() })
+	if _, err := e.StartSession("op"); err != nil {
+		t.Fatal(err)
+	}
+	before := e.ObservationStats().Delivered
+	e.Observe(Observation{Subject: "u", AuthSource: "idp", Host: "flip.example", Status: "OK"})
+	barrierWait(t, func() bool { return e.ObservationStats().Delivered > before }, "observation delivered")
+	// Complete the round trip BEFORE the stop: B was visible only during the
+	// consume of that one observation, so the close-time seam read sees A
+	// again. Only the post-resolution bracket edge can have latched it — the
+	// decision-time stamp said A, and pre-bracket the seam still said A.
+	epoch.Store("A")
+	sess, err := e.StopSession("op")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, c := range sess.CategoryChurn {
+		if c.To == "B" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("resolution-moment transient not latched: churn=%v", sess.CategoryChurn)
+	}
+}
+
 // TestFinishActive_PersistFailureRecordsGap (round 13): the gate is OFF for
 // the whole drain + failed write of a stop — requests in that interval went
 // unobserved. Reopening the session without recording the window as a gap

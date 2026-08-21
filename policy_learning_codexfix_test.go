@@ -507,6 +507,64 @@ func TestEffectivePolicySnapshot_CoherentUnderConcurrentCommit(t *testing.T) {
 	}
 }
 
+// TestCodexFix_OrdinaryDraftEditNeverVanishesUnderCommit (round 16): an
+// ordinary CRUD handler mutates the candidate under the store's own lock, so
+// a commit's snapshot→clear could swallow the edit while the handler
+// reported success. The writeGate serializes the handler's whole
+// mutate-then-finalize sequence with the commit; bounded stress under -race
+// using the exact handler bracket.
+func TestCodexFix_OrdinaryDraftEditNeverVanishesUnderCommit(t *testing.T) {
+	plDurableDraftHarness(t)
+	setRequireCommit(true)
+	for i := 0; i < 40; i++ {
+		disabled := false
+		rule := PolicyRule{
+			ID: newRuleID(), Name: fmt.Sprintf("edit-stress-%d", i), SourceGroup: "g",
+			DestCategory: "m5b-cat", Action: ActionAllow, SSLAction: SSLInspect, Enabled: &disabled,
+		}
+		stampRuleMetadataForWrite(&rule, nil, "codexfix")
+		ver, _ := effectivePolicyVersion()
+		if _, err := policyDraft.stageDurableAppend("codexfix", ver, rule); err != nil {
+			t.Fatalf("stage: %v", err)
+		}
+
+		commitDone := make(chan struct{})
+		go func() {
+			// The commit handler's bracket: exclusive gate around activation.
+			policyDraft.writeGate.Lock()
+			_, _ = policyDraft.commitActivate(nil)
+			policyDraft.writeGate.Unlock()
+			close(commitDone)
+		}()
+
+		// The ordinary handler's bracket: mutate + finalize under the read side.
+		mutated := rule
+		mutated.Action = ActionBlockPage
+		beginPolicyWrite()
+		ok := policyWriteStore("codexfix").UpdateByID(rule.ID, mutated)
+		if ok {
+			if policyDraftEngaged() {
+				policyDraft.persist()
+			} else {
+				policyStore.Save()
+			}
+		}
+		endPolicyWrite()
+		<-commitDone
+
+		if !ok {
+			continue // the commit won and cleared the draft before the handler's store fetch — the edit was refused, not swallowed
+		}
+		got := plFindTargetRule(rule.ID)
+		if got == nil {
+			t.Fatalf("iteration %d: successful edit vanished (in neither candidate nor running)", i)
+		}
+		if got.Action != ActionBlockPage {
+			t.Fatalf("iteration %d: successful edit's content lost (action=%q)", i, got.Action)
+		}
+	}
+}
+
 // TestCodexFix_CommitAppendNeverVanishesRule (Codex re-review): the commit's
 // snapshot→activate→clear now shares one coordinator critical section with
 // the durable append, so a successfully appended rule can land only entirely

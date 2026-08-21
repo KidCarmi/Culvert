@@ -1573,6 +1573,9 @@ func apiPolicyCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	stampRuleMetadataForWrite(&rule, nil, sessionAdmin(r))
+	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
+	beginPolicyWrite()
+	defer endPolicyWrite()
 	added := policyWriteStore(sessionAdmin(r)).Add(rule)
 	logName := strings.ReplaceAll(strings.ReplaceAll(added.Name, "\n", "_"), "\r", "_")
 	logAction := strings.ReplaceAll(strings.ReplaceAll(string(added.Action), "\n", "_"), "\r", "_")
@@ -1624,6 +1627,9 @@ func apiPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	stampRuleMetadataForWrite(&rule, beforeRule, sessionAdmin(r))
+	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
+	beginPolicyWrite()
+	defer endPolicyWrite()
 	if !policyWriteStore(sessionAdmin(r)).Update(priority, rule) {
 		policyDraft.reconcile() // a failed mutation may have opened a now-clean draft
 		http.Error(w, "rule not found", http.StatusNotFound)
@@ -1666,6 +1672,9 @@ func apiPolicyDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
 		return
 	}
+	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
+	beginPolicyWrite()
+	defer endPolicyWrite()
 	if !policyWriteStore(sessionAdmin(r)).Delete(priority) {
 		policyDraft.reconcile() // a failed mutation may have opened a now-clean draft
 		http.Error(w, "rule not found", http.StatusNotFound)
@@ -1722,6 +1731,9 @@ func apiPolicyUpdateByID(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	stampRuleMetadataForWrite(&rule, beforeRule, sessionAdmin(r))
+	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
+	beginPolicyWrite()
+	defer endPolicyWrite()
 	if !policyWriteStore(sessionAdmin(r)).UpdateByID(id, rule) {
 		policyDraft.reconcile() // a failed mutation may have opened a now-clean draft
 		http.Error(w, "rule not found", http.StatusNotFound)
@@ -1745,6 +1757,9 @@ func apiPolicyDeleteByID(w http.ResponseWriter, r *http.Request, id string) {
 		http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
 		return
 	}
+	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
+	beginPolicyWrite()
+	defer endPolicyWrite()
 	if !policyWriteStore(sessionAdmin(r)).DeleteByID(id) {
 		policyDraft.reconcile() // a failed mutation may have opened a now-clean draft
 		http.Error(w, "rule not found", http.StatusNotFound)
@@ -1785,6 +1800,9 @@ func apiPolicyBulkDelete(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
+	beginPolicyWrite()
+	defer endPolicyWrite()
 	ws := policyWriteStore(sessionAdmin(r))
 	deleted := 0
 	for _, p := range body.Priorities {
@@ -1857,6 +1875,9 @@ func apiPolicyReorder(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
+	beginPolicyWrite()
+	defer endPolicyWrite()
 	if !policyWriteStore(sessionAdmin(r)).PermutePriorities(body.Priorities) {
 		policyDraft.reconcile() // a failed permute may have opened a now-clean draft
 		http.Error(w, "priority list length mismatch or unknown priority", http.StatusBadRequest)
@@ -1971,6 +1992,9 @@ func apiPolicyMove(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
+	beginPolicyWrite()
+	defer endPolicyWrite()
 	if !policyWriteStore(sessionAdmin(r)).PermutePriorities(priorities) {
 		policyDraft.reconcile() // a failed permute may have opened a now-clean draft
 		http.Error(w, "reorder failed (concurrent modification?)", http.StatusConflict)

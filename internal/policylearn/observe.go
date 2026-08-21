@@ -327,17 +327,25 @@ func (e *Engine) consumeGuarded(t *transport, o Observation) {
 			return
 		}
 		attributed = true
+		// Per-observation churn latch (Codex rounds 13/15/16). Three latch
+		// points make the identity series complete:
+		//   - the CONSUME-TIME read BEFORE resolution and the one AFTER it
+		//     bracket aggregateLocked's category resolution (round 16): if the
+		//     resolver ran under a transient taxonomy/policy B, B was current
+		//     at some instant inside the bracket, so one of the two reads sees
+		//     it — the old single post-hoc read missed an A→B→A completing
+		//     around the resolution moment;
+		//   - the DECISION-TIME stamps (round 15) latch a change that
+		//     completed while the event sat queued.
+		// Each check is a pair of memoized-string compares; equal-to-last is a
+		// no-op. The only residual is a full round trip landing entirely
+		// between the two adjacent bracket reads with the resolution inside —
+		// two atomic swaps within nanoseconds.
+		now := e.cfg.Now()
+		e.checkEpochLocked(sess, now, "", "") // consume-time, pre-resolution
 		e.aggregateLocked(sess, &o)
-		// Per-observation churn latch (Codex round 13): the old 64-observation
-		// cadence left a blind window — a taxonomy or policy A→B→A round trip
-		// completing between two samples classified observations under B while
-		// both samples saw A, so the B-derived evidence looked baseline-
-		// consistent. The identity reads are cheap (cached fingerprints /
-		// generation-memoized content hash), so every consumed observation
-		// checks; the only residual is a round trip racing a SINGLE
-		// observation's resolution, which the neighboring observations'
-		// checks latch.
-		e.checkEpochLocked(sess, e.cfg.Now(), o.catEpoch, o.policyID)
+		e.checkEpochLocked(sess, now, o.catEpoch, o.policyID) // decision-time stamps
+		e.checkEpochLocked(sess, now, "", "")                 // consume-time, post-resolution
 		e.sinceFlush++
 		if e.sinceFlush >= flushEvery {
 			e.sinceFlush = 0

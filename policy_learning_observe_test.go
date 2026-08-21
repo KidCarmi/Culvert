@@ -253,6 +253,40 @@ func TestObservationE2E_CONNECTTunnel(t *testing.T) {
 	}
 }
 
+// TestObservation_ActionDerivedFromEnforcementStatus (Codex round 16): the
+// default-action label must come from the ENFORCEMENT's own recorded status,
+// never a fresh read of the defaultPolicyAction atomic — a default-action
+// flip landing between applyPolicyDecision and the adapter callback mislabeled
+// the observation against the decision that actually ran. Simulated here by
+// pointing the atomic at "deny" while the recorded status says the request was
+// allowed under default-allow: the observation must say default:allow.
+func TestObservation_ActionDerivedFromEnforcementStatus(t *testing.T) {
+	col := &obsCollector{}
+	eng := swapPolicyLearnSink(t, col.sink)
+	prevAllow := defaultPolicyAction()
+	t.Cleanup(func() { setDefaultPolicyAction(prevAllow) })
+
+	// The enforcement decision ran under default-allow (status OK, no match);
+	// the atomic has since flipped to deny before the adapter observed it.
+	setDefaultPolicyAction("deny")
+	learnObserveDecision(authOutcome{identity: "alice", source: "local"}, "flip-action.example", "GET", nil, "OK", "Bypass")
+	// And the mirror case: enforcement default-denied; atomic now says allow.
+	setDefaultPolicyAction("allow")
+	learnObserveDecision(authOutcome{identity: "alice", source: "local"}, "flip-deny.example", "GET", nil, "POLICY_DEFAULT_DENY", "")
+	_ = eng.Close()
+
+	if o, ok := obsForHost(t, col, "flip-action.example"); !ok {
+		t.Fatalf("no observation for the allowed request (got %v)", col.all())
+	} else if o.Action != "default:allow" {
+		t.Errorf("allowed-branch Action = %q, want default:allow (current atomic value must not leak in)", o.Action)
+	}
+	if o, ok := obsForHost(t, col, "flip-deny.example"); !ok {
+		t.Fatalf("no observation for the denied request (got %v)", col.all())
+	} else if o.Action != "default:deny" {
+		t.Errorf("denied-branch Action = %q, want default:deny", o.Action)
+	}
+}
+
 // TestObservationE2E_DisabledNilEngine: with the singleton nil the adapter is
 // a no-op — the request flows and nothing panics.
 func TestObservationE2E_DisabledNilEngine(t *testing.T) {
