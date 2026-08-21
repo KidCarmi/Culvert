@@ -16,6 +16,9 @@ import "fmt"
 // (*Config) used internally via cfg.SetProvider.
 func loadLegacyAuthProviders(c legacyAuthProvidersStartupConfig) error {
 	if c.LDAP.URL != "" {
+		// Retain the resolved YAML block (read-only) so the admin API can
+		// summarize it and offer the explicit registry import (ADR-0025).
+		setLegacyLDAPYAMLConfig(c.LDAP)
 		// ADR-0025 authority rule: an enabled LDAP profile in the IdP registry
 		// (loaded by initUIAccessPolicy, which runs before this loader) is the
 		// SOLE operational LDAP authority. The legacy YAML block is then not

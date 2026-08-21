@@ -497,6 +497,12 @@ func apiIdPList(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		p.ID = "" // force generation of new ID
+		// Optional safe-activation preflight (?preflight=connection): a live
+		// connection test must pass BEFORE anything persists (LDAP only).
+		if rep := ldapActivationPreflight(r, &p); rep != nil && !rep.OK {
+			writeLDAPPreflightFailure(w, rep)
+			return
+		}
 		if err := idpRegistry.Upsert(&p); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -564,6 +570,13 @@ func apiIdPItem(w http.ResponseWriter, r *http.Request, id string) {
 			samlMetadataXML:  samlMetadataXMLPresent(body),
 			ldapBindPassword: ldapBindPasswordPresent(body),
 		})
+		// Optional safe-activation preflight (?preflight=connection): a broken
+		// candidate must never replace a working enabled provider — on failure
+		// nothing is mutated and the live provider stays untouched (LDAP only).
+		if rep := ldapActivationPreflight(r, &p); rep != nil && !rep.OK {
+			writeLDAPPreflightFailure(w, rep)
+			return
+		}
 		if err := idpRegistry.Upsert(&p); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -984,9 +997,12 @@ func registerAuthRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/auth/lockouts", apiAuthLockouts)              // list/clear active login lockouts (admin unlock)
 
 	// ── Generic IdP Framework ─────────────────────────────────────────────
-	mux.HandleFunc("/api/idp", apiIdPList)              // GET list / POST create
-	mux.HandleFunc("/api/idp/discover", apiIdPDiscover) // POST: run OIDC discovery (must be before /api/idp/)
-	mux.HandleFunc("/api/idp/", apiIdPRouter)           // GET|PUT|DELETE /api/idp/{id} + /api/idp/{id}/groups
+	mux.HandleFunc("/api/idp", apiIdPList)                                // GET list / POST create
+	mux.HandleFunc("/api/idp/discover", apiIdPDiscover)                   // POST: run OIDC discovery (must be before /api/idp/)
+	mux.HandleFunc("/api/idp/test", apiIdPTest)                           // POST: candidate-based LDAP directory test (ADR-0025)
+	mux.HandleFunc("/api/idp/legacy-ldap", apiIdPLegacyLDAP)              // GET: legacy YAML ldap summary
+	mux.HandleFunc("/api/idp/legacy-ldap/import", apiIdPLegacyLDAPImport) // POST: explicit legacy import
+	mux.HandleFunc("/api/idp/", apiIdPRouter)                             // GET|PUT|DELETE /api/idp/{id} + /api/idp/{id}/groups
 
 	// ── Auth callbacks (not behind UI auth middleware) ────────────────────
 	// These are reached by browser redirects from IdPs (not admin UI calls).
