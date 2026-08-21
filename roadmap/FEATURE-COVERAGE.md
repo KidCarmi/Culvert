@@ -73,7 +73,7 @@
 | Root CA management | `/api/ca-cert` | FULL — generate, download PEM, view expiry |
 | SSL bypass list | `/api/ssl-bypass` | FULL |
 | Content scanning toggle | `/api/content-scan` | FULL |
-| OCSP/CRL revocation | `/api/ocsp` | FULL — toggle, cache stats |
+| OCSP revocation | `/api/ocsp` | FULL — toggle, cache stats (OCSP only; CRL checking is not implemented) |
 | HSM/KMS key provider | `/api/ca/key-provider` | FULL — shows active provider, CA readiness, dual-CA status |
 | Dual-CA overlap | `/api/ca-cert` | FULL — secondary CA auto-expires after NotAfter |
 
