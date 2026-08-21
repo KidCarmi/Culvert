@@ -216,7 +216,7 @@ func (c *Cell) apply(agg *Aggregate, o *Observation, cls evidenceClass, token, d
 	if o.At > c.LastSeen {
 		c.LastSeen = o.At
 	}
-	if token != "" {
+	if token != "" { //nolint:nestif // bounded-admission branches per evidence set (M3 spec)
 		if c.Subjects == nil {
 			c.Subjects = map[string]bool{}
 		}

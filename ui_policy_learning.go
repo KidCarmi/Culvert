@@ -309,7 +309,7 @@ func apiPolicyLearningConfig(w http.ResponseWriter, r *http.Request) { //nolint:
 		// State fencing (§3, §5): a Learning session pins its baseline to the
 		// current guardrails and must be explicitly completed or cancelled
 		// before the feature is disabled or the guardrail moves.
-		if eng := policyLearnEngine.Load(); eng != nil {
+		if eng := policyLearnEngine.Load(); eng != nil { //nolint:nestif // active-session fencing decision tree is intentionally explicit (§3, §5)
 			if _, active := eng.ActiveSession(); active {
 				if !target.Enabled {
 					http.Error(w, "cannot disable policy learning: "+errPolicyLearnActiveSession.Error(), http.StatusConflict)

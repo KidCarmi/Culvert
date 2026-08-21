@@ -127,7 +127,7 @@ func plAcceptRecommendation(eng *policylearn.Engine, recID string, ifVersion int
 	// Resume path first: if the intent's rule already exists, the ONLY correct
 	// moves are finalize (content matches) or refuse (content differs) — the
 	// fences fence the MUTATION, and the mutation already happened.
-	if rec.State == policylearn.RecStateAccepting {
+	if rec.State == policylearn.RecStateAccepting { //nolint:nestif // the M5B reconcile decision table is intentionally explicit, one branch per arm
 		if existing := plFindTargetRule(rec.TargetRuleID); existing != nil {
 			if !plRuleMatchesTranslation(existing, &rec) {
 				return plAcceptOutcome{}, errAcceptIntegrityConflict

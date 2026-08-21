@@ -163,7 +163,7 @@ func BenchmarkPerfQual_ProxyCONNECT(b *testing.B) { //nolint:gocognit // one exp
 			defer restoreSSRF()
 
 			// Raw TCP echo target for the tunnel.
-			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 			if err != nil {
 				b.Fatalf("listen: %v", err)
 			}
