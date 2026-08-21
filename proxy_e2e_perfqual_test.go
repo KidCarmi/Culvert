@@ -13,6 +13,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -131,7 +132,8 @@ func BenchmarkPerfQual_ProxyHTTPForward(b *testing.B) {
 			cpu0 := cpuNow()
 			for i := 0; i < b.N; i++ {
 				t0 := time.Now()
-				resp, err := client.Get(backend.URL + "/")
+				req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, backend.URL+"/", http.NoBody)
+				resp, err := client.Do(req)
 				if err != nil {
 					b.Fatalf("proxied GET: %v", err)
 				}
@@ -152,7 +154,7 @@ func BenchmarkPerfQual_ProxyHTTPForward(b *testing.B) {
 
 // BenchmarkPerfQual_ProxyCONNECT measures CONNECT tunnel ESTABLISHMENT (dial →
 // CONNECT → 200 → close) through the real bypass-tunnel path, per operation.
-func BenchmarkPerfQual_ProxyCONNECT(b *testing.B) {
+func BenchmarkPerfQual_ProxyCONNECT(b *testing.B) { //nolint:gocognit // one explicit stage per tunnel-establishment step; extraction would distort the measured path
 	for _, size := range []int{100} {
 		b.Run(fmt.Sprintf("rules=%d", size), func(b *testing.B) {
 			teardown := benchProxySetup(size)
@@ -190,7 +192,7 @@ func BenchmarkPerfQual_ProxyCONNECT(b *testing.B) {
 			cpu0 := cpuNow()
 			for i := 0; i < b.N; i++ {
 				t0 := time.Now()
-				conn, err := net.DialTimeout("tcp", proxyURL.Host, 5*time.Second)
+				conn, err := (&net.Dialer{Timeout: 5 * time.Second}).DialContext(context.Background(), "tcp", proxyURL.Host)
 				if err != nil {
 					b.Fatalf("dial proxy: %v", err)
 				}

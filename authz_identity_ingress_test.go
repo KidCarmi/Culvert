@@ -53,9 +53,10 @@ func spoofedGet(t *testing.T, proxyURL *url.URL, targetURL, spoof string) int {
 // only identity source on these test paths would be the spoofed header.
 func assertNoIdentityAttribution(t *testing.T, destHost string) {
 	t.Helper()
-	for _, e := range logGet() {
-		if e.Host == destHost && e.Identity != "" {
-			t.Errorf("log entry for %s attributed to identity %q — client-controlled header must never reach log attribution", destHost, e.Identity)
+	entries := logGet()
+	for i := range entries { // index-based: LogEntry is a large struct (rangeValCopy)
+		if entries[i].Host == destHost && entries[i].Identity != "" {
+			t.Errorf("log entry for %s attributed to identity %q — client-controlled header must never reach log attribution", destHost, entries[i].Identity)
 		}
 	}
 }

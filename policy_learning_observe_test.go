@@ -6,6 +6,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"net"
 	"net/http"
@@ -60,9 +61,10 @@ func swapPolicyLearnSink(t *testing.T, sink func(policylearn.Observation)) *poli
 
 func obsForHost(t *testing.T, col *obsCollector, host string) (policylearn.Observation, bool) {
 	t.Helper()
-	for _, o := range col.all() {
-		if o.Host == host {
-			return o, true
+	obs := col.all()
+	for i := range obs { // index-based: Observation carries a groups slice (rangeValCopy)
+		if obs[i].Host == host {
+			return obs[i], true
 		}
 	}
 	return policylearn.Observation{}, false
@@ -201,7 +203,7 @@ func TestObservationE2E_CONNECTTunnel(t *testing.T) {
 	t.Cleanup(srv.Close)
 	proxyURL, _ := url.Parse(srv.URL)
 
-	conn, err := net.DialTimeout("tcp", proxyURL.Host, 5*time.Second)
+	conn, err := (&net.Dialer{Timeout: 5 * time.Second}).DialContext(context.Background(), "tcp", proxyURL.Host)
 	if err != nil {
 		t.Fatal(err)
 	}

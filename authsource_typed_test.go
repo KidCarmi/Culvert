@@ -59,9 +59,10 @@ func blockExeResponses(t *testing.T) {
 // entryFor returns the newest log entry for host with the given status.
 func entryFor(t *testing.T, destHost, status string) (LogEntry, bool) {
 	t.Helper()
-	for _, e := range logGet() {
-		if e.Host == destHost && e.Status == status {
-			return e, true
+	entries := logGet()
+	for i := range entries { // index-based: LogEntry is a large struct (rangeValCopy)
+		if entries[i].Host == destHost && entries[i].Status == status {
+			return entries[i], true
 		}
 	}
 	return LogEntry{}, false

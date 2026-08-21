@@ -258,6 +258,8 @@ type HostCount struct {
 	Count int64  `json:"count"`
 }
 
+// AttributionCount is one bounded attribution row (rule-hit or tier-hit
+// breakdown) copied by value into recommendation evidence.
 type AttributionCount struct {
 	Key   string `json:"key"`
 	Count int64  `json:"count"`
@@ -470,7 +472,7 @@ func (e *Engine) RecommendableCategories() []string {
 // Repeated generation is idempotent: identical content (same EvidenceHash) is
 // kept, not duplicated; changed content supersedes the prior object. Persists
 // before returning (rollback on failure).
-func (e *Engine) GenerateRecommendations(sessionID string) (GenerateResult, error) {
+func (e *Engine) GenerateRecommendations(sessionID string) (GenerateResult, error) { //nolint:cyclop // the named eligibility gates + idempotent supersession are intentionally one explicit pipeline (M4 spec)
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.readOnly {
@@ -690,7 +692,7 @@ func newRecommendation(sess *Session, group, category string, cell *Cell, th Thr
 // Subject/day OVERFLOW is deliberately NOT a cap: the exact admitted count is
 // an honest lower bound (spec: overflow affects coverage exactness, and the
 // figures used here are the exact admitted counts, never estimates).
-func confidenceFor(sess *Session, c *Cell, th Thresholds) (level string, reasons, limits []string) {
+func confidenceFor(sess *Session, c *Cell, th Thresholds) (level string, reasons, limits []string) { //nolint:cyclop // each named predicate/cap is one explicit branch (M4 spec)
 	subjects := len(c.Subjects)
 	days := len(c.Days)
 	switch {

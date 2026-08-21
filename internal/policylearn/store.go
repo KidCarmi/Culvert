@@ -112,7 +112,7 @@ func (e *Engine) load() error {
 
 var errSchemaTooNew = errors.New("schema newer than binary")
 
-func decodeEnvelope(raw []byte) (*persistEnvelope, error) {
+func decodeEnvelope(raw []byte) (*persistEnvelope, error) { //nolint:cyclop // one explicit branch per schema version in the v1..v7 migration ladder
 	// Peek the schema version LENIENTLY first: a newer-schema document may
 	// legitimately carry fields this binary's strict decoder rejects, and it
 	// must be classified as "newer" (read-only), not "corrupt" (quarantine).

@@ -13,11 +13,12 @@ import (
 )
 
 func TestPolicyLearningResolver_PathsOnlyNoEnablement(t *testing.T) {
-	cfg := resolvePolicyLearningStartupConfig(&FileConfig{}, "/data")
-	if cfg.StorePath != filepath.Join("/data", "policy_learning.json") {
+	dataDir := filepath.Join("/", "data")
+	cfg := resolvePolicyLearningStartupConfig(&FileConfig{}, dataDir)
+	if cfg.StorePath != filepath.Join(dataDir, "policy_learning.json") {
 		t.Errorf("StorePath = %q", cfg.StorePath)
 	}
-	if cfg.SubjectKeyPath != filepath.Join("/data", "policy_learning_subject.key") {
+	if cfg.SubjectKeyPath != filepath.Join(dataDir, "policy_learning_subject.key") {
 		t.Errorf("SubjectKeyPath = %q", cfg.SubjectKeyPath)
 	}
 	// nil FileConfig tolerated (zero-value contract).

@@ -125,7 +125,7 @@ func TestDecision_RejectLifecycle(t *testing.T) {
 func TestDecision_PersistFailureRollsBack(t *testing.T) {
 	dir := t.TempDir()
 	sub := filepath.Join(dir, "store")
-	if err := os.Mkdir(sub, 0o755); err != nil {
+	if err := os.Mkdir(sub, 0o750); err != nil {
 		t.Fatal(err)
 	}
 	clk := newTestClock()
@@ -152,7 +152,7 @@ func TestDecision_PersistFailureRollsBack(t *testing.T) {
 
 	// Restore the directory: the same accept now succeeds; finalize-failure
 	// rollback follows the same contract.
-	if err := os.Mkdir(sub, 0o755); err != nil {
+	if err := os.Mkdir(sub, 0o750); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := e.BeginAccept(recID, "01TARGETRULEIDAAAAAAAAAAAA"); err != nil {

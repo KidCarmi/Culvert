@@ -187,7 +187,7 @@ func (e *Engine) aggregateLocked(sess *Session, o *Observation) {
 
 // apply folds one contribution into the cell under the evidence-direction
 // invariant (allowed-only evidence sets).
-func (c *Cell) apply(agg *Aggregate, o *Observation, cls evidenceClass, token, day, tier string) {
+func (c *Cell) apply(agg *Aggregate, o *Observation, cls evidenceClass, token, day, tier string) { //nolint:cyclop,nestif // one explicit admission branch per bounded evidence set (M3 spec)
 	c.Requests++
 	switch cls {
 	case classAllowed:

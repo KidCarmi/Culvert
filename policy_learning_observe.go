@@ -76,12 +76,13 @@ func learnObserveDecision(auth authOutcome, host, method string, match *PolicyMa
 	}
 	ruleID := ""
 	var action string
-	if match != nil && match.Rule != nil {
+	switch {
+	case match != nil && match.Rule != nil:
 		ruleID = match.Rule.ID
 		action = string(match.Action)
-	} else if defaultPolicyAction() == "allow" {
+	case defaultPolicyAction() == "allow":
 		action = "default:allow" // static literals: no concat allocation on the hot path
-	} else {
+	default:
 		action = "default:deny"
 	}
 	eng.Observe(policylearn.Observation{

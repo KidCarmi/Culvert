@@ -108,7 +108,7 @@ func plFindTargetRule(targetID string) *PolicyRule {
 // policyLearnAdminMu (held by the caller / API handler). ifVersion is the
 // REQUIRED optimistic fence the client echoed from the effective policy view
 // (the same generation family every policy write handler uses).
-func plAcceptRecommendation(eng *policylearn.Engine, recID string, ifVersion int64, actor string) (plAcceptOutcome, error) { //nolint:cyclop // the reconcile decision table is intentionally explicit
+func plAcceptRecommendation(eng *policylearn.Engine, recID string, ifVersion int64, actor string) (plAcceptOutcome, error) { //nolint:cyclop,gocognit,nestif // the reconcile decision table is intentionally explicit
 	rec, ok := eng.RecommendationByID(recID)
 	if !ok {
 		return plAcceptOutcome{}, policylearn.ErrRecommendationNotFound

@@ -250,8 +250,9 @@ func (c *policyDraftCoordinator) durableTargetPresent(ruleID string) bool {
 	path := c.path
 	inMemory := false
 	if path == "" && c.state.Active {
-		for _, r := range c.cand.List() {
-			if r.ID == ruleID {
+		rules := c.cand.List()
+		for i := range rules { // index-based: PolicyRule is a large struct (rangeValCopy)
+			if rules[i].ID == ruleID {
 				inMemory = true
 			}
 		}

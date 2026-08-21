@@ -1134,7 +1134,7 @@ const (
 // reason ("" = this rule matched, scan stops). trace MUST be nil on the
 // enforcement hot path: the nil branch allocates nothing (the skip strings are
 // static literals), preserving the zero-per-rule-allocation contract.
-func evalAccessRules(rules []*PolicyRule, in *accessEvalInput, now func() time.Time, trace func(rule *PolicyRule, skip string)) *PolicyRule {
+func evalAccessRules(rules []*PolicyRule, in *accessEvalInput, now func() time.Time, trace func(rule *PolicyRule, skip string)) *PolicyRule { //nolint:gocognit // one explicit skip-reason branch per rule condition; the zero-alloc contract forbids extraction on this hot path
 	// Parse the client IP ONCE into a local (stays on the stack — matchSourceAddr
 	// never retains it), reused across every rule's precomputed srcIPNet.
 	clientAddr := net.ParseIP(in.clientIP)

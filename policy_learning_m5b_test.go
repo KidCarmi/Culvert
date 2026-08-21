@@ -96,8 +96,9 @@ func plCountTargetRules(targetID string) (candidate, running int) {
 	if targetID == "" {
 		return 0, 0
 	}
-	for _, r := range policyDraft.candidateList() {
-		if r.ID == targetID {
+	cand := policyDraft.candidateList()
+	for i := range cand { // index-based: PolicyRule is a large struct (rangeValCopy)
+		if cand[i].ID == targetID {
 			candidate++
 		}
 	}

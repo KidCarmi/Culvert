@@ -254,7 +254,7 @@ func apiPolicyLearningStatus(w http.ResponseWriter, r *http.Request) {
 // enable/disable + the recommendable-category guardrail. Deterministic 409s:
 // disabling or changing the guardrail while a Learning session is active is
 // refused — the operator must explicitly Complete or Cancel first (§3, §5).
-func apiPolicyLearningConfig(w http.ResponseWriter, r *http.Request) { //nolint:cyclop,funlen // method-switch handler: transition fencing is intentionally explicit
+func apiPolicyLearningConfig(w http.ResponseWriter, r *http.Request) { //nolint:cyclop,funlen,gocognit,nestif // method-switch handler: transition fencing is intentionally explicit
 	switch r.Method {
 	case http.MethodGet:
 		if !requireRole(w, r, RoleViewer) {
@@ -450,10 +450,13 @@ func apiPolicyLearningSessions(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, map[string]any{"sessions": []plSessionDTO{}, "enabled": false, "scope": "node-local"})
 		return
 	}
+	// Index-based ranges: the session/recommendation DTO sources are large
+	// structs (rangeValCopy convention).
 	if id := r.URL.Query().Get("id"); id != "" {
-		for _, s := range eng.Sessions() {
-			if s.ID == id {
-				jsonOK(w, plSessionToDTO(eng, s))
+		list := eng.Sessions()
+		for i := range list {
+			if list[i].ID == id {
+				jsonOK(w, plSessionToDTO(eng, list[i]))
 				return
 			}
 		}
@@ -462,8 +465,8 @@ func apiPolicyLearningSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	list := eng.Sessions()
 	out := make([]plSessionDTO, 0, len(list))
-	for _, s := range list {
-		out = append(out, plSessionToDTO(eng, s))
+	for i := range list {
+		out = append(out, plSessionToDTO(eng, list[i]))
 	}
 	jsonOK(w, map[string]any{"sessions": out, "enabled": true, "scope": "node-local"})
 }
@@ -487,9 +490,10 @@ func apiPolicyLearningRecommendations(w http.ResponseWriter, r *http.Request) {
 		}
 		cur := policyLearnStaleInputs(eng)
 		if id := r.URL.Query().Get("id"); id != "" {
-			for _, rec := range eng.Recommendations() {
-				if rec.ID == id {
-					jsonOK(w, plRecommendationToDTO(rec, cur))
+			list := eng.Recommendations()
+			for i := range list { // index-based: Recommendation is a large struct (rangeValCopy)
+				if list[i].ID == id {
+					jsonOK(w, plRecommendationToDTO(list[i], cur))
 					return
 				}
 			}
@@ -498,8 +502,8 @@ func apiPolicyLearningRecommendations(w http.ResponseWriter, r *http.Request) {
 		}
 		list := eng.Recommendations()
 		out := make([]plRecommendationDTO, 0, len(list))
-		for _, rec := range list {
-			out = append(out, plRecommendationToDTO(rec, cur))
+		for i := range list {
+			out = append(out, plRecommendationToDTO(list[i], cur))
 		}
 		ver, _ := effectivePolicyVersion()
 		jsonOK(w, map[string]any{
@@ -651,8 +655,8 @@ func apiPolicyLearningGenerate(w http.ResponseWriter, r *http.Request) {
 		"generated policy-learning recommendations (advisory; no enforcement change)")
 	cur := policyLearnStaleInputs(eng)
 	out := make([]plRecommendationDTO, 0, len(res.Recommendations))
-	for _, rec := range res.Recommendations {
-		out = append(out, plRecommendationToDTO(rec, cur))
+	for i := range res.Recommendations { // index-based: large struct (rangeValCopy)
+		out = append(out, plRecommendationToDTO(res.Recommendations[i], cur))
 	}
 	jsonOK(w, map[string]any{
 		"session_id":                  res.SessionID,

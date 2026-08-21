@@ -29,9 +29,10 @@ import (
 // entry about destHost and returns its auth_source, or ok=false.
 func authSourceForHost(t *testing.T, destHost, status string) (string, bool) {
 	t.Helper()
-	for _, e := range logGet() { // newest-first
-		if e.Host == destHost && (status == "" || e.Status == status) {
-			return e.AuthSource, true
+	entries := logGet()      // newest-first
+	for i := range entries { // index-based: LogEntry is a large struct (rangeValCopy)
+		if entries[i].Host == destHost && (status == "" || entries[i].Status == status) {
+			return entries[i].AuthSource, true
 		}
 	}
 	return "", false
