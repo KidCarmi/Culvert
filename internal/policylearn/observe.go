@@ -214,6 +214,55 @@ func (e *Engine) CaptureWindow() (uint64, bool) {
 	}
 }
 
+// admitObservation is the registration-time admission decision table (Codex
+// rounds 27/28). Called with the producer REGISTERED; returns true leaving it
+// registered (the caller enqueues), or false after DEREGISTERING and
+// accounting the refusal.
+//
+// Captured-window observations (WindowGen != 0): a decision captured under a
+// window that has since CLOSED must be charged to THAT window's session —
+// returning on the gate left the closed session's loss accounting falsely
+// clean, and enqueueing under a rotated generation resolved as a GLOBAL drop
+// that degraded the successor's pinned transport baselines with loss that
+// was never its own. The producer registration is released BEFORE the
+// charge: chargeLateWindowLoss takes e.mu, and the window-close paths wait
+// on the producer count while holding e.mu (registered producers must never
+// take the lock). When the gate is on and the generation matches WHILE
+// REGISTERED, a concurrent close must wait for this producer before
+// rotating, so the enqueue lands in the captured window — deliberately NO
+// further gate re-read after admission (round 28): a stop turning the gate
+// off after admission waits for us; the old shared gate check returned
+// silently and lost the captured decision.
+func (e *Engine) admitObservation(t *transport, o *Observation) bool {
+	if o.WindowGen != 0 {
+		if e.closed.Load() {
+			// Shutdown tail: the drain has exited — global drop (documented).
+			t.producers.Add(-1)
+			t.dropped.Add(1)
+			return false
+		}
+		if !e.learningActive.Load() || o.WindowGen != e.windowGen.Load() {
+			t.producers.Add(-1)
+			e.chargeLateWindowLoss(o.WindowGen)
+			return false
+		}
+		return true
+	}
+	if !e.learningActive.Load() {
+		t.producers.Add(-1)
+		return false
+	}
+	if e.closed.Load() {
+		// The drain has exited (or is exiting): an enqueue could no longer be
+		// consumed, so refuse it HERE and count the loss — a producer must
+		// never enqueue successfully into an abandoned channel (Codex fix).
+		t.producers.Add(-1)
+		t.dropped.Add(1)
+		return false
+	}
+	return true
+}
+
 // Observe emits one observation. Non-blocking under every condition; safe from
 // any goroutine. Ignored (uncounted — "not learning" is not loss) when no
 // session is Learning.
@@ -229,48 +278,8 @@ func (e *Engine) Observe(o Observation) {
 	// there is no interleaving left in which an event lands with a rotated
 	// generation or beyond the shutdown sweep.
 	t.producers.Add(1)
-	if o.WindowGen != 0 { //nolint:nestif // captured-window admission is a decision table (rounds 27/28)
-		// Captured-window path (Codex rounds 27/28): a decision captured
-		// under a window that has since CLOSED must be charged to THAT
-		// window's session — returning on the gate left the closed session's
-		// loss accounting falsely clean, and enqueueing under a rotated
-		// generation resolved as a GLOBAL drop that degraded the successor's
-		// pinned transport baselines with loss that was never its own. The
-		// producer registration is released BEFORE the charge:
-		// chargeLateWindowLoss takes e.mu, and the window-close paths wait on
-		// the producer count while holding e.mu (registered producers must
-		// never take the lock).
-		if e.closed.Load() {
-			// Shutdown tail: the drain has exited — global drop (documented).
-			t.producers.Add(-1)
-			t.dropped.Add(1)
-			return
-		}
-		if !e.learningActive.Load() || o.WindowGen != e.windowGen.Load() {
-			t.producers.Add(-1)
-			e.chargeLateWindowLoss(o.WindowGen)
-			return
-		}
-		// Gate on + matching generation observed WHILE REGISTERED: a
-		// concurrent close must wait for this producer before rotating, so
-		// the enqueue below lands in the captured window. Deliberately NO
-		// further gate re-read (Codex round 28): a stop turning the gate off
-		// between here and the send waits for us — the old shared gate check
-		// below returned silently and lost the captured decision.
-	} else {
-		if !e.learningActive.Load() {
-			t.producers.Add(-1)
-			return
-		}
-		if e.closed.Load() {
-			// The drain has exited (or is exiting): an enqueue could no
-			// longer be consumed, so refuse it HERE and count the loss — a
-			// producer must never enqueue successfully into an abandoned
-			// channel (Codex fix).
-			t.producers.Add(-1)
-			t.dropped.Add(1)
-			return
-		}
+	if !e.admitObservation(t, &o) {
+		return
 	}
 	defer t.producers.Add(-1)
 	if o.Host == "" {
