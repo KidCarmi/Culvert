@@ -104,17 +104,46 @@ func learnCategoryEpoch() string {
 // M3 limitation — the category epoch has never represented it); its churn
 // remains outside this fence.
 type learnDecisionKey struct {
-	policy   policyContentKey
+	policy policyContentKey
+	tax    learnTaxKey
+}
+
+// learnTaxKey is the taxonomy half of the fence (compared independently of
+// the policy half so a default-action flip never fabricates category churn
+// and vice versa).
+type learnTaxKey struct {
 	saasView *effectiveCategoryView
 	catRev   uint64
 }
 
+func learnTaxKeyNow() learnTaxKey {
+	return learnTaxKey{saasView: saasEffectiveView.Current(), catRev: catStore.Revision()}
+}
+
 func learnDecisionKeyNow() learnDecisionKey {
-	return learnDecisionKey{
-		policy:   policyContentKeyNow(),
-		saasView: saasEffectiveView.Current(),
-		catRev:   catStore.Revision(),
+	return learnDecisionKey{policy: policyContentKeyNow(), tax: learnTaxKeyNow()}
+}
+
+// learnFencedStamp returns identity() as the decision-time stamp ONLY when
+// the sub-key equals want both BEFORE and AFTER the identity read (Codex
+// round 23): the identity helpers re-read live state, so a config restore
+// landing between the sub-key check and the identity read would stamp the
+// RESTORED identity for evidence the decision derived under the transient
+// state — and with the restore completing the round trip, consumption and
+// the close-time check would both see the baseline and latch no churn. The
+// post-read recheck closes that: every key component is monotonic, so
+// equality on both sides proves no mutation overlapped the read and the
+// returned identity describes exactly the captured state. ok=false ⇒ the
+// caller stamps its flip witness.
+func learnFencedStamp[K comparable](want K, keyNow func() K, identity func() string) (string, bool) {
+	if keyNow() != want {
+		return "", false
 	}
+	id := identity()
+	if keyNow() != want {
+		return "", false
+	}
+	return id, true
 }
 
 // learnDecisionKeySnapshot captures the full decision key for the
@@ -170,29 +199,24 @@ func learnObserveDecision(auth authOutcome, host, method string, match *PolicyMa
 	}
 	policyID, catEpoch := "", ""
 	if havePK {
-		cur := learnDecisionKeyNow()
-		if cur.policy == pk.policy {
-			// No policy-config mutation intervened since before evaluation:
-			// the memoized identity IS the decision identity (0-alloc —
-			// memoized string).
-			policyID = policyContentIdentityCached()
+		// Each half fenced on BOTH sides of its identity read (round 23; see
+		// learnFencedStamp). Steady state returns the memoized strings —
+		// 0-alloc; the witnesses allocate only at config-change rate.
+		if id, ok := learnFencedStamp(pk.policy, policyContentKeyNow, policyContentIdentityCached); ok {
+			policyID = id
 		} else {
-			// A mutation provably landed inside the evaluation→stamp bracket.
+			// A mutation provably overlapped the evaluation→stamp bracket.
 			// The decision-time identity is unrecoverable, so stamp a witness
-			// unique to the captured key (allocates — config-change-rate
-			// only, never steady-state).
+			// unique to the captured key.
 			policyID = "policy-flip@" + strconv.FormatInt(pk.policy.gen, 16) + ":" +
 				strconv.FormatUint(pk.policy.catgroupRev, 16) + ":" + strconv.FormatUint(pk.policy.defaultRev, 16)
 		}
-		if cur.saasView == pk.saasView && cur.catRev == pk.catRev {
-			// Taxonomy unchanged across the bracket: the memoized epoch is the
-			// one evaluation resolved through (0-alloc — memoized string).
-			catEpoch = learnCategoryEpoch()
+		if ep, ok := learnFencedStamp(pk.tax, learnTaxKeyNow, learnCategoryEpoch); ok {
+			catEpoch = ep
 		} else {
-			// A taxonomy swap or admin-store mutation landed inside the
-			// bracket — the content-derived epoch is ABA-blind to a round
-			// trip, so stamp a witness unique to the captured taxonomy state.
-			catEpoch = "category-flip@" + strconv.FormatUint(pk.catRev, 16)
+			// The content-derived epoch is ABA-blind to a round trip, so
+			// stamp a witness unique to the captured taxonomy state.
+			catEpoch = "category-flip@" + strconv.FormatUint(pk.tax.catRev, 16)
 		}
 	}
 	eng.Observe(policylearn.Observation{

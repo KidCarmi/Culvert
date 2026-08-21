@@ -370,6 +370,42 @@ func TestObservation_DefaultDecisionCarriesDecisionTimeIdentity(t *testing.T) {
 	}
 }
 
+// TestLearnFencedStamp_PostReadFlipYieldsWitness (Codex round 23): the
+// identity helpers re-read live state, so a config restore landing between
+// the sub-key check and the identity read used to stamp the RESTORED
+// identity for evidence derived under the transient state. The fenced stamp
+// must revalidate the sub-key AFTER the read and refuse (⇒ witness) when it
+// moved — deterministically driven through the seam.
+func TestLearnFencedStamp_PostReadFlipYieldsWitness(t *testing.T) {
+	// Flip lands between the pre-check and the identity read completing:
+	// keyNow returns the captured key first, then the moved key.
+	calls := 0
+	keyNow := func() int {
+		calls++
+		if calls == 1 {
+			return 7 // pre-check: still the captured key
+		}
+		return 8 // post-read: the restore has landed
+	}
+	identity := func() string { return "RESTORED-BASELINE" }
+	if id, ok := learnFencedStamp(7, keyNow, identity); ok {
+		t.Fatalf("post-read flip accepted the restored identity %q — B-derived evidence would stamp baseline A and latch no churn", id)
+	}
+
+	// Steady bracket: both reads match ⇒ the identity is authoritative.
+	if id, ok := learnFencedStamp(7, func() int { return 7 }, func() string { return "STEADY" }); !ok || id != "STEADY" {
+		t.Fatalf("steady bracket refused (id=%q ok=%v)", id, ok)
+	}
+
+	// Pre-check mismatch refuses without consulting the identity at all.
+	if _, ok := learnFencedStamp(7, func() int { return 9 }, func() string {
+		t.Fatal("identity read despite a pre-check mismatch")
+		return ""
+	}); ok {
+		t.Fatal("pre-check mismatch accepted")
+	}
+}
+
 // TestObservationE2E_DisabledNilEngine: with the singleton nil the adapter is
 // a no-op — the request flows and nothing panics.
 func TestObservationE2E_DisabledNilEngine(t *testing.T) {
