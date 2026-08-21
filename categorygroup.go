@@ -22,11 +22,11 @@ type CategoryGroupStore = catgroup.Store
 
 var globalCategoryGroups = catgroup.New()
 
-// categoryGroupMatchesHostRule reports whether host belongs to the category
-// group the rule references — the hot-path function called during policy
-// evaluation (matchDestNorm). Host → category goes through the two-tier fusion
-// (lookupHostCategory); the group membership check is the engine's O(1) catSet
-// lookup. Unknown group or uncategorized host = no match (fail-closed).
+// categoryGroupMatchesHostScratch reports whether the scratch's host belongs to
+// the category group the rule references — the hot-path function called during
+// policy evaluation (matchDestNorm). Host → category goes through the two-tier
+// fusion; the group membership check is the engine's O(1) catSet lookup.
+// Unknown group or uncategorized host = no match (fail-closed).
 //
 // References-by-id (S2): it resolves the group by the rule's AUTHORITATIVE ID
 // first (rename-safe), falling back to the denormalized name only when the id
@@ -34,8 +34,13 @@ var globalCategoryGroups = catgroup.New()
 // result is final — the stale name is never consulted, so a rename can't make a
 // rule match a different group. Byte-identical to the name path for rules with
 // no DestCategoryGroupID.
-func categoryGroupMatchesHostRule(rule *PolicyRule, host string) bool {
-	hostCat, _, _ := lookupHostCategory(host)
+// It takes the SCAN-SCOPED host scratch, so every category-group rule in one
+// policy evaluation shares ONE host→category resolution instead of repeating
+// the two-tier fusion per rule (policy_hostcat.go). Group membership stays the
+// engine's O(1) catSet lookup, evaluated per rule as before. Callers outside a
+// scan build a throwaway scratch with newHostCatScratch(host).
+func categoryGroupMatchesHostScratch(rule *PolicyRule, sc *hostCatScratch) bool {
+	hostCat, _, _ := sc.fusion()
 	if id := rule.DestCategoryGroupID; id != "" {
 		if matched, resolved := globalCategoryGroups.MatchesCategoryByID(id, hostCat); resolved {
 			return matched

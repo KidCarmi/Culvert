@@ -17,7 +17,7 @@ import (
 // internal/geoip. This file keeps the parts that depend on package main:
 //
 //   - resolveHost: host → public net.IP, applying the shared SSRF private-range
-//     check (isPrivateIP/privateCIDRs). It stays here because that SSRF backbone
+//     check (isPrivateIP/privateRanges). It stays here because that SSRF backbone
 //     is shared by proxy/security/threatfeed/release and must not be forked.
 //   - geo: a thin host-based wrapper preserving the LookupFull/Lookup/LookupCached
 //     API used by callers (enrollment.go, policy.go, proxy.go), delegating to the
