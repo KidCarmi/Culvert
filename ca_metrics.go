@@ -54,6 +54,75 @@ func caWritePrometheus(w *strings.Builder) {
 	fmt.Fprintf(w, "culvert_cluster_ca_rotations_total %d\n", statClusterCARotations.Load())
 
 	caWriteUsabilityPrometheus(w)
+	clusterCAWritePrometheus(w)
+}
+
+// clusterCAWritePrometheus appends the CHAOS-50 cluster-CA usability series.
+//
+// The gap these close: before them, `culvert_cluster_ca_rotations_total` was the
+// ONLY cluster-CA series, and it counts successes — so a control plane whose CA
+// directory had gone read-only, and whose rotation had therefore failed every
+// day for a month, was indistinguishable on /metrics from one that simply had
+// not needed to rotate yet. Both read 0. There was no expiry series at all, so
+// nothing an alerting rule could evaluate ahead of the cliff, and the cliff
+// itself (a fleet-wide mTLS trust failure) moved no counter either.
+//
+// culvert_cluster_ca_expires_in_seconds is the one to alert on well before the
+// cliff; culvert_cluster_ca_rotation_failures_total is the one that says the
+// automatic remedy is not working, which is the actionable signal. The rest
+// confirm the cliff was reached.
+//
+// Label-free, per the CA-2 metrics contract: no node ID, subject, serial,
+// fingerprint, or key material — counts and one time delta only.
+func clusterCAWritePrometheus(w *strings.Builder) {
+	snap := clusterCAFailures()
+
+	// BOTH gauges are omitted entirely when no cluster CA is loaded — the common
+	// case on a single-node appliance or any data-plane node.
+	//
+	// The `usable` gauge needs this as much as the expiry one, and getting it
+	// wrong is worse: Usable() returns the "no cluster CA loaded" error on such a
+	// node, so an unconditional gauge reads `culvert_cluster_ca_usable 0` —
+	// indistinguishable from an expired CA on a real control plane. The runbook's
+	// recommended paging rule is literally `culvert_cluster_ca_usable == 0`, so
+	// that would page for every node in the estate that legitimately has no
+	// signing CA, exactly contradicting the runbook's promise that these rules do
+	// not fire outside a cluster.
+	//
+	// An absent series is the honest encoding of "this node has no cluster CA":
+	// the question does not apply, rather than having the answer "broken". Same
+	// reasoning as `culvert_ca_expires_in_seconds` in CHAOS-28, where 0 would
+	// have read as "expires now".
+	//
+	// The COUNTERS below stay unconditional on purpose: a counter resting at 0 is
+	// the normal, non-alerting state and keeping the series present means rate()
+	// and increase() work from the first scrape rather than starting on the first
+	// fault.
+	if exp := globalClusterCA.Expiry(); !exp.IsZero() {
+		w.WriteString("\n# HELP culvert_cluster_ca_usable Whether the cluster CA can currently sign node certificates peers will accept (1 = yes)\n")
+		w.WriteString("# TYPE culvert_cluster_ca_usable gauge\n")
+		usable := 0
+		if globalClusterCA.Usable() == nil {
+			usable = 1
+		}
+		fmt.Fprintf(w, "culvert_cluster_ca_usable %d\n", usable)
+
+		w.WriteString("\n# HELP culvert_cluster_ca_expires_in_seconds Seconds until the cluster CA certificate expires (negative once expired)\n")
+		w.WriteString("# TYPE culvert_cluster_ca_expires_in_seconds gauge\n")
+		fmt.Fprintf(w, "culvert_cluster_ca_expires_in_seconds %d\n", int64(time.Until(exp).Seconds()))
+	}
+
+	w.WriteString("\n# HELP culvert_cluster_ca_sign_refused_total Node-certificate issuances refused because the cluster CA was outside its validity window\n")
+	w.WriteString("# TYPE culvert_cluster_ca_sign_refused_total counter\n")
+	fmt.Fprintf(w, "culvert_cluster_ca_sign_refused_total %d\n", snap.SignRefusals)
+
+	w.WriteString("\n# HELP culvert_cluster_ca_node_certs_clamped_total Node certificates whose validity was clamped to the cluster CA's own expiry\n")
+	w.WriteString("# TYPE culvert_cluster_ca_node_certs_clamped_total counter\n")
+	fmt.Fprintf(w, "culvert_cluster_ca_node_certs_clamped_total %d\n", snap.ClampedIssuances)
+
+	w.WriteString("\n# HELP culvert_cluster_ca_rotation_failures_total Cluster CA auto-rotation attempts that failed\n")
+	w.WriteString("# TYPE culvert_cluster_ca_rotation_failures_total counter\n")
+	fmt.Fprintf(w, "culvert_cluster_ca_rotation_failures_total %d\n", snap.RotationFailures)
 }
 
 // caWriteUsabilityPrometheus appends the CHAOS-28 Root-CA usability series.
