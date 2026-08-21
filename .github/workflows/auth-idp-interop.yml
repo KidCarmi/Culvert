@@ -132,3 +132,56 @@ jobs:
       - name: SimpleSAMLphp logs
         if: failure()
         run: docker logs culvert-simplesamlphp
+
+  openldap:
+    name: OpenLDAP
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CULVERT_OPENLDAP_URL: ldap://127.0.0.1:3389
+      CULVERT_OPENLDAP_LDAPS_URL: ldaps://127.0.0.1:3636
+      CULVERT_OPENLDAP_BIND_DN: cn=admin,dc=corp,dc=example
+      CULVERT_OPENLDAP_BIND_PASSWORD: admin-password
+      CULVERT_OPENLDAP_BASE_DN: dc=corp,dc=example
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/setup-go-cache
+
+      # Pinned OpenLDAP with the memberof overlay enabled by default; the
+      # deterministic fixture directory (.github/idp/openldap/bootstrap.ldif)
+      # seeds users alice/bob and the engineering group. Credentials are
+      # fixture-only. The image auto-generates a self-signed TLS certificate,
+      # so the ldaps/StartTLS interop paths run without extra material.
+      - name: Start OpenLDAP
+        run: |
+          docker run -d --name culvert-openldap \
+            -p 127.0.0.1:3389:389 -p 127.0.0.1:3636:636 \
+            -e LDAP_ORGANISATION="Culvert Interop" \
+            -e LDAP_DOMAIN=corp.example \
+            -e LDAP_ADMIN_PASSWORD=admin-password \
+            -v "$PWD/.github/idp/openldap:/container/service/slapd/assets/config/bootstrap/ldif/custom:ro" \
+            osixia/openldap:1.5.0 --copy-service
+
+      - name: Wait for OpenLDAP fixture
+        run: |
+          for i in $(seq 1 60); do
+            if docker exec culvert-openldap ldapsearch -x -H ldap://localhost \
+                 -D "cn=admin,dc=corp,dc=example" -w admin-password \
+                 -b "dc=corp,dc=example" "(uid=alice)" dn 2>/dev/null | grep -q "uid=alice"; then
+              echo "OpenLDAP fixture is ready."
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "OpenLDAP fixture did not become ready in time."
+          docker logs culvert-openldap
+          exit 1
+
+      - name: Run OpenLDAP interop tests
+        run: go test -run TestOpenLDAPInterop -count=1 -timeout=5m .
+
+      - name: OpenLDAP logs
+        if: failure()
+        run: docker logs culvert-openldap

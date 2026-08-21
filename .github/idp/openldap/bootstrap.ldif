@@ -1,0 +1,41 @@
+# Deterministic OpenLDAP fixture for the Culvert LDAP IdP interop suite
+# (ADR-0025). Loaded by osixia/openldap into dc=corp,dc=example.
+#
+# Users:
+#   alice / alice-password  — displayName "Alice Example", mail, member of engineering
+#   bob   / bob-password    — no group memberships
+# Groups:
+#   cn=engineering,ou=groups — groupOfNames; the image's memberof overlay
+#   reflects membership into each member's memberOf attribute.
+# Test credentials are FIXTURE-ONLY.
+
+dn: ou=people,dc=corp,dc=example
+objectClass: organizationalUnit
+ou: people
+
+dn: ou=groups,dc=corp,dc=example
+objectClass: organizationalUnit
+ou: groups
+
+dn: uid=alice,ou=people,dc=corp,dc=example
+objectClass: inetOrgPerson
+uid: alice
+cn: Alice
+sn: Example
+displayName: Alice Example
+mail: alice@corp.example
+userPassword: alice-password
+
+dn: uid=bob,ou=people,dc=corp,dc=example
+objectClass: inetOrgPerson
+uid: bob
+cn: Bob
+sn: Example
+displayName: Bob Example
+mail: bob@corp.example
+userPassword: bob-password
+
+dn: cn=engineering,ou=groups,dc=corp,dc=example
+objectClass: groupOfNames
+cn: engineering
+member: uid=alice,ou=people,dc=corp,dc=example
