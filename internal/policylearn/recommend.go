@@ -417,7 +417,7 @@ func guardrailsHashFor(canonical []string) string {
 	h.Write([]byte(guardrailsHashDomainTag))
 	var l [4]byte
 	for _, c := range canonical {
-		binary.BigEndian.PutUint32(l[:], uint32(len(c)))
+		binary.BigEndian.PutUint32(l[:], uint32(len(c))) // #nosec G115 -- category names are far below 4 GiB; GuardrailsHash framing is a pinned identity, do not widen
 		h.Write(l[:])
 		h.Write([]byte(c))
 	}
@@ -854,7 +854,7 @@ func recID(sessionID, group, category, evidenceHash string) string {
 	h.Write([]byte(recIDDomainTag))
 	var l [4]byte
 	for _, s := range []string{sessionID, group, category, evidenceHash} {
-		binary.BigEndian.PutUint32(l[:], uint32(len(s)))
+		binary.BigEndian.PutUint32(l[:], uint32(len(s))) // #nosec G115 -- framed IDs are far below 4 GiB; recID framing is a pinned identity, do not widen
 		h.Write(l[:])
 		h.Write([]byte(s))
 	}

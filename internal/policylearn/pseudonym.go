@@ -97,10 +97,10 @@ func (sk *subjectKey) token(authSource, subject string) string {
 	}
 	mac := hmac.New(sha256.New, sk.key)
 	var l [4]byte
-	binary.BigEndian.PutUint32(l[:], uint32(len(authSource)))
+	binary.BigEndian.PutUint32(l[:], uint32(len(authSource))) // #nosec G115 -- len() is non-negative and identifiers are far below 4 GiB; the frame format is a pinned token identity, do not widen
 	mac.Write(l[:])
 	mac.Write([]byte(authSource))
-	binary.BigEndian.PutUint32(l[:], uint32(len(subject)))
+	binary.BigEndian.PutUint32(l[:], uint32(len(subject))) // #nosec G115 -- same bound; pinned token-identity framing
 	mac.Write(l[:])
 	mac.Write([]byte(subject))
 	return hex.EncodeToString(mac.Sum(nil)[:16])

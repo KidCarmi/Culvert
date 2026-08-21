@@ -536,7 +536,7 @@ func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host,
 				return "POLICY_REDIRECT", true
 			}
 			logger.Printf("POLICY_REDIRECT rule=%q pri=%s %s -> %q => %q [%s] {req_id=%s identity=%s rule=%s action=redirect}", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, sanitizeLog(host), sanitizeLog(match.Rule.RedirectURL), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), sanitizeLog(match.Rule.Name))
-			http.Redirect(w, r, match.Rule.RedirectURL, http.StatusFound)
+			http.Redirect(w, r, match.Rule.RedirectURL, http.StatusFound) // #nosec G710 -- admin-configured rule action target; the isSafeRedirectURL guard above blocks unsafe values
 			return "POLICY_REDIRECT", true
 
 		case ActionAllow:
