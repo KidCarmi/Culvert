@@ -72,10 +72,54 @@ func computeHealth() healthReport {
 	}
 }
 
-// handleHealth returns liveness + readiness details for monitoring tools.
+// coarseClamAVStatus collapses ClamAVStatus()'s value to a fixed enum for the
+// UNAUTHENTICATED surface.
+//
+// ClamAVStatus returns "disabled", "connected", or the free-text
+// fmt.Sprintf("unreachable: %v", err) built from a live dial error — in
+// practice "unreachable: clamav: connect failed: dial tcp 10.0.1.5:3310:
+// connect: connection refused". That publishes the internal address and port of
+// the AV daemon, i.e. internal network topology, to any client that can reach
+// the proxy port, together with the fact that malware scanning is currently
+// down. It is the same string, from the same producer, that was removed from
+// the /ready `clamav` row — /health is served by the same
+// routeProxyListenerBuiltin dispatcher on the same unauthenticated listener and
+// was left carrying it verbatim.
+//
+// The enum is chosen so no monitoring predicate changes meaning: "disabled" and
+// "connected" pass through untouched, and every failure value already began
+// with the "unreachable" prefix this collapses to. Only the operator-only cause
+// is withheld, and it is not lost — it stays on the role-gated
+// /api/security-scan/status (`clamav_status`, which re-pings on cache miss) and
+// in the support bundle, where computeHealth's redact:"internal" tag is
+// actually honoured by Redactor.Classify.
+func coarseClamAVStatus(status string) string {
+	switch status {
+	case "disabled", "connected":
+		return status
+	default:
+		return "unreachable"
+	}
+}
+
+// handleHealth returns liveness + posture for monitoring tools.
+//
+// This handler is reachable ONLY through routeProxyListenerBuiltin (pac.go) on
+// the PROXY listener, which main.go dispatches BEFORE handleRequest — so there
+// is no proxy authentication, no admin session, and no IP guard in front of it.
+// Every client that can use the gateway can read whatever is written here.
+//
+// computeHealth's other consumer is the support-bundle collector, which passes
+// the struct through Redactor.Classify and therefore honours the
+// redact:"internal" tags on ClamAV/CAExpiresDays/SSLInspection/
+// ThreatFeedEntries. This path has no such filter, so any narrowing for the
+// public surface belongs here rather than in computeHealth, which must keep
+// returning the full posture for the bundle.
 func handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(computeHealth()); err != nil {
+	report := computeHealth()
+	report.ClamAV = coarseClamAVStatus(report.ClamAV)
+	if err := json.NewEncoder(w).Encode(report); err != nil {
 		logger.Printf("handleHealth encode: %v", err)
 	}
 }
