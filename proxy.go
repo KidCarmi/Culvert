@@ -17,27 +17,37 @@ import (
 // "allow" = passthrough mode (initial setup), "deny" = zero-trust (production).
 // Set by setDefaultPolicyAction() during startup based on config or rule count.
 // Stored as 1 (allow) or 0 (deny) via atomic int32 to avoid data races.
-var defaultPolicyActionAllow int32 // 0 = deny (default)
-
-// defaultPolicyActionRev counts setDefaultPolicyAction calls. The action
-// itself is a TWO-VALUE atomic, so "same value before and after" cannot prove
-// it held throughout an interval (ABA); this monotonic counter can — any flip
-// inside a bracketed read moves it. Process-local change signal only (memo
-// keys), never an identity.
-var defaultPolicyActionRev atomic.Uint64
+// defaultPolicyActionState packs the action value and its change signal into
+// ONE atomic word: bit 0 = allow flag, bits 1+ = a set counter. The counter
+// exists because the value alone is two-state, so "same value before and
+// after" cannot prove it held throughout an interval (ABA); it shares the
+// value's word because publishing them as two separate atomics left a window
+// where a descheduled setter had published the new VALUE but not the new
+// SIGNAL — enforcement could run under the new action while the policy-
+// content memo still validated against the old key (Codex round 19). Every
+// set strictly increases the word, so a loaded word is simultaneously the
+// current action AND a fencing revision that any later set invalidates.
+// Process-local change signal only (memo keys), never an identity.
+// Zero value = deny, revision 0 (the fail-closed default).
+var defaultPolicyActionState atomic.Uint64
 
 func setDefaultPolicyAction(action string) {
+	var allow uint64
 	if action == "allow" {
-		atomic.StoreInt32(&defaultPolicyActionAllow, 1)
-	} else {
-		atomic.StoreInt32(&defaultPolicyActionAllow, 0)
+		allow = 1
 	}
-	defaultPolicyActionRev.Add(1)
+	for {
+		old := defaultPolicyActionState.Load()
+		next := ((old>>1)+1)<<1 | allow
+		if defaultPolicyActionState.CompareAndSwap(old, next) {
+			return
+		}
+	}
 }
 
 // defaultPolicyAction returns the current default action string ("allow"/"deny").
 func defaultPolicyAction() string {
-	if atomic.LoadInt32(&defaultPolicyActionAllow) == 1 {
+	if defaultPolicyActionState.Load()&1 == 1 {
 		return "allow"
 	}
 	return "deny"

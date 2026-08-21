@@ -7,7 +7,6 @@ import (
 	"log"
 	"os"
 	"sync"
-	"sync/atomic"
 	"testing"
 )
 
@@ -23,16 +22,16 @@ func ensureRewriteDefaultTestLogger(t *testing.T) {
 }
 
 // resetRewriteDefaultGlobals snapshots/restores the rewriter state and
-// defaultPolicyActionAllow for isolation under -shuffle. The rewriter half
+// defaultPolicyActionState for isolation under -shuffle. The rewriter half
 // delegates to rewrite.Rewriter.Snapshot (the engine now lives in
 // internal/rewrite; this helper no longer reaches into its unexported fields).
 func resetRewriteDefaultGlobals(t *testing.T) {
 	t.Helper()
 	restoreRewriter := rewriter.Snapshot()
-	origAction := atomic.LoadInt32(&defaultPolicyActionAllow)
+	origAction := defaultPolicyActionState.Load()
 	t.Cleanup(func() {
 		restoreRewriter()
-		atomic.StoreInt32(&defaultPolicyActionAllow, origAction)
+		defaultPolicyActionState.Store(origAction)
 	})
 }
 

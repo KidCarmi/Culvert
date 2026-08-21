@@ -241,7 +241,9 @@ func policyContentKeyNow() policyContentKey {
 	return policyContentKey{
 		gen:         gen,
 		catgroupRev: globalCategoryGroups.Revision(),
-		defaultRev:  defaultPolicyActionRev.Load(),
+		// The whole packed word (value + set counter, one atomic load): value
+		// and change signal can never be observed out of step (round 19).
+		defaultRev: defaultPolicyActionState.Load(),
 	}
 }
 

@@ -512,20 +512,32 @@ func TestPolicyContentMemoized_MidHashFlipNeverPoisonsMemo(t *testing.T) {
 	}
 }
 
-// TestSetDefaultPolicyAction_RoundTripMovesRevision (Codex round 18): the
-// default action is a two-value atomic, so value equality across a bracket
+// TestSetDefaultPolicyAction_RoundTripMovesRevision (Codex rounds 18/19):
+// the default action value is two-state, so value equality across a bracket
 // cannot prove it held throughout (allow→deny→allow lands back on the same
-// value — ABA). The memo key therefore carries the flip COUNTER, which every
-// set must advance so a round trip is visible to the revalidation.
+// value — ABA). The memo key therefore carries the packed state word, whose
+// set counter every mutation must advance — and because value and counter
+// share ONE atomic word, a reader can never observe the new value with the
+// old change signal (the round-19 descheduled-setter window).
 func TestSetDefaultPolicyAction_RoundTripMovesRevision(t *testing.T) {
 	prev := defaultPolicyAction()
 	t.Cleanup(func() { setDefaultPolicyAction(prev) })
 
-	before := defaultPolicyActionRev.Load()
+	before := defaultPolicyActionState.Load()
 	setDefaultPolicyAction("allow")
+	mid := defaultPolicyActionState.Load()
 	setDefaultPolicyAction("deny")
-	if moved := defaultPolicyActionRev.Load() - before; moved < 2 {
-		t.Fatalf("round trip advanced the flip counter by %d, want ≥2 — ABA invisible to the memo key", moved)
+	after := defaultPolicyActionState.Load()
+	if moved := (after >> 1) - (before >> 1); moved < 2 {
+		t.Fatalf("round trip advanced the set counter by %d, want ≥2 — ABA invisible to the memo key", moved)
+	}
+	// The value rides the SAME word as the counter: each observed word must
+	// carry the action just set, so value and signal cannot be out of step.
+	if mid&1 != 1 || after&1 != 0 {
+		t.Fatalf("packed word carries the wrong action (mid=%b after=%b)", mid, after)
+	}
+	if !(mid > before && after > mid) {
+		t.Fatalf("packed word not strictly increasing (%d, %d, %d)", before, mid, after)
 	}
 }
 
