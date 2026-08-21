@@ -536,7 +536,7 @@ func TestSetDefaultPolicyAction_RoundTripMovesRevision(t *testing.T) {
 	if mid&1 != 1 || after&1 != 0 {
 		t.Fatalf("packed word carries the wrong action (mid=%b after=%b)", mid, after)
 	}
-	if !(mid > before && after > mid) {
+	if mid <= before || after <= mid {
 		t.Fatalf("packed word not strictly increasing (%d, %d, %d)", before, mid, after)
 	}
 }
