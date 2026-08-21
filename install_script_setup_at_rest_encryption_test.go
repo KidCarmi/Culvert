@@ -42,6 +42,7 @@ func runSetupAtRestEncryptionChoice2(t *testing.T, passphrase string) (output st
 	t.Helper()
 	setupFn := extractShellFunctionBraceAware(t, "scripts/install.sh", "setup_at_rest_encryption")
 	envPutFn := extractShellFunction(t, "scripts/install.sh", "env_put")
+	validateFn := extractShellFunction(t, "scripts/install.sh", "validate_passphrase_for_env_file")
 
 	// setup_at_rest_encryption only reaches the "own passphrase" branch when
 	// stdin is a TTY (`[[ -t 0 ]]`) and the operator types "2" at the prompt.
@@ -60,7 +61,7 @@ is_fresh_deployment() { return 1; }
 secret_already_set() { return 1; }
 ` + "INSTALL_DIR=" + dir + "\n"
 
-	script := stubs + envPutFn + "\n" + setupFn + "\n" + "setup_at_rest_encryption\n"
+	script := stubs + validateFn + "\n" + envPutFn + "\n" + setupFn + "\n" + "setup_at_rest_encryption\n"
 
 	cmd := exec.CommandContext(t.Context(), "bash", "-c", script) // #nosec G204 -- fixed test script content, not external/user input
 	cmd.Stdin = bytes.NewBufferString(passphrase + "\n" + passphrase + "\n")
@@ -297,6 +298,7 @@ func TestInstallScript_SetupAtRestEncryption_HostEnvOnlyCAPassphraseWithEmbedded
 	setupFn := extractShellFunctionBraceAware(t, "scripts/install.sh", "setup_at_rest_encryption")
 	envPutFn := extractShellFunction(t, "scripts/install.sh", "env_put")
 	secretFn := extractShellFunction(t, "scripts/install.sh", "secret_already_set")
+	validateFn := extractShellFunctionBraceAware(t, "scripts/install.sh", "validate_passphrase_for_env_file")
 
 	dir := t.TempDir()
 	envFile := filepath.Join(dir, ".env")
@@ -309,13 +311,16 @@ is_fresh_deployment() { return 0; }
 export CULVERT_CA_PASSPHRASE=$'abcdefgh\nijklmnop'
 ` + "INSTALL_DIR=" + dir + "\n"
 
-	script := stubs + secretFn + "\n" + envPutFn + "\n" + setupFn + "\n" + "setup_at_rest_encryption\n"
+	script := stubs + secretFn + "\n" + envPutFn + "\n" + validateFn + "\n" + setupFn + "\n" + "setup_at_rest_encryption\n"
 
 	cmd := exec.CommandContext(t.Context(), "bash", "-c", script) // #nosec G204 -- fixed test script content, not external/user input
 	cmd.Stdin = bytes.NewReader(nil)                              // non-interactive: stdin is not a TTY
 	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("setup_at_rest_encryption failed: %v\n%s", err, out)
+	// The host-env family now fails CLOSED through the shared validator (the
+	// same contract as the interactive choice-2 path), so the malformed value
+	// must abort the run rather than be skipped with a warning.
+	if err == nil {
+		t.Fatalf("setup_at_rest_encryption accepted an embedded-newline CULVERT_CA_PASSPHRASE; output:\n%s", out)
 	}
 
 	envContent := ""
