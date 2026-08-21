@@ -11,10 +11,12 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -42,6 +44,103 @@ func TestPublicIdPProfile_RedactsLDAPBindPassword(t *testing.T) {
 	if publicIdPProfile(p2).LDAP.BindCredentialConfigured {
 		t.Error("bindCredentialConfigured must be false without a stored credential")
 	}
+}
+
+// TestPublicIdPProfile_ProjectionParity pins the explicit-allowlist
+// projection: every field of IdPProfile and its sub-configs is either
+// propagated verbatim, listed in the declared REDACTED set, or DERIVED.
+// publicIdPProfile deliberately rebuilds each struct from named fields
+// (never a copy-then-blank, which still aliases secret-bearing memory), so
+// a newly added profile field that is not wired here must fail this test
+// instead of silently vanishing from every read response.
+func TestPublicIdPProfile_ProjectionParity(t *testing.T) {
+	redacted := map[string]bool{
+		"OIDC.ClientSecret": true,
+		"SAML.MetadataXML":  true,
+		"LDAP.BindPassword": true,
+	}
+	derived := map[string]bool{
+		// Recomputed from BindPassword presence, never copied from input.
+		"LDAP.BindCredentialConfigured": true,
+	}
+
+	in := &IdPProfile{}
+	ctr := 0
+	fillProjectionSentinels(t, reflect.ValueOf(in).Elem(), "", &ctr)
+	out := publicIdPProfile(in)
+	checkProjectionParity(t, reflect.ValueOf(in).Elem(), reflect.ValueOf(out).Elem(), "", redacted, derived)
+}
+
+// fillProjectionSentinels sets every exported field of a struct (recursing
+// into pointer-to-struct fields) to a unique nonzero sentinel value.
+func fillProjectionSentinels(t *testing.T, v reflect.Value, path string, ctr *int) {
+	t.Helper()
+	for i := 0; i < v.NumField(); i++ {
+		f := v.Field(i)
+		p := projectionFieldPath(path, v.Type().Field(i).Name)
+		*ctr++
+		switch f.Kind() {
+		case reflect.String:
+			f.SetString(fmt.Sprintf("sentinel-%d", *ctr))
+		case reflect.Bool:
+			f.SetBool(true)
+		case reflect.Int:
+			f.SetInt(int64(*ctr))
+		case reflect.Slice:
+			if f.Type().Elem().Kind() != reflect.String {
+				t.Fatalf("%s: unsupported slice kind %s — extend the parity filler", p, f.Type())
+			}
+			f.Set(reflect.ValueOf([]string{fmt.Sprintf("sentinel-%d", *ctr)}))
+		case reflect.Ptr:
+			if f.Type().Elem().Kind() != reflect.Struct {
+				t.Fatalf("%s: unsupported pointer kind %s — extend the parity filler", p, f.Type())
+			}
+			f.Set(reflect.New(f.Type().Elem()))
+			fillProjectionSentinels(t, f.Elem(), v.Type().Field(i).Name, ctr)
+		default:
+			t.Fatalf("%s: unsupported field kind %s — extend the parity filler", p, f.Kind())
+		}
+	}
+}
+
+// checkProjectionParity walks the input/output field pairs: redacted fields
+// must be zero in the output, derived fields are skipped, everything else
+// must be propagated verbatim.
+func checkProjectionParity(t *testing.T, in, out reflect.Value, path string, redacted, derived map[string]bool) {
+	t.Helper()
+	for i := 0; i < in.NumField(); i++ {
+		name := in.Type().Field(i).Name
+		p := projectionFieldPath(path, name)
+		fi, fo := in.Field(i), out.Field(i)
+		if fi.Kind() == reflect.Ptr {
+			if fo.IsNil() {
+				t.Errorf("%s: sub-config dropped by the projection", p)
+				continue
+			}
+			checkProjectionParity(t, fi.Elem(), fo.Elem(), name, redacted, derived)
+			continue
+		}
+		switch {
+		case redacted[p]:
+			if !fo.IsZero() {
+				t.Errorf("%s: REDACTED field leaked through the projection: %v", p, fo.Interface())
+			}
+		case derived[p]:
+			// Value is recomputed; presence is asserted by the write-only
+			// semantics tests above.
+		default:
+			if !reflect.DeepEqual(fi.Interface(), fo.Interface()) {
+				t.Errorf("%s: not propagated by the allowlist projection: in=%v out=%v — add the new field to publicIdPProfile", p, fi.Interface(), fo.Interface())
+			}
+		}
+	}
+}
+
+func projectionFieldPath(path, name string) string {
+	if path == "" {
+		return name
+	}
+	return path + "." + name
 }
 
 func ldapProfileBodyForPut(name string, extra map[string]any) map[string]any {

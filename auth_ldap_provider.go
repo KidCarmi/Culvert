@@ -98,7 +98,7 @@ const (
 	maxLDAPDNLen        = 1024
 	maxLDAPFilterLen    = 512
 	maxLDAPAttrLen      = 64
-	maxLDAPPasswordLen  = 1024
+	maxLDAPBindInputLen = 1024
 	minLDAPCacheTTLSecs = 10
 	maxLDAPCacheTTLSecs = 86400 // 24h
 	defLDAPCacheTTLSecs = 300
@@ -128,8 +128,8 @@ func validateLDAPProfileConfig(cfg *LDAPProfileConfig) error {
 			return fmt.Errorf("%s: %w", f.name, err)
 		}
 	}
-	if len(cfg.BindPassword) > maxLDAPPasswordLen {
-		return fmt.Errorf("bind credential exceeds %d bytes", maxLDAPPasswordLen)
+	if len(cfg.BindPassword) > maxLDAPBindInputLen {
+		return fmt.Errorf("bind credential exceeds %d bytes", maxLDAPBindInputLen)
 	}
 	if err := validateLDAPUserFilter(cfg.UserFilter); err != nil {
 		return fmt.Errorf("userFilter: %w", err)

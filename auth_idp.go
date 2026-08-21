@@ -563,37 +563,78 @@ func cloneIdPProfiles(profiles []*IdPProfile) []*IdPProfile {
 	return out
 }
 
-// publicIdPProfile returns a response-safe copy. Client secrets and uploaded
-// SAML metadata XML are write-only API inputs and must not be exposed through
-// viewer/admin read responses.
+// publicIdPProfile returns a response-safe copy. Client secrets, uploaded
+// SAML metadata XML, and the LDAP bind credential are write-only API inputs
+// and must not be exposed through viewer/admin read responses.
+//
+// This is an explicit ALLOWLIST projection, deliberately not a struct copy
+// with the secret fields blanked afterwards: a copy still aliases (or is
+// derived from) secret-bearing memory, which both taint analysis (CodeQL
+// clear-text-logging, which does not strong-update pointer fields) and a
+// future refactor can trip over. Rebuilding every sub-config from named
+// non-secret fields makes the projection provably secret-free by
+// construction. Field-completeness is pinned by
+// TestPublicIdPProfile_ProjectionParity — adding a profile field means
+// adding it here (or to the declared redaction set) or that test fails.
 func publicIdPProfile(p *IdPProfile) *IdPProfile {
 	if p == nil {
 		return nil
 	}
-	cp := *p
-	cp.EmailDomains = append([]string(nil), p.EmailDomains...)
-	cp.KnownGroups = append([]string(nil), p.KnownGroups...)
+	cp := &IdPProfile{
+		ID:           p.ID,
+		Name:         p.Name,
+		Type:         p.Type,
+		EmailDomains: append([]string(nil), p.EmailDomains...),
+		Enabled:      p.Enabled,
+		Priority:     p.Priority,
+		KnownGroups:  append([]string(nil), p.KnownGroups...),
+	}
 	if p.OIDC != nil {
-		oidc := *p.OIDC
-		oidc.Scopes = append([]string(nil), p.OIDC.Scopes...)
-		oidc.ClientSecret = ""
-		cp.OIDC = &oidc
+		cp.OIDC = &OIDCProfileConfig{
+			Issuer:   p.OIDC.Issuer,
+			ClientID: p.OIDC.ClientID,
+			// ClientSecret: write-only input, redacted.
+			Scopes:                append([]string(nil), p.OIDC.Scopes...),
+			GroupsClaim:           p.OIDC.GroupsClaim,
+			RequiredScope:         p.OIDC.RequiredScope,
+			RequiredAudience:      p.OIDC.RequiredAudience,
+			TLSSkipVerify:         p.OIDC.TLSSkipVerify,
+			AuthorizationEndpoint: p.OIDC.AuthorizationEndpoint,
+			TokenEndpoint:         p.OIDC.TokenEndpoint,
+			IntrospectionEndpoint: p.OIDC.IntrospectionEndpoint,
+			UserinfoEndpoint:      p.OIDC.UserinfoEndpoint,
+			JWKsURI:               p.OIDC.JWKsURI,
+		}
 	}
 	if p.SAML != nil {
-		saml := *p.SAML
-		saml.MetadataXML = ""
-		cp.SAML = &saml
+		cp.SAML = &SAMLProfileConfig{
+			MetadataURL: p.SAML.MetadataURL,
+			// MetadataXML: write-only admin upload, redacted.
+			NameIDFormat:    p.SAML.NameIDFormat,
+			GroupsAttribute: p.SAML.GroupsAttribute,
+			EmailAttribute:  p.SAML.EmailAttribute,
+			NameAttribute:   p.SAML.NameAttribute,
+		}
 	}
 	if p.LDAP != nil {
-		ldap := *p.LDAP
-		// The bind credential is a write-only API input (same containment as
-		// the OIDC client secret): blanked in every read/audit projection.
-		// Read surfaces expose only the BindCredentialConfigured metadata bit.
-		ldap.BindPassword = ""
-		ldap.BindCredentialConfigured = p.LDAP.BindPassword != ""
-		cp.LDAP = &ldap
+		cp.LDAP = &LDAPProfileConfig{
+			URL:           p.LDAP.URL,
+			StartTLS:      p.LDAP.StartTLS,
+			TLSSkipVerify: p.LDAP.TLSSkipVerify,
+			BindDN:        p.LDAP.BindDN,
+			// BindPassword: write-only input, redacted. Read surfaces expose
+			// only the derived BindCredentialConfigured metadata bit.
+			BindCredentialConfigured: p.LDAP.BindPassword != "",
+			BaseDN:                   p.LDAP.BaseDN,
+			UserFilter:               p.LDAP.UserFilter,
+			EmailAttribute:           p.LDAP.EmailAttribute,
+			NameAttribute:            p.LDAP.NameAttribute,
+			GroupAttribute:           p.LDAP.GroupAttribute,
+			RequiredGroup:            p.LDAP.RequiredGroup,
+			CacheTTLSeconds:          p.LDAP.CacheTTLSeconds,
+		}
 	}
-	return &cp
+	return cp
 }
 
 func publicIdPProfiles(profiles []*IdPProfile) []*IdPProfile {
