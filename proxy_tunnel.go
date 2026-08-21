@@ -1252,7 +1252,10 @@ func scanInspectBody(r, req *http.Request, resp *http.Response, br blockResponde
 	}
 
 	origBody := resp.Body
-	body, readErr := io.ReadAll(io.LimitReader(origBody, maxScanBufferBytes()))
+	// resp.ContentLength is the origin's declaration (-1 when chunked); it sizes
+	// the buffer and nothing else — the read still runs to EOF or to the scan
+	// limit, so an under-declared body does not get its tail forwarded unscanned.
+	body, readErr := readScanBuffer(origBody, maxScanBufferBytes(), resp.ContentLength)
 	if readErr != nil {
 		origBody.Close()
 		logger.Printf("SSL_INSPECT: body read error for %q: %v", sanitizeLog(hostOnly), readErr)

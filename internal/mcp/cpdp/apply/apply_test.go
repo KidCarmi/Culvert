@@ -439,3 +439,190 @@ func reasonMust(t *testing.T, err error, want mcperr.Reason) {
 		t.Fatalf("reason = %v, want %v (%v)", got, want, err)
 	}
 }
+
+// ---- AbortApplied / RejectAck (transaction compensation) -----------------------
+
+// TestAbortApplied_RevertsToPreviousPersistBeforeSwap proves AbortApplied undoes the
+// last Apply: the active pointer returns to the prior snapshot, a Rejected ack
+// replaces the pending Applied one, the revert is durably persisted (so a restart
+// recovers the prior snapshot, never the aborted one), and persist happens before
+// the in-memory swap.
+func TestAbortApplied_RevertsToPreviousPersistBeforeSwap(t *testing.T) {
+	s, ts := mkSigner(t, "k1")
+	store := &memStore{}
+	a := newApplier(t, cpdp.CapabilityGateway, ts, store)
+	e1 := gwEnv(t, s, 5, 2)
+	e2 := gwEnv(t, s, 5, 3)
+	if _, err := a.Apply(e1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Apply(e2); err != nil {
+		t.Fatal(err)
+	}
+	// At persist time of the abort, the active pointer must still be the aborted e2.
+	store.onPersist = func(st *PersistedState) {
+		if a.store.Active() == nil || a.store.Active().ContentHash != e2.ContentHash {
+			t.Errorf("active swapped before abort persist completed")
+		}
+		if st.Current == nil || st.Current.ContentHash != e1.ContentHash {
+			t.Errorf("abort did not persist the prior snapshot as current")
+		}
+	}
+	ack, err := a.AbortApplied(e2.ContentHash, mcperr.New(mcperr.ReasonSnapshotPersistFailed, "test", "rollout persist failed"))
+	if err != nil {
+		t.Fatalf("abort: %v", err)
+	}
+	if ack.State != cpdp.AckRejected || ack.ContentHash != e2.ContentHash {
+		t.Fatalf("abort ack not a rejection bound to the aborted env: %+v", ack)
+	}
+	if a.Active() == nil || a.Active().ContentHash != e1.ContentHash {
+		t.Fatalf("abort did not revert active to the prior snapshot")
+	}
+	if a.PendingAck() == nil || a.PendingAck().State != cpdp.AckRejected {
+		t.Fatal("pending ack must be the rejection after abort (no AckApplied may survive)")
+	}
+	// Restart recovers the prior snapshot, never the aborted one.
+	a2 := newApplier(t, cpdp.CapabilityGateway, ts, store)
+	if err := a2.Recover(); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if a2.Active() == nil || a2.Active().ContentHash != e1.ContentHash {
+		t.Fatal("restart after abort did not recover the prior snapshot")
+	}
+}
+
+// TestAbortApplied_FirstApplyRevertsToNoActive proves aborting the FIRST apply (no
+// prior snapshot) reverts to no-active (fail-closed / disabled), and a restart
+// recovers no active snapshot.
+func TestAbortApplied_FirstApplyRevertsToNoActive(t *testing.T) {
+	s, ts := mkSigner(t, "k1")
+	store := &memStore{}
+	a := newApplier(t, cpdp.CapabilityGateway, ts, store)
+	e1 := gwEnv(t, s, 5, 2)
+	if _, err := a.Apply(e1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.AbortApplied(e1.ContentHash, mcperr.New(mcperr.ReasonSnapshotPersistFailed, "test", "x")); err != nil {
+		t.Fatalf("abort: %v", err)
+	}
+	if a.Active() != nil {
+		t.Fatal("abort of the first apply must leave no active snapshot")
+	}
+	a2 := newApplier(t, cpdp.CapabilityGateway, ts, store)
+	if err := a2.Recover(); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if a2.Active() != nil {
+		t.Fatal("restart after aborting the first apply must recover no active snapshot")
+	}
+}
+
+// TestAbortApplied_PersistFailureLeavesAbortedActiveAndErrors proves that when the
+// compensating write itself fails (a still-degraded disk), AbortApplied returns the
+// error with the active pointer left on the aborted envelope — never a silent
+// half-abort — so the caller/recovery can converge it.
+func TestAbortApplied_PersistFailureLeavesAbortedActiveAndErrors(t *testing.T) {
+	s, ts := mkSigner(t, "k1")
+	store := &memStore{}
+	a := newApplier(t, cpdp.CapabilityGateway, ts, store)
+	e1 := gwEnv(t, s, 5, 2)
+	e2 := gwEnv(t, s, 5, 3)
+	if _, err := a.Apply(e1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Apply(e2); err != nil {
+		t.Fatal(err)
+	}
+	store.failNext.Store(true)
+	ack, err := a.AbortApplied(e2.ContentHash, mcperr.New(mcperr.ReasonSnapshotPersistFailed, "test", "x"))
+	if err == nil {
+		t.Fatal("abort must surface a compensating-write failure")
+	}
+	if ack == nil || ack.State != cpdp.AckRejected {
+		t.Fatal("abort must still return a rejection ack")
+	}
+	if a.Active() == nil || a.Active().ContentHash != e2.ContentHash {
+		t.Fatal("a failed abort must leave the active pointer on the aborted env (no silent half-abort)")
+	}
+}
+
+// TestRejectAck_NoMutation proves RejectAck builds a bound rejection without touching
+// active state or the pending ack.
+func TestRejectAck_NoMutation(t *testing.T) {
+	s, ts := mkSigner(t, "k1")
+	a := newApplier(t, cpdp.CapabilityGateway, ts, &memStore{})
+	e1 := gwEnv(t, s, 5, 2)
+	if _, err := a.Apply(e1); err != nil {
+		t.Fatal(err)
+	}
+	e2 := gwEnv(t, s, 5, 3)
+	ack := a.RejectAck(e2, mcperr.New(mcperr.ReasonSnapshotPersistFailed, "test", "rollout precondition"))
+	if ack.State != cpdp.AckRejected || ack.ContentHash != e2.ContentHash {
+		t.Fatalf("reject ack not bound to e2: %+v", ack)
+	}
+	if a.Active() == nil || a.Active().ContentHash != e1.ContentHash {
+		t.Fatal("RejectAck must not change active state")
+	}
+	if a.PendingAck() == nil || a.PendingAck().State != cpdp.AckApplied {
+		t.Fatal("RejectAck must not disturb the existing pending Applied ack")
+	}
+}
+
+// TestAbortApplied_RefusesWhenActiveIsNotTheAbortedEnvelope is the SECURITY
+// regression gate for the compensation binding. AbortApplied must revert ONLY the
+// envelope its caller applied. Without the hash binding it reverted "whatever is
+// active right now", so an interleaving Apply between a caller's Apply and its
+// compensation silently rolled back an UNRELATED, newer, validly-signed snapshot —
+// a fail-open config regression driven purely by timing.
+func TestAbortApplied_RefusesWhenActiveIsNotTheAbortedEnvelope(t *testing.T) {
+	s, ts := mkSigner(t, "k1")
+	store := &memStore{}
+	a := newApplier(t, cpdp.CapabilityGateway, ts, store)
+	e1 := gwEnv(t, s, 5, 2)
+	e2 := gwEnv(t, s, 5, 3)
+	e3 := gwEnv(t, s, 5, 4)
+	for _, e := range []*cpdp.Envelope{e1, e2, e3} {
+		if _, err := a.Apply(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	persistsBefore := store.persists.Load()
+	// A late compensation for e2 arrives after e3 was applied: it must be refused,
+	// non-mutating, and must not persist anything.
+	ack, err := a.AbortApplied(e2.ContentHash, mcperr.New(mcperr.ReasonSnapshotPersistFailed, "test", "late abort"))
+	if err == nil {
+		t.Fatal("abort bound to a superseded envelope must be refused")
+	}
+	if ack != nil {
+		t.Fatalf("a refused abort must not produce an ack: %+v", ack)
+	}
+	if got := mcperr.ReasonOf(err); got != mcperr.ReasonSnapshotHashMismatch {
+		t.Fatalf("unexpected reason %v", got)
+	}
+	if a.Active() == nil || a.Active().ContentHash != e3.ContentHash {
+		t.Fatal("a refused abort must not revert the unrelated newer snapshot")
+	}
+	if store.persists.Load() != persistsBefore {
+		t.Fatal("a refused abort must not write durable state")
+	}
+	if a.PendingAck() == nil || a.PendingAck().State != cpdp.AckApplied {
+		t.Fatal("a refused abort must not replace the pending ack of the live snapshot")
+	}
+}
+
+// TestAbortApplied_RefusesUnboundAbort proves an empty binding is never accepted:
+// an unbound compensation is not a safe operation at any time.
+func TestAbortApplied_RefusesUnboundAbort(t *testing.T) {
+	s, ts := mkSigner(t, "k1")
+	a := newApplier(t, cpdp.CapabilityGateway, ts, &memStore{})
+	e1 := gwEnv(t, s, 5, 2)
+	if _, err := a.Apply(e1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.AbortApplied("", mcperr.New(mcperr.ReasonSnapshotPersistFailed, "test", "x")); err == nil {
+		t.Fatal("an unbound abort must be refused")
+	}
+	if a.Active() == nil || a.Active().ContentHash != e1.ContentHash {
+		t.Fatal("a refused unbound abort must not mutate active state")
+	}
+}

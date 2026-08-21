@@ -152,6 +152,63 @@ func unavailableSSORefs(refs []string) []string {
 	return out
 }
 
+// authLDAPProfileDiagnostics reports transport-hygiene and authority risks for
+// enabled LDAP IdP profiles (ADR-0025). Report-only. Codes:
+//   - ldap_plaintext_transport     WARN — plain ldap:// without StartTLS.
+//   - ldap_tls_unverified          WARN — certificate verification disabled.
+//   - ldap_legacy_config_shadowed  WARN — the legacy YAML ldap block is
+//     shadowed by a registry LDAP profile (informational; remove the block).
+func authLDAPProfileDiagnostics() []OperatorContractCheck {
+	if idpRegistry == nil {
+		return nil
+	}
+	var checks []OperatorContractCheck
+	var plaintext, unverified []string
+	for _, p := range idpRegistry.All() {
+		if p == nil || !p.Enabled || p.Type != IdPTypeLDAP || p.LDAP == nil {
+			continue
+		}
+		label := p.Name
+		if label == "" {
+			label = p.ID
+		}
+		if strings.HasPrefix(strings.ToLower(p.LDAP.URL), "ldap://") && !p.LDAP.StartTLS {
+			plaintext = append(plaintext, label)
+		}
+		if p.LDAP.TLSSkipVerify {
+			unverified = append(unverified, label)
+		}
+	}
+	if len(plaintext) > 0 {
+		checks = append(checks, OperatorContractCheck{
+			Code:   "ldap_plaintext_transport",
+			Status: diagWarn,
+			Message: "LDAP identity provider(s) use plain LDAP without StartTLS — user and service-account credentials cross the network unencrypted: " +
+				strings.Join(plaintext, ", "),
+			OperatorAction: "Switch the provider's connection security to LDAPS (recommended) or StartTLS.",
+		})
+	}
+	if len(unverified) > 0 {
+		checks = append(checks, OperatorContractCheck{
+			Code:   "ldap_tls_unverified",
+			Status: diagWarn,
+			Message: "LDAP identity provider(s) have TLS certificate verification DISABLED — the credential channel is open to interception: " +
+				strings.Join(unverified, ", "),
+			OperatorAction: "Install the directory's CA on this appliance and re-enable certificate verification.",
+		})
+	}
+	if legacyLDAPYAMLConfig() != nil && idpRegistry.HasEnabledLDAP() {
+		checks = append(checks, OperatorContractCheck{
+			Code:   "ldap_legacy_config_shadowed",
+			Status: diagWarn,
+			Message: "A legacy YAML ldap block is present but shadowed by an enabled LDAP identity provider in the registry — " +
+				"the registry is authoritative and the YAML block is ignored.",
+			OperatorAction: "Remove the ldap block from config.yaml; LDAP is managed from Objects → Identity Providers.",
+		})
+	}
+	return checks
+}
+
 // maxShadowFindings caps shadow rows so a pathological ruleset can't flood the
 // operator contract.
 const maxShadowFindings = 25

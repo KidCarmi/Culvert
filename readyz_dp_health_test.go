@@ -142,8 +142,12 @@ func TestHandleReady_CPPollFailingSustained_ReportOnlyFailRow(t *testing.T) {
 	if row == nil || row.Status != "fail" {
 		t.Fatalf("cp_poll row = %+v, want fail after sustained poll failure", row)
 	}
-	if !strings.Contains(row.Detail, "last-known-good") {
-		t.Errorf("cp_poll detail should explain the degraded mode, got %q", row.Detail)
+	// The detail names the degraded SUBSYSTEM and points at the log. It must
+	// NOT name the enforcement consequence or measure the outage — /ready is
+	// unauthenticated on the proxy port (see readyz_dp_detail_disclosure_test.go,
+	// which owns that contract).
+	if !strings.Contains(row.Detail, "control plane") || !strings.Contains(row.Detail, "see server logs") {
+		t.Errorf("cp_poll detail should name the subsystem and point at the logs, got %q", row.Detail)
 	}
 	// Report-only: the DEFAULT verdict must not gate on it — a CP outage
 	// must not eject the whole DP fleet from a default-configured LB.
@@ -204,30 +208,25 @@ func TestHandleReady_NodeCertRenewalFailing_FailRowAndRecovery(t *testing.T) {
 	if row == nil || row.Status != "fail" {
 		t.Fatalf("node_cert row = %+v, want fail while renewal is failing inside the window", row)
 	}
-	// The detail carries days-left and points at the logs, but NOT the renewal
-	// cause: /ready is unauthenticated on the proxy listener and renewDPCert's
-	// error names the control-plane address or an absolute cert/key path (see
-	// appendDPHealthChecks and readyz_detail_disclosure_test.go). This assertion
-	// previously required the cause to be present, which pinned the leak.
-	if !strings.Contains(row.Detail, "day") {
-		t.Errorf("node_cert detail should carry days-left, got %q", row.Detail)
-	}
-	if !strings.Contains(row.Detail, "see server logs") {
-		t.Errorf("node_cert detail should point the operator at the logs, got %q", row.Detail)
-	}
-	if strings.Contains(row.Detail, "connection refused") || strings.Contains(row.Detail, "RenewCert RPC") {
-		t.Errorf("node_cert detail must not publish the renewal cause on the unauthenticated /ready surface, got %q", row.Detail)
+	// The detail names the degraded SUBSYSTEM and points at the log. The cause
+	// and the cert's remaining lifetime are deliberately absent — /ready is
+	// unauthenticated on the proxy port (see readyz_dp_detail_disclosure_test.go,
+	// which owns that contract).
+	if !strings.Contains(row.Detail, "node certificate") || !strings.Contains(row.Detail, "see server logs") {
+		t.Errorf("node_cert detail should name the subsystem and point at the logs, got %q", row.Detail)
 	}
 	if code != http.StatusOK || status != "ready" {
 		t.Fatalf("default verdict changed: code=%d status=%q, want 200/ready (report-only contract)", code, status)
 	}
 
-	// An expired cert reports the EXPIRED wording.
+	// An ALREADY-EXPIRED cert still produces the failing row. It reports the
+	// same fixed detail as the expiring case on purpose: distinguishing them
+	// would publish how far past NotAfter this node's mTLS identity is.
 	expiredFile := writeCertExpiringIn(t, -48*time.Hour)
 	alertDPCertRenewalFailure("dp-test", expiredFile, errors.New("RenewCert RPC: connection refused"))
 	_, _, checks = readyChecks(t, "/ready")
-	if row := checks["node_cert"]; row == nil || !strings.Contains(row.Detail, "EXPIRED") {
-		t.Fatalf("node_cert row = %+v, want EXPIRED wording for a past-NotAfter cert", row)
+	if row := checks["node_cert"]; row == nil || row.Status != "fail" {
+		t.Fatalf("node_cert row = %+v, want a failing row for a past-NotAfter cert with failing renewal", row)
 	}
 
 	// Successful renewal clears the row through the same reset the renewal

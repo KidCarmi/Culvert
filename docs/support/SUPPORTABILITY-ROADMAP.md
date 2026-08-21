@@ -1,6 +1,12 @@
 # Culvert Supportability Framework — Implementation Roadmap
 
-- **Status:** Proposed (design). Milestones M0–M7. First slices deliberately small enough to review safely.
+- **Status:** Appliance track **M0–M5 implemented and shipped**; cloud track
+  (the TAC receiving/analysis tier) remains proposed (design); the
+  appliance-side M6 upload queue and M7 telemetry collection have since
+  shipped. See
+  `docs/operator/support-bundles-and-diagnostics.md` for the live operator
+  runbook covering everything M0–M5 shipped. Milestones M0–M7 below. First
+  slices deliberately small enough to review safely.
 - **Depends on:** all `docs/support/*` specs + ADRs 0008–0018.
 - **Sequencing principle:** ship the redaction wall and a minimal bundle before breadth. Never add a collector before its classification + tests exist. Each milestone is independently valuable and independently revertible.
 
@@ -38,7 +44,7 @@
 
 ---
 
-## M1 — Local health model & standard support bundle
+## M1 — Local health model & standard support bundle ✅ shipped
 
 - **Scope:**
   - `internal/redaction` v1: `DataClass`, `Redactor.Struct`, registry backed by `config_surfaces.go` + a minimal `dataFileClasses`; fail-closed default.
@@ -60,7 +66,7 @@
 
 ---
 
-## M2 — Plugin collectors & centralized redaction
+## M2 — Plugin collectors & centralized redaction ✅ shipped
 
 - **Scope:** complete the collector registry (tls, config-versions, timeline-stub, request-logs with masking, governance, upstream/CDR/scan posture); harden `internal/redaction` with the free-form scrubber + masking semantics + profiles + custom exclusions; `redaction-report.json` + mandatory preview; land all three parity walls as **blocking**.
 - **Non-goals:** host/cluster collectors, debug levels beyond L1, upload.
@@ -75,7 +81,7 @@
 
 ---
 
-## M3 — Targeted diagnostics & incident scopes
+## M3 — Targeted diagnostics & incident scopes ✅ shipped
 
 - **Scope:** `diagnose dns|tls|upstream|storage|policy`; `IncidentScope` catalog + `--scope` selection; debug levels L0–L4 with mandatory TTL + restart-surviving watchdog + auto-stop; the operational timeline (taps on config-version/failover/CA/alert/restart/crash) with improved (dated/compressed) retention.
 - **Non-goals:** cluster diagnostics (M5), upload.
@@ -90,7 +96,7 @@
 
 ---
 
-## M4 — Encrypted export & support-case workflow
+## M4 — Encrypted export & support-case workflow ✅ shipped
 
 - **Scope:** bundle lifecycle FSM (persisted, crash-safe); offline download with optional passphrase (`backupcrypt`) or recipient-key (age/X25519) encryption; `culvert support validate/inspect/history`; `case_id` binding; retention janitor.
 - **Non-goals:** online upload (M6), remote support.
@@ -104,7 +110,7 @@
 
 ---
 
-## M5 — HA & recovery diagnostics
+## M5 — HA & recovery diagnostics ✅ shipped
 
 - **Scope:** the three CP/DP instrumentation additions (per-DP applied version in `MetricsReport`; populate `EnrolledNode.Version`; failover/self-fence ring on `/api/cluster/ha`); cluster fan-out collector + `diagnose cluster` with local-vs-cluster discriminators; etcd-endpoint reachability probe; recovery-mode hardening (bundle under DB/CP down).
 - **Non-goals:** upload, telemetry.

@@ -23,9 +23,36 @@ package main
 // CP-poll failure would let a CP outage eject the entire DP fleet from the
 // load balancer at once. Operators who *want* dependency-degraded nodes
 // ejected opt in per probe with /ready?strict=1 (see handleReady).
+//
+// DISCLOSURE CONTRACT (shared with appendCAReadinessCheck and
+// appendStateFileChecks): /ready is served UNAUTHENTICATED on the proxy port,
+// so every detail on these rows is a FIXED, operator-directed string. Both
+// rows used to be built with fmt.Sprintf over live internals and published:
+//
+//	cp_poll   → "control plane unreachable for 12m3s — serving last-known-good
+//	             config; policy/auth updates are not arriving"
+//	node_cert → "node certificate EXPIRED 4 day(s) ago and renewal is failing
+//	             (last error: RenewCert RPC: ... dial tcp 10.0.3.7:9443:
+//	             connect: connection refused)"
+//
+// which hands any client on the network the control plane's internal address
+// and port, the raw gRPC/TLS transport error, the exact remaining lifetime of
+// this node's mTLS identity, and — the part that actually arms an attacker —
+// an explicit statement of the ENFORCEMENT POSTURE: that policy and auth
+// updates are not arriving, i.e. a revoked credential or a newly-blocked
+// destination is still being honoured here, and for how long it has been so.
+// A row STATUS names a degraded subsystem; a row DETAIL must not name the
+// security consequence or measure it.
+//
+// Nothing is lost to the operator. Both causes are already logged by their own
+// loops on every occurrence ("DataPlane: GetConfig error" in
+// controlplane_client.go, "DataPlane: cert renewal check" in dp_enrollment.go),
+// the cert failure additionally fires the latched cert_expiry alert, and the
+// CP-reachability posture is spelled out in full on the role-gated
+// /api/diagnostics dp_last_known_good_config contract row. The verdicts are
+// unchanged: report-only by default, gating under ?strict=1.
 
 import (
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -61,45 +88,38 @@ func dpMarkCPPollHealthy() {
 
 // dpNodeCertRenewal is the probe-facing state of the DP cert-renewal loop.
 // Unlike the dpCertExpiryAlert latch (which fires each escalation once), this
-// is overwritten on every failed attempt so the /ready row always shows the
-// current days-left, and cleared on successful renewal.
+// is refreshed on every failed attempt and cleared on successful renewal.
 //
-// lastErr is recorded but deliberately NOT published on /ready — that surface is
-// unauthenticated and the error carries the control-plane address or an absolute
-// cert/key path (see appendDPHealthChecks). It is kept because the operator-facing
-// copy of the cause is already carried by the process log and the cert_expiry
-// alert, and because a future ROLE-GATED surface is the right place for it; any
-// new reader must be authenticated.
+// It holds ONLY the boolean, deliberately. Its sole consumer is the
+// unauthenticated /ready row above, so a days-left int or a lastErr string
+// retained here is one fmt.Sprintf away from the public surface — which is
+// exactly how the raw renewal error and the cert's remaining lifetime came to
+// be published. The days count and the cause stay where they belong: the
+// process log and the latched cert_expiry alert, both written by
+// alertDPCertRenewalFailure's caller before it reaches this recorder.
 var dpNodeCertRenewal struct {
 	mu      sync.Mutex
 	failing bool
-	days    int // days until NotAfter at the last failed attempt (negative = expired)
-	lastErr string
 }
 
-func recordDPCertRenewalFailure(days int, renewErr error) {
+func recordDPCertRenewalFailure() {
 	dpNodeCertRenewal.mu.Lock()
 	dpNodeCertRenewal.failing = true
-	dpNodeCertRenewal.days = days
-	dpNodeCertRenewal.lastErr = ""
-	if renewErr != nil {
-		dpNodeCertRenewal.lastErr = renewErr.Error()
-	}
 	dpNodeCertRenewal.mu.Unlock()
 }
 
 func clearDPCertRenewalFailure() {
 	dpNodeCertRenewal.mu.Lock()
 	dpNodeCertRenewal.failing = false
-	dpNodeCertRenewal.days = 0
-	dpNodeCertRenewal.lastErr = ""
 	dpNodeCertRenewal.mu.Unlock()
 }
 
-func dpCertRenewalFailureSnapshot() (failing bool, days int, lastErr string) {
+// dpCertRenewalFailing reports whether the last renewal attempt inside the
+// renewal window failed. It is the whole probe-facing state.
+func dpCertRenewalFailing() bool {
 	dpNodeCertRenewal.mu.Lock()
 	defer dpNodeCertRenewal.mu.Unlock()
-	return dpNodeCertRenewal.failing, dpNodeCertRenewal.days, dpNodeCertRenewal.lastErr
+	return dpNodeCertRenewal.failing
 }
 
 // appendDPHealthChecks adds the cp_poll and node_cert rows to /ready when
@@ -112,47 +132,28 @@ func appendDPHealthChecks(checks map[string]*readinessCheck) {
 
 	cp := &readinessCheck{Status: "ok"}
 	if dpControlPlanePollFailing.Load() {
+		// Fixed string, identical on both branches: no elapsed time, and no
+		// statement of what stops arriving. Only the STATUS distinguishes a
+		// sustained outage from one still inside the grace window — the detail
+		// carries no measurement an observer could use to size the stale-config
+		// window. The full posture is on the role-gated /api/diagnostics
+		// (dp_last_known_good_config) and in the log.
+		cp.Detail = "control plane connectivity is degraded — see server logs"
 		since := dpCPPollFailingSince.Load()
 		if since != 0 && time.Since(time.Unix(0, since)) >= dpCPPollFailGrace {
 			cp.Status = "fail"
-			cp.Detail = fmt.Sprintf(
-				"control plane unreachable for %s — serving last-known-good config; policy/auth updates are not arriving",
-				time.Since(time.Unix(0, since)).Round(time.Second))
-		} else {
-			// Failing but inside the grace window (or a bare flag with no
-			// transition stamp): not yet a probe-visible failure.
-			cp.Detail = "control plane poll failing (within grace window)"
 		}
+		// Otherwise: failing but inside the grace window (or a bare flag with no
+		// transition stamp) — not yet a probe-visible failure.
 	}
 	checks["cp_poll"] = cp
 
-	// The last renewal error is deliberately NOT published here. /ready is served
-	// by routeProxyListenerBuiltin on the proxy listener with no authentication
-	// and no IP guard, and renewDPCert's error is not a sanitised string: the
-	// "RenewCert RPC: %w" branch wraps a gRPC dial failure that names the
-	// CONTROL PLANE's address and port, and the "write cert:"/"write key:"
-	// branches wrap an *os.PathError carrying the absolute node cert/key path.
-	// Publishing either hands an unauthenticated client the cluster's internal
-	// topology and the appliance's on-disk layout — the same class that was
-	// removed from the ca and clamav rows, on the same surface.
-	//
-	// The row, its "fail" status and the days-remaining count all stay: that is
-	// the CHAOS-09 visibility contract, and days-left is this node's own
-	// certificate lifecycle rather than internal topology. Only the cause is
-	// withheld, and unlike the clamav row it is genuinely recoverable from the
-	// log — both renewal call sites log it verbatim ("DataPlane: cert renewal
-	// check: %v" / "DataPlane: CA rotation renewal failed: %v"), and the latched
-	// cert_expiry alert carries it in full.
 	cert := &readinessCheck{Status: "ok"}
-	if failing, days, _ := dpCertRenewalFailureSnapshot(); failing {
+	if dpCertRenewalFailing() {
 		cert.Status = "fail"
-		if days < 0 {
-			cert.Detail = fmt.Sprintf(
-				"node certificate EXPIRED %d day(s) ago and renewal is failing — see server logs", -days)
-		} else {
-			cert.Detail = fmt.Sprintf(
-				"node certificate expires in %d day(s) and renewal is failing — see server logs", days)
-		}
+		// Fixed string: no remaining lifetime, no expired/expiring distinction,
+		// no renewal cause. All three are in the log and the cert_expiry alert.
+		cert.Detail = "node certificate renewal is failing — see server logs"
 	}
 	checks["node_cert"] = cert
 }

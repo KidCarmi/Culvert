@@ -27,6 +27,8 @@ import (
 
 	"github.com/crewjam/saml"
 	"github.com/crewjam/saml/samlsp"
+
+	"github.com/KidCarmi/Culvert/internal/authstate"
 )
 
 // ---------------------------------------------------------------------------
@@ -120,7 +122,7 @@ func (p *SAMLProvider) ResolveIdentity(_, _ string) (*Identity, bool) { return n
 
 // CaptiveLoginURL generates a SAML AuthnRequest and returns the redirect URL.
 // relayURL is stored server-side; RelayState carries an opaque request handle.
-func (p *SAMLProvider) CaptiveLoginURL(relayURL string, _ *http.Request) string {
+func (p *SAMLProvider) CaptiveLoginURL(relayURL string, r *http.Request) string {
 	authReq, err := p.sp.MakeAuthenticationRequest(
 		p.sp.GetSSOBindingLocation(saml.HTTPRedirectBinding),
 		saml.HTTPRedirectBinding,
@@ -131,15 +133,16 @@ func (p *SAMLProvider) CaptiveLoginURL(relayURL string, _ *http.Request) string 
 		return ""
 	}
 	state := mustRandHex(16)
-	globalSAMLStateStore.set(state, &samlStateEntry{
+	// Attributed to the requesting client so a flood from one source can only
+	// evict its own in-flight state, never another user's mid-login entry.
+	globalSAMLStateStore.Set(state, authStateClientKey(r), &samlStateEntry{
 		requestID:  authReq.ID,
 		relayURL:   relayURL,
 		providerID: p.profile.ID,
-		createdAt:  time.Now(),
 	})
 	redirectURL, err := authReq.Redirect(state, p.sp)
 	if err != nil {
-		globalSAMLStateStore.pop(state)
+		globalSAMLStateStore.Pop(state)
 		logger.Printf("SAML[%s] redirect build error: %v", p.profile.ID, err)
 		return ""
 	}
@@ -153,7 +156,7 @@ func (p *SAMLProvider) ExchangeAssertion(r *http.Request) (*Identity, string, er
 		return nil, "", fmt.Errorf("saml callback: form parse: %w", err)
 	}
 	state := r.FormValue("RelayState")
-	entry, ok := globalSAMLStateStore.peek(state)
+	entry, ok := globalSAMLStateStore.Peek(state)
 	if !ok {
 		return nil, "", fmt.Errorf("saml callback: invalid or expired state")
 	}
@@ -162,7 +165,7 @@ func (p *SAMLProvider) ExchangeAssertion(r *http.Request) (*Identity, string, er
 	}
 	// authSAMLCallback tries each SAML provider; consume only after the
 	// state proves this provider owns the original AuthnRequest.
-	entry, ok = globalSAMLStateStore.pop(state)
+	entry, ok = globalSAMLStateStore.Pop(state)
 	if !ok {
 		return nil, "", fmt.Errorf("saml callback: invalid or expired state")
 	}
@@ -190,65 +193,25 @@ type samlStateEntry struct {
 	requestID  string
 	relayURL   string
 	providerID string
-	createdAt  time.Time
 }
 
-type samlStateStore struct {
-	mu      sync.Mutex
-	entries map[string]*samlStateEntry
-}
+// samlStateStore is the bounded, fair-share store for in-flight SAML
+// AuthnRequests, keyed by the opaque RelayState handle.
+//
+// Like the OIDC PKCE store it is populated by UNAUTHENTICATED requests (the
+// captive-portal path resolves a login URL before the client has any
+// identity), so its eviction policy is a security control: an anonymous flood
+// must not be able to destroy other users' in-flight login state. See
+// internal/authstate.
+type samlStateStore = authstate.Store[*samlStateEntry]
 
 const samlStateTTL = 10 * time.Minute
 const samlStateStoreMax = 1000
 
-var globalSAMLStateStore = &samlStateStore{entries: make(map[string]*samlStateEntry)}
+var globalSAMLStateStore = newSAMLStateStore()
 
-func (s *samlStateStore) set(state string, e *samlStateEntry) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(s.entries) >= samlStateStoreMax {
-		now := time.Now()
-		for k, v := range s.entries {
-			if now.After(v.createdAt.Add(samlStateTTL)) {
-				delete(s.entries, k)
-			}
-		}
-		if len(s.entries) >= samlStateStoreMax {
-			for k := range s.entries {
-				delete(s.entries, k)
-				break
-			}
-		}
-	}
-	s.entries[state] = e
-}
-
-func (s *samlStateStore) peek(state string) (*samlStateEntry, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	e, ok := s.entries[state]
-	if !ok {
-		return nil, false
-	}
-	if time.Since(e.createdAt) > samlStateTTL {
-		delete(s.entries, state)
-		return nil, false
-	}
-	return e, true
-}
-
-func (s *samlStateStore) pop(state string) (*samlStateEntry, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	e, ok := s.entries[state]
-	if !ok {
-		return nil, false
-	}
-	delete(s.entries, state)
-	if time.Since(e.createdAt) > samlStateTTL {
-		return nil, false
-	}
-	return e, true
+func newSAMLStateStore() *samlStateStore {
+	return authstate.New[*samlStateEntry](samlStateTTL, samlStateStoreMax)
 }
 
 // ---------------------------------------------------------------------------

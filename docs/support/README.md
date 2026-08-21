@@ -1,6 +1,15 @@
 # Culvert Supportability Framework (CSF) — Documentation Index
 
-Design-only doc set for an enterprise-grade TAC / support framework. **No implementation yet.**
+Doc set for an enterprise-grade TAC / support framework. **The appliance track
+(M0–M5) is implemented** — support bundles, redaction, plugin collectors,
+`diagnose`/incident-scope verbs, encrypted + sealed export, and HA/recovery
+diagnostics all ship in the binary today; see
+`docs/operator/support-bundles-and-diagnostics.md` for the live operator
+runbook. The appliance halves of M6 (secure-upload queue) and M7
+(consent-gated telemetry collection; no network sender in this build) have
+since shipped; the cloud receiving tier (`TAC-CLOUD-ARCHITECTURE.md`)
+remains design-only. See
+`SUPPORTABILITY-ROADMAP.md` for per-milestone shipped/design status.
 Read in this order; the vocabulary in `SUPPORTABILITY-ARCHITECTURE.md §0` is normative across all docs.
 
 > **Model: cloud-first (REVISION 2, 2026-07-13).** Three tiers — **(1) On-Prem Culvert Product** (self-sufficient; never depends on the cloud), **(2) Optional Outbound Support Integration** (collect→redact→consent→encrypt→upload, outbound-only), **(3) Cloud-Hosted TAC Operating System** (all analysis, correlation, known-issue matching, AI, workflow). The appliance collects and transmits evidence; it does **not** analyze. See `ANALYSIS-MODEL-DECISION.md` for the 3-model comparison and `TAC-CLOUD-ARCHITECTURE.md` for the cloud tier.

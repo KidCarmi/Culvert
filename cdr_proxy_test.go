@@ -512,8 +512,8 @@ func TestCDRHashCache_EvictionUnderPressure(t *testing.T) {
 	}
 }
 
-// Ensure tags are whitelisted low-cardinality only (direction=download).
-func TestSafeCDRSanitize_TagsAreWhitelisted(t *testing.T) {
+// Ensure tags are allowlisted low-cardinality only (direction=download).
+func TestSafeCDRSanitize_TagsAreAllowlisted(t *testing.T) {
 	resetCDRCountersAndCache(t)
 	freshPolicyStore(t)
 	srv := &fakeSluice{result: &pb.SanitizeResult{Status: pb.Status_CLEAN}}
