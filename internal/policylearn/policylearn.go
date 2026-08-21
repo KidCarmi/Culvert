@@ -236,11 +236,20 @@ func (e *Engine) Close() error {
 	e.opMu.Lock()
 	defer e.opMu.Unlock()
 	if t := e.tr; t != nil {
-		// Refuse (and count) producers BEFORE the drain exits, then sweep the
-		// channel once the drain is gone: a producer that raced past the
-		// closed flag may have enqueued after the drain's final empty check,
-		// and nothing may successfully enqueue into an abandoned channel
-		// (Codex fix). Post-stop the channel has exactly one reader: us.
+		// Gate OFF first (Codex fix): Close's final fold+save below is the
+		// LAST persistence this process performs, so nothing may move the
+		// transport counters after it. The engine closes before the proxy
+		// listener stops (shutdown order 67 vs 90), so requests still arrive
+		// in the shutdown tail — with the gate off they return uncounted,
+		// and the unobserved tail is represented by the process_restart gap
+		// the next load records (and confidence-caps), not by counters the
+		// store could no longer persist. Then refuse producers BEFORE the
+		// drain exits, and sweep the channel once the drain is gone: a
+		// producer that raced past the closed flag may have enqueued after
+		// the drain's final empty check, and nothing may successfully
+		// enqueue into an abandoned channel (Codex fix). Post-stop the
+		// channel has exactly one reader: us.
+		e.learningActive.Store(false)
 		e.closed.Store(true)
 		// Wait for in-flight producers (registered before the flag was set)
 		// to finish their enqueue decision — afterwards no send can land in

@@ -125,9 +125,15 @@ func TestStopSession_DrainsBacklogBeforeCompleting(t *testing.T) {
 }
 
 // TestObserve_RefusedAndCountedAfterClose: once the drain has exited, a
-// producer must not enqueue successfully into the abandoned channel — the
-// observation is refused at the gate and COUNTED as a drop. Pre-fix: it was
-// counted Accepted and silently lost.
+// producer must not enqueue successfully into the abandoned channel. The
+// original fix refused post-close observations at the closed flag and
+// COUNTED them as drops; the Codex round-6 revision turns the learning gate
+// off first instead — Close's final fold+save is the last persistence the
+// process performs, so a counted drop AFTER it could never be written and
+// the persisted window would silently omit shutdown-tail loss. Post-close
+// observations now refuse WITHOUT any counter movement; the unobserved tail
+// is represented by the process_restart gap the next load records (which
+// caps confidence).
 func TestObserve_RefusedAndCountedAfterClose(t *testing.T) {
 	dir := t.TempDir()
 	clk := newTestClock()
@@ -154,8 +160,8 @@ func TestObserve_RefusedAndCountedAfterClose(t *testing.T) {
 		t.Fatalf("post-close Observe was accepted into an abandoned channel (accepted %d -> %d)",
 			before.Accepted, st.Accepted)
 	}
-	if st.Dropped != before.Dropped+1 {
-		t.Fatalf("post-close Observe not counted as a drop (dropped %d -> %d)", before.Dropped, st.Dropped)
+	if st != before {
+		t.Fatalf("post-close Observe moved transport counters after the final save (%+v -> %+v)", before, st)
 	}
 }
 
