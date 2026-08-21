@@ -100,18 +100,20 @@ func (t *readErrTracker) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// handleHTTP forwards a plain-HTTP request. id is the TYPED server-resolved
-// identity context (F6) — identity/provenance never rides a header.
-func handleHTTP(w http.ResponseWriter, r *http.Request, id ProxyIdentity) {
+// prepareHTTPForward applies the request-side forward transforms before the
+// round trip: body limit + sent-bytes counter, hop-by-hop and internal-header
+// scrub, request-side rewrite rules, and the URL-userinfo → Basic
+// Authorization promotion http.Client.send used to perform (the transport
+// drops userinfo from the request line, so without the promotion an
+// absolute-form URI with credentials would reach the origin with none).
+// Returns the rewrite host and the byte counter (nil when the request has no
+// body). Extracted from handleHTTP verbatim (funlen; behavior identical).
+func prepareHTTPForward(w http.ResponseWriter, r *http.Request) (string, *countingReader) {
+	var reqCounter *countingReader
 	if r.Body != nil {
-		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
-	}
-
-	// Wrap request body to count bytes sent upstream.
-	var reqCounter countingReader
-	if r.Body != nil {
-		reqCounter.r = r.Body
-		r.Body = &reqCounter
+		// Wrap request body: limit + count bytes sent upstream.
+		reqCounter = &countingReader{r: http.MaxBytesReader(w, r.Body, maxRequestBody)}
+		r.Body = reqCounter
 	}
 
 	removeHopHeaders(r.Header)
@@ -129,6 +131,21 @@ func handleHTTP(w http.ResponseWriter, r *http.Request, id ProxyIdentity) {
 
 	r.RequestURI = ""
 
+	// http.Client.send promotes URL userinfo to a Basic Authorization header
+	// before the round trip; the transport does not (see above), so keep the
+	// promotion here.
+	if u := r.URL.User; u != nil && r.Header.Get("Authorization") == "" {
+		password, _ := u.Password()
+		r.SetBasicAuth(u.Username(), password)
+	}
+	return host, reqCounter
+}
+
+// handleHTTP forwards a plain-HTTP request. id is the TYPED server-resolved
+// identity context (F6) — identity/provenance never rides a header.
+func handleHTTP(w http.ResponseWriter, r *http.Request, id ProxyIdentity) {
+	host, reqCounter := prepareHTTPForward(w, r)
+
 	// Forward through the transport, not through an http.Client: a forward proxy
 	// must never follow a redirect (a 3xx belongs to the client), so the only
 	// things the per-request client here provided were "don't redirect" and a
@@ -136,16 +153,6 @@ func handleHTTP(w http.ResponseWriter, r *http.Request, id ProxyIdentity) {
 	// anyway, before CheckRedirect is ever consulted. Rationale and measurements
 	// are in the block above upstreamRequestTimeout.
 	tr := getUpstreamTransport()
-
-	// http.Client.send promotes URL userinfo to a Basic Authorization header
-	// before the round trip; the transport does not, and it drops userinfo from
-	// the request line. A client that sends an absolute-form request URI with
-	// credentials (GET http://user:pass@host/) would otherwise reach the origin
-	// with no credentials at all, so keep the promotion here.
-	if u := r.URL.User; u != nil && r.Header.Get("Authorization") == "" {
-		password, _ := u.Password()
-		r.SetBasicAuth(u.Username(), password)
-	}
 
 	ctx := r.Context()
 
@@ -223,7 +230,9 @@ func handleHTTP(w http.ResponseWriter, r *http.Request, id ProxyIdentity) {
 	upstreamAtt.Record(tracked.err)
 
 	// Track bytes transferred for data exfiltration detection.
-	atomic.AddInt64(&statBytesSent, reqCounter.count)
+	if reqCounter != nil {
+		atomic.AddInt64(&statBytesSent, reqCounter.count)
+	}
 	atomic.AddInt64(&statBytesRecv, respBytes)
 }
 
