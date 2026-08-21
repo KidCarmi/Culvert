@@ -1527,12 +1527,57 @@ gen_passphrase() {
 # leave the CA passphrase to the operator.
 setup_at_rest_encryption() {
   local envfile="$INSTALL_DIR/.env"
-  if secret_already_set CULVERT_LOG_PASSPHRASE "$envfile" || secret_already_set CULVERT_CA_PASSPHRASE "$envfile"; then
+  local log_set=0 ca_set=0
+  secret_already_set CULVERT_LOG_PASSPHRASE "$envfile" && log_set=1
+  secret_already_set CULVERT_CA_PASSPHRASE "$envfile" && ca_set=1
+
+  # CA passphrase already set: nothing left for this function to do (we never
+  # overwrite an existing value, and a set CA passphrase means at-rest
+  # encryption was already decided one way or another).
+  if [[ "$ca_set" == 1 ]]; then
     info "Encryption passphrase already configured — keeping existing values."
     return
   fi
 
   local fresh=0; is_fresh_deployment && fresh=1
+
+  # On an EXISTING deployment, a pre-set log passphrase is the full contract
+  # (the CA passphrase is deliberately left to the operator — see above).
+  if [[ "$log_set" == 1 && "$fresh" != 1 ]]; then
+    info "Encryption passphrase already configured — keeping existing values."
+    return
+  fi
+
+  # Fresh deployment with a log passphrase already set (e.g. exported in the
+  # host env by an automated install, or left over from an interrupted prior
+  # run) but no CA passphrase yet: reuse the existing log passphrase for the
+  # CA key rather than silently leaving the SSL-inspection CA private key
+  # unencrypted with no warning at all.
+  if [[ "$log_set" == 1 && "$ca_set" != 1 ]]; then
+    local existing_pass="${CULVERT_LOG_PASSPHRASE:-}"
+    if [[ -z "$existing_pass" && -f "$envfile" ]]; then
+      existing_pass="$(grep -E '^CULVERT_LOG_PASSPHRASE=' "$envfile" | tail -1 | cut -d= -f2-)"
+    fi
+    # .env values round-trip through docker compose's own interpolation (it
+    # expands $-references when resolving .env, same as the interactive
+    # choice=2 path guards against below) — writing a value containing those
+    # characters here could silently persist a DIFFERENT string than the one
+    # actually used as CULVERT_LOG_PASSPHRASE, so CA and log encryption keys
+    # would diverge instead of matching as intended.
+    if [[ -n "$existing_pass" ]] && ! printf '%s' "$existing_pass" | LC_ALL=C grep -q '[^A-Za-z0-9._@%^!*()+=:,-]'; then
+      env_put CULVERT_CA_PASSPHRASE "$existing_pass" "$envfile"
+      info "Fresh deployment — also encrypting the SSL-inspection CA key with the existing CULVERT_LOG_PASSPHRASE."
+    elif [[ -n "$existing_pass" ]]; then
+      warn "CULVERT_LOG_PASSPHRASE contains characters that are not safe to persist verbatim in $envfile"
+      warn "(docker compose re-interpolates \$-references when reading .env) — leaving"
+      warn "CULVERT_CA_PASSPHRASE unset rather than risk a silently mismatched key. Set it yourself in"
+      warn "$envfile if you need the CA key encrypted."
+    else
+      warn "CULVERT_LOG_PASSPHRASE is configured but its value could not be read to also encrypt the"
+      warn "SSL-inspection CA key — set CULVERT_CA_PASSPHRASE yourself in $envfile if you need it encrypted."
+    fi
+    return
+  fi
 
   local choice="1"
   if [[ -t 0 ]]; then
@@ -1885,35 +1930,71 @@ patch_allow_peers_numeric_uid() {
   esac
   tmp="$(mktemp)" || return 1
   if ! sudo awk -v uid="$uid" '
+    # find_comment_start returns the index of the first "#" that lies OUTSIDE
+    # a double-quoted TOML string, or 0 if none. A naive regex split at the
+    # first "#" would misfire on a legitimate quoted peer value that itself
+    # contains "#" (TOML allows it, and the maint-agent config loader accepts
+    # any username user.Lookup resolves, e.g. allow_peers = ["svc#prod"]) —
+    # that "#" is not a comment marker and must not truncate the array. Walks
+    # back over any whitespace immediately preceding the "#" so that
+    # whitespace is treated as part of the comment (preserved on reattach).
+    # Does not handle escaped quotes inside a TOML string (\"); not a concern
+    # for the usernames/UIDs this array holds.
+    function find_comment_start(s,    i, n, inquote, ch) {
+      n = length(s)
+      inquote = 0
+      for (i = 1; i <= n; i++) {
+        ch = substr(s, i, 1)
+        if (ch == "\"") {
+          inquote = !inquote
+        } else if (ch == "#" && !inquote) {
+          while (i > 1 && substr(s, i - 1, 1) ~ /[[:space:]]/) i--
+          return i
+        }
+      }
+      return 0
+    }
     BEGIN { patched=0 }
     /^[[:space:]]*allow_peers[[:space:]]*=/ && patched == 0 {
       line=$0
-      if (line ~ /^[[:space:]]*allow_peers[[:space:]]*=[[:space:]]*\["culvert-cp"\][[:space:]]*$/) {
-        print "allow_peers = [\"" uid "\"]"
+      # Split off a trailing inline TOML comment before classifying the line,
+      # so an operator-added "  # ..." note on the allow_peers line (a normal
+      # TOML habit) is not mistaken for the array spilling onto later lines —
+      # the array-closing checks below must see the actual code, not comment
+      # text. code is what gets rewritten; comment (if any) is reattached
+      # unchanged on every branch that prints a modified line.
+      code=line; comment=""
+      cstart=find_comment_start(line)
+      if (cstart > 0) {
+        comment=substr(line, cstart)
+        code=substr(line, 1, cstart-1)
+      }
+      if (code ~ /^[[:space:]]*allow_peers[[:space:]]*=[[:space:]]*\["culvert-cp"\][[:space:]]*$/) {
+        print "allow_peers = [\"" uid "\"]" comment
         patched=1
         next
       }
-      if (line ~ "\"" uid "\"") {
+      if (code ~ "\"" uid "\"") {
         print line
         patched=1
         next
       }
-      if (line !~ /\][[:space:]]*$/) {
+      if (code !~ /\][[:space:]]*$/) {
         print line
         patched=2
         next
       }
-      if (line ~ /\[[[:space:]]*\][[:space:]]*$/) {
+      if (code ~ /\[[[:space:]]*\][[:space:]]*$/) {
         # Empty array (e.g. "allow_peers = []"): the generic append below
         # always prepends a comma, which would leave a leading ", " with no
         # preceding element ("[, \"uid\"]") — invalid TOML.
-        sub(/\[[[:space:]]*\][[:space:]]*$/, "[\"" uid "\"]", line)
-        print line
+        sub(/\[[[:space:]]*\][[:space:]]*$/, "[\"" uid "\"]", code)
+        print code comment
         patched=1
         next
       }
-      sub(/[[:space:]]*\][[:space:]]*$/, ", \"" uid "\"]", line)
-      print line
+      sub(/[[:space:]]*\][[:space:]]*$/, ", \"" uid "\"]", code)
+      print code comment
       patched=1
       next
     }

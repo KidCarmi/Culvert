@@ -233,7 +233,7 @@ jobs:
 
     steps:
       - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
-        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -284,7 +284,7 @@ jobs:
       # ── Registry login ────────────────────────────────────────────────────
       # ghcr.io: always available, uses GITHUB_TOKEN — no secrets needed.
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4.5.1
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -412,7 +412,7 @@ jobs:
       actions: read       # require-gate.sh (tag-path guard)
     steps:
       - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
-        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -573,7 +573,7 @@ jobs:
       id-token: write     # cosign keyless blob signing of the re-signed index.json
     steps:
       - name: Harden runner (egress audit — same baseline as catalog-pipeline)
-        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -814,7 +814,7 @@ jobs:
 
     steps:
       - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
-        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -832,6 +832,15 @@ jobs:
 
       - uses: ./.github/actions/setup-go-cache
 
+      # Release version-stamp fail-closed guard: an OFFICIAL signed binary MUST carry a
+      # real vX.Y.Z tag stamped into main.version. Refuse to build/sign if the ref
+      # name is empty or not a semver tag; never fall back to empty/dev/latest/SHA.
+      # (env-indirection: never interpolate ${{ github.ref_name }} into run: text.)
+      - name: Assert release version stamp
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: .github/scripts/assert-release-ref.sh "$REF_NAME"
+
       # Build the release binaries via the shared composite — the SAME action the
       # verify-reproducible job calls, so an independent tag rebuild can never
       # drift from this build. Proxy on every leg; culvert-maint on linux only.
@@ -843,6 +852,19 @@ jobs:
           ext: ${{ matrix.ext || '' }}
           ref-name: ${{ github.ref_name }}
           include-maint: ${{ matrix.goos == 'linux' }}
+
+      # Runtime version-stamp GATE (native linux/amd64 leg only): start the EXACT
+      # binary that will be signed/published, probe /healthz, and assert it
+      # self-reports the release tag. This is the gate that would have caught the
+      # v1.0.202 defect (signed binary whose /healthz reported an empty version).
+      # Foreign-platform legs cannot execute here; the shared composite guarantees
+      # every leg uses the identical linker value, and this native leg proves the
+      # bytes-under-signature actually surface it at runtime.
+      - name: Gate runtime version stamp (linux/amd64)
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: .github/scripts/assert-runtime-version.sh "./culvert-linux-amd64" "$REF_NAME"
 
       # Install cosign for keyless signing via Sigstore OIDC (no secrets needed).
       - name: Install cosign
@@ -1026,7 +1048,7 @@ jobs:
           - { goos: windows, goarch: amd64, ext: .exe }
     steps:
       - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
-        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
         with:
           # Needs module-proxy egress: the composite runs `go mod download` for
           # BOTH modules (cmd/culvert-maint deps are not in the root-go.sum
@@ -1035,6 +1057,15 @@ jobs:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-go-cache
+
+      # SAME fail-closed release version-stamp guard as the release job: the reproducible
+      # rebuild must not silently accept a non-tag version input either (else the
+      # two paths could drift on the version stamp while still hash-matching an
+      # equally-wrong build).
+      - name: Assert release version stamp
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: .github/scripts/assert-release-ref.sh "$REF_NAME"
 
       # SAME composite + SAME inputs as the release job → an independent rebuild
       # that cannot drift from the real build.

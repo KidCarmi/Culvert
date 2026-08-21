@@ -1,14 +1,21 @@
 # Authentication Policy — Phase 1 Implementation Plan (FINAL / FROZEN)
 
-**Status:** Design FROZEN. Implementation NOT started.
+**Status:** Design FROZEN. **Implementation SHIPPED** (Slices 1–8, per
+`AUTH-POLICY-PHASE2-PLAN.md`'s own "Predecessors" line) — live in
+`authpolicy.go` (`AuthOutcome`, `resolveAuthOutcome`, `resolveNoCredAuthOutcome`).
+The later `defaultAuthOutcome`/`UnauthMode`-retirement slices built on top of
+this plan are tracked separately in `AUTH-POLICY-DEFAULTAUTHOUTCOME-SPEC.md`
+(the current authority for that surface — see CLAUDE.md's Architecture Notes).
 **Supersedes:** the earlier "Stage-1 exempt hook" framing. The architectural
 spine is now the **AuthOutcome resolver**, not a boolean gate with an exempt
 escape hatch.
 **Builds on:** `roadmap/AUTHENTICATION-POLICY-SPEC.md` (Phase 0 seams, merged via
 #397/#401/#403/#406).
 
-This document freezes the Phase 1 design. It authorizes **no** runtime code and
-**no** change to `proxy.go`. Implementation begins only after explicit approval.
+This document froze the Phase 1 design; at freeze time it authorized **no**
+runtime code and **no** change to `proxy.go` pending explicit approval. That
+approval was since given and Phase 1 shipped (see Status above); the design
+record below is retained unmodified as historical context.
 
 ---
 

@@ -252,7 +252,8 @@ func overridesEmpty(ov catoverride.Overrides) bool {
 // The embedded baseline is many-to-many (catStore's BuiltIn taxonomy), so it carries its
 // membership index alongside the classification map — see embeddedBaselineMemberships.
 func rawEmbeddedView() *effectiveCategoryView {
-	return newEffectiveViewWithMembership(embeddedBaselineEntries(), embeddedBaselineMemberships(),
+	classes, members := embeddedBaselinePair()
+	return newEffectiveViewWithMembership(classes, members,
 		effectiveCategoryView{Source: sourceEmbedded, ConfigRevision: "compiled"})
 }
 
@@ -270,14 +271,15 @@ func (c *activationCoordinator) composeEmbeddedForOverrides() (*effectiveCategor
 	if overridesEmpty(ov) {
 		return rawEmbeddedView(), nil
 	}
-	composed := catoverride.ComposeView(embeddedBaselineEntries(), ov)
+	baseClasses, baseMembers := embeddedBaselinePair()
+	composed := catoverride.ComposeView(baseClasses, ov)
 	if verr := validateEffectiveComposition(composed); verr != nil {
 		return nil, fmt.Errorf("%w: %v", errActivateStore, verr)
 	}
 	// ComposeMembership applies the SAME tombstone/assert suppression over the
 	// many-to-many baseline, so an override still governs its whole subtree — a
 	// tombstoned host cannot survive through one of its other categories.
-	composedMembers := catoverride.ComposeMembership(embeddedBaselineMemberships(), ov)
+	composedMembers := catoverride.ComposeMembership(baseMembers, ov)
 	return newEffectiveViewWithMembership(composed, composedMembers,
 		effectiveCategoryView{Source: sourceEmbedded, ConfigRevision: rev, sealed: catoverride.SealedKeys(ov)}), nil
 }

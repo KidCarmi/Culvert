@@ -52,7 +52,8 @@ type Writer struct {
 	lastReconnErr time.Time // backoff: suppress reconnect attempts for 5s after failure
 	drops         atomic.Uint64
 	panics        atomic.Uint64
-	dialFunc      func() (net.Conn, error) // test seam; nil = real dialer
+	panicObserver atomic.Pointer[func(recovered any)] // optional; see SetPanicObserver
+	dialFunc      func() (net.Conn, error)            // test seam; nil = real dialer
 
 	// Async delivery plumbing (nil/zero on a zero-value Writer → synchronous).
 	queue     chan string   // formatted lines awaiting delivery (bounded at queueCap)
@@ -270,14 +271,42 @@ func (s *Writer) writeMsg(pri int, msg string) {
 // The guard is deliberately local (no obs import): this package is a
 // self-contained stdlib-only leaf per its header contract, and deliverLine
 // releases s.mu through a defer, so unwinding never leaves the mutex held.
+// The recovered value is forwarded to the optional panicObserver (see
+// SetPanicObserver) rather than logged here, for the same no-obs-import
+// reason — without an observer wired, a recovered panic is visible only
+// through Panics().
 func (s *Writer) deliverGuarded(line string) {
 	defer func() {
-		if recover() != nil {
+		if r := recover(); r != nil {
 			s.panics.Add(1)
 			s.drops.Add(1)
+			if p := s.panicObserver.Load(); p != nil {
+				func() {
+					defer func() { _ = recover() }() // an observer must never crash the drain goroutine
+					(*p)(r)
+				}()
+			}
 		}
 	}()
 	s.deliverLine(line)
+}
+
+// SetPanicObserver publishes an optional observer notified synchronously, on
+// the drain goroutine, whenever deliverGuarded recovers a panic. This package
+// is a stdlib-only leaf with no logging dependency (see the package doc), so
+// without an observer a recovered panic is visible only through Panics() —
+// package main wires this to the process log (mirrors fileutil's and
+// internal/audit's SetWriteFailureObserver, the same leaf-package-can't-log
+// seam applied to a second chokepoint). A nil fn clears it. The observer runs
+// AFTER deliverLine's own deferred mutex unlock has already fired during
+// unwind, so it never needs s.mu, and is itself panic-contained so a bad
+// observer can never take down delivery.
+func (s *Writer) SetPanicObserver(fn func(recovered any)) {
+	if fn == nil {
+		s.panicObserver.Store(nil)
+		return
+	}
+	s.panicObserver.Store(&fn)
 }
 
 func (s *Writer) deliverLine(line string) {

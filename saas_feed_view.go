@@ -259,7 +259,25 @@ func (v *effectiveCategoryView) MatchesCategory(cat, host string) bool {
 // full-store behavior. On a fresh install catStore == DefaultEntries, so this is exactly
 // the compiled baseline.
 func embeddedBaselineEntries() map[string]string {
-	return catStore.BuiltInHostCategories()
+	classes, _ := embeddedBaselinePair()
+	return classes
+}
+
+// embeddedBaselinePair returns the classification and membership maps derived
+// from ONE snapshot of catStore's BuiltIn taxonomy. Capturing them with two
+// separate store reads let a concurrent built-in edit land between them and
+// produce a torn classification/membership pair inside one composed view
+// (review P2 on the membership fix). The classification map is a pure
+// projection of the membership map (first category wins — the same rule
+// BuiltInHostCategories applies), so deriving both from the same snapshot
+// removes the window entirely.
+func embeddedBaselinePair() (map[string]string, map[string][]string) {
+	members := catStore.BuiltInHostMemberships()
+	classes := make(map[string]string, len(members))
+	for h, cats := range members {
+		classes[h] = cats[0]
+	}
+	return classes, members
 }
 
 // embeddedBaselineMemberships is the MEMBERSHIP companion of embeddedBaselineEntries:
@@ -277,7 +295,8 @@ func embeddedBaselineMemberships() map[string][]string {
 // a raw baseline is wanted; the coordinator's installEmbedded composes admin overrides on
 // top (F3b-4 override-only recompose applies to the embedded baseline too).
 func embeddedBaselineView() *effectiveCategoryView {
-	return newEffectiveViewWithMembership(embeddedBaselineEntries(), embeddedBaselineMemberships(),
+	classes, members := embeddedBaselinePair()
+	return newEffectiveViewWithMembership(classes, members,
 		effectiveCategoryView{
 			Source:         sourceEmbedded,
 			ConfigRevision: "compiled",
