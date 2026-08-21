@@ -31,6 +31,8 @@ import (
 	"time"
 
 	jwtv5 "github.com/golang-jwt/jwt/v5"
+
+	"github.com/KidCarmi/Culvert/internal/authstate"
 )
 
 // ---------------------------------------------------------------------------
@@ -397,70 +399,26 @@ type pkceEntry struct {
 	verifier   string
 	nonce      string
 	relayURL   string
-	createdAt  time.Time
 	providerID string
 }
 
-type pkceStore struct {
-	mu      sync.Mutex
-	entries map[string]*pkceEntry // key = state
-}
+// pkceStore is the bounded, fair-share store for in-flight OIDC authorization
+// requests (verifier + nonce + return target), keyed by the `state` token.
+//
+// Entries are minted SPECULATIVELY for clients that have not authenticated —
+// resolveCaptivePortalURL does it on the proxy's no-credentials path, and the
+// public /auth/select page does it per render — so the store's eviction policy
+// decides whether an anonymous flood can destroy other users' in-flight login
+// state. It cannot: see internal/authstate.
+type pkceStore = authstate.Store[*pkceEntry]
 
 const pkceEntryTTL = 10 * time.Minute
 const pkceStoreMax = 1000
 
-var globalPKCEStore = &pkceStore{entries: make(map[string]*pkceEntry)}
+var globalPKCEStore = newPKCEStore()
 
-func (s *pkceStore) set(state string, e *pkceEntry) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	// Evict expired entries (and oldest if full).
-	if len(s.entries) >= pkceStoreMax {
-		now := time.Now()
-		for k, v := range s.entries {
-			if now.After(v.createdAt.Add(pkceEntryTTL)) {
-				delete(s.entries, k)
-			}
-		}
-		// If still full, evict one arbitrary entry.
-		if len(s.entries) >= pkceStoreMax {
-			for k := range s.entries {
-				delete(s.entries, k)
-				break
-			}
-		}
-	}
-	s.entries[state] = e
-}
-
-func (s *pkceStore) pop(state string) (*pkceEntry, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	e, ok := s.entries[state]
-	if !ok {
-		return nil, false
-	}
-	delete(s.entries, state)
-	if time.Since(e.createdAt) > pkceEntryTTL {
-		return nil, false // expired
-	}
-	return e, true
-}
-
-// peek returns the PKCE entry without removing it (used by the UI to identify
-// which provider the state belongs to before calling ExchangeCode).
-func (s *pkceStore) peek(state string) (*pkceEntry, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	e, ok := s.entries[state]
-	if !ok {
-		return nil, false
-	}
-	if time.Since(e.createdAt) > pkceEntryTTL {
-		delete(s.entries, state)
-		return nil, false
-	}
-	return e, true
+func newPKCEStore() *pkceStore {
+	return authstate.New[*pkceEntry](pkceEntryTTL, pkceStoreMax)
 }
 
 // ---------------------------------------------------------------------------
@@ -694,11 +652,12 @@ func (p *OIDCFlowProvider) CaptiveLoginURL(relayURL string, r *http.Request) str
 	h := sha256.Sum256([]byte(verifier))
 	challenge := base64.RawURLEncoding.EncodeToString(h[:])
 
-	globalPKCEStore.set(state, &pkceEntry{
+	// Attributed to the requesting client so a flood from one source can only
+	// evict its own in-flight state, never another user's mid-login entry.
+	globalPKCEStore.Set(state, authStateClientKey(r), &pkceEntry{
 		verifier:   verifier,
 		nonce:      nonce,
 		relayURL:   relayURL,
-		createdAt:  time.Now(),
 		providerID: p.profile.ID,
 	})
 
@@ -727,7 +686,7 @@ func (p *OIDCFlowProvider) CaptiveLoginURL(relayURL string, r *http.Request) str
 // ExchangeCode handles the authorization code callback: exchanges the code for
 // tokens, validates the ID token, fetches userinfo, and returns the Identity.
 func (p *OIDCFlowProvider) ExchangeCode(r *http.Request, code, state string) (*Identity, error) {
-	entry, ok := globalPKCEStore.pop(state)
+	entry, ok := globalPKCEStore.Pop(state)
 	if !ok {
 		return nil, fmt.Errorf("oidc callback: invalid or expired state")
 	}
