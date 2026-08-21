@@ -1148,6 +1148,12 @@ func evalAccessRules(rules []*PolicyRule, in *accessEvalInput, now func() time.T
 	// Parse the client IP ONCE into a local (stays on the stack — matchSourceAddr
 	// never retains it), reused across every rule's precomputed srcIPNet.
 	clientAddr := net.ParseIP(in.clientIP)
+	// Resolve the destination's CATEGORY at most ONCE for the whole scan, lazily
+	// on the first category-scoped rule reached (see policy_hostcat.go): the
+	// host→category fusion depends only on the host, so running it per rule
+	// multiplied an O(all host patterns) taxonomy scan — plus a BadgerDB read
+	// per domain label on a feed-backed deployment — by the rule count.
+	catScratch := newHostCatScratch(in.host)
 	// The control flow is deliberately the parent enforcement loop's exact
 	// continue-based structure: on the nil-trace path (enforcement) it is
 	// branch-for-branch identical to the pre-extraction scan, and the skip-reason
@@ -1191,7 +1197,7 @@ func evalAccessRules(rules []*PolicyRule, in *accessEvalInput, now func() time.T
 				continue
 			}
 		}
-		if !matchDestNorm(rule, in.host, in.normHost) {
+		if !matchDestNorm(rule, in.host, in.normHost, &catScratch) {
 			if trace != nil {
 				trace(rule, accessSkipDest)
 			}
@@ -1555,15 +1561,18 @@ func matchIPOrCIDRAddr(cidrOrIP, clientIP string, clientAddr net.IP) bool {
 // ─── Destination matching ─────────────────────────────────────────────────────
 
 func matchDest(rule *PolicyRule, host string) bool {
-	return matchDestNorm(rule, host, normalizeHost(host))
+	sc := newHostCatScratch(host)
+	return matchDestNorm(rule, host, normalizeHost(host), &sc)
 }
 
-// matchDestNorm is matchDest's core. normHost MUST be normalizeHost(host); the
-// hot path (Evaluate) computes it ONCE per request and reuses it across every
-// rule, and uses each rule's precomputed normFQDN — eliminating the two
-// per-rule host+pattern normalization allocations. Category/country checks keep
-// using the raw host (they normalize internally and are far less common).
-func matchDestNorm(rule *PolicyRule, host, normHost string) bool {
+// matchDestNorm is matchDest's core. normHost MUST be normalizeHost(host) and
+// sc MUST be a scratch built for the same host; the hot path (Evaluate) builds
+// both ONCE per request and reuses them across every rule, and uses each rule's
+// precomputed normFQDN — eliminating the two per-rule host+pattern
+// normalization allocations and the per-rule host→category resolution.
+// Country checks keep using the raw host (they normalize internally and are far
+// less common).
+func matchDestNorm(rule *PolicyRule, host, normHost string, sc *hostCatScratch) bool {
 	// Empty fields mean "match any" — all configured fields must satisfy.
 	fqdnSet := rule.DestFQDN != ""
 	catSet := rule.DestCategory != "" && rule.DestCategory != CategoryAny
@@ -1583,12 +1592,15 @@ func matchDestNorm(rule *PolicyRule, host, normHost string) bool {
 		}
 	}
 	// URL category check (single category).
-	if catSet && !matchCategory(rule.DestCategory, host) {
+	if catSet && !sc.matchesCategory(rule.DestCategory) {
 		return false
 	}
 	// Category group check — host must be in ANY category within the group.
-	// O(1): lookupHostCategory(host) → group.catSet[result].
-	if catGroupSet && !categoryGroupMatchesHostRule(rule, host) {
+	// Amortized O(1) per rule: the host→category fusion is resolved ONCE per
+	// scan (hostCatScratch) and each of its halves is itself indexed — the
+	// urlcat reverse index answers host→category in O(labels) map probes
+	// (urlcat.Store.LookupHost) and the group membership check is a set probe.
+	if catGroupSet && !categoryGroupMatchesHostScratch(rule, sc) {
 		return false
 	}
 	// Geo-IP country check — cache-only to avoid blocking the request goroutine.
@@ -1666,64 +1678,41 @@ func matchFQDN(pattern, host string) bool { return hostutil.MatchFQDN(pattern, h
 
 func matchFQDNNorm(pattern, host string) bool { return hostutil.MatchFQDNNorm(pattern, host) }
 
+// matchCategory reports whether host belongs to the named URL category.
+//
+// F3b-4 source-aware resolution. When the signed-feed effective view is installed
+// (offline at startup, atomically replaced on a committed activation / override
+// recompose), the SaaS taxonomy is served EXCLUSIVELY from that view and catStore
+// contributes ADMIN-created categories only — so a signed activation cannot be
+// double-served or served stale from catStore, and policy readers observe a single
+// complete view via one atomic pointer load. When the view is absent (lifecycle
+// unarmed / disabled build / unit tests) the full catStore taxonomy serves, byte-for-
+// byte as before.
+//
+// The resolution itself lives on hostCatScratch so a policy scan can share one
+// host→category resolution across every rule (policy_hostcat.go); this is the
+// single-shot entry point for callers outside a scan.
 func matchCategory(cat URLCategory, host string) bool {
-	// F3b-4 source-aware resolution. When the signed-feed effective view is installed
-	// (offline at startup, atomically replaced on a committed activation / override
-	// recompose), the SaaS taxonomy is served EXCLUSIVELY from that view and catStore
-	// contributes ADMIN-created categories only — so a signed activation cannot be
-	// double-served or served stale from catStore, and policy readers observe a single
-	// complete view via one atomic pointer load. When the view is absent (lifecycle
-	// unarmed / disabled build / unit tests) the full catStore taxonomy serves, byte-for-
-	// byte as before.
-	if view := saasEffectiveView.Current(); view != nil {
-		if catStore.MatchesHostAdmin(cat, host) {
-			return true
-		}
-		// Membership check (not a short-circuit): a view classification under a DIFFERENT
-		// category must still fall through to the UT1 layer, matching the original
-		// cross-layer OR semantics.
-		if c, ok := view.LookupHost(host); ok && strings.EqualFold(c, string(cat)) {
-			return true
-		}
-	} else if catStore.MatchesHost(cat, host) {
-		return true
-	}
-	// Layer 2: community BadgerDB feed — domain-walking point lookups.
-	if communityDB != nil {
-		if foundCat, ok := communityDB.Lookup(host); ok {
-			return strings.EqualFold(foundCat, string(cat))
-		}
-	}
-	return false
+	sc := newHostCatScratch(host)
+	return sc.matchesCategory(cat)
 }
 
 // lookupHostCategory resolves a hostname to its URL category across both tiers.
-// Returns (category, tier, matchedBy) where tier is "admin", "community", or "none".
-// Used by the admin URL-lookup API endpoint and policy test response enrichment.
+// Returns (category, tier, matchedBy) where tier is "admin", "saas",
+// "community", or "none". Used by the admin URL-lookup API endpoint and policy
+// test response enrichment.
+//
+// F3b-4 source-aware resolution — see matchCategory. With the signed-feed
+// effective view installed: admin-created categories (catStore, BuiltIn=false)
+// first, then the SaaS taxonomy from the atomic view (tier "saas"), then UT1.
+// Without it, the full catStore taxonomy serves as before (tier "admin").
+//
+// The resolution lives on hostCatScratch (policy_hostcat.go) so a policy scan
+// resolves it once and shares it across every rule; this is the single-shot
+// entry point for callers outside a scan.
 func lookupHostCategory(host string) (category, tier, matchedBy string) {
-	// F3b-4 source-aware resolution (see matchCategory). With the signed-feed effective
-	// view installed: admin-created categories (catStore, BuiltIn=false) first, then the
-	// SaaS taxonomy from the atomic view (tier "saas"), then UT1. Without it, the full
-	// catStore taxonomy serves as before (tier "admin").
-	if view := saasEffectiveView.Current(); view != nil {
-		if name, pattern, ok := catStore.LookupHostAdmin(host); ok {
-			return name, "admin", pattern
-		}
-		if c, ok := view.LookupHost(host); ok {
-			return c, "saas", normalizeHost(host)
-		}
-	} else if name, pattern, ok := catStore.LookupHost(host); ok {
-		return name, "admin", pattern
-	}
-
-	// Layer 2: community BadgerDB feed.
-	h := normalizeHost(host)
-	if communityDB != nil {
-		if foundCat, ok := communityDB.Lookup(h); ok {
-			return foundCat, "community", h
-		}
-	}
-	return "", "none", ""
+	sc := newHostCatScratch(host)
+	return sc.fusion()
 }
 
 // ── SSL Bypass Matcher ────────────────────────────────────────────────────────

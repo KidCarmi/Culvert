@@ -74,11 +74,19 @@ enters `VerifyEnforce`**. Having signature/freshness primitives in the codebase
 is worthless if the default boot path runs permissive with no trust roots. The
 binding rule (`release_wiring.go::resolveCatalogVerifyMode`):
 
-- **Trust roots present (baked OR `CULVERT_RELEASE_CATALOG_TRUST_KEYS`) ⇒
-  `VerifyEnforce`.** This is automatic and is the only production mode.
+- **Trust roots present (baked ed25519 OR `CULVERT_RELEASE_CATALOG_TRUST_KEYS`
+  OR the baked Sigstore root, see P2b-2a below) ⇒ `VerifyEnforce`.** This is
+  automatic and is the only production mode.
 - **No roots and no override ⇒ Release Management is DISABLED** (enforce with an
   empty ring fails closed in `NewTrustStore`). An unsigned catalog on disk is
-  **never** auto-trusted — `/api/releases` reports `available:false`.
+  **never** auto-trusted — `/api/releases` reports `available:false`. **This is
+  no longer the default posture of a stock build**: since P2b-2a baked the real
+  Sigstore public-good `trusted_root.json` into the binary, `nSchemes` is never
+  zero unless an operator explicitly empties
+  `CULVERT_RELEASE_SIGSTORE_TRUSTED_ROOT` — so a plain `go build` today enters
+  `VerifyEnforce` and, per the baked `defaultReleaseCatalogURL` (M1-2), attempts
+  a live auto-seed fetch against `catalog.culvertlabs.com` with zero
+  configuration. See `docs/operator/sigstore-trusted-root-lifecycle.md`.
 - **Permissive / disabled are EXPLICIT break-glass only**, via
   `CULVERT_RELEASE_CATALOG_VERIFY=permissive|disabled`, read once at startup, and
   always logged with a loud warning. Permissive accepts an *unsigned* catalog but
@@ -116,12 +124,11 @@ Implemented:
   happens in the binary (trust roots there); the installer only forwards the env.
   See `roadmap/D1.6d-P1.7-catalog-autoseed-plan.md`.
 
-Still to do in Phase 1:
-
-- ☐ Publish the official catalog bundle (`index.json`, `index.json.sig`,
-  manifests, optional `catalog.bundle.json`) and ship the baked public root
-  (Phase 2 release pipeline). Until then, auto-seed needs an operator-provided
-  signed catalog URL + trust roots.
+Phase 1 is now fully shipped — the "still to do" item below (publish the
+official bundle + ship the baked public root) landed in the Phase 2
+release-pipeline work (see P2a/P2b status below): the baked Sigstore root
+(P2b-2a) and the baked default catalog URL (M1-2) mean auto-seed no longer
+needs any operator-provided URL or trust roots on a stock build.
 
 Acceptance:
 - A clean install can auto-seed the official signed catalog and show
@@ -130,7 +137,8 @@ Acceptance:
   a lower `catalog_version`, signing with an untrusted key, or using a tag
   results in `available:false` and no dispatch.
 - With no trust roots configured, Release Management stays disabled; no unsigned
-  catalog is ever auto-trusted.
+  catalog is ever auto-trusted. (On a stock build this requires deliberately
+  emptying `CULVERT_RELEASE_SIGSTORE_TRUSTED_ROOT` — see above.)
 
 ## Phase 2: Release Pipeline and Image Trust
 
@@ -154,17 +162,23 @@ baked-ed25519 model Phase 1 shipped — see
 - ✅ Attach the generated bundle (`index.json`, manifests, `checksums.txt`) to
   the run as an artifact. The bundle is **UNSIGNED in P2a** — the gate's ephemeral
   ed25519 key is in-process/discarded and is NOT the official trust signature.
-- Catalog is NOT yet trusted by a shipped Control Plane (no baked official root) —
-  that is P2b.
+- ✅ Catalog is now trusted by a shipped Control Plane via the baked official
+  Sigstore root — see Phase 2b below.
 
-### Phase 2b — Control-Plane keyless catalog trust (separate, reviewed)
+### Phase 2b — Control-Plane keyless catalog trust (separate, reviewed) — SHIPPED
 
-- Sign the catalog with the chosen keyless backend (Sigstore identity).
-- Add the in-binary verifier (Fulcio root + pinned `KidCarmi/Culvert`
-  release-workflow identity, Rekor), bundle offline roots for air-gap.
-- Ship the official root and publish the trusted official catalog so end-users
-  can update through Release Management.
-- CI gate: image signature verifies against the expected workflow identity.
+- ✅ In-binary verifier (Fulcio root + pinned `KidCarmi/Culvert`
+  release-workflow identity, Rekor), offline air-gap-safe verification
+  (P2b-1).
+- ✅ Official root baked in and ACTIVE by default (P2b-2a) — see
+  `docs/operator/sigstore-trusted-root-lifecycle.md` for the provenance and
+  refresh procedure.
+- ✅ CI signs the catalog with the keyless backend and proves the
+  end-to-end verify + image-signature identity match in the release gate
+  (P2b-2b).
+- ✅ Catalog freshness without a version bump: a weekly re-sign cron (M1-4)
+  re-signs the same `catalog_version` with a renewed `expires_at`. See
+  [`catalog-resign-runbook.md`](catalog-resign-runbook.md).
 
 Acceptance:
 - 2a: a release cannot attach a catalog unless generation + digest-match +

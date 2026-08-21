@@ -561,6 +561,12 @@ type authMatchScratch struct {
 	normSet bool
 	addr    net.IP // net.ParseIP(ctx.ClientIP); nil = unparseable (fails closed)
 	addrSet bool
+	// cat carries the same lazy contract for the host→category fusion, shared
+	// with the Stage-2 access scan via matchDestNorm (policy_hostcat.go). Bound
+	// to ctx.Host on first use; an auth scan with no category-scoped rule never
+	// resolves anything.
+	cat    hostCatScratch
+	catSet bool
 }
 
 func (s *authMatchScratch) normHost() string {
@@ -569,6 +575,14 @@ func (s *authMatchScratch) normHost() string {
 		s.normSet = true
 	}
 	return s.norm
+}
+
+func (s *authMatchScratch) hostCat() *hostCatScratch {
+	if !s.catSet {
+		s.cat = newHostCatScratch(s.ctx.Host)
+		s.catSet = true
+	}
+	return &s.cat
 }
 
 func (s *authMatchScratch) clientAddr() net.IP {
@@ -626,7 +640,7 @@ func authRuleMatchesScratch(rule *PolicyRule, s *authMatchScratch) (AuthOutcome,
 	if !authRuleHasDestination(*rule) && !spec.BroadExemption {
 		return "", false
 	}
-	if !matchDestNorm(rule, s.ctx.Host, s.normHost()) {
+	if !matchDestNorm(rule, s.ctx.Host, s.normHost(), s.hostCat()) {
 		return "", false
 	}
 	// Schedule: a malformed timezone must fail closed (require auth), NOT silently

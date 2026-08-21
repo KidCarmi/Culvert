@@ -283,7 +283,19 @@ func scanHTTPResponseBody(w http.ResponseWriter, r *http.Request, resp *http.Res
 		return false, nil
 	}
 
-	buffered, readErr := io.ReadAll(io.LimitReader(resp.Body, globalSecScanner.MaxBytes()))
+	// Buffer the scan window; if the body runs past it, the deferred overflow
+	// signal fires when the first uninspected byte is actually forwarded. An
+	// origin that omits Content-Length (chunked) skips the pre-check above
+	// entirely, so this is the ONLY place the plain-HTTP path can observe that
+	// it is forwarding bytes no scanner inspected. The ContentLength >
+	// MaxBytes case already returned above, so the declaration here is either
+	// absent (-1, chunked) or within the limit; it sizes the buffer only.
+	scanLimit := globalSecScanner.MaxBytes()
+	scanHost, scanClientIP := r.Host, r.RemoteAddr
+	buffered, rest, readErr := readScanPrefix(resp.Body, scanLimit, resp.ContentLength, func() {
+		cip, _, _ := net.SplitHostPort(scanClientIP)
+		logScanLimitExceeded(scanHost, cip, scanLimit)
+	})
 	if readErr != nil {
 		// Fail closed (CHAOS-17): before this fix the error path returned
 		// false, silently forwarding the response unscanned AND truncated
@@ -336,7 +348,15 @@ func scanHTTPResponseBody(w http.ResponseWriter, r *http.Request, resp *http.Res
 		scanBlock(w, r.Host, scanResult.Reason, scanResult.Source)
 		return true, nil
 	}
-	// Reassemble: buffered prefix + any remaining bytes beyond the limit.
-	resp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(buffered), resp.Body))
+	// Nothing matched in the window we could see. If the body ran past that
+	// window, rest's deferred signal records the delivery of the first
+	// uninspected byte (counter + log + deduped scan_skipped alert) exactly as
+	// the declared-Content-Length pre-check does, so an origin cannot suppress
+	// the signal just by using chunked transfer encoding — and a body of
+	// exactly the window size never false-signals, without the limit+1 probe
+	// read that could stall on a pausing origin.
+	//
+	// Reassemble: buffered prefix + the unread remainder.
+	resp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(buffered), rest))
 	return false, nil
 }

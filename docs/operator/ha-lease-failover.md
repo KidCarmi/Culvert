@@ -176,7 +176,7 @@ The TTL is the **failover-latency ↔ tolerance trade**:
 
 - `docs/adr/0005-ha-lease-witness-failover.md` — design, adversarial review,
   slice log (S0–S5).
-- `docs/adr/0004-ha-split-brain-safe-defaults.md` — the manual-failover
+- `docs/adr/0004-ha-split-brain-fencing.md` — the manual-failover
   baseline this builds on.
 - `docs/engineering/TECHNICAL-RISK-REGISTER.md` RISK-001 — the split-brain
   risk this closes.

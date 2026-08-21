@@ -1,14 +1,21 @@
 # Authentication Policy — Frozen Architecture Spec
 
-**Status:** FROZEN (architecture). Implementation not started.
+**Status:** FROZEN (architecture). **Implementation SHIPPED** — the Phase 1
+seams this spec froze went on to ship (`AUTH-POLICY-PHASE1-PLAN.md`, Slices
+1–8), followed by Phase 2 `CredentialRequired` (`AUTH-POLICY-PHASE2-PLAN.md`)
+and the `defaultAuthOutcome`/`UnauthMode`-retirement work (Slices 1–5,
+`AUTH-POLICY-DEFAULTAUTHOUTCOME-SPEC.md` — the current authority for that
+surface; see CLAUDE.md's Architecture Notes).
 **Scope:** Replace production reliance on global Unauth Mode with scoped,
 context-aware **Authentication Policy** evaluated inside a unified Policy
 Decision Point (PDP). Optimize for maintainability, operator experience, and
 long-term evolution toward a commercial enterprise SWG / Browser Security /
 ZTNA product.
 
-This document freezes the architecture. It does **not** authorize runtime code
-changes. No proxy behavior changes are introduced by this commit.
+This document froze the architecture; at freeze time it authorized no runtime
+code changes. Runtime code has since shipped on top of this design (see
+Status above) — the architecture record below is retained unmodified as
+historical context.
 
 ---
 

@@ -5,12 +5,14 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/autoexclude"
 	"github.com/KidCarmi/Culvert/internal/decryptobs"
+	"github.com/KidCarmi/Culvert/internal/ssrf"
 )
 
 // defaultPolicyActionState controls what happens when no PBAC rule matches a
@@ -62,32 +64,34 @@ func defaultPolicyAction() string {
 // This prevents internal network topology disclosure and stops clients from
 // injecting identity claims.
 func scrubForwardedHeaders(r *http.Request) {
-	// Strip private IPs from X-Forwarded-For.
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		var public []string
-		for _, raw := range strings.Split(xff, ",") {
-			ip := net.ParseIP(strings.TrimSpace(raw))
-			if ip != nil && !isPrivateIP(ip) {
-				public = append(public, ip.String())
-			}
-		}
-		if len(public) == 0 {
-			r.Header.Del("X-Forwarded-For")
-		} else {
-			r.Header.Set("X-Forwarded-For", strings.Join(public, ", "))
+	// Strip private IPs from X-Forwarded-For. The header slice is read directly
+	// (rather than via Get) because a request carrying MORE THAN ONE
+	// X-Forwarded-For line must always be rewritten: Get reads only the first
+	// line, and the Set below collapses the header to that one value — dropping
+	// the trailing lines is part of the scrub, not an accident, so the
+	// leave-untouched fast path must not be taken for a multi-line header.
+	if vals := r.Header[hdrForwardedFor]; len(vals) > 0 && vals[0] != "" {
+		out, changed := sanitizeForwardedFor(vals[0])
+		switch {
+		case !changed && len(vals) == 1:
+			// Every hop is public and already in canonical form: the Set would
+			// write back a byte-identical value, so skip it.
+		case out == "":
+			r.Header.Del(hdrForwardedFor)
+		default:
+			r.Header.Set(hdrForwardedFor, out)
 		}
 	}
 
 	// Remove X-Real-IP if it resolves to a private address.
-	if xri := r.Header.Get("X-Real-IP"); xri != "" {
-		ip := net.ParseIP(strings.TrimSpace(xri))
-		if ip == nil || isPrivateIP(ip) {
-			r.Header.Del("X-Real-IP")
+	if xri := r.Header.Get(hdrRealIP); xri != "" {
+		if addr, ok := parsePublicAddr(xri); !ok || ssrf.PrivateAddr(addr) {
+			r.Header.Del(hdrRealIP)
 		}
 	}
 
 	// Always remove internal identity header before forwarding.
-	r.Header.Del("X-User-Identity")
+	r.Header.Del(hdrUserIdentity)
 
 	// Trailer hardening: Go forwards declared request trailers on r.Write, and
 	// the scrub above touches r.Header only (noted in the 2026-07-11 security
@@ -112,9 +116,9 @@ func scrubForwardedHeaders(r *http.Request) {
 // scrubTrailerKeys removes the identity/topology keys the forward-path scrub
 // bans from request trailers.
 func scrubTrailerKeys(t http.Header) {
-	t.Del("X-Forwarded-For")
-	t.Del("X-Real-IP")
-	t.Del("X-User-Identity")
+	t.Del(hdrForwardedFor)
+	t.Del(hdrRealIP)
+	t.Del(hdrUserIdentity)
 }
 
 // trailerRescrubBody re-applies the trailer scrub when the request body is
@@ -131,6 +135,95 @@ func (b *trailerRescrubBody) Read(p []byte) (int, error) {
 		scrubTrailerKeys(b.trailer)
 	}
 	return n, err
+}
+
+// Canonical header names, hoisted so the scrub does not re-derive them per
+// request (they are also the exact map keys used for the direct slice read).
+const (
+	hdrForwardedFor = "X-Forwarded-For"
+	hdrRealIP       = "X-Real-IP"
+	hdrUserIdentity = "X-User-Identity"
+)
+
+// parsePublicAddr parses one X-Forwarded-For / X-Real-IP hop token.
+//
+// It uses netip.ParseAddr rather than net.ParseIP because the latter
+// heap-allocates a 16-byte net.IP for every token of every scrubbed request,
+// while netip.Addr is a value. Acceptance is deliberately narrowed back to
+// net.ParseIP's: netip.ParseAddr also accepts a scoped address ("fe80::1%eth0"),
+// which net.ParseIP rejected, so a zoned token is reported as unparseable here
+// and dropped exactly as before. That keeps an attacker-supplied zone string out
+// of the header value forwarded upstream.
+//
+// The returned address is unmapped so that its rendering matches what
+// net.IP.String() produced: net.IP.String() prints an IPv4-mapped address in
+// dotted-quad form, whereas netip.Addr.String() would print "::ffff:1.2.3.4".
+func parsePublicAddr(token string) (netip.Addr, bool) {
+	addr, err := netip.ParseAddr(strings.TrimSpace(token))
+	if err != nil || addr.Zone() != "" {
+		return netip.Addr{}, false
+	}
+	return addr.Unmap(), true
+}
+
+// sanitizeForwardedFor filters an X-Forwarded-For value down to its public hops,
+// returning the replacement value and whether it differs from in.
+//
+// changed=false means the input already IS the sanitized form byte for byte, so
+// the caller can leave the header alone — the common load-balancer / proxy-chain
+// shape, and the reason the whole scrub is allocation-free on it. An empty
+// return with changed=true means every hop was private or unparseable and the
+// header must be deleted.
+//
+// Semantics are those of the previous strings.Split + net.ParseIP + ip.String()
+// + strings.Join implementation: hops are comma-separated, surrounding
+// whitespace is ignored, any hop that does not parse or that lands in a
+// private/internal range is dropped, and survivors are re-emitted in canonical
+// form joined by ", ". Only the mechanics changed — no per-hop net.IP, no
+// intermediate []string, and no Join.
+func sanitizeForwardedFor(in string) (out string, changed bool) {
+	// Single pass, rendering into a stack buffer. 256 bytes covers ~21 IPv4 or
+	// ~11 IPv6 hops — far past any realistic chain — so the ordinary request
+	// never touches the heap; append() grows onto it for a pathological chain.
+	// The buffer does not escape: the comparison below reads it in place and the
+	// string conversion copies.
+	var scratch [256]byte
+	buf := scratch[:0]
+	for list := in; ; {
+		token, rest, more := nextForwardedHop(list)
+		if addr, ok := parsePublicAddr(token); ok && !ssrf.PrivateAddr(addr) {
+			if len(buf) > 0 {
+				buf = append(buf, ',', ' ')
+			}
+			buf = addr.AppendTo(buf)
+		}
+		if !more {
+			break
+		}
+		list = rest
+	}
+	if len(buf) == 0 {
+		return "", true // every hop private or unparseable: delete the header
+	}
+	// Comparing a []byte against a string does not allocate, so recognising the
+	// already-sanitized value costs one memcmp and saves BOTH the string build
+	// and the header write.
+	if string(buf) == in {
+		return in, false
+	}
+	return string(buf), true
+}
+
+// nextForwardedHop splits the leading hop off a comma-separated header value.
+//
+// more reports whether a separator was CONSUMED — not whether the remainder is
+// non-empty. The distinction matters: "203.0.113.9," carries a second, empty
+// hop, which must be dropped (so that value is NOT already sanitized).
+func nextForwardedHop(list string) (token, rest string, more bool) {
+	if i := strings.IndexByte(list, ','); i >= 0 {
+		return list[:i], list[i+1:], true
+	}
+	return list, "", false
 }
 
 // policyLogURI builds the URL stored in LogEntry.URI for the per-rule "log full
