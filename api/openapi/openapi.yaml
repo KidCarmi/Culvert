@@ -1770,7 +1770,7 @@ components:
     LDAPProfileConfigInput:
       type: object
       description: |
-        LDAP/Active Directory profile settings (ADR-0025). bindPassword is a
+        LDAP/Active Directory profile settings (ADR-0027). bindPassword is a
         WRITE-ONLY input: never returned by reads, preserved when omitted on
         update, cleared only when present and empty. Read responses carry the
         derived bindCredentialConfigured flag instead.

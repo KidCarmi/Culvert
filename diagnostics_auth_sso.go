@@ -153,7 +153,7 @@ func unavailableSSORefs(refs []string) []string {
 }
 
 // authLDAPProfileDiagnostics reports transport-hygiene and authority risks for
-// enabled LDAP IdP profiles (ADR-0025). Report-only. Codes:
+// enabled LDAP IdP profiles (ADR-0027). Report-only. Codes:
 //   - ldap_plaintext_transport     WARN — plain ldap:// without StartTLS.
 //   - ldap_tls_unverified          WARN — certificate verification disabled.
 //   - ldap_legacy_config_shadowed  WARN — the legacy YAML ldap block is

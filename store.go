@@ -586,7 +586,7 @@ func (c *Config) AuthEnabled() bool {
 // UI and setup flow gate on this — NOT AuthEnabled — so that open mode keeps the
 // admin UI gated and makes setup one-time (Slice 5).
 //
-// The legacyLDAPRetired term (ADR-0025 / P1-2) keeps the gate CLOSED for a
+// The legacyLDAPRetired term (ADR-0027 / P1-2) keeps the gate CLOSED for a
 // deployment whose only setup anchor was the legacy YAML LDAP provider: the
 // cutover to the IdP registry deactivates that provider, and without this
 // term the deactivation (or any later restart, with the durable sentinel but

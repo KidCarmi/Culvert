@@ -1,7 +1,7 @@
 package main
 
 // auth_ldap_provider.go — LDAP / Active Directory as a first-class IdP
-// registry provider (ADR-0025).
+// registry provider (ADR-0027).
 //
 // LDAPIdPProvider adapts the hardened directory engine in auth_ldap.go (two-
 // step bind, CHAOS-47 unreachable gating, authoritative-only caching) to the
@@ -299,7 +299,7 @@ func validateLDAPAttrName(attr string) error {
 	return nil
 }
 
-// ─── Legacy YAML authority shadowing + durable cutover (ADR-0025 / P1-2) ─────
+// ─── Legacy YAML authority shadowing + durable cutover (ADR-0027 / P1-2) ─────
 //
 // AUTHORITY MODEL: there is exactly ONE operational LDAP authenticator.
 // Until cutover, the legacy YAML block is the bootstrap authenticator. The
@@ -462,7 +462,7 @@ func (p *LDAPIdPProvider) ResolveIdentity(username, password string) (*Identity,
 }
 
 // CaptiveLoginURL always returns "": LDAP can NEVER drive a browser SSO flow.
-// This is a hard capability guarantee (ADR-0025), not an unimplemented stub —
+// This is a hard capability guarantee (ADR-0027), not an unimplemented stub —
 // the interactive surfaces additionally exclude LDAP structurally via
 // IdPType.Interactive, so this is defense-in-depth.
 func (p *LDAPIdPProvider) CaptiveLoginURL(string, *http.Request) string { return "" }

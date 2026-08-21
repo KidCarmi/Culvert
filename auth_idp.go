@@ -23,7 +23,7 @@ const (
 	IdPTypeLDAP IdPType = "ldap"
 )
 
-// ─── Provider capability model (ADR-0025) ────────────────────────────────────
+// ─── Provider capability model (ADR-0027) ────────────────────────────────────
 //
 // Capabilities are a pure function of the IdP type, declared ONCE here and
 // consumed by every SSO/credential predicate. Before LDAP joined the registry,
@@ -772,7 +772,7 @@ func (r *IdPRegistry) EnabledCredentialProviders() []IdentityProvider {
 // HasEnabledInteractiveProvider is the allocation-free boolean probe behind
 // resolveRequestAuth's per-request ssoCapable predicate: at least one enabled
 // profile of an INTERACTIVE type (OIDC/SAML) with a live compiled provider.
-// Before ADR-0025 this was HasEnabledProviders — correct only while every
+// Before ADR-0027 this was HasEnabledProviders — correct only while every
 // registry type was interactive; an enabled LDAP profile must NOT make the
 // proxy advertise an SSO/captive flow it can never fulfil.
 // Allocation-free (pinned by the benchgate).
@@ -808,7 +808,7 @@ func (r *IdPRegistry) HasEnabledCredentialProvider() bool {
 }
 
 // HasEnabledLDAP reports whether any profile is enabled with Type LDAP —
-// consulted by the legacy-YAML shadowing rule (ADR-0025 §authority): when an
+// consulted by the legacy-YAML shadowing rule (ADR-0027 §authority): when an
 // enabled registry LDAP profile exists, the registry is the sole operational
 // LDAP authority and the legacy FileConfig.LDAP provider is not wired /
 // deactivated. Profile-level (not live-gated), matching HasEnabledOIDC.

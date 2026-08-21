@@ -910,7 +910,7 @@ func validateAuthRule(rule PolicyRule) (warnings []string, err error) {
 //   - SSORequired: providerRefs allowed (empty = all compatible enabled
 //     interactive IdPs; one/many recorded for later runtime selection).
 //   - CredentialRequired: providerRefs REJECTED — reserved for a future
-//     program. An early ADR-0025 draft activated it, but presented
+//     program. An early ADR-0027 draft activated it, but presented
 //     Proxy-Authorization credentials resolve through the GLOBAL validator
 //     chain BEFORE the no-credentials Stage-1 branch, so a per-rule provider
 //     subset was only half-enforced (another provider or local/legacy

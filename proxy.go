@@ -334,7 +334,7 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 		effectiveDefault = OutcomeDefault
 	}
 	credCapable := hasCredentialCapableProvider()
-	ssoCapable := idpRegistry.HasEnabledInteractiveProvider() // allocation-free probe, INTERACTIVE types only (ADR-0025) — an enabled LDAP profile must not advertise an SSO flow it can never fulfil
+	ssoCapable := idpRegistry.HasEnabledInteractiveProvider() // allocation-free probe, INTERACTIVE types only (ADR-0027) — an enabled LDAP profile must not advertise an SSO flow it can never fulfil
 	authRequired := credCapable || ssoCapable || originalEffective == OutcomeExempt
 
 	if authRequired { //nolint:nestif // adaptive-auth decision tree is inherently nested (matches the if-match dispatch convention; DEBT-002 isolated it for testability)

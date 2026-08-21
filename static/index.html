@@ -1993,7 +1993,7 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
             </div>
           </div>
 
-          <!-- LDAP fields (ADR-0025) -->
+          <!-- LDAP fields (ADR-0027) -->
           <div id="idp-ldap-fields" style="display:none">
             <div style="border-top:1px solid var(--border);margin:18px 0 16px;position:relative">
               <span style="position:absolute;top:-9px;left:0;font-size:.7rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;background:var(--surface1);padding-right:8px">Directory Connection</span>
@@ -2423,7 +2423,7 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
               <textarea class="input" id="cert-pem" rows="5" style="width:100%;font-family:monospace;font-size:.75rem;resize:vertical" placeholder="-----BEGIN CERTIFICATE-----&#10;...&#10;-----END CERTIFICATE-----"></textarea>
             </div>
             <div style="margin-bottom:14px">
-              <label class="form-label">Private Key (PEM) <span style="color:#ef4444;font-weight:400">- stored in memory only, never logged</span></label>
+              <label class="form-label">Private Key (PEM) <span style="color:#ef4444;font-weight:400">- never logged; persisted to the CA bundle path for the MITM target (see confirmation after upload), validate-only (never persisted) for the UI target</span></label>
               <textarea class="input" id="cert-key" rows="5" style="width:100%;font-family:monospace;font-size:.75rem;resize:vertical" placeholder="-----BEGIN EC PRIVATE KEY-----&#10;...&#10;-----END EC PRIVATE KEY-----"></textarea>
             </div>
             <button class="btn" data-click="uploadCustomCert"><svg class="ico" aria-hidden="true"><use href="#i-upload"/></svg> Upload & Activate</button>
@@ -13792,7 +13792,7 @@ function toggleIdPTypeFields() {
   syncSAMLMetadataSourceChoice();
 }
 
-// ─── LDAP form helpers (ADR-0025) ─────────────────────────────────────────────
+// ─── LDAP form helpers (ADR-0027) ─────────────────────────────────────────────
 
 function ldapSelectedSecurity() {
   if (document.getElementById('idp-ldap-sec-starttls').checked) return 'starttls';
@@ -14049,7 +14049,7 @@ async function saveIdP() {
   }
   const method = id ? 'PUT' : 'POST';
   let url      = id ? `/api/idp/${id}` : '/api/idp';
-  // Safe activation (ADR-0025): enabling an LDAP provider runs a live
+  // Safe activation (ADR-0027): enabling an LDAP provider runs a live
   // connection preflight server-side BEFORE anything persists — a broken
   // candidate can never replace a working enabled provider.
   if (type === 'ldap' && body.enabled) url += '?preflight=connection';

@@ -1,6 +1,6 @@
 package main
 
-// authpolicy_ldap_test.go — LDAP × Authentication Policy wall (ADR-0025,
+// authpolicy_ldap_test.go — LDAP × Authentication Policy wall (ADR-0027,
 // hardening round P1-1).
 //
 // CredentialRequired providerRefs is NOT activated: an earlier draft

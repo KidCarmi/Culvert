@@ -1,4 +1,4 @@
-# ADR-0025: LDAP / Active Directory as a first-class Identity Provider
+# ADR-0027: LDAP / Active Directory as a first-class Identity Provider
 
 - **Status**: Accepted (2026-08-21)
 - **Deciders**: maintainer + engineering session

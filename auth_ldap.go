@@ -142,7 +142,7 @@ type ldapCacheEntry struct {
 }
 
 // ldapIdentityAttrs names the directory attributes the identity-resolving
-// engine maps into Identity fields (ADR-0025). Zero value = legacy mode: the
+// engine maps into Identity fields (ADR-0027). Zero value = legacy mode: the
 // engine requests only dn+memberOf and never builds an Identity, keeping the
 // legacy YAML provider's wire behavior and semantics byte-identical.
 type ldapIdentityAttrs struct {
@@ -437,7 +437,7 @@ func (a *LDAPAuth) verify(username, password string) (*Identity, bool, error) { 
 
 // buildIdentity maps the directory entry into the normalised Identity
 // (identity-resolving engines only; legacy boolean mode returns nil).
-// Canonical semantics (ADR-0025): Sub = full user DN (stable, unambiguous),
+// Canonical semantics (ADR-0027): Sub = full user DN (stable, unambiguous),
 // Groups = configured group attribute verbatim (full group DNs, direct
 // membership only), Provider = IdP profile ID so authSource resolves to
 // "ldap:<profile-id>".

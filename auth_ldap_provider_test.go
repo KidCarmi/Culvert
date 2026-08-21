@@ -1,6 +1,6 @@
 package main
 
-// auth_ldap_provider_test.go — Slice 1 regression wall for ADR-0025:
+// auth_ldap_provider_test.go — Slice 1 regression wall for ADR-0027:
 //  1. The capability model (IdPType.Interactive / CredentialCapable) and the
 //     capability-explicit registry accessors.
 //  2. LDAP can NEVER leak into interactive SSO behavior — selector, captive
