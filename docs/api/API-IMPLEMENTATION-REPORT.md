@@ -67,7 +67,7 @@ deterministic, and runs inside the required `go test -race ./...`.
   documented operations spanning public/admin/health, safe/destructive, all HTTP
   methods, with `x-culvert-*` metadata describing **actual** behavior (plain-text
   `http.Error` responses).
-- **Engine:** `internal/apicontract` (getkin/kin-openapi v0.145.0, MIT) —
+- **Engine:** `internal/apicontract` (getkin/kin-openapi v0.146.0, MIT) —
   validation, Go-native style-lint, bijective route⇄manifest⇄spec coverage +
   role/mutating/audit binding + exemption expiry & horizon, request/response
   validators, deterministic bundler, visibility-filtered offline HTML renderer.
