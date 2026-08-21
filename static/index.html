@@ -4958,7 +4958,7 @@ Firefox (all platforms):
                   <button class="btn primary sm" data-click="releaseDispatchOpen">＋ Dispatch</button>
                 </div>
               </div>
-              <div id="rel-status" style="font-size:.85rem;line-height:1.7"><span style="color:var(--muted)">No dispatch recorded for this agent.</span></div>
+              <div id="rel-status" style="font-size:.85rem;line-height:1.7"><span style="color:var(--muted)">No dispatch recorded for this maintenance agent.</span></div>
             </div>
           </div>
 
@@ -5065,7 +5065,7 @@ Firefox (all platforms):
             <div id="support-upload-status" role="status" aria-live="polite" style="margin-bottom:6px"><p class="hint">Loading…</p></div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap" data-min-role="admin">
               <input id="upload-origin" class="input sm" type="text" placeholder="https://tac.example.com" style="width:240px" title="TAC upload base URL (https, non-private)">
-              <input id="upload-credential" class="input sm" type="password" placeholder="bearer credential (optional)" style="width:200px" autocomplete="off" title="Per-appliance bearer credential; stored 0600, never displayed. Leave blank to keep the existing one.">
+              <input id="upload-credential" class="input sm" type="password" placeholder="bearer credential (optional)" style="width:200px" autocomplete="off" title="Per-node bearer credential; stored 0600, never displayed. Leave blank to keep the existing one.">
               <label style="display:flex;gap:4px;align-items:center;font-size:.8rem"><input id="upload-enabled" type="checkbox"> Enable</label>
               <label style="display:flex;gap:4px;align-items:center;font-size:.8rem" title="Remove the stored credential"><input id="upload-clear-cred" type="checkbox"> Clear credential</label>
               <button class="btn ghost sm" data-click="saveUploadConfig" data-min-role="admin" title="Save the upload posture (node-local; no bundle is sent by this action)">Save</button>
@@ -5083,7 +5083,7 @@ Firefox (all platforms):
             <div id="support-telemetry-status" role="status" aria-live="polite" style="margin-bottom:6px"><p class="hint">Loading…</p></div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap" data-min-role="admin">
               <input id="telemetry-origin" class="input sm" type="text" placeholder="https://tac.culvertlabs.com" style="width:240px" title="TAC telemetry origin (https, non-private; no path/query/fragment)">
-              <input id="telemetry-credential" class="input sm" type="password" placeholder="bearer credential" style="width:200px" autocomplete="off" title="Per-appliance bearer credential; stored 0600, never displayed. Leave blank to keep the existing one.">
+              <input id="telemetry-credential" class="input sm" type="password" placeholder="bearer credential" style="width:200px" autocomplete="off" title="Per-node bearer credential; stored 0600, never displayed. Leave blank to keep the existing one.">
               <label style="display:flex;gap:4px;align-items:center;font-size:.8rem"><input id="telemetry-enabled" type="checkbox"> Enable</label>
               <label style="display:flex;gap:4px;align-items:center;font-size:.8rem" title="Remove the stored credential"><input id="telemetry-clear-cred" type="checkbox"> Clear credential</label>
               <button class="btn ghost sm" data-click="saveTelemetryConfig" data-min-role="admin" title="Save the telemetry posture (node-local; no data is sent - no sender exists in this build)">Save</button>
@@ -5194,7 +5194,7 @@ Firefox (all platforms):
 <div id="release-dispatch-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;align-items:center;justify-content:center">
   <div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:24px 28px;max-width:460px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.35)">
     <h3 style="margin:0 0 12px;font-size:1.05rem;font-weight:700">Dispatch Release</h3>
-    <p style="margin:0 0 16px;font-size:.82rem;color:var(--muted);line-height:1.5">Choose a release <b>or</b> a channel (not both). The agent applies the verified pinned digest.</p>
+    <p style="margin:0 0 16px;font-size:.82rem;color:var(--muted);line-height:1.5">Choose a release <b>or</b> a channel (not both). The maintenance agent applies the verified pinned digest.</p>
     <div style="display:grid;gap:12px">
       <label style="font-size:.78rem;color:var(--muted)">Release
         <select id="rel-disp-release" data-change="releaseDispSelectRelease" style="width:100%;margin-top:4px;padding:6px 8px;font-size:.85rem;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text)"></select>
@@ -5207,7 +5207,7 @@ Firefox (all platforms):
           <option value="critical">critical</option>
         </select>
       </label>
-      <label style="font-size:.78rem;color:var(--muted)">Agent
+      <label style="font-size:.78rem;color:var(--muted)">Maintenance Agent
         <input id="rel-disp-agent" value="local" style="width:100%;margin-top:4px;padding:6px 8px;font-size:.85rem;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text)">
       </label>
       <label style="font-size:.82rem;display:flex;align-items:center;gap:8px"><input type="checkbox" id="rel-disp-prebackup" data-change="releaseDispToggleBackup"> Pre-restart config backup (pre_backup)</label>
@@ -12502,6 +12502,15 @@ async function submitPolicyRule() {
   finally { _polMutateInFlight = false; }
 }
 
+// F20: the Allow/Block quick filters are a display-only umbrella over the raw
+// PolicyAction wire values - Drop (silent) and Block_Page (with page) both read
+// as "Block" here, matching the actionBadge() grouping shown in the table.
+function polActionBucket(action) {
+  if (action === 'Allow') return 'allow';
+  if (action === 'Drop' || action === 'Block_Page') return 'block';
+  return '';
+}
+
 // Extend renderPolicy to show country and file profile columns
 function setPolActionFilter(f) {
   polActionFilter = f;
@@ -12673,7 +12682,7 @@ function renderPolicy() {
 
   // F20: client-side search + action filter (computed only when rebuilding)
   const filtered = ordered.filter(r => {
-    if (polActionFilter && r.action !== polActionFilter) return false;
+    if (polActionFilter && polActionBucket(r.action) !== polActionFilter) return false;
     if (_polUnusedFilter && !polRuleIsUnused(r)) return false;
     if (!q) return true;
     const haystack = [r.name, r.sourceIP, r.sourceIdentity, r.sourceGroup, r.authSource,
@@ -16388,12 +16397,12 @@ async function loadReleaseCurrent() {
   const agent = releaseCurrentAgent();
   try {
     const r = await apiFetch('/api/releases/current?agent=' + encodeURIComponent(agent));
-    if (r.status === 404) { box.innerHTML = '<span style="color:var(--muted)">Unknown agent: ' + escHtml(agent) + '</span>'; return; }
-    if (r.status === 503) { box.innerHTML = '<span style="color:var(--warn,#f59e0b)">Agent unreachable</span>'; return; }
+    if (r.status === 404) { box.innerHTML = '<span style="color:var(--muted)">Unknown maintenance agent: ' + escHtml(agent) + '</span>'; return; }
+    if (r.status === 503) { box.innerHTML = '<span style="color:var(--warn,#f59e0b)">Maintenance agent unreachable</span>'; return; }
     if (!r.ok)            { box.innerHTML = '<span style="color:var(--danger)">Error ' + r.status + '</span>'; return; }
     const c = await r.json();
     if (c.available === false) {
-      box.innerHTML = '<span style="color:var(--muted)">No catalog loaded - current release is undetermined until a catalog is seeded. Agent reachability is not checked on this path.</span>';
+      box.innerHTML = '<span style="color:var(--muted)">No catalog loaded - current release is undetermined until a catalog is seeded. Maintenance agent reachability is not checked on this path.</span>';
     } else if (c.known) {
       box.innerHTML = '<div><b>' + escHtml(c.release_id || '') + '</b> <span style="color:var(--muted)">' + escHtml(c.version_id || '') + '</span></div>'
         + '<div style="color:var(--muted);font-size:.75rem;margin-top:4px">agent: ' + escHtml(agent) + '</div>';
@@ -16430,7 +16439,7 @@ function renderReleaseStatus(rec) {
   const resumeBtn = document.getElementById('rel-resume-btn');
   if (!box) return;
   if (!rec || !rec.phase || rec.phase === 'none') {
-    box.innerHTML = '<span style="color:var(--muted)">No dispatch recorded for this agent.</span>';
+    box.innerHTML = '<span style="color:var(--muted)">No dispatch recorded for this maintenance agent.</span>';
     if (resumeBtn) resumeBtn.style.display = 'none';
     return;
   }
@@ -16475,7 +16484,7 @@ async function releaseDispatchSubmit() {
   if (!releaseId && !channel) { toast('Choose a release or a channel', 'error'); return; }
   const preBackup = document.getElementById('rel-disp-prebackup').checked;
   const passphraseRef = document.getElementById('rel-disp-passphrase').value.trim();
-  // pre_backup is honored by the agent ONLY with a passphrase_ref; without one
+  // pre_backup is honored by the maintenance agent ONLY with a passphrase_ref; without one
   // the planner silently skips the backup. Require it so the checkbox is meaningful.
   if (preBackup && !passphraseRef) {
     toast('Pre-backup requires a backup passphrase reference (or uncheck it)', 'error');
@@ -16501,18 +16510,18 @@ async function releaseDispatchSubmit() {
       releaseDispatchCancel();
       if (agent === releaseCurrentAgent()) loadReleaseStatus(4);
     } else if (r.status === 200) {
-      // No-op success: the agent is already running the target release.
+      // No-op success: the maintenance agent is already running the target release.
       toast(payload.status === 'already_current'
         ? 'Already on the target release - no dispatch needed'
         : 'Dispatch accepted', 'success');
       releaseDispatchCancel();
       if (agent === releaseCurrentAgent()) { loadReleaseCurrent(); loadReleaseStatus(); }
     } else if (r.status === 409) {
-      toast(payload.status === 'stale_replan_required' ? 'Node drifted - re-plan required' : 'A dispatch is already in flight on this agent', 'error');
+      toast(payload.status === 'stale_replan_required' ? 'Node drifted - re-plan required' : 'A dispatch is already in flight on this maintenance agent', 'error');
     } else if (r.status === 404) {
-      toast('Unknown agent: ' + agent, 'error');
+      toast('Unknown maintenance agent: ' + agent, 'error');
     } else if (r.status === 503) {
-      toast('Agent unavailable' + (payload.detail ? ': ' + payload.detail : ''), 'error');
+      toast('Maintenance agent unavailable' + (payload.detail ? ': ' + payload.detail : ''), 'error');
     } else if (r.status === 502) {
       toast('Dispatch failed: ' + (payload.detail || 'agent error'), 'error');
     } else {
