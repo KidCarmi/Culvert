@@ -10372,13 +10372,20 @@ async function disableSyslog() {
 async function loadGeoIPStatus() {
   try {
     const g = await api('/api/geoip');
-    setText('geoip-status', g.enabled ? 'Enabled' : (g.lastError ? 'Failed to load' : 'Disabled'));
-    document.getElementById('geoip-status').style.color = g.enabled ? 'var(--green)' : (g.lastError ? 'var(--red)' : 'var(--muted)');
+    setText('geoip-status', g.enabled ? (g.lastError ? 'Enabled (refresh failed)' : 'Enabled') : (g.lastError ? 'Failed to load' : 'Disabled'));
+    document.getElementById('geoip-status').style.color = g.enabled ? (g.lastError ? 'var(--yellow)' : 'var(--green)') : (g.lastError ? 'var(--red)' : 'var(--muted)');
     setText('geoip-path', g.dbPath || '(not configured)');
     const errEl = document.getElementById('geoip-error');
     if (g.lastError) {
       const when = g.lastErrorAt ? new Date(g.lastErrorAt).toLocaleString() : '';
-      errEl.textContent = 'destCountry policy rules will not match: ' + g.lastError + (when ? ' (' + when + ')' : '');
+      // enabled + lastError = a RELOAD failed but the previously loaded database
+      // is still installed and serving lookups — say so, instead of wrongly
+      // claiming destCountry rules stopped matching (they only stop when no
+      // reader is installed at all).
+      const impact = g.enabled
+        ? 'database refresh failed — still serving the previously loaded database: '
+        : 'destCountry policy rules will not match: ';
+      errEl.textContent = impact + g.lastError + (when ? ' (' + when + ')' : '');
       errEl.style.display = '';
     } else {
       errEl.style.display = 'none';
