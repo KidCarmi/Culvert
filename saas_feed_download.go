@@ -393,6 +393,13 @@ func (f *feedFetcher) do(ctx context.Context, u *url.URL, expectPath, priorETag 
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		// Inline scheme+host guard so CodeQL can verify the SSRF contract at the call
+		// site (validateFeedURLContract is called before every hop but is a wrapper
+		// function the static analyser cannot trace through).
+		if cur.Scheme != saasFeedOfficialScheme || cur.Hostname() != saasFeedOfficialHost {
+			return nil, fmt.Errorf("%w: scheme/host constraint violated at dial: %q://%q", errFeedFetchSSRF,
+				strings.ReplaceAll(cur.Scheme, "\n", ""), strings.ReplaceAll(cur.Hostname(), "\n", ""))
+		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, cur.String(), http.NoBody)
 		if err != nil {
 			return nil, err
@@ -401,13 +408,6 @@ func (f *feedFetcher) do(ctx context.Context, u *url.URL, expectPath, priorETag 
 		req.Header.Set("Accept-Encoding", "identity") // belt: no compressed transfer negotiated
 		if priorETag != "" {
 			req.Header.Set("If-None-Match", priorETag)
-		}
-		// Inline scheme+host guard so CodeQL can verify the SSRF contract at the call
-		// site (validateFeedURLContract is called before every hop but is a wrapper
-		// function the static analyser cannot trace through).
-		if cur.Scheme != saasFeedOfficialScheme || cur.Hostname() != saasFeedOfficialHost {
-			return nil, fmt.Errorf("%w: scheme/host constraint violated at dial: %q://%q", errFeedFetchSSRF,
-				strings.ReplaceAll(cur.Scheme, "\n", ""), strings.ReplaceAll(cur.Hostname(), "\n", ""))
 		}
 		resp, err := f.client.Do(req)
 		if err != nil {
