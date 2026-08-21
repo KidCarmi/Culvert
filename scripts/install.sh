@@ -512,6 +512,13 @@ else
 fi
 
 cd "$INSTALL_DIR"
+# Canonicalize to the absolute path `cd` just resolved. INSTALL_DIR can still
+# hold a relative CULVERT_DIR override (e.g. "culvert-stack") at this point,
+# and every later use of $INSTALL_DIR — including agent_ancestors_traversable,
+# which walks dirname($INSTALL_DIR) upward — assumes an absolute path. Passing
+# a relative one there would resolve to "$PWD/$INSTALL_DIR", double-counting
+# the leaf we already cd'd into instead of naming it once.
+INSTALL_DIR="$PWD"
 
 ###############################################################################
 # 6. Seed the pinned proxy image tag (P1.4)
@@ -1520,12 +1527,57 @@ gen_passphrase() {
 # leave the CA passphrase to the operator.
 setup_at_rest_encryption() {
   local envfile="$INSTALL_DIR/.env"
-  if secret_already_set CULVERT_LOG_PASSPHRASE "$envfile" || secret_already_set CULVERT_CA_PASSPHRASE "$envfile"; then
+  local log_set=0 ca_set=0
+  secret_already_set CULVERT_LOG_PASSPHRASE "$envfile" && log_set=1
+  secret_already_set CULVERT_CA_PASSPHRASE "$envfile" && ca_set=1
+
+  # CA passphrase already set: nothing left for this function to do (we never
+  # overwrite an existing value, and a set CA passphrase means at-rest
+  # encryption was already decided one way or another).
+  if [[ "$ca_set" == 1 ]]; then
     info "Encryption passphrase already configured — keeping existing values."
     return
   fi
 
   local fresh=0; is_fresh_deployment && fresh=1
+
+  # On an EXISTING deployment, a pre-set log passphrase is the full contract
+  # (the CA passphrase is deliberately left to the operator — see above).
+  if [[ "$log_set" == 1 && "$fresh" != 1 ]]; then
+    info "Encryption passphrase already configured — keeping existing values."
+    return
+  fi
+
+  # Fresh deployment with a log passphrase already set (e.g. exported in the
+  # host env by an automated install, or left over from an interrupted prior
+  # run) but no CA passphrase yet: reuse the existing log passphrase for the
+  # CA key rather than silently leaving the SSL-inspection CA private key
+  # unencrypted with no warning at all.
+  if [[ "$log_set" == 1 && "$ca_set" != 1 ]]; then
+    local existing_pass="${CULVERT_LOG_PASSPHRASE:-}"
+    if [[ -z "$existing_pass" && -f "$envfile" ]]; then
+      existing_pass="$(grep -E '^CULVERT_LOG_PASSPHRASE=' "$envfile" | tail -1 | cut -d= -f2-)"
+    fi
+    # .env values round-trip through docker compose's own interpolation (it
+    # expands $-references when resolving .env, same as the interactive
+    # choice=2 path guards against below) — writing a value containing those
+    # characters here could silently persist a DIFFERENT string than the one
+    # actually used as CULVERT_LOG_PASSPHRASE, so CA and log encryption keys
+    # would diverge instead of matching as intended.
+    if [[ -n "$existing_pass" ]] && ! printf '%s' "$existing_pass" | LC_ALL=C grep -q '[^A-Za-z0-9._@%^!*()+=:,-]'; then
+      env_put CULVERT_CA_PASSPHRASE "$existing_pass" "$envfile"
+      info "Fresh deployment — also encrypting the SSL-inspection CA key with the existing CULVERT_LOG_PASSPHRASE."
+    elif [[ -n "$existing_pass" ]]; then
+      warn "CULVERT_LOG_PASSPHRASE contains characters that are not safe to persist verbatim in $envfile"
+      warn "(docker compose re-interpolates \$-references when reading .env) — leaving"
+      warn "CULVERT_CA_PASSPHRASE unset rather than risk a silently mismatched key. Set it yourself in"
+      warn "$envfile if you need the CA key encrypted."
+    else
+      warn "CULVERT_LOG_PASSPHRASE is configured but its value could not be read to also encrypt the"
+      warn "SSL-inspection CA key — set CULVERT_CA_PASSPHRASE yourself in $envfile if you need it encrypted."
+    fi
+    return
+  fi
 
   local choice="1"
   if [[ -t 0 ]]; then
@@ -1759,8 +1811,14 @@ MAINT_AGENT_WIRED=0
 # searchable, or the agent could never chdir in. A system path like /srv/culvert
 # passes (/, /srv are 0755); a 0700 home or /root is rejected at an ancestor.
 agent_ancestors_traversable() {
-  local p mode
-  p="$(dirname "$1")"
+  local target="$1" p mode
+  # $1 (INSTALL_DIR) can be a relative CULVERT_DIR override with no leading
+  # "/". dirname() on a relative, single-segment path (e.g. "culvert-stack")
+  # returns ".", and dirname(".") is ALSO "." forever — the walk below would
+  # never reach "/" and spin forever. Anchor to an absolute path first so the
+  # loop terminates exactly like it does for an already-absolute $1.
+  [[ "$target" == /* ]] || target="${PWD}/${target}"
+  p="$(dirname "$target")"
   while :; do
     [[ -d "$p" ]] || return 1
     mode="$(stat -c '%a' "$p" 2>/dev/null)" || return 1
@@ -1872,35 +1930,71 @@ patch_allow_peers_numeric_uid() {
   esac
   tmp="$(mktemp)" || return 1
   if ! sudo awk -v uid="$uid" '
+    # find_comment_start returns the index of the first "#" that lies OUTSIDE
+    # a double-quoted TOML string, or 0 if none. A naive regex split at the
+    # first "#" would misfire on a legitimate quoted peer value that itself
+    # contains "#" (TOML allows it, and the maint-agent config loader accepts
+    # any username user.Lookup resolves, e.g. allow_peers = ["svc#prod"]) —
+    # that "#" is not a comment marker and must not truncate the array. Walks
+    # back over any whitespace immediately preceding the "#" so that
+    # whitespace is treated as part of the comment (preserved on reattach).
+    # Does not handle escaped quotes inside a TOML string (\"); not a concern
+    # for the usernames/UIDs this array holds.
+    function find_comment_start(s,    i, n, inquote, ch) {
+      n = length(s)
+      inquote = 0
+      for (i = 1; i <= n; i++) {
+        ch = substr(s, i, 1)
+        if (ch == "\"") {
+          inquote = !inquote
+        } else if (ch == "#" && !inquote) {
+          while (i > 1 && substr(s, i - 1, 1) ~ /[[:space:]]/) i--
+          return i
+        }
+      }
+      return 0
+    }
     BEGIN { patched=0 }
     /^[[:space:]]*allow_peers[[:space:]]*=/ && patched == 0 {
       line=$0
-      if (line ~ /^[[:space:]]*allow_peers[[:space:]]*=[[:space:]]*\["culvert-cp"\][[:space:]]*$/) {
-        print "allow_peers = [\"" uid "\"]"
+      # Split off a trailing inline TOML comment before classifying the line,
+      # so an operator-added "  # ..." note on the allow_peers line (a normal
+      # TOML habit) is not mistaken for the array spilling onto later lines —
+      # the array-closing checks below must see the actual code, not comment
+      # text. code is what gets rewritten; comment (if any) is reattached
+      # unchanged on every branch that prints a modified line.
+      code=line; comment=""
+      cstart=find_comment_start(line)
+      if (cstart > 0) {
+        comment=substr(line, cstart)
+        code=substr(line, 1, cstart-1)
+      }
+      if (code ~ /^[[:space:]]*allow_peers[[:space:]]*=[[:space:]]*\["culvert-cp"\][[:space:]]*$/) {
+        print "allow_peers = [\"" uid "\"]" comment
         patched=1
         next
       }
-      if (line ~ "\"" uid "\"") {
+      if (code ~ "\"" uid "\"") {
         print line
         patched=1
         next
       }
-      if (line !~ /\][[:space:]]*$/) {
+      if (code !~ /\][[:space:]]*$/) {
         print line
         patched=2
         next
       }
-      if (line ~ /\[[[:space:]]*\][[:space:]]*$/) {
+      if (code ~ /\[[[:space:]]*\][[:space:]]*$/) {
         # Empty array (e.g. "allow_peers = []"): the generic append below
         # always prepends a comma, which would leave a leading ", " with no
         # preceding element ("[, \"uid\"]") — invalid TOML.
-        sub(/\[[[:space:]]*\][[:space:]]*$/, "[\"" uid "\"]", line)
-        print line
+        sub(/\[[[:space:]]*\][[:space:]]*$/, "[\"" uid "\"]", code)
+        print code comment
         patched=1
         next
       }
-      sub(/[[:space:]]*\][[:space:]]*$/, ", \"" uid "\"]", line)
-      print line
+      sub(/[[:space:]]*\][[:space:]]*$/, ", \"" uid "\"]", code)
+      print code comment
       patched=1
       next
     }
@@ -1936,6 +2030,66 @@ verify_maint_agent_health_as_proxy_uid() {
   fi
   warn "Cannot impersonate UID $uid for the health probe (no passwd entry for sudo, and setpriv is unavailable)."
   return 1
+}
+
+# heal_maint_proxy_repo CFG WANTED — repoint a freshly-seeded config.toml's
+# proxy_repo (and its paired image_allowlist) at WANTED when both are still
+# the packaging example's untouched default for ghcr.io/kidcarmi/culvert.
+# CULVERT_PROXY_REPO / CULVERT_RELEASE_PROXY_REPO is the documented override
+# for a custom/private registry (§6 above), but unlike compose_project_dir and
+# socket_path — which DO get self-healed elsewhere in install_maint_agent —
+# nothing ever propagated that override into config.toml's proxy_repo. Left
+# unhealed, wire_release_agent_for_compose's cfg_repo != release_repo check
+# PERMANENTLY skips Release-Management wiring on every custom-registry
+# install, since nothing else ever brings the two back into agreement.
+# Rewrites ONLY the byte-identical untouched default (mirrors the
+# compose_project_dir self-heal's "never touch an operator edit" rule) —
+# an already-customized proxy_repo OR image_allowlist is left alone, and the
+# caller's existing mismatch warning still fires. The replacement
+# image_allowlist keeps the same shape the packaging installer's own
+# proxy_repo/image_allowlist consistency check expects (dots in the repo
+# literal escaped, so they match literally rather than as a regex wildcard).
+#
+# Deliberately does NOT build the replacement lines with awk -v: awk's -v
+# (and command-line var=value) assignments are escape-processed per POSIX,
+# and an unrecognized escape like the "\." this function needs is handled
+# inconsistently across awk implementations — some silently DROP the
+# backslash, which would turn a literal dot back into a regex wildcard (CI
+# caught exactly this: passed on a local gawk, failed on the runner's awk).
+# A plain bash line-for-line comparison + printf never reinterprets the
+# value, so the escaping survives on every awk/sed/shell combination.
+heal_maint_proxy_repo() {
+  local cfg="$1" wanted="$2"
+  local default_repo="ghcr.io/kidcarmi/culvert"
+  local old_proxy_line="proxy_repo = \"$default_repo\""
+  local old_allow_line="image_allowlist = '^ghcr\\.io/kidcarmi/culvert(:[A-Za-z0-9._-]+|@sha256:[a-f0-9]{64})\$'"
+
+  [[ "$wanted" != "$default_repo" ]] || return 1
+  sudo grep -qxF "$old_proxy_line" "$cfg" 2>/dev/null || return 1
+  sudo grep -qxF "$old_allow_line" "$cfg" 2>/dev/null || return 1
+
+  local escaped new_proxy_line new_allow_line tmp line
+  escaped="$(printf '%s' "$wanted" | sed 's/\./\\./g')"
+  new_proxy_line="proxy_repo = \"$wanted\""
+  new_allow_line="image_allowlist = '^${escaped}(:[A-Za-z0-9._-]+|@sha256:[a-f0-9]{64})\$'"
+
+  tmp="$(mktemp)" || return 1
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" == "$old_proxy_line" ]]; then
+      printf '%s\n' "$new_proxy_line"
+    elif [[ "$line" == "$old_allow_line" ]]; then
+      printf '%s\n' "$new_allow_line"
+    else
+      printf '%s\n' "$line"
+    fi
+  done < <(sudo cat "$cfg" 2>/dev/null) > "$tmp"
+  if [[ ! -s "$tmp" ]]; then
+    rm -f "$tmp"
+    return 1
+  fi
+  sudo install -m 0640 -o root -g culvert-maint "$tmp" "$cfg"
+  rm -f "$tmp"
+  return 0
 }
 
 wire_release_agent_for_compose() {
@@ -2214,6 +2368,31 @@ install_maint_agent() {
     return 0
   fi
 
+  # Repoint proxy_repo (+ its paired image_allowlist) at a custom/private
+  # registry requested via CULVERT_RELEASE_PROXY_REPO / CULVERT_PROXY_REPO, the
+  # same override wire_release_agent_for_compose resolves as release_repo.
+  # Runs here, BEFORE the "already installed" fast paths below, because those
+  # paths wire_release_agent_for_compose and return WITHOUT ever reaching the
+  # self-heal blocks near the end of this function — a re-run against an
+  # already-installed agent (the common case: adding CULVERT_PROXY_REPO to an
+  # existing deployment, no version change) would otherwise never get healed.
+  # A truly fresh host has no config.toml yet at this point, so this is a
+  # harmless no-op here; the matching call near the end of this function
+  # (alongside the compose_project_dir/socket_path self-heals) catches that
+  # case once the packaging installer has created it. heal_maint_proxy_repo
+  # only rewrites the untouched packaging default (see its own doc comment);
+  # an operator-edited proxy_repo/image_allowlist is left alone and the
+  # existing mismatch warning in wire_release_agent_for_compose still applies.
+  local wanted_proxy_repo="${CULVERT_RELEASE_PROXY_REPO:-${CULVERT_PROXY_REPO:-ghcr.io/kidcarmi/culvert}}"
+  if heal_maint_proxy_repo /etc/culvert-maint/config.toml "$wanted_proxy_repo"; then
+    info "Pointing maintenance agent at the custom proxy registry ($wanted_proxy_repo)..."
+    if ! sudo CULVERT_MAINT_SKIP_VERIFY=1 bash "$maint_installer" /usr/local/bin/culvert-maint; then
+      warn "Re-rendering after pointing the agent at $wanted_proxy_repo failed."
+      warn "Fix proxy_repo/image_allowlist in /etc/culvert-maint/config.toml and re-run the installer."
+      return 0
+    fi
+  fi
+
   # ── Fast path: already installed AND at a KNOWN target version → just ensure
   #    traversal + wiring, skipping the (network) cosign verify + bundle extract
   #    entirely. The guards above already ran, so wiring here cannot create a
@@ -2421,6 +2600,20 @@ install_maint_agent() {
     if ! sudo CULVERT_MAINT_SKIP_VERIFY=1 bash "$maint_installer" /usr/local/bin/culvert-maint; then
       warn "Re-rendering the sudoers binding for $INSTALL_DIR failed."
       warn "Fix compose_project_dir in /etc/culvert-maint/config.toml and re-run the installer."
+      return 0
+    fi
+  fi
+
+  # Same proxy_repo repointing as above, for the FRESH-install case: the
+  # earlier call (before the fast-path returns) no-ops when config.toml
+  # doesn't exist yet — it does now, freshly seeded by the installer call(s)
+  # above. Idempotent: a re-run where the earlier call already healed it
+  # finds proxy_repo no longer at the default and no-ops here too.
+  if heal_maint_proxy_repo /etc/culvert-maint/config.toml "$wanted_proxy_repo"; then
+    info "Pointing maintenance agent at the custom proxy registry ($wanted_proxy_repo)..."
+    if ! sudo CULVERT_MAINT_SKIP_VERIFY=1 bash "$maint_installer" /usr/local/bin/culvert-maint; then
+      warn "Re-rendering after pointing the agent at $wanted_proxy_repo failed."
+      warn "Fix proxy_repo/image_allowlist in /etc/culvert-maint/config.toml and re-run the installer."
       return 0
     fi
   fi

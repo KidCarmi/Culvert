@@ -56,6 +56,6 @@ func tryLoadBlocklistFile(path string) {
 	case os.IsNotExist(err):
 		logger.Printf("Blocklist not found at %s — starting with empty list", path)
 	default:
-		logger.Fatalf("Cannot load blocklist: %v", err)
+		logFatalf("Cannot load blocklist: %v", err)
 	}
 }

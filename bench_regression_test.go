@@ -20,10 +20,17 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"log"
+	"net"
 	"net/http"
+	"net/netip"
+	"strings"
 	"testing"
 
 	"github.com/KidCarmi/Culvert/internal/sslbypass"
+	"github.com/KidCarmi/Culvert/internal/ssrf"
+	"github.com/KidCarmi/Culvert/internal/urlcat"
 )
 
 // TestBenchGate_PolicyEvalAllocs locks in the O(1)-allocation policy hot path.
@@ -153,10 +160,15 @@ func TestBenchGate_AuthResolveAllocs(t *testing.T) {
 				rules, allocs, maxAllocsAccessOnly)
 		}
 	}
-	// (b) fixed 8-auth-rule tranche across growing access rulebases: measured 33
-	// allocs/op (8 rules × ParseCIDR + one client-IP parse), CONSTANT in access
-	// count. Bound adds headroom while still failing an O(access-rules) return.
-	const maxAllocsWithAuth = 48
+	// (b) fixed 8-auth-rule tranche across growing access rulebases. This was 33
+	// allocs/op (8 rules × 4 for net.ParseCIDR + one client-IP parse) until the
+	// subject-CIDR precompute (precomputeSubjectNets, run by sortLocked) moved
+	// the parse to publication time; the scan now allocates ONLY the single
+	// per-request client-IP parse — measured 1 alloc/op, constant in BOTH access
+	// and auth rule count. The bound keeps a little headroom but is far below
+	// the per-rule shape: 8 auth rules re-parsing their CIDRs would land at ~33
+	// and fail here immediately.
+	const maxAllocsWithAuth = 4
 	for _, rules := range []int{10, 1000, 10000} {
 		ps := buildAuthResolveStore(rules, benchAuthRules(8)...)
 		res := testing.Benchmark(func(b *testing.B) {
@@ -170,9 +182,50 @@ func TestBenchGate_AuthResolveAllocs(t *testing.T) {
 			rules, allocs, maxAllocsWithAuth, res.NsPerOp())
 		if allocs > maxAllocsWithAuth {
 			t.Errorf("REGRESSION: auth resolve over %d access + 8 auth rules allocates %d/op, exceeds constant bound %d — "+
-				"allocation is scaling with rulebase size again (List() clone, per-rule host normalization, or per-rule IP parse)",
+				"allocation is scaling with rulebase size again (List() clone, per-rule host normalization, or per-rule IP parse), "+
+				"or the subject-CIDR precompute (precomputeSubjectNets) is no longer reaching the resolver",
 				rules, allocs, maxAllocsWithAuth)
 		}
+	}
+}
+
+// TestBenchGate_AuthScheduleTZAllocs locks the Stage-1 schedule gate onto the
+// process-wide timezone cache. time.LoadLocation is NOT cached by the stdlib —
+// it re-reads and re-parses the tzdata file on every call (~8.6 µs and ~8.6 KB
+// per call measured on CI hardware). authScheduleParseable runs per scheduled
+// auth rule per request, so calling it directly put a disk read and 8.6 KB of
+// garbage on the proxy hot path for every scheduled rule of every request.
+// Stage-2 fixed the identical bug; this pins the Stage-1 half.
+//
+// The gate is allocation-keyed (hardware-independent): the cached resolution is
+// 0 allocs/op, the uncached one is 13.
+func TestBenchGate_AuthScheduleTZAllocs(t *testing.T) {
+	const maxAllocs = 2 // measured 0; uncached time.LoadLocation is 13
+	sched := &PolicySchedule{
+		Timezone:  "America/New_York",
+		Days:      []string{"Mon", "Tue", "Wed", "Thu", "Fri"},
+		TimeStart: "09:00",
+		TimeEnd:   "17:00",
+	}
+	// Warm the cache once so the benchmark measures the steady state (the first
+	// resolution legitimately reads tzdata; every later one must not).
+	if !authScheduleParseable(sched) {
+		t.Fatalf("fixture timezone %q did not resolve", sched.Timezone)
+	}
+	res := testing.Benchmark(func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_ = authScheduleParseable(sched)
+		}
+	})
+	allocs := res.AllocsPerOp()
+	t.Logf("authScheduleParseable tz=%s: %d allocs/op (bound %d), %d ns/op",
+		sched.Timezone, allocs, maxAllocs, res.NsPerOp())
+	if allocs > maxAllocs {
+		t.Errorf("REGRESSION: authScheduleParseable allocates %d/op, exceeds bound %d — "+
+			"the Stage-1 schedule gate is calling time.LoadLocation directly again instead of "+
+			"resolving through scheduleLocationResolved, putting a tzdata disk read on the request path",
+			allocs, maxAllocs)
 	}
 }
 
@@ -240,6 +293,10 @@ func TestBenchGate_AuthCapabilityProbeAllocs(t *testing.T) {
 			for i := 0; i < b.N; i++ {
 				_ = reg.HasEnabledProviders()
 				_ = reg.HasEnabledOIDC()
+				// ADR-0025 capability probes — the successors actually consumed
+				// by resolveRequestAuth's ssoCapable/credCapable; same zero bound.
+				_ = reg.HasEnabledInteractiveProvider()
+				_ = reg.HasEnabledCredentialProvider()
 			}
 		})
 		allocs := res.AllocsPerOp()
@@ -340,6 +397,119 @@ func TestBenchGate_ScrubAllocs(t *testing.T) {
 	}
 }
 
+// TestBenchGate_ForwardedForFilterAllocs locks in the allocation-free
+// X-Forwarded-For filter. The scrub runs on every plain-HTTP request, every
+// WebSocket upgrade, and every decrypted inner exchange of an SSL-inspected
+// tunnel, so per-hop allocation here is allocation on essentially all proxied
+// traffic. The bound above cannot catch it: it includes http.NewRequest, whose
+// ~10 allocations swamp the filter's own.
+//
+// The pre-change filter ran strings.Split + net.ParseIP + net.IP.String() +
+// strings.Join, i.e. roughly two allocations per hop plus the join — 6 allocs and
+// 208 B/op on an ordinary three-hop public chain, 12 allocs and 560 B on a deep
+// one. It now parses into a netip.Addr value, renders through a stack buffer, and
+// returns the input verbatim when the header is already in sanitized form (the
+// load-balancer case), so the ALL-PUBLIC shapes are allocation-free end to end.
+//
+// Allocations are the gate, not ns/op: they are deterministic and hardware-
+// independent. Any reintroduction of net.ParseIP, an intermediate []string, or an
+// unconditional rebuild fails here regardless of runner speed.
+func TestBenchGate_ForwardedForFilterAllocs(t *testing.T) {
+	cases := []struct {
+		name string
+		xff  string
+		// wantChanged is the shape being pinned, not just a sanity check: it is
+		// what separates "recognised as already-sanitized" from "rewritten", and
+		// the two have different allocation contracts.
+		wantChanged bool
+		maxAllocs   int64
+	}{
+		// Already-sanitized chains: the filter must recognise the fixed point and
+		// return the input, allocating nothing at any chain length.
+		{"single public hop", "203.0.113.9", false, 0},
+		{"public chain", "203.0.113.9, 198.51.100.4, 192.0.2.33", false, 0},
+		{"deep public chain", "203.0.113.1, 203.0.113.2, 203.0.113.3, 203.0.113.4, " +
+			"203.0.113.5, 203.0.113.6, 203.0.113.7, 203.0.113.8", false, 0},
+		// Every hop dropped: the value is rewritten, but to nothing, so the empty
+		// builder never allocates either.
+		{"all private", "10.0.0.1, 192.168.1.1, 172.16.0.1", true, 0},
+		// Shapes that genuinely rewrite: exactly ONE allocation, the returned
+		// string. Never one per hop.
+		{"mixed chain", "10.0.0.1, 203.0.113.9, 192.168.1.1", true, 1},
+		{"non-canonical spacing", "203.0.113.9,198.51.100.4,192.0.2.33", true, 1},
+		{"ipv6 mixed chain", "2001:db8::1, fe80::1, 2001:db8::2", true, 1},
+		{"deep mixed chain", "203.0.113.1, 10.0.0.1, 203.0.113.2, 10.0.0.2, 203.0.113.3, " +
+			"10.0.0.3, 203.0.113.4, 10.0.0.4", true, 1},
+		// Pathological chain whose rendered value outgrows the stack scratch. This
+		// is the ONLY shape allowed to allocate for the buffer itself, and the
+		// point of the case is that the cost stays a small CONSTANT — the buffer
+		// doubles, it does not allocate per hop.
+		{"over-scratch chain", overScratchChain(30), false, 2},
+	}
+	for _, tc := range cases {
+		// Assert the fixture's shape OUTSIDE the benchmark. A b.Fatalf inside
+		// testing.Benchmark makes it return a ZERO BenchmarkResult, whose
+		// AllocsPerOp is 0 — which would sail through the bound below and turn a
+		// broken fixture into a silently passing gate.
+		if _, changed := sanitizeForwardedFor(tc.xff); changed != tc.wantChanged {
+			t.Errorf("fixture %q: changed = %v, want %v — the already-sanitized fast path no longer "+
+				"classifies this shape as expected, so the allocation bound below is measuring the wrong branch",
+				tc.name, changed, tc.wantChanged)
+			continue
+		}
+		res := testing.Benchmark(func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				_, _ = sanitizeForwardedFor(tc.xff)
+			}
+		})
+		if res.N == 0 {
+			t.Errorf("fixture %q: benchmark did not run (zero result) — the measurement below is meaningless", tc.name)
+			continue
+		}
+		allocs := res.AllocsPerOp()
+		t.Logf("sanitizeForwardedFor %s: %d allocs/op (bound %d), %d ns/op, changed=%v",
+			tc.name, allocs, tc.maxAllocs, res.NsPerOp(), tc.wantChanged)
+		if allocs > tc.maxAllocs {
+			t.Errorf("REGRESSION: sanitizeForwardedFor %q allocates %d/op, exceeds bound %d — "+
+				"per-hop allocation has returned to the forwarded-header scrub (net.ParseIP instead of "+
+				"netip.ParseAddr, an intermediate []string + strings.Join, addr.String() per hop, or the "+
+				"already-sanitized fast path bypassed). See proxy.go sanitizeForwardedFor.", tc.name, allocs, tc.maxAllocs)
+		}
+	}
+}
+
+// TestBenchGate_PrivateAddrClassifierAllocs pins the guard table that the filter
+// above calls once per hop. It is a linear scan, and a PUBLIC address — the
+// common case — matches nothing and so always pays the full scan of its family.
+// The bound is ZERO: the netip entry point exists precisely so classification
+// costs no allocation, and PrivateIP (the net.IP façade the other eight SSRF
+// call sites use) must stay allocation-free through it too.
+func TestBenchGate_PrivateAddrClassifierAllocs(t *testing.T) {
+	const maxAllocs int64 = 0
+	for _, s := range []string{"203.0.113.9", "10.0.0.1", "2001:db8::1", "fe80::1"} {
+		addr, err := netip.ParseAddr(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ip := net.ParseIP(s)
+		res := testing.Benchmark(func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				_ = ssrf.PrivateAddr(addr)
+				_ = isPrivateIP(ip)
+			}
+		})
+		allocs := res.AllocsPerOp()
+		t.Logf("PrivateAddr+isPrivateIP %s: %d allocs/op (bound %d), %d ns/op", s, allocs, maxAllocs, res.NsPerOp())
+		if allocs > maxAllocs {
+			t.Errorf("REGRESSION: private-address classification of %s allocates %d/op, exceeds bound %d — "+
+				"the guard table is materialising a net.IP (or otherwise allocating) per check, on a path "+
+				"reached once per X-Forwarded-For hop per request. See internal/ssrf PrivateAddr.", s, allocs, maxAllocs)
+		}
+	}
+}
+
 // TestBenchGate_TracingIDAllocs guards the per-request tracing-ID generators.
 // setupRequestTracing runs both on essentially every proxied request (the
 // request ID and traceparent are generated whenever the client sent none —
@@ -398,5 +568,210 @@ func TestBenchGate_PolicyEvalScheduledAllocs(t *testing.T) {
 				"(fmt.Sprintf in matchSchedule / parseClockMinutes fallback engaged on well-formed bounds?)",
 				rules, allocs, maxAllocs)
 		}
+	}
+}
+
+// TestBenchGate_BlockPathAlertAllocs locks in the per-request alert-producer
+// gate. Before it, every blocked request ran `go fireAlert(...)` unconditionally:
+// a goroutine spawn, a heap-escaped payload, an RFC3339 timestamp format, a
+// dedup-key concat and a round trip through the single process-wide dedup mutex
+// — all to deliver an alert to nobody, because the default posture is no
+// webhooks configured. Measured cost was 752-3106 ns/op at 2-3 allocs/op against
+// an allow-path baseline of ~113 ns/op at 0 allocs/op, i.e. a blocked request
+// cost 5-20x an allowed one.
+//
+// That is the wrong way round for a gateway: block volume peaks exactly when a
+// scanning or beaconing flood is in progress, so the ungated producer degraded
+// the proxy hardest under attack. recordStats now consults HasSubscriber first
+// (the same contract storage_health.go uses), and the block path is allocation-
+// free again.
+//
+// Allocations are the gate, not ns/op: they are deterministic and hardware-
+// independent, so this bound holds across runners. A single alloc/op here means
+// the goroutine spawn (or the payload build feeding it) has returned to the
+// unsubscribed block path.
+func TestBenchGate_BlockPathAlertAllocs(t *testing.T) {
+	const maxAllocs int64 = 0 // steady state 0; pre-fix 2-3
+
+	orig := globalAlertStore
+	defer func() { globalAlertStore = orig }()
+	as := &AlertStore{}
+	as.Init("") // no webhooks — the default posture
+	globalAlertStore = as
+
+	for _, status := range []string{"POLICY_BLOCK", "POLICY_DROP", "THREAT_BLOCKED", "SCAN_BLOCKED", "DPI_BLOCKED"} {
+		res := testing.Benchmark(func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				recordStats("203.0.113.7", "target.example.com", status, "deny-rule", "block")
+			}
+		})
+		allocs := res.AllocsPerOp()
+		t.Logf("recordStats %s (no subscriber): %d allocs/op (bound %d), %d ns/op", status, allocs, maxAllocs, res.NsPerOp())
+		if allocs > maxAllocs {
+			t.Errorf("REGRESSION: recordStats %s allocates %d/op with NO webhook subscribed, exceeds bound %d — "+
+				"the HasSubscriber gate has been bypassed and every blocked request is spawning an alert "+
+				"goroutine again. See store.go recordStats.", status, allocs, maxAllocs)
+		}
+	}
+}
+
+// TestBenchGate_DNSFailureAlertAllocs is the same contract for the second
+// per-request producer. fireDNSFailureAlert is reached from all four dial sites
+// (plain HTTP, CONNECT bypass, CONNECT inspect, WebSocket); its rate is set by
+// the environment, not the operator, so a resolver brownout would otherwise turn
+// every request into a goroutine spawn plus an err.Error() format.
+func TestBenchGate_DNSFailureAlertAllocs(t *testing.T) {
+	const maxAllocs int64 = 0 // steady state 0; the err.Error() format alone was 1
+
+	orig := globalAlertStore
+	defer func() { globalAlertStore = orig }()
+	as := &AlertStore{}
+	as.Init("")
+	globalAlertStore = as
+
+	err := errTestDNS{}
+	res := testing.Benchmark(func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			fireDNSFailureAlert("dns-fail.example.com", err)
+		}
+	})
+	allocs := res.AllocsPerOp()
+	t.Logf("fireDNSFailureAlert (no subscriber): %d allocs/op (bound %d), %d ns/op", allocs, maxAllocs, res.NsPerOp())
+	if allocs > maxAllocs {
+		t.Errorf("REGRESSION: fireDNSFailureAlert allocates %d/op with NO webhook subscribed, exceeds bound %d — "+
+			"the HasSubscriber gate has been bypassed; a DNS brownout will now spawn a goroutine per request. "+
+			"See alerts.go fireDNSFailureAlert.", allocs, maxAllocs)
+	}
+}
+
+// TestBenchGate_RequestLogEntryAllocs locks in the allocation-free per-request
+// request-log record. persistLogEntry is the chokepoint every logged request
+// flows through — HTTP, CONNECT, WebSocket, SOCKS5, TUNNEL_CLOSED accounting
+// rows and SSL-inspected inner requests — so an allocation here is an
+// allocation on 100% of logged traffic.
+//
+// The only allocation it ever had was time.Now().Format("15:04:05"), a
+// one-second-resolution render re-derived per request. It is now memoised per
+// wall-clock second (store_logclock.go), which took the record build from
+// 277 ns/1 alloc to 150 ns/0 allocs serially. This gate fails if a per-request
+// format, an fmt.Sprintf, or any other allocating field build returns to the
+// path.
+func TestBenchGate_RequestLogEntryAllocs(t *testing.T) {
+	const maxAllocs int64 = 0 // steady state 0; the clock render alone was 1
+
+	if logger == nil {
+		logger = log.New(io.Discard, "", log.LstdFlags)
+	}
+	res := testing.Benchmark(func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			persistLogEntry("203.0.113.7", "GET", "benchgate.example.com", "OK",
+				"allow-corp-saas", "Allow", "alice@corp.example", 0, 0, 0, "", "", AuthLogFields{})
+		}
+	})
+	allocs := res.AllocsPerOp()
+	t.Logf("persistLogEntry: %d allocs/op (bound %d), %d ns/op", allocs, maxAllocs, res.NsPerOp())
+	if allocs > maxAllocs {
+		t.Errorf("REGRESSION: persistLogEntry allocates %d/op, exceeds bound %d — "+
+			"per-request allocation has returned to the request-log chokepoint "+
+			"(a re-introduced time.Format, or an allocating field build). "+
+			"See store.go persistLogEntry and store_logclock.go.", allocs, maxAllocs)
+	}
+}
+
+// overScratchChain builds a canonical all-public X-Forwarded-For value with n
+// hops, used to probe the filter past its stack scratch. 30 IPv4 hops render to
+// ~380 bytes, comfortably beyond the 256-byte buffer.
+func overScratchChain(n int) string {
+	var b strings.Builder
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		fmt.Fprintf(&b, "203.0.%d.%d", i/256, i%256)
+	}
+	return b.String()
+}
+
+// TestBenchGate_CategoryLookupConstantInTaxonomySize locks in the
+// SIZE-INDEPENDENCE contract on host→category resolution.
+//
+// catStore.LookupHost sits on the request path: lookupHostCategory (policy.go)
+// calls it, and categoryGroupMatchesHostRule (categorygroup.go) calls THAT once
+// per proxied request for every enabled access rule carrying a
+// DestCategoryGroup. It used to be a nested scan over every host pattern of
+// every category, so the cost was O(taxonomy) per rule per request — measured
+// ~24 us on the SHIPPED default taxonomy (657 patterns) and ~252 us at 5657, or
+// ~497 us of pure CPU per request for a 20-rule category posture. It is now a
+// bounded probe per host label (internal/urlcat lookupIn).
+//
+// This gate is keyed on the RATIO between two taxonomy sizes measured on the
+// SAME machine in the same run, not on absolute ns/op — that is what keeps it
+// hardware-independent, the same property the alloc-keyed gates above rely on.
+// A return to the linear scan shows up as a ~10x ratio and fails immediately;
+// the indexed lookup's ratio is ~1, with the remaining slack being map/cache
+// effects from the larger index.
+//
+// Allocation cannot gate this one: the old scan was already 0 allocs/op (the
+// "."+pattern concatenation is stack-allocated because it never escapes
+// strings.HasSuffix). The regression this guards is pure CPU.
+func TestBenchGate_CategoryLookupConstantInTaxonomySize(t *testing.T) {
+	// Ratio bound. Measured ~1.05x indexed (76 ns at 657 patterns, 80 ns at
+	// 6570); the linear scan measured ~10x (24 us → 250 us). 4 leaves generous
+	// room for a noisy shared runner while staying far below the failure mode.
+	const maxRatio = 4.0
+
+	// A host in NO category: the clean-traffic case, and the worst case for the
+	// old scan since a miss cannot short-circuit.
+	const probe = "uncategorized.example.invalid"
+
+	measure := func(patterns int) (int64, int) {
+		entries := urlcat.DefaultEntries()
+		base := 0
+		for _, e := range entries {
+			base += len(e.Hosts)
+		}
+		if patterns > base {
+			hosts := make([]string, 0, patterns-base)
+			for i := 0; i < patterns-base; i++ {
+				hosts = append(hosts, fmt.Sprintf("pad-%d.corp.invalid", i))
+			}
+			entries = append(entries, &urlcat.Entry{Name: "Padding", Hosts: hosts})
+			base = patterns
+		}
+		s := urlcat.New(entries)
+		if _, _, ok := s.LookupHost(probe); ok {
+			t.Fatalf("patterns=%d: probe host matched — the benchmark is not measuring the miss path", base)
+		}
+		// Two rounds, keep the faster: damps a scheduler hiccup on a shared
+		// runner without weakening the bound.
+		best := int64(0)
+		for round := 0; round < 2; round++ {
+			ns := testing.Benchmark(func(b *testing.B) {
+				for i := 0; i < b.N; i++ {
+					_, _, _ = s.LookupHost(probe)
+				}
+			}).NsPerOp()
+			if best == 0 || ns < best {
+				best = ns
+			}
+		}
+		return best, base
+	}
+
+	smallNs, smallN := measure(0)     // the shipped default taxonomy
+	largeNs, largeN := measure(10000) // a deployment that grew its own categories
+
+	ratio := float64(largeNs) / float64(smallNs)
+	t.Logf("LookupHost: %d ns/op at %d patterns, %d ns/op at %d patterns — ratio %.2fx (bound %.1fx)",
+		smallNs, smallN, largeNs, largeN, ratio, maxRatio)
+	if ratio > maxRatio {
+		t.Errorf("REGRESSION: LookupHost cost grew %.2fx when the taxonomy grew %.1fx, exceeding the %.1fx bound — "+
+			"host→category resolution is scaling with taxonomy size again instead of with the host's label count. "+
+			"That cost is paid inside the request goroutine, once per category-group rule, on every proxied request. "+
+			"See internal/urlcat lookupIn and the hostIndex/adminHostIndex construction in rebuildIndex.",
+			ratio, float64(largeN)/float64(smallN), maxRatio)
 	}
 }

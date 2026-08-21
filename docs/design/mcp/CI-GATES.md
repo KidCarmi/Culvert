@@ -1,5 +1,18 @@
 # MCP CI Gates
 
+> **PR-11 status (guarded execution / Shadow / Canary) — IMPLEMENTED, disabled by default.** The mode
+> ladder, immutable revisioned scope, central hard-failure classifier, bounded Model-A upstream client,
+> guarded execution (commit-before-side-effect, DLP-before-egress, credential containment, no client-token
+> passthrough), and signed CP→DP rollout distribution now ship in `internal/mcp/{rollout,upstreamclient,execution}`
+> and the `package main` composition. **Observe is non-executing; Shadow/Canary execute only inside an exact
+> approved scope for Model A (local-client); Production remains qualification-locked** (no config/env/CLI/API
+> bypass; no in-binary issuer). `outbound-connector`/`dmz-endpoint`, endpoint bridge, transparent discovery,
+> and Management mutation remain excluded. Duration targets (14d/7d/24h) are measurable machinery, not
+> completed evidence; Production Qualification is the separate gate. There is no PR-12 in this
+> package's slice sequence — see [`IMPLEMENTATION-SLICES.md`](IMPLEMENTATION-SLICES.md) (not to be
+> confused with the unrelated fix CLAUDE.md separately labels "PR-12").
+
+
 Status: PR-0 design artifact (Proposed)
 
 > **Decision provenance (2026-07-24, [`docs/adr/0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md)).**
@@ -142,6 +155,39 @@ surface it covers — i.e. these are hard entry gates for PR-1 through PR-10, no
 | Secret-in-events scan (decision-event payload redaction assertions) — **MUST scan both capabilities' event streams**; Management events carry configuration payloads, so a Gateway-only scan leaves the higher-privilege stream unchecked | MCP-CRED-004, MCP-EVENT-003 | MCP-T-023,028 | PR-4 (credential broker), PR-8 (event model) |
 | Event durability under saturation (no silent loss of auth/deny/high-risk events) — **MUST cover BOTH capabilities: (a)** the Gateway critical-class case **and** the **Management** critical-class case (a non-persistable configuration-publication / state-affecting Management event **fails closed AND** enters degraded mode with alert), **and (b)** the **nine blocking `MCP-T-075` containment tests** enumerated below, which REPLACE the superseded denial-event durability-lockout test — that test asserted the vulnerability succeeded, so a green result on it was evidence of the defect, not of the control — **plus commit-before-execute ordering asserted PER CLASS, each proving the ABSENCE OF EVERY IRREVERSIBLE ACTION DOWNSTREAM OF THAT FLOW'S COMMIT GATE — not only the eponymous one, since a single flow can carry two classes' side effects — and "no upstream call" is meaningless for classes that make none: write/destructive ⇒ **no upstream call occurred AND no broker-side materialization occurred**; configuration publication ⇒ **no new configuration revision exists, nothing was signed or pushed, and every DP remains on the prior epoch** — **SLICE TIMING: the real signed CP→DP publication path lands in PR-10, which depends on PR-8, so at PR-8 this case can only exercise a stub. It is therefore ALSO a PR-10 gate obligation: the PR-8 durability suite **MUST be re-run against the real publication wiring when PR-10 introduces it**, and PR-10 MUST NOT be marked green until it has been. Otherwise the actual publication path could ship without this assertion ever executing**; credential issue/rotation/revocation ⇒ **broker-side credential state unchanged** (nothing minted, rotated or revoked) **AND no upstream call occurred**; state-affecting Management operation ⇒ **no state change AND no new revision, nothing signed or pushed, every DP on the prior epoch** — DFD-3's irreversible action is `Publish signed snapshot`, so a state-change-only assertion passes a handler that publishes after the commit fails. **SLICE TIMING — `state-affecting Management` has NO V1 mechanism** (ADR-0024 §D-13 defers every Management mutation to a post-V1 decision), so PR-8 can only **stub** this class; the **real-path** assertion is assigned to the ****Future Management-Mutation Gate** (IMPLEMENTATION-SLICES, D-13), which MUST NOT be marked green without it** (amendment 18's dual ownership, as for the PR-10 publication re-run). A test observing only the returned error or the degraded state passes against an implementation that acts first and reports failure afterwards. **Plus a spool-commit-failure case distinct from queue saturation** (full disk / `fsync` error / encryption-key failure) proving the gate is a CONFIRMED durable commit rather than successful enqueueing** | MCP-EVENT-002 | MCP-T-044 | PR-8 |
 
+> **PR-5 listener/runtime gate — IMPLEMENTED.** The PR-5 rows above (transport-rejection listener
+> assertions, `MCP-INSP-009` listener bind + E2E rebinding, `MCP-OPS-002` per-listener saturation/isolation,
+> `MCP-OPS-001` MCP-off overhead) are now backed by `internal/mcp/runtime`: the config/limits-validation
+> matrix (`config_test.go`), the transport/status matrix + observe-only disposition (`pipeline_test.go`,
+> `TestPipeline_TransportMethods`/`TestPipeline_DecisionPointObserveOnly`), the **live-listener H1.1 + HTTP/2
+> Host/Origin rebinding proofs over a reused connection** (`listener_test.go`,
+> `TestListener_HostRecheckedPerRequestH11`/`TestListener_HostRecheckedPerStreamH2`), the auth/credential-
+> extraction + immutable-binding matrix (`auth_test.go`), per-listener admission-saturation + cross-capability
+> isolation (`runtime_test.go`, `TestListener_AdmissionBounded`/`TestRuntime_ListenerIsolation`),
+> transactional-startup rollback + graceful-shutdown no-leak (`TestRuntime_TransactionalStartupRollback`/
+> `TestRuntime_StartServeShutdownNoLeak`), anti-weakening mutants (`antiweakening_test.go`), three fuzz targets
+> (`fuzz_test.go`) and benchmarks incl. `BenchmarkRuntimeDisabledStartStop` (MCP-off overhead ≈ zero). The
+> **N-rejected-clients ⇒ zero-retained-streams** and version-set (`D-1`) fixtures remain as noted (PR-5 opens no
+> stream on any path — `RetainStream` is unconditionally false, asserted by
+> `TestAntiWeakening_RetainStreamAlwaysFalse`). Wiring the diff-scoped `golangci-lint`/`gosec` PR gates over the
+> new package is mechanical CI (`pr-fast-gate.yml`).
+
+> **PR-6 policy-engine gate — IMPLEMENTED.** The PR-6 `Release gate` (determinism + authorization-negative
+> green) is backed by `internal/mcp/policy` + `internal/mcp/policy/simulate`: the determinism/property suite
+> (`property_test.go` — same-input⇒same-decision over repeats, order-independent snapshot hash, input
+> immutability, fail-closed-on-error), the authorization-negative suite (`antiweakening_test.go` 17 tripwires +
+> `engine_test.go` hard-override/ambiguous-identity/default-deny + `compile_test.go` obligation-matrix +
+> Management-legal-actions), the **I/O-free / clock-free static wall** (`noio_test.go` — AST import allowlist +
+> forbidden-`time.Now` scan), the simulator≡evaluator parity + blast-radius (`simulate_test.go`), the runtime
+> decision-only integration (`internal/mcp/runtime/policy_test.go` — never contacts an upstream server, a
+> credential provider, or the broker, an ALLOW-class decision returns an unimplemented execution state, and a
+> missing snapshot fails closed), three fuzz targets
+> (`FuzzCompile`/`FuzzEvaluate`/`FuzzGlob`), and benchmarks (compile/eval/no-match/override/parallel/atomic-read).
+> All green under `-race -count=2 -shuffle=on`. The policy-bundle UPLOAD API / reason-code-catalog config
+> surfaces (`CONFIG-SURFACE-MATRIX.md`, tagged PR-6/PR-9) and signed CP→DP policy distribution are deliberately
+> OUT of PR-6 scope — decision engine only. Diff-scoped `golangci-lint`/`gosec` over the new packages is
+> mechanical CI (`pr-fast-gate.yml`).
+
 > **Fuzz gate — blocking (PR-time) vs. advisory (scheduled).** PR-1's acceptance requires **fuzz green**,
 > so a **bounded, blocking** protocol-kernel fuzz job must be wired into `pr-fast-gate.yml`/`pr-deep-gate.yml`
 > (the first row above). `fuzz-nightly.yml` is **not** that gate and **must not be described as
@@ -217,13 +263,13 @@ have — and a test claiming both that a bypass exists and that it cannot be con
 | Protocol-kernel structural + protocol-state suite (**incl. cross-capability limit isolation**, **and a STAGE-ORDER case: a method valid only in the version about to be negotiated MUST NOT be rejected pre-negotiation, and a version-specific method MUST be admitted against the NEGOTIATED version's allowlist — `MCP-PROTO-002` split around `MCP-PROTO-010/011`; PLUS a BOOTSTRAP case — on an un-negotiated session the `initialize` handshake MUST be admitted version-independently, and a NON-initialize method MUST be rejected WITHOUT its version/capability fields being interpreted and WITHOUT any negotiation-state mutation**) | proposed (target PR-1) | Proposed | Yes, for PR-1 | MCP-PROTO-001..008,012,013,014 | No |
 | Protocol-compatibility conformance gate (D-1-gated) | proposed (target PR-1) | Proposed | Yes, for PR-1 (green only after D-1) | MCP-PROTO-010,011 | No |
 | Deeper scheduled protocol-kernel fuzzing | proposed (extends `fuzz-nightly.yml`) | Advisory | No (scheduled/deep signal) | MCP-PROTO-009 | Partial (harness exists) |
-| Malicious-MCP-server test suite | proposed (target PR-2) | Proposed | Yes, for PR-2 | MCP-TOOL-001..006 | No |
-| OAuth/audience/replay negative matrix | proposed (target PR-3) | Proposed | Yes, for PR-3 | MCP-AUTH-001..008 | No |
+| Malicious-MCP-server test suite | present (PR-2) | Existing | Yes, for PR-2 | MCP-TOOL-001..006 | No |
+| OAuth/audience/replay negative matrix | present (PR-3) | Existing | Yes, for PR-3 | MCP-AUTH-001..008 | No |
 | SSRF private-IP matrix + DNS-rebinding lab + inbound Origin/Host tests (**incl. cross-capability allowlist isolation**) | proposed (target PR-1/**PR-5**/PR-7) | Proposed | Yes, for PR-1 (INSP-008 **primitive only**, no listener) / **PR-5 (INSP-009 — listener bind + host allowlist + E2E rebinding; the PR-1 unit test does NOT close the listener-side threat)** / PR-7 (SSRF) | MCP-INSP-004,005,008,**009** | No |
 | SSE-exhaustion/slowloris/queue-saturation tests (**per listener**) | proposed (target PR-5/PR-8) | Proposed | Yes, for PR-5/PR-8 | MCP-OPS-002, MCP-EVENT-002 | No |
 | Mixed-version/stale-epoch/corrupt-snapshot tests **+ PR-8 durability-suite re-run on the real publication path** | proposed (target PR-10) | Proposed | Yes, for PR-10 | MCP-CPDP-001..003, MCP-HA-001..002, **MCP-EVENT-002** | No |
 | MCP-off overhead regression benchmark | proposed (target PR-5) | Proposed | Yes, for PR-5 | MCP-OPS-001 | No |
-| Tool canonicalization/drift/privilege-expansion tests | proposed (target PR-2/PR-6) | Proposed | Yes, for PR-2/PR-6 | MCP-TOOL-001..006 | No |
+| Tool canonicalization/drift/privilege-expansion tests | present (PR-2 classification); proposed (target PR-6) | Partial | Yes, for PR-2/PR-6 | MCP-TOOL-001..006 | No |
 | Secret-in-events scan (**both capabilities' streams**) | proposed (target PR-4/PR-8) | Proposed | Yes, for PR-4/PR-8 | MCP-CRED-004, MCP-EVENT-003 | No |
 | Event durability under saturation (**both capabilities; MCP-T-075 containment suite included**) | proposed (target PR-8 **+ Future Management-Mutation Gate (D-13) for the real `state-affecting Management` path — PR-8 stubs it**) | Proposed | **Yes, for PR-8 AND for the Future Management-Mutation Gate (D-13)** — the post-V1 real-path re-run is **blocking for that gate**, which MUST NOT be marked green on PR-8's stub coverage | MCP-EVENT-001/002/007, MCP-OPS-005 | No |
 | `dependency-review-action` | proposed, cross-cutting | Proposed | REC — not yet scoped to a specific PR | — | No |

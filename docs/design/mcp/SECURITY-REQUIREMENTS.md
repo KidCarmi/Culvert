@@ -1,10 +1,53 @@
 # MCP Security Gateway — Security Requirements
 
+> **PR-11 status (guarded execution / Shadow / Canary) — IMPLEMENTED, disabled by default.** The mode
+> ladder, immutable revisioned scope, central hard-failure classifier, bounded Model-A upstream client,
+> guarded execution (commit-before-side-effect, DLP-before-egress, credential containment, no client-token
+> passthrough), and signed CP→DP rollout distribution now ship in `internal/mcp/{rollout,upstreamclient,execution}`
+> and the `package main` composition. **Observe is non-executing; Shadow/Canary execute only inside an exact
+> approved scope for Model A (local-client); Production remains qualification-locked** (no config/env/CLI/API
+> bypass; no in-binary issuer). `outbound-connector`/`dmz-endpoint`, endpoint bridge, transparent discovery,
+> and Management mutation remain excluded. Duration targets (14d/7d/24h) are measurable machinery, not
+> completed evidence; Production Qualification is the separate gate. There is no PR-12 in this
+> package's slice sequence — see [`IMPLEMENTATION-SLICES.md`](IMPLEMENTATION-SLICES.md) (not to be
+> confused with the unrelated fix CLAUDE.md separately labels "PR-12").
+
+
 Canonical **requirement-ID registry** for the PR-0 package. IDs are stable and referenced by
 [`THREAT-MODEL.md`](THREAT-MODEL.md), [`TEST-TRACEABILITY-MATRIX.md`](TEST-TRACEABILITY-MATRIX.md),
 [`ABUSE-CASES.md`](ABUSE-CASES.md) and [`IMPLEMENTATION-SLICES.md`](IMPLEMENTATION-SLICES.md).
 
 **All requirements are `Status: Proposed`** (PR-0 is design-only; nothing is implemented). Normative
+
+> **Update (PR-3) — auth/identity requirements now IMPLEMENTED (dormant).** `MCP-AUTH-001,002,003,004,006,007,008`
+> and `MCP-ID-001,002,003,007,008` are realized listener-independently in `internal/mcp/authn`,
+> `internal/mcp/identity`, `internal/mcp/senderconstraint` and the shared `internal/mcp/jose`/`internal/mcp/limits`
+> leaves, verified by the negative-auth matrix, anti-weakening tests, fuzz targets, race/shuffle and benchmarks.
+> `MCP-AUTH-005` (no-passthrough broker) stays PR-4; `MCP-ID-004` stays PR-8; `MCP-ID-005,006` stay PR-6 (policy).
+> The code is NOT wired into `package main` and performs no network I/O (keys, introspection results and TLS
+> thumbprints are explicit inputs), so the operative `Status` for release-gating stays `Proposed` until the PR-5
+> listener and PR-6 policy engine land — this note records that the PR-3 *code* exists, not that the end-to-end
+> control is deployed.
+
+> **Update (PR-4) — credential-broker requirements now IMPLEMENTED (dormant).** `MCP-AUTH-005` (no client-token
+> passthrough) and `MCP-CRED-001,002,003,004,005,006` are realized listener-independently in
+> `internal/mcp/credentials/{profile,provider,broker}` (reusing the `internal/secret` boundary via two minimal
+> audited additions, `NewSealed`/`MemoryProvider`). Proven by: the broker consumes only the PR-3
+> `identity.ResolvedContext` and the provider request carries only the one-way correlation digest (`MCP-CRED-001`,
+> `MCP-AUTH-005`); profiles are scoped by tenant/environment/server/tool/resource with a power ceiling and
+> provider-effective-scope validation rejects any broadening (`MCP-CRED-002`); short-TTL leases with an atomic
+> validate-before-publish rotation state machine + bounded grace and immediate tombstone-and-cache-invalidate
+> revocation (`MCP-CRED-003`); a scoped zeroize-on-success/error/panic materialization callback, sanitized
+> `SafeResult`, canary-proof provider-error sanitization, and no exported byte/string secret accessor
+> (`MCP-CRED-004`); a bounded, partitioned, TTL, encrypted-envelope-only cache with deterministic eviction
+> (`MCP-CRED-005`); and a fail-closed posture — high-risk always fails closed, low-risk cached fallback only under
+> explicit profile policy with a valid, fresh, non-revoked entry (`MCP-CRED-006`). The injected
+> pre-materialization gate (policy = PR-6, durable events = PR-8) is an interface only here. The code is NOT wired
+> into `package main` and performs no network I/O (trusted keys, introspection results and provider material arrive
+> as explicit inputs), so the operative `Status` stays `Proposed` until the PR-5 listener and PR-6 policy engine
+> land — this records that the PR-4 *code* exists, not that the end-to-end control is deployed. `MCP-CRED-004`'s
+> event-redaction leg and the durable spool stay PR-8.
+
 keywords **MUST / MUST NOT / SHOULD / MAY** are used deliberately. "Gate" names the slice or CI gate that
 must be green before the requirement is considered satisfied. Every requirement carries: statement,
 rationale, threat IDs, control owner, implementation owner, verification method, evidence required.
@@ -55,6 +98,58 @@ Verification · Evidence · Gate**. Status is `Proposed` for all rows unless not
 
 ---
 
+> **PR-5 status — `MCP-INSP-009`, `MCP-OPS-001`, `MCP-OPS-002` IMPLEMENTED.** `internal/mcp/runtime` binds
+> dedicated, isolated Gateway + Management listeners on explicitly configured interfaces (wildcard binds
+> rejected unless explicitly acked; validated before bind), invokes the PR-1 `MCP-INSP-008` primitive **after
+> header parsing on every request and every HTTP/2 stream** (proven E2E over reused H1.1 + H2 connections —
+> `TestListener_HostRecheckedPerRequestH11`/`TestListener_HostRecheckedPerStreamH2`), enforces per-listener
+> bounded worker pools + admission queues with cross-capability isolation (`MCP-OPS-002` —
+> `TestListener_AdmissionBounded`/`TestRuntime_ListenerIsolation`), opens **zero streams** on any path
+> (`RetainStream` unconditionally false), and is DISABLED BY DEFAULT with a near-zero MCP-off cost
+> (`MCP-OPS-001` — `BenchmarkRuntimeDisabledStartStop`). The listener runs the PR-1 kernel + PR-3 auth +
+> immutable identity-session binding and is **observe-only** (decision-point methods deterministically
+> rejected `observe_only`; no policy/credential/upstream). See [`IMPLEMENTATION-SLICES.md`](IMPLEMENTATION-SLICES.md) PR-5.
+
+> **PR-6 status — `MCP-POLICY-001..006`, `MCP-TOOL-004`, `MCP-TOOL-006`, `MCP-ID-005`, `MCP-ID-006` IMPLEMENTED
+> (dormant).** `internal/mcp/policy` is a deterministic, **I/O-free** decision engine (`Engine.Evaluate`) over
+> an immutable `DecisionInput` tuple + an immutable, capability-local compiled `Snapshot`: default-deny, bounded,
+> namespace-isolated (Gateway/Management can never cross-match), with the exactly nine actions, typed reason
+> codes/remediation, and a per-action obligation matrix. **Hard security overrides run before any rule** —
+> unknown-tool / privilege-expansion → QUARANTINE (`MCP-TOOL-004/006`), cross-tenant / ambiguous-identity-on-write
+> (`MCP-ID-005`) / Management-mutation-V1 / server-identity-change / server-disabled → fail-closed DENY — so a broad
+> ALLOW can never launder them; a destructive op is never implicitly allowed. The evaluator does NO network/fs/db/
+> DNS/env/clock/secret/logging work (explicit `EvalTime`, never `time.Now()`; pinned by an AST import-allowlist
+> test). The simulator (`internal/mcp/policy/simulate`) reuses the SAME evaluator (single/corpus/blast-radius/
+> shadow) and publishes/executes nothing. Wired into the PR-5 runtime as an OPTIONAL decision-only provider: an
+> ALLOW-class decision is recorded but returns `execution_state: not_implemented` (no upstream/credential/broker
+> call, no fabricated success); a missing snapshot fails closed with `MCP.POLICY.SNAPSHOT_UNAVAILABLE`. NOT wired
+> into `package main` (dormant). `MCP-POLICY-007` (approval UX) is PR-9. See
+> [`IMPLEMENTATION-SLICES.md`](IMPLEMENTATION-SLICES.md) PR-6.
+
+> **PR-7 status — `MCP-INSP-001..007` IMPLEMENTED (dormant).** `internal/mcp/inspection` (+ `schema`, `dlp`,
+> `destination`) is the decision-only inspection layer. `MCP-INSP-001` — semantic tool-argument validation
+> against the exact catalog schema over a CLOSED V1 keyword subset with exact-rational numbers (no `float64`);
+> unsupported security-relevant keywords fail conservative, never silently ignored. `MCP-INSP-002` — bounded
+> output size/type/schema validation with an explicit truncation contract (structured over-limit → block;
+> invalid/schema-invalid JSON → block; DLP runs on the FULL admitted content before any allowed display
+> truncation). `MCP-INSP-003` — deterministic secret + synthetic PII/financial DLP reusing the existing
+> `internal/redaction` scrubber (no second scrubber) with block/redact/label dispositions and sanitized findings
+> that never carry the matched secret. `MCP-INSP-004` — destination scheme/host/IP classification through the
+> AUTHORITATIVE `internal/ssrf` table (private/link-local/metadata/loopback/reserved/multicast/mapped-bypass
+> rejected). `MCP-INSP-005` — pinned resolve→connect via an INJECTED resolver + connect-time peer verification
+> against the immutable `PinnedDestination` and the real `ssrf.Control` (rebinding TOCTOU). `MCP-INSP-006` — one
+> shared request-local redirect guard that re-canonicalizes/re-SSRF-checks/re-pins each hop and refuses scheme
+> downgrade, cross-origin, public→private/metadata, credential URLs and loops. `MCP-INSP-007` — best-effort
+> deterministic prompt-injection labeling (labeled, never silently trusted; hard-block opt-in per profile).
+> Immutable capability-split Gateway/Management profiles; the `ALLOW_WITH_REDACTION` transform deep-copies (never
+> mutates the original), re-validates the schema, re-scans for residual secrets and attests original/transformed
+> canonical hashes. Wired into `internal/mcp/runtime` as an OPTIONAL provider (`Deps.Inspection`; nil ⇒
+> byte-identical old path): a Gateway `tools/call` is inspected BEFORE policy, a hard security failure blocks
+> regardless of the PR-6 action, and the sanitized summary feeds `policy.DecisionInput.Inspection`. Still
+> decision-only — NO upstream/credential/broker/durable-event work; an inspected ALLOW still returns
+> `execution_state: not_implemented`. NOT wired into `package main` (dormant). `MCP-INSP-008` (PR-1 primitive) and
+> `MCP-INSP-009` (PR-5 listener) are unchanged. See [`IMPLEMENTATION-SLICES.md`](IMPLEMENTATION-SLICES.md) PR-7.
+
 ## MCP-PROTO — Protocol kernel (framing, bounds, version negotiation, state)
 
 New family added by the PR-1 remediation (`PR1-READINESS-REMEDIATION.md`, finding H-2). These are the
@@ -86,7 +181,7 @@ this package does **not** fix production default numbers without evidence.
 | MCP-PROTO-014 | **UTF-8 / protocol-token handling.** (1) Invalid UTF-8 in any decoded string **MUST** be rejected. (2) Protocol **method names** and other spec-defined protocol tokens **MUST** be compared **exactly** (byte-for-byte, no normalization folding) against the supported-version allowlist. (3) Until D-1 proves that a supported protocol version permits non-ASCII method tokens, **non-ASCII protocol method names MUST be rejected**. (4) Opaque **user/server/tool identifiers** **MUST** follow their **field-specific** canonicalization rules and **MUST NOT** be globally Unicode-normalized by the protocol kernel unless the selected protocol specification explicitly requires it. This control does **not** detect, collapse, or prevent homoglyph/confusable attacks — if a later approved profile permits Unicode identifiers, confusable handling requires an **explicit field-level policy and dedicated tests** (out of scope here). | Make identifier handling explicit and safe without overstating it: invalid UTF-8 and non-ASCII/normalization-sensitive method tokens can bypass allowlist/dispatch or create a parser differential; exact comparison + non-ASCII rejection is the accurate protocol-layer control (NFC is **not** a confusable defense). | MCP-T-057,065 | Sec / Eng | Invalid-UTF-8 rejection tests; exact method-token comparison tests; non-ASCII-method-name rejection (D-1-gated); test that opaque identifiers are **not** globally normalized by the kernel | Invalid UTF-8 rejected; method tokens compared exactly; non-ASCII method names rejected pending D-1; opaque identifiers untouched by kernel-level normalization | PR-1 |
 | MCP-PROTO-015 | **Peer-role, requestor-scoped protocol state.** The kernel **MUST** be parameterized by **peer role** (client-facing vs upstream-server-facing) so **one** kernel implementation — one parser/framing/classification/version-adapter/bounds/cleanup — serves **both** untrusted legs; there **MUST NOT** be a second, unspecified decoder for upstream bytes. Outstanding-request / correlation / cancellation state **MUST** be keyed by at least `(session, requestor-role/direction, request-id)` with **independent per-requestor ID-uniqueness**. One direction **MUST NEVER** resolve, complete, cancel, delete, overwrite or release the other direction's state; the same JSON-RPC `id` **MAY** be outstanding concurrently in **both** directions; a cancellation references only a request issued in the **same direction** by the **owning requestor**; the `initialize` request **MUST NOT** be cancelled; a post-response cancellation is a tolerated **late race**, not a duplicate-completion fault. A peer-role method registry (`MCP-PROTO-016`) may differ in **admission** per leg, but the **security parser MUST NOT diverge**. | The design modelled the client→server envelope only; a single session-keyed table mis-correlates by construction (both peers legitimately mint `id:1`), and an unspecified second decoder for upstream bytes reintroduces the very parser differential `MCP-PROTO-001` prevents — across the two legs (#925). | MCP-T-076,059,060,069 | Sec / Eng | Requestor-direction correlation + same-id-both-directions + opposite-direction-cancellation-rejected + initialize-not-cancellable + late-cancel-tolerated fixtures; upstream-leg hostile corpus through the SAME kernel (differential assertion) | Correlation keyed by (session, direction, id); no cross-direction release; one kernel proven over both legs | PR-1 |
 | MCP-PROTO-016 | **Admitted-method registry (Culvert-reviewed, not version-derived).** Culvert **MUST** admit protocol methods only from a Culvert-reviewed registry ([`MCP-OPERATION-REGISTRY.md`](MCP-OPERATION-REGISTRY.md)), **not** "whatever the negotiated version contains". Every **admitted** method **MUST** resolve to exactly **one** named downstream decision point **XOR** be **kernel-terminal** (forward parity); **no** dispatch path **MUST** exist for a method absent from the registry (reverse parity); a method valid in the negotiated version but **absent** from the registry **MUST** be rejected; capability advertisement **MUST NOT** exceed the admitted registry; and **no** YAML/CLI/API/GUI configuration **MAY** re-admit a method absent from the reviewed registry (no `allow_unknown_methods`). `resources/*`, `prompts/*`, `completion/*`, server-originated `sampling`/`elicitation`/`roots`, and `tasks/*` are **rejected** in V1, never admitted-and-unpoliced. **Version-era admission** is bound to [`TRANSPORT-FALLBACK-EVIDENCE.md`](TRANSPORT-FALLBACK-EVIDENCE.md): the 2025-era baseline and the **non-final** `2026-07-28` stateless RC are kept separate (the RC is comparison-only, excluded from V1), and a method valid only in an unadmitted era/version is **rejected**. | `MCP-PROTO-002` rejects *unknown* methods but is silent on *known-but-unpoliced* ones; `resources/read` would reach the runtime with no tool identity, no rule field matching it — a data-exfil primitive bypassing tool policy, drift, credential scope and approval at once (#928). | MCP-T-077,059 | Sec / Eng | Forward-parity (every admitted method → one owner XOR kernel-terminal) + reverse-parity (no dispatch for absent method) + spec-valid-but-registry-absent-rejected + resources/read-rejected + no-config-re-admission + advertisement-matches-registry gates (predicate-28) | Every admitted method owned exactly once; registry-absent rejected; advertisement ⊆ registry | PR-1 |
-| MCP-PROTO-017 | **Legacy-transport exclusion and no pre-negotiation held stream.** Culvert V1 **MUST** host **no** legacy `2024-11-05` HTTP+SSE transport pair — no SSE endpoint that emits an `endpoint` event, no paired legacy POST endpoint, no compatibility alias, and **no** configuration switch / profile flag / "allow-unknown transport era" option that could enable either (an explicit supported-transport **decision**, not an omission). The kernel/listener **MUST NOT** allocate or hold any SSE stream **before** a valid negotiated session — or other explicitly authorized stream context — exists: a GET without that context **MUST** return the spec-sanctioned terminal **`405`** (never an empty or indefinitely-held `text/event-stream`), and every security-motivated `400`/`404`/`405` rejection **MUST** be terminal such that a client's spec-mandated follow-on GET receives `405` and **zero** streams are retained. **N rejected clients MUST leave zero retained streams** (a hard invariant, not a connection-count bound; listener-side load assertion at PR-5). Preferring a `200` `initialize` **counter-offer** over a `4xx` hard reject avoids both the spec `4xx` legacy-probe trigger and the SDK catch-any app-fallback. All status/transport facts are bound to [`TRANSPORT-FALLBACK-EVIDENCE.md`](TRANSPORT-FALLBACK-EVIDENCE.md); the **sessionless / first-request** absent-`MCP-Protocol-Version` ruling is **D-1 (OPEN)** and `2025-03-26` **MUST NOT** be silently admitted. | A security-motivated `4xx` on the initialize/transport path is exactly what recruits a spec-conformant (or catch-any) SDK client into the legacy `2024-11-05` HTTP+SSE probe; if a stream is then opened/held awaiting an `endpoint` event Culvert never emits, each rejected client leaves an **unauthenticated, pre-initialize, indefinitely-held stream** (self-amplifying, MCP-T-042 class). No prior requirement owned **legacy-transport exclusion** or the **no-pre-negotiation-stream** invariant (#929); `MCP-PROTO-010` owns no-silent-downgrade, `MCP-INSP-009`/`MCP-OPS-002` the PR-5 listener bounds, `MCP-PROTO-013` the rejection response shape — none states these two. | MCP-T-078,042 | Sec / Eng | Legacy-endpoint-negative (no route/config emits an `endpoint` event) + GET-without-context→`405`-zero-stream + `400`/`404`/`405`-terminal-with-`405`-follow-on-zero-retention + N-rejected-clients-zero-retained-streams (PR-5) + `200`-counter-offer-preferred + protocol-era-separation fixtures; official-SDK unsupported-version + catch-any fallback sequences ([`TRANSPORT-FALLBACK-EVIDENCE.md`](TRANSPORT-FALLBACK-EVIDENCE.md) §9) | No legacy endpoint reachable; GET-without-context is `405` with zero allocation; every `4xx` follow-on GET is `405` with zero retention; N rejected ⇒ zero retained streams; `2025-03-26` not silently admitted (D-1) | PR-1 (exclusion + terminal-status primitive) / PR-5 (held-stream + load) |
+| MCP-PROTO-017 | **Legacy-transport exclusion and no pre-negotiation held stream.** Culvert V1 **MUST** host **no** legacy `2024-11-05` HTTP+SSE transport pair — no SSE endpoint that emits an `endpoint` event, no paired legacy POST endpoint, no compatibility alias, and **no** configuration switch / profile flag / "allow-unknown transport era" option that could enable either (an explicit supported-transport **decision**, not an omission). The kernel/listener **MUST NOT** allocate or hold any SSE stream **before** a valid negotiated session — or other explicitly authorized stream context — exists: a GET without that context **MUST** return the spec-sanctioned terminal **`405`** (never an empty or indefinitely-held `text/event-stream`), and every security-motivated `400`/`404`/`405` rejection **MUST** be terminal such that a client's spec-mandated follow-on GET receives `405` and **zero** streams are retained. **N rejected clients MUST leave zero retained streams** (a hard invariant, not a connection-count bound; listener-side load assertion at PR-5). Preferring a `200` `initialize` **counter-offer** over a `4xx` hard reject avoids both the spec `4xx` legacy-probe trigger and the SDK catch-any app-fallback. All status/transport facts are bound to [`TRANSPORT-FALLBACK-EVIDENCE.md`](TRANSPORT-FALLBACK-EVIDENCE.md); the **sessionless / first-request** absent-`MCP-Protocol-Version` ruling is **D-1 CLOSED — reject with `400`** and `2025-03-26` **MUST NOT** be silently admitted. | A security-motivated `4xx` on the initialize/transport path is exactly what recruits a spec-conformant (or catch-any) SDK client into the legacy `2024-11-05` HTTP+SSE probe; if a stream is then opened/held awaiting an `endpoint` event Culvert never emits, each rejected client leaves an **unauthenticated, pre-initialize, indefinitely-held stream** (self-amplifying, MCP-T-042 class). No prior requirement owned **legacy-transport exclusion** or the **no-pre-negotiation-stream** invariant (#929); `MCP-PROTO-010` owns no-silent-downgrade, `MCP-INSP-009`/`MCP-OPS-002` the PR-5 listener bounds, `MCP-PROTO-013` the rejection response shape — none states these two. | MCP-T-078,042 | Sec / Eng | Legacy-endpoint-negative (no route/config emits an `endpoint` event) + GET-without-context→`405`-zero-stream + `400`/`404`/`405`-terminal-with-`405`-follow-on-zero-retention + N-rejected-clients-zero-retained-streams (PR-5) + `200`-counter-offer-preferred + protocol-era-separation fixtures; official-SDK unsupported-version + catch-any fallback sequences ([`TRANSPORT-FALLBACK-EVIDENCE.md`](TRANSPORT-FALLBACK-EVIDENCE.md) §9) | No legacy endpoint reachable; GET-without-context is `405` with zero allocation; every `4xx` follow-on GET is `405` with zero retention; N rejected ⇒ zero retained streams; `2025-03-26` not silently admitted (D-1) | PR-1 (exclusion + terminal-status primitive) / PR-5 (held-stream + load) |
 
 ## MCP-AUTH — Authentication & token validation
 

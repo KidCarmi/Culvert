@@ -7,7 +7,8 @@ shape reached a reviewer, and each is intended to make the same shape
 
 ## CI status — exact, per predicate
 
-**Eight of the nine now run in the required Fast PR Gate.** This changed after board
+**Ten of the eleven now run in the required Fast PR Gate** (predicate-25 is the lone deliberate
+manual exclusion). This changed after board
 blocker #927, which took three PRs and four verification rounds — and *every*
 intermediate head passed the full pipeline while still carrying a real defect,
 including one where the config-surface matrix did not parse as a table at all and
@@ -25,6 +26,11 @@ it parsed these documents.
 | `predicate-26.py` | **Runs in Fast PR Gate** |
 | `predicate-27.py` | **Runs in Fast PR Gate** |
 | `predicate-28.py` | **Runs in Fast PR Gate** |
+| `predicate-29.py` | **Runs in Fast PR Gate** (transport-fallback evidence; D-1-**closed** governance) |
+| `predicate-30.py` | **Runs in Fast PR Gate** (PR-1 entry closure — ADR Accepted, D-1/D-15 CLOSED, GO) |
+
+The runner executes **exactly ten blocking predicates** — `19, 21, 22, 23, 24, 26, 27, 28, 29, 30` — and
+`predicate-25` stays manual.
 
 The job runs when a PR touches `docs/design/mcp/**`, ADR-0024, the runner script,
 or `pr-fast-gate.yml`; it is skipped otherwise, and a skip counts as passing. A
@@ -125,6 +131,8 @@ authority changes. That failure has happened four times in this remediation
 | `predicate-26.py` | the config-surface matrix **parses as a table at all**, is **non-empty**, and every `MCP-CFG-001` row invariant holds over the **parsed** rows — header/delimiter/data widths equal, **every delimiter cell ≥ 3 hyphens**, expected row count, no duplicate field IDs, known registry classes and value kinds, sensitive value kinds only in `RC-1`/`RC-2`, `RC-X` empty, the `RC-0 ⇔ none` and `snapshot-meta ⇔ RC-5` biconditionals; **every declared summary label present exactly once**, no duplicate members inside a summary, and forward **and** bounded-reverse summary↔live parity for **every** summary; and **two complete, unique published censuses** (value kind *and* registry class) — every vocabulary token claimed exactly once, including zero-valued ones, no unknown tokens, plus the row and sensitive-kind totals — all reproduced from parsed rows | `CONFIG-SURFACE-MATRIX.md` §"The matrix" + its own class/vocabulary/summary/census blocks |
 | `predicate-27.py` | both the **requirement** registry and the **threat** registry **parse non-vacuously**, and every published census that summarises them matches the value **derived from the live registry** — the requirement total, namespace (family) count and **complete, unique per-family** census in `SECURITY-REQUIREMENTS.md` `## Summary`; the `TEST-TRACEABILITY-MATRIX.md` final-totals `**N threats**` / `**N requirements**`, its per-family spot-claims, and the §3 `all N requirements, 0 unreachable` total; plus per-ID uniqueness in both registries. Occurrence-counted, not first-match; a statement explicitly describing an **earlier** state is not governed | the requirement rows of `SECURITY-REQUIREMENTS.md` (per-family `\| ID \| … \|` tables) and the canonical `MCP-T-###` rows of `THREAT-MODEL.md` §11 |
 | `predicate-28.py` | the MCP **operation registry** binds both protocol directions to an authorized, parity-checked admitted-method surface — non-vacuous GFM parse; unique composite `(capability, leg, direction, method)` keys; every **admitted** row names one decision point **XOR** is kernel-terminal; every **rejected** row has no dispatch owner; separate Management/Gateway rows; explicit rejection of `resources`/`prompts`/`completion`/`sampling`/`elicitation`/`roots`/`tasks` (incl. `resources/read`, `tasks/cancel`); reverse capabilities not advertised; the requestor-scoped `(session, direction, id)` correlation, same-direction cancellation, `initialize`-not-cancellable and late-cancel normative statements; no `allow_unknown_methods`; and `DATA-FLOW-DIAGRAMS.md`/`PROTOCOL-COMPATIBILITY.md` cross-references | the 16-column table + normative prose of `MCP-OPERATION-REGISTRY.md` (#925/#928) |
+| `predicate-29.py` | the transport-fallback evidence matrix parses non-vacuously; the legacy-`2024-11-05` exclusion, terminal-status / zero-stream invariants, 2025/2026 era separation, Gate-3 amendment record (C-6 withdrawn, A-7 removed, C-7 narrowed), and **D-1-CLOSED** governance all hold; version-set-dependent fixtures stay `IMPL-PENDING`, never pre-marked green | the 14-column matrix + normative prose of `TRANSPORT-FALLBACK-EVIDENCE.md`; `OPEN-DECISIONS.md` `### D-1` (#929) |
+| `predicate-30.py` | the PR-1 **entry closure** is internally consistent and no closed entry decision is silently reopened — ADR-0024 `Accepted`; D-1 and D-15 `CLOSED`; #925–#929 recorded complete; the exact supported/rejected version set; batch rejected; the six-method admitted surface; no legacy SSE; the sessionless missing-header → `400` ruling; #923 final state `GO`; four gates complete; no stale ARB/committee/role-signature gate; PR-1 scope kernel-only | `PR1-ENTRY-CLOSURE.md` (primary), cross-checked against `docs/adr/0024-…`, `OPEN-DECISIONS.md` and `MCP-OPERATION-REGISTRY.md` (#923) |
 
 ### `predicate-26.py` — the anti-vacuity check
 
@@ -394,8 +402,8 @@ in a working session and never saved:
 
 | Cited in the ledger | Reproducible here? |
 |---|---|
-| Predicates 19, 21, 22, 23, 24, 25 | **Yes** — files above |
-| Predicates 7, 8, 13, 18, and the "outcome-lane check" | **No** — not saved; their recorded results cannot be re-run |
+| Predicates 19, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30 | **Yes** — files above (19/21/22/23/24/26/27/28/29/30 are blocking in CI; 25 is manual) |
+| Predicates 7, 8, 13, 18, and the "outcome-lane check" | **No** — not saved; **non-reproducible historical evidence, not current blockers**; recorded results stand as labelled claims and are **not** reconstructed from memory |
 
 This register exists because round 35 corrected round 34 for recording a
 predicate result whose artifact did not exist, and then recorded its own results

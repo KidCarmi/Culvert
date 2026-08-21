@@ -131,8 +131,8 @@ Severity = f(Impact, Likelihood), each rated Low/Medium/High.
 | DFD-10 | CP→DP snapshot publication | MCP-T-047..050 |
 | DFD-11 | Rollback | MCP-T-047, MCP-T-048 |
 | DFD-12 | Local enterprise client connectivity | MCP-T-036, MCP-T-037, MCP-T-030 |
-| DFD-13 | Outbound-only connector | MCP-T-051, MCP-T-052, MCP-T-053 |
-| DFD-14 | Hardened DMZ endpoint | MCP-T-036, MCP-T-042, MCP-T-051 |
+| DFD-13 | Outbound-only connector | MCP-T-051, MCP-T-053, MCP-T-010 |
+| DFD-14 | Hardened DMZ endpoint | MCP-T-036, MCP-T-042, MCP-T-052 |
 | DFD-15 | Protocol-kernel decode path (PR-1) | MCP-T-057..074 (parser/framing/version/state) |
 | DFD-16 | Two-leg kernel + method admission (PR-1) | MCP-T-076, MCP-T-077 (reverse-channel/direction confusion; admitted-but-unpoliced dispatch) |
 | DFD-17 | Transport rejection → terminal GET → zero stream (PR-1/PR-5) | MCP-T-078 (security-rejection-path legacy fallback + retained unauthenticated stream) |

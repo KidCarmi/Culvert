@@ -9,9 +9,9 @@
 - **What moved:** the Option-B six-section proposal that previously lived here — including the eight
   trust-boundary constraints and the separation doctrine — was promoted verbatim (with the five closed
   PR-1 entry decisions D-2, D-5, D-8, D-9, D-13 added) into ADR-0024.
-- **Current ADR status:** ADR-0024 is `Proposed`, awaiting formal ratification by the Architecture Review
-  Board and Security Architecture. It becomes the accepted PR-1 entry-gate ADR only once that ratification
-  is recorded in the ADR's "Ratification" section.
+- **Current ADR status:** ADR-0024 is **`Status: Accepted`** (2026-07-31). Acceptance rests on the merged
+  repository state — independent AI research, adversarial review, structural predicates, and CI — not on any
+  organizational ratification step (there is none in this project). See ADR-0024 "Acceptance".
 
 ## Why this pointer exists
 

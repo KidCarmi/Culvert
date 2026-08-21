@@ -193,12 +193,24 @@ func TestTelemetryStartupValidationHasNoSideEffects(t *testing.T) {
 
 	loadTelemetryConfigAtStartup()
 
-	// Let any (illegitimately) spawned goroutine actually get scheduled
-	// before sampling, so this doesn't pass by racing ahead of it.
-	time.Sleep(50 * time.Millisecond)
-	if after := runtime.NumGoroutine(); after > goroutinesBefore {
-		t.Errorf("startup validation started %d goroutine(s) — it must be strictly synchronous and inert",
-			after-goroutinesBefore)
+	// The startup validation must be strictly synchronous: after it returns, the
+	// goroutine count must settle back to (or below) the baseline. runtime.NumGoroutine()
+	// is a PROCESS-GLOBAL counter, so under -shuffle/-count=2 a transient goroutine from
+	// an UNRELATED prior test can be mid-flight during a single post-sleep sample and cause
+	// a false positive (a determinism flake). Poll for the count to return to baseline
+	// within a bounded window: a goroutine the startup step ITSELF leaked stays elevated
+	// and still fails; an unrelated transient one drains and the assertion passes.
+	settled := false
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		if runtime.NumGoroutine() <= goroutinesBefore {
+			settled = true
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !settled {
+		t.Errorf("startup validation left the goroutine count above baseline (%d) — it must be strictly synchronous and inert",
+			goroutinesBefore)
 	}
 	if after := listDirTree(t, dataDir); !reflect.DeepEqual(after, before) {
 		t.Errorf("startup validation changed filesystem state: before=%v after=%v", before, after)

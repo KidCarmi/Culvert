@@ -76,6 +76,55 @@ type SubjectPredicate struct {
 	Type   string   `json:"type"`
 	Op     string   `json:"op,omitempty"`
 	Values []string `json:"values"`
+
+	// nets is the parsed form of the CIDR Values, precomputed by
+	// precomputeSubjectNets from sortLocked() under the same contract as
+	// PolicyRule.srcIPNet/normFQDN: the Stage-1 hot path reads it instead of
+	// re-running net.ParseCIDR per value per rule per request (~4 allocs each).
+	// Index-aligned with Values; a nil element means "not precomputed" (a bare
+	// IP, or an invalid CIDR) and falls back to the allocating matchIPOrCIDRAddr
+	// path, so correctness never depends on it being populated. Unexported ⇒
+	// never serialized, and cleared by copyPolicyRuleForPublication so a copy can
+	// never carry a stale net past an edit to Values.
+	nets []*net.IPNet
+}
+
+// precomputeSubjectNets parses every CIDR subject-predicate value ONCE at rule
+// publication. Stage-1 auth rules are evaluated on every request that reaches
+// the gate, and net.ParseCIDR allocates 4 objects (~74 B) per value — measured
+// at 33 allocs/op and 93.6% of the Stage-1 resolver's total allocations on an
+// 8-auth-rule rulebase. The parsed *net.IPNet values are immutable and shared
+// only across immutable published definitions, so the hot path reads them
+// without synchronization, exactly like srcIPNet.
+//
+// Only values that actually parse as CIDRs are stored; bare-IP values keep the
+// allocation-free string comparison. A predicate with no parseable CIDR keeps a
+// nil nets slice so it costs nothing to carry.
+func precomputeSubjectNets(sm *SubjectMatch) {
+	if sm == nil {
+		return
+	}
+	for i := range sm.All {
+		p := &sm.All[i]
+		p.nets = nil
+		if p.Type != subjectPredicateCIDR || len(p.Values) == 0 {
+			continue
+		}
+		nets := make([]*net.IPNet, len(p.Values))
+		parsed := false
+		for j, v := range p.Values {
+			if !strings.Contains(v, "/") {
+				continue // bare IP — matched by string equality, no parse needed
+			}
+			if _, n, err := net.ParseCIDR(v); err == nil {
+				nets[j] = n
+				parsed = true
+			}
+		}
+		if parsed {
+			p.nets = nets
+		}
+	}
 }
 
 // validateSubjectMatch validates a SubjectMatch. A nil selector is valid (the
@@ -209,7 +258,7 @@ const authSourceExempt = "exempt"
 //	system — reserved for internal/system-originated traffic (future)
 //
 // IdP profile IDs and names must never collide with these: provider Name()
-// values are "oidc:<ID>"/"saml:<ID>" and matchAuthSource strips those prefixes
+// values are "oidc:<ID>"/"saml:<ID>"/"ldap:<ID>" and matchAuthSource strips those prefixes
 // (stripIdPPrefix), while OIDC/SAML sessions carry the bare profile ID as
 // Identity.Provider — so a profile ID or name equal to a reserved word would
 // make authSource-scoped access rules ambiguous (e.g. a rule targeting
@@ -512,6 +561,12 @@ type authMatchScratch struct {
 	normSet bool
 	addr    net.IP // net.ParseIP(ctx.ClientIP); nil = unparseable (fails closed)
 	addrSet bool
+	// cat carries the same lazy contract for the host→category fusion, shared
+	// with the Stage-2 access scan via matchDestNorm (policy_hostcat.go). Bound
+	// to ctx.Host on first use; an auth scan with no category-scoped rule never
+	// resolves anything.
+	cat    hostCatScratch
+	catSet bool
 }
 
 func (s *authMatchScratch) normHost() string {
@@ -520,6 +575,14 @@ func (s *authMatchScratch) normHost() string {
 		s.normSet = true
 	}
 	return s.norm
+}
+
+func (s *authMatchScratch) hostCat() *hostCatScratch {
+	if !s.catSet {
+		s.cat = newHostCatScratch(s.ctx.Host)
+		s.catSet = true
+	}
+	return &s.cat
 }
 
 func (s *authMatchScratch) clientAddr() net.IP {
@@ -577,7 +640,7 @@ func authRuleMatchesScratch(rule *PolicyRule, s *authMatchScratch) (AuthOutcome,
 	if !authRuleHasDestination(*rule) && !spec.BroadExemption {
 		return "", false
 	}
-	if !matchDestNorm(rule, s.ctx.Host, s.normHost()) {
+	if !matchDestNorm(rule, s.ctx.Host, s.normHost(), s.hostCat()) {
 		return "", false
 	}
 	// Schedule: a malformed timezone must fail closed (require auth), NOT silently
@@ -694,10 +757,10 @@ func matchSubjectAddr(sm *SubjectMatch, clientIP string, clientAddr net.IP) bool
 		return false
 	}
 	for i := range sm.All {
-		p := sm.All[i]
+		p := &sm.All[i] // by pointer: SubjectPredicate carries three slice headers
 		switch p.Type {
 		case subjectPredicateCIDR:
-			if !cidrPredicateMatchesAddr(p.Values, clientIP, clientAddr) {
+			if !cidrPredicateMatches(p, clientIP, clientAddr) {
 				return false
 			}
 		default:
@@ -707,11 +770,22 @@ func matchSubjectAddr(sm *SubjectMatch, clientIP string, clientAddr net.IP) bool
 	return true
 }
 
-// cidrPredicateMatchesAddr reports whether the client is contained by ANY of
-// values (each a CIDR or bare IP). An empty value list fails closed. clientAddr
-// MUST be net.ParseIP(clientIP).
-func cidrPredicateMatchesAddr(values []string, clientIP string, clientAddr net.IP) bool {
-	for _, v := range values {
+// cidrPredicateMatches reports whether the client is contained by ANY of the
+// predicate's values (each a CIDR or bare IP). An empty value list fails closed.
+// clientAddr MUST be net.ParseIP(clientIP) (nil = unparseable, fails closed on
+// the CIDR branch); the resolver parses it once per request.
+//
+// It reads the predicate's precomputed nets when present and falls back to the
+// allocating per-value parse otherwise, so a rule that reached the evaluator
+// without going through sortLocked still matches identically — just slower.
+func cidrPredicateMatches(p *SubjectPredicate, clientIP string, clientAddr net.IP) bool {
+	for i, v := range p.Values {
+		if i < len(p.nets) && p.nets[i] != nil {
+			if clientAddr != nil && p.nets[i].Contains(clientAddr) {
+				return true
+			}
+			continue
+		}
 		if matchIPOrCIDRAddr(v, clientIP, clientAddr) {
 			return true
 		}
@@ -724,12 +798,21 @@ func cidrPredicateMatchesAddr(values []string, clientIP string, clientAddr net.I
 // non-empty but unparseable IANA timezone fails closed (the Stage-1 gate must not
 // waive authentication based on a schedule it cannot evaluate, and unlike
 // validatePolicyRule the bulk persistence paths never reject such a timezone).
+//
+// Resolution goes through the process-wide scheduleLocCache (scheduleLocationResolved),
+// NOT time.LoadLocation directly: the stdlib does not cache, so it re-reads and
+// re-parses the tzdata file on EVERY call — measured at ~8.6 µs and ~8.6 KB of
+// garbage per call on this repo's CI hardware. This runs per scheduled auth rule
+// per request on the Stage-1 gate, so an uncached call put a disk read and 8.6 KB
+// of GC pressure on the proxy hot path for every scheduled rule of every request.
+// Stage-2 (matchScheduleAt) has resolved through the same cache since the
+// equivalent fix there; this is the Stage-1 half of that contract.
 func authScheduleParseable(s *PolicySchedule) bool {
 	if s == nil || s.Timezone == "" {
 		return true
 	}
-	_, err := time.LoadLocation(s.Timezone)
-	return err == nil
+	_, ok := scheduleLocationResolved(s.Timezone)
+	return ok
 }
 
 // authRuleNotExpired reports whether the rule has not expired. An empty
@@ -826,7 +909,17 @@ func validateAuthRule(rule PolicyRule) (warnings []string, err error) {
 // (validateSSOProviderRefsLive). Outcome gating (Phase 3 Slice 2):
 //   - SSORequired: providerRefs allowed (empty = all compatible enabled
 //     interactive IdPs; one/many recorded for later runtime selection).
-//   - CredentialRequired: providerRefs rejected (deferred to a later slice).
+//   - CredentialRequired: providerRefs REJECTED — reserved for a future
+//     program. An early ADR-0025 draft activated it, but presented
+//     Proxy-Authorization credentials resolve through the GLOBAL validator
+//     chain BEFORE the no-credentials Stage-1 branch, so a per-rule provider
+//     subset was only half-enforced (another provider or local/legacy
+//     credentials could still satisfy the rule) — unacceptable semantic
+//     ambiguity, reverted. Provider-specific authorization is expressed
+//     safely in Stage 2 via AuthSource/SourceGroup. The future design must
+//     cover presented credentials, sessions, local auth, legacy providers,
+//     stale/deleted refs, multi-provider ordering, and failure semantics as
+//     one coherent contract (see roadmap/LDAP-IDP-MODERNIZATION-PLAN.md §12).
 //   - Exempt: providerRefs rejected (no provider concept).
 func validateAuthOutcomeAndProviders(spec *AuthRuleSpec) error {
 	switch spec.Outcome {
@@ -838,10 +931,9 @@ func validateAuthOutcomeAndProviders(spec *AuthRuleSpec) error {
 	if spec.Outcome == OutcomeSSORequired {
 		return validateSSOProviderRefsShape(spec.ProviderRefs)
 	}
-	// Exempt and CredentialRequired do not accept providerRefs in Phase 3 Slice 2.
 	if len(spec.ProviderRefs) != 0 {
 		if spec.Outcome == OutcomeCredentialRequired {
-			return fmt.Errorf("providerRefs for CredentialRequired is deferred and cannot be set yet")
+			return fmt.Errorf("providerRefs for CredentialRequired is reserved for a future program and cannot be set; scope by provider in Stage 2 via authSource/sourceGroup access rules")
 		}
 		return fmt.Errorf("providerRefs is not valid on Exempt rules")
 	}
@@ -906,8 +998,8 @@ func validateSSOProviderRefsLive(spec *AuthRuleSpec) error {
 			return fmt.Errorf("providerRef %q does not match any configured IdP profile", id)
 		case !p.Enabled:
 			return fmt.Errorf("providerRef %q references a disabled IdP profile", id)
-		case p.Type != IdPTypeOIDC && p.Type != IdPTypeSAML:
-			return fmt.Errorf("providerRef %q is not an interactive (OIDC or SAML) IdP", id)
+		case !p.Type.Interactive():
+			return fmt.Errorf("providerRef %q is not an interactive (OIDC or SAML) IdP — LDAP is credential-only and can never satisfy SSORequired", id)
 		}
 	}
 	return nil

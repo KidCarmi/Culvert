@@ -10,6 +10,18 @@ after a policy decision. It is the authoritative source for requirement IDs in t
 
 **Status: PR-0 design artifact (Proposed).**
 
+> **Update (PR-3) — identity/auth core IMPLEMENTED.** The principal model (§3), capability-specific
+> OAuth client/resource/scope validation (§4), JWT and opaque-token validation, audience/tenant
+> isolation, short-TTL/temporal checks, and the DPoP/mTLS sender-constraint primitives with bounded
+> proof-`jti` replay protection (§5) are now realized, listener-independently, in `internal/mcp/identity`,
+> `internal/mcp/authn`, `internal/mcp/senderconstraint`, and the shared `internal/mcp/jose` leaf
+> (`MCP-ID-001..008`, `MCP-AUTH-001..008`). The `[INFER] net-new` / `NOT-VERIFIED` provenance tags below
+> describe the pre-PR-3 codebase and are retained as the historical evidence record; where a cell says a
+> control is "net-new" or "absent today", read it together with this note: the control now exists as code,
+> but remains dormant (no listener, no `package main` wiring, no network I/O — all key material,
+> introspection results and TLS-binding thumbprints are explicit inputs). Credential-profile selection /
+> brokering (§7) stays PR-4 and is deliberately still absent.
+
 > **Decision status — D-2 CLOSED (2026-07-24, [`ADR-0024 §D-2`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md)).**
 > Culvert is the **OAuth protected resource server** (Option A): client tokens terminate at Culvert;
 > clients request the canonical Culvert MCP resource via RFC 8707 `resource` and Culvert validates the
@@ -206,6 +218,21 @@ target PR live in [SECURITY-REQUIREMENTS.md](SECURITY-REQUIREMENTS.md); threat c
 > Selling point ([BLUEPRINT.md](BLUEPRINT.md) §13): agents never receive production credentials. The
 > agent's token is valid only for Culvert; after a policy ALLOW-class decision, Culvert's broker selects
 > a short-lived, scoped, revocable upstream credential on the agent's behalf.
+
+> **Update (PR-4) — the credential broker is IMPLEMENTED (dormant).** The model in this section is realized
+> listener-independently in `internal/mcp/credentials/{profile,provider,broker}` (`MCP-CRED-001..006`,
+> `MCP-AUTH-005`): immutable credential profiles (§7.1) with opaque ids scoped by tenant/environment/server/tool/
+> resource and a power ceiling; a narrow provider interface (§7.2) returning an OPAQUE `secret.Sealed` handle +
+> non-secret lease (never raw bytes/strings/secret-bearing errors); a two-phase `Plan`→`Materialize` flow where an
+> injected pre-materialization gate runs BEFORE any cache decrypt or provider fetch (policy = PR-6, durable events
+> = PR-8 supply the gate later); the §7.3 failure matrix (high-risk fail-closed, low-risk cached fallback only under
+> explicit policy); atomic rotation + immediate revocation; and a bounded, partitioned, encrypted-envelope-only
+> cache. It reuses the `internal/secret` containment boundary (two minimal audited additions, `NewSealed`/
+> `MemoryProvider`) — no second secret container. The agent still never holds a credential and the client token is
+> never forwarded upstream (the broker consumes only the PR-3 resolved identity; the provider request carries only
+> the one-way correlation digest). NOT wired into `package main`; no network I/O — the actual upstream call, the
+> policy decision and the durable event spool are PR-5/PR-6/PR-8. Provenance/`[INFER]`-net-new tags below describe
+> the pre-PR-4 codebase and are retained as the historical record.
 
 ### 7.1 Credential Profiles
 

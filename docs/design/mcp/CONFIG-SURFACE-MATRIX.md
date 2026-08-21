@@ -1,11 +1,33 @@
 # MCP Configuration Surface Matrix
 
+> **PR-11 status (guarded execution / Shadow / Canary) — IMPLEMENTED, disabled by default.** The mode
+> ladder, immutable revisioned scope, central hard-failure classifier, bounded Model-A upstream client,
+> guarded execution (commit-before-side-effect, DLP-before-egress, credential containment, no client-token
+> passthrough), and signed CP→DP rollout distribution now ship in `internal/mcp/{rollout,upstreamclient,execution}`
+> and the `package main` composition. **Observe is non-executing; Shadow/Canary execute only inside an exact
+> approved scope for Model A (local-client); Production remains qualification-locked** (no config/env/CLI/API
+> bypass; no in-binary issuer). `outbound-connector`/`dmz-endpoint`, endpoint bridge, transparent discovery,
+> and Management mutation remain excluded. Duration targets (14d/7d/24h) are measurable machinery, not
+> completed evidence; Production Qualification is the separate gate. There is no PR-12 in this
+> package's slice sequence — see [`IMPLEMENTATION-SLICES.md`](IMPLEMENTATION-SLICES.md) (not to be
+> confused with the unrelated fix CLAUDE.md separately labels "PR-12").
+
+
 **Status: PR-0 design artifact (Proposed).** Every field in this document is a **PROPOSED** design
 field for the two MCP capabilities described in [`BLUEPRINT.md`](BLUEPRINT.md) and
 [`RECOMMENDED-ARCHITECTURE.md`](RECOMMENDED-ARCHITECTURE.md). None of these fields exist in the
 repository today (**[FACT]** grep for an MCP/JSON-RPC listener returns zero hits — see
 [`VERIFIED-REPOSITORY-CONTEXT.md`](VERIFIED-REPOSITORY-CONTEXT.md)). Nothing in this document should be
 read as describing shipped behavior.
+
+> **PR-5 note (Observe runtime shipped; config surface still PROPOSED).** PR-5 lands
+> `internal/mcp/runtime` — the dedicated Gateway/Management listeners, bounded pools and observe pipeline —
+> **wired into `package main` DISABLED BY DEFAULT** (`initMCPRuntime`, always-off). PR-5 deliberately ships
+> **NO config surface**: no `-mcp-*` CLI flag, no `mcp.*` YAML key, no `CULVERT_MCP_*` env var, and no
+> admin API/GUI. Every `mcp_*` row below therefore remains **PROPOSED (PR-9)** — the enable/bind/port/
+> allowlist settings and their API+GUI parity are a later slice — so this matrix's anti-drift inventory is
+> **unchanged** by PR-5 (no new registered config field). The listener's runtime bounds are validated in-code
+> (`internal/mcp/runtime/limits.go`, `config.go`) at construction, not via any persisted config surface.
 
 ## Purpose
 
@@ -64,6 +86,15 @@ implemented starting at PR-1/PR-2:
   (recommended **Option A** — extend the existing registry), and it is a **hard PR-1 entry gate**
   alongside D-1.** The binding structural constraint it selects is recorded in
   [`ADR-0024 §Decision Part 1 item 8`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md).
+
+> **PR-6 update — the policy engine adds NO operator config surface.** `internal/mcp/policy` is a dormant,
+> decision-only engine: it has **no CLI flag, env var, YAML key, Admin API, or GUI panel**, so it introduces no
+> new `configBackup`/`AdminSettings`/`ConfigSnapshot` field and no `configSurfaces` row in this slice. The
+> policy-bundle upload/publish and reason-code-catalog rows below (tagged for their own slices) are the surfaces
+> that carry the config parity obligation — and they land with the Management API/GUI (PR-9) and signed CP→DP
+> distribution (PR-10), **not** PR-6. A policy `Snapshot` is compiled from an in-memory document and published
+> through a bounded in-process `Store`; there is no persisted, exported, rolled-back, or CP→DP-synced policy
+> config field in PR-6, so the anti-drift wall is intentionally untouched here.
 
 **Known limitation this closes — stated plainly, because the gap is invisible by construction.**
 `config_surfaces_test.go`'s type inventory (`csrStructTypes()`) is **hard-coded to exactly three
@@ -475,8 +506,8 @@ from this fixed enum; no field introduces a tenth action.
   itself vs. introducing a parallel MCP-specific registry, and the deferred snapshot signing-scheme
   selection.
 - [`docs/adr/0024-mcp-agent-security-gateway-trust-boundary.md`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md)
-  — the numbered ADR (promoted from the in-package proposal on 2026-07-24; `Status: Proposed`, ratification
-  pending) recording the trust-boundary decisions and the D-2/D-5/D-8/D-9/D-13 closures. This matrix's
+  — the numbered ADR (promoted from the in-package proposal on 2026-07-24; **`Status: Accepted`**)
+  recording the trust-boundary decisions and the D-2/D-5/D-8/D-9/D-13 closures. This matrix's
   config-surface plan is downstream of that decision — notably: `mcp_gateway_connector_*` fields are a
   **post-V1 connector slice** (D-8) and `mcp_gateway_dmz_*` fields are **default-off/deferred** (D-9).
 

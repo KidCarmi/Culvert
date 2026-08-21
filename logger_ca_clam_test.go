@@ -32,6 +32,7 @@ func TestJSONLogWriter_Write(t *testing.T) {
 }
 
 func TestSetupLogger_PlainText_NoFile(t *testing.T) {
+	restoreLogSink(t) // setupLogger publishes the async sink globally
 	l, closer, err := setupLogger("", 0, "text")
 	if err != nil {
 		t.Fatalf("setupLogger error: %v", err)
@@ -45,6 +46,7 @@ func TestSetupLogger_PlainText_NoFile(t *testing.T) {
 }
 
 func TestSetupLogger_JSON_NoFile(t *testing.T) {
+	restoreLogSink(t) // setupLogger publishes the async sink globally
 	l, closer, err := setupLogger("", 0, "json")
 	if err != nil {
 		t.Fatalf("setupLogger JSON error: %v", err)
@@ -58,6 +60,7 @@ func TestSetupLogger_JSON_NoFile(t *testing.T) {
 }
 
 func TestSetupLogger_WithFile(t *testing.T) {
+	restoreLogSink(t) // setupLogger publishes the async sink globally
 	f, err := os.CreateTemp("", "setuplogger*.log")
 	if err != nil {
 		t.Fatal(err)
@@ -79,6 +82,7 @@ func TestSetupLogger_WithFile(t *testing.T) {
 }
 
 func TestSetupLogger_JSONWithFile(t *testing.T) {
+	restoreLogSink(t) // setupLogger publishes the async sink globally
 	f, err := os.CreateTemp("", "setuplogger_json*.log")
 	if err != nil {
 		t.Fatal(err)

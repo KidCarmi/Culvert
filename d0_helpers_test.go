@@ -49,6 +49,7 @@ func d0WireMux(t *testing.T) *http.ServeMux {
 	registerReleaseRoutes(mux)
 	registerSupportRoutes(mux)
 	registerDiagnoseRoutes(mux)
+	registerMCPRoutes(mux)
 	return mux
 }
 
@@ -188,7 +189,7 @@ var d0KnownRoutes = func() []string {
 //   - Remove an entry from uiRoutes only             → fails C1 reverse
 //     (helper-registered route has no metadata) AND this D0 count test.
 func TestD0_RouteInventory_Locked141(t *testing.T) {
-	const want = 189 // + /api/urlcat/feed-status (UT1 + SaaS feed freshness/failure counts)
+	const want = 222 // 219 + 3 ADR-0025 LDAP IdP routes (/api/idp/test, /api/idp/legacy-ldap, /api/idp/legacy-ldap/import)
 	if got := len(d0KnownRoutes); got != want {
 		t.Fatalf("d0KnownRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}

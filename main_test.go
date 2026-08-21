@@ -18,5 +18,15 @@ func TestMain(m *testing.M) {
 	// obs default sink writes straight to stderr and observability tests for
 	// extracted leaves (internal/bandwidth, internal/nodegroup, ...) see "".
 	obs.SetSink(func(line string) { logger.Print(line) })
+	// Give the test binary a writable default dataDir so components that now persist
+	// node-local state (e.g. the durable MCP rollout state, mcp_rollout_persist.go)
+	// do not fail against the production "/data" default. Tests that need a specific
+	// dataDir still override it via withTempDataDir (which saves/restores this value).
+	if td, err := os.MkdirTemp("", "culvert-test-datadir-"); err == nil {
+		dataDir = td
+		code := m.Run()
+		os.RemoveAll(td)
+		os.Exit(code)
+	}
 	os.Exit(m.Run())
 }

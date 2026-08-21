@@ -87,6 +87,23 @@ func apiStats(w http.ResponseWriter, r *http.Request) {
 		// Persistent request-log health: non-zero means writes are failing
 		// (e.g. disk full) and the on-disk history is incomplete.
 		"logWriteErrors": reqlog.WriteErrors(),
+		// Persistent AUDIT-log health. Non-zero means admin-action entries did
+		// not reach the durable JSONL file (disk full, read-only remount, failed
+		// post-rotation reopen), so the compliance record is incomplete — the
+		// in-memory ring keeps only the newest 500 entries and is wiped on
+		// restart, so this is the only way an operator can see the gap.
+		"auditLogWriteErrors": auditWriteErrors(),
+		// Non-zero means the async JSONL persistence queue saturated: no
+		// entry was lost, but request goroutines waited on the disk.
+		"logBackpressure": reqlog.Backpressure(),
+		// Non-zero means the async PROCESS-log queue (internal/logsink; every
+		// POLICY_ALLOW/BLOCK/DROP line plus general logger.Printf output)
+		// saturated: no line was lost, but the caller waited for queue room.
+		// A distinct subsystem from logBackpressure above (request-log JSONL
+		// persistence) — previously visible only via the culvert_logsink_
+		// backpressure_total Prometheus metric, invisible to an operator
+		// without a metrics scraper wired up.
+		"processLogBackpressure": logSinkBackpressure(),
 		// Audit/request-log persistence state: if the operator configured a
 		// file path but the engine could not open it at startup (bad
 		// permissions, missing directory, full disk), both silently fall
@@ -665,6 +682,17 @@ func apiConfigExport(w http.ResponseWriter, r *http.Request) {
 		b.CategoryGroups = globalCategoryGroups.List()
 		b.DecryptionProfiles = globalDecryptionProfiles.List()
 		b.ContentScanBypassHosts = dpiScanner.BypassHosts()
+		// SaaS signed category-feed CONFIGURATION + overrides (F3a-2). Exported as
+		// configuration only — never the node-local runtime/activation/floor state,
+		// which is off every surface by construction (no configBackup binding). The
+		// URL/protocol are captured RESOLVED (always non-empty), so a same-version
+		// round-trip restores them exactly; a pre-F3a-2 backup lacks these fields.
+		b.SaaSFeedManaged = captureSaaSFeedManaged()
+		b.SaaSFeedEnabled = captureSaaSFeedEnabled()
+		b.SaaSFeedURL = captureSaaSFeedURL()
+		b.SaaSFeedProtocol = captureSaaSFeedProtocol()
+		b.SaaSFeedRefreshSeconds = getSaaSFeedDurable().RefreshSeconds
+		b.CategoryOverrides = captureCategoryOverrides()
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -763,6 +791,19 @@ func buildImportPreview(b *configBackup, replaceMode bool) ([]importPreviewSecti
 	add("Category Groups", len(b.CategoryGroups), len(globalCategoryGroups.List()), taxonomyNote)
 	add("Decryption Profiles", len(b.DecryptionProfiles), len(globalDecryptionProfiles.List()), taxonomyNote)
 
+	// Category overrides (F3a-2): mirror importCategoryOverrides — an empty/absent
+	// set skips (import never wipes), a populated set merges (upsert by host) or
+	// replaces. add()'s incoming==0 guard matches the never-wipe apply semantics.
+	ovInc := 0
+	if b.CategoryOverrides != nil {
+		ovInc = categoryOverridesCount(*b.CategoryOverrides)
+	}
+	ovCur := 0
+	if cur := captureCategoryOverrides(); cur != nil {
+		ovCur = categoryOverridesCount(*cur)
+	}
+	add("Category Overrides", ovInc, ovCur, taxonomyNote)
+
 	add("Rewrite Rules", len(b.RewriteRules), len(rewriter.List()), "")
 	add("SSL Bypass", len(b.SSLBypass), len(sslBypass.List()), "")
 	add("Content Scan Patterns", len(b.ContentScanPatterns), len(dpiScanner.List()), "")
@@ -822,6 +863,26 @@ func buildImportSettingsPreview(b *configBackup) []importPreviewSetting {
 			state = "enabled"
 		}
 		setting("Connection Limit", fmt.Sprintf("%d per IP (%s)", b.ConnLimitMaxPerIP, state))
+	}
+	// SaaS feed config (F3a-2): gated on SaaSFeedProtocol != "" to mirror
+	// importSaaSFeedConfig's apply gate exactly — a pre-extension backup (protocol
+	// absent) applies nothing, so the preview must report nothing.
+	if b.SaaSFeedProtocol != "" {
+		mgmt := "unmanaged"
+		if b.SaaSFeedManaged {
+			mgmt = "managed"
+		}
+		state := "disabled"
+		if b.SaaSFeedEnabled {
+			state = "enabled"
+		}
+		setting("SaaS Feed", fmt.Sprintf("%s, %s (%s)", mgmt, state, b.SaaSFeedProtocol))
+		if b.SaaSFeedURL != "" {
+			setting("SaaS Feed URL", b.SaaSFeedURL)
+		}
+		if b.SaaSFeedRefreshSeconds != 0 {
+			setting("SaaS Feed Refresh", fmt.Sprintf("%ds", b.SaaSFeedRefreshSeconds))
+		}
 	}
 	return settings
 }
@@ -939,6 +1000,21 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// SaaS feed config (F3a-2). A managed Data Plane node must not import
+	// CP-authoritative feed policy locally — reject the whole import with a
+	// deterministic error before any mutation. And strict-validate the incoming
+	// feed config through the F3a-1 boundary (reject legacy/unsupported protocol or
+	// URL, and any invalid override) so a bad backup is refused whole, never
+	// partially applied.
+	if backupCarriesSaaSFeed(&b) && isManagedDataPlane() {
+		http.Error(w, "saas feed config is control-plane managed on a data-plane node; import it on the control plane", http.StatusConflict)
+		return
+	}
+	if err := validateSaaSFeedImport(&b); err != nil {
+		http.Error(w, "invalid saas feed config: "+sanitizeLog(err.Error()), http.StatusBadRequest)
+		return
+	}
+
 	// PAC pre-validation (before ANY store mutation): strictly validate the
 	// IMPORTED PAC fields themselves so a malformed backup is rejected whole
 	// with actionable errors instead of silently importing junk. Pre-existing
@@ -968,6 +1044,11 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	// applyConfigBackup's leaf-first dependency order (rules reference groups,
 	// groups reference categories by name).
 	importCategoryTaxonomy(&b, replaceMode)
+
+	// Category overrides (F3a-2) — leaf-first, before policy rules. Import never
+	// wipes: an absent/empty override set skips in both modes (an explicit clear is
+	// a rollback-only capability). Pre-validated above.
+	importCategoryOverrides(&b, replaceMode)
 
 	// Policy rules — replace or upsert-by-identity (extracted to keep the
 	// handler under the nestif complexity threshold).
@@ -1110,6 +1191,11 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 			connLimiter.Disable()
 		}
 	}
+
+	// SaaS feed config (F3a-2). Never-wipe: applied only when the backup carries it
+	// (SaaSFeedProtocol set). Pre-validated above; publishes to the durable holder
+	// only (persisted by adminSettingsSave below) — no downloader/legacy syncer.
+	importSaaSFeedConfig(&b)
 
 	importMode := "merge"
 	if replaceMode {
@@ -1414,8 +1500,21 @@ func apiUIAllowIPs(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// syslogConfigured tracks whether syslog was initialised so the UI can reflect it.
+// syslogConfigured tracks whether syslog was initialised SUCCESSFULLY so the UI
+// can reflect it AND so admin_settings persistence only re-saves a working addr
+// (see admin_settings.go:447 — never persist a connect-failed target).
 var syslogConfigured string // the addr string, empty = not configured
+
+// syslogConfiguredAddr records the operator-configured syslog/SIEM target
+// regardless of whether InitSyslog actually connected (mirrors
+// auditLogConfiguredPath). buildOperatorContract's checkSyslogFeed compares
+// it against the live globalSyslog handle so the Diagnostics panel can tell an
+// intentional "no SIEM feed" apart from a configured feed that silently failed
+// to connect at startup — the latter previously left only one startup log line
+// as signal while the /api/syslog readback reported the feed as "not
+// configured". Kept in sync at both startup paths (loadObservability,
+// applyAdminServices) and the runtime API (apiSyslogConfig enable/disable).
+var syslogConfiguredAddr string
 
 // auditLogConfiguredPath / requestLogConfiguredPath record the operator-
 // configured persistent-log path (set in loadObservability regardless of
@@ -1440,12 +1539,19 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		format := "rfc3164"
-		var drops uint64
+		var drops, panics uint64
 		if globalSyslog != nil {
 			format = globalSyslog.Format()
+			// Read panics before drops: deliverGuarded's recover branch always
+			// increments panics first, then drops (independent atomics, no
+			// combined snapshot). Reading in the same order means a report can
+			// only ever lag panics behind drops, never the reverse — so the
+			// UI's `drops > 0` gate can never hide a real panic behind a
+			// stale-looking drops==0.
+			panics = globalSyslog.Panics()
 			drops = globalSyslog.Drops()
 		}
-		jsonOK(w, map[string]any{"addr": syslogConfigured, "format": format, "drops": drops})
+		jsonOK(w, map[string]any{"addr": syslogConfigured, "format": format, "drops": drops, "panics": panics})
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {
 			return
@@ -1471,6 +1577,7 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 				globalSyslog = nil
 			}
 			syslogConfigured = ""
+			syslogConfiguredAddr = ""
 			auditEvent(r, "settings.syslog", "disabled", "")
 			adminSettingsSave()
 			jsonOK(w, map[string]any{"ok": true, "addr": "", "format": "rfc3164"})
@@ -1481,6 +1588,7 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		syslogConfigured = body.Addr
+		syslogConfiguredAddr = body.Addr
 		auditEvent(r, "settings.syslog", body.Addr, "syslog forwarding enabled (format="+globalSyslog.Format()+")")
 		adminSettingsSave()
 		jsonOK(w, map[string]any{"ok": true, "addr": body.Addr, "format": globalSyslog.Format()})
@@ -1759,9 +1867,10 @@ func apiConnLimit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		jsonOK(w, map[string]any{
-			"enabled":   connLimiter.Enabled(),
-			"maxPerIP":  connLimiter.MaxPerIP(),
-			"activeIPs": connLimiter.ActiveIPs(),
+			"enabled":       connLimiter.Enabled(),
+			"maxPerIP":      connLimiter.MaxPerIP(),
+			"activeIPs":     connLimiter.ActiveIPs(),
+			"rejectedTotal": connLimiter.Rejected(),
 		})
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {

@@ -9,11 +9,13 @@
 #   - clamav  — the real image downloads ~250 MB of virus signatures on first
 #               boot (slow, memory-hungry, 300s start_period).
 #
-# We replace it with a tiny always-up busybox so the proxy's start-order
-# `depends_on` is satisfied, and disable its healthcheck so
-# `docker compose up --wait` only gates on the proxy becoming healthy. The proxy
-# itself is the REAL `culvert/proxy:pinned` image, started by the REAL compose
-# definition via the REAL installer — only the orthogonal sidecars are stubbed.
+# We replace it with a tiny always-up busybox with a trivial always-pass
+# healthcheck, so the base file's `depends_on: clamav: condition:
+# service_healthy` (which gates real deployments on the real ClamAV signature
+# download) is satisfied almost immediately here instead of waiting on a
+# healthcheck that was never going to run. The proxy itself is the REAL
+# `culvert/proxy:pinned` image, started by the REAL compose definition via the
+# REAL installer — only the orthogonal sidecars are stubbed.
 #
 # The proxy tolerates an unreachable ClamAV at runtime (per-request retry) and a
 # missing GeoIP DB at startup (logged, GeoIP disabled), so /health and /ready
@@ -23,7 +25,11 @@ services:
     image: busybox:stable
     command: ["sleep", "infinity"]
     healthcheck:
-      disable: true
+      test: ["CMD-SHELL", "true"]
+      interval: 5s
+      timeout: 3s
+      retries: 1
+      start_period: 0s
 
   # Give `docker compose up --wait` a little boot margin: the base proxy
   # healthcheck has no start_period, so the first probe lands ~30s after start.

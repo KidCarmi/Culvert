@@ -287,7 +287,11 @@ func startLogStoreRetention(ctx context.Context, s *logStore, interval time.Dura
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				runDiskGuard(s)
+				// CHAOS-24: contain the ROUND. This janitor is the only thing
+				// enforcing the size cap and the disk-protection threshold, so
+				// a dead loop fills the volume — which then takes down every
+				// other durable writer on the box.
+				runGuarded("logstore_retention", func() { runDiskGuard(s) })
 			}
 		}
 	}()

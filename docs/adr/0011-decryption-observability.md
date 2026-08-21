@@ -416,3 +416,5 @@ corrections below are recorded here and are binding on the slices that implement
 - ADR-0008 / ADR-0009 (autoexclude security semantics — unchanged), ADR-0010 / F9a (#741 / #740 — tunables
   on the same subsystem).
 - The `auth_*` SIEM block on `logstore.Entry` — the in-tree precedent this pattern extends.
+- `docs/operator/traffic-log-destination-privacy.md` — the operator runbook for the §4
+  destination-privacy posture (enabling, key rotation, cluster behavior, troubleshooting).

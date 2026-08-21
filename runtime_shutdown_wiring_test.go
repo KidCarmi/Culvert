@@ -48,6 +48,8 @@ var canonicalLateShutdownHooks = []struct {
 }{
 	{"cluster-store-flush", shutdownOrderClusterStoreFlush},
 	{"scan-svc-shutdown", shutdownOrderScanSvcShutdown},
+	{"mcp-runtime-stop", shutdownOrderMCPRuntimeStop},
+	{"mcp-telemetry-drain", shutdownOrderMCPTelemetryDrain},
 	{"admin-ui-shutdown", shutdownOrderAdminUIShutdown},
 	{"socks5-listener-stop", shutdownOrderSOCKS5ListenerStop},
 	{"proxy-server-shutdown", shutdownOrderProxyServerShutdown},
