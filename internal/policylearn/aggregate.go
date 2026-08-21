@@ -303,7 +303,7 @@ func (c *Cell) DistinctSubjects() int { return len(c.Subjects) }
 func CellKey(scope, category string) string { return scope + cellKeySep + category }
 
 // SplitCellKey returns (scope, category).
-func SplitCellKey(key string) (string, string) {
+func SplitCellKey(key string) (scope, category string) {
 	if i := strings.IndexByte(key, 0x1f); i >= 0 {
 		return key[:i], key[i+1:]
 	}

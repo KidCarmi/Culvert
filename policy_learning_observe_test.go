@@ -209,7 +209,7 @@ func TestObservationE2E_CONNECTTunnel(t *testing.T) {
 	}
 	defer conn.Close()
 	target := ln.Addr().String()
-	fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target) //nolint:errcheck
+	fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target) //nolint:errcheck // test conn write; failure surfaces on the read below
 	line, err := bufio.NewReader(conn).ReadString('\n')
 	if err != nil || !containsHTTP200(line) {
 		t.Fatalf("CONNECT: %q %v", line, err)

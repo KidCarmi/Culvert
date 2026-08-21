@@ -111,9 +111,9 @@ func BenchmarkPerfQual_ProxyHTTPForward(b *testing.B) {
 			defer teardown()
 
 			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				io.Copy(io.Discard, r.Body) //nolint:errcheck
+				io.Copy(io.Discard, r.Body) //nolint:errcheck // bench backend body drain; best-effort
 				w.WriteHeader(http.StatusOK)
-				fmt.Fprint(w, "ok") //nolint:errcheck
+				fmt.Fprint(w, "ok") //nolint:errcheck // bench backend response write; best-effort
 			}))
 			defer backend.Close()
 
