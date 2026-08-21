@@ -897,7 +897,9 @@ func authSelectProvider(w http.ResponseWriter, r *http.Request) {
 	// Optional providers= filter (Phase 3 Slice 4) scopes the selection to a set
 	// of bare IdP profile IDs (used by an SSORequired rule's providerRefs); absent
 	// → all enabled providers (backward-compatible; Default flow unaffected).
-	providers := filterProvidersByID(idpRegistry.EnabledProviders(), r.URL.Query().Get("providers"))
+	// INTERACTIVE providers only (ADR-0025): the sign-in selector must never
+	// offer a credential-only provider (LDAP) — it has no browser flow.
+	providers := filterProvidersByID(idpRegistry.EnabledInteractiveProviders(), r.URL.Query().Get("providers"))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprintf(w, `<!DOCTYPE html><html><head>
 <meta charset="utf-8"><title>Culvert — Sign In</title>

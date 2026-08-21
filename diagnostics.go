@@ -1179,11 +1179,12 @@ func hasCredentialCapableProvider() bool {
 			return true
 		}
 	}
-	// HasEnabledOIDC reads the profiles in place. This probe runs on EVERY
+	// HasEnabledCredentialProvider reads the profiles in place (OIDC or LDAP —
+	// the CREDENTIAL-capable types, ADR-0025). This probe runs on EVERY
 	// proxied request (resolveRequestAuth's credCapable), and the previous
 	// idpRegistry.All() loop deep-cloned every profile per call just to
 	// answer this boolean — pure per-request allocation on the hot path.
-	return idpRegistry != nil && idpRegistry.HasEnabledOIDC()
+	return idpRegistry != nil && idpRegistry.HasEnabledCredentialProvider()
 }
 
 // exemptRiskBuckets collects offending exempt-rule names per risk category.

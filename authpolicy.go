@@ -258,7 +258,7 @@ const authSourceExempt = "exempt"
 //	system — reserved for internal/system-originated traffic (future)
 //
 // IdP profile IDs and names must never collide with these: provider Name()
-// values are "oidc:<ID>"/"saml:<ID>" and matchAuthSource strips those prefixes
+// values are "oidc:<ID>"/"saml:<ID>"/"ldap:<ID>" and matchAuthSource strips those prefixes
 // (stripIdPPrefix), while OIDC/SAML sessions carry the bare profile ID as
 // Identity.Provider — so a profile ID or name equal to a reserved word would
 // make authSource-scoped access rules ambiguous (e.g. a rule targeting
@@ -975,8 +975,8 @@ func validateSSOProviderRefsLive(spec *AuthRuleSpec) error {
 			return fmt.Errorf("providerRef %q does not match any configured IdP profile", id)
 		case !p.Enabled:
 			return fmt.Errorf("providerRef %q references a disabled IdP profile", id)
-		case p.Type != IdPTypeOIDC && p.Type != IdPTypeSAML:
-			return fmt.Errorf("providerRef %q is not an interactive (OIDC or SAML) IdP", id)
+		case !p.Type.Interactive():
+			return fmt.Errorf("providerRef %q is not an interactive (OIDC or SAML) IdP — LDAP is credential-only and can never satisfy SSORequired", id)
 		}
 	}
 	return nil

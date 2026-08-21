@@ -19,7 +19,36 @@ type IdPType string
 const (
 	IdPTypeOIDC IdPType = "oidc"
 	IdPTypeSAML IdPType = "saml"
+	IdPTypeLDAP IdPType = "ldap"
 )
+
+// ─── Provider capability model (ADR-0025) ────────────────────────────────────
+//
+// Capabilities are a pure function of the IdP type, declared ONCE here and
+// consumed by every SSO/credential predicate. Before LDAP joined the registry,
+// "enabled registry profile" and "interactive SSO provider" were the same set,
+// and several per-request predicates leaned on that coincidence
+// (ssoCapable := HasEnabledProviders(), credCapable via HasEnabledOIDC()).
+// With a non-interactive, credential-capable type in the registry those
+// equations are wrong in both directions, so security decisions must go
+// through these capability predicates — never through raw type switches
+// scattered across the proxy.
+
+// Interactive reports whether providers of this type can drive a browser SSO
+// flow (captive portal / IdP selector / SSORequired). LDAP is deliberately
+// NEVER interactive: it must not appear on the SSO selector, mint captive
+// login URLs, count toward ssoCapable, or satisfy an SSORequired providerRef.
+func (t IdPType) Interactive() bool {
+	return t == IdPTypeOIDC || t == IdPTypeSAML
+}
+
+// CredentialCapable reports whether providers of this type can validate a
+// PRESENTED Basic credential (proxy username/password or token). SAML is
+// browser-only and excluded — counting it would re-open the identity-spoofing
+// hazard documented at resolveRequestAuth's credCapable predicate.
+func (t IdPType) CredentialCapable() bool {
+	return t == IdPTypeOIDC || t == IdPTypeLDAP
+}
 
 // IdPProfile is the persistent configuration for one identity provider.
 // Profiles are stored in a JSON file (idp_profiles.json) and managed
@@ -38,9 +67,10 @@ type IdPProfile struct {
 	// the authoritative source.
 	KnownGroups []string `json:"knownGroups,omitempty"`
 
-	// Only one of OIDC/SAML is populated depending on Type.
+	// Only one of OIDC/SAML/LDAP is populated depending on Type.
 	OIDC *OIDCProfileConfig `json:"oidc,omitempty"`
 	SAML *SAMLProfileConfig `json:"saml,omitempty"`
+	LDAP *LDAPProfileConfig `json:"ldap,omitempty"`
 }
 
 // OIDCProfileConfig holds OIDC-specific settings for an IdP profile.
@@ -218,8 +248,8 @@ func validateUpsertProfile(p *IdPProfile) error {
 	if err := validateReservedIdPNaming(p); err != nil {
 		return err
 	}
-	if p.Type != IdPTypeOIDC && p.Type != IdPTypeSAML {
-		return fmt.Errorf("idp: type must be 'oidc' or 'saml'")
+	if p.Type != IdPTypeOIDC && p.Type != IdPTypeSAML && p.Type != IdPTypeLDAP {
+		return fmt.Errorf("idp: type must be 'oidc', 'saml', or 'ldap'")
 	}
 	// Security: validate issuer/metadata URLs before compiling.
 	if p.Type == IdPTypeOIDC && p.OIDC != nil {
@@ -230,6 +260,11 @@ func validateUpsertProfile(p *IdPProfile) error {
 	if p.Type == IdPTypeSAML {
 		if err := validateSAMLProfileConfig(p.SAML); err != nil {
 			return fmt.Errorf("idp saml: %w", err)
+		}
+	}
+	if p.Type == IdPTypeLDAP {
+		if err := validateLDAPProfileConfig(p.LDAP); err != nil {
+			return fmt.Errorf("idp ldap: %w", err)
 		}
 	}
 	return nil
@@ -310,6 +345,11 @@ func compileIdPProfile(p *IdPProfile) (IdentityProvider, error) {
 			return nil, fmt.Errorf("saml profile missing saml config")
 		}
 		return NewSAMLProvider(p)
+	case IdPTypeLDAP:
+		if p.LDAP == nil {
+			return nil, fmt.Errorf("ldap profile missing ldap config")
+		}
+		return NewLDAPIdPProvider(p)
 	default:
 		return nil, fmt.Errorf("unknown IdP type %q", p.Type)
 	}
@@ -409,8 +449,8 @@ func validateIdPProfile(p *IdPProfile) error {
 	if err := validateReservedIdPNaming(p); err != nil {
 		return err
 	}
-	if p.Type != IdPTypeOIDC && p.Type != IdPTypeSAML {
-		return fmt.Errorf("idp: type must be 'oidc' or 'saml'")
+	if p.Type != IdPTypeOIDC && p.Type != IdPTypeSAML && p.Type != IdPTypeLDAP {
+		return fmt.Errorf("idp: type must be 'oidc', 'saml', or 'ldap'")
 	}
 	if p.Type == IdPTypeOIDC {
 		if p.OIDC == nil {
@@ -423,6 +463,11 @@ func validateIdPProfile(p *IdPProfile) error {
 	if p.Type == IdPTypeSAML {
 		if err := validateSAMLProfileConfig(p.SAML); err != nil {
 			return fmt.Errorf("idp saml: %w", err)
+		}
+	}
+	if p.Type == IdPTypeLDAP {
+		if err := validateLDAPProfileConfig(p.LDAP); err != nil {
+			return fmt.Errorf("idp ldap: %w", err)
 		}
 	}
 	return nil
@@ -446,6 +491,10 @@ func cloneIdPProfiles(profiles []*IdPProfile) []*IdPProfile {
 		if p.SAML != nil {
 			saml := *p.SAML
 			cp.SAML = &saml
+		}
+		if p.LDAP != nil {
+			ldap := *p.LDAP
+			cp.LDAP = &ldap
 		}
 		out = append(out, &cp)
 	}
@@ -473,6 +522,15 @@ func publicIdPProfile(p *IdPProfile) *IdPProfile {
 		saml.MetadataXML = ""
 		cp.SAML = &saml
 	}
+	if p.LDAP != nil {
+		ldap := *p.LDAP
+		// The bind credential is a write-only API input (same containment as
+		// the OIDC client secret): blanked in every read/audit projection.
+		// Read surfaces expose only the BindCredentialConfigured metadata bit.
+		ldap.BindPassword = ""
+		ldap.BindCredentialConfigured = p.LDAP.BindPassword != ""
+		cp.LDAP = &ldap
+	}
 	return &cp
 }
 
@@ -489,13 +547,16 @@ func publicIdPProfiles(profiles []*IdPProfile) []*IdPProfile {
 // RouteByDomain returns the enabled provider whose email domain matches.
 // When multiple providers match the same domain, the one with the lowest
 // Priority value wins (0 is treated as default = max int for sorting).
+// Only INTERACTIVE providers are eligible: RouteByDomain exists to pick the
+// browser-SSO destination for a captive redirect, and a non-interactive type
+// (LDAP) can never fulfil one — matching it would swallow the redirect.
 func (r *IdPRegistry) RouteByDomain(domain string) IdentityProvider {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	var bestProfile *IdPProfile
 	var bestProv IdentityProvider
 	for _, p := range r.profiles {
-		if !p.Enabled {
+		if !p.Enabled || !p.Type.Interactive() {
 			continue
 		}
 		for _, d := range p.EmailDomains {
@@ -563,6 +624,81 @@ func (r *IdPRegistry) HasEnabledProviders() bool {
 			if _, ok := r.live[p.ID]; ok {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// EnabledInteractiveProviders returns the live providers that can drive a
+// browser SSO flow (OIDC/SAML), in profile order. This is the ONLY accessor
+// interactive surfaces (captive portal, /auth/select) may iterate — a
+// non-interactive provider (LDAP) must never be offered a browser flow.
+func (r *IdPRegistry) EnabledInteractiveProviders() []IdentityProvider {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var out []IdentityProvider
+	for _, p := range r.profiles {
+		if p != nil && p.Enabled && p.Type.Interactive() {
+			if prov, ok := r.live[p.ID]; ok {
+				out = append(out, prov)
+			}
+		}
+	}
+	return out
+}
+
+// EnabledCredentialProviders returns the live providers that can validate a
+// PRESENTED Basic credential (OIDC introspection, LDAP bind), in profile
+// order. The proxy's Basic-auth arm iterates this — not EnabledProviders — so
+// browser-only providers are structurally excluded from credential
+// validation rather than relying on their ResolveIdentity returning false.
+func (r *IdPRegistry) EnabledCredentialProviders() []IdentityProvider {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var out []IdentityProvider
+	for _, p := range r.profiles {
+		if p != nil && p.Enabled && p.Type.CredentialCapable() {
+			if prov, ok := r.live[p.ID]; ok {
+				out = append(out, prov)
+			}
+		}
+	}
+	return out
+}
+
+// HasEnabledInteractiveProvider is the allocation-free boolean probe behind
+// resolveRequestAuth's per-request ssoCapable predicate: at least one enabled
+// profile of an INTERACTIVE type (OIDC/SAML) with a live compiled provider.
+// Before ADR-0025 this was HasEnabledProviders — correct only while every
+// registry type was interactive; an enabled LDAP profile must NOT make the
+// proxy advertise an SSO/captive flow it can never fulfil.
+// Allocation-free (pinned by the benchgate).
+func (r *IdPRegistry) HasEnabledInteractiveProvider() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, p := range r.profiles {
+		if p != nil && p.Enabled && p.Type.Interactive() {
+			if _, ok := r.live[p.ID]; ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// HasEnabledCredentialProvider is the allocation-free boolean probe behind
+// hasCredentialCapableProvider's registry term (resolveRequestAuth's
+// credCapable, per request): at least one enabled profile of a
+// CREDENTIAL-CAPABLE type (OIDC/LDAP). Like HasEnabledOIDC before it, this is
+// deliberately profile-level and NOT gated on a live compiled instance — a
+// compile failure must not silently flip the deployment into the no-backend
+// inert path. Allocation-free (pinned by the benchgate).
+func (r *IdPRegistry) HasEnabledCredentialProvider() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, p := range r.profiles {
+		if p != nil && p.Enabled && p.Type.CredentialCapable() {
+			return true
 		}
 	}
 	return false
