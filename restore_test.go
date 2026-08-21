@@ -537,6 +537,26 @@ func makeBackupWithRealCA(t *testing.T, users []uiUserRecord, enrolledNodes int)
 	return out, caFP
 }
 
+// makeBackupWithoutCA packs a backup from a dataDir that never had a
+// cluster CA — a legitimate state (cluster-ca.crt/.key are
+// OptionalFirstRun in backup.go, e.g. a backup taken before HA/clustering
+// was ever enabled on that node). Returns the tarball path.
+func makeBackupWithoutCA(t *testing.T, users []uiUserRecord) string {
+	t.Helper()
+	dataDir := t.TempDir()
+
+	env := uiUsersFileEnvelope{Users: users}
+	body, _ := json.Marshal(env)
+	seedFile(t, dataDir, "ui_users.json", body, 0o600)
+	seedFile(t, dataDir, "cluster.json", []byte(`{"nodes":{}}`), 0o600)
+
+	out := filepath.Join(t.TempDir(), "backup.tar.gz")
+	if err := runBackup(out, dataDir); err != nil {
+		t.Fatalf("backup: %v", err)
+	}
+	return out
+}
+
 // seedCurrentDataDir writes a minimal current /data with optional
 // cluster CA, ui_users, and enrolled nodes — used for analyzer tests
 // that compare backup state to current state.
@@ -1045,6 +1065,72 @@ func TestRestoreCommit_DPGuard_AllowsWithFlag(t *testing.T) {
 	}
 	if _, ok := readBak(t, currentDir); !ok {
 		t.Error(".bak should exist after successful commit")
+	}
+}
+
+// ── 28b. DP guard fires when the backup has NO cluster CA at all ────
+//
+// analyzeCommit's CA-fingerprint-delta computation previously required
+// BOTH a.CurrentCAFingerprint and a.RestoredCAFingerprint to be non-empty
+// before considering the CA "changed". restoredCAFingerprint legitimately
+// returns "" whenever the restore mode pulls the CA from the tarball
+// (full/trust-root-only) and the tarball simply has no cluster-ca.crt —
+// a real state for a backup taken before a cluster CA ever existed. That
+// made "current CA present, restored CA absent" register as UNCHANGED,
+// so the DP re-enrollment guard never fired even though committing would
+// remove the cluster CA (staged from neither the tarball nor preserved
+// from current, since the mode routes it to "from tarball") while DPs
+// were enrolled against it — a silent, unrecoverable loss of the CA
+// private key with no flag required and no warning.
+func TestRestoreCommit_DPGuard_BlocksWhenBackupHasNoCA(t *testing.T) {
+	src := makeBackupWithoutCA(t, []uiUserRecord{{Username: "alice", Role: RoleAdmin}})
+	currentDir := seedCurrentDataDir(t, true,
+		[]uiUserRecord{{Username: "bob", Role: RoleAdmin}}, 2) // 2 enrolled DPs
+	preCASha := fileSHA(t, filepath.Join(currentDir, "cluster-ca.crt"))
+
+	_, err := captureStdout(t, func() error {
+		return runRestoreCommit(src, currentDir, "", commitOptsFull())
+	})
+	if err == nil {
+		t.Fatal("expected DP guard error: restoring a CA-less backup over a live CA with enrolled DPs must not proceed silently")
+	}
+	if !strings.Contains(err.Error(), "--accept-dp-reenrollment") {
+		t.Errorf("error should name the required flag, got: %v", err)
+	}
+
+	if fileSHA(t, filepath.Join(currentDir, "cluster-ca.crt")) != preCASha {
+		t.Error("/data should be untouched (CA must not be silently removed) when DP guard fires")
+	}
+	if _, ok := readBak(t, currentDir); ok {
+		t.Error(".bak should not exist when DP guard fires")
+	}
+	if stagingExists(t, currentDir) {
+		t.Error("staging should not exist when DP guard fires")
+	}
+}
+
+// TestRestore_DryRun_ModeFull_MissingBackupCA_DoesNotClaimUnchanged pins the
+// dry-run summary side of the same defect: printRestoreSummary's "Restored:
+// (none would be present)" line must not be immediately followed by
+// "CA fingerprint unchanged." — the two are contradictory, and an operator
+// skimming the summary could reasonably read "unchanged" as "safe to
+// proceed" for what is actually a full CA removal.
+func TestRestore_DryRun_ModeFull_MissingBackupCA_DoesNotClaimUnchanged(t *testing.T) {
+	src := makeBackupWithoutCA(t, []uiUserRecord{{Username: "alice", Role: RoleAdmin}})
+	currentDir := seedCurrentDataDir(t, true,
+		[]uiUserRecord{{Username: "bob", Role: RoleAdmin}}, 1)
+
+	out, err := captureStdout(t, func() error {
+		return runRestoreDryRun(src, currentDir, "", restoreOpts{Mode: modeFull})
+	})
+	if err != nil {
+		t.Fatalf("dry-run: %v", err)
+	}
+	if strings.Contains(out, "CA fingerprint unchanged") {
+		t.Errorf("removing the current cluster CA must not be reported as unchanged, got:\n%s", out)
+	}
+	if !strings.Contains(out, "DP re-enrollment required") {
+		t.Errorf("expected the DP re-enrollment warning, got:\n%s", out)
 	}
 }
 

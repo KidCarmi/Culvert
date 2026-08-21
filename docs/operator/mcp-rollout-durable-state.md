@@ -81,13 +81,21 @@ is restored:
 - When a valid trust store is present, the Gateway and Management appliers are composed
   as physically isolated engines with their own durable state under
   `<dataDir>/mcp_distribution/`, recovered at startup, then reconciled against the
-  rollout state.
+  rollout state. The reconcile completes **before** the appliers become reachable by the
+  config-apply path, so a config snapshot pulled during startup can never have its
+  rollout commit overwritten by the startup reconcile replaying older recovered state.
+- Provisioning these PUBLIC verification roots is a *consuming* capability only. It does
+  not arm this node to publish MCP envelopes: the control-plane capture path is armed
+  solely by a real CP publication and is reported separately as `cp_publication` on
+  `GET /api/mcp/distribution`.
 - Applying a signed envelope is one transaction. An executing target mode with the
   guarded-execution plane not composed, or a capability-mismatched rollout, is rejected
   before the distribution is ever activated, so no applied acknowledgement is produced
   and no distribution-versus-rollout split is left behind. If the rollout commit fails
   after the distribution activated (a rollout-state persistence failure), the
-  distribution activation is reverted and the acknowledgement becomes a rejection. The
+  distribution activation is reverted and the acknowledgement becomes a rejection. That
+  compensation is bound to the content hash of the envelope being aborted and is refused
+  if anything else is active, so it can never roll back an unrelated newer snapshot. The
   effective composition state (`dp_composed`, `dp_compose_reason`, PUBLIC
   `dp_trust_key_ids`) is surfaced read-only on `GET /api/mcp/distribution`.
 

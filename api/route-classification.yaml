@@ -1512,6 +1512,36 @@ routes:
     audit_expected: false
     danger_level: medium
     documented: true
+  - route: "/api/idp/test"
+    method: "POST"
+    handler: "apiIdPTest"
+    domain: "auth"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: true
+    audit_expected: true
+    danger_level: low
+    documented: true
+  - route: "/api/idp/legacy-ldap"
+    method: "GET"
+    handler: "apiIdPLegacyLDAP"
+    domain: "auth"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
+  - route: "/api/idp/legacy-ldap/import"
+    method: "POST"
+    handler: "apiIdPLegacyLDAPImport"
+    domain: "auth"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: true
+    audit_expected: true
+    danger_level: medium
+    documented: true
   - route: "/api/logger"
     method: "GET"
     handler: "apiLoggerConfig"

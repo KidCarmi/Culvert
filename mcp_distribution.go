@@ -7,7 +7,6 @@ import (
 
 	"github.com/KidCarmi/Culvert/internal/mcp/cpdp"
 	"github.com/KidCarmi/Culvert/internal/mcp/cpdp/apply"
-	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 )
 
 // mcpDistribution holds the node-local MCP CP→DP signed-snapshot distribution
@@ -21,7 +20,18 @@ import (
 // logic lives in internal/mcp/cpdp{,/apply,/publication}. No signing or validation
 // logic is inlined here.
 type mcpDistribution struct {
+	// enabled reports that the node-local MCP distribution seam is composed. Today
+	// the only production writer is initMCPDistribution (the DP applier composition),
+	// so it is armed by DP verify-trust provisioning.
 	enabled atomic.Bool
+
+	// cpEnabled arms the CONTROL-PLANE capture path (mcpCaptured*) — i.e. whether a
+	// signed MCP envelope may ride an outbound ConfigSnapshot. It is deliberately
+	// SEPARATE from `enabled`: DP verify-trust provisioning (public keys, a consuming
+	// capability) must never arm a publishing capability. It is set only by
+	// setCPPublished, which is reachable only from the CP publication coordinator
+	// (signer + HA write authority + durable four-eyes commit).
+	cpEnabled atomic.Bool
 
 	mu sync.Mutex
 	// CP side: the currently-published signed envelope per capability, captured into
@@ -48,7 +58,7 @@ var globalMCPDistribution = &mcpDistribution{}
 // outbound ConfigSnapshot, or nil when MCP distribution is disabled/unpublished.
 func mcpCapturedGateway() *cpdp.Envelope {
 	d := globalMCPDistribution
-	if !d.enabled.Load() {
+	if !d.cpEnabled.Load() {
 		return nil
 	}
 	d.mu.Lock()
@@ -59,7 +69,7 @@ func mcpCapturedGateway() *cpdp.Envelope {
 // mcpCapturedManagement mirrors mcpCapturedGateway for the Management capability.
 func mcpCapturedManagement() *cpdp.Envelope {
 	d := globalMCPDistribution
-	if !d.enabled.Load() {
+	if !d.cpEnabled.Load() {
 		return nil
 	}
 	d.mu.Lock()
@@ -81,7 +91,11 @@ func (d *mcpDistribution) setCPPublished(env *cpdp.Envelope) {
 		d.cpGateway = env
 	case cpdp.CapabilityManagement:
 		d.cpManagement = env
+	default:
+		return // unknown capability: never arm the capture path
 	}
+	// A real CP publication is the ONLY thing that arms the outbound capture path.
+	d.cpEnabled.Store(true)
 }
 
 // dpApplierFor returns the DP apply engine for a capability, or nil when this node
@@ -133,6 +147,7 @@ type mcpCapabilityStatus struct {
 func mcpDistributionStatus() map[string]any {
 	d := globalMCPDistribution
 	enabled := d.enabled.Load()
+	cpArmed := d.cpEnabled.Load()
 	d.mu.Lock()
 	gw := capStatus(d.cpGateway)
 	mg := capStatus(d.cpManagement)
@@ -142,7 +157,7 @@ func mcpDistributionStatus() map[string]any {
 	published := d.cpGateway != nil || d.cpManagement != nil
 	d.mu.Unlock()
 	state := "local_only"
-	if enabled && published {
+	if cpArmed && published {
 		state = "pending_distribution"
 	}
 	if reason == "" {
@@ -150,6 +165,7 @@ func mcpDistributionStatus() map[string]any {
 	}
 	return map[string]any{
 		"enabled":            enabled,
+		"cp_publication":     cpArmed, // outbound capture armed only by a real CP publication
 		"distribution_state": state,
 		"gateway":            gw,
 		"management":         mg,
@@ -230,16 +246,23 @@ func applySnapshotMCP(snap ConfigSnapshot) {
 //     AckApplied is delivered and no revision split remains. The rollout state has
 //     already rolled itself back to the prior config (commitRolloutTransition is
 //     atomic). A double persistence fault (compensating write also failing) is logged
-//     and converged at the next restart by reconcileRolloutWithDistribution.
+//     and converged at the next restart by reconcileRolloutWithAppliers.
 func applyMCPCapabilityEnvelope(a *apply.Applier, env *cpdp.Envelope, capb cpdp.Capability) {
 	cfg := rolloutFromEnvelope(env)
 	mgmt := capb == cpdp.CapabilityManagement
 	// (1) Deterministic precondition pre-check, before distribution activation.
 	if cfg != nil {
-		if (cfg.Capability == rollout.CapabilityManagement) != mgmt {
+		if !rolloutCapabilityMatches(cfg, capb) {
 			// Capability isolation: a Gateway envelope must never carry a Management
 			// rollout (or vice versa). Reject WHOLE without staging distribution.
-			_ = a.RejectAck(env, errRolloutPersistFailed)
+			//
+			// The ack's reason code is the CP's only signal about WHY a node nacked,
+			// and this rejection is the exact shape of a capability-confusion attempt
+			// — the one class the Gateway/Management isolation boundary exists to
+			// stop. It must be reported as such: a plain sentinel carries no
+			// mcperr.Reason, so ReasonOf resolves to ReasonNone and the fleet sees an
+			// unclassified rejection it cannot alert on.
+			_ = a.RejectAck(env, errRolloutCapabilityMismatch)
 			logger.Printf("MCP %s snapshot rejected: rollout capability mismatch (distribution not applied)", capb.String())
 			return
 		}
@@ -252,7 +275,7 @@ func applyMCPCapabilityEnvelope(a *apply.Applier, env *cpdp.Envelope, capb cpdp.
 	}
 	// (2) Distribution transaction: verify + persist + activate (Applied ack pending).
 	if _, err := a.Apply(env); err != nil {
-		logger.Printf("MCP %s snapshot rejected (SWG unaffected): %v", capb.String(), sanitizeLog(err.Error()))
+		logger.Printf("MCP %s snapshot rejected (SWG unaffected): %q", capb.String(), sanitizeLog(err.Error()))
 		return
 	}
 	// The envelope carries no rollout change: distribution stands alone (absence is not
@@ -275,12 +298,12 @@ func applyMCPCapabilityEnvelope(a *apply.Applier, env *cpdp.Envelope, capb cpdp.
 		// (4) Compensate: the rollout half was rejected AFTER the distribution half
 		// activated. Revert distribution so the two never diverge and no AckApplied
 		// stands for a rollout the node rejected.
-		if _, aerr := a.AbortApplied(err); aerr != nil {
-			logger.Printf("MCP %s CRITICAL: rollout commit failed AND distribution abort failed; restart reconciliation will converge: rollout=%v abort=%v",
+		if _, aerr := a.AbortApplied(env.ContentHash, err); aerr != nil {
+			logger.Printf("MCP %s CRITICAL: rollout commit failed AND distribution abort failed; restart reconciliation will converge: rollout=%q abort=%q",
 				capb.String(), sanitizeLog(err.Error()), sanitizeLog(aerr.Error()))
 			return
 		}
-		logger.Printf("MCP %s snapshot rejected: rollout commit failed, distribution reverted (no AckApplied): %v",
+		logger.Printf("MCP %s snapshot rejected: rollout commit failed, distribution reverted (no AckApplied): %q",
 			capb.String(), sanitizeLog(err.Error()))
 	}
 }

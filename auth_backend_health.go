@@ -7,7 +7,7 @@ package main
 // authenticates on every request does not re-bind or re-introspect per request.
 // Before this file, every one of their failure branches — TCP dial refused,
 // STARTTLS handshake error, service-account bind failure, search error,
-// introspection transport error, IdP HTTP 5xx, malformed response — collapsed
+// introspection transport error, identity-backend HTTP 5xx, malformed response — collapsed
 // into the same `false` that a genuinely wrong password produces, and that
 // `false` was written into the cache.
 //
@@ -39,7 +39,7 @@ package main
 // magnitude, an evidence-based gauge for "is a backend unreachable right now",
 // a counter for the blast radius (requests denied without a probe), and a
 // rate-limited `identity_backend_unreachable` alert. This also closes the
-// long-standing AU-7 gap — an IdP outage was previously indistinguishable
+// long-standing AU-7 gap — an identity-backend outage was previously indistinguishable
 // from a brute-force spike, because both showed up only as auth failures.
 
 import (

@@ -138,7 +138,7 @@ func ruleReferencesObject(r *PolicyRule, objType, name, objID string) string {
 			}
 			// Only suppress the name check when the ID resolves to a LIVE group.
 			// A DANGLING ID (points at no group) makes the match path fall back
-			// to the name (categoryGroupMatchesHostRule), so the walk must too —
+			// to the name (categoryGroupMatchesHostScratch), so the walk must too —
 			// otherwise a rule enforcing this group by name is invisible here and
 			// the group can be deleted out from under it (walk vs match disagree,
 			// OBJECT-REFERENCES-BY-ID.md §8).

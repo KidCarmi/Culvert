@@ -20,7 +20,11 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"testing"
+
+	"github.com/KidCarmi/Culvert/internal/catgroup"
+	"github.com/KidCarmi/Culvert/internal/urlcat"
 )
 
 // buildPolicyStore returns a store with n non-matching access rules. With a
@@ -157,6 +161,73 @@ func BenchmarkPolicyEvaluate_ScheduledRules(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				if m := ps.Evaluate("203.0.113.7", "", "unauth", "target.example.com", nil); m != nil {
+					b.Fatalf("expected no match (default deny), got rule %q", m.Rule.Name)
+				}
+			}
+		})
+	}
+}
+
+// buildCategoryGroupPolicyStore returns a store with n access rules that each
+// reference a category group and constrain nothing else, so every one of them
+// reaches categoryGroupMatchesHostRule during a scan. That is the shape a
+// category-driven posture actually has ("Marketing → Deny", "AI → Inspect",
+// …): the rules are selected by DESTINATION CATEGORY, not by FQDN, so there is
+// no cheap FQDN test to short-circuit them first.
+func buildCategoryGroupPolicyStore(n int) *PolicyStore {
+	ps := &PolicyStore{}
+	rules := make([]PolicyRule, n)
+	for i := 0; i < n; i++ {
+		rules[i] = PolicyRule{
+			Priority:          i + 1,
+			Name:              fmt.Sprintf("catgroup-rule-%d", i),
+			DestCategoryGroup: fmt.Sprintf("group-%d", i),
+			Action:            ActionBlockPage,
+		}
+	}
+	ps.ReplaceAll(rules)
+	return ps
+}
+
+// BenchmarkPolicyEvaluate_CategoryGroupRules is the end-to-end measure of the
+// host→category resolution that category-group rules depend on.
+//
+// Each such rule calls categoryGroupMatchesHostRule → lookupHostCategory →
+// catStore.LookupHost. That lookup used to scan every host pattern of every
+// category in the taxonomy, so the per-request cost was
+// (rules with a category group) x (patterns in the taxonomy) — on the SHIPPED
+// default taxonomy alone (657 patterns) that measured ~24 us per rule, i.e.
+// hundreds of microseconds of pure CPU inside the request goroutine for an
+// ordinary posture. It is now a bounded probe per host label, independent of
+// taxonomy size; see internal/urlcat.lookupIn.
+//
+// The query host is deliberately UNCATEGORIZED: that is both the clean-traffic
+// case and the worst case, since a miss cannot short-circuit.
+func BenchmarkPolicyEvaluate_CategoryGroupRules(b *testing.B) {
+	origCat, origGroups := catStore, globalCategoryGroups
+	b.Cleanup(func() { catStore, globalCategoryGroups = origCat, origGroups })
+
+	// The shipped default taxonomy — what a fresh install evaluates against.
+	catStore = newCategoryStore(urlcat.DefaultEntries())
+	catStore.SetPathForTest(filepath.Join(b.TempDir(), "categories.json"))
+
+	for _, n := range []int{1, 5, 20} {
+		globalCategoryGroups = catgroup.New()
+		groups := make([]CategoryGroup, n)
+		for i := 0; i < n; i++ {
+			groups[i] = CategoryGroup{
+				Name:       fmt.Sprintf("group-%d", i),
+				Categories: []string{"Streaming", "Gambling"},
+			}
+		}
+		globalCategoryGroups.ReplaceAll(groups)
+
+		ps := buildCategoryGroupPolicyStore(n)
+		b.Run(fmt.Sprintf("rules=%d", n), func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if m := ps.Evaluate("203.0.113.7", "", "unauth", "uncategorized.example.invalid", nil); m != nil {
 					b.Fatalf("expected no match (default deny), got rule %q", m.Rule.Name)
 				}
 			}

@@ -24,6 +24,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -86,6 +87,22 @@ func registerBackupsRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/backups", apiBackups)
 }
 
+// backupsCache single-flights and briefly caches the agent listing. Every
+// call below makes the maintenance agent spawn a `docker compose run --rm
+// cli` container, and securityMiddleware rate-limits only mutating methods —
+// so without this, any authenticated viewer holding refresh could spawn
+// unbounded containers on the host (review P1). One fetch at a time (the
+// mutex is held across the fetch: concurrent callers wait, then read the
+// fresh result), and results — including failures, which would otherwise
+// hammer a down agent — are served from cache inside the TTL.
+var backupsCache struct {
+	mu      sync.Mutex
+	at      time.Time
+	payload map[string]any
+}
+
+const backupsCacheTTL = 15 * time.Second
+
 // apiBackups is a read-only, viewer-role GET surfacing the backup archive
 // directory (as scanned by the CP-local maintenance agent's GET /v1/backups)
 // so an admin can answer "is my backup job actually working" from the GUI
@@ -100,23 +117,39 @@ func apiBackups(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	ep, ok := resolveLocalMaintAgentEndpoint()
-	if !ok {
-		jsonOK(w, map[string]any{
-			"available": false,
-			"reason":    "maintenance agent not configured",
-		})
+	backupsCache.mu.Lock()
+	defer backupsCache.mu.Unlock()
+	if backupsCache.payload != nil && time.Since(backupsCache.at) < backupsCacheTTL {
+		jsonOK(w, backupsCache.payload)
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	out := buildBackupsPayload(r.Context())
+	backupsCache.payload, backupsCache.at = out, time.Now()
+	jsonOK(w, out)
+}
+
+// buildBackupsPayload performs one agent listing and shapes the response.
+// Agent-down and not-configured both answer 200 {available:false, reason} —
+// the OpenAPI contract declares 200/403 only, and the GUI's api() helper
+// throws on any non-2xx, which would blank the panel exactly while the
+// operator is diagnosing the agent (review P2; mirrors the not-configured
+// branch that already behaved this way).
+func buildBackupsPayload(ctx context.Context) map[string]any {
+	ep, ok := resolveLocalMaintAgentEndpoint()
+	if !ok {
+		return map[string]any{
+			"available": false,
+			"reason":    "maintenance agent not configured",
+		}
+	}
+	fctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	entries, err := fetchAgentBackups(ctx, ep)
+	entries, err := fetchAgentBackups(fctx, ep)
 	if err != nil {
-		writeJSONStatus(w, http.StatusServiceUnavailable, map[string]any{
+		return map[string]any{
 			"available": false,
 			"reason":    err.Error(),
-		})
-		return
+		}
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].ModifiedAt.After(entries[j].ModifiedAt) })
 	out := map[string]any{
@@ -127,5 +160,5 @@ func apiBackups(w http.ResponseWriter, r *http.Request) {
 	if len(entries) > 0 {
 		out["newest_at"] = entries[0].ModifiedAt.UTC().Format(time.RFC3339)
 	}
-	jsonOK(w, out)
+	return out
 }
