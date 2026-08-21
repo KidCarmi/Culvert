@@ -258,7 +258,7 @@ const authSourceExempt = "exempt"
 //	system — reserved for internal/system-originated traffic (future)
 //
 // IdP profile IDs and names must never collide with these: provider Name()
-// values are "oidc:<ID>"/"saml:<ID>" and matchAuthSource strips those prefixes
+// values are "oidc:<ID>"/"saml:<ID>"/"ldap:<ID>" and matchAuthSource strips those prefixes
 // (stripIdPPrefix), while OIDC/SAML sessions carry the bare profile ID as
 // Identity.Provider — so a profile ID or name equal to a reserved word would
 // make authSource-scoped access rules ambiguous (e.g. a rule targeting
@@ -561,6 +561,12 @@ type authMatchScratch struct {
 	normSet bool
 	addr    net.IP // net.ParseIP(ctx.ClientIP); nil = unparseable (fails closed)
 	addrSet bool
+	// cat carries the same lazy contract for the host→category fusion, shared
+	// with the Stage-2 access scan via matchDestNorm (policy_hostcat.go). Bound
+	// to ctx.Host on first use; an auth scan with no category-scoped rule never
+	// resolves anything.
+	cat    hostCatScratch
+	catSet bool
 }
 
 func (s *authMatchScratch) normHost() string {
@@ -569,6 +575,14 @@ func (s *authMatchScratch) normHost() string {
 		s.normSet = true
 	}
 	return s.norm
+}
+
+func (s *authMatchScratch) hostCat() *hostCatScratch {
+	if !s.catSet {
+		s.cat = newHostCatScratch(s.ctx.Host)
+		s.catSet = true
+	}
+	return &s.cat
 }
 
 func (s *authMatchScratch) clientAddr() net.IP {
@@ -626,7 +640,7 @@ func authRuleMatchesScratch(rule *PolicyRule, s *authMatchScratch) (AuthOutcome,
 	if !authRuleHasDestination(*rule) && !spec.BroadExemption {
 		return "", false
 	}
-	if !matchDestNorm(rule, s.ctx.Host, s.normHost()) {
+	if !matchDestNorm(rule, s.ctx.Host, s.normHost(), s.hostCat()) {
 		return "", false
 	}
 	// Schedule: a malformed timezone must fail closed (require auth), NOT silently
@@ -895,7 +909,17 @@ func validateAuthRule(rule PolicyRule) (warnings []string, err error) {
 // (validateSSOProviderRefsLive). Outcome gating (Phase 3 Slice 2):
 //   - SSORequired: providerRefs allowed (empty = all compatible enabled
 //     interactive IdPs; one/many recorded for later runtime selection).
-//   - CredentialRequired: providerRefs rejected (deferred to a later slice).
+//   - CredentialRequired: providerRefs REJECTED — reserved for a future
+//     program. An early ADR-0025 draft activated it, but presented
+//     Proxy-Authorization credentials resolve through the GLOBAL validator
+//     chain BEFORE the no-credentials Stage-1 branch, so a per-rule provider
+//     subset was only half-enforced (another provider or local/legacy
+//     credentials could still satisfy the rule) — unacceptable semantic
+//     ambiguity, reverted. Provider-specific authorization is expressed
+//     safely in Stage 2 via AuthSource/SourceGroup. The future design must
+//     cover presented credentials, sessions, local auth, legacy providers,
+//     stale/deleted refs, multi-provider ordering, and failure semantics as
+//     one coherent contract (see roadmap/LDAP-IDP-MODERNIZATION-PLAN.md §12).
 //   - Exempt: providerRefs rejected (no provider concept).
 func validateAuthOutcomeAndProviders(spec *AuthRuleSpec) error {
 	switch spec.Outcome {
@@ -907,10 +931,9 @@ func validateAuthOutcomeAndProviders(spec *AuthRuleSpec) error {
 	if spec.Outcome == OutcomeSSORequired {
 		return validateSSOProviderRefsShape(spec.ProviderRefs)
 	}
-	// Exempt and CredentialRequired do not accept providerRefs in Phase 3 Slice 2.
 	if len(spec.ProviderRefs) != 0 {
 		if spec.Outcome == OutcomeCredentialRequired {
-			return fmt.Errorf("providerRefs for CredentialRequired is deferred and cannot be set yet")
+			return fmt.Errorf("providerRefs for CredentialRequired is reserved for a future program and cannot be set; scope by provider in Stage 2 via authSource/sourceGroup access rules")
 		}
 		return fmt.Errorf("providerRefs is not valid on Exempt rules")
 	}
@@ -975,8 +998,8 @@ func validateSSOProviderRefsLive(spec *AuthRuleSpec) error {
 			return fmt.Errorf("providerRef %q does not match any configured IdP profile", id)
 		case !p.Enabled:
 			return fmt.Errorf("providerRef %q references a disabled IdP profile", id)
-		case p.Type != IdPTypeOIDC && p.Type != IdPTypeSAML:
-			return fmt.Errorf("providerRef %q is not an interactive (OIDC or SAML) IdP", id)
+		case !p.Type.Interactive():
+			return fmt.Errorf("providerRef %q is not an interactive (OIDC or SAML) IdP — LDAP is credential-only and can never satisfy SSORequired", id)
 		}
 	}
 	return nil

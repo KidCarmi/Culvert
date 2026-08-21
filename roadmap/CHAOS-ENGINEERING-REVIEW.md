@@ -17,6 +17,36 @@ everything else is triaged below with a suggested PR and required tests for foll
 
 ## 0. Revision log
 
+**2026-08-11 — CHAOS-49 sweep (the multi-IdP registry auth path under IdP failure).**
+
+CHAOS-47 gave the LEGACY identity backends a three-part contract (an infrastructure failure is
+never cached as a verdict; an unreachable backend arms a half-open probe gate; both are reported
+on the `identity_backend` row) and closed by naming the newer **IdP-registry** path as having
+none of it. This sweep confirms that and finds the domain is worse than recorded in three ways
+that are not about introspection at all — all three in the **JWKS cache**, the component that
+distributes the public keys every ID-token validation depends on. (1) `refresh()` installed
+whatever it parsed, so an HTTP **200 carrying no usable keys** — a rate-limiter body, an edge
+stub, a full rotation to EC — **WIPED the key cache**, and because the wipe happens on the
+SUCCESS path it also destroys the explicit "return the stale key rather than failing" fallback
+that exists to survive exactly this: a silent, fleet-wide SSO outage with no log, metric, or
+health signal. (2) `resp.StatusCode` was never checked, so a JSON error body behind a 503 took
+the same wipe path — a 500 returning HTML was *safer* than a well-behaved JSON 503. (3) The
+refetch decision keyed on cache MEMBERSHIP, so an **unknown `kid` re-fetched the JWKS on every
+request, forever**; the kid is read from an UNVERIFIED token header, making this an
+unauthenticated amplifier (gain = number of configured providers) pointed at the customer's own
+IdP — and it fires without an attacker in any 2-IdP estate, because the dispatch loop asks every
+provider about every other provider's token. Plus (4) no single-flight: 40 concurrent misses ⇒
+40 fetches. And CHAOS-49 as recorded: (5) no introspection result cache — 20 authenticated
+requests ⇒ 20 round trips; (6) no probe gate and no health reporting — 11 requests against a
+DOWN IdP ⇒ 11 full round trips with `degraded=false`, `gatedDenials=0`, and, because providers
+are tried SEQUENTIALLY, up to N × 10 s of serialized dial timeouts per request holding a
+goroutine, a connection, and a per-IP slot. All six fixed, each reproduced empirically against
+`main` first. The load-bearing decision was to REUSE the CHAOS-47 primitives (`authProbeGate`,
+`noteAuthBackend*`, `cacheKey`, `errIntrospectClient`) rather than write a second dialect, so the
+new backend lands on the existing `identity_backend` row, metrics, and alert with no new
+operator vocabulary and no new config. See
+`docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-11.md`.
+
 **2026-08-09 — CHAOS-28 sweep (the Root CA across its lifecycle).**
 
 The inspection CA is the one control whose failure produces no error anywhere INSIDE the
@@ -218,7 +248,7 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | WK-1 | **ClamAV daemon down → files pass UNSCANNED (fail-open), no alert/counter.** Contradicts the same file's *timeout* path, which fails **closed**. Two infra-failure modes, opposite postures. | GAP | H | `internal/secscan/secscan.go:499-514` vs timeout `secscan.go:490-495` |
 | WK-2 | Remote scan sidecar down → fail-open, **but** alerted (`scan_svc_down`) + counted. Posture not admin-selectable; 30s per-request timeout stacks latency when hard-down. | ✓ (risky) | H | `internal/secscan/remote.go:95-155,84-90,105` |
 | WK-3 | GeoIP cache-miss on the policy hot path fails **closed** (country allow-rule cannot match unknown country); `LookupCached` never blocks on DB/DNS. | ✓ | — | `policy.go:831-839`, `geoip.go:84-93`; tests `final_coverage_test.go:203` |
-| WK-4 | GeoIP DB missing/corrupt: reader stays nil, feature degrades to "no country data" — safe, but **no staleness/health signal** (MMDBs expire silently). | GAP (obs) | M | `internal/geoip/geoip.go:23-36,71` |
+| WK-4 | GeoIP DB missing/corrupt: reader stays nil, feature degrades to "no country data" — safe, but **no staleness/health signal** (MMDBs expire silently). | GAP (obs) → **PARTIALLY CLOSED** (`BuildTime()` reads the `.mmdb`'s own `build_epoch`; `GET /api/geoip` returns `dbBuildDate`/`dbAgeDays`; GeoIP Database panel shows the age, warn-colored past 90 days; load failures surfaced via `lastError`. Residual: no PROACTIVE alert/metric — an operator must open the panel to notice) | M | `internal/geoip/geoip.go` `BuildTime`, `ui_security.go` `apiGeoIPConfig` |
 | WK-5 | **Threat-feed timeout → stale-erase.** On partial failure `Sync` unconditionally replaces the maps with only what succeeded, discarding prior good entries; stamps `lastSync=now` even on failure; no backoff, no staleness alert → coverage silently shrinks for up to 6h. | GAP → **CLOSED** (per-source `replacedSources` replacement, `threatfeed.go` `applySync`) | H | `internal/threatfeed/threatfeed.go:150-183` |
 | WK-6 | UT1 category feed failures counted but **never alerted**; fixed 24h retry, no backoff. Stale-serve is safe (last-good BadgerDB). | GAP (obs) | M | `internal/feedsync/feedsync.go:192-213,176` |
 | WK-7 | Category DB (Badger) corruption: read errors → "not found" (fail-open for category-block, no crash); value-log truncate/replay on restart. | ✓ | — | `internal/catdb/catdb.go:37-50,84-100` |
@@ -289,7 +319,7 @@ they cannot see fail. Concretely, add alerts + metrics for:
 - `culvert_ca_persist_failures_total` + alert (CA-2, CA-13).
 - ClamAV scan-error counter + `scan_svc_down`-style alert (WK-1), matching the remote-scanner path.
 - Per-feed `last_success` + staleness alert at >2× interval (WK-5, WK-6).
-- GeoIP DB load-failure / age alert (WK-4).
+- GeoIP DB load-failure / age **alert** (WK-4). The age/failure *surfacing* (API + panel) shipped; the proactive alert half is still open.
 - `idp.unreachable` distinct from auth-failure (AU-7).
 - ~~Audit write-failure counter surfaced on `/healthz` (ST-8), matching reqlog.~~ **Shipped — see §13.**
 

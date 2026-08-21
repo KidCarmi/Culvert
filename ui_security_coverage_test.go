@@ -332,6 +332,32 @@ func TestAPIOCSPConfig_POSTBadJSON(t *testing.T) {
 	assertStatus(t, w, http.StatusBadRequest)
 }
 
+// ─── apiGeoIPConfig ──────────────────────────────────────────────────────────
+
+func TestAPIGeoIPConfig_GETShape(t *testing.T) {
+	w := httptest.NewRecorder()
+	apiGeoIPConfig(w, getReq("/api/geoip"))
+	assertStatus(t, w, http.StatusOK)
+
+	m := assertJSON(t, w)
+	// Both fields are required by the UI panel contract.
+	if _, ok := m["enabled"]; !ok {
+		t.Error("GET response missing enabled field")
+	}
+	if _, ok := m["dbPath"]; !ok {
+		t.Error("GET response missing dbPath field")
+	}
+	// No test process loads a real .mmdb fixture, so the engine stays
+	// disabled — the staleness fields must be omitted rather than reporting a
+	// misleading zero age.
+	if _, ok := m["dbAgeDays"]; ok {
+		t.Error("GET response must omit dbAgeDays when no GeoIP database is loaded")
+	}
+	if _, ok := m["dbBuildDate"]; ok {
+		t.Error("GET response must omit dbBuildDate when no GeoIP database is loaded")
+	}
+}
+
 // ─── apiSecYARARules ───────────────────────────────────────────────────────
 
 // yaraTestRuleset swaps globalYARA for an isolated test-only instance rooted

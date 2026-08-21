@@ -112,15 +112,28 @@ func TestHandleReady_SurfacesCALoadFailure(t *testing.T) {
 		t.Fatal("no failure recorded: ca row should be absent (baseline behavior)")
 	}
 
-	// Failure recorded → visible fail row with the detail…
+	// Failure recorded → visible fail row…
 	sslInspectionLoadError.Store("Root CA load/init failed for /data/ca.bundle: bad passphrase")
 	got, gotCode := ready()
 	caCheck, ok := got.Checks["ca"]
 	if !ok {
 		t.Fatal("ca row missing from /readyz after a configured CA failed to load (CHAOS-06)")
 	}
-	if caCheck.Status != "fail" || !strings.Contains(caCheck.Detail, "bad passphrase") {
-		t.Fatalf("ca check = %+v, want fail with the load error detail", caCheck)
+	if caCheck.Status != "fail" {
+		t.Fatalf("ca check = %+v, want status fail", caCheck)
+	}
+	// …carrying a FIXED detail, never the raw cause. /ready is unauthenticated
+	// on the proxy port, so the bundle path and the "inspection is off" cause
+	// must not be published to every client on the network (see
+	// appendCAReadinessCheck). The visibility contract CHAOS-06 established is
+	// the failing ROW; the cause belongs to the log and the alert.
+	if !strings.Contains(caCheck.Detail, "see server logs") {
+		t.Fatalf("ca detail = %q, want the fixed see-server-logs string", caCheck.Detail)
+	}
+	for _, leak := range []string{"/data/ca.bundle", "bad passphrase"} {
+		if strings.Contains(caCheck.Detail, leak) {
+			t.Fatalf("ca detail leaks %q to the unauthenticated /ready surface: %q", leak, caCheck.Detail)
+		}
 	}
 	// …and it is report-only: the ca row alone must not change the
 	// readiness verdict (documented posture — the proxy still serves as a

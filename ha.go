@@ -1077,6 +1077,13 @@ func addRequestLogHealth(resp map[string]any) {
 	if n := reqlog.Backpressure(); n > 0 {
 		resp["requestLogBackpressure"] = n
 	}
+	// Process-log write failures (console + process log file, e.g. the
+	// POLICY_ALLOW/BLOCK/DROP line-per-request stream). Same fault class as
+	// requestLogWriteErrors/auditLogWriteErrors above, previously visible only
+	// via the culvert_logsink_write_errors_total Prometheus metric.
+	if n := logSinkWriteErrors(); n > 0 {
+		resp["processLogWriteErrors"] = n
+	}
 }
 
 // apiHealthz is an unauthenticated health-check endpoint for load balancers.
@@ -1120,6 +1127,7 @@ func apiHealthz(w http.ResponseWriter, r *http.Request) {
 		"version": version,
 	}
 	addLeaseHealth(standbyResp, globalHA)
+	addRequestLogHealth(standbyResp)
 	resp, _ := json.Marshal(standbyResp)
 	_, _ = w.Write(resp)
 }
