@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -76,6 +77,23 @@ func apiMCPRolloutTransition(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	auditEvent(r, "mcp.rollout.transition.request", req.Capability+":"+req.ToMode, "")
+	// Execution-dependency precondition (Shadow execution safety gate): a transition
+	// to an executing mode (Shadow/Canary) cannot be honored while the guarded-
+	// execution plane is not composed. Surface that fail-closed reason truthfully
+	// rather than the generic distribution message, so the operator sees the real
+	// blocker. Production was already rejected above.
+	if to.Executes() {
+		capbManagement := mcpRolloutCapability(r) == rollout.CapabilityManagement
+		if req.Capability != "" {
+			if parsed, perr := rollout.ParseCapability(req.Capability); perr == nil {
+				capbManagement = parsed == rollout.CapabilityManagement
+			}
+		}
+		if !execDepsConfigured(capbManagement) {
+			http.Error(w, "shadow_execution_dependencies_not_configured", http.StatusConflict)
+			return
+		}
+	}
 	// A CP-side accepted transition is not fleet-effective until it is published +
 	// acknowledged; that signed path is not wired in the disabled-default posture.
 	http.Error(w, "distribution_not_configured", http.StatusConflict)
@@ -175,15 +193,27 @@ func apiMCPRolloutEmergency(w http.ResponseWriter, r *http.Request) {
 		}
 		capab = parsed
 	}
+	var perr error
 	switch req.Action {
 	case "clear":
-		getMCPRollout().clearEmergency(capab)
+		perr = getMCPRollout().clearEmergency(capab)
 		auditEvent(r, "mcp.rollout.emergency.clear", capab.String(), "")
 	default:
-		getMCPRollout().emergencyDisable(capab, r.RemoteAddr)
+		perr = getMCPRollout().emergencyDisable(capab, r.RemoteAddr)
 		auditEvent(r, "mcp.rollout.emergency.disable", capab.String(), "")
 	}
-	jsonOK(w, map[string]any{"capability": capab.String(), "killed": getMCPRollout().stateFor(capab).Killed()})
+	killed := getMCPRollout().stateFor(capab).Killed()
+	if perr != nil {
+		// The in-memory action took effect (kill switch is engaged/cleared) but could
+		// not be made restart-durable. Report it truthfully so the operator does not
+		// trust a durable success: a restart may not preserve this action. 500 with the
+		// current in-memory state and persisted:false.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]any{"capability": capab.String(), "killed": killed, "persisted": false, "error": "rollout_persist_failed"})
+		return
+	}
+	jsonOK(w, map[string]any{"capability": capab.String(), "killed": killed, "persisted": true})
 }
 
 // apiMCPRolloutRehearse records a rollback rehearsal (evidence). The live signed
@@ -223,9 +253,17 @@ func apiMCPRolloutRehearse(w http.ResponseWriter, r *http.Request) {
 		}
 		capab = parsed
 	}
-	getMCPRollout().stateFor(capab).UpdateEvidence(func(e *rollout.EvidenceSummary) { e.RollbackRehearsed = true })
+	// Rehearsal is durable evidence; record + persist under the durable-mutation lock
+	// so a restart preserves it. A persist failure is surfaced truthfully.
+	if err := getMCPRollout().recordRehearsal(capab); err != nil {
+		auditEvent(r, "mcp.rollout.rehearse-rollback", capab.String(), "")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]any{"capability": capab.String(), "rollback_rehearsed": true, "persisted": false, "error": "rollout_persist_failed"})
+		return
+	}
 	auditEvent(r, "mcp.rollout.rehearse-rollback", capab.String(), "")
-	jsonOK(w, map[string]any{"capability": capab.String(), "rollback_rehearsed": true})
+	jsonOK(w, map[string]any{"capability": capab.String(), "rollback_rehearsed": true, "persisted": true})
 }
 
 // apiMCPExecutions returns the bounded, safe execution history (counts only — no

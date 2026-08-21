@@ -552,10 +552,18 @@ func (c *Config) AuthEnabled() bool {
 // exists OR the operator deliberately chose the open default (Exempt). The admin
 // UI and setup flow gate on this — NOT AuthEnabled — so that open mode keeps the
 // admin UI gated and makes setup one-time (Slice 5).
+//
+// The legacyLDAPRetired term (ADR-0025 / P1-2) keeps the gate CLOSED for a
+// deployment whose only setup anchor was the legacy YAML LDAP provider: the
+// cutover to the IdP registry deactivates that provider, and without this
+// term the deactivation (or any later restart, with the durable sentinel but
+// no wired provider) would flip setup back to "incomplete" — which the admin
+// middleware treats as unauthenticated RoleAdmin for everyone. Retirement is
+// a deliberate, durable operator state, so it counts as configured.
 func (c *Config) IsConfigured() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.user != "" || c.provider != nil || c.defaultAuthOutcome == OutcomeExempt
+	return c.user != "" || c.provider != nil || c.defaultAuthOutcome == OutcomeExempt || legacyLDAPRetired()
 }
 
 // DefaultAuthOutcome returns the authoritative global Stage-1 default applied on
