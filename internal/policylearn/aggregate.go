@@ -149,6 +149,14 @@ func (e *Engine) aggregateLocked(sess *Session, o *Observation) {
 		sess.Agg = newAggregate()
 	}
 	agg := sess.Agg
+	if agg.Cells == nil {
+		// A session persisted before its first cell round-trips Agg as {}
+		// (every field omitempty), which decodes to a non-nil Aggregate with a
+		// nil Cells map — same decoded-empty shape the Cell maps below handle
+		// lazily. Without this init every post-restart observation of the
+		// recovered session dies in per-event panic containment.
+		agg.Cells = map[string]*Cell{}
+	}
 
 	category, tier := "", "none"
 	if e.cfg.Categories != nil {

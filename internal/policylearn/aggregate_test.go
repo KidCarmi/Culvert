@@ -466,3 +466,44 @@ func TestPseudonym_FramingCannotCollide(t *testing.T) {
 		t.Fatal("empty subject must not tokenize")
 	}
 }
+
+// TestAggregate_RestartResumeBeforeFirstCellDoesNotPanic pins the
+// qualification-drill regression: a Learning session persisted BEFORE any
+// cell exists round-trips its aggregate as {} (every field omitempty), which
+// decodes to a non-nil Aggregate with a NIL Cells map. The consume path must
+// treat that shape like the other decoded-empty maps (lazy init), not panic —
+// a mid-Learning crash/restart would otherwise lose EVERY post-restart
+// observation of the recovered session to per-event panic containment
+// (counted, degraded, zero cells, zero recommendations).
+func TestAggregate_RestartResumeBeforeFirstCellDoesNotPanic(t *testing.T) {
+	h := newAggHarness(t, nil)
+	// Persisted state now holds the Learning session with an EMPTY aggregate
+	// (StartSession persisted it; no observation has been drained).
+	if err := h.e.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{Now: h.clk.now,
+		StorePath:      filepath.Join(h.dir, "policy_learning.json"),
+		SubjectKeyPath: filepath.Join(h.dir, "subject.key")}
+	e2, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = e2.Close() })
+	e2.Observe(Observation{Subject: "alice", AuthSource: "oidc:okta",
+		Groups: []string{"eng"}, Host: "code.example", Method: "GET", Status: "OK"})
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && e2.ObservationStats().Delivered < 1 {
+		time.Sleep(time.Millisecond)
+	}
+	st := e2.ObservationStats()
+	if st.ConsumerPanics != 0 {
+		t.Fatalf("consumer panicked on resumed empty aggregate: %+v", st)
+	}
+	e2.mu.Lock()
+	defer e2.mu.Unlock()
+	if e2.aggSession == nil || e2.aggSession.Agg == nil ||
+		e2.aggSession.Agg.Cells[CellKey("g:eng", "")] == nil {
+		t.Fatalf("observation after resume did not aggregate; agg=%+v", e2.aggSession)
+	}
+}
