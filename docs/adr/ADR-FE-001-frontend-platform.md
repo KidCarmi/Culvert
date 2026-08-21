@@ -1,13 +1,15 @@
 # ADR-FE-001: Frontend Platform for the CULVERT Admin UI
 
-- **Status**: Proposed (design round — awaiting external review; no implementation has begun)
-- **Date**: 2026-08-21
-- **Deciders**: awaiting review
+- **Status**: **Accepted** (2026-08-21)
+- **Date**: 2026-08-21 (proposed and accepted same day; accepted after the external
+  architecture review's correction round was incorporated)
+- **Deciders**: project owner, on the recommendation of the external architecture review
+  (2026-08-21). Implementation remains blocked until FE-1A begins by explicit go-ahead.
 - **Supersedes**: the un-ratified "no framework / vanilla JS" position recorded in prose in
-  `docs/design/REDESIGN-ROADMAP.md` (lines 6–10), `docs/design/CURRENT-UI-AUDIT.md` (§0), and
-  `docs/design/mcp/PRODUCTION-INTEGRATION.md` (§ non-negotiables). No ADR ever recorded that
-  decision; `docs/design/M1-M2-SELF-REVIEW.md` itself notes a build pipeline "deserves its own
-  design record". This is that record.
+  `docs/design/REDESIGN-ROADMAP.md` (lines 6–10), `docs/design/CURRENT-UI-AUDIT.md` (§1
+  verdict), and `docs/design/mcp/PRODUCTION-INTEGRATION.md` (§ non-negotiables). No ADR ever
+  recorded that decision; `docs/design/M1-M2-SELF-REVIEW.md` itself notes a build pipeline
+  "deserves its own design record". This is that record.
 - **Related**: `docs/design/FRONTEND-CURRENT-STATE.md`, `docs/design/FRONTEND-MIGRATION-PLAN.md`,
   `docs/design/FRONTEND-SECURITY-CONTRACT.md`, `docs/design/FRONTEND-FEATURE-PARITY.md`,
   ADR-0018 (OpenAPI contract).
@@ -40,171 +42,215 @@ Hard constraints that do NOT change (from `CLAUDE.md`, ADR-0018, and the CI cont
 2. **Byte-reproducible release builds.** `pr-deep-gate.yml` builds the binary twice and
    sha256-compares. The frontend bundle is embedded in the binary, so the frontend build must be
    deterministic.
-3. **Backend authority.** `uiRoutes` metadata (229 rows), the C2 enforcement middleware,
-   handler-level `requireRole`, CSRF-by-Origin, session cookies, audit, and config versioning
-   are untouched. The UI is presentation, not an authorization boundary.
+3. **Backend authority.** `uiRoutes` metadata (229 routes / 343 method rows), the C2
+   enforcement middleware, handler-level `requireRole`, CSRF-by-Origin, session cookies, audit,
+   and config versioning are untouched. The UI is presentation, not an authorization boundary.
 4. **No backend API rewrite.** ADR-0018's hand-authored OpenAPI 3.0.4 contract over the existing
-   handlers stands; its route-coverage exemptions expire 2027-01-31.
-5. **CSP posture may only strengthen** (target: drop `style-src 'unsafe-inline'`, keep or tighten
-   the script nonce model).
+   handlers stands (334 of 343 method rows documented; 9 non-REST exemptions).
+5. **CSP posture may only strengthen.** The new application targets a nonce-free strict CSP
+   (see "CSP and the nonce decoupling" below); the legacy shell keeps its nonce model until
+   cutover.
 6. **"No Node in the fast gate"** (ADR-0018) is renegotiated by this ADR, not silently ignored:
-   see "Build-time vs runtime" below for how Node enters CI without entering the appliance.
+   Node enters CI as a verification/drift lane only, never the appliance runtime and never the
+   Go-only build path (see "Build-time vs runtime").
 
 ## Decision
 
-Adopt the following platform for a clean parallel replacement of the embedded frontend:
+Adopt the following platform for a clean parallel replacement of the embedded frontend.
+
+### Locked baseline (exact pins — no caret/tilde ranges for direct dependencies)
+
+Every version below was verified against the official npm registry dist-tags and
+`nodejs.org/dist/index.json` on **2026-08-21** (evidence recorded beneath the table). Direct
+dependencies are declared with **exact versions**; `package-lock.json` is mandatory and
+`npm ci` is the only install command.
+
+| Component | Pinned version | Verification evidence (2026-08-21) |
+|---|---|---|
+| Node.js | **24.19.0** (LTS "Krypton") | `nodejs.org/dist/index.json`: newest v24 LTS entry `v24.19.0`, bundled npm 11.17.0 |
+| npm | **11.17.0** | bundled with Node 24.19.0 (same source) |
+| react / react-dom | **19.2.8** (identical versions) | registry dist-tag `latest: 19.2.8` for both packages |
+| typescript | **6.0.3**, `strict: true` + `noUncheckedIndexedAccess` | newest stable release inside typescript-eslint's supported range (see rejection of TS 7 below) |
+| vite | **8.2.2** | registry dist-tag `latest: 8.2.2`; `engines.node: "^20.19.0 \|\| >=22.12.0"` (Node 24.19.0 satisfies); dependency graph confirms `rolldown ~1.2.4` — Vite 8 production bundling is **Rolldown-based** |
+| react-router | **8.3.0**, **client-side (library/data) mode only** | registry dist-tag `latest: 8.3.0`; peer `react >=19.2.7` (satisfied by 19.2.8); `engines.node: ">=22.22.0"` (satisfied) |
+| @tanstack/react-query | **5.101.4** | registry dist-tag `latest: 5.101.4`; peer `react ^18 \|\| ^19` |
+| vitest | **4.1.11** | registry dist-tag `latest: 4.1.11`; `engines.node: "^20.0.0 \|\| ^22.0.0 \|\| >=24.0.0"` |
+| @playwright/test | **1.62.1** | registry dist-tag `latest: 1.62.1`; `engines.node: ">=20"` |
+| typescript-eslint | **8.67.0** (lint toolchain anchor) | registry `latest: 8.67.0`; peer `typescript >=4.8.4 <6.1.0`, `eslint ^8.57.0 \|\| ^9.0.0 \|\| ^10.0.0` |
+
+**Effective minimum Node across the toolchain**: react-router 8.3.0's `>=22.22.0` is the
+strictest engine; the canonical environment pins Node **24.19.0**, recorded identically in
+`frontend/.node-version`, `frontend/package.json` `engines` (`node: "24.19.0"`,
+`npm: "11.17.0"`), CI workflow setup steps, and the canonical deterministic-build environment
+definition (FE-1A). Patch upgrades to any pin are ordinary reviewed PRs that update all four
+places atomically.
+
+**Why TypeScript 6.0.3, not 7.0.2**: the registry's `latest` TypeScript is 7.0.2 (the native
+compiler major), but typescript-eslint 8.67.0 — the only maintained TS lint toolchain — supports
+`typescript >=4.8.4 <6.1.0`. Pinning 7.x would leave the mandatory lint gate unsupported.
+6.0.3 is the newest stable inside the supported range (5.9.3 is the fallback if FE-1A surfaces
+a 6.0.x incompatibility, recorded then). Revisit TS 7 when typescript-eslint declares support.
+
+### Explicitly rejected for the initial baseline
+
+- **React Compiler** — not enabled; revisit only with its own evaluation after the app exists.
+- **React Server Components** — no server React runtime exists or is permitted.
+- **React Router Framework Mode** — library/data mode only; no file-system routing, no SSR
+  manifest, no framework plugin.
+- **SSR of any form** — the Go binary serves static assets; there is no Node at runtime.
+- **React 18 compatibility** — the app targets React 19.2.x APIs exclusively; no compat
+  shims, no dual-version testing.
+- Also rejected (unchanged from the first round): Next.js/meta-frameworks, htmx/server
+  partials, microfrontends, service worker/PWA (own-ADR required), CSS-in-JS runtimes, large
+  pre-styled component libraries, Preact, Lit/Web Components, Svelte/Solid/Vue (evaluated
+  against the required axes in the first round; none materially stronger for a 5–10-year
+  security appliance on hiring, AI-assisted reliability, a11y ecosystem, and idiom stability).
+
+### Platform summary
 
 | Concern | Decision |
 |---|---|
-| UI framework | **React 18/19** (function components + hooks only) |
-| Language | **TypeScript, `strict: true`** (plus `noUncheckedIndexedAccess`) |
-| Build | **Vite** (Rollup production build), pinned via `package-lock.json`; deterministic config |
-| Styling | **CSS Modules + a shared design-token stylesheet** (custom properties); zero runtime CSS-in-JS |
-| Server state | **TanStack Query** (polling, caching, invalidation, cancellation) |
-| Client state | React context + reducers per feature; **no global store** (Redux/Zustand) without a demonstrated need |
-| Routing | **React Router** (hash-free, real paths under the SPA fallback) |
-| Forms | Local component state + a small shared form-field contract; no form library initially |
-| Headless a11y primitives | Evaluate **Radix UI primitives** for Dialog/Menu/Tabs only; adopt per-component with justification, else hand-roll on the ARIA Authoring Practices |
-| Charts | Keep **Chart.js v4** (already vendored, 2 charts today) as an npm dep, lazy-loaded with the dashboard chunk |
-| API layer | One typed client in `frontend/src/api/`; **types generated from the committed ADR-0018 `api/openapi/openapi.json`** (334 of 343 live method-rows documented; deterministic, offline-consumable), with hand-authored types only for the 9 exempt rows until their exemptions close |
-| Unit/component tests | **Vitest + Testing Library** (role/label queries only) |
-| E2E | **Playwright (TS)** against the real Go binary with the embedded bundle; replaces the playwright-go `uie2e` suite incrementally |
-| Lint/format | ESLint (typescript-eslint) + Prettier, both pinned |
-| Node version | Pinned via `.nvmrc` + `package.json engines`; CI uses the same pin; **build-time only** |
+| UI framework | React 19.2.8 (function components + hooks only) |
+| Language | TypeScript 6.0.3, `strict: true` |
+| Build | Vite 8.2.2 (**Rolldown** production bundling), deterministic configuration (FE-1A gate) |
+| Styling | CSS Modules + shared design-token stylesheet; **zero inline styles, zero runtime style injection** (see the inline-style ban in `FRONTEND-SECURITY-CONTRACT.md` §4) |
+| Server state | TanStack Query 5.101.4 under the mandatory security profile (`FRONTEND-SECURITY-CONTRACT.md` §6) |
+| Client state | React context + reducers per feature; no global store without demonstrated need |
+| Routing | React Router 8.3.0, client-side mode, real paths under the SPA fallback |
+| Forms | Local component state + shared form-field contract; no form library initially |
+| Headless a11y primitives | **OQ-2, deferred to FE-2**: Radix evaluated component-by-component (Dialog/Popover/Tabs candidates) vs internal primitives on the ARIA Authoring Practices; every adoption individually justified with bundle + CSP + supply-chain checks |
+| Charts | **Conditional** — Chart.js 4.x passes the FE-2 gate (zero CSP violations under the strict nonce-free policy, zero runtime style mutation, CSS/attribute-controlled dimensions, lazy chunk, accessible table/text equivalent, budget) **or is replaced by a thin internal SVG/CSS implementation**. CSP is never weakened to retain a library. |
+| API layer | One typed client in `frontend/src/api/`; **committed generated types** `frontend/src/api/types.gen.ts` from the committed `api/openapi/openapi.json` (334/343 rows documented); runtime decoders at the boundary per `FRONTEND-SECURITY-CONTRACT.md` §7 — generated types are compile-time only |
+| Unit/component tests | Vitest 4.1.11 + Testing Library (role/label queries only) |
+| E2E | @playwright/test 1.62.1 (TS) against the real Go binary with the embedded bundle |
+| Lint/format | ESLint (typescript-eslint 8.67.0) + Prettier, exact-pinned in FE-1A |
 
-### Why React + TypeScript + Vite (vs. the alternatives)
+### CSP and the nonce decoupling
 
-Evaluated against the required axes:
+The new application is built to need **no nonce and no HTML mutation**:
 
-- **Svelte/SvelteKit, SolidJS, Vue**: all produce fine bundles; none offers a *materially
-  stronger* case on the axes that matter for a 5–10-year security appliance: hiring pool and
-  contributor accessibility (React's is the largest by a wide margin), AI-assisted engineering
-  reliability (React+TS has the deepest training corpus and the most predictable idiom), a11y
-  ecosystem (Radix/ARIA patterns, Testing Library), and TypeScript depth. Svelte 5 runes and
-  Solid signals are attractive but smaller ecosystems with faster-moving idioms — a churn risk
-  over a decade. Bundle-size deltas (~30–60 KB gz framework overhead for React) are immaterial
-  for a same-host LAN admin UI that is served from the appliance itself and cached.
-- **Lit / Web Components**: closest to "no framework", but weak form/routing/server-state
-  ecosystem and materially worse AI/contributor familiarity; shadow-DOM styling complicates a
-  token-based design system and Playwright/Testing Library ergonomics.
-- **Preact**: React-compatible with a smaller runtime, but compat-layer risk against Radix/
-  TanStack over years outweighs ~30 KB on an appliance-served asset.
-- **Continue vanilla JS with incremental modularization**: rejected. The repo has already run
-  this program (M1–M3); inline styles *grew* during it (1,386 → 1,999), and the remaining debt
-  (typing, components, state isolation, testability, CSP style posture) is structural, not
-  incremental. With no customers and no DOM contract, this is the cheapest moment a rewrite
-  will ever be.
-- **Next.js or any SSR/meta-framework**: rejected, confirmed by repository evidence. The UI is
-  served by a Go binary on an air-gapped appliance to authenticated admins; there is no SEO, no
-  public content, no Node production runtime, and the serving layer is ~100 lines of Go
-  (`ui_static.go`). SSR would *add* a runtime dependency the appliance forbids.
-- **htmx / server-rendered partials from Go**: would put presentation logic back into the Go
-  binary and couple 189 JSON endpoints to HTML fragments; the admin API is JSON-first and
-  consumed by tests and (per ADR-0018) a documented contract. Rejected.
+- zero inline scripts, zero inline styles, zero runtime style injection;
+- no `__CSP_NONCE__` placeholder, no Vite post-processing plugin rewriting `index.html`,
+  no per-request shell substitution;
+- served under a route-specific strict policy: `script-src 'self'; script-src-attr 'none';
+  style-src 'self'; style-src-attr 'none'; object-src 'none'; base-uri 'none';
+  form-action 'self'; frame-ancestors 'none'` plus the existing same-origin image/connect
+  constraints.
+
+The legacy shell keeps its current nonce + `style-src 'unsafe-inline'` policy unchanged until
+cutover; at cutover the nonce generation and shell-substitution code are removed with the
+legacy UI. Full contract: `FRONTEND-SECURITY-CONTRACT.md` §3.
 
 ### State-class separation (doctrine §8)
 
-- **Server state**: TanStack Query exclusively (queries keyed per endpoint; polling via
-  `refetchInterval` gated on route + document visibility — fixing today's always-on background
-  polling; mutation invalidation replaces today's manual re-fetch calls).
-- **Form state**: local to feature components; a dirty-tracking hook replaces today's single
-  `viewLeaveGuards.policy` entry and extends leave-guards to every editor.
-- **Navigation state**: React Router URL (making all 38 views deep-linkable; today only MCP has
-  hash routing).
-- **Ephemeral visual state**: component `useState`; toasts and dialogs via small context
-  providers with a real stack (superseding `_modalStack` + 6 legacy non-stack modals).
-- **Long-running operations**: dedicated hooks per workflow (release dispatch polling with its
-  ticket semantics, MCP transition ticketing, support-bundle lifecycle) owning start/poll/stop.
-- **Event-stream state**: one SSE hook owning the `/api/events` EventSource, jittered backoff
-  (preserving today's ±25% jitter and 30-retry cap semantics, but resumable without reload),
-  publishing into query cache.
+- **Server state**: TanStack Query exclusively, under the security profile (no persistence
+  plugin, no offline queue, classified retries only, `refetchOnWindowFocus: false`, sensitive
+  queries `gcTime: 0`); polling via `refetchInterval` gated on route + document visibility.
+- **Form state**: local to feature components; a dirty-tracking hook extends leave-guards to
+  every editor (today only `policy` has one).
+- **Navigation state**: React Router URL — all 38 views deep-linkable.
+- **Ephemeral visual state**: component `useState`; toasts/dialogs via context providers with a
+  real stack. Dynamic visual state renders through classes / `data-*` attributes /
+  predeclared CSS — never style mutation.
+- **Long-running operations**: dedicated hooks per workflow (release dispatch, MCP transition
+  ticketing, support-bundle lifecycle) owning start/poll/stop.
+- **Event-stream state**: one SSE hook owning `/api/events`, jittered backoff preserved,
+  resumable without reload; torn down on route unmount and on any authentication boundary.
+- **Authentication boundary rule** (corrects the first draft): on 401/logout/user or role
+  change, all requests are cancelled, the query cache cleared, SSE closed, timers stopped,
+  Blob URLs revoked, and secret-bearing forms/candidates cleared. Only non-sensitive route
+  intent and the theme preference survive re-authentication.
 
 ### Build-time vs runtime; ADR-0018 "no Node in the fast gate"
 
-Node is a **build-time dependency only**. The appliance never runs Node. The Dockerfile gains a
-pinned `node:<version>-alpine` builder stage producing `frontend/dist`, which is copied to the
-embed path before the Go builder stage; the bare `go build` path is served by a committed-`dist`
-strategy (below). ADR-0018's "no Node in the fast gate" clause was written to keep *optional
-docs tooling* out of the required lane; this ADR amends it deliberately: the fast gate gains one
-pinned `npm ci && npm run build` step (or none at all under the committed-dist option — see
-Open Question OQ-1) — recorded here, not slipped in.
+Node is a **build/verification-time dependency only**. The appliance never runs Node, and —
+because build output is committed (below) — the normal Go-only build paths (`go build`,
+the Dockerfile, the release image) never run Node either. Node exists in exactly one CI lane:
+the frontend verification/drift lane (lint, typecheck, unit tests, type generation, build,
+byte-compare against the committed output). ADR-0018's "no Node in the fast gate" posture is
+amended to admit that single lane, recorded here.
 
-### Generated `dist`: committed vs release-built (recorded trade-off)
+### OQ-1 + OQ-3 — CLOSED (review decision, 2026-08-21)
 
-Two viable strategies; **the recommendation is (A) committed dist**, with the trade-off recorded
-so review can overturn it:
+**Committed generated output.** `frontend/dist/` is the one canonical output directory,
+committed to the repository together with `frontend/src/api/types.gen.ts`:
 
-- **(A) Commit `frontend/dist` to the repo** (regenerated by CI check, not by hand).
-  - Pros: `go build -o culvert .` keeps working with zero toolchain (preserves today's
-    contributor experience and the `hygiene` build steps unchanged); byte-reproducibility gate
-    trivially satisfied (the bytes are in git); air-gapped source builds need no npm registry;
-    the Docker builder stage needs no Node at all.
-  - Cons: generated bytes in git (review noise — mitigated by `linguist-generated` and a CI
-    **drift gate** that rebuilds and byte-compares, making hand-edits or stale dist a hard
-    failure); requires the Vite build itself to be deterministic (also required by (B)).
-- **(B) Build `dist` in CI/Docker only, never commit.**
-  - Pros: clean history; no drift class.
-  - Cons: every build path (fast-gate hygiene ×2, deep-gate determinism ×2, ci.yml test job,
-    Dockerfile both arches, developer `go build`) must grow a Node stage; bare `go build` from a
-    tarball fails without Node + registry access — hostile to air-gapped source builds; the
-    determinism gate then depends on Vite determinism *inside* the required lane.
-- Either way, **Vite build determinism is mandatory** (stable chunk hashing, no timestamps,
-  sorted emission; verified by a build-twice-compare CI step) because the deep-gate compares
-  binaries. This is a gate in FE-1 of the migration plan.
+```
+frontend/
+  src/            (incl. src/api/types.gen.ts — committed, generated)
+  package.json
+  package-lock.json
+  dist/           (committed, generated)
+    index.html
+    manifest.json (Vite build.manifest configured to emit at dist/manifest.json)
+    assets/
+```
+
+- `go build -o culvert .` keeps working with zero toolchain; air-gapped source builds need no
+  npm registry; the deep-gate binary byte-comparison is satisfied because the embedded bytes
+  are in git.
+- **The Docker release build consumes the reviewed committed dist and does not introduce a
+  Node build stage.**
+- Generated paths are marked `linguist-generated` in `.gitattributes`; hand-edits are
+  impossible to land because the drift lane rebuilds and byte-compares (full contract:
+  `FRONTEND-MIGRATION-PLAN.md` §"Drift & determinism contract").
+- Production sourcemaps are disabled; `dist/manifest.json` is embedded for Go-side validation
+  but never publicly served.
+- Frontend dependencies and licenses are included in release notices and the SBOM.
+- The earlier `webdist/` proposal is withdrawn; `frontend/dist/` is embedded directly
+  (`//go:embed all:frontend/dist` — a root-relative subdirectory, valid for the root-package
+  embed).
+
+**Lifecycle scripts**: `npm ci --ignore-scripts` is the *target* posture but is **not mandated
+until FE-1A proves the pinned toolchain builds correctly under it**. Grounds for expecting it
+to pass: Vite 8's Rolldown and esbuild distribute prebuilt platform binaries via
+`optionalDependencies`, not install scripts. If validation fails, FE-1A enumerates the exact
+lifecycle scripts that must execute, with per-script justification, in the migration plan —
+never a blanket allowance.
 
 ### Dependency policy
 
-- `package-lock.json` committed; `npm ci` only; Dependabot/renovate cadence aligned with Go deps.
+- Direct dependencies: **exact versions only** (no `^`/`~`); lockfile committed; `npm ci`
+  exclusively; upgrade cadence aligned with Go deps and always a reviewed PR touching pin +
+  lockfile + evidence note together.
 - Every dependency license-reviewed at introduction (MIT/Apache-2/BSD/ISC allowlist); a
-  `license-checker`-class scan joins the deep gate next to `go-licenses`.
-- `npm audit` (or osv-scanner, which already understands lockfiles) joins the security lane.
-- Runtime dependency budget: framework + router + query + chart + (optionally) Radix primitives.
-  Anything beyond requires a one-paragraph justification in the PR. No utility packages
-  (lodash, moment, axios, uuid, clsx-alikes) — small stable helpers are written in-repo.
+  Node license scan joins the deep gate next to `go-licenses`; lockfile-aware vulnerability
+  scanning (osv-scanner or `npm audit`) joins the security lane; both outputs feed notices +
+  SBOM.
+- Runtime dependency budget: react, react-dom, react-router, @tanstack/react-query,
+  (conditionally) chart.js, (per-component, OQ-2) Radix primitives. Anything beyond requires a
+  one-paragraph justification in the PR. No utility packages — small stable helpers are
+  written in-repo. No library that requires inline style mutation (contract §4) may be
+  adopted at all.
 - `.dockerignore` and `.gitignore` gain `node_modules/`; gitleaks allowlist reviewed for
   lockfile/bundle false positives.
 
-### Explicit rejections
-
-- **Service worker / PWA**: rejected. A stale cached UI across an appliance upgrade is an
-  operational hazard; `index.html` stays `no-store`, hashed assets `immutable`. Reopening this
-  requires its own ADR.
-- **Microfrontends**: rejected; one Vite app, one embed.
-- **Permanent dual UI**: rejected; the legacy file has a deletion gate (FE-9).
-- **CSS-in-JS runtimes** (styled-components, emotion): rejected; they reintroduce runtime style
-  injection that fights a strict `style-src` and adds bundle weight for nothing tokens can't do.
-- **A large pre-styled component library** (MUI, AntD, Mantine): rejected; visual identity,
-  bundle weight, and theming debt outweigh speed; CULVERT builds its own thin design system on
-  tokens + (at most) headless primitives.
-
 ## Consequences
 
-- Two frontends coexist during migration (legacy embedded file + new app behind a dev flag /
-  parallel route), bounded by the FE-9 deletion gate — no permanent dual mode.
-- ~29 markup-string-scanning Go tests are progressively replaced by behavior-level tests
-  (component/E2E) as their features migrate; the *intent* tests (no inline handlers, no external
-  origins, no native dialogs, typed-confirm coverage, CSP posture) are re-expressed against the
-  new bundle in FE-1/FE-2 rather than deleted.
-- CI grows: Node setup + `npm ci` caching, frontend lint/type/test/build jobs, dist drift gate
-  (option A), npm license + vulnerability scanning, Playwright-TS lane; `proxy-ui-e2e.yml` path
-  filters updated to include `frontend/**`.
-- `ui_static.go` is rewritten for hashed-asset serving + SPA fallback (design in
-  `FRONTEND-MIGRATION-PLAN.md` FE-1); the `__CSP_NONCE__` substitution contract is preserved for
-  the shell only.
-- Browser support floor formalized: evergreen Chrome/Edge/Firefox + Safari ≥ 16 (supersedes the
-  incidental Safari ≥ 12.1 floor recorded in M1-M2-SELF-REVIEW L1).
+- Two frontends exist in the tree during migration; the new app's `/app/` preview route is
+  **disabled by default** and available only under an explicit experimental development/test
+  flag — the shipping product never exposes an unfinished second frontend. No `/legacy/`
+  route ever ships: at cutover the new frontend takes `/` and the legacy frontend is removed
+  from the shipping tree in the same release; rollback is image/commit rollback.
+- ~29 markup-string-scanning Go tests are progressively replaced by behavior-level tests; the
+  intent tests (no inline handlers, air-gap, no native dialogs, typed-confirm coverage, CSP
+  posture) are re-expressed against the new bundle in FE-1A/FE-2.
+- CI grows exactly one Node lane (verification/drift) plus license/vuln scanning;
+  `proxy-ui-e2e.yml` path filters gain `frontend/**`.
+- The serving layer is rewritten per the hardened contract (`FRONTEND-MIGRATION-PLAN.md` §2,
+  `FRONTEND-SECURITY-CONTRACT.md` §9): hashed assets, manifest validation, strict resolution
+  order, and **frontend-subsystem-unavailable = explicit 503 + degraded readiness + critical
+  log/metric — never a process-wide startup failure** (a frontend asset problem must not
+  become a proxy outage; making it process-fatal would require its own ADR).
+- Browser support floor: evergreen Chrome/Edge/Firefox + Safari ≥ 16 (supersedes the
+  incidental Safari ≥ 12.1 floor in M1-M2-SELF-REVIEW L1).
 
-## Open questions for review
+## Open questions
 
-- **OQ-1**: Committed vs release-built `dist` (recommendation: committed, with drift gate).
-- **OQ-2**: Radix primitives vs fully hand-rolled a11y primitives (recommendation: Radix for
-  Dialog/Popover/Tabs only; decide per component in FE-2 with a bundle-size check).
-- **OQ-3**: OpenAPI-generated types now vs hand-authored-incremental. Discovery closed most of
-  this question: `api/route-classification.yaml` shows 334/343 method-rows documented and
-  `openapi.json` is committed + deterministic, so `openapi-typescript` can run offline against a
-  committed artifact with no network and no drift (a CI gate compares generated output).
-  Recommendation: **generate from day one**; hand-author only the 9 exempt rows. Residual
-  decision for review: whether generated `types.gen.ts` is committed (mirroring the dist
-  decision in OQ-1) — recommended yes, with the same rebuild-and-compare drift gate. One caveat
-  the spec itself records: API errors are `text/plain` via `http.Error`, not a JSON envelope —
-  the typed client must model errors as `(status, text)` and not invent an error schema.
+- **OQ-1**: CLOSED — committed `frontend/dist/` (review decision above).
+- **OQ-2**: OPEN, deferred to FE-2 by review approval — Radix vs internal primitives, decided
+  component-by-component with recorded justification.
+- **OQ-3**: CLOSED — committed `frontend/src/api/types.gen.ts` generated from the committed
+  `openapi.json`, same drift gate as dist. Runtime decoders remain mandatory at the boundary
+  (types are compile-time only); API errors are modeled as `(status, text)` because the
+  contract documents `text/plain` errors.

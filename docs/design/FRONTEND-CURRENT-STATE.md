@@ -96,7 +96,7 @@ bundler config, or `.ts` file. The only `npm` invocation in CI installs the play
 
 | ID | Finding | Anchor |
 |---|---|---|
-| GAP-1 | The C2 metadata index files Go-1.22 `{param}` wildcard paths under their literal `{id}` string, so the **10 wildcard routes never match**; e.g. `/api/support/bundles/<id>/approve` falls to the public `/` catch-all and **skips C2 entirely** (handler `requireRole` is the only gate) | `ui_metadata_enforcement.go:179–200` |
+| GAP-1 | The C2 metadata index files Go-1.22 `{param}` wildcard paths under their literal `{id}` string, so the **10 wildcard routes never match**; e.g. `/api/support/bundles/<id>/approve` falls to the public `/` catch-all and skips the C2 metadata-enforcement layer. Stated precisely: a **C2 metadata-enforcement (defense-in-depth) bypass, not a proven authentication bypass** — handler-level `requireRole` still gates every affected handler. Tracked as work item SEC-C2. | `ui_metadata_enforcement.go:179–200` |
 | GAP-2 | `/api/auth/totp*` public-allowlist entry has no handler; no TOTP enrollment API exists | `ui_middleware.go:232–242` |
 | GAP-3 | No HSTS on the admin UI despite HTTPS-by-default; `Secure` cookie flag silently drops on self-sign failure or a proxy that omits `X-Forwarded-Proto` | `ui.go:135–136`, `ui_session.go:16–18` |
 | GAP-4 | `PATCH` outside `isMutating` (CSRF/body-cap/rate-limit bypass if ever routed) | `ui_middleware.go:174` |
@@ -191,8 +191,12 @@ dependencies, current test coverage, and migration risk — lives in
 
 ## 6. Backend contracts the frontend consumes (keep — authoritative)
 
-- **Routes**: 229 `uiRoutes` entries / 344 method rows (viewer 148, admin 115, operator 66,
-  public 15; mutating 182; audit-expected 162), count-locked by C1 + D0 tests. Route additions
+- **Routes**: 229 `uiRoutes` entries / **343** method rows (GET 146, POST 114, PUT 35,
+  DELETE 32, MethodAny 16; viewer 147, admin 115, operator 66, public 15; mutating 182;
+  audit-expected 162), count-locked by C1 + D0 tests. (An earlier draft said 344 — that
+  figure counted a `{Method:` occurrence inside a comment at `ui_routes_meta.go:80`; the
+  structured count is 343 and matches `api/route-classification.yaml` 1:1. The full generated
+  accounting table lives in `FRONTEND-SECURITY-CONTRACT.md` §7.) Route additions
   are a four-place change (registration, `ui_routes_meta.go`, `d0KnownRoutes`,
   `api/route-classification.yaml`) + `make api-bundle`.
 - **OpenAPI (ADR-0018)**: `api/openapi/openapi.yaml` (11,049 lines, 221 paths, ~570 schemas),

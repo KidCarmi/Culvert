@@ -2,8 +2,9 @@
 
 - **Status**: Baseline (2026-08-21). This is the parity gate for the frontend replacement: FE-8
   cutover requires every row DONE or explicitly descoped with sign-off. Measured from
-  `static/index.html` (21,565 lines, 38 views), `ui_routes_meta.go` (229 routes / 344 method
-  rows), and the discovery inventory in `FRONTEND-CURRENT-STATE.md`.
+  `static/index.html` (21,565 lines, 38 views), `ui_routes_meta.go` (229 routes / 343 method
+  rows — see the generated accounting table in `FRONTEND-SECURITY-CONTRACT.md` §7), and the
+  discovery inventory in `FRONTEND-CURRENT-STATE.md`.
 - Legend — **Role**: minimum role that sees the panel (`data-min-role` and/or imperative guard;
   backend per-endpoint roles remain authoritative). **Mut**: panel contains mutating calls.
   **Destr**: contains destructive/hard-to-reverse operations (T3 = typed-word tier-3 ceremony,
@@ -16,7 +17,7 @@
 
 | ID | View (`data-view`) | Endpoints (families) | Role | Mut | Destr | Audit | Poll/SSE | Tests | Risk |
 |---|---|---|---|---|---|---|---|---|---|
-| FE-V01 | `dashboard` | `/api/stats`, `/api/timeseries`, `/api/top-hosts`, `/api/country-traffic`, `/api/dashboard/{health,threats,top-rules}`, `/api/health/explain` | viewer | no | — | — | 3 s tick + SSE `/api/events` (counters, countries, LIVE pill) | E (LiveSSEDashboard), A | **H** — SSE lifecycle + tick pause/resume semantics + 2 Chart.js charts + posture strip |
+| FE-V01 | `dashboard` | `/api/stats`, `/api/timeseries`, `/api/top-hosts`, `/api/country-traffic`, `/api/dashboard/{health,threats,top-rules}`, `/api/health/explain` | viewer | no | — | — | 3 s tick + SSE `/api/events` (counters, countries, LIVE pill) | E (LiveSSEDashboard), A | **H** — SSE lifecycle + tick pause/resume semantics + 2 charts (Chart.js is **conditional on the FE-2 gate** — strict-CSP/no-style-mutation proof, else replaced by an internal SVG/CSS implementation; see ADR-FE-001) + posture strip |
 | FE-V02 | `livefeed` (Traffic) | `/api/requests`, `/api/logs{,/retention,/purge}`, `/api/export` | viewer | purge/retention | purge (confirm) | yes | 3 s tick | E (TrafficRuleLink…), A | M — high-churn table, filters, history paging, rule-ID deep link |
 | FE-V03 | `audit` | `/api/audit` | viewer | no | — | — | on-view load | E (AuditTrail, AuditLog_Filterable) | L |
 | FE-V04 | `decexclusions` | `/api/decryption-exclusions{,/tunables}` | viewer (tunables admin) | yes | evict one / clear all / reset tunables (confirms) | yes | on-view | G (decexcl_tunables), A | L |
