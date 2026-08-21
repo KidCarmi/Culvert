@@ -144,16 +144,16 @@ func TestEmptyClientKeyIsUsable(t *testing.T) {
 
 func TestCapIsNeverExceeded(t *testing.T) {
 	c := newClk()
-	const max = 16
-	s := NewWithClock[int](time.Hour, max, c.now)
+	const maxEntries = 16
+	s := NewWithClock[int](time.Hour, maxEntries, c.now)
 	for i := range 500 {
 		s.Set(fmt.Sprintf("k%d", i), fmt.Sprintf("c%d", i%7), i)
-		if n := s.Len(); n > max {
-			t.Fatalf("after %d inserts Len = %d, want <= %d", i+1, n, max)
+		if n := s.Len(); n > maxEntries {
+			t.Fatalf("after %d inserts Len = %d, want <= %d", i+1, n, maxEntries)
 		}
 	}
-	if s.Len() != max {
-		t.Errorf("Len = %d, want %d (a saturated store stays saturated)", s.Len(), max)
+	if s.Len() != maxEntries {
+		t.Errorf("Len = %d, want %d (a saturated store stays saturated)", s.Len(), maxEntries)
 	}
 }
 
@@ -161,7 +161,7 @@ func TestNonPositiveMaxIsClamped(t *testing.T) {
 	s := New[string](time.Minute, 0)
 	s.Set("k", "c", "v")
 	if s.Len() != 1 {
-		t.Fatalf("Len = %d, want 1 (max<1 must clamp to 1, not to an unusable store)", s.Len())
+		t.Fatalf("Len = %d, want 1 (maxEntries<1 must clamp to 1, not to an unusable store)", s.Len())
 	}
 }
 
@@ -194,14 +194,14 @@ func TestExpiredEntriesAreReclaimedBeforeEviction(t *testing.T) {
 // entry with overwhelming probability.
 func TestFloodingClientEvictsOnlyItself(t *testing.T) {
 	c := newClk()
-	const max = 64
-	s := NewWithClock[string](10*time.Minute, max, c.now)
+	const maxEntries = 64
+	s := NewWithClock[string](10*time.Minute, maxEntries, c.now)
 
 	// An honest browser starts one login.
 	s.Set("victim-state", "10.0.0.9", "victim-verifier")
 
 	// A single unauthenticated source floods far past the cap.
-	for i := range 100 * max {
+	for i := range 100 * maxEntries {
 		c.advance(time.Millisecond)
 		s.Set(fmt.Sprintf("flood-%d", i), "198.51.100.7", "x")
 	}
@@ -219,8 +219,8 @@ func TestFloodingClientEvictsOnlyItself(t *testing.T) {
 // that each hold a single entry.
 func TestFloodingClientCannotStarveManyVictims(t *testing.T) {
 	c := newClk()
-	const max = 64
-	s := NewWithClock[string](10*time.Minute, max, c.now)
+	const maxEntries = 64
+	s := NewWithClock[string](10*time.Minute, maxEntries, c.now)
 
 	victims := make([]string, 0, 32)
 	for i := range 32 {
@@ -229,7 +229,7 @@ func TestFloodingClientCannotStarveManyVictims(t *testing.T) {
 		c.advance(time.Millisecond)
 		s.Set(k, fmt.Sprintf("10.0.0.%d", i), "v")
 	}
-	for i := range 50 * max {
+	for i := range 50 * maxEntries {
 		c.advance(time.Millisecond)
 		s.Set(fmt.Sprintf("flood-%d", i), "198.51.100.7", "x")
 	}
@@ -370,9 +370,9 @@ func TestBucketMemoryDoesNotGrowWithChurn(t *testing.T) {
 // meant to survive.
 func TestBucketMemoryDoesNotGrowUnderSustainedFlood(t *testing.T) {
 	c := newClk()
-	const max = 64
-	s := NewWithClock[string](time.Hour, max, c.now)
-	for i := range 200 * max {
+	const maxEntries = 64
+	s := NewWithClock[string](time.Hour, maxEntries, c.now)
+	for i := range 200 * maxEntries {
 		c.advance(time.Millisecond)
 		s.Set(fmt.Sprintf("k%d", i), "flooder", "v")
 	}
@@ -383,11 +383,11 @@ func TestBucketMemoryDoesNotGrowUnderSustainedFlood(t *testing.T) {
 		n = len(b.keys)
 	}
 	s.mu.Unlock()
-	if n > 4*max {
-		t.Errorf("bucket slice grew to %d for a store capped at %d — compaction does not fire while a client sits at the cap", n, max)
+	if n > 4*maxEntries {
+		t.Errorf("bucket slice grew to %d for a store capped at %d — compaction does not fire while a client sits at the cap", n, maxEntries)
 	}
-	if s.Len() != max {
-		t.Errorf("Len = %d, want %d", s.Len(), max)
+	if s.Len() != maxEntries {
+		t.Errorf("Len = %d, want %d", s.Len(), maxEntries)
 	}
 }
 
@@ -417,8 +417,8 @@ func TestClientAccountingSurvivesEviction(t *testing.T) {
 // ── Concurrency ─────────────────────────────────────────────────────────────
 
 func TestConcurrentUseIsRaceFreeAndBounded(t *testing.T) {
-	const max = 128
-	s := New[int](time.Minute, max)
+	const maxEntries = 128
+	s := New[int](time.Minute, maxEntries)
 
 	var wg sync.WaitGroup
 	for w := range 16 {
@@ -438,8 +438,8 @@ func TestConcurrentUseIsRaceFreeAndBounded(t *testing.T) {
 	}
 	wg.Wait()
 
-	if n := s.Len(); n > max {
-		t.Errorf("Len = %d, want <= %d", n, max)
+	if n := s.Len(); n > maxEntries {
+		t.Errorf("Len = %d, want <= %d", n, maxEntries)
 	}
 }
 

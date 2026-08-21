@@ -50,12 +50,12 @@ import (
 // The zero value is not usable; construct with New or NewWithClock. All
 // methods are safe for concurrent use.
 type Store[T any] struct {
-	mu      sync.Mutex
-	entries map[string]*record[T]
-	buckets map[string]*bucket
-	ttl     time.Duration
-	max     int
-	now     func() time.Time
+	mu         sync.Mutex
+	entries    map[string]*record[T]
+	buckets    map[string]*bucket
+	ttl        time.Duration
+	maxEntries int
+	now        func() time.Time
 
 	evictions uint64
 }
@@ -78,28 +78,28 @@ type bucket struct {
 	live int
 }
 
-// New returns a store bounded by ttl and max, using the wall clock.
-// A non-positive max is treated as 1 (a store that cannot hold anything is a
+// New returns a store bounded by ttl and maxEntries, using the wall clock.
+// A non-positive maxEntries is treated as 1 (a store that cannot hold anything is a
 // silent outage; a store of one is at least honest about the bound).
-func New[T any](ttl time.Duration, max int) *Store[T] {
-	return NewWithClock[T](ttl, max, time.Now)
+func New[T any](ttl time.Duration, maxEntries int) *Store[T] {
+	return NewWithClock[T](ttl, maxEntries, time.Now)
 }
 
 // NewWithClock is New with an injected clock, so expiry and eviction ordering
 // are deterministic under test.
-func NewWithClock[T any](ttl time.Duration, max int, now func() time.Time) *Store[T] {
-	if max < 1 {
-		max = 1
+func NewWithClock[T any](ttl time.Duration, maxEntries int, now func() time.Time) *Store[T] {
+	if maxEntries < 1 {
+		maxEntries = 1
 	}
 	if now == nil {
 		now = time.Now
 	}
 	return &Store[T]{
-		entries: make(map[string]*record[T]),
-		buckets: make(map[string]*bucket),
-		ttl:     ttl,
-		max:     max,
-		now:     now,
+		entries:    make(map[string]*record[T]),
+		buckets:    make(map[string]*bucket),
+		ttl:        ttl,
+		maxEntries: maxEntries,
+		now:        now,
 	}
 }
 
@@ -119,12 +119,12 @@ func (s *Store[T]) Set(key, client string, val T) {
 
 	now := s.now()
 	s.removeLocked(key)
-	if len(s.entries) >= s.max {
+	if len(s.entries) >= s.maxEntries {
 		s.sweepExpiredLocked(now)
 	}
-	// Loop rather than evict once: max can be lowered between calls, and an
+	// Loop rather than evict once: maxEntries can be lowered between calls, and an
 	// evictOneLocked that finds nothing to take must not spin.
-	for len(s.entries) >= s.max {
+	for len(s.entries) >= s.maxEntries {
 		if !s.evictOneLocked() {
 			break
 		}

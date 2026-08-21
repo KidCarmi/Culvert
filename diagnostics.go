@@ -167,6 +167,9 @@ func buildOperatorContract() OperatorContract {
 	// exemption postures. Contributes nothing when no exempt rules exist.
 	checks = append(checks, authExemptDiagnostics(policyStore.List(), policyActionFromDefault())...)
 	checks = append(checks, authCredentialRequiredDiagnostics(policyStore.List(), hasCredentialCapableProvider())...)
+	// LDAP profile hygiene diagnostics (ADR-0025). Report-only; contribute
+	// nothing when no LDAP profiles exist.
+	checks = append(checks, authLDAPProfileDiagnostics()...)
 	// SSORequired risk diagnostics + auth-rule shadow/overlap diagnostics (Phase 3
 	// Slice 5). Report-only; contribute nothing when no SSO/auth rules apply.
 	checks = append(checks, authSSORequiredDiagnostics(policyStore.List())...)
@@ -467,7 +470,7 @@ func checkAuditPersistence() OperatorContractCheck {
 // state clears when a backend is observed to answer, never on elapsed time.
 // Memory-only read; no probe is issued from the diagnostics path. The cause
 // text is deliberately NOT reproduced here: it names the configured endpoint
-// (an LDAP URL, an IdP host), and this contract is a VIEWER-role surface with a
+// (an LDAP URL, an OIDC introspection host), and this contract is a VIEWER-role surface with a
 // standing no-sensitive-values guardrail. The cause goes to the admin-scoped
 // sinks — the log line and the identity_backend_unreachable alert.
 func checkIdentityBackend() OperatorContractCheck {
@@ -1179,11 +1182,12 @@ func hasCredentialCapableProvider() bool {
 			return true
 		}
 	}
-	// HasEnabledOIDC reads the profiles in place. This probe runs on EVERY
+	// HasEnabledCredentialProvider reads the profiles in place (OIDC or LDAP —
+	// the CREDENTIAL-capable types, ADR-0025). This probe runs on EVERY
 	// proxied request (resolveRequestAuth's credCapable), and the previous
 	// idpRegistry.All() loop deep-cloned every profile per call just to
 	// answer this boolean — pure per-request allocation on the hot path.
-	return idpRegistry != nil && idpRegistry.HasEnabledOIDC()
+	return idpRegistry != nil && idpRegistry.HasEnabledCredentialProvider()
 }
 
 // exemptRiskBuckets collects offending exempt-rule names per risk category.
