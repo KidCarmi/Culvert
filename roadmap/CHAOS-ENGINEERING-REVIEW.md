@@ -24,7 +24,8 @@ everything else is triaged below with a suggested PR and required tests for foll
 > are all stamped `CHAOS-50`, as are ~20 source comments across the three merged
 > PRs. **Cite these findings by SECTION number, not by CHAOS id, until this is
 > resolved.** This is the SECOND occurrence of the same governance failure:
-> `docs/engineering/PRODUCTION-FAILURE-MODE-AUDIT.md` §14 recorded that the
+> `docs/engineering/PRODUCTION-FAILURE-MODE-AUDIT.md` §13 (Governance
+> observations) recorded that the
 > 2026-07-07 and 2026-07-10 reviews both defined CHAOS-22…27 with different
 > meanings, concluding *"the CHAOS series is not a stable registry —
 > cross-referencing an ID requires naming the review date"* and recommending a
@@ -381,7 +382,7 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | ST-6 | **`ui_users.json`: non-atomic write (no fsync) + fail-open-to-empty roster on corruption.** Power loss mid-save loses the entire admin roster + TOTP secrets + `default_auth_outcome`; loader starts empty with no quarantine → potential admin lockout. | GAP → **CLOSED** (`fileutil.AtomicWrite`, `store.go:887`) | H | `store.go:759-763,691-693`, `auth_startup.go:39-40` |
 | ST-7 | Persistent request-log JSONL write is **synchronous + globally serialized** under one mutex on the hot path → slow disk collapses proxy throughput (head-of-line). Disk-*full* is handled (counted, once-logged). | GAP → **CLOSED** (async bounded queue + single drainer, `internal/reqlog/persist.go`) | M | `internal/reqlog/reqlog.go:154-167`, `internal/fileutil/rotating.go:40-61` |
 | ST-8 | Audit write **silently drops on I/O failure** (`//nolint:errcheck`, no counter) — compliance "who changed what" vanishes on full/RO disk; `GetPersistent` re-reads the whole file per query. | GAP → **CLOSED (silent-loss half)** — every lost entry counted (`audit.WriteErrors()`), first failure logged, wired into the storage-health plane (degraded contract row + `storage_write_failed` alert), surfaced on `/api/stats`, `/metrics`, `/healthz` and the dashboard. Residual: persistence stays best-effort (an admin change still succeeds over a failing disk) and the `GetPersistent` full-file re-read is untouched — see §13 | M/H | `internal/audit/audit.go` (`countWriteError`, `SetWriteFailureObserver`), `storage_health.go` init |
-| ST-9 | Startup `logger.Fatalf` on blocklist/URL-category read errors (any non-`IsNotExist`) → **crash-loop** on permission/EIO faults. | GAP → **PARTLY CLOSED** (CHAOS-50 closed the Layer-2 community-store half — the one load with no defensible reason to be fatal. The three remaining fatal loads — `catStore.Load`, the blocklist, the policy file — are a POSTURE decision recorded as R-F in §17: `ui_users.json` and `cluster.json` quarantine-and-continue on a corrupt file while `categories.json`, their closest analogue, exits) | M | `blocklist_startup.go:59`, `main.go:724`, `urlcategories_startup.go` (catStore.Load); Layer-2 half now `loadCommunityFeedDB` — see §17 |
+| ST-9 | Startup `logger.Fatalf` on blocklist/URL-category read errors (any non-`IsNotExist`) → **crash-loop** on permission/EIO faults. | GAP → **PARTLY CLOSED** (CHAOS-50 closed the Layer-2 community-store half — the one load with no defensible reason to be fatal. The three remaining fatal loads — `catStore.Load`, the blocklist, the policy file — are a POSTURE decision recorded as R-F in §19: `ui_users.json` and `cluster.json` quarantine-and-continue on a corrupt file while `categories.json`, their closest analogue, exits) | M | `blocklist_startup.go:59`, `main.go:724`, `urlcategories_startup.go` (catStore.Load); Layer-2 half now `loadCommunityFeedDB` — see §19 |
 | ST-10 | Backup is not a consistent cross-file snapshot (inputs read at different instants); residual non-atomic writers (`cdrpolicy.go:195`, `internal/scanexcl/scanexcl.go:93`, `update_cluster.go:193`). | GAP | L/M | backup pack loop `backup.go:~280`; flagged by `cluster_persistence_atomic_test.go:8` |
 | ST-11 | RotatingFile keeps one archive; reopen failure after rename leaves logging wedged until restart (bounded-growth design otherwise correct). | ✓ (edge) | L | `internal/fileutil/rotating.go:44-56` |
 | ST-12 | catdb corruption-recovery comment claims Badger truncate-on-corruption but `Open` sets no such option; a corrupt community DB is fatal via ST-9 coupling. **Re-scoped by CHAOS-50 and far worse than recorded:** the option does not exist to add (badger v4 REMOVED `Options.Truncate`), the store was default-ON in the shipped compose file behind `restart: unless-stopped` (⇒ unattended crash-loop, no admin UI to recover from), and the worst fault does not return an error at all — a corrupt `.sst` PANICS from a badger-spawned goroutine, so no caller-side `recover()` can contain it. | GAP (doc/behavior) → **CLOSED** (CHAOS-50: `catdb.OpenResilient` — poison marker + flock-gated quarantine + deny-list-first classifier; degrade, never exit) | L → **H** | was: `internal/catdb/catdb.go` `Open`; now `internal/catdb/resilient.go`, `loadCommunityFeedDB` — see §17 |
@@ -1729,6 +1730,19 @@ pinned by `TestCheckCategoryFeedDB_RowCarriesNoRawCause`.
   the closest analogue to the two files CHAOS-05/07 chose to quarantine, and it
   exits instead. Whether "policy-load-bearing" justifies refuse-to-boot rather
   than boot-and-deny is an owner call, not a patch.
+
+  **This is not a new finding, and that is the point.** The 2026-07-11 audit
+  already inventoried the whole class as **F-23 "Crash loop on fatal config"**
+  (`docs/engineering/PRODUCTION-FAILURE-MODE-AUDIT.md` §4, the failure-mode
+  matrix), naming five fatal sites — bad policy, blocklist, malformed HA lease,
+  **`urlcategories_startup.go:22,46`**, and port-bind — noting `restart: unless-stopped` ⇒ *"indefinite crash loop"*
+  with *"no self-alert after day-1"*, and ranking it among the top availability
+  killers (§15). Its `Mode` column reads `CLOSED` in the sense that table uses —
+  fail-CLOSED, i.e. the process dies rather than passing traffic — **not**
+  "resolved"; the audit is an inventory, not a tracker, and nothing claimed a fix.
+  CHAOS-50 closed exactly ONE of F-23's five sites, a month later, having
+  rediscovered it independently. The remaining four are R-F. Anyone picking this
+  up should start from F-23's list rather than re-deriving it a third time.
 - **Panic recovery costs one restart.** The marker cannot act until the boot
   after the crash. Zero-crash recovery means probing the store in a child process
   first — better, and a reasonable follow-up, but larger than the fault warrants.
