@@ -17,6 +17,24 @@ everything else is triaged below with a suggested PR and required tests for foll
 
 ## 0. Revision log
 
+> **⚠️ IDENTIFIER COLLISION — `CHAOS-50` names THREE unrelated sweeps.** Several
+> reviews ran concurrently in August 2026 and each took the next free number
+> independently, so §17 (the cluster/enrollment CA lifecycle), §18 (the CA
+> plane's recovery paths) and §19 (the boot path under a damaged data volume)
+> are all stamped `CHAOS-50`, as are ~20 source comments across the three merged
+> PRs. **Cite these findings by SECTION number, not by CHAOS id, until this is
+> resolved.** This is the SECOND occurrence of the same governance failure:
+> `docs/engineering/PRODUCTION-FAILURE-MODE-AUDIT.md` §14 recorded that the
+> 2026-07-07 and 2026-07-10 reviews both defined CHAOS-22…27 with different
+> meanings, concluding *"the CHAOS series is not a stable registry —
+> cross-referencing an ID requires naming the review date"* and recommending a
+> single append-only ledger (`TECHNICAL-RISK-REGISTER.md`, 2026-07-11 entry).
+> That recommendation was never implemented, and concurrent sweeps have now
+> reproduced it. Allocating an id at the START of a sweep, in a committed
+> placeholder row, is what would actually prevent it. Renumbering now means
+> rewriting identifiers three merged PRs already reference, so it is an OWNER
+> decision, not a unilateral edit — recorded here rather than silently "fixed".
+
 **2026-08-19 — CHAOS-50 sweep (the cluster/enrollment CA across its lifecycle).**
 
 CHAOS-28 closed the inspection CA and handed off row **CA-13** as "the same defect class in the
@@ -1438,7 +1456,7 @@ lands in the same branch and the same verdict is correct for it.
 CA-17 (new, closed) · **Full review:**
 `docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-14.md`
 
-### 17.1 CHAOS-51 — the cluster CA install path self-deadlocked
+### 18.1 CHAOS-51 — the cluster CA install path self-deadlocked
 
 `sync.RWMutex` is not reentrant. `clusterCA.ImportCA` held `ca.mu.Lock()` across two
 calls that come straight back into the same object, and `CleanupSecondary` repeated
@@ -1482,7 +1500,7 @@ unwired; otherwise the deadlock at the preceding line wins).
 **Keep the rule:** nothing called between `ca.mu.Lock()` and its `Unlock` may reach
 `globalClusterCA`, `CurrentConfigSnapshot`, or the CP TLS pool.
 
-### 17.2 CHAOS-50 — a failed Root-CA load had no way back
+### 18.2 CHAOS-50 — a failed Root-CA load had no way back
 
 CHAOS-06 made the failure visible; CHAOS-28 made an *expired* CA fail closed. Neither asked
 what happens next, and the answer was nothing.
@@ -1514,7 +1532,7 @@ what happens next, and the answer was nothing.
    CHAOS-28. Now `culvert_ca_inspect_bypassed_total` + a rate-limited log + `/api/ca/status`
    + a CA-panel banner.
 
-### 17.3 What is deliberately left
+### 18.3 What is deliberately left
 
 - **CA-3b — the posture.** An inspect-matched CONNECT with no CA loaded still bypasses, while
   the same appliance-wide fault at *expiry* is refused 502. CHAOS-28's supporting argument
@@ -1527,7 +1545,7 @@ what happens next, and the answer was nothing.
 - **CA-13** — still open; this sweep went to `enrollment.go` for the deadlock and did not
   widen into the rotation-observability half.
 
-### 17.4 Review follow-ups (raised against the fix, fixed in the same PR)
+### 18.4 Review follow-ups (raised against the fix, fixed in the same PR)
 
 Both are the SAME SHAPE as the bug this sweep is about — a multi-step operation whose steps
 are individually atomic and jointly not — so they are recorded rather than deferred.
@@ -1562,7 +1580,7 @@ ST-9 (partly closed), WK-7 (boot half closed) ·
 **Full write-up:** `docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-17.md` ·
 **Runbook:** `docs/operator/category-store-recovery.md`
 
-### 17.1 The asymmetry
+### 19.1 The asymmetry
 
 CHAOS-05/07 already decided what a corrupt state file does at boot, and recorded
 the reasoning in `state_corruption.go`: quarantine the evidence, keep booting,
@@ -1582,7 +1600,7 @@ kept booting over the two that hold real state. `docker-compose.yml:152` sets
 unattended crash-loop: no proxy, no admin UI, no health endpoint, and no path
 back through any interface the product ships.
 
-### 17.2 The fault the obvious fix does not reach
+### 19.2 The fault the obvious fix does not reach
 
 A corrupt `.sst` does not make `badger.Open` return an error. It panics, from a
 goroutine badger itself spawns:
@@ -1603,7 +1621,7 @@ ST-12's recorded remedy is also gone: badger v4 REMOVED `Options.Truncate`. The
 doc comment on `catdb.Open` promising crash-truncation was simply false, and it
 is why the row sat at severity L for six weeks.
 
-### 17.3 The empirical table (badger v4.9.6, the options `catdb.Open` uses)
+### 19.3 The empirical table (badger v4.9.6, the options `catdb.Open` uses)
 
 | Injected fault | Result |
 |---|---|
@@ -1624,7 +1642,7 @@ matching is the only mechanism available — which is why the table is itself a
 test (`TestClassifyOpenError_EmpiricalBadgerMessages`) and why it is never
 allowed to authorise a rename on its own.
 
-### 17.4 The fix — `catdb.OpenResilient`
+### 19.4 The fix — `catdb.OpenResilient`
 
 1. **A per-attempt, flock-OWNED poison marker** (a SIBLING of the store, so a
    quarantine cannot carry it away) is armed around every open attempt and
@@ -1677,7 +1695,7 @@ The same mechanism on a store with authoritative content would be data
 destruction — which is why the quarantine moves aside rather than deletes, and
 why it is deliberately NOT extended to `internal/logstore` here.
 
-### 17.5 Visibility
+### 19.5 Visibility
 
 No new flag, YAML key, env var, or API field — the GUI-parity rule is satisfied
 by surfaces that already exist:
@@ -1696,7 +1714,7 @@ which is this review's own mistake committed one layer up. The diagnostics row
 also carries no raw path or badger error (the CHAOS-28 viewer-role guardrail),
 pinned by `TestCheckCategoryFeedDB_RowCarriesNoRawCause`.
 
-### 17.6 What is deliberately left
+### 19.6 What is deliberately left
 
 - **R-E — `internal/logstore` has the same uncatchable panic.** `OpenTTL`
   (`internal/logstore/logstore.go:298`) calls `badger.Open` with the same options

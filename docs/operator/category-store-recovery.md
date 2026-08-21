@@ -130,4 +130,4 @@ day** — that is disk nobody has reclaimed and an incident nobody has looked at
 - `docs/operator/root-ca-expiry.md` — the same fail-visible posture for the CA.
 - `docs/operator/support-bundles-and-diagnostics.md` — reading the operator
   contract rows.
-- `roadmap/CHAOS-ENGINEERING-REVIEW.md` §17 — the finding and its evidence.
+- `roadmap/CHAOS-ENGINEERING-REVIEW.md` §19 — the finding and its evidence.
