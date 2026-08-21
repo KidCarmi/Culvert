@@ -188,3 +188,44 @@ func TestReadScanBuffer_AllocationsConstant(t *testing.T) {
 		}
 	}
 }
+
+// stallReader yields a few bytes, then fails — the shape of a hostile origin
+// that declares a large Content-Length and then never delivers it.
+type stallReader struct {
+	payload []byte
+	err     error
+}
+
+func (s *stallReader) Read(p []byte) (int, error) {
+	if len(s.payload) == 0 {
+		return 0, s.err
+	}
+	n := copy(p, s.payload)
+	s.payload = s.payload[n:]
+	return n, nil
+}
+
+// TestReadScanBuffer_StalledDeclarationDoesNotCommitHint pins the deferred
+// allocation: an origin that declares a body inside the presize cap but stalls
+// before delivering it must cost this proxy the io.ReadAll seed size it always
+// cost, not a hint-sized buffer per in-flight response (an amplification where
+// N parallel declare-and-stall responses commit N x maxScanPresizeBytes of
+// live heap for zero attacker bandwidth).
+func TestReadScanBuffer_StalledDeclarationDoesNotCommitHint(t *testing.T) {
+	stallErr := errors.New("origin stalled")
+	src := &stallReader{payload: []byte("abc"), err: stallErr}
+
+	got, err := ReadScanBuffer(src, 5<<20, maxScanPresizeBytes)
+	if !errors.Is(err, stallErr) {
+		t.Fatalf("err = %v, want the stall error", err)
+	}
+	if string(got) != "abc" {
+		t.Fatalf("bytes = %q, want the delivered prefix", got)
+	}
+	if cap(got) >= maxScanPresizeBytes {
+		t.Fatalf("returned buffer capacity %d — the declared hint was allocated before the origin produced the body", cap(got))
+	}
+	if cap(got) > 512 {
+		t.Fatalf("returned buffer capacity %d, want <= the 512-byte io.ReadAll seed", cap(got))
+	}
+}

@@ -70,11 +70,37 @@ func ReadScanBuffer(r io.Reader, limit, contentLength int64) ([]byte, error) {
 		return io.ReadAll(lr)
 	}
 
+	// One seed-sized read BEFORE committing the hinted allocation.
+	// Content-Length is declared by the origin — attacker-choosable — so an
+	// origin that advertises a body and then stalls must cost this proxy what
+	// the old io.ReadAll path cost (a 512-byte seed per in-flight response),
+	// not the full hint: without this, N parallel declare-and-stall responses
+	// would commit N x maxScanPresizeBytes of live heap for zero attacker
+	// bandwidth. The hint is spent only once the origin has produced bytes.
+	// 512 is io.ReadAll's own seed size, so the stalled/tiny-body shapes are
+	// byte-for-byte the cost profile of the path this function replaced.
+	var seed [512]byte
+	seedN := 0
+	for seedN < len(seed) {
+		n, err := lr.Read(seed[seedN:])
+		seedN += n
+		if err != nil {
+			if err == io.EOF {
+				err = nil
+			}
+			// EOF or error before the seed filled: the hint allocation was
+			// never needed. Return a right-sized copy (also avoids holding
+			// hint-sized memory for a body that over-declared its length).
+			return append([]byte(nil), seed[:seedN]...), err
+		}
+	}
+
 	// hint+512 rather than hint: the read that observes EOF still needs a free
 	// slot to read into, and 512 is io.ReadAll's own seed size. Without the
 	// slack a truthful Content-Length would pay one final grow-and-copy of the
 	// whole buffer — exactly the cost this function exists to remove.
-	buf := make([]byte, 0, hint+512)
+	buf := make([]byte, seedN, hint+512)
+	copy(buf, seed[:seedN])
 	for {
 		if len(buf) == cap(buf) {
 			buf = append(buf, 0)[:len(buf)]
