@@ -177,6 +177,62 @@ is_fresh_deployment() { return 0; }
 	}
 }
 
+// TestInstallScript_SetupAtRestEncryption_HostEnvOnlyCAPassphraseIsPersisted
+// proves that when CULVERT_CA_PASSPHRASE is already set — but ONLY in this
+// process's environment, e.g. exported by an automated/non-interactive
+// install before running scripts/install.sh, and not yet written to .env —
+// setup_at_rest_encryption() persists it to .env rather than treating it as
+// "already configured" and silently doing nothing.
+//
+// This matters because later in scripts/install.sh the stack is started with
+// plain `sudo docker compose up -d --wait ...` (no `-E`), which does NOT
+// forward the invoking shell's environment to the child process. A
+// CULVERT_CA_PASSPHRASE that lives only in this process's env and never
+// makes it into .env is therefore silently dropped: docker compose resolves
+// `${CULVERT_CA_PASSPHRASE:-}` to empty, and the proxy starts up and
+// generates/persists its Root CA private key UNENCRYPTED — exactly the
+// "proxy recreates with an empty passphrase" failure mode
+// carry_forward_prior_secrets() (scripts/install.sh) documents and guards
+// against for a different trigger (a re-run landing in a new stack dir).
+func TestInstallScript_SetupAtRestEncryption_HostEnvOnlyCAPassphraseIsPersisted(t *testing.T) {
+	setupFn := extractShellFunctionBraceAware(t, "scripts/install.sh", "setup_at_rest_encryption")
+	envPutFn := extractShellFunction(t, "scripts/install.sh", "env_put")
+	secretFn := extractShellFunction(t, "scripts/install.sh", "secret_already_set")
+
+	dir := t.TempDir()
+	envFile := filepath.Join(dir, ".env")
+	const hostCAPass = "host-env-only-ca-passphrase-5678" // #nosec G101 -- synthetic test fixture; never leaves this test
+
+	stubs := `
+info() { :; }
+warn() { :; }
+error() { echo "ERROR: $*" >&2; exit 7; }
+is_fresh_deployment() { return 0; }
+export CULVERT_CA_PASSPHRASE='` + hostCAPass + `'
+` + "INSTALL_DIR=" + dir + "\n"
+
+	script := stubs + secretFn + "\n" + envPutFn + "\n" + setupFn + "\n" + "setup_at_rest_encryption\n"
+
+	cmd := exec.CommandContext(t.Context(), "bash", "-c", script) // #nosec G204 -- fixed test script content, not external/user input
+	cmd.Stdin = bytes.NewReader(nil)                              // non-interactive: stdin is not a TTY
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("setup_at_rest_encryption failed: %v\n%s", err, out)
+	}
+
+	envContent := ""
+	if b, rerr := os.ReadFile(envFile); rerr == nil {
+		envContent = string(b)
+	}
+
+	if !strings.Contains(envContent, "CULVERT_CA_PASSPHRASE="+hostCAPass) {
+		t.Fatalf("a CULVERT_CA_PASSPHRASE set only in the host environment was never persisted to .env; "+
+			"'sudo docker compose up' (no -E) does not forward this shell's environment, so the proxy would "+
+			"start with an EMPTY CA passphrase and store its Root CA private key unencrypted. "+
+			"output:\n%s\n.env content:\n%s", out, envContent)
+	}
+}
+
 // TestInstallScript_SetupAtRestEncryption_FreshDeployWithUnsafeHostLogPassphraseSkipsCA
 // proves that when CULVERT_LOG_PASSPHRASE is supplied only via the host
 // environment and contains characters that are unsafe to persist verbatim in
@@ -223,5 +279,54 @@ export CULVERT_LOG_PASSPHRASE='` + unsafeLogPass + `'
 			"CULVERT_CA_PASSPHRASE in .env — docker compose's own .env interpolation could resolve this "+
 			"to a DIFFERENT value than the real log passphrase, silently mismatching the two encryption "+
 			"keys; output:\n%s\n.env content:\n%s", unsafeLogPass, out, envContent)
+	}
+}
+
+// TestInstallScript_SetupAtRestEncryption_HostEnvOnlyCAPassphraseWithEmbeddedNewlineRejected
+// proves that the host-env-only-CA-passphrase persistence path (added
+// alongside TestInstallScript_SetupAtRestEncryption_HostEnvOnlyCAPassphraseIsPersisted
+// above) rejects a value containing an embedded newline rather than
+// persisting it. Both halves of "abcdefgh\nijklmnop" are individually
+// charset-clean, so a charset check run with plain (line-splitting) `grep`
+// checks each half separately and never sees the disallowed newline — env_put
+// would then append the value as TWO lines ("CULVERT_CA_PASSPHRASE=abcdefgh"
+// followed by a bare "ijklmnop"), corrupting the persisted passphrase and
+// potentially leaving an existing CA bundle undecryptable (Codex review on
+// PR #1156). The check must treat the whole value as one unit (`grep -z`).
+func TestInstallScript_SetupAtRestEncryption_HostEnvOnlyCAPassphraseWithEmbeddedNewlineRejected(t *testing.T) {
+	setupFn := extractShellFunctionBraceAware(t, "scripts/install.sh", "setup_at_rest_encryption")
+	envPutFn := extractShellFunction(t, "scripts/install.sh", "env_put")
+	secretFn := extractShellFunction(t, "scripts/install.sh", "secret_already_set")
+
+	dir := t.TempDir()
+	envFile := filepath.Join(dir, ".env")
+
+	stubs := `
+info() { :; }
+warn() { :; }
+error() { echo "ERROR: $*" >&2; exit 7; }
+is_fresh_deployment() { return 0; }
+export CULVERT_CA_PASSPHRASE=$'abcdefgh\nijklmnop'
+` + "INSTALL_DIR=" + dir + "\n"
+
+	script := stubs + secretFn + "\n" + envPutFn + "\n" + setupFn + "\n" + "setup_at_rest_encryption\n"
+
+	cmd := exec.CommandContext(t.Context(), "bash", "-c", script) // #nosec G204 -- fixed test script content, not external/user input
+	cmd.Stdin = bytes.NewReader(nil)                              // non-interactive: stdin is not a TTY
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("setup_at_rest_encryption failed: %v\n%s", err, out)
+	}
+
+	envContent := ""
+	if b, rerr := os.ReadFile(envFile); rerr == nil {
+		envContent = string(b)
+	}
+
+	if strings.Contains(envContent, "CULVERT_CA_PASSPHRASE=") {
+		t.Fatalf("a host CULVERT_CA_PASSPHRASE containing an embedded newline (\"abcdefgh\\nijklmnop\", each "+
+			"half individually charset-clean) was persisted to .env instead of being rejected — a "+
+			"line-splitting charset check misses the newline, and env_put then appends the value as two "+
+			"malformed .env lines, corrupting the passphrase; output:\n%s\n.env content:\n%s", out, envContent)
 	}
 }

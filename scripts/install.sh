@@ -1553,6 +1553,34 @@ setup_at_rest_encryption() {
   # overwrite an existing value, and a set CA passphrase means at-rest
   # encryption was already decided one way or another).
   if [[ "$ca_set" == 1 ]]; then
+    # secret_already_set() treats a host-environment-only value (e.g.
+    # exported by an automated, non-interactive install before running this
+    # script) as "already configured" too — but §7 below starts the stack
+    # with plain `sudo docker compose up` (no `-E`), which does NOT forward
+    # this shell's environment to the child process. A CULVERT_CA_PASSPHRASE
+    # that lives only here and never makes it into .env is silently dropped:
+    # docker compose resolves it to empty and the proxy persists its Root CA
+    # private key UNENCRYPTED — the same "proxy recreates with an empty
+    # passphrase" failure carry_forward_prior_secrets() above guards against
+    # for a different trigger. Persist it now (same $-interpolation safety
+    # guard as the reuse-for-CA branch below) so it actually survives.
+    if [[ -n "${CULVERT_CA_PASSPHRASE:-}" ]] && ! grep -Eq '^CULVERT_CA_PASSPHRASE=.+' "$envfile" 2>/dev/null; then
+      # `-z`/--null-data makes grep match the WHOLE value as one record
+      # (instead of splitting on newlines and checking each line against the
+      # charset separately) — without it, a value containing an embedded
+      # newline whose individual lines each happen to be charset-clean (e.g.
+      # a secret-manager value with a stray "\n") would pass this check, then
+      # env_put would append it as a SECOND, malformed .env line, silently
+      # corrupting the persisted passphrase (Codex review, PR #1156).
+      if ! printf '%s' "$CULVERT_CA_PASSPHRASE" | LC_ALL=C grep -qz '[^A-Za-z0-9._@%^!*()+=:,-]'; then
+        env_put CULVERT_CA_PASSPHRASE "$CULVERT_CA_PASSPHRASE" "$envfile"
+      else
+        warn "CULVERT_CA_PASSPHRASE is set in the environment but contains characters unsafe to persist"
+        warn "verbatim in $envfile (docker compose re-interpolates \$-references when reading .env) —"
+        warn "leaving it out. 'sudo docker compose up' does not forward this shell's environment, so set"
+        warn "CULVERT_CA_PASSPHRASE directly in $envfile if you need it to survive this install."
+      fi
+    fi
     info "Encryption passphrase already configured — keeping existing values."
     return
   fi
