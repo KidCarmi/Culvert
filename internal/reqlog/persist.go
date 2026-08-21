@@ -3,6 +3,7 @@ package reqlog
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"io"
 	"sync"
 	"sync/atomic"
@@ -24,8 +25,8 @@ import (
 // The fix is the pattern this codebase already applies to its other two
 // request-log sinks — internal/logstore (queryable history) and
 // internal/syslog (SIEM): callers enqueue on a bounded channel and ONE drain
-// goroutine owns the file. A slow or stalled disk now costs bounded drops,
-// never proxy latency. Entries are drained in FIFO order by a single
+// goroutine owns the file. A slow disk now costs queue depth rather than
+// proxy latency. Entries are drained in FIFO order by a single
 // goroutine, so the JSONL file stays chronologically ordered exactly as
 // before, and the bytes written per entry are unchanged.
 //
@@ -81,8 +82,10 @@ var (
 // Backpressure reports how many request-log entries had to wait for room in
 // the persistence queue. Non-zero means the JSONL sink is not keeping up with
 // the request rate and proxy latency is once again coupled to disk latency —
-// the signal to move the request log to a faster volume. No entry is ever
-// lost, so this is a saturation gauge, not a loss counter.
+// the signal to move the request log to a faster volume. This is a saturation
+// gauge, not a loss counter: steady-state saturation loses nothing (callers
+// wait). Entries that genuinely never reach the file — a failed write, or a
+// saturated queue caught by shutdown — are counted by WriteErrors() instead.
 func Backpressure() int64 { return atomic.LoadInt64(&backpressure) }
 
 // enqueue hands an entry to the drain goroutine. The common path is a
@@ -91,10 +94,17 @@ func Backpressure() int64 { return atomic.LoadInt64(&backpressure) }
 func enqueue(e Entry) {
 	persistMu.Lock()
 	ch, stop := persistCh, stopCh
+	if ch != nil {
+		// Registered under the SAME critical section that publishes ch, so
+		// stopPersist — which nils the pointers under this mutex before
+		// waiting — observes every sender that could still hold this ch.
+		enqueueWG.Add(1)
+	}
 	persistMu.Unlock()
 	if ch == nil {
 		return
 	}
+	defer enqueueWG.Done()
 	select {
 	case ch <- e:
 		return
@@ -111,9 +121,27 @@ func enqueue(e Entry) {
 	case ch <- e:
 	case <-stop:
 		// Shutdown raced this send; the drain goroutine has stopped
-		// consuming, so waiting would hang the caller forever.
+		// consuming, so waiting would hang the caller forever. The entry
+		// does NOT reach the file, so charge it to writeErrors — that
+		// counter's contract is "entries that did not reach the file", and
+		// leaving this path silent would let the durable audit record lose
+		// entries with no counter and no log to show for it.
+		countWriteError(1, errShutdownRace)
 	}
 }
+
+// errShutdownRace marks an entry discarded because persistence shut down while
+// the caller was blocked on a saturated queue.
+var errShutdownRace = errors.New("request log: persistence stopped while the queue was saturated")
+
+// enqueueWG tracks in-flight enqueue calls so stopPersist can wait for every
+// sender that snapshotted the live channel before sweeping it. Without this, a
+// sender blocked on a saturated queue could win its `ch <- e` case AFTER the
+// drain goroutine's final takePending — stranding the entry in the abandoned
+// channel with no writeErrors charge (the review P2 on this accounting). Every
+// such sender completes promptly once `stop` is closed (both select cases are
+// ready), so the wait converges.
+var enqueueWG sync.WaitGroup
 
 // startPersist brings up the drain goroutine if it is not already running.
 // Idempotent; callers hold no lock.
@@ -138,7 +166,7 @@ func stopPersist() {
 		persistMu.Unlock()
 		return
 	}
-	stop := stopCh
+	ch, stop := persistCh, stopCh
 	persistCh, flushCh, stopCh = nil, nil, nil
 	persistMu.Unlock()
 
@@ -158,6 +186,23 @@ func stopPersist() {
 	case <-waited:
 	case <-timer.C:
 		obs.Printf("WARN request log: persistence drain did not stop within %v (sink wedged); abandoning it", persistSyncTimeout)
+	}
+
+	// Every sender that snapshotted this channel has now been registered on
+	// enqueueWG (registration shares the mutex section that published the
+	// channel), and each completes promptly once `stop` is closed — so after
+	// this wait, nothing can deposit into ch again. Sweep what the drain
+	// goroutine's final takePending raced past: a saturated sender that won
+	// its `ch <- e` case after that final drain would otherwise strand its
+	// entry in the abandoned channel, silently and uncounted.
+	enqueueWG.Wait()
+	for {
+		select {
+		case <-ch:
+			countWriteError(1, errShutdownRace)
+		default:
+			return
+		}
 	}
 }
 
@@ -229,48 +274,140 @@ func drainLoop(ch chan Entry, flush chan chan struct{}, stop chan struct{}) {
 	// A single reused encoder writes compact JSON + '\n' straight into the
 	// buffer. Byte-identical to the previous json.Marshal(e)+'\n', minus the
 	// per-entry intermediate slice.
-	bw := bufio.NewWriterSize(asyncSink{}, persistBufSize)
-	enc := json.NewEncoder(bw)
+	b := newBatch()
 
 	for {
-		select {
-		case e := <-ch:
-			batch := encodeEntry(enc, e)
-			batch += drainPending(enc, ch)
-			flushBatch(bw, batch)
-		case done := <-flush:
-			flushBatch(bw, drainPending(enc, ch))
-			close(done)
-		case <-stop:
-			// Final drain: entries already queued must still reach the file.
-			flushBatch(bw, drainPending(enc, ch))
+		if stopped := drainRound(b, ch, flush, stop); stopped {
 			return
 		}
 	}
 }
 
-// drainPending encodes every entry currently queued, returning how many it
-// buffered. It never blocks.
-func drainPending(enc *json.Encoder, ch chan Entry) int {
-	n := 0
+// batch owns the drain goroutine's write buffer AND the number of records
+// currently buffered but not yet flushed.
+//
+// The count has to live outside a single round so the panic-recovery path can
+// charge and discard exactly what was lost — see drainRound.
+type batch struct {
+	bw  *bufio.Writer
+	enc *json.Encoder
+	n   int // records buffered, not yet flushed
+}
+
+func newBatch() *batch {
+	bw := bufio.NewWriterSize(asyncSink{}, persistBufSize)
+	return &batch{bw: bw, enc: json.NewEncoder(bw)}
+}
+
+// encode buffers one record. The count is incremented BEFORE the encode: if
+// Encode panics part-way, the buffer may already hold a partial record, and
+// that record is lost either way — counting first keeps the discard honest.
+func (b *batch) encode(e Entry) {
+	b.n++
+	if err := b.enc.Encode(e); err != nil {
+		countWriteError(1, err)
+		b.n--
+	}
+}
+
+// takePending buffers every entry currently queued. It never blocks.
+func (b *batch) takePending(ch chan Entry) {
 	for {
 		select {
 		case e := <-ch:
-			n += encodeEntry(enc, e)
+			b.encode(e)
 		default:
-			return n
+			return
 		}
 	}
 }
 
-// encodeEntry buffers one JSONL record, returning 1 if the record is pending a
-// flush. A marshal failure is charged immediately — it never reaches the file.
-func encodeEntry(enc *json.Encoder, e Entry) int {
-	if err := enc.Encode(e); err != nil {
-		countWriteError(1, err)
-		return 0
+func (b *batch) flush() {
+	flushBatch(b.bw, b.n)
+	b.n = 0
+}
+
+// discard drops a buffer left poisoned by a recovered panic.
+//
+// This is load-bearing, not hygiene. bufio.Writer.Flush clears its buffer only
+// AFTER the underlying Write RETURNS (`b.n = 0` is the last statement), so a
+// Write that PANICS unwinds with the batch still buffered. Reusing that writer
+// replays the same poisoned bytes on every later flush: with a deterministic,
+// content-triggered fault the drain goroutine stays alive and healthy-looking
+// while nothing ever reaches the durable audit file again — a silent, permanent
+// loss of the compliance record, which is exactly the failure class the panic
+// guard exists to remove.
+//
+// So the batch is dropped and its records are charged to WriteErrors. The loss
+// is then BOUNDED (one batch) and VISIBLE, instead of unbounded and silent.
+// Reset also clears bufio's latched error, so a transient fault resumes
+// logging — the same contract flushBatch applies to a failed flush.
+func (b *batch) discard() {
+	if b.n > 0 {
+		countWriteError(int64(b.n), errPoisonedBatch)
+		b.n = 0
 	}
-	return 1
+	b.bw.Reset(asyncSink{})
+}
+
+// errPoisonedBatch explains a discard in the (once-only) write-error log line.
+// The panic VALUE is deliberately not folded in here — obs.ReportPanic routes
+// it to the crash sink, which owns the bounded, scrubbed, redacted record.
+var errPoisonedBatch = errors.New("batch discarded after a recovered panic in the request-log sink")
+
+// drainRound runs ONE select round of the drain loop, reporting whether stop
+// was observed.
+//
+// CHAOS-24: the guard is deliberately here, around the round, and NOT at the
+// top of drainLoop. This goroutine owns a BLOCKING queue — Add parks the caller
+// when the channel is full rather than discarding the durable audit record (see
+// Add above) — so a drain goroutine that EXITS is worse than one that crashes:
+// the process keeps running while every request goroutine piles up in Add,
+// forever, with no panic, no restart, and no alert. Recovering per round keeps
+// the consumer alive, so a panicking entry costs at most the batch it was in
+// and the queue keeps draining.
+//
+// The recovery path discards the (possibly poisoned) buffer before reporting —
+// see batch.discard for why continuing with it would wedge the log silently.
+// recover() only works when called directly by the deferred function, which is
+// why this reports via obs.ReportPanic instead of deferring obs.Guard.
+//
+// On a recovered panic the named return keeps its zero value (false), so the
+// loop simply continues. That is also correct on the stop branch: `stop` is
+// closed, so the next round's select observes it immediately and returns true.
+func drainRound(b *batch, ch chan Entry, flush chan chan struct{}, stop chan struct{}) (stopped bool) {
+	defer func() {
+		if v := recover(); v != nil {
+			b.discard()
+			obs.ReportPanic("reqlog_drain", v)
+		}
+	}()
+	select {
+	case e := <-ch:
+		b.encode(e)
+		b.takePending(ch)
+		b.flush()
+	case done := <-flush:
+		// close(done) runs through a defer so a panic mid-flush still RELEASES
+		// the Sync waiter. Sync is bounded, so the alternative is "only" a
+		// timeout — but ReadPersistent calls Sync, so that would put a stall on
+		// every admin request-log read for as long as the fault persists.
+		func() {
+			defer close(done)
+			b.takePending(ch)
+			b.flush()
+		}()
+	case <-stop:
+		// Final drain: entries already queued must still reach the file. If
+		// this panics the round returns false and the loop re-enters, but
+		// takePending has already consumed those entries and discard clears the
+		// buffer — so shutdown still converges (pinned by
+		// TestDrain_StopStillTerminatesAfterPanic).
+		b.takePending(ch)
+		b.flush()
+		return true
+	}
+	return false
 }
 
 // flushBatch pushes the buffered records to the sink. n is the number of

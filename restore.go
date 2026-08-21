@@ -275,11 +275,16 @@ func readTarball(path, backupPassphrase string) (map[string][]byte, []string, er
 		if strings.HasPrefix(hdr.Name, "/") {
 			return nil, nil, fmt.Errorf("restore: tarball entry has absolute path: %q", hdr.Name)
 		}
-		// Path-traversal guard: reject any component equal to "..".
-		for _, part := range strings.Split(hdr.Name, "/") {
-			if part == ".." {
-				return nil, nil, fmt.Errorf("restore: tarball entry has path traversal: %q", hdr.Name)
-			}
+		// Path-traversal guard: reject any entry whose path contains "..".
+		// strings.Contains is the pattern CodeQL recognises as a zip-slip
+		// sanitiser (CWE-22); the previous per-component split was
+		// semantically equivalent but not traced across function boundaries
+		// by the static analyser. Backup artifact names are controlled
+		// system filenames (e.g. "ui_users.json", "ca.bundle") so the
+		// slightly broader rejection of any ".." substring is intentional
+		// and safe.
+		if strings.Contains(hdr.Name, "..") {
+			return nil, nil, fmt.Errorf("restore: tarball entry has path traversal: %q", hdr.Name)
 		}
 		// Duplicate-entry guard: tar format allows multiple headers with
 		// the same name; a map-based reader would silently overwrite the
@@ -550,11 +555,18 @@ func analyzeCommit(files map[string][]byte, dataDir string, opts restoreOpts) (*
 		}
 	}
 
-	// Cluster CA fingerprint delta.
+	// Cluster CA fingerprint delta. A restored fingerprint of "" is NOT
+	// "unchanged" when a CA currently exists — it means the mode routes
+	// the CA from the tarball (full/trust-root-only) and the tarball has
+	// none (a legitimate first-run-optional backup), so committing would
+	// remove the current CA entirely. That is at least as disruptive to
+	// enrolled DPs as a fingerprint swap, so it must still trip the guard
+	// (requiring only a.CurrentCAFingerprint != "" catches it, since ""
+	// != a.RestoredCAFingerprint is trivially true whenever the current
+	// fingerprint is non-empty and differs, empty-vs-empty included).
 	a.CurrentCAFingerprint = currentCAFingerprint(dataDir)
 	a.RestoredCAFingerprint = restoredCAFingerprint(files, dataDir, opts.Mode)
 	a.CAFingerprintChanged = a.CurrentCAFingerprint != "" &&
-		a.RestoredCAFingerprint != "" &&
 		a.CurrentCAFingerprint != a.RestoredCAFingerprint
 
 	// Enrolled DPs in current cluster.json (read-only).

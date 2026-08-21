@@ -20,11 +20,13 @@ package main
 // Docker required.
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // searchableTempRoot creates a fresh directory directly under /tmp and makes it
@@ -152,5 +154,124 @@ func TestInstallScript_AgentAncestorsTraversable_Blocked0750Home(t *testing.T) {
 	if got := runAgentAncestorsTraversable(t, stack); got != "BLOCKED" {
 		t.Fatalf("agent_ancestors_traversable(%s) = %q, want BLOCKED when the %s ancestor is 0750 "+
 			"(no world-search bit, agent user not in group)", stack, got, home)
+	}
+}
+
+// TestInstallScript_AgentAncestorsTraversable_RelativePathDoesNotHang is the
+// field bug: CULVERT_DIR (INSTALL_DIR's source) is a documented operator
+// override with no requirement that it be absolute, and install.sh never
+// normalizes it before passing it to agent_ancestors_traversable. The walk
+// does `p="$(dirname "$1")"` and loops until p == "/" — but for a relative,
+// single-segment path (e.g. CULVERT_DIR=culvert-stack), dirname("culvert-stack")
+// is ".", and dirname(".") is ALSO "." forever, so the loop never reaches "/"
+// and spins forever. This turns a fail-closed safety guard (skip the
+// maintenance agent when an ancestor is unsearchable) into a hang that wastes
+// an otherwise-completed install with no output, requiring the operator to
+// notice and kill the process. The helper must resolve a relative path before
+// walking so it terminates like the absolute-path case.
+func TestInstallScript_AgentAncestorsTraversable_RelativePathDoesNotHang(t *testing.T) {
+	root := searchableTempRoot(t)
+	stack := filepath.Join(root, "stack")
+	if err := os.MkdirAll(stack, 0o750); err != nil {
+		t.Fatalf("mkdir stack: %v", err)
+	}
+	chmod0755Chain(t, root, stack)
+
+	fn := extractShellFunction(t, "scripts/install.sh", "agent_ancestors_traversable")
+	script := fn + "\nif agent_ancestors_traversable \"$1\"; then echo TRAVERSABLE; else echo BLOCKED; fi\n"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	// cmd.Dir=root + a bare relative leaf name reproduces a relative CULVERT_DIR:
+	// the string passed to agent_ancestors_traversable never starts with "/".
+	cmd := exec.CommandContext(ctx, "bash", "-c", script, "agent-traversable-test", "stack") //nolint:gosec // fixed script, path is a test tempdir
+	cmd.Dir = root
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		t.Fatalf("agent_ancestors_traversable(\"stack\") hung (infinite loop) on a relative path — "+
+			"dirname(\".\") == \".\" forever, so the ancestor walk never reaches \"/\"; got so far: %s", out)
+	}
+	if err != nil {
+		t.Fatalf("shell script failed: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != "TRAVERSABLE" {
+		t.Fatalf("agent_ancestors_traversable(\"stack\") = %q, want TRAVERSABLE for a relative path under a world-searchable root", got)
+	}
+}
+
+// extractShellLines pulls the literal source lines from the first line
+// containing startMarker (inclusive) up to (but not including) the first
+// later line containing endMarker, out of scriptPath. Used to exercise a
+// top-level script fragment (not a named function) exactly as it reads in
+// scripts/install.sh, instead of duplicating it in the test.
+func extractShellLines(t *testing.T, scriptPath, startMarker, endMarker string) string {
+	t.Helper()
+	raw, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", scriptPath, err)
+	}
+	lines := strings.Split(string(raw), "\n")
+	start := -1
+	for i, line := range lines {
+		if strings.Contains(line, startMarker) {
+			start = i
+			break
+		}
+	}
+	if start == -1 {
+		t.Fatalf("could not find start marker %q in %s", startMarker, scriptPath)
+	}
+	end := -1
+	for i := start + 1; i < len(lines); i++ {
+		if strings.Contains(lines[i], endMarker) {
+			end = i
+			break
+		}
+	}
+	if end == -1 {
+		t.Fatalf("could not find end marker %q in %s", endMarker, scriptPath)
+	}
+	return strings.Join(lines[start:end], "\n")
+}
+
+// TestInstallScript_AgentAncestorsTraversable_RealCallOrder_DoesNotDoubleCountLeaf
+// reproduces the ACTUAL production call order end-to-end: install.sh runs
+// `cd "$INSTALL_DIR"` (which can still hold a relative CULVERT_DIR override)
+// and only THEN canonicalizes it (`INSTALL_DIR="$PWD"`) — agent_ancestors_traversable
+// is never called before that. A fix that instead resolved a relative $1
+// against $PWD *inside* the helper, without also canonicalizing at the call
+// site, would double-count the leaf: by call time $PWD already equals the
+// target directory, so "$PWD/$1" names the target's own CHILD, and dirname()
+// of that is the target itself — the leaf gets checked as if it were an
+// ancestor. This proves that doesn't happen: a leaf that is 0700 (the state
+// BEFORE ensure_agent_traversal's later 0750 grant — see the comment above
+// agent_ancestors_traversable) must not make an otherwise-fully-searchable
+// path report BLOCKED.
+func TestInstallScript_AgentAncestorsTraversable_RealCallOrder_DoesNotDoubleCountLeaf(t *testing.T) {
+	root := searchableTempRoot(t)
+	stack := filepath.Join(root, "stack")
+	if err := os.MkdirAll(stack, 0o750); err != nil {
+		t.Fatalf("mkdir stack: %v", err)
+	}
+	if err := os.Chmod(stack, 0o700); err != nil {
+		t.Fatalf("chmod stack: %v", err)
+	}
+
+	canon := extractShellLines(t, "scripts/install.sh", `cd "$INSTALL_DIR"`, "# 6. Seed the pinned proxy image tag")
+	fn := extractShellFunction(t, "scripts/install.sh", "agent_ancestors_traversable")
+	script := "INSTALL_DIR=\"$1\"\n" + canon + "\n" + fn +
+		"\nif agent_ancestors_traversable \"$INSTALL_DIR\"; then echo TRAVERSABLE; else echo BLOCKED; fi\n"
+
+	// Start OUTSIDE stack (like install.sh's original invocation directory) and
+	// pass the RELATIVE leaf name — reproducing a relative CULVERT_DIR=stack.
+	cmd := exec.CommandContext(t.Context(), "bash", "-c", script, "agent-traversable-test", "stack") //nolint:gosec // fixed script, path is a test tempdir
+	cmd.Dir = root
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("shell script failed: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != "TRAVERSABLE" {
+		t.Fatalf("agent_ancestors_traversable after the real cd+canonicalize sequence = %q, want TRAVERSABLE "+
+			"(every real ancestor is 0755; a 0700 LEAF must not be checked as if it were its own ancestor)", got)
 	}
 }

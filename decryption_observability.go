@@ -134,15 +134,20 @@ func (o DecryptionOutcome) toBlock(redact bool) *logstore.DecryptionBlock {
 // reflects whether upstream verification was skipped for the matched rule (dec.SkipVerify);
 // CacheConsulted/ProfileID carry the fail-open scope read (hit-or-miss) from resolveSSLDecision.
 // FailStage/FailCategory stay `none` — a decrypted, inspected session has no failure.
-func inspectedOutcome(dec sslResolution, hostOnly string, upstreamCS tls.ConnectionState, match *PolicyMatch) *DecryptionOutcome {
+func inspectedOutcome(dec sslResolution, hostOnly string, upstreamCS tls.ConnectionState, match *PolicyMatch, effectiveSkip bool) *DecryptionOutcome {
 	// CertVerify must reflect the EFFECTIVE upstream verification the origin leg actually
-	// performed — resolveInspectSkipVerify, the same resolver upstreamInspectTLSConfigForMatch
-	// feeds. A decryption profile's CertVerification ("skip"/"strict"/"permissive") overrides
-	// the rule's inline dec.SkipVerify, so deriving from dec.SkipVerify alone would record the
-	// opposite of what happened (Codex #801). resolveInspectSkipVerify is deterministic in
-	// match, so this reproduces the handshake's effective skip without a second config build.
+	// performed. effectiveSkip is CAPTURED from the handshake's own tls.Config
+	// (upstreamTLSCfg.InsecureSkipVerify) — the ground truth of what this session did —
+	// rather than RE-RESOLVED against the live decryption-profile store. Re-resolving
+	// (the old resolveInspectSkipVerify call here) was a TOCTOU: a profile that mutates
+	// between the handshake-config build and this record build (admin edit, CP→DP config
+	// sync) could flip the recorded cert_verify to the opposite of what the handshake
+	// actually did, forging an inaccurate security audit record (CWE-367 → CWE-778).
+	// A decryption profile's CertVerification ("skip"/"strict"/"permissive") already
+	// overrode the rule's inline dec.SkipVerify when that config was built (Codex #801),
+	// so the captured value carries that precedence without a second, racy resolution.
 	certVerify := decryptobs.CertVerifyVerified
-	if resolveInspectSkipVerify(match, dec.SkipVerify) {
+	if effectiveSkip {
 		certVerify = decryptobs.CertVerifySkipped
 	}
 	o := &DecryptionOutcome{
@@ -284,6 +289,43 @@ func upstreamConnectFailureOutcome(err error, hostOnly string, dec sslResolution
 		CertVerify:     decryptobs.CertVerifyNotChecked,
 		FailStage:      decryptobs.FailStageTCPConnect,
 		FailCategory:   classifyConnectFailure(err),
+		ProfileID:      dec.ScopeID,
+		CacheConsulted: dec.Consulted,
+	}
+	if match != nil && match.Rule != nil {
+		o.RuleID = match.Rule.ID
+		o.RuleName = match.Rule.Name
+	}
+	return o
+}
+
+// caUnusableOutcome builds the ADR-0011 DecryptionOutcome for a session that
+// policy selected for inspection but that was failed CLOSED because this node's
+// own Root CA is outside its validity window (CHAOS-28).
+//
+// It reuses the frozen closed sets rather than extending them, and each choice
+// is load-bearing:
+//
+//   - DecisionNoFailOpen502 — the session was blocked with a 502 and no
+//     fail-open applied. That is literally what happened, and it keeps the
+//     appliance-wide fault out of the `inspect_unavailable` bucket, which means
+//     "bypassed because no CA was loaded" and must stay countable as a BYPASS.
+//   - FailStageClientHello — no forged leaf could be produced, so the failure
+//     lands on the client leg before any hello was answered.
+//   - FailCategoryCertificate — the defective certificate is ours, but the class
+//     an operator triages by is the same one.
+//
+// It never feeds the auto-exclusion learner: the fault is host-independent, so
+// learning from it would promote every host that happened to be requested
+// during the outage into a permanent bypass.
+func caUnusableOutcome(hostOnly string, dec sslResolution, match *PolicyMatch) *DecryptionOutcome {
+	o := &DecryptionOutcome{
+		Outcome:        decryptobs.OutcomeFailed,
+		DecisionSource: decryptobs.DecisionNoFailOpen502,
+		Host:           hostOnly,
+		CertVerify:     decryptobs.CertVerifyNotChecked,
+		FailStage:      decryptobs.FailStageClientHello,
+		FailCategory:   decryptobs.FailCategoryCertificate,
 		ProfileID:      dec.ScopeID,
 		CacheConsulted: dec.Consulted,
 	}

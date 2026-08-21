@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -292,6 +293,71 @@ func TestAPISetupComplete_UnauthMode(t *testing.T) {
 	assertStatus(t, w, http.StatusOK)
 }
 
+// TestAPISetupComplete_PersistFailure_DoesNotClaimSuccess proves the
+// first-time setup wizard cannot report success to the browser when the
+// admin credential it just created could not be durably saved to disk, and
+// that a retry after the transient fault clears actually succeeds.
+//
+// cfg.SetAuth only mutates in-memory state; cfg.IsConfigured() reads that
+// same in-memory state, not the file. If SaveUIUsersFile fails (disk full,
+// a misconfigured/read-only data volume — a realistic fresh-install fault)
+// and the handler still replies {"ok":true} + logs the operator in, the
+// operator walks away believing setup is complete. If the process restarts
+// before any later save succeeds, ui_users.json still doesn't exist,
+// IsConfigured() reverts to false on load, and the "one-time" setup wizard
+// reopens to ANY unauthenticated visitor — who can then claim the admin
+// account outright. Failing the request is not enough on its own, though:
+// SetAuth already flipped IsConfigured() to true in memory, so without a
+// rollback a retry would hit the "setup already complete" 403 with no
+// session and no persisted credential — a dead end for the operator. The fix
+// must both fail the request AND roll the in-memory state back so a retry
+// goes through the normal, retryable setup path.
+func TestAPISetupComplete_PersistFailure_DoesNotClaimSuccess(t *testing.T) {
+	resetSetupLockout()
+	t.Cleanup(resetSetupLockout)
+	snapshotAuthGlobals(t)
+	_ = cfg.SetAuth("", "") // ensure no auth configured
+
+	// Point uiUsersFile at a path whose parent directory does not exist, so
+	// SaveUIUsersFile's fileutil.AtomicWrite (os.CreateTemp in that dir)
+	// fails deterministically — simulating a disk/permission fault during
+	// first-time setup without needing real disk-full/permission tricks.
+	badDir := t.TempDir()
+	cfg.SetUIUsersFile(filepath.Join(badDir, "does-not-exist", "ui_users.json"))
+
+	w := httptest.NewRecorder()
+	initSecret(t)
+	apiSetupComplete(w, jsonReq(http.MethodPost, "/api/setup/complete", map[string]any{
+		"user": "admin", "pass": "Sup3rSecret1",
+	}))
+
+	if w.Code == http.StatusOK {
+		t.Fatalf("setup must not report success when the admin credential could not be durably persisted; got 200 body: %s", w.Body.String())
+	}
+	for _, c := range w.Result().Cookies() {
+		if c.Name == uiSessionCookieName {
+			t.Errorf("setup must not auto-login the operator when persistence failed; got session cookie %q", c.Name)
+		}
+	}
+	if cfg.IsConfigured() {
+		t.Fatalf("setup must roll back to unconfigured on persist failure so it stays retryable; IsConfigured() = true")
+	}
+
+	// Retry after the transient fault clears (point uiUsersFile at a writable
+	// path) must succeed via the normal setup path, not "setup already
+	// complete".
+	resetSetupLockout()
+	cfg.SetUIUsersFile(filepath.Join(badDir, "ui_users.json"))
+	w2 := httptest.NewRecorder()
+	apiSetupComplete(w2, jsonReq(http.MethodPost, "/api/setup/complete", map[string]any{
+		"user": "admin", "pass": "Sup3rSecret1",
+	}))
+	assertStatus(t, w2, http.StatusOK)
+	if !cfg.IsConfigured() {
+		t.Error("retry after the fault cleared should have completed setup")
+	}
+}
+
 // TestAPISetupComplete_ConcurrentRequests_OnlyOneWins proves apiSetupComplete's
 // "callable once" contract holds under concurrency. The handler reads
 // cfg.IsConfigured() and only later calls cfg.SetAuth — a classic
@@ -372,6 +438,74 @@ func TestAPIAuthLogin_NoAuth(t *testing.T) {
 	m := assertJSON(t, w)
 	if m["ok"] != true {
 		t.Errorf("expected ok=true when auth disabled, got %v", m)
+	}
+}
+
+// TestAPIAuthLogin_PreSetupSession_RejectedAfterSetupCreatesSameUsername proves
+// that a session issued by apiAuthLogin's pre-setup bootstrap bypass (any
+// credentials succeed while !cfg.IsConfigured(), ui_auth.go:65-68) cannot
+// outlive first-time setup.
+//
+// The setup wizard itself never calls /api/auth/login before setup completes
+// (static/index.html only wires the login form for the "setup already done"
+// branch), but the endpoint is public and reachable directly. An attacker who
+// POSTs to it before the real operator finishes the wizard — using the
+// wizard's own suggested default username "admin" (static/index.html
+// su-user field) — receives a real, signed admin session cookie for
+// Sub="admin" without knowing any real password. uiAuthMiddleware's only
+// defense against stale local sessions is rejecting sessions for a
+// nonexistent user (ui_middleware.go:271-275); once the real operator
+// completes setup with that same default username, the attacker's earlier
+// cookie now names an existing user and remains a valid admin session for
+// its full TTL.
+func TestAPIAuthLogin_PreSetupSession_RejectedAfterSetupCreatesSameUsername(t *testing.T) {
+	resetSetupLockout()
+	t.Cleanup(resetSetupLockout)
+	_ = cfg.SetAuth("", "")
+	defer func() { _ = cfg.SetAuth("", "") }()
+	initSecret(t)
+
+	// Attacker reaches the bootstrap window before setup completes.
+	loginW := httptest.NewRecorder()
+	apiAuthLogin(loginW, jsonReq(http.MethodPost, "/api/auth/login", map[string]any{
+		"user": "admin", "pass": "attacker-does-not-know-the-real-password",
+	}))
+	assertStatus(t, loginW, http.StatusOK)
+
+	var attackerCookie *http.Cookie
+	for _, c := range loginW.Result().Cookies() {
+		if c.Name == uiSessionCookieName {
+			attackerCookie = c
+		}
+	}
+	if attackerCookie == nil {
+		// No session was issued during the bootstrap window — the
+		// vulnerability this test guards against cannot occur here.
+		return
+	}
+
+	// The real operator completes first-time setup using the wizard's own
+	// suggested default username.
+	resetSetupLockout()
+	setupW := httptest.NewRecorder()
+	apiSetupComplete(setupW, jsonReq(http.MethodPost, "/api/setup/complete", map[string]any{
+		"user": "admin", "pass": "RealAdminPassword123!",
+	}))
+	assertStatus(t, setupW, http.StatusOK)
+
+	// Replay the attacker's pre-setup cookie against a protected endpoint
+	// through the real middleware chain.
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/users", http.NoBody)
+	req.RemoteAddr = "127.0.0.1:9999"
+	req.AddCookie(attackerCookie)
+	rec := httptest.NewRecorder()
+	uiAuthMiddleware(http.HandlerFunc(apiAuthUsers)).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("attacker's pre-setup session for username %q remained valid after setup created a real "+
+			"user with the same name (got status %d, body %q) — the bootstrap-window login lets an attacker "+
+			"mint a persistent admin session for the wizard's default username before the real operator "+
+			"finishes setup", "admin", rec.Code, rec.Body.String())
 	}
 }
 
@@ -604,6 +738,23 @@ func TestAPIStats_LogPersistenceFields(t *testing.T) {
 	}
 	if m["requestLogPath"] != requestLogConfiguredPath {
 		t.Errorf("requestLogPath = %v; want %v", m["requestLogPath"], requestLogConfiguredPath)
+	}
+}
+
+// TestAPIStats_ProcessLogBackpressureField proves the operator-blind-spot fix:
+// GET /api/stats surfaces the async process-log queue's backpressure counter
+// (internal/logsink, driving culvert_logsink_backpressure_total), which was
+// previously visible only via /metrics — invisible to an operator without a
+// Prometheus scraper wired up.
+func TestAPIStats_ProcessLogBackpressureField(t *testing.T) {
+	w := httptest.NewRecorder()
+	apiStats(w, getReq("/api/stats"))
+	m := assertJSON(t, w)
+	if _, ok := m["processLogBackpressure"]; !ok {
+		t.Fatal("stats response missing 'processLogBackpressure' field")
+	}
+	if got := m["processLogBackpressure"]; got != float64(0) {
+		t.Errorf("processLogBackpressure = %v; want 0 with no logsink installed in the test process", got)
 	}
 }
 
@@ -956,6 +1107,22 @@ func TestAPISyslogConfig_Get(t *testing.T) {
 	w := httptest.NewRecorder()
 	apiSyslogConfig(w, getReq("/api/syslog"))
 	assertStatus(t, w, http.StatusOK)
+}
+
+// A panic recovered in the syslog drain goroutine is a distinct failure mode
+// from an ordinary drop (unreachable/slow collector) - the GET response must
+// surface it so the GUI can tell the two apart instead of only logging it.
+func TestAPISyslogConfig_Get_ExposesPanicsCount(t *testing.T) {
+	w := httptest.NewRecorder()
+	apiSyslogConfig(w, getReq("/api/syslog"))
+	assertStatus(t, w, http.StatusOK)
+	var body map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if _, ok := body["panics"]; !ok {
+		t.Fatalf("expected \"panics\" field in /api/syslog response, got %v", body)
+	}
 }
 
 func TestAPISyslogConfig_Disable(t *testing.T) {

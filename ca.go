@@ -60,20 +60,76 @@ func init() {
 // certificate expiry and triggers rotation when needed — for BOTH the
 // inspection CA (internal/ca) and the cluster CA (enrollment.go). The loop
 // lives here, not in the package, because it spans both CAs.
-func StartCAAutoRotation(ctx context.Context, caPath, passphrase string) {
+// caRotationRoundObserver, when non-nil, is invoked after each completed
+// auto-rotation round. Publish-once TEST seam (nil in production, so the loop is
+// byte-identical); it exists because a test that swaps process globals needs a
+// deterministic "the round is finished" signal rather than a sleep.
+//
+// It is SNAPSHOTTED by StartCAAutoRotation on the caller's goroutine — the loop
+// never reads the variable itself. A goroutine that re-read it each round would
+// race any test restoring it in cleanup, which is the same defect class this
+// file's own tests exist to catch.
+var caRotationRoundObserver func()
+
+// CHAOS-50 / CA-13: because this ONE loop is the only rotation driver for TWO
+// independent trust roots, its start condition must not depend on the state of
+// either. Its caller (loadRootCA) used to start it only when the INSPECTION CA
+// was ready, which silently disabled cluster-CA rotation whenever the
+// inspection bundle failed to load. Both halves are individually no-ops when
+// their CA is absent, so the loop is safe to start on every node.
+// The returned channel is closed when the loop goroutine has exited, so a
+// caller that cancels ctx can JOIN the worker instead of assuming it stopped.
+// Production ignores it (shutdown does not block on this loop), but a test that
+// starts the loop must be able to leave no goroutine behind: a background worker
+// still running after its test finished lands its goroutines in an unrelated
+// test's window, which is how a process-wide runtime.NumGoroutine() guardrail
+// elsewhere in this suite gets blamed for churn it did not cause.
+func StartCAAutoRotation(ctx context.Context, caPath, passphrase string) <-chan struct{} {
+	roundDone := caRotationRoundObserver
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		t := time.NewTicker(ca.RotationCheckInterval)
 		defer t.Stop()
+		// CHAOS-28 / CA-4: check IMMEDIATELY, before the first tick. The loop
+		// used to wait a full RotationCheckInterval (24h) after boot, which put
+		// a 24-hour blind spot in front of the one recovery path this failure
+		// has. It is reached exactly when it matters most — an appliance that
+		// was powered off through its rotation window, or restarted to recover
+		// from the expiry outage itself, would sit there for another day doing
+		// nothing while every inspected HTTPS request failed. RotateIfNeeded is
+		// a no-op outside the 30-day window, so on a healthy node this costs one
+		// expiry comparison at startup.
+		checkRound := func() {
+			// Each CA is guarded separately so a fault in one still lets the
+			// other rotate.
+			runGuarded("ca_rotation", func() {
+				certMgr.RotateIfNeeded(caPath, passphrase)
+				certMgr.CleanupSecondaryCA()
+			})
+			runGuarded("cluster_ca_rotation", func() {
+				globalClusterCA.RotateIfNeeded()
+				globalClusterCA.CleanupSecondary()
+			})
+			if roundDone != nil {
+				roundDone()
+			}
+		}
+		checkRound()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				certMgr.RotateIfNeeded(caPath, passphrase)
-				certMgr.CleanupSecondaryCA()
-				globalClusterCA.RotateIfNeeded()
-				globalClusterCA.CleanupSecondary()
+				// CHAOS-24: contain the ROUND. A panic here would otherwise
+				// kill the gateway; a guard that let the goroutine exit would
+				// be worse still — the CA would silently never rotate again
+				// and the failure would only surface at expiry, as a
+				// fleet-wide inspected-HTTPS outage. Each CA is guarded
+				// separately so a fault in one still lets the other rotate.
+				checkRound()
 			}
 		}
 	}()
+	return done
 }

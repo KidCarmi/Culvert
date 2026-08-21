@@ -9,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -479,6 +480,38 @@ func TestClusterCA_InitOrLoad(t *testing.T) {
 	}
 }
 
+// TestClusterCA_RotationFailure_SurfacedInInfo proves the Product Experience
+// fix: an auto-rotation failure (previously logger.Printf-only, invisible
+// until the CA actually expired) is now readable via Info() — the same
+// accessor GET /api/cluster/ca and the Cluster CA GUI panel already use —
+// and a subsequent successful ImportCA clears it.
+func TestClusterCA_RotationFailure_SurfacedInInfo(t *testing.T) {
+	dir := t.TempDir()
+	ca := &clusterCA{}
+	if err := ca.InitOrLoad(dir); err != nil {
+		t.Fatalf("InitOrLoad: %v", err)
+	}
+
+	ca.recordRotationFailure(errors.New("disk full"))
+
+	info := ca.Info()
+	if got := info["lastRotationError"]; got != "disk full" {
+		t.Fatalf("lastRotationError = %v, want %q", got, "disk full")
+	}
+	if at, _ := info["lastRotationErrorAt"].(string); at == "" {
+		t.Fatal("lastRotationErrorAt should be set")
+	}
+
+	certPEM, keyPEM := seedClusterCAFiles(t)
+	if err := ca.ImportCA(certPEM, keyPEM); err != nil {
+		t.Fatalf("ImportCA: %v", err)
+	}
+	info = ca.Info()
+	if _, ok := info["lastRotationError"]; ok {
+		t.Fatal("lastRotationError should be cleared after a successful ImportCA")
+	}
+}
+
 // ── D1.1f: bootstrap consistency tests ─────────────────────────────────────
 
 // seedClusterCAFiles bootstraps a clusterCA into a fresh temp dir and
@@ -889,6 +922,38 @@ func TestAPIClusterStatus_IncludesEnrollInfo(t *testing.T) {
 	enrolled, ok := resp["enrolledNodes"].([]any)
 	if !ok || len(enrolled) != 1 {
 		t.Fatalf("expected 1 enrolledNode, got %v", resp["enrolledNodes"])
+	}
+}
+
+// TestAPIClusterStatus_SurfacesGRPCCompression pins the operator-visible
+// read-only surfacing of the CULVERT_CLUSTER_GRPC_COMPRESSION startup flag
+// (see CLAUDE.md) so its effective value can never silently regress back to
+// invisible without a test failure.
+func TestAPIClusterStatus_SurfacesGRPCCompression(t *testing.T) {
+	orig := clusterGRPCCompression
+	defer func() { clusterGRPCCompression = orig }()
+
+	for _, want := range []bool{true, false} {
+		clusterGRPCCompression = want
+
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodGet, "/api/cluster/status", http.NoBody)
+		apiClusterStatus(w, r)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", w.Code)
+		}
+		var resp map[string]any
+		if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		got, ok := resp["grpcCompressionEnabled"].(bool)
+		if !ok {
+			t.Fatalf("grpcCompressionEnabled missing or not a bool: %v", resp["grpcCompressionEnabled"])
+		}
+		if got != want {
+			t.Fatalf("grpcCompressionEnabled = %v, want %v", got, want)
+		}
 	}
 }
 

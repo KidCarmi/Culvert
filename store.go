@@ -220,6 +220,7 @@ var (
 	drainPendingAuditEvents = audit.Drain
 	requeueAuditEvents      = audit.Requeue
 	auditPersistActive      = audit.PersistActive
+	auditWriteErrors        = audit.WriteErrors
 )
 
 // InitAuditLog opens path for append-only JSONL audit persistence.
@@ -451,6 +452,25 @@ func (c *Config) SetAuth(user, pass string) error {
 	return nil
 }
 
+// RollbackFailedSetupAuth undoes a SetAuth(user, ...) call whose result could
+// not be durably persisted (e.g. SaveUIUsersFile failed during first-time
+// setup): it clears the legacy c.user/passHash and removes the roster entry
+// SetAuth added, so IsConfigured() reverts to false and the setup wizard
+// stays retryable. Unlike DeleteUIUser, this never refuses on "last admin" —
+// there is no completed setup to protect, only an in-memory credential that
+// must not survive a failed persist (leaving it in place while telling the
+// operator setup failed would make a retry hit "setup already complete" with
+// no session and no durable credential — a dead end).
+func (c *Config) RollbackFailedSetupAuth(user string) {
+	c.mu.Lock()
+	c.user = ""
+	c.passHash = nil
+	c.authRevision++
+	delete(c.uiUsers, user)
+	c.cache.clear()
+	c.mu.Unlock()
+}
+
 // dummyBcryptHash is a fixed bcrypt hash (cost = DefaultCost, matching stored
 // credential hashes) used to equalise local-auth timing on a username miss
 // (RISK-008). Without it, a wrong username returns instantly while a correct
@@ -551,10 +571,18 @@ func (c *Config) AuthEnabled() bool {
 // exists OR the operator deliberately chose the open default (Exempt). The admin
 // UI and setup flow gate on this — NOT AuthEnabled — so that open mode keeps the
 // admin UI gated and makes setup one-time (Slice 5).
+//
+// The legacyLDAPRetired term (ADR-0025 / P1-2) keeps the gate CLOSED for a
+// deployment whose only setup anchor was the legacy YAML LDAP provider: the
+// cutover to the IdP registry deactivates that provider, and without this
+// term the deactivation (or any later restart, with the durable sentinel but
+// no wired provider) would flip setup back to "incomplete" — which the admin
+// middleware treats as unauthenticated RoleAdmin for everyone. Retirement is
+// a deliberate, durable operator state, so it counts as configured.
 func (c *Config) IsConfigured() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.user != "" || c.provider != nil || c.defaultAuthOutcome == OutcomeExempt
+	return c.user != "" || c.provider != nil || c.defaultAuthOutcome == OutcomeExempt || legacyLDAPRetired()
 }
 
 // DefaultAuthOutcome returns the authoritative global Stage-1 default applied on
@@ -1262,9 +1290,15 @@ func persistLogEntry(ip, method, host, status, ruleMatched, actionTaken, identit
 	// three destination fields share one contract. redactedHost is computed once and
 	// threaded into the URI redactor so the host is HMAC'd a single time per record.
 	redactedHost := redactDestinationHost(host)
+	// One clock read for the whole record. Two reads not only cost twice as
+	// much, they could straddle a second boundary and emit a TS and a Time that
+	// disagree. The human-readable field is memoised per wall-clock second
+	// (store_logclock.go) — byte-identical output, and it removes the only
+	// remaining allocation on this per-request path.
+	now := time.Now()
 	entry := LogEntry{
-		TS:          time.Now().UnixMilli(),
-		Time:        time.Now().Format("15:04:05"),
+		TS:          now.UnixMilli(),
+		Time:        logClockStamp(now),
 		IP:          ip,
 		Identity:    identity,
 		Method:      method,

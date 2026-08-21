@@ -32,6 +32,10 @@ package main
 // consumed directly by the shutdown registry.
 func loadObservability(cfg observabilityStartupConfig) {
 	if cfg.SyslogAddr != "" {
+		// Record intent regardless of Init's outcome (see syslogConfiguredAddr)
+		// so checkSyslogFeed can distinguish an intentional no-SIEM setup from a
+		// configured feed that silently failed to connect at startup.
+		syslogConfiguredAddr = cfg.SyslogAddr
 		if err := InitSyslog(cfg.SyslogAddr, cfg.SyslogFormat); err != nil {
 			logger.Printf("Syslog: connect failed (%v) — continuing without syslog", err)
 		} else {

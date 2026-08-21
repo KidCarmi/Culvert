@@ -66,7 +66,7 @@ type uiRouteMetadata struct {
 	Methods []uiRouteMethod // per-method contract (length ≥ 1)
 }
 
-// uiRoutes is the alphabetised metadata table for all 137 admin-UI routes.
+// uiRoutes is the alphabetised metadata table for all admin-UI routes (count locked by TestC1_RouteMetadata_Locked141).
 //
 // MIGRATION BUCKETS (per the C1.5 schema-evolution decision):
 //
@@ -124,6 +124,15 @@ var uiRoutes = []uiRouteMetadata{
 		}},
 	{Path: "/api/idp/discover", Handler: "apiIdPDiscover", Domain: "auth", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true}}},
+	{Path: "/api/idp/test", Handler: "apiIdPTest", Domain: "auth", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
+			Note: "candidate-based LDAP directory test; actuates an admin-supplied endpoint (bounded, sanitized, audited)"}}},
+	{Path: "/api/idp/legacy-ldap", Handler: "apiIdPLegacyLDAP", Domain: "auth", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer,
+			Note: "non-secret summary of the legacy YAML ldap block + authority state"}}},
+	{Path: "/api/idp/legacy-ldap/import", Handler: "apiIdPLegacyLDAPImport", Domain: "auth", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
+			Note: "explicit one-time import of the legacy YAML ldap block as a disabled IdP profile"}}},
 	{Path: "/api/idp/", Handler: "apiIdPRouter", Domain: "auth", Public: false,
 		Methods: []uiRouteMethod{{Method: MethodAny, MinRole: RoleViewer, Mutating: true, AuditExpected: true,
 			Note: "C1.5 audit: dispatches to apiIdPItem (GET=viewer / PUT=admin / DELETE=admin) and apiIdPGroups; lowest accepted role is viewer (GET)"}}},
@@ -281,8 +290,8 @@ var uiRoutes = []uiRouteMetadata{
 		}},
 	{Path: "/api/decryption/redaction", Handler: "apiDecryptionRedaction", Domain: "policy", Public: false,
 		Methods: []uiRouteMethod{
-			{Method: "GET", MinRole: RoleViewer, Note: "ADR-0011 §4: read the host/SNI redaction posture"},
-			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "ADR-0011 §4: toggle host/SNI redaction; node-local (admin_settings-durable, off export/import/rollback/CP→DP)"},
+			{Method: "GET", MinRole: RoleViewer, Note: "ADR-0011 §4: read the traffic-log destination-privacy posture (host/URI/dec.*/top_hosts)"},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "ADR-0011 §4: toggle destination-privacy posture or rotate its pseudonym key; node-local (admin_settings-durable, off export/import/rollback/CP→DP)"},
 		}},
 	{Path: "/api/decryption-exclusions", Handler: "apiDecryptionExclusions", Domain: "policy", Public: false,
 		Methods: []uiRouteMethod{
@@ -671,8 +680,8 @@ var uiRoutes = []uiRouteMetadata{
 			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
 			{Method: "DELETE", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
 		}},
-	{Path: "/api/cluster/bootstrap/", Handler: "apiBootstrapRouter", Domain: "cluster", Public: false,
-		Methods: []uiRouteMethod{{Method: MethodAny, MinRole: RoleViewer, Note: "token-authed bootstrap dispatch; gating delegated to handler"}}},
+	{Path: "/api/cluster/bootstrap/", Handler: "apiBootstrapRouter", Domain: "cluster", Public: true,
+		Methods: []uiRouteMethod{{Method: MethodAny, MinRole: RolePublic, Note: "on uiAuthMiddleware's public allowlist; its own single-use, time-limited enrollment token is the auth (bootstrap.go)"}}},
 
 	// ── CDR (Sluice) integration ──────────────────────────────────────────
 	{Path: "/api/cdr/config", Handler: "apiCDRConfig", Domain: "cdr", Public: false,
@@ -726,6 +735,12 @@ var uiRoutes = []uiRouteMetadata{
 	{Path: "/api/releases/catalog-refresh", Handler: "apiReleaseCatalogRefresh", Domain: "release", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
 			Note: "re-fetch the catalog from the configured origin + reload; verification unchanged; audited via auditEvent"}}},
+
+	// Backup archive visibility (read-only pass-through of the CP-local
+	// maintenance agent's GET /v1/backups; no new agent capability).
+	{Path: "/api/backups", Handler: "apiBackups", Domain: "support", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer,
+			Note: "read-only backup archive listing via the CP-local maintenance agent"}}},
 
 	// Supportability framework (M1) — redacted csb/1 diagnostic bundles.
 	{Path: "/api/support/status", Handler: "apiSupportStatus", Domain: "support", Public: false,
@@ -883,6 +898,9 @@ var uiRoutes = []uiRouteMetadata{
 	{Path: "/api/mcp/distribution", Handler: "apiMCPDistribution", Domain: "mcp", Public: false,
 		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer,
 			Note: "PR-10 signed CP→DP distribution status (safe fields only; no key/signature/raw snapshot)"}}},
+	{Path: "/api/mcp/distribution/acks", Handler: "apiMCPDistributionAcks", Domain: "mcp", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer,
+			Note: "PR-UX-5 capability-scoped per-DP acknowledgement read model (counts + rows; not-configured when no distribution)"}}},
 	{Path: "/api/mcp/rollback", Handler: "apiMCPRollback", Domain: "mcp", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
 			Note: "PR-10 four-eyes atomic rollback to a retained signed snapshot; Management MCP may not roll back"}}},
@@ -895,9 +913,12 @@ var uiRoutes = []uiRouteMetadata{
 			Note: "PR-11 one-stage promotion / demotion via the signed publication path; Production rejected without a qualification receipt"}}},
 	{Path: "/api/mcp/rollout/scope", Handler: "apiMCPRolloutScope", Domain: "mcp", Public: false,
 		Methods: []uiRouteMethod{
-			{Method: "GET", MinRole: RoleViewer, Note: "PR-11 current rollout scope + revision/hash (safe)"},
+			{Method: "GET", MinRole: RoleViewer, Note: "PR-11 current rollout scope + revision/hash (safe); PR-UX-5 enriched with kind/enumerable/percent/counts/spec"},
 			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
 				Note: "PR-11 scope widening via the signed publication path (four-eyes)"}}},
+	{Path: "/api/mcp/rollout/scope/validate", Handler: "apiMCPRolloutScopeValidate", Domain: "mcp", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleViewer, Mutating: true,
+			Note: "PR-UX-5 read-only candidate-scope validation + diff preview; POST by method convention but runs a pure Compile, publishes nothing, and is not audited (danger-level none)"}}},
 	{Path: "/api/mcp/rollout/evidence", Handler: "apiMCPRolloutEvidence", Domain: "mcp", Public: false,
 		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer,
 			Note: "PR-11 measured evidence-window progress; production remains qualification-locked"}}},

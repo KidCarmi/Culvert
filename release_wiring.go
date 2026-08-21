@@ -73,8 +73,10 @@ const (
 	// deferral); surfaced read-only on GET /api/releases.
 	envReleaseRefreshInterval = "CULVERT_RELEASE_REFRESH_INTERVAL"
 	// envReleaseSigstoreTrustedRoot is the OPTIONAL path to a custom Sigstore TUF
-	// trusted_root.json (P2b). Unset ⇒ the baked embed (empty in OSS ⇒ scheme
-	// dormant). PUBLIC trust material only — never private keys.
+	// trusted_root.json (P2b). Unset ⇒ the baked embed — as of P2b-2a this is the
+	// real Sigstore public-good root, so the keyless scheme is ACTIVE by default
+	// (point this at an empty file to deactivate). PUBLIC trust material only —
+	// never private keys.
 	envReleaseSigstoreTrustedRoot = "CULVERT_RELEASE_SIGSTORE_TRUSTED_ROOT"
 )
 
@@ -307,6 +309,26 @@ func loadReleaseManagement(cfg releaseStartupConfig) {
 	trust, err := NewTrustStoreWithSigstore(cfg.trustKeys, cfg.verifyMode, cfg.sigstore)
 	if err != nil {
 		logger.Printf("release management disabled: %v (configure CULVERT_RELEASE_CATALOG_TRUST_KEYS, ship baked roots, or set CULVERT_RELEASE_CATALOG_VERIFY=permissive for break-glass)", err)
+		// The empty-enforce-ring failure IS the case the Sigstore warning
+		// describes: an operator who set a custom identity (…_SIGSTORE_IDENTITY)
+		// with no trusted root leaves the keyless scheme dormant, so with no
+		// ed25519 roots either the enforce ring is empty and construction fails
+		// here. Publish a warning-only manager (no dispatch service, no catalog)
+		// so GET /api/releases surfaces available:false + sigstore_warn instead
+		// of a blank 503 the operator cannot diagnose without log access — the
+		// exact misconfiguration this warning exists to make visible.
+		if cfg.sigstoreWarn != "" {
+			setReleaseManager(&releaseManager{
+				verifyMode:   cfg.verifyMode,
+				trustSchemes: trustSchemes(cfg),
+				sigstoreWarn: cfg.sigstoreWarn,
+				// A non-nil store keeps the dispatch-status read (which does not
+				// gate on svc) safe; it stays empty, so that endpoint reports
+				// "phase: none" for a disabled manager. Every dispatch/refresh
+				// handler already gates on svc == nil and returns 503.
+				store: newDispatchStore(),
+			})
+		}
 		return
 	}
 
@@ -377,6 +399,7 @@ func loadReleaseManagement(cfg releaseStartupConfig) {
 	rm := newReleaseManager(svc, resolve)
 	rm.verifyMode = cfg.verifyMode
 	rm.trustSchemes = trustSchemes(cfg)
+	rm.sigstoreWarn = cfg.sigstoreWarn
 	rm.catalogURLSource = cfg.catalogURLSource
 	if cfg.catalogURL != "" {
 		// Host only (never the full override URL — it may carry presigned creds).

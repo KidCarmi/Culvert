@@ -263,7 +263,10 @@ func startHitCounterPersistence(ctx context.Context, path string) <-chan struct{
 				saveHitCounters(path)
 				return
 			case <-t.C:
-				saveHitCounters(path)
+				// CHAOS-24: contain the ROUND so a marshal fault costs one
+				// checkpoint rather than the process, and the loop survives to
+				// take the next one (and the ctx.Done final save).
+				runGuarded("metrics_persist", func() { saveHitCounters(path) })
 			}
 		}
 	}()
@@ -643,6 +646,38 @@ culvert_upstream_direct_fallback_total %d
 		upFallbackTotal,
 	)
 
+	// CHAOS-50: Layer-2 community category store boot health. `available` is 0
+	// both when the store is unconfigured and when it failed to open — the
+	// operator distinguishes them from the `category_feed_db` diagnostics row
+	// (and from the absence of `-cat-feed-db`), while an alerting rule that only
+	// cares "is Layer 2 serving?" needs a single series. `quarantined_copies`
+	// counts `.corrupt.*` directories still on the volume, so an incident stays
+	// visible across restarts even after the store self-healed.
+	cfdb := catFeedDBState()
+	cfdbAvailable, cfdbRecovered := 0, 0
+	if cfdb.Available {
+		cfdbAvailable = 1
+	}
+	if cfdb.Recovered {
+		cfdbRecovered = 1
+	}
+	_, _ = fmt.Fprintf(w, `# HELP culvert_catfeeddb_available 1 when the Layer-2 community category store is open and serving lookups
+# TYPE culvert_catfeeddb_available gauge
+culvert_catfeeddb_available %d
+
+# HELP culvert_catfeeddb_recovered 1 when a damaged community category store was quarantined and re-created at this startup
+# TYPE culvert_catfeeddb_recovered gauge
+culvert_catfeeddb_recovered %d
+
+# HELP culvert_catfeeddb_quarantined_copies Quarantined (.corrupt.*) copies of the community category store still on the data volume
+# TYPE culvert_catfeeddb_quarantined_copies gauge
+culvert_catfeeddb_quarantined_copies %d
+`,
+		cfdbAvailable,
+		cfdbRecovered,
+		cfdb.ResidualCopies,
+	)
+
 	// CHAOS-45: durable-write (persistence) health. The boot-time writability
 	// probe cannot see a volume that goes read-only or full LATER, and most
 	// store Save() paths discard the write error — these series are the only
@@ -674,6 +709,36 @@ culvert_storage_write_last_failure_age_seconds %d
 			int64(time.Since(swSnap.Last).Seconds()),
 		)
 	}
+
+	// CHAOS-47: identity-backend reachability. culvert_requests_auth_fail
+	// conflates "wrong password" with "the directory is down", which is exactly
+	// the ambiguity that made an IdP outage look like a brute-force spike.
+	// These series separate the infrastructure half: _unavailable_total counts
+	// detected unreachable outcomes (one per probe, not per denied request),
+	// _unavailable is 1 while a backend is in its cooldown, and
+	// _gated_denials_total is the blast radius — requests denied without
+	// contacting the backend while it was gated.
+	abSnap := authBackendHealthStatus()
+	abDegraded := 0
+	if abSnap.Degraded {
+		abDegraded = 1
+	}
+	_, _ = fmt.Fprintf(w, `# HELP culvert_auth_backend_unavailable_total Times an external identity backend (LDAP/OIDC) could not be reached — authentication failed closed
+# TYPE culvert_auth_backend_unavailable_total counter
+culvert_auth_backend_unavailable_total %d
+
+# HELP culvert_auth_backend_unavailable 1 while an external identity backend is unreachable (cleared only by an observed successful reach)
+# TYPE culvert_auth_backend_unavailable gauge
+culvert_auth_backend_unavailable %d
+
+# HELP culvert_auth_backend_gated_denials_total Authentication attempts denied during an identity-backend outage without contacting the backend
+# TYPE culvert_auth_backend_gated_denials_total counter
+culvert_auth_backend_gated_denials_total %d
+`,
+		abSnap.Unavailable,
+		abDegraded,
+		abSnap.GatedDenials,
+	)
 
 	// Decryption-profile success delta: which protocol inspected tunnels negotiated
 	// on the upstream leg (h2 = Inspect-as-HTTP/2 working; http/1.1 = strip/downgrade).
@@ -727,7 +792,8 @@ culvert_decrypt_autoexclude_surge_total %d
 	liveFeedWritePrometheus(&ruleMetBuf)
 	releaseCatalogWritePrometheus(&ruleMetBuf)
 	pacWritePrometheus(&ruleMetBuf)
-	supportWritePrometheus(&ruleMetBuf)  // culvert_support_bundle_retention_* (M5 retention observability)
-	saasFeedWritePrometheus(&ruleMetBuf) // culvert_saasfeed_* (F3b-4 signed-feed observability)
-	fmt.Fprint(w, ruleMetBuf.String())   //nolint:errcheck // writes to http.ResponseWriter; an error only means the client disconnected
+	supportWritePrometheus(&ruleMetBuf)   // culvert_support_bundle_retention_* (M5 retention observability)
+	saasFeedWritePrometheus(&ruleMetBuf)  // culvert_saasfeed_* (F3b-4 signed-feed observability)
+	writeMCPTelemetryMetrics(&ruleMetBuf) // culvert_mcp_* (QUAL-3 durable telemetry, low-cardinality)
+	fmt.Fprint(w, ruleMetBuf.String())    //nolint:errcheck // writes to http.ResponseWriter; an error only means the client disconnected
 }

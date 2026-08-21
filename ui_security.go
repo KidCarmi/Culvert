@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/alerts"
 	"github.com/KidCarmi/Culvert/internal/geoip"
 )
 
@@ -139,7 +140,9 @@ func apiAlertsWebhookTest(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]any{"ok": ok2, "delivered": ok2})
 }
 
-// GET /api/alerts/webhooks/history — delivery history (Finding 8.1).
+// GET /api/alerts/webhooks/history — delivery history (Finding 8.1), plus
+// retry-queue health so an admin can see alerting degradation (queued
+// retries, permanently exhausted/dropped deliveries) without grepping logs.
 func apiAlertsDeliveryHist(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -148,7 +151,18 @@ func apiAlertsDeliveryHist(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleViewer) {
 		return
 	}
-	jsonOK(w, map[string]any{"deliveries": globalAlertStore.DeliveryHistory()})
+	jsonOK(w, map[string]any{
+		"deliveries":            globalAlertStore.DeliveryHistory(),
+		"retry_queue_depth":     alerts.RetryQueueDepth(),
+		"retry_exhausted_total": alerts.RetryExhaustedTotal(),
+		"retry_dropped_total":   alerts.RetryDroppedTotal(),
+		// CHAOS-27: dedup-window health. Evictions mean the alert key space is
+		// being flooded with unique details, so duplicate suppression is
+		// degraded (more deliveries, never fewer) — the operator-visible
+		// signature of a scanning wave reaching the alert plane.
+		"dedup_tracked":         globalAlertStore.DedupTracked(),
+		"dedup_evictions_total": alerts.DedupEvictionsTotal(),
+	})
 }
 
 func apiSecurity(w http.ResponseWriter, r *http.Request) {
@@ -231,23 +245,34 @@ func apiCACert(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleViewer) {
 			return
 		}
-		pem := certMgr.CACertPEM()
-		if pem == nil {
+		if certMgr.CACertPEM() == nil {
 			http.Error(w, "CA not initialised", http.StatusServiceUnavailable)
 			return
 		}
 		// Return JSON metadata or raw PEM depending on Accept header.
 		if strings.Contains(r.Header.Get("Accept"), "application/json") {
-			info := certMgr.CACertInfo()
-			jsonOK(w, info)
+			jsonOK(w, certMgr.CACertInfo())
 			return
 		}
-		w.Header().Set("Content-Type", "application/x-pem-file")
-		w.Header().Set("Content-Disposition", `attachment; filename="culvert-ca.pem"`)
-		w.Write(pem) //nolint:errcheck // HTTP response write
+		writeCACertPEM(w)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// writeCACertPEM serves the Root CA certificate as a downloadable PEM file.
+// Shared by /api/ca-cert (Certificates panel) and /api/ca/download (CA
+// Management panel) — both routes exist for GUI back-compat, but must never
+// re-diverge into two independently-maintained copies of this response.
+func writeCACertPEM(w http.ResponseWriter) {
+	pem := certMgr.CACertPEM()
+	if pem == nil {
+		http.Error(w, "CA not initialised", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-pem-file")
+	w.Header().Set("Content-Disposition", `attachment; filename="culvert-ca.pem"`)
+	w.Write(pem) //nolint:errcheck // HTTP response write
 }
 
 // POST /api/certs/upload — upload a custom TLS certificate+key for the UI or MITM engine.
@@ -282,13 +307,32 @@ func apiCertsUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if target == "mitm" {
-		if err := certMgr.LoadCustomCA(certPEM, keyPEM); err != nil {
+		// CHAOS-50: PERSIST the uploaded CA. It used to be installed in memory
+		// only, so an admin who uploaded their enterprise MITM CA got a gateway
+		// that silently reverted to the previous (or no) CA on the next restart —
+		// the same swallowed-durability shape CHAOS-28 fixed for rotation, on the
+		// other CA-install path. The response now states which happened, and the
+		// recorded load failure is cleared only when the bundle actually landed.
+		// Install + persist + latch clear run as one operation under caMutationMu.
+		persisted, err := installAndPersistCustomMITMCA(certPEM, keyPEM)
+		if err != nil {
 			logger.Printf("certs upload MITM: %v", err)
 			http.Error(w, "invalid CA cert/key pair", http.StatusBadRequest)
 			return
 		}
+		if !persisted {
+			auditEvent(r, "certs.upload_mitm", "custom MITM CA", "NOT PERSISTED — in-memory only")
+			jsonOK(w, map[string]any{
+				"status":    "ok",
+				"target":    "mitm",
+				"persisted": false,
+				"warning": "The uploaded CA is active but could not be written to the CA bundle path — " +
+					"it exists in memory only and will be LOST on restart. Restore write access and upload again.",
+			})
+			return
+		}
 		auditEvent(r, "certs.upload_mitm", "custom MITM CA", "")
-		jsonOK(w, map[string]string{"status": "ok", "target": "mitm"})
+		jsonOK(w, map[string]any{"status": "ok", "target": "mitm", "persisted": true})
 		return
 	}
 	// UI cert — validate only; actual rotation requires restart.
@@ -550,7 +594,7 @@ func apiSecFeedsSync(w http.ResponseWriter, r *http.Request) {
 	globalThreatFeed.Sync()
 	// Audit the manual sync — admin-only operation that mutates the data
 	// driving every block decision. See docs/C15_UNKNOWN_AUDIT.md §3.2.
-	auditEvent(r, "security.feeds_sync", "manual", "")
+	auditEvent(r, "threatfeed.sync", "manual", "")
 	jsonOK(w, secScanStatusMap())
 }
 
@@ -1087,6 +1131,43 @@ func apiCAStatus(w http.ResponseWriter, r *http.Request) {
 	if !expiry.IsZero() {
 		info["expiresIn"] = time.Until(expiry).Round(time.Hour).String()
 	}
+	// CHAOS-28 usability posture. `ready` only says a CA is LOADED; a CA outside
+	// its own validity window is loaded, signs nothing a client accepts, and
+	// used to render as a perfectly healthy panel. These fields are what an
+	// operator sees when inspected HTTPS stops working fleet-wide.
+	usabilityErr := certMgr.Usable()
+	info["usable"] = usabilityErr == nil
+	if usabilityErr != nil {
+		info["unusableReason"] = usabilityErr.Error()
+	}
+	caFaults := caUsabilityFailures()
+	info["inspectBlocked"] = caFaults.Blocks
+	info["signRefused"] = certMgr.SignRefusals()
+	// rotationPersistFailures is the CUMULATIVE history; rotationPersistDegraded
+	// is whether the ACTIVE CA may be memory-only right now. The panel banner
+	// keys on the latter so it clears once a rotation actually persists.
+	info["rotationPersistFailures"] = caFaults.PersistFailures
+	info["rotationPersistDegraded"] = caFaults.PersistDegraded
+	if caFaults.PersistDegraded && caFaults.PersistErr != "" {
+		info["rotationPersistError"] = caFaults.PersistErr
+	}
+	// CHAOS-50 load/recovery posture. `ready:false` alone does not distinguish
+	// "no CA configured on this node" from "the configured CA could not be
+	// loaded and every inspect-matched CONNECT is being forwarded UNINSPECTED" —
+	// opposite operator instructions from the same field. `inspectBypassed` is
+	// the fail-OPEN counterpart to `inspectBlocked` above.
+	loadFailure := sslInspectionLoadFailure()
+	info["loadFailed"] = loadFailure != ""
+	if loadFailure != "" {
+		info["loadFailureReason"] = loadFailure
+	}
+	info["inspectBypassed"] = caInspectBypassCount()
+	rec := caLoadRecoveryStatus()
+	info["loadRecoveryAttempts"] = rec.Attempts
+	info["loadRecoveryGaveUp"] = rec.GaveUp
+	if rec.LastErr != "" {
+		info["loadRecoveryError"] = rec.LastErr
+	}
 	// Dual-CA overlap status.
 	info["dualCAActive"] = certMgr.SecondaryCAActive()
 	if secInfo := certMgr.SecondaryCAInfo(); secInfo != nil {
@@ -1095,6 +1176,30 @@ func apiCAStatus(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, info)
 }
 
+// persistRotatedCA writes the freshly-rotated Root CA to the configured bundle
+// path and reports whether it landed. It is the manual force-rotate half of the
+// CHAOS-28 / CA-2 fix: this path carried the same swallowed-save defect as
+// auto-rotation — it logged the error, then answered 200 and bumped the success
+// counter for a CA that lives only in RAM. An operator force-rotating to RECOVER
+// from an expiry outage is exactly the person who must not be told it worked.
+//
+// Returns true when nothing needed writing (no bundle path configured), because
+// there is no durability claim to fail in that configuration.
+func persistRotatedCA() bool {
+	if caRuntime.path == "" {
+		return true
+	}
+	if err := certMgr.SaveCA(caRuntime.path, caRuntime.passphrase); err != nil {
+		logger.Printf("CA force-rotate: save failed: %v", err)
+		noteCARotationPersistFailure(err.Error())
+		return false
+	}
+	noteCARotationPersisted()
+	return true
+}
+
+// apiCADownload is a back-compat alias of apiCACert's PEM-download branch,
+// reached from the CA Management panel. See writeCACertPEM.
 func apiCADownload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1103,14 +1208,7 @@ func apiCADownload(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleViewer) {
 		return
 	}
-	pem := certMgr.CACertPEM()
-	if pem == nil {
-		http.Error(w, "CA not initialised", http.StatusServiceUnavailable)
-		return
-	}
-	w.Header().Set("Content-Type", "application/x-pem-file")
-	w.Header().Set("Content-Disposition", `attachment; filename="culvert-ca.pem"`)
-	w.Write(pem) //nolint:errcheck
+	writeCACertPEM(w)
 }
 
 // apiCACacheClear flushes the in-memory leaf-certificate LRU cache.
@@ -1200,18 +1298,70 @@ func apiCARotate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := certMgr.InitCA(); err != nil {
+	// Under caMutationMu so an in-flight automatic recovery attempt cannot land
+	// between the install and the persist and overwrite this rotation with the
+	// bundle it was already reading (see rootca_recovery.go). The HTTP response
+	// is written after the lock is released.
+	info, persisted, err := installAndPersistRotatedCA()
+	if err != nil {
 		http.Error(w, "rotation failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if caRuntime.path != "" {
-		if err := certMgr.SaveCA(caRuntime.path, caRuntime.passphrase); err != nil {
-			logger.Printf("CA force-rotate: save failed: %v", err)
-		}
+	if !persisted {
+		// Still 200: the rotation DID happen and the new CA is active, so
+		// reporting an error would be wrong in the other direction. The caller
+		// is told what did not happen instead.
+		info["persisted"] = false
+		info["warning"] = "The new Root CA could not be written to disk — it exists in memory only and will be LOST on restart. Restore write access to the CA bundle path and rotate again."
+		auditEvent(r, "ca.rotate", "root_ca", "force rotation via admin API (confirmed) — NOT PERSISTED, in-memory only")
+		jsonOK(w, info)
+		return
 	}
 	statCARotations.Add(1)
 	auditEvent(r, "ca.rotate", "root_ca", "force rotation via admin API (confirmed)")
-	jsonOK(w, certMgr.CACertInfo())
+	jsonOK(w, info)
+}
+
+// installAndPersistRotatedCA mints a new Root CA, writes it to the configured
+// bundle path, and clears the recorded load failure — as ONE operation under
+// caMutationMu, so the automatic recovery loop cannot interleave with it.
+//
+// The latch clear is deliberately gated on the persist. A force-rotate is the
+// documented manual recovery from a failed CA load and is the EVIDENCE that
+// clears the recorded failure (without it, /healthz, /readyz?strict=1 and the
+// support-telemetry readiness row keep reporting the fault after the operator has
+// fixed it — a red probe that outlives what it describes). But a rotation that did
+// not reach disk resolves only the load half, not the durability half, so the
+// failure must stay recorded.
+func installAndPersistRotatedCA() (info map[string]any, persisted bool, err error) {
+	caMutationMu.Lock()
+	defer caMutationMu.Unlock()
+
+	if err := certMgr.InitCA(); err != nil {
+		return nil, false, err
+	}
+	info = certMgr.CACertInfo()
+	if !persistRotatedCA() {
+		return info, false, nil
+	}
+	noteSSLInspectionRecovered("force rotation via admin API")
+	return info, true, nil
+}
+
+// installAndPersistCustomMITMCA is the custom-CA-upload counterpart of
+// installAndPersistRotatedCA, under the same lock for the same reason.
+func installAndPersistCustomMITMCA(certPEM, keyPEM []byte) (persisted bool, err error) {
+	caMutationMu.Lock()
+	defer caMutationMu.Unlock()
+
+	if err := certMgr.LoadCustomCA(certPEM, keyPEM); err != nil {
+		return false, err
+	}
+	if !persistRotatedCA() {
+		return false, nil
+	}
+	noteSSLInspectionRecovered("custom MITM CA uploaded via admin API")
+	return true, nil
 }
 
 // apiCAKeyProvider returns the current key provider status for HSM/KMS UI.
@@ -1303,10 +1453,24 @@ func apiGeoIPConfig(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleViewer) {
 		return
 	}
-	jsonOK(w, map[string]any{
+	resp := map[string]any{
 		"enabled": geoip.Enabled(),
 		"dbPath":  uiCfgGeoIPDB,
-	})
+	}
+	if built, ok := geoip.BuildTime(); ok && !built.IsZero() {
+		resp["dbBuildDate"] = built.Format(time.RFC3339)
+		resp["dbAgeDays"] = int(time.Since(built).Hours() / 24)
+	}
+	// Surface a failed database load (bad path, corrupt/expired .mmdb) so an
+	// admin can tell "disabled — never configured" apart from "disabled — the
+	// configured database won't open" without reading the process log. See
+	// destCountry policy rules, which fail closed (no match) the same way in
+	// both cases.
+	if msg, at, ok := geoip.LoadError(); ok {
+		resp["lastError"] = msg
+		resp["lastErrorAt"] = at.UTC().Format(time.RFC3339)
+	}
+	jsonOK(w, resp)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

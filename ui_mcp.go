@@ -31,21 +31,16 @@ import (
 // Durable approval/publication commits require the MCP runtime's PR-8 event
 // manager; until that is enabled they fail closed (durability_required).
 
-// mcpPolicyStores holds the two capability-local PR-6 policy stores.
-type mcpPolicyStores struct {
-	gw  *policy.Store
-	mgt *policy.Store
-}
+// mcpPolicyStores is the adminapi.PolicyStores adapter over the node-local policy
+// holder (mcp_policy.go). It reads the capability-local stores LIVE from the holder,
+// so the runtime PolicyProvider (which reads the SAME Gateway store) and the read-only
+// Policy Admin API can never diverge — a snapshot the startup path publishes is
+// visible here even though getMCPAdmin captured the holder earlier (single source of
+// truth). The Management store is never published to (capability isolation).
+type mcpPolicyStores struct{ h *mcpPolicyHolder }
 
 func (s *mcpPolicyStores) Store(capability string) (*policy.Store, bool) {
-	switch capability {
-	case "gateway":
-		return s.gw, true
-	case "management":
-		return s.mgt, true
-	default:
-		return nil, false
-	}
+	return s.h.storeFor(capability)
 }
 
 // mcpDisabledCommitter fails closed for both approval-decision and
@@ -96,7 +91,14 @@ func mcpIDGen() approval.ID {
 func getMCPAdmin() *mcpAdminServer {
 	mcpAdminOnce.Do(func() {
 		lim := adminapi.DefaultLimits()
-		stores := &mcpPolicyStores{gw: policy.NewStore(policy.CapGateway), mgt: policy.NewStore(policy.CapManagement)}
+		// QUAL-4: the SHARED capability-local policy stores owned by the node-local
+		// policy holder. The runtime PolicyProvider evaluates against the SAME Gateway
+		// store this admin singleton reads, so the /api/mcp/policy active read, the
+		// simulator Compare baseline, and the runtime evaluator observe the identical
+		// compiled snapshot (single source of truth). The Management store is never
+		// published to (capability isolation). When no policy source is composed both
+		// stores are empty — byte-identical to the QUAL-3 disabled default.
+		stores := mcpPolicy.stores()
 		appr := approval.NewStore(approval.Config{MaxPending: lim.MaxPendingApprovals(), MaxPerTenant: lim.MaxApprovalsPerTenant(), TTL: lim.ApprovalTTL()})
 		cfg := adminapi.NewConfigStore(lim.MaxMgmtOutputBytes())
 		committer := mcpDisabledCommitter{}
@@ -104,17 +106,40 @@ func getMCPAdmin() *mcpAdminServer {
 			Policy:    stores,
 			Approvals: mcpApprovalCounts{store: appr},
 			Config:    cfg,
-			Runtime: func(string) adminapi.RuntimeStateHealth {
-				return adminapi.RuntimeStateHealth{State: "disabled"}
-			},
-			Durability: func(string) adminapi.DurabilityHealth {
-				return adminapi.DurabilityHealth{CriticalState: "normal", DenialState: "normal", Severity: "none", RecoveryState: "n/a"}
-			},
+			Runtime:   mcpObserveRuntimeHealth,
+			// QUAL-3: the real per-capability durability snapshot. Evaluated per request,
+			// so it reflects live telemetry state; reports the truthful not-configured
+			// baseline when telemetry is not composed.
+			Durability: mcpTelemetryDurability,
 		}
-		svc := adminapi.NewService(adminapi.Params{
+		params := adminapi.Params{
 			PolicyStores: stores, PolicyLimits: policy.DefaultLimits(), Approvals: appr,
 			PubCommitter: committer, IDGen: mcpIDGen, Health: health, ConfigStore: cfg, Limits: lim,
-		})
+		}
+		// QUAL-3: wire the committed-event read seam to the SAME durable spool the
+		// runtime commits to, so decision reads use the real EventReader (nil ⇒ the
+		// DecisionService stays disabled, QUAL-2 behavior). Snapshotted once — see the
+		// ordering contract below.
+		if er := mcpAdminEventReader(); er != nil {
+			params.Events = er
+		}
+		// QUAL-2: wire the SAME shared Registry/Catalog the runtime pipeline reads, so
+		// the read-only Servers/Tools Admin API is the single source of truth. Both stay
+		// nil when no qualification inventory is loaded (Inventory service stays disabled,
+		// returning empty views — byte-identical to the QUAL-1 disabled default).
+		//
+		// Ordering contract: this singleton snapshots the inventory holder ONCE. It must
+		// be built AFTER initMCPRuntime has published the holder. initMCPRuntime enforces
+		// this by eagerly binding the singleton once a loaded inventory is published (see
+		// mcp_runtime.go), so a first admin request can never capture a pre-publish
+		// (empty) holder while the pipeline resolves the seeded fleet.
+		if rs, cs, ic := mcpAdminInventorySources(); rs != nil {
+			params.Registry = rs
+			params.Catalog = cs
+			health.Inventory = ic
+			params.Health = health
+		}
+		svc := adminapi.NewService(params)
 		disp := management.NewDispatcher(adminapi.NewManagementBackend(svc), lim.MaxMgmtInputBytes(), lim.MaxMgmtOutputBytes())
 		mcpAdmin = &mcpAdminServer{svc: svc, disp: disp, appCommit: committer, publication: svc.Publication}
 	})
@@ -140,11 +165,15 @@ func registerMCPRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/mcp/config", apiMCPConfig)
 	mux.HandleFunc("/api/mcp/management-access", apiMCPManagementAccess)
 	mux.HandleFunc("/api/mcp/distribution", apiMCPDistribution)
+	// PR-UX-5 additive read-only acknowledgement read model (capability-scoped).
+	mux.HandleFunc("/api/mcp/distribution/acks", apiMCPDistributionAcks)
 	mux.HandleFunc("/api/mcp/rollback", apiMCPRollback)
 	// PR-11 rollout surface.
 	mux.HandleFunc("/api/mcp/rollout", apiMCPRollout)
 	mux.HandleFunc("/api/mcp/rollout/transition", apiMCPRolloutTransition)
 	mux.HandleFunc("/api/mcp/rollout/scope", apiMCPRolloutScope)
+	// PR-UX-5 additive read-only candidate-scope validation + diff preview.
+	mux.HandleFunc("/api/mcp/rollout/scope/validate", apiMCPRolloutScopeValidate)
 	mux.HandleFunc("/api/mcp/rollout/evidence", apiMCPRolloutEvidence)
 	mux.HandleFunc("/api/mcp/rollout/emergency", apiMCPRolloutEmergency)
 	mux.HandleFunc("/api/mcp/rollout/rehearse-rollback", apiMCPRolloutRehearse)
@@ -217,6 +246,21 @@ func apiMCPOverview(w http.ResponseWriter, r *http.Request) {
 		"execution_state":              "not_implemented",
 		"management_tools":             len(management.Catalog()),
 		"health":                       m.svc.Health.Snapshot(),
+		// QUAL-2: safe, read-only qualification-inventory readiness. It distinguishes
+		// not_configured / loaded / invalid and reports counts — it NEVER labels the
+		// subsystem Observe-/qualification-/production-ready (inventory is one dependency).
+		"inventory": inventoryStatus(),
+		// QUAL-3: safe, read-only durable-telemetry readiness (state, per-partition
+		// committed counts, exporter state + lag, saturation). Decision telemetry flips
+		// to "ready" only when a QUAL-4 policy snapshot is composed AND telemetry is
+		// active; execution stays disabled.
+		"telemetry": mcpTelemetryStatus(),
+		// QUAL-4: safe, read-only node-local policy readiness. It distinguishes
+		// not_configured / loaded / invalid and reports the active Observe evaluation
+		// snapshot's revision + canonical hash + rule count + default action, with
+		// enforcement/execution/fleet-distribution all truthfully false. The active
+		// snapshot detail is also on /api/mcp/policy (the same shared store).
+		"policy": mcpPolicyStatus(),
 	})
 }
 
@@ -372,8 +416,10 @@ func apiMCPDecisions(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	f := adminapi.DecisionFilter{
 		Action: q.Get("action"), ReasonCode: q.Get("reason_code"), RuleID: q.Get("rule_id"),
-		ServerID: q.Get("server_id"), ToolName: q.Get("tool_name"), PrincipalID: q.Get("principal_id"),
-		AgentID: q.Get("agent_id"),
+		ServerID: q.Get("server_id"), ToolName: q.Get("tool_name"), ToolFingerprint: q.Get("tool_fingerprint"),
+		PrincipalID: q.Get("principal_id"), AgentID: q.Get("agent_id"), ClientID: q.Get("client_id"),
+		ExecutionState: q.Get("execution_state"), PolicySnapshotHash: q.Get("policy_snapshot_hash"),
+		CredentialProfileRef: q.Get("credential_profile_ref"),
 	}
 	res, err := m.svc.Decisions.Search(mcpCapability(r), tenant, q.Get("cursor"), mcpQueryLimit(r), f)
 	if err != nil {
@@ -514,6 +560,13 @@ func apiMCPPublications(w http.ResponseWriter, r *http.Request) {
 		var req mcpPublishReq
 		if err := decodeJSON(r, &req); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		// Management MCP is non-mutating in V1: reject a Management policy publication
+		// fail-closed at the boundary (the service layer rejects it too, defense in
+		// depth). This blocks a Management publication workflow, never creates one.
+		if strings.EqualFold(strings.TrimSpace(req.Capability), "management") {
+			mcpErr(w, mcperr.New(mcperr.ReasonAdminForbidden, "mcp", "management MCP is non-mutating in V1; policy publication is not permitted for the management capability"))
 			return
 		}
 		m := getMCPAdmin()

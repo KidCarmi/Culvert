@@ -19,11 +19,15 @@ import (
 // clusterGRPCCompressionEnvVar opts the DP into gzip-compressing its CP↔DP
 // gRPC stream. It is a rollout/transition control, read once at startup
 // (startup-scoped, recorded GUI-parity deferral — same class as the HA-lease
-// endpoints and -cluster-insecure). Default OFF: an unset/typo'd value leaves
-// compression disabled so a partially-upgraded or rolled-back cluster can never
-// go dark (the frame increase alone carries an uncompressed 2 M-host snapshot).
-// Enable it only after every Control Plane in the fleet runs a build that
-// registers the gzip codec (CP-first upgrade complete).
+// endpoints and -cluster-insecure; the resolved value is still surfaced
+// read-only on GET /api/cluster/status as grpcCompressionEnabled, same
+// status-only precedent as the HA Fencing Lease card, so an operator can
+// confirm the effective setting without shelling in). Default OFF: an
+// unset/typo'd value leaves compression disabled so a partially-upgraded or
+// rolled-back cluster can never go dark (the frame increase alone carries an
+// uncompressed 2 M-host snapshot). Enable it only after every Control Plane
+// in the fleet runs a build that registers the gzip codec (CP-first upgrade
+// complete).
 const clusterGRPCCompressionEnvVar = "CULVERT_CLUSTER_GRPC_COMPRESSION"
 
 // clusterGRPCCompression is the resolved opt-in flag, read once at startup.
