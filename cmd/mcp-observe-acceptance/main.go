@@ -50,7 +50,10 @@ func run() int {
 		fmt.Fprintf(os.Stderr, "mcp-observe-acceptance: %v\n", err)
 		return 2
 	}
-	h, err := mcpacceptance.NewHarness(spec, mcpacceptance.Options{SourceSHA: *sourceSHA})
+	// The requested bounded run timeout doubles as the PKI validity horizon: an
+	// authoritative run refuses to start if any qualification certificate chain
+	// would expire before now+timeout (pre-run error, exit 2, no child process).
+	h, err := mcpacceptance.NewHarness(spec, mcpacceptance.Options{SourceSHA: *sourceSHA, RunHorizon: *timeout})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "mcp-observe-acceptance: %v\n", err)
 		return 2

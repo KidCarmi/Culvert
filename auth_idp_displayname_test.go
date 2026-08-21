@@ -62,7 +62,9 @@ func (p *labeledTestProvider) CaptiveLoginURL(relay string, _ *http.Request) str
 func TestAuthSelectProvider_RendersDisplayNameNotMachineKey(t *testing.T) {
 	orig := idpRegistry
 	t.Cleanup(func() { idpRegistry = orig })
-	profile := &IdPProfile{ID: "a1b2c3d4e5f6", Name: "Corporate Okta", Enabled: true}
+	// Type is load-bearing since ADR-0025: the selection screen iterates
+	// EnabledInteractiveProviders(), which filters on IdPType.Interactive().
+	profile := &IdPProfile{ID: "a1b2c3d4e5f6", Name: "Corporate Okta", Type: IdPTypeOIDC, Enabled: true}
 	idpRegistry = &IdPRegistry{
 		profiles: []*IdPProfile{profile},
 		live: map[string]IdentityProvider{

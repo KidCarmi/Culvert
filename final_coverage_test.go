@@ -703,8 +703,8 @@ func TestIdPRegistry_Save_WithPath(t *testing.T) {
 		live: make(map[string]IdentityProvider),
 		path: dir + "/idp.json",
 	}
-	if err := reg.save(); err != nil {
-		t.Fatalf("save with path: %v", err)
+	if err := reg.persist(reg.profiles); err != nil {
+		t.Fatalf("persist with path: %v", err)
 	}
 	// Verify file was written
 	data, err := os.ReadFile(dir + "/idp.json")

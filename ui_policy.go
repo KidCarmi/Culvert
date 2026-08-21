@@ -1981,6 +1981,11 @@ type policyTestTrace struct {
 func walkPolicyTestRules(rules []PolicyRule, sourceIP, identity, authSource, host string, groups []string) ([]policyTestTrace, *PolicyRule) {
 	var trace []policyTestTrace
 	var matched *PolicyRule
+	// Mirror Evaluate's per-scan hoists so the simulator resolves the
+	// destination's category exactly once, the same way the engine it is
+	// simulating does (policy_hostcat.go).
+	normHost := normalizeHost(host)
+	catScratch := newHostCatScratch(host)
 	for i := range rules {
 		r2 := rules[i] // copy (index-based range: PolicyRule is a large struct)
 		skip := ""
@@ -1991,7 +1996,7 @@ func walkPolicyTestRules(rules []PolicyRule, sourceIP, identity, authSource, hos
 			skip = "source mismatch"
 		case !matchSchedule(r2.Schedule):
 			skip = "schedule inactive"
-		case !matchDest(&r2, host):
+		case !matchDestNorm(&r2, host, normHost, &catScratch):
 			skip = "destination mismatch"
 		}
 		trace = append(trace, policyTestTrace{Priority: r2.Priority, Name: r2.Name, SkipReason: skip})

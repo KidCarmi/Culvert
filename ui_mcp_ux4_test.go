@@ -163,11 +163,18 @@ func TestMCPUX4_TransitionProductionLockedAndNotConfigured(t *testing.T) {
 	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "rollout_production_locked") {
 		t.Fatalf("transition to production = %d body=%s, want 403 rollout_production_locked", rec.Code, rec.Body.String())
 	}
-	// A non-production transition in the disabled-default posture is a truthful 409
-	// (recorded, not accepted/pending/effective).
+	// An executing-mode transition (canary/shadow) in the shipped Observe-only
+	// composition fails closed at the execution-dependency precondition — the truthful
+	// blocker the operator must see before any distribution concern.
 	rec = mcpReq(http.MethodPost, "/api/mcp/rollout/transition", RoleAdmin, `{"capability":"gateway","to_mode":"canary"}`)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "shadow_execution_dependencies_not_configured") {
+		t.Fatalf("transition to canary = %d body=%s, want 409 shadow_execution_dependencies_not_configured", rec.Code, rec.Body.String())
+	}
+	// A non-executing transition (Observe) reaches the signed-distribution gate, which
+	// is not wired in the disabled-default posture: truthful 409 distribution_not_configured.
+	rec = mcpReq(http.MethodPost, "/api/mcp/rollout/transition", RoleAdmin, `{"capability":"gateway","to_mode":"observe"}`)
 	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "distribution_not_configured") {
-		t.Fatalf("transition to canary = %d body=%s, want 409 distribution_not_configured", rec.Code, rec.Body.String())
+		t.Fatalf("transition to observe = %d body=%s, want 409 distribution_not_configured", rec.Code, rec.Body.String())
 	}
 	// An invalid target mode is a 400.
 	if got := mcpReq(http.MethodPost, "/api/mcp/rollout/transition", RoleAdmin, `{"capability":"gateway","to_mode":"bogus"}`).Code; got != http.StatusBadRequest {
