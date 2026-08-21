@@ -294,6 +294,18 @@ func (e *Engine) maybeExpireLocked(now time.Time) {
 func (e *Engine) closeWindowLocked() {
 	e.learningActive.Store(false)
 	e.syncTransportLocked()
+	// Codex fix: events still QUEUED at this instant were accepted under this
+	// window and are doomed by the rotation below — attribute them to THIS
+	// session's loss accounting now, so a generate from the expired session
+	// sees a degraded (confidence-capped) window instead of a clean one. The
+	// same events also hit the global drop counter when they drain, which a
+	// later window's delta may fold again — an accepted OVERCOUNT of loss
+	// (the safe direction: it only weakens claims).
+	if sess := e.aggSession; sess != nil && e.tr != nil {
+		if backlog := int64(len(e.tr.ch)); backlog > 0 {
+			sess.Transport.Dropped += backlog
+		}
+	}
 	e.windowGen.Add(1)
 	e.aggSession = nil
 }

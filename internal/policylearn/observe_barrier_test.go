@@ -226,3 +226,184 @@ func TestFinishActive_PersistFailureRestoresPrunedSessions(t *testing.T) {
 		t.Fatalf("retried completion: %v", err)
 	}
 }
+
+// TestScopesFor_EmptyGroupNamesNeverMintRealGroupScope (Codex re-review):
+// an IdP emitting an empty group array entry must never create the scope
+// "g:" — generation would strip the prefix into SourceGroup == "", which a
+// PolicyRule treats as "any source". Empty entries are skipped; all-empty
+// groups aggregate as groupless.
+func TestScopesFor_EmptyGroupNamesNeverMintRealGroupScope(t *testing.T) {
+	dir := t.TempDir()
+	clk := newTestClock()
+	e, err := New(Config{
+		Now:            clk.now,
+		StorePath:      filepath.Join(dir, "pl.json"),
+		SubjectKeyPath: filepath.Join(dir, "sk.key"),
+		Categories:     func(string) (string, string) { return "Dev Tools", "admin" },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = e.Close() })
+	if _, err := e.StartSession("op"); err != nil {
+		t.Fatal(err)
+	}
+	e.Observe(Observation{Subject: "a", AuthSource: "idp", Groups: []string{"", "eng"},
+		Host: "code.example", Status: "OK"})
+	e.Observe(Observation{Subject: "b", AuthSource: "idp", Groups: []string{""},
+		Host: "code.example", Status: "OK"})
+	barrierWait(t, func() bool { return e.ObservationStats().Delivered >= 2 }, "delivery")
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	agg := e.aggSession.Agg
+	if c := agg.Cells[CellKey(scopeGroupPrefix, "Dev Tools")]; c != nil {
+		t.Fatalf("empty group name minted the real-group scope %q", scopeGroupPrefix)
+	}
+	if c := agg.Cells[CellKey("g:eng", "Dev Tools")]; c == nil || c.Allowed != 1 {
+		t.Fatal("non-empty group did not aggregate")
+	}
+	if c := agg.Cells[CellKey(ScopeGroupless, "Dev Tools")]; c == nil || c.Allowed != 1 {
+		t.Fatal("all-empty groups did not aggregate as groupless")
+	}
+}
+
+// TestGenerate_EmptyGroupScopeSkippedAsSynthetic (Codex re-review, defense in
+// depth): a legacy persisted cell under the bare "g:" scope must never
+// generate a recommendation (SourceGroup "" would mean "any source").
+func TestGenerate_EmptyGroupScopeSkippedAsSynthetic(t *testing.T) {
+	dir := t.TempDir()
+	clk := newTestClock()
+	e, err := New(Config{
+		Now:                     clk.now,
+		StorePath:               filepath.Join(dir, "pl.json"),
+		SubjectKeyPath:          filepath.Join(dir, "sk.key"),
+		RecommendableCategories: []string{"Dev Tools"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = e.Close() })
+	if _, err := e.StartSession("op"); err != nil {
+		t.Fatal(err)
+	}
+	done, err := e.StopSession("op")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.mu.Lock()
+	sess := e.sessions[len(e.sessions)-1]
+	if sess.Agg == nil {
+		sess.Agg = newAggregate()
+	}
+	sess.Agg.Cells[CellKey(scopeGroupPrefix, "Dev Tools")] = &Cell{Requests: 5, Allowed: 5}
+	e.mu.Unlock()
+	res, err := e.GenerateRecommendations(done.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Recommendations) != 0 {
+		t.Fatalf("empty-group scope generated %d recommendation(s): first group %q",
+			len(res.Recommendations), res.Recommendations[0].Group)
+	}
+	if res.SkippedSyntheticScope == 0 {
+		t.Fatal("empty-group scope not counted as a synthetic skip")
+	}
+}
+
+// TestLazyExpiry_AttributesQueuedBacklogToExpiredWindow (Codex re-review):
+// max-duration expiry cannot run a drain barrier (it fires under e.mu from
+// read paths), so the still-queued backlog of the expired window must be
+// attributed to the expired session's loss accounting — a generate from it
+// then sees a DEGRADED window instead of a clean one.
+func TestLazyExpiry_AttributesQueuedBacklogToExpiredWindow(t *testing.T) {
+	dir := t.TempDir()
+	release := make(chan struct{})
+	var releaseOnce atomic.Bool
+	var sinkEntered atomic.Bool
+	clk := newTestClock()
+	e, err := New(Config{
+		Now:            clk.now,
+		StorePath:      filepath.Join(dir, "pl.json"),
+		SubjectKeyPath: filepath.Join(dir, "sk.key"),
+		Sink: func(Observation) {
+			sinkEntered.Store(true)
+			<-release
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if releaseOnce.CompareAndSwap(false, true) {
+			close(release)
+		}
+		_ = e.Close()
+	})
+	a, err := e.StartSession("op")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 4; i++ {
+		e.Observe(Observation{Subject: "a", AuthSource: "idp", Host: "x.example", Status: "OK"})
+	}
+	barrierWait(t, sinkEntered.Load, "drain parked in sink")
+
+	clk.advance(e.cfg.MaxSessionDuration + time.Minute)
+	sessions := e.Sessions() // triggers lazy expiry with the backlog still queued
+	var expired *Session
+	for i := range sessions {
+		if sessions[i].ID == a.ID {
+			expired = &sessions[i]
+		}
+	}
+	if expired == nil || expired.State != StateCompleted {
+		t.Fatalf("session did not lazily expire: %+v", expired)
+	}
+	if expired.Transport.Dropped == 0 {
+		t.Fatal("expired session's window shows zero loss despite a doomed queued backlog")
+	}
+	if !expired.Transport.Degraded() {
+		t.Fatal("expired window not degraded")
+	}
+}
+
+// TestClose_ConcurrentProducersNeverStrandEvents (Codex re-review): the
+// producer gate makes the closed-check-then-send atomic with shutdown — after
+// Close returns, no event may remain in the channel.
+func TestClose_ConcurrentProducersNeverStrandEvents(t *testing.T) {
+	dir := t.TempDir()
+	clk := newTestClock()
+	e, err := New(Config{
+		Now:            clk.now,
+		StorePath:      filepath.Join(dir, "pl.json"),
+		SubjectKeyPath: filepath.Join(dir, "sk.key"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.StartSession("op"); err != nil {
+		t.Fatal(err)
+	}
+	stopProducers := make(chan struct{})
+	producersDone := make(chan struct{})
+	go func() {
+		defer close(producersDone)
+		for {
+			select {
+			case <-stopProducers:
+				return
+			default:
+				e.Observe(Observation{Subject: "a", AuthSource: "idp", Host: "x.example", Status: "OK"})
+			}
+		}
+	}()
+	time.Sleep(10 * time.Millisecond)
+	if err := e.Close(); err != nil {
+		t.Fatal(err)
+	}
+	close(stopProducers)
+	<-producersDone
+	if n := len(e.tr.ch); n != 0 {
+		t.Fatalf("%d event(s) stranded in the channel after Close", n)
+	}
+}

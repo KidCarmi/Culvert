@@ -131,11 +131,20 @@ func scopesFor(o *Observation, scratch []string) []string {
 	if o.Subject == "" {
 		return append(scratch, ScopeUnauth)
 	}
-	if len(o.Groups) == 0 {
-		return append(scratch, ScopeGroupless)
-	}
+	// An EMPTY group name must never mint the real-group scope "g:" (Codex
+	// fix): generation would strip the prefix into an empty source group,
+	// which the enforcement layer treats as "any source" — an IdP emitting an
+	// empty array entry would turn an accepted per-group recommendation into
+	// an allow-for-everyone rule. Empty entries are skipped; an identity
+	// whose groups are ALL empty aggregates as groupless.
 	for _, g := range o.Groups {
+		if g == "" {
+			continue
+		}
 		scratch = append(scratch, scopeGroupPrefix+g)
+	}
+	if len(scratch) == 0 {
+		return append(scratch, ScopeGroupless)
 	}
 	return scratch
 }

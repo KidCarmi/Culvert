@@ -95,6 +95,13 @@ type transport struct {
 	done     chan struct{}
 	stopOnce sync.Once
 
+	// producers counts Observe calls between registration and the completion
+	// of their enqueue decision; Close waits for it to reach zero AFTER
+	// setting the closed flag, so an Observe that read closed == false can
+	// never complete its send after the final sweep (Codex fix — the
+	// check-then-send gap is otherwise unsynchronized with shutdown).
+	producers atomic.Int64
+
 	accepted        atomic.Int64
 	dropped         atomic.Int64
 	rejected        atomic.Int64
@@ -122,6 +129,11 @@ func (e *Engine) Observe(o Observation) {
 		return
 	}
 	t := e.tr
+	// Register BEFORE the closed check: Close sets the flag and then waits
+	// for the producer count to drain, so a producer that saw closed == false
+	// is guaranteed to finish its send before the final sweep runs.
+	t.producers.Add(1)
+	defer t.producers.Add(-1)
 	if e.closed.Load() {
 		// The drain has exited (or is exiting): an enqueue could no longer be
 		// consumed, so refuse it HERE and count the loss — a producer must

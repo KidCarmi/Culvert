@@ -602,7 +602,12 @@ func buildRecommendations(sess *Session, allowSet map[string]bool, th Thresholds
 	var out []*Recommendation
 	for _, key := range keys {
 		scope, category := SplitCellKey(key)
-		if !strings.HasPrefix(scope, scopeGroupPrefix) {
+		if !strings.HasPrefix(scope, scopeGroupPrefix) || scope == scopeGroupPrefix {
+			// Synthetic populations AND the empty-group scope "g:" (a legacy
+			// cell from before empty group names were filtered at aggregation)
+			// are evidence-only: an empty source group means "any source" at
+			// the enforcement layer, so it must never become a recommendation
+			// (Codex fix).
 			res.SkippedSyntheticScope++
 			continue
 		}

@@ -143,8 +143,18 @@ func plAcceptRecommendation(eng *policylearn.Engine, recID string, ifVersion int
 			// refuse with a version conflict — Accepted is NEVER latched
 			// without the exact target existing in one of the two domains.
 			if policyStore.findByIDCopy(rec.TargetRuleID) == nil {
-				if err := policyDraft.ensureDurableTarget(rec.TargetRuleID); err != nil {
+				recForMatch := rec
+				err := policyDraft.ensureDurableTarget(rec.TargetRuleID, func(r *PolicyRule) bool {
+					// Content re-proven INSIDE the durability lock (Codex fix):
+					// a concurrent draft update between the unlocked comparison
+					// above and this point must surface as an integrity
+					// conflict, never persist-and-finalize altered content.
+					return plRuleMatchesTranslation(r, &recForMatch)
+				})
+				if err != nil {
 					switch {
+					case errors.Is(err, errDraftTargetContentDrift):
+						return plAcceptOutcome{}, errAcceptIntegrityConflict
 					case errors.Is(err, errDraftTargetMissing) &&
 						policyStore.findByIDCopy(rec.TargetRuleID) == nil:
 						return plAcceptOutcome{}, fmt.Errorf(

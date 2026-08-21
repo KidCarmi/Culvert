@@ -38,6 +38,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -242,6 +243,12 @@ func (e *Engine) Close() error {
 		// and nothing may successfully enqueue into an abandoned channel
 		// (Codex fix). Post-stop the channel has exactly one reader: us.
 		e.closed.Store(true)
+		// Wait for in-flight producers (registered before the flag was set)
+		// to finish their enqueue decision — afterwards no send can land in
+		// the channel beyond what the sweep below consumes (Codex fix).
+		for t.producers.Load() != 0 {
+			runtime.Gosched()
+		}
 		t.stopOnce.Do(func() {
 			close(t.stop)
 			<-t.done

@@ -285,6 +285,11 @@ func (c *policyDraftCoordinator) durableTargetPresent(ruleID string) bool {
 // revert/delete/commit removed it after an earlier unlocked lookup saw it.
 var errDraftTargetMissing = errors.New("draft target rule is no longer in the candidate")
 
+// errDraftTargetContentDrift: the target rule IS a member of the locked
+// candidate but its content no longer matches the caller's expectation — a
+// concurrent draft update altered it after an earlier unlocked comparison.
+var errDraftTargetContentDrift = errors.New("draft target rule content changed since it was verified")
+
 // ensureDurableTarget guarantees ruleID is durably recoverable from the draft
 // domain, with MEMBERSHIP PROVEN UNDER THE SAME LOCK AS THE PERSIST (Codex
 // fix): between an unlocked lookup and this call a concurrent draft
@@ -295,21 +300,28 @@ var errDraftTargetMissing = errors.New("draft target rule is no longer in the ca
 // refuse semantics); membership proven, the candidate is persisted under the
 // same critical section. In-memory mode (no path) the locked candidate itself
 // is the durable domain.
-func (c *policyDraftCoordinator) ensureDurableTarget(ruleID string) error {
+// matches, when non-nil, is verified against the located rule INSIDE the same
+// critical section (Codex fix: the earlier unlocked content comparison can be
+// invalidated by a concurrent ordinary draft update; the durability point is
+// the last responsible moment to prove the content still holds).
+func (c *policyDraftCoordinator) ensureDurableTarget(ruleID string, matches func(*PolicyRule) bool) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	member := false
+	var member *PolicyRule
 	if c.state.Active {
 		rules := c.cand.List()
 		for i := range rules { // index-based: PolicyRule is a large struct (rangeValCopy)
 			if rules[i].ID == ruleID {
-				member = true
+				member = &rules[i]
 				break
 			}
 		}
 	}
-	if !member {
+	if member == nil {
 		return errDraftTargetMissing
+	}
+	if matches != nil && !matches(member) {
+		return errDraftTargetContentDrift
 	}
 	if c.path == "" {
 		return nil // in-memory mode: locked membership is the domain
@@ -318,6 +330,40 @@ func (c *policyDraftCoordinator) ensureDurableTarget(ruleID string) error {
 		return fmt.Errorf("%v: %w", err, errDraftPersistFailed)
 	}
 	return nil
+}
+
+// commitActivate is the COMMIT critical section (Codex fix): snapshot,
+// set-validation, diff, activation (running := candidate), persistence, and
+// draft clear all under ONE hold of c.mu — a concurrent stageDurableAppend
+// (which also holds c.mu for its fence+append+persist) can therefore land
+// either entirely BEFORE the snapshot (committed with everything else) or
+// entirely AFTER the clear (it re-opens a fresh draft carrying the new rule);
+// it can no longer slip between the snapshot and the clear, where the old
+// sequence published the stale snapshot and deleted the freshly persisted
+// rule while its acceptance had already reported success. Lock order
+// c.mu → PolicyStore.mu (the stageTarget convention).
+func (c *policyDraftCoordinator) commitActivate() (policyDraftDiff, error) {
+	c.mu.Lock()
+	if !c.state.Active {
+		c.mu.Unlock()
+		return policyDraftDiff{}, errors.New("no draft to commit")
+	}
+	cand := c.cand.List()
+	for i := range cand {
+		if err := validatePolicyRule(cand[i], cand, cand[i].Priority); err != nil {
+			c.mu.Unlock()
+			return policyDraftDiff{}, fmt.Errorf("candidate rule %s is invalid: %w", sanitizeLog(cand[i].Name), err)
+		}
+	}
+	diff := c.diffVsRunning()
+	policyStore.ReplaceAll(cand)
+	policyStore.Save()
+	path := c.clearLocked()
+	c.mu.Unlock()
+	if path != "" {
+		_ = os.Remove(path)
+	}
+	return diff, nil
 }
 
 // clearLocked resets the candidate + state; caller holds c.mu. Returns the
@@ -765,21 +811,14 @@ func apiPolicyDraftCommit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "the running rulebase changed since this draft was opened (an import or rollback) — revert and re-stage to avoid clobbering it", http.StatusConflict)
 		return
 	}
-	// Validate the candidate as a set. Per-rule validity was enforced at stage
-	// time; re-run it defensively over the whole candidate before activation.
-	cand := policyDraft.candidateList()
-	for i := range cand {
-		if err := validatePolicyRule(cand[i], cand, cand[i].Priority); err != nil {
-			http.Error(w, "candidate rule "+sanitizeLog(cand[i].Name)+" is invalid: "+err.Error(), http.StatusBadRequest)
-			return
-		}
+	// Validate + diff + activate + clear as ONE coordinator critical section
+	// (Codex fix): a concurrent durable append can no longer land between the
+	// commit's snapshot and its clear.
+	diff, err := policyDraft.commitActivate()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
-	diff := policyDraft.diffVsRunning()
-
-	// Activate: running := candidate, persist, clear the draft.
-	policyStore.ReplaceAll(cand)
-	policyStore.Save()
-	policyDraft.clear()
 
 	actor := sessionAdmin(r)
 	detail := commitDetail(diff, comment)

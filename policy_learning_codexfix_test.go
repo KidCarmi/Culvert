@@ -8,6 +8,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/KidCarmi/Culvert/internal/policylearn"
@@ -58,14 +59,14 @@ func TestCodexFix_EnsureDurableTargetProvesMembershipUnderLock(t *testing.T) {
 	plDurableDraftHarness(t)
 	_, targetID := plAcceptingWithStagedRule(t)
 
-	if err := policyDraft.ensureDurableTarget(targetID); err != nil {
+	if err := policyDraft.ensureDurableTarget(targetID, nil); err != nil {
 		t.Fatalf("staged member reported not durable: %v", err)
 	}
 
 	// Concurrent-revert interleave, made deterministic: the target vanishes
 	// between an unlocked lookup and the locked proof.
 	policyDraft.clear()
-	err := policyDraft.ensureDurableTarget(targetID)
+	err := policyDraft.ensureDurableTarget(targetID, nil)
 	if !errors.Is(err, errDraftTargetMissing) {
 		t.Fatalf("vanished target reported durable (err=%v) — membership not proven under the lock", err)
 	}
@@ -155,4 +156,75 @@ func TestCodexFix_AcceptRetryStaleFenceAborts(t *testing.T) {
 		t.Fatal("stale-fence retry latched Accepted")
 	}
 	assertAcceptedImpliesTarget(t, recID)
+}
+
+// TestCodexFix_ContentDriftAtDurabilityPointRefused (Codex re-review): the
+// content comparison is re-proven INSIDE the durability critical section — a
+// matcher that rejects at the locked moment must surface as content drift,
+// never persist-and-report-durable.
+func TestCodexFix_ContentDriftAtDurabilityPointRefused(t *testing.T) {
+	plDurableDraftHarness(t)
+	recID, targetID := plAcceptingWithStagedRule(t)
+
+	// Locked-moment drift, made deterministic: the matcher stands in for the
+	// concurrent draft update that invalidated the earlier unlocked check.
+	err := policyDraft.ensureDurableTarget(targetID, func(*PolicyRule) bool { return false })
+	if !errors.Is(err, errDraftTargetContentDrift) {
+		t.Fatalf("drifted content reported durable (err=%v)", err)
+	}
+
+	// Full-flow variant: mutate the staged rule's content, then retry — the
+	// accept must refuse with the integrity conflict, never latch.
+	mutated := *plFindTargetRule(targetID)
+	mutated.Action = ActionBlockPage
+	if !policyWriteStore("codexfix").UpdateByID(targetID, mutated) {
+		t.Fatalf("test setup: could not mutate staged rule %s", targetID)
+	}
+	ver, _ := effectivePolicyVersion()
+	_, err = plAcceptRecommendation(policyLearnEngine.Load(), recID, ver, "codexfix")
+	if !errors.Is(err, errAcceptIntegrityConflict) {
+		t.Fatalf("mutated target accepted (err=%v)", err)
+	}
+	rec, _ := policyLearnEngine.Load().RecommendationByID(recID)
+	if rec.State == policylearn.RecStateAccepted {
+		t.Fatal("content drift latched Accepted")
+	}
+}
+
+// TestCodexFix_CommitAppendNeverVanishesRule (Codex re-review): the commit's
+// snapshot→activate→clear now shares one coordinator critical section with
+// the durable append, so a successfully appended rule can land only entirely
+// before the snapshot (published to running) or entirely after the clear
+// (in a freshly opened draft) — never in the vanished middle. Bounded
+// concurrent stress; run under -race.
+func TestCodexFix_CommitAppendNeverVanishesRule(t *testing.T) {
+	plDurableDraftHarness(t)
+	setRequireCommit(true)
+	for i := 0; i < 40; i++ {
+		ver, _ := effectivePolicyVersion()
+		disabled := false
+		rule := PolicyRule{
+			ID:           newRuleID(),
+			Name:         fmt.Sprintf("codexfix-stress-%d", i),
+			SourceGroup:  "stress",
+			DestCategory: "m5b-cat",
+			Action:       ActionAllow,
+			SSLAction:    SSLInspect,
+			Enabled:      &disabled,
+		}
+		stampRuleMetadataForWrite(&rule, nil, "codexfix")
+		commitDone := make(chan struct{})
+		go func() {
+			_, _ = policyDraft.commitActivate() // may 4xx-equivalent when no draft — fine
+			close(commitDone)
+		}()
+		added, err := policyDraft.stageDurableAppend("codexfix", ver, rule)
+		<-commitDone
+		if err != nil {
+			continue // fence conflict: the commit won the interleave; nothing was appended
+		}
+		if plFindTargetRule(added.ID) == nil {
+			t.Fatalf("iteration %d: appended rule %s vanished (in neither candidate nor running)", i, added.ID)
+		}
+	}
 }
