@@ -8,13 +8,26 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/cpdp"
+	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 )
 
 // errShadowExecDepsNotConfigured is returned when a transition to an executing mode
 // (Shadow/Canary/Production) is attempted but the guarded-execution plane is not
 // composed (the shipped Observe-only posture). Fail-closed: no partial Shadow state.
-var errShadowExecDepsNotConfigured = errors.New("shadow_execution_dependencies_not_configured")
+//
+// It carries an mcperr.Reason so that when it is used as a DP rejection cause the
+// resulting acknowledgement reaches the Control Plane with a truthful, alertable
+// code. A bare errors.New resolves to ReasonNone under mcperr.ReasonOf, which
+// renders a security-relevant nack indistinguishable from an unclassified one.
+var errShadowExecDepsNotConfigured = mcperr.New(mcperr.ReasonRolloutTransitionInvalid,
+	"rollout.transition", "shadow_execution_dependencies_not_configured")
+
+// errRolloutCapabilityMismatch marks a signed envelope whose embedded rollout config
+// names a different capability than the envelope itself — the capability-confusion
+// shape the Gateway/Management isolation boundary exists to reject.
+var errRolloutCapabilityMismatch = mcperr.New(mcperr.ReasonSnapshotCapabilityMismatch,
+	"rollout.transition", "rollout capability does not match the envelope capability")
 
 // errRolloutPersistFailed wraps a durable-persistence failure so callers can reject a
 // transition rather than acknowledge a RAM-only mode change.

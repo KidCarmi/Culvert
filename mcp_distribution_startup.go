@@ -132,8 +132,15 @@ func initMCPDistribution(_ *startupState) {
 // It prefers the already-resolved cluster node id, then the hostname, then a fixed
 // fallback — mirroring how cluster_startup seeds clusterRole.nodeID.
 func resolveMCPDPNodeID() string {
-	if clusterRole.nodeID != "" {
-		return clusterRole.nodeID
+	// clusterRole is documented as read under clusterRoleMu (controlplane.go): an
+	// HA standby's auto-promote goroutine is already running by the time this shim
+	// executes, and it mutates the struct under the write lock. Take the read lock
+	// rather than relying on which fields happen to be written today.
+	clusterRoleMu.RLock()
+	nodeID := clusterRole.nodeID
+	clusterRoleMu.RUnlock()
+	if nodeID != "" {
+		return nodeID
 	}
 	if h, err := os.Hostname(); err == nil && h != "" {
 		return h
