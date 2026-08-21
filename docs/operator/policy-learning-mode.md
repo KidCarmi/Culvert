@@ -111,9 +111,14 @@ separately from confidence, as facts — there is no percentage/"membership"
 field, because the true population denominator is never known.
 
 A recommendation goes **stale** — flagged, not deleted — when the policy
-rulebase, the category taxonomy, the recommendable-category guardrail, or
-the decision-policy thresholds it was generated against have since changed.
-Staleness is recomputed by the server on every read.
+rulebase, the recommendable-category guardrail, or the decision-policy
+thresholds it was generated against have since changed. The category
+taxonomy is tracked too, but **only the signed SaaS feed and the admin
+URL-category store** — a change to the separate community/UT1 category
+database carries no generation identity today (a recorded limitation) and
+will *not* mark an affected recommendation stale, even though its category
+evidence may have shifted underneath it. Staleness is recomputed by the
+server on every read.
 
 ## Accepting a recommendation
 
