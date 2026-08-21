@@ -71,7 +71,6 @@ func init() {
 // file's own tests exist to catch.
 var caRotationRoundObserver func()
 
-//
 // CHAOS-50 / CA-13: because this ONE loop is the only rotation driver for TWO
 // independent trust roots, its start condition must not depend on the state of
 // either. Its caller (loadRootCA) used to start it only when the INSPECTION CA
