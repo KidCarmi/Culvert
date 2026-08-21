@@ -261,6 +261,23 @@ func liveFeedWritePrometheus(w *strings.Builder) {
 	fmt.Fprintf(w, "# TYPE culvert_alert_dedup_evictions_total counter\nculvert_alert_dedup_evictions_total %d\n", alerts.DedupEvictionsTotal())
 	fmt.Fprintf(w, "\n# HELP culvert_alert_dedup_tracked Alert dedup keys currently tracked inside the suppression window (bounded by the cap)\n")
 	fmt.Fprintf(w, "# TYPE culvert_alert_dedup_tracked gauge\nculvert_alert_dedup_tracked %d\n", globalAlertStore.DedupTracked())
+
+	// Interactive-login state stores (OIDC PKCE / SAML AuthnRequest). These are
+	// populated by UNAUTHENTICATED requests, so a rising eviction counter is the
+	// operator's signal that in-flight login state is being displaced before it
+	// can be redeemed — either the cap is too small for the deployment, or
+	// something is flooding the captive-portal path. Fair-share eviction keeps a
+	// single flooding source evicting only itself (internal/authstate), so a
+	// climbing counter alongside a low client count localises the source.
+	fmt.Fprintf(w, "\n# HELP culvert_login_state_entries In-flight interactive-login callback state currently held, by store\n")
+	fmt.Fprintf(w, "# TYPE culvert_login_state_entries gauge\nculvert_login_state_entries{store=\"oidc_pkce\"} %d\nculvert_login_state_entries{store=\"saml\"} %d\n",
+		globalPKCEStore.Len(), globalSAMLStateStore.Len())
+	fmt.Fprintf(w, "\n# HELP culvert_login_state_clients Distinct client keys currently holding interactive-login callback state, by store\n")
+	fmt.Fprintf(w, "# TYPE culvert_login_state_clients gauge\nculvert_login_state_clients{store=\"oidc_pkce\"} %d\nculvert_login_state_clients{store=\"saml\"} %d\n",
+		globalPKCEStore.Clients(), globalSAMLStateStore.Clients())
+	fmt.Fprintf(w, "\n# HELP culvert_login_state_evictions_total Interactive-login callback state dropped at the cap before it could be redeemed. Non-zero means some SSO logins failed with \"invalid or expired state\"\n")
+	fmt.Fprintf(w, "# TYPE culvert_login_state_evictions_total counter\nculvert_login_state_evictions_total{store=\"oidc_pkce\"} %d\nculvert_login_state_evictions_total{store=\"saml\"} %d\n",
+		globalPKCEStore.Evictions(), globalSAMLStateStore.Evictions())
 }
 
 // apiCountryTraffic returns the top destination countries for the dashboard.

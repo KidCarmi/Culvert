@@ -742,11 +742,17 @@ func buildSupportBundle(ctx context.Context, level support.DebugLevel, scope, ca
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, fmt.Errorf("nonce: %w", err)
 	}
+	// clusterRole is mutated by enableControlPlane / DP enrollment transitions;
+	// snapshot it under clusterRoleMu (matching diagnoseCluster) so a bundle build
+	// concurrent with a role change can't read a torn node identity (CWE-362).
+	clusterRoleMu.RLock()
+	nodeID, nodeRole := clusterRole.nodeID, clusterRole.role
+	clusterRoleMu.RUnlock()
 	return support.NewRunner().Build(ctx, support.BuildOptions{
 		Version:   version,
 		GoVersion: runtime.Version(),
 		Runtime: support.RuntimeInfo{
-			NodeID: clusterRole.nodeID, Role: clusterRole.role, Runtime: "unknown",
+			NodeID: nodeID, Role: nodeRole, Runtime: "unknown",
 		},
 		Level:             level,
 		Profile:           "default",

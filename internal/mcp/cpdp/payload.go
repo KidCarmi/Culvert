@@ -139,5 +139,40 @@ func (p Payload) checkCapabilityIsolation(capab Capability) error {
 	default:
 		return mcperr.New(mcperr.ReasonSnapshotCapabilityMismatch, "cpdp.payload", "unknown capability")
 	}
+	// The payload BLOCK is capability-correct; the embedded rollout config must be
+	// too. rollout.SignedConfig carries its OWN Capability field, and every consumer
+	// routes the commit by THAT field (rollout.State is capability-local), so a
+	// config whose self-declared capability disagrees with the signed envelope would
+	// steer a commit onto the OTHER capability's state — the exact cross-capability
+	// contamination this isolation check exists to make structural. Enforce it HERE,
+	// in the engine, so the invariant holds for every caller and, critically, for
+	// every snapshot that reaches the durable store: a consumer reading recovered
+	// state must not have to re-derive it (Applier.Recover deliberately re-runs only
+	// signature/capability/min-version, not full payload validation).
+	return p.checkRolloutCapability(capab)
+}
+
+// checkRolloutCapability verifies that an embedded rollout config's self-declared
+// capability matches the envelope's signed capability. A nil rollout (no rollout
+// change) is valid. Fails closed on any disagreement.
+func (p Payload) checkRolloutCapability(capab Capability) error {
+	var rc *rollout.SignedConfig
+	switch capab {
+	case CapabilityGateway:
+		rc = p.Gateway.Rollout
+	case CapabilityManagement:
+		rc = p.Management.Rollout
+	}
+	if rc == nil {
+		return nil // absence is not a change
+	}
+	want := rollout.CapabilityGateway
+	if capab == CapabilityManagement {
+		want = rollout.CapabilityManagement
+	}
+	if rc.Capability != want {
+		return mcperr.New(mcperr.ReasonSnapshotCapabilityMismatch, "cpdp.payload",
+			"rollout config capability does not match the snapshot capability")
+	}
 	return nil
 }

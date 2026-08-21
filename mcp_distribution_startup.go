@@ -49,7 +49,7 @@ func initMCPDistribution(_ *startupState) {
 		d.composeReason = cfg.Reason
 		d.mu.Unlock()
 		if cfg.Reason != "not_configured" {
-			logger.Printf("MCP distribution DP compose skipped (fail-closed): %s", sanitizeLog(cfg.Reason))
+			logger.Printf("MCP distribution DP compose skipped (fail-closed): %q", sanitizeLog(cfg.Reason))
 		}
 		return
 	}
@@ -57,7 +57,7 @@ func initMCPDistribution(_ *startupState) {
 	// Ensure the per-capability durable-state directory exists before composing (the
 	// atomic file store writes a temp file alongside its target).
 	if err := os.MkdirAll(cfg.DataDir, 0o700); err != nil {
-		logger.Printf("MCP distribution DP compose failed: cannot create state dir (fail-closed): %v", sanitizeLog(err.Error()))
+		logger.Printf("MCP distribution DP compose failed: cannot create state dir (fail-closed): %q", sanitizeLog(err.Error()))
 		d.mu.Lock()
 		d.composeReason = "state_dir_unavailable"
 		d.mu.Unlock()
@@ -81,7 +81,7 @@ func initMCPDistribution(_ *startupState) {
 			IDGen:      idGen,
 		})
 		if err != nil {
-			logger.Printf("MCP distribution DP compose failed for %s (fail-closed, none registered): %v", capb.String(), sanitizeLog(err.Error()))
+			logger.Printf("MCP distribution DP compose failed for %s (fail-closed, none registered): %q", capb.String(), sanitizeLog(err.Error()))
 			d.mu.Lock()
 			d.composeReason = "invalid_applier"
 			d.mu.Unlock()
@@ -90,7 +90,7 @@ func initMCPDistribution(_ *startupState) {
 		if rerr := ap.Recover(); rerr != nil {
 			// Fail closed: a corrupt/unverifiable durable state must never leave a
 			// half-composed DP or a permissive empty active snapshot.
-			logger.Printf("MCP distribution DP recover failed for %s (fail-closed, none registered): %v", capb.String(), sanitizeLog(rerr.Error()))
+			logger.Printf("MCP distribution DP recover failed for %s (fail-closed, none registered): %q", capb.String(), sanitizeLog(rerr.Error()))
 			d.mu.Lock()
 			d.composeReason = "recover_failed"
 			d.mu.Unlock()
@@ -98,6 +98,22 @@ func initMCPDistribution(_ *startupState) {
 		}
 		built[capb] = ap
 	}
+
+	// §8 crash-window convergence: reconcile the node-local rollout state with the
+	// recovered distribution active envelopes so a crash between distribution
+	// activation and rollout commit converges to a single truthful state on restart.
+	//
+	// This MUST run BEFORE the appliers are published to the global seam. The DP
+	// config-sync poller is already running by the time this shim executes (it is
+	// started from initCluster, ~16 startup steps earlier, and polls immediately),
+	// so publishing first would open a window in which a freshly-pulled, validly
+	// signed ConfigSnapshot is applied concurrently and then has its rollout commit
+	// OVERWRITTEN by this reconcile replaying the stale recovered envelope — exactly
+	// the distribution/rollout split the PR-12 transaction exists to prevent (and, if
+	// the newer envelope was a de-escalation, a silent revert to the wider mode).
+	// Reconciling off the locally-built appliers closes the window by construction:
+	// applySnapshotMCP cannot observe an applier until reconcile has finished.
+	reconcileRolloutWithAppliers(built)
 
 	// Publish both appliers atomically, then flip enabled last.
 	d.mu.Lock()
@@ -108,12 +124,7 @@ func initMCPDistribution(_ *startupState) {
 	d.mu.Unlock()
 	d.enabled.Store(true)
 
-	// §8 crash-window convergence: reconcile the node-local rollout state with the
-	// recovered distribution active envelopes so a crash between distribution
-	// activation and rollout commit converges to a single truthful state on restart.
-	reconcileRolloutWithDistribution()
-
-	logger.Printf("MCP distribution DP appliers composed (node=%s, trust_roots=%d, gateway+management isolated)",
+	logger.Printf("MCP distribution DP appliers composed (node=%q, trust_roots=%d, gateway+management isolated)",
 		sanitizeLog(cfg.NodeID), len(cfg.TrustKeyIDs))
 }
 
@@ -121,8 +132,15 @@ func initMCPDistribution(_ *startupState) {
 // It prefers the already-resolved cluster node id, then the hostname, then a fixed
 // fallback — mirroring how cluster_startup seeds clusterRole.nodeID.
 func resolveMCPDPNodeID() string {
-	if clusterRole.nodeID != "" {
-		return clusterRole.nodeID
+	// clusterRole is documented as read under clusterRoleMu (controlplane.go): an
+	// HA standby's auto-promote goroutine is already running by the time this shim
+	// executes, and it mutates the struct under the write lock. Take the read lock
+	// rather than relying on which fields happen to be written today.
+	clusterRoleMu.RLock()
+	nodeID := clusterRole.nodeID
+	clusterRoleMu.RUnlock()
+	if nodeID != "" {
+		return nodeID
 	}
 	if h, err := os.Hostname(); err == nil && h != "" {
 		return h
@@ -130,11 +148,11 @@ func resolveMCPDPNodeID() string {
 	return "mcp-dp"
 }
 
-// reconcileRolloutWithDistribution converges the two durable stores at startup. For
-// each capability whose recovered distribution active envelope carries a rollout
-// config, it re-commits that rollout idempotently, so a crash BETWEEN distribution
-// activation and the coupled rollout commit heals to a consistent state (distribution
-// is the signed source of truth for mode/scope; the rollout projection follows it).
+// reconcileRolloutWithAppliers converges the two durable stores at startup. For each
+// capability whose recovered distribution active envelope carries a rollout config, it
+// re-commits that rollout idempotently, so a crash BETWEEN distribution activation and
+// the coupled rollout commit heals to a consistent state (distribution is the signed
+// source of truth for mode/scope; the rollout projection follows it).
 //
 // It is idempotent by construction: when the rollout state already matches the active
 // envelope the commit is a same-mode/same-scope no-op that preserves the window and
@@ -142,11 +160,17 @@ func resolveMCPDPNodeID() string {
 // without execution dependencies — which the coordinator's pre-check prevents from
 // ever being distribution-persisted in the shipped build) leaves the restored rollout
 // state untouched and is logged; it never promotes.
-func reconcileRolloutWithDistribution() {
-	d := globalMCPDistribution
+//
+// It takes the appliers as a PARAMETER rather than reading them back off the published
+// global seam. That is what makes the convergence race-free rather than merely
+// unlikely: the composing goroutine can converge while the appliers are still private
+// to it, so the config-apply path cannot observe an applier mid-reconcile. Do not
+// "simplify" this back into a global read — see the ordering note in
+// initMCPDistribution.
+func reconcileRolloutWithAppliers(appliers map[cpdp.Capability]*cpdpapply.Applier) {
 	now := time.Now()
 	for _, capb := range []cpdp.Capability{cpdp.CapabilityGateway, cpdp.CapabilityManagement} {
-		a := d.dpApplierFor(capb)
+		a := appliers[capb]
 		if a == nil {
 			continue
 		}
@@ -158,8 +182,21 @@ func reconcileRolloutWithDistribution() {
 		if cfg == nil {
 			continue
 		}
+		// Capability isolation, re-checked at the commit point. commitRolloutTransition
+		// routes by cfg.Capability, so a recovered envelope whose inner rollout declares
+		// the OTHER capability would commit onto that capability's state — crossing the
+		// ADR-0024 boundary at startup, with no operator action and no CP round trip.
+		// The apply-time coordinator makes this unreachable through the live path, and
+		// cpdp validation now rejects such an envelope outright, but Applier.Recover
+		// re-verifies only signature/capability/min-version (NOT full payload
+		// validation), so this path must not inherit its safety from a check that ran in
+		// a different process lifetime. Fail closed and leave the restored state alone.
+		if !rolloutCapabilityMatches(cfg, capb) {
+			logger.Printf("MCP rollout reconcile for %s refused: recovered rollout declares a different capability (isolation, fail-closed)", capb.String())
+			continue
+		}
 		if err := getMCPRollout().commitRolloutTransition(cfg, "startup-reconcile", now); err != nil {
-			logger.Printf("MCP rollout reconcile for %s left rollout state unchanged: %v", capb.String(), sanitizeLog(err.Error()))
+			logger.Printf("MCP rollout reconcile for %s left rollout state unchanged: %q", capb.String(), sanitizeLog(err.Error()))
 		}
 	}
 }
