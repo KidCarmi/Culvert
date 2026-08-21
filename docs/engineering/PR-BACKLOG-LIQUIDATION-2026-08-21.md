@@ -60,3 +60,24 @@ CLOSED-DUPLICATE, CLOSED-SUPERSEDED, CLOSED-ALREADY-PRESENT, CLOSED-OBSOLETE, CL
 | #1108 | security(restore) zip-slip regression wall | MERGED (`04db7cc`) | Tests-only; pins a previously unpinned CWE-22 guard. |
 | #970 | fix(scan) truncation signal everywhere | FIXED+MERGED (`a349e2a`) | Review P2 (blocking limit+1 probe) fixed by DEFERRING the signal to actual delivery of the first uninspected byte; composed with #1115's pre-sized buffer; tests pin the deferred contract. |
 | #809 | security review 07-17 fixes | FIXED+MERGED (`68bddc7`) | Reduced to the 3 still-unfixed findings (cert_verify capture — extended to the native-H2 path main grew later; clusterRole snapshot; corrID bound); /ready half superseded by #1139 (doc post-scripted). |
+| #1130/#1156/#1145/#1163/#1170/#1114/#1177/#1136/#1138/#1176/#1153 | ops/install/misc (11 PRs) | MERGED | Each qualified on current main with focused tests. #1136 also carried #932's ported UI copy fix. |
+| #1106 | install: host-env passphrase persistence | FIXED+MERGED (`a9d4cdc`) | Reconstructed against the restructured function; unified fail-closed posture via the shared validator (matches the interactive choice-2 contract; replaces #1156's warn-and-skip); validator gained the -qz whole-value check. |
+| #1074/#1105/#1112/#1119/#1134/#1143/#1161/#1167 | observability/GUI (8 PRs) | FIXED+MERGED | Every open reviewer finding fixed pre-merge: #1105 honest reload-failure text; #1112 G115 clamp + WK-4 alert half kept open + composed with #1105; #1119 degraded-on-health-fetch-failure; #1134 http.NoBody nit; #1143 single-flight/TTL cache (P1) + 200 available:false (P2) + route pins→223, both pinned by new tests; #1161 per-sentinel precedence reporting + honest recovery wording, with a pin test; #1167's CI determinism red reproduced NOT reproducible with the exact seed on current main (unrelated order flake at its stale base). |
+| #1173 | cluster-CA CHAOS-50 (canonical of 9) | FIXED+MERGED (`6801c66`) | Widest correct coverage, green gates, zero unresolved threads. Ports before merge: #1179's token preservation (+2 gates) and clock-fault classification (not_yet_valid on /health, fix-NTP remediation); import-time not-yet-valid rejection closing #1166's P1 (+ gate). Full suite + race validated. |
+| #1140 | Root-CA recovery plane | FIXED+MERGED (`3dc2b7a`) | Rebased over #1173: installMu overlap dropped (subsumed by commitImport/importMu — its CHAOS-51 deadlock tests pass unchanged against the merged mechanism); unique payload kept (rootca_recovery.go bounded retry + caMutationMu). |
+| #916 | DP cert-renewal retry | CLOSED-UNSAFE (rework) | Fix defeated by its own unresolved P1 (ambiguous renewal ⇒ CP already swapped CertSerial ⇒ retry loop can never succeed); needs CP-side renewal idempotency — a designed change. Follow-up priority RAISED: #1173's clamp increases renewal traffic near CA expiry. |
+| #1110/#1124/#1133/#1146/#1166/#1179 | cluster-CA duplicates | CLOSED-SUPERSEDED | Coverage matrix vs #1173 built first; each close comment records what was compared and what was ported (see PR comments). #1133 additionally carried an active sign-past-expiry fail-open; #1146 a wrong runbook claim + an alert-name design #1173 correctly avoids. |
+
+## Follow-ups recorded (not lost by closures)
+
+- DP cert-renewal retry needs CP-side renewal idempotency (from #916's P1); priority raised by the merged clamp's extra renewal traffic near CA expiry.
+- HA `ImportCASilent`/`applyReplicatedCA` should clear rotation-degraded (Codex on #1124).
+- Transient sign-before-pool-publish window after cluster-CA import (Codex on #1124; self-healing via DP reconnect backoff — low).
+- MCP startup-reconcile mismatch branch skips rather than quarantines a crossed recovered envelope (from #1178; defense-in-depth behind #1144's wall).
+- Grace-window `ok` row on /ready still publishes a fixed degraded-connectivity string (from #1178; cosmetic).
+- WK-4's proactive GeoIP staleness/load-failure alert half is still open (kept open in the register by #1112's rebase).
+- Reverse-index memory bound vs the 2M-host snapshot cap; case-colliding category names at ReplaceAll/import (Codex on the urlcat family).
+- internal/yara per-pattern regex timeout harness — same fix as internal/scanner's, still deferred (pre-existing note).
+- T-9's rename evidence now depends on the alerts_event_rename_import_test.go fixture (from #1113).
+- HA A3/A8 reachability classification (from #853, closed): the behavioral spec (HA-REACHABILITY-CLASSIFICATION.md) and 18 tests remain on branch `claude/ha-reachability-to-main` for a fresh re-land against the reworked guardedTick loop.
+
