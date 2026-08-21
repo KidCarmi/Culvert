@@ -292,7 +292,7 @@ func rollbackConfigVersion(w http.ResponseWriter, r *http.Request) {
 	}
 	auditEvent(r, "config.rollback", "system", auditDetail)
 
-	saveConfigVersion(actor, fmt.Sprintf("rollback to v%d", req.Version))
+	saveConfigVersion(actor, fmt.Sprintf("config.rollback v%d", req.Version))
 
 	if globalConfigStore != nil {
 		// A rolled-back config was valid when saved; if a cap was lowered since,
