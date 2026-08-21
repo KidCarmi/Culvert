@@ -179,9 +179,6 @@ func (e *Engine) LearningActive() bool { return e.learningActive.Load() }
 // client DTOs.
 func (e *Engine) SubjectKeyID() string { return e.subjKey.keyID }
 
-// Observe emits one observation. Non-blocking under every condition; safe from
-// any goroutine. Ignored (uncounted — "not learning" is not loss) when no
-// session is Learning.
 // TaxonomyToken is an opaque MONOTONIC change token for the taxonomy the
 // Categories resolver consults, produced by the Config.TaxonomyKey seam.
 // View holds the root's immutable taxonomy view object (holding it prevents
@@ -197,6 +194,9 @@ type TaxonomyToken struct {
 // via Observation.WindowGen (Codex round 24).
 func (e *Engine) WindowGeneration() uint64 { return e.windowGen.Load() }
 
+// Observe emits one observation. Non-blocking under every condition; safe from
+// any goroutine. Ignored (uncounted — "not learning" is not loss) when no
+// session is Learning.
 func (e *Engine) Observe(o Observation) {
 	t := e.tr
 	// Register BEFORE the gate and closed checks (Codex fix): the window-close

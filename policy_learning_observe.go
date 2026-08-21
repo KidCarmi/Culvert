@@ -223,26 +223,24 @@ func learnObserveDecision(auth authOutcome, host, method string, match *PolicyMa
 		action = "default:allow"
 	}
 	policyID, catEpoch := "", ""
-	{
-		// Each half fenced on BOTH sides of its identity read (round 23; see
-		// learnFencedStamp). Steady state returns the memoized strings —
-		// 0-alloc; the witnesses allocate only at config-change rate.
-		if id, ok := learnFencedStamp(ctx.key.policy, policyContentKeyNow, policyContentIdentityCached); ok {
-			policyID = id
-		} else {
-			// A mutation provably overlapped the evaluation→stamp bracket.
-			// The decision-time identity is unrecoverable, so stamp a witness
-			// unique to the captured key.
-			policyID = "policy-flip@" + strconv.FormatInt(ctx.key.policy.gen, 16) + ":" +
-				strconv.FormatUint(ctx.key.policy.catgroupRev, 16) + ":" + strconv.FormatUint(ctx.key.policy.defaultRev, 16)
-		}
-		if ep, ok := learnFencedStamp(ctx.key.tax, learnTaxKeyNow, learnCategoryEpoch); ok {
-			catEpoch = ep
-		} else {
-			// The content-derived epoch is ABA-blind to a round trip, so
-			// stamp a witness unique to the captured taxonomy state.
-			catEpoch = "category-flip@" + strconv.FormatUint(ctx.key.tax.catRev, 16)
-		}
+	// Each half fenced on BOTH sides of its identity read (round 23; see
+	// learnFencedStamp). Steady state returns the memoized strings —
+	// 0-alloc; the witnesses allocate only at config-change rate.
+	if id, ok := learnFencedStamp(ctx.key.policy, policyContentKeyNow, policyContentIdentityCached); ok {
+		policyID = id
+	} else {
+		// A mutation provably overlapped the evaluation→stamp bracket.
+		// The decision-time identity is unrecoverable, so stamp a witness
+		// unique to the captured key.
+		policyID = "policy-flip@" + strconv.FormatInt(ctx.key.policy.gen, 16) + ":" +
+			strconv.FormatUint(ctx.key.policy.catgroupRev, 16) + ":" + strconv.FormatUint(ctx.key.policy.defaultRev, 16)
+	}
+	if ep, ok := learnFencedStamp(ctx.key.tax, learnTaxKeyNow, learnCategoryEpoch); ok {
+		catEpoch = ep
+	} else {
+		// The content-derived epoch is ABA-blind to a round trip, so
+		// stamp a witness unique to the captured taxonomy state.
+		catEpoch = "category-flip@" + strconv.FormatUint(ctx.key.tax.catRev, 16)
 	}
 	eng.Observe(policylearn.Observation{
 		Subject:    auth.identity,
