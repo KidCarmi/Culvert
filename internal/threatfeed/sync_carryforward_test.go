@@ -19,7 +19,7 @@ import (
 
 func seedFeed() *Feed {
 	tf := New()
-	tf.enabled.Store(true)
+	tf.SetEnabledForTest(true) // publishes the read view; a bare field poke would leave it stale
 	tf.urls = map[string]entry{
 		"http://evil.example/mal.exe":  {Source: "urlhaus"},
 		"http://phish.example/login":   {Source: "openphish"},
@@ -30,6 +30,7 @@ func seedFeed() *Feed {
 		"phish.example": {Source: "openphish"},
 	}
 	tf.totalEntries.Store(3)
+	tf.republishForTest() // the field pokes above bypass the mutators that publish
 	return tf
 }
 
@@ -117,7 +118,7 @@ func TestApplySync_CleanSync_FullyReplacesFeedOwnedEntries(t *testing.T) {
 
 func TestApplySync_ClusterSyncEntriesSurviveLocalSync(t *testing.T) {
 	tf := New()
-	tf.enabled.Store(true)
+	tf.SetEnabledForTest(true) // publishes the read view; a bare field poke would leave it stale
 	// DP state: entries imported from the CP snapshot, not from a local fetch.
 	tf.ImportFeedData(
 		map[string]int64{"http://cp-known.example/mal": time.Now().Unix()},
@@ -167,7 +168,7 @@ func TestFetchFeedInto_ZeroEntrySuccessDoesNotReplace(t *testing.T) {
 	defer empty.Close()
 
 	tf := New()
-	tf.enabled.Store(true)
+	tf.SetEnabledForTest(true) // publishes the read view; a bare field poke would leave it stale
 	urls, domains := map[string]entry{}, map[string]entry{}
 	replaced, failure := tf.fetchFeedInto(empty.URL, sourceURLhaus, "URLhaus", urls, domains)
 	if replaced {
@@ -190,18 +191,31 @@ func TestFetchFeedInto_ZeroEntrySuccessDoesNotReplace(t *testing.T) {
 	}
 }
 
-// TestApplySync_MergeHoldsWriteLock_BlocksReaders PROVES the review finding
-// (PR #587, external review headline comment): the carryForward merge runs
-// inside tf.mu.Lock, so while a sync merges a large previous DB, request-path
-// readers (CheckURL/CheckDomain take RLock) are locked out for the duration —
-// the pre-fix lock hold was an O(1) pointer swap. The cost is accepted
-// (bounded, once per sync cycle) and this test documents it: if the recorded
-// follow-up lands (merge outside the lock with a pointer recheck), the
-// lock-out disappears and this test should be inverted/removed deliberately.
-func TestApplySync_MergeHoldsWriteLock_BlocksReaders(t *testing.T) {
+// TestApplySync_MergeHoldsWriteLock_ButRequestPathIsNotBlocked is the amended
+// form of the PR #587 review pin.
+//
+// The original recorded finding was that the carryForward merge runs inside
+// tf.mu.Lock, so while a sync merges a large previous DB the REQUEST PATH
+// (CheckURL/CheckDomain, which then took tf.mu.RLock) was locked out for the
+// duration. The lock-free readView made the second half of that claim false:
+// the request path no longer touches tf.mu at all, so a multi-millisecond merge
+// is invisible to it. Only the cold readers (saveToDisk, DomainAllowlist, the
+// admin surfaces) still contend, which is the accepted, bounded cost.
+//
+// Both halves are asserted here so neither can regress silently:
+//
+//  1. the merge still holds the write lock (the original observation — cold
+//     readers are still locked out, so the pin keeps its teeth); and
+//  2. CheckDomain keeps answering THROUGHOUT that window, from the previous
+//     generation of tables, with no lock acquisition at all.
+//
+// (2) is the regression guard for the readView: if the per-request lookups ever
+// go back to taking tf.mu, a 100k-entry merge stalls every in-flight request
+// and this fails.
+func TestApplySync_MergeHoldsWriteLock_ButRequestPathIsNotBlocked(t *testing.T) {
 	const n = 100_000
 	tf := New()
-	tf.enabled.Store(true)
+	tf.SetEnabledForTest(true) // publishes the read view; a bare field poke would leave it stale
 	urls := make(map[string]entry, n)
 	domains := make(map[string]entry, n)
 	for i := 0; i < n; i++ {
@@ -209,6 +223,7 @@ func TestApplySync_MergeHoldsWriteLock_BlocksReaders(t *testing.T) {
 		domains[fmt.Sprintf("h%d.example", i)] = entry{Source: sourceURLhaus}
 	}
 	tf.urls, tf.domains = urls, domains
+	tf.republishForTest()
 
 	done := make(chan struct{})
 	go func() {
@@ -220,18 +235,18 @@ func TestApplySync_MergeHoldsWriteLock_BlocksReaders(t *testing.T) {
 		close(done)
 	}()
 
-	// Poll the read lock the way a request-path CheckDomain would contend for
-	// it. The merge holds the write lock for milliseconds while each poll
-	// iteration is sub-microsecond, so observing zero lock-outs is only
-	// possible if the merge ran outside the lock.
-	var blocked, polls int
+	// Poll the write-lock window the way a COLD reader would, and on every
+	// iteration also run a request-path lookup. The merge holds the write lock
+	// for milliseconds while each poll iteration is sub-microsecond, so
+	// observing zero cold lock-outs would mean the merge left the lock.
+	var blocked, polls, lookups int
 	for {
 		select {
 		case <-done:
 			if blocked == 0 {
-				t.Fatalf("request-path readers were never locked out across %d polls — merge no longer under the write lock? update/remove this pin deliberately", polls)
+				t.Fatalf("cold readers were never locked out across %d polls — merge no longer under the write lock? update this pin deliberately", polls)
 			}
-			t.Logf("readers locked out on %d of %d lock polls during the merge", blocked, polls)
+			t.Logf("cold readers locked out on %d of %d lock polls; %d request-path lookups completed unblocked during the merge", blocked, polls, lookups)
 			return
 		default:
 		}
@@ -240,6 +255,12 @@ func TestApplySync_MergeHoldsWriteLock_BlocksReaders(t *testing.T) {
 			tf.mu.RUnlock()
 		} else {
 			blocked++
+			// The write lock is HELD right now. A request-path lookup must
+			// still complete — off the published view, without the lock.
+			if mal, _ := tf.CheckDomain("h1.example"); !mal {
+				t.Fatal("CheckDomain missed a known domain mid-merge — the published view was not self-consistent")
+			}
+			lookups++
 		}
 	}
 }
@@ -276,14 +297,23 @@ func TestFetchFeedInto_TruncatedNonZeroBodyReplaces_DocumentedResidual(t *testin
 	}
 }
 
-// TestSeedForTest_MutatesPublishedMapsInPlace PROVES why the carryForward
-// merge must stay under the write lock (or a future lock-scope fix must
-// pointer-recheck): the published maps are NOT immutable-after-publish.
-// SeedForTest inserts into tf.urls/tf.domains IN PLACE under the lock, so
-// iterating those maps outside the lock (the naive "merge outside, swap
-// inside" optimization) would be a map read racing a map write.
-func TestSeedForTest_MutatesPublishedMapsInPlace(t *testing.T) {
+// TestSeedForTest_ReplacesRatherThanMutatesPublishedMaps is the INVERSE of the
+// tripwire this test used to be.
+//
+// It previously proved that SeedForTest inserted into tf.urls/tf.domains IN
+// PLACE, and warned that the "merge outside the lock, swap inside" optimization
+// was therefore unsafe. The lock-free readView (threatfeed.go) inverted that
+// requirement: the per-request lookups now read the published maps with NO lock
+// at all, so an in-place insert into a published map is a data race against
+// every in-flight request — not merely against a hypothetical future
+// optimization. SeedForTest was converted to copy-then-swap accordingly.
+//
+// The assertion is kept, pointed the other way, because it is the cheapest
+// guard on the contract the whole read path rests on: a map reachable from a
+// published readView is never written in place.
+func TestSeedForTest_ReplacesRatherThanMutatesPublishedMaps(t *testing.T) {
 	tf := New()
+	tf.SetEnabledForTest(true)                 // New() yields an idle feed; Init is what enables it
 	urlsRef, domainsRef := tf.urls, tf.domains // aliases of the published maps
 
 	tf.SeedForTest(
@@ -291,10 +321,17 @@ func TestSeedForTest_MutatesPublishedMapsInPlace(t *testing.T) {
 		map[string]string{"seeded.example": sourceURLhaus},
 	)
 
-	if _, ok := urlsRef["http://seeded.example/a"]; !ok {
-		t.Fatal("SeedForTest replaced tf.urls instead of mutating in place — the merge-outside-the-lock optimization may now be safe; revisit the applySync lock-scope follow-up")
+	if _, ok := urlsRef["http://seeded.example/a"]; ok {
+		t.Fatal("SeedForTest wrote into the previously-published tf.urls — a published map must never be mutated in place; the lock-free CheckURL/CheckDomain read it without a lock")
 	}
-	if _, ok := domainsRef["seeded.example"]; !ok {
-		t.Fatal("SeedForTest replaced tf.domains instead of mutating in place — revisit the applySync lock-scope follow-up")
+	if _, ok := domainsRef["seeded.example"]; ok {
+		t.Fatal("SeedForTest wrote into the previously-published tf.domains — see above")
+	}
+	// The swap itself must still be observable through the read path.
+	if mal, _ := tf.CheckURL("http://seeded.example/a"); !mal {
+		t.Error("seeded URL not visible through CheckURL after the swap")
+	}
+	if mal, _ := tf.CheckDomain("seeded.example"); !mal {
+		t.Error("seeded domain not visible through CheckDomain after the swap")
 	}
 }

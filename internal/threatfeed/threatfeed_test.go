@@ -66,8 +66,8 @@ func newEnabledFeed() *Feed {
 		urls:            make(map[string]entry),
 		domains:         make(map[string]entry),
 		domainAllowlist: make(map[string]bool),
+		enabled:         true,
 	}
-	tf.enabled.Store(true)
 	tf.totalEntries.Store(0)
 	return tf
 }
@@ -111,6 +111,7 @@ func TestThreatFeed_CheckURL_Disabled(t *testing.T) {
 	tf := &Feed{
 		urls:    make(map[string]entry),
 		domains: make(map[string]entry),
+		enabled: false,
 	}
 	hit, _ := tf.CheckURL("http://malware.example.com/evil")
 	if hit {
@@ -412,6 +413,7 @@ func TestThreatFeed_CheckDomain_Disabled(t *testing.T) {
 	tf := &Feed{
 		urls:    make(map[string]entry),
 		domains: make(map[string]entry),
+		enabled: false,
 	}
 	hit, _ := tf.CheckDomain("evil.example.com")
 	if hit {
