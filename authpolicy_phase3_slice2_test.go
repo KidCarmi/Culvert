@@ -108,11 +108,13 @@ func TestP3S2_ShapeRejectsInvalidSSORequired(t *testing.T) {
 }
 
 func TestP3S2_ProviderRefsRejectedForCRAndExempt(t *testing.T) {
-	// CredentialRequired + providerRefs → rejected (deferred).
+	// CredentialRequired + providerRefs → ACCEPTED at shape level since
+	// ADR-0025 activated the reserved seam (refs name the credential-capable
+	// provider subset; referential checks run at the API write door).
 	cr := validCRRule()
 	cr.Auth.ProviderRefs = []string{"corp-oidc"}
-	if _, err := validateAuthRule(cr); err == nil {
-		t.Error("CredentialRequired providerRefs must remain rejected (deferred)")
+	if _, err := validateAuthRule(cr); err != nil {
+		t.Errorf("CredentialRequired providerRefs must pass shape validation (ADR-0025): %v", err)
 	}
 	// Exempt + providerRefs → rejected (no provider concept).
 	ex := validExemptRule()

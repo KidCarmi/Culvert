@@ -892,10 +892,15 @@ func validateAuthRule(rule PolicyRule) (warnings []string, err error) {
 // providerRefs is SHAPE-validated here only (registry-free, so the bulk
 // persistence gate via policyRulePersistable stays pure); the referential check
 // that each ref names an enabled, type-compatible IdP runs at the API write door
-// (validateSSOProviderRefsLive). Outcome gating (Phase 3 Slice 2):
-//   - SSORequired: providerRefs allowed (empty = all compatible enabled
-//     interactive IdPs; one/many recorded for later runtime selection).
-//   - CredentialRequired: providerRefs rejected (deferred to a later slice).
+// (validateAuthProviderRefsLive). Outcome gating:
+//   - SSORequired (Phase 3 Slice 2): providerRefs allowed (empty = all
+//     compatible enabled interactive IdPs).
+//   - CredentialRequired (ADR-0025): providerRefs allowed — the reserved seam
+//     activates now that a non-interactive credential provider (LDAP) exists.
+//     Empty = the global validator chain; non-empty names the credential-
+//     capable (OIDC/LDAP) profile subset that may satisfy the rule. Runtime:
+//     a rule whose refs resolve to zero eligible providers fails CLOSED (403,
+//     no dangling 407) rather than challenging unfulfillably.
 //   - Exempt: providerRefs rejected (no provider concept).
 func validateAuthOutcomeAndProviders(spec *AuthRuleSpec) error {
 	switch spec.Outcome {
@@ -904,14 +909,10 @@ func validateAuthOutcomeAndProviders(spec *AuthRuleSpec) error {
 	default:
 		return fmt.Errorf("auth outcome must be Exempt, CredentialRequired, or SSORequired")
 	}
-	if spec.Outcome == OutcomeSSORequired {
+	if spec.Outcome == OutcomeSSORequired || spec.Outcome == OutcomeCredentialRequired {
 		return validateSSOProviderRefsShape(spec.ProviderRefs)
 	}
-	// Exempt and CredentialRequired do not accept providerRefs in Phase 3 Slice 2.
 	if len(spec.ProviderRefs) != 0 {
-		if spec.Outcome == OutcomeCredentialRequired {
-			return fmt.Errorf("providerRefs for CredentialRequired is deferred and cannot be set yet")
-		}
 		return fmt.Errorf("providerRefs is not valid on Exempt rules")
 	}
 	return nil
@@ -960,6 +961,44 @@ func validateSSOProviderRefsShape(refs []string) error {
 // write time. Empty providerRefs is valid (= all compatible enabled interactive
 // IdPs). Stored rules are NOT re-checked here, so a later IdP deletion/disable
 // does not drop them (DR-4); runtime + diagnostics fail closed in later slices.
+// validateAuthProviderRefsLive is the single write-door referential check for
+// providerRefs across the outcomes that accept them: SSORequired refs must
+// resolve to enabled INTERACTIVE profiles, CredentialRequired refs to enabled
+// CREDENTIAL-capable profiles (ADR-0025). Same DR-4 posture as the SSO check:
+// consulted only at the API write door, never on stored rules.
+func validateAuthProviderRefsLive(spec *AuthRuleSpec) error {
+	if err := validateSSOProviderRefsLive(spec); err != nil {
+		return err
+	}
+	return validateCredentialProviderRefsLive(spec)
+}
+
+// validateCredentialProviderRefsLive checks that every providerRef on a
+// CredentialRequired rule resolves to an ENABLED, CREDENTIAL-capable
+// (OIDC/LDAP) IdP profile. SAML is browser-only and can never validate a
+// presented Basic credential; an LDAP ref is the primary intended use.
+func validateCredentialProviderRefsLive(spec *AuthRuleSpec) error {
+	if spec == nil || spec.Outcome != OutcomeCredentialRequired || len(spec.ProviderRefs) == 0 {
+		return nil
+	}
+	if idpRegistry == nil {
+		return fmt.Errorf("providerRefs set but no IdP profiles are configured")
+	}
+	for _, ref := range spec.ProviderRefs {
+		id := strings.TrimSpace(ref)
+		p := idpRegistry.Get(id)
+		switch {
+		case p == nil:
+			return fmt.Errorf("providerRef %q does not match any configured IdP profile", id)
+		case !p.Enabled:
+			return fmt.Errorf("providerRef %q references a disabled IdP profile", id)
+		case !p.Type.CredentialCapable():
+			return fmt.Errorf("providerRef %q is not a credential-capable (OIDC or LDAP) IdP — SAML is browser-only and cannot satisfy CredentialRequired", id)
+		}
+	}
+	return nil
+}
+
 func validateSSOProviderRefsLive(spec *AuthRuleSpec) error {
 	if spec == nil || spec.Outcome != OutcomeSSORequired || len(spec.ProviderRefs) == 0 {
 		return nil

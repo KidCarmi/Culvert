@@ -120,6 +120,31 @@ func eligibleSSOProviders(providerRefs []string) []ssoEligibleProvider {
 	return out
 }
 
+// countEligibleCredentialProviderRefs returns how many of a CredentialRequired
+// rule's providerRefs resolve to an enabled, credential-capable (OIDC/LDAP)
+// live provider (ADR-0025). Consulted only when refs are non-empty: the
+// no-credentials CR arm fails CLOSED (403) at zero — a 407 challenge no
+// scoped provider could ever satisfy would be a dangling affordance.
+// Registry drift (disabled/deleted refs) is thus handled at runtime, mirroring
+// eligibleSSOProviders' DR-4 posture.
+func countEligibleCredentialProviderRefs(providerRefs []string) int {
+	if idpRegistry == nil {
+		return 0
+	}
+	n := 0
+	for _, ref := range providerRefs {
+		id := strings.TrimSpace(ref)
+		p := idpRegistry.Get(id)
+		if p == nil || !p.Enabled || !p.Type.CredentialCapable() {
+			continue
+		}
+		if _, ok := idpRegistry.LiveProvider(id); ok {
+			n++
+		}
+	}
+	return n
+}
+
 // ssoRelayURL is the original URL the browser was trying to reach (carried
 // through the SSO flow as the post-login return target).
 func ssoRelayURL(r *http.Request) string {
