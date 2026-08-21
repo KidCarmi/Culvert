@@ -52,6 +52,62 @@ silently disabled a healthy trust root's lifecycle for what is a 10-YEAR certifi
 change. All seven fixed, 18 gates in `cluster_ca_chaos_test.go`. See §17 and
 `docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-19.md`.
 
+**2026-08-14 — CHAOS-50 / CHAOS-51 sweep (the CA plane's RECOVERY paths — both CAs).**
+
+CHAOS-06 made a Root-CA load failure visible and CHAOS-28 made an EXPIRED CA fail closed.
+Neither asked what happens NEXT, and the answer was uniformly nothing: the bundle was read
+once at startup, `sslInspectionLoadError` had no clearer anywhere in the non-test tree, and
+the one background loop that could heal either CA was skipped whenever the inspection CA was
+the thing that failed. Eight defects, all fixed.
+
+**CHAOS-51 is the headline and was not in the register.** `clusterCA.ImportCA` held
+`ca.mu.Lock()` across TWO calls that re-enter the same object — `onRotate` →
+`rebuildCPCertPool` → `AllCACertsPEM` → `RLock`, and `CurrentConfigSnapshot()` →
+`CACertFingerprint` → `RLock` — and `CleanupSecondary` repeated the first. `sync.RWMutex` is
+not reentrant, so each **self-deadlocked and left the write lock held for the life of the
+process**: every reader of the cluster CA then blocked forever, including `CACertFingerprint`
+and therefore EVERY CP→DP ConfigSnapshot. `rebuildCPCertPool` additionally strands
+`cpTLSConfig.mu` (it takes that FIRST, then blocks), and that is the mutex
+`getCPTLSConfigForClient` takes on every ClientHello — so the CP stops completing TLS
+handshakes too, and a reconnecting DP cannot even reach the RPC that would have served it
+stale config. Total Control-Plane stall — no enrollment, no config distribution, no cluster
+admin API, no new CP TLS session — reachable three ways, two of them unattended:
+`POST /api/cluster/ca` (immediately and deterministically on any CP with the gRPC server up,
+because that is what wires `onRotate`), `RotateIfNeeded` at cluster-CA expiry−30d, and
+`CleanupSecondary` when an overlap window ends. A restart clears the lock but NOT the trigger
+for the unattended two, so it is self-reproducing. It was found by accident, in the CONTROL
+arm of a harness written to prove something else, and it survived every prior review because
+every existing `ImportCA` test calls the method on a LOCAL `clusterCA` value while the re-entrant
+reads go through the `globalClusterCA` package variable — a different mutex. The generalisable
+lesson: **a test that constructs its own instance of a singleton cannot observe a re-entrancy
+defect in that singleton.** Fixed by splitting the mutation (`installLocked`) from the
+notification/publication half, which now runs with the lock released; same for
+`CleanupSecondary`. Also on those lines: `ImportCA` dereferenced `ca.secondaryCert`
+unconditionally, nil-panicking on a FIRST import (row CA-17).
+
+**CHAOS-50** closes the long-open CA-3. (1) `StartCAAutoRotation` was gated on
+`certMgr.Ready()` but drives FOUR things — both CAs' `RotateIfNeeded` and both secondary
+cleanups — so an inspection-CA fault silently disabled CLUSTER-CA rotation for the process
+lifetime, and made every runtime recovery permanent-but-useless (a force-rotated CA that
+would never auto-rotate). The gate bought nothing: both `RotateIfNeeded`s already no-op when
+their own CA is absent. (2) A failed load was never retried — the faults that actually happen
+(volume attaches after the container starts, NFS/EBS hiccup, ownership fixed a minute later,
+disk full at first write) all left inspection disabled long after the fault cleared. Now a
+BOUNDED campaign (10 attempts, 5 s→5 min backoff, then a terminal log line). The load-bearing
+decision: a retry **must never mint**. `LoadOrInitCA` generates a fresh root when the path is
+absent, which is right on first boot and catastrophic on a retry — an unmounted volume would
+silently swap the fleet's trust anchor for one no client trusts and write it to ephemeral
+storage, reproducing the CA-1 symptom from a new cause with the appliance reporting itself
+healthy. Recovery re-reads the CONFIGURED bundle only. (3) `sslInspectionLoadError` was
+write-only, so `/healthz`, `/readyz?strict=1` and support telemetry stayed red after a REAL
+recovery — a probe that outlives its fault, inverting this plane's own
+"recovery-on-evidence" rule. (4) An admin-uploaded MITM CA was never persisted (silently lost
+on restart). (5) The inspect-matched fail-OPEN bypass had no counter at all, while its
+fail-CLOSED twin has had one since CHAOS-28. The fail-open POSTURE is deliberately unchanged
+and recorded as **CA-3b** (owner decision): unlike the expired-CA case, refusing here DOES
+cost availability that bypassing preserves, so the flip is customer-visible and not a chaos
+fix's call. See `docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-14.md`.
+
 **2026-08-11 — CHAOS-49 sweep (the multi-IdP registry auth path under IdP failure).**
 
 CHAOS-47 gave the LEGACY identity backends a three-part contract (an infrastructure failure is
@@ -206,7 +262,9 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | CA-1 | **Expired Root CA keeps signing leaves** — no `time.Now().After(caCert.NotAfter)` guard on the sign path. Every inspected client then sees an opaque expired-issuer TLS error (site-wide inspected-HTTPS outage) with no fast-fail signal. | GAP → **CLOSED** (CHAOS-28: fail-closed 502 at dispatch + `ErrCAUnusable` at the sign path + `culvert_ca_usable`/`_expires_in_seconds` + `ssl_inspection: expired`) | H | was: `internal/ca/ca.go` `signLeaf`; now `internal/ca/validity.go`, `proxy_tunnel.go` `failClosedUnusableCA` — see §16 |
 | CA-1b | **Forged leaf `NotAfter` was not clamped to the issuer's** — leaves minted in the CA's final 24h claimed validity past their own issuer, the state that makes an expiry incident hardest to diagnose (leaf looks valid, only the chain fails). | GAP → **CLOSED** (CHAOS-28, `clampLeafValidity`, both ends) | M | was: `internal/ca/ca.go` `signLeaf` `NotAfter: now+24h`; see §16 |
 | CA-2 | Rotation `SaveCA` failure (disk full / read-only) is **swallowed** — logged, still returns `true`, still fires the "rotated successfully" alert. New CA lives only in RAM; next restart reloads the old near-expiry bundle. | GAP → **CLOSED** (CHAOS-28, `RotationPersistFailureObserver` + distinct log wording + `culvert_ca_rotation_persist_failures_total` + CA-panel banner) | H | was: `internal/ca/ca.go` `RotateIfNeeded`; see §16 |
-| CA-3 | Corrupt bundle / wrong `CULVERT_CA_PASSPHRASE` / expired-at-rest CA at startup → **fail OPEN**: inspection silently disabled, traffic falls through to SSL-bypass (no DPI/CDR/file-blocking). Log line only, no alert, no `ssl_inspection_ready` gauge. | GAP (silent) | H | `rootca_startup.go:40-44`; `handleTunnel` gate `proxy.go:1335`; `ImportBundle` `ca.go:286` |
+| CA-3 | Corrupt bundle / wrong `CULVERT_CA_PASSPHRASE` / expired-at-rest CA at startup → **fail OPEN**: inspection silently disabled, traffic falls through to SSL-bypass (no DPI/CDR/file-blocking). Log line only, no alert, no `ssl_inspection_ready` gauge. | GAP → **CLOSED** (visibility by CHAOS-06; RECOVERY by CHAOS-50: bounded retry campaign that never mints, `noteSSLInspectionRecovered` clears the latch on evidence, `culvert_ca_load_failed` + `culvert_ca_inspect_bypassed_total`, CA-panel fail-open banner. The POSTURE is split out as CA-3b) | H | was: `rootca_startup.go:40-44`; now `rootca_recovery.go`, `ca_metrics.go` `caWriteLoadFailurePrometheus` — see the 2026-08-14 review |
+| CA-3b | **Fail-open/fail-closed asymmetry**: an inspect-matched CONNECT with no CA loaded proceeds as an unscanned tunnel, while the same appliance-wide fault found at EXPIRY is refused 502 (CA-1). Opposite postures for one fault class, decided by `caCert != nil`. CHAOS-28's supporting argument ("refusing costs no availability that signing would have preserved") does NOT carry over — this traffic works fine as a tunnel — so the flip is a customer-visible availability decision. | GAP (**owner decision**; window now short + measurable) | H | `handleTunnel` `proxy_tunnel.go:321,347`; counter `noteCAInspectUnavailableBypass` |
+| CA-17 | **Cluster-CA install path SELF-DEADLOCKS**: `ImportCA` held `ca.mu.Lock()` across `onRotate`→`rebuildCPCertPool`→`AllCACertsPEM`→`RLock` AND across `CurrentConfigSnapshot()`→`CACertFingerprint`→`RLock`; `CleanupSecondary` repeated the first. Non-reentrant `sync.RWMutex` ⇒ write lock held for the life of the process ⇒ every cluster-CA reader blocks, incl. every CP→DP ConfigSnapshot. Total CP stall; restart does not clear the unattended triggers. Plus a nil-deref on `ca.secondaryCert` on a FIRST import. Invisible to the suite because every prior test used a LOCAL `clusterCA` while the re-entrant reads go through `globalClusterCA`. | NEW → **CLOSED** (CHAOS-51: `installLocked` + post-lock effects; `TestChaos51_*` install the object AS the global and stand up `cpTLSConfig`) | **Critical** | was: `enrollment.go:1128,1185,1201,1223`; see the 2026-08-14 review |
 | CA-4 | Auto-rotation loop: **no immediate startup check** (24h blind spot after boot), **no retry/backoff** on failure (waits a fixed 24h). | GAP → **PARTLY CLOSED** (CHAOS-28: the startup blind spot is closed — one guarded round runs before the ticker, sharing the CHAOS-24 guard. Retry/backoff on a FAILED rotation still waits the full 24h) | M/H | `ca.go` `StartCAAutoRotation`; see §16 |
 | CA-5 | `cert_expiry` alert only fires **on rotation**, not as an early warning — contract says "fired on startup if ≤30 days" but the only producer is the rotation observer. | GAP (contract mismatch) | M | producer `ca.go:45-53`; contract `internal/alerts/store.go:17` |
 | CA-6 | OCSP fails **closed** when a cert lists responders and none answer; `VerifyConnection` re-checks resumed sessions. Caveats: nil-issuer → fail-open; OCSP client has no SSRF guard on the peer-controlled responder URL. | ✓ (+2 caveats) | L/M | `internal/ocsp/ocsp.go:177-181`, `ocsp.go:41-56`; caveats `ocsp.go:139-142,187-206` |
@@ -1325,3 +1383,126 @@ lands in the same branch and the same verdict is correct for it.
 > the rejecting verifier is co-located with the signer, so the same constant turns "absorb
 > disagreement" into "disagree with yourself." A constant copied across a boundary needs its
 > justification re-derived, not just its value.
+
+## 18. CHAOS-50 / CHAOS-51 — The CA plane's recovery paths (both CAs)
+
+**Date:** 2026-08-14 · **Rows:** CA-3 (closed), CA-3b (new, owner decision),
+CA-17 (new, closed) · **Full review:**
+`docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-14.md`
+
+### 17.1 CHAOS-51 — the cluster CA install path self-deadlocked
+
+`sync.RWMutex` is not reentrant. `clusterCA.ImportCA` held `ca.mu.Lock()` across two
+calls that come straight back into the same object, and `CleanupSecondary` repeated
+the first:
+
+```
+ca.onRotate()           → rebuildCPCertPool()  → ca.AllCACertsPEM()  → ca.mu.RLock()
+CurrentConfigSnapshot() → globalClusterCA.CACertFingerprint()        → ca.mu.RLock()
+```
+
+Each self-deadlocked *and* stranded the write lock for the life of the process, so every
+cluster-CA reader blocked forever — `CACertFingerprint` included, hence **every CP→DP
+`ConfigSnapshot`**. `rebuildCPCertPool` takes `cpTLSConfig.mu` *before* it blocks, so that
+mutex is stranded too, and it is the one `getCPTLSConfigForClient` takes on every
+ClientHello: the CP also stops completing TLS handshakes, so a reconnecting DP cannot even
+reach the RPC that would have served it stale config.
+
+**Reachable three ways, two unattended:** `POST /api/cluster/ca` (immediately and
+deterministically on any CP whose gRPC server is up — that is what wires `onRotate`),
+`RotateIfNeeded` at cluster-CA expiry−30d, and `CleanupSecondary` at the end of an overlap
+window. A restart clears the lock but not the last two triggers, so the node re-deadlocks:
+**self-reproducing and non-recoverable.**
+
+**Why the suite never saw it.** Every prior `ImportCA` test calls the method on a **local**
+`clusterCA` value, while the re-entrant reads go through the `globalClusterCA` package
+variable — a different mutex — and `rebuildCPCertPool` returns early when
+`cpTLSConfig.cfg == nil`, which it always is in a unit test. The generalisable rule:
+**a test that constructs its own instance of a singleton cannot observe a re-entrancy defect
+in that singleton.** The new gates install the object under test *as* the global and stand up
+`cpTLSConfig`, and bound every call on a child goroutine so a regression reports instead of
+wedging CI.
+
+**Fix.** `installLocked` does validation, backup, overlap bookkeeping, persistence and the
+state swap under the lock and returns a `clusterCAImportEffects`; `ImportCA` then runs
+`onRotate`, `StartCARotation`, the config publish and the counter with the lock released.
+`CleanupSecondary` captures `onRotate` under the lock and calls it after unlocking.
+`StartCARotation` fires only when a previous CA existed — `ca.secondaryCert` was
+dereferenced unconditionally, a nil panic on a FIRST import (reachable when `onRotate` is
+unwired; otherwise the deadlock at the preceding line wins).
+
+**Keep the rule:** nothing called between `ca.mu.Lock()` and its `Unlock` may reach
+`globalClusterCA`, `CurrentConfigSnapshot`, or the CP TLS pool.
+
+### 17.2 CHAOS-50 — a failed Root-CA load had no way back
+
+CHAOS-06 made the failure visible; CHAOS-28 made an *expired* CA fail closed. Neither asked
+what happens next, and the answer was nothing.
+
+1. **The auto-rotation loop was gated on `certMgr.Ready()`** but drives four things — both
+   CAs' `RotateIfNeeded` and both secondary cleanups. An inspection-CA fault therefore
+   silently disabled **cluster-CA** rotation for the process lifetime, and left every runtime
+   recovery with a CA that would never auto-rotate. The gate bought nothing: both
+   `RotateIfNeeded`s already no-op when their own CA is absent. Now unconditional.
+2. **No retry.** The bundle was read once. The faults that actually happen are transient
+   (volume attaches after the container starts, NFS/EBS hiccup, ownership fixed a minute
+   later, disk full at first write) and all of them left inspection disabled long after the
+   fault cleared. Now a **bounded** campaign: `caLoadRetryBudget` 10 attempts,
+   `caLoadRetryInitial` 5 s → `caLoadRetryMax` 5 min, then a terminal log line.
+3. **A retry must never MINT.** `LoadOrInitCA` generates a fresh root when the path is
+   absent — right on first boot, catastrophic on a retry: an unmounted volume would silently
+   swap the fleet's trust anchor for one no client trusts and write it to ephemeral storage,
+   reproducing the CA-1 symptom from a new cause with the appliance reporting itself healthy.
+   `attemptInspectionCARecovery` matches the action to the fault (no path ⇒ `InitCA`; CA
+   already loaded ⇒ `SaveCA`, the durability half; otherwise ⇒ `LoadCA` on the configured
+   bundle only).
+4. **`sslInspectionLoadError` was write-only** — `/healthz`, `/readyz?strict=1` and support
+   telemetry stayed red after a *real* recovery, a probe that outlives its fault and an
+   inversion of this plane's own recovery-on-evidence rule. `noteSSLInspectionRecovered`
+   clears it, called from the retry loop, from `apiCARotate` **after** the persist check, and
+   from the MITM `apiCertsUpload` — which now **persists** the uploaded CA (it was memory-only
+   and silently lost on restart).
+5. **The fail-OPEN direction had no counter**, while its fail-CLOSED twin has had one since
+   CHAOS-28. Now `culvert_ca_inspect_bypassed_total` + a rate-limited log + `/api/ca/status`
+   + a CA-panel banner.
+
+### 17.3 What is deliberately left
+
+- **CA-3b — the posture.** An inspect-matched CONNECT with no CA loaded still bypasses, while
+  the same appliance-wide fault at *expiry* is refused 502. CHAOS-28's supporting argument
+  ("refusing costs no availability that signing would have preserved") does **not** carry
+  over: that traffic was already dead, this traffic works fine as a tunnel. The flip is a
+  customer-visible availability decision and belongs to the owner. This work makes the window
+  short (retry) and measurable (counter) so the decision can be taken on data.
+- **The retry schedule is not configurable** (GUI-parity cost for a value nobody has asked to
+  change).
+- **CA-13** — still open; this sweep went to `enrollment.go` for the deadlock and did not
+  widen into the rotation-observability half.
+
+### 17.4 Review follow-ups (raised against the fix, fixed in the same PR)
+
+Both are the SAME SHAPE as the bug this sweep is about — a multi-step operation whose steps
+are individually atomic and jointly not — so they are recorded rather than deferred.
+
+- **FS-9 / row CA-18 — automatic and manual Root-CA recovery could overwrite each other.**
+  Installing a CA is read/generate → install → persist → clear-the-latch. The retry loop and
+  the admin force-rotate both perform it and nothing serialized them: a retry could read the
+  OLD bundle, the admin could install AND persist a NEW one, and the retry would then install
+  its buffered old CA on top. The API reports `persisted:true` — true, ON DISK — while the
+  LIVE process signs with the superseded root, so every client the operator just provisioned
+  with the new root rejects every leaf until a restart. Not remote: the retry window is
+  ~25 min and force-rotate is the documented manual recovery, so these are the two actors an
+  operator runs during the same incident. Fixed with `caMutationMu` (an OUTER lock across
+  install + persist + latch-clear in all three paths); the "already fixed by hand?" check
+  moved INSIDE the lock, because outside it that was a check-then-act with the same gap.
+  Pinned by `TestChaos50_ManualRecoveryIsNotOverwrittenByRetry`.
+- **FS-10 / row CA-19 — the cluster-CA publish phase could interleave.** Releasing `ca.mu`
+  before the publish is what removes the deadlock, but on its own it lets a second import land
+  between the state swap and the publish: two imports can run `StartCARotation` out of order
+  (persisted rotation record describes the OLDER CA) or a cleanup can clear a newer import's
+  record. Fixed with `clusterCA.installMu`, an OPERATION-level lock spanning `installLocked` +
+  the publish, taken by `ImportCA` and `CleanupSecondary`. The two locks are not
+  interchangeable: `mu` guards the fields and must not be held across the publish; `installMu`
+  orders the operations and is never taken by anything the publish reaches. Lock order
+  `installMu` → `mu`, never the reverse, so the CHAOS-51 cycle is not reintroduced. Pinned by
+  `TestChaos51_ConcurrentImportsKeepRotationRecordConsistent`.

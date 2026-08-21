@@ -72,6 +72,10 @@ func loadRootCA(cfg rootCAStartupConfig, ctx context.Context) {
 	// rotation check); it exists so a test driving this loader leaves no
 	// background goroutine running past its own completion.
 	caRotationLoopDone = StartCAAutoRotation(ctx, cfg.Path, cfg.Passphrase)
+
+	// A recorded load failure gets a bounded retry campaign (rootca_recovery.go).
+	// No-op on a healthy boot.
+	startInspectionCARecoveryLoop(ctx, cfg)
 }
 
 // caRotationLoopDone is closed when the auto-rotation loop started by the most

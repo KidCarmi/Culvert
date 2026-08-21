@@ -307,13 +307,32 @@ func apiCertsUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if target == "mitm" {
-		if err := certMgr.LoadCustomCA(certPEM, keyPEM); err != nil {
+		// CHAOS-50: PERSIST the uploaded CA. It used to be installed in memory
+		// only, so an admin who uploaded their enterprise MITM CA got a gateway
+		// that silently reverted to the previous (or no) CA on the next restart —
+		// the same swallowed-durability shape CHAOS-28 fixed for rotation, on the
+		// other CA-install path. The response now states which happened, and the
+		// recorded load failure is cleared only when the bundle actually landed.
+		// Install + persist + latch clear run as one operation under caMutationMu.
+		persisted, err := installAndPersistCustomMITMCA(certPEM, keyPEM)
+		if err != nil {
 			logger.Printf("certs upload MITM: %v", err)
 			http.Error(w, "invalid CA cert/key pair", http.StatusBadRequest)
 			return
 		}
+		if !persisted {
+			auditEvent(r, "certs.upload_mitm", "custom MITM CA", "NOT PERSISTED — in-memory only")
+			jsonOK(w, map[string]any{
+				"status":    "ok",
+				"target":    "mitm",
+				"persisted": false,
+				"warning": "The uploaded CA is active but could not be written to the CA bundle path — " +
+					"it exists in memory only and will be LOST on restart. Restore write access and upload again.",
+			})
+			return
+		}
 		auditEvent(r, "certs.upload_mitm", "custom MITM CA", "")
-		jsonOK(w, map[string]string{"status": "ok", "target": "mitm"})
+		jsonOK(w, map[string]any{"status": "ok", "target": "mitm", "persisted": true})
 		return
 	}
 	// UI cert — validate only; actual rotation requires restart.
@@ -1132,6 +1151,23 @@ func apiCAStatus(w http.ResponseWriter, r *http.Request) {
 	if caFaults.PersistDegraded && caFaults.PersistErr != "" {
 		info["rotationPersistError"] = caFaults.PersistErr
 	}
+	// CHAOS-50 load/recovery posture. `ready:false` alone does not distinguish
+	// "no CA configured on this node" from "the configured CA could not be
+	// loaded and every inspect-matched CONNECT is being forwarded UNINSPECTED" —
+	// opposite operator instructions from the same field. `inspectBypassed` is
+	// the fail-OPEN counterpart to `inspectBlocked` above.
+	loadFailure := sslInspectionLoadFailure()
+	info["loadFailed"] = loadFailure != ""
+	if loadFailure != "" {
+		info["loadFailureReason"] = loadFailure
+	}
+	info["inspectBypassed"] = caInspectBypassCount()
+	rec := caLoadRecoveryStatus()
+	info["loadRecoveryAttempts"] = rec.Attempts
+	info["loadRecoveryGaveUp"] = rec.GaveUp
+	if rec.LastErr != "" {
+		info["loadRecoveryError"] = rec.LastErr
+	}
 	// Dual-CA overlap status.
 	info["dualCAActive"] = certMgr.SecondaryCAActive()
 	if secInfo := certMgr.SecondaryCAInfo(); secInfo != nil {
@@ -1262,12 +1298,16 @@ func apiCARotate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := certMgr.InitCA(); err != nil {
+	// Under caMutationMu so an in-flight automatic recovery attempt cannot land
+	// between the install and the persist and overwrite this rotation with the
+	// bundle it was already reading (see rootca_recovery.go). The HTTP response
+	// is written after the lock is released.
+	info, persisted, err := installAndPersistRotatedCA()
+	if err != nil {
 		http.Error(w, "rotation failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	info := certMgr.CACertInfo()
-	if !persistRotatedCA() {
+	if !persisted {
 		// Still 200: the rotation DID happen and the new CA is active, so
 		// reporting an error would be wrong in the other direction. The caller
 		// is told what did not happen instead.
@@ -1280,6 +1320,48 @@ func apiCARotate(w http.ResponseWriter, r *http.Request) {
 	statCARotations.Add(1)
 	auditEvent(r, "ca.rotate", "root_ca", "force rotation via admin API (confirmed)")
 	jsonOK(w, info)
+}
+
+// installAndPersistRotatedCA mints a new Root CA, writes it to the configured
+// bundle path, and clears the recorded load failure — as ONE operation under
+// caMutationMu, so the automatic recovery loop cannot interleave with it.
+//
+// The latch clear is deliberately gated on the persist. A force-rotate is the
+// documented manual recovery from a failed CA load and is the EVIDENCE that
+// clears the recorded failure (without it, /healthz, /readyz?strict=1 and the
+// support-telemetry readiness row keep reporting the fault after the operator has
+// fixed it — a red probe that outlives what it describes). But a rotation that did
+// not reach disk resolves only the load half, not the durability half, so the
+// failure must stay recorded.
+func installAndPersistRotatedCA() (info map[string]any, persisted bool, err error) {
+	caMutationMu.Lock()
+	defer caMutationMu.Unlock()
+
+	if err := certMgr.InitCA(); err != nil {
+		return nil, false, err
+	}
+	info = certMgr.CACertInfo()
+	if !persistRotatedCA() {
+		return info, false, nil
+	}
+	noteSSLInspectionRecovered("force rotation via admin API")
+	return info, true, nil
+}
+
+// installAndPersistCustomMITMCA is the custom-CA-upload counterpart of
+// installAndPersistRotatedCA, under the same lock for the same reason.
+func installAndPersistCustomMITMCA(certPEM, keyPEM []byte) (persisted bool, err error) {
+	caMutationMu.Lock()
+	defer caMutationMu.Unlock()
+
+	if err := certMgr.LoadCustomCA(certPEM, keyPEM); err != nil {
+		return false, err
+	}
+	if !persistRotatedCA() {
+		return false, nil
+	}
+	noteSSLInspectionRecovered("custom MITM CA uploaded via admin API")
+	return true, nil
 }
 
 // apiCAKeyProvider returns the current key provider status for HSM/KMS UI.

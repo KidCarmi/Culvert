@@ -4320,6 +4320,13 @@ Firefox (all platforms):
           The replacement CA exists in memory only — a restart will discard it and rotate again to a different CA.
           Fix the data volume, then force a rotation.
         </div>
+        <div id="ca-load-banner" style="display:none;margin:0 0 12px;padding:10px 12px;border-radius:6px;background:rgba(220,53,69,.12);border:1px solid var(--red,#dc3545);font-size:.86rem">
+          <strong>Configured Root CA did not load — traffic is leaving UNINSPECTED.</strong>
+          <span id="ca-load-reason"></span>
+          Inspect-matched HTTPS is being forwarded as a plain tunnel, so DLP, anti-virus, YARA, CDR and DPI
+          are not running on those sessions. <span id="ca-load-counts" style="color:var(--muted)"></span>
+          <span id="ca-load-recovery"></span>
+        </div>
         <div class="cards" id="ca-cards" style="grid-template-columns:repeat(3,1fr)">
           <div class="card"><div class="card-label">Status</div><div class="card-value" id="ca-status">-</div></div>
           <div class="card"><div class="card-label">Expires</div><div class="card-value" id="ca-expiry">-</div></div>
@@ -16782,6 +16789,22 @@ async function loadCAMgmt() {
   persistBanner.style.display = ca.rotationPersistDegraded ? '' : 'none';
   if (ca.rotationPersistDegraded) {
     document.getElementById('ca-persist-reason').textContent = ca.rotationPersistError || '';
+  }
+  // CHAOS-50: a CONFIGURED CA that failed to load is the fail-OPEN state — the
+  // opposite of the fail-closed banner above, and the one with security
+  // consequences, so it says what is happening to traffic and how many sessions
+  // it has already affected. `ready:false` on its own cannot express this: an
+  // appliance with no CA configured looks identical.
+  const loadBanner = document.getElementById('ca-load-banner');
+  loadBanner.style.display = ca.loadFailed ? '' : 'none';
+  if (ca.loadFailed) {
+    document.getElementById('ca-load-reason').textContent = ca.loadFailureReason || '';
+    document.getElementById('ca-load-counts').textContent =
+      (ca.inspectBypassed ?? 0) + ' connection(s) forwarded uninspected since boot.';
+    document.getElementById('ca-load-recovery').textContent = ca.loadRecoveryGaveUp
+      ? ' Automatic recovery gave up after ' + (ca.loadRecoveryAttempts ?? 0) +
+        ' attempts — fix the bundle/passphrase and restart, or force a rotation below and redistribute the new CA.'
+      : ' Automatic recovery is retrying (' + (ca.loadRecoveryAttempts ?? 0) + ' attempt(s) so far).';
   }
   document.getElementById('ca-expiry').textContent = ca.expiresIn || '-';
   document.getElementById('ca-provider').textContent = ca.keyProvider || 'local';

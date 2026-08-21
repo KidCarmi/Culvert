@@ -167,4 +167,37 @@ func caWriteUsabilityPrometheus(w *strings.Builder) {
 	w.WriteString("\n# HELP culvert_ca_rotation_persist_failures_total Rotations that generated a new Root CA but could not write it to disk\n")
 	w.WriteString("# TYPE culvert_ca_rotation_persist_failures_total counter\n")
 	fmt.Fprintf(w, "culvert_ca_rotation_persist_failures_total %d\n", snap.PersistFailures)
+
+	caWriteLoadFailurePrometheus(w)
+}
+
+// caWriteLoadFailurePrometheus appends the CHAOS-50 Root-CA load/recovery
+// series — the FAIL-OPEN half of the CA fault surface.
+//
+// culvert_ca_usable already covers the fail-CLOSED direction (a CA that is
+// loaded but outside its validity window). It cannot cover this one: when the
+// bundle never loaded there is no CA to ask, so `culvert_ca_usable` reports 0
+// and `culvert_ca_expires_in_seconds` is omitted — indistinguishable from a
+// node that was never configured to inspect at all. The three series here say
+// which it is, whether the appliance is still trying to recover, and how much
+// traffic has left uninspected in the meantime.
+//
+// Label-free, per the CA-2 metrics contract.
+func caWriteLoadFailurePrometheus(w *strings.Builder) {
+	w.WriteString("\n# HELP culvert_ca_load_failed Whether a configured Root CA failed to load or persist and has not recovered (1 = failed)\n")
+	w.WriteString("# TYPE culvert_ca_load_failed gauge\n")
+	failed := 0
+	if sslInspectionLoadFailure() != "" {
+		failed = 1
+	}
+	fmt.Fprintf(w, "culvert_ca_load_failed %d\n", failed)
+
+	rec := caLoadRecoveryStatus()
+	w.WriteString("\n# HELP culvert_ca_load_recovery_attempts_total Bounded retry attempts made to recover a failed Root CA load\n")
+	w.WriteString("# TYPE culvert_ca_load_recovery_attempts_total counter\n")
+	fmt.Fprintf(w, "culvert_ca_load_recovery_attempts_total %d\n", rec.Attempts)
+
+	w.WriteString("\n# HELP culvert_ca_inspect_bypassed_total CONNECTs policy selected for inspection that were forwarded UNINSPECTED because no Root CA was loaded\n")
+	w.WriteString("# TYPE culvert_ca_inspect_bypassed_total counter\n")
+	fmt.Fprintf(w, "culvert_ca_inspect_bypassed_total %d\n", caInspectBypassCount())
 }

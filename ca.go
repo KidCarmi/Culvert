@@ -60,7 +60,17 @@ func init() {
 // certificate expiry and triggers rotation when needed — for BOTH the
 // inspection CA (internal/ca) and the cluster CA (enrollment.go). The loop
 // lives here, not in the package, because it spans both CAs.
+// caRotationRoundObserver, when non-nil, is invoked after each completed
+// auto-rotation round. Publish-once TEST seam (nil in production, so the loop is
+// byte-identical); it exists because a test that swaps process globals needs a
+// deterministic "the round is finished" signal rather than a sleep.
 //
+// It is SNAPSHOTTED by StartCAAutoRotation on the caller's goroutine — the loop
+// never reads the variable itself. A goroutine that re-read it each round would
+// race any test restoring it in cleanup, which is the same defect class this
+// file's own tests exist to catch.
+var caRotationRoundObserver func()
+
 // CHAOS-50 / CA-13: because this ONE loop is the only rotation driver for TWO
 // independent trust roots, its start condition must not depend on the state of
 // either. Its caller (loadRootCA) used to start it only when the INSPECTION CA
@@ -75,6 +85,7 @@ func init() {
 // test's window, which is how a process-wide runtime.NumGoroutine() guardrail
 // elsewhere in this suite gets blamed for churn it did not cause.
 func StartCAAutoRotation(ctx context.Context, caPath, passphrase string) <-chan struct{} {
+	roundDone := caRotationRoundObserver
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -100,6 +111,9 @@ func StartCAAutoRotation(ctx context.Context, caPath, passphrase string) <-chan 
 				globalClusterCA.RotateIfNeeded()
 				globalClusterCA.CleanupSecondary()
 			})
+			if roundDone != nil {
+				roundDone()
+			}
 		}
 		checkRound()
 		for {
