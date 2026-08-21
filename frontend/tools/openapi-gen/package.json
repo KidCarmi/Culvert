@@ -1,0 +1,16 @@
+{
+  "name": "culvert-openapi-gen",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Isolated OpenAPI type-generator workspace (FE-1A). Separate from the app toolchain because openapi-typescript declares a required peer of typescript ^5.x while the app pins TypeScript 6.0.3 (ADR-FE-001); the generator only uses TypeScript to print the emitted file — the app's TS 6.0.3 type-checks the output.",
+  "type": "module",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": "24.19.0",
+    "npm": "11.17.0"
+  },
+  "devDependencies": {
+    "openapi-typescript": "7.13.0",
+    "typescript": "5.9.3"
+  }
+}
