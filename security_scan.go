@@ -10,6 +10,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 
@@ -153,11 +154,85 @@ func maxScanBufferBytes() int64 {
 	return dpi
 }
 
+// readScanPrefix buffers the bytes a scanner may inspect and arranges for the
+// truncation signal to fire if the body genuinely continues past that window.
+//
+// scan is exactly what io.ReadAll(io.LimitReader(body, limit)) would have
+// produced (pre-sized from contentLength via secscan.ReadScanBuffer, hint
+// only), so scan semantics are byte-identical to the call it replaces. rest is
+// the remainder the caller must forward after scan when reassembling the body.
+//
+// The signal is DEFERRED, not probed: an earlier revision read limit+1 bytes
+// to learn "is there more?" up front, but that probe blocks on a streaming
+// body of exactly limit bytes that pauses without sending EOF — on the
+// SSL-inspect path there is no upstream body deadline, so a stalling origin
+// could withhold an already-clean response indefinitely (review P2). Instead,
+// when the window filled, rest wraps the remainder so that onOverflow fires
+// exactly once, at the moment a byte beyond the window is actually delivered.
+// That is when "forwarded unscanned" becomes true, this never reads ahead of
+// what the caller forwards (no new blocking anywhere), a body of exactly
+// limit bytes never false-signals (its rest returns EOF), and block paths —
+// which never forward the tail — never signal, preserving the deliberate
+// no-signal-on-block behavior.
+//
+// A non-positive limit means there is no scan window at all: nothing is read,
+// rest is the untouched body, and onOverflow never fires (matching
+// LimitReader(body, 0)). A read error is never laundered into a truncation:
+// it is propagated, preserving the CHAOS-17 fail-closed contract exactly.
+func readScanPrefix(body io.Reader, limit, contentLength int64, onOverflow func()) (scan []byte, rest io.Reader, err error) {
+	if limit <= 0 {
+		return []byte{}, body, nil
+	}
+	raw, err := readScanBuffer(body, limit, contentLength)
+	if err != nil {
+		return nil, nil, err
+	}
+	if int64(len(raw)) < limit {
+		// EOF inside the window: the scanners saw everything.
+		return raw, eofReader{}, nil
+	}
+	return raw, &overflowSignalReader{r: body, onFirstByte: onOverflow}, nil
+}
+
+// eofReader is an always-empty remainder for bodies that ended inside the
+// scan window.
+type eofReader struct{}
+
+func (eofReader) Read([]byte) (int, error) { return 0, io.EOF }
+
+// overflowSignalReader passes reads through to the unread remainder of a
+// response body and fires onFirstByte exactly once, when the first byte past
+// the scan window is actually delivered toward the client.
+type overflowSignalReader struct {
+	r           io.Reader
+	onFirstByte func()
+	fired       bool
+}
+
+func (o *overflowSignalReader) Read(p []byte) (int, error) {
+	n, err := o.r.Read(p)
+	if n > 0 && !o.fired {
+		o.fired = true
+		if o.onFirstByte != nil {
+			o.onFirstByte()
+		}
+	}
+	return n, err
+}
+
 // logScanLimitExceeded logs a warning and fires a "scan_skipped" alert when a
 // response body exceeds the scan buffer limit and is therefore forwarded
 // without ClamAV/YARA/DPI inspection (Finding 4.2).
 // Tier 1.2: also increments the scan-skipped counter so the status API
 // exposes size-skipped events without grepping logs.
+//
+// Every path that forwards bytes the scanners never saw MUST call this — not
+// only the declared-Content-Length pre-check. A response body is truncated to
+// the scan window on the SSL-inspect path (scanInspectBody) and on the
+// plain-HTTP path whenever the length is not declared up front (chunked
+// transfer encoding), and both forward the unscanned remainder to the client.
+// Signalling only the declared-length case leaves the operator blind in exactly
+// the shape an origin chooses for itself.
 func logScanLimitExceeded(host, clientIP string, maxBytes int64) {
 	secscan.AddScanSkipped()
 	if logger != nil {

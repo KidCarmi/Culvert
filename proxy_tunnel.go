@@ -1252,10 +1252,17 @@ func scanInspectBody(r, req *http.Request, resp *http.Response, br blockResponde
 	}
 
 	origBody := resp.Body
-	// resp.ContentLength is the origin's declaration (-1 when chunked); it sizes
-	// the buffer and nothing else — the read still runs to EOF or to the scan
-	// limit, so an under-declared body does not get its tail forwarded unscanned.
-	body, readErr := readScanBuffer(origBody, maxScanBufferBytes(), resp.ContentLength)
+	// Buffer the scan window (pre-sized from the origin's declaration, hint
+	// only; -1 when chunked). This path has no Content-Length pre-check, so
+	// before this change an over-limit download was partially scanned and the
+	// remainder forwarded with no counter, no log line and no alert — the
+	// primary SWG path was the blind one. If the decrypted body runs past the
+	// window, rest's deferred signal fires when the first uninspected byte is
+	// actually relayed toward the client.
+	scanLimit := maxScanBufferBytes()
+	body, rest, readErr := readScanPrefix(origBody, scanLimit, resp.ContentLength, func() {
+		logScanLimitExceeded(hostOnly, clientIP, scanLimit)
+	})
 	if readErr != nil {
 		origBody.Close()
 		logger.Printf("SSL_INSPECT: body read error for %q: %v", sanitizeLog(hostOnly), readErr)
@@ -1327,8 +1334,15 @@ func scanInspectBody(r, req *http.Request, resp *http.Response, br blockResponde
 		return scanBlocked
 	}
 
-	// No match: reassemble the body (buffered prefix + remaining bytes).
-	resp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(body), origBody))
+	// No match in the window we could see. If the body runs past that window,
+	// rest's deferred signal records the delivery of the first uninspected
+	// byte (counter + log + deduped scan_skipped alert) — the same signal the
+	// plain-HTTP path emits. Deliberately structural on the block paths above:
+	// those never read rest, never deliver the tail, and therefore never
+	// signal — "forwarded unscanned" stays true by construction.
+	//
+	// Reassemble: buffered prefix + the unread remainder.
+	resp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(body), rest))
 	return scanClean
 }
 
