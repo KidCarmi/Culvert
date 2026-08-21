@@ -136,6 +136,31 @@ func (e *Engine) recoverLearningSession(s *Session, now time.Time) {
 
 var errSchemaTooNew = errors.New("schema newer than binary")
 
+// validateSessionRecord rejects a malformed persisted session: missing
+// identity/state, an unknown state, or a null aggregate cell — a
+// syntactically valid store can still carry `"cells":{"…":null}` (corruption
+// or a hand edit), and the aggregate consumers dereference cell fields, so a
+// nil cell would panic every later generation for the session (Codex fix).
+// Corrupt stores go to quarantine, never partially honored.
+func validateSessionRecord(s *Session) error {
+	if s == nil || s.ID == "" || s.State == "" {
+		return errors.New("decode session store: malformed session record")
+	}
+	switch s.State {
+	case StateLearning, StateCompleted, StateCancelled:
+	default:
+		return fmt.Errorf("decode session store: unknown session state %q", s.State)
+	}
+	if s.Agg != nil {
+		for key, c := range s.Agg.Cells {
+			if c == nil {
+				return fmt.Errorf("decode session store: session %s carries a null aggregate cell %q", s.ID, key)
+			}
+		}
+	}
+	return nil
+}
+
 func decodeEnvelope(raw []byte) (*persistEnvelope, error) { //nolint:cyclop // one explicit branch per schema version in the v1..v7 migration ladder
 	// Peek the schema version LENIENTLY first: a newer-schema document may
 	// legitimately carry fields this binary's strict decoder rejects, and it
@@ -165,27 +190,11 @@ func decodeEnvelope(raw []byte) (*persistEnvelope, error) { //nolint:cyclop // o
 	}
 	learning := 0
 	for _, s := range env.Sessions {
-		if s == nil || s.ID == "" || s.State == "" {
-			return nil, errors.New("decode session store: malformed session record")
+		if err := validateSessionRecord(s); err != nil {
+			return nil, err
 		}
-		switch s.State {
-		case StateLearning:
+		if s.State == StateLearning {
 			learning++
-		case StateCompleted, StateCancelled:
-		default:
-			return nil, fmt.Errorf("decode session store: unknown session state %q", s.State)
-		}
-		// A syntactically valid store can still carry `"cells":{"…":null}`
-		// (corruption or a hand edit); the aggregate consumers dereference
-		// cell fields, so a nil cell would panic every later generation for
-		// the session (Codex fix) — corrupt stores go to quarantine, never
-		// partially honored.
-		if s.Agg != nil {
-			for key, c := range s.Agg.Cells {
-				if c == nil {
-					return nil, fmt.Errorf("decode session store: session %s carries a null aggregate cell %q", s.ID, key)
-				}
-			}
 		}
 	}
 	// One-active is a load-bearing invariant, so enforce it at decode (Codex
