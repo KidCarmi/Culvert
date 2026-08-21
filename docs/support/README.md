@@ -5,8 +5,10 @@ Doc set for an enterprise-grade TAC / support framework. **The appliance track
 `diagnose`/incident-scope verbs, encrypted + sealed export, and HA/recovery
 diagnostics all ship in the binary today; see
 `docs/operator/support-bundles-and-diagnostics.md` for the live operator
-runbook. The cloud track (M6 upload, M7 proactive/telemetry, and the
-`TAC-CLOUD-ARCHITECTURE.md` tier) remains design-only. See
+runbook. The appliance halves of M6 (secure-upload queue) and M7
+(consent-gated telemetry collection; no network sender in this build) have
+since shipped; the cloud receiving tier (`TAC-CLOUD-ARCHITECTURE.md`)
+remains design-only. See
 `SUPPORTABILITY-ROADMAP.md` for per-milestone shipped/design status.
 Read in this order; the vocabulary in `SUPPORTABILITY-ARCHITECTURE.md §0` is normative across all docs.
 

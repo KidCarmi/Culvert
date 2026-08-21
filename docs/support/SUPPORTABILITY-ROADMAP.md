@@ -1,7 +1,9 @@
 # Culvert Supportability Framework — Implementation Roadmap
 
 - **Status:** Appliance track **M0–M5 implemented and shipped**; cloud track
-  (M6 secure upload, M7 proactive/telemetry) remains proposed (design). See
+  (the TAC receiving/analysis tier) remains proposed (design); the
+  appliance-side M6 upload queue and M7 telemetry collection have since
+  shipped. See
   `docs/operator/support-bundles-and-diagnostics.md` for the live operator
   runbook covering everything M0–M5 shipped. Milestones M0–M7 below. First
   slices deliberately small enough to review safely.
