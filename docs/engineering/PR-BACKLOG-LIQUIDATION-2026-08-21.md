@@ -67,12 +67,13 @@ CLOSED-DUPLICATE, CLOSED-SUPERSEDED, CLOSED-ALREADY-PRESENT, CLOSED-OBSOLETE, CL
 | #1140 | Root-CA recovery plane | FIXED+MERGED (`3dc2b7a`) | Rebased over #1173: installMu overlap dropped (subsumed by commitImport/importMu — its CHAOS-51 deadlock tests pass unchanged against the merged mechanism); unique payload kept (rootca_recovery.go bounded retry + caMutationMu). |
 | #916 | DP cert-renewal retry | CLOSED-UNSAFE (rework) | Fix defeated by its own unresolved P1 (ambiguous renewal ⇒ CP already swapped CertSerial ⇒ retry loop can never succeed); needs CP-side renewal idempotency — a designed change. Follow-up priority RAISED: #1173's clamp increases renewal traffic near CA expiry. |
 | #1110/#1124/#1133/#1146/#1166/#1179 | cluster-CA duplicates | CLOSED-SUPERSEDED | Coverage matrix vs #1173 built first; each close comment records what was compared and what was ported (see PR comments). #1133 additionally carried an active sign-past-expiry fail-open; #1146 a wrong runbook claim + an alert-name design #1173 correctly avoids. |
+| #1185 | docs(chaos): register-numbering repair | MERGED (`6dc07e5`) | Opened mid-operation by the #1159 author session, repairing fallout from this operation's own concurrent-merge conflict resolutions: the §17/§18/§19 renumbering moved the `##` headings but not their `###` subsections, and left CLAUDE.md + the category-store-recovery runbook pointing at the wrong section. Verified docs-only from the merge-base (the two-dot diff misleads on this reused branch); also records the CHAOS-50 triple-collision as an owner decision. |
 
 
 ## Outcome summary
 
 - **Starting state:** 100 open PRs (99 actionable + protected #1181). 12 conflicted with baseline main; 3 drafts (853, 1147, and the not-flagged-but-explicit 854); 6 dependabot; ~10 CI-red; 7 duplicate/superseded families identified (cluster-CA ×9, urlcat ×4, readyz-leak ×3, terminology reports ×14+, pkg-count docs ×4, /ready docs ×3, MCP-docs ×2, release-catalog docs ×2, threatfeed ×2, install-passphrase ×2, codeql-action ×3).
-- **Merged: 72** — of which ~31 required engineering first (conflict reconstruction, review-finding fixes, consolidation ports, reductions to unique payloads).
+- **Merged: 73** (incl. the mid-operation follow-up #1185) — of which ~31 required engineering first (conflict reconstruction, review-finding fixes, consolidation ports, reductions to unique payloads).
 - **Closed without merge: 27** — 5 duplicates (unique value ported before closing), 16 superseded, 1 already-in-main (#1086), 4 obsolete (#1002, #932, #854, #853), 1 unsafe-as-written (#916, re-filed as a designed follow-up).
 - **Final open-PR state: exactly #1181** (verified by fresh query; #1181 and its branch untouched throughout).
 
@@ -99,5 +100,6 @@ codeql-action split-pin family consolidated against the pin wall; #1167's Deep-g
 - Reverse-index memory bound vs the 2M-host snapshot cap; case-colliding category names at ReplaceAll/import (Codex on the urlcat family).
 - internal/yara per-pattern regex timeout harness — same fix as internal/scanner's, still deferred (pre-existing note).
 - T-9's rename evidence now depends on the alerts_event_rename_import_test.go fixture (from #1113).
+- CHAOS-50 now stamps three unrelated sweeps (§17/§18/§19) — #1185 records it; the owner decides who keeps the id (or declares the series non-unique by policy). The durable fix: allocate the id in a committed placeholder row at sweep START.
 - HA A3/A8 reachability classification (from #853, closed): the behavioral spec (HA-REACHABILITY-CLASSIFICATION.md) and 18 tests remain on branch `claude/ha-reachability-to-main` for a fresh re-land against the reworked guardedTick loop.
 
