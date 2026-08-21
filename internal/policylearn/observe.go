@@ -350,6 +350,15 @@ func (e *Engine) syncTransportLocked() {
 		return
 	}
 	cur := e.observationStatsRaw()
+	if cur != e.tPin {
+		// The fold below changes the session's persisted loss accounting, so
+		// the store is dirty even when no aggregation event set the flag
+		// (Codex fix): a transport-only change — an empty-host rejection or a
+		// consumer panic right after a cadence save — used to leave dirty
+		// false, and Close returned without writing the final deltas; the
+		// next process then reloaded a window missing recorded loss.
+		e.dirty = true
+	}
 	sess.Transport.Accepted += cur.Accepted - e.tPin.Accepted
 	sess.Transport.Dropped += cur.Dropped - e.tPin.Dropped
 	sess.Transport.Rejected += cur.Rejected - e.tPin.Rejected

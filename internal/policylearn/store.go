@@ -89,6 +89,22 @@ func (e *Engine) load() error {
 			continue
 		}
 		s.Gaps = append(s.Gaps, Gap{At: rfc3339(now), Reason: "process_restart"})
+		// A legacy active session with NO key pin (pre-pseudonym schema, or a
+		// stripped store) must not stay unpinned (Codex fix): unpinned, a
+		// later key loss would merge disjoint token populations without ever
+		// setting SubjectKeyChanged — double-counting subjects, the one
+		// inflationary direction evidence must never err in — and the blank
+		// ID is skipped by StaleReasons, so the failure would never surface.
+		// Pin the CURRENT key so continuity is verifiable from here on; if
+		// the session somehow already carries subject evidence (tokens
+		// minted under an unknowable key), record the discontinuity first.
+		if s.SubjectKeyID == "" {
+			if s.Agg != nil && s.Agg.SubjectBudgetUsed > 0 {
+				s.Gaps = append(s.Gaps, Gap{At: rfc3339(now), Reason: "subject_key_changed"})
+				s.Agg.SubjectKeyChanged = true
+			}
+			s.SubjectKeyID = e.subjKey.keyID
+		}
 		// M3: subject-key continuity is part of distinct-subject identity.
 		// A different key after restart (deleted/rotated) makes pre/post
 		// token populations DISJOINT — record it, never merge silently.

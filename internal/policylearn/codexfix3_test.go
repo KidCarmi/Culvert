@@ -297,6 +297,93 @@ func TestLoad_RejectsMultipleLearningSessionsToQuarantine(t *testing.T) {
 	}
 }
 
+// TestClose_PersistsTransportOnlyDeltas (round 5): a transport-only counter
+// change after the last cadence save (an empty-host rejection, a consumer
+// panic) modifies the active session's TransportWindow at Close's final sync
+// but set no dirty flag — Close returned without writing it, and the next
+// process reloaded a window missing recorded loss.
+func TestClose_PersistsTransportOnlyDeltas(t *testing.T) {
+	dir := t.TempDir()
+	clk := newTestClock()
+	e := newTestEngine(t, dir, clk, nil)
+	if _, err := e.StartSession("op"); err != nil {
+		t.Fatal(err)
+	}
+	// Transport-only event: rejected at the gate (empty host), no aggregation,
+	// no cadence save — the store believes itself clean.
+	e.Observe(Observation{Subject: "u", AuthSource: "idp", Host: "", Status: "OK"})
+	if err := e.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	e2 := newTestEngine(t, dir, clk, nil)
+	t.Cleanup(func() { _ = e2.Close() })
+	sessions := e2.Sessions()
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 reloaded session, got %d", len(sessions))
+	}
+	if sessions[0].Transport.Rejected != 1 {
+		t.Fatalf("transport-only delta lost across Close/reload: %+v", sessions[0].Transport)
+	}
+}
+
+// TestLoad_LegacyActiveSessionPinnedToCurrentKey (round 5): an active session
+// with NO subject-key pin (pre-pseudonym schema) must be pinned to the
+// current key at load — unpinned, a later key loss would merge disjoint token
+// populations without ever setting SubjectKeyChanged (double-counting
+// subjects), and the blank ID is skipped by staleness so it never surfaces.
+// A session already carrying subject evidence under an unknowable key must
+// additionally record the discontinuity.
+func TestLoad_LegacyActiveSessionPinnedToCurrentKey(t *testing.T) {
+	dir := t.TempDir()
+	raw := `{"schema_version":7,"sessions":[` +
+		`{"id":"a","state":"learning","created_at":"2026-08-13T12:00:00Z","started_at":"2026-08-13T12:00:00Z","created_by":"op","baseline":{}}]}`
+	if err := os.WriteFile(filepath.Join(dir, "policy_learning.json"), []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	clk := newTestClock()
+	e := newTestEngine(t, dir, clk, nil)
+	t.Cleanup(func() { _ = e.Close() })
+	sessions := e.Sessions()
+	if len(sessions) != 1 || sessions[0].SubjectKeyID != e.SubjectKeyID() || e.SubjectKeyID() == "" {
+		t.Fatalf("legacy active session not pinned to the current key: %+v (want key %q)", sessions[0], e.SubjectKeyID())
+	}
+	ov, _ := e.SessionOverview("a")
+	if ov.SubjectKeyChanged {
+		t.Fatal("clean legacy session (no subject evidence) flagged as key-changed")
+	}
+}
+
+// TestLoad_LegacyUnpinnedSessionWithTokensRecordsDiscontinuity (round 5): the
+// unknowable-key variant — subject evidence exists, so the merge hazard is
+// real and must be recorded, never silently pinned over.
+func TestLoad_LegacyUnpinnedSessionWithTokensRecordsDiscontinuity(t *testing.T) {
+	dir := t.TempDir()
+	raw := `{"schema_version":7,"sessions":[` +
+		`{"id":"a","state":"learning","created_at":"2026-08-13T12:00:00Z","started_at":"2026-08-13T12:00:00Z","created_by":"op","baseline":{},` +
+		`"agg":{"subject_budget_used":3}}]}`
+	if err := os.WriteFile(filepath.Join(dir, "policy_learning.json"), []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	clk := newTestClock()
+	e := newTestEngine(t, dir, clk, nil)
+	t.Cleanup(func() { _ = e.Close() })
+	ov, ok := e.SessionOverview("a")
+	if !ok || !ov.SubjectKeyChanged {
+		t.Fatalf("unpinned session with subject evidence not flagged key-changed (ok=%v ov=%+v)", ok, ov)
+	}
+	sessions := e.Sessions()
+	found := false
+	for _, g := range sessions[0].Gaps {
+		if g.Reason == "subject_key_changed" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("subject_key_changed gap not recorded: %+v", sessions[0].Gaps)
+	}
+}
+
 // TestObserve_GroupTruncationCountedOnlyOnAcceptedEnqueue (round 4):
 // GroupsTruncated means "an ACCEPTED observation carries incomplete group
 // context" — an over-wide observation dropped at a full queue must count as a
