@@ -108,7 +108,7 @@ func plFindTargetRule(targetID string) *PolicyRule {
 // policyLearnAdminMu (held by the caller / API handler). ifVersion is the
 // REQUIRED optimistic fence the client echoed from the effective policy view
 // (the same generation family every policy write handler uses).
-func plAcceptRecommendation(eng *policylearn.Engine, recID string, ifVersion int64, actor string) (plAcceptOutcome, error) { //nolint:cyclop,gocognit,nestif // the reconcile decision table is intentionally explicit
+func plAcceptRecommendation(eng *policylearn.Engine, recID string, ifVersion int64, actor string) (plAcceptOutcome, error) { //nolint:cyclop,gocognit,nestif,funlen // the reconcile decision table is intentionally explicit
 	rec, ok := eng.RecommendationByID(recID)
 	if !ok {
 		return plAcceptOutcome{}, policylearn.ErrRecommendationNotFound
@@ -144,15 +144,16 @@ func plAcceptRecommendation(eng *policylearn.Engine, recID string, ifVersion int
 			// without the exact target existing in one of the two domains.
 			if policyStore.findByIDCopy(rec.TargetRuleID) == nil {
 				if err := policyDraft.ensureDurableTarget(rec.TargetRuleID); err != nil {
-					if errors.Is(err, errDraftTargetMissing) &&
-						policyStore.findByIDCopy(rec.TargetRuleID) == nil {
+					switch {
+					case errors.Is(err, errDraftTargetMissing) &&
+						policyStore.findByIDCopy(rec.TargetRuleID) == nil:
 						return plAcceptOutcome{}, fmt.Errorf(
 							"target rule %s disappeared during acceptance (concurrent draft change): %w",
 							rec.TargetRuleID, errAcceptVersionConflict)
-					} else if errors.Is(err, errDraftTargetMissing) {
+					case errors.Is(err, errDraftTargetMissing):
 						// Committed while accepting: the rule reached RUNNING
 						// through the canonical path — durable; fall through.
-					} else {
+					default:
 						return plAcceptOutcome{}, err
 					}
 				}

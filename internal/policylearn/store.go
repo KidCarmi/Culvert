@@ -85,23 +85,24 @@ func (e *Engine) load() error {
 	// recorded restart gap makes honest.
 	now := e.cfg.Now()
 	for _, s := range e.sessions {
-		if s.State == StateLearning {
-			s.Gaps = append(s.Gaps, Gap{At: rfc3339(now), Reason: "process_restart"})
-			// M3: subject-key continuity is part of distinct-subject identity.
-			// A different key after restart (deleted/rotated) makes pre/post
-			// token populations DISJOINT — record it, never merge silently.
-			if s.SubjectKeyID != "" && s.SubjectKeyID != e.subjKey.keyID {
-				s.Gaps = append(s.Gaps, Gap{At: rfc3339(now), Reason: "subject_key_changed"})
-				if s.Agg == nil {
-					s.Agg = newAggregate()
-				}
-				s.Agg.SubjectKeyChanged = true
-				s.SubjectKeyID = e.subjKey.keyID // re-pin so the flag fires once per change
-			}
-			e.aggSession = s
-			e.aggGen = e.windowGen.Add(1) // resumed window: post-restart events attribute here
-			e.dirty = true
+		if s.State != StateLearning {
+			continue
 		}
+		s.Gaps = append(s.Gaps, Gap{At: rfc3339(now), Reason: "process_restart"})
+		// M3: subject-key continuity is part of distinct-subject identity.
+		// A different key after restart (deleted/rotated) makes pre/post
+		// token populations DISJOINT — record it, never merge silently.
+		if s.SubjectKeyID != "" && s.SubjectKeyID != e.subjKey.keyID {
+			s.Gaps = append(s.Gaps, Gap{At: rfc3339(now), Reason: "subject_key_changed"})
+			if s.Agg == nil {
+				s.Agg = newAggregate()
+			}
+			s.Agg.SubjectKeyChanged = true
+			s.SubjectKeyID = e.subjKey.keyID // re-pin so the flag fires once per change
+		}
+		e.aggSession = s
+		e.aggGen = e.windowGen.Add(1) // resumed window: post-restart events attribute here
+		e.dirty = true
 	}
 	e.maybeExpireLocked(now) // constructor-time: no concurrent access yet
 	e.pruneLocked()
