@@ -164,7 +164,22 @@ func (sc *hostCatScratch) matchesCategory(cat URLCategory) bool {
 		if catStore.MatchesHostAdmin(cat, sc.host) {
 			return true
 		}
-		if c, ok := sc.viewLookup(); ok && strings.EqualFold(c, string(cat)) {
+		// MEMBERSHIP, not classification. sc.viewLookup answers "what is this
+		// host?" — ONE category, taken from the most specific key. This asks
+		// "is this host in category C?", which the classification answer
+		// cannot decide: the baseline taxonomy is many-to-many (linkedin.com
+		// is both "Social Media" and "HR & Recruiting"), so comparing against
+		// the single classified category dropped every other category the
+		// host belongs to — and with it any Deny rule keyed on one of them
+		// (fail-open). MatchesCategory reproduces catStore.MatchesHost
+		// exactly: exact key then every suffix key, no shadowing by a more
+		// specific key in a different category. Deliberately NOT memoized on
+		// the scratch — it depends on the rule's category and is an O(labels)
+		// index probe, same policy as MatchesHost/MatchesHostAdmin.
+		//
+		// Still not a short-circuit: a non-match must fall through to the UT1
+		// layer, matching the original cross-layer OR semantics.
+		if view.MatchesCategory(string(cat), sc.host) {
 			return true
 		}
 	} else if catStore.MatchesHost(cat, sc.host) {
