@@ -178,7 +178,7 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 		effectiveDefault = OutcomeDefault
 	}
 	credCapable := hasCredentialCapableProvider()
-	ssoCapable := idpRegistry.HasEnabledProviders() // allocation-free probe — EnabledProviders() builds a slice per call, and this runs per request
+	ssoCapable := idpRegistry.HasEnabledInteractiveProvider() // allocation-free probe, INTERACTIVE types only (ADR-0025) — an enabled LDAP profile must not advertise an SSO flow it can never fulfil
 	authRequired := credCapable || ssoCapable || originalEffective == OutcomeExempt
 
 	if authRequired { //nolint:nestif // adaptive-auth decision tree is inherently nested (matches the if-match dispatch convention; DEBT-002 isolated it for testability)
@@ -202,9 +202,12 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 			// header (never default-exempted).
 			u, p, ok := parseProxyAuth(r)
 			if ok && credCapable {
-				// Try IdP registry providers first (OIDC introspection).
+				// Try IdP registry providers first (OIDC introspection, LDAP
+				// bind). EnabledCredentialProviders excludes browser-only
+				// types (SAML) structurally — the credential chain is the
+				// capability-explicit accessor, not "everything enabled".
 				authed := false
-				for _, prov := range idpRegistry.EnabledProviders() {
+				for _, prov := range idpRegistry.EnabledCredentialProviders() {
 					id, resolved := prov.ResolveIdentity(u, p)
 					if !resolved || id == nil || strings.TrimSpace(id.Sub) == "" {
 						continue

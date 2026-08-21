@@ -1397,7 +1397,7 @@ func matchAuthSource(ruleAuthSource, actualAuthSource string) bool {
 // splitIdPSource separates an auth-source string into its IdP scheme
 // ("oidc"/"saml", or "" when bare/non-IdP) and the profile name.
 func splitIdPSource(source string) (scheme, name string) {
-	for _, p := range []string{"oidc:", "saml:"} {
+	for _, p := range []string{"oidc:", "saml:", "ldap:"} {
 		if rest, ok := strings.CutPrefix(source, p); ok && rest != "" {
 			return strings.TrimSuffix(p, ":"), rest
 		}
@@ -1406,7 +1406,7 @@ func splitIdPSource(source string) (scheme, name string) {
 }
 
 func stripIdPPrefix(source string) string {
-	for _, prefix := range []string{"oidc:", "saml:"} {
+	for _, prefix := range []string{"oidc:", "saml:", "ldap:"} {
 		if rest, ok := strings.CutPrefix(source, prefix); ok && rest != "" {
 			return rest
 		}

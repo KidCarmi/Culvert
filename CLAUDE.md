@@ -28,11 +28,13 @@ ui_helpers.go — auditEvent / auditEventDiff / decodeJSON / shared validators
 ui_middleware.go / ui_session.go / ui_rbac.go — middleware chain, session cookies, RBAC helpers
 session.go    — Session shim over internal/session (ADR-0002; key holder — race-safe, three runtime writers — token codec, revocation, TTL, jti live in the package; main keeps cookie helpers + sessionIdentity + env/config key wiring). **Terminology note**: the HMAC key used to sign/verify admin-UI session cookies is ONE concept surfaced under FOUR names by design, not drift — "Session Secret" (`CULVERT_SESSION_SECRET` env, `session_secret` YAML key, `/api/session-secret`; a load-bearing backward-compatible contract, do not rename), "Session Signing Key" (GUI panel title in `static/index.html`), `SigningKey`/`SetSigningKey` (the `internal/session` accessor), and `SessionHMAC` (the `ConfigSnapshot` CP→DP wire field, named for gosec G117). Do not "fix" any one layer's name in isolation — see the cross-referencing comments at `internal/session/session.go` (`SigningKey`) and `controlplane_snapshot.go` (`applySnapshotSessionSecret`).
 auth.go       — Local bcrypt auth
-auth_ldap.go  — LDAP bind + search auth with group resolution
+auth_ldap.go  — Shared LDAP directory engine (two-step bind, CHAOS-47 gating, authoritative-only cache) + the legacy boolean YAML provider (deliberately identity-free — see ADR-0025)
+auth_ldap_provider.go — LDAP as a first-class IdP (ADR-0025): LDAPProfileConfig + dedicated validator (ldap/ldaps only, exactly-one-%s filter, transport-contradiction check; deliberately NOT validateExternalURL — directories live on internal networks), LDAPIdPProvider (Identity: Sub=user DN, groups=full DNs; CaptiveLoginURL always "" — never interactive), legacy-YAML shadowing (enforceLegacyLDAPShadowing, guarded so cfg.IsConfigured can never flip open)
 auth_oidc.go  — OIDC token introspection (RFC 7662)
 auth_oidc_flow.go — Full OIDC Authorization Code + PKCE flow
 auth_saml.go  — SAML 2.0 SP via crewjam/saml
-auth_idp.go   — Multi-IdP registry, validateExternalURL
+auth_idp.go   — Multi-IdP registry (OIDC/SAML/LDAP), validateExternalURL; provider CAPABILITY model (ADR-0025): IdPType.Interactive()/CredentialCapable() + capability-explicit accessors (EnabledInteractiveProviders/EnabledCredentialProviders + allocation-free Has* probes) — every SSO/credential predicate consumes these, never "enabled profile == SSO provider"
+ui_auth_ldap.go — LDAP admin API (ADR-0025): POST /api/idp/test (staged candidate directory test, bounded + sanitized + audited), GET /api/idp/legacy-ldap + POST /api/idp/legacy-ldap/import (explicit YAML→registry migration, disabled test-then-enable), ldapActivationPreflight (?preflight=connection — broken candidate never replaces a working provider)
 identity.go   — Identity model (Sub, Groups, Source)
 clam_vars.go  — ClamAV shim: aliases over internal/clamav (ADR-0002; INSTREAM scanner client lives in the package)
 yara_vars.go  — YARA shim: aliases over internal/yara (ADR-0002; pure-Go rule engine lives in the package)
