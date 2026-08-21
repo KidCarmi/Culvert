@@ -214,11 +214,18 @@ Implemented after review sign-off, scoped to exactly the reported slice:
 
 - `urlcat.Store.ContentFingerprint()` — a cached deterministic semantic
   identity of the taxonomy covering exactly the resolution-relevant content
-  (original-case names, BuiltIn tier flags, lowercased/deduped/sorted host
-  patterns; canonical entry ordering; length-prefixed framing under the
-  `culvert-urlcat-content-fp-v1` domain tag). Excluded by contract:
-  process-local counters, timestamps, mutation history, map/insertion order,
-  host-pattern case and duplicates (matchedBy display only), empty patterns.
+  (entry SEQUENCE order per QB-2.1 — `LookupHost`/`LookupHostAdmin` scan
+  entries in order and return the first match, so order is semantic under
+  overlapping patterns; original-case names, BuiltIn tier flags,
+  lowercased/deduped/sorted host patterns; length-prefixed framing under the
+  `culvert-urlcat-content-fp-v2` domain tag). Excluded by contract:
+  process-local counters, timestamps, mutation history, map iteration order,
+  within-entry host order, host-pattern case and duplicates (matchedBy
+  display only), empty patterns. A reorder with no pattern overlaps also
+  changes the identity — an accepted CONSERVATIVE false-stale for Preview
+  (safer than failing to detect a real categorization semantic change),
+  pinned with overlap regressions proving order changes the resolver output
+  (`TestFingerprint_OverlapReorderChanges*`).
   Cached: established on load/construction, recomputed under the store lock
   after every semantic mutation; reads are one atomic load; a semantic no-op
   leaves the value unchanged. The now-consumerless `Revision()` counter is

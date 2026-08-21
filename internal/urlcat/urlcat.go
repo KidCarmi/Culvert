@@ -65,8 +65,9 @@ type Store struct {
 
 // fingerprintDomain versions the ContentFingerprint framing. Bump it whenever
 // the framed field set or encoding changes — consumers pin the returned value
-// as an identity, so two framings must never collide.
-const fingerprintDomain = "culvert-urlcat-content-fp-v1"
+// as an identity, so two framings must never collide. v2 (QB-2.1): entries
+// are framed in RESOLVER SEQUENCE order, no longer sorted by name.
+const fingerprintDomain = "culvert-urlcat-content-fp-v2"
 
 // ContentFingerprint returns a deterministic semantic identity of the
 // taxonomy: equal iff the RESOLUTION-RELEVANT content is equal, stable across
@@ -75,22 +76,26 @@ const fingerprintDomain = "culvert-urlcat-content-fp-v1"
 // (ADR-0025 §6, epoch scheme v2).
 //
 // Covered (exactly the state that can change a Lookup*/Matches* result):
+//   - the ENTRY SEQUENCE ORDER (QB-2.1: LookupHost/LookupHostAdmin scan
+//     s.entries in order and return the FIRST match, so order is
+//     resolution-relevant whenever category patterns overlap; entries are
+//     framed in sequence, never sorted — a reorder that cannot change any
+//     resolution (no overlaps) still changes the identity, an accepted
+//     CONSERVATIVE false-stale: safer than missing a real semantic change),
 //   - every entry's Name in ORIGINAL case (the resolvers return it verbatim,
 //     and downstream consumers key on it),
 //   - the BuiltIn flag (it decides admin-tier membership: LookupHostAdmin /
 //     MatchesHostAdmin see only BuiltIn=false entries),
 //   - the entry's host patterns, lowercased (the resolver-input transform),
-//     de-duplicated and sorted.
+//     de-duplicated and sorted — WITHIN-entry host order stays canonical
+//     because it can only affect the matchedBy display string, and Learning
+//     consumes the resolved category, never matchedBy.
 //
 // Excluded by contract: process-local counters, timestamps, mutation history,
-// map/insertion/iteration order (entries are canonically sorted by name;
-// LookupHost's first-match-wins entry order is deliberately NOT encoded — it
-// can only matter when two categories' patterns overlap, and encoding it
-// would turn every same-content reorder into a false identity change), host
-// pattern CASE and duplicate patterns (they affect only the matchedBy display
-// string, never the resolved category), empty patterns, and display-only or
-// metrics state. Framing is length-prefixed under fingerprintDomain, so field
-// boundaries are unambiguous.
+// map iteration order, host pattern CASE and duplicate patterns (matchedBy
+// display only), empty patterns, and display-only or metrics state. Framing
+// is length-prefixed under fingerprintDomain, so field boundaries are
+// unambiguous.
 //
 // The value is cached; reads are one atomic load. Before the first
 // load/mutation (zero-value store) it is computed on demand.
@@ -118,6 +123,8 @@ func computeFingerprint(entries []*Entry) string {
 		builtIn bool
 		hosts   []string
 	}
+	// Entries are framed in s.entries SEQUENCE order (QB-2.1) — the exact
+	// order the resolvers scan — so a reorder is an identity change.
 	fes := make([]frameEntry, 0, len(entries))
 	for _, e := range entries {
 		hs := make([]string, 0, len(e.Hosts))
@@ -132,13 +139,6 @@ func computeFingerprint(entries []*Entry) string {
 		sort.Strings(hs)
 		fes = append(fes, frameEntry{name: e.Name, builtIn: e.BuiltIn, hosts: hs})
 	}
-	sort.Slice(fes, func(i, j int) bool {
-		a, b := strings.ToLower(fes[i].name), strings.ToLower(fes[j].name)
-		if a != b {
-			return a < b
-		}
-		return fes[i].name < fes[j].name // exact-case tie-break: total order
-	})
 	h := sha256.New()
 	var n [8]byte
 	frame := func(v string) {

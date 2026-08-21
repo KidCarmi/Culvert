@@ -110,9 +110,13 @@ trust boundary that prevents it, before any learning code is written.
    that spanned one. The epoch is now scheme **v2** (`"v2|"`-tagged): the
    admin component is `urlcat.Store.ContentFingerprint()`, a cached
    deterministic hash over exactly the resolution-relevant taxonomy content
-   (original-case names, BuiltIn tier flags, lowercased/deduped/sorted host
-   patterns; canonical entry ordering, length-prefixed domain-tagged
-   framing). Same effective taxonomy ⇒ same identity across restart/reload;
+   (entry SEQUENCE order — the first-match-wins resolvers make order
+   semantic under overlapping patterns (QB-2.1); original-case names,
+   BuiltIn tier flags, lowercased/deduped/sorted host patterns;
+   length-prefixed domain-tagged framing). A no-overlap reorder also changes
+   the identity — accepted CONSERVATIVE false-stale for Preview: safer than
+   missing a real categorization change. Same ordered effective taxonomy ⇒
+   same identity across restart/reload;
    different ⇒ different. Old counter-scheme pins are NOT backfilled or
    reinterpreted: the scheme tag guarantees they can never compare equal to a
    v2 value, so sessions/recommendations created before the upgrade go stale

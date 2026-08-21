@@ -44,8 +44,13 @@ func TestFingerprint_ReloadIdenticalTaxonomyIsIdentical(t *testing.T) {
 	}
 }
 
-// (3) Insertion order cannot affect the fingerprint.
-func TestFingerprint_InsertionOrderIrrelevant(t *testing.T) {
+// (QB-2.1) Entry SEQUENCE order is resolution-relevant (first-match-wins
+// resolvers), so reordering categories MUST change the fingerprint — even
+// when no patterns overlap (accepted conservative false-stale for Preview:
+// safer than missing a real categorization change). Host order WITHIN one
+// category stays canonicalized: it can only affect the matchedBy display
+// string, and Learning consumes the resolved category, never matchedBy.
+func TestFingerprint_EntryOrderIsIdentity(t *testing.T) {
 	a := fpStore(t)
 	for _, c := range [][2]string{{"Alpha", "a.lab"}, {"Beta", "b.lab"}, {"Gamma", "c.lab"}} {
 		if err := a.Set(c[0], []string{c[1]}, false); err != nil {
@@ -58,10 +63,10 @@ func TestFingerprint_InsertionOrderIrrelevant(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if a.ContentFingerprint() != b.ContentFingerprint() {
-		t.Fatal("insertion order changed the fingerprint")
+	if a.ContentFingerprint() == b.ContentFingerprint() {
+		t.Fatal("category reorder did not change the fingerprint (entry order is resolution-relevant)")
 	}
-	// Host-list order within an entry is equally irrelevant.
+	// Host-list order within an entry stays irrelevant.
 	c1, c2 := fpStore(t), fpStore(t)
 	if err := c1.Set("X", []string{"one.lab", "two.lab"}, false); err != nil {
 		t.Fatal(err)
@@ -71,6 +76,56 @@ func TestFingerprint_InsertionOrderIrrelevant(t *testing.T) {
 	}
 	if c1.ContentFingerprint() != c2.ContentFingerprint() {
 		t.Fatal("host order changed the fingerprint")
+	}
+}
+
+// (QB-2.1) Overlap regression — WHY entry order must be in the identity: with
+// overlapping patterns the first-match-wins scan returns a DIFFERENT category
+// for the same host depending on entry order, so two orderings are two
+// different effective taxonomies and must carry two different fingerprints.
+func TestFingerprint_OverlapReorderChangesResolutionAndIdentity(t *testing.T) {
+	entryA := Entry{Name: "A", Hosts: []string{"example.com"}}
+	entryB := Entry{Name: "B", Hosts: []string{"foo.example.com"}}
+
+	ab := New([]*Entry{{Name: entryA.Name, Hosts: entryA.Hosts}, {Name: entryB.Name, Hosts: entryB.Hosts}})
+	ba := New([]*Entry{{Name: entryB.Name, Hosts: entryB.Hosts}, {Name: entryA.Name, Hosts: entryA.Hosts}})
+
+	catAB, _, ok := ab.LookupHost("foo.example.com")
+	if !ok || catAB != "A" {
+		t.Fatalf("order A,B: LookupHost(foo.example.com) = %q, want A", catAB)
+	}
+	catBA, _, ok := ba.LookupHost("foo.example.com")
+	if !ok || catBA != "B" {
+		t.Fatalf("order B,A: LookupHost(foo.example.com) = %q, want B", catBA)
+	}
+	if ab.ContentFingerprint() == ba.ContentFingerprint() {
+		t.Fatal("resolver output differs by order but fingerprints are equal — identity misses a real semantic change")
+	}
+}
+
+// The equivalent LookupHostAdmin (admin tier, BuiltIn=false entries) case.
+func TestFingerprint_OverlapReorderChangesAdminResolutionAndIdentity(t *testing.T) {
+	mk := func(first, second Entry) *Store {
+		return New([]*Entry{
+			{Name: first.Name, Hosts: first.Hosts, BuiltIn: false},
+			{Name: second.Name, Hosts: second.Hosts, BuiltIn: false},
+		})
+	}
+	entryA := Entry{Name: "AdminA", Hosts: []string{"corp.lab"}}
+	entryB := Entry{Name: "AdminB", Hosts: []string{"git.corp.lab"}}
+	ab := mk(entryA, entryB)
+	ba := mk(entryB, entryA)
+
+	catAB, _, ok := ab.LookupHostAdmin("git.corp.lab")
+	if !ok || catAB != "AdminA" {
+		t.Fatalf("order A,B: LookupHostAdmin(git.corp.lab) = %q, want AdminA", catAB)
+	}
+	catBA, _, ok := ba.LookupHostAdmin("git.corp.lab")
+	if !ok || catBA != "AdminB" {
+		t.Fatalf("order B,A: LookupHostAdmin(git.corp.lab) = %q, want AdminB", catBA)
+	}
+	if ab.ContentFingerprint() == ba.ContentFingerprint() {
+		t.Fatal("admin-tier resolver output differs by order but fingerprints are equal")
 	}
 }
 
