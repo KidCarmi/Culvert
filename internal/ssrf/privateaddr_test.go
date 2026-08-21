@@ -268,6 +268,7 @@ func TestPrivateAddr_RandomizedAgreement(t *testing.T) {
 	const step = 1021 // prime: walks all octet alignments
 	for u := uint64(0); u <= 0xFFFFFFFF; u += step {
 		v := uint32(u)
+		// #nosec G115 -- v is a uint32; each shifted byte is bounded by construction
 		addr := netip.AddrFrom4([4]byte{byte(v >> 24), byte(v >> 16), byte(v >> 8), byte(v)})
 		want := legacyPrivateIP(net.IP(addr.AsSlice()))
 		if got := PrivateAddr(addr); got != want {
@@ -278,7 +279,7 @@ func TestPrivateAddr_RandomizedAgreement(t *testing.T) {
 	// public space between them) with a fixed low half.
 	for hi := 0; hi < 0x10000; hi++ {
 		var b [16]byte
-		b[0], b[1] = byte(hi>>8), byte(hi)
+		b[0], b[1] = byte(hi>>8), byte(hi) // #nosec G115 -- hi < 0x10000 by the loop bound
 		b[15] = 1
 		addr := netip.AddrFrom16(b)
 		want := legacyPrivateIP(net.IP(addr.AsSlice()))

@@ -22,13 +22,44 @@ import (
 // isIntrospectClientError and ResolveIdentity.
 var errIntrospectClient = errors.New("introspection endpoint returned a 4xx (client/token error)")
 
+// errIntrospectClientAuth marks an HTTP 401 — the introspection endpoint
+// rejected THIS NODE's client credentials. It is a reachability-class failure
+// on purpose (it arms the cooldown and is reported as an outage), because every
+// token will fail until an operator fixes the credential. The message names the
+// remediation, since the endpoint is up and no amount of retrying will help.
+// See isIntrospectClientError for why a 401 is never caller-attributable.
+var errIntrospectClientAuth = errors.New(
+	"introspection endpoint rejected our client credentials (HTTP 401) — check client_id/client_secret; " +
+		"every token will fail until this is corrected")
+
 // isIntrospectClientError reports whether a non-200 introspection status is a
 // caller/config-side rejection (a 4xx an unauthenticated request can provoke)
 // rather than a backend reachability problem. 429 (Too Many Requests) and 408
 // (Request Timeout) are 4xx but are transient "back off / retry" signals, so
 // they DO count as reachability failures and are allowed to arm the cooldown.
+//
+// 401 is excluded for a different reason, and RFC 7662 is what makes the
+// exclusion safe. Per §2.2 an unknown or inactive TOKEN is reported as HTTP 200
+// with `active:false`, and per §2.3 a 401 means the authorization server
+// rejected *our* client credentials — the client_id/client_secret this node
+// authenticates the introspection call with. A caller's token travels in the
+// POST body and cannot provoke it, so a 401 is never caller-attributable: it is
+// a PROVIDER-WIDE fault (a rotated or mistyped client secret, a revoked
+// introspection grant) under which every token will fail. Classifying it as a
+// caller error left the appliance re-introspecting on every request, with the
+// identity_backend contract row reporting healthy, throughout a total
+// authentication outage — the CHAOS-49 silent-failure shape, found on review of
+// PR #1117.
+//
+// 403 is deliberately NOT included. RFC 7662 does not specify it, so a
+// non-conformant IdP could plausibly emit it per-token — and treating an
+// attacker-reachable status as provider-wide would hand an unauthenticated
+// caller a lever to arm the gate for everyone. The asymmetry decides it:
+// mis-classifying 401 costs observability, mis-classifying 403 would cost
+// availability.
 func isIntrospectClientError(code int) bool {
-	if code == http.StatusTooManyRequests || code == http.StatusRequestTimeout {
+	switch code {
+	case http.StatusTooManyRequests, http.StatusRequestTimeout, http.StatusUnauthorized:
 		return false
 	}
 	return code >= 400 && code < 500
@@ -300,6 +331,9 @@ func (a *OIDCAuth) introspect(token string) (identity *Identity, active bool, to
 			// gate on it.
 			return nil, false, nil, fmt.Errorf("%w: HTTP %d", errIntrospectClient, resp.StatusCode)
 		}
+		if resp.StatusCode == http.StatusUnauthorized {
+			return nil, false, nil, fmt.Errorf("%w", errIntrospectClientAuth)
+		}
 		return nil, false, nil, fmt.Errorf("introspection endpoint returned HTTP %d", resp.StatusCode)
 	}
 
@@ -381,17 +415,12 @@ func (a *OIDCAuth) oidcCacheSetIdentityWithExp(key string, identity *Identity, o
 		ok = false
 	}
 	now := time.Now()
-	ttl := a.ttl
-	if ok && tokenExp != nil {
-		until := time.Unix(*tokenExp, 0).Sub(now)
-		if until <= 0 {
-			// An IdP may transiently report active=true at the expiry boundary,
-			// but the declared token lifetime remains authoritative.
-			identity = nil
-			ok = false
-		} else if until < ttl {
-			ttl = until
-		}
+	ttl, stillValid := clampCacheTTLToTokenExpiry(a.ttl, tokenExp, now)
+	if ok && !stillValid {
+		// An IdP may transiently report active=true at the expiry boundary,
+		// but the declared token lifetime remains authoritative.
+		identity = nil
+		ok = false
 	}
 	a.mu.Lock()
 	// Evict a random entry when the cache is full to prevent unbounded growth.
@@ -404,6 +433,28 @@ func (a *OIDCAuth) oidcCacheSetIdentityWithExp(key string, identity *Identity, o
 	a.cache[key] = &oidcCacheEntry{ok: ok, identity: cloneIdentity(identity), expiry: now.Add(ttl)}
 	a.mu.Unlock()
 	return cloneIdentity(identity), ok
+}
+
+// clampCacheTTLToTokenExpiry bounds a positive cache entry by the token's own
+// declared lifetime, so a cached "yes" can never outlive the credential it was
+// derived from. It reports stillValid=false when the token has already expired,
+// which the caller must turn into a denial.
+//
+// Shared by both introspection backends (auth_oidc.go and the IdP-registry
+// provider in auth_oidc_flow.go) — the rule is a property of RFC 7662 tokens,
+// not of either backend.
+func clampCacheTTLToTokenExpiry(ttl time.Duration, tokenExp *int64, now time.Time) (bounded time.Duration, stillValid bool) {
+	if tokenExp == nil {
+		return ttl, true
+	}
+	until := time.Unix(*tokenExp, 0).Sub(now)
+	if until <= 0 {
+		return ttl, false
+	}
+	if until < ttl {
+		return until, true
+	}
+	return ttl, true
 }
 
 func cloneIdentity(id *Identity) *Identity {
