@@ -41,6 +41,13 @@ type mcpObserveStartupConfig struct {
 	// path (QUAL-2). Empty ⇒ no inventory (QUAL-1 empty-registry behavior).
 	QualificationInventoryFile string
 
+	// QualificationPolicyFile is the static, node-local Gateway policy source path
+	// (QUAL-4). Empty ⇒ no policy composed (QUAL-3 behavior; decision telemetry stays
+	// pending-policy). Present ⇒ the file is compiled + published as the node-local
+	// active Observe evaluation snapshot; a present-but-invalid file fails activation
+	// closed. The policy is EVALUATED for evidence only and never executes.
+	QualificationPolicyFile string
+
 	// Telemetry is the resolved QUAL-3 durable-telemetry block. Disabled ⇒ QUAL-2
 	// behavior (no event manager). Pure value DTO; the side-effecting composition
 	// (KEK, spool, exporter) lives in the loader.
@@ -107,6 +114,7 @@ func resolveMCPObserveStartupConfig(fc *FileConfig) mcpObserveStartupConfig {
 		ResourceName:      g.ResourceName,
 
 		QualificationInventoryFile: g.QualificationInventoryFile,
+		QualificationPolicyFile:    g.QualificationPolicyFile,
 
 		Telemetry: mcpTelemetryStartupConfig{
 			Enabled:          g.QualificationTelemetry.Enabled,

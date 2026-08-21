@@ -231,3 +231,46 @@ func TestValidCDRFailMode(t *testing.T) {
 		}
 	}
 }
+
+// ── CDR server_fingerprint hex validation (validateCDR) ─────────────────────
+//
+// validateCDR's server_fingerprint check enforced only LENGTH (64 chars after
+// stripping the optional "sha256:"/"SHA256:" prefix and colons) but never
+// checked that those characters were actually hex digits — even though its
+// own error message promises "expected 64 hex chars (SHA-256)". A config.yaml
+// with a 64-character but non-hex server_fingerprint (e.g. a fat-fingered
+// paste, or 'g'/'z'/'q' substituted for valid hex digits) sailed through
+// startup validation. The mistake then only surfaces later as a NON-FATAL
+// "CDR: initial client dial failed ... invalid hex" log line from
+// buildCDRTLSConfig (cdr.go, loadCDR path) — CDR silently never comes up
+// instead of a clear, immediate startup error naming the bad field.
+func TestValidateCDR_RejectsNonHexServerFingerprint(t *testing.T) {
+	tests := []struct {
+		name string
+		fp   string
+		want bool // true = validate() should accept
+	}{
+		{"empty (unset)", "", true},
+		{"valid 64-char hex", strings.Repeat("ab", 32), true},
+		{"valid with sha256: prefix", "sha256:" + strings.Repeat("cd", 32), true},
+		{"valid with colons", strings.Repeat("ab:", 31) + "ab", true},
+		{"right length, non-hex chars", strings.Repeat("zq", 32), false},
+		{"right length, one bad char", strings.Repeat("a", 63) + "z", false},
+		{"too short", strings.Repeat("a", 63), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fc := &FileConfig{}
+			fc.CDR.Enabled = true
+			fc.CDR.Endpoint = "sluice:8443"
+			fc.CDR.ServerFingerprint = tt.fp
+			err := fc.validate()
+			if tt.want && err != nil {
+				t.Errorf("validate() rejected a valid server_fingerprint %q: %v", tt.fp, err)
+			}
+			if !tt.want && err == nil {
+				t.Errorf("validate() accepted an invalid server_fingerprint %q, want a rejection", tt.fp)
+			}
+		})
+	}
+}

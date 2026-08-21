@@ -96,10 +96,10 @@ jobs:
       # Signing contacts Fulcio/Rekor/TUF; audit baseline (same posture as ci.yml's
       # catalog-pipeline signing job) — the block flip enumerates sigstore endpoints.
       - name: Harden runner (egress audit)
-        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
         with:
           egress-policy: audit
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-go-cache
@@ -242,7 +242,7 @@ jobs:
       # activation the owner appends their R2 S3 endpoint host if it is not already a
       # subdomain of r2.cloudflarestorage.com.
       - name: Harden runner (egress block)
-        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
         with:
           egress-policy: block
           allowed-endpoints: >
@@ -260,7 +260,7 @@ jobs:
       # compile + run package main; a feeds-v* tag is cut from a reviewed main commit,
       # but pinning to the default branch keeps the executed verifier code out of a
       # would-be attacker's reach regardless.
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-go-cache

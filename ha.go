@@ -97,6 +97,15 @@ type HAState struct {
 	// loop goroutine — previously an operator had no warning before a standby
 	// silently hit the auto-failover/self-fence threshold (see setSyncFailCount).
 	syncFailCount int
+
+	// syncPanics counts standby sync ROUNDS contained by the CHAOS-25 guard.
+	// A contained round deliberately does NOT advance syncFailCount (see
+	// standbyLoop), so without its own counter a standby whose apply path
+	// panics every tick would sit at sync_fail_count=0 forever and read as
+	// healthy while replication is dead. syncPanicAlerted is the fire-once
+	// latch, re-armed by the next successful sync.
+	syncPanics       int
+	syncPanicAlerted bool
 }
 
 // promoteContext holds the parameters StartAsStandby threads into the sync loop,
@@ -120,6 +129,7 @@ type HAStatus struct {
 	StandbyAddr   string `json:"standby_addr,omitempty"`    // leader-side failback target (ADR-0005 S0)
 	SyncFailCount int    `json:"sync_fail_count,omitempty"` // standby-side: consecutive HASync failures since last success
 	LastSyncOK    string `json:"last_sync_ok,omitempty"`    // standby-side: RFC3339 of the last successful HASync apply
+	SyncPanics    int    `json:"sync_panics,omitempty"`     // standby-side: sync rounds contained by the panic guard (CHAOS-25)
 }
 
 func (h *HAState) Status() HAStatus {
@@ -143,6 +153,7 @@ func (h *HAState) Status() HAStatus {
 	// struct verbatim).
 	if h.role == "standby" {
 		s.SyncFailCount = h.syncFailCount
+		s.SyncPanics = h.syncPanics
 		if !h.lastSyncOK.IsZero() {
 			s.LastSyncOK = h.lastSyncOK.Format(time.RFC3339)
 		}
@@ -395,6 +406,109 @@ type standbyLoopState struct {
 	client                    *DataPlaneClient
 	failCount                 int
 	manualWarned              bool // warn-once latch for the auto-failover-disabled path
+
+	// syncFn overrides the leader-sync call. nil ⇒ the production path
+	// (h.syncFromLeader). It exists so the CHAOS-25 fault-injection tests can
+	// make a round panic without standing up a gRPC leader; production never
+	// sets it.
+	syncFn func() bool
+}
+
+// sync performs one leader-sync attempt through the (optionally injected) seam.
+func (s *standbyLoopState) sync() bool {
+	if s.syncFn != nil {
+		return s.syncFn()
+	}
+	return s.h.syncFromLeader(s.ctx, s.client, s.token)
+}
+
+// haStandbySyncComponent labels contained standby-sync panics in the crash
+// plane (culvert_crash_records_total{component}).
+const haStandbySyncComponent = "ha-standby-sync"
+
+// haPromoteComponent labels contained panics raised by the caller-supplied
+// onPromote hook (CP gRPC server startup).
+const haPromoteComponent = "ha-promote"
+
+// guardedTick runs ONE standby sync round under the CHAOS-25 panic guard and
+// reports whether the loop should exit (this node promoted to leader).
+//
+// Per-ROUND, never per-goroutine — the CHAOS-24 contract (internal/obs/guard.go).
+// A `defer recover()` at the top of standbyLoop would let the loop RETURN on a
+// panic, and that is the worst outcome available here: the node keeps
+// role="standby" and a live process, but it stops replicating AND stops watching
+// the leader, so the failover detector is dead. The leader could then die with
+// nothing left to notice — HA silently gone, every dashboard green.
+//
+// The fail-closed decision this guard encodes (the finding inside the finding):
+//
+//	a panicking round is NOT evidence that the leader is unreachable.
+//
+// The whole round is guarded, so a panic raised while fetching/applying the
+// bundle unwinds BEFORE tick's setFail(failCount+1) — the promotion streak is
+// left untouched by design, and this function additionally refuses to report
+// `exit` on a panicking round. That ordering is load-bearing, not incidental:
+// the bundle is leader-supplied content, so a deterministic apply-path panic
+// repeats every 5s tick. Charging those rounds toward haStandbyMaxFail would
+// auto-promote a standby whose ONLY problem is its own parser — and in legacy
+// (unfenced) mode, with a perfectly healthy leader still serving, that is a
+// remotely-triggerable SPLIT BRAIN. It would have made containment strictly
+// worse than the crash it replaced: today the process dies and restarts into a
+// crash-loop, which is loud, single-writer, and safe.
+//
+// A panic raised later — inside promote() itself, after a genuine sync failure
+// already advanced the streak — keeps that (correct) increment and simply
+// leaves the node a standby, retryable on the next tick.
+//
+// The cost of not counting is that a permanently panicking standby never
+// escalates on its own, so the containment is reported instead: crash record +
+// culvert_crash_records_total{component="ha-standby-sync"}, the sync_panics
+// status field, and a fire-once ha_sync_panic alert (notePanicRound).
+func (s *standbyLoopState) guardedTick() (exit bool) {
+	if runGuarded(haStandbySyncComponent, func() { exit = s.tick() }) {
+		s.h.notePanicRound(s.leaderAddr)
+		return false
+	}
+	return exit
+}
+
+// notePanicRound records a CONTAINED standby-sync panic. Because the panicking
+// round is deliberately kept out of the failure streak (see guardedTick), this
+// counter + alert are the ONLY operator-facing signal that replication has
+// stalled — without them the containment would trade a loud crash for a silent
+// one, which is the failure class the guard exists to remove.
+func (h *HAState) notePanicRound(leaderAddr string) {
+	h.mu.Lock()
+	h.syncPanics++
+	n := h.syncPanics
+	first := !h.syncPanicAlerted
+	h.syncPanicAlerted = true
+	h.mu.Unlock()
+
+	logger.Printf("HA: standby sync round panicked and was CONTAINED (contained_rounds=%d, leader=%q) — "+
+		"state replication from the leader is stalled. The failure streak is deliberately NOT advanced, "+
+		"so this node will not auto-promote on its own fault (that would risk split brain against a "+
+		"healthy leader). Manual promotion remains available if the leader is genuinely down.",
+		n, sanitizeLog(leaderAddr))
+
+	if first {
+		go alerts.Fire("ha_sync_panic", alerts.Payload{
+			Event:  "ha_sync_panic",
+			Host:   leaderAddr,
+			Detail: "standby HA sync round panicked and was contained; replication is stalled and automatic failover is suppressed for this node (manual promotion available)",
+			Source: "ha",
+		})
+	}
+}
+
+// clearSyncPanicAlert re-arms the fire-once ha_sync_panic latch after a healthy
+// round, so a LATER stall alerts again instead of being swallowed by the first
+// occurrence. The cumulative syncPanics counter is never reset — it is the
+// durable "this node has been here before" signal for the operator.
+func (h *HAState) clearSyncPanicAlert() {
+	h.mu.Lock()
+	h.syncPanicAlerted = false
+	h.mu.Unlock()
 }
 
 // standbyLoop receives ITS OWN stop channel from StartAsStandby rather than
@@ -434,7 +548,7 @@ func (h *HAState) standbyLoop(ctx context.Context, stopCh chan struct{}, leaderA
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
-	s.syncOnce() // try immediately
+	s.guardedSyncOnce() // try immediately
 
 	for {
 		select {
@@ -443,7 +557,7 @@ func (h *HAState) standbyLoop(ctx context.Context, stopCh chan struct{}, leaderA
 		case <-stopCh:
 			return
 		case <-ticker.C:
-			if s.tick() {
+			if s.guardedTick() {
 				return
 			}
 		}
@@ -467,7 +581,16 @@ func (s *standbyLoopState) onMaxFail() bool {
 	}
 	if s.h.autoFailoverEnabled() {
 		s.h.promote("leader unreachable")
-		return true
+		// Report whether promotion ACTUALLY happened, mirroring the lease path
+		// above. promote() is not infallible: onPromote can return an error, or
+		// (CHAOS-25) panic and be contained — both reset the once-guard and
+		// leave this node a standby. Returning an unconditional true there told
+		// standbyLoop to exit, permanently ending BOTH replication and leader
+		// monitoring on a node that never became a leader — the silent-stall
+		// outcome the per-round guard exists to prevent, reached one level up.
+		// Returning IsLeader() keeps the loop ticking so the next round retries
+		// the promotion, exactly as lease mode already does.
+		return s.h.IsLeader()
 	}
 	if !s.manualWarned {
 		s.h.warnManualFailoverRequired(s.leaderAddr)
@@ -490,11 +613,23 @@ func (s *standbyLoopState) syncOnce() {
 		s.setFail(s.failCount + 1)
 		return
 	}
-	if s.h.syncFromLeader(s.ctx, s.client, s.token) {
+	if s.sync() {
 		s.setFail(0)
 		s.manualWarned = false
+		s.h.clearSyncPanicAlert()
 	} else {
 		s.setFail(s.failCount + 1)
+	}
+}
+
+// guardedSyncOnce is guardedTick's counterpart for the immediate try at loop
+// start. The very first bundle a standby applies is the most likely to panic
+// (it is the largest and the only one applied against a cold local state), and
+// an unguarded panic there would kill the process during startup — a crash-loop
+// that never reaches the retry the loop was built to provide.
+func (s *standbyLoopState) guardedSyncOnce() {
+	if runGuarded(haStandbySyncComponent, s.syncOnce) {
+		s.h.notePanicRound(s.leaderAddr)
 	}
 }
 
@@ -510,9 +645,10 @@ func (s *standbyLoopState) tick() bool {
 		}
 		s.client = c
 	}
-	if s.h.syncFromLeader(s.ctx, s.client, s.token) {
+	if s.sync() {
 		s.setFail(0)
 		s.manualWarned = false // leader recovered — re-arm the warning
+		s.h.clearSyncPanicAlert()
 		return false
 	}
 	if s.ctx.Err() != nil {
@@ -730,9 +866,24 @@ func (h *HAState) promote(reason string) {
 	}
 
 	logger.Printf("HA: promoting to leader (%s)", reason)
-	if err := pc.onPromote(); err != nil {
+	// CHAOS-25: onPromote starts the CP gRPC server — foreign, failure-prone
+	// startup work reached from THREE callers (the standby loop, the planned
+	// handoff, and the admin PromoteManually API). A panic in it is
+	// operationally identical to the error it already handles: the node did not
+	// become a leader. Treat it that way — reset the once-guard, stay standby,
+	// stay retryable — rather than letting it kill an in-line gateway. The lease
+	// grant taken just above is left unkept and simply expires after its TTL,
+	// exactly as the error branch already documents; haIssuanceAllowed is
+	// role-gated, so a standby holding an unrenewed grant issues nothing.
+	var promoteErr error
+	if runGuarded(haPromoteComponent, func() { promoteErr = pc.onPromote() }) {
+		h.promoted.Store(false) // allow a later retry (we are provably not leader here)
+		logger.Printf("HA: promote panicked and was contained — staying as standby (retryable)")
+		return
+	}
+	if promoteErr != nil {
 		h.promoted.Store(false) // allow a later retry
-		logger.Printf("HA: promote failed: %v — staying as standby", err)
+		logger.Printf("HA: promote failed: %v — staying as standby", promoteErr)
 		return
 	}
 
@@ -939,7 +1090,7 @@ func apiHealthz(w http.ResponseWriter, r *http.Request) {
 	status := globalHA.Status()
 	// If HA is not enabled, this node is standalone — always healthy.
 	if !status.Enabled {
-		resp := map[string]any{"status": "ok", "role": "standalone", "leader": true, "write_authority": true}
+		resp := map[string]any{"status": "ok", "role": "standalone", "leader": true, "write_authority": true, "version": version}
 		addRequestLogHealth(resp)
 		jsonOK(w, resp)
 		return
@@ -954,6 +1105,7 @@ func apiHealthz(w http.ResponseWriter, r *http.Request) {
 		resp := map[string]any{
 			"status": "ok", "role": "leader", "leader": true, "since": status.Since,
 			"term": status.Term, "write_authority": globalHA.WriteAllowed(), "auto_failover": status.AutoFailover,
+			"version": version,
 		}
 		addLeaseHealth(resp, globalHA)
 		addRequestLogHealth(resp)
@@ -965,6 +1117,7 @@ func apiHealthz(w http.ResponseWriter, r *http.Request) {
 	standbyResp := map[string]any{
 		"status": "standby", "role": "standby", "leader": false,
 		"term": status.Term, "write_authority": false, "auto_failover": status.AutoFailover,
+		"version": version,
 	}
 	addLeaseHealth(standbyResp, globalHA)
 	resp, _ := json.Marshal(standbyResp)

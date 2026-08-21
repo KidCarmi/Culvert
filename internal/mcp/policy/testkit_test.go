@@ -15,7 +15,10 @@ func gwInput() DecisionInput {
 		Principal: Principal{Kind: SubjectHuman, SubjectID: "user-1", Tenant: "tenant-a",
 			Groups: []string{"developers"}, Assurance: AssuranceHigh, Issuer: "https://idp"},
 		Client: Client{ClientID: "client-g", Tenant: "tenant-a", Capability: CapGateway, Trust: TrustHigh},
-		Server: &Server{ServerID: "srv-1", Owner: "team", Environment: "prod",
+		// Owner MUST equal Principal.Tenant so the default fixture is a valid same-tenant
+		// request (QUAL-5 Gateway tenant isolation denies a cross-tenant tuple as a hard
+		// override before any user rule).
+		Server: &Server{ServerID: "srv-1", Owner: "tenant-a", Environment: "prod",
 			Enabled: true, Verification: ServerVerified},
 		Tool: &Tool{Name: "read_file", ServerID: "srv-1", FingerprintHash: "abc123",
 			Disposition: DispUsable, Drift: DriftNoMaterialChange, Destination: DestinationApproved,

@@ -241,6 +241,31 @@ in-container `git status` sees those as deleted and the image binary ships
 `vcs.modified=true` (not tree-state reproducible). Disjoint provenance surface
 (the image has its own cosign signature), tracked separately.
 
+**F2 — runtime version identity (DONE).** Prompted by the first LIVE
+authoritative MCP Observe Acceptance (v1.0.202), which failed its required
+`artifact.version` criterion: `main.version` was stamped correctly by the
+release build (`-X main.version=${REF_NAME}`), but the live `/healthz`
+handler omitted the `version` field entirely, so the release's runtime
+identity was unverifiable. Two fail-closed gates now guard this, both wired
+from `.github/scripts/`:
+- **`assert-release-ref.sh`** runs on the `release` job (before
+  `Build release binaries`) AND on `verify-reproducible` (before
+  `Rebuild release binaries`) — it refuses to build/sign when `REF_NAME` is
+  empty or not a `vX.Y.Z` tag, so an official signed binary can never be
+  stamped with an empty/dev/latest/SHA version.
+- **`assert-runtime-version.sh`** runs only on the native `linux/amd64` leg
+  of `release` (a foreign-platform binary can't execute on the runner): it
+  boots the exact just-built bytes-under-signature with `-ui-no-tls`, polls
+  `GET /healthz` on the admin listener, and asserts the reported `version`
+  field equals the release tag. This is the check that would have caught
+  v1.0.202 — it proves the signed binary surfaces its identity at runtime,
+  not just that the linker flag was set.
+
+`api/openapi/openapi.yaml`'s `HealthStatus.version` documents the field
+these gates enforce. See `TestHealthz_ReportsRuntimeVersion` (handler) and
+the `release_version_identity` test family (guard behavior) for the pinned
+contract.
+
 Every GitHub Release now carries **per-module CycloneDX SBOMs** for its binaries
 (`culvert.sbom.cdx.json` + `culvert-maint.sbom.cdx.json`), generated once on the
 linux/amd64 leg (syft reads the embedded Go build-info, identical across
