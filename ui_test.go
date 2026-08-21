@@ -441,6 +441,74 @@ func TestAPIAuthLogin_NoAuth(t *testing.T) {
 	}
 }
 
+// TestAPIAuthLogin_PreSetupSession_RejectedAfterSetupCreatesSameUsername proves
+// that a session issued by apiAuthLogin's pre-setup bootstrap bypass (any
+// credentials succeed while !cfg.IsConfigured(), ui_auth.go:65-68) cannot
+// outlive first-time setup.
+//
+// The setup wizard itself never calls /api/auth/login before setup completes
+// (static/index.html only wires the login form for the "setup already done"
+// branch), but the endpoint is public and reachable directly. An attacker who
+// POSTs to it before the real operator finishes the wizard — using the
+// wizard's own suggested default username "admin" (static/index.html
+// su-user field) — receives a real, signed admin session cookie for
+// Sub="admin" without knowing any real password. uiAuthMiddleware's only
+// defense against stale local sessions is rejecting sessions for a
+// nonexistent user (ui_middleware.go:271-275); once the real operator
+// completes setup with that same default username, the attacker's earlier
+// cookie now names an existing user and remains a valid admin session for
+// its full TTL.
+func TestAPIAuthLogin_PreSetupSession_RejectedAfterSetupCreatesSameUsername(t *testing.T) {
+	resetSetupLockout()
+	t.Cleanup(resetSetupLockout)
+	_ = cfg.SetAuth("", "")
+	defer func() { _ = cfg.SetAuth("", "") }()
+	initSecret(t)
+
+	// Attacker reaches the bootstrap window before setup completes.
+	loginW := httptest.NewRecorder()
+	apiAuthLogin(loginW, jsonReq(http.MethodPost, "/api/auth/login", map[string]any{
+		"user": "admin", "pass": "attacker-does-not-know-the-real-password",
+	}))
+	assertStatus(t, loginW, http.StatusOK)
+
+	var attackerCookie *http.Cookie
+	for _, c := range loginW.Result().Cookies() {
+		if c.Name == uiSessionCookieName {
+			attackerCookie = c
+		}
+	}
+	if attackerCookie == nil {
+		// No session was issued during the bootstrap window — the
+		// vulnerability this test guards against cannot occur here.
+		return
+	}
+
+	// The real operator completes first-time setup using the wizard's own
+	// suggested default username.
+	resetSetupLockout()
+	setupW := httptest.NewRecorder()
+	apiSetupComplete(setupW, jsonReq(http.MethodPost, "/api/setup/complete", map[string]any{
+		"user": "admin", "pass": "RealAdminPassword123!",
+	}))
+	assertStatus(t, setupW, http.StatusOK)
+
+	// Replay the attacker's pre-setup cookie against a protected endpoint
+	// through the real middleware chain.
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/users", http.NoBody)
+	req.RemoteAddr = "127.0.0.1:9999"
+	req.AddCookie(attackerCookie)
+	rec := httptest.NewRecorder()
+	uiAuthMiddleware(http.HandlerFunc(apiAuthUsers)).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("attacker's pre-setup session for username %q remained valid after setup created a real "+
+			"user with the same name (got status %d, body %q) — the bootstrap-window login lets an attacker "+
+			"mint a persistent admin session for the wizard's default username before the real operator "+
+			"finishes setup", "admin", rec.Code, rec.Body.String())
+	}
+}
+
 func TestAPIAuthLogin_InvalidCredentials(t *testing.T) {
 	_ = cfg.SetAuth("admin", "correct-password-123")
 	defer func() { _ = cfg.SetAuth("", "") }()
