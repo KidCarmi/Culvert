@@ -154,7 +154,7 @@ func BenchmarkHTTPForward_HandleHTTP(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		rr := httptest.NewRecorder()
-		handleHTTP(rr, benchForwardRequest(origin.URL+"/some/path"))
+		handleHTTP(rr, benchForwardRequest(origin.URL+"/some/path"), ProxyIdentity{})
 		if rr.Code != http.StatusOK {
 			b.Fatalf("status %d", rr.Code)
 		}
