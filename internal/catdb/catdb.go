@@ -32,8 +32,16 @@ type CommunityDB struct {
 }
 
 // Open opens (or creates) a BadgerDB at the given directory.
-// Truncate is enabled so a crashed container can restart without manual
-// intervention — BadgerDB replays and truncates a corrupted value log.
+//
+// It is NOT crash-tolerant on its own, and the comment that used to claim
+// otherwise ("Truncate is enabled so a crashed container can restart without
+// manual intervention") was false in two ways: badger v4 removed the Truncate
+// option entirely, and the worst crash damage does not surface as an error at
+// all — a corrupt `.sst` makes this call PANIC from a goroutine badger spawns,
+// which no caller can recover from. Boot paths must therefore call
+// OpenResilient (resilient.go), which detects and quarantines a store a
+// previous process could not survive. Direct Open is for callers that already
+// know the directory is sound (tests, and OpenResilient itself).
 func Open(dir string) (*CommunityDB, error) {
 	opts := badger.DefaultOptions(dir).
 		// Reduce per-file size: 128 MiB vs the 1 GiB default.

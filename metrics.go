@@ -646,6 +646,38 @@ culvert_upstream_direct_fallback_total %d
 		upFallbackTotal,
 	)
 
+	// CHAOS-50: Layer-2 community category store boot health. `available` is 0
+	// both when the store is unconfigured and when it failed to open — the
+	// operator distinguishes them from the `category_feed_db` diagnostics row
+	// (and from the absence of `-cat-feed-db`), while an alerting rule that only
+	// cares "is Layer 2 serving?" needs a single series. `quarantined_copies`
+	// counts `.corrupt.*` directories still on the volume, so an incident stays
+	// visible across restarts even after the store self-healed.
+	cfdb := catFeedDBState()
+	cfdbAvailable, cfdbRecovered := 0, 0
+	if cfdb.Available {
+		cfdbAvailable = 1
+	}
+	if cfdb.Recovered {
+		cfdbRecovered = 1
+	}
+	_, _ = fmt.Fprintf(w, `# HELP culvert_catfeeddb_available 1 when the Layer-2 community category store is open and serving lookups
+# TYPE culvert_catfeeddb_available gauge
+culvert_catfeeddb_available %d
+
+# HELP culvert_catfeeddb_recovered 1 when a damaged community category store was quarantined and re-created at this startup
+# TYPE culvert_catfeeddb_recovered gauge
+culvert_catfeeddb_recovered %d
+
+# HELP culvert_catfeeddb_quarantined_copies Quarantined (.corrupt.*) copies of the community category store still on the data volume
+# TYPE culvert_catfeeddb_quarantined_copies gauge
+culvert_catfeeddb_quarantined_copies %d
+`,
+		cfdbAvailable,
+		cfdbRecovered,
+		cfdb.ResidualCopies,
+	)
+
 	// CHAOS-45: durable-write (persistence) health. The boot-time writability
 	// probe cannot see a volume that goes read-only or full LATER, and most
 	// store Save() paths discard the write error — these series are the only
