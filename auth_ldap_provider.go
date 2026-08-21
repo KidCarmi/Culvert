@@ -168,6 +168,12 @@ func validateLDAPURL(raw string) error {
 	if u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" {
 		return fmt.Errorf("must be scheme://host[:port] only — no credentials, path, or query")
 	}
+	return validateLDAPHostPort(u)
+}
+
+// validateLDAPHostPort checks the authority part of an already scheme- and
+// shape-validated directory URL.
+func validateLDAPHostPort(u *url.URL) error {
 	host := u.Hostname()
 	if host == "" {
 		return fmt.Errorf("host is required")
@@ -186,25 +192,30 @@ func validateLDAPURL(raw string) error {
 
 // isValidHostname is a conservative RFC-1123 hostname check.
 func isValidHostname(h string) bool {
-	if len(h) == 0 || len(h) > 253 {
+	if h == "" || len(h) > 253 {
 		return false
 	}
 	for _, label := range strings.Split(strings.TrimSuffix(h, "."), ".") {
-		if len(label) == 0 || len(label) > 63 {
-			return false
-		}
-		for i := 0; i < len(label); i++ {
-			c := label[i]
-			ok := c == '-' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
-			if !ok {
-				return false
-			}
-		}
-		if label[0] == '-' || label[len(label)-1] == '-' {
+		if !isValidHostLabel(label) {
 			return false
 		}
 	}
 	return true
+}
+
+// isValidHostLabel checks one dot-separated hostname label.
+func isValidHostLabel(label string) bool {
+	if label == "" || len(label) > 63 {
+		return false
+	}
+	for i := 0; i < len(label); i++ {
+		c := label[i]
+		ok := c == '-' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+		if !ok {
+			return false
+		}
+	}
+	return label[0] != '-' && label[len(label)-1] != '-'
 }
 
 // validateLDAPDN bounds an (optional) DN-shaped field. Empty is allowed —
@@ -281,7 +292,7 @@ func validateLDAPAttrName(attr string) error {
 		if i == 0 && !isAlpha {
 			return fmt.Errorf("must start with a letter")
 		}
-		if !isAlpha && !(c >= '0' && c <= '9') && c != '-' {
+		if !isAlpha && (c < '0' || c > '9') && c != '-' {
 			return fmt.Errorf("may contain only letters, digits, and hyphens")
 		}
 	}

@@ -89,11 +89,7 @@ func TestLDAPProfile_CompilesInRegistry(t *testing.T) {
 	if got := prov.Name(); got != "ldap:corp-ad" {
 		t.Errorf("Name() = %q, want ldap:corp-ad", got)
 	}
-	idp, isIdP := prov.(IdentityProvider)
-	if !isIdP {
-		t.Fatal("LDAP provider must implement IdentityProvider")
-	}
-	if got := idp.DisplayName(); got != "Corporate AD" {
+	if got := prov.DisplayName(); got != "Corporate AD" {
 		t.Errorf("DisplayName() = %q, want Corporate AD", got)
 	}
 }
@@ -118,7 +114,7 @@ func TestLDAPProfile_NeverInteractive(t *testing.T) {
 	}
 	// 4. Captive login URL is structurally empty.
 	prov, _ := reg.LiveProvider("corp-ad")
-	if url := prov.(IdentityProvider).CaptiveLoginURL("corp.example", nil); url != "" {
+	if url := prov.CaptiveLoginURL("corp.example", nil); url != "" {
 		t.Errorf("CaptiveLoginURL() = %q, want empty — LDAP must never mint a browser flow", url)
 	}
 	// 5. Email-domain routing must not pick LDAP.
@@ -145,7 +141,7 @@ func TestLDAPProfile_NeverInteractive(t *testing.T) {
 func TestLDAPProfile_NeverOnAuthSelectPage(t *testing.T) {
 	swapIdPRegistry(t, ldapTestProfile("corp-ad", "Corporate AD"))
 
-	req := httptest.NewRequest(http.MethodGet, "/auth/select", nil)
+	req := httptest.NewRequest(http.MethodGet, "/auth/select", http.NoBody)
 	rec := httptest.NewRecorder()
 	authSelectProvider(rec, req)
 	body := rec.Body.String()
@@ -159,7 +155,7 @@ func TestLDAPProfile_NeverOnAuthSelectPage(t *testing.T) {
 
 func TestCaptivePortalURL_IgnoresLDAPOnlyRegistry(t *testing.T) {
 	swapIdPRegistry(t, ldapTestProfile("corp-ad", "Corporate AD"))
-	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/", http.NoBody)
 	if got := resolveCaptivePortalURL(req); got != cfg.OIDCLoginURL() {
 		t.Errorf("resolveCaptivePortalURL with LDAP-only registry = %q, want legacy fallback %q", got, cfg.OIDCLoginURL())
 	}

@@ -177,11 +177,11 @@ func TestAPIIdPItem_PutWithoutPreflightKeepsExistingSemantics(t *testing.T) {
 }
 
 func TestLDAPActivationPreflight_IgnoresNonLDAPAndAbsentParam(t *testing.T) {
-	r := httptest.NewRequest(http.MethodPut, "/api/idp/x", nil)
+	r := httptest.NewRequest(http.MethodPut, "/api/idp/x", http.NoBody)
 	if rep := ldapActivationPreflight(r, ldapTestProfile("x", "X")); rep != nil {
 		t.Fatal("preflight ran without the query param")
 	}
-	r = httptest.NewRequest(http.MethodPut, "/api/idp/x?preflight=connection", nil)
+	r = httptest.NewRequest(http.MethodPut, "/api/idp/x?preflight=connection", http.NoBody)
 	oidc := &IdPProfile{Type: IdPTypeOIDC}
 	if rep := ldapActivationPreflight(r, oidc); rep != nil {
 		t.Fatal("preflight must be a no-op for non-LDAP types")
