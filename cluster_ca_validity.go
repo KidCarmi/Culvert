@@ -54,6 +54,42 @@ const clusterCARenewalWindow = 30 * 24 * time.Hour
 // and contains no key material.
 var errClusterCAUnusable = errors.New("cluster CA unusable")
 
+// errClusterCAExpired / errClusterCANotYetValid are wrapped ALONGSIDE the
+// unusable sentinel so callers can tell a genuine expiry (recovery: rotate or
+// import a new trust root) from a CLOCK fault (recovery: fix NTP — rotating
+// would churn the fleet's trust root for nothing). Ported from the competing
+// CHAOS-50 implementation on PR #1179, where the distinction originated.
+var (
+	errClusterCAExpired     = errors.New("expired")
+	errClusterCANotYetValid = errors.New("not yet valid")
+)
+
+// clusterCAUnusableKind classifies an Usable() error into a stable, machine-
+// readable kind for metrics/health surfaces: "expired", "not_yet_valid", or
+// "unavailable" (no CA loaded / anything else). Empty for nil.
+func clusterCAUnusableKind(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, errClusterCAExpired):
+		return "expired"
+	case errors.Is(err, errClusterCANotYetValid):
+		return "not_yet_valid"
+	default:
+		return "unavailable"
+	}
+}
+
+// clusterCAUnusableRemediation returns the operator action that actually fixes
+// the given kind. Kept next to the classifier so the two can never drift; a
+// clock fault must NOT be answered with a fleet-wide trust-root rotation.
+func clusterCAUnusableRemediation(kind string) string {
+	if kind == "not_yet_valid" {
+		return "Correct this Control Plane's system clock (NTP) — the cluster CA is not yet valid. Do NOT rotate the CA; the trust root is fine."
+	}
+	return "Rotate or import a cluster CA (Cluster → CA) to restore enrollment."
+}
+
 // clusterCAUsable is the pure validity predicate, split out from the method so
 // tests can drive it with an explicit clock instead of waiting ten years for a
 // CA to expire.
@@ -62,7 +98,7 @@ func clusterCAUsable(cert *x509.Certificate, now time.Time) error {
 		return fmt.Errorf("%w: no cluster CA loaded", errClusterCAUnusable)
 	}
 	if now.After(cert.NotAfter) {
-		return fmt.Errorf("%w: expired at %s (%s ago)", errClusterCAUnusable,
+		return fmt.Errorf("%w: %w at %s (%s ago)", errClusterCAUnusable, errClusterCAExpired,
 			cert.NotAfter.UTC().Format(time.RFC3339),
 			now.Sub(cert.NotAfter).Round(time.Second))
 	}
@@ -92,8 +128,8 @@ func clusterCAUsable(cert *x509.Certificate, now time.Time) error {
 	// Self-generated CAs are unaffected: RotateIfNeeded backdates NotBefore by an
 	// hour, so only an imported or replicated CA can reach this branch.
 	if now.Before(cert.NotBefore) {
-		return fmt.Errorf("%w: not valid until %s (system clock may have rolled back, or the CA was issued by a host whose clock is ahead)",
-			errClusterCAUnusable, cert.NotBefore.UTC().Format(time.RFC3339))
+		return fmt.Errorf("%w: %w until %s (system clock may have rolled back, or the CA was issued by a host whose clock is ahead)",
+			errClusterCAUnusable, errClusterCANotYetValid, cert.NotBefore.UTC().Format(time.RFC3339))
 	}
 	return nil
 }

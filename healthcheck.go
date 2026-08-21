@@ -91,14 +91,19 @@ func clusterCAHealthStatus() string {
 	if globalClusterCA.Expiry().IsZero() {
 		return "disabled"
 	}
-	switch {
-	case globalClusterCA.Usable() != nil:
+	if err := globalClusterCA.Usable(); err != nil {
+		// "expired" vs "not_yet_valid" (clock fault) point at OPPOSITE
+		// recoveries — rotate/import vs fix NTP — so the probe must not
+		// collapse them (ported from PR #1179's classification).
+		if kind := clusterCAUnusableKind(err); kind == "not_yet_valid" {
+			return "not_yet_valid"
+		}
 		return "expired"
-	case clusterCARotationDegraded():
-		return "rotation_failing"
-	default:
-		return "ready"
 	}
+	if clusterCARotationDegraded() {
+		return "rotation_failing"
+	}
+	return "ready"
 }
 
 // coarseClamAVStatus collapses ClamAVStatus()'s value to a fixed enum for the

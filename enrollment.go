@@ -1128,6 +1128,19 @@ func parseAndValidateCACert(certPEM []byte) (*x509.Certificate, error) {
 	if time.Now().After(cert.NotAfter) {
 		return nil, fmt.Errorf("certificate has already expired (%s)", cert.NotAfter.Format("2006-01-02"))
 	}
+	// Reject a NOT-YET-VALID CA at the door, symmetric with the expiry check
+	// above: under the strict Usable() gate a successful import of such a CA
+	// would instantly disable issuance ("import succeeded" followed by every
+	// enrollment refusing until NotBefore arrives) — the review P1 on the
+	// competing CHAOS-50 implementation (#1166). A small tolerance absorbs
+	// honest clock skew from the host that generated the CA; anything beyond
+	// it is either a clock fault (fix NTP) or a mis-cut certificate, and both
+	// are better refused with this message than accepted into an unusable
+	// trust root.
+	if notBefore := cert.NotBefore.Add(-5 * time.Minute); time.Now().Before(notBefore) {
+		return nil, fmt.Errorf("certificate is not valid until %s — importing it would disable node-certificate issuance until then; check this host's clock (NTP) or re-issue the CA",
+			cert.NotBefore.UTC().Format(time.RFC3339))
+	}
 	return cert, nil
 }
 

@@ -17,6 +17,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"math/big"
@@ -889,4 +890,106 @@ func TestChaos50_ClusterRotationSurvivesInspectionCALoadFailure(t *testing.T) {
 	}
 	t.Fatalf("DEFECT: cluster CA never rotated (fingerprint still %s…) — its rotation driver is "+
 		"gated on the inspection CA being ready", before[:12])
+}
+
+// ── token preservation (ported from the competing PR #1179) ─────────────────
+
+// TestEnroll_UnusableCADoesNotConsumeToken pins the token-preserving front
+// half of the fail-closed contract: enrollment tokens are single-use and
+// their consumption is persisted, so a CA-precondition refusal must happen
+// BEFORE the token is spent — otherwise repairing the CA leaves the node
+// holding a dead credential and an admin minting replacements.
+func TestEnroll_UnusableCADoesNotConsumeToken(t *testing.T) {
+	captureClusterCAAlerts(t)
+	installClusterCA(t, newClusterCAWithWindow(t, t.TempDir(),
+		time.Now().Add(-2*365*24*time.Hour), time.Now().Add(-24*time.Hour)))
+	origStore := globalClusterStore
+	t.Cleanup(func() { globalClusterStore = origStore })
+	globalClusterStore = newTestClusterStore(t)
+
+	token, err := globalClusterStore.GenerateToken("", "", "admin", 24*time.Hour)
+	if err != nil {
+		t.Fatalf("generate token: %v", err)
+	}
+	reqJSON, _ := json.Marshal(EnrollRequest{
+		Token: token, NodeID: "dp-tp1", CSR: string(newTestCSR(t, "dp-tp1")),
+	})
+
+	srv := &controlPlaneServer{}
+	if _, err := srv.Enroll(context.Background(), reqJSON); err == nil {
+		t.Fatal("enrollment against an expired cluster CA must be refused")
+	} else if !strings.Contains(err.Error(), "cannot issue") {
+		t.Errorf("refusal should name the cause: %v", err)
+	}
+
+	if !globalClusterStore.TokenExists(token) {
+		t.Fatal("the enrollment token was CONSUMED by a refusal that was not the " +
+			"caller's fault — after the CA is repaired the node cannot retry and an " +
+			"admin must mint and distribute a replacement")
+	}
+	if _, registered := globalClusterStore.GetNode("dp-tp1"); registered {
+		t.Error("a refused enrollment must not register the node")
+	}
+	if snap := clusterCAFailures(); snap.SignRefusals != 1 {
+		t.Errorf("refusals = %d, want exactly 1 (the precondition returns before "+
+			"SignCSR, so the refusal must not be double-counted)", snap.SignRefusals)
+	}
+
+	// And the token still works once the CA is usable again — the whole point.
+	installClusterCA(t, newClusterCAWithWindow(t, t.TempDir(),
+		time.Now().Add(-time.Hour), time.Now().Add(365*24*time.Hour)))
+	if _, err := srv.Enroll(context.Background(), reqJSON); err != nil {
+		t.Fatalf("the preserved token must enroll once the CA is repaired: %v", err)
+	}
+	if _, registered := globalClusterStore.GetNode("dp-tp1"); !registered {
+		t.Error("node should be registered after the successful retry")
+	}
+}
+
+// TestEnroll_UninitializedCADoesNotConsumeToken applies the same rule to the
+// pre-existing "not initialized" precondition, which had the identical shape.
+func TestEnroll_UninitializedCADoesNotConsumeToken(t *testing.T) {
+	installClusterCA(t, &clusterCA{}) // never initialized
+	origStore := globalClusterStore
+	t.Cleanup(func() { globalClusterStore = origStore })
+	globalClusterStore = newTestClusterStore(t)
+
+	token, err := globalClusterStore.GenerateToken("", "", "admin", 24*time.Hour)
+	if err != nil {
+		t.Fatalf("generate token: %v", err)
+	}
+	reqJSON, _ := json.Marshal(EnrollRequest{
+		Token: token, NodeID: "dp-tp2", CSR: string(newTestCSR(t, "dp-tp2")),
+	})
+
+	srv := &controlPlaneServer{}
+	if _, err := srv.Enroll(context.Background(), reqJSON); err == nil {
+		t.Fatal("enrollment with no cluster CA must be refused")
+	}
+	if !globalClusterStore.TokenExists(token) {
+		t.Error("an uninitialized cluster CA consumed the enrollment token")
+	}
+}
+
+// TestImportCA_RejectsNotYetValidCA closes the import-side half of the strict
+// NotBefore gate (review P1 on the competing #1166): a CA whose NotBefore is
+// in the future would import "successfully" and then refuse every issuance
+// until it becomes valid — reject it at the door with the actual remediation
+// instead.
+func TestImportCA_RejectsNotYetValidCA(t *testing.T) {
+	future := newClusterCAWithWindow(t, t.TempDir(),
+		time.Now().Add(2*time.Hour), time.Now().Add(2*365*24*time.Hour))
+	if _, err := parseAndValidateCACert(future.certPEM); err == nil {
+		t.Fatal("a not-yet-valid CA must be refused at import")
+	} else if !strings.Contains(err.Error(), "not valid until") {
+		t.Errorf("refusal should name the cause and remediation: %v", err)
+	}
+
+	// Honest skew stays importable: a CA cut seconds ago on a slightly-ahead
+	// host must not be refused.
+	nearlyNow := newClusterCAWithWindow(t, t.TempDir(),
+		time.Now().Add(2*time.Minute), time.Now().Add(2*365*24*time.Hour))
+	if _, err := parseAndValidateCACert(nearlyNow.certPEM); err != nil {
+		t.Fatalf("a CA inside the skew tolerance must import: %v", err)
+	}
 }
