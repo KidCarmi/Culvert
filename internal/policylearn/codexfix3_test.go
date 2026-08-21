@@ -1294,3 +1294,44 @@ func TestLateLossFlag_PersistedUnderBumpedSchema(t *testing.T) {
 		t.Fatal("FinalizeAccept latched accepted after a restart discarded the invalidation flag")
 	}
 }
+
+// TestLoad_RewritesV8FlagCarrierToCurrentSchema (round 31): a version-8 PR
+// build already persisted late_loss_invalidated under schema_version 8; this
+// binary decodes such a document cleanly, but leaving it on disk at version 8
+// preserved the exact rollback quarantine the v9 bump prevents (a pre-flag
+// binary strict-decodes the unknown field as corruption because the declared
+// version is not newer). Load must rewrite older envelopes at the current
+// version so a later rollback lands in the errSchemaTooNew read-only posture.
+func TestLoad_RewritesV8FlagCarrierToCurrentSchema(t *testing.T) {
+	dir := t.TempDir()
+	raw := `{"schema_version":8,"sessions":[` +
+		`{"id":"s1","state":"completed","created_at":"2026-08-20T12:00:00Z","started_at":"2026-08-20T12:00:00Z","created_by":"op","baseline":{}}],` +
+		`"recommendations":[{"id":"r1","session_id":"s1","state":"accepting","target_rule_id":"t1","late_loss_invalidated":true,` +
+		`"group":"g","category":"c","proposed_rule":{},"confidence":"low","coverage":{"membership_denominator_known":false},"evidence":{},"baseline":{},` +
+		`"policy":{},"policy_hash":"h","evidence_hash":"e","engine_schema":8,"generated_at":"2026-08-20T12:30:00Z"}]}`
+	if err := os.WriteFile(filepath.Join(dir, "policy_learning.json"), []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	clk := newTestClock()
+	e := newTestEngine(t, dir, clk, nil)
+	t.Cleanup(func() { _ = e.Close() })
+
+	got, err := os.ReadFile(filepath.Join(dir, "policy_learning.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var peek struct {
+		SchemaVersion int `json:"schema_version"`
+	}
+	if err := json.Unmarshal(got, &peek); err != nil {
+		t.Fatal(err)
+	}
+	if peek.SchemaVersion != SchemaVersion {
+		t.Fatalf("v8 flag-carrying store left at schema_version %d after load — a pre-flag binary rollback would QUARANTINE it; want rewrite at %d", peek.SchemaVersion, SchemaVersion)
+	}
+	// The flag itself must survive the rewrite.
+	rec, ok := e.RecommendationByID("r1")
+	if !ok || !rec.LateLossInvalidated {
+		t.Fatalf("migrated store lost the invalidation flag (rec=%+v ok=%v)", rec, ok)
+	}
+}

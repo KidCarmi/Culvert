@@ -79,6 +79,20 @@ func (e *Engine) load() error {
 	}
 	e.sessions = env.Sessions
 	e.recs = env.Recommendations
+	// Older-version documents are REWRITTEN at the current version during
+	// load (Codex round 31): a version-8 PR build already persisted
+	// late_loss_invalidated under schema_version 8, and this binary decodes
+	// that document cleanly — but leaving it on disk at version 8 keeps the
+	// exact rollback quarantine the v9 bump exists to prevent (a pre-flag
+	// binary strict-decodes the unknown field as corruption because the
+	// declared version is not newer). Upgrading the envelope on load turns
+	// every later rollback into the intended errSchemaTooNew read-only
+	// posture. General by design: any future additive field + bump gets the
+	// same upgrade-on-load, so a mixed-version rollback window never
+	// re-presents an old version number carrying new fields.
+	if env.SchemaVersion < SchemaVersion {
+		e.dirty = true
+	}
 	if pruned := pruneRecommendations(e.recs); len(pruned) != len(e.recs) {
 		e.recs = pruned
 		e.dirty = true
