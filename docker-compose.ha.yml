@@ -124,7 +124,16 @@ services:
       retries: 3
 
   # ── Data Plane worker (activate with --profile dp) ─────────────────────────
-  # Usage: ENROLL_URL=culvert://TOKEN@cp:50051 docker compose --profile dp up -d
+  # Usage: ENROLL_URL=culvert://enroll/cp:50051/TOKEN?ca-fp=sha256:FINGERPRINT \
+  #          docker compose --profile dp up -d
+  # The ?ca-fp=... suffix is NOT optional: callEnrollRPC (dp_enrollment.go)
+  # connects to the Control Plane over insecure gRPC, so the fingerprint is
+  # the only check against an impersonated CP answering the enrollment call.
+  # Omitting it accepts and persists whatever CA the far end presents. The
+  # GUI's "Enable HA" / node-enrollment panel gives you the exact URL,
+  # fingerprint included — paste it verbatim rather than hand-typing this
+  # example. See parseEnrollURL in dp_enrollment.go for the format the
+  # `--enroll` flag actually expects.
   dp:
     build: .
     container_name: culvert-dp
