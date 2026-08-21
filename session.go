@@ -33,9 +33,12 @@ const sessionCookieName = session.CookieName
 // pointer is stable — tests swap its contents, never the pointer).
 var sessionRevoked = session.Revoked
 
-// initSessionSecret sets the HMAC key for session cookies.
-// Priority: CULVERT_SESSION_SECRET env > config file > random.
-func initSessionSecret() {
+// initSessionSecret sets the HMAC key for session cookies. Reports whether
+// CULVERT_SESSION_SECRET supplied it, so the caller (loadSession) can keep
+// the documented priority — CULVERT_SESSION_SECRET env > config file >
+// random — instead of letting a subsequent config-file value unconditionally
+// clobber an explicit env key.
+func initSessionSecret() bool {
 	// Check the raw value for absence first — trimming before the emptiness
 	// check would make a whitespace-only value indistinguishable from unset
 	// and silently install a random key with no diagnostic. Only a value
@@ -49,9 +52,10 @@ func initSessionSecret() {
 		}
 		session.SetSigningKey(key)
 		logger.Printf("Session: using shared signing key from CULVERT_SESSION_SECRET")
-		return
+		return true
 	}
 	session.InitRandomKey()
+	return false
 }
 
 // initSessionSecretFromConfig applies a config-file session secret.
