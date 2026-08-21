@@ -63,23 +63,9 @@ func buildCategoryPolicyStore(n int) *PolicyStore {
 	return ps
 }
 
-// buildCategoryGroupPolicyStore returns n rules scoped by category GROUP. Each
-// one resolves the host→category fusion (lookupHostCategory) before the O(1)
-// group-membership check, so the fusion runs once per rule per request.
-func buildCategoryGroupPolicyStore(n int) *PolicyStore {
-	ps := &PolicyStore{}
-	rules := make([]PolicyRule, n)
-	for i := 0; i < n; i++ {
-		rules[i] = PolicyRule{
-			Priority:          i + 1,
-			Name:              fmt.Sprintf("catgroup-rule-%d", i),
-			DestCategoryGroup: fmt.Sprintf("group-%d", i),
-			Action:            ActionAllow,
-		}
-	}
-	ps.ReplaceAll(rules)
-	return ps
-}
+// The category-GROUP store builder is shared with policy_bench_test.go
+// (buildCategoryGroupPolicyStore) — the two benchmark files landed from
+// separate PRs and were reconciled to one declaration.
 
 func BenchmarkPolicyEvaluate_CategoryRules(b *testing.B) {
 	seedCategoryTaxonomy(b, 12, 40)
@@ -97,7 +83,7 @@ func BenchmarkPolicyEvaluate_CategoryRules(b *testing.B) {
 	}
 }
 
-func BenchmarkPolicyEvaluate_CategoryGroupRules(b *testing.B) {
+func BenchmarkPolicyEvaluate_CategoryGroupRulesSynthetic(b *testing.B) {
 	seedCategoryTaxonomy(b, 12, 40)
 	for _, n := range []int{10, 50, 200} {
 		ps := buildCategoryGroupPolicyStore(n)

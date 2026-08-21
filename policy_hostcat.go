@@ -12,11 +12,10 @@ package main
 // of that class, and the most expensive one:
 //
 //   - lookupHostCategory, which every category-GROUP rule calls, resolves the
-//     host through catStore.LookupHost. That scan is deliberately O(total host
-//     patterns) rather than O(labels) — it walks the entry lists instead of the
-//     lowercase index so it can report the admin's configured pattern verbatim
-//     for the URL-lookup API — and it lowercases and concatenates per pattern.
-//     The policy hot path discards that pattern, but paid for it once per rule.
+//     host through catStore.LookupHost. At the time of this hoist that was an
+//     O(total host patterns) scan; it has since gained a reverse index
+//     (urlcat hostIndex, O(labels) probes) — the two changes compose, and the
+//     measurements below predate that index (they bound the worst case).
 //   - communityDB.Lookup opens a BadgerDB read transaction per domain label. On
 //     a feed-backed deployment that is a transaction, and a trip through
 //     Badger's read-timestamp oracle, per rule per request.

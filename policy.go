@@ -1404,7 +1404,7 @@ func matchAuthSource(ruleAuthSource, actualAuthSource string) bool {
 // splitIdPSource separates an auth-source string into its IdP scheme
 // ("oidc"/"saml", or "" when bare/non-IdP) and the profile name.
 func splitIdPSource(source string) (scheme, name string) {
-	for _, p := range []string{"oidc:", "saml:"} {
+	for _, p := range []string{"oidc:", "saml:", "ldap:"} {
 		if rest, ok := strings.CutPrefix(source, p); ok && rest != "" {
 			return strings.TrimSuffix(p, ":"), rest
 		}
@@ -1413,7 +1413,7 @@ func splitIdPSource(source string) (scheme, name string) {
 }
 
 func stripIdPPrefix(source string) string {
-	for _, prefix := range []string{"oidc:", "saml:"} {
+	for _, prefix := range []string{"oidc:", "saml:", "ldap:"} {
 		if rest, ok := strings.CutPrefix(source, prefix); ok && rest != "" {
 			return rest
 		}
@@ -1497,7 +1497,10 @@ func matchDestNorm(rule *PolicyRule, host, normHost string, sc *hostCatScratch) 
 		return false
 	}
 	// Category group check — host must be in ANY category within the group.
-	// O(1): the scan-scoped host→category fusion → group.catSet[result].
+	// Amortized O(1) per rule: the host→category fusion is resolved ONCE per
+	// scan (hostCatScratch) and each of its halves is itself indexed — the
+	// urlcat reverse index answers host→category in O(labels) map probes
+	// (urlcat.Store.LookupHost) and the group membership check is a set probe.
 	if catGroupSet && !categoryGroupMatchesHostScratch(rule, sc) {
 		return false
 	}
