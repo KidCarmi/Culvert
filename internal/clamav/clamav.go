@@ -189,18 +189,11 @@ func (c *Client) Scan(data []byte) (virusName string, isMalicious bool, err erro
 // self-sustaining collapse, every abandoned scan squatting a slot and pushing
 // live requests onto the fail-open queue-full path.
 func (c *Client) ScanContext(ctx context.Context, data []byte) (virusName string, isMalicious bool, err error) {
-	waitCtx := ctx
-	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
-		var cancelWait context.CancelFunc
-		waitCtx, cancelWait = context.WithTimeout(ctx, clamQueueWaitFallback)
-		defer cancelWait()
+	release, err := acquireSlot(ctx)
+	if err != nil {
+		return "", false, err
 	}
-	select {
-	case clamSem <- struct{}{}:
-	case <-waitCtx.Done():
-		return "", false, fmt.Errorf("%w (%d concurrent): %w", ErrQueueFull, clamMaxConcurrent, waitCtx.Err())
-	}
-	defer func() { <-clamSem }()
+	defer release()
 
 	// The caller's context may already be done (it was consumed queueing).
 	if err := ctx.Err(); err != nil {
@@ -220,16 +213,7 @@ func (c *Client) ScanContext(ctx context.Context, data []byte) (virusName string
 	stopWatch := c.watchCancel(ctx, conn)
 	defer stopWatch()
 
-	// A read/write that failed because WE gave up must say so. Without this the
-	// I/O error reads as a daemon fault, and the orchestrator would both take
-	// the fail-open engine-error branch and fire a scan_clam_error alert for
-	// every abandoned scan — attributing this node's saturation to a healthy
-	// daemon, in an alert storm precisely when it is busiest.
-	defer func() {
-		if err != nil && ctx.Err() != nil && !errors.Is(err, ctx.Err()) {
-			err = fmt.Errorf("%w: %w", err, ctx.Err())
-		}
-	}()
+	defer func() { err = abortCause(ctx, err) }()
 
 	// Send INSTREAM command (null-terminated).
 	if _, err := fmt.Fprintf(conn, "zINSTREAM\x00"); err != nil {
@@ -265,6 +249,41 @@ func (c *Client) ScanContext(ctx context.Context, data []byte) (virusName string
 		return "", false, fmt.Errorf("clamav: read response: %w", err)
 	}
 	return parseClamResponse(strings.TrimRight(string(resp), "\x00\n\r "))
+}
+
+// acquireSlot books one of the clamMaxConcurrent scan slots, waiting on the
+// CALLER's budget. A caller with no deadline of its own (the legacy Scan entry
+// point) gets clamQueueWaitFallback so it cannot block forever. The returned
+// func releases the slot and is always safe to defer.
+//
+// ErrQueueFull says which resource ran out, so the orchestrator can tell "this
+// node is at capacity" (add capacity) from "the daemon faulted" (fix the
+// daemon) — they need different responses and different postures.
+func acquireSlot(ctx context.Context) (release func(), err error) {
+	waitCtx := ctx
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancelWait context.CancelFunc
+		waitCtx, cancelWait = context.WithTimeout(ctx, clamQueueWaitFallback)
+		defer cancelWait()
+	}
+	select {
+	case clamSem <- struct{}{}:
+		return func() { <-clamSem }, nil
+	case <-waitCtx.Done():
+		return nil, fmt.Errorf("%w (%d concurrent): %w", ErrQueueFull, clamMaxConcurrent, waitCtx.Err())
+	}
+}
+
+// abortCause annotates an I/O error that failed because WE gave up. Without it
+// the error reads as a daemon fault, and the orchestrator would take the
+// fail-open engine-error branch AND fire a scan_clam_error alert for every
+// abandoned scan — attributing this node's saturation to a healthy daemon, in
+// an alert storm precisely when it is busiest.
+func abortCause(ctx context.Context, err error) error {
+	if err == nil || ctx.Err() == nil || errors.Is(err, ctx.Err()) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", err, ctx.Err())
 }
 
 // effectiveDeadline returns the earlier of the caller's deadline and the

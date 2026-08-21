@@ -71,7 +71,7 @@ func newGatedClam() *gatedClam { return &gatedClam{release: make(chan struct{})}
 
 func (g *gatedClam) Ping() error { return nil }
 
-func (g *gatedClam) verdict() (string, bool, error) {
+func (g *gatedClam) verdict() (name string, found bool, err error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.name, g.found, g.err
@@ -83,7 +83,7 @@ func (g *gatedClam) setVerdict(name string, found bool, err error) {
 	g.name, g.found, g.err = name, found, err
 }
 
-func (g *gatedClam) Scan([]byte) (string, bool, error) {
+func (g *gatedClam) Scan([]byte) (name string, found bool, err error) {
 	g.calls.Add(1)
 	defer g.finished.Add(1)
 	<-g.release
@@ -305,7 +305,7 @@ func TestChaos_AbandonedScansAreCountedAndUnwind(t *testing.T) {
 type saturatedClam struct{ calls atomic.Int64 }
 
 func (s *saturatedClam) Ping() error { return nil }
-func (s *saturatedClam) Scan([]byte) (string, bool, error) {
+func (s *saturatedClam) Scan([]byte) (name string, found bool, err error) {
 	s.calls.Add(1)
 	return "", false, clamav.ErrQueueFull
 }
@@ -486,10 +486,10 @@ func TestChaos_TimeoutCooldownStillReplacesWeakerEntries(t *testing.T) {
 type ctxGatedClam struct{ calls atomic.Int64 }
 
 func (c *ctxGatedClam) Ping() error { return nil }
-func (c *ctxGatedClam) Scan([]byte) (string, bool, error) {
+func (c *ctxGatedClam) Scan([]byte) (name string, found bool, err error) {
 	return "", false, errors.New("clamav: no context")
 }
-func (c *ctxGatedClam) ScanContext(ctx context.Context, _ []byte) (string, bool, error) {
+func (c *ctxGatedClam) ScanContext(ctx context.Context, _ []byte) (name string, found bool, err error) {
 	c.calls.Add(1)
 	<-ctx.Done()
 	return "", false, fmt.Errorf("clamav: scan aborted: %w", ctx.Err())
