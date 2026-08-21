@@ -209,40 +209,78 @@ func policyLearnApplyDesiredLocked(desired policyLearnSettings) {
 // stamps, so they mismatch v2 values and go stale exactly once at upgrade —
 // never reinterpreted (the epoch-scheme upgrade precedent).
 // policyContentMemo caches the content hash keyed by (policy generation,
-// default action, category-group revision): every RULEBASE mutation bumps the
-// generation, but the DEFAULT ACTION is part of the hashed content and its
-// setter flips an atomic WITHOUT advancing the generation (Codex round 14 — a
-// generation-only key served the stale hash through a deny→allow→deny flip,
-// so the per-observation churn check never latched the transient allow
-// window), and CATEGORY-GROUP membership is resolved at evaluation time from
-// its own store, whose edits advance neither the generation nor the category
-// epoch (Codex round 17 — tightening a group a rule references changed
-// enforcement while every pinned identity still matched). All key components
-// are cheap reads, so the learning drain's PER-OBSERVATION check (Codex round
-// 13) costs three loads + compares; the hash recomputes at most once per
-// policy or group change. A same-key content change is impossible in-process
-// (every rule mutator bumps the generation, every group mutator bumps the
-// group revision, the default action is in the key); the memo is
-// process-local, so counter resets across restarts cannot alias into it.
+// category-group revision, default-action revision): every RULEBASE mutation
+// bumps the generation, but the DEFAULT ACTION setter flips an atomic WITHOUT
+// advancing the generation (Codex round 14 — a generation-only key served the
+// stale hash through a deny→allow→deny flip, so the per-observation churn
+// check never latched the transient allow window), and CATEGORY-GROUP
+// membership is resolved at evaluation time from its own store, whose edits
+// advance neither the generation nor the category epoch (Codex round 17 —
+// tightening a group a rule references changed enforcement while every pinned
+// identity still matched). All key components are cheap atomic loads, so the
+// learning drain's PER-OBSERVATION check (Codex round 13) costs three loads +
+// compares; the hash recomputes at most once per policy or group change. A
+// same-key content change is impossible in-process (every rule mutator bumps
+// the generation, every group mutator bumps the group revision, every
+// default-action set bumps its flip counter); the memo is process-local, so
+// counter resets across restarts cannot alias into it.
+// policyContentKey is the memo key: three MONOTONIC process-local change
+// counters. Monotonicity is load-bearing (Codex round 18): the default action
+// itself is a two-value atomic, so comparing its VALUE before and after a
+// hash computation cannot prove it held throughout (an allow→deny→allow round
+// trip lands back on the same value — ABA); its flip COUNTER moves on every
+// set, so key equality across a bracket proves no component changed inside it.
+type policyContentKey struct {
+	gen         int64
+	catgroupRev uint64
+	defaultRev  uint64
+}
+
+func policyContentKeyNow() policyContentKey {
+	gen, _ := policyStore.policyVersion()
+	return policyContentKey{
+		gen:         gen,
+		catgroupRev: globalCategoryGroups.Revision(),
+		defaultRev:  defaultPolicyActionRev.Load(),
+	}
+}
+
 type policyContentMemoEntry struct {
-	gen           int64
-	catgroupRev   uint64
-	defaultAction string
-	hash          string
+	key  policyContentKey
+	hash string
 }
 
 var policyContentMemo atomic.Pointer[policyContentMemoEntry]
 
 func policyContentIdentityCached() string {
-	gen, _ := policyStore.policyVersion()
-	da := defaultPolicyAction()
-	cgRev := globalCategoryGroups.Revision()
-	if m := policyContentMemo.Load(); m != nil && m.gen == gen && m.defaultAction == da && m.catgroupRev == cgRev {
-		return m.hash
+	return policyContentMemoized(policyContentKeyNow, policyContentIdentity)
+}
+
+// policyContentMemoized is the seqlock-style memo core, seam-injected for
+// deterministic interleaving tests. The key is REVALIDATED after hashing
+// (Codex round 18): hash() re-reads live state, so a key component moving
+// mid-computation used to store the NEW content's hash under the OLD key — a
+// poisoned entry that then mislabeled every later read matching the old key
+// (e.g. a transient default-allow window reported under the deny hash, so
+// its churn never latched) until the generation happened to move. A hash is
+// now published/returned only when the key is IDENTICAL on both sides of the
+// computation; otherwise it is discarded and the read retries. The loop can
+// only iterate while an admin-rate counter is moving, and each retry is one
+// hash over the policy config — termination is bounded by config-change rate,
+// not request rate.
+func policyContentMemoized(keyNow func() policyContentKey, hash func() string) string {
+	for {
+		k := keyNow()
+		if m := policyContentMemo.Load(); m != nil && m.key == k {
+			return m.hash
+		}
+		h := hash()
+		if keyNow() != k {
+			continue // moved mid-hash: h may not describe the state k names
+		}
+		policyContentMemo.Store(&policyContentMemoEntry{key: k, hash: h})
+		return h
 	}
-	h := policyContentIdentity()
-	policyContentMemo.Store(&policyContentMemoEntry{gen: gen, catgroupRev: cgRev, defaultAction: da, hash: h})
-	return h
 }
 
 // catGroupContentDTO is the canonical resolution-relevant projection of a
@@ -313,7 +351,11 @@ func policyLearnStaleInputs(eng *policylearn.Engine) policylearn.StaleInputs {
 		GuardrailsHash:           eng.GuardrailsHash(),
 		SubjectKeyID:             eng.SubjectKeyID(),
 		RecommendationPolicyHash: eng.RecommendationPolicyHash(),
-		PolicyContentHash:        policyContentIdentity(),
+		// Cached path deliberately: the memo core brackets the hash with a
+		// key revalidation, so the value always describes ONE consistent
+		// config state — the raw identity read here could interleave with a
+		// config edit and hash a chimera matching no state that ever ran.
+		PolicyContentHash: policyContentIdentityCached(),
 	}
 }
 

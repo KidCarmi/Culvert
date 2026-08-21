@@ -19,12 +19,20 @@ import (
 // Stored as 1 (allow) or 0 (deny) via atomic int32 to avoid data races.
 var defaultPolicyActionAllow int32 // 0 = deny (default)
 
+// defaultPolicyActionRev counts setDefaultPolicyAction calls. The action
+// itself is a TWO-VALUE atomic, so "same value before and after" cannot prove
+// it held throughout an interval (ABA); this monotonic counter can — any flip
+// inside a bracketed read moves it. Process-local change signal only (memo
+// keys), never an identity.
+var defaultPolicyActionRev atomic.Uint64
+
 func setDefaultPolicyAction(action string) {
 	if action == "allow" {
 		atomic.StoreInt32(&defaultPolicyActionAllow, 1)
 	} else {
 		atomic.StoreInt32(&defaultPolicyActionAllow, 0)
 	}
+	defaultPolicyActionRev.Add(1)
 }
 
 // defaultPolicyAction returns the current default action string ("allow"/"deny").

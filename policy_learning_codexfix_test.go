@@ -471,6 +471,64 @@ func TestPolicyContentIdentity_IgnoresProvenanceStamps(t *testing.T) {
 	}
 }
 
+// TestPolicyContentMemoized_MidHashFlipNeverPoisonsMemo (Codex round 18):
+// policyContentIdentity re-reads live state, so a key component moving
+// between the memo-key read and the hash completion used to store the NEW
+// content's hash under the OLD key. The poisoned entry then answered every
+// later read matching the old key — e.g. a transient default-allow window
+// served the deny hash, so observations stamped during it claimed the
+// baseline identity and the churn check never latched. The seam-injected
+// core deterministically interleaves the flip mid-hash: the post-flip hash
+// must never publish under the pre-flip key.
+func TestPolicyContentMemoized_MidHashFlipNeverPoisonsMemo(t *testing.T) {
+	prev := policyContentMemo.Load()
+	policyContentMemo.Store(nil)
+	t.Cleanup(func() { policyContentMemo.Store(prev) })
+
+	k1 := policyContentKey{gen: 7, catgroupRev: 3, defaultRev: 1}
+	k2 := policyContentKey{gen: 7, catgroupRev: 3, defaultRev: 2}
+	keyCalls := 0
+	keyNow := func() policyContentKey {
+		keyCalls++
+		if keyCalls == 1 {
+			return k1 // the read that opens the bracket
+		}
+		return k2 // the admin flip lands before the hash completes
+	}
+	hash := func() string { return "H2" } // hash() observes the post-flip state
+
+	if got := policyContentMemoized(keyNow, hash); got != "H2" {
+		t.Fatalf("memoized = %q, want the post-flip hash H2", got)
+	}
+	m := policyContentMemo.Load()
+	if m == nil {
+		t.Fatal("no memo entry published")
+	}
+	if m.key == k1 {
+		t.Fatal("post-flip hash stored under the pre-flip key — poisoned memo entry")
+	}
+	if m.key != k2 || m.hash != "H2" {
+		t.Fatalf("memo = {%+v %q}, want a consistent {k2, H2}", m.key, m.hash)
+	}
+}
+
+// TestSetDefaultPolicyAction_RoundTripMovesRevision (Codex round 18): the
+// default action is a two-value atomic, so value equality across a bracket
+// cannot prove it held throughout (allow→deny→allow lands back on the same
+// value — ABA). The memo key therefore carries the flip COUNTER, which every
+// set must advance so a round trip is visible to the revalidation.
+func TestSetDefaultPolicyAction_RoundTripMovesRevision(t *testing.T) {
+	prev := defaultPolicyAction()
+	t.Cleanup(func() { setDefaultPolicyAction(prev) })
+
+	before := defaultPolicyActionRev.Load()
+	setDefaultPolicyAction("allow")
+	setDefaultPolicyAction("deny")
+	if moved := defaultPolicyActionRev.Load() - before; moved < 2 {
+		t.Fatalf("round trip advanced the flip counter by %d, want ≥2 — ABA invisible to the memo key", moved)
+	}
+}
+
 // TestPolicyContentIdentity_CategoryGroupMembership (Codex round 17): a rule
 // with DestCategoryGroup resolves the group's CURRENT membership at
 // evaluation time, so group edits change enforcement without touching the
