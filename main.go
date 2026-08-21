@@ -216,9 +216,10 @@ func main() {
 	initBackgroundServices(s)
 	initSOCKS5(s)
 	initPersistentAdminState(s)
-	initPolicyLearning(s) // ADR-0025 M1: disabled-by-default learning skeleton (constant-off; no effect)
-	initMCPRuntime(s)     // PR-5: disabled-by-default MCP listener runtime (no SWG effect when off)
-	initMCPRollout(s)     // PR-11: disabled-by-default rollout composition (Gateway/Management isolated)
+	initPolicyLearning(s)  // ADR-0025 M1: disabled-by-default learning skeleton (constant-off; no effect)
+	initMCPRuntime(s)      // PR-5: disabled-by-default MCP listener runtime (no SWG effect when off)
+	initMCPRollout(s)      // PR-11: disabled-by-default rollout composition (Gateway/Management isolated)
+	initMCPDistribution(s) // PR-12: disabled-by-default DP applier composition (after rollout state is restored)
 	loadReleaseManagement(resolveReleaseStartupConfig())
 	startAdminUI(s)
 
