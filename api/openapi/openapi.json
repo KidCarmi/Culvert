@@ -743,6 +743,10 @@
         "additionalProperties": true,
         "description": "Cluster node role and enrollment status (fields vary by role).",
         "properties": {
+          "grpcCompressionEnabled": {
+            "description": "Resolved CULVERT_CLUSTER_GRPC_COMPRESSION value for this node (startup-scoped, read-only here).",
+            "type": "boolean"
+          },
           "nodeID": {
             "type": "string"
           },

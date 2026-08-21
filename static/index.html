@@ -4435,6 +4435,10 @@ Firefox (all platforms):
           <div class="card"><div class="card-label">Enrolled Nodes</div><div class="card-value" id="cluster-enrolled-count">0</div></div>
           <div class="card" id="cluster-ha-card" style="display:none"><div class="card-label">HA Status</div><div class="card-value" id="cluster-ha-status">-</div></div>
         </div>
+        <p style="color:var(--muted);font-size:.7rem;margin:10px 0 0 0">
+          CP&harr;DP gRPC compression: <strong id="cluster-grpc-compression">-</strong>
+          <span style="margin-left:4px">&mdash; startup-scoped (<code>CULVERT_CLUSTER_GRPC_COMPRESSION</code>), status-only here. Enable fleet-wide only after every Control Plane runs a build that supports it (CP-first upgrade).</span>
+        </p>
       </div>
 
       <!-- Enable Control Plane (shown only in standalone mode) -->
@@ -17043,6 +17047,7 @@ async function loadCluster() {
     document.getElementById('cluster-role').textContent = r.role || 'standalone';
     document.getElementById('cluster-node-id').textContent = r.nodeID || '-';
     document.getElementById('cluster-grpc').textContent = r.grpcAddr || '-';
+    document.getElementById('cluster-grpc-compression').textContent = r.grpcCompressionEnabled ? 'Enabled' : 'Disabled';
 
     // HA status card
     const ha = r.ha || {};
