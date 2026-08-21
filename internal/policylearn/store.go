@@ -99,6 +99,7 @@ func (e *Engine) load() error {
 				s.SubjectKeyID = e.subjKey.keyID // re-pin so the flag fires once per change
 			}
 			e.aggSession = s
+			e.aggGen = e.windowGen.Add(1) // resumed window: post-restart events attribute here
 			e.dirty = true
 		}
 	}

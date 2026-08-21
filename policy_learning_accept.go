@@ -134,13 +134,27 @@ func plAcceptRecommendation(eng *policylearn.Engine, recID string, ifVersion int
 			}
 			// M5B.1 durability gate: the latch may only follow a target that is
 			// durably recoverable — already committed to running (the canonical
-			// commit path), or present in the persisted draft document. A rule
-			// that reached candidate MEMORY under a failed best-effort persist
-			// is re-persisted durably first; if that write fails too, the
-			// intent stays pending (retryable), never Accepted.
+			// commit path), or a PROVEN member of the locked candidate persisted
+			// under the same lock (ensureDurableTarget, Codex fix). If the
+			// target vanished between the unlocked lookup above and the locked
+			// proof (concurrent revert/delete), the mutation no longer holds:
+			// re-check running (a commit moves the rule there BEFORE clearing
+			// the candidate, so this closes the commit window) and otherwise
+			// refuse with a version conflict — Accepted is NEVER latched
+			// without the exact target existing in one of the two domains.
 			if policyStore.findByIDCopy(rec.TargetRuleID) == nil {
 				if err := policyDraft.ensureDurableTarget(rec.TargetRuleID); err != nil {
-					return plAcceptOutcome{}, err
+					if errors.Is(err, errDraftTargetMissing) &&
+						policyStore.findByIDCopy(rec.TargetRuleID) == nil {
+						return plAcceptOutcome{}, fmt.Errorf(
+							"target rule %s disappeared during acceptance (concurrent draft change): %w",
+							rec.TargetRuleID, errAcceptVersionConflict)
+					} else if errors.Is(err, errDraftTargetMissing) {
+						// Committed while accepting: the rule reached RUNNING
+						// through the canonical path — durable; fall through.
+					} else {
+						return plAcceptOutcome{}, err
+					}
 				}
 			}
 			fin, err := eng.FinalizeAccept(rec.ID, actor)

@@ -86,6 +86,8 @@ func (s *Session) clone() Session {
 // StartSession opens a new Learning session. Enforces the one-active-session
 // invariant and the read-only posture; persists before returning.
 func (e *Engine) StartSession(actor string) (Session, error) {
+	e.opMu.Lock()
+	defer e.opMu.Unlock()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.readOnly {
@@ -118,17 +120,25 @@ func (e *Engine) StartSession(actor string) (Session, error) {
 		Agg:             newAggregate(),
 		startedAtParsed: now,
 	}
+	// Transactional membership snapshot (Codex fix): pruneLocked filters the
+	// slice IN PLACE, so a failed persist must restore the pre-transition
+	// list — not just drop the appended session — or the pruned terminal
+	// record would be silently lost by a transition that reported failure.
+	prevSessions := append([]*Session(nil), e.sessions...)
 	e.sessions = append(e.sessions, s)
 	e.pruneLocked()
 	prevAggSession := e.aggSession
+	prevAggGen := e.aggGen
 	e.aggSession = s
+	e.aggGen = e.windowGen.Add(1) // open this session's acceptance window
 	e.pinTransportLocked()
 	e.learningActive.Store(true)
 	if err := e.saveLocked(); err != nil {
 		// Persist-before-return: a failed durable write must not leave a
 		// phantom active session that a restart would forget.
-		e.sessions = e.sessions[:len(e.sessions)-1]
+		e.sessions = prevSessions
 		e.aggSession = prevAggSession
+		e.aggGen = prevAggGen
 		e.learningActive.Store(false)
 		return Session{}, err
 	}
@@ -147,30 +157,59 @@ func (e *Engine) CancelSession(actor string) (Session, error) {
 }
 
 func (e *Engine) finishActive(actor, terminalState string) (Session, error) {
+	e.opMu.Lock()
+	defer e.opMu.Unlock()
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	if e.readOnly {
+		e.mu.Unlock()
 		return Session{}, ErrStoreReadOnly
 	}
 	now := e.cfg.Now()
 	e.maybeExpireLocked(now)
 	s := e.activeLocked()
 	if s == nil {
+		e.mu.Unlock()
 		return Session{}, ErrNoActiveSession
 	}
+	// Close the acceptance window BEFORE the transition (Codex fix): the gate
+	// stops new observations, the generation bump makes any gate-racer
+	// unattributable (counted, never silently aggregated elsewhere), and
+	// events already ACCEPTED under this window still carry its generation —
+	// so the drain barrier below flushes exactly this session's backlog into
+	// its aggregate before it becomes terminal. finishing suppresses lazy
+	// expiry while e.mu is released for the barrier (opMu already serializes
+	// the other lifecycle ops).
+	e.finishing = true
+	e.learningActive.Store(false)
+	e.windowGen.Add(1)
+	e.mu.Unlock()
+
+	e.drainBarrier() // every observation accepted under s's window is now aggregated into s
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.finishing = false
 	prevState, prevStopAt, prevStopBy := s.State, s.StoppedAt, s.StoppedBy
+	// Transactional membership snapshot (Codex fix): see StartSession.
+	prevSessions := append([]*Session(nil), e.sessions...)
 	s.State = terminalState
 	s.StoppedAt = rfc3339(now)
 	s.StoppedBy = actor
 	e.checkEpochLocked(s, now) // final churn check for the window
 	e.syncTransportLocked()    // fold the session-window transport deltas
 	e.pruneLocked()
-	e.learningActive.Store(false)
 	if err := e.saveLocked(); err != nil {
 		s.State, s.StoppedAt, s.StoppedBy = prevState, prevStopAt, prevStopBy
+		e.sessions = prevSessions
+		// Re-open the window under the CURRENT generation: learning resumes
+		// and new observations attribute to s again.
+		e.aggGen = e.windowGen.Load()
 		e.learningActive.Store(true)
 		return Session{}, err
 	}
+	// Terminal immutability (Codex fix): nothing may attribute to this
+	// aggregate again — the next StartSession opens a fresh window.
+	e.aggSession = nil
 	return s.clone(), nil
 }
 
@@ -214,6 +253,9 @@ func (e *Engine) activeLocked() *Session {
 // mutating operation (or Close). Never called with e.readOnly writes pending —
 // on a read-only engine the flip stays in memory only, by design.
 func (e *Engine) maybeExpireLocked(now time.Time) {
+	if e.finishing {
+		return // a finish owns the transition; its barrier window must not race a lazy expiry
+	}
 	s := e.activeLocked()
 	if s == nil {
 		return
@@ -227,7 +269,7 @@ func (e *Engine) maybeExpireLocked(now time.Time) {
 			s.StoppedAt = rfc3339(now)
 			s.StoppedBy = "system:invalid-start-stamp"
 			e.dirty = true
-			e.learningActive.Store(false)
+			e.closeWindowLocked()
 			e.pruneLocked()
 			return
 		}
@@ -238,9 +280,22 @@ func (e *Engine) maybeExpireLocked(now time.Time) {
 		s.StoppedAt = rfc3339(now)
 		s.StoppedBy = "system:max-duration"
 		e.dirty = true
-		e.learningActive.Store(false)
+		e.closeWindowLocked()
 		e.pruneLocked()
 	}
+}
+
+// closeWindowLocked closes the acceptance window at a lazy-expiry transition:
+// gate off, final delta fold, window rotated, aggregation target cleared —
+// the expired session's aggregate becomes immutable and any still-queued
+// events of its window drain as counted drops (an accounted loss at a
+// max-duration overrun boundary, never a silent aggregation into a terminal
+// or later session). Caller holds e.mu.
+func (e *Engine) closeWindowLocked() {
+	e.learningActive.Store(false)
+	e.syncTransportLocked()
+	e.windowGen.Add(1)
+	e.aggSession = nil
 }
 
 // AggregateOverview is the bounded factual summary of one session's

@@ -280,16 +280,40 @@ func (c *policyDraftCoordinator) durableTargetPresent(ruleID string) bool {
 	return false
 }
 
-// ensureDurableTarget guarantees ruleID is durably recoverable: if the
-// persisted document already carries it, done; otherwise (an earlier
-// best-effort persist failed after the rule reached candidate memory) the
-// candidate is re-persisted durably and the failure, if any, is returned.
+// errDraftTargetMissing: the target rule is not a member of the ACTIVE
+// candidate at the locked moment of the durability proof — a concurrent
+// revert/delete/commit removed it after an earlier unlocked lookup saw it.
+var errDraftTargetMissing = errors.New("draft target rule is no longer in the candidate")
+
+// ensureDurableTarget guarantees ruleID is durably recoverable from the draft
+// domain, with MEMBERSHIP PROVEN UNDER THE SAME LOCK AS THE PERSIST (Codex
+// fix): between an unlocked lookup and this call a concurrent draft
+// revert/delete/commit can remove the target, and the old shape re-persisted
+// whatever the candidate then held — even an inactive draft — and reported
+// durable. Now: the target must be a member of the locked ACTIVE candidate or
+// this returns errDraftTargetMissing (the caller decides running-store or
+// refuse semantics); membership proven, the candidate is persisted under the
+// same critical section. In-memory mode (no path) the locked candidate itself
+// is the durable domain.
 func (c *policyDraftCoordinator) ensureDurableTarget(ruleID string) error {
-	if c.durableTargetPresent(ruleID) {
-		return nil
-	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	member := false
+	if c.state.Active {
+		rules := c.cand.List()
+		for i := range rules { // index-based: PolicyRule is a large struct (rangeValCopy)
+			if rules[i].ID == ruleID {
+				member = true
+				break
+			}
+		}
+	}
+	if !member {
+		return errDraftTargetMissing
+	}
+	if c.path == "" {
+		return nil // in-memory mode: locked membership is the domain
+	}
 	if err := c.persistLocked(); err != nil {
 		return fmt.Errorf("%v: %w", err, errDraftPersistFailed)
 	}

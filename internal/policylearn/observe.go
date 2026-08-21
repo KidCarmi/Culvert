@@ -43,6 +43,12 @@ const (
 // AuthSource "unauth"/"exempt" is the explicit unauthenticated marker and must
 // never be folded into group evidence (Groups is nil there by construction).
 type Observation struct {
+	// gen is the acceptance-window generation stamped at enqueue (Codex fix:
+	// consumption attributes an event ONLY to the session whose window
+	// accepted it — never to a later session). Engine-internal; never
+	// serialized.
+	gen uint64
+
 	At         int64    // unix seconds; stamped by the engine at accept when zero
 	Subject    string   // resolved identity; "" = unauthenticated
 	AuthSource string   // verbatim provenance ("local"/"exempt"/"unauth"/IdP source)
@@ -59,7 +65,7 @@ type Observation struct {
 // future readiness computations must be unable to lie about transport loss).
 type ObservationStats struct {
 	Accepted       int64 // enqueued
-	Dropped        int64 // queue full — event discarded, request unaffected
+	Dropped        int64 // whole observation lost: queue full at enqueue, transport closed, or no attributable session window at consume (closed/rotated window) — always counted, never silent
 	Rejected       int64 // invalid (empty Host) — discarded
 	ConsumerPanics int64 // sink panicked — event lost, drain continued
 	Delivered      int64 // handed to the sink (or discarded clean when no sink)
@@ -73,9 +79,18 @@ type ObservationStats struct {
 	GroupsTruncated int64
 }
 
+// queuedItem is one transport-channel element: either an observation or a
+// drain-barrier marker (barrier non-nil). FIFO through the SAME channel is
+// what makes the barrier a proof: when the marker is consumed, every
+// observation enqueued before it has been consumed too.
+type queuedItem struct {
+	o       Observation
+	barrier chan struct{}
+}
+
 // transport is the engine-owned queue + single drain goroutine.
 type transport struct {
-	ch       chan Observation
+	ch       chan queuedItem
 	stop     chan struct{}
 	done     chan struct{}
 	stopOnce sync.Once
@@ -107,6 +122,13 @@ func (e *Engine) Observe(o Observation) {
 		return
 	}
 	t := e.tr
+	if e.closed.Load() {
+		// The drain has exited (or is exiting): an enqueue could no longer be
+		// consumed, so refuse it HERE and count the loss — a producer must
+		// never enqueue successfully into an abandoned channel (Codex fix).
+		t.dropped.Add(1)
+		return
+	}
 	if o.Host == "" {
 		t.rejected.Add(1)
 		return
@@ -127,11 +149,36 @@ func (e *Engine) Observe(o Observation) {
 	if o.At == 0 {
 		o.At = e.cfg.Now().Unix()
 	}
+	// Stamp the CURRENT acceptance window: the consumer attributes the event
+	// only while this window's session is still the aggregation target.
+	o.gen = e.windowGen.Load()
 	select {
-	case t.ch <- o:
+	case t.ch <- queuedItem{o: o}:
 		t.accepted.Add(1)
 	default:
 		t.dropped.Add(1) // queue full: drop + account, never block the request
+	}
+}
+
+// drainBarrier blocks until every observation enqueued BEFORE the call has
+// been consumed: it sends a marker through the same FIFO channel and waits
+// for the drain to reach it. The send may block when the queue is full (the
+// admin plane is allowed to wait; the drain is live) and both waits abandon
+// cleanly if the transport shuts down concurrently — Close's final sweep
+// consumes whatever remains.
+func (e *Engine) drainBarrier() {
+	t := e.tr
+	if t == nil {
+		return
+	}
+	marker := make(chan struct{})
+	select {
+	case t.ch <- queuedItem{barrier: marker}:
+		select {
+		case <-marker:
+		case <-t.done:
+		}
+	case <-t.done:
 	}
 }
 
@@ -145,7 +192,7 @@ func (e *Engine) ObservationStats() ObservationStats {
 // owns this goroutine.
 func (e *Engine) startTransport() {
 	t := &transport{
-		ch:   make(chan Observation, observationQueueCap),
+		ch:   make(chan queuedItem, observationQueueCap),
 		stop: make(chan struct{}),
 		done: make(chan struct{}),
 	}
@@ -160,13 +207,21 @@ func (e *Engine) drainLoop(t *transport) {
 	defer close(t.done)
 	for {
 		select {
-		case o := <-t.ch:
-			e.consumeGuarded(t, o)
+		case q := <-t.ch:
+			if q.barrier != nil {
+				close(q.barrier)
+				continue
+			}
+			e.consumeGuarded(t, q.o)
 		case <-t.stop:
 			for {
 				select {
-				case o := <-t.ch:
-					e.consumeGuarded(t, o)
+				case q := <-t.ch:
+					if q.barrier != nil {
+						close(q.barrier)
+						continue
+					}
+					e.consumeGuarded(t, q.o)
 				default:
 					return
 				}
@@ -186,13 +241,21 @@ func (e *Engine) consumeGuarded(t *transport, o Observation) {
 			t.panics.Add(1)
 		}
 	}()
+	attributed := false
 	func() {
 		e.mu.Lock()
 		defer e.mu.Unlock()
 		sess := e.aggSession
-		if sess == nil {
-			return // no attributable session (cannot happen for accepted events; defensive)
+		if sess == nil || o.gen != e.aggGen {
+			// Accepted under a window that has since CLOSED (session finished,
+			// expired, or rotated before this event drained). A terminal
+			// aggregate is immutable and a later session must never consume
+			// another window's events (Codex fix) — count the whole-event loss
+			// and discard.
+			t.dropped.Add(1)
+			return
 		}
+		attributed = true
 		e.aggregateLocked(sess, &o)
 		e.sinceEpoch++
 		if e.sinceEpoch >= epochCheckEvery {
@@ -210,6 +273,9 @@ func (e *Engine) consumeGuarded(t *transport, o Observation) {
 			e.dirty = true
 		}
 	}()
+	if !attributed {
+		return
+	}
 	if s := e.cfg.Sink; s != nil {
 		s(o)
 	}

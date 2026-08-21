@@ -142,8 +142,23 @@ type Engine struct {
 	readOnly bool       // ErrSchemaTooNew posture: never write
 	dirty    bool       // lazy-expiry flipped state in memory; persisted on next mutation/Close
 
+	// opMu serializes the LIFECYCLE operations (Start/Stop/Cancel/Close) so a
+	// finish can release e.mu for its drain barrier without a concurrent
+	// lifecycle op interleaving. Never taken by Observe or the drain.
+	opMu sync.Mutex
+
 	learningActive atomic.Bool // M2: lock-free Observe gate, maintained on every state change
+	closed         atomic.Bool // transport shut down: Observe refuses + counts instead of enqueueing into an abandoned channel
 	tr             *transport  // M2: bounded observation queue + single drain
+
+	// Acceptance-window generation (Codex fix): windowGen is stamped onto every
+	// accepted observation; aggGen (under mu) is the generation of the CURRENT
+	// aggregation target. Consumption requires equality, so a completed
+	// session's aggregate is immutable and a later session can never consume
+	// events accepted under an earlier window.
+	windowGen atomic.Uint64
+	aggGen    uint64 // under mu
+	finishing bool   // under mu: a finish holds the lifecycle between window-close and persist; lazy expiry must not race it
 
 	// M3 aggregation state (all mutated under mu; drain-owned cadence counters
 	// are also only touched under mu inside consumeGuarded).
@@ -218,11 +233,32 @@ func (e *Engine) ReadOnly() bool {
 // deterministic shutdown), then flushes any lazily-flipped session state. Safe
 // to call more than once and on a read-only engine.
 func (e *Engine) Close() error {
+	e.opMu.Lock()
+	defer e.opMu.Unlock()
 	if t := e.tr; t != nil {
+		// Refuse (and count) producers BEFORE the drain exits, then sweep the
+		// channel once the drain is gone: a producer that raced past the
+		// closed flag may have enqueued after the drain's final empty check,
+		// and nothing may successfully enqueue into an abandoned channel
+		// (Codex fix). Post-stop the channel has exactly one reader: us.
+		e.closed.Store(true)
 		t.stopOnce.Do(func() {
 			close(t.stop)
 			<-t.done
 		})
+	sweep:
+		for {
+			select {
+			case q := <-t.ch:
+				if q.barrier != nil {
+					close(q.barrier)
+					continue
+				}
+				e.consumeGuarded(t, q.o)
+			default:
+				break sweep
+			}
+		}
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
