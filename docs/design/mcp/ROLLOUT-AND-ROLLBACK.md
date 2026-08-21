@@ -252,9 +252,12 @@ Per the shared PR-0 editorial correction (see [BLUEPRINT.md](BLUEPRINT.md) §23 
 [IMPLEMENTATION-SLICES.md](IMPLEMENTATION-SLICES.md)): the rollout modes defined in this document map onto
 **PR-11 — Shadow / Canary** (modes, scope controls, dashboards, and rollout guardrails), which is followed
 by a **separate Production Qualification gate** (full evidence pack per §6 + Joint Go/No-Go Board
-sign-off). There is **no PR-12**. The source DOCX's separate connectivity slice is folded across PR-5
-(runtime/listener) and PR-10 (CP/DP); any reinstatement of a distinct connectivity or PR-12 slice is a
-tracked open decision in [OPEN-DECISIONS.md](OPEN-DECISIONS.md), not part of this rollout model.
+sign-off). There is **no PR-12** in this package's slice sequence. The source DOCX's separate connectivity
+slice is folded across PR-5 (runtime/listener) and PR-10 (CP/DP); any reinstatement of a distinct
+connectivity or PR-12 slice is a tracked open decision in [OPEN-DECISIONS.md](OPEN-DECISIONS.md), not part
+of this rollout model. (This is unrelated to the later, already-shipped fix that root `CLAUDE.md` and
+[`docs/operator/mcp-rollout-durable-state.md`](../../operator/mcp-rollout-durable-state.md) separately
+label "PR-12" — see [IMPLEMENTATION-SLICES.md](IMPLEMENTATION-SLICES.md) for the disambiguation.)
 
 Sequence, for reference: PR-0 (this design baseline) → PR-1 Protocol kernel → PR-2 Registry & catalog →
 PR-3 Identity principal → PR-4 Credential broker → PR-5 Observe runtime → PR-6 Policy engine →
