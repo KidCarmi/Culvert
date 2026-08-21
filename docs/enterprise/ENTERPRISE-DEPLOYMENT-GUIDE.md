@@ -153,7 +153,7 @@ See **[IDENTITY-AND-ACCESS-DEPLOYMENT.md](IDENTITY-AND-ACCESS-DEPLOYMENT.md)**. 
 See **[TLS-INSPECTION-DEPLOYMENT.md](TLS-INSPECTION-DEPLOYMENT.md)**. Summary:
 1. Set `CULVERT_CA_PASSPHRASE` and `-ca-path /data/ca.bundle`; the first start generates an ECDSA P-256 root CA (encrypted at rest, PBKDF2-600k + AES-256-GCM).
 2. Download the CA: **Certificates → Download Root CA (.pem)** or `GET /api/ca-cert`. Distribute to endpoint trust stores (GPO/MDM/`update-ca-trust`).
-3. Configure inspection bypass for pinned/banking/mTLS hosts: **SSL Inspection Bypass** or per-rule `Bypass`.
+3. Configure inspection bypass for pinned/banking/mTLS hosts: **SSL Bypass** or per-rule `Bypass`.
 
 > **⛔ DEPLOYMENT BLOCKER — GAP-PKI-01/02/03 (bring-your-own CA).** If you import your internal-PKI CA (`POST /api/certs/upload`, `target=mitm`): it must be **ECDSA** (RSA rejected), it is **not persisted** (lost on restart), and **auto-rotation will overwrite it** with an auto-generated CA at the 30-day mark. For a durable imported CA today, pre-stage an EC PEM bundle at `-ca-path` on disk (needs host access) and monitor expiry externally. Evaluate carefully before committing to internal-PKI-signed inspection.
 

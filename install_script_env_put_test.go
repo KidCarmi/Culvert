@@ -10,11 +10,15 @@ package main
 // tracks the actual installer script instead of a copy that can drift.
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // extractShellFunction pulls a bash function's source (from "name() {" to the
@@ -126,5 +130,136 @@ func TestInstallScript_EnvPut_PreservesFileOnRealGrepFailure(t *testing.T) {
 
 	if !strings.Contains(content, "EXISTING_VAR=original_value") {
 		t.Errorf("a real grep failure while setting CULVERT_MAINT_GID lost the pre-existing EXISTING_VAR entry — the temp file must not be promoted over the original on a genuine error; .env content:\n%s", content)
+	}
+}
+
+// runEnvPutProcess runs a single, real, independent `bash` process that
+// sources the real env_put() body and calls it once. Used to build genuine
+// concurrent-process tests below (as opposed to the single-process,
+// same-shell shadowing technique used elsewhere in this file) — env_put's
+// concurrency safety is specifically about separate OS processes (two
+// overlapping install.sh runs), so the regression tests for it must use
+// real, separate processes racing on a real lock file, not a simulation.
+func runEnvPutProcess(t *testing.T, fn, envFile, varName, val string) error {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	script := fn + "\n" + `env_put "$1" "$2" "$3"`
+	cmd := exec.CommandContext(ctx, "bash", "-c", script, "env_put_concurrency_test", varName, val, envFile) // #nosec G204 -- fixed test script content, not external/user input
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("env_put %s=%s timed out (likely deadlocked): %s", varName, val, out)
+	}
+	if err != nil {
+		return fmt.Errorf("env_put %s=%s failed: %w: %s", varName, val, err, out)
+	}
+	return nil
+}
+
+// TestInstallScript_EnvPut_ConcurrentDistinctVars_NoCorruptionOrDeadlock
+// proves that many env_put calls, each setting a DIFFERENT var, racing as
+// real concurrent processes against the SAME .env file — e.g. install.sh's
+// wire_release_agent_for_compose (env_put CULVERT_MAINT_GID, env_put
+// CULVERT_RELEASE_PROXY_REPO) overlapping a second, concurrent installer
+// run touching other vars — neither deadlocks (env_put's internal locking
+// must not be reentrant-unsafe in a way that hangs a genuinely concurrent,
+// non-nested caller) nor corrupts the file (every var ends up present
+// exactly once, and pre-existing content survives).
+func TestInstallScript_EnvPut_ConcurrentDistinctVars_NoCorruptionOrDeadlock(t *testing.T) {
+	fn := extractShellFunction(t, "scripts/install.sh", "env_put")
+
+	dir := t.TempDir()
+	envFile := filepath.Join(dir, ".env")
+	if err := os.WriteFile(envFile, []byte("EXISTING=original\n"), 0o600); err != nil {
+		t.Fatalf("seed %s: %v", envFile, err)
+	}
+
+	const n = 8
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			errs <- runEnvPutProcess(t, fn, envFile, fmt.Sprintf("VAR%d", i), fmt.Sprintf("val%d", i))
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatalf("read %s: %v", envFile, err)
+	}
+	content := string(got)
+
+	if !strings.Contains(content, "EXISTING=original") {
+		t.Errorf("pre-existing EXISTING var lost to the concurrent env_put race; .env content:\n%s", content)
+	}
+	for i := 0; i < n; i++ {
+		want := fmt.Sprintf("VAR%d=val%d", i, i)
+		if !strings.Contains(content, want) {
+			t.Errorf("missing %q after %d concurrent env_put processes raced the same .env; .env content:\n%s", want, n, content)
+		}
+	}
+}
+
+// TestInstallScript_EnvPut_ConcurrentSameVar_NoLostUpdateOrDuplicate proves
+// the specific race flagged in review of the unique-temp-file fix alone
+// (PR #1130): two env_put calls as real concurrent processes both updating
+// the SAME var. Giving each call its own staging file stops the two writes
+// from colliding with EACH OTHER, but does not stop one call's `grep` (its
+// READ of the pre-update file) from racing the other's `mv`+append (its
+// WRITE) — so whichever `mv` lands last can still silently overwrite the
+// other's already-applied update, either resurrecting a stale duplicate
+// line or discarding the other's write outright (a lost-update race).
+// env_put now serializes its full read/modify/write sequence behind a
+// flock held on a dedicated lock file for the transaction's whole duration,
+// so this proves BOTH invariants hold under real concurrent execution:
+// no crash/deadlock, and — whichever of the two writers "wins" — exactly
+// ONE VARA= line survives, holding one of the two written values (never
+// both, never neither, never corrupted).
+func TestInstallScript_EnvPut_ConcurrentSameVar_NoLostUpdateOrDuplicate(t *testing.T) {
+	fn := extractShellFunction(t, "scripts/install.sh", "env_put")
+
+	dir := t.TempDir()
+	envFile := filepath.Join(dir, ".env")
+	if err := os.WriteFile(envFile, []byte("EXISTING=original\nVARA=oldvalue\n"), 0o600); err != nil {
+		t.Fatalf("seed %s: %v", envFile, err)
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	wg.Add(2)
+	go func() { defer wg.Done(); errs <- runEnvPutProcess(t, fn, envFile, "VARA", "raceval1") }()
+	go func() { defer wg.Done(); errs <- runEnvPutProcess(t, fn, envFile, "VARA", "raceval2") }()
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatalf("read %s: %v", envFile, err)
+	}
+	content := string(got)
+
+	if n := strings.Count(content, "VARA="); n != 1 {
+		t.Fatalf("env_put left %d VARA= lines in .env after two concurrent processes raced to update it, want "+
+			"exactly 1 — env_put's own doc comment promises \"set/replace VAR=VALUE in FILE\"; .env content:\n%s", n, content)
+	}
+	if !strings.Contains(content, "VARA=raceval1") && !strings.Contains(content, "VARA=raceval2") {
+		t.Errorf("the surviving VARA= line holds neither racing value (corrupted by the race); .env content:\n%s", content)
+	}
+	if !strings.Contains(content, "EXISTING=original") {
+		t.Errorf("pre-existing EXISTING var lost to the concurrent env_put race; .env content:\n%s", content)
 	}
 }

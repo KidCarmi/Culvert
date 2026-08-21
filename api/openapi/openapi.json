@@ -743,6 +743,10 @@
         "additionalProperties": true,
         "description": "Cluster node role and enrollment status (fields vary by role).",
         "properties": {
+          "grpcCompressionEnabled": {
+            "description": "Resolved CULVERT_CLUSTER_GRPC_COMPRESSION value for this node (startup-scoped, read-only here).",
+            "type": "boolean"
+          },
           "nodeID": {
             "type": "string"
           },
@@ -1348,11 +1352,29 @@
       "GeoIPStatus": {
         "additionalProperties": true,
         "properties": {
+          "dbAgeDays": {
+            "description": "Days since dbBuildDate; omitted when no database is loaded.",
+            "type": "integer"
+          },
+          "dbBuildDate": {
+            "description": "MaxMind build timestamp embedded in the loaded .mmdb; omitted when no database is loaded.",
+            "format": "date-time",
+            "type": "string"
+          },
           "dbPath": {
             "type": "string"
           },
           "enabled": {
             "type": "boolean"
+          },
+          "lastError": {
+            "description": "Most recent database-load failure, if any (e.g. bad path, corrupt/expired .mmdb). Present only when the last load attempt failed; destCountry policy rules do not match while this is set.",
+            "type": "string"
+          },
+          "lastErrorAt": {
+            "description": "When lastError was recorded (RFC 3339). Present only alongside lastError.",
+            "format": "date-time",
+            "type": "string"
           }
         },
         "required": [
@@ -1464,6 +1486,9 @@
             "nullable": true,
             "type": "array"
           },
+          "ldap": {
+            "$ref": "#/components/schemas/LDAPProfileConfigInput"
+          },
           "name": {
             "type": "string"
           },
@@ -1483,7 +1508,8 @@
           "type": {
             "enum": [
               "oidc",
-              "saml"
+              "saml",
+              "ldap"
             ],
             "type": "string"
           }
@@ -1491,6 +1517,173 @@
         "required": [
           "name",
           "type"
+        ],
+        "type": "object"
+      },
+      "IdPTestReport": {
+        "additionalProperties": false,
+        "properties": {
+          "identity": {
+            "additionalProperties": false,
+            "nullable": true,
+            "properties": {
+              "email": {
+                "type": "string"
+              },
+              "groupCount": {
+                "type": "integer"
+              },
+              "groups": {
+                "description": "Bounded sample of resolved groups.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "name": {
+                "type": "string"
+              },
+              "sub": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "sub",
+              "groupCount"
+            ],
+            "type": "object"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "steps": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "action": {
+                  "description": "Actionable operator hint for a failed stage.",
+                  "type": "string"
+                },
+                "detail": {
+                  "type": "string"
+                },
+                "durationMs": {
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "error": {
+                  "description": "Sanitized, length-bounded server error text.",
+                  "type": "string"
+                },
+                "label": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "ok": {
+                  "type": "boolean"
+                },
+                "skipped": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "name",
+                "label",
+                "ok"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "ok",
+          "steps"
+        ],
+        "type": "object"
+      },
+      "IdPTestRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "$ref": "#/components/schemas/IdPProfileInput"
+          },
+          "testPassword": {
+            "description": "Transient test credential — never persisted, logged, or audited.",
+            "type": "string"
+          },
+          "testUsername": {
+            "description": "Optional directory login to run the full identity test.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "profile"
+        ],
+        "type": "object"
+      },
+      "LDAPProfileConfigInput": {
+        "additionalProperties": false,
+        "description": "LDAP/Active Directory profile settings (ADR-0025). bindPassword is a\nWRITE-ONLY input: never returned by reads, preserved when omitted on\nupdate, cleared only when present and empty. Read responses carry the\nderived bindCredentialConfigured flag instead.\n",
+        "nullable": true,
+        "properties": {
+          "baseDn": {
+            "type": "string"
+          },
+          "bindCredentialConfigured": {
+            "description": "Read-only response metadata; ignored on write.",
+            "type": "boolean"
+          },
+          "bindDn": {
+            "description": "Service-account DN used to locate users; empty = anonymous bind.",
+            "type": "string"
+          },
+          "bindPassword": {
+            "description": "Write-only service-account credential.",
+            "type": "string"
+          },
+          "cacheTtlSeconds": {
+            "description": "Authoritative auth-result cache TTL. 0 = default (300).",
+            "type": "integer"
+          },
+          "emailAttribute": {
+            "description": "Default mail.",
+            "type": "string"
+          },
+          "groupAttribute": {
+            "description": "Default memberOf; values are kept verbatim (full group DNs).",
+            "type": "string"
+          },
+          "nameAttribute": {
+            "description": "Default displayName.",
+            "type": "string"
+          },
+          "requiredGroup": {
+            "description": "Legacy provider-level access gate (direct membership). Prefer Access Rules over identity groups.",
+            "type": "string"
+          },
+          "startTls": {
+            "description": "Upgrade a plain ldap:// connection with StartTLS. Invalid together with ldaps://.",
+            "type": "boolean"
+          },
+          "tlsSkipVerify": {
+            "description": "UNSAFE — disable certificate verification (self-signed dev directories only).",
+            "type": "boolean"
+          },
+          "url": {
+            "description": "ldap://host[:port] or ldaps://host[:port] (host[:port] only — no credentials, path, or query).",
+            "type": "string"
+          },
+          "userFilter": {
+            "description": "Search filter template with exactly one %s placeholder. Default (sAMAccountName=%s).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "baseDn"
         ],
         "type": "object"
       },
@@ -11126,6 +11319,148 @@
         "x-culvert-danger-level": "medium",
         "x-culvert-idempotency": "non-idempotent",
         "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/idp/legacy-ldap": {
+      "get": {
+        "description": "Non-secret summary of the legacy bootstrap `ldap:` block from\nconfig.yaml, plus its authority state (active / shadowed by an\nenabled registry LDAP profile). The bind credential is never\nreturned — only a bindCredentialConfigured flag. Used by the\nIdentity Providers screen to offer the explicit one-time import.\n",
+        "operationId": "getLegacyLDAP",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Legacy YAML LDAP summary."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Legacy YAML LDAP summary",
+        "tags": [
+          "auth"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.2.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/idp/legacy-ldap/import": {
+      "post": {
+        "description": "Create a DISABLED LDAP IdP profile from the legacy bootstrap `ldap:`\nblock, copying every security-effective field (including the stored\nbind credential, which never transits the browser). The administrator\nthen tests and enables the profile — the explicit, downgrade-safe\nmigration path into the IdP registry. The YAML file is never\nmodified. 404 when no legacy ldap block is configured.\n",
+        "operationId": "importLegacyLDAP",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The imported (disabled) LDAP IdP profile, secret-redacted."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/PlainNotFound"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Import legacy YAML LDAP configuration",
+        "tags": [
+          "auth"
+        ],
+        "x-culvert-audit-event": "idp.import",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.2.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/idp/test": {
+      "post": {
+        "description": "Run the staged, candidate-based directory test for an LDAP/Active\nDirectory IdP profile BEFORE persisting it: server reachability,\ntransport security (LDAPS/StartTLS), service-account bind, Base DN\nsearch, and — optionally, when a transient test username/password is\nsupplied — a full user lookup + authentication + identity mapping.\nThe candidate profile is never persisted; an empty ldap.bindPassword\non a candidate that names an existing profile id reuses the stored\ncredential so edits never require retyping the secret. Test-user\npasswords are transient: never persisted, logged, cached, or audited.\nErrors are sanitized and bounded; the HTTP call returns 200 with the\nper-step report even when the directory test fails.\n",
+        "operationId": "testIdP",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IdPTestRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdPTestReport"
+                }
+              }
+            },
+            "description": "Staged directory-test report (ok=false when any stage failed)."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Test IdP directory connection",
+        "tags": [
+          "auth"
+        ],
+        "x-culvert-audit-event": "idp.test",
+        "x-culvert-danger-level": "low",
+        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.2.0",
         "x-culvert-permission": "admin",
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
