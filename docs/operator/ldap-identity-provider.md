@@ -31,9 +31,10 @@ proxy Basic authentication. No restart is required at any point.
 
 ## What a directory provider is (and is not)
 
-- **Credential provider**: validates presented proxy Basic credentials and is
-  eligible for `CredentialRequired` authentication rules (including scoped
-  `providerRefs`).
+- **Credential provider**: validates presented proxy Basic credentials and
+  satisfies ordinary `CredentialRequired` authentication rules. (Per-rule
+  `providerRefs` on CredentialRequired is reserved for a future program —
+  scope traffic per provider in Access Rules instead, see below.)
 - **Never interactive SSO**: an LDAP profile never appears on the browser
   sign-in selector, never mints captive-portal URLs, and can never satisfy an
   `SSORequired` rule — the API rejects such refs and the runtime fails closed.
@@ -75,18 +76,28 @@ Providers screen shows a banner when it is present:
    provider is deactivated (one warning; the YAML file is **never**
    modified). Remove the `ldap:` block at your convenience.
 
-Authority rules:
+Authority rules (durable cutover):
 
-- Registry LDAP profile enabled ⇒ the registry is the sole operational LDAP
-  authority; the YAML block is ignored (at startup and at runtime). There is
-  never field-by-field merging.
-- Deleting/disabling the registry profile does **not** silently re-arm the
-  YAML provider; a restart restores the YAML bootstrap behavior.
-- Edge case: on an appliance with **no local admin account** and the
-  fail-closed default authentication, the legacy provider stays wired as the
-  setup-gate anchor (deactivating it would reopen first-time setup). The
-  registry still takes precedence in the credential chain; create a local
-  admin account and restart to retire the YAML provider.
+- The first time an enabled registry LDAP profile is observed on a node that
+  carries a legacy YAML `ldap:` block, the node records the durable
+  `legacy_ldap_retired` sentinel in `admin_settings.json` (audited as
+  `idp.legacy_ldap.retired`) and deactivates the legacy provider. From that
+  point the registry is the SOLE operational LDAP authority — there is never
+  field-by-field merging and never a legacy fallback: a credential the
+  registry rejects is denied, full stop.
+- The cutover survives registry disable/delete, process restarts, and CP/DP
+  restarts. Deleting or disabling the registry profile does NOT re-arm the
+  YAML provider — the sentinel, not the profile's runtime enable state, owns
+  the authority decision.
+- The admin console stays safely gated throughout: setup-complete counts the
+  cutover sentinel, so retiring the proxy backend can never reopen the
+  first-time-setup gate — including on appliances with no local admin
+  account.
+- **Break-glass revert** (explicit, offline, audited by the surrounding
+  change control — there is deliberately no API): stop Culvert, remove the
+  `"legacy_ldap_retired"` field from `/data/admin_settings.json`, remove or
+  disable the registry LDAP profile, and restart. The YAML block then wires
+  again as the bootstrap authenticator.
 
 ## Failure behavior
 
@@ -107,8 +118,7 @@ Observability: `culvert_auth_backend_unavailable{,_total}` and gated-denial
 counters carry backend `ldap:<profile-id>`; the `identity_backend` operator
 contract row reports outages/recovery; diagnostics add
 `ldap_plaintext_transport`, `ldap_tls_unverified`,
-`ldap_legacy_config_shadowed`, `auth_cr_no_eligible_provider`, and
-`auth_cr_providerref_unavailable`.
+and `ldap_legacy_config_shadowed`.
 
 ## Cluster
 

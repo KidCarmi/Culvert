@@ -46,24 +46,57 @@ Two structural hazards block simply adding `"ldap"` to the registry:
    `Identity`: Sub = user DN, Email/Name/Groups from configurable attributes
    (defaults `mail`/`displayName`/`memberOf`, full group DNs, direct
    membership only), `authSource = "ldap:<profile-id>"`.
-4. **The legacy YAML provider stays boolean-only and is shadowed, not merged**:
-   when an enabled registry LDAP profile exists, the legacy provider is not
-   wired (one warning). Migration is an explicit, admin-driven import that
-   creates a disabled profile for test-then-enable. The legacy `LDAPAuth`
-   deliberately does NOT gain `ResolveIdentity` — that would silently flip
-   existing deployments' Stage-2 identity (username→DN) and authSource
-   ("local"→"ldap").
+4. **The legacy YAML provider stays boolean-only and is retired by a durable
+   cutover, never merged** (hardening round P1-2): the first time an enabled
+   registry LDAP profile is observed on a node carrying a legacy YAML `ldap:`
+   block, the node records the node-local `legacy_ldap_retired` sentinel in
+   `admin_settings.json` (the established AdminDurable sentinel pattern;
+   OFF export/import, version-rollback, and CP→DP — a config restore must
+   never resurrect a retired authenticator) and deactivates the legacy
+   provider. After cutover the YAML block is bootstrap/import source
+   material only — across registry disable/delete, restarts, and CP/DP
+   restarts. Authority is deliberately NOT keyed on `HasEnabledLDAP()`
+   alone (enable/disable is runtime state, not source-of-truth ownership).
+   There is exactly ONE operational LDAP authenticator at all times: no
+   guarded exceptions, no field merging, no hidden legacy fallback — a
+   credential the registry rejects is denied, never retried against the
+   YAML provider. The setup gate is decoupled from the proxy backend:
+   `cfg.IsConfigured()` counts the retirement sentinel, so deactivating the
+   legacy provider can never flip first-time setup open (unauthenticated
+   RoleAdmin), even on a node with no local admin account. Break-glass
+   revert is an explicit offline edit of `admin_settings.json` (documented
+   in the operator guide); there is intentionally no API for it. Migration
+   remains an explicit, admin-driven import creating a disabled profile for
+   test-then-enable; the legacy `LDAPAuth` deliberately does NOT gain
+   `ResolveIdentity` — that would silently flip existing deployments'
+   Stage-2 identity (username→DN) and authSource ("local"→"ldap").
 5. **Bind credential follows the OIDC ClientSecret containment pattern**
    (write-only input, preserve-on-omit, blank in every read/audit projection,
    `bindCredentialConfigured` metadata only, 0600 store). Generic IdP
    secret-at-rest encryption is recorded as a separate slice; an LDAP-only
    scheme is rejected.
-6. **CredentialRequired providerRefs activate** for credential-capable
-   providers (the reserved seam), with fail-closed challenge suppression when
-   a rule's refs resolve to zero eligible providers. Runtime credential
-   validation remains the global chain (recorded limitation; per-rule
-   validator scoping is a future seam). SSORequired continues to reject
-   non-interactive refs at the write door and at runtime.
+6. **CredentialRequired providerRefs stays RESERVED** (hardening round P1-1
+   reverted an earlier draft activation). Presented Proxy-Authorization
+   credentials resolve through the GLOBAL validator chain before the
+   no-credentials Stage-1 branch, so a per-rule provider subset was only
+   half-enforced — another OIDC/LDAP provider or local/legacy credentials
+   could satisfy the rule, and stale refs failed closed only on the
+   no-credential path. Partial pinning is worse than none: validation
+   rejects CR providerRefs again. LDAP is fully usable with ordinary
+   CredentialRequired; provider-specific authorization is expressed in
+   Stage 2 (`AuthSource = <LDAP profile>`, `SourceGroup = <group DN>`). A
+   future fully-scoped design must cover presented credentials, sessions,
+   local auth, legacy providers, stale/deleted refs, multi-provider
+   ordering, and failure semantics as ONE coherent contract (recorded in
+   `roadmap/LDAP-IDP-MODERNIZATION-PLAN.md` §12). SSORequired continues to
+   reject non-interactive refs at the write door and at runtime.
+7. **IdPRegistry mutations are transactional** (hardening round P1-3):
+   Upsert/Delete/ReplaceAll build the candidate on copies, validate,
+   compile the next live set, PERSIST atomically, and only then publish —
+   a persistence failure leaves the old profiles, live providers, and
+   credentials authoritative, with no success audit and no cluster
+   snapshot publication (API reports 500). The deliberate in-memory mode
+   (no profiles file) keeps its explicit warning + publish behavior.
 
 ## Consequences
 

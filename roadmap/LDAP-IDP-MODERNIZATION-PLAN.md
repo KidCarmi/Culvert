@@ -1,15 +1,27 @@
 # LDAP / Active Directory IdP Modernization — Slice 0 Architecture Freeze
 
-Status: **PROGRAM COMPLETE** (Slices 0–6 shipped, 2026-08-21; Slice 0 frozen
-against `main` @ b697cf3). Recorded decisions made during implementation:
-CredentialRequired providerRefs activated for credential-capable (OIDC/LDAP)
-profiles with a fail-closed zero-eligible runtime gate (per-rule validator
-scoping inside the presented-credential arm remains a documented future
-seam); runtime legacy-YAML shadowing is guarded so `cfg.IsConfigured()` can
-never flip false (the no-local-admin anchor case keeps the legacy provider
-wired with registry precedence); the provider-list Edit button's broken
-double-JSON attribute encoding (pre-existing) was fixed after the new
-browser E2E exposed it.
+Status: **PROGRAM COMPLETE + HARDENING ROUND 1** (Slices 0–6 shipped
+2026-08-21; Slice 0 frozen against `main` @ b697cf3; pre-PR hardening P1-1/
+P1-2/P1-3 applied the same day). Recorded decisions:
+
+- **P1-1 (revert)**: the draft activation of CredentialRequired providerRefs
+  was REVERTED — presented credentials run the GLOBAL validator chain before
+  the no-credentials Stage-1 branch, so per-rule provider pinning was only
+  half-enforced. CR providerRefs is validation-rejected again (reserved);
+  provider scoping is expressed in Stage 2 via AuthSource/SourceGroup. See
+  §12 for the future design item.
+- **P1-2 (single authority)**: the guarded "keep legacy wired when no local
+  admin exists" exception was REMOVED. Cutover to registry LDAP is a durable
+  node-local sentinel (`AdminSettings.LegacyLDAPRetired`) that survives
+  registry disable/delete and restarts; `cfg.IsConfigured()` counts it, so
+  deactivating the legacy proxy backend can never fail the admin-UI setup
+  gate open. Exactly one operational LDAP authenticator, no legacy fallback.
+- **P1-3 (transactional registry)**: Upsert/Delete/ReplaceAll persist the
+  candidate BEFORE publishing; a persistence failure leaves old profiles +
+  live providers authoritative (API 500, no audit, no snapshot publication).
+- The provider-list Edit button's broken double-JSON attribute encoding
+  (pre-existing) was fixed after the new browser E2E exposed it.
+
 Authority: this document + `docs/adr/0025-ldap-first-class-idp.md`. Where roadmap
 status text and runtime code disagreed, the runtime code was treated as authoritative.
 
@@ -146,7 +158,7 @@ One deterministic authority; never field-by-field merging.
 | 1 | No LDAP anywhere | Unchanged. |
 | 2 | Legacy YAML only | Legacy provider wired exactly as today (boolean, authSource "local"). Startup logs a bounded migration hint; `/api/idp/legacy-ldap` exposes non-secret summary + one-click import. |
 | 3 | Registry LDAP only | Registry is the sole authority (full Identity, authSource `ldap:<id>`). |
-| 4/5 | Both present (identical or different) | **Registry wins.** The legacy YAML LDAP provider is not wired (startup) / is deactivated (runtime create): one clear warning, no repeated spam, zero merging. Deactivation falls back to local bcrypt exactly as if `ldap.url` were unset. |
+| 4/5 | Both present (identical or different) | **Registry wins, durably (P1-2).** Observing an enabled registry LDAP profile records the node-local `legacy_ldap_retired` sentinel (admin_settings.json) and deactivates the legacy provider: one clear warning, zero merging, no fallback. After cutover the YAML block stays retired across registry disable/delete and restarts; `cfg.IsConfigured()` counts the sentinel so the setup gate never reopens. Break-glass revert = explicit offline settings edit. |
 | 6 | Malformed legacy YAML LDAP | Unchanged: startup fails with "LDAP config error:" (existing contract). |
 | 7 | Missing registry file | Unchanged: first-run no-op. |
 | 8 | Unwritable registry persistence | Unchanged: `save()` error propagates to the API caller; in-memory warning when no path configured. |
@@ -234,3 +246,27 @@ vet / build / targeted `-race` tests green before moving on. Gate for Slice 0:
 `static/index.html`, `.github/workflows/auth-idp-interop.yml` + `.github/idp/openldap/`,
 `docs/adr/0025-ldap-first-class-idp.md`, `docs/operator/ldap-identity-provider.md`,
 plus test files.
+
+## 12. Future design item — fully-scoped CredentialRequired provider selection
+
+Recorded (P1-1): CR `providerRefs` remains reserved until a design covers the
+WHOLE credential path as one coherent contract, not just the no-credentials
+challenge arm. Minimum scope for that future program:
+
+- **Presented credentials**: per-rule validator scoping inside the Basic-auth
+  arm — the matched auth rule must be resolvable before/alongside credential
+  validation, and only the scoped providers may be consulted.
+- **Sessions**: whether an existing session minted by an out-of-scope
+  provider satisfies a scoped CR rule.
+- **Local + legacy auth**: whether/how the local bcrypt account and any
+  legacy provider participate when refs are non-empty.
+- **Stale/deleted/disabled refs**: consistent fail-closed behavior on BOTH
+  the challenge and the presented-credential paths, plus diagnostics.
+- **Multi-provider ordering**: deterministic iteration and short-circuit
+  semantics within the scoped subset; no cross-directory lockout
+  amplification.
+- **Failure semantics**: gate/cooldown interaction (CHAOS-47) when a scoped
+  provider is unreachable while an unscoped one is healthy.
+
+Until then: authenticate with ordinary CR; authorize per-provider in Stage 2
+(`AuthSource`/`SourceGroup`), which the shipped tests pin end to end.
