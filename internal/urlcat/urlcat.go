@@ -11,12 +11,17 @@
 package urlcat
 
 import (
+	"crypto/sha256"
 	_ "embed"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/hostutil"
@@ -60,7 +65,21 @@ type Store struct {
 	hostIndex      map[string]patternRef
 	adminHostIndex map[string]patternRef
 	path           string
+	fp             atomic.Value // string: cached semantic ContentFingerprint (recomputed under mu on every semantic change)
+
+	// rev counts semantic mutations (every path that recomputes the
+	// fingerprint). PROCESS-LOCAL change signal for memo/fence keys ONLY —
+	// never an identity (the QB-2 lesson: identities must be content-derived
+	// and restart-stable; this counter exists precisely because the content
+	// fingerprint is ABA-blind, an A→B→A round trip restoring the same
+	// string). Bumped INSIDE the write-lock critical section, so the unlock
+	// that publishes new content also publishes the advanced revision.
+	rev atomic.Uint64
 }
+
+// Revision returns the process-local semantic-mutation counter. Monotonic
+// within a process; resets on restart — a fence key, not an identity.
+func (s *Store) Revision() uint64 { return s.rev.Load() }
 
 // patternRef locates one host pattern inside s.entries: entry position, then
 // position within that entry's Hosts. Positions — not the resolved strings —
@@ -81,6 +100,123 @@ func (r patternRef) less(o patternRef) bool {
 	return r.host < o.host
 }
 
+// fingerprintDomain versions the ContentFingerprint framing. Bump it whenever
+// the framed field set or encoding changes — consumers pin the returned value
+// as an identity, so two framings must never collide. v2 (QB-2.1): entries
+// are framed in RESOLVER SEQUENCE order, no longer sorted by name.
+const fingerprintDomain = "culvert-urlcat-content-fp-v3"
+
+// ContentFingerprint returns a deterministic semantic identity of the
+// taxonomy: equal iff the RESOLUTION-RELEVANT content is equal, stable across
+// restart/reload of identical persisted state (unlike a process-local
+// revision counter). Consumed by the policy-learning category epoch
+// (ADR-0025 §6, epoch scheme v2).
+//
+// Covered (exactly the state that can change a Lookup*/Matches* result):
+//   - the ENTRY SEQUENCE ORDER (QB-2.1: LookupHost/LookupHostAdmin scan
+//     s.entries in order and return the FIRST match, so order is
+//     resolution-relevant whenever category patterns overlap; entries are
+//     framed in sequence, never sorted — a reorder that cannot change any
+//     resolution (no overlaps) still changes the identity, an accepted
+//     CONSERVATIVE false-stale: safer than missing a real semantic change),
+//   - every entry's Name in ORIGINAL case (the resolvers return it verbatim,
+//     and downstream consumers key on it),
+//   - the BuiltIn flag (it decides admin-tier membership: LookupHostAdmin /
+//     MatchesHostAdmin see only BuiltIn=false entries),
+//   - the entry's host patterns, lowercased RAW — the trailing dot is KEPT
+//     (v3, Codex round 26): the host→category resolver (LookupHost, the path
+//     Learning consumes) compares strings.ToLower(pattern) with NO trailing-
+//     dot trim while the incoming host IS trimmed, so a "example.com."
+//     spelling is a DEAD pattern there and switching a live pattern to it is
+//     resolution-relevant — the fingerprint must move. (The category→hosts
+//     matcher MatchesHost trims, so for it this is a conservative
+//     false-stale — the accepted direction. The two matchers have disagreed
+//     on this spelling since before the reverse index existed; the
+//     fingerprint mirrors the resolver Learning actually uses.)
+//     De-duplicated and sorted — WITHIN-entry host order stays canonical
+//     because it can only affect the matchedBy display string, and Learning
+//     consumes the resolved category, never matchedBy.
+//
+// Excluded by contract: process-local counters, timestamps, mutation history,
+// map iteration order, host pattern CASE and exact-duplicate patterns
+// (matchedBy display only), empty patterns, and display-only or metrics
+// state. Framing
+// is length-prefixed under fingerprintDomain, so field boundaries are
+// unambiguous.
+//
+// The value is cached; reads are one atomic load. Before the first
+// load/mutation (zero-value store) it is computed on demand.
+func (s *Store) ContentFingerprint() string {
+	if v, ok := s.fp.Load().(string); ok && v != "" {
+		return v
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return computeFingerprint(s.entries)
+}
+
+// recomputeFingerprintLocked refreshes the cached fingerprint. Caller must
+// hold s.mu (write) — every semantic mutation path calls this before
+// unlocking, so readers never observe a stale identity for new content.
+func (s *Store) recomputeFingerprintLocked() {
+	s.fp.Store(computeFingerprint(s.entries))
+	s.rev.Add(1) // under s.mu: content and change signal publish together
+}
+
+// computeFingerprint derives the canonical content hash (see
+// ContentFingerprint for the field contract). Pure function of entries.
+func computeFingerprint(entries []*Entry) string {
+	type frameEntry struct {
+		name    string
+		builtIn bool
+		hosts   []string
+	}
+	// Entries are framed in s.entries SEQUENCE order (QB-2.1) — the exact
+	// order the resolvers scan — so a reorder is an identity change.
+	fes := make([]frameEntry, 0, len(entries))
+	for _, e := range entries {
+		hs := make([]string, 0, len(e.Hosts))
+		seen := make(map[string]bool, len(e.Hosts))
+		for _, h := range e.Hosts {
+			// Mirror LookupHost's comparison exactly: lowercase, NO trailing-
+			// dot trim (v3, Codex round 26 — supersedes the earlier trim,
+			// which mirrored the category→hosts matcher instead and made a
+			// live→dead "example.com"→"example.com." pattern edit invisible
+			// to the fingerprint even though it changes what LookupHost — the
+			// resolver Learning consumes — returns for that host).
+			hl := strings.ToLower(h)
+			if hl != "" && !seen[hl] {
+				seen[hl] = true
+				hs = append(hs, hl)
+			}
+		}
+		sort.Strings(hs)
+		fes = append(fes, frameEntry{name: e.Name, builtIn: e.BuiltIn, hosts: hs})
+	}
+	h := sha256.New()
+	var n [8]byte
+	frame := func(v string) {
+		binary.BigEndian.PutUint64(n[:], uint64(len(v)))
+		h.Write(n[:])
+		h.Write([]byte(v))
+	}
+	frame(fingerprintDomain)
+	for i := range fes {
+		frame(fes[i].name)
+		if fes[i].builtIn {
+			h.Write([]byte{1})
+		} else {
+			h.Write([]byte{0})
+		}
+		binary.BigEndian.PutUint64(n[:], uint64(len(fes[i].hosts)))
+		h.Write(n[:])
+		for _, hh := range fes[i].hosts {
+			frame(hh)
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil)[:16])
+}
+
 // New builds a store over entries and its derived host index.
 func New(entries []*Entry) *Store {
 	s := &Store{entries: entries}
@@ -88,7 +224,8 @@ func New(entries []*Entry) *Store {
 	return s
 }
 
-// rebuildIndex reconstructs every derived index from s.entries.
+// rebuildIndex reconstructs every derived index from s.entries and
+// refreshes the cached content fingerprint.
 // Caller must hold s.mu (write or be the sole owner).
 //
 // It is the maintenance path for every mutation EXCEPT a single-host append:
@@ -103,6 +240,7 @@ func New(entries []*Entry) *Store {
 // the SaaS feed sync calls it once per merged host, and a wholesale rebuild
 // there would stall the request path once per host (see that function).
 func (s *Store) rebuildIndex() {
+	s.recomputeFingerprintLocked()
 	idx := make(map[string]map[string]bool, len(s.entries))
 	admin := make(map[string]map[string]bool)
 	hostIdx := make(map[string]patternRef)
@@ -186,6 +324,28 @@ func DefaultEntries() []*Entry {
 		}
 	}
 	return entries
+}
+
+// DefaultBusinessCategoryNames returns the sorted names of the embedded SaaS
+// BUSINESS category seed list ONLY (default_categories.json) — deliberately
+// excluding the hardcoded non-business built-ins (Social Media, Malicious,
+// News, Streaming, Gambling, Adult). This is the fail-closed seed for the
+// policy-learning recommendable-category allowlist (ADR-0025 M4): a category
+// must be on this list (or a future governed surface's) before the learning
+// engine may propose an Allow rule for it.
+func DefaultBusinessCategoryNames() []string {
+	var saas []Entry
+	if json.Unmarshal(defaultCategoriesJSON, &saas) != nil {
+		return nil // fail closed: no parse ⇒ nothing recommendable
+	}
+	names := make([]string, 0, len(saas))
+	for i := range saas {
+		if saas[i].Name != "" {
+			names = append(names, saas[i].Name)
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 // Load reads categories from a JSON file. If the file does not exist the
@@ -317,6 +477,9 @@ func (s *Store) AddHost(category, host string) error {
 		}
 		e.Hosts = append(e.Hosts, host)
 		s.addHostToIndexes(ei, e, key, host)
+		// Incremental index patch above; the semantic identity still moves —
+		// refresh the fingerprint + revision (same cost this path always paid).
+		s.recomputeFingerprintLocked()
 		s.mu.Unlock()
 		s.Save()
 		return nil

@@ -392,9 +392,18 @@ func (ps *PolicyStore) saveMetaSnapshot(m policyMeta) {
 // does not carry a second persistence path.
 
 // Save persists the current rules to disk (skips HitCount — runtime only).
-func (ps *PolicyStore) Save() {
+// Best-effort legacy wrapper; callers that must know whether the durable
+// write landed (the draft-commit path) use SaveErr.
+func (ps *PolicyStore) Save() { _ = ps.SaveErr() }
+
+// SaveErr is the error-returning persistence core (Codex fix: the commit path
+// must not clear the draft when the running-policy write failed — a swallowed
+// error left the NEW policy in memory, the OLD policy on disk, and no draft,
+// so a restart silently reverted the commit and stranded a learning
+// acceptance with no durable target).
+func (ps *PolicyStore) SaveErr() error {
 	if ps.path == "" {
-		return
+		return nil
 	}
 	// Mutations may proceed while persistence runs, but saves themselves must be
 	// ordered end-to-end. Otherwise an older snapshot can rename after a newer
@@ -414,15 +423,16 @@ func (ps *PolicyStore) Save() {
 
 	data, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
-		return
+		return fmt.Errorf("marshal policy rules: %w", err)
 	}
 	// Atomic + durable write — temp file, fsync, rename, parent-dir fsync.
 	// Skip saveMeta on failure so the .meta sidecar can't record a newer
 	// version/timestamp than the rules actually on disk.
 	if err := atomicWriteFile(ps.path, data, 0o600); err != nil {
-		return
+		return fmt.Errorf("write policy rules: %w", err)
 	}
 	ps.saveMetaSnapshot(meta)
+	return nil
 }
 
 // List returns a copy of all rules (including live HitCount).
@@ -1082,6 +1092,125 @@ func (ps *PolicyStore) evaluationSnapshot() []*PolicyRule {
 	return rules
 }
 
+// accessEvalInput carries the per-request Stage-2 evaluation inputs. It is
+// passed to evalAccessRules by POINTER so the non-inlinable core takes a narrow
+// register-friendly argument list (the F4 Policy Tester and future replay/shadow
+// callers pass the same struct). The client IP is carried as a STRING, not a
+// pre-parsed net.IP: the core parses it once into a local, so the net.ParseIP
+// result never escapes through the struct to the heap. Measured note: extracting
+// the hot loop into this shared non-inlinable core costs ~10% on the policy
+// evaluation micro-benchmark versus the pre-extraction inlined scan, independent
+// of the argument-passing form (explicit params / this struct / forwarded
+// params all measured a comparable regression); allocations are unchanged. This
+// is the accepted cost of the single-evaluator mandate (ADR-0026) — see the F3
+// evidence package.
+type accessEvalInput struct {
+	clientIP   string
+	identity   string
+	authSource string
+	host       string // raw destination host
+	normHost   string // normalizeHost(host)
+	groups     []string
+}
+
+// Stage-2 per-rule skip reasons. Shared by the evaluator core's trace callback
+// and the Policy Tester so both speak one vocabulary (ADR-0026).
+const (
+	accessSkipDisabled  = "disabled"
+	accessSkipNonAccess = "non-access rule (auth)"
+	accessSkipSource    = "source mismatch"
+	accessSkipSchedule  = "schedule inactive"
+	accessSkipDest      = "destination mismatch"
+)
+
+// evalAccessRules is the single canonical Stage-2 access-rule scan: priority
+// order, first match wins, empty rule field = "any". It is the one definition
+// of access-decision semantics (ADR-0026), shared by the enforcement path
+// (PolicyStore.Evaluate, which wraps it with hit accounting + PolicyMatch
+// construction), the Policy Tester, and future replay/shadow.
+//
+// It is PURE: no counter mutation, no logging, no store locks. Callers needing a
+// pinned category/geo environment pin generations around it rather than forking
+// the evaluator — the live singletons the destination matchers consult ARE the
+// evaluation semantics.
+//
+// The inputs arrive via a pointer to accessEvalInput (see that type's doc).
+// in.normHost MUST be normalizeHost(in.host); each rule reuses its precomputed
+// srcIPNet / normFQDN.
+//
+// now is read at most once, lazily, on the first scheduled rule reached (a scan
+// with no scheduled rules never calls it) — the one-instant-per-evaluation
+// decision point. trace, when non-nil, is called once per rule with the skip
+// reason ("" = this rule matched, scan stops). trace MUST be nil on the
+// enforcement hot path: the nil branch allocates nothing (the skip strings are
+// static literals), preserving the zero-per-rule-allocation contract.
+func evalAccessRules(rules []*PolicyRule, in *accessEvalInput, now func() time.Time, trace func(rule *PolicyRule, skip string)) *PolicyRule { //nolint:gocognit // one explicit skip-reason branch per rule condition; the zero-alloc contract forbids extraction on this hot path
+	// Parse the client IP ONCE into a local (stays on the stack — matchSourceAddr
+	// never retains it), reused across every rule's precomputed srcIPNet.
+	clientAddr := net.ParseIP(in.clientIP)
+	// Resolve the destination's CATEGORY at most ONCE for the whole scan, lazily
+	// on the first category-scoped rule reached (see policy_hostcat.go): the
+	// host→category fusion depends only on the host, so running it per rule
+	// multiplied an O(all host patterns) taxonomy scan — plus a BadgerDB read
+	// per domain label on a feed-backed deployment — by the rule count.
+	catScratch := newHostCatScratch(in.host)
+	// The control flow is deliberately the parent enforcement loop's exact
+	// continue-based structure: on the nil-trace path (enforcement) it is
+	// branch-for-branch identical to the pre-extraction scan, and the skip-reason
+	// string literals are referenced only inside the `if trace != nil` guards, so
+	// they are never materialized on the hot path (no per-rule string work). The
+	// guards themselves are predicted-not-taken when trace is nil.
+	var scanNow time.Time
+	var scanNowSet bool
+	for i := range rules {
+		rule := rules[i]
+		if !ruleIsEnabled(rule) {
+			if trace != nil {
+				trace(rule, accessSkipDisabled)
+			}
+			continue
+		}
+		// Stage-2 evaluates access rules only. Authentication rules (Stage-1)
+		// are inert here; an empty RuleType defaults to access for backward
+		// compatibility, so pre-existing rules match exactly as before.
+		if ruleTypeOf(rule) != ruleTypeAccess {
+			if trace != nil {
+				trace(rule, accessSkipNonAccess)
+			}
+			continue
+		}
+		if !matchSourceAddr(rule, in.clientIP, clientAddr, in.identity, in.authSource, in.groups) {
+			if trace != nil {
+				trace(rule, accessSkipSource)
+			}
+			continue
+		}
+		if rule.Schedule != nil {
+			if !scanNowSet {
+				scanNow = now()
+				scanNowSet = true
+			}
+			if !matchScheduleAt(rule.Schedule, scanNow) {
+				if trace != nil {
+					trace(rule, accessSkipSchedule)
+				}
+				continue
+			}
+		}
+		if !matchDestNorm(rule, in.host, in.normHost, &catScratch) {
+			if trace != nil {
+				trace(rule, accessSkipDest)
+			}
+			continue
+		}
+		if trace != nil {
+			trace(rule, "")
+		}
+		return rule
+	}
+	return nil
+}
+
 // Evaluate iterates rules in priority order and returns the first match.
 // authSource is the IdP name that authenticated the user (e.g. "okta", "ldap",
 // "local") or "unauth" when no credentials were presented.
@@ -1095,75 +1224,45 @@ func (ps *PolicyStore) Evaluate(clientIP, identity, authSource, host string, gro
 	// Lock) waiting on a DNS-blocked scan would stall all policy evaluation.
 	rules := ps.evaluationSnapshot()
 
-	// Normalize the destination host ONCE for the whole scan; every rule's FQDN
-	// check reuses it (the host is identical across rules). This, plus each
-	// rule's precomputed normFQDN, removes the ~2 allocs/rule the policy hot path
-	// previously incurred re-normalizing host+pattern on every rule.
-	normHost := normalizeHost(host)
-	// Parse the client IP ONCE for the whole scan; every CIDR-scoped rule's
-	// precomputed srcIPNet reuses it (previously net.ParseCIDR + net.ParseIP
-	// ran per rule per request, ~4 allocs/rule on source-scoped rulesets).
-	clientAddr := net.ParseIP(clientIP)
-	// Read the clock ONCE for the whole scan, lazily on the first scheduled
-	// rule reached (a scan with no scheduled rules never reads it). Previously
-	// every scheduled rule paid its own time.Now() inside matchSchedule; one
-	// instant per scan is also the more consistent decision point.
-	var scanNow time.Time
-	// Resolve the destination's CATEGORY at most ONCE for the whole scan, lazily
-	// on the first category-scoped rule reached. The host→category fusion depends
-	// only on the host, so running it per rule multiplied an expensive lookup —
-	// an O(all host patterns) taxonomy scan, plus a BadgerDB read transaction per
-	// domain label on a feed-backed deployment — by the rule count. See
-	// policy_hostcat.go for the measurements.
-	catScratch := newHostCatScratch(host)
-
-	for i := range rules {
-		rule := rules[i]
-		if !ruleIsEnabled(rule) {
-			continue
-		}
-		// Stage-2 evaluates access rules only. Authentication rules (Stage-1)
-		// are inert here; an empty RuleType defaults to access for backward
-		// compatibility, so all pre-existing rules are matched exactly as before.
-		if ruleTypeOf(rule) != ruleTypeAccess {
-			continue
-		}
-		if !matchSourceAddr(rule, clientIP, clientAddr, identity, authSource, groups) {
-			continue
-		}
-		if rule.Schedule != nil {
-			if scanNow.IsZero() {
-				scanNow = time.Now()
-			}
-			if !matchScheduleAt(rule.Schedule, scanNow) {
-				continue
-			}
-		}
-		if !matchDestNorm(rule, host, normHost, &catScratch) {
-			continue
-		}
-		// Every published definition has a stable accounting cell. Revisions of
-		// the same rule share it, so a reader finishing on an older definition
-		// cannot lose its hit when a writer publishes the next revision.
-		atomic.AddInt64(&rule.counters.hitCount, 1)
-		atomicStoreMax(&rule.counters.lastHitUnix, time.Now().Unix())
-		// Precomputed by sortLocked (never "" there — empty conditions render
-		// as "any"); fall back for rules that bypassed the mutators.
-		conds := rule.matchedConds
-		if conds == "" {
-			conds = buildMatchedConditions(rule)
-		}
-		match := &PolicyMatch{
-			Action:            rule.Action,
-			SSLAction:         rule.SSLAction,
-			TLSSkipVerify:     rule.TLSSkipVerify,
-			MatchedConditions: conds,
-		}
-		copyPolicyRuleForMatch(&match.ruleSnapshot, rule)
-		match.Rule = &match.ruleSnapshot
-		return match
+	// Enforcement path: the canonical core with the wall clock and no trace (the
+	// nil-trace branch is allocation-free). Normalize the destination host ONCE
+	// for the whole scan (each rule reuses its precomputed normFQDN; the core
+	// parses the client IP once for the precomputed srcIPNet), keeping the ~2
+	// host + ~4 CIDR per-rule allocations the hot path previously incurred
+	// eliminated. in stays on this frame — evalAccessRules never retains it.
+	in := accessEvalInput{
+		clientIP:   clientIP,
+		identity:   identity,
+		authSource: authSource,
+		host:       host,
+		normHost:   normalizeHost(host),
+		groups:     groups,
 	}
-	return nil
+	rule := evalAccessRules(rules, &in, time.Now, nil)
+	if rule == nil {
+		return nil
+	}
+
+	// Every published definition has a stable accounting cell. Revisions of the
+	// same rule share it, so a reader finishing on an older definition cannot
+	// lose its hit when a writer publishes the next revision.
+	atomic.AddInt64(&rule.counters.hitCount, 1)
+	atomicStoreMax(&rule.counters.lastHitUnix, time.Now().Unix())
+	// Precomputed by sortLocked (never "" there — empty conditions render as
+	// "any"); fall back for rules that bypassed the mutators.
+	conds := rule.matchedConds
+	if conds == "" {
+		conds = buildMatchedConditions(rule)
+	}
+	match := &PolicyMatch{
+		Action:            rule.Action,
+		SSLAction:         rule.SSLAction,
+		TLSSkipVerify:     rule.TLSSkipVerify,
+		MatchedConditions: conds,
+	}
+	copyPolicyRuleForMatch(&match.ruleSnapshot, rule)
+	match.Rule = &match.ruleSnapshot
+	return match
 }
 
 // buildMatchedConditions produces a compact summary of which rule conditions

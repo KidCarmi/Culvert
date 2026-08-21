@@ -1482,6 +1482,23 @@ func policyVersionConflictAgainst(w http.ResponseWriter, r *http.Request, cur in
 	return true
 }
 
+// parseIfVersion extracts the optional ?ifVersion=N asserted generation for
+// callers that re-verify the fence inside a locked critical section (the
+// draft-commit path). nil = no assertion. Invalid input also returns nil —
+// callers run policyVersionConflictAgainst first, which 400s malformed input
+// before this is consulted.
+func parseIfVersion(r *http.Request) *int64 {
+	raw := strings.TrimSpace(r.URL.Query().Get("ifVersion"))
+	if raw == "" {
+		return nil
+	}
+	v, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return nil
+	}
+	return &v
+}
+
 // apiPolicy dispatches the access-rule CRUD endpoint. The per-method branches
 // live in apiPolicyCreate/Update/Delete so this stays a thin router (gocognit).
 func apiPolicy(w http.ResponseWriter, r *http.Request) {
@@ -1569,6 +1586,9 @@ func apiPolicyCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	stampRuleMetadataForWrite(&rule, nil, sessionAdmin(r))
+	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
+	beginPolicyWrite()
+	defer endPolicyWrite()
 	added := policyWriteStore(sessionAdmin(r)).Add(rule)
 	logName := strings.ReplaceAll(strings.ReplaceAll(added.Name, "\n", "_"), "\r", "_")
 	logAction := strings.ReplaceAll(strings.ReplaceAll(string(added.Action), "\n", "_"), "\r", "_")
@@ -1620,6 +1640,9 @@ func apiPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	stampRuleMetadataForWrite(&rule, beforeRule, sessionAdmin(r))
+	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
+	beginPolicyWrite()
+	defer endPolicyWrite()
 	if !policyWriteStore(sessionAdmin(r)).Update(priority, rule) {
 		policyDraft.reconcile() // a failed mutation may have opened a now-clean draft
 		http.Error(w, "rule not found", http.StatusNotFound)
@@ -1662,6 +1685,9 @@ func apiPolicyDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
 		return
 	}
+	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
+	beginPolicyWrite()
+	defer endPolicyWrite()
 	if !policyWriteStore(sessionAdmin(r)).Delete(priority) {
 		policyDraft.reconcile() // a failed mutation may have opened a now-clean draft
 		http.Error(w, "rule not found", http.StatusNotFound)
@@ -1718,6 +1744,9 @@ func apiPolicyUpdateByID(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	stampRuleMetadataForWrite(&rule, beforeRule, sessionAdmin(r))
+	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
+	beginPolicyWrite()
+	defer endPolicyWrite()
 	if !policyWriteStore(sessionAdmin(r)).UpdateByID(id, rule) {
 		policyDraft.reconcile() // a failed mutation may have opened a now-clean draft
 		http.Error(w, "rule not found", http.StatusNotFound)
@@ -1741,6 +1770,9 @@ func apiPolicyDeleteByID(w http.ResponseWriter, r *http.Request, id string) {
 		http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
 		return
 	}
+	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
+	beginPolicyWrite()
+	defer endPolicyWrite()
 	if !policyWriteStore(sessionAdmin(r)).DeleteByID(id) {
 		policyDraft.reconcile() // a failed mutation may have opened a now-clean draft
 		http.Error(w, "rule not found", http.StatusNotFound)
@@ -1781,6 +1813,9 @@ func apiPolicyBulkDelete(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
+	beginPolicyWrite()
+	defer endPolicyWrite()
 	ws := policyWriteStore(sessionAdmin(r))
 	deleted := 0
 	for _, p := range body.Priorities {
@@ -1853,6 +1888,9 @@ func apiPolicyReorder(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
+	beginPolicyWrite()
+	defer endPolicyWrite()
 	if !policyWriteStore(sessionAdmin(r)).PermutePriorities(body.Priorities) {
 		policyDraft.reconcile() // a failed permute may have opened a now-clean draft
 		http.Error(w, "priority list length mismatch or unknown priority", http.StatusBadRequest)
@@ -1967,6 +2005,9 @@ func apiPolicyMove(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
+	beginPolicyWrite()
+	defer endPolicyWrite()
 	if !policyWriteStore(sessionAdmin(r)).PermutePriorities(priorities) {
 		policyDraft.reconcile() // a failed permute may have opened a now-clean draft
 		http.Error(w, "reorder failed (concurrent modification?)", http.StatusConflict)
@@ -1988,36 +2029,32 @@ type policyTestTrace struct {
 }
 
 // walkPolicyTestRules dry-runs Stage-2 access evaluation for the simulator (no
-// hit counts), returning the per-rule trace and the first match (nil = none).
-// Mirrors Evaluate: Stage-1 auth rules are inert for access decisions, so they
-// appear in the trace as skipped, never as the match.
+// hit counts, no mutation), returning the per-rule trace and the first match
+// (nil = none). It routes through the canonical evaluator core (evalAccessRules,
+// ADR-0026), so a simulation matches exactly what the proxy enforcement path
+// would decide: same priority/first-match, the same matchers, the
+// one-instant-per-evaluation schedule clock, and — unlike the pre-ADR-0026
+// tester — it skips disabled rules (a disabled rule can never match at runtime,
+// so it now appears in the trace as skipped "disabled" rather than as a match).
+// Stage-1 auth rules stay inert for access decisions and appear as skipped.
 func walkPolicyTestRules(rules []PolicyRule, sourceIP, identity, authSource, host string, groups []string) ([]policyTestTrace, *PolicyRule) {
-	var trace []policyTestTrace
-	var matched *PolicyRule
-	// Mirror Evaluate's per-scan hoists so the simulator resolves the
-	// destination's category exactly once, the same way the engine it is
-	// simulating does (policy_hostcat.go).
-	normHost := normalizeHost(host)
-	catScratch := newHostCatScratch(host)
+	// The core walks []*PolicyRule; take addresses of the caller-owned copies.
+	ptrs := make([]*PolicyRule, len(rules))
 	for i := range rules {
-		r2 := rules[i] // copy (index-based range: PolicyRule is a large struct)
-		skip := ""
-		switch {
-		case ruleTypeOf(&r2) != ruleTypeAccess:
-			skip = "non-access rule (auth)"
-		case !matchSource(&r2, sourceIP, identity, authSource, groups):
-			skip = "source mismatch"
-		case !matchSchedule(r2.Schedule):
-			skip = "schedule inactive"
-		case !matchDestNorm(&r2, host, normHost, &catScratch):
-			skip = "destination mismatch"
-		}
-		trace = append(trace, policyTestTrace{Priority: r2.Priority, Name: r2.Name, SkipReason: skip})
-		if skip == "" {
-			matched = &r2
-			break
-		}
+		ptrs[i] = &rules[i]
 	}
+	trace := make([]policyTestTrace, 0, len(rules))
+	in := accessEvalInput{
+		clientIP:   sourceIP,
+		identity:   identity,
+		authSource: authSource,
+		host:       host,
+		normHost:   normalizeHost(host),
+		groups:     groups,
+	}
+	matched := evalAccessRules(ptrs, &in, time.Now, func(rule *PolicyRule, skip string) {
+		trace = append(trace, policyTestTrace{Priority: rule.Priority, Name: rule.Name, SkipReason: skip})
+	})
 	return trace, matched
 }
 
@@ -2053,7 +2090,13 @@ func apiPolicyTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rules := policyStore.List()
+	// Evaluate the EFFECTIVE rulebase: the draft candidate when Draft Mode is
+	// engaged, else the running store (GAP-POL-03, ADR-0026). rulebase tells the
+	// admin which set was simulated so a draft-mode test is never mistaken for a
+	// test of live policy. Rules and label come from ONE coordinator-locked
+	// snapshot (Codex round 15) — separate reads could interleave with a
+	// commit/revert and evaluate an empty candidate or mislabel the set.
+	rules, rulebase := effectivePolicySnapshot()
 
 	// Stage-1 simulation (Slice 8): resolve the auth outcome for this request
 	// and mirror Slice 7's runtime wiring — a no-credentials Exempt match makes
@@ -2081,6 +2124,7 @@ func apiPolicyTest(w http.ResponseWriter, r *http.Request) {
 			"trace":         trace,
 			"hostCategory":  hostCategory,
 			"auth":          authBlock,
+			"rulebase":      rulebase,
 		})
 		return
 	}
@@ -2091,6 +2135,7 @@ func apiPolicyTest(w http.ResponseWriter, r *http.Request) {
 		"trace":        trace,
 		"hostCategory": hostCategory,
 		"auth":         authBlock,
+		"rulebase":     rulebase,
 	})
 }
 

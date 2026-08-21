@@ -10,7 +10,6 @@ package main
 import (
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"testing"
 
 	"github.com/KidCarmi/Culvert/internal/blocklist"
@@ -190,10 +189,10 @@ func resetSnapshotBoundsTestGlobals(t *testing.T) {
 	t.Helper()
 	origBL := bl
 	origIPF := ipf
-	origAction := atomic.LoadInt32(&defaultPolicyActionAllow)
+	origAction := defaultPolicyActionState.Load()
 	t.Cleanup(func() {
 		bl = origBL
 		ipf = origIPF
-		atomic.StoreInt32(&defaultPolicyActionAllow, origAction)
+		defaultPolicyActionState.Store(origAction)
 	})
 }

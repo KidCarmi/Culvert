@@ -59,7 +59,7 @@ func TestHandleHTTP_TruncatedParentBodyChargesBreaker(t *testing.T) {
 	for i := 1; i <= 2; i++ {
 		rr := httptest.NewRecorder()
 		// The target host is irrelevant — the fake parent answers everything.
-		handleHTTP(rr, httptest.NewRequest(http.MethodGet, "http://origin.invalid/file.bin", http.NoBody))
+		handleHTTP(rr, httptest.NewRequest(http.MethodGet, "http://origin.invalid/file.bin", http.NoBody), ProxyIdentity{})
 		if rr.Code != http.StatusOK {
 			t.Fatalf("request %d: parent sent valid headers, want 200 to the client, got %d", i, rr.Code)
 		}

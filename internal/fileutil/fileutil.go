@@ -73,6 +73,16 @@ func noteWriteSuccess(path string) {
 	}
 }
 
+// ErrReplacedNotSynced marks an AtomicWrite failure that occurred AFTER the
+// rename: the target file already carries the new content (visible to every
+// reader, and on the overwhelming majority of filesystems durable), but the
+// parent-directory sync failed, so the rename's durability across an
+// immediate crash is not guaranteed. Callers running compensating rollbacks
+// must NOT restore prior in-memory state on this error — memory would then
+// contradict the visible file, and a restart would load the "rolled back"
+// content anyway. Test with errors.Is.
+var ErrReplacedNotSynced = errors.New("atomic write: target replaced but parent directory not synced")
+
 // noteWriteFailure notifies the observer (if any) and returns err unchanged so
 // every failure branch of AtomicWrite can stay a one-line `return`.
 func noteWriteFailure(path string, err error) error {
@@ -138,10 +148,13 @@ func AtomicWrite(path string, data []byte, perm os.FileMode) error {
 		!errors.Is(syncErr, syscall.EINVAL) &&
 		!errors.Is(syncErr, syscall.ENOTSUP) &&
 		!errors.Is(syncErr, syscall.EOPNOTSUPP) {
-		return noteWriteFailure(path, fmt.Errorf("atomic write %s: parent dir fsync: %w", path, syncErr))
+		// Post-rename failure: the target already carries the new content —
+		// mark it so compensating-rollback callers can tell (see
+		// ErrReplacedNotSynced).
+		return noteWriteFailure(path, fmt.Errorf("atomic write %s: parent dir fsync: %w: %w", path, syncErr, ErrReplacedNotSynced))
 	}
 	if closeErr != nil && syncErr == nil {
-		return noteWriteFailure(path, fmt.Errorf("atomic write %s: parent dir close: %w", path, closeErr))
+		return noteWriteFailure(path, fmt.Errorf("atomic write %s: parent dir close: %w: %w", path, closeErr, ErrReplacedNotSynced))
 	}
 	noteWriteSuccess(path)
 	return nil

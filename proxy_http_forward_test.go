@@ -58,7 +58,7 @@ func TestHandleHTTP_RedirectNotFollowed(t *testing.T) {
 	defer origin.Close()
 
 	rr := httptest.NewRecorder()
-	handleHTTP(rr, httptest.NewRequest(http.MethodGet, origin.URL+"/redirect", http.NoBody))
+	handleHTTP(rr, httptest.NewRequest(http.MethodGet, origin.URL+"/redirect", http.NoBody), ProxyIdentity{})
 
 	if rr.Code != http.StatusFound {
 		t.Fatalf("status = %d, want 302 passed through to the client", rr.Code)
@@ -91,7 +91,7 @@ func TestHandleHTTP_URLUserinfoBecomesBasicAuth(t *testing.T) {
 
 	target := strings.Replace(origin.URL, "http://", "http://alice:s3cret@", 1)
 	rr := httptest.NewRecorder()
-	handleHTTP(rr, httptest.NewRequest(http.MethodGet, target, http.NoBody))
+	handleHTTP(rr, httptest.NewRequest(http.MethodGet, target, http.NoBody), ProxyIdentity{})
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rr.Code)
@@ -118,7 +118,7 @@ func TestHandleHTTP_ExplicitAuthorizationWins(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, target, http.NoBody)
 	req.Header.Set("Authorization", "Bearer client-chosen")
 
-	handleHTTP(httptest.NewRecorder(), req)
+	handleHTTP(httptest.NewRecorder(), req, ProxyIdentity{})
 
 	if gotAuth != "Bearer client-chosen" {
 		t.Fatalf("Authorization = %q, want the client's own header preserved", gotAuth)
@@ -161,7 +161,7 @@ func TestHandleHTTP_TimeoutCoversResponseBody(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleHTTP(httptest.NewRecorder(), req)
+		handleHTTP(httptest.NewRecorder(), req, ProxyIdentity{})
 	}()
 
 	select {
@@ -178,7 +178,7 @@ func TestHandleHTTP_TransportErrorStillBadGateway(t *testing.T) {
 	withDirectTransport(t)
 
 	rr := httptest.NewRecorder()
-	handleHTTP(rr, httptest.NewRequest(http.MethodGet, "http://"+deadTCPAddr(t)+"/x", http.NoBody))
+	handleHTTP(rr, httptest.NewRequest(http.MethodGet, "http://"+deadTCPAddr(t)+"/x", http.NoBody), ProxyIdentity{})
 
 	if rr.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want 502 for a failed upstream round trip", rr.Code)
@@ -201,7 +201,7 @@ func TestHandleHTTP_RequestBodyReachesOrigin(t *testing.T) {
 
 	body := strings.Repeat("payload-", 64)
 	rr := httptest.NewRecorder()
-	handleHTTP(rr, httptest.NewRequest(http.MethodPost, origin.URL, strings.NewReader(body)))
+	handleHTTP(rr, httptest.NewRequest(http.MethodPost, origin.URL, strings.NewReader(body)), ProxyIdentity{})
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rr.Code)
@@ -225,7 +225,7 @@ func TestHandleHTTP_ResponseHeadersAndBodyForwarded(t *testing.T) {
 	defer origin.Close()
 
 	rr := httptest.NewRecorder()
-	handleHTTP(rr, httptest.NewRequest(http.MethodGet, origin.URL, http.NoBody))
+	handleHTTP(rr, httptest.NewRequest(http.MethodGet, origin.URL, http.NoBody), ProxyIdentity{})
 
 	if rr.Code != http.StatusTeapot {
 		t.Fatalf("status = %d, want 418", rr.Code)

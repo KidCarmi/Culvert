@@ -206,7 +206,7 @@ func TestScanHTTPResponseBody_ChunkedOverLimitSignalsScanSkipped(t *testing.T) {
 	// the delta is measured across scan + forward, and must stay zero until
 	// the forward happens.
 	delta := scanSkippedDelta(func() {
-		handled, scanReadErr = scanHTTPResponseBody(w, r, resp)
+		handled, scanReadErr = scanHTTPResponseBody(w, r, resp, ProxyIdentity{})
 		got, readErr = io.ReadAll(resp.Body) // the forward
 	})
 
@@ -239,7 +239,7 @@ func TestScanHTTPResponseBody_UnderLimitDoesNotSignal(t *testing.T) {
 	resp := newChunkedResponse(content)
 	w := httptest.NewRecorder()
 
-	delta := scanSkippedDelta(func() { scanHTTPResponseBody(w, r, resp) })
+	delta := scanSkippedDelta(func() { scanHTTPResponseBody(w, r, resp, ProxyIdentity{}) })
 	if delta != 0 {
 		t.Errorf("scan_skipped delta = %d, want 0 — a fully scanned response must never raise the unscanned-content signal", delta)
 	}
@@ -260,7 +260,7 @@ func TestScanHTTPResponseBody_ExactlyAtLimitDoesNotSignal(t *testing.T) {
 	resp := newChunkedResponse(content)
 	w := httptest.NewRecorder()
 
-	delta := scanSkippedDelta(func() { scanHTTPResponseBody(w, r, resp) })
+	delta := scanSkippedDelta(func() { scanHTTPResponseBody(w, r, resp, ProxyIdentity{}) })
 	if delta != 0 {
 		t.Errorf("scan_skipped delta = %d, want 0 at exactly the limit (false positive)", delta)
 	}
@@ -287,7 +287,7 @@ func TestScanHTTPResponseBody_DeclaredOverLimitStillSignalsOnce(t *testing.T) {
 	}
 	w := httptest.NewRecorder()
 
-	delta := scanSkippedDelta(func() { scanHTTPResponseBody(w, r, resp) })
+	delta := scanSkippedDelta(func() { scanHTTPResponseBody(w, r, resp, ProxyIdentity{}) })
 	if delta != 1 {
 		t.Errorf("scan_skipped delta = %d, want exactly 1 for a declared over-limit body", delta)
 	}
@@ -308,7 +308,7 @@ func inspectScanFixture(t *testing.T, body []byte) (*http.Response, scanBodyOutc
 	}
 	var out scanBodyOutcome
 	delta := scanSkippedDelta(func() {
-		out = scanInspectBody(req, req, resp, &spyResponder{}, nil, ProxyIdentity{}, "cdn.example.com", "198.51.100.11", nil)
+		out = scanInspectBody(req, req, resp, &spyResponder{}, nil, ProxyIdentity{ClientIP: "198.51.100.11"}, "cdn.example.com", nil)
 	})
 	return resp, out, delta
 }
@@ -398,7 +398,7 @@ func TestScanInspectBody_ReadErrorStillFailsClosed(t *testing.T) {
 	}
 	var out scanBodyOutcome
 	delta := scanSkippedDelta(func() {
-		out = scanInspectBody(req, req, resp, &spyResponder{}, nil, ProxyIdentity{}, "cdn.example.com", "198.51.100.12", nil)
+		out = scanInspectBody(req, req, resp, &spyResponder{}, nil, ProxyIdentity{ClientIP: "198.51.100.12"}, "cdn.example.com", nil)
 	})
 	if out != scanReadError {
 		t.Fatalf("want scanReadError (fail closed), got %v", out)
@@ -428,7 +428,7 @@ func TestScanLimitSignal_ConcurrentResponsesEachCountedOnce(t *testing.T) {
 				r := httptest.NewRequest(http.MethodGet, "http://files.example.com/race.bin", http.NoBody)
 				r.RemoteAddr = "198.51.100.13:6000"
 				resp := newChunkedResponse(content) //nolint:bodyclose // test NopCloser body; the reassembled body is read below
-				handled, _ := scanHTTPResponseBody(httptest.NewRecorder(), r, resp)
+				handled, _ := scanHTTPResponseBody(httptest.NewRecorder(), r, resp, ProxyIdentity{})
 				if handled {
 					t.Error("clean prefix must not be blocked")
 				}

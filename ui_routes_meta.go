@@ -303,6 +303,32 @@ var uiRoutes = []uiRouteMetadata{
 			{Method: "GET", MinRole: RoleViewer, Note: "F10: defaults + bounds + schema (current values live on /api/decryption-exclusions)"},
 			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "F10: set auto-exclusion tunables; validate→persist→apply (persist-before-apply, no rollback branch); no config-version (off rollback surface)"},
 		}},
+	{Path: "/api/policy-learning", Handler: "apiPolicyLearningStatus", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "ADR-0025 M5A: factual node-local learning status (advisory-only feature; no enforcement effect)"},
+		}},
+	{Path: "/api/policy-learning/config", Handler: "apiPolicyLearningConfig", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "ADR-0025 M5A: governed enablement + recommendable-category guardrail + read-only recommendation-policy metadata"},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "ADR-0025 M5A: enable/disable + guardrail; 409 while a Learning session is active; persist-before-apply; no config-version (AdminDurable-only, off rollback surface)"},
+		}},
+	{Path: "/api/policy-learning/session", Handler: "apiPolicyLearningSession", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true, Note: "ADR-0025 M5A: start|complete|cancel the Learning session; deterministic 409 on invalid transitions; node-local state, no config-version"},
+		}},
+	{Path: "/api/policy-learning/sessions", Handler: "apiPolicyLearningSessions", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "ADR-0025 M5A: retained session listing/detail (?id=); factual summaries only — no subject tokens or cell contents"},
+		}},
+	{Path: "/api/policy-learning/recommendations", Handler: "apiPolicyLearningRecommendations", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "ADR-0025 M5A: recommendation listing/detail (?id=) with server-side staleness; advisory data only"},
+			{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true, Note: "ADR-0025 M5B: accept|reject decision. Operator floor = reject; the accept branch requires ADMIN via a second requireRole (documented C4 role-divergence, apiIdPRouter convention). Accept is DRAFT-ONLY (409 without RequireCommit) and creates one disabled draft rule fenced by if_version"},
+		}},
+	{Path: "/api/policy-learning/recommendations/generate", Handler: "apiPolicyLearningGenerate", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true, Note: "ADR-0025 M5A: deterministic generation from a COMPLETED session (M4 engine); 404 unknown session, 409 not-completed/stale-guardrails/key-changed/read-only"},
+		}},
 	{Path: "/api/urlcat", Handler: "apiURLCat", Domain: "policy", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer, Note: "GET branch protected by uiAuthMiddleware; no explicit requireRole call observed"},

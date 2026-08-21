@@ -151,6 +151,19 @@ type AuthLogFields struct {
 	// (the wire stays byte-identical); populated only on the CONNECT decision
 	// path. Maps to LogEntry.Dec.
 	Dec *DecryptionBlock
+	// AuthSource is the categorical authentication source that produced this
+	// request's identity context (F5): "local" | "exempt" | "unauth" | an IdP
+	// profile source ("oidc:<id>" / "saml:<id>" / bare profile ID from
+	// identityAuthSource). Populated ONLY from the server-side resolved auth
+	// state (resolveRequestAuth's source / ProxyIdentity.AuthSource) — never
+	// from any client-supplied header or request field (F6 removed the internal
+	// X-User-Identity transport entirely; identity travels as typed values).
+	// Empty on rows with no auth context (pre-auth blocks like
+	// IP_BLOCKED/RATE_LIMITED, AUTH_FAIL where no backend authenticated the
+	// credentials, and SOCKS5's boolean auth) — empty means "unattributed",
+	// never "unauthenticated" (that is "unauth").
+	// Maps to LogEntry.AuthSource (omitempty ⇒ wire byte-identical when empty).
+	AuthSource string
 }
 
 // applyTo copies the auth observability fields onto a log entry. It never touches
@@ -163,6 +176,7 @@ func (a AuthLogFields) applyTo(e *LogEntry) {
 	e.AuthSchemaVersion = a.SchemaVersion
 	e.RuleID = a.RuleID
 	e.Dec = a.Dec // nil ⇒ no dec block (byte-identical); set only on the decryption decision path
+	e.AuthSource = a.AuthSource
 }
 
 // The request-log engine (ring + persistent JSONL layer + TTL read cache +
@@ -1216,14 +1230,16 @@ func persistTunnelClose(ip, method, host, identity, ruleMatched, ruleID string, 
 // decryption client-cert live-rescue (ADR-0009), so the bypass is queryable in
 // the request/tunnel feed and not just inferable from SSLAction.
 func persistTunnelCloseReason(ip, method, host, identity, ruleMatched, ruleID string, bytesSent, bytesRecv int64, start time.Time, sslAction, actionTaken string) {
-	persistTunnelCloseDec(ip, method, host, identity, ruleMatched, ruleID, bytesSent, bytesRecv, start, sslAction, actionTaken, nil)
+	persistTunnelCloseDec(ip, method, host, identity, ruleMatched, ruleID, bytesSent, bytesRecv, start, sslAction, actionTaken, nil, "")
 }
 
 // persistTunnelCloseDec is persistTunnelCloseReason plus an optional ADR-0011
 // decryption-observability block on the feed entry. nil ⇒ no dec block (byte-identical).
-func persistTunnelCloseDec(ip, method, host, identity, ruleMatched, ruleID string, bytesSent, bytesRecv int64, start time.Time, sslAction, actionTaken string, dec *DecryptionBlock) {
+// authSource is the F5 categorical attribution from the resolved auth context
+// (ProxyIdentity.AuthSource); empty on paths with no auth context (SOCKS5).
+func persistTunnelCloseDec(ip, method, host, identity, ruleMatched, ruleID string, bytesSent, bytesRecv int64, start time.Time, sslAction, actionTaken string, dec *DecryptionBlock, authSource string) {
 	persistLogEntry(ip, method, host, "TUNNEL_CLOSED", ruleMatched, actionTaken, identity,
-		bytesSent, bytesRecv, time.Since(start).Milliseconds(), sslAction, "", AuthLogFields{RuleID: ruleID, Dec: dec})
+		bytesSent, bytesRecv, time.Since(start).Milliseconds(), sslAction, "", AuthLogFields{RuleID: ruleID, Dec: dec, AuthSource: authSource})
 }
 
 // recordTunnelClose accounts a raw tunnel's bytes AND writes its feed entry
@@ -1275,7 +1291,7 @@ func recordTunnelCloseGatedDec(match *PolicyMatch, id ProxyIdentity, method, hos
 	if dec != nil {
 		block = dec.toBlock(redact)
 	}
-	persistTunnelCloseDec(id.ClientIP, method, host, id.Identity, ruleName, ruleID, bytesSent, bytesRecv, start, sslAction, actionTaken, block)
+	persistTunnelCloseDec(id.ClientIP, method, host, id.Identity, ruleName, ruleID, bytesSent, bytesRecv, start, sslAction, actionTaken, block, id.AuthSource)
 }
 
 // persistLogEntry builds the LogEntry and writes it to the ring, JSONL file,

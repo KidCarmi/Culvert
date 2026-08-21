@@ -181,3 +181,52 @@ func TestCategoryGroupStore_DeleteNonExistent(t *testing.T) {
 		t.Error("expected error deleting non-existent group")
 	}
 }
+
+// TestRevision_PublishedWithContents (Codex round 20): the revision must
+// advance inside the same critical section that publishes the contents — a
+// post-unlock bump left a window where a reader observed NEW membership under
+// the OLD revision, so a revision-keyed memo validated a stale value against
+// live contents. The writer alternates two memberships (revision parity ⇔
+// membership parity); a reader that brackets a membership read with two equal
+// revision reads must always see the membership matching that revision's
+// parity. Concurrency stress: the pre-fix window is a few instructions wide,
+// so this is probabilistic per iteration but fails fast in practice under
+// -race scheduling.
+func TestRevision_PublishedWithContents(t *testing.T) {
+	s := New()
+	groupA := []Group{{ID: "id1", Name: "g", Categories: []string{"a"}}}
+	groupB := []Group{{ID: "id1", Name: "g", Categories: []string{"b"}}}
+	s.ReplaceAll(groupA) // rev 1 → membership "a" (odd rev ⇔ "a")
+	base := s.Revision()
+	if base != 1 {
+		t.Fatalf("baseline revision = %d, want 1", base)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 5000; i++ {
+			if i%2 == 0 {
+				s.ReplaceAll(groupB)
+			} else {
+				s.ReplaceAll(groupA)
+			}
+		}
+	}()
+
+	for i := 0; i < 20000; i++ {
+		r1 := s.Revision()
+		matchedA, _ := s.MatchesCategoryByID("id1", "a")
+		r2 := s.Revision()
+		if r1 != r2 {
+			continue // a replacement raced the bracket; nothing provable
+		}
+		// Stable bracket: rev r1 fully published this membership. Odd
+		// revisions (1, 3, ...) carry "a"; even carry "b".
+		wantA := r1%2 == 1
+		if matchedA != wantA {
+			t.Fatalf("revision %d observed membership a=%v, want a=%v — contents published before the revision advanced", r1, matchedA, wantA)
+		}
+	}
+	<-done
+}

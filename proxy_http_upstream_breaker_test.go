@@ -54,7 +54,7 @@ func TestHandleHTTP_BrokenParentProxyTripsBreakerThenDirectFallback(t *testing.T
 	// to the parent's breaker.
 	for i := 1; i <= 2; i++ {
 		rr := httptest.NewRecorder()
-		handleHTTP(rr, httptest.NewRequest(http.MethodGet, origin.URL, http.NoBody))
+		handleHTTP(rr, httptest.NewRequest(http.MethodGet, origin.URL, http.NoBody), ProxyIdentity{})
 		if rr.Code != http.StatusBadGateway {
 			t.Fatalf("request %d via dead parent: status %d, want 502", i, rr.Code)
 		}
@@ -67,7 +67,7 @@ func TestHandleHTTP_BrokenParentProxyTripsBreakerThenDirectFallback(t *testing.T
 	// Request 3: breaker open → pool exhausted → DIRECT egress reaches the
 	// origin, and the fail-open fallback is recorded.
 	rr := httptest.NewRecorder()
-	handleHTTP(rr, httptest.NewRequest(http.MethodGet, origin.URL, http.NoBody))
+	handleHTTP(rr, httptest.NewRequest(http.MethodGet, origin.URL, http.NoBody), ProxyIdentity{})
 	if rr.Code != http.StatusOK || rr.Body.String() != "direct-ok" {
 		t.Fatalf("direct-fallback request: status %d body %q, want 200 %q", rr.Code, rr.Body.String(), "direct-ok")
 	}

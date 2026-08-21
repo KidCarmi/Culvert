@@ -491,7 +491,7 @@ func handleH2StreamOutcome(w http.ResponseWriter, out exchangeOutcome, req *http
 		// Per-rule "log full URL" parity with the H1 path (log-only; the enclosing
 		// CONNECT was already counted at allow time).
 		if match != nil && match.Rule != nil && match.Rule.LogFullURI && ruleLogsTraffic(match.Rule) {
-			recordRequestLogOnly(clientIP, req.Method, hostOnly, "OK", match.Rule.Name, string(ActionAllow), id.Identity, "inspect", policyLogURI(hostOnly, reqPath), AuthLogFields{RuleID: match.Rule.ID, Dec: decBlock})
+			recordRequestLogOnly(clientIP, req.Method, hostOnly, "OK", match.Rule.Name, string(ActionAllow), id.Identity, "inspect", policyLogURI(hostOnly, reqPath), AuthLogFields{RuleID: match.Rule.ID, Dec: decBlock, AuthSource: id.AuthSource})
 		}
 	case exBlocked:
 		// The h2 block responder already wrote the 403 to the stream.

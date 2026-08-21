@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/netip"
@@ -14,23 +15,40 @@ import (
 	"github.com/KidCarmi/Culvert/internal/ssrf"
 )
 
-// defaultPolicyAction controls what happens when no PBAC rule matches a request.
-// "allow" = passthrough mode (initial setup), "deny" = zero-trust (production).
-// Set by setDefaultPolicyAction() during startup based on config or rule count.
-// Stored as 1 (allow) or 0 (deny) via atomic int32 to avoid data races.
-var defaultPolicyActionAllow int32 // 0 = deny (default)
+// defaultPolicyActionState controls what happens when no PBAC rule matches a
+// request: allow = passthrough mode (initial setup), deny = zero-trust
+// (production). Set by setDefaultPolicyAction() during startup based on
+// config or rule count. It packs the action value and its change signal into
+// ONE atomic word: bit 0 = allow flag, bits 1+ = a set counter. The counter
+// exists because the value alone is two-state, so "same value before and
+// after" cannot prove it held throughout an interval (ABA); it shares the
+// value's word because publishing them as two separate atomics left a window
+// where a descheduled setter had published the new VALUE but not the new
+// SIGNAL — enforcement could run under the new action while the policy-
+// content memo still validated against the old key (Codex round 19). Every
+// set strictly increases the word, so a loaded word is simultaneously the
+// current action AND a fencing revision that any later set invalidates.
+// Process-local change signal only (memo keys), never an identity.
+// Zero value = deny, revision 0 (the fail-closed default).
+var defaultPolicyActionState atomic.Uint64
 
 func setDefaultPolicyAction(action string) {
+	var allow uint64
 	if action == "allow" {
-		atomic.StoreInt32(&defaultPolicyActionAllow, 1)
-	} else {
-		atomic.StoreInt32(&defaultPolicyActionAllow, 0)
+		allow = 1
+	}
+	for {
+		old := defaultPolicyActionState.Load()
+		next := ((old>>1)+1)<<1 | allow
+		if defaultPolicyActionState.CompareAndSwap(old, next) {
+			return
+		}
 	}
 }
 
 // defaultPolicyAction returns the current default action string ("allow"/"deny").
 func defaultPolicyAction() string {
-	if atomic.LoadInt32(&defaultPolicyActionAllow) == 1 {
+	if defaultPolicyActionState.Load()&1 == 1 {
 		return "allow"
 	}
 	return "deny"
@@ -74,6 +92,49 @@ func scrubForwardedHeaders(r *http.Request) {
 
 	// Always remove internal identity header before forwarding.
 	r.Header.Del(hdrUserIdentity)
+
+	// Trailer hardening: Go forwards declared request trailers on r.Write, and
+	// the scrub above touches r.Header only (noted in the 2026-07-11 security
+	// review). The same identity/topology keys must not ride through as
+	// trailers either. The early deletion alone is NOT enough (Codex fix):
+	// net/http merges the RECEIVED trailer fields back into r.Trailer when the
+	// body reaches EOF — after this scrub ran — and both the upstream
+	// transport (handleHTTP forwards r itself) and the WebSocket r.Write emit
+	// trailers from that same map, so a client could smuggle the scrubbed
+	// keys as LATE trailers. The body wrapper re-applies the deletion at EOF:
+	// the outbound writer reads the body to EOF and only then writes the
+	// trailer section, in the same goroutine, so the re-scrub is ordered
+	// after the merge and before the forward.
+	if r.Trailer != nil {
+		scrubTrailerKeys(r.Trailer)
+		if r.Body != nil && r.Body != http.NoBody {
+			r.Body = &trailerRescrubBody{ReadCloser: r.Body, trailer: r.Trailer}
+		}
+	}
+}
+
+// scrubTrailerKeys removes the identity/topology keys the forward-path scrub
+// bans from request trailers.
+func scrubTrailerKeys(t http.Header) {
+	t.Del(hdrForwardedFor)
+	t.Del(hdrRealIP)
+	t.Del(hdrUserIdentity)
+}
+
+// trailerRescrubBody re-applies the trailer scrub when the request body is
+// fully read (see scrubForwardedHeaders — the server merges received trailer
+// values into r.Trailer at body EOF, which would undo an early-only scrub).
+type trailerRescrubBody struct {
+	io.ReadCloser
+	trailer http.Header
+}
+
+func (b *trailerRescrubBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err != nil {
+		scrubTrailerKeys(b.trailer)
+	}
+	return n, err
 }
 
 // Canonical header names, hoisted so the scrub does not re-derive them per
@@ -188,9 +249,11 @@ func policyLogURI(host, path string) string {
 // LogFullURI — so a blocked download keeps its full URL, the events that matter
 // most for investigation. Blocks are always logged (no LogTraffic gate); only
 // the URI is conditional. Counting matches the prior recordRequest path.
-func recordInspectBlock(clientIP, status, ruleMatched, actionTaken, hostOnly, path string, match *PolicyMatch, dec *DecryptionBlock) {
+// id is the typed server-resolved identity context (F6): the row carries the
+// authenticated identity and auth-source provenance — never a header value.
+func recordInspectBlock(id ProxyIdentity, status, ruleMatched, actionTaken, hostOnly, path string, match *PolicyMatch, dec *DecryptionBlock) {
 	uri := ""
-	auth := AuthLogFields{Dec: dec} // ADR-0011: block rows carry the inspected dec block too
+	auth := AuthLogFields{Dec: dec, AuthSource: id.AuthSource} // ADR-0011: block rows carry the inspected dec block too
 	if match != nil && match.Rule != nil {
 		if match.Rule.LogFullURI {
 			uri = policyLogURI(hostOnly, path)
@@ -204,7 +267,7 @@ func recordInspectBlock(clientIP, status, ruleMatched, actionTaken, hostOnly, pa
 			auth.RuleID = match.Rule.ID
 		}
 	}
-	recordRequestAuthURI(clientIP, "CONNECT", hostOnly, status, ruleMatched, actionTaken, "", "inspect", uri, auth)
+	recordRequestAuthURI(id.ClientIP, "CONNECT", hostOnly, status, ruleMatched, actionTaken, id.Identity, "inspect", uri, auth)
 }
 
 // authOutcome carries the Stage-1 adaptive-auth result from
@@ -354,6 +417,7 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 					// Proxy-Authorization header is present, so malformed
 					// credentials keep today's 407 below.
 					authLog = authLogFieldsFor(d)
+					authLog.AuthSource = authenticatedSource // F5: server-side source (still "unauth" pre-credential)
 					authenticatedSource = authSourceExempt
 					incAuthExempt()
 					logger.Printf("AUTH_EXEMPT rule=%q id=%q %s -> %q {req_id=%s}",
@@ -383,6 +447,7 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 					// Default whenever a Proxy-Authorization header is present). The
 					// kill switch does NOT disable CR.
 					authLog = authLogFieldsFor(d)
+					authLog.AuthSource = authenticatedSource // F5: server-side source (still "unauth" pre-credential)
 					atomic.AddInt64(&statAuthFail, 1)
 					incAuthCredentialRequired()
 					w.Header().Set("Proxy-Authenticate", `Basic realm="Culvert"`)
@@ -403,6 +468,7 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 					// resolveNoCredAuthOutcome returns Default whenever a
 					// Proxy-Authorization header is present).
 					authLog = authLogFieldsFor(d)
+					authLog.AuthSource = authenticatedSource // F5: server-side source (still "unauth" pre-credential)
 					// Only a browser can complete an interactive SSO flow. Resolving the
 					// portal URL can ALLOCATE IdP callback state (PKCE / SAML stores) as a
 					// side effect, so it is done ONLY for browser clients: a non-browser or
@@ -494,14 +560,18 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 // already-authenticated request. It returns true if it has written a terminal
 // block response (403 / block page) and the caller must return. Behaviour is
 // identical to the previously-inlined gates (DEBT-002 extraction; no logic change).
-func preDispatchBlocked(w http.ResponseWriter, r *http.Request, clientIP, host, reqID, authenticatedIdentity string, authLog AuthLogFields) bool {
+// preDispatchBlocked returns the status it recorded ("" when nothing blocked)
+// and whether it wrote a terminal block response — the status return is the
+// single source of truth for the M3 pre-dispatch learning observation
+// (negative/context evidence). Enforcement behavior is unchanged.
+func preDispatchBlocked(w http.ResponseWriter, r *http.Request, clientIP, host, reqID, authenticatedIdentity string, authLog AuthLogFields) (string, bool) {
 	// Legacy blocklist check (still active alongside policy engine).
 	if bl.IsBlocked(host) {
 		atomic.AddInt64(&statBlocked, 1)
 		http.Error(w, "Forbidden by Culvert", http.StatusForbidden)
 		recordRequestAuth(clientIP, r.Method, r.Host, "BLOCKED", "blocklist", "", authenticatedIdentity, authLog)
 		logger.Printf("BLOCKED %s -> %q {req_id=%s identity=%s action=block source=blocklist}", clientIP, sanitizeLog(host), reqID, sanitizeLog(authenticatedIdentity))
-		return true
+		return "BLOCKED", true
 	}
 
 	// Threat intelligence feed check — covers both plain HTTP destinations
@@ -513,7 +583,7 @@ func preDispatchBlocked(w http.ResponseWriter, r *http.Request, clientIP, host, 
 			recordRequestAuth(clientIP, r.Method, r.Host, "THREAT_BLOCKED", result.Source, result.Reason, authenticatedIdentity, authLog)
 			logger.Printf("THREAT_BLOCKED domain %s -> %q (%q)", clientIP, sanitizeLog(host), sanitizeLog(result.Reason))
 			serveBlockPage(w, r.Host, "Threat Intelligence", result.Reason)
-			return true
+			return "THREAT_BLOCKED", true
 		}
 		// Full-URL check for non-CONNECT (plain HTTP) requests.
 		if r.Method != http.MethodConnect && !isWebSocketUpgrade(r) {
@@ -522,7 +592,7 @@ func preDispatchBlocked(w http.ResponseWriter, r *http.Request, clientIP, host, 
 				recordRequestAuth(clientIP, r.Method, r.Host, "THREAT_BLOCKED", result.Source, result.Reason, authenticatedIdentity, authLog)
 				logger.Printf("THREAT_BLOCKED url %s -> %q (%q)", clientIP, sanitizeLog(r.Host), sanitizeLog(result.Reason))
 				serveBlockPage(w, r.Host, "Threat Intelligence", result.Reason)
-				return true
+				return "THREAT_BLOCKED", true
 			}
 		}
 	}
@@ -532,7 +602,7 @@ func preDispatchBlocked(w http.ResponseWriter, r *http.Request, clientIP, host, 
 		atomic.AddInt64(&statBlocked, 1)
 		http.Error(w, "Forbidden by plugin", http.StatusForbidden)
 		recordRequestAuth(clientIP, r.Method, r.Host, "BLOCKED", "plugin", "", authenticatedIdentity, authLog)
-		return true
+		return "BLOCKED", true
 	}
 
 	// File block profile — check URL path extension for non-tunnel requests.
@@ -545,10 +615,10 @@ func preDispatchBlocked(w http.ResponseWriter, r *http.Request, clientIP, host, 
 			recordRequestAuth(clientIP, r.Method, r.Host, "FILE_BLOCKED", ext, "", authenticatedIdentity, authLog)
 			logger.Printf("FILE_BLOCKED %s -> %q%q (ext=%q)", clientIP, sanitizeLog(host), sanitizeLog(r.URL.Path), sanitizeLog(ext))
 			serveBlockPage(w, r.Host+r.URL.Path, "File Block", ext)
-			return true
+			return "FILE_BLOCKED", true
 		}
 	}
-	return false
+	return "", false
 }
 
 // applyPolicyDecision dispatches the matched policy action (drop / block page
@@ -557,7 +627,16 @@ func preDispatchBlocked(w http.ResponseWriter, r *http.Request, clientIP, host, 
 // response and the caller must return; false means the request proceeds to
 // transport dispatch. Behaviour is identical to the previously-inlined switch
 // (DEBT-002 extraction; no logic change).
-func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host, reqID, authenticatedIdentity string, authLog AuthLogFields, match *PolicyMatch) bool { //nolint:gocognit,cyclop,funlen // policy-action dispatch is inherently branchy; isolated and independently testable (DEBT-002)
+// applyPolicyDecision returns the status it recorded for this decision (the
+// request-log Status taxonomy: OK / POLICY_DROP / POLICY_BLOCK /
+// POLICY_REDIRECT / FILE_BLOCKED / POLICY_DEFAULT_DENY) and whether it wrote
+// a terminal response. The status return is the single source of truth for
+// the M2 learning observation — reconstruction at the call site would
+// duplicate this dispatch. The learning decision-identity bracket is captured
+// by the CALLER before policy evaluation (learnDecisionKeySnapshot, Codex
+// rounds 20/21) — it spans this whole dispatch, so no per-branch capture is
+// needed here. Enforcement behavior is unchanged.
+func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host, reqID, authenticatedIdentity string, authLog AuthLogFields, match *PolicyMatch) (string, bool) { //nolint:gocognit,cyclop,funlen // policy-action dispatch is inherently branchy; isolated and independently testable (DEBT-002)
 	if match != nil { //nolint:nestif // policy action dispatch is inherently branchy
 		ruleMet.RecordHit(match.Rule.Name)
 		// Rename-safe decision attribution: stamp the matched rule's stable ULID
@@ -589,14 +668,14 @@ func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host,
 					panic(http.ErrAbortHandler)
 				}
 			}
-			return true
+			return "POLICY_DROP", true
 
 		case ActionBlockPage:
 			atomic.AddInt64(&statBlocked, 1)
 			recordRequestAuthURI(clientIP, r.Method, r.Host, "POLICY_BLOCK", match.Rule.Name, string(ActionBlockPage), authenticatedIdentity, "", ruleURI, authLog)
 			logger.Printf("POLICY_BLOCK rule=%q pri=%s %s -> %q [%s] {req_id=%s identity=%s rule=%s action=block}", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, sanitizeLog(host), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), sanitizeLog(match.Rule.Name))
 			serveBlockPage(w, r.Host, string(match.Rule.DestCategory), match.Rule.Name)
-			return true
+			return "POLICY_BLOCK", true
 
 		case ActionRedirect:
 			atomic.AddInt64(&statBlocked, 1)
@@ -604,11 +683,11 @@ func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host,
 			if !isSafeRedirectURL(match.Rule.RedirectURL) {
 				logger.Printf("POLICY_REDIRECT rule=%q: invalid redirect URL %q — blocking", sanitizeLog(match.Rule.Name), sanitizeLog(match.Rule.RedirectURL))
 				http.Error(w, "Forbidden", http.StatusForbidden)
-				return true
+				return "POLICY_REDIRECT", true
 			}
 			logger.Printf("POLICY_REDIRECT rule=%q pri=%s %s -> %q => %q [%s] {req_id=%s identity=%s rule=%s action=redirect}", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, sanitizeLog(host), sanitizeLog(match.Rule.RedirectURL), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), sanitizeLog(match.Rule.Name))
-			http.Redirect(w, r, match.Rule.RedirectURL, http.StatusFound)
-			return true
+			http.Redirect(w, r, match.Rule.RedirectURL, http.StatusFound) // #nosec G710 -- admin-configured rule action target; the isSafeRedirectURL guard above blocks unsafe values
+			return "POLICY_REDIRECT", true
 
 		case ActionAllow:
 			// Per-rule file profile: even when the policy allows the request,
@@ -623,7 +702,7 @@ func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host,
 					recordRequestAuthURI(clientIP, r.Method, r.Host, "FILE_BLOCKED", string(match.Rule.FileProfile), match.Rule.Name, authenticatedIdentity, "", ruleURI, authLog)
 					logger.Printf("FILE_BLOCKED (policy profile) %s -> %q%q (profile=%q rule=%q)", clientIP, sanitizeLog(host), sanitizeLog(r.URL.Path), sanitizeLog(string(match.Rule.FileProfile)), sanitizeLog(match.Rule.Name))
 					serveBlockPage(w, r.Host+r.URL.Path, "File Block (Policy)", string(match.Rule.FileProfile))
-					return true
+					return "FILE_BLOCKED", true
 				}
 			}
 			if ruleLogsTraffic(match.Rule) {
@@ -637,21 +716,23 @@ func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host,
 			// Fall through to normal handling below.
 		}
 	} else {
-		// No rule matched — apply the configured default action.
-		if defaultPolicyAction() == "allow" {
+		// No rule matched — apply the configured default action (one load of
+		// the packed state word; the caller's pre-evaluation identity snapshot
+		// brackets this read for the learning stamp).
+		if defaultPolicyActionState.Load()&1 == 1 {
 			// Passthrough mode: allow all unmatched traffic (initial setup).
 			recordRequestAuth(clientIP, r.Method, r.Host, "OK", "default-allow", "Allow", authenticatedIdentity, authLog)
-		} else {
-			// Zero Trust: deny by default. Serve the custom HTML block page so
-			// end-users see a clear, branded explanation.
-			atomic.AddInt64(&statBlocked, 1)
-			recordRequestAuth(clientIP, r.Method, r.Host, "POLICY_DEFAULT_DENY", "", "", authenticatedIdentity, authLog)
-			logger.Printf("POLICY_DEFAULT_DENY %s %s %q {req_id=%s identity=%s action=deny}", clientIP, r.Method, sanitizeLog(r.Host), reqID, sanitizeLog(authenticatedIdentity))
-			serveBlockPage(w, r.Host, "Default Deny", "No matching policy rule")
-			return true
+			return "OK", false
 		}
+		// Zero Trust: deny by default. Serve the custom HTML block page so
+		// end-users see a clear, branded explanation.
+		atomic.AddInt64(&statBlocked, 1)
+		recordRequestAuth(clientIP, r.Method, r.Host, "POLICY_DEFAULT_DENY", "", "", authenticatedIdentity, authLog)
+		logger.Printf("POLICY_DEFAULT_DENY %s %s %q {req_id=%s identity=%s action=deny}", clientIP, r.Method, sanitizeLog(r.Host), reqID, sanitizeLog(authenticatedIdentity))
+		serveBlockPage(w, r.Host, "Default Deny", "No matching policy rule")
+		return "POLICY_DEFAULT_DENY", true
 	}
-	return false
+	return "OK", false
 }
 
 // recordRequestTelemetry records per-request observability after dispatch:
@@ -893,6 +974,16 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	reqID := setupRequestTracing(w, r)
 
+	// ── Ingress trust boundary (security review 2026-08-13) ─────────────────
+	// X-User-Identity is an INTERNAL header: the auth layer below re-stamps it
+	// for the plain-HTTP logging consumers (proxy_http.go). A client-supplied
+	// value must never survive into authentication, policy evaluation, or log
+	// attribution — on the identity-free paths (default-Exempt, scoped exempt,
+	// no-backend inert) nothing below overwrites it, so delete it here
+	// unconditionally, fail-closed for every downstream branch. The egress
+	// scrubForwardedHeaders still strips it before any upstream forward.
+	r.Header.Del("X-User-Identity")
+
 	// PROXY-plane panic backstop (record-only; never writes an HTTP status, so a
 	// hijacked CONNECT/WS tunnel is never corrupted and the happy path is
 	// byte-identical). See crashguard.go.
@@ -933,12 +1024,14 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	authenticatedGroups := auth.groups
 	authenticatedSource := auth.source
 	authLog := auth.log
+	// F5: stamp the categorical auth source onto every log row this request
+	// produces. Server-side resolved state only — never a header value.
+	authLog.AuthSource = authenticatedSource
 
-	// Set internal identity headers — scrubForwardedHeaders removes them
-	// before forwarding upstream.
-	if authenticatedIdentity != "" {
-		r.Header.Set("X-User-Identity", authenticatedIdentity)
-	}
+	// F6: identity travels as TYPED server-side values only (ProxyIdentity /
+	// authOutcome) — the internal X-User-Identity header transport is removed.
+	// The ingress delete above and the egress scrubForwardedHeaders remain as
+	// defense-in-depth; nothing internal stamps or reads the header anymore.
 
 	host := r.Host
 	if h, _, err := net.SplitHostPort(host); err == nil {
@@ -949,8 +1042,15 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	// A destination that cannot be IDNA-normalized (invalid punycode label)
 	// would flow into every downstream matcher (blocklist, threat feed,
 	// policy FQDN, category) un-normalized. No legitimate client emits
-	// invalid punycode, so reject outright instead of failing open.
-	if _, ok := normalizeHostStrict(host); !ok {
+	// invalid punycode, so reject outright instead of failing open. The
+	// canonical form is kept for the learning observations below (Codex fix:
+	// spelling aliases like Example.COM / example.com. are ONE destination to
+	// policy and category resolution, so they must be ONE evidence key — the
+	// raw spelling made aliases consume separate TopHosts budget entries and
+	// perturb evidence hashes). Matchers keep receiving the raw host: each
+	// normalizes internally, and changing their input is out of scope here.
+	normHost, ok := normalizeHostStrict(host)
+	if !ok {
 		atomic.AddInt64(&statBlocked, 1)
 		http.Error(w, "Bad Request: invalid host", http.StatusBadRequest)
 		recordRequestAuth(clientIP, r.Method, r.Host, "INVALID_HOST", "idna", "", authenticatedIdentity, authLog)
@@ -958,24 +1058,57 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// M2 decision context (Codex rounds 21/24/25): snapshot the FULL policy
+	// identity key (rulebase generation, category-group revision, packed
+	// default-action word — all monotonic) plus the engine and its
+	// acceptance-window generation BEFORE the pre-dispatch gates run, so BOTH
+	// learning emissions below — the pre-dispatch negative evidence and the
+	// Stage-2 decision — bind to the session that was active when the request
+	// was decided, and the identity stamps can prove the config was still
+	// current at stamp time (or witness that it was not). Captured only while
+	// learning is active (two atomic loads otherwise).
+	learnCtx, learnHaveCtx := learnDecisionSnapshot()
+
 	// ── Pre-policy content blocks (blocklist / threat / plugin / file) ──────
-	// Extracted to preDispatchBlocked (DEBT-002). Returns true if it already
+	// Extracted to preDispatchBlocked (DEBT-002). blocked=true means it already
 	// wrote a terminal block response.
-	if preDispatchBlocked(w, r, clientIP, host, reqID, authenticatedIdentity, authLog) {
+	if preStatus, blocked := preDispatchBlocked(w, r, clientIP, host, reqID, authenticatedIdentity, authLog); blocked {
+		// M3: pre-dispatch blocks are context/negative learning evidence
+		// (never blocks the request; bound to the captured session window).
+		learnObservePreDispatch(auth, normHost, r.Method, preStatus, learnCtx, learnHaveCtx)
 		return
 	}
 
 	// ── Policy engine (PBAC) pre-check ───────────────────────────────────────
-	// X-User-Identity is the authenticated identity set by the auth layer
-	// (OIDC/LDAP); scrubForwardedHeaders already stripped any client-supplied
-	// value, so this value is safe to use for policy matching.
-	identity := r.Header.Get("X-User-Identity")
-	match := policyStore.Evaluate(clientIP, identity, authenticatedSource, host, authenticatedGroups)
+	// The identity comes from the resolved auth context DIRECTLY — never from
+	// the X-User-Identity request header. The header was deleted at ingress
+	// above and re-stamped only when authentication produced an identity; it is
+	// transport for the internal HTTP logging consumers, not an authority
+	// boundary (see the note at the stamping site above).
+	match := policyStore.Evaluate(clientIP, authenticatedIdentity, authenticatedSource, host, authenticatedGroups)
+
+	// M3 (H2-drop gap closure): the ActionDrop branch's HTTP/2 fallback aborts
+	// via panic(http.ErrAbortHandler) BEFORE applyPolicyDecision returns, which
+	// would lose the observation. The Drop branch's recorded status is
+	// deterministic (always POLICY_DROP), so emit it pre-abort here and skip
+	// the duplicate on the normal terminal path below. Enforcement untouched.
+	isDrop := match != nil && match.Rule != nil && match.Action == ActionDrop
+	if isDrop {
+		learnObserveDecision(auth, normHost, r.Method, match, "POLICY_DROP", "", learnCtx, learnHaveCtx)
+	}
 
 	// ── Policy action dispatch ──────────────────────────────────────────────
-	// Extracted to applyPolicyDecision (DEBT-002). Returns true if it wrote a
-	// terminal drop / block / redirect / deny response.
-	if applyPolicyDecision(w, r, clientIP, host, reqID, authenticatedIdentity, authLog, match) {
+	// Extracted to applyPolicyDecision (DEBT-002). terminal=true means it wrote
+	// a terminal drop / block / redirect / deny response.
+	decisionStatus, terminal := applyPolicyDecision(w, r, clientIP, host, reqID, authenticatedIdentity, authLog, match)
+	if terminal {
+		// M2: one learning observation per policy decision (blocked branch;
+		// the Drop case was already emitted pre-abort above). Non-blocking,
+		// drop-on-full; a nil (disabled) engine costs one atomic load.
+		// Learning has zero authority here — see ADR-0025.
+		if !isDrop {
+			learnObserveDecision(auth, normHost, r.Method, match, decisionStatus, "", learnCtx, learnHaveCtx)
+		}
 		return
 	}
 
@@ -986,6 +1119,11 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	sslDec := resolveSSLDecision(match, host, clientIP)
 	sslAction := sslDec.Action
+
+	// M2: one learning observation per policy decision (allowed branch, after
+	// the SSL decision so the observation carries it). Same non-blocking,
+	// advisory-only contract as the blocked branch above.
+	learnObserveDecision(auth, normHost, r.Method, match, decisionStatus, string(sslAction), learnCtx, learnHaveCtx)
 
 	// Identity context forwarded to SSL-inspect (consumed by CDR today;
 	// future audit enrichment can read this without re-parsing headers).
@@ -1002,7 +1140,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	case isWebSocketUpgrade(r):
 		handleWebSocket(w, r, match, proxyID)
 	default:
-		handleHTTP(w, r)
+		handleHTTP(w, r, proxyID)
 	}
 
 	recordRequestTelemetry(r, start, sslAction, match, host, clientIP)
