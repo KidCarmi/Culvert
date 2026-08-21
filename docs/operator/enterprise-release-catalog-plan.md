@@ -176,6 +176,9 @@ baked-ed25519 model Phase 1 shipped — see
 - ✅ CI signs the catalog with the keyless backend and proves the
   end-to-end verify + image-signature identity match in the release gate
   (P2b-2b).
+- ✅ Catalog freshness without a version bump: a weekly re-sign cron (M1-4)
+  re-signs the same `catalog_version` with a renewed `expires_at`. See
+  [`catalog-resign-runbook.md`](catalog-resign-runbook.md).
 
 Acceptance:
 - 2a: a release cannot attach a catalog unless generation + digest-match +

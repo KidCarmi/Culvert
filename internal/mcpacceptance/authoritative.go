@@ -40,6 +40,21 @@ func (h *Harness) preflightAuthoritative() error {
 	if op == nil {
 		return fmt.Errorf("acceptance: authoritative preflight requires an operator environment")
 	}
+	// PKI-lifetime gate (v1.0.203 incident class): the operator identity material
+	// must be currently valid AND remain valid through the requested bounded run
+	// timeout, verified against the configured trust roots and TLS server name,
+	// BEFORE any child process or tripwire starts. Preflight readiness is
+	// time-sensitive: this check runs at every authoritative invocation, so
+	// material that aged out since an earlier preflight fails here, not as a
+	// mid-run TLS cascade.
+	now := h.now()
+	horizon := h.runHorizon
+	if horizon < 0 {
+		horizon = 0 // a negative -timeout cannot shrink the at-`now` requirement
+	}
+	if err := validateFixturePKI(h.fixture, now, now.Add(horizon)); err != nil {
+		return err
+	}
 	raw, err := os.ReadFile(filepath.Clean(op.policyFile)) // #nosec G304 -- operator-supplied policy path, statted regular+bounded
 	if err != nil {
 		return fmt.Errorf("acceptance: read operator policy: %w", err)

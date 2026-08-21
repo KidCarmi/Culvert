@@ -68,7 +68,7 @@ func TestApplyConfigSnapshot_RateLimitExemptNilSkipsEmptyClears(t *testing.T) {
 		t.Error("nil RateLimitExempt must leave existing exemptions intact (skip)")
 	}
 
-	// [] → clear: an explicit empty list wipes the whitelist.
+	// [] → clear: an explicit empty list wipes the exempt list.
 	applyConfigSnapshot(ConfigSnapshot{Version: 3, RateLimitExempt: []string{}})
 	if rl.IsExempt("203.0.113.11") {
 		t.Error("empty RateLimitExempt must clear exemptions")
@@ -84,7 +84,7 @@ func TestValidateConfigSnapshot_RejectsRateLimitExemptOverflow(t *testing.T) {
 
 // The CP→DP snapshot travels as JSON. An empty exemption list (operator
 // removed the last exemption) must survive the round-trip as a non-nil []
-// so the DP CLEARS its stale whitelist — not get dropped by `omitempty` and
+// so the DP CLEARS its stale exempt list — not get dropped by `omitempty` and
 // silently treated as nil→skip, leaving the IP exempt until restart.
 func TestConfigSnapshot_EmptyRateLimitExemptSurvivesJSONAndClearsDP(t *testing.T) {
 	snapshotRLExemptions(t)

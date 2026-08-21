@@ -1527,12 +1527,57 @@ gen_passphrase() {
 # leave the CA passphrase to the operator.
 setup_at_rest_encryption() {
   local envfile="$INSTALL_DIR/.env"
-  if secret_already_set CULVERT_LOG_PASSPHRASE "$envfile" || secret_already_set CULVERT_CA_PASSPHRASE "$envfile"; then
+  local log_set=0 ca_set=0
+  secret_already_set CULVERT_LOG_PASSPHRASE "$envfile" && log_set=1
+  secret_already_set CULVERT_CA_PASSPHRASE "$envfile" && ca_set=1
+
+  # CA passphrase already set: nothing left for this function to do (we never
+  # overwrite an existing value, and a set CA passphrase means at-rest
+  # encryption was already decided one way or another).
+  if [[ "$ca_set" == 1 ]]; then
     info "Encryption passphrase already configured — keeping existing values."
     return
   fi
 
   local fresh=0; is_fresh_deployment && fresh=1
+
+  # On an EXISTING deployment, a pre-set log passphrase is the full contract
+  # (the CA passphrase is deliberately left to the operator — see above).
+  if [[ "$log_set" == 1 && "$fresh" != 1 ]]; then
+    info "Encryption passphrase already configured — keeping existing values."
+    return
+  fi
+
+  # Fresh deployment with a log passphrase already set (e.g. exported in the
+  # host env by an automated install, or left over from an interrupted prior
+  # run) but no CA passphrase yet: reuse the existing log passphrase for the
+  # CA key rather than silently leaving the SSL-inspection CA private key
+  # unencrypted with no warning at all.
+  if [[ "$log_set" == 1 && "$ca_set" != 1 ]]; then
+    local existing_pass="${CULVERT_LOG_PASSPHRASE:-}"
+    if [[ -z "$existing_pass" && -f "$envfile" ]]; then
+      existing_pass="$(grep -E '^CULVERT_LOG_PASSPHRASE=' "$envfile" | tail -1 | cut -d= -f2-)"
+    fi
+    # .env values round-trip through docker compose's own interpolation (it
+    # expands $-references when resolving .env, same as the interactive
+    # choice=2 path guards against below) — writing a value containing those
+    # characters here could silently persist a DIFFERENT string than the one
+    # actually used as CULVERT_LOG_PASSPHRASE, so CA and log encryption keys
+    # would diverge instead of matching as intended.
+    if [[ -n "$existing_pass" ]] && ! printf '%s' "$existing_pass" | LC_ALL=C grep -q '[^A-Za-z0-9._@%^!*()+=:,-]'; then
+      env_put CULVERT_CA_PASSPHRASE "$existing_pass" "$envfile"
+      info "Fresh deployment — also encrypting the SSL-inspection CA key with the existing CULVERT_LOG_PASSPHRASE."
+    elif [[ -n "$existing_pass" ]]; then
+      warn "CULVERT_LOG_PASSPHRASE contains characters that are not safe to persist verbatim in $envfile"
+      warn "(docker compose re-interpolates \$-references when reading .env) — leaving"
+      warn "CULVERT_CA_PASSPHRASE unset rather than risk a silently mismatched key. Set it yourself in"
+      warn "$envfile if you need the CA key encrypted."
+    else
+      warn "CULVERT_LOG_PASSPHRASE is configured but its value could not be read to also encrypt the"
+      warn "SSL-inspection CA key — set CULVERT_CA_PASSPHRASE yourself in $envfile if you need it encrypted."
+    fi
+    return
+  fi
 
   local choice="1"
   if [[ -t 0 ]]; then
