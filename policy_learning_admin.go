@@ -135,6 +135,7 @@ func buildPolicyLearnEngine(cats []string) (*policylearn.Engine, error) {
 		},
 		CategoryEpoch:           learnCategoryEpoch,
 		PolicyContent:           policyContentIdentityCached,
+		TaxonomyKey:             learnTaxonomyToken,
 		RecommendableCategories: cats,
 		Quarantine: func(path string, err error) {
 			quarantineCorruptStateFile("policy_learning", path, err)

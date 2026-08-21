@@ -361,8 +361,12 @@ func TestM5B1_GroupTruncationCountedAndSurfaced(t *testing.T) {
 		groups[i] = "grp" + string(rune('a'+i))
 	}
 	eng := policyLearnEngine.Load()
+	ctx, ok := learnDecisionSnapshot()
+	if !ok {
+		t.Fatal("learnDecisionSnapshot refused with an active session")
+	}
 	learnObserveDecision(authOutcome{identity: "many@corp.example", source: "idp", groups: groups},
-		"m5b1.example", "GET", nil, "OK", "Inspect", learnDecisionKey{}, false)
+		"m5b1.example", "GET", nil, "OK", "Inspect", ctx, true)
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) && eng.ObservationStats().Delivered < 1 {
 		time.Sleep(time.Millisecond)

@@ -29,7 +29,7 @@ func TestBenchGate_LearnObserveDisabledZeroAlloc(t *testing.T) {
 	defer policyLearnEngine.Store(prev)
 	auth := authOutcome{identity: "alice", source: "test-idp", groups: []string{"engineering", "sec"}}
 	allocs := testing.AllocsPerRun(2000, func() {
-		learnObserveDecision(auth, "host.example", "GET", nil, "OK", "Bypass", learnDecisionKey{}, false)
+		learnObserveDecision(auth, "host.example", "GET", nil, "OK", "Bypass", learnDecisionCtx{}, false)
 	})
 	if allocs != 0 {
 		t.Fatalf("disabled learnObserveDecision allocates %.1f/op, want 0 — the off posture must be free", allocs)
@@ -57,7 +57,7 @@ func TestBenchGate_LearnObserveEnabledIdleZeroAlloc(t *testing.T) {
 	}()
 	auth := authOutcome{identity: "alice", source: "test-idp", groups: []string{"engineering", "sec"}}
 	if allocs := testing.AllocsPerRun(2000, func() {
-		learnObserveDecision(auth, "host.example", "GET", nil, "OK", "Bypass", learnDecisionKey{}, false)
+		learnObserveDecision(auth, "host.example", "GET", nil, "OK", "Bypass", learnDecisionCtx{}, false)
 	}); allocs != 0 {
 		t.Fatalf("enabled-idle learnObserveDecision allocates %.1f/op, want 0 — the idle posture must be free", allocs)
 	}
@@ -87,16 +87,20 @@ func TestBenchGate_LearnObserveEnabledBoundedAllocs(t *testing.T) {
 		_ = eng.Close()
 	}()
 
+	benchCtx, benchOK := learnDecisionSnapshot()
+	if !benchOK {
+		t.Fatal("learnDecisionSnapshot refused with an active session")
+	}
 	authNoGroups := authOutcome{identity: "alice", source: "test-idp"}
 	if got := testing.AllocsPerRun(2000, func() {
-		learnObserveDecision(authNoGroups, "host.example", "GET", nil, "OK", "Bypass", learnDecisionKey{}, false)
+		learnObserveDecision(authNoGroups, "host.example", "GET", nil, "OK", "Bypass", benchCtx, true)
 	}); got > 0 {
 		t.Fatalf("enabled enqueue (no groups) allocates %.1f/op, want 0", got)
 	}
 
 	authGroups := authOutcome{identity: "alice", source: "test-idp", groups: []string{"engineering", "security", "vpn"}}
 	if got := testing.AllocsPerRun(2000, func() {
-		learnObserveDecision(authGroups, "host.example", "GET", nil, "OK", "Bypass", learnDecisionKey{}, false)
+		learnObserveDecision(authGroups, "host.example", "GET", nil, "OK", "Bypass", benchCtx, true)
 	}); got > 1 {
 		t.Fatalf("enabled enqueue (3 groups) allocates %.1f/op, want <=1 (the bounded groups copy)", got)
 	}

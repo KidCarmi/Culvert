@@ -14,6 +14,7 @@ package policylearn
 
 import (
 	"runtime"
+	"strconv"
 	"sync"
 	"sync/atomic"
 )
@@ -70,6 +71,17 @@ type Observation struct {
 	Action     string // rule action, or "default:allow"/"default:deny"
 	Status     string // the request-log Status taxonomy value for this decision
 	SSLAction  string // "Inspect"/"Bypass" when resolved; "" on blocked branches
+
+	// WindowGen, when non-zero, is the acceptance-window generation the
+	// producer captured WITH its decision (Codex round 24): a decision made
+	// while session A was active must never aggregate into a session B whose
+	// window opened mid-dispatch — A's finish barrier cannot wait for a
+	// producer that has not registered yet. Observe stamps the captured
+	// generation instead of the current one, so a rotated-window event
+	// resolves through the existing gen-mismatch machinery as a COUNTED drop,
+	// never as another session's evidence. Zero = stamp the current window
+	// (paths with no decision-time capture).
+	WindowGen uint64
 
 	// PolicyID/CatEpoch are the caller-supplied DECISION-TIME identity stamps
 	// (Codex rounds 20/22): the producer captured (or derived a change
@@ -170,6 +182,21 @@ func (e *Engine) SubjectKeyID() string { return e.subjKey.keyID }
 // Observe emits one observation. Non-blocking under every condition; safe from
 // any goroutine. Ignored (uncounted — "not learning" is not loss) when no
 // session is Learning.
+// TaxonomyToken is an opaque MONOTONIC change token for the taxonomy the
+// Categories resolver consults, produced by the Config.TaxonomyKey seam.
+// View holds the root's immutable taxonomy view object (holding it prevents
+// pointer reuse, so equality proves the same view); Rev is a monotonic
+// mutation counter for the mutable store. Compared only for equality.
+type TaxonomyToken struct {
+	View any
+	Rev  uint64
+}
+
+// WindowGeneration returns the current acceptance-window generation, for
+// producers that capture their decision context BEFORE dispatch and stamp it
+// via Observation.WindowGen (Codex round 24).
+func (e *Engine) WindowGeneration() uint64 { return e.windowGen.Load() }
+
 func (e *Engine) Observe(o Observation) {
 	t := e.tr
 	// Register BEFORE the gate and closed checks (Codex fix): the window-close
@@ -214,9 +241,16 @@ func (e *Engine) Observe(o Observation) {
 	if o.At == 0 {
 		o.At = e.cfg.Now().Unix()
 	}
-	// Stamp the CURRENT acceptance window: the consumer attributes the event
-	// only while this window's session is still the aggregation target.
-	o.gen = e.windowGen.Load()
+	// Stamp the acceptance window: the producer's captured generation when it
+	// carried one (round 24 — the decision belongs to the session that was
+	// active when it was made; a rotated window resolves as a counted drop at
+	// consume), else the CURRENT window. The consumer attributes the event
+	// only while the stamped window's session is still the aggregation target.
+	if o.WindowGen != 0 {
+		o.gen = o.WindowGen
+	} else {
+		o.gen = e.windowGen.Load()
+	}
 	// Decision-time identity stamps (Codex round 15; see the field docs). The
 	// seams are memoized at the root, so these are cheap alloc-free reads. A
 	// producer-supplied stamp (captured at the enforcement decision itself,
@@ -357,12 +391,32 @@ func (e *Engine) consumeGuarded(t *transport, o Observation) {
 		//   - the DECISION-TIME stamps (round 15) latch a change that
 		//     completed while the event sat queued.
 		// Each check is a pair of memoized-string compares; equal-to-last is a
-		// no-op. The only residual is a full round trip landing entirely
-		// between the two adjacent bracket reads with the resolution inside —
-		// two atomic swaps within nanoseconds.
+		// no-op. The epoch comparisons alone are ABA-blind — a full round
+		// trip restoring the SAME epoch string inside the bracket is
+		// invisible to them — so the resolution is ALSO bracketed by the
+		// MONOTONIC TaxonomyKey token (round 24): any taxonomy mutation
+		// between the two token reads latches a churn witness even when the
+		// content-derived epoch reads identical on both sides.
 		now := e.cfg.Now()
+		var tok1 TaxonomyToken
+		haveTok := e.cfg.TaxonomyKey != nil
+		if haveTok {
+			tok1 = e.cfg.TaxonomyKey()
+		}
 		e.checkEpochLocked(sess, now, "", "") // consume-time, pre-resolution
 		e.aggregateLocked(sess, &o)
+		if haveTok {
+			if tok2 := e.cfg.TaxonomyKey(); tok2 != tok1 {
+				// A mutation overlapped THIS observation's resolution: the
+				// resolved category may belong to neither the pre nor the
+				// post taxonomy state. Latch a witness unique to the
+				// post-mutation revision — it can never equal any epoch
+				// string or the baseline, so the churn always records.
+				e.latchChurnLocked(sess, now, "category-flip@r"+strconv.FormatUint(tok2.Rev, 10),
+					sess.Baseline.CategoryEpoch, &sess.CategoryChurn,
+					func(a *Aggregate) *int64 { return &a.ChurnOverflow })
+			}
+		}
 		e.checkEpochLocked(sess, now, o.catEpoch, o.policyID) // decision-time stamps
 		e.checkEpochLocked(sess, now, "", "")                 // consume-time, post-resolution
 		e.sinceFlush++

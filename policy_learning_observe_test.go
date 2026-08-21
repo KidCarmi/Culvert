@@ -270,10 +270,12 @@ func TestObservation_ActionDerivedFromEnforcementStatus(t *testing.T) {
 	// The enforcement decision ran under default-allow (status OK, no match);
 	// the atomic has since flipped to deny before the adapter observed it.
 	setDefaultPolicyAction("deny")
-	learnObserveDecision(authOutcome{identity: "alice", source: "local"}, "flip-action.example", "GET", nil, "OK", "Bypass", learnDecisionKey{}, false)
+	ctx1, _ := learnDecisionSnapshot()
+	learnObserveDecision(authOutcome{identity: "alice", source: "local"}, "flip-action.example", "GET", nil, "OK", "Bypass", ctx1, true)
 	// And the mirror case: enforcement default-denied; atomic now says allow.
 	setDefaultPolicyAction("allow")
-	learnObserveDecision(authOutcome{identity: "alice", source: "local"}, "flip-deny.example", "GET", nil, "POLICY_DEFAULT_DENY", "", learnDecisionKey{}, false)
+	ctx2, _ := learnDecisionSnapshot()
+	learnObserveDecision(authOutcome{identity: "alice", source: "local"}, "flip-deny.example", "GET", nil, "POLICY_DEFAULT_DENY", "", ctx2, true)
 	_ = eng.Close()
 
 	if o, ok := obsForHost(t, col, "flip-action.example"); !ok {
@@ -305,16 +307,16 @@ func TestObservation_DefaultDecisionCarriesDecisionTimeIdentity(t *testing.T) {
 
 	// Consistent case: the key at capture is still current — the stamp must
 	// be the real (memoized) content identity.
-	pk, ok := learnDecisionKeySnapshot()
+	pk, ok := learnDecisionSnapshot()
 	if !ok {
-		t.Fatal("learnDecisionKeySnapshot refused with an active session")
+		t.Fatal("learnDecisionSnapshot refused with an active session")
 	}
 	steadyWant := policyContentIdentityCached() // identity at the steady call, before the later mutations
 	learnObserveDecision(auth, "steady.example", "GET", nil, "OK", "Bypass", pk, true)
 
 	// Default-action flip case: a set lands inside the bracket (round 20).
 	prev := defaultPolicyAction()
-	stale, _ := learnDecisionKeySnapshot()
+	stale, _ := learnDecisionSnapshot()
 	setDefaultPolicyAction(prev) // same value, new word: a completed round trip
 	learnObserveDecision(auth, "flipped.example", "GET", nil, "OK", "Bypass", stale, true)
 
@@ -326,7 +328,7 @@ func TestObservation_DefaultDecisionCarriesDecisionTimeIdentity(t *testing.T) {
 	blocker := PolicyRule{ID: newRuleID(), Name: "transient-blocker", SourceGroup: "g",
 		DestFQDN: "blocked.example", Action: ActionBlockPage, Enabled: &enabled}
 	policyStore.ReplaceAll([]PolicyRule{blocker})
-	stale2, _ := learnDecisionKeySnapshot() // captured while the blocker is REMOVED...
+	stale2, _ := learnDecisionSnapshot() // captured while the blocker is REMOVED...
 	policyStore.ReplaceAll([]PolicyRule{blocker, {ID: newRuleID(), Name: "extra",
 		SourceGroup: "g", DestFQDN: "x.example", Action: ActionAllow, Enabled: &enabled}})
 	policyStore.ReplaceAll([]PolicyRule{blocker}) // ...and the original policy restored
@@ -336,7 +338,7 @@ func TestObservation_DefaultDecisionCarriesDecisionTimeIdentity(t *testing.T) {
 	// and restored inside the bracket — the content fingerprint returns to
 	// its baseline (ABA-blind), but the mutation counter moved, so the
 	// CATEGORY stamp must be the witness, never the restored epoch.
-	stale3, _ := learnDecisionKeySnapshot()
+	stale3, _ := learnDecisionSnapshot()
 	if err := catStore.Set("transient-cat", []string{"transient.example"}, false); err != nil {
 		t.Fatal(err)
 	}
@@ -412,5 +414,5 @@ func TestObservationE2E_DisabledNilEngine(t *testing.T) {
 	prev := policyLearnEngine.Load()
 	policyLearnEngine.Store(nil)
 	t.Cleanup(func() { policyLearnEngine.Store(prev) })
-	learnObserveDecision(authOutcome{identity: "x", source: "local"}, "h.example", "GET", nil, "OK", "Bypass", learnDecisionKey{}, false)
+	learnObserveDecision(authOutcome{identity: "x", source: "local"}, "h.example", "GET", nil, "OK", "Bypass", learnDecisionCtx{}, false)
 }

@@ -120,6 +120,16 @@ func learnTaxKeyNow() learnTaxKey {
 	return learnTaxKey{saasView: saasEffectiveView.Current(), catRev: catStore.Revision()}
 }
 
+// learnTaxonomyToken is the engine's Config.TaxonomyKey seam (Codex round
+// 24): the same monotonic taxonomy state as learnTaxKey, shaped as the
+// engine's opaque token so the drain can bracket each observation's category
+// RESOLUTION — the content-derived epoch is ABA-blind, so only these
+// monotonic components can witness a round trip completing within one
+// resolution. The token HOLDS the view pointer (no reuse while captured).
+func learnTaxonomyToken() policylearn.TaxonomyToken {
+	return policylearn.TaxonomyToken{View: saasEffectiveView.Current(), Rev: catStore.Revision()}
+}
+
 func learnDecisionKeyNow() learnDecisionKey {
 	return learnDecisionKey{policy: policyContentKeyNow(), tax: learnTaxKeyNow()}
 }
@@ -146,17 +156,30 @@ func learnFencedStamp[K comparable](want K, keyNow func() K, identity func() str
 	return id, true
 }
 
-// learnDecisionKeySnapshot captures the full decision key for the
+// learnDecisionCtx is the full decision-time capture: the identity fence key
+// PLUS the engine and acceptance-window generation the decision ran under
+// (Codex round 24 — a decision made while session A was active must never
+// aggregate into a session B whose window opened mid-dispatch; A's finish
+// barrier cannot wait for a producer that has not registered yet, so the
+// adapter observes on the CAPTURED engine with the CAPTURED window stamp and
+// a rotated window resolves as a counted drop, never as B's evidence).
+type learnDecisionCtx struct {
+	key learnDecisionKey
+	eng *policylearn.Engine
+	gen uint64
+}
+
+// learnDecisionSnapshot captures the full decision context for the
 // evaluation→stamp bracket, gated on learning being active so the
 // idle/disabled request path pays at most two atomic loads. handleRequest
 // calls it BEFORE policy evaluation; the adapter fences both identity stamps
-// against it AFTER the decision.
-func learnDecisionKeySnapshot() (learnDecisionKey, bool) {
+// against the key AFTER the decision and stamps into the captured window.
+func learnDecisionSnapshot() (learnDecisionCtx, bool) {
 	eng := policyLearnEngine.Load()
 	if eng == nil || !eng.LearningActive() {
-		return learnDecisionKey{}, false
+		return learnDecisionCtx{}, false
 	}
-	return learnDecisionKeyNow(), true
+	return learnDecisionCtx{key: learnDecisionKeyNow(), eng: eng, gen: eng.WindowGeneration()}, true
 }
 
 // pk is the full decision key captured BEFORE policy evaluation
@@ -174,13 +197,15 @@ func learnDecisionKeySnapshot() (learnDecisionKey, bool) {
 // content hash, epoch, or baseline, so the consume-time comparison latches
 // the churn we know happened. (Halves are fenced separately so a
 // default-action flip does not fabricate CATEGORY churn and vice versa.)
-func learnObserveDecision(auth authOutcome, host, method string, match *PolicyMatch, status, sslAction string, pk learnDecisionKey, havePK bool) {
-	eng := policyLearnEngine.Load()
-	if eng == nil || !eng.LearningActive() {
-		// Disabled (nil) or enabled-but-idle: gate BEFORE any Observation is
-		// built — no DTO, no group copy, no enqueue (M5A §1; benchgate-pinned).
+func learnObserveDecision(auth authOutcome, host, method string, match *PolicyMatch, status, sslAction string, ctx learnDecisionCtx, haveCtx bool) {
+	if !haveCtx || ctx.eng == nil {
+		// No decision-time capture: learning was disabled or idle when the
+		// decision was made. A session that started MID-DISPATCH must not
+		// receive evidence from a decision that predates its window (round
+		// 24), so this is a strict no-op — never a fresh engine load.
 		return
 	}
+	eng := ctx.eng // the engine the decision ran under — never reloaded
 	ruleID := ""
 	var action string
 	switch {
@@ -198,25 +223,25 @@ func learnObserveDecision(auth authOutcome, host, method string, match *PolicyMa
 		action = "default:allow"
 	}
 	policyID, catEpoch := "", ""
-	if havePK {
+	{
 		// Each half fenced on BOTH sides of its identity read (round 23; see
 		// learnFencedStamp). Steady state returns the memoized strings —
 		// 0-alloc; the witnesses allocate only at config-change rate.
-		if id, ok := learnFencedStamp(pk.policy, policyContentKeyNow, policyContentIdentityCached); ok {
+		if id, ok := learnFencedStamp(ctx.key.policy, policyContentKeyNow, policyContentIdentityCached); ok {
 			policyID = id
 		} else {
 			// A mutation provably overlapped the evaluation→stamp bracket.
 			// The decision-time identity is unrecoverable, so stamp a witness
 			// unique to the captured key.
-			policyID = "policy-flip@" + strconv.FormatInt(pk.policy.gen, 16) + ":" +
-				strconv.FormatUint(pk.policy.catgroupRev, 16) + ":" + strconv.FormatUint(pk.policy.defaultRev, 16)
+			policyID = "policy-flip@" + strconv.FormatInt(ctx.key.policy.gen, 16) + ":" +
+				strconv.FormatUint(ctx.key.policy.catgroupRev, 16) + ":" + strconv.FormatUint(ctx.key.policy.defaultRev, 16)
 		}
-		if ep, ok := learnFencedStamp(pk.tax, learnTaxKeyNow, learnCategoryEpoch); ok {
+		if ep, ok := learnFencedStamp(ctx.key.tax, learnTaxKeyNow, learnCategoryEpoch); ok {
 			catEpoch = ep
 		} else {
 			// The content-derived epoch is ABA-blind to a round trip, so
 			// stamp a witness unique to the captured taxonomy state.
-			catEpoch = "category-flip@" + strconv.FormatUint(pk.tax.catRev, 16)
+			catEpoch = "category-flip@" + strconv.FormatUint(ctx.key.tax.catRev, 16)
 		}
 	}
 	eng.Observe(policylearn.Observation{
@@ -231,5 +256,6 @@ func learnObserveDecision(auth authOutcome, host, method string, match *PolicyMa
 		SSLAction:  sslAction,
 		PolicyID:   policyID, // "" ⇒ engine seam stamp at enqueue
 		CatEpoch:   catEpoch, // "" ⇒ engine seam stamp at enqueue
+		WindowGen:  ctx.gen,  // the captured window — a rotation resolves as a counted drop
 	})
 }

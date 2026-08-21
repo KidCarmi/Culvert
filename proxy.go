@@ -1080,7 +1080,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	// stamp can prove the entire config the decision ran under was still
 	// current at stamp time — or witness that it was not. Captured only while
 	// learning is active (two atomic loads otherwise).
-	learnPK, learnHavePK := learnDecisionKeySnapshot()
+	learnCtx, learnHaveCtx := learnDecisionSnapshot()
 	match := policyStore.Evaluate(clientIP, authenticatedIdentity, authenticatedSource, host, authenticatedGroups)
 
 	// M3 (H2-drop gap closure): the ActionDrop branch's HTTP/2 fallback aborts
@@ -1090,7 +1090,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	// the duplicate on the normal terminal path below. Enforcement untouched.
 	isDrop := match != nil && match.Rule != nil && match.Action == ActionDrop
 	if isDrop {
-		learnObserveDecision(auth, normHost, r.Method, match, "POLICY_DROP", "", learnPK, learnHavePK)
+		learnObserveDecision(auth, normHost, r.Method, match, "POLICY_DROP", "", learnCtx, learnHaveCtx)
 	}
 
 	// ── Policy action dispatch ──────────────────────────────────────────────
@@ -1103,7 +1103,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		// drop-on-full; a nil (disabled) engine costs one atomic load.
 		// Learning has zero authority here — see ADR-0025.
 		if !isDrop {
-			learnObserveDecision(auth, normHost, r.Method, match, decisionStatus, "", learnPK, learnHavePK)
+			learnObserveDecision(auth, normHost, r.Method, match, decisionStatus, "", learnCtx, learnHaveCtx)
 		}
 		return
 	}
@@ -1119,7 +1119,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	// M2: one learning observation per policy decision (allowed branch, after
 	// the SSL decision so the observation carries it). Same non-blocking,
 	// advisory-only contract as the blocked branch above.
-	learnObserveDecision(auth, normHost, r.Method, match, decisionStatus, string(sslAction), learnPK, learnHavePK)
+	learnObserveDecision(auth, normHost, r.Method, match, decisionStatus, string(sslAction), learnCtx, learnHaveCtx)
 
 	// Identity context forwarded to SSL-inspect (consumed by CDR today;
 	// future audit enrichment can read this without re-parsing headers).

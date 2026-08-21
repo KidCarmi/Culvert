@@ -835,3 +835,87 @@ func TestObserve_ExplicitCategoryStampAuthoritative(t *testing.T) {
 		t.Fatalf("explicit decision-time category stamp did not reach the churn latch: churn=%v", sess.CategoryChurn)
 	}
 }
+
+// TestObserve_CapturedWindowRotatedResolvesAsDrop (Codex round 24): a
+// decision made while session A was active must never aggregate into a
+// session B whose window opened mid-dispatch — the producer stamps the
+// CAPTURED window generation, and the existing gen-mismatch machinery
+// resolves the rotated-window event as a COUNTED drop.
+func TestObserve_CapturedWindowRotatedResolvesAsDrop(t *testing.T) {
+	clk := newTestClock()
+	e := newTestEngine(t, t.TempDir(), clk, nil)
+	t.Cleanup(func() { _ = e.Close() })
+	if _, err := e.StartSession("op"); err != nil {
+		t.Fatal(err)
+	}
+	captured := e.WindowGeneration() // the decision ran under session A
+	if _, err := e.StopSession("op"); err != nil {
+		t.Fatal(err)
+	}
+	b, err := e.StartSession("op") // session B opens mid-dispatch
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	before := e.ObservationStats()
+	e.Observe(Observation{Subject: "u", AuthSource: "idp", Host: "late.example", Status: "OK",
+		WindowGen: captured})
+	barrierWait(t, func() bool {
+		st := e.ObservationStats()
+		return st.Dropped > before.Dropped || st.Delivered > before.Delivered
+	}, "observation resolved")
+
+	st := e.ObservationStats()
+	if st.Dropped <= before.Dropped {
+		t.Fatalf("rotated-window observation was not counted as a drop: %+v", st)
+	}
+	ov, ok := e.SessionOverview(b.ID)
+	if !ok {
+		t.Fatal("session B missing")
+	}
+	if ov.Cells != 0 {
+		t.Fatalf("session B aggregated another window's decision (cells=%d)", ov.Cells)
+	}
+}
+
+// TestChurn_ResolutionTokenWitnessesABARoundTrip (Codex round 24): the
+// consume-time epoch brackets are content-derived and therefore ABA-blind —
+// a taxonomy A→B→A round trip completing WITHIN one observation's resolution
+// reads epoch "A" on both sides. The monotonic TaxonomyKey token bracket
+// must witness it: the resolver's mutation moves the revision even though
+// the epoch string is restored.
+func TestChurn_ResolutionTokenWitnessesABARoundTrip(t *testing.T) {
+	var rev atomic.Uint64
+	clk := newTestClock()
+	e := newTestEngine(t, t.TempDir(), clk, func(c *Config) {
+		c.Baseline = func() Baseline { return Baseline{CategoryEpoch: "A"} }
+		c.CategoryEpoch = func() string { return "A" } // ABA: restored on every read
+		c.TaxonomyKey = func() TaxonomyToken { return TaxonomyToken{Rev: rev.Load()} }
+		c.Categories = func(host string) (string, string) {
+			if host == "aba.example" {
+				rev.Add(2) // A→B→A: two mutations complete inside the resolution
+			}
+			return "cat", "tier"
+		}
+	})
+	t.Cleanup(func() { _ = e.Close() })
+	if _, err := e.StartSession("op"); err != nil {
+		t.Fatal(err)
+	}
+	before := e.ObservationStats().Delivered
+	e.Observe(Observation{Subject: "u", AuthSource: "idp", Host: "aba.example", Status: "OK"})
+	barrierWait(t, func() bool { return e.ObservationStats().Delivered > before }, "observation delivered")
+	sess, err := e.StopSession("op")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, c := range sess.CategoryChurn {
+		if strings.HasPrefix(c.To, "category-flip@r") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("ABA round trip within resolution not witnessed: churn=%v", sess.CategoryChurn)
+	}
+}

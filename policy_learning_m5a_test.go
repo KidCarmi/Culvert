@@ -123,14 +123,20 @@ func TestPL_ObservationGatingThreeStates(t *testing.T) {
 	plHarness(t)
 	auth := authOutcome{identity: "gate@corp.example", source: "idp", groups: []string{"eng"}}
 
-	// Disabled: nil singleton — adapter is a no-op.
-	learnObserveDecision(auth, "x.example", "GET", nil, "OK", "Bypass", learnDecisionKey{}, false)
+	// Disabled: nil singleton — no capture exists, adapter is a no-op.
+	if _, ok := learnDecisionSnapshot(); ok {
+		t.Fatal("snapshot succeeded with a nil engine")
+	}
+	learnObserveDecision(auth, "x.example", "GET", nil, "OK", "Bypass", learnDecisionCtx{}, false)
 
 	// Enabled but idle: the gate fires BEFORE Observation construction — the
 	// transport counters must show NOTHING (not even a rejection).
 	plEnable(t)
 	eng := policyLearnEngine.Load()
-	learnObserveDecision(auth, "x.example", "GET", nil, "OK", "Bypass", learnDecisionKey{}, false)
+	if _, ok := learnDecisionSnapshot(); ok {
+		t.Fatal("snapshot succeeded while idle")
+	}
+	learnObserveDecision(auth, "x.example", "GET", nil, "OK", "Bypass", learnDecisionCtx{}, false)
 	learnObservePreDispatch(auth, "x.example", "GET", "BLOCKED")
 	if s := eng.ObservationStats(); s.Accepted != 0 || s.Rejected != 0 || s.Dropped != 0 {
 		t.Fatalf("enabled-idle produced transport activity: %+v", s)
@@ -138,7 +144,11 @@ func TestPL_ObservationGatingThreeStates(t *testing.T) {
 
 	// Active session: the qualified M2 path.
 	plStartSession(t)
-	learnObserveDecision(auth, "x.example", "GET", nil, "OK", "Bypass", learnDecisionKey{}, false)
+	ctx, ok := learnDecisionSnapshot()
+	if !ok {
+		t.Fatal("snapshot refused with an active session")
+	}
+	learnObserveDecision(auth, "x.example", "GET", nil, "OK", "Bypass", ctx, true)
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) && eng.ObservationStats().Delivered < 1 {
 		time.Sleep(time.Millisecond)
@@ -277,8 +287,12 @@ func plObserve(t *testing.T, subject string, groups []string, host string) {
 	t.Helper()
 	eng := policyLearnEngine.Load()
 	before := eng.ObservationStats().Delivered
+	ctx, ok := learnDecisionSnapshot()
+	if !ok {
+		t.Fatal("learnDecisionSnapshot refused with an active session")
+	}
 	learnObserveDecision(authOutcome{identity: subject, source: "idp", groups: groups},
-		host, "GET", nil, "OK", "Inspect", learnDecisionKey{}, false)
+		host, "GET", nil, "OK", "Inspect", ctx, true)
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) && eng.ObservationStats().Delivered <= before {
 		time.Sleep(time.Millisecond)

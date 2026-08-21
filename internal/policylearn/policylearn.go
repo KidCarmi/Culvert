@@ -133,6 +133,15 @@ type Config struct {
 	// be cheap (the root memoizes by policy generation). nil = policy-churn
 	// tracking disabled.
 	PolicyContent func() string
+	// TaxonomyKey returns a MONOTONIC change token for the taxonomy the
+	// Categories resolver consults (Codex round 24): the content-derived
+	// CategoryEpoch is deliberately ABA-blind — a taxonomy A→B→A round trip
+	// restores the same epoch string — so the consume-time brackets alone
+	// cannot witness a round trip completing WITHIN one observation's
+	// resolution. The drain reads this token on both sides of the resolution
+	// and latches a churn witness when it moved. Must be cheap (atomic
+	// loads). nil = resolution-bracket witnessing disabled.
+	TaxonomyKey func() TaxonomyToken
 	// RecommendableCategories is the fail-closed ALLOWLIST of categories the
 	// M4 generator may recommend (never a denylist): a cell whose category is
 	// not on this list can never produce a recommendation, and an EMPTY list
