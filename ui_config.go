@@ -104,6 +104,12 @@ func apiStats(w http.ResponseWriter, r *http.Request) {
 		// backpressure_total Prometheus metric, invisible to an operator
 		// without a metrics scraper wired up.
 		"processLogBackpressure": logSinkBackpressure(),
+		// Process-log write failures (console + process log file). Same fault
+		// class as logWriteErrors/auditLogWriteErrors above, but for the
+		// POLICY_ALLOW/BLOCK/DROP line-per-request stream — previously visible
+		// only via the culvert_logsink_write_errors_total Prometheus metric,
+		// invisible to an operator without a metrics scraper wired up.
+		"processLogWriteErrors": logSinkWriteErrors(),
 		// Audit/request-log persistence state: if the operator configured a
 		// file path but the engine could not open it at startup (bad
 		// permissions, missing directory, full disk), both silently fall
@@ -141,6 +147,8 @@ func apiDashboardHealth(w http.ResponseWriter, r *http.Request) {
 		"goroutines":    runtime.NumGoroutine(),
 		"numGC":         mem.NumGC,
 		"sseClients":    hub.ClientCount(),
+		"sseEvicted":    hub.Evicted(),
+		"sseRejected":   hub.Rejected(),
 		"blocklistSize": bl.Count(),
 		"logStore":      logStoreHealth(),
 	})

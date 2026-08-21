@@ -18,6 +18,7 @@ type healthReport struct {
 	ClamAV            string `json:"clamav" redact:"internal"`
 	CAExpiresDays     int    `json:"ca_expires_days" redact:"internal"`
 	SSLInspection     string `json:"ssl_inspection" redact:"internal"`
+	ClusterCA         string `json:"cluster_ca" redact:"internal"`
 	ThreatFeedEntries int64  `json:"threat_feed_entries" redact:"internal"`
 }
 
@@ -68,8 +69,41 @@ func computeHealth() healthReport {
 		ClamAV:            clamStatus,
 		CAExpiresDays:     caExpiresDays,
 		SSLInspection:     sslInspection,
+		ClusterCA:         clusterCAHealthStatus(),
 		ThreatFeedEntries: tfEntries,
 	}
+}
+
+// clusterCAHealthStatus is the /healthz posture for the cluster (enrollment) CA
+// — CHAOS-50, register row CA-13.
+//
+// It exists because /healthz reported the inspection CA's posture and said
+// nothing at all about the CA the whole control plane depends on. A CP whose
+// cluster CA had expired — every DP unable to complete mTLS, no config reaching
+// the fleet — served an unqualified `status: ok`.
+//
+// "disabled" when no cluster CA is loaded (the ordinary single-node appliance),
+// so the field never reads as a fault on a node that has no cluster at all.
+// "rotation_failing" is the leading indicator and outranks nothing: it is only
+// reported for a CA that is still usable, because "expired" is the more specific
+// and more urgent fault.
+func clusterCAHealthStatus() string {
+	if globalClusterCA.Expiry().IsZero() {
+		return "disabled"
+	}
+	if err := globalClusterCA.Usable(); err != nil {
+		// "expired" vs "not_yet_valid" (clock fault) point at OPPOSITE
+		// recoveries — rotate/import vs fix NTP — so the probe must not
+		// collapse them (ported from PR #1179's classification).
+		if kind := clusterCAUnusableKind(err); kind == "not_yet_valid" {
+			return "not_yet_valid"
+		}
+		return "expired"
+	}
+	if clusterCARotationDegraded() {
+		return "rotation_failing"
+	}
+	return "ready"
 }
 
 // coarseClamAVStatus collapses ClamAVStatus()'s value to a fixed enum for the
@@ -241,6 +275,49 @@ func appendCAReadinessCheck(checks map[string]*readinessCheck) {
 	}
 }
 
+// appendClusterCAReadinessCheck adds the report-only `cluster_ca` row (CHAOS-50,
+// register row CA-13).
+//
+// No row at all when no cluster CA is loaded: that is the ordinary single-node
+// appliance, and a permanently-absent row would be noise, not a signal.
+//
+// REPORT-ONLY, deliberately, and for a sharper reason than the `ca` row's: an
+// expired cluster CA is fleet-wide BY CONSTRUCTION — every node was issued from
+// the same root — so gating readiness on it would eject the entire fleet from
+// the load balancer at the same instant, taking down all the proxying that
+// still works perfectly. The cluster CA governs the CONTROL plane (config sync,
+// enrollment); a DP with a stale-but-valid config keeps enforcing policy. An
+// operator who wants those nodes ejected opts in via /ready?strict=1.
+//
+// The detail is a FIXED string. /ready is unauthenticated on the proxy port, so
+// anything here is readable by any client on the network, and the specific cause
+// ("expired at <date>") is a precise fingerprint of a control-plane-degraded
+// node — it tells an observer the fleet cannot receive policy updates right now.
+// Naming the posture is safe in this direction only because it fails CLOSED
+// (issuance refused), unlike the load-failure branch above.
+func appendClusterCAReadinessCheck(checks map[string]*readinessCheck) {
+	if globalClusterCA.Expiry().IsZero() {
+		return
+	}
+	if globalClusterCA.Usable() != nil {
+		checks["cluster_ca"] = &readinessCheck{
+			Status: "fail",
+			Detail: "cluster CA outside its validity window; node enrollment and cert renewal are refused — see server logs",
+		}
+		return
+	}
+	// A FAILING ROTATION is deliberately NOT a readiness failure, matching how
+	// the `ca` row treats the inspection CA's persist-degraded state. Readiness
+	// answers "can this node serve right now", and a node whose CA is still
+	// valid can: it enrolls, renews, and syncs normally. The problem is a dated
+	// one — the CA will not be replaced before it expires — so it belongs on the
+	// surfaces that demand human action (`/healthz` reports rotation_failing,
+	// `/api/diagnostics` fails the cluster_ca row, the alert fires, the counter
+	// climbs), not on the one a load balancer uses to eject nodes. Failing here
+	// would let /ready?strict=1 eject a fully working fleet a month early.
+	checks["cluster_ca"] = &readinessCheck{Status: "ok"}
+}
+
 // computeReadiness builds the readiness snapshot and the HTTP status code (200
 // when all gating checks pass, 503 otherwise). Shared by handleReady and the
 // readiness support collector. The verdict returned here is the DEFAULT
@@ -254,6 +331,9 @@ func computeReadiness() (report readinessReport, code int) {
 
 	// 1. CA — see appendCAReadinessCheck. Report-only: never gates.
 	appendCAReadinessCheck(checks)
+	// 1b. Cluster CA — see appendClusterCAReadinessCheck. Report-only; absent
+	// entirely on a node with no cluster CA.
+	appendClusterCAReadinessCheck(checks)
 
 	// 2. ClamAV: if scanner is initialised, verify connectivity.
 	//
@@ -371,8 +451,8 @@ func handleReady(w http.ResponseWriter, r *http.Request) {
 
 // strictVerdictFails implements the opt-in strict readiness verdict
 // (CHAOS-09): /ready?strict=1 (or strict=true) treats EVERY failing row as
-// gating, including the report-only rows (ca, policy_loaded, state_file_*,
-// cp_poll, node_cert) that never gate the default verdict. The default
+// gating, including the report-only rows (ca, cluster_ca, policy_loaded,
+// state_file_*, cp_poll, node_cert) that never gate the default verdict. The default
 // posture is deliberately unchanged: gating on CP-poll failure by default
 // would let a CP outage eject the entire DP fleet from the load balancer at
 // once. A load balancer that SHOULD eject dependency-degraded nodes points

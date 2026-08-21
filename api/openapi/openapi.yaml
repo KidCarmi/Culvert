@@ -706,6 +706,8 @@ components:
         goroutines: { type: integer }
         numGC: { type: integer }
         sseClients: { type: integer }
+        sseEvicted: { type: integer, description: 'Cumulative count of slow SSE clients evicted by the broadcast hub.' }
+        sseRejected: { type: integer, description: 'Cumulative count of SSE connections rejected at the hub client cap.' }
         blocklistSize: { type: integer }
     DashboardThreats:
       type: object
@@ -738,6 +740,7 @@ components:
       properties:
         role: { type: string }
         nodeID: { type: string }
+        grpcCompressionEnabled: { type: boolean, description: 'Resolved CULVERT_CLUSTER_GRPC_COMPRESSION value for this node (startup-scoped, read-only here).' }
     ClusterNodes:
       type: object
       required: [nodes]
@@ -784,6 +787,13 @@ components:
     SupportStatus:
       type: object
       description: Supportability status (debug level, bundle state, retention).
+      additionalProperties: true
+    BackupsStatus:
+      type: object
+      description: >-
+        Backup archive listing read from the CP-local maintenance agent.
+        `available:false` means the agent could not be reached or is not
+        configured; `backups` is newest-first when available.
       additionalProperties: true
     UpstreamConfig:
       type: object
@@ -1391,6 +1401,10 @@ components:
       properties:
         enabled: { type: boolean }
         dbPath: { type: string }
+        dbBuildDate: { type: string, format: date-time, description: "MaxMind build timestamp embedded in the loaded .mmdb; omitted when no database is loaded." }
+        dbAgeDays: { type: integer, description: "Days since dbBuildDate; omitted when no database is loaded." }
+        lastError: { type: string, description: 'Most recent database-load failure, if any (e.g. bad path, corrupt/expired .mmdb). Present only when the last load attempt failed; destCountry policy rules do not match while this is set.' }
+        lastErrorAt: { type: string, format: date-time, description: 'When lastError was recorded (RFC 3339). Present only alongside lastError.' }
 
     IdPList:
       type: object
@@ -5295,6 +5309,34 @@ paths:
             application/json:
               schema: { type: object, additionalProperties: true }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
+  /api/backups:
+    get:
+      operationId: getBackups
+      tags: [support]
+      summary: Backup archive listing
+      description: >-
+        Read-only listing of the backup archive directory, sourced from the
+        CP-local maintenance agent's GET /v1/backups (the same scan the
+        --list-backups CLI performs). Lets an admin confirm a backup job
+        actually produced a file, its size, and how stale it is, without
+        SSH access to the host.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Backup archive listing.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BackupsStatus' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
 
   /api/support/status:

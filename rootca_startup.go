@@ -50,10 +50,38 @@ func loadRootCA(cfg rootCAStartupConfig, ctx context.Context) {
 	caRuntime.path = cfg.Path
 	caRuntime.passphrase = cfg.Passphrase
 	// Start CA auto-rotation background check.
-	if certMgr.Ready() {
-		StartCAAutoRotation(ctx, cfg.Path, cfg.Passphrase)
-	}
+	//
+	// CHAOS-50 / CA-13: started UNCONDITIONALLY. This used to be gated on
+	// certMgr.Ready(), which reads as a harmless optimisation — why run a
+	// rotation loop for a CA that failed to load? — but the loop drives BOTH
+	// CAs (see StartCAAutoRotation), and the cluster CA is the only thing
+	// rotating it. So a corrupt inspection bundle, a wrong
+	// CULVERT_CA_PASSPHRASE, or an unreadable -ca-path silently took the
+	// CLUSTER CA's entire lifecycle manager down with it: no auto-rotation, and
+	// no secondary-CA overlap cleanup, on a node whose cluster CA was perfectly
+	// healthy. Two independent trust roots, one shared failure — and because a
+	// cluster CA is a 10-year certificate, the consequence would surface years
+	// after the inspection-CA fault that caused it, with nothing left to
+	// connect them.
+	//
+	// The gate is not needed for the inspection half either: RotateIfNeeded and
+	// CleanupSecondaryCA both return immediately when no CA is loaded, so on a
+	// node with no inspection CA this costs one zero-time comparison per day.
+	// The loop's done channel is published so a caller that cancels ctx can join
+	// the worker. Production never waits on it (shutdown does not block on a
+	// rotation check); it exists so a test driving this loader leaves no
+	// background goroutine running past its own completion.
+	caRotationLoopDone = StartCAAutoRotation(ctx, cfg.Path, cfg.Passphrase)
+
+	// A recorded load failure gets a bounded retry campaign (rootca_recovery.go).
+	// No-op on a healthy boot.
+	startInspectionCARecoveryLoop(ctx, cfg)
 }
+
+// caRotationLoopDone is closed when the auto-rotation loop started by the most
+// recent loadRootCA has exited. Written once per loadRootCA (startup, or a test),
+// read only after cancelling that loop's context.
+var caRotationLoopDone <-chan struct{}
 
 // initInspectionCA performs the load-or-init half of loadRootCA: persisted
 // bundle when a path is configured, ephemeral in-memory CA otherwise.

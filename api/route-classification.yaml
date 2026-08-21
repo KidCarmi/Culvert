@@ -247,6 +247,16 @@ routes:
     audit_expected: true
     danger_level: medium
     documented: true
+  - route: "/api/backups"
+    method: "GET"
+    handler: "apiBackups"
+    domain: "support"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
   - route: "/api/blocklist"
     method: "GET"
     handler: "apiBlocklist"

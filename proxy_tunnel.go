@@ -344,6 +344,19 @@ func handleTunnel(w http.ResponseWriter, r *http.Request, dec sslResolution, mat
 		handleTunnelInspect(w, r, dec, match, id)
 		return
 	}
+	if dec.Action == SSLInspect {
+		// Policy selected inspection but no Root CA is loaded at all, so this
+		// session proceeds as an unscanned tunnel: DLP, AV, YARA, CDR and DPI are
+		// all off for it. That is the OPPOSITE posture to the expired-CA branch
+		// above, and until CHAOS-50 it moved no counter and produced no runtime
+		// signal — only a startup log line that has long scrolled away by the time
+		// anyone asks how much traffic left uninspected. Counting it does not
+		// change the posture (see the review's Residual Risk: the fail-open →
+		// fail-closed flip is a customer-visible availability decision and is
+		// recorded as an owner decision, not taken here); it makes the window
+		// measurable while it is open.
+		noteCAInspectUnavailableBypass()
+	}
 	// Bypass path — attach the ADR-0011 decryption outcome for the close record.
 	handleTunnelBypass(w, r, match, id, "", bypassOutcome(dec, r.Host))
 }

@@ -376,6 +376,11 @@
         ],
         "type": "object"
       },
+      "BackupsStatus": {
+        "additionalProperties": true,
+        "description": "Backup archive listing read from the CP-local maintenance agent. `available:false` means the agent could not be reached or is not configured; `backups` is newest-first when available.",
+        "type": "object"
+      },
       "BandwidthPolicies": {
         "items": {
           "additionalProperties": true,
@@ -743,6 +748,10 @@
         "additionalProperties": true,
         "description": "Cluster node role and enrollment status (fields vary by role).",
         "properties": {
+          "grpcCompressionEnabled": {
+            "description": "Resolved CULVERT_CLUSTER_GRPC_COMPRESSION value for this node (startup-scoped, read-only here).",
+            "type": "boolean"
+          },
           "nodeID": {
             "type": "string"
           },
@@ -979,6 +988,14 @@
             "type": "integer"
           },
           "sseClients": {
+            "type": "integer"
+          },
+          "sseEvicted": {
+            "description": "Cumulative count of slow SSE clients evicted by the broadcast hub.",
+            "type": "integer"
+          },
+          "sseRejected": {
+            "description": "Cumulative count of SSE connections rejected at the hub client cap.",
             "type": "integer"
           }
         },
@@ -1348,11 +1365,29 @@
       "GeoIPStatus": {
         "additionalProperties": true,
         "properties": {
+          "dbAgeDays": {
+            "description": "Days since dbBuildDate; omitted when no database is loaded.",
+            "type": "integer"
+          },
+          "dbBuildDate": {
+            "description": "MaxMind build timestamp embedded in the loaded .mmdb; omitted when no database is loaded.",
+            "format": "date-time",
+            "type": "string"
+          },
           "dbPath": {
             "type": "string"
           },
           "enabled": {
             "type": "boolean"
+          },
+          "lastError": {
+            "description": "Most recent database-load failure, if any (e.g. bad path, corrupt/expired .mmdb). Present only when the last load attempt failed; destCountry policy rules do not match while this is set.",
+            "type": "string"
+          },
+          "lastErrorAt": {
+            "description": "When lastError was recorded (RFC 3339). Present only alongside lastError.",
+            "format": "date-time",
+            "type": "string"
           }
         },
         "required": [
@@ -5413,6 +5448,45 @@
         "x-culvert-idempotency": "non-idempotent",
         "x-culvert-introduced-version": "1.0.0",
         "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/backups": {
+      "get": {
+        "description": "Read-only listing of the backup archive directory, sourced from the CP-local maintenance agent's GET /v1/backups (the same scan the --list-backups CLI performs). Lets an admin confirm a backup job actually produced a file, its size, and how stale it is, without SSH access to the host.",
+        "operationId": "getBackups",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupsStatus"
+                }
+              }
+            },
+            "description": "Backup archive listing."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Backup archive listing",
+        "tags": [
+          "support"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"

@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -466,6 +467,43 @@ func TestApiCDRHealth_CachedSnapshotReturned(t *testing.T) {
 	profiles, ok := got["profiles"].([]any)
 	if !ok || len(profiles) != 1 {
 		t.Fatalf("profiles = %v", got["profiles"])
+	}
+}
+
+// TestApiCDRHealth_StaleCacheSurfacesConsecutiveFailures pins the GUI
+// blind-spot fix: while the poller is failing but hasn't yet cleared the
+// cache (< cdrHealthFailStaleAfter), the response must still say so via
+// consecutiveFailures/liveHealthy, instead of silently reporting the old
+// "healthy: true" snapshot with no sign anything is degraded.
+func TestApiCDRHealth_StaleCacheSurfacesConsecutiveFailures(t *testing.T) {
+	resetCDRState(t)
+	cdrHealthMu.Lock()
+	cdrHealthLast = &pb.HealthResponse{Healthy: true, Version: "v0.1.0"}
+	cdrHealthMu.Unlock()
+	t.Cleanup(clearCDRHealth)
+
+	atomic.StoreInt64(&cdrHealthFailures, 2)
+	atomic.StoreInt64(&statCDRInstanceHealthy, 0)
+	t.Cleanup(func() {
+		atomic.StoreInt64(&cdrHealthFailures, 0)
+		atomic.StoreInt64(&statCDRInstanceHealthy, 0)
+	})
+
+	w := httptest.NewRecorder()
+	apiCDRHealth(w, newViewerRequest("/api/cdr/health"))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d; body=%s", w.Code, w.Body.String())
+	}
+	var got map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &got)
+	if got["healthy"] != true {
+		t.Fatalf("expected stale cached healthy=true, got %v", got["healthy"])
+	}
+	if cf, ok := got["consecutiveFailures"].(float64); !ok || cf != 2 {
+		t.Fatalf("consecutiveFailures = %v", got["consecutiveFailures"])
+	}
+	if got["liveHealthy"] != false {
+		t.Fatalf("liveHealthy = %v; want false", got["liveHealthy"])
 	}
 }
 
