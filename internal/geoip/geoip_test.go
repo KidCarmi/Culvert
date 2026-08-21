@@ -7,6 +7,7 @@ package geoip
 import (
 	"net"
 	"testing"
+	"time"
 )
 
 func TestEnabled_FalseBeforeInit(t *testing.T) {
@@ -25,6 +26,23 @@ func TestInitGeoDB_MissingFileErrors(t *testing.T) {
 	}
 	if Enabled() {
 		t.Fatal("Enabled() must stay false after a failed InitGeoDB")
+	}
+}
+
+func TestLoadError_RecordsAndClearsFailure(t *testing.T) {
+	// A failed InitGeoDB must be recorded so an admin can tell "never
+	// configured" apart from "configured but won't open" without reading
+	// the process log (both otherwise look identical via Enabled()==false).
+	before := time.Now()
+	if err := InitGeoDB("/nonexistent/GeoLite2-Country.mmdb"); err == nil {
+		t.Fatal("InitGeoDB on a missing file must return an error")
+	}
+	msg, at, ok := LoadError()
+	if !ok || msg == "" {
+		t.Fatalf("LoadError() = (%q, %v, %v), want a recorded failure", msg, at, ok)
+	}
+	if at.Before(before) {
+		t.Fatalf("LoadError() timestamp %v predates the failing call at %v", at, before)
 	}
 }
 

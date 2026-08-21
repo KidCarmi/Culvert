@@ -1371,10 +1371,20 @@ func apiGeoIPConfig(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleViewer) {
 		return
 	}
-	jsonOK(w, map[string]any{
+	resp := map[string]any{
 		"enabled": geoip.Enabled(),
 		"dbPath":  uiCfgGeoIPDB,
-	})
+	}
+	// Surface a failed database load (bad path, corrupt/expired .mmdb) so an
+	// admin can tell "disabled — never configured" apart from "disabled — the
+	// configured database won't open" without reading the process log. See
+	// destCountry policy rules, which fail closed (no match) the same way in
+	// both cases.
+	if msg, at, ok := geoip.LoadError(); ok {
+		resp["lastError"] = msg
+		resp["lastErrorAt"] = at.UTC().Format(time.RFC3339)
+	}
+	jsonOK(w, resp)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

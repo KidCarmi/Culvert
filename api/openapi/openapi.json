@@ -1353,6 +1353,15 @@
           },
           "enabled": {
             "type": "boolean"
+          },
+          "lastError": {
+            "description": "Most recent database-load failure, if any (e.g. bad path, corrupt/expired .mmdb). Present only when the last load attempt failed; destCountry policy rules do not match while this is set.",
+            "type": "string"
+          },
+          "lastErrorAt": {
+            "description": "When lastError was recorded (RFC 3339). Present only alongside lastError.",
+            "format": "date-time",
+            "type": "string"
           }
         },
         "required": [
