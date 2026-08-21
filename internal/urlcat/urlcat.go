@@ -130,7 +130,12 @@ func computeFingerprint(entries []*Entry) string {
 		hs := make([]string, 0, len(e.Hosts))
 		seen := make(map[string]bool, len(e.Hosts))
 		for _, h := range e.Hosts {
-			hl := strings.ToLower(h)
+			// Mirror the RESOLVER's normalization exactly (rebuildIndex:
+			// lowercase + strip trailing dot) — a spelling that resolves
+			// identically must fingerprint identically, or a re-save of
+			// "example.com." vs "example.com" would falsely churn the
+			// category epoch and stale valid session evidence (Codex fix).
+			hl := strings.ToLower(strings.TrimSuffix(h, "."))
 			if hl != "" && !seen[hl] {
 				seen[hl] = true
 				hs = append(hs, hl)

@@ -188,6 +188,15 @@ func (c *policyDraftCoordinator) persistSnapshotLocked(rules []PolicyRule) error
 		return fmt.Errorf("marshal error: %w", err)
 	}
 	if err := fileutil.AtomicWrite(c.path, data, 0o600); err != nil {
+		if errors.Is(err, fileutil.ErrReplacedNotSynced) {
+			// Post-rename failure: policy_draft.json already carries the new
+			// content, so the durable domain HOLDS the write — reporting
+			// failure would trigger compensating rollbacks (delete the
+			// appended rule) that contradict the file a restart recovers
+			// (Codex round-8/10 class). The write-failure observer has
+			// already surfaced the storage degradation.
+			return nil
+		}
 		return fmt.Errorf("write error: %w", err)
 	}
 	return nil
@@ -396,7 +405,16 @@ func (c *policyDraftCoordinator) commitActivate(ifVersion *int64) (policyDraftDi
 	// draft retained, so the operator can retry once the volume recovers.
 	prevRunning := policyStore.List()
 	policyStore.ReplaceAll(cand)
-	if err := policyStore.SaveErr(); err != nil {
+	if err := policyStore.SaveErr(); err != nil && errors.Is(err, fileutil.ErrReplacedNotSynced) {
+		// Post-rename failure (Codex fix): the policy file already CARRIES the
+		// candidate — rolling back memory would contradict the visible file
+		// and a restart would activate the "failed" policy anyway. Proceed as
+		// committed; the residual is rename durability across an immediate
+		// crash (equivalent to crashing just before the commit), and the
+		// CHAOS-45 write-failure observer has already surfaced the storage
+		// degradation.
+		logWarnf("PolicyDraft: commit content persisted but parent-dir sync failed: %v", err)
+	} else if err != nil {
 		policyStore.ReplaceAll(prevRunning)
 		// Re-base the retained draft onto the RESTORED running (Codex fix):
 		// both ReplaceAlls advanced the running generation with NO semantic

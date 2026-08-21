@@ -168,6 +168,23 @@ func TestFingerprint_EverySemanticMutationChangesIt(t *testing.T) {
 }
 
 // (5) A semantic no-op does not change the fingerprint.
+// TestFingerprint_TrailingDotSpellingIsIdentity (Codex round 10): the
+// resolver's index strips trailing dots (rebuildIndex), so "example.com." and
+// "example.com" resolve identically — the fingerprint must apply the SAME
+// normalization or a re-save with the alternate spelling falsely churns the
+// category epoch and stales valid session evidence.
+func TestFingerprint_TrailingDotSpellingIsIdentity(t *testing.T) {
+	a := New([]*Entry{{Name: "Dev Tools", Hosts: []string{"example.com"}}})
+	b := New([]*Entry{{Name: "Dev Tools", Hosts: []string{"example.com."}}})
+	if a.ContentFingerprint() != b.ContentFingerprint() {
+		t.Fatal("trailing-dot spelling changed the fingerprint despite identical resolution")
+	}
+	c := New([]*Entry{{Name: "Dev Tools", Hosts: []string{"example.com", "example.com."}}})
+	if a.ContentFingerprint() != c.ContentFingerprint() {
+		t.Fatal("trailing-dot duplicate changed the fingerprint despite identical resolution")
+	}
+}
+
 func TestFingerprint_SemanticNoOpsDoNotChangeIt(t *testing.T) {
 	s := fpStore(t)
 	if err := s.Set("Dev Tools", []string{"gitlab.lab", "ci.lab"}, false); err != nil {

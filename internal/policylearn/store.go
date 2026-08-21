@@ -220,7 +220,15 @@ func (e *Engine) saveLocked() error {
 		return fmt.Errorf("policylearn: marshal session store: %w", err)
 	}
 	if err := fileutil.AtomicWrite(e.cfg.StorePath, raw, 0o600); err != nil {
-		return fmt.Errorf("policylearn: persist session store: %w", err)
+		if !errors.Is(err, fileutil.ErrReplacedNotSynced) {
+			return fmt.Errorf("policylearn: persist session store: %w", err)
+		}
+		// Post-rename failure: the store file already carries the new
+		// content, so the durable domain HOLDS the write — reporting failure
+		// would trigger the lifecycle transactions' compensating rollbacks
+		// (Start/finish restore membership) against a file a restart
+		// recovers with the transition applied (Codex round-10 class). The
+		// write-failure observer has already surfaced the degradation.
 	}
 	e.dirty = false
 	return nil

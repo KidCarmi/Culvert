@@ -340,6 +340,30 @@ func TestScopesFor_CaseAndWhitespaceVariantsShareOneScope(t *testing.T) {
 	}
 }
 
+// TestScopesFor_EqualFoldEquivalentsShareOneScope (round 10): the canonical
+// fold must implement enforcement's FULL EqualFold equivalence, not ASCII
+// ToLower — Σ/ς/σ, S/ſ, and K/U+212A compare equal under containsGroupCI's
+// EqualFold but lower to different strings.
+func TestScopesFor_EqualFoldEquivalentsShareOneScope(t *testing.T) {
+	cases := [][]string{
+		{"\u03a3\u0391\u039b\u0395\u03a3", "\u03c3\u03b1\u03bb\u03b5\u03c2"}, // sigma forms compare equal under EqualFold
+		{"Sales", "\u017fales"},   // long s (U+017F) vs S
+		{"Kelvin", "\u212aelvin"}, // Kelvin sign (U+212A) vs K
+	}
+	for _, groups := range cases {
+		got := scopesFor(&Observation{Subject: "u", Groups: groups}, nil)
+		if len(got) != 1 {
+			t.Fatalf("EqualFold-equivalent variants %q not folded to one scope: %v", groups, got)
+		}
+		for _, g := range groups {
+			folded := got[0][len(scopeGroupPrefix):]
+			if !strings.EqualFold(strings.TrimSpace(g), folded) {
+				t.Fatalf("canonical scope %q not EqualFold-equal to source %q", folded, g)
+			}
+		}
+	}
+}
+
 // TestClose_PersistsTransportOnlyDeltas (round 5): a transport-only counter
 // change after the last cadence save (an empty-host rejection, a consumer
 // panic) modifies the active session's TransportWindow at Close's final sync

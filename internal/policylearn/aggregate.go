@@ -22,6 +22,7 @@ package policylearn
 import (
 	"strings"
 	"time"
+	"unicode"
 )
 
 // Aggregation bounds (all package constants — deterministic, admin-independent).
@@ -124,6 +125,27 @@ func classifyStatus(status string) evidenceClass {
 	}
 }
 
+// foldGroup returns the canonical representative of a group name under the
+// enforcement comparison's EQUIVALENCE (containsGroupCI: trim + EqualFold).
+// strings.ToLower alone is NOT that equivalence for Unicode — Σ/ς/σ (and
+// S/ſ, K/U+212A) compare equal under EqualFold but lower to different
+// strings (Codex fix). EqualFold's per-rune equivalence classes are the
+// unicode.SimpleFold cycles, so the canonical rune is derived from the
+// cycle's minimum (a cycle invariant), lowercased so ASCII keeps its
+// familiar form: two strings map equal here exactly when EqualFold reports
+// them equal.
+func foldGroup(g string) string {
+	return strings.Map(func(r rune) rune {
+		low := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			if f < low {
+				low = f
+			}
+		}
+		return unicode.ToLower(low)
+	}, strings.TrimSpace(g))
+}
+
 // scopesFor returns the population scopes an observation contributes to.
 // scratch is reused to keep the drain allocation-light.
 func scopesFor(o *Observation, scratch []string) []string {
@@ -145,7 +167,7 @@ func scopesFor(o *Observation, scratch []string) []string {
 		// splitting evidence (or minting duplicate, semantically identical
 		// recommendations; a generated rule's SourceGroup is the folded form,
 		// which enforcement matches case-insensitively).
-		g = strings.ToLower(strings.TrimSpace(g))
+		g = foldGroup(g)
 		if g == "" {
 			continue
 		}
