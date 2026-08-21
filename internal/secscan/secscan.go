@@ -160,7 +160,16 @@ type Scanner struct {
 	excl     HashExcluder  // nil → no hash allowlist
 	cache    *hashcache.HashCache
 	maxBytes int64 // max bytes to buffer per response for body scanning
-	enabled  bool
+
+	// enabled is the outermost per-request gate (proxy.go preDispatchBlocked
+	// consults it before every threat-feed check, on EVERY proxied request), so
+	// it is deliberately atomic rather than guarded by mu. Same reasoning as
+	// threatfeed.Feed.enabled: reading a config boolean through the RWMutex that
+	// also guards the scanner's collaborators made the request path contend on a
+	// single reader-count cache line for no benefit. Init writes it once; nothing
+	// reads it in a composite invariant with the locked fields except
+	// BodyScanEnabled, which still takes the lock for the clam/yara pointers.
+	enabled atomic.Bool
 
 	// Tier 2.3: ClamAV ping cache. Protects the admin dashboard from
 	// opening a fresh TCP connection to ClamAV on every status poll.
@@ -247,7 +256,7 @@ func (ss *Scanner) Init(clamAddr string, maxBytes int64, cache *hashcache.HashCa
 			obs.Printf("SecurityScan: ClamAV connected at %q", clamAddr)
 		}
 	}
-	ss.enabled = true
+	ss.enabled.Store(true)
 	// Tier 2.3: Invalidate any cached clam status so the first admin poll
 	// after reconfiguration runs a real ping.
 	ss.clamStatusVal = ""
@@ -259,17 +268,24 @@ func (ss *Scanner) Init(clamAddr string, maxBytes int64, cache *hashcache.HashCa
 }
 
 // Enabled reports whether the scanner has been initialised.
+//
+// Lock-free by contract — see the enabled field. This is the gate the proxy
+// consults before any threat check, so it must stay free of mu.
+// TestScannerEnabled_IsLockFree pins the property.
 func (ss *Scanner) Enabled() bool {
-	ss.mu.RLock()
-	defer ss.mu.RUnlock()
-	return ss.enabled
+	return ss.enabled.Load()
 }
 
 // BodyScanEnabled reports whether body scanning (ClamAV and/or YARA) is active.
+// Unlike Enabled it still takes mu: the clam/yara collaborators are ordinary
+// mu-guarded fields and this is a response-stage check, not the request gate.
 func (ss *Scanner) BodyScanEnabled() bool {
+	if !ss.enabled.Load() {
+		return false
+	}
 	ss.mu.RLock()
 	defer ss.mu.RUnlock()
-	return ss.enabled && (ss.clam != nil || (ss.yara != nil && ss.yara.Loaded()))
+	return ss.clam != nil || (ss.yara != nil && ss.yara.Loaded())
 }
 
 // MaxBytes returns the buffer limit for body scanning.

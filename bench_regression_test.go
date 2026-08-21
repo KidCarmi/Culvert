@@ -289,6 +289,10 @@ func TestBenchGate_AuthCapabilityProbeAllocs(t *testing.T) {
 			for i := 0; i < b.N; i++ {
 				_ = reg.HasEnabledProviders()
 				_ = reg.HasEnabledOIDC()
+				// ADR-0025 capability probes — the successors actually consumed
+				// by resolveRequestAuth's ssoCapable/credCapable; same zero bound.
+				_ = reg.HasEnabledInteractiveProvider()
+				_ = reg.HasEnabledCredentialProvider()
 			}
 		})
 		allocs := res.AllocsPerOp()
