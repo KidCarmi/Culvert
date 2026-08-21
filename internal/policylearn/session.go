@@ -393,51 +393,54 @@ func (e *Engine) registerWindowOwnerLocked(gen uint64, sessionID string) {
 func (e *Engine) chargeLateWindowLoss(gen uint64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if id, ok := e.windowOwner[gen]; ok {
-		for _, s := range e.sessions {
-			if s.ID == id {
-				s.Transport.Dropped++
-				// Recommendations already generated from this session pinned
-				// the PRE-charge transport loss into their immutable Coverage
-				// (Codex round 28): the loss they claim is now understated,
-				// so still-pending ones are SUPERSEDED — the existing durable
-				// generated→superseded latch, which acceptance refuses — and
-				// ACCEPTING intents are flagged LateLossInvalidated (round
-				// 29): their transition happened but their EFFECT (the draft
-				// rule) may not have, and FinalizeAccept refuses the flag
-				// under this same mutex, so a flagged intent can never latch
-				// accepted. Accepted/rejected stay latched (their effects are
-				// final; the loss only weakens future claims). A regenerate
-				// from the session sees the charged window and produces
-				// honestly-degraded replacements.
-				invalidated := e.invalidateSessionRecsLocked(id)
-				e.dirty = true
-				// Durability (round 29): a COMPLETED session has no later
-				// flush to ride — no observation flow reaches it, and absent
-				// another admin mutation or a graceful Close the dirty flag
-				// alone would let an abrupt exit reload the pre-charge store:
-				// clean loss accounting and a GENERATED recommendation that
-				// acceptance would honor. A decision-state change (supersede/
-				// flag — at most one per charge burst: later charges find
-				// nothing left to flip) persists SYNCHRONOUSLY before the
-				// charge returns; a counter-only charge schedules a
-				// single-flight async persist so a burst coalesces instead of
-				// paying one AtomicWrite per late decision on request
-				// goroutines. A failed save leaves dirty armed for the next
-				// flush/Close (drain precedent).
-				if invalidated {
-					if err := e.saveLocked(); err != nil {
-						e.dirty = true
-					}
-				} else {
-					e.schedulePersistLocked()
-				}
-				return
-			}
-		}
-		delete(e.windowOwner, gen)
+	id, ok := e.windowOwner[gen]
+	if !ok {
+		e.tr.dropped.Add(1)
+		return
 	}
+	for _, s := range e.sessions {
+		if s.ID != id {
+			continue
+		}
+		s.Transport.Dropped++
+		// Recommendations already generated from this session pinned the
+		// PRE-charge transport loss into their immutable Coverage (Codex
+		// round 28): the loss they claim is now understated, so still-pending
+		// ones are SUPERSEDED — the existing durable generated→superseded
+		// latch, which acceptance refuses — and ACCEPTING intents are flagged
+		// LateLossInvalidated (round 29): their transition happened but their
+		// EFFECT (the draft rule) may not have, and FinalizeAccept refuses
+		// the flag under this same mutex, so a flagged intent can never latch
+		// accepted. Accepted/rejected stay latched (their effects are final;
+		// the loss only weakens future claims). A regenerate from the session
+		// sees the charged window and produces honestly-degraded replacements.
+		e.persistLateChargeLocked(e.invalidateSessionRecsLocked(id))
+		return
+	}
+	delete(e.windowOwner, gen) // owner pruned: fall back to the global counter
 	e.tr.dropped.Add(1)
+}
+
+// persistLateChargeLocked makes one late charge durable (round 29): a
+// COMPLETED session has no later flush to ride — no observation flow reaches
+// it, and absent another admin mutation or a graceful Close the dirty flag
+// alone would let an abrupt exit reload the pre-charge store: clean loss
+// accounting and a GENERATED recommendation that acceptance would honor. A
+// decision-state change (supersede/flag — at most one per charge burst:
+// later charges find nothing left to flip) persists SYNCHRONOUSLY before the
+// charge returns; a counter-only charge schedules a single-flight async
+// persist so a burst coalesces instead of paying one AtomicWrite per late
+// decision on request goroutines. A failed save leaves dirty armed for the
+// next flush/Close (drain precedent). Caller holds e.mu.
+func (e *Engine) persistLateChargeLocked(invalidated bool) {
+	e.dirty = true
+	if !invalidated {
+		e.schedulePersistLocked()
+		return
+	}
+	if err := e.saveLocked(); err != nil {
+		e.dirty = true
+	}
 }
 
 // invalidateSessionRecsLocked applies the late-loss invalidation to every
