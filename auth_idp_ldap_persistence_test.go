@@ -91,7 +91,7 @@ func fillProjectionSentinels(t *testing.T, v reflect.Value, path string, ctr *in
 				t.Fatalf("%s: unsupported slice kind %s — extend the parity filler", p, f.Type())
 			}
 			f.Set(reflect.ValueOf([]string{fmt.Sprintf("sentinel-%d", *ctr)}))
-		case reflect.Ptr:
+		case reflect.Pointer:
 			if f.Type().Elem().Kind() != reflect.Struct {
 				t.Fatalf("%s: unsupported pointer kind %s — extend the parity filler", p, f.Type())
 			}
@@ -112,7 +112,7 @@ func checkProjectionParity(t *testing.T, in, out reflect.Value, path string, red
 		name := in.Type().Field(i).Name
 		p := projectionFieldPath(path, name)
 		fi, fo := in.Field(i), out.Field(i)
-		if fi.Kind() == reflect.Ptr {
+		if fi.Kind() == reflect.Pointer {
 			if fo.IsNil() {
 				t.Errorf("%s: sub-config dropped by the projection", p)
 				continue
