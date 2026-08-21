@@ -216,7 +216,7 @@ func (e *Engine) finishActive(actor, terminalState string) (Session, error) {
 	s.StoppedAt = rfc3339(now)
 	s.StoppedBy = actor
 	e.checkEpochLocked(s, now, "", "") // final churn check for the window (current seam reads)
-	e.syncTransportLocked()    // fold the session-window transport deltas
+	e.syncTransportLocked()            // fold the session-window transport deltas
 	e.pruneLocked()
 	if err := e.saveLocked(); err != nil {
 		s.State, s.StoppedAt, s.StoppedBy = prevState, prevStopAt, prevStopBy

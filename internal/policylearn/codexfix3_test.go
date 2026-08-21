@@ -584,7 +584,7 @@ func TestChurn_QueuedTransientWindowLatchedFromDecisionTimeStamp(t *testing.T) {
 	e.mu.Lock()
 	content.Store("hash-B")
 	e.Observe(Observation{Subject: "u", AuthSource: "idp", Host: "x.example", Status: "OK"}) // decided under B
-	content.Store("hash-A") // restored BEFORE the drain consumes
+	content.Store("hash-A")                                                                  // restored BEFORE the drain consumes
 	e.Observe(Observation{Subject: "u", AuthSource: "idp", Host: "y.example", Status: "OK"})
 	e.mu.Unlock()
 
