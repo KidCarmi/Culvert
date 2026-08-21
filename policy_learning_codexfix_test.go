@@ -409,6 +409,29 @@ func TestCodexFix_AcceptRefusedWhenDraftModeDisarmedAtStagingMoment(t *testing.T
 	}
 }
 
+// TestPolicyContentIdentityCached_DefaultActionInvalidates (Codex round 14):
+// the memo must key on the default action too — its setter flips an atomic
+// WITHOUT advancing the policy generation, so a generation-only key served
+// the stale hash through a deny→allow→deny flip and the per-observation
+// churn check never latched the transient allow window.
+func TestPolicyContentIdentityCached_DefaultActionInvalidates(t *testing.T) {
+	prev := defaultPolicyAction()
+	t.Cleanup(func() { setDefaultPolicyAction(prev) })
+
+	setDefaultPolicyAction("deny")
+	h1 := policyContentIdentityCached()
+	setDefaultPolicyAction("allow") // no rule change: generation does NOT move
+	h2 := policyContentIdentityCached()
+	if h2 == h1 {
+		t.Fatal("default-action flip served the stale cached content hash — the transient window would never latch churn")
+	}
+	setDefaultPolicyAction("deny")
+	h3 := policyContentIdentityCached()
+	if h3 != h1 {
+		t.Fatalf("restored default action did not restore the content hash (h1=%s h3=%s)", h1, h3)
+	}
+}
+
 // TestPolicyContentIdentity_IgnoresProvenanceStamps (Codex round 4): the
 // policy CONTENT hash pins what the policy SAYS — stampRuleMetadataForWrite
 // restamps ModifiedAt/By on EVERY save, so a semantically identical re-save

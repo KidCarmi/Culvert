@@ -208,27 +208,34 @@ func policyLearnApplyDesiredLocked(desired policyLearnSettings) {
 // every recommendation). Domain tag v2: pre-fix pinned hashes covered the
 // stamps, so they mismatch v2 values and go stale exactly once at upgrade —
 // never reinterpreted (the epoch-scheme upgrade precedent).
-// policyContentMemo caches the content hash keyed by the policy generation:
-// every rulebase mutation bumps the generation, so the hash recomputes at
-// most once per policy change while the learning drain's PER-OBSERVATION
-// churn check (Codex round 13) costs one version read + string compare.
-// A same-generation content change is impossible in-process (every mutator
-// bumps); the memo is process-local, so counter resets across restarts
-// cannot alias into it.
+// policyContentMemo caches the content hash keyed by (policy generation,
+// default action): every RULEBASE mutation bumps the generation, but the
+// DEFAULT ACTION is part of the hashed content and its setter flips an atomic
+// WITHOUT advancing the generation (Codex round 14 — a generation-only key
+// served the stale hash through a deny→allow→deny flip, so the per-
+// observation churn check never latched the transient allow window). Both
+// key components are cheap reads, so the learning drain's PER-OBSERVATION
+// check (Codex round 13) costs two loads + string compares; the hash
+// recomputes at most once per policy change. A same-key content change is
+// impossible in-process (every rule mutator bumps the generation; the
+// default action is in the key); the memo is process-local, so counter
+// resets across restarts cannot alias into it.
 type policyContentMemoEntry struct {
-	gen  int64
-	hash string
+	gen           int64
+	defaultAction string
+	hash          string
 }
 
 var policyContentMemo atomic.Pointer[policyContentMemoEntry]
 
 func policyContentIdentityCached() string {
 	gen, _ := policyStore.policyVersion()
-	if m := policyContentMemo.Load(); m != nil && m.gen == gen {
+	da := defaultPolicyAction()
+	if m := policyContentMemo.Load(); m != nil && m.gen == gen && m.defaultAction == da {
 		return m.hash
 	}
 	h := policyContentIdentity()
-	policyContentMemo.Store(&policyContentMemoEntry{gen: gen, hash: h})
+	policyContentMemo.Store(&policyContentMemoEntry{gen: gen, defaultAction: da, hash: h})
 	return h
 }
 
