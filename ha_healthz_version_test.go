@@ -9,8 +9,8 @@ import (
 
 // TestHealthz_ReportsRuntimeVersion pins the release-integrity invariant surfaced
 // by the first LIVE authoritative MCP Observe Acceptance (v1.0.202): the live
-// /healthz endpoint MUST self-report the build-time release identity, wired to the
-// SAME package var the linker stamps (`-X main.version=vX.Y.Z`). The v1.0.202
+// /healthz endpoint MUST self-report the build-time release version stamp, wired to
+// the SAME package var the linker stamps (`-X main.version=vX.Y.Z`). The v1.0.202
 // signed binary stamped main.version correctly but apiHealthz omitted the field
 // entirely, so the acceptance harness read an empty version and the required
 // `artifact.version` criterion failed. This test fails closed if /healthz ever
@@ -35,7 +35,7 @@ func TestHealthz_ReportsRuntimeVersion(t *testing.T) {
 	}
 	got, ok := body["version"]
 	if !ok {
-		t.Fatal(`/healthz response has no "version" field: signed release identity is unverifiable at runtime`)
+		t.Fatal(`/healthz response has no "version" field: signed release version stamp is unverifiable at runtime`)
 	}
 	// Wired to the linker-stamped main.version SSOT, not a literal.
 	if got != version {
