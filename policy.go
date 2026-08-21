@@ -1487,7 +1487,11 @@ func matchDestNorm(rule *PolicyRule, host, normHost string) bool {
 		return false
 	}
 	// Category group check — host must be in ANY category within the group.
-	// O(1): lookupHostCategory(host) → group.catSet[result].
+	// O(labels): lookupHostCategory(host) → group.catSet[result]. The group
+	// membership half was always O(1); the host→category half was a linear
+	// scan over every configured pattern until urlcat gained its reverse
+	// index — this comment used to claim a cost the code did not have. Both
+	// halves are now indexed — see urlcat.Store.LookupHost.
 	if catGroupSet && !categoryGroupMatchesHostRule(rule, host) {
 		return false
 	}
