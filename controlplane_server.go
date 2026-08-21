@@ -499,6 +499,22 @@ func admitEnrollment(ctx context.Context, raw json.RawMessage) (EnrollRequest, T
 		priorNode = &snapshot
 	}
 
+	// CHAOS-50: refuse an unusable cluster CA BEFORE the one-time token is spent.
+	//
+	// Enrollment tokens are single-use and their consumption is persisted, so a
+	// precondition failure AFTER this point costs the caller their credential
+	// permanently: once the CA is repaired the node retries with a token the CP
+	// has already marked used, and an admin has to mint and distribute a
+	// replacement. A failure that is not the caller's fault must not spend the
+	// caller's credential — the same applies to the pre-existing "not
+	// initialized" check further down in Enroll, which had the same shape.
+	// Deliberately placed AFTER the per-IP rate limiter, so an unauthenticated
+	// flood cannot drive the refusal counter or the alert gate. (Ported from
+	// the competing CHAOS-50 implementation on PR #1179.)
+	if err := clusterCAIssuancePrecondition(); err != nil {
+		return req, TokenInfo{}, nil, err
+	}
+
 	// Validate and consume the enrollment token atomically (persisted to disk).
 	// Returns token metadata so we don't need to re-access the map.
 	tokInfo, err := globalClusterStore.ValidateAndConsumeToken(req.Token, req.NodeID, sourceIP)
@@ -507,6 +523,27 @@ func admitEnrollment(ctx context.Context, raw json.RawMessage) (EnrollRequest, T
 		return req, TokenInfo{}, nil, status.Errorf(codes.PermissionDenied, "enrollment denied: %v", err)
 	}
 	return req, tokInfo, priorNode, nil
+}
+
+// clusterCAIssuancePrecondition reports whether the cluster CA can issue a
+// certificate right now, as a gRPC status error ready to return.
+//
+// It is the token-preserving front half of the CHAOS-50 fail-closed contract:
+// the authoritative guard still lives in SignCSR (which RenewCert also reaches,
+// and which no caller can bypass), but running the same check here — before the
+// token is spent — means a refusal costs the operator a retry rather than a
+// credential. A refusal is counted exactly once because this path returns
+// before SignCSR is reached.
+func clusterCAIssuancePrecondition() error {
+	if !globalClusterCA.Ready() {
+		return status.Errorf(codes.FailedPrecondition, "cluster CA not initialized")
+	}
+	if err := globalClusterCA.Usable(); err != nil {
+		noteClusterCASignRefused(err.Error())
+		return status.Errorf(codes.FailedPrecondition, "cluster CA cannot issue certificates: %v — %s",
+			err, clusterCAUnusableRemediation(clusterCAUnusableKind(err)))
+	}
+	return nil
 }
 
 // nodeCertExpired reports whether an enrolled node's certificate is past its

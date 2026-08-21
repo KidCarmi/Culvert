@@ -160,7 +160,7 @@ func handleInspectNativeALPN(w http.ResponseWriter, r *http.Request, rawUpstream
 	if clientOffersH2(clientOffer) {
 		upstreamProtos = []string{"h2", "http/1.1"}
 	}
-	upstreamTLS, up, err := handshakeUpstreamALPN(r.Context(), rawUpstream, hostOnly, dec.SkipVerify, upstreamProtos, match)
+	upstreamTLS, up, effectiveSkip, err := handshakeUpstreamALPN(r.Context(), rawUpstream, hostOnly, dec.SkipVerify, upstreamProtos, match)
 	if err != nil {
 		rawClient.Close() //nolint:errcheck // best-effort cleanup (200 already sent; cannot 502)
 		// Learn-only on the native path: the 200 is already sent, so the current
@@ -194,7 +194,7 @@ func handleInspectNativeALPN(w http.ResponseWriter, r *http.Request, rawUpstream
 	recordActiveConn(1)
 	defer recordActiveConn(-1)
 
-	dispatchNativeInspect(r, clientTLS, upstreamTLS, up, down, hostOnly, dec, match, id)
+	dispatchNativeInspect(r, clientTLS, upstreamTLS, up, down, hostOnly, dec, match, id, effectiveSkip)
 }
 
 // dispatchNativeInspect finalises an established native-ALPN inspected tunnel: it builds
@@ -205,8 +205,8 @@ func handleInspectNativeALPN(w http.ResponseWriter, r *http.Request, rawUpstream
 // loop, threading the projected dec block onto both paths' per-request log entries. The
 // block carries the native (h2 or h1) leg's negotiated TLS state — the piece the earlier
 // nil-block follow-up left out. redact=false mirrors the strip path.
-func dispatchNativeInspect(r *http.Request, clientTLS, upstreamTLS *tls.Conn, up, down, hostOnly string, dec sslResolution, match *PolicyMatch, id ProxyIdentity) {
-	inspected := inspectedOutcome(dec, hostOnly, upstreamTLS.ConnectionState(), match)
+func dispatchNativeInspect(r *http.Request, clientTLS, upstreamTLS *tls.Conn, up, down, hostOnly string, dec sslResolution, match *PolicyMatch, id ProxyIdentity, effectiveSkip bool) {
+	inspected := inspectedOutcome(dec, hostOnly, upstreamTLS.ConnectionState(), match, effectiveSkip)
 	recordDecryptSession(inspected)
 	decBlock := inspected.toBlock(decRedactHosts())
 	if up == "h2" && down == "h2" {
@@ -247,16 +247,19 @@ func relayPlaintextInspectFallback(rawClient net.Conn, peekBuf io.Reader, rawUps
 // the given ALPN protocols and returns the connection and the negotiated protocol.
 // It closes the connection on handshake failure. tlsSkipVerify (admin-configured
 // per rule) disables upstream cert verification for internal/self-signed hosts.
-func handshakeUpstreamALPN(ctx context.Context, rawUpstream net.Conn, hostOnly string, tlsSkipVerify bool, protos []string, match *PolicyMatch) (*tls.Conn, string, error) {
+// The returned effectiveSkip is the InsecureSkipVerify the handshake's own
+// tls.Config carried — the ground truth for the ADR-0011 cert_verify record
+// (captured, never re-resolved against the live profile store; CWE-367).
+func handshakeUpstreamALPN(ctx context.Context, rawUpstream net.Conn, hostOnly string, tlsSkipVerify bool, protos []string, match *PolicyMatch) (*tls.Conn, string, bool, error) {
 	cfg := upstreamInspectTLSConfigForMatch(hostOnly, tlsSkipVerify, match)
 	cfg.NextProtos = protos
 	up := tls.Client(rawUpstream, cfg)
 	if err := up.HandshakeContext(ctx); err != nil {
 		up.Close()                       //nolint:errcheck // best-effort cleanup (closes underlying TCP conn)
 		recordProfileMintlsReject(match) // attribute the drop if a profile set a min-TLS floor
-		return nil, "", err
+		return nil, "", false, err
 	}
-	return up, up.ConnectionState().NegotiatedProtocol, nil
+	return up, up.ConnectionState().NegotiatedProtocol, cfg.InsecureSkipVerify, nil
 }
 
 // peekClientALPN reads the client's offered ALPN protocols from the buffered

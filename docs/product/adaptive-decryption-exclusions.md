@@ -1,7 +1,7 @@
 # Adaptive Decryption Exclusions (Fail-Open + Auto-Learn)
 
 **Official product documentation** · Culvert Secure Web Gateway
-Feature area: SSL/TLS Decryption · Availability: shipped (operator-tuning enhancements planned — see [Part 12](#future-improvements-planned)) · Audience: administrators, support, security, engineering
+Feature area: SSL/TLS Decryption · Availability: shipped, including admin-tunable cache parameters (confirm-count/TTL/window/cap, F10) · Audience: administrators, support, security, engineering
 
 > **What this is in one sentence.** Culvert can *learn at runtime* which hosts are
 > incompatible with SSL inspection and transparently bypass decryption for them —
@@ -219,24 +219,43 @@ affected.
 | **Hot-path glue** | `autoexclude_resolve.go` (package main) | Gates learn+read on the rule's fail-open opt-in; classifies TLS failures into learnable reasons; derives client-evidence token; fires audit/alert/metric on promotion. |
 | **Decision point** | `proxy.go` → `resolveSSLAction` | Per-CONNECT consult: if the rule is fail-open and the host is excluded, downgrade Inspect → Bypass. |
 | **Failure sites** | `proxy_tunnel.go`, `proxy_tunnel_h2.go` | Where an inspect handshake fails; call `maybeFailOpenOrigin` / `maybeFailOpenClient`. |
-| **Decryption Profile** | `internal/decryptprofile` | Holds the `OnInspectError` field; `FailOpenScope(name)` is the no-copy hot-path accessor returning `(profileID, isFailOpen)`. |
+| **Decryption Profile** | `internal/decryptprofile` | Holds the `OnInspectError` field; `FailOpenScope(name)` is the no-copy hot-path accessor returning `(profileID, securityGen, ok)` (ok iff the profile exists and is fail-open). |
 | **Admin API** | `apiDecryptionExclusions` (`ui_policy.go`) | `GET` list+stats+footprint (viewer), `DELETE` evict/clear (operator). |
-| **UI** | Decryption Exclusions panel (`static/index.html`) | Read/evict surface + the fail-open toggle on the profile editor. |
+| **Cache Tuning API** | `ui_policy.go` (`GET`/`PUT /api/decryption-exclusions/tunables`) | `GET` defaults+bounds (viewer), `PUT` full-set update of the five engine parameters (admin). |
+| **UI** | Decryption Exclusions panel (`static/index.html`) | Read/evict surface, the **Cache Tuning** section (admin-only), and the fail-open toggle on the profile editor. |
 | **Metrics** | `metrics.go` + `autoexclude_resolve.go` | Prometheus counters/gauges. |
 
 ### The scoped key (policy isolation)
 
-Every entry — active and pending — is keyed by **`(scopeID, host)`**, where
+Every active entry is keyed by **`(scopeID, host)`**, and pending observations
+use that same base plus the current security generation and failure reason.
 `scopeID` is the **stable identity of the decryption profile** that matched the
 failing session (not the profile name; a rename preserves the ID).
 
 ```
 active map key  =  scopeID \x00 host
-pending map key =  scopeID \x00 host \x00 reason
+pending map key =  scopeID \x00 host \x00 gen \x00 reason
 ```
 
 Host-only keying would *not* be policy isolation; the scope is. A host learned under
 profile *A* is consulted **only** for sessions that also match profile *A*.
+
+### Security-generation fencing (a security edit invalidates learned entries)
+
+The profile ID is stable across edits (renames preserve it), so keying on
+`(scopeID, host)` alone would let a security-relevant edit to a fail-open profile
+keep consulting exclusions learned under the *old* posture. Every entry therefore
+also records the **security generation** of its owning profile — a deterministic
+fingerprint (`decryptprofile.computeSecurityGen`) over only the security-effective
+fields (`OnInspectError`, `CertVerification`, `OnUnsupported`, `MinTLSVersion`,
+`MaxTLSVersion`, `InspectHTTP2`). `Observe`/`Contains` are keyed on
+`(scopeID, gen, host)`: a generation mismatch is a miss, so editing any of those
+fields invalidates every exclusion learned under the prior generation immediately —
+no waiting out the TTL or clearing the cache by hand. A rename or any
+non-security-effective edit keeps the generation and preserves learned entries. The
+generation is computed locally on every node from the profile's current fields
+(never persisted or synced), so Control Plane and Data Plane nodes always agree on
+which exclusions are valid, identically across restarts.
 
 ### Cache lifecycle
 
@@ -315,6 +334,7 @@ it does not live-rescue even for `client_cert_required` (a documented deferral).
 | `scope_name` | Human-readable profile name (cached at learn time) |
 | `host` | Normalized host (host-only, lowercased, port/trailing-dot stripped) |
 | `reason` | `client_cert_required` \| `unsupported_params` \| `client_pinned` |
+| `security_gen` | Owning profile's security generation at learn time (see [Security-generation fencing](#security-generation-fencing-a-security-edit-invalidates-learned-entries)); omitted when empty |
 | `learned_at` | Promotion time |
 | `expires_at` | `learned_at + TTL` (pinned reason uses the shorter pinned TTL) |
 | `hits` | Sessions that bypassed because of this entry (blast-radius / triage signal) |
@@ -376,7 +396,17 @@ promotion, `SSL_AUTOEXCLUDE_BYPASS …` on each hit.
 
 `DELETE /api/decryption-exclusions?scope=<id>&host=<host>` (role: **operator**) →
 evict one. `DELETE /api/decryption-exclusions` (no `host`) → clear all. Both audit.
-There is **no create/update path** — the cache is runtime state, not configuration.
+There is **no create/update path** for entries — the cache is runtime state, not
+configuration.
+
+`GET /api/decryption-exclusions/tunables` (role: **viewer**) → defaults + bounds
+for the five engine parameters (`confirm_n`, `ttl_secs`, `pinned_ttl_secs`,
+`window_secs`, `max_entries`); current effective values live on the Stats block
+above, not here. `PUT /api/decryption-exclusions/tunables` (role: **admin**) → a
+full-set replacement (an omitted or zero field resets to its default); persists to
+durable per-node admin settings before applying live. See the [operator
+guide](../operator/decryption-auto-exclusions.md#tuning-the-cache-durable-per-node)
+for the parameter table and tuning guidance.
 
 > A deleted profile's `scope_id` is intentionally **omitted** from `scope_names`
 > (with `scope_rule_counts` = 0). The UI reads that absence as the signal to badge
@@ -1170,9 +1200,11 @@ learned hosts in **Monitor → Decryption Exclusions**.
   unsupported-params, and the native-HTTP/2 path are learn-only — the first session
   fails and the next self-heals.
 - **Per-node, volatile.** Not synchronized across HA nodes; cleared on restart.
-- **Fixed defaults.** Confirm-count (2), TTLs (12h / 1h pinned), window (10m), and
-  cap (4096) are PAN-OS-aligned constants; posture is surfaced read-only. Operator
-  tuning is a planned enhancement.
+- **Node-local tuning.** The five cache parameters (confirm-count, TTL, pinned TTL,
+  window, cap; PAN-OS-aligned defaults) are admin-tunable via the Cache Tuning
+  panel/API and durable across restart, but deliberately **not** synced Control
+  Plane → Data Plane, exported, or subject to version rollback — each node is tuned
+  independently.
 - **NAT/DHCP.** Unauthenticated devices sharing an egress IP count as one client for
   the confirm-count.
 
@@ -1209,6 +1241,12 @@ learned hosts in **Monitor → Decryption Exclusions**.
 - **Scoped key from day two.** The original single-host key was reworked to
   `(scopeID, host)` (blocker B1). Host-only keying is not policy isolation; the
   profile-ID scope is. This is the single most important security property.
+- **Security-generation fencing (PR2).** The profile ID is stable across edits, so a
+  same-ID security-relevant change (e.g. flipping `OnInspectError`, tightening
+  `CertVerification`) could otherwise leave stale exclusions live. Keying narrows to
+  `(scopeID, gen, host)` with the generation precomputed at store-write time so the
+  hot path never hashes — see [Security-generation
+  fencing](#security-generation-fencing-a-security-edit-invalidates-learned-entries).
 - **Confirm-count over distinct evidence, not raw failures.** Prevents
   single-endpoint self-poisoning (B4). Token prefers authenticated identity; IPv4
   stays raw (a /24 would over-collapse a NAT fleet), IPv6 collapses to /64
@@ -1254,8 +1292,6 @@ learned hosts in **Monitor → Decryption Exclusions**.
 - **Native-HTTP/2-path live rescue** (currently learn-only there).
 - **Curated predefined pinned-app exclusion list** (well-known apps, first-session).
 - **`learn-review` posture** — record + alert, bypass only after operator approval.
-- **Operator-tunable confirm-count / TTL** via the GUI (currently fixed defaults,
-  surfaced read-only).
 
 ### Technical debt / deferred work
 
@@ -1264,8 +1300,6 @@ learned hosts in **Monitor → Decryption Exclusions**.
   first-session proof-of-work that does not exist for `certificate_required`.
 - **NAT/DHCP evidence weakness** for unauthenticated shared-egress fleets is inherent
   to IP-based evidence; the mitigation is client authentication.
-- **Read-only posture** (no GUI tuning of confirm-count/TTL) is a GUI-parity
-  deferral, not a hard constraint — the engine already parameterizes them.
 
 ### Test coverage (map for maintainers)
 

@@ -27,14 +27,19 @@ func withClusterCAGlobals(t *testing.T) {
 	})
 	globalClusterStore = newTestClusterStore(t)
 	globalConfigStore = &ConfigStore{}
-	// Use a fresh, empty global cluster CA. ImportCA persists onto its
-	// receiver `ca` and then calls CurrentConfigSnapshot(), which reads
-	// globalClusterCA.CACertFingerprint() under that CA's RLock. Pointing the
-	// global at a *separate* empty CA (cert==nil → fingerprint returns fast)
-	// keeps the snapshot read off the receiver's held write lock. (A
-	// pre-existing self-deadlock exists if globalClusterCA IS the receiver
-	// being imported — out of scope for this key-encryption PR; mirrors the
-	// existing TestClusterCARotationCounter_ImportCAIncrements pattern.)
+	// Use a fresh, empty global cluster CA — an isolation measure only, now that
+	// the self-deadlock this used to work around is fixed.
+	//
+	// HISTORY (CHAOS-50): ImportCA used to hold ca.mu across
+	// CurrentConfigSnapshot(), which reads globalClusterCA.CACertFingerprint()
+	// under that same RLock — a hard self-deadlock whenever globalClusterCA WAS
+	// the receiver, i.e. always in production. Pointing the global at a separate
+	// empty CA dodged it, and this comment recorded the defect as "out of scope"
+	// for the key-encryption PR that introduced the workaround. That kept a
+	// Critical control-plane deadlock out of the risk register entirely. The fix
+	// (commit under the lock, side effects with it released) landed with
+	// TestChaos50_ImportCADoesNotDeadlock, which drives the production aliasing
+	// deliberately. Do not restore the workaround as if it were still load-bearing.
 	globalClusterCA = &clusterCA{}
 }
 
