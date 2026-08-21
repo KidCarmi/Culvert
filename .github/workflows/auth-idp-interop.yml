@@ -149,18 +149,40 @@ jobs:
 
       - uses: ./.github/actions/setup-go-cache
 
+      # The image's cfssl TLS auto-generation is unreliable on hosted runners
+      # (slapd came up with "TLS: can't accept: No certificate was found",
+      # failing the LDAPS/StartTLS interop tests), so provision a
+      # deterministic throwaway certificate instead: self-signed, 2-day,
+      # SAN localhost/127.0.0.1. The key is world-readable on purpose — CI
+      # fixture material only, same posture as the SAML job's IdP cert.
+      - name: Generate throwaway TLS certificate
+        run: |
+          mkdir -p /tmp/openldap-certs
+          openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
+            -keyout /tmp/openldap-certs/ldap.key \
+            -out /tmp/openldap-certs/ldap.crt \
+            -subj "/CN=ldap.corp.example" \
+            -addext "subjectAltName=DNS:ldap.corp.example,DNS:localhost,IP:127.0.0.1"
+          cp /tmp/openldap-certs/ldap.crt /tmp/openldap-certs/ca.crt
+          chmod 644 /tmp/openldap-certs/*
+
       # Pinned OpenLDAP with the memberof overlay enabled by default; the
       # deterministic fixture directory (.github/idp/openldap/bootstrap.ldif)
       # seeds users alice/bob and the engineering group. Credentials are
-      # fixture-only. The image auto-generates a self-signed TLS certificate,
-      # so the ldaps/StartTLS interop paths run without extra material.
+      # fixture-only. The pre-provisioned certs (default filenames
+      # ldap.crt/ldap.key/ca.crt) make the image skip its own generation;
+      # LDAP_TLS_VERIFY_CLIENT=never because the suite tests server-auth
+      # TLS, not mutual TLS.
       - name: Start OpenLDAP
         run: |
           docker run -d --name culvert-openldap \
+            --hostname ldap.corp.example \
             -p 127.0.0.1:3389:389 -p 127.0.0.1:3636:636 \
             -e LDAP_ORGANISATION="Culvert Interop" \
             -e LDAP_DOMAIN=corp.example \
             -e LDAP_ADMIN_PASSWORD=admin-password \
+            -e LDAP_TLS_VERIFY_CLIENT=never \
+            -v /tmp/openldap-certs:/container/service/slapd/assets/certs \
             -v "$PWD/.github/idp/openldap:/container/service/slapd/assets/config/bootstrap/ldif/custom:ro" \
             osixia/openldap:1.5.0 --copy-service
 
