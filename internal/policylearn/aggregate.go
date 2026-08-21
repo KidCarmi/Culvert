@@ -253,7 +253,7 @@ func (c *Cell) apply(agg *Aggregate, o *Observation, cls evidenceClass, token, d
 
 // boundedCount increments m[key], admitting at most bound distinct keys;
 // overflow keys are counted in other.
-func boundedCount(m *map[string]int64, other *int64, key string, bound int) {
+func boundedCount(m *map[string]int64, other *int64, key string, bound int) { //nolint:gocritic // ptrToRefParam: the pointer is required — the nil map is lazily REPLACED (decoded-empty shape), not just written through
 	if *m == nil {
 		*m = map[string]int64{}
 	}

@@ -13,7 +13,7 @@ import (
 )
 
 func TestPolicyLearningResolver_PathsOnlyNoEnablement(t *testing.T) {
-	dataDir := filepath.Join("/", "data")
+	dataDir := t.TempDir()
 	cfg := resolvePolicyLearningStartupConfig(&FileConfig{}, dataDir)
 	if cfg.StorePath != filepath.Join(dataDir, "policy_learning.json") {
 		t.Errorf("StorePath = %q", cfg.StorePath)

@@ -168,11 +168,11 @@ func TestAggregate_SyntheticScopesNeverCollideWithGroups(t *testing.T) {
 	h.observe(t, "bob", "local", nil, "code.example", "OK")
 	h.drainWait(t, 3)
 
-	real := h.cell(t, "g:unauth", "Dev Tools")
+	realGrp := h.cell(t, "g:unauth", "Dev Tools")
 	synth := h.cell(t, ScopeUnauth, "Dev Tools")
 	groupless := h.cell(t, ScopeGroupless, "Dev Tools")
-	if real.Requests != 1 || synth.Requests != 1 || groupless.Requests != 1 {
-		t.Fatalf("scope collision: real=%d synth=%d groupless=%d", real.Requests, synth.Requests, groupless.Requests)
+	if realGrp.Requests != 1 || synth.Requests != 1 || groupless.Requests != 1 {
+		t.Fatalf("scope collision: real=%d synth=%d groupless=%d", realGrp.Requests, synth.Requests, groupless.Requests)
 	}
 	if synth.DistinctSubjects() != 0 {
 		t.Fatal("unauthenticated traffic must not mint subject tokens")

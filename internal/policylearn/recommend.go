@@ -472,7 +472,7 @@ func (e *Engine) RecommendableCategories() []string {
 // Repeated generation is idempotent: identical content (same EvidenceHash) is
 // kept, not duplicated; changed content supersedes the prior object. Persists
 // before returning (rollback on failure).
-func (e *Engine) GenerateRecommendations(sessionID string) (GenerateResult, error) { //nolint:cyclop // the named eligibility gates + idempotent supersession are intentionally one explicit pipeline (M4 spec)
+func (e *Engine) GenerateRecommendations(sessionID string) (GenerateResult, error) { //nolint:cyclop,funlen // the named eligibility gates + idempotent supersession are intentionally one explicit pipeline (M4 spec)
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.readOnly {
