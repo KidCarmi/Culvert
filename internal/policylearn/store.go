@@ -141,15 +141,28 @@ func decodeEnvelope(raw []byte) (*persistEnvelope, error) { //nolint:cyclop // o
 	if env.SchemaVersion < minReadableSchemaVersion {
 		return nil, fmt.Errorf("decode session store: unsupported schema_version %d", env.SchemaVersion)
 	}
+	learning := 0
 	for _, s := range env.Sessions {
 		if s == nil || s.ID == "" || s.State == "" {
 			return nil, errors.New("decode session store: malformed session record")
 		}
 		switch s.State {
-		case StateLearning, StateCompleted, StateCancelled:
+		case StateLearning:
+			learning++
+		case StateCompleted, StateCancelled:
 		default:
 			return nil, fmt.Errorf("decode session store: unknown session state %q", s.State)
 		}
+	}
+	// One-active is a load-bearing invariant, so enforce it at decode (Codex
+	// fix): with two Learning records, load would aggregate into the LAST one
+	// while activeLocked and every session API select the FIRST — observations
+	// silently attributed to a session other than the one displayed/completed,
+	// and completing the first would strand the other as Learning with the
+	// aggregation target cleared. A store that violates it is corrupt and goes
+	// to the quarantine path, never partially honored.
+	if learning > 1 {
+		return nil, fmt.Errorf("decode session store: %d learning sessions (one-active invariant)", learning)
 	}
 	for _, r := range env.Recommendations {
 		if r == nil || r.ID == "" || r.SessionID == "" {

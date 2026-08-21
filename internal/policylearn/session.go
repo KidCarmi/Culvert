@@ -315,18 +315,25 @@ func (e *Engine) closeWindowLocked() {
 	// Codex fix: events ACCEPTED but not yet resolved at this instant were
 	// accepted under this window and are doomed by the rotation below.
 	// Derive the count from the monotonic transport counters — accepted −
-	// delivered − dropped − panics — because a queue-length probe misses the
-	// event the drain has already DEQUEUED and holds while waiting for e.mu
-	// (that event would otherwise resolve as a post-close drop with this
-	// session's window claiming zero loss). Charging them here lets a generate
-	// from the expired session see a degraded (confidence-capped) window
-	// instead of a clean one. The same events also hit the global drop counter
-	// when they drain (and an aggregated-but-undelivered event counts here
-	// too), which a later window's delta may fold again — an accepted
-	// OVERCOUNT of loss (the safe direction: it only weakens claims).
+	// delivered − consumeDropped − panics, i.e. accepted events not yet
+	// delivered, consume-discarded, or lost to a panic — because a
+	// queue-length probe misses the event the drain has already DEQUEUED and
+	// holds while waiting for e.mu (that event would otherwise resolve as a
+	// post-close drop with this session's window claiming zero loss). The
+	// consume-side drop share is subtracted rather than the public Dropped
+	// counter: the latter also contains enqueue-side drops that were never
+	// accepted and would deflate the quantity below zero under queue-full
+	// history, silently un-charging a real drain-held loss. Charging here
+	// lets a generate from the expired session see a degraded
+	// (confidence-capped) window instead of a clean one. The same events also
+	// hit the global drop counter when they drain (and an aggregated-but-
+	// undelivered event counts here too), which a later window's delta may
+	// fold again — an accepted OVERCOUNT of loss (the safe direction: it only
+	// weakens claims).
 	if sess := e.aggSession; sess != nil && e.tr != nil {
-		cur := e.observationStatsRaw()
-		if outstanding := cur.Accepted - cur.Delivered - cur.Dropped - cur.ConsumerPanics; outstanding > 0 {
+		t := e.tr
+		outstanding := t.accepted.Load() - t.delivered.Load() - t.consumeDropped.Load() - t.panics.Load()
+		if outstanding > 0 {
 			sess.Transport.Dropped += outstanding
 		}
 	}

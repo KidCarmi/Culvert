@@ -109,6 +109,15 @@ type transport struct {
 	panics          atomic.Int64
 	delivered       atomic.Int64
 	groupsTruncated atomic.Int64
+
+	// consumeDropped is the CONSUME-side share of dropped: events that were
+	// ACCEPTED (enqueued) and later discarded at consumption (closed/rotated
+	// window). Engine-internal — the window-close loss accounting needs
+	// "accepted but unresolved" (= accepted − delivered − consumeDropped −
+	// panics), and the public Dropped counter also contains enqueue-side
+	// drops (queue full / closed transport) that were never accepted, which
+	// would deflate that quantity below zero under queue-full history.
+	consumeDropped atomic.Int64
 }
 
 // waitProducers spins until no Observe call is between its registration and
@@ -141,15 +150,21 @@ func (e *Engine) SubjectKeyID() string { return e.subjKey.keyID }
 // any goroutine. Ignored (uncounted — "not learning" is not loss) when no
 // session is Learning.
 func (e *Engine) Observe(o Observation) {
+	t := e.tr
+	// Register BEFORE the gate and closed checks (Codex fix): the window-close
+	// paths turn the gate off and then wait for registered producers before
+	// rotating the generation, and Close sets the closed flag and waits before
+	// its final sweep — so an enqueue can only happen when the producer was
+	// registered AND then observed the gate on (or the flag off). A producer
+	// registering after the wait completed necessarily observes the gate off
+	// (it was turned off before the wait) and returns without enqueueing;
+	// there is no interleaving left in which an event lands with a rotated
+	// generation or beyond the shutdown sweep.
+	t.producers.Add(1)
+	defer t.producers.Add(-1)
 	if !e.learningActive.Load() {
 		return
 	}
-	t := e.tr
-	// Register BEFORE the closed check: Close sets the flag and then waits
-	// for the producer count to drain, so a producer that saw closed == false
-	// is guaranteed to finish its send before the final sweep runs.
-	t.producers.Add(1)
-	defer t.producers.Add(-1)
 	if e.closed.Load() {
 		// The drain has exited (or is exiting): an enqueue could no longer be
 		// consumed, so refuse it HERE and count the loss — a producer must
@@ -164,11 +179,12 @@ func (e *Engine) Observe(o Observation) {
 	// Bounded copy: the caller's slice is request-owned and must not cross the
 	// goroutine boundary; truncation beyond the cap is deterministic AND
 	// counted (M5B.1) — group context beyond the bound is lost, never silently.
+	truncated := false
 	if len(o.Groups) > 0 {
 		n := len(o.Groups)
 		if n > MaxObservationGroups {
 			n = MaxObservationGroups
-			t.groupsTruncated.Add(1)
+			truncated = true
 		}
 		g := make([]string, n)
 		copy(g, o.Groups[:n])
@@ -183,6 +199,14 @@ func (e *Engine) Observe(o Observation) {
 	select {
 	case t.ch <- queuedItem{o: o}:
 		t.accepted.Add(1)
+		if truncated {
+			// Counted only on a SUCCESSFUL enqueue (Codex fix): GroupsTruncated
+			// means "an ACCEPTED observation carries incomplete group context" —
+			// charging it before a failed send made a dropped event also count
+			// as truncated-accepted, and under overload the counter could
+			// exceed Accepted, corrupting the coverage facts.
+			t.groupsTruncated.Add(1)
+		}
 	default:
 		t.dropped.Add(1) // queue full: drop + account, never block the request
 	}
@@ -281,6 +305,7 @@ func (e *Engine) consumeGuarded(t *transport, o Observation) {
 			// another window's events (Codex fix) — count the whole-event loss
 			// and discard.
 			t.dropped.Add(1)
+			t.consumeDropped.Add(1)
 			return
 		}
 		attributed = true

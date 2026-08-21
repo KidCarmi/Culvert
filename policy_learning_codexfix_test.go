@@ -250,6 +250,45 @@ func TestCodexFix_CommitFenceRecheckedInsideActivation(t *testing.T) {
 	}
 }
 
+// TestPolicyContentIdentity_IgnoresProvenanceStamps (Codex round 4): the
+// policy CONTENT hash pins what the policy SAYS — stampRuleMetadataForWrite
+// restamps ModifiedAt/By on EVERY save, so a semantically identical re-save
+// must not change the hash (it staled every recommendation), exactly as the
+// draft comparator sameRuleContent already canonicalizes. Semantic changes
+// still change it.
+func TestPolicyContentIdentity_IgnoresProvenanceStamps(t *testing.T) {
+	plDurableDraftHarness(t)
+	enabled := true
+	r := PolicyRule{
+		ID: newRuleID(), Name: "content-hash", SourceGroup: "g", DestCategory: "m5b-cat",
+		Action: ActionAllow, SSLAction: SSLInspect, Enabled: &enabled,
+		CreatedAt: "2026-08-01T00:00:00Z", ModifiedAt: "2026-08-21T10:00:00Z", ModifiedBy: "alice",
+	}
+	policyStore.ReplaceAll([]PolicyRule{r})
+	base := policyContentIdentity()
+
+	resaved := r
+	resaved.ModifiedAt = "2026-08-21T11:11:11Z"
+	resaved.ModifiedBy = "bob"
+	policyStore.ReplaceAll([]PolicyRule{resaved})
+	if policyContentIdentity() != base {
+		t.Fatal("provenance-only re-save changed the policy content hash")
+	}
+
+	resaved.HitCount = 42
+	resaved.LastHit = "2026-08-21T11:12:00Z"
+	policyStore.ReplaceAll([]PolicyRule{resaved})
+	if policyContentIdentity() != base {
+		t.Fatal("hit churn changed the policy content hash")
+	}
+
+	resaved.Action = ActionBlockPage
+	policyStore.ReplaceAll([]PolicyRule{resaved})
+	if policyContentIdentity() == base {
+		t.Fatal("semantic change did not change the policy content hash")
+	}
+}
+
 // TestCodexFix_CommitAppendNeverVanishesRule (Codex re-review): the commit's
 // snapshot→activate→clear now shares one coordinator critical section with
 // the durable append, so a successfully appended rule can land only entirely

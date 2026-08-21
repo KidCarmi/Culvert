@@ -199,15 +199,24 @@ func policyLearnApplyDesiredLocked(desired policyLearnSettings) {
 // the enforced rulebase content or the default action differs from what was
 // running while its evidence was observed — including rule edits, reorders,
 // enables/disables, adds/deletes, rollbacks, and imports; and NOT for hit-count
-// churn, restarts, or metadata-only version bumps.
+// churn, restarts, metadata-only version bumps, or a no-op re-save (Codex fix:
+// stampRuleMetadataForWrite restamps ModifiedAt/By on EVERY save, so the
+// provenance stamps must be canonicalized out exactly as the draft comparator
+// sameRuleContent does — otherwise a semantically identical re-save staled
+// every recommendation). Domain tag v2: pre-fix pinned hashes covered the
+// stamps, so they mismatch v2 values and go stale exactly once at upgrade —
+// never reinterpreted (the epoch-scheme upgrade precedent).
 func policyContentIdentity() string {
 	rules := policyStore.List()
 	for i := range rules {
 		rules[i].HitCount = 0
 		rules[i].LastHit = ""
+		rules[i].CreatedAt = ""
+		rules[i].ModifiedAt = ""
+		rules[i].ModifiedBy = ""
 	}
 	h := sha256.New()
-	h.Write([]byte("culvert-policy-content-v1\x00"))
+	h.Write([]byte("culvert-policy-content-v2\x00"))
 	h.Write([]byte(defaultPolicyAction()))
 	h.Write([]byte{0})
 	if err := json.NewEncoder(h).Encode(rules); err != nil {

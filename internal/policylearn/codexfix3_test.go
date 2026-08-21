@@ -5,7 +5,11 @@ package policylearn
 // session-gap confidence cap, and group-scope deduplication.
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -106,6 +110,42 @@ func TestLazyExpiry_CountsDrainHeldObservation(t *testing.T) {
 	}
 }
 
+// TestLazyExpiry_DrainHeldLossNotMaskedByEnqueueDrops: the outstanding count
+// must subtract only the CONSUME-side drop share — the public Dropped counter
+// also contains enqueue-side drops (queue full) that were never accepted, and
+// a combined subtraction under that history goes negative and silently
+// un-charges a real drain-held loss (undercount — the direction loss
+// accounting must never err in).
+func TestLazyExpiry_DrainHeldLossNotMaskedByEnqueueDrops(t *testing.T) {
+	clk := newTestClock()
+	e := newTestEngine(t, t.TempDir(), clk, nil)
+	t.Cleanup(func() { _ = e.Close() })
+	a, err := e.StartSession("op")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulated queue-full history: enqueue-side drops, never accepted.
+	e.tr.dropped.Add(5)
+
+	e.mu.Lock()
+	e.Observe(Observation{Subject: "a", AuthSource: "idp", Host: "x.example", Status: "OK"})
+	barrierWait(t, func() bool { return len(e.tr.ch) == 0 }, "drain dequeued the observation")
+	clk.advance(e.cfg.MaxSessionDuration + time.Minute)
+	e.maybeExpireLocked(clk.now())
+	var dropped int64
+	for _, s := range e.sessions {
+		if s.ID == a.ID {
+			dropped = s.Transport.Dropped
+		}
+	}
+	e.mu.Unlock()
+
+	// 5 folded enqueue-side drops + the 1 drain-held accepted event.
+	if dropped != 6 {
+		t.Fatalf("drain-held loss masked by enqueue-drop history: window Dropped=%d, want 6", dropped)
+	}
+}
+
 // TestConfidence_SessionGapCapsBelowHigh: a recorded observation gap (process
 // restart while Learning) is unobserved traffic the transport counters could
 // not see — it must cap confidence below HIGH and be identified as a limit.
@@ -172,5 +212,137 @@ func TestScopesFor_DuplicateGroupNamesContributeOnce(t *testing.T) {
 	e.mu.Unlock()
 	if cell.Requests != 1 || cell.Allowed != 1 {
 		t.Fatalf("duplicated group inflated the cell: requests=%d allowed=%d", cell.Requests, cell.Allowed)
+	}
+}
+
+// ── Codex round-4 regressions ────────────────────────────────────────────────
+
+// TestFinishActive_ConcurrentObserversNeverLeakPastWindowClose (round 4):
+// producer registration now precedes the gate check, so an enqueue can only
+// happen when the producer was registered AND then observed the gate on — the
+// stop's producer wait therefore covers every possible enqueuer, and no
+// observation's acceptance can land outside a session window. Stress-guard
+// under -race: after the stop, every accepted event is resolved AND every
+// accepted/dropped count is attributed to a session window (the pre-fix
+// gate-racer leaked its counts into the inter-window gap).
+func TestFinishActive_ConcurrentObserversNeverLeakPastWindowClose(t *testing.T) {
+	clk := newTestClock()
+	e := newTestEngine(t, t.TempDir(), clk, nil)
+	t.Cleanup(func() { _ = e.Close() })
+	if _, err := e.StartSession("op"); err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					e.Observe(Observation{Subject: "u", AuthSource: "idp", Host: "x.example", Status: "OK"})
+				}
+			}
+		}()
+	}
+	time.Sleep(20 * time.Millisecond)
+	if _, err := e.StopSession("op"); err != nil {
+		t.Fatal(err)
+	}
+	close(stop)
+	wg.Wait()
+	e.drainBarrier()
+
+	st := e.ObservationStats()
+	if unresolved := st.Accepted - st.Delivered - e.tr.consumeDropped.Load() - st.ConsumerPanics; unresolved != 0 {
+		t.Fatalf("%d unresolved accepted observations after window close: %+v", unresolved, st)
+	}
+	var winAccepted, winDropped int64
+	for _, s := range e.Sessions() {
+		winAccepted += s.Transport.Accepted
+		winDropped += s.Transport.Dropped
+	}
+	if winAccepted != st.Accepted || winDropped != st.Dropped {
+		t.Fatalf("transport counts leaked outside session windows: windows accepted=%d dropped=%d, global %+v",
+			winAccepted, winDropped, st)
+	}
+}
+
+// TestLoad_RejectsMultipleLearningSessionsToQuarantine (round 4): one-active
+// is a load-bearing invariant — a store carrying two Learning records would
+// aggregate into one session while the APIs display/complete the other.
+// Decode must reject it into the quarantine path, never partially honor it.
+func TestLoad_RejectsMultipleLearningSessionsToQuarantine(t *testing.T) {
+	dir := t.TempDir()
+	raw := `{"schema_version":7,"sessions":[` +
+		`{"id":"a","state":"learning","created_at":"2026-08-13T12:00:00Z","started_at":"2026-08-13T12:00:00Z","created_by":"op","baseline":{}},` +
+		`{"id":"b","state":"learning","created_at":"2026-08-13T12:01:00Z","started_at":"2026-08-13T12:01:00Z","created_by":"op","baseline":{}}]}`
+	if err := os.WriteFile(filepath.Join(dir, "policy_learning.json"), []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var quarantined error
+	clk := newTestClock()
+	e := newTestEngine(t, dir, clk, func(c *Config) {
+		c.Quarantine = func(_ string, err error) { quarantined = err }
+	})
+	t.Cleanup(func() { _ = e.Close() })
+	if quarantined == nil || !strings.Contains(quarantined.Error(), "learning sessions") {
+		t.Fatalf("two-learning store not quarantined (err=%v)", quarantined)
+	}
+	if n := len(e.Sessions()); n != 0 {
+		t.Fatalf("malformed store partially honored: %d sessions loaded", n)
+	}
+}
+
+// TestObserve_GroupTruncationCountedOnlyOnAcceptedEnqueue (round 4):
+// GroupsTruncated means "an ACCEPTED observation carries incomplete group
+// context" — an over-wide observation dropped at a full queue must count as a
+// drop only, or the truncation counter can exceed Accepted and corrupt the
+// coverage facts carried on recommendations.
+func TestObserve_GroupTruncationCountedOnlyOnAcceptedEnqueue(t *testing.T) {
+	clk := newTestClock()
+	e := newTestEngine(t, t.TempDir(), clk, nil)
+	t.Cleanup(func() { _ = e.Close() })
+	if _, err := e.StartSession("op"); err != nil {
+		t.Fatal(err)
+	}
+	wide := make([]string, MaxObservationGroups+4)
+	for i := range wide {
+		wide[i] = fmt.Sprintf("g%d", i)
+	}
+
+	// Accepted + truncated: counted (the existing contract).
+	e.Observe(Observation{Subject: "u", AuthSource: "idp", Groups: wide, Host: "x.example", Status: "OK"})
+	if got := e.ObservationStats().GroupsTruncated; got != 1 {
+		t.Fatalf("accepted truncated observation not counted (got %d)", got)
+	}
+
+	// Park the drain on e.mu and fill the queue to capacity, then attempt an
+	// over-wide observation: dropped, and NOT counted as truncated.
+	e.mu.Lock()
+	filled := false
+	for i := 0; i < observationQueueCap+2; i++ {
+		e.Observe(Observation{Subject: "u", AuthSource: "idp", Host: "fill.example", Status: "OK"})
+		if len(e.tr.ch) == observationQueueCap {
+			filled = true
+			break
+		}
+	}
+	if !filled {
+		e.mu.Unlock()
+		t.Fatal("could not fill the transport queue")
+	}
+	before := e.ObservationStats()
+	e.Observe(Observation{Subject: "u", AuthSource: "idp", Groups: wide, Host: "y.example", Status: "OK"})
+	after := e.ObservationStats()
+	e.mu.Unlock()
+	if after.Dropped != before.Dropped+1 {
+		t.Fatalf("full-queue observation not dropped (before=%+v after=%+v)", before, after)
+	}
+	if after.GroupsTruncated != before.GroupsTruncated {
+		t.Fatal("dropped observation counted as truncated-accepted")
 	}
 }
