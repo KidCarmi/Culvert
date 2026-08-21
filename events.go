@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/alerts"
 	"github.com/KidCarmi/Culvert/internal/logstore"
 	"github.com/KidCarmi/Culvert/internal/reqlog"
 	"github.com/KidCarmi/Culvert/internal/secscan"
@@ -244,12 +245,39 @@ func liveFeedWritePrometheus(w *strings.Builder) {
 	fmt.Fprintf(w, "# TYPE culvert_sse_rejected_total counter\nculvert_sse_rejected_total %d\n", hub.Rejected())
 	fmt.Fprintf(w, "\n# HELP culvert_reqlog_write_errors_total Persistent request-log write or marshal failures (e.g. disk full)\n")
 	fmt.Fprintf(w, "# TYPE culvert_reqlog_write_errors_total counter\nculvert_reqlog_write_errors_total %d\n", reqlog.WriteErrors())
+	fmt.Fprintf(w, "\n# HELP culvert_reqlog_backpressure_total Request-log entries that had to wait for room in the async persistence queue (JSONL sink not keeping up)\n")
+	fmt.Fprintf(w, "# TYPE culvert_reqlog_backpressure_total counter\nculvert_reqlog_backpressure_total %d\n", reqlog.Backpressure())
 	fmt.Fprintf(w, "\n# HELP culvert_reqlog_skipped_lines_total Corrupt JSONL lines skipped while reading the persistent request log\n")
 	fmt.Fprintf(w, "# TYPE culvert_reqlog_skipped_lines_total counter\nculvert_reqlog_skipped_lines_total %d\n", reqlog.SkippedLines())
+	fmt.Fprintf(w, "\n# HELP culvert_audit_write_errors_total Admin-action audit entries that never reached the persistent JSONL file (disk full, read-only volume, failed reopen). Non-zero means the durable compliance record is incomplete\n")
+	fmt.Fprintf(w, "# TYPE culvert_audit_write_errors_total counter\nculvert_audit_write_errors_total %d\n", auditWriteErrors())
 	fmt.Fprintf(w, "\n# HELP culvert_logstore_dropped_total History-store entries dropped because the async write queue was full\n")
 	fmt.Fprintf(w, "# TYPE culvert_logstore_dropped_total counter\nculvert_logstore_dropped_total %d\n", logstore.Dropped())
 	fmt.Fprintf(w, "\n# HELP culvert_logstore_pruned_total History-store entries deleted by the size-retention janitor\n")
 	fmt.Fprintf(w, "# TYPE culvert_logstore_pruned_total counter\nculvert_logstore_pruned_total %d\n", logstore.Pruned())
+	fmt.Fprintf(w, "\n# HELP culvert_logsink_backpressure_total Process-log lines that had to wait for room in the async log queue (stdout/log file not keeping up, so request latency is coupled to it again)\n")
+	fmt.Fprintf(w, "# TYPE culvert_logsink_backpressure_total counter\nculvert_logsink_backpressure_total %d\n", logSinkBackpressure())
+	fmt.Fprintf(w, "\n# HELP culvert_alert_dedup_evictions_total Alert dedup keys evicted at the cap (CHAOS-27). Non-zero means the alert key space is being flooded with unique details (scanning wave) and duplicate suppression is degraded — alerts may deliver more than once per window, never fewer\n")
+	fmt.Fprintf(w, "# TYPE culvert_alert_dedup_evictions_total counter\nculvert_alert_dedup_evictions_total %d\n", alerts.DedupEvictionsTotal())
+	fmt.Fprintf(w, "\n# HELP culvert_alert_dedup_tracked Alert dedup keys currently tracked inside the suppression window (bounded by the cap)\n")
+	fmt.Fprintf(w, "# TYPE culvert_alert_dedup_tracked gauge\nculvert_alert_dedup_tracked %d\n", globalAlertStore.DedupTracked())
+
+	// Interactive-login state stores (OIDC PKCE / SAML AuthnRequest). These are
+	// populated by UNAUTHENTICATED requests, so a rising eviction counter is the
+	// operator's signal that in-flight login state is being displaced before it
+	// can be redeemed — either the cap is too small for the deployment, or
+	// something is flooding the captive-portal path. Fair-share eviction keeps a
+	// single flooding source evicting only itself (internal/authstate), so a
+	// climbing counter alongside a low client count localises the source.
+	fmt.Fprintf(w, "\n# HELP culvert_login_state_entries In-flight interactive-login callback state currently held, by store\n")
+	fmt.Fprintf(w, "# TYPE culvert_login_state_entries gauge\nculvert_login_state_entries{store=\"oidc_pkce\"} %d\nculvert_login_state_entries{store=\"saml\"} %d\n",
+		globalPKCEStore.Len(), globalSAMLStateStore.Len())
+	fmt.Fprintf(w, "\n# HELP culvert_login_state_clients Distinct client keys currently holding interactive-login callback state, by store\n")
+	fmt.Fprintf(w, "# TYPE culvert_login_state_clients gauge\nculvert_login_state_clients{store=\"oidc_pkce\"} %d\nculvert_login_state_clients{store=\"saml\"} %d\n",
+		globalPKCEStore.Clients(), globalSAMLStateStore.Clients())
+	fmt.Fprintf(w, "\n# HELP culvert_login_state_evictions_total Interactive-login callback state dropped at the cap before it could be redeemed. Non-zero means some SSO logins failed with \"invalid or expired state\"\n")
+	fmt.Fprintf(w, "# TYPE culvert_login_state_evictions_total counter\nculvert_login_state_evictions_total{store=\"oidc_pkce\"} %d\nculvert_login_state_evictions_total{store=\"saml\"} %d\n",
+		globalPKCEStore.Evictions(), globalSAMLStateStore.Evictions())
 }
 
 // apiCountryTraffic returns the top destination countries for the dashboard.

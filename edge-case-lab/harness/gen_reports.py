@@ -148,8 +148,10 @@ def main():
     A("3. **Config-durability model.** Policy created via the admin API is in-memory unless a "
       "persistence flag/file is configured, and the API gives no ephemeral warning — a GUI-configured "
       "policy silently vanishes on restart (SWG-0124).")
-    A("4. **Named-option/behavior drift.** `certVerification=permissive` is accepted but behaves like "
-      "`strict` (its allow+log semantics are deferred/unimplemented) — SWG-0069.")
+    A("4. **Named-option/behavior drift (RESOLVED, #716).** `certVerification=permissive` used to be "
+      "accepted while behaving like `strict` (its allow+log semantics were never implemented) — SWG-0069. "
+      "The value is now retired: rejected on every write path (HTTP 400) and fail-closed-migrated to "
+      "`strict` on load/sync, so the named option no longer misrepresents its behavior.")
     A("5. **GUI-parity of security-critical knobs.** Several release/HA/fencing knobs are "
       "startup/env-scoped (documented deferrals), limiting runtime GUI control.")
     A("")

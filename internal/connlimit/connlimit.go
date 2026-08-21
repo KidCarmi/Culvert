@@ -17,6 +17,7 @@ type ConnLimiter struct {
 	conns    map[string]*int64
 	maxPerIP int
 	enabled  atomic.Bool
+	rejected atomic.Int64
 }
 
 // New returns a ConnLimiter with the default per-IP cap, initially disabled.
@@ -61,6 +62,15 @@ func (cl *ConnLimiter) ActiveIPs() int {
 	return len(cl.conns)
 }
 
+// Rejected returns the cumulative count of connections refused because the
+// client IP was over its per-IP cap (process lifetime; never reset). This is
+// the only signal an admin has that a configured limit is actually rejecting
+// live traffic rather than sitting unused — the reject path (proxy.go,
+// socks5.go) has no other counter or metric.
+func (cl *ConnLimiter) Rejected() int64 {
+	return cl.rejected.Load()
+}
+
 // Acquire records a connection from ip and reports whether it is admitted
 // (false ⇒ the per-IP limit is exceeded and the caller should reject).
 //
@@ -101,6 +111,7 @@ func (cl *ConnLimiter) Acquire(ip string) bool {
 			}
 		}
 		cl.mu.Unlock()
+		cl.rejected.Add(1)
 		return false
 	}
 	return true

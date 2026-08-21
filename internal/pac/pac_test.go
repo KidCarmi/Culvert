@@ -8,9 +8,9 @@ import (
 	"testing"
 )
 
-// ─── cidrToIPMask ─────────────────────────────────────────────────────────────
+// ─── normalizeCIDR ────────────────────────────────────────────────────────────
 
-func TestCIDRToIPMask(t *testing.T) {
+func TestNormalizeCIDR(t *testing.T) {
 	cases := []struct {
 		cidr    string
 		wantIP  string
@@ -28,36 +28,36 @@ func TestCIDRToIPMask(t *testing.T) {
 		{"not-a-cidr", "", "", false},
 		{"192.168.0.0/33", "", "", false}, // prefix > 32
 		{"192.168.0.0/-1", "", "", false}, // negative prefix
+		{"2001:db8::/32", "", "", false},  // IPv6 unsupported (isInNet is v4)
 	}
 	for _, c := range cases {
-		ip, msk, ok := cidrToIPMask(c.cidr)
-		if ok != c.wantOK {
-			t.Errorf("cidrToIPMask(%q): ok=%v, want %v", c.cidr, ok, c.wantOK)
+		entry, _, errIssue := normalizeCIDR(c.cidr)
+		if (errIssue == nil) != c.wantOK {
+			t.Errorf("normalizeCIDR(%q): err=%v, wantOK=%v", c.cidr, errIssue, c.wantOK)
 			continue
 		}
 		if !c.wantOK {
 			continue
 		}
-		if ip != c.wantIP {
-			t.Errorf("cidrToIPMask(%q): ip=%q, want %q", c.cidr, ip, c.wantIP)
+		if entry.CIDRIP != c.wantIP {
+			t.Errorf("normalizeCIDR(%q): ip=%q, want %q", c.cidr, entry.CIDRIP, c.wantIP)
 		}
-		if msk != c.wantMsk {
-			t.Errorf("cidrToIPMask(%q): mask=%q, want %q", c.cidr, msk, c.wantMsk)
+		if entry.CIDRMask != c.wantMsk {
+			t.Errorf("normalizeCIDR(%q): mask=%q, want %q", c.cidr, entry.CIDRMask, c.wantMsk)
 		}
 	}
 }
 
-// ─── isIPCIDR ─────────────────────────────────────────────────────────────────
-
-func TestIsIPCIDR(t *testing.T) {
-	if !isIPCIDR("10.0.0.0/8") {
-		t.Error("10.0.0.0/8 should be CIDR")
+func TestNormalizeCIDR_HostBitsCleared(t *testing.T) {
+	entry, warn, errIssue := normalizeCIDR("192.168.1.55/24")
+	if errIssue != nil {
+		t.Fatalf("unexpected error: %v", errIssue)
 	}
-	if isIPCIDR("example.com") {
-		t.Error("example.com should not be CIDR")
+	if entry.CIDRIP != "192.168.1.0" {
+		t.Errorf("host bits not cleared: %q", entry.CIDRIP)
 	}
-	if isIPCIDR("*.example.com") {
-		t.Error("*.example.com should not be CIDR")
+	if warn == nil || warn.Code != IssueCIDRNormalized {
+		t.Errorf("expected cidr_normalized warning, got %+v", warn)
 	}
 }
 

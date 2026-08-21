@@ -92,7 +92,7 @@ jobs:
       # egress-policy: block with an allow-list of the static hosts; at activation the
       # owner appends their R2 S3 endpoint host and public-base host (see header).
       - name: Harden runner (egress block)
-        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
         with:
           egress-policy: block
           allowed-endpoints: >
@@ -112,7 +112,7 @@ jobs:
       # package main; checking out an attacker-controlled ref here would be code
       # execution with R2/CF secrets in scope (pwn-request). workflow_run already runs
       # the default-branch copy of this file; we keep the checked-out code in lock-step.
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-go-cache
@@ -389,12 +389,21 @@ jobs:
         run: |
           set -euo pipefail
           WANT="$(cat stage/.index.sha256)"
+          # The cache purge (the real cache-bust; the bounded retry rides out edge
+          # eventual-consistency) still goes to the Cloudflare API over curl — that
+          # endpoint is not bot-managed. The live-object confirm fetch, however, must
+          # NOT use curl: the catalog zone's bot management fingerprints the TLS/HTTP2
+          # client and 403s curl even with the matching UA. cmd/catalogfetch uses the
+          # known-good Go client shape (see release_catalog_http.go) and prints the
+          # served index.json's SHA-256.
           curl -fsS -X POST "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/purge_cache" \
             -H "Authorization: Bearer $CF_CACHE_PURGE_TOKEN" \
             -H "Content-Type: application/json" \
             --data "{\"files\":[\"$R2_PUBLIC_BASE/release-catalog/index.json\",\"$R2_PUBLIC_BASE/release-catalog/index.json.sigstore\"]}" >/dev/null
+          go build -o "$RUNNER_TEMP/catalogfetch" ./cmd/catalogfetch
+          FETCH="$RUNNER_TEMP/catalogfetch"
           for i in 1 2 3 4 5; do
-            GOT="$(curl -fsS -H 'Cache-Control: no-cache' "$R2_PUBLIC_BASE/release-catalog/index.json" | sha256sum | awk '{print $1}')" || GOT=""
+            GOT="$("$FETCH" "$R2_PUBLIC_BASE/release-catalog/index.json")" || GOT=""
             if [ "$GOT" = "$WANT" ]; then echo "live index confirmed ($WANT)"; exit 0; fi
             echo "confirm attempt $i: got '$GOT' want '$WANT' — retrying"; sleep $((i*i))
           done

@@ -165,6 +165,11 @@ type startupState struct {
 }
 
 func main() {
+	// Positional subcommand: `culvert bootstrap-resolve ...` fetches + verifies the
+	// signed release catalog and emits the fresh-install decision, then exits. It
+	// must run BEFORE the global flag set is defined (it is not a flag).
+	maybeRunBootstrapResolve(os.Args)
+
 	s := &startupState{}
 	parseFlags(s)
 	handleOneShotCommands(s)
@@ -181,6 +186,7 @@ func main() {
 	loadFileConfigAndFlags(s)
 	initUIExtras(s)
 	initLogger(s)
+	initMemoryBackstop() // P0-2: soft GOMEMLIMIT so a large config-apply degrades to GC, not OOM
 	initLifecycleContext(s)
 	defer appLifecycleCancel() // kept in main() for panic safety; initLifecycleContext only creates the context.
 
@@ -210,6 +216,9 @@ func main() {
 	initBackgroundServices(s)
 	initSOCKS5(s)
 	initPersistentAdminState(s)
+	initMCPRuntime(s)      // PR-5: disabled-by-default MCP listener runtime (no SWG effect when off)
+	initMCPRollout(s)      // PR-11: disabled-by-default rollout composition (Gateway/Management isolated)
+	initMCPDistribution(s) // PR-12: disabled-by-default DP applier composition (after rollout state is restored)
 	loadReleaseManagement(resolveReleaseStartupConfig())
 	startAdminUI(s)
 
@@ -617,7 +626,7 @@ func initUIAccessPolicy(s *startupState) {
 // initPAC is the PR3 expansion shim: resolve the PAC slice (config
 // path + default proxy port) and apply it.
 func initPAC(s *startupState) {
-	cfg := resolvePACStartupConfig(s.pPort)
+	cfg := resolvePACStartupConfig(dataDir, s.pPort)
 	if err := loadPAC(cfg); err != nil {
 		log.Fatalf("%v", err)
 	}
@@ -712,7 +721,7 @@ func initPolicy(s *startupState) {
 	polPath := firstStr(*s.policyFile, s.fc.Proxy.PolicyFile)
 	if polPath != "" {
 		if err := policyStore.Load(polPath); err != nil {
-			logger.Fatalf("Cannot load policy file: %v", err)
+			logFatalf("Cannot load policy file: %v", err)
 		}
 		logger.Printf("Policy: %d rule(s) loaded from %s", len(policyStore.List()), polPath)
 	} else {
@@ -770,7 +779,7 @@ func initFileBlocking(s *startupState) {
 // semantics are unchanged — the loader returns errors, main fails fast.
 func initSSLBypassAndDPI(s *startupState) {
 	if err := loadInspectionRules(resolveInspectionRulesConfig(s.fc)); err != nil {
-		logger.Fatalf("inspection rules: %v", err)
+		logFatalf("inspection rules: %v", err)
 	}
 }
 
@@ -813,6 +822,13 @@ func initUpstreamProxy(s *startupState) {
 // (cdr_startup*.go). CLI flag values are packed here; the runtime
 // enable-sentinel is read by the loader (filesystem side effect).
 func initCDR(s *startupState) {
+	// Mirror config.yaml's cdr.fail_mode validation (validateCDR, config.go)
+	// on the CLI path: an invalid -cdr-fail-mode value must fail loud at
+	// startup, not silently reach CDRFailOpen() — which treats any value
+	// other than the exact string "closed" as fail-OPEN.
+	if fm := *s.cdrFailModeFlag; !validCDRFailMode(fm) {
+		log.Fatalf("Invalid -cdr-fail-mode %q: must be \"open\" or \"closed\"", fm)
+	}
 	loadCDR(
 		resolveCDRStartupConfig(s.fc, cdrCLIFlags{
 			Enabled:     *s.cdrEnabledFlag,
@@ -889,20 +905,10 @@ func buildAndStartProxyServer(s *startupState) *http.Server {
 	// for CONNECT requests (HTTPS tunnels). Using a plain HandlerFunc avoids
 	// the redirect and lets handleRequest receive every proxy request directly.
 	proxyHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/health":
-			handleHealth(w, r)
-		case "/ready":
-			handleReady(w, r)
-		case "/metrics":
-			handleMetrics(w, r)
-		case "/proxy.pac":
-			// Serve PAC over plain HTTP so Windows/macOS clients can fetch it
-			// without TLS — the proxy port is always HTTP.
-			servePACFile(w, r)
-		default:
-			handleRequest(w, r)
+		if routeProxyListenerBuiltin(w, r) {
+			return
 		}
+		handleRequest(w, r)
 	})
 
 	proxySrv := &http.Server{
@@ -1021,7 +1027,7 @@ func installSignalHandlers(s *startupState) (quit, sighup chan os.Signal) {
 func runProxyUntilShutdown(s *startupState, proxySrv *http.Server, quit chan os.Signal) {
 	go func() {
 		if err := proxySrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Fatalf("Proxy error: %v", err)
+			logFatalf("Proxy error: %v", err)
 		}
 	}()
 
@@ -1164,7 +1170,10 @@ func enableControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath strin
 	// publish so a restarted (or HA-promoted) CP never re-issues version
 	// numbers at or below what running DPs have already seen.
 	globalConfigStore.armVersionPersistence(filepath.Join(dataDir, cpConfigVersionFile))
-	globalConfigStore.Update(CurrentConfigSnapshot())
+	// Initial publish. A commit-time rejection (startup config already over a
+	// cluster-sync cap) is logged + alerted + surfaced via LastPublishError;
+	// the CP still serves locally, so boot continues.
+	_ = globalConfigStore.Update(CurrentConfigSnapshot())
 	initClusterCA(clusterDBPath)
 	if err := StartControlPlaneGRPC(grpcAddr, certFile, keyFile, caFile); err != nil {
 		return err

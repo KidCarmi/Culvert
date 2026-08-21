@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/pac"
 	"github.com/KidCarmi/Culvert/internal/reqlog"
 	"github.com/KidCarmi/Culvert/internal/secscan"
 	"github.com/KidCarmi/Culvert/internal/session"
@@ -66,6 +67,12 @@ func apiStats(w http.ResponseWriter, r *http.Request) {
 	if allowed < 0 {
 		allowed = 0
 	}
+	// Fleet-freeze status: non-empty when the CP's last config publish was
+	// rejected at commit (over cap/bytes), so the fleet is stuck on the last
+	// valid snapshot. Surfaced on the always-polled /api/stats so the dashboard
+	// can raise a persistent banner instead of the operator having to run the
+	// diagnose verb (the failure this feature exists to make un-silent).
+	publishRejected, publishRejectedAt := globalConfigStore.LastPublishError()
 	jsonOK(w, map[string]any{
 		"total":       total,
 		"allowed":     allowed,
@@ -80,6 +87,23 @@ func apiStats(w http.ResponseWriter, r *http.Request) {
 		// Persistent request-log health: non-zero means writes are failing
 		// (e.g. disk full) and the on-disk history is incomplete.
 		"logWriteErrors": reqlog.WriteErrors(),
+		// Persistent AUDIT-log health. Non-zero means admin-action entries did
+		// not reach the durable JSONL file (disk full, read-only remount, failed
+		// post-rotation reopen), so the compliance record is incomplete — the
+		// in-memory ring keeps only the newest 500 entries and is wiped on
+		// restart, so this is the only way an operator can see the gap.
+		"auditLogWriteErrors": auditWriteErrors(),
+		// Non-zero means the async JSONL persistence queue saturated: no
+		// entry was lost, but request goroutines waited on the disk.
+		"logBackpressure": reqlog.Backpressure(),
+		// Non-zero means the async PROCESS-log queue (internal/logsink; every
+		// POLICY_ALLOW/BLOCK/DROP line plus general logger.Printf output)
+		// saturated: no line was lost, but the caller waited for queue room.
+		// A distinct subsystem from logBackpressure above (request-log JSONL
+		// persistence) — previously visible only via the culvert_logsink_
+		// backpressure_total Prometheus metric, invisible to an operator
+		// without a metrics scraper wired up.
+		"processLogBackpressure": logSinkBackpressure(),
 		// Audit/request-log persistence state: if the operator configured a
 		// file path but the engine could not open it at startup (bad
 		// permissions, missing directory, full disk), both silently fall
@@ -98,6 +122,9 @@ func apiStats(w http.ResponseWriter, r *http.Request) {
 		// on the Dashboard instead of requiring the admin to know to check
 		// the Governance nav item.
 		"c2Mode": c2Mode(),
+		// Cluster config-publish freeze (empty = healthy).
+		"configPublishRejected":   publishRejected,
+		"configPublishRejectedAt": publishRejectedAt,
 	})
 }
 
@@ -261,6 +288,16 @@ func buildLogFilterPredicate(q url.Values) func(*LogEntry) bool {
 	filterLevel := strings.ToUpper(q.Get("level"))
 	filterMethod := strings.ToUpper(q.Get("method"))
 	filterIdentity := strings.ToLower(q.Get("identity"))
+	// ADR-0011 Phase 3 drill-down: structured dec.* filters on the nested decryption block.
+	// The enum fields (outcome/decision_source/fail_category) are bounded lowercase tokens,
+	// so an exact case-folded match is right; profile_id is an opaque ID, matched exactly.
+	// A record with no dec block never matches ANY dec.* filter — those select decryption
+	// sessions specifically. The predicate is shared by the in-memory ring and the history
+	// store, so both drill-down paths stay consistent.
+	filterDecOutcome := q.Get("dec_outcome")
+	filterDecSource := q.Get("dec_decision_source")
+	filterDecFailCat := q.Get("dec_fail_category")
+	filterDecProfile := q.Get("dec_profile_id")
 	return func(e *LogEntry) bool {
 		if filterHost != "" && !strings.Contains(strings.ToLower(e.Host), filterHost) &&
 			!strings.Contains(strings.ToLower(e.IP), filterHost) {
@@ -276,6 +313,18 @@ func buildLogFilterPredicate(q url.Values) func(*LogEntry) bool {
 			return false
 		}
 		if filterIdentity != "" && !strings.Contains(strings.ToLower(e.Identity), filterIdentity) {
+			return false
+		}
+		if filterDecOutcome != "" && (e.Dec == nil || !strings.EqualFold(e.Dec.Outcome, filterDecOutcome)) {
+			return false
+		}
+		if filterDecSource != "" && (e.Dec == nil || !strings.EqualFold(e.Dec.DecisionSource, filterDecSource)) {
+			return false
+		}
+		if filterDecFailCat != "" && (e.Dec == nil || !strings.EqualFold(e.Dec.FailCategory, filterDecFailCat)) {
+			return false
+		}
+		if filterDecProfile != "" && (e.Dec == nil || e.Dec.ProfileID != filterDecProfile) {
 			return false
 		}
 		return true
@@ -572,6 +621,9 @@ func apiConfigExport(w http.ResponseWriter, r *http.Request) {
 		b.PACProxyHost = pc.ProxyHost
 		b.PACProxyPort = pc.ProxyPort
 		b.PACExclusions = pc.Exclusions
+		profCfg := pacProfiles.Get() // single Get (torn-capture guard)
+		b.PACProfiles = nonNilProfiles(profCfg.Profiles)
+		b.PACPools = nonNilPools(profCfg.Pools)
 		filename = "culvert-pac"
 	case "alerts":
 		b.AlertWebhooks = globalAlertStore.List()
@@ -605,6 +657,9 @@ func apiConfigExport(w http.ResponseWriter, r *http.Request) {
 		b.PACProxyHost = pc.ProxyHost
 		b.PACProxyPort = pc.ProxyPort
 		b.PACExclusions = pc.Exclusions
+		fullProfCfg := pacProfiles.Get() // single Get (torn-capture guard)
+		b.PACProfiles = nonNilProfiles(fullProfCfg.Profiles)
+		b.PACPools = nonNilPools(fullProfCfg.Pools)
 		// Alert webhooks (secrets excluded by List()).
 		b.AlertWebhooks = globalAlertStore.List()
 		// Block page template.
@@ -627,6 +682,17 @@ func apiConfigExport(w http.ResponseWriter, r *http.Request) {
 		b.CategoryGroups = globalCategoryGroups.List()
 		b.DecryptionProfiles = globalDecryptionProfiles.List()
 		b.ContentScanBypassHosts = dpiScanner.BypassHosts()
+		// SaaS signed category-feed CONFIGURATION + overrides (F3a-2). Exported as
+		// configuration only — never the node-local runtime/activation/floor state,
+		// which is off every surface by construction (no configBackup binding). The
+		// URL/protocol are captured RESOLVED (always non-empty), so a same-version
+		// round-trip restores them exactly; a pre-F3a-2 backup lacks these fields.
+		b.SaaSFeedManaged = captureSaaSFeedManaged()
+		b.SaaSFeedEnabled = captureSaaSFeedEnabled()
+		b.SaaSFeedURL = captureSaaSFeedURL()
+		b.SaaSFeedProtocol = captureSaaSFeedProtocol()
+		b.SaaSFeedRefreshSeconds = getSaaSFeedDurable().RefreshSeconds
+		b.CategoryOverrides = captureCategoryOverrides()
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -725,6 +791,19 @@ func buildImportPreview(b *configBackup, replaceMode bool) ([]importPreviewSecti
 	add("Category Groups", len(b.CategoryGroups), len(globalCategoryGroups.List()), taxonomyNote)
 	add("Decryption Profiles", len(b.DecryptionProfiles), len(globalDecryptionProfiles.List()), taxonomyNote)
 
+	// Category overrides (F3a-2): mirror importCategoryOverrides — an empty/absent
+	// set skips (import never wipes), a populated set merges (upsert by host) or
+	// replaces. add()'s incoming==0 guard matches the never-wipe apply semantics.
+	ovInc := 0
+	if b.CategoryOverrides != nil {
+		ovInc = categoryOverridesCount(*b.CategoryOverrides)
+	}
+	ovCur := 0
+	if cur := captureCategoryOverrides(); cur != nil {
+		ovCur = categoryOverridesCount(*cur)
+	}
+	add("Category Overrides", ovInc, ovCur, taxonomyNote)
+
 	add("Rewrite Rules", len(b.RewriteRules), len(rewriter.List()), "")
 	add("SSL Bypass", len(b.SSLBypass), len(sslBypass.List()), "")
 	add("Content Scan Patterns", len(b.ContentScanPatterns), len(dpiScanner.List()), "")
@@ -785,6 +864,26 @@ func buildImportSettingsPreview(b *configBackup) []importPreviewSetting {
 		}
 		setting("Connection Limit", fmt.Sprintf("%d per IP (%s)", b.ConnLimitMaxPerIP, state))
 	}
+	// SaaS feed config (F3a-2): gated on SaaSFeedProtocol != "" to mirror
+	// importSaaSFeedConfig's apply gate exactly — a pre-extension backup (protocol
+	// absent) applies nothing, so the preview must report nothing.
+	if b.SaaSFeedProtocol != "" {
+		mgmt := "unmanaged"
+		if b.SaaSFeedManaged {
+			mgmt = "managed"
+		}
+		state := "disabled"
+		if b.SaaSFeedEnabled {
+			state = "enabled"
+		}
+		setting("SaaS Feed", fmt.Sprintf("%s, %s (%s)", mgmt, state, b.SaaSFeedProtocol))
+		if b.SaaSFeedURL != "" {
+			setting("SaaS Feed URL", b.SaaSFeedURL)
+		}
+		if b.SaaSFeedRefreshSeconds != 0 {
+			setting("SaaS Feed Refresh", fmt.Sprintf("%ds", b.SaaSFeedRefreshSeconds))
+		}
+	}
 	return settings
 }
 
@@ -798,7 +897,7 @@ func writeImportPreview(w http.ResponseWriter, r *http.Request, b *configBackup,
 	if replaceMode {
 		mode = "replace"
 	}
-	auditEvent(r, "config.import.preview", mode, fmt.Sprintf("from backup exported %s", b.ExportedAt))
+	auditEvent(r, "config.import.preview", mode, fmt.Sprintf("from config exported %s", b.ExportedAt))
 	jsonOK(w, map[string]any{
 		"dryRun":     true,
 		"mode":       mode,
@@ -901,6 +1000,30 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// SaaS feed config (F3a-2). A managed Data Plane node must not import
+	// CP-authoritative feed policy locally — reject the whole import with a
+	// deterministic error before any mutation. And strict-validate the incoming
+	// feed config through the F3a-1 boundary (reject legacy/unsupported protocol or
+	// URL, and any invalid override) so a bad backup is refused whole, never
+	// partially applied.
+	if backupCarriesSaaSFeed(&b) && isManagedDataPlane() {
+		http.Error(w, "saas feed config is control-plane managed on a data-plane node; import it on the control plane", http.StatusConflict)
+		return
+	}
+	if err := validateSaaSFeedImport(&b); err != nil {
+		http.Error(w, "invalid saas feed config: "+sanitizeLog(err.Error()), http.StatusBadRequest)
+		return
+	}
+
+	// PAC pre-validation (before ANY store mutation): strictly validate the
+	// IMPORTED PAC fields themselves so a malformed backup is rejected whole
+	// with actionable errors instead of silently importing junk. Pre-existing
+	// live entries are untouched by this gate — only the incoming payload is
+	// judged, and the tolerant apply below never rejects.
+	if !importPACPreValidationOK(w, &b, replaceMode) {
+		return
+	}
+
 	// Blocklist. Feed attribution is carried across a replace-mode
 	// rebuild — ClearAll+Add would otherwise strand every feed entry as
 	// unattributed (Codex P1, PR #447).
@@ -921,6 +1044,11 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	// applyConfigBackup's leaf-first dependency order (rules reference groups,
 	// groups reference categories by name).
 	importCategoryTaxonomy(&b, replaceMode)
+
+	// Category overrides (F3a-2) — leaf-first, before policy rules. Import never
+	// wipes: an absent/empty override set skips in both modes (an explicit clear is
+	// a rollback-only capability). Pre-validated above.
+	importCategoryOverrides(&b, replaceMode)
 
 	// Policy rules — replace or upsert-by-identity (extracted to keep the
 	// handler under the nestif complexity threshold).
@@ -1021,6 +1149,13 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 		_ = pacStore.Set(pc)
 	}
 
+	// PAC profiles/pools (PAC initiative PR 2): import never wipes —
+	// absent/empty fields skip in both modes; merge upserts by ID; replace
+	// replaces the whole set. Pre-validated above; tolerant Set here.
+	if len(b.PACProfiles) > 0 || len(b.PACPools) > 0 {
+		_ = pacProfiles.Set(importPACProfilesCandidate(pacProfiles.Get(), &b, replaceMode))
+	}
+
 	// Alert webhooks (Finding 10.3).
 	if len(b.AlertWebhooks) > 0 {
 		if replaceMode {
@@ -1057,17 +1192,114 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// SaaS feed config (F3a-2). Never-wipe: applied only when the backup carries it
+	// (SaaSFeedProtocol set). Pre-validated above; publishes to the durable holder
+	// only (persisted by adminSettingsSave below) — no downloader/legacy syncer.
+	importSaaSFeedConfig(&b)
+
 	importMode := "merge"
 	if replaceMode {
 		importMode = "replace"
 	}
-	auditEvent(r, "config.import", importMode, fmt.Sprintf("from backup exported %s", b.ExportedAt))
+	auditEvent(r, "config.import", importMode, fmt.Sprintf("from config exported %s", b.ExportedAt))
 	saveConfigVersion(sessionAdmin(r), "config.import")
 	// Snapshot the admin-settings layer (rate limit, IP filter, rewrite
 	// rules, block page, conn limit, upstream pool, …) so the imported state
 	// survives a restart — import previously left it runtime-only.
 	adminSettingsSave()
-	jsonOK(w, map[string]any{"ok": true, "mode": importMode, "exportedAt": b.ExportedAt})
+	// Republish the cluster snapshot: import is a recovery path operators use
+	// interchangeably with rollback (which already republishes) — DPs must
+	// converge on the imported state without waiting for an unrelated
+	// mutation (Palo fleet review, ops finding 2). The imported config is
+	// applied locally regardless; if it exceeds a cluster-sync cap the publish
+	// is rejected at commit — report that inline so the admin knows the fleet
+	// did not receive it (the local import still succeeded).
+	pubErr := publishCurrentConfigSnapshot()
+	resp := map[string]any{"ok": true, "mode": importMode, "exportedAt": b.ExportedAt}
+	if pubErr != nil {
+		resp["cluster_publish_rejected"] = pubErr.Error()
+	}
+	jsonOK(w, resp)
+}
+
+// importPACPreValidationOK strictly validates the PAC fields of an import
+// payload BEFORE any store mutation, writing a structured 400 and returning
+// false on failure. Only the incoming payload is judged; the tolerant apply
+// path never rejects.
+func importPACPreValidationOK(w http.ResponseWriter, b *configBackup, replaceMode bool) bool {
+	var issues []pac.ValidationIssue
+	if b.PACProxyHost != "" || b.PACProxyPort != 0 || len(b.PACExclusions) > 0 {
+		_, is := pac.ValidateConfig(PACConfig{
+			ProxyHost:  b.PACProxyHost,
+			ProxyPort:  b.PACProxyPort,
+			Exclusions: b.PACExclusions,
+		})
+		issues = append(issues, is...)
+	}
+	// Profiles/pools are validated as the EXACT candidate the apply step
+	// would install (merged against existing state), so a profile that
+	// references an already-present pool passes and a dangling reference
+	// fails — before any mutation.
+	if len(b.PACProfiles) > 0 || len(b.PACPools) > 0 {
+		candidate := importPACProfilesCandidate(pacProfiles.Get(), b, replaceMode)
+		issues = append(issues, pac.ValidateProfilesConfig(candidate)...)
+	}
+	if len(issues) == 0 {
+		return true
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusBadRequest)
+	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // best-effort error body
+		"error":  "PAC configuration in import failed validation",
+		"issues": issues,
+	})
+	return false
+}
+
+// importPACProfilesCandidate builds the exact profiles/pools config an
+// import would install: replace mode swaps whole non-empty sets; merge mode
+// upserts by ID (existing objects updated in place, new ones appended).
+// Import never wipes — absent/empty payload fields keep the current set.
+func importPACProfilesCandidate(cur pac.ProfilesConfig, b *configBackup, replaceMode bool) pac.ProfilesConfig {
+	if replaceMode {
+		if len(b.PACPools) > 0 {
+			cur.Pools = b.PACPools
+		}
+		if len(b.PACProfiles) > 0 {
+			cur.Profiles = b.PACProfiles
+		}
+		return cur
+	}
+	for pi := range b.PACPools {
+		in := b.PACPools[pi]
+		replaced := false
+		for i := range cur.Pools {
+			if cur.Pools[i].ID == in.ID {
+				cur.Pools[i] = in
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			cur.Pools = append(cur.Pools, in)
+		}
+	}
+	for pi := range b.PACProfiles {
+		in := b.PACProfiles[pi]
+		replaced := false
+		for i := range cur.Profiles {
+			if cur.Profiles[i].ID == in.ID {
+				in.Revision = cur.Profiles[i].Revision + 1
+				cur.Profiles[i] = in
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			cur.Profiles = append(cur.Profiles, in)
+		}
+	}
+	return cur
 }
 
 // importCategoryTaxonomy applies URL categories then category groups from an
@@ -1088,6 +1320,11 @@ func importCategoryTaxonomy(b *configBackup, replaceMode bool) {
 				func(e CategoryEntry) string { return e.Name }))
 		}
 		catStore.Save()
+		// The imported taxonomy's BuiltIn entries are served from the effective view, so
+		// the import only reaches policy evaluation after a recompose. importCategoryOverrides
+		// runs its own recompose but early-returns on an absent/empty override set, which is
+		// the common case for a taxonomy-only import.
+		recomposeSignedFeedTaxonomy()
 	}
 	if len(b.CategoryGroups) > 0 {
 		if replaceMode {
@@ -1268,8 +1505,21 @@ func apiUIAllowIPs(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// syslogConfigured tracks whether syslog was initialised so the UI can reflect it.
+// syslogConfigured tracks whether syslog was initialised SUCCESSFULLY so the UI
+// can reflect it AND so admin_settings persistence only re-saves a working addr
+// (see admin_settings.go:447 — never persist a connect-failed target).
 var syslogConfigured string // the addr string, empty = not configured
+
+// syslogConfiguredAddr records the operator-configured syslog/SIEM target
+// regardless of whether InitSyslog actually connected (mirrors
+// auditLogConfiguredPath). buildOperatorContract's checkSyslogFeed compares
+// it against the live globalSyslog handle so the Diagnostics panel can tell an
+// intentional "no SIEM feed" apart from a configured feed that silently failed
+// to connect at startup — the latter previously left only one startup log line
+// as signal while the /api/syslog readback reported the feed as "not
+// configured". Kept in sync at both startup paths (loadObservability,
+// applyAdminServices) and the runtime API (apiSyslogConfig enable/disable).
+var syslogConfiguredAddr string
 
 // auditLogConfiguredPath / requestLogConfiguredPath record the operator-
 // configured persistent-log path (set in loadObservability regardless of
@@ -1294,12 +1544,19 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		format := "rfc3164"
-		var drops uint64
+		var drops, panics uint64
 		if globalSyslog != nil {
 			format = globalSyslog.Format()
+			// Read panics before drops: deliverGuarded's recover branch always
+			// increments panics first, then drops (independent atomics, no
+			// combined snapshot). Reading in the same order means a report can
+			// only ever lag panics behind drops, never the reverse — so the
+			// UI's `drops > 0` gate can never hide a real panic behind a
+			// stale-looking drops==0.
+			panics = globalSyslog.Panics()
 			drops = globalSyslog.Drops()
 		}
-		jsonOK(w, map[string]any{"addr": syslogConfigured, "format": format, "drops": drops})
+		jsonOK(w, map[string]any{"addr": syslogConfigured, "format": format, "drops": drops, "panics": panics})
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {
 			return
@@ -1325,6 +1582,7 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 				globalSyslog = nil
 			}
 			syslogConfigured = ""
+			syslogConfiguredAddr = ""
 			auditEvent(r, "settings.syslog", "disabled", "")
 			adminSettingsSave()
 			jsonOK(w, map[string]any{"ok": true, "addr": "", "format": "rfc3164"})
@@ -1335,6 +1593,7 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		syslogConfigured = body.Addr
+		syslogConfiguredAddr = body.Addr
 		auditEvent(r, "settings.syslog", body.Addr, "syslog forwarding enabled (format="+globalSyslog.Format()+")")
 		adminSettingsSave()
 		jsonOK(w, map[string]any{"ok": true, "addr": body.Addr, "format": globalSyslog.Format()})
@@ -1544,7 +1803,7 @@ func apiNetworkSettings(w http.ResponseWriter, r *http.Request) {
 		// finding from roadmap/CONFIG-VERSIONING-TRIAGE.md +
 		// roadmap/CATEGORY-D-PRIME-DIRECTION.md §4.
 		// Keep connected DPs aligned for SAML/OIDC callback generation.
-		publishCurrentConfigSnapshot()
+		_ = publishCurrentConfigSnapshot()
 		jsonOK(w, map[string]string{"status": "ok"})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1613,9 +1872,10 @@ func apiConnLimit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		jsonOK(w, map[string]any{
-			"enabled":   connLimiter.Enabled(),
-			"maxPerIP":  connLimiter.MaxPerIP(),
-			"activeIPs": connLimiter.ActiveIPs(),
+			"enabled":       connLimiter.Enabled(),
+			"maxPerIP":      connLimiter.MaxPerIP(),
+			"activeIPs":     connLimiter.ActiveIPs(),
+			"rejectedTotal": connLimiter.Rejected(),
 		})
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {
@@ -1684,12 +1944,21 @@ func apiBlockPage(w http.ResponseWriter, r *http.Request) {
 // Upstream Proxy Chaining API
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// upstreamDirectFallbackStatus is the CHAOS-11 fail-open visibility block
+// shared by the upstream GET surfaces: whether the pool is currently
+// bypassed to direct egress and how many requests have fallen back.
+func upstreamDirectFallbackStatus() map[string]any {
+	active, total := upstreamPool.DirectFallback()
+	return map[string]any{"active": active, "total": total}
+}
+
 func apiUpstream(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		jsonOK(w, map[string]any{
-			"enabled": upstreamPool.Enabled(),
-			"proxies": upstreamPool.List(),
+			"enabled":         upstreamPool.Enabled(),
+			"proxies":         upstreamPool.List(),
+			"direct_fallback": upstreamDirectFallbackStatus(),
 		})
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {
@@ -1721,8 +1990,9 @@ func apiUpstreamSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, map[string]any{
-		"enabled": upstreamPool.Enabled(),
-		"proxies": upstreamPool.List(),
+		"enabled":         upstreamPool.Enabled(),
+		"proxies":         upstreamPool.List(),
+		"direct_fallback": upstreamDirectFallbackStatus(),
 	})
 }
 
@@ -1774,6 +2044,8 @@ func apiOTLPConfig(w http.ResponseWriter, r *http.Request) {
 			"endpoint":       globalOTLP.Endpoint(),
 			"hasAuth":        hasAuth,
 			"authHeaderName": authName,
+			"metricsHealth":  globalOTLP.Health(),
+			"tracesHealth":   globalOTLPTraces.Health(),
 		})
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {
@@ -1847,8 +2119,8 @@ func registerSettingsRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/export", apiExport)
 
 	// ── Backup / restore / config versioning ──────────────────────────────
-	mux.HandleFunc("/api/config/export", apiConfigExport)     // GET — download backup JSON
-	mux.HandleFunc("/api/config/import", apiConfigImport)     // POST — restore from backup JSON
+	mux.HandleFunc("/api/config/export", apiConfigExport)     // GET — download exported config JSON
+	mux.HandleFunc("/api/config/import", apiConfigImport)     // POST — restore from exported config JSON
 	mux.HandleFunc("/api/config/versions", apiConfigVersions) // GET list / POST rollback
 	mux.HandleFunc("/api/config/diff", apiConfigDiff)         // GET diff between versions
 

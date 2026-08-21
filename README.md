@@ -46,7 +46,7 @@ docker compose up -d          # a working proxy + admin UI, no config required
 | **Distributed** | gRPC Control Plane / Data Plane with mTLS, config-snapshot sync, node groups, per-group bandwidth/QoS, config versioning, rolling upgrades, optional etcd fencing lease for HA |
 | **Supply chain** | Signed release catalog (Ed25519 + Sigstore keyless), digest-pinned image dispatch, SLSA L3 provenance, Cosign-signed artifacts |
 
-See the interactive **[architecture overview](docs/architecture.md)** and the panel-by-panel **[admin UI reference](docs/UI_REFACTOR_AUDIT.md)** for detail.
+See the interactive **[architecture overview](docs/architecture.md)** and the **[Admin UI / Control Plane reference](CLAUDE.md#admin-ui--control-plane)** for detail.
 
 ---
 
@@ -242,7 +242,7 @@ Culvert is built defense-in-depth. Every claim below is enforced in code.
 
 ### Post-Quantum key exchange
 
-Culvert runs on Go 1.25, whose `crypto/tls` **auto-negotiates the hybrid X25519 + ML-KEM-768 key exchange** when the peer supports it - protecting confidentiality against "Harvest Now, Decrypt Later" attacks on all TLS connections. This capability is inherited from the Go toolchain rather than configured by Culvert, and adds ~1ms to the initial handshake with no ongoing cost. Certificate **signing** remains classical ECDSA P-256; PQC signatures (ML-DSA) will follow when the Go standard library adds native support.
+Culvert runs on Go 1.26, whose `crypto/tls` **auto-negotiates the hybrid X25519 + ML-KEM-768 key exchange** when the peer supports it - protecting confidentiality against "Harvest Now, Decrypt Later" attacks on all TLS connections. This capability is inherited from the Go toolchain rather than configured by Culvert, and adds ~1ms to the initial handshake with no ongoing cost. Certificate **signing** remains classical ECDSA P-256; PQC signatures (ML-DSA) will follow when the Go standard library adds native support.
 
 ### Supply-chain integrity
 
@@ -313,6 +313,7 @@ Beyond ~500 users or ~1 Gbps sustained, scale horizontally with a gRPC Control P
 - **HA fencing** - optional etcd fencing lease (`-ha-etcd-*`) provides fail-closed leader election with epoch-based fencing; without it, the legacy leader/standby model applies. See [`docs/operator/ha-lease-failover.md`](docs/operator/ha-lease-failover.md).
 - **Config versioning** - every mutation snapshots automatically (50-version history) with side-by-side diff and one-click rollback.
 - **Backup / restore** - via the profile-gated `cli` compose service; see [`docs/operator/docker-compose-backup-restore.md`](docs/operator/docker-compose-backup-restore.md).
+- **Catalog-driven install** - a fresh install selects its image from the signed release catalog (not GHCR tags), verifying the verifier binary, catalog, and image under one pinned identity. Operator inputs, fallback matrix, release-cutover checklist, and identity-rotation runbook: [`docs/operator/catalog-bootstrap-install-runbook.md`](docs/operator/catalog-bootstrap-install-runbook.md).
 
 Detailed single-node, multi-node, and upstream-chaining topologies are in the **[Deployment Guide](docs/deployment-guide.md)**. Full sizing tables (per-connection memory, cluster throughput) are in [`docs/OPERATIONS.md`](docs/OPERATIONS.md).
 
@@ -320,7 +321,7 @@ Detailed single-node, multi-node, and upstream-chaining topologies are in the **
 
 ## Development
 
-Requires **Go 1.25+**.
+Requires **Go 1.26+**.
 
 ```bash
 go build -o culvert .                        # build
@@ -329,7 +330,7 @@ go test -coverprofile=cover.out ./...        # coverage
 go test -fuzz FuzzIsPrivateHost -fuzztime=30s  # fuzz the SSRF guard
 ```
 
-**Repository layout:** everything is `package main` at the root (composition roots and thin shims); logic/state/persistence live in ~48 packages under `internal/`. Coding conventions, the `internal/` decomposition, and the admin-API route-metadata contract are documented in [`CLAUDE.md`](CLAUDE.md).
+**Repository layout:** everything is `package main` at the root (composition roots and thin shims); logic/state/persistence live in 63 packages under `internal/`. A handful of standalone tools (the Maintenance Agent, the OpenAPI bundler, CI diagnostics) live under `cmd/` instead. Coding conventions, the `internal/` decomposition, and the admin-API route-metadata contract are documented in [`CLAUDE.md`](CLAUDE.md).
 
 **Fuzz targets:** `FuzzIsPrivateHost`, `FuzzIsSafeRedirectURL`, `FuzzParseClamResponse`, `FuzzNormaliseFeedURL`, `FuzzMatchDest`, `FuzzParseYARALiteral`.
 
@@ -347,7 +348,7 @@ Stated plainly, because a security product should be honest about its edges:
 
 - **Revocation:** OCSP only - **CRL checking is not implemented**. OCSP fails open when a certificate publishes no responder.
 - **Fresh-install posture:** with zero rules and no `default_action`, the proxy starts in passthrough (allow), not deny. Enforce Zero Trust explicitly.
-- **Post-quantum:** key exchange is quantum-resistant (inherited from Go 1.25); certificate signing remains classical ECDSA P-256.
+- **Post-quantum:** key exchange is quantum-resistant (inherited from Go 1.26); certificate signing remains classical ECDSA P-256.
 - **SOCKS5:** CONNECT only - UDP ASSOCIATE is rejected.
 - **License gate:** blocks GPL/AGPL/LGPL; CPAL is not currently enforced by the license check.
 - **Sizing figures** in the deployment tables are engineering estimates, not published benchmarks - validate against your own workload before capacity planning.

@@ -203,7 +203,7 @@ func TestH2InspectDrain_FenceRefusesNewTunnel(t *testing.T) {
 	outer := httptest.NewRequest(http.MethodConnect, "https://origin.test:443", http.NoBody)
 
 	before := atomic.LoadInt64(&statH2InspectActive)
-	handleInspectH2(outer, clientTLS, upstreamTLS, "origin.test", nil, ProxyIdentity{})
+	handleInspectH2(outer, clientTLS, upstreamTLS, "origin.test", nil, ProxyIdentity{}, nil)
 	if got := atomic.LoadInt64(&statH2InspectActive); got != before {
 		t.Fatalf("fenced tunnel registered a conn (active gauge %d -> %d); the fence must refuse before registering", before, got)
 	}

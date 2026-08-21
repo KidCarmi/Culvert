@@ -23,4 +23,14 @@ func loadBackgroundServices(cfg backgroundServicesStartupConfig, ctx context.Con
 	// M3: support debug capture-level auto-revert watchdog (active auto-stop; the
 	// on-read expiry check already guarantees restart-surviving revert without it).
 	go startDebugLevelWatchdog(ctx)
+
+	// NOTE: the support-bundle age-retention janitor is deliberately NOT started
+	// here. Its boot sweep must observe the GUI-configured retention caps (Slice B),
+	// which LoadAdminSettings restores LATER in startup — so it is started from the
+	// persistent-admin-state loader, immediately after LoadAdminSettings, to avoid a
+	// boot sweep running the default caps for up to one tick.
+
+	// ADR-0011 §3: decryption inspection-coverage trend sampler (volatile time-series
+	// behind the Decryption Health panel's coverage-erosion chart).
+	go startDecCoverageSampler(ctx)
 }

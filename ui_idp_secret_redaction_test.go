@@ -425,7 +425,7 @@ func oidcDiscoveryCacheProfile() *IdPProfile {
 }
 
 func TestStaticIdPModal_ClearsWriteOnlyFieldsOnlyWhenExplicitlyChecked(t *testing.T) {
-	data, err := os.ReadFile("static/index.html")
+	data, err := os.ReadFile(staticIndexHTMLPath())
 	if err != nil {
 		t.Fatalf("read static/index.html: %v", err)
 	}
@@ -481,7 +481,7 @@ func TestStaticIdPModal_ClearsWriteOnlyFieldsOnlyWhenExplicitlyChecked(t *testin
 }
 
 func TestStaticIdPList_UsesRedactedSafeSAMLInlineMetadataIndicator(t *testing.T) {
-	data, err := os.ReadFile("static/index.html")
+	data, err := os.ReadFile(staticIndexHTMLPath())
 	if err != nil {
 		t.Fatalf("read static/index.html: %v", err)
 	}

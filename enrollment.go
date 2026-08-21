@@ -385,10 +385,12 @@ func (cs *ClusterStore) GetNode(nodeID string) (*EnrolledNode, bool) {
 	return n, ok
 }
 
-// UpdateNodeSeen updates the LastSeen timestamp and status.
+// UpdateNodeSeen updates the LastSeen timestamp and status. An empty ipAddr or
+// version is skipped so a heartbeat that omits either (e.g. an older DP that
+// predates the M5 version report) never wipes a previously-recorded value.
 // Persists to disk every 10 heartbeats to avoid excessive I/O while
 // still surviving restarts with reasonably fresh status.
-func (cs *ClusterStore) UpdateNodeSeen(nodeID, ipAddr string) {
+func (cs *ClusterStore) UpdateNodeSeen(nodeID, ipAddr, version string) {
 	cs.mu.Lock()
 	if n, ok := cs.st.Nodes[nodeID]; ok {
 		n.LastSeen = time.Now()
@@ -396,6 +398,9 @@ func (cs *ClusterStore) UpdateNodeSeen(nodeID, ipAddr string) {
 		if ipAddr != "" {
 			n.IPAddress = ipAddr
 			autoGeoLabel(n)
+		}
+		if version != "" {
+			n.Version = version
 		}
 	}
 	cs.heartbeatCount++
@@ -767,6 +772,13 @@ type clusterCA struct {
 	secondaryPEM  []byte
 	secondaryExp  time.Time // when secondary CA expires (auto-cleanup)
 	onRotate      func()    // callback to rebuild TLS cert pool after import
+	// lastRotationErr/lastRotationErrAt record the most recent RotateIfNeeded
+	// failure so it is visible on Info() (admin API) instead of only in logs —
+	// otherwise a stuck auto-rotation (e.g. a read-only CA directory) is
+	// silent until the CA actually expires and the cluster mTLS trust breaks.
+	// Cleared on the next successful ImportCA (auto-rotation or manual).
+	lastRotationErr   string
+	lastRotationErrAt time.Time
 }
 
 var globalClusterCA = &clusterCA{}
@@ -1160,6 +1172,10 @@ func (ca *clusterCA) ImportCA(certPEM, keyPEM []byte) error {
 	ca.cert = cert
 	ca.key = key
 	ca.certPEM = certPEM
+	// A successful import (auto-rotation or manual) resolves any prior
+	// auto-rotation failure that Info() was surfacing.
+	ca.lastRotationErr = ""
+	ca.lastRotationErrAt = time.Time{}
 
 	fp := sha256.Sum256(cert.Raw)
 	logger.Printf("ClusterCA: imported custom CA (expires %s, fingerprint %s)",
@@ -1180,7 +1196,9 @@ func (ca *clusterCA) ImportCA(certPEM, keyPEM []byte) error {
 	)
 
 	// Bump config version so DP nodes pick up the new CA fingerprint on next poll.
-	globalConfigStore.Update(CurrentConfigSnapshot())
+	// A commit-time rejection (config over a cap) is logged + alerted + surfaced
+	// via LastPublishError; CA rotation itself already succeeded above.
+	_ = globalConfigStore.Update(CurrentConfigSnapshot())
 
 	statClusterCARotations.Add(1)
 	return nil
@@ -1225,6 +1243,15 @@ func (ca *clusterCA) AllCACertsPEM() []byte {
 	return buf
 }
 
+// recordRotationFailure records the most recent auto-rotation failure for
+// Info() to surface. err is an internal crypto/x509 error, never user input.
+func (ca *clusterCA) recordRotationFailure(err error) {
+	ca.mu.Lock()
+	ca.lastRotationErr = err.Error()
+	ca.lastRotationErrAt = time.Now()
+	ca.mu.Unlock()
+}
+
 // RotateIfNeeded checks cluster CA expiry and auto-rotates if it expires
 // within 30 days. Preserves the old CA as secondary for dual-CA overlap.
 func (ca *clusterCA) RotateIfNeeded() {
@@ -1245,12 +1272,14 @@ func (ca *clusterCA) RotateIfNeeded() {
 	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		logger.Printf("ClusterCA: auto-rotation failed (keygen): %v", err)
+		ca.recordRotationFailure(err)
 		return
 	}
 	serialMax := new(big.Int).Lsh(big.NewInt(1), 128)
 	serial, err := rand.Int(rand.Reader, serialMax)
 	if err != nil {
 		logger.Printf("ClusterCA: auto-rotation failed (serial): %v", err)
+		ca.recordRotationFailure(err)
 		return
 	}
 	template := &x509.Certificate{
@@ -1266,19 +1295,23 @@ func (ca *clusterCA) RotateIfNeeded() {
 	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &privKey.PublicKey, privKey)
 	if err != nil {
 		logger.Printf("ClusterCA: auto-rotation failed (create cert): %v", err)
+		ca.recordRotationFailure(err)
 		return
 	}
 	newCertPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
 	keyDER, err := x509.MarshalECPrivateKey(privKey)
 	if err != nil {
 		logger.Printf("ClusterCA: auto-rotation failed (marshal key): %v", err)
+		ca.recordRotationFailure(err)
 		return
 	}
 	newKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 
 	// ImportCA handles dual-CA overlap, backup, persistence, and TLS pool rebuild.
+	// On success it clears lastRotationErr itself (while still holding ca.mu).
 	if err := ca.ImportCA(newCertPEM, newKeyPEM); err != nil {
 		logger.Printf("ClusterCA: auto-rotation failed (import): %v", err)
+		ca.recordRotationFailure(err)
 		return
 	}
 	logger.Printf("ClusterCA: auto-rotated successfully (new CA expires %s)",
@@ -1308,6 +1341,10 @@ func (ca *clusterCA) Info() map[string]any {
 			"expires":     ca.secondaryCert.NotAfter.Format(time.RFC3339),
 			"fingerprint": hex.EncodeToString(sfp[:]),
 		}
+	}
+	if ca.lastRotationErr != "" {
+		info["lastRotationError"] = ca.lastRotationErr
+		info["lastRotationErrorAt"] = ca.lastRotationErrAt.UTC().Format(time.RFC3339)
 	}
 	return info
 }

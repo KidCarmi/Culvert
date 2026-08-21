@@ -39,7 +39,7 @@ redirectURL,enabled,id,ruleType(access|auth),comment
 - createdAt/modifiedAt/modifiedBy server-stamped.
 
 ## DecryptionProfile JSON:
-id,name,inspectHttp2,certVerification(strict|permissive|skip),onUnsupported(fail-close|fail-open),
+id,name,inspectHttp2,certVerification(strict|skip),onUnsupported(fail-close|fail-open),
 onInspectError(fail-close|fail-open),minTlsVersion,maxTlsVersion,stallTimeoutSecs
 
 ## Roles: admin>operator>viewer. policy CRUD=operator; authpolicy/idp/settings=admin; reads=viewer.

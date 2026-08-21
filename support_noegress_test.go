@@ -4,8 +4,17 @@ package main
 // diagnose surface (#788 merge-gate invariant). The supportability appliance is
 // offline-only and consent-gated: building a bundle or running a diagnose verb
 // must never phone home, and the ONLY sanctioned dials on the diagnose surface
-// are the two audited, SSRF-guarded seams (tlsHandshakeProbe's net.Dialer with
-// ssrfControl, and diagnoseLookupIP's bounded resolver lookup).
+// are the THREE audited seams, each pinned by exact count below:
+//   1. tlsHandshakeProbe's net.Dialer — SSRF-guarded (ssrfControl) + TLS1.2 + 5s.
+//   2. diagnoseLookupIP's bounded resolver lookup — SSRF-guarded (private-IP refusal).
+//   3. diagnoseEtcd's globalHA.probeLeaseBackend — a read-only Provider.Read of
+//      the HA fencing-lease backend. Its target is the OPERATOR-CONFIGURED etcd
+//      endpoint (startup config, NOT attacker-controllable), so it is reviewed
+//      as non-SSRF-relevant and is bounded by a 5s context instead of an
+//      isPrivateHost guard (a fencing etcd normally lives on a private address,
+//      which such a guard would wrongly refuse). Adding it here — rather than
+//      hiding the dial behind globalHA — keeps this wall's guarantee honest: a
+//      NEW dial site on the diagnose surface still fails the pin.
 //
 // Three layers, mirroring the repo's wall conventions (C1/C1.5, crashguard):
 //  1. IMPORT WALL — internal/support (the engine) may not import any
@@ -73,14 +82,16 @@ var outboundIdents = []string{
 	"http.DefaultClient", "http.Client{", "http.NewRequest",
 	"net.Dial(", "net.DialTimeout(", "net.Dialer{", "tls.Dial", "exec.Command", "exec.CommandContext",
 	"DefaultResolver",
+	".probeLeaseBackend(", // diagnose etcd's HA fencing-lease reachability seam
 }
 
 // diagnoseSeamCounts pins diagnose.go's audited dial seams by exact marker
 // count. Adding ANY new dial/lookup site to diagnose.go fails this wall and
 // forces a deliberate review of its SSRF guard.
 var diagnoseSeamCounts = map[string]int{
-	"net.Dialer{":     1, // tlsHandshakeProbe — ssrfControl + MinVersion TLS1.2 + 5s bound
-	"DefaultResolver": 1, // diagnoseLookupIP — bounded ctx + private-IP refusal
+	"net.Dialer{":         1, // tlsHandshakeProbe — ssrfControl + MinVersion TLS1.2 + 5s bound
+	"DefaultResolver":     1, // diagnoseLookupIP — bounded ctx + private-IP refusal
+	".probeLeaseBackend(": 1, // diagnoseEtcd — read-only Provider.Read of the operator-configured etcd fencing endpoint (startup config, not attacker input → non-SSRF); 5s ctx bound
 }
 
 func TestSupportSurface_NoOutboundCallSites(t *testing.T) {
@@ -106,7 +117,7 @@ func TestSupportSurface_NoOutboundCallSites(t *testing.T) {
 	}
 
 	// diagnose.go: the two audited seams, pinned by exact count.
-	b, err := os.ReadFile("diagnose.go")
+	b, err := os.ReadFile(filepath.Join(pkgSourceDir(), "diagnose.go"))
 	if err != nil {
 		t.Fatalf("read diagnose.go: %v", err)
 	}

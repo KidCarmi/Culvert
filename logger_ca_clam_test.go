@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"log"
 	"os"
 	"strings"
 	"testing"
@@ -31,6 +32,7 @@ func TestJSONLogWriter_Write(t *testing.T) {
 }
 
 func TestSetupLogger_PlainText_NoFile(t *testing.T) {
+	restoreLogSink(t) // setupLogger publishes the async sink globally
 	l, closer, err := setupLogger("", 0, "text")
 	if err != nil {
 		t.Fatalf("setupLogger error: %v", err)
@@ -44,6 +46,7 @@ func TestSetupLogger_PlainText_NoFile(t *testing.T) {
 }
 
 func TestSetupLogger_JSON_NoFile(t *testing.T) {
+	restoreLogSink(t) // setupLogger publishes the async sink globally
 	l, closer, err := setupLogger("", 0, "json")
 	if err != nil {
 		t.Fatalf("setupLogger JSON error: %v", err)
@@ -57,6 +60,7 @@ func TestSetupLogger_JSON_NoFile(t *testing.T) {
 }
 
 func TestSetupLogger_WithFile(t *testing.T) {
+	restoreLogSink(t) // setupLogger publishes the async sink globally
 	f, err := os.CreateTemp("", "setuplogger*.log")
 	if err != nil {
 		t.Fatal(err)
@@ -78,6 +82,7 @@ func TestSetupLogger_WithFile(t *testing.T) {
 }
 
 func TestSetupLogger_JSONWithFile(t *testing.T) {
+	restoreLogSink(t) // setupLogger publishes the async sink globally
 	f, err := os.CreateTemp("", "setuplogger_json*.log")
 	if err != nil {
 		t.Fatal(err)
@@ -141,6 +146,34 @@ func TestSetGetLogLevel(t *testing.T) {
 	SetLogLevel(LevelDebug)
 	if GetLogLevel() != LevelDebug {
 		t.Errorf("GetLogLevel() = %v after SetLogLevel(DEBUG)", GetLogLevel())
+	}
+}
+
+func TestLogHelpers_SanitizeRenderedMessage(t *testing.T) {
+	var buf bytes.Buffer
+	oldLogger := logger
+	oldLevel := GetLogLevel()
+	logger = log.New(&buf, "", 0)
+	SetLogLevel(LevelWarn)
+	t.Cleanup(func() {
+		logger = oldLogger
+		SetLogLevel(oldLevel)
+	})
+
+	logWarnf("warn %s", "bad\nuser\t\x1b")
+	logErrorf("error %s", "bad\ruser\t\x1b")
+
+	out := buf.String()
+	for _, line := range strings.Split(strings.TrimSuffix(out, "\n"), "\n") {
+		if strings.ContainsAny(line, "\r\t\x1b") {
+			t.Fatalf("log output contains unsanitized control characters: %q", out)
+		}
+	}
+	if !strings.Contains(out, "WARN warn bad_user__\n") {
+		t.Fatalf("warn log output missing sanitized message: %q", out)
+	}
+	if !strings.Contains(out, "ERROR error bad_user__\n") {
+		t.Fatalf("error log output missing sanitized message: %q", out)
 	}
 }
 

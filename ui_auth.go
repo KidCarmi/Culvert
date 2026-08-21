@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -497,11 +498,18 @@ func apiIdPList(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		p.ID = "" // force generation of new ID
-		if err := idpRegistry.Upsert(&p); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+		// Optional safe-activation preflight (?preflight=connection): a live
+		// connection test must pass BEFORE anything persists (LDAP only).
+		if rep := ldapActivationPreflight(r, &p); rep != nil && !rep.OK {
+			writeLDAPPreflightFailure(w, rep)
 			return
 		}
-		publishCurrentConfigSnapshot()
+		if err := idpRegistry.Upsert(&p); err != nil {
+			http.Error(w, err.Error(), idpMutationErrorStatus(err))
+			return
+		}
+		enforceLegacyLDAPShadowing()
+		_ = publishCurrentConfigSnapshot()
 		auditEventDiff(r, "idp.create", p.ID, p.Name, nil, auditIdPProfile(&p))
 		logger.Printf("UI: IdP profile created id=%q name=%q type=%q", sanitizeLog(p.ID), sanitizeLog(p.Name), sanitizeLog(string(p.Type)))
 		jsonOK(w, publicIdPProfile(&p))
@@ -558,12 +566,24 @@ func apiIdPItem(w http.ResponseWriter, r *http.Request, id string) {
 			return
 		}
 		p.ID = id
-		preserveWriteOnlyIdPFields(before, &p, oidcClientSecretPresent(body), samlMetadataXMLPresent(body))
-		if err := idpRegistry.Upsert(&p); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+		preserveWriteOnlyIdPFields(before, &p, writeOnlyIdPFieldPresence{
+			oidcClientSecret: oidcClientSecretPresent(body),
+			samlMetadataXML:  samlMetadataXMLPresent(body),
+			ldapBindPassword: ldapBindPasswordPresent(body),
+		})
+		// Optional safe-activation preflight (?preflight=connection): a broken
+		// candidate must never replace a working enabled provider — on failure
+		// nothing is mutated and the live provider stays untouched (LDAP only).
+		if rep := ldapActivationPreflight(r, &p); rep != nil && !rep.OK {
+			writeLDAPPreflightFailure(w, rep)
 			return
 		}
-		publishCurrentConfigSnapshot()
+		if err := idpRegistry.Upsert(&p); err != nil {
+			http.Error(w, err.Error(), idpMutationErrorStatus(err))
+			return
+		}
+		enforceLegacyLDAPShadowing()
+		_ = publishCurrentConfigSnapshot()
 		auditEventDiff(r, "idp.update", id, p.Name, auditIdPProfile(before), auditIdPProfile(&p))
 		logger.Printf("UI: IdP profile updated id=%q name=%q", sanitizeLog(id), sanitizeLog(p.Name))
 		jsonOK(w, publicIdPProfile(&p))
@@ -573,10 +593,16 @@ func apiIdPItem(w http.ResponseWriter, r *http.Request, id string) {
 		}
 		p := idpRegistry.Get(id)
 		if err := idpRegistry.Delete(id); err != nil {
-			http.Error(w, err.Error(), http.StatusNotFound)
+			// A persist failure is NOT "not found": the profile still exists
+			// and its live provider is still authoritative (P1-3).
+			status := http.StatusNotFound
+			if errors.Is(err, errIdPPersistFailed) {
+				status = http.StatusInternalServerError
+			}
+			http.Error(w, err.Error(), status)
 			return
 		}
-		publishCurrentConfigSnapshot()
+		_ = publishCurrentConfigSnapshot()
 		auditEventDiff(r, "idp.delete", id, "", auditIdPProfile(p), nil)
 		logger.Printf("UI: IdP profile deleted id=%q", sanitizeLog(id))
 		w.WriteHeader(http.StatusNoContent)
@@ -585,13 +611,49 @@ func apiIdPItem(w http.ResponseWriter, r *http.Request, id string) {
 	}
 }
 
-func preserveWriteOnlyIdPFields(before, next *IdPProfile, oidcClientSecretProvided, samlMetadataXMLProvided bool) {
+// writeOnlyIdPFieldPresence records which write-only secret fields the update
+// request body actually carried (raw-body presence check, NOT decoded-value
+// emptiness): an OMITTED field preserves the stored secret, while a PRESENT
+// empty field is an explicit clear — the two must stay distinguishable.
+type writeOnlyIdPFieldPresence struct {
+	oidcClientSecret bool
+	samlMetadataXML  bool
+	ldapBindPassword bool
+}
+
+// idpMutationErrorStatus maps a registry mutation error to the HTTP status:
+// a persistence failure is a server-side fault (500) — the request was valid
+// and NOTHING changed (transactional registry, P1-3) — while every other
+// error is a validation/compile rejection of the caller's input (400).
+func idpMutationErrorStatus(err error) int {
+	if errors.Is(err, errIdPPersistFailed) {
+		return http.StatusInternalServerError
+	}
+	return http.StatusBadRequest
+}
+
+func preserveWriteOnlyIdPFields(before, next *IdPProfile, present writeOnlyIdPFieldPresence) {
 	if before == nil || next == nil {
 		return
 	}
-	preserveOIDCClientSecret(before, next, oidcClientSecretProvided)
+	preserveOIDCClientSecret(before, next, present.oidcClientSecret)
 	preserveOIDCDiscoveryEndpoints(before, next)
-	preserveSAMLMetadataXML(before, next, samlMetadataXMLProvided)
+	preserveSAMLMetadataXML(before, next, present.samlMetadataXML)
+	preserveLDAPBindPassword(before, next, present.ldapBindPassword)
+}
+
+// preserveLDAPBindPassword keeps the stored bind credential when an update
+// omits the write-only bindPassword field (the GET projection never returns
+// it, so an edit round-trip would otherwise wipe it). A request that carries
+// the field explicitly — even empty — wins: empty-with-field-present is the
+// deliberate clear path (e.g. switching to anonymous bind).
+func preserveLDAPBindPassword(before, next *IdPProfile, bindPasswordProvided bool) {
+	if before.Type != IdPTypeLDAP || next.Type != IdPTypeLDAP || before.LDAP == nil || next.LDAP == nil {
+		return
+	}
+	if before.LDAP.BindPassword != "" && !bindPasswordProvided && next.LDAP.BindPassword == "" {
+		next.LDAP.BindPassword = before.LDAP.BindPassword
+	}
 }
 
 func auditIdPProfile(p *IdPProfile) *IdPProfile {
@@ -646,6 +708,10 @@ func oidcClientSecretPresent(body []byte) bool {
 
 func samlMetadataXMLPresent(body []byte) bool {
 	return nestedJSONFieldPresent(body, "saml", "metadataXml")
+}
+
+func ldapBindPasswordPresent(body []byte) bool {
+	return nestedJSONFieldPresent(body, "ldap", "bindPassword")
 }
 
 func nestedJSONFieldPresent(body []byte, section, field string) bool {
@@ -728,7 +794,7 @@ func authOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Find provider by state (providerID is stored inside the PKCE entry).
-	entry, ok := globalPKCEStore.peek(state)
+	entry, ok := globalPKCEStore.Peek(state)
 	if !ok {
 		http.Error(w, "invalid or expired state", http.StatusBadRequest)
 		return
@@ -897,7 +963,9 @@ func authSelectProvider(w http.ResponseWriter, r *http.Request) {
 	// Optional providers= filter (Phase 3 Slice 4) scopes the selection to a set
 	// of bare IdP profile IDs (used by an SSORequired rule's providerRefs); absent
 	// → all enabled providers (backward-compatible; Default flow unaffected).
-	providers := filterProvidersByID(idpRegistry.EnabledProviders(), r.URL.Query().Get("providers"))
+	// INTERACTIVE providers only (ADR-0025): the sign-in selector must never
+	// offer a credential-only provider (LDAP) — it has no browser flow.
+	providers := filterProvidersByID(idpRegistry.EnabledInteractiveProviders(), r.URL.Query().Get("providers"))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprintf(w, `<!DOCTYPE html><html><head>
 <meta charset="utf-8"><title>Culvert — Sign In</title>
@@ -947,9 +1015,12 @@ func registerAuthRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/auth/lockouts", apiAuthLockouts)              // list/clear active login lockouts (admin unlock)
 
 	// ── Generic IdP Framework ─────────────────────────────────────────────
-	mux.HandleFunc("/api/idp", apiIdPList)              // GET list / POST create
-	mux.HandleFunc("/api/idp/discover", apiIdPDiscover) // POST: run OIDC discovery (must be before /api/idp/)
-	mux.HandleFunc("/api/idp/", apiIdPRouter)           // GET|PUT|DELETE /api/idp/{id} + /api/idp/{id}/groups
+	mux.HandleFunc("/api/idp", apiIdPList)                                // GET list / POST create
+	mux.HandleFunc("/api/idp/discover", apiIdPDiscover)                   // POST: run OIDC discovery (must be before /api/idp/)
+	mux.HandleFunc("/api/idp/test", apiIdPTest)                           // POST: candidate-based LDAP directory test (ADR-0025)
+	mux.HandleFunc("/api/idp/legacy-ldap", apiIdPLegacyLDAP)              // GET: legacy YAML ldap summary
+	mux.HandleFunc("/api/idp/legacy-ldap/import", apiIdPLegacyLDAPImport) // POST: explicit legacy import
+	mux.HandleFunc("/api/idp/", apiIdPRouter)                             // GET|PUT|DELETE /api/idp/{id} + /api/idp/{id}/groups
 
 	// ── Auth callbacks (not behind UI auth middleware) ────────────────────
 	// These are reached by browser redirects from IdPs (not admin UI calls).

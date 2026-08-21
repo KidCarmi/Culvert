@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"fmt"
 	"os"
 	"strings"
@@ -177,6 +178,104 @@ type FileConfig struct {
 		LeaseTTLSeconds int    `yaml:"lease_ttl_seconds"` // fencing lease TTL (default 10, minimum 3; failover latency ≈ TTL)
 	} `yaml:"cluster"`
 
+	// MCP configures the dedicated MCP (Model Context Protocol) Agent Security
+	// Gateway listener (ADR-0024). DISABLED BY DEFAULT: with mcp.gateway.enabled
+	// unset, NO listener binds, NO socket opens, NO goroutine starts, and the Secure
+	// Web Gateway path is byte-identical. QUAL-1 supports ONLY the Gateway capability
+	// in Observe posture — the listener parses/identifies/authenticates and records,
+	// but performs NO upstream tool execution (no executor, broker, or upstream
+	// client is composed). Management MCP has NO startup-activation config here and
+	// cannot be activated by this block. Read once at startup (node-local,
+	// startup-scoped — recorded GUI-parity deferral, same class as cluster/HA config).
+	MCP struct {
+		Gateway struct {
+			Enabled     bool   `yaml:"enabled"`      // master switch; unset ⇒ disabled (default)
+			BindAddress string `yaml:"bind_address"` // interface/IP to bind (e.g. "127.0.0.1"); wildcard rejected
+			Port        int    `yaml:"port"`         // listener port (required when enabled)
+			// ProtocolVersion, when set, must be in the frozen supported allowlist
+			// (2025-11-25 primary / 2025-06-18 floor); empty ⇒ the primary baseline. An
+			// unsupported/unknown value fails activation closed.
+			ProtocolVersion string   `yaml:"protocol_version"`
+			AllowedHosts    []string `yaml:"allowed_hosts"`   // Host/:authority allowlist (mandatory, non-empty when enabled)
+			AllowedOrigins  []string `yaml:"allowed_origins"` // Origin allowlist (optional)
+			RequireOrigin   bool     `yaml:"require_origin"`  // require an Origin header
+			ConnectorMode   string   `yaml:"connector_mode"`  // only "local-client"/"" accepted (Model A); connector/dmz rejected
+			// TLS material — file paths resolved at startup (never stored in the admin
+			// API). A production listener requires a server cert+key; client-cert mode
+			// "require" (the qualification posture) also requires a client-CA bundle.
+			TLSCertFile    string `yaml:"tls_cert_file"`
+			TLSKeyFile     string `yaml:"tls_key_file"`
+			ClientCAFile   string `yaml:"client_ca_file"`
+			ClientCertMode string `yaml:"client_cert_mode"` // "require" (default) | "request" | "none"
+			// OAuth resource-server configuration.
+			CanonicalResource string   `yaml:"canonical_resource"`  // exact expected token audience/resource id (required)
+			TrustedIssuers    []string `yaml:"trusted_issuers"`     // accepted token issuer identifiers (>=1)
+			AcceptedClientIDs []string `yaml:"accepted_client_ids"` // accepted OAuth client ids (>=1)
+			RequiredScopes    []string `yaml:"required_scopes"`     // required scopes (>=1; no blanket)
+			AllowedScopes     []string `yaml:"allowed_scopes"`      // additional permitted scopes (optional)
+			SenderConstraint  string   `yaml:"sender_constraint"`   // "mtls" | "dpop" | "mtls-or-dpop" | "bearer" (fail-closed default: mtls)
+			MinAssurance      string   `yaml:"min_assurance"`       // "low" | "medium" | "high" (default high)
+			// TrustedJWKSFile is a static JWKS document (PUBLIC keys only) that seeds the
+			// in-memory trusted-key resolver. authn performs no JWKS fetch, so keys are
+			// operator-supplied trust anchors. Keys are registered under every trusted
+			// issuer. Private-key material in the JWKS fails activation closed.
+			TrustedJWKSFile string `yaml:"trusted_jwks_file"`
+			ResourceName    string `yaml:"resource_name"` // optional public display label for the metadata document
+			// QualificationInventoryFile is a static, node-local JSON document (QUAL-2)
+			// describing exactly one Gateway qualification fleet: a dedicated tenant, its
+			// registered servers (opaque id, endpoint reference, pinned verified identity,
+			// credential-profile REFERENCE only — never raw credentials) and their known
+			// tools. It is loaded ONCE at startup (no hot reload, no admin upload), seeded
+			// atomically through the existing Registry/Catalog contracts, and shared as the
+			// single source of truth by the Gateway runtime pipeline AND the read-only MCP
+			// Servers/Tools Admin API. Absent ⇒ QUAL-1 behavior (empty registry/catalog).
+			// A present-but-invalid file fails activation closed (nothing binds); it never
+			// partially seeds and never enables MCP on its own (mcp.gateway.enabled still
+			// gates the listener). No secret material may appear in this file.
+			QualificationInventoryFile string `yaml:"qualification_inventory_file"`
+			// QualificationPolicyFile is a static, node-local policy source document (QUAL-4)
+			// in the EXISTING accepted Gateway policy format (schema_version 1, capability
+			// "gateway", default_action DENY, rules[]). It is loaded ONCE at startup (no hot
+			// reload, no admin upload, no CLI/env policy body), compiled through the EXISTING
+			// policy compiler + limits, and published as the node-local ACTIVE Observe
+			// evaluation snapshot into the SAME capability-local policy Store the read-only
+			// Policy Admin API and simulator read (single source of truth). Absent ⇒ QUAL-3
+			// behavior (no snapshot; decision telemetry stays pending-policy). A present-but-
+			// invalid file fails activation closed (nothing binds; no partial snapshot). This
+			// is a LOCAL qualification Observe snapshot — never fleet-published, never
+			// Production-enforced; the policy is EVALUATED for evidence only and never
+			// executes an upstream effect. No secret material may appear in this file.
+			QualificationPolicyFile string `yaml:"qualification_policy_file"`
+			// QualificationTelemetry (QUAL-3) composes the existing MCP durable-events
+			// machinery into the Gateway Observe runtime: an encrypted, capability-isolated
+			// event spool (KEK from a model-B secret.Provider file — never a raw key in
+			// YAML/CLI/env), a durable node-local qualification archive exporter, restart-safe
+			// export cursors, truthful telemetry health, and low-cardinality metrics.
+			// DISABLED BY DEFAULT: absence preserves QUAL-2 behavior (no event manager, no
+			// spool). An enabled-but-invalid block fails activation closed (nothing binds; no
+			// partial manager/exporter; no plaintext or memory-only fallback). Observe-only:
+			// no tool executes. This is a telemetry FOUNDATION — with Policy still absent only
+			// the denial lane commits on live requests; decision telemetry stays pending-policy.
+			QualificationTelemetry struct {
+				Enabled bool   `yaml:"enabled"`  // master switch; unset ⇒ disabled (default)
+				NodeID  string `yaml:"node_id"`  // stable node identity stamped into every event (required)
+				DataDir string `yaml:"data_dir"` // canonical telemetry durable root (spool + cursors); required
+				// KEKFile is the model-B key-at-rest file (secret.FileProvider): a random
+				// 32-byte KEK auto-generated 0600 on first use, stable across restarts. The KEK
+				// is NEVER in YAML/CLI/env and never derived from node id/password/config. A
+				// wrong/unavailable KEK fails closed (the spool cannot decrypt). Required.
+				KEKFile string `yaml:"kek_file"`
+				Export  struct {
+					Type       string `yaml:"type"`        // only "local-qualification-archive" (no network sink)
+					Directory  string `yaml:"directory"`   // node-local archive root (required)
+					BatchSize  int    `yaml:"batch_size"`  // max events per export batch (bounded; 0 ⇒ default)
+					MaxRetries int    `yaml:"max_retries"` // export retry bound per batch (bounded; 0 ⇒ default)
+					MaxBytes   int64  `yaml:"max_bytes"`   // archive total-size cap in bytes (bounded; 0 ⇒ default)
+				} `yaml:"export"`
+			} `yaml:"qualification_telemetry"`
+		} `yaml:"gateway"`
+	} `yaml:"mcp"`
+
 	// SecurityScan configures the local security scanning stack:
 	// ClamAV antivirus, YARA rule-based detection, and threat-intelligence
 	// feed lookups — all running locally with no external API dependency.
@@ -302,6 +401,19 @@ type CDRConfig struct {
 // availability by default, admins opt into fail-closed.
 func (c CDRConfig) CDRFailOpen() bool {
 	return !strings.EqualFold(strings.TrimSpace(c.FailMode), "closed")
+}
+
+// validCDRFailMode reports whether fm is a recognized cdr.fail_mode /
+// -cdr-fail-mode value: "" (unset — defaults to open), "open", or "closed".
+// Shared by FileConfig.validateCDR (the config.yaml path, which fails the
+// whole config load on an unrecognized value) and initCDR in main.go (the
+// CLI-flag path). Without this shared gate, a typo in -cdr-fail-mode was
+// stored verbatim and silently interpreted by CDRFailOpen as fail-OPEN (any
+// value other than the exact string "closed" is open) — the opposite of
+// what an operator hardening CDR to fail-closed intended, with no startup
+// warning. The same typo in config.yaml already refused to start.
+func validCDRFailMode(fm string) bool {
+	return fm == "" || fm == "open" || fm == "closed"
 }
 
 func loadFileConfig(path string) (*FileConfig, error) {
@@ -481,7 +593,7 @@ func (fc *FileConfig) validateCDR() []string { //nolint:cyclop // flat switch-st
 	if fc.CDR.Endpoint == "" {
 		errs = append(errs, "cdr.endpoint is required when cdr.enabled is true")
 	}
-	if fm := fc.CDR.FailMode; fm != "" && fm != "open" && fm != "closed" {
+	if fm := fc.CDR.FailMode; !validCDRFailMode(fm) {
 		errs = append(errs, fmt.Sprintf("cdr.fail_mode: must be \"open\" or \"closed\", got %q", fm))
 	}
 	if m := fc.CDR.DefaultMode; m != "" && m != "ENFORCE" && m != "REPORT_ONLY" && m != "BYPASS_WITH_REPORT" {
@@ -503,6 +615,15 @@ func (fc *FileConfig) validateCDR() []string { //nolint:cyclop // flat switch-st
 		fp = strings.ReplaceAll(fp, ":", "")
 		if len(fp) != 64 {
 			errs = append(errs, fmt.Sprintf("cdr.server_fingerprint: expected 64 hex chars (SHA-256), got %d", len(fp)))
+		} else if _, err := hex.DecodeString(fp); err != nil {
+			// Length alone isn't enough: a 64-character value that isn't valid
+			// hex would otherwise sail through startup validation and only
+			// surface later as a non-fatal CDR client-dial failure (loadCDR,
+			// cdr_startup.go) — CDR silently never comes up instead of a clear
+			// startup error naming the bad field. buildCDRTLSConfig (cdr.go)
+			// enforces the same hex requirement at connect time; this mirrors
+			// it at config-load time so the failure is loud and immediate.
+			errs = append(errs, "cdr.server_fingerprint: expected 64 hex chars (SHA-256), got non-hex characters")
 		}
 	}
 	if p := fc.CDR.CertsDir; p != "" && strings.Contains(p, "..") {

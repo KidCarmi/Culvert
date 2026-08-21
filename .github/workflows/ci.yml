@@ -51,7 +51,7 @@ jobs:
       !(github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/'))
 
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: ./.github/actions/setup-go-cache
 
@@ -97,7 +97,7 @@ jobs:
     # its full dependency scorecard for visibility, but a low score no longer
     # blocks the PR. Revisit if the action gains an allowlist/regression mode.
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: KidCarmi/Dependency-Obituary@9a35b0a193035bc746428bfdc9664f0ee0818028 # main @ 2026-07-03
         # step-level continue-on-error so the JOB (and its check run) concludes
         # success — a job-level flag would leave the check red on the PR.
@@ -117,7 +117,7 @@ jobs:
       !(github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/'))
 
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Build proxy image from branch source
         run: |
@@ -233,10 +233,10 @@ jobs:
 
     steps:
       - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
-        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
         with:
           egress-policy: audit
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0   # full history needed for tag-based version computation
 
@@ -284,7 +284,7 @@ jobs:
       # ── Registry login ────────────────────────────────────────────────────
       # ghcr.io: always available, uses GITHUB_TOKEN — no secrets needed.
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -412,10 +412,10 @@ jobs:
       actions: read       # require-gate.sh (tag-path guard)
     steps:
       - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
-        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
         with:
           egress-policy: audit
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0   # full history for the tagged commit's committer date (deterministic generated_at)
       # Tag-path guard: this job keyless-signs the release catalog on a v*
@@ -545,7 +545,7 @@ jobs:
           echo "bundle=$BUNDLE" >> "$GITHUB_OUTPUT"
       - name: Attach complete signed catalog bundle to the GitHub Release (tag path)
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           files: ${{ steps.pkg.outputs.bundle }}
 
@@ -573,10 +573,10 @@ jobs:
       id-token: write     # cosign keyless blob signing of the re-signed index.json
     steps:
       - name: Harden runner (egress audit — same baseline as catalog-pipeline)
-        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
         with:
           egress-policy: audit
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0   # full tag list for the latest-tag assert (SEC-F2a)
       - uses: ./.github/actions/setup-go-cache
@@ -733,7 +733,7 @@ jobs:
             echo "       Create the fine-grained PAT + secret per the SEC-F7 runbook."
             exit 1
           }
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0   # need full history for tags
           # Persist the PAT (not the default token) so the tag push below is
@@ -814,10 +814,10 @@ jobs:
 
     steps:
       - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
-        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
         with:
           egress-policy: audit
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Tag-path guard (assert): refuse to build/sign release binaries unless
       # the tagged commit was green on its main push. Defense-in-depth behind
@@ -832,6 +832,15 @@ jobs:
 
       - uses: ./.github/actions/setup-go-cache
 
+      # Release version-stamp fail-closed guard: an OFFICIAL signed binary MUST carry a
+      # real vX.Y.Z tag stamped into main.version. Refuse to build/sign if the ref
+      # name is empty or not a semver tag; never fall back to empty/dev/latest/SHA.
+      # (env-indirection: never interpolate ${{ github.ref_name }} into run: text.)
+      - name: Assert release version stamp
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: .github/scripts/assert-release-ref.sh "$REF_NAME"
+
       # Build the release binaries via the shared composite — the SAME action the
       # verify-reproducible job calls, so an independent tag rebuild can never
       # drift from this build. Proxy on every leg; culvert-maint on linux only.
@@ -843,6 +852,19 @@ jobs:
           ext: ${{ matrix.ext || '' }}
           ref-name: ${{ github.ref_name }}
           include-maint: ${{ matrix.goos == 'linux' }}
+
+      # Runtime version-stamp GATE (native linux/amd64 leg only): start the EXACT
+      # binary that will be signed/published, probe /healthz, and assert it
+      # self-reports the release tag. This is the gate that would have caught the
+      # v1.0.202 defect (signed binary whose /healthz reported an empty version).
+      # Foreign-platform legs cannot execute here; the shared composite guarantees
+      # every leg uses the identical linker value, and this native leg proves the
+      # bytes-under-signature actually surface it at runtime.
+      - name: Gate runtime version stamp (linux/amd64)
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: .github/scripts/assert-runtime-version.sh "./culvert-linux-amd64" "$REF_NAME"
 
       # Install cosign for keyless signing via Sigstore OIDC (no secrets needed).
       - name: Install cosign
@@ -924,7 +946,7 @@ jobs:
           cat "subjects-${{ matrix.goos }}-${{ matrix.goarch }}.txt"
 
       - name: Upload proxy release asset + signature bundle
-        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           files: |
             culvert-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }}
@@ -932,7 +954,7 @@ jobs:
 
       - name: Upload culvert-maint release asset + signature bundle (linux)
         if: matrix.goos == 'linux'
-        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           files: |
             culvert-maint-${{ matrix.goos }}-${{ matrix.goarch }}
@@ -945,7 +967,7 @@ jobs:
       # the .sigstore.json is the in-toto attestation binding it to the binary.
       - name: Upload SBOMs + attestation bundles (linux/amd64 leg)
         if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
-        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           files: |
             culvert.sbom.cdx.json
@@ -1026,15 +1048,24 @@ jobs:
           - { goos: windows, goarch: amd64, ext: .exe }
     steps:
       - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
-        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
         with:
           # Needs module-proxy egress: the composite runs `go mod download` for
           # BOTH modules (cmd/culvert-maint deps are not in the root-go.sum
           # cache). If release is ever flipped to egress-policy: block, this job
           # must get the same allowlist.
           egress-policy: audit
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-go-cache
+
+      # SAME fail-closed release version-stamp guard as the release job: the reproducible
+      # rebuild must not silently accept a non-tag version input either (else the
+      # two paths could drift on the version stamp while still hash-matching an
+      # equally-wrong build).
+      - name: Assert release version stamp
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: .github/scripts/assert-release-ref.sh "$REF_NAME"
 
       # SAME composite + SAME inputs as the release job → an independent rebuild
       # that cannot drift from the real build.

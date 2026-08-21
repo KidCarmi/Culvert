@@ -948,6 +948,9 @@ func (ps *PolicyStore) sortLocked() {
 			}
 		}
 		r.matchedConds = buildMatchedConditions(r)
+		// Stage-1 (auth-rule) subject CIDRs, same contract: parse once here so
+		// the per-request resolver never runs net.ParseCIDR.
+		precomputeSubjectNets(r.SubjectMatch)
 	}
 	ps.rules = next
 }
@@ -988,6 +991,10 @@ func copyPolicyRuleForPublication(nr, rule *PolicyRule) {
 		sm.All = append([]SubjectPredicate(nil), rule.SubjectMatch.All...)
 		for i := range sm.All {
 			sm.All[i].Values = append([]string(nil), sm.All[i].Values...)
+			// Drop the precompute with the same discipline as srcIPNet below: a
+			// copy must never carry a net parsed from a since-edited Values.
+			// sortLocked repopulates it on the published definition.
+			sm.All[i].nets = nil
 		}
 		nr.SubjectMatch = &sm
 	}
@@ -1097,6 +1104,18 @@ func (ps *PolicyStore) Evaluate(clientIP, identity, authSource, host string, gro
 	// precomputed srcIPNet reuses it (previously net.ParseCIDR + net.ParseIP
 	// ran per rule per request, ~4 allocs/rule on source-scoped rulesets).
 	clientAddr := net.ParseIP(clientIP)
+	// Read the clock ONCE for the whole scan, lazily on the first scheduled
+	// rule reached (a scan with no scheduled rules never reads it). Previously
+	// every scheduled rule paid its own time.Now() inside matchSchedule; one
+	// instant per scan is also the more consistent decision point.
+	var scanNow time.Time
+	// Resolve the destination's CATEGORY at most ONCE for the whole scan, lazily
+	// on the first category-scoped rule reached. The host→category fusion depends
+	// only on the host, so running it per rule multiplied an expensive lookup —
+	// an O(all host patterns) taxonomy scan, plus a BadgerDB read transaction per
+	// domain label on a feed-backed deployment — by the rule count. See
+	// policy_hostcat.go for the measurements.
+	catScratch := newHostCatScratch(host)
 
 	for i := range rules {
 		rule := rules[i]
@@ -1112,10 +1131,15 @@ func (ps *PolicyStore) Evaluate(clientIP, identity, authSource, host string, gro
 		if !matchSourceAddr(rule, clientIP, clientAddr, identity, authSource, groups) {
 			continue
 		}
-		if !matchSchedule(rule.Schedule) {
-			continue
+		if rule.Schedule != nil {
+			if scanNow.IsZero() {
+				scanNow = time.Now()
+			}
+			if !matchScheduleAt(rule.Schedule, scanNow) {
+				continue
+			}
 		}
-		if !matchDestNorm(rule, host, normHost) {
+		if !matchDestNorm(rule, host, normHost, &catScratch) {
 			continue
 		}
 		// Every published definition has a stable accounting cell. Revisions of
@@ -1190,22 +1214,44 @@ func buildMatchedConditions(rule *PolicyRule) string {
 // (and warns once instead of once per request); a tzdata fix therefore needs a
 // restart to be picked up, matching the read-once posture of other config.
 // time.Location values are immutable and safe for concurrent use.
-var scheduleLocCache sync.Map // timezone string → *time.Location
+var scheduleLocCache sync.Map // timezone string → scheduleLoc
+
+// scheduleLoc is one memoised timezone resolution. It carries the parse OUTCOME
+// alongside the location so callers that need to distinguish "resolved to UTC"
+// from "failed, fell back to UTC" — the Stage-1 auth gate, which must fail
+// closed on a timezone it cannot evaluate — can share this cache instead of
+// calling time.LoadLocation themselves.
+type scheduleLoc struct {
+	loc *time.Location
+	ok  bool
+}
+
+// scheduleLocationResolved resolves an IANA timezone name through the
+// process-wide cache, returning the location and whether the name actually
+// parsed. On failure it returns (time.UTC, false).
+func scheduleLocationResolved(name string) (*time.Location, bool) {
+	if cached, ok := scheduleLocCache.Load(name); ok {
+		e := cached.(scheduleLoc)
+		return e.loc, e.ok
+	}
+	e := scheduleLoc{ok: true}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		logWarnf("Policy: invalid schedule timezone %q, falling back to UTC", sanitizeLog(name))
+		e.loc, e.ok = time.UTC, false
+	} else {
+		e.loc = loc
+	}
+	scheduleLocCache.Store(name, e)
+	return e.loc, e.ok
+}
 
 // scheduleLocation resolves an IANA timezone name to a *time.Location through
 // the process-wide cache, falling back to UTC on failure. Shared by every
 // matchSchedule caller (Stage-2 access rules, Stage-1 auth rules, CDR policy,
 // and the policy simulator).
 func scheduleLocation(name string) *time.Location {
-	if cached, ok := scheduleLocCache.Load(name); ok {
-		return cached.(*time.Location)
-	}
-	loc, err := time.LoadLocation(name)
-	if err != nil {
-		logWarnf("Policy: invalid schedule timezone %q, falling back to UTC", sanitizeLog(name))
-		loc = time.UTC
-	}
-	scheduleLocCache.Store(name, loc)
+	loc, _ := scheduleLocationResolved(name)
 	return loc
 }
 
@@ -1213,43 +1259,100 @@ func matchSchedule(s *PolicySchedule) bool {
 	if s == nil {
 		return true
 	}
+	return matchScheduleAt(s, time.Now())
+}
+
+// matchScheduleAt is matchSchedule against a caller-supplied instant. The
+// Stage-2 Evaluate scan reads the clock once per request and passes the same
+// instant to every scheduled rule — previously each rule paid its own
+// time.Now() inside the scan (and one decision could straddle a minute
+// boundary mid-scan).
+func matchScheduleAt(s *PolicySchedule, now time.Time) bool {
 	loc := time.UTC
 	if s.Timezone != "" {
 		loc = scheduleLocation(s.Timezone)
 	}
-	now := time.Now().In(loc)
+	now = now.In(loc)
+	if !scheduleDayMatch(s.Days, now) {
+		return false
+	}
+	if s.TimeStart == "" || s.TimeEnd == "" {
+		return true
+	}
+	return scheduleTimeMatch(s.TimeStart, s.TimeEnd, now)
+}
 
-	// Day-of-week check.
-	if len(s.Days) > 0 {
-		day := now.Weekday().String()[:3] // "Mon", "Tue" …
-		found := false
-		for _, d := range s.Days {
-			if strings.EqualFold(d, day) {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return false
+// scheduleDayMatch is the day-of-week check ("Mon", "Tue" …, case-insensitive).
+// An empty Days list means every day.
+func scheduleDayMatch(days []string, now time.Time) bool {
+	if len(days) == 0 {
+		return true
+	}
+	day := now.Weekday().String()[:3] // "Mon", "Tue" …
+	for _, d := range days {
+		if strings.EqualFold(d, day) {
+			return true
 		}
 	}
+	return false
+}
 
-	// Time-of-day check.
-	if s.TimeStart != "" && s.TimeEnd != "" {
-		cur := fmt.Sprintf("%02d:%02d", now.Hour(), now.Minute())
-		if s.TimeStart <= s.TimeEnd {
-			// Normal range e.g. 09:00–17:00.
-			if cur < s.TimeStart || cur >= s.TimeEnd {
-				return false
-			}
-		} else {
-			// Overnight range e.g. 22:00–06:00.
-			if cur < s.TimeStart && cur >= s.TimeEnd {
-				return false
-			}
-		}
+// scheduleTimeMatch is the time-of-day window check (start inclusive, end
+// exclusive; start > end is an overnight range). Well-formed zero-padded
+// "HH:MM" bounds compare on a minutes-of-day scale — the same total order as
+// the previous lexicographic string comparison, minus the per-rule fmt.Sprintf
+// allocation that put O(rules) heap garbage on the policy hot path. Malformed
+// bounds fall back to the legacy string comparison unchanged.
+func scheduleTimeMatch(startStr, endStr string, now time.Time) bool {
+	start, okStart := parseClockMinutes(startStr)
+	end, okEnd := parseClockMinutes(endStr)
+	if !okStart || !okEnd {
+		return scheduleTimeMatchLegacy(startStr, endStr, now)
 	}
-	return true
+	cur := now.Hour()*60 + now.Minute()
+	if start <= end {
+		// Normal range e.g. 09:00–17:00.
+		return cur >= start && cur < end
+	}
+	// Overnight range e.g. 22:00–06:00.
+	return cur >= start || cur < end
+}
+
+// scheduleTimeMatchLegacy preserves the pre-optimization lexicographic
+// comparison for bounds parseClockMinutes rejects (e.g. unpadded "9:00"):
+// whatever such a schedule matched before, it matches now.
+func scheduleTimeMatchLegacy(startStr, endStr string, now time.Time) bool {
+	cur := fmt.Sprintf("%02d:%02d", now.Hour(), now.Minute())
+	if startStr <= endStr {
+		return cur >= startStr && cur < endStr
+	}
+	return cur >= startStr || cur < endStr
+}
+
+// parseClockMinutes converts a strict zero-padded 24-h "HH:MM" clock string to
+// minutes since midnight. "24:00" is accepted (1440) as the exclusive
+// end-of-day bound existing schedules use to close a full-day window. On the
+// strict format the minute scale is order-isomorphic to string comparison, so
+// swapping the comparison cannot flip any schedule decision; anything else
+// returns ok=false and stays on the legacy comparison.
+func parseClockMinutes(s string) (int, bool) {
+	if len(s) != 5 || s[2] != ':' {
+		return 0, false
+	}
+	h1, h2 := s[0]-'0', s[1]-'0'
+	m1, m2 := s[3]-'0', s[4]-'0'
+	if h1 > 9 || h2 > 9 || m1 > 9 || m2 > 9 {
+		return 0, false
+	}
+	hh := int(h1)*10 + int(h2)
+	mm := int(m1)*10 + int(m2)
+	if hh == 24 && mm == 0 {
+		return 1440, true
+	}
+	if hh > 23 || mm > 59 {
+		return 0, false
+	}
+	return hh*60 + mm, true
 }
 
 // ─── Source matching ──────────────────────────────────────────────────────────
@@ -1301,7 +1404,7 @@ func matchAuthSource(ruleAuthSource, actualAuthSource string) bool {
 // splitIdPSource separates an auth-source string into its IdP scheme
 // ("oidc"/"saml", or "" when bare/non-IdP) and the profile name.
 func splitIdPSource(source string) (scheme, name string) {
-	for _, p := range []string{"oidc:", "saml:"} {
+	for _, p := range []string{"oidc:", "saml:", "ldap:"} {
 		if rest, ok := strings.CutPrefix(source, p); ok && rest != "" {
 			return strings.TrimSuffix(p, ":"), rest
 		}
@@ -1310,7 +1413,7 @@ func splitIdPSource(source string) (scheme, name string) {
 }
 
 func stripIdPPrefix(source string) string {
-	for _, prefix := range []string{"oidc:", "saml:"} {
+	for _, prefix := range []string{"oidc:", "saml:", "ldap:"} {
 		if rest, ok := strings.CutPrefix(source, prefix); ok && rest != "" {
 			return rest
 		}
@@ -1341,18 +1444,36 @@ func matchIPOrCIDR(cidrOrIP, clientIP string) bool {
 	return cidrOrIP == clientIP
 }
 
+// matchIPOrCIDRAddr is matchIPOrCIDR with the client IP pre-parsed. clientAddr
+// MUST be net.ParseIP(clientIP) (nil = unparseable, fails closed on the CIDR
+// branch); the Stage-1 auth resolver parses once per request instead of per
+// predicate value.
+func matchIPOrCIDRAddr(cidrOrIP, clientIP string, clientAddr net.IP) bool {
+	if strings.Contains(cidrOrIP, "/") {
+		_, ipNet, err := net.ParseCIDR(cidrOrIP)
+		if err != nil {
+			return false
+		}
+		return clientAddr != nil && ipNet.Contains(clientAddr)
+	}
+	return cidrOrIP == clientIP
+}
+
 // ─── Destination matching ─────────────────────────────────────────────────────
 
 func matchDest(rule *PolicyRule, host string) bool {
-	return matchDestNorm(rule, host, normalizeHost(host))
+	sc := newHostCatScratch(host)
+	return matchDestNorm(rule, host, normalizeHost(host), &sc)
 }
 
-// matchDestNorm is matchDest's core. normHost MUST be normalizeHost(host); the
-// hot path (Evaluate) computes it ONCE per request and reuses it across every
-// rule, and uses each rule's precomputed normFQDN — eliminating the two
-// per-rule host+pattern normalization allocations. Category/country checks keep
-// using the raw host (they normalize internally and are far less common).
-func matchDestNorm(rule *PolicyRule, host, normHost string) bool {
+// matchDestNorm is matchDest's core. normHost MUST be normalizeHost(host) and
+// sc MUST be a scratch built for the same host; the hot path (Evaluate) builds
+// both ONCE per request and reuses them across every rule, and uses each rule's
+// precomputed normFQDN — eliminating the two per-rule host+pattern
+// normalization allocations and the per-rule host→category resolution.
+// Country checks keep using the raw host (they normalize internally and are far
+// less common).
+func matchDestNorm(rule *PolicyRule, host, normHost string, sc *hostCatScratch) bool {
 	// Empty fields mean "match any" — all configured fields must satisfy.
 	fqdnSet := rule.DestFQDN != ""
 	catSet := rule.DestCategory != "" && rule.DestCategory != CategoryAny
@@ -1372,12 +1493,15 @@ func matchDestNorm(rule *PolicyRule, host, normHost string) bool {
 		}
 	}
 	// URL category check (single category).
-	if catSet && !matchCategory(rule.DestCategory, host) {
+	if catSet && !sc.matchesCategory(rule.DestCategory) {
 		return false
 	}
 	// Category group check — host must be in ANY category within the group.
-	// O(1): lookupHostCategory(host) → group.catSet[result].
-	if catGroupSet && !categoryGroupMatchesHostRule(rule, host) {
+	// Amortized O(1) per rule: the host→category fusion is resolved ONCE per
+	// scan (hostCatScratch) and each of its halves is itself indexed — the
+	// urlcat reverse index answers host→category in O(labels) map probes
+	// (urlcat.Store.LookupHost) and the group membership check is a set probe.
+	if catGroupSet && !categoryGroupMatchesHostScratch(rule, sc) {
 		return false
 	}
 	// Geo-IP country check — cache-only to avoid blocking the request goroutine.
@@ -1455,37 +1579,41 @@ func matchFQDN(pattern, host string) bool { return hostutil.MatchFQDN(pattern, h
 
 func matchFQDNNorm(pattern, host string) bool { return hostutil.MatchFQDNNorm(pattern, host) }
 
+// matchCategory reports whether host belongs to the named URL category.
+//
+// F3b-4 source-aware resolution. When the signed-feed effective view is installed
+// (offline at startup, atomically replaced on a committed activation / override
+// recompose), the SaaS taxonomy is served EXCLUSIVELY from that view and catStore
+// contributes ADMIN-created categories only — so a signed activation cannot be
+// double-served or served stale from catStore, and policy readers observe a single
+// complete view via one atomic pointer load. When the view is absent (lifecycle
+// unarmed / disabled build / unit tests) the full catStore taxonomy serves, byte-for-
+// byte as before.
+//
+// The resolution itself lives on hostCatScratch so a policy scan can share one
+// host→category resolution across every rule (policy_hostcat.go); this is the
+// single-shot entry point for callers outside a scan.
 func matchCategory(cat URLCategory, host string) bool {
-	// Layer 1: admin-managed catStore — exact + suffix match (fast, in-memory).
-	if catStore.MatchesHost(cat, host) {
-		return true
-	}
-	// Layer 2: community BadgerDB feed — domain-walking point lookups.
-	if communityDB != nil {
-		if foundCat, ok := communityDB.Lookup(host); ok {
-			return strings.EqualFold(foundCat, string(cat))
-		}
-	}
-	return false
+	sc := newHostCatScratch(host)
+	return sc.matchesCategory(cat)
 }
 
 // lookupHostCategory resolves a hostname to its URL category across both tiers.
-// Returns (category, tier, matchedBy) where tier is "admin", "community", or "none".
-// Used by the admin URL-lookup API endpoint and policy test response enrichment.
+// Returns (category, tier, matchedBy) where tier is "admin", "saas",
+// "community", or "none". Used by the admin URL-lookup API endpoint and policy
+// test response enrichment.
+//
+// F3b-4 source-aware resolution — see matchCategory. With the signed-feed
+// effective view installed: admin-created categories (catStore, BuiltIn=false)
+// first, then the SaaS taxonomy from the atomic view (tier "saas"), then UT1.
+// Without it, the full catStore taxonomy serves as before (tier "admin").
+//
+// The resolution lives on hostCatScratch (policy_hostcat.go) so a policy scan
+// resolves it once and shares it across every rule; this is the single-shot
+// entry point for callers outside a scan.
 func lookupHostCategory(host string) (category, tier, matchedBy string) {
-	// Layer 1: admin-managed catStore — exact + suffix match.
-	if name, pattern, ok := catStore.LookupHost(host); ok {
-		return name, "admin", pattern
-	}
-
-	// Layer 2: community BadgerDB feed.
-	h := normalizeHost(host)
-	if communityDB != nil {
-		if foundCat, ok := communityDB.Lookup(h); ok {
-			return foundCat, "community", h
-		}
-	}
-	return "", "none", ""
+	sc := newHostCatScratch(host)
+	return sc.fusion()
 }
 
 // ── SSL Bypass Matcher ────────────────────────────────────────────────────────

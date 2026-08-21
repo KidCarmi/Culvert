@@ -88,6 +88,11 @@ func TestMITM_NativeH2_InspectsAndProxies(t *testing.T) {
 	inspectRuleNative()
 
 	target := origin.Listener.Addr().String()
+	// ADR-0011 P2: the native-ALPN inspect path must count the session in the coverage
+	// metric (Codex #803 — it returns before the strip path's counter). Capture the
+	// baseline before driving the session, then assert the delta after a successful
+	// inspected round-trip.
+	coverageBefore := inspectedSessionTotal(t)
 	tc, proto := connectTLSWithProto(t, proxyURL.Host, target, "origin.test", proxyRoots, []string{"h2", "http/1.1"})
 	if proto != "h2" {
 		t.Fatalf("downstream ALPN = %q, want h2 (native inspection must not downgrade)", proto)
@@ -116,6 +121,73 @@ func TestMITM_NativeH2_InspectsAndProxies(t *testing.T) {
 	}
 	if sawIdentity != "" {
 		t.Fatalf("origin saw X-User-Identity=%q — pipeline scrub did not run on the H2 path", sawIdentity)
+	}
+	if got := inspectedSessionTotal(t); got <= coverageBefore {
+		t.Fatalf("culvert_decrypt_sessions_total{outcome=inspected} did not increment for the native-H2 session (%d ≤ %d)", got, coverageBefore)
+	}
+}
+
+// TestMITM_NativeH2_AttachesDecBlock proves the native-ALPN/H2 inspect path now attaches
+// the ADR-0011 inspected dec block to the per-request log entry (the piece the earlier
+// nil-block follow-up left out): the block carries the h2 leg's negotiated TLS state and
+// the policy_inspect decision.
+func TestMITM_NativeH2_AttachesDecBlock(t *testing.T) {
+	allowLoopbackTunnel(t)
+	_, proxyRoots := setupInspectCA(t)
+
+	origin := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	}))
+	origin.EnableHTTP2 = true
+	origin.StartTLS()
+	defer origin.Close()
+
+	proxyURL := startTestProxy(t)
+	// Native inspect rule WITH LogFullURI so the per-request entry (carrying the dec block)
+	// is emitted.
+	f := false
+	policyStore.rules = nil
+	policyStore.Add(PolicyRule{
+		Priority: 1, Name: "inspect-native-logfull", DestFQDN: "*",
+		Action: ActionAllow, SSLAction: SSLInspect, TLSSkipVerify: true, StripALPN: &f, LogFullURI: true,
+	})
+
+	target := origin.Listener.Addr().String()
+	tc, proto := connectTLSWithProto(t, proxyURL.Host, target, "origin.test", proxyRoots, []string{"h2", "http/1.1"})
+	if proto != "h2" {
+		t.Fatalf("downstream ALPN = %q, want h2", proto)
+	}
+	cc, err := (&http2.Transport{}).NewClientConn(tc)
+	if err != nil {
+		t.Fatalf("h2 client conn: %v", err)
+	}
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://origin.test/hello", http.NoBody)
+	resp, err := cc.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("h2 round-trip: %v", err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	resp.Body.Close() //nolint:errcheck // test cleanup
+
+	// Scan the ring for the inspected inner-request entry and assert its dec block.
+	var found *DecryptionBlock
+	for _, e := range logGet() {
+		if e.SSLAction == "inspect" && e.Status == "OK" && e.Dec != nil {
+			found = e.Dec
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("no inspected inner-request entry with a dec block found for the native-H2 session")
+	}
+	if found.Outcome != "inspected" || found.DecisionSource != "policy_inspect" {
+		t.Fatalf("dec block outcome/source = %s/%s, want inspected/policy_inspect", found.Outcome, found.DecisionSource)
+	}
+	if found.ALPN != "h2" {
+		t.Fatalf("dec block ALPN = %q, want h2 (native H2 leg state)", found.ALPN)
+	}
+	if found.CertVerify != "skipped" { // rule set TLSSkipVerify
+		t.Fatalf("dec block cert_verify = %q, want skipped", found.CertVerify)
 	}
 }
 
@@ -164,6 +236,22 @@ func TestMITM_NativeH2_BlocksFileDownload(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	if len(body) == 0 || resp.Header.Get("Content-Type") == "" {
 		t.Fatalf("expected a 403 block body with content-type, got %q ct=%q", body, resp.Header.Get("Content-Type"))
+	}
+
+	// ADR-0011 (Codex #828): the BLOCK-log row — the highest-value dec.* drill-down
+	// target — must carry the inspected dec block, not just the delivered path.
+	var blocked *DecryptionBlock
+	for _, e := range logGet() {
+		if e.Status == "FILE_BLOCKED" && e.Dec != nil {
+			blocked = e.Dec
+			break
+		}
+	}
+	if blocked == nil {
+		t.Fatal("FILE_BLOCKED row on the native-H2 path has no dec block — block rows are not filterable by dec.*")
+	}
+	if blocked.Outcome != "inspected" || blocked.ALPN != "h2" {
+		t.Fatalf("blocked dec block = outcome %q alpn %q, want inspected/h2", blocked.Outcome, blocked.ALPN)
 	}
 }
 

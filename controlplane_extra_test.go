@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/hex"
 	"testing"
 	"time"
 
@@ -283,6 +285,51 @@ func TestInitSessionSecretFromConfig_TooShort(t *testing.T) {
 
 	initSessionSecretFromConfig("aabb") // only 2 bytes
 	// Should keep the original secret.
+}
+
+// TestInitSessionSecretFromConfig_TrailingNewline covers a session_secret
+// value sourced from a file (e.g. a YAML value populated via a shell
+// `$(cat secret-file)`-style step, or hand-edited with a trailing newline
+// left in place by an editor). hex.DecodeString rejects the embedded
+// newline outright, so a byte-for-byte-valid secret was silently discarded
+// in favor of a random key — defeating shared-signing-key clustering with
+// no error surfaced beyond a log line.
+func TestInitSessionSecretFromConfig_TrailingNewline(t *testing.T) {
+	origSecret := session.SigningKey()
+	defer session.SetSigningKey(origSecret)
+
+	const hexKey = "aaaaaaaabbbbbbbbccccccccddddddddeeeeeeeeffffffff0000000011111111" //nolint:gosec // test value
+	initSessionSecretFromConfig(hexKey + "\n")
+
+	got := session.SigningKey()
+	if len(got) != 32 {
+		t.Fatalf("session secret length = %d, want 32 (trailing newline should be trimmed, not treated as invalid hex)", len(got))
+	}
+	want, _ := hex.DecodeString(hexKey)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("session secret = %x, want %x", got, want)
+	}
+}
+
+// TestInitSessionSecretFromConfig_WhitespaceOnly guards against a regression
+// where trimming to fix TestInitSessionSecretFromConfig_TrailingNewline
+// could make an explicitly-configured-but-whitespace-only session_secret
+// indistinguishable from an omitted field: it must still be rejected (kept
+// original key, warning logged), not silently accepted as "no override"
+// (Codex review on PR #983).
+func TestInitSessionSecretFromConfig_WhitespaceOnly(t *testing.T) {
+	origSecret := session.SigningKey()
+	defer session.SetSigningKey(origSecret)
+
+	baseline := bytes.Repeat([]byte{0x42}, 32)
+	session.SetSigningKey(baseline)
+
+	initSessionSecretFromConfig("   \n\t  ")
+
+	got := session.SigningKey()
+	if !bytes.Equal(got, baseline) {
+		t.Fatalf("session secret changed on whitespace-only config value: got %x, want unchanged %x", got, baseline)
+	}
 }
 
 // ── cpServerOption Tests ───────────────────────────────────────────────────

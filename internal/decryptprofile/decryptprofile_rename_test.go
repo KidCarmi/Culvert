@@ -71,7 +71,7 @@ func TestFailOpenScopeByID(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Resolved + fail-open → (id, true).
-	scope, resolved := s.FailOpenScopeByID(fo.ID)
+	scope, _, resolved := s.FailOpenScopeByID(fo.ID)
 	if !resolved || scope != fo.ID {
 		t.Errorf("FailOpenScopeByID(fail-open) = (%q,%v), want (%q,true)", scope, resolved, fo.ID)
 	}
@@ -82,23 +82,23 @@ func TestFailOpenScopeByID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if scope, resolved := s.FailOpenScopeByID(fc.ID); scope != "" || !resolved {
+	if scope, _, resolved := s.FailOpenScopeByID(fc.ID); scope != "" || !resolved {
 		t.Errorf("FailOpenScopeByID(fail-close) = (%q,%v), want (\"\",true)", scope, resolved)
 	}
 	// Not found → ("", false): the ID resolves to no profile, so the caller
 	// may fall back to the denormalized name.
-	if scope, resolved := s.FailOpenScopeByID("nonexistent"); scope != "" || resolved {
+	if scope, _, resolved := s.FailOpenScopeByID("nonexistent"); scope != "" || resolved {
 		t.Errorf("FailOpenScopeByID(missing) = (%q,%v), want (\"\",false)", scope, resolved)
 	}
 	// Empty id → ("", false).
-	if scope, resolved := s.FailOpenScopeByID(""); scope != "" || resolved {
+	if scope, _, resolved := s.FailOpenScopeByID(""); scope != "" || resolved {
 		t.Errorf("FailOpenScopeByID(\"\") = (%q,%v), want (\"\",false)", scope, resolved)
 	}
 	// Scope tracks the profile across a rename (ID unchanged).
 	if _, err := s.Rename(fo.ID, "FO-renamed"); err != nil {
 		t.Fatal(err)
 	}
-	if scope, resolved := s.FailOpenScopeByID(fo.ID); !resolved || scope != fo.ID {
+	if scope, _, resolved := s.FailOpenScopeByID(fo.ID); !resolved || scope != fo.ID {
 		t.Error("scope should survive a rename (keyed by stable id)")
 	}
 }

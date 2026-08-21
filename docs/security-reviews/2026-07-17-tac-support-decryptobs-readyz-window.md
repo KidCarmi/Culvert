@@ -337,3 +337,13 @@ All touched suites pass under `go test` and `go test -race`; `gofmt`/`go vet` cl
 - The four fixed items are low-severity and low-blast-radius; the fixes are
   minimal, behavior-preserving for the security-relevant decision paths, and add
   negative regression guards so the same classes cannot silently return.
+
+---
+
+**Post-script (2026-08-21, backlog reconciliation):** the `/ready` DP-detail
+redaction described above was ultimately superseded before landing by a deeper
+cut (PR #1139: leak-capable state removed from the DP probe recorder itself,
+expiry countdown withheld), so this review's PR carried only the other three
+fixes into main: the captured (not re-resolved) `cert_verify` record, the
+`clusterRole` snapshot in `buildSupportBundle`, and the bounded crash-record
+correlation id.

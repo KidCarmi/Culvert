@@ -170,8 +170,12 @@ func New(db *catdb.CommunityDB, feedURL string, syncInterval time.Duration) *Syn
 // An immediate sync is performed on first start when the DB is empty.
 func (fs *Syncer) Start(ctx context.Context) {
 	go func() {
+		// CHAOS-24: Sync streams and parses a remote gzip tarball (UT1 mirror).
+		// Guard the ROUND so a malformed/hostile archive costs one sync window
+		// rather than terminating an in-line gateway; the last-good BadgerDB
+		// stays readable throughout, so degradation is already graceful.
 		if fs.db.Stats() == 0 {
-			fs.Sync()
+			obs.SafeCall("feedsync", fs.Sync)
 		}
 		ticker := time.NewTicker(fs.syncInterval)
 		defer ticker.Stop()
@@ -180,7 +184,7 @@ func (fs *Syncer) Start(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				fs.Sync()
+				obs.SafeCall("feedsync", fs.Sync)
 			}
 		}
 	}()

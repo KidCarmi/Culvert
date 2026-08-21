@@ -2,6 +2,16 @@
 
 Culvert supports three deployment modes. Choose the one that fits your scale.
 
+> **Image tag:** the Compose examples below use `culvert/proxy:pinned` — a
+> fixed **local-only** tag that must be seeded before the first `up`. If it
+> isn't present, Compose falls back to a registry pull and fails with
+> `pull access denied for culvert/proxy` (see README.md's troubleshooting
+> entry). Seed it first via the
+> [one-line installer](../README.md#one-line-install-linux)
+> (`curl ... install.sh | bash`), which handles this for you, or build it
+> yourself: `docker build -t culvert/proxy:pinned .`. See the `proxy:` service
+> comment in `docker-compose.yml` for the full rationale (P1.4).
+
 ---
 
 ## 1. Standalone (Single Node)
@@ -15,7 +25,7 @@ This is the default and works for most deployments.
 # docker-compose.yml
 services:
   culvert:
-    image: culvert:latest
+    image: culvert/proxy:pinned
     ports:
       - "8080:8080"   # HTTP/HTTPS proxy
       - "1080:1080"   # SOCKS5 (optional)
@@ -248,7 +258,7 @@ From the Admin UI cluster panel you can:
 # docker-compose.multi.yml
 services:
   control-plane:
-    image: culvert:latest
+    image: culvert/proxy:pinned
     ports:
       - "9090:9090"    # Admin UI
       - "50051:50051"  # gRPC
@@ -271,7 +281,7 @@ services:
       -threat-feed-db /data/threatfeeds.json
 
   data-plane-1:
-    image: culvert:latest
+    image: culvert/proxy:pinned
     ports:
       - "8080:8080"
       - "1080:1080"
@@ -294,7 +304,7 @@ services:
       - control-plane
 
   data-plane-2:
-    image: culvert:latest
+    image: culvert/proxy:pinned
     ports:
       - "8081:8080"
       - "1081:1080"
@@ -340,7 +350,7 @@ docker compose -f docker-compose.multi.yml up -d
 | Blocklist entries | Rate limit counters |
 | IP filter list + mode | Session cookies |
 | Rate limit config (RPM) | Connection counters |
-| Auth enabled / unauth mode | Leaf cert cache |
+| Auth enabled / default auth outcome | Leaf cert cache |
 | OIDC/SAML IdP profiles | SAML AuthnRequest RelayState |
 | External auth base URL | OIDC PKCE login state |
 | Session HMAC signing key | Browser cookies (client-held) |
@@ -561,3 +571,38 @@ Or CLI:
 ```
 
 Supported SIEMs: Splunk, Elasticsearch, QRadar, rsyslog, syslog-ng.
+
+Delivery is asynchronous: the request path enqueues formatted lines on a
+bounded channel and a single drain goroutine owns the socket, reconnect, and
+backoff — a slow or unreachable collector costs delivery drops, never proxy
+latency. `format` selects `rfc3164` (BSD syslog, default) or `rfc5424` (IETF
+structured syslog; preferred by modern SIEMs for structured data and
+microsecond timestamps).
+
+**Status and counters** — `GET /api/syslog` (admin role) returns:
+
+| Field | Meaning |
+|---|---|
+| `addr` | Configured collector address, empty if forwarding is disabled |
+| `format` | `rfc3164` or `rfc5424` |
+| `drops` | Messages lost since forwarding started (queue was full when a send was attempted) |
+| `panics` | Subset of `drops` caused by a recovered panic in the drain goroutine, rather than collector capacity |
+
+Both counters reset when forwarding is reconfigured or disabled. There is no
+Prometheus metric for these counters — `GET /api/syslog` and the **Settings >
+Syslog Forwarding** panel (which shows the same drop/panic breakdown) are the
+only surfaces.
+
+**Troubleshooting drops** — `drops > 0` with `panics == 0` means the
+collector could not keep up or was unreachable: check network connectivity
+and the collector's own ingest capacity. `panics > 0` means some of those
+drops came from a recurring internal formatting bug rather than collector
+capacity — a different fix (check the process log, since `internal/syslog`
+is a dependency-free leaf package and logs the recovered panic there, not to
+syslog itself) is needed and increasing collector capacity will not help.
+
+Send a one-off test message (admin role) with:
+
+```bash
+curl -X POST -u admin:pass https://proxy-host:9090/api/syslog/test
+```

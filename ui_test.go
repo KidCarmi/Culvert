@@ -252,6 +252,32 @@ func TestAPISetupComplete_ShortPassword(t *testing.T) {
 	assertStatus(t, w, http.StatusBadRequest)
 }
 
+// TestAPISetupComplete_PasswordTooLong proves the first-time setup wizard
+// rejects an over-long password with a clean 400, not a bcrypt internals leak.
+// bcrypt.GenerateFromPassword errors on any password over 72 bytes
+// (golang.org/x/crypto's documented limit), but validatePasswordComplexity
+// only enforces a minimum length — so an admin pasting a long password-manager
+// password (a very plausible first-run action) previously hit SetAuth's
+// bcrypt error and got a raw 500 "internal error: bcrypt: password length
+// exceeds 72 bytes" instead of the same 400 validation response every other
+// weak-password case gets.
+func TestAPISetupComplete_PasswordTooLong(t *testing.T) {
+	resetSetupLockout()
+	t.Cleanup(resetSetupLockout)
+	_ = cfg.SetAuth("", "") // ensure no auth configured
+	defer func() { _ = cfg.SetAuth("", "") }()
+
+	longPass := "Aa1" + strings.Repeat("x", 70) // 73 bytes, otherwise valid
+	w := httptest.NewRecorder()
+	apiSetupComplete(w, jsonReq(http.MethodPost, "/api/setup/complete", map[string]any{
+		"user": "admin", "pass": longPass,
+	}))
+	assertStatus(t, w, http.StatusBadRequest)
+	if cfg.IsConfigured() {
+		t.Error("setup must not be marked complete when the password is rejected")
+	}
+}
+
 func TestAPISetupComplete_UnauthMode(t *testing.T) {
 	resetSetupLockout()
 	t.Cleanup(resetSetupLockout)
@@ -578,6 +604,23 @@ func TestAPIStats_LogPersistenceFields(t *testing.T) {
 	}
 	if m["requestLogPath"] != requestLogConfiguredPath {
 		t.Errorf("requestLogPath = %v; want %v", m["requestLogPath"], requestLogConfiguredPath)
+	}
+}
+
+// TestAPIStats_ProcessLogBackpressureField proves the operator-blind-spot fix:
+// GET /api/stats surfaces the async process-log queue's backpressure counter
+// (internal/logsink, driving culvert_logsink_backpressure_total), which was
+// previously visible only via /metrics — invisible to an operator without a
+// Prometheus scraper wired up.
+func TestAPIStats_ProcessLogBackpressureField(t *testing.T) {
+	w := httptest.NewRecorder()
+	apiStats(w, getReq("/api/stats"))
+	m := assertJSON(t, w)
+	if _, ok := m["processLogBackpressure"]; !ok {
+		t.Fatal("stats response missing 'processLogBackpressure' field")
+	}
+	if got := m["processLogBackpressure"]; got != float64(0) {
+		t.Errorf("processLogBackpressure = %v; want 0 with no logsink installed in the test process", got)
 	}
 }
 
@@ -930,6 +973,22 @@ func TestAPISyslogConfig_Get(t *testing.T) {
 	w := httptest.NewRecorder()
 	apiSyslogConfig(w, getReq("/api/syslog"))
 	assertStatus(t, w, http.StatusOK)
+}
+
+// A panic recovered in the syslog drain goroutine is a distinct failure mode
+// from an ordinary drop (unreachable/slow collector) - the GET response must
+// surface it so the GUI can tell the two apart instead of only logging it.
+func TestAPISyslogConfig_Get_ExposesPanicsCount(t *testing.T) {
+	w := httptest.NewRecorder()
+	apiSyslogConfig(w, getReq("/api/syslog"))
+	assertStatus(t, w, http.StatusOK)
+	var body map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if _, ok := body["panics"]; !ok {
+		t.Fatalf("expected \"panics\" field in /api/syslog response, got %v", body)
+	}
 }
 
 func TestAPISyslogConfig_Disable(t *testing.T) {

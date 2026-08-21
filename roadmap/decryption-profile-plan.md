@@ -1,5 +1,14 @@
 # Decryption Profile — PAN-OS-style GUI-managed inspection profile
 
+> **Superseded note (production hardening, issue #716):** the deferred
+> `CertVerification=permissive` value referenced below was **retired**, not shipped.
+> Its documented allow-on-failure enforcement was never implemented (it verified
+> like `strict`), so keeping it in the schema was a misleading operator contract.
+> `certVerification` now accepts only `strict` and `skip` (plus inherit); a legacy
+> `permissive` is fail-closed-migrated to `strict` on load/sync. A genuine
+> allow-on-failure posture needs a separate approved design. See
+> `docs/operator/decryption-profiles.md`.
+
 **Status:** PLAN (v1, pre-implementation). To be validated by three independent
 reviewers (PAN-OS decryption/product, config-architecture/anti-drift, UI/API +
 security) before any code — same gate that preceded the native-H2 program and PR3d.
@@ -287,7 +296,7 @@ enforce-vs-defer:**
 type DecryptionProfile struct {
 	ID   string; Name string
 	InspectHTTP2     *bool  // H2 toggle (back-compat fallback: rule.StripALPN → strip default)
-	CertVerification string // "" inherit | "strict" | "permissive" | "skip"  (folds per-rule TLSSkipVerify)
+	CertVerification string // "" inherit | "strict" | "skip"  (folds per-rule TLSSkipVerify; "permissive" retired — see superseded note)
 	OnUnsupported    string // "" inherit | "fail-close" | "fail-open"  (unsupported TLS version/cipher)
 	MinTLSVersion    string // "" | "1.2" | "1.3"
 	MaxTLSVersion    string // "" | "1.2" | "1.3"   (PAN-OS parity: floor AND cap — NIT-1)

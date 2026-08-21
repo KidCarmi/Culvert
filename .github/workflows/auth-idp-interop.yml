@@ -30,7 +30,7 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: ./.github/actions/setup-go-cache
 
@@ -70,7 +70,7 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: ./.github/actions/setup-go-cache
 
@@ -132,3 +132,78 @@ jobs:
       - name: SimpleSAMLphp logs
         if: failure()
         run: docker logs culvert-simplesamlphp
+
+  openldap:
+    name: OpenLDAP
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CULVERT_OPENLDAP_URL: ldap://127.0.0.1:3389
+      CULVERT_OPENLDAP_LDAPS_URL: ldaps://127.0.0.1:3636
+      CULVERT_OPENLDAP_BIND_DN: cn=admin,dc=corp,dc=example
+      CULVERT_OPENLDAP_BIND_PASSWORD: admin-password
+      CULVERT_OPENLDAP_BASE_DN: dc=corp,dc=example
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/setup-go-cache
+
+      # The image's cfssl TLS auto-generation is unreliable on hosted runners
+      # (slapd came up with "TLS: can't accept: No certificate was found",
+      # failing the LDAPS/StartTLS interop tests), so provision a
+      # deterministic throwaway certificate instead: self-signed, 2-day,
+      # SAN localhost/127.0.0.1. The key is world-readable on purpose — CI
+      # fixture material only, same posture as the SAML job's IdP cert.
+      - name: Generate throwaway TLS certificate
+        run: |
+          mkdir -p /tmp/openldap-certs
+          openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
+            -keyout /tmp/openldap-certs/ldap.key \
+            -out /tmp/openldap-certs/ldap.crt \
+            -subj "/CN=ldap.corp.example" \
+            -addext "subjectAltName=DNS:ldap.corp.example,DNS:localhost,IP:127.0.0.1"
+          cp /tmp/openldap-certs/ldap.crt /tmp/openldap-certs/ca.crt
+          chmod 644 /tmp/openldap-certs/*
+
+      # Pinned OpenLDAP with the memberof overlay enabled by default; the
+      # deterministic fixture directory (.github/idp/openldap/bootstrap.ldif)
+      # seeds users alice/bob and the engineering group. Credentials are
+      # fixture-only. The pre-provisioned certs (default filenames
+      # ldap.crt/ldap.key/ca.crt) make the image skip its own generation;
+      # LDAP_TLS_VERIFY_CLIENT=never because the suite tests server-auth
+      # TLS, not mutual TLS.
+      - name: Start OpenLDAP
+        run: |
+          docker run -d --name culvert-openldap \
+            --hostname ldap.corp.example \
+            -p 127.0.0.1:3389:389 -p 127.0.0.1:3636:636 \
+            -e LDAP_ORGANISATION="Culvert Interop" \
+            -e LDAP_DOMAIN=corp.example \
+            -e LDAP_ADMIN_PASSWORD=admin-password \
+            -e LDAP_TLS_VERIFY_CLIENT=never \
+            -v /tmp/openldap-certs:/container/service/slapd/assets/certs \
+            -v "$PWD/.github/idp/openldap:/container/service/slapd/assets/config/bootstrap/ldif/custom:ro" \
+            osixia/openldap:1.5.0 --copy-service
+
+      - name: Wait for OpenLDAP fixture
+        run: |
+          for i in $(seq 1 60); do
+            if docker exec culvert-openldap ldapsearch -x -H ldap://localhost \
+                 -D "cn=admin,dc=corp,dc=example" -w admin-password \
+                 -b "dc=corp,dc=example" "(uid=alice)" dn 2>/dev/null | grep -q "uid=alice"; then
+              echo "OpenLDAP fixture is ready."
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "OpenLDAP fixture did not become ready in time."
+          docker logs culvert-openldap
+          exit 1
+
+      - name: Run OpenLDAP interop tests
+        run: go test -run TestOpenLDAPInterop -count=1 -timeout=5m .
+
+      - name: OpenLDAP logs
+        if: failure()
+        run: docker logs culvert-openldap

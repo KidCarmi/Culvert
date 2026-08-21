@@ -57,9 +57,12 @@ Only the certificate is exportable — never the private key. Distribute to endp
 
 ## 4. Bypass rules (do NOT inspect these)
 
-Cert-pinned apps, banking, healthcare, and mTLS-protected origins must bypass inspection. Configure via **SSL Inspection Bypass** or `GET/POST/DELETE /api/ssl-bypass` (operator role): FQDN globs (`*.bank.com`) or `~`-prefixed regexes, persisted to `ssl_bypass.json`. Per-rule `SSLAction: Bypass` also works; the bypass matcher is an always-bypass override.
+Cert-pinned apps, banking, healthcare, and mTLS-protected origins must bypass inspection. Configure via **SSL Bypass** or `GET/POST/DELETE /api/ssl-bypass` (operator role): FQDN globs (`*.bank.com`) or `~`-prefixed regexes, persisted to `ssl_bypass.json`. Per-rule `SSLAction: Bypass` also works; the bypass matcher is an always-bypass override.
 
 > **GAP-PKI-06 — origin mTLS.** Culvert presents no client certificate to inspected origins; an origin requiring mutual TLS returns `502`. **Bypass** those hosts (opaque relay preserves the client's own mTLS). Non-TLS over CONNECT (SSH/RDP) falls back to a raw relay automatically.
+
+- **Adaptive decryption exclusion (automatic, opt-in fail-open).** Separately from the bypass rules above, a decryption profile can opt a rule into `OnInspectError=="fail-open"`: hosts that repeatedly fail decryption are learned into a scoped, TTL-bounded cache and subsequent CONNECTs to them bypass automatically — see [`docs/operator/decryption-auto-exclusions.md`](../operator/decryption-auto-exclusions.md).
+- **Native HTTP/2 inspection** is a separate, opt-in per-rule/profile setting that inspects the tunnel as HTTP/2 instead of downgrading to HTTP/1.1 — see [`docs/operator/http2-inspection.md`](../operator/http2-inspection.md).
 
 ## 5. Rotation & expiry
 

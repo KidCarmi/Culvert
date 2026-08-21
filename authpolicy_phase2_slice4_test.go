@@ -200,7 +200,7 @@ func withCredentialEnv(t *testing.T, withLocalUser bool) {
 // Slice 3 (S2): under default Exempt a scoped CR rule ENFORCES; the end-to-end
 // diagnostics surface the migration WARN (not the removed dead-under-unauth one).
 func TestP2S4_Diagnostics_CRDefaultExemptMigration_Warn(t *testing.T) {
-	resetPolicyStoreForDiag(t)
+	resetDiagVerdictGlobals(t)
 	withCredentialEnv(t, true)               // credential-capable, so the no-provider FAIL does not fire
 	cfg.SetDefaultAuthOutcome(OutcomeExempt) // open mode (defaultAuthOutcome Exempt)
 	t.Cleanup(func() { cfg.SetDefaultAuthOutcome(OutcomeDefault) })
@@ -222,7 +222,7 @@ func TestP2S4_Diagnostics_CRDefaultExemptMigration_Warn(t *testing.T) {
 }
 
 func TestP2S4_Diagnostics_CRNoProvider_Fail(t *testing.T) {
-	resetPolicyStoreForDiag(t)
+	resetDiagVerdictGlobals(t)
 	withCredentialEnv(t, false) // no credential-capable validator → FAIL
 	policyStore.Add(validCRRule())
 
@@ -276,21 +276,21 @@ func TestP2S4_Routes_NoNewAuthPolicyRoutes(t *testing.T) {
 // ── Static UI: the panel exposes the outcome selector, gating, and CR copy ───
 
 func TestP2S4_UI_OutcomeSelectorAndCopy(t *testing.T) {
-	html, err := os.ReadFile("static/index.html")
+	html, err := os.ReadFile(staticIndexHTMLPath())
 	if err != nil {
 		t.Fatalf("read index.html: %v", err)
 	}
 	s := string(html)
 	// Assert on stable identifiers (not whole sentences) so copy edits don't break.
 	mustContain := []string{
-		`id="ap-outcome"`,              // outcome selector exists
-		`value="CredentialRequired"`,   // CR is selectable
-		`value="Exempt"`,               // Exempt is selectable
-		`apOutcomeChanged`,             // broad-exemption gating handler
-		`getElementById('ap-outcome')`, // apSave reads the selector (no hardcoded Exempt)
-		`🔐 CredentialRequired`,         // simulator + list render CR distinctly
-		`for reference only`,           // CR note clarifies the unauth Stage-2 block is not the post-auth decision
-		`Auth Policy`,                  // nav/panel renamed from "Auth Exempt"
+		`id="ap-outcome"`,                     // outcome selector exists
+		`value="CredentialRequired"`,          // CR is selectable
+		`value="Exempt"`,                      // Exempt is selectable
+		`apOutcomeChanged`,                    // broad-exemption gating handler
+		`getElementById('ap-outcome')`,        // apSave reads the selector (no hardcoded Exempt)
+		`#i-lock"/></svg> CredentialRequired`, // simulator + list render CR distinctly (lock icon)
+		`for reference only`,                  // CR note clarifies the unauth Stage-2 block is not the post-auth decision
+		`Auth Policy`,                         // nav/panel renamed from "Auth Exempt"
 	}
 	for _, sub := range mustContain {
 		if !strings.Contains(s, sub) {

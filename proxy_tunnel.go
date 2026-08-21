@@ -70,7 +70,7 @@ func dialWebSocketUpstream(w http.ResponseWriter, r *http.Request) (net.Conn, bo
 	if err != nil {
 		logger.Printf("WS dial error %q: %v", sanitizeLog(host), err)
 		if isDNSError(err) {
-			go fireAlert("dns_failure", AlertPayload{Host: host, Detail: err.Error(), Source: "proxy"})
+			fireDNSFailureAlert(host, err)
 		}
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return nil, false
@@ -319,11 +319,55 @@ func detectProtocolName(b byte) string {
 // can branch on identity without re-parsing headers.
 func handleTunnel(w http.ResponseWriter, r *http.Request, dec sslResolution, match *PolicyMatch, id ProxyIdentity) {
 	if dec.Action == SSLInspect && certMgr.Ready() {
+		// CHAOS-28 / CA-1: a Root CA that is installed but outside its own
+		// validity window can still SIGN — nothing in x509.CreateCertificate
+		// checks the parent's NotBefore/NotAfter — so the pre-guard behavior was
+		// to hand every client a well-formed leaf chained to an expired issuer
+		// and let it fail path validation. Fail CLOSED here instead, before the
+		// 200, so the client gets a proxy error it can act on rather than an
+		// opaque per-site certificate warning, and the appliance emits one
+		// countable event instead of N invisible ones.
+		//
+		// This deliberately does NOT fall through to the bypass branch below,
+		// and deliberately does NOT honour a decryption profile's fail-open
+		// setting. Both would convert an appliance-wide fault into fleet-wide
+		// UNINSPECTED egress: DLP, AV, YARA, CDR and DPI all off, silently, for
+		// every host at once. The profile fail-open contract is scoped to
+		// PER-ORIGIN incompatibility and is gated behind a confirm-count for
+		// exactly that reason; an expired CA is host-independent, so treating it
+		// as a decryption exclusion would poison the whole cache from one fault.
+		if err := certMgr.Usable(); err != nil {
+			failClosedUnusableCA(w, r, dec, match, id, err)
+			return
+		}
+		noteCAUsable()
 		handleTunnelInspect(w, r, dec, match, id)
 		return
 	}
 	// Bypass path — attach the ADR-0011 decryption outcome for the close record.
 	handleTunnelBypass(w, r, match, id, "", bypassOutcome(dec, r.Host))
+}
+
+// failClosedUnusableCA rejects a CONNECT that policy selected for inspection
+// while the Root CA cannot produce a leaf any client would accept (CHAOS-28).
+//
+// It runs BEFORE the 200, so it uses the same 502-before-200 semantics as the
+// unreachable-origin branch in handleTunnelInspect: the client sees a proxy
+// error rather than a hijacked connection that then fails its TLS handshake for
+// reasons it cannot attribute to the proxy. The response body carries no detail
+// — the cause names the appliance's own certificate state and belongs in the
+// log, the alert and the admin surfaces, not in a response any client on the
+// network can read.
+func failClosedUnusableCA(w http.ResponseWriter, r *http.Request, dec sslResolution, match *PolicyMatch, id ProxyIdentity, err error) {
+	hostOnly, _, splitErr := net.SplitHostPort(r.Host)
+	if splitErr != nil {
+		hostOnly = r.Host
+	}
+	// Counted, rate-limited log + alert. The per-connection rate is bounded by
+	// the sink's gate, not by this call site: an expired CA fails every request.
+	noteCAConnectBlocked(err.Error())
+	recordDecryptFailureEntry(caUnusableOutcome(hostOnly, dec, match), id, hostOnly, match, decRedactHosts())
+	http.Error(w, "Bad Gateway", http.StatusBadGateway)
 }
 
 // bypassOutcome builds the ADR-0011 DecryptionOutcome for a CONNECT that was BYPASSED
@@ -404,7 +448,7 @@ func handleTunnelBypass(w http.ResponseWriter, r *http.Request, match *PolicyMat
 	if err != nil {
 		logger.Printf("tunnel dial error %q: %v", sanitizeLog(r.Host), err)
 		if isDNSError(err) {
-			go fireAlert("dns_failure", AlertPayload{Host: r.Host, Detail: err.Error(), Source: "proxy"})
+			fireDNSFailureAlert(r.Host, err)
 		}
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
@@ -463,7 +507,7 @@ func handleTunnelBypass(w http.ResponseWriter, r *http.Request, match *PolicyMat
 
 	// Per-connection accounting entry (bytes + lifetime). bypassReason (when set)
 	// tags the feed entry so a rescue is queryable, not just an unattributed bypass.
-	recordTunnelCloseGatedDec(match, id, "CONNECT", r.Host, toDest, toClient, start, "bypass", bypassReason, dec, false)
+	recordTunnelCloseGatedDec(match, id, "CONNECT", r.Host, toDest, toClient, start, "bypass", bypassReason, dec, decRedactHosts())
 }
 
 // upstreamVerifyRoots returns the process-wide root pool used to verify
@@ -609,7 +653,22 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, dec sslResoluti
 	if err != nil {
 		logger.Printf("inspect dial error %q: %v", sanitizeLog(targetHost), err)
 		if isDNSError(err) {
-			go fireAlert("dns_failure", AlertPayload{Host: targetHost, Detail: err.Error(), Source: "proxy"})
+			fireDNSFailureAlert(targetHost, err)
+		}
+		// ADR-0011: an inspect rule whose ORIGIN is unreachable is a FAILED
+		// decryption attempt (fail_stage=tcp_connect) — count it toward coverage +
+		// the failure taxonomy and write the drill-down row, instead of vanishing.
+		// This site is BEFORE the native/strip split, so it covers both paths. NO
+		// maybeFailOpen* — a dial failure is a transport error, not a learn signal.
+		//
+		// Record ONLY a genuine unreachable-origin failure. A client abort mid-dial
+		// (the request context ended → r.Context().Err() != nil) and an ssrfControl
+		// security rejection (DNS-rebinding/private-IP block, errSSRFBlocked) are NOT
+		// decryption attempts against the upstream, so they must not pollute the
+		// Decryption Health coverage/failure metrics (Codex #846). The dialer's own
+		// 10s Timeout does not cancel r.Context(), so a real dial timeout still records.
+		if shouldRecordConnectFailure(r.Context().Err(), err) {
+			recordDecryptFailureEntry(upstreamConnectFailureOutcome(err, hostOnly, dec, match), id, hostOnly, match, decRedactHosts())
 		}
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
@@ -624,7 +683,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, dec sslResoluti
 	// this flow: reordering here would change the strip path's 502-before-200
 	// semantics. It takes ownership of the freshly-dialled rawUpstream.
 	if !resolveStripALPN(match) {
-		handleInspectNativeALPN(w, r, rawUpstream, targetHost, hostOnly, dec.SkipVerify, match, id)
+		handleInspectNativeALPN(w, r, rawUpstream, targetHost, hostOnly, dec, match, id)
 		return
 	}
 
@@ -673,7 +732,15 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, dec sslResoluti
 			Outcome:        decryptobs.OutcomeRescued,
 			DecisionSource: decryptobs.DecisionAutoexcludeRescue,
 			Host:           hostOnly,
+			// The rescue is gated on a fail-open profile, so dec.ScopeID is the
+			// non-empty profile identity recordAutoExclude/recordAutoExcludeRescue
+			// keyed the cache/audit/alert entry on. Project it like every sibling
+			// builder (bypass/failure/withLearn) so the rescued row is attributable
+			// to its profile scope — otherwise a per-scope blast-radius/SIEM query
+			// misses every rescued session (review finding: scope-attribution gap).
+			ProfileID:      dec.ScopeID,
 			ExclReason:     autoExReasonClientCert,
+			ExclScope:      dec.ScopeID,
 			FailStage:      decryptobs.FailStageUpstreamHandshake,
 			FailCategory:   decryptobs.FailCategoryClientCertRequired,
 			Rescued:        true,
@@ -691,7 +758,8 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, dec sslResoluti
 		// next session self-heals) and returns false; cert-verify and generic/origin-
 		// emitted alerts never learn. No rescue here (client-cert is handled above,
 		// structurally, before this branch).
-		maybeFailOpenOrigin(hostOnly, match, id, herr)
+		learned, _ := maybeFailOpenOrigin(hostOnly, match, id, herr)
+		recordDecryptFailureEntry(withLearn(originInspectFailureOutcome(herr, hostOnly, dec, match), learned, dec.ScopeID), id, hostOnly, match, decRedactHosts()) // ADR-0011 failure taxonomy + feed row (learner fields when this session fed the cache)
 		logger.Printf("upstream TLS handshake error %q: %v%s", sanitizeLog(targetHost), herr, mintlsHint(match))
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
@@ -740,7 +808,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, dec sslResoluti
 	if firstByte[0] != 0x16 { // not a TLS handshake record
 		proto := detectProtocolName(firstByte[0])
 		logger.Printf("SSL_INSPECT non-TLS protocol detected for %q (first byte=0x%02x, proto=%s) — falling back to raw relay",
-			sanitizeLog(hostOnly), firstByte[0], proto)
+			sanitizeLog(hostOnly), firstByte[0], sanitizeLog(proto))
 		// Raw relay: splice the peeked reader (client) ↔ upstream (already
 		// TLS-connected). This is a non-TLS tunnel that bypasses HTTP-level
 		// inspection, so — like the CONNECT-bypass / WebSocket / SOCKS5 relays —
@@ -775,7 +843,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, dec sslResoluti
 		rawClient.Close()   //nolint:errcheck // force the peer relay to unblock
 		upstreamTLS.Close() //nolint:errcheck // force the peer relay to unblock
 		<-done
-		recordTunnelCloseGatedDec(match, id, "CONNECT", hostOnly, toUpstream, toClient, start, "inspect", "", nonTLSFallbackOutcome(hostOnly), false)
+		recordTunnelCloseGatedDec(match, id, "CONNECT", hostOnly, toUpstream, toClient, start, "inspect", "", nonTLSFallbackOutcome(hostOnly), decRedactHosts())
 		return
 	}
 
@@ -785,9 +853,10 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, dec sslResoluti
 	// stable across connections and clients can resume.
 	clientTLS := tls.Server(readerConn{Conn: rawClient, r: peekBuf}, mitmClientTLSConfig)
 	if err := clientTLS.HandshakeContext(r.Context()); err != nil {
-		clientTLS.Close()                             //nolint:errcheck // best-effort cleanup on handshake failure
-		upstreamTLS.Close()                           //nolint:errcheck // best-effort cleanup on handshake failure
-		maybeFailOpenClient(hostOnly, match, id, err) // learn a pinning rejection (learn-only; next session self-heals)
+		clientTLS.Close()                                                                                                                                         //nolint:errcheck // best-effort cleanup on handshake failure
+		upstreamTLS.Close()                                                                                                                                       //nolint:errcheck // best-effort cleanup on handshake failure
+		learned := maybeFailOpenClient(hostOnly, match, id, err)                                                                                                  // learn a pinning rejection (learn-only; next session self-heals)
+		recordDecryptFailureEntry(withLearn(clientInspectFailureOutcome(err, hostOnly, dec, match), learned, dec.ScopeID), id, hostOnly, match, decRedactHosts()) // ADR-0011 failure taxonomy + feed row (learner fields when this session fed the cache)
 		logger.Printf("SSL_INSPECT client TLS handshake error for %q: %v", sanitizeLog(hostOnly), err)
 		return
 	}
@@ -796,15 +865,19 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, dec sslResoluti
 	recordActiveConn(1)
 	defer recordActiveConn(-1)
 
-	// ADR-0011: build the inspected decryption-observability block ONCE from the
-	// completed origin TLS state and reuse it for every inner-request log entry. The
-	// entries are opt-in per rule (LogFullURI), so this projection is cheap and off the
-	// latency-critical handshake path. redact=false mirrors the bypass close path — the
-	// §4 host/SNI redaction config surface is a later slice.
-	// Capture cert_verify from the config the handshake ACTUALLY used
-	// (upstreamTLSCfg.InsecureSkipVerify), not a re-resolution against the live
+	// ADR-0011: build the inspected decryption-observability outcome ONCE from the
+	// completed origin TLS state, count the session (this is the inspect-success
+	// terminal — it logs per-inner-request and never reaches the close seam that counts
+	// the other paths), then project the block for reuse across every inner-request log
+	// entry. The entries are opt-in per rule (LogFullURI), so the projection is cheap and
+	// off the latency-critical handshake path. redact=false mirrors the bypass close path
+	// — the §4 host/SNI redaction config surface is a later slice.
+	// cert_verify is CAPTURED from the config the handshake ACTUALLY used
+	// (upstreamTLSCfg.InsecureSkipVerify), not re-resolved against the live
 	// profile store — the store may have mutated during the handshake window (CWE-367).
-	decBlock := inspectedOutcome(dec, hostOnly, upstreamTLS.ConnectionState(), match, upstreamTLSCfg.InsecureSkipVerify).toBlock(false)
+	inspected := inspectedOutcome(dec, hostOnly, upstreamTLS.ConnectionState(), match, upstreamTLSCfg.InsecureSkipVerify)
+	recordDecryptSession(inspected)
+	decBlock := inspected.toBlock(decRedactHosts())
 
 	// 5. Proxy the decrypted HTTP/1.x stream request-by-request (DPI/scan/CDR/
 	// file-block via the shared inspection pipeline). Extracted so the native-ALPN
@@ -870,6 +943,7 @@ relayLoop:
 			id:        id,
 			host:      hostOnly,
 			clientIP:  clientIP,
+			dec:       decBlock, // ADR-0011: rides block-log rows too
 			responder: h1BlockResponder{w: clientTLS},
 			// H1 upstream leg: serialize the request and parse the response over
 			// the persistent TLS conn pair. req.Body is closed after the write
@@ -994,6 +1068,10 @@ type inspectExchange struct {
 	responder blockResponder
 	roundTrip func(*http.Request) (*http.Response, error)
 	deliver   func(*http.Response) error
+	// dec is the ADR-0011 inspected decryption block for this tunnel (built once per
+	// session). It rides the BLOCK-log rows too — a blocked inspected session is the
+	// highest-value dec.* drill-down target — not just the delivered LogFullURI entry.
+	dec *DecryptionBlock
 }
 
 // runInspectExchange applies the protocol-neutral inspection pipeline to one
@@ -1017,7 +1095,7 @@ func runInspectExchange(ex *inspectExchange) exchangeOutcome {
 
 	// File blocking (inner request) runs before any response byte reaches the
 	// client, so a clean 403 is safe to emit.
-	if inspectFileBlocked(ex.responder, ex.req, resp, ex.match, ex.host, ex.clientIP) {
+	if inspectFileBlocked(ex.responder, ex.req, resp, ex.match, ex.host, ex.clientIP, ex.dec) {
 		return exchangeOutcome{kind: exBlocked}
 	}
 
@@ -1030,7 +1108,7 @@ func runInspectExchange(ex *inspectExchange) exchangeOutcome {
 	// Unified scan buffer: magic/polyglot + CDR + DPI + ClamAV + YARA. Buffers up
 	// to maxScanBufferBytes() before forwarding so any match blocks the response
 	// entirely (true prevention).
-	switch scanInspectBody(ex.outer, ex.req, resp, ex.responder, ex.match, ex.id, ex.host, ex.clientIP) {
+	switch scanInspectBody(ex.outer, ex.req, resp, ex.responder, ex.match, ex.id, ex.host, ex.clientIP, ex.dec) {
 	case scanBlocked:
 		return exchangeOutcome{kind: exBlocked}
 	case scanReadError:
@@ -1059,12 +1137,12 @@ func runInspectExchange(ex *inspectExchange) exchangeOutcome {
 // Content-Type MIME. On a match it records the block, closes resp.Body, writes
 // the block page to the client, and returns true — the caller must stop serving
 // the tunnel. Returns false (resp.Body left open) when nothing is blocked.
-func inspectFileBlocked(br blockResponder, req *http.Request, resp *http.Response, match *PolicyMatch, hostOnly, clientIP string) bool {
+func inspectFileBlocked(br blockResponder, req *http.Request, resp *http.Response, match *PolicyMatch, hostOnly, clientIP string, dec *DecryptionBlock) bool {
 	// 1. Global file extension blocklist — inner request URL.
 	if ext := fileBlocker.CheckPath(req.URL.Path); ext != "" {
 		atomic.AddInt64(&statFileBlocked, 1)
 		atomic.AddInt64(&statBlocked, 1)
-		recordInspectBlock(clientIP, "FILE_BLOCKED", ext, "", hostOnly, req.URL.Path, match)
+		recordInspectBlock(clientIP, "FILE_BLOCKED", ext, "", hostOnly, req.URL.Path, match, dec)
 		resp.Body.Close()
 		emitFileBlock(br, hostOnly, req.URL.Path, ext, "global ext")
 		return true
@@ -1074,13 +1152,13 @@ func inspectFileBlocked(br blockResponder, req *http.Request, resp *http.Respons
 	if match != nil && match.Rule != nil && match.Rule.FileProfileBlocked(req.URL.Path) {
 		atomic.AddInt64(&statFileBlocked, 1)
 		atomic.AddInt64(&statBlocked, 1)
-		recordInspectBlock(clientIP, "FILE_BLOCKED", string(match.Rule.FileProfile), match.Rule.Name, hostOnly, req.URL.Path, match)
+		recordInspectBlock(clientIP, "FILE_BLOCKED", string(match.Rule.FileProfile), match.Rule.Name, hostOnly, req.URL.Path, match, dec)
 		resp.Body.Close()
 		emitFileBlock(br, hostOnly, req.URL.Path, string(match.Rule.FileProfile), "policy profile")
 		return true
 	}
 	// 3. Content-Disposition header — generic URL but declared filename.
-	if inspectCDBlocked(br, req, resp, match, hostOnly, clientIP) {
+	if inspectCDBlocked(br, req, resp, match, hostOnly, clientIP, dec) {
 		return true
 	}
 	// 4. Content-Type MIME — renamed executables where the server still reports
@@ -1088,7 +1166,7 @@ func inspectFileBlocked(br blockResponder, req *http.Request, resp *http.Respons
 	if ext := fileBlocker.CheckContentType(resp.Header.Get("Content-Type")); ext != "" {
 		atomic.AddInt64(&statFileBlocked, 1)
 		atomic.AddInt64(&statBlocked, 1)
-		recordInspectBlock(clientIP, "FILE_BLOCKED", ext, "", hostOnly, req.URL.Path, match)
+		recordInspectBlock(clientIP, "FILE_BLOCKED", ext, "", hostOnly, req.URL.Path, match, dec)
 		resp.Body.Close()
 		emitFileBlock(br, hostOnly, req.URL.Path, ext, "content-type")
 		return true
@@ -1111,7 +1189,7 @@ func emitFileBlock(br blockResponder, hostOnly, urlPath, ext, source string) {
 // on the global blocklist, or whose filename matches the matched rule's file
 // profile (catches SourceForge-style /files/latest/download URLs). Returns true
 // if it blocked (resp.Body closed, block page written).
-func inspectCDBlocked(br blockResponder, req *http.Request, resp *http.Response, match *PolicyMatch, hostOnly, clientIP string) bool {
+func inspectCDBlocked(br blockResponder, req *http.Request, resp *http.Response, match *PolicyMatch, hostOnly, clientIP string, dec *DecryptionBlock) bool {
 	cd := resp.Header.Get("Content-Disposition")
 	if cd == "" {
 		return false
@@ -1119,7 +1197,7 @@ func inspectCDBlocked(br blockResponder, req *http.Request, resp *http.Response,
 	if ext := fileBlocker.CheckContentDisposition(cd); ext != "" {
 		atomic.AddInt64(&statFileBlocked, 1)
 		atomic.AddInt64(&statBlocked, 1)
-		recordInspectBlock(clientIP, "FILE_BLOCKED", ext, "", hostOnly, req.URL.Path, match)
+		recordInspectBlock(clientIP, "FILE_BLOCKED", ext, "", hostOnly, req.URL.Path, match, dec)
 		resp.Body.Close()
 		emitFileBlock(br, hostOnly, req.URL.Path, ext, "content-disposition")
 		return true
@@ -1133,7 +1211,7 @@ func inspectCDBlocked(br blockResponder, req *http.Request, resp *http.Response,
 	}
 	atomic.AddInt64(&statFileBlocked, 1)
 	atomic.AddInt64(&statBlocked, 1)
-	recordInspectBlock(clientIP, "FILE_BLOCKED", string(match.Rule.FileProfile), match.Rule.Name, hostOnly, req.URL.Path, match)
+	recordInspectBlock(clientIP, "FILE_BLOCKED", string(match.Rule.FileProfile), match.Rule.Name, hostOnly, req.URL.Path, match, dec)
 	resp.Body.Close()
 	emitFileBlock(br, hostOnly, fn, string(match.Rule.FileProfile), "policy profile (content-disposition)")
 	return true
@@ -1145,11 +1223,11 @@ func inspectCDBlocked(br blockResponder, req *http.Request, resp *http.Response,
 // the block page. status is the request-log status ("FILE_BLOCKED"/
 // "POLYGLOT_BLOCKED"), detail the matched type/reason, source the BlockConn
 // label ("magic bytes"/"polyglot").
-func inspectMagicBlock(br blockResponder, origBody io.ReadCloser, match *PolicyMatch, status, detail, source, hostOnly, clientIP, path string) {
+func inspectMagicBlock(br blockResponder, origBody io.ReadCloser, match *PolicyMatch, status, detail, source, hostOnly, clientIP, path string, dec *DecryptionBlock) {
 	origBody.Close()
 	atomic.AddInt64(&statFileBlocked, 1)
 	atomic.AddInt64(&statBlocked, 1)
-	recordInspectBlock(clientIP, status, detail, "", hostOnly, path, match)
+	recordInspectBlock(clientIP, status, detail, "", hostOnly, path, match, dec)
 	emitFileBlock(br, hostOnly, path, detail, source)
 }
 
@@ -1169,7 +1247,7 @@ func inspectMagicBlock(br blockResponder, origBody io.ReadCloser, match *PolicyM
 //     let this surface as a clean, empty success. Conflating it with scanBlocked
 //     produced a silent empty 200 on the H2 path (an on-path origin reset became a
 //     cacheable success); keeping it distinct is the fail-closed contract.
-func scanInspectBody(r, req *http.Request, resp *http.Response, br blockResponder, match *PolicyMatch, id ProxyIdentity, hostOnly, clientIP string) scanBodyOutcome {
+func scanInspectBody(r, req *http.Request, resp *http.Response, br blockResponder, match *PolicyMatch, id ProxyIdentity, hostOnly, clientIP string, dec *DecryptionBlock) scanBodyOutcome {
 	ct := resp.Header.Get("Content-Type")
 	// Tier 3.3/3.4: admin-managed host allowlists short-circuit buffering.
 	if globalScanExclusions.IsHostExcluded(hostOnly) || !bodyNeedsBuffering(ct) {
@@ -1177,7 +1255,10 @@ func scanInspectBody(r, req *http.Request, resp *http.Response, br blockResponde
 	}
 
 	origBody := resp.Body
-	body, readErr := io.ReadAll(io.LimitReader(origBody, maxScanBufferBytes()))
+	// resp.ContentLength is the origin's declaration (-1 when chunked); it sizes
+	// the buffer and nothing else — the read still runs to EOF or to the scan
+	// limit, so an under-declared body does not get its tail forwarded unscanned.
+	body, readErr := readScanBuffer(origBody, maxScanBufferBytes(), resp.ContentLength)
 	if readErr != nil {
 		origBody.Close()
 		logger.Printf("SSL_INSPECT: body read error for %q: %v", sanitizeLog(hostOnly), readErr)
@@ -1191,13 +1272,13 @@ func scanInspectBody(r, req *http.Request, resp *http.Response, br blockResponde
 	// File blocking: magic byte detection — block archives even if the
 	// URL/Content-Disposition doesn't reveal the format.
 	if archType := IsBlockedArchive(scanBody); archType != "" {
-		inspectMagicBlock(br, origBody, match, "FILE_BLOCKED", "magic:"+archType, "magic bytes", hostOnly, clientIP, req.URL.Path)
+		inspectMagicBlock(br, origBody, match, "FILE_BLOCKED", "magic:"+archType, "magic bytes", hostOnly, clientIP, req.URL.Path, dec)
 		return scanBlocked
 	}
 	// File blocking: polyglot detection — block files whose Content-Type
 	// doesn't match their actual magic bytes.
 	if reason := CheckMagicVsContentType(scanBody, ct); reason != "" {
-		inspectMagicBlock(br, origBody, match, "POLYGLOT_BLOCKED", reason, "polyglot", hostOnly, clientIP, req.URL.Path)
+		inspectMagicBlock(br, origBody, match, "POLYGLOT_BLOCKED", reason, "polyglot", hostOnly, clientIP, req.URL.Path, dec)
 		return scanBlocked
 	}
 
@@ -1223,7 +1304,7 @@ func scanInspectBody(r, req *http.Request, resp *http.Response, br blockResponde
 	if !remoteScan && !dpiScanner.IsBypassHost(hostOnly) && dpiScanner.Enabled() && isTextContentType(ct) {
 		if pattern, matched := safeDPIScan(scanBody); matched {
 			origBody.Close()
-			recordInspectBlock(clientIP, "DPI_BLOCKED", "", pattern, hostOnly, req.URL.Path, match)
+			recordInspectBlock(clientIP, "DPI_BLOCKED", "", pattern, hostOnly, req.URL.Path, match, dec)
 			dpiBlock(br, hostOnly, pattern)
 			return scanBlocked
 		}
@@ -1244,7 +1325,7 @@ func scanInspectBody(r, req *http.Request, resp *http.Response, br blockResponde
 		}
 		origBody.Close()
 		atomic.AddInt64(&statBlocked, 1)
-		recordInspectBlock(clientIP, "SCAN_BLOCKED", scanResult.Source, scanResult.Reason, hostOnly, req.URL.Path, match)
+		recordInspectBlock(clientIP, "SCAN_BLOCKED", scanResult.Source, scanResult.Reason, hostOnly, req.URL.Path, match, dec)
 		scanBlockConn(br, hostOnly, scanResult.Reason, scanResult.Source)
 		return scanBlocked
 	}

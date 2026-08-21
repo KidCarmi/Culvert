@@ -66,7 +66,7 @@ type uiRouteMetadata struct {
 	Methods []uiRouteMethod // per-method contract (length ≥ 1)
 }
 
-// uiRoutes is the alphabetised metadata table for all 137 admin-UI routes.
+// uiRoutes is the alphabetised metadata table for all admin-UI routes (count locked by TestC1_RouteMetadata_Locked141).
 //
 // MIGRATION BUCKETS (per the C1.5 schema-evolution decision):
 //
@@ -124,6 +124,15 @@ var uiRoutes = []uiRouteMetadata{
 		}},
 	{Path: "/api/idp/discover", Handler: "apiIdPDiscover", Domain: "auth", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true}}},
+	{Path: "/api/idp/test", Handler: "apiIdPTest", Domain: "auth", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
+			Note: "candidate-based LDAP directory test; actuates an admin-supplied endpoint (bounded, sanitized, audited)"}}},
+	{Path: "/api/idp/legacy-ldap", Handler: "apiIdPLegacyLDAP", Domain: "auth", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer,
+			Note: "non-secret summary of the legacy YAML ldap block + authority state"}}},
+	{Path: "/api/idp/legacy-ldap/import", Handler: "apiIdPLegacyLDAPImport", Domain: "auth", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
+			Note: "explicit one-time import of the legacy YAML ldap block as a disabled IdP profile"}}},
 	{Path: "/api/idp/", Handler: "apiIdPRouter", Domain: "auth", Public: false,
 		Methods: []uiRouteMethod{{Method: MethodAny, MinRole: RoleViewer, Mutating: true, AuditExpected: true,
 			Note: "C1.5 audit: dispatches to apiIdPItem (GET=viewer / PUT=admin / DELETE=admin) and apiIdPGroups; lowest accepted role is viewer (GET)"}}},
@@ -275,6 +284,15 @@ var uiRoutes = []uiRouteMetadata{
 			{Method: "PUT", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
 			{Method: "DELETE", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
 		}},
+	{Path: "/api/decryption/health", Handler: "apiDecryptionHealth", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "ADR-0011: read-only decryption coverage + failure-taxonomy aggregate (server-computed from culvert_decrypt_* counters); side-effect-free"},
+		}},
+	{Path: "/api/decryption/redaction", Handler: "apiDecryptionRedaction", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "ADR-0011 §4: read the traffic-log destination-privacy posture (host/URI/dec.*/top_hosts)"},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "ADR-0011 §4: toggle destination-privacy posture or rotate its pseudonym key; node-local (admin_settings-durable, off export/import/rollback/CP→DP)"},
+		}},
 	{Path: "/api/decryption-exclusions", Handler: "apiDecryptionExclusions", Domain: "policy", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer, Note: "read-only list of the volatile auto-exclusion cache + posture"},
@@ -299,6 +317,26 @@ var uiRoutes = []uiRouteMetadata{
 		}},
 	{Path: "/api/urlcat/lookup", Handler: "apiURLCatLookup", Domain: "policy", Public: false,
 		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer, Note: "no direct requireRole; protected by uiAuthMiddleware"}}},
+	{Path: "/api/urlcat/feed-status", Handler: "apiURLCatFeedStatus", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer, Note: "no direct requireRole; protected by uiAuthMiddleware; read-only feed freshness/failure counts"}}},
+	{Path: "/api/saas-feed/settings", Handler: "apiSaaSFeedSettings", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "F3a-2: read the SaaS signed-feed configuration (configured vs runtime-activation state)"},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "F3a-2: set url/protocol/managed/enabled/refresh; validate→persist→publish; denied on a managed data-plane node (409)"},
+		}},
+	{Path: "/api/saas-feed/overrides", Handler: "apiSaaSFeedOverrides", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "F3a-2: read the admin category-override set"},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "F3a-2: full-set override replacement (empty ⇒ clear all); denied on a managed data-plane node (409)"},
+		}},
+	{Path: "/api/saas-feed/status", Handler: "apiSaaSFeedStatus", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "F3b-4: read the signed-feed runtime status (state/provenance/freshness/counts)"},
+		}},
+	{Path: "/api/saas-feed/refresh", Handler: "apiSaaSFeedRefresh", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "F3b-4: manual signed-feed refresh (singleflight; deterministic accepted/in_progress/no-op/error)"},
+		}},
 	{Path: "/api/blockpage", Handler: "apiBlockPage", Domain: "policy", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer},
@@ -308,10 +346,76 @@ var uiRoutes = []uiRouteMetadata{
 	// ── PAC file ──────────────────────────────────────────────────────────
 	{Path: "/proxy.pac", Handler: "servePACFile", Domain: "pac", Public: true,
 		Methods: []uiRouteMethod{{Method: "GET", MinRole: RolePublic, Note: "Windows PAC clients cannot send credentials"}}},
+	{Path: "/pac/", Handler: "servePACProfileFile", Domain: "pac", Public: true,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RolePublic, Note: "per-profile PAC endpoints; PAC clients cannot send credentials"}}},
 	{Path: "/api/pac-config", Handler: "apiPACConfig", Domain: "pac", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer, Note: "no direct requireRole; protected by uiAuthMiddleware"},
-			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "no direct requireRole; gating delegated"},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/pac/profiles", Handler: "apiPACProfiles", Domain: "pac", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "no direct requireRole; protected by uiAuthMiddleware"},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/pac/profiles/", Handler: "apiPACProfileItem", Domain: "pac", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "no direct requireRole; protected by uiAuthMiddleware"},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "/{id}/lifecycle sub-resource: save-draft/publish/rollback (initiative PR 3)"},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+			{Method: "DELETE", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/pac/pools", Handler: "apiPACPools", Domain: "pac", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "no direct requireRole; protected by uiAuthMiddleware"},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/pac/pools/", Handler: "apiPACPoolItem", Domain: "pac", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "no direct requireRole; protected by uiAuthMiddleware"},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+			{Method: "DELETE", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/pac/simulate", Handler: "apiPACSimulate", Domain: "pac", Public: false,
+		Methods: []uiRouteMethod{
+			// Semantically read-only (no state change, no live DNS); POST only
+			// to carry a JSON body. Mutating flag follows the POST convention
+			// (informational — CSRF/body-limit key on the method) and
+			// AuditExpected stays false since nothing is mutated.
+			{Method: "POST", MinRole: RoleViewer, Mutating: true, Note: "read-only PAC steering simulation; POST carries the query body"},
+		}},
+	{Path: "/api/pac/analyze", Handler: "apiPACAnalyze", Domain: "pac", Public: false,
+		Methods: []uiRouteMethod{
+			// Read-only diff/impact for a candidate draft. POST only to carry a
+			// JSON body; Mutating follows the POST convention (informational).
+			// AuditExpected stays false so C2c's audit-completion signal on the
+			// mutating lifecycle route remains a meaningful drift indicator.
+			{Method: "POST", MinRole: RoleViewer, Mutating: true, Note: "read-only PAC steering diff/impact analysis; POST carries the query body"},
+		}},
+	{Path: "/api/pac/posture/inventory", Handler: "apiPACPostureInventory", Domain: "pac", Public: false,
+		Methods: []uiRouteMethod{
+			// Read-only config-derived DIRECT (full-bypass) inventory (PAC
+			// Exception Intelligence P0). Observable evidence class only.
+			{Method: "GET", MinRole: RoleViewer, Note: "no direct requireRole; protected by uiAuthMiddleware"},
+		}},
+	{Path: "/api/pac/posture/diff", Handler: "apiPACPostureDiff", Domain: "pac", Public: false,
+		Methods: []uiRouteMethod{
+			// Read-only DIRECT-surface change-diff for a candidate config (PAC
+			// Exception Intelligence P3). POST only to carry the candidate JSON;
+			// Mutating follows the POST convention (informational, like
+			// /api/pac/analyze). AuditExpected stays false — no mutation. Observable.
+			{Method: "POST", MinRole: RoleViewer, Mutating: true, Note: "read-only candidate DIRECT-diff; POST carries the candidate config"},
+		}},
+	{Path: "/api/pac/posture/exceptions", Handler: "apiPACExceptions", Domain: "pac", Public: false,
+		Methods: []uiRouteMethod{
+			// DIRECT-exception governance list (PAC Exception Intelligence P2).
+			{Method: "GET", MinRole: RoleViewer, Note: "no direct requireRole; protected by uiAuthMiddleware"},
+		}},
+	{Path: "/api/pac/posture/exceptions/", Handler: "apiPACExceptionItem", Domain: "pac", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "no direct requireRole; protected by uiAuthMiddleware"},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+			{Method: "DELETE", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
 		}},
 
 	// ── Security: TLS inspect (CA, certs, SSL bypass) ─────────────────────
@@ -546,6 +650,8 @@ var uiRoutes = []uiRouteMetadata{
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true}}},
 	{Path: "/api/cluster/metrics", Handler: "apiClusterMetrics", Domain: "cluster", Public: false,
 		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
+	{Path: "/api/cluster/convergence", Handler: "apiClusterConvergence", Domain: "cluster", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
 	{Path: "/api/cluster/ca", Handler: "apiClusterCA", Domain: "cluster", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer},
@@ -574,8 +680,8 @@ var uiRoutes = []uiRouteMetadata{
 			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
 			{Method: "DELETE", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
 		}},
-	{Path: "/api/cluster/bootstrap/", Handler: "apiBootstrapRouter", Domain: "cluster", Public: false,
-		Methods: []uiRouteMethod{{Method: MethodAny, MinRole: RoleViewer, Note: "token-authed bootstrap dispatch; gating delegated to handler"}}},
+	{Path: "/api/cluster/bootstrap/", Handler: "apiBootstrapRouter", Domain: "cluster", Public: true,
+		Methods: []uiRouteMethod{{Method: MethodAny, MinRole: RolePublic, Note: "on uiAuthMiddleware's public allowlist; its own single-use, time-limited enrollment token is the auth (bootstrap.go)"}}},
 
 	// ── CDR (Sluice) integration ──────────────────────────────────────────
 	{Path: "/api/cdr/config", Handler: "apiCDRConfig", Domain: "cdr", Public: false,
@@ -662,7 +768,26 @@ var uiRoutes = []uiRouteMetadata{
 			Note: "download a READY bundle wrapped in the PSCA passphrase envelope (AES-256-GCM); operator+ (approval-gated exfil, like plain download); POST carries the passphrase in the body (never logged); audited as support.bundle.download_encrypted"}}},
 	{Path: "/api/support/bundles/{id}/download-sealed", Handler: "apiSupportBundleExportSealed", Domain: "support", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true,
-			Note: "download a READY bundle sealed to a recipient X25519 public key (NaCl anonymous box, E2E — appliance holds no decrypt key); operator+ (approval-gated exfil); public key in body (not secret); audited as support.bundle.download_sealed"}}},
+			Note: "download a READY bundle sealed to a recipient X25519 public key (NaCl anonymous box, E2E — appliance holds no decrypt key); operator+ (approval-gated exfil); public key or registered recipient name in body (not secret); audited as support.bundle.download_sealed"}}},
+	{Path: "/api/support/bundles/{id}/exports", Handler: "apiSupportBundleExports", Domain: "support", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer,
+			Note: "recent export/exfiltration history for one bundle (actor/time/action) scanned from the audit ring; read-only, no bundle content; viewer+"}}},
+	{Path: "/api/support/bundles/{id}/manifest", Handler: "apiSupportBundleManifest", Domain: "support", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer,
+			Note: "bundle manifest metadata (section inventory/sizes/classes/status + integrity hashes) without downloading the tarball; secret-free by construction; read-only; viewer+"}}},
+	{Path: "/api/support/recipients", Handler: "apiSupportRecipients", Domain: "support", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "list registered sealing recipients (name + public key + fingerprint; nothing secret)"},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
+				Note: "register a named recipient (validates the X25519 key against the low-order guard, stores its SHA-256 fingerprint); admin; audited as support.recipient.add"},
+		}},
+	{Path: "/api/support/recipients/{name}", Handler: "apiSupportRecipientItem", Domain: "support", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
+				Note: "rotate a registered recipient's key in place (re-validated + re-fingerprinted); admin; audited as support.recipient.rotate"},
+			{Method: "DELETE", MinRole: RoleOperator, Mutating: true, AuditExpected: true,
+				Note: "remove a registered recipient; operator+; audited as support.recipient.delete"},
+		}},
 	{Path: "/api/support/debug-level", Handler: "apiSupportDebugLevel", Domain: "support", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer, Note: "effective capture level + elevation state + remaining TTL"},
@@ -670,6 +795,36 @@ var uiRoutes = []uiRouteMetadata{
 				Note: "elevate the default bundle capture depth for a bounded window (mandatory positive ttl_seconds); admin; audited as support.debug_level.set"},
 			{Method: "DELETE", MinRole: RoleOperator, Mutating: true, AuditExpected: true,
 				Note: "revert the capture level to baseline immediately; operator+; audited as support.debug_level.clear"}}},
+	{Path: "/api/support/retention", Handler: "apiSupportRetention", Domain: "support", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "current retention caps + defaults + bounds + pending-eviction projection"},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
+				Note: "set the configurable count/age retention caps (partial {keep, max_age_days}; a change evicting evidence-exempt bundles needs typed confirm_evict); admin; audited as support.retention.set"}}},
+	{Path: "/api/support/upload/config", Handler: "apiSupportUploadConfig", Domain: "support", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "M6: read the node-local secure-upload posture (default not_enabled; no secret exposed)"},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
+				Note: "M6: set the upload enable flag + TAC origin (https, non-private literal IP refused); node-local (off export/import/rollback/CP→DP); no egress; audited as support.upload.config"}}},
+	{Path: "/api/support/tac-trust", Handler: "apiSupportTACTrust", Domain: "support", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer,
+			Note: "M6: resolved TAC recipient trust set for encrypt-to-TAC (key id + alg + fingerprint + source + active flag; public material only, nothing secret); read-only — config is baked + env-only (CULVERT_TAC_TRUST_KEYS), GUI-parity deferral like the release-catalog trust roots; viewer+"}}},
+	{Path: "/api/support/uploads", Handler: "apiSupportUploads", Domain: "support", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer,
+			Note: "M6: list the outbound upload queue (per-bundle state/attempts/receipt; no secrets); read-only; viewer+"}}},
+	{Path: "/api/support/bundles/{id}/upload", Handler: "apiSupportBundleUpload", Domain: "support", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "M6: one bundle's upload status + signed receipt (from the durable queue entry); viewer+"},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
+				Note: "M6: explicit per-bundle upload CONSENT — seal the READY bundle to TAC and enqueue it (fails closed unless upload enabled + TAC trust configured + bundle READY + confirm + case_id); the background worker delivers it; admin; audited as support.upload"}}},
+	{Path: "/api/support/telemetry/preview", Handler: "apiSupportTelemetryPreview", Domain: "support", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleAdmin,
+			Note: "M7 Slice 1: read-only preview of the exact current support-telemetry sample (schema_version + registry_hash + metric names/values) that would be sealed and sent if telemetry were ever enabled; no consent switch, no sender, no egress exist yet; creates no persistent state"}}},
+	{Path: "/api/support/telemetry/config", Handler: "apiSupportTelemetryConfig", Domain: "support", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleAdmin,
+				Note: "M7 Slice 2: read the node-local telemetry consent/config posture (enabled/effective_enabled/canonical origin/credential_set/status; credential value never exposed, origin re-validated + canonicalized before it is returned); ADMIN-only — the whole consent-configuration surface is admin-gated, unlike the separately-governed telemetry preview; node-local (off export/import/rollback/CP→DP); no egress"},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
+				Note: "M7 Slice 2: set telemetry enabled/origin/credential (bearer-mandatory to enable; https-only canonical origin, private/internal literal IP refused; credential preserve/replace/clear semantics); node-local; no egress (still no sender in this build); audited as support.telemetry.config"}}},
 	{Path: "/api/diagnose/storage", Handler: "apiDiagnoseStorage", Domain: "support", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true,
 			Note: "local read-only storage diagnosis (writability probe + free space + data-dir stat); operator+; no network, no shell; audited as diagnose.storage"}}},
@@ -685,7 +840,92 @@ var uiRoutes = []uiRouteMetadata{
 	{Path: "/api/diagnose/cluster", Handler: "apiDiagnoseCluster", Domain: "support", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true,
 			Note: "cluster/HA posture diagnosis over in-memory state (role, lease, node counts, write authority); no network, no shell, no secret/infra detail; operator+; audited as diagnose.cluster"}}},
+	{Path: "/api/diagnose/etcd", Handler: "apiDiagnoseEtcd", Domain: "support", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true,
+			Note: "bounded, read-only reachability probe of the HA fencing-lease (etcd) backend (holder/epoch + latency; endpoints never echoed); operator-config endpoints so not SSRF-guarded; clean n/a when no lease configured; no shell; audited as diagnose.etcd"}}},
 	{Path: "/api/diagnose/config", Handler: "apiDiagnoseConfig", Domain: "support", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true,
 			Note: "live config-snapshot validity (same cap validation that gates a CP→DP sync) + non-secret collection sizes; no snapshot values; operator+; no network, no shell; audited as diagnose.config"}}},
+	{Path: "/api/diagnose/support", Handler: "apiDiagnoseSupport", Domain: "support", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true,
+			Note: "support-bundle store health: bundle count/size/age spread, retention bounds, janitor last-sweep + evicted total; counts + a timestamp only, no bundle content; operator+; no network, no shell; audited as diagnose.support"}}},
+	{Path: "/api/diagnose/all", Handler: "apiDiagnoseAll", Domain: "support", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true,
+			Note: "aggregate of the no-input local verbs (storage+upstream+cluster+config) in one call; excludes dns/tls (need a host); operator+; no network, no shell; audited as diagnose.all"}}},
+
+	// ── MCP admin API (PR-9) ──────────────────────────────────────────────
+	{Path: "/api/mcp/overview", Handler: "apiMCPOverview", Domain: "mcp", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
+	{Path: "/api/mcp/health", Handler: "apiMCPHealth", Domain: "mcp", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
+	{Path: "/api/mcp/servers", Handler: "apiMCPServers", Domain: "mcp", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
+	{Path: "/api/mcp/tools", Handler: "apiMCPTools", Domain: "mcp", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
+	{Path: "/api/mcp/decisions", Handler: "apiMCPDecisions", Domain: "mcp", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
+	{Path: "/api/mcp/decision-explain", Handler: "apiMCPDecisionExplain", Domain: "mcp", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
+	{Path: "/api/mcp/policy", Handler: "apiMCPPolicy", Domain: "mcp", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
+	{Path: "/api/mcp/policy-simulate", Handler: "apiMCPPolicySimulate", Domain: "mcp", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleOperator, Mutating: true,
+			Note: "validate/simulate/compare a candidate on the shared PR-6 engine; POST by method convention but publishes nothing and is not audited (danger-level none)"}}},
+	{Path: "/api/mcp/publications", Handler: "apiMCPPublications", Domain: "mcp", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer},
+			{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true}}},
+	{Path: "/api/mcp/publication-decision", Handler: "apiMCPPublicationDecision", Domain: "mcp", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
+			Note: "four-eyes approve/reject/publish of a publication request; commit-before-publish, local_only"}}},
+	{Path: "/api/mcp/approvals", Handler: "apiMCPApprovals", Domain: "mcp", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
+	{Path: "/api/mcp/approval-decision", Handler: "apiMCPApprovalDecision", Domain: "mcp", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
+			Note: "four-eyes approve/reject of an operational approval; never executes"}}},
+	{Path: "/api/mcp/config", Handler: "apiMCPConfig", Domain: "mcp", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true}}},
+	{Path: "/api/mcp/management-access", Handler: "apiMCPManagementAccess", Domain: "mcp", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
+	{Path: "/api/mcp/distribution", Handler: "apiMCPDistribution", Domain: "mcp", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer,
+			Note: "PR-10 signed CP→DP distribution status (safe fields only; no key/signature/raw snapshot)"}}},
+	{Path: "/api/mcp/distribution/acks", Handler: "apiMCPDistributionAcks", Domain: "mcp", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer,
+			Note: "PR-UX-5 capability-scoped per-DP acknowledgement read model (counts + rows; not-configured when no distribution)"}}},
+	{Path: "/api/mcp/rollback", Handler: "apiMCPRollback", Domain: "mcp", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
+			Note: "PR-10 four-eyes atomic rollback to a retained signed snapshot; Management MCP may not roll back"}}},
+	// PR-11 rollout surface (mode ladder / scope / evidence / emergency / execution).
+	{Path: "/api/mcp/rollout", Handler: "apiMCPRollout", Domain: "mcp", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer,
+			Note: "PR-11 rollout status: desired/local/fleet-effective mode, scope, metrics, DP acks, production lock"}}},
+	{Path: "/api/mcp/rollout/transition", Handler: "apiMCPRolloutTransition", Domain: "mcp", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
+			Note: "PR-11 one-stage promotion / demotion via the signed publication path; Production rejected without a qualification receipt"}}},
+	{Path: "/api/mcp/rollout/scope", Handler: "apiMCPRolloutScope", Domain: "mcp", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "PR-11 current rollout scope + revision/hash (safe); PR-UX-5 enriched with kind/enumerable/percent/counts/spec"},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
+				Note: "PR-11 scope widening via the signed publication path (four-eyes)"}}},
+	{Path: "/api/mcp/rollout/scope/validate", Handler: "apiMCPRolloutScopeValidate", Domain: "mcp", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleViewer, Mutating: true,
+			Note: "PR-UX-5 read-only candidate-scope validation + diff preview; POST by method convention but runs a pure Compile, publishes nothing, and is not audited (danger-level none)"}}},
+	{Path: "/api/mcp/rollout/evidence", Handler: "apiMCPRolloutEvidence", Domain: "mcp", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer,
+			Note: "PR-11 measured evidence-window progress; production remains qualification-locked"}}},
+	{Path: "/api/mcp/rollout/emergency", Handler: "apiMCPRolloutEmergency", Domain: "mcp", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
+			Note: "PR-11 node-local emergency kill switch (narrows only; never promotes/widens/enables execution)"}}},
+	{Path: "/api/mcp/rollout/rehearse-rollback", Handler: "apiMCPRolloutRehearse", Domain: "mcp", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
+			Note: "PR-11 record a rollback rehearsal (local evidence)"}}},
+	{Path: "/api/mcp/executions", Handler: "apiMCPExecutions", Domain: "mcp", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer,
+			Note: "PR-11 bounded execution history (counts only; no tenant/subject/argument/token)"}}},
+	{Path: "/api/mcp/upstream-health", Handler: "apiMCPUpstreamHealth", Domain: "mcp", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer,
+			Note: "PR-11 upstream-leg health (bounded counts)"}}},
 }

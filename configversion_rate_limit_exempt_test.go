@@ -23,10 +23,10 @@ import (
 	"time"
 )
 
-// snapshotRateLimiter captures and restores rl's exemption whitelist AND
+// snapshotRateLimiter captures and restores rl's exemption list AND
 // configured RPM so these tests do not pollute siblings under
 // -shuffle=on / -count=N. Uses the new ReplaceExemptions primitive for the
-// whitelist restore.
+// exempt-list restore.
 func snapshotRateLimiter(t *testing.T) {
 	t.Helper()
 	origExempt := rl.ListExemptions()
@@ -81,7 +81,7 @@ func TestConfigVersion_RateLimitExempt_RoundTrip(t *testing.T) {
 
 // TestConfigVersion_RateLimitExempt_NilSnapshotIsNoOp pins the backward-
 // compat contract: a configBackup whose RateLimitExempt is nil (an old
-// pre-extension snapshot) leaves the live whitelist untouched.
+// pre-extension snapshot) leaves the live exempt list untouched.
 func TestConfigVersion_RateLimitExempt_NilSnapshotIsNoOp(t *testing.T) {
 	snapshotRateLimiter(t)
 	rl.ReplaceExemptions([]string{"203.0.113.9"})
@@ -104,7 +104,7 @@ func TestConfigVersion_RateLimitExempt_NilSnapshotIsNoOp(t *testing.T) {
 
 // TestConfigVersion_RateLimitExempt_EmptySnapshotWipes pins the wipe
 // half: a snapshot recorded at zero exemptions (non-nil []string{}) clears
-// the live whitelist on rollback. The nil-skip guard must key on nil, not
+// the live exempt list on rollback. The nil-skip guard must key on nil, not
 // len()==0, or this wipe would be silently dropped.
 func TestConfigVersion_RateLimitExempt_EmptySnapshotWipes(t *testing.T) {
 	snapshotRateLimiter(t)
@@ -128,7 +128,7 @@ func TestConfigVersion_RateLimitExempt_EmptySnapshotWipes(t *testing.T) {
 // preflight accuracy: diffConfigs must surface rate_limit_exempt so a
 // rollback preview reflects the actual exemption delta. Without the
 // diffStringList call, dry-run would claim "no change" while apply mutates
-// the whitelist — the rollback "lie" this PR also closes.
+// the exempt list — the rollback "lie" this PR also closes.
 func TestConfigVersion_RateLimitExempt_DiffReportsChanges(t *testing.T) {
 	a := &configBackup{RateLimitExempt: []string{"203.0.113.1", "203.0.113.2"}}
 	b := &configBackup{RateLimitExempt: []string{"203.0.113.1", "203.0.113.3"}}

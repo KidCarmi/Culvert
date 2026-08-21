@@ -36,6 +36,7 @@ func TestUIAuthMiddleware_PublicPaths(t *testing.T) {
 		"/api/auth/totp/setup",
 		"/auth/callback",
 		"/proxy.pac",
+		"/pac/default.pac",
 	}
 
 	for _, path := range publicPaths {
@@ -157,6 +158,61 @@ func TestUIAuthMiddleware_BadBasicAuth(t *testing.T) {
 
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("bad Basic auth: got %d, want 401", w.Code)
+	}
+}
+
+// TestUIAuthMiddleware_ClusterBootstrapIsTokenAuthed proves the documented
+// one-command DP-node bootstrap flow (ui_cluster.go: `curl .../api/cluster/
+// bootstrap/<token> | sudo bash`, run from a brand-new host with no session
+// cookie or credentials) actually works once the CP has completed initial
+// setup — the normal state of any real production Control Plane.
+//
+// apiBootstrapScript/apiBootstrapCompose (bootstrap.go) both document
+// themselves as "no auth required, but the token itself is the auth" and
+// ui_routes_meta.go's uiRoutes entry for this path says the same ("gating
+// delegated to handler"). But uiAuthMiddleware runs BEFORE that handler and
+// gates every /api/ path not on its own hardcoded allowlist behind a session
+// cookie or Basic Auth once cfg.IsConfigured() is true — and the allowlist
+// does not include /api/cluster/bootstrap/. A plain unauthenticated curl
+// against a configured CP therefore gets a bare 401 from the middleware and
+// never reaches the handler's own token check.
+func TestUIAuthMiddleware_ClusterBootstrapIsTokenAuthed(t *testing.T) {
+	origCfg := cfg
+	origStore := globalClusterStore
+	defer func() {
+		cfg = origCfg
+		globalClusterStore = origStore
+	}()
+
+	// A configured CP — the state of virtually every real deployment once
+	// an admin has completed initial setup.
+	testCfg := &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
+	_ = testCfg.SetAuth("admin", "secret")
+	cfg = testCfg
+
+	globalClusterStore = newTestClusterStore(t)
+	token, err := globalClusterStore.GenerateToken("dp", "", "admin", time.Hour)
+	if err != nil {
+		t.Fatalf("GenerateToken: %v", err)
+	}
+
+	// Chain matches the real production order: uiIPGuardMiddleware and
+	// securityMiddleware don't gate on auth, so the auth-relevant portion
+	// of the chain is uiAuthMiddleware → uiMetadataEnforcement → mux.
+	handler := uiAuthMiddleware(uiMetadataEnforcement(http.HandlerFunc(apiBootstrapRouter)))
+
+	for _, path := range []string{
+		"/api/cluster/bootstrap/" + token,
+		"/api/cluster/bootstrap/" + token + "/compose",
+	} {
+		// No session cookie, no Basic Auth — exactly what the generated
+		// onboarding `curl` command sends from a fresh, unenrolled host.
+		r := httptest.NewRequest(http.MethodGet, path, http.NoBody)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		if w.Code != http.StatusOK {
+			t.Errorf("path %s: got %d, want 200 (the token-authed handler should serve the script/compose without a session or Basic Auth); body=%q", path, w.Code, w.Body.String())
+		}
 	}
 }
 

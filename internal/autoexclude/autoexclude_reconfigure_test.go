@@ -87,7 +87,7 @@ func TestReconfigure_PreservesActiveWithinLimits(t *testing.T) {
 		t.Fatalf("Reconfigure dropped entries within the cap: got %d, want 10", c.Len())
 	}
 	for i := 0; i < 10; i++ {
-		if _, ok := c.Contains(sc, fmt.Sprintf("h%02d.example", i)); !ok {
+		if _, ok := c.Contains(sc, "", fmt.Sprintf("h%02d.example", i)); !ok {
 			t.Fatalf("h%02d.example should still be excluded after in-limits Reconfigure", i)
 		}
 	}
@@ -131,7 +131,7 @@ func TestReconfigure_LoweredActiveCapEvictsExactly(t *testing.T) {
 	}
 	// The 8 NEWEST (h12..h19) survive; the 12 oldest are gone.
 	for i := 0; i < n; i++ {
-		_, ok := c.Contains(sc, fmt.Sprintf("h%02d.example", i))
+		_, ok := c.Contains(sc, "", fmt.Sprintf("h%02d.example", i))
 		wantKept := i >= n-8
 		if ok != wantKept {
 			t.Fatalf("h%02d.example kept=%v, want kept=%v (oldest must be evicted first)", i, ok, wantKept)
@@ -174,7 +174,7 @@ func TestReconfigure_DeterministicEviction(t *testing.T) {
 		out := make([]string, 0, 4)
 		for i := 0; i < 10; i++ {
 			host := fmt.Sprintf("h%02d.example", i)
-			if _, ok := c.Contains(sc, host); ok {
+			if _, ok := c.Contains(sc, "", host); ok {
 				out = append(out, host)
 			}
 		}
@@ -262,7 +262,7 @@ func TestReconfigure_TTLChangeIsForwardOnly(t *testing.T) {
 	}
 	// … and it is still active well past the NEW (1m) TTL.
 	clk.add(10 * time.Minute)
-	if _, ok := c.Contains(sc, "old.example"); !ok {
+	if _, ok := c.Contains(sc, "", "old.example"); !ok {
 		t.Fatal("existing entry must live to its ORIGINAL expiry, not the shortened TTL")
 	}
 	// A NEWLY promoted entry uses the new 1m TTL.
@@ -296,9 +296,9 @@ func TestReconfigure_Concurrent(t *testing.T) {
 			host := "h" + strconv.Itoa(g%256) + ".example"
 			switch g % 5 {
 			case 0:
-				c.Observe("s", "s", host, ReasonUnsupportedParams, "id:"+strconv.Itoa(g))
+				c.Observe("s", "", "s", host, ReasonUnsupportedParams, "id:"+strconv.Itoa(g))
 			case 1:
-				_, _ = c.Contains("s", host)
+				_, _ = c.Contains("s", "", host)
 			case 2:
 				c.Remove("s", host)
 			case 3:
@@ -329,7 +329,7 @@ func TestReconfigure_ReentrantClockNoDeadlock(t *testing.T) {
 		}
 		return time.Unix(1_700_000_000, 0)
 	}})
-	c.Observe("s", "s", "h.example", ReasonUnsupportedParams, "id:x")
+	c.Observe("s", "", "s", "h.example", ReasonUnsupportedParams, "id:x")
 
 	done := make(chan struct{})
 	go func() {
@@ -349,8 +349,8 @@ func TestReconfigure_ReentrantClockNoDeadlock(t *testing.T) {
 // nothing Contains allocates).
 func TestReconfigure_NoReadPathAllocRegression(t *testing.T) {
 	c := New(Config{ConfirmN: 1, MaxEntries: 100})
-	c.Observe("s", "s", "host.example", ReasonUnsupportedParams, "id:x") // active hit target
-	read := func() { _, _ = c.Contains("s", "host.example") }
+	c.Observe("s", "", "s", "host.example", ReasonUnsupportedParams, "id:x") // active hit target
+	read := func() { _, _ = c.Contains("s", "", "host.example") }
 
 	before := testing.AllocsPerRun(200, read)
 	c.Reconfigure(Config{ConfirmN: 1, MaxEntries: 50, TTL: 6 * time.Hour})

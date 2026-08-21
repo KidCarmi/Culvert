@@ -194,7 +194,7 @@ func TestTunablesAPI_PUT_PersistFailurePreservesEntries(t *testing.T) {
 	c := autoExclude()
 	for i := 0; i < seeded; i++ {
 		// confirmN=1 ⇒ a single distinct-client observation promotes to an active exclusion.
-		c.Observe("scope-a", "profile A", fmt.Sprintf("host%d.example", i), autoexclude.ReasonClientCertRequired, "203.0.113.7")
+		c.Observe("scope-a", "", "profile A", fmt.Sprintf("host%d.example", i), autoexclude.ReasonClientCertRequired, "203.0.113.7")
 	}
 	if got := c.Len(); got != seeded {
 		t.Fatalf("seed: active=%d, want %d", got, seeded)

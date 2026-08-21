@@ -147,6 +147,7 @@ func buildOperatorContract() OperatorContract {
 		checkCDR(),
 		checkClusterPosture(),
 		checkDPLastGoodConfigSnapshot(),
+		checkConfigSnapshotApply(),
 		checkSAMLStatePosture(),
 		checkSAMLBaseURLPosture(),
 		checkDefaultAuthOpen(),
@@ -154,14 +155,21 @@ func buildOperatorContract() OperatorContract {
 		checkConfigSnapshotValidator(),
 		checkConfigVersionsPresent(cv),
 		checkConfigVersionsReadable(cv),
+		checkConfigVersionsIntegrity(),
 		checkConfigRollbackValidation(cv),
 		checkKeyAtRest(),
 		checkAuditPersistence(),
+		checkIdentityBackend(),
+		checkSyslogFeed(),
+		checkMemoryBackstop(),
 	}
 	// Auth Exempt risk diagnostics (Slice 8): WARN-only rows for risky Stage-1
 	// exemption postures. Contributes nothing when no exempt rules exist.
 	checks = append(checks, authExemptDiagnostics(policyStore.List(), policyActionFromDefault())...)
 	checks = append(checks, authCredentialRequiredDiagnostics(policyStore.List(), hasCredentialCapableProvider())...)
+	// LDAP profile hygiene diagnostics (ADR-0025). Report-only; contribute
+	// nothing when no LDAP profiles exist.
+	checks = append(checks, authLDAPProfileDiagnostics()...)
 	// SSORequired risk diagnostics + auth-rule shadow/overlap diagnostics (Phase 3
 	// Slice 5). Report-only; contribute nothing when no SSO/auth rules apply.
 	checks = append(checks, authSSORequiredDiagnostics(policyStore.List())...)
@@ -225,6 +233,41 @@ func checkDPLastGoodConfigSnapshot() OperatorContractCheck {
 	}
 }
 
+// checkConfigSnapshotApply covers a failure mode dp_last_known_good_config
+// does not: the CONTENT of the last snapshot/delta received from the
+// control plane was rejected (malformed payload, over-cap validation
+// failure, IdP-profile sync failure, or an
+// applyConfigSnapshot/applyBlocklistDeltaSnapshot rejection — see
+// configsnapshot_apply_health.go), even though CP polling itself is
+// succeeding. Without this check that state reads as a plain "control plane
+// polling healthy" ok, even though this node is silently stuck on stale
+// policy/auth config. Deliberately silent on CP reachability — that is
+// dp_last_known_good_config's claim to make (via dpControlPlanePollFailing),
+// and configSnapshotApplyFailing can still be latched from a rejection that
+// happened before a later, unrelated poll outage.
+func checkConfigSnapshotApply() OperatorContractCheck {
+	if !audit.DPMode() {
+		return OperatorContractCheck{
+			Code:    "dp_config_snapshot_apply",
+			Status:  diagOK,
+			Message: "not running as a data plane",
+		}
+	}
+	if !lastConfigSnapshotApplyOK() {
+		return OperatorContractCheck{
+			Code:           "dp_config_snapshot_apply",
+			Status:         diagFail,
+			Message:        "the last config snapshot/delta received from the control plane was rejected — this node is not applying new policy/auth config",
+			OperatorAction: "Check data plane logs for the most recent \"DataPlane: parse config error\", \"DataPlane: rejecting config snapshot\", \"DataPlane: config snapshot ... apply incomplete\", \"DataPlane: config snapshot ... apply rejected\", \"DataPlane: parse delta remainder\", \"DataPlane: rejecting delta remainder\", or \"DataPlane: delta ... apply failed\" line and fix the control-plane-side config that keeps failing validation.",
+		}
+	}
+	return OperatorContractCheck{
+		Code:    "dp_config_snapshot_apply",
+		Status:  diagOK,
+		Message: "last config snapshot/delta applied successfully",
+	}
+}
+
 // rollUpVerdict folds the per-check statuses into a single top-level verdict.
 // Any "fail" → "fail"; otherwise any "warn" → "warn"; else "ok".
 func rollUpVerdict(checks []OperatorContractCheck) string {
@@ -246,9 +289,39 @@ func rollUpVerdict(checks []OperatorContractCheck) string {
 // perform disk I/O, network probes, or any operation that mutates state.
 
 func checkStorage() OperatorContractCheck {
-	// This check reports the cached result of the one-shot writability
-	// probe that ran at startup (probeStorageWritability). The handler
-	// itself does NO disk I/O — repeated calls are free.
+	// CHAOS-45: runtime durable-write failures outrank the boot probe. The
+	// probe runs ONCE and its verdict is cached forever, so a data directory
+	// that goes read-only or full after boot would otherwise keep reporting
+	// "writable (verified once at startup)" while every save silently failed.
+	// Observed failures are authoritative evidence that persistence is broken
+	// NOW; the probe is only evidence about the state at boot.
+	// Recovery is reported ONLY on evidence — a successful durable write
+	// observed after the last failure. Elapsed silence is not recovery: a
+	// filesystem that is still read-only or still full looks identical to a
+	// healthy one when nothing tries to write.
+	if s := storageWriteFailures(); s.Total > 0 {
+		last := s.Last.UTC().Format(time.RFC3339)
+		if !storageRecoveryObserved() {
+			return OperatorContractCheck{
+				Code:   "storage_path",
+				Status: diagFail,
+				Message: fmt.Sprintf("%d durable write(s) to the data directory failed and NO successful write has been observed since — persisted state is being LOST (last: %s at %s: %s)",
+					s.Total, s.Path, last, s.Err),
+				OperatorAction: "The data directory has become unwritable or full since startup. Check free space and inode count, confirm the volume is still mounted read-write, then re-apply any configuration changed since the first failure — admin-API changes made during this window are live in memory but did NOT reach disk and will be lost on restart.",
+			}
+		}
+		return OperatorContractCheck{
+			Code:   "storage_path",
+			Status: diagWarn,
+			Message: fmt.Sprintf("%d durable write(s) failed earlier in this process; writes have since been observed to succeed (last failure: %s at %s)",
+				s.Total, s.Path, last),
+			OperatorAction: "Writes are landing again — a later write was observed to succeed. Configuration changed during the failure window may still not have reached disk: re-save anything edited around that time, and check the host for the transient full-disk / read-only-remount event.",
+		}
+	}
+
+	// No runtime failures observed — report the cached result of the one-shot
+	// writability probe that ran at startup (probeStorageWritability). The
+	// handler itself does NO disk I/O — repeated calls are free.
 	switch storageWritability() {
 	case storageStateWritable:
 		return OperatorContractCheck{
@@ -305,6 +378,33 @@ func checkRootCA() OperatorContractCheck {
 			OperatorAction: "Provide CULVERT_CA_PASSPHRASE and a -ca-bundle path to enable SSL inspection, or ignore if SSL inspection is not used.",
 		}
 	}
+	// CHAOS-28: "initialised" is not the same as "usable". A Root CA outside its
+	// own validity window is initialised, signs nothing a client will accept,
+	// and used to report diagOK through a total inspected-HTTPS outage. The
+	// message carries the impact and a count, never the raw cause — this row is
+	// a VIEWER-role surface with a standing no-sensitive-values guardrail, and
+	// the cause names the appliance's exact certificate state. Full detail stays
+	// in the logs, the alert, and the admin-role CA API.
+	if certMgr.Usable() != nil {
+		return OperatorContractCheck{
+			Code:   "root_ca",
+			Status: diagFail,
+			Message: fmt.Sprintf("root CA outside its validity window — SSL inspection is BLOCKED (%d connections refused since boot)",
+				caUsabilityFailures().Blocks),
+			OperatorAction: "Rotate the Root CA (CA Management → Force Rotation) and redistribute the new CA certificate to clients.",
+		}
+	}
+	// Keyed on the CURRENT persistence state, not the cumulative counter: an
+	// operator who restores the volume and force-rotates has fixed this, and a
+	// row latched on the counter would keep contradicting them until restart.
+	if caRotationPersistDegraded() {
+		return OperatorContractCheck{
+			Code:           "root_ca",
+			Status:         diagWarn,
+			Message:        "root CA rotated but could not be saved — the replacement exists in memory only and will be lost on restart",
+			OperatorAction: "Restore write access to the data directory, then force a Root CA rotation so the new CA is persisted.",
+		}
+	}
 	return OperatorContractCheck{
 		Code:    "root_ca",
 		Status:  diagOK,
@@ -357,6 +457,90 @@ func checkAuditPersistence() OperatorContractCheck {
 		Code:    "audit_log_persistence",
 		Status:  diagOK,
 		Message: "audit trail is persisting to the configured log file",
+	}
+}
+
+// checkIdentityBackend reports external identity-backend (LDAP / OIDC)
+// reachability (CHAOS-47).
+//
+// This row exists because the only prior signal for "the directory is down"
+// was a rise in authentication failures — indistinguishable from a
+// brute-force spike, and the response to those two situations is opposite.
+// Like the storage row, recovery is reported on EVIDENCE only: the degraded
+// state clears when a backend is observed to answer, never on elapsed time.
+// Memory-only read; no probe is issued from the diagnostics path. The cause
+// text is deliberately NOT reproduced here: it names the configured endpoint
+// (an LDAP URL, an OIDC introspection host), and this contract is a VIEWER-role surface with a
+// standing no-sensitive-values guardrail. The cause goes to the admin-scoped
+// sinks — the log line and the identity_backend_unreachable alert.
+func checkIdentityBackend() OperatorContractCheck {
+	s := authBackendHealthStatus()
+	if s.Unavailable == 0 {
+		return OperatorContractCheck{
+			Code:    "identity_backend",
+			Status:  diagOK,
+			Message: "no external identity-backend outage observed since startup",
+		}
+	}
+	last := s.Last.UTC().Format(time.RFC3339)
+	if s.Degraded {
+		return OperatorContractCheck{
+			Code:   "identity_backend",
+			Status: diagFail,
+			Message: fmt.Sprintf("identity backend %q is UNREACHABLE — proxy authentication is failing closed (%d outage(s) since boot, %d request(s) denied without reaching it; last at %s)",
+				s.Backend, s.Unavailable, s.GatedDenials, last),
+			OperatorAction: "Users cannot authenticate until the directory/IdP answers again. Check reachability from this node (DNS, route, firewall, TLS) and the service account's credentials. No operator action is needed here once it recovers: the denials are not cached, so authentication resumes on the first successful reach.",
+		}
+	}
+	return OperatorContractCheck{
+		Code:   "identity_backend",
+		Status: diagWarn,
+		Message: fmt.Sprintf("identity backend %q was unreachable earlier in this process and has since answered (%d outage(s), %d request(s) denied during them; last at %s)",
+			s.Backend, s.Unavailable, s.GatedDenials, last),
+		OperatorAction: "Authentication has recovered. Users who authenticated during the window saw 407s; investigate the transient directory/IdP outage on the host or the identity service itself.",
+	}
+}
+
+// checkSyslogFeed reports whether the operator-configured syslog/SIEM feed is
+// actually delivering. A silent connect failure at startup (unreachable
+// collector, bad host/port, TCP refused) leaves globalSyslog nil while the
+// /api/syslog readback reports the feed as "not configured" — indistinguishable
+// from an intentional no-op — so a compliance/SIEM feed can be down with only a
+// single startup log line ("Syslog: connect failed …") as signal. This surfaces
+// that state as an explicit operator-contract verdict. syslogConfiguredAddr
+// records operator intent regardless of InitSyslog's outcome, so it
+// distinguishes "not configured" from "configured but silently down". Mirrors
+// checkAuditPersistence. Side-effect-free: reads process state only, never
+// dials the collector (use POST /api/syslog/test for an active probe).
+func checkSyslogFeed() OperatorContractCheck {
+	if syslogConfiguredAddr == "" {
+		return OperatorContractCheck{
+			Code:    "syslog_feed",
+			Status:  diagOK,
+			Message: "not configured — no remote syslog/SIEM forwarding",
+		}
+	}
+	// Healthy only when the target we actually connected to (syslogConfigured,
+	// set SOLELY on a successful InitSyslog) matches the operator's current
+	// intent (syslogConfiguredAddr, recorded regardless of outcome). A bare
+	// globalSyslog != nil check is not enough: observability inits from
+	// YAML/flags BEFORE admin settings apply a persisted override, so if the
+	// first target connects and a later re-init to a new target fails,
+	// globalSyslog stays non-nil pointing at the PREVIOUS collector while intent
+	// has moved on — the persisted SIEM target is silently down but a nil-check
+	// would still report OK.
+	if globalSyslog == nil || syslogConfigured != syslogConfiguredAddr {
+		return OperatorContractCheck{
+			Code:           "syslog_feed",
+			Status:         diagFail,
+			Message:        "configured but failed to connect — remote syslog/SIEM forwarding is silently down, events are not reaching the collector",
+			OperatorAction: "Verify the collector host/port and network path, then re-save the syslog target (POST /api/syslog) or restart the proxy; use POST /api/syslog/test to confirm connectivity.",
+		}
+	}
+	return OperatorContractCheck{
+		Code:    "syslog_feed",
+		Status:  diagOK,
+		Message: "remote syslog/SIEM forwarding is active",
 	}
 }
 
@@ -763,6 +947,36 @@ func checkConfigVersionsReadable(s configVersionSummary) OperatorContractCheck {
 	}
 }
 
+// checkConfigVersionsIntegrity scans the FULL version history, not just the
+// latest snapshot: checkConfigVersionsReadable only inspects the most recent
+// v{N}.json, so a corrupt file anywhere else in the retained window (disk
+// fault, external tampering, an older-build bug) is silently dropped by
+// List/ListMeta and never appears in this check — the rollback list just
+// looks shorter, indistinguishable from normal retention pruning.
+func checkConfigVersionsIntegrity() OperatorContractCheck {
+	present, readable := configVersions.Integrity()
+	if present == 0 {
+		return OperatorContractCheck{
+			Code:    "config_versions_integrity",
+			Status:  diagOK,
+			Message: "no version history to check",
+		}
+	}
+	if readable < present {
+		return OperatorContractCheck{
+			Code:           "config_versions_integrity",
+			Status:         diagWarn,
+			Message:        fmt.Sprintf("%d of %d config version file(s) on disk are corrupt or unreadable and are hidden from the rollback list", present-readable, present),
+			OperatorAction: "Inspect the config versions directory for truncated or invalid v{N}.json files; remove any that are unusable (other intact versions remain usable) or restore the directory from a /data backup.",
+		}
+	}
+	return OperatorContractCheck{
+		Code:    "config_versions_integrity",
+		Status:  diagOK,
+		Message: fmt.Sprintf("all %d config version file(s) on disk parse cleanly", present),
+	}
+}
+
 func checkConfigRollbackValidation(s configVersionSummary) OperatorContractCheck {
 	if !s.Found {
 		return OperatorContractCheck{
@@ -968,11 +1182,12 @@ func hasCredentialCapableProvider() bool {
 			return true
 		}
 	}
-	// HasEnabledOIDC reads the profiles in place. This probe runs on EVERY
+	// HasEnabledCredentialProvider reads the profiles in place (OIDC or LDAP —
+	// the CREDENTIAL-capable types, ADR-0025). This probe runs on EVERY
 	// proxied request (resolveRequestAuth's credCapable), and the previous
 	// idpRegistry.All() loop deep-cloned every profile per call just to
 	// answer this boolean — pure per-request allocation on the hot path.
-	return idpRegistry != nil && idpRegistry.HasEnabledOIDC()
+	return idpRegistry != nil && idpRegistry.HasEnabledCredentialProvider()
 }
 
 // exemptRiskBuckets collects offending exempt-rule names per risk category.

@@ -6,6 +6,12 @@
 // the proxy/SOCKS5 per-request hot path and moved VERBATIM — same RWMutex,
 // same probe sequence. package main keeps the process-wide `bl` singleton and
 // every admin/cluster surface behind type aliases.
+//
+// The probe SEQUENCE is still that original one, verdict for verdict; what has
+// changed since the extraction is how each probe's lookup key is built. See
+// probePrefixed for why the concatenated keys had to go, and
+// blocklist_bench_test.go for the differential test that pins the new bodies
+// against the pre-fix ones.
 package blocklist
 
 import (
@@ -58,6 +64,14 @@ type Store struct {
 	feedSrc    map[string]string // host → feed URL attribution (lazily initialized)
 	path       string
 	mode       string // "block" (default) or "allow"
+
+	// syncedFP is the 256-bit XOR-of-SHA256 fingerprint of the
+	// CP-AUTHORITATIVE host set the cluster delta-sync path last applied
+	// (T3 P1). It is fed ONLY by CP-supplied data (ReplaceFeedEntries /
+	// ApplyDelta) and is deliberately DECOUPLED from DP-local manual blocks
+	// and from the enforcement maps, so a DP with its own manual blocks still
+	// converges to the exact fingerprint the CP advertises. See delta.go.
+	syncedFP [32]byte
 }
 
 // Mode returns the current list mode: "block" (default) or "allow".
@@ -248,17 +262,75 @@ func (b *Store) Save() {
 	}
 }
 
+// hostKeyProbeMax bounds the stack scratch buffer probePrefixed uses to build
+// a prefixed lookup key. A DNS name is at most 253 bytes (RFC 1035 §2.3.4), so
+// this covers every legitimate host plus the two-byte "*." prefix with room to
+// spare; a longer host falls back to the plain concatenation, which is equally
+// correct and simply allocates as it always did.
+const hostKeyProbeMax = 255
+
+// probePrefixed reports whether m contains the key prefix+host, WITHOUT
+// building that key on the heap.
+//
+// The probes it replaces sit on the per-request proxy hot path (IsBlocked runs
+// on every HTTP, CONNECT, WebSocket and SOCKS5 destination) and each one built
+// a throwaway string only to index a map with it. Go's compiler hands a
+// non-escaping concatenation a 32-byte stack buffer, so the cost was invisible
+// on a short hostname and a heap allocation on a long one — and long is the
+// ordinary shape in real traffic (regional cloud and CDN endpoints such as
+// "very-long-subdomain.assets.cdn.example-corporation.com" run well past 30
+// bytes). Measured on that host with NO exceptions configured at all — the
+// default posture, where every probe misses an EMPTY map:
+//
+//	before   415 ns/op   176 B/op   3 allocs/op
+//	after    181 ns/op     0 B/op   0 allocs/op
+//
+// The full before/after table across host shapes and both postures lives in
+// blocklist_bench_test.go, whose baseline benchmark runs these exact pre-fix
+// bodies in the same binary.
+//
+// Two mechanisms, both behaviour-preserving:
+//
+//   - len(m) == 0 short-circuits. Indexing an empty map always misses, so the
+//     answer is unchanged; this is what erases the whole exception walk on a
+//     store with no exceptions.
+//   - m[string(buf[:n])] is the compiler's no-copy map-index form: the string
+//     conversion of a byte slice used directly as a map key does not allocate,
+//     so the key lives on the stack for the length of the lookup and nowhere
+//     else. The map itself never sees the buffer — only the bytes are compared.
+func probePrefixed(m map[string]bool, prefix, host string) bool {
+	if len(m) == 0 {
+		return false
+	}
+	n := len(prefix) + len(host)
+	if n > hostKeyProbeMax {
+		return m[prefix+host]
+	}
+	var buf [hostKeyProbeMax]byte
+	copy(buf[:], prefix)
+	copy(buf[len(prefix):], host)
+	return m[string(buf[:n])]
+}
+
 // isListed reports whether host matches any entry in the list (mode-agnostic).
+//
+// The label walk indexes bytes rather than ranging over runes. '.' (0x2E) is
+// ASCII, and no byte of a multi-byte UTF-8 sequence can equal it, so the two
+// forms visit exactly the same dot positions — the byte form just skips the
+// rune decoding on the way.
 func (b *Store) isListed(host string) bool {
 	if b.exact[host] {
 		return true
 	}
-	for i, ch := range host {
-		if ch == '.' && b.wildcards[host[i:]] {
+	if len(b.wildcards) == 0 {
+		return false
+	}
+	for i := 0; i < len(host); i++ {
+		if host[i] == '.' && b.wildcards[host[i:]] {
 			return true
 		}
 	}
-	return b.wildcards["."+host]
+	return probePrefixed(b.wildcards, ".", host)
 }
 
 // isExcepted returns true when host or any of its parent domains is in the
@@ -266,24 +338,29 @@ func (b *Store) isListed(host string) bool {
 // wildcard entries (stored as "*.example.com").
 // Must be called with b.mu held (at least RLock).
 func (b *Store) isExcepted(host string) bool {
+	// No exceptions configured — the default posture — so every probe below
+	// would miss an empty map. Answer without walking the labels at all.
+	if len(b.exceptions) == 0 {
+		return false
+	}
 	if b.exceptions[host] {
 		return true
 	}
 	// Check if a wildcard exception covers this exact host
 	// e.g. "*.raw.githubusercontent.com" should match "raw.githubusercontent.com"
-	if b.exceptions["*."+host] {
+	if probePrefixed(b.exceptions, "*.", host) {
 		return true
 	}
 	// Walk parent domains: sub.example.com → example.com → com
 	// Each dot boundary is also checked as a wildcard pattern *.parent.
-	for i, ch := range host {
-		if ch == '.' {
+	for i := 0; i < len(host); i++ {
+		if host[i] == '.' {
 			parent := host[i+1:]
 			if b.exceptions[parent] {
 				return true
 			}
 			// e.g. "*.example.com" stored literally in exceptions
-			if b.exceptions["*."+parent] {
+			if probePrefixed(b.exceptions, "*.", parent) {
 				return true
 			}
 		}
@@ -419,6 +496,13 @@ func (b *Store) Add(host string) {
 func (b *Store) ReplaceFeedEntries(hosts []string) {
 	newExact := map[string]bool{}
 	newWildcards := map[string]bool{}
+	// Recompute the CP-authoritative synced fingerprint over the incoming set
+	// (T3 P1). A full apply is the ground-truth reset for syncedFP — it heals
+	// any drift a malformed delta stream could have introduced. Computed here,
+	// before the lock, so the O(N) hashing never stalls IsBlocked. The
+	// fingerprint is over the CP list ONLY (no manual re-injection) because the
+	// synced set the CP advertises does not include DP-local manual blocks.
+	fp := feedSetFingerprint(hosts)
 	for _, h := range hosts {
 		h = strings.ToLower(strings.TrimSpace(h))
 		if h == "" {
@@ -431,6 +515,7 @@ func (b *Store) ReplaceFeedEntries(hosts []string) {
 		}
 	}
 	b.mu.Lock()
+	b.syncedFP = fp
 	// Re-inject admin-added manual entries into the enforcement
 	// maps. b.manual is the attribution set; the entries are also
 	// normalised at AddManual time so no further trim/lowercase is
@@ -586,6 +671,30 @@ func (b *Store) List() []string {
 	}
 	for suffix := range b.wildcards {
 		out = append(out, "*"+suffix)
+	}
+	return out
+}
+
+// FeedList returns the CP-authoritative (non-manual) entries — the synced set —
+// with wildcards rendered as "*.example.com". The delta path persists this as the
+// last-good BlockedHosts so a cold restart reconstructs a fingerprint-consistent
+// synced set: List() would fold in DP-local manual blocks the CP set never had,
+// which on reload would poison syncedFP relative to the CP's feed-only target.
+// (Enforcement of manual blocks is unaffected — ReplaceFeedEntries re-injects
+// b.manual on every apply.)
+func (b *Store) FeedList() []string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	out := make([]string, 0, len(b.exact)+len(b.wildcards))
+	for h := range b.exact {
+		if !b.manual[h] {
+			out = append(out, h)
+		}
+	}
+	for suffix := range b.wildcards {
+		if h := "*" + suffix; !b.manual[h] {
+			out = append(out, h)
+		}
 	}
 	return out
 }

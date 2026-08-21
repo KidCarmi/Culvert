@@ -93,8 +93,7 @@ non-`omitempty`** (explicit `false`/`none` always present when the block is); **
 | ALPN | `dec_alpn` | enum | `h2` \| `http/1.1` \| `` |
 | Cert verification | `dec_cert_verify` | enum | §2.2 `CertVerify` |
 | Failure stage | `dec_fail_stage` | enum | §2.2 `FailStage` |
-| Failure category | `dec_fail_category` | enum | §2.2 `FailCategory` (normalized, PAN Error-Index-like) |
-| Bounded failure reason | `dec_fail_reason` | enum | small fixed token set; **never** a raw Go error string |
+| Failure category | `dec_fail_category` | enum | §2.2 `FailCategory` (normalized, PAN Error-Index-like); resolution (a) below — the single normalized reason, no separate `dec_fail_reason` field |
 | Exclusion reason | `dec_excl_reason` | enum | engine reason: `client_cert_required` \| `unsupported_params` \| `client_pinned` \| `` |
 | Exclusion scope | `dec_excl_scope` | string | owning profile ID (same as `dec_profile_id`; explicit for SIEM joins) |
 | Cache consulted | `dec_cache_consulted` | bool | read path ran (fail-open session) |
@@ -105,7 +104,7 @@ non-`omitempty`** (explicit `false`/`none` always present when the block is); **
 | Node identity | `dec_node_id` | string | CP/DP `NodeID`; empty in single-binary mode |
 | Timestamps | (reuse `Entry.TS`/`Time`/`DurationMs`) | — | no new time fields; decision-to-close duration already on `TUNNEL_CLOSED` |
 
-**Raw error strings never appear.** `dec_fail_reason`/`dec_fail_category` are the *normalized* projection of
+**Raw error strings never appear.** `dec_fail_category` is the *normalized* projection of
 the classifier output; the unbounded Go error text stays out of the record (and out of metrics), matching
 the CWE-117 / log-injection posture (`auditSafe`, `sanitizeLog`).
 
@@ -227,10 +226,16 @@ admin only for any future tunables (ADR-0010). All via `requireRole` + `uiRoutes
 - **Cardinality controls** — enums only for labels; profile *name* label reuses `maxAutoExcludeLabels`
   (200) cap with inline sanitisation so CodeQL sees the guard; host/SNI/cipher/identity/cert-subject are
   **record fields, never labels**.
-- **Redaction requirements** — `dec_host` and `dec_sni` are subject to the same redaction posture as the
-  rest of the request feed (an operator privacy toggle may hash/omit them); they are never required for a
-  metric. Log-injection: all string fields pass `auditSafe`/`sanitizeLog` before entering any log/audit/
-  alert projection.
+- **Redaction requirements** — the node-local `decryption_redact_hosts` toggle is a **global
+  destination-privacy posture** (PR3 Option B, `traffic_redaction.go`). When on, the destination is
+  pseudonymized with a **keyed HMAC** (`h_`+12hex, never omission) at the single `persistLogEntry`
+  chokepoint, so the top-level `host`/`uri` AND the nested `dec_host`/`dec_sni` — across **every** sink
+  (feed, JSONL/history, SIEM, drill-down) — carry the identical token and no plaintext destination. The key
+  is node-local (a stable per-node pseudonym; fleet-wide correlation via a synced key is the deferred B3
+  follow-up) and **fail-closed** (posture on + key missing ⇒ a constant `redacted` sentinel, never
+  plaintext). The retired unsalted 48-bit hash is gone. `dec_host`/`dec_sni` are never required for a metric.
+  Design + sink inventory: `roadmap/PR3-privacy-posture-v2-DECISION.md`. Log-injection: all string fields
+  pass `auditSafe`/`sanitizeLog` before entering any log/audit/alert projection.
 - **Certificate-metadata privacy** — do **not** store full cert subject/issuer strings by default. If a
   cert fingerprint is recorded at all, it is a bounded **SPKI/cert SHA-256 hash** (hex, fixed length),
   redactable, and **record-only** (never a label, never an autoexclude key — see §5). Default posture:
@@ -365,11 +370,11 @@ corrections below are recorded here and are binding on the slices that implement
   `All<Type>` per type, and that every `All<Type>` slice is pinned — the real uiRoutes-style
   reverse parity. `Valid()` is now a compile-time switch (not a scan of the exported slice),
   so mutating an `All<Type>` var cannot corrupt validation.
-- **[design, `dec_fail_reason`] §2.1 lists a `dec_fail_reason` enum with a vocabulary defined
-  nowhere.** It is redundant with `dec_fail_category` (`FailCategory`). **Resolution:** the
-  wiring slice either (a) drops `dec_fail_reason` and lets `FailCategory` be the single
-  normalized reason, or (b) defines a `FailReason` enum in `decryptobs` (with its own pin)
-  before any field references it. No §2.1 field may reference an undefined vocabulary.
+- **[design, `dec_fail_reason`] §2.1 listed a `dec_fail_reason` enum with a vocabulary defined
+  nowhere.** It was redundant with `dec_fail_category` (`FailCategory`). **Resolution taken:**
+  (a) — the wiring slice dropped `dec_fail_reason`; `FailCategory` is the single normalized
+  reason (`internal/logstore.DecryptionBlock` has no `FailReason` field). §2.1 above reflects
+  this — no §2.1 field may reference an undefined vocabulary.
 - **[design, `dec_excl_reason`] the empty "no exclusion" member.** §2.1 lists
   `client_cert_required | unsupported_params | client_pinned | ""` but §2.2 says the field
   reuses `autoexclude.Reason`, whose `allReasons` has **no** empty member. **Resolution:** the
@@ -411,3 +416,5 @@ corrections below are recorded here and are binding on the slices that implement
 - ADR-0008 / ADR-0009 (autoexclude security semantics — unchanged), ADR-0010 / F9a (#741 / #740 — tunables
   on the same subsystem).
 - The `auth_*` SIEM block on `logstore.Entry` — the in-tree precedent this pattern extends.
+- `docs/operator/traffic-log-destination-privacy.md` — the operator runbook for the §4
+  destination-privacy posture (enabling, key rotation, cluster behavior, troubleshooting).

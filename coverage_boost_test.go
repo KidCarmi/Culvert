@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -410,6 +411,8 @@ func TestValidatePasswordComplexity(t *testing.T) {
 		{"Abcdefghi", false},
 		{"12345678", false},
 		{"", false},
+		{"Aa1" + strings.Repeat("x", 69), true},  // 72 bytes — bcrypt's max, must still pass
+		{"Aa1" + strings.Repeat("x", 70), false}, // 73 bytes — over bcrypt's hard limit
 	}
 	for _, tt := range tests {
 		err := validatePasswordComplexity(tt.pass)
