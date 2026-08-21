@@ -937,7 +937,7 @@ func TestAPIClusterStatus_SurfacesGRPCCompression(t *testing.T) {
 		clusterGRPCCompression = want
 
 		w := httptest.NewRecorder()
-		r := httptest.NewRequest(http.MethodGet, "/api/cluster/status", nil)
+		r := httptest.NewRequest(http.MethodGet, "/api/cluster/status", http.NoBody)
 		apiClusterStatus(w, r)
 
 		if w.Code != http.StatusOK {
