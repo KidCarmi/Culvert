@@ -46,8 +46,8 @@ func TestUIE2E_GovernancePanelSurfacesControlPlane(t *testing.T) {
 		got, _ := page.Locator("#gov-c2-state").TextContent()
 		t.Errorf("governance panel should render the C2 mode; got %q: %v", got, err)
 	}
-	// The six C2 counters rendered (would_deny is the always-present first one).
-	if err := assert.Locator(page.Locator("#gov-counters")).ToContainText("would_deny"); err != nil {
+	// The six C2 counters rendered (would-deny counter is first).
+	if err := assert.Locator(page.Locator("#gov-counters")).ToContainText("Would deny"); err != nil {
 		got, _ := page.Locator("#gov-counters").TextContent()
 		t.Errorf("governance panel should render the C2 counters; got %q: %v", got, err)
 	}

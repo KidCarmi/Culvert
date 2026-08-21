@@ -468,7 +468,7 @@ func TestAbortApplied_RevertsToPreviousPersistBeforeSwap(t *testing.T) {
 			t.Errorf("abort did not persist the prior snapshot as current")
 		}
 	}
-	ack, err := a.AbortApplied(mcperr.New(mcperr.ReasonSnapshotPersistFailed, "test", "rollout persist failed"))
+	ack, err := a.AbortApplied(e2.ContentHash, mcperr.New(mcperr.ReasonSnapshotPersistFailed, "test", "rollout persist failed"))
 	if err != nil {
 		t.Fatalf("abort: %v", err)
 	}
@@ -502,7 +502,7 @@ func TestAbortApplied_FirstApplyRevertsToNoActive(t *testing.T) {
 	if _, err := a.Apply(e1); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.AbortApplied(mcperr.New(mcperr.ReasonSnapshotPersistFailed, "test", "x")); err != nil {
+	if _, err := a.AbortApplied(e1.ContentHash, mcperr.New(mcperr.ReasonSnapshotPersistFailed, "test", "x")); err != nil {
 		t.Fatalf("abort: %v", err)
 	}
 	if a.Active() != nil {
@@ -534,7 +534,7 @@ func TestAbortApplied_PersistFailureLeavesAbortedActiveAndErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	store.failNext.Store(true)
-	ack, err := a.AbortApplied(mcperr.New(mcperr.ReasonSnapshotPersistFailed, "test", "x"))
+	ack, err := a.AbortApplied(e2.ContentHash, mcperr.New(mcperr.ReasonSnapshotPersistFailed, "test", "x"))
 	if err == nil {
 		t.Fatal("abort must surface a compensating-write failure")
 	}
@@ -565,5 +565,64 @@ func TestRejectAck_NoMutation(t *testing.T) {
 	}
 	if a.PendingAck() == nil || a.PendingAck().State != cpdp.AckApplied {
 		t.Fatal("RejectAck must not disturb the existing pending Applied ack")
+	}
+}
+
+// TestAbortApplied_RefusesWhenActiveIsNotTheAbortedEnvelope is the SECURITY
+// regression gate for the compensation binding. AbortApplied must revert ONLY the
+// envelope its caller applied. Without the hash binding it reverted "whatever is
+// active right now", so an interleaving Apply between a caller's Apply and its
+// compensation silently rolled back an UNRELATED, newer, validly-signed snapshot —
+// a fail-open config regression driven purely by timing.
+func TestAbortApplied_RefusesWhenActiveIsNotTheAbortedEnvelope(t *testing.T) {
+	s, ts := mkSigner(t, "k1")
+	store := &memStore{}
+	a := newApplier(t, cpdp.CapabilityGateway, ts, store)
+	e1 := gwEnv(t, s, 5, 2)
+	e2 := gwEnv(t, s, 5, 3)
+	e3 := gwEnv(t, s, 5, 4)
+	for _, e := range []*cpdp.Envelope{e1, e2, e3} {
+		if _, err := a.Apply(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	persistsBefore := store.persists.Load()
+	// A late compensation for e2 arrives after e3 was applied: it must be refused,
+	// non-mutating, and must not persist anything.
+	ack, err := a.AbortApplied(e2.ContentHash, mcperr.New(mcperr.ReasonSnapshotPersistFailed, "test", "late abort"))
+	if err == nil {
+		t.Fatal("abort bound to a superseded envelope must be refused")
+	}
+	if ack != nil {
+		t.Fatalf("a refused abort must not produce an ack: %+v", ack)
+	}
+	if got := mcperr.ReasonOf(err); got != mcperr.ReasonSnapshotHashMismatch {
+		t.Fatalf("unexpected reason %v", got)
+	}
+	if a.Active() == nil || a.Active().ContentHash != e3.ContentHash {
+		t.Fatal("a refused abort must not revert the unrelated newer snapshot")
+	}
+	if store.persists.Load() != persistsBefore {
+		t.Fatal("a refused abort must not write durable state")
+	}
+	if a.PendingAck() == nil || a.PendingAck().State != cpdp.AckApplied {
+		t.Fatal("a refused abort must not replace the pending ack of the live snapshot")
+	}
+}
+
+// TestAbortApplied_RefusesUnboundAbort proves an empty binding is never accepted:
+// an unbound compensation is not a safe operation at any time.
+func TestAbortApplied_RefusesUnboundAbort(t *testing.T) {
+	s, ts := mkSigner(t, "k1")
+	a := newApplier(t, cpdp.CapabilityGateway, ts, &memStore{})
+	e1 := gwEnv(t, s, 5, 2)
+	if _, err := a.Apply(e1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.AbortApplied("", mcperr.New(mcperr.ReasonSnapshotPersistFailed, "test", "x")); err == nil {
+		t.Fatal("an unbound abort must be refused")
+	}
+	if a.Active() == nil || a.Active().ContentHash != e1.ContentHash {
+		t.Fatal("a refused unbound abort must not mutate active state")
 	}
 }

@@ -6,7 +6,7 @@ package main
 // inside the appliance: an expired Root CA does not stop the gateway, does not
 // error, and does not change a single counter — it just makes every forged leaf
 // unacceptable to every client. The operator sees a wave of per-site
-// certificate warnings and nothing else; `/healthz` still said
+// certificate warnings and nothing else; the proxy's `/health` still said
 // `ssl_inspection: ready` because Ready() only asks whether a CA is loaded.
 //
 // This file is the sink for the engine's publish-once usability observers. It
@@ -264,7 +264,7 @@ func caInspectionUsable() bool {
 
 // caUsabilityDegraded reports whether the Root CA should be treated as broken
 // RIGHT NOW: a fault has been observed and no successful verification has been
-// seen since. Used by the operator contract, /healthz, /readyz and /metrics.
+// seen since. Used by the operator contract, the proxy's /health, /ready and /metrics.
 func caUsabilityDegraded() bool {
 	caUsability.mu.Lock()
 	defer caUsability.mu.Unlock()

@@ -40,7 +40,9 @@ func resolveCaptivePortalURL(r *http.Request) string {
 	}
 
 	// Single provider — redirect directly without selection screen.
-	providers := idpRegistry.EnabledProviders()
+	// INTERACTIVE providers only (ADR-0025): a credential-only provider
+	// (LDAP) cannot fulfil a captive redirect and must not swallow it.
+	providers := idpRegistry.EnabledInteractiveProviders()
 	if len(providers) == 1 {
 		return providers[0].CaptiveLoginURL(relayURL, r)
 	}
@@ -108,7 +110,7 @@ func eligibleSSOProviders(providerRefs []string) []ssoEligibleProvider {
 	for _, ref := range ids {
 		id := strings.TrimSpace(ref)
 		p := idpRegistry.Get(id)
-		if p == nil || !p.Enabled || (p.Type != IdPTypeOIDC && p.Type != IdPTypeSAML) {
+		if p == nil || !p.Enabled || !p.Type.Interactive() {
 			continue
 		}
 		if live, ok := idpRegistry.LiveProvider(id); ok {

@@ -3,9 +3,12 @@ package main
 // session_startup_test.go — PR3 expansion Batch 2 coverage.
 
 import (
+	"bytes"
+	"encoding/hex"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -65,6 +68,45 @@ func TestResolveSessionStartupConfig_AllEmpty(t *testing.T) {
 	got := resolveSessionStartupConfig(&FileConfig{}, "", 0)
 	if got.Secret != "" || got.RevocationsFile != "" || got.TimeoutHours != 0 {
 		t.Errorf("expected zero-value; got %+v", got)
+	}
+}
+
+// TestLoadSession_EnvSessionSecretWinsOverConfigFile guards the documented
+// priority in session.go's initSessionSecret ("CULVERT_SESSION_SECRET env >
+// config file > random") and in internal/session's package doc comment ("the
+// startup wiring (env/config key priority — env is read in the startup shim
+// per the slice convention)"). loadSession used to call
+// initSessionSecretFromConfig unconditionally after initSessionSecret, so a
+// non-empty config-file session_secret always won — even when
+// CULVERT_SESSION_SECRET was already set — silently reversing the documented
+// order. In a multi-node/HA deployment where every node sets
+// CULVERT_SESSION_SECRET (CLAUDE.md "Key Environment Variables"; required on
+// every node so sessions stay valid cluster-wide) but one node also carries a
+// stale/mismatched session_secret in its config.yaml, that node would sign
+// admin-UI cookies with a different key than its peers — with no
+// operator-visible error.
+func TestLoadSession_EnvSessionSecretWinsOverConfigFile(t *testing.T) {
+	resetSessionStartupGlobals(t)
+	ensureSessionStartupTestLogger(t)
+
+	origKey := session.SigningKey()
+	t.Cleanup(func() { session.SetSigningKey(origKey) })
+
+	envHex := strings.Repeat("11", 32) // 32 bytes, test-only
+	cfgHex := strings.Repeat("22", 32) // different 32 bytes, test-only
+	t.Setenv("CULVERT_SESSION_SECRET", envHex)
+
+	if err := loadSession(sessionStartupConfig{Secret: cfgHex}); err != nil {
+		t.Fatalf("loadSession: %v", err)
+	}
+
+	want, err := hex.DecodeString(envHex)
+	if err != nil {
+		t.Fatalf("decode envHex: %v", err)
+	}
+	if got := session.SigningKey(); !bytes.Equal(got, want) {
+		t.Errorf("signing key came from the config-file session_secret, not CULVERT_SESSION_SECRET env "+
+			"(got %x, want %x) — violates the documented priority env > config file > random", got, want)
 	}
 }
 

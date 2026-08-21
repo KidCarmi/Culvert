@@ -99,11 +99,10 @@ func TestSAMLExchangeAssertionRejectsTransientOnlyNameIDResponse(t *testing.T) {
 
 func TestSAMLExchangeAssertionRejectsWrongRequestID(t *testing.T) {
 	fixture := newSignedSAMLFixture(t, nil)
-	globalSAMLStateStore.set(fixture.state, &samlStateEntry{
+	globalSAMLStateStore.Set(fixture.state, "203.0.113.5", &samlStateEntry{
 		requestID:  "different-request-id",
 		relayURL:   fixture.relayURL,
 		providerID: fixture.provider.profile.ID,
-		createdAt:  time.Now(),
 	})
 
 	id, relayURL, err := fixture.provider.ExchangeAssertion(fixture.callbackRequest(t))
