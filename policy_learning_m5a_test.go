@@ -124,13 +124,13 @@ func TestPL_ObservationGatingThreeStates(t *testing.T) {
 	auth := authOutcome{identity: "gate@corp.example", source: "idp", groups: []string{"eng"}}
 
 	// Disabled: nil singleton — adapter is a no-op.
-	learnObserveDecision(auth, "x.example", "GET", nil, "OK", "Bypass", 0)
+	learnObserveDecision(auth, "x.example", "GET", nil, "OK", "Bypass", policyContentKey{}, false)
 
 	// Enabled but idle: the gate fires BEFORE Observation construction — the
 	// transport counters must show NOTHING (not even a rejection).
 	plEnable(t)
 	eng := policyLearnEngine.Load()
-	learnObserveDecision(auth, "x.example", "GET", nil, "OK", "Bypass", 0)
+	learnObserveDecision(auth, "x.example", "GET", nil, "OK", "Bypass", policyContentKey{}, false)
 	learnObservePreDispatch(auth, "x.example", "GET", "BLOCKED")
 	if s := eng.ObservationStats(); s.Accepted != 0 || s.Rejected != 0 || s.Dropped != 0 {
 		t.Fatalf("enabled-idle produced transport activity: %+v", s)
@@ -138,7 +138,7 @@ func TestPL_ObservationGatingThreeStates(t *testing.T) {
 
 	// Active session: the qualified M2 path.
 	plStartSession(t)
-	learnObserveDecision(auth, "x.example", "GET", nil, "OK", "Bypass", 0)
+	learnObserveDecision(auth, "x.example", "GET", nil, "OK", "Bypass", policyContentKey{}, false)
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) && eng.ObservationStats().Delivered < 1 {
 		time.Sleep(time.Millisecond)
@@ -278,7 +278,7 @@ func plObserve(t *testing.T, subject string, groups []string, host string) {
 	eng := policyLearnEngine.Load()
 	before := eng.ObservationStats().Delivered
 	learnObserveDecision(authOutcome{identity: subject, source: "idp", groups: groups},
-		host, "GET", nil, "OK", "Inspect", 0)
+		host, "GET", nil, "OK", "Inspect", policyContentKey{}, false)
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) && eng.ObservationStats().Delivered <= before {
 		time.Sleep(time.Millisecond)

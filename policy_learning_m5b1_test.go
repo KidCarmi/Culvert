@@ -362,7 +362,7 @@ func TestM5B1_GroupTruncationCountedAndSurfaced(t *testing.T) {
 	}
 	eng := policyLearnEngine.Load()
 	learnObserveDecision(authOutcome{identity: "many@corp.example", source: "idp", groups: groups},
-		"m5b1.example", "GET", nil, "OK", "Inspect", 0)
+		"m5b1.example", "GET", nil, "OK", "Inspect", policyContentKey{}, false)
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) && eng.ObservationStats().Delivered < 1 {
 		time.Sleep(time.Millisecond)
