@@ -1732,17 +1732,35 @@ pinned by `TestCheckCategoryFeedDB_RowCarriesNoRawCause`.
   than boot-and-deny is an owner call, not a patch.
 
   **This is not a new finding, and that is the point.** The 2026-07-11 audit
-  already inventoried the whole class as **F-23 "Crash loop on fatal config"**
+  already inventoried the class as **F-23 "Crash loop on fatal config"**
   (`docs/engineering/PRODUCTION-FAILURE-MODE-AUDIT.md` §4, the failure-mode
-  matrix), naming five fatal sites — bad policy, blocklist, malformed HA lease,
-  **`urlcategories_startup.go:22,46`**, and port-bind — noting `restart: unless-stopped` ⇒ *"indefinite crash loop"*
-  with *"no self-alert after day-1"*, and ranking it among the top availability
+  matrix), noting `restart: unless-stopped` ⇒ *"indefinite crash loop"* with
+  *"no self-alert after day-1"*, and ranking it among the top availability
   killers (§15). Its `Mode` column reads `CLOSED` in the sense that table uses —
   fail-CLOSED, i.e. the process dies rather than passing traffic — **not**
   "resolved"; the audit is an inventory, not a tracker, and nothing claimed a fix.
-  CHAOS-50 closed exactly ONE of F-23's five sites, a month later, having
-  rediscovered it independently. The remaining four are R-F. Anyone picking this
-  up should start from F-23's list rather than re-deriving it a third time.
+
+  **R-F is a SUBSET of F-23, not the remainder of it.** F-23 lists five entries,
+  and one of them covers two distinct loads:
+
+  | F-23 entry | Load | Status |
+  |---|---|---|
+  | `urlcategories_startup.go:22,46` | `:46` — Layer-2 community store | **CLOSED by CHAOS-50** |
+  | `urlcategories_startup.go:22,46` | `:22` — `catStore.Load`, Layer 1 | R-F |
+  | `blocklist_startup.go:59` | blocklist | R-F |
+  | bad policy (`main.go:690`, now `:724`) | policy file | R-F |
+  | `cluster_startup.go:44` | malformed HA lease | **not R-F** |
+  | `main.go:993` / `ui.go:118` | port-bind | **not R-F** |
+
+  So CHAOS-50 closed ONE load — half of a single F-23 entry — a month after the
+  audit named it, having rediscovered it independently. R-F is the three
+  remaining **data-file** loads, which share the question this sweep answered for
+  Layer 2: is refuse-to-boot right for a file that failed to parse? The HA-lease
+  and port-bind entries are deliberately outside R-F — they are not data-file
+  loads and their postures are separate arguments (a port-bind failure has a
+  strong case for staying fatal). Anyone picking this up should start from F-23's
+  list rather than re-deriving it a third time, but should scope R-F to the three
+  rows above.
 - **Panic recovery costs one restart.** The marker cannot act until the boot
   after the crash. Zero-crash recovery means probing the store in a child process
   first — better, and a reasonable follow-up, but larger than the fault warrants.
