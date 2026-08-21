@@ -108,20 +108,30 @@ func TestLearnCategoryEpoch_EngineRestartDoesNotChurnOrStale(t *testing.T) {
 	}
 
 	// (8) Restart mid-Learning with unchanged taxonomy: session resumes with a
-	// process_restart gap but NO category churn.
+	// process_restart gap but NO category churn. The epoch check runs on the
+	// drain cadence (every epochCheckEvery observations) and at session stop,
+	// so the churn assertion is made AFTER StopSession — the point where the
+	// check has definitely executed against the resumed session's pin.
 	catStoreRestartEquivalentRebuild()
 	e2 := epochTestEngine(t, dir)
-	epochTestObserve(t, e2, 1) // drain runs the epoch check against the resumed session
+	epochTestObserve(t, e2, 1)
 	sess := e2.Sessions()
 	cur := sess[len(sess)-1]
 	if cur.State != policylearn.StateLearning {
 		t.Fatalf("session did not resume Learning: %s", cur.State)
 	}
-	if len(cur.CategoryChurn) != 0 {
-		t.Fatalf("restart alone recorded category churn: %+v", cur.CategoryChurn)
+
+	// (9) Complete → generate → restart again: the recommendation carries NO
+	// category-related stale reason under the unchanged taxonomy.
+	done, err := e2.StopSession("qb2")
+	if err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if len(done.CategoryChurn) != 0 {
+		t.Fatalf("restart alone recorded category churn: %+v", done.CategoryChurn)
 	}
 	gotRestartGap := false
-	for _, g := range cur.Gaps {
+	for _, g := range done.Gaps {
 		if g.Reason == "process_restart" {
 			gotRestartGap = true
 		}
@@ -130,14 +140,7 @@ func TestLearnCategoryEpoch_EngineRestartDoesNotChurnOrStale(t *testing.T) {
 		}
 	}
 	if !gotRestartGap {
-		t.Fatalf("process_restart gap missing: %+v", cur.Gaps)
-	}
-
-	// (9) Complete → generate → restart again: the recommendation carries NO
-	// category-related stale reason under the unchanged taxonomy.
-	done, err := e2.StopSession("qb2")
-	if err != nil {
-		t.Fatalf("Stop: %v", err)
+		t.Fatalf("process_restart gap missing: %+v", done.Gaps)
 	}
 	if _, err := e2.GenerateRecommendations(done.ID); err != nil {
 		t.Fatalf("Generate: %v", err)

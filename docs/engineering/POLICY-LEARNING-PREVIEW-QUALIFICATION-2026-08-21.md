@@ -160,7 +160,8 @@ already use — pinned by
 `TestAggregate_RestartResumeBeforeFirstCellDoesNotPanic` (reproduced the
 panic on the pre-fix binary; drill re-run 23/23).
 
-**QB-2 (REPORTED, not fixed): CategoryEpoch is restart-volatile.**
+**QB-2 (FIXED in this branch — reported first, corrective slice approved and
+implemented same-day, §8): CategoryEpoch was restart-volatile.**
 `learnCategoryEpoch()` composes the admin-taxonomy component from
 `urlcat.Store.Revision()` — an in-process counter bumped on every index
 rebuild INCLUDING load — so the epoch differs across restarts even when the
@@ -254,12 +255,12 @@ Implemented after review sign-off, scoped to exactly the reported slice:
 
 ## 9. Verdict
 
-**SHIP PREVIEW after one bounded corrective slice (QB-2).** Every
-qualification surface the epoch pin does not touch is green: predeclared-
-accuracy P0, zero-loss soak, a fully green operator journey with an ~89%
-immediate-usefulness rate, all durability/cardinality/guardrail invariants
-holding on real process boundaries, and privacy/evidence-honesty contracts
-verified on disk. QB-1 is fixed and regression-pinned in this branch. QB-2 is
-deterministic and fail-closed but breaks accept-after-restart, a routine
-operator sequence — preview should not onboard customers until the epoch
-derivation slice lands.
+**SHIP PREVIEW.** Both correctness blockers are closed and regression-pinned
+in this branch: QB-1 (resumed-empty-aggregate panic) and QB-2 including the
+QB-2.1 entry-order hardening (restart-stable, order-aware CategoryEpoch —
+implemented after review sign-off as the approved corrective slice, §8, and
+requalified 15/15 on the real binary with real restarts). Every
+qualification surface is green: predeclared-accuracy P0, zero-loss soak, a
+fully green operator journey with an ~89% immediate-usefulness rate, all
+durability/cardinality/guardrail invariants holding on real process
+boundaries, and privacy/evidence-honesty contracts verified on disk.
