@@ -199,6 +199,7 @@ func TestInstallScript_SetupAtRestEncryption_HostEnvOnlyCAPassphraseIsPersisted(
 	setupFn := extractShellFunctionBraceAware(t, "scripts/install.sh", "setup_at_rest_encryption")
 	envPutFn := extractShellFunction(t, "scripts/install.sh", "env_put")
 	secretFn := extractShellFunction(t, "scripts/install.sh", "secret_already_set")
+	validateFn := extractShellFunction(t, "scripts/install.sh", "validate_passphrase_for_env_file")
 
 	dir := t.TempDir()
 	envFile := filepath.Join(dir, ".env")
@@ -212,7 +213,7 @@ is_fresh_deployment() { return 0; }
 export CULVERT_CA_PASSPHRASE='` + hostCAPass + `'
 ` + "INSTALL_DIR=" + dir + "\n"
 
-	script := stubs + secretFn + "\n" + envPutFn + "\n" + setupFn + "\n" + "setup_at_rest_encryption\n"
+	script := stubs + secretFn + "\n" + envPutFn + "\n" + validateFn + "\n" + setupFn + "\n" + "setup_at_rest_encryption\n"
 
 	cmd := exec.CommandContext(t.Context(), "bash", "-c", script) // #nosec G204 -- fixed test script content, not external/user input
 	cmd.Stdin = bytes.NewReader(nil)                              // non-interactive: stdin is not a TTY
@@ -234,17 +235,26 @@ export CULVERT_CA_PASSPHRASE='` + hostCAPass + `'
 	}
 }
 
-// TestInstallScript_SetupAtRestEncryption_FreshDeployWithUnsafeHostLogPassphraseSkipsCA
-// proves that when CULVERT_LOG_PASSPHRASE is supplied only via the host
-// environment and contains characters that are unsafe to persist verbatim in
-// .env (docker compose re-interpolates $-references when reading .env — the
-// exact class of characters the choice=2 "enter my own passphrase" path
-// below already rejects for this reason), setup_at_rest_encryption() must
-// NOT blindly copy it into CULVERT_CA_PASSPHRASE. Doing so risks docker
-// compose resolving the persisted CA passphrase to a DIFFERENT string than
-// the actual (host-env, unmangled) log passphrase, silently splitting one
-// intended shared key into two different ones.
-func TestInstallScript_SetupAtRestEncryption_FreshDeployWithUnsafeHostLogPassphraseSkipsCA(t *testing.T) {
+// TestInstallScript_SetupAtRestEncryption_ExistingUnsafeLogPassphraseSkipsCAReuse
+// proves that when .env ALREADY carries a CULVERT_LOG_PASSPHRASE containing
+// characters unsafe to persist verbatim (docker compose re-interpolates
+// $-references when reading .env — the exact class of characters the
+// choice=2 "enter my own passphrase" path rejects, and validate_passphrase_
+// for_env_file enforces for freshly-supplied host-env values), the "reuse
+// the log passphrase for the CA key too" fresh-deploy path must NOT blindly
+// copy it into CULVERT_CA_PASSPHRASE.
+//
+// This value is seeded directly in .env (not via the host environment):
+// this run's own host-env intake now fails CLOSED through
+// validate_passphrase_for_env_file (see the RejectsUnsafeCharHostEnvPassphrase/
+// RejectsTooShortHostEnvPassphrase tests), so an unsafe value can only reach
+// this "reuse" branch by predating this run entirely — e.g. written by an
+// older script version, or hand-edited — which is exactly the case this
+// reuse-only-if-safe check exists to catch: reusing it for a SECOND secret
+// where docker compose's own interpolation could resolve the copy to a
+// DIFFERENT string than the original, silently splitting one intended
+// shared key into two different ones.
+func TestInstallScript_SetupAtRestEncryption_ExistingUnsafeLogPassphraseSkipsCAReuse(t *testing.T) {
 	setupFn := extractShellFunctionBraceAware(t, "scripts/install.sh", "setup_at_rest_encryption")
 	envPutFn := extractShellFunction(t, "scripts/install.sh", "env_put")
 	secretFn := extractShellFunction(t, "scripts/install.sh", "secret_already_set")
@@ -252,13 +262,18 @@ func TestInstallScript_SetupAtRestEncryption_FreshDeployWithUnsafeHostLogPassphr
 	dir := t.TempDir()
 	envFile := filepath.Join(dir, ".env")
 
-	const unsafeLogPass = `abc$def`
+	// Long enough to clear the 12-character floor so only the charset defense
+	// is under test here (the length floor is covered separately).
+	const unsafeLogPass = `abc$defghijklmnop`
+	if err := os.WriteFile(envFile, []byte("CULVERT_LOG_PASSPHRASE="+unsafeLogPass+"\n"), 0o600); err != nil {
+		t.Fatalf("seed .env: %v", err)
+	}
+
 	stubs := `
 info() { :; }
 warn() { :; }
 error() { echo "ERROR: $*" >&2; exit 7; }
 is_fresh_deployment() { return 0; }
-export CULVERT_LOG_PASSPHRASE='` + unsafeLogPass + `'
 ` + "INSTALL_DIR=" + dir + "\n"
 
 	script := stubs + secretFn + "\n" + envPutFn + "\n" + setupFn + "\n" + "setup_at_rest_encryption\n"
@@ -270,13 +285,13 @@ export CULVERT_LOG_PASSPHRASE='` + unsafeLogPass + `'
 		t.Fatalf("setup_at_rest_encryption failed: %v\n%s", err, out)
 	}
 
-	envContent := ""
-	if b, rerr := os.ReadFile(envFile); rerr == nil {
-		envContent = string(b)
+	envContent, rerr := os.ReadFile(envFile)
+	if rerr != nil {
+		t.Fatalf("read %s: %v", envFile, rerr)
 	}
 
-	if strings.Contains(envContent, "CULVERT_CA_PASSPHRASE=") {
-		t.Fatalf("an unsafe-charset host CULVERT_LOG_PASSPHRASE (%q) was copied verbatim into "+
+	if strings.Contains(string(envContent), "CULVERT_CA_PASSPHRASE=") {
+		t.Fatalf("an unsafe-charset on-disk CULVERT_LOG_PASSPHRASE (%q) was copied verbatim into "+
 			"CULVERT_CA_PASSPHRASE in .env — docker compose's own .env interpolation could resolve this "+
 			"to a DIFFERENT value than the real log passphrase, silently mismatching the two encryption "+
 			"keys; output:\n%s\n.env content:\n%s", unsafeLogPass, out, envContent)
