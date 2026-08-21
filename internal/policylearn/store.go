@@ -25,10 +25,12 @@ import (
 // policy_content_hash (canonical access-policy content identity); 6 = M5B
 // decision lifecycle (accepting/accepted/rejected states + target_rule_id /
 // accepted_* / rejected_* / reject_reason); 7 = M5B.1 group-truncation loss
-// accounting (transport groups_truncated). Older documents load cleanly on a
-// newer binary (pure field additions, all omitempty); saves always write the
-// current version.
-const SchemaVersion = 7
+// accounting (transport groups_truncated); 8 = policy-content churn (session
+// policy_churn + aggregate policy_churn_overflow — Codex round 13: transient
+// A→B→A policy changes latched as they happen). Older documents load cleanly
+// on a newer binary (pure field additions, all omitempty); saves always write
+// the current version.
+const SchemaVersion = 8
 
 // minReadableSchemaVersion: every version in [min, current] loads.
 const minReadableSchemaVersion = 1

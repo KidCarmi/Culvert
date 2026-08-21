@@ -310,11 +310,16 @@ func (e *Engine) consumeGuarded(t *transport, o Observation) {
 		}
 		attributed = true
 		e.aggregateLocked(sess, &o)
-		e.sinceEpoch++
-		if e.sinceEpoch >= epochCheckEvery {
-			e.sinceEpoch = 0
-			e.checkEpochLocked(sess, e.cfg.Now())
-		}
+		// Per-observation churn latch (Codex round 13): the old 64-observation
+		// cadence left a blind window — a taxonomy or policy A→B→A round trip
+		// completing between two samples classified observations under B while
+		// both samples saw A, so the B-derived evidence looked baseline-
+		// consistent. The identity reads are cheap (cached fingerprints /
+		// generation-memoized content hash), so every consumed observation
+		// checks; the only residual is a round trip racing a SINGLE
+		// observation's resolution, which the neighboring observations'
+		// checks latch.
+		e.checkEpochLocked(sess, e.cfg.Now())
 		e.sinceFlush++
 		if e.sinceFlush >= flushEvery {
 			e.sinceFlush = 0

@@ -202,10 +202,10 @@ func TestAggregate_CategoryEpochChurnRecorded(t *testing.T) {
 	}
 	// Flip the epoch mid-session; churn is detected on the drain cadence.
 	h.epoch = "epoch-2"
-	for i := 0; i < epochCheckEvery+1; i++ {
+	for i := 0; i < 65; i++ {
 		h.observe(t, "alice", "idp", []string{"eng"}, "code.example", "OK")
 	}
-	h.drainWait(t, int64(epochCheckEvery+1))
+	h.drainWait(t, int64(65))
 	if _, err := h.e.StopSession("m3"); err != nil { // stop also checks
 		t.Fatal(err)
 	}

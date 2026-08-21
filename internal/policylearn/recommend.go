@@ -99,7 +99,9 @@ const (
 // config). Bump it with any change to that logic so the semantic shift is
 // visible in RecommendationPolicyHash even when no configurable knob moved.
 // v2: session observation gaps (process restarts) cap confidence below HIGH.
-const recommendAlgorithmVersion = 2
+// v3: mid-session policy-content churn (incl. transient A→B→A round trips)
+// caps confidence below HIGH.
+const recommendAlgorithmVersion = 3
 
 // Recommendation bounds.
 const (
@@ -747,11 +749,20 @@ func confidenceFor(sess *Session, c *Cell, th Thresholds) (level string, reasons
 		capBelowHigh(fmt.Sprintf("session_gaps:%d", len(sess.Gaps)))
 	}
 	churnOverflow := int64(0)
+	policyChurnOverflow := int64(0)
 	if sess.Agg != nil {
 		churnOverflow = sess.Agg.ChurnOverflow
+		policyChurnOverflow = sess.Agg.PolicyChurnOverflow
 	}
 	if len(sess.CategoryChurn) > 0 || churnOverflow > 0 {
 		capBelowHigh(fmt.Sprintf("category_churn:changes=%d,overflow=%d", len(sess.CategoryChurn), churnOverflow))
+	}
+	// Policy-content churn (Codex round 13): part of the session's evidence
+	// was collected under a DIFFERENT policy — even when the content hash was
+	// later restored to the baseline (A→B→A), which the generation-time
+	// identity comparison alone cannot see. Same posture as category churn.
+	if len(sess.PolicyChurn) > 0 || policyChurnOverflow > 0 {
+		capBelowHigh(fmt.Sprintf("policy_churn:changes=%d,overflow=%d", len(sess.PolicyChurn), policyChurnOverflow))
 	}
 	if communityTierMajority(c, th) {
 		capBelowHigh("community_tier_majority")

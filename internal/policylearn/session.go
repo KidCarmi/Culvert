@@ -40,6 +40,7 @@ type Session struct {
 	// M3 — bounded factual aggregation + degradation metadata.
 	SubjectKeyID  string          `json:"subject_key_id,omitempty"` // pseudonym-key identity the tokens were minted under
 	CategoryChurn []EpochChurn    `json:"category_churn,omitempty"` // bounded mid-session category-generation changes
+	PolicyChurn   []EpochChurn    `json:"policy_churn,omitempty"`   // bounded mid-session policy-content changes (schema v8, Codex round 13: an A→B→A round trip during the session collects evidence under B that the restored baseline hash alone cannot reveal)
 	Transport     TransportWindow `json:"transport,omitempty"`      // session-window transport-counter deltas (loss accounting)
 	Agg           *Aggregate      `json:"agg,omitempty"`            // bounded Group × Category cells
 
@@ -76,6 +77,7 @@ func (s *Session) clone() Session {
 	c := *s
 	c.Gaps = append([]Gap(nil), s.Gaps...)
 	c.CategoryChurn = append([]EpochChurn(nil), s.CategoryChurn...)
+	c.PolicyChurn = append([]EpochChurn(nil), s.PolicyChurn...)
 	// Agg is intentionally shared read-only in clones only via deep accessors;
 	// external callers get a nil Agg to keep session copies cheap and to keep
 	// the mutable aggregate encapsulated (AggregateSnapshot is the read API).
@@ -219,6 +221,12 @@ func (e *Engine) finishActive(actor, terminalState string) (Session, error) {
 	if err := e.saveLocked(); err != nil {
 		s.State, s.StoppedAt, s.StoppedBy = prevState, prevStopAt, prevStopBy
 		e.sessions = prevSessions
+		// The gate was OFF for the whole drain + failed write — requests in
+		// that interval went unobserved. Record the window as a gap BEFORE
+		// resuming (Codex round 13): a later successful completion must not
+		// claim full confidence over it (the round-3 session_gaps cap fires).
+		s.Gaps = append(s.Gaps, Gap{At: rfc3339(now), Reason: "failed_transition"})
+		e.dirty = true
 		// Re-open the window under the CURRENT generation: learning resumes
 		// and new observations attribute to s again.
 		e.aggGen = e.windowGen.Load()

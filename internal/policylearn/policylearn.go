@@ -125,6 +125,14 @@ type Config struct {
 	// into the session baseline at Start; a mid-session change is recorded as
 	// churn. nil = epoch tracking disabled.
 	CategoryEpoch func() string
+	// PolicyContent returns the current canonical policy CONTENT identity
+	// (schema v8, Codex round 13) — compared per consumed observation against
+	// the Baseline.PolicyContentHash pinned at Start, so evidence collected
+	// under a TRANSIENT policy change (A→B→A) is latched as churn even though
+	// the restored hash matches the baseline again at generation time. Must
+	// be cheap (the root memoizes by policy generation). nil = policy-churn
+	// tracking disabled.
+	PolicyContent func() string
 	// RecommendableCategories is the fail-closed ALLOWLIST of categories the
 	// M4 generator may recommend (never a denylist): a cell whose category is
 	// not on this list can never produce a recommendation, and an EMPTY list
@@ -172,7 +180,6 @@ type Engine struct {
 	aggSession   *Session    // the session observations are attributed to (the one Learning when accepted)
 	scopeScratch []string    // reusable scope buffer for the drain
 	sinceFlush   int         // observations since the last aggregate persist
-	sinceEpoch   int         // observations since the last category-epoch check
 	tPin         ObservationStats
 
 	// M4 recommendation state. allowlist/allowSet/guardrailsHash/th are

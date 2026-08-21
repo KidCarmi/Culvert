@@ -469,6 +469,142 @@ func TestLoad_LegacyUnpinnedSessionWithTokensRecordsDiscontinuity(t *testing.T) 
 	}
 }
 
+// TestChurn_TransientEpochRoundTripWithinCadenceLatched (round 13): a
+// taxonomy A→B→A round trip completing within fewer than 64 delivered
+// observations evaded the old cadence check — observations classified under
+// B looked baseline-consistent. The churn latch now runs per consumed
+// observation.
+func TestChurn_TransientEpochRoundTripWithinCadenceLatched(t *testing.T) {
+	var epoch atomic.Value
+	epoch.Store("A")
+	clk := newTestClock()
+	e := newTestEngine(t, t.TempDir(), clk, func(c *Config) {
+		c.CategoryEpoch = func() string { return epoch.Load().(string) }
+	})
+	t.Cleanup(func() { _ = e.Close() })
+	if _, err := e.StartSession("op"); err != nil {
+		t.Fatal(err)
+	}
+	obs := func() {
+		before := e.ObservationStats().Delivered
+		e.Observe(Observation{Subject: "u", AuthSource: "idp", Host: "x.example", Status: "OK"})
+		barrierWait(t, func() bool { return e.ObservationStats().Delivered > before }, "observation delivered")
+	}
+	obs()
+	epoch.Store("B")
+	obs() // classified while the taxonomy is B — far below the old 64 cadence
+	epoch.Store("A")
+	obs()
+	sess, err := e.StopSession("op")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sess.CategoryChurn) < 2 {
+		t.Fatalf("A→B→A round trip within the old cadence window not latched: churn=%v", sess.CategoryChurn)
+	}
+}
+
+// TestChurn_TransientPolicyRoundTripLatched (round 13): evidence collected
+// under a TRANSIENT policy change (A→B→A) is invisible to the generation-time
+// content-hash comparison — the restored hash matches the baseline again.
+// The per-observation policy-content latch records it as it happens, and the
+// churn caps confidence below HIGH.
+func TestChurn_TransientPolicyRoundTripLatched(t *testing.T) {
+	var content atomic.Value
+	content.Store("hash-A")
+	clk := newTestClock()
+	e := newTestEngine(t, t.TempDir(), clk, func(c *Config) {
+		c.Baseline = func() Baseline { return Baseline{PolicyContentHash: content.Load().(string)} }
+		c.PolicyContent = func() string { return content.Load().(string) }
+	})
+	t.Cleanup(func() { _ = e.Close() })
+	if _, err := e.StartSession("op"); err != nil {
+		t.Fatal(err)
+	}
+	obs := func() {
+		before := e.ObservationStats().Delivered
+		e.Observe(Observation{Subject: "u", AuthSource: "idp", Host: "x.example", Status: "OK"})
+		barrierWait(t, func() bool { return e.ObservationStats().Delivered > before }, "observation delivered")
+	}
+	obs()
+	content.Store("hash-B")
+	obs()
+	content.Store("hash-A") // restored — the identity comparison alone sees no change
+	obs()
+	sess, err := e.StopSession("op")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sess.PolicyChurn) < 2 {
+		t.Fatalf("transient policy round trip not latched: churn=%v", sess.PolicyChurn)
+	}
+
+	// The churn caps confidence below HIGH with an identified limit.
+	th := Thresholds{}.withDefaults()
+	cell := &Cell{Allowed: 100, Subjects: map[string]bool{}, Days: map[string]bool{}}
+	for i := 0; i < 10; i++ {
+		cell.Subjects[string(rune('a'+i))] = true
+		cell.Days["2026-08-0"+string(rune('1'+i))] = true
+	}
+	level, _, limits := confidenceFor(&sess, cell, th)
+	if level == ConfidenceHigh {
+		t.Fatal("policy-churned session still produced HIGH confidence")
+	}
+	found := false
+	for _, l := range limits {
+		if strings.HasPrefix(l, "policy_churn:") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("policy churn not identified in limits: %v", limits)
+	}
+}
+
+// TestFinishActive_PersistFailureRecordsGap (round 13): the gate is OFF for
+// the whole drain + failed write of a stop — requests in that interval went
+// unobserved. Reopening the session without recording the window as a gap
+// let a later successful completion claim full confidence over it.
+func TestFinishActive_PersistFailureRecordsGap(t *testing.T) {
+	dir := t.TempDir()
+	store := filepath.Join(dir, "store")
+	if err := os.Mkdir(store, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	clk := newTestClock()
+	e, err := New(Config{
+		Now:            clk.now,
+		StorePath:      filepath.Join(store, "pl.json"),
+		SubjectKeyPath: filepath.Join(dir, "sk.key"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = e.Close() })
+	if _, err := e.StartSession("op"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(store); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.StopSession("op"); err == nil {
+		t.Fatal("StopSession succeeded with the store directory removed")
+	}
+	sessions := e.Sessions()
+	if len(sessions) != 1 || sessions[0].State != StateLearning {
+		t.Fatalf("failed stop did not resume the session: %+v", sessions)
+	}
+	found := false
+	for _, g := range sessions[0].Gaps {
+		if g.Reason == "failed_transition" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("failed-transition window not recorded as a gap: %+v", sessions[0].Gaps)
+	}
+}
+
 // TestLoad_RejectsNullAggregateCellToQuarantine (round 12): a syntactically
 // valid store carrying `"cells":{"…":null}` must quarantine at decode — the
 // aggregate consumers dereference cell fields, so a nil cell would panic

@@ -34,6 +34,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/policylearn"
@@ -133,6 +134,7 @@ func buildPolicyLearnEngine(cats []string) (*policylearn.Engine, error) {
 			return category, tier
 		},
 		CategoryEpoch:           learnCategoryEpoch,
+		PolicyContent:           policyContentIdentityCached,
 		RecommendableCategories: cats,
 		Quarantine: func(path string, err error) {
 			quarantineCorruptStateFile("policy_learning", path, err)
@@ -206,6 +208,30 @@ func policyLearnApplyDesiredLocked(desired policyLearnSettings) {
 // every recommendation). Domain tag v2: pre-fix pinned hashes covered the
 // stamps, so they mismatch v2 values and go stale exactly once at upgrade —
 // never reinterpreted (the epoch-scheme upgrade precedent).
+// policyContentMemo caches the content hash keyed by the policy generation:
+// every rulebase mutation bumps the generation, so the hash recomputes at
+// most once per policy change while the learning drain's PER-OBSERVATION
+// churn check (Codex round 13) costs one version read + string compare.
+// A same-generation content change is impossible in-process (every mutator
+// bumps); the memo is process-local, so counter resets across restarts
+// cannot alias into it.
+type policyContentMemoEntry struct {
+	gen  int64
+	hash string
+}
+
+var policyContentMemo atomic.Pointer[policyContentMemoEntry]
+
+func policyContentIdentityCached() string {
+	gen, _ := policyStore.policyVersion()
+	if m := policyContentMemo.Load(); m != nil && m.gen == gen {
+		return m.hash
+	}
+	h := policyContentIdentity()
+	policyContentMemo.Store(&policyContentMemoEntry{gen: gen, hash: h})
+	return h
+}
+
 func policyContentIdentity() string {
 	rules := policyStore.List()
 	for i := range rules {

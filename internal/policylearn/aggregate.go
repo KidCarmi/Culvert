@@ -36,8 +36,7 @@ const (
 	maxTierHits           = 8     // per-cell category-tier entries (defensive; tiers are a small closed set)
 	maxCategoryChurn      = 8     // recorded category-epoch changes per session
 
-	flushEvery      = 1024 // drain-side persist cadence (aggregated observations)
-	epochCheckEvery = 64   // drain-side category-epoch churn check cadence
+	flushEvery = 1024 // drain-side persist cadence (aggregated observations)
 )
 
 // Scope-key construction. The "g:"/"s:" prefixes are the collision wall.
@@ -89,10 +88,11 @@ type Aggregate struct {
 	Cells map[string]*Cell `json:"cells,omitempty"` // key: scope + \x1f + category
 
 	// Loss/degradation accounting (evidence can only weaken on overflow).
-	CellsDropped      int64 `json:"cells_dropped,omitempty"`       // contributions refused at the cell cap
-	SubjectBudgetUsed int64 `json:"subject_budget_used,omitempty"` // global token budget consumption
-	ChurnOverflow     int64 `json:"churn_overflow,omitempty"`
-	SubjectKeyChanged bool  `json:"subject_key_changed,omitempty"` // key rotated/lost mid-session — token populations before/after are disjoint
+	CellsDropped        int64 `json:"cells_dropped,omitempty"`       // contributions refused at the cell cap
+	SubjectBudgetUsed   int64 `json:"subject_budget_used,omitempty"` // global token budget consumption
+	ChurnOverflow       int64 `json:"churn_overflow,omitempty"`
+	PolicyChurnOverflow int64 `json:"policy_churn_overflow,omitempty"` // policy-content changes past the bounded list (schema v8)
+	SubjectKeyChanged   bool  `json:"subject_key_changed,omitempty"`   // key rotated/lost mid-session — token populations before/after are disjoint
 }
 
 func newAggregate() *Aggregate {
@@ -342,26 +342,46 @@ func boundedCount(m *map[string]int64, other *int64, key string, bound int) { //
 // baseline (bounded; overflow counted). Called under e.mu from the drain
 // cadence and at session stop.
 func (e *Engine) checkEpochLocked(sess *Session, now time.Time) {
-	if e.cfg.CategoryEpoch == nil || sess == nil {
+	if sess == nil {
 		return
 	}
-	cur := e.cfg.CategoryEpoch()
-	last := sess.Baseline.CategoryEpoch
-	if n := len(sess.CategoryChurn); n > 0 {
-		last = sess.CategoryChurn[n-1].To
+	if e.cfg.CategoryEpoch != nil {
+		e.latchChurnLocked(sess, now, e.cfg.CategoryEpoch(), sess.Baseline.CategoryEpoch,
+			&sess.CategoryChurn, func(a *Aggregate) *int64 { return &a.ChurnOverflow })
+	}
+	// Policy-content churn (schema v8, Codex round 13): an A→B→A policy round
+	// trip during the session collects evidence under B; at generation time
+	// the restored content hash matches the baseline again, so the round trip
+	// is invisible to the identity comparison — it must be latched HERE, as
+	// it happens, exactly like category churn.
+	if e.cfg.PolicyContent != nil {
+		e.latchChurnLocked(sess, now, e.cfg.PolicyContent(), sess.Baseline.PolicyContentHash,
+			&sess.PolicyChurn, func(a *Aggregate) *int64 { return &a.PolicyChurnOverflow })
+	}
+}
+
+// latchChurnLocked appends a churn record when cur differs from the LAST seen
+// value (the pinned baseline, or the newest recorded churn — so a full A→B→A
+// round trip records both edges); overflow past the bound is counted, never
+// silent. Caller holds e.mu.
+func (e *Engine) latchChurnLocked(sess *Session, now time.Time, cur, baseline string, churn *[]EpochChurn, overflow func(*Aggregate) *int64) {
+	last := baseline
+	if n := len(*churn); n > 0 {
+		last = (*churn)[n-1].To
 	}
 	if cur == last {
 		return
 	}
-	if len(sess.CategoryChurn) >= maxCategoryChurn {
+	if len(*churn) >= maxCategoryChurn {
 		if sess.Agg == nil {
 			sess.Agg = newAggregate()
 		}
-		sess.Agg.ChurnOverflow++
+		p := overflow(sess.Agg)
+		*p++
 		e.dirty = true
 		return
 	}
-	sess.CategoryChurn = append(sess.CategoryChurn, EpochChurn{At: rfc3339(now), To: cur})
+	*churn = append(*churn, EpochChurn{At: rfc3339(now), To: cur})
 	e.dirty = true
 }
 
