@@ -137,7 +137,7 @@ func BenchmarkPerfQual_ProxyHTTPForward(b *testing.B) {
 				if err != nil {
 					b.Fatalf("proxied GET: %v", err)
 				}
-				io.Copy(io.Discard, resp.Body) //nolint:errcheck
+				io.Copy(io.Discard, resp.Body) //nolint:errcheck // bench body drain; best-effort
 				resp.Body.Close()
 				if resp.StatusCode != http.StatusOK {
 					b.Fatalf("status %d", resp.StatusCode)
@@ -176,7 +176,7 @@ func BenchmarkPerfQual_ProxyCONNECT(b *testing.B) { //nolint:gocognit // one exp
 					}
 					go func(c net.Conn) {
 						defer c.Close()
-						io.Copy(c, c) //nolint:errcheck
+						io.Copy(c, c) //nolint:errcheck // bench echo relay; ends on close
 					}(c)
 				}
 			}()
@@ -196,7 +196,7 @@ func BenchmarkPerfQual_ProxyCONNECT(b *testing.B) { //nolint:gocognit // one exp
 				if err != nil {
 					b.Fatalf("dial proxy: %v", err)
 				}
-				fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target) //nolint:errcheck
+				fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target) //nolint:errcheck // bench conn write; failure surfaces on the read
 				br := bufio.NewReader(conn)
 				line, err := br.ReadString('\n')
 				if err != nil || !containsHTTP200(line) {
