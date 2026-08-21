@@ -342,11 +342,26 @@ func (c *policyDraftCoordinator) ensureDurableTarget(ruleID string, matches func
 // sequence published the stale snapshot and deleted the freshly persisted
 // rule while its acceptance had already reported success. Lock order
 // c.mu → PolicyStore.mu (the stageTarget convention).
-func (c *policyDraftCoordinator) commitActivate() (policyDraftDiff, error) {
+//
+// ifVersion, when non-nil, is the candidate generation the operator reviewed,
+// RE-VERIFIED here inside the same critical section (Codex fix): the handler's
+// unlocked precondition can be invalidated by a stageDurableAppend landing
+// between the handler's read and this lock — the commit would then activate a
+// candidate carrying a staged rule the operator never saw. A mismatch returns
+// errDraftVersionConflict and activates nothing.
+func (c *policyDraftCoordinator) commitActivate(ifVersion *int64) (policyDraftDiff, error) {
 	c.mu.Lock()
 	if !c.state.Active {
 		c.mu.Unlock()
 		return policyDraftDiff{}, errors.New("no draft to commit")
+	}
+	if ifVersion != nil {
+		if cur, _ := c.cand.policyVersion(); cur != *ifVersion {
+			c.mu.Unlock()
+			return policyDraftDiff{}, fmt.Errorf(
+				"the draft changed since you loaded it (your version %d, current %d) — review and retry: %w",
+				*ifVersion, cur, errDraftVersionConflict)
+		}
 	}
 	cand := c.cand.List()
 	for i := range cand {
@@ -789,11 +804,15 @@ func apiPolicyDraftCommit(w http.ResponseWriter, r *http.Request) {
 	// changes. A commit ALWAYS operates on the candidate, so compare against the
 	// candidate's generation directly — not effectivePolicyVersion(), which falls
 	// back to running when RequireCommit is off (the stranded-draft recovery
-	// state) and would spuriously 409 a legitimate recovery commit.
+	// state) and would spuriously 409 a legitimate recovery commit. This early
+	// check owns the canonical structured 409 (and the invalid-param 400);
+	// commitActivate re-verifies the same fence INSIDE its critical section
+	// (Codex fix) so a durable append landing after this line still conflicts.
 	candVer, _ := policyDraft.candidateVersion()
 	if policyVersionConflictAgainst(w, r, candVer) {
 		return
 	}
+	ifVersion := parseIfVersion(r)
 	var body struct {
 		Comment string `json:"comment"`
 	}
@@ -813,9 +832,14 @@ func apiPolicyDraftCommit(w http.ResponseWriter, r *http.Request) {
 	}
 	// Validate + diff + activate + clear as ONE coordinator critical section
 	// (Codex fix): a concurrent durable append can no longer land between the
-	// commit's snapshot and its clear.
-	diff, err := policyDraft.commitActivate()
+	// commit's snapshot and its clear, and the reviewed-version fence is
+	// re-verified under the same lock.
+	diff, err := policyDraft.commitActivate(ifVersion)
 	if err != nil {
+		if errors.Is(err, errDraftVersionConflict) {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}

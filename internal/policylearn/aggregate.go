@@ -141,6 +141,22 @@ func scopesFor(o *Observation, scratch []string) []string {
 		if g == "" {
 			continue
 		}
+		// A group name asserted MORE THAN ONCE in one identity (the OIDC/SAML
+		// extractors preserve duplicate claim values) must contribute exactly
+		// one scope (Codex fix): duplicate scope keys would apply the single
+		// observation repeatedly to the same cell, inflating counts — the one
+		// direction evidence must never err in. Bounded O(n²) over at most
+		// MaxObservationGroups entries; alloc-free.
+		dup := false
+		for _, s := range scratch {
+			if s[len(scopeGroupPrefix):] == g {
+				dup = true
+				break
+			}
+		}
+		if dup {
+			continue
+		}
 		scratch = append(scratch, scopeGroupPrefix+g)
 	}
 	if len(scratch) == 0 {

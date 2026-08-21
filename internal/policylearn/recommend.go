@@ -98,7 +98,8 @@ const (
 // bounds they run under (per-generation/retention caps are code constants, not
 // config). Bump it with any change to that logic so the semantic shift is
 // visible in RecommendationPolicyHash even when no configurable knob moved.
-const recommendAlgorithmVersion = 1
+// v2: session observation gaps (process restarts) cap confidence below HIGH.
+const recommendAlgorithmVersion = 2
 
 // Recommendation bounds.
 const (
@@ -736,6 +737,14 @@ func confidenceFor(sess *Session, c *Cell, th Thresholds) (level string, reasons
 	if sess.Transport.Degraded() {
 		capBelowHigh(fmt.Sprintf("transport_loss:dropped=%d,rejected=%d,panics=%d",
 			sess.Transport.Dropped, sess.Transport.Rejected, sess.Transport.ConsumerPanics))
+	}
+	// A recorded observation GAP (a process restart while the session was
+	// Learning) is a window of unobserved traffic (Codex fix): the transport
+	// counters are clean across it precisely because nothing was running to
+	// count the loss, so full confidence must not be claimed over it. Same
+	// posture as transport loss — identified as a limit, caps HIGH to MEDIUM.
+	if len(sess.Gaps) > 0 {
+		capBelowHigh(fmt.Sprintf("session_gaps:%d", len(sess.Gaps)))
 	}
 	churnOverflow := int64(0)
 	if sess.Agg != nil {

@@ -191,6 +191,65 @@ func TestCodexFix_ContentDriftAtDurabilityPointRefused(t *testing.T) {
 	}
 }
 
+// TestCodexFix_CommitFenceRecheckedInsideActivation (Codex round 3): the
+// handler's unlocked ?ifVersion precondition can be invalidated by a
+// stageDurableAppend landing between the handler's read and the commit's
+// critical section — the commit would then activate a candidate carrying a
+// staged rule the operator never reviewed. commitActivate must re-verify the
+// asserted candidate version INSIDE the same coordinator lock the durable
+// append uses, and conflict instead of activating.
+func TestCodexFix_CommitFenceRecheckedInsideActivation(t *testing.T) {
+	plDurableDraftHarness(t)
+	setRequireCommit(true)
+
+	mkRule := func(name string) PolicyRule {
+		disabled := false
+		r := PolicyRule{
+			ID:           newRuleID(),
+			Name:         name,
+			SourceGroup:  "fence",
+			DestCategory: "m5b-cat",
+			Action:       ActionAllow,
+			SSLAction:    SSLInspect,
+			Enabled:      &disabled,
+		}
+		stampRuleMetadataForWrite(&r, nil, "codexfix")
+		return r
+	}
+
+	ver, _ := effectivePolicyVersion()
+	if _, err := policyDraft.stageDurableAppend("codexfix", ver, mkRule("fence-reviewed")); err != nil {
+		t.Fatalf("stageDurableAppend: %v", err)
+	}
+	reviewed, _ := policyDraft.candidateVersion() // the version the operator reviewed
+
+	// The interleaved durable append (a learning accept) the operator did NOT see.
+	ver2, _ := effectivePolicyVersion()
+	unseen, err := policyDraft.stageDurableAppend("codexfix", ver2, mkRule("fence-unseen"))
+	if err != nil {
+		t.Fatalf("stageDurableAppend (interleave): %v", err)
+	}
+
+	if _, err := policyDraft.commitActivate(&reviewed); !errors.Is(err, errDraftVersionConflict) {
+		t.Fatalf("stale reviewed version committed anyway (err=%v)", err)
+	}
+	if policyStore.findByIDCopy(unseen.ID) != nil {
+		t.Fatal("conflicted commit still activated the unreviewed rule into RUNNING")
+	}
+	if !policyDraft.active() {
+		t.Fatal("conflicted commit cleared the draft")
+	}
+
+	// With the CURRENT candidate version the commit proceeds.
+	cur, _ := policyDraft.candidateVersion()
+	if _, err := policyDraft.commitActivate(&cur); err != nil {
+		t.Fatalf("current-version commit: %v", err)
+	}
+	if policyStore.findByIDCopy(unseen.ID) == nil {
+		t.Fatal("committed rule missing from RUNNING")
+	}
+}
+
 // TestCodexFix_CommitAppendNeverVanishesRule (Codex re-review): the commit's
 // snapshot→activate→clear now shares one coordinator critical section with
 // the durable append, so a successfully appended rule can land only entirely
@@ -215,7 +274,7 @@ func TestCodexFix_CommitAppendNeverVanishesRule(t *testing.T) {
 		stampRuleMetadataForWrite(&rule, nil, "codexfix")
 		commitDone := make(chan struct{})
 		go func() {
-			_, _ = policyDraft.commitActivate() // may 4xx-equivalent when no draft — fine
+			_, _ = policyDraft.commitActivate(nil) // may 4xx-equivalent when no draft — fine
 			close(commitDone)
 		}()
 		added, err := policyDraft.stageDurableAppend("codexfix", ver, rule)

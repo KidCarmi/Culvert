@@ -1469,6 +1469,23 @@ func policyVersionConflictAgainst(w http.ResponseWriter, r *http.Request, cur in
 	return true
 }
 
+// parseIfVersion extracts the optional ?ifVersion=N asserted generation for
+// callers that re-verify the fence inside a locked critical section (the
+// draft-commit path). nil = no assertion. Invalid input also returns nil —
+// callers run policyVersionConflictAgainst first, which 400s malformed input
+// before this is consulted.
+func parseIfVersion(r *http.Request) *int64 {
+	raw := strings.TrimSpace(r.URL.Query().Get("ifVersion"))
+	if raw == "" {
+		return nil
+	}
+	v, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return nil
+	}
+	return &v
+}
+
 // apiPolicy dispatches the access-rule CRUD endpoint. The per-method branches
 // live in apiPolicyCreate/Update/Delete so this stays a thin router (gocognit).
 func apiPolicy(w http.ResponseWriter, r *http.Request) {

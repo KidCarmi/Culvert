@@ -181,8 +181,19 @@ func (e *Engine) finishActive(actor, terminalState string) (Session, error) {
 	// the other lifecycle ops).
 	e.finishing = true
 	e.learningActive.Store(false)
-	e.windowGen.Add(1)
 	e.mu.Unlock()
+
+	// Wait for in-flight producers BEFORE rotating the window (Codex fix): an
+	// Observe that passed the active gate may not have completed its enqueue
+	// yet — rotating first would stamp its observation with the NEXT
+	// generation, so the barrier below could not flush it into s and its
+	// acceptance would resolve as a post-terminal drop outside s's accounting.
+	// The gate is off, so the producer count can only fall; producers never
+	// take e.mu and never block (bounded wait).
+	if t := e.tr; t != nil {
+		t.waitProducers()
+	}
+	e.windowGen.Add(1)
 
 	e.drainBarrier() // every observation accepted under s's window is now aggregated into s
 
@@ -293,17 +304,30 @@ func (e *Engine) maybeExpireLocked(now time.Time) {
 // or later session). Caller holds e.mu.
 func (e *Engine) closeWindowLocked() {
 	e.learningActive.Store(false)
+	if t := e.tr; t != nil {
+		// Codex fix: a producer that passed the active gate may not have
+		// completed its enqueue yet — wait (bounded; producers never take e.mu)
+		// so its acceptance is visible to the outstanding count below instead
+		// of leaking past the close entirely.
+		t.waitProducers()
+	}
 	e.syncTransportLocked()
-	// Codex fix: events still QUEUED at this instant were accepted under this
-	// window and are doomed by the rotation below — attribute them to THIS
-	// session's loss accounting now, so a generate from the expired session
-	// sees a degraded (confidence-capped) window instead of a clean one. The
-	// same events also hit the global drop counter when they drain, which a
-	// later window's delta may fold again — an accepted OVERCOUNT of loss
-	// (the safe direction: it only weakens claims).
+	// Codex fix: events ACCEPTED but not yet resolved at this instant were
+	// accepted under this window and are doomed by the rotation below.
+	// Derive the count from the monotonic transport counters — accepted −
+	// delivered − dropped − panics — because a queue-length probe misses the
+	// event the drain has already DEQUEUED and holds while waiting for e.mu
+	// (that event would otherwise resolve as a post-close drop with this
+	// session's window claiming zero loss). Charging them here lets a generate
+	// from the expired session see a degraded (confidence-capped) window
+	// instead of a clean one. The same events also hit the global drop counter
+	// when they drain (and an aggregated-but-undelivered event counts here
+	// too), which a later window's delta may fold again — an accepted
+	// OVERCOUNT of loss (the safe direction: it only weakens claims).
 	if sess := e.aggSession; sess != nil && e.tr != nil {
-		if backlog := int64(len(e.tr.ch)); backlog > 0 {
-			sess.Transport.Dropped += backlog
+		cur := e.observationStatsRaw()
+		if outstanding := cur.Accepted - cur.Delivered - cur.Dropped - cur.ConsumerPanics; outstanding > 0 {
+			sess.Transport.Dropped += outstanding
 		}
 	}
 	e.windowGen.Add(1)

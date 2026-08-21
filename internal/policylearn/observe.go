@@ -13,6 +13,7 @@ package policylearn
 // no auxiliary queue, and no per-observation goroutine.
 
 import (
+	"runtime"
 	"sync"
 	"sync/atomic"
 )
@@ -108,6 +109,21 @@ type transport struct {
 	panics          atomic.Int64
 	delivered       atomic.Int64
 	groupsTruncated atomic.Int64
+}
+
+// waitProducers spins until no Observe call is between its registration and
+// the completion of its enqueue decision. Callers must FIRST make the gate
+// unpassable for new producers (learningActive off, or the closed flag set)
+// so the count can only fall. Producers never take e.mu and their send is
+// non-blocking, so the wait is bounded and safe to run while holding e.mu.
+// Shared by Close (shutdown) and the window-close paths (Codex fix: a
+// producer that passed the active gate must complete its enqueue BEFORE the
+// window rotates, so its observation is attributed — or counted — under the
+// window that accepted it, never silently lost between windows).
+func (t *transport) waitProducers() {
+	for t.producers.Load() != 0 {
+		runtime.Gosched()
+	}
 }
 
 // LearningActive reports whether a session is currently Learning (the same
