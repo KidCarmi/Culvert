@@ -1107,6 +1107,10 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
                 <span style="font-size:.8rem;color:var(--muted)">SSE Clients</span>
                 <span class="mono-value" id="d-sse">-</span>
               </div>
+              <div class="flex-between" id="d-sse-issues-row" style="display:none">
+                <span style="font-size:.8rem;color:var(--muted)">SSE Evicted / Rejected</span>
+                <span class="mono-value text-red" id="d-sse-issues">-</span>
+              </div>
               <div class="flex-between">
                 <span style="font-size:.8rem;color:var(--muted)">Blocklist Entries</span>
                 <span class="mono-value" id="d-bl-size">-</span>
@@ -11845,6 +11849,9 @@ async function fetchDashboardHealth() {
     setText('d-goroutines', h.goroutines || 0);
     setText('d-gc',         h.numGC || 0);
     setText('d-sse',        h.sseClients || 0);
+    const sseIssues = (h.sseEvicted || 0) + (h.sseRejected || 0);
+    document.getElementById('d-sse-issues-row').style.display = sseIssues > 0 ? '' : 'none';
+    setText('d-sse-issues', `${fmt(h.sseEvicted || 0)} evicted, ${fmt(h.sseRejected || 0)} rejected`);
     setText('d-bl-size',    fmt(h.blocklistSize || 0));
   } catch(_) {}
 }
