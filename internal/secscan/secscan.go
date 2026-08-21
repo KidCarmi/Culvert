@@ -543,25 +543,71 @@ func (ss *Scanner) ScanBody(data []byte) *Result {
 
 	select {
 	case result := <-ch:
-		return result
+		return ss.completeScan(result, hash)
 	case <-ctx.Done():
 		abandoned.Store(true)
-		atomic.AddInt64(&statScanTimeout, 1)
-		obs.Warnf("SecurityScan: ScanBody timeout after %s for hash %s — blocking (fail-closed)", scanBodyTimeout(), hash)
-		// Memoise the refusal only briefly. This is an INFRASTRUCTURE verdict,
-		// not a verdict about the content, and it used to be stored with the
-		// full content-cache TTL (1 h by default) — so a few seconds of scanner
-		// slowness blocked that exact object, node-wide, for every user, for an
-		// hour after the fault cleared, recoverable only by an admin cache
-		// flush. scanBodyInner's clamDark branch already refuses to cache a
-		// verdict computed while ClamAV was dark, for exactly this reason; the
-		// reasoning simply had not been applied to its neighbour. A short
-		// cooldown keeps the useful half — a stampede of doomed 10 s scans for
-		// one hot object is what fills the queue in the first place — without
-		// outliving the fault.
-		ss.cache.SetTTL(hash, hashcache.ScanCacheResult{Clean: false, Reason: "scan timeout", Source: "timeout"}, scanTimeoutCooldown)
-		return &Result{Blocked: true, Reason: "scan timeout", Source: "timeout", Hash: hash}
+		return ss.noteScanTimeout(hash)
 	}
+}
+
+// completeScan finalises a result the worker delivered before the select gave
+// up on it.
+//
+// A timeout-SOURCED result means the worker found the budget gone and enforced
+// it from its own side. With a budget-aware ClamAV client that is not a rare
+// race: the connection deadline and ctx.Done() become ready at the same
+// instant, so either arm of the select can win, and the choice between two
+// ready cases is random. Both arms must therefore land on the same accounting
+// — otherwise statScanTimeout undercounts nondeterministically, and, worse, no
+// cooldown is written, so the next request for the same hot object immediately
+// launches another doomed scan. That is precisely the stampede the cooldown
+// exists to prevent, unreliable in exactly the regime it was built for.
+func (ss *Scanner) completeScan(result *Result, hash string) *Result {
+	if result != nil && result.Source == "timeout" {
+		return ss.noteScanTimeout(hash)
+	}
+	return result
+}
+
+// noteScanTimeout performs the fail-closed timeout accounting — counter, log,
+// cooldown memo — and returns the refusal. Exactly one of ScanBody's two arms
+// calls it per scan, so the counter counts scans, not events.
+func (ss *Scanner) noteScanTimeout(hash string) *Result {
+	atomic.AddInt64(&statScanTimeout, 1)
+	obs.Warnf("SecurityScan: ScanBody timeout after %s for hash %s — blocking (fail-closed)", scanBodyTimeout(), hash)
+	ss.cacheTimeoutCooldown(hash)
+	return &Result{Blocked: true, Reason: "scan timeout", Source: "timeout", Hash: hash}
+}
+
+// cacheTimeoutCooldown memoises the fail-closed refusal briefly.
+//
+// Two rules, and both were learned the hard way. First, the lifetime: this is
+// an INFRASTRUCTURE verdict, not a verdict about the content, and it used to be
+// stored with the full content-cache TTL (1 h by default) — so a few seconds of
+// scanner slowness blocked that exact object, node-wide, for every user, for an
+// hour after the fault cleared, recoverable only by an admin cache flush.
+// scanBodyInner's clamDark branch already refuses to cache a verdict computed
+// while ClamAV was dark, for exactly this reason; the reasoning simply had not
+// been applied to its neighbour. A short cooldown keeps the useful half — a
+// stampede of doomed scans for one hot object is what fills the queue in the
+// first place — without outliving the fault.
+//
+// Second, the direction: it must never DOWNGRADE a confirmed threat verdict.
+// A late block from this scan's own abandoned goroutine, or from a concurrent
+// scan of the same hash, can land between the deadline firing and this write.
+// Overwriting it would replace a named, full-TTL threat entry with a generic
+// one that lapses in 30 s, after which the object depends on the next scan
+// succeeding — and the engine-error path is fail-OPEN. That is the same
+// tighten-only rule publishVerdict enforces; it had simply not been carried
+// across to the neighbouring branch, which is the very mistake this whole
+// change exists to correct.
+func (ss *Scanner) cacheTimeoutCooldown(hash string) {
+	timeoutVerdict := hashcache.ScanCacheResult{Clean: false, Reason: "scan timeout", Source: "timeout"}
+	ss.cache.SetTTLUnless(hash, timeoutVerdict, scanTimeoutCooldown, func(existing hashcache.ScanCacheResult) bool {
+		// Keep any CONFIRMED block: it names the threat and carries the full
+		// content TTL, both of which this generic entry would destroy.
+		return !existing.Clean && existing.Source != "timeout"
+	})
 }
 
 // scanTimeoutCooldown is how long a fail-closed scan-timeout refusal is

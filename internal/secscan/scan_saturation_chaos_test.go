@@ -26,6 +26,8 @@ package secscan
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -357,6 +359,172 @@ func TestChaos_SaturationCounterIsExactWhileTheLogIsGated(t *testing.T) {
 	}
 	if got := atomic.LoadInt64(&statClamSaturated) - before; got != n {
 		t.Fatalf("ClamSaturated delta = %d, want %d — the log gate must not suppress the counter", got, n)
+	}
+	if got := clam.calls.Load(); got != n {
+		t.Fatalf("engine consulted %d times, want %d", got, n)
+	}
+}
+
+// ── Review follow-up: two defects in the fix itself (PR #1192, Codex review) ──
+
+// TestChaos_TimeoutFromTheWorkerIsAccountedLikeTheDeadlineArm pins that a
+// timeout-sourced result arriving on the WORKER channel goes through the same
+// accounting as the deadline arm of the select.
+//
+// With a budget-aware ClamAV client the connection deadline and ctx.Done()
+// become ready at the same instant, so which arm wins is a coin flip. Routing
+// only one of them through the accounting made statScanTimeout undercount
+// nondeterministically and — the part that actually bites — skipped the
+// cooldown write, so the next request for the same hot object immediately
+// launched another doomed scan. The cooldown was unreliable in exactly the
+// regime it exists for.
+func TestChaos_TimeoutFromTheWorkerIsAccountedLikeTheDeadlineArm(t *testing.T) {
+	withScanBudget(t, 10*time.Second)
+	withCooldown(t, 10*time.Second)
+
+	ss := newSlowScanner(t, &fakeClam{}, time.Hour)
+	data := []byte("content whose worker reported the overrun itself")
+	hash := hashcache.SHA256Hex(data)
+	before := atomic.LoadInt64(&statScanTimeout)
+
+	// Exactly what scanBodyInner delivers when it finds the budget gone.
+	res := ss.completeScan(&Result{Blocked: true, Reason: "scan timeout", Source: "timeout", Hash: hash}, hash)
+
+	if res == nil || !res.Blocked || res.Source != "timeout" {
+		t.Fatalf("a worker-reported timeout must stay a fail-closed refusal, got %+v", res)
+	}
+	if got := atomic.LoadInt64(&statScanTimeout) - before; got != 1 {
+		t.Fatalf("ScanTimeout delta = %d, want 1 — the worker arm skipped the counter", got)
+	}
+	cached, ok := ss.cache.Get(hash)
+	if !ok || cached.Clean || cached.Source != "timeout" {
+		t.Fatalf("the worker arm must write the cooldown too, got %+v (present=%v)", cached, ok)
+	}
+}
+
+// TestChaos_WorkerVerdictsStillPassThroughUnchanged is the other half: only a
+// timeout-sourced result is re-accounted. A real verdict must reach the caller
+// untouched and must not be charged to the timeout counter.
+func TestChaos_WorkerVerdictsStillPassThroughUnchanged(t *testing.T) {
+	ss := newSlowScanner(t, &fakeClam{}, time.Hour)
+	before := atomic.LoadInt64(&statScanTimeout)
+
+	block := &Result{Blocked: true, Reason: "EICAR-Test", Source: "clamav", Hash: "h"}
+	if got := ss.completeScan(block, "h"); got != block {
+		t.Fatalf("a real block must pass through unchanged, got %+v", got)
+	}
+	if got := ss.completeScan(nil, "h"); got != nil {
+		t.Fatalf("a clean verdict must pass through unchanged, got %+v", got)
+	}
+	if got := atomic.LoadInt64(&statScanTimeout) - before; got != 0 {
+		t.Fatalf("real verdicts must not be charged to the timeout counter (delta %d)", got)
+	}
+}
+
+// TestChaos_TimeoutCooldownNeverDowngradesAConfirmedBlock pins the direction
+// rule on the cooldown write.
+//
+// A late block — from this scan's own abandoned goroutine, or from a concurrent
+// scan of the same hash — can land between the deadline firing and the cooldown
+// write. Overwriting it replaces a NAMED, full-TTL threat entry with a generic
+// one that lapses in 30 s, after which the object depends on the next scan
+// succeeding, and the engine-error path is fail-OPEN. Tighten-only applies here
+// for the same reason it applies to publishVerdict.
+func TestChaos_TimeoutCooldownNeverDowngradesAConfirmedBlock(t *testing.T) {
+	withCooldown(t, 30*time.Second)
+	ss := newSlowScanner(t, &fakeClam{}, time.Hour)
+	hash := hashcache.SHA256Hex([]byte("known malware"))
+
+	// A confirmed threat verdict is already cached.
+	ss.cache.Set(hash, hashcache.ScanCacheResult{Clean: false, Reason: "EICAR-Test-Signature", Source: "clamav"})
+
+	ss.cacheTimeoutCooldown(hash)
+
+	cached, ok := ss.cache.Get(hash)
+	if !ok {
+		t.Fatal("the confirmed verdict disappeared")
+	}
+	if cached.Source != "clamav" || cached.Reason != "EICAR-Test-Signature" {
+		t.Fatalf("a generic timeout entry downgraded a confirmed block: %+v", cached)
+	}
+}
+
+// TestChaos_TimeoutCooldownStillReplacesWeakerEntries keeps the direction rule
+// from becoming a blanket refusal to write: an absent entry, a clean one, and
+// an earlier timeout entry must all be (re)written, or the cooldown would never
+// refresh and the stampede guard would decay.
+func TestChaos_TimeoutCooldownStillReplacesWeakerEntries(t *testing.T) {
+	withCooldown(t, 30*time.Second)
+	ss := newSlowScanner(t, &fakeClam{}, time.Hour)
+
+	for _, tc := range []struct {
+		name string
+		seed *hashcache.ScanCacheResult
+	}{
+		{"absent", nil},
+		{"clean", &hashcache.ScanCacheResult{Clean: true, Source: "clean"}},
+		{"earlier timeout", &hashcache.ScanCacheResult{Clean: false, Reason: "scan timeout", Source: "timeout"}},
+	} {
+		hash := hashcache.SHA256Hex([]byte(tc.name))
+		if tc.seed != nil {
+			ss.cache.Set(hash, *tc.seed)
+		}
+		ss.cacheTimeoutCooldown(hash)
+		cached, ok := ss.cache.Get(hash)
+		if !ok || cached.Clean || cached.Source != "timeout" {
+			t.Fatalf("%s: cooldown must be written, got %+v (present=%v)", tc.name, cached, ok)
+		}
+	}
+}
+
+// TestChaos_TimeoutAccountingIsExactWhicheverArmWins is the end-to-end
+// invariant: N scans that all exceed the budget must produce exactly N timeout
+// counts, regardless of which select arm happens to win each time.
+// ctxGatedClam blocks until the scan budget is gone and then reports the
+// context error — the production shape with a budget-aware client, where the
+// worker's completion and the deadline become ready at the same instant.
+type ctxGatedClam struct{ calls atomic.Int64 }
+
+func (c *ctxGatedClam) Ping() error { return nil }
+func (c *ctxGatedClam) Scan([]byte) (string, bool, error) {
+	return "", false, errors.New("clamav: no context")
+}
+func (c *ctxGatedClam) ScanContext(ctx context.Context, _ []byte) (string, bool, error) {
+	c.calls.Add(1)
+	<-ctx.Done()
+	return "", false, fmt.Errorf("clamav: scan aborted: %w", ctx.Err())
+}
+
+// TestChaos_TimeoutAccountingIsExactWhicheverArmWins is the end-to-end
+// invariant: N scans that all exceed the budget must produce exactly N timeout
+// counts and N cooldown entries, regardless of which select arm happens to win
+// each time. The worker here finishes at the very instant the deadline fires,
+// so over N iterations both arms win some of the time — which is the whole
+// point, and was the source of the nondeterministic undercount.
+func TestChaos_TimeoutAccountingIsExactWhicheverArmWins(t *testing.T) {
+	withScanBudget(t, 30*time.Millisecond)
+	withCooldown(t, 10*time.Second)
+
+	clam := &ctxGatedClam{}
+	ss := newSlowScanner(t, clam, time.Hour)
+
+	before := atomic.LoadInt64(&statScanTimeout)
+	const n = 12
+	for i := 0; i < n; i++ {
+		data := []byte(strings.Repeat("z", i+1))
+		res := ss.ScanBody(data)
+		if res == nil || !res.Blocked || res.Source != "timeout" {
+			t.Fatalf("scan %d: expected the fail-closed refusal, got %+v", i, res)
+		}
+		// Every refused scan must also leave the stampede guard behind, or a
+		// burst on one hot object keeps launching doomed scans.
+		cached, ok := ss.cache.Get(hashcache.SHA256Hex(data))
+		if !ok || cached.Clean || cached.Source != "timeout" {
+			t.Fatalf("scan %d: cooldown missing, got %+v (present=%v)", i, cached, ok)
+		}
+	}
+	if got := atomic.LoadInt64(&statScanTimeout) - before; got != n {
+		t.Fatalf("ScanTimeout delta = %d, want %d — accounting depends on which arm won", got, n)
 	}
 	if got := clam.calls.Load(); got != n {
 		t.Fatalf("engine consulted %d times, want %d", got, n)

@@ -115,6 +115,36 @@ func (c *HashCache) SetTTL(hash string, result ScanCacheResult, ttl time.Duratio
 	}
 }
 
+// SetTTLUnless stores result under hash with the given lifetime unless keep
+// reports that the entry already present must be preserved. It returns whether
+// the write happened; ttl ≤ 0 uses the cache's configured TTL.
+//
+// The test and the write are one atomic step under the cache lock. A caller
+// doing Get-then-Set instead would leave a window in which a stronger verdict
+// lands between the two and is overwritten anyway — which is the exact race
+// this exists to close. keep is called only with a present, unexpired entry
+// (an expired one counts as absent), and hit/miss counters are untouched:
+// this is a write path, not a lookup.
+func (c *HashCache) SetTTLUnless(hash string, result ScanCacheResult, ttl time.Duration, keep func(existing ScanCacheResult) bool) bool {
+	if ttl <= 0 {
+		ttl = c.ttl
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if e, ok := c.entries[hash]; ok && keep != nil && !time.Now().After(e.expiresAt) && keep(e.result) {
+		return false
+	}
+	if len(c.entries) >= c.maxSize {
+		c.evictLocked()
+	}
+	c.entries[hash] = &hashCacheEntry{
+		result:    result,
+		expiresAt: time.Now().Add(ttl),
+	}
+	return true
+}
+
 // Stats returns (hits, misses, currentSize) for Prometheus / admin UI.
 func (c *HashCache) Stats() (hits, misses int64, currentSize int) {
 	c.mu.RLock()

@@ -1893,3 +1893,22 @@ got it right; CHAOS-28's paired persist observers). Stated generally:
 - **The remote scan sidecar was not touched** (WK-2). It is the other fail-open scanning path, with
   its own 30 s per-request timeout and no budget threading; the same findings are structurally
   likely to repeat there. Separate sweep.
+
+### 20.6 Review follow-up — two defects in the fix itself
+
+Found by automated review of the first cut; both real, both the same mistake §20.3 names.
+
+1. **Only the deadline arm of `ScanBody`'s select did the timeout accounting.** Once `scanBodyInner`
+   gained its own budget check, the WORKER arm could deliver a timeout-sourced result too — and with
+   a budget-aware ClamAV client the connection deadline and `ctx.Done()` become ready at the SAME
+   instant, so which arm wins is a coin flip. On roughly half of all timeouts `statScanTimeout` did
+   not increment and, worse, **no cooldown was written** — so the next request for that hot object
+   immediately launched another doomed scan. The stampede guard was unreliable in exactly the regime
+   it exists for. Both arms now route through one `noteScanTimeout`.
+2. **The cooldown write could downgrade a confirmed threat verdict.** A late block (from the
+   abandoned goroutine, or a concurrent scan of the same hash) landing between the deadline and the
+   write was replaced by a generic 30 s entry — after which the object depends on the next scan
+   succeeding, and the engine-error path is fail-OPEN. `publishVerdict`'s tighten-only rule, not
+   carried across to the branch beside it: **the literal mistake §20.3 names, committed in the change
+   that names it.** Fixed with `hashcache.SetTTLUnless` (test and write atomic under the cache lock —
+   a caller-side `Get`-then-`Set` would leave open the very window being closed).

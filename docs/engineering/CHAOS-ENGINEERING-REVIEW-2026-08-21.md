@@ -288,3 +288,65 @@ observers). The generalisable form:
 > When a branch is given a special rule because of what it computed under
 > failure, check every sibling branch that computes under the same failure. The
 > reasoning is almost never specific to the branch that happened to be reviewed.
+
+---
+
+## 11. Review follow-up — two defects in the fix itself
+
+Both were found by automated review (Codex) of the first cut, both were real, and both belong in the
+record because they are the *same* mistake §10 is about, made while fixing it.
+
+### 11.1 Only one of the two select arms did the timeout accounting
+
+`ScanBody` waits on two cases: the worker's result, and the deadline. The deadline arm counted
+`statScanTimeout` and wrote the cooldown; the worker arm just returned whatever arrived.
+
+That looked harmless when the worker could only deliver a *real* verdict. It stopped being harmless
+the moment `scanBodyInner` gained its own budget check (SC-4's "both sides" guard, which is correct
+and stays): the worker can now deliver a **timeout-sourced** result. And with a budget-aware ClamAV
+client the two are not merely both possible — the connection deadline and `ctx.Done()` become ready
+at the **same instant**, and Go picks between two ready cases at random.
+
+So on roughly half of all timeouts:
+
+* `statScanTimeout` did not increment — the incident undercounted, nondeterministically; and
+* **no cooldown was written**, so the next request for that same hot object immediately launched
+  another doomed scan.
+
+The second is the one that bites. The cooldown exists specifically to stop a burst on one object
+from filling the queue with scans that cannot finish — and it was unreliable in exactly the regime
+it was built for. Fixed by routing both arms through one `noteScanTimeout`; `completeScan` maps a
+timeout-sourced worker result onto it. Exactly one arm runs per scan, so the counter still counts
+scans rather than events.
+
+### 11.2 The cooldown write could downgrade a confirmed threat verdict
+
+The cooldown was written with an unconditional `SetTTL`. A **late block** — from this scan's own
+abandoned goroutine, or from a concurrent scan of the same hash — can land between the deadline
+firing and that write. The write then replaced a *named*, full-content-TTL threat entry
+(`{Clean:false, Reason:"EICAR-…", Source:"clamav"}`) with a *generic* one lapsing in 30 seconds.
+
+Both entries block, so nothing is admitted immediately — but after 30 seconds the object depends on
+the **next** scan succeeding, and the engine-error path is fail-**open**. A known-malicious body that
+had been positively identified could therefore be admitted by a subsequent daemon fault, where the
+confirmed entry would have kept refusing it for the hour. The threat name is lost from the operator's
+view too.
+
+This is `publishVerdict`'s tighten-only rule, not carried across to the branch beside it — **the
+literal mistake §10 names**, committed in the change that names it. Fixed with
+`hashcache.SetTTLUnless`, which makes the test and the write one atomic step under the cache lock:
+a `Get`-then-`Set` in the caller would leave open the very window being closed.
+
+### 11.3 Gates
+
+`TestChaos_TimeoutFromTheWorkerIsAccountedLikeTheDeadlineArm` (delta 0, want 1 pre-fix),
+`TestChaos_WorkerVerdictsStillPassThroughUnchanged` (only timeout-sourced results are re-accounted),
+`TestChaos_TimeoutCooldownNeverDowngradesAConfirmedBlock` (pre-fix: *"a generic timeout entry
+downgraded a confirmed block"*), `TestChaos_TimeoutCooldownStillReplacesWeakerEntries` (the direction
+rule must not become a blanket refusal to write), and
+`TestChaos_TimeoutAccountingIsExactWhicheverArmWins` (N overruns ⇒ N counts and N cooldown entries,
+whichever arm wins).
+
+One honesty note on that last one: it is a **property** gate, not a reproduction. Its assertion is
+exact post-fix, but pre-fix it fails only when the worker arm actually wins a race, so a given run
+can pass against the broken code. The deterministic evidence for 11.1 is the direct gate above it.
