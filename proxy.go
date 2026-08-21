@@ -1058,13 +1058,24 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// M2 decision context (Codex rounds 21/24/25): snapshot the FULL policy
+	// identity key (rulebase generation, category-group revision, packed
+	// default-action word — all monotonic) plus the engine and its
+	// acceptance-window generation BEFORE the pre-dispatch gates run, so BOTH
+	// learning emissions below — the pre-dispatch negative evidence and the
+	// Stage-2 decision — bind to the session that was active when the request
+	// was decided, and the identity stamps can prove the config was still
+	// current at stamp time (or witness that it was not). Captured only while
+	// learning is active (two atomic loads otherwise).
+	learnCtx, learnHaveCtx := learnDecisionSnapshot()
+
 	// ── Pre-policy content blocks (blocklist / threat / plugin / file) ──────
 	// Extracted to preDispatchBlocked (DEBT-002). blocked=true means it already
 	// wrote a terminal block response.
 	if preStatus, blocked := preDispatchBlocked(w, r, clientIP, host, reqID, authenticatedIdentity, authLog); blocked {
-		// M3: pre-dispatch blocks are context/negative learning evidence (a
-		// nil engine costs one atomic load; never blocks the request).
-		learnObservePreDispatch(auth, normHost, r.Method, preStatus)
+		// M3: pre-dispatch blocks are context/negative learning evidence
+		// (never blocks the request; bound to the captured session window).
+		learnObservePreDispatch(auth, normHost, r.Method, preStatus, learnCtx, learnHaveCtx)
 		return
 	}
 
@@ -1074,13 +1085,6 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	// above and re-stamped only when authentication produced an identity; it is
 	// transport for the internal HTTP logging consumers, not an authority
 	// boundary (see the note at the stamping site above).
-	// M2 decision-identity bracket (Codex round 21): snapshot the FULL policy
-	// identity key (rulebase generation, category-group revision, packed
-	// default-action word — all monotonic) BEFORE evaluation, so the learning
-	// stamp can prove the entire config the decision ran under was still
-	// current at stamp time — or witness that it was not. Captured only while
-	// learning is active (two atomic loads otherwise).
-	learnCtx, learnHaveCtx := learnDecisionSnapshot()
 	match := policyStore.Evaluate(clientIP, authenticatedIdentity, authenticatedSource, host, authenticatedGroups)
 
 	// M3 (H2-drop gap closure): the ActionDrop branch's HTTP/2 fallback aborts

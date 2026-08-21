@@ -408,6 +408,53 @@ func TestLearnFencedStamp_PostReadFlipYieldsWitness(t *testing.T) {
 	}
 }
 
+// TestObservation_PreDispatchBoundToCapturedWindow (Codex round 25): the
+// pre-dispatch path must carry the same captured session-window context as
+// the Stage-2 path — an uncaptured emission stamped the CURRENT generation,
+// so a session B starting mid-request recorded a block that predates its
+// window (contaminating B's blocked counts and confidence caps).
+func TestObservation_PreDispatchBoundToCapturedWindow(t *testing.T) {
+	col := &obsCollector{}
+	eng := swapPolicyLearnSink(t, col.sink)
+	auth := authOutcome{identity: "alice", source: "local"}
+
+	ctx, ok := learnDecisionSnapshot() // captured under session A
+	if !ok {
+		t.Fatal("learnDecisionSnapshot refused with an active session")
+	}
+	if _, err := eng.StopSession("m2-test"); err != nil { // A completes...
+		t.Fatal(err)
+	}
+	if _, err := eng.StartSession("m2-test-b"); err != nil { // ...B opens mid-request
+		t.Fatal(err)
+	}
+	before := eng.ObservationStats()
+	learnObservePreDispatch(auth, "stale-block.example", "GET", "BLOCKED", ctx, true)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		st := eng.ObservationStats()
+		if st.Dropped > before.Dropped || st.Delivered > before.Delivered {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	_ = eng.Close()
+
+	if _, leaked := obsForHost(t, col, "stale-block.example"); leaked {
+		t.Fatal("pre-dispatch block captured under session A was delivered into session B")
+	}
+	if st := eng.ObservationStats(); st.Dropped <= before.Dropped {
+		t.Fatalf("rotated-window pre-dispatch event not counted as a drop: %+v", st)
+	}
+
+	// And the no-capture path is a strict no-op (never a fresh engine load).
+	before = eng.ObservationStats()
+	learnObservePreDispatch(auth, "uncaptured.example", "GET", "BLOCKED", learnDecisionCtx{}, false)
+	if st := eng.ObservationStats(); st != before {
+		t.Fatalf("uncaptured pre-dispatch emission moved transport counters: %+v", st)
+	}
+}
+
 // TestObservationE2E_DisabledNilEngine: with the singleton nil the adapter is
 // a no-op — the request flows and nothing panics.
 func TestObservationE2E_DisabledNilEngine(t *testing.T) {

@@ -137,7 +137,7 @@ func TestPL_ObservationGatingThreeStates(t *testing.T) {
 		t.Fatal("snapshot succeeded while idle")
 	}
 	learnObserveDecision(auth, "x.example", "GET", nil, "OK", "Bypass", learnDecisionCtx{}, false)
-	learnObservePreDispatch(auth, "x.example", "GET", "BLOCKED")
+	learnObservePreDispatch(auth, "x.example", "GET", "BLOCKED", learnDecisionCtx{}, false)
 	if s := eng.ObservationStats(); s.Accepted != 0 || s.Rejected != 0 || s.Dropped != 0 {
 		t.Fatalf("enabled-idle produced transport activity: %+v", s)
 	}

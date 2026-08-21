@@ -25,14 +25,15 @@ import (
 // policy evaluation (threat feed / blocklist / plugin / global file-extension
 // gate). Context/negative evidence only — the aggregation model classifies
 // these by their status and they can never contribute positive ALLOW evidence.
-func learnObservePreDispatch(auth authOutcome, host, method, status string) {
-	eng := policyLearnEngine.Load()
-	if eng == nil || !eng.LearningActive() {
-		// Disabled (nil) or enabled-but-idle: gate BEFORE any Observation is
-		// built — no DTO, no group copy, no enqueue (M5A §1; benchgate-pinned).
+func learnObservePreDispatch(auth authOutcome, host, method, status string, ctx learnDecisionCtx, haveCtx bool) {
+	if !haveCtx || ctx.eng == nil {
+		// No decision-time capture: learning was disabled or idle when the
+		// pre-dispatch gates ran. A session started mid-request must not
+		// record a block that predates its window (Codex round 25) — strict
+		// no-op, never a fresh engine load.
 		return
 	}
-	eng.Observe(policylearn.Observation{
+	ctx.eng.Observe(policylearn.Observation{
 		Subject:    auth.identity,
 		AuthSource: auth.source,
 		Groups:     auth.groups,
@@ -40,6 +41,7 @@ func learnObservePreDispatch(auth authOutcome, host, method, status string) {
 		Method:     method,
 		Action:     "predispatch",
 		Status:     status,
+		WindowGen:  ctx.gen, // the captured window — a rotation resolves as a counted drop
 	})
 }
 

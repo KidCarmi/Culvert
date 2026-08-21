@@ -35,7 +35,7 @@ func TestBenchGate_LearnObserveDisabledZeroAlloc(t *testing.T) {
 		t.Fatalf("disabled learnObserveDecision allocates %.1f/op, want 0 — the off posture must be free", allocs)
 	}
 	if allocs := testing.AllocsPerRun(2000, func() {
-		learnObservePreDispatch(auth, "host.example", "GET", "BLOCKED")
+		learnObservePreDispatch(auth, "host.example", "GET", "BLOCKED", learnDecisionCtx{}, false)
 	}); allocs != 0 {
 		t.Fatalf("disabled learnObservePreDispatch allocates %.1f/op, want 0", allocs)
 	}
@@ -62,7 +62,7 @@ func TestBenchGate_LearnObserveEnabledIdleZeroAlloc(t *testing.T) {
 		t.Fatalf("enabled-idle learnObserveDecision allocates %.1f/op, want 0 — the idle posture must be free", allocs)
 	}
 	if allocs := testing.AllocsPerRun(2000, func() {
-		learnObservePreDispatch(auth, "host.example", "GET", "BLOCKED")
+		learnObservePreDispatch(auth, "host.example", "GET", "BLOCKED", learnDecisionCtx{}, false)
 	}); allocs != 0 {
 		t.Fatalf("enabled-idle learnObservePreDispatch allocates %.1f/op, want 0", allocs)
 	}
