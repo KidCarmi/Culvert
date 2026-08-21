@@ -2667,8 +2667,10 @@ Firefox (all platforms):
           <div id="ui-tls-fallback-banner" style="display:none;margin:0 0 14px;padding:10px 12px;border-radius:6px;background:rgba(220,53,69,.12);border:1px solid var(--red,#dc3545);font-size:.86rem">
             <strong>Self-signed TLS setup failed — this admin panel, including login, is being served over plain HTTP.</strong>
             <span id="ui-tls-fallback-reason" style="color:var(--muted)"></span>
-            Credentials and session cookies for this panel are traveling unencrypted. Fix the underlying issue (commonly a
-            read-only data directory or an unwritable cert cache) and restart to restore TLS.
+            Credentials and session cookies for this panel are traveling unencrypted. The self-signed certificate/key
+            generation itself failed (see the reason above) — this is not a filesystem issue, since nothing is read
+            from or written to disk during self-signing. Restart to retry, or start Culvert with
+            <code>-tls-cert</code>/<code>-tls-key</code> to use a custom certificate instead of self-signing.
           </div>
           <div class="form-group">
             <label class="form-label">External Base URL</label>
@@ -18541,6 +18543,11 @@ function resetBlockPage() {
 
 <div id="setup-overlay">
   <div class="setup-card" id="setup-card-inner">
+    <div id="setup-tls-fallback-banner" style="display:none;margin:0 0 14px;padding:10px 12px;border-radius:6px;background:rgba(220,53,69,.12);border:1px solid var(--red,#dc3545);font-size:.82rem;text-align:left">
+      <strong>Self-signed TLS setup failed — this page is being served over plain HTTP.</strong>
+      The admin password you set below will travel unencrypted. <span id="setup-tls-fallback-reason" style="color:var(--muted)"></span>
+      Consider completing setup over a trusted network only, then restart the appliance to retry TLS.
+    </div>
     <div class="setup-logo"><svg class="ico" aria-hidden="true"><use href="#i-shield"/></svg></div>
     <h2>Welcome to Culvert</h2>
     <p>This is the first-time setup.<br>
@@ -18787,6 +18794,10 @@ pre.diff-block { margin:0;white-space:pre-wrap;word-break:break-all;font-size:.7
 </style>
 <div id="login-overlay">
   <div class="setup-card">
+    <div id="login-tls-fallback-banner" style="display:none;margin:0 0 14px;padding:10px 12px;border-radius:6px;background:rgba(220,53,69,.12);border:1px solid var(--red,#dc3545);font-size:.82rem;text-align:left">
+      <strong>Self-signed TLS setup failed — this page is being served over plain HTTP.</strong>
+      The credentials you enter below will travel unencrypted. <span id="login-tls-fallback-reason" style="color:var(--muted)"></span>
+    </div>
     <div class="setup-logo"><svg class="ico" aria-hidden="true"><use href="#i-shield"/></svg></div>
     <h2>Sign in to Culvert</h2>
     <p>Enter your admin credentials to access the management dashboard.</p>
@@ -18835,12 +18846,28 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
   btn.disabled = false; btn.textContent = 'Sign In';
 });
 
+// renderTLSFallbackBanner - shows the pre-auth TLS-fallback warning on the
+// setup or login overlay. Both /api/setup/status and /api/auth/status are
+// public (reachable before any credential is submitted), so this is the
+// only point that can warn an operator BEFORE their password travels
+// unencrypted over a failed-self-sign HTTP fallback.
+function renderTLSFallbackBanner(idPrefix, active, reason) {
+  const banner = document.getElementById(idPrefix + '-tls-fallback-banner');
+  if (!banner) return;
+  banner.style.display = active ? '' : 'none';
+  if (active) {
+    const r = document.getElementById(idPrefix + '-tls-fallback-reason');
+    if (r) r.textContent = reason || '';
+  }
+}
+
 // ── Init: check setup status then auth status ───────────────────────────
 (async () => {
   try {
     const s = await fetch('/api/setup/status');
     if (!s.ok) { showLoginOverlay(); return; }
     const d = await s.json();
+    renderTLSFallbackBanner('setup', d.ui_tls_fallback, d.ui_tls_fallback_reason);
 
     if (d.needsSetup) {
       // First-time setup - show the setup wizard.
@@ -18891,6 +18918,7 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
         const a = await fetch('/api/auth/status');
         if (a.ok) {
           const ad = await a.json();
+          renderTLSFallbackBanner('login', ad.ui_tls_fallback, ad.ui_tls_fallback_reason);
           if (!ad.loggedIn) {
             showLoginOverlay();
           } else {

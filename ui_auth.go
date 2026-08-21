@@ -170,6 +170,17 @@ func apiAuthLogin(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "Invalid credentials", http.StatusUnauthorized)
 }
 
+// jsonOKAuthStatus writes an /api/auth/status response, adding the
+// pre-authentication TLS-fallback fields to every branch — the login overlay
+// reads this endpoint before a session exists, so it is the only place a
+// browser sitting on the login form (about to submit a password) can learn
+// the connection is unencrypted.
+func jsonOKAuthStatus(w http.ResponseWriter, fields map[string]any) {
+	fields["ui_tls_fallback"] = uiTLSFallbackActive
+	fields["ui_tls_fallback_reason"] = uiTLSFallbackReason
+	jsonOK(w, fields)
+}
+
 // GET /api/auth/status — return whether the current request has a valid session.
 func apiAuthStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -177,7 +188,7 @@ func apiAuthStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !cfg.IsConfigured() {
-		jsonOK(w, map[string]any{"loggedIn": true, "user": "", "role": RoleAdmin})
+		jsonOKAuthStatus(w, map[string]any{"loggedIn": true, "user": "", "role": RoleAdmin})
 		return
 	}
 	sess, err := readUISessionCookie(r)
@@ -186,18 +197,18 @@ func apiAuthStatus(w http.ResponseWriter, r *http.Request) {
 		if !role.HasRole(RoleViewer) {
 			role = RoleAdmin
 		}
-		jsonOK(w, map[string]any{"loggedIn": true, "user": sess.Sub, "role": role})
+		jsonOKAuthStatus(w, map[string]any{"loggedIn": true, "user": sess.Sub, "role": role})
 		return
 	}
 	// Accept Basic Auth header for CLI/API callers.
 	user, pass, ok := r.BasicAuth()
 	if ok {
 		if role, valid := cfg.VerifyUIUser(user, pass); valid {
-			jsonOK(w, map[string]any{"loggedIn": true, "user": user, "role": role})
+			jsonOKAuthStatus(w, map[string]any{"loggedIn": true, "user": user, "role": role})
 			return
 		}
 	}
-	jsonOK(w, map[string]any{"loggedIn": false})
+	jsonOKAuthStatus(w, map[string]any{"loggedIn": false})
 }
 
 // POST /api/auth/logout — clear the admin session cookie.
@@ -413,7 +424,11 @@ func apiSetupStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	jsonOK(w, map[string]any{"needsSetup": !cfg.IsConfigured()})
+	jsonOK(w, map[string]any{
+		"needsSetup":             !cfg.IsConfigured(),
+		"ui_tls_fallback":        uiTLSFallbackActive,
+		"ui_tls_fallback_reason": uiTLSFallbackReason,
+	})
 }
 
 // POST /api/setup/complete — sets the initial admin credential or enables unauth mode.
