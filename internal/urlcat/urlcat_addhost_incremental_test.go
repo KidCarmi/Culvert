@@ -38,10 +38,10 @@ func TestAddHost_IncrementalMatchesRebuild(t *testing.T) {
 	s := New(freshEntries())
 	adds := []struct{ cat, host string }{
 		{"Alpha", "new-a.example"},
-		{"Beta", "shared.example"},   // duplicate pattern, later entry: Alpha must keep the win
-		{"Gamma", "beta.example"},    // duplicate of an earlier admin entry
+		{"Beta", "shared.example"}, // duplicate pattern, later entry: Alpha must keep the win
+		{"Gamma", "beta.example"},  // duplicate of an earlier admin entry
 		{"Beta", "b2.example"},
-		{"Alpha", "late.example"},    // earlier entry now claims a pattern a later entry held
+		{"Alpha", "late.example"}, // earlier entry now claims a pattern a later entry held
 	}
 	for _, a := range adds {
 		if err := s.AddHost(a.cat, a.host); err != nil {

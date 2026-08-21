@@ -22,10 +22,14 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/netip"
+	"strings"
 	"testing"
 
 	"github.com/KidCarmi/Culvert/internal/sslbypass"
+	"github.com/KidCarmi/Culvert/internal/ssrf"
 	"github.com/KidCarmi/Culvert/internal/urlcat"
 )
 
@@ -393,6 +397,119 @@ func TestBenchGate_ScrubAllocs(t *testing.T) {
 	}
 }
 
+// TestBenchGate_ForwardedForFilterAllocs locks in the allocation-free
+// X-Forwarded-For filter. The scrub runs on every plain-HTTP request, every
+// WebSocket upgrade, and every decrypted inner exchange of an SSL-inspected
+// tunnel, so per-hop allocation here is allocation on essentially all proxied
+// traffic. The bound above cannot catch it: it includes http.NewRequest, whose
+// ~10 allocations swamp the filter's own.
+//
+// The pre-change filter ran strings.Split + net.ParseIP + net.IP.String() +
+// strings.Join, i.e. roughly two allocations per hop plus the join — 6 allocs and
+// 208 B/op on an ordinary three-hop public chain, 12 allocs and 560 B on a deep
+// one. It now parses into a netip.Addr value, renders through a stack buffer, and
+// returns the input verbatim when the header is already in sanitized form (the
+// load-balancer case), so the ALL-PUBLIC shapes are allocation-free end to end.
+//
+// Allocations are the gate, not ns/op: they are deterministic and hardware-
+// independent. Any reintroduction of net.ParseIP, an intermediate []string, or an
+// unconditional rebuild fails here regardless of runner speed.
+func TestBenchGate_ForwardedForFilterAllocs(t *testing.T) {
+	cases := []struct {
+		name string
+		xff  string
+		// wantChanged is the shape being pinned, not just a sanity check: it is
+		// what separates "recognised as already-sanitized" from "rewritten", and
+		// the two have different allocation contracts.
+		wantChanged bool
+		maxAllocs   int64
+	}{
+		// Already-sanitized chains: the filter must recognise the fixed point and
+		// return the input, allocating nothing at any chain length.
+		{"single public hop", "203.0.113.9", false, 0},
+		{"public chain", "203.0.113.9, 198.51.100.4, 192.0.2.33", false, 0},
+		{"deep public chain", "203.0.113.1, 203.0.113.2, 203.0.113.3, 203.0.113.4, " +
+			"203.0.113.5, 203.0.113.6, 203.0.113.7, 203.0.113.8", false, 0},
+		// Every hop dropped: the value is rewritten, but to nothing, so the empty
+		// builder never allocates either.
+		{"all private", "10.0.0.1, 192.168.1.1, 172.16.0.1", true, 0},
+		// Shapes that genuinely rewrite: exactly ONE allocation, the returned
+		// string. Never one per hop.
+		{"mixed chain", "10.0.0.1, 203.0.113.9, 192.168.1.1", true, 1},
+		{"non-canonical spacing", "203.0.113.9,198.51.100.4,192.0.2.33", true, 1},
+		{"ipv6 mixed chain", "2001:db8::1, fe80::1, 2001:db8::2", true, 1},
+		{"deep mixed chain", "203.0.113.1, 10.0.0.1, 203.0.113.2, 10.0.0.2, 203.0.113.3, " +
+			"10.0.0.3, 203.0.113.4, 10.0.0.4", true, 1},
+		// Pathological chain whose rendered value outgrows the stack scratch. This
+		// is the ONLY shape allowed to allocate for the buffer itself, and the
+		// point of the case is that the cost stays a small CONSTANT — the buffer
+		// doubles, it does not allocate per hop.
+		{"over-scratch chain", overScratchChain(30), false, 2},
+	}
+	for _, tc := range cases {
+		// Assert the fixture's shape OUTSIDE the benchmark. A b.Fatalf inside
+		// testing.Benchmark makes it return a ZERO BenchmarkResult, whose
+		// AllocsPerOp is 0 — which would sail through the bound below and turn a
+		// broken fixture into a silently passing gate.
+		if _, changed := sanitizeForwardedFor(tc.xff); changed != tc.wantChanged {
+			t.Errorf("fixture %q: changed = %v, want %v — the already-sanitized fast path no longer "+
+				"classifies this shape as expected, so the allocation bound below is measuring the wrong branch",
+				tc.name, changed, tc.wantChanged)
+			continue
+		}
+		res := testing.Benchmark(func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				_, _ = sanitizeForwardedFor(tc.xff)
+			}
+		})
+		if res.N == 0 {
+			t.Errorf("fixture %q: benchmark did not run (zero result) — the measurement below is meaningless", tc.name)
+			continue
+		}
+		allocs := res.AllocsPerOp()
+		t.Logf("sanitizeForwardedFor %s: %d allocs/op (bound %d), %d ns/op, changed=%v",
+			tc.name, allocs, tc.maxAllocs, res.NsPerOp(), tc.wantChanged)
+		if allocs > tc.maxAllocs {
+			t.Errorf("REGRESSION: sanitizeForwardedFor %q allocates %d/op, exceeds bound %d — "+
+				"per-hop allocation has returned to the forwarded-header scrub (net.ParseIP instead of "+
+				"netip.ParseAddr, an intermediate []string + strings.Join, addr.String() per hop, or the "+
+				"already-sanitized fast path bypassed). See proxy.go sanitizeForwardedFor.", tc.name, allocs, tc.maxAllocs)
+		}
+	}
+}
+
+// TestBenchGate_PrivateAddrClassifierAllocs pins the guard table that the filter
+// above calls once per hop. It is a linear scan, and a PUBLIC address — the
+// common case — matches nothing and so always pays the full scan of its family.
+// The bound is ZERO: the netip entry point exists precisely so classification
+// costs no allocation, and PrivateIP (the net.IP façade the other eight SSRF
+// call sites use) must stay allocation-free through it too.
+func TestBenchGate_PrivateAddrClassifierAllocs(t *testing.T) {
+	const maxAllocs int64 = 0
+	for _, s := range []string{"203.0.113.9", "10.0.0.1", "2001:db8::1", "fe80::1"} {
+		addr, err := netip.ParseAddr(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ip := net.ParseIP(s)
+		res := testing.Benchmark(func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				_ = ssrf.PrivateAddr(addr)
+				_ = isPrivateIP(ip)
+			}
+		})
+		allocs := res.AllocsPerOp()
+		t.Logf("PrivateAddr+isPrivateIP %s: %d allocs/op (bound %d), %d ns/op", s, allocs, maxAllocs, res.NsPerOp())
+		if allocs > maxAllocs {
+			t.Errorf("REGRESSION: private-address classification of %s allocates %d/op, exceeds bound %d — "+
+				"the guard table is materialising a net.IP (or otherwise allocating) per check, on a path "+
+				"reached once per X-Forwarded-For hop per request. See internal/ssrf PrivateAddr.", s, allocs, maxAllocs)
+		}
+	}
+}
+
 // TestBenchGate_TracingIDAllocs guards the per-request tracing-ID generators.
 // setupRequestTracing runs both on essentially every proxied request (the
 // request ID and traceparent are generated whenever the client sent none —
@@ -562,6 +679,20 @@ func TestBenchGate_RequestLogEntryAllocs(t *testing.T) {
 			"(a re-introduced time.Format, or an allocating field build). "+
 			"See store.go persistLogEntry and store_logclock.go.", allocs, maxAllocs)
 	}
+}
+
+// overScratchChain builds a canonical all-public X-Forwarded-For value with n
+// hops, used to probe the filter past its stack scratch. 30 IPv4 hops render to
+// ~380 bytes, comfortably beyond the 256-byte buffer.
+func overScratchChain(n int) string {
+	var b strings.Builder
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		fmt.Fprintf(&b, "203.0.%d.%d", i/256, i%256)
+	}
+	return b.String()
 }
 
 // TestBenchGate_CategoryLookupConstantInTaxonomySize locks in the

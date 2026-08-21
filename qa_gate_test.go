@@ -7,7 +7,7 @@ package main
 // The tests are grouped by defect they cover:
 //
 //   1. sanitizeLog control-byte strip         (proxy.go)
-//   2. privateCIDRs coverage expansion        (proxy.go)
+//   2. privateRanges coverage expansion       (internal/ssrf)
 //   3. SSRF ssrfControl Dialer.Control hook   (security.go)
 //   4. Config.TOTPLastCounter persistence     (store.go)
 //
@@ -67,7 +67,7 @@ func TestSanitizeLog_FastPathNoAlloc(t *testing.T) {
 	}
 }
 
-// ─── 6. privateCIDRs coverage expansion ─────────────────────────────────────
+// ─── 6. privateRanges coverage expansion ────────────────────────────────────
 
 func TestIsPrivateIP_ExpandedCoverage(t *testing.T) {
 	// Every entry below is explicitly required to be private after the

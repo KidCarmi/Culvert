@@ -15,7 +15,7 @@ package main
 //   - Is a client-spoofed X-User-Identity header stripped before forwarding?
 //
 // Everything is hermetic: no public internet, no example.com, no Docker. The
-// only deliberate relaxation is removing the loopback CIDRs from privateCIDRs
+// only deliberate relaxation is removing the loopback CIDRs from privateRanges
 // for the duration of a CONNECT test (restored on cleanup) so the real SSRF
 // guard, dialer, and relay can run unchanged against a 127.0.0.1 fixture. The
 // SSRF logic itself is untouched; TestUNAUTH_CONNECT_SSRFBlocksLoopback still
