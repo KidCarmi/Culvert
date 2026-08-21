@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -504,7 +505,7 @@ func apiIdPList(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := idpRegistry.Upsert(&p); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			http.Error(w, err.Error(), idpMutationErrorStatus(err))
 			return
 		}
 		enforceLegacyLDAPShadowing()
@@ -578,7 +579,7 @@ func apiIdPItem(w http.ResponseWriter, r *http.Request, id string) {
 			return
 		}
 		if err := idpRegistry.Upsert(&p); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			http.Error(w, err.Error(), idpMutationErrorStatus(err))
 			return
 		}
 		enforceLegacyLDAPShadowing()
@@ -592,7 +593,13 @@ func apiIdPItem(w http.ResponseWriter, r *http.Request, id string) {
 		}
 		p := idpRegistry.Get(id)
 		if err := idpRegistry.Delete(id); err != nil {
-			http.Error(w, err.Error(), http.StatusNotFound)
+			// A persist failure is NOT "not found": the profile still exists
+			// and its live provider is still authoritative (P1-3).
+			status := http.StatusNotFound
+			if errors.Is(err, errIdPPersistFailed) {
+				status = http.StatusInternalServerError
+			}
+			http.Error(w, err.Error(), status)
 			return
 		}
 		_ = publishCurrentConfigSnapshot()
@@ -612,6 +619,17 @@ type writeOnlyIdPFieldPresence struct {
 	oidcClientSecret bool
 	samlMetadataXML  bool
 	ldapBindPassword bool
+}
+
+// idpMutationErrorStatus maps a registry mutation error to the HTTP status:
+// a persistence failure is a server-side fault (500) — the request was valid
+// and NOTHING changed (transactional registry, P1-3) — while every other
+// error is a validation/compile rejection of the caller's input (400).
+func idpMutationErrorStatus(err error) int {
+	if errors.Is(err, errIdPPersistFailed) {
+		return http.StatusInternalServerError
+	}
+	return http.StatusBadRequest
 }
 
 func preserveWriteOnlyIdPFields(before, next *IdPProfile, present writeOnlyIdPFieldPresence) {

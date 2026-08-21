@@ -116,7 +116,7 @@ func apiIdPLegacyLDAPImport(w http.ResponseWriter, r *http.Request) {
 		LDAP:    legacyLDAPToProfileConfig(c),
 	}
 	if err := idpRegistry.Upsert(p); err != nil {
-		http.Error(w, "legacy ldap config cannot be imported: "+err.Error(), http.StatusBadRequest)
+		http.Error(w, "legacy ldap config cannot be imported: "+err.Error(), idpMutationErrorStatus(err))
 		return
 	}
 	_ = publishCurrentConfigSnapshot()

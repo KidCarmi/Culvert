@@ -13,7 +13,10 @@ package main
 // staged directory-test pipeline, and LDAPS.
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -186,6 +189,68 @@ func TestOpenLDAPInterop_StagedDirectoryTest(t *testing.T) {
 	}
 	if !sawBindFailure {
 		t.Errorf("service_bind failure not reported: %+v", rep.Steps)
+	}
+}
+
+// TestOpenLDAPInterop_PreflightSucceedsThenPersistFails is the P1-3 proof
+// with a REAL preflight: the ?preflight=connection stage passes against the
+// live directory, and the SUBSEQUENT persistence failure must still leave
+// the old provider live and the API reporting failure — the transaction
+// point is persistence, not the preflight.
+func TestOpenLDAPInterop_PreflightSucceedsThenPersistFails(t *testing.T) {
+	p := openLDAPInteropProfile(t)
+
+	orig := idpRegistry
+	t.Cleanup(func() { idpRegistry = orig })
+	reg := &IdPRegistry{live: make(map[string]IdentityProvider)}
+	idpRegistry = reg
+	if err := reg.Load(filepath.Join(t.TempDir(), "idp_profiles.json")); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if err := reg.Upsert(p); err != nil {
+		t.Fatalf("seed Upsert: %v", err)
+	}
+	liveBefore, ok := reg.LiveProvider(p.ID)
+	if !ok {
+		t.Fatal("seed profile did not compile")
+	}
+
+	// Break persistence AFTER the working provider is live.
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reg.mu.Lock()
+	reg.path = filepath.Join(blocker, "idp_profiles.json")
+	reg.mu.Unlock()
+
+	// Enabled edit WITH the connection preflight: the preflight succeeds
+	// against the live directory; the persist step then fails.
+	body := map[string]any{
+		"name": "Renamed Interop AD", "type": "ldap", "enabled": true,
+		"ldap": map[string]any{
+			"url":    p.LDAP.URL,
+			"bindDn": p.LDAP.BindDN,
+			"baseDn": p.LDAP.BaseDN,
+		},
+	}
+	w := httptest.NewRecorder()
+	r := jsonReq(http.MethodPut, "/api/idp/"+p.ID+"?preflight=connection", body)
+	apiIdPItem(w, r, p.ID)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("preflight-then-persist-failure: status = %d, want 500 (body=%s)", w.Code, w.Body.String())
+	}
+	got := reg.Get(p.ID)
+	if got == nil || got.Name != "OpenLDAP Interop" {
+		t.Fatalf("stored profile changed after failed persistence: %+v", got)
+	}
+	liveAfter, ok := reg.LiveProvider(p.ID)
+	if !ok || liveAfter != liveBefore {
+		t.Fatal("old live provider was replaced despite the failed persistence")
+	}
+	// And it still authenticates.
+	if id, ok := liveAfter.ResolveIdentity("alice", "alice-password"); !ok || id == nil {
+		t.Fatal("old provider no longer authenticates after the failed mutation")
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -196,20 +197,42 @@ func (r *IdPRegistry) Load(path string) error {
 	return nil
 }
 
-// save persists current profiles to the JSON file (must be called under lock).
+// errIdPPersistFailed marks a registry mutation that failed at the PERSIST
+// step. The transactional mutation model (P1-3) guarantees nothing published
+// changed when this is returned; API handlers map it to 500 (the request was
+// valid — the appliance could not store it) rather than 400.
+var errIdPPersistFailed = errors.New("idp: persisting the profile registry failed; no change was applied")
+
+// persist writes the CANDIDATE profile set to the JSON file (called under
+// lock, BEFORE the candidate is published — see the mutation model below).
 // The write is atomic (temp file + fsync + rename) so a crash mid-write can
 // never truncate or corrupt the on-disk registry — Load fails startup on
 // corrupt JSON, so a torn write would brick the proxy at next boot.
-func (r *IdPRegistry) save() error {
+//
+// TRANSACTIONAL MUTATION MODEL (P1-3, shared by Upsert/Delete/ReplaceAll):
+//
+//	build next candidate profiles → validate → compile next live set
+//	    → persist(next) atomically
+//	    → ONLY on persist success: publish profiles+live under the lock
+//
+// A persistence failure therefore leaves the old profiles, old live
+// providers, and old credentials fully authoritative — the API reports
+// failure and nothing (audit success, cluster snapshot) is emitted for a
+// state that does not exist. In deliberate in-memory mode (path == "") the
+// warning is kept and the publish proceeds — explicit pre-existing behavior.
+func (r *IdPRegistry) persist(profiles []*IdPProfile) error {
 	if r.path == "" {
 		logger.Printf("IdP: WARNING — profile change is in-memory only and will be LOST on restart; set -idp-profiles-file (or proxy.idp_profiles_file) to persist")
 		return nil
 	}
-	data, err := json.MarshalIndent(r.profiles, "", "  ")
+	data, err := json.MarshalIndent(profiles, "", "  ")
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %v", errIdPPersistFailed, err)
 	}
-	return atomicWriteFile(r.path, data, 0o600)
+	if err := atomicWriteFile(r.path, data, 0o600); err != nil {
+		return fmt.Errorf("%w: %v", errIdPPersistFailed, err)
+	}
+	return nil
 }
 
 // Persisted reports whether profile changes are written to disk. False means
@@ -303,27 +326,36 @@ func (r *IdPRegistry) Upsert(p *IdPProfile) error {
 		compiled = prov
 	}
 
-	// Replace or append.
+	// Build the CANDIDATE state on copies — the published slice/map must not
+	// be touched until persistence succeeds (P1-3 transactional model).
+	nextProfiles := make([]*IdPProfile, len(r.profiles))
+	copy(nextProfiles, r.profiles)
 	found := false
-	for i, existing := range r.profiles {
+	for i, existing := range nextProfiles {
 		if existing.ID == p.ID {
-			r.profiles[i] = p
+			nextProfiles[i] = p
 			found = true
 			break
 		}
 	}
 	if !found {
-		r.profiles = append(r.profiles, p)
+		nextProfiles = append(nextProfiles, p)
 	}
-
-	// Recompile live provider if enabled.
+	nextLive := make(map[string]IdentityProvider, len(r.live)+1)
+	for id, prov := range r.live {
+		nextLive[id] = prov
+	}
 	if p.Enabled {
-		r.live[p.ID] = compiled
+		nextLive[p.ID] = compiled
 	} else {
-		delete(r.live, p.ID)
+		delete(nextLive, p.ID)
 	}
 
-	return r.save()
+	if err := r.persist(nextProfiles); err != nil {
+		return err // old profiles + old live providers stay authoritative
+	}
+	r.profiles, r.live = nextProfiles, nextLive
+	return nil
 }
 
 func validateSAMLProfileConfig(cfg *SAMLProfileConfig) error {
@@ -366,16 +398,29 @@ func compileIdPProfile(p *IdPProfile) (IdentityProvider, error) {
 	}
 }
 
-// Delete removes a profile by ID.
+// Delete removes a profile by ID (transactional: persisted before published,
+// so a persist failure leaves the profile and its live provider active).
 func (r *IdPRegistry) Delete(id string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for i, p := range r.profiles {
-		if p.ID == id {
-			r.profiles = append(r.profiles[:i], r.profiles[i+1:]...)
-			delete(r.live, id)
-			return r.save()
+		if p.ID != id {
+			continue
 		}
+		nextProfiles := make([]*IdPProfile, 0, len(r.profiles)-1)
+		nextProfiles = append(nextProfiles, r.profiles[:i]...)
+		nextProfiles = append(nextProfiles, r.profiles[i+1:]...)
+		nextLive := make(map[string]IdentityProvider, len(r.live))
+		for lid, prov := range r.live {
+			if lid != id {
+				nextLive[lid] = prov
+			}
+		}
+		if err := r.persist(nextProfiles); err != nil {
+			return err // the profile stays stored AND live
+		}
+		r.profiles, r.live = nextProfiles, nextLive
+		return nil
 	}
 	return fmt.Errorf("idp %q not found", id)
 }
@@ -401,7 +446,9 @@ func (r *IdPRegistry) All() []*IdPProfile {
 
 // ReplaceAll atomically swaps the registry to match profiles. Enabled
 // providers are compiled before the swap so callers never observe a
-// half-applied IdP snapshot.
+// half-applied IdP snapshot, and the candidate is PERSISTED before it is
+// published (P1-3): a persistence failure rejects the whole replacement and
+// the previous set — including on a DP applying a CP snapshot — stays live.
 func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 	nextProfiles := cloneIdPProfiles(profiles)
 	nextLive := make(map[string]IdentityProvider)
@@ -422,9 +469,12 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if err := r.persist(nextProfiles); err != nil {
+		return err // the previous profile set + live providers stay authoritative
+	}
 	r.profiles = nextProfiles
 	r.live = nextLive
-	return r.save()
+	return nil
 }
 
 // validateReservedIdPNaming rejects IdP profile IDs and names that collide with
