@@ -141,7 +141,7 @@ func TestLDAPProfile_NeverInteractive(t *testing.T) {
 func TestLDAPProfile_NeverOnAuthSelectPage(t *testing.T) {
 	swapIdPRegistry(t, ldapTestProfile("corp-ad", "Corporate AD"))
 
-	req := httptest.NewRequest(http.MethodGet, "/auth/select", http.NoBody)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/auth/select", http.NoBody)
 	rec := httptest.NewRecorder()
 	authSelectProvider(rec, req)
 	body := rec.Body.String()
@@ -155,7 +155,7 @@ func TestLDAPProfile_NeverOnAuthSelectPage(t *testing.T) {
 
 func TestCaptivePortalURL_IgnoresLDAPOnlyRegistry(t *testing.T) {
 	swapIdPRegistry(t, ldapTestProfile("corp-ad", "Corporate AD"))
-	req := httptest.NewRequest(http.MethodGet, "http://example.com/", http.NoBody)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://example.com/", http.NoBody)
 	if got := resolveCaptivePortalURL(req); got != cfg.OIDCLoginURL() {
 		t.Errorf("resolveCaptivePortalURL with LDAP-only registry = %q, want legacy fallback %q", got, cfg.OIDCLoginURL())
 	}

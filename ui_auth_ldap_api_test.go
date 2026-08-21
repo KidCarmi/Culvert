@@ -196,10 +196,16 @@ func withLegacyLDAPYAML(t *testing.T, c *LDAPConfig) {
 	prev := legacyLDAPYAMLState.cfg
 	legacyLDAPYAMLState.cfg = c
 	legacyLDAPYAMLState.mu.Unlock()
+	// A retained YAML block plus an enabled registry LDAP profile is exactly
+	// the cutover condition, so any handler under test may flip the durable
+	// legacy_ldap_retired flag — snapshot/restore it too, or it leaks into
+	// every later test's cfg.IsConfigured().
+	prevRetired := legacyLDAPRetiredFlag.Load()
 	t.Cleanup(func() {
 		legacyLDAPYAMLState.mu.Lock()
 		legacyLDAPYAMLState.cfg = prev
 		legacyLDAPYAMLState.mu.Unlock()
+		legacyLDAPRetiredFlag.Store(prevRetired)
 	})
 }
 
