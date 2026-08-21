@@ -1865,11 +1865,20 @@
             },
             "nullable": true,
             "type": "array"
+          },
+          "ui_tls_fallback": {
+            "description": "True when self-signed TLS setup failed at startup and the admin UI fell back to plain HTTP.",
+            "type": "boolean"
+          },
+          "ui_tls_fallback_reason": {
+            "description": "The self-sign error, when ui_tls_fallback is true.",
+            "type": "string"
           }
         },
         "required": [
           "base_url",
-          "trust_forwarded_headers"
+          "trust_forwarded_headers",
+          "ui_tls_fallback"
         ],
         "type": "object"
       },

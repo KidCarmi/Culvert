@@ -1759,6 +1759,8 @@ func apiNetworkSettings(w http.ResponseWriter, r *http.Request) {
 			"ui_sans":                 uiExtraSANs,
 			"trust_forwarded_headers": trustForwardedHeaders,
 			"trusted_proxy_cidrs":     ListTrustedProxyCIDRs(),
+			"ui_tls_fallback":         uiTLSFallbackActive,
+			"ui_tls_fallback_reason":  uiTLSFallbackReason,
 		})
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {
