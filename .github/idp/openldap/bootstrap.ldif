@@ -5,8 +5,11 @@
 #   alice / alice-password  — displayName "Alice Example", mail, member of engineering
 #   bob   / bob-password    — no group memberships
 # Groups:
-#   cn=engineering,ou=groups — groupOfNames; the image's memberof overlay
-#   reflects membership into each member's memberOf attribute.
+#   cn=engineering,ou=groups — groupOfUniqueNames: the osixia image's
+#   memberof overlay is configured with olcMemberOfGroupOC=groupOfUniqueNames
+#   and olcMemberOfMemberAD=uniqueMember, so ONLY that shape is reflected
+#   into each member's memberOf attribute (a groupOfNames/member group is
+#   silently ignored — the suite's group assertions then fail).
 # Test credentials are FIXTURE-ONLY.
 
 dn: ou=people,dc=corp,dc=example
@@ -36,6 +39,6 @@ mail: bob@corp.example
 userPassword: bob-password
 
 dn: cn=engineering,ou=groups,dc=corp,dc=example
-objectClass: groupOfNames
+objectClass: groupOfUniqueNames
 cn: engineering
-member: uid=alice,ou=people,dc=corp,dc=example
+uniqueMember: uid=alice,ou=people,dc=corp,dc=example
