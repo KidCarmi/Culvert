@@ -15,7 +15,15 @@ package main
 // Each test below reproduces the pre-fix failure through ACTUAL policy matching
 // (matchCategory / lookupHostCategory), not internal holder state.
 
-import "testing"
+import (
+	"bytes"
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"testing"
+	"time"
+)
 
 // seedBuiltInCategory installs a BuiltIn=true category (the embedded/feed-owned class)
 // and removes it on cleanup.
@@ -218,5 +226,59 @@ func TestF3b4Regression_RecomposeTaxonomyNoOpWhenUnarmed(t *testing.T) {
 	}
 	if !matchCategory(cat, host) {
 		t.Errorf("a no-op recompose must leave policy matching intact")
+	}
+}
+
+// ─── the WIRING proof: the production handler itself must recompose ──────────────────
+//
+// The tests above exercise the recompose SEMANTICS through recomposeBaseline, which
+// stands in for the armed lifecycle. This one pins the production WIRING end-to-end:
+// the real signed-feed runtime is armed (startSignedFeedLifecycle, offline embedded
+// baseline), the mutation goes through the REAL apiURLCatHost handler over HTTP, and
+// enforcement is asserted through matchCategory. Deleting the handler's
+// recomposeSignedFeedTaxonomy() call fails this test (review P2: the earlier tests
+// called the recompose helper directly, so the handler wiring itself was unproven).
+func TestF3b4Wiring_APIURLCatHostRecomposesArmedRuntime(t *testing.T) {
+	const cat, seeded, added = "WiringSaaSCat", "wiring-seeded.example", "wiring-added.example"
+
+	snapshotCatStore(t)
+	snapshotConfigVersionsDir(t)
+	f3a2ResetFeedDurable(t)
+	f3a2SwapOverrides(t)
+	swapClusterRole(t, "standalone")
+	swapFeedStatus(t, time.Date(2026, 8, 21, 0, 0, 0, 0, time.UTC))
+	swapFeedRuntimeGlobals(t)
+	resetOwnership(t)
+	setSaaSFeedDurable(saasFeedDurable{SchemaVersion: saasStoreSchemaVersion})
+
+	seedBuiltInCategory(t, cat, []string{seeded})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	startSignedFeedLifecycle(filepath.Join(t.TempDir(), "saas_feed"), ctx)
+	if globalSaaSFeedRuntime == nil {
+		t.Fatal("lifecycle did not arm the runtime")
+	}
+
+	if !matchCategory(cat, seeded) {
+		t.Fatal("precondition: the seeded built-in host must match through the armed view")
+	}
+	if matchCategory(cat, added) {
+		t.Fatal("precondition: the not-yet-added host must not match")
+	}
+
+	// The canonical operator action, through the production handler.
+	w := httptest.NewRecorder()
+	rctx := context.WithValue(context.Background(), uiRoleKey{}, RoleAdmin)
+	body := bytes.NewReader([]byte(`{"category":"` + cat + `","host":"` + added + `"}`))
+	r := httptest.NewRequestWithContext(rctx, http.MethodPost, "/api/urlcat/host", body)
+	r.Header.Set("Content-Type", "application/json")
+	apiURLCatHost(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("apiURLCatHost status = %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	if !matchCategory(cat, added) {
+		t.Fatal("handler mutation not enforced: apiURLCatHost did not recompose the armed effective view (recomposeSignedFeedTaxonomy wiring lost?)")
 	}
 }

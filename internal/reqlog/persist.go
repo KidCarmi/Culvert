@@ -94,10 +94,17 @@ func Backpressure() int64 { return atomic.LoadInt64(&backpressure) }
 func enqueue(e Entry) {
 	persistMu.Lock()
 	ch, stop := persistCh, stopCh
+	if ch != nil {
+		// Registered under the SAME critical section that publishes ch, so
+		// stopPersist — which nils the pointers under this mutex before
+		// waiting — observes every sender that could still hold this ch.
+		enqueueWG.Add(1)
+	}
 	persistMu.Unlock()
 	if ch == nil {
 		return
 	}
+	defer enqueueWG.Done()
 	select {
 	case ch <- e:
 		return
@@ -127,6 +134,15 @@ func enqueue(e Entry) {
 // the caller was blocked on a saturated queue.
 var errShutdownRace = errors.New("request log: persistence stopped while the queue was saturated")
 
+// enqueueWG tracks in-flight enqueue calls so stopPersist can wait for every
+// sender that snapshotted the live channel before sweeping it. Without this, a
+// sender blocked on a saturated queue could win its `ch <- e` case AFTER the
+// drain goroutine's final takePending — stranding the entry in the abandoned
+// channel with no writeErrors charge (the review P2 on this accounting). Every
+// such sender completes promptly once `stop` is closed (both select cases are
+// ready), so the wait converges.
+var enqueueWG sync.WaitGroup
+
 // startPersist brings up the drain goroutine if it is not already running.
 // Idempotent; callers hold no lock.
 func startPersist() {
@@ -150,7 +166,7 @@ func stopPersist() {
 		persistMu.Unlock()
 		return
 	}
-	stop := stopCh
+	ch, stop := persistCh, stopCh
 	persistCh, flushCh, stopCh = nil, nil, nil
 	persistMu.Unlock()
 
@@ -170,6 +186,23 @@ func stopPersist() {
 	case <-waited:
 	case <-timer.C:
 		obs.Printf("WARN request log: persistence drain did not stop within %v (sink wedged); abandoning it", persistSyncTimeout)
+	}
+
+	// Every sender that snapshotted this channel has now been registered on
+	// enqueueWG (registration shares the mutex section that published the
+	// channel), and each completes promptly once `stop` is closed — so after
+	// this wait, nothing can deposit into ch again. Sweep what the drain
+	// goroutine's final takePending raced past: a saturated sender that won
+	// its `ch <- e` case after that final drain would otherwise strand its
+	// entry in the abandoned channel, silently and uncounted.
+	enqueueWG.Wait()
+	for {
+		select {
+		case <-ch:
+			countWriteError(1, errShutdownRace)
+		default:
+			return
+		}
 	}
 }
 
