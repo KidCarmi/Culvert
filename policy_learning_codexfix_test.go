@@ -471,6 +471,49 @@ func TestPolicyContentIdentity_IgnoresProvenanceStamps(t *testing.T) {
 	}
 }
 
+// TestPolicyContentIdentity_CategoryGroupMembership (Codex round 17): a rule
+// with DestCategoryGroup resolves the group's CURRENT membership at
+// evaluation time, so group edits change enforcement without touching the
+// rulebase, the policy generation, or the category epoch. The content
+// identity must cover the groups — and the memo must key on the group store's
+// revision so the cached path sees the edit immediately. Canonicalization is
+// pinned too: provenance restamps, display case, and member order must not
+// stale (the identity is restart-stable content, never a counter).
+func TestPolicyContentIdentity_CategoryGroupMembership(t *testing.T) {
+	plDurableDraftHarness(t)
+	snapshotGlobalCategoryGroups(t)
+
+	enabled := true
+	policyStore.ReplaceAll([]PolicyRule{{
+		ID: newRuleID(), Name: "group-rule", SourceGroup: "g",
+		DestCategoryGroup: "Prod Allowed", Action: ActionAllow, SSLAction: SSLInspect, Enabled: &enabled,
+	}})
+	if _, err := globalCategoryGroups.Add("Prod Allowed", []string{"saas", "devtools"}); err != nil {
+		t.Fatal(err)
+	}
+	base := policyContentIdentityCached()
+
+	// Membership edit: enforcement changes; nothing else moves. Both the
+	// direct hash and the CACHED path must change (the memo key carries the
+	// group revision — a generation+action key served the stale hash).
+	if err := globalCategoryGroups.Update("Prod Allowed", []string{"saas"}); err != nil {
+		t.Fatal(err)
+	}
+	if policyContentIdentityCached() == base {
+		t.Fatal("category-group membership edit did not change the cached policy content identity")
+	}
+
+	// Restore the membership with different case and order: canonically the
+	// same content, so the identity must return to base (restart-stable, no
+	// false-stale on spelling).
+	if err := globalCategoryGroups.Update("Prod Allowed", []string{"DevTools", "SaaS"}); err != nil {
+		t.Fatal(err)
+	}
+	if policyContentIdentityCached() != base {
+		t.Fatal("canonically identical group membership produced a different identity (false stale)")
+	}
+}
+
 // TestEffectivePolicySnapshot_CoherentUnderConcurrentCommit (round 15): the
 // tester's rules and rulebase label must come from ONE coordinator-locked
 // view — separate engagement/list/label reads interleaving with a commit

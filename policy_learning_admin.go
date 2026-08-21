@@ -209,19 +209,24 @@ func policyLearnApplyDesiredLocked(desired policyLearnSettings) {
 // stamps, so they mismatch v2 values and go stale exactly once at upgrade —
 // never reinterpreted (the epoch-scheme upgrade precedent).
 // policyContentMemo caches the content hash keyed by (policy generation,
-// default action): every RULEBASE mutation bumps the generation, but the
-// DEFAULT ACTION is part of the hashed content and its setter flips an atomic
-// WITHOUT advancing the generation (Codex round 14 — a generation-only key
-// served the stale hash through a deny→allow→deny flip, so the per-
-// observation churn check never latched the transient allow window). Both
-// key components are cheap reads, so the learning drain's PER-OBSERVATION
-// check (Codex round 13) costs two loads + string compares; the hash
-// recomputes at most once per policy change. A same-key content change is
-// impossible in-process (every rule mutator bumps the generation; the
-// default action is in the key); the memo is process-local, so counter
-// resets across restarts cannot alias into it.
+// default action, category-group revision): every RULEBASE mutation bumps the
+// generation, but the DEFAULT ACTION is part of the hashed content and its
+// setter flips an atomic WITHOUT advancing the generation (Codex round 14 — a
+// generation-only key served the stale hash through a deny→allow→deny flip,
+// so the per-observation churn check never latched the transient allow
+// window), and CATEGORY-GROUP membership is resolved at evaluation time from
+// its own store, whose edits advance neither the generation nor the category
+// epoch (Codex round 17 — tightening a group a rule references changed
+// enforcement while every pinned identity still matched). All key components
+// are cheap reads, so the learning drain's PER-OBSERVATION check (Codex round
+// 13) costs three loads + compares; the hash recomputes at most once per
+// policy or group change. A same-key content change is impossible in-process
+// (every rule mutator bumps the generation, every group mutator bumps the
+// group revision, the default action is in the key); the memo is
+// process-local, so counter resets across restarts cannot alias into it.
 type policyContentMemoEntry struct {
 	gen           int64
+	catgroupRev   uint64
 	defaultAction string
 	hash          string
 }
@@ -231,12 +236,25 @@ var policyContentMemo atomic.Pointer[policyContentMemoEntry]
 func policyContentIdentityCached() string {
 	gen, _ := policyStore.policyVersion()
 	da := defaultPolicyAction()
-	if m := policyContentMemo.Load(); m != nil && m.gen == gen && m.defaultAction == da {
+	cgRev := globalCategoryGroups.Revision()
+	if m := policyContentMemo.Load(); m != nil && m.gen == gen && m.defaultAction == da && m.catgroupRev == cgRev {
 		return m.hash
 	}
 	h := policyContentIdentity()
-	policyContentMemo.Store(&policyContentMemoEntry{gen: gen, defaultAction: da, hash: h})
+	policyContentMemo.Store(&policyContentMemoEntry{gen: gen, catgroupRev: cgRev, defaultAction: da, hash: h})
 	return h
+}
+
+// catGroupContentDTO is the canonical resolution-relevant projection of a
+// category group for the content identity: the stable ID and lowercase name
+// (both rule-reference keys) and the SORTED member-category set. Provenance
+// (CreatedAt/UpdatedAt — restamped on no-op edits) and display case (matching
+// is lowercase-keyed) are canonicalized out, mirroring the rule-stamp zeroing
+// above.
+type catGroupContentDTO struct {
+	ID         string   `json:"id"`
+	Name       string   `json:"name"`
+	Categories []string `json:"categories"`
 }
 
 func policyContentIdentity() string {
@@ -248,11 +266,37 @@ func policyContentIdentity() string {
 		rules[i].ModifiedAt = ""
 		rules[i].ModifiedBy = ""
 	}
+	// Category groups are part of what the policy SAYS: a rule's
+	// DestCategoryGroup resolves the group's CURRENT membership at evaluation
+	// time, so the same rulebase enforces differently after a group edit
+	// (Codex round 17). ALL groups are hashed, not just referenced ones —
+	// an edit to an unreferenced group is a conservative false-stale, the
+	// accepted direction (QB-2.1 precedent); referenced-only tracking would
+	// couple this identity to rule-reference resolution semantics.
+	groups := globalCategoryGroups.List()
+	cgs := make([]catGroupContentDTO, 0, len(groups))
+	for i := range groups {
+		cats := append([]string(nil), groups[i].Categories...)
+		sort.Strings(cats)
+		cgs = append(cgs, catGroupContentDTO{
+			ID:         groups[i].ID,
+			Name:       strings.ToLower(groups[i].Name),
+			Categories: cats,
+		})
+	}
+	sort.Slice(cgs, func(i, j int) bool { return cgs[i].Name < cgs[j].Name })
 	h := sha256.New()
-	h.Write([]byte("culvert-policy-content-v2\x00"))
+	// Domain tag v3: v2 hashes did not cover category groups, so every v2 pin
+	// mismatches once at upgrade and is never reinterpreted (the epoch-scheme
+	// upgrade precedent).
+	h.Write([]byte("culvert-policy-content-v3\x00"))
 	h.Write([]byte(defaultPolicyAction()))
 	h.Write([]byte{0})
-	if err := json.NewEncoder(h).Encode(rules); err != nil {
+	enc := json.NewEncoder(h)
+	if err := enc.Encode(rules); err != nil {
+		return "marshal-error" // structurally impossible (fixed struct slice)
+	}
+	if err := enc.Encode(cgs); err != nil {
 		return "marshal-error" // structurally impossible (fixed struct slice)
 	}
 	return hex.EncodeToString(h.Sum(nil)[:16])

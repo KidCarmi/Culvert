@@ -28,6 +28,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -55,7 +56,19 @@ type Store struct {
 	groups map[string]*Group // keyed by lowercase name
 	order  []string          // insertion order for stable list output
 	path   string
+
+	// rev counts successful mutations (Load/Add/Update/Delete/Rename/
+	// ReplaceAll). It is a PROCESS-LOCAL change signal for memoization only
+	// ("contents may have changed since revision N") — never an identity:
+	// callers that need a durable, restart-stable identity must hash the
+	// group CONTENTS (the QB-2 lesson from urlcat's retired revision
+	// counter). Atomic so readers never touch mu.
+	rev atomic.Uint64
 }
+
+// Revision returns the process-local mutation counter. Monotonic within a
+// process; resets on restart — a memo key, not an identity.
+func (s *Store) Revision() uint64 { return s.rev.Load() }
 
 // New builds an empty store.
 func New() *Store {
@@ -124,6 +137,7 @@ func (s *Store) Load(path string) error {
 	s.groups = built
 	s.order = order
 	s.mu.Unlock()
+	s.rev.Add(1)
 
 	obs.Printf("CategoryGroups: loaded %d group(s) from %s", len(groups), path)
 	// Persist newly-assigned IDs so they survive restart (idempotent: a second
@@ -218,6 +232,7 @@ func (s *Store) Add(name string, categories []string) (*Group, error) {
 	}
 	s.groups[key] = g
 	s.order = append(s.order, key)
+	s.rev.Add(1)
 	return g, nil
 }
 
@@ -236,6 +251,7 @@ func (s *Store) Update(name string, categories []string) error {
 	g.Categories = cats
 	g.catSet = buildCatSet(cats)
 	g.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	s.rev.Add(1)
 	return nil
 }
 
@@ -257,6 +273,7 @@ func (s *Store) Delete(name string) error {
 			break
 		}
 	}
+	s.rev.Add(1)
 	return nil
 }
 
@@ -293,6 +310,7 @@ func (s *Store) UpdateByID(id string, categories []string) error {
 			g.Categories = cats
 			g.catSet = buildCatSet(cats)
 			g.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+			s.rev.Add(1)
 			return nil
 		}
 	}
@@ -317,6 +335,7 @@ func (s *Store) DeleteByID(id string) (string, error) {
 					break
 				}
 			}
+			s.rev.Add(1)
 			return name, nil
 		}
 	}
@@ -357,6 +376,7 @@ func (s *Store) Rename(id, newName string) (oldName string, err error) {
 		// Same key (no change or case-only) — update the display name in place.
 		cur.Name = newName
 		cur.UpdatedAt = now
+		s.rev.Add(1)
 		return oldName, nil
 	}
 	if _, taken := s.groups[newKey]; taken {
@@ -372,6 +392,7 @@ func (s *Store) Rename(id, newName string) (oldName string, err error) {
 			break
 		}
 	}
+	s.rev.Add(1)
 	return oldName, nil
 }
 
@@ -421,6 +442,7 @@ func (s *Store) ReplaceAll(groups []Group) {
 	s.groups = built
 	s.order = order
 	s.mu.Unlock()
+	s.rev.Add(1)
 }
 
 // ContainsCategory returns true if any group references the given category name.
