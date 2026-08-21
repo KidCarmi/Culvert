@@ -189,34 +189,48 @@ var (
 	adminSettingsPath string
 )
 
-// adminSettingsDurablySaved tracks whether admin_settings.json has been
-// durably written at least once, either found already saved at startup
-// (LoadAdminSettings) or written since (SaveAdminSettings). Every omnibus
-// save marks ALL sentinel-gated surfaces (log retention, log-store enable,
-// trusted-proxy CIDRs, blocklist feeds, upstream proxy pool, YARA settings,
-// decryption auto-exclusion tunables, support-bundle retention) authoritative
-// together — see saveAdminSettingsWithOverrides — so this single flag
-// accurately reflects all of them without re-deriving each sentinel at read
-// time. Diagnostics-only; never consulted by load/apply/save logic itself.
-var adminSettingsDurablySaved atomic.Bool
+// adminSettingsOverriddenSurfaces holds the operator-facing names of the
+// sentinel-gated surfaces that are CURRENTLY durably overridden by
+// admin_settings.json — snapshotted whenever the file is loaded at startup or
+// durably saved (SaveAdminSettings). Per-sentinel, not a single any-set flag:
+// an admin_settings.json written by an OLDER build carries only the sentinels
+// that existed then (e.g. no autoexclude_tunables_saved / support_retention_
+// saved), and those un-sentineled surfaces still follow config.yaml/CLI — a
+// blanket "everything is overridden" claim would be wrong for exactly the
+// upgraded installs that most need this diagnostic. Diagnostics-only; never
+// consulted by load/apply/save logic itself.
+var adminSettingsOverriddenSurfaces atomic.Pointer[[]string]
 
-// AdminSettingsDurablyOverridden reports whether the sentinel-gated settings
-// above are currently sourced from a GUI/API-saved admin_settings.json
-// (true) rather than from config.yaml/CLI flags (false). Race-free, no I/O;
-// safe for the read-only diagnostics handler.
-func AdminSettingsDurablyOverridden() bool {
-	return adminSettingsDurablySaved.Load()
+// AdminSettingsOverriddenSurfaces returns the operator-facing names of the
+// surfaces currently pinned by a saved sentinel (empty = everything still
+// follows config.yaml/CLI). Race-free, no I/O; safe for the read-only
+// diagnostics handler.
+func AdminSettingsOverriddenSurfaces() []string {
+	if p := adminSettingsOverriddenSurfaces.Load(); p != nil {
+		return *p
+	}
+	return nil
 }
 
-// adminSettingsHasSavedSentinel reports whether any of the sentinel-gated
-// surfaces snapshotted by saveAdminSettingsWithOverrides is marked saved —
-// i.e. whether loading s would make those surfaces durably authoritative
-// over config.yaml/CLI. Pure; shared by LoadAdminSettings so the field list
-// lives in exactly one place.
-func adminSettingsHasSavedSentinel(s AdminSettings) bool {
-	return s.LogRetentionSaved || s.LogStoreEnabledSaved || s.TrustedProxyCIDRsSaved ||
-		s.BlocklistFeedsSaved || s.UpstreamProxiesSaved || s.YARASettingsSaved ||
-		s.AutoExcludeTunablesSaved || s.SupportRetentionSaved
+// snapshotOverriddenSurfaces derives the per-sentinel surface list from s and
+// publishes it. The field list lives in exactly one place — here — shared by
+// the load and save paths.
+func snapshotOverriddenSurfaces(s AdminSettings) {
+	var out []string
+	add := func(saved bool, name string) {
+		if saved {
+			out = append(out, name)
+		}
+	}
+	add(s.LogRetentionSaved, "log retention")
+	add(s.LogStoreEnabledSaved, "log-store enable")
+	add(s.TrustedProxyCIDRsSaved, "trusted-proxy CIDRs")
+	add(s.BlocklistFeedsSaved, "blocklist feeds")
+	add(s.UpstreamProxiesSaved, "upstream proxy pool")
+	add(s.YARASettingsSaved, "YARA engine settings")
+	add(s.AutoExcludeTunablesSaved, "decryption auto-exclusion tunables")
+	add(s.SupportRetentionSaved, "support-bundle retention")
+	adminSettingsOverriddenSurfaces.Store(&out)
 }
 
 // LoadAdminSettings reads the settings file and applies each field to its
@@ -288,9 +302,7 @@ func LoadAdminSettings(path string) {
 	applyAdminSupportRetention(&s)             // Slice B: configurable support-bundle retention caps
 	setDecRedactHosts(s.DecryptionRedactHosts) // ADR-0011 §4 host/SNI redaction posture
 
-	if adminSettingsHasSavedSentinel(s) {
-		adminSettingsDurablySaved.Store(true)
-	}
+	snapshotOverriddenSurfaces(s)
 
 	logger.Printf("AdminSettings: loaded from %s", path)
 }
@@ -730,7 +742,7 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 		logger.Printf("AdminSettings: write error: %v", err)
 		return err
 	}
-	adminSettingsDurablySaved.Store(true)
+	snapshotOverriddenSurfaces(s)
 	// Persist-before-apply: the durable write succeeded, so apply the target to the
 	// live runtime now — still under adminSettingsMu, so the (disk, runtime) pair
 	// moves atomically w.r.t. every other save.

@@ -834,7 +834,8 @@ func checkYARAEnginePosture() OperatorContractCheck {
 // restart. This is intended persistence behavior, not a fault, so it always
 // reports "ok" — the point is visibility, not a warning.
 func checkConfigSourcePrecedence() OperatorContractCheck {
-	if !AdminSettingsDurablyOverridden() {
+	overridden := AdminSettingsOverriddenSurfaces()
+	if len(overridden) == 0 {
 		return OperatorContractCheck{
 			Code:   "config_source_precedence",
 			Status: diagOK,
@@ -843,14 +844,19 @@ func checkConfigSourcePrecedence() OperatorContractCheck {
 				"and support-bundle retention are all sourced from config.yaml/CLI flags.",
 		}
 	}
+	// Per-sentinel, not all-or-nothing: an admin_settings.json written by an
+	// older build carries only the sentinels that existed then, and any
+	// surface without its sentinel still follows config.yaml/CLI.
 	return OperatorContractCheck{
 		Code:   "config_source_precedence",
 		Status: diagOK,
-		Message: "Admin settings have been saved from the GUI/API at least once. Log retention, log-store enable, " +
-			"trusted-proxy CIDRs, blocklist feeds, upstream proxy pool, YARA engine settings, decryption " +
-			"auto-exclusion tunables, and support-bundle retention are now durable admin overrides — future " +
-			"edits to config.yaml or CLI flags for these settings are ignored on restart.",
-		OperatorAction: "Manage these settings from the admin GUI or REST API going forward; config.yaml/CLI edits to them take effect again only after they are changed via the GUI/API.",
+		Message: "Durable admin overrides are active for: " + strings.Join(overridden, ", ") + ". " +
+			"config.yaml/CLI edits for these settings are ignored on restart; any sentinel-gated " +
+			"setting not listed still follows config.yaml/CLI.",
+		OperatorAction: "Manage the listed settings from the admin GUI or REST API. To return one to " +
+			"config.yaml/CLI ownership, stop the node and remove its *_saved sentinel (or the whole " +
+			"admin_settings.json) from the data directory — GUI/API edits always re-save the sentinel, " +
+			"so YAML never silently regains precedence.",
 	}
 }
 
