@@ -1000,3 +1000,116 @@ func TestAggregate_PreDispatchNotAttributedToDefaultAction(t *testing.T) {
 		t.Fatalf("attribution split wrong: predispatch=%d default=%d (want 1/1 — pre-dispatch must not masquerade as a default-action hit)", pre, def)
 	}
 }
+
+// TestChargeLateWindowLoss_SupersedesGeneratedRecs (round 28): a late
+// captured-window charge degrades the session's transport loss AFTER
+// recommendations may have copied the pre-charge loss into their immutable
+// Coverage — a generated HIGH-confidence recommendation would stay
+// apparently clean and acceptable despite the newly known loss. The charge
+// must supersede the session's still-generated recommendations (the durable
+// generated→superseded latch acceptance refuses).
+func TestChargeLateWindowLoss_SupersedesGeneratedRecs(t *testing.T) {
+	clk := newTestClock()
+	e := newRecEngine(t, t.TempDir(), clk, nil)
+	if _, err := e.StartSession("op"); err != nil {
+		t.Fatal(err)
+	}
+	captured, ok := e.CaptureWindow()
+	if !ok {
+		t.Fatal("CaptureWindow refused with an active session")
+	}
+	feedHighEvidence(t, e, clk)
+	sess, err := e.StopSession("op")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := mustGenerate(t, e, sess.ID)
+	if len(res.Recommendations) == 0 {
+		t.Fatal("setup: no recommendation generated")
+	}
+
+	// The late decision from A's window arrives after generation.
+	e.chargeLateWindowLoss(captured)
+
+	for _, r := range e.Recommendations() {
+		if r.SessionID == sess.ID && r.State == RecStateGenerated {
+			t.Fatalf("recommendation %s still generated after its session's loss accounting changed — stale HIGH confidence remains acceptable", r.ID)
+		}
+	}
+}
+
+// TestCaptureWindow_Contract (round 28): the coherent capture returns the
+// OWNED open-window generation while a session is Learning and refuses
+// otherwise — the separate gate/generation reads it replaces could capture
+// an unowned closing generation between a stop and its rotation.
+func TestCaptureWindow_Contract(t *testing.T) {
+	clk := newTestClock()
+	e := newTestEngine(t, t.TempDir(), clk, nil)
+	t.Cleanup(func() { _ = e.Close() })
+	if gen, ok := e.CaptureWindow(); ok {
+		t.Fatalf("CaptureWindow succeeded with no session (gen=%d)", gen)
+	}
+	if _, err := e.StartSession("op"); err != nil {
+		t.Fatal(err)
+	}
+	gen, ok := e.CaptureWindow()
+	if !ok || gen != e.WindowGeneration() {
+		t.Fatalf("active capture (gen=%d ok=%v) != current window %d", gen, ok, e.WindowGeneration())
+	}
+	if _, err := e.StopSession("op"); err != nil {
+		t.Fatal(err)
+	}
+	if gen, ok := e.CaptureWindow(); ok {
+		t.Fatalf("CaptureWindow succeeded after stop (gen=%d)", gen)
+	}
+}
+
+// TestObserve_CapturedDecisionsNeverVanishAcrossStop (round 28): captured
+// decisions racing a session stop must be accounted SOMEWHERE — delivered,
+// folded into the closing window's outstanding count, or charged late to the
+// owning session — never silently dropped by a gate re-read after the
+// captured pre-check passed (the pre-fix second gate return). Conservation
+// stress under -race.
+func TestObserve_CapturedDecisionsNeverVanishAcrossStop(t *testing.T) {
+	const n = 200
+	clk := newTestClock()
+	e := newTestEngine(t, t.TempDir(), clk, nil)
+	t.Cleanup(func() { _ = e.Close() })
+	a, err := e.StartSession("op")
+	if err != nil {
+		t.Fatal(err)
+	}
+	captured, _ := e.CaptureWindow()
+
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			e.Observe(Observation{Subject: "u", AuthSource: "idp", Host: "conserve.example",
+				Status: "OK", WindowGen: captured})
+		}()
+		if i == n/2 {
+			if _, err := e.StopSession("op"); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	wg.Wait()
+
+	var sessDropped, delivered int64
+	for _, s := range e.Sessions() {
+		if s.ID == a.ID {
+			sessDropped = s.Transport.Dropped
+		}
+	}
+	st := e.ObservationStats()
+	delivered = st.Delivered
+	if got := delivered + sessDropped + st.Dropped; got < n {
+		t.Fatalf("captured decisions vanished: delivered=%d sessionCharged=%d globalDropped=%d (accounted %d < %d)",
+			delivered, sessDropped, st.Dropped, got, n)
+	}
+	if st.Dropped != 0 {
+		t.Fatalf("captured decisions leaked to the GLOBAL drop counter (%d) — successor baselines would be contaminated", st.Dropped)
+	}
+}

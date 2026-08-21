@@ -178,10 +178,18 @@ type learnDecisionCtx struct {
 // against the key AFTER the decision and stamps into the captured window.
 func learnDecisionSnapshot() (learnDecisionCtx, bool) {
 	eng := policyLearnEngine.Load()
-	if eng == nil || !eng.LearningActive() {
+	if eng == nil {
 		return learnDecisionCtx{}, false
 	}
-	return learnDecisionCtx{key: learnDecisionKeyNow(), eng: eng, gen: eng.WindowGeneration()}, true
+	// Coherent gate+generation capture (Codex round 28): separate
+	// LearningActive/WindowGeneration reads let a session stop and rotate in
+	// between, capturing an unowned closing generation that could only fall
+	// back to the global drop counter later.
+	gen, ok := eng.CaptureWindow()
+	if !ok {
+		return learnDecisionCtx{}, false
+	}
+	return learnDecisionCtx{key: learnDecisionKeyNow(), eng: eng, gen: gen}, true
 }
 
 // pk is the full decision key captured BEFORE policy evaluation

@@ -397,6 +397,16 @@ func (e *Engine) chargeLateWindowLoss(gen uint64) {
 		for _, s := range e.sessions {
 			if s.ID == id {
 				s.Transport.Dropped++
+				// Recommendations already generated from this session pinned
+				// the PRE-charge transport loss into their immutable Coverage
+				// (Codex round 28): the loss they claim is now understated,
+				// so still-pending ones are SUPERSEDED — the existing durable
+				// generated→superseded latch, which acceptance refuses.
+				// Accepted/accepting/rejected states stay latched (their
+				// transitions already happened; the loss only weakens future
+				// claims). A regenerate from the session sees the charged
+				// window and produces honestly-degraded replacements.
+				e.supersedeGeneratedRecsLocked(id)
 				e.dirty = true
 				return
 			}
@@ -404,6 +414,28 @@ func (e *Engine) chargeLateWindowLoss(gen uint64) {
 		delete(e.windowOwner, gen)
 	}
 	e.tr.dropped.Add(1)
+}
+
+// supersedeGeneratedRecsLocked marks every still-generated recommendation of
+// sessionID superseded (copy-on-write, matching the generation-path
+// supersession). Caller holds e.mu and owns the dirty flag.
+func (e *Engine) supersedeGeneratedRecsLocked(sessionID string) {
+	var swapped []*Recommendation
+	for i, r := range e.recs {
+		if r.SessionID != sessionID || r.State != RecStateGenerated {
+			continue
+		}
+		if swapped == nil {
+			swapped = make([]*Recommendation, len(e.recs))
+			copy(swapped, e.recs)
+		}
+		c := r.clone()
+		c.State = RecStateSuperseded
+		swapped[i] = &c
+	}
+	if swapped != nil {
+		e.recs = swapped
+	}
 }
 
 // AggregateOverview is the bounded factual summary of one session's
