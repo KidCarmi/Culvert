@@ -131,7 +131,7 @@ func clusterCAWritePrometheus(w *strings.Builder) {
 // operator could scrape. `culvert_ca_rotations_total` only counts successes,
 // the cache counters kept ticking (the engine happily signed unusable leaves),
 // and there was no expiry series at all — CA expiry was visible only as
-// `ca_expires_days` inside the /healthz JSON body, which no alerting rule
+// `ca_expires_days` inside the proxy's /health JSON body, which no alerting rule
 // evaluates. `culvert_ca_expires_in_seconds` is the one an operator should
 // alert on WELL before the cliff; the rest are for confirming the cliff was hit.
 //

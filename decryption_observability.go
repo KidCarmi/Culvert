@@ -134,15 +134,20 @@ func (o DecryptionOutcome) toBlock(redact bool) *logstore.DecryptionBlock {
 // reflects whether upstream verification was skipped for the matched rule (dec.SkipVerify);
 // CacheConsulted/ProfileID carry the fail-open scope read (hit-or-miss) from resolveSSLDecision.
 // FailStage/FailCategory stay `none` — a decrypted, inspected session has no failure.
-func inspectedOutcome(dec sslResolution, hostOnly string, upstreamCS tls.ConnectionState, match *PolicyMatch) *DecryptionOutcome {
+func inspectedOutcome(dec sslResolution, hostOnly string, upstreamCS tls.ConnectionState, match *PolicyMatch, effectiveSkip bool) *DecryptionOutcome {
 	// CertVerify must reflect the EFFECTIVE upstream verification the origin leg actually
-	// performed — resolveInspectSkipVerify, the same resolver upstreamInspectTLSConfigForMatch
-	// feeds. A decryption profile's CertVerification ("skip"/"strict"/"permissive") overrides
-	// the rule's inline dec.SkipVerify, so deriving from dec.SkipVerify alone would record the
-	// opposite of what happened (Codex #801). resolveInspectSkipVerify is deterministic in
-	// match, so this reproduces the handshake's effective skip without a second config build.
+	// performed. effectiveSkip is CAPTURED from the handshake's own tls.Config
+	// (upstreamTLSCfg.InsecureSkipVerify) — the ground truth of what this session did —
+	// rather than RE-RESOLVED against the live decryption-profile store. Re-resolving
+	// (the old resolveInspectSkipVerify call here) was a TOCTOU: a profile that mutates
+	// between the handshake-config build and this record build (admin edit, CP→DP config
+	// sync) could flip the recorded cert_verify to the opposite of what the handshake
+	// actually did, forging an inaccurate security audit record (CWE-367 → CWE-778).
+	// A decryption profile's CertVerification ("skip"/"strict"/"permissive") already
+	// overrode the rule's inline dec.SkipVerify when that config was built (Codex #801),
+	// so the captured value carries that precedence without a second, racy resolution.
 	certVerify := decryptobs.CertVerifyVerified
-	if resolveInspectSkipVerify(match, dec.SkipVerify) {
+	if effectiveSkip {
 		certVerify = decryptobs.CertVerifySkipped
 	}
 	o := &DecryptionOutcome{

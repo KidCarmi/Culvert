@@ -1754,6 +1754,7 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
       <div id="idp-persist-warning" style="display:none;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.35);color:#f87171;border-radius:8px;padding:10px 14px;margin:0 0 16px;font-size:.82rem;line-height:1.5">
         <svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> <strong>Not persisted:</strong> identity providers are stored in memory only and will be <strong>lost on restart or update</strong>. Start Culvert with <code>-idp-profiles-file /data/idp_profiles.json</code> (or set <code>proxy.idp_profiles_file</code> in config.yaml) to persist them.
       </div>
+      <div id="idp-legacy-ldap-banner" style="display:none;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.3);color:var(--text);border-radius:8px;padding:12px 14px;margin:0 0 16px;font-size:.82rem;line-height:1.6"></div>
       <div id="idp-list" style="display:flex;flex-direction:column;gap:10px"></div>
     </div>
 
@@ -1849,6 +1850,31 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
               </button>
             </div>
           </div>
+
+          <!-- Directory (LDAP) section -->
+          <div class="idp-proto-section" style="margin-top:18px">
+            <div class="idp-proto-label">
+              <span class="idp-proto-badge ldap">Directory</span>
+              LDAP / Active Directory - proxy usernames &amp; passwords validated against your directory
+            </div>
+            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px">
+              <button class="idp-provider-card" data-click="selectIdPTemplate" data-arg="ad-ldap" data-tpl="ad-ldap">
+                <span class="idp-card-icon" style="background:#0078d415;color:#0078d4">AD</span>
+                <span class="idp-card-name">Microsoft Active Directory</span>
+                <span class="idp-card-proto">LDAP</span>
+              </button>
+              <button class="idp-provider-card" data-click="selectIdPTemplate" data-arg="openldap" data-tpl="openldap">
+                <span class="idp-card-icon" style="background:#f59e0b15;color:#f59e0b">LD</span>
+                <span class="idp-card-name">LDAP / OpenLDAP</span>
+                <span class="idp-card-proto">LDAP</span>
+              </button>
+              <button class="idp-provider-card" data-click="selectIdPTemplate" data-arg="freeipa" data-tpl="freeipa">
+                <span class="idp-card-icon" style="background:#22c55e15;color:#22c55e">IP</span>
+                <span class="idp-card-name">FreeIPA</span>
+                <span class="idp-card-proto">LDAP</span>
+              </button>
+            </div>
+          </div>
         </div>
 
         <!-- Step 2: Configuration form -->
@@ -1871,7 +1897,7 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
               <label class="form-label">Provider Name <span style="color:var(--red)">*</span></label>
               <input id="idp-name" class="input" placeholder="e.g. Okta Corporate" style="width:100%">
             </div>
-            <div class="form-group" style="margin-bottom:0">
+            <div class="form-group" id="idp-domains-group" style="margin-bottom:0">
               <label class="form-label">Email Domains <span style="color:var(--muted);font-weight:400">(comma-separated)</span></label>
               <input id="idp-domains" class="input" placeholder="corp.com, company.org" style="width:100%">
             </div>
@@ -1960,6 +1986,133 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
             </div>
           </div>
 
+          <!-- LDAP fields (ADR-0025) -->
+          <div id="idp-ldap-fields" style="display:none">
+            <div style="border-top:1px solid var(--border);margin:18px 0 16px;position:relative">
+              <span style="position:absolute;top:-9px;left:0;font-size:.7rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;background:var(--surface1);padding-right:8px">Directory Connection</span>
+            </div>
+            <div style="background:var(--surface2);border-radius:8px;padding:10px 12px;margin-bottom:14px;font-size:.78rem;line-height:1.6;color:var(--muted)">
+              A directory provider validates proxy usernames &amp; passwords (Basic authentication) and resolves the user's
+              groups for Access Rules. It never appears on the browser single-sign-on selector - use OIDC or SAML for
+              interactive SSO.
+            </div>
+            <div style="display:grid;grid-template-columns:2fr 1fr;gap:12px;margin-bottom:12px">
+              <div class="form-group" style="margin-bottom:0">
+                <label class="form-label" for="idp-ldap-server">Server <span style="color:var(--red)">*</span></label>
+                <input id="idp-ldap-server" class="input" placeholder="dc01.corp.example" style="width:100%" autocomplete="off">
+              </div>
+              <div class="form-group" style="margin-bottom:0">
+                <label class="form-label" for="idp-ldap-port">Port</label>
+                <input id="idp-ldap-port" class="input" type="number" min="1" max="65535" placeholder="636" style="width:100%">
+              </div>
+            </div>
+            <div class="form-group" style="margin-bottom:12px">
+              <label class="form-label">Connection security</label>
+              <div role="radiogroup" aria-label="Connection security" style="display:flex;flex-direction:column;gap:6px;font-size:.84rem">
+                <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                  <input type="radio" name="idp-ldap-security" id="idp-ldap-sec-ldaps" value="ldaps" checked data-change="ldapSecurityChanged" style="width:auto">
+                  <span><strong>LDAPS</strong> <span style="color:#22c55e;font-size:.74rem;font-weight:600">Recommended</span> <span style="color:var(--muted)">- TLS from the first byte (port 636)</span></span>
+                </label>
+                <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                  <input type="radio" name="idp-ldap-security" id="idp-ldap-sec-starttls" value="starttls" data-change="ldapSecurityChanged" style="width:auto">
+                  <span><strong>StartTLS</strong> <span style="color:var(--muted)">- upgrade a plain connection to TLS (port 389)</span></span>
+                </label>
+                <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                  <input type="radio" name="idp-ldap-security" id="idp-ldap-sec-plain" value="plain" data-change="ldapSecurityChanged" style="width:auto">
+                  <span><strong>Plain LDAP</strong> <span style="color:#f87171;font-size:.74rem;font-weight:600">Unsafe - development only</span></span>
+                </label>
+              </div>
+            </div>
+            <div id="idp-ldap-plain-warning" role="alert" style="display:none;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.35);color:#f87171;border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:.8rem;line-height:1.5">
+              <strong>Unencrypted transport:</strong> user and service-account passwords will cross the network in clear text. Use LDAPS or StartTLS in production.
+            </div>
+            <div class="form-group" style="margin-bottom:12px">
+              <label class="form-label" for="idp-ldap-basedn">Base DN <span style="color:var(--red)">*</span></label>
+              <input id="idp-ldap-basedn" class="input" placeholder="DC=corp,DC=example" style="width:100%" autocomplete="off">
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+              <div class="form-group" style="margin-bottom:0">
+                <label class="form-label" for="idp-ldap-binddn">Service account (Bind DN) <span style="color:var(--muted);font-weight:400">- empty = anonymous</span></label>
+                <input id="idp-ldap-binddn" class="input" placeholder="CN=svc-proxy,OU=Service,DC=corp,DC=example" style="width:100%" autocomplete="off">
+              </div>
+              <div class="form-group" style="margin-bottom:0">
+                <label class="form-label" for="idp-ldap-bindpw">Bind credential</label>
+                <label id="idp-ldap-clear-bindpw-wrap" style="display:none;align-items:center;gap:6px;margin-bottom:7px;font-size:.78rem;color:var(--muted);cursor:pointer">
+                  <input type="checkbox" id="idp-ldap-clear-bindpw" style="width:auto">
+                  <span>Clear saved credential</span>
+                </label>
+                <input id="idp-ldap-bindpw" class="input" type="password" placeholder="••••••••" style="width:100%" autocomplete="new-password">
+                <div id="idp-ldap-bindpw-state" style="display:none;font-size:.74rem;color:#22c55e;margin-top:5px">Configured - leave blank to keep the saved credential; type to replace it.</div>
+              </div>
+            </div>
+
+            <details id="idp-ldap-advanced" style="margin-bottom:14px">
+              <summary style="cursor:pointer;font-size:.8rem;font-weight:600;color:var(--muted);padding:6px 0">Advanced</summary>
+              <div style="padding-top:10px">
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+                  <div class="form-group" style="margin-bottom:0">
+                    <label class="form-label" for="idp-ldap-filter">User filter <span style="color:var(--muted);font-weight:400">(%s = login name)</span></label>
+                    <input id="idp-ldap-filter" class="input" placeholder="(sAMAccountName=%s)" style="width:100%;font-family:monospace" autocomplete="off">
+                  </div>
+                  <div class="form-group" style="margin-bottom:0">
+                    <label class="form-label" for="idp-ldap-group-attr">Group attribute</label>
+                    <input id="idp-ldap-group-attr" class="input" placeholder="memberOf" style="width:100%" autocomplete="off">
+                  </div>
+                </div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+                  <div class="form-group" style="margin-bottom:0">
+                    <label class="form-label" for="idp-ldap-email-attr">Email attribute</label>
+                    <input id="idp-ldap-email-attr" class="input" placeholder="mail" style="width:100%" autocomplete="off">
+                  </div>
+                  <div class="form-group" style="margin-bottom:0">
+                    <label class="form-label" for="idp-ldap-name-attr">Display-name attribute</label>
+                    <input id="idp-ldap-name-attr" class="input" placeholder="displayName" style="width:100%" autocomplete="off">
+                  </div>
+                </div>
+                <div class="form-group" style="margin-bottom:12px">
+                  <label class="form-label" for="idp-ldap-required-group">Provider-level required group <span style="color:var(--muted);font-weight:400">(full group DN)</span></label>
+                  <input id="idp-ldap-required-group" class="input" placeholder="CN=ProxyUsers,OU=Groups,DC=corp,DC=example" style="width:100%" autocomplete="off">
+                  <div style="font-size:.74rem;color:var(--muted);margin-top:5px;line-height:1.5">
+                    Optional legacy/provider-level restriction (direct membership only). For normal authorization,
+                    use <strong>Access Rules</strong> with the identity groups this provider resolves.
+                  </div>
+                </div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:4px">
+                  <div class="form-group" style="margin-bottom:0">
+                    <label class="form-label" for="idp-ldap-cachettl">Auth cache TTL <span style="color:var(--muted);font-weight:400">(seconds, 0 = default 300)</span></label>
+                    <input id="idp-ldap-cachettl" class="input" type="number" min="0" max="86400" placeholder="300" style="width:100%">
+                  </div>
+                  <div class="form-group" style="margin-bottom:0;display:flex;align-items:flex-end">
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:.82rem">
+                      <input type="checkbox" id="idp-ldap-skipverify" style="width:auto" data-change="ldapSecurityChanged">
+                      <span>Skip TLS certificate verification <span style="color:#f87171;font-weight:600">(unsafe)</span></span>
+                    </label>
+                  </div>
+                </div>
+                <div id="idp-ldap-skipverify-warning" role="alert" style="display:none;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.35);color:#f87171;border-radius:8px;padding:10px 14px;margin-top:8px;font-size:.8rem;line-height:1.5">
+                  <strong>Certificate verification disabled:</strong> the credential channel is open to interception. Only for self-signed development directories - install the directory's CA instead.
+                </div>
+              </div>
+            </details>
+
+            <!-- Test connection -->
+            <div style="border-top:1px solid var(--border);margin:14px 0 12px;position:relative">
+              <span style="position:absolute;top:-9px;left:0;font-size:.7rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;background:var(--surface1);padding-right:8px">Test</span>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:8px;align-items:end;margin-bottom:10px">
+              <div class="form-group" style="margin-bottom:0">
+                <label class="form-label" for="idp-ldap-test-user">Test username <span style="color:var(--muted);font-weight:400">(optional)</span></label>
+                <input id="idp-ldap-test-user" class="input" placeholder="alice" style="width:100%" autocomplete="off">
+              </div>
+              <div class="form-group" style="margin-bottom:0">
+                <label class="form-label" for="idp-ldap-test-pass">Test password <span style="color:var(--muted);font-weight:400">(never stored)</span></label>
+                <input id="idp-ldap-test-pass" class="input" type="password" placeholder="••••••••" style="width:100%" autocomplete="new-password">
+              </div>
+              <button class="btn ghost" data-click="testLDAPConnection" id="idp-ldap-test-btn" style="white-space:nowrap">Test connection</button>
+            </div>
+            <div id="idp-ldap-test-result" aria-live="polite" style="display:none;background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px 14px;font-size:.8rem;margin-bottom:6px;line-height:1.7"></div>
+          </div>
+
           <!-- Known Groups -->
           <div style="border-top:1px solid var(--border);margin:18px 0 16px;position:relative">
             <span style="position:absolute;top:-9px;left:0;font-size:.7rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;background:var(--surface1);padding-right:8px">Known Groups</span>
@@ -2025,6 +2178,7 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
     }
     .idp-proto-badge.saml { background:rgba(20,184,166,.15);color:#2dd4bf; }
     .idp-proto-badge.oidc { background:rgba(16,185,129,.15);color:#34d399; }
+    .idp-proto-badge.ldap { background:rgba(245,158,11,.15);color:#fbbf24; }
     /* Copy button in SP info panel */
     .idp-copy-btn {
       display:inline-flex;align-items:center;gap:4px;
@@ -2271,10 +2425,10 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
 
       </div>
 
-      <!-- SSL Inspection Bypass (logically grouped with certificates) -->
+      <!-- SSL Bypass (logically grouped with certificates) -->
       <div class="panel" style="margin-top:18px">
         <div class="panel-header">
-          <span class="panel-title">SSL Inspection Bypass</span>
+          <span class="panel-title">SSL Bypass</span>
         </div>
         <div class="panel-body">
           <p class="hint">
@@ -2640,7 +2794,12 @@ Firefox (all platforms):
               <span class="info-label">Database Path</span>
               <span class="info-val" id="geoip-path" style="font-size:.78rem;word-break:break-all">-</span>
             </div>
+            <div class="info-item" style="flex:1;min-width:140px">
+              <span class="info-label">Database Age</span>
+              <span class="info-val" id="geoip-age" style="color:var(--muted)">-</span>
+            </div>
           </div>
+          <div id="geoip-error" style="display:none;margin-top:10px;color:var(--red);font-size:.82rem"></div>
         </div>
       </div>
 
@@ -3882,6 +4041,7 @@ Firefox (all platforms):
               <div class="card"><div class="card-label">Fail mode</div><div id="cdr-ov-failmode" class="card-value">-</div></div>
               <div class="card"><div class="card-label">Max file size</div><div id="cdr-ov-maxsize" class="card-value">-</div></div>
               <div class="card"><div class="card-label">Client active</div><div id="cdr-ov-active" class="card-value">-</div></div>
+              <div class="card"><div class="card-label">Last probe</div><div id="cdr-ov-lastprobe" class="card-value">-</div></div>
             </div>
           </div>
         </div>
@@ -4275,6 +4435,10 @@ Firefox (all platforms):
           <div class="card"><div class="card-label">Enrolled Nodes</div><div class="card-value" id="cluster-enrolled-count">0</div></div>
           <div class="card" id="cluster-ha-card" style="display:none"><div class="card-label">HA Status</div><div class="card-value" id="cluster-ha-status">-</div></div>
         </div>
+        <p style="color:var(--muted);font-size:.7rem;margin:10px 0 0 0">
+          CP&harr;DP gRPC compression: <strong id="cluster-grpc-compression">-</strong>
+          <span style="margin-left:4px">&mdash; startup-scoped (<code>CULVERT_CLUSTER_GRPC_COMPRESSION</code>), status-only here. Enable fleet-wide only after every Control Plane runs a build that supports it (CP-first upgrade).</span>
+        </p>
       </div>
 
       <!-- Enable Control Plane (shown only in standalone mode) -->
@@ -4783,6 +4947,7 @@ Firefox (all platforms):
             <div style="display:flex;align-items:center;margin-bottom:8px;gap:8px">
               <div style="font-size:.78rem;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.04em">Release Catalog</div>
               <span id="rel-trust-badge" style="font-size:.7rem;font-weight:700;padding:2px 8px;border-radius:99px" title="Catalog signature verification mode"></span>
+              <span id="rel-trust-schemes" style="font-size:.72rem;color:var(--muted)" title="Signature trust scheme(s) currently active"></span>
               <span id="rel-catalog-meta" style="margin-left:auto;color:var(--muted);font-size:.72rem"></span>
             </div>
             <div id="rel-trust-warning" style="display:none;font-size:.78rem;color:var(--warn,#f59e0b);background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.35);border-radius:6px;padding:6px 10px;margin-bottom:8px"></div>
@@ -4805,7 +4970,7 @@ Firefox (all platforms):
                   <button class="btn primary sm" data-click="releaseDispatchOpen">＋ Dispatch</button>
                 </div>
               </div>
-              <div id="rel-status" style="font-size:.85rem;line-height:1.7"><span style="color:var(--muted)">No dispatch recorded for this agent.</span></div>
+              <div id="rel-status" style="font-size:.85rem;line-height:1.7"><span style="color:var(--muted)">No dispatch recorded for this maintenance agent.</span></div>
             </div>
           </div>
 
@@ -4840,6 +5005,17 @@ Firefox (all platforms):
           <div>
             <div style="font-weight:600;margin-bottom:6px">Health verdict</div>
             <div id="support-health" role="status" aria-live="polite"><p class="hint">Loading…</p></div>
+          </div>
+
+          <div>
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+              <span style="font-weight:600">Backups</span>
+              <button class="btn ghost sm" data-click="loadBackups" title="Re-check the backup archive directory">
+                <svg class="ico" aria-hidden="true"><use href="#i-refresh"/></svg> Refresh
+              </button>
+            </div>
+            <p class="hint">Archive directory scanned by the maintenance agent - the same listing <code>--list-backups</code> produces, without SSH.</p>
+            <div id="support-backups" role="status" aria-live="polite"><p class="hint">Loading…</p></div>
           </div>
 
           <div>
@@ -4912,7 +5088,7 @@ Firefox (all platforms):
             <div id="support-upload-status" role="status" aria-live="polite" style="margin-bottom:6px"><p class="hint">Loading…</p></div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap" data-min-role="admin">
               <input id="upload-origin" class="input sm" type="text" placeholder="https://tac.example.com" style="width:240px" title="TAC upload base URL (https, non-private)">
-              <input id="upload-credential" class="input sm" type="password" placeholder="bearer credential (optional)" style="width:200px" autocomplete="off" title="Per-appliance bearer credential; stored 0600, never displayed. Leave blank to keep the existing one.">
+              <input id="upload-credential" class="input sm" type="password" placeholder="bearer credential (optional)" style="width:200px" autocomplete="off" title="Per-node bearer credential; stored 0600, never displayed. Leave blank to keep the existing one.">
               <label style="display:flex;gap:4px;align-items:center;font-size:.8rem"><input id="upload-enabled" type="checkbox"> Enable</label>
               <label style="display:flex;gap:4px;align-items:center;font-size:.8rem" title="Remove the stored credential"><input id="upload-clear-cred" type="checkbox"> Clear credential</label>
               <button class="btn ghost sm" data-click="saveUploadConfig" data-min-role="admin" title="Save the upload posture (node-local; no bundle is sent by this action)">Save</button>
@@ -4930,7 +5106,7 @@ Firefox (all platforms):
             <div id="support-telemetry-status" role="status" aria-live="polite" style="margin-bottom:6px"><p class="hint">Loading…</p></div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap" data-min-role="admin">
               <input id="telemetry-origin" class="input sm" type="text" placeholder="https://tac.culvertlabs.com" style="width:240px" title="TAC telemetry origin (https, non-private; no path/query/fragment)">
-              <input id="telemetry-credential" class="input sm" type="password" placeholder="bearer credential" style="width:200px" autocomplete="off" title="Per-appliance bearer credential; stored 0600, never displayed. Leave blank to keep the existing one.">
+              <input id="telemetry-credential" class="input sm" type="password" placeholder="bearer credential" style="width:200px" autocomplete="off" title="Per-node bearer credential; stored 0600, never displayed. Leave blank to keep the existing one.">
               <label style="display:flex;gap:4px;align-items:center;font-size:.8rem"><input id="telemetry-enabled" type="checkbox"> Enable</label>
               <label style="display:flex;gap:4px;align-items:center;font-size:.8rem" title="Remove the stored credential"><input id="telemetry-clear-cred" type="checkbox"> Clear credential</label>
               <button class="btn ghost sm" data-click="saveTelemetryConfig" data-min-role="admin" title="Save the telemetry posture (node-local; no data is sent - no sender exists in this build)">Save</button>
@@ -5041,7 +5217,7 @@ Firefox (all platforms):
 <div id="release-dispatch-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;align-items:center;justify-content:center">
   <div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:24px 28px;max-width:460px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.35)">
     <h3 style="margin:0 0 12px;font-size:1.05rem;font-weight:700">Dispatch Release</h3>
-    <p style="margin:0 0 16px;font-size:.82rem;color:var(--muted);line-height:1.5">Choose a release <b>or</b> a channel (not both). The agent applies the verified pinned digest.</p>
+    <p style="margin:0 0 16px;font-size:.82rem;color:var(--muted);line-height:1.5">Choose a release <b>or</b> a channel (not both). The maintenance agent applies the verified pinned digest.</p>
     <div style="display:grid;gap:12px">
       <label style="font-size:.78rem;color:var(--muted)">Release
         <select id="rel-disp-release" data-change="releaseDispSelectRelease" style="width:100%;margin-top:4px;padding:6px 8px;font-size:.85rem;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text)"></select>
@@ -5054,7 +5230,7 @@ Firefox (all platforms):
           <option value="critical">critical</option>
         </select>
       </label>
-      <label style="font-size:.78rem;color:var(--muted)">Agent
+      <label style="font-size:.78rem;color:var(--muted)">Maintenance Agent
         <input id="rel-disp-agent" value="local" style="width:100%;margin-top:4px;padding:6px 8px;font-size:.85rem;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text)">
       </label>
       <label style="font-size:.82rem;display:flex;align-items:center;gap:8px"><input type="checkbox" id="rel-disp-prebackup" data-change="releaseDispToggleBackup"> Pre-restart config backup (pre_backup)</label>
@@ -5207,6 +5383,8 @@ document.addEventListener('click', e => {
     case 'editIdP':           editIdP(JSON.parse(arg)); break;
     case 'deleteIdP':         deleteIdP(arg, arg2); break;
     case 'idpCopyText':       idpCopyText(arg, el); break;
+    case 'testLDAPConnection': testLDAPConnection(); break;
+    case 'importLegacyLDAP':  importLegacyLDAP(); break;
 
     // ── PAC ──
     case 'savePACConfig':     savePACConfig(); break;
@@ -5431,6 +5609,7 @@ document.addEventListener('click', e => {
     // ── Release management (P1.6d-1) ──
     case 'loadReleases':           loadReleases(); break;
     case 'loadSupport':            loadSupport(); break;
+    case 'loadBackups':            loadBackups(); break;
     case 'supportCreateBundle':    supportCreateBundle(); break;
     case 'supportSetDebugLevel':   supportSetDebugLevel(); break;
     case 'supportClearDebugLevel': supportClearDebugLevel(); break;
@@ -5492,6 +5671,7 @@ document.addEventListener('change', e => {
     case 'importBlocklist':   importBlocklist(el); break;
     case 'loadXMLFile':       loadXMLFile(e); break;
     case 'syncSAMLMetadataSourceChoice': syncSAMLMetadataSourceChoice(); break;
+    case 'ldapSecurityChanged': ldapSecurityChanged(); break;
     case 'setLogLevel':       setLogLevel(el.value); break;
     case 'importConfig':      importConfig(el); break;
     case 'toggleOCSP':        toggleOCSP(el.checked); break;
@@ -6050,6 +6230,10 @@ async function doLogout() {
 
 // ── Users & Roles ────────────────────────────────────────────────────────
 let _editingUsername = null; // null = new user, else username being edited
+// Unicode-aware password complexity test — mirrors server validatePasswordComplexity
+// (uses ES2018 Unicode property escapes; falls back to ASCII ranges on older browsers)
+let _pwdComplexRe; try { _pwdComplexRe = {u:new RegExp('\\p{Lu}','u'),l:new RegExp('\\p{Ll}','u'),d:new RegExp('\\p{Nd}','u')}; } catch(e){}
+const meetsPasswordComplexity = p => _pwdComplexRe ? _pwdComplexRe.u.test(p)&&_pwdComplexRe.l.test(p)&&_pwdComplexRe.d.test(p) : /[A-Z]/.test(p)&&/[a-z]/.test(p)&&/[0-9]/.test(p);
 
 async function fetchUsers() {
   if (uiRole !== 'admin') return;
@@ -6112,9 +6296,13 @@ async function saveUser() {
                            : document.getElementById('um-pass').value;
   const role     = document.getElementById('um-role').value;
 
+  const complexityErr = 'Password must contain at least one uppercase letter, one lowercase letter, and one digit.';
+
   if (!username)                           return showUserErr('Username is required.');
   if (!isEdit && password.length < 8)      return showUserErr('Password must be at least 8 characters.');
+  if (!isEdit && !meetsPasswordComplexity(password)) return showUserErr(complexityErr);
   if (isEdit && password && password.length < 8) return showUserErr('New password must be at least 8 characters.');
+  if (isEdit && password && !meetsPasswordComplexity(password)) return showUserErr(complexityErr);
 
   btn.disabled = true; btn.textContent = 'Saving…';
   try {
@@ -7710,6 +7898,8 @@ async function fetchStats() {
       setPosture('logging', 'crit', fmt(s.auditLogWriteErrors) + ' audit entries lost (compliance record incomplete)');
     } else if ((s.logWriteErrors || 0) > 0) {
       setPosture('logging', 'warn', fmt(s.logWriteErrors) + ' write errors');
+    } else if ((s.processLogWriteErrors || 0) > 0) {
+      setPosture('logging', 'warn', fmt(s.processLogWriteErrors) + ' process-log lines lost');
     } else if (logFallback.req || logFallback.audit) {
       const which = logFallback.req && logFallback.audit ? 'Request+audit log'
         : logFallback.req ? 'Request log' : 'Audit log';
@@ -10205,9 +10395,35 @@ async function disableSyslog() {
 async function loadGeoIPStatus() {
   try {
     const g = await api('/api/geoip');
-    setText('geoip-status', g.enabled ? 'Enabled' : 'Disabled');
-    document.getElementById('geoip-status').style.color = g.enabled ? 'var(--green)' : 'var(--muted)';
+    setText('geoip-status', g.enabled ? (g.lastError ? 'Enabled (refresh failed)' : 'Enabled') : (g.lastError ? 'Failed to load' : 'Disabled'));
+    document.getElementById('geoip-status').style.color = g.enabled ? (g.lastError ? 'var(--yellow)' : 'var(--green)') : (g.lastError ? 'var(--red)' : 'var(--muted)');
     setText('geoip-path', g.dbPath || '(not configured)');
+    const ageEl = document.getElementById('geoip-age');
+    if (typeof g.dbAgeDays === 'number') {
+      // MaxMind GeoLite2 country data degrades in accuracy as IP allocations
+      // shift; Culvert never auto-refreshes the file, so flag a stale build.
+      const stale = g.dbAgeDays > 90;
+      ageEl.textContent = g.dbAgeDays + ' day(s) (built ' + g.dbBuildDate.slice(0, 10) + ')' + (stale ? ' - stale, consider updating' : '');
+      ageEl.style.color = stale ? 'var(--warn,#f59e0b)' : 'var(--muted)';
+    } else {
+      ageEl.textContent = '-';
+      ageEl.style.color = 'var(--muted)';
+    }
+    const errEl = document.getElementById('geoip-error');
+    if (g.lastError) {
+      const when = g.lastErrorAt ? new Date(g.lastErrorAt).toLocaleString() : '';
+      // enabled + lastError = a RELOAD failed but the previously loaded database
+      // is still installed and serving lookups — say so, instead of wrongly
+      // claiming destCountry rules stopped matching (they only stop when no
+      // reader is installed at all).
+      const impact = g.enabled
+        ? 'database refresh failed — still serving the previously loaded database: '
+        : 'destCountry policy rules will not match: ';
+      errEl.textContent = impact + g.lastError + (when ? ' (' + when + ')' : '');
+      errEl.style.display = '';
+    } else {
+      errEl.style.display = 'none';
+    }
   } catch(_) {}
 }
 
@@ -10713,9 +10929,33 @@ function cdrRenderOverview() {
   set('cdr-ov-maxsize',  cfg.maxFileSizeMB ? cfg.maxFileSizeMB + ' MB' : '50 MB (default)');
   set('cdr-ov-active',   cfg.clientActive ? 'yes' : 'no');
 
+  // consecutiveFailures comes from the background health poller (cdr_health.go),
+  // which keeps probing every 15s even while /api/cdr/health still serves a
+  // cached "last known good" response - the cache is only cleared after several
+  // failed ticks. Surfacing the raw count here means a pool that just went
+  // unreachable shows "degraded" immediately instead of a stale "active" badge
+  // for up to ~30s with no visible indication anything is wrong.
+  const health = cdrState.health || {};
+  // A missing/failed health response is itself a degraded signal: once the
+  // cached snapshot is cleared (3rd consecutive failure) /api/cdr/health
+  // starts 502ing, the fetch above catches to null — and without this check
+  // the badge would flip back to green exactly when the outage became
+  // persistent.
+  const healthUnavailable = cfg.clientActive && cdrState.health == null;
+  const failing = healthUnavailable || (health.consecutiveFailures || 0) > 0;
+  set('cdr-ov-lastprobe', health.lastSeen
+    ? new Date(health.lastSeen).toLocaleString() + (failing ? ` (${health.consecutiveFailures} failed probes since)` : '')
+    : (healthUnavailable ? 'unavailable (health endpoint failing)' : '-'));
+
   const badge = document.getElementById('cdr-status-badge');
   if (badge) {
     if (!cfg.enabled) { badge.textContent = 'disabled'; badge.className = 'badge'; }
+    else if (cfg.clientActive && failing) {
+      badge.textContent = healthUnavailable
+        ? 'degraded (health endpoint unavailable)'
+        : `degraded (${health.consecutiveFailures} consecutive probe failures)`;
+      badge.className = 'badge warn';
+    }
     else if (cfg.clientActive) { badge.textContent = 'active'; badge.className = 'badge allow'; }
     else { badge.textContent = 'not connected'; badge.className = 'badge drop'; }
   }
@@ -10743,9 +10983,10 @@ function cdrRenderOverview() {
     tbody.innerHTML = '<tr><td colspan="8" class="muted">No instances enrolled - go to the Instances tab to add one.</td></tr>';
     return;
   }
-  const health = cdrState.health || {};
   tbody.innerHTML = instances.map(i => {
-    const healthy = (cfg.clientActive && health.healthy) ? '<span class="badge allow">healthy</span>' : '<span class="badge drop">-</span>';
+    const healthy = !(cfg.clientActive && health.healthy) ? '<span class="badge drop">-</span>'
+      : failing ? '<span class="badge warn">degraded</span>'
+      : '<span class="badge allow">healthy</span>';
     const cb = cdrBreakerBadge(i);
     return `<tr>
       <td>${escHtml(i.name)}</td>
@@ -12338,6 +12579,15 @@ async function submitPolicyRule() {
   finally { _polMutateInFlight = false; }
 }
 
+// F20: the Allow/Block quick filters are a display-only umbrella over the raw
+// PolicyAction wire values - Drop (silent) and Block_Page (with page) both read
+// as "Block" here, matching the actionBadge() grouping shown in the table.
+function polActionBucket(action) {
+  if (action === 'Allow') return 'allow';
+  if (action === 'Drop' || action === 'Block_Page') return 'block';
+  return '';
+}
+
 // Extend renderPolicy to show country and file profile columns
 function setPolActionFilter(f) {
   polActionFilter = f;
@@ -12509,7 +12759,7 @@ function renderPolicy() {
 
   // F20: client-side search + action filter (computed only when rebuilding)
   const filtered = ordered.filter(r => {
-    if (polActionFilter && r.action !== polActionFilter) return false;
+    if (polActionFilter && polActionBucket(r.action) !== polActionFilter) return false;
     if (_polUnusedFilter && !polRuleIsUnused(r)) return false;
     if (!q) return true;
     const haystack = [r.name, r.sourceIP, r.sourceIdentity, r.sourceGroup, r.authSource,
@@ -12796,6 +13046,11 @@ document.querySelectorAll('.nav-item').forEach(el => {
 // Provider logo detection - maps known IdP patterns to badge colours + short labels.
 function idpProviderMeta(p) {
   const n = (p.name || '').toLowerCase();
+  if (p.type === 'ldap') {
+    if (n.includes('active directory') || n.includes(' ad') || n === 'ad') return { label: 'Active Directory', color: '#0078d4' };
+    if (n.includes('freeipa') || n.includes('ipa')) return { label: 'FreeIPA', color: '#22c55e' };
+    return { label: 'LDAP', color: '#f59e0b' };
+  }
   const issuer = (p.oidc && p.oidc.issuer || '').toLowerCase();
   const metaUrl = (p.saml && p.saml.metadataUrl || '').toLowerCase();
   const src = n + ' ' + issuer + ' ' + metaUrl;
@@ -12816,6 +13071,7 @@ function idpProviderMeta(p) {
 }
 
 async function loadIdPList() {
+  loadLegacyLDAPBanner();
   const res = await apiFetch('/api/idp');
   if (!res.ok) return;
   const data = await res.json();
@@ -12837,7 +13093,7 @@ async function loadIdPList() {
     el.innerHTML = `<div style="text-align:center;padding:48px 24px;color:var(--muted);background:var(--surface1);border-radius:10px;border:1px solid var(--border)">
       <div style="margin-bottom:12px"><svg class="ico" style="width:3rem;height:3rem" aria-hidden="true"><use href="#i-id"/></svg></div>
       <div style="font-size:1rem;font-weight:600;margin-bottom:6px">No identity providers configured</div>
-      <div style="font-size:.85rem">Click "+ Add Provider" to connect Okta, Azure AD, Google Workspace, ADFS or any OIDC/SAML provider.</div>
+      <div style="font-size:.85rem">Click "+ Add Provider" to connect Microsoft Active Directory, Okta, Azure AD, Google Workspace, ADFS or any OIDC/SAML/LDAP provider.</div>
     </div>`;
     return;
   }
@@ -12845,12 +13101,19 @@ async function loadIdPList() {
     const meta = idpProviderMeta(p);
     const protoBadge = p.type === 'saml'
       ? `<span style="background:rgba(20,184,166,.12);color:#2dd4bf;border-radius:4px;padding:2px 7px;font-size:.67rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em">SAML</span>`
-      : `<span style="background:rgba(16,185,129,.12);color:#34d399;border-radius:4px;padding:2px 7px;font-size:.67rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em">OIDC</span>`;
+      : p.type === 'ldap'
+        ? `<span style="background:rgba(245,158,11,.12);color:#fbbf24;border-radius:4px;padding:2px 7px;font-size:.67rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em">LDAP</span>`
+        : `<span style="background:rgba(16,185,129,.12);color:#34d399;border-radius:4px;padding:2px 7px;font-size:.67rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em">OIDC</span>`;
     const statusBadge = p.enabled
       ? `<span style="display:inline-flex;align-items:center;gap:4px;background:rgba(34,197,94,.1);color:#22c55e;border-radius:4px;padding:2px 8px;font-size:.7rem;font-weight:600"><span style="width:6px;height:6px;border-radius:50%;background:#22c55e;display:inline-block"></span>Enabled</span>`
       : `<span style="display:inline-flex;align-items:center;gap:4px;background:var(--surface2);color:var(--muted);border-radius:4px;padding:2px 8px;font-size:.7rem;font-weight:600"><span style="width:6px;height:6px;border-radius:50%;background:var(--muted);display:inline-block"></span>Disabled</span>`;
     const vendorBadge = `<span style="background:${meta.color}18;color:${meta.color};border-radius:4px;padding:2px 7px;font-size:.7rem;font-weight:700;border:1px solid ${meta.color}30">${escHtml(meta.label)}</span>`;
-    const metaLine = p.type === 'oidc' && p.oidc
+    const ldapSecurity = p.type === 'ldap' && p.ldap
+      ? ((p.ldap.url || '').toLowerCase().startsWith('ldaps://') ? 'LDAPS' : (p.ldap.startTls ? 'StartTLS' : 'Plain LDAP'))
+      : '';
+    const metaLine = p.type === 'ldap' && p.ldap
+      ? `<div style="font-size:.77rem;color:var(--muted);margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(p.ldap.url || '')}">Server: <span style="color:var(--text)">${escHtml((p.ldap.url || '').replace(/^ldaps?:\/\//i,''))}</span> · Base DN: <span style="color:var(--text)">${escHtml(p.ldap.baseDn || '')}</span> · <span style="color:${ldapSecurity === 'Plain LDAP' ? '#f87171' : (ldapSecurity === 'LDAPS' ? '#22c55e' : 'var(--text)')}">${ldapSecurity}${p.ldap.tlsSkipVerify ? ' (unverified!)' : ''}</span></div>`
+      : p.type === 'oidc' && p.oidc
       ? `<div style="font-size:.77rem;color:var(--muted);margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(p.oidc.issuer)}">Issuer: <span style="color:var(--text)">${escHtml(p.oidc.issuer)}</span></div>`
       : p.type === 'saml' && p.saml && p.saml.metadataUrl
         ? `<div style="font-size:.77rem;color:var(--muted);margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Metadata URL configured</div>`
@@ -12885,7 +13148,7 @@ async function loadIdPList() {
         </div>
       </div>
       <div style="display:flex;gap:6px;flex-shrink:0">
-        <button class="btn ghost sm" data-click="editIdP" data-arg="${JSON.stringify(JSON.stringify(p))}">Edit</button>
+        <button class="btn ghost sm" data-click="editIdP" data-arg="${escHtml(JSON.stringify(p))}">Edit</button>
         <button class="btn danger-quiet sm" data-click="deleteIdP" data-arg="${escHtml(p.id)}" data-arg2="${escHtml(p.name)}">Delete</button>
       </div>
     </div>`;
@@ -12960,6 +13223,21 @@ const IDP_TEMPLATES = {
     banner: '<b>Generic SAML 2.0</b>: Provide the ACS URL and SP Entity ID below to your IdP admin. Get the metadata URL or XML from your IdP and paste/upload it. Map the attribute names for email and group memberships to match what your IdP sends.',
     spInfo: true,
   },
+  'ad-ldap': {
+    type: 'ldap', name: 'Active Directory',
+    ldapFilter: '(sAMAccountName=%s)', ldapGroupAttr: 'memberOf', ldapEmailAttr: 'mail', ldapNameAttr: 'displayName',
+    banner: '<b>Microsoft Active Directory</b>: enter a domain controller, the domain\'s Base DN (e.g. <code>DC=corp,DC=example</code>) and a low-privilege service account. Users sign in with their AD username &amp; password; the resolved <em>memberOf</em> group DNs become identity groups for Access Rules. Use <em>Test connection</em> before enabling.',
+  },
+  'openldap': {
+    type: 'ldap', name: 'OpenLDAP',
+    ldapFilter: '(uid=%s)', ldapGroupAttr: 'memberOf', ldapEmailAttr: 'mail', ldapNameAttr: 'cn',
+    banner: '<b>LDAP / OpenLDAP</b>: users are located with <code>(uid=%s)</code> under the Base DN and authenticated with a direct bind. Group membership is read from the <em>memberOf</em> overlay when enabled - adjust the group attribute if your directory uses a different scheme.',
+  },
+  'freeipa': {
+    type: 'ldap', name: 'FreeIPA',
+    ldapFilter: '(uid=%s)', ldapGroupAttr: 'memberOf', ldapEmailAttr: 'mail', ldapNameAttr: 'displayName',
+    banner: '<b>FreeIPA</b>: point at an IPA server with a Base DN like <code>cn=users,cn=accounts,dc=corp,dc=example</code>. Users authenticate with their IPA login; <em>memberOf</em> group DNs become identity groups for Access Rules.',
+  },
 };
 
 let _idpWizardBaseURL = '';
@@ -13016,6 +13294,15 @@ function selectIdPTemplate(tpl) {
   if (t.metaUrlHint) document.getElementById('idp-meta-url').placeholder = t.metaUrlHint;
   if (t.groupsAttr) document.getElementById('idp-saml-groups').value = t.groupsAttr;
   if (t.emailAttr) document.getElementById('idp-saml-email').value = t.emailAttr;
+  // LDAP defaults (presets configure defaults only - one shared backend)
+  if (t.type === 'ldap') {
+    document.getElementById('idp-ldap-filter').value     = t.ldapFilter    || '';
+    document.getElementById('idp-ldap-group-attr').value = t.ldapGroupAttr || '';
+    document.getElementById('idp-ldap-email-attr').value = t.ldapEmailAttr || '';
+    document.getElementById('idp-ldap-name-attr').value  = t.ldapNameAttr  || '';
+    document.getElementById('idp-ldap-sec-ldaps').checked = true;
+    ldapSecurityChanged();
+  }
 
   // Show banner
   const banner = document.getElementById('idp-context-banner');
@@ -13025,10 +13312,13 @@ function selectIdPTemplate(tpl) {
   } else {
     banner.style.display = 'none';
   }
-  // SP info
+  // SP info (interactive SSO providers only — a directory provider has no
+  // browser callback to register in any portal)
   const spDiv = document.getElementById('idp-sp-info');
   const spBody = document.getElementById('idp-sp-info-body');
-  if (t.spInfo) {
+  if (t.type === 'ldap') {
+    spDiv.style.display = 'none';
+  } else if (t.spInfo) {
     spBody.innerHTML = _idpSPInfoHTML();
     spDiv.style.display = '';
   } else {
@@ -13065,6 +13355,13 @@ function openIdPModal(p) {
   document.getElementById('idp-clear-secret-wrap').style.display = (p && p.type === 'oidc') ? 'flex' : 'none';
   document.getElementById('idp-clear-metadata-xml').checked = false;
   document.getElementById('idp-clear-metadata-xml-wrap').style.display = (p && p.type === 'saml' && p.saml && !p.saml.metadataUrl) ? 'flex' : 'none';
+  const bindConfigured = !!(p && p.type === 'ldap' && p.ldap && p.ldap.bindCredentialConfigured);
+  document.getElementById('idp-ldap-clear-bindpw').checked = false;
+  document.getElementById('idp-ldap-clear-bindpw-wrap').style.display = bindConfigured ? 'flex' : 'none';
+  document.getElementById('idp-ldap-bindpw-state').style.display = bindConfigured ? '' : 'none';
+  document.getElementById('idp-ldap-test-result').style.display = 'none';
+  document.getElementById('idp-ldap-test-user').value = '';
+  document.getElementById('idp-ldap-test-pass').value = '';
 
   if (p) {
     // Edit mode - skip step 1, go straight to form
@@ -13096,8 +13393,33 @@ function openIdPModal(p) {
     document.getElementById('idp-saml-email').value  = saml.emailAttribute || '';
     document.getElementById('idp-saml-nameid-format').value = saml.nameIdFormat || '';
     document.getElementById('idp-saml-name-attr').value = saml.nameAttribute || '';
+    // LDAP: decompose the canonical url into Server / security / Port.
+    const ldap = p.ldap || {};
+    if (p.type === 'ldap') {
+      const m = /^(ldaps?):\/\/(\[[^\]]+\]|[^:\/]+)(?::(\d+))?$/i.exec(ldap.url || '');
+      const scheme = m ? m[1].toLowerCase() : 'ldaps';
+      document.getElementById('idp-ldap-server').value = m ? m[2].replace(/^\[|\]$/g, '') : '';
+      document.getElementById('idp-ldap-port').value = m && m[3] ? m[3] : '';
+      document.getElementById('idp-ldap-sec-ldaps').checked = scheme === 'ldaps';
+      document.getElementById('idp-ldap-sec-starttls').checked = scheme === 'ldap' && !!ldap.startTls;
+      document.getElementById('idp-ldap-sec-plain').checked = scheme === 'ldap' && !ldap.startTls;
+      document.getElementById('idp-ldap-basedn').value = ldap.baseDn || '';
+      document.getElementById('idp-ldap-binddn').value = ldap.bindDn || '';
+      document.getElementById('idp-ldap-bindpw').value = ''; // write-only: never prefilled
+      document.getElementById('idp-ldap-filter').value = ldap.userFilter || '';
+      document.getElementById('idp-ldap-email-attr').value = ldap.emailAttribute || '';
+      document.getElementById('idp-ldap-name-attr').value = ldap.nameAttribute || '';
+      document.getElementById('idp-ldap-group-attr').value = ldap.groupAttribute || '';
+      document.getElementById('idp-ldap-required-group').value = ldap.requiredGroup || '';
+      document.getElementById('idp-ldap-cachettl').value = ldap.cacheTtlSeconds || '';
+      document.getElementById('idp-ldap-skipverify').checked = !!ldap.tlsSkipVerify;
+      document.getElementById('idp-ldap-advanced').open =
+        !!(ldap.requiredGroup || ldap.tlsSkipVerify || ldap.cacheTtlSeconds);
+    }
     // Show SP info for SAML
-    if (p.type === 'saml') {
+    if (p.type === 'ldap') {
+      document.getElementById('idp-sp-info').style.display = 'none';
+    } else if (p.type === 'saml') {
       document.getElementById('idp-sp-info-body').innerHTML = _idpSPInfoHTML();
       document.getElementById('idp-sp-info').style.display = '';
     } else {
@@ -13114,15 +13436,25 @@ function openIdPModal(p) {
     document.getElementById('idp-modal-title').textContent = 'Add Identity Provider';
     document.getElementById('idp-sp-info').style.display = 'none';
     // Reset form
-    ['idp-name','idp-domains','idp-issuer','idp-client-id','idp-client-secret','idp-scopes','idp-groups-claim','idp-oidc-required-scope','idp-oidc-required-audience','idp-oidc-tls-skip','idp-meta-url','idp-meta-xml','idp-saml-groups','idp-saml-email','idp-saml-nameid-format','idp-saml-name-attr'].forEach(id => document.getElementById(id).value = '');
+    ['idp-name','idp-domains','idp-issuer','idp-client-id','idp-client-secret','idp-scopes','idp-groups-claim','idp-oidc-required-scope','idp-oidc-required-audience','idp-oidc-tls-skip','idp-meta-url','idp-meta-xml','idp-saml-groups','idp-saml-email','idp-saml-nameid-format','idp-saml-name-attr','idp-ldap-server','idp-ldap-port','idp-ldap-basedn','idp-ldap-binddn','idp-ldap-bindpw','idp-ldap-filter','idp-ldap-email-attr','idp-ldap-name-attr','idp-ldap-group-attr','idp-ldap-required-group','idp-ldap-cachettl'].forEach(id => document.getElementById(id).value = '');
+    document.getElementById('idp-ldap-skipverify').checked = false;
+    document.getElementById('idp-ldap-sec-ldaps').checked = true;
+    document.getElementById('idp-ldap-advanced').open = false;
     document.querySelectorAll('.idp-provider-card').forEach(c => c.classList.remove('selected'));
   }
   syncSAMLMetadataSourceChoice();
   document.getElementById('idp-modal').style.display = 'block';
 }
 
-function editIdP(jsonStr) {
-  openIdPModal(JSON.parse(jsonStr));
+// editIdP accepts the parsed profile object (from the click dispatch's
+// JSON.parse of the escHtml'd data-arg) or a raw JSON string.
+// NOTE: the previous data-arg encoding (JSON.stringify(JSON.stringify(p))
+// straight into an HTML attribute) embedded raw double quotes, so the
+// attribute parsed as empty and the Edit button silently did nothing —
+// caught by the LDAP GUI browser E2E. escHtml on a single stringify is the
+// correct attribute-safe encoding.
+function editIdP(p) {
+  openIdPModal(typeof p === 'string' ? JSON.parse(p) : p);
 }
 
 function closeIdPModal() {
@@ -13133,7 +13465,161 @@ function toggleIdPTypeFields() {
   const t = document.getElementById('idp-type').value;
   document.getElementById('idp-oidc-fields').style.display = t === 'oidc' ? '' : 'none';
   document.getElementById('idp-saml-fields').style.display = t === 'saml' ? '' : 'none';
+  document.getElementById('idp-ldap-fields').style.display = t === 'ldap' ? '' : 'none';
+  // Email domains are an SSO-routing hint; a directory provider has no browser flow.
+  document.getElementById('idp-domains-group').style.display = t === 'ldap' ? 'none' : '';
+  if (t === 'ldap') ldapSecurityChanged();
   syncSAMLMetadataSourceChoice();
+}
+
+// ─── LDAP form helpers (ADR-0025) ─────────────────────────────────────────────
+
+function ldapSelectedSecurity() {
+  if (document.getElementById('idp-ldap-sec-starttls').checked) return 'starttls';
+  if (document.getElementById('idp-ldap-sec-plain').checked) return 'plain';
+  return 'ldaps';
+}
+
+// ldapSecurityChanged keeps the port placeholder and unsafe-transport warnings
+// in sync with the selected connection security. Never touches an explicit port.
+function ldapSecurityChanged() {
+  const sec = ldapSelectedSecurity();
+  document.getElementById('idp-ldap-port').placeholder = sec === 'ldaps' ? '636' : '389';
+  document.getElementById('idp-ldap-plain-warning').style.display = sec === 'plain' ? '' : 'none';
+  document.getElementById('idp-ldap-skipverify-warning').style.display =
+    document.getElementById('idp-ldap-skipverify').checked ? '' : 'none';
+}
+
+// buildLDAPProfileConfig assembles the canonical ldap config from the form.
+// Returns null (after a toast) when a required field is missing. The write-only
+// bind credential is included only when replacing or explicitly clearing.
+function buildLDAPProfileConfig() {
+  const server = document.getElementById('idp-ldap-server').value.trim();
+  if (!server) { toast('Server is required', 'error'); return null; }
+  const baseDn = document.getElementById('idp-ldap-basedn').value.trim();
+  if (!baseDn) { toast('Base DN is required', 'error'); return null; }
+  const sec = ldapSelectedSecurity();
+  const port = document.getElementById('idp-ldap-port').value.trim() || (sec === 'ldaps' ? '636' : '389');
+  const host = server.includes(':') && !server.startsWith('[') ? '[' + server + ']' : server; // bare IPv6 → bracketed
+  const ldap = {
+    url: (sec === 'ldaps' ? 'ldaps://' : 'ldap://') + host + ':' + port,
+    startTls: sec === 'starttls',
+    tlsSkipVerify: document.getElementById('idp-ldap-skipverify').checked,
+    bindDn: document.getElementById('idp-ldap-binddn').value.trim(),
+    baseDn,
+    userFilter: document.getElementById('idp-ldap-filter').value.trim(),
+    emailAttribute: document.getElementById('idp-ldap-email-attr').value.trim(),
+    nameAttribute: document.getElementById('idp-ldap-name-attr').value.trim(),
+    groupAttribute: document.getElementById('idp-ldap-group-attr').value.trim(),
+    requiredGroup: document.getElementById('idp-ldap-required-group').value.trim(),
+    cacheTtlSeconds: parseInt(document.getElementById('idp-ldap-cachettl').value, 10) || 0,
+  };
+  const bindPw = document.getElementById('idp-ldap-bindpw').value;
+  if (document.getElementById('idp-ldap-clear-bindpw').checked) ldap.bindPassword = '';
+  else if (bindPw) ldap.bindPassword = bindPw;
+  // Omitted field = keep the saved credential (write-only semantics).
+  return ldap;
+}
+
+function ldapTestStepIcon(s) {
+  if (s.skipped) return '<span style="color:var(--muted)">○</span>';
+  return s.ok ? '<span style="color:#22c55e">✓</span>' : '<span style="color:#f87171">✗</span>';
+}
+
+// renderLDAPTestReport renders the staged report from POST /api/idp/test into
+// the result box. Text-only content is escaped; no secrets ever arrive here.
+function renderLDAPTestReport(rep) {
+  const el = document.getElementById('idp-ldap-test-result');
+  const rows = (rep.steps || []).map(s => {
+    const dur = s.durationMs ? `<span style="color:var(--muted);font-size:.72rem"> ${s.durationMs} ms</span>` : '';
+    const detail = s.detail ? `<div style="color:var(--muted);font-size:.74rem;margin-left:20px">${escHtml(s.detail)}</div>` : '';
+    const err = s.error ? `<div style="color:#f87171;font-size:.74rem;margin-left:20px">${escHtml(s.error)}</div>` : '';
+    const action = s.action ? `<div style="color:#fbbf24;font-size:.74rem;margin-left:20px">${escHtml(s.action)}</div>` : '';
+    return `<div>${ldapTestStepIcon(s)} ${escHtml(s.label)}${dur}${detail}${err}${action}</div>`;
+  }).join('');
+  let identity = '';
+  if (rep.identity) {
+    const id = rep.identity;
+    identity = `<div style="border-top:1px solid var(--border);margin-top:8px;padding-top:8px">
+      <div style="font-weight:600;margin-bottom:4px;color:#22c55e">Authentication succeeded</div>
+      <div style="color:var(--muted)">Subject: <span style="color:var(--text)">${escHtml(id.sub || '')}</span></div>
+      ${id.email ? `<div style="color:var(--muted)">Email: <span style="color:var(--text)">${escHtml(id.email)}</span></div>` : ''}
+      ${id.name ? `<div style="color:var(--muted)">Display name: <span style="color:var(--text)">${escHtml(id.name)}</span></div>` : ''}
+      <div style="color:var(--muted)">Groups resolved: <span style="color:var(--text)">${id.groupCount || 0}</span></div>
+    </div>`;
+  }
+  const verdict = rep.ok
+    ? '<div style="font-weight:700;color:#22c55e;margin-bottom:6px">Directory test passed</div>'
+    : '<div style="font-weight:700;color:#f87171;margin-bottom:6px">Directory test failed - the current configuration was not changed</div>';
+  el.innerHTML = verdict + rows + identity;
+  el.style.display = '';
+}
+
+// testLDAPConnection runs the staged candidate test (Admin only). The test
+// password field is cleared afterwards - it is transient by contract.
+async function testLDAPConnection() {
+  const ldap = buildLDAPProfileConfig();
+  if (!ldap) return;
+  const btn = document.getElementById('idp-ldap-test-btn');
+  btn.disabled = true; btn.textContent = 'Testing…';
+  try {
+    const body = {
+      profile: {
+        id: document.getElementById('idp-edit-id').value || undefined,
+        name: document.getElementById('idp-name').value.trim() || 'candidate',
+        type: 'ldap',
+        ldap,
+      },
+    };
+    const testUser = document.getElementById('idp-ldap-test-user').value.trim();
+    const testPass = document.getElementById('idp-ldap-test-pass').value;
+    if (testUser) body.testUsername = testUser;
+    if (testUser && testPass) body.testPassword = testPass;
+    const res = await apiFetch('/api/idp/test', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    if (!res.ok) {
+      toast('Test failed: ' + await res.text(), 'error');
+      return;
+    }
+    renderLDAPTestReport(await res.json());
+  } finally {
+    btn.disabled = false; btn.textContent = 'Test connection';
+    document.getElementById('idp-ldap-test-pass').value = '';
+  }
+}
+
+// ─── Legacy YAML LDAP import (explicit migration) ────────────────────────────
+
+async function loadLegacyLDAPBanner() {
+  const banner = document.getElementById('idp-legacy-ldap-banner');
+  if (!banner) return;
+  try {
+    const res = await apiFetch('/api/idp/legacy-ldap');
+    if (!res.ok) { banner.style.display = 'none'; return; }
+    const info = await res.json();
+    if (!info.present) { banner.style.display = 'none'; return; }
+    if (info.shadowed) {
+      banner.innerHTML = `<strong>Legacy LDAP configuration is inactive.</strong> config.yaml still contains an
+        <code>ldap:</code> block, but an LDAP identity provider in this registry is now authoritative.
+        Remove the block from config.yaml to retire it.`;
+    } else {
+      banner.innerHTML = `<strong>Legacy LDAP configuration detected.</strong> This appliance authenticates against
+        <code>${escHtml(info.url || '')}</code> from a config.yaml <code>ldap:</code> block. Import it as an identity
+        provider to manage it here (test-then-enable; the YAML file is never modified).
+        <div style="margin-top:8px"><button class="btn sm" data-click="importLegacyLDAP">Import legacy LDAP configuration</button></div>`;
+    }
+    banner.style.display = '';
+  } catch (e) {
+    banner.style.display = 'none';
+  }
+}
+
+async function importLegacyLDAP() {
+  const res = await apiFetch('/api/idp/legacy-ldap/import', { method: 'POST' });
+  if (!res.ok) { toast('Import failed: ' + await res.text(), 'error'); return; }
+  const p = await res.json();
+  toast('Imported as a disabled provider - test it, then enable', 'success');
+  loadIdPList();
+  openIdPModal(p);
 }
 
 function syncSAMLMetadataSourceChoice() {
@@ -13202,7 +13688,12 @@ async function saveIdP() {
     enabled:      document.getElementById('idp-enabled').checked,
     knownGroups,
   };
-  if (type === 'oidc') {
+  if (type === 'ldap') {
+    const ldap = buildLDAPProfileConfig();
+    if (!ldap) return;
+    body.ldap = ldap;
+    delete body.emailDomains; // SSO-routing hint; not applicable to a directory provider
+  } else if (type === 'oidc') {
     const scopeStr = document.getElementById('idp-scopes').value.trim();
     const clientSecret = document.getElementById('idp-client-secret').value;
     const clearClientSecret = document.getElementById('idp-clear-secret').checked;
@@ -13237,9 +13728,24 @@ async function saveIdP() {
     }
   }
   const method = id ? 'PUT' : 'POST';
-  const url    = id ? `/api/idp/${id}` : '/api/idp';
+  let url      = id ? `/api/idp/${id}` : '/api/idp';
+  // Safe activation (ADR-0025): enabling an LDAP provider runs a live
+  // connection preflight server-side BEFORE anything persists — a broken
+  // candidate can never replace a working enabled provider.
+  if (type === 'ldap' && body.enabled) url += '?preflight=connection';
   const res = await apiFetch(url, { method, headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
   if (!res.ok) {
+    if (res.status === 422) {
+      // Preflight failure: show the staged report; nothing was changed.
+      try {
+        const rep = await res.json();
+        if (rep && rep.test) renderLDAPTestReport(rep.test);
+        toast('Connection test failed - the current configuration remains active and unchanged', 'error');
+      } catch (e) {
+        toast('Connection test failed - the current configuration remains active and unchanged', 'error');
+      }
+      return;
+    }
     toast('Error: ' + await res.text(), 'error');
     return;
   }
@@ -14592,6 +15098,58 @@ async function loadSupport() {
   loadUploads();
   loadTelemetryConfig();
   loadSupportTelemetryPreview();
+  loadBackups();
+}
+
+// Backup archive visibility: read-only pass-through of the CP-local
+// maintenance agent's GET /v1/backups (see backups_api.go). Answers "did the
+// backup job actually run, how big, how stale" from the GUI - no SSH/CLI.
+async function loadBackups() {
+  const el = document.getElementById('support-backups');
+  if (!el) return;
+  el.innerHTML = '<p class="hint">Loading…</p>';
+  el.setAttribute('aria-busy', 'true');
+  try {
+    const data = await api('/api/backups');
+    renderBackups(data);
+  } catch (e) {
+    el.innerHTML = '<p class="hint">Failed to load backups: ' + escHtml(e.message) + '</p>';
+  } finally {
+    el.removeAttribute('aria-busy');
+  }
+}
+
+function renderBackups(data) {
+  const el = document.getElementById('support-backups');
+  if (!el) return;
+  data = data || {};
+  if (!data.available) {
+    el.innerHTML = '<p class="hint">Not available' + (data.reason ? ': ' + escHtml(String(data.reason)) : '') + '.</p>';
+    return;
+  }
+  const backups = Array.isArray(data.backups) ? data.backups : [];
+  if (!backups.length) {
+    el.innerHTML = '<p class="hint">No backup archives found.</p>';
+    return;
+  }
+  let staleness = '';
+  if (data.newest_at) {
+    const ageMs = new Date() - new Date(data.newest_at);
+    if (ageMs > 48 * 3600 * 1000) {
+      staleness = ' <span style="color:var(--red);font-weight:600">· newest backup is ' + timeAgo(new Date(data.newest_at)) + ' - check the backup job</span>';
+    } else {
+      staleness = ' · newest ' + timeAgo(new Date(data.newest_at));
+    }
+  }
+  const hdr = '<p class="hint">' + backups.length + ' archive' + (backups.length === 1 ? '' : 's') + staleness + '</p>';
+  el.innerHTML = hdr + '<div style="overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr>' +
+    '<th>Filename</th><th>Size</th><th>Modified</th><th>Encrypted</th></tr></thead><tbody>' +
+    backups.map(b => '<tr>' +
+      '<td style="font-family:monospace">' + escHtml(String(b.filename || '')) + '</td>' +
+      '<td>' + fmtBytes(b.size_bytes || 0) + '</td>' +
+      '<td>' + (b.modified_at ? escHtml(timeAgo(new Date(b.modified_at))) : '-') + '</td>' +
+      '<td>' + (b.encrypted ? 'yes' : 'no') + '</td>' +
+    '</tr>').join('') + '</tbody></table></div>';
 }
 
 // M7 Slice 1: read-only preview only — GET /api/support/telemetry/preview
@@ -15842,6 +16400,12 @@ function renderReleaseTrustBadge(d) {
   badge.textContent = 'Trust: ' + mode.toUpperCase() + (breakGlass ? ' (break-glass)' : '');
   badge.style.background = breakGlass ? 'rgba(239,68,68,.15)' : 'rgba(34,197,94,.15)';
   badge.style.color = breakGlass ? 'var(--red)' : 'var(--green)';
+  const schemesEl = document.getElementById('rel-trust-schemes');
+  if (schemesEl) {
+    const schemeLabels = { ed25519: 'ed25519 keys', sigstore: 'Sigstore identity', 'ed25519+sigstore': 'ed25519 keys + Sigstore identity', none: 'none' };
+    const raw = d && d.trust_schemes;
+    schemesEl.textContent = raw ? ('via ' + (schemeLabels[raw] || raw)) : '';
+  }
   if (!warn) return;
   const lines = [];
   if (breakGlass) {
@@ -15962,12 +16526,12 @@ async function loadReleaseCurrent() {
   const agent = releaseCurrentAgent();
   try {
     const r = await apiFetch('/api/releases/current?agent=' + encodeURIComponent(agent));
-    if (r.status === 404) { box.innerHTML = '<span style="color:var(--muted)">Unknown agent: ' + escHtml(agent) + '</span>'; return; }
-    if (r.status === 503) { box.innerHTML = '<span style="color:var(--warn,#f59e0b)">Agent unreachable</span>'; return; }
+    if (r.status === 404) { box.innerHTML = '<span style="color:var(--muted)">Unknown maintenance agent: ' + escHtml(agent) + '</span>'; return; }
+    if (r.status === 503) { box.innerHTML = '<span style="color:var(--warn,#f59e0b)">Maintenance agent unreachable</span>'; return; }
     if (!r.ok)            { box.innerHTML = '<span style="color:var(--danger)">Error ' + r.status + '</span>'; return; }
     const c = await r.json();
     if (c.available === false) {
-      box.innerHTML = '<span style="color:var(--muted)">No catalog loaded - current release is undetermined until a catalog is seeded. Agent reachability is not checked on this path.</span>';
+      box.innerHTML = '<span style="color:var(--muted)">No catalog loaded - current release is undetermined until a catalog is seeded. Maintenance agent reachability is not checked on this path.</span>';
     } else if (c.known) {
       box.innerHTML = '<div><b>' + escHtml(c.release_id || '') + '</b> <span style="color:var(--muted)">' + escHtml(c.version_id || '') + '</span></div>'
         + '<div style="color:var(--muted);font-size:.75rem;margin-top:4px">agent: ' + escHtml(agent) + '</div>';
@@ -16004,7 +16568,7 @@ function renderReleaseStatus(rec) {
   const resumeBtn = document.getElementById('rel-resume-btn');
   if (!box) return;
   if (!rec || !rec.phase || rec.phase === 'none') {
-    box.innerHTML = '<span style="color:var(--muted)">No dispatch recorded for this agent.</span>';
+    box.innerHTML = '<span style="color:var(--muted)">No dispatch recorded for this maintenance agent.</span>';
     if (resumeBtn) resumeBtn.style.display = 'none';
     return;
   }
@@ -16049,7 +16613,7 @@ async function releaseDispatchSubmit() {
   if (!releaseId && !channel) { toast('Choose a release or a channel', 'error'); return; }
   const preBackup = document.getElementById('rel-disp-prebackup').checked;
   const passphraseRef = document.getElementById('rel-disp-passphrase').value.trim();
-  // pre_backup is honored by the agent ONLY with a passphrase_ref; without one
+  // pre_backup is honored by the maintenance agent ONLY with a passphrase_ref; without one
   // the planner silently skips the backup. Require it so the checkbox is meaningful.
   if (preBackup && !passphraseRef) {
     toast('Pre-backup requires a backup passphrase reference (or uncheck it)', 'error');
@@ -16075,18 +16639,18 @@ async function releaseDispatchSubmit() {
       releaseDispatchCancel();
       if (agent === releaseCurrentAgent()) loadReleaseStatus(4);
     } else if (r.status === 200) {
-      // No-op success: the agent is already running the target release.
+      // No-op success: the maintenance agent is already running the target release.
       toast(payload.status === 'already_current'
         ? 'Already on the target release - no dispatch needed'
         : 'Dispatch accepted', 'success');
       releaseDispatchCancel();
       if (agent === releaseCurrentAgent()) { loadReleaseCurrent(); loadReleaseStatus(); }
     } else if (r.status === 409) {
-      toast(payload.status === 'stale_replan_required' ? 'Node drifted - re-plan required' : 'A dispatch is already in flight on this agent', 'error');
+      toast(payload.status === 'stale_replan_required' ? 'Node drifted - re-plan required' : 'A dispatch is already in flight on this maintenance agent', 'error');
     } else if (r.status === 404) {
-      toast('Unknown agent: ' + agent, 'error');
+      toast('Unknown maintenance agent: ' + agent, 'error');
     } else if (r.status === 503) {
-      toast('Agent unavailable' + (payload.detail ? ': ' + payload.detail : ''), 'error');
+      toast('Maintenance agent unavailable' + (payload.detail ? ': ' + payload.detail : ''), 'error');
     } else if (r.status === 502) {
       toast('Dispatch failed: ' + (payload.detail || 'agent error'), 'error');
     } else {
@@ -16489,11 +17053,11 @@ async function loadGovernance() {
     const noPolicy = num(ctr.no_policy);
     const auditMissing = num(ctr.audit_missing);
     document.getElementById('gov-counters').innerHTML = `
-      <div>would_deny:     <strong>${wouldDeny}</strong></div>
-      <div>enforce_denied: <strong>${enforceDenied}</strong></div>
-      <div>missing_meta:   <strong style="color:${missingMeta?'#ef4444':''}">${missingMeta}</strong></div>
-      <div>no_policy:      <strong style="color:${noPolicy?'#ef4444':''}">${noPolicy}</strong></div>
-      <div>audit_missing:  <strong style="color:${auditMissing?'#f59e0b':''}">${auditMissing}</strong></div>
+      <div title="would_deny">Would deny (role below required): <strong>${wouldDeny}</strong></div>
+      <div title="enforce_denied">Enforced denials (403s): <strong>${enforceDenied}</strong></div>
+      <div title="missing_meta">Routes missing metadata: <strong style="color:${missingMeta?'#ef4444':''}">${missingMeta}</strong></div>
+      <div title="no_policy">Unmatched method policy: <strong style="color:${noPolicy?'#ef4444':''}">${noPolicy}</strong></div>
+      <div title="audit_missing">Audit not recorded: <strong style="color:${auditMissing?'#f59e0b':''}">${auditMissing}</strong></div>
     `;
 
     const byRole = routes.by_min_role || {};
@@ -16503,9 +17067,10 @@ async function loadGovernance() {
     }).join('');
 
     const axes = ['metadata_parity', 'audit_completion', 'enforce_consistency'];
+    const axisLabels = { metadata_parity: 'Metadata parity', audit_completion: 'Audit completion', enforce_consistency: 'Enforcement consistency' };
     document.getElementById('gov-health-axes').innerHTML = axes.map(k => {
       const v = palette[health[k]] || palette.ok;
-      return `<span style="padding:3px 9px;border-radius:999px;font-size:.7rem;font-weight:600;background:${v.bg};color:${v.fg}">${escHtml(k)}: ${v.label}</span>`;
+      return `<span title="${escHtml(k)}" style="padding:3px 9px;border-radius:999px;font-size:.7rem;font-weight:600;background:${v.bg};color:${v.fg}">${escHtml(axisLabels[k] || k)}: ${v.label}</span>`;
     }).join('');
 
     const issues = Array.isArray(health.issues) ? health.issues : [];
@@ -16548,6 +17113,7 @@ async function loadCluster() {
     document.getElementById('cluster-role').textContent = r.role || 'standalone';
     document.getElementById('cluster-node-id').textContent = r.nodeID || '-';
     document.getElementById('cluster-grpc').textContent = r.grpcAddr || '-';
+    document.getElementById('cluster-grpc-compression').textContent = r.grpcCompressionEnabled ? 'Enabled' : 'Disabled';
 
     // HA status card
     const ha = r.ha || {};
@@ -16642,7 +17208,7 @@ async function loadCluster() {
     } else {
       noNodes.style.display = '';
       noNodes.textContent = r.role === 'data-plane'
-        ? 'This node is a Data Plane worker. Manage enrollment from the Control Plane.'
+        ? 'This node is a Data Plane node. Manage enrollment from the Control Plane.'
         : 'Enable Control Plane mode above to start managing Data Plane nodes.';
       table.style.display = 'none';
     }
@@ -17628,7 +18194,7 @@ function resetBlockPage() {
     <form id="setup-form" autocomplete="on">
       <label for="su-user">Admin username</label>
       <input id="su-user" type="text" value="admin" autocomplete="username" maxlength="64" required>
-      <label for="su-pass">Password <span style="color:var(--muted)">(minimum 8 characters)</span></label>
+      <label for="su-pass">Password <span style="color:var(--muted)">(min 8 chars, incl. uppercase, lowercase &amp; a digit)</span></label>
       <input id="su-pass" type="password" autocomplete="new-password" minlength="8" required>
       <label for="su-pass2">Confirm password</label>
       <input id="su-pass2" type="password" autocomplete="new-password" minlength="8" required>
@@ -17727,7 +18293,7 @@ function resetBlockPage() {
       <input id="um-username" type="text" class="input" style="width:100%" maxlength="64" autocomplete="off">
     </div>
     <div class="form-group" id="um-pass-group">
-      <label class="form-label">Password <span style="color:var(--muted)">(min 8 characters)</span></label>
+      <label class="form-label">Password <span style="color:var(--muted)">(min 8 chars, incl. uppercase, lowercase &amp; a digit)</span></label>
       <input id="um-pass" type="password" class="input" style="width:100%" autocomplete="new-password">
     </div>
     <div class="form-group" id="um-pass-hint-group" style="display:none">
@@ -17937,6 +18503,8 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
 
         if (!user)            return showErr('Username cannot be empty.');
         if (pass.length < 8)  return showErr('Password must be at least 8 characters.');
+        if (!meetsPasswordComplexity(pass))
+          return showErr('Password must contain at least one uppercase letter, one lowercase letter, and one digit.');
         if (pass !== pass2)   return showErr('Passwords do not match.');
 
         btn.disabled = true; btn.textContent = 'Saving\u2026';

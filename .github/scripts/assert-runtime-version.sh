@@ -2,12 +2,18 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # assert-runtime-version.sh <binary> <expected-version>
 #
-# Runtime version-identity gate. Starts the EXACT built proxy binary that will be
+# Runtime version-stamp gate. Starts the EXACT built proxy binary that will be
 # signed/published, probes its live /healthz endpoint, and asserts it self-reports
 # <expected-version> (the release tag). This proves the bytes-under-signature
-# actually surface their release identity at runtime: the check that would have
-# caught the v1.0.202 defect, where a correctly-stamped main.version never reached
-# /healthz (the endpoint omitted the field entirely).
+# actually surface their release version stamp at runtime: the check that would
+# have caught the v1.0.202 defect, where a correctly-stamped main.version never
+# reached /healthz (the endpoint omitted the field entirely).
+#
+# NOTE: "version stamp" is deliberately distinct from "release identity" — the
+# latter names the cosign/Sigstore signer-trust identity verified elsewhere in
+# this pipeline (e.g. the "Verify pushed image signature matches the pinned
+# release identity" step). This gate is unrelated: it proves WHAT VERSION the
+# binary claims to be, not WHO SIGNED it.
 #
 # Runs only on the native leg (linux/amd64) since a foreign-platform binary cannot
 # execute on the runner; the shared build composite guarantees every matrix leg
@@ -45,7 +51,7 @@ for _ in $(seq 1 60); do
 done
 
 if [ -z "$GOT" ]; then
-  echo "::error::/healthz did not surface a version field (release identity is unverifiable at runtime)"
+  echo "::error::/healthz did not surface a version field (release version stamp is unverifiable at runtime)"
   cat "$BODY" 2>/dev/null || true
   exit 1
 fi
@@ -54,4 +60,4 @@ if [ "$GOT" != "$WANT" ]; then
   exit 1
 fi
 
-echo "runtime version identity OK: /healthz reports $GOT (== release tag)"
+echo "runtime version stamp OK: /healthz reports $GOT (== release tag)"

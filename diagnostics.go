@@ -152,6 +152,7 @@ func buildOperatorContract() OperatorContract {
 		checkSAMLBaseURLPosture(),
 		checkDefaultAuthOpen(),
 		checkYARAEnginePosture(),
+		checkConfigSourcePrecedence(),
 		checkConfigSnapshotValidator(),
 		checkConfigVersionsPresent(cv),
 		checkConfigVersionsReadable(cv),
@@ -159,6 +160,7 @@ func buildOperatorContract() OperatorContract {
 		checkConfigRollbackValidation(cv),
 		checkKeyAtRest(),
 		checkAuditPersistence(),
+		checkRequestLogPersistence(),
 		checkIdentityBackend(),
 		checkSyslogFeed(),
 		checkMemoryBackstop(),
@@ -170,6 +172,9 @@ func buildOperatorContract() OperatorContract {
 	// exemption postures. Contributes nothing when no exempt rules exist.
 	checks = append(checks, authExemptDiagnostics(policyStore.List(), policyActionFromDefault())...)
 	checks = append(checks, authCredentialRequiredDiagnostics(policyStore.List(), hasCredentialCapableProvider())...)
+	// LDAP profile hygiene diagnostics (ADR-0025). Report-only; contribute
+	// nothing when no LDAP profiles exist.
+	checks = append(checks, authLDAPProfileDiagnostics()...)
 	// SSORequired risk diagnostics + auth-rule shadow/overlap diagnostics (Phase 3
 	// Slice 5). Report-only; contribute nothing when no SSO/auth rules apply.
 	checks = append(checks, authSSORequiredDiagnostics(policyStore.List())...)
@@ -521,6 +526,40 @@ func checkAuditPersistence() OperatorContractCheck {
 	}
 }
 
+// checkRequestLogPersistence reports whether the operator-configured request
+// log file (request_log_file / -request-log) is actually persisting entries
+// to disk. A silent failure here (bad path, permissions, unmounted volume)
+// degrades the traffic log — frequently the artifact pulled for incident
+// investigation — to the volatile in-memory ring with only a startup log
+// line as signal. GET /api/stats already exposes the configured path
+// (requestLogConfiguredPath) as a raw field; this surfaces it as an explicit
+// operator-contract VERDICT (fail + remediation) alongside the other health
+// rows. requestLogConfiguredPath records operator intent regardless of
+// initRequestLog's outcome, so it distinguishes "not configured" from
+// "configured but degraded". Mirrors checkAuditPersistence.
+func checkRequestLogPersistence() OperatorContractCheck {
+	if requestLogConfiguredPath == "" {
+		return OperatorContractCheck{
+			Code:    "request_log_persistence",
+			Status:  diagOK,
+			Message: "not configured — request log is in-memory only, lost on restart",
+		}
+	}
+	if !requestLogPersistActive() {
+		return OperatorContractCheck{
+			Code:           "request_log_persistence",
+			Status:         diagFail,
+			Message:        "configured but failed to open — request log has silently fallen back to the in-memory ring, lost on restart",
+			OperatorAction: "Fix permissions/mount on the configured request log path, then restart the proxy to restore durable request-log persistence.",
+		}
+	}
+	return OperatorContractCheck{
+		Code:    "request_log_persistence",
+		Status:  diagOK,
+		Message: "request log is persisting to the configured log file",
+	}
+}
+
 // checkIdentityBackend reports external identity-backend (LDAP / OIDC)
 // reachability (CHAOS-47).
 //
@@ -531,7 +570,7 @@ func checkAuditPersistence() OperatorContractCheck {
 // state clears when a backend is observed to answer, never on elapsed time.
 // Memory-only read; no probe is issued from the diagnostics path. The cause
 // text is deliberately NOT reproduced here: it names the configured endpoint
-// (an LDAP URL, an IdP host), and this contract is a VIEWER-role surface with a
+// (an LDAP URL, an OIDC introspection host), and this contract is a VIEWER-role surface with a
 // standing no-sensitive-values guardrail. The cause goes to the admin-scoped
 // sinks — the log line and the identity_backend_unreachable alert.
 func checkIdentityBackend() OperatorContractCheck {
@@ -844,6 +883,44 @@ func checkYARAEnginePosture() OperatorContractCheck {
 		Code:    "yara_engine_posture",
 		Status:  diagOK,
 		Message: "YARA engine posture: fail-closed on timeout and saturation",
+	}
+}
+
+// checkConfigSourcePrecedence surfaces the DEBT-009 residual gap: config.yaml
+// and CLI flags for a specific group of settings (log retention, log-store
+// enable, trusted-proxy CIDRs, blocklist feeds, upstream proxy pool, YARA
+// engine settings, decryption auto-exclusion tunables, support-bundle
+// retention) are silently superseded the moment ANY admin GUI/API mutation
+// is saved — saveAdminSettingsWithOverrides always snapshots the full set
+// together, so an operator who only meant to change an unrelated setting
+// (e.g. the session timeout) unknowingly pins all of these to their current
+// values, and a later config.yaml edit for any of them has no effect after
+// restart. This is intended persistence behavior, not a fault, so it always
+// reports "ok" — the point is visibility, not a warning.
+func checkConfigSourcePrecedence() OperatorContractCheck {
+	overridden := AdminSettingsOverriddenSurfaces()
+	if len(overridden) == 0 {
+		return OperatorContractCheck{
+			Code:   "config_source_precedence",
+			Status: diagOK,
+			Message: "No admin settings saved yet — log retention, log-store enable, trusted-proxy CIDRs, " +
+				"blocklist feeds, upstream proxy pool, YARA engine settings, decryption auto-exclusion tunables, " +
+				"and support-bundle retention are all sourced from config.yaml/CLI flags.",
+		}
+	}
+	// Per-sentinel, not all-or-nothing: an admin_settings.json written by an
+	// older build carries only the sentinels that existed then, and any
+	// surface without its sentinel still follows config.yaml/CLI.
+	return OperatorContractCheck{
+		Code:   "config_source_precedence",
+		Status: diagOK,
+		Message: "Durable admin overrides are active for: " + strings.Join(overridden, ", ") + ". " +
+			"config.yaml/CLI edits for these settings are ignored on restart; any sentinel-gated " +
+			"setting not listed still follows config.yaml/CLI.",
+		OperatorAction: "Manage the listed settings from the admin GUI or REST API. To return one to " +
+			"config.yaml/CLI ownership, stop the node and remove its *_saved sentinel (or the whole " +
+			"admin_settings.json) from the data directory — GUI/API edits always re-save the sentinel, " +
+			"so YAML never silently regains precedence.",
 	}
 }
 
@@ -1243,11 +1320,12 @@ func hasCredentialCapableProvider() bool {
 			return true
 		}
 	}
-	// HasEnabledOIDC reads the profiles in place. This probe runs on EVERY
+	// HasEnabledCredentialProvider reads the profiles in place (OIDC or LDAP —
+	// the CREDENTIAL-capable types, ADR-0025). This probe runs on EVERY
 	// proxied request (resolveRequestAuth's credCapable), and the previous
 	// idpRegistry.All() loop deep-cloned every profile per call just to
 	// answer this boolean — pure per-request allocation on the hot path.
-	return idpRegistry != nil && idpRegistry.HasEnabledOIDC()
+	return idpRegistry != nil && idpRegistry.HasEnabledCredentialProvider()
 }
 
 // exemptRiskBuckets collects offending exempt-rule names per risk category.

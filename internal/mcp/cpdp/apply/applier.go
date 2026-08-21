@@ -180,6 +180,15 @@ func (a *Applier) RejectAck(env *cpdp.Envelope, cause error) *cpdp.Acknowledgeme
 // active distribution state before returning failure. cause names the rollout error
 // that triggered the abort (bounded reason only in the ack).
 //
+// abortedHash BINDS the compensation to the exact envelope the caller applied. The
+// abort is refused, non-mutating, unless the currently-active content hash equals
+// abortedHash. Without that binding the method would revert "whatever is active
+// right now", so any interleaving Apply between the caller's Apply and its
+// compensation would silently roll back an UNRELATED, newer, validly-signed
+// snapshot — a fail-OPEN config regression driven purely by timing. The engine's
+// callers are expected to be serialized, but a compensation primitive must not
+// depend on a caller-side invariant it cannot check: this is the check.
+//
 // Ordering matches the rest of the engine: the reverted state is durably persisted
 // BEFORE the in-memory swap, so a crash mid-abort recovers the reverted (prior)
 // snapshot, never a half-abort. A persistence failure here (the compensating write
@@ -187,7 +196,7 @@ func (a *Applier) RejectAck(env *cpdp.Envelope, cause error) *cpdp.Acknowledgeme
 // pointer left on the aborted envelope; startup recovery reconciliation is the
 // documented backstop for that double-fault. The trusted epoch is never moved
 // backwards.
-func (a *Applier) AbortApplied(cause error) (*cpdp.Acknowledgement, error) {
+func (a *Applier) AbortApplied(abortedHash string, cause error) (*cpdp.Acknowledgement, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -195,6 +204,12 @@ func (a *Applier) AbortApplied(cause error) (*cpdp.Acknowledgement, error) {
 	if aborted == nil {
 		// Nothing was applied — nothing to abort. Fail-closed, non-mutating.
 		return nil, mcperr.New(mcperr.ReasonSnapshotMalformed, "cpdp.apply.abort", "no active snapshot to abort")
+	}
+	// Bind the compensation to the envelope the caller actually applied. An empty
+	// binding is rejected too: an unbound abort is never a safe operation.
+	if abortedHash == "" || aborted.ContentHash != abortedHash {
+		return nil, mcperr.New(mcperr.ReasonSnapshotHashMismatch, "cpdp.apply.abort",
+			"active snapshot is not the envelope being aborted")
 	}
 	target := a.store.Previous() // the snapshot active before the aborted Apply (may be nil)
 	ack := a.reject(aborted, cause)

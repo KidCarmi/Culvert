@@ -292,7 +292,7 @@ func rollbackConfigVersion(w http.ResponseWriter, r *http.Request) {
 	}
 	auditEvent(r, "config.rollback", "system", auditDetail)
 
-	saveConfigVersion(actor, fmt.Sprintf("rollback to v%d", req.Version))
+	saveConfigVersion(actor, fmt.Sprintf("config.rollback v%d", req.Version))
 
 	if globalConfigStore != nil {
 		// A rolled-back config was valid when saved; if a cap was lowered since,
@@ -481,6 +481,10 @@ func applyConfigBackup(b *configBackup) error {
 	if b.URLCategories != nil {
 		catStore.ReplaceAll(b.URLCategories)
 		catStore.Save()
+		// The rolled-back taxonomy's BuiltIn entries reach policy evaluation only through
+		// the effective view. The CategoryOverrides block below recomposes too, but it is
+		// nil-skipped on a pre-extension / no-override snapshot, so rollback needs its own.
+		recomposeSignedFeedTaxonomy()
 	}
 
 	// CategoryGroups MUST be applied before PolicyRules. Policy rules

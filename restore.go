@@ -555,11 +555,18 @@ func analyzeCommit(files map[string][]byte, dataDir string, opts restoreOpts) (*
 		}
 	}
 
-	// Cluster CA fingerprint delta.
+	// Cluster CA fingerprint delta. A restored fingerprint of "" is NOT
+	// "unchanged" when a CA currently exists — it means the mode routes
+	// the CA from the tarball (full/trust-root-only) and the tarball has
+	// none (a legitimate first-run-optional backup), so committing would
+	// remove the current CA entirely. That is at least as disruptive to
+	// enrolled DPs as a fingerprint swap, so it must still trip the guard
+	// (requiring only a.CurrentCAFingerprint != "" catches it, since ""
+	// != a.RestoredCAFingerprint is trivially true whenever the current
+	// fingerprint is non-empty and differs, empty-vs-empty included).
 	a.CurrentCAFingerprint = currentCAFingerprint(dataDir)
 	a.RestoredCAFingerprint = restoredCAFingerprint(files, dataDir, opts.Mode)
 	a.CAFingerprintChanged = a.CurrentCAFingerprint != "" &&
-		a.RestoredCAFingerprint != "" &&
 		a.CurrentCAFingerprint != a.RestoredCAFingerprint
 
 	// Enrolled DPs in current cluster.json (read-only).
