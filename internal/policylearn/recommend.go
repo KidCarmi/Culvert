@@ -76,11 +76,19 @@ const (
 	ConfidenceLow    = "low"
 )
 
-// DefaultActionRuleKey is the RuleHits attribution key recorded when a decision
-// carried no RuleID (the default action decided). Exported so evidence readers
-// can distinguish default-action attribution from any real rule ULID — a ULID
-// can never equal this sentinel.
+// DefaultActionRuleKey is the RuleHits attribution key recorded when a
+// POLICY decision carried no RuleID (the default action decided). Exported so
+// evidence readers can distinguish default-action attribution from any real
+// rule ULID — a ULID can never equal this sentinel.
 const DefaultActionRuleKey = "_default_"
+
+// PreDispatchRuleKey is the RuleHits attribution key for pre-dispatch blocks
+// (threat feed / blocklist / plugin / global file-extension gate) — decisions
+// made BEFORE the policy evaluator ran (Codex round 26: they carry no RuleID,
+// and folding them under DefaultActionRuleKey claimed the default action
+// decided traffic the evaluator never saw). A ULID can never equal this
+// sentinel either.
+const PreDispatchRuleKey = "_predispatch_"
 
 // Fixed ProposedRule semantics (ADR-0025 born-safe shape). Constants, not
 // inputs: generation cannot be asked to propose anything else.

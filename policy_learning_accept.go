@@ -124,6 +124,19 @@ func plAcceptRecommendation(eng *policylearn.Engine, recID string, ifVersion int
 		return plAcceptOutcome{}, stateRefusal(rec.State)
 	}
 
+	// The whole acceptance transaction — the resume-path membership proof,
+	// the version fence + durable append, and the accepted latch — runs under
+	// the coordinator's policy WRITE gate (Codex round 26): ordinary draft
+	// CRUD holds the read side and commit/revert hold the write side, so
+	// neither can mutate the candidate between the fence read and the append
+	// (which let an append land on a candidate newer than expectedVersion,
+	// bypassing the optimistic conflict) nor remove the staged target between
+	// the append and the latch (which let accepted latch with an absent
+	// TargetRuleID). Lock order: policyLearnAdminMu (caller) → writeGate →
+	// c.mu → PolicyStore.mu; nothing below re-enters the gate.
+	policyDraft.writeGate.Lock()
+	defer policyDraft.writeGate.Unlock()
+
 	// Resume path first: if the intent's rule already exists, the ONLY correct
 	// moves are finalize (content matches) or refuse (content differs) — the
 	// fences fence the MUTATION, and the mutation already happened.

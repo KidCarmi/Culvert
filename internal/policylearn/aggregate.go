@@ -268,10 +268,16 @@ func (c *Cell) apply(agg *Aggregate, o *Observation, cls evidenceClass, token, d
 		c.Blocked++
 	}
 
-	// Attribution breakdowns (all directions, bounded).
+	// Attribution breakdowns (all directions, bounded). A pre-dispatch block
+	// never reached the policy evaluator, so it must not masquerade as a
+	// default-action hit (Codex round 26).
 	ruleKey := o.RuleID
 	if ruleKey == "" {
-		ruleKey = DefaultActionRuleKey
+		if o.Action == "predispatch" {
+			ruleKey = PreDispatchRuleKey
+		} else {
+			ruleKey = DefaultActionRuleKey
+		}
 	}
 	boundedCount(&c.RuleHits, &c.OtherRules, ruleKey, maxRuleHits)
 	boundedCount(&c.TierHits, &c.OtherTiers, tier, maxTierHits)

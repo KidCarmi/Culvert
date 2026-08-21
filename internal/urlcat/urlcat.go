@@ -104,7 +104,7 @@ func (r patternRef) less(o patternRef) bool {
 // the framed field set or encoding changes — consumers pin the returned value
 // as an identity, so two framings must never collide. v2 (QB-2.1): entries
 // are framed in RESOLVER SEQUENCE order, no longer sorted by name.
-const fingerprintDomain = "culvert-urlcat-content-fp-v2"
+const fingerprintDomain = "culvert-urlcat-content-fp-v3"
 
 // ContentFingerprint returns a deterministic semantic identity of the
 // taxonomy: equal iff the RESOLUTION-RELEVANT content is equal, stable across
@@ -123,14 +123,24 @@ const fingerprintDomain = "culvert-urlcat-content-fp-v2"
 //     and downstream consumers key on it),
 //   - the BuiltIn flag (it decides admin-tier membership: LookupHostAdmin /
 //     MatchesHostAdmin see only BuiltIn=false entries),
-//   - the entry's host patterns, lowercased (the resolver-input transform),
-//     de-duplicated and sorted — WITHIN-entry host order stays canonical
+//   - the entry's host patterns, lowercased RAW — the trailing dot is KEPT
+//     (v3, Codex round 26): the host→category resolver (LookupHost, the path
+//     Learning consumes) compares strings.ToLower(pattern) with NO trailing-
+//     dot trim while the incoming host IS trimmed, so a "example.com."
+//     spelling is a DEAD pattern there and switching a live pattern to it is
+//     resolution-relevant — the fingerprint must move. (The category→hosts
+//     matcher MatchesHost trims, so for it this is a conservative
+//     false-stale — the accepted direction. The two matchers have disagreed
+//     on this spelling since before the reverse index existed; the
+//     fingerprint mirrors the resolver Learning actually uses.)
+//     De-duplicated and sorted — WITHIN-entry host order stays canonical
 //     because it can only affect the matchedBy display string, and Learning
 //     consumes the resolved category, never matchedBy.
 //
 // Excluded by contract: process-local counters, timestamps, mutation history,
-// map iteration order, host pattern CASE and duplicate patterns (matchedBy
-// display only), empty patterns, and display-only or metrics state. Framing
+// map iteration order, host pattern CASE and exact-duplicate patterns
+// (matchedBy display only), empty patterns, and display-only or metrics
+// state. Framing
 // is length-prefixed under fingerprintDomain, so field boundaries are
 // unambiguous.
 //
@@ -168,12 +178,13 @@ func computeFingerprint(entries []*Entry) string {
 		hs := make([]string, 0, len(e.Hosts))
 		seen := make(map[string]bool, len(e.Hosts))
 		for _, h := range e.Hosts {
-			// Mirror the RESOLVER's normalization exactly (rebuildIndex:
-			// lowercase + strip trailing dot) — a spelling that resolves
-			// identically must fingerprint identically, or a re-save of
-			// "example.com." vs "example.com" would falsely churn the
-			// category epoch and stale valid session evidence (Codex fix).
-			hl := strings.ToLower(strings.TrimSuffix(h, "."))
+			// Mirror LookupHost's comparison exactly: lowercase, NO trailing-
+			// dot trim (v3, Codex round 26 — supersedes the earlier trim,
+			// which mirrored the category→hosts matcher instead and made a
+			// live→dead "example.com"→"example.com." pattern edit invisible
+			// to the fingerprint even though it changes what LookupHost — the
+			// resolver Learning consumes — returns for that host).
+			hl := strings.ToLower(h)
 			if hl != "" && !seen[hl] {
 				seen[hl] = true
 				hs = append(hs, hl)

@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/KidCarmi/Culvert/internal/policylearn"
 )
@@ -714,4 +715,38 @@ func TestCodexFix_CommitAppendNeverVanishesRule(t *testing.T) {
 			t.Fatalf("iteration %d: appended rule %s vanished (in neither candidate nor running)", i, added.ID)
 		}
 	}
+}
+
+// TestCodexFix_AcceptTransactionHoldsPolicyWriteGate (round 26): the whole
+// acceptance transaction must hold the coordinator's policy WRITE gate —
+// ordinary CRUD (read side) and commit/revert (write side) could otherwise
+// interleave between the version fence and the durable append (bypassing the
+// optimistic conflict) or between the append and the accepted latch (latching
+// accepted with an absent target). Pinned behaviorally: an in-flight policy
+// write (read side held, as every CRUD handler holds it) must block the
+// acceptance until released.
+func TestCodexFix_AcceptTransactionHoldsPolicyWriteGate(t *testing.T) {
+	plDurableDraftHarness(t)
+	recID, _ := plAcceptingWithStagedRule(t)
+
+	beginPolicyWrite() // an ordinary CRUD write in flight
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ver, _ := effectivePolicyVersion()
+		_, _ = plAcceptRecommendation(policyLearnEngine.Load(), recID, ver, "codexfix")
+	}()
+	select {
+	case <-done:
+		endPolicyWrite()
+		t.Fatal("acceptance completed while an ordinary policy write held the gate — the transaction is not serialized")
+	case <-time.After(100 * time.Millisecond):
+	}
+	endPolicyWrite()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("acceptance never completed after the gate was released")
+	}
+	assertAcceptedImpliesTarget(t, recID)
 }

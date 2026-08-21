@@ -919,3 +919,41 @@ func TestChurn_ResolutionTokenWitnessesABARoundTrip(t *testing.T) {
 		t.Fatalf("ABA round trip within resolution not witnessed: churn=%v", sess.CategoryChurn)
 	}
 }
+
+// TestAggregate_PreDispatchNotAttributedToDefaultAction (round 26): a
+// pre-dispatch block never reached the policy evaluator, so its RuleHits
+// attribution must be the distinct PreDispatchRuleKey — folding it under
+// DefaultActionRuleKey claimed the default action decided traffic the
+// evaluator never saw.
+func TestAggregate_PreDispatchNotAttributedToDefaultAction(t *testing.T) {
+	clk := newTestClock()
+	e := newTestEngine(t, t.TempDir(), clk, nil)
+	t.Cleanup(func() { _ = e.Close() })
+	if _, err := e.StartSession("op"); err != nil {
+		t.Fatal(err)
+	}
+	before := e.ObservationStats().Delivered
+	e.Observe(Observation{Subject: "u", AuthSource: "idp", Host: "x.example",
+		Action: "predispatch", Status: "BLOCKED"})
+	e.Observe(Observation{Subject: "u", AuthSource: "idp", Host: "x.example",
+		Action: "default:allow", Status: "OK"})
+	barrierWait(t, func() bool { return e.ObservationStats().Delivered >= before+2 }, "both delivered")
+	if _, err := e.StopSession("op"); err != nil {
+		t.Fatal(err)
+	}
+	pre, def := int64(0), int64(0)
+	e.mu.Lock()
+	for _, s := range e.sessions {
+		if s.Agg == nil {
+			continue
+		}
+		for _, c := range s.Agg.Cells {
+			pre += c.RuleHits[PreDispatchRuleKey]
+			def += c.RuleHits[DefaultActionRuleKey]
+		}
+	}
+	e.mu.Unlock()
+	if pre != 1 || def != 1 {
+		t.Fatalf("attribution split wrong: predispatch=%d default=%d (want 1/1 — pre-dispatch must not masquerade as a default-action hit)", pre, def)
+	}
+}

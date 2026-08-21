@@ -249,6 +249,13 @@ var errDraftModeDisarmed = errors.New("draft mode (Require Commit) is not armed"
 // views. Disarm itself now serializes on c.mu (disarmRequireCommit), so
 // either the disarm wins (this refuses) or the append wins (the draft is
 // active and the disarm refuses).
+// Concurrency note (Codex round 26): the version fence below reads the
+// CANDIDATE's generation, which ordinary draft CRUD mutates under
+// writeGate.RLock + PolicyStore.mu — neither conflicts with c.mu. The
+// production caller (plAcceptRecommendation) therefore holds writeGate's
+// WRITE side across this call and the subsequent accepted latch, making
+// fence + append + latch one policy-write transaction that CRUD, commit,
+// revert, and delete cannot interleave with.
 func (c *policyDraftCoordinator) stageDurableAppendArmed(actor string, expectedVersion int64, rule PolicyRule) (PolicyRule, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

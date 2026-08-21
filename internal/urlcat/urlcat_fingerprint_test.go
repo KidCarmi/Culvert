@@ -168,20 +168,22 @@ func TestFingerprint_EverySemanticMutationChangesIt(t *testing.T) {
 }
 
 // (5) A semantic no-op does not change the fingerprint.
-// TestFingerprint_TrailingDotSpellingIsIdentity (Codex round 10): the
-// resolver's index strips trailing dots (rebuildIndex), so "example.com." and
-// "example.com" resolve identically — the fingerprint must apply the SAME
-// normalization or a re-save with the alternate spelling falsely churns the
-// category epoch and stales valid session evidence.
-func TestFingerprint_TrailingDotSpellingIsIdentity(t *testing.T) {
+// TestFingerprint_TrailingDotSpellingIsDistinct (Codex round 26, superseding
+// the round-10 identity pin): the host→category resolver (LookupHost — the
+// path Learning consumes) compares raw lowercase patterns while incoming
+// hosts are trimmed, so "example.com." is a DEAD pattern there. Switching a
+// live pattern to the dotted spelling changes resolution, so the fingerprint
+// must move — trimming made that edit invisible and left sessions and
+// recommendations fresh across a resolution-relevant taxonomy change.
+func TestFingerprint_TrailingDotSpellingIsDistinct(t *testing.T) {
 	a := New([]*Entry{{Name: "Dev Tools", Hosts: []string{"example.com"}}})
 	b := New([]*Entry{{Name: "Dev Tools", Hosts: []string{"example.com."}}})
-	if a.ContentFingerprint() != b.ContentFingerprint() {
-		t.Fatal("trailing-dot spelling changed the fingerprint despite identical resolution")
+	if a.ContentFingerprint() == b.ContentFingerprint() {
+		t.Fatal("live→dead trailing-dot pattern edit did not change the fingerprint — LookupHost resolution changed invisibly")
 	}
-	c := New([]*Entry{{Name: "Dev Tools", Hosts: []string{"example.com", "example.com."}}})
+	c := New([]*Entry{{Name: "Dev Tools", Hosts: []string{"example.com", "example.com"}}})
 	if a.ContentFingerprint() != c.ContentFingerprint() {
-		t.Fatal("trailing-dot duplicate changed the fingerprint despite identical resolution")
+		t.Fatal("exact-duplicate pattern changed the fingerprint despite identical resolution")
 	}
 }
 
