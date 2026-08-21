@@ -703,6 +703,21 @@ func effectivePolicyList() []PolicyRule {
 	return policyStore.List()
 }
 
+// effectivePolicySnapshot returns the effective rulebase AND its label from
+// ONE coordinator-locked view (Codex round 15): the policy tester's separate
+// engagement check, list read, and label read could interleave with a
+// commit/revert — evaluating an empty candidate, or reporting a captured
+// draft snapshot as "running". Lock order c.mu → PolicyStore.mu (the
+// stageTarget convention).
+func effectivePolicySnapshot() (rules []PolicyRule, rulebase string) {
+	policyDraft.mu.Lock()
+	defer policyDraft.mu.Unlock()
+	if requireCommitEnabled() && policyDraft.state.Active {
+		return policyDraft.cand.List(), "draft"
+	}
+	return policyStore.List(), "running"
+}
+
 // effectivePolicyVersion is the generation clients echo via ?ifVersion=: the
 // candidate's while drafting (so two admins editing the shared draft collide),
 // else running's.

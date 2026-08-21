@@ -2056,12 +2056,10 @@ func apiPolicyTest(w http.ResponseWriter, r *http.Request) {
 	// Evaluate the EFFECTIVE rulebase: the draft candidate when Draft Mode is
 	// engaged, else the running store (GAP-POL-03, ADR-0026). rulebase tells the
 	// admin which set was simulated so a draft-mode test is never mistaken for a
-	// test of live policy.
-	rules := effectivePolicyList()
-	rulebase := "running"
-	if policyDraftEngaged() {
-		rulebase = "draft"
-	}
+	// test of live policy. Rules and label come from ONE coordinator-locked
+	// snapshot (Codex round 15) — separate reads could interleave with a
+	// commit/revert and evaluate an empty candidate or mislabel the set.
+	rules, rulebase := effectivePolicySnapshot()
 
 	// Stage-1 simulation (Slice 8): resolve the auth outcome for this request
 	// and mirror Slice 7's runtime wiring — a no-credentials Exempt match makes

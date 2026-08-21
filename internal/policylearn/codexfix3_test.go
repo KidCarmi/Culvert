@@ -561,6 +561,42 @@ func TestChurn_TransientPolicyRoundTripLatched(t *testing.T) {
 	}
 }
 
+// TestChurn_QueuedTransientWindowLatchedFromDecisionTimeStamp (round 15): the
+// churn latch must see the identities in effect at DECISION time — a
+// transient change (A→B→A) completing while the events sat queued left the
+// consume-time seam read seeing only the restored baseline, so the transient-
+// window evidence latched no churn.
+func TestChurn_QueuedTransientWindowLatchedFromDecisionTimeStamp(t *testing.T) {
+	var content atomic.Value
+	content.Store("hash-A")
+	clk := newTestClock()
+	e := newTestEngine(t, t.TempDir(), clk, func(c *Config) {
+		c.Baseline = func() Baseline { return Baseline{PolicyContentHash: "hash-A"} }
+		c.PolicyContent = func() string { return content.Load().(string) }
+	})
+	t.Cleanup(func() { _ = e.Close() })
+	if _, err := e.StartSession("op"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Park the drain on e.mu so the transient window completes while the
+	// events sit queued.
+	e.mu.Lock()
+	content.Store("hash-B")
+	e.Observe(Observation{Subject: "u", AuthSource: "idp", Host: "x.example", Status: "OK"}) // decided under B
+	content.Store("hash-A") // restored BEFORE the drain consumes
+	e.Observe(Observation{Subject: "u", AuthSource: "idp", Host: "y.example", Status: "OK"})
+	e.mu.Unlock()
+
+	sess, err := e.StopSession("op")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sess.PolicyChurn) < 2 {
+		t.Fatalf("queued transient window not latched from the decision-time stamps: churn=%v", sess.PolicyChurn)
+	}
+}
+
 // TestFinishActive_PersistFailureRecordsGap (round 13): the gate is OFF for
 // the whole drain + failed write of a stop — requests in that interval went
 // unobserved. Reopening the session without recording the window as a gap

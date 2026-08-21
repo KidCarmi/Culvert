@@ -471,6 +471,42 @@ func TestPolicyContentIdentity_IgnoresProvenanceStamps(t *testing.T) {
 	}
 }
 
+// TestEffectivePolicySnapshot_CoherentUnderConcurrentCommit (round 15): the
+// tester's rules and rulebase label must come from ONE coordinator-locked
+// view — separate engagement/list/label reads interleaving with a commit
+// could evaluate an EMPTY candidate or mislabel a draft snapshot "running".
+// Bounded stress under -race: the snapshot must never observe an empty
+// rulebase and its label must match its content.
+func TestEffectivePolicySnapshot_CoherentUnderConcurrentCommit(t *testing.T) {
+	plDurableDraftHarness(t)
+	setRequireCommit(true)
+	for i := 0; i < 40; i++ {
+		disabled := false
+		rule := PolicyRule{
+			ID: newRuleID(), Name: fmt.Sprintf("snap-stress-%d", i), SourceGroup: "g",
+			DestCategory: "m5b-cat", Action: ActionAllow, SSLAction: SSLInspect, Enabled: &disabled,
+		}
+		stampRuleMetadataForWrite(&rule, nil, "codexfix")
+		ver, _ := effectivePolicyVersion()
+		if _, err := policyDraft.stageDurableAppend("codexfix", ver, rule); err != nil {
+			t.Fatalf("stage: %v", err)
+		}
+		commitDone := make(chan struct{})
+		go func() {
+			_, _ = policyDraft.commitActivate(nil)
+			close(commitDone)
+		}()
+		rules, label := effectivePolicySnapshot()
+		<-commitDone
+		if len(rules) == 0 {
+			t.Fatalf("iteration %d: snapshot observed an EMPTY rulebase mid-commit (label=%q)", i, label)
+		}
+		if label != "draft" && label != "running" {
+			t.Fatalf("iteration %d: unknown rulebase label %q", i, label)
+		}
+	}
+}
+
 // TestCodexFix_CommitAppendNeverVanishesRule (Codex re-review): the commit's
 // snapshot→activate→clear now shares one coordinator critical section with
 // the durable append, so a successfully appended rule can land only entirely

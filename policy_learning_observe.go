@@ -11,6 +11,8 @@ package main
 // predicted branch — no allocation, no goroutine, no I/O (benchgate-pinned).
 
 import (
+	"sync/atomic"
+
 	"github.com/KidCarmi/Culvert/internal/policylearn"
 )
 
@@ -59,12 +61,34 @@ func learnObservePreDispatch(auth authOutcome, host, method, status string) {
 // pinned under the old counter scheme can never compare equal to a v2 value,
 // so pre-upgrade objects go stale exactly ONCE at upgrade (documented in the
 // preview qualification record) instead of being silently reinterpreted.
+// learnEpochMemo caches the composed epoch string keyed by its two components
+// — the saas VIEW POINTER (each view is immutable after construction, so
+// pointer identity implies content identity) and the cached admin
+// fingerprint string (Codex round 15: Observe stamps the DECISION-TIME epoch
+// on every enqueued observation, so the composition must be alloc-free on
+// the request path — the concat re-runs only when a component actually
+// changed).
+type learnEpochMemoEntry struct {
+	view  *effectiveCategoryView
+	admin string
+	epoch string
+}
+
+var learnEpochMemo atomic.Pointer[learnEpochMemoEntry]
+
 func learnCategoryEpoch() string {
-	saas := "none"
-	if v := saasEffectiveView.Current(); v != nil {
-		saas = v.GenerationID + ":" + v.ConfigRevision
+	view := saasEffectiveView.Current()
+	admin := catStore.ContentFingerprint()
+	if m := learnEpochMemo.Load(); m != nil && m.view == view && m.admin == admin {
+		return m.epoch
 	}
-	return "v2|saas:" + saas + "|admin:" + catStore.ContentFingerprint()
+	saas := "none"
+	if view != nil {
+		saas = view.GenerationID + ":" + view.ConfigRevision
+	}
+	epoch := "v2|saas:" + saas + "|admin:" + admin
+	learnEpochMemo.Store(&learnEpochMemoEntry{view: view, admin: admin, epoch: epoch})
+	return epoch
 }
 
 func learnObserveDecision(auth authOutcome, host, method string, match *PolicyMatch, status, sslAction string) {

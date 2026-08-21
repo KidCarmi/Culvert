@@ -341,12 +341,21 @@ func boundedCount(m *map[string]int64, other *int64, key string, bound int) { //
 // checkEpochLocked records category-generation churn against the session
 // baseline (bounded; overflow counted). Called under e.mu from the drain
 // cadence and at session stop.
-func (e *Engine) checkEpochLocked(sess *Session, now time.Time) {
+// checkEpochLocked latches category-epoch and policy-content churn. catEpoch/
+// policyID, when non-empty, are the observation's DECISION-TIME stamps (Codex
+// round 15) — a transient change completing while the event sat queued is
+// visible only in the stamp, never in a consume-time seam read; empty values
+// (the finish-time final check, or a seam-less test engine) fall back to the
+// current seam reads. Caller holds e.mu.
+func (e *Engine) checkEpochLocked(sess *Session, now time.Time, catEpoch, policyID string) {
 	if sess == nil {
 		return
 	}
 	if e.cfg.CategoryEpoch != nil {
-		e.latchChurnLocked(sess, now, e.cfg.CategoryEpoch(), sess.Baseline.CategoryEpoch,
+		if catEpoch == "" {
+			catEpoch = e.cfg.CategoryEpoch()
+		}
+		e.latchChurnLocked(sess, now, catEpoch, sess.Baseline.CategoryEpoch,
 			&sess.CategoryChurn, func(a *Aggregate) *int64 { return &a.ChurnOverflow })
 	}
 	// Policy-content churn (schema v8, Codex round 13): an A→B→A policy round
@@ -355,7 +364,10 @@ func (e *Engine) checkEpochLocked(sess *Session, now time.Time) {
 	// is invisible to the identity comparison — it must be latched HERE, as
 	// it happens, exactly like category churn.
 	if e.cfg.PolicyContent != nil {
-		e.latchChurnLocked(sess, now, e.cfg.PolicyContent(), sess.Baseline.PolicyContentHash,
+		if policyID == "" {
+			policyID = e.cfg.PolicyContent()
+		}
+		e.latchChurnLocked(sess, now, policyID, sess.Baseline.PolicyContentHash,
 			&sess.PolicyChurn, func(a *Aggregate) *int64 { return &a.PolicyChurnOverflow })
 	}
 }

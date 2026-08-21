@@ -49,6 +49,16 @@ type Observation struct {
 	// accepted it — never to a later session). Engine-internal; never
 	// serialized.
 	gen uint64
+	// catEpoch/policyID are the DECISION-TIME identity stamps (Codex round
+	// 15): the churn latch must see the identities in effect when the
+	// decision was made, not when the drain consumes the event — a transient
+	// change (deny→allow→deny, taxonomy A→B→A) completing while the event
+	// sat queued would otherwise leave the drain seeing only the restored
+	// baseline, and the transient-window evidence would latch no churn.
+	// Stamped by Observe from the injected identity seams (memoized at the
+	// root — alloc-free reads); engine-internal, never serialized.
+	catEpoch string
+	policyID string
 
 	At         int64    // unix seconds; stamped by the engine at accept when zero
 	Subject    string   // resolved identity; "" = unauthenticated
@@ -196,6 +206,14 @@ func (e *Engine) Observe(o Observation) {
 	// Stamp the CURRENT acceptance window: the consumer attributes the event
 	// only while this window's session is still the aggregation target.
 	o.gen = e.windowGen.Load()
+	// Decision-time identity stamps (Codex round 15; see the field docs). The
+	// seams are memoized at the root, so these are cheap alloc-free reads.
+	if e.cfg.CategoryEpoch != nil {
+		o.catEpoch = e.cfg.CategoryEpoch()
+	}
+	if e.cfg.PolicyContent != nil {
+		o.policyID = e.cfg.PolicyContent()
+	}
 	select {
 	case t.ch <- queuedItem{o: o}:
 		t.accepted.Add(1)
@@ -319,7 +337,7 @@ func (e *Engine) consumeGuarded(t *transport, o Observation) {
 		// checks; the only residual is a round trip racing a SINGLE
 		// observation's resolution, which the neighboring observations'
 		// checks latch.
-		e.checkEpochLocked(sess, e.cfg.Now())
+		e.checkEpochLocked(sess, e.cfg.Now(), o.catEpoch, o.policyID)
 		e.sinceFlush++
 		if e.sinceFlush >= flushEvery {
 			e.sinceFlush = 0
