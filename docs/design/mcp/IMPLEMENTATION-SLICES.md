@@ -20,6 +20,14 @@ dependencies, security requirements, tests, acceptance criteria, rollback, owner
 > evaluated **per request / per H2 stream after header parsing** — never once per connection, since
 > `Host`/`Origin` do not exist at socket accept — **E2E** rebinding proof **over a reused connection**) is **PR-5** for Model A / the Future DMZ gate for Model C. PR-1 binds
 > no listener.
+>
+> **Terminology note (2026-08-19):** "no PR-12" above is scoped to *this package's* PR-0…PR-11 slice
+> sequence — it means the source DOCX's distinct connectivity slice was folded (D-12) rather than
+> reinstated as its own numbered slice. It does **not** describe the unrelated, already-shipped fix that
+> root `CLAUDE.md` and [`docs/operator/mcp-rollout-durable-state.md`](../../operator/mcp-rollout-durable-state.md)
+> separately label "PR-12" (production DP-applier composition + rollout/distribution transaction,
+> `mcp_distribution_startup.go`) — that label was assigned later, outside this package's numbering, and
+> is not a slice in the sequence below.
 
 Delivery rule (BLUEPRINT §23): every slice needs a defined trust boundary, acceptance criteria, tests and
 rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted ADR under `docs/adr/`**
@@ -259,7 +267,8 @@ rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted AD
   approved scope for Model A; Production stays qualification-locked** (no config/env/CLI/API bypass; test
   verifier only via injection; synthetic clock windows labeled test evidence). NO Model-B connector, NO
   Model-C DMZ, NO endpoint bridge, NO transparent discovery, NO Management mutation. Production
-  Qualification remains the separate gate; **there is no PR-12.**
+  Qualification remains the separate gate; **there is no PR-12** in this package's slice sequence (see the
+  terminology note above — not to be confused with the unrelated fix CLAUDE.md separately labels "PR-12").
 
 ## PR-C (post-V1) — Outbound Connector (Model B) *(D-8 — not in V1; own design gate)*
 - **Objective:** the outbound-only connector for approved cloud-AI vendors — **only** after a named vendor

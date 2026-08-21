@@ -49,30 +49,39 @@ func loadRootCA(cfg rootCAStartupConfig, ctx context.Context) {
 	// Store CA runtime config for API-driven rotation.
 	caRuntime.path = cfg.Path
 	caRuntime.passphrase = cfg.Passphrase
-
-	// CHAOS-50 / register row CA-3: start the auto-rotation loop
-	// UNCONDITIONALLY. It used to be gated on certMgr.Ready(), which coupled two
-	// CAs that share nothing but this goroutine: the round it runs drives the
-	// INSPECTION CA *and* the CLUSTER CA (enrollment / CP↔DP mTLS), plus both
-	// secondary-CA overlap cleanups. So an inspection-CA load failure — a wrong
-	// passphrase, a corrupt bundle, a volume that was not mounted yet — silently
-	// disabled cluster-CA rotation and both cleanups for the entire life of the
-	// process, in a subsystem the operator has no reason to connect to the CA
-	// bundle they are debugging. The gate bought nothing: both RotateIfNeeded
-	// implementations already return immediately when their own CA is absent
-	// (internal/ca CAExpiry().IsZero(), enrollment.go cert == nil), so on a
-	// CA-less node the round is two nil checks a day.
+	// Start CA auto-rotation background check.
 	//
-	// It also made every RUNTIME recovery permanent-but-useless: an operator who
-	// fixed inspection via force-rotate or a custom-CA upload got a working CA
-	// that would never auto-rotate again, because the loop that would have
-	// rotated it was skipped at boot and there is no other place that starts it.
-	StartCAAutoRotation(ctx, cfg.Path, cfg.Passphrase)
+	// CHAOS-50 / CA-13: started UNCONDITIONALLY. This used to be gated on
+	// certMgr.Ready(), which reads as a harmless optimisation — why run a
+	// rotation loop for a CA that failed to load? — but the loop drives BOTH
+	// CAs (see StartCAAutoRotation), and the cluster CA is the only thing
+	// rotating it. So a corrupt inspection bundle, a wrong
+	// CULVERT_CA_PASSPHRASE, or an unreadable -ca-path silently took the
+	// CLUSTER CA's entire lifecycle manager down with it: no auto-rotation, and
+	// no secondary-CA overlap cleanup, on a node whose cluster CA was perfectly
+	// healthy. Two independent trust roots, one shared failure — and because a
+	// cluster CA is a 10-year certificate, the consequence would surface years
+	// after the inspection-CA fault that caused it, with nothing left to
+	// connect them.
+	//
+	// The gate is not needed for the inspection half either: RotateIfNeeded and
+	// CleanupSecondaryCA both return immediately when no CA is loaded, so on a
+	// node with no inspection CA this costs one zero-time comparison per day.
+	// The loop's done channel is published so a caller that cancels ctx can join
+	// the worker. Production never waits on it (shutdown does not block on a
+	// rotation check); it exists so a test driving this loader leaves no
+	// background goroutine running past its own completion.
+	caRotationLoopDone = StartCAAutoRotation(ctx, cfg.Path, cfg.Passphrase)
 
 	// A recorded load failure gets a bounded retry campaign (rootca_recovery.go).
 	// No-op on a healthy boot.
 	startInspectionCARecoveryLoop(ctx, cfg)
 }
+
+// caRotationLoopDone is closed when the auto-rotation loop started by the most
+// recent loadRootCA has exited. Written once per loadRootCA (startup, or a test),
+// read only after cancelling that loop's context.
+var caRotationLoopDone <-chan struct{}
 
 // initInspectionCA performs the load-or-init half of loadRootCA: persisted
 // bundle when a path is configured, ephemeral in-memory CA otherwise.

@@ -36,7 +36,7 @@ carried the headline finding (**CA-1**, High) — this sweep confirmed it is sti
 it. \#4 is unrelated to expiry and was found in the same file — an unbounded slice behind a
 bounded map, growing on the most ordinary workload there is.
 
-Everything here is now fail-closed, counted, alerted, and visible on `/healthz`, `/readyz`,
+Everything here is now fail-closed, counted, alerted, and visible on the proxy's `/health`, `/ready`,
 `/metrics` and the CA Management panel.
 
 ---
@@ -83,14 +83,14 @@ There is no canary, no partial degradation, no staggering.
 
 | Signal | Pre-fix state during the outage |
 |---|---|
-| `/healthz` `ssl_inspection` | `"ready"` — `Ready()` only asks whether a CA is loaded |
-| `/readyz` `ca` row | `ok` |
+| `/health` `ssl_inspection` | `"ready"` — `Ready()` only asks whether a CA is loaded |
+| `/ready` `ca` row | `ok` |
 | `culvert_ca_rotations_total` | unchanged (counts successes only) |
 | `culvert_cert_cache_*` | ticking normally — the engine was signing happily |
 | Alerts | none; `cert_expiry` fires on *rotation*, not on expiry-reached |
 | Logs | none |
 
-The single closest thing to a signal was `ca_expires_days` inside the `/healthz` JSON body —
+The single closest thing to a signal was `ca_expires_days` inside the `/health` JSON body —
 a field no alerting rule evaluates and no dashboard plotted, and which in any case only helps
 *before* the cliff.
 
@@ -270,7 +270,7 @@ drift apart).
 | | Pre-fix | Post-fix |
 |---|---|---|
 | **Automatic recovery** | Rotation, but only ≥24h after boot (FS-6) and possibly non-durable (FS-3) | Rotation checked at startup **and** every 24h; a non-durable rotation is reported, not hidden |
-| **Manual recovery** | Possible but undiscoverable — nothing named the CA as the cause | `/healthz` `ssl_inspection: expired`, `/readyz` `ca: fail`, `culvert_ca_usable 0`, a `cert_expiry` alert naming the impact, and a red CA-panel banner with the remediation |
+| **Manual recovery** | Possible but undiscoverable — nothing named the CA as the cause | `/health` `ssl_inspection: expired`, `/ready` `ca: fail`, `culvert_ca_usable 0`, a `cert_expiry` alert naming the impact, and a red CA-panel banner with the remediation |
 | **Recovery evidence** | n/a | Degraded state clears **only** on an observed usable verification (`caInspectionUsable`) — silence is never treated as recovery |
 | **Residual manual step** | — | Redistributing the new root CA to clients. Unavoidable: a new root is untrusted by definition, and no in-band mechanism can fix that |
 
@@ -306,10 +306,10 @@ at it.
   any flavour of bypass rather than `failed` / `no_fail_open_502`).
 - **The auto-exclusion cache is not poisoned.** The unusable-CA path sets no learner field;
   pinned by both the projection test and the end-to-end dispatcher test.
-- **No new information disclosure.** The 502 body carries no detail; the `/readyz` row — an
+- **No new information disclosure.** The 502 body carries no detail; the `/ready` row — an
   unauthenticated surface on the proxy port — carries a fixed string, not the CA's exact
   `NotAfter`, which would fingerprint a security-degraded node to any client that can reach
-  the proxy. The full cause goes to the logs, the alert, `/healthz` (`redact:"internal"`) and
+  the proxy. The full cause goes to the logs, the alert, `/health` (`redact:"internal"`) and
   the role-gated admin API. Asserted, not assumed.
 - **Metrics stay label-free**, per the CA-2 contract: no SNI host, SAN, subject, serial,
   fingerprint or key material — counts and one time delta.
@@ -328,7 +328,7 @@ at it.
 | Fail-closed CONNECT dispatch + ADR-0011 failure outcome | `proxy_tunnel.go`, `decryption_observability.go` |
 | Immediate startup rotation check (CA-4) | `ca.go` |
 | `culvert_ca_usable` · `_expires_in_seconds` · `_sign_refused_total` · `_inspect_blocked_total` · `_rotation_persist_failures_total` | `ca_metrics.go` |
-| `/healthz` `ssl_inspection: expired`; `/readyz` `ca` row (report-only, strict-gating) | `healthcheck.go` |
+| `/health` `ssl_inspection: expired`; `/ready` `ca` row (report-only, strict-gating) | `healthcheck.go` |
 | `GET /api/ca/status` usability fields + CA-panel banners | `ui_security.go`, `static/index.html` |
 
 ---

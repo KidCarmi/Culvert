@@ -78,7 +78,7 @@ Scores: 5 = best fit for Culvert, 1 = worst. Weighted by the drivers above.
 | Concern | Tool | Pin | Why |
 |---|---|---|---|
 | Spec dialect | **OpenAPI 3.0.4** | `openapi: 3.0.4` | see below |
-| Parse/validate + request/response validation, in-process | **getkin/kin-openapi** | `v0.144.0` (in `go.mod`) | pure Go, offline, runs in `go test`; MIT |
+| Parse/validate + request/response validation, in-process | **getkin/kin-openapi** | `v0.146.0` (in `go.mod`) | pure Go, offline, runs in `go test`; MIT |
 | Route/RBAC coverage | *(no dep)* Go test binding `uiRoutes` ⇄ spec ⇄ manifest | — | reuses the existing single source of truth |
 | Bundle + offline docs | *(no dep)* `cmd/apibundle` (Go) | — | deterministic JSON + self-contained HTML; no Node, no CDN |
 | Breaking-change | **oasdiff** | `v1.11.7` (pinned in script; not in module graph) | Go single binary; Apache-2.0 |

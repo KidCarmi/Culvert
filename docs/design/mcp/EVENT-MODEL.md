@@ -8,7 +8,9 @@
 > approved scope for Model A (local-client); Production remains qualification-locked** (no config/env/CLI/API
 > bypass; no in-binary issuer). `outbound-connector`/`dmz-endpoint`, endpoint bridge, transparent discovery,
 > and Management mutation remain excluded. Duration targets (14d/7d/24h) are measurable machinery, not
-> completed evidence; Production Qualification is the separate gate. There is no PR-12.
+> completed evidence; Production Qualification is the separate gate. There is no PR-12 in this
+> package's slice sequence — see [`IMPLEMENTATION-SLICES.md`](IMPLEMENTATION-SLICES.md) (not to be
+> confused with the unrelated fix CLAUDE.md separately labels "PR-12").
 
 
 Purpose: define the durable **decision-event** schema emitted by the Culvert MCP Security Gateway

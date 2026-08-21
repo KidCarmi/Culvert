@@ -245,23 +245,34 @@ func apiCACert(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleViewer) {
 			return
 		}
-		pem := certMgr.CACertPEM()
-		if pem == nil {
+		if certMgr.CACertPEM() == nil {
 			http.Error(w, "CA not initialised", http.StatusServiceUnavailable)
 			return
 		}
 		// Return JSON metadata or raw PEM depending on Accept header.
 		if strings.Contains(r.Header.Get("Accept"), "application/json") {
-			info := certMgr.CACertInfo()
-			jsonOK(w, info)
+			jsonOK(w, certMgr.CACertInfo())
 			return
 		}
-		w.Header().Set("Content-Type", "application/x-pem-file")
-		w.Header().Set("Content-Disposition", `attachment; filename="culvert-ca.pem"`)
-		w.Write(pem) //nolint:errcheck // HTTP response write
+		writeCACertPEM(w)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// writeCACertPEM serves the Root CA certificate as a downloadable PEM file.
+// Shared by /api/ca-cert (Certificates panel) and /api/ca/download (CA
+// Management panel) — both routes exist for GUI back-compat, but must never
+// re-diverge into two independently-maintained copies of this response.
+func writeCACertPEM(w http.ResponseWriter) {
+	pem := certMgr.CACertPEM()
+	if pem == nil {
+		http.Error(w, "CA not initialised", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-pem-file")
+	w.Header().Set("Content-Disposition", `attachment; filename="culvert-ca.pem"`)
+	w.Write(pem) //nolint:errcheck // HTTP response write
 }
 
 // POST /api/certs/upload — upload a custom TLS certificate+key for the UI or MITM engine.
@@ -583,7 +594,7 @@ func apiSecFeedsSync(w http.ResponseWriter, r *http.Request) {
 	globalThreatFeed.Sync()
 	// Audit the manual sync — admin-only operation that mutates the data
 	// driving every block decision. See docs/C15_UNKNOWN_AUDIT.md §3.2.
-	auditEvent(r, "security.feeds_sync", "manual", "")
+	auditEvent(r, "threatfeed.sync", "manual", "")
 	jsonOK(w, secScanStatusMap())
 }
 
@@ -1187,6 +1198,8 @@ func persistRotatedCA() bool {
 	return true
 }
 
+// apiCADownload is a back-compat alias of apiCACert's PEM-download branch,
+// reached from the CA Management panel. See writeCACertPEM.
 func apiCADownload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1195,14 +1208,7 @@ func apiCADownload(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleViewer) {
 		return
 	}
-	pem := certMgr.CACertPEM()
-	if pem == nil {
-		http.Error(w, "CA not initialised", http.StatusServiceUnavailable)
-		return
-	}
-	w.Header().Set("Content-Type", "application/x-pem-file")
-	w.Header().Set("Content-Disposition", `attachment; filename="culvert-ca.pem"`)
-	w.Write(pem) //nolint:errcheck
+	writeCACertPEM(w)
 }
 
 // apiCACacheClear flushes the in-memory leaf-certificate LRU cache.
@@ -1447,10 +1453,24 @@ func apiGeoIPConfig(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleViewer) {
 		return
 	}
-	jsonOK(w, map[string]any{
+	resp := map[string]any{
 		"enabled": geoip.Enabled(),
 		"dbPath":  uiCfgGeoIPDB,
-	})
+	}
+	if built, ok := geoip.BuildTime(); ok && !built.IsZero() {
+		resp["dbBuildDate"] = built.Format(time.RFC3339)
+		resp["dbAgeDays"] = int(time.Since(built).Hours() / 24)
+	}
+	// Surface a failed database load (bad path, corrupt/expired .mmdb) so an
+	// admin can tell "disabled — never configured" apart from "disabled — the
+	// configured database won't open" without reading the process log. See
+	// destCountry policy rules, which fail closed (no match) the same way in
+	// both cases.
+	if msg, at, ok := geoip.LoadError(); ok {
+		resp["lastError"] = msg
+		resp["lastErrorAt"] = at.UTC().Format(time.RFC3339)
+	}
+	jsonOK(w, resp)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

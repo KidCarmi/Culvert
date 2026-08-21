@@ -124,6 +124,15 @@ var uiRoutes = []uiRouteMetadata{
 		}},
 	{Path: "/api/idp/discover", Handler: "apiIdPDiscover", Domain: "auth", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true}}},
+	{Path: "/api/idp/test", Handler: "apiIdPTest", Domain: "auth", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
+			Note: "candidate-based LDAP directory test; actuates an admin-supplied endpoint (bounded, sanitized, audited)"}}},
+	{Path: "/api/idp/legacy-ldap", Handler: "apiIdPLegacyLDAP", Domain: "auth", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer,
+			Note: "non-secret summary of the legacy YAML ldap block + authority state"}}},
+	{Path: "/api/idp/legacy-ldap/import", Handler: "apiIdPLegacyLDAPImport", Domain: "auth", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
+			Note: "explicit one-time import of the legacy YAML ldap block as a disabled IdP profile"}}},
 	{Path: "/api/idp/", Handler: "apiIdPRouter", Domain: "auth", Public: false,
 		Methods: []uiRouteMethod{{Method: MethodAny, MinRole: RoleViewer, Mutating: true, AuditExpected: true,
 			Note: "C1.5 audit: dispatches to apiIdPItem (GET=viewer / PUT=admin / DELETE=admin) and apiIdPGroups; lowest accepted role is viewer (GET)"}}},
@@ -726,6 +735,12 @@ var uiRoutes = []uiRouteMetadata{
 	{Path: "/api/releases/catalog-refresh", Handler: "apiReleaseCatalogRefresh", Domain: "release", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
 			Note: "re-fetch the catalog from the configured origin + reload; verification unchanged; audited via auditEvent"}}},
+
+	// Backup archive visibility (read-only pass-through of the CP-local
+	// maintenance agent's GET /v1/backups; no new agent capability).
+	{Path: "/api/backups", Handler: "apiBackups", Domain: "support", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer,
+			Note: "read-only backup archive listing via the CP-local maintenance agent"}}},
 
 	// Supportability framework (M1) — redacted csb/1 diagnostic bundles.
 	{Path: "/api/support/status", Handler: "apiSupportStatus", Domain: "support", Public: false,

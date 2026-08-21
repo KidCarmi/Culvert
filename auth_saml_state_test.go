@@ -11,12 +11,26 @@ import (
 	"time"
 
 	"github.com/crewjam/saml"
+
+	"github.com/KidCarmi/Culvert/internal/authstate"
 )
 
 func resetSAMLStateStore(t *testing.T) {
 	t.Helper()
 	orig := globalSAMLStateStore
-	globalSAMLStateStore = &samlStateStore{entries: make(map[string]*samlStateEntry)}
+	globalSAMLStateStore = newSAMLStateStore()
+	t.Cleanup(func() {
+		globalSAMLStateStore = orig
+	})
+}
+
+// resetSAMLStateStoreAt swaps in a store whose clock is pinned to `now`, so a
+// test can place an entry outside the TTL without sleeping. The store owns
+// entry creation time (internal/authstate), so this is how expiry is driven.
+func resetSAMLStateStoreAt(t *testing.T, now func() time.Time) {
+	t.Helper()
+	orig := globalSAMLStateStore
+	globalSAMLStateStore = authstate.NewWithClock[*samlStateEntry](samlStateTTL, samlStateStoreMax, now)
 	t.Cleanup(func() {
 		globalSAMLStateStore = orig
 	})
@@ -132,7 +146,7 @@ func TestSAMLCaptiveLoginURLStoresRequestIDInRelayState(t *testing.T) {
 		t.Fatal("RelayState should be an opaque state handle, not the raw relay URL")
 	}
 
-	entry, ok := globalSAMLStateStore.peek(state)
+	entry, ok := globalSAMLStateStore.Peek(state)
 	if !ok {
 		t.Fatal("RelayState did not map to a stored SAML request")
 	}
@@ -166,13 +180,15 @@ func TestSAMLExchangeAssertionRequiresKnownState(t *testing.T) {
 }
 
 func TestSAMLExchangeAssertionRejectsExpiredState(t *testing.T) {
-	resetSAMLStateStore(t)
-	globalSAMLStateStore.set("expired-state", &samlStateEntry{
+	clock := time.Now().Add(-samlStateTTL - time.Minute)
+	resetSAMLStateStoreAt(t, func() time.Time { return clock })
+	globalSAMLStateStore.Set("expired-state", "203.0.113.5", &samlStateEntry{
 		requestID:  "request-a",
 		relayURL:   "https://app.example/",
 		providerID: "corp-saml",
-		createdAt:  time.Now().Add(-samlStateTTL - time.Minute),
 	})
+	// Advance past the TTL: the entry above is now expired.
+	clock = time.Now()
 	prov := testSAMLRedirectProvider(t)
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/saml/callback", strings.NewReader(url.Values{
 		"RelayState":   {"expired-state"},
@@ -187,18 +203,17 @@ func TestSAMLExchangeAssertionRejectsExpiredState(t *testing.T) {
 	if id != nil || relay != "" {
 		t.Fatalf("got id=%+v relay=%q, want no identity or relay on expired state", id, relay)
 	}
-	if _, ok := globalSAMLStateStore.peek("expired-state"); ok {
+	if _, ok := globalSAMLStateStore.Peek("expired-state"); ok {
 		t.Fatal("expired state should be removed")
 	}
 }
 
 func TestSAMLExchangeAssertionProviderMismatchDoesNotConsumeState(t *testing.T) {
 	resetSAMLStateStore(t)
-	globalSAMLStateStore.set("state-a", &samlStateEntry{
+	globalSAMLStateStore.Set("state-a", "203.0.113.5", &samlStateEntry{
 		requestID:  "request-a",
 		relayURL:   "https://app.example/",
 		providerID: "other-saml",
-		createdAt:  time.Now(),
 	})
 	prov := testSAMLRedirectProvider(t)
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/saml/callback", strings.NewReader(url.Values{
@@ -211,18 +226,17 @@ func TestSAMLExchangeAssertionProviderMismatchDoesNotConsumeState(t *testing.T) 
 	if err == nil {
 		t.Fatal("expected provider mismatch to fail")
 	}
-	if _, ok := globalSAMLStateStore.peek("state-a"); !ok {
+	if _, ok := globalSAMLStateStore.Peek("state-a"); !ok {
 		t.Fatal("provider mismatch should not consume state before authSAMLCallback tries the owning provider")
 	}
 }
 
 func TestSAMLExchangeAssertionConsumesStateBeforeValidation(t *testing.T) {
 	resetSAMLStateStore(t)
-	globalSAMLStateStore.set("state-a", &samlStateEntry{
+	globalSAMLStateStore.Set("state-a", "203.0.113.5", &samlStateEntry{
 		requestID:  "request-a",
 		relayURL:   "https://app.example/",
 		providerID: "corp-saml",
-		createdAt:  time.Now(),
 	})
 	prov := testSAMLRedirectProvider(t)
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/auth/saml/callback", strings.NewReader(url.Values{
@@ -238,7 +252,7 @@ func TestSAMLExchangeAssertionConsumesStateBeforeValidation(t *testing.T) {
 	if id != nil || relay != "" {
 		t.Fatalf("got id=%+v relay=%q, want no identity or relay on failure", id, relay)
 	}
-	if _, ok := globalSAMLStateStore.peek("state-a"); ok {
+	if _, ok := globalSAMLStateStore.Peek("state-a"); ok {
 		t.Fatal("state should be consumed before SAML response validation to prevent callback replay")
 	}
 }

@@ -35,8 +35,8 @@ Any one of these is conclusive:
 
 | Surface | What you'll see |
 |---|---|
-| `GET /healthz` | `"ssl_inspection": "expired"` |
-| `GET /readyz` | `checks.ca.status = "fail"` (report-only — it does **not** flip the node to `not_ready` unless you probe `/readyz?strict=1`) |
+| `GET /health` (proxy port) | `"ssl_inspection": "expired"` — not the admin/UI port's `/healthz`, which is HA-only and carries no CA field |
+| `GET /ready` (proxy port) | `checks.ca.status = "fail"` (report-only — it does **not** flip the node to `not_ready` unless you probe `/ready?strict=1`) |
 | `GET /metrics` | `culvert_ca_usable 0`, `culvert_ca_expires_in_seconds` negative, `culvert_ca_inspect_blocked_total` climbing |
 | `GET /api/diagnostics` | operator-contract row `root_ca` = **fail**, with the remediation |
 | Admin UI → CA Management | red banner: *SSL inspection is DOWN* |
@@ -63,7 +63,7 @@ Any one of these is conclusive:
    gateway: a new root is untrusted by definition. Download it from *CA Management → Download
    CA*, or `GET /api/ca/download`, and push it through your existing trust-store channel
    (MDM, group policy, configuration management).
-5. **Verify.** `culvert_ca_usable` returns to `1` and `/healthz` returns to
+5. **Verify.** `culvert_ca_usable` returns to `1` and `/health` returns to
    `"ssl_inspection": "ready"`. Culvert clears the degraded state only after it has actually
    verified the CA is usable again — elapsed time alone never clears it.
 
