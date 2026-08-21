@@ -13,7 +13,7 @@ import (
 // ── apiSecFeedsSync audit emission ────────────────────────────────────────
 //
 // This test pins the C1.5 §3.2 fix: a successful manual threat-feed sync
-// must record an "security.feeds_sync" audit entry. Before the fix, the
+// must record a "threatfeed.sync" audit entry. Before the fix, the
 // admin-only POST mutated state (overwriting the URL / domain maps that
 // drive every block decision) without producing an audit trail.
 //
@@ -25,7 +25,7 @@ import (
 
 // TestSecFeedsSync_RecordsAuditEntry covers the positive path: an
 // admin-role POST to apiSecFeedsSync with the feed enabled appends one
-// "security.feeds_sync" entry to the audit ring buffer.
+// "threatfeed.sync" entry to the audit ring buffer.
 //
 // Saturation-tolerant: the in-memory audit ring is bounded at
 // maxAuditLogs (500). Under -count=2 -shuffle=on the cumulative
@@ -67,8 +67,8 @@ func TestSecFeedsSync_RecordsAuditEntry(t *testing.T) {
 	// (Actor, Action, Object, TS≥baseline) tuple so we cannot collide
 	// with any entry written by another test or a prior invocation
 	// under -count=2.
-	if !hasMatchingAuditEntry(auditGet(), "198.51.100.50", "security.feeds_sync", "manual", baselineTS) {
-		t.Fatalf("no audit entry recorded with Actor=198.51.100.50 Action=security.feeds_sync Object=manual TS>=%d", baselineTS)
+	if !hasMatchingAuditEntry(auditGet(), "198.51.100.50", "threatfeed.sync", "manual", baselineTS) {
+		t.Fatalf("no audit entry recorded with Actor=198.51.100.50 Action=threatfeed.sync Object=manual TS>=%d", baselineTS)
 	}
 }
 
@@ -98,7 +98,7 @@ func TestSecFeedsSync_FeedDisabled_NoAuditEntry(t *testing.T) {
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("disabled feed: got %d, want 503 (body=%s)", rec.Code, rec.Body.String())
 	}
-	if hasMatchingAuditEntry(auditGet(), "198.51.100.51", "security.feeds_sync", "manual", baselineTS) {
+	if hasMatchingAuditEntry(auditGet(), "198.51.100.51", "threatfeed.sync", "manual", baselineTS) {
 		t.Errorf("audit entry recorded for disabled feed (Actor=198.51.100.51, since TS=%d)", baselineTS)
 	}
 }

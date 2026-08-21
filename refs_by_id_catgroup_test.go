@@ -13,8 +13,17 @@ import (
 	"testing"
 )
 
+// catGroupMatches is the single-shot form of categoryGroupMatchesHostScratch:
+// the production caller is a rule SCAN that shares one host scratch across every
+// rule, so a test asking about one rule builds a throwaway scratch — the same
+// shape matchDest uses.
+func catGroupMatches(rule *PolicyRule, host string) bool {
+	sc := newHostCatScratch(host)
+	return categoryGroupMatchesHostScratch(rule, &sc)
+}
+
 // seedHostCategory points a host at a category via the admin catStore, so
-// categoryGroupMatchesHostRule's lookupHostCategory resolves it.
+// the category-group matcher's host→category fusion resolves it.
 func seedHostCategory(t *testing.T, category, host string) {
 	t.Helper()
 	if err := catStore.Set(category, []string{host}, false); err != nil {
@@ -35,7 +44,7 @@ func TestCategoryGroupMatchesHostRule_IDFirstWithFallback(t *testing.T) {
 	// Rule links by ID but its denormalized name is STALE — the ID resolves, so
 	// the group's real membership is used (matches), NOT the stale name.
 	rule := &PolicyRule{DestCategoryGroup: "STALE", DestCategoryGroupID: g.ID}
-	if !categoryGroupMatchesHostRule(rule, "example.com") {
+	if !catGroupMatches(rule, "example.com") {
 		t.Error("ID-first match failed: stale name should be ignored when the ID resolves")
 	}
 	// A rule whose ID points at a group that does NOT contain the host's category
@@ -43,17 +52,17 @@ func TestCategoryGroupMatchesHostRule_IDFirstWithFallback(t *testing.T) {
 	// (Authoritative-ID: a resolved group's result is final.)
 	g2, _ := globalCategoryGroups.Add("other", []string{"gambling"})
 	rule2 := &PolicyRule{DestCategoryGroup: "grp", DestCategoryGroupID: g2.ID}
-	if categoryGroupMatchesHostRule(rule2, "example.com") {
+	if catGroupMatches(rule2, "example.com") {
 		t.Error("authoritative ID violated: a resolved non-member group must not fall back to the name")
 	}
 	// Un-migrated rule (no ID) falls back to the name.
 	rule3 := &PolicyRule{DestCategoryGroup: "grp"}
-	if !categoryGroupMatchesHostRule(rule3, "example.com") {
+	if !catGroupMatches(rule3, "example.com") {
 		t.Error("name-fallback match failed for an un-migrated rule")
 	}
 	// Dangling ID (no such group) falls back to the name.
 	rule4 := &PolicyRule{DestCategoryGroup: "grp", DestCategoryGroupID: "deadbeef0000"}
-	if !categoryGroupMatchesHostRule(rule4, "example.com") {
+	if !catGroupMatches(rule4, "example.com") {
 		t.Error("dangling ID must fall back to the denormalized name")
 	}
 }
@@ -169,7 +178,7 @@ func TestObjectReferences_CategoryGroupStaleNameNoFalsePositive(t *testing.T) {
 // TestObjectReferences_CategoryGroupDanglingIDFallsBackToName pins the
 // walk↔match parity fix: a rule with a DANGLING DestCategoryGroupID (no live
 // group) whose denormalized name resolves to a live group is ENFORCING that
-// group at eval time (categoryGroupMatchesHostRule falls back to the name), so
+// group at eval time (the matcher falls back to the name), so
 // the delete-block walk must attribute it too — else the group is deletable
 // while in use.
 func TestObjectReferences_CategoryGroupDanglingIDFallsBackToName(t *testing.T) {

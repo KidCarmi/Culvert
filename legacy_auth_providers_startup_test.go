@@ -22,18 +22,32 @@ func ensureLegacyAuthTestLogger(t *testing.T) {
 }
 
 // resetLegacyAuthGlobals snapshots/restores cfg.provider and
-// oidcLoginURL for isolation under -shuffle.
+// oidcLoginURL for isolation under -shuffle. It also snapshots/restores the
+// legacy-LDAP YAML retention and the durable cutover sentinel:
+// loadLegacyAuthProviders overwrites legacyLDAPYAMLState, and a leaked YAML
+// block would let ANY later test that enables a registry LDAP profile flip
+// the process-global legacy_ldap_retired flag — which makes cfg.IsConfigured()
+// true for the rest of the suite (the exact shuffle failure seen in
+// TestAPIAuthLogin_AuthDisabled).
 func resetLegacyAuthGlobals(t *testing.T) {
 	t.Helper()
 	cfg.mu.RLock()
 	origProv := cfg.provider
 	cfg.mu.RUnlock()
 	origLogin := oidcLoginURL
+	legacyLDAPYAMLState.mu.Lock()
+	origYAML := legacyLDAPYAMLState.cfg
+	legacyLDAPYAMLState.mu.Unlock()
+	origRetired := legacyLDAPRetiredFlag.Load()
 	t.Cleanup(func() {
 		cfg.mu.Lock()
 		cfg.provider = origProv
 		cfg.mu.Unlock()
 		oidcLoginURL = origLogin
+		legacyLDAPYAMLState.mu.Lock()
+		legacyLDAPYAMLState.cfg = origYAML
+		legacyLDAPYAMLState.mu.Unlock()
+		legacyLDAPRetiredFlag.Store(origRetired)
 	})
 }
 

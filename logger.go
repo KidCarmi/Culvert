@@ -136,6 +136,19 @@ func logSinkBackpressure() int64 {
 	return 0
 }
 
+// logSinkWriteErrors reports how many process-log lines (console + process
+// log file, e.g. POLICY_ALLOW/BLOCK/DROP entries) never reached their
+// destination writer — non-zero means the process-log record has gaps, the
+// same class of loss request-log and audit-log writes already surface via
+// reqlog.WriteErrors()/auditWriteErrors(). Zero when no async sink is
+// installed.
+func logSinkWriteErrors() int64 {
+	if w := logSink.Load(); w != nil {
+		return w.WriteErrors()
+	}
+	return 0
+}
+
 // ── Rotating file writer ─────────────────────────────────────────────────────
 // rotatingFile moved to internal/fileutil (ADR-0002, store.go decomposition
 // Phase B — the audit engine shares it); the aliases keep the logger and

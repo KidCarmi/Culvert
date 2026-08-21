@@ -73,8 +73,10 @@ const (
 	// deferral); surfaced read-only on GET /api/releases.
 	envReleaseRefreshInterval = "CULVERT_RELEASE_REFRESH_INTERVAL"
 	// envReleaseSigstoreTrustedRoot is the OPTIONAL path to a custom Sigstore TUF
-	// trusted_root.json (P2b). Unset ⇒ the baked embed (empty in OSS ⇒ scheme
-	// dormant). PUBLIC trust material only — never private keys.
+	// trusted_root.json (P2b). Unset ⇒ the baked embed — as of P2b-2a this is the
+	// real Sigstore public-good root, so the keyless scheme is ACTIVE by default
+	// (point this at an empty file to deactivate). PUBLIC trust material only —
+	// never private keys.
 	envReleaseSigstoreTrustedRoot = "CULVERT_RELEASE_SIGSTORE_TRUSTED_ROOT"
 )
 

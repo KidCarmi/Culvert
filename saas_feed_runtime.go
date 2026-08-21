@@ -417,6 +417,26 @@ func recomposeSignedFeedOverrides() {
 	rt.recomposeOverrides(resolveLifecycleCtx())
 }
 
+// recomposeSignedFeedTaxonomy triggers the same local, no-network effective-view recompose
+// after the ADMIN-managed catStore TAXONOMY changed (category create/update/delete, single
+// host add/remove, config import, config-version rollback).
+//
+// Why this is required and not merely tidy: before the first signed activation the effective
+// view's baseline IS catStore's BuiltIn=true taxonomy (embeddedBaselineEntries reads the live
+// store), and since F3b-4 the policy hot path serves built-in categories EXCLUSIVELY from that
+// view — catStore contributes only its BuiltIn=false adminIndex (matchCategory / MatchesHostAdmin).
+// The view is an immutable startup snapshot, so without this call an operator's edit to a
+// BUILT-IN category lands in catStore but never reaches policy evaluation: a Deny rule scoped
+// to that category silently stops matching the host the operator just added, and the /api/urlcat
+// lookup tool disagrees with what is actually enforced — until the next restart rebuilds the
+// baseline. Fail-closed on error: a failed recompose leaves the previous view installed and logs.
+//
+// Residual (deliberate, documented): once a signed generation IS committed the coordinator
+// rebuilds from the feed snapshot, so the feed — not catStore — owns the SaaS taxonomy and
+// built-in edits are superseded by design. Adding hosts to a feed-owned category is the
+// category-OVERRIDE surface's job (/api/saas-feed/overrides), not /api/urlcat.
+func recomposeSignedFeedTaxonomy() { recomposeSignedFeedOverrides() }
+
 // noteOverrideFootprint publishes the current applied-override count + revision so the
 // status/API/metrics reflect the composed override footprint alongside the served view.
 func (rt *saasFeedRuntime) noteOverrideFootprint() {

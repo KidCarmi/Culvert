@@ -2,8 +2,20 @@ package plugin
 
 import (
 	"net/http"
+	"sync"
 	"testing"
+
+	"github.com/KidCarmi/Culvert/internal/obs"
 )
+
+// withPanicSink installs fn as the obs crash-reporting sink for the duration
+// of the test and restores a harmless default afterwards so later tests in
+// this binary never inherit a capturing closure.
+func withPanicSink(t *testing.T, fn func(component string, v any)) {
+	t.Helper()
+	obs.SetPanicSink(fn)
+	t.Cleanup(func() { obs.SetPanicSink(func(string, any) {}) })
+}
 
 // fakePlugin is a minimal Middleware used only in these tests. Package main
 // keeps its own testPlugin (shared with the proxy handler tests) — this
@@ -58,6 +70,42 @@ func TestDecide_PanicIsAllow(t *testing.T) {
 			t.Errorf("panicking plugin must be treated as Allow, got %v", got)
 		}
 	})
+}
+
+func TestDecide_PanicReportsToCrashSink(t *testing.T) {
+	var mu sync.Mutex
+	var components []string
+	withPanicSink(t, func(component string, v any) {
+		mu.Lock()
+		defer mu.Unlock()
+		components = append(components, component)
+	})
+	withChain([]Middleware{&fakePlugin{name: "panicky", panicOn: true}}, func() {
+		Decide("1.1.1.1", "GET", "example.com")
+	})
+	mu.Lock()
+	defer mu.Unlock()
+	if len(components) != 1 || components[0] != "plugin:panicky" {
+		t.Errorf("crash sink calls = %v, want [plugin:panicky]", components)
+	}
+}
+
+func TestOnResponse_PanicReportsToCrashSink(t *testing.T) {
+	var mu sync.Mutex
+	var components []string
+	withPanicSink(t, func(component string, v any) {
+		mu.Lock()
+		defer mu.Unlock()
+		components = append(components, component)
+	})
+	withChain([]Middleware{&fakePlugin{name: "panicky", panicOn: true}}, func() {
+		OnResponse(nil)
+	})
+	mu.Lock()
+	defer mu.Unlock()
+	if len(components) != 1 || components[0] != "plugin:panicky" {
+		t.Errorf("crash sink calls = %v, want [plugin:panicky]", components)
+	}
 }
 
 func TestOnResponse_CallsAllAndSurvivesPanic(t *testing.T) {

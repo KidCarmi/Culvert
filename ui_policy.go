@@ -991,6 +991,10 @@ func apiURLCat(w http.ResponseWriter, r *http.Request) { //nolint:cyclop,funlen,
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		// Set() on an EXISTING name preserves that entry's BuiltIn flag, so this POST can
+		// land on a built-in category — which the policy path serves from the effective
+		// view, not catStore. Recompose so the edit is actually enforced.
+		recomposeSignedFeedTaxonomy()
 		auditEvent(r, "urlcat.create", body.Name, fmt.Sprintf("%d host(s)", len(body.Hosts)))
 		saveConfigVersion(sessionAdmin(r), "urlcat.create")
 		jsonOK(w, map[string]string{"name": body.Name})
@@ -1024,6 +1028,8 @@ func apiURLCat(w http.ResponseWriter, r *http.Request) { //nolint:cyclop,funlen,
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		// A built-in category's hosts are served from the effective view, not catStore.
+		recomposeSignedFeedTaxonomy()
 		auditEvent(r, "urlcat.update", name, fmt.Sprintf("%d host(s)", len(body.Hosts)))
 		saveConfigVersion(sessionAdmin(r), "urlcat.update")
 		jsonOK(w, map[string]string{"name": name})
@@ -1051,6 +1057,9 @@ func apiURLCat(w http.ResponseWriter, r *http.Request) { //nolint:cyclop,funlen,
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
+		// Deleting a built-in category must also retire it from the served view —
+		// otherwise policy keeps matching a category the operator just removed.
+		recomposeSignedFeedTaxonomy()
 		auditEvent(r, "urlcat.delete", name, "")
 		saveConfigVersion(sessionAdmin(r), "urlcat.delete")
 		w.WriteHeader(http.StatusNoContent)
@@ -1083,6 +1092,9 @@ func apiURLCatHost(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
+		// The canonical "block this host via its category" action. On a built-in
+		// category the host only reaches policy through the effective view.
+		recomposeSignedFeedTaxonomy()
 		auditEvent(r, "urlcat.host.add", body.Category, body.Host)
 		saveConfigVersion(sessionAdmin(r), "urlcat.host.add")
 		jsonOK(w, map[string]string{"category": body.Category, "host": body.Host})
@@ -1101,6 +1113,7 @@ func apiURLCatHost(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
+		recomposeSignedFeedTaxonomy()
 		auditEvent(r, "urlcat.host.remove", category, host)
 		saveConfigVersion(sessionAdmin(r), "urlcat.host.remove")
 		w.WriteHeader(http.StatusNoContent)
@@ -1981,6 +1994,11 @@ type policyTestTrace struct {
 func walkPolicyTestRules(rules []PolicyRule, sourceIP, identity, authSource, host string, groups []string) ([]policyTestTrace, *PolicyRule) {
 	var trace []policyTestTrace
 	var matched *PolicyRule
+	// Mirror Evaluate's per-scan hoists so the simulator resolves the
+	// destination's category exactly once, the same way the engine it is
+	// simulating does (policy_hostcat.go).
+	normHost := normalizeHost(host)
+	catScratch := newHostCatScratch(host)
 	for i := range rules {
 		r2 := rules[i] // copy (index-based range: PolicyRule is a large struct)
 		skip := ""
@@ -1991,7 +2009,7 @@ func walkPolicyTestRules(rules []PolicyRule, sourceIP, identity, authSource, hos
 			skip = "source mismatch"
 		case !matchSchedule(r2.Schedule):
 			skip = "schedule inactive"
-		case !matchDest(&r2, host):
+		case !matchDestNorm(&r2, host, normHost, &catScratch):
 			skip = "destination mismatch"
 		}
 		trace = append(trace, policyTestTrace{Priority: r2.Priority, Name: r2.Name, SkipReason: skip})

@@ -285,6 +285,11 @@ start; **Slice** = blocks the named slice; **Non-blocking** = can trail.
 - **Evidence:** editorial correction (PR-0..PR-11 + Production Qualification; [`IMPLEMENTATION-SLICES.md`](IMPLEMENTATION-SLICES.md)).
 - **Owner:** Staff Eng. **Due:** PR-5. **Closure:** slice plan recorded; if reinstated, PR-12 must be explicitly defined + justified here.
 - **Blocking:** Non-blocking (planning).
+- **Note (2026-08-19):** the label "PR-12" was later reused, outside this package's numbering, by root
+  `CLAUDE.md` and [`docs/operator/mcp-rollout-durable-state.md`](../../operator/mcp-rollout-durable-state.md)
+  for an unrelated, already-shipped fix (production DP-applier composition + rollout/distribution
+  transaction, `mcp_distribution_startup.go`). It does not reinstate the connectivity slice this decision
+  keeps folded — see [`IMPLEMENTATION-SLICES.md`](IMPLEMENTATION-SLICES.md) for the disambiguation.
 
 ### D-13 — Management MCP scope (read-only vs draft vs controlled mutation)
 - **Question:** how far does Management MCP go in V1?

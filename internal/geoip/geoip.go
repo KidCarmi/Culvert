@@ -7,6 +7,7 @@
 package geoip
 
 import (
+	"math"
 	"net"
 	"sync"
 	"time"
@@ -18,25 +19,49 @@ var (
 	geoDBMu    sync.RWMutex
 	geoDB      *geoip2.Reader // nil = disabled
 	geoDBBuilt time.Time      // MaxMind build timestamp of the loaded .mmdb; zero when not loaded
+	geoLoadErr string         // "" = no failure on record
+	geoLoadAt  time.Time      // when geoLoadErr was last set
 )
 
 // InitGeoDB opens the GeoLite2-Country .mmdb file.
 // Call once at startup. Subsequent calls replace the open reader atomically.
+// A failure is recorded for LoadError and left for the caller to log; it is
+// cleared by a subsequent successful call so a fixed path stops reporting a
+// stale error.
 func InitGeoDB(path string) error {
 	r, err := geoip2.Open(path)
 	if err != nil {
+		geoDBMu.Lock()
+		geoLoadErr = err.Error()
+		geoLoadAt = time.Now()
+		geoDBMu.Unlock()
 		return err
 	}
-	built := time.Unix(int64(r.Metadata().BuildEpoch), 0).UTC()
+	epoch := r.Metadata().BuildEpoch
+	if epoch > math.MaxInt64 {
+		epoch = math.MaxInt64 // implausible (year 292e9); clamp for the G115 conversion bound
+	}
+	built := time.Unix(int64(epoch), 0).UTC() // #nosec G115 -- clamped above
 	geoDBMu.Lock()
 	old := geoDB
 	geoDB = r
 	geoDBBuilt = built
+	geoLoadErr = ""
+	geoLoadAt = time.Now()
 	geoDBMu.Unlock()
 	if old != nil {
 		_ = old.Close()
 	}
 	return nil
+}
+
+// LoadError reports the most recent InitGeoDB failure and when it occurred.
+// ok is false when no database was ever configured, or the last attempt (if
+// any) succeeded — i.e. there is nothing for an operator to act on.
+func LoadError() (msg string, at time.Time, ok bool) {
+	geoDBMu.RLock()
+	defer geoDBMu.RUnlock()
+	return geoLoadErr, geoLoadAt, geoLoadErr != ""
 }
 
 // Enabled reports whether a GeoIP database is loaded.
