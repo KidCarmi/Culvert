@@ -91,13 +91,17 @@ func New(entries []*Entry) *Store {
 // rebuildIndex reconstructs every derived index from s.entries.
 // Caller must hold s.mu (write or be the sole owner).
 //
-// It is the SINGLE maintenance path: the mutators call it wholesale rather
-// than patching individual index keys. A full rebuild is O(total patterns),
-// but every mutator that reaches here also calls Save(), which marshals the
-// entire store to JSON and atomically rewrites the file — so the rebuild is
-// noise next to the work already being done, and the positional hostIndex
-// below cannot be patched incrementally anyway (deleting a category shifts
-// every later entry position).
+// It is the maintenance path for every mutation EXCEPT a single-host append:
+// Set/Delete/RemoveHost rebuild wholesale rather than patching individual
+// index keys, because the positional hostIndex below cannot be patched
+// incrementally for those shapes (deleting a category shifts every later
+// entry position; a removed pattern's replacement winner is not enumerable
+// from the index). A full rebuild is O(total patterns), but each of those
+// mutators also calls Save(), which marshals the entire store to JSON and
+// atomically rewrites the file — so the rebuild is noise next to the work
+// already being done. AddHost alone folds incrementally (addHostToIndexes):
+// the SaaS feed sync calls it once per merged host, and a wholesale rebuild
+// there would stall the request path once per host (see that function).
 func (s *Store) rebuildIndex() {
 	idx := make(map[string]map[string]bool, len(s.entries))
 	admin := make(map[string]map[string]bool)
@@ -302,7 +306,7 @@ func (s *Store) Delete(name string) error {
 func (s *Store) AddHost(category, host string) error {
 	s.mu.Lock()
 	key := strings.ToLower(category)
-	for _, e := range s.entries {
+	for ei, e := range s.entries {
 		if !strings.EqualFold(e.Name, category) {
 			continue
 		}
@@ -312,13 +316,65 @@ func (s *Store) AddHost(category, host string) error {
 			return nil // already present
 		}
 		e.Hosts = append(e.Hosts, host)
-		s.rebuildIndex()
+		s.addHostToIndexes(ei, e, key, host)
 		s.mu.Unlock()
 		s.Save()
 		return nil
 	}
 	s.mu.Unlock()
 	return fmt.Errorf("category %q not found", category)
+}
+
+// addHostToIndexes folds ONE host just APPENDED to s.entries[ei].Hosts into
+// every derived index, instead of rebuilding the whole taxonomy.
+//
+// Rebuilding here would be correct but pathological: the legacy SaaS feed
+// sync calls AddHost once per merged host (saas_feed.go), so a large feed
+// update would rebuild the ENTIRE index once per added host while holding the
+// write lock — stalling the request path's RLock for O(hosts × patterns)
+// total (the exact stall flagged as P1 on PR #1171). An APPEND is uniquely
+// well-behaved: it adds one candidate at the END of one entry's host list, so
+// no existing (entry, host) position shifts and the only reverse-index key
+// whose winner can change is this pattern's — and only if the new position
+// precedes the current holder in scan order. Removal has no such property,
+// which is why RemoveHost/Delete/Set still rebuild wholesale.
+//
+// Lock discipline mirrors rebuildIndex exactly: the forward inner sets are
+// probed OUTSIDE the lock by MatchesHost/MatchesHostAdmin (pointer snapshot
+// under RLock), so the touched category's set is cloned-and-swapped, never
+// mutated in place; the reverse indices are only ever probed under RLock
+// (lookupIn), so an in-place insert under the write lock is safe.
+//
+// Degenerate config note: with DUPLICATE category names (already-recorded
+// review follow-up; first-wins vs last-wins was inconsistent before the
+// index existed), a wholesale rebuild keys the forward set off the LAST
+// duplicate while this fold extends the currently-published set. AddHost
+// targets the FIRST duplicate either way, so the fold's result is the more
+// self-consistent of the two; no supported configuration reaches this.
+func (s *Store) addHostToIndexes(ei int, e *Entry, key, host string) {
+	set := make(map[string]bool, len(s.index[key])+1)
+	for h := range s.index[key] {
+		set[h] = true
+	}
+	set[strings.ToLower(strings.TrimSuffix(host, "."))] = true
+	s.index[key] = set
+	if !e.BuiltIn {
+		s.adminIndex[key] = set
+	}
+
+	// Same deliberate normalization split as rebuildIndex: the reverse key
+	// keeps a trailing dot.
+	// #nosec G115 -- slice indices: non-negative and bounded by len
+	ref := patternRef{entry: int32(ei), host: int32(len(e.Hosts) - 1)}
+	pk := strings.ToLower(host)
+	if cur, dup := s.hostIndex[pk]; !dup || ref.less(cur) {
+		s.hostIndex[pk] = ref
+	}
+	if !e.BuiltIn {
+		if cur, dup := s.adminHostIndex[pk]; !dup || ref.less(cur) {
+			s.adminHostIndex[pk] = ref
+		}
+	}
 }
 
 // RemoveHost deletes a host from the named category.

@@ -158,6 +158,7 @@ func TestLookupIndex_MatchesReferenceScan(t *testing.T) {
 // taxonomies with heavy pattern overlap, probed with hosts drawn from the same
 // label pool so hits and misses are both common.
 func TestLookupIndex_MatchesReferenceScanRandomized(t *testing.T) {
+	// #nosec G404 -- deterministic seeded generator for reproducible test data
 	rng := rand.New(rand.NewSource(20260818))
 	labels := []string{"a", "b", "c", "example", "com", "net", "corp", "invalid"}
 
