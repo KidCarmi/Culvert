@@ -169,3 +169,29 @@ func TestLDAPAuth_CacheKeyIsHex(t *testing.T) {
 		t.Errorf("cache key should be valid hex, got %q: %v", k, err)
 	}
 }
+
+// TestLDAPTLSConfig_ServerNameFromURL pins the StartTLS ServerName fix:
+// go-ldap's Conn.StartTLS passes the config verbatim to tls.Client, and
+// crypto/tls refuses ServerName=="" with InsecureSkipVerify==false — so the
+// secure StartTLS configuration depends on this derivation.
+func TestLDAPTLSConfig_ServerNameFromURL(t *testing.T) {
+	c := ldapTLSConfig("ldap://dc01.corp.example:389", false)
+	if c.ServerName != "dc01.corp.example" {
+		t.Errorf("ServerName = %q, want the URL hostname", c.ServerName)
+	}
+	if c.InsecureSkipVerify {
+		t.Error("InsecureSkipVerify must stay false when not opted in")
+	}
+	c = ldapTLSConfig("ldaps://dc02.corp.example:636", true)
+	if c.ServerName != "dc02.corp.example" {
+		t.Errorf("ServerName = %q for ldaps", c.ServerName)
+	}
+	if !c.InsecureSkipVerify {
+		t.Error("InsecureSkipVerify must honor the admin opt-in")
+	}
+	// Unparseable URL: no ServerName, config still usable (dial fails later
+	// with its own error; validation rejects such URLs at the write door).
+	if c := ldapTLSConfig("::not-a-url::", false); c.ServerName != "" {
+		t.Errorf("ServerName = %q for junk URL, want empty", c.ServerName)
+	}
+}

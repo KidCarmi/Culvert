@@ -5,12 +5,29 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
 
 	ldap "github.com/go-ldap/ldap/v3"
 )
+
+// ldapTLSConfig builds the client TLS config for a directory connection,
+// deriving ServerName from the configured URL's hostname. This is
+// load-bearing for the StartTLS path: go-ldap's Conn.StartTLS hands the
+// config verbatim to tls.Client, and crypto/tls refuses a handshake with
+// neither ServerName nor InsecureSkipVerify — without it, the RECOMMENDED
+// secure StartTLS configuration (startTls=true, tlsSkipVerify=false) could
+// never authenticate. ldaps:// dials fill ServerName from the dial address
+// on their own, so setting it explicitly only changes the StartTLS path.
+func ldapTLSConfig(rawURL string, skipVerify bool) *tls.Config {
+	cfg := &tls.Config{InsecureSkipVerify: skipVerify} // #nosec G402 -- skipVerify is an explicit admin opt-in for self-signed LDAP certs
+	if u, err := url.Parse(rawURL); err == nil && u.Hostname() != "" {
+		cfg.ServerName = u.Hostname()
+	}
+	return cfg
+}
 
 // errLDAPAccountRejected marks a user-bind the directory ANSWERED but did not
 // accept for a reason that is not "wrong password" — a locked, disabled or
@@ -321,7 +338,7 @@ func (a *LDAPAuth) noteVerifyError(err error) {
 // the split is load-bearing rather than stylistic; see authenticate. The
 // Identity is non-nil only on success and only for identity-resolving engines.
 func (a *LDAPAuth) verify(username, password string) (*Identity, bool, error) { //nolint:gocognit,cyclop // the two-step-bind decision tree with its blast-radius error classification is inherently branchy; single-sourced for legacy + registry engines
-	tlsCfg := &tls.Config{InsecureSkipVerify: a.cfg.TLSSkipVerify} // #nosec G402 -- TLSSkipVerify is an explicit admin opt-in for self-signed LDAP certs
+	tlsCfg := ldapTLSConfig(a.cfg.URL, a.cfg.TLSSkipVerify)
 
 	// Dial with timeout to prevent DoS from hung LDAP servers.
 	conn, err := ldap.DialURL(a.cfg.URL,

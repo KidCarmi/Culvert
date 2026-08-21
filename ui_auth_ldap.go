@@ -12,7 +12,6 @@ package main
 // logged, cached, or audited.
 
 import (
-	"crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
@@ -343,7 +342,7 @@ func runLDAPDirectoryTest(pc *LDAPProfileConfig, testUsername, testPassword stri
 // ldapTestConnect performs the reachable + transport-security stages.
 func ldapTestConnect(rep *ldapTestReport, pc *LDAPProfileConfig) (*ldap.Conn, bool) {
 	isLDAPS := strings.HasPrefix(strings.ToLower(pc.URL), "ldaps://")
-	tlsCfg := &tls.Config{InsecureSkipVerify: pc.TLSSkipVerify} // #nosec G402 -- explicit admin opt-in, surfaced as a warning in the report
+	tlsCfg := ldapTLSConfig(pc.URL, pc.TLSSkipVerify)
 	start := time.Now()
 	conn, err := ldap.DialURL(pc.URL,
 		ldap.DialWithTLSConfig(tlsCfg),

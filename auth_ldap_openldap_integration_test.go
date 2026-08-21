@@ -295,3 +295,40 @@ func TestOpenLDAPInterop_StartTLS(t *testing.T) {
 		t.Fatalf("StartTLS ResolveIdentity failed")
 	}
 }
+
+// TestOpenLDAPInterop_SecureStartTLSReachesCertVerification pins the
+// ldapTLSConfig ServerName fix at the protocol level: with verification ON
+// (startTls=true, tlsSkipVerify=false) against the self-signed fixture, the
+// handshake must fail at CERTIFICATE VERIFICATION (x509) — not with Go's
+// client-side "either ServerName or InsecureSkipVerify must be specified"
+// config error, which is what a ServerName-less tls.Config produces and
+// which would mean every secure StartTLS deployment fails before the
+// directory is ever consulted.
+func TestOpenLDAPInterop_SecureStartTLSReachesCertVerification(t *testing.T) {
+	p := openLDAPInteropProfile(t)
+	if !strings.HasPrefix(strings.ToLower(p.LDAP.URL), "ldap://") {
+		t.Skip("StartTLS test requires a plain ldap:// CULVERT_OPENLDAP_URL")
+	}
+	p.LDAP.StartTLS = true
+	p.LDAP.TLSSkipVerify = false
+
+	rep := runLDAPDirectoryTest(p.LDAP, "", "")
+	if rep.OK {
+		t.Fatal("verification against a self-signed fixture certificate must fail")
+	}
+	var tlsErr string
+	for _, s := range rep.Steps {
+		if s.Name == "tls" && !s.OK {
+			tlsErr = s.Error
+		}
+	}
+	if tlsErr == "" {
+		t.Fatalf("expected the tls step to fail with a certificate error, report: %+v", rep.Steps)
+	}
+	if strings.Contains(tlsErr, "ServerName or InsecureSkipVerify") {
+		t.Fatalf("secure StartTLS died on the client-side ServerName config error (regression): %q", tlsErr)
+	}
+	if !strings.Contains(tlsErr, "x509") && !strings.Contains(tlsErr, "certificate") {
+		t.Fatalf("tls step error is not a certificate-verification failure: %q", tlsErr)
+	}
+}
