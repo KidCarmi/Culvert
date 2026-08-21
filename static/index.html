@@ -5065,7 +5065,7 @@ Firefox (all platforms):
             <div id="support-upload-status" role="status" aria-live="polite" style="margin-bottom:6px"><p class="hint">Loading…</p></div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap" data-min-role="admin">
               <input id="upload-origin" class="input sm" type="text" placeholder="https://tac.example.com" style="width:240px" title="TAC upload base URL (https, non-private)">
-              <input id="upload-credential" class="input sm" type="password" placeholder="bearer credential (optional)" style="width:200px" autocomplete="off" title="Per-appliance bearer credential; stored 0600, never displayed. Leave blank to keep the existing one.">
+              <input id="upload-credential" class="input sm" type="password" placeholder="bearer credential (optional)" style="width:200px" autocomplete="off" title="Per-node bearer credential; stored 0600, never displayed. Leave blank to keep the existing one.">
               <label style="display:flex;gap:4px;align-items:center;font-size:.8rem"><input id="upload-enabled" type="checkbox"> Enable</label>
               <label style="display:flex;gap:4px;align-items:center;font-size:.8rem" title="Remove the stored credential"><input id="upload-clear-cred" type="checkbox"> Clear credential</label>
               <button class="btn ghost sm" data-click="saveUploadConfig" data-min-role="admin" title="Save the upload posture (node-local; no bundle is sent by this action)">Save</button>
@@ -5083,7 +5083,7 @@ Firefox (all platforms):
             <div id="support-telemetry-status" role="status" aria-live="polite" style="margin-bottom:6px"><p class="hint">Loading…</p></div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap" data-min-role="admin">
               <input id="telemetry-origin" class="input sm" type="text" placeholder="https://tac.culvertlabs.com" style="width:240px" title="TAC telemetry origin (https, non-private; no path/query/fragment)">
-              <input id="telemetry-credential" class="input sm" type="password" placeholder="bearer credential" style="width:200px" autocomplete="off" title="Per-appliance bearer credential; stored 0600, never displayed. Leave blank to keep the existing one.">
+              <input id="telemetry-credential" class="input sm" type="password" placeholder="bearer credential" style="width:200px" autocomplete="off" title="Per-node bearer credential; stored 0600, never displayed. Leave blank to keep the existing one.">
               <label style="display:flex;gap:4px;align-items:center;font-size:.8rem"><input id="telemetry-enabled" type="checkbox"> Enable</label>
               <label style="display:flex;gap:4px;align-items:center;font-size:.8rem" title="Remove the stored credential"><input id="telemetry-clear-cred" type="checkbox"> Clear credential</label>
               <button class="btn ghost sm" data-click="saveTelemetryConfig" data-min-role="admin" title="Save the telemetry posture (node-local; no data is sent - no sender exists in this build)">Save</button>
