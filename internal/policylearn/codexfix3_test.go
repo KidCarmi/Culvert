@@ -5,6 +5,7 @@ package policylearn
 // session-gap confidence cap, and group-scope deduplication.
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -143,6 +144,31 @@ func TestLazyExpiry_DrainHeldLossNotMaskedByEnqueueDrops(t *testing.T) {
 	// 5 folded enqueue-side drops + the 1 drain-held accepted event.
 	if dropped != 6 {
 		t.Fatalf("drain-held loss masked by enqueue-drop history: window Dropped=%d, want 6", dropped)
+	}
+}
+
+// TestStartSession_RefusedAfterClose (round 7): the engine closes at shutdown
+// order 67 while the admin UI stops at 70, so a session start can still
+// arrive after Close — it must refuse rather than persist a new active
+// session and arm the gate on a closed transport (whose observations could
+// only ever become unpersistable post-final-save drops).
+func TestStartSession_RefusedAfterClose(t *testing.T) {
+	dir := t.TempDir()
+	clk := newTestClock()
+	e := newTestEngine(t, dir, clk, nil)
+	if err := e.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.StartSession("op"); !errors.Is(err, ErrEngineClosed) {
+		t.Fatalf("post-close StartSession not refused (err=%v)", err)
+	}
+	if e.LearningActive() {
+		t.Fatal("post-close start armed the learning gate")
+	}
+	e2 := newTestEngine(t, dir, clk, nil)
+	t.Cleanup(func() { _ = e2.Close() })
+	if n := len(e2.Sessions()); n != 0 {
+		t.Fatalf("post-close start persisted a session (%d found)", n)
 	}
 }
 

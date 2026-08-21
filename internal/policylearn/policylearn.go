@@ -61,6 +61,12 @@ var (
 	// ErrStoreReadOnly: the persisted store was written by a newer schema;
 	// the engine refuses every mutation so a downgrade can never clobber it.
 	ErrStoreReadOnly = errors.New("policylearn: session store schema is newer than this binary (read-only)")
+	// ErrEngineClosed: a lifecycle mutation reached an engine whose transport
+	// has shut down (Codex fix — the engine closes at shutdown order 67 while
+	// the admin UI stops at 70, so a session start can still arrive; arming
+	// learningActive on a closed transport would count drops AFTER the final
+	// save, loss the store can no longer persist).
+	ErrEngineClosed = errors.New("policylearn: engine is closed (shutting down)")
 )
 
 // Baseline pins the configuration generations a session's future evidence is

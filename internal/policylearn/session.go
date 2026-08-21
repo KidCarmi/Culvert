@@ -93,6 +93,13 @@ func (e *Engine) StartSession(actor string) (Session, error) {
 	if e.readOnly {
 		return Session{}, ErrStoreReadOnly
 	}
+	if e.closed.Load() {
+		// The transport has shut down (graceful-shutdown window: the engine
+		// closes before the admin UI stops). Refuse rather than persist a new
+		// active session whose observations could only ever become
+		// unpersistable post-final-save drops (Codex fix).
+		return Session{}, ErrEngineClosed
+	}
 	now := e.cfg.Now()
 	e.maybeExpireLocked(now)
 	if e.activeLocked() != nil {

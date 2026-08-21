@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -74,12 +75,45 @@ func scrubForwardedHeaders(r *http.Request) {
 	// Trailer hardening: Go forwards declared request trailers on r.Write, and
 	// the scrub above touches r.Header only (noted in the 2026-07-11 security
 	// review). The same identity/topology keys must not ride through as
-	// trailers either.
+	// trailers either. The early deletion alone is NOT enough (Codex fix):
+	// net/http merges the RECEIVED trailer fields back into r.Trailer when the
+	// body reaches EOF — after this scrub ran — and both the upstream
+	// transport (handleHTTP forwards r itself) and the WebSocket r.Write emit
+	// trailers from that same map, so a client could smuggle the scrubbed
+	// keys as LATE trailers. The body wrapper re-applies the deletion at EOF:
+	// the outbound writer reads the body to EOF and only then writes the
+	// trailer section, in the same goroutine, so the re-scrub is ordered
+	// after the merge and before the forward.
 	if r.Trailer != nil {
-		r.Trailer.Del("X-Forwarded-For")
-		r.Trailer.Del("X-Real-IP")
-		r.Trailer.Del("X-User-Identity")
+		scrubTrailerKeys(r.Trailer)
+		if r.Body != nil && r.Body != http.NoBody {
+			r.Body = &trailerRescrubBody{ReadCloser: r.Body, trailer: r.Trailer}
+		}
 	}
+}
+
+// scrubTrailerKeys removes the identity/topology keys the forward-path scrub
+// bans from request trailers.
+func scrubTrailerKeys(t http.Header) {
+	t.Del("X-Forwarded-For")
+	t.Del("X-Real-IP")
+	t.Del("X-User-Identity")
+}
+
+// trailerRescrubBody re-applies the trailer scrub when the request body is
+// fully read (see scrubForwardedHeaders — the server merges received trailer
+// values into r.Trailer at body EOF, which would undo an early-only scrub).
+type trailerRescrubBody struct {
+	io.ReadCloser
+	trailer http.Header
+}
+
+func (b *trailerRescrubBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err != nil {
+		scrubTrailerKeys(b.trailer)
+	}
+	return n, err
 }
 
 // policyLogURI builds the URL stored in LogEntry.URI for the per-rule "log full

@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -168,6 +169,48 @@ func TestIdentityIngress_AuthenticatedIdentityStillAttributed(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("no log entry attributed to the authenticated identity 'alice' — internal identity stamping must survive the ingress scrub")
+	}
+}
+
+// TestIdentityIngress_LateTrailerCannotResurrectScrubbedKeys (Codex round 7):
+// the early trailer deletion alone is defeated by net/http itself — for a
+// chunked request with declared trailers, the server merges the RECEIVED
+// trailer values back into r.Trailer when the body reaches EOF, AFTER
+// scrubForwardedHeaders ran, and the forward paths (client.Do(r), r.Write)
+// emit trailers from that same map. The scrub's body wrapper must re-delete
+// the banned keys at EOF, so the map the outbound writer reads is clean.
+func TestIdentityIngress_LateTrailerCannotResurrectScrubbedKeys(t *testing.T) {
+	type result struct{ pre, post string }
+	got := make(chan result, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		scrubForwardedHeaders(r) // as every forward path does before sending upstream
+		pre := r.Trailer.Get("X-User-Identity")
+		// Reading the body to EOF is exactly what the upstream transport does
+		// before writing the trailer section from r.Trailer.
+		_, _ = io.Copy(io.Discard, r.Body)
+		got <- result{pre: pre, post: r.Trailer.Get("X-User-Identity")}
+	}))
+	defer srv.Close()
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, strings.NewReader("payload"))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.ContentLength = -1 // chunked, so the trailer section exists
+	req.Trailer = http.Header{}
+	req.Trailer.Set("X-User-Identity", "mallory@evil.example")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	resp.Body.Close()
+
+	r := <-got
+	if r.pre != "" {
+		t.Fatalf("early scrub failed outright: %q", r.pre)
+	}
+	if r.post != "" {
+		t.Fatalf("late trailer resurrected the scrubbed identity key after body EOF: %q — the forwarded trailer map is poisoned", r.post)
 	}
 }
 
