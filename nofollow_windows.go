@@ -11,3 +11,17 @@ package main
 //
 // See nofollow_unix.go for the real flag on Unix-like platforms.
 const oNoFollow = 0
+
+// oNonBlock likewise degrades to a no-op (0) on Windows, which has no FIFOs in
+// the POSIX sense and no syscall.O_NONBLOCK. Callers use it only to avoid
+// blocking on a FIFO that replaced a regular file; on this convenience target
+// the descriptor-bound Stat still rejects any non-regular file, it just cannot
+// guarantee the open itself returns promptly.
+//
+// NOTE for readers of the telemetry config loader: on Windows the no-follow
+// guarantee is unavailable, so a symlink at the config path would be followed
+// and the loader's symlink defense degrades to the type/permission checks it
+// makes on the resulting descriptor. This is accepted for the same reason as
+// oNoFollow above — the appliance ships as a Linux container; the Windows
+// binary is a build-matrix convenience only.
+const oNonBlock = 0

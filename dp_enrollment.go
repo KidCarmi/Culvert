@@ -242,6 +242,17 @@ func startDataPlane(ctx context.Context, addr, nodeID, certFile, keyFile, caFile
 	}
 	clusterRole.nodeID = nodeID
 
+	// D4: seed the fencing-epoch ratchet from disk BEFORE the first poll so a
+	// restart cannot reopen the epoch-0 window an epoch-0 zombie CP would exploit.
+	loadDPLastSeenEpoch()
+
+	// F3b-4 finding #2: wire the durable feed-authority mirror store BEFORE replaying the
+	// last-good snapshot below, so the replay persists the authoritative feed config on the
+	// first restart after upgrade — without depending on the CP incrementing its config
+	// version. The signed-feed lifecycle (initURLCategories, run later) re-uses this same
+	// instance.
+	wireSaaSFeedAuthorityStore()
+
 	if certFile != "" {
 		if err := checkDPCertExpiry(certFile); err != nil {
 			logWarnf("ControlPlane: %v", err)
@@ -252,23 +263,33 @@ func startDataPlane(ctx context.Context, addr, nodeID, certFile, keyFile, caFile
 	// Fails closed if an encrypted key is present but unreadable.
 	if keyFile != "" {
 		if err := maybeMigrateDPNodeKey(keyFile); err != nil {
-			logger.Fatalf("DataPlane: DP node key at-rest: %v", err)
+			logFatalf("DataPlane: DP node key at-rest: %v", err)
 		}
 	}
+	// Version facts of the cached config the node is about to enforce, so the
+	// first heartbeat reports the applied config/policy version even if the
+	// initial CP poll is rejected (M5 PR-A — Codex).
+	var cachedConfigVersion, cachedPolicyVersion int64
 	if snap, err := applyDPLastGoodConfigSnapshot(); err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			logger.Printf("DataPlane: last-known-good config unavailable: %v", err)
 		} else {
 			logger.Printf("DataPlane: no last-known-good config at %s", dpLastGoodConfigSnapshotPath())
 		}
-	} else if mergedAddr := mergeCPAddresses(addr, snap.CPAddresses); mergedAddr != addr {
-		logger.Printf("DataPlane: seeded CP failover addresses from last-known-good config: %s", sanitizeLog(mergedAddr))
-		addr = mergedAddr
+	} else {
+		cachedConfigVersion = snap.Version
+		cachedPolicyVersion = snap.PolicyVersion
+		if mergedAddr := mergeCPAddresses(addr, snap.CPAddresses); mergedAddr != addr {
+			logger.Printf("DataPlane: seeded CP failover addresses from last-known-good config: %s", sanitizeLog(mergedAddr))
+			addr = mergedAddr
+		}
 	}
 	dpClient, err := NewDataPlaneClient(nodeID, addr, certFile, keyFile, caFile)
 	if err != nil {
-		logger.Fatalf("DataPlane client: %v", err)
+		logFatalf("DataPlane client: %v", err)
 	}
+	dpClient.lastVersion.Store(cachedConfigVersion)
+	dpClient.lastPolicyVersion.Store(cachedPolicyVersion)
 	activeDPClient.Store(dpClient) // for HA address discovery
 	audit.SetDPMode(true)
 	dpClient.Run(ctx, 30*time.Second)
@@ -305,12 +326,26 @@ func checkDPCertExpiry(certFile string) error {
 // from the CP before the current one expires. Also listens for CA rotation
 // notifications to trigger immediate renewal (zero-touch CA rotation).
 func dpCertRenewalLoop(ctx context.Context, client *DataPlaneClient, nodeID, certFile, keyFile, caFile string) {
+	// CHAOS-24: every round runs under runGuarded. This loop is the ONLY thing
+	// keeping this node's mTLS identity valid — if it stops, nothing reports it
+	// and the node silently drops out of the cluster weeks later, when the cert
+	// expires. So a panic must neither kill the process nor end the loop: it is
+	// contained, recorded, and alerted through the SAME path as a renewal
+	// error, because operationally it is one (the renewal did not happen).
+	renew := func() {
+		if panicked := runGuarded("dp_cert_renewal", func() {
+			if err := tryRenewDPCert(ctx, client, nodeID, certFile, keyFile, caFile); err != nil {
+				logger.Printf("DataPlane: cert renewal check: %v", err)
+				alertDPCertRenewalFailure(nodeID, certFile, err)
+			}
+		}); panicked {
+			alertDPCertRenewalFailure(nodeID, certFile, errDPRenewalPanic)
+		}
+	}
+
 	// CHAOS-12: check once immediately — a node powered off past its renewal
 	// window must not sit on a nearly-expired cert for another 6 hours.
-	if err := tryRenewDPCert(ctx, client, nodeID, certFile, keyFile, caFile); err != nil {
-		logger.Printf("DataPlane: cert renewal check: %v", err)
-		alertDPCertRenewalFailure(nodeID, certFile, err)
-	}
+	renew()
 	// Then check every 6 hours.
 	ticker := time.NewTicker(6 * time.Hour)
 	defer ticker.Stop()
@@ -319,20 +354,28 @@ func dpCertRenewalLoop(ctx context.Context, client *DataPlaneClient, nodeID, cer
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := tryRenewDPCert(ctx, client, nodeID, certFile, keyFile, caFile); err != nil {
-				logger.Printf("DataPlane: cert renewal check: %v", err)
-				alertDPCertRenewalFailure(nodeID, certFile, err)
-			}
+			renew()
 		case <-caRotationNotify:
 			// CP rotated its CA — renew immediately regardless of cert expiry.
 			logger.Printf("DataPlane: CA rotation detected — initiating immediate cert renewal")
-			if err := forceRenewDPCert(ctx, client, nodeID, certFile, keyFile, caFile); err != nil {
-				logger.Printf("DataPlane: CA rotation renewal failed: %v", err)
-				alertDPCertRenewalFailure(nodeID, certFile, err)
+			if panicked := runGuarded("dp_cert_renewal", func() {
+				if err := forceRenewDPCert(ctx, client, nodeID, certFile, keyFile, caFile); err != nil {
+					logger.Printf("DataPlane: CA rotation renewal failed: %v", err)
+					alertDPCertRenewalFailure(nodeID, certFile, err)
+				}
+			}); panicked {
+				alertDPCertRenewalFailure(nodeID, certFile, errDPRenewalPanic)
 			}
 		}
 	}
 }
+
+// errDPRenewalPanic is the error surfaced to the operator when a cert-renewal
+// round was contained by the panic guard. The panic VALUE is never propagated
+// here — it can embed attacker-shaped text or a secret, and recordCrash already
+// owns the bounded/redacted record. The alert only needs to say the renewal did
+// not complete, which is the operator-actionable fact.
+var errDPRenewalPanic = errors.New("cert renewal round aborted by a recovered panic (see crash record)")
 
 // certNeedsRenewal checks if a PEM cert file expires within 30 days.
 // Returns days remaining, or -1 if the cert cannot be read.

@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -177,14 +178,18 @@ func classifyClientInspectFailure(err error) (AutoExcludeReason, bool) {
 }
 
 // decryptionScope returns the policy-boundary scope (the matched decryption
-// profile's stable ID + display name) that owns any exclusion learned for this
-// session. A fail-open session always has a concrete profile (resolveFailOpen
-// required it), so the ID is non-empty on the learn/read paths.
-func decryptionScope(match *PolicyMatch) (id, name string) {
+// profile's stable ID + security generation + display name) that owns any exclusion
+// learned for this session. A fail-open session always has a concrete profile
+// (resolveFailOpen required it), so the ID is non-empty on the learn/read paths. The
+// gen fences the learned entry to the profile's CURRENT security posture — an edit
+// that changes cert/TLS/H2/OnUnsupported/OnInspectError changes the gen, so the entry
+// stops matching. Computed from the resolved profile (learn path only, on inspect
+// failure — not the per-CONNECT hot read, which uses the precomputed accessor).
+func decryptionScope(match *PolicyMatch) (id, gen, name string) {
 	if p := resolveDecryptionProfile(match); p != nil {
-		return p.ID, p.Name
+		return p.ID, p.SecurityGen(), p.Name
 	}
-	return "", ""
+	return "", "", ""
 }
 
 // clientEvidence derives the opaque distinct-client token the confirm-count
@@ -225,13 +230,19 @@ func clientEvidence(reason AutoExcludeReason, identity, clientIP string) string 
 // when the observation PROMOTES it to an active exclusion (confirm-count of
 // distinct client-evidence tokens reached), fires the audit + alert + metric.
 // Safe to call on any failure site; it no-ops if the reason or scope is empty.
-func recordAutoExclude(match *PolicyMatch, host string, reason AutoExcludeReason, id ProxyIdentity) {
+// recordAutoExclude returns contributed=true iff this session actually fed the
+// learner (reached Observe with acceptable evidence) — the ADR-0011 signal the
+// failure-row projection reads to stamp dec.cache_learned/excl_reason on the
+// DECRYPT_FAILED sessions that populate the cache (Codex #840). It stays true
+// even when Observe is still gathering confirmation: the confirm-count token WAS
+// contributed. Every early return (no reason / no scope / no evidence) is false.
+func recordAutoExclude(match *PolicyMatch, host string, reason AutoExcludeReason, id ProxyIdentity) (contributed bool) {
 	if reason == "" {
-		return
+		return false
 	}
-	scopeID, scopeName := decryptionScope(match)
+	scopeID, scopeGen, scopeName := decryptionScope(match)
 	if scopeID == "" {
-		return // no fail-open profile to scope to (gated caller, defensive)
+		return false // no fail-open profile to scope to (gated caller, defensive)
 	}
 	client := clientEvidence(reason, id.Identity, id.ClientIP)
 	if client == "" {
@@ -242,10 +253,12 @@ func recordAutoExclude(match *PolicyMatch, host string, reason AutoExcludeReason
 		// could reset an in-flight window and drop already-accumulated AUTHENTICATED
 		// tokens (letting IP-only noise indefinitely block the two-identity promotion
 		// path). Skipping the call makes empty evidence contribute NOTHING, as intended.
-		return
+		return false
 	}
-	if !autoExclude().Observe(scopeID, scopeName, host, reason, client) {
-		return // still gathering confirmation, or already excluded
+	// From here the session HAS fed the learner (the Observe call is the evidence
+	// contribution), so contributed=true whether or not this token tips promotion.
+	if !autoExclude().Observe(scopeID, scopeGen, scopeName, host, reason, client) {
+		return true // still gathering confirmation (or already excluded) — evidence still contributed
 	}
 	// Promotion: inspection is now OFF for this (scope, host) until the entry expires.
 	autoExcludeLearns.record(string(reason), scopeName)
@@ -273,6 +286,7 @@ func recordAutoExclude(match *PolicyMatch, host string, reason AutoExcludeReason
 	// a threshold crossing (poisoning-campaign signal) — the aggregate the
 	// per-host alert above cannot provide.
 	maybeFireAutoExcludeSurge(scopeName)
+	return true
 }
 
 // feedReasonClientCertRescue is the structured feed ActionTaken tag for a
@@ -340,7 +354,7 @@ var autoExcludeRescueCounter int64
 // back through maybeFailOpenOrigin's bool return.
 func recordAutoExcludeRescue(match *PolicyMatch, host string, reason AutoExcludeReason, id ProxyIdentity) {
 	atomic.AddInt64(&autoExcludeRescueCounter, 1)
-	_, scopeName := decryptionScope(match)
+	_, _, scopeName := decryptionScope(match)
 	// Strip quotes AND newlines before the audit/alert/log fields (log-injection
 	// DiD — same posture as recordAutoExclude).
 	safeHost := auditSafe(host)
@@ -375,38 +389,172 @@ func recordAutoExcludeRescue(match *PolicyMatch, host string, reason AutoExclude
 // (a specific, structured signal) may rescue the triggering session (B3);
 // unsupported-params learns but returns false (the next session self-heals). A
 // cert-verify or unrecognized failure returns false and never learns.
-func maybeFailOpenOrigin(host string, match *PolicyMatch, id ProxyIdentity, err error) (rescue bool) {
+// The returned `learned` reason is non-empty iff this session actually fed the
+// learner (ADR-0011 §cache-lifecycle): the failure-row projection stamps it onto
+// the DECRYPT_FAILED dec block so the drill-down reflects which failures populate
+// the cache (Codex #840). rescue is unchanged (the client-cert live-rescue gate).
+func maybeFailOpenOrigin(host string, match *PolicyMatch, id ProxyIdentity, err error) (learned AutoExcludeReason, rescue bool) {
 	if !resolveFailOpen(match) {
-		return false
+		return "", false
 	}
 	reason, learn, rescueOK := classifyOriginInspectFailure(err)
 	if !learn {
-		return false
+		return "", rescueOK
 	}
-	recordAutoExclude(match, host, reason, id)
-	return rescueOK
+	if !recordAutoExclude(match, host, reason, id) {
+		return "", rescueOK // qualifying signal but no evidence contributed (e.g. unauth client_pinned)
+	}
+	return reason, rescueOK
 }
 
 // maybeFailOpenClient learns a CLIENT-leg pinning rejection under a fail-open
 // profile. Learn-only: the client already aborted its handshake against our
 // forged leaf, so the current session cannot be rescued — the NEXT session to the
 // (scope, host) self-heals via the cache once the confirm-count is met.
-func maybeFailOpenClient(host string, match *PolicyMatch, id ProxyIdentity, err error) {
+// Returns the `learned` reason (non-empty iff this session fed the learner) so
+// the client-leg failure row can carry the cache-lifecycle fields (Codex #840).
+func maybeFailOpenClient(host string, match *PolicyMatch, id ProxyIdentity, err error) (learned AutoExcludeReason) {
 	if !resolveFailOpen(match) {
-		return
+		return ""
 	}
 	reason, learn := classifyClientInspectFailure(err)
 	if !learn {
-		return
+		return ""
 	}
-	recordAutoExclude(match, host, reason, id)
+	if !recordAutoExclude(match, host, reason, id) {
+		return ""
+	}
+	return reason
 }
 
 // autoExcludeHitCounter counts sessions bypassed because of a learned exclusion
-// (the self-heal read path). Exposed via metrics.go.
+// (the self-heal read path). Kept as the process-total source of truth for the
+// /api/decryption/health aggregate and the qualification test; the per-scope
+// breakdown rides autoExcludeHitsByScope (F6). Exposed via metrics.go.
 var autoExcludeHitCounter int64
 
-func recordAutoExcludeHit() { atomic.AddInt64(&autoExcludeHitCounter, 1) }
+// recordAutoExcludeHit records one learned-exclusion bypass. It is on the per-CONNECT
+// decision hot path (resolveSSLDecision's hit branch), so it must not allocate: the atomic
+// add is alloc-free, and autoExcludeHitsByScope.record keys by the scopeID string DIRECTLY
+// (no concat) so an already-seen scope is a lock + map read with zero allocation
+// (TestBenchGate_AutoExcludeResolveAllocs pins the failOpenHit case). sum over the
+// {scope} label reproduces the process total.
+func recordAutoExcludeHit(scopeID string) {
+	atomic.AddInt64(&autoExcludeHitCounter, 1)
+	autoExcludeHitsByScope.record(scopeID)
+}
+
+// autoExcludeHitScopeCounter is the cardinality-capped single-label {scope} hit counter
+// behind culvert_decrypt_autoexclude_hit_total. Scope is an admin-created decryption-
+// profile ID; the map is still capped defensively (overflow folds to _other_), matching
+// autoExcludeLearnCounter. Keying by the scopeID alone (no concat) keeps record()
+// allocation-free on the hot path.
+type autoExcludeHitScopeCounter struct {
+	mu     sync.RWMutex
+	counts map[string]*int64
+	order  []string
+}
+
+var autoExcludeHitsByScope = &autoExcludeHitScopeCounter{counts: make(map[string]*int64)}
+
+func (c *autoExcludeHitScopeCounter) record(scope string) {
+	c.mu.RLock()
+	p, ok := c.counts[scope]
+	c.mu.RUnlock()
+	if ok {
+		atomic.AddInt64(p, 1)
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if p, ok = c.counts[scope]; ok {
+		atomic.AddInt64(p, 1)
+		return
+	}
+	if len(c.order) >= maxAutoExcludeLabels {
+		scope = "_other_" // fold overflow scopes into a shared bucket
+		if p, ok = c.counts[scope]; ok {
+			atomic.AddInt64(p, 1)
+			return
+		}
+	}
+	v := int64(1)
+	c.counts[scope] = &v
+	c.order = append(c.order, scope)
+}
+
+func (c *autoExcludeHitScopeCounter) writePrometheus(w *strings.Builder) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if len(c.order) == 0 {
+		return
+	}
+	w.WriteString("# HELP culvert_decrypt_autoexclude_hit_total Sessions that bypassed SSL inspection because of a learned decryption exclusion, by profile scope\n")
+	w.WriteString("# TYPE culvert_decrypt_autoexclude_hit_total counter\n")
+	for _, scope := range c.order {
+		s := strings.ReplaceAll(scope, `"`, "")
+		fmt.Fprintf(w, "culvert_decrypt_autoexclude_hit_total{scope=%q} %d\n", s, atomic.LoadInt64(c.counts[scope]))
+	}
+}
+
+// scopeGauge is one capped active-by-scope series.
+type scopeGauge struct {
+	scope string
+	n     int
+}
+
+// cappedActiveScopes orders the per-scope active counts (count desc, then scope name) and
+// bounds the distinct series at maxAutoExcludeLabels, folding the tail into a single
+// _other_ aggregate. The cache can hold up to maxEntries (tunable, default 4096) entries
+// across arbitrarily many admin-created profiles, so without the cap a scrape could emit
+// thousands of Prometheus series (Codex #817); this mirrors the hit counter's fold. The
+// count-desc order keeps the highest-occupancy scopes (the ones eroding coverage most) as
+// their own series and buckets the long tail.
+func cappedActiveScopes(byScope map[string]int) []scopeGauge {
+	if len(byScope) == 0 {
+		return nil
+	}
+	scopes := make([]string, 0, len(byScope))
+	for s := range byScope {
+		scopes = append(scopes, s)
+	}
+	sort.Slice(scopes, func(i, j int) bool {
+		if byScope[scopes[i]] != byScope[scopes[j]] {
+			return byScope[scopes[i]] > byScope[scopes[j]]
+		}
+		return scopes[i] < scopes[j]
+	})
+	out := make([]scopeGauge, 0, len(scopes))
+	other := 0
+	for i, s := range scopes {
+		if i >= maxAutoExcludeLabels {
+			other += byScope[s]
+			continue
+		}
+		out = append(out, scopeGauge{s, byScope[s]})
+	}
+	if other > 0 {
+		out = append(out, scopeGauge{"_other_", other})
+	}
+	return out
+}
+
+// writeAutoExcludeActiveByScope emits the culvert_decrypt_autoexclude_active{scope} gauge
+// — the current live-exclusion occupancy per profile scope (F6). Read path only (scrape
+// time), computed from the engine snapshot; emits nothing when the cache is empty (no
+// zero-noise), matching the labeled learn/hit series. Cardinality-capped via
+// cappedActiveScopes.
+func writeAutoExcludeActiveByScope(w *strings.Builder) {
+	rows := cappedActiveScopes(autoExclude().ActiveByScope())
+	if len(rows) == 0 {
+		return
+	}
+	w.WriteString("# HELP culvert_decrypt_autoexclude_active Current active learned decryption exclusions (inspection is OFF for these hosts), by profile scope\n")
+	w.WriteString("# TYPE culvert_decrypt_autoexclude_active gauge\n")
+	for _, r := range rows {
+		fmt.Fprintf(w, "culvert_decrypt_autoexclude_active{scope=%q} %d\n", strings.ReplaceAll(r.scope, `"`, ""), r.n)
+	}
+}
 
 // autoExcludeLearnCounter is a cardinality-capped {reason,scope} learn counter,
 // mirroring decProfMintlsRejects. The reason set is a bounded engine enum and the

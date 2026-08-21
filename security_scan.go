@@ -29,6 +29,16 @@ type (
 // (proxy.go, cdr_proxy.go) and the test suite.
 var decompressForScan = secscan.DecompressForScan
 
+// readScanBuffer fills the scan buffer for one response body. It replaces
+// io.ReadAll(io.LimitReader(body, limit)) at the two buffering call sites
+// (the SSL-inspect inner loop and the plain-HTTP path), using the origin's
+// declared Content-Length to size the destination in one allocation instead of
+// growing it a doubling at a time. The hint is advisory only — the read still
+// runs to EOF or to limit — so what reaches the scanners is unchanged; see
+// internal/secscan/scanbuffer.go for the measurements and the equivalence
+// contract.
+var readScanBuffer = secscan.ReadScanBuffer
+
 const (
 	maxDecompressBytes = secscan.MaxDecompressBytes
 	scanBodyTimeout    = secscan.ScanBodyTimeout
@@ -248,6 +258,7 @@ func secScanStatusMap() map[string]interface{} {
 		"stat_scan_timeout":        counters.ScanTimeout,    // Tier 1.2
 		"stat_scan_skipped":        counters.ScanSkipped,    // Tier 1.2
 		"stat_remote_scan_fail":    counters.RemoteScanFail, // Tier 2.2
+		"stat_clam_scan_error":     counters.ClamScanError,  // CHAOS-10
 
 		"threat_feed_allowlist_masked": globalThreatFeed.AllowlistMaskedTotal(),
 	}

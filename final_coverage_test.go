@@ -703,8 +703,8 @@ func TestIdPRegistry_Save_WithPath(t *testing.T) {
 		live: make(map[string]IdentityProvider),
 		path: dir + "/idp.json",
 	}
-	if err := reg.save(); err != nil {
-		t.Fatalf("save with path: %v", err)
+	if err := reg.persist(reg.profiles); err != nil {
+		t.Fatalf("persist with path: %v", err)
 	}
 	// Verify file was written
 	data, err := os.ReadFile(dir + "/idp.json")
@@ -985,6 +985,32 @@ func TestConfig_SetUIUser_UpdateRoleOnly(t *testing.T) {
 	err := cfg.SetUIUser("roletest", "", RoleAdmin)
 	if err != nil {
 		t.Errorf("SetUIUser update role only: %v", err)
+	}
+}
+
+// TestConfig_SetUIUser_NewUserRequiresPassword proves that creating a
+// brand-new user with an empty password is rejected instead of silently
+// no-op'ing. POST /api/auth/users (apiAuthUsers, ui_auth.go) only validates
+// body.Password when non-empty, so a client that omits the password field
+// while creating a NEW user reaches SetUIUser with password="" and
+// existing==nil. Before the fix, SetUIUser's password-empty branch only
+// updates an ALREADY-EXISTING user's role and silently does nothing when
+// there is no existing user — the handler still reports {"ok": true} and
+// audits "auth.users.set", but no account is ever created, so the new
+// "admin" can never log in.
+func TestConfig_SetUIUser_NewUserRequiresPassword(t *testing.T) {
+	const user = "phantomuser"
+	defer cfg.DeleteUIUser(user) //nolint:errcheck // test teardown; cleanup errors are non-actionable
+
+	err := cfg.SetUIUser(user, "", RoleAdmin)
+	if err == nil {
+		t.Fatalf("SetUIUser(%q, \"\", RoleAdmin) on a brand-new user returned nil error; want an error rejecting the empty password", user)
+	}
+
+	for _, u := range cfg.ListUIUsers() {
+		if u.Username == user {
+			t.Fatalf("SetUIUser silently created user %q despite an empty password and a non-nil error", user)
+		}
 	}
 }
 

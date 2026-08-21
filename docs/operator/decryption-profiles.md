@@ -11,7 +11,7 @@ Profiles** in the admin UI, or via `POST/PUT/DELETE /api/decryption-profiles`.
 | Field | Meaning | Default (when "inherit") |
 |---|---|---|
 | **Inspect as HTTP/2** | Inspect the tunnel natively as HTTP/2 instead of downgrading to HTTP/1.1. Removes the HTTP/1.1-downgrade anti-bot signal. | strip → HTTP/1.1 (today's behavior) |
-| **Certificate Verification** | Upstream (origin) cert posture: `strict` (verify, block untrusted/expired), `permissive` (verify, allow + log — *coming soon*), `skip` (no verification ⚠). | the rule's inline **Skip TLS Verify** |
+| **Certificate Verification** | Upstream (origin) cert posture: `strict` (verify, block untrusted/expired), `skip` (no verification ⚠). | the rule's inline **Skip TLS Verify** |
 | **On Unsupported TLS** | Posture when the origin's TLS can't be inspected: `fail-close` (drop). `fail-open` (bypass out of inspection) is *coming soon*. | fail-close (today's behavior) |
 | **Min / Max TLS Version** | Floor / cap on the upstream inspect handshake (`1.2` / `1.3`). | floor 1.2, no cap |
 | **Per-stream Stall Timeout** | Inactivity bound per inspected H2 stream, seconds (clamped `[5, 3600]`; `0` = default). | the engine default |
@@ -79,11 +79,40 @@ blocked (409) until the reference is removed (**Where used** shows the referrers
 - The native-H2 drain/stream metrics (`culvert_h2_inspect_*`) are documented in
   `http2-inspection.md`.
 
+## Certificate Verification: no `permissive`
+
+`CertVerification` accepts **`strict`** and **`skip`** (plus inherit). There is no
+`permissive` ("verify, allow on failure, and log") value. An earlier build exposed
+it as *coming soon*, but the allow-on-failure enforcement was never implemented —
+the runtime always verified like `strict` (fail-closed). Rather than keep a
+misleading operator contract, the value is **retired**:
+
+- Creating or updating a profile with `certVerification: permissive` is **rejected**
+  (HTTP `400`) — pick `strict` or `skip`.
+- An existing profile that still carries `permissive` (from an older node, an
+  imported config, a rolled-back version, or a CP→DP snapshot) is **fail-closed-
+  migrated to `strict`** on load/sync. The runtime behavior is unchanged (it already
+  verified like strict); the migration only corrects the stored value so it matches
+  what is enforced. Each migration logs a `WARN` line and records an audit event
+  (`decryption-profile.cert-verification.migrated`).
+
+Re-introducing a genuine allow-on-failure posture would require a separate,
+approved design — it is a "relax safety" behavior on the verify path, not a
+schema tweak.
+
+> **Cluster note (CP-first upgrade).** The migration is applied on the node that
+> loads/receives the profile. If an **un-upgraded Control Plane** keeps serving a
+> `permissive` profile to upgraded Data Planes, each DP corrects it to `strict`
+> locally and re-emits the migration diagnostic on every config-version bump (the
+> corrected value never "sticks" because the authoritative CP resends the old
+> value). This is benign — the DP always enforces `strict` — and stops once the CP
+> is upgraded (it then migrates its own stored copy and serves `strict`). Upgrade
+> the Control Plane first.
+
 ## Deferred (coming soon)
 
-- `CertVerification: permissive` (verify-but-allow + log) and `OnUnsupported:
-  fail-open` (bypass out of inspection) — both are "relax safety" behaviors that
-  touch the relay path and ship in a later, separately-reviewed slice; the fields are
-  visible now (fail-open greyed) so the object's shape is stable.
+- `OnUnsupported: fail-open` (bypass out of inspection) — a "relax safety" behavior
+  that touches the relay path and ships in a later, separately-reviewed slice; the
+  field is visible now (fail-open greyed) so the object's shape is stable.
 - A "test this profile against a destination" preview tool and a dry-run/shadow mode
   are planned operability follow-ups.

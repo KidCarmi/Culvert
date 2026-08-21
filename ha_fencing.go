@@ -31,6 +31,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 )
 
@@ -130,8 +133,73 @@ func dpObserveEpoch(source string, epoch int64) bool {
 			logger.Printf("DataPlane: REJECTED %s from a stale control plane (epoch %d < last seen %d)", sanitizeLog(source), epoch, last)
 			return false
 		}
-		if epoch == last || dpLastSeenEpoch.CompareAndSwap(last, epoch) {
+		if epoch == last {
 			return true
+		}
+		if dpLastSeenEpoch.CompareAndSwap(last, epoch) {
+			// D4: persist the advanced ratchet so a DP restart cannot reopen the
+			// epoch-0 window (a fenced-out zombie CP stamping epoch 0 would be
+			// accepted by the unseeded branch above, then — because a 0 stamp never
+			// seeds the ratchet — the DP would sticky-track the zombie's
+			// self-consistent deltas indefinitely). Epoch advances are rare
+			// (leadership changes only), so the write is off the hot path.
+			persistDPLastSeenEpoch(epoch)
+			return true
+		}
+	}
+}
+
+// dpLastSeenEpochFile persists the DP's last-seen fencing epoch (ADR-0005 D4).
+const dpLastSeenEpochFile = "dp_last_seen_epoch.json"
+
+type dpLastSeenEpochState struct {
+	Epoch int64 `json:"epoch"`
+}
+
+func dpLastSeenEpochPath() string {
+	return filepath.Join(dataDir, dpLastSeenEpochFile)
+}
+
+// persistDPLastSeenEpoch durably records the ratchet. Best-effort: a failed write
+// only reopens the (rare) restart window, so it logs and continues.
+func persistDPLastSeenEpoch(epoch int64) {
+	if dataDir == "" {
+		return // test/bare process with no data dir
+	}
+	data, err := json.Marshal(dpLastSeenEpochState{Epoch: epoch})
+	if err == nil {
+		err = atomicWriteFile(dpLastSeenEpochPath(), data, 0o600)
+	}
+	if err != nil {
+		logger.Printf("DataPlane: persist last-seen epoch failed: %v", err)
+	}
+}
+
+// loadDPLastSeenEpoch seeds the ratchet from disk before the first poll so a
+// restart preserves the epoch floor (D4). Monotonic: it only ever raises the
+// in-memory value. A missing/corrupt file is non-fatal (the ratchet stays at its
+// current value — no worse than pre-D4).
+func loadDPLastSeenEpoch() {
+	if dataDir == "" {
+		return
+	}
+	data, err := os.ReadFile(dpLastSeenEpochPath())
+	if err != nil {
+		return // absent on first run
+	}
+	var st dpLastSeenEpochState
+	if err := json.Unmarshal(data, &st); err != nil {
+		logger.Printf("DataPlane: last-seen epoch floor corrupt (%v) — starting unseeded", err)
+		return
+	}
+	for st.Epoch > 0 {
+		cur := dpLastSeenEpoch.Load()
+		if st.Epoch <= cur {
+			return
+		}
+		if dpLastSeenEpoch.CompareAndSwap(cur, st.Epoch) {
+			logger.Printf("DataPlane: seeded last-seen fencing epoch %d from disk", st.Epoch)
+			return
 		}
 	}
 }

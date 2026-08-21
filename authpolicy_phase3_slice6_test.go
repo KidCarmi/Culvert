@@ -21,7 +21,7 @@ import (
 // ── Static UI: outcome selector, providerRefs control, and copy ──────────────
 
 func TestP3S6_UI_ExposesSSORequiredAndProviderRefs(t *testing.T) {
-	html, err := os.ReadFile("static/index.html")
+	html, err := os.ReadFile(staticIndexHTMLPath())
 	if err != nil {
 		t.Fatalf("read index.html: %v", err)
 	}
@@ -36,7 +36,7 @@ func TestP3S6_UI_ExposesSSORequiredAndProviderRefs(t *testing.T) {
 		`id="ap-providerrefs-help"`,       // help text for the selector
 		`function apPopulateProviderRefs`, // fills the selector from enabled OIDC/SAML IdPs
 		`function apOutcomeChanged`,       // gating handler reveals the selector
-		`🌐 SSORequired`,                   // distinct badge for the outcome
+		`#i-globe"/></svg> SSORequired`,   // distinct badge for the outcome (globe icon)
 		`_policyIdPList`,                  // IdP list reused for the selector
 		`api('/api/idp')`,                 // viewer-readable source for the selector (no new route)
 	}
@@ -50,7 +50,7 @@ func TestP3S6_UI_ExposesSSORequiredAndProviderRefs(t *testing.T) {
 // The providerRefs selector must reveal for SSORequired only, and the broad-
 // exemption checkbox must be forced off for the challenge outcomes.
 func TestP3S6_UI_ProviderRefsGatedToSSOOnly(t *testing.T) {
-	html, err := os.ReadFile("static/index.html")
+	html, err := os.ReadFile(staticIndexHTMLPath())
 	if err != nil {
 		t.Fatalf("read index.html: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestP3S6_UI_ProviderRefsGatedToSSOOnly(t *testing.T) {
 // enabled/present must be rendered as a selected "(unavailable)" option so
 // saving an edited rule never silently drops it.
 func TestP3S6_UI_PreservesUnavailableProviderRefs(t *testing.T) {
-	html, err := os.ReadFile("static/index.html")
+	html, err := os.ReadFile(staticIndexHTMLPath())
 	if err != nil {
 		t.Fatalf("read index.html: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestP3S6_UI_PreservesUnavailableProviderRefs(t *testing.T) {
 // decision as three separate things, with an SSORequired branch that reads as
 // a challenge (302/403), never as Allow.
 func TestP3S6_UI_SimulatorSeparatesStagesAndHandlesSSO(t *testing.T) {
-	html, err := os.ReadFile("static/index.html")
+	html, err := os.ReadFile(staticIndexHTMLPath())
 	if err != nil {
 		t.Fatalf("read index.html: %v", err)
 	}

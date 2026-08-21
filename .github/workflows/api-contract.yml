@@ -1,0 +1,65 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# API Contract — OpenAPI governance (advisory lane)
+#
+# The CORE contract gates (spec validation, style-lint, route coverage,
+# request/response/authz conformance, generated-artifact drift, exemption
+# expiry) are ordinary Go tests and therefore ALSO run inside the REQUIRED
+# `go test -race ./...` in pr-fast-gate.yml — so drift is already merge-blocking
+# there. This advisory workflow adds the fast, Go-native `make api-verify`
+# summary plus the out-of-band breaking-change check (oasdiff), and is scoped to
+# PRs that touch the API surface. It is intentionally NOT a required check.
+# ─────────────────────────────────────────────────────────────────────────────
+name: API Contract
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "api/**"
+      - "internal/apicontract/**"
+      - "cmd/apibundle/**"
+      - "ui_routes_meta.go"
+      - "ui_*.go"
+      - "pac.go"
+      - "release_api.go"
+      - "diagnostics.go"
+      - "cdr_ui.go"
+      - "scripts/openapi/**"
+      - "docs/api/**"
+      - ".github/workflows/api-contract.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: api-contract-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  api-verify:
+    name: "API · verify contract (Go-native, offline)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Gate 8 — generated artifacts must match the YAML source.
+      - name: Bundle drift check
+        run: go run ./cmd/apibundle -check
+
+      # Gates 1/2/3/4/5/6 — validation, style-lint, coverage, conformance.
+      - name: Enforcement engine tests
+        run: go test ./internal/apicontract/... -count=1
+
+      - name: Live coverage + conformance gates
+        run: go test . -run 'TestOpenAPI_|TestConformance_' -count=1 -v
+
+  # NOTE: the breaking-change (Gate 7) and client-generation (Gate 9) checks now
+  # live in .github/workflows/pr-api-governance.yml as MERGE-BLOCKING checks
+  # (strict mode). The former advisory oasdiff job here was removed to avoid
+  # running oasdiff twice per contract PR; this workflow keeps only the fast
+  # Go-native drift + engine + conformance summary.

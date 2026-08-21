@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/feedsync"
+	"github.com/KidCarmi/Culvert/internal/pac"
 )
 
 // blocklistCleanupUnattributed handles DELETE /api/blocklist?scope=unattributed:
@@ -916,13 +917,17 @@ func apiDecryptionExclusionTunables(w http.ResponseWriter, r *http.Request) {
 		}
 		// VALIDATE (done) → PERSIST target → APPLY runtime. Persist first: a write
 		// failure must not have already evicted learned entries (persist-before-apply).
+		// The apply runs via applyOnSuccess INSIDE the save's lock so a concurrent
+		// omnibus save can't revert the just-persisted tunables on disk.
 		old := currentAutoExcludeTunables()
-		if err := saveAdminSettingsWithAutoExclude(&resolved); err != nil {
+		if err := saveAdminSettingsWithOverrides(adminSaveOverrides{
+			autoExclude:    &resolved,
+			applyOnSuccess: func() { autoExclude().Reconfigure(resolved.engineConfig()) },
+		}); err != nil {
 			logger.Printf("decryption tunables: persist failed, runtime unchanged: %v", err)
 			http.Error(w, "failed to persist tunables", http.StatusInternalServerError)
 			return
 		}
-		autoExclude().Reconfigure(resolved.engineConfig()) // infallible; disk already committed
 		auditEventDiff(r, "decryption.autoexclude.tunables", "tunables",
 			"updated adaptive decryption-exclusion tunables", old, resolved)
 		jsonOK(w, resolved)
@@ -1135,6 +1140,63 @@ func apiURLCatLookup(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// GET /api/urlcat/feed-status — freshness and failure counts for the two
+// background feeds that back URL Categories (UT1 community blacklist + SaaS
+// curated JSON). Both feeds already track this state via Stats()/SyncFailures()
+// for the /metrics Prometheus writer (urlcat_metrics.go); this surfaces the
+// same read-only state to the admin GUI so a stalled or failing feed is
+// visible without scraping /metrics or reading logs. Read-only, no config-version.
+//
+// NOTE: the two feeds' counts mean different things and are NOT
+// interchangeable. UT1's Stats() reports the full corpus size parsed on the
+// last sync (feedsync.Syncer.totalDomains). SaaS's Stats() reports only the
+// merge callback's "added" return (mergeSaaSCategories, saas_feed.go) — the
+// number of NEW hosts folded in that sync, which is legitimately 0 on a
+// healthy, routine, unchanged sync. Rendering that as "entries" would read
+// as an empty/broken feed, so it gets its own field name.
+func apiURLCatFeedStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	ut1 := map[string]any{"configured": globalUT1FeedSyncer != nil}
+	if globalUT1FeedSyncer != nil {
+		entries, lastSync, interval := globalUT1FeedSyncer.Stats()
+		ut1["entries"] = entries
+		ut1["lastSync"] = rfc3339OrEmpty(lastSync)
+		ut1["intervalSeconds"] = int64(interval.Seconds())
+		ut1["syncFailures"] = feedsync.SyncFailures()
+	}
+
+	// SaaS block now reflects the SIGNED feed (F3b-4). The legacy raw syncer is retired
+	// from runtime authority, so its sync-failure counters no longer contaminate this
+	// status — this is a compact summary of the signed-feed runtime state (the full
+	// snapshot lives on GET /api/saas-feed/status). UT1 stays a separate, unchanged feed.
+	sf := globalSaaSFeedStatus.Snapshot()
+	saas := map[string]any{
+		"configured":        sf.Configured,
+		"enabled":           sf.Enabled,
+		"state":             sf.State.String(),
+		"activeFeedVersion": nullableInt64(sf.ActiveFeedVersion),
+		"provenance":        sf.Provenance,
+		"lastSuccess":       rfc3339OrEmpty(sf.LastSuccessfulActivation),
+		"syncFailures":      sf.FailuresSinceStart,
+		"stale":             sf.Stale,
+	}
+
+	jsonOK(w, map[string]any{"ut1": ut1, "saas": saas})
+}
+
+// rfc3339OrEmpty renders t as RFC3339 UTC, or "" for the zero value (never
+// synced) — mirrors the blocklist-feed and threat-feed status handlers.
+func rfc3339OrEmpty(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
 // configBackup is the portable JSON snapshot of all non-secret configuration.
 type configBackup struct {
 	Version             int           `json:"version"`
@@ -1213,6 +1275,14 @@ type configBackup struct {
 	// non-WireWipeCapable field).
 	DecryptionProfiles []DecryptionProfile `json:"decryptionProfiles"`
 
+	// PACProfiles/PACPools put the PAC steering profiles feature (PAC
+	// initiative PR 2) on the export/import + rollback surfaces. Same
+	// posture as CategoryGroups: NO omitempty — nil → apply skips (old
+	// snapshot, no opinion); [] → apply wipes; populated → apply replaces.
+	// Both are cluster-synced WireWipeCapable (see config_surfaces.go).
+	PACProfiles []pac.Profile `json:"pacProfiles"`
+	PACPools    []pac.Pool    `json:"pacPools"`
+
 	// URLCategories extends the rollback surface to cover catStore
 	// (admin-managed Layer 1; communityDB Layer 2 is intentionally
 	// out-of-band). Per roadmap/URL-CATEGORIES-ROLLBACK-EXTENSION-SPEC.md
@@ -1232,6 +1302,26 @@ type configBackup struct {
 	// serializes as `[]` (wipe on apply) and distinguishes itself from
 	// an old pre-extension snapshot (absent field → nil → skip).
 	ContentScanBypassHosts []string `json:"contentScanBypassHosts"`
+
+	// SaaS signed category-feed configuration (F3a-2). CP-authoritative fleet
+	// policy on the export/import/rollback surface. Exported as CONFIGURATION only —
+	// never the node-local runtime/activation/floor state (design §A.6). On import,
+	// the block is applied only when SaaSFeedProtocol is set (never-wipe); on
+	// rollback it is applied unconditionally (like DefaultAction). URL/protocol are
+	// strict-validated at import through the F3a-1 boundary (legacy/unsupported
+	// values rejected). The values round-trip through the durable holder, NOT the
+	// legacy syncer.
+	SaaSFeedManaged        bool   `json:"saasFeedManaged,omitempty"`
+	SaaSFeedEnabled        bool   `json:"saasFeedEnabled,omitempty"`
+	SaaSFeedURL            string `json:"saasFeedURL,omitempty"`
+	SaaSFeedProtocol       string `json:"saasFeedProtocol,omitempty"`
+	SaaSFeedRefreshSeconds int64  `json:"saasFeedRefreshSeconds,omitempty"`
+
+	// CategoryOverrides is the admin category-override set (F3a-2). Pointer for
+	// presence — nil ⇒ absent (import skips = never-wipe; rollback keep-local) —
+	// mirroring the ConfigSnapshot posture. NO omitempty so an explicit empty set
+	// (a deliberate clear) round-trips as `{}` rather than being dropped.
+	CategoryOverrides *CategoryOverrides `json:"categoryOverrides"`
 }
 
 // GET /api/config/export — download a full configuration backup as JSON.
@@ -1891,6 +1981,11 @@ type policyTestTrace struct {
 func walkPolicyTestRules(rules []PolicyRule, sourceIP, identity, authSource, host string, groups []string) ([]policyTestTrace, *PolicyRule) {
 	var trace []policyTestTrace
 	var matched *PolicyRule
+	// Mirror Evaluate's per-scan hoists so the simulator resolves the
+	// destination's category exactly once, the same way the engine it is
+	// simulating does (policy_hostcat.go).
+	normHost := normalizeHost(host)
+	catScratch := newHostCatScratch(host)
 	for i := range rules {
 		r2 := rules[i] // copy (index-based range: PolicyRule is a large struct)
 		skip := ""
@@ -1901,7 +1996,7 @@ func walkPolicyTestRules(rules []PolicyRule, sourceIP, identity, authSource, hos
 			skip = "source mismatch"
 		case !matchSchedule(r2.Schedule):
 			skip = "schedule inactive"
-		case !matchDest(&r2, host):
+		case !matchDestNorm(&r2, host, normHost, &catScratch):
 			skip = "destination mismatch"
 		}
 		trace = append(trace, policyTestTrace{Priority: r2.Priority, Name: r2.Name, SkipReason: skip})
@@ -2169,11 +2264,18 @@ func registerPolicyRoutes(mux *http.ServeMux) {
 	// URL Categories (dynamic host-list management).
 	mux.HandleFunc("/api/category-groups", apiCategoryGroups)                             // GET/POST/PUT/DELETE category groups
 	mux.HandleFunc("/api/decryption-profiles", apiDecryptionProfiles)                     // GET/POST/PUT/DELETE decryption profiles
+	mux.HandleFunc("/api/decryption/health", apiDecryptionHealth)                         // GET ADR-0011 coverage + failure aggregate (viewer, read-only)
+	mux.HandleFunc("/api/decryption/redaction", apiDecryptionRedaction)                   // GET viewer / PUT admin — ADR-0011 §4 traffic-log destination-privacy posture (host/URI/dec.*/top_hosts)
 	mux.HandleFunc("/api/decryption-exclusions", apiDecryptionExclusions)                 // GET list learned exclusions / DELETE evict one (?host=) or clear all
 	mux.HandleFunc("/api/decryption-exclusions/tunables", apiDecryptionExclusionTunables) // GET defaults+bounds / PUT admin runtime tunables (F10)
 	mux.HandleFunc("/api/urlcat", apiURLCat)                                              // GET/POST/PUT/DELETE categories
 	mux.HandleFunc("/api/urlcat/host", apiURLCatHost)                                     // POST/DELETE individual hosts
 	mux.HandleFunc("/api/urlcat/lookup", apiURLCatLookup)                                 // GET — resolve a domain to its category
+	mux.HandleFunc("/api/urlcat/feed-status", apiURLCatFeedStatus)                        // GET — UT1 + SaaS feed freshness/failure counts (viewer, read-only)
+	mux.HandleFunc("/api/saas-feed/settings", apiSaaSFeedSettings)                        // GET viewer / PUT admin (F3a-2 signed-feed config)
+	mux.HandleFunc("/api/saas-feed/overrides", apiSaaSFeedOverrides)                      // GET viewer / PUT admin (F3a-2 category overrides)
+	mux.HandleFunc("/api/saas-feed/status", apiSaaSFeedStatus)                            // GET viewer (F3b-4 signed-feed runtime status)
+	mux.HandleFunc("/api/saas-feed/refresh", apiSaaSFeedRefresh)                          // POST admin (F3b-4 manual refresh, singleflight)
 
 	// Block page template (shown to users blocked by a policy rule).
 	mux.HandleFunc("/api/blockpage", apiBlockPage) // GET template / PUT update

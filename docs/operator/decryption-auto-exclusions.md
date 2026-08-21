@@ -117,6 +117,26 @@ population's fail-open profile cannot open a hole in another's. The panel shows
 each exclusion's owning profile and its **blast radius** (how many policy rules
 that profile is bound to).
 
+### A security edit to a profile invalidates its exclusions immediately
+
+Each exclusion also records the **security generation** of the profile it was
+learned under — a fingerprint over the fields that change inspection compatibility
+or bypass authorization: `On Inspect Error`, `Certificate Verification`,
+`On Unsupported TLS`, `Min/Max TLS Version`, and `Inspect as HTTP/2`. When you edit
+any of those on a profile, its generation changes, so **every exclusion learned
+under the old posture stops matching and those hosts return to normal inspection at
+once** — you do not have to wait out the TTL or clear the cache by hand. The host
+re-learns under the new posture only if it is still incompatible with it.
+
+A **rename** or any display-only change is *not* security-effective, so it keeps the
+generation and **preserves** the learned exclusions. Turning a profile from
+fail-open to **fail-close** both removes the fail-open gate (the cache is no longer
+consulted at all) and changes the generation — a belt-and-suspenders stop.
+
+The generation is computed locally on every node from the profile's fields (never
+synced), so a Control Plane and its Data Planes always agree on which exclusions are
+valid, and the behavior is identical across restarts.
+
 ### The never-exclude control
 
 The cache is consulted **only for sessions whose matched rule is fail-open**. A

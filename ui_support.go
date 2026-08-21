@@ -15,9 +15,20 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/support"
+)
+
+// Retention-sweep observability (node-local, since-boot). An operator asking
+// "why did my bundle disappear?" can see the total evicted and when the age
+// janitor last ran. Atomics: read lock-free from the status handler, written
+// from the prune paths / janitor goroutine.
+var (
+	supportRetentionEvicted   atomic.Int64 // bundles removed by retention (both caps) since boot
+	supportRetentionLastSweep atomic.Int64 // unix seconds of the last age-sweep pass (0 = never run)
 )
 
 // Support-bundle disk-safety bounds (roadmap cross-milestone invariant #4: every
@@ -26,9 +37,46 @@ import (
 // M1 bounds so a bundle build can never fill the /data volume nor accumulate
 // without limit.
 const (
-	supportMinFreeBytes  = 256 << 20 // refuse a new bundle build below this free headroom
-	supportRetentionKeep = 10        // keep the newest N persisted bundles, evict oldest-first
+	supportMinFreeBytes = 256 << 20 // refuse a new bundle build below this free headroom
+
+	// The count cap (keep) and age cap (max-age) are admin-configurable + durable
+	// (Slice B). Read them via supportRetentionKeepVal() / supportRetentionMaxAgeVal()
+	// (support_retention_config.go), never a const — a stale const read would bypass a
+	// GUI-tightened cap. The count-based prune runs only when a NEW bundle is built, so
+	// an idle appliance would otherwise keep stale bundles forever; the background
+	// janitor evicts anything older than the age cap on the tick below.
+
+	// supportRetentionTick is the age-sweep cadence (fixed; not tuned).
+	supportRetentionTick = 6 * time.Hour
+
+	// supportMaxStoreBytes is a hard ceiling on the TOTAL on-disk size of the bundle
+	// store. The count/age caps can't predict per-bundle size, and the
+	// supportMinFreeBytes preflight only REFUSES a new build (507) — it never reclaims
+	// — so without this a store of large bundles can wedge the diagnostic path exactly
+	// when an operator needs a fresh bundle. This reclaims oldest-first over EVICTABLE
+	// bundles until the store is under the ceiling.
+	supportMaxStoreBytes = 2 << 30 // 2 GiB
 )
+
+// supportPruneMu serializes every retention prune pass (count, age, size). Each pass
+// is list-then-RemoveAll with no per-file lock; two concurrent passes (create-path
+// prune vs the 6h janitor vs a second concurrent build) would otherwise race —
+// os.RemoveAll returns nil for an already-gone path, so the error guard misses it and
+// the eviction counter + audit trail double-count a single physical eviction. Prunes
+// are infrequent, so full serialization is free.
+var supportPruneMu sync.Mutex
+
+// retentionEvidence reports whether a bundle is FORENSIC EVIDENCE that retention must
+// never auto-delete: bound to a support case (CaseID). Exempt from ALL caps.
+func retentionEvidence(s *supportBundleSummary) bool { return s.CaseID != "" }
+
+// retentionExemptFromCountCap is the count-cap exemption: evidence (case-bound) PLUS
+// any bundle still under mandatory review (pending) — a fresh build must not evict a
+// bundle an admin is mid-approval on. The age/size caps use retentionEvidence only, so
+// a stale never-approved pending bundle can still age out / be reclaimed under pressure.
+func retentionExemptFromCountCap(s *supportBundleSummary) bool {
+	return retentionEvidence(s) || s.State == bundleStatePending
+}
 
 // errSupportLowDisk is the fail-closed preflight sentinel: the POST handler maps
 // it to 507 Insufficient Storage so the operator sees a clear, distinct cause.
@@ -48,8 +96,19 @@ func registerSupportRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/support/bundles/{id}/validate", apiSupportBundleValidate)
 	mux.HandleFunc("/api/support/bundles/{id}/download-encrypted", apiSupportBundleExportEncrypted)
 	mux.HandleFunc("/api/support/bundles/{id}/download-sealed", apiSupportBundleExportSealed)
+	mux.HandleFunc("/api/support/bundles/{id}/exports", apiSupportBundleExports)
+	mux.HandleFunc("/api/support/bundles/{id}/manifest", apiSupportBundleManifest)
+	mux.HandleFunc("/api/support/recipients", apiSupportRecipients)
+	mux.HandleFunc("/api/support/recipients/{name}", apiSupportRecipientItem)
 	mux.HandleFunc("/api/support/debug-level", apiSupportDebugLevel)
+	mux.HandleFunc("/api/support/retention", apiSupportRetention)
+	mux.HandleFunc("/api/support/upload/config", apiSupportUploadConfig)
+	mux.HandleFunc("/api/support/tac-trust", apiSupportTACTrust)
+	mux.HandleFunc("/api/support/uploads", apiSupportUploads)
+	mux.HandleFunc("/api/support/bundles/{id}/upload", apiSupportBundleUpload)
 	mux.HandleFunc("/api/health/explain", apiHealthExplain)
+	mux.HandleFunc("/api/support/telemetry/preview", apiSupportTelemetryPreview)
+	mux.HandleFunc("/api/support/telemetry/config", apiSupportTelemetryConfig)
 }
 
 // debugLevelView is the read-only status of the capture-level controller.
@@ -257,11 +316,19 @@ type supportStatus struct {
 	CollectorEngineVer    int                    `json:"collector_engine_version"`
 	RedactionModelVersion int                    `json:"redaction_model_version"`
 	Collectors            []supportCollectorInfo `json:"collectors"`
-	Scopes                []string               `json:"scopes"` // selectable incident scopes
+	Scopes                []string               `json:"scopes"`                         // selectable incident scopes
+	RetentionKeep         int                    `json:"retention_keep"`                 // count cap: newest N persisted bundles kept
+	RetentionMaxAgeDays   int                    `json:"retention_max_age_days"`         // age cap: idle-appliance background sweep
+	RetentionEvicted      int64                  `json:"retention_evicted_total"`        // bundles removed by retention since boot
+	RetentionLastSweep    string                 `json:"retention_last_sweep,omitempty"` // RFC3339 of the last age sweep (empty = never)
+	RecipientCount        int                    `json:"recipient_count"`                // registered sealing recipients
+	RecipientMax          int                    `json:"recipient_max"`                  // registry cap
 }
 
-// apiSupportStatus reports the support subsystem's static contract: engine +
-// redaction versions and the registered collector inventory (viewer, read-only).
+// apiSupportStatus reports the support subsystem's contract + current state: engine
+// + redaction versions, the registered collector inventory, selectable scopes, the
+// bundle-retention window, and the sealing-recipient registry size (viewer,
+// read-only; no secrets — counts and capabilities only).
 func apiSupportStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
@@ -280,13 +347,36 @@ func apiSupportStatus(w http.ResponseWriter, r *http.Request) {
 			MinLevel: int(m.MinLevel), MaxClass: m.MaxClass.String(), SchemaVersion: m.SchemaVersion,
 		})
 	}
+	lastSweep := ""
+	if u := supportRetentionLastSweep.Load(); u > 0 {
+		lastSweep = time.Unix(u, 0).UTC().Format(time.RFC3339)
+	}
 	jsonOK(w, supportStatus{
 		BundleFormat:          support.BundleFormat,
 		CollectorEngineVer:    support.CollectorEngineVer,
 		RedactionModelVersion: support.RedactionModelVer,
 		Collectors:            info,
 		Scopes:                supportScopeNames(),
+		RetentionKeep:         supportRetentionKeepVal(),
+		RetentionMaxAgeDays:   int(supportRetentionMaxAgeVal() / (24 * time.Hour)),
+		RetentionEvicted:      supportRetentionEvicted.Load(),
+		RetentionLastSweep:    lastSweep,
+		RecipientCount:        len(listSupportRecipients()),
+		RecipientMax:          maxSupportRecipients,
 	})
+}
+
+// supportWritePrometheus exposes the support-bundle retention counters for
+// scraping — durable, alertable observability that complements the point-in-time
+// JSON on /api/support/status (e.g. alert if the last sweep timestamp goes stale,
+// or on a sudden eviction-rate spike). Counts + a timestamp only; no secrets.
+func supportWritePrometheus(w *strings.Builder) {
+	w.WriteString("\n# HELP culvert_support_bundle_retention_evicted_total Support bundles removed by retention (count + age caps) since process start\n")
+	w.WriteString("# TYPE culvert_support_bundle_retention_evicted_total counter\n")
+	fmt.Fprintf(w, "culvert_support_bundle_retention_evicted_total %d\n", supportRetentionEvicted.Load())
+	w.WriteString("# HELP culvert_support_bundle_retention_last_sweep_timestamp_seconds Unix time of the last age-retention sweep (0 = never run)\n")
+	w.WriteString("# TYPE culvert_support_bundle_retention_last_sweep_timestamp_seconds gauge\n")
+	fmt.Fprintf(w, "culvert_support_bundle_retention_last_sweep_timestamp_seconds %d\n", supportRetentionLastSweep.Load())
 }
 
 // supportBundleIDRe pins the deterministic bundle-id shape so a path segment can
@@ -306,6 +396,13 @@ type supportBundleSummary struct {
 	SizeBytes       int64  `json:"size_bytes"`
 	State           string `json:"state"`             // pending|ready (mandatory-preview lifecycle)
 	CaseID          string `json:"case_id,omitempty"` // operator-bound support case (M4)
+
+	// dirName is the ON-DISK directory name this summary was scanned from. It is
+	// deliberately distinct from BundleID (which is manifest CONTENT): a corrupt
+	// or hand-copied manifest can carry a bundle_id that differs from the directory
+	// it lives in, so any filesystem eviction MUST target dirName — never BundleID,
+	// which could name a different, valid bundle. Unexported ⇒ never serialized.
+	dirName string
 }
 
 // apiSupportBundles lists (GET, viewer) or creates (POST, admin) support bundles.
@@ -452,6 +549,7 @@ func listSupportBundles() []supportBundleSummary {
 			BundleID: man.BundleID, CreatedAt: man.CreatedAt, Format: man.Format,
 			TotalCollectors: man.Collection.TotalCollectors, OK: man.Collection.OK,
 			Failed: man.Collection.Failed, SizeBytes: size, State: st.State, CaseID: st.CaseID,
+			dirName: id,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt > out[j].CreatedAt })
@@ -667,6 +765,12 @@ func buildSupportBundle(ctx context.Context, level support.DebugLevel, scope, ca
 // crash-safe on the error path (a failed persist never strands a partial dir),
 // and bounded (oldest-first retention cap) — roadmap cross-milestone invariant #4.
 func createSupportBundle(ctx context.Context, scope string, level support.DebugLevel, caseID string) (res *support.BuildResult, retErr error) {
+	// Reclaim over-cap OLD bundles BEFORE the low-disk preflight — otherwise a store
+	// already at the size ceiling refuses every new build (507) while stale bundles
+	// sit un-reclaimed, the exact wedge the size cap exists to prevent. No just-created
+	// bundle exists yet, so nothing to exempt.
+	pruneSupportBundlesBySize(supportMaxStoreBytes, "")
+
 	// Disk-headroom preflight: never begin a build that could fill /data. A
 	// statfs error is non-fatal (fail-open on an unreadable FS is fine here —
 	// the write itself still errors and cleans up), a low reading is fail-closed.
@@ -738,7 +842,10 @@ func createSupportBundle(ctx context.Context, scope string, level support.DebugL
 	if err := os.Rename(tmp, filepath.Join(dir, "manifest.json")); err != nil {
 		return nil, fmt.Errorf("commit manifest: %w", err)
 	}
-	pruneSupportBundles(supportRetentionKeep)
+	pruneSupportBundles(supportRetentionKeepVal())
+	// Exempt the bundle we just built: a store over-cap from case-bound evidence must
+	// not delete the fresh bundle before we return its id (it would be un-approvable).
+	pruneSupportBundlesBySize(supportMaxStoreBytes, res.BundleID)
 	return res, nil
 }
 
@@ -751,22 +858,140 @@ func pruneSupportBundles(keep int) {
 	if keep < 1 {
 		return
 	}
-	sums := listSupportBundles() // newest-first
-	if len(sums) <= keep {
+	supportPruneMu.Lock()
+	defer supportPruneMu.Unlock()
+
+	// Count the cap against EVICTABLE bundles only. Evidence (case-bound) and
+	// under-review (pending) bundles are exempt and must NOT consume a keep slot or be
+	// evicted — otherwise a fresh build can silently delete a bundle a TAC engineer is
+	// mid-download on (the bundle a case is anchored to). listSupportBundles is
+	// newest-first, so iterate and evict only the evictable overflow past `keep`.
+	sums := listSupportBundles()
+	kept := 0
+	for i := range sums {
+		s := &sums[i]
+		if retentionExemptFromCountCap(s) {
+			continue // never counts toward the cap, never evicted
+		}
+		kept++
+		if kept <= keep {
+			continue
+		}
+		evictBundleDir(s.dirName, "retention count-cap")
+	}
+}
+
+// evictBundleDir removes one bundle directory (best-effort, path-guarded) and records
+// the eviction. Returns true ONLY on a real removal — the size cap uses this to avoid
+// crediting bytes it did not actually reclaim. Caller MUST hold supportPruneMu. dirName
+// is the ON-DISK directory, NEVER the manifest BundleID (a corrupt/hand-copied manifest
+// can name a different, valid bundle).
+func evictBundleDir(dirName, reason string) bool {
+	if !supportBundleIDRe.MatchString(dirName) {
+		return false // defense-in-depth against a path-traversal shape
+	}
+	if err := os.RemoveAll(filepath.Join(supportBundlesDir(), dirName)); err != nil {
+		logger.Printf("support: %s evict failed for %q: %v",
+			reason, strings.ReplaceAll(dirName, "\n", ""), err)
+		return false
+	}
+	supportRetentionEvicted.Add(1)
+	auditSystem("support.bundle.expire", dirName, reason)
+	return true
+}
+
+// pruneSupportBundlesByAge evicts persisted bundles whose manifest CreatedAt is
+// older than maxAge. The count-based prune runs ONLY on a new build, so this is
+// what protects an IDLE appliance from accumulating stale bundles on disk. now is
+// injected for deterministic tests. FAIL-SAFE: a bundle whose CreatedAt is
+// absent/unparseable is KEPT (a parse failure must never trigger an eviction).
+// Best-effort: an eviction failure is logged and skipped, never fatal.
+func pruneSupportBundlesByAge(now time.Time, maxAge time.Duration) {
+	if maxAge <= 0 {
 		return
 	}
-	for _, s := range sums[keep:] {
-		// Defense-in-depth: BundleID here comes from manifest content, so re-guard
-		// against the path-traversal shape before any os.RemoveAll.
-		if !supportBundleIDRe.MatchString(s.BundleID) {
+	supportPruneMu.Lock()
+	defer supportPruneMu.Unlock()
+
+	// Record that a real sweep ran (observability), regardless of how many — if
+	// any — bundles it evicts. now is injected, so this is deterministic in tests.
+	supportRetentionLastSweep.Store(now.Unix())
+	sums := listSupportBundles()
+	for i := range sums {
+		s := &sums[i]
+		if retentionEvidence(s) {
+			continue // case-bound evidence never ages out
+		}
+		created, err := time.Parse(time.RFC3339, s.CreatedAt)
+		if err != nil {
+			continue // fail-safe: unparseable/absent timestamp ⇒ keep
+		}
+		if now.Sub(created) <= maxAge {
 			continue
 		}
-		if err := os.RemoveAll(filepath.Join(supportBundlesDir(), s.BundleID)); err != nil {
-			logger.Printf("support: retention evict failed for %q: %v",
-				strings.ReplaceAll(s.BundleID, "\n", ""), err)
-			continue
+		evictBundleDir(s.dirName, "retention max-age")
+	}
+}
+
+// pruneSupportBundlesBySize reclaims oldest-first over EVICTABLE (non-evidence) bundles
+// until the total store is under maxBytes. Backstops the count/age caps, which can't
+// bound total size; without it a store of large bundles wedges the diagnostic path
+// (the supportMinFreeBytes preflight only refuses new builds, never reclaims). Evidence
+// (case-bound) bundles are exempt — if the store is over the ceiling with only evidence,
+// nothing is reclaimed (an operator must unbind/delete manually; logged once).
+// exceptDir (may be "") is a bundle the caller must never evict — the create path
+// passes the bundle it just built so a store already over-cap from case-bound
+// evidence can't delete the freshly-created bundle before returning its id.
+func pruneSupportBundlesBySize(maxBytes int64, exceptDir string) {
+	if maxBytes <= 0 {
+		return
+	}
+	supportPruneMu.Lock()
+	defer supportPruneMu.Unlock()
+
+	sums := listSupportBundles() // newest-first
+	var total int64
+	for i := range sums {
+		total += sums[i].SizeBytes
+	}
+	if total <= maxBytes {
+		return
+	}
+	// Evict oldest-first (walk from the tail) over evictable bundles until under cap.
+	for i := len(sums) - 1; i >= 0 && total > maxBytes; i-- {
+		s := &sums[i]
+		if retentionEvidence(s) || s.dirName == exceptDir {
+			continue // evidence (and the just-created bundle) are never size-reclaimed
 		}
-		auditSystem("support.bundle.expire", s.BundleID, "retention cap")
+		// Only credit the reclaim if the removal actually succeeded — otherwise the
+		// loop could stop under the cap while the files are still on disk.
+		if evictBundleDir(s.dirName, "retention size-cap") {
+			total -= s.SizeBytes
+		}
+	}
+	if total > maxBytes {
+		logger.Printf("support: store still over size cap (%d > %d bytes) after reclaiming all evictable bundles — remaining are case-bound evidence; manual cleanup required", total, maxBytes)
+	}
+}
+
+// startSupportRetentionJanitor runs the age-based sweep once at boot and then on a
+// fixed cadence, so an idle appliance still evicts stale bundles. Parented to ctx;
+// it exits on shutdown.
+func startSupportRetentionJanitor(ctx context.Context) {
+	sweep := func() {
+		pruneSupportBundlesByAge(time.Now(), supportRetentionMaxAgeVal())
+		pruneSupportBundlesBySize(supportMaxStoreBytes, "")
+	}
+	sweep()
+	t := time.NewTicker(supportRetentionTick)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			sweep()
+		}
 	}
 }
 
@@ -774,6 +999,18 @@ func pruneSupportBundles(keep int) {
 // one-shot: it builds a minimal (L0) bundle headless — no server, no admin UI —
 // and writes it to outPath. This is the "GUI is down" escape hatch (the endorsed
 // GAP-MON-01 recovery path). Prints a short summary to stdout.
+//
+// Recovery-safety contract (M5 PR-E — pinned by support_recovery_test.go): this
+// runs from handleOneShotCommands BEFORE any init*, so it must build a valid
+// bundle with the server/DB/CP unavailable. That holds because (1) every
+// subsystem singleton is constructed at package-init (certMgr, globalThreatFeed,
+// …), so it is non-nil though unconfigured; (2) the L0 collectors read those as
+// empty-but-valid rather than assuming a live subsystem; and (3) mandatory
+// collectors gate completeness but NEVER abort, and the runner isolates each
+// collector's panic/timeout/budget into a failed SECTION — so a partial bundle
+// is always produced, never an aborted one. A NEW L0 collector that reaches an
+// init*-wired subsystem (the DB, the CP client, live server state) breaks the
+// wall.
 func runSupportBundleCommand(outPath string) error {
 	res, err := buildSupportBundle(context.Background(), support.L0, "standard", "")
 	if err != nil {

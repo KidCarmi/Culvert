@@ -107,6 +107,34 @@ func TestSpanExporter_RingBufferOverflow(t *testing.T) {
 	if spans[len(spans)-1].StartNano != int64(total-1) {
 		t.Errorf("newest span StartNano = %d, want %d", spans[len(spans)-1].StartNano, total-1)
 	}
+	// Every span pushed past the cap is a silent overwrite; that count must
+	// surface via Health() rather than being invisible.
+	if got, want := e.Health().DroppedSpans, int64(total-spanBufferCap); got != want {
+		t.Errorf("DroppedSpans = %d, want %d", got, want)
+	}
+}
+
+func TestSpanExporter_Health(t *testing.T) {
+	e := &SpanExporter{buf: make([]SpanRecord, spanBufferCap)}
+	if h := e.Health(); h.FailureCount != 0 || h.LastError != "" || h.DroppedSpans != 0 {
+		t.Fatalf("fresh exporter should report zero health, got %+v", h)
+	}
+
+	e.mu.Lock()
+	e.endpoint = "ftp://bad"
+	e.client = http.DefaultClient
+	e.mu.Unlock()
+	e.RecordSpan(SpanRecord{StartNano: 1})
+	if err := e.push(t.Context()); err == nil {
+		t.Fatal("push must reject a non-http(s) endpoint")
+	}
+	h := e.Health()
+	if h.FailureCount != 1 || h.LastError == "" || h.LastErrorAt == "" {
+		t.Fatalf("expected a recorded failure, got %+v", h)
+	}
+	if h.LastSuccessAt != "" {
+		t.Fatalf("LastSuccessAt should stay empty, got %q", h.LastSuccessAt)
+	}
 }
 
 func TestSpanExporter_ConcurrentRecordDrain(t *testing.T) {

@@ -11,6 +11,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"sync"
 	"time"
@@ -47,6 +48,13 @@ type AdminSettings struct {
 	MetricsToken string            `json:"metrics_token,omitempty"`
 	LogLevel     string            `json:"log_level,omitempty"`
 
+	// TrafficPseudonymKey is the node-local 32-byte HMAC key for the PR3 Option B
+	// destination-privacy posture (traffic_redaction.go). Sensitive + AdminDurable-only
+	// (0600 file, like MetricsToken): OFF export/import, version-rollback, and CP→DP —
+	// destination pseudonymization is a per-appliance privacy choice, and a synced key
+	// (fleet correlation) is the deferred B3 follow-up. Generated on first enable.
+	TrafficPseudonymKey []byte `json:"traffic_pseudonym_key,omitempty"`
+
 	// History-store retention. LogRetentionSaved is a sentinel (like
 	// YARASettingsSaved): when false the values below are not applied on load,
 	// so a zero value can't override the YAML/CLI-seeded retention on settings
@@ -64,6 +72,17 @@ type AdminSettings struct {
 
 	// LogCriticalDiskPct is the disk-protection threshold (%). 0 = use default.
 	LogCriticalDiskPct int `json:"log_critical_disk_pct,omitempty"`
+
+	// LegacyLDAPRetired is the durable LDAP-authority cutover sentinel
+	// (ADR-0025 / P1-2): once an enabled registry LDAP identity provider is
+	// observed on a node that carries a legacy YAML ldap block, the block is
+	// permanently retired as an operational authenticator — across registry
+	// disable/delete and every restart. Node-local + AdminDurable-only (never
+	// exported/imported, never rolled back, never CP→DP synced): authority
+	// ownership is per-node state, and a config restore must not resurrect a
+	// retired authenticator. Break-glass revert is an explicit offline edit
+	// (documented in docs/operator/ldap-identity-provider.md).
+	LegacyLDAPRetired bool `json:"legacy_ldap_retired"`
 
 	// Session
 	SessionTimeoutHours int `json:"session_timeout_hours,omitempty"`
@@ -92,8 +111,20 @@ type AdminSettings struct {
 	BlocklistFeedURL      string                 `json:"blocklist_feed_url,omitempty"`
 	BlocklistFeedInterval string                 `json:"blocklist_feed_interval,omitempty"` // e.g. "24h"
 
-	// SaaS category feed
-	SaaSFeedURL string `json:"saas_feed_url,omitempty"`
+	// SaaS signed category feed (F3a-1). SaaSFeedManaged is the sentinel that
+	// distinguishes "operator never touched it" (false ⇒ on-by-default) from
+	// "explicitly configured"; SaaSFeedEnabled is authoritative only when managed.
+	// Empty URL ⇒ the built-in official endpoint. Protocol has one legal value
+	// today (signed_manifest_v1). SaaSStoreSchemaVersion is the durable migration
+	// marker (§A.5) — its absence triggers the one-time schema init; a value newer
+	// than this binary supports is refused. These fields are node-local and durable
+	// in F3a-1 (the CP→DP wire + *bool presence lands in F3a-2).
+	SaaSFeedURL            string `json:"saas_feed_url,omitempty"`
+	SaaSFeedManaged        bool   `json:"saas_feed_managed"`
+	SaaSFeedEnabled        bool   `json:"saas_feed_enabled"`
+	SaaSFeedProtocol       string `json:"saas_feed_protocol,omitempty"`
+	SaaSFeedRefreshSeconds int64  `json:"saas_feed_refresh_seconds,omitempty"`
+	SaaSStoreSchemaVersion int    `json:"saas_store_schema_version,omitempty"`
 
 	// Upstream proxy chaining. UpstreamProxiesSaved is a sentinel (mirroring
 	// BlocklistFeedsSaved): when true the persisted list is authoritative and
@@ -133,6 +164,23 @@ type AdminSettings struct {
 	AutoExcludePinnedTTLSecs int  `json:"autoexclude_pinned_ttl_secs,omitempty"`
 	AutoExcludeWindowSecs    int  `json:"autoexclude_window_secs,omitempty"`
 	AutoExcludeMaxEntries    int  `json:"autoexclude_max_entries,omitempty"`
+
+	// ADR-0011 §4 host/SNI redaction posture. When true, the projected decryption
+	// blocks hash host/SNI instead of recording plaintext. Default false (record
+	// plaintext); a plain bool needs no sentinel (false is both "off" and "unset").
+	// Node-local like the auto-exclusion tunables — OFF export/import, rollback, CP→DP.
+	DecryptionRedactHosts bool `json:"decryption_redact_hosts,omitempty"`
+
+	// Support-bundle retention caps (Slice B). SupportRetentionSaved is a sentinel
+	// (like AutoExcludeTunablesSaved): when false the values below are not applied on
+	// load, so a zero-value field can't override the compiled defaults on files
+	// predating this feature. These caps govern DURABLE forensic evidence, so they
+	// are node-local OPERATIONAL tuning — OFF export/import, version-rollback, and
+	// CP→DP propagation (the learned/tunable-state-is-node-local precedent; a synced
+	// surface would carry a config-rollback mass-eviction hazard).
+	SupportRetentionSaved      bool `json:"support_retention_saved"`
+	SupportRetentionKeep       int  `json:"support_retention_keep,omitempty"`
+	SupportRetentionMaxAgeDays int  `json:"support_retention_max_age_days,omitempty"`
 }
 
 var (
@@ -148,21 +196,66 @@ func LoadAdminSettings(path string) {
 	adminSettingsPath = path
 	adminSettingsMu.Unlock()
 
+	// Re-surface an unreconciled quarantine from a prior boot (CHAOS-05 pattern): after
+	// a corrupt load we default and the next save writes a clean file, so the /readyz
+	// row + alert would otherwise vanish while every GUI-saved admin setting stays lost.
+	noteResidualQuarantine("admin_settings", path)
+
 	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return // first run — no settings file yet; components keep their config defaults
+	}
 	if err != nil {
-		return // first run or missing file — use config defaults
+		// Read error on an EXISTING file (EACCES/EIO): the content may be intact, so do
+		// NOT quarantine (a rename could move a healthy file aside on a transient
+		// permission blip — the documented state-corruption posture). Surface it
+		// loudly — every durable admin setting silently reverts to its default until
+		// this is fixed — but keep booting.
+		logger.Printf("AdminSettings: cannot read %q (%v) — every GUI-saved admin setting is using its default until the file is readable and the node is restarted", sanitizeLog(path), err)
+		return
 	}
 	var s AdminSettings
-	if json.Unmarshal(data, &s) != nil {
-		logger.Printf("AdminSettings: unmarshal error from %s — using defaults", path)
+	if err := json.Unmarshal(data, &s); err != nil {
+		// Present-but-corrupt settings. Previously this logged and returned — and the
+		// NEXT SaveAdminSettings (any admin mutation) then atomically OVERWROTE the
+		// corrupt file with a defaults-only snapshot, destroying the only copy of the
+		// operator's durable GUI config with one log line as the trace. Route it
+		// through the CHAOS-05/07 quarantine-don't-overwrite mechanism (shared with
+		// ui_users.json / cluster.json): rename the corrupt file aside so no save can
+		// clobber it, fire the state_file_corrupt alert, and record a /readyz fail row.
+		quarantineCorruptStateFile("admin_settings", path, err)
 		return
+	}
+
+	// F3a-1: initialize the SaaS feed-config schema boundary before applying admin
+	// services. Idempotent (marker-guarded), backed up before mutation, atomic, and
+	// fail-safe — a failure logs and this boot proceeds with the pre-migration
+	// (safe-default) resolution, retrying next boot. It does NOT change the persisted
+	// URL the legacy syncer reads, so there is no live behavior change here.
+	if rep, mErr := migrateSaaSFeedStore(&s, path, data, time.Now); mErr != nil {
+		if errors.Is(mErr, ErrSaaSSchemaTooNew) {
+			// A feed-store schema newer than this binary supports: fail CLOSED to the
+			// compiled baseline. Clear the persisted feed URL in memory so the legacy
+			// syncer below does NOT consume a field from a schema we just declared
+			// unsafe (the file is left untouched — the migration refused to write).
+			s.SaaSFeedURL = ""
+			logger.Printf("AdminSettings: SaaS feed store schema newer than supported (%v) — failing closed to the baseline feed config", mErr)
+		} else {
+			logger.Printf("AdminSettings: SaaS feed store migration not applied (%v); outcome=%s", mErr, rep.Outcome)
+		}
+	} else if rep.Outcome == "migrated" {
+		logger.Printf("AdminSettings: migrated SaaS feed store to schema %d (url_class=%s protocol_reset=%t backup=%q)",
+			rep.ToSchema, rep.URLClass, rep.ProtocolReset, sanitizeLog(rep.BackupPath))
 	}
 
 	applyAdminSecurity(&s)
 	applyAdminServices(&s)
+	applyLegacyLDAPRetirement(&s)
 	applyAdminNetwork(&s)
 	applyAdminYARA(&s)
 	applyAdminAutoExcludeTunables(&s)
+	applyAdminSupportRetention(&s)             // Slice B: configurable support-bundle retention caps
+	setDecRedactHosts(s.DecryptionRedactHosts) // ADR-0011 §4 host/SNI redaction posture
 
 	logger.Printf("AdminSettings: loaded from %s", path)
 }
@@ -203,6 +296,9 @@ func applyAdminSecurity(s *AdminSettings) {
 // applyAdminServices applies logging, monitoring, and session settings.
 func applyAdminServices(s *AdminSettings) {
 	if s.SyslogAddr != "" {
+		// Record intent even if the connect fails so checkSyslogFeed surfaces a
+		// silently-down SIEM feed (see syslogConfiguredAddr).
+		syslogConfiguredAddr = s.SyslogAddr
 		if err := InitSyslog(s.SyslogAddr, s.SyslogFormat); err == nil {
 			syslogConfigured = s.SyslogAddr
 		}
@@ -213,6 +309,30 @@ func applyAdminServices(s *AdminSettings) {
 	}
 	if s.MetricsToken != "" {
 		metricsToken = s.MetricsToken
+	}
+	// PR3 Option B node-local pseudonym key. Accept ONLY a full-length (32-byte) key —
+	// a truncated/corrupt/hand-edited value is ignored so the posture fails closed to a
+	// sentinel rather than HMACing with a weak key.
+	if len(s.TrafficPseudonymKey) == trafficKeyLen {
+		setTrafficPseudonymKey(s.TrafficPseudonymKey)
+	}
+	// If the destination-privacy posture is ON but no valid key was restored (a node
+	// upgrading from the legacy/B0 host/SNI toggle, which had no key), mint one now so
+	// redaction produces real tokens instead of the fail-closed sentinel. Generated
+	// in-memory here; it persists on the next SaveAdminSettings. Logged so the operator
+	// knows a key was minted (pseudonym correlation for this node begins here).
+	//
+	// Gate on the LOADED posture (s.DecryptionRedactHosts), NOT the live decRedactHosts()
+	// flag: applyAdminServices runs BEFORE setDecRedactHosts restores the flag at the end
+	// of LoadAdminSettings, so the live flag still holds the pre-load default here. Reading
+	// it would make a legacy `decryption_redact_hosts:true` file with no key skip minting,
+	// leaving the node emitting the fail-closed sentinel until the next settings save.
+	if s.DecryptionRedactHosts && len(getTrafficPseudonymKey()) != trafficKeyLen {
+		if err := ensureTrafficPseudonymKey(); err != nil {
+			logger.Printf("TrafficRedaction: pseudonym key generation failed; destination redaction fails closed to a sentinel: %v", err)
+		} else {
+			logger.Printf("TrafficRedaction: destination-privacy posture is on but no key was stored; minted a node-local pseudonym key (persists on next settings save)")
+		}
 	}
 	if s.LogLevel != "" {
 		SetLogLevel(ParseLogLevel(s.LogLevel))
@@ -241,9 +361,22 @@ func applyAdminServices(s *AdminSettings) {
 		setCriticalDiskPct(s.LogCriticalDiskPct)
 	}
 	applyBlocklistFeeds(s)
-	if s.SaaSFeedURL != "" {
-		globalSaaSFeed.Configure(s.SaaSFeedURL, 24*time.Hour)
-	}
+	// F3a-2: the signed-feed URL is NO LONGER routed into the legacy additive
+	// syncer (globalSaaSFeed). The legacy syncer keeps whatever URL it was
+	// configured with at startup; the new signed-feed URL lives only in the
+	// durable holder below. This is the "critical separation" contract — a
+	// persisted signed URL (feeds.culvertlabs.com/…/manifest.sigstore.json) must
+	// never be handed to the raw-category syncer, which would misinterpret it and
+	// fetch it as a plain feed. No downloader consumes the holder in F3a-2; it is
+	// inert configuration until the F3b signed-feed client lands.
+	setSaaSFeedDurable(saasFeedDurable{
+		Managed:        s.SaaSFeedManaged,
+		Enabled:        s.SaaSFeedEnabled,
+		URL:            s.SaaSFeedURL,
+		Protocol:       s.SaaSFeedProtocol,
+		RefreshSeconds: s.SaaSFeedRefreshSeconds,
+		SchemaVersion:  s.SaaSStoreSchemaVersion,
+	})
 }
 
 // BlocklistFeedSetting is the persisted form of one blocklist feed.
@@ -282,6 +415,24 @@ func applyBlocklistFeeds(s *AdminSettings) {
 			}
 		}
 		blFeedSyncer.SetFeed(feeds[i].URL, interval)
+	}
+}
+
+// applyLegacyLDAPRetirement applies the durable LDAP-authority cutover
+// sentinel (ADR-0025 / P1-2). LoadAdminSettings runs AFTER the legacy auth
+// providers wire (main.go init order), so a retired-but-still-wired legacy
+// provider from THIS boot is deactivated here via the shared enforcement
+// path. The reverse reconciliation also lives here: a cutover observed
+// earlier in boot (registry profile present before the settings path was
+// known) persists now.
+func applyLegacyLDAPRetirement(s *AdminSettings) {
+	if s.LegacyLDAPRetired {
+		legacyLDAPRetiredFlag.Store(true)
+	}
+	enforceLegacyLDAPShadowing()
+	if legacyLDAPRetired() && !s.LegacyLDAPRetired {
+		// In-memory cutover predates the settings load — make it durable.
+		adminSettingsSave()
 	}
 }
 
@@ -428,22 +579,47 @@ func snapshotBlocklistFeeds(s *AdminSettings) {
 	}
 }
 
+// adminSaveOverrides carries per-feature TARGET values a persist-before-apply PUT
+// wants written to disk instead of the current live values. Every field is nil for
+// an ordinary omnibus save; a PUT sets exactly the one it owns so a persist failure
+// never leaves that feature's live state changed vs disk. The omnibus save rebuilds
+// AdminSettings from scratch on EVERY admin mutation, so a new durable field MUST be
+// snapshotted in saveAdminSettingsWithOverrides or it is silently dropped on the next
+// unrelated mutation.
+type adminSaveOverrides struct {
+	autoExclude      *autoExcludeTunables
+	supportRetention *supportRetentionConfig
+	// applyOnSuccess, when set, is the runtime apply for a persist-before-apply PUT.
+	// It runs INSIDE the save's adminSettingsMu critical section, immediately after a
+	// successful write — so no concurrent omnibus save can snapshot the pre-apply
+	// runtime value and then land its own AtomicWrite after this one, reverting the
+	// just-persisted setting on disk. It runs only on a successful write (persist
+	// failure ⇒ never applied ⇒ runtime and disk stay in agreement).
+	applyOnSuccess func()
+}
+
 // SaveAdminSettings snapshots all current runtime values and writes them
 // atomically to the settings file. Called after every API mutation. Returns the
-// write error so a caller that needs durable-vs-runtime consistency (the F10
-// tunables PUT) can detect a persist failure; the fire-and-forget adminSettingsSave
-// wrapper ignores it (best-effort, as before).
-func SaveAdminSettings() error { return saveAdminSettingsWithAutoExclude(nil) }
+// write error so a caller that needs durable-vs-runtime consistency can detect a
+// persist failure; the fire-and-forget adminSettingsSave wrapper ignores it.
+func SaveAdminSettings() error { return saveAdminSettingsWithOverrides(adminSaveOverrides{}) }
 
-// saveAdminSettingsWithAutoExclude is SaveAdminSettings with an optional autoexclude
-// override. When ae is non-nil the durable file records those TARGET tunables instead
-// of the live cache's — the F10 PUT persists the target FIRST, then (only on success)
-// applies it to the live cache. Because the apply (Reconfigure) is infallible, a
-// persist failure leaves the cache — and every learned exclusion in it — untouched.
-func saveAdminSettingsWithAutoExclude(ae *autoExcludeTunables) error {
+// saveAdminSettingsWithOverrides is SaveAdminSettings with optional per-feature
+// TARGET overrides. When a field is non-nil the durable file records those TARGET
+// values instead of the live ones — the owning PUT persists the target FIRST, then
+// (only on success) applies it to the live runtime. Because those applies are
+// infallible, a persist failure leaves the live state — and any data it governs —
+// untouched.
+func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
+	// Hold adminSettingsMu across the ENTIRE snapshot → write → apply sequence, not
+	// just the path read. Every save (omnibus or override-carrying) is thereby
+	// serialized: a concurrent adminSettingsSave() goroutine can neither snapshot a
+	// half-applied runtime nor land its AtomicWrite between this save's write and its
+	// applyOnSuccess. Saves are per-mutation and infrequent, so full serialization is
+	// free; adminSettingsSave already runs this off the request goroutine.
 	adminSettingsMu.Lock()
+	defer adminSettingsMu.Unlock()
 	path := adminSettingsPath
-	adminSettingsMu.Unlock()
 	if path == "" {
 		return nil
 	}
@@ -465,6 +641,7 @@ func saveAdminSettingsWithAutoExclude(ae *autoExcludeTunables) error {
 		TrustForwardedHeaders:  trustForwardedHeaders,
 		TrustedProxyCIDRs:      ListTrustedProxyCIDRs(),
 		TrustedProxyCIDRsSaved: true, // once saved, the persisted list is authoritative (incl. empty)
+		LegacyLDAPRetired:      legacyLDAPRetired(),
 	}
 
 	snapshotAdminEndpoints(&s)
@@ -474,10 +651,12 @@ func saveAdminSettingsWithAutoExclude(ae *autoExcludeTunables) error {
 
 	snapshotBlocklistFeeds(&s)
 
-	// SaaS feed
-	if saasURL := globalSaaSFeed.FeedURL(); saasURL != "" {
-		s.SaaSFeedURL = saasURL
-	}
+	// SaaS feed (F3a-2). ALL durable feed-config fields — including the URL —
+	// are snapshotted from the holder (snapshotSaaSFeedDurable is the sole writer
+	// of s.SaaSFeedURL). The legacy syncer no longer owns the URL, so an unrelated
+	// admin mutation preserves the signed-feed config + schema marker without
+	// re-reading (and thereby coupling to) the legacy additive syncer.
+	snapshotSaaSFeedDurable(&s)
 
 	// Upstream proxy pool (raw entries — see field comment)
 	s.UpstreamProxiesSaved = true
@@ -499,7 +678,10 @@ func saveAdminSettingsWithAutoExclude(ae *autoExcludeTunables) error {
 	s.YARAOnSaturation = yaraGetOnSaturation()
 	s.YARAAlertDegraded = yaraGetAlertDegraded()
 
-	snapshotAutoExcludeTunables(&s, ae)
+	snapshotAutoExcludeTunables(&s, ov.autoExclude)
+	snapshotSupportRetention(&s, ov.supportRetention) // Slice B: configurable retention caps
+	s.DecryptionRedactHosts = decRedactHosts()        // ADR-0011 §4 / PR3 Option B destination-privacy posture
+	s.TrafficPseudonymKey = getTrafficPseudonymKey()  // PR3 Option B node-local pseudonym key (nil when unset)
 
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
@@ -512,6 +694,12 @@ func saveAdminSettingsWithAutoExclude(ae *autoExcludeTunables) error {
 	if err := fileutil.AtomicWrite(path, data, 0o600); err != nil {
 		logger.Printf("AdminSettings: write error: %v", err)
 		return err
+	}
+	// Persist-before-apply: the durable write succeeded, so apply the target to the
+	// live runtime now — still under adminSettingsMu, so the (disk, runtime) pair
+	// moves atomically w.r.t. every other save.
+	if ov.applyOnSuccess != nil {
+		ov.applyOnSuccess()
 	}
 	return nil
 }

@@ -135,7 +135,7 @@ func TestP4S4_Simulator_Matrix(t *testing.T) {
 // ── Static UI: new default-authentication language ───────────────────────────
 
 func TestP4S4_UI_DefaultAuthLanguage(t *testing.T) {
-	html, err := os.ReadFile("static/index.html")
+	html, err := os.ReadFile(staticIndexHTMLPath())
 	if err != nil {
 		t.Fatalf("read index.html: %v", err)
 	}

@@ -22,6 +22,8 @@ is listed under "replaces".
 | **Engine** | A scanning/enforcement subsystem: ClamAV, YARA, DPI, Threat Feeds, CDR, GeoIP | "scanner", "threat engine" (keep "Threat engine breakdown" as a chart title is fine) |
 | **Object** | A reusable referenced entity: URL category, category group, file profile, rewrite rule, identity provider | new umbrella (nav section) |
 | **Profile** | A named object bundle (file profile — `Executables`, `Archives`; IdP profile) | — |
+| **Steering profile** | A PAC traffic-steering ruleset assigning client networks to proxy pools (`internal/pac`, `/api/pac/profiles`, GUI "Steering Profiles") | the fourth distinct "Profile" concept alongside file/decryption/CDR profiles — always say "steering profile," never bare "profile," on this screen |
+| **Proxy pool** (PAC) | The ordered `PROXY a; PROXY b` failover chain a steering profile hands to a client browser (`internal/pac.Pool`, GUI "Proxy Pools") | distinct from **Upstream Proxies** — Culvert's own server-side outbound egress chain (`/api/upstream`); never call the latter a "proxy pool" outside its own screen |
 | **Provider** | An identity provider profile (OIDC/SAML/LDAP; `/api/idp`) | "IdP" acceptable in dense tables |
 | **Appliance** | *Not used.* Culvert deploys as binary/container; the UI says **node** or **instance** | avoid inventing appliance language |
 | **Node** | An enrolled cluster member (`EnrolledNode`) | — |

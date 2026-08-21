@@ -40,6 +40,11 @@ func isPrivateHost(hostport string) error { return ssrf.PrivateHost(hostport) }
 // SOCKS5 paths, which build their own dialers.
 var ssrfControl = ssrf.Control
 
+// errSSRFBlocked is the sentinel a connect-time ssrfControl rejection wraps, so
+// a dial-error site can errors.Is() a DNS-rebinding/private-IP security block
+// apart from a genuine unreachable-origin dial error.
+var errSSRFBlocked = ssrf.ErrBlocked
+
 // ssrfSafeDialContext is a net.Dialer.DialContext replacement that rejects
 // connections to private/internal IPs at connect time (DNS-rebinding safe).
 //
@@ -195,7 +200,7 @@ type RateLimiter struct {
 	window  atomic.Int64 // nanoseconds
 	enabled atomic.Bool
 
-	// Whitelist — exempt IPs/CIDRs that bypass rate limiting (e.g. monitoring).
+	// Exempt list — exempt IPs/CIDRs that bypass rate limiting (e.g. monitoring).
 	exemptMu   sync.RWMutex
 	exemptNets []*net.IPNet
 	exemptIPs  map[string]bool

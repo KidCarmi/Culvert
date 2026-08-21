@@ -25,14 +25,7 @@ type healthReport struct {
 // Shared by handleHealth and the health support collector.
 func computeHealth() healthReport {
 	// CA cert expiry
-	caExpiresDays := -1
-	if info := certMgr.CACertInfo(); info["ready"] == true {
-		if notAfterStr, ok := info["notAfter"].(string); ok {
-			if t, err := time.Parse("2006-01-02", notAfterStr); err == nil {
-				caExpiresDays = int(time.Until(t).Hours() / 24)
-			}
-		}
-	}
+	caExpiresDays := caExpiryDaysRemaining()
 
 	// Threat feed entry count
 	tfEntries, _, _ := globalThreatFeed.Stats()
@@ -53,11 +46,19 @@ func computeHealth() healthReport {
 	// failure while Ready() stays true. Reporting "ready" there would hide a CA
 	// bundle that never persisted — the configured inspection material is not
 	// actually usable across a restart.
+	// CHAOS-28: an installed-but-expired (or not-yet-valid) CA is reported as
+	// "expired", NOT "ready". Ready() only asks whether a CA is loaded, so
+	// before this the probe stayed green through a total inspected-HTTPS outage
+	// — the single least-visible failure in the appliance. Checked after the
+	// load failure (which is the more specific fault) and before Ready().
 	sslInspection := "ready"
-	if sslInspectionLoadFailure() != "" {
+	switch {
+	case sslInspectionLoadFailure() != "":
 		sslInspection = "load_failed"
-	} else if !certMgr.Ready() {
+	case !certMgr.Ready():
 		sslInspection = "unavailable"
+	case certMgr.Usable() != nil:
+		sslInspection = "expired"
 	}
 
 	return healthReport{
@@ -125,6 +126,77 @@ func appendStateFileChecks(checks map[string]*readinessCheck) {
 	}
 }
 
+// appendCAReadinessCheck adds the report-only `ca` row.
+//
+// Report status but don't fail readiness — the proxy still works as a plain
+// forward proxy if the CA didn't load. A configured-but-failed load is surfaced
+// as a failing (non-gating) check so the degradation is visible to probes
+// instead of the row silently disappearing (CHAOS-06); posture (report-only)
+// mirrors policy_loaded.
+//
+// The recorded load failure is checked BEFORE Ready(): LoadOrInitCA runs
+// InitCA() (Ready() → true) before SaveCA(), so a SaveCA failure leaves a
+// recorded failure while Ready() stays true. Reporting "ok" there would hide a
+// configured CA bundle that never persisted.
+//
+// CHAOS-28 adds the unusable-CA branch (loaded, but outside its own validity
+// window — so it signs nothing a client accepts). It stays REPORT-ONLY like the
+// rest of this check, and that is a deliberate availability choice: an expired
+// CA is typically fleet-wide (every node was provisioned from the same bundle
+// at the same time), so gating readiness on it would eject the entire fleet
+// from the load balancer simultaneously and take plain HTTP and bypassed HTTPS
+// — which still work — down with it. An operator who wants those nodes ejected
+// opts in via /ready?strict=1.
+//
+// EVERY detail on this row is a FIXED string. /ready is served unauthenticated
+// on the proxy port — the same port every client on the network already dials —
+// so anything written here is readable by any user, not just an operator.
+//
+// That applies to BOTH failing branches, and the load-failure one is why this
+// paragraph is stated as a rule rather than a note about the validity branch.
+// It used to pass sslInspectionLoadFailure() through verbatim, which is
+// "Root CA load/init failed for <bundle path>: <OS error> — SSL inspection
+// DISABLED (TLS traffic is tunnel-only: no scanning/DLP/CDR)". That published
+// the CA bundle's filesystem path AND an explicit, machine-readable
+// announcement that the gateway's inspection controls are off, to anyone who
+// can reach the proxy. An attacker or insider polling /ready learns exactly
+// when DLP/AV/CDR/DPI are down and can time exfiltration for that window —
+// the fingerprint of a security-degraded node this row must not hand out.
+//
+// The full detail is not lost: it stays in the process log, the
+// `ca_load_failed` alert, and the role-gated admin surfaces. Status is
+// unchanged ("fail", still report-only), so probe and monitoring behaviour is
+// byte-identical — only the operator-only cause is withheld from the
+// unauthenticated surface.
+//
+// The detail also does not state the ENFORCEMENT POSTURE, which is the part
+// that actually arms an attacker. "ca: fail" alone says a named subsystem is
+// degraded; it does not say which way it fails, and the two directions are
+// opposite. A load failure degrades to tunnel-only BYPASS — traffic flows
+// UNINSPECTED — so spelling that out hands an unauthenticated observer the
+// exfiltration window directly. (The validity branch below fails CLOSED, i.e.
+// refuses traffic, which is why naming its posture is not the same hazard.)
+// Withholding it costs the operator nothing: they are being pointed at the log,
+// which carries the cause and the consequence in full.
+func appendCAReadinessCheck(checks map[string]*readinessCheck) {
+	switch {
+	case sslInspectionLoadFailure() != "":
+		checks["ca"] = &readinessCheck{
+			Status: "fail",
+			Detail: "configured root CA is unavailable — see server logs",
+		}
+	case !certMgr.Ready():
+		// Not configured yet — no row at all (pre-CHAOS-06 baseline behavior).
+	case certMgr.Usable() != nil:
+		checks["ca"] = &readinessCheck{
+			Status: "fail",
+			Detail: "root CA outside its validity window; SSL inspection is blocked — see server logs",
+		}
+	default:
+		checks["ca"] = &readinessCheck{Status: "ok"}
+	}
+}
+
 // computeReadiness builds the readiness snapshot and the HTTP status code (200
 // when all gating checks pass, 503 otherwise). Shared by handleReady and the
 // readiness support collector. The verdict returned here is the DEFAULT
@@ -136,23 +208,29 @@ func computeReadiness() (report readinessReport, code int) {
 	checks := map[string]*readinessCheck{}
 	allOK := true
 
-	// 1. CA: report status but don't fail readiness — proxy still works as a
-	// plain forward proxy if the CA didn't load. A configured-but-failed load is
-	// surfaced as a failing (non-gating) check so the degradation is visible to
-	// probes instead of the row silently disappearing (CHAOS-06); posture
-	// (report-only) mirrors policy_loaded.
-	//
-	// The recorded load failure is checked BEFORE Ready(): LoadOrInitCA runs
-	// InitCA() (Ready() → true) before SaveCA(), so a SaveCA failure leaves a
-	// recorded failure while Ready() stays true. Reporting "ok" there would hide
-	// a configured CA bundle that never persisted.
-	if detail := sslInspectionLoadFailure(); detail != "" {
-		checks["ca"] = &readinessCheck{Status: "fail", Detail: detail}
-	} else if certMgr.Ready() {
-		checks["ca"] = &readinessCheck{Status: "ok"}
-	}
+	// 1. CA — see appendCAReadinessCheck. Report-only: never gates.
+	appendCAReadinessCheck(checks)
 
 	// 2. ClamAV: if scanner is initialised, verify connectivity.
+	//
+	// The detail is FIXED for the same reason as the `ca` row above: this
+	// endpoint is unauthenticated on the proxy port, and ClamAVStatus()'s
+	// non-connected value is a raw dial error ("unreachable: clamav: connect
+	// failed: dial tcp 10.0.1.5:3310: connect: connection refused") that
+	// publishes the internal address and port of the AV daemon — internal
+	// network topology, handed to any client that can reach the proxy, together
+	// with the fact that AV scanning is currently down. The gating verdict is
+	// unchanged: this row still fails readiness, exactly as before.
+	//
+	// It points at the ADMIN SURFACE rather than at the log, unlike the `ca` row
+	// above, and the difference is not cosmetic. ClamAV's ping error is logged
+	// only by Scanner.Init (startup and reconfigure); ClamAVStatus caches it and
+	// logs nothing. A daemon that dies at RUNTIME — a restart, an OOM, a crashed
+	// container, which is the ordinary case — therefore produces a failing row
+	// with no corresponding log line at all, so "see server logs" would send an
+	// operator to a source that need not mention the outage. The live cause is
+	// always on the role-gated /api/security-scan/status (`clamav_status`),
+	// which re-pings on cache miss.
 	if globalSecScanner != nil {
 		st := globalSecScanner.ClamAVStatus()
 		switch st {
@@ -161,7 +239,10 @@ func computeReadiness() (report readinessReport, code int) {
 		case "connected":
 			checks["clamav"] = &readinessCheck{Status: "ok"}
 		default:
-			checks["clamav"] = &readinessCheck{Status: "fail", Detail: st}
+			checks["clamav"] = &readinessCheck{
+				Status: "fail",
+				Detail: "ClamAV unreachable — see Security Scanning status in the admin UI",
+			}
 			allOK = false
 		}
 	}
@@ -211,6 +292,13 @@ func computeReadiness() (report readinessReport, code int) {
 	appendStateFileChecks(checks)
 	appendDPHealthChecks(checks)
 
+	// 10. Signed SaaS feed (F3b-4) — REPORT-ONLY, never gates readiness. A valid
+	// embedded baseline always exists, so the feed never makes readiness
+	// internet-dependent: a stuck origin / stale LKG is a non-gating degradation, and
+	// corruption/equivocation/authority-loss is a non-gating critical row (probes that
+	// want to eject such nodes opt in via /ready?strict=1).
+	appendSaaSFeedHealthCheck(checks)
+
 	status, code := "ready", http.StatusOK
 	if !allOK {
 		status, code = "not_ready", http.StatusServiceUnavailable
@@ -258,6 +346,28 @@ func strictVerdictFails(r *http.Request, checks map[string]*readinessCheck) bool
 		}
 	}
 	return false
+}
+
+// caExpiryDaysRemaining returns the number of days until the internal CA
+// certificate expires, or -1 when no CA is loaded/ready. Shared by
+// computeHealth and the support-telemetry registry's
+// support_health_ca_expiry_bucket read (support_telemetry_registry.go) so
+// there is exactly one place that reads the CA's notAfter — not a second,
+// independently-computed source of truth.
+func caExpiryDaysRemaining() int {
+	info := certMgr.CACertInfo()
+	if info["ready"] != true {
+		return -1
+	}
+	notAfterStr, ok := info["notAfter"].(string)
+	if !ok {
+		return -1
+	}
+	t, err := time.Parse("2006-01-02", notAfterStr)
+	if err != nil {
+		return -1
+	}
+	return int(time.Until(t).Hours() / 24)
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

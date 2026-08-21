@@ -58,9 +58,9 @@ var (
 	ringLen  int     // valid entries (≤ MaxRing)
 )
 
-// Persistent JSONL layer. Assigned once at startup (Init) and read lock-free
-// on the hot path — the same publication pattern the pre-extraction package
-// globals used.
+// Persistent JSONL layer, guarded by writerMu (persist.go). These are no
+// longer touched by the request hot path at all: Add enqueues and the single
+// drain goroutine is the only reader of writer.
 var (
 	writer   io.Writer // *fileutil.RotatingFile; nil = file persistence disabled
 	closer   io.Closer
@@ -127,9 +127,12 @@ func Init(path string, maxMB int) error {
 	if err != nil {
 		return fmt.Errorf("request log open %s: %w", path, err)
 	}
+	writerMu.Lock()
 	writer = rf
 	closer = rf
 	filePath = path
+	writerMu.Unlock()
+	startPersist()
 
 	// Drop any cached parse from a previous file.
 	readCache.mu.Lock()
@@ -141,7 +144,12 @@ func Init(path string, maxMB int) error {
 
 // Close releases the persistent file handle (best-effort; shutdown hook).
 // Safe when persistence was never initialised.
+// It drains the persistence queue first, so entries still in flight at
+// shutdown reach the file rather than being discarded with the goroutine.
 func Close() error {
+	stopPersist()
+	writerMu.Lock()
+	defer writerMu.Unlock()
 	if closer == nil {
 		return nil
 	}
@@ -162,21 +170,10 @@ func Add(e Entry) {
 	}
 	ringMu.Unlock()
 
-	// Persist to JSONL file (outside the lock to avoid blocking callers).
-	if w := writer; w != nil {
-		b, err := json.Marshal(e)
-		if err == nil {
-			b = append(b, '\n')
-			_, err = w.Write(b)
-		}
-		if err != nil {
-			// A full disk must not silently destroy the request history:
-			// count every failure, log only the first to avoid flooding.
-			if atomic.AddInt64(&writeErrors, 1) == 1 {
-				obs.Printf("ERROR request log: persistent write failed (further failures counted silently): %v", err)
-			}
-		}
-	}
+	// Hand the entry to the JSONL drain goroutine. Never blocks and never
+	// touches the disk on this goroutine — see persist.go for why the
+	// marshal and the write(2) must not run on the request path.
+	enqueue(e)
 
 	// Persist to the queryable history store (async, non-blocking, nil-safe).
 	if h := history; h != nil {
@@ -217,7 +214,7 @@ func SkippedLines() int64 { return atomic.LoadInt64(&skippedLines) }
 // file is consulted; the rotated ".1" archive is intentionally skipped to
 // keep each query bounded to one rotation window.
 func ReadPersistent() ([]Entry, error) {
-	path := filePath
+	path := FilePath()
 	if path == "" {
 		return nil, nil
 	}
@@ -228,6 +225,13 @@ func ReadPersistent() ([]Entry, error) {
 	if readCache.path == path && time.Now().Before(readCache.expires) {
 		return readCache.entries, nil
 	}
+
+	// Persistence is asynchronous, so drain the queue before parsing: an
+	// admin read must never miss a request that has already been served.
+	// This costs nothing in practice — reads are dashboard polls behind the
+	// TTL cache above, not a hot path — and it keeps read-your-writes
+	// semantics identical to the pre-async synchronous writer.
+	Sync()
 
 	f, err := os.Open(path) // #nosec G304 -- operator-configured path
 	if err != nil {
@@ -302,17 +306,31 @@ func SwapRingForTest() (restore func()) {
 // SetWriterForTest points JSONL persistence at w (closer and path stay as
 // they are), returning a restore func. Used to inject failing writers.
 func SetWriterForTest(w io.Writer) (restore func()) {
+	writerMu.Lock()
 	old := writer
 	writer = w
-	return func() { writer = old }
+	writerMu.Unlock()
+	startPersist()
+	return func() {
+		stopPersist()
+		writerMu.Lock()
+		writer = old
+		writerMu.Unlock()
+	}
 }
 
 // SetFilePathForTest points persistent reads at path without opening a
 // writer, returning a restore func.
 func SetFilePathForTest(path string) (restore func()) {
+	writerMu.Lock()
 	old := filePath
 	filePath = path
-	return func() { filePath = old }
+	writerMu.Unlock()
+	return func() {
+		writerMu.Lock()
+		filePath = old
+		writerMu.Unlock()
+	}
 }
 
 // SwapPersistenceForTest snapshots and clears the writer/closer/path trio,
@@ -320,13 +338,19 @@ func SetFilePathForTest(path string) (restore func()) {
 // left wired (so a re-init inside the test cannot leak) before reinstating
 // the snapshot.
 func SwapPersistenceForTest() (restore func()) {
+	stopPersist()
+	writerMu.Lock()
 	oldW, oldC, oldP := writer, closer, filePath
 	writer, closer, filePath = nil, nil, ""
+	writerMu.Unlock()
 	return func() {
+		stopPersist()
+		writerMu.Lock()
 		if closer != nil {
 			_ = closer.Close()
 		}
 		writer, closer, filePath = oldW, oldC, oldP
+		writerMu.Unlock()
 	}
 }
 
@@ -335,6 +359,9 @@ func SwapPersistenceForTest() (restore func()) {
 // or not persistence was initialised. (No restore — mirrors the
 // pre-extraction resetRequestLogState helper's exact semantics.)
 func ResetForTest() {
+	stopPersist()
+	writerMu.Lock()
+	defer writerMu.Unlock()
 	if closer != nil {
 		_ = closer.Close()
 	}
@@ -359,7 +386,15 @@ func ExpireCacheForTest() {
 
 // PersistActive reports whether a persistent file handle is wired (test
 // support for the startup/shutdown-hook coverage).
-func PersistActive() bool { return closer != nil }
+func PersistActive() bool {
+	writerMu.RLock()
+	defer writerMu.RUnlock()
+	return closer != nil
+}
 
 // FilePath reports the configured persistent JSONL path ("" = disabled).
-func FilePath() string { return filePath }
+func FilePath() string {
+	writerMu.RLock()
+	defer writerMu.RUnlock()
+	return filePath
+}

@@ -39,3 +39,13 @@ config.example.yaml         @KidCarmi
 # ── Frontend — UI changes need UX + security review (XSS risk) ─────────────
 static/                     @KidCarmi
 ui.go                       @KidCarmi
+
+# ── API contract — OpenAPI governance program ──────────────────────────────
+# Changes to the contract, its enforcement engine, the classification manifest,
+# or the route source-of-truth require API-governance review.
+api/                        @KidCarmi
+docs/api/                   @KidCarmi
+docs/adr/0018-openapi-contract.md @KidCarmi
+internal/apicontract/       @KidCarmi
+cmd/apibundle/              @KidCarmi
+ui_routes_meta.go           @KidCarmi

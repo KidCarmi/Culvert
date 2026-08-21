@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/halease"
 )
 
 // Diagnostic command framework (M3). Product-level, typed operations — NEVER a
@@ -754,23 +756,59 @@ type configCollectionSize struct {
 // surfaces any snapshot value (rules, hosts, session HMAC, IdP secrets) — only
 // counts and the pass/fail verdict.
 type configDiagnosis struct {
-	SchemaVersion int                    `json:"schema_version"`
-	GeneratedAt   string                 `json:"generated_at"`
-	OK            bool                   `json:"ok"` // validateConfigSnapshot == nil (no cap exceeded)
-	PolicyVersion int64                  `json:"policy_version"`
-	Epoch         int64                  `json:"epoch"`
-	Sizes         []configCollectionSize `json:"sizes"`
-	Error         string                 `json:"error,omitempty"` // first cap violation (names the collection + cap)
+	SchemaVersion int    `json:"schema_version"`
+	GeneratedAt   string `json:"generated_at"`
+	// OK is the AGGREGATE-safe verdict: true unless the snapshot is a real
+	// problem for THIS node's role. A standalone node never syncs config over
+	// the cluster wire, so an over-cap snapshot is advisory (warn), not a
+	// failure — keeping OK true so a lone appliance is not marked DEGRADED for a
+	// cluster-sync bound it does not exercise. A syncing node (CP or DP) keeps
+	// the hard verdict: over-cap ⇒ OK false.
+	OK     bool   `json:"ok"`
+	Status string `json:"status"` // "ok" | "warn" | "degraded"
+	// Syncing reports whether this node participates in CP↔DP config sync, i.e.
+	// whether the per-slice caps actually gate anything for it.
+	Syncing        bool                   `json:"syncing"`
+	PolicyVersion  int64                  `json:"policy_version"`
+	Epoch          int64                  `json:"epoch"`
+	Sizes          []configCollectionSize `json:"sizes"`
+	Utilization    []snapshotSliceCap     `json:"utilization"`              // size vs cap for every capped slice
+	MaxUtilPercent int                    `json:"max_util_percent"`         // highest size/cap across all slices
+	MaxUtilSlice   string                 `json:"max_util_slice,omitempty"` // the slice at MaxUtilPercent
+	Error          string                 `json:"error,omitempty"`          // first cap violation (names the collection + cap)
+	Note           string                 `json:"note,omitempty"`           // human explanation of a warn verdict
+	// PublishRejected is set on a Control Plane when the most recent config
+	// publish was refused at commit (over-cap) — the fleet is running the last
+	// valid snapshot, not the live config. Empty when the last publish succeeded.
+	PublishRejected   string `json:"publish_rejected,omitempty"`
+	PublishRejectedAt string `json:"publish_rejected_at,omitempty"`
 }
 
+// configWarnUtilPercent is the utilization at which a slice trips the amber
+// "approaching cap" tier — an early passive signal before a slice actually
+// overflows and (for a syncing node) breaks the fleet.
+const configWarnUtilPercent = 80
+
 // diagnoseConfigFrom validates a snapshot and summarizes its non-secret sizes.
-// Pure (no I/O), so tests drive the pass/fail branches with a fabricated snapshot.
-// validateConfigSnapshot supplies the COMPLETE verdict (it checks every capped
-// collection); the Sizes list surfaces the operationally-relevant subset.
-func diagnoseConfigFrom(snap ConfigSnapshot, now time.Time) configDiagnosis {
+// Pure (no I/O), so tests drive the branches with a fabricated snapshot + role.
+// syncing = this node participates in config sync (CP or DP); it decides whether
+// an over-cap snapshot is a hard failure (degraded) or advisory (warn).
+func diagnoseConfigFrom(snap ConfigSnapshot, syncing bool, now time.Time) configDiagnosis {
+	util := configSnapshotSliceCaps(snap)
+	maxPct, maxSlice := 0, ""
+	for _, s := range util {
+		if s.Cap <= 0 {
+			continue
+		}
+		pct := s.Size * 100 / s.Cap
+		if pct > maxPct {
+			maxPct, maxSlice = pct, s.Name
+		}
+	}
 	d := configDiagnosis{
 		SchemaVersion: diagnoseSchemaVersion,
 		GeneratedAt:   now.UTC().Format(time.RFC3339),
+		Syncing:       syncing,
 		PolicyVersion: snap.PolicyVersion,
 		Epoch:         snap.Epoch,
 		Sizes: []configCollectionSize{
@@ -790,11 +828,26 @@ func diagnoseConfigFrom(snap ConfigSnapshot, now time.Time) configDiagnosis {
 			{"bandwidth_policies", len(snap.BandwidthPolicies)},
 			{"decryption_profiles", len(snap.DecryptionProfiles)},
 		},
+		Utilization:    util,
+		MaxUtilPercent: maxPct,
+		MaxUtilSlice:   maxSlice,
 	}
-	if err := validateConfigSnapshot(snap); err != nil {
-		d.Error = boundedErr(err.Error())
-	} else {
-		d.OK = true
+	switch err := validateConfigSnapshot(snap); {
+	case err != nil && syncing:
+		// A syncing node with an over-cap snapshot is genuinely broken: a CP
+		// cannot push it and a DP would reject it wholesale.
+		d.Status, d.OK, d.Error = "degraded", false, boundedErr(err.Error())
+	case err != nil && !syncing:
+		// Standalone: the cap only gates cluster sync, which this node does not
+		// do. Surface it as advisory so the aggregate health stays green — this
+		// is the false-positive DEGRADED a lone appliance used to hit.
+		d.Status, d.OK, d.Error = "warn", true, boundedErr(err.Error())
+		d.Note = "over the cluster-sync cap, but this node is standalone (not syncing) so proxying is unaffected; the cap would block CP→DP sync if you enable clustering"
+	case maxPct >= configWarnUtilPercent:
+		d.Status, d.OK = "warn", true
+		d.Note = "a config collection is approaching its cap"
+	default:
+		d.Status, d.OK = "ok", true
 	}
 	return d
 }
@@ -837,11 +890,128 @@ func apiDiagnoseCluster(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, d)
 }
 
+// ── diagnose etcd ─────────────────────────────────────────────────────────────
+
+// etcdProbeTimeout hard-bounds the fencing-lease reachability Read so a wedged or
+// unreachable etcd endpoint cannot hang the handler. Generous enough for a
+// cross-AZ round-trip; the etcd client's own dial is lazy so an unreachable
+// endpoint surfaces as a deadline, not a stall.
+const etcdProbeTimeout = 5 * time.Second
+
+// etcdDiagnosis is the raw reachability fact for the HA fencing-lease (etcd)
+// backend: is it reachable from THIS node, and what lease state does it report.
+// Read-only and verdict-free beyond reachable/not — split-brain/quorum ANALYSIS
+// is the TAC Cloud tier's job, not the appliance's. The etcd endpoints are never
+// echoed (operator infra detail); only the lease's own holder/epoch (already
+// surfaced on /api/cluster/ha) and a bounded transport error are returned.
+type etcdDiagnosis struct {
+	SchemaVersion int    `json:"schema_version"`
+	GeneratedAt   string `json:"generated_at"`
+	Configured    bool   `json:"configured"`             // an etcd fencing lease is armed on this node
+	OK            bool   `json:"ok"`                     // reachable (or n/a when not configured)
+	Status        string `json:"status"`                 // ok|error|n/a
+	Reachable     bool   `json:"reachable,omitempty"`    // the bounded Read returned
+	Holder        string `json:"holder,omitempty"`       // current lease holder candidate ID ("" = free)
+	Epoch         int64  `json:"epoch,omitempty"`        // fencing epoch reported by the backend
+	ValidForMs    int64  `json:"valid_for_ms,omitempty"` // remaining lease time per the backend
+	LatencyMs     int64  `json:"latency_ms,omitempty"`   // probe round-trip
+	Error         string `json:"error,omitempty"`        // bounded transport error when unreachable
+	Note          string `json:"note,omitempty"`
+}
+
+// classifyEtcdProbe turns a probe outcome into the typed diagnosis. Pure (no
+// I/O), so tests drive not-configured / reachable / unreachable without an etcd.
+func classifyEtcdProbe(configured bool, st halease.Status, latency time.Duration, err error, now time.Time) etcdDiagnosis {
+	d := etcdDiagnosis{
+		SchemaVersion: diagnoseSchemaVersion,
+		GeneratedAt:   now.UTC().Format(time.RFC3339),
+		Configured:    configured,
+	}
+	if !configured {
+		d.Status, d.OK = "n/a", true
+		d.Note = "no etcd fencing lease configured on this node (legacy manual-failover or standalone HA); nothing to probe"
+		return d
+	}
+	d.LatencyMs = latency.Milliseconds()
+	if err != nil {
+		d.Status, d.OK, d.Error = "error", false, boundedErr(err.Error())
+		d.Note = "etcd fencing-lease backend is unreachable from this node — leadership is denied fail-closed until it recovers"
+		return d
+	}
+	d.Reachable, d.OK, d.Status = true, true, "ok"
+	d.Holder = st.Holder
+	d.Epoch = st.Epoch
+	if st.ValidFor > 0 {
+		d.ValidForMs = st.ValidFor.Milliseconds()
+	}
+	if st.Holder == "" {
+		d.Note = "etcd reachable; the fencing lease is currently free (no live leader holds it)"
+	}
+	return d
+}
+
+// diagnoseEtcd runs the bounded, read-only reachability probe against the
+// configured etcd fencing-lease backend and classifies the result. The Read
+// never mutates lease state (Provider.Read contract).
+func diagnoseEtcd(ctx context.Context, now time.Time) etcdDiagnosis {
+	start := time.Now()
+	configured, st, err := globalHA.probeLeaseBackend(ctx)
+	latency := time.Since(start)
+	return classifyEtcdProbe(configured, st, latency, err, now)
+}
+
+// apiDiagnoseEtcd probes the HA fencing-lease (etcd) backend's reachability from
+// this node (POST, operator). Read-only: a bounded, no-mutation Read against the
+// operator-configured etcd endpoints. The endpoints are STARTUP config, never
+// attacker-controllable, so the outbound is not SSRF-relevant and (unlike
+// dns/tls) is deliberately NOT isPrivateHost-guarded — a fencing etcd normally
+// lives on a private address; the context timeout is the only bound needed.
+func apiDiagnoseEtcd(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleOperator) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), etcdProbeTimeout)
+	defer cancel()
+	d := diagnoseEtcd(ctx, time.Now())
+	auditEvent(r, "diagnose.etcd", "etcd", boolResult(d.OK))
+	jsonOK(w, d)
+}
+
 // diagnoseConfig assembles the live config snapshot and diagnoses it. The snapshot
 // build is a read-only assembly over the config stores; the snapshot VALUES never
 // leave this function (only counts + the verdict are returned).
 func diagnoseConfig(now time.Time) configDiagnosis {
-	return diagnoseConfigFrom(CurrentConfigSnapshot(), now)
+	syncing := nodeParticipatesInConfigSync()
+	d := diagnoseConfigFrom(CurrentConfigSnapshot(), syncing, now)
+	// P1 commit-time validation: if the CP's last publish was rejected (over-cap),
+	// the fleet is on a stale snapshot — surface it as a degraded, named error
+	// even if the operator has since trimmed the live config back under the cap
+	// (the fleet only recovers on the next successful publish).
+	if msg, ts := globalConfigStore.LastPublishError(); msg != "" {
+		d.PublishRejected, d.PublishRejectedAt = msg, ts
+		d.Status, d.OK = "degraded", false
+		if d.Error == "" {
+			d.Error = "last config publish rejected: " + msg
+		}
+	}
+	return d
+}
+
+// nodeParticipatesInConfigSync reports whether this node actually exchanges
+// ConfigSnapshots over the cluster wire — i.e. whether the per-slice caps gate
+// anything for it. True for a Control Plane (it publishes snapshots) or an
+// active Data Plane (it applies them); false for a standalone appliance, for
+// which the caps are a dormant cluster-sync bound.
+func nodeParticipatesInConfigSync() bool {
+	clusterRoleMu.RLock()
+	role := clusterRole.role
+	clusterRoleMu.RUnlock()
+	return role == "control-plane" || role == "data-plane" || activeDPClient.Load() != nil
 }
 
 // apiDiagnoseConfig reports live config-snapshot validity + non-secret sizes
@@ -860,6 +1030,221 @@ func apiDiagnoseConfig(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, d)
 }
 
+// ── diagnose support ────────────────────────────────────────────────────────
+
+// supportDiagnosis reports support-bundle STORE health: how many bundles are
+// persisted, their aggregate on-disk size, the age spread, the retention bounds
+// in force, and the janitor's activity (last sweep + evictions since boot). It
+// answers "is my support-bundle store healthy, and why did a bundle disappear?"
+// — counts, sizes, and a timestamp only, never bundle content. Read-only, no
+// network, no shell.
+type supportDiagnosis struct {
+	SchemaVersion       int            `json:"schema_version"`
+	GeneratedAt         string         `json:"generated_at"`
+	OK                  bool           `json:"ok"`
+	BundleCount         int            `json:"bundle_count"`
+	PendingCount        int            `json:"pending_count"` // created but not yet approved
+	TotalBytes          int64          `json:"total_bytes"`   // aggregate bundle.csb.tgz size
+	OldestAgeHours      int64          `json:"oldest_age_hours,omitempty"`
+	NewestAgeHours      int64          `json:"newest_age_hours,omitempty"`
+	RetentionKeep       int            `json:"retention_keep"`
+	RetentionMaxAgeDays int            `json:"retention_max_age_days"`
+	RetentionEvicted    int64          `json:"retention_evicted_total"`
+	LastSweep           string         `json:"retention_last_sweep,omitempty"`
+	Checks              []storageCheck `json:"checks"`
+}
+
+// countBundleDirs returns how many csb_-shaped subdirectories exist under the
+// bundle store (the RAW on-disk bundle count, before manifest parsing). An absent
+// store is (0, nil) — a healthy empty store, created on the first bundle. A
+// present-but-unreadable directory returns the ReadDir error so the caller can
+// fault the diagnosis instead of silently reporting empty.
+func countBundleDirs() (int, error) {
+	entries, err := os.ReadDir(supportBundlesDir())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil // no bundle written yet
+		}
+		return 0, err
+	}
+	n := 0
+	for _, e := range entries {
+		if e.IsDir() && supportBundleIDRe.MatchString(e.Name()) {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// diagnoseSupport inspects the persisted support-bundle store. now is injected for
+// deterministic timestamps in tests. It only reads bundle summaries (secret-free by
+// construction) and the retention observability atoms — it never opens a bundle.
+func diagnoseSupport(now time.Time) supportDiagnosis {
+	d := supportDiagnosis{
+		SchemaVersion:       diagnoseSchemaVersion,
+		GeneratedAt:         now.UTC().Format(time.RFC3339),
+		RetentionKeep:       supportRetentionKeepVal(),
+		RetentionMaxAgeDays: int(supportRetentionMaxAgeVal() / (24 * time.Hour)),
+		RetentionEvicted:    supportRetentionEvicted.Load(),
+	}
+	if u := supportRetentionLastSweep.Load(); u > 0 {
+		d.LastSweep = time.Unix(u, 0).UTC().Format(time.RFC3339)
+	}
+
+	sums := listSupportBundles() // newest-first, path-guarded, secret-free
+	d.BundleCount = len(sums)
+	var oldest, newest time.Time
+	for i := range sums {
+		s := &sums[i]
+		d.TotalBytes += s.SizeBytes
+		if s.State == bundleStatePending {
+			d.PendingCount++
+		}
+		if t, err := time.Parse(time.RFC3339, s.CreatedAt); err == nil {
+			if oldest.IsZero() || t.Before(oldest) {
+				oldest = t
+			}
+			if t.After(newest) {
+				newest = t
+			}
+		}
+	}
+	if !oldest.IsZero() {
+		d.OldestAgeHours = int64(now.Sub(oldest).Hours())
+		d.NewestAgeHours = int64(now.Sub(newest).Hours())
+	}
+
+	d.Checks = supportStoreChecks(now, oldest, d.BundleCount)
+
+	d.OK = true
+	for i := range d.Checks {
+		if !d.Checks[i].OK {
+			d.OK = false
+			break
+		}
+	}
+	return d
+}
+
+// supportStoreChecks builds the health checks for the bundle store. Split out of
+// diagnoseSupport to keep it under the cyclop threshold. now/oldest are injected;
+// bundleCount is the PARSED-summary count from listSupportBundles.
+func supportStoreChecks(now, oldest time.Time, bundleCount int) []storageCheck {
+	dir := supportBundlesDir()
+	var checks []storageCheck
+
+	// Store readability + manifest integrity. listSupportBundles is deliberately
+	// LENIENT — empty on a ReadDir error, silently skips unreadable/corrupt
+	// manifests — so a broken store would otherwise read as a healthy EMPTY store
+	// (Codex #834). Cross-check the raw csb_-shaped subdir count against the parsed
+	// count: a ReadDir failure or a shortfall (a dir present but not parsed) faults.
+	rawDirs, readErr := countBundleDirs()
+	switch {
+	case readErr != nil:
+		checks = append(checks, storageCheck{Name: "bundles_dir_readable", Path: dir, OK: false, Detail: "readdir: " + readErr.Error()})
+	case rawDirs > bundleCount:
+		checks = append(checks, storageCheck{Name: "bundles_dir_readable", Path: dir, OK: false,
+			Detail: strconv.Itoa(rawDirs-bundleCount) + " bundle dir(s) unreadable/corrupt (present on disk but not parsed)"})
+	default:
+		checks = append(checks, storageCheck{Name: "bundles_dir_readable", Path: dir, OK: true})
+	}
+
+	// Count cap honored. The janitor evicts oldest-first on a new build and on the
+	// age tick, so an overflow beyond keep signals a stuck/failing janitor. keep==0
+	// disables the cap. Read the configurable cap once (Slice B).
+	keep := supportRetentionKeepVal()
+	if keep > 0 {
+		overCap := bundleCount > keep
+		detail := ""
+		if overCap {
+			detail = "count " + strconv.Itoa(bundleCount) + " exceeds keep cap " + strconv.Itoa(keep)
+		}
+		checks = append(checks, storageCheck{Name: "within_count_cap", Path: dir, OK: !overCap, Detail: detail})
+	}
+
+	// Age cap honored. A store can sit under the count cap with only a few bundles
+	// yet still hold ones older than max-age if the background janitor is stopped or
+	// failing (Codex #834) — the count cap alone can't catch that. maxAge<=0 disables.
+	maxAge := supportRetentionMaxAgeVal()
+	if maxAge > 0 && !oldest.IsZero() {
+		overAge := now.Sub(oldest) > maxAge
+		detail := ""
+		if overAge {
+			detail = "oldest bundle age " + strconv.FormatInt(int64(now.Sub(oldest).Hours())/24, 10) + "d exceeds max-age " +
+				strconv.Itoa(int(maxAge/(24*time.Hour))) + "d — the age janitor may be stopped or failing"
+		}
+		checks = append(checks, storageCheck{Name: "within_age_cap", Path: dir, OK: !overAge, Detail: detail})
+	}
+	return checks
+}
+
+// apiDiagnoseSupport reports support-bundle store health (POST, operator).
+// Read-only, no network, no shell, no bundle content.
+func apiDiagnoseSupport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleOperator) {
+		return
+	}
+	d := diagnoseSupport(time.Now())
+	auditEvent(r, "diagnose.support", "support", boolResult(d.OK))
+	jsonOK(w, d)
+}
+
+// ── diagnose all ──────────────────────────────────────────────────────────────
+
+// allDiagnosis aggregates every NO-INPUT local diagnostic into one snapshot so an
+// operator/TAC can run a single "local health" check. It deliberately excludes the
+// dns/tls verbs (they require a target host and touch the network); all four
+// members here are local + in-memory (storage does only its own create+remove
+// writability probe). OK is the AND of the members — a single degraded check makes
+// the aggregate degraded.
+type allDiagnosis struct {
+	SchemaVersion int               `json:"schema_version"`
+	GeneratedAt   string            `json:"generated_at"`
+	OK            bool              `json:"ok"`
+	Storage       storageDiagnosis  `json:"storage"`
+	Upstream      upstreamDiagnosis `json:"upstream"`
+	Cluster       clusterDiagnosis  `json:"cluster"`
+	Config        configDiagnosis   `json:"config"`
+}
+
+// diagnoseAll runs the no-input local verbs and aggregates them. now is injected
+// for deterministic timestamps in tests. No verb here audits on its own (the
+// per-verb audit lives in the individual handlers), so the caller emits one
+// diagnose.all event.
+func diagnoseAll(now time.Time) allDiagnosis {
+	d := allDiagnosis{
+		SchemaVersion: diagnoseSchemaVersion,
+		GeneratedAt:   now.UTC().Format(time.RFC3339),
+		Storage:       diagnoseStorage(now),
+		Upstream:      diagnoseUpstream(now),
+		Cluster:       diagnoseCluster(now),
+		Config:        diagnoseConfig(now),
+	}
+	d.OK = d.Storage.OK && d.Upstream.OK && d.Cluster.OK && d.Config.OK
+	return d
+}
+
+// apiDiagnoseAll runs every no-input local diagnostic in one call (POST, operator).
+// Read-only (bar the storage writability probe), no network, no shell.
+func apiDiagnoseAll(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleOperator) {
+		return
+	}
+	d := diagnoseAll(time.Now())
+	auditEvent(r, "diagnose.all", "all", boolResult(d.OK))
+	jsonOK(w, d)
+}
+
 // registerDiagnoseRoutes wires the diagnose verb surface.
 func registerDiagnoseRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/diagnose/storage", apiDiagnoseStorage)
@@ -867,5 +1252,8 @@ func registerDiagnoseRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/diagnose/dns", apiDiagnoseDNS)
 	mux.HandleFunc("/api/diagnose/tls", apiDiagnoseTLS)
 	mux.HandleFunc("/api/diagnose/cluster", apiDiagnoseCluster)
+	mux.HandleFunc("/api/diagnose/etcd", apiDiagnoseEtcd)
 	mux.HandleFunc("/api/diagnose/config", apiDiagnoseConfig)
+	mux.HandleFunc("/api/diagnose/support", apiDiagnoseSupport)
+	mux.HandleFunc("/api/diagnose/all", apiDiagnoseAll)
 }

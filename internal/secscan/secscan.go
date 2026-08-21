@@ -37,6 +37,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/alerts"
 	"github.com/KidCarmi/Culvert/internal/clamav"
 	"github.com/KidCarmi/Culvert/internal/hashcache"
 	"github.com/KidCarmi/Culvert/internal/obs"
@@ -72,6 +73,7 @@ var (
 	statScanTimeout       int64 // body scans that hit ScanBodyTimeout (fail-closed)
 	statScanSkipped       int64 // responses forwarded unscanned (size > maxBytes)
 	statRemoteScanFail    int64 // remote scan sidecar failures (fail-open)
+	statClamScanError     int64 // ClamAV scan errors mid-request (fail-open, alerted)
 )
 
 // CounterSnapshot is a point-in-time copy of the scan counters.
@@ -82,6 +84,7 @@ type CounterSnapshot struct {
 	ScanTimeout       int64
 	ScanSkipped       int64
 	RemoteScanFail    int64
+	ClamScanError     int64
 }
 
 // Counters returns a snapshot of all scan counters.
@@ -93,6 +96,7 @@ func Counters() CounterSnapshot {
 		ScanTimeout:       atomic.LoadInt64(&statScanTimeout),
 		ScanSkipped:       atomic.LoadInt64(&statScanSkipped),
 		RemoteScanFail:    atomic.LoadInt64(&statRemoteScanFail),
+		ClamScanError:     atomic.LoadInt64(&statClamScanError),
 	}
 }
 
@@ -156,7 +160,16 @@ type Scanner struct {
 	excl     HashExcluder  // nil → no hash allowlist
 	cache    *hashcache.HashCache
 	maxBytes int64 // max bytes to buffer per response for body scanning
-	enabled  bool
+
+	// enabled is the outermost per-request gate (proxy.go preDispatchBlocked
+	// consults it before every threat-feed check, on EVERY proxied request), so
+	// it is deliberately atomic rather than guarded by mu. Same reasoning as
+	// threatfeed.Feed.enabled: reading a config boolean through the RWMutex that
+	// also guards the scanner's collaborators made the request path contend on a
+	// single reader-count cache line for no benefit. Init writes it once; nothing
+	// reads it in a composite invariant with the locked fields except
+	// BodyScanEnabled, which still takes the lock for the clam/yara pointers.
+	enabled atomic.Bool
 
 	// Tier 2.3: ClamAV ping cache. Protects the admin dashboard from
 	// opening a fresh TCP connection to ClamAV on every status poll.
@@ -243,7 +256,7 @@ func (ss *Scanner) Init(clamAddr string, maxBytes int64, cache *hashcache.HashCa
 			obs.Printf("SecurityScan: ClamAV connected at %q", clamAddr)
 		}
 	}
-	ss.enabled = true
+	ss.enabled.Store(true)
 	// Tier 2.3: Invalidate any cached clam status so the first admin poll
 	// after reconfiguration runs a real ping.
 	ss.clamStatusVal = ""
@@ -255,17 +268,24 @@ func (ss *Scanner) Init(clamAddr string, maxBytes int64, cache *hashcache.HashCa
 }
 
 // Enabled reports whether the scanner has been initialised.
+//
+// Lock-free by contract — see the enabled field. This is the gate the proxy
+// consults before any threat check, so it must stay free of mu.
+// TestScannerEnabled_IsLockFree pins the property.
 func (ss *Scanner) Enabled() bool {
-	ss.mu.RLock()
-	defer ss.mu.RUnlock()
-	return ss.enabled
+	return ss.enabled.Load()
 }
 
 // BodyScanEnabled reports whether body scanning (ClamAV and/or YARA) is active.
+// Unlike Enabled it still takes mu: the clam/yara collaborators are ordinary
+// mu-guarded fields and this is a response-stage check, not the request gate.
 func (ss *Scanner) BodyScanEnabled() bool {
+	if !ss.enabled.Load() {
+		return false
+	}
 	ss.mu.RLock()
 	defer ss.mu.RUnlock()
-	return ss.enabled && (ss.clam != nil || (ss.yara != nil && ss.yara.Loaded()))
+	return ss.clam != nil || (ss.yara != nil && ss.yara.Loaded())
 }
 
 // MaxBytes returns the buffer limit for body scanning.
@@ -495,18 +515,40 @@ func (ss *Scanner) ScanBody(data []byte) *Result {
 	}
 }
 
+// clamScanError records a ClamAV mid-request scan failure: counter + webhook
+// alert (deduped by the alerts store), mirroring the remote sidecar's
+// remoteScanFail model (CHAOS-10). Fired on its own goroutine like
+// remoteScanFail: Dispatch's semaphore-full path enqueues the retry with a
+// synchronous disk write, and this runs inside ScanBody's fail-closed
+// timeout — a saturated webhook queue must not turn the fail-open error
+// path into a scan-timeout block.
+func clamScanError(err error) {
+	atomic.AddInt64(&statClamScanError, 1)
+	go alerts.Fire("scan_clam_error", alerts.Payload{
+		Source: "clamav",
+		Detail: err.Error(),
+	})
+}
+
 // scanBodyInner runs ClamAV + YARA sequentially. Called from ScanBody under a timeout.
 func (ss *Scanner) scanBodyInner(data []byte, hash string) *Result {
 	ss.mu.RLock()
 	clam := ss.clam
 	ss.mu.RUnlock()
 
-	// ClamAV scan.
+	// ClamAV scan. An engine error (daemon crash mid-stream) falls through to
+	// YARA — fail-open for THIS request, but counted + alerted, and the verdict
+	// is never cached: a "clean" computed while ClamAV was dark would otherwise
+	// keep admitting the same content by hash long after the daemon recovers.
+	clamDark := false
 	if clam != nil {
 		name, found, err := clam.Scan(data)
-		if err != nil {
+		switch {
+		case err != nil:
+			clamDark = true
+			clamScanError(err)
 			obs.Printf("ERROR SecurityScan: ClamAV error: %s", strings.ReplaceAll(err.Error(), "\n", " "))
-		} else if found {
+		case found:
 			atomic.AddInt64(&statClamBlocked, 1)
 			ss.cache.Set(hash, hashcache.ScanCacheResult{Clean: false, Reason: name, Source: "clamav"})
 			return &Result{Blocked: true, Reason: name, Source: "clamav", Hash: hash}
@@ -523,8 +565,11 @@ func (ss *Scanner) scanBodyInner(data []byte, hash string) *Result {
 		}
 	}
 
-	// Content is clean — cache the negative result.
-	ss.cache.Set(hash, hashcache.ScanCacheResult{Clean: true, Source: "clean"})
+	// Content is clean — cache the negative result, unless ClamAV errored:
+	// a partial scan is not a clean verdict (the next occurrence rescans).
+	if !clamDark {
+		ss.cache.Set(hash, hashcache.ScanCacheResult{Clean: true, Source: "clean"})
+	}
 	return nil
 }
 

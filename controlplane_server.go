@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/pbkdf2"
@@ -21,6 +22,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	_ "google.golang.org/grpc/encoding/gzip" // registers the gzip compressor for the config stream
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 )
@@ -85,26 +87,179 @@ func verifyNodeCert(ctx context.Context, claimedNodeID string) error {
 	return nil
 }
 
-func (s *controlPlaneServer) GetConfig(ctx context.Context, _ json.RawMessage) (json.RawMessage, error) {
+func (s *controlPlaneServer) GetConfig(ctx context.Context, req json.RawMessage) (json.RawMessage, error) {
+	// P0-3 version-conditional fast path: the DP sends the version it already
+	// holds. If it is current, return a tiny "unchanged" sentinel instead of
+	// re-marshaling and re-sending the whole (~60 MiB at 2 M hosts) snapshot on
+	// every poll — the dominant steady-state CP CPU/egress cost the 10x cap
+	// raise amplified. This preserves the DP's existing semantics exactly: the
+	// DP already returns before applyConfigSnapshot when snap.Version <=
+	// lastVersion, so nothing (incl. CA-rotation detection, which lives in
+	// apply) fires on an unchanged version today either. An old DP omits the
+	// field (KnownVersion 0) and always gets the full snapshot, and an old CP
+	// ignores the request body and always returns full — so this is
+	// backward-compatible in both rollout directions.
+	// Refuse to distribute an empty config when the initial publish was rejected
+	// (nothing valid was ever published) — a fresh DP must not be handed a zero
+	// snapshot. The DP treats Unavailable as a poll failure and keeps its
+	// last-good; the operator sees the reason and trims the oversized config.
+	if ok, reason := globalConfigStore.ServableConfig(); !ok {
+		return nil, status.Errorf(codes.Unavailable, "control plane has no valid config to distribute: %s", reason)
+	}
+	var greq getConfigRequest
+	_ = json.Unmarshal(req, &greq) // tolerate empty/"{}"/garbage → KnownVersion 0
+	if greq.KnownVersion > 0 && greq.KnownVersion >= globalConfigStore.Version() {
+		return json.Marshal(configUnchangedReply{ConfigUnchanged: true, Version: greq.KnownVersion})
+	}
+
 	// GetConfig is called during initial poll before enrollment completes, so
 	// it must remain reachable without a full node-identity check. However,
 	// the snapshot carries secrets (SessionHMAC) that must NOT leak to
 	// unenrolled callers. We redact those fields unless the peer's TLS cert
 	// serial matches an enrolled, non-revoked node. (C1 fix.)
+	fp := globalClusterCA.CACertFingerprint()
+
+	// T2 CP-side marshal cache: on a config change every enrolled DP polls once
+	// for the new version and the CP re-marshaled the full (~60 MiB at 2 M hosts)
+	// snapshot PER DP. The cache marshals it ONCE per (version, CA-fingerprint)
+	// and serves all enrolled pollers from the shared bytes. Only the ENROLLED
+	// (full) variant is cached; the rare unenrolled bootstrap path is never
+	// cached, so the redacted-response path can never serve a secret-bearing
+	// cached blob (defense-in-depth over the redaction below).
+	if callerIsEnrolledNode(ctx) {
+		return gcMarshalCache.serve(fp)
+	}
+
+	// T2 exfil hardening: the config is non-secret but reveals the org's
+	// blocklist, policy rules, and threat-intel sources. The design serves it to
+	// UNENROLLED callers (the bootstrap contract — C1: redacted, no SessionHMAC),
+	// and the cheap version-conditional poll made bulk pulls low-cost. Throttle
+	// the unenrolled FULL-snapshot pull per peer IP: a legitimate node pulls the
+	// config a handful of times before enrolling, then polls as an enrolled peer;
+	// an exfil loop is rate-limited. Enrolled peers (above) are never throttled.
+	if ip := peerSourceIP(ctx); ip != "" && !unenrolledConfigPullAllow(ip) {
+		return nil, status.Errorf(codes.ResourceExhausted, "unenrolled config-pull rate exceeded; enroll to poll without limit")
+	}
+
 	snap := globalConfigStore.Get()
-	// Include cluster CA fingerprint so DP nodes detect CA rotation.
-	if fp := globalClusterCA.CACertFingerprint(); fp != "" {
+	if fp != "" {
 		snap.CAFingerprint = fp
 	}
+	// Redact secrets from unenrolled callers. We are already in the unenrolled
+	// branch (the enrolled case returned above), so this guard is always true
+	// here — it is kept as an explicit !callerIsEnrolledNode block as
+	// defense-in-depth. The actual field zeroing lives in redactUnenrolledSnapshot
+	// (shared with GetConfigDelta) so the redaction-parity test
+	// (config_surfaces_test.go: TestConfigSurfaces_SnapshotRedaction) pins ONE
+	// place both unenrolled-reachable surfaces route through.
 	if !callerIsEnrolledNode(ctx) {
-		snap.SessionHMAC = ""
-		snap.IdPProfiles = nil
+		redactUnenrolledSnapshot(&snap)
 	}
 	b, err := json.Marshal(snap)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "marshal: %v", err)
 	}
 	return b, nil
+}
+
+// redactUnenrolledSnapshot zeroes every Sensitive ConfigSnapshot field before the
+// snapshot is served to an UNENROLLED caller. It is the single source of truth for
+// unenrolled redaction, shared by GetConfig and GetConfigDelta so the redaction-
+// parity test (config_surfaces_test.go: TestConfigSurfaces_SnapshotRedaction) pins
+// one place and every unenrolled-reachable surface stays covered. When a new
+// Sensitive synced field is added, zero it HERE and both surfaces are protected.
+func redactUnenrolledSnapshot(snap *ConfigSnapshot) {
+	snap.SessionHMAC = ""
+	snap.IdPProfiles = nil
+}
+
+// peerSourceIP returns the client IP of the gRPC peer, or "" when unavailable.
+func peerSourceIP(ctx context.Context) string {
+	p, ok := peer.FromContext(ctx)
+	if !ok || p.Addr == nil {
+		return ""
+	}
+	if host, _, err := net.SplitHostPort(p.Addr.String()); err == nil {
+		return host
+	}
+	return ""
+}
+
+// unenrolledConfigPull throttles unenrolled full-snapshot pulls per peer IP.
+var unenrolledConfigPull = struct {
+	mu       sync.Mutex
+	attempts map[string][]time.Time
+}{attempts: map[string][]time.Time{}}
+
+// unenrolledConfigPullAllow reports whether ip may pull the full unenrolled
+// config now, sliding-window rate-limited. Generous enough for a bootstrapping
+// node's retries, tight enough to make bulk exfiltration slow.
+func unenrolledConfigPullAllow(ip string) bool {
+	const (
+		maxPulls = 10
+		window   = time.Minute
+	)
+	unenrolledConfigPull.mu.Lock()
+	defer unenrolledConfigPull.mu.Unlock()
+	now := time.Now()
+	recent := unenrolledConfigPull.attempts[ip][:0]
+	for _, t := range unenrolledConfigPull.attempts[ip] {
+		if now.Sub(t) < window {
+			recent = append(recent, t)
+		}
+	}
+	unenrolledConfigPull.attempts[ip] = recent
+	if len(recent) >= maxPulls {
+		return false
+	}
+	unenrolledConfigPull.attempts[ip] = append(unenrolledConfigPull.attempts[ip], now)
+	return true
+}
+
+// gcMarshalCache caches the marshaled FULL (enrolled) config snapshot keyed on
+// (version, CA-fingerprint) so N enrolled DPs polling the same config change
+// share ONE marshal instead of forcing N. It never holds a redacted variant, so
+// it cannot leak a secret-bearing blob to an unenrolled caller.
+var gcMarshalCache configMarshalCache
+
+type configMarshalCache struct {
+	mu      sync.Mutex
+	version int64
+	caFP    string
+	bytes   json.RawMessage
+}
+
+// serve returns the marshaled full snapshot for the current published version
+// and CA fingerprint, marshaling (and caching) exactly once per change. The
+// marshal runs under the lock so concurrent first-pollers on a fresh version
+// produce ONE marshal (bounding transient memory to a single copy) rather than
+// N; subsequent pollers return the cached bytes. Lock order is cache→store
+// (Get takes the store RLock); nothing takes the store lock then this one.
+func (c *configMarshalCache) serve(fp string) (json.RawMessage, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	snap := globalConfigStore.Get()
+	if fp != "" {
+		snap.CAFingerprint = fp
+	}
+	if c.bytes != nil && c.version == snap.Version && c.caFP == fp {
+		return c.bytes, nil
+	}
+	b, err := json.Marshal(snap)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "marshal: %v", err)
+	}
+	c.version, c.caFP, c.bytes = snap.Version, fp, b
+	return b, nil
+}
+
+// reset clears the cache. Production never needs it (globalConfigStore is a
+// version-monotonic singleton); tests that swap globalConfigStore call it so a
+// version number reused by a fresh store cannot serve a prior store's bytes.
+func (c *configMarshalCache) reset() {
+	c.mu.Lock()
+	c.version, c.caFP, c.bytes = 0, "", nil
+	c.mu.Unlock()
 }
 
 // callerIsEnrolledNode returns true when the gRPC peer presented a TLS
@@ -152,8 +307,9 @@ func (s *controlPlaneServer) PushMetrics(ctx context.Context, raw json.RawMessag
 	nodeMetrics[report.NodeID] = report
 	nodeMetricsMu.Unlock()
 
-	// Update heartbeat.
-	globalClusterStore.UpdateNodeSeen(report.NodeID, "")
+	// Update heartbeat. M5 PR-B: carry the DP's reported build version so the
+	// cluster node list shows which culvert version each node is actually on.
+	globalClusterStore.UpdateNodeSeen(report.NodeID, "", report.CulvertVersion)
 
 	logger.Printf("ControlPlane: metrics from node %s (total=%d)", report.NodeID, report.Total)
 	// ADR-0005 S3: piggyback the fencing epoch on every heartbeat reply so
@@ -611,6 +767,13 @@ func (s *controlPlaneServer) HASync(ctx context.Context, raw json.RawMessage) (j
 		return nil, status.Errorf(codes.PermissionDenied, "invalid HA token")
 	}
 
+	// Refuse to replicate an empty config to a standby when the leader's initial
+	// publish was rejected (nothing valid ever published) — applyHABundle would
+	// otherwise apply the zero snapshot and wipe the standby's config.
+	if ok, reason := globalConfigStore.ServableConfig(); !ok {
+		return nil, status.Errorf(codes.Unavailable, "leader has no valid config to replicate: %s", reason)
+	}
+
 	// ADR-0005 S0: record the standby's advertised address as the failback
 	// target (only after the token check, so an unauthenticated caller cannot
 	// poison it). The advertised value is normalised against the OBSERVED peer
@@ -637,12 +800,20 @@ func (s *controlPlaneServer) HASync(ctx context.Context, raw json.RawMessage) (j
 		caKeyEncrypted = enc
 	}
 
+	// Replicate the PUBLISHED snapshot (globalConfigStore.Get()), NOT a fresh
+	// CurrentConfigSnapshot(): the published snapshot is the one commit-time
+	// validation already accepted, so the standby always receives a
+	// within-cap, version-CONSISTENT config. A fresh rebuild could be over-cap
+	// (rejected at publish, so never distributed to DPs) yet get stamped with
+	// the old published Version — the standby would then hold config the fleet
+	// never had, mismatched to its version floor.
+	published := globalConfigStore.Get()
 	bundle := HAStateBundle{
 		ClusterState:     stateJSON,
 		CACertPEM:        string(globalClusterCA.CACertPEM()),
 		CAKeyEncrypted:   caKeyEncrypted,
-		Config:           CurrentConfigSnapshot(),
-		Version:          globalConfigStore.Get().Version,
+		Config:           published,
+		Version:          published.Version,
 		PromoteRequested: globalHA.plannedPromotion.Load(), // ADR-0004 Slice 1e: coordinated handoff
 		LeaderTerm:       globalHA.Status().Term,           // ADR-0004 Slice 1c/P2: seed standby epoch
 		Epoch:            globalHA.CurrentEpoch(),          // ADR-0005 S3: puller-side fence input
@@ -686,48 +857,27 @@ func StartControlPlaneGRPC(addr, certFile, keyFile, caFile string) error {
 		return err
 	}
 
-	srv := grpc.NewServer(serverOpt)
-	svc := &controlPlaneServer{}
-
-	srv.RegisterService(&grpc.ServiceDesc{
-		ServiceName: configServiceName,
-		HandlerType: (*controlPlaneServer)(nil),
-		Methods: []grpc.MethodDesc{
-			{
-				MethodName: "GetConfig",
-				Handler:    wrapUnary(svc.GetConfig),
-			},
-			{
-				MethodName: "PushMetrics",
-				Handler:    wrapUnary(svc.PushMetrics),
-			},
-			{
-				MethodName: "Enroll",
-				Handler:    wrapUnary(svc.Enroll),
-			},
-			{
-				MethodName: "SyncRateLimits",
-				Handler:    wrapUnary(svc.SyncRateLimits),
-			},
-			{
-				MethodName: "SyncRevocations",
-				Handler:    wrapUnary(svc.SyncRevocations),
-			},
-			{
-				MethodName: "PushAuditEvents",
-				Handler:    wrapUnary(svc.PushAuditEvents),
-			},
-			{
-				MethodName: "RenewCert",
-				Handler:    wrapUnary(svc.RenewCert),
-			},
-			{
-				MethodName: "HASync",
-				Handler:    wrapUnary(svc.HASync),
-			},
-		},
-		Streams: []grpc.StreamDesc{},
-	}, svc)
+	srv := grpc.NewServer(
+		serverOpt,
+		// Match the DP client's frame budget so an enterprise-scale
+		// ConfigSnapshot (2 M blocked hosts + IP list + URL categories) fits
+		// uncompressed. gRPC's 4 MiB default receive limit is what capped the
+		// old snapshot at ~200 k hosts. Importing
+		// google.golang.org/grpc/encoding/gzip (blank import above) registers
+		// the codec so the server ALWAYS accepts gzip requests and echoes gzip
+		// on those responses — but never REQUIRES it. This is what makes the
+		// DP's opt-in compression (CULVERT_CLUSTER_GRPC_COMPRESSION) a safe,
+		// CP-first migration: an upgraded CP handles both compressed and
+		// uncompressed DPs, so enabling compression never depends on rollout
+		// order the way an unconditional client-side compressor would.
+		// Asymmetric by direction: the big config snapshot only flows OUTBOUND
+		// (GetConfig / HASync responses), so the server SENDS large but RECEIVES
+		// tight — every inbound RPC is small, so a 16 MiB recv cap shrinks the
+		// CP's inbound allocation surface instead of inheriting the 128 MiB frame.
+		grpc.MaxRecvMsgSize(maxClusterInboundMsgSize),
+		grpc.MaxSendMsgSize(maxClusterGRPCMsgSize),
+	)
+	registerConfigService(srv)
 
 	lc := net.ListenConfig{}
 	ln, err := lc.Listen(context.Background(), "tcp", addr)
@@ -742,6 +892,38 @@ func StartControlPlaneGRPC(addr, certFile, keyFile, caFile string) error {
 		}
 	}()
 	return nil
+}
+
+// registerConfigService registers the hand-rolled ConfigService (JSON over
+// gRPC, no protoc) on srv. Shared by StartControlPlaneGRPC and the bufconn
+// round-trip test so the test exercises the EXACT production registration —
+// the registration that used to panic at startup (see the nil impl below).
+//
+// The impl argument to RegisterService is nil, NOT a *controlPlaneServer: every
+// handler is bound via wrapUnary(svc.Method) and closes over svc, so the impl
+// is unused at dispatch. grpc.RegisterService reflect-checks a NON-nil impl
+// against HandlerType, and HandlerType here is a concrete struct
+// (*controlPlaneServer) rather than an interface, so a non-nil impl panics with
+// "reflect: non-interface type passed to Type.Implements". Passing nil takes
+// grpc's legacy no-typecheck path and lets the server actually start.
+func registerConfigService(srv grpc.ServiceRegistrar) {
+	svc := &controlPlaneServer{}
+	srv.RegisterService(&grpc.ServiceDesc{
+		ServiceName: configServiceName,
+		HandlerType: (*controlPlaneServer)(nil),
+		Methods: []grpc.MethodDesc{
+			{MethodName: "GetConfig", Handler: wrapUnary(svc.GetConfig)},
+			{MethodName: "GetConfigDelta", Handler: wrapUnary(svc.GetConfigDelta)},
+			{MethodName: "PushMetrics", Handler: wrapUnary(svc.PushMetrics)},
+			{MethodName: "Enroll", Handler: wrapUnary(svc.Enroll)},
+			{MethodName: "SyncRateLimits", Handler: wrapUnary(svc.SyncRateLimits)},
+			{MethodName: "SyncRevocations", Handler: wrapUnary(svc.SyncRevocations)},
+			{MethodName: "PushAuditEvents", Handler: wrapUnary(svc.PushAuditEvents)},
+			{MethodName: "RenewCert", Handler: wrapUnary(svc.RenewCert)},
+			{MethodName: "HASync", Handler: wrapUnary(svc.HASync)},
+		},
+		Streams: []grpc.StreamDesc{},
+	}, nil)
 }
 
 // StopControlPlaneGRPC gracefully stops the gRPC server, draining in-flight

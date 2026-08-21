@@ -401,6 +401,10 @@ type scanCtx struct {
 	data     []byte
 	lower    []byte
 	lowerSet bool
+	// runner is this scan's regex worker, created on the first regex string and
+	// reused by every later one so the ReDoS timeout harness is paid once per
+	// scan rather than once per string. nil until then; see regexrunner.go.
+	runner *regexRunner
 }
 
 // lowerData returns bytes.ToLower(data), computing it at most once. bytes.ToLower
@@ -421,6 +425,7 @@ func (y *RuleSet) Match(data []byte) []string {
 	y.mu.RUnlock()
 
 	ctx := &scanCtx{data: data}
+	defer ctx.closeRegexRunner()
 	var matched []string
 	for i := range rules {
 		if evalYARARule(&rules[i], ctx) {
@@ -554,7 +559,7 @@ func yaraStringIDExists(defs []yaraStringDef, id string) bool {
 func matchYARAString(s *yaraStringDef, ctx *scanCtx) bool {
 	if s.re != nil {
 		timeout := time.Duration(GetTimeoutSecs()) * time.Second
-		return matchRegexWithTimeout(s.re, ctx.data, timeout)
+		return ctx.matchRegex(s.re, ctx.data, timeout)
 	}
 	if s.noCase {
 		// Body lowercased at most once per scan (ctx.lowerData); literalLower
@@ -567,6 +572,24 @@ func matchYARAString(s *yaraStringDef, ctx *scanCtx) bool {
 
 // yaraInflight tracks abandoned regex goroutines to prevent unbounded accumulation.
 var yaraInflight atomic.Int64
+
+// yaraMatchComponent labels contained per-match panics in the crash plane;
+// yaraMatchPanics is the local counter (MatchPanics()).
+const yaraMatchComponent = "yara-match"
+
+var yaraMatchPanics atomic.Int64
+
+// yaraMatchFn is the regex-match call itself, indirected so the CHAOS-25
+// fault-injection test can make a match panic — a real *regexp.Regexp cannot be
+// coerced into panicking, so without this seam the guard below would be
+// unpinnable. Production never replaces it.
+var yaraMatchFn = func(re *regexp.Regexp, data []byte) bool { return re.Match(data) }
+
+// MatchPanics reports how many regex-match rounds were contained by the
+// CHAOS-25 guard. Non-zero means some scan verdicts were decided by the
+// on-timeout posture rather than by the rule itself, so it is a correctness
+// signal, not only a liveness one.
+func MatchPanics() int64 { return yaraMatchPanics.Load() }
 
 // yaraSaturationCheck returns (saturated, result). When saturated is true, the
 // caller must return result immediately without attempting the regex match.
@@ -611,29 +634,22 @@ func yaraTimeoutResult(timeout time.Duration, pattern string) bool {
 	return GetOnTimeout() != FailOpenWithAlert
 }
 
-// matchRegexWithTimeout runs re.Match(data) in a goroutine. Returns true
+// matchRegexWithTimeout runs re.Match(data) under a deadline. Returns true
 // (fail-closed / suspicious) when the match does not complete within timeout
 // or when the inflight cap is reached, unless the admin has explicitly chosen
 // fail_open_with_alert for that posture.
 // Abandoned goroutines are tracked via yaraInflight to prevent unbounded leaks.
+//
+// This is the standalone single-match form, for callers with no scan to
+// amortize a worker across; it sets up a scanCtx worker and tears it down again
+// (regexrunner.go). The scan path instead threads one scanCtx through every
+// string, so the worker is shared. Both go through the SAME scanCtx.matchRegex,
+// which is the single implementation of the timeout, saturation and posture
+// policy — there is deliberately no second copy to drift out of sync.
 func matchRegexWithTimeout(re *regexp.Regexp, data []byte, timeout time.Duration) bool {
-	inflight := yaraInflight.Load()
-	if saturated, result := yaraSaturationCheck(inflight); saturated {
-		return result
-	}
-	yaraDegradedCheck(inflight)
-	ch := make(chan bool, 1)
-	yaraInflight.Add(1)
-	go func() {
-		defer yaraInflight.Add(-1)
-		ch <- re.Match(data)
-	}()
-	select {
-	case matched := <-ch:
-		return matched
-	case <-time.After(timeout):
-		return yaraTimeoutResult(timeout, re.String())
-	}
+	ctx := &scanCtx{}
+	defer ctx.closeRegexRunner()
+	return ctx.matchRegex(re, data, timeout)
 }
 
 // ── Boolean condition evaluator ───────────────────────────────────────────────

@@ -44,6 +44,14 @@ var errCatalogUnchanged = errors.New("release catalog: unchanged (304)")
 
 const httpCatalogDefaultTimeout = 30 * time.Second
 
+// catalogUserAgent identifies catalog fetches to the origin (matches the
+// project-wide convention in internal/threatfeed/internal/feedsync). A
+// default Go-http-client UA is indistinguishable from generic bot traffic to
+// a CDN/WAF fronting the catalog origin (e.g. Cloudflare bot-management on
+// catalog.culvertlabs.com) and can be blocked with a 403 even though the
+// request is legitimate — every catalog fetch must self-identify.
+const catalogUserAgent = "Culvert-ReleaseCatalog/1.0 (+https://github.com/KidCarmi/Culvert)"
+
 // HTTPCatalogProvider fetches and stages a catalog candidate from an HTTP(S)
 // base URL. It is constructed once and may be reused; ETag/Last-Modified state
 // is retained between Stage calls for conditional fetches.
@@ -414,6 +422,7 @@ func (p *HTTPCatalogProvider) doGet(ctx context.Context, rel string, decorate fu
 		if err != nil {
 			return nil, err
 		}
+		req.Header.Set("User-Agent", catalogUserAgent)
 		if decorate != nil {
 			decorate(req)
 		}

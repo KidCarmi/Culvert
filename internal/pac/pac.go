@@ -9,10 +9,9 @@ package pac
 import (
 	"encoding/json"
 	"fmt"
-	"net"
 	"os"
-	"strings"
 	"sync"
+	"time"
 
 	"github.com/KidCarmi/Culvert/internal/fileutil"
 )
@@ -41,6 +40,9 @@ type Store struct {
 	// Used when Config.ProxyPort is zero, so /proxy.pac auto-detects the
 	// right port even when the admin hasn't explicitly configured it.
 	defaultPort int
+	// modTime is when the config last changed (load or mutation) — the
+	// Last-Modified source for /proxy.pac. Operational metadata only.
+	modTime time.Time
 }
 
 // Load reads config from the JSON file; a missing file is a no-op.
@@ -55,7 +57,32 @@ func (s *Store) Load(path string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return json.Unmarshal(data, &s.cfg)
+	if err := json.Unmarshal(data, &s.cfg); err != nil {
+		return err
+	}
+	s.modTime = time.Now()
+	return nil
+}
+
+// LoadMigrate loads from path, one-way migrating from legacyPath when path
+// does not exist yet but legacyPath does: the legacy file is loaded, the
+// store is re-pointed at path, and the config is persisted there. The legacy
+// file is left in place (frozen; a downgraded binary reads it stale — see
+// docs/operator/pac-traffic-steering.md).
+func (s *Store) LoadMigrate(path, legacyPath string) (migrated bool, err error) {
+	if _, statErr := os.Stat(path); statErr == nil || legacyPath == "" {
+		return false, s.Load(path)
+	}
+	if _, statErr := os.Stat(legacyPath); statErr != nil {
+		return false, s.Load(path)
+	}
+	if err := s.Load(legacyPath); err != nil {
+		return false, err
+	}
+	s.mu.Lock()
+	s.path = path
+	s.mu.Unlock()
+	return true, s.Set(s.Get())
 }
 
 // Get returns a snapshot of the current config.
@@ -67,11 +94,15 @@ func (s *Store) Get() Config {
 	return c
 }
 
-// Set replaces the config and persists it.
+// Set replaces the config and persists it. Set is deliberately TOLERANT of
+// entry content (no validation): its callers include config-version rollback
+// and cluster snapshot apply, which replay historical data and discard
+// errors. Strict validation lives at the admin API boundary (ValidateConfig).
 func (s *Store) Set(c Config) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cfg = c
+	s.modTime = time.Now()
 	if s.path == "" {
 		return nil
 	}
@@ -80,6 +111,13 @@ func (s *Store) Set(c Config) error {
 		return err
 	}
 	return fileutil.AtomicWrite(s.path, data, 0o600)
+}
+
+// ModTime reports when the config last changed (zero before any load/set).
+func (s *Store) ModTime() time.Time {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.modTime
 }
 
 // SetDefaultPort records the runtime proxy listening port used as the
@@ -102,6 +140,7 @@ type State struct {
 	Cfg         Config
 	Path        string
 	DefaultPort int
+	ModTime     time.Time
 }
 
 // Snapshot returns the store's full state. Test support: pair with Restore
@@ -109,7 +148,7 @@ type State struct {
 func (s *Store) Snapshot() State {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return State{Cfg: s.cfg, Path: s.path, DefaultPort: s.defaultPort}
+	return State{Cfg: s.cfg, Path: s.path, DefaultPort: s.defaultPort, ModTime: s.modTime}
 }
 
 // Restore resets the store to a previously captured State (test support).
@@ -119,106 +158,18 @@ func (s *Store) Restore(st State) {
 	s.cfg = st.Cfg
 	s.path = st.Path
 	s.defaultPort = st.DefaultPort
+	s.modTime = st.ModTime
 }
 
-// GeneratePAC builds the PAC JavaScript.
-// proxyAddr is the "host:port" string to use when ProxyHost is empty
-// (caller passes the request's Host as a fallback).
+// Compile builds the PAC artifact for the current config. proxyAddr is the
+// request-derived "host[:port]" used only when Config.ProxyHost is empty
+// (the port part is discarded — /proxy.pac is served from the UI or proxy
+// listener, whose port is not necessarily the proxy port clients must use).
+func (s *Store) Compile(proxyAddr string) Artifact {
+	return CompileConfig(s.Get(), proxyAddr, s.DefaultPort())
+}
+
+// GeneratePAC builds the PAC JavaScript (compatibility wrapper over Compile).
 func (s *Store) GeneratePAC(proxyAddr string) string {
-	c := s.Get()
-
-	host := c.ProxyHost
-	port := c.ProxyPort
-	if port == 0 {
-		if def := s.DefaultPort(); def > 0 {
-			port = def
-		} else {
-			port = 8080
-		}
-	}
-	if host == "" {
-		// r.Host is "uiHost:uiPort" — we only want the hostname part.
-		// The port we serve /proxy.pac from is the UI port, NOT the proxy port;
-		// using it as-is would send client traffic to the wrong listener.
-		proxyAddr = strings.TrimPrefix(proxyAddr, "https://")
-		proxyAddr = strings.TrimPrefix(proxyAddr, "http://")
-		h, _, err := net.SplitHostPort(proxyAddr)
-		if err == nil && h != "" {
-			host = h // bare hostname; port comes from Config.ProxyPort
-		} else {
-			host = proxyAddr // already bare (no port suffix)
-		}
-	}
-	proxyDirective := fmt.Sprintf("PROXY %s:%d", host, port)
-	if host == "" {
-		proxyDirective = "DIRECT"
-	}
-
-	var sb strings.Builder
-	sb.WriteString("function FindProxyForURL(url, host) {\n")
-	sb.WriteString("  // Always bypass for plain names and loopback\n")
-	sb.WriteString("  if (isPlainHostName(host)) return \"DIRECT\";\n")
-	sb.WriteString("  if (isInNet(dnsResolve(host), \"127.0.0.0\", \"255.0.0.0\")) return \"DIRECT\";\n")
-	sb.WriteString("  // RFC-1918 private ranges — always DIRECT\n")
-	sb.WriteString("  if (isInNet(dnsResolve(host), \"10.0.0.0\",    \"255.0.0.0\"))   return \"DIRECT\";\n")
-	sb.WriteString("  if (isInNet(dnsResolve(host), \"172.16.0.0\",  \"255.240.0.0\")) return \"DIRECT\";\n")
-	sb.WriteString("  if (isInNet(dnsResolve(host), \"192.168.0.0\", \"255.255.0.0\")) return \"DIRECT\";\n")
-
-	if len(c.Exclusions) > 0 {
-		sb.WriteString("\n  // Custom exclusions — go DIRECT\n")
-		for _, exc := range c.Exclusions {
-			writeExclusion(&sb, strings.TrimSpace(exc))
-		}
-	}
-
-	sb.WriteString("\n  // All other traffic routes through the proxy\n")
-	fmt.Fprintf(&sb, "  return %q;\n", proxyDirective)
-	sb.WriteString("}\n")
-	return sb.String()
-}
-
-// writeExclusion appends the PAC DIRECT rule for a single exclusion entry:
-// IP CIDR → isInNet, "*."-wildcard → dnsDomainIs, bare domain → exact match
-// plus subdomains. Blank entries are skipped.
-func writeExclusion(sb *strings.Builder, exc string) {
-	switch {
-	case exc == "":
-		// blank / whitespace-only — silently skipped
-	case isIPCIDR(exc):
-		// IP CIDR — use isInNet with mask derived from prefix length.
-		if ip, mask, ok := cidrToIPMask(exc); ok {
-			fmt.Fprintf(sb, "  if (isInNet(dnsResolve(host), %q, %q)) return \"DIRECT\";\n", ip, mask)
-		}
-	case strings.HasPrefix(exc, "*."):
-		// *.corp.com → all subdomains of corp.com
-		suffix := exc[1:] // .corp.com
-		fmt.Fprintf(sb, "  if (dnsDomainIs(host, %q)) return \"DIRECT\";\n", suffix)
-	default:
-		// bare domain — exact match + all subdomains
-		fmt.Fprintf(sb, "  if (host === %q || dnsDomainIs(host, %q)) return \"DIRECT\";\n", exc, "."+exc)
-	}
-}
-
-// isIPCIDR returns true if s looks like an IP CIDR range (contains '/').
-func isIPCIDR(s string) bool { return strings.Contains(s, "/") }
-
-// cidrToIPMask converts "192.168.0.0/16" → ("192.168.0.0", "255.255.0.0", true).
-// Only handles IPv4.
-func cidrToIPMask(cidr string) (ip, mask string, ok bool) {
-	parts := strings.SplitN(cidr, "/", 2)
-	if len(parts) != 2 {
-		return "", "", false
-	}
-	ip = parts[0]
-	var prefix int
-	if _, err := fmt.Sscanf(parts[1], "%d", &prefix); err != nil || prefix < 0 || prefix > 32 {
-		return "", "", false
-	}
-	var m uint32
-	if prefix > 0 {
-		m = ^uint32(0) << (32 - prefix)
-	}
-	mask = fmt.Sprintf("%d.%d.%d.%d",
-		(m>>24)&0xff, (m>>16)&0xff, (m>>8)&0xff, m&0xff)
-	return ip, mask, true
+	return s.Compile(proxyAddr).JS
 }

@@ -2,7 +2,14 @@ package main
 
 // auth_startup.go — startup-time loader for the auth slice
 // (P4.4 / S1). Mirrors the pre-extraction body of initAuth
-// (main.go:508–528) byte-for-byte except parameterized.
+// (main.go:508–528), parameterized, plus one closed gap: a
+// validateAuthStartupCredentials gate (nightly QA finding) ahead of
+// cfg.SetAuth so a non-empty -user/-pass or auth.user/auth.pass that
+// fails validatePasswordComplexity is rejected fatally at startup
+// instead of silently creating a "configured" admin account that
+// bypasses the same floor every other credential entry point
+// (apiSetupComplete, the admin config-auth API, --reset-password)
+// already enforces.
 //
 // Behaviour invariants preserved:
 //   - cfg.ProxyPort and cfg.UIPort assigned directly (the two
@@ -30,6 +37,9 @@ import "log"
 func loadAuth(auth authStartupConfig) {
 	cfg.ProxyPort = auth.ProxyPort
 	cfg.UIPort = auth.UIPort
+	if err := validateAuthStartupCredentials(auth); err != nil {
+		log.Fatalf("Rejecting -user/-pass (or auth.user/auth.pass): %v", err)
+	}
 	if err := cfg.SetAuth(auth.AuthUser, auth.AuthPass); err != nil {
 		log.Fatalf("Failed to set auth: %v", err)
 	}

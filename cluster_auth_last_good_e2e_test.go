@@ -34,8 +34,8 @@ func TestClusterAuth_LiveControlPlaneSyncUpdatesDataPlaneAuth(t *testing.T) {
 	}
 	client.fetchAndApply(t.Context())
 
-	if client.lastVersion != 1 {
-		t.Fatalf("lastVersion = %d, want 1 after first CP sync", client.lastVersion)
+	if client.lastVersion.Load() != 1 {
+		t.Fatalf("lastVersion = %d, want 1 after first CP sync", client.lastVersion.Load())
 	}
 	if cfg.ProxyBaseURL() != "https://proxy.example.test/culvert" || !trustForwardedHeaders {
 		t.Fatalf("DP auth settings = base %q trust %v, want CP-published values", cfg.ProxyBaseURL(), trustForwardedHeaders)
@@ -65,8 +65,8 @@ func TestClusterAuth_LiveControlPlaneSyncUpdatesDataPlaneAuth(t *testing.T) {
 	fixture.store.Update(updated)
 	client.fetchAndApply(t.Context())
 
-	if client.lastVersion != 2 {
-		t.Fatalf("lastVersion = %d, want 2 after CP IdP update", client.lastVersion)
+	if client.lastVersion.Load() != 2 {
+		t.Fatalf("lastVersion = %d, want 2 after CP IdP update", client.lastVersion.Load())
 	}
 	if cfg.ProxyBaseURL() != "https://proxy2.example.test/edge" {
 		t.Fatalf("DP ProxyBaseURL = %q, want updated CP value", cfg.ProxyBaseURL())

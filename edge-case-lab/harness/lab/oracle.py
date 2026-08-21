@@ -315,12 +315,15 @@ def _tls_disposition(intent: dict, rule: dict, vec: dict, exp: Expectation) -> s
             exp.notes.append("ssl-bypass override forces passthrough despite inspect rule")
             return TLS_PASSTHROUGH
     # inspect active. If upstream cert is untrusted and the rule does NOT skip verify
-    # and the profile is not permissive/skip => inspect leg fails => connection fails.
+    # and the profile is not skip => inspect leg fails => connection fails.
     upstream_untrusted = vec.get("upstream_cert") == "untrusted"
     prof = (intent.get("objects", {}).get("decryption_profiles") or {}).get(rule.get("decryption_profile") or "", {})
-    # Profiles are stored as {"api": {"certVerification": "skip"|"permissive"|"strict", ...}}
+    # Profiles are stored as {"api": {"certVerification": "skip"|"strict", ...}}.
+    # 'permissive' was RETIRED (#716) — rejected on write, migrated to 'strict' on
+    # load/sync — so it can never appear here and is NOT a relaxed mode (it always
+    # verified like strict anyway).
     prof_verify = (prof.get("api", {}) or {}).get("certVerification") or prof.get("cert_verification")
-    verify_relaxed = rule.get("tls_skip_verify") or prof_verify in ("skip", "permissive")
+    verify_relaxed = rule.get("tls_skip_verify") or prof_verify == "skip"
     if upstream_untrusted and not verify_relaxed:
         exp.disposition = CONN_FAIL
         exp.http_status_family = "conn_fail"

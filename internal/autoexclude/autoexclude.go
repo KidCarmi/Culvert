@@ -8,12 +8,19 @@
 // multi-tenant forward proxy. Four design choices make it safe to auto-disable
 // inspection for a host based on a runtime signal:
 //
-//  1. SCOPED KEY. Every entry is keyed by (scope, host), where scope is an
-//     explicit policy boundary — the matched decryption profile's identity. A
-//     host learned under one fail-open profile is consulted ONLY for sessions
-//     matched to that same profile, so one fail-open rule/profile/tenant can
-//     never create a bypass consumed by another rule targeting the same host.
-//     Host-only keying is NOT policy isolation; the scope is.
+//  1. SCOPED KEY + SECURITY GENERATION. Every entry is keyed by (scope, host),
+//     where scope is an explicit policy boundary — the matched decryption profile's
+//     identity. A host learned under one fail-open profile is consulted ONLY for
+//     sessions matched to that same profile, so one fail-open rule/profile/tenant
+//     can never create a bypass consumed by another rule targeting the same host.
+//     Host-only keying is NOT policy isolation; the scope is. Each entry ALSO records
+//     the owning profile's SECURITY GENERATION (a fingerprint over the fields that
+//     change inspection compatibility or bypass authorization). Observe/Contains
+//     compare it, so a security-relevant profile edit — which keeps the same stable
+//     scope ID — invalidates the entry immediately (miss → re-inspect) rather than
+//     letting a stale-posture bypass live to TTL. A rename/cosmetic edit keeps the
+//     gen, so it never invalidates. This NARROWS the (scope, host) boundary to
+//     (scope, gen, host); it never broadens it.
 //
 //  2. CONFIRM-COUNT over distinct CLIENT-EVIDENCE tokens. A host is not excluded
 //     on the first failure. The cache holds a PENDING observation per
@@ -123,6 +130,12 @@ type Entry struct {
 	// ClientCount is how many distinct client-evidence tokens were observed
 	// failing before promotion (provenance for the learn decision).
 	ClientCount int `json:"client_count"`
+	// SecurityGen is the owning profile's security generation (fingerprint over the
+	// security-effective fields) under which this exclusion was learned. A profile
+	// edit that changes that posture changes the gen, so this entry stops matching
+	// (Contains misses) and the session re-inspects. Surfaced for operator/fleet
+	// visibility into which posture an exclusion belongs to.
+	SecurityGen string `json:"security_gen,omitempty"`
 }
 
 type entry struct {
@@ -134,6 +147,7 @@ type entry struct {
 	expiresAt   time.Time
 	hits        int64
 	clientCount int
+	gen         string // security generation under which this exclusion was learned
 }
 
 // pend is an in-progress observation awaiting confirmN distinct client tokens.
@@ -218,7 +232,7 @@ func (c *Cache) reasonTTL(r Reason) time.Duration {
 // (promoted=true is the security-relevant "inspection just went dark" event — the
 // caller fires the audit/alert/metric on it). If already actively excluded, it is
 // a no-op returning false. An empty scopeID or host is ignored (fail-safe).
-func (c *Cache) Observe(scopeID, scopeName, host string, reason Reason, client string) (promoted bool) {
+func (c *Cache) Observe(scopeID, gen, scopeName, host string, reason Reason, client string) (promoted bool) {
 	h := normHost(host)
 	if scopeID == "" || h == "" {
 		return false
@@ -229,11 +243,16 @@ func (c *Cache) Observe(scopeID, scopeName, host string, reason Reason, client s
 	defer c.mu.Unlock()
 
 	ak := key(scopeID, h)
-	if e, ok := c.active[ak]; ok && now.Before(e.expiresAt) {
-		return false // already excluded for this scope
+	if e, ok := c.active[ak]; ok && now.Before(e.expiresAt) && e.gen == gen {
+		return false // already excluded for this scope under the CURRENT posture
 	}
+	// A stale-gen active entry (profile edited since it was learned) does NOT
+	// short-circuit here: evidence re-accumulates under the new gen and the
+	// promotion below OVERWRITES the stale entry with the current-posture one.
 
-	pk := ak + "\x00" + string(reason)
+	// Pending is gen-scoped so evidence never merges across security postures: an
+	// edit mid-accumulation starts a fresh confirm-count for the new posture.
+	pk := ak + "\x00" + gen + "\x00" + string(reason)
 	p := c.pend[pk]
 	switch {
 	case p == nil:
@@ -257,7 +276,9 @@ func (c *Cache) Observe(scopeID, scopeName, host string, reason Reason, client s
 		return false // still gathering confirmation
 	}
 
-	// Promote to an active exclusion for this scope.
+	// Promote to an active exclusion for this scope + posture. This OVERWRITES any
+	// stale-gen entry at ak (a pre-edit exclusion the caller can no longer consult),
+	// reclaiming the (scope, host) slot for the current posture.
 	c.active[ak] = &entry{
 		scopeID:     scopeID,
 		scopeName:   scopeName,
@@ -266,25 +287,33 @@ func (c *Cache) Observe(scopeID, scopeName, host string, reason Reason, client s
 		learnedAt:   now,
 		expiresAt:   now.Add(c.reasonTTL(reason)),
 		clientCount: len(p.clients),
+		gen:         gen,
 	}
 	delete(c.pend, pk)
-	// Drop any other pending observations for the SAME (scope, host) under a
+	// Drop any other pending observations for the SAME (scope, gen, host) under a
 	// different reason — it's excluded now. Keyed on the fixed reason set, so this
 	// is O(#reasons), NOT an O(pending) scan (which would be a per-promotion CPU/
-	// lock-hold cost under load).
+	// lock-hold cost under load). Stale-gen pending for the same host ages out via
+	// the window; it is a different posture and must not be silently merged.
 	for _, r := range allReasons {
 		if r != reason {
-			delete(c.pend, ak+"\x00"+string(r))
+			delete(c.pend, ak+"\x00"+gen+"\x00"+string(r))
 		}
 	}
 	c.evictLocked(now)
 	return true
 }
 
-// Contains reports whether (scopeID, host) is actively excluded, returning the
-// learn reason. On a hit it increments that entry's blast-radius hit counter.
-// Expired entries read as absent (lazy — physical removal happens in evict/List).
-func (c *Cache) Contains(scopeID, host string) (Reason, bool) {
+// Contains reports whether (scopeID, host) is actively excluded UNDER the current
+// security generation gen, returning the learn reason. On a hit it increments that
+// entry's blast-radius hit counter. Expired entries read as absent (lazy — physical
+// removal happens in evict/List). A gen MISMATCH also reads as absent: the owning
+// profile's security posture changed since the entry was learned, so the stale entry
+// is not consulted and the session returns to normal inspection (it re-learns under
+// the new posture, or the stale entry ages out / is overwritten by the next
+// promotion). The stale entry is intentionally not deleted here — Contains holds only
+// the RLock; it is bounded by maxEntries + TTL like any other entry.
+func (c *Cache) Contains(scopeID, gen, host string) (Reason, bool) {
 	h := normHost(host)
 	if scopeID == "" || h == "" {
 		return "", false
@@ -299,7 +328,7 @@ func (c *Cache) Contains(scopeID, host string) (Reason, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	e, ok := c.active[key(scopeID, h)]
-	if !ok || !now.Before(e.expiresAt) {
+	if !ok || !now.Before(e.expiresAt) || e.gen != gen {
 		return "", false
 	}
 	atomic.AddInt64(&e.hits, 1)
@@ -541,6 +570,7 @@ func (c *Cache) List() []Entry {
 			ExpiresAt:   e.expiresAt,
 			Hits:        atomic.LoadInt64(&e.hits),
 			ClientCount: e.clientCount,
+			SecurityGen: e.gen,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].LearnedAt.After(out[j].LearnedAt) })
@@ -603,6 +633,23 @@ type Stats struct {
 	PinnedSecs int `json:"pinned_ttl_secs"`
 	WindowSecs int `json:"window_secs"`
 	MaxEntries int `json:"max_entries"`
+}
+
+// ActiveByScope returns the count of currently-active (non-expired) exclusions per scope
+// ID — the per-scope breakdown behind the culvert_decrypt_autoexclude_active{scope} gauge
+// (F6). Scope cardinality is bounded by the admin-created decryption-profile set, so no
+// label cap is needed. A scope with only expired entries is omitted (its live count is 0).
+func (c *Cache) ActiveByScope() map[string]int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	now := c.now()
+	out := make(map[string]int)
+	for _, e := range c.active {
+		if now.Before(e.expiresAt) {
+			out[e.scopeID]++
+		}
+	}
+	return out
 }
 
 // Stats returns a snapshot of the cache configuration and occupancy.

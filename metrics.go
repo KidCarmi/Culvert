@@ -263,7 +263,10 @@ func startHitCounterPersistence(ctx context.Context, path string) <-chan struct{
 				saveHitCounters(path)
 				return
 			case <-t.C:
-				saveHitCounters(path)
+				// CHAOS-24: contain the ROUND so a marshal fault costs one
+				// checkpoint rather than the process, and the loop survives to
+				// take the next one (and the ctx.Done final save).
+				runGuarded("metrics_persist", func() { saveHitCounters(path) })
 			}
 		}
 	}()
@@ -523,6 +526,10 @@ culvert_clamav_blocked_total %d
 # TYPE culvert_yara_blocked_total counter
 culvert_yara_blocked_total %d
 
+# HELP culvert_clam_scan_errors_total Total ClamAV scan errors mid-request (content forwarded unscanned, fail-open)
+# TYPE culvert_clam_scan_errors_total counter
+culvert_clam_scan_errors_total %d
+
 # HELP culvert_threat_feed_blocked_total Total requests blocked by threat intelligence feeds
 # TYPE culvert_threat_feed_blocked_total counter
 culvert_threat_feed_blocked_total %d
@@ -575,6 +582,7 @@ culvert_auth_sso_required_total %d
 		dpiBlocked,
 		clamBlocked,
 		yaraBlocked,
+		scanCounters.ClamScanError,
 		feedBlocked,
 		feedEntries,
 		globalThreatFeed.AllowlistMaskedTotal(),
@@ -587,6 +595,10 @@ culvert_auth_sso_required_total %d
 		atomic.LoadInt64(&statAuthCredentialRequired),
 		atomic.LoadInt64(&statAuthSSORequired),
 	)
+
+	// Config-snapshot cluster-sync cap utilization is emitted for ALL capped
+	// slices by writeConfigSnapshotSizeMetrics (cluster_metrics.go), sourced from
+	// the sizes cached at publish — no per-scrape snapshot rebuild.
 
 	// PR3d — inspected native-HTTP/2 tunnel drain observability. activeConns above
 	// conflates H1-inspect, H2-inspect, and raw-bypass tunnels; these disambiguate
@@ -613,6 +625,89 @@ culvert_h2_inspect_drain_forced_total %d
 		atomic.LoadInt64(&statH2InspectForced),
 	)
 
+	// CHAOS-11: parent-proxy chain fail-open visibility. fallback_active=1
+	// means the pool is CURRENTLY bypassed (all parents unhealthy or
+	// circuit-open) and egress is direct; the counter tracks how many
+	// requests egressed direct while the chain was configured.
+	upFallbackActive, upFallbackTotal := upstreamPool.DirectFallback()
+	upActiveVal := 0
+	if upFallbackActive {
+		upActiveVal = 1
+	}
+	_, _ = fmt.Fprintf(w, `# HELP culvert_upstream_direct_fallback_active 1 when the parent-proxy pool is currently failing open to direct egress (all parents down)
+# TYPE culvert_upstream_direct_fallback_active gauge
+culvert_upstream_direct_fallback_active %d
+
+# HELP culvert_upstream_direct_fallback_total Requests that egressed DIRECT because no parent proxy was available (fail-open bypass of the chain)
+# TYPE culvert_upstream_direct_fallback_total counter
+culvert_upstream_direct_fallback_total %d
+`,
+		upActiveVal,
+		upFallbackTotal,
+	)
+
+	// CHAOS-45: durable-write (persistence) health. The boot-time writability
+	// probe cannot see a volume that goes read-only or full LATER, and most
+	// store Save() paths discard the write error — these series are the only
+	// runtime signal that persisted state is being lost.
+	// culvert_storage_write_degraded is 1 while a failure occurred inside
+	// storageDegradedWindow; the age gauge is omitted entirely when no failure
+	// has ever been observed (a "0" would read as "just failed").
+	swSnap := storageWriteFailures()
+	swDegraded := 0
+	if storageDegraded() {
+		swDegraded = 1
+	}
+	_, _ = fmt.Fprintf(w, `# HELP culvert_storage_write_failures_total Durable writes (fileutil.AtomicWrite) that failed since boot — persisted config/state was lost
+# TYPE culvert_storage_write_failures_total counter
+culvert_storage_write_failures_total %d
+
+# HELP culvert_storage_write_degraded 1 when a durable write failed recently enough that persistence should be treated as broken
+# TYPE culvert_storage_write_degraded gauge
+culvert_storage_write_degraded %d
+`,
+		swSnap.Total,
+		swDegraded,
+	)
+	if swSnap.Total > 0 {
+		_, _ = fmt.Fprintf(w, `# HELP culvert_storage_write_last_failure_age_seconds Seconds since the most recent durable-write failure (absent when none has occurred)
+# TYPE culvert_storage_write_last_failure_age_seconds gauge
+culvert_storage_write_last_failure_age_seconds %d
+`,
+			int64(time.Since(swSnap.Last).Seconds()),
+		)
+	}
+
+	// CHAOS-47: identity-backend reachability. culvert_requests_auth_fail
+	// conflates "wrong password" with "the directory is down", which is exactly
+	// the ambiguity that made an IdP outage look like a brute-force spike.
+	// These series separate the infrastructure half: _unavailable_total counts
+	// detected unreachable outcomes (one per probe, not per denied request),
+	// _unavailable is 1 while a backend is in its cooldown, and
+	// _gated_denials_total is the blast radius — requests denied without
+	// contacting the backend while it was gated.
+	abSnap := authBackendHealthStatus()
+	abDegraded := 0
+	if abSnap.Degraded {
+		abDegraded = 1
+	}
+	_, _ = fmt.Fprintf(w, `# HELP culvert_auth_backend_unavailable_total Times an external identity backend (LDAP/OIDC) could not be reached — authentication failed closed
+# TYPE culvert_auth_backend_unavailable_total counter
+culvert_auth_backend_unavailable_total %d
+
+# HELP culvert_auth_backend_unavailable 1 while an external identity backend is unreachable (cleared only by an observed successful reach)
+# TYPE culvert_auth_backend_unavailable gauge
+culvert_auth_backend_unavailable %d
+
+# HELP culvert_auth_backend_gated_denials_total Authentication attempts denied during an identity-backend outage without contacting the backend
+# TYPE culvert_auth_backend_gated_denials_total counter
+culvert_auth_backend_gated_denials_total %d
+`,
+		abSnap.Unavailable,
+		abDegraded,
+		abSnap.GatedDenials,
+	)
+
 	// Decryption-profile success delta: which protocol inspected tunnels negotiated
 	// on the upstream leg (h2 = Inspect-as-HTTP/2 working; http/1.1 = strip/downgrade).
 	_, _ = fmt.Fprintf(w, `# HELP culvert_inspect_upstream_alpn_total Inspected-tunnel upstream (origin) leg negotiated protocol
@@ -629,13 +724,10 @@ culvert_inspect_upstream_alpn_total{protocol="http/1.1"} %d
 	// coverage erosion the operator can alert on). Learn events (by reason) append
 	// via autoExcludeLearns.writePrometheus below.
 	aeStats := autoExclude().Stats()
-	_, _ = fmt.Fprintf(w, `# HELP culvert_decrypt_autoexclude_hit_total Sessions that bypassed SSL inspection because of a learned decryption exclusion
-# TYPE culvert_decrypt_autoexclude_hit_total counter
-culvert_decrypt_autoexclude_hit_total %d
-# HELP culvert_decrypt_autoexclude_active Current count of active learned decryption exclusions (hosts inspection is OFF for)
-# TYPE culvert_decrypt_autoexclude_active gauge
-culvert_decrypt_autoexclude_active %d
-# HELP culvert_decrypt_autoexclude_pending Current count of in-progress (unconfirmed) exclusion observations
+	// hit_total{scope} and active{scope} are emitted as labelled series below (F6, via
+	// autoExcludeHitsByScope + writeAutoExcludeActiveByScope); the process total is
+	// sum()-able and also surfaced on /api/decryption/health.
+	_, _ = fmt.Fprintf(w, `# HELP culvert_decrypt_autoexclude_pending Current count of in-progress (unconfirmed) exclusion observations
 # TYPE culvert_decrypt_autoexclude_pending gauge
 culvert_decrypt_autoexclude_pending %d
 # HELP culvert_decrypt_autoexclude_rescue_total Sessions live-bypassed on the first client_cert_required signal (confirm-count-exempt, before any persistent promotion)
@@ -645,8 +737,6 @@ culvert_decrypt_autoexclude_rescue_total %d
 # TYPE culvert_decrypt_autoexclude_surge_total counter
 culvert_decrypt_autoexclude_surge_total %d
 `,
-		atomic.LoadInt64(&autoExcludeHitCounter),
-		aeStats.Active,
 		aeStats.Pending,
 		atomic.LoadInt64(&autoExcludeRescueCounter),
 		atomic.LoadInt64(&autoExcludeSurgeCounter),
@@ -656,7 +746,11 @@ culvert_decrypt_autoexclude_surge_total %d
 	ruleMet.WritePrometheus(&ruleMetBuf)
 	decProfMintlsRejects.writePrometheus(&ruleMetBuf)
 	autoExcludeLearns.writePrometheus(&ruleMetBuf)
-	crashByComponent.writePrometheus(&ruleMetBuf) // culvert_crash_records_* (panic recovery)
+	autoExcludeHitsByScope.writePrometheus(&ruleMetBuf) // F6: per-scope autoexclude hit counter
+	writeAutoExcludeActiveByScope(&ruleMetBuf)          // F6: per-scope autoexclude active gauge
+	decSessions.writePrometheus(&ruleMetBuf)            // culvert_decrypt_sessions_total (ADR-0011 coverage)
+	decFailures.writePrometheus(&ruleMetBuf)            // culvert_decrypt_failures_total (ADR-0011 failure taxonomy)
+	crashByComponent.writePrometheus(&ruleMetBuf)       // culvert_crash_records_* (panic recovery)
 	latencyHist.WritePrometheus(&ruleMetBuf)
 	urlcatWritePrometheus(&ruleMetBuf)
 	caWritePrometheus(&ruleMetBuf)
@@ -665,5 +759,9 @@ culvert_decrypt_autoexclude_surge_total %d
 	cdrWritePrometheus(&ruleMetBuf)
 	liveFeedWritePrometheus(&ruleMetBuf)
 	releaseCatalogWritePrometheus(&ruleMetBuf)
-	fmt.Fprint(w, ruleMetBuf.String()) //nolint:errcheck
+	pacWritePrometheus(&ruleMetBuf)
+	supportWritePrometheus(&ruleMetBuf)   // culvert_support_bundle_retention_* (M5 retention observability)
+	saasFeedWritePrometheus(&ruleMetBuf)  // culvert_saasfeed_* (F3b-4 signed-feed observability)
+	writeMCPTelemetryMetrics(&ruleMetBuf) // culvert_mcp_* (QUAL-3 durable telemetry, low-cardinality)
+	fmt.Fprint(w, ruleMetBuf.String())    //nolint:errcheck // writes to http.ResponseWriter; an error only means the client disconnected
 }

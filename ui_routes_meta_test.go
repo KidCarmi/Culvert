@@ -60,8 +60,45 @@ import (
 //     surface (bundle report/approve, debug-level, diagnose/{storage,upstream,
 //     dns,tls}, bundle validate + download-encrypted, and related routes); see
 //     `const want` below for the current authoritative total.
+//   - 164 — ADR-0011 P2 added /api/decryption/health (read-only decryption
+//     coverage + failure-taxonomy aggregate; viewer).
+//   - 173 — PAC Traffic Steering PR2+PR3 integration: +7 routes over main's 166
+//     (/pac/ per-profile PAC file; /api/pac/profiles, /profiles/, /pools,
+//     /pools/, /simulate, /analyze).
+//   - 174 — PAC Exception Intelligence P0 added /api/pac/posture/inventory
+//     (read-only config-derived DIRECT full-bypass inventory; viewer).
+//   - 176 — PAC Exception Intelligence P2 added /api/pac/posture/exceptions
+//     (governance list; viewer) + /api/pac/posture/exceptions/ (item: viewer
+//     GET, admin PUT/DELETE).
+//   - 177 — ADR-0011 §4 added /api/decryption/redaction (GET viewer / PUT admin
+//     host/SNI redaction toggle).
+//   - 178 — reconcile parallel-merge drift: /api/diagnose/support (M5, #834) and
+//     /api/decryption/redaction landed together; both carry metadata (parity
+//     green) but the const bump for one was overwritten, leaving actual=178 and
+//     the lock at 177 (main's Fast Gate was red on this). Bumped to match.
+//   - 180 — PAC Exception Intelligence P3 added /api/pac/posture/diff (read-only
+//     candidate DIRECT change-diff; viewer POST), on top of main's 179.
+//   - 181 — M5 supportability added /api/diagnose/etcd (bounded read-only HA
+//     fencing-lease reachability probe; operator POST).
+//   - 182 — T3 P1 added /api/cluster/convergence (read-only config-sync fleet
+//     convergence / straggler view; viewer).
+//   - 183 — M6 secure-upload PR-1 added /api/support/upload/config (node-local
+//     default-off upload posture; GET viewer / PUT admin; no egress).
+//   - 184 — M6 secure-upload PR-4 added /api/support/tac-trust (read-only resolved
+//     TAC recipient trust set for encrypt-to-TAC; GET viewer; no egress).
+//   - 186 — M6 secure-upload PR-5 added /api/support/uploads (GET viewer: upload
+//     queue list) and /api/support/bundles/{id}/upload (GET viewer status+receipt /
+//     POST admin per-bundle upload consent → seal + enqueue).
+//   - 187 — M7 Slice 1 added /api/support/telemetry/preview (GET admin: read-only
+//     preview of the current support-telemetry sample; no consent, sender, or
+//     egress exists yet).
+//   - 188 — M7 Slice 2 added /api/support/telemetry/config (GET viewer / PUT
+//     admin: node-local telemetry consent + bearer-auth config; still zero
+//     egress — no sender exists yet).
+//   - 189 — Added /api/urlcat/feed-status (GET viewer: UT1 + SaaS category
+//     feed freshness/failure counts, previously Prometheus-only).
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 160
+	const want = 222 // 219 + 3 ADR-0025 LDAP IdP routes (/api/idp/test, /api/idp/legacy-ldap, /api/idp/legacy-ldap/import)
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}
@@ -169,6 +206,7 @@ var helperSourceFiles = []string{
 	"release_api.go",
 	"ui_support.go",
 	"diagnose.go",
+	"ui_mcp.go",
 }
 
 // scanRegisteredRoutes returns every route path registered by a
@@ -179,7 +217,10 @@ var helperSourceFiles = []string{
 func scanRegisteredRoutes() (map[string]string, error) {
 	out := make(map[string]string)
 	for _, name := range helperSourceFiles {
-		data, err := os.ReadFile(filepath.Clean(name))
+		// Absolute path anchored to the package source dir — NOT CWD — so a
+		// concurrent test's os.Chdir cannot make this scan read a wrong/partial
+		// file set (the CWD-race flake that intermittently breaks C1 reverse parity).
+		data, err := os.ReadFile(filepath.Join(pkgSourceDir(), name))
 		if err != nil {
 			return nil, err
 		}

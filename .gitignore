@@ -60,3 +60,6 @@ edge-case-lab/evidence/
 edge-case-lab/scenarios/
 edge-case-lab/reports/mutation-raw.jsonl
 /tmp/culvert.log
+
+# OpenAPI tool install dir (scripts/openapi/*.sh)
+.tools/

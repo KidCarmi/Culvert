@@ -585,6 +585,7 @@ func registerClusterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/cluster/node-groups/membership", apiNodeGroupMembership) // GET group membership (F9)
 	mux.HandleFunc("/api/cluster/drain", apiClusterDrain)                         // POST toggle node drain mode
 	mux.HandleFunc("/api/cluster/metrics", apiClusterMetrics)                     // GET aggregated cluster metrics
+	mux.HandleFunc("/api/cluster/convergence", apiClusterConvergence)             // GET config-sync fleet convergence (T3 P1)
 	mux.HandleFunc("/api/cluster/ca", apiClusterCA)                               // GET info / POST import cluster CA
 	mux.HandleFunc("/api/cluster/rate-limits", apiClusterRateLimits)              // GET distributed RL status
 	mux.HandleFunc("/api/cluster/audit", apiClusterAudit)                         // GET centralized audit log

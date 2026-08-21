@@ -23,7 +23,7 @@ Consequences:
 
 - First admin via the setup wizard; further admins/roles via `GET/POST/DELETE /api/auth/users` (admin-only). Roles: admin / operator / viewer, enforced by `requireRole` plus the C2 metadata middleware.
 - Passwords: complexity-enforced, bcrypt at rest in `/data/ui_users.json` (0600). TOTP 2FA available with backup codes.
-- **Last-admin protection:** the API refuses to delete the final admin (`store.go:619-636`).
+- **Last-admin protection:** the API refuses to delete the final admin (`DeleteUIUser`, `store.go:693-710`).
 - **Brute-force lockout:** IP + user lockout after 5 failures (15-min cooldown) + a 20-failure account-wide tier. Lockout state is **in-memory** — a process restart clears it. A previously-successful login IP is trusted for 30 days and bypasses the tier-2 account lock.
 
 ## 3. Proxy-user authentication (LDAP / OIDC / SAML)

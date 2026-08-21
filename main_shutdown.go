@@ -63,8 +63,14 @@ const (
 	// in the sequence the gRPC server has stopped (no new heartbeats) and
 	// appLifecycleCancel has stopped the heartbeat monitor, so the Save
 	// races with nothing.
-	shutdownOrderClusterStoreFlush   = 55
-	shutdownOrderScanSvcShutdown     = 60
+	shutdownOrderClusterStoreFlush = 55
+	shutdownOrderScanSvcShutdown   = 60
+	// PR-5: stop the MCP listeners (drain-bounded) before the admin UI + proxy
+	// drain. A disabled runtime makes this a no-op.
+	shutdownOrderMCPRuntimeStop = 65
+	// QUAL-3: drain + close the MCP telemetry spool/exporter AFTER the listeners stop
+	// (so no new events are produced), before the admin UI. A no-op while disabled.
+	shutdownOrderMCPTelemetryDrain   = 66
 	shutdownOrderAdminUIShutdown     = 70
 	shutdownOrderSOCKS5ListenerStop  = 80
 	shutdownOrderProxyServerShutdown = 90
@@ -189,6 +195,20 @@ func registerLateShutdownHooks(reg *shutdownRegistry, s *startupState, proxySrv 
 	reg.Register("scan-svc-shutdown", shutdownOrderScanSvcShutdown, func(ctx context.Context) error {
 		if s.scanSvc != nil {
 			_ = s.scanSvc.Shutdown(ctx)
+		}
+		return nil
+	})
+	// PR-5: stop the dedicated MCP listeners (Gateway + Management) before draining
+	// the admin UI and proxy. No-op while the runtime is disabled (the default).
+	reg.Register("mcp-runtime-stop", shutdownOrderMCPRuntimeStop, func(ctx context.Context) error {
+		if err := shutdownMCPRuntime(ctx); err != nil {
+			logger.Printf("MCP runtime shutdown error: %v", err)
+		}
+		return nil
+	})
+	reg.Register("mcp-telemetry-drain", shutdownOrderMCPTelemetryDrain, func(ctx context.Context) error {
+		if err := shutdownMCPTelemetry(ctx); err != nil {
+			logger.Printf("MCP telemetry shutdown error: %v", err)
 		}
 		return nil
 	})

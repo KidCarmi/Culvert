@@ -14,14 +14,14 @@ import (
 func TestDiagnoseConfig_ValidAndOverCap(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 
-	// A small, well-formed snapshot validates.
+	// A small, well-formed snapshot validates (role does not matter here).
 	ok := diagnoseConfigFrom(ConfigSnapshot{
 		PolicyVersion: 7, Epoch: 3,
 		PolicyRules:  make([]PolicyRule, 2),
 		BlockedHosts: []string{"a.example", "b.example"},
-	}, now)
-	if !ok.OK {
-		t.Fatalf("small snapshot reported not-ok: %q", ok.Error)
+	}, false, now)
+	if !ok.OK || ok.Status != "ok" {
+		t.Fatalf("small snapshot reported not-ok: status=%q err=%q", ok.Status, ok.Error)
 	}
 	if ok.PolicyVersion != 7 || ok.Epoch != 3 {
 		t.Fatalf("version/epoch not surfaced: %+v", ok)
@@ -31,15 +31,53 @@ func TestDiagnoseConfig_ValidAndOverCap(t *testing.T) {
 		t.Fatalf("policy_rules size=%d want 2", sz)
 	}
 
-	// A snapshot that blows a cap fails, and the error names the collection.
+	// On a SYNCING node an over-cap snapshot is a hard failure; the error names
+	// the collection.
 	over := diagnoseConfigFrom(ConfigSnapshot{
 		BlockedHosts: make([]string, maxSnapBlockedHosts+1),
-	}, now)
-	if over.OK {
-		t.Fatal("over-cap snapshot reported ok")
+	}, true, now)
+	if over.OK || over.Status != "degraded" {
+		t.Fatalf("over-cap syncing snapshot: OK=%v status=%q, want degraded", over.OK, over.Status)
 	}
 	if !strings.Contains(over.Error, "blocked_hosts") {
 		t.Fatalf("error %q does not name the offending collection", over.Error)
+	}
+}
+
+// TestDiagnoseConfig_StandaloneOverCapIsWarnNotDegraded pins the customer-facing
+// fix: a STANDALONE node whose local config exceeds the cluster-sync cap must be
+// advisory (warn, OK true), NOT DEGRADED — the cap gates CP→DP sync, which a
+// lone appliance never performs. Regression guard for the reported false
+// positive ("config snapshot blocked_hosts=... exceeds cap").
+func TestDiagnoseConfig_StandaloneOverCapIsWarnNotDegraded(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	d := diagnoseConfigFrom(ConfigSnapshot{
+		BlockedHosts: make([]string, maxSnapBlockedHosts+1),
+	}, false, now) // syncing=false → standalone
+	if !d.OK {
+		t.Fatal("standalone over-cap must keep OK=true so the aggregate health is not DEGRADED")
+	}
+	if d.Status != "warn" {
+		t.Fatalf("standalone over-cap status=%q, want warn", d.Status)
+	}
+	if d.Note == "" || !strings.Contains(d.Error, "blocked_hosts") {
+		t.Fatalf("standalone over-cap should still surface the advisory note + error: note=%q err=%q", d.Note, d.Error)
+	}
+}
+
+// TestDiagnoseConfig_ApproachingCapWarns proves the amber early-signal tier: a
+// slice at/above the warn threshold trips warn even though it is under the cap.
+func TestDiagnoseConfig_ApproachingCapWarns(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	near := maxSnapBlockedHosts * configWarnUtilPercent / 100 // exactly the threshold
+	d := diagnoseConfigFrom(ConfigSnapshot{
+		BlockedHosts: make([]string, near),
+	}, true, now)
+	if d.Status != "warn" || !d.OK {
+		t.Fatalf("approaching-cap: status=%q OK=%v, want warn/OK", d.Status, d.OK)
+	}
+	if d.MaxUtilSlice != "blocked_hosts" || d.MaxUtilPercent < configWarnUtilPercent {
+		t.Fatalf("utilization not surfaced: slice=%q pct=%d", d.MaxUtilSlice, d.MaxUtilPercent)
 	}
 }
 
@@ -50,7 +88,7 @@ func TestDiagnoseConfig_NoValues(t *testing.T) {
 	d := diagnoseConfigFrom(ConfigSnapshot{
 		BlockedHosts:      []string{secretish},
 		SSLBypassPatterns: []string{secretish},
-	}, time.Unix(1_700_000_000, 0).UTC())
+	}, false, time.Unix(1_700_000_000, 0).UTC())
 	raw, err := json.Marshal(d)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)

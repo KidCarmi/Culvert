@@ -49,6 +49,7 @@ func d0WireMux(t *testing.T) *http.ServeMux {
 	registerReleaseRoutes(mux)
 	registerSupportRoutes(mux)
 	registerDiagnoseRoutes(mux)
+	registerMCPRoutes(mux)
 	return mux
 }
 
@@ -154,11 +155,24 @@ var d0KnownRoutes = func() []string {
 //   - 140 — Terminology governance T-10: added canonical /api/dpi and
 //     /api/dpi/bypass alongside the retained legacy /api/content-scan and
 //     /api/content-scan/bypass aliases (same handlers).
-//   - +16 — TAC support framework (M1-M5) added: support status/bundles/
+//   - +20 — TAC support framework (M1-M5) added: support status/bundles/
 //     {id}(+report,+approve)/health-explain (+6); support/debug-level (+1);
 //     diagnose/storage, diagnose/upstream, diagnose/dns, diagnose/tls,
-//     diagnose/cluster, diagnose/config (+6); bundles/{id}/validate (+1);
-//     bundles/{id}/download-encrypted (+1); bundles/{id}/download-sealed (+1).
+//     diagnose/cluster, diagnose/config, diagnose/all (+7); bundles/{id}/validate (+1);
+//     bundles/{id}/download-encrypted (+1); bundles/{id}/download-sealed (+1);
+//     bundles/{id}/exports (+1 — per-bundle export/exfil history);
+//     support/recipients (+1) + recipients/{name} (+1) — sealing-recipient registry.
+//   - 164 — ADR-0011 P2 added /api/decryption/health (read-only decryption
+//     coverage + failure-taxonomy aggregate; viewer).
+//   - 166 — reconcile parallel-merge drift (support exports + decryption/health
+//     both bumped 163→164) and add /api/support/bundles/{id}/manifest (read-only
+//     manifest metadata view without downloading the tarball; viewer).
+//   - 177 — catch up to main (PAC steering/exception + PEI-P2 governance routes,
+//     176) + ADR-0011 §4 added /api/decryption/redaction (host/SNI redaction
+//     toggle; GET viewer / PUT admin).
+//   - 178 — reconcile parallel-merge drift: Supportability M5 added
+//     /api/diagnose/support (bundle-store health self-check) but its lock bump
+//     collided with the /api/decryption/redaction merge; the true count is 178.
 //
 // POST-C1 FAILURE MATRIX (the table below is the FULL contract; the
 // reverse-direction gap that existed in pre-C1 D0 is now closed by
@@ -175,7 +189,7 @@ var d0KnownRoutes = func() []string {
 //   - Remove an entry from uiRoutes only             → fails C1 reverse
 //     (helper-registered route has no metadata) AND this D0 count test.
 func TestD0_RouteInventory_Locked141(t *testing.T) {
-	const want = 160
+	const want = 222 // 219 + 3 ADR-0025 LDAP IdP routes (/api/idp/test, /api/idp/legacy-ldap, /api/idp/legacy-ldap/import)
 	if got := len(d0KnownRoutes); got != want {
 		t.Fatalf("d0KnownRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}

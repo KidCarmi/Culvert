@@ -28,6 +28,7 @@ import (
 // Regex patterns are prefixed with "~" (e.g. "~^.*\.gov\.il$").
 type pattern struct {
 	raw  string
+	norm string // hostutil.NormalizeHost(raw), precomputed for glob patterns ("" for regex)
 	isRE bool
 	re   *regexp.Regexp
 }
@@ -53,7 +54,13 @@ func compilePattern(p string) (pattern, error) {
 		}
 		bp.isRE = true
 		bp.re = re
+		return bp, nil
 	}
+	// Normalize the glob pattern ONCE at compile time so Matches can use
+	// MatchFQDNNorm — the same precompute the policy engine applies to rule
+	// FQDNs (PolicyRule.normFQDN). NormalizeHost is pure/deterministic, so
+	// this is byte-identical to normalizing per call inside MatchFQDN.
+	bp.norm = hostutil.NormalizeHost(p)
 	return bp, nil
 }
 
@@ -163,14 +170,37 @@ func (m *Matcher) List() []string {
 func (m *Matcher) Matches(host string) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	// Fast path: no patterns configured (the default) — skip the IDNA
+	// normalization entirely.
+	if len(m.compiled) == 0 {
+		return false
+	}
+	// Normalize the host ONCE; each glob compares against the pattern's
+	// precomputed normalized form (MatchFQDNNorm). The previous per-pattern
+	// MatchFQDN re-normalized BOTH arguments on every iteration — ~735 ns +
+	// 4 allocs per pattern per inspected CONNECT.
 	h := hostutil.NormalizeHost(host)
+	// NormalizeHost is not idempotent for a host carrying an empty trailing
+	// DNS label ("example.com.." — TrimSuffix strips one dot, IDNA keeps the
+	// other), and such hosts pass the request path's NormalizeHostStrict gate.
+	// The pre-optimization code re-normalized the host inside per-pattern
+	// MatchFQDN — for GLOB patterns only — so "example.com.." matched the
+	// bypass pattern "example.com" while regexes matched against the
+	// single-pass form. Preserve those exact semantics: globs compare against
+	// hg (a second pass paid ONLY on the pathological trailing-dot shape),
+	// regexes keep h. The common path stays single-pass with hg == h
+	// (Codex + Copilot reviews, PR #918).
+	hg := h
+	if strings.HasSuffix(hg, ".") {
+		hg = hostutil.NormalizeHost(hg)
+	}
 	for _, p := range m.compiled {
 		if p.isRE {
 			if p.re.MatchString(h) {
 				return true
 			}
 		} else {
-			if hostutil.MatchFQDN(p.raw, h) {
+			if hostutil.MatchFQDNNorm(p.norm, hg) {
 				return true
 			}
 		}

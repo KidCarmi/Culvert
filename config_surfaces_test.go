@@ -37,7 +37,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/pac"
+
 	"github.com/KidCarmi/Culvert/internal/blocklist"
+	"github.com/KidCarmi/Culvert/internal/catoverride"
 	"github.com/KidCarmi/Culvert/internal/decryptprofile"
 )
 
@@ -101,10 +104,12 @@ func TestConfigSurfaces_ReflectionParity(t *testing.T) {
 // ─── 2. Snapshot cap parity (H5) ──────────────────────────────────────
 
 // snapshotCapCeiling bounds any single ConfigSnapshot per-slice cap. The
-// current maximum is 200k; 1M gives headroom without letting a cap grow so
-// large the H5 memory-DoS bound stops meaning anything (DEBT-006 residual:
-// magnitude, not just existence).
-const snapshotCapCeiling = 1_000_000
+// current maximum is 2M (blocked_hosts/ip_list/url_categories, raised for
+// enterprise-scale threat feeds); 4M gives headroom without letting a cap grow
+// so large the H5 memory-DoS bound stops meaning anything (DEBT-006 residual:
+// magnitude, not just existence). The CP↔DP frame is independently bounded by
+// maxClusterGRPCMsgSize, so the transport cannot be abused even at cap.
+const snapshotCapCeiling = 4_000_000
 
 func TestConfigSurfaces_SnapshotCapParity(t *testing.T) {
 	snapType := csrStructTypes()["ConfigSnapshot"]
@@ -125,8 +130,8 @@ func TestConfigSurfaces_SnapshotCapParity(t *testing.T) {
 			}
 			// Magnitude, not just existence (DEBT-006 residual): a cap set to
 			// MaxInt or an absurd value passes the existence check but leaves
-			// the H5 DoS bound toothless. The current max is 200k
-			// (maxSnapBlockedHosts/IPList/URLCategories); ceiling gives 5×
+			// the H5 DoS bound toothless. The current max is 2M
+			// (maxSnapBlockedHosts/IPList/URLCategories); ceiling gives 2×
 			// headroom while still bounding a single field well under a
 			// pathological allocation. A field that legitimately needs more is
 			// a design smell that should be reviewed, not silently capped huge.
@@ -139,8 +144,8 @@ func TestConfigSurfaces_SnapshotCapParity(t *testing.T) {
 	// validateConfigSnapshot (controlplane.go) enforces exactly this many
 	// per-slice caps. If you add a capped field there, register it here (and
 	// vice versa) — the two tables must move in lockstep.
-	if capped != 20 {
-		t.Errorf("registry declares %d capped ConfigSnapshot fields; validateConfigSnapshot enforces 20 — the tables drifted", capped)
+	if capped != 22 {
+		t.Errorf("registry declares %d capped ConfigSnapshot fields; validateConfigSnapshot enforces 22 — the tables drifted", capped)
 	}
 }
 
@@ -209,6 +214,28 @@ func csrNilGuardCases() map[string]struct {
 		"content_scan_bypass_hosts": {
 			populate: func(c *configBackup) { c.ContentScanBypassHosts = []string{"csr-bypass.example.com"} },
 			wipe:     func(c *configBackup) { c.ContentScanBypassHosts = []string{} },
+		},
+		"pac_profiles": {
+			populate: func(c *configBackup) {
+				c.PACProfiles = []pac.Profile{{ID: "csr-prof", Name: "CSR", Enabled: true, PoolID: "csr-pool",
+					PrivateNetworks: pac.PrivateDirect, AvailabilityMode: pac.ModeBalanced}}
+			},
+			wipe: func(c *configBackup) { c.PACProfiles = []pac.Profile{} },
+		},
+		"pac_pools": {
+			populate: func(c *configBackup) {
+				c.PACPools = []pac.Pool{{ID: "csr-pool", Name: "CSR", Endpoints: []pac.PoolEndpoint{{Host: "csr.example", Port: 8080}}}}
+			},
+			wipe: func(c *configBackup) { c.PACPools = []pac.Pool{} },
+		},
+		// category_overrides is a pointer-to-struct on the rollback surface with
+		// nil-skip / non-nil-replace semantics: nil target ⇒ apply skips (no diff);
+		// a non-nil (even empty) set ⇒ apply replaces (diff reports the clear).
+		"category_overrides": {
+			populate: func(c *configBackup) {
+				c.CategoryOverrides = &CategoryOverrides{Added: map[string]string{"csr.example.com": "csr-cat"}}
+			},
+			wipe: func(c *configBackup) { c.CategoryOverrides = &CategoryOverrides{} },
 		},
 	}
 }
@@ -321,6 +348,42 @@ func csrDiffMutators() map[string]func(a, b *configBackup) {
 			a.URLCategories = []CategoryEntry{}
 			b.URLCategories = []CategoryEntry{{Name: "csr-diff-c"}}
 		},
+		"pac_profiles": func(a, b *configBackup) {
+			a.PACProfiles = []pac.Profile{}
+			b.PACProfiles = []pac.Profile{{ID: "csr-diff-prof", Name: "CSR"}}
+		},
+		"pac_pools": func(a, b *configBackup) {
+			a.PACPools = []pac.Pool{}
+			b.PACPools = []pac.Pool{{ID: "csr-diff-pool", Name: "CSR"}}
+		},
+		// SaaS feed scalars: the diff block is gated on b.SaaSFeedProtocol != ""
+		// (mirroring applyConfigBackup), so every mutator sets protocol non-empty on
+		// both sides, then diverges the target field on one side.
+		"saas_feed_url": func(a, b *configBackup) {
+			a.SaaSFeedProtocol, b.SaaSFeedProtocol = saasFeedProtocolV1, saasFeedProtocolV1
+			a.SaaSFeedURL = builtinSaaSFeedURL
+			b.SaaSFeedURL = ""
+		},
+		"saas_feed_managed": func(a, b *configBackup) {
+			a.SaaSFeedProtocol, b.SaaSFeedProtocol = saasFeedProtocolV1, saasFeedProtocolV1
+			a.SaaSFeedManaged, b.SaaSFeedManaged = false, true
+		},
+		"saas_feed_enabled": func(a, b *configBackup) {
+			a.SaaSFeedProtocol, b.SaaSFeedProtocol = saasFeedProtocolV1, saasFeedProtocolV1
+			a.SaaSFeedEnabled, b.SaaSFeedEnabled = false, true
+		},
+		"saas_feed_protocol": func(a, b *configBackup) {
+			a.SaaSFeedProtocol = "signed_manifest_v0"
+			b.SaaSFeedProtocol = saasFeedProtocolV1
+		},
+		"saas_feed_refresh_seconds": func(a, b *configBackup) {
+			a.SaaSFeedProtocol, b.SaaSFeedProtocol = saasFeedProtocolV1, saasFeedProtocolV1
+			a.SaaSFeedRefreshSeconds, b.SaaSFeedRefreshSeconds = 3600, 7200
+		},
+		"category_overrides": func(a, b *configBackup) {
+			a.CategoryOverrides = &CategoryOverrides{Added: map[string]string{"csr.example.com": "csr-cat"}}
+			b.CategoryOverrides = &CategoryOverrides{}
+		},
 	}
 }
 
@@ -402,6 +465,16 @@ func csrIsolateRollbackStores(t *testing.T) {
 
 	origAction := defaultPolicyAction()
 	t.Cleanup(func() { setDefaultPolicyAction(origAction) })
+
+	// SaaS feed durable holder (F3a-2): snapshot + restore the whole struct.
+	origFeed := getSaaSFeedDurable()
+	t.Cleanup(func() { setSaaSFeedDurable(origFeed) })
+
+	// globalCategoryOverrides (F3a-2): swap for a fresh in-memory store (path="" →
+	// Save is a no-op) and restore, so the round-trip diverges it without leaking.
+	origOv := globalCategoryOverrides
+	globalCategoryOverrides = catoverride.New()
+	t.Cleanup(func() { globalCategoryOverrides = origOv })
 }
 
 // csrSeedStateA drives every rollback-surface store to a known state A.
@@ -431,6 +504,13 @@ func csrSeedStateA() {
 	catStore.ReplaceAll([]CategoryEntry{{Name: "csr-cat", Hosts: []string{"csr.example.com"}}})
 	globalCategoryGroups.ReplaceAll([]CategoryGroup{{Name: "csr-group", Categories: []string{"csr-cat"}}})
 	globalDecryptionProfiles.ReplaceAll([]DecryptionProfile{{Name: "csr-dp-a", MinTLSVersion: "1.2", OnInspectError: "fail-open"}})
+	// SaaS feed config (F3a-2): a fully-set managed state so capture (resolved
+	// url/protocol non-empty) applies on rollback and round-trips.
+	setSaaSFeedDurable(saasFeedDurable{
+		Managed: true, Enabled: true, URL: builtinSaaSFeedURL,
+		Protocol: saasFeedProtocolV1, RefreshSeconds: 3600, SchemaVersion: saasStoreSchemaVersion,
+	})
+	_ = globalCategoryOverrides.ReplaceAll(CategoryOverrides{Added: map[string]string{"csr-a.example.com": "csr-cat"}})
 }
 
 // csrMutateStateB moves every store somewhere else, so an apply-miss for any
@@ -457,6 +537,12 @@ func csrMutateStateB() {
 	catStore.ReplaceAll([]CategoryEntry{})
 	globalCategoryGroups.ReplaceAll([]CategoryGroup{})
 	globalDecryptionProfiles.ReplaceAll([]DecryptionProfile{})
+	// SaaS feed config (F3a-2): diverge every field so an apply-miss is caught.
+	setSaaSFeedDurable(saasFeedDurable{
+		Managed: false, Enabled: false, URL: "", Protocol: "", RefreshSeconds: 0,
+		SchemaVersion: saasStoreSchemaVersion,
+	})
+	_ = globalCategoryOverrides.ReplaceAll(CategoryOverrides{Tombstones: []string{"csr-b.example.com"}})
 }
 
 // csrCanon renders a captured field value order-insensitively for slices
@@ -781,14 +867,19 @@ func TestConfigSurfaces_SnapshotApplyParity(t *testing.T) {
 // `snap.Field` selector inside them is a read = a consumed field. Enumerated
 // here so the scan survives further gocognit splits (add the new function).
 var snapshotApplyFuncs = map[string]bool{
-	"applyConfigSnapshot":               true, // controlplane_snapshot.go
-	"applySnapshotPolicyAndTraffic":     true,
-	"applySnapshotClusterRuntime":       true,
-	"applySnapshotSessionSecret":        true,
-	"applySnapshotExtendedState":        true,
-	"applyExternalAuthSnapshotSettings": true,
-	"syncSnapshotIdPProfiles":           true,
-	"fetchAndApply":                     true, // controlplane_client.go (DP poller)
+	"applyConfigSnapshot":                 true, // controlplane_snapshot.go
+	"applySnapshotPolicyAndTraffic":       true,
+	"applySnapshotBlocklist":              true, // T3 P1: blocklist step, split out of applySnapshotPolicyAndTraffic
+	"applySnapshotTrafficExceptBlocklist": true, // T3 P1: the rest, shared by the full + delta apply paths
+	"applySnapshotClusterRuntime":         true,
+	"applySnapshotSessionSecret":          true,
+	"applySnapshotExtendedState":          true,
+	"applySnapshotSaaSFeed":               true, // F3a-2: SaaS feed config + category overrides
+	"applyExternalAuthSnapshotSettings":   true,
+	"syncSnapshotIdPProfiles":             true,
+	"fetchAndApply":                       true, // controlplane_client.go (DP poller)
+	"applyBlocklistDeltaSnapshot":         true, // T3 P1: DP-side delta apply (controlplane_delta.go)
+	"applySnapshotMCP":                    true, // PR-10: optional signed MCP CP→DP snapshots (mcp_distribution.go)
 }
 
 func snapshotApplyFuncNames() string {
@@ -806,7 +897,7 @@ func snapshotApplyFuncNames() string {
 func snapshotConsumedFields(t *testing.T) map[string]bool {
 	t.Helper()
 	consumed := map[string]bool{}
-	for _, file := range []string{"controlplane_snapshot.go", "controlplane_client.go"} {
+	for _, file := range []string{"controlplane_snapshot.go", "controlplane_client.go", "mcp_distribution.go"} {
 		fset := token.NewFileSet()
 		f, err := parser.ParseFile(fset, file, nil, parser.SkipObjectResolution)
 		if err != nil {
@@ -917,9 +1008,12 @@ func TestConfigSurfaces_SnapshotWireWipe(t *testing.T) {
 	}
 }
 
-// snapshotRedactedFields returns the ConfigSnapshot field names zeroed inside
-// the `if !callerIsEnrolledNode(…) { … }` block of controlplane_server.go
-// (snap.Field = "" / nil assignments).
+// snapshotRedactedFields returns the ConfigSnapshot field names zeroed inside the
+// shared redactUnenrolledSnapshot helper (snap.Field = "" / nil assignments on the
+// pointer parameter). Redaction moved OUT of the GetConfig if-block into this
+// single helper so BOTH unenrolled-reachable surfaces (GetConfig and
+// GetConfigDelta) route through one pinned place — the AST scan follows it there.
+// snapshotRedactionCallers additionally asserts every such surface calls it.
 func snapshotRedactedFields(t *testing.T) map[string]bool {
 	t.Helper()
 	const file = "controlplane_server.go"
@@ -930,22 +1024,12 @@ func snapshotRedactedFields(t *testing.T) map[string]bool {
 	}
 	redacted := map[string]bool{}
 	ast.Inspect(f, func(n ast.Node) bool {
-		ifst, ok := n.(*ast.IfStmt)
-		if !ok {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "redactUnenrolledSnapshot" || fn.Body == nil {
 			return true
 		}
-		un, ok := ifst.Cond.(*ast.UnaryExpr)
-		if !ok || un.Op != token.NOT {
-			return true
-		}
-		call, ok := un.X.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		if fnid, ok := call.Fun.(*ast.Ident); !ok || fnid.Name != "callerIsEnrolledNode" {
-			return true
-		}
-		ast.Inspect(ifst.Body, func(m ast.Node) bool {
+		// The pointer param is named "snap"; collect its zeroed fields.
+		ast.Inspect(fn.Body, func(m ast.Node) bool {
 			if as, ok := m.(*ast.AssignStmt); ok {
 				for _, lhs := range as.Lhs {
 					if sel, ok := lhs.(*ast.SelectorExpr); ok {
@@ -957,7 +1041,40 @@ func snapshotRedactedFields(t *testing.T) map[string]bool {
 			}
 			return true
 		})
-		return true
+		return false
 	})
+	if len(redacted) == 0 {
+		t.Fatal("redactUnenrolledSnapshot not found or zeroes no fields — the redaction wall lost its anchor")
+	}
 	return redacted
+}
+
+// snapshotRedactionCallers asserts that every unenrolled-reachable snapshot
+// surface routes through redactUnenrolledSnapshot, so the wall (which pins the
+// helper's fields) actually covers each door. Sec-F2: GetConfigDelta added a
+// SECOND secret-bearing surface in a different file; without this the parity test
+// would give false assurance for it.
+func TestConfigSurfaces_RedactionCallers(t *testing.T) {
+	for _, file := range []string{"controlplane_server.go", "controlplane_delta.go"} {
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, file, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse %s: %v", file, err)
+		}
+		found := false
+		ast.Inspect(f, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "redactUnenrolledSnapshot" {
+				found = true
+			}
+			return true
+		})
+		if !found {
+			t.Errorf("%s serves ConfigSnapshot to unenrolled callers but never calls "+
+				"redactUnenrolledSnapshot — a secret-bearing surface outside the redaction wall", file)
+		}
+	}
 }

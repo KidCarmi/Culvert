@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/tls"
+	"errors"
 	"testing"
 
 	"github.com/KidCarmi/Culvert/internal/autoexclude"
@@ -34,7 +35,7 @@ func TestResolveSSLDecision_ClassifiesSource(t *testing.T) {
 	}
 
 	// A learned exclusion under that scope ⇒ bypass, autoexclude_cache, with reason+scope, consulted.
-	autoExclude().Observe(foScope, "fo", "seeded.example", autoexclude.ReasonClientPinned, "id:probe")
+	autoExclude().Observe(foScope, scopeGen(t, "fo"), "fo", "seeded.example", autoexclude.ReasonClientPinned, "id:probe")
 	d := resolveSSLDecision(fo, "seeded.example", "1.2.3.4")
 	if d.Action != SSLBypass || d.Source != decryptobs.DecisionAutoexcludeCache ||
 		d.ExclReason != autoexclude.ReasonClientPinned || d.ScopeID != foScope || !d.Consulted {
@@ -167,6 +168,78 @@ func TestInspectedOutcome_CertVerifyFromEffectiveSkip(t *testing.T) {
 	decInline := sslResolution{Action: SSLInspect, Source: decryptobs.DecisionPolicyInspect, SkipVerify: true}
 	if b := inspectedOutcome(decInline, "h", cs, mStrict).toBlock(false); b.CertVerify != "verified" {
 		t.Fatalf("profile strict over inline-true: cert_verify=%s want verified", b.CertVerify)
+	}
+}
+
+// TestClassifyOriginFailure pins the upstream-leg error → bounded (stage, category,
+// source) mapping, including the fail-safe default for an unrecognised error.
+func TestClassifyOriginFailure(t *testing.T) {
+	cases := []struct {
+		name       string
+		err        error
+		wantStage  decryptobs.FailStage
+		wantCat    decryptobs.FailCategory
+		wantSource decryptobs.DecisionSource
+	}{
+		{"cert_verify", errors.New("x509: certificate signed by unknown authority"), decryptobs.FailStageCertVerify, decryptobs.FailCategoryCertificate, decryptobs.DecisionCertVerifyBlock},
+		{"client_cert_required", errors.New("tls: certificate required"), decryptobs.FailStageUpstreamHandshake, decryptobs.FailCategoryClientCertRequired, decryptobs.DecisionNoFailOpen502},
+		{"version", errors.New("tls: server selected unsupported protocol version 301"), decryptobs.FailStageUpstreamHandshake, decryptobs.FailCategoryVersion, decryptobs.DecisionNoFailOpen502},
+		{"cipher", errors.New("tls: no cipher suite supported by both client and server"), decryptobs.FailStageUpstreamHandshake, decryptobs.FailCategoryCipher, decryptobs.DecisionNoFailOpen502},
+		{"timeout", errors.New("dial tcp: i/o timeout"), decryptobs.FailStageUpstreamHandshake, decryptobs.FailCategoryTimeout, decryptobs.DecisionNoFailOpen502},
+		{"protocol", errors.New("remote error: tls: handshake failure"), decryptobs.FailStageUpstreamHandshake, decryptobs.FailCategoryProtocol, decryptobs.DecisionNoFailOpen502},
+		{"other_default", errors.New("connection reset by peer"), decryptobs.FailStageUpstreamHandshake, decryptobs.FailCategoryOther, decryptobs.DecisionNoFailOpen502},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s, cat, src := classifyOriginFailure(c.err)
+			if s != c.wantStage || cat != c.wantCat || src != c.wantSource {
+				t.Fatalf("classifyOriginFailure(%q) = %s/%s/%s, want %s/%s/%s", c.err, s, cat, src, c.wantStage, c.wantCat, c.wantSource)
+			}
+		})
+	}
+}
+
+// TestClassifyClientFailure pins the client-leg (forged-leaf) error → bounded (stage, category).
+func TestClassifyClientFailure(t *testing.T) {
+	if s, cat := classifyClientFailure(errors.New("remote error: tls: bad certificate")); s != decryptobs.FailStageClientLeafReject || cat != decryptobs.FailCategoryClientPinned {
+		t.Fatalf("pinned: %s/%s", s, cat)
+	}
+	if s, cat := classifyClientFailure(errors.New("read tcp: i/o timeout")); s != decryptobs.FailStageClientHello || cat != decryptobs.FailCategoryTimeout {
+		t.Fatalf("timeout: %s/%s", s, cat)
+	}
+	// Native-ALPN reachable case: h2-only client forced to http/1.1 vs an h1-only origin
+	// fails the forged-leaf handshake with an ALPN alert — protocol, not other (Codex #812).
+	if s, cat := classifyClientFailure(errors.New("tls: no application protocol")); s != decryptobs.FailStageClientHello || cat != decryptobs.FailCategoryProtocol {
+		t.Fatalf("alpn no_application_protocol: %s/%s want client_hello/protocol", s, cat)
+	}
+	if s, cat := classifyClientFailure(errors.New("tls: client requested unsupported application protocols h2")); s != decryptobs.FailStageClientHello || cat != decryptobs.FailCategoryProtocol {
+		t.Fatalf("alpn unsupported protocols: %s/%s want client_hello/protocol", s, cat)
+	}
+	if s, cat := classifyClientFailure(errors.New("tls: protocol version not supported")); s != decryptobs.FailStageClientHello || cat != decryptobs.FailCategoryVersion {
+		t.Fatalf("client version mismatch: %s/%s want client_hello/version", s, cat)
+	}
+	if s, cat := classifyClientFailure(errors.New("some unrecognised abort")); s != decryptobs.FailStageClientHello || cat != decryptobs.FailCategoryOther {
+		t.Fatalf("default: %s/%s", s, cat)
+	}
+}
+
+// TestInspectFailureOutcomes pins that the builders produce a failed outcome carrying the
+// classified taxonomy, rule identity, fail-open scope, and TLS sentinels (no session).
+func TestInspectFailureOutcomes(t *testing.T) {
+	match := &PolicyMatch{Rule: &PolicyRule{ID: "r9", Name: "inspect"}}
+	dec := sslResolution{Action: SSLInspect, Source: decryptobs.DecisionPolicyInspect, ScopeID: "prof", Consulted: true}
+
+	b := originInspectFailureOutcome(errors.New("x509: certificate has expired"), "site.example", dec, match).toBlock(false)
+	if b.Outcome != "failed" || b.DecisionSource != "cert_verify_block" || b.FailStage != "cert_verify" || b.FailCategory != "certificate" {
+		t.Fatalf("origin cert-verify failure block wrong: %+v", b)
+	}
+	if b.TLSVersion != "unknown" || b.RuleID != "r9" || b.ProfileID != "prof" || !b.CacheConsulted {
+		t.Fatalf("origin failure must carry sentinels+identity+scope: %+v", b)
+	}
+
+	c := clientInspectFailureOutcome(errors.New("remote error: tls: unknown certificate authority"), "h", dec, match).toBlock(false)
+	if c.Outcome != "failed" || c.FailStage != "client_leaf_reject" || c.FailCategory != "client_pinned" {
+		t.Fatalf("client pinned failure block wrong: %+v", c)
 	}
 }
 

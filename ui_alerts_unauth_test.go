@@ -145,6 +145,36 @@ func TestAPIAlertsWebhooks_DELETE(t *testing.T) {
 	}
 }
 
+// ── apiAlertsDeliveryHist ─────────────────────────────────────────────────────
+
+// TestAPIAlertsDeliveryHist_RetryHealth pins that the delivery-history
+// endpoint surfaces retry-queue depth and exhausted/dropped counters, so an
+// admin can see alerting degradation from the GUI instead of grepping logs.
+func TestAPIAlertsDeliveryHist_RetryHealth(t *testing.T) {
+	orig := globalAlertStore
+	defer func() { globalAlertStore = orig }()
+	as := &AlertStore{}
+	as.Init("")
+	globalAlertStore = as
+
+	req := adminRequest(http.MethodGet, "/api/alerts/webhooks/history", "")
+	w := httptest.NewRecorder()
+	apiAlertsDeliveryHist(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	for _, key := range []string{"deliveries", "retry_queue_depth", "retry_exhausted_total", "retry_dropped_total"} {
+		if _, ok := resp[key]; !ok {
+			t.Errorf("response missing %q key", key)
+		}
+	}
+}
+
 // ── apiDefaultAuthOutcome ─────────────────────────────────────────────────────────────
 
 func TestAPIDefaultAuthOutcome_SetDefaultAuthOutcome(t *testing.T) {

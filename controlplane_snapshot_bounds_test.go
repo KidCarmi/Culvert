@@ -83,6 +83,46 @@ func TestValidateConfigSnapshot_RejectsThreatFeedURLsOverflow(t *testing.T) {
 	}
 }
 
+// TestValidateConfigSnapshot_RejectsURLCategoryHostOverflow covers the P1 inner-
+// dimension bound: url_categories has a small ENTRY cap, but each entry carries a
+// Hosts list — a few entries must not smuggle millions of hosts past it.
+func TestValidateConfigSnapshot_RejectsURLCategoryHostOverflow(t *testing.T) {
+	// Two entries whose Hosts together exceed the aggregate host cap.
+	half := maxSnapURLCategoryHosts/2 + 1
+	snap := ConfigSnapshot{URLCategories: []CategoryEntry{
+		{Name: "a", Hosts: make([]string, half)},
+		{Name: "b", Hosts: make([]string, half)},
+	}}
+	err := validateConfigSnapshot(snap)
+	if err == nil || !strings.Contains(err.Error(), "url_category_hosts") {
+		t.Fatalf("expected url_category_hosts overflow, got %v", err)
+	}
+}
+
+// TestValidateConfigSnapshot_RejectsAggregateOverflow covers the P1 aggregate
+// bound: individually-valid host-scale slices whose SUM exceeds the frame's
+// capacity must be rejected with a clear named error (not left to overflow the
+// wire). Two 2 M slices are each under their own cap but sum past the aggregate.
+func TestValidateConfigSnapshot_RejectsAggregateOverflow(t *testing.T) {
+	snap := ConfigSnapshot{
+		BlockedHosts: make([]string, maxSnapBlockedHosts),
+		IPList:       make([]string, maxSnapIPList),
+	}
+	err := validateConfigSnapshot(snap)
+	if err == nil || !strings.Contains(err.Error(), "aggregate") {
+		t.Fatalf("expected aggregate overflow (2M+2M > %d), got %v", maxSnapAggregateEntries, err)
+	}
+}
+
+// TestValidateConfigSnapshot_AllowsSingleMaxedSlice confirms the aggregate bound
+// does NOT reject the legitimate largest single-slice case (a 2 M blocklist).
+func TestValidateConfigSnapshot_AllowsSingleMaxedSlice(t *testing.T) {
+	snap := ConfigSnapshot{BlockedHosts: make([]string, maxSnapBlockedHosts)}
+	if err := validateConfigSnapshot(snap); err != nil {
+		t.Fatalf("a single maxed slice (2M blocked hosts) must validate; got %v", err)
+	}
+}
+
 // TestApplyConfigSnapshot_RejectsOversizedSnapshot wires the validator
 // into the apply path: an over-cap snapshot must NOT mutate the local
 // blocklist.
@@ -102,7 +142,11 @@ func TestApplyConfigSnapshot_RejectsOversizedSnapshot(t *testing.T) {
 	for i := range snap.BlockedHosts {
 		snap.BlockedHosts[i] = "evil.example"
 	}
-	applyConfigSnapshot(snap)
+	// applyConfigSnapshot must now RETURN an error on rejection (so the HA
+	// resync path can fail closed instead of marking sync-OK on a dropped apply).
+	if err := applyConfigSnapshot(snap); err == nil {
+		t.Error("applyConfigSnapshot returned nil for an over-cap snapshot; HA fail-closed depends on the error")
+	}
 
 	if bl != preBL {
 		t.Error("bl pointer changed despite over-cap snapshot — partial application")
@@ -119,7 +163,8 @@ func TestApplyConfigSnapshot_RejectsOversizedSnapshot(t *testing.T) {
 func TestFetchAndApply_OverCapDoesNotPoisonLastVersion(t *testing.T) {
 	resetSnapshotBoundsTestGlobals(t)
 
-	c := &DataPlaneClient{lastVersion: 5}
+	c := &DataPlaneClient{}
+	c.lastVersion.Store(5)
 	snap := ConfigSnapshot{
 		Version:      10,
 		BlockedHosts: make([]string, maxSnapBlockedHosts+1),
@@ -132,8 +177,8 @@ func TestFetchAndApply_OverCapDoesNotPoisonLastVersion(t *testing.T) {
 	if err := validateConfigSnapshot(snap); err == nil {
 		t.Fatal("validator should have rejected oversized snapshot")
 	}
-	if c.lastVersion != 5 {
-		t.Errorf("lastVersion should remain 5 on rejected snapshot; got %d", c.lastVersion)
+	if c.lastVersion.Load() != 5 {
+		t.Errorf("lastVersion should remain 5 on rejected snapshot; got %d", c.lastVersion.Load())
 	}
 }
 

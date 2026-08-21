@@ -1,6 +1,16 @@
 # Culvert Admin UI Refactor Audit
 
-Status: living document — opened on 2026-04-28
+Status: **historical — the refactor plan below (Phases A–D) has SHIPPED.**
+Opened 2026-04-28; retained as a record of the original audit and phased plan,
+not as a current-state reference. `ui.go` now contains no `mux.HandleFunc`
+calls at all — routing goes through the `register*Routes` helpers this
+document originally proposed, `ui_routes_meta.go` implements a route-metadata
+table (more advanced than §6's `uiRoute` sketch — method-aware, not just one
+role per path), and `ui_metadata_enforcement.go` implements the
+middleware-driven RBAC gate Phase C called out as its first behavior-affecting
+change. For the current, authoritative description of the admin API's
+route-registration layers and RBAC enforcement, see **CLAUDE.md's "Admin UI /
+Control Plane" section**, not this document.
 Owner: refactor task force (Lead Architect)
 Scope: `ui.go` and adjacent `ui_*.go` files, admin HTTP server, RBAC and session
         machinery. No proxy / SOCKS / policy-engine code.
@@ -15,8 +25,10 @@ audit helpers, validation helpers, and a smattering of UI-specific globals.
 
 A previous wave of work has already extracted the *handlers* themselves into
 domain files (`ui_auth.go`, `ui_cluster.go`, `ui_config.go`, `ui_policy.go`,
-`ui_security.go`, `cdr_ui.go`). What remains in `ui.go` (794 lines, 131 routes)
-is the wiring layer — and it is still doing too many jobs.
+`ui_security.go`, `cdr_ui.go`). What remained in `ui.go` at the time this audit
+was written (794 lines, 131 routes) was the wiring layer — and it was still
+doing too many jobs. (As of this refactor's completion, `ui.go` is down to
+`startUI()`'s bootstrap only — see the status note above.)
 
 The objective of this refactor is **mechanical** decomposition: split the
 remaining `ui.go` along clean seams (middleware, session, RBAC, helpers),
@@ -117,7 +129,10 @@ Counts below are derived from `ui.go:103-274`.
 
 These endpoints already require auth via `uiAuthMiddleware`; most call
 `requireRole(w, r, "admin")` internally. The refactor must not perturb the
-middleware chain order: `uiIPGuardMiddleware → securityMiddleware → uiAuthMiddleware → mux`.
+middleware chain order — which, as of Phase C shipping, is:
+`uiIPGuardMiddleware → securityMiddleware → uiAuthMiddleware → uiMetadataEnforcement → mux`
+(`uiMetadataEnforcement` did not exist when this audit was written; it is the
+metadata-driven RBAC gate Phase C below introduced).
 
 ### 3.2 High — public, no auth gate (intentional)
 
@@ -188,10 +203,13 @@ ui_config.go           (existing) settings/import/export/syslog/logger handlers
 cdr_ui.go              (existing) CDR / Sluice handlers
 ```
 
-Future (out of scope for the first PR):
+Proposed as future/out of scope for the first PR, since shipped as
+`ui_routes_meta.go` (route metadata table) + per-domain `register*Routes`
+helpers spread across the existing handler files (no single `ui_routes.go`):
 
 ```
-ui_routes.go           registerXxxRoutes() helpers, route metadata table
+ui_routes_meta.go      uiRoutes metadata table (method-aware: uiRouteMethod{Method,MinRole,Mutating,AuditExpected})
+ui_metadata_enforcement.go   middleware-driven RBAC gate (Phase C)
 ```
 
 ---
@@ -214,14 +232,18 @@ ui_routes.go           registerXxxRoutes() helpers, route metadata table
   small `ui_static.go`. `pendingCARotation` moves to `ui_security.go` (its only
   user) once a separate test pass lands.
 
-### Phase B — Route registration grouping
+### Phase B — Route registration grouping (SHIPPED)
 
 Replace the flat `mux.HandleFunc(...)` block in `startUI` with a small set of
 domain register helpers (`registerAuthRoutes`, `registerPolicyRoutes`, …). One
 file per domain or one helper per existing handler file. No new metadata yet —
 **still purely mechanical**.
 
-### Phase C — Route metadata foundation
+Shipped: `startUI()` contains zero `mux.HandleFunc` calls; every route is
+registered through a `register*Routes(mux, ...)` helper. See CLAUDE.md's
+"Admin UI / Control Plane" section.
+
+### Phase C — Route metadata foundation (SHIPPED)
 
 Introduce a typed route table:
 
@@ -238,6 +260,17 @@ type uiRoute struct {
 `startUI` walks the table and registers handlers, with the auth middleware
 consulting `MinRole` rather than the current ad-hoc handler checks. This is
 the first behavior-affecting phase and must land with a full RBAC test sweep.
+
+Shipped as `uiRoutes` in `ui_routes_meta.go` — method-aware (`Methods
+[]uiRouteMethod`, each with its own `MinRole`/`Mutating`/`AuditExpected`,
+finer-grained than the single-role sketch above) — enforced by
+`uiMetadataEnforcement` (fail-closed by default; kill switch
+`CULVERT_C2_ENFORCE`). Also shipped beyond this document's original scope:
+C2c (audit-completion observability) and C4 (report-only role-divergence
+detection), plus a read-only governance surface at
+`/api/governance/control-plane`. See CLAUDE.md for the full contract and the
+D0/C1/C1.5/C2/C2c/C4 test-pyramid this phase's "full RBAC test sweep"
+became.
 
 ### Phase D — Regression tests
 
@@ -279,15 +312,15 @@ tests start landing in Phase D.
 
 ---
 
-## 8. Follow-up PR plan (next 3–5)
+## 8. Follow-up PR plan (next 3–5) — ALL SHIPPED
 
-| # | Title | Files touched | Risk | Validation |
-|---:|---|---|:---:|---|
-| 2 | Phase A2: extract `ui_helpers.go` | `ui.go`, new `ui_helpers.go` | low | `go test ./...` |
-| 3 | Phase A3: extract SPA shell + move `pendingCARotation` | `ui.go`, new `ui_static.go`, `ui_security.go` | low | `go test ./...`, manual SPA load |
-| 4 | Phase B: route registration grouped into `register*Routes` | `ui.go`, new `ui_routes.go` (or per-domain helpers) | medium | full test suite + race |
-| 5 | Phase C: route metadata table + middleware-driven RBAC | `ui_routes.go`, `ui_middleware.go`, every handler | high | full test suite + race + new RBAC sweep |
-| 6 | Phase D: RBAC/CSRF/rate-limit regression sweep | new `ui_rbac_test.go`, new `ui_csrf_test.go` | low | `go test -run TestRBAC -race` |
+| # | Title | Files touched | Risk | Validation | Status |
+|---:|---|---|:---:|---|---|
+| 2 | Phase A2: extract `ui_helpers.go` | `ui.go`, new `ui_helpers.go` | low | `go test ./...` | Shipped |
+| 3 | Phase A3: extract SPA shell + move `pendingCARotation` | `ui.go`, new `ui_static.go`, `ui_security.go` | low | `go test ./...`, manual SPA load | Shipped |
+| 4 | Phase B: route registration grouped into `register*Routes` | `ui.go`, new `ui_routes.go` (or per-domain helpers) | medium | full test suite + race | Shipped (per-domain helpers, no single `ui_routes.go`) |
+| 5 | Phase C: route metadata table + middleware-driven RBAC | `ui_routes.go`, `ui_middleware.go`, every handler | high | full test suite + race + new RBAC sweep | Shipped as `ui_routes_meta.go` + `ui_metadata_enforcement.go`, plus C2c/C4 beyond original scope |
+| 6 | Phase D: RBAC/CSRF/rate-limit regression sweep | new `ui_rbac_test.go`, new `ui_csrf_test.go` | low | `go test -run TestRBAC -race` | Shipped (D0/C1/C1.5/C2/C2c/C4 test pyramid — see CLAUDE.md Testing Guarantees) |
 
 ---
 

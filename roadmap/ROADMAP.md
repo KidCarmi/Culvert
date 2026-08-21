@@ -44,7 +44,7 @@ Sourced from production deployment evaluation feedback (April 2026).
 
 - [x] **Upstream proxy chaining UI** — Admin panel for parent proxies, failover, circuit breaker, health checks
 - [x] **Header rewrite rules UI** — Admin panel for per-host header rewrite rules
-- [x] **OCSP/CRL settings UI** — Toggle OCSP checking, view cache stats
+- [x] **OCSP settings UI** — Toggle OCSP checking, view cache stats (CRL checking is not implemented — see README Limitations)
 - [x] **Syslog configuration UI** — Configure syslog forwarding address from Settings panel
 - [x] **Metrics endpoint configuration UI** — Bearer token management via Settings panel
 - [x] **Logger configuration UI** — View log format, rotation, file path in Settings panel

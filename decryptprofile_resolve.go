@@ -170,15 +170,18 @@ func resolveH2StallTimeout(match *PolicyMatch) time.Duration {
 // the inspect leg. Profile CertVerification precedence:
 //
 //	"skip"                 ⇒ skip verification (== today's TLSSkipVerify=true)
-//	"strict" | "permissive"⇒ verify (permissive's allow-on-fail is DEFERRED, so it
-//	                          verifies like strict for now)
+//	"strict"               ⇒ verify (block untrusted/expired)
 //	"" (inherit) / no profile ⇒ the rule's inline TLSSkipVerify (ruleSkip)
+//
+// The retired "permissive" value can no longer reach here: it is rejected on
+// every write path and fail-closed-migrated to "strict" on load/sync, so no
+// stored profile carries it.
 func resolveInspectSkipVerify(match *PolicyMatch, ruleSkip bool) bool {
 	if p := resolveDecryptionProfile(match); p != nil {
 		switch p.CertVerification {
 		case "skip":
 			return true
-		case "strict", "permissive":
+		case "strict":
 			return false
 		}
 	}

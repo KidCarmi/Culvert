@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/obs"
@@ -45,6 +46,41 @@ type MetricsExporter struct {
 	client   *http.Client
 	cancel   context.CancelFunc
 	snapshot SnapshotFunc
+
+	// Push-health diagnostics (read-only; never gates or alters push
+	// behavior). Otherwise a broken collector endpoint fails silently
+	// forever — the only trace is a log line an admin would need to SSH
+	// in and grep for.
+	pushFailures  atomic.Int64
+	lastErr       atomic.Value // string
+	lastErrAt     atomic.Int64 // UnixNano; 0 = never
+	lastSuccessAt atomic.Int64 // UnixNano; 0 = never
+}
+
+// PushHealth reports an OTLP push loop's diagnostic state for the admin API
+// — purely observational, computed from counters already maintained
+// in-process.
+type PushHealth struct {
+	FailureCount  int64  `json:"failureCount"`
+	LastError     string `json:"lastError,omitempty"`
+	LastErrorAt   string `json:"lastErrorAt,omitempty"`   // RFC3339 UTC; empty = never
+	LastSuccessAt string `json:"lastSuccessAt,omitempty"` // RFC3339 UTC; empty = never
+	DroppedSpans  int64  `json:"droppedSpans,omitempty"`  // trace exporter only
+}
+
+// Health returns the current push-loop diagnostic snapshot.
+func (o *MetricsExporter) Health() PushHealth {
+	h := PushHealth{FailureCount: o.pushFailures.Load()}
+	if v, _ := o.lastErr.Load().(string); v != "" {
+		h.LastError = v
+	}
+	if t := o.lastErrAt.Load(); t != 0 {
+		h.LastErrorAt = time.Unix(0, t).UTC().Format(time.RFC3339)
+	}
+	if t := o.lastSuccessAt.Load(); t != 0 {
+		h.LastSuccessAt = time.Unix(0, t).UTC().Format(time.RFC3339)
+	}
+	return h
 }
 
 // NewMetrics builds a metrics exporter over the given snapshot source
@@ -136,7 +172,7 @@ func (o *MetricsExporter) pushLoop(ctx context.Context) {
 	}
 }
 
-func (o *MetricsExporter) push(ctx context.Context) error {
+func (o *MetricsExporter) push(ctx context.Context) (err error) {
 	o.mu.RLock()
 	endpoint := o.endpoint
 	headers := o.headers
@@ -145,6 +181,15 @@ func (o *MetricsExporter) push(ctx context.Context) error {
 	if endpoint == "" {
 		return nil
 	}
+	defer func() {
+		if err != nil {
+			o.pushFailures.Add(1)
+			o.lastErr.Store(err.Error())
+			o.lastErrAt.Store(time.Now().UnixNano())
+		} else {
+			o.lastSuccessAt.Store(time.Now().UnixNano())
+		}
+	}()
 
 	// Regexp barrier: CodeQL recognises Regexp.MatchString as an SSRF
 	// sanitiser, breaking the taint chain on endpoint (go/request-forgery).

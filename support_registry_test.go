@@ -37,6 +37,10 @@ var m2CollectorRoster = []string{
 	"runtime",
 	// M3 operational timeline (L1)
 	"timeline",
+	// M5 local-health posture (L1)
+	"local_health",
+	// M7 Slice 1 scoped support-metric registry snapshot (L0)
+	"support_metrics",
 }
 
 func TestM2Wall_RosterLocked(t *testing.T) {

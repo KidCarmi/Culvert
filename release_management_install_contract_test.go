@@ -109,16 +109,29 @@ func TestReleaseManagementInstallerWiresFailClosed(t *testing.T) {
 	}
 }
 
+// The installer is catalog-AWARE (it forwards CULVERT_RELEASE_CATALOG_URL and runs
+// the in-binary `bootstrap-resolve` verifier to choose the image), but the trust
+// contract requires that it never (a) bakes a DEFAULT catalog origin into the shell
+// — the canonical default lives ONLY in the Go binary, so origin and trust cannot
+// drift — nor (b) fetches/parses an UNSIGNED catalog index in shell. Verification
+// stays entirely in the verified binary.
 func TestReleaseManagementInstallerDoesNotAutoSeedCatalog(t *testing.T) {
 	install := readContractFile(t, "scripts/install.sh")
 	for _, forbidden := range []string{
+		// No baked default origin (the binary owns defaultReleaseCatalogURL).
+		"catalog.culvertlabs.com",
+		// No unsigned in-shell catalog fetch/parse.
 		"release_catalog/index.json",
 		"release-catalog/index.json",
 		"curl -fsSL https://raw.githubusercontent.com/KidCarmi/Culvert/main/release_catalog",
-		"CULVERT_RELEASE_CATALOG_URL",
 	} {
 		if strings.Contains(install, forbidden) {
-			t.Fatalf("installer must not auto-seed or hide a default release catalog source; found %q", forbidden)
+			t.Fatalf("installer must not bake a default catalog origin or fetch an unsigned catalog in shell; found %q", forbidden)
 		}
+	}
+	// It MUST, however, resolve the image through the verified bootstrap-resolve
+	// subcommand rather than enumerating tags on the trusted path.
+	if !strings.Contains(install, "bootstrap-resolve") {
+		t.Fatal("installer must resolve the fresh-install image via the verified `bootstrap-resolve` subcommand")
 	}
 }

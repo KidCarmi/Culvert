@@ -85,3 +85,50 @@ func refreshLoopTick(ctx context.Context, getRM func() *releaseManager) {
 		}
 	}
 }
+
+// runCatalogStaleWatchdogLoop keeps the M1-3 freshness watchdog alive when the
+// refresh loop does NOT run (CHAOS-23, 2026-07-10 review). The watchdog
+// normally rides runRefresh, but that loop starts only with a catalog origin in
+// enforce mode — so a disabled-fetch appliance (catalog_url_source=disabled,
+// the air-gapped/operator-managed-catalog posture) or a break-glass
+// permissive/disabled deployment evaluated staleness only at boot and on
+// manual refresh: a set-and-forget appliance crossing the 30-day threshold at
+// runtime never fired release_catalog_stale until a restart. This loop is pure
+// detection — no fetch, no reload, no trust logic; one holder read + latch
+// check per tick — started by loadReleaseManagement ONLY when the refresh loop
+// is not (exactly one runtime watchdog driver per process).
+func runCatalogStaleWatchdogLoop(ctx context.Context, interval time.Duration, getRM func() *releaseManager) {
+	if interval <= 0 {
+		return
+	}
+	timer := time.NewTimer(jitteredInterval(interval))
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+		staleWatchdogTick(getRM)
+		timer.Reset(jitteredInterval(interval))
+	}
+}
+
+// staleWatchdogTick runs ONE freshness evaluation under the same panic-
+// containment contract as refreshLoopTick (CHAOS-R1): in the deployments this
+// loop serves it is the SOLE runtime driver of stale-alerting, so a panic must
+// cost one tick, not the watchdog for the rest of the process lifetime. The
+// statusMu section inside evaluateCatalogFreshness releases via defer, so
+// recovery here cannot strand the mutex.
+func staleWatchdogTick(getRM func() *releaseManager) {
+	defer func() {
+		if r := recover(); r != nil {
+			if logger != nil {
+				logger.Printf("release catalog: stale-watchdog tick panicked (recovered, loop continues): %v", r)
+			}
+		}
+	}()
+	if rm := getRM(); rm != nil {
+		rm.evaluateCatalogFreshness()
+	}
+}

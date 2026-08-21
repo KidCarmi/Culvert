@@ -98,3 +98,37 @@ func TestDPLastGoodConfigDiagnostics_CPDownRequiresLocalSnapshot(t *testing.T) {
 		t.Fatalf("status with healthy CP polling = %q, want ok", got.Status)
 	}
 }
+
+// TestCheckConfigSnapshotApply_ContentRejectionIsVisible covers the gap
+// checkDPLastGoodConfigSnapshot leaves: CP reachable + polling healthy, but
+// the last snapshot's CONTENT was rejected. Without this check that state
+// reads as a plain ok on the operator contract even though the node is
+// stuck on stale policy/auth config.
+func TestCheckConfigSnapshotApply_ContentRejectionIsVisible(t *testing.T) {
+	origDP := audit.DPMode()
+	origFailing := configSnapshotApplyFailing.Load()
+	audit.SetDPMode(true)
+	t.Cleanup(func() {
+		audit.SetDPMode(origDP)
+		configSnapshotApplyFailing.Store(origFailing)
+	})
+
+	markConfigSnapshotApplyOK()
+	if got := checkConfigSnapshotApply(); got.Status != diagOK {
+		t.Fatalf("status after successful apply = %q, want ok", got.Status)
+	}
+
+	markConfigSnapshotApplyRejected()
+	got := checkConfigSnapshotApply()
+	if got.Status != diagFail {
+		t.Fatalf("status after rejected apply = %q, want fail", got.Status)
+	}
+	if got.OperatorAction == "" {
+		t.Fatalf("rejected apply check has no operator action")
+	}
+
+	markConfigSnapshotApplyOK()
+	if got := checkConfigSnapshotApply(); got.Status != diagOK {
+		t.Fatalf("status after recovery = %q, want ok", got.Status)
+	}
+}
