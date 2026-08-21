@@ -88,14 +88,12 @@ func TestP2S1_CR_RejectsInvalid(t *testing.T) {
 		"identity predicate": func(r *PolicyRule) {
 			r.SubjectMatch.All = []SubjectPredicate{{Type: "directory_group", Values: []string{"eng"}}}
 		},
-		// ADR-0025 activated CR providerRefs (credential-capable subset); the
-		// SHAPE rules still reject malformed refs.
-		"providerRefs malformed": func(r *PolicyRule) { r.Auth.ProviderRefs = []string{" okta "} },
-		"protocol socks5":        func(r *PolicyRule) { r.Auth.Protocol = "socks5" },
-		"protocol unknown":       func(r *PolicyRule) { r.Auth.Protocol = "ftp" },
-		"missing dest":           func(r *PolicyRule) { r.DestFQDN = ""; r.DestCategory = ""; r.DestCategoryGroup = "" },
-		"broadExemption":         func(r *PolicyRule) { r.DestFQDN = ""; r.Auth.BroadExemption = true },
-		"broadExempt+dest":       func(r *PolicyRule) { r.Auth.BroadExemption = true }, // even with a dest, broadExemption is invalid on CR
+		"providerRefs set": func(r *PolicyRule) { r.Auth.ProviderRefs = []string{"okta"} },
+		"protocol socks5":  func(r *PolicyRule) { r.Auth.Protocol = "socks5" },
+		"protocol unknown": func(r *PolicyRule) { r.Auth.Protocol = "ftp" },
+		"missing dest":     func(r *PolicyRule) { r.DestFQDN = ""; r.DestCategory = ""; r.DestCategoryGroup = "" },
+		"broadExemption":   func(r *PolicyRule) { r.DestFQDN = ""; r.Auth.BroadExemption = true },
+		"broadExempt+dest": func(r *PolicyRule) { r.Auth.BroadExemption = true }, // even with a dest, broadExemption is invalid on CR
 	}
 	for name, mutate := range cases {
 		r := validCRRule()

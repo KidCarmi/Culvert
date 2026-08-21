@@ -290,22 +290,6 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 					// Default whenever a Proxy-Authorization header is present). The
 					// kill switch does NOT disable CR.
 					authLog = authLogFieldsFor(d)
-					// ADR-0025: a CR rule scoped by providerRefs whose refs resolve to
-					// ZERO enabled credential-capable providers (deleted/disabled LDAP or
-					// OIDC profiles) fails CLOSED — a 407 would be a dangling affordance
-					// no scoped provider could ever satisfy. Empty refs keep the global
-					// validator-chain semantics. (Recorded limitation: when credentials
-					// ARE presented, arm 2 validates against the global chain — per-rule
-					// validator scoping inside arm 2 is a future seam.)
-					if len(d.Rule.Auth.ProviderRefs) > 0 && countEligibleCredentialProviderRefs(d.Rule.Auth.ProviderRefs) == 0 {
-						atomic.AddInt64(&statAuthFail, 1)
-						incAuthCredentialRequired()
-						recordRequestAuth(clientIP, r.Method, r.Host, "CRED_DENIED", d.Rule.Name, "", "", authLog)
-						logger.Printf("AUTH_CR rule=%q id=%q %s -> %q {req_id=%s action=deny reason=no_eligible_provider}",
-							sanitizeLog(d.Rule.Name), sanitizeLog(d.Rule.ID), clientIP, sanitizeLog(r.Host), reqID)
-						http.Error(w, "Forbidden: no eligible credential provider for this destination", http.StatusForbidden)
-						return authOutcome{}, false
-					}
 					atomic.AddInt64(&statAuthFail, 1)
 					incAuthCredentialRequired()
 					w.Header().Set("Proxy-Authenticate", `Basic realm="Culvert"`)

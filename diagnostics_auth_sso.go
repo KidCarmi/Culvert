@@ -152,47 +152,6 @@ func unavailableSSORefs(refs []string) []string {
 	return out
 }
 
-// authCRProviderRefDiagnostics reports operator risks for CredentialRequired
-// rules scoped by providerRefs (ADR-0025). Mirrors ssoProviderRefChecks' DR-4
-// posture: stored rules are never dropped on registry drift — runtime fails
-// closed (403), and these rows tell the operator why. Codes:
-//   - auth_cr_no_eligible_provider  FAIL — a rule's refs resolve to zero
-//     enabled credential-capable providers; covered traffic is failed closed.
-//   - auth_cr_providerref_unavailable WARN — some (not all) refs are
-//     disabled/deleted/non-credential-capable.
-func authCRProviderRefDiagnostics(rules []PolicyRule) []OperatorContractCheck {
-	var checks []OperatorContractCheck
-	for i := range rules {
-		r := &rules[i]
-		if ruleTypeOf(r) != ruleTypeAuth || r.Auth == nil || r.Auth.Outcome != OutcomeCredentialRequired {
-			continue
-		}
-		if !ruleIsEnabled(r) || !authRuleNotExpired(r.Auth) || len(r.Auth.ProviderRefs) == 0 {
-			continue
-		}
-		eligible := countEligibleCredentialProviderRefs(r.Auth.ProviderRefs)
-		switch {
-		case eligible == 0:
-			checks = append(checks, OperatorContractCheck{
-				Code:   "auth_cr_no_eligible_provider",
-				Status: diagFail,
-				Message: fmt.Sprintf("CredentialRequired rule %s scopes providerRefs to zero eligible credential providers — "+
-					"every covered request is failed closed (403) instead of challenged", ruleRef(r)),
-				OperatorAction: "Re-enable or recreate the referenced LDAP/OIDC provider, update the rule's providerRefs, or remove the rule.",
-			})
-		case eligible < len(r.Auth.ProviderRefs):
-			checks = append(checks, OperatorContractCheck{
-				Code:   "auth_cr_providerref_unavailable",
-				Status: diagWarn,
-				Message: fmt.Sprintf("CredentialRequired rule %s references %d provider(s) that are disabled, deleted, or not credential-capable — "+
-					"%d of %d refs remain eligible", ruleRef(r), len(r.Auth.ProviderRefs)-eligible, eligible, len(r.Auth.ProviderRefs)),
-				OperatorAction: "Prune stale providerRefs or re-enable the referenced providers.",
-			})
-		}
-	}
-	return checks
-}
-
 // authLDAPProfileDiagnostics reports transport-hygiene and authority risks for
 // enabled LDAP IdP profiles (ADR-0025). Report-only. Codes:
 //   - ldap_plaintext_transport     WARN — plain ldap:// without StartTLS.

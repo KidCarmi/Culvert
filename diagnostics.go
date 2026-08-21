@@ -167,9 +167,8 @@ func buildOperatorContract() OperatorContract {
 	// exemption postures. Contributes nothing when no exempt rules exist.
 	checks = append(checks, authExemptDiagnostics(policyStore.List(), policyActionFromDefault())...)
 	checks = append(checks, authCredentialRequiredDiagnostics(policyStore.List(), hasCredentialCapableProvider())...)
-	// CR providerRefs + LDAP profile hygiene diagnostics (ADR-0025). Report-only;
-	// contribute nothing when no CR refs / LDAP profiles exist.
-	checks = append(checks, authCRProviderRefDiagnostics(policyStore.List())...)
+	// LDAP profile hygiene diagnostics (ADR-0025). Report-only; contribute
+	// nothing when no LDAP profiles exist.
 	checks = append(checks, authLDAPProfileDiagnostics()...)
 	// SSORequired risk diagnostics + auth-rule shadow/overlap diagnostics (Phase 3
 	// Slice 5). Report-only; contribute nothing when no SSO/auth rules apply.

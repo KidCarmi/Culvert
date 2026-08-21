@@ -126,11 +126,11 @@ func apiAuthPolicyCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	// Referential providerRefs check (SSORequired + CredentialRequired) —
-	// registry-aware, write-door only. Bulk persistence paths stay shape-only
-	// so registry drift never drops stored rules (DR-4).
+	// Referential providerRefs check (SSORequired) — registry-aware, write-door
+	// only. Bulk persistence paths stay shape-only so registry drift never drops
+	// stored rules (DR-4). Phase 3 Slice 2.
 	if rule.Auth != nil {
-		if err := validateAuthProviderRefsLive(rule.Auth); err != nil {
+		if err := validateSSOProviderRefsLive(rule.Auth); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -174,10 +174,9 @@ func apiAuthPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	// Referential providerRefs check (SSORequired + CredentialRequired) —
-	// write-door only (DR-4).
+	// Referential providerRefs check (SSORequired) — write-door only (DR-4).
 	if rule.Auth != nil {
-		if err := validateAuthProviderRefsLive(rule.Auth); err != nil {
+		if err := validateSSOProviderRefsLive(rule.Auth); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}

@@ -264,43 +264,17 @@ func TestP3S6_API_RBACUnchanged(t *testing.T) {
 func TestP3S6_API_ProviderRefsStillRejectedForExemptAndCR(t *testing.T) {
 	withConfigVersionsDir(t)
 	withIdPRegistry(t, &IdPProfile{ID: "corp-oidc", Name: "Corp OIDC", Type: IdPTypeOIDC, Enabled: true})
-
-	// Exempt + providerRefs → still rejected (no provider concept).
-	withFreshPolicyStore(t)
-	body := guiSSORulePayload("bad-Exempt", []string{"corp-oidc"})
-	body["auth"].(map[string]any)["outcome"] = "Exempt"
-	w := httptest.NewRecorder()
-	apiAuthPolicy(w, roleReq(RoleAdmin, "POST", "/api/authpolicy", body))
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("Exempt + providerRefs: POST = %d, want 400", w.Code)
-	}
-	if len(listAuthRules()) != 0 {
-		t.Error("Exempt + providerRefs: rule must not be stored")
-	}
-
-	// CredentialRequired + a credential-capable (OIDC) ref → ACCEPTED (ADR-0025).
-	withFreshPolicyStore(t)
-	body = guiSSORulePayload("cr-ok", []string{"corp-oidc"})
-	body["auth"].(map[string]any)["outcome"] = "CredentialRequired"
-	w = httptest.NewRecorder()
-	apiAuthPolicy(w, roleReq(RoleAdmin, "POST", "/api/authpolicy", body))
-	if w.Code != http.StatusOK {
-		t.Errorf("CR + eligible providerRef: POST = %d, want 200 (body=%s)", w.Code, w.Body.String())
-	}
-	if len(listAuthRules()) != 1 {
-		t.Error("CR + eligible providerRef: rule must be stored")
-	}
-
-	// CredentialRequired + a missing ref → rejected at the write door.
-	withFreshPolicyStore(t)
-	body = guiSSORulePayload("cr-bad", []string{"ghost-ref"})
-	body["auth"].(map[string]any)["outcome"] = "CredentialRequired"
-	w = httptest.NewRecorder()
-	apiAuthPolicy(w, roleReq(RoleAdmin, "POST", "/api/authpolicy", body))
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("CR + missing providerRef: POST = %d, want 400", w.Code)
-	}
-	if len(listAuthRules()) != 0 {
-		t.Error("CR + missing providerRef: rule must not be stored")
+	for _, outcome := range []string{"Exempt", "CredentialRequired"} {
+		withFreshPolicyStore(t)
+		body := guiSSORulePayload("bad-"+outcome, []string{"corp-oidc"})
+		body["auth"].(map[string]any)["outcome"] = outcome
+		w := httptest.NewRecorder()
+		apiAuthPolicy(w, roleReq(RoleAdmin, "POST", "/api/authpolicy", body))
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s + providerRefs: POST = %d, want 400", outcome, w.Code)
+		}
+		if len(listAuthRules()) != 0 {
+			t.Errorf("%s + providerRefs: rule must not be stored", outcome)
+		}
 	}
 }
