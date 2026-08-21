@@ -159,6 +159,7 @@ func buildOperatorContract() OperatorContract {
 		checkConfigRollbackValidation(cv),
 		checkKeyAtRest(),
 		checkAuditPersistence(),
+		checkRequestLogPersistence(),
 		checkIdentityBackend(),
 		checkSyslogFeed(),
 		checkMemoryBackstop(),
@@ -457,6 +458,40 @@ func checkAuditPersistence() OperatorContractCheck {
 		Code:    "audit_log_persistence",
 		Status:  diagOK,
 		Message: "audit trail is persisting to the configured log file",
+	}
+}
+
+// checkRequestLogPersistence reports whether the operator-configured request
+// log file (request_log_file / -request-log) is actually persisting entries
+// to disk. A silent failure here (bad path, permissions, unmounted volume)
+// degrades the traffic log — frequently the artifact pulled for incident
+// investigation — to the volatile in-memory ring with only a startup log
+// line as signal. GET /api/stats already exposes the configured path
+// (requestLogConfiguredPath) as a raw field; this surfaces it as an explicit
+// operator-contract VERDICT (fail + remediation) alongside the other health
+// rows. requestLogConfiguredPath records operator intent regardless of
+// initRequestLog's outcome, so it distinguishes "not configured" from
+// "configured but degraded". Mirrors checkAuditPersistence.
+func checkRequestLogPersistence() OperatorContractCheck {
+	if requestLogConfiguredPath == "" {
+		return OperatorContractCheck{
+			Code:    "request_log_persistence",
+			Status:  diagOK,
+			Message: "not configured — request log is in-memory only, lost on restart",
+		}
+	}
+	if !requestLogPersistActive() {
+		return OperatorContractCheck{
+			Code:           "request_log_persistence",
+			Status:         diagFail,
+			Message:        "configured but failed to open — request log has silently fallen back to the in-memory ring, lost on restart",
+			OperatorAction: "Fix permissions/mount on the configured request log path, then restart the proxy to restore durable request-log persistence.",
+		}
+	}
+	return OperatorContractCheck{
+		Code:    "request_log_persistence",
+		Status:  diagOK,
+		Message: "request log is persisting to the configured log file",
 	}
 }
 
