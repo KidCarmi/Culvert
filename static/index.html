@@ -5006,6 +5006,17 @@ Firefox (all platforms):
           </div>
 
           <div>
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+              <span style="font-weight:600">Backups</span>
+              <button class="btn ghost sm" data-click="loadBackups" title="Re-check the backup archive directory">
+                <svg class="ico" aria-hidden="true"><use href="#i-refresh"/></svg> Refresh
+              </button>
+            </div>
+            <p class="hint">Archive directory scanned by the maintenance agent - the same listing <code>--list-backups</code> produces, without SSH.</p>
+            <div id="support-backups" role="status" aria-live="polite"><p class="hint">Loading…</p></div>
+          </div>
+
+          <div>
             <div style="font-weight:600;margin-bottom:6px">Capture level</div>
             <p class="hint">Elevate the default bundle capture depth for a bounded window. A TTL is <strong>mandatory</strong> - the level auto-reverts to baseline when it expires (even across a restart).</p>
             <div id="support-debug-level" role="status" aria-live="polite" style="margin:6px 0"><p class="hint">Loading…</p></div>
@@ -5596,6 +5607,7 @@ document.addEventListener('click', e => {
     // ── Release management (P1.6d-1) ──
     case 'loadReleases':           loadReleases(); break;
     case 'loadSupport':            loadSupport(); break;
+    case 'loadBackups':            loadBackups(); break;
     case 'supportCreateBundle':    supportCreateBundle(); break;
     case 'supportSetDebugLevel':   supportSetDebugLevel(); break;
     case 'supportClearDebugLevel': supportClearDebugLevel(); break;
@@ -15084,6 +15096,58 @@ async function loadSupport() {
   loadUploads();
   loadTelemetryConfig();
   loadSupportTelemetryPreview();
+  loadBackups();
+}
+
+// Backup archive visibility: read-only pass-through of the CP-local
+// maintenance agent's GET /v1/backups (see backups_api.go). Answers "did the
+// backup job actually run, how big, how stale" from the GUI - no SSH/CLI.
+async function loadBackups() {
+  const el = document.getElementById('support-backups');
+  if (!el) return;
+  el.innerHTML = '<p class="hint">Loading…</p>';
+  el.setAttribute('aria-busy', 'true');
+  try {
+    const data = await api('/api/backups');
+    renderBackups(data);
+  } catch (e) {
+    el.innerHTML = '<p class="hint">Failed to load backups: ' + escHtml(e.message) + '</p>';
+  } finally {
+    el.removeAttribute('aria-busy');
+  }
+}
+
+function renderBackups(data) {
+  const el = document.getElementById('support-backups');
+  if (!el) return;
+  data = data || {};
+  if (!data.available) {
+    el.innerHTML = '<p class="hint">Not available' + (data.reason ? ': ' + escHtml(String(data.reason)) : '') + '.</p>';
+    return;
+  }
+  const backups = Array.isArray(data.backups) ? data.backups : [];
+  if (!backups.length) {
+    el.innerHTML = '<p class="hint">No backup archives found.</p>';
+    return;
+  }
+  let staleness = '';
+  if (data.newest_at) {
+    const ageMs = new Date() - new Date(data.newest_at);
+    if (ageMs > 48 * 3600 * 1000) {
+      staleness = ' <span style="color:var(--red);font-weight:600">· newest backup is ' + timeAgo(new Date(data.newest_at)) + ' - check the backup job</span>';
+    } else {
+      staleness = ' · newest ' + timeAgo(new Date(data.newest_at));
+    }
+  }
+  const hdr = '<p class="hint">' + backups.length + ' archive' + (backups.length === 1 ? '' : 's') + staleness + '</p>';
+  el.innerHTML = hdr + '<div style="overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr>' +
+    '<th>Filename</th><th>Size</th><th>Modified</th><th>Encrypted</th></tr></thead><tbody>' +
+    backups.map(b => '<tr>' +
+      '<td style="font-family:monospace">' + escHtml(String(b.filename || '')) + '</td>' +
+      '<td>' + fmtBytes(b.size_bytes || 0) + '</td>' +
+      '<td>' + (b.modified_at ? escHtml(timeAgo(new Date(b.modified_at))) : '-') + '</td>' +
+      '<td>' + (b.encrypted ? 'yes' : 'no') + '</td>' +
+    '</tr>').join('') + '</tbody></table></div>';
 }
 
 // M7 Slice 1: read-only preview only — GET /api/support/telemetry/preview
