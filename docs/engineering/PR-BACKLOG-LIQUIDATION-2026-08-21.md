@@ -68,6 +68,26 @@ CLOSED-DUPLICATE, CLOSED-SUPERSEDED, CLOSED-ALREADY-PRESENT, CLOSED-OBSOLETE, CL
 | #916 | DP cert-renewal retry | CLOSED-UNSAFE (rework) | Fix defeated by its own unresolved P1 (ambiguous renewal ⇒ CP already swapped CertSerial ⇒ retry loop can never succeed); needs CP-side renewal idempotency — a designed change. Follow-up priority RAISED: #1173's clamp increases renewal traffic near CA expiry. |
 | #1110/#1124/#1133/#1146/#1166/#1179 | cluster-CA duplicates | CLOSED-SUPERSEDED | Coverage matrix vs #1173 built first; each close comment records what was compared and what was ported (see PR comments). #1133 additionally carried an active sign-past-expiry fail-open; #1146 a wrong runbook claim + an alert-name design #1173 correctly avoids. |
 
+
+## Outcome summary
+
+- **Starting state:** 100 open PRs (99 actionable + protected #1181). 12 conflicted with baseline main; 3 drafts (853, 1147, and the not-flagged-but-explicit 854); 6 dependabot; ~10 CI-red; 7 duplicate/superseded families identified (cluster-CA ×9, urlcat ×4, readyz-leak ×3, terminology reports ×14+, pkg-count docs ×4, /ready docs ×3, MCP-docs ×2, release-catalog docs ×2, threatfeed ×2, install-passphrase ×2, codeql-action ×3).
+- **Merged: 72** — of which ~31 required engineering first (conflict reconstruction, review-finding fixes, consolidation ports, reductions to unique payloads).
+- **Closed without merge: 27** — 5 duplicates (unique value ported before closing), 16 superseded, 1 already-in-main (#1086), 4 obsolete (#1002, #932, #854, #853), 1 unsafe-as-written (#916, re-filed as a designed follow-up).
+- **Final open-PR state: exactly #1181** (verified by fresh query; #1181 and its branch untouched throughout).
+
+### High-risk merges performed (each with local qualification + review-finding closure first)
+#1037 (policy fail-open), #1016 (unenforced taxonomy edits), #1173+#1140 (cluster-CA trust plane), #1172 (SSO flood), #1165 (JWKS ceiling), #1157/#1144 (MCP transaction/capability), #1158 (HTTP forward path rewrite), #1164/#1180 (policy hot-path indexes), #809 (TOCTOU capture extended to the native-H2 path main grew after the branch).
+
+### High-risk work deliberately NOT merged
+#853's HA promotion-evidence classification (must be re-woven into the reworked guardedTick loop — spec + tests preserved on its branch); #916's renewal retry (defeated by its own ambiguity P1; needs CP-side idempotency); #932's telemetry metric rename (now a cross-repo wire-contract change guarded by the golden-fixture wall).
+
+### Review comments that caught real defects (fixed before merge)
+#1115 declare-and-stall pre-allocation; #970 blocking limit+1 probe; #1037 torn membership snapshot; #1016 reqlog shutdown stranding + wiring-untested recompose; #1143 unbounded container spawn + contract-breaking 503; #1161 wrong all-overridden claim + impossible recovery advice; #1105 misleading reload-failure text; #1119 green-badge-during-outage; #1112 G115 + overclaimed roadmap row; #1179→#1173 token burn; #1166→#1173 not-yet-valid import.
+
+### CI defects/flakes handled
+codeql-action split-pin family consolidated against the pin wall; #1167's Deep-gate determinism red shown NOT reproducible with the exact seed/count on current main; several stale-base govulncheck/trivy reds cleared by rebase; the mid-storm `Auto-Tag Release` failures on main are gate-approval cancellation artifacts of rapid sequential merging (all build/test/publish jobs green), resolved by the final quiescent run.
+
 ## Follow-ups recorded (not lost by closures)
 
 - DP cert-renewal retry needs CP-side renewal idempotency (from #916's P1); priority raised by the merged clamp's extra renewal traffic near CA expiry.
