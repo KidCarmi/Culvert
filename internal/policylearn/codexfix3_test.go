@@ -765,3 +765,38 @@ func TestObserve_GroupTruncationCountedOnlyOnAcceptedEnqueue(t *testing.T) {
 		t.Fatal("dropped observation counted as truncated-accepted")
 	}
 }
+
+// TestObserve_ExplicitPolicyStampAuthoritative (Codex round 20): a producer
+// that captured the policy identity (or a change witness) at the enforcement
+// decision passes it as Observation.PolicyID; the engine must use it as the
+// decision-time stamp INSTEAD of the enqueue-time seam read. Here the seam
+// says the baseline never moved — only the explicit witness can latch churn,
+// exactly the decision→stamp flip window the round-20 adapter closes.
+func TestObserve_ExplicitPolicyStampAuthoritative(t *testing.T) {
+	clk := newTestClock()
+	e := newTestEngine(t, t.TempDir(), clk, func(c *Config) {
+		c.Baseline = func() Baseline { return Baseline{PolicyContentHash: "hash-A"} }
+		c.PolicyContent = func() string { return "hash-A" } // seam: nothing ever changed
+	})
+	t.Cleanup(func() { _ = e.Close() })
+	if _, err := e.StartSession("op"); err != nil {
+		t.Fatal(err)
+	}
+	before := e.ObservationStats().Delivered
+	e.Observe(Observation{Subject: "u", AuthSource: "idp", Host: "x.example", Status: "OK",
+		PolicyID: "default-action-flip@2a"})
+	barrierWait(t, func() bool { return e.ObservationStats().Delivered > before }, "observation delivered")
+	sess, err := e.StopSession("op")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, c := range sess.PolicyChurn {
+		if c.To == "default-action-flip@2a" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("explicit decision-time stamp did not reach the churn latch: churn=%v", sess.PolicyChurn)
+	}
+}

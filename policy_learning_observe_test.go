@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -269,10 +270,10 @@ func TestObservation_ActionDerivedFromEnforcementStatus(t *testing.T) {
 	// The enforcement decision ran under default-allow (status OK, no match);
 	// the atomic has since flipped to deny before the adapter observed it.
 	setDefaultPolicyAction("deny")
-	learnObserveDecision(authOutcome{identity: "alice", source: "local"}, "flip-action.example", "GET", nil, "OK", "Bypass")
+	learnObserveDecision(authOutcome{identity: "alice", source: "local"}, "flip-action.example", "GET", nil, "OK", "Bypass", 0)
 	// And the mirror case: enforcement default-denied; atomic now says allow.
 	setDefaultPolicyAction("allow")
-	learnObserveDecision(authOutcome{identity: "alice", source: "local"}, "flip-deny.example", "GET", nil, "POLICY_DEFAULT_DENY", "")
+	learnObserveDecision(authOutcome{identity: "alice", source: "local"}, "flip-deny.example", "GET", nil, "POLICY_DEFAULT_DENY", "", 0)
 	_ = eng.Close()
 
 	if o, ok := obsForHost(t, col, "flip-action.example"); !ok {
@@ -287,11 +288,49 @@ func TestObservation_ActionDerivedFromEnforcementStatus(t *testing.T) {
 	}
 }
 
+// TestObservation_DefaultDecisionCarriesDecisionTimeIdentity (Codex round
+// 20): the observation's policy identity must be derived from the packed
+// state word the DEFAULT branch loaded to decide — a post-decision seam read
+// let a flip-and-restore inside the decision→stamp window pair the transient
+// evidence with the restored baseline identity. Word unchanged ⇒ the current
+// memoized identity is the decision identity; word moved ⇒ the stamp is a
+// unique flip witness the churn latch cannot mistake for the baseline.
+func TestObservation_DefaultDecisionCarriesDecisionTimeIdentity(t *testing.T) {
+	col := &obsCollector{}
+	eng := swapPolicyLearnSink(t, col.sink)
+	auth := authOutcome{identity: "alice", source: "local"}
+
+	// Consistent case: the word at the decision is still current — the stamp
+	// must be the real (memoized) content identity.
+	w := defaultPolicyActionState.Load()
+	learnObserveDecision(auth, "steady.example", "GET", nil, "OK", "Bypass", w)
+
+	// Flip case: a set lands between the decision and the stamp (simulated by
+	// advancing the word after capturing it) — the stamp must be the witness,
+	// never the restored current identity.
+	prev := defaultPolicyAction()
+	stale := defaultPolicyActionState.Load()
+	setDefaultPolicyAction(prev) // same value, new word: a completed round trip
+	learnObserveDecision(auth, "flipped.example", "GET", nil, "OK", "Bypass", stale)
+	_ = eng.Close()
+
+	if o, ok := obsForHost(t, col, "steady.example"); !ok {
+		t.Fatalf("no steady observation (got %v)", col.all())
+	} else if o.PolicyID != policyContentIdentityCached() {
+		t.Errorf("steady-word stamp = %q, want the memoized content identity", o.PolicyID)
+	}
+	if o, ok := obsForHost(t, col, "flipped.example"); !ok {
+		t.Fatalf("no flipped observation (got %v)", col.all())
+	} else if !strings.HasPrefix(o.PolicyID, "default-action-flip@") {
+		t.Errorf("stale-word stamp = %q, want a default-action-flip witness — the restored identity would latch no churn", o.PolicyID)
+	}
+}
+
 // TestObservationE2E_DisabledNilEngine: with the singleton nil the adapter is
 // a no-op — the request flows and nothing panics.
 func TestObservationE2E_DisabledNilEngine(t *testing.T) {
 	prev := policyLearnEngine.Load()
 	policyLearnEngine.Store(nil)
 	t.Cleanup(func() { policyLearnEngine.Store(prev) })
-	learnObserveDecision(authOutcome{identity: "x", source: "local"}, "h.example", "GET", nil, "OK", "Bypass")
+	learnObserveDecision(authOutcome{identity: "x", source: "local"}, "h.example", "GET", nil, "OK", "Bypass", 0)
 }

@@ -11,6 +11,7 @@ package main
 // predicted branch — no allocation, no goroutine, no I/O (benchgate-pinned).
 
 import (
+	"strconv"
 	"sync/atomic"
 
 	"github.com/KidCarmi/Culvert/internal/policylearn"
@@ -91,7 +92,19 @@ func learnCategoryEpoch() string {
 	return epoch
 }
 
-func learnObserveDecision(auth authOutcome, host, method string, match *PolicyMatch, status, sslAction string) {
+// daWord is the packed default-action state word applyPolicyDecision's
+// DEFAULT branch loaded to make its decision (0 = not a default-branch
+// decision, or no capture — falls back to the engine's enqueue-time seam
+// stamp). Codex round 20: stamping the policy identity from a post-decision
+// read let a full flip-and-restore inside the decision→stamp window pair
+// transient-window evidence with the restored baseline identity, latching no
+// churn. The word is strictly increasing, so equality with the current word
+// PROVES no default-action set intervened — the current memoized identity is
+// then the decision identity; inequality proves one DID, and the stamp
+// becomes a unique change witness that can never equal any content hash or
+// baseline, so the consume-time comparison latches the churn we know
+// happened.
+func learnObserveDecision(auth authOutcome, host, method string, match *PolicyMatch, status, sslAction string, daWord uint64) {
 	eng := policyLearnEngine.Load()
 	if eng == nil || !eng.LearningActive() {
 		// Disabled (nil) or enabled-but-idle: gate BEFORE any Observation is
@@ -114,6 +127,20 @@ func learnObserveDecision(auth authOutcome, host, method string, match *PolicyMa
 	default:
 		action = "default:allow"
 	}
+	policyID := ""
+	if (match == nil || match.Rule == nil) && daWord != 0 {
+		if defaultPolicyActionState.Load() == daWord {
+			// No set intervened since the enforcement load: the memoized
+			// identity IS the decision identity (0-alloc — memoized string).
+			policyID = policyContentIdentityCached()
+		} else {
+			// A set provably landed between the decision and this stamp. The
+			// decision-time identity is unrecoverable, so stamp a witness
+			// unique to that decision word (allocates — flip-rate only,
+			// never steady-state).
+			policyID = "default-action-flip@" + strconv.FormatUint(daWord, 16)
+		}
+	}
 	eng.Observe(policylearn.Observation{
 		Subject:    auth.identity,
 		AuthSource: auth.source, // verbatim opaque provenance
@@ -124,5 +151,6 @@ func learnObserveDecision(auth authOutcome, host, method string, match *PolicyMa
 		Action:     action,
 		Status:     status,
 		SSLAction:  sslAction,
+		PolicyID:   policyID, // "" ⇒ engine seam stamp at enqueue
 	})
 }

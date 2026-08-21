@@ -70,6 +70,16 @@ type Observation struct {
 	Action     string // rule action, or "default:allow"/"default:deny"
 	Status     string // the request-log Status taxonomy value for this decision
 	SSLAction  string // "Inspect"/"Bypass" when resolved; "" on blocked branches
+
+	// PolicyID is the caller-supplied DECISION-TIME policy identity (Codex
+	// round 20): the producer captured (or derived a change witness from) the
+	// state that actually determined enforcement, so the stamp cannot be a
+	// later value that a flip-and-restore already re-baselined. When empty,
+	// Observe stamps the current PolicyContent seam value at enqueue instead
+	// (the pre-round-20 behavior; still used by paths with no decision-time
+	// capture). Opaque to the engine — only compared for equality by the
+	// churn latch.
+	PolicyID string
 }
 
 // ObservationStats are the monotonic transport counters (loss accounting —
@@ -211,7 +221,13 @@ func (e *Engine) Observe(o Observation) {
 	if e.cfg.CategoryEpoch != nil {
 		o.catEpoch = e.cfg.CategoryEpoch()
 	}
-	if e.cfg.PolicyContent != nil {
+	switch {
+	case o.PolicyID != "":
+		// The producer captured the identity (or a change witness) at the
+		// enforcement decision itself (Codex round 20) — authoritative over
+		// any enqueue-time seam read.
+		o.policyID = o.PolicyID
+	case e.cfg.PolicyContent != nil:
 		o.policyID = e.cfg.PolicyContent()
 	}
 	select {

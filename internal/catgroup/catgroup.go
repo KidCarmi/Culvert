@@ -136,8 +136,11 @@ func (s *Store) Load(path string) error {
 	s.mu.Lock()
 	s.groups = built
 	s.order = order
-	s.mu.Unlock()
+	// Bump BEFORE unlock (round 19 follow-up): the mutex release publishes
+	// the new contents, so any reader that can observe them already sees the
+	// advanced revision — value and change signal are never out of step.
 	s.rev.Add(1)
+	s.mu.Unlock()
 
 	obs.Printf("CategoryGroups: loaded %d group(s) from %s", len(groups), path)
 	// Persist newly-assigned IDs so they survive restart (idempotent: a second
@@ -441,8 +444,11 @@ func (s *Store) ReplaceAll(groups []Group) {
 	s.mu.Lock()
 	s.groups = built
 	s.order = order
-	s.mu.Unlock()
+	// Bump BEFORE unlock (round 19 follow-up): the mutex release publishes
+	// the new contents, so any reader that can observe them already sees the
+	// advanced revision — value and change signal are never out of step.
 	s.rev.Add(1)
+	s.mu.Unlock()
 }
 
 // ContainsCategory returns true if any group references the given category name.

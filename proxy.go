@@ -537,11 +537,16 @@ func preDispatchBlocked(w http.ResponseWriter, r *http.Request, clientIP, host, 
 // (DEBT-002 extraction; no logic change).
 // applyPolicyDecision returns the status it recorded for this decision (the
 // request-log Status taxonomy: OK / POLICY_DROP / POLICY_BLOCK /
-// POLICY_REDIRECT / FILE_BLOCKED / POLICY_DEFAULT_DENY) and whether it wrote a
-// terminal response. The status return is the single source of truth for the
+// POLICY_REDIRECT / FILE_BLOCKED / POLICY_DEFAULT_DENY), the packed
+// default-action state word the DEFAULT branch loaded to make its decision
+// (0 on rule-matched branches — the adapter consults it only for no-match
+// decisions; Codex round 20: the learning stamp must be derived from the
+// load that actually determined enforcement, not a later re-read a
+// flip-and-restore already re-baselined), and whether it wrote a terminal
+// response. The status return is the single source of truth for the
 // M2 learning observation — reconstruction at the call site would duplicate
 // this dispatch. Enforcement behavior is unchanged.
-func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host, reqID, authenticatedIdentity string, authLog AuthLogFields, match *PolicyMatch) (string, bool) { //nolint:gocognit,cyclop,funlen // policy-action dispatch is inherently branchy; isolated and independently testable (DEBT-002)
+func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host, reqID, authenticatedIdentity string, authLog AuthLogFields, match *PolicyMatch) (string, uint64, bool) { //nolint:gocognit,cyclop,funlen // policy-action dispatch is inherently branchy; isolated and independently testable (DEBT-002)
 	if match != nil { //nolint:nestif // policy action dispatch is inherently branchy
 		ruleMet.RecordHit(match.Rule.Name)
 		// Rename-safe decision attribution: stamp the matched rule's stable ULID
@@ -573,14 +578,14 @@ func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host,
 					panic(http.ErrAbortHandler)
 				}
 			}
-			return "POLICY_DROP", true
+			return "POLICY_DROP", 0, true
 
 		case ActionBlockPage:
 			atomic.AddInt64(&statBlocked, 1)
 			recordRequestAuthURI(clientIP, r.Method, r.Host, "POLICY_BLOCK", match.Rule.Name, string(ActionBlockPage), authenticatedIdentity, "", ruleURI, authLog)
 			logger.Printf("POLICY_BLOCK rule=%q pri=%s %s -> %q [%s] {req_id=%s identity=%s rule=%s action=block}", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, sanitizeLog(host), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), sanitizeLog(match.Rule.Name))
 			serveBlockPage(w, r.Host, string(match.Rule.DestCategory), match.Rule.Name)
-			return "POLICY_BLOCK", true
+			return "POLICY_BLOCK", 0, true
 
 		case ActionRedirect:
 			atomic.AddInt64(&statBlocked, 1)
@@ -588,11 +593,11 @@ func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host,
 			if !isSafeRedirectURL(match.Rule.RedirectURL) {
 				logger.Printf("POLICY_REDIRECT rule=%q: invalid redirect URL %q — blocking", sanitizeLog(match.Rule.Name), sanitizeLog(match.Rule.RedirectURL))
 				http.Error(w, "Forbidden", http.StatusForbidden)
-				return "POLICY_REDIRECT", true
+				return "POLICY_REDIRECT", 0, true
 			}
 			logger.Printf("POLICY_REDIRECT rule=%q pri=%s %s -> %q => %q [%s] {req_id=%s identity=%s rule=%s action=redirect}", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, sanitizeLog(host), sanitizeLog(match.Rule.RedirectURL), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), sanitizeLog(match.Rule.Name))
 			http.Redirect(w, r, match.Rule.RedirectURL, http.StatusFound) // #nosec G710 -- admin-configured rule action target; the isSafeRedirectURL guard above blocks unsafe values
-			return "POLICY_REDIRECT", true
+			return "POLICY_REDIRECT", 0, true
 
 		case ActionAllow:
 			// Per-rule file profile: even when the policy allows the request,
@@ -607,7 +612,7 @@ func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host,
 					recordRequestAuthURI(clientIP, r.Method, r.Host, "FILE_BLOCKED", string(match.Rule.FileProfile), match.Rule.Name, authenticatedIdentity, "", ruleURI, authLog)
 					logger.Printf("FILE_BLOCKED (policy profile) %s -> %q%q (profile=%q rule=%q)", clientIP, sanitizeLog(host), sanitizeLog(r.URL.Path), sanitizeLog(string(match.Rule.FileProfile)), sanitizeLog(match.Rule.Name))
 					serveBlockPage(w, r.Host+r.URL.Path, "File Block (Policy)", string(match.Rule.FileProfile))
-					return "FILE_BLOCKED", true
+					return "FILE_BLOCKED", 0, true
 				}
 			}
 			if ruleLogsTraffic(match.Rule) {
@@ -621,21 +626,26 @@ func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host,
 			// Fall through to normal handling below.
 		}
 	} else {
-		// No rule matched — apply the configured default action.
-		if defaultPolicyAction() == "allow" {
+		// No rule matched — apply the configured default action. ONE load of
+		// the packed state word decides AND is returned to the caller (Codex
+		// round 20): the learning adapter stamps its policy identity against
+		// this exact word, so the stamp can never describe a state other than
+		// the one that produced this decision.
+		daWord := defaultPolicyActionState.Load()
+		if daWord&1 == 1 {
 			// Passthrough mode: allow all unmatched traffic (initial setup).
 			recordRequestAuth(clientIP, r.Method, r.Host, "OK", "default-allow", "Allow", authenticatedIdentity, authLog)
-		} else {
-			// Zero Trust: deny by default. Serve the custom HTML block page so
-			// end-users see a clear, branded explanation.
-			atomic.AddInt64(&statBlocked, 1)
-			recordRequestAuth(clientIP, r.Method, r.Host, "POLICY_DEFAULT_DENY", "", "", authenticatedIdentity, authLog)
-			logger.Printf("POLICY_DEFAULT_DENY %s %s %q {req_id=%s identity=%s action=deny}", clientIP, r.Method, sanitizeLog(r.Host), reqID, sanitizeLog(authenticatedIdentity))
-			serveBlockPage(w, r.Host, "Default Deny", "No matching policy rule")
-			return "POLICY_DEFAULT_DENY", true
+			return "OK", daWord, false
 		}
+		// Zero Trust: deny by default. Serve the custom HTML block page so
+		// end-users see a clear, branded explanation.
+		atomic.AddInt64(&statBlocked, 1)
+		recordRequestAuth(clientIP, r.Method, r.Host, "POLICY_DEFAULT_DENY", "", "", authenticatedIdentity, authLog)
+		logger.Printf("POLICY_DEFAULT_DENY %s %s %q {req_id=%s identity=%s action=deny}", clientIP, r.Method, sanitizeLog(r.Host), reqID, sanitizeLog(authenticatedIdentity))
+		serveBlockPage(w, r.Host, "Default Deny", "No matching policy rule")
+		return "POLICY_DEFAULT_DENY", daWord, true
 	}
-	return "OK", false
+	return "OK", 0, false
 }
 
 // recordRequestTelemetry records per-request observability after dispatch:
@@ -986,20 +996,20 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	// the duplicate on the normal terminal path below. Enforcement untouched.
 	isDrop := match != nil && match.Rule != nil && match.Action == ActionDrop
 	if isDrop {
-		learnObserveDecision(auth, normHost, r.Method, match, "POLICY_DROP", "")
+		learnObserveDecision(auth, normHost, r.Method, match, "POLICY_DROP", "", 0)
 	}
 
 	// ── Policy action dispatch ──────────────────────────────────────────────
 	// Extracted to applyPolicyDecision (DEBT-002). terminal=true means it wrote
 	// a terminal drop / block / redirect / deny response.
-	decisionStatus, terminal := applyPolicyDecision(w, r, clientIP, host, reqID, authenticatedIdentity, authLog, match)
+	decisionStatus, daWord, terminal := applyPolicyDecision(w, r, clientIP, host, reqID, authenticatedIdentity, authLog, match)
 	if terminal {
 		// M2: one learning observation per policy decision (blocked branch;
 		// the Drop case was already emitted pre-abort above). Non-blocking,
 		// drop-on-full; a nil (disabled) engine costs one atomic load.
 		// Learning has zero authority here — see ADR-0025.
 		if !isDrop {
-			learnObserveDecision(auth, normHost, r.Method, match, decisionStatus, "")
+			learnObserveDecision(auth, normHost, r.Method, match, decisionStatus, "", daWord)
 		}
 		return
 	}
@@ -1015,7 +1025,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	// M2: one learning observation per policy decision (allowed branch, after
 	// the SSL decision so the observation carries it). Same non-blocking,
 	// advisory-only contract as the blocked branch above.
-	learnObserveDecision(auth, normHost, r.Method, match, decisionStatus, string(sslAction))
+	learnObserveDecision(auth, normHost, r.Method, match, decisionStatus, string(sslAction), daWord)
 
 	// Identity context forwarded to SSL-inspect (consumed by CDR today;
 	// future audit enrichment can read this without re-parsing headers).
