@@ -1492,23 +1492,41 @@ env_put() {
     warn "Set $var manually in $file if you need it, then restart the stack."
     return 0
   fi
-  touch "$file"; chmod 600 "$file"
-  sed -i 's/\r$//' "$file" 2>/dev/null || true # normalize to LF so compose parses cleanly
-  # grep -v exits 1 (not just erroring) whenever EVERY line matched the
-  # pattern being dropped — including the common case where $file contains
-  # only this one VAR=... line. Treat ONLY that "no lines survived" case (1)
-  # as benign and promote the filtered file; a real error (e.g. ENOSPC while
-  # writing $file.tmp) gets a higher exit code and must NOT clobber the
-  # existing $file with a truncated/empty temp file.
-  local rc=0
-  grep -vE "^${var}=" "$file" > "$file.tmp" 2>/dev/null && rc=0 || rc=$?
-  if [[ $rc -eq 0 || $rc -eq 1 ]]; then
-    mv "$file.tmp" "$file"
-  else
-    rm -f "$file.tmp"
-  fi
-  printf '%s=%s\n' "$var" "$val" >> "$file"
-  chmod 600 "$file"
+  # The full read (grep) / write (mv|rm) / append sequence below must run as
+  # ONE atomic transaction — install.sh is designed to be safely re-run
+  # against an existing deployment (e.g. an automation retry racing a
+  # still-running instance, or two admins running it at once), and two
+  # concurrent env_put calls both reading "$file" before either has written
+  # it back can otherwise interleave: whichever "mv" runs LAST wins
+  # unconditionally, silently discarding the other invocation's already-
+  # applied update (a lost-update race — unique-per-invocation staging files
+  # alone stop the two calls' writes from colliding, but not their reads
+  # and writes from interleaving with each other). A dedicated lock file
+  # (not $file itself, which gets replaced out from under an flock held on
+  # its old inode by the very "mv" below) held for the whole transaction
+  # serializes concurrent env_put calls against the same $file into a strict
+  # queue, so this reasons about $file exactly as a sequential caller would.
+  (
+    flock -x 9
+    touch "$file"; chmod 600 "$file"
+    sed -i 's/\r$//' "$file" 2>/dev/null || true # normalize to LF so compose parses cleanly
+    # grep -v exits 1 (not just erroring) whenever EVERY line matched the
+    # pattern being dropped — including the common case where $file contains
+    # only this one VAR=... line. Treat ONLY that "no lines survived" case (1)
+    # as benign and promote the filtered file; a real error (e.g. ENOSPC
+    # while writing $tmp) gets a higher exit code and must NOT clobber the
+    # existing $file with a truncated/empty temp file.
+    tmp="$(mktemp "${file}.XXXXXX" 2>/dev/null)" || tmp="${file}.tmp.$$"
+    rc=0
+    grep -vE "^${var}=" "$file" > "$tmp" 2>/dev/null && rc=0 || rc=$?
+    if [[ $rc -eq 0 || $rc -eq 1 ]]; then
+      mv "$tmp" "$file"
+    else
+      rm -f "$tmp"
+    fi
+    printf '%s=%s\n' "$var" "$val" >> "$file"
+    chmod 600 "$file"
+  ) 9>"$file.lock"
 }
 
 gen_passphrase() {
@@ -1519,6 +1537,38 @@ gen_passphrase() {
   printf '%s' "$p"
 }
 
+# validate_passphrase_for_env_file LABEL PASS — enforces the same length +
+# character-safety contract on a passphrase regardless of where it came from
+# (operator-typed or host-env-supplied) before it is ever written to .env.
+# Exits via error() on failure; returns silently on success.
+validate_passphrase_for_env_file() {
+  local label="$1" pass="$2"
+  # This passphrase is PBKDF2-SHA256'd (600k iterations, internal/ca/ca.go)
+  # straight into the AES-256-GCM key that protects the SSL-inspection Root
+  # CA private key and saved request logs — a short passphrase is brute-
+  # forceable regardless of the iteration count. gen_passphrase's
+  # auto-generated default is 40 characters; require anything else supplied
+  # to be long enough to meaningfully resist an offline attack.
+  if [[ "${#pass}" -lt 12 ]]; then
+    error "$label too short (${#pass} characters) — must be at least 12. This encrypts the SSL-inspection CA key and saved logs at rest, so it must resist offline brute-force."
+  fi
+  # The passphrase is stored in .env, which docker compose interpolates
+  # ($VAR), treats # as a comment, etc. Restrict to characters that survive
+  # that round-trip intact so the value reaching the container is exact — a
+  # raw "$" is the sharpest edge here: Compose treats "$Foo" in a .env value
+  # as ITS OWN variable reference and can resolve it to something else
+  # entirely (often empty, under the very same sudo-reset environment this
+  # whole function works around), silently storing a different passphrase
+  # than the one supplied.
+  # -z/--null-data makes grep match the WHOLE value as one record: without it
+  # a value with an embedded newline whose individual lines are each charset-
+  # clean would pass, and env_put would then append it as a second, malformed
+  # .env line, silently corrupting the persisted passphrase (Codex, PR #1156).
+  if printf '%s' "$pass" | LC_ALL=C grep -qz '[^A-Za-z0-9._@%^!*()+=:,-]'; then
+    error "$label has characters unsafe for the .env file. Use letters, digits, and simple punctuation (no \$, quotes, backslash, #, /, newlines, or spaces)."
+  fi
+}
+
 # Encrypts data at rest (AES-256), value(s) stored in $INSTALL_DIR/.env which
 # docker-compose.yml reads as ${CULVERT_*_PASSPHRASE:-}. We never overwrite an
 # existing value. On a FRESH deployment (no data volume yet) we can safely also
@@ -1527,6 +1577,27 @@ gen_passphrase() {
 # leave the CA passphrase to the operator.
 setup_at_rest_encryption() {
   local envfile="$INSTALL_DIR/.env"
+
+  # A host-environment-only CULVERT_LOG_PASSPHRASE (exported by an automated,
+  # non-interactive install) has the same failure shape the CA branch below
+  # guards against: secret_already_set() counts it as "configured", but §7
+  # starts the stack with plain `sudo docker compose up` (no `-E`), which does
+  # not forward this shell's environment — so the value never reaches compose's
+  # ${VAR:-} substitution and saved-log encryption silently runs with an empty
+  # passphrase. Persist it into .env FIRST (env_put never overwrites an
+  # existing .env value, so an on-disk operator value still wins), with the
+  # same whole-value charset guard (grep -z: an embedded newline must not
+  # split into per-line checks and then corrupt .env — Codex review, PR #1156).
+  # Fail-closed via the shared validator — the same floor and charset contract
+  # the interactive choice-2 path enforces on an operator-typed passphrase; a
+  # host-env value is equally operator-supplied, and warn-and-continue here
+  # would run the install with the operator's encryption intent silently
+  # dropped.
+  if [[ -n "${CULVERT_LOG_PASSPHRASE:-}" ]] && ! grep -Eq '^CULVERT_LOG_PASSPHRASE=.+' "$envfile" 2>/dev/null; then
+    validate_passphrase_for_env_file "CULVERT_LOG_PASSPHRASE" "$CULVERT_LOG_PASSPHRASE"
+    env_put CULVERT_LOG_PASSPHRASE "$CULVERT_LOG_PASSPHRASE" "$envfile"
+  fi
+
   local log_set=0 ca_set=0
   secret_already_set CULVERT_LOG_PASSPHRASE "$envfile" && log_set=1
   secret_already_set CULVERT_CA_PASSPHRASE "$envfile" && ca_set=1
@@ -1535,6 +1606,26 @@ setup_at_rest_encryption() {
   # overwrite an existing value, and a set CA passphrase means at-rest
   # encryption was already decided one way or another).
   if [[ "$ca_set" == 1 ]]; then
+    # secret_already_set() treats a host-environment-only value (e.g.
+    # exported by an automated, non-interactive install before running this
+    # script) as "already configured" too — but §7 below starts the stack
+    # with plain `sudo docker compose up` (no `-E`), which does NOT forward
+    # this shell's environment to the child process. A CULVERT_CA_PASSPHRASE
+    # that lives only here and never makes it into .env is silently dropped:
+    # docker compose resolves it to empty and the proxy persists its Root CA
+    # private key UNENCRYPTED — the same "proxy recreates with an empty
+    # passphrase" failure carry_forward_prior_secrets() above guards against
+    # for a different trigger. Persist it now (same $-interpolation safety
+    # guard as the reuse-for-CA branch below) so it actually survives.
+    # Fail-closed via the shared validator (12-char floor + whole-value charset
+    # check) — the same contract the interactive choice-2 path enforces, so an
+    # operator's explicit encryption intent is never silently dropped into an
+    # unencrypted-CA install (the earlier warn-and-skip posture contradicted
+    # the interactive path's error on the identical input).
+    if [[ -n "${CULVERT_CA_PASSPHRASE:-}" ]] && ! grep -Eq '^CULVERT_CA_PASSPHRASE=.+' "$envfile" 2>/dev/null; then
+      validate_passphrase_for_env_file "CULVERT_CA_PASSPHRASE" "$CULVERT_CA_PASSPHRASE"
+      env_put CULVERT_CA_PASSPHRASE "$CULVERT_CA_PASSPHRASE" "$envfile"
+    fi
     info "Encryption passphrase already configured — keeping existing values."
     return
   fi
@@ -1603,21 +1694,7 @@ setup_at_rest_encryption() {
       local pass2=""; read -rsp "Confirm passphrase: " pass2; echo ""
       [[ -n "$pass" ]] || error "Empty passphrase."
       [[ "$pass" == "$pass2" ]] || error "Passphrases did not match."
-      # This passphrase is PBKDF2-SHA256'd (600k iterations, internal/ca/ca.go)
-      # straight into the AES-256-GCM key that protects the SSL-inspection Root
-      # CA private key and saved request logs — a short passphrase is brute-
-      # forceable regardless of the iteration count. gen_passphrase's
-      # auto-generated default is 40 characters; require an operator-chosen one
-      # to be long enough to meaningfully resist an offline attack.
-      if [[ "${#pass}" -lt 12 ]]; then
-        error "Passphrase too short (${#pass} characters) — must be at least 12. This encrypts the SSL-inspection CA key and saved logs at rest, so it must resist offline brute-force."
-      fi
-      # The passphrase is stored in .env, which docker compose interpolates
-      # ($VAR), treats # as a comment, etc. Restrict to characters that survive
-      # that round-trip intact so the value reaching the container is exact.
-      if printf '%s' "$pass" | LC_ALL=C grep -q '[^A-Za-z0-9._@%^!*()+=:,-]'; then
-        error "Passphrase has characters unsafe for the .env file. Use letters, digits, and simple punctuation (no \$, quotes, backslash, #, /, or spaces)."
-      fi
+      validate_passphrase_for_env_file "Passphrase" "$pass"
       ;;
     3)
       warn "Skipping encryption at rest. Enable later by setting CULVERT_LOG_PASSPHRASE"
@@ -2137,7 +2214,7 @@ wire_release_agent_for_compose() {
     warn "Release Management auto-wiring skipped: culvert-maint group/GID not found."
     return 0
   fi
-  if [[ ! -f "$cfg" || ! -f "$sudoers" ]]; then
+  if ! sudo test -f "$cfg" || ! sudo test -f "$sudoers"; then
     warn "Release Management auto-wiring skipped: maintenance-agent config or sudoers file is missing."
     return 0
   fi
@@ -2193,7 +2270,7 @@ wire_release_agent_for_compose() {
     # re-runs) AND safe against a hand-edited config.toml whose last line lacks a
     # trailing newline (without this, the key would glue onto that line and the
     # maint installer would not render the two-`-f` sudoers rule).
-    if [[ -n "$(tail -c1 "$cfg" 2>/dev/null)" ]]; then
+    if [[ -n "$(sudo tail -c1 "$cfg" 2>/dev/null)" ]]; then
       printf '\n' | sudo tee -a "$cfg" >/dev/null
     fi
     printf 'compose_override_file = "docker-compose.maint-agent.yml"\n' | sudo tee -a "$cfg" >/dev/null
@@ -2594,7 +2671,7 @@ install_maint_agent() {
   # untouched default — never an operator-edited path. Re-render reuses the
   # already-installed binary (skip-verify) so we never download twice.
   if [[ "$INSTALL_DIR" != "/srv/culvert" ]] \
-     && grep -q '^compose_project_dir = "/srv/culvert"' /etc/culvert-maint/config.toml 2>/dev/null; then
+     && sudo grep -q '^compose_project_dir = "/srv/culvert"' /etc/culvert-maint/config.toml 2>/dev/null; then
     info "Pointing maintenance agent at this stack (compose_project_dir=$INSTALL_DIR)..."
     sudo sed -i "s|^compose_project_dir = .*|compose_project_dir = \"$INSTALL_DIR\"|" /etc/culvert-maint/config.toml
     if ! sudo CULVERT_MAINT_SKIP_VERIFY=1 bash "$maint_installer" /usr/local/bin/culvert-maint; then
@@ -2623,7 +2700,7 @@ install_maint_agent() {
   # the unprivileged agent cannot bind directly in root-owned /run. Rewrite ONLY
   # the untouched old default to the managed-runtime-dir path; never touch a
   # customized value. socket_path is not sudoers-bound, so no re-render needed.
-  if grep -q '^socket_path = "/run/culvert-maint.sock"' /etc/culvert-maint/config.toml 2>/dev/null; then
+  if sudo grep -q '^socket_path = "/run/culvert-maint.sock"' /etc/culvert-maint/config.toml 2>/dev/null; then
     info "Migrating socket_path to the managed runtime dir (/run/culvert-maint/culvert-maint.sock)..."
     sudo sed -i 's|^socket_path = "/run/culvert-maint.sock"|socket_path = "/run/culvert-maint/culvert-maint.sock"|' /etc/culvert-maint/config.toml
   fi

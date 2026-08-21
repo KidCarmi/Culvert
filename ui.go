@@ -89,6 +89,7 @@ func newAdminUIHandler() http.Handler { //nolint:funlen // route registration; e
 	registerGovernanceRoutes(mux)     // ui_governance.go  —  1 route  (C3, admin-only)
 	registerReleaseRoutes(mux)        // release_api.go    —  5 routes (P1.6d-0, no GUI)
 	registerSupportRoutes(mux)        // ui_support.go     —  2 routes (M1 Slice 1)
+	registerBackupsRoutes(mux)        // backups_api.go    —  1 route  (backup-archive visibility)
 	registerDiagnoseRoutes(mux)       // diagnose.go       —  1 route  (M3 diagnose verbs)
 	registerMCPRoutes(mux)            // ui_mcp.go         — 14 routes (PR-9 MCP admin API)
 	registerPolicyLearningRoutes(mux) // ui_policy_learning.go — 6 routes (ADR-0025 M5A)

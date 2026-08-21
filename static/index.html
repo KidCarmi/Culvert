@@ -1110,6 +1110,10 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
                 <span style="font-size:.8rem;color:var(--muted)">SSE Clients</span>
                 <span class="mono-value" id="d-sse">-</span>
               </div>
+              <div class="flex-between" id="d-sse-issues-row" style="display:none">
+                <span style="font-size:.8rem;color:var(--muted)">SSE Evicted / Rejected</span>
+                <span class="mono-value text-red" id="d-sse-issues">-</span>
+              </div>
               <div class="flex-between">
                 <span style="font-size:.8rem;color:var(--muted)">Blocklist Entries</span>
                 <span class="mono-value" id="d-bl-size">-</span>
@@ -2797,7 +2801,12 @@ Firefox (all platforms):
               <span class="info-label">Database Path</span>
               <span class="info-val" id="geoip-path" style="font-size:.78rem;word-break:break-all">-</span>
             </div>
+            <div class="info-item" style="flex:1;min-width:140px">
+              <span class="info-label">Database Age</span>
+              <span class="info-val" id="geoip-age" style="color:var(--muted)">-</span>
+            </div>
           </div>
+          <div id="geoip-error" style="display:none;margin-top:10px;color:var(--red);font-size:.82rem"></div>
         </div>
       </div>
 
@@ -4105,6 +4114,7 @@ Firefox (all platforms):
               <div class="card"><div class="card-label">Fail mode</div><div id="cdr-ov-failmode" class="card-value">-</div></div>
               <div class="card"><div class="card-label">Max file size</div><div id="cdr-ov-maxsize" class="card-value">-</div></div>
               <div class="card"><div class="card-label">Client active</div><div id="cdr-ov-active" class="card-value">-</div></div>
+              <div class="card"><div class="card-label">Last probe</div><div id="cdr-ov-lastprobe" class="card-value">-</div></div>
             </div>
           </div>
         </div>
@@ -4379,6 +4389,13 @@ Firefox (all platforms):
           The replacement CA exists in memory only — a restart will discard it and rotate again to a different CA.
           Fix the data volume, then force a rotation.
         </div>
+        <div id="ca-load-banner" style="display:none;margin:0 0 12px;padding:10px 12px;border-radius:6px;background:rgba(220,53,69,.12);border:1px solid var(--red,#dc3545);font-size:.86rem">
+          <strong>Configured Root CA did not load — traffic is leaving UNINSPECTED.</strong>
+          <span id="ca-load-reason"></span>
+          Inspect-matched HTTPS is being forwarded as a plain tunnel, so DLP, anti-virus, YARA, CDR and DPI
+          are not running on those sessions. <span id="ca-load-counts" style="color:var(--muted)"></span>
+          <span id="ca-load-recovery"></span>
+        </div>
         <div class="cards" id="ca-cards" style="grid-template-columns:repeat(3,1fr)">
           <div class="card"><div class="card-label">Status</div><div class="card-value" id="ca-status">-</div></div>
           <div class="card"><div class="card-label">Expires</div><div class="card-value" id="ca-expiry">-</div></div>
@@ -4498,6 +4515,10 @@ Firefox (all platforms):
           <div class="card"><div class="card-label">Enrolled Nodes</div><div class="card-value" id="cluster-enrolled-count">0</div></div>
           <div class="card" id="cluster-ha-card" style="display:none"><div class="card-label">HA Status</div><div class="card-value" id="cluster-ha-status">-</div></div>
         </div>
+        <p style="color:var(--muted);font-size:.7rem;margin:10px 0 0 0">
+          CP&harr;DP gRPC compression: <strong id="cluster-grpc-compression">-</strong>
+          <span style="margin-left:4px">&mdash; startup-scoped (<code>CULVERT_CLUSTER_GRPC_COMPRESSION</code>), status-only here. Enable fleet-wide only after every Control Plane runs a build that supports it (CP-first upgrade).</span>
+        </p>
       </div>
 
       <!-- Enable Control Plane (shown only in standalone mode) -->
@@ -4615,6 +4636,8 @@ Firefox (all platforms):
               <div class="stat-card"><div class="stat-val" id="cca-expires">-</div><div class="stat-label">Expires</div></div>
               <div class="stat-card"><div class="stat-val" id="cca-fingerprint" style="font-size:.65rem;word-break:break-all">-</div><div class="stat-label">SHA-256 Fingerprint</div></div>
             </div>
+            <div id="cca-unusable-banner" style="display:none;margin-top:12px;padding:10px 12px;border-radius:8px;background:rgba(239,68,68,.12);color:var(--danger);font-size:.8rem;line-height:1.5"></div>
+            <div id="cca-clamp-banner" style="display:none;margin-top:12px;padding:10px 12px;border-radius:8px;background:rgba(245,158,11,.12);color:#f59e0b;font-size:.8rem;line-height:1.5"></div>
             <div id="cca-rotation-warning" style="display:none;margin-top:12px;padding:10px 12px;border-radius:8px;background:rgba(239,68,68,.12);color:var(--danger);font-size:.8rem;line-height:1.5"></div>
           </div>
           <details style="margin-top:12px">
@@ -5027,7 +5050,7 @@ Firefox (all platforms):
                   <button class="btn primary sm" data-click="releaseDispatchOpen">＋ Dispatch</button>
                 </div>
               </div>
-              <div id="rel-status" style="font-size:.85rem;line-height:1.7"><span style="color:var(--muted)">No dispatch recorded for this agent.</span></div>
+              <div id="rel-status" style="font-size:.85rem;line-height:1.7"><span style="color:var(--muted)">No dispatch recorded for this maintenance agent.</span></div>
             </div>
           </div>
 
@@ -5062,6 +5085,17 @@ Firefox (all platforms):
           <div>
             <div style="font-weight:600;margin-bottom:6px">Health verdict</div>
             <div id="support-health" role="status" aria-live="polite"><p class="hint">Loading…</p></div>
+          </div>
+
+          <div>
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+              <span style="font-weight:600">Backups</span>
+              <button class="btn ghost sm" data-click="loadBackups" title="Re-check the backup archive directory">
+                <svg class="ico" aria-hidden="true"><use href="#i-refresh"/></svg> Refresh
+              </button>
+            </div>
+            <p class="hint">Archive directory scanned by the maintenance agent - the same listing <code>--list-backups</code> produces, without SSH.</p>
+            <div id="support-backups" role="status" aria-live="polite"><p class="hint">Loading…</p></div>
           </div>
 
           <div>
@@ -5134,7 +5168,7 @@ Firefox (all platforms):
             <div id="support-upload-status" role="status" aria-live="polite" style="margin-bottom:6px"><p class="hint">Loading…</p></div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap" data-min-role="admin">
               <input id="upload-origin" class="input sm" type="text" placeholder="https://tac.example.com" style="width:240px" title="TAC upload base URL (https, non-private)">
-              <input id="upload-credential" class="input sm" type="password" placeholder="bearer credential (optional)" style="width:200px" autocomplete="off" title="Per-appliance bearer credential; stored 0600, never displayed. Leave blank to keep the existing one.">
+              <input id="upload-credential" class="input sm" type="password" placeholder="bearer credential (optional)" style="width:200px" autocomplete="off" title="Per-node bearer credential; stored 0600, never displayed. Leave blank to keep the existing one.">
               <label style="display:flex;gap:4px;align-items:center;font-size:.8rem"><input id="upload-enabled" type="checkbox"> Enable</label>
               <label style="display:flex;gap:4px;align-items:center;font-size:.8rem" title="Remove the stored credential"><input id="upload-clear-cred" type="checkbox"> Clear credential</label>
               <button class="btn ghost sm" data-click="saveUploadConfig" data-min-role="admin" title="Save the upload posture (node-local; no bundle is sent by this action)">Save</button>
@@ -5152,7 +5186,7 @@ Firefox (all platforms):
             <div id="support-telemetry-status" role="status" aria-live="polite" style="margin-bottom:6px"><p class="hint">Loading…</p></div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap" data-min-role="admin">
               <input id="telemetry-origin" class="input sm" type="text" placeholder="https://tac.culvertlabs.com" style="width:240px" title="TAC telemetry origin (https, non-private; no path/query/fragment)">
-              <input id="telemetry-credential" class="input sm" type="password" placeholder="bearer credential" style="width:200px" autocomplete="off" title="Per-appliance bearer credential; stored 0600, never displayed. Leave blank to keep the existing one.">
+              <input id="telemetry-credential" class="input sm" type="password" placeholder="bearer credential" style="width:200px" autocomplete="off" title="Per-node bearer credential; stored 0600, never displayed. Leave blank to keep the existing one.">
               <label style="display:flex;gap:4px;align-items:center;font-size:.8rem"><input id="telemetry-enabled" type="checkbox"> Enable</label>
               <label style="display:flex;gap:4px;align-items:center;font-size:.8rem" title="Remove the stored credential"><input id="telemetry-clear-cred" type="checkbox"> Clear credential</label>
               <button class="btn ghost sm" data-click="saveTelemetryConfig" data-min-role="admin" title="Save the telemetry posture (node-local; no data is sent - no sender exists in this build)">Save</button>
@@ -5263,7 +5297,7 @@ Firefox (all platforms):
 <div id="release-dispatch-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;align-items:center;justify-content:center">
   <div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:24px 28px;max-width:460px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.35)">
     <h3 style="margin:0 0 12px;font-size:1.05rem;font-weight:700">Dispatch Release</h3>
-    <p style="margin:0 0 16px;font-size:.82rem;color:var(--muted);line-height:1.5">Choose a release <b>or</b> a channel (not both). The agent applies the verified pinned digest.</p>
+    <p style="margin:0 0 16px;font-size:.82rem;color:var(--muted);line-height:1.5">Choose a release <b>or</b> a channel (not both). The maintenance agent applies the verified pinned digest.</p>
     <div style="display:grid;gap:12px">
       <label style="font-size:.78rem;color:var(--muted)">Release
         <select id="rel-disp-release" data-change="releaseDispSelectRelease" style="width:100%;margin-top:4px;padding:6px 8px;font-size:.85rem;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text)"></select>
@@ -5276,7 +5310,7 @@ Firefox (all platforms):
           <option value="critical">critical</option>
         </select>
       </label>
-      <label style="font-size:.78rem;color:var(--muted)">Agent
+      <label style="font-size:.78rem;color:var(--muted)">Maintenance Agent
         <input id="rel-disp-agent" value="local" style="width:100%;margin-top:4px;padding:6px 8px;font-size:.85rem;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text)">
       </label>
       <label style="font-size:.82rem;display:flex;align-items:center;gap:8px"><input type="checkbox" id="rel-disp-prebackup" data-change="releaseDispToggleBackup"> Pre-restart config backup (pre_backup)</label>
@@ -5664,6 +5698,7 @@ document.addEventListener('click', e => {
     // ── Release management (P1.6d-1) ──
     case 'loadReleases':           loadReleases(); break;
     case 'loadSupport':            loadSupport(); break;
+    case 'loadBackups':            loadBackups(); break;
     case 'supportCreateBundle':    supportCreateBundle(); break;
     case 'supportSetDebugLevel':   supportSetDebugLevel(); break;
     case 'supportClearDebugLevel': supportClearDebugLevel(); break;
@@ -8180,6 +8215,8 @@ async function fetchStats() {
       setPosture('logging', 'crit', fmt(s.auditLogWriteErrors) + ' audit entries lost (compliance record incomplete)');
     } else if ((s.logWriteErrors || 0) > 0) {
       setPosture('logging', 'warn', fmt(s.logWriteErrors) + ' write errors');
+    } else if ((s.processLogWriteErrors || 0) > 0) {
+      setPosture('logging', 'warn', fmt(s.processLogWriteErrors) + ' process-log lines lost');
     } else if (logFallback.req || logFallback.audit) {
       const which = logFallback.req && logFallback.audit ? 'Request+audit log'
         : logFallback.req ? 'Request log' : 'Audit log';
@@ -10675,9 +10712,35 @@ async function disableSyslog() {
 async function loadGeoIPStatus() {
   try {
     const g = await api('/api/geoip');
-    setText('geoip-status', g.enabled ? 'Enabled' : 'Disabled');
-    document.getElementById('geoip-status').style.color = g.enabled ? 'var(--green)' : 'var(--muted)';
+    setText('geoip-status', g.enabled ? (g.lastError ? 'Enabled (refresh failed)' : 'Enabled') : (g.lastError ? 'Failed to load' : 'Disabled'));
+    document.getElementById('geoip-status').style.color = g.enabled ? (g.lastError ? 'var(--yellow)' : 'var(--green)') : (g.lastError ? 'var(--red)' : 'var(--muted)');
     setText('geoip-path', g.dbPath || '(not configured)');
+    const ageEl = document.getElementById('geoip-age');
+    if (typeof g.dbAgeDays === 'number') {
+      // MaxMind GeoLite2 country data degrades in accuracy as IP allocations
+      // shift; Culvert never auto-refreshes the file, so flag a stale build.
+      const stale = g.dbAgeDays > 90;
+      ageEl.textContent = g.dbAgeDays + ' day(s) (built ' + g.dbBuildDate.slice(0, 10) + ')' + (stale ? ' - stale, consider updating' : '');
+      ageEl.style.color = stale ? 'var(--warn,#f59e0b)' : 'var(--muted)';
+    } else {
+      ageEl.textContent = '-';
+      ageEl.style.color = 'var(--muted)';
+    }
+    const errEl = document.getElementById('geoip-error');
+    if (g.lastError) {
+      const when = g.lastErrorAt ? new Date(g.lastErrorAt).toLocaleString() : '';
+      // enabled + lastError = a RELOAD failed but the previously loaded database
+      // is still installed and serving lookups — say so, instead of wrongly
+      // claiming destCountry rules stopped matching (they only stop when no
+      // reader is installed at all).
+      const impact = g.enabled
+        ? 'database refresh failed — still serving the previously loaded database: '
+        : 'destCountry policy rules will not match: ';
+      errEl.textContent = impact + g.lastError + (when ? ' (' + when + ')' : '');
+      errEl.style.display = '';
+    } else {
+      errEl.style.display = 'none';
+    }
   } catch(_) {}
 }
 
@@ -11183,9 +11246,33 @@ function cdrRenderOverview() {
   set('cdr-ov-maxsize',  cfg.maxFileSizeMB ? cfg.maxFileSizeMB + ' MB' : '50 MB (default)');
   set('cdr-ov-active',   cfg.clientActive ? 'yes' : 'no');
 
+  // consecutiveFailures comes from the background health poller (cdr_health.go),
+  // which keeps probing every 15s even while /api/cdr/health still serves a
+  // cached "last known good" response - the cache is only cleared after several
+  // failed ticks. Surfacing the raw count here means a pool that just went
+  // unreachable shows "degraded" immediately instead of a stale "active" badge
+  // for up to ~30s with no visible indication anything is wrong.
+  const health = cdrState.health || {};
+  // A missing/failed health response is itself a degraded signal: once the
+  // cached snapshot is cleared (3rd consecutive failure) /api/cdr/health
+  // starts 502ing, the fetch above catches to null — and without this check
+  // the badge would flip back to green exactly when the outage became
+  // persistent.
+  const healthUnavailable = cfg.clientActive && cdrState.health == null;
+  const failing = healthUnavailable || (health.consecutiveFailures || 0) > 0;
+  set('cdr-ov-lastprobe', health.lastSeen
+    ? new Date(health.lastSeen).toLocaleString() + (failing ? ` (${health.consecutiveFailures} failed probes since)` : '')
+    : (healthUnavailable ? 'unavailable (health endpoint failing)' : '-'));
+
   const badge = document.getElementById('cdr-status-badge');
   if (badge) {
     if (!cfg.enabled) { badge.textContent = 'disabled'; badge.className = 'badge'; }
+    else if (cfg.clientActive && failing) {
+      badge.textContent = healthUnavailable
+        ? 'degraded (health endpoint unavailable)'
+        : `degraded (${health.consecutiveFailures} consecutive probe failures)`;
+      badge.className = 'badge warn';
+    }
     else if (cfg.clientActive) { badge.textContent = 'active'; badge.className = 'badge allow'; }
     else { badge.textContent = 'not connected'; badge.className = 'badge drop'; }
   }
@@ -11213,9 +11300,10 @@ function cdrRenderOverview() {
     tbody.innerHTML = '<tr><td colspan="8" class="muted">No instances enrolled - go to the Instances tab to add one.</td></tr>';
     return;
   }
-  const health = cdrState.health || {};
   tbody.innerHTML = instances.map(i => {
-    const healthy = (cfg.clientActive && health.healthy) ? '<span class="badge allow">healthy</span>' : '<span class="badge drop">-</span>';
+    const healthy = !(cfg.clientActive && health.healthy) ? '<span class="badge drop">-</span>'
+      : failing ? '<span class="badge warn">degraded</span>'
+      : '<span class="badge allow">healthy</span>';
     const cb = cdrBreakerBadge(i);
     return `<tr>
       <td>${escHtml(i.name)}</td>
@@ -12076,6 +12164,9 @@ async function fetchDashboardHealth() {
     setText('d-goroutines', h.goroutines || 0);
     setText('d-gc',         h.numGC || 0);
     setText('d-sse',        h.sseClients || 0);
+    const sseIssues = (h.sseEvicted || 0) + (h.sseRejected || 0);
+    document.getElementById('d-sse-issues-row').style.display = sseIssues > 0 ? '' : 'none';
+    setText('d-sse-issues', `${fmt(h.sseEvicted || 0)} evicted, ${fmt(h.sseRejected || 0)} rejected`);
     setText('d-bl-size',    fmt(h.blocklistSize || 0));
   } catch(_) {}
 }
@@ -12808,6 +12899,15 @@ async function submitPolicyRule() {
   finally { _polMutateInFlight = false; }
 }
 
+// F20: the Allow/Block quick filters are a display-only umbrella over the raw
+// PolicyAction wire values - Drop (silent) and Block_Page (with page) both read
+// as "Block" here, matching the actionBadge() grouping shown in the table.
+function polActionBucket(action) {
+  if (action === 'Allow') return 'allow';
+  if (action === 'Drop' || action === 'Block_Page') return 'block';
+  return '';
+}
+
 // Extend renderPolicy to show country and file profile columns
 function setPolActionFilter(f) {
   polActionFilter = f;
@@ -12979,7 +13079,7 @@ function renderPolicy() {
 
   // F20: client-side search + action filter (computed only when rebuilding)
   const filtered = ordered.filter(r => {
-    if (polActionFilter && r.action !== polActionFilter) return false;
+    if (polActionFilter && polActionBucket(r.action) !== polActionFilter) return false;
     if (_polUnusedFilter && !polRuleIsUnused(r)) return false;
     if (!q) return true;
     const haystack = [r.name, r.sourceIP, r.sourceIdentity, r.sourceGroup, r.authSource,
@@ -15327,6 +15427,58 @@ async function loadSupport() {
   loadUploads();
   loadTelemetryConfig();
   loadSupportTelemetryPreview();
+  loadBackups();
+}
+
+// Backup archive visibility: read-only pass-through of the CP-local
+// maintenance agent's GET /v1/backups (see backups_api.go). Answers "did the
+// backup job actually run, how big, how stale" from the GUI - no SSH/CLI.
+async function loadBackups() {
+  const el = document.getElementById('support-backups');
+  if (!el) return;
+  el.innerHTML = '<p class="hint">Loading…</p>';
+  el.setAttribute('aria-busy', 'true');
+  try {
+    const data = await api('/api/backups');
+    renderBackups(data);
+  } catch (e) {
+    el.innerHTML = '<p class="hint">Failed to load backups: ' + escHtml(e.message) + '</p>';
+  } finally {
+    el.removeAttribute('aria-busy');
+  }
+}
+
+function renderBackups(data) {
+  const el = document.getElementById('support-backups');
+  if (!el) return;
+  data = data || {};
+  if (!data.available) {
+    el.innerHTML = '<p class="hint">Not available' + (data.reason ? ': ' + escHtml(String(data.reason)) : '') + '.</p>';
+    return;
+  }
+  const backups = Array.isArray(data.backups) ? data.backups : [];
+  if (!backups.length) {
+    el.innerHTML = '<p class="hint">No backup archives found.</p>';
+    return;
+  }
+  let staleness = '';
+  if (data.newest_at) {
+    const ageMs = new Date() - new Date(data.newest_at);
+    if (ageMs > 48 * 3600 * 1000) {
+      staleness = ' <span style="color:var(--red);font-weight:600">· newest backup is ' + timeAgo(new Date(data.newest_at)) + ' - check the backup job</span>';
+    } else {
+      staleness = ' · newest ' + timeAgo(new Date(data.newest_at));
+    }
+  }
+  const hdr = '<p class="hint">' + backups.length + ' archive' + (backups.length === 1 ? '' : 's') + staleness + '</p>';
+  el.innerHTML = hdr + '<div style="overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr>' +
+    '<th>Filename</th><th>Size</th><th>Modified</th><th>Encrypted</th></tr></thead><tbody>' +
+    backups.map(b => '<tr>' +
+      '<td style="font-family:monospace">' + escHtml(String(b.filename || '')) + '</td>' +
+      '<td>' + fmtBytes(b.size_bytes || 0) + '</td>' +
+      '<td>' + (b.modified_at ? escHtml(timeAgo(new Date(b.modified_at))) : '-') + '</td>' +
+      '<td>' + (b.encrypted ? 'yes' : 'no') + '</td>' +
+    '</tr>').join('') + '</tbody></table></div>';
 }
 
 // M7 Slice 1: read-only preview only — GET /api/support/telemetry/preview
@@ -16703,12 +16855,12 @@ async function loadReleaseCurrent() {
   const agent = releaseCurrentAgent();
   try {
     const r = await apiFetch('/api/releases/current?agent=' + encodeURIComponent(agent));
-    if (r.status === 404) { box.innerHTML = '<span style="color:var(--muted)">Unknown agent: ' + escHtml(agent) + '</span>'; return; }
-    if (r.status === 503) { box.innerHTML = '<span style="color:var(--warn,#f59e0b)">Agent unreachable</span>'; return; }
+    if (r.status === 404) { box.innerHTML = '<span style="color:var(--muted)">Unknown maintenance agent: ' + escHtml(agent) + '</span>'; return; }
+    if (r.status === 503) { box.innerHTML = '<span style="color:var(--warn,#f59e0b)">Maintenance agent unreachable</span>'; return; }
     if (!r.ok)            { box.innerHTML = '<span style="color:var(--danger)">Error ' + r.status + '</span>'; return; }
     const c = await r.json();
     if (c.available === false) {
-      box.innerHTML = '<span style="color:var(--muted)">No catalog loaded - current release is undetermined until a catalog is seeded. Agent reachability is not checked on this path.</span>';
+      box.innerHTML = '<span style="color:var(--muted)">No catalog loaded - current release is undetermined until a catalog is seeded. Maintenance agent reachability is not checked on this path.</span>';
     } else if (c.known) {
       box.innerHTML = '<div><b>' + escHtml(c.release_id || '') + '</b> <span style="color:var(--muted)">' + escHtml(c.version_id || '') + '</span></div>'
         + '<div style="color:var(--muted);font-size:.75rem;margin-top:4px">agent: ' + escHtml(agent) + '</div>';
@@ -16745,7 +16897,7 @@ function renderReleaseStatus(rec) {
   const resumeBtn = document.getElementById('rel-resume-btn');
   if (!box) return;
   if (!rec || !rec.phase || rec.phase === 'none') {
-    box.innerHTML = '<span style="color:var(--muted)">No dispatch recorded for this agent.</span>';
+    box.innerHTML = '<span style="color:var(--muted)">No dispatch recorded for this maintenance agent.</span>';
     if (resumeBtn) resumeBtn.style.display = 'none';
     return;
   }
@@ -16790,7 +16942,7 @@ async function releaseDispatchSubmit() {
   if (!releaseId && !channel) { toast('Choose a release or a channel', 'error'); return; }
   const preBackup = document.getElementById('rel-disp-prebackup').checked;
   const passphraseRef = document.getElementById('rel-disp-passphrase').value.trim();
-  // pre_backup is honored by the agent ONLY with a passphrase_ref; without one
+  // pre_backup is honored by the maintenance agent ONLY with a passphrase_ref; without one
   // the planner silently skips the backup. Require it so the checkbox is meaningful.
   if (preBackup && !passphraseRef) {
     toast('Pre-backup requires a backup passphrase reference (or uncheck it)', 'error');
@@ -16816,18 +16968,18 @@ async function releaseDispatchSubmit() {
       releaseDispatchCancel();
       if (agent === releaseCurrentAgent()) loadReleaseStatus(4);
     } else if (r.status === 200) {
-      // No-op success: the agent is already running the target release.
+      // No-op success: the maintenance agent is already running the target release.
       toast(payload.status === 'already_current'
         ? 'Already on the target release - no dispatch needed'
         : 'Dispatch accepted', 'success');
       releaseDispatchCancel();
       if (agent === releaseCurrentAgent()) { loadReleaseCurrent(); loadReleaseStatus(); }
     } else if (r.status === 409) {
-      toast(payload.status === 'stale_replan_required' ? 'Node drifted - re-plan required' : 'A dispatch is already in flight on this agent', 'error');
+      toast(payload.status === 'stale_replan_required' ? 'Node drifted - re-plan required' : 'A dispatch is already in flight on this maintenance agent', 'error');
     } else if (r.status === 404) {
-      toast('Unknown agent: ' + agent, 'error');
+      toast('Unknown maintenance agent: ' + agent, 'error');
     } else if (r.status === 503) {
-      toast('Agent unavailable' + (payload.detail ? ': ' + payload.detail : ''), 'error');
+      toast('Maintenance agent unavailable' + (payload.detail ? ': ' + payload.detail : ''), 'error');
     } else if (r.status === 502) {
       toast('Dispatch failed: ' + (payload.detail || 'agent error'), 'error');
     } else {
@@ -16952,6 +17104,22 @@ async function loadCAMgmt() {
   persistBanner.style.display = ca.rotationPersistDegraded ? '' : 'none';
   if (ca.rotationPersistDegraded) {
     document.getElementById('ca-persist-reason').textContent = ca.rotationPersistError || '';
+  }
+  // CHAOS-50: a CONFIGURED CA that failed to load is the fail-OPEN state — the
+  // opposite of the fail-closed banner above, and the one with security
+  // consequences, so it says what is happening to traffic and how many sessions
+  // it has already affected. `ready:false` on its own cannot express this: an
+  // appliance with no CA configured looks identical.
+  const loadBanner = document.getElementById('ca-load-banner');
+  loadBanner.style.display = ca.loadFailed ? '' : 'none';
+  if (ca.loadFailed) {
+    document.getElementById('ca-load-reason').textContent = ca.loadFailureReason || '';
+    document.getElementById('ca-load-counts').textContent =
+      (ca.inspectBypassed ?? 0) + ' connection(s) forwarded uninspected since boot.';
+    document.getElementById('ca-load-recovery').textContent = ca.loadRecoveryGaveUp
+      ? ' Automatic recovery gave up after ' + (ca.loadRecoveryAttempts ?? 0) +
+        ' attempts — fix the bundle/passphrase and restart, or force a rotation below and redistribute the new CA.'
+      : ' Automatic recovery is retrying (' + (ca.loadRecoveryAttempts ?? 0) + ' attempt(s) so far).';
   }
   document.getElementById('ca-expiry').textContent = ca.expiresIn || '-';
   document.getElementById('ca-provider').textContent = ca.keyProvider || 'local';
@@ -17290,6 +17458,7 @@ async function loadCluster() {
     document.getElementById('cluster-role').textContent = r.role || 'standalone';
     document.getElementById('cluster-node-id').textContent = r.nodeID || '-';
     document.getElementById('cluster-grpc').textContent = r.grpcAddr || '-';
+    document.getElementById('cluster-grpc-compression').textContent = r.grpcCompressionEnabled ? 'Enabled' : 'Disabled';
 
     // HA status card
     const ha = r.ha || {};
@@ -17414,9 +17583,14 @@ async function loadClusterCA() {
   try {
     const r = await api('/api/cluster/ca');
     if (!r) return;
-    const status = r.dualCAActive ? 'Active (Dual-CA Overlap)' : r.initialized ? 'Active' : 'Not Initialized';
+    // CHAOS-50: "initialized" and "usable" are different questions. An expired
+    // cluster CA is initialized, refuses every issuance, and used to render as a
+    // green "Active" while the whole fleet had lost mTLS trust.
+    const unusable = r.initialized && r.usable === false;
+    const status = unusable ? 'EXPIRED (enrollment blocked)'
+      : r.dualCAActive ? 'Active (Dual-CA Overlap)' : r.initialized ? 'Active' : 'Not Initialized';
     document.getElementById('cca-status').textContent = status;
-    document.getElementById('cca-status').style.color = r.initialized ? '#22c55e' : 'var(--muted)';
+    document.getElementById('cca-status').style.color = unusable ? 'var(--danger)' : r.initialized ? '#22c55e' : 'var(--muted)';
     document.getElementById('cca-subject').textContent = r.subject || '-';
     document.getElementById('cca-expires').textContent = r.expires ? new Date(r.expires).toLocaleDateString() : '-';
     const fpText = r.fingerprint || '-';
@@ -17428,6 +17602,37 @@ async function loadClusterCA() {
     // before expiry) - if it keeps failing (e.g. a read-only CA directory), the
     // only prior signal was a log line, discovered only once nodes actually lost
     // trust at expiry. Surface the last failure here instead.
+    // CHAOS-50: the outage banner. Unlike the rotation warning below, this is
+    // the cliff itself — issuance is already being refused, so it names the
+    // remediation (import a replacement CA) rather than saying it will retry.
+    const badEl = document.getElementById('cca-unusable-banner');
+    if (badEl) {
+      if (unusable) {
+        badEl.style.display = '';
+        badEl.innerHTML = '<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> Cluster CA is UNUSABLE: ' +
+          escHtml(r.unusableReason || 'outside its validity window') +
+          '. Node enrollment and certificate renewal are refused (' + escHtml(String(r.signRefused || 0)) +
+          ' refused since boot) and enrolled nodes cannot complete mTLS with this control plane. ' +
+          'Import a replacement cluster CA below — nodes renew automatically once trust is restored.';
+      } else {
+        badEl.style.display = 'none';
+        badEl.textContent = '';
+      }
+    }
+    // The warning shoulder: certs are being clamped to the CA's own expiry, so
+    // the CA is inside its final window and has not been replaced yet.
+    const clampEl = document.getElementById('cca-clamp-banner');
+    if (clampEl) {
+      if (!unusable && r.nodeCertsClamped > 0) {
+        clampEl.style.display = '';
+        clampEl.innerHTML = '<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> Cluster CA expires in ' +
+          escHtml(String(r.expiresInDays)) + ' day(s) and has not rotated. ' + escHtml(String(r.nodeCertsClamped)) +
+          ' node certificate(s) have been clamped to the CA’s own expiry, so affected nodes will keep renewing until it is replaced.';
+      } else {
+        clampEl.style.display = 'none';
+        clampEl.textContent = '';
+      }
+    }
     const warnEl = document.getElementById('cca-rotation-warning');
     if (warnEl) {
       if (r.lastRotationError) {

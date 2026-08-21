@@ -14,6 +14,7 @@ import (
 	"errors"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/fileutil"
@@ -204,6 +205,50 @@ var (
 	adminSettingsPath string
 )
 
+// adminSettingsOverriddenSurfaces holds the operator-facing names of the
+// sentinel-gated surfaces that are CURRENTLY durably overridden by
+// admin_settings.json — snapshotted whenever the file is loaded at startup or
+// durably saved (SaveAdminSettings). Per-sentinel, not a single any-set flag:
+// an admin_settings.json written by an OLDER build carries only the sentinels
+// that existed then (e.g. no autoexclude_tunables_saved / support_retention_
+// saved), and those un-sentineled surfaces still follow config.yaml/CLI — a
+// blanket "everything is overridden" claim would be wrong for exactly the
+// upgraded installs that most need this diagnostic. Diagnostics-only; never
+// consulted by load/apply/save logic itself.
+var adminSettingsOverriddenSurfaces atomic.Pointer[[]string]
+
+// AdminSettingsOverriddenSurfaces returns the operator-facing names of the
+// surfaces currently pinned by a saved sentinel (empty = everything still
+// follows config.yaml/CLI). Race-free, no I/O; safe for the read-only
+// diagnostics handler.
+func AdminSettingsOverriddenSurfaces() []string {
+	if p := adminSettingsOverriddenSurfaces.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+// snapshotOverriddenSurfaces derives the per-sentinel surface list from s and
+// publishes it. The field list lives in exactly one place — here — shared by
+// the load and save paths.
+func snapshotOverriddenSurfaces(s AdminSettings) {
+	var out []string
+	add := func(saved bool, name string) {
+		if saved {
+			out = append(out, name)
+		}
+	}
+	add(s.LogRetentionSaved, "log retention")
+	add(s.LogStoreEnabledSaved, "log-store enable")
+	add(s.TrustedProxyCIDRsSaved, "trusted-proxy CIDRs")
+	add(s.BlocklistFeedsSaved, "blocklist feeds")
+	add(s.UpstreamProxiesSaved, "upstream proxy pool")
+	add(s.YARASettingsSaved, "YARA engine settings")
+	add(s.AutoExcludeTunablesSaved, "decryption auto-exclusion tunables")
+	add(s.SupportRetentionSaved, "support-bundle retention")
+	adminSettingsOverriddenSurfaces.Store(&out)
+}
+
 // LoadAdminSettings reads the settings file and applies each field to its
 // respective component. Called once in main() after all components init.
 // Missing file = first run; each component keeps its config/default value.
@@ -273,6 +318,8 @@ func LoadAdminSettings(path string) {
 	applyAdminSupportRetention(&s)             // Slice B: configurable support-bundle retention caps
 	applyAdminPolicyLearning(&s)               // ADR-0025 M5A: record governed desired state (materialized by loadPolicyLearning)
 	setDecRedactHosts(s.DecryptionRedactHosts) // ADR-0011 §4 host/SNI redaction posture
+
+	snapshotOverriddenSurfaces(s)
 
 	logger.Printf("AdminSettings: loaded from %s", path)
 }
@@ -748,6 +795,7 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 		logger.Printf("AdminSettings: write error: %v", err)
 		return err
 	}
+	snapshotOverriddenSurfaces(s)
 	// Persist-before-apply: the durable write succeeded, so apply the target to the
 	// live runtime now — still under adminSettingsMu, so the (disk, runtime) pair
 	// moves atomically w.r.t. every other save.

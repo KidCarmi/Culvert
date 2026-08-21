@@ -60,8 +60,35 @@ func init() {
 // certificate expiry and triggers rotation when needed — for BOTH the
 // inspection CA (internal/ca) and the cluster CA (enrollment.go). The loop
 // lives here, not in the package, because it spans both CAs.
-func StartCAAutoRotation(ctx context.Context, caPath, passphrase string) {
+// caRotationRoundObserver, when non-nil, is invoked after each completed
+// auto-rotation round. Publish-once TEST seam (nil in production, so the loop is
+// byte-identical); it exists because a test that swaps process globals needs a
+// deterministic "the round is finished" signal rather than a sleep.
+//
+// It is SNAPSHOTTED by StartCAAutoRotation on the caller's goroutine — the loop
+// never reads the variable itself. A goroutine that re-read it each round would
+// race any test restoring it in cleanup, which is the same defect class this
+// file's own tests exist to catch.
+var caRotationRoundObserver func()
+
+// CHAOS-50 / CA-13: because this ONE loop is the only rotation driver for TWO
+// independent trust roots, its start condition must not depend on the state of
+// either. Its caller (loadRootCA) used to start it only when the INSPECTION CA
+// was ready, which silently disabled cluster-CA rotation whenever the
+// inspection bundle failed to load. Both halves are individually no-ops when
+// their CA is absent, so the loop is safe to start on every node.
+// The returned channel is closed when the loop goroutine has exited, so a
+// caller that cancels ctx can JOIN the worker instead of assuming it stopped.
+// Production ignores it (shutdown does not block on this loop), but a test that
+// starts the loop must be able to leave no goroutine behind: a background worker
+// still running after its test finished lands its goroutines in an unrelated
+// test's window, which is how a process-wide runtime.NumGoroutine() guardrail
+// elsewhere in this suite gets blamed for churn it did not cause.
+func StartCAAutoRotation(ctx context.Context, caPath, passphrase string) <-chan struct{} {
+	roundDone := caRotationRoundObserver
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		t := time.NewTicker(ca.RotationCheckInterval)
 		defer t.Stop()
 		// CHAOS-28 / CA-4: check IMMEDIATELY, before the first tick. The loop
@@ -84,6 +111,9 @@ func StartCAAutoRotation(ctx context.Context, caPath, passphrase string) {
 				globalClusterCA.RotateIfNeeded()
 				globalClusterCA.CleanupSecondary()
 			})
+			if roundDone != nil {
+				roundDone()
+			}
 		}
 		checkRound()
 		for {
@@ -101,4 +131,5 @@ func StartCAAutoRotation(ctx context.Context, caPath, passphrase string) {
 			}
 		}
 	}()
+	return done
 }

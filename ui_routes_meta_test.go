@@ -98,7 +98,7 @@ import (
 //   - 189 — Added /api/urlcat/feed-status (GET viewer: UT1 + SaaS category
 //     feed freshness/failure counts, previously Prometheus-only).
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 228 // 219 + 6 /api/policy-learning/* (ADR-0025 M5A) + 3 LDAP IdP routes (/api/idp/test, /api/idp/legacy-ldap, /api/idp/legacy-ldap/import)
+	const want = 229 // 222 (incl. the 3 ADR-0025 LDAP IdP routes) + 6 /api/policy-learning/* (ADR-0025 M5A) + 1 /api/backups (backup-archive visibility)
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}
@@ -205,6 +205,7 @@ var helperSourceFiles = []string{
 	"ui_governance.go",
 	"release_api.go",
 	"ui_support.go",
+	"backups_api.go",
 	"diagnose.go",
 	"ui_mcp.go",
 	"ui_policy_learning.go",

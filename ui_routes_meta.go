@@ -762,6 +762,12 @@ var uiRoutes = []uiRouteMetadata{
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
 			Note: "re-fetch the catalog from the configured origin + reload; verification unchanged; audited via auditEvent"}}},
 
+	// Backup archive visibility (read-only pass-through of the CP-local
+	// maintenance agent's GET /v1/backups; no new agent capability).
+	{Path: "/api/backups", Handler: "apiBackups", Domain: "support", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer,
+			Note: "read-only backup archive listing via the CP-local maintenance agent"}}},
+
 	// Supportability framework (M1) — redacted csb/1 diagnostic bundles.
 	{Path: "/api/support/status", Handler: "apiSupportStatus", Domain: "support", Public: false,
 		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer,
