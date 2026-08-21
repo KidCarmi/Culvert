@@ -334,6 +334,13 @@ func secScanStatusMap() map[string]interface{} {
 		"stat_scan_skipped":        counters.ScanSkipped,    // Tier 1.2
 		"stat_remote_scan_fail":    counters.RemoteScanFail, // Tier 2.2
 		"stat_clam_scan_error":     counters.ClamScanError,  // CHAOS-10
+		// Saturation plane: capacity exhaustion is reported separately from a
+		// daemon fault (different operator response), and late-discarded
+		// verdicts say how often content was decided by the deadline rather
+		// than by the engines.
+		"stat_clam_saturated":    counters.ClamSaturated,
+		"stat_scan_late_discard": counters.ScanLateDiscarded,
+		"scan_inflight":          counters.ScanInflight,
 
 		"threat_feed_allowlist_masked": globalThreatFeed.AllowlistMaskedTotal(),
 	}

@@ -86,8 +86,23 @@ func (c *HashCache) Get(hash string) (ScanCacheResult, bool) {
 	return e.result, true
 }
 
-// Set stores a scan result under the given content hash.
+// Set stores a scan result under the given content hash, with the cache's
+// configured TTL.
 func (c *HashCache) Set(hash string, result ScanCacheResult) {
+	c.SetTTL(hash, result, 0)
+}
+
+// SetTTL stores a scan result with an explicit lifetime; ttl ≤ 0 uses the
+// cache's configured TTL.
+//
+// It exists for verdicts that are ABOUT THE SCANNER rather than about the
+// content — a fail-closed scan-timeout refusal, for instance. Those must not
+// inherit the content TTL: a scanner that was briefly slow would otherwise keep
+// blocking a specific object for the rest of the hour, long after it recovered.
+func (c *HashCache) SetTTL(hash string, result ScanCacheResult, ttl time.Duration) {
+	if ttl <= 0 {
+		ttl = c.ttl
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -96,7 +111,7 @@ func (c *HashCache) Set(hash string, result ScanCacheResult) {
 	}
 	c.entries[hash] = &hashCacheEntry{
 		result:    result,
-		expiresAt: time.Now().Add(c.ttl),
+		expiresAt: time.Now().Add(ttl),
 	}
 }
 

@@ -610,6 +610,27 @@ components:
       properties:
         enabled: { type: boolean }
         scan_svc_mode: { type: string }
+        stat_scan_timeout:
+          type: integer
+          description: Body scans that exceeded the scan budget and were refused (fail-closed).
+        stat_clam_saturated:
+          type: integer
+          description: >-
+            Body scans that could not obtain a ClamAV slot within the scan budget. The daemon is
+            healthy; the node is at scanning capacity. Reported separately from
+            stat_clam_scan_error because the operator response differs (add capacity vs. fix the
+            daemon).
+        stat_scan_late_discard:
+          type: integer
+          description: >-
+            Clean verdicts computed after the scan budget expired and discarded; the fail-closed
+            refusal stands. A correctness signal — non-zero means content is being decided by the
+            deadline rather than by the scan engines.
+        scan_inflight:
+          type: integer
+          description: >-
+            Body scans currently running, including scans whose caller already gave up and was
+            served the fail-closed refusal.
 
     # ── Slice 3 tranche 4: scan/pac/decryption/release read-model schemas ──────────
     ScanSvcConfig:

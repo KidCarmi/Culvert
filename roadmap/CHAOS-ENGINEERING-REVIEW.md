@@ -36,6 +36,36 @@ everything else is triaged below with a suggested PR and required tests for foll
 > rewriting identifiers three merged PRs already reference, so it is an OWNER
 > decision, not a unilateral edit — recorded here rather than silently "fixed".
 
+**2026-08-21 — CHAOS-52 sweep (the body-scan pipeline under scanner slowness and saturation).**
+
+The register has carried **WK-1** ("ClamAV daemon down → files pass UNSCANNED, fail-open") as an open
+High, framed as a POSTURE question about a daemon fault. That framing understated it. **The
+fail-open branch is reachable by LOAD, on a completely healthy daemon, with no infrastructure
+failure anywhere** — and the mechanism is a private constant three call-frames below the decision it
+overrides. `clamav.Client.Scan` caps concurrency at four and, with all four slots busy, waited **5 s
+and returned an ordinary error**; the orchestrator classifies any engine error as a fault and takes
+the fail-OPEN branch, while its OWN budget (`ScanBodyTimeout`, 10 s — the limit that exists to decide
+exactly this) fails CLOSED. So the inner limit always fired first and inverted the outer one's
+verdict: five concurrent downloads that keep four scans busy for five seconds cause every subsequent
+response to be forwarded without antivirus inspection, *reported as a daemon error*. Inducible on
+demand, no privilege needed. A second defect made it self-sustaining: `ScanBody` enforced its
+deadline with `time.After` and stopped WAITING without stopping the WORK, so an abandoned scan kept
+its ClamAV slot for the client's own 30 s timeout — **3x the budget that had already given up on
+it** — measured at **30.006 s against a 150 ms deadline** on the pre-fix tree. Once scans start
+timing out, abandoned work crowds out live work and live work falls onto the fail-open path. Two more
+defects decided what happens AFTER a timeout, pulling in opposite directions so that the outcome for
+identical content came down to a race: the fail-closed refusal was cached under the CONTENT TTL (1 h
+default), blocking a legitimate object node-wide for an hour after a five-second stall; unless the
+abandoned goroutine finished first and wrote `Clean:true` over it, silently converting a fail-closed
+refusal into a cached admission with no counter and no log. That last one is the mistake the code
+TWO LINES ABOVE it already knows about — the ClamAV-error branch carries a comment explaining that a
+verdict computed while the daemon was dark must never be cached. The reasoning had been applied to
+one branch and not its neighbour, the same shape as the 2026-08-19 review's own §13.1. All four
+fixed; the unifying rule is stated in the code: **an inner deadline must never preempt an outer one
+and invert its posture, and abandoned work must release what it holds.** 12 gates, each verified
+failing against the pre-fix behavior. See rows WK-15…WK-18 and
+`docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-21.md`.
+
 **2026-08-19 — CHAOS-50 sweep (the cluster/enrollment CA across its lifecycle).**
 
 CHAOS-28 closed the inspection CA and handed off row **CA-13** as "the same defect class in the
@@ -409,7 +439,8 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 
 | # | Scenario | Verdict | Sev | Evidence |
 |---|----------|---------|-----|----------|
-| WK-1 | **ClamAV daemon down → files pass UNSCANNED (fail-open), no alert/counter.** Contradicts the same file's *timeout* path, which fails **closed**. Two infra-failure modes, opposite postures. | GAP | H | `internal/secscan/secscan.go:499-514` vs timeout `secscan.go:490-495` |
+| WK-1 | **ClamAV daemon down → files pass UNSCANNED (fail-open), no alert/counter.** Contradicts the same file's *timeout* path, which fails **closed**. Two infra-failure modes, opposite postures. **Re-scoped by CHAOS-52 and larger than recorded:** the fail-open branch was reachable by LOAD, not only by a daemon fault (see WK-15), because a private 5 s queue deadline preempted the 10 s fail-closed one. The visibility half closed with CHAOS-10 (counter + `scan_clam_error` + never caching a dark verdict); the LOAD half closed with CHAOS-52. | GAP → **visibility CLOSED** (CHAOS-10), **load-reachability CLOSED** (CHAOS-52); the daemon-DOWN posture is split out as WK-1b | H | `internal/secscan/secscan.go` `scanBodyInner`/`recordClamFailure` |
+| WK-1b | **Posture**: a ClamAV daemon that is genuinely DOWN still fails OPEN (counted + alerted). Deliberately asymmetric with saturation, which now fails closed: a down daemon is an operator-visible infrastructure state with its own alert and status surface and refusing all traffic on it is a fleet-wide outage, whereas saturation is transient, self-clearing in seconds, and inducible on demand by whoever wants the gap. Same class as CA-3b. | GAP (**owner decision**; now counted, alerted, and distinguishable from saturation) | H | `internal/secscan/secscan.go` `recordClamFailure` default branch |
 | WK-2 | Remote scan sidecar down → fail-open, **but** alerted (`scan_svc_down`) + counted. Posture not admin-selectable; 30s per-request timeout stacks latency when hard-down. | ✓ (risky) | H | `internal/secscan/remote.go:95-155,84-90,105` |
 | WK-3 | GeoIP cache-miss on the policy hot path fails **closed** (country allow-rule cannot match unknown country); `LookupCached` never blocks on DB/DNS. | ✓ | — | `policy.go:831-839`, `geoip.go:84-93`; tests `final_coverage_test.go:203` |
 | WK-4 | GeoIP DB missing/corrupt: reader stays nil, feature degrades to "no country data" — safe, but **no staleness/health signal** (MMDBs expire silently). | GAP (obs) → **PARTIALLY CLOSED** (`BuildTime()` reads the `.mmdb`'s own `build_epoch`; `GET /api/geoip` returns `dbBuildDate`/`dbAgeDays`; GeoIP Database panel shows the age, warn-colored past 90 days; load failures surfaced via `lastError`. Residual: no PROACTIVE alert/metric — an operator must open the panel to notice) | M | `internal/geoip/geoip.go` `BuildTime`, `ui_security.go` `apiGeoIPConfig` |
@@ -424,6 +455,10 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | WK-11 | SSE slow client: non-blocking `select … default → close+evict`, 256-client cap, runs off the request path. | ✓ | — | `internal/sse/sse.go:66-78,46` |
 | WK-12 | YARA compile failure loads remaining rules (never disables engine); regex timeout + saturation cap with admin-selectable fail-closed/open posture + alerts. Residual: abandoned regex goroutines are counted but never cancelled (memory held until they finish). | ✓ (+leak caveat) | L/M | `internal/yara/yara.go:98-130,584-602,540` |
 | WK-13 | Ticker loops have **no jitter** + immediate sync-on-boot → fleet-wide thundering herd against public feeds (URLhaus/OpenPhish/NethServer mirror) on rollout and every interval. | GAP | M | `threatfeed.go:132-135`, `feedsync.go:173-176`, blocklistfeed 60s / cdr_health 15s |
+| WK-15 | **ClamAV's queue wait had its own 5 s deadline, which preempted the orchestrator's 10 s one and INVERTED its posture.** Exceeding the inner limit returned an ordinary error → classified as an engine fault → fail-OPEN, while the outer limit fails CLOSED. Five concurrent scans on a HEALTHY daemon therefore admitted content unscanned, reported as a daemon error. Attacker-inducible, no privilege. | GAP → **CLOSED** (CHAOS-52: `ScanContext` charges the queue wait to the caller's budget; `ErrQueueFull` keeps saturation distinguishable from a fault; `culvert_clam_saturated_total`) | **H** | was: `internal/clamav/clamav.go` `Scan` 5 s `time.After`; now `ScanContext` + `internal/secscan` `recordClamFailure` — see §20 |
+| WK-16 | **`ScanBody` stopped WAITING without stopping the WORK.** The abandoned scan goroutine held a ClamAV slot (1 of 4) and a copy of the body until the client's own 30 s timeout — 3x the budget that had already given up on it — unbounded in count and invisible in every surface. Four abandoned scans occupy every slot, pushing live requests onto WK-15's fail-open path: the failure sustains itself under load. Measured 30.006 s against a 150 ms deadline. | GAP → **CLOSED** (CHAOS-52: the budget is a context; cancellation reaches the dial, the conn deadline and a close-watcher; `culvert_scan_inflight`) | **H** | was: `internal/secscan/secscan.go` `ScanBody` `time.After`; now `context.WithTimeout` + `clamav.effectiveDeadline`/`watchCancel` — see §20 |
+| WK-17 | **The fail-closed scan-timeout refusal was cached with the CONTENT TTL** (1 h default), so seconds of scanner slowness blocked that exact object node-wide, for every user, for an hour after recovery — manual cache flush the only recourse. The ClamAV-error branch two lines above already refuses to cache for exactly this reason. | GAP → **CLOSED** (CHAOS-52: `hashcache.SetTTL` + `scanTimeoutCooldown` 30 s) | M | was: `internal/secscan/secscan.go` `ScanBody` timeout arm; now `SetTTL` — see §20 |
+| WK-18 | **An abandoned scan could overturn the fail-closed verdict.** On finishing, the abandoned goroutine wrote `Clean:true` over the refusal the user had just been served — a cached admission for the rest of the TTL, no counter, no log; whether an object was blocked or served was decided by a race. | GAP → **CLOSED** (CHAOS-52: `publishVerdict` tighten-only — a late BLOCK still publishes, a late CLEAN is discarded and counted; budget enforced from both sides so the `select` coin flip cannot launder an overrun) | **H** | was: `internal/secscan/secscan.go` `scanBodyInner` `cache.Set`; now `publishVerdict`/`noteLateCleanDiscarded` — see §20 |
 | WK-14 | Release-catalog autoseed: stage → read-only verify+freshness+rollback → atomic swap with move-aside `.bak` restore-on-failure; fail-closed, no unsigned auto-download. | ✓ | — | `release_autoseed.go:49-122,100-116` |
 
 ---
@@ -1770,3 +1805,91 @@ pinned by `TestCheckCategoryFeedDB_RowCarriesNoRawCause`.
 - **No circuit breaker on repeated quarantines.** A dying disk will re-download
   the feed on every boot; `culvert_catfeeddb_quarantined_copies` and the
   diagnostics row are the operator's signal, but nothing in the process gives up.
+
+---
+
+## 20. CHAOS-52 — The body-scan pipeline under scanner slowness and saturation
+
+**Full write-up:** `docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-21.md`.
+**Id allocated at the start of the sweep**, per the governance note in §0 — this is the first sweep
+to do so.
+
+### 20.1 Why this domain
+
+WK-1 has been an open High since the first sweep, framed as a posture question about a ClamAV daemon
+that is *down*. Every review since has re-read it as "should fail-open be fail-closed?" and left it
+as an owner decision. Nobody asked the prior question: **what else reaches that branch?**
+
+The answer is: ordinary load. `clamav.Client.Scan` caps concurrency at four and, with the slots busy,
+waited five seconds and returned an error — and to `scanBodyInner`, an error from the engine is a
+fault, so it takes the fail-OPEN path. The orchestrator's own ten-second budget, which exists to
+decide precisely the case "the scan did not finish in time" and decides it fail-CLOSED, never got to
+run. **The inner limit always fired first and inverted the outer one.**
+
+That is a security control switched off by capacity, on healthy infrastructure, by anyone who can
+send four large requests.
+
+### 20.2 The four defects
+
+1. **WK-15 — the inner deadline inverted the outer one.** Fixed by making the queue wait charge to
+   the CALLER's context (`ScanContext`). Exceeding the budget is now the outer, fail-closed
+   decision. `ErrQueueFull` keeps "at capacity" distinguishable from "daemon faulted" — different
+   counter, different log line, and no `scan_clam_error` alert for the one that is not a fault
+   (pre-fix, one busy period alerted repeatedly against a perfectly healthy daemon, *while* the node
+   was at its busiest — the same backwards-under-load shape the `HasSubscriber` rule exists to
+   prevent).
+2. **WK-16 — abandoned work held the scarce resource.** `ScanBody` stopped waiting without stopping
+   the work; the goroutine kept its ClamAV slot to the client's 30 s timeout, 3x the budget that had
+   already abandoned it. Four of those occupy every slot, so live requests take WK-15's fail-open
+   path and load keeps the system there. Fixed by making the budget a context that actually reaches
+   the dial, the connection deadline (`effectiveDeadline` takes the earlier of caller and client),
+   and a watcher that closes the connection on cancel. Abandonment is now bounded in TIME by the
+   budget, hence in COUNT by arrival-rate × budget, and it is visible (`culvert_scan_inflight`).
+3. **WK-17 — the refusal outlived the fault.** The fail-closed `"scan timeout"` entry went into the
+   hash cache with the CONTENT TTL. A five-second stall blocked that object for an hour, node-wide,
+   after recovery. Fixed with `hashcache.SetTTL` and a 30 s cooldown — keeping the useful half (a
+   burst of requests for one hot object must not each start a doomed 10 s scan, which is what fills
+   the queue in the first place) without the hour.
+4. **WK-18 — the abandoned scan could overturn the fail-closed verdict.** It wrote `Clean:true` over
+   the refusal, converting a fail-closed decision into a cached admission, silently. Fixed with a
+   tighten-only rule: a late BLOCK still publishes (and upgrades the placeholder to the real threat
+   name); a late CLEAN is discarded and counted. The budget is additionally enforced from inside
+   `scanBodyInner`, because `ScanBody`'s `select` can see a finished scan and an expired deadline as
+   simultaneously ready and pick either — without that, an overrun could be laundered into a clean
+   verdict by winning a coin flip.
+
+### 20.3 The process lesson
+
+WK-17 and WK-18 sit within twenty lines of a comment stating the correct rule for the *neighbouring*
+branch: the ClamAV-error path already refuses to cache a verdict computed while the daemon was dark,
+*"otherwise the same content stays admitted by hash long after ClamAV recovers."* The reasoning was
+right and was applied to exactly one branch.
+
+This is the third occurrence of that shape (2026-08-19 §13.1, the omitted gauge next to the one that
+got it right; CHAOS-28's paired persist observers). Stated generally:
+
+> **When a branch is given a special rule because of what it computed under failure, check every
+> sibling branch that computes under the same failure.** The reasoning is almost never specific to
+> the branch that happened to be reviewed.
+
+### 20.4 Operator runbook
+
+`docs/operator/scan-capacity-and-timeouts.md` — the new signals, suggested paging rules, triage for
+"users report intermittent 403 scan timeout", how to add scanning capacity, and the posture table
+(including why saturation fails closed while a down daemon does not).
+
+### 20.5 What is deliberately left
+
+- **`clamMaxConcurrent` is still a hardcoded 4, and is now availability-critical.** Failing closed
+  under saturation turns a silent bypass into a visible refusal — the right direction — but a node
+  with genuinely insufficient scanning capacity now blocks where it used to admit. No knob was
+  added: a setting whose only use is widening a security bypass deserves a design decision, not a
+  side effect of a chaos fix. Raising it, or making it configurable with GUI parity, is the natural
+  follow-up.
+- **WK-1b** (daemon genuinely down → still fail-open) is unchanged and remains an owner decision,
+  now counted, alerted, and separable from saturation.
+- **YARA is not cancellable** — `YARAMatcher.Match` has no context, so the YARA leg of an abandoned
+  scan still runs to its own internal bounds. Harmless now (tighten-only), but the CPU is spent.
+- **The remote scan sidecar was not touched** (WK-2). It is the other fail-open scanning path, with
+  its own 30 s per-request timeout and no budget threading; the same findings are structurally
+  likely to repeat there. Separate sweep.

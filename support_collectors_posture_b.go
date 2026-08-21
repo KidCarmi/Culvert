@@ -125,6 +125,11 @@ type scanSection struct {
 	ThreatFeedBlocked int64  `json:"threat_feed_blocked" redact:"internal"`
 	ScanTimeout       int64  `json:"scan_timeout" redact:"internal"`
 	ScanSkipped       int64  `json:"scan_skipped" redact:"internal"`
+	// Saturation plane: how often the node ran out of scanning capacity, and
+	// how often a verdict was decided by the deadline rather than the engines.
+	ClamSaturated     int64 `json:"clam_saturated" redact:"internal"`
+	ScanLateDiscarded int64 `json:"scan_late_discarded" redact:"internal"`
+	ScanInflight      int64 `json:"scan_inflight" redact:"internal"`
 }
 
 type scanCollector struct{}
@@ -170,6 +175,9 @@ func (scanCollector) Collect(_ context.Context, in support.CollectInput, sink su
 		ThreatFeedBlocked: c.ThreatFeedBlocked,
 		ScanTimeout:       c.ScanTimeout,
 		ScanSkipped:       c.ScanSkipped,
+		ClamSaturated:     c.ClamSaturated,
+		ScanLateDiscarded: c.ScanLateDiscarded,
+		ScanInflight:      c.ScanInflight,
 	}
 	res := in.Redactor.Classify(sec)
 	if err := sink.WriteJSON(res.Value); err != nil {

@@ -530,6 +530,22 @@ culvert_yara_blocked_total %d
 # TYPE culvert_clam_scan_errors_total counter
 culvert_clam_scan_errors_total %d
 
+# HELP culvert_scan_timeout_total Total body scans that exceeded the scan budget and were refused (fail-closed)
+# TYPE culvert_scan_timeout_total counter
+culvert_scan_timeout_total %d
+
+# HELP culvert_clam_saturated_total Total body scans that could not obtain a ClamAV slot within the scan budget (daemon healthy, node at capacity)
+# TYPE culvert_clam_saturated_total counter
+culvert_clam_saturated_total %d
+
+# HELP culvert_scan_late_discarded_total Total clean verdicts computed after the scan budget expired and discarded (the fail-closed refusal stands)
+# TYPE culvert_scan_late_discarded_total counter
+culvert_scan_late_discarded_total %d
+
+# HELP culvert_scan_inflight Body scans currently running, including scans whose caller already gave up
+# TYPE culvert_scan_inflight gauge
+culvert_scan_inflight %d
+
 # HELP culvert_threat_feed_blocked_total Total requests blocked by threat intelligence feeds
 # TYPE culvert_threat_feed_blocked_total counter
 culvert_threat_feed_blocked_total %d
@@ -583,6 +599,10 @@ culvert_auth_sso_required_total %d
 		clamBlocked,
 		yaraBlocked,
 		scanCounters.ClamScanError,
+		scanCounters.ScanTimeout,
+		scanCounters.ClamSaturated,
+		scanCounters.ScanLateDiscarded,
+		scanCounters.ScanInflight,
 		feedBlocked,
 		feedEntries,
 		globalThreatFeed.AllowlistMaskedTotal(),

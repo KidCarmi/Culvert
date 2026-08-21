@@ -1579,6 +1579,18 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
               <div style="font-size:.7rem;color:var(--muted);margin-bottom:2px">ClamAV scan errors</div>
               <div id="sec-clam-error" style="font-weight:600;font-size:.85rem">0</div>
             </div>
+            <div style="background:var(--surface2);border-radius:8px;padding:10px">
+              <div style="font-size:.7rem;color:var(--muted);margin-bottom:2px" title="Scans that could not get a ClamAV slot within the scan budget. The daemon is healthy — this node is at scanning capacity.">ClamAV at capacity</div>
+              <div id="sec-clam-saturated" style="font-weight:600;font-size:.85rem">0</div>
+            </div>
+            <div style="background:var(--surface2);border-radius:8px;padding:10px">
+              <div style="font-size:.7rem;color:var(--muted);margin-bottom:2px" title="Body scans running right now, including scans whose request already gave up and was refused.">Scans in flight</div>
+              <div id="sec-scan-inflight" style="font-weight:600;font-size:.85rem">0</div>
+            </div>
+            <div style="background:var(--surface2);border-radius:8px;padding:10px">
+              <div style="font-size:.7rem;color:var(--muted);margin-bottom:2px" title="Clean verdicts that arrived after the scan budget expired and were discarded — the content was refused by the deadline, not judged by the engines.">Late verdicts discarded</div>
+              <div id="sec-scan-late-discard" style="font-weight:600;font-size:.85rem">0</div>
+            </div>
           </div>
           <div id="sec-yara-warnings" style="display:none;background:rgba(234,179,8,.1);border-left:3px solid var(--yellow);padding:8px 12px;border-radius:6px;margin-bottom:14px;font-size:.78rem;color:var(--yellow)"></div>
 
@@ -9408,6 +9420,9 @@ async function loadSecScanStatus() {
     setMetric('sec-yara-inflight', s.yara_inflight, (s.yara_inflight_max||50)*0.8, s.yara_inflight_max||50);
     setMetric('sec-remote-fail', s.stat_remote_scan_fail, 1, 10);
     setMetric('sec-clam-error', s.stat_clam_scan_error, 1, 10);
+    setMetric('sec-clam-saturated', s.stat_clam_saturated, 1, 10);
+    setMetric('sec-scan-inflight', s.scan_inflight, 4, 16);
+    setMetric('sec-scan-late-discard', s.stat_scan_late_discard, 1, 10);
   } catch(e) { console.error(e); }
 }
 
