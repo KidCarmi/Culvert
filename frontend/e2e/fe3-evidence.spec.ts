@@ -66,7 +66,7 @@ test("capture FE-3 auth evidence", async ({ page, context }) => {
   // Session-expired → login (route intent preserved in the address bar).
   await context.clearCookies();
   await page.getByRole("link", { name: "Design System" }).click();
-  await page.waitForSelector("text=Sign in");
+  await page.waitForSelector("text=Management session ended");
   await page.screenshot({ path: out("session-expired-login.png") });
 
   // Authenticated viewer shell (no Administration affordances).

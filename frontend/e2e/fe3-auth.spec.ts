@@ -50,6 +50,8 @@ test("configured appliance shows Login — no shell flash", async ({ page }) => 
   await expect(page.getByRole("navigation", { name: "Primary" })).toHaveCount(
     0,
   );
+  // §8: no boundary reason on an ordinary first visit.
+  await expect(page.getByText("Management session ended")).toHaveCount(0);
   expect(w.errors).toEqual([]);
   expect(w.external).toEqual([]);
 });
@@ -137,10 +139,16 @@ test("session expiry: boundary 401 → one teardown → login; route intent hono
   await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
 
   // The server-side session disappears (cookie invalidated in the browser);
-  // the next protected probe — fired by the route transition — returns 401.
+  // the route-transition identity revalidation discovers loggedOut → ONE
+  // collapsed boundary teardown → login.
   await context.clearCookies();
   await page.getByRole("link", { name: "Design System" }).click();
   await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
+  // §8: the boundary reason is shown inline — never a toast, never "timeout".
+  await expect(page.getByText("Management session ended")).toBeVisible();
+  await expect(
+    page.getByText("Your management session is no longer valid"),
+  ).toBeVisible();
 
   // Re-authenticate: the safe internal route intent (/design-system) is
   // honored for the confirmed role.
@@ -148,6 +156,11 @@ test("session expiry: boundary 401 → one teardown → login; route intent hono
   await expect(
     page.getByRole("heading", { name: "Design system" }),
   ).toBeVisible();
+  // The boundary reason cleared on successful authentication: signing out
+  // deliberately shows NO session-ended callout on the login screen.
+  await page.getByRole("button", { name: "Sign out" }).click();
+  await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
+  await expect(page.getByText("Management session ended")).toHaveCount(0);
   expect(w.errors).toEqual([]);
   expect(w.external).toEqual([]);
 });
