@@ -1,0 +1,46 @@
+/* DataTable foundation: dense, bordered, localized horizontal scroll. */
+.wrap {
+  overflow-x: auto; /* wide tables scroll HERE, never the page */
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--r-lg);
+  background: var(--color-surface);
+}
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-sm);
+}
+.table th {
+  text-align: left;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-text-muted);
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--color-border);
+  white-space: nowrap;
+  background: var(--color-surface-raised);
+}
+.table td {
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--color-border-subtle);
+  height: var(--table-row-h);
+  vertical-align: middle;
+}
+.table tbody tr:last-child td {
+  border-bottom: 0;
+}
+.table tbody tr:hover td {
+  background: var(--color-interactive-tint);
+}
+.numeric {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.caption {
+  caption-side: top;
+  text-align: left;
+  padding: var(--sp-3);
+  font-weight: 600;
+}

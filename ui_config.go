@@ -381,6 +381,14 @@ func parseLogQueryWindow(q url.Values) (fromMs, toMs int64, offset, limit int, e
 // history store is disabled. from/to are Unix seconds (parseTimestampParam),
 // converted to the store's millisecond keys here.
 func apiLogsServeStore(w http.ResponseWriter, r *http.Request) {
+	// ADR-FE-002 Monitor contract: a `cursor` parameter (present, even
+	// empty = first page) selects keyset pagination with NO exact total.
+	// Requests without it keep the legacy offset/limit/total behavior
+	// byte-compatible for existing clients.
+	if r.URL.Query().Has("cursor") {
+		apiLogsServeStoreCursor(w, r)
+		return
+	}
 	ls := globalLogStore.Load()
 	if ls == nil {
 		jsonOK(w, map[string]any{"logs": []LogEntry{}, "total": 0, "history": false})

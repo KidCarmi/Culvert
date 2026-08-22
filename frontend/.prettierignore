@@ -1,0 +1,5 @@
+dist/
+node_modules/
+tools/openapi-gen/node_modules/
+src/api/types.gen.ts
+package-lock.json

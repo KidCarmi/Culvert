@@ -10,3 +10,7 @@ coverage.*
 *_test.go
 testdata
 fuzz_test.go
+# Frontend (FE-1A): the Go/docker build consumes only the committed
+# frontend/dist (embedded in FE-1B); dependency trees stay out of the context.
+frontend/node_modules
+frontend/tools/openapi-gen/node_modules

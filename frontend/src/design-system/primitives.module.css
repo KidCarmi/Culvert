@@ -1,0 +1,337 @@
+/* Core primitive styling — semantic tokens only. */
+
+/* ── Button ─────────────────────────────────────────────────────────────── */
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  height: var(--control-h);
+  padding: 0 var(--sp-4);
+  border-radius: var(--r-md);
+  border: 1px solid transparent;
+  font: inherit;
+  font-size: var(--fs-md);
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+  white-space: nowrap;
+}
+.button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+.button[data-size="sm"] {
+  height: var(--control-h-sm);
+  padding: 0 var(--sp-3);
+  font-size: var(--fs-sm);
+}
+.button[data-variant="primary"] {
+  background: var(--color-interactive);
+  color: var(--color-text-inverse);
+}
+.button[data-variant="primary"]:hover:not(:disabled) {
+  background: var(--color-interactive-hover);
+}
+.button[data-variant="primary"]:active:not(:disabled) {
+  background: var(--color-interactive-active);
+}
+.button[data-variant="secondary"] {
+  background: var(--color-surface-raised);
+  border-color: var(--color-border);
+  color: var(--color-text);
+}
+.button[data-variant="secondary"]:hover:not(:disabled) {
+  border-color: var(--color-interactive);
+}
+.button[data-variant="ghost"] {
+  background: transparent;
+  color: var(--color-text-secondary);
+}
+.button[data-variant="ghost"]:hover:not(:disabled) {
+  background: var(--color-interactive-tint);
+  color: var(--color-text);
+}
+.button[data-variant="danger"] {
+  background: var(--color-status-critical-solid);
+  color: var(--color-status-on-critical);
+}
+.button[data-variant="danger"]:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+.button[data-variant="danger-quiet"] {
+  background: transparent;
+  border-color: var(--color-status-critical-border);
+  color: var(--color-status-critical-text);
+}
+.button[data-variant="danger-quiet"]:hover:not(:disabled) {
+  background: var(--color-status-critical-bg);
+}
+.iconButton {
+  composes: button;
+  width: var(--control-h);
+  padding: 0;
+}
+
+/* ── StatusBadge ───────────────────────────────────────────────────────── */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 20px;
+  padding: 0 var(--sp-2);
+  border-radius: var(--r-full);
+  border: 1px solid;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.badgeDot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-full);
+  background: currentColor;
+}
+.badge[data-status="ok"] {
+  color: var(--color-status-ok-text);
+  background: var(--color-status-ok-bg);
+  border-color: var(--color-status-ok-border);
+}
+.badge[data-status="warn"] {
+  color: var(--color-status-warn-text);
+  background: var(--color-status-warn-bg);
+  border-color: var(--color-status-warn-border);
+}
+.badge[data-status="critical"] {
+  color: var(--color-status-critical-text);
+  background: var(--color-status-critical-bg);
+  border-color: var(--color-status-critical-border);
+}
+.badge[data-status="info"] {
+  color: var(--color-status-info-text);
+  background: var(--color-status-info-bg);
+  border-color: var(--color-status-info-border);
+}
+.badge[data-status="unknown"] {
+  color: var(--color-status-unknown-text);
+  background: var(--color-status-unknown-bg);
+  border-color: var(--color-status-unknown-border);
+}
+.badge[data-status="neutral"] {
+  color: var(--color-status-neutral-text);
+  background: var(--color-status-neutral-bg);
+  border-color: var(--color-status-neutral-border);
+}
+
+/* ── Callout ───────────────────────────────────────────────────────────── */
+.callout {
+  display: flex;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--r-md);
+  border: 1px solid;
+  font-size: var(--fs-sm);
+}
+.callout[data-variant="info"] {
+  background: var(--color-status-info-bg);
+  border-color: var(--color-status-info-border);
+}
+.callout[data-variant="success"] {
+  background: var(--color-status-ok-bg);
+  border-color: var(--color-status-ok-border);
+}
+.callout[data-variant="warning"] {
+  background: var(--color-status-warn-bg);
+  border-color: var(--color-status-warn-border);
+}
+.callout[data-variant="critical"] {
+  background: var(--color-status-critical-bg);
+  border-color: var(--color-status-critical-border);
+}
+.callout[data-variant="unknown"] {
+  background: var(--color-status-unknown-bg);
+  border-color: var(--color-status-unknown-border);
+}
+.calloutIcon {
+  flex: none;
+  margin-top: 1px;
+}
+.callout[data-variant="info"] .calloutIcon {
+  color: var(--color-status-info-text);
+}
+.callout[data-variant="success"] .calloutIcon {
+  color: var(--color-status-ok-text);
+}
+.callout[data-variant="warning"] .calloutIcon {
+  color: var(--color-status-warn-text);
+}
+.callout[data-variant="critical"] .calloutIcon {
+  color: var(--color-status-critical-text);
+}
+.callout[data-variant="unknown"] .calloutIcon {
+  color: var(--color-status-unknown-text);
+}
+.calloutTitle {
+  font-weight: 600;
+  font-size: var(--fs-md);
+  margin-bottom: 2px;
+}
+
+/* ── Card / Section ────────────────────────────────────────────────────── */
+.card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--r-lg);
+}
+.cardHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+.cardTitle {
+  font-size: var(--fs-lg);
+  font-weight: 600;
+}
+.cardBody {
+  padding: var(--sp-4);
+}
+.divider {
+  border: 0;
+  border-top: 1px solid var(--color-border-subtle);
+  margin: var(--sp-4) 0;
+}
+
+/* ── Tooltip (internal, CSS-positioned; no measurement, no style attrs) ── */
+.tooltipHost {
+  position: relative;
+  display: inline-flex;
+}
+.tooltipBubble {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  translate: -50% 0;
+  z-index: var(--z-dropdown);
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: var(--r-sm);
+  background: var(--color-elevated);
+  border: 1px solid var(--color-border);
+  box-shadow: var(--shadow-dropdown);
+  color: var(--color-text);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity var(--dur-fast) var(--ease);
+  pointer-events: none;
+}
+.tooltipHost:hover .tooltipBubble,
+.tooltipHost:focus-within .tooltipBubble {
+  opacity: 1;
+  visibility: visible;
+}
+
+/* ── Spinner / Progress / Skeleton ─────────────────────────────────────── */
+.spinner {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border-radius: var(--r-full);
+  border: 2px solid var(--color-border);
+  border-top-color: var(--color-interactive);
+  animation: spin 700ms linear infinite;
+}
+@keyframes spin {
+  to {
+    rotate: 360deg;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation-duration: 2s;
+  }
+}
+.skeleton {
+  border-radius: var(--r-sm);
+  background: linear-gradient(
+    90deg,
+    var(--color-surface-raised) 25%,
+    var(--color-elevated) 50%,
+    var(--color-surface-raised) 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.4s var(--ease) infinite;
+  min-height: 1em;
+  color: transparent;
+  user-select: none;
+}
+@keyframes shimmer {
+  to {
+    background-position: -200% 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .skeleton {
+    animation: none;
+    background: var(--color-surface-raised);
+  }
+}
+
+/* ── Empty / Error states ──────────────────────────────────────────────── */
+.state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-8) var(--sp-4);
+  text-align: center;
+}
+.stateTitle {
+  font-size: var(--fs-lg);
+  font-weight: 600;
+}
+.stateBody {
+  color: var(--color-text-muted);
+  font-size: var(--fs-sm);
+  max-width: 44ch;
+}
+.stateIcon {
+  color: var(--color-text-muted);
+}
+.state[data-tone="error"] .stateIcon {
+  color: var(--color-status-critical-text);
+}
+
+/* ── KeyValue / Mono / Timestamp ───────────────────────────────────────── */
+.kv {
+  display: grid;
+  grid-template-columns: minmax(120px, max-content) 1fr;
+  gap: var(--sp-1) var(--sp-4);
+  font-size: var(--fs-sm);
+  margin: 0;
+}
+.kv dt {
+  color: var(--color-text-muted);
+}
+.kv dd {
+  margin: 0;
+}
+.mono {
+  font-family: var(--font-mono);
+  font-size: 0.94em;
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--r-sm);
+  padding: 1px 5px;
+}
+.timestamp {
+  color: var(--color-text-muted);
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+}

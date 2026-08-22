@@ -63,3 +63,10 @@ edge-case-lab/reports/mutation-raw.jsonl
 
 # OpenAPI tool install dir (scripts/openapi/*.sh)
 .tools/
+
+# Frontend (FE-1A): dependency trees are never committed; dist/ and
+# src/api/types.gen.ts ARE committed (drift-gated generated output).
+frontend/node_modules/
+frontend/tools/openapi-gen/node_modules/
+frontend/test-results/
+frontend/e2e/.state/

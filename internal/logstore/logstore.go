@@ -558,6 +558,181 @@ func (s *Store) Query(fromMs, toMs int64, offset, limit int, filter func(*Entry)
 	return out, total, err
 }
 
+// PageResult is one keyset page (ADR-FE-002 Monitor query contract).
+type PageResult struct {
+	Entries []Entry
+	// NextTS/NextSeq name the LAST entry RETURNED; a follow-up QueryPage
+	// passing them resumes strictly AFTER it (exclusive) in newest-first
+	// order. Meaningful only when len(Entries) > 0. When ScanLimited is
+	// false this is the correct continuation point — it deliberately does
+	// NOT skip the look-ahead match that proved HasMore.
+	NextTS  int64
+	NextSeq uint32
+	// LastScanTS/LastScanSeq name the LAST raw entry VISITED and evaluated
+	// (matched or not). Meaningful when Scanned > 0. When ScanLimited is
+	// true this is the continuation point: resuming strictly after it never
+	// rescans a raw range this walk already proved non-matching, so a
+	// bounded continuation makes forward progress even when ZERO matching
+	// rows were returned (the sparse-filter forward-progress guarantee).
+	LastScanTS  int64
+	LastScanSeq uint32
+	// HasMore reports that this walk did not exhaust the requested window:
+	// either a look-ahead MATCH proved another result exists (ScanLimited
+	// false), or the scan budget ran out first (ScanLimited true) — in the
+	// latter case more HISTORY remains to be SEARCHED, but no further match
+	// is proven to exist.
+	HasMore bool
+	// ScanLimited reports the walk stopped because the scan budget was
+	// exhausted before the window was exhausted and before a look-ahead
+	// match ended the page normally. Distinguishes "more matches are known"
+	// from "more history remains to be searched".
+	ScanLimited bool
+	// Scanned counts raw entries visited AND evaluated (matched or not) —
+	// the deterministic cost seam the Monitor scale gate asserts on: page
+	// cost is bounded by the entries visited to fill ONE page, never by how
+	// many pages precede it. Never exceeds the scan budget.
+	Scanned int
+}
+
+// QueryPage is keyset (cursor) pagination newest-first within [fromMs, toMs],
+// applying filter, under the production scan budget (scanCap). See
+// QueryPageWithBudget for the full contract.
+func (s *Store) QueryPage(fromMs, toMs int64, afterTS int64, afterSeq uint32, limit int, filter func(*Entry) bool) (PageResult, error) {
+	return s.QueryPageWithBudget(fromMs, toMs, afterTS, afterSeq, limit, 0, filter)
+}
+
+// QueryPageWithBudget is QueryPage with an explicit raw-scan budget
+// (scanBudget <= 0 ⇒ the production scanCap; the parameter exists so the
+// bounded-continuation algorithm is testable with a small budget without a
+// mutable global). Unlike Query it computes NO exact total and never scans
+// past the page (plus one look-ahead match for HasMore), so the cost of page
+// N does not grow with page depth. afterTS/afterSeq zero ⇒ first page;
+// otherwise they name a previously returned OR previously scanned key and
+// iteration resumes strictly after it. The (timestamp, seq) key pair is a
+// total order, so paging is stable under concurrent appends: new entries get
+// NEWER keys and can never duplicate or displace entries below an existing
+// cursor.
+//
+// Bounded scan-continuation contract (sparse-filter forward progress):
+//   - Page filled and a look-ahead MATCH found ⇒ HasMore=true,
+//     ScanLimited=false; continue from NextTS/NextSeq (the look-ahead match
+//     is re-visited and returned by the next page — never skipped).
+//   - Scan budget exhausted first ⇒ HasMore=true, ScanLimited=true;
+//     continue from LastScanTS/LastScanSeq (strictly after every raw entry
+//     already evaluated — an already-proven non-matching range is never
+//     rescanned, even when the page returned zero rows).
+//   - Window exhausted ⇒ HasMore=false, ScanLimited=false: a true terminal
+//     empty/partial page.
+func (s *Store) QueryPageWithBudget(fromMs, toMs int64, afterTS int64, afterSeq uint32, limit, scanBudget int, filter func(*Entry) bool) (PageResult, error) {
+	var page PageResult
+	if s == nil {
+		return page, nil
+	}
+	s.closeMu.RLock()
+	defer s.closeMu.RUnlock()
+	if s.closed {
+		return page, nil
+	}
+	toMs, limit, scanBudget = clampPageQuery(toMs, limit, scanBudget)
+	page.Entries = make([]Entry, 0, queryAllocHint)
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Reverse = true
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		seekPageStart(it, toMs, afterTS, afterSeq)
+		for ; it.Valid(); it.Next() {
+			item := it.Item()
+			k := item.Key()
+			if storeKeyTS(k) < fromMs {
+				return nil // window exhausted — a true terminal page
+			}
+			if page.Scanned >= scanBudget {
+				// Budget exhausted BEFORE this entry was evaluated: it is
+				// deliberately NOT counted or stamped, so the continuation
+				// (strictly after LastScan*) resumes exactly here — nothing
+				// skipped, nothing rescanned.
+				page.HasMore = true
+				page.ScanLimited = true
+				return nil
+			}
+			page.Scanned++
+			page.LastScanTS = storeKeyTS(k)
+			page.LastScanSeq = storeKeySeq(k)
+			var e Entry
+			if err := item.Value(func(v []byte) error { return json.Unmarshal(v, &e) }); err != nil {
+				continue
+			}
+			if filter != nil && !filter(&e) {
+				continue
+			}
+			if len(page.Entries) >= limit {
+				// One matching entry beyond the page ⇒ has_more, stop. The
+				// continuation for this NORMAL stop is NextTS/NextSeq (last
+				// RETURNED), so this look-ahead match is returned first on
+				// the next page.
+				page.HasMore = true
+				return nil
+			}
+			page.Entries = append(page.Entries, e)
+			page.NextTS = storeKeyTS(k)
+			page.NextSeq = storeKeySeq(k)
+		}
+		return nil
+	})
+	return page, err
+}
+
+// clampPageQuery normalizes the page-query bounds: an unset upper bound means
+// "newest", the page size is clamped to [1, maxQueryLimit] (default 100), and
+// the raw-scan budget to (0, scanCap] (<=0 ⇒ the production scanCap).
+func clampPageQuery(toMs int64, limit, scanBudget int) (clampedTo int64, clampedLimit, clampedBudget int) {
+	if toMs <= 0 {
+		toMs = math.MaxInt64
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > maxQueryLimit {
+		limit = maxQueryLimit
+	}
+	if scanBudget <= 0 || scanBudget > scanCap {
+		scanBudget = scanCap
+	}
+	return toMs, limit, scanBudget
+}
+
+// seekPageStart positions the reverse iterator at the first entry of this
+// page: the newest key within the window on a first page, or strictly after
+// the cursor key on a continuation. Reverse Seek positions at the largest key
+// <= seek, so when resuming from a cursor that exact entry was already
+// returned or scanned — skip it.
+func seekPageStart(it *badger.Iterator, toMs, afterTS int64, afterSeq uint32) {
+	seek := storeKey(toMs, math.MaxUint32)
+	cursored := afterTS != 0 || afterSeq != 0
+	if cursored {
+		seek = storeKey(afterTS, afterSeq)
+	}
+	it.Seek(seek)
+	if cursored && it.Valid() && storeKeyEqual(it.Item().Key(), afterTS, afterSeq) {
+		it.Next()
+	}
+}
+
+// storeKeyEqual reports whether k encodes exactly (tsMs, seq).
+func storeKeyEqual(k []byte, tsMs int64, seq uint32) bool {
+	return len(k) >= keyLen && storeKeyTS(k) == tsMs && storeKeySeq(k) == seq
+}
+
+// storeKeySeq extracts the 4-byte sequence disambiguator from a store key.
+func storeKeySeq(k []byte) uint32 {
+	if len(k) < keyLen {
+		return 0
+	}
+	return binary.BigEndian.Uint32(k[8:12])
+}
+
 // Stats reports current usage for the admin retention panel.
 type Stats struct {
 	Bytes    int64 `json:"bytes"`              // tracked logical size (same counter as the size cap)

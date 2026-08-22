@@ -3,6 +3,15 @@
 Status: Phase 5 deliverable of the GUI redesign program
 Date: 2026-07-11
 
+> **2026-08-21 — Strategy statement below SUPERSEDED (pending review).** The
+> "framework rewrite is rejected" position was recorded here in prose and never
+> as an ADR. `docs/adr/ADR-FE-001-frontend-platform.md` (Proposed) re-evaluates
+> it under changed premises (no production customers; DOM compatibility and
+> markup-pinned tests explicitly non-binding) and proposes a React+TS+Vite
+> replacement; see `docs/design/FRONTEND-MIGRATION-PLAN.md`. The milestone
+> history and the M4/M5 open items below remain accurate as a record and as
+> backlog input. Rationale preserved intact below.
+
 Strategy: **incremental redesign inside the existing single-file vanilla-JS
 architecture.** A framework rewrite is rejected: the SPA is embedded via
 `go:embed` with a CSP-nonce pipeline, multiple Go test suites pin exact markup

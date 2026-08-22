@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"os"
 	"time"
 )
 
@@ -107,6 +108,13 @@ func newAdminUIHandler() http.Handler { //nolint:funlen // route registration; e
 	registerDiagnoseRoutes(mux)       // diagnose.go       —  1 route  (M3 diagnose verbs)
 	registerMCPRoutes(mux)            // ui_mcp.go         — 14 routes (PR-9 MCP admin API)
 	registerPolicyLearningRoutes(mux) // ui_policy_learning.go — 6 routes (ADR-0025 M5A)
+
+	// FE-1B (ADR-FE-001): the NEW frontend's experimental /app preview +
+	// /assets namespace. Registration is unconditional (C1/D0 walls stay
+	// deterministic); the CULVERT_EXPERIMENTAL_UI default-off gate lives in
+	// the handlers, and the embedded artifact is validated exactly once here.
+	ensureFrontendV2(os.Getenv(frontendV2EnvVar))
+	registerFrontendV2Routes(mux) // ui_frontend_v2.go — 3 routes (FE-1B, default-off)
 
 	// ADMIN-plane panic backstop (outermost). The admin chain never hijacks, so a
 	// clean 500 is valid when nothing was committed; trackedRW preserves
