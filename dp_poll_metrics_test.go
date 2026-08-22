@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync/atomic"
 	"testing"
 )
 
@@ -17,10 +16,10 @@ func TestDPPollHistogram_ObserveAndRender(t *testing.T) {
 	t.Cleanup(func() { metricsToken = oldTok })
 	metricsToken = ""
 
-	beforeCount := atomic.LoadInt64(&dpPollHist.total)
+	beforeCount := dpPollHist.Count()
 	dpPollHist.Observe(0.02) // → le="0.025" bucket
 
-	if got := atomic.LoadInt64(&dpPollHist.total); got != beforeCount+1 {
+	if got := dpPollHist.Count(); got != beforeCount+1 {
 		t.Fatalf("dpPollHist count = %d, want %d after one Observe", got, beforeCount+1)
 	}
 

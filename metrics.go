@@ -344,28 +344,131 @@ func (rm *ruleMetrics) WritePrometheus(w *strings.Builder) {
 
 // ─── Latency histogram ──────────────────────────────────────────────────────
 // Fixed-bucket histogram in Prometheus text format. Generalized so multiple
-// metrics can reuse the same lock-free implementation (CA-2 PR2): the name,
-// help text, and bucket layout are per-instance. newLatencyHistogram preserves
-// the original request-latency metric byte-for-byte.
+// metrics can reuse the same implementation (CA-2 PR2): the name, help text,
+// and bucket layout are per-instance. newLatencyHistogram preserves the
+// original request-latency metric byte-for-byte.
+//
+// ── Sharding ─────────────────────────────────────────────────────────────────
+//
+// latencyHist.Observe runs on EVERY proxied request (recordRequestTelemetry,
+// proxy.go) — HTTP, CONNECT, WebSocket alike. The original implementation was
+// lock-free, which is not the same thing as contention-free: it wrote three
+// atomics per observation onto two shared cache lines, and the first of them
+// was a compare-and-swap LOOP over one process-wide float64 accumulator. A CAS
+// loop under contention does not merely serialise — it degrades, because every
+// losing core retries and the retries themselves generate the coherence traffic
+// that makes the next round lose. So the metric got more expensive per request
+// the more cores were carrying traffic, on 100% of traffic.
+//
+// The measurement that matters is not ns/op at one core, it is how ns/op MOVES
+// with core count. BenchmarkLatencyHistogramObserveParallel, realistic
+// nanosecond-resolution latency samples, median of n=10 (4-core, Go 1.26):
+//
+//	GOMAXPROCS │  before  │  after  │
+//	     1     │   15.0ns │  13.6ns │
+//	     2     │  125.5ns │  16.6ns │
+//	     4     │  158.9ns │  12.0ns │
+//
+// Before, four cores delivered 6.3M observations/s — an order of magnitude LESS
+// than the 67M/s a single core managed, i.e. adding cores subtracted throughput.
+// After, the cost is flat in core count and four cores deliver 83M/s: 13.2x the
+// old four-core ceiling, and the gap widens on the 16- and 32-core hardware this
+// ships to. The single-core path is unchanged to slightly better, so unlike most
+// sharding trades there is no low-concurrency price to pay.
+//
+// Two changes get that, and both are cost-only — every number this renders is
+// the same number, computed the same way:
+//
+//  1. Counters are split across histShardCount cache-line-isolated shards, so
+//     concurrent observers usually write disjoint lines. Scrapes sum the shards;
+//     a scrape is once per scrape interval against a per-request write path, so
+//     moving work from Observe to WritePrometheus is the correct direction.
+//
+//  2. The float64 CAS accumulator becomes an integer NANOSECOND accumulator, a
+//     single atomic add. This is also strictly more accurate: a float64 sum of
+//     seconds loses low-order precision as it grows (53-bit mantissa against a
+//     sum that reaches 1e8 with 1e-9 increments), while int64 nanoseconds are
+//     exact for 292 years of accumulated latency and order-independent, so the
+//     sharded partial sums recombine without drift.
+//
+// The separate `total` counter is gone with it: the observation count is the
+// sum of the bucket counters, which removes a third atomic write from every
+// observation AND makes `_count` exactly equal the `+Inf` bucket, as the
+// Prometheus exposition format requires. The old shape incremented `total`
+// before the bucket, so a scrape landing between the two rendered a `_count`
+// one greater than `+Inf`.
+//
+// ── What this does NOT fix ───────────────────────────────────────────────────
+//
+// Observe has no key to shard on, so the shard is chosen from the observation
+// itself: latencies come from time.Since, so the low mantissa bits of the
+// float64 are nanosecond noise and spread well (4096 realistic samples fill
+// all 128 shards: min 19, max 49, mean 32, none empty). A caller that observes
+// a CONSTANT value therefore lands every observation on one shard and scales
+// exactly as the old code did — never worse, since that path is still two
+// atomic adds rather than a CAS loop plus two. TestHistogramShardSpread pins
+// the spread rather than assuming it, and the structural regression gate is
+// TestBenchGate_ObservationsDoNotShareOneCounter.
+
+const (
+	// maxHistogramBuckets bounds the per-shard bucket array so a shard is a
+	// flat, cache-line-sized value type instead of a slice header pointing
+	// somewhere else. Every histogram in the tree today declares 10 or 11
+	// bounds; newHistogram rejects anything larger rather than silently
+	// truncating (TestHistogramBucketLimit pins that all of them fit).
+	maxHistogramBuckets = 12
+
+	// histShardCount is the number of cache-line-isolated counter sets. It is a
+	// constant rather than a runtime probe for the same reason connlimit's is:
+	// the useful property is that concurrent writers rarely collide, and the
+	// collision rate is (writers/shards), so 128 keeps a 32-core box under 25%
+	// while costing 16 KB per histogram (48 KB for the three in the tree).
+	// 256 and 512 were measured and bought 1.5ns and 2.4ns at four cores — not
+	// worth 2x and 4x the footprint.
+	histShardCount = 128
+
+	// histShardBytes is the per-shard stride: 8 + 13*8 = 112 bytes of counters
+	// rounded up to two 64-byte cache lines, so one observer's write never
+	// invalidates a neighbouring shard's line. Raising maxHistogramBuckets past
+	// what this covers makes histShard's padding array negative, which is a
+	// COMPILE error rather than a silently unpadded shard.
+	// TestHistogramShardIsCacheLineSized pins the resulting size.
+	histShardBytes = 128
+)
+
+// histShard is one observer-local set of counters. Padded to histShardBytes:
+// unpacked, two shards would share a cache line and writing one would
+// invalidate the other, handing back most of what splitting them just bought
+// (the same false-sharing trap measured in internal/connlimit).
+type histShard struct {
+	sumNanos int64                          // atomic; total observed duration in ns
+	counts   [maxHistogramBuckets + 1]int64 // atomic per-bucket counters (+1 for +Inf)
+	_        [histShardBytes - 8 - (maxHistogramBuckets+1)*8]byte
+}
 
 type latencyHistogram struct {
 	name    string    // metric name, e.g. culvert_request_duration_seconds
 	help    string    // HELP text
 	buckets []float64 // upper bounds (immutable after init)
-	counts  []int64   // per-bucket atomic counter
-	sumBits int64     // atomic float64 stored as int64 bits
-	total   int64     // atomic total observations
+	shards  [histShardCount]histShard
 }
 
 // newHistogram builds a histogram with a custom name, help text, and bucket
 // upper bounds (seconds). Buckets should be ≥ 0.0001 so %g renders them as
 // plain decimals rather than scientific notation.
+//
+// It panics when the caller declares more than maxHistogramBuckets bounds.
+// Every call site is a package-level var, so this is a build-time programming
+// error that fails on the first test run, not a runtime failure mode.
 func newHistogram(name, help string, buckets []float64) *latencyHistogram {
+	if len(buckets) > maxHistogramBuckets {
+		panic(fmt.Sprintf("newHistogram(%s): %d bucket bounds exceeds maxHistogramBuckets=%d",
+			name, len(buckets), maxHistogramBuckets))
+	}
 	return &latencyHistogram{
 		name:    name,
 		help:    help,
 		buckets: buckets,
-		counts:  make([]int64, len(buckets)+1), // +1 for +Inf
 	}
 }
 
@@ -390,39 +493,98 @@ var certSignHist = newHistogram(
 	[]float64{0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1},
 )
 
-// Observe records a latency observation in seconds (lock-free).
+// maxObservableNanos bounds the float→int conversion below. A float64 outside
+// [0, maxObservableNanos) converts to an UNSPECIFIED int64 in Go, so the guard
+// is a correctness requirement, not defensive padding — and it is two
+// predictable compares (NaN fails both) on a path that has none to spare.
+// Excluded observations still land in a bucket; only the `_sum` skips them.
+// The old float accumulator had no equivalent guard: one NaN observation
+// poisoned `_sum` to NaN permanently.
+const maxObservableNanos = 1 << 62
+
+// histShardFor picks the shard for one observation.
+//
+// Observe carries no natural sharding key, so the entropy comes from the
+// observation itself. Latencies originate from time.Since, so the low mantissa
+// bits are nanosecond noise; the splitmix64 finalizer spreads them over the
+// whole index space in three ALU ops rather than trusting any particular bit
+// range to vary (a coarse clock would leave the low bits constant, and the mix
+// keeps the higher-order variation usable when it does).
+func (h *latencyHistogram) histShardFor(seconds float64) *histShard {
+	x := math.Float64bits(seconds)
+	x ^= x >> 33
+	x *= 0xff51afd7ed558ccd
+	x ^= x >> 33
+	return &h.shards[x&(histShardCount-1)]
+}
+
+// Observe records a latency observation in seconds. Lock-free, allocation-free,
+// and — unlike the CAS-loop version it replaces — contention-free between
+// observers that land on different shards. See the sharding note above.
 func (h *latencyHistogram) Observe(seconds float64) {
-	// Atomic float64 add via CAS loop — bit reinterpretation, not numeric conversion.
-	for {
-		old := atomic.LoadInt64(&h.sumBits)
-		newVal := math.Float64frombits(uint64(old)) + seconds                             // #nosec G115 -- bit reinterpret, not numeric conversion
-		if atomic.CompareAndSwapInt64(&h.sumBits, old, int64(math.Float64bits(newVal))) { // #nosec G115 -- bit reinterpret, not numeric conversion
-			break
-		}
+	s := h.histShardFor(seconds)
+	if ns := seconds * 1e9; ns > 0 && ns < maxObservableNanos {
+		atomic.AddInt64(&s.sumNanos, int64(ns))
 	}
-	atomic.AddInt64(&h.total, 1)
 	for i, bound := range h.buckets {
 		if seconds <= bound {
-			atomic.AddInt64(&h.counts[i], 1)
+			atomic.AddInt64(&s.counts[i], 1)
 			return
 		}
 	}
-	atomic.AddInt64(&h.counts[len(h.buckets)], 1) // +Inf bucket
+	atomic.AddInt64(&s.counts[len(h.buckets)], 1) // +Inf bucket
+}
+
+// snapshot folds every shard into one reading: per-bucket (NON-cumulative)
+// counts, the observation count, and the summed duration in seconds.
+//
+// Shards are read one at a time, so a snapshot taken under live traffic is a
+// near-consistent rather than atomic view — the same property the unsharded
+// counters had, and the one Prometheus already assumes of a scrape. What it
+// does guarantee is INTERNAL consistency: total is derived from the very
+// counts returned, so `_count` can never disagree with the `+Inf` bucket.
+func (h *latencyHistogram) snapshot() (counts []int64, total int64, sum float64) {
+	counts = make([]int64, len(h.buckets)+1)
+	var nanos int64
+	for i := range h.shards {
+		s := &h.shards[i]
+		nanos += atomic.LoadInt64(&s.sumNanos)
+		for j := range counts {
+			counts[j] += atomic.LoadInt64(&s.counts[j])
+		}
+	}
+	for _, c := range counts {
+		total += c
+	}
+	return counts, total, float64(nanos) / 1e9
+}
+
+// Count returns the number of observations recorded. Allocation-free; used by
+// tests and by callers that need only the count, not the distribution.
+func (h *latencyHistogram) Count() int64 {
+	var total int64
+	for i := range h.shards {
+		for j := 0; j <= len(h.buckets); j++ {
+			total += atomic.LoadInt64(&h.shards[i].counts[j])
+		}
+	}
+	return total
 }
 
 // WritePrometheus writes the histogram in Prometheus text exposition format.
 func (h *latencyHistogram) WritePrometheus(w *strings.Builder) { //nolint:errcheck // strings.Builder.Write never returns an error
+	counts, total, sum := h.snapshot()
 	fmt.Fprintf(w, "\n# HELP %s %s\n", h.name, h.help)
 	fmt.Fprintf(w, "# TYPE %s histogram\n", h.name)
 	var cumulative int64
 	for i, bound := range h.buckets {
-		cumulative += atomic.LoadInt64(&h.counts[i])
+		cumulative += counts[i]
 		fmt.Fprintf(w, "%s_bucket{le=\"%g\"} %d\n", h.name, bound, cumulative)
 	}
-	cumulative += atomic.LoadInt64(&h.counts[len(h.buckets)])
+	cumulative += counts[len(h.buckets)]
 	fmt.Fprintf(w, "%s_bucket{le=\"+Inf\"} %d\n", h.name, cumulative)
-	fmt.Fprintf(w, "%s_sum %f\n", h.name, math.Float64frombits(uint64(atomic.LoadInt64(&h.sumBits)))) // #nosec G115 -- bit reinterpret
-	fmt.Fprintf(w, "%s_count %d\n", h.name, atomic.LoadInt64(&h.total))
+	fmt.Fprintf(w, "%s_sum %f\n", h.name, sum)
+	fmt.Fprintf(w, "%s_count %d\n", h.name, total)
 }
 
 // metricsToken is the Bearer token required to access /metrics.
