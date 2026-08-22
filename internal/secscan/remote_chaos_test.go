@@ -299,7 +299,8 @@ func TestChaos_BlockedVerdictIsHonoured(t *testing.T) {
 	}
 }
 
-// TestChaos_ResultHashIsComputedLocallyNotTakenFromTheSidecar.
+// TestChaos_ResultHashIsComputedLocallyNotTakenFromTheSidecar proves the
+// scanned bytes decide the hash, not the reply.
 //
 // The Hash on a Result feeds the admin allowlist and cache-evict surfaces. Taken
 // from the reply, a compromised — or merely buggy — sidecar could name any
@@ -326,7 +327,8 @@ type stubExcl struct{ hashes map[string]bool }
 
 func (s stubExcl) IsHashExcluded(h string) bool { return s.hashes[h] }
 
-// TestChaos_HashAllowlistAppliesToTheRemotePath.
+// TestChaos_HashAllowlistAppliesToTheRemotePath proves the admin allowlist is
+// honoured by both scanning back ends.
 //
 // Scanner.ScanBody has always consulted the allowlist; the remote client never
 // did. An admin clearing a false positive by hash saw the entry accepted,
@@ -382,7 +384,8 @@ func TestChaos_FaultAlertIsGatedOnASubscriber(t *testing.T) {
 	rec.none(t, 300*time.Millisecond)
 }
 
-// TestChaos_FaultAlertDetailIsBoundedForDedup.
+// TestChaos_FaultAlertDetailIsBoundedForDedup proves the alert detail stays a
+// bounded reason class, so the dedup window can actually suppress it.
 //
 // The alert store dedups on "event:detail" for 30 s. Raw transport errors embed
 // the ephemeral LOCAL port, so a sidecar resetting connections produced a

@@ -264,7 +264,7 @@ const (
 
 // scanOnce performs the round trip and classifies the outcome. Split out so the
 // posture decision above reads as one switch.
-func (rs *RemoteScanner) scanOnce(ctx context.Context, client *http.Client, baseURL string, data []byte, contentType, hash string) (*Result, string, string) {
+func (rs *RemoteScanner) scanOnce(ctx context.Context, client *http.Client, baseURL string, data []byte, contentType, hash string) (result *Result, class, cause string) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/scan", bytes.NewReader(data))
 	if err != nil {
 		return nil, remoteFaultRequest, err.Error()

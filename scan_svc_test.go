@@ -444,7 +444,8 @@ func TestBodyNeedsBuffering_RemoteScanner(t *testing.T) {
 	}
 }
 
-// TestChaos53_SidecarStatusCannotShadowThisNodesIdentity.
+// TestChaos53_SidecarStatusCannotShadowThisNodesIdentity proves this node keeps
+// stating its own scan mode when the sidecar's status blob is merged in.
 //
 // The sidecar's /status IS its own secScanStatusMap, so it carries
 // "scan_svc_mode":"local" and its own "enabled". Merged in blind, those
@@ -453,7 +454,10 @@ func TestBodyNeedsBuffering_RemoteScanner(t *testing.T) {
 // operator uses to confirm which scanning back end is actually in use.
 func TestChaos53_SidecarStatusCannotShadowThisNodesIdentity(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
+		//nolint:errcheck // test stub: an encode failure would surface as the
+		// assertion below failing, and there is nothing useful to do with the
+		// error inside a stand-in handler.
+		json.NewEncoder(w).Encode(map[string]interface{}{
 			// Exactly what a real sidecar returns: its OWN status map.
 			"enabled":       false,
 			"scan_svc_mode": "local",

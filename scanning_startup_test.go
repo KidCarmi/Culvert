@@ -94,7 +94,8 @@ func TestResolveScanning_SizesAndDurations(t *testing.T) {
 
 // ── CHAOS-53: scan exclusions in remote mode ────────────────────────────────
 
-// TestChaos53_RemoteModeLoadsScanExclusions.
+// TestChaos53_RemoteModeLoadsScanExclusions proves the admin allowlist is read
+// from disk in remote mode, and that saves reach disk afterwards.
 //
 // The exclusion load used to sit on the LOCAL branch only, so a sidecar
 // deployment never read the file. That is worse than it sounds, because
