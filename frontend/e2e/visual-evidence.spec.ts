@@ -2,6 +2,7 @@
 // is set (qualification runs); screenshots are evidence artifacts, never
 // committed to the repository.
 import { test } from "@playwright/test";
+import { openNavToFinalState } from "./nav-open";
 
 const dir = process.env["CULVERT_EVIDENCE_DIR"];
 
@@ -52,9 +53,11 @@ test("capture visual evidence", async ({ page }) => {
   await page.waitForSelector("text=Proxy Healthy");
   await page.screenshot({ path: out("gallery-1024x768-dark.png") });
 
-  // ≈200% zoom on a 1280 desktop: 640 CSS px viewport.
+  // ≈200% zoom on a 1280 desktop: 640 CSS px viewport. The capture waits on
+  // the SAME final-open-state condition as the qualification proof — never a
+  // mid-transition frame.
   await page.setViewportSize({ width: 640, height: 800 });
   await page.goto("/app/");
-  await page.getByRole("button", { name: "Open navigation" }).click();
+  await openNavToFinalState(page);
   await page.screenshot({ path: out("shell-640w-200pct-zoom-nav.png") });
 });

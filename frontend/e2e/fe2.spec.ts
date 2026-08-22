@@ -5,6 +5,7 @@
 // CSP, with console/error/external-request monitoring throughout.
 import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
+import { openNavToFinalState } from "./nav-open";
 
 function watch(
   page: Page,
@@ -167,7 +168,7 @@ test("reduced motion collapses durations", async ({ page }) => {
   expect(dur).toMatch(/^0m?s$/); // minifier normalizes 0ms -> 0s
 });
 
-test("zoom/narrow reflow: no page-level horizontal scroll, nav reachable", async ({
+test("zoom/narrow reflow: no page-level horizontal scroll, nav fully opens", async ({
   page,
 }) => {
   // 640×800 CSS px ≈ a 1280-wide desktop at 200% zoom.
@@ -179,9 +180,23 @@ test("zoom/narrow reflow: no page-level horizontal scroll, nav reachable", async
       document.documentElement.clientWidth,
   );
   expect(overflow).toBeLessThanOrEqual(0);
-  // Critical navigation stays reachable via the menu toggle.
-  await page.getByRole("button", { name: "Open navigation" }).click();
-  await expect(page.getByRole("link", { name: "Design System" })).toBeVisible();
+  // Critical navigation reaches its FINAL open state: sidebar fully
+  // in-viewport, settled at x = 0 — a mid-transition sliver fails this.
+  await openNavToFinalState(page);
+  // Every critical link is 100% inside the viewport, not merely "visible".
+  await expect(
+    page.getByRole("link", { name: "Design System" }),
+  ).toBeInViewport({ ratio: 1 });
+  await expect(page.getByRole("link", { name: "Overview" })).toBeInViewport({
+    ratio: 1,
+  });
+  // The open panel introduces no page-level horizontal overflow either.
+  const overflowOpen = await page.evaluate(
+    () =>
+      document.documentElement.scrollWidth -
+      document.documentElement.clientWidth,
+  );
+  expect(overflowOpen).toBeLessThanOrEqual(0);
 });
 
 test("1024x768 shell remains usable", async ({ page }) => {
