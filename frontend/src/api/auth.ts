@@ -108,14 +108,6 @@ export const decodeOKResponse: Decoder<{ ok: true }> = (v, path = "$") => {
   return { ok: true };
 };
 
-/** /api/stats used purely as a protected session probe: the payload is
- * discarded — only "the session was accepted by a protected endpoint"
- * matters. Shape is validated as an object, nothing more is trusted. */
-export const decodeProbe: Decoder<undefined> = (v, path = "$") => {
-  readRecord(v, path);
-  return undefined;
-};
-
 // ── API calls ──────────────────────────────────────────────────────────────
 
 export function getSetupStatus(): Promise<SetupStatus> {
@@ -170,11 +162,4 @@ export function postSetupComplete(
     body: { user, pass },
     unauthorizedPolicy: "expected",
   });
-}
-
-/** Protected-endpoint session probe (viewer-readable /api/stats,
- * uiRoutes MinRole=viewer). Uses the DEFAULT boundary 401 policy — a 401
- * here means the session was refused by a protected endpoint. */
-export function probeSession(): Promise<undefined> {
-  return apiRequest("/api/stats", decodeProbe);
 }

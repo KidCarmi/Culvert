@@ -9,11 +9,9 @@
 // (/api/logs, /api/audit, /api/policy, /api/ca/status, /api/cluster/status,
 // /api/releases), while Administrators (/api/auth/users, GET=admin) and
 // Settings (/api/config/export, GET=admin) are admin governance surfaces.
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { JSX, ReactNode } from "react";
 import { NavLink, Outlet, useLocation } from "react-router";
-import { useQuery } from "@tanstack/react-query";
-import { probeSession } from "../api/auth";
 import type { Role } from "../api/auth";
 import { useAuth } from "../auth/AuthProvider";
 import { hasRole } from "../auth/rbac";
@@ -145,18 +143,31 @@ export function AppShell(): JSX.Element {
   const location = useLocation();
   const role: Role = state.role ?? "viewer"; // defensive: gate guarantees non-null
 
-  // Session probe (§13): route transitions revalidate the session against a
-  // PROTECTED endpoint (/api/stats, viewer GET) — no aggressive polling. A
-  // boundary 401 here is the session-expiry signal → ONE idempotent
-  // teardown. gcTime 0: session-scoped, never retained (§7).
-  useQuery({
-    queryKey: ["auth", "session-probe", location.pathname],
-    queryFn: probeSession,
-    gcTime: 0,
-    staleTime: 0,
-    refetchOnMount: "always",
-    retry: false,
-  });
+  // Identity-continuity revalidation (no aggressive polling, and NOT
+  // TanStack refetchOnWindowFocus — this is AUTH IDENTITY revalidation, not
+  // data refetch): the session cookie is shared same-origin across tabs, so
+  // the identity behind it can be replaced under this tab. Revalidate at
+  // the operator boundaries — every v2 route transition, and the browser
+  // returning to this tab (focus / visibility restoration). The machine
+  // compares the fresh identity against what this tab renders and runs the
+  // full collapsed teardown before any different identity/role may render.
+  useEffect(() => {
+    void machine.revalidateAuthenticatedSession();
+  }, [machine, location.pathname]);
+  useEffect(() => {
+    const onFocus = (): void => {
+      void machine.revalidateAuthenticatedSession();
+    };
+    const onVisibility = (): void => {
+      if (document.visibilityState === "visible") onFocus();
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [machine]);
 
   const signOut = (): void => {
     if (signingOut) return; // §12: no duplicate submission

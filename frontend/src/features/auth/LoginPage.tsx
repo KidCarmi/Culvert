@@ -158,6 +158,19 @@ export function LoginPage(): JSX.Element {
       tlsFallback={state.tlsFallback}
       tlsFallbackReason={state.tlsFallbackReason}
     >
+      {state.boundaryNote === "session_ended" && (
+        // §8: memory-only boundary reason — never "timeout" (the 401 or
+        // loggedOut answer may mean revocation, deletion, or replacement);
+        // never persisted; cleared on successful authentication; absent on
+        // an ordinary first visit.
+        <Callout
+          variant="warning"
+          title="Management session ended"
+          role="alert"
+        >
+          Your management session is no longer valid. Sign in again to continue.
+        </Callout>
+      )}
       {state.logoutNote === "unconfirmed" && (
         <Callout
           variant="warning"
