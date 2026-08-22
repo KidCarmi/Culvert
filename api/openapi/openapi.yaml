@@ -637,6 +637,24 @@ components:
           description: >-
             Body scans currently running, including scans whose caller already gave up and was
             served the fail-closed refusal.
+        stat_remote_scan_fail:
+          type: integer
+          description: >-
+            Remote scan-sidecar FAULTS that forwarded content unscanned (fail-open): unreachable,
+            HTTP error, unreadable or unintelligible reply, or a 200 carrying no affirmative
+            verdict. Slowness and capacity are NOT here — those fail closed and are counted as
+            stat_scan_timeout.
+        stat_remote_scan_saturated:
+          type: integer
+          description: >-
+            Remote scans the sidecar refused for capacity (HTTP 429). Fail-closed, and also counted
+            as stat_scan_timeout. Reported separately from stat_remote_scan_fail because the
+            operator response differs (add scanning capacity vs. fix the sidecar).
+        remote_scan_inflight:
+          type: integer
+          description: >-
+            Remote scan round trips currently in flight. The saturation gauge for a sidecar
+            deployment, where scan_inflight is structurally zero.
 
     # ── Slice 3 tranche 4: scan/pac/decryption/release read-model schemas ──────────
     ScanSvcConfig:

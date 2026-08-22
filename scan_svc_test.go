@@ -443,3 +443,44 @@ func TestBodyNeedsBuffering_RemoteScanner(t *testing.T) {
 		t.Error("expected true for text content with remote scanner")
 	}
 }
+
+// TestChaos53_SidecarStatusCannotShadowThisNodesIdentity.
+//
+// The sidecar's /status IS its own secScanStatusMap, so it carries
+// "scan_svc_mode":"local" and its own "enabled". Merged in blind, those
+// overwrote the keys this process had just set, and a proxy running in remote
+// mode reported mode "local" to its own admin UI and API — the one field an
+// operator uses to confirm which scanning back end is actually in use.
+func TestChaos53_SidecarStatusCannotShadowThisNodesIdentity(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
+			// Exactly what a real sidecar returns: its OWN status map.
+			"enabled":       false,
+			"scan_svc_mode": "local",
+			"scan_svc_url":  "",
+			"clamav_status": "connected",
+		})
+	})
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	orig := globalRemoteScanner
+	globalRemoteScanner = &RemoteScanner{}
+	globalRemoteScanner.Init(ts.URL)
+	defer func() { globalRemoteScanner = orig }()
+
+	m := secScanStatusMap()
+	if m["scan_svc_mode"] != "remote" {
+		t.Errorf("scan_svc_mode = %v, want remote — the far end stated this node's mode", m["scan_svc_mode"])
+	}
+	if m["enabled"] != true {
+		t.Errorf("enabled = %v, want true — the far end stated this node's enablement", m["enabled"])
+	}
+	if m["scan_svc_url"] != ts.URL {
+		t.Errorf("scan_svc_url = %v, want %s", m["scan_svc_url"], ts.URL)
+	}
+	// Genuine sidecar detail still merges through.
+	if m["clamav_status"] != "connected" {
+		t.Errorf("clamav_status = %v, want connected", m["clamav_status"])
+	}
+}

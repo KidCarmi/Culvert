@@ -128,8 +128,16 @@ In rough order of effectiveness:
    trade stays visible.
 4. **Move scanning off-box** with the remote scan sidecar
    (`-remote-scan-url`), which takes the local ClamAV/YARA legs out of the
-   request path entirely. Note the sidecar has its own fail-open posture
-   (register row WK-2) and its own failure counter, `stat_remote_scan_fail`.
+   request path entirely.
+
+   **Read §6.1 before doing this.** The sidecar shares the scan budget and the
+   fail-closed posture for slowness and capacity (CHAOS-53), but a sidecar that
+   is genuinely unreachable or erroring still **fails open** — a recorded owner
+   decision (register row WK-2b), same shape as a down ClamAV daemon. Note also
+   that the sidecar is an HTTP front end to a ClamAV with the same 4-slot cap,
+   so moving scanning off-box relocates the queue rather than removing it; it
+   buys capacity when the sidecar host has more CPU than the proxy host, or
+   when several proxies share one larger scanner.
 
 `clamMaxConcurrent` is **not** configurable. It is deliberate: with saturation
 now failing closed, a setting that raises it is a setting that trades safety for
@@ -151,3 +159,36 @@ see the follow-up recorded in `roadmap/CHAOS-ENGINEERING-REVIEW.md` §20.4.
 The asymmetry between the first two rows is intentional and is the subject of
 register row WK-1b. If your risk posture requires the daemon-down case to fail
 closed as well, that is a product change, not a configuration one — raise it.
+
+### 6.1 The remote scan sidecar
+
+The sidecar is a second implementation of the same control, and it now carries
+the same postures. Until CHAOS-53 it did not: a sidecar that merely answered
+**slowly** forwarded the response unscanned, because the client's private 30 s
+deadline surfaced as a transport error and every transport error was treated as
+a fault. That is fixed — the two back ends now share one budget and one verdict
+for "the scan did not finish in time."
+
+| Condition | Posture | Signal |
+|---|---|---|
+| Sidecar exceeds the scan budget | **Fail closed** — refuse | `culvert_scan_timeout_total` (shared with the local path), `scan_timeout` alert |
+| Sidecar reports capacity (HTTP 429) | **Fail closed** — refuse | `culvert_remote_scan_saturated_total` + the timeout counter above |
+| Sidecar unreachable / 5xx / unintelligible reply | **Fail open** — forward, counted + alerted | `culvert_remote_scan_fail_total`, `scan_svc_down` alert (register row WK-2b) |
+| Sidecar returns 200 without a verdict | **Fail open**, counted as a fault | `culvert_remote_scan_fail_total`, alert detail `no verdict in response` |
+| Content matched by the sidecar | Block | — |
+
+**Suggested paging rules on a sidecar deployment.** Every `culvert_scan_*`
+series except `culvert_scan_timeout_total` is structurally zero here, so page on:
+
+- `rate(culvert_remote_scan_fail_total[5m]) > 0` — content is being forwarded
+  unscanned. This is the one that matters.
+- `culvert_remote_scan_inflight` sustained near your sidecar's concurrency — the
+  leading indicator of budget refusals.
+- `rate(culvert_scan_timeout_total[5m])` rising — users will be seeing
+  `403 scan timeout`; §4's triage applies unchanged.
+
+**Scan exclusions.** Both lists (hosts and SHA-256 hashes) apply in sidecar mode
+and are consulted before the round trip. If you ran a sidecar deployment on a
+build predating CHAOS-53, your lists were never loaded from disk and every save
+was silently discarded — re-enter them once after upgrading and confirm they
+survive a restart.

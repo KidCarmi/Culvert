@@ -36,6 +36,35 @@ everything else is triaged below with a suggested PR and required tests for foll
 > rewriting identifiers three merged PRs already reference, so it is an OWNER
 > decision, not a unilateral edit — recorded here rather than silently "fixed".
 
+**2026-08-22 — CHAOS-53 sweep (the remote scan sidecar under failure, slowness and saturation).**
+
+CHAOS-52 §20.5 handed this off: the sidecar "is the other fail-open scanning path, with its own 30 s
+per-request timeout and no budget threading; the same findings are structurally likely to repeat
+there." They repeat, and they are worse, because of where the documentation points. **Culvert has two
+body-scanning back ends and they disagreed about what to do when a scan does not finish in time.**
+The local path bounds a scan by `ScanBodyTimeout` (10 s) and fails CLOSED — counted, logged, alerted,
+memoised. The remote path bounded one by a PRIVATE 30 s context inside a client with a 60 s timeout —
+3x and 6x the budget the same process gives the same decision — and surfaced its expiry as an
+ordinary transport error, which the classifier read as a sidecar fault and handled fail-OPEN. `nil`
+from a scanner means clean, so *"the sidecar did not answer in time"* and *"the sidecar answered
+clean"* were the same value at the call site. That is CHAOS-52's WK-15 defect standing in the other
+path, with three aggravations: it is reachable by ordinary QUEUEING (the sidecar fronts the same
+ClamAV that saturates at four concurrent scans, so a queue longer than the deadline is the normal
+steady state of an under-provisioned scanner, not a failure of one); the CHAOS-52 runbook
+RECOMMENDS moving scanning to the sidecar as the remedy for the local path's capacity behaviour, so
+the recommended remedy silently swapped a fail-closed control for a fail-open one; and it was
+invisible, because not one `culvert_scan_*` series is produced by the remote path and the sidecar's
+own failure counter reached only the admin JSON API. **Six further defects sat around it, five silent
+by construction.** The worst: any HTTP 200 whose body parsed as JSON was treated as CLEAN — `{}`,
+`null`, a load balancer's JSON error page — so scanning was fully off with no counter, no log and no
+alert. The most surprising: scan exclusions were never LOADED in remote mode, and because
+`scanexcl.Store` learns its persistence path FROM `Load`, `Save()` was a documented no-op — so every
+admin edit to the allowlists returned 200, wrote an audit entry and took a config-version snapshot
+while persisting nothing, and the lists reverted to empty on the next restart. All fixed; the
+fail-open posture for a GENUINELY unreachable sidecar is unchanged and remains the recorded owner
+decision, now split out as WK-2b. 17 gates, each verified failing against the pre-fix behavior. See
+rows WK-2/WK-2b/WK-19, §21, and `docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-22.md`.
+
 **2026-08-21 — CHAOS-52 sweep (the body-scan pipeline under scanner slowness and saturation).**
 
 The register has carried **WK-1** ("ClamAV daemon down → files pass UNSCANNED, fail-open") as an open
@@ -441,7 +470,9 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 |---|----------|---------|-----|----------|
 | WK-1 | **ClamAV daemon down → files pass UNSCANNED (fail-open), no alert/counter.** Contradicts the same file's *timeout* path, which fails **closed**. Two infra-failure modes, opposite postures. **Re-scoped by CHAOS-52 and larger than recorded:** the fail-open branch was reachable by LOAD, not only by a daemon fault (see WK-15), because a private 5 s queue deadline preempted the 10 s fail-closed one. The visibility half closed with CHAOS-10 (counter + `scan_clam_error` + never caching a dark verdict); the LOAD half closed with CHAOS-52. | GAP → **visibility CLOSED** (CHAOS-10), **load-reachability CLOSED** (CHAOS-52); the daemon-DOWN posture is split out as WK-1b | H | `internal/secscan/secscan.go` `scanBodyInner`/`recordClamFailure` |
 | WK-1b | **Posture**: a ClamAV daemon that is genuinely DOWN still fails OPEN (counted + alerted). Deliberately asymmetric with saturation, which now fails closed: a down daemon is an operator-visible infrastructure state with its own alert and status surface and refusing all traffic on it is a fleet-wide outage, whereas saturation is transient, self-clearing in seconds, and inducible on demand by whoever wants the gap. Same class as CA-3b. | GAP (**owner decision**; now counted, alerted, and distinguishable from saturation) | H | `internal/secscan/secscan.go` `recordClamFailure` default branch |
-| WK-2 | Remote scan sidecar down → fail-open, **but** alerted (`scan_svc_down`) + counted. Posture not admin-selectable; 30s per-request timeout stacks latency when hard-down. | ✓ (risky) | H | `internal/secscan/remote.go:95-155,84-90,105` |
+| WK-2 | Remote scan sidecar down → fail-open, **but** alerted (`scan_svc_down`) + counted. Posture not admin-selectable; 30s per-request timeout stacks latency when hard-down. **Re-scoped by CHAOS-53 and much larger than recorded:** that 30 s timeout was not merely latency, it was a PRIVATE deadline three times the process's own fail-closed scan budget, and exceeding it surfaced as a transport error → classified as a fault → fail-OPEN. So a merely SLOW sidecar forwarded content unscanned while the local back end blocks for the identical condition (WK-19). The down-sidecar posture is split out as WK-2b. | GAP → **slowness/capacity CLOSED** (CHAOS-53, §21); the sidecar-DOWN posture is split out as WK-2b | H | `internal/secscan/remote.go` `ScanBody`/`scanOnce` |
+| WK-2b | **Posture**: a sidecar that is genuinely unreachable/erroring still fails OPEN (counted + alerted). Deliberately asymmetric with slowness and capacity, which now fail closed — exactly the WK-1/WK-1b split, for the same reasons. | GAP (**owner decision**; now counted, gated-alerted, rate-limit logged, and reachable only by an actual fault) | H | `internal/secscan/remote.go` `remoteScanFail` |
+| WK-19 | **The remote sidecar had none of the CHAOS-52 protections, and the runbook recommended switching to it.** Six further defects: any HTTP 200 whose body parsed as JSON (`{}`, `null`) was read as CLEAN with no counter/log/alert; NO `culvert_scan_*` series is produced on a sidecar node and `stat_remote_scan_fail` never reached `/metrics`; the fail-open alert fired per request ungated with a raw `err.Error()` (ephemeral port ⇒ un-dedupable key) and logged per request; scan exclusions were never LOADED in remote mode, so `scanexcl.Store` had no path and every admin Save was a silent no-op that returned 200 and was audited as success; the hash allowlist was never consulted and `Result.Hash` came from the SIDECAR; `Status()` decoded an unbounded body on an admin endpoint; and the sidecar's own status blob shadowed this node's `scan_svc_mode`, so a remote node reported "local". | GAP → **CLOSED (CHAOS-53)** | **H** | §21; `docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-22.md` |
 | WK-3 | GeoIP cache-miss on the policy hot path fails **closed** (country allow-rule cannot match unknown country); `LookupCached` never blocks on DB/DNS. | ✓ | — | `policy.go:831-839`, `geoip.go:84-93`; tests `final_coverage_test.go:203` |
 | WK-4 | GeoIP DB missing/corrupt: reader stays nil, feature degrades to "no country data" — safe, but **no staleness/health signal** (MMDBs expire silently). | GAP (obs) → **PARTIALLY CLOSED** (`BuildTime()` reads the `.mmdb`'s own `build_epoch`; `GET /api/geoip` returns `dbBuildDate`/`dbAgeDays`; GeoIP Database panel shows the age, warn-colored past 90 days; load failures surfaced via `lastError`. Residual: no PROACTIVE alert/metric — an operator must open the panel to notice) | M | `internal/geoip/geoip.go` `BuildTime`, `ui_security.go` `apiGeoIPConfig` |
 | WK-5 | **Threat-feed timeout → stale-erase.** On partial failure `Sync` unconditionally replaces the maps with only what succeeded, discarding prior good entries; stamps `lastSync=now` even on failure; no backoff, no staleness alert → coverage silently shrinks for up to 6h. | GAP → **CLOSED** (per-source `replacedSources` replacement, `threatfeed.go` `applySync`) | H | `internal/threatfeed/threatfeed.go:150-183` |
@@ -1912,3 +1943,104 @@ Found by automated review of the first cut; both real, both the same mistake §2
    carried across to the branch beside it: **the literal mistake §20.3 names, committed in the change
    that names it.** Fixed with `hashcache.SetTTLUnless` (test and write atomic under the cache lock —
    a caller-side `Get`-then-`Set` would leave open the very window being closed).
+
+---
+
+## 21. CHAOS-53 — The remote scan sidecar under failure, slowness and saturation
+
+**Full write-up:** `docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-22.md`.
+**Id allocated at the start of the sweep**, per §0.
+
+### 21.1 Why this domain
+
+§20.5 nominated it: the sidecar is the OTHER fail-open scanning path, and CHAOS-52's findings were
+judged "structurally likely to repeat there." The judgement was right. What it did not anticipate is
+that the same sweep's operator runbook (`docs/operator/scan-capacity-and-timeouts.md`, "Adding
+scanning capacity") recommends **moving scanning to the sidecar** as the remedy for the local path's
+new fail-closed-under-saturation behaviour — so following the documentation moved an operator from a
+path with a budget, cancellation, timeout accounting, a cooldown, a tighten-only cache rule and an
+in-flight gauge, to a path with none of them.
+
+### 21.2 The posture inversion (RS-1)
+
+`RemoteScanner.ScanBody` opened `context.WithTimeout(context.Background(), 30*time.Second)` inside an
+`http.Client{Timeout: 60 * time.Second}` — 3x and 6x `ScanBodyTimeout` — and handled `client.Do`'s
+error with one classification: fault → `remoteScanFail` → `return nil`. A `nil` from a scanner means
+CLEAN, so at the call site "the sidecar did not answer in time" and "the sidecar answered clean" were
+the same value. The local path spends 130 lines of comment explaining why that exact condition must
+BLOCK.
+
+The condition is not exotic. The sidecar is an HTTP front end to the same ClamAV whose concurrency
+cap is four; CHAOS-52 measured five concurrent downloads holding all four slots. A queue longer than
+the client's deadline is the normal steady state of an under-provisioned scanner.
+
+Fixed by giving both back ends ONE budget: the remote scan runs under `scanBodyTimeout()` — same
+value, same test seam — and an overrun returns the local path's own refusal (`Source: "timeout"`),
+increments the same `statScanTimeout`, and therefore lights up the same `culvert_scan_timeout_total`,
+the same `scan_timeout` alert in `proxy_tunnel.go`, and the same 403. Sidecar-reported capacity
+(HTTP 429) is classified as capacity, counted separately, and refused the same way — the CHAOS-52
+saturation rule, transposed.
+
+### 21.3 The five silent ones
+
+- **A 200 without an affirmative verdict was CLEAN.** `ScanResponse` unmarshals from `{}` and `null`
+  without error, so any 200 with a JSON body admitted the content — an ingress error envelope, a
+  health endpoint reached by a mistyped port, a maintenance page. Scanning off, no counter, no log,
+  no alert. A verdict must now be `Blocked` or `Clean`; anything else is a counted fault. The shipped
+  sidecar sets `Clean` explicitly, so a correct deployment is byte-identical.
+- **No metric.** Every `culvert_scan_*` series is produced by `Scanner`, which a remote-mode node
+  never initialises, and `statRemoteScanFail` reached only `/api/security-scan/status`. Now
+  `culvert_remote_scan_{fail,saturated}_total` + `culvert_remote_scan_inflight`, with
+  `culvert_scan_timeout_total` covering both back ends.
+- **Scan exclusions were never LOADED in remote mode.** Worse than a stale allowlist:
+  `scanexcl.Store` learns its persistence path FROM `Load`, and `Save()` is a documented no-op
+  without one — so every admin edit returned 200, wrote an audit entry and took a config-version
+  snapshot while persisting nothing, and the lists reverted to empty on the next restart. The HOST
+  list is on the request path in remote mode too, so it was being ignored outright as well.
+- **The hash allowlist was not consulted, and `Result.Hash` came from the SIDECAR** — the value that
+  then names objects in the operator's allowlist and cache-evict surfaces. Now computed locally from
+  the bytes actually scanned, and consulted before the round trip.
+- **The status blob shadowed this node's identity.** `secScanStatusMap` merged the sidecar's
+  `/status` — which IS the sidecar's own `secScanStatusMap`, carrying `"scan_svc_mode": "local"` —
+  over the map it had just built, so a proxy in remote mode reported mode `local` to its own admin UI.
+
+### 21.4 The alert that amplified the fault (RS-5)
+
+`remoteScanFail` ran `go alerts.Fire(...)` and `obs.Printf` unconditionally, once per proxied
+response, for as long as the sidecar was unwell — the contract CLAUDE.md states and
+`fireDNSFailureAlert` documents, violated by the other producer whose rate is set by a FAULT rather
+than by the operator. The dedup key made it worse: `Dispatch` dedups on `event + ":" + Detail`, and
+Detail was `"transport error: " + err.Error()`, which for a reset embeds the EPHEMERAL LOCAL PORT. A
+sidecar resetting connections therefore produced a distinct key per request, unsuppressable by
+construction, and the fan-out lands in the 500-entry retry queue — where a scanner fault can evict
+REAL threat alerts. CHAOS-27 identified this key-cardinality class for the host-in-detail producers
+and bounded the map; this producer was never converted.
+
+Now: bounded reason classes in the alert (so dedup works), the full cause in a `degradedLogAllowed`
+line, the counter carrying the magnitude, and a new `alerts.HasSubscriber` seam
+(`internal/alerts/alerts.go`) that **fails toward delivery** when no probe is installed, so a missing
+wire-up can never silence a real alert.
+
+### 21.5 The process lesson
+
+CHAOS-52 §20.3's rule, one level up. The sibling here is not a branch but a BACK END:
+
+> **A second implementation of a security decision is a second posture until proven otherwise.** When
+> a control has two back ends, the invariant belongs to the CONTROL, not to the implementation that
+> happened to be reviewed — and the deployment the docs recommend is the one to check first.
+
+### 21.6 What is deliberately left
+
+- **A genuinely unreachable sidecar still fails OPEN** (WK-2b). Unchanged owner decision, now
+  counted, gated-alerted, and reachable only by an actual fault.
+- **No circuit breaker and no periodic health probe.** Each request pays one budget to rediscover a
+  dead sidecar. `internal/upstream`'s breaker plus a `remote_scan` operator-contract row is the
+  natural next slice.
+- **No hash cache on the remote path.** Identical objects are re-shipped every time — which is
+  precisely the stampede that saturates the sidecar. Not fixed here: memoising a sidecar-sourced
+  verdict needs a decision about TTL and about whether it may be memoised at all.
+- **No `MaxConnsPerHost`.** N concurrent requests open N connections to the component that is already
+  the bottleneck. Bounding it is the right direction; choosing the number is a capacity decision, and
+  the per-request budget now bounds the damage.
+- **The sidecar's `/scan` has no authentication.** Documented as loopback/private-network, enforced
+  nowhere. Out of scope; recorded.
