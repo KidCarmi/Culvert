@@ -2,7 +2,7 @@
 
 Deploying egress policy safely: the model, staged rollout, validation, rollback, and test→prod promotion — with the gaps that shape a safe rollout.
 
-> **Enterprise-readiness verdict:** **Policy engine, candidate/commit Draft Mode, draft-aware dry-run testing, rollback, and export/import promotion are production-ready. Safe staged rollout is still weak** — there is no monitor-only enforcement mode (GAP-POL-01) and no node-scoped targeting (GAP-POL-02), so pilots must be expressed as user/IP populations and enforcement is all-or-nothing per rule. A non-enforcing **Security Policy Learning Mode** to close GAP-POL-01 is planned (ADR-0025, not yet implemented).
+> **Enterprise-readiness verdict:** **Policy engine, candidate/commit Draft Mode, draft-aware dry-run testing, rollback, and export/import promotion are production-ready. Safe staged rollout is still weak** — there is no monitor-only enforcement mode (GAP-POL-01) and no node-scoped targeting (GAP-POL-02), so pilots must be expressed as user/IP populations and enforcement is all-or-nothing per rule. A non-enforcing **Policy Learning Mode** (ADR-0025) ships today and helps *design* the pilot's allow rules from observed traffic, but it is not a monitor-only enforcement mode itself — see [`docs/operator/policy-learning-mode.md`](../operator/policy-learning-mode.md).
 
 ---
 
@@ -40,7 +40,7 @@ Deploying egress policy safely: the model, staged rollout, validation, rollback,
 
 - **Opt-in, per instance:** `PUT /api/policy/draft {require_commit: true}` (admin) arms Draft Mode. Default is off — behavior is byte-identical to the pre-draft direct-write model when disarmed.
 - **Candidate/commit lifecycle:** while armed, every mutating policy handler writes to a **candidate** rulebase (a separate `policy_draft.json`), not the live store. Review the pending diff and any advisory rule-shadow findings on the draft panel, then `POST /api/policy/draft/commit` (operator, requires a comment) to atomically publish the candidate to the live store and record it as a config version; `POST /api/policy/draft/revert` discards it. See `docs/design/POLICY-DRAFT-DESIGN.md`.
-- **Learning Mode (future, ADR-0025):** accepted policy-learning recommendations land in this same candidate as disabled `Allow`/`Inspect` rules — commit remains the sole activation step.
+- **Policy Learning Mode (ADR-0025, shipped):** accepted policy-learning recommendations land in this same candidate as `Allow`/`Inspect` rules that are created **disabled**. Committing the draft only publishes the rule as-is — it does *not* enable it, so enabling the rule is a required, separate step before it enforces anything. See [`docs/operator/policy-learning-mode.md`](../operator/policy-learning-mode.md).
 
 ## 5. Rollback
 
