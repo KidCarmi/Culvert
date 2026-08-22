@@ -36,8 +36,15 @@ git -C "$ROOT" archive HEAD frontend api/openapi/openapi.json |
   git commit -qm base
   git tag base
 )
-cp -al "$FRONTEND/node_modules" "$REPO/frontend/node_modules"
-cp -al "$FRONTEND/tools/openapi-gen/node_modules" \
+# Hardlink copy when the temp dir shares a filesystem with the workspace;
+# plain copy otherwise (containers often mount /tmp and the workspace on
+# different devices, where cross-device hardlinks fail).
+copy_tree() {
+  rm -rf "$2"
+  cp -al "$1" "$2" 2>/dev/null || { rm -rf "$2"; cp -a "$1" "$2"; }
+}
+copy_tree "$FRONTEND/node_modules" "$REPO/frontend/node_modules"
+copy_tree "$FRONTEND/tools/openapi-gen/node_modules" \
   "$REPO/frontend/tools/openapi-gen/node_modules"
 
 FE="$REPO/frontend"
