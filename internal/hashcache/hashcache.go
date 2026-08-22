@@ -86,8 +86,23 @@ func (c *HashCache) Get(hash string) (ScanCacheResult, bool) {
 	return e.result, true
 }
 
-// Set stores a scan result under the given content hash.
+// Set stores a scan result under the given content hash, with the cache's
+// configured TTL.
 func (c *HashCache) Set(hash string, result ScanCacheResult) {
+	c.SetTTL(hash, result, 0)
+}
+
+// SetTTL stores a scan result with an explicit lifetime; ttl ≤ 0 uses the
+// cache's configured TTL.
+//
+// It exists for verdicts that are ABOUT THE SCANNER rather than about the
+// content — a fail-closed scan-timeout refusal, for instance. Those must not
+// inherit the content TTL: a scanner that was briefly slow would otherwise keep
+// blocking a specific object for the rest of the hour, long after it recovered.
+func (c *HashCache) SetTTL(hash string, result ScanCacheResult, ttl time.Duration) {
+	if ttl <= 0 {
+		ttl = c.ttl
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -96,8 +111,38 @@ func (c *HashCache) Set(hash string, result ScanCacheResult) {
 	}
 	c.entries[hash] = &hashCacheEntry{
 		result:    result,
-		expiresAt: time.Now().Add(c.ttl),
+		expiresAt: time.Now().Add(ttl),
 	}
+}
+
+// SetTTLUnless stores result under hash with the given lifetime unless keep
+// reports that the entry already present must be preserved. It returns whether
+// the write happened; ttl ≤ 0 uses the cache's configured TTL.
+//
+// The test and the write are one atomic step under the cache lock. A caller
+// doing Get-then-Set instead would leave a window in which a stronger verdict
+// lands between the two and is overwritten anyway — which is the exact race
+// this exists to close. keep is called only with a present, unexpired entry
+// (an expired one counts as absent), and hit/miss counters are untouched:
+// this is a write path, not a lookup.
+func (c *HashCache) SetTTLUnless(hash string, result ScanCacheResult, ttl time.Duration, keep func(existing ScanCacheResult) bool) bool {
+	if ttl <= 0 {
+		ttl = c.ttl
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if e, ok := c.entries[hash]; ok && keep != nil && !time.Now().After(e.expiresAt) && keep(e.result) {
+		return false
+	}
+	if len(c.entries) >= c.maxSize {
+		c.evictLocked()
+	}
+	c.entries[hash] = &hashCacheEntry{
+		result:    result,
+		expiresAt: time.Now().Add(ttl),
+	}
+	return true
 }
 
 // Stats returns (hits, misses, currentSize) for Prometheus / admin UI.

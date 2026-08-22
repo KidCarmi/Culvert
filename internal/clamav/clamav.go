@@ -19,12 +19,20 @@ package clamav
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"strings"
 	"time"
 )
+
+// ErrQueueFull reports that a scan could not obtain one of the
+// clamMaxConcurrent slots within the caller's budget. It is deliberately
+// distinguishable from a daemon fault: the daemon is healthy, this node is
+// simply at its scanning capacity, and the two need different operator
+// responses (add capacity vs. fix the daemon) and different postures.
+var ErrQueueFull = errors.New("clamav: scan queue full")
 
 // Client is a ClamAV CLAMD protocol client.
 type Client struct {
@@ -144,25 +152,68 @@ func parseClamVersion(raw string) Version {
 	return v
 }
 
-// Scan submits data to the ClamAV daemon via the INSTREAM command.
-// Returns (virusName, isMalicious, error).
-// virusName is non-empty only when isMalicious is true.
-// Concurrent scans are limited by clamSem to prevent overwhelming the daemon.
-func (c *Client) Scan(data []byte) (virusName string, isMalicious bool, err error) {
-	// P6: Non-blocking semaphore with timeout to prevent goroutine backlog.
-	select {
-	case clamSem <- struct{}{}:
-	case <-time.After(5 * time.Second):
-		return "", false, fmt.Errorf("clamav: scan queue full (%d concurrent), timed out", clamMaxConcurrent)
-	}
-	defer func() { <-clamSem }()
+// clamQueueWaitFallback bounds the semaphore wait for callers that supply no
+// deadline of their own (the legacy Scan entry point). Callers that DO carry a
+// budget — the scan orchestrator does — must not have it preempted: see
+// ScanContext.
+const clamQueueWaitFallback = 5 * time.Second
 
-	conn, err := (&net.Dialer{Timeout: c.timeout}).DialContext(context.Background(), c.network, c.addr)
+// Scan submits data to the ClamAV daemon via the INSTREAM command using the
+// legacy budget (clamQueueWaitFallback for the queue, c.timeout for the I/O).
+// Prefer ScanContext, which lets the caller own the deadline.
+func (c *Client) Scan(data []byte) (virusName string, isMalicious bool, err error) {
+	return c.ScanContext(context.Background(), data)
+}
+
+// ScanContext submits data to the ClamAV daemon via the INSTREAM command under
+// the caller's context. Returns (virusName, isMalicious, error); virusName is
+// non-empty only when isMalicious is true.
+//
+// Concurrent scans are limited by clamSem to protect the daemon. The wait for a
+// slot is charged to the CALLER'S budget rather than to a private constant.
+// That distinction is load-bearing and was a defect: the queue wait used to give
+// up after its own 5 s and return an ordinary error, which the orchestrator
+// classifies as "engine fault" and handles fail-OPEN — so five concurrent large
+// downloads on a perfectly healthy daemon admitted content unscanned, while the
+// orchestrator's own 10 s deadline (the outer limit that is supposed to decide
+// this) fails CLOSED. An inner deadline must never preempt an outer one and
+// invert its posture. With the caller's context threaded through, exceeding the
+// budget lands on the caller's fail-closed path, and ErrQueueFull says which
+// resource ran out so saturation stays distinguishable from a daemon fault.
+//
+// Cancellation is honoured throughout: the dial, the deadline on the connection
+// (the earlier of the caller's deadline and c.timeout), and an explicit watcher
+// that closes the connection when the context ends. A scan the caller has
+// abandoned therefore releases its clamSem slot promptly instead of holding one
+// of four for the full c.timeout — which is what turned a slow daemon into a
+// self-sustaining collapse, every abandoned scan squatting a slot and pushing
+// live requests onto the fail-open queue-full path.
+func (c *Client) ScanContext(ctx context.Context, data []byte) (virusName string, isMalicious bool, err error) {
+	release, err := acquireSlot(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	defer release()
+
+	// The caller's context may already be done (it was consumed queueing).
+	if err := ctx.Err(); err != nil {
+		return "", false, fmt.Errorf("clamav: scan aborted: %w", err)
+	}
+
+	conn, err := (&net.Dialer{Timeout: c.timeout}).DialContext(ctx, c.network, c.addr)
 	if err != nil {
 		return "", false, fmt.Errorf("clamav: connect: %w", err)
 	}
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(c.timeout)) //nolint:errcheck // a failed deadline set is surfaced by the subsequent read/write
+	conn.SetDeadline(c.effectiveDeadline(ctx)) //nolint:errcheck // a failed deadline set is surfaced by the subsequent read/write
+
+	// Cancellation (as opposed to expiry) is not covered by the deadline, so
+	// close the connection when the caller gives up; the in-flight read/write
+	// then returns immediately and the slot is released.
+	stopWatch := c.watchCancel(ctx, conn)
+	defer stopWatch()
+
+	defer func() { err = abortCause(ctx, err) }()
 
 	// Send INSTREAM command (null-terminated).
 	if _, err := fmt.Fprintf(conn, "zINSTREAM\x00"); err != nil {
@@ -198,6 +249,73 @@ func (c *Client) Scan(data []byte) (virusName string, isMalicious bool, err erro
 		return "", false, fmt.Errorf("clamav: read response: %w", err)
 	}
 	return parseClamResponse(strings.TrimRight(string(resp), "\x00\n\r "))
+}
+
+// acquireSlot books one of the clamMaxConcurrent scan slots, waiting on the
+// CALLER's budget. A caller with no deadline of its own (the legacy Scan entry
+// point) gets clamQueueWaitFallback so it cannot block forever. The returned
+// func releases the slot and is always safe to defer.
+//
+// ErrQueueFull says which resource ran out, so the orchestrator can tell "this
+// node is at capacity" (add capacity) from "the daemon faulted" (fix the
+// daemon) — they need different responses and different postures.
+func acquireSlot(ctx context.Context) (release func(), err error) {
+	waitCtx := ctx
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancelWait context.CancelFunc
+		waitCtx, cancelWait = context.WithTimeout(ctx, clamQueueWaitFallback)
+		defer cancelWait()
+	}
+	select {
+	case clamSem <- struct{}{}:
+		return func() { <-clamSem }, nil
+	case <-waitCtx.Done():
+		return nil, fmt.Errorf("%w (%d concurrent): %w", ErrQueueFull, clamMaxConcurrent, waitCtx.Err())
+	}
+}
+
+// abortCause annotates an I/O error that failed because WE gave up. Without it
+// the error reads as a daemon fault, and the orchestrator would take the
+// fail-open engine-error branch AND fire a scan_clam_error alert for every
+// abandoned scan — attributing this node's saturation to a healthy daemon, in
+// an alert storm precisely when it is busiest.
+func abortCause(ctx context.Context, err error) error {
+	if err == nil || ctx.Err() == nil || errors.Is(err, ctx.Err()) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", err, ctx.Err())
+}
+
+// effectiveDeadline returns the earlier of the caller's deadline and the
+// client's own c.timeout. Taking the earlier of the two is what stops an
+// abandoned scan from squatting a clamSem slot for the full c.timeout (30 s by
+// default, 3x the orchestrator's scan budget) after its caller has already
+// returned a verdict.
+func (c *Client) effectiveDeadline(ctx context.Context) time.Time {
+	own := time.Now().Add(c.timeout)
+	if d, ok := ctx.Deadline(); ok && d.Before(own) {
+		return d
+	}
+	return own
+}
+
+// watchCancel closes conn if ctx ends before the returned stop func is called.
+// SetDeadline covers expiry but not cancellation, and a scan the caller has
+// abandoned must release its slot immediately rather than run to its deadline.
+// The returned func is idempotent and always safe to defer.
+func (c *Client) watchCancel(ctx context.Context, conn net.Conn) func() {
+	if ctx.Done() == nil {
+		return func() {}
+	}
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			conn.Close() //nolint:errcheck // best-effort abort; the blocked I/O call reports the real error
+		case <-done:
+		}
+	}()
+	return func() { close(done) }
 }
 
 // parseClamResponse parses a CLAMD INSTREAM response.

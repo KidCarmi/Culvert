@@ -30,6 +30,8 @@ import (
 	"bytes"
 	"compress/flate"
 	"compress/gzip"
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -74,7 +76,22 @@ var (
 	statScanSkipped       int64 // responses forwarded unscanned (size > maxBytes)
 	statRemoteScanFail    int64 // remote scan sidecar failures (fail-open)
 	statClamScanError     int64 // ClamAV scan errors mid-request (fail-open, alerted)
+	statClamSaturated     int64 // scans that could not get a ClamAV slot within the budget
+	statScanLateDiscarded int64 // clean verdicts computed after the deadline and discarded
 )
+
+// scanInflight counts body scans currently running, INCLUDING scans whose
+// caller has already returned the fail-closed timeout verdict and is no longer
+// waiting. Abandoned work is the part that used to be invisible, and it is the
+// part that matters: each abandoned scan holds its share of the ClamAV
+// concurrency limit and a copy of the response body until it unwinds.
+var scanInflight atomic.Int64
+
+// ScanInflight reports body scans currently running (abandoned ones included).
+// It is a saturation gauge: a value that stays near or above the ClamAV
+// concurrency limit means scans are queueing, which is the leading indicator of
+// the timeout-and-abandon regime.
+func ScanInflight() int64 { return scanInflight.Load() }
 
 // CounterSnapshot is a point-in-time copy of the scan counters.
 type CounterSnapshot struct {
@@ -85,6 +102,9 @@ type CounterSnapshot struct {
 	ScanSkipped       int64
 	RemoteScanFail    int64
 	ClamScanError     int64
+	ClamSaturated     int64
+	ScanLateDiscarded int64
+	ScanInflight      int64
 }
 
 // Counters returns a snapshot of all scan counters.
@@ -97,6 +117,9 @@ func Counters() CounterSnapshot {
 		ScanSkipped:       atomic.LoadInt64(&statScanSkipped),
 		RemoteScanFail:    atomic.LoadInt64(&statRemoteScanFail),
 		ClamScanError:     atomic.LoadInt64(&statClamScanError),
+		ClamSaturated:     atomic.LoadInt64(&statClamSaturated),
+		ScanLateDiscarded: atomic.LoadInt64(&statScanLateDiscarded),
+		ScanInflight:      scanInflight.Load(),
 	}
 }
 
@@ -499,20 +522,111 @@ func (ss *Scanner) ScanBody(data []byte) *Result {
 
 	// Run all scanners under a single timeout.
 	// Fail-closed: if the deadline fires, we block the content (Zero Trust).
+	//
+	// The deadline is a context, not a bare timer, so that the work actually
+	// STOPS when we stop waiting for it. Previously the inner goroutine ran on
+	// uninterrupted — holding one of the four ClamAV slots for up to the
+	// client's own 30 s timeout, three times this budget — so under a slow
+	// daemon the slots filled with scans nobody was waiting for and live
+	// requests fell onto ClamAV's fail-OPEN queue-full path. Cancelling here is
+	// what stops that from becoming self-sustaining.
+	ctx, cancel := context.WithTimeout(context.Background(), scanBodyTimeout())
+	defer cancel()
+
+	var abandoned atomic.Bool
 	ch := make(chan *Result, 1)
+	scanInflight.Add(1)
 	go func() {
-		ch <- ss.scanBodyInner(data, hash)
+		defer scanInflight.Add(-1)
+		ch <- ss.scanBodyInner(ctx, data, hash, &abandoned)
 	}()
 
 	select {
 	case result := <-ch:
-		return result
-	case <-time.After(ScanBodyTimeout):
-		atomic.AddInt64(&statScanTimeout, 1)
-		obs.Warnf("SecurityScan: ScanBody timeout after %s for hash %s — blocking (fail-closed)", ScanBodyTimeout, hash)
-		ss.cache.Set(hash, hashcache.ScanCacheResult{Clean: false, Reason: "scan timeout", Source: "timeout"})
-		return &Result{Blocked: true, Reason: "scan timeout", Source: "timeout", Hash: hash}
+		return ss.completeScan(result, hash)
+	case <-ctx.Done():
+		abandoned.Store(true)
+		return ss.noteScanTimeout(hash)
 	}
+}
+
+// completeScan finalises a result the worker delivered before the select gave
+// up on it.
+//
+// A timeout-SOURCED result means the worker found the budget gone and enforced
+// it from its own side. With a budget-aware ClamAV client that is not a rare
+// race: the connection deadline and ctx.Done() become ready at the same
+// instant, so either arm of the select can win, and the choice between two
+// ready cases is random. Both arms must therefore land on the same accounting
+// — otherwise statScanTimeout undercounts nondeterministically, and, worse, no
+// cooldown is written, so the next request for the same hot object immediately
+// launches another doomed scan. That is precisely the stampede the cooldown
+// exists to prevent, unreliable in exactly the regime it was built for.
+func (ss *Scanner) completeScan(result *Result, hash string) *Result {
+	if result != nil && result.Source == "timeout" {
+		return ss.noteScanTimeout(hash)
+	}
+	return result
+}
+
+// noteScanTimeout performs the fail-closed timeout accounting — counter, log,
+// cooldown memo — and returns the refusal. Exactly one of ScanBody's two arms
+// calls it per scan, so the counter counts scans, not events.
+func (ss *Scanner) noteScanTimeout(hash string) *Result {
+	atomic.AddInt64(&statScanTimeout, 1)
+	obs.Warnf("SecurityScan: ScanBody timeout after %s for hash %s — blocking (fail-closed)", scanBodyTimeout(), hash)
+	ss.cacheTimeoutCooldown(hash)
+	return &Result{Blocked: true, Reason: "scan timeout", Source: "timeout", Hash: hash}
+}
+
+// cacheTimeoutCooldown memoises the fail-closed refusal briefly.
+//
+// Two rules, and both were learned the hard way. First, the lifetime: this is
+// an INFRASTRUCTURE verdict, not a verdict about the content, and it used to be
+// stored with the full content-cache TTL (1 h by default) — so a few seconds of
+// scanner slowness blocked that exact object, node-wide, for every user, for an
+// hour after the fault cleared, recoverable only by an admin cache flush.
+// scanBodyInner's clamDark branch already refuses to cache a verdict computed
+// while ClamAV was dark, for exactly this reason; the reasoning simply had not
+// been applied to its neighbour. A short cooldown keeps the useful half — a
+// stampede of doomed scans for one hot object is what fills the queue in the
+// first place — without outliving the fault.
+//
+// Second, the direction: it must never DOWNGRADE a confirmed threat verdict.
+// A late block from this scan's own abandoned goroutine, or from a concurrent
+// scan of the same hash, can land between the deadline firing and this write.
+// Overwriting it would replace a named, full-TTL threat entry with a generic
+// one that lapses in 30 s, after which the object depends on the next scan
+// succeeding — and the engine-error path is fail-OPEN. That is the same
+// tighten-only rule publishVerdict enforces; it had simply not been carried
+// across to the neighbouring branch, which is the very mistake this whole
+// change exists to correct.
+func (ss *Scanner) cacheTimeoutCooldown(hash string) {
+	timeoutVerdict := hashcache.ScanCacheResult{Clean: false, Reason: "scan timeout", Source: "timeout"}
+	ss.cache.SetTTLUnless(hash, timeoutVerdict, scanTimeoutCooldown, func(existing hashcache.ScanCacheResult) bool {
+		// Keep any CONFIRMED block: it names the threat and carries the full
+		// content TTL, both of which this generic entry would destroy.
+		return !existing.Clean && existing.Source != "timeout"
+	})
+}
+
+// scanTimeoutCooldown is how long a fail-closed scan-timeout refusal is
+// remembered. Deliberately far shorter than the content-cache TTL: it bounds
+// how long an infrastructure fault can keep blocking content after it clears,
+// while still absorbing a burst of requests for the same object during it.
+// Production never assigns it; it is a var only so the chaos gates can prove
+// the refusal actually expires rather than waiting 30 s to watch it happen.
+var scanTimeoutCooldown = 30 * time.Second
+
+// scanBodyTimeoutOverride is a test seam for the scan budget. Production never
+// sets it; ScanBodyTimeout stays the exported contract.
+var scanBodyTimeoutOverride atomic.Int64
+
+func scanBodyTimeout() time.Duration {
+	if v := scanBodyTimeoutOverride.Load(); v > 0 {
+		return time.Duration(v)
+	}
+	return ScanBodyTimeout
 }
 
 // clamScanError records a ClamAV mid-request scan failure: counter + webhook
@@ -530,8 +644,84 @@ func clamScanError(err error) {
 	})
 }
 
-// scanBodyInner runs ClamAV + YARA sequentially. Called from ScanBody under a timeout.
-func (ss *Scanner) scanBodyInner(data []byte, hash string) *Result {
+// clamContextScanner is the optional budget-aware scan capability.
+// *clamav.Client implements it; test fakes need not, so it is type-asserted
+// rather than folded into the required ClamScanner interface (same pattern as
+// clamVersioner). A scanner without it keeps the legacy private-deadline
+// behavior.
+type clamContextScanner interface {
+	ScanContext(ctx context.Context, data []byte) (name string, found bool, err error)
+}
+
+// runClam performs the ClamAV leg under the scan budget when the injected
+// scanner supports it.
+func runClam(ctx context.Context, clam ClamScanner, data []byte) (name string, found bool, err error) {
+	if cs, ok := clam.(clamContextScanner); ok {
+		return cs.ScanContext(ctx, data)
+	}
+	return clam.Scan(data)
+}
+
+// publishVerdict records a verdict in the hash cache under the tighten-only
+// rule for abandoned scans.
+//
+// A scan whose caller already returned the fail-closed timeout verdict is
+// ABANDONED, and an abandoned scan must never publish a CLEAN result: doing so
+// silently converts a fail-closed refusal into a cached admission for the rest
+// of the TTL, so whether a given object is blocked or served comes down to a
+// race between the deadline and the scanner. A late BLOCK is still published —
+// it can only tighten the cached verdict, and it upgrades the placeholder
+// "scan timeout" entry to the real threat name.
+func (ss *Scanner) publishVerdict(hash string, r hashcache.ScanCacheResult, abandoned *atomic.Bool) {
+	if r.Clean && abandoned != nil && abandoned.Load() {
+		noteLateCleanDiscarded(hash)
+		return
+	}
+	ss.cache.Set(hash, r)
+}
+
+// noteLateCleanDiscarded records a clean verdict computed outside the scan
+// budget and thrown away. It is a CORRECTNESS signal, not a liveness one: a
+// non-zero value means content was refused by the deadline rather than judged
+// by the engines, so a persistently non-zero counter says the scan budget (or
+// the scanner behind it) no longer fits the traffic.
+func noteLateCleanDiscarded(hash string) {
+	atomic.AddInt64(&statScanLateDiscarded, 1)
+	if degradedLogAllowed(&lastLateDiscardLog) {
+		obs.Warnf("SecurityScan: discarding clean verdict for hash %s computed after the %s deadline (fail-closed decision stands); total %d",
+			hash, scanBodyTimeout(), atomic.LoadInt64(&statScanLateDiscarded))
+	}
+}
+
+// Every condition this file reports is one that recurs PER REQUEST for as long
+// as the fault lasts, so the log line is rate-limited while the counter stays
+// exact — the same count-everything / gate-the-noise discipline as
+// storage_health.go and ca_health.go. Logging every occurrence would degrade
+// the node hardest exactly when it is already saturated, which is the shape
+// this whole change exists to remove.
+const degradedLogInterval = time.Minute
+
+var (
+	lastLateDiscardLog atomic.Int64
+	lastSaturatedLog   atomic.Int64
+	lastAbandonedLog   atomic.Int64
+)
+
+// degradedLogAllowed reports whether enough time has passed since the last log
+// line gated by last, and claims the slot if so.
+func degradedLogAllowed(last *atomic.Int64) bool {
+	now := time.Now().UnixNano()
+	prev := last.Load()
+	if prev != 0 && now-prev < int64(degradedLogInterval) {
+		return false
+	}
+	return last.CompareAndSwap(prev, now)
+}
+
+// scanBodyInner runs ClamAV + YARA sequentially. Called from ScanBody under
+// ctx, which carries the scan budget; abandoned reports whether the caller has
+// already given up and returned the fail-closed verdict.
+func (ss *Scanner) scanBodyInner(ctx context.Context, data []byte, hash string, abandoned *atomic.Bool) *Result {
 	ss.mu.RLock()
 	clam := ss.clam
 	ss.mu.RUnlock()
@@ -542,15 +732,14 @@ func (ss *Scanner) scanBodyInner(data []byte, hash string) *Result {
 	// keep admitting the same content by hash long after the daemon recovers.
 	clamDark := false
 	if clam != nil {
-		name, found, err := clam.Scan(data)
+		name, found, err := runClam(ctx, clam, data)
 		switch {
 		case err != nil:
 			clamDark = true
-			clamScanError(err)
-			obs.Printf("ERROR SecurityScan: ClamAV error: %s", strings.ReplaceAll(err.Error(), "\n", " "))
+			ss.recordClamFailure(ctx, err)
 		case found:
 			atomic.AddInt64(&statClamBlocked, 1)
-			ss.cache.Set(hash, hashcache.ScanCacheResult{Clean: false, Reason: name, Source: "clamav"})
+			ss.publishVerdict(hash, hashcache.ScanCacheResult{Clean: false, Reason: name, Source: "clamav"}, abandoned)
 			return &Result{Blocked: true, Reason: name, Source: "clamav", Hash: hash}
 		}
 	}
@@ -560,17 +749,67 @@ func (ss *Scanner) scanBodyInner(data []byte, hash string) *Result {
 		if matches := y.Match(data); len(matches) > 0 {
 			reason := strings.Join(matches, ", ")
 			atomic.AddInt64(&statYARABlocked, 1)
-			ss.cache.Set(hash, hashcache.ScanCacheResult{Clean: false, Reason: reason, Source: "yara"})
+			ss.publishVerdict(hash, hashcache.ScanCacheResult{Clean: false, Reason: reason, Source: "yara"}, abandoned)
 			return &Result{Blocked: true, Reason: reason, Source: "yara", Hash: hash}
 		}
+	}
+
+	// The budget is enforced from BOTH sides. ScanBody's select can observe a
+	// completed scan and an expired deadline as simultaneously ready and pick
+	// either — so without this check an overrun could be laundered into a
+	// clean verdict by winning a coin flip. A scan that finishes outside its
+	// budget returns the same fail-closed refusal its caller would have.
+	if ctx.Err() != nil {
+		noteLateCleanDiscarded(hash)
+		return &Result{Blocked: true, Reason: "scan timeout", Source: "timeout", Hash: hash}
 	}
 
 	// Content is clean — cache the negative result, unless ClamAV errored:
 	// a partial scan is not a clean verdict (the next occurrence rescans).
 	if !clamDark {
-		ss.cache.Set(hash, hashcache.ScanCacheResult{Clean: true, Source: "clean"})
+		ss.publishVerdict(hash, hashcache.ScanCacheResult{Clean: true, Source: "clean"}, abandoned)
 	}
 	return nil
+}
+
+// recordClamFailure classifies a failed ClamAV leg. The three causes need
+// different operator responses and must not share one counter or one alert:
+//
+//	budget exhausted — WE gave up (deadline/cancel). Not a daemon fault at all;
+//	                   alerting on it turns one slow-scanner incident into an
+//	                   alert storm blaming a healthy daemon.
+//	queue full       — the daemon is healthy, this node is at capacity. The fix
+//	                   is capacity, and it is now charged to the caller's
+//	                   budget, so it lands on the fail-closed timeout path
+//	                   rather than the fail-open engine-error path.
+//	engine error     — a genuine daemon fault: counted + alerted as before.
+func (ss *Scanner) recordClamFailure(ctx context.Context, err error) {
+	switch {
+	case ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled):
+		if errors.Is(err, clamav.ErrQueueFull) {
+			ss.noteClamSaturated(err, "scan budget exhausted while queued")
+			return
+		}
+		if degradedLogAllowed(&lastAbandonedLog) {
+			obs.Printf("SecurityScan: ClamAV scan abandoned at the scan deadline: %s", strings.ReplaceAll(err.Error(), "\n", " "))
+		}
+	case errors.Is(err, clamav.ErrQueueFull):
+		ss.noteClamSaturated(err, "no slot available")
+	default:
+		clamScanError(err)
+		obs.Printf("ERROR SecurityScan: ClamAV error: %s", strings.ReplaceAll(err.Error(), "\n", " "))
+	}
+}
+
+// noteClamSaturated counts a capacity refusal and logs it at most once per
+// degradedLogInterval. The counter carries the magnitude; the line carries the
+// explanation.
+func (ss *Scanner) noteClamSaturated(err error, why string) {
+	atomic.AddInt64(&statClamSaturated, 1)
+	if degradedLogAllowed(&lastSaturatedLog) {
+		obs.Warnf("SecurityScan: ClamAV at capacity (%s) — %s; total %d",
+			strings.ReplaceAll(err.Error(), "\n", " "), why, atomic.LoadInt64(&statClamSaturated))
+	}
 }
 
 // ── Cache accessors (ADR-0006) ──────────────────────────────────────────────
