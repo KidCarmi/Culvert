@@ -48,6 +48,7 @@ jobs:
       code: ${{ steps.classify.outputs.code }}
       agent: ${{ steps.classify.outputs.agent }}
       mcp_docs: ${{ steps.classify.outputs.mcp_docs }}
+      frontend: ${{ steps.classify.outputs.frontend }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -62,6 +63,7 @@ jobs:
             echo "code=true"     >> "$GITHUB_OUTPUT"
             echo "agent=true"    >> "$GITHUB_OUTPUT"
             echo "mcp_docs=true" >> "$GITHUB_OUTPUT"
+            echo "frontend=true" >> "$GITHUB_OUTPUT"
             echo "Manual run — all jobs enabled."
             exit 0
           fi
@@ -86,6 +88,7 @@ jobs:
           code=false
           agent=false
           mcp_docs=false
+          frontend=false
           while IFS= read -r f; do
             case "$f" in
               # Load-bearing docs: docs_saml_test.go reads this file at test
@@ -109,11 +112,27 @@ jobs:
               .github/scripts/mcp-doc-predicates.sh) mcp_docs=true ;;
               .github/workflows/pr-fast-gate.yml) mcp_docs=true ;;
             esac
+            # Frontend verification surface (FE-1A, ADR-FE-001). Its OWN
+            # `case`, same rationale as mcp_docs. Fail-toward-running: the
+            # committed-generated-output contract can be altered by the
+            # OpenAPI document, the hygiene files (.gitattributes marks the
+            # generated paths; the ignore files gate what reaches git/docker),
+            # this workflow, and the reusable frontend workflow itself — a
+            # change to ANY of them exercises the frontend gate.
+            case "$f" in
+              frontend/*) frontend=true ;;
+              ui_frontend_v2*) frontend=true ;;
+              api/openapi/openapi.json) frontend=true ;;
+              .github/workflows/frontend-verify.yml) frontend=true ;;
+              .github/workflows/pr-fast-gate.yml) frontend=true ;;
+              .gitattributes|.gitignore|.dockerignore) frontend=true ;;
+            esac
           done < changed.txt
           echo "code=$code"         >> "$GITHUB_OUTPUT"
           echo "agent=$agent"       >> "$GITHUB_OUTPUT"
           echo "mcp_docs=$mcp_docs" >> "$GITHUB_OUTPUT"
-          echo "code=$code agent=$agent mcp_docs=$mcp_docs"
+          echo "frontend=$frontend" >> "$GITHUB_OUTPUT"
+          echo "code=$code agent=$agent mcp_docs=$mcp_docs frontend=$frontend"
 
   # ─── 1. Hygiene: fmt + vet + build (incl. arm64 compile + static assert) ──
   hygiene:
@@ -400,6 +419,20 @@ jobs:
           path: proxy-traffic.log
           retention-days: 7
 
+  # ─── F. Frontend verification (FE-1A, ADR-FE-001) ──────────────────────────
+  # Reusable implementation lives in frontend-verify.yml (workflow_call):
+  # digest-pinned canonical Node container, ignore-scripts installs proven in
+  # both npm trees, type-generation + committed-dist porcelain drift gates,
+  # drift-gate tamper harness, and the 2-build determinism check. Runs only
+  # when the classifier saw the frontend surface; the aggregate counts the
+  # skip as passing on unrelated PRs (needs-verdict), so the ONE required
+  # branch-protection check stays "✅ Fast PR Gate — APPROVED".
+  frontend:
+    name: "Gate · frontend"
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    uses: ./.github/workflows/frontend-verify.yml
+
   # ─── ✅ Aggregate — the ONE required branch-protection check ────────────────
   # Always runs. Skipped jobs (docs-only PRs, unchanged agent module) count
   # as passing; failure or cancellation of any needed job fails the gate.
@@ -418,6 +451,7 @@ jobs:
       - gitleaks
       - agent
       - mcp-predicates
+      - frontend
     if: always()
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

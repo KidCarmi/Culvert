@@ -334,6 +334,10 @@ func computeReadiness() (report readinessReport, code int) {
 	// 1b. Cluster CA — see appendClusterCAReadinessCheck. Report-only; absent
 	// entirely on a node with no cluster CA.
 	appendClusterCAReadinessCheck(checks)
+	// 1c. FrontendV2 (FE-1B) — report-only, absent while the experimental UI
+	// is disabled; never gates the default verdict (a broken preview UI must
+	// not eject a serving proxy). See appendFrontendV2ReadinessCheck.
+	appendFrontendV2ReadinessCheck(checks)
 
 	// 2. ClamAV: if scanner is initialised, verify connectivity.
 	//

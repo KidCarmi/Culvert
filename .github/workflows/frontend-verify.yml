@@ -1,0 +1,135 @@
+# Frontend verification (FE-1A, ADR-FE-001) — reusable implementation.
+#
+# The only REQUIRED CI lane that installs and verifies the new frontend
+# dependency/build toolchain. (The advisory playwright-go UI-E2E lane still
+# uses npm to stage its browser driver until the legacy UI retires at
+# FE-8/FE-9.) The appliance runtime and every Go build path stay Node-free:
+# frontend/dist and src/api/types.gen.ts are COMMITTED generated output, and
+# this lane proves they are exactly what the pinned toolchain regenerates
+# (drift gates), that the build is deterministic, and that the drift gates
+# themselves cannot regress (tamper harness).
+#
+# REQUIRED-GATE WIRING: this workflow is a `workflow_call` dependency of the
+# Fast PR Gate (`pr-fast-gate.yml` job `frontend`, aggregated into
+# "✅ Fast PR Gate — APPROVED"). It deliberately has NO pull_request trigger
+# of its own — PR enforcement flows only through the Fast Gate aggregate, so
+# no second required branch-protection check exists.
+#
+# CANONICAL ENVIRONMENT: the build bytes are produced inside the digest-pinned
+# Node 24.19.0 Linux container below (the accepted canonical deterministic
+# build environment), not on the mutable host runner image. The host runner is
+# only the execution substrate.
+#
+# The contract lives in repository scripts, not in this YAML — CI runs the
+# same commands a developer runs:
+#   npm run verify                        (frontend/scripts/verify.sh)
+#   sh scripts/verify-determinism.sh 2    (frontend/scripts/verify-determinism.sh)
+#   sh scripts/test-drift-gate.sh         (frontend/scripts/test-drift-gate.sh)
+name: Frontend Verify
+
+on:
+  workflow_call:
+  workflow_dispatch:
+    inputs:
+      determinism_builds:
+        description: "Isolated clean builds for the determinism proof (5 = qualification evidence)"
+        required: false
+        default: "2"
+  push:
+    branches: [main]
+    paths:
+      - "frontend/**"
+      - "api/openapi/openapi.json"
+      - ".github/workflows/frontend-verify.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: "Frontend · verify + determinism"
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    container:
+      # Canonical pinned frontend build environment (index digest covers all
+      # platforms; CI resolves linux/amd64). Node 24.19.0 / npm 11.17.0 are
+      # re-asserted inside by scripts/assert-toolchain.sh.
+      image: node:24.19.0-bookworm@sha256:934240a162082fd8b8a2f90cd5114446443f1eba1c5378f6687167ca405e6584
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The container user differs from the workspace owner; the drift gates
+      # are git-status based and must not trip gitleaks-era ownership guards.
+      - name: Git workspace trust
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      # The pinned toolchain identity is a contract (ADR-FE-001): fail fast
+      # and loudly if the container ever drifts from Node 24.19.0/npm 11.17.0.
+      - name: Toolchain identity
+        run: sh scripts/assert-toolchain.sh
+
+      # Canonical gate: clean ignore-scripts install (policy proven in BOTH
+      # npm trees), OpenAPI type generation + porcelain drift gate, lint,
+      # format, strict typecheck, unit tests, production build +
+      # committed-dist porcelain drift gate, generated-bundle security scan,
+      # license policy, vulnerability policy.
+      - name: Verify (canonical contract)
+        run: npm run verify
+
+      # The drift gates themselves are regression-tested: tamper classes
+      # A–D (modified byte, committed deletion + untracked regeneration,
+      # rogue dist file, deleted dist asset) must FAIL and clean
+      # regeneration (E) must PASS, in a synthetic repo.
+      - name: Drift-gate tamper harness
+        run: sh scripts/test-drift-gate.sh
+
+      # Isolated clean builds must be byte-identical (full-tree inventory +
+      # SHA-256, every file). PR runs build twice to catch nondeterminism
+      # regressions; qualification evidence dispatches with 5.
+      - name: Determinism (isolated clean builds)
+        run: sh scripts/verify-determinism.sh "${{ inputs.determinism_builds || '2' }}"
+
+  # FE-1B real-binary browser smoke: the committed production dist, embedded
+  # in the real CULVERT Go binary by go:embed, served under the experimental
+  # /app preview with the strict nonce-free CSP, rendered by real Chromium
+  # (frontend/e2e/smoke.spec.ts via frontend/scripts/e2e-smoke.sh — never a
+  # dev server or mock). Runs on the host runner because it needs the Go
+  # toolchain + a browser; the Node toolchain is installed as the exact
+  # pinned release with checksum verification (no mutable action, no
+  # whatever-node-the-runner-has).
+  smoke:
+    name: "Frontend · real-binary browser smoke"
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-go-cache
+
+      - name: Install pinned Node 24.19.0 (checksum-verified)
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -eu
+          curl -fsSLO https://nodejs.org/dist/v24.19.0/node-v24.19.0-linux-x64.tar.xz
+          echo "14b342e71204f811bde6153be8e04b62aef63c236fef92b55f9c83154b409647  node-v24.19.0-linux-x64.tar.xz" | sha256sum -c -
+          sudo mkdir -p /opt/node24
+          sudo tar -xJf node-v24.19.0-linux-x64.tar.xz -C /opt/node24 --strip-components=1
+          echo "/opt/node24/bin" >> "$GITHUB_PATH"
+
+      - name: Toolchain identity
+        run: sh scripts/assert-toolchain.sh
+
+      - name: Install frontend deps (ignore-scripts posture)
+        run: npm ci --no-audit --no-fund
+
+      # Browser revision is locked by the exact-pinned @playwright/test.
+      - name: Install pinned Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Real-binary browser smoke
+        run: sh scripts/e2e-smoke.sh

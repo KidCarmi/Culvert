@@ -2,6 +2,17 @@
 
 Status: Phase 1 deliverable of the GUI redesign program (see `REDESIGN-ROADMAP.md`)
 Date: 2026-07-11
+
+> **2026-08-21 — SUPERSEDED as a factual audit** by
+> `docs/design/FRONTEND-CURRENT-STATE.md` (the SPA has since grown ~1.8× to
+> 21,565 lines / 38 views; the CDN reference in §1 is gone; several §3 defects
+> are fixed). §6's preservation contracts are carried forward — split into
+> still-binding backend/security contracts vs DOM contracts that lapse with the
+> planned replacement — by `FRONTEND-SECURITY-CONTRACT.md` and
+> `FRONTEND-FEATURE-PARITY.md`. The §1 verdict's "framework rewrite is
+> objectively unsafe" judgment is superseded by
+> `docs/adr/ADR-FE-001-frontend-platform.md` (Proposed). Original text
+> preserved below.
 Scope: `static/index.html` (the entire frontend), its serving layer (`ui_static.go`,
 `ui_middleware.go`), and the admin API surface it consumes (`ui_routes_meta.go`).
 

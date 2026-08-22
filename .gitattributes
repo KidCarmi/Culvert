@@ -1,0 +1,7 @@
+# Generated frontend outputs (FE-1A, ADR-FE-001 OQ-1/OQ-3): committed but
+# machine-written; the frontend verify lane regenerates and byte-compares, so
+# hand edits cannot land. Marked generated for review tooling.
+frontend/dist/** linguist-generated=true
+frontend/src/api/types.gen.ts linguist-generated=true
+frontend/package-lock.json linguist-generated=true
+frontend/tools/openapi-gen/package-lock.json linguist-generated=true
