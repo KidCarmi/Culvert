@@ -396,18 +396,46 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 >   history-disabled FRESH appliance; viewports 1440/1024/640(≈200% zoom);
 >   §25 evidence set delivered as artifacts (never committed).
 
-### FE-5 — Policy, security, network features
+### FE-5 — Policy, security, network features — BATCH 2 (approved decomposition)
+
+> **Batch-2 program record (2026-08-22, planning gate accepted).** Batch 1
+> (FE-1A→FE-4) is merged (`main` @ `fdad5254`, delivery `c1d3db57`, closeout in
+> `docs/engineering/FRONTEND-BATCH-1-CLOSEOUT.md` on the retained Batch-1
+> evidence branch `claude/culvert-frontend-modernization-qnyqb6`). Batch 2 is
+> developed on `claude/culvert-frontend-batch2` (granular commits, no squash).
+> The FE-5 domain is decomposed into SEVEN slices:
+>
+> | Slice | Scope | Status |
+> |---|---|---|
+> | **2A** | Policy Read & Explainability: Access Rules read surface, Policy Tester, Where Used (generic read consumer), Traffic → Policy stable-rule-ID deep links, 500-rule scale qualification | this round |
+> | **2A-M** | Monitor residue micro-slice: Traffic retention / purge / export (destructive mutation + retention configuration + Blob/download ownership — deliberately SPLIT out of 2A; no architectural dependency on the Policy read surface) | pending |
+> | **2B** | Policy Write: rule create/edit/delete/bulk, staged reorder + move, draft commit/revert, Require Commit toggle, multi-admin actor warning, shadow warnings, `ifVersion` fencing UX, default-action mutation, dirty-route guard | pending |
+> | **2C** | Authentication Policy (Stage-1 rules + default-auth-outcome T3 ceremony) + Policy Learning (advisory panel, accept-to-draft, reject) | pending |
+> | **2D** | Objects & Taxonomy: URL categories (+hosts, lookup, feed status), SaaS feed settings/overrides/refresh, category groups (+rename), decryption profiles (+rename, cert-enum lockstep), file profiles, rewrite | pending |
+> | **2E** | Scanning / Content Security / Decryption / CDR: blocklist (+feeds/exceptions/mode T3), Content & Scanning (YARA/DPI/exclusions/threat feeds/cache/saturation), decryption exclusions + tunables + health (pulled forward from FE-6 for cohesion with 2D profiles), CDR | pending |
+> | **2F** | Network: PAC (profiles/pools/lifecycle/simulator/analyze/posture/exceptions + server-named DIRECT-bypass T3 ceremony) + Upstream (write-only credentials, direct-fallback banner) | pending |
+>
+> FE-6/FE-7/FE-8 remain outside Batch 2. ADR-FE-001 and ADR-FE-002 remain
+> authoritative; no new ADR. Parity rows are updated only for capabilities a
+> slice actually proves — FE-V16 stays partial until 2B completes the write
+> surface.
 - **Objective**: FE-V16..V26 (policy + draft/commit + staged reorder + tester + authpolicy +
   policylearn + blocklist + security-scan + fileblock + cdr + objects), FE-V31/V32 (upstream,
   PAC incl. governance + T3 bypass ceremony), FE-X06 (where-used).
-- **Dependency**: FE-4. **Size**: L (~10 PR slices; policy split into
-  rulebase/draft/reorder/tester sub-PRs).
+- **Dependency**: FE-4. **Size**: L (slices 2A–2F above).
 - **DoD**: draft multi-admin actor warning, shadow warnings, version fencing, ref-guarded
   deletes, cert-enum lockstep re-expressed from a shared constant.
 - **Browser proof**: policy mutation, failed (version-fenced) mutation, destructive
   confirmation, PAC simulator + bypass ceremony.
 - **Exit gate (evidence)**: parity rows checked; policy table renders 500 rules within the
   interaction budget.
+
+> **Slice 2A implementation record (this branch).** See the parity matrix rows
+> FE-V16 (read surface migrated; write/draft/reorder pending 2B), FE-V06
+> (Policy Tester migrated), FE-X06 (Where Used generic read consumer proven),
+> FE-V02 (Traffic → rule-ID deep link; retention/purge/export residue pending
+> 2A-M). Details are recorded next to each row and in the 2A qualification
+> report.
 
 ### FE-6 — Cluster, identity, certificates, settings, releases, support, MCP, decryption
 - **Objective**: FE-V27..V30, FE-V33, FE-V35, FE-V36 (settings decomposed per IA §5),
