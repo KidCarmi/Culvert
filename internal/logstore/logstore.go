@@ -687,7 +687,7 @@ func (s *Store) QueryPageWithBudget(fromMs, toMs int64, afterTS int64, afterSeq 
 // clampPageQuery normalizes the page-query bounds: an unset upper bound means
 // "newest", the page size is clamped to [1, maxQueryLimit] (default 100), and
 // the raw-scan budget to (0, scanCap] (<=0 ⇒ the production scanCap).
-func clampPageQuery(toMs int64, limit, scanBudget int) (int64, int, int) {
+func clampPageQuery(toMs int64, limit, scanBudget int) (clampedTo int64, clampedLimit, clampedBudget int) {
 	if toMs <= 0 {
 		toMs = math.MaxInt64
 	}
