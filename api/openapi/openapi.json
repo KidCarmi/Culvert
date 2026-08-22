@@ -349,6 +349,14 @@
           "role": {
             "$ref": "#/components/schemas/Role"
           },
+          "ui_tls_fallback": {
+            "description": "True when self-signed TLS setup failed at startup and the admin UI fell back to plain HTTP. Exposed pre-authentication so the login overlay can warn before credentials are submitted.",
+            "type": "boolean"
+          },
+          "ui_tls_fallback_reason": {
+            "description": "The self-sign error, when ui_tls_fallback is true.",
+            "type": "string"
+          },
           "user": {
             "type": "string"
           }
@@ -1865,11 +1873,20 @@
             },
             "nullable": true,
             "type": "array"
+          },
+          "ui_tls_fallback": {
+            "description": "True when self-signed TLS setup failed at startup and the admin UI fell back to plain HTTP.",
+            "type": "boolean"
+          },
+          "ui_tls_fallback_reason": {
+            "description": "The self-sign error, when ui_tls_fallback is true.",
+            "type": "string"
           }
         },
         "required": [
           "base_url",
-          "trust_forwarded_headers"
+          "trust_forwarded_headers",
+          "ui_tls_fallback"
         ],
         "type": "object"
       },
@@ -3590,10 +3607,19 @@
           "needsSetup": {
             "description": "True until an initial admin credential (or explicit open mode) is configured.",
             "type": "boolean"
+          },
+          "ui_tls_fallback": {
+            "description": "True when self-signed TLS setup failed at startup and the admin UI fell back to plain HTTP. Exposed pre-authentication so the setup wizard can warn before the initial admin password is submitted.",
+            "type": "boolean"
+          },
+          "ui_tls_fallback_reason": {
+            "description": "The self-sign error, when ui_tls_fallback is true.",
+            "type": "string"
           }
         },
         "required": [
-          "needsSetup"
+          "needsSetup",
+          "ui_tls_fallback"
         ],
         "type": "object"
       },
@@ -18490,7 +18516,8 @@
             "content": {
               "application/json": {
                 "example": {
-                  "needsSetup": true
+                  "needsSetup": true,
+                  "ui_tls_fallback": false
                 },
                 "schema": {
                   "$ref": "#/components/schemas/SetupStatus"

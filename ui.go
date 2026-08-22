@@ -50,6 +50,20 @@ var (
 	uiCfgLogFormat string
 )
 
+// uiTLSFallbackActive/uiTLSFallbackReason record whether startUI fell back to
+// plain HTTP after a self-signed TLS certificate could not be generated — the
+// admin panel, including login, is then served in cleartext with no other
+// signal of this anywhere in the product (not logs-adjacent: the operator
+// would otherwise only learn this by tailing the process log or noticing the
+// browser shows no padlock). Set once at startup before the admin server
+// starts accepting connections; read-only afterward via
+// GET /api/settings/network. Never set when -ui-no-tls was explicitly
+// requested (an intentional plaintext choice, not a degraded fallback).
+var (
+	uiTLSFallbackActive bool
+	uiTLSFallbackReason string
+)
+
 // newAdminUIServer constructs the admin UI *http.Server with the same mux,
 // middleware chain, and timeouts that startUI uses, but without binding a
 // listener. Extracted so tests can drive the same server against an explicit
@@ -133,6 +147,8 @@ func startUI(port int, certFile, keyFile string, noTLS bool) *http.Server {
 	if !noTLS {
 		tlsCfg, err := selfSignedTLS()
 		if err != nil {
+			uiTLSFallbackActive = true
+			uiTLSFallbackReason = err.Error()
 			logger.Printf("TLS self-sign failed (%v), falling back to HTTP", err)
 		} else {
 			srv.TLSConfig = tlsCfg
