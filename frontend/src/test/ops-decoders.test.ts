@@ -6,7 +6,6 @@
 // (fe4.spec.ts, history-disabled appliance) where the real backend emits it.
 import { describe, expect, it } from "vitest";
 import {
-  decodeDiagnoseResult,
   decodeGovernance,
   decodeOperatorContract,
   decodeStats,
@@ -62,6 +61,7 @@ describe("decodeTrafficPage (cursor contract)", () => {
     logs: [entry],
     next_cursor: "abc",
     has_more: true,
+    scan_limited: false,
     history: true,
     snapshot_at: "2026-08-22T13:00:00Z",
     limit: 100,
@@ -72,12 +72,28 @@ describe("decodeTrafficPage (cursor contract)", () => {
     expect(p.logs).toHaveLength(1);
     expect(p.nextCursor).toBe("abc");
     expect(p.hasMore).toBe(true);
+    expect(p.scanLimited).toBe(false);
     expect(p.history).toBe(true);
+  });
+
+  it("decodes a scan-limited continuation page", () => {
+    const p = decodeTrafficPage({
+      ...page,
+      logs: [],
+      scan_limited: true,
+    });
+    expect(p.logs).toHaveLength(0);
+    expect(p.scanLimited).toBe(true);
+    expect(p.hasMore).toBe(true);
+    expect(p.nextCursor).toBe("abc");
   });
 
   it("carries no total — and requires the truth-telling fields", () => {
     expect(() => decodeTrafficPage(omit(page, "history"))).toThrow(DecodeError);
     expect(() => decodeTrafficPage(omit(page, "has_more"))).toThrow(
+      DecodeError,
+    );
+    expect(() => decodeTrafficPage(omit(page, "scan_limited"))).toThrow(
       DecodeError,
     );
   });
@@ -108,31 +124,6 @@ describe("decodeOperatorContract", () => {
       checks: [{ code: "c", status: "warn", message: "m" }],
     });
     expect(c.checks[0]?.operatorAction).toBe("");
-  });
-});
-
-describe("decodeDiagnoseResult (schema_version fail-closed)", () => {
-  it("renders only primitive fields, sorted", () => {
-    const r = decodeDiagnoseResult({
-      schema_version: 1,
-      ok: true,
-      free_bytes: 5,
-      data_dir: "/data",
-      checks: [{ nested: true }],
-    });
-    expect(r.fields.map((f) => f.key)).toEqual([
-      "data_dir",
-      "free_bytes",
-      "ok",
-    ]);
-    expect(r.fields[2]?.value).toBe("yes");
-  });
-
-  it("rejects an unsupported schema_version", () => {
-    expect(() => decodeDiagnoseResult({ schema_version: 2, ok: true })).toThrow(
-      DecodeError,
-    );
-    expect(() => decodeDiagnoseResult({ ok: true })).toThrow(DecodeError);
   });
 });
 

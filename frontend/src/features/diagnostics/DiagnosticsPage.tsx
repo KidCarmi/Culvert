@@ -1,20 +1,26 @@
-// FE-4 Diagnostics (§13/§14): the /api/diagnostics operator contract is a
-// SNAPSHOT — verdict, generated_at, and per-check {code, status, message,
-// operator_action}, with operator_action rendered first-class on every
-// warn/fail row (the FE-2 DiagnosticsResult vocabulary carries it). Active
-// /api/diagnose/{verb} runs perform probe work and therefore run ONLY on
-// explicit operator action — never automatically, never in the background.
-// Results decode schema_version fail-closed; unknown schema is a controlled
-// error. Viewer reads the snapshot; active runs are operator+ (server
-// enforced; the UI hides the controls below operator).
-import { useState } from "react";
+// FE-4 Diagnostics (§13/§14 + hardening rounds): the /api/diagnostics
+// operator contract is a SNAPSHOT — verdict, generated_at, and per-check
+// {code, status, message, operator_action}, with operator_action rendered
+// first-class on every warn/fail row. Active /api/diagnose/{verb} runs
+// perform probe work and therefore run ONLY on explicit operator action —
+// never automatically, never retried. All NINE backend verbs are exposed
+// (storage/upstream/dns/tls/cluster/etcd/config/support/all — the fixed
+// server registry, all operator+). Results decode through PER-VERB runtime
+// contracts (src/api/diagnose.ts) fail-closed and render through a
+// deliberate presentation model — summary rows, check/proxy/utilization
+// tables, and nested sub-results for `all` — never a raw JSON dump, never
+// HTML. The in-flight run request is OWNED by an AbortController wired to
+// unmount and the FE-3 authentication boundary (§10).
+import { useEffect, useRef, useState } from "react";
 import type { JSX } from "react";
 import { useMutation } from "@tanstack/react-query";
-import { getDiagnostics, runDiagnose, DIAGNOSE_VERBS } from "../../api/ops";
-import type { DiagnoseResult, DiagnoseVerb } from "../../api/ops";
+import { getDiagnostics } from "../../api/ops";
+import { runDiagnose, DIAGNOSE_VERBS } from "../../api/diagnose";
+import type { DiagnoseVerb, DiagnoseView } from "../../api/diagnose";
 import { ApiError } from "../../api/client";
 import { useAuth } from "../../auth/AuthProvider";
 import { hasRole } from "../../auth/rbac";
+import { registerAuthCleanup } from "../../auth/teardown";
 import { PageHeader } from "../../layouts/AppShell";
 import { DiagnosticsResult } from "../../design-system/appliance";
 import {
@@ -24,9 +30,12 @@ import {
   ErrorState,
   KeyValue,
   Skeleton,
+  StatusBadge,
 } from "../../design-system/primitives";
+import { DataTable } from "../../design-system/table";
 import { InputField } from "../../design-system/forms";
 import { SnapshotBar, useSnapshot } from "../../shared/snapshot";
+import { createDiagnoseRunOwner } from "./runOwner";
 import styles from "./diagnostics.module.css";
 
 const statusLabel: Record<"ok" | "warn" | "fail", string> = {
@@ -45,16 +54,76 @@ const VERB_TARGET: Partial<
   tls: { label: "host:port to check", key: "target" },
 };
 
+function DiagnoseResultView({ view }: { view: DiagnoseView }): JSX.Element {
+  return (
+    <div className={styles.runResult}>
+      <KeyValue
+        items={view.summary.map(
+          (kv) =>
+            [
+              kv.label,
+              kv.status !== undefined ? (
+                <StatusBadge key={kv.label} status={kv.status}>
+                  {kv.value}
+                </StatusBadge>
+              ) : (
+                kv.value
+              ),
+            ] as const,
+        )}
+      />
+      {view.tables.map((tbl) => (
+        <div key={tbl.title} className={styles.runTable}>
+          <DataTable
+            caption={tbl.title}
+            columns={tbl.headers.map((h, i) => ({
+              key: h,
+              header: h,
+              render: (r: readonly string[]) => r[i] ?? "",
+            }))}
+            rows={tbl.rows}
+            rowKey={(r) => r.join("|")}
+          />
+        </div>
+      ))}
+      {view.sub.map((s) => (
+        <section key={s.verb} className={styles.subResult}>
+          <h3 className={styles.subTitle}>{s.verb}</h3>
+          <DiagnoseResultView view={s} />
+        </section>
+      ))}
+    </div>
+  );
+}
+
 function ActiveDiagnostics(): JSX.Element {
   const [verb, setVerb] = useState<DiagnoseVerb>("storage");
   const [target, setTarget] = useState("");
-  const run = useMutation<DiagnoseResult, unknown, void>({
+  // One AbortController per active run, owned here (§10): a new run aborts
+  // its predecessor; unmount and the auth boundary abort the active run.
+  const ownerRef = useRef(createDiagnoseRunOwner());
+  useEffect(() => {
+    const owner = ownerRef.current;
+    const unregister = registerAuthCleanup(() => {
+      owner.abort();
+    });
+    return () => {
+      unregister();
+      owner.abort();
+    };
+  }, []);
+  const run = useMutation<DiagnoseView, unknown, void>({
     mutationFn: () => {
+      const owner = ownerRef.current;
+      const signal = owner.begin();
       const spec = VERB_TARGET[verb];
       return runDiagnose(
         verb,
         spec !== undefined ? { [spec.key]: target } : undefined,
-      );
+        signal,
+      ).finally(() => {
+        owner.settle(signal);
+      });
     },
   });
   const spec = VERB_TARGET[verb];
@@ -114,13 +183,7 @@ function ActiveDiagnostics(): JSX.Element {
               : "The diagnostic could not be completed."}
         </Callout>
       )}
-      {run.data !== undefined && (
-        <div className={styles.runResult}>
-          <KeyValue
-            items={run.data.fields.map((f) => [f.key, f.value] as const)}
-          />
-        </div>
-      )}
+      {run.data !== undefined && <DiagnoseResultView view={run.data} />}
     </Card>
   );
 }

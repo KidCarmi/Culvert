@@ -42,14 +42,18 @@ interface OverviewSnapshot {
 }
 
 // ONE snapshot fetch set (§9): the five bounded reads travel together so the
-// page carries a single honest freshness timestamp.
-async function fetchOverview(): Promise<OverviewSnapshot> {
+// page carries a single honest freshness timestamp — and share ONE
+// AbortSignal, so the FE-3 authentication boundary (cancelQueries) aborts
+// every request in the set at the network layer.
+export async function fetchOverview(
+  signal: AbortSignal,
+): Promise<OverviewSnapshot> {
   const [stats, timeseries, health, threats, topRules] = await Promise.all([
-    getStats(),
-    getTimeseries(),
-    getDashboardHealth(),
-    getDashboardThreats(),
-    getTopRules(),
+    getStats(signal),
+    getTimeseries(signal),
+    getDashboardHealth(signal),
+    getDashboardThreats(signal),
+    getTopRules(signal),
   ]);
   return { stats, timeseries, health, threats, topRules };
 }
@@ -157,7 +161,7 @@ export function OverviewPage(): JSX.Element {
                 ]}
               />
             </Card>
-            <Card title="Traffic — last hour">
+            <Card title="Traffic counters — since process start">
               <div className={styles.statRow}>
                 <div className={styles.stat}>
                   <span className={styles.statValue}>{snap.stats.total}</span>
@@ -179,7 +183,7 @@ export function OverviewPage(): JSX.Element {
                 </div>
               </div>
               <LineChart
-                title="Requests per minute (snapshot window)"
+                title="Requests per minute — last 60 minutes"
                 points={snap.timeseries.data}
                 unit="req/min"
               />

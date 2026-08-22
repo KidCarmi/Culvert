@@ -16,6 +16,13 @@ import {
 import { DecodeError } from "./decode";
 import type { Decoder } from "./decode";
 
+// Every FE-4 GET accepts the caller's AbortSignal so the FE-3 §6.4 boundary
+// (QueryClient.cancelQueries) — and any owner teardown — propagates to the
+// network layer. TanStack only aborts fetches whose queryFn CONSUMED the
+// signal, so consuming it here is load-bearing, not optional.
+const sigOpts = (signal?: AbortSignal): { signal?: AbortSignal } =>
+  signal !== undefined ? { signal } : {};
+
 // ── /api/stats ─────────────────────────────────────────────────────────────
 
 export interface Stats {
@@ -59,8 +66,8 @@ export const decodeStats: Decoder<Stats> = (v, path = "$") => {
   };
 };
 
-export function getStats(): Promise<Stats> {
-  return apiRequest("/api/stats", decodeStats);
+export function getStats(signal?: AbortSignal): Promise<Stats> {
+  return apiRequest("/api/stats", decodeStats, sigOpts(signal));
 }
 
 // ── /api/timeseries (60 one-minute buckets) ────────────────────────────────
@@ -81,8 +88,8 @@ export const decodeTimeseries: Decoder<Timeseries> = (v, path = "$") => {
   };
 };
 
-export function getTimeseries(): Promise<Timeseries> {
-  return apiRequest("/api/timeseries", decodeTimeseries);
+export function getTimeseries(signal?: AbortSignal): Promise<Timeseries> {
+  return apiRequest("/api/timeseries", decodeTimeseries, sigOpts(signal));
 }
 
 // ── /api/dashboard/health ──────────────────────────────────────────────────
@@ -108,8 +115,14 @@ export const decodeDashboardHealth: Decoder<DashboardHealth> = (
   };
 };
 
-export function getDashboardHealth(): Promise<DashboardHealth> {
-  return apiRequest("/api/dashboard/health", decodeDashboardHealth);
+export function getDashboardHealth(
+  signal?: AbortSignal,
+): Promise<DashboardHealth> {
+  return apiRequest(
+    "/api/dashboard/health",
+    decodeDashboardHealth,
+    sigOpts(signal),
+  );
 }
 
 // ── /api/dashboard/threats ─────────────────────────────────────────────────
@@ -134,8 +147,14 @@ export const decodeDashboardThreats: Decoder<DashboardThreats> = (
   };
 };
 
-export function getDashboardThreats(): Promise<DashboardThreats> {
-  return apiRequest("/api/dashboard/threats", decodeDashboardThreats);
+export function getDashboardThreats(
+  signal?: AbortSignal,
+): Promise<DashboardThreats> {
+  return apiRequest(
+    "/api/dashboard/threats",
+    decodeDashboardThreats,
+    sigOpts(signal),
+  );
 }
 
 // ── /api/dashboard/top-rules ───────────────────────────────────────────────
@@ -163,8 +182,12 @@ export const decodeTopRules: Decoder<readonly TopRule[]> = (v, path = "$") => {
   );
 };
 
-export function getTopRules(): Promise<readonly TopRule[]> {
-  return apiRequest("/api/dashboard/top-rules", decodeTopRules);
+export function getTopRules(signal?: AbortSignal): Promise<readonly TopRule[]> {
+  return apiRequest(
+    "/api/dashboard/top-rules",
+    decodeTopRules,
+    sigOpts(signal),
+  );
 }
 
 // ── /api/logs (Monitor cursor contract, ADR-FE-002) ────────────────────────
@@ -248,7 +271,13 @@ export const decodeTrafficEntry: Decoder<TrafficEntry> = (v, path = "$") => {
 export interface TrafficPage {
   logs: readonly TrafficEntry[];
   nextCursor: string;
+  /** more results exist (scanLimited=false: a further MATCH is proven;
+   * scanLimited=true: more HISTORY remains to be SEARCHED) */
   hasMore: boolean;
+  /** the server's raw-scan budget stopped this walk before the window was
+   * exhausted; nextCursor continues the bounded search (issued even when
+   * zero rows were returned — forward progress is guaranteed) */
+  scanLimited: boolean;
   history: boolean;
   snapshotAt: string;
   limit: number;
@@ -260,6 +289,7 @@ export const decodeTrafficPage: Decoder<TrafficPage> = (v, path = "$") => {
     logs: field(o, "logs", readArray(decodeTrafficEntry), path),
     nextCursor: field(o, "next_cursor", readString, path),
     hasMore: field(o, "has_more", readBoolean, path),
+    scanLimited: field(o, "scan_limited", readBoolean, path),
     history: field(o, "history", readBoolean, path),
     snapshotAt: field(o, "snapshot_at", readString, path),
     limit: field(o, "limit", readNumber, path),
@@ -363,28 +393,35 @@ export interface AuditPage {
   limit: number;
 }
 
-export function getAudit(q: {
-  offset: number;
-  limit: number;
-  fromMs: number;
-  toMs: number;
-  source: "memory" | "file";
-}): Promise<AuditPage> {
+export function getAudit(
+  q: {
+    offset: number;
+    limit: number;
+    fromMs: number;
+    toMs: number;
+    source: "memory" | "file";
+  },
+  signal?: AbortSignal,
+): Promise<AuditPage> {
   const p = new URLSearchParams();
   p.set("offset", String(q.offset));
   p.set("limit", String(q.limit));
   p.set("from", String(q.fromMs));
   p.set("to", String(q.toMs));
   if (q.source === "file") p.set("source", "file");
-  return apiRequest(`/api/audit?${p.toString()}`, (v, path = "$") => {
-    const o = readRecord(v, path);
-    return {
-      entries: field(o, "entries", readArrayOrNull(decodeAuditRecord), path),
-      total: field(o, "total", readNumber, path),
-      offset: field(o, "offset", readNumber, path),
-      limit: field(o, "limit", readNumber, path),
-    };
-  });
+  return apiRequest(
+    `/api/audit?${p.toString()}`,
+    (v, path = "$") => {
+      const o = readRecord(v, path);
+      return {
+        entries: field(o, "entries", readArrayOrNull(decodeAuditRecord), path),
+        total: field(o, "total", readNumber, path),
+        offset: field(o, "offset", readNumber, path),
+        limit: field(o, "limit", readNumber, path),
+      };
+    },
+    sigOpts(signal),
+  );
 }
 
 // ── /api/diagnostics (operator contract snapshot) ──────────────────────────
@@ -433,67 +470,14 @@ export const decodeOperatorContract: Decoder<OperatorContract> = (
   };
 };
 
-export function getDiagnostics(): Promise<OperatorContract> {
-  return apiRequest("/api/diagnostics", decodeOperatorContract);
-}
-
-// ── /api/diagnose/{verb} (explicit active runs; operator+) ─────────────────
-
-export const DIAGNOSE_VERBS = [
-  "storage",
-  "upstream",
-  "dns",
-  "tls",
-  "cluster",
-  "etcd",
-  "config",
-] as const;
-export type DiagnoseVerb = (typeof DIAGNOSE_VERBS)[number];
-
-/** One active-diagnostic result: schema_version is REQUIRED and must be the
- * supported version; the remaining fields are rendered from validated
- * primitives only — nothing is guessed from unknown shapes. */
-export interface DiagnoseResult {
-  schemaVersion: number;
-  fields: ReadonlyArray<{ key: string; value: string }>;
-}
-
-export const SUPPORTED_DIAGNOSE_SCHEMA = 1;
-
-export const decodeDiagnoseResult: Decoder<DiagnoseResult> = (
-  v,
-  path = "$",
-) => {
-  const o = readRecord(v, path);
-  const schemaVersion = field(o, "schema_version", readNumber, path);
-  if (schemaVersion !== SUPPORTED_DIAGNOSE_SCHEMA) {
-    throw new DecodeError(
-      `${path}.schema_version`,
-      `supported version ${String(SUPPORTED_DIAGNOSE_SCHEMA)}`,
-      schemaVersion,
-    );
-  }
-  const fields: Array<{ key: string; value: string }> = [];
-  for (const [k, val] of Object.entries(o)) {
-    if (k === "schema_version") continue;
-    if (typeof val === "string") fields.push({ key: k, value: val });
-    else if (typeof val === "number")
-      fields.push({ key: k, value: String(val) });
-    else if (typeof val === "boolean")
-      fields.push({ key: k, value: val ? "yes" : "no" });
-    // non-primitive fields are deliberately not rendered generically
-  }
-  fields.sort((a, b) => (a.key < b.key ? -1 : 1));
-  return { schemaVersion, fields };
-};
-
-export function runDiagnose(
-  verb: DiagnoseVerb,
-  body?: unknown,
-): Promise<DiagnoseResult> {
-  const opts: { method: "POST"; body?: unknown } = { method: "POST" };
-  if (body !== undefined) opts.body = body;
-  return apiRequest(`/api/diagnose/${verb}`, decodeDiagnoseResult, opts);
+export function getDiagnostics(
+  signal?: AbortSignal,
+): Promise<OperatorContract> {
+  return apiRequest(
+    "/api/diagnostics",
+    decodeOperatorContract,
+    sigOpts(signal),
+  );
 }
 
 // ── /api/governance/control-plane (admin) ──────────────────────────────────
@@ -572,6 +556,12 @@ export const decodeGovernance: Decoder<GovernanceSnapshot> = (
   };
 };
 
-export function getGovernance(): Promise<GovernanceSnapshot> {
-  return apiRequest("/api/governance/control-plane", decodeGovernance);
+export function getGovernance(
+  signal?: AbortSignal,
+): Promise<GovernanceSnapshot> {
+  return apiRequest(
+    "/api/governance/control-plane",
+    decodeGovernance,
+    sigOpts(signal),
+  );
 }

@@ -5,7 +5,7 @@
 // truthful: "Recent (memory)" is the 500-entry ring; "Persistent file" is
 // the durable JSONL. Manual Refresh; no polling; before/after snapshots are
 // expandable TEXT (never rendered as HTML).
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import type { FormEvent, JSX } from "react";
 import { useSearchParams } from "react-router";
 import { useQuery } from "@tanstack/react-query";
@@ -54,25 +54,36 @@ export function AuditPage(): JSX.Element {
   const [pageIndex, setPageIndex] = useState(0);
   const [expanded, setExpanded] = useState<number | null>(null);
 
-  const win = resolveWindow(
-    applied.preset,
-    applied.customFrom,
-    applied.customTo,
-    Date.now(),
+  // Frozen per applied query (same contract as TrafficPage): page N of a
+  // window must be page N of the SAME window, not of a newer "now".
+  const win = useMemo(
+    () =>
+      resolveWindow(
+        applied.preset,
+        applied.customFrom,
+        applied.customTo,
+        Date.now(),
+      ),
+    [applied],
   );
   const windowError = typeof win === "string" ? win : "";
 
   const query = useQuery({
     queryKey: ["ops", "audit", applied, pageIndex],
-    queryFn: () => {
+    // Consumes TanStack's AbortSignal so the FE-3 auth boundary
+    // (cancelQueries) aborts the underlying request (§9).
+    queryFn: ({ signal }) => {
       if (typeof win === "string") throw new Error(win);
-      return getAudit({
-        offset: pageIndex * PAGE_SIZE,
-        limit: PAGE_SIZE,
-        fromMs: win.fromSec * 1000,
-        toMs: win.toSec * 1000 + 999,
-        source: applied.source,
-      });
+      return getAudit(
+        {
+          offset: pageIndex * PAGE_SIZE,
+          limit: PAGE_SIZE,
+          fromMs: win.fromSec * 1000,
+          toMs: win.toSec * 1000 + 999,
+          source: applied.source,
+        },
+        signal,
+      );
     },
     enabled: windowError === "",
     staleTime: Infinity,

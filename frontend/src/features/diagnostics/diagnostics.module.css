@@ -49,3 +49,22 @@
   border-top: 1px solid var(--color-border-subtle);
   padding-top: var(--sp-3);
 }
+
+.runTable {
+  margin-top: var(--sp-3);
+}
+
+.subResult {
+  margin-top: var(--sp-4);
+  border-top: 1px solid var(--color-border-subtle);
+  padding-top: var(--sp-3);
+}
+
+.subTitle {
+  margin: 0 0 var(--sp-2);
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--color-text-muted);
+}

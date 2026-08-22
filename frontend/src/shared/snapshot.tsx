@@ -14,11 +14,15 @@ import styles from "./snapshot.module.css";
 
 export function useSnapshot<T>(
   key: readonly unknown[],
-  fetcher: () => Promise<T>,
+  fetcher: (signal: AbortSignal) => Promise<T>,
 ): UseQueryResult<T> {
   return useQuery({
+    // The queryFn CONSUMES TanStack's AbortSignal and every snapshot fetcher
+    // passes it to the network layer, so the FE-3 §6.4 authentication
+    // boundary (QueryClient.cancelQueries) aborts the underlying fetches —
+    // cancellation that reaches the wire, not just the cache.
     queryKey: key,
-    queryFn: fetcher,
+    queryFn: ({ signal }) => fetcher(signal),
     // Snapshots never refetch on their own; Refresh is the operator's action.
     staleTime: Infinity,
     retry: false,

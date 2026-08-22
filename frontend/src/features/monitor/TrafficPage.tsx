@@ -6,7 +6,7 @@
 // in the URL for bookmarking; the opaque cursor stays in memory — a reload
 // starts at page 1 (documented choice, §22). Full URIs are shown only in row
 // detail and never placed in persistent browser storage.
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import type { FormEvent, JSX } from "react";
 import { useSearchParams } from "react-router";
 import { useQuery } from "@tanstack/react-query";
@@ -136,11 +136,20 @@ export function TrafficPage(): JSX.Element {
   const [memoryFallback, setMemoryFallback] = useState(false);
   const cursor = cursors.at(-1) ?? "";
 
-  const win = resolveWindow(
-    applied.preset,
-    applied.customFrom,
-    applied.customTo,
-    Date.now(),
+  // The window is resolved ONCE per applied query (Apply/Refresh bump
+  // `epoch`) and FROZEN across renders — pagination renders must not
+  // re-resolve "now": the cursor is fingerprint-bound to the exact from/to
+  // it was minted under, and a per-render drifting window would 400 every
+  // continuation (and make "page 2" of a moving window incoherent).
+  const win = useMemo(
+    () =>
+      resolveWindow(
+        applied.preset,
+        applied.customFrom,
+        applied.customTo,
+        Date.now(),
+      ),
+    [applied],
   );
   const windowError = typeof win === "string" ? win : "";
 
@@ -386,21 +395,42 @@ export function TrafficPage(): JSX.Element {
 
       {page !== undefined && page.history && (
         <>
-          {page.logs.length === 0 ? (
+          {page.logs.length === 0 && !page.hasMore ? (
+            // TRUE terminal: the server exhausted the requested window.
             <EmptyState title="No matching requests">
               Nothing in retained history matches this filter and time range.
             </EmptyState>
           ) : (
             <>
-              <TrafficTable
-                rows={page.logs}
-                expanded={expanded}
-                onToggle={setExpanded}
-              />
+              {page.logs.length === 0 ? (
+                // Scan-limited empty segment (§3): the bounded search found
+                // no match IN THIS SEGMENT but has not exhausted the window
+                // — never rendered as a terminal empty result. Continuation
+                // stays an explicit, bounded operator action (no
+                // auto-chaining of scan segments).
+                <Callout
+                  variant="info"
+                  title="No matches in this scanned segment"
+                  role="status"
+                >
+                  More retained history remains to search — this query scanned a
+                  bounded segment of history without finding a match in it. Use
+                  “Continue search” to search the next segment.
+                </Callout>
+              ) : (
+                <TrafficTable
+                  rows={page.logs}
+                  expanded={expanded}
+                  onToggle={setExpanded}
+                />
+              )}
               <div className={styles.pager}>
                 <span className={styles.pagerInfo}>
-                  {String(page.logs.length)} results
-                  {page.hasMore ? " — more results available" : ""}
+                  {page.scanLimited && page.hasMore
+                    ? `${String(page.logs.length)} results in this scan segment — more retained history remains to search`
+                    : `${String(page.logs.length)} results${
+                        page.hasMore ? " — more results available" : ""
+                      }`}
                   {cursors.length > 0
                     ? ` (page ${String(cursors.length + 1)})`
                     : ""}
@@ -425,7 +455,9 @@ export function TrafficPage(): JSX.Element {
                     setExpanded(null);
                   }}
                 >
-                  Next
+                  {page.scanLimited && page.hasMore
+                    ? "Continue search"
+                    : "Next"}
                 </Button>
               </div>
             </>
