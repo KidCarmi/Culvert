@@ -108,7 +108,7 @@ func scrubForwardedHeaders(r *http.Request) {
 	if r.Trailer != nil {
 		scrubTrailerKeys(r.Trailer)
 		if r.Body != nil && r.Body != http.NoBody {
-			r.Body = &trailerRescrubBody{ReadCloser: r.Body, trailer: r.Trailer}
+			r.Body = &trailerRescrubBody{body: r.Body, trailer: r.Trailer}
 		}
 	}
 }
@@ -124,18 +124,31 @@ func scrubTrailerKeys(t http.Header) {
 // trailerRescrubBody re-applies the trailer scrub when the request body is
 // fully read (see scrubForwardedHeaders — the server merges received trailer
 // values into r.Trailer at body EOF, which would undo an early-only scrub).
+//
+// The rescrub runs ONLY from Read, and every outbound path writes the body
+// with io.Copy, which prefers src.(io.WriterTo) over Read. Any copy fast path
+// the wrapper exposes would therefore drain the body to EOF without this Read
+// running once, leaving the merged trailer map — with the client's smuggled
+// identity keys — to reach the upstream writer. Embedding io.ReadCloser
+// promotes only that interface's own method set (Read, Close), so it would
+// not expose one today; the wrapped body is a NAMED FIELD so that this stays
+// true structurally rather than by that detail, and so a later switch to a
+// concrete embedded body type cannot silently open the bypass. Pinned by
+// TestIdentityIngress_TrailerRescrubBodyExposesNoBypassInterface.
 type trailerRescrubBody struct {
-	io.ReadCloser
+	body    io.ReadCloser
 	trailer http.Header
 }
 
 func (b *trailerRescrubBody) Read(p []byte) (int, error) {
-	n, err := b.ReadCloser.Read(p)
+	n, err := b.body.Read(p)
 	if err != nil {
 		scrubTrailerKeys(b.trailer)
 	}
 	return n, err
 }
+
+func (b *trailerRescrubBody) Close() error { return b.body.Close() }
 
 // Canonical header names, hoisted so the scrub does not re-derive them per
 // request (they are also the exact map keys used for the direct slice read).

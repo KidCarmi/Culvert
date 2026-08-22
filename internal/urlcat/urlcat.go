@@ -65,9 +65,18 @@ type Store struct {
 	hostIndex      map[string]patternRef
 	adminHostIndex map[string]patternRef
 	path           string
-	fp             atomic.Value // string: cached semantic ContentFingerprint (recomputed under mu on every semantic change)
 
-	// rev counts semantic mutations (every path that recomputes the
+	// fp is the REVISION-KEYED memo of the semantic ContentFingerprint. It is
+	// filled lazily by the first reader after a mutation, never by the writer
+	// (see invalidateFingerprintLocked for why), and a cached entry is valid
+	// exactly while its rev still equals s.rev.
+	fp atomic.Pointer[fingerprintCache]
+	// fpMu single-flights the O(taxonomy) computation so a burst of concurrent
+	// readers after a mutation pays for ONE hash, not one per goroutine. Lock
+	// order is fpMu → s.mu (read); no writer ever takes fpMu.
+	fpMu sync.Mutex
+
+	// rev counts semantic mutations (every path that changes the
 	// fingerprint). PROCESS-LOCAL change signal for memo/fence keys ONLY —
 	// never an identity (the QB-2 lesson: identities must be content-derived
 	// and restart-stable; this counter exists precisely because the content
@@ -144,23 +153,66 @@ const fingerprintDomain = "culvert-urlcat-content-fp-v3"
 // is length-prefixed under fingerprintDomain, so field boundaries are
 // unambiguous.
 //
-// The value is cached; reads are one atomic load. Before the first
-// load/mutation (zero-value store) it is computed on demand.
+// The value is memoized on the semantic-mutation revision: in steady state a
+// read is two atomic loads, and the hash is recomputed at most once per
+// mutation BATCH by the first reader that needs it (single-flighted through
+// fpMu). Computation happens under the READ lock, so it never stalls the
+// request path's category lookups; a zero-value store (pre-Load window)
+// answers on demand and caches at revision 0.
+//
+// Freshness is exact, not best-effort: every semantic mutation advances s.rev
+// inside the writer's critical section, so a reader that can observe new
+// content necessarily observes the advanced revision, misses the memo, and
+// recomputes. A cached entry can therefore never describe superseded content
+// (s.rev is monotonic, so a revision names exactly one content state). That
+// is load-bearing beyond performance — the policy-learning category epoch
+// pins this value, and a fingerprint that failed to move after a taxonomy
+// edit would leave recommendations reported FRESH against a taxonomy their
+// evidence was never observed under.
 func (s *Store) ContentFingerprint() string {
-	if v, ok := s.fp.Load().(string); ok && v != "" {
-		return v
+	if c := s.fp.Load(); c != nil && c.rev == s.rev.Load() {
+		return c.fp
 	}
+	s.fpMu.Lock()
+	defer s.fpMu.Unlock()
+	// Re-check: a concurrent reader may have published while we queued.
+	if c := s.fp.Load(); c != nil && c.rev == s.rev.Load() {
+		return c.fp
+	}
+	// Read rev and entries under the SAME read lock: no writer can be inside
+	// its critical section, so the pair is consistent and the published entry
+	// is exactly the content of that revision.
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return computeFingerprint(s.entries)
+	rev := s.rev.Load()
+	fp := computeFingerprint(s.entries)
+	s.mu.RUnlock()
+	s.fp.Store(&fingerprintCache{rev: rev, fp: fp})
+	return fp
 }
 
-// recomputeFingerprintLocked refreshes the cached fingerprint. Caller must
-// hold s.mu (write) — every semantic mutation path calls this before
-// unlocking, so readers never observe a stale identity for new content.
-func (s *Store) recomputeFingerprintLocked() {
-	s.fp.Store(computeFingerprint(s.entries))
-	s.rev.Add(1) // under s.mu: content and change signal publish together
+// fingerprintCache is one memoized (revision, fingerprint) pair.
+type fingerprintCache struct {
+	rev uint64
+	fp  string
+}
+
+// invalidateFingerprintLocked advances the semantic-mutation revision, which
+// both publishes the change signal and invalidates the fingerprint memo.
+// Caller must hold s.mu (write) — the unlock that publishes the new content
+// also publishes the advanced revision, so value and change signal are never
+// out of step.
+//
+// It deliberately does NOT compute the hash. computeFingerprint is
+// O(all host patterns) with per-entry sorting and allocation, and AddHost —
+// which the SaaS feed merge calls ONCE PER MERGED HOST (saas_feed.go) — runs
+// this inside the write lock every category lookup on the request path
+// contends on. Hashing here reintroduced exactly the O(hosts × patterns)
+// write-lock stall that addHostToIndexes exists to avoid (measured 17x on the
+// shipped default taxonomy and 133x at 50k patterns), and it did so
+// unconditionally — including in the default posture, where Policy Learning
+// is disabled and nothing ever reads the fingerprint at all.
+func (s *Store) invalidateFingerprintLocked() {
+	s.rev.Add(1)
 }
 
 // computeFingerprint derives the canonical content hash (see
@@ -225,7 +277,7 @@ func New(entries []*Entry) *Store {
 }
 
 // rebuildIndex reconstructs every derived index from s.entries and
-// refreshes the cached content fingerprint.
+// invalidates the cached content fingerprint.
 // Caller must hold s.mu (write or be the sole owner).
 //
 // It is the maintenance path for every mutation EXCEPT a single-host append:
@@ -240,7 +292,7 @@ func New(entries []*Entry) *Store {
 // the SaaS feed sync calls it once per merged host, and a wholesale rebuild
 // there would stall the request path once per host (see that function).
 func (s *Store) rebuildIndex() {
-	s.recomputeFingerprintLocked()
+	s.invalidateFingerprintLocked()
 	idx := make(map[string]map[string]bool, len(s.entries))
 	admin := make(map[string]map[string]bool)
 	hostIdx := make(map[string]patternRef)
@@ -477,9 +529,10 @@ func (s *Store) AddHost(category, host string) error {
 		}
 		e.Hosts = append(e.Hosts, host)
 		s.addHostToIndexes(ei, e, key, host)
-		// Incremental index patch above; the semantic identity still moves —
-		// refresh the fingerprint + revision (same cost this path always paid).
-		s.recomputeFingerprintLocked()
+		// Incremental index patch above; the semantic identity still moves, so
+		// invalidate the fingerprint memo. O(1) by contract — see
+		// invalidateFingerprintLocked and addHostToIndexes.
+		s.invalidateFingerprintLocked()
 		s.mu.Unlock()
 		s.Save()
 		return nil

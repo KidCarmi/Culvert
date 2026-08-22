@@ -238,3 +238,49 @@ func TestIdentityIngress_TrailerScrubbed(t *testing.T) {
 		}
 	}
 }
+
+// TestIdentityIngress_TrailerRescrubBodyExposesNoBypassInterface pins the
+// structural precondition of the late-trailer rescrub above. The rescrub runs
+// ONLY from trailerRescrubBody.Read, and every outbound path writes the body
+// with io.Copy, which prefers src.(io.WriterTo) — and, through a bufio-backed
+// destination, dst.(io.ReaderFrom) — over Read. A wrapper exposing such a
+// method would be drained to EOF without Read running once: the merged
+// trailer map would never be re-scrubbed and a client could smuggle
+// X-User-Identity upstream as a late trailer. The wrapper must therefore
+// expose Read/Close and nothing else, whatever the body it wraps implements.
+func TestIdentityIngress_TrailerRescrubBodyExposesNoBypassInterface(t *testing.T) {
+	// A body that implements every copy fast path io.Copy consults. If the
+	// wrapper promoted them, the assertions below would succeed.
+	var w any = &trailerRescrubBody{body: &copyFastPathBody{}, trailer: http.Header{}}
+	if _, ok := w.(io.WriterTo); ok {
+		t.Error("trailerRescrubBody exposes io.WriterTo — io.Copy would bypass Read and never re-scrub the trailers")
+	}
+	if _, ok := w.(io.ReaderFrom); ok {
+		t.Error("trailerRescrubBody exposes io.ReaderFrom — a copy fast path would bypass Read")
+	}
+	if _, ok := w.(io.Seeker); ok {
+		t.Error("trailerRescrubBody exposes io.Seeker — the body must not be rewindable past the rescrub")
+	}
+	// The two methods it MUST expose still work, and Read still re-scrubs.
+	tr := http.Header{"X-User-Identity": []string{"mallory@evil.example"}}
+	b := &trailerRescrubBody{body: io.NopCloser(strings.NewReader("")), trailer: tr}
+	if _, err := b.Read(make([]byte, 1)); err == nil {
+		t.Fatal("expected EOF from an empty body")
+	}
+	if got := tr.Get("X-User-Identity"); got != "" {
+		t.Errorf("Read at EOF did not re-scrub the trailer: %q", got)
+	}
+	if err := b.Close(); err != nil {
+		t.Errorf("Close: %v", err)
+	}
+}
+
+// copyFastPathBody implements the optional interfaces io.Copy prefers, so the
+// promotion check above is meaningful rather than vacuous.
+type copyFastPathBody struct{}
+
+func (*copyFastPathBody) Read([]byte) (int, error)          { return 0, io.EOF }
+func (*copyFastPathBody) Close() error                      { return nil }
+func (*copyFastPathBody) WriteTo(io.Writer) (int64, error)  { return 0, nil }
+func (*copyFastPathBody) ReadFrom(io.Reader) (int64, error) { return 0, nil }
+func (*copyFastPathBody) Seek(int64, int) (int64, error)    { return 0, nil }
