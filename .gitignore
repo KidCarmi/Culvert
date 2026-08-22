@@ -69,3 +69,4 @@ edge-case-lab/reports/mutation-raw.jsonl
 frontend/node_modules/
 frontend/tools/openapi-gen/node_modules/
 frontend/test-results/
+frontend/e2e/.state/

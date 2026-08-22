@@ -82,6 +82,9 @@ test("shell keyboard navigation: skip link first, nav reachable", async ({
   page,
 }) => {
   await page.goto("/app/");
+  // FE-3: wait for the authenticated shell (past the boot phase) before
+  // exercising the tab order.
+  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
   await page.keyboard.press("Tab");
   await expect(
     page.getByRole("link", { name: "Skip to content" }),
