@@ -6,6 +6,7 @@ import type {
   InputHTMLAttributes,
   JSX,
   ReactNode,
+  Ref,
   SelectHTMLAttributes,
   TextareaHTMLAttributes,
 } from "react";
@@ -68,13 +69,17 @@ function Field({
 }
 
 type InputProps = FieldChrome &
-  Omit<InputHTMLAttributes<HTMLInputElement>, "id">;
+  Omit<InputHTMLAttributes<HTMLInputElement>, "id"> & {
+    /** focus-management seam (FE-3): a ref to the underlying input */
+    inputRef?: Ref<HTMLInputElement>;
+  };
 
 export function InputField({
   label,
   required,
   help,
   error,
+  inputRef,
   ...rest
 }: InputProps): JSX.Element {
   const chrome: FieldChrome = { label };
@@ -86,6 +91,7 @@ export function InputField({
       {({ id, describedBy, invalid }) => (
         <input
           id={id}
+          ref={inputRef}
           className={styles.input}
           aria-describedby={describedBy}
           aria-invalid={invalid || undefined}
