@@ -9867,7 +9867,19 @@ paths:
       operationId: getLogs
       tags: [dashboard]
       summary: Request logs
-      description: Request logs.
+      description: >-
+        Request logs. source=memory (default) reads the in-memory ring;
+        source=file the persistent JSONL; source=store the Badger-backed
+        history. In store mode a `cursor` parameter (present, even empty =
+        first page) selects the ADR-FE-002 keyset-pagination contract:
+        newest-first, opaque stateless cursor bound to the query's
+        time-window + filter fingerprint, response
+        {logs, next_cursor, has_more, history, snapshot_at, limit} with NO
+        exact total (rendering pagination never scans matching history past
+        the page). Requests without `cursor` keep the legacy
+        offset/limit/total behavior unchanged. A malformed cursor, a cursor
+        from a different query, or a cursor outside the requested window is
+        a controlled 400.
       security:
         - sessionCookie: []
         - basicAuth: []
@@ -9894,12 +9906,53 @@ paths:
           in: query
           required: false
           schema: { type: string }
+        - name: cursor
+          in: query
+          required: false
+          description: >-
+            Opaque keyset cursor (store mode only; present-but-empty requests
+            the first page). Bounded decode; never a raw datastore key.
+          schema: { type: string, maxLength: 256 }
+        - name: from
+          in: query
+          required: false
+          schema: { type: string }
+        - name: to
+          in: query
+          required: false
+          schema: { type: string }
+        - name: filter
+          in: query
+          required: false
+          schema: { type: string }
+        - name: status
+          in: query
+          required: false
+          schema: { type: string }
+        - name: level
+          in: query
+          required: false
+          schema: { type: string }
+        - name: method
+          in: query
+          required: false
+          schema: { type: string }
+        - name: identity
+          in: query
+          required: false
+          schema: { type: string }
       responses:
         '200':
           description: Request logs.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/GenericRead' }
+        '400':
+          description: >-
+            Invalid from/to, malformed cursor, or cursor presented with a
+            different query. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
         '403': { $ref: '#/components/responses/PlainForbidden' }
 
   /api/support/bundles/{id}:

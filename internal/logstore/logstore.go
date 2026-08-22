@@ -558,6 +558,115 @@ func (s *Store) Query(fromMs, toMs int64, offset, limit int, filter func(*Entry)
 	return out, total, err
 }
 
+// PageResult is one keyset page (ADR-FE-002 Monitor query contract).
+type PageResult struct {
+	Entries []Entry
+	// NextTS/NextSeq name the LAST entry returned; a follow-up QueryPage
+	// passing them resumes strictly AFTER it (exclusive) in newest-first
+	// order. Meaningful only when len(Entries) > 0.
+	NextTS  int64
+	NextSeq uint32
+	// HasMore reports whether at least one more matching entry exists past
+	// this page (or the scan-cap backstop stopped the walk early).
+	HasMore bool
+	// Scanned counts raw entries visited (matched or not) — the
+	// deterministic cost seam the Monitor scale gate asserts on: page cost
+	// is bounded by the entries visited to fill ONE page, never by how many
+	// pages precede it.
+	Scanned int
+}
+
+// QueryPage is keyset (cursor) pagination newest-first within [fromMs, toMs],
+// applying filter. Unlike Query it computes NO exact total and never scans
+// past the page (plus one look-ahead match for HasMore), so the cost of page
+// N does not grow with page depth. afterTS/afterSeq zero ⇒ first page;
+// otherwise they name the last-returned entry and iteration resumes strictly
+// after it. The (timestamp, seq) key pair is a total order, so paging is
+// stable under concurrent appends: new entries get NEWER keys and can never
+// duplicate or displace entries below an existing cursor.
+func (s *Store) QueryPage(fromMs, toMs int64, afterTS int64, afterSeq uint32, limit int, filter func(*Entry) bool) (PageResult, error) {
+	var page PageResult
+	if s == nil {
+		return page, nil
+	}
+	s.closeMu.RLock()
+	defer s.closeMu.RUnlock()
+	if s.closed {
+		return page, nil
+	}
+	if toMs <= 0 {
+		toMs = math.MaxInt64
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > maxQueryLimit {
+		limit = maxQueryLimit
+	}
+	page.Entries = make([]Entry, 0, queryAllocHint)
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Reverse = true
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		seek := storeKey(toMs, math.MaxUint32)
+		cursored := afterTS != 0 || afterSeq != 0
+		if cursored {
+			seek = storeKey(afterTS, afterSeq)
+		}
+		it.Seek(seek)
+		// Reverse Seek positions at the largest key <= seek: when resuming
+		// from a cursor that exact entry was already returned — skip it.
+		if cursored && it.Valid() && storeKeyEqual(it.Item().Key(), afterTS, afterSeq) {
+			it.Next()
+		}
+		for ; it.Valid(); it.Next() {
+			item := it.Item()
+			if storeKeyTS(item.Key()) < fromMs {
+				return nil // window exhausted — no more matches
+			}
+			page.Scanned++
+			if page.Scanned > scanCap {
+				// Backstop hit: there may be more, but this walk is done.
+				page.HasMore = true
+				return nil
+			}
+			var e Entry
+			if err := item.Value(func(v []byte) error { return json.Unmarshal(v, &e) }); err != nil {
+				continue
+			}
+			if filter != nil && !filter(&e) {
+				continue
+			}
+			if len(page.Entries) >= limit {
+				// One matching entry beyond the page ⇒ has_more, stop.
+				page.HasMore = true
+				return nil
+			}
+			page.Entries = append(page.Entries, e)
+			k := item.Key()
+			page.NextTS = storeKeyTS(k)
+			page.NextSeq = storeKeySeq(k)
+		}
+		return nil
+	})
+	return page, err
+}
+
+// storeKeyEqual reports whether k encodes exactly (tsMs, seq).
+func storeKeyEqual(k []byte, tsMs int64, seq uint32) bool {
+	return len(k) >= keyLen && storeKeyTS(k) == tsMs && storeKeySeq(k) == seq
+}
+
+// storeKeySeq extracts the 4-byte sequence disambiguator from a store key.
+func storeKeySeq(k []byte) uint32 {
+	if len(k) < keyLen {
+		return 0
+	}
+	return binary.BigEndian.Uint32(k[8:12])
+}
+
 // Stats reports current usage for the admin retention panel.
 type Stats struct {
 	Bytes    int64 `json:"bytes"`              // tracked logical size (same counter as the size cap)

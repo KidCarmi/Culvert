@@ -11602,7 +11602,7 @@
     },
     "/api/logs": {
       "get": {
-        "description": "Request logs.",
+        "description": "Request logs. source=memory (default) reads the in-memory ring; source=file the persistent JSONL; source=store the Badger-backed history. In store mode a `cursor` parameter (present, even empty = first page) selects the ADR-FE-002 keyset-pagination contract: newest-first, opaque stateless cursor bound to the query's time-window + filter fingerprint, response {logs, next_cursor, has_more, history, snapshot_at, limit} with NO exact total (rendering pagination never scans matching history past the page). Requests without `cursor` keep the legacy offset/limit/total behavior unchanged. A malformed cursor, a cursor from a different query, or a cursor outside the requested window is a controlled 400.",
         "operationId": "getLogs",
         "parameters": [
           {
@@ -11636,6 +11636,72 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "Opaque keyset cursor (store mode only; present-but-empty requests the first page). Bounded decode; never a raw datastore key.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "maxLength": 256,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "filter",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "level",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "method",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "identity",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -11648,6 +11714,16 @@
               }
             },
             "description": "Request logs."
+          },
+          "400": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Invalid from/to, malformed cursor, or cursor presented with a different query. Body is plain text."
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
