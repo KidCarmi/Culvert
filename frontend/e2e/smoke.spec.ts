@@ -26,31 +26,32 @@ test("new UI renders under strict CSP with no console errors or external request
   page.on("pageerror", (err) => pageErrors.push(String(err)));
   page.on("request", (req) => requestURLs.push(req.url()));
 
+  await page.emulateMedia({ colorScheme: "dark" }); // deterministic system theme
   const resp = await page.goto("/app/");
   expect(resp?.status()).toBe(200);
   expect(resp?.headers()["content-security-policy"]).toBe(strictCSP);
   expect(resp?.headers()["cache-control"]).toBe("no-store");
 
-  // Shell renders (JS executed): the heading is rendered by React, not markup.
-  await expect(page.getByRole("heading", { name: "CULVERT" })).toBeVisible();
-  await expect(page.getByText("Frontend Platform Foundation")).toBeVisible();
+  // Shell renders (JS executed): the app shell + overview page are React-drawn.
+  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(page.getByText("Secure Web Gateway")).toBeVisible();
 
-  // CSS loaded: app.css paints the dark background.
+  // CSS loaded: the token canvas paints the dark background.
   const bg = await page.evaluate(
     () => getComputedStyle(document.body).backgroundColor,
   );
-  expect(bg).toBe("rgb(13, 17, 23)");
+  expect(bg).toBe("rgb(11, 15, 26)");
 
   // Reload succeeds.
   await page.reload();
-  await expect(page.getByRole("heading", { name: "CULVERT" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
 
-  // Direct deep-link navigation + reload succeed (SPA fallback).
-  const deep = await page.goto("/app/policy/rules/42");
+  // Direct deep-link navigation + reload succeed (SPA fallback → router).
+  const deep = await page.goto("/app/no/such/route");
   expect(deep?.status()).toBe(200);
-  await expect(page.getByRole("heading", { name: "CULVERT" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Not found" })).toBeVisible();
   await page.reload();
-  await expect(page.getByRole("heading", { name: "CULVERT" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Not found" })).toBeVisible();
 
   // No CSP violations / console errors / page errors.
   expect(consoleErrors).toEqual([]);
