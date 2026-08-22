@@ -177,8 +177,15 @@ export function HistoryPage(): JSX.Element {
   };
 
   const refreshToResolve = (): void => {
+    // Uncertainty resolves ONLY on a fresh successful GET. `res.data` alone
+    // is NOT proof: a failed refetch deliberately keeps the previous snapshot
+    // in the cache (SnapshotBar's stale truth), and a cancelled refetch
+    // reverts to the pre-refetch success state — so require the refetch to
+    // have SUCCEEDED and the success stamp to have ADVANCED past the one we
+    // started from.
+    const before = q.dataUpdatedAt;
     void q.refetch().then((res) => {
-      if (res.data !== undefined) setUnknown(null); // fresh server truth
+      if (res.isSuccess && res.dataUpdatedAt > before) setUnknown(null);
     });
   };
 

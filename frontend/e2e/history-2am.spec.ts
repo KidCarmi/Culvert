@@ -413,11 +413,38 @@ test("unknown Save outcome: prior snapshot kept, unconfirmed declared, blocked u
     page.getByRole("button", { name: "Purge retained history…" }),
   ).toBeDisabled();
 
+  // A FAILED resolving refresh must NOT clear the latch: fail the retention
+  // GET only now — after the unknown state exists, never the initial load.
+  await page.unrouteAll();
+  await page.route("**/api/logs/retention", async (route) => {
+    if (route.request().method() === "GET") {
+      await route.abort();
+      return;
+    }
+    await route.continue();
+  });
+  await page.getByRole("button", { name: "Refresh current state" }).click();
+  await expect(
+    page.getByText("Refresh failed — showing previous snapshot"),
+  ).toBeVisible();
+  await expect(page.getByText("Save outcome unconfirmed")).toBeVisible();
+  await expect(page.getByText("Disabled", { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Edit history settings" }),
+  ).toBeDisabled();
+  await expect(
+    page.getByRole("button", { name: "Purge retained history…" }),
+  ).toBeDisabled();
+
+  // Only a fresh SUCCESSFUL GET resolves.
   await page.unrouteAll();
   await page.getByRole("button", { name: "Refresh current state" }).click();
   await expect(page.getByText("Save outcome unconfirmed")).toBeHidden();
   await expect(
     page.getByRole("button", { name: "Edit history settings" }),
+  ).toBeEnabled();
+  await expect(
+    page.getByRole("button", { name: "Purge retained history…" }),
   ).toBeEnabled();
   assertClean(w);
 });
@@ -453,9 +480,31 @@ test("unknown Purge outcome: dialog closes into the unconfirmed state with the r
     page.getByRole("button", { name: "Purge retained history…" }),
   ).toBeDisabled();
 
+  // A FAILED resolving refresh keeps the unconfirmed declaration, fabricates
+  // no success acknowledgement, and keeps Purge blocked.
+  await page.route("**/api/logs/retention", async (route) => {
+    if (route.request().method() === "GET") {
+      await route.abort();
+      return;
+    }
+    await route.continue();
+  });
+  await page.getByRole("button", { name: "Refresh current state" }).click();
+  await expect(
+    page.getByText("Refresh failed — showing previous snapshot"),
+  ).toBeVisible();
+  await expect(page.getByText("Purge outcome unconfirmed")).toBeVisible();
+  await expect(page.getByText("Retained history purged")).toBeHidden();
+  await expect(
+    page.getByRole("button", { name: "Purge retained history…" }),
+  ).toBeDisabled();
+
   await page.unrouteAll();
   await page.getByRole("button", { name: "Refresh current state" }).click();
   await expect(page.getByText("Purge outcome unconfirmed")).toBeHidden();
+  await expect(
+    page.getByRole("button", { name: "Purge retained history…" }),
+  ).toBeEnabled();
   assertClean(w);
 });
 

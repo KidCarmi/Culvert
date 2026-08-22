@@ -2,7 +2,11 @@
 // Viewer mounts NO mutation controls (not disabled fakes — absent); an
 // admin Save whose outcome the client never observed (network loss) keeps
 // the prior snapshot, declares the outcome unconfirmed, blocks further
-// mutations, and resolves ONLY via a fresh successful GET.
+// mutations, and resolves ONLY via a fresh successful GET. Critically, a
+// FAILED refresh must NOT resolve the latch: the query deliberately keeps
+// the previous snapshot in cache on a failed refetch, so cached data is
+// never proof of server confirmation — only a refetch that actually
+// SUCCEEDED (fresh dataUpdatedAt) clears mutation uncertainty.
 import { StrictMode, act } from "react";
 import { createRoot } from "react-dom/client";
 import type { Root } from "react-dom/client";
@@ -48,12 +52,35 @@ const retentionJSON = {
   },
 };
 
+// A second, distinguishable server state (S2) so resolution tests prove
+// FRESH server adoption rather than a re-render of cached S1.
+const retentionJSONv2 = {
+  ...retentionJSON,
+  retentionDays: 14,
+  usage: { ...retentionJSON.usage, count: 7 },
+};
+
 let container: HTMLDivElement;
 let root: Root;
 
 beforeEach(() => {
   container = document.createElement("div");
   document.body.appendChild(container);
+  // jsdom does not implement <dialog>.showModal()/close() (the prototype has
+  // no such members to spy on); the wrapper only needs the `open` property to
+  // track, so model exactly that.
+  Object.defineProperty(HTMLDialogElement.prototype, "showModal", {
+    configurable: true,
+    value(this: HTMLDialogElement) {
+      this.open = true;
+    },
+  });
+  Object.defineProperty(HTMLDialogElement.prototype, "close", {
+    configurable: true,
+    value(this: HTMLDialogElement) {
+      this.open = false;
+    },
+  });
 });
 
 afterEach(() => {
@@ -89,22 +116,36 @@ function machineFor(
   });
 }
 
-/** Route the page's fetches: GET retention serves the fixture; PUT behavior
- * is injectable per test. */
+function okJSON(body: unknown): Promise<Response> {
+  return Promise.resolve(
+    new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }),
+  );
+}
+
+// Mutable per-test handlers so a test can change what the NEXT GET (or the
+// purge POST) does mid-flow — e.g. serve S1, then fail, then serve S2.
+let onGet: () => Promise<Response>;
+let onPost: () => Promise<Response>;
+
+/** Route the page's fetches: GET retention serves onGet (default: the S1
+ * fixture); PUT behavior is injectable; POST purge serves onPost. */
 function stubFetch(onPut: () => Promise<Response>): ReturnType<typeof vi.fn> {
+  onGet = () => okJSON(retentionJSON);
+  onPost = () => Promise.reject(new TypeError("no POST expected"));
   const fn = vi.fn((input: unknown, init?: RequestInit) => {
     const url = String(input);
     const method = init?.method ?? "GET";
     if (url.includes("/api/logs/retention") && method === "GET") {
-      return Promise.resolve(
-        new Response(JSON.stringify(retentionJSON), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
-      );
+      return onGet();
     }
     if (url.includes("/api/logs/retention") && method === "PUT") {
       return onPut();
+    }
+    if (url.includes("/api/logs/purge") && method === "POST") {
+      return onPost();
     }
     return Promise.reject(new TypeError(`unexpected fetch ${method} ${url}`));
   });
@@ -142,6 +183,40 @@ function buttons(): string[] {
   return Array.from(container.querySelectorAll("button")).map(
     (b) => b.textContent ?? "",
   );
+}
+
+function findButton(match: (text: string) => boolean): HTMLButtonElement {
+  const b = Array.from(container.querySelectorAll("button")).find((el) =>
+    match(el.textContent ?? ""),
+  );
+  expect(b).toBeDefined();
+  if (b === undefined) throw new Error("button not found");
+  return b;
+}
+
+/** dd value rendered next to the Posture card's dt label. */
+function kv(label: string): string {
+  const dt = Array.from(container.querySelectorAll("dt")).find(
+    (d) => d.textContent === label,
+  );
+  return dt?.nextElementSibling?.textContent ?? "";
+}
+
+async function settle(): Promise<void> {
+  await act(async () => {
+    await new Promise((r) => {
+      setTimeout(r, 0);
+    });
+  });
+}
+
+async function clickAndSettle(btn: HTMLButtonElement): Promise<void> {
+  await act(async () => {
+    btn.click();
+    await new Promise((r) => {
+      setTimeout(r, 0);
+    });
+  });
 }
 
 it("viewer mounts the read surface + export, and NO mutation controls exist", async () => {
@@ -217,4 +292,114 @@ it("admin Save with an unobserved outcome: prior snapshot kept, outcome declared
     expect(container.textContent).not.toContain("Save outcome unconfirmed");
   });
   expect(editBtn?.disabled).toBe(false);
+});
+
+it("unknown Save: a FAILED refresh keeps the latch and blocked controls; only a fresh successful GET (S2) resolves and is adopted", async () => {
+  stubFetch(() => Promise.reject(new TypeError("network down"))); // PUT dies
+  await mount("admin");
+  // A. initial GET succeeded with S1.
+  expect(kv("Retention days")).toBe("30");
+
+  // B/C. Save with an unobserved outcome → unknown latch.
+  await clickAndSettle(findButton((t) => t.includes("Edit history settings")));
+  await vi.waitFor(() => {
+    expect(container.textContent).toContain("Save history settings");
+  });
+  await clickAndSettle(findButton((t) => t.includes("Save history settings")));
+  await vi.waitFor(async () => {
+    await settle();
+    expect(container.textContent).toContain("Save outcome unconfirmed");
+  });
+
+  // E. the resolving refresh FAILS. The cache deliberately keeps S1, so
+  // cached data must NOT be read as server confirmation.
+  onGet = () => Promise.reject(new TypeError("still down"));
+  await clickAndSettle(findButton((t) => t.includes("Refresh current state")));
+  await vi.waitFor(async () => {
+    await settle();
+    // G. SnapshotBar reports the failed refresh over the previous snapshot.
+    expect(container.textContent).toContain(
+      "Refresh failed — showing previous snapshot",
+    );
+  });
+  // F. old S1 remains rendered.
+  expect(kv("Retention days")).toBe("30");
+  // H. the unknown latch REMAINS.
+  expect(container.textContent).toContain("Save outcome unconfirmed");
+  // I/J. Edit and Purge remain blocked.
+  expect(findButton((t) => t.includes("Edit history settings")).disabled).toBe(
+    true,
+  );
+  expect(
+    findButton((t) => t.includes("Purge retained history…")).disabled,
+  ).toBe(true);
+
+  // K. a later GET succeeds with S2 (distinguishable from cached S1).
+  onGet = () => okJSON(retentionJSONv2);
+  await clickAndSettle(findButton((t) => t.includes("Refresh current state")));
+  await vi.waitFor(async () => {
+    await settle();
+    // L. only now does the latch clear.
+    expect(container.textContent).not.toContain("Save outcome unconfirmed");
+  });
+  // M. controls re-enable.
+  expect(findButton((t) => t.includes("Edit history settings")).disabled).toBe(
+    false,
+  );
+  expect(
+    findButton((t) => t.includes("Purge retained history…")).disabled,
+  ).toBe(false);
+  // N. rendered state is the FRESH server state S2, not cached S1.
+  expect(kv("Retention days")).toBe("14");
+});
+
+it("unknown Purge: failed refresh keeps 'Purge outcome unconfirmed' and no success ack; a later successful GET resolves", async () => {
+  stubFetch(() => Promise.reject(new TypeError("no PUT expected")));
+  await mount("admin");
+  onPost = () => Promise.reject(new TypeError("network down")); // purge dies
+
+  // A. run the T2 ceremony into an unknown outcome.
+  await clickAndSettle(
+    findButton((t) => t.includes("Purge retained history…")),
+  );
+  await vi.waitFor(() => {
+    expect(container.textContent).toContain("Purge persistent traffic history");
+  });
+  await clickAndSettle(findButton((t) => t === "Purge retained history"));
+  await vi.waitFor(async () => {
+    await settle();
+    expect(container.textContent).toContain("Purge outcome unconfirmed");
+  });
+  expect(container.textContent).toContain(
+    "The appliance may have completed the purge before the connection was lost. Refresh History & Storage before taking another destructive action.",
+  );
+
+  // B. first resolving refresh FAILS.
+  onGet = () => Promise.reject(new TypeError("still down"));
+  await clickAndSettle(findButton((t) => t.includes("Refresh current state")));
+  await vi.waitFor(async () => {
+    await settle();
+    expect(container.textContent).toContain(
+      "Refresh failed — showing previous snapshot",
+    );
+  });
+  // C/D. the unconfirmed declaration remains; no success acknowledgement is
+  // fabricated (cached count/bytes are not proof of purge success).
+  expect(container.textContent).toContain("Purge outcome unconfirmed");
+  expect(container.textContent).not.toContain("Retained history purged");
+  // E. Purge remains blocked.
+  expect(
+    findButton((t) => t.includes("Purge retained history…")).disabled,
+  ).toBe(true);
+
+  // F. a later successful GET resolves the latch.
+  onGet = () => okJSON(retentionJSONv2);
+  await clickAndSettle(findButton((t) => t.includes("Refresh current state")));
+  await vi.waitFor(async () => {
+    await settle();
+    expect(container.textContent).not.toContain("Purge outcome unconfirmed");
+  });
+  expect(
+    findButton((t) => t.includes("Purge retained history…")).disabled,
+  ).toBe(false);
 });
