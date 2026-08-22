@@ -266,8 +266,16 @@ export function AppShell(): JSX.Element {
               setup failed
               {state.tlsFallbackReason !== ""
                 ? ` (${state.tlsFallbackReason})`
+                : // The auth-status response withholds the cause (it is an
+                  // unauthenticated endpoint — see preAuthTLSFallbackReason,
+                  // ui_auth.go). This session IS authenticated, so point at
+                  // the surface that does carry it.
+                  ""}
+              .{" "}
+              {state.tlsFallbackReason === ""
+                ? "See Settings → Network & TLS for the cause. "
                 : ""}
-              . Restart the appliance to retry TLS.
+              Restart the appliance to retry TLS.
             </Callout>
           </div>
         )}

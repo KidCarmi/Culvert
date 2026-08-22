@@ -25,9 +25,17 @@ export function TLSFallbackWarning({
     >
       Automatic TLS setup failed, so the management interface is being served
       over plain HTTP. Credentials submitted on this page may travel
-      unencrypted.{reason !== "" ? ` Server detail: ${reason}.` : ""} Complete
-      this task over a trusted network only, then restart the appliance to retry
-      TLS.
+      unencrypted.
+      {reason !== ""
+        ? ` Server detail: ${reason}.`
+        : // The server deliberately withholds the cause from this
+          // UNAUTHENTICATED page — the raw self-sign error can embed an
+          // operator-configured SAN or the host name (see
+          // preAuthTLSFallbackReason, ui_auth.go). Say where it lives rather
+          // than silently rendering nothing.
+          " The specific cause is not published on this unauthenticated page; it is available after signing in, under Settings → Network & TLS."}{" "}
+      Complete this task over a trusted network only, then restart the appliance
+      to retry TLS.
     </Callout>
   );
 }

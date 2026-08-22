@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -73,7 +74,7 @@ func TestSECTLSFB1_SetupStatusNeverLeaksTheCause(t *testing.T) {
 	if v != "" {
 		t.Errorf("ui_tls_fallback_reason = %q on an UNAUTHENTICATED endpoint, want \"\"", v)
 	}
-	if body := rec.Body.String(); containsSubstring(body, "vault-primary.corp.internal") {
+	if body := rec.Body.String(); strings.Contains(body, "vault-primary.corp.internal") {
 		t.Errorf("internal host name leaked in unauthenticated body: %s", body)
 	}
 }
@@ -180,18 +181,6 @@ func TestSECTLSFB1_UnauthenticatedCallerIsRefusedTheAuthenticatedSurface(t *test
 			t.Errorf("%s is no longer public — the pre-auth cleartext warning would never render", p)
 		}
 	}
-}
-
-func containsSubstring(haystack, needle string) bool {
-	if len(needle) == 0 {
-		return true
-	}
-	for i := 0; i+len(needle) <= len(haystack); i++ {
-		if haystack[i:i+len(needle)] == needle {
-			return true
-		}
-	}
-	return false
 }
 
 func stringOfLength(n int) string {
