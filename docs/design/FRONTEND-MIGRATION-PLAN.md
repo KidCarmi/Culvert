@@ -408,7 +408,7 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > | Slice | Scope | Status |
 > |---|---|---|
 > | **2A** | Policy Read & Explainability: Access Rules read surface, Policy Tester, Where Used (generic read consumer), Traffic → Policy stable-rule-ID deep links, 500-rule scale qualification | this round |
-> | **2A-M** | Monitor residue micro-slice: Traffic retention / purge / export (destructive mutation + retention configuration + Blob/download ownership — deliberately SPLIT out of 2A; no architectural dependency on the Policy read surface) | pending |
+> | **2A-M** | Monitor residue micro-slice: Traffic retention / purge / export (destructive mutation + retention configuration + Blob/download ownership — deliberately SPLIT out of 2A; no architectural dependency on the Policy read surface) | this round |
 > | **2B** | Policy Write: rule create/edit/delete/bulk, staged reorder + move, draft commit/revert, Require Commit toggle, multi-admin actor warning, shadow warnings, `ifVersion` fencing UX, default-action mutation, dirty-route guard | pending |
 > | **2C** | Authentication Policy (Stage-1 rules + default-auth-outcome T3 ceremony) + Policy Learning (advisory panel, accept-to-draft, reject) | pending |
 > | **2D** | Objects & Taxonomy: URL categories (+hosts, lookup, feed status), SaaS feed settings/overrides/refresh, category groups (+rename), decryption profiles (+rename, cert-enum lockstep), file profiles, rewrite | pending |
@@ -473,6 +473,40 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 >   suite (FE-1B/2/3/4 + the 20-flow 2A spec) green; canonical-container
 >   verify + tamper + determinism ×5; Go contract suites; binary determinism
 >   ×2 + arm64.
+
+> **Slice 2A-M implementation record (this branch, 2026-08-22).**
+> - **Route**: `/app/monitor/history` — Monitor → History & Storage (viewer
+>   floor; nav between Audit Log and Diagnostics; route-intent entry).
+>   Snapshot-driven per ADR-FE-002 (one GET, manual Refresh, no polling/SSE).
+> - **Retention contract**: ONE `RetentionView` runtime decoder serves
+>   `GET /api/logs/retention`, the `PUT` mutation response, and
+>   `POST /api/logs/purge` (all return `logStoreRetentionView()`); absent
+>   optional statistics decode to undefined, never invented zeros.
+> - **RBAC**: viewer/operator = full read + recent-memory export; ONLY admin
+>   mounts Edit/Enable-Disable/Threshold/Purge (uiRoutes truth; no
+>   decorative disabled controls).
+> - **Mutations**: explicit edit state, one Save, retry=false, no optimistic
+>   update; success renders only the server's returned view. Disable states
+>   plainly that retained data stays on disk; the encryption-key-mismatch
+>   409 surfaces distinctly with purge-then-enable as two deliberate
+>   actions. Purge is a T2 ConfirmationDialog naming exactly what is and is
+>   NOT deleted. Network/timeout outcomes are STATE UNKNOWN: prior snapshot
+>   kept, unconfirmed declared (purge uses the required copy), further
+>   mutations blocked until a fresh successful GET.
+> - **Export**: `GET /api/export` labelled truthfully as **Export recent
+>   memory** — the in-memory ring (`reqlog.MaxRing` = 5000 entries), never
+>   persistent history; JSON/CSV via a bounded download client
+>   (`apiDownloadRequest`: target gate, media-type allowlist, 32 MiB cap
+>   with streaming enforcement, boundary-401) + an owned Blob/download
+>   primitive (`createDownloadOwner`: supersession, deterministic client
+>   filenames, revoke-on-deliver/unmount/auth-boundary).
+> - **Harness isolation (§19)**: every e2e premise is established through
+>   the supported admin API; mutation flows run on the FRESH appliance so
+>   the AUTH store's seeded Traffic evidence is never disabled or purged;
+>   FRESH ends disabled. Recorded harness debt: `dataDir` is the fixed
+>   absolute `/data` shared by all local instances (and any stray local
+>   process can hold the Badger lock on `/data/logstore`) — premises must
+>   be API-established, never assumed.
 
 ### FE-6 — Cluster, identity, certificates, settings, releases, support, MCP, decryption
 - **Objective**: FE-V27..V30, FE-V33, FE-V35, FE-V36 (settings decomposed per IA §5),

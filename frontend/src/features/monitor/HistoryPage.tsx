@@ -701,7 +701,7 @@ export function HistoryPage(): JSX.Element {
             <>
               This permanently deletes all retained Traffic history from this
               appliance. If history saving is disabled, stored history on disk
-              is still deleted.
+              is still deleted. This cannot be undone.
             </>
           }
           impact="All retained persistent Traffic history is deleted. In-memory recent Traffic, the Audit Log, configuration history, and support bundles are NOT affected."
