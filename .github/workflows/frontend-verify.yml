@@ -30,6 +30,11 @@ name: Frontend Verify
 on:
   workflow_call:
   workflow_dispatch:
+    inputs:
+      determinism_builds:
+        description: "Isolated clean builds for the determinism proof (5 = qualification evidence)"
+        required: false
+        default: "2"
   push:
     branches: [main]
     paths:
@@ -81,8 +86,8 @@ jobs:
       - name: Drift-gate tamper harness
         run: sh scripts/test-drift-gate.sh
 
-      # Two isolated clean builds must be byte-identical (full-tree inventory
-      # + SHA-256, every file). The five-build evidence run is executed for
-      # release qualification; two catches nondeterminism regressions per PR.
-      - name: Determinism (2 isolated clean builds)
-        run: sh scripts/verify-determinism.sh 2
+      # Isolated clean builds must be byte-identical (full-tree inventory +
+      # SHA-256, every file). PR runs build twice to catch nondeterminism
+      # regressions; qualification evidence dispatches with 5.
+      - name: Determinism (isolated clean builds)
+        run: sh scripts/verify-determinism.sh "${{ inputs.determinism_builds || '2' }}"
