@@ -226,3 +226,66 @@ func TestJWKS_TrustWindowConstantsAreOrdered(t *testing.T) {
 			"refresh cycle would fail closed", jwksStaleMaxAge, jwksCacheTTL)
 	}
 }
+
+// ── SEC-JWKS-1f: the ceiling breach is observable, not just logged ──────────
+
+// The stale-trust ceiling was previously visible only via a rate-limited log
+// line — an admin without log/Grafana access had no way to discover that ID-
+// token validation for a provider had started failing closed. staleCeilingStatus
+// is the operator-facing signal (consumed by checkOIDCJWKSTrust in
+// diagnostics.go); it must flip true exactly when getKey starts refusing and
+// flip back false the moment a refresh actually recovers — never on elapsed
+// time alone.
+func TestJWKS_StaleCeilingStatusReflectsRefusalAndRecovery(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+	srv, broken := jwksBrokenAfterFirst(t, "kid-1", &key.PublicKey)
+
+	j := jwksCacheAgainst(t, srv)
+	if _, err := j.getKey("kid-1"); err != nil {
+		t.Fatalf("initial getKey: %v", err)
+	}
+	if breached, _, _ := j.staleCeilingStatus(); breached {
+		t.Fatal("a freshly-fetched cache reported the stale ceiling as breached")
+	}
+
+	// Inside the ceiling: still degraded-but-serving, not yet a breach.
+	broken.Store(true)
+	ageCache(j, jwksStaleMaxAge/2)
+	if _, err := j.getKey("kid-1"); err != nil {
+		t.Fatalf("unexpected refusal inside the ceiling: %v", err)
+	}
+	if breached, _, _ := j.staleCeilingStatus(); breached {
+		t.Fatal("staleCeilingStatus reported a breach while still inside the trust window")
+	}
+
+	// Past the ceiling: getKey refuses, and the status must say so.
+	ageCache(j, jwksStaleMaxAge+time.Hour)
+	if _, err := j.getKey("kid-1"); err == nil {
+		t.Fatal("expected a refusal past the ceiling")
+	}
+	breached, since, uri := j.staleCeilingStatus()
+	if !breached {
+		t.Fatal("getKey refused past the ceiling but staleCeilingStatus did not report a breach")
+	}
+	if since < jwksStaleMaxAge {
+		t.Fatalf("staleCeilingStatus reported since=%s, want >= the %s ceiling", since, jwksStaleMaxAge)
+	}
+	if uri == "" {
+		t.Fatal("staleCeilingStatus did not report the JWKS URI")
+	}
+
+	// Recovery is on OBSERVED evidence only: a successful refresh must clear it.
+	broken.Store(false)
+	j.mu.Lock()
+	j.lastAttempt = time.Time{}
+	j.mu.Unlock()
+	if _, err := j.getKey("kid-1"); err != nil {
+		t.Fatalf("recovered endpoint still refused: %v", err)
+	}
+	if breached, _, _ := j.staleCeilingStatus(); breached {
+		t.Fatal("staleCeilingStatus still reported a breach after a successful refresh")
+	}
+}

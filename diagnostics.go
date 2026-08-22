@@ -163,6 +163,7 @@ func buildOperatorContract() OperatorContract {
 		checkCategoryFeedDB(),
 		checkRequestLogPersistence(),
 		checkIdentityBackend(),
+		checkOIDCJWKSTrust(),
 		checkSyslogFeed(),
 		checkMemoryBackstop(),
 	}
@@ -599,6 +600,34 @@ func checkIdentityBackend() OperatorContractCheck {
 		Message: fmt.Sprintf("identity backend %q was unreachable earlier in this process and has since answered (%d outage(s), %d request(s) denied during them; last at %s)",
 			s.Backend, s.Unavailable, s.GatedDenials, last),
 		OperatorAction: "Authentication has recovered. Users who authenticated during the window saw 407s; investigate the transient directory/IdP outage on the host or the identity service itself.",
+	}
+}
+
+// checkOIDCJWKSTrust reports whether any live OIDC provider's JWKS key set is
+// past the stale-trust ceiling (SEC-JWKS-1, auth_oidc_flow.go). The engine
+// keeps authenticating with a stale-but-still-trusted key set for up to
+// jwksStaleMaxAge while the IdP's JWKS endpoint stays unreachable — a
+// deliberate availability trade — but past that ceiling ID-token validation
+// starts failing CLOSED for that provider, and the only prior signal was a
+// rate-limited log line: "the transition from degraded but working to
+// authentication is failing must not be silent" (see logStaleRefusal).
+// Memory-only read; issues no fetch. Contributes nothing when no configured
+// OIDC provider has ever breached the ceiling.
+func checkOIDCJWKSTrust() OperatorContractCheck {
+	stale := jwksStaleProviders()
+	if len(stale) == 0 {
+		return OperatorContractCheck{
+			Code:    "oidc_jwks_trust",
+			Status:  diagOK,
+			Message: "no OIDC provider's JWKS key set is past the stale-trust ceiling",
+		}
+	}
+	return OperatorContractCheck{
+		Code:   "oidc_jwks_trust",
+		Status: diagFail,
+		Message: fmt.Sprintf("OIDC provider(s) %s cannot refresh their JWKS key set and are past the stale-trust ceiling — ID-token validation is FAILING CLOSED for them (a signing key withdrawn at the IdP would otherwise keep authenticating indefinitely)",
+			strings.Join(stale, ", ")),
+		OperatorAction: "Restore reachability to the provider's JWKS endpoint (DNS, route, firewall, TLS). Logins via this provider will keep failing until one refresh succeeds; no operator action is needed once it does — recovery is automatic on the next successful fetch.",
 	}
 }
 

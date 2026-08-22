@@ -151,6 +151,15 @@ type jwksCache struct {
 
 	logAt      time.Time // rate-limits the refresh-failure log line
 	staleLogAt time.Time // rate-limits the stale-ceiling refusal log line
+
+	// ceilingBreached mirrors the current SEC-JWKS-1 posture: set true the
+	// moment a lookup is refused for being past jwksStaleMaxAge, cleared the
+	// moment a refresh next succeeds. It exists so operator-facing surfaces
+	// (checkOIDCJWKSTrust, diagnostics.go) can report the fail-closed
+	// transition without depending on the rate-limited log line as the only
+	// signal — see logStaleRefusal's own comment on why that transition must
+	// not be silent.
+	ceilingBreached bool
 }
 
 const (
@@ -223,6 +232,9 @@ func (j *jwksCache) getKey(kid string) (interface{}, error) {
 			// longer than we are willing to vouch for. Fail closed — a key
 			// withdrawn at the IdP must not keep authenticating here.
 			j.logStaleRefusal(fetchedAt)
+			j.mu.Lock()
+			j.ceilingBreached = true
+			j.mu.Unlock()
 			// The cause is sanitised + %q because this error reaches a log via the
 			// callback handler, and the house rule is that anything crossing that
 			// boundary is sanitised at the site CodeQL can see (CWE-117).
@@ -271,6 +283,39 @@ func (j *jwksCache) logStaleRefusal(fetchedAt time.Time) {
 			"otherwise keep authenticating here. Restore reachability to the JWKS endpoint.",
 			sanitizeLog(uri), time.Since(fetchedAt).Truncate(time.Minute), jwksStaleMaxAge)
 	}
+}
+
+// staleCeilingStatus reports whether this cache is currently refusing lookups
+// under the SEC-JWKS-1 stale-trust ceiling, and how long it has been since the
+// last successful refresh. Side-effect-free: reads cached state only, issues
+// no fetch. Used by operator-facing surfaces (checkOIDCJWKSTrust); the
+// rate-limited log line stays the debug-level detail, this is the always-on
+// signal.
+func (j *jwksCache) staleCeilingStatus() (breached bool, since time.Duration, jwksURI string) {
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+	if j.fetchedAt.IsZero() {
+		return j.ceilingBreached, 0, j.jwksURI
+	}
+	return j.ceilingBreached, time.Since(j.fetchedAt), j.jwksURI
+}
+
+// jwksStaleProviders returns the display names of every live, enabled
+// OIDCFlowProvider whose JWKS cache is currently past the stale-trust
+// ceiling — i.e. ID-token validation for that provider is failing closed.
+// Side-effect-free: issues no fetch, only reads cached state.
+func jwksStaleProviders() []string {
+	var names []string
+	for _, live := range idpRegistry.EnabledProviders() {
+		ofp, ok := live.(*OIDCFlowProvider)
+		if !ok || ofp.jwks == nil {
+			continue
+		}
+		if breached, _, _ := ofp.jwks.staleCeilingStatus(); breached {
+			names = append(names, ofp.DisplayName())
+		}
+	}
+	return names
 }
 
 // refreshOnce runs at most one refresh per jwksMinRefreshInterval and lets
@@ -387,6 +432,7 @@ func (j *jwksCache) refresh() error {
 	j.mu.Lock()
 	j.keys = keys
 	j.fetchedAt = time.Now()
+	j.ceilingBreached = false
 	j.mu.Unlock()
 	return nil
 }
