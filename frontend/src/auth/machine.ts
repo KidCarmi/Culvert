@@ -21,12 +21,16 @@
 // so the identity behind it can be REPLACED underneath a running tab (sign
 // out + sign in as someone else elsewhere). Every transition that replaces
 // or ends an AUTHENTICATED identity — session-expiry 401, revalidation
-// discovering loggedOut, a DIFFERENT user, a DIFFERENT role, or an invalid
-// identity payload — runs the FULL auth-boundary teardown FIRST, through ONE
-// collapsed in-flight boundary (`runBoundaryTransition`): a racing boundary
-// 401 and an identity-change revalidation can never produce two teardown
-// runs or two final transitions. Only a same-user same-role confirmation
-// skips the teardown.
+// discovering loggedOut, a DIFFERENT user, a DIFFERENT role, an invalid
+// identity payload, AND explicit logout — runs the FULL auth-boundary
+// teardown through ONE collapsed coordinator (`runBoundaryTransition`, the
+// sole caller of runAuthTeardown): racing transitions can never produce two
+// teardown runs or two final transitions, and the teardown runs at most
+// ONCE per authenticated episode, so FE-4 cleanup owners (EventSource,
+// reconnect/polling timers, Blob/draft owners) never need to be idempotent.
+// A user-initiated logout joins AUTHORITATIVELY: its deliberate sign-out UX
+// wins any race against a session-expired finalizer. Only a same-user
+// same-role confirmation skips the teardown.
 //
 // Identity/session data lives ONLY here (plain memory) — never in the
 // TanStack Query cache, never in browser storage. Auth reads are direct
@@ -100,6 +104,18 @@ export class AuthMachine {
    * one final transition; the joiner's own finalize is dropped (its next
    * trigger re-observes the settled state). */
   private boundaryInFlight: Promise<void> | null = null;
+  /** the boundary's pending final transition; a user-INITIATED logout may
+   * replace it (authoritative join) so a racing session-expired finalizer
+   * can never overwrite the deliberate sign-out UX. */
+  private boundaryFinalize: (() => void) | null = null;
+  private boundaryFinalizeAuthoritative = false;
+  /** exactly-once teardown per authenticated episode: set true when the
+   * boundary teardown has run, reset when a NEW authenticated identity is
+   * adopted. A boundary that fires after the episode was already torn down
+   * (e.g. an explicit logout landing after a completed expiry boundary)
+   * transitions WITHOUT re-running owner cleanups — FE-4 SSE/timer/Blob
+   * owners must never inherit an implicit idempotency requirement. */
+  private episodeTornDown = false;
   /** §12: duplicate logout submissions join the first. */
   private logoutInFlight: Promise<LogoutOutcome> | null = null;
   /** concurrent revalidation triggers join one status read + boundary. */
@@ -124,17 +140,38 @@ export class AuthMachine {
     for (const fn of [...this.listeners]) fn(this.state);
   }
 
-  /** The single collapsed boundary: full teardown FIRST, then exactly one
-   * final transition. The query cache is cleared BEFORE listeners can
-   * observe the finalized state. */
-  private runBoundaryTransition(finalize: () => void): Promise<void> {
-    if (this.boundaryInFlight !== null) return this.boundaryInFlight;
+  /** THE single boundary coordinator — the ONLY caller of runAuthTeardown.
+   * Full teardown FIRST (at most once per authenticated episode), then
+   * exactly one final transition. The query cache and owner cleanups are
+   * settled BEFORE listeners can observe the finalized state. Concurrent
+   * boundaries join the in-flight one; an `authoritative` join (explicit,
+   * user-initiated logout) replaces the pending finalize so the deliberate
+   * sign-out UX wins the race — a non-authoritative joiner never does. */
+  private runBoundaryTransition(
+    finalize: () => void,
+    opts?: { authoritative?: boolean },
+  ): Promise<void> {
+    if (this.boundaryInFlight !== null) {
+      if (opts?.authoritative === true && !this.boundaryFinalizeAuthoritative) {
+        this.boundaryFinalize = finalize;
+        this.boundaryFinalizeAuthoritative = true;
+      }
+      return this.boundaryInFlight;
+    }
+    this.boundaryFinalize = finalize;
+    this.boundaryFinalizeAuthoritative = opts?.authoritative ?? false;
     this.boundaryInFlight = (async () => {
       try {
-        await runAuthTeardown(this.qc);
+        if (!this.episodeTornDown) {
+          this.episodeTornDown = true;
+          await runAuthTeardown(this.qc);
+        }
       } finally {
+        const f = this.boundaryFinalize;
+        this.boundaryFinalize = null;
+        this.boundaryFinalizeAuthoritative = false;
         try {
-          finalize();
+          f?.();
         } finally {
           this.boundaryInFlight = null;
         }
@@ -162,6 +199,7 @@ export class AuthMachine {
     auth: AuthStatus & { loggedIn: true },
   ): Promise<void> {
     const finalize = (): void => {
+      this.episodeTornDown = false; // a NEW authenticated episode begins
       this.set({
         phase: "authenticated",
         user: auth.user,
@@ -368,10 +406,18 @@ export class AuthMachine {
     });
   }
 
-  /** §12 explicit logout: one POST (duplicates join), then the FULL
-   * teardown, then an honest outcome — an unknown network result never
-   * claims the server token was revoked. Local sensitive state is cleared
-   * regardless. */
+  /** §12 explicit logout, unified with the boundary coordinator:
+   *   1. duplicate submissions join the first (logoutInFlight)
+   *   2. exactly one POST /api/auth/logout — no boundary path ever POSTs
+   *   3. confirmed/unconfirmed determined honestly (fresh status read
+   *      where practical; an unknown network outcome never claims the
+   *      server token was revoked)
+   *   4. join/start the SAME collapsed boundary used by sessionExpired
+   *      and identity replacement — client teardown runs exactly once
+   *   5. finalize unauthenticated with logoutNote confirmed|unconfirmed
+   *      and boundaryNote null — the AUTHORITATIVE join guarantees a
+   *      racing session-expired finalizer can never replace the
+   *      deliberate sign-out result with "Management session ended". */
   logout(): Promise<LogoutOutcome> {
     if (this.logoutInFlight !== null) return this.logoutInFlight;
     this.logoutInFlight = (async () => {
@@ -382,9 +428,7 @@ export class AuthMachine {
       } catch {
         // unknown outcome — serverConfirmed stays false, represented honestly
       }
-      await runAuthTeardown(this.qc);
       if (serverConfirmed) {
-        // Confirm via a fresh status read where practical (§12).
         try {
           const auth = await this.api.getAuthStatus();
           if (auth.loggedIn && !auth.bootstrap) serverConfirmed = false;
@@ -392,14 +436,19 @@ export class AuthMachine {
           // status unreachable: keep the POST's own success as the signal
         }
       }
-      this.set({
-        phase: "unauthenticated",
-        user: "",
-        role: null,
-        errorDetail: "",
-        logoutNote: serverConfirmed ? "confirmed" : "unconfirmed",
-        boundaryNote: null, // a deliberate sign-out is not a "session ended"
-      });
+      await this.runBoundaryTransition(
+        () => {
+          this.set({
+            phase: "unauthenticated",
+            user: "",
+            role: null,
+            errorDetail: "",
+            logoutNote: serverConfirmed ? "confirmed" : "unconfirmed",
+            boundaryNote: null, // a deliberate sign-out is not a "session ended"
+          });
+        },
+        { authoritative: true },
+      );
       this.logoutInFlight = null;
       return { serverConfirmed };
     })();

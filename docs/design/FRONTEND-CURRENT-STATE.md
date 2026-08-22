@@ -192,18 +192,20 @@ dependencies, current test coverage, and migration risk — lives in
 
 ## 6. Backend contracts the frontend consumes (keep — authoritative)
 
-- **Routes**: 229 `uiRoutes` entries / **343** method rows (GET 146, POST 114, PUT 35,
-  DELETE 32, MethodAny 16; viewer 147, admin 115, operator 66, public 15; mutating 182;
-  audit-expected 162), count-locked by C1 + D0 tests. (An earlier draft said 344 — that
-  figure counted a `{Method:` occurrence inside a comment at `ui_routes_meta.go:80`; the
-  structured count is 343 and matches `api/route-classification.yaml` 1:1. The full generated
-  accounting table lives in `FRONTEND-SECURITY-CONTRACT.md` §7.) Route additions
+- **Routes**: 232 `uiRoutes` entries / **346** method rows (GET 146, POST 114, PUT 35,
+  DELETE 32, MethodAny 19; viewer 147, admin 115, operator 66, public 18; mutating 182;
+  audit-expected 162), count-locked by C1 + D0 tests — regenerated 2026-08-22 after FE-1B
+  added the three v2 static routes (`/app`, `/app/`, `/assets/`: MethodAny, public, exempt
+  non-REST). (An earlier draft said 344 — that figure counted a `{Method:` occurrence inside
+  a comment at `ui_routes_meta.go:80`; the structured count matches
+  `api/route-classification.yaml` 1:1. The full generated accounting table lives in
+  `FRONTEND-SECURITY-CONTRACT.md` §7.) Route additions
   are a four-place change (registration, `ui_routes_meta.go`, `d0KnownRoutes`,
   `api/route-classification.yaml`) + `make api-bundle`.
 - **OpenAPI (ADR-0018)**: `api/openapi/openapi.yaml` (11,049 lines, 221 paths, ~570 schemas),
   deterministic committed `openapi.json`, offline docs pages, and
-  `api/route-classification.yaml` binding **334 of 343** method rows as documented (9 exempt
-  with owners + expiry ≤ 2027-01-31). Ten Go-native CI gates keep it in lockstep with
+  `api/route-classification.yaml` binding **334 of 346** method rows as documented (12 exempt
+  non-REST rows with owners + expiry ≤ 2027-01-31). Ten Go-native CI gates keep it in lockstep with
   `uiRoutes`. **Errors are `text/plain`**, not a JSON envelope — a typed client must model
   `(status, text)`.
 - **Governance surface**: `GET /api/governance/control-plane` returns the live route inventory
@@ -227,7 +229,7 @@ dependencies, current test coverage, and migration risk — lives in
 
 ## 7. Test surface today
 
-- **Backend contract suites (keep, untouched)**: D0 (route inventory locked at 229, auth
+- **Backend contract suites (keep, untouched)**: D0 (route inventory locked at 232, auth
   allowlist, CSRF/body/rate), C1/C1.5 (metadata↔mux↔handler parity), C2/C2c (enforcement +
   audit observability), C4 (role divergence), C3 governance, `config_surfaces_test.go`,
   `apicontract_*` (10 OpenAPI gates), `data_surfaces_test.go`.

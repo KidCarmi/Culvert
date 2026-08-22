@@ -299,8 +299,16 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > - **Open Mode**: setup-time `{unauth:true}` WITHHELD from the v2 UI —
 >   see FRONTEND-FEATURE-PARITY.md FE-X02 and FRONTEND-CURRENT-STATE.md
 >   GAP-9 (SETUP-OPEN-MODE).
+> - **Boundary unification (final hardening)**: explicit logout joins the
+>   SAME collapsed boundary coordinator as sessionExpired and identity
+>   replacement (authoritative join — the deliberate sign-out UX wins any
+>   race); the coordinator is the sole caller of the auth teardown and runs
+>   it at most once per authenticated episode, so FE-4 cleanup owners
+>   (SSE, timers, Blob/draft owners) never need to be idempotent.
 > - **Qualification checkpoint**: FE-3-FROZEN branch history
->   `claude/culvert-frontend-modernization-qnyqb6` (FE-3.1–FE-3.9);
+>   `claude/culvert-frontend-modernization-qnyqb6` (FE-3.1–FE-3.11: .1–.9
+>   implementation + continuity hardening, .10 durable docs, .11 boundary
+>   unification);
 >   real-binary Playwright suite across three appliance states + the
 >   multi-tab identity-switch spec; unit matrix incl. §6 A–G continuity
 >   proofs.
