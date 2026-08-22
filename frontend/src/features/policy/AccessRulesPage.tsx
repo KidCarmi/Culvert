@@ -206,30 +206,61 @@ export function AccessRulesPage(): JSX.Element {
     paramValid && ruleParam !== ""
       ? accessRules.find((r) => r.id === ruleParam)
       : undefined;
+  const targetVisible =
+    target !== undefined && filtered.some((r) => r.id === target.id);
   const [highlightId, setHighlightId] = useState<string | null>(null);
   const [announce, setAnnounce] = useState("");
   const targetRowRef = useRef<HTMLTableRowElement | null>(null);
-  const announcedFor = useRef<string | null>(null);
+  // The ?rule= value this component has FINISHED locating (row existed,
+  // scrolled, focused, highlighted, announced). Reset whenever the parameter
+  // changes so A → B → A locates A again; never set before the row exists.
+  const handledParam = useRef<string | null>(null);
+  const highlightTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (highlightTimer.current !== null) clearTimeout(highlightTimer.current);
+    },
+    [],
+  );
   useEffect(() => {
-    if (target === undefined || snap === undefined) return;
-    if (announcedFor.current === target.id) return;
-    announcedFor.current = target.id;
+    if (snap === undefined) return;
+    if (ruleParam === "" || !paramValid || target === undefined) {
+      // Empty / malformed / not-in-snapshot: any previous target-specific
+      // state (highlight, announcement, handled marker) must not survive —
+      // a stale highlight next to an invalid/historical callout would lie.
+      handledParam.current = null;
+      if (highlightTimer.current !== null) {
+        clearTimeout(highlightTimer.current);
+        highlightTimer.current = null;
+      }
+      setHighlightId(null);
+      setAnnounce("");
+      return;
+    }
+    if (handledParam.current === ruleParam) return; // located; user owns the filter again
+    if (!targetVisible) {
+      // A NEW valid deep-link navigation is authoritative over the temporary
+      // in-memory display filter: reset it so the target row can exist. The
+      // effect re-runs once the unfiltered rows have rendered.
+      setFilter("");
+      return;
+    }
+    const row = targetRowRef.current;
+    if (row === null) return; // row not committed yet; re-runs on `filtered`
+    handledParam.current = ruleParam;
+    if (highlightTimer.current !== null) clearTimeout(highlightTimer.current);
     setHighlightId(target.id);
+    row.scrollIntoView({ block: "center" });
+    row.focus();
+    // Announced only AFTER the row exists, is scrolled, and holds focus.
     setAnnounce(
       `Rule ${target.name} (priority ${String(target.priority)}) located.`,
     );
-    const row = targetRowRef.current;
-    if (row !== null) {
-      row.scrollIntoView({ block: "center" });
-      row.focus();
-    }
-    const t = setTimeout(() => {
+    highlightTimer.current = setTimeout(() => {
       setHighlightId(null);
+      highlightTimer.current = null;
     }, 4000);
-    return () => {
-      clearTimeout(t);
-    };
-  }, [target, snap]);
+  }, [ruleParam, paramValid, target, targetVisible, filtered, snap]);
 
   const draft = snap?.draft === true;
 
@@ -250,7 +281,7 @@ export function AccessRulesPage(): JSX.Element {
           />
         }
       />
-      <span aria-live="polite" className={styles.srOnly}>
+      <span role="status" aria-live="polite" className={styles.srOnly}>
         {announce}
       </span>
 

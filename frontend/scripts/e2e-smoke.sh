@@ -104,7 +104,7 @@ EOF2
 #               Access Rules surface excludes them.
 {
   printf '[\n'
-  printf '{"priority":1,"name":"E2E Match Rule","destFQDN":"rule-hit.test","action":"Block_Page","sslAction":"","comment":"Deterministic 2A match target"},\n'
+  printf '{"priority":1,"name":"E2E Match Rule","destFQDN":"rule-hit.test","action":"Block_Page","sslAction":"","fileFiltering":true,"fileProfile":"Executables","comment":"Deterministic 2A match target"},\n'
   printf '{"priority":5,"name":"E2E Reference Rule","destFQDN":"ref-probe.test","destCategory":"News","fileFiltering":true,"fileProfile":"Executables","action":"Allow","sslAction":"Inspect","comment":"Where-used fixture"},\n'
   i=1
   while [ "$i" -le 500 ]; do

@@ -355,6 +355,20 @@ test.describe("history-disabled appliance", () => {
     await login(page, "root-admin", "StrongPass123");
     await expect(page.getByRole("heading", { name: "Traffic" })).toBeVisible();
 
+    // Enforce this test's premise through the supported admin API: dataDir
+    // is the fixed absolute /data shared by every harness instance on the
+    // machine, so an admin-settings save from ANY instance in a PREVIOUS
+    // run (e.g. the 2A draft fixture on the AUTH appliance, whose store is
+    // enabled) can persist log_store_enabled=true and silently re-enable a
+    // history store on this "store-less" appliance at boot. CI runners are
+    // ephemeral and never see this; a long-lived dev machine does.
+    const off = await page.request.put(`${FRESH_URL}/api/logs/retention`, {
+      data: { enabled: false },
+    });
+    expect(off.ok()).toBe(true);
+    await page.goto(`${FRESH_URL}/app/monitor/traffic`);
+    await expect(page.getByRole("heading", { name: "Traffic" })).toBeVisible();
+
     // Degraded ≠ error ≠ empty: the disabled store is a first-class state.
     await expect(
       page.getByText("Persistent history is disabled"),

@@ -274,11 +274,97 @@ test("Where Used fetches on explicit interest and lists the real referencing rul
   expect(refRequests).toHaveLength(0);
 
   await page.getByRole("button", { name: /Where used: File profile/ }).click();
-  await expect(page.getByText(/is referenced by 1 consumer/)).toBeVisible();
-  // The consumer is this access rule, deep-linked by its stable ID.
+  // Both fixture rules reference the "Executables" file profile; each is an
+  // access-rule consumer deep-linked by its stable ID.
+  await expect(page.getByText(/is referenced by 2 consumers/)).toBeVisible();
   const refPanelLink = page.getByRole("link", { name: "E2E Reference Rule" });
   await expect(refPanelLink).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "E2E Match Rule" }),
+  ).toBeVisible();
   expect(refRequests).toHaveLength(1);
+  assertClean(w);
+});
+
+// ── Deep-link navigation correction: filter-hidden target via a REAL
+//    Where Used link (same mounted route, no document reload), A → B → A,
+//    and stale-state cleanup ─────────────────────────────────────────────
+
+test("a new deep link overrides the active filter via a real Where Used link; A → B → A re-locates", async ({
+  page,
+  baseURL,
+}) => {
+  const w = watch(page, baseURL ?? AUTH_URL);
+  const ruleA = await ruleByName(page, "E2E Reference Rule");
+  const ruleB = await ruleByName(page, "E2E Match Rule");
+
+  await page.goto("/app/policies/access-rules");
+  await expect(page.getByText("502 of 502 access rules")).toBeVisible();
+
+  // Filter to A only — the future target B is now hidden from the table.
+  await page.getByLabel("Filter").fill("E2E Reference");
+  await expect(page.getByText("1 of 502 access rules")).toBeVisible();
+  await expect(page.getByText("E2E Match Rule")).toHaveCount(0);
+
+  // Real in-app path: A's detail → Where Used → click the OTHER access-rule
+  // consumer (B). Same React route; only the ?rule= query changes.
+  await page
+    .getByRole("button", { name: "Details for rule E2E Reference Rule" })
+    .click();
+  await page.getByRole("button", { name: /Where used: File profile/ }).click();
+  await page.getByRole("link", { name: "E2E Match Rule" }).click();
+
+  // URL carries B's stable ID; the filter was reset by the navigation; B's
+  // row exists, is fully in viewport, holds focus, is highlighted; and the
+  // announcement names B.
+  await expect(page).toHaveURL(
+    new RegExp(`/app/policies/access-rules\\?rule=${ruleB.id}`),
+  );
+  const highlighted = page.locator('tr[data-highlight="true"]');
+  await expect(highlighted).toHaveCount(1);
+  await expect(highlighted).toContainText("E2E Match Rule");
+  await expect(page.getByLabel("Filter")).toHaveValue("");
+  // "Fully visible" for a row inside the horizontally-scrollable table means
+  // the row intersects the viewport and its FULL HEIGHT is inside it (the
+  // row is deliberately wider than the viewport — table-local x-scroll — so
+  // an intersection ratio of 1 is unreachable by design).
+  await expect(highlighted).toBeInViewport();
+  const rowBox = await highlighted.boundingBox();
+  const vp = page.viewportSize();
+  expect(rowBox).not.toBeNull();
+  expect(vp).not.toBeNull();
+  if (rowBox !== null && vp !== null) {
+    expect(rowBox.y).toBeGreaterThanOrEqual(0);
+    expect(rowBox.y + rowBox.height).toBeLessThanOrEqual(vp.height);
+  }
+  await expect(highlighted).toBeFocused();
+  await expect(page.getByRole("status")).toContainText("Rule E2E Match Rule");
+
+  // B → A through the same real consumer path (B also carries the profile).
+  await page
+    .getByRole("button", { name: "Details for rule E2E Match Rule" })
+    .click();
+  await page.getByRole("button", { name: /Where used: File profile/ }).click();
+  await page.getByRole("link", { name: "E2E Reference Rule" }).click();
+  await expect(page).toHaveURL(
+    new RegExp(`/app/policies/access-rules\\?rule=${ruleA.id}`),
+  );
+  await expect(highlighted).toHaveCount(1);
+  await expect(highlighted).toContainText("E2E Reference Rule");
+  await expect(highlighted).toBeFocused();
+  await expect(page.getByRole("status")).toContainText(
+    "Rule E2E Reference Rule",
+  );
+
+  // Back to B (history navigation — still no document reload): B highlights
+  // and is announced again.
+  await page.goBack();
+  await expect(page).toHaveURL(
+    new RegExp(`/app/policies/access-rules\\?rule=${ruleB.id}`),
+  );
+  await expect(highlighted).toHaveCount(1);
+  await expect(highlighted).toContainText("E2E Match Rule");
+  await expect(page.getByRole("status")).toContainText("Rule E2E Match Rule");
   assertClean(w);
 });
 
@@ -461,9 +547,16 @@ test("stale/nonexistent ruleId gets the truthful not-in-snapshot callout", async
       "It may represent historical data or a rule outside the current effective Access Rules view.",
     ),
   ).toBeVisible();
-  // It is NOT claimed deleted, and the rulebase still renders normally.
+  // It is NOT claimed deleted, the rulebase still renders normally, and no
+  // row is highlighted next to the callout.
   await expect(page.getByText(/deleted/i)).toHaveCount(0);
   await expect(page.getByText("502 of 502 access rules")).toBeVisible();
+  await expect(page.locator('tr[data-highlight="true"]')).toHaveCount(0);
+
+  // Malformed parameter: its own truthful callout, and again no highlight.
+  await page.goto("/app/policies/access-rules?rule=not%20a%20rule%3Cid%3E");
+  await expect(page.getByText("Invalid rule reference")).toBeVisible();
+  await expect(page.locator('tr[data-highlight="true"]')).toHaveCount(0);
   assertClean(w);
 });
 
