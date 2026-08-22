@@ -7,6 +7,7 @@ package main
 // is the real one.
 
 import (
+	"encoding/json"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -677,5 +678,41 @@ func TestFE1B_DuplicateManifestKeysRejected(t *testing.T) {
 	}
 	if err := frontendV2RejectDuplicateJSONKeys([]byte(`{"a":{"x":1},"b":[{"x":1},{"x":2}],"c":"a"}`)); err != nil {
 		t.Fatalf("distinct keys across sibling objects must pass: %v", err)
+	}
+}
+
+// ── FE-2: the real production bundle exercises the import graph ─────────────
+
+// TestFE2_ProductionBundleHasDynamicChunkAndValidates proves the committed
+// production bundle now contains at least one dynamic-import chunk (the
+// lazy-loaded design-system route) and that the real Go validator accepts
+// exactly that manifest shape (FE-2 §5 infrastructure proof).
+func TestFE2_ProductionBundleHasDynamicChunkAndValidates(t *testing.T) {
+	dist, err := fs.Sub(frontendV2DistFS, "frontend/dist")
+	if err != nil {
+		t.Fatalf("sub: %v", err)
+	}
+	if _, _, err := validateFrontendV2(dist); err != nil {
+		t.Fatalf("committed production dist with dynamic chunks must validate: %v", err)
+	}
+	raw, err := fs.ReadFile(dist, "manifest.json")
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	var manifest map[string]frontendV2ManifestEntry
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		t.Fatalf("parse manifest: %v", err)
+	}
+	hasDynamicImport, hasDynamicEntry := false, false
+	for _, e := range manifest {
+		if len(e.DynamicImports) > 0 {
+			hasDynamicImport = true
+		}
+		if e.IsDynamicEntry {
+			hasDynamicEntry = true
+		}
+	}
+	if !hasDynamicImport || !hasDynamicEntry {
+		t.Fatalf("production manifest must contain a dynamic chunk (dynamicImports=%v isDynamicEntry=%v) — the FE-2 lazy route is the infrastructure proof", hasDynamicImport, hasDynamicEntry)
 	}
 }
