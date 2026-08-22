@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/obs"
@@ -215,8 +216,19 @@ var cloudMetadataEndpoints = []cloudMetadataEndpoint{
 
 // detectCloudPublicIPs queries cloud instance metadata APIs to discover
 // the machine's public IP address. Returns nil on non-cloud hosts or if
-// no public IP is assigned. Each provider is tried sequentially; the first
-// successful response wins (a host is only on one cloud provider).
+// no public IP is assigned. This runs synchronously on the admin-UI startup
+// path (SelfSigned -> collectSANs), on every process start where no explicit
+// -tls-cert/-tls-key is configured — the shipped docker-compose.yml default.
+//
+// Providers are probed CONCURRENTLY, not one after another: a host where
+// 169.254.169.254 is unreachable in a way that HANGS rather than fails fast
+// (a common enterprise/air-gapped posture — DROPPING rather than REJECTING
+// metadata traffic to deter SSRF) used to pay every candidate's own timeout
+// in sequence (AWS token + AWS value + GCP + Azure), so total latency grew
+// with the number of providers instead of being capped by the slowest single
+// one. A host is only ever on one cloud, so the first (precedence-ordered)
+// success wins the same as before — only the wall-clock cost of the
+// unreachable case changes.
 func detectCloudPublicIPs() []net.IP {
 	// Short timeout — metadata is local (< 50ms on cloud, times out on bare metal).
 	// 2s total allows for IMDSv2 two-step (PUT token + GET IP) on busy instances.
@@ -228,14 +240,27 @@ func detectCloudPublicIPs() []net.IP {
 		},
 	}
 
-	// Try AWS first with IMDSv2 (token-based), fall back to IMDSv1.
-	if ip := queryAWSMetadata(client); ip != nil {
-		return []net.IP{ip}
+	// results[0] = AWS, results[1:] = cloudMetadataEndpoints[1:] (GCP, Azure)
+	// in their declared order — preserves the original precedence when
+	// picking among successes below.
+	results := make([]net.IP, len(cloudMetadataEndpoints))
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		results[0] = queryAWSMetadata(client)
+	}()
+	for i, ep := range cloudMetadataEndpoints[1:] { // skip AWS (index 0), handled above
+		i, ep := i+1, ep
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results[i] = queryMetadataEndpoint(client, ep)
+		}()
 	}
+	wg.Wait()
 
-	// Try GCP and Azure.
-	for _, ep := range cloudMetadataEndpoints[1:] { // skip AWS (index 0), handled above
-		ip := queryMetadataEndpoint(client, ep)
+	for _, ip := range results {
 		if ip != nil {
 			return []net.IP{ip}
 		}
@@ -261,6 +286,9 @@ var publicIPEndpoints = []cloudMetadataEndpoint{
 
 // detectPublicIPFallback queries public IP reflection services to discover
 // the machine's external IP. Used when IMDS is unreachable (Docker bridge).
+// Probed concurrently for the same reason as detectCloudPublicIPs above — an
+// unreachable-but-not-refused endpoint must not multiply its timeout by the
+// number of fallback services tried.
 func detectPublicIPFallback(client *http.Client) net.IP {
 	// Only try if we appear to be running in a container — avoids adding
 	// a NAT gateway IP on developer laptops.
@@ -268,10 +296,21 @@ func detectPublicIPFallback(client *http.Client) net.IP {
 		return nil
 	}
 
-	for _, ep := range publicIPEndpoints {
-		ip := queryMetadataEndpoint(client, ep)
+	results := make([]net.IP, len(publicIPEndpoints))
+	var wg sync.WaitGroup
+	for i, ep := range publicIPEndpoints {
+		i, ep := i, ep
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results[i] = queryMetadataEndpoint(client, ep)
+		}()
+	}
+	wg.Wait()
+
+	for i, ip := range results {
 		if ip != nil {
-			obs.Printf("UITLS: detected public IP via %s (IMDS unreachable, container fallback): %s", ep.name, ip)
+			obs.Printf("UITLS: detected public IP via %s (IMDS unreachable, container fallback): %s", publicIPEndpoints[i].name, ip)
 			return ip
 		}
 	}
