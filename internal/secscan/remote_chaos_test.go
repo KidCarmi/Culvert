@@ -83,14 +83,24 @@ func since(before CounterSnapshot) delta {
 // captureAlerts installs a sink that records scan_svc_down events only, plus a
 // subscriber probe that answers yes, restoring no-op versions afterwards.
 //
-// Event-filtered for the reason clam_error_test.go filters on its detail
-// marker: the sink is process-global inside this binary and alerts fire on
-// their own goroutine, so a straggler from a neighbouring test must not satisfy
-// this one's assertion. Every gate below that ARMS an alert also waits for it,
-// so no straggler of this event escapes its own test either.
+// STRAGGLERS. The sink is process-global inside this binary and alerts fire on
+// their OWN goroutine, so a neighbouring test's alert can land in this test's
+// recorder. Several gates here drive remoteScanFail without observing the
+// alert at all, so "every gate waits for the alert it arms" is not true and
+// cannot be made true cheaply. The determinism gate caught exactly that: under
+// -shuffle, TwoHundredWithoutAVerdictIsAFaultNotClean's `no verdict in
+// response` landed in FaultAlertIsGatedOnASubscriber's recorder and failed it.
+//
+// So every assertion below is on CONTENT, never on a bare arrival or a count —
+// the same rule clam_error_test.go states, which it implements with a unique
+// per-invocation error string. That is unavailable here BY DESIGN: the whole
+// point of the fix is that the alert detail is a bounded, low-cardinality
+// class, so there is nowhere to put a nonce. The discriminator is therefore
+// the sidecar's HTTP status, which the class embeds: a gate that must observe
+// or refute one specific alert uses a status no other gate uses.
 func captureAlerts(t *testing.T) *remoteAlertRecorder {
 	t.Helper()
-	rec := &remoteAlertRecorder{fired: make(chan alerts.Payload, 16)}
+	rec := &remoteAlertRecorder{fired: make(chan alerts.Payload, 64)}
 	alerts.SetSink(func(event string, p alerts.Payload) {
 		if event != "scan_svc_down" {
 			return
@@ -109,25 +119,52 @@ func captureAlerts(t *testing.T) *remoteAlertRecorder {
 	return rec
 }
 
+// statusClass is the alert detail remoteScanFail produces for a non-200, and
+// the only per-gate discriminator available (see captureAlerts).
+func statusClass(code int) string { return fmt.Sprintf("sidecar returned HTTP %d", code) }
+
 type remoteAlertRecorder struct{ fired chan alerts.Payload }
 
-func (a *remoteAlertRecorder) wait(t *testing.T) alerts.Payload {
+// waitFor drains until an alert with exactly detail arrives, ignoring anything
+// else that lands in the window.
+func (a *remoteAlertRecorder) waitFor(t *testing.T, detail string) alerts.Payload {
 	t.Helper()
-	select {
-	case p := <-a.fired:
-		return p
-	case <-time.After(2 * time.Second):
-		t.Fatal("expected an alert, none fired")
-		return alerts.Payload{}
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case p := <-a.fired:
+			if p.Detail == detail {
+				return p
+			}
+		case <-deadline:
+			t.Fatalf("expected an alert with detail %q, none fired", detail)
+			return alerts.Payload{}
+		}
 	}
 }
 
-func (a *remoteAlertRecorder) none(t *testing.T, within time.Duration) {
+// collect drains every alert that arrives within d.
+func (a *remoteAlertRecorder) collect(d time.Duration) []alerts.Payload {
+	var out []alerts.Payload
+	deadline := time.After(d)
+	for {
+		select {
+		case p := <-a.fired:
+			out = append(out, p)
+		case <-deadline:
+			return out
+		}
+	}
+}
+
+// noneWith fails if an alert carrying exactly detail arrives within d. Other
+// details are neighbours' stragglers and are ignored by design.
+func (a *remoteAlertRecorder) noneWith(t *testing.T, d time.Duration, detail string) {
 	t.Helper()
-	select {
-	case p := <-a.fired:
-		t.Fatalf("expected no alert, got %s/%s", p.Event, p.Detail)
-	case <-time.After(within):
+	for _, p := range a.collect(d) {
+		if p.Detail == detail {
+			t.Fatalf("expected no alert for %q, got one", detail)
+		}
 	}
 }
 
@@ -371,8 +408,11 @@ func TestChaos_FaultAlertIsGatedOnASubscriber(t *testing.T) {
 	rec := captureAlerts(t)
 	alerts.SetSubscriberProbe(func(string) bool { return false })
 
+	// StatusTeapot is used by no other gate, so the only alert that could carry
+	// this detail is this gate's own — a straggler cannot mask a regression,
+	// and cannot fake one either.
 	srv := sidecar(t, func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "boom", http.StatusInternalServerError)
+		http.Error(w, "boom", http.StatusTeapot)
 	})
 	rs := newRemoteAt(t, srv.URL)
 
@@ -381,7 +421,7 @@ func TestChaos_FaultAlertIsGatedOnASubscriber(t *testing.T) {
 	if d := since(before); d.fail != 1 {
 		t.Fatalf("the fault must still be COUNTED when nobody subscribes; counter moved by %d", d.fail)
 	}
-	rec.none(t, 300*time.Millisecond)
+	rec.noneWith(t, 300*time.Millisecond, statusClass(http.StatusTeapot))
 }
 
 // TestChaos_FaultAlertDetailIsBoundedForDedup proves the alert detail stays a
@@ -409,28 +449,40 @@ func TestChaos_FaultAlertDetailIsBoundedForDedup(t *testing.T) {
 	rs := newRemoteAt(t, srv.URL)
 	rs.ScanBody([]byte("payload"), "")
 
-	p := rec.wait(t)
-	if p.Event != "scan_svc_down" || p.Source != "remote_scan" {
-		t.Fatalf("unexpected alert %+v", p)
+	// Asserted over EVERY alert observed rather than the first one, which makes
+	// this straggler-proof without needing a discriminator: the property is
+	// universal, so any scan_svc_down in the binary must satisfy it, and a
+	// neighbour's alert is an extra sample rather than a confounder.
+	got := rec.collect(500 * time.Millisecond)
+	if len(got) == 0 {
+		t.Fatal("a transport fault must alert")
 	}
-	if strings.Contains(p.Detail, "://") || strings.Contains(p.Detail, "127.0.0.1") || strings.Contains(p.Detail, srv.Listener.Addr().String()) {
-		t.Fatalf("alert detail carries per-request text (%q) — the dedup key is event:detail, so this cannot be suppressed", p.Detail)
+	sawTransport := false
+	for _, p := range got {
+		if p.Event != "scan_svc_down" || p.Source != "remote_scan" {
+			t.Fatalf("unexpected alert %+v", p)
+		}
+		if strings.Contains(p.Detail, "://") || strings.Contains(p.Detail, "127.0.0.1") || strings.Contains(p.Detail, srv.Listener.Addr().String()) {
+			t.Fatalf("alert detail carries per-request text (%q) — the dedup key is event:detail, so this cannot be suppressed", p.Detail)
+		}
+		if p.Detail == remoteFaultTransport {
+			sawTransport = true
+		}
 	}
-	if p.Detail != remoteFaultTransport {
-		t.Fatalf("alert detail must be a bounded reason class, got %q", p.Detail)
+	if !sawTransport {
+		t.Fatalf("want the bounded transport class among %v", got)
 	}
 
 	// The status-code classes are bounded too — the code is the actionable
-	// half and there are only a few dozen of them.
+	// half and there are only a few dozen of them. StatusBadGateway is this
+	// gate's own discriminator.
 	rec2 := captureAlerts(t)
 	resetRemoteLogGates(t)
 	bad := sidecar(t, func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "boom", http.StatusBadGateway)
 	})
 	newRemoteAt(t, bad.URL).ScanBody([]byte("payload"), "")
-	if got := rec2.wait(t).Detail; got != fmt.Sprintf("sidecar returned HTTP %d", http.StatusBadGateway) {
-		t.Fatalf("status class not bounded: %q", got)
-	}
+	rec2.waitFor(t, statusClass(http.StatusBadGateway))
 }
 
 // TestChaos_TransportFaultStillFailsOpenAndIsCounted pins the posture that is
@@ -460,9 +512,7 @@ func TestChaos_TransportFaultStillFailsOpenAndIsCounted(t *testing.T) {
 	if d.timeout != 0 {
 		t.Fatalf("a dial failure is not a budget refusal; scan timeout moved by %d", d.timeout)
 	}
-	if p := rec.wait(t); p.Detail != remoteFaultTransport {
-		t.Fatalf("want the bounded transport class, got %q", p.Detail)
-	}
+	rec.waitFor(t, remoteFaultTransport)
 }
 
 // TestChaos_FaultLogIsRateLimitedWhileTheCounterStaysExact — the sidecar fault
