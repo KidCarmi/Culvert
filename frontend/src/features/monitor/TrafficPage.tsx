@@ -8,7 +8,7 @@
 // detail and never placed in persistent browser storage.
 import { useMemo, useState } from "react";
 import type { FormEvent, JSX } from "react";
-import { useSearchParams } from "react-router";
+import { Link, useSearchParams } from "react-router";
 import { useQuery } from "@tanstack/react-query";
 import { getTrafficHistory, getTrafficMemory } from "../../api/ops";
 import type { TrafficEntry } from "../../api/ops";
@@ -84,7 +84,19 @@ function fmtBytes(n: number): string {
 function RowDetail({ e }: { e: TrafficEntry }): JSX.Element {
   const items: Array<readonly [string, JSX.Element | string]> = [
     ["Rule", e.ruleMatched === "" ? "—" : e.ruleMatched],
-    ["Rule ID", e.ruleId === "" ? "—" : <Mono key="rid">{e.ruleId}</Mono>],
+    [
+      "Rule ID",
+      e.ruleId === "" ? (
+        "—"
+      ) : (
+        <Link
+          key="rid"
+          to={`/policies/access-rules?rule=${encodeURIComponent(e.ruleId)}`}
+        >
+          <Mono>{e.ruleId}</Mono>
+        </Link>
+      ),
+    ],
     ["Action", e.actionTaken === "" ? "—" : e.actionTaken],
     [
       "Full URI",
@@ -548,7 +560,19 @@ function TrafficRow({
         <td className={styles.hostCell}>{e.host}</td>
         <td>{statusBadge(e.status)}</td>
         <td className={styles.ruleCell}>
-          {e.ruleMatched === "" ? "—" : e.ruleMatched}
+          {/* 2A: the STABLE rule ID is authoritative for the Policy deep
+              link — a name alone never becomes a link. */}
+          {e.ruleId !== "" ? (
+            <Link
+              to={`/policies/access-rules?rule=${encodeURIComponent(e.ruleId)}`}
+            >
+              {e.ruleMatched === "" ? e.ruleId : e.ruleMatched}
+            </Link>
+          ) : e.ruleMatched === "" ? (
+            "—"
+          ) : (
+            e.ruleMatched
+          )}
         </td>
         <td className={styles.numeric}>
           {fmtBytes(e.bytesSent + e.bytesRecv)}
