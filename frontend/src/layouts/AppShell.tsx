@@ -1,11 +1,22 @@
-// CULVERT application shell (FE-2 §4): sidebar navigation, topbar context,
-// skip link, main region, toast region. Auth/RBAC arrive in FE-3 — the nav
-// below is static metadata proving the information architecture; entries not
-// yet migrated render as non-interactive "planned" rows rather than fake
-// routes.
+// CULVERT application shell (FE-2 §4 + FE-3 §16): session-aware sidebar
+// navigation, topbar identity/account area, skip link, main region. The
+// shell mounts ONLY inside the authenticated phase (AuthGate). Navigation
+// is filtered by the session role through capability metadata — hidden nav
+// is UX, never security: the backend (requireRole + C2 metadata middleware)
+// remains the authorization boundary. Planned entries are visible IA only,
+// never routes; their minRole comes from uiRoutes evidence
+// (ui_routes_meta.go), not invention: read surfaces carry viewer GETs
+// (/api/logs, /api/audit, /api/policy, /api/ca/status, /api/cluster/status,
+// /api/releases), while Administrators (/api/auth/users, GET=admin) and
+// Settings (/api/config/export, GET=admin) are admin governance surfaces.
 import { useState } from "react";
 import type { JSX, ReactNode } from "react";
-import { NavLink, Outlet } from "react-router";
+import { NavLink, Outlet, useLocation } from "react-router";
+import { useQuery } from "@tanstack/react-query";
+import { probeSession } from "../api/auth";
+import type { Role } from "../api/auth";
+import { useAuth } from "../auth/AuthProvider";
+import { hasRole } from "../auth/rbac";
 import {
   CulvertMark,
   IconActivity,
@@ -19,13 +30,14 @@ import {
   IconSun,
   IconUsers,
 } from "../design-system/icons";
-import { IconButton } from "../design-system/primitives";
+import { Button, Callout, IconButton } from "../design-system/primitives";
 import { readThemePreference, setTheme } from "../design-system/theme";
 import type { ThemePreference } from "../design-system/theme";
 import styles from "./AppShell.module.css";
 
 interface NavEntry {
   label: string;
+  minRole: Role;
   to?: string; // real route; absent = planned (not yet migrated)
 }
 
@@ -41,41 +53,58 @@ const NAV: readonly NavSection[] = [
   {
     heading: "Overview",
     icon: <IconGauge />,
-    entries: [{ label: "Overview", to: "/" }],
+    entries: [{ label: "Overview", to: "/", minRole: "viewer" }],
   },
   {
     heading: "Monitor",
     icon: <IconActivity />,
-    entries: [{ label: "Traffic" }, { label: "Audit Log" }],
+    entries: [
+      { label: "Traffic", minRole: "viewer" },
+      { label: "Audit Log", minRole: "viewer" },
+    ],
   },
   {
     heading: "Policies",
     icon: <IconPolicy />,
-    entries: [{ label: "Access Rules" }, { label: "Authentication Rules" }],
+    entries: [
+      { label: "Access Rules", minRole: "viewer" },
+      { label: "Authentication Rules", minRole: "viewer" },
+    ],
   },
   {
     heading: "Security",
     icon: <IconShield />,
-    entries: [{ label: "Content & Scanning" }, { label: "Certificates" }],
+    entries: [
+      { label: "Content & Scanning", minRole: "viewer" },
+      { label: "Certificates", minRole: "viewer" },
+    ],
   },
   {
     heading: "Platform",
     icon: <IconServer />,
-    entries: [{ label: "Cluster" }, { label: "Release Management" }],
+    entries: [
+      { label: "Cluster", minRole: "viewer" },
+      { label: "Release Management", minRole: "viewer" },
+    ],
   },
   {
     heading: "Administration",
     icon: <IconUsers />,
-    entries: [{ label: "Administrators" }, { label: "Settings" }],
+    entries: [
+      { label: "Administrators", minRole: "admin" },
+      { label: "Settings", minRole: "admin" },
+    ],
   },
   {
     heading: "Experimental",
     icon: <IconMonitor />,
-    entries: [{ label: "Design System", to: "/design-system" }],
+    entries: [
+      { label: "Design System", to: "/design-system", minRole: "viewer" },
+    ],
   },
 ];
 
-function ThemeSwitcher(): JSX.Element {
+export function ThemeSwitcher(): JSX.Element {
   const [pref, setPref] = useState<ThemePreference>(readThemePreference());
   const choose = (p: ThemePreference): void => {
     setTheme(p);
@@ -111,6 +140,35 @@ function ThemeSwitcher(): JSX.Element {
 
 export function AppShell(): JSX.Element {
   const [navOpen, setNavOpen] = useState(false);
+  const { state, machine } = useAuth();
+  const [signingOut, setSigningOut] = useState(false);
+  const location = useLocation();
+  const role: Role = state.role ?? "viewer"; // defensive: gate guarantees non-null
+
+  // Session probe (§13): route transitions revalidate the session against a
+  // PROTECTED endpoint (/api/stats, viewer GET) — no aggressive polling. A
+  // boundary 401 here is the session-expiry signal → ONE idempotent
+  // teardown. gcTime 0: session-scoped, never retained (§7).
+  useQuery({
+    queryKey: ["auth", "session-probe", location.pathname],
+    queryFn: probeSession,
+    gcTime: 0,
+    staleTime: 0,
+    refetchOnMount: "always",
+    retry: false,
+  });
+
+  const signOut = (): void => {
+    if (signingOut) return; // §12: no duplicate submission
+    setSigningOut(true);
+    void machine.logout(); // machine tears down + transitions; gate unmounts us
+  };
+
+  const visibleSections = NAV.map((s) => ({
+    ...s,
+    entries: s.entries.filter((e) => hasRole(role, e.minRole)),
+  })).filter((s) => s.entries.length > 0);
+
   return (
     <div className={styles.shell}>
       <a href="#main" className="skip-link">
@@ -125,7 +183,7 @@ export function AppShell(): JSX.Element {
           </div>
         </div>
         <nav className={styles.nav} aria-label="Primary">
-          {NAV.map((section) => (
+          {visibleSections.map((section) => (
             <div key={section.heading} className={styles.navSection}>
               <div className={styles.navHeading}>{section.heading}</div>
               {section.entries.map((e) =>
@@ -170,8 +228,36 @@ export function AppShell(): JSX.Element {
         <span className={styles.previewBadge}>Experimental preview</span>
         <span className={styles.topbarSpacer} />
         <ThemeSwitcher />
+        <span className={styles.account}>
+          <span className={styles.accountUser}>{state.user}</span>
+          <span className={styles.accountRole}>{role}</span>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={signOut}
+            disabled={signingOut}
+          >
+            {signingOut ? "Signing out…" : "Sign out"}
+          </Button>
+        </span>
       </header>
       <main id="main" className={styles.main} tabIndex={-1}>
+        {state.tlsFallback && (
+          <div className={styles.tlsBanner}>
+            <Callout
+              variant="critical"
+              title="Management traffic is NOT encrypted"
+              role="alert"
+            >
+              This admin session runs over plain HTTP because automatic TLS
+              setup failed
+              {state.tlsFallbackReason !== ""
+                ? ` (${state.tlsFallbackReason})`
+                : ""}
+              . Restart the appliance to retry TLS.
+            </Callout>
+          </div>
+        )}
         <Outlet />
       </main>
     </div>

@@ -1,12 +1,16 @@
-// Router foundation (FE-2 §5): client-side library mode, basename /app
-// (matching the FE-1B serving contract: every GET/HEAD deep link under /app
-// receives the SPA shell). Infrastructure routes only — future product URLs
-// are NOT faked here. /design-system is DELIBERATELY lazy-loaded so the real
+// Router foundation (FE-2 §5 + FE-3 §17): client-side library mode,
+// basename /app (matching the FE-1B serving contract: every GET/HEAD deep
+// link under /app receives the SPA shell). The layout element is the FE-3
+// AuthGate — every route, /design-system included, renders only through the
+// authoritative auth phase (setup → login → shell); pre-setup exposes only
+// the Setup UI. Infrastructure routes only — future product URLs are NOT
+// faked here. /design-system is DELIBERATELY lazy-loaded so the real
 // production bundle exercises dynamicImports → manifest → the Go validator.
 import { createBrowserRouter } from "react-router";
 import type { JSX } from "react";
-import { AppShell, PageHeader } from "../layouts/AppShell";
+import { PageHeader } from "../layouts/AppShell";
 import { ErrorState } from "../design-system/primitives";
+import { AuthGate } from "../features/auth/AuthGate";
 import { OverviewPage } from "../features/overview/OverviewPage";
 
 function NotFoundPage(): JSX.Element {
@@ -26,7 +30,7 @@ export function createAppRouter(): ReturnType<typeof createBrowserRouter> {
     [
       {
         path: "/",
-        element: <AppShell />,
+        element: <AuthGate />,
         children: [
           { index: true, element: <OverviewPage /> },
           {

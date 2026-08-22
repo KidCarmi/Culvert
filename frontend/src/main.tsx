@@ -7,6 +7,7 @@ import "./design-system/tokens.css";
 import "./design-system/base.css";
 import { initTheme } from "./design-system/theme";
 import { ToastProvider } from "./design-system/toast";
+import { AuthProvider } from "./auth/AuthProvider";
 import { createAppRouter } from "./app/router";
 
 // Theme applies synchronously before first paint — no flash, no reload on
@@ -24,7 +25,9 @@ createRoot(root).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
       <ToastProvider>
-        <RouterProvider router={router} />
+        <AuthProvider>
+          <RouterProvider router={router} />
+        </AuthProvider>
       </ToastProvider>
     </QueryClientProvider>
   </StrictMode>,
