@@ -12,7 +12,12 @@ import { useQuery } from "@tanstack/react-query";
 import { getObjectReferences } from "../../api/policy";
 import type { ObjectRefConsumer, ObjectRefType } from "../../api/policy";
 import { ApiError } from "../../api/client";
-import { Button, ErrorState, Mono, Spinner } from "../../design-system/primitives";
+import {
+  Button,
+  ErrorState,
+  Mono,
+  Spinner,
+} from "../../design-system/primitives";
 import styles from "./policy.module.css";
 
 const REF_TYPE_LABEL: Record<ObjectRefType, string> = {

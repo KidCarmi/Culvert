@@ -168,7 +168,9 @@ test("traffic: bounded default query over seeded history, cursor paging with dis
   await expect(page.getByText("(page 2)")).toBeVisible();
   await expect(page.getByText("fe4-seed-49.test")).toBeVisible();
   await expect(page.getByText("fe4-seed-149.test")).toBeHidden();
-  await expect(page.locator("tbody tr")).toHaveCount(50);
+  // 151 seeded entries since 2A (150 default-deny + the rule-hit block that
+  // backs the Traffic → Policy deep-link proof): page 2 carries the tail 51.
+  await expect(page.locator("tbody tr")).toHaveCount(51);
   // End of history: Next disables instead of inventing a page count.
   await expect(page.getByRole("button", { name: "Next" })).toBeDisabled();
 

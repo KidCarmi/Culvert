@@ -148,7 +148,10 @@ export interface PolicySnapshot {
   draft: boolean;
 }
 
-export const decodePolicySnapshot: Decoder<PolicySnapshot> = (v, path = "$") => {
+export const decodePolicySnapshot: Decoder<PolicySnapshot> = (
+  v,
+  path = "$",
+) => {
   const o = readRecord(v, path);
   const rules = field(o, "rules", readArray(decodePolicyRule), path);
   const accessRules = rules.filter((r) => r.kind === "access");

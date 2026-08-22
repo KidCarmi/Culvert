@@ -90,7 +90,34 @@ default_action: deny
 log_store_path: $WORK/auth/logstore
 EOF2
 
-start_instance AUTH "$UI_PORT" "$PROXY_PORT" -ui-users-file "$WORK/auth/ui_users.json" -config "$WORK/auth/config.yaml"
+# ── 2A policy fixture: 503 rules loaded via the supported -policy file ────
+# Priority 1  : "E2E Match Rule" — Block_Page on rule-hit.test (a matched
+#               BLOCK logs the rule name + stable ULID with ZERO egress; the
+#               ULID is minted by the server's load-time backfill, never
+#               hardcoded in test code).
+# Priority 5  : carries fileProfile/category references for the Where Used
+#               browser proof.
+# 10..509     : 500 Stage-2 access rules — the scale-qualification corpus.
+#               None matches the fe4-seed-*.test or rule-hit.test seeds, so
+#               the FE-4 default-deny history evidence is unchanged.
+# 9001..9002  : two VALID Stage-1 auth rules (ruleType=auth), proving the
+#               Access Rules surface excludes them.
+{
+  printf '[\n'
+  printf '{"priority":1,"name":"E2E Match Rule","destFQDN":"rule-hit.test","action":"Block_Page","sslAction":"","comment":"Deterministic 2A match target"},\n'
+  printf '{"priority":5,"name":"E2E Reference Rule","destFQDN":"ref-probe.test","destCategory":"News","fileFiltering":true,"fileProfile":"Executables","action":"Allow","sslAction":"Inspect","comment":"Where-used fixture"},\n'
+  i=1
+  while [ "$i" -le 500 ]; do
+    if [ $((i % 2)) -eq 0 ]; then act=Allow; ssl=Bypass; else act=Block_Page; ssl=Inspect; fi
+    printf '{"priority":%d,"name":"Bulk rule %03d","destFQDN":"bulk-%d.example.test","action":"%s","sslAction":"%s"},\n' "$((i + 9))" "$i" "$i" "$act" "$ssl"
+    i=$((i + 1))
+  done
+  printf '{"priority":9001,"name":"E2E Auth Exempt","ruleType":"auth","action":"Allow","destFQDN":"auth-fixture.test","subjectMatch":{"schemaVersion":1,"all":[{"type":"cidr","values":["10.99.0.0/24"]}]},"auth":{"outcome":"Exempt","owner":"e2e-harness","reason":"Stage-1 exclusion fixture"}},\n'
+  printf '{"priority":9002,"name":"E2E Auth Exempt B","ruleType":"auth","action":"Allow","destFQDN":"auth-fixture-b.test","subjectMatch":{"schemaVersion":1,"all":[{"type":"cidr","values":["10.98.0.0/24"]}]},"auth":{"outcome":"Exempt","owner":"e2e-harness","reason":"Stage-1 exclusion fixture B"}}\n'
+  printf ']\n'
+} > "$WORK/auth/policy.json"
+
+start_instance AUTH "$UI_PORT" "$PROXY_PORT" -ui-users-file "$WORK/auth/ui_users.json" -config "$WORK/auth/config.yaml" -policy "$WORK/auth/policy.json"
 start_instance FRESH "$FRESH_PORT" "$((PROXY_PORT + 1))" -ui-users-file "$WORK/fresh/ui_users.json"
 start_instance FAIL "$FAIL_PORT" "$((PROXY_PORT + 2))" -ui-users-file "$WORK/failparent/blocker/ui_users.json"
 
@@ -118,6 +145,10 @@ while [ "$i" -lt 150 ]; do
   curl -s -o /dev/null --max-time 2 -x "http://127.0.0.1:$PROXY_PORT" "http://fe4-seed-$i.test/" || true
   i=$((i + 1))
 done
+# 2A: ONE request matching "E2E Match Rule" (Block_Page — zero egress). The
+# resulting newest history row carries the rule's real stable ULID for the
+# Traffic → Policy deep-link proof. Total history: 151 entries.
+curl -s -o /dev/null --max-time 2 -x "http://127.0.0.1:$PROXY_PORT" "http://rule-hit.test/" || true
 sleep 2 # allow the async history writer to flush
 
 cd "$FRONTEND"

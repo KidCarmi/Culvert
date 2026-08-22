@@ -31,7 +31,9 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function stubReferences(referencedBy: ObjectRefConsumer[]): ReturnType<typeof vi.fn> {
+function stubReferences(
+  referencedBy: ObjectRefConsumer[],
+): ReturnType<typeof vi.fn> {
   const fn = vi.fn(() =>
     Promise.resolve(
       new Response(
@@ -47,7 +49,9 @@ function stubReferences(referencedBy: ObjectRefConsumer[]): ReturnType<typeof vi
   return fn;
 }
 
-async function mount(referencedBy: ObjectRefConsumer[]): Promise<ReturnType<typeof vi.fn>> {
+async function mount(
+  referencedBy: ObjectRefConsumer[],
+): Promise<ReturnType<typeof vi.fn>> {
   const fetchStub = stubReferences(referencedBy);
   const router = createMemoryRouter(
     [
@@ -154,6 +158,6 @@ it("an arbitrary/malicious server view string can never mint a route", async () 
   // string appears nowhere as a navigation target.
   expect(container.querySelector("a")).toBeNull();
   const html = container.innerHTML;
-  expect(html).not.toContain("href=\"../../auth/logout\"");
+  expect(html).not.toContain('href="../../auth/logout"');
   expect(html).not.toContain("javascript:alert");
 });

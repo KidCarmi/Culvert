@@ -66,7 +66,11 @@ const NAV: readonly NavSection[] = [
     heading: "Policies",
     icon: <IconPolicy />,
     entries: [
-      { label: "Access Rules", to: "/policies/access-rules", minRole: "viewer" },
+      {
+        label: "Access Rules",
+        to: "/policies/access-rules",
+        minRole: "viewer",
+      },
       { label: "Policy Tester", to: "/policies/tester", minRole: "viewer" },
       { label: "Authentication Rules", minRole: "viewer" },
     ],

@@ -430,12 +430,49 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 - **Exit gate (evidence)**: parity rows checked; policy table renders 500 rules within the
   interaction budget.
 
-> **Slice 2A implementation record (this branch).** See the parity matrix rows
-> FE-V16 (read surface migrated; write/draft/reorder pending 2B), FE-V06
-> (Policy Tester migrated), FE-X06 (Where Used generic read consumer proven),
-> FE-V02 (Traffic → rule-ID deep link; retention/purge/export residue pending
-> 2A-M). Details are recorded next to each row and in the 2A qualification
-> report.
+> **Slice 2A implementation record (this branch, 2026-08-22).**
+> - **Routes**: `/app/policies/access-rules` + `/app/policies/tester` (real v2
+>   routes, viewer floor; nav entries under Policies; route-intent entries).
+>   Authentication Rules stays a planned, non-interactive nav item until 2C.
+> - **Access Rules (FE-V16 READ)**: `GET /api/policy` envelope decoded
+>   fail-closed (`rules/count/version/updatedAt/draft`); ruleType classified
+>   explicitly (`""|"access"` → access, `"auth"` → excluded-but-counted,
+>   anything else → explicit unknown callout, never an access rule); server
+>   priority order preserved (no column sorting; filter hides, never
+>   reorders); snapshot/refresh per ADR-FE-002 (SnapshotBar, failed refresh
+>   keeps the previous rulebase, AbortSignal to the wire); in-memory
+>   client-side filter for the bounded 500-rule target; row-detail expansion
+>   for secondary metadata; draft/running truthfulness from the server's
+>   `draft` flag (candidate callout, no 2B mutation UX); `?rule=<id>` deep
+>   link resolved by data equality (bounded parameter, scroll/focus +
+>   temporary data-state highlight + polite announcement; honest
+>   not-in-snapshot callout).
+> - **Policy Tester (FE-V06)**: explicit Run-test over the viewer dry-run
+>   `POST /api/policy/test`; discriminated decoder (matched union, trace,
+>   hostCategory, exact `simulateAuthOutcome` auth block, rulebase
+>   `running|draft` only); the tested-rulebase truth leads the result; no
+>   input/result persistence; read-only proven (no version/hit/rule change,
+>   no mutating API call).
+> - **Where Used (FE-X06)**: one reusable read-only consumer of
+>   `GET /api/objects/references`; explicit-interest fetch; server `view`
+>   strings are data — navigation only through the reviewed
+>   consumer→route mapping (access-rule/policy by stable ID; others
+>   information-only until migrated).
+> - **Traffic deep link (FE-V02 partial)**: rows with a stable `ruleId` link
+>   to the Access Rules deep link (ID-authoritative); Traffic
+>   query/cursor/snapshot semantics untouched. Retention/purge/export remain
+>   2A-M.
+> - **Shared explicit-run owner**: the FE-4 diagnostics AbortController owner
+>   extracted verbatim to `src/shared/runOwner.ts` (second real consumer);
+>   diagnostics import path re-exports it, FE-4 cancellation tests unchanged.
+> - **Scale**: no virtualization; 502-rule real-binary browser proof at
+>   1024×768 / 1440×900 / 640×800(zoom-proxy) with a ≤1 s filter and
+>   deep-link interaction budget.
+> - **Qualification checkpoint**: granular commits B2.0 + 2A.1–2A.4 on
+>   `claude/culvert-frontend-batch2`; unit matrix + real-binary Playwright
+>   suite (FE-1B/2/3/4 + the 20-flow 2A spec) green; canonical-container
+>   verify + tamper + determinism ×5; Go contract suites; binary determinism
+>   ×2 + arm64.
 
 ### FE-6 — Cluster, identity, certificates, settings, releases, support, MCP, decryption
 - **Objective**: FE-V27..V30, FE-V33, FE-V35, FE-V36 (settings decomposed per IA §5),

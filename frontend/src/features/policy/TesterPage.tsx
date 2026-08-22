@@ -46,9 +46,7 @@ function ResultView({ result }: { result: TesterResult }): JSX.Element {
               Rule <strong>{result.rule.name}</strong> (priority{" "}
               {String(result.rule.priority)}) →{" "}
             </span>
-            <StatusBadge
-              status={result.action === "Allow" ? "ok" : "critical"}
-            >
+            <StatusBadge status={result.action === "Allow" ? "ok" : "critical"}>
               {result.action}
             </StatusBadge>
             {result.rule.id !== "" && <Mono>{result.rule.id}</Mono>}
@@ -67,7 +65,10 @@ function ResultView({ result }: { result: TesterResult }): JSX.Element {
       </div>
       {result.rulebase === "draft" && (
         <div className={styles.calloutSpace}>
-          <Callout variant="warning" title="This tested the Policy Draft candidate">
+          <Callout
+            variant="warning"
+            title="This tested the Policy Draft candidate"
+          >
             The result reflects staged rules, not the running enforcement
             policy. Commit the draft (later slice / legacy console) before
             expecting live traffic to behave this way.
@@ -88,7 +89,9 @@ function ResultView({ result }: { result: TesterResult }): JSX.Element {
             <div>
               <dt className={styles.refDetail}>Tier</dt>
               <dd>
-                {result.hostCategory.tier === "" ? "—" : result.hostCategory.tier}
+                {result.hostCategory.tier === ""
+                  ? "—"
+                  : result.hostCategory.tier}
               </dd>
             </div>
             <div>
@@ -188,7 +191,9 @@ function ResultView({ result }: { result: TesterResult }): JSX.Element {
                   <td className={styles.numeric}>{result.rule.priority}</td>
                   <td className={styles.nameCell}>{result.rule.name}</td>
                   <td>
-                    <StatusBadge status="info">matched — evaluation stops</StatusBadge>
+                    <StatusBadge status="info">
+                      matched — evaluation stops
+                    </StatusBadge>
                   </td>
                 </tr>
               )}
@@ -332,9 +337,9 @@ export function TesterPage(): JSX.Element {
       {err !== null && !(err instanceof ApiError && err.kind === "aborted") && (
         <ErrorState title="Test failed">
           {err instanceof ApiError
-            ? (err.bodyText !== undefined && err.bodyText !== ""
-                ? err.bodyText
-                : err.message)
+            ? err.bodyText !== undefined && err.bodyText !== ""
+              ? err.bodyText
+              : err.message
             : "The test request failed."}
         </ErrorState>
       )}

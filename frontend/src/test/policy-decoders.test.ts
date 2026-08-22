@@ -107,7 +107,10 @@ describe("policy envelope decoder (§27)", () => {
     expect(classifyRuleType("")).toBe("access");
     expect(classifyRuleType("access")).toBe("access");
     const snap = decodePolicySnapshot(
-      envelope([accessRule, { ...accessRule, priority: 2, ruleType: "access" }]),
+      envelope([
+        accessRule,
+        { ...accessRule, priority: 2, ruleType: "access" },
+      ]),
     );
     expect(snap.accessRules).toHaveLength(2);
   });
@@ -297,9 +300,9 @@ describe("object references decoder (§27)", () => {
         referencedBy: [{ consumerType: "access-rule" }], // missing name
       }),
     ).toThrow(DecodeError);
-    expect(() =>
-      decodeObjectReferences({ referencedBy: [] }),
-    ).toThrow(DecodeError);
+    expect(() => decodeObjectReferences({ referencedBy: [] })).toThrow(
+      DecodeError,
+    );
   });
 });
 
