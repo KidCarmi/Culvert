@@ -118,6 +118,18 @@ jobs:
           path: binary-load.log
           retention-days: 14
 
+      # Deployment-artifact contract: docker-compose.yml's `cli` service must
+      # never let the shipped binary fall through into full proxy/admin-UI
+      # startup (an accidental `docker compose --profile cli up -d` would
+      # otherwise run a second daemon against the shared proxy-data volume).
+      # Reuses the binary + /data already prepared above. Same tag as the
+      # other real-binary tests in this job, run explicitly by name since it
+      # is not a load/restart test and doesn't belong in those patterns.
+      - name: Compose cli-service safety (no second proxy)
+        env:
+          CULVERT_BIN: ${{ github.workspace }}/culvert
+        run: go test -tags proxybinload -run 'TestDockerComposeCLIServiceCannotStartSecondProxy' -v -timeout 2m .
+
   benchmarks:
     name: Policy-engine benchmarks (benchstat baseline)
     runs-on: ubuntu-latest

@@ -246,11 +246,17 @@ services:
     volumes:
       - proxy-data:/data
       - culvert-backups:/backup
-    # Operator supplies one-shot flags via `run --rm cli <flags>`. The
-    # Dockerfile ENTRYPOINT is `./culvert`; the empty command here clears
-    # the daemon CMD so an accidental `docker compose --profile cli up -d`
-    # would not start a second proxy.
-    command: []
+    # Operator supplies one-shot flags via `run --rm cli <flags>` — `run`
+    # REPLACES this command entirely, so it never reaches the binary above.
+    # An empty command here does NOT stop an accidental `docker compose
+    # --profile cli up -d`: main.go's one-shot dispatch (backup/restore/
+    # list/cleanup/reset-password) only exits early when one of those flags
+    # is set, so `./culvert` with no arguments at all falls straight through
+    # into normal startup — a full second proxy + admin UI against the same
+    # shared proxy-data volume the running `proxy` service owns. `-h` makes
+    # Go's flag package print usage and exit immediately instead, so the
+    # accidental invocation does nothing rather than running a second daemon.
+    command: ["-h"]
 
 volumes:
   proxy-data:
