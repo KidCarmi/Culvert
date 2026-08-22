@@ -46,18 +46,21 @@ func decodeJSONBody(t *testing.T, rec *httptest.ResponseRecorder) map[string]any
 	return got
 }
 
-// The secret-shaped cause used across these tests: the exact shape Go's x509
-// encoder produces when a SAN cannot be encoded, carrying an internal name.
-const tlsFallbackSecretReason = `x509: "vault-primary.corp.internal" cannot be encoded as an IA5String`
+// The disclosure-bearing cause used across these tests: the exact shape Go's
+// x509 encoder produces when a SAN cannot be encoded, carrying an internal
+// host name. It is a synthetic error string, NOT a credential — the previous
+// name matched gosec's G101 secret-name pattern, which is the same
+// identifier-naming trap CLAUDE.md records for G117.
+const tlsFallbackCauseWithInternalName = `x509: "vault-primary.corp.internal" cannot be encoded as an IA5String`
 
 // TestSECTLSFB1_SetupStatusNeverLeaksTheCause — /api/setup/status is on the
 // public allowlist (isPublicUIAuthPath: prefix /api/setup). It must carry the
 // flag and an EMPTY cause.
 func TestSECTLSFB1_SetupStatusNeverLeaksTheCause(t *testing.T) {
-	withTLSFallback(t, true, tlsFallbackSecretReason)
+	withTLSFallback(t, true, tlsFallbackCauseWithInternalName)
 
 	rec := httptest.NewRecorder()
-	apiSetupStatus(rec, httptest.NewRequest(http.MethodGet, "/api/setup/status", nil))
+	apiSetupStatus(rec, httptest.NewRequest(http.MethodGet, "/api/setup/status", http.NoBody))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
@@ -82,7 +85,7 @@ func TestSECTLSFB1_SetupStatusNeverLeaksTheCause(t *testing.T) {
 // TestSECTLSFB1_AuthStatusNeverLeaksTheCause — every branch of
 // /api/auth/status (also public) goes through jsonOKAuthStatus.
 func TestSECTLSFB1_AuthStatusNeverLeaksTheCause(t *testing.T) {
-	withTLSFallback(t, true, tlsFallbackSecretReason)
+	withTLSFallback(t, true, tlsFallbackCauseWithInternalName)
 
 	for _, tc := range []struct {
 		name   string
@@ -120,7 +123,7 @@ func TestSECTLSFB1_FlagStillReachesPreAuthWhenClear(t *testing.T) {
 	withTLSFallback(t, false, "")
 
 	rec := httptest.NewRecorder()
-	apiSetupStatus(rec, httptest.NewRequest(http.MethodGet, "/api/setup/status", nil))
+	apiSetupStatus(rec, httptest.NewRequest(http.MethodGet, "/api/setup/status", http.NoBody))
 	got := decodeJSONBody(t, rec)
 	if got["ui_tls_fallback"] != false {
 		t.Errorf("ui_tls_fallback = %v, want false", got["ui_tls_fallback"])
@@ -135,7 +138,7 @@ func TestSECTLSFB1_FlagStillReachesPreAuthWhenClear(t *testing.T) {
 func TestSECTLSFB1_PreAuthReasonIsUnconditional(t *testing.T) {
 	for _, reason := range []string{
 		"",
-		tlsFallbackSecretReason,
+		tlsFallbackCauseWithInternalName,
 		"line one\nline two\r\nSet-Cookie: injected=1",
 		stringOfLength(64 * 1024),
 	} {
@@ -150,9 +153,9 @@ func TestSECTLSFB1_PreAuthReasonIsUnconditional(t *testing.T) {
 // the operator's diagnostic path: GET /api/settings/network (viewer+) still
 // carries the full cause.
 func TestSECTLSFB1_AuthenticatedCauseStillAvailable(t *testing.T) {
-	withTLSFallback(t, true, tlsFallbackSecretReason)
+	withTLSFallback(t, true, tlsFallbackCauseWithInternalName)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/settings/network", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/settings/network", http.NoBody)
 	req = req.WithContext(context.WithValue(req.Context(), uiRoleKey{}, RoleViewer))
 	rec := httptest.NewRecorder()
 	apiNetworkSettings(rec, req)
@@ -163,7 +166,7 @@ func TestSECTLSFB1_AuthenticatedCauseStillAvailable(t *testing.T) {
 	if got["ui_tls_fallback"] != true {
 		t.Errorf("ui_tls_fallback = %v, want true", got["ui_tls_fallback"])
 	}
-	if got["ui_tls_fallback_reason"] != tlsFallbackSecretReason {
+	if got["ui_tls_fallback_reason"] != tlsFallbackCauseWithInternalName {
 		t.Errorf("authenticated cause = %v, want the full reason — the diagnostic path must survive the fix", got["ui_tls_fallback_reason"])
 	}
 }
