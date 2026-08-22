@@ -1,0 +1,113 @@
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  max-width: 420px;
+}
+.label {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+.required {
+  color: var(--color-status-critical-text);
+  margin-left: 2px;
+}
+.help {
+  font-size: var(--fs-xs);
+  color: var(--color-text-muted);
+}
+.error {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  font-size: var(--fs-xs);
+  color: var(--color-status-critical-text);
+}
+.input,
+.select,
+.textarea {
+  font: inherit;
+  font-size: var(--fs-md);
+  color: var(--color-text);
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-border);
+  border-radius: var(--r-md);
+  padding: 0 var(--sp-3);
+  height: var(--control-h);
+  transition: border-color var(--dur-fast) var(--ease);
+}
+.textarea {
+  height: auto;
+  min-height: 72px;
+  padding: var(--sp-2) var(--sp-3);
+  resize: vertical;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+}
+.input:hover,
+.select:hover,
+.textarea:hover {
+  border-color: var(--color-text-muted);
+}
+.input:focus-visible,
+.select:focus-visible,
+.textarea:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 0;
+  border-color: var(--color-focus);
+}
+.input[aria-invalid="true"],
+.textarea[aria-invalid="true"],
+.select[aria-invalid="true"] {
+  border-color: var(--color-status-critical-border);
+}
+.input:disabled,
+.select:disabled,
+.textarea:disabled {
+  color: var(--color-text-disabled);
+  cursor: not-allowed;
+}
+.checkboxRow {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-md);
+  cursor: pointer;
+}
+.checkbox {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--color-interactive);
+}
+/* Switch: native checkbox, switch-styled; role=switch carries semantics. */
+.switch {
+  appearance: none;
+  width: 34px;
+  height: 19px;
+  border-radius: var(--r-full);
+  background: var(--color-border);
+  border: 1px solid var(--color-border);
+  position: relative;
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease);
+  margin: 0;
+}
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 13px;
+  height: 13px;
+  border-radius: var(--r-full);
+  background: var(--color-surface);
+  transition: translate var(--dur-fast) var(--ease);
+}
+.switch:checked {
+  background: var(--color-interactive);
+  border-color: var(--color-interactive);
+}
+.switch:checked::after {
+  translate: 15px 0;
+}

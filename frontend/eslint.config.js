@@ -128,7 +128,7 @@ export default tseslint.config(
         },
         {
           selector:
-            'TSAsExpression:not(:has(> TSTypeReference > Identifier[name="const"]))',
+            'TSAsExpression:not([typeAnnotation.typeName.name="const"])',
           message:
             "`as SomeType` is banned in authored source (contract §7.T1): untrusted data crosses the boundary through decoders, not assertions. (`as const` is permitted.)",
         },
@@ -137,6 +137,25 @@ export default tseslint.config(
           message: "Angle-bracket type assertions are banned (contract §7.T1).",
         },
       ],
+    },
+  },
+  {
+    // Test files (unit + browser specs) may ARRANGE and ASSERT browser-
+    // storage state (seeding garbage values, proving persistence) — the
+    // application ban stays absolute outside src/design-system/theme.ts.
+    files: ["src/test/**", "e2e/**"],
+    rules: {
+      "no-restricted-globals": "off",
+    },
+  },
+  {
+    // THE sanctioned theme-storage module (contract §9.B1): the ONLY file
+    // allowed to touch localStorage, via targeted eslint-disable comments on
+    // exactly the storage lines. unused-disable reporting keeps the
+    // exceptions honest; every other ban still applies here.
+    files: ["src/design-system/theme.ts"],
+    linterOptions: {
+      reportUnusedDisableDirectives: "error",
     },
   },
   {

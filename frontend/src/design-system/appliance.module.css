@@ -1,0 +1,184 @@
+/* Golden appliance components: one shared vocabulary for health, diagnosis,
+   change impact, long-running operations, rollback, audit. */
+
+.healthList {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.healthRow {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  padding: var(--sp-2) 0;
+  border-bottom: 1px solid var(--color-border-subtle);
+  font-size: var(--fs-sm);
+}
+.healthRow:last-child {
+  border-bottom: 0;
+}
+.healthName {
+  min-width: 160px;
+  font-weight: 600;
+}
+.healthDetail {
+  color: var(--color-text-muted);
+  flex: 1;
+}
+.operatorAction {
+  display: block;
+  color: var(--color-text-secondary);
+  margin-top: 2px;
+}
+.operatorAction::before {
+  content: "→ ";
+  color: var(--color-interactive);
+}
+
+.diagHeader {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-3);
+}
+
+.diff {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--r-md);
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+}
+.diffRow {
+  display: grid;
+  grid-template-columns: 18px minmax(140px, max-content) 1fr;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-3);
+}
+.diffRow[data-kind="added"] {
+  background: var(--color-diff-add-bg);
+}
+.diffRow[data-kind="removed"] {
+  background: var(--color-diff-del-bg);
+}
+.diffMark {
+  font-weight: 700;
+}
+.diffRow[data-kind="added"] .diffMark {
+  color: var(--color-diff-add-text);
+}
+.diffRow[data-kind="removed"] .diffMark {
+  color: var(--color-diff-del-text);
+}
+.diffRow[data-kind="changed"] .diffMark {
+  color: var(--color-status-warn-text);
+}
+.diffField {
+  color: var(--color-text-secondary);
+}
+.diffBefore {
+  text-decoration: line-through;
+  color: var(--color-text-muted);
+}
+
+.opList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.opPhase {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-sm);
+}
+.opDot {
+  width: 10px;
+  height: 10px;
+  border-radius: var(--r-full);
+  border: 2px solid var(--color-border);
+  flex: none;
+}
+.opPhase[data-state="done"] .opDot {
+  background: var(--color-status-ok-text);
+  border-color: var(--color-status-ok-text);
+}
+.opPhase[data-state="active"] .opDot {
+  border-color: var(--color-interactive);
+  animation: pulse 1.2s var(--ease) infinite;
+}
+.opPhase[data-state="failed"] .opDot {
+  background: var(--color-status-critical-text);
+  border-color: var(--color-status-critical-text);
+}
+.opPhase[data-state="unknown"] .opDot {
+  background: var(--color-status-unknown-text);
+  border-color: var(--color-status-unknown-text);
+}
+.opPhase[data-state="pending"] {
+  color: var(--color-text-muted);
+}
+@keyframes pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .opPhase[data-state="active"] .opDot {
+    animation: none;
+  }
+}
+.opDetail {
+  color: var(--color-text-muted);
+}
+
+.rollback {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--color-status-info-border);
+  background: var(--color-status-info-bg);
+  border-radius: var(--r-md);
+  font-size: var(--fs-sm);
+}
+.rollbackIcon {
+  color: var(--color-status-info-text);
+  flex: none;
+}
+.rollbackText {
+  flex: 1;
+}
+
+.timeline {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+}
+.timelineRow {
+  display: grid;
+  grid-template-columns: max-content max-content 1fr;
+  gap: var(--sp-3);
+  padding: var(--sp-2) 0;
+  border-bottom: 1px solid var(--color-border-subtle);
+  font-size: var(--fs-sm);
+  align-items: baseline;
+}
+.timelineRow:last-child {
+  border-bottom: 0;
+}
+.timelineActor {
+  font-weight: 600;
+}
+.timelineObject {
+  color: var(--color-text-muted);
+}

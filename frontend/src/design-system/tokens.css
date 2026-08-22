@@ -1,0 +1,178 @@
+/* CULVERT design tokens — ONE semantic system (FE-2 §2).
+   Doctrine: components consume SEMANTIC tokens only; raw values live here and
+   nowhere else. Both themes are first-class and field-for-field parallel —
+   the dark/light gap class of bug is structurally prevented.
+   Identity inherited deliberately from the legacy system (DESIGN-SYSTEM.md):
+   deep-navy operations canvas, teal accent, 4px grid, dense 13–14px text,
+   1px borders over shadows, tabular-nums metrics. */
+
+:root {
+  /* ── Typography ─────────────────────────────────────────────────────── */
+  --font-ui:
+    system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial,
+    sans-serif;
+  --font-mono:
+    ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  --fs-xs: 0.72rem; /* table headers, badges, captions */
+  --fs-sm: 0.8rem; /* secondary text, dense cells */
+  --fs-md: 0.875rem; /* body, inputs, buttons */
+  --fs-lg: 1rem; /* section titles */
+  --fs-xl: 1.25rem; /* page headings */
+  --fs-2xl: 1.75rem; /* metric values (tabular-nums) */
+  --lh-tight: 1.25;
+  --lh-body: 1.5;
+
+  /* ── Spacing (4px grid, compact enterprise density) ─────────────────── */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+
+  /* ── Geometry ───────────────────────────────────────────────────────── */
+  --r-sm: 4px;
+  --r-md: 6px;
+  --r-lg: 10px;
+  --r-full: 999px;
+  --control-h: 32px; /* buttons, inputs, selects */
+  --control-h-sm: 26px; /* dense row actions */
+  --table-row-h: 36px;
+  --sidebar-w: 232px;
+  --sidebar-w-narrow: 56px;
+  --topbar-h: 48px;
+
+  /* ── Motion ─────────────────────────────────────────────────────────── */
+  --dur-fast: 120ms;
+  --dur-base: 180ms;
+  --dur-slow: 280ms;
+  --ease: cubic-bezier(0.2, 0, 0.2, 1);
+
+  /* ── Layering contract ──────────────────────────────────────────────── */
+  --z-shell: 100; /* sidebar / topbar */
+  --z-dropdown: 400;
+  --z-toast: 700;
+  /* native <dialog> lives in the browser top layer, above everything;
+     these values govern non-top-layer stacking only. */
+}
+
+/* ── Dark (primary — operations rooms) ────────────────────────────────── */
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --color-canvas: #0b0f1a;
+  --color-surface: #111827; /* cards, panels */
+  --color-surface-raised: #151d2e; /* nested surfaces */
+  --color-surface-sunken: #0d1322; /* wells, code blocks */
+  --color-elevated: #1a2235; /* floating layers (menus, dialogs) */
+  --color-border: #263145;
+  --color-border-subtle: #1c2536;
+
+  --color-text: #e2e8f0;
+  --color-text-secondary: #aab4c8;
+  --color-text-muted: #8892a8;
+  --color-text-disabled: #5b6578;
+  --color-text-inverse: #0b0f1a;
+
+  --color-interactive: #14b8a6;
+  --color-interactive-hover: #2dd4bf;
+  --color-interactive-active: #0d9488;
+  --color-interactive-tint: rgba(20, 184, 166, 0.12);
+  --color-focus: #2dd4bf;
+
+  --color-status-info-text: #7dd3fc;
+  --color-status-info-bg: rgba(56, 189, 248, 0.12);
+  --color-status-info-border: rgba(56, 189, 248, 0.35);
+  --color-status-ok-text: #4ade80;
+  --color-status-ok-bg: rgba(34, 197, 94, 0.12);
+  --color-status-ok-border: rgba(34, 197, 94, 0.35);
+  --color-status-warn-text: #fbbf24;
+  --color-status-warn-bg: rgba(245, 158, 11, 0.12);
+  --color-status-warn-border: rgba(245, 158, 11, 0.4);
+  --color-status-critical-text: #f87171;
+  --color-status-critical-bg: rgba(239, 68, 68, 0.12);
+  --color-status-critical-border: rgba(239, 68, 68, 0.45);
+  --color-status-critical-solid: #dc2626;
+  --color-status-on-critical: #ffffff;
+  --color-status-unknown-text: #a5b4fc;
+  --color-status-unknown-bg: rgba(129, 140, 248, 0.12);
+  --color-status-unknown-border: rgba(129, 140, 248, 0.35);
+  --color-status-neutral-text: #8892a8;
+  --color-status-neutral-bg: rgba(136, 146, 168, 0.12);
+  --color-status-neutral-border: rgba(136, 146, 168, 0.3);
+
+  --color-diff-add-bg: rgba(34, 197, 94, 0.1);
+  --color-diff-add-text: #4ade80;
+  --color-diff-del-bg: rgba(239, 68, 68, 0.1);
+  --color-diff-del-text: #f87171;
+
+  --shadow-dropdown: 0 4px 16px rgba(0, 0, 0, 0.45);
+  --shadow-dialog: 0 12px 40px rgba(0, 0, 0, 0.55);
+  --backdrop: rgba(4, 7, 14, 0.62);
+}
+
+/* ── Light (first-class, not an inversion) ────────────────────────────── */
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --color-canvas: #f3f4f6;
+  --color-surface: #ffffff;
+  --color-surface-raised: #f9fafb;
+  --color-surface-sunken: #eef0f3;
+  --color-elevated: #ffffff;
+  --color-border: #d6dbe3;
+  --color-border-subtle: #e5e8ee;
+
+  --color-text: #1f2937;
+  --color-text-secondary: #4b5563;
+  --color-text-muted: #6b7280;
+  --color-text-disabled: #9aa3b0;
+  --color-text-inverse: #ffffff;
+
+  --color-interactive: #0d9488;
+  --color-interactive-hover: #0f766e;
+  --color-interactive-active: #115e59;
+  --color-interactive-tint: rgba(13, 148, 136, 0.1);
+  --color-focus: #0d9488;
+
+  --color-status-info-text: #0369a1;
+  --color-status-info-bg: rgba(3, 105, 161, 0.08);
+  --color-status-info-border: rgba(3, 105, 161, 0.3);
+  --color-status-ok-text: #15803d;
+  --color-status-ok-bg: rgba(21, 128, 61, 0.08);
+  --color-status-ok-border: rgba(21, 128, 61, 0.3);
+  --color-status-warn-text: #a16207;
+  --color-status-warn-bg: rgba(161, 98, 7, 0.1);
+  --color-status-warn-border: rgba(161, 98, 7, 0.35);
+  --color-status-critical-text: #b91c1c;
+  --color-status-critical-bg: rgba(185, 28, 28, 0.08);
+  --color-status-critical-border: rgba(185, 28, 28, 0.35);
+  --color-status-critical-solid: #b91c1c;
+  --color-status-on-critical: #ffffff;
+  --color-status-unknown-text: #4f46e5;
+  --color-status-unknown-bg: rgba(79, 70, 229, 0.08);
+  --color-status-unknown-border: rgba(79, 70, 229, 0.3);
+  --color-status-neutral-text: #6b7280;
+  --color-status-neutral-bg: rgba(107, 114, 128, 0.1);
+  --color-status-neutral-border: rgba(107, 114, 128, 0.3);
+
+  --color-diff-add-bg: rgba(21, 128, 61, 0.08);
+  --color-diff-add-text: #15803d;
+  --color-diff-del-bg: rgba(185, 28, 28, 0.08);
+  --color-diff-del-text: #b91c1c;
+
+  --shadow-dropdown: 0 4px 16px rgba(15, 23, 42, 0.14);
+  --shadow-dialog: 0 12px 40px rgba(15, 23, 42, 0.22);
+  --backdrop: rgba(15, 23, 42, 0.4);
+}
+
+/* ── Reduced motion: durations collapse globally ──────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-fast: 0ms;
+    --dur-base: 0ms;
+    --dur-slow: 0ms;
+  }
+}

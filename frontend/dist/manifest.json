@@ -1,11 +1,26 @@
 {
   "index.html": {
-    "file": "assets/index-JKo3N-Hu.js",
+    "file": "assets/index-CyTZX-Ps.js",
     "name": "index",
     "src": "index.html",
     "isEntry": true,
+    "dynamicImports": [
+      "src/features/gallery/GalleryPage.tsx"
+    ],
     "css": [
-      "assets/index--XtOykcB.css"
+      "assets/index-BCcoV_JT.css"
+    ]
+  },
+  "src/features/gallery/GalleryPage.tsx": {
+    "file": "assets/GalleryPage-BZ7xoSIx.js",
+    "name": "GalleryPage",
+    "src": "src/features/gallery/GalleryPage.tsx",
+    "isDynamicEntry": true,
+    "imports": [
+      "index.html"
+    ],
+    "css": [
+      "assets/GalleryPage-DpA5kiIo.css"
     ]
   }
 }

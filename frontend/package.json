@@ -12,7 +12,7 @@
   "scripts": {
     "generate": "sh scripts/generate-types.sh",
     "lint": "eslint .",
-    "format:check": "prettier --check \"src/**/*.{ts,tsx,css}\" \"*.{ts,html}\" \"scripts/**/*.mjs\"",
+    "format:check": "prettier --check \"src/**/*.{ts,tsx,css}\" \"e2e/**/*.ts\" \"*.{ts,html}\" \"scripts/**/*.mjs\"",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "build": "vite build",
