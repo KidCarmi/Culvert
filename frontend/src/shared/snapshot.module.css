@@ -1,0 +1,12 @@
+.bar {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.updated {
+  color: var(--color-text-muted);
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
