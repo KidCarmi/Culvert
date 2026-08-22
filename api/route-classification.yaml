@@ -3115,6 +3115,51 @@ routes:
     audit_expected: true
     danger_level: low
     documented: true
+  - route: "/app"
+    method: "*"
+    handler: "handleFrontendV2Shell"
+    domain: "static"
+    visibility: intentionally-undocumented
+    min_role: "public"
+    mutating: false
+    audit_expected: false
+    danger_level: medium
+    documented: false
+    exemption:
+      owner: platform-team
+      reason: experimental FrontendV2 SPA shell (FE-1B, default-off behind CULVERT_EXPERIMENTAL_UI), not an API surface
+      security_class: non-rest-surface
+      expires: *baseline
+  - route: "/app/"
+    method: "*"
+    handler: "handleFrontendV2Shell"
+    domain: "static"
+    visibility: intentionally-undocumented
+    min_role: "public"
+    mutating: false
+    audit_expected: false
+    danger_level: medium
+    documented: false
+    exemption:
+      owner: platform-team
+      reason: experimental FrontendV2 SPA shell + deep links (FE-1B, default-off), not an API surface
+      security_class: non-rest-surface
+      expires: *baseline
+  - route: "/assets/"
+    method: "*"
+    handler: "handleFrontendV2Asset"
+    domain: "static"
+    visibility: intentionally-undocumented
+    min_role: "public"
+    mutating: false
+    audit_expected: false
+    danger_level: medium
+    documented: false
+    exemption:
+      owner: platform-team
+      reason: FrontendV2 hashed static assets (FE-1B, default-off), not an API surface
+      security_class: non-rest-surface
+      expires: *baseline
   - route: "/auth/logout"
     method: "*"
     handler: "authLogout"

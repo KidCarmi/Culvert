@@ -89,6 +89,17 @@ var uiRoutes = []uiRouteMetadata{
 	{Path: "/", Handler: "serveUIShell", Domain: "static", Public: true,
 		Methods: []uiRouteMethod{{Method: MethodAny, MinRole: RolePublic}}},
 
+	// ── FrontendV2 experimental preview (FE-1B, ADR-FE-001) ───────────────
+	// Default-OFF behind CULVERT_EXPERIMENTAL_UI (handlers 404 when
+	// disabled, indistinguishable from an unregistered path). GET/HEAD-only
+	// enforced in-handler; strict nonce-free CSP is route-scoped there.
+	{Path: "/app", Handler: "handleFrontendV2Shell", Domain: "static", Public: true,
+		Methods: []uiRouteMethod{{Method: MethodAny, MinRole: RolePublic}}},
+	{Path: "/app/", Handler: "handleFrontendV2Shell", Domain: "static", Public: true,
+		Methods: []uiRouteMethod{{Method: MethodAny, MinRole: RolePublic}}},
+	{Path: "/assets/", Handler: "handleFrontendV2Asset", Domain: "static", Public: true,
+		Methods: []uiRouteMethod{{Method: MethodAny, MinRole: RolePublic}}},
+
 	// ── Setup bootstrap (public allowlist /api/setup) ─────────────────────
 	{Path: "/api/setup/status", Handler: "apiSetupStatus", Domain: "setup", Public: true,
 		Methods: []uiRouteMethod{{Method: "GET", MinRole: RolePublic}}},
