@@ -43,6 +43,9 @@ export function checkDist() {
     errors.push("index.html: nonce plumbing present (banned for the new app)");
   for (const m of html.matchAll(/\b(?:src|href)\s*=\s*["']([^"']+)["']/gi)) {
     const url = m[1] ?? "";
+    // Same-origin-relative and data: URIs only (data: makes no network
+    // request and is admitted by the CSP's img-src data:).
+    if (url.startsWith("data:")) continue;
     if (!url.startsWith("/") || url.startsWith("//"))
       errors.push(`index.html: non-same-origin resource URL ${url}`);
   }
