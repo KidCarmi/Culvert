@@ -101,14 +101,13 @@ On the merged head `c1d3db57…` (PR #1194, final check set — all green):
 - External review: Codex re-review concluded "Didn't find any major issues";
   its one accepted P2 finding (governance health vocabulary) was fixed in B1.2.
 
-Post-merge `main` push (`fdad5254…`) triggered the full main-path workflows
-(CI run 3774, QA Gate run 2991, Security Release Gate run 3639), which were
-still executing when this record was written; their conclusions belong to the
-`main` branch health record, not to the PR acceptance evidence above. Relevant
-base context: the previous `main` push (`2517c8d2…`, PR #1189 — **before**
-Batch 1) already had QA Gate red, which made CI's Auto-Tag job fail its
-"Require Security + QA gate approval" step; that condition predates and is
-unrelated to this delivery.
+Post-merge `main` push (`fdad5254…`) ran the full main-path workflows —
+**all three concluded success**: CI run 3774 (16:34:40Z), QA Gate run 2991
+(16:34:16Z), Security Release Gate run 3639 (16:27:59Z). Relevant base
+context: the previous `main` push (`2517c8d2…`, PR #1189 — **before**
+Batch 1) had QA Gate red, which made CI's Auto-Tag job fail its "Require
+Security + QA gate approval" step; that pre-existing condition cleared with
+this push — `main` is greener after the Batch 1 merge than before it.
 
 ## 6. Known deferred work (inherited by Batch 2+)
 
