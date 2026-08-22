@@ -5,7 +5,7 @@
 // CSP, with console/error/external-request monitoring throughout.
 import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
-import { openNavToFinalState } from "./nav-open";
+import { expectNavLinkReachable, openNavToFinalState } from "./nav-open";
 
 function watch(
   page: Page,
@@ -186,13 +186,12 @@ test("zoom/narrow reflow: no page-level horizontal scroll, nav fully opens", asy
   // Critical navigation reaches its FINAL open state: sidebar fully
   // in-viewport, settled at x = 0 — a mid-transition sliver fails this.
   await openNavToFinalState(page);
-  // Every critical link is 100% inside the viewport, not merely "visible".
-  await expect(
-    page.getByRole("link", { name: "Design System" }),
-  ).toBeInViewport({ ratio: 1 });
-  await expect(page.getByRole("link", { name: "Overview" })).toBeInViewport({
-    ratio: 1,
-  });
+  // Every critical link is REACHABLE and then 100% inside the viewport.
+  // Since FE-4 the nav is taller than one 640×800 viewport (Monitor +
+  // Governance entries) and the sidebar scrolls by design, so the honest
+  // condition is scroll-within-the-panel → fully visible.
+  await expectNavLinkReachable(page, "Design System");
+  await expectNavLinkReachable(page, "Overview");
   // The open panel introduces no page-level horizontal overflow either.
   const overflowOpen = await page.evaluate(
     () =>

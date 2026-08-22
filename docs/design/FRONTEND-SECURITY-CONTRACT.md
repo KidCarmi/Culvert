@@ -101,10 +101,11 @@ without a counterpart — enforced by the route-coverage gate, green on this che
 | OpenAPI-applicable rows | **334** | 346 − 12 |
 | Documented rows | **334** | 100% of applicable rows |
 | Exempt rows | **12** | all non-REST, owner + expiry recorded |
-| Frontend-consumed exempt rows | **6** | `/` (legacy shell), `/app` + `/app/` + `/assets/` (the v2 app itself — HTML shell + hashed assets, browser navigations/loads, not XHR), `/api/events` (future SSE hook), `/api/idp/` (IdP item/groups sub-router — needs a hand-authored type + decoder). `/auth/*` are browser navigations the SPA links to, not XHR; `/api/cluster/bootstrap/` is not consumed by the SPA. |
+| Frontend-consumed exempt rows | **5** | `/` (legacy shell), `/app` + `/app/` + `/assets/` (the v2 app itself — HTML shell + hashed assets, browser navigations/loads, not XHR), `/api/idp/` (IdP item/groups sub-router — needs a hand-authored type + decoder). `/auth/*` are browser navigations the SPA links to, not XHR; `/api/cluster/bootstrap/` is not consumed by the SPA. `/api/events` moved OUT of this set (FE-4 / ADR-FE-002): the v2 client never consumes the SSE surface — it stays exempt as a legacy-UI-only stream. |
 
 Consequence: `types.gen.ts` covers every JSON XHR surface except the `/api/idp/` sub-router
-(hand-authored types + decoder) and the SSE payload (hand-authored decoder in the SSE hook).
+(hand-authored types + decoder). No SSE decoder exists or is planned: per ADR-FE-002 the
+v2 client consumes snapshots and bounded queries only, never `/api/events`.
 
 ## 8. Destructive-operation ceremonies
 
@@ -142,7 +143,7 @@ Consequence: `types.gen.ts` covers every JSON XHR surface except the `/api/idp/`
 |---|---|
 | U1 | File upload (certs, YARA rules, config import, CDR test) uses the existing endpoints with server-side validation; client `accept=` filters are UX only. Config import always runs the `dryRun=true` preview and shows the change summary before the destructive apply, preserving replace-vs-merge. |
 | U2 | Downloads keep server-set `Content-Disposition` semantics; Blob URLs are revoked after use and at the authentication boundary; export redaction disclosure (secrets excluded by construction) is presented next to the action. |
-| U3 | SSE: one EventSource, same-origin, jittered backoff preserved; the retry give-up becomes resumable (user-visible reconnect affordance); 503 + `Retry-After` honored; stream torn down on route unmount and at the authentication boundary. |
+| U3 | SSE: **superseded for v2 by ADR-FE-002 (FE-4, 2026-08-22)** — the v2 client opens no EventSource and never requests `/api/events` (browser-proven), so this invariant has no v2 implementation surface; it remains the recorded posture of the retained legacy stream. Monitor data arrives only via explicit, bounded, server-filtered queries with visible snapshot freshness ("Updated" advances only on success; failed refresh keeps the previous snapshot behind an explicit stale indicator), and superseded/torn-down queries are aborted at the network layer (the §6.4/Q4 boundary contract covers them). |
 | U4 | Errors follow UX-PRINCIPLES: what failed / why / next action / current state. Distinct partial-failure states (rollback "applied-but-not-persisted", release `available:false` with reason, MCP unknown-state) each get distinct rendering — never a generic toast. Production builds never log secrets or full request bodies to the console. |
 
 ## 12. Backend security work items this contract references

@@ -313,16 +313,76 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 >   multi-tab identity-switch spec; unit matrix incl. §6 A–G continuity
 >   proofs.
 
-### FE-4 — Dashboard & diagnostics
-- **Objective**: FE-V01 (dashboard incl. SSE liveness + charts per the FE-2 gate outcome),
-  FE-V02 (traffic), FE-V03 (audit), FE-V34 (diagnostics), FE-V38 (governance).
-- **Dependency**: FE-3. **Size**: L. One PR per view; chart chunk lazy-loaded.
-- **DoD**: SSE reconnect resumable past the retry cap; tick pause-on-error/resume-on-SSE;
-  visibility-gated polling; diagnostics `operator_action` rendering.
-- **Browser proof**: SSE reconnection, polling cleanup on navigation, diagnostics run,
-  deep-link + refresh.
-- **Exit gate (evidence)**: **automated polling/SSE memory soak** (scripted, in CI or a
-  recorded harness run): dashboard soak with forced reconnects shows a stable heap.
+### FE-4 — Snapshot operations & Monitor — IMPLEMENTED (this branch)
+- **Objective (as revised by ADR-FE-002, Accepted)**: FE-V01 (Overview as a SNAPSHOT
+  dashboard), FE-V02 (Traffic as a QUERY-DRIVEN history console), FE-V03 (audit),
+  FE-V34 (diagnostics), FE-V38 (governance).
+- **Dependency**: FE-3. **Size**: L.
+- **Product decision (authoritative — `docs/adr/ADR-FE-002-monitor-query-model.md`)**:
+  the CULVERT Monitor is query-driven, not stream-driven. Explicit queries, mandatory
+  time ranges, server-side filtering, bounded server-side pagination, explicit refresh,
+  visible snapshot freshness. The v2 client consumes **no SSE and no polling ticks**:
+  no `EventSource`, no `/api/events` request, no auto-refresh (deferred; if ever added
+  it is opt-in, OFF by default, ≥30 s, route+document-visible only, never persisted).
+  The backend SSE surface is retained untouched for the legacy UI.
+
+> **FE-4 implementation record (2026-08-22, externally reviewed).**
+> - **Backend scale contract (FE-4.1)**: `internal/logstore` gained
+>   `QueryPage` — keyset (cursor) pagination newest-first over the
+>   `(timestamp, seq)` total order; scans only one page + one look-ahead
+>   match, computes NO exact total, stable under concurrent appends.
+>   `GET /api/logs?source=store` gained an opaque stateless cursor mode
+>   (`ui_logs_cursor.go`): base64url `{v,ts,seq,fp}` where `fp` is a bounded
+>   fingerprint of the filtering query — a cursor minted for query A is a
+>   controlled 400 against query B; malformed/oversized cursors are 400;
+>   page default 100 / max 500; response carries `has_more` + `next_cursor`
+>   and deliberately no total. The legacy offset mode is byte-compatible.
+>   Deterministic scale proof via the `Scanned` seam: page 40 of a
+>   5000-entry store costs the same scan count (≤ limit+1) as page 1.
+> - **Snapshot freshness contract (§17)**: one `useSnapshot` hook + one
+>   `SnapshotBar` implement loading → fresh → refreshing → error-with-
+>   previous-snapshot → error-empty. "Updated HH:MM:SS" advances ONLY on a
+>   successful response; a failed refresh keeps the old snapshot behind an
+>   explicit "Refresh failed — showing previous snapshot" indicator
+>   (browser-proven with a network-abort fixture).
+> - **Overview**: ONE snapshot fetch set (`/api/stats`, `/api/timeseries`,
+>   `/api/dashboard/{health,threats,top-rules}`) so the page carries a
+>   single honest freshness timestamp; persistence/degraded warnings
+>   (audit/request-log persistence inactive, write errors, cluster publish
+>   rejected) render above the grid; manual Refresh only.
+> - **Traffic**: draft→Apply query console (no per-keystroke queries);
+>   mandatory time presets 15m/1h/6h/24h/custom (from<to validated);
+>   Previous/Next over an in-memory cursor stack (reload ⇒ page 1 —
+>   documented §22 choice; safe query state lives in the URL, the opaque
+>   cursor never does); truthful availability states — disabled store ≠
+>   error ≠ empty, and the in-memory RECENT-ring fallback is an explicit
+>   button and clearly labelled as a different, volatile source; superseded
+>   in-flight queries are aborted (proven at the network layer).
+> - **Audit**: bounded time-windowed pages over `/api/audit` (offset
+>   pagination is honest here — the backend computes a real total and the
+>   read is bounded); sources labelled truthfully (500-entry volatile ring
+>   vs durable JSONL); before/after snapshots render as text, never HTML.
+> - **Diagnostics**: viewer snapshot with `operator_action` first-class on
+>   warn/fail rows; `/api/diagnose/{verb}` runs ONLY on explicit operator
+>   action (browser-proven: zero diagnose requests on page load), gated to
+>   operator+ in UI with the server authoritative; results decode
+>   `schema_version` fail-closed (unsupported schema ⇒ controlled error,
+>   never guessed rendering).
+> - **Governance**: admin-only snapshot of `/api/governance/control-plane`
+>   presented operator-first (enforcement mode, health, findings with
+>   hints, counters); viewer direct navigation fails closed into an
+>   explicit error state via the server's 403 (no nav entry, no crash).
+> - **DoD deviations from the original FE-4 text (all deliberate,
+>   ADR-FE-002)**: no SSE reconnect/LIVE-STALE pill, no tick
+>   pause/resume, no polling, and the polling/SSE memory-soak exit gate is
+>   replaced by (a) the deterministic scan-count proof above and (b) the
+>   browser-proven no-stream posture (zero `/api/events` requests across
+>   every FE-4 flow). Charts remain the FE-2 internal SVG primitives.
+> - **Qualification checkpoint**: real-binary Playwright suite over 150
+>   seeded `POLICY_DEFAULT_DENY` history entries (Zero-Trust `default_action:
+>   deny` harness, Badger store provisioned via `log_store_path`), plus the
+>   history-disabled FRESH appliance; viewports 1440/1024/640(≈200% zoom);
+>   §25 evidence set delivered as artifacts (never committed).
 
 ### FE-5 — Policy, security, network features
 - **Objective**: FE-V16..V26 (policy + draft/commit + staged reorder + tester + authpolicy +
