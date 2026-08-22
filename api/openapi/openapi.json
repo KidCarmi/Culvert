@@ -1647,7 +1647,7 @@
       },
       "LDAPProfileConfigInput": {
         "additionalProperties": false,
-        "description": "LDAP/Active Directory profile settings (ADR-0025). bindPassword is a\nWRITE-ONLY input: never returned by reads, preserved when omitted on\nupdate, cleared only when present and empty. Read responses carry the\nderived bindCredentialConfigured flag instead.\n",
+        "description": "LDAP/Active Directory profile settings (ADR-0027). bindPassword is a\nWRITE-ONLY input: never returned by reads, preserved when omitted on\nupdate, cleared only when present and empty. Read responses carry the\nderived bindCredentialConfigured flag instead.\n",
         "nullable": true,
         "properties": {
           "baseDn": {

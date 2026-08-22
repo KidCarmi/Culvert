@@ -1,5 +1,5 @@
 # Deterministic OpenLDAP fixture for the Culvert LDAP IdP interop suite
-# (ADR-0025). Loaded by osixia/openldap into dc=corp,dc=example.
+# (ADR-0027). Loaded by osixia/openldap into dc=corp,dc=example.
 #
 # Users:
 #   alice / alice-password  — displayName "Alice Example", mail, member of engineering

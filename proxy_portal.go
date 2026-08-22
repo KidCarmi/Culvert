@@ -40,7 +40,7 @@ func resolveCaptivePortalURL(r *http.Request) string {
 	}
 
 	// Single provider — redirect directly without selection screen.
-	// INTERACTIVE providers only (ADR-0025): a credential-only provider
+	// INTERACTIVE providers only (ADR-0027): a credential-only provider
 	// (LDAP) cannot fulfil a captive redirect and must not swallow it.
 	providers := idpRegistry.EnabledInteractiveProviders()
 	if len(providers) == 1 {

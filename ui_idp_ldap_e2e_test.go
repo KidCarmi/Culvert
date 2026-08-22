@@ -2,7 +2,7 @@
 
 package main
 
-// LDAP / Active Directory IdP GUI E2E (ADR-0025, Slice 4) — advisory tier.
+// LDAP / Active Directory IdP GUI E2E (ADR-0027, Slice 4) — advisory tier.
 //
 // Drives real Chromium against the in-process admin UI and covers the mission
 // contract for the Identity Providers screen:

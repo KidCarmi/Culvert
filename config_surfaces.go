@@ -499,7 +499,7 @@ var configSurfaces = []configSurfaceRow{
 	{ID: "trusted_proxy_cidrs_saved", Kind: kindSentinel, AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "TrustedProxyCIDRsSaved"}}},
 	{ID: "legacy_ldap_retired", Kind: kindSentinel, AdminDurable: true,
-		Note:     "ADR-0025 P1-2 durable LDAP-authority cutover: node-local, OFF export/import/rollback/CP→DP — a restore must never resurrect the retired YAML authenticator",
+		Note:     "ADR-0027 P1-2 durable LDAP-authority cutover: node-local, OFF export/import/rollback/CP→DP — a restore must never resurrect the retired YAML authenticator",
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "LegacyLDAPRetired"}}},
 	{ID: "yara_settings_saved", Kind: kindSentinel, AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "YARASettingsSaved"}}},

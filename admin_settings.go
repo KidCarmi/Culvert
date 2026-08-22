@@ -75,7 +75,7 @@ type AdminSettings struct {
 	LogCriticalDiskPct int `json:"log_critical_disk_pct,omitempty"`
 
 	// LegacyLDAPRetired is the durable LDAP-authority cutover sentinel
-	// (ADR-0025 / P1-2): once an enabled registry LDAP identity provider is
+	// (ADR-0027 / P1-2): once an enabled registry LDAP identity provider is
 	// observed on a node that carries a legacy YAML ldap block, the block is
 	// permanently retired as an operational authenticator — across registry
 	// disable/delete and every restart. Node-local + AdminDurable-only (never
@@ -483,7 +483,7 @@ func applyBlocklistFeeds(s *AdminSettings) {
 }
 
 // applyLegacyLDAPRetirement applies the durable LDAP-authority cutover
-// sentinel (ADR-0025 / P1-2). LoadAdminSettings runs AFTER the legacy auth
+// sentinel (ADR-0027 / P1-2). LoadAdminSettings runs AFTER the legacy auth
 // providers wire (main.go init order), so a retired-but-still-wired legacy
 // provider from THIS boot is deactivated here via the shared enforcement
 // path. The reverse reconciliation also lives here: a cutover observed

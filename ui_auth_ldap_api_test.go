@@ -1,6 +1,6 @@
 package main
 
-// ui_auth_ldap_api_test.go — Slice 3 wall (ADR-0025): the LDAP admin-API
+// ui_auth_ldap_api_test.go — Slice 3 wall (ADR-0027): the LDAP admin-API
 // surface. Directory-free: live-directory behavior is covered by the
 // OpenLDAP interop suite; here we pin request validation, RBAC, staged-report
 // shape on unreachable targets, stored-secret reuse, audit hygiene, the

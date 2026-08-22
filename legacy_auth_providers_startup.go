@@ -17,9 +17,9 @@ import "fmt"
 func loadLegacyAuthProviders(c legacyAuthProvidersStartupConfig) error {
 	if c.LDAP.URL != "" {
 		// Retain the resolved YAML block (read-only) so the admin API can
-		// summarize it and offer the explicit registry import (ADR-0025).
+		// summarize it and offer the explicit registry import (ADR-0027).
 		setLegacyLDAPYAMLConfig(c.LDAP)
-		// ADR-0025 single-authority rule (P1-2): the legacy YAML block is
+		// ADR-0027 single-authority rule (P1-2): the legacy YAML block is
 		// never wired once the node has CUT OVER to the IdP registry — either
 		// durably (the legacy_ldap_retired sentinel; loaded from
 		// admin_settings.json later in boot and re-enforced there, or set by

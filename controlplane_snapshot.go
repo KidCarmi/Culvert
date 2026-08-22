@@ -1147,7 +1147,7 @@ func syncSnapshotIdPProfiles(snap ConfigSnapshot) error {
 		return fmt.Errorf("idp profile sync: %w", err)
 	}
 	// A synced enabled LDAP profile makes the registry the sole operational
-	// LDAP authority on this DP too (ADR-0025) — a node-local legacy YAML
+	// LDAP authority on this DP too (ADR-0027) — a node-local legacy YAML
 	// ldap provider must not remain a second authenticator.
 	enforceLegacyLDAPShadowing()
 	logger.Printf("DataPlane: synced %d IdP profile(s) from control plane", len(snap.IdPProfiles))

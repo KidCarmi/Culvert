@@ -1028,7 +1028,7 @@ func authSelectProvider(w http.ResponseWriter, r *http.Request) {
 	// Optional providers= filter (Phase 3 Slice 4) scopes the selection to a set
 	// of bare IdP profile IDs (used by an SSORequired rule's providerRefs); absent
 	// → all enabled providers (backward-compatible; Default flow unaffected).
-	// INTERACTIVE providers only (ADR-0025): the sign-in selector must never
+	// INTERACTIVE providers only (ADR-0027): the sign-in selector must never
 	// offer a credential-only provider (LDAP) — it has no browser flow.
 	providers := filterProvidersByID(idpRegistry.EnabledInteractiveProviders(), r.URL.Query().Get("providers"))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -1082,7 +1082,7 @@ func registerAuthRoutes(mux *http.ServeMux) {
 	// ── Generic IdP Framework ─────────────────────────────────────────────
 	mux.HandleFunc("/api/idp", apiIdPList)                                // GET list / POST create
 	mux.HandleFunc("/api/idp/discover", apiIdPDiscover)                   // POST: run OIDC discovery (must be before /api/idp/)
-	mux.HandleFunc("/api/idp/test", apiIdPTest)                           // POST: candidate-based LDAP directory test (ADR-0025)
+	mux.HandleFunc("/api/idp/test", apiIdPTest)                           // POST: candidate-based LDAP directory test (ADR-0027)
 	mux.HandleFunc("/api/idp/legacy-ldap", apiIdPLegacyLDAP)              // GET: legacy YAML ldap summary
 	mux.HandleFunc("/api/idp/legacy-ldap/import", apiIdPLegacyLDAPImport) // POST: explicit legacy import
 	mux.HandleFunc("/api/idp/", apiIdPRouter)                             // GET|PUT|DELETE /api/idp/{id} + /api/idp/{id}/groups

@@ -173,7 +173,7 @@ func buildOperatorContract() OperatorContract {
 	// exemption postures. Contributes nothing when no exempt rules exist.
 	checks = append(checks, authExemptDiagnostics(policyStore.List(), policyActionFromDefault())...)
 	checks = append(checks, authCredentialRequiredDiagnostics(policyStore.List(), hasCredentialCapableProvider())...)
-	// LDAP profile hygiene diagnostics (ADR-0025). Report-only; contribute
+	// LDAP profile hygiene diagnostics (ADR-0027). Report-only; contribute
 	// nothing when no LDAP profiles exist.
 	checks = append(checks, authLDAPProfileDiagnostics()...)
 	// SSORequired risk diagnostics + auth-rule shadow/overlap diagnostics (Phase 3
@@ -1322,7 +1322,7 @@ func hasCredentialCapableProvider() bool {
 		}
 	}
 	// HasEnabledCredentialProvider reads the profiles in place (OIDC or LDAP —
-	// the CREDENTIAL-capable types, ADR-0025). This probe runs on EVERY
+	// the CREDENTIAL-capable types, ADR-0027). This probe runs on EVERY
 	// proxied request (resolveRequestAuth's credCapable), and the previous
 	// idpRegistry.All() loop deep-cloned every profile per call just to
 	// answer this boolean — pure per-request allocation on the hot path.

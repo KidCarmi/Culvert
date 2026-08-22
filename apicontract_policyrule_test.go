@@ -106,7 +106,7 @@ func TestConformance_NicheStructs_Request(t *testing.T) {
 	cases := []struct{ method, path, good, bad string }{
 		{"POST", "/api/pac/pools", `{"name":"p1","endpoints":[{"host":"x"}]}`, `{"endpoints":"x"}`},
 		{"POST", "/api/pac/profiles", `{"name":"pr1","enabled":true,"poolId":"p1"}`, `{"name":"x","bogus":1}`},
-		// "ldap" joined the type enum (ADR-0025), so the invalid-enum probe
+		// "ldap" joined the type enum (ADR-0027), so the invalid-enum probe
 		// uses a type that stays outside the contract.
 		{"POST", "/api/idp", `{"name":"okta","type":"oidc","emailDomains":["c.com"],"enabled":true}`, `{"name":"x","type":"kerberos"}`},
 		{"PUT", "/api/policy/draft", `{"require_commit":true}`, `{"require_commit":"yes"}`},

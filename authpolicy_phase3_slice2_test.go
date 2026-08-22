@@ -109,7 +109,7 @@ func TestP3S2_ShapeRejectsInvalidSSORequired(t *testing.T) {
 
 func TestP3S2_ProviderRefsRejectedForCRAndExempt(t *testing.T) {
 	// CredentialRequired + providerRefs → rejected (reserved for a future
-	// program — an ADR-0025 draft activation was reverted because presented
+	// program — an ADR-0027 draft activation was reverted because presented
 	// credentials run the GLOBAL validator chain, so per-rule provider
 	// pinning was only half-enforced).
 	cr := validCRRule()

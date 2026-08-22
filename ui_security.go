@@ -326,8 +326,9 @@ func apiCertsUpload(w http.ResponseWriter, r *http.Request) {
 				"status":    "ok",
 				"target":    "mitm",
 				"persisted": false,
-				"warning": "The uploaded CA is active but could not be written to the CA bundle path — " +
-					"it exists in memory only and will be LOST on restart. Restore write access and upload again.",
+				"warning": "The uploaded CA is active but was not persisted — it exists in memory only " +
+					"and will be LOST on restart. Configure a persistent CA bundle path (-ca-path / " +
+					"proxy.ca_path) or restore write access to it, then upload again.",
 			})
 			return
 		}
@@ -1356,6 +1357,16 @@ func installAndPersistCustomMITMCA(certPEM, keyPEM []byte) (persisted bool, err 
 
 	if err := certMgr.LoadCustomCA(certPEM, keyPEM); err != nil {
 		return false, err
+	}
+	// Unlike persistRotatedCA's force-rotate caller — where an ephemeral,
+	// in-memory-only CA was already the documented behavior with no bundle
+	// path configured, so "no failure" is the right answer — an uploaded
+	// custom CA is an admin-supplied secret the admin was just told is
+	// "persisted". No bundle path configured means there is nowhere to
+	// write it, so this must report false (in-memory only), not reuse
+	// persistRotatedCA's "no durability claim to fail" semantics.
+	if caRuntime.path == "" {
+		return false, nil
 	}
 	if !persistRotatedCA() {
 		return false, nil

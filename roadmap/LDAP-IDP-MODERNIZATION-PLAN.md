@@ -22,7 +22,7 @@ P1-2/P1-3 applied the same day). Recorded decisions:
 - The provider-list Edit button's broken double-JSON attribute encoding
   (pre-existing) was fixed after the new browser E2E exposed it.
 
-Authority: this document + `docs/adr/0025-ldap-first-class-idp.md`. Where roadmap
+Authority: this document + `docs/adr/0027-ldap-first-class-idp.md`. Where roadmap
 status text and runtime code disagreed, the runtime code was treated as authoritative.
 
 ## 1. Verified current state (discovery report)
@@ -244,7 +244,7 @@ vet / build / targeted `-race` tests green before moving on. Gate for Slice 0:
 `legacy_auth_providers_startup.go` (shadowing), `config.example.yaml`,
 `api/openapi/openapi.yaml`, `api/route-classification.yaml`,
 `static/index.html`, `.github/workflows/auth-idp-interop.yml` + `.github/idp/openldap/`,
-`docs/adr/0025-ldap-first-class-idp.md`, `docs/operator/ldap-identity-provider.md`,
+`docs/adr/0027-ldap-first-class-idp.md`, `docs/operator/ldap-identity-provider.md`,
 plus test files.
 
 ## 12. Future design item — fully-scoped CredentialRequired provider selection

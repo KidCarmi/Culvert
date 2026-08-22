@@ -1,6 +1,6 @@
 package main
 
-// ui_auth_ldap.go — Admin API surface for the LDAP/AD IdP (ADR-0025, Slice 3):
+// ui_auth_ldap.go — Admin API surface for the LDAP/AD IdP (ADR-0027, Slice 3):
 //
 //   POST /api/idp/test               — staged, candidate-based directory test
 //   GET  /api/idp/legacy-ldap        — non-secret summary of the legacy YAML block
@@ -508,7 +508,7 @@ func ldapTestUserLookup(rep *ldapTestReport, conn *ldap.Conn, pc *LDAPProfileCon
 	}
 }
 
-// ─── Activation preflight (safe activation, ADR-0025 §15) ────────────────────
+// ─── Activation preflight (safe activation, ADR-0027 §15) ────────────────────
 
 // ldapActivationPreflight gates a profile write behind a live connection test
 // when the caller requested it (?preflight=connection). Only meaningful for

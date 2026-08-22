@@ -1,6 +1,6 @@
 package main
 
-// auth_idp_ldap_persistence_test.go — Slice 2 wall (ADR-0025):
+// auth_idp_ldap_persistence_test.go — Slice 2 wall (ADR-0027):
 //   - write-only bind-credential API semantics (redact / preserve / replace /
 //     explicit clear / no audit leak),
 //   - registry persistence round-trip,
@@ -303,7 +303,7 @@ func TestIdPRegistry_LDAPProfilePersistsAndReloads(t *testing.T) {
 	}
 }
 
-// ── Legacy YAML authority + durable cutover (ADR-0025 / P1-2) ────────────────
+// ── Legacy YAML authority + durable cutover (ADR-0027 / P1-2) ────────────────
 //
 // SINGLE-AUTHORITY WALL: one operational LDAP authenticator, no hidden legacy
 // fallback, durable cutover across registry disable/delete and restarts, and

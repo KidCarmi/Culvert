@@ -1,6 +1,6 @@
 # LDAP / Active Directory Identity Provider
 
-LDAP/AD is a first-class identity provider (ADR-0025): managed from
+LDAP/AD is a first-class identity provider (ADR-0027): managed from
 **Objects → Identity Providers**, no restarts, cluster-synced, producing full
 identities for Access Rules. This guide covers setup, migration from the
 legacy YAML block, policy integration, failure behavior, and the downgrade

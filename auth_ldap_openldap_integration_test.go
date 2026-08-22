@@ -1,7 +1,7 @@
 package main
 
 // auth_ldap_openldap_integration_test.go — REAL-directory interop suite for
-// the LDAP IdP (ADR-0025, Slice 6). Runs against a pinned OpenLDAP container
+// the LDAP IdP (ADR-0027, Slice 6). Runs against a pinned OpenLDAP container
 // seeded from .github/idp/openldap/bootstrap.ldif (see the "OpenLDAP" job in
 // .github/workflows/auth-idp-interop.yml). Env-gated: skips without
 // CULVERT_OPENLDAP_URL, exactly like the Keycloak/SimpleSAMLphp suites.
