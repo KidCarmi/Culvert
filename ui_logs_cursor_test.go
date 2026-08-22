@@ -54,12 +54,11 @@ func cursorStoreFixture(t *testing.T, n int) {
 	drainLogStore(t, s, n)
 }
 
-func getCursorPage(t *testing.T, query string) (cursorPageResp, int) {
+func getCursorPage(t *testing.T, query string) (resp cursorPageResp, code int) {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/api/logs?"+query, http.NoBody)
 	rec := httptest.NewRecorder()
 	apiLogs(rec, req)
-	var resp cursorPageResp
 	if rec.Code == http.StatusOK {
 		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 			t.Fatalf("unmarshal: %v", err)

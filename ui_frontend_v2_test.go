@@ -7,6 +7,7 @@ package main
 // is the real one.
 
 import (
+	"bytes"
 	"encoding/json"
 	"io/fs"
 	"net/http"
@@ -37,7 +38,7 @@ func fe1bServe(t *testing.T, st *frontendV2State, method, target string) *httpte
 	t.Cleanup(restore)
 	h := d0WrappedHandler(t)
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(method, target, nil)
+	req := httptest.NewRequest(method, target, http.NoBody)
 	h.ServeHTTP(rec, req)
 	return rec
 }
@@ -206,7 +207,7 @@ func TestFE1B_ManifestAndTraversalUnreachable(t *testing.T) {
 	// Traversal shapes: ServeMux canonicalizes dotted paths (301) — either a
 	// redirect or a 404 is acceptable; a 200 with file bytes is not.
 	for _, target := range []string{"/assets/../ca.bundle", "/assets/..%2fmain.go", "/assets/%2e%2e/secret"} {
-		req := httptest.NewRequest(http.MethodGet, target, nil)
+		req := httptest.NewRequest(http.MethodGet, target, http.NoBody)
 		restore := swapFrontendV2ForTest(st)
 		rec := httptest.NewRecorder()
 		d0WrappedHandler(t).ServeHTTP(rec, req)
@@ -636,7 +637,7 @@ func TestFE1B_ShellManifestBinding(t *testing.T) {
 			mIdx, _ := fs.ReadFile(mutated, "index.html")
 			mMan, _ := fs.ReadFile(mutated, "manifest.json")
 			bMan, _ := fs.ReadFile(fe1bFixture(nil), "manifest.json")
-			if string(mIdx) == string(base) && string(mMan) == string(bMan) {
+			if bytes.Equal(mIdx, base) && bytes.Equal(mMan, bMan) {
 				t.Fatal("fixture mutation did not change shell or manifest")
 			}
 			_, _, err := validateFrontendV2(mutated)

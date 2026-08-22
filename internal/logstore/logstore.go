@@ -633,18 +633,7 @@ func (s *Store) QueryPageWithBudget(fromMs, toMs int64, afterTS int64, afterSeq 
 	if s.closed {
 		return page, nil
 	}
-	if toMs <= 0 {
-		toMs = math.MaxInt64
-	}
-	if limit <= 0 {
-		limit = 100
-	}
-	if limit > maxQueryLimit {
-		limit = maxQueryLimit
-	}
-	if scanBudget <= 0 || scanBudget > scanCap {
-		scanBudget = scanCap
-	}
+	toMs, limit, scanBudget = clampPageQuery(toMs, limit, scanBudget)
 	page.Entries = make([]Entry, 0, queryAllocHint)
 	err := s.db.View(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
@@ -652,18 +641,7 @@ func (s *Store) QueryPageWithBudget(fromMs, toMs int64, afterTS int64, afterSeq 
 		it := txn.NewIterator(opts)
 		defer it.Close()
 
-		seek := storeKey(toMs, math.MaxUint32)
-		cursored := afterTS != 0 || afterSeq != 0
-		if cursored {
-			seek = storeKey(afterTS, afterSeq)
-		}
-		it.Seek(seek)
-		// Reverse Seek positions at the largest key <= seek: when resuming
-		// from a cursor that exact entry was already returned or scanned —
-		// skip it.
-		if cursored && it.Valid() && storeKeyEqual(it.Item().Key(), afterTS, afterSeq) {
-			it.Next()
-		}
+		seekPageStart(it, toMs, afterTS, afterSeq)
 		for ; it.Valid(); it.Next() {
 			item := it.Item()
 			k := item.Key()
@@ -704,6 +682,42 @@ func (s *Store) QueryPageWithBudget(fromMs, toMs int64, afterTS int64, afterSeq 
 		return nil
 	})
 	return page, err
+}
+
+// clampPageQuery normalizes the page-query bounds: an unset upper bound means
+// "newest", the page size is clamped to [1, maxQueryLimit] (default 100), and
+// the raw-scan budget to (0, scanCap] (<=0 ⇒ the production scanCap).
+func clampPageQuery(toMs int64, limit, scanBudget int) (int64, int, int) {
+	if toMs <= 0 {
+		toMs = math.MaxInt64
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > maxQueryLimit {
+		limit = maxQueryLimit
+	}
+	if scanBudget <= 0 || scanBudget > scanCap {
+		scanBudget = scanCap
+	}
+	return toMs, limit, scanBudget
+}
+
+// seekPageStart positions the reverse iterator at the first entry of this
+// page: the newest key within the window on a first page, or strictly after
+// the cursor key on a continuation. Reverse Seek positions at the largest key
+// <= seek, so when resuming from a cursor that exact entry was already
+// returned or scanned — skip it.
+func seekPageStart(it *badger.Iterator, toMs, afterTS int64, afterSeq uint32) {
+	seek := storeKey(toMs, math.MaxUint32)
+	cursored := afterTS != 0 || afterSeq != 0
+	if cursored {
+		seek = storeKey(afterTS, afterSeq)
+	}
+	it.Seek(seek)
+	if cursored && it.Valid() && storeKeyEqual(it.Item().Key(), afterTS, afterSeq) {
+		it.Next()
+	}
 }
 
 // storeKeyEqual reports whether k encodes exactly (tsMs, seq).

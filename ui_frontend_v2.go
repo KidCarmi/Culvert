@@ -173,22 +173,9 @@ func validateFrontendV2(dist fs.FS) (shell []byte, assets map[string]frontendV2A
 	if err != nil || len(shell) == 0 {
 		return nil, nil, fmt.Errorf("index.html missing or empty")
 	}
-	rawManifest, err := fs.ReadFile(dist, "manifest.json")
+	manifest, err := frontendV2ReadManifest(dist)
 	if err != nil {
-		return nil, nil, fmt.Errorf("manifest.json missing")
-	}
-	// Duplicate-key pre-scan BEFORE the generic decode: encoding/json is
-	// last-value-wins on duplicate object keys, which would let an ambiguous
-	// manifest smuggle a second definition past validation.
-	if err := frontendV2RejectDuplicateJSONKeys(rawManifest); err != nil {
 		return nil, nil, err
-	}
-	var manifest map[string]frontendV2ManifestEntry
-	if err := json.Unmarshal(rawManifest, &manifest); err != nil {
-		return nil, nil, fmt.Errorf("manifest.json does not parse")
-	}
-	if len(manifest) == 0 {
-		return nil, nil, fmt.Errorf("manifest.json has no entries")
 	}
 
 	referenced, err := frontendV2CollectRefs(manifest)
@@ -203,31 +190,9 @@ func validateFrontendV2(dist fs.FS) (shell []byte, assets map[string]frontendV2A
 	if err != nil {
 		return nil, nil, err
 	}
-
-	// Every manifest reference must exist in the embed; every embedded asset
-	// must be referenced (an unreferenced asset means the manifest and the
-	// tree disagree — ambiguous, fail closed).
-	assets = make(map[string]frontendV2Asset, len(referenced))
-	for ref := range referenced {
-		info, ok := embedded[ref]
-		if !ok {
-			return nil, nil, fmt.Errorf("manifest references missing file %q", ref)
-		}
-		assets[ref] = info
-	}
-	for p := range embedded {
-		if _, ok := referenced[p]; !ok {
-			return nil, nil, fmt.Errorf("embedded asset %q not referenced by manifest", p)
-		}
-	}
-	// Ambiguity: two logical assets must never collide case-insensitively.
-	lower := make(map[string]string, len(assets))
-	for p := range assets {
-		lc := strings.ToLower(p)
-		if prev, dup := lower[lc]; dup && prev != p {
-			return nil, nil, fmt.Errorf("ambiguous assets differing only by case")
-		}
-		lower[lc] = p
+	assets, err = frontendV2CrossCheckAssets(referenced, embedded)
+	if err != nil {
+		return nil, nil, err
 	}
 	// Bind the static shell to the validated authoritative entry: a shell
 	// that points at anything else must never be classified Ready (a 200
@@ -236,6 +201,58 @@ func validateFrontendV2(dist fs.FS) (shell []byte, assets map[string]frontendV2A
 		return nil, nil, err
 	}
 	return shell, assets, nil
+}
+
+// frontendV2ReadManifest reads + decodes manifest.json with the duplicate-key
+// pre-scan BEFORE the generic decode: encoding/json is last-value-wins on
+// duplicate object keys, which would let an ambiguous manifest smuggle a
+// second definition past validation.
+func frontendV2ReadManifest(dist fs.FS) (map[string]frontendV2ManifestEntry, error) {
+	rawManifest, err := fs.ReadFile(dist, "manifest.json")
+	if err != nil {
+		return nil, fmt.Errorf("manifest.json missing")
+	}
+	if err := frontendV2RejectDuplicateJSONKeys(rawManifest); err != nil {
+		return nil, err
+	}
+	var manifest map[string]frontendV2ManifestEntry
+	if err := json.Unmarshal(rawManifest, &manifest); err != nil {
+		return nil, fmt.Errorf("manifest.json does not parse")
+	}
+	if len(manifest) == 0 {
+		return nil, fmt.Errorf("manifest.json has no entries")
+	}
+	return manifest, nil
+}
+
+// frontendV2CrossCheckAssets requires the manifest reference set and the
+// embedded tree to agree exactly: every manifest reference must exist in the
+// embed; every embedded asset must be referenced (an unreferenced asset means
+// the manifest and the tree disagree — ambiguous, fail closed); and two
+// logical assets must never collide case-insensitively.
+func frontendV2CrossCheckAssets(referenced map[string]struct{}, embedded map[string]frontendV2Asset) (map[string]frontendV2Asset, error) {
+	assets := make(map[string]frontendV2Asset, len(referenced))
+	for ref := range referenced {
+		info, ok := embedded[ref]
+		if !ok {
+			return nil, fmt.Errorf("manifest references missing file %q", ref)
+		}
+		assets[ref] = info
+	}
+	for p := range embedded {
+		if _, ok := referenced[p]; !ok {
+			return nil, fmt.Errorf("embedded asset %q not referenced by manifest", p)
+		}
+	}
+	lower := make(map[string]string, len(assets))
+	for p := range assets {
+		lc := strings.ToLower(p)
+		if prev, dup := lower[lc]; dup && prev != p {
+			return nil, fmt.Errorf("ambiguous assets differing only by case")
+		}
+		lower[lc] = p
+	}
+	return assets, nil
 }
 
 // frontendV2ValidateImportGraph checks the chunk graph: every imports /
@@ -289,29 +306,7 @@ func frontendV2ValidateShellBinding(shell []byte, manifest map[string]frontendV2
 		return fmt.Errorf(`manifest "index.html" entry file is not a JS chunk`)
 	}
 
-	scripts := map[string]bool{}
-	for _, m := range frontendV2ShellScriptRE.FindAllSubmatch(shell, -1) {
-		scripts[string(m[1])] = true
-	}
-	stylesheets := map[string]bool{}
-	preloads := map[string]bool{}
-	for _, tag := range frontendV2ShellLinkRE.FindAll(shell, -1) {
-		var rel, href string
-		for _, am := range frontendV2ShellAttrRE.FindAllSubmatch(tag, -1) {
-			switch string(am[1]) {
-			case "rel":
-				rel = string(am[2])
-			case "href":
-				href = string(am[2])
-			}
-		}
-		switch rel {
-		case "stylesheet":
-			stylesheets[href] = true
-		case "modulepreload":
-			preloads[href] = true
-		}
-	}
+	scripts, stylesheets, preloads := frontendV2ShellRefs(shell)
 
 	// Exactly the entry JS, nothing else, addressed under /assets/.
 	wantJS := "/" + entry.File
@@ -335,19 +330,50 @@ func frontendV2ValidateShellBinding(shell []byte, manifest map[string]frontendV2
 		}
 	}
 	// Every bound URL must be a validated asset (same-origin /assets/ path).
-	for href := range scripts {
-		if _, ok := assets[strings.TrimPrefix(href, "/")]; !ok || !strings.HasPrefix(href, "/assets/") {
-			return fmt.Errorf("shell script is not a validated /assets/ artifact")
+	if err := frontendV2RequireValidatedAssets(scripts, assets, "shell script is not a validated /assets/ artifact"); err != nil {
+		return err
+	}
+	if err := frontendV2RequireValidatedAssets(stylesheets, assets, "shell stylesheet is not a validated /assets/ artifact"); err != nil {
+		return err
+	}
+	return frontendV2RequireValidatedAssets(preloads, assets, "shell modulepreload is not a validated /assets/ artifact")
+}
+
+// frontendV2ShellRefs extracts the shell's script srcs, stylesheet hrefs, and
+// modulepreload hrefs from the constrained Vite-generated markup.
+func frontendV2ShellRefs(shell []byte) (scripts, stylesheets, preloads map[string]bool) {
+	scripts = map[string]bool{}
+	for _, m := range frontendV2ShellScriptRE.FindAllSubmatch(shell, -1) {
+		scripts[string(m[1])] = true
+	}
+	stylesheets = map[string]bool{}
+	preloads = map[string]bool{}
+	for _, tag := range frontendV2ShellLinkRE.FindAll(shell, -1) {
+		var rel, href string
+		for _, am := range frontendV2ShellAttrRE.FindAllSubmatch(tag, -1) {
+			switch string(am[1]) {
+			case "rel":
+				rel = string(am[2])
+			case "href":
+				href = string(am[2])
+			}
+		}
+		switch rel {
+		case "stylesheet":
+			stylesheets[href] = true
+		case "modulepreload":
+			preloads[href] = true
 		}
 	}
-	for href := range stylesheets {
+	return scripts, stylesheets, preloads
+}
+
+// frontendV2RequireValidatedAssets requires every referenced URL to be a
+// validated asset addressed under same-origin /assets/.
+func frontendV2RequireValidatedAssets(refs map[string]bool, assets map[string]frontendV2Asset, msg string) error {
+	for href := range refs {
 		if _, ok := assets[strings.TrimPrefix(href, "/")]; !ok || !strings.HasPrefix(href, "/assets/") {
-			return fmt.Errorf("shell stylesheet is not a validated /assets/ artifact")
-		}
-	}
-	for href := range preloads {
-		if _, ok := assets[strings.TrimPrefix(href, "/")]; !ok || !strings.HasPrefix(href, "/assets/") {
-			return fmt.Errorf("shell modulepreload is not a validated /assets/ artifact")
+			return fmt.Errorf("%s", msg)
 		}
 	}
 	return nil
@@ -359,13 +385,8 @@ func frontendV2ValidateShellBinding(shell []byte, manifest map[string]frontendV2
 // hide an ambiguous build artifact. Iterative (explicit frame stack): a
 // hostile deeply-nested document cannot recurse the goroutine stack.
 func frontendV2RejectDuplicateJSONKeys(raw []byte) error {
-	type frame struct {
-		isObject  bool
-		expectKey bool
-		keys      map[string]bool
-	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
-	var stack []*frame
+	var sc frontendV2DupKeyScanner
 	for {
 		tok, err := dec.Token()
 		if err != nil {
@@ -373,42 +394,67 @@ func frontendV2RejectDuplicateJSONKeys(raw []byte) error {
 			// again (with a stable message) by the real decode.
 			return nil //nolint:nilerr // malformed JSON is rejected by the caller's Unmarshal
 		}
-		top := func() *frame {
-			if len(stack) == 0 {
-				return nil
-			}
-			return stack[len(stack)-1]
+		if err := sc.step(tok); err != nil {
+			return err
 		}
-		switch t := tok.(type) {
-		case json.Delim:
-			switch t {
-			case '{':
-				stack = append(stack, &frame{isObject: true, expectKey: true, keys: map[string]bool{}})
-			case '[':
-				stack = append(stack, &frame{})
-			case '}', ']':
-				stack = stack[:len(stack)-1]
-				if f := top(); f != nil && f.isObject {
-					f.expectKey = true
-				}
+	}
+}
+
+// frontendV2DupKeyScanner holds the explicit frame stack for the duplicate-key
+// walk; one step processes one JSON token.
+type frontendV2DupKeyScanner struct {
+	stack []*frontendV2JSONFrame
+}
+
+type frontendV2JSONFrame struct {
+	isObject  bool
+	expectKey bool
+	keys      map[string]bool
+}
+
+func (sc *frontendV2DupKeyScanner) top() *frontendV2JSONFrame {
+	if len(sc.stack) == 0 {
+		return nil
+	}
+	return sc.stack[len(sc.stack)-1]
+}
+
+// afterValue marks that the current object (if any) expects a key next.
+func (sc *frontendV2DupKeyScanner) afterValue() {
+	if f := sc.top(); f != nil && f.isObject {
+		f.expectKey = true
+	}
+}
+
+func (sc *frontendV2DupKeyScanner) step(tok json.Token) error {
+	switch t := tok.(type) {
+	case json.Delim:
+		sc.stepDelim(t)
+	case string:
+		if f := sc.top(); f != nil && f.isObject && f.expectKey {
+			if f.keys[t] {
+				return fmt.Errorf("manifest.json has a duplicate object key")
 			}
-		case string:
-			if f := top(); f != nil && f.isObject && f.expectKey {
-				if f.keys[t] {
-					return fmt.Errorf("manifest.json has a duplicate object key")
-				}
-				f.keys[t] = true
-				f.expectKey = false
-				continue
-			}
-			if f := top(); f != nil && f.isObject {
-				f.expectKey = true
-			}
-		default:
-			if f := top(); f != nil && f.isObject {
-				f.expectKey = true
-			}
+			f.keys[t] = true
+			f.expectKey = false
+			return nil
 		}
+		sc.afterValue()
+	default:
+		sc.afterValue()
+	}
+	return nil
+}
+
+func (sc *frontendV2DupKeyScanner) stepDelim(t json.Delim) {
+	switch t {
+	case '{':
+		sc.stack = append(sc.stack, &frontendV2JSONFrame{isObject: true, expectKey: true, keys: map[string]bool{}})
+	case '[':
+		sc.stack = append(sc.stack, &frontendV2JSONFrame{})
+	case '}', ']':
+		sc.stack = sc.stack[:len(sc.stack)-1]
+		sc.afterValue()
 	}
 }
 
@@ -444,6 +490,16 @@ func frontendV2CollectRefs(manifest map[string]frontendV2ManifestEntry) (map[str
 // output, but they are validated as if hostile — a compromised build must
 // fail closed here, not reach the filesystem layer.
 func frontendV2ValidateAssetPath(p string) error {
+	if err := frontendV2AssetPathShape(p); err != nil {
+		return err
+	}
+	return frontendV2AssetNameContract(p)
+}
+
+// frontendV2AssetPathShape rejects structurally hostile paths: absolute,
+// traversal, encoded, scheme/origin, non-canonical, out-of-namespace, or
+// sourcemap references.
+func frontendV2AssetPathShape(p string) error {
 	switch {
 	case p == "":
 		return fmt.Errorf("empty asset path")
@@ -462,6 +518,13 @@ func frontendV2ValidateAssetPath(p string) error {
 	case strings.HasSuffix(p, ".map"):
 		return fmt.Errorf("sourcemap referenced")
 	}
+	return nil
+}
+
+// frontendV2AssetNameContract enforces the serving-name contract: an
+// allowlisted extension, the content-hash suffix required for immutable
+// caching (see frontendV2HashedName), and a conservative character set.
+func frontendV2AssetNameContract(p string) error {
 	if _, ok := frontendV2MIME[path.Ext(p)]; !ok {
 		return fmt.Errorf("unsupported asset extension %q", path.Ext(p))
 	}
@@ -472,12 +535,17 @@ func frontendV2ValidateAssetPath(p string) error {
 		return fmt.Errorf("asset %q lacks the content-hash suffix required for immutable caching", sanitizeLog(p))
 	}
 	for _, r := range p {
-		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' ||
-			r == '/' || r == '.' || r == '-' || r == '_') {
+		if !frontendV2AllowedPathRune(r) {
 			return fmt.Errorf("disallowed character in asset path")
 		}
 	}
 	return nil
+}
+
+// frontendV2AllowedPathRune is the conservative asset-path alphabet.
+func frontendV2AllowedPathRune(r rune) bool {
+	return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' ||
+		r == '/' || r == '.' || r == '-' || r == '_'
 }
 
 // frontendV2ListDist inventories the embedded tree: only index.html,
