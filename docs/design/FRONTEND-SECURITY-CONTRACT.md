@@ -86,21 +86,22 @@ fetch → status validation → Content-Type validation → parse as unknown
 | T3 | Explicit runtime decoders/guards are **mandatory minimum** for: auth status + login/TOTP state; setup status/complete; policy draft + version-fencing responses; Root-CA rotation token responses; release operation state (`op_id` lifecycle, `available:false` variants); MCP ticket/transition state; config import (dry-run preview) + rollback (partial-failure, `runtime_only_surfaces`); support-bundle lifecycle. Malformed responses on these paths render an explicit error state, never a crash or a silently-wrong screen. |
 | T4 | Decoders are total: unknown fields ignored, missing/invalid required fields → typed decode error surfaced through the standard error path. |
 
-### Route/OpenAPI accounting (generated from the live repo, 2026-08-21)
+### Route/OpenAPI accounting (regenerated from the live repo, 2026-08-22 — post-FE-1B)
 
-The prior "344 method rows" figure counted a comment (`ui_routes_meta.go:80`); the structured
-count is **343**, in exact 1:1 parity with `api/route-classification.yaml` (zero rows on
-either side without a counterpart):
+The FE-1B embedded-serving round added the three v2 static routes (`/app`, `/app/`,
+`/assets/` — MethodAny, RolePublic, exempt `non-rest-surface`); the structured count is
+**346**, in exact 1:1 parity with `api/route-classification.yaml` (zero rows on either side
+without a counterpart — enforced by the route-coverage gate, green on this checkpoint):
 
 | Quantity | Count | Notes |
 |---|---|---|
-| Registered method policies (`uiRoutes`, 229 routes) | **343** | GET 146, POST 114, PUT 35, DELETE 32, MethodAny 16 · viewer 147, admin 115, operator 66, public 15 · mutating 182, audit-expected 162 |
-| Classification manifest rows | **343** | 1:1 with uiRoutes (gate-enforced projection) |
-| Non-OpenAPI / non-REST rows (exempt, `security_class: non-rest-surface`) | **9** | `/` (SPA shell), `/api/events` (SSE), `/api/idp/` + `/api/cluster/bootstrap/` (dynamic sub-routers), `/auth/logout`, `/auth/oidc/callback`, `/auth/saml/callback`, `/auth/saml/metadata`, `/auth/select` (browser SSO flows) |
-| OpenAPI-applicable rows | **334** | 343 − 9 |
+| Registered method policies (`uiRoutes`, 232 routes) | **346** | GET 146, POST 114, PUT 35, DELETE 32, MethodAny 19 · viewer 147, admin 115, operator 66, public 18 · mutating 182, audit-expected 162 |
+| Classification manifest rows | **346** | 1:1 with uiRoutes (gate-enforced projection) |
+| Non-OpenAPI / non-REST rows (exempt, `security_class: non-rest-surface`) | **12** | `/` (legacy SPA shell), `/app` + `/app/` + `/assets/` (FE-1B v2 shell + hashed assets), `/api/events` (SSE), `/api/idp/` + `/api/cluster/bootstrap/` (dynamic sub-routers), `/auth/logout`, `/auth/oidc/callback`, `/auth/saml/callback`, `/auth/saml/metadata`, `/auth/select` (browser SSO flows) |
+| OpenAPI-applicable rows | **334** | 346 − 12 |
 | Documented rows | **334** | 100% of applicable rows |
-| Exempt rows | **9** | all non-REST, owner + expiry recorded |
-| Frontend-consumed exempt rows | **3** | `/` (the shell itself), `/api/events` (SSE hook), `/api/idp/` (IdP item/groups sub-router — needs a hand-authored type + decoder). `/auth/*` are browser navigations the SPA links to, not XHR; `/api/cluster/bootstrap/` is not consumed by the SPA. |
+| Exempt rows | **12** | all non-REST, owner + expiry recorded |
+| Frontend-consumed exempt rows | **6** | `/` (legacy shell), `/app` + `/app/` + `/assets/` (the v2 app itself — HTML shell + hashed assets, browser navigations/loads, not XHR), `/api/events` (future SSE hook), `/api/idp/` (IdP item/groups sub-router — needs a hand-authored type + decoder). `/auth/*` are browser navigations the SPA links to, not XHR; `/api/cluster/bootstrap/` is not consumed by the SPA. |
 
 Consequence: `types.gen.ts` covers every JSON XHR surface except the `/api/idp/` sub-router
 (hand-authored types + decoder) and the SSE payload (hand-authored decoder in the SSE hook).

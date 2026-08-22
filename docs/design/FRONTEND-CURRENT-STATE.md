@@ -104,6 +104,7 @@ bundler config, or `.ts` file. The only `npm` invocation in CI installs the play
 | GAP-6 | `mcp-rollout` nav item has no `viewMeta` entry → topbar renders the raw slug | `index.html:5958–6010` |
 | GAP-7 | Keyboard shortcut map contains `'4': 'log'` — no such view exists | `index.html:5920` |
 | GAP-8 | `describeLogPersistence` returns an `<svg>` string in one branch but callers use `textContent` → renders literal markup | `index.html:8130–8145` |
+| GAP-9 | **SETUP-OPEN-MODE**: `POST /api/setup/complete {unauth:true}` flips the appliance to configured (`defaultAuthOutcome=Exempt` ⇒ `IsConfigured()` true) without creating any UI admin — from that moment `uiAuthMiddleware` demands a session/Basic credential that no in-band path can mint, so in-band management authentication is unavailable and recovery requires OOB appliance-shell access (`-user/-pass` / `auth.user` YAML / `--reset-password`). The legacy wizard never exposes the option; the v2 UI deliberately WITHHOLDS it (FE-3). Backend/product decision pending: either the setup API should refuse `unauth:true` without a credential, or the option should require/co-create an admin identity. | `ui_auth.go:505-511`, `store.go:596-600`, `ui_middleware.go:254-296` |
 
 These are recorded here for visibility; fixing them is backend scope and is sequenced in the
 migration plan where the new frontend depends on them (GAP-1 especially).

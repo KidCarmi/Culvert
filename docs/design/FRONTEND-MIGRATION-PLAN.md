@@ -258,7 +258,7 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 - **Exit gate (evidence)**: primitives reviewed against UX-PRINCIPLES MUST rules;
   strict-CSP browser run over the component gallery with zero violations.
 
-### FE-3 — Setup, auth, session, RBAC navigation
+### FE-3 — Setup, auth, session, RBAC navigation — IMPLEMENTED (this branch)
 - **Objective**: first-run setup, login/logout with the in-band TOTP state machine, 401
   handling with the full authentication-boundary teardown (contract §6), role-gated router +
   nav, session-expiry UX.
@@ -268,6 +268,42 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
   forms cleared).
 - **Browser proof**: first-setup, login/logout, expiry, role-difference specs.
 - **Exit gate**: security review against `FRONTEND-SECURITY-CONTRACT.md` §1–§2, §6.
+
+> **FE-3 implementation record (2026-08-22, externally reviewed).**
+> - **Authoritative boot ordering**: one machine (`src/auth/machine.ts`) —
+>   `booting → GET /api/setup/status` FIRST (the pre-setup bootstrap
+>   `{loggedIn:true,user:"",role:"admin"}` shape is never a human session),
+>   then `GET /api/auth/status`; phases `setup_required | unauthenticated |
+>   authenticated | auth_error`. Login/setup responses are never trusted
+>   alone — every entry to `authenticated` goes through a fresh dual read.
+> - **401 policy**: `RequestOptions.unauthorizedPolicy` — `"expected"` for
+>   auth-flow calls (invalid password / invalid TOTP are form errors),
+>   `"boundary"` (default) for everything else; boundary 401s enter ONE
+>   idempotent collapsed transition.
+> - **Boundary collapse**: every teardown-carrying transition (boundary 401,
+>   revalidation-discovered logout/identity change/invalid identity,
+>   refresh-discovered replacement) joins one in-flight boundary — exactly
+>   one teardown, one final transition.
+> - **Identity/role continuity (hardening round)**:
+>   `revalidateAuthenticatedSession()` re-reads `/api/auth/status` at v2
+>   route transitions and window focus/visibility restoration (never
+>   TanStack refetchOnWindowFocus, no polling). Server loggedOut → teardown
+>   → login with a memory-only "Management session ended" reason; different
+>   user OR role → FULL teardown FIRST, then the new identity renders
+>   (multi-tab cookie replacement proven in a same-context two-page spec);
+>   same user+role → no teardown; transport failure preserves the current
+>   identity. The earlier `/api/stats` probe was REMOVED in its favor.
+> - **TOTP**: strictly in-band — `totp_required` (no cookie) → same
+>   credentials re-POSTed with the code/backup code; no enrollment surface
+>   (backend GAP-2).
+> - **Open Mode**: setup-time `{unauth:true}` WITHHELD from the v2 UI —
+>   see FRONTEND-FEATURE-PARITY.md FE-X02 and FRONTEND-CURRENT-STATE.md
+>   GAP-9 (SETUP-OPEN-MODE).
+> - **Qualification checkpoint**: FE-3-FROZEN branch history
+>   `claude/culvert-frontend-modernization-qnyqb6` (FE-3.1–FE-3.9);
+>   real-binary Playwright suite across three appliance states + the
+>   multi-tab identity-switch spec; unit matrix incl. §6 A–G continuity
+>   proofs.
 
 ### FE-4 — Dashboard & diagnostics
 - **Objective**: FE-V01 (dashboard incl. SSE liveness + charts per the FE-2 gate outcome),
