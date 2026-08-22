@@ -18,6 +18,7 @@ export const KNOWN_ROUTES: readonly KnownRoute[] = [
   { path: "/", minRole: "viewer" },
   { path: "/monitor/traffic", minRole: "viewer" },
   { path: "/monitor/audit", minRole: "viewer" },
+  { path: "/monitor/history", minRole: "viewer" },
   { path: "/policies/access-rules", minRole: "viewer" },
   { path: "/policies/tester", minRole: "viewer" },
   { path: "/diagnostics", minRole: "viewer" },

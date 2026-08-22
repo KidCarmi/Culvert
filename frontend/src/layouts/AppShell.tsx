@@ -59,6 +59,7 @@ const NAV: readonly NavSection[] = [
     entries: [
       { label: "Traffic", to: "/monitor/traffic", minRole: "viewer" },
       { label: "Audit Log", to: "/monitor/audit", minRole: "viewer" },
+      { label: "History & Storage", to: "/monitor/history", minRole: "viewer" },
       { label: "Diagnostics", to: "/diagnostics", minRole: "viewer" },
     ],
   },

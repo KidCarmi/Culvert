@@ -134,3 +134,55 @@
   max-height: 300px;
   overflow-y: auto;
 }
+
+/* 2A-M History & Storage */
+.historySection {
+  margin-bottom: var(--sp-4);
+}
+
+.historyGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--sp-4);
+  align-items: start;
+  margin-bottom: var(--sp-4);
+}
+
+.historyGrid > * {
+  min-width: 0;
+}
+
+.historyKV {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: var(--sp-2) var(--sp-4);
+  margin: 0;
+}
+
+.historyKV dt {
+  font-size: var(--fs-xs);
+  color: var(--color-text-muted);
+}
+
+.historyKV dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.historyNote {
+  color: var(--color-text-muted);
+  font-size: var(--fs-sm);
+  margin-top: 0;
+}
+
+.historyForm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--sp-3);
+}
+
+.historyForm > * {
+  min-width: 180px;
+  flex: 0 1 auto;
+}

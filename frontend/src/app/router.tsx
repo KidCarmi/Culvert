@@ -14,6 +14,7 @@ import { AuthGate } from "../features/auth/AuthGate";
 import { OverviewPage } from "../features/overview/OverviewPage";
 import { TrafficPage } from "../features/monitor/TrafficPage";
 import { AuditPage } from "../features/monitor/AuditPage";
+import { HistoryPage } from "../features/monitor/HistoryPage";
 import { DiagnosticsPage } from "../features/diagnostics/DiagnosticsPage";
 import { GovernancePage } from "../features/governance/GovernancePage";
 import { AccessRulesPage } from "../features/policy/AccessRulesPage";
@@ -41,6 +42,7 @@ export function createAppRouter(): ReturnType<typeof createBrowserRouter> {
           { index: true, element: <OverviewPage /> },
           { path: "monitor/traffic", element: <TrafficPage /> },
           { path: "monitor/audit", element: <AuditPage /> },
+          { path: "monitor/history", element: <HistoryPage /> },
           { path: "policies/access-rules", element: <AccessRulesPage /> },
           { path: "policies/tester", element: <TesterPage /> },
           { path: "diagnostics", element: <DiagnosticsPage /> },
