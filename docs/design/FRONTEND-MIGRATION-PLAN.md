@@ -206,7 +206,39 @@ Accepted. Exit: this round.
 The new frontend does not gate on SEC-* landing, except FE-8 cutover requires SEC-C2 (the new
 UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 
-### FE-2 — Design system & application shell
+### FE-2 — Design system & application shell — IMPLEMENTED (this branch)
+
+> **OQ-2 CLOSED (component-by-component, FE-2 round).** No overlay/positioning
+> dependency was added; Radix was rejected per-component on hard evidence: its
+> Dialog/Tooltip/Popover presence+positioning layers write inline `style`
+> attributes and runtime style properties, which the CULVERT contract bans
+> outright (§4.Y1 — the ban is on the practice, independent of CSP
+> enforcement paths). Decisions:
+>
+> | Primitive | Decision | Basis |
+> |---|---|---|
+> | Dialog | **Native `<dialog>` + internal wrapper** | top layer, focus containment, inert background, `::backdrop`, Esc-cancel from the platform; wrapper adds ceremony-aware Esc policy + state sync; browser-proven (focus lifecycle, containment, return-to-invoker) |
+> | Tooltip | **Internal, CSS-positioned** | static above-center placement needs no measurement ⇒ no style attrs; `aria-describedby` semantics |
+> | Popover / Menu | **Deferred to first consumer**; designated approach = native HTML `popover` attribute (top layer, CSP-clean) | no FE-2 consumer; pre-deciding a library without a use case violates the dependency policy |
+> | Tabs | **Deferred to first consumer**; designated approach = internal APG roving-tabindex | no FE-2 consumer |
+> | Select | **Native `<select>`, token-styled** | correct semantics free; custom listboxes wait for a real need |
+>
+> **CHART DECISION = REJECT (Chart.js).** Hard-requirement failure with
+> concrete evidence: the shipped v4.4.0 bundle performs runtime style
+> mutation (`.style.height=` / `.style.width=` in its responsive canvas
+> path — `grep -o '\.style\.[a-zA-Z]*\s*=' static/chart.umd.js` → 2 writes),
+> violating "zero runtime style mutation" (§17/§4). CSP/contract was not
+> weakened; the two dashboard chart shapes are covered by thin internal SVG
+> primitives (`design-system/charts.tsx`: LineChart + DonutChart, geometry
+> via SVG attributes, visible-legend/sr-only non-visual equivalents),
+> browser-proven under the strict CSP. Chart.js will not be a dependency of
+> the new frontend; the legacy vendored copy retires with the legacy UI.
+>
+> **Icon strategy**: internal 16-icon SVG set (`design-system/icons.tsx`),
+> `aria-hidden` by default, labeled when icon-only — no dependency, no CDN.
+> **Theme**: `system|dark|light`; `design-system/theme.ts` is the single
+> sanctioned `localStorage` module (ESLint ban lifted for exactly that file);
+> stamped via `data-theme`, live `prefers-color-scheme` tracking, no reload.
 - **Objective**: tokens (seeded from `DESIGN-SYSTEM.md`, both themes, CULVERT identity),
   primitives (AppShell, Navigation, PageHeader, DataTable, FormField, Dialog,
   ConfirmationDialog incl. Tier-3 typed-word + two-phase-token variants, StatusBadge,
