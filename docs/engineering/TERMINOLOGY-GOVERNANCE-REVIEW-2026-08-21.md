@@ -148,8 +148,32 @@ worth a small deduction even though this instance is now fixed).
   required and the key is not retained by the server at all).
 - **Priority:** Medium (an admin-facing trust claim, one panel, no functional change) — one step below
   T-43 because it's contained to a single label rather than a citation key spanning many files.
-  **Migration risk:** none — copy-only; the JSON `persisted`/`warning` response fields the fix references
-  were already correct and are untouched.
+  **Migration risk:** none — copy-only for the label itself; see the follow-up correction below.
+
+**Post-publication corrections (PR #1189 review, same day):** automated PR review (Codex) caught three
+real issues in this change before merge, all fixed in the same PR:
+
+1. **A genuine backend bug the T-44 label fix exposed, not just a copy problem.** `installAndPersistCustomMITMCA`
+   reused `persistRotatedCA()`, whose "return true when no bundle path is configured" contract is correct
+   for its original caller (force-rotate of an already-ephemeral CA — there's no durability claim to break)
+   but wrong for the CA-upload path: with no `-ca-path`/`proxy.ca_path` configured, the admin's uploaded key
+   was reported `"persisted": true` while never being written anywhere. The T-44 label fix would have been
+   actively *more* wrong in this specific configuration than the original blanket "memory only" claim it
+   replaced. Fixed by giving `installAndPersistCustomMITMCA` its own `caRuntime.path == ""` check (returning
+   `false`, not delegating to `persistRotatedCA`'s force-rotate semantics) and generalizing the warning text
+   to cover both "no path configured" and "write failed" honestly.
+2. **The OpenAPI bundle (`api/openapi/openapi.json`) was not regenerated** after the T-43 line edit to
+   `api/openapi/openapi.yaml` (the LDAP profile description's `ADR-0025`→`ADR-0027`), which the repo's
+   `TestOpenAPI_Gate8_BundleNotStale` gate test correctly failed on (confirmed as the root cause of both
+   failing required CI checks). Fixed by running `make api-bundle` and verifying `-check` passes.
+3. **One LDAP-context `ADR-0025` reference was missed** in `.github/idp/openldap/bootstrap.ldif` — outside
+   the `.go`/`.md`/`.html`/`.yaml` file-type filter the original T-43 sweep used. Fixed; a follow-up
+   unrestricted repo-wide grep confirms no remaining LDAP-context `ADR-0025` references anywhere.
+
+This is recorded here rather than silently folded into the fix above because it is itself a useful data
+point for the program: a comment/doc-only terminology change can still have a real, testable blast radius
+(a generated-artifact staleness gate, an incompletely-scoped grep) that only surfaced under review — worth
+remembering next time this program scopes a "low risk" mechanical rename as zero-verification-needed.
 
 ---
 
