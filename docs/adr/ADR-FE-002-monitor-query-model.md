@@ -2,7 +2,7 @@
 
 - **Status**: Accepted (2026-08-22)
 - **Deciders**: frontend-modernization program owner (external review), Round-5 directive
-- **Context**: FE-4 operational surfaces (Overview, Monitor → Traffic, Monitor → Audit,
+- **Context**: FE-4 operational surfaces (Dashboard, Monitor → Traffic, Monitor → Audit,
   Diagnostics, Governance) for the v2 administration frontend.
 - **Supersedes**: the earlier FE-4 SSE/live-dashboard direction recorded in
   `FRONTEND-MIGRATION-PLAN.md` (FE-4) and the FE-X04 consumption assumption in

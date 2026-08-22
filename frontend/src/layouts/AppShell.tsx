@@ -51,7 +51,7 @@ const NAV: readonly NavSection[] = [
   {
     heading: "Overview",
     icon: <IconGauge />,
-    entries: [{ label: "Overview", to: "/", minRole: "viewer" }],
+    entries: [{ label: "Dashboard", to: "/", minRole: "viewer" }],
   },
   {
     heading: "Monitor",

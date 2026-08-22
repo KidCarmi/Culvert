@@ -105,7 +105,7 @@ export function OverviewPage(): JSX.Element {
   return (
     <>
       <PageHeader
-        title="Overview"
+        title="Dashboard"
         subtitle="Appliance snapshot — explicit refresh, no background streaming"
         actions={
           <SnapshotBar
