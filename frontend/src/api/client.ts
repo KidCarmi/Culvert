@@ -28,7 +28,8 @@ export type ApiErrorKind =
   | "timeout"
   | "aborted"
   | "decode"
-  | "contenttype";
+  | "contenttype"
+  | "toolarge"; // download exceeded the bounded response-size cap (2A-M §14)
 
 // Bounded error-body budget: an appliance API error is a short text/plain
 // line. Read at most MAX_ERROR_BYTES off the wire, present at most
@@ -253,6 +254,158 @@ export async function readBoundedErrorText(resp: Response): Promise<string> {
     }
   }
   return text.slice(0, MAX_ERROR_TEXT_CHARS);
+}
+
+// ── Bounded binary download (2A-M §13/§14) ─────────────────────────────────
+// The JSON client is not a Blob client, but a download must not bypass its
+// security fundamentals. apiDownloadRequest preserves them all: target gate
+// BEFORE fetch, same-origin credentials, redirect:error, AbortSignal +
+// bounded timeout, boundary-401 behavior, bounded error-body read, no retry.
+// Success is gated on an exact media-type allowlist (parameters tolerated,
+// type compared exactly), and the body read is CAPPED: an explicit
+// Content-Length over the cap is rejected before reading, and a missing or
+// dishonest Content-Length is enforced by the streaming reader itself
+// (cancel + controlled error — never a silently truncated "successful"
+// download).
+//
+// Cap rationale (recorded): the only 2A-M consumer is GET /api/export, which
+// serializes the bounded in-memory request ring (reqlog.MaxRing = 5000
+// entries; ~350 B typical, ~2 KB worst-case per entry ⇒ ≈10 MB worst-case
+// export). 32 MiB gives >3× worst-case headroom while keeping an absolute
+// bound on browser memory.
+export const MAX_DOWNLOAD_BYTES = 32 * 1024 * 1024;
+
+export interface DownloadResult {
+  blob: Blob;
+  /** exact lowercased media type (no parameters) the server declared */
+  mediaType: string;
+}
+
+export interface DownloadOptions {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  maxBytes?: number;
+}
+
+function mediaTypeOf(header: string | null): string {
+  if (header === null) return "";
+  return (header.split(";", 1)[0] ?? "").trim().toLowerCase();
+}
+
+export async function apiDownloadRequest(
+  path: string,
+  allowedMediaTypes: readonly string[],
+  opts: DownloadOptions = {},
+): Promise<DownloadResult> {
+  assertApiTarget(path); // BEFORE any fetch — failed validation never dials
+
+  const maxBytes = opts.maxBytes ?? MAX_DOWNLOAD_BYTES;
+  const timeout = AbortSignal.timeout(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  const signal =
+    opts.signal !== undefined
+      ? AbortSignal.any([opts.signal, timeout])
+      : timeout;
+
+  let resp: Response;
+  try {
+    resp = await fetch(path, {
+      method: "GET",
+      signal,
+      credentials: "same-origin",
+      redirect: "error",
+    });
+  } catch (err) {
+    if (timeout.aborted)
+      throw new ApiError("timeout", `download from ${path} timed out`);
+    if (opts.signal?.aborted === true)
+      throw new ApiError("aborted", `download from ${path} aborted`);
+    throw new ApiError(
+      "network",
+      `network failure reaching ${path}: ${String(err)}`,
+    );
+  }
+
+  if (!resp.ok) {
+    const text = await readBoundedErrorText(resp);
+    if (resp.status === 401) on401?.();
+    throw new ApiError(
+      "http",
+      `${path}: HTTP ${String(resp.status)}`,
+      resp.status,
+      text,
+    );
+  }
+
+  const mediaType = mediaTypeOf(resp.headers.get("Content-Type"));
+  if (!allowedMediaTypes.includes(mediaType)) {
+    // Arbitrary server bytes never become a valid download.
+    try {
+      await resp.body?.cancel();
+    } catch {
+      /* already closed */
+    }
+    throw new ApiError(
+      "contenttype",
+      `${path}: unexpected download Content-Type ${resp.headers.get("Content-Type") ?? "(none)"}`,
+      resp.status,
+    );
+  }
+
+  const declared = resp.headers.get("Content-Length");
+  if (declared !== null) {
+    const n = Number(declared);
+    if (Number.isFinite(n) && n > maxBytes) {
+      try {
+        await resp.body?.cancel();
+      } catch {
+        /* already closed */
+      }
+      throw new ApiError(
+        "toolarge",
+        `${path}: download of ${declared} bytes exceeds the ${String(maxBytes)}-byte cap`,
+        resp.status,
+      );
+    }
+  }
+
+  const body = resp.body;
+  if (body === null) {
+    return { blob: new Blob([], { type: mediaType }), mediaType };
+  }
+  const reader = body.getReader();
+  const chunks: BlobPart[] = [];
+  let bytes = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value !== undefined) {
+        bytes += value.byteLength;
+        if (bytes > maxBytes) {
+          // Dishonest/absent Content-Length: enforce the cap at the reader —
+          // controlled error, never a partial file presented as success.
+          await reader.cancel();
+          throw new ApiError(
+            "toolarge",
+            `${path}: download exceeded the ${String(maxBytes)}-byte cap`,
+            resp.status,
+          );
+        }
+        chunks.push(value);
+      }
+    }
+  } catch (err) {
+    if (err instanceof ApiError) throw err;
+    if (opts.signal?.aborted === true)
+      throw new ApiError("aborted", `download from ${path} aborted`);
+    if (timeout.aborted)
+      throw new ApiError("timeout", `download from ${path} timed out`);
+    throw new ApiError(
+      "network",
+      `download from ${path} failed mid-stream: ${String(err)}`,
+    );
+  }
+  return { blob: new Blob(chunks, { type: mediaType }), mediaType };
 }
 
 /** Retry classification (contract §6.Q2): never on 4xx; bounded on network
