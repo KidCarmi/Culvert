@@ -87,6 +87,11 @@ export function checkDist() {
   }
 
   // 4. Hashed assets live under assets/ with a content-hash suffix.
+  //    LOCKSTEP CONTRACT: the hash shape `-[A-Za-z0-9_-]{8,}` is enforced a
+  //    second time, independently, by the Go runtime validator
+  //    (ui_frontend_v2.go frontendV2HashedName) because admitted assets are
+  //    served immutable. TestFE1B_HashRuleMatchesBundleScan pins the two
+  //    patterns together — change both or neither.
   for (const f of files) {
     if (f.startsWith("assets/") && !/-[A-Za-z0-9_-]{8,}\.[a-z0-9]+$/.test(f))
       errors.push(`asset without content hash: ${f}`);

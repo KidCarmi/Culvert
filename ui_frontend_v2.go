@@ -16,12 +16,14 @@ package main
 // line, a report-only /ready row) while everything else keeps serving.
 
 import (
+	"bytes"
 	"embed"
 	"encoding/json"
 	"fmt"
 	"io/fs"
 	"net/http"
 	"path"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -141,13 +143,30 @@ func swapFrontendV2ForTest(s *frontendV2State) (restore func()) {
 
 // ─── Validation (FE-1B §3/§15 — runs once, fail-closed) ─────────────────────
 
-// frontendV2Manifest is the subset of the Vite manifest the validator reads.
+// frontendV2ManifestEntry is the subset of the Vite ManifestChunk the
+// validator reads. Imports/DynamicImports carry MANIFEST KEYS (not file
+// paths) referring to other chunks; both are validated for existence.
 type frontendV2ManifestEntry struct {
-	File    string   `json:"file"`
-	CSS     []string `json:"css"`
-	Assets  []string `json:"assets"`
-	IsEntry bool     `json:"isEntry"`
+	File           string   `json:"file"`
+	CSS            []string `json:"css"`
+	Assets         []string `json:"assets"`
+	IsEntry        bool     `json:"isEntry"`
+	IsDynamicEntry bool     `json:"isDynamicEntry"`
+	Imports        []string `json:"imports"`
+	DynamicImports []string `json:"dynamicImports"`
 }
+
+// frontendV2HashedName enforces the content-hash filename contract at
+// RUNTIME, independently of the FE-1A bundle gate: every admitted asset is
+// served with `Cache-Control: … immutable`, so an un-hashed name would be
+// cached forever across upgrades. Rule: `<name>-<hash≥8 of [A-Za-z0-9_-]>`
+// before the allowlisted extension — the current Vite/Rolldown base64url
+// hash shape, extension-agnostic (works for future svg/png/webp/woff2).
+// KEPT IN LOCKSTEP with the FE-1A bundle scan's identical pattern in
+// frontend/scripts/check-dist.mjs (`-[A-Za-z0-9_-]{8,}`); the cross-contract
+// test TestFE1B_HashRuleMatchesBundleScan pins the two representations
+// together.
+var frontendV2HashedName = regexp.MustCompile(`-[A-Za-z0-9_-]{8,}$`)
 
 func validateFrontendV2(dist fs.FS) (shell []byte, assets map[string]frontendV2Asset, err error) {
 	shell, err = fs.ReadFile(dist, "index.html")
@@ -157,6 +176,12 @@ func validateFrontendV2(dist fs.FS) (shell []byte, assets map[string]frontendV2A
 	rawManifest, err := fs.ReadFile(dist, "manifest.json")
 	if err != nil {
 		return nil, nil, fmt.Errorf("manifest.json missing")
+	}
+	// Duplicate-key pre-scan BEFORE the generic decode: encoding/json is
+	// last-value-wins on duplicate object keys, which would let an ambiguous
+	// manifest smuggle a second definition past validation.
+	if err := frontendV2RejectDuplicateJSONKeys(rawManifest); err != nil {
+		return nil, nil, err
 	}
 	var manifest map[string]frontendV2ManifestEntry
 	if err := json.Unmarshal(rawManifest, &manifest); err != nil {
@@ -168,6 +193,9 @@ func validateFrontendV2(dist fs.FS) (shell []byte, assets map[string]frontendV2A
 
 	referenced, err := frontendV2CollectRefs(manifest)
 	if err != nil {
+		return nil, nil, err
+	}
+	if err := frontendV2ValidateImportGraph(manifest); err != nil {
 		return nil, nil, err
 	}
 
@@ -201,7 +229,187 @@ func validateFrontendV2(dist fs.FS) (shell []byte, assets map[string]frontendV2A
 		}
 		lower[lc] = p
 	}
+	// Bind the static shell to the validated authoritative entry: a shell
+	// that points at anything else must never be classified Ready (a 200
+	// index.html whose JS 404s is a broken blank UI, not a working one).
+	if err := frontendV2ValidateShellBinding(shell, manifest, assets); err != nil {
+		return nil, nil, err
+	}
 	return shell, assets, nil
+}
+
+// frontendV2ValidateImportGraph checks the chunk graph: every imports /
+// dynamicImports value must be an existing MANIFEST KEY. Referenced chunks
+// pass the normal file/css/assets checks because validation walks every
+// manifest entry flat — there is no recursive traversal anywhere, so cyclic
+// or hostile graphs terminate by construction (bounded by len(manifest)).
+func frontendV2ValidateImportGraph(manifest map[string]frontendV2ManifestEntry) error {
+	for key, e := range manifest {
+		for _, imp := range e.Imports {
+			if _, ok := manifest[imp]; !ok {
+				return fmt.Errorf("manifest entry %q imports missing key %q", sanitizeLog(key), sanitizeLog(imp))
+			}
+		}
+		for _, imp := range e.DynamicImports {
+			if _, ok := manifest[imp]; !ok {
+				return fmt.Errorf("manifest entry %q dynamically imports missing key %q", sanitizeLog(key), sanitizeLog(imp))
+			}
+		}
+	}
+	return nil
+}
+
+// frontendV2ShellScriptRE / frontendV2ShellLinkRE extract resource references
+// from VITE'S CONSTRAINED GENERATED SHELL — a handful of <script>/<link> tags
+// with double-quoted attributes emitted by the bundler. This is deliberately
+// NOT a general HTML parser; the shell is machine-generated and the FE-1A
+// bundle gate already pins its structural shape (no inline bodies, no
+// single-quoted attributes, no exotic markup).
+var (
+	frontendV2ShellScriptRE = regexp.MustCompile(`<script\b[^>]*\bsrc="([^"]+)"`)
+	frontendV2ShellLinkRE   = regexp.MustCompile(`<link\b[^>]*>`)
+	frontendV2ShellAttrRE   = regexp.MustCompile(`\b(rel|href)="([^"]*)"`)
+)
+
+// frontendV2ValidateShellBinding requires the authoritative entry
+// manifest["index.html"] (isEntry, hashed JS file) and proves the static
+// shell references EXACTLY that entry's artifacts: its JS file as the only
+// script, its CSS set as the stylesheet set, modulepreload targets only
+// validated assets. Same-origin /assets/ addressing is implied: every bound
+// reference must resolve to a validated asset path.
+func frontendV2ValidateShellBinding(shell []byte, manifest map[string]frontendV2ManifestEntry, assets map[string]frontendV2Asset) error {
+	entry, ok := manifest["index.html"]
+	if !ok {
+		return fmt.Errorf(`manifest has no "index.html" entry`)
+	}
+	if !entry.IsEntry {
+		return fmt.Errorf(`manifest "index.html" entry is not isEntry`)
+	}
+	if path.Ext(entry.File) != ".js" {
+		return fmt.Errorf(`manifest "index.html" entry file is not a JS chunk`)
+	}
+
+	scripts := map[string]bool{}
+	for _, m := range frontendV2ShellScriptRE.FindAllSubmatch(shell, -1) {
+		scripts[string(m[1])] = true
+	}
+	stylesheets := map[string]bool{}
+	preloads := map[string]bool{}
+	for _, tag := range frontendV2ShellLinkRE.FindAll(shell, -1) {
+		var rel, href string
+		for _, am := range frontendV2ShellAttrRE.FindAllSubmatch(tag, -1) {
+			switch string(am[1]) {
+			case "rel":
+				rel = string(am[2])
+			case "href":
+				href = string(am[2])
+			}
+		}
+		switch rel {
+		case "stylesheet":
+			stylesheets[href] = true
+		case "modulepreload":
+			preloads[href] = true
+		}
+	}
+
+	// Exactly the entry JS, nothing else, addressed under /assets/.
+	wantJS := "/" + entry.File
+	if !scripts[wantJS] {
+		return fmt.Errorf("shell does not reference the manifest entry JS")
+	}
+	if len(scripts) != 1 {
+		return fmt.Errorf("shell references %d scripts, want exactly the entry chunk", len(scripts))
+	}
+	// Exactly the entry CSS set.
+	wantCSS := map[string]bool{}
+	for _, c := range entry.CSS {
+		wantCSS["/"+c] = true
+	}
+	if len(stylesheets) != len(wantCSS) {
+		return fmt.Errorf("shell stylesheet set differs from manifest entry css")
+	}
+	for href := range stylesheets {
+		if !wantCSS[href] {
+			return fmt.Errorf("shell references stylesheet outside the manifest entry css")
+		}
+	}
+	// Every bound URL must be a validated asset (same-origin /assets/ path).
+	for href := range scripts {
+		if _, ok := assets[strings.TrimPrefix(href, "/")]; !ok || !strings.HasPrefix(href, "/assets/") {
+			return fmt.Errorf("shell script is not a validated /assets/ artifact")
+		}
+	}
+	for href := range stylesheets {
+		if _, ok := assets[strings.TrimPrefix(href, "/")]; !ok || !strings.HasPrefix(href, "/assets/") {
+			return fmt.Errorf("shell stylesheet is not a validated /assets/ artifact")
+		}
+	}
+	for href := range preloads {
+		if _, ok := assets[strings.TrimPrefix(href, "/")]; !ok || !strings.HasPrefix(href, "/assets/") {
+			return fmt.Errorf("shell modulepreload is not a validated /assets/ artifact")
+		}
+	}
+	return nil
+}
+
+// frontendV2RejectDuplicateJSONKeys walks the raw JSON token stream and
+// rejects duplicate keys in ANY object (top-level manifest keys and chunk
+// fields alike) — the generic decoder's last-value-wins behavior must never
+// hide an ambiguous build artifact. Iterative (explicit frame stack): a
+// hostile deeply-nested document cannot recurse the goroutine stack.
+func frontendV2RejectDuplicateJSONKeys(raw []byte) error {
+	type frame struct {
+		isObject  bool
+		expectKey bool
+		keys      map[string]bool
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	var stack []*frame
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			// io.EOF ends a well-formed document; malformed JSON is caught
+			// again (with a stable message) by the real decode.
+			return nil //nolint:nilerr // malformed JSON is rejected by the caller's Unmarshal
+		}
+		top := func() *frame {
+			if len(stack) == 0 {
+				return nil
+			}
+			return stack[len(stack)-1]
+		}
+		switch t := tok.(type) {
+		case json.Delim:
+			switch t {
+			case '{':
+				stack = append(stack, &frame{isObject: true, expectKey: true, keys: map[string]bool{}})
+			case '[':
+				stack = append(stack, &frame{})
+			case '}', ']':
+				stack = stack[:len(stack)-1]
+				if f := top(); f != nil && f.isObject {
+					f.expectKey = true
+				}
+			}
+		case string:
+			if f := top(); f != nil && f.isObject && f.expectKey {
+				if f.keys[t] {
+					return fmt.Errorf("manifest.json has a duplicate object key")
+				}
+				f.keys[t] = true
+				f.expectKey = false
+				continue
+			}
+			if f := top(); f != nil && f.isObject {
+				f.expectKey = true
+			}
+		default:
+			if f := top(); f != nil && f.isObject {
+				f.expectKey = true
+			}
+		}
+	}
 }
 
 // frontendV2CollectRefs gathers and path-validates every file the manifest
@@ -256,6 +464,12 @@ func frontendV2ValidateAssetPath(p string) error {
 	}
 	if _, ok := frontendV2MIME[path.Ext(p)]; !ok {
 		return fmt.Errorf("unsupported asset extension %q", path.Ext(p))
+	}
+	// Immutable-cache naming contract: the served Cache-Control is
+	// `max-age=31536000, immutable`, so only content-hashed names may be
+	// admitted (see frontendV2HashedName).
+	if base := strings.TrimSuffix(path.Base(p), path.Ext(p)); !frontendV2HashedName.MatchString(base) {
+		return fmt.Errorf("asset %q lacks the content-hash suffix required for immutable caching", sanitizeLog(p))
 	}
 	for _, r := range p {
 		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' ||
