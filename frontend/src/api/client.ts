@@ -92,12 +92,23 @@ export function assertApiTarget(path: string): void {
 
 type Method = "GET" | "POST" | "PUT" | "DELETE";
 
+// 401 policy (FE-3 §4): the CALLER declares the semantic context of a 401 —
+// it is never inferred from the URL.
+//   "boundary" (default) — a 401 means the session the app believed in was
+//     refused: the global authentication-boundary handler runs (teardown →
+//     login). Every ordinary authenticated application request uses this.
+//   "expected" — a 401 is normal application behavior for THIS call (invalid
+//     password / invalid TOTP on /api/auth/login): the error is returned to
+//     the caller and the boundary handler is NOT invoked.
+export type UnauthorizedPolicy = "boundary" | "expected";
+
 export interface RequestOptions {
   method?: Method;
   /** JSON-serialized body for mutating requests */
   body?: unknown;
   signal?: AbortSignal;
   timeoutMs?: number;
+  unauthorizedPolicy?: UnauthorizedPolicy;
 }
 
 // The authentication-boundary callback (FE-3 wires the real teardown +
@@ -149,7 +160,16 @@ export async function apiRequest<T>(
 
   if (!resp.ok) {
     const text = await readBoundedErrorText(resp);
-    if (resp.status === 401) on401?.();
+    // FE-3 §4: only a BOUNDARY 401 signals "the session this app believed in
+    // was refused". An EXPECTED 401 (declared by the caller — e.g. invalid
+    // credentials on /api/auth/login) is an ordinary application error and
+    // must never trigger the session-expiry transition.
+    if (
+      resp.status === 401 &&
+      (opts.unauthorizedPolicy ?? "boundary") === "boundary"
+    ) {
+      on401?.();
+    }
     throw new ApiError(
       "http",
       `${path}: HTTP ${String(resp.status)}`,
