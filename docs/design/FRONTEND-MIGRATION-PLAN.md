@@ -155,7 +155,23 @@ Accepted. Exit: this round.
   hand-edit to dist fails CI); `ignore-scripts` outcome recorded.
 - **Rollback**: revert the PR — nothing outside `frontend/` + CI is touched.
 
-### FE-1B — Embedded Static Serving
+### FE-1B — Embedded Static Serving — IMPLEMENTED (this branch)
+
+> **Implemented contract (FE-1B round).** Engine: `ui_frontend_v2.go`
+> (`//go:embed all:frontend/dist`, validation-once at init, status model
+> disabled/ready/invalid). Flag: `CULVERT_EXPERIMENTAL_UI` (opt-in parser per
+> the `CULVERT_CLUSTER_GRPC_COMPRESSION` convention; read once, never
+> per-request). Routes `/app`, `/app/`, `/assets/` are registered
+> unconditionally (deterministic C1/D0 walls, counts 229→232) with the
+> default-off gate in the handlers (disabled ⇒ plain 404, indistinguishable
+> from unregistered). **Asset-namespace decision: Option A — stable
+> `/assets/`** (collision-proven against the live route inventory; survives
+> cutover unchanged; no base rebuild, no HTML rewriting). Strict nonce-free
+> CSP is route-scoped to the new surface; the legacy nonce CSP is untouched.
+> Invalid artifact ⇒ 503 text/plain no-store + one critical log + report-only
+> `frontend_v2` /ready row; the data plane continues. Real-binary Playwright
+> smoke: `frontend/e2e/smoke.spec.ts` via `frontend/scripts/e2e-smoke.sh`,
+> wired as the `smoke` job of `frontend-verify.yml` (Fast Gate member).
 - **Objective**: Go embed of `frontend/dist`; flag-gated `/app/` preview route; route-specific
   strict CSP; manifest validation with the 503-unavailable behavior; cache policy; SPA
   fallback per the §2 resolution order; static-serving Go tests (each §2 property, incl.

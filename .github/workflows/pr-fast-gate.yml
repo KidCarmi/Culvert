@@ -121,6 +121,7 @@ jobs:
             # change to ANY of them exercises the frontend gate.
             case "$f" in
               frontend/*) frontend=true ;;
+              ui_frontend_v2*) frontend=true ;;
               api/openapi/openapi.json) frontend=true ;;
               .github/workflows/frontend-verify.yml) frontend=true ;;
               .github/workflows/pr-fast-gate.yml) frontend=true ;;

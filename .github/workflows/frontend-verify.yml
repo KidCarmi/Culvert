@@ -91,3 +91,45 @@ jobs:
       # regressions; qualification evidence dispatches with 5.
       - name: Determinism (isolated clean builds)
         run: sh scripts/verify-determinism.sh "${{ inputs.determinism_builds || '2' }}"
+
+  # FE-1B real-binary browser smoke: the committed production dist, embedded
+  # in the real CULVERT Go binary by go:embed, served under the experimental
+  # /app preview with the strict nonce-free CSP, rendered by real Chromium
+  # (frontend/e2e/smoke.spec.ts via frontend/scripts/e2e-smoke.sh — never a
+  # dev server or mock). Runs on the host runner because it needs the Go
+  # toolchain + a browser; the Node toolchain is installed as the exact
+  # pinned release with checksum verification (no mutable action, no
+  # whatever-node-the-runner-has).
+  smoke:
+    name: "Frontend · real-binary browser smoke"
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-go-cache
+
+      - name: Install pinned Node 24.19.0 (checksum-verified)
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -eu
+          curl -fsSLO https://nodejs.org/dist/v24.19.0/node-v24.19.0-linux-x64.tar.xz
+          echo "14b342e71204f811bde6153be8e04b62aef63c236fef92b55f9c83154b409647  node-v24.19.0-linux-x64.tar.xz" | sha256sum -c -
+          sudo mkdir -p /opt/node24
+          sudo tar -xJf node-v24.19.0-linux-x64.tar.xz -C /opt/node24 --strip-components=1
+          echo "/opt/node24/bin" >> "$GITHUB_PATH"
+
+      - name: Toolchain identity
+        run: sh scripts/assert-toolchain.sh
+
+      - name: Install frontend deps (ignore-scripts posture)
+        run: npm ci --no-audit --no-fund
+
+      # Browser revision is locked by the exact-pinned @playwright/test.
+      - name: Install pinned Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Real-binary browser smoke
+        run: sh scripts/e2e-smoke.sh
