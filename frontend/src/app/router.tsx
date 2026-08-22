@@ -12,6 +12,10 @@ import { PageHeader } from "../layouts/AppShell";
 import { ErrorState } from "../design-system/primitives";
 import { AuthGate } from "../features/auth/AuthGate";
 import { OverviewPage } from "../features/overview/OverviewPage";
+import { TrafficPage } from "../features/monitor/TrafficPage";
+import { AuditPage } from "../features/monitor/AuditPage";
+import { DiagnosticsPage } from "../features/diagnostics/DiagnosticsPage";
+import { GovernancePage } from "../features/governance/GovernancePage";
 
 function NotFoundPage(): JSX.Element {
   return (
@@ -33,6 +37,10 @@ export function createAppRouter(): ReturnType<typeof createBrowserRouter> {
         element: <AuthGate />,
         children: [
           { index: true, element: <OverviewPage /> },
+          { path: "monitor/traffic", element: <TrafficPage /> },
+          { path: "monitor/audit", element: <AuditPage /> },
+          { path: "diagnostics", element: <DiagnosticsPage /> },
+          { path: "governance", element: <GovernancePage /> },
           {
             path: "design-system",
             lazy: async () => {

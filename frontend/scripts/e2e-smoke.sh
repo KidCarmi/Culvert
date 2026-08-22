@@ -38,7 +38,7 @@ echo "e2e-smoke: building CULVERT binary (embeds committed frontend/dist)"
 mkdir -p "$WORK/auth" "$WORK/fresh" "$WORK/failparent"
 cat > "$WORK/auth/ui_users.json" <<'EOF'
 {
-  "default_auth_outcome": "Default",
+  "default_auth_outcome": "Exempt",
   "users": [
     {
       "username": "admin",
@@ -81,7 +81,16 @@ start_instance() {
   eval "${name}_PID=\$!"
 }
 
-start_instance AUTH "$UI_PORT" "$PROXY_PORT" -ui-users-file "$WORK/auth/ui_users.json"
+# Zero-Trust posture for the seeded history: Stage-1 is Exempt (no proxy
+# credentials needed) and Stage-2 default_action is deny, so each seeded
+# request is refused at the policy default (POLICY_DEFAULT_DENY) with zero
+# egress, and lands in the Badger history store at log_store_path.
+cat > "$WORK/auth/config.yaml" <<EOF2
+default_action: deny
+log_store_path: $WORK/auth/logstore
+EOF2
+
+start_instance AUTH "$UI_PORT" "$PROXY_PORT" -ui-users-file "$WORK/auth/ui_users.json" -config "$WORK/auth/config.yaml"
 start_instance FRESH "$FRESH_PORT" "$((PROXY_PORT + 1))" -ui-users-file "$WORK/fresh/ui_users.json"
 start_instance FAIL "$FAIL_PORT" "$((PROXY_PORT + 2))" -ui-users-file "$WORK/failparent/blocker/ui_users.json"
 
@@ -102,6 +111,14 @@ wait_ready "$UI_PORT" AUTH
 wait_ready "$FRESH_PORT" FRESH
 wait_ready "$FAIL_PORT" FAIL
 echo "e2e-smoke: all three instances ready"
+
+echo "e2e-smoke: seeding traffic history through the AUTH proxy (default-deny)"
+i=0
+while [ "$i" -lt 150 ]; do
+  curl -s -o /dev/null --max-time 2 -x "http://127.0.0.1:$PROXY_PORT" "http://fe4-seed-$i.test/" || true
+  i=$((i + 1))
+done
+sleep 2 # allow the async history writer to flush
 
 cd "$FRONTEND"
 CULVERT_E2E_BASE_URL="http://127.0.0.1:$UI_PORT" \

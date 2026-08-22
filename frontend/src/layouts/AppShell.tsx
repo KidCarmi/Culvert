@@ -57,8 +57,9 @@ const NAV: readonly NavSection[] = [
     heading: "Monitor",
     icon: <IconActivity />,
     entries: [
-      { label: "Traffic", minRole: "viewer" },
-      { label: "Audit Log", minRole: "viewer" },
+      { label: "Traffic", to: "/monitor/traffic", minRole: "viewer" },
+      { label: "Audit Log", to: "/monitor/audit", minRole: "viewer" },
+      { label: "Diagnostics", to: "/diagnostics", minRole: "viewer" },
     ],
   },
   {
@@ -91,6 +92,7 @@ const NAV: readonly NavSection[] = [
     entries: [
       { label: "Administrators", minRole: "admin" },
       { label: "Settings", minRole: "admin" },
+      { label: "Governance", to: "/governance", minRole: "admin" },
     ],
   },
   {

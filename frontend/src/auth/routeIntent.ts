@@ -16,6 +16,10 @@ export interface KnownRoute {
 // future rounds add entries here as real routes (never faked ahead of time).
 export const KNOWN_ROUTES: readonly KnownRoute[] = [
   { path: "/", minRole: "viewer" },
+  { path: "/monitor/traffic", minRole: "viewer" },
+  { path: "/monitor/audit", minRole: "viewer" },
+  { path: "/diagnostics", minRole: "viewer" },
+  { path: "/governance", minRole: "admin" }, // uiRoutes: /api/governance/control-plane GET=admin
   { path: "/design-system", minRole: "viewer" },
 ];
 
