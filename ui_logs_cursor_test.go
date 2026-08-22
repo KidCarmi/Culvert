@@ -19,13 +19,14 @@ import (
 )
 
 type cursorPageResp struct {
-	Logs       []LogEntry `json:"logs"`
-	NextCursor string     `json:"next_cursor"`
-	HasMore    bool       `json:"has_more"`
-	History    bool       `json:"history"`
-	SnapshotAt string     `json:"snapshot_at"`
-	Limit      int        `json:"limit"`
-	Total      *int       `json:"total"` // must stay ABSENT in cursor mode
+	Logs        []LogEntry `json:"logs"`
+	NextCursor  string     `json:"next_cursor"`
+	HasMore     bool       `json:"has_more"`
+	ScanLimited bool       `json:"scan_limited"`
+	History     bool       `json:"history"`
+	SnapshotAt  string     `json:"snapshot_at"`
+	Limit       int        `json:"limit"`
+	Total       *int       `json:"total"` // must stay ABSENT in cursor mode
 }
 
 func cursorStoreFixture(t *testing.T, n int) {

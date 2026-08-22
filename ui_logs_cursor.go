@@ -4,11 +4,14 @@
 // offset/limit client keeps its exact current behavior and `total` field.
 //
 // The cursor is OPAQUE and STATELESS: base64url(JSON{v, ts, seq, fp}).
-//   - ts/seq name the last-returned history entry (the store's own
-//     time-ordered key pair) — no Badger key bytes, file paths, or other
-//     datastore internals are exposed, and the decoded pair is VALIDATED
-//     against the request's time window before use, so a forged cursor can
-//     only reposition pagination inside the same window it already reads.
+//   - ts/seq name a history-entry position (the store's own time-ordered
+//     key pair): the last RETURNED entry on a normal page, or the last raw
+//     entry SCANNED when the walk was stopped by its scan budget
+//     (scan_limited — the sparse-filter continuation point). No Badger key
+//     bytes, file paths, or other datastore internals are exposed, and the
+//     decoded pair is VALIDATED against the request's time window before
+//     use, so a forged cursor can only reposition pagination inside the
+//     same window it already reads.
 //   - fp is a bounded fingerprint of the query the cursor belongs to
 //     (from/to + every filter param). A cursor presented with different
 //     query parameters is refused with 400 — a cursor from query A can
@@ -46,6 +49,13 @@ type logsCursor struct {
 	Seq uint32 `json:"seq"`
 	FP  string `json:"fp"`
 }
+
+// apiLogsCursorScanBudget overrides the raw-scan budget handed to
+// QueryPageWithBudget. 0 (the production value, never changed at runtime)
+// means the engine default (scanCap); tests set a small budget so the
+// scan-limited continuation contract is provable through the real handler
+// without a 500k-entry fixture.
+var apiLogsCursorScanBudget = 0
 
 // logsCursorFingerprintParams: every parameter that defines the logical
 // query a cursor belongs to. limit/cursor are deliberately excluded (page
@@ -140,7 +150,8 @@ func apiLogsServeStoreCursor(w http.ResponseWriter, r *http.Request) {
 	if ls == nil {
 		jsonOK(w, map[string]any{
 			"logs": []LogEntry{}, "next_cursor": "", "has_more": false,
-			"history": false, "snapshot_at": snapshotAt, "limit": limit,
+			"scan_limited": false,
+			"history":      false, "snapshot_at": snapshotAt, "limit": limit,
 		})
 		return
 	}
@@ -157,18 +168,33 @@ func apiLogsServeStoreCursor(w http.ResponseWriter, r *http.Request) {
 		afterTS, afterSeq = c.TS, c.Seq
 	}
 
-	page, err := ls.QueryPage(fromMs, toMs, afterTS, afterSeq, limit, buildLogFilterPredicate(q))
+	page, err := ls.QueryPageWithBudget(fromMs, toMs, afterTS, afterSeq, limit, apiLogsCursorScanBudget, buildLogFilterPredicate(q))
 	if err != nil {
 		logger.Printf("WARN apiLogs: history cursor query: %v", err)
 		http.Error(w, "history query error", http.StatusInternalServerError)
 		return
 	}
+	// Continuation contract (sparse-filter forward progress):
+	//   - scan_limited=true  ⇒ the raw-scan budget stopped this walk before
+	//     the window was exhausted: more HISTORY remains to be SEARCHED (no
+	//     further match is proven). The cursor resumes strictly after the
+	//     last raw entry already evaluated (LastScan*) — issued even when
+	//     ZERO rows were returned, so an already-proven non-matching range
+	//     is never rescanned and continuation always makes forward progress.
+	//   - scan_limited=false + has_more=true ⇒ a look-ahead MATCH proved
+	//     another result exists; the cursor resumes after the last RETURNED
+	//     entry so that match is returned first on the next page.
+	//   - has_more=false ⇒ the window is exhausted: a true terminal page.
 	next := ""
-	if page.HasMore && len(page.Entries) > 0 {
+	switch {
+	case page.ScanLimited:
+		next = encodeLogsCursor(logsCursor{V: 1, TS: page.LastScanTS, Seq: page.LastScanSeq, FP: fp})
+	case page.HasMore && len(page.Entries) > 0:
 		next = encodeLogsCursor(logsCursor{V: 1, TS: page.NextTS, Seq: page.NextSeq, FP: fp})
 	}
 	jsonOK(w, map[string]any{
 		"logs": page.Entries, "next_cursor": next, "has_more": page.HasMore,
-		"history": true, "snapshot_at": snapshotAt, "limit": limit,
+		"scan_limited": page.ScanLimited,
+		"history":      true, "snapshot_at": snapshotAt, "limit": limit,
 	})
 }

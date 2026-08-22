@@ -63,12 +63,29 @@ mode is byte-compatible and untouched for existing clients.
   No server-side session cursor storage exists.
 - Page size: default 100, hard server clamp 500 (the legacy 5000 offset ceiling is
   deliberately NOT the Monitor behavior).
-- Response: `{logs, next_cursor, has_more, history, snapshot_at, limit}` — no `total`.
-  `history:false` truthfully reports a disabled/unavailable store.
+- Response: `{logs, next_cursor, has_more, scan_limited, history, snapshot_at, limit}`
+  — no `total`. `history:false` truthfully reports a disabled/unavailable store.
 - Cost: `logstore.QueryPage` visits only the entries needed to fill one page (plus one
-  look-ahead match for `has_more`), bounded by the store's scan cap as a backstop; the
-  deterministic `Scanned` seam is asserted by tests — page-40's scan cost equals
+  look-ahead match for `has_more`), bounded by a raw-scan budget (the store's scan cap);
+  the deterministic `Scanned` seam is asserted by tests — page-40's scan cost equals
   page-1's, where the old offset/exact-total contract's cost grew linearly with depth.
+- **Bounded scan-continuation (qualification-hardening amendment)**: under a sparse
+  filter the scan budget can stop a walk before the requested window is exhausted.
+  `has_more` alone would then conflate two materially different truths, so the response
+  carries `scan_limited`:
+  - `scan_limited:false` + `has_more:true` — a look-ahead MATCH proved another result
+    exists; `next_cursor` names the last RETURNED entry, so the look-ahead match is
+    returned first on the next page (never skipped).
+  - `scan_limited:true` (+ `has_more:true`) — more HISTORY remains to be SEARCHED; no
+    further match is proven. `next_cursor` names the last raw entry already SCANNED and
+    is issued even when ZERO rows were returned, so continuation resumes strictly past
+    every entry this walk evaluated: forward progress is guaranteed and a proven
+    non-matching range is never rescanned (the infinite-loop shape a
+    last-returned-entry cursor would have under a budget-sized gap).
+  - `has_more:false` — the window is exhausted: the only state the UI may render as a
+    terminal empty result.
+  The UI keeps continuation an EXPLICIT, bounded operator action ("Continue search");
+  scan segments are never auto-chained in the browser — one click, one bounded segment.
 
 ## Consequences
 
