@@ -15,6 +15,7 @@ import {
 } from "../../design-system/primitives";
 import { DataTable } from "../../design-system/table";
 import { SnapshotBar, useSnapshot } from "../../shared/snapshot";
+import { governanceHealthBadgeStatus } from "./health";
 import styles from "../diagnostics/diagnostics.module.css";
 
 export function GovernancePage(): JSX.Element {
@@ -72,17 +73,12 @@ export function GovernancePage(): JSX.Element {
                 ],
                 [
                   "Governance health",
-                  snap.healthStatus === "ok" ? (
-                    <StatusBadge status="ok">ok</StatusBadge>
-                  ) : (
-                    <StatusBadge
-                      status={
-                        snap.healthStatus === "drift" ? "critical" : "warn"
-                      }
-                    >
-                      {snap.healthStatus}
-                    </StatusBadge>
-                  ),
+                  <StatusBadge
+                    key="gh"
+                    status={governanceHealthBadgeStatus(snap.healthStatus)}
+                  >
+                    {snap.healthStatus}
+                  </StatusBadge>,
                 ],
                 [
                   "Routes (total / public)",

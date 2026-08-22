@@ -14,6 +14,7 @@ import {
 } from "../api/ops";
 import { DecodeError } from "../api/decode";
 import { resolveWindow, isTimePreset } from "../features/monitor/timeRange";
+import { governanceHealthBadgeStatus } from "../features/governance/health";
 
 const omit = (o: Record<string, unknown>, k: string): Record<string, unknown> =>
   Object.fromEntries(Object.entries(o).filter(([key]) => key !== k));
@@ -134,14 +135,25 @@ describe("decodeGovernance", () => {
       routes: { total: 232, public: 18, method_entries: 346 },
       c2: { mode: "enforce", kill_switch_active: false },
       counters: { would_deny: 2, audit_missing: 0, note: "not-a-number" },
-      governance_health: { status: "ok", issues: [] },
+      governance_health: { status: "healthy", issues: [] },
     });
     expect(g.counters).toEqual([
       { key: "audit_missing", value: 0 },
       { key: "would_deny", value: 2 },
     ]);
     expect(g.mode).toBe("enforce");
+    expect(g.healthStatus).toBe("healthy");
     expect(g.issues).toEqual([]);
+  });
+
+  it("maps the backend health vocabulary to badge severities (Codex fix)", () => {
+    // The TOP-LEVEL status vocabulary is healthy|warn|drift (ui_governance.go);
+    // "ok" exists only per-axis. healthy must render the SUCCESS badge.
+    expect(governanceHealthBadgeStatus("healthy")).toBe("ok");
+    expect(governanceHealthBadgeStatus("warn")).toBe("warn");
+    expect(governanceHealthBadgeStatus("drift")).toBe("critical");
+    // Unknown future value degrades visibly, never silently green.
+    expect(governanceHealthBadgeStatus("mystery")).toBe("warn");
   });
 });
 
