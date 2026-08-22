@@ -60,8 +60,8 @@
 
 | ID | Workflow | Endpoints | Notes | Risk |
 |---|---|---|---|---|
-| FE-X01 | Login / logout / session expiry | `/api/auth/{login,logout,status}` | 2-step TOTP in-band (`totp_required`); 401-anywhere → login overlay; logout revokes | **H** |
-| FE-X02 | First-admin setup | `/api/setup/{status,complete}` | Bootstrap role injection window; complexity mirror; auto-login; unauth (Exempt) mode option | **H** |
+| FE-X01 | Login / logout / session expiry | `/api/auth/{login,logout,status}` | 2-step TOTP in-band (`totp_required`); 401-anywhere → login overlay; logout revokes; **pre-auth TLS-fallback warning banner** driven by `ui_tls_fallback`/`ui_tls_fallback_reason` on `/api/auth/status` (added on main 2026-08-22) | **H** |
+| FE-X02 | First-admin setup | `/api/setup/{status,complete}` | Bootstrap role injection window; complexity mirror; auto-login; unauth (Exempt) mode option; **pre-auth TLS-fallback warning banner** driven by `ui_tls_fallback` on `/api/setup/status` | **H** |
 | FE-X03 | Theme | `localStorage['culvert-theme']` | Only browser storage in the app — keep as the only persisted client state | L |
 | FE-X04 | SSE liveness | `/api/events` | connected handshake, backoff+jitter, 30-retry cap (make resumable), LIVE/STALE pill, 503-at-cap handling | **H** |
 | FE-X05 | Global confirm/danger/prompt dialogs | — | 3-tier system + MCP danger dialog; typed words; stack, focus trap, Esc; replace 6 legacy modals + 5 native prompt/confirm sites | **H** |
@@ -94,6 +94,14 @@
   metadata indicator.
 - Blocklist feed remove: second confirm for "also remove its entries".
 - Two-phase Root-CA rotation token ceremony.
+- Pre-auth TLS-fallback warning banners (setup overlay, login overlay, and in-app) driven by
+  `ui_tls_fallback`/`ui_tls_fallback_reason` on `/api/setup/status` and `/api/auth/status`
+  (main, 2026-08-22 — the credentials-over-plain-HTTP warning must not be lost in migration).
+- Security-panel scan-saturation tiles (`stat_clam_saturated`, `scan_inflight`,
+  `stat_scan_late_discard` on `/api/security-scan/status`; main, 2026-08-22).
+- CA cert-upload persistence disclosure: the MITM-target upload is persisted to the CA bundle
+  path (label + confirmation copy fixed on main, 2026-08-22); the UI-target upload is
+  validate-only.
 - Country flags via Unicode regional indicators (no CDN), theme-aware charts,
   reduced-motion-safe `chart.update('none')` behavior.
 
