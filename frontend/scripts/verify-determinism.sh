@@ -30,8 +30,8 @@ while [ "$i" -le "$N" ]; do
   (
     cd "$BUILD/frontend"
     sh scripts/assert-toolchain.sh >/dev/null
-    npm ci --no-audit --no-fund >/dev/null 2>&1
-    (cd tools/openapi-gen && npm ci --no-audit --no-fund >/dev/null 2>&1)
+    npm ci --ignore-scripts --no-audit --no-fund >/dev/null 2>&1
+    (cd tools/openapi-gen && npm ci --ignore-scripts --no-audit --no-fund >/dev/null 2>&1)
     node tools/openapi-gen/generate.mjs >/dev/null
     npm run build >/dev/null 2>&1
   )

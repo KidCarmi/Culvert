@@ -57,7 +57,10 @@ marked in `.gitattributes` as `linguist-generated` (plus `-diff` optional for di
 Production sourcemaps are **disabled**. Frontend dependencies + licenses are included in
 release notices and the SBOM.
 
-The **frontend verification/drift lane** (the only CI lane that runs Node; fast-gate member)
+The **frontend verification/drift lane** (the only *required* CI lane that installs and
+verifies the new frontend dependency/build toolchain — the advisory playwright-go UI-E2E lane
+still uses npm for its browser driver until FE-8/FE-9; wired into the Fast Gate aggregate as
+the `frontend` job of `pr-fast-gate.yml`, reusable via `workflow_call`)
 executes, in one canonical pinned Linux environment (same container image recorded in the
 workflow — this is the deterministic-build environment of record):
 

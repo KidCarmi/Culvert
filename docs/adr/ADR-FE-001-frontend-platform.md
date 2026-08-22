@@ -165,10 +165,12 @@ legacy UI. Full contract: `FRONTEND-SECURITY-CONTRACT.md` §3.
 
 Node is a **build/verification-time dependency only**. The appliance never runs Node, and —
 because build output is committed (below) — the normal Go-only build paths (`go build`,
-the Dockerfile, the release image) never run Node either. Node exists in exactly one CI lane:
-the frontend verification/drift lane (lint, typecheck, unit tests, type generation, build,
-byte-compare against the committed output). ADR-0018's "no Node in the fast gate" posture is
-amended to admit that single lane, recorded here.
+the Dockerfile, the release image) never run Node either. The frontend verification/drift lane
+is the only *required* CI lane that installs and verifies the new frontend dependency/build
+toolchain (lint, typecheck, unit tests, type generation, build, byte-compare against the
+committed output); the advisory playwright-go UI-E2E lane separately uses npm to stage its
+browser driver until the legacy UI retires at FE-8/FE-9. ADR-0018's "no Node in the fast gate"
+posture is amended to admit that single required lane, recorded here.
 
 ### OQ-1 + OQ-3 — CLOSED (review decision, 2026-08-21)
 
@@ -235,7 +237,8 @@ never a blanket allowance.
 - ~29 markup-string-scanning Go tests are progressively replaced by behavior-level tests; the
   intent tests (no inline handlers, air-gap, no native dialogs, typed-confirm coverage, CSP
   posture) are re-expressed against the new bundle in FE-1A/FE-2.
-- CI grows exactly one Node lane (verification/drift) plus license/vuln scanning;
+- CI grows one required frontend verification/drift lane (the only required lane installing
+  the new frontend toolchain; Fast Gate member via `workflow_call`) plus license/vuln scanning;
   `proxy-ui-e2e.yml` path filters gain `frontend/**`.
 - The serving layer is rewritten per the hardened contract (`FRONTEND-MIGRATION-PLAN.md` §2,
   `FRONTEND-SECURITY-CONTRACT.md` §9): hashed assets, manifest validation, strict resolution
