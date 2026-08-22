@@ -15,25 +15,13 @@ import { useAuth } from "../../auth/AuthProvider";
 import { Button, Callout } from "../../design-system/primitives";
 import { InputField } from "../../design-system/forms";
 import { AuthScreen } from "./AuthScreen";
+import { passwordProblem, usernameProblem } from "./validation";
 import styles from "./auth.module.css";
 
 interface FieldErrors {
   user?: string;
   pass?: string;
   pass2?: string;
-}
-
-// Mirrors validatePasswordComplexity (store.go:696) for UX only — the
-// server remains authoritative.
-function passwordProblem(pass: string): string | undefined {
-  if (pass.length < 8) return "Password must be at least 8 characters.";
-  if (new TextEncoder().encode(pass).length > 72) {
-    return "Password must be at most 72 bytes (bcrypt limit).";
-  }
-  if (!/[A-Z]/.test(pass) || !/[a-z]/.test(pass) || !/[0-9]/.test(pass)) {
-    return "Password must contain at least one uppercase letter, one lowercase letter, and one digit.";
-  }
-  return undefined;
 }
 
 type FormNotice =
@@ -60,9 +48,8 @@ export function SetupPage(): JSX.Element {
     if (busy) return;
     const trimmed = user.trim();
     const errs: FieldErrors = {};
-    if (trimmed.length < 1 || trimmed.length > 64) {
-      errs.user = "Username must be 1–64 characters.";
-    }
+    const up = usernameProblem(user);
+    if (up !== undefined) errs.user = up;
     const pp = passwordProblem(pass);
     if (pp !== undefined) errs.pass = pp;
     if (pass2 !== pass) errs.pass2 = "Passwords do not match.";
