@@ -83,7 +83,12 @@ test("overview loads one snapshot set, manual refresh advances freshness, zero S
   await page.goto("/app/");
   await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
   await expect(page.getByText("Management health")).toBeVisible();
-  await expect(page.getByText("Traffic — last hour")).toBeVisible();
+  await expect(
+    page.getByText("Traffic counters — since process start"),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Requests per minute — last 60 minutes", { exact: true }),
+  ).toBeVisible();
   const updated = page.getByText(/^Updated \d\d:\d\d:\d\d$/);
   await expect(updated).toBeVisible();
   const before = await updated.textContent();
@@ -155,6 +160,10 @@ test("traffic: bounded default query over seeded history, cursor paging with dis
   ).toBeVisible();
 
   // Next: page 2 is a DIFFERENT slice (no fake exact totals anywhere).
+  // Cross an epoch-second boundary first: the applied window is FROZEN per
+  // query, so a later click must reuse the cursor's exact from/to — a
+  // per-render re-resolved window would 400 the fingerprint-bound cursor.
+  await page.waitForTimeout(1100);
   await page.getByRole("button", { name: "Next" }).click();
   await expect(page.getByText("(page 2)")).toBeVisible();
   await expect(page.getByText("fe4-seed-49.test")).toBeVisible();
@@ -277,6 +286,57 @@ test("traffic: a superseded in-flight query is cancelled and never overwrites th
   assertClean(w);
 });
 
+test("traffic: a scan-limited segment is never a terminal empty state and Continue searches on", async ({
+  page,
+  baseURL,
+}) => {
+  const w = watch(page, baseURL ?? AUTH_URL);
+  // Network fixture over the REAL response: the first page is rewritten to
+  // report a scan-limited empty segment carrying the REAL continuation
+  // cursor; the continuation request passes through to the live backend.
+  let patched = false;
+  await page.route(
+    (u) => u.pathname === "/api/logs",
+    async (route) => {
+      const url = new URL(route.request().url());
+      if (url.searchParams.get("cursor") === "" && !patched) {
+        patched = true;
+        const resp = await route.fetch();
+        const body: unknown = await resp.json();
+        const rec =
+          typeof body === "object" && body !== null && !Array.isArray(body)
+            ? body
+            : {};
+        await route.fulfill({
+          response: resp,
+          json: { ...rec, logs: [], has_more: true, scan_limited: true },
+        });
+        return;
+      }
+      await route.continue();
+    },
+  );
+  await page.goto("/app/monitor/traffic");
+
+  // Honest partial-segment state — NOT the terminal empty state.
+  await expect(
+    page.getByText("No matches in this scanned segment"),
+  ).toBeVisible();
+  await expect(page.getByText("No matching requests")).toBeHidden();
+  await expect(
+    page.getByText(/0 results in this scan segment — more retained history/),
+  ).toBeVisible();
+
+  // Continuation is explicit and bounded: ONE click issues ONE follow-up
+  // query (no auto-chaining), which reaches real history. The crossed
+  // second boundary pins the frozen-window contract (cursor from/to reuse).
+  await page.waitForTimeout(1100);
+  await page.getByRole("button", { name: "Continue search" }).click();
+  await expect(page.getByText("fe4-seed-49.test")).toBeVisible();
+  await expect(page.getByText("(page 2)")).toBeVisible();
+  assertClean(w);
+});
+
 // ── Truthful history availability (§8) — FRESH appliance, no store ────────
 
 test.describe("history-disabled appliance", () => {
@@ -372,12 +432,31 @@ test("diagnostics: snapshot with first-class operator_action; explicit run only"
   // Loading the page ran NO active diagnostic (§14: explicit action only).
   expect(diagnoseCalls).toEqual([]);
 
-  // Explicit run as admin: storage verb, result rendered from the decoded
-  // schema_version=1 payload.
+  // Explicit runs as admin. The full fixed backend verb registry is
+  // exposed (storage/upstream/dns/tls/cluster/etcd/config/support/all).
   await expect(page.getByText("Run a diagnostic")).toBeVisible();
+  await expect(
+    page.getByRole("group", { name: "Diagnostic" }).getByRole("button"),
+  ).toHaveCount(9);
+
+  // storage: per-verb decoded, deliberately presented (summary + checks).
   await page.getByRole("button", { name: "Run storage diagnostic" }).click();
-  await expect(page.getByText("data_dir").first()).toBeVisible();
+  await expect(page.getByText("Data directory", { exact: true })).toBeVisible();
   expect(diagnoseCalls.length).toBe(1);
+
+  // support: explicitly runnable, decoded through its own contract.
+  await page.getByRole("button", { name: "support", exact: true }).click();
+  await page.getByRole("button", { name: "Run support diagnostic" }).click();
+  await expect(page.getByText("Pending approval")).toBeVisible();
+  expect(diagnoseCalls.length).toBe(2);
+
+  // all: nested sub-results render as deliberate sections, not a dump.
+  await page.getByRole("button", { name: "all", exact: true }).click();
+  await page.getByRole("button", { name: "Run all diagnostic" }).click();
+  await expect(page.getByText("Verbs aggregated")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "cluster" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "config" })).toBeVisible();
+  expect(diagnoseCalls.length).toBe(3);
   assertClean(w);
 });
 

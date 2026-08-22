@@ -339,6 +339,18 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 >   and deliberately no total. The legacy offset mode is byte-compatible.
 >   Deterministic scale proof via the `Scanned` seam: page 40 of a
 >   5000-entry store costs the same scan count (≤ limit+1) as page 1.
+>   The qualification-hardening round added the bounded scan-continuation
+>   contract (`scan_limited` + a last-SCANNED continuation cursor issued
+>   even for zero-row segments), so sparse filters have guaranteed forward
+>   progress — a proven non-matching range is never rescanned, and the UI
+>   distinguishes "no matches in this scanned segment / Continue search"
+>   from the true terminal empty window. Engine + API + browser proofs:
+>   `logstore_page_sparse_test.go`, `ui_logs_cursor_sparse_test.go`,
+>   fe4.spec.ts. Per-verb diagnose decoders (all NINE backend verbs incl.
+>   support/all), network-layer auth-boundary cancellation for every FE-4
+>   request (queries consume TanStack's AbortSignal; the diagnose mutation
+>   owns an AbortController wired to registerAuthCleanup), and the
+>   truthful Overview time-scope labels landed in the same round.
 > - **Snapshot freshness contract (§17)**: one `useSnapshot` hook + one
 >   `SnapshotBar` implement loading → fresh → refreshing → error-with-
 >   previous-snapshot → error-empty. "Updated HH:MM:SS" advances ONLY on a
