@@ -177,9 +177,30 @@ func apiAuthLogin(w http.ResponseWriter, r *http.Request) {
 // the connection is unencrypted.
 func jsonOKAuthStatus(w http.ResponseWriter, fields map[string]any) {
 	fields["ui_tls_fallback"] = uiTLSFallbackActive
-	fields["ui_tls_fallback_reason"] = uiTLSFallbackReason
+	fields["ui_tls_fallback_reason"] = preAuthTLSFallbackReason()
 	jsonOK(w, fields)
 }
+
+// preAuthTLSFallbackReason is the reason value served on the UNAUTHENTICATED
+// endpoints (/api/auth/status, /api/setup/status): always empty.
+//
+// The BOOLEAN belongs pre-authentication — a browser about to submit a
+// password must be able to learn the connection is cleartext, and that is the
+// whole point of surfacing it there. The CAUSE does not. It is a raw
+// error string from the self-sign path, and Go's x509 encoder embeds the
+// offending value in its errors, so an operator-configured SAN or the host's
+// own hostname (uitls.collectSANs adds os.Hostname()) can end up verbatim in
+// a response any unauthenticated client on the admin port can read.
+//
+// This is the same rule the readiness rows already follow — /ready and /health
+// carry FIXED detail precisely because they are unauthenticated (see the ca /
+// cluster_ca / frontend_v2 rows). The cause stays available to an authenticated
+// caller on GET /api/settings/network (viewer+), alongside ui_sans.
+//
+// The KEY is still emitted (empty) rather than omitted: both frontends decode
+// this response with a strict runtime decoder that requires the field, and the
+// warning banners already render correctly with an empty cause.
+func preAuthTLSFallbackReason() string { return "" }
 
 // GET /api/auth/status — return whether the current request has a valid session.
 func apiAuthStatus(w http.ResponseWriter, r *http.Request) {
@@ -425,9 +446,11 @@ func apiSetupStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, map[string]any{
-		"needsSetup":             !cfg.IsConfigured(),
-		"ui_tls_fallback":        uiTLSFallbackActive,
-		"ui_tls_fallback_reason": uiTLSFallbackReason,
+		"needsSetup":      !cfg.IsConfigured(),
+		"ui_tls_fallback": uiTLSFallbackActive,
+		// Unauthenticated surface: the flag, never the cause. See
+		// preAuthTLSFallbackReason.
+		"ui_tls_fallback_reason": preAuthTLSFallbackReason(),
 	})
 }
 

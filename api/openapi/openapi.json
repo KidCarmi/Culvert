@@ -354,7 +354,7 @@
             "type": "boolean"
           },
           "ui_tls_fallback_reason": {
-            "description": "The self-sign error, when ui_tls_fallback is true.",
+            "description": "Always empty on this UNAUTHENTICATED endpoint. The flag belongs pre-authentication; the raw self-sign error can embed an operator-configured SAN or the host name, so the cause is served only to an authenticated caller on GET /api/settings/network. The key is always present so strict clients decode it.",
             "type": "string"
           },
           "user": {
@@ -3613,7 +3613,7 @@
             "type": "boolean"
           },
           "ui_tls_fallback_reason": {
-            "description": "The self-sign error, when ui_tls_fallback is true.",
+            "description": "Always empty on this UNAUTHENTICATED endpoint. The flag belongs pre-authentication; the raw self-sign error can embed an operator-configured SAN or the host name, so the cause is served only to an authenticated caller on GET /api/settings/network. The key is always present so strict clients decode it.",
             "type": "string"
           }
         },
