@@ -228,18 +228,36 @@ func (j *jwksCache) getKey(kid string) (interface{}, error) {
 			return k, nil // serve the stale key rather than failing (inside the ceiling)
 		}
 		if ok {
-			// Past the ceiling: we hold a key the IdP has not re-affirmed for
-			// longer than we are willing to vouch for. Fail closed — a key
-			// withdrawn at the IdP must not keep authenticating here.
-			j.logStaleRefusal(fetchedAt)
+			// Past the ceiling AS FAR AS OUR PRE-REFRESH SNAPSHOT KNOWS — but
+			// our refreshOnce may have returned errJWKSThrottled precisely
+			// because a CONCURRENT lookup refreshed successfully after we
+			// captured fetchedAt (that success advanced fetchedAt and cleared
+			// the flag; the throttle is a rate control, never staleness
+			// evidence). Re-read fetchedAt under the lock: only record a breach
+			// and fail closed if the cache is STILL past the ceiling. Otherwise
+			// the recovered key set is live, so serve it — and never restore a
+			// breach flag from an obsolete snapshot (which would report a
+			// freshly refreshed provider as failing until the next TTL refresh).
+			// fetchedAt is monotonic non-decreasing, so re-reading it never
+			// weakens the staleness bound.
 			j.mu.Lock()
+			curFetchedAt := j.fetchedAt
+			if j.staleServable(curFetchedAt) {
+				kk, okk := j.keys[kid]
+				j.mu.Unlock()
+				if okk {
+					return kk, nil
+				}
+				return nil, fmt.Errorf("jwks: key %q not found", kid)
+			}
 			j.ceilingBreached = true
 			j.mu.Unlock()
+			j.logStaleRefusal(curFetchedAt)
 			// The cause is sanitised + %q because this error reaches a log via the
 			// callback handler, and the house rule is that anything crossing that
 			// boundary is sanitised at the site CodeQL can see (CWE-117).
 			return nil, fmt.Errorf("%w (last successful fetch %s ago, ceiling %s): %q",
-				errJWKSStaleCeiling, time.Since(fetchedAt).Truncate(time.Minute), jwksStaleMaxAge,
+				errJWKSStaleCeiling, time.Since(curFetchedAt).Truncate(time.Minute), jwksStaleMaxAge,
 				sanitizeLog(err.Error()))
 		}
 		return nil, err

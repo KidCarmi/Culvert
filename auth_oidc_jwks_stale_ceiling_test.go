@@ -289,3 +289,66 @@ func TestJWKS_StaleCeilingStatusReflectsRefusalAndRecovery(t *testing.T) {
 		t.Fatal("staleCeilingStatus still reported a breach after a successful refresh")
 	}
 }
+
+// ── SEC-JWKS-1g: a throttled straggler must not clobber a concurrent refresh ──
+
+// Codex review of PR #1198: two lookups race on a stale-past-ceiling cache.
+// One refreshes successfully (advancing fetchedAt, clearing the flag); the
+// other captured the old fetchedAt, then gets errJWKSThrottled from its own
+// refreshOnce (the successful attempt bumped lastAttempt). If the breach flag
+// were set unconditionally from that obsolete snapshot, /api/diagnostics would
+// report a freshly recovered provider as failing until the next TTL refresh.
+//
+// The refusal branch re-reads fetchedAt under the lock and only records a
+// breach when the cache is STILL past the ceiling. This test drives that race
+// deterministically: the server handler simulates the concurrent successful
+// refresh landing (advancing fetchedAt, clearing the flag) at the instant this
+// lookup's own refresh fails.
+func TestJWKS_ThrottledStragglerDoesNotClobberConcurrentRefresh(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+
+	var jptr atomic.Pointer[jwksCache]
+	var simulateConcurrentRecovery atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if simulateConcurrentRecovery.Load() {
+			// Stand in for a concurrent lookup that just refreshed successfully:
+			// advance fetchedAt and clear the flag WHILE this lookup's own
+			// refresh is mid-flight and about to fail with a 503.
+			if j := jptr.Load(); j != nil {
+				j.mu.Lock()
+				j.fetchedAt = time.Now()
+				j.ceilingBreached = false
+				j.mu.Unlock()
+			}
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":"unavailable"}`))
+			return
+		}
+		_, _ = w.Write([]byte(jwksBodyFor(t, "kid-1", &key.PublicKey)))
+	}))
+	t.Cleanup(srv.Close)
+
+	j := jwksCacheAgainst(t, srv)
+	jptr.Store(j)
+	if _, err := j.getKey("kid-1"); err != nil {
+		t.Fatalf("initial getKey: %v", err)
+	}
+
+	// This lookup's snapshot is past the ceiling and its own refresh fails, but
+	// the cache is concurrently refreshed to fresh mid-flight (server handler).
+	simulateConcurrentRecovery.Store(true)
+	ageCache(j, jwksStaleMaxAge+time.Hour)
+	if _, err := j.getKey("kid-1"); err != nil {
+		t.Fatalf("a lookup whose cache was concurrently refreshed to fresh was refused "+
+			"(the throttled straggler failed closed on an obsolete snapshot): %v", err)
+	}
+	if breached, _, _ := j.staleCeilingStatus(); breached {
+		t.Fatal("a throttled straggler restored the stale-ceiling breach flag from an " +
+			"obsolete snapshot after a concurrent refresh had recovered the cache — " +
+			"/api/diagnostics would report a healthy provider as failing")
+	}
+}
