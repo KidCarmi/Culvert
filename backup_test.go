@@ -493,3 +493,97 @@ func TestBackup_PACExceptions_IncludedWithContent(t *testing.T) {
 		t.Errorf("pac_exceptions.json content mismatch in backup")
 	}
 }
+
+// ── Nightly QA: persisted, admin-configurable stores missing from the
+// backup surface ─────────────────────────────────────────────────────
+//
+// defaultBackupArtifacts() drifted from the actual set of files the running
+// proxy persists under dataDir: decryption_profiles.json (named SSL-inspect
+// profiles, internal/decryptprofile), alert_webhooks.json (alert webhook
+// endpoints incl. RISK-003-encrypted secrets), fileblock.json (file
+// extension block profiles), and saas_feed/overrides.json (admin category
+// overrides for the signed SaaS URL-category feed) are all admin-configurable
+// via their own API endpoints and persisted to dataDir, exactly like
+// policy.json/bandwidth.json/pac_config.json above — but were never added to
+// the artifact list, so a backup taken today silently has no way to ever
+// restore them (e.g. after reinstalling onto a fresh volume, or restoring
+// onto a replacement host).
+func TestBackup_DecryptionProfiles_IncludedWithContent(t *testing.T) {
+	dataDir := t.TempDir()
+	seedFile(t, dataDir, "ui_users.json", []byte(`{}`), 0o600)
+	body := []byte(`{"profiles":[{"id":"p1","name":"Fail-Open Guest Wifi","onInspectError":"fail-open"}]}`)
+	seedFile(t, dataDir, "decryption_profiles.json", body, 0o600)
+
+	out := filepath.Join(t.TempDir(), "backup.tar.gz")
+	if err := runBackup(out, dataDir); err != nil {
+		t.Fatalf("runBackup: %v", err)
+	}
+	_, files, _ := readBackupTarball(t, out)
+	got, ok := files["data/decryption_profiles.json"]
+	if !ok {
+		t.Fatalf("data/decryption_profiles.json missing from tarball: %v", sortedNames(files))
+	}
+	if !bytes.Equal(got, body) {
+		t.Errorf("decryption_profiles.json content mismatch in backup")
+	}
+}
+
+func TestBackup_AlertWebhooks_IncludedWithContent(t *testing.T) {
+	dataDir := t.TempDir()
+	seedFile(t, dataDir, "ui_users.json", []byte(`{}`), 0o600)
+	body := []byte(`{"webhooks":[{"id":"w1","url":"https://hooks.example.com/culvert","events":["threat_detected"]}]}`)
+	seedFile(t, dataDir, "alert_webhooks.json", body, 0o600)
+
+	out := filepath.Join(t.TempDir(), "backup.tar.gz")
+	if err := runBackup(out, dataDir); err != nil {
+		t.Fatalf("runBackup: %v", err)
+	}
+	_, files, _ := readBackupTarball(t, out)
+	got, ok := files["data/alert_webhooks.json"]
+	if !ok {
+		t.Fatalf("data/alert_webhooks.json missing from tarball: %v", sortedNames(files))
+	}
+	if !bytes.Equal(got, body) {
+		t.Errorf("alert_webhooks.json content mismatch in backup")
+	}
+}
+
+func TestBackup_FileBlockProfiles_IncludedWithContent(t *testing.T) {
+	dataDir := t.TempDir()
+	seedFile(t, dataDir, "ui_users.json", []byte(`{}`), 0o600)
+	body := []byte(`{"profiles":[{"name":"Executables","extensions":[".exe",".bat"]}]}`)
+	seedFile(t, dataDir, "fileblock.json", body, 0o600)
+
+	out := filepath.Join(t.TempDir(), "backup.tar.gz")
+	if err := runBackup(out, dataDir); err != nil {
+		t.Fatalf("runBackup: %v", err)
+	}
+	_, files, _ := readBackupTarball(t, out)
+	got, ok := files["data/fileblock.json"]
+	if !ok {
+		t.Fatalf("data/fileblock.json missing from tarball: %v", sortedNames(files))
+	}
+	if !bytes.Equal(got, body) {
+		t.Errorf("fileblock.json content mismatch in backup")
+	}
+}
+
+func TestBackup_SaaSFeedOverrides_IncludedWithContent(t *testing.T) {
+	dataDir := t.TempDir()
+	seedFile(t, dataDir, "ui_users.json", []byte(`{}`), 0o600)
+	body := []byte(`{"overrides":[{"host":"internal.example.com","category":"Business"}]}`)
+	seedFile(t, dataDir, filepath.Join("saas_feed", "overrides.json"), body, 0o600)
+
+	out := filepath.Join(t.TempDir(), "backup.tar.gz")
+	if err := runBackup(out, dataDir); err != nil {
+		t.Fatalf("runBackup: %v", err)
+	}
+	_, files, _ := readBackupTarball(t, out)
+	got, ok := files["data/saas_feed/overrides.json"]
+	if !ok {
+		t.Fatalf("data/saas_feed/overrides.json missing from tarball: %v", sortedNames(files))
+	}
+	if !bytes.Equal(got, body) {
+		t.Errorf("saas_feed/overrides.json content mismatch in backup")
+	}
+}
