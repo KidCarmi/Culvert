@@ -362,19 +362,27 @@ func (rm *ruleMetrics) WritePrometheus(w *strings.Builder) {
 //
 // The measurement that matters is not ns/op at one core, it is how ns/op MOVES
 // with core count. BenchmarkLatencyHistogramObserveParallel, realistic
-// nanosecond-resolution latency samples, median of n=10 (4-core, Go 1.26):
+// nanosecond-resolution latency samples, median of n=15 (4-core, Go 1.26):
 //
 //	GOMAXPROCS │  before  │  after  │
-//	     1     │   15.0ns │  13.6ns │
-//	     2     │  125.5ns │  16.6ns │
-//	     4     │  158.9ns │  12.0ns │
+//	     1     │   20.6ns │  18.3ns │
+//	     2     │  179.6ns │  40.7ns │
+//	     4     │  292.3ns │  30.3ns │
 //
-// Before, four cores delivered 6.3M observations/s — an order of magnitude LESS
-// than the 67M/s a single core managed, i.e. adding cores subtracted throughput.
-// After, the cost is flat in core count and four cores deliver 83M/s: 13.2x the
+// Before, four cores delivered 3.4M observations/s — an order of magnitude LESS
+// than the 49M/s a single core managed, i.e. adding cores subtracted throughput.
+// After, the cost is flat in core count and four cores deliver 33M/s: 9.6x the
 // old four-core ceiling, and the gap widens on the 16- and 32-core hardware this
-// ships to. The single-core path is unchanged to slightly better, so unlike most
-// sharding trades there is no low-concurrency price to pay.
+// ships to. The single-core path is slightly better too, so unlike most sharding
+// trades there is no low-concurrency price to pay.
+//
+// The absolute "before" figure is load-sensitive BY CONSTRUCTION — a contended
+// CAS loop degrades further the busier the machine is — so it is not a stable
+// constant: the same benchmark on a quieter run of the same box measured
+// 15.0 / 125.5 / 158.9 against 13.6 / 16.6 / 12.0. Both runs agree on the shape
+// and on an order-of-magnitude win at four cores; neither should be quoted as a
+// precise number. That volatility is itself the argument: the cost of this path
+// used to depend on what else the gateway was doing.
 //
 // Two changes get that, and both are cost-only — every number this renders is
 // the same number, computed the same way:
@@ -384,19 +392,20 @@ func (rm *ruleMetrics) WritePrometheus(w *strings.Builder) {
 //     a scrape is once per scrape interval against a per-request write path, so
 //     moving work from Observe to WritePrometheus is the correct direction.
 //
-//  2. The float64 CAS accumulator becomes an integer NANOSECOND accumulator, a
-//     single atomic add. This is also strictly more accurate: a float64 sum of
-//     seconds loses low-order precision as it grows (53-bit mantissa against a
-//     sum that reaches 1e8 with 1e-9 increments), while int64 nanoseconds are
-//     exact for 292 years of accumulated latency and order-independent, so the
-//     sharded partial sums recombine without drift.
+//  2. The separate `total` counter is gone: the observation count is the sum of
+//     the bucket counters, which removes an atomic write from every observation
+//     AND makes `_count` exactly equal the `+Inf` bucket, as the Prometheus
+//     exposition format requires. The old shape incremented `total` before the
+//     bucket, so a scrape landing between the two rendered a `_count` one
+//     greater than `+Inf`.
 //
-// The separate `total` counter is gone with it: the observation count is the
-// sum of the bucket counters, which removes a third atomic write from every
-// observation AND makes `_count` exactly equal the `+Inf` bucket, as the
-// Prometheus exposition format requires. The old shape incremented `total`
-// before the bucket, so a scrape landing between the two rendered a `_count`
-// one greater than `+Inf`.
+// The sum stays a float64 CAS, now per shard. That is deliberate and the
+// reasoning is on Observe: an integer-nanosecond accumulator is measurably
+// cheaper but overflows after ~107 days on a busy gateway and exports a
+// negative `_sum` when it does. Sharding is what removed the contention; the
+// accumulator's type never had to change to get it. Per-shard partial sums are
+// also ~128x smaller than the old global one, so float64 precision is better
+// than before, not worse.
 //
 // ── What this does NOT fix ───────────────────────────────────────────────────
 //
@@ -441,9 +450,9 @@ const (
 // invalidate the other, handing back most of what splitting them just bought
 // (the same false-sharing trap measured in internal/connlimit).
 type histShard struct {
-	sumNanos int64                          // atomic; total observed duration in ns
-	counts   [maxHistogramBuckets + 1]int64 // atomic per-bucket counters (+1 for +Inf)
-	_        [histShardBytes - 8 - (maxHistogramBuckets+1)*8]byte
+	sumBits int64                          // atomic float64 seconds, stored as bits
+	counts  [maxHistogramBuckets + 1]int64 // atomic per-bucket counters (+1 for +Inf)
+	_       [histShardBytes - 8 - (maxHistogramBuckets+1)*8]byte
 }
 
 type latencyHistogram struct {
@@ -493,15 +502,6 @@ var certSignHist = newHistogram(
 	[]float64{0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1},
 )
 
-// maxObservableNanos bounds the float→int conversion below. A float64 outside
-// [0, maxObservableNanos) converts to an UNSPECIFIED int64 in Go, so the guard
-// is a correctness requirement, not defensive padding — and it is two
-// predictable compares (NaN fails both) on a path that has none to spare.
-// Excluded observations still land in a bucket; only the `_sum` skips them.
-// The old float accumulator had no equivalent guard: one NaN observation
-// poisoned `_sum` to NaN permanently.
-const maxObservableNanos = 1 << 62
-
 // histShardFor picks the shard for one observation.
 //
 // Observe carries no natural sharding key, so the entropy comes from the
@@ -519,12 +519,38 @@ func (h *latencyHistogram) histShardFor(seconds float64) *histShard {
 }
 
 // Observe records a latency observation in seconds. Lock-free, allocation-free,
-// and — unlike the CAS-loop version it replaces — contention-free between
-// observers that land on different shards. See the sharding note above.
+// and — unlike the single-accumulator version it replaces — contention-free
+// between observers that land on different shards. See the sharding note above.
+//
+// The sum is still accumulated as float64 seconds via a CAS, which is NOT the
+// pathology this file's sharding note describes. That was ONE process-wide CAS
+// loop: every core in the process contended for the same word, so the retries
+// themselves generated the traffic that caused the next round of retries. Here
+// the loop is per shard, so concurrent observers are almost always CAS-ing
+// different words and the loop does not iterate. An integer-nanosecond
+// accumulator would be a single atomic add and measured 0.4ns/op cheaper
+// serially and 2.9ns/op cheaper at four cores — but int64 nanoseconds overflow
+// after 9.2e9 seconds of ACCUMULATED latency, which a 10k req/s gateway
+// averaging 100ms reaches in about 107 days of uptime, and a wrapped sum
+// exports a NEGATIVE, non-monotonic `_sum` to Prometheus and OTLP. float64
+// cannot overflow at any reachable magnitude, so the 3ns buys the whole class
+// away on a path this change already made ~140ns cheaper. Do not "optimize"
+// this back into an integer accumulator without solving that.
+//
+// The non-finite guard has no equivalent in the pre-sharding code, which had
+// the same shape: one NaN observation poisoned `_sum` to NaN for the lifetime
+// of the process, with no way for a scrape to recover. A rejected observation
+// is still counted in its bucket; only the sum skips it.
 func (h *latencyHistogram) Observe(seconds float64) {
 	s := h.histShardFor(seconds)
-	if ns := seconds * 1e9; ns > 0 && ns < maxObservableNanos {
-		atomic.AddInt64(&s.sumNanos, int64(ns))
+	if seconds > 0 && seconds < math.MaxFloat64 { // false for NaN and +Inf
+		for {
+			old := atomic.LoadInt64(&s.sumBits)
+			sum := math.Float64frombits(uint64(old)) + seconds                             // #nosec G115 -- bit reinterpret, not numeric conversion
+			if atomic.CompareAndSwapInt64(&s.sumBits, old, int64(math.Float64bits(sum))) { // #nosec G115 -- bit reinterpret, not numeric conversion
+				break
+			}
+		}
 	}
 	for i, bound := range h.buckets {
 		if seconds <= bound {
@@ -545,10 +571,9 @@ func (h *latencyHistogram) Observe(seconds float64) {
 // counts returned, so `_count` can never disagree with the `+Inf` bucket.
 func (h *latencyHistogram) snapshot() (counts []int64, total int64, sum float64) {
 	counts = make([]int64, len(h.buckets)+1)
-	var nanos int64
 	for i := range h.shards {
 		s := &h.shards[i]
-		nanos += atomic.LoadInt64(&s.sumNanos)
+		sum += math.Float64frombits(uint64(atomic.LoadInt64(&s.sumBits))) // #nosec G115 -- bit reinterpret
 		for j := range counts {
 			counts[j] += atomic.LoadInt64(&s.counts[j])
 		}
@@ -556,7 +581,7 @@ func (h *latencyHistogram) snapshot() (counts []int64, total int64, sum float64)
 	for _, c := range counts {
 		total += c
 	}
-	return counts, total, float64(nanos) / 1e9
+	return counts, total, sum
 }
 
 // Count returns the number of observations recorded. Allocation-free; used by

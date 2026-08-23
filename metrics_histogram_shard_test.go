@@ -101,8 +101,7 @@ func TestHistogramCountsAndSumAcrossShards(t *testing.T) {
 			t.Errorf("counts[%d] = %d, want 1 (buckets: %v)", idx, counts[idx], counts)
 		}
 	}
-	// Nanosecond accumulation is exact to 1ns per observation.
-	if math.Abs(sum-want) > 1e-6 {
+	if math.Abs(sum-want) > 1e-9 {
 		t.Errorf("sum = %v, want %v", sum, want)
 	}
 }
@@ -163,10 +162,10 @@ func TestHistogramConcurrentObserversAreExact(t *testing.T) {
 	}
 }
 
-// TestHistogramNonFiniteObservationDoesNotPoisonSum pins the float→int guard.
-// The previous float64 accumulator had no equivalent: one NaN observation
-// turned `_sum` into NaN for the lifetime of the process, and a scrape has no
-// way to recover from that.
+// TestHistogramNonFiniteObservationDoesNotPoisonSum pins the finite guard.
+// The pre-sharding accumulator had no equivalent: one NaN observation turned
+// `_sum` into NaN for the lifetime of the process, and a scrape has no way to
+// recover from that.
 func TestHistogramNonFiniteObservationDoesNotPoisonSum(t *testing.T) {
 	h := newLatencyHistogram()
 	h.Observe(0.1)
@@ -183,6 +182,46 @@ func TestHistogramNonFiniteObservationDoesNotPoisonSum(t *testing.T) {
 	}
 	if math.Abs(sum-0.2) > 1e-6 {
 		t.Errorf("sum = %v, want 0.2 (finite observations only)", sum)
+	}
+}
+
+// TestHistogramSumDoesNotOverflowAtHighAggregateLatency is the regression test
+// for the review finding on PR #1200: an int64-NANOSECOND accumulator wraps
+// once AGGREGATE observed latency passes ~9.2e9 seconds, which is only ~107
+// days of uptime for a 10k req/s gateway averaging 100ms — and a wrapped sum
+// exports a NEGATIVE, non-monotonic `_sum` to Prometheus and OTLP, which the
+// pre-sharding float64 accumulator could never do.
+//
+// Each observation here is 1e9 seconds, so twenty of them total 2e10 seconds =
+// 2e19 nanoseconds, comfortably past math.MaxInt64 (9.22e18). They also share
+// one value, so they all land on ONE shard — which is the worst case, and the
+// case a per-shard integer counter would still wrap in even if the fold were
+// widened. The sum must come back positive and correct.
+func TestHistogramSumDoesNotOverflowAtHighAggregateLatency(t *testing.T) {
+	h := newLatencyHistogram()
+	const each, n = 1e9, 20
+	for i := 0; i < n; i++ {
+		h.Observe(each)
+	}
+
+	_, total, sum := h.snapshot()
+	if total != n {
+		t.Fatalf("total = %d, want %d", total, n)
+	}
+	if sum <= 0 {
+		t.Fatalf("sum = %v — the accumulator wrapped; a negative _sum breaks the "+
+			"Prometheus monotonicity contract for histogram sums", sum)
+	}
+	if want := float64(each) * n; math.Abs(sum-want)/want > 1e-12 {
+		t.Fatalf("sum = %v, want %v", sum, want)
+	}
+
+	// The rendered line must not carry a minus sign either.
+	var buf strings.Builder
+	h.WritePrometheus(&buf)
+	got := metricValue(t, buf.String(), "culvert_request_duration_seconds_sum ")
+	if strings.HasPrefix(got, "-") {
+		t.Fatalf("_sum rendered as %s — negative sums are never valid", got)
 	}
 }
 
@@ -395,9 +434,9 @@ var benchLatencies = func() []float64 {
 }()
 
 // BenchmarkLatencyHistogramObserve measures the serial cost of one
-// observation. The sharded, integer-nanosecond form is no more expensive
-// uncontended (15.0 → 13.6 ns/op on the reference box): the extra index mix is
-// paid for by dropping the CAS loop and the separate total counter.
+// observation. The sharded form is no more expensive uncontended: the extra
+// index mix is paid for by dropping the separate total counter, and the CAS
+// that remains is per shard rather than process-wide.
 func BenchmarkLatencyHistogramObserve(b *testing.B) {
 	h := newLatencyHistogram()
 	b.ReportAllocs()
