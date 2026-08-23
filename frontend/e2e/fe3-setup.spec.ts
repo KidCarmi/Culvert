@@ -132,7 +132,7 @@ test("credential setup completes: auto-login confirmed by fresh auth/status → 
     .getByRole("button", { name: "Create administrator account" })
     .click();
   // Authenticated shell only after POST + fresh setup/status + auth/status.
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
   await expect(page.getByText("root-admin")).toBeVisible();
   await expect(page.getByRole("button", { name: "Sign out" })).toBeVisible();
   expect(w.errors).toEqual([]);

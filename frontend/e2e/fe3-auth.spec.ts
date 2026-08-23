@@ -88,7 +88,7 @@ test("TOTP: second step, invalid code error, success via real code", async ({
   // Real RFC 6238 code (same host clock as the server) → authenticated.
   await code.fill(totpCode(TOTP_SECRET));
   await page.getByRole("button", { name: "Verify" }).click();
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
   await expect(page.getByText(USERS.totp.user)).toBeVisible();
   expect(w.errors).toEqual([]);
   expect(w.external).toEqual([]);
@@ -101,7 +101,7 @@ test("logout: server revocation, teardown, storage hygiene (§23)", async ({
   const w = watch(page);
   await page.goto(`${AUTH_URL}/app/`);
   await login(page, USERS.admin.user, USERS.admin.pass);
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
 
   // §23 while authenticated: the session cookie is HttpOnly (not
   // JS-readable), storage carries at most the theme key.
@@ -136,7 +136,7 @@ test("session expiry: boundary 401 → one teardown → login; route intent hono
   const w = watch(page);
   await page.goto(`${AUTH_URL}/app/`);
   await login(page, USERS.admin.user, USERS.admin.pass);
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
 
   // The server-side session disappears (cookie invalidated in the browser);
   // the route-transition identity revalidation discovers loggedOut → ONE
@@ -172,7 +172,7 @@ test("RBAC navigation: viewer, operator, admin differences", async ({
   // viewer: no Administration affordances.
   await page.goto(`${AUTH_URL}/app/`);
   await login(page, USERS.viewer.user, USERS.viewer.pass);
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
   await expect(page.getByText("viewer", { exact: true })).toBeVisible();
   await expect(page.getByText("Administrators")).toHaveCount(0);
   await expect(page.getByText("Settings")).toHaveCount(0);
@@ -183,7 +183,7 @@ test("RBAC navigation: viewer, operator, admin differences", async ({
   // operator: intermediate — same read surfaces, no admin governance, and
   // the role is visible in the shell.
   await login(page, USERS.operator.user, USERS.operator.pass);
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
   await expect(page.getByText("operator", { exact: true })).toBeVisible();
   await expect(page.getByText("Administrators")).toHaveCount(0);
   await page.getByRole("button", { name: "Sign out" }).click();
@@ -191,7 +191,7 @@ test("RBAC navigation: viewer, operator, admin differences", async ({
 
   // admin: governance affordances appear.
   await login(page, USERS.admin.user, USERS.admin.pass);
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
   await expect(page.getByText("Administrators")).toBeVisible();
   await expect(page.getByText("Settings")).toBeVisible();
   expect(w.errors).toEqual([]);
@@ -237,7 +237,7 @@ test("TLS fallback warning renders BEFORE credentials and inside the shell", asy
   ).toBeVisible();
   // And it carries into the authenticated shell.
   await login(page, USERS.admin.user, USERS.admin.pass);
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
   await expect(
     page.getByText("Management traffic is NOT encrypted"),
   ).toBeVisible();

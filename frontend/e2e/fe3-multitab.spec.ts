@@ -43,7 +43,7 @@ test("tab A adopts the replaced viewer identity after teardown — no reload", a
   // Tab A: authenticated admin shell.
   await page.goto(`${AUTH_URL}/app/`);
   await login(page, USERS.admin.user, USERS.admin.pass);
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
   await expect(page.getByText("Administrators")).toBeVisible();
   await expect(page.getByText("admin", { exact: true })).toHaveCount(2); // account user + role chip
   // Reload marker: survives ONLY if tab A is never fully reloaded.
@@ -56,12 +56,12 @@ test("tab A adopts the replaced viewer identity after teardown — no reload", a
   const pageB = await context.newPage();
   const wB = watch(pageB);
   await pageB.goto(`${AUTH_URL}/app/`);
-  await expect(pageB.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(pageB.getByRole("heading", { name: "Dashboard" })).toBeVisible();
   await expect(pageB.getByText("admin", { exact: true })).toHaveCount(2);
   await pageB.getByRole("button", { name: "Sign out" }).click();
   await expect(pageB.getByRole("heading", { name: "Sign in" })).toBeVisible();
   await login(pageB, USERS.viewer.user, USERS.viewer.pass);
-  await expect(pageB.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(pageB.getByRole("heading", { name: "Dashboard" })).toBeVisible();
   await expect(pageB.getByText("viewer", { exact: true })).toBeVisible();
 
   // Tab A returns to the foreground: the approved revalidation boundary.
