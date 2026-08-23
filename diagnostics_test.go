@@ -1330,3 +1330,72 @@ func TestApiDiagnostics_SyslogFeedStalePreviousTarget(t *testing.T) {
 		t.Errorf("syslog_feed status = %q, want fail when the intended target is not the connected one (stale writer)", found.Status)
 	}
 }
+
+// findOIDCJWKSTrustCheck locates the oidc_jwks_trust row.
+func findOIDCJWKSTrustCheck(t *testing.T, c OperatorContract) OperatorContractCheck {
+	t.Helper()
+	for i := range c.Checks {
+		if c.Checks[i].Code == "oidc_jwks_trust" {
+			return c.Checks[i]
+		}
+	}
+	t.Fatal("oidc_jwks_trust check missing from report")
+	return OperatorContractCheck{}
+}
+
+// TestApiDiagnostics_OIDCJWKSTrustDefaultOK — no configured OIDC provider has
+// ever breached the SEC-JWKS-1 stale-trust ceiling (the common case, including
+// deployments with no OIDC provider at all): the row must read ok.
+func TestApiDiagnostics_OIDCJWKSTrustDefaultOK(t *testing.T) {
+	orig := idpRegistry
+	t.Cleanup(func() { idpRegistry = orig })
+	idpRegistry = &IdPRegistry{live: make(map[string]IdentityProvider)}
+
+	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+	w := httptest.NewRecorder()
+	apiDiagnostics(w, r)
+
+	c := decodeContract(t, w)
+	found := findOIDCJWKSTrustCheck(t, c)
+	if found.Status != diagOK {
+		t.Errorf("oidc_jwks_trust status = %q, want ok with no OIDC provider configured", found.Status)
+	}
+}
+
+// TestApiDiagnostics_OIDCJWKSTrustReportsCeilingBreach — this is the fix under
+// test: before it, the SEC-JWKS-1 fail-closed transition (ID-token validation
+// refusing every login for a provider) was visible only via a rate-limited log
+// line, with nothing on /api/diagnostics or the admin GUI. A breached provider
+// must surface as a fail row naming it.
+func TestApiDiagnostics_OIDCJWKSTrustReportsCeilingBreach(t *testing.T) {
+	orig := idpRegistry
+	t.Cleanup(func() { idpRegistry = orig })
+	profile := &IdPProfile{ID: "p1", Name: "Corporate Okta", Type: IdPTypeOIDC, Enabled: true}
+	prov := &OIDCFlowProvider{
+		profile: profile,
+		jwks: &jwksCache{
+			keys:            map[string]interface{}{},
+			ceilingBreached: true,
+		},
+	}
+	idpRegistry = &IdPRegistry{
+		profiles: []*IdPProfile{profile},
+		live:     map[string]IdentityProvider{profile.ID: prov},
+	}
+
+	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+	w := httptest.NewRecorder()
+	apiDiagnostics(w, r)
+
+	c := decodeContract(t, w)
+	found := findOIDCJWKSTrustCheck(t, c)
+	if found.Status != diagFail {
+		t.Errorf("oidc_jwks_trust status = %q, want fail when a provider is past the stale-trust ceiling", found.Status)
+	}
+	if !strings.Contains(found.Message, "Corporate Okta") {
+		t.Errorf("oidc_jwks_trust message = %q, want it to name the affected provider", found.Message)
+	}
+	if found.OperatorAction == "" {
+		t.Error("oidc_jwks_trust fail row has no operator_action")
+	}
+}
