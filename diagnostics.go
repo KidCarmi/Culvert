@@ -163,6 +163,7 @@ func buildOperatorContract() OperatorContract {
 		checkCategoryFeedDB(),
 		checkRequestLogPersistence(),
 		checkIdentityBackend(),
+		checkInteractiveLoginState(),
 		checkOIDCJWKSTrust(),
 		checkSyslogFeed(),
 		checkMemoryBackstop(),
@@ -600,6 +601,45 @@ func checkIdentityBackend() OperatorContractCheck {
 		Message: fmt.Sprintf("identity backend %q was unreachable earlier in this process and has since answered (%d outage(s), %d request(s) denied during them; last at %s)",
 			s.Backend, s.Unavailable, s.GatedDenials, last),
 		OperatorAction: "Authentication has recovered. Users who authenticated during the window saw 407s; investigate the transient directory/IdP outage on the host or the identity service itself.",
+	}
+}
+
+// checkInteractiveLoginState reports whether the OIDC PKCE / SAML AuthnRequest
+// callback-state stores (internal/authstate) have evicted any in-flight login
+// before it could be redeemed.
+//
+// Both stores are populated by UNAUTHENTICATED requests — every captive/SSO
+// portal resolution mints an entry — so a non-zero eviction count is the
+// operator's ONLY signal that real users' SSO logins are failing "invalid or
+// expired state" on their callback: either the fixed 1000-entry cap is
+// undersized for real login volume, or an anonymous client is flooding the
+// login path. Fair-share eviction (see internal/authstate) makes a flooding
+// source evict mostly itself, so a low client count next to a climbing
+// eviction count localises the source; a high, spread-out client count points
+// at legitimate volume outgrowing the cap instead.
+//
+// Prior to this check the only place these counters were visible was the raw
+// /metrics text (culvert_login_state_*) — an operator had no reason to look
+// there for the cause of a wave of "please try logging in again" tickets.
+// Memory-only read; no probe is issued from the diagnostics path.
+func checkInteractiveLoginState() OperatorContractCheck {
+	pkceEvictions := globalPKCEStore.Evictions()
+	samlEvictions := globalSAMLStateStore.Evictions()
+	if pkceEvictions == 0 && samlEvictions == 0 {
+		return OperatorContractCheck{
+			Code:   "interactive_login_state",
+			Status: diagOK,
+			Message: fmt.Sprintf("no interactive-login (OIDC PKCE / SAML) callback state has been evicted since boot (%d OIDC PKCE, %d SAML entr(ies) currently in flight)",
+				globalPKCEStore.Len(), globalSAMLStateStore.Len()),
+		}
+	}
+	return OperatorContractCheck{
+		Code:   "interactive_login_state",
+		Status: diagWarn,
+		Message: fmt.Sprintf("interactive-login callback state was evicted before use since boot — affected users saw \"invalid or expired state\" on their SSO callback (OIDC PKCE: %d evicted, %d in flight across %d client(s); SAML: %d evicted, %d in flight across %d client(s))",
+			pkceEvictions, globalPKCEStore.Len(), globalPKCEStore.Clients(),
+			samlEvictions, globalSAMLStateStore.Len(), globalSAMLStateStore.Clients()),
+		OperatorAction: "A low client count next to the eviction count points at one flooding source hitting the captive-portal/SSO-portal resolution path (it mostly evicts only itself — consider rate-limiting or blocking that source). A high, spread-out client count means real login volume is outgrowing the store's capacity rather than an attack.",
 	}
 }
 
