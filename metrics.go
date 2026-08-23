@@ -546,6 +546,18 @@ culvert_scan_late_discarded_total %d
 # TYPE culvert_scan_inflight gauge
 culvert_scan_inflight %d
 
+# HELP culvert_remote_scan_fail_total Total remote scan-sidecar faults that forwarded content UNSCANNED (fail-open)
+# TYPE culvert_remote_scan_fail_total counter
+culvert_remote_scan_fail_total %d
+
+# HELP culvert_remote_scan_saturated_total Total remote scans the sidecar refused for capacity (fail-closed, also counted as scan timeouts)
+# TYPE culvert_remote_scan_saturated_total counter
+culvert_remote_scan_saturated_total %d
+
+# HELP culvert_remote_scan_inflight Remote scan round trips currently in flight
+# TYPE culvert_remote_scan_inflight gauge
+culvert_remote_scan_inflight %d
+
 # HELP culvert_threat_feed_blocked_total Total requests blocked by threat intelligence feeds
 # TYPE culvert_threat_feed_blocked_total counter
 culvert_threat_feed_blocked_total %d
@@ -603,6 +615,15 @@ culvert_auth_sso_required_total %d
 		scanCounters.ClamSaturated,
 		scanCounters.ScanLateDiscarded,
 		scanCounters.ScanInflight,
+		// Remote (sidecar) scanning. Emitted unconditionally, like every other
+		// scan counter: a sidecar deployment used to export NO scanning signal
+		// at all — every culvert_scan_* series is structurally zero there and
+		// the sidecar's own fail-open counter reached only the admin JSON API,
+		// so the paging rules in the scan-capacity runbook were silently dead
+		// on exactly the deployment that runbook recommends.
+		scanCounters.RemoteScanFail,
+		scanCounters.RemoteScanSaturated,
+		scanCounters.RemoteScanInflight,
 		feedBlocked,
 		feedEntries,
 		globalThreatFeed.AllowlistMaskedTotal(),

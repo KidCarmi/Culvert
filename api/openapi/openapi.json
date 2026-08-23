@@ -3003,6 +3003,10 @@
           "enabled": {
             "type": "boolean"
           },
+          "remote_scan_inflight": {
+            "description": "Remote scan round trips currently in flight. The saturation gauge for a sidecar deployment, where scan_inflight is structurally zero.",
+            "type": "integer"
+          },
           "scan_inflight": {
             "description": "Body scans currently running, including scans whose caller already gave up and was served the fail-closed refusal.",
             "type": "integer"
@@ -3012,6 +3016,14 @@
           },
           "stat_clam_saturated": {
             "description": "Body scans that could not obtain a ClamAV slot within the scan budget. The daemon is healthy; the node is at scanning capacity. Reported separately from stat_clam_scan_error because the operator response differs (add capacity vs. fix the daemon).",
+            "type": "integer"
+          },
+          "stat_remote_scan_fail": {
+            "description": "Remote scan-sidecar FAULTS that forwarded content unscanned (fail-open): unreachable, HTTP error, unreadable or unintelligible reply, or a 200 carrying no affirmative verdict. Slowness and capacity are NOT here — those fail closed and are counted as stat_scan_timeout.",
+            "type": "integer"
+          },
+          "stat_remote_scan_saturated": {
+            "description": "Remote scans the sidecar refused for capacity (HTTP 429). Fail-closed, and also counted as stat_scan_timeout. Reported separately from stat_remote_scan_fail because the operator response differs (add scanning capacity vs. fix the sidecar).",
             "type": "integer"
           },
           "stat_scan_late_discard": {

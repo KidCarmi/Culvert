@@ -280,6 +280,14 @@ func secScanStatusMap() map[string]interface{} {
 			for k, v := range status {
 				m[k] = v
 			}
+			// The sidecar's /status IS its own secScanStatusMap, so it carries
+			// its own "enabled" and "scan_svc_mode": "local". Merged in blind,
+			// those overwrote the three keys this process owns, and a proxy in
+			// remote mode reported scan_svc_mode "local" to its own admin UI.
+			// The identity of THIS node is not the far end's to state.
+			m["enabled"] = true
+			m["scan_svc_mode"] = "remote"
+			m["scan_svc_url"] = globalRemoteScanner.URL()
 			m["scan_svc_degraded"] = false
 		} else {
 			m["scan_svc_status"] = fmt.Sprintf("unreachable: %v", err)
@@ -300,6 +308,13 @@ func secScanStatusMap() map[string]interface{} {
 		m["threat_feed_allowlist_masked"] = globalThreatFeed.AllowlistMaskedTotal()
 		// Tier 2.2: surface remote sidecar failure counter even when scan_svc_mode=remote.
 		m["stat_remote_scan_fail"] = counters.RemoteScanFail
+		// CHAOS-53: the fail-CLOSED half of the remote posture. scan_timeout now
+		// counts budget refusals from the sidecar path too, so this deployment
+		// finally reports both directions of a scanning fault instead of only
+		// the one that admits content.
+		m["stat_scan_timeout"] = counters.ScanTimeout
+		m["stat_remote_scan_saturated"] = counters.RemoteScanSaturated
+		m["remote_scan_inflight"] = counters.RemoteScanInflight
 		return m
 	}
 

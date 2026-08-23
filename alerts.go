@@ -47,7 +47,16 @@ var fireAlert = func(event string, payload AlertPayload) {
 	globalAlertStore.Dispatch(event, payload)
 }
 
-func init() { alerts.SetSink(fireAlert) }
+func init() {
+	alerts.SetSink(fireAlert)
+	// The subscription query behind the HasSubscriber gate that request-path
+	// producers inside internal/* use (see alerts.HasSubscriber). Same
+	// publish-once lifecycle as the sink; the probe reads the same
+	// process-wide store the dispatch does.
+	alerts.SetSubscriberProbe(func(event string) bool {
+		return globalAlertStore.HasSubscriber(event)
+	})
+}
 
 // fireDNSFailureAlert reports a failed destination lookup from the proxy
 // request path. It is the single producer for the "dns_failure" event, shared

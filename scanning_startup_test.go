@@ -6,9 +6,13 @@ package main
 // and tested by their own suites.
 
 import (
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/scanexcl"
 )
 
 func TestResolveScanning_DisabledByDefault(t *testing.T) {
@@ -85,5 +89,54 @@ func TestResolveScanning_SizesAndDurations(t *testing.T) {
 	fc.SecurityScan.CacheTTL = "garbage"
 	if got := resolveScanningStartupConfig(fc, scanningCLIFlags{}, ""); got.CacheTTL != time.Hour {
 		t.Errorf("unparseable CacheTTL = %v, want 1h fallback", got.CacheTTL)
+	}
+}
+
+// ── CHAOS-53: scan exclusions in remote mode ────────────────────────────────
+
+// TestChaos53_RemoteModeLoadsScanExclusions proves the admin allowlist is read
+// from disk in remote mode, and that saves reach disk afterwards.
+//
+// The exclusion load used to sit on the LOCAL branch only, so a sidecar
+// deployment never read the file. That is worse than it sounds, because
+// scanexcl.Store learns its persistence path FROM Load: with no path, Save() is
+// a documented no-op, so every admin edit to the exclusion lists returned 200,
+// wrote an audit entry and took a config-version snapshot while persisting
+// nothing — the lists reverted to empty on the next restart, silently. The HOST
+// list is consulted on the request path in remote mode too (proxy_tunnel.go,
+// proxy_http.go), so the setting was being ignored outright as well.
+func TestChaos53_RemoteModeLoadsScanExclusions(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "scan_exclusions.json")
+	const hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	if err := os.WriteFile(path, []byte(`{"hashes":["`+hash+`"],"hosts":["excluded.example"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	prev := globalScanExclusions
+	globalScanExclusions = scanexcl.New()
+	t.Cleanup(func() { globalScanExclusions = prev })
+
+	loadScanExclusions(path)
+
+	if !globalScanExclusions.IsHashExcluded(hash) {
+		t.Error("hash allowlist not loaded in remote mode")
+	}
+	if !globalScanExclusions.IsHostExcluded("excluded.example") {
+		t.Error("host allowlist not loaded in remote mode — the request path consults it in remote mode too")
+	}
+
+	// The load is also what gives the store a path to save to. Without it the
+	// admin API's Save() succeeds and writes nothing.
+	globalScanExclusions.Replace([]string{hash}, []string{"another.example"})
+	if err := globalScanExclusions.Save(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if !strings.Contains(string(raw), "another.example") {
+		t.Fatalf("admin edits did not reach disk: %s", raw)
 	}
 }
