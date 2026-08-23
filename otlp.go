@@ -13,7 +13,6 @@ package main
 
 import (
 	"fmt"
-	"math"
 	"sync/atomic"
 	"time"
 
@@ -126,11 +125,15 @@ func otlpGaugeMetrics(now string) []otlp.Metric {
 }
 
 func otlpHistogramMetric(now string) otlp.Metric {
-	bucketCounts := make([]string, len(latencyHist.buckets)+1)
-	for i := range latencyHist.counts {
-		bucketCounts[i] = fmt.Sprintf("%d", atomic.LoadInt64(&latencyHist.counts[i]))
+	// One snapshot folds the sharded counters into per-bucket counts, the
+	// observation count and the summed seconds (metrics.go). Reading the three
+	// through a single snapshot is also what keeps Count consistent with
+	// BucketCounts — they now come from the same fold.
+	counts, total, histSum := latencyHist.snapshot()
+	bucketCounts := make([]string, len(counts))
+	for i, c := range counts {
+		bucketCounts[i] = fmt.Sprintf("%d", c)
 	}
-	histSum := math.Float64frombits(uint64(atomic.LoadInt64(&latencyHist.sumBits))) // #nosec G115
 	return otlp.Metric{
 		Name:        "culvert.request.duration",
 		Description: "Request latency",
@@ -139,7 +142,7 @@ func otlpHistogramMetric(now string) otlp.Metric {
 			AggregationTemporality: 2,
 			DataPoints: []otlp.HistDataPoint{{
 				TimeUnixNano:   now,
-				Count:          atomic.LoadInt64(&latencyHist.total),
+				Count:          total,
 				Sum:            histSum,
 				BucketCounts:   bucketCounts,
 				ExplicitBounds: latencyHist.buckets,
