@@ -213,10 +213,74 @@ var cloudMetadataEndpoints = []cloudMetadataEndpoint{
 	},
 }
 
+// raceProbesByPrecedence runs every probe CONCURRENTLY and returns the first
+// non-nil result in PRECEDENCE order (probes[0] outranks probes[1], and so
+// on) — the same "a host is only on one provider, try candidates in a fixed
+// order" contract detectCloudPublicIPs/detectPublicIPFallback always had.
+//
+// It returns as soon as the winning candidate is KNOWN, not once every probe
+// has finished: once probes[0..k] have all resolved and probes[k] is the
+// first of them to succeed, any probe ranked below k can no longer change the
+// answer, so their goroutines are abandoned (they still run to completion in
+// the background, bounded by their own request timeout, and are simply
+// discarded) rather than waited on. Without this, a fast, high-precedence
+// success would still be held up by a slow or hanging low-precedence probe —
+// worse than the original sequential code, which returned immediately on the
+// first success and never even started the rest.
+func raceProbesByPrecedence(probes []func() net.IP) net.IP {
+	n := len(probes)
+	if n == 0 {
+		return nil
+	}
+
+	type outcome struct {
+		idx int
+		ip  net.IP
+	}
+	done := make(chan outcome, n)
+	for i, p := range probes {
+		i, p := i, p
+		go func() { done <- outcome{idx: i, ip: p()} }()
+	}
+
+	resolved := make([]bool, n)
+	results := make([]net.IP, n)
+	for remaining := n; remaining > 0; remaining-- {
+		o := <-done
+		resolved[o.idx] = true
+		results[o.idx] = o.ip
+
+		// Walk the resolved prefix in precedence order: stop at the first
+		// still-pending probe (an earlier-ranked one might still succeed) or
+		// return the first success found along the way.
+		for i := 0; i < n; i++ {
+			if !resolved[i] {
+				break
+			}
+			if results[i] != nil {
+				return results[i]
+			}
+		}
+	}
+	return nil
+}
+
 // detectCloudPublicIPs queries cloud instance metadata APIs to discover
 // the machine's public IP address. Returns nil on non-cloud hosts or if
-// no public IP is assigned. Each provider is tried sequentially; the first
-// successful response wins (a host is only on one cloud provider).
+// no public IP is assigned. This runs synchronously on the admin-UI startup
+// path (SelfSigned -> collectSANs), on every process start where no explicit
+// -tls-cert/-tls-key is configured — the shipped docker-compose.yml default.
+//
+// Providers are probed CONCURRENTLY, not one after another: a host where
+// 169.254.169.254 is unreachable in a way that HANGS rather than fails fast
+// (a common enterprise/air-gapped posture — DROPPING rather than REJECTING
+// metadata traffic to deter SSRF) used to pay every candidate's own timeout
+// in sequence (AWS token + AWS value + GCP + Azure), so total latency grew
+// with the number of providers instead of being capped by the slowest single
+// one. raceProbesByPrecedence still returns the same precedence-ordered
+// first success as before — only the wall-clock cost changes, and only for
+// the cases that were never previously fast (unreachable-but-not-refused, or
+// a low-precedence straggler after a high-precedence win).
 func detectCloudPublicIPs() []net.IP {
 	// Short timeout — metadata is local (< 50ms on cloud, times out on bare metal).
 	// 2s total allows for IMDSv2 two-step (PUT token + GET IP) on busy instances.
@@ -228,17 +292,16 @@ func detectCloudPublicIPs() []net.IP {
 		},
 	}
 
-	// Try AWS first with IMDSv2 (token-based), fall back to IMDSv1.
-	if ip := queryAWSMetadata(client); ip != nil {
-		return []net.IP{ip}
+	probes := []func() net.IP{
+		func() net.IP { return queryAWSMetadata(client) },
+	}
+	for _, ep := range cloudMetadataEndpoints[1:] { // skip AWS (index 0), handled above
+		ep := ep
+		probes = append(probes, func() net.IP { return queryMetadataEndpoint(client, ep) })
 	}
 
-	// Try GCP and Azure.
-	for _, ep := range cloudMetadataEndpoints[1:] { // skip AWS (index 0), handled above
-		ip := queryMetadataEndpoint(client, ep)
-		if ip != nil {
-			return []net.IP{ip}
-		}
+	if ip := raceProbesByPrecedence(probes); ip != nil {
+		return []net.IP{ip}
 	}
 
 	// Fallback: IMDS unreachable (e.g. Docker bridge networking where
@@ -261,6 +324,10 @@ var publicIPEndpoints = []cloudMetadataEndpoint{
 
 // detectPublicIPFallback queries public IP reflection services to discover
 // the machine's external IP. Used when IMDS is unreachable (Docker bridge).
+// Probed concurrently via raceProbesByPrecedence for the same reason as
+// detectCloudPublicIPs above — an unreachable-but-not-refused endpoint must
+// not multiply its timeout by the number of fallback services tried, and a
+// fast preferred-endpoint success must not be held up by a slower one.
 func detectPublicIPFallback(client *http.Client) net.IP {
 	// Only try if we appear to be running in a container — avoids adding
 	// a NAT gateway IP on developer laptops.
@@ -268,14 +335,16 @@ func detectPublicIPFallback(client *http.Client) net.IP {
 		return nil
 	}
 
-	for _, ep := range publicIPEndpoints {
-		ip := queryMetadataEndpoint(client, ep)
-		if ip != nil {
-			obs.Printf("UITLS: detected public IP via %s (IMDS unreachable, container fallback): %s", ep.name, ip)
-			return ip
-		}
+	probes := make([]func() net.IP, len(publicIPEndpoints))
+	for i, ep := range publicIPEndpoints {
+		ep := ep
+		probes[i] = func() net.IP { return queryMetadataEndpoint(client, ep) }
 	}
-	return nil
+	ip := raceProbesByPrecedence(probes)
+	if ip != nil {
+		obs.Printf("UITLS: detected public IP via container fallback: %s", ip)
+	}
+	return ip
 }
 
 // isRunningInContainer returns true if the process appears to be inside a Docker/OCI container.
