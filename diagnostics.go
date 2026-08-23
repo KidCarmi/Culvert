@@ -610,13 +610,22 @@ func checkIdentityBackend() OperatorContractCheck {
 //
 // Both stores are populated by UNAUTHENTICATED requests — every captive/SSO
 // portal resolution mints an entry — so a non-zero eviction count is the
-// operator's ONLY signal that real users' SSO logins are failing "invalid or
-// expired state" on their callback: either the fixed 1000-entry cap is
+// operator's ONLY signal that some in-flight logins were displaced before
+// their browser could redeem them: either the fixed 1000-entry cap is
 // undersized for real login volume, or an anonymous client is flooding the
-// login path. Fair-share eviction (see internal/authstate) makes a flooding
-// source evict mostly itself, so a low client count next to a climbing
-// eviction count localises the source; a high, spread-out client count points
-// at legitimate volume outgrowing the cap instead.
+// login path. An evicted entry does not prove a user actually hit "invalid or
+// expired state" — that requires the browser to attempt the callback after
+// its state was dropped, which this store does not observe — so the message
+// says "may have", not "did".
+//
+// Evictions() is cumulative for the process lifetime; Len()/Clients() are a
+// snapshot of right now. They can describe different points in time: a burst
+// that has long since drained (every entry redeemed or expired) still shows a
+// non-zero eviction count next to a near-empty, low-client store, which looks
+// identical to a resolved incident and MUST NOT be read as "one small active
+// flooding source" from this snapshot alone. Distinguishing an active flood
+// from a historical one needs a trend (is the counter still climbing?), which
+// the operator_action below asks for explicitly instead of inferring it here.
 //
 // Prior to this check the only place these counters were visible was the raw
 // /metrics text (culvert_login_state_*) — an operator had no reason to look
@@ -636,10 +645,10 @@ func checkInteractiveLoginState() OperatorContractCheck {
 	return OperatorContractCheck{
 		Code:   "interactive_login_state",
 		Status: diagWarn,
-		Message: fmt.Sprintf("interactive-login callback state was evicted before use since boot — affected users saw \"invalid or expired state\" on their SSO callback (OIDC PKCE: %d evicted, %d in flight across %d client(s); SAML: %d evicted, %d in flight across %d client(s))",
+		Message: fmt.Sprintf("interactive-login callback state has been evicted at the cap since boot — some evicted logins may have failed their SSO callback with \"invalid or expired state\" (OIDC PKCE: %d evicted since boot, %d currently in flight across %d client(s) right now; SAML: %d evicted since boot, %d currently in flight across %d client(s) right now)",
 			pkceEvictions, globalPKCEStore.Len(), globalPKCEStore.Clients(),
 			samlEvictions, globalSAMLStateStore.Len(), globalSAMLStateStore.Clients()),
-		OperatorAction: "A low client count next to the eviction count points at one flooding source hitting the captive-portal/SSO-portal resolution path (it mostly evicts only itself — consider rate-limiting or blocking that source). A high, spread-out client count means real login volume is outgrowing the store's capacity rather than an attack.",
+		OperatorAction: "The eviction count is cumulative since boot while the in-flight/client counts are a snapshot of right now, so a store that has since drained can show this warning long after the cause resolved — do not read the current client count as the size of the event that caused the evictions. Re-check this endpoint (or culvert_login_state_evictions_total on /metrics) over time: if the eviction count is still climbing alongside a small, steady set of clients, that is an active flooding source hitting the captive-portal/SSO-portal resolution path worth rate-limiting or blocking; if it has stopped climbing, the store already recovered and no action is needed.",
 	}
 }
 
