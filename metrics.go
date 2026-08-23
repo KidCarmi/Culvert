@@ -913,6 +913,47 @@ culvert_catfeeddb_quarantined_copies %d
 		cfdb.ResidualCopies,
 	)
 
+	// CHAOS-54: SOCKS5 accept-loop health. Emitted ONLY when a SOCKS5 listener
+	// is configured — on the ordinary appliance (-socks5-port 0) these series
+	// are absent entirely, because `listener_up 0` on a node that never had
+	// SOCKS5 is indistinguishable from a dead listener and the documented
+	// paging rule is `== 0` (the cluster_ca gauge precedent).
+	//
+	// `up` is 0 only when the accept loop STOPPED (an unrecoverable socket
+	// error or a contained panic) — terminal, restart required. A listener
+	// that is retrying stays up=1 with `accept_degraded 1`, because it recovers
+	// on its own the moment descriptors free up.
+	if sk := socks5ListenerState(); sk.Configured {
+		up, degraded := 1, 0
+		if sk.Down {
+			up = 0
+		}
+		if sk.Degraded {
+			degraded = 1
+		}
+		_, _ = fmt.Fprintf(w, `# HELP culvert_socks5_listener_up 1 while the SOCKS5 accept loop is running; 0 once it has stopped and the port is closed
+# TYPE culvert_socks5_listener_up gauge
+culvert_socks5_listener_up %d
+
+# HELP culvert_socks5_accept_errors_total Accept errors on the SOCKS5 listener since startup
+# TYPE culvert_socks5_accept_errors_total counter
+culvert_socks5_accept_errors_total %d
+
+# HELP culvert_socks5_accept_degraded 1 while the SOCKS5 listener has been failing to accept for longer than the degradation threshold
+# TYPE culvert_socks5_accept_degraded gauge
+culvert_socks5_accept_degraded %d
+
+# HELP culvert_socks5_accept_backoff_seconds Current SOCKS5 accept retry backoff; 0 when accepts are succeeding
+# TYPE culvert_socks5_accept_backoff_seconds gauge
+culvert_socks5_accept_backoff_seconds %g
+`,
+			up,
+			sk.Total,
+			degraded,
+			sk.Backoff.Seconds(),
+		)
+	}
+
 	// CHAOS-45: durable-write (persistence) health. The boot-time writability
 	// probe cannot see a volume that goes read-only or full LATER, and most
 	// store Save() paths discard the write error — these series are the only
