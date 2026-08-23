@@ -458,7 +458,7 @@ func validateTelemetryCredential(cred string) error {
 // (§4/§14). GET (admin) reads the redacted posture; PUT (admin) sets
 // enabled/origin/credential, validated and audited. Node-local — no
 // saveConfigVersion, no admin_settings.json, no CP→DP sync (mirrors the
-// upload config's independence, ADR-0022/P6 consent separation). This
+// upload config's independence, ADR-0031/P6 consent separation). This
 // handler cannot cause egress: it only reads/writes a local JSON file.
 func apiSupportTelemetryConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {

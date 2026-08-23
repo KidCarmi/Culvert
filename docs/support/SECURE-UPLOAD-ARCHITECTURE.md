@@ -17,7 +17,7 @@ The appliance never analyzes. Its terminal state is "encrypted bundle uploaded, 
 
 ---
 
-## 2. Consent model (explicit, layered, separate from telemetry — ADR-0022/P6)
+## 2. Consent model (explicit, layered, separate from telemetry — ADR-0031/P6)
 
 Four independent switches, four audit trails; enabling one never enables another:
 

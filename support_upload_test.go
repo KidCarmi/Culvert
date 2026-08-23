@@ -184,7 +184,7 @@ func TestNoAutoUpload(t *testing.T) {
 	}
 }
 
-// TestConsentSeparation — the upload switch is independent (ADR-0022/P6):
+// TestConsentSeparation — the upload switch is independent (ADR-0031/P6):
 // enabling upload writes ONLY its own node-local file and touches no other
 // consent/posture surface. Extended for M7 Slice 2 (§14/§15): enabling
 // telemetry afterward writes ONLY its own node-local file too, leaves

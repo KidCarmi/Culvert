@@ -1,9 +1,9 @@
-# ADR-0020: Source-side redaction & a data-classification registry for support data
+# ADR-0029: Source-side redaction & a data-classification registry for support data
 
 - **Status:** Proposed (design recorded 2026-07-12; no code moved)
 - **Date:** 2026-07-12
 - **Deciders:** Principal Supportability Architect (proposed); project maintainer (to ratify)
-- **Relates to:** ADR-0007 (secret containment — the `NEVER_EXPORT` enforcement), ADR-0019 (bundle framework), `config_surfaces.go` (the existing classification pattern). Full design in `docs/support/REDACTION-MODEL.md`.
+- **Relates to:** ADR-0007 (secret containment — the `NEVER_EXPORT` enforcement), ADR-0028 (bundle framework), `config_surfaces.go` (the existing classification pattern). Full design in `docs/support/REDACTION-MODEL.md`.
 
 ## Context
 

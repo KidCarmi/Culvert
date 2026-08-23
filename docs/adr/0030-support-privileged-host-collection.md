@@ -1,9 +1,9 @@
-# ADR-0021: Privileged host/container collection via the maintenance agent (read-only `/v1/collect`)
+# ADR-0030: Privileged host/container collection via the maintenance agent (read-only `/v1/collect`)
 
 - **Status:** Proposed (design recorded 2026-07-12; no code moved)
 - **Date:** 2026-07-12
 - **Deciders:** Principal Supportability Architect (proposed); project maintainer (to ratify)
-- **Relates to:** ADR-0019 (bundle framework), the maintenance-agent design (`roadmap/D1.6-maintenance-agent-design.md`), the P1.4 pin-binding sudoers model. Full design in `docs/support/SUPPORTABILITY-ARCHITECTURE.md §6`.
+- **Relates to:** ADR-0028 (bundle framework), the maintenance-agent design (`roadmap/D1.6-maintenance-agent-design.md`), the P1.4 pin-binding sudoers model. Full design in `docs/support/SUPPORTABILITY-ARCHITECTURE.md §6`.
 
 ## Context
 
@@ -40,4 +40,4 @@ Extend the **existing maintenance agent** with a **read-only `POST /v1/collect`*
 1. **Give the proxy the docker socket / host mounts.** Rejected: catastrophic attack-surface increase; the proxy is internet-adjacent.
 2. **A dedicated support daemon.** Rejected: a second privileged process to secure; the agent already solves the hard parts.
 3. **Collect only in-process state, no host facts.** Rejected as insufficient for disk-exhaustion / crash-loop / container-state incidents — but this **is** the fallback when the agent is unavailable (degraded bundle, P5).
-4. **Ship a support shell/`kubectl exec`-style escape hatch for TAC.** Rejected outright — violates the no-shell rule; remote support (if ever built) is per-command allowlisted, not a shell (ADR-0022 / SECURE-UPLOAD §remote).
+4. **Ship a support shell/`kubectl exec`-style escape hatch for TAC.** Rejected outright — violates the no-shell rule; remote support (if ever built) is per-command allowlisted, not a shell (ADR-0031 / SECURE-UPLOAD §remote).
