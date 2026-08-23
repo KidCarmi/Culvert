@@ -449,8 +449,15 @@ const (
 // unpacked, two shards would share a cache line and writing one would
 // invalidate the other, handing back most of what splitting them just bought
 // (the same false-sharing trap measured in internal/connlimit).
+// sumBits is UNSIGNED because that is the type math.Float64bits speaks. The
+// pre-sharding code kept the same value in an int64 and paid for it with a
+// uint64<->int64 conversion on every read and every write, each carrying a
+// `#nosec G115` that the linter does not in fact honour (those lines only
+// survived because the gate runs --new-from-rev and they predated it). Using
+// atomic.CompareAndSwapUint64 removes both conversions and both suppressions
+// rather than carrying the debt forward.
 type histShard struct {
-	sumBits int64                          // atomic float64 seconds, stored as bits
+	sumBits uint64                         // atomic float64 seconds, stored as bits
 	counts  [maxHistogramBuckets + 1]int64 // atomic per-bucket counters (+1 for +Inf)
 	_       [histShardBytes - 8 - (maxHistogramBuckets+1)*8]byte
 }
@@ -545,9 +552,9 @@ func (h *latencyHistogram) Observe(seconds float64) {
 	s := h.histShardFor(seconds)
 	if seconds > 0 && seconds < math.MaxFloat64 { // false for NaN and +Inf
 		for {
-			old := atomic.LoadInt64(&s.sumBits)
-			sum := math.Float64frombits(uint64(old)) + seconds                             // #nosec G115 -- bit reinterpret, not numeric conversion
-			if atomic.CompareAndSwapInt64(&s.sumBits, old, int64(math.Float64bits(sum))) { // #nosec G115 -- bit reinterpret, not numeric conversion
+			old := atomic.LoadUint64(&s.sumBits)
+			sum := math.Float64frombits(old) + seconds
+			if atomic.CompareAndSwapUint64(&s.sumBits, old, math.Float64bits(sum)) {
 				break
 			}
 		}
@@ -573,7 +580,7 @@ func (h *latencyHistogram) snapshot() (counts []int64, total int64, sum float64)
 	counts = make([]int64, len(h.buckets)+1)
 	for i := range h.shards {
 		s := &h.shards[i]
-		sum += math.Float64frombits(uint64(atomic.LoadInt64(&s.sumBits))) // #nosec G115 -- bit reinterpret
+		sum += math.Float64frombits(atomic.LoadUint64(&s.sumBits))
 		for j := range counts {
 			counts[j] += atomic.LoadInt64(&s.counts[j])
 		}
