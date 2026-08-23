@@ -1,5 +1,5 @@
 // Package redaction is the data-governance engine for support bundles
-// (REDACTION-MODEL.md, ADR-0009). It classifies collected data by DataClass and
+// (REDACTION-MODEL.md, ADR-0020). It classifies collected data by DataClass and
 // redacts STRUCTURALLY at the source: SECRET/NEVER_EXPORT fields are dropped,
 // SENSITIVE fields are masked, and any unclassified field fails closed to
 // SENSITIVE (masked, never passed through). Regexes are a later backstop; the

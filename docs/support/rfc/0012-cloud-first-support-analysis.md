@@ -6,7 +6,7 @@
 - **Status:** Proposed (design recorded 2026-07-13; no code moved)
 - **Date:** 2026-07-13
 - **Deciders:** Principal Supportability Architect (proposed); project maintainer (to ratify)
-- **Relates to:** ADR-0008 (bundle framework), ADR-0013 (no local analyzer), ADR-0014 (outbound-only), ADR-0015 (cloud independence). Decision basis: `docs/support/ANALYSIS-MODEL-DECISION.md`.
+- **Relates to:** ADR-0019 (bundle framework), ADR-0013 (no local analyzer), ADR-0014 (outbound-only), ADR-0015 (cloud independence). Decision basis: `docs/support/ANALYSIS-MODEL-DECISION.md`.
 
 ## Context
 The initial supportability design placed timeline construction, incident correlation, and cluster analysis on the appliance. Culvert is an on-prem, egress-critical security appliance whose CPU/memory/disk are sized for the proxy relay hot path, and whose analyzer updates would require signed, digest-pinned releases. A structured comparison of three models (full-local / hybrid / cloud-first) across 17 dimensions scored cloud-first 72 vs hybrid 49 vs full-local 40, dominating hot-path safety, update velocity, version drift, correlation, accuracy, and blast radius.

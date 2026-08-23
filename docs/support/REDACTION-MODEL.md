@@ -1,6 +1,6 @@
 # Culvert Support — Redaction & Data-Governance Model
 
-- **Status:** Proposed (design). Decision recorded in ADR-0009.
+- **Status:** Proposed (design). Decision recorded in ADR-0020.
 - **Depends on:** `config_surfaces.go` (existing classification registry — the template), `internal/secret` (ADR-0007, the `NEVER_EXPORT` enforcement), `SUPPORT-BUNDLE-SPEC.md`, `COLLECTOR-CONTRACT.md`.
 - **Core stance:** **Redact structurally at the source, fail closed on the highest class, and treat regexes as a backstop — never the primary control.** Support data may contain secrets, identities, URLs, headers, tokens, certificates, keys, and traffic metadata; none of these may leave the appliance except deliberately and provably.
 

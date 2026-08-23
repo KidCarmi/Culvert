@@ -191,6 +191,18 @@ destination-privacy feature (keyed HMAC). Findings T-13 through T-20 below are n
 - **Priority:** Medium (real risk of a reader/agent citing or acting on the wrong decision record;
   no runtime/functional impact — this is documentation-identifier collision only).
   **Estimated PR size:** Medium (renumber 4 files + update ~6 cross-referencing docs; no code touched).
+- **Resolution (2026-08-23):** Fixed per the recommendation above, with one adjustment — the
+  original target block (`0018`–`0021`) had since been partly claimed (`0018-openapi-contract.md`
+  landed after this review), so the Supportability-framework track's four colliding files were
+  renumbered to the next unclaimed contiguous block instead: `0008` → `0019`, `0009` → `0020`,
+  `0010` → `0021`, `0011` → `0022`. Their own "Relates to" cross-references, the ~8 other docs that
+  cited the support meaning by number (`docs/adr/0014-*.md`, `0016-*.md`,
+  `docs/support/rfc/0012-*.md`, `COLLECTOR-CONTRACT.md`, `REDACTION-MODEL.md`,
+  `SUPPORTABILITY-ARCHITECTURE.md`, `SUPPORTABILITY-THREAT-MODEL.md`,
+  `SECURE-UPLOAD-ARCHITECTURE.md`), and the handful of `/P6`-qualified code comments that also
+  cited it (`support_upload.go`, `support_telemetry_config.go`, their tests,
+  `internal/redaction/class.go`) were all updated. The decryption-track files (`0008`–`0011`
+  decryption-exclusion/observability) were left untouched, per the recommendation.
 
 ### T-17 — Traffic-log destination-privacy config key still says "decryption" after its scope expanded (new — documented, not fixed)
 - **Business concept:** the destination-privacy (pseudonymization) toggle for traffic-log entries.

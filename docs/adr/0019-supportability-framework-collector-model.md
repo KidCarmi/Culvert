@@ -1,9 +1,9 @@
-# ADR-0008: Supportability Framework — plugin-collector model & the Culvert Support Bundle
+# ADR-0019: Supportability Framework — plugin-collector model & the Culvert Support Bundle
 
 - **Status:** Proposed (design recorded 2026-07-12; no code moved)
 - **Date:** 2026-07-12
 - **Deciders:** Principal Supportability Architect (proposed); project maintainer (to ratify)
-- **Relates to:** ADR-0002 (internal decomposition — a new engine `internal/support`), ADR-0007 (secret containment — the `NEVER_EXPORT` enforcement), ADR-0009 (redaction), ADR-0010 (privileged host collection), ADR-0011 (export/consent). Full design in `docs/support/`.
+- **Relates to:** ADR-0002 (internal decomposition — a new engine `internal/support`), ADR-0007 (secret containment — the `NEVER_EXPORT` enforcement), ADR-0020 (redaction), ADR-0021 (privileged host collection), ADR-0022 (export/consent). Full design in `docs/support/`.
 
 ## Context
 
@@ -17,7 +17,7 @@ Build a **plugin-collector supportability framework** in a new engine `internal/
 
 1. **Collectors, not a monolith.** Each subsystem owns a small `Collector` that produces exactly one bundle section, with typed metadata (owner, timeout, byte budget, level/runtime/feature gates, declared max data class). The runner executes them concurrently, each isolated with a timeout + panic recovery, so **a broken collector becomes a manifest error entry, never a bundle abort**.
 2. **A stable, dual-readable format.** Every CSB carries a machine-readable `manifest.json` (versioned per the three-axis scheme: format / engine / per-section schema) with per-section SHA-256 + integrity hashes + collection-errors, and a human `SUMMARY.md`. Reuse the audited `backup.go` tar/manifest/atomic-write machinery and `internal/backupcrypt` for encryption; **do not** reuse `defaultBackupArtifacts` and **never** ship a raw backup.
-3. **Redaction at the source** (ADR-0009), enforced fail-closed, with a mandatory pre-export preview.
+3. **Redaction at the source** (ADR-0020), enforced fail-closed, with a mandatory pre-export preview.
 4. **Runtime-agnostic by construction.** Collectors declare a runtime capability; the runner gates them. Build for Compose+HA now; OVA/k8s later add only new collectors.
 5. **One contract, three front-ends.** `/api/support/*` (route family + `uiRoutes` metadata + RBAC + C2), a `data-view="support"` GUI panel, and `culvert support`/`diagnose` CLI verbs — plus a recovery-mode one-shot that works with the server/GUI down.
 6. **A CI parity wall** (`support_registry_test.go`) makes it impossible to add a collector without a unique id/path, a golden schema, a data-class bound, and its mandatory test set.
@@ -40,4 +40,4 @@ Build a **plugin-collector supportability framework** in a new engine `internal/
 
 1. **Extend the raw backup with a redaction pass.** Rejected: retrofitting redaction onto a byte-faithful `/data` copy is fail-open by default and couples diagnostics to the restore surface. Source-side collectors are fail-closed and decoupled.
 2. **One monolithic `/api/support-bundle` handler.** Rejected: no failure isolation, no per-subsystem ownership, no runtime gating, and it grows unreviewably. The collector registry mirrors the proven `uiRoutes`/`config_surfaces` registry discipline.
-3. **A separate support daemon.** Rejected: a second privileged process is unnecessary attack surface; the proxy hosts application collectors and the existing maintenance agent hosts host collection (ADR-0010).
+3. **A separate support daemon.** Rejected: a second privileged process is unnecessary attack surface; the proxy hosts application collectors and the existing maintenance agent hosts host collection (ADR-0021).

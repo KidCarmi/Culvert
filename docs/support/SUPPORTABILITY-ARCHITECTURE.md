@@ -88,7 +88,7 @@ These names are normative. Any doc, code symbol, API field, or CLI flag that nam
 └───────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Boundary rule:** redaction happens **at the source, inside the collector**, before any value crosses a process/network/disk boundary — never as a post-hoc scrub of an assembled blob (ADR-0009). The Governance Plane's Redactor is the *shared library* every collector calls; the orchestration layer re-validates the assembled bundle against the classifier as defense-in-depth, but the primary guarantee is source-side.
+**Boundary rule:** redaction happens **at the source, inside the collector**, before any value crosses a process/network/disk boundary — never as a post-hoc scrub of an assembled blob (ADR-0020). The Governance Plane's Redactor is the *shared library* every collector calls; the orchestration layer re-validates the assembled bundle against the classifier as defense-in-depth, but the primary guarantee is source-side.
 
 ---
 
@@ -134,7 +134,7 @@ All three call the same orchestration API; none has privileged logic of its own.
 
 ## 6. Privileged host collection — the internal diagnostics service
 
-**Decision (ADR-0010):** do not give the proxy host access; extend the maintenance agent with a **read-only `POST /v1/collect`** operation. Attack-surface contract:
+**Decision (ADR-0021):** do not give the proxy host access; extend the maintenance agent with a **read-only `POST /v1/collect`** operation. Attack-surface contract:
 
 - **Transport/auth unchanged:** UDS `0660`, `SO_PEERCRED` UID allowlist; the proxy is the only allowed peer.
 - **Capabilities:** an **allowlisted, read-only** template set only — `docker compose ps` (state), `docker compose logs --no-color --tail=N` (bounded), `df`/`stat` on the data volume, `docker inspect --format {{json .Image}}` (image identity only, reusing the existing enumerated whitespace-safe pattern), `date -u`/clock, `uname`. **No `--format {{json .Config.Env}}`, no arbitrary path, no write op.**
