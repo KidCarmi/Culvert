@@ -90,6 +90,14 @@ func defaultBackupArtifacts(dataDir string) []backupArtifact {
 		{SrcPath: p("admin_settings.json"), TarPath: "data/admin_settings.json"},
 		{SrcPath: p("ssl_bypass.json"), TarPath: "data/ssl_bypass.json"},
 		{SrcPath: p("dpi_patterns.json"), TarPath: "data/dpi_patterns.json"},
+		// Admin-configurable stores that had drifted out of this list (nightly
+		// QA edge-case pass): each is persisted via its own API-backed store,
+		// exactly like policy.json/bandwidth.json above, but was never added
+		// here — so a backup taken today had no way to ever restore them.
+		{SrcPath: p("decryption_profiles.json"), TarPath: "data/decryption_profiles.json"},
+		{SrcPath: p("alert_webhooks.json"), TarPath: "data/alert_webhooks.json"},
+		{SrcPath: p("fileblock.json"), TarPath: "data/fileblock.json"},
+		{SrcPath: p(filepath.Join("saas_feed", "overrides.json")), TarPath: "data/saas_feed/overrides.json"},
 	}
 }
 
