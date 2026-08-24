@@ -192,4 +192,3 @@ func (f *failAppendBackend) AppendSync(path string, frame []byte, perm os.FileMo
 	}
 	return f.Backend.AppendSync(path, frame, perm)
 }
-
