@@ -359,5 +359,9 @@ func addLeaseHealth(resp map[string]any, h *HAState) {
 	if mode != "none" {
 		resp["lease_valid"] = valid
 		resp["epoch"] = epoch
+		// CHAOS-55: "read-only and working on it" is a different operator
+		// decision from "read-only and stuck", and before this they looked
+		// identical on every surface.
+		resp["lease_recovering"] = h.leaseRecoveryActive()
 	}
 }

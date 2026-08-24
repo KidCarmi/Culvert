@@ -44,12 +44,16 @@ import (
 // Restart behaviour (ADR-0004): on restart a node honours its PERSISTED role —
 // a standby re-enters standby (it never silently self-asserts as a second
 // leader). A restarted LEADER in lease mode must RE-ACQUIRE the lease
-// (acquireLeaseForResume waits out its own previous process's ghost lease);
-// denied + a recorded standby address (ADR-0005 S0, learned via HASync) means
+// (acquireLeaseForResume waits out its own previous process's ghost lease, and
+// — CHAOS-55 — retries a briefly unreachable backend). Denied BY A LIVE FOREIGN
+// HOLDER plus a recorded standby address (ADR-0005 S0, learned via HASync) means
 // the standby promoted meanwhile, so the node re-enters standby and resyncs
-// from it (enterStandbyResync). In legacy mode a restarted leader resumes
-// leadership — it has no way to probe its peer — and under auto-failover it
-// logs a split-brain-risk warning.
+// from it (enterStandbyResync). An UNREACHABLE backend is NOT that answer: the
+// node keeps the read-only leader role and a background loop
+// (ha_lease_recovery.go) completes the resume when the fence becomes visible —
+// demoting only on an affirmative read of a foreign holder. In legacy mode a
+// restarted leader resumes leadership — it has no way to probe its peer — and
+// under auto-failover it logs a split-brain-risk warning.
 //
 // Authentication: standby presents a shared HA token in every HASync RPC.
 // The leader verifies it against the stored token.
@@ -86,6 +90,10 @@ type HAState struct {
 	leaseConfirmedAt time.Time     // local time of the last backend-CONFIRMED grant/renew
 	leaseValidFor    time.Duration // validity the backend confirmed at leaseConfirmedAt
 	leaseStopCh      chan struct{} // keepalive loop stop; nil = not running
+	// leaseRecoveryCh stops the CHAOS-55 re-acquire loop; nil = not running.
+	// Armed only for role=leader with leaseEpoch==0 — a node that holds the
+	// leader role but not the fence. See ha_lease_recovery.go.
+	leaseRecoveryCh chan struct{}
 
 	// ── Lease-arbitrated failover (ADR-0005 S4) ──
 	resync        haResyncContext // material to re-enter standby after a demotion (cluster loader)
@@ -299,13 +307,24 @@ func (h *HAState) EnableAsLeader(peerAddr string, autoFailover bool) (string, er
 func (h *HAState) ResumeAsLeader(cfg *haConfig) {
 	// ADR-0005 S2: a restarting leader's old lease expired during the
 	// restart, so it must re-acquire. Granted ⇒ normal leadership (epoch,
-	// keepalive). Denied ⇒ S4: if the ex-standby's address was recorded
-	// (S0) and the loader provided resync material, re-enter STANDBY
-	// against it instead of asserting an unfenced leader role; otherwise
-	// fall back to the S2 stance (role kept, NO write authority, CRITICAL
-	// alert).
-	leaseGranted := h.acquireLeaseForResume()
-	if !leaseGranted && h.leaseConfigured() {
+	// keepalive). Denied BY A LIVE FOREIGN HOLDER ⇒ S4: the peer promoted
+	// while we were down, so if its address was recorded (S0) and the loader
+	// provided resync material, re-enter STANDBY against it rather than
+	// asserting a stale leader role.
+	//
+	// CHAOS-55 — the second condition is load-bearing and was NOT here before.
+	// Demotion used to follow ANY failed resume, so an unreachable fencing
+	// backend (an absence of information) was acted on as a fence decision:
+	// on a whole-site restart the ex-leader stood by against the ex-standby
+	// while the ex-standby stood by against it, nothing synced, and the
+	// freshness gate then refused every auto-promotion — a permanently
+	// leaderless cluster produced by a few seconds of etcd being slow to boot.
+	// An unknown fence now keeps the read-only leader role and hands the
+	// decision to the recovery loop, which demotes on an AFFIRMATIVE read of a
+	// foreign holder (handleForeignFenceHolder) and otherwise completes the
+	// interrupted resume.
+	leaseGranted, foreignHolder := h.acquireLeaseForResume()
+	if !leaseGranted && h.leaseConfigured() && foreignHolder {
 		h.mu.Lock()
 		h.token = cfg.Token
 		h.standbyAddr = cfg.StandbyAddr
@@ -330,12 +349,24 @@ func (h *HAState) ResumeAsLeader(cfg *haConfig) {
 	leaseConfigured := h.lease != nil
 	h.mu.Unlock()
 	if leaseConfigured && !leaseGranted {
-		logger.Printf("HA: CRITICAL — resumed leader role WITHOUT the fencing lease; write authority is OFF until an operator acts (ADR-0005 S2)")
+		logger.Printf("HA: CRITICAL — resumed leader role WITHOUT the fencing lease; write authority is OFF (ADR-0005 S2). " +
+			"Recovery runs in the background (CHAOS-55) — no operator action is required unless it keeps failing.")
 		go alerts.Fire("ha_resume_unfenced", alerts.Payload{
 			Event:  "ha_resume_unfenced",
 			Detail: "leader restarted but could not acquire the fencing lease; serving read-only (no write authority)",
 			Source: "ha",
 		})
+		// CHAOS-55 / register row HA-7: without this the node stays a
+		// permanently read-only leader — startLeaseKeepalive no-ops on a zero
+		// epoch, so nothing in the process would ever call Acquire again.
+		//
+		// Armed ONLY for an UNKNOWN fence state. A resume denied by a live
+		// foreign holder is an answer, not an interruption: that path keeps the
+		// shipped S2 stance (read-only leader role + CRITICAL alert) and must
+		// not spend RPCs waiting for a healthy peer to die.
+		if !foreignHolder {
+			h.startLeaseRecovery()
+		}
 	}
 	h.startLeaseKeepalive()
 	// Re-persist the SAME values (idempotent; keeps the file canonical).
@@ -951,9 +982,10 @@ func (h *HAState) PromoteManually() error {
 	return nil
 }
 
-// stopLoops signals the sync loop and the lease keepalive loop to exit
-// WITHOUT waiting for them. Internal use only (promote runs on the standby
-// loop's own goroutine); external callers want Stop.
+// stopLoops signals the sync loop, the lease keepalive loop and the CHAOS-55
+// lease-recovery loop to exit WITHOUT waiting for them. Internal use only
+// (promote runs on the standby loop's own goroutine); external callers want
+// Stop.
 func (h *HAState) stopLoops() {
 	h.mu.Lock()
 	if h.stopCh != nil {
@@ -962,6 +994,7 @@ func (h *HAState) stopLoops() {
 	}
 	h.mu.Unlock()
 	h.stopLeaseKeepalive()
+	h.stopLeaseRecovery()
 }
 
 // Stop terminates the sync loop and the lease keepalive loop and WAITS for
