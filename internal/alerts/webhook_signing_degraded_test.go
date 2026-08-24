@@ -174,7 +174,7 @@ func TestSigningDegraded_ListReportsItWithoutLeaking(t *testing.T) {
 	if listed[0].Secret != "" {
 		t.Errorf("List leaked a secret: %q", listed[0].Secret)
 	}
-	blob, err := json.Marshal(listed)
+	blob, err := json.Marshal(listed) // #nosec G117 -- List() blanks Secret; marshalling it is HOW the redaction is proven, and the assertion below fails if any secret material survives
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -304,7 +304,7 @@ func TestSigningDegraded_MalformedStoredSecret(t *testing.T) {
 	} {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "alert_webhooks.json")
-		body, err := json.Marshal([]Webhook{{ID: "1", Name: "h", URL: "https://h.example.com/x", Enabled: true, Secret: stored}})
+		body, err := json.Marshal([]Webhook{{ID: "1", Name: "h", URL: "https://h.example.com/x", Enabled: true, Secret: stored}}) // #nosec G117 -- Secret holds a deliberately malformed at-rest fixture, never a cleartext key: this writes the store file the loader must refuse to "fix"
 		if err != nil {
 			t.Fatalf("marshal: %v", err)
 		}
@@ -352,7 +352,7 @@ func TestSigningDegraded_StatusIsNeverAcceptedFromACaller(t *testing.T) {
 
 	// Straight from the file.
 	path2 := filepath.Join(t.TempDir(), "alert_webhooks.json")
-	body, err := json.Marshal([]Webhook{{ID: "1", Name: "h", URL: "https://h.example.com/x", Enabled: true, SigningDegraded: true}})
+	body, err := json.Marshal([]Webhook{{ID: "1", Name: "h", URL: "https://h.example.com/x", Enabled: true, SigningDegraded: true}}) // #nosec G117 -- no secret is set at all: this writes a hand-edited store file asserting a status the loader must not believe
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
