@@ -155,6 +155,50 @@ func MatchFQDN(pattern, host string) bool {
 // IDNA-normalized. The policy hot path passes a once-normalized host and a
 // rule's precomputed normalized pattern, avoiding the two per-rule
 // NormalizeHost allocations.
+//
+// ── Why the bare-domain branch does not build "."+pattern ─────────────────────
+//
+// This function is called ONCE PER RULE, PER REQUEST: evalAccessRules walks the
+// enabled rulebase in priority order and every rule carrying a DestFQDN reaches
+// here (policy.go matchDestNorm), and the SSL-bypass matcher walks its own
+// pattern list the same way per CONNECT (internal/sslbypass). So its cost is
+// multiplied by the rule count on every proxied request, and an allowed request
+// pays the MISS on every rule ahead of the one that matches.
+//
+// The bare-domain branch used to decide its suffix test as
+// strings.HasSuffix(host, "."+pattern). That concatenation exists only to be
+// compared and thrown away, and Go hands a non-escaping concatenation a 32-byte
+// stack buffer — so a pattern of 31 bytes or less cost a copy, and anything
+// longer cost a HEAP ALLOCATION. Long is the ordinary shape for the bare-domain
+// rules operators actually write ("assets.cdn.example-corporation.com" is 34),
+// which put the allocation on the wrong side of the common case: one per rule,
+// per request. A 100-rule policy of such patterns burned ~4.8 KB of garbage on
+// every proxied request, scaling with the rulebase.
+//
+// Deciding the same test by index costs neither. Measured on this machine
+// (Go 1.26, 100 rules that all miss — what an allowed request pays before it
+// reaches its catch-all; hostutil_matchfqdn_bench_test.go):
+//
+//	pattern  │ before                          │ after
+//	─────────┼─────────────────────────────────┼──────────────────────────
+//	26 bytes │ 2160 ns/op     0 B    0 allocs  │  660 ns/op  0 B  0 allocs
+//	37 bytes │ 5171 ns/op  4800 B  100 allocs  │  492 ns/op  0 B  0 allocs
+//	54 bytes │ 5363 ns/op  6400 B  100 allocs  │  422 ns/op  0 B  0 allocs
+//
+// The 26-byte row is the one that never allocated, and it still gets 3.3x
+// faster: dropping runtime.concatstring2 and its copy is most of the win, so
+// the gain does not depend on a policy being written with long patterns.
+//
+// The equivalence is exact, not approximate. strings.HasSuffix(host, "."+p)
+// is true exactly when len(host) >= len(p)+1, host's last len(p) bytes equal p,
+// and the byte before them is '.'. With n = len(host)-len(p) that is
+// n > 0 && host[n-1] == '.' && host[n:] == p — including the boundary shapes
+// (empty pattern, pattern longer than host, equal lengths). Pinned against the
+// verbatim pre-fix body by TestMatchFQDNNorm_MatchesPreOptimizationBehaviour
+// and FuzzMatchFQDNNorm.
+//
+// The "*." branch is left alone: pattern[1:] is a substring, which never
+// allocated.
 func MatchFQDNNorm(pattern, host string) bool {
 	if pattern == "*" {
 		return true
@@ -165,7 +209,11 @@ func MatchFQDNNorm(pattern, host string) bool {
 	}
 	// Palo Alto-style: a bare domain implicitly includes all its subdomains.
 	// "example.com" matches "example.com" AND "www.example.com".
-	return host == pattern || strings.HasSuffix(host, "."+pattern)
+	if host == pattern {
+		return true
+	}
+	n := len(host) - len(pattern)
+	return n > 0 && host[n-1] == '.' && host[n:] == pattern
 }
 
 // StripHostPort removes a trailing :port and IPv6 brackets from a host value,
