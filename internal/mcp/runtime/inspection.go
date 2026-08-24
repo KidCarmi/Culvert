@@ -48,7 +48,7 @@ type inspectionRun struct {
 // result. It performs NO upstream/credential work and (in the decision-only default
 // with no resolver) NO DNS. Returns ran=false for any non-inspected path
 // (nil provider, non-Gateway, non-tools/call), leaving the old path byte-identical.
-func (p *pipeline) runInspection(req Request, msg jsonrpc.Message, now time.Time) inspectionRun {
+func (p *pipeline) runInspection(ctx context.Context, req Request, msg jsonrpc.Message, now time.Time) inspectionRun {
 	if p.inspection == nil || p.capability != protocol.Gateway || msg.Method != "tools/call" {
 		return inspectionRun{}
 	}
@@ -85,7 +85,7 @@ func (p *pipeline) runInspection(req Request, msg jsonrpc.Message, now time.Time
 		Tool: tool, RequestedName: name, RequestedServer: req.ServerID,
 		InputSchema: inputSchema, Compiled: run.compiled, Args: args,
 	}
-	run.result = inspection.InspectRequest(context.Background(), prof, in, now)
+	run.result = inspection.InspectRequest(ctx, prof, in, now)
 	return run
 }
 

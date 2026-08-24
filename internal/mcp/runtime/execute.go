@@ -62,7 +62,7 @@ type ExecOutput struct {
 // dispatchExecute hands a decision-point outcome to the guarded executor and maps
 // the result back into a terminal Outcome. It is only reached when p.executor is
 // non-nil (the disabled-by-default posture keeps the decision-only path).
-func (p *pipeline) dispatchExecute(rb *recBuilder, req Request, msg jsonrpc.Message, ctx *identity.ResolvedContext, in policy.DecisionInput, d policy.Decision, insp inspectionRun, snapshotHash string, now time.Time) Outcome {
+func (p *pipeline) dispatchExecute(ctx context.Context, rb *recBuilder, req Request, msg jsonrpc.Message, ident *identity.ResolvedContext, in policy.DecisionInput, d policy.Decision, insp inspectionRun, snapshotHash string, now time.Time) Outcome {
 	var srv *registry.ServerRecord
 	if req.ServerID != "" && p.deps.Registry != nil {
 		if rec, ok := p.deps.Registry.Current().Get(registry.ServerID(req.ServerID)); ok {
@@ -82,12 +82,18 @@ func (p *pipeline) dispatchExecute(rb *recBuilder, req Request, msg jsonrpc.Mess
 		Decision:     d,
 		Input:        in,
 		Inspection:   inspResult,
-		Identity:     ctx,
+		Identity:     ident,
 		Server:       srv,
 		SnapshotHash: snapshotHash,
 		Now:          now,
 	}
-	out := p.executor.Execute(context.Background(), ei)
+	// SEC-MCP-03. The executor performs the REAL upstream side effect and must
+	// inherit the request's deadline and cancellation: with a DETACHED background
+	// context here, a disconnected client, an exhausted RequestDeadline or a
+	// shutdown could not stop an in-flight upstream call, and every ctx-honouring
+	// stage the executor reaches (broker, provider, dial, TLS, response read,
+	// response inspection) silently lost its bound.
+	out := p.executor.Execute(ctx, ei)
 
 	// Record the truthful observation fields.
 	if out.EvaluatedAction != "" {

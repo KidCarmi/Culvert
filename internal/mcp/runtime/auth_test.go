@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"testing"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
@@ -58,7 +59,7 @@ func TestPipeline_AuthMissingRejected(t *testing.T) {
 	p := newGatewayPipeline(t, testDeps(t, k, nil))
 	req := gwRequest(gwToken(k), initializeBody(1))
 	req.AuthorizationHeaders = nil // no credential
-	out := p.Process(req, fixedClock())
+	out := p.Process(context.Background(), req, fixedClock())
 	if out.Status != 401 || out.Reason != mcperr.ReasonCredentialMissing {
 		t.Fatalf("missing auth: status=%d reason=%v", out.Status, out.Reason)
 	}
@@ -69,7 +70,7 @@ func TestPipeline_QueryBearerRejected(t *testing.T) {
 	p := newGatewayPipeline(t, testDeps(t, k, nil))
 	req := gwRequest(gwToken(k), initializeBody(1))
 	req.BearerInQuery = true
-	out := p.Process(req, fixedClock())
+	out := p.Process(context.Background(), req, fixedClock())
 	if out.Reason != mcperr.ReasonCredentialInQuery {
 		t.Fatalf("query bearer: reason=%v", out.Reason)
 	}
@@ -93,7 +94,7 @@ func TestPipeline_ImmutableIdentityBinding(t *testing.T) {
 			"aud": gwResource, "scope": gwScope, "tenant": testTenant,
 			"iat": fixedClock().Unix(), "exp": fixedClock().Add(600e9).Unix(),
 		}, k)
-	out := p.Process(withSession(gwRequest(other, pingBody(9)), sid), fixedClock())
+	out := p.Process(context.Background(), withSession(gwRequest(other, pingBody(9)), sid), fixedClock())
 	if out.Reason != mcperr.ReasonSessionIdentityRebind {
 		t.Fatalf("rebind: reason=%v, want session_identity_rebind", out.Reason)
 	}
@@ -101,7 +102,7 @@ func TestPipeline_ImmutableIdentityBinding(t *testing.T) {
 		t.Fatalf("rebind status=%d, want 409", out.Status)
 	}
 	// The original identity still works on the same session (binding retained).
-	ok := p.Process(withSession(gwRequest(tok, pingBody(10)), sid), fixedClock())
+	ok := p.Process(context.Background(), withSession(gwRequest(tok, pingBody(10)), sid), fixedClock())
 	if ok.Disposition != DispKernelTerminal {
 		t.Fatalf("original identity broke after rejected rebind: %v", ok.Reason)
 	}
@@ -125,7 +126,7 @@ func TestPipeline_ManagementRejectsServerPath(t *testing.T) {
 		AuthorizationHeaders: []string{"Bearer " + mgmtToken(k)},
 		Body:                 initializeBody(1),
 	}
-	out := p.Process(req, fixedClock())
+	out := p.Process(context.Background(), req, fixedClock())
 	if out.Status != 404 || out.Reason != mcperr.ReasonAdmissionRejected {
 		t.Fatalf("mgmt server path: status=%d reason=%v", out.Status, out.Reason)
 	}

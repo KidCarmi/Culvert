@@ -208,8 +208,10 @@ func (l *Listener) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeStatus(w, status)
 		return
 	}
-	// Steps 4–15.
-	out := l.pipe.Process(req, l.clock())
+	// Steps 4–15, under the SAME deadline context that bounded admission. Before
+	// SEC-MCP-02 this ctx was built, used only for admit(), and then cancelled by the
+	// deferred cancel above while every expensive stage ran unbounded.
+	out := l.pipe.Process(ctx, req, l.clock())
 	l.writeOutcome(w, out)
 }
 
@@ -248,6 +250,16 @@ func (l *Listener) admit(ctx context.Context) (func(), bool) {
 // NEVER trusts a forwarded Host/Origin header or a client-supplied certificate
 // thumbprint. A non-zero returned status means a transport-level rejection.
 func (l *Listener) extractRequest(w http.ResponseWriter, r *http.Request) (req Request, status int) {
+	// SEC-MCP-04. Anti-ambiguity, BEFORE any value is read: a singleton
+	// security-relevant header presented more than once is rejected whole. A
+	// first-value-wins reading lets an intermediary and this gateway resolve the
+	// same conflict differently (the classic request-smuggling / header-confusion
+	// shape), so no value is picked. Authorization already had this rule inside
+	// parseCredential; applying it uniformly here is what makes the posture real.
+	if h, dup := duplicateSingletonHeader(r.Header); dup {
+		_ = h // the offending name is deliberately not echoed to the client
+		return Request{}, http.StatusBadRequest
+	}
 	// mTLS defense-in-depth: a require-cert listener must have a verified peer cert.
 	if l.cfg.ClientCertMode == ClientCertRequire {
 		if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
@@ -399,4 +411,44 @@ type limitConn struct {
 func (c *limitConn) Close() error {
 	c.release()
 	return c.Conn.Close()
+}
+
+// singletonSecurityHeaderNames are the request headers whose value feeds a
+// security decision and which a conforming client sends at most once. Adding a
+// header that participates in an authentication, authorization, routing or
+// origin decision to the request path REQUIRES adding it here — see
+// TestSecurity_GuardedSingletonSetIsComplete.
+//
+// Canonical MIME form (http.Header keys are canonicalized on Set/Add), so the
+// lookup is exact and case-insensitivity is handled by net/http itself.
+var singletonSecurityHeaderNames = [...]string{
+	"Origin",               // cross-origin / DNS-rebinding decision
+	"Dpop",                 // sender-constraint proof
+	"Mcp-Session-Id",       // session resolution
+	"Mcp-Protocol-Version", // version admission
+	"Authorization",        // the credential itself
+}
+
+// isSingletonSecurityHeader reports whether name (any case) is one of the guarded
+// singleton security headers.
+func isSingletonSecurityHeader(name string) bool {
+	c := http.CanonicalHeaderKey(name)
+	for _, h := range singletonSecurityHeaderNames {
+		if h == c {
+			return true
+		}
+	}
+	return false
+}
+
+// duplicateSingletonHeader returns the first guarded singleton header that appears
+// more than once. Duplication alone is the trigger — two IDENTICAL values are just
+// as ambiguous to a middlebox that forwards only one of them.
+func duplicateSingletonHeader(h http.Header) (string, bool) {
+	for _, name := range singletonSecurityHeaderNames {
+		if len(h.Values(name)) > 1 {
+			return name, true
+		}
+	}
+	return "", false
 }

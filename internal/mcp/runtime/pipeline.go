@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -121,6 +122,16 @@ type pipeline struct {
 	// pipeline keeps the decision-only path (execution_state not_implemented).
 	executor ExecutionProvider
 
+	// authSem and dpopSem enforce Limits.AuthConcurrency / Limits.DPoPConcurrency —
+	// the two attacker-reachable stages that cost real CPU (signature verification,
+	// token introspection, DPoP proof verification). Both bounds were validated at
+	// construction and then never read (SEC-MCP-05); a validated-but-unenforced knob
+	// is a false control, so they are buffered channels acquired for exactly the
+	// duration of the work they bound. Per-pipeline, so one capability's
+	// authentication storm can never starve the other's.
+	authSem chan struct{}
+	dpopSem chan struct{}
+
 	// boundMu guards boundIDs — the set of session ids this pipeline has bound an
 	// identity to. It lets reconcileBindings unbind identities for sessions the
 	// kernel sweeper reclaimed (which has no per-binding hook), so the binding store
@@ -156,6 +167,8 @@ func newPipeline(cfg ListenerConfig, deps Deps, listenerID string, ctr *counters
 		ctr:        ctr,
 		rev:        rev,
 		boundIDs:   make(map[string]struct{}),
+		authSem:    make(chan struct{}, cfg.Limits.AuthConcurrency()),
+		dpopSem:    make(chan struct{}, cfg.Limits.DPoPConcurrency()),
 	}
 	if deps.Policy != nil {
 		p.policy = deps.Policy
@@ -236,10 +249,17 @@ func (p *pipeline) newRecord(req Request, start time.Time) *recBuilder {
 // the listener owns admission/TLS/header bounds — steps 1–3 — before calling in).
 // A rejection at any step returns immediately WITHOUT touching later state
 // (no session, no auth, no binding, no upstream — none of which exist here anyway).
-func (p *pipeline) Process(req Request, now time.Time) Outcome {
+func (p *pipeline) Process(ctx context.Context, req Request, now time.Time) Outcome {
 	p.ctr.requestsTotal.Add(1)
 	rb := p.newRecord(req, now)
 
+	// SEC-MCP-02. ctx carries the listener's RequestDeadline and the client's own
+	// cancellation. It is checked at every stage boundary below and handed to every
+	// stage that can block (inspection, guarded execution and everything they
+	// reach), so the deadline bounds the WHOLE request rather than admission alone.
+	if out, expired := p.checkBudget(ctx, rb); expired {
+		return out
+	}
 	// Step 4–6: Host/:authority + Origin — on EVERY request/stream, before any
 	// method dispatch (the DNS-rebinding / cross-origin defense, MCP-INSP-009).
 	if out, ok := p.checkHostOrigin(req, rb); !ok {
@@ -251,7 +271,21 @@ func (p *pipeline) Process(req Request, now time.Time) Outcome {
 		tr := decideTransportMethod(req.HTTPMethod)
 		return p.reject(rb, tr.status, mcperr.ReasonHTTPMethodRejected, "")
 	}
-	return p.processPost(req, rb, now)
+	return p.processPost(ctx, req, rb, now)
+}
+
+// checkBudget terminates the request when its context is already done (deadline
+// exceeded, client gone, or shutdown). It is the ONLY place a deadline turns into
+// an outcome, so the disposition, counter and record are identical wherever the
+// budget runs out. 503 matches the listener's other availability refusals; the
+// reason is the specific, already-classified request_deadline_exceeded (which the
+// rollout hard-failure table maps to HardAvailabilityBounds).
+func (p *pipeline) checkBudget(ctx context.Context, rb *recBuilder) (Outcome, bool) {
+	if ctx == nil || ctx.Err() == nil {
+		return Outcome{}, false
+	}
+	p.ctr.timeouts.Add(1)
+	return p.reject(rb, 503, mcperr.ReasonRequestDeadlineExceeded, ""), true
 }
 
 // checkHostOrigin performs steps 4–6. Returns ok=false and a rejection Outcome on
@@ -271,10 +305,27 @@ func (p *pipeline) checkHostOrigin(req Request, rb *recBuilder) (Outcome, bool) 
 }
 
 // processPost runs steps 7–15 for a POST request.
-func (p *pipeline) processPost(req Request, rb *recBuilder, now time.Time) Outcome {
+func (p *pipeline) processPost(ctx context.Context, req Request, rb *recBuilder, now time.Time) Outcome {
 	// Step 7: path/capability — the route's capability must match this listener's.
 	if req.Capability != p.capability {
 		return p.reject(rb, 404, mcperr.ReasonAdmissionRejected, "")
+	}
+	// SEC-MCP-06. Credential PRESENCE and SHAPE are checked here — before the
+	// registry is consulted, before the body is buffered, before a session can be
+	// opened. Two things follow:
+	//
+	//   1. no unauthenticated server-existence ORACLE. Registry resolution used to
+	//      run first, so a credential-less probe got 404 for an unknown server id and
+	//      401 for a registered one, enumerating a tenant's MCP servers for free;
+	//   2. no pre-authentication work amplification. A credential-less request no
+	//      longer buffers up to MaxBodyBytes, runs the strict decoder, or churns a
+	//      session open/close.
+	//
+	// This is a CHEAP, purely syntactic check (no crypto, no I/O). The authoritative
+	// validation still happens at step 12 against the same headers; this can only
+	// ever reject earlier, never admit.
+	if out, ok := p.precheckCredential(req, rb); !ok {
+		return out
 	}
 	// Step 8: server-id / registry (Gateway only). Management must not access the
 	// Gateway catalog/registry. The opaque server id is resolved from the route here,
@@ -298,13 +349,32 @@ func (p *pipeline) processPost(req Request, rb *recBuilder, now time.Time) Outco
 		return p.reject(rb, 400, mcperr.ReasonOf(err), "")
 	}
 	rb.rec.Class = classOf(msg.Class)
+	// The body is now buffered and decoded; re-check the budget before the first
+	// stage that can perform expensive cryptographic or durable work.
+	if out, expired := p.checkBudget(ctx, rb); expired {
+		return out
+	}
 	// A response arriving on the client-facing leg is not a client-originated
 	// request; the observe listener never correlates upstream responses (there is no
 	// upstream). Reject a bare response frame.
 	if msg.Class == jsonrpc.ClassResponse {
 		return p.reject(rb, 400, mcperr.ReasonInvalidJSONRPC, "")
 	}
-	return p.processMessage(req, rb, msg, now)
+	return p.processMessage(ctx, req, rb, msg, now)
+}
+
+// precheckCredential rejects a request whose credential is absent, ambiguous, or
+// malformed, recording it EXACTLY as the later authentication stage would: same
+// counter, same denial-lane routing, same reason, same status. Moving a rejection
+// earlier must never make it less observable.
+func (p *pipeline) precheckCredential(req Request, rb *recBuilder) (Outcome, bool) {
+	if _, err := parseCredential(req); err != nil {
+		reason := mcperr.ReasonOf(err)
+		p.ctr.authFailures.Add(1)
+		p.routeAuthDenial(reason)
+		return p.reject(rb, statusForAuth(reason), reason, ""), false
+	}
+	return Outcome{}, true
 }
 
 // resolveServer performs step 8. For Gateway it resolves the opaque ServerID from
@@ -373,7 +443,7 @@ func parseGatewayServerID(path string) string {
 }
 
 // processMessage runs steps 11–15 for a decoded request/notification.
-func (p *pipeline) processMessage(req Request, rb *recBuilder, msg jsonrpc.Message, now time.Time) Outcome {
+func (p *pipeline) processMessage(ctx context.Context, req Request, rb *recBuilder, msg jsonrpc.Message, now time.Time) Outcome {
 	// Step 11: version / session / lifecycle — resolve or create the session and,
 	// for initialize, negotiate the protocol version. `created` is true only for a
 	// session this request just opened (an initialize), so a later-step rejection can
@@ -383,7 +453,7 @@ func (p *pipeline) processMessage(req Request, rb *recBuilder, msg jsonrpc.Messa
 		return out
 	}
 	// Step 12: PR-3 auth + sender-constraint (+ step 13: immutable identity binding).
-	ctx, err := p.authenticate(req, sess, now)
+	ident, err := p.authenticate(req, sess, now)
 	if err != nil {
 		if created {
 			p.closeSession(sess.ID())
@@ -394,8 +464,8 @@ func (p *pipeline) processMessage(req Request, rb *recBuilder, msg jsonrpc.Messa
 		p.routeAuthDenial(mcperr.ReasonOf(err))
 		return p.reject(rb, statusForAuth(mcperr.ReasonOf(err)), mcperr.ReasonOf(err), "")
 	}
-	rb.rec.PrincipalHash = digest(ctx.Fingerprint())
-	rb.rec.ClientID = ctx.Client().ClientID
+	rb.rec.PrincipalHash = digest(ident.Fingerprint())
+	rb.rec.ClientID = ident.Client().ClientID
 	rb.rec.AuthResult = "ok"
 	rb.rec.SessionDigest = digest(sess.ID())
 	// Step 14: method admission (lifecycle + reviewed registry, via the session).
@@ -407,12 +477,12 @@ func (p *pipeline) processMessage(req Request, rb *recBuilder, msg jsonrpc.Messa
 		p.ctr.admissionRejected.Add(1)
 		// PR-8: route the authorization/admission denial into the denial lane, with
 		// the verified identity that now exists. Never blocks authenticated work.
-		p.routeDenial(ctx, mcperr.ReasonOf(err).Code())
+		p.routeDenial(ident, mcperr.ReasonOf(err).Code())
 		return p.reject(rb, statusForAdmission(mcperr.ReasonOf(err)), mcperr.ReasonOf(err), "")
 	}
 	rb.rec.Method = msg.Method // safe: an admitted method is one of the reviewed six
 	// Step 15: disposition (observe-only in PR-5; decision-only policy in PR-6).
-	return p.dispatch(rb, req, msg, sess, ctx, negotiated, adm, now)
+	return p.dispatch(ctx, rb, req, msg, sess, ident, negotiated, adm, now)
 }
 
 // resolveSession performs step 11. On an initialize it opens a new session and
@@ -477,13 +547,13 @@ func (p *pipeline) openInitialize(req Request, rb *recBuilder, msg jsonrpc.Messa
 // complete normally; decision-point methods (tools/list, tools/call) end in a
 // deterministic observe-only rejection — never a policy call, credential
 // materialization, upstream contact, or fabricated success.
-func (p *pipeline) dispatch(rb *recBuilder, req Request, msg jsonrpc.Message, sess *session.Session, ctx *identity.ResolvedContext, negotiated protocol.Version, adm protocol.Admission, now time.Time) Outcome {
+func (p *pipeline) dispatch(ctx context.Context, rb *recBuilder, req Request, msg jsonrpc.Message, sess *session.Session, ident *identity.ResolvedContext, negotiated protocol.Version, adm protocol.Admission, now time.Time) Outcome {
 	if adm.Handling == protocol.HandlingDecisionPoint {
 		// PR-6: if a policy provider is wired, evaluate the capability-local snapshot
 		// (decision-only — never an upstream/credential/broker call). Otherwise keep
 		// the PR-5 observe-only disposition.
 		if p.policy != nil {
-			return p.dispatchPolicy(rb, req, msg, ctx, now)
+			return p.dispatchPolicy(ctx, rb, req, msg, ident, now)
 		}
 		p.ctr.observeOnly.Add(1)
 		body := observeOnlyError(msg.ID)

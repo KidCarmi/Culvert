@@ -18,9 +18,9 @@ func TestAntiWeakening_ObserveOnlyNeverSucceeds(t *testing.T) {
 	p := newGatewayPipeline(t, testDeps(t, k, nil))
 	tok := gwToken(k)
 	sid := doInit(t, p, tok)
-	p.Process(withSession(gwRequest(tok, initializedNotification()), sid), fixedClock())
+	p.Process(context.Background(), withSession(gwRequest(tok, initializedNotification()), sid), fixedClock())
 
-	out := p.Process(withSession(gwRequest(tok, toolsCallBody(3)), sid), fixedClock())
+	out := p.Process(context.Background(), withSession(gwRequest(tok, toolsCallBody(3)), sid), fixedClock())
 	if out.Disposition != DispObserveOnly || out.Reason != mcperr.ReasonObserveOnly {
 		t.Fatalf("tools/call was not observe-only: disp=%v reason=%v", out.Disposition, out.Reason)
 	}
@@ -69,7 +69,7 @@ func TestAntiWeakening_RetainStreamAlwaysFalse(t *testing.T) {
 		func() Request { r := gwRequest(tok, initializeBody(1)); r.Host = "evil"; return r }(),
 	}
 	for i, req := range cases {
-		if out := p.Process(req, fixedClock()); out.RetainStream {
+		if out := p.Process(context.Background(), req, fixedClock()); out.RetainStream {
 			t.Fatalf("case %d retained a stream", i)
 		}
 	}
@@ -100,13 +100,13 @@ func BenchmarkPipelineKernelTerminal(b *testing.B) {
 	k := newESKey(b, "k1")
 	p := newGatewayPipelineB(b, testDeps(b, k, nil))
 	tok := gwToken(k)
-	out := p.Process(gwRequest(tok, initializeBody(1)), fixedClock())
+	out := p.Process(context.Background(), gwRequest(tok, initializeBody(1)), fixedClock())
 	sid := out.SessionID
-	p.Process(withSession(gwRequest(tok, initializedNotification()), sid), fixedClock())
+	p.Process(context.Background(), withSession(gwRequest(tok, initializedNotification()), sid), fixedClock())
 	req := withSession(gwRequest(tok, pingBody(2)), sid)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		p.Process(req, fixedClock())
+		p.Process(context.Background(), req, fixedClock())
 	}
 }
 
@@ -115,12 +115,12 @@ func BenchmarkPipelineObserveOnly(b *testing.B) {
 	k := newESKey(b, "k1")
 	p := newGatewayPipelineB(b, testDeps(b, k, nil))
 	tok := gwToken(k)
-	sid := p.Process(gwRequest(tok, initializeBody(1)), fixedClock()).SessionID
-	p.Process(withSession(gwRequest(tok, initializedNotification()), sid), fixedClock())
+	sid := p.Process(context.Background(), gwRequest(tok, initializeBody(1)), fixedClock()).SessionID
+	p.Process(context.Background(), withSession(gwRequest(tok, initializedNotification()), sid), fixedClock())
 	req := withSession(gwRequest(tok, toolsListBody(3)), sid)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		p.Process(req, fixedClock())
+		p.Process(context.Background(), req, fixedClock())
 	}
 }
 

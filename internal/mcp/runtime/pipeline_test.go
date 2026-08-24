@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"testing"
@@ -11,7 +12,7 @@ import (
 // doInit runs an initialize on p and returns the created session id.
 func doInit(t *testing.T, p *pipeline, token string) string {
 	t.Helper()
-	out := p.Process(gwRequest(token, initializeBody(1)), fixedClock())
+	out := p.Process(context.Background(), gwRequest(token, initializeBody(1)), fixedClock())
 	if out.Status != 200 || out.Disposition != DispKernelTerminal {
 		t.Fatalf("initialize: status=%d disp=%v reason=%v", out.Status, out.Disposition, out.Reason)
 	}
@@ -41,7 +42,7 @@ func TestPipeline_InitializeThenPing(t *testing.T) {
 
 	// notifications/initialized completes the handshake (202, no body).
 	ni := withSession(gwRequest(tok, initializedNotification()), sid)
-	out := p.Process(ni, fixedClock())
+	out := p.Process(context.Background(), ni, fixedClock())
 	if out.Status != 202 || out.Disposition != DispKernelTerminal {
 		t.Fatalf("initialized: status=%d disp=%v reason=%v", out.Status, out.Disposition, out.Reason)
 	}
@@ -49,7 +50,7 @@ func TestPipeline_InitializeThenPing(t *testing.T) {
 		t.Fatalf("notification produced a response body: %q", out.ResponseBody)
 	}
 	// ping in steady state → 200 with an empty result.
-	out = p.Process(withSession(gwRequest(tok, pingBody(2)), sid), fixedClock())
+	out = p.Process(context.Background(), withSession(gwRequest(tok, pingBody(2)), sid), fixedClock())
 	if out.Status != 200 || out.Disposition != DispKernelTerminal {
 		t.Fatalf("ping: status=%d disp=%v", out.Status, out.Disposition)
 	}
@@ -61,7 +62,7 @@ func TestPipeline_DecisionPointObserveOnly(t *testing.T) {
 	p := newGatewayPipeline(t, testDeps(t, k, sink))
 	tok := gwToken(k)
 	sid := doInit(t, p, tok)
-	p.Process(withSession(gwRequest(tok, initializedNotification()), sid), fixedClock())
+	p.Process(context.Background(), withSession(gwRequest(tok, initializedNotification()), sid), fixedClock())
 
 	for _, tc := range []struct {
 		name string
@@ -71,7 +72,7 @@ func TestPipeline_DecisionPointObserveOnly(t *testing.T) {
 		{"tools/call", toolsCallBody(4)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			out := p.Process(withSession(gwRequest(tok, tc.body), sid), fixedClock())
+			out := p.Process(context.Background(), withSession(gwRequest(tok, tc.body), sid), fixedClock())
 			if out.Disposition != DispObserveOnly {
 				t.Fatalf("disposition = %v, want observe-only", out.Disposition)
 			}
@@ -113,7 +114,7 @@ func TestPipeline_HostRejected(t *testing.T) {
 	p := newGatewayPipeline(t, testDeps(t, k, nil))
 	req := gwRequest(gwToken(k), initializeBody(1))
 	req.Host = "evil.example.com" // not on the allowlist
-	out := p.Process(req, fixedClock())
+	out := p.Process(context.Background(), req, fixedClock())
 	if out.Status != 403 || out.Reason != mcperr.ReasonHostRejected {
 		t.Fatalf("host reject: status=%d reason=%v", out.Status, out.Reason)
 	}
@@ -128,7 +129,7 @@ func TestPipeline_TransportMethods(t *testing.T) {
 	for _, m := range []string{"GET", "DELETE", "PUT", "PATCH", "HEAD"} {
 		req := gwRequest(gwToken(k), nil)
 		req.HTTPMethod = m
-		out := p.Process(req, fixedClock())
+		out := p.Process(context.Background(), req, fixedClock())
 		if out.Status != 405 {
 			t.Fatalf("%s: status=%d, want 405", m, out.Status)
 		}
@@ -144,7 +145,7 @@ func TestPipeline_TransportMethods(t *testing.T) {
 func TestPipeline_DecodeFailure(t *testing.T) {
 	k := newESKey(t, "k1")
 	p := newGatewayPipeline(t, testDeps(t, k, nil))
-	out := p.Process(gwRequest(gwToken(k), []byte(`{not json`)), fixedClock())
+	out := p.Process(context.Background(), gwRequest(gwToken(k), []byte(`{not json`)), fixedClock())
 	if out.Status != 400 || out.Disposition != DispRejected {
 		t.Fatalf("decode failure: status=%d disp=%v", out.Status, out.Disposition)
 	}
@@ -155,7 +156,7 @@ func TestPipeline_UnknownServerRejected(t *testing.T) {
 	p := newGatewayPipeline(t, testDeps(t, k, nil))
 	req := gwRequest(gwToken(k), initializeBody(1))
 	req.ServerID = "does-not-exist"
-	out := p.Process(req, fixedClock())
+	out := p.Process(context.Background(), req, fixedClock())
 	if out.Status != 404 || out.Reason != mcperr.ReasonRegistryServerUnavailable {
 		t.Fatalf("unknown server: status=%d reason=%v", out.Status, out.Reason)
 	}
@@ -167,7 +168,7 @@ func TestPipeline_InitializeAuthFailClosesSession(t *testing.T) {
 	// An initialize with NO credential must not leave a session pinning the cap.
 	req := gwRequest(gwToken(k), initializeBody(1))
 	req.AuthorizationHeaders = nil
-	out := p.Process(req, fixedClock())
+	out := p.Process(context.Background(), req, fixedClock())
 	if out.Status != 401 {
 		t.Fatalf("status = %d, want 401", out.Status)
 	}
@@ -204,7 +205,7 @@ func TestPipeline_BodyReadOnlyAfterHostOrigin(t *testing.T) {
 	req.Body = nil
 	req.BodyReader = tr
 	req.Host = "evil.example.com"
-	out := p.Process(req, fixedClock())
+	out := p.Process(context.Background(), req, fixedClock())
 	if out.Status != 403 {
 		t.Fatalf("status = %d, want 403", out.Status)
 	}
