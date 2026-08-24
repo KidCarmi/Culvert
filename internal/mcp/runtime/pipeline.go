@@ -499,7 +499,7 @@ func (p *pipeline) processMessage(ctx context.Context, req Request, rb *recBuild
 		return out
 	}
 	// Step 12: PR-3 auth + sender-constraint (+ step 13: immutable identity binding).
-	ident, err := p.authenticate(req, sess, now)
+	ident, err := p.authenticate(ctx, req, sess, now)
 	if err != nil {
 		if created {
 			p.closeSession(sess.ID())

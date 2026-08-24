@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"strings"
 	"time"
 
@@ -92,7 +93,7 @@ func guessTokenType(token string) authn.TokenType {
 // is never trusted and no private-key material is ever passed. On success the
 // immutable identity is bound to the session; a second, DIFFERENT identity on the
 // same session is rejected (the binding is immutable).
-func (p *pipeline) authenticate(req Request, sess *session.Session, now time.Time) (*identity.ResolvedContext, error) {
+func (p *pipeline) authenticate(ctx context.Context, req Request, sess *session.Session, now time.Time) (*identity.ResolvedContext, error) {
 	cred, err := parseCredential(req)
 	if err != nil {
 		return nil, err
@@ -102,10 +103,21 @@ func (p *pipeline) authenticate(req Request, sess *session.Session, now time.Tim
 	// verification whose own bound is DPoPConcurrency. Both are acquired for exactly
 	// the work they bound and released immediately after, so a token flood cannot
 	// convert the worker pool into unbounded crypto.
-	release := p.acquireAuthSlot()
+	//
+	// The wait is bounded by the REQUEST CONTEXT (SEC-MCP-02): a queue that ignored
+	// the deadline would reintroduce the very unbounded stage the deadline exists to
+	// bound, and a slot holder that stalls (a hung introspector) would park every
+	// waiter for the process lifetime.
+	release, err := p.acquireSlot(ctx, p.authSem)
+	if err != nil {
+		return nil, err
+	}
 	defer release()
 	if req.HasDPoP {
-		releaseDPoP := p.acquireDPoPSlot()
+		releaseDPoP, derr := p.acquireSlot(ctx, p.dpopSem)
+		if derr != nil {
+			return nil, derr
+		}
 		defer releaseDPoP()
 	}
 
@@ -119,19 +131,19 @@ func (p *pipeline) authenticate(req Request, sess *session.Session, now time.Tim
 	if err != nil {
 		return nil, err
 	}
-	ctx, err := authn.Authenticate(authReq, p.authCfg, p.deps.authDeps(), now)
+	ident, err := authn.Authenticate(authReq, p.authCfg, p.deps.authDeps(), now)
 	if err != nil {
 		return nil, err
 	}
 	// Immutable session-identity binding. A rejected auth never reaches here, so a
 	// failed authentication can never overwrite or delete an existing binding.
-	if _, err := p.bindings.Bind(sess.ID(), ctx); err != nil {
+	if _, err := p.bindings.Bind(sess.ID(), ident); err != nil {
 		return nil, err
 	}
 	// Track the bound session so a later kernel sweep can unbind it (the binding
 	// store has no per-session sweep hook of its own).
 	p.trackBinding(sess.ID())
-	return ctx, nil
+	return ident, nil
 }
 
 // validateClaims runs the PR-3 token validator that matches the credential type.
@@ -207,18 +219,22 @@ func (p *pipeline) buildAuthRequest(req Request, cred authn.Credential, claims *
 	return authReq, nil
 }
 
-// acquireAuthSlot blocks until an AuthConcurrency slot is free and returns its
-// release. It deliberately BLOCKS rather than shedding: the caller already holds a
-// worker slot bounded by MaxConcurrent and a request deadline bounded by
-// RequestDeadline, so waiting here is bounded by construction, while shedding
-// would turn a tuning knob into an availability cliff.
-func (p *pipeline) acquireAuthSlot() func() {
-	p.authSem <- struct{}{}
-	return func() { <-p.authSem }
-}
-
-// acquireDPoPSlot is acquireAuthSlot for the independent DPoP-verification bound.
-func (p *pipeline) acquireDPoPSlot() func() {
-	p.dpopSem <- struct{}{}
-	return func() { <-p.dpopSem }
+// acquireSlot takes one slot from a concurrency semaphore, WAITING rather than
+// shedding (shedding would turn a tuning knob into an availability cliff) but only
+// for as long as the request's own budget lasts. A request whose context ends
+// while queued is refused with request_deadline_exceeded — the same classification
+// the pipeline's stage-boundary budget checks produce — so a saturated or stalled
+// verification stage can never park a caller indefinitely.
+func (p *pipeline) acquireSlot(ctx context.Context, sem chan struct{}) (func(), error) {
+	if ctx == nil {
+		sem <- struct{}{}
+		return func() { <-sem }, nil
+	}
+	select {
+	case sem <- struct{}{}:
+		return func() { <-sem }, nil
+	case <-ctx.Done():
+		p.ctr.timeouts.Add(1)
+		return nil, mcperr.New(mcperr.ReasonRequestDeadlineExceeded, "runtime.auth", "request budget elapsed while queued for a verification slot")
+	}
 }

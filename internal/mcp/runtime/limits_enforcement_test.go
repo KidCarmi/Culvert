@@ -192,3 +192,47 @@ func TestSecurity_PrecheckIsTransparentToValidCredentials(t *testing.T) {
 		t.Fatalf("valid request must still succeed: %d / %v / %v", out.Status, out.Disposition, out.Reason)
 	}
 }
+
+// A request must never be parked indefinitely waiting for a verification slot. A
+// concurrency bound whose queue ignores the request budget reintroduces exactly
+// the unbounded stage the deadline exists to bound, and a stalled slot holder (a
+// hung introspector) would park every waiter for the process lifetime.
+func TestLimits_SlotWaitHonoursTheRequestBudget(t *testing.T) {
+	k := newESKey(t, "k1")
+	deps := testDeps(t, k, nil)
+	bk := &blockingKeys{inner: deps.Keys, entered: make(chan struct{}, 4), release: make(chan struct{})}
+	deps.Keys = bk
+
+	cfg := gwListenerConfig(t)
+	cfg.Limits = limitsWithAuthConcurrency(t, 1)
+	p, err := newPipeline(cfg, deps, "wait-gw", &counters{}, 1)
+	if err != nil {
+		t.Fatalf("newPipeline: %v", err)
+	}
+	tok := gwToken(k)
+
+	// Occupy the single slot with a caller that never returns.
+	go p.Process(context.Background(), gwRequest(tok, initializeBody(1)), fixedClock())
+	select {
+	case <-bk.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the blocking caller never took the slot")
+	}
+	defer close(bk.release)
+
+	// A second request whose budget is LIVE on entry but expires while it waits: it
+	// must be refused by the wait itself, not by the stage-boundary checks (which
+	// already passed) and not after the blocked holder eventually returns.
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	done := make(chan Outcome, 1)
+	go func() { done <- p.Process(ctx, gwRequest(tok, initializeBody(2)), fixedClock()) }()
+	select {
+	case out := <-done:
+		if out.Reason != mcperr.ReasonRequestDeadlineExceeded {
+			t.Fatalf("reason = %v, want request_deadline_exceeded", out.Reason)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("a request with an elapsed budget was parked on the verification semaphore")
+	}
+}
