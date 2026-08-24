@@ -358,6 +358,66 @@ func TestAPISetupComplete_PersistFailure_DoesNotClaimSuccess(t *testing.T) {
 	}
 }
 
+// TestAPISetupComplete_UnauthModePersistFailure_DoesNotClaimSuccess is the
+// open-mode sibling of TestAPISetupComplete_PersistFailure_DoesNotClaimSuccess.
+// The credentialed branch of apiSetupComplete explicitly checks
+// SaveUIUsersFile's error and calls cfg.RollbackFailedSetupAuth on failure —
+// see the comment there for why: SetAuth already flips IsConfigured() to true
+// in memory, so a restart before a later successful save reverts it to false
+// and reopens the "one-time" setup wizard to any unauthenticated visitor.
+//
+// The body.Unauth branch reaches the exact same hazard through
+// cfg.SetDefaultAuthOutcome(OutcomeExempt): that setter also flips in-memory
+// state unconditionally and only logWarnf's on a persist failure — the error
+// never reaches apiSetupComplete's caller — so the handler still replies
+// {"ok":true,"unauth":true} even though nothing was durably saved.
+func TestAPISetupComplete_UnauthModePersistFailure_DoesNotClaimSuccess(t *testing.T) {
+	resetSetupLockout()
+	t.Cleanup(resetSetupLockout)
+	snapshotAuthGlobals(t)
+	_ = cfg.SetAuth("", "") // ensure no auth configured
+	cfg.SetDefaultAuthOutcome(OutcomeDefault)
+
+	// Point uiUsersFile at a path whose parent directory does not exist, so
+	// SaveUIUsersFile's fileutil.AtomicWrite fails deterministically —
+	// simulating a disk/permission fault during first-time setup.
+	badDir := t.TempDir()
+	// Registered AFTER t.TempDir() so it runs BEFORE TempDir's own cleanup
+	// removes badDir (t.Cleanup is LIFO): the reset below persists to
+	// badDir/ui_users.json (set by the retry further down), which must
+	// still exist when this runs, or the reset itself fails to persist and
+	// leaves defaultAuthOutcome stuck at Exempt — leaking Exempt into every
+	// later test via the shared global cfg.
+	t.Cleanup(func() { cfg.SetDefaultAuthOutcome(OutcomeDefault) })
+	cfg.SetUIUsersFile(filepath.Join(badDir, "does-not-exist", "ui_users.json"))
+
+	w := httptest.NewRecorder()
+	initSecret(t)
+	apiSetupComplete(w, jsonReq(http.MethodPost, "/api/setup/complete", map[string]any{
+		"unauth": true,
+	}))
+
+	if w.Code == http.StatusOK {
+		t.Fatalf("setup must not report success when the open-mode default could not be durably persisted; got 200 body: %s", w.Body.String())
+	}
+	if cfg.IsConfigured() {
+		t.Fatalf("setup must roll back to unconfigured on persist failure so it stays retryable; IsConfigured() = true")
+	}
+
+	// Retry after the transient fault clears must succeed via the normal
+	// setup path, not "setup already complete".
+	resetSetupLockout()
+	cfg.SetUIUsersFile(filepath.Join(badDir, "ui_users.json"))
+	w2 := httptest.NewRecorder()
+	apiSetupComplete(w2, jsonReq(http.MethodPost, "/api/setup/complete", map[string]any{
+		"unauth": true,
+	}))
+	assertStatus(t, w2, http.StatusOK)
+	if !cfg.IsConfigured() {
+		t.Error("retry after the fault cleared should have completed setup")
+	}
+}
+
 // TestAPISetupComplete_ConcurrentRequests_OnlyOneWins proves apiSetupComplete's
 // "callable once" contract holds under concurrency. The handler reads
 // cfg.IsConfigured() and only later calls cfg.SetAuth — a classic
