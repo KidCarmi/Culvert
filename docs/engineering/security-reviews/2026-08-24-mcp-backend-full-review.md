@@ -421,7 +421,7 @@ Recorded so the next reviewer knows what was covered, not just what broke.
 | `go test -race -count=1 ./internal/mcp/...` | **PASS** |
 | `go test -count=1 ./...` (whole tree, incl. all MCP integration/e2e) | **PASS** — exit 0, zero FAIL lines |
 | `go test -count=2 -shuffle=on ./...` (determinism gate) | **PASS** — exit 0 |
-| `go test -race -count=1 ./internal/mcp/... .` | **PASS** — exit 0, no data races |
+| `go test -race -count=1 -timeout=20m ./internal/mcp/... .` | **PASS** — exit 0, zero data races (643 s; the Go default 10 min timeout is too short for the root package, matching CI's `-timeout=15m`) |
 | `gofmt -l` (excluding `frontend/`) | **PASS** — clean |
 | Culvert binary build (`go build -o culvert .`) | **PASS** — 53 MB |
 | `golangci-lint` | **NOT AVAILABLE — installed but unusable.** The binary at `/usr/local/bin/golangci-lint` is built with Go 1.25; `go.mod` requires Go 1.26, so it panics during type-checking (`package requires newer Go version go1.26 (application built with go1.25)`) before emitting a single finding. This is a toolchain-version incompatibility in this environment, not a clean run — **no lint result was obtained**. CI's `pr-fast-gate` lane runs the diff-scoped lint on a matching toolchain and remains the authority. |
