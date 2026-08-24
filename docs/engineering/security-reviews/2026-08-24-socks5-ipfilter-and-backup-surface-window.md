@@ -280,3 +280,16 @@ malformed response is still a `DecodeError`.
 5. **The `X-Culvert-Signature` posture on a degraded webhook stays fail-open**
    (deliver unsigned, loudly) rather than fail-closed (refuse to deliver). Owner
    decision, argued above; revisit if a customer requires signed-or-nothing.
+6. **The at-rest envelope still carries no key identity.** `enc:v1:` records
+   nonce+ciphertext and nothing about which key sealed it, so a store *can*
+   hold blobs from two key generations — restore-preserved ones under the old
+   key, anything written since under the current one — and nothing but the
+   operator's memory distinguishes them. Raised by Codex review on PR #1222.
+   Two thirds of the hazard are closed here: a failed decrypt no longer mints a
+   key (so a degraded node has *no* key until the operator acts, which makes
+   the key-restore path clean), and both operator surfaces state the remedy in
+   order. What remains — a mixed store if the operator re-enters secrets and
+   *then* restores the old key — is now a visible, badged state rather than a
+   silent one, but the durable fix is a key-identified envelope (`enc:v2:
+   <key-id>:…`) with rewrap-on-load. That is an on-disk format change with
+   downgrade implications, deliberately out of scope for a security-review PR.
