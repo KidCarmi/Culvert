@@ -86,62 +86,16 @@ type Deps struct {
 // and resolves the immutable identity context. It returns the context or a typed
 // rejection, and never returns the raw token.
 func Authenticate(req AuthRequest, cfg CapabilityAuthConfig, deps Deps, now time.Time) (*identity.ResolvedContext, error) {
-	switch req.Credential.Location {
-	case LocationAuthorizationHeader:
-		// ok
-	case LocationQueryString:
-		return nil, mcperr.New(mcperr.ReasonCredentialInQuery, "authn", "bearer token in query string is forbidden")
-	default:
-		return nil, mcperr.New(mcperr.ReasonCredentialMissing, "authn", "no credential in a supported location")
-	}
-
-	claims, err := validateToken(req.Credential, cfg, deps, now)
+	v, err := ValidateCredential(req.Credential, cfg, deps, now)
 	if err != nil {
 		return nil, err
 	}
-	if err := crossCheck(claims, req); err != nil {
-		return nil, err
-	}
-	sender, err := verifySenderConstraint(req, cfg, claims, deps, now)
-	if err != nil {
-		return nil, err
-	}
-	// SEC-MCP-01. Effective assurance is a property of what was CRYPTOGRAPHICALLY
-	// VERIFIED on THIS request, never of what the caller asserted. The asserted
-	// level is therefore CLAMPED to the ceiling the verified sender constraint
-	// justifies (see effectiveAssurance) BEFORE the MinAssurance floor is checked
-	// and before it enters the resolved context. Without the clamp, a caller that
-	// derives its assertion from a request-shaped hint — e.g. the mere PRESENCE of
-	// a `DPoP:` header under a BearerControlled profile, where no proof is ever
-	// verified — satisfies the operator's MinAssurance floor and every downstream
-	// `principal.assurance` / `session.assurance` policy condition for free.
-	effective := effectiveAssurance(req.Subject, sender)
-	in := identity.ResolveInput{
-		Capability:        cfg.capability,
-		Tenant:            req.Tenant,
-		Subject:           req.Subject,
-		Agent:             req.Agent,
-		Client:            req.Client,
-		Server:            req.Server,
-		Tool:              req.Tool,
-		Resource:          req.Resource,
-		CanonicalResource: cfg.canonicalResource,
-		Issuer:            claims.Issuer,
-		Scopes:            claims.Scopes,
-		Assurance:         effective,
-		SenderConstraint:  sender,
-		Expiry:            time.Unix(claims.Expiry, 0),
-		TokenDigest:       jose.SHA256B64URL([]byte(req.Credential.Token)),
-	}
-	if claims.HasAuthTime {
-		in.AuthTime = time.Unix(claims.AuthTime, 0)
-		in.HasAuthTime = true
-	}
-	if effective < cfg.minAssurance {
-		return nil, mcperr.New(mcperr.ReasonDelegationChainInvalid, "authn", "subject assurance below the capability minimum")
-	}
-	return identity.Resolve(in, deps.Registry, deps.Catalog)
+	return AuthenticateVerified(v, req, cfg, deps, now)
 }
+
+// tokenDigest is the one-way sanitized correlation digest of a raw token. It is
+// the ONLY thing derived from the raw token that leaves this package.
+func tokenDigest(token string) string { return jose.SHA256B64URL([]byte(token)) }
 
 func validateToken(cred Credential, cfg CapabilityAuthConfig, deps Deps, now time.Time) (*Claims, error) {
 	switch cred.Type {

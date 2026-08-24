@@ -13,6 +13,11 @@
 package authn
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
+	"sort"
+
 	"github.com/KidCarmi/Culvert/internal/mcp/identity"
 	"github.com/KidCarmi/Culvert/internal/mcp/limits"
 	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
@@ -35,6 +40,11 @@ type CapabilityAuthConfig struct {
 	senderProfile     senderconstraint.Profile
 	minAssurance      identity.AssuranceLevel
 	lim               limits.AuthLimits
+	// cfgID is a stable content identity over every acceptance-relevant field. It
+	// binds a VerifiedCredential to the exact config it was validated against, so a
+	// credential verified for one capability can never be presented to
+	// AuthenticateVerified under another (OVN-06).
+	cfgID string
 }
 
 // Capability returns the surface this config governs.
@@ -118,7 +128,44 @@ func NewCapabilityConfig(in CapabilityConfigInput) (CapabilityAuthConfig, error)
 	for s := range cfg.requiredScopes {
 		cfg.allowedScopes[s] = struct{}{}
 	}
+	cfg.cfgID = computeConfigID(cfg)
 	return cfg, nil
+}
+
+// computeConfigID hashes every acceptance-relevant field into a stable identity.
+// Length-framed segments prevent field-boundary collisions; set members are sorted
+// so the identity is a function of CONTENT, not of map iteration order.
+func computeConfigID(c CapabilityAuthConfig) string {
+	h := sha256.New()
+	seg := func(s string) {
+		var n [8]byte
+		binary.BigEndian.PutUint64(n[:], uint64(len(s)))
+		h.Write(n[:])
+		h.Write([]byte(s))
+	}
+	segSet := func(label string, m map[string]struct{}) {
+		keys := make([]string, 0, len(m))
+		for k := range m {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		seg(label)
+		var n [8]byte
+		binary.BigEndian.PutUint64(n[:], uint64(len(keys)))
+		h.Write(n[:])
+		for _, k := range keys {
+			seg(k)
+		}
+	}
+	seg("cap:" + c.capability.String())
+	seg("res:" + c.canonicalResource)
+	segSet("iss", c.trustedIssuers)
+	segSet("cli", c.acceptedClientIDs)
+	segSet("req", c.requiredScopes)
+	segSet("alw", c.allowedScopes)
+	segSet("wld", c.wildcardAllowed)
+	h.Write([]byte{byte(c.senderProfile), byte(c.minAssurance)})
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // ConfigSet holds the two INDEPENDENT capability configs and proves, at
