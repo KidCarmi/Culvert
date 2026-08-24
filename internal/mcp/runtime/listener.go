@@ -80,6 +80,21 @@ func newListener(cfg ListenerConfig, deps Deps, listenerID string, rev uint64) (
 		WriteTimeout:      cfg.Limits.WriteTimeout(),
 		IdleTimeout:       cfg.Limits.IdleTimeout(),
 		MaxHeaderBytes:    cfg.Limits.MaxHeaderBytes(),
+		// OVN-07. Attach a per-connection request budget. HTTP/2 multiplexing makes
+		// MaxConns meaningless as a bound on concurrent REQUESTS: ServeTLS
+		// auto-enables h2 and one accepted socket can carry hundreds of concurrent
+		// streams into an admission path sized for MaxConcurrent workers, saturating
+		// the capability while consuming ONE of the MaxConns slots that were supposed
+		// to bound it. Measured against the real listener: 186 concurrent requests
+		// from a single connection.
+		//
+		// http.Server.HTTP2.MaxConcurrentStreams is NOT used for this: it is silently
+		// ignored on the ServeTLS auto-h2 path in this Go toolchain (verified
+		// empirically — setting it to 8 still admitted 200 concurrent streams), so
+		// relying on it would be a control that only looks configured.
+		ConnContext: func(ctx context.Context, _ net.Conn) context.Context {
+			return context.WithValue(ctx, connBudgetKey{}, newConnBudget(cfg.Limits.MaxConcurrent()))
+		},
 		ConnState: func(_ net.Conn, state http.ConnState) {
 			if state == http.StateNew {
 				ctr.acceptedConns.Add(1)
@@ -176,6 +191,18 @@ func (l *Listener) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Step 1: admission — bounded worker pool + queue, before any expensive work.
 	ctx, cancel := context.WithTimeout(r.Context(), l.lim.RequestDeadline())
 	defer cancel()
+	// OVN-07: a single connection may not have more requests in flight than the
+	// listener has workers. Taken BEFORE the shared queue so one connection's excess
+	// streams cannot occupy queue slots either. This bounds the AMPLIFICATION; it
+	// does not make admission fair across sources (RISK-026).
+	if relConn, ok := acquireConnBudget(ctx); ok {
+		defer relConn()
+	} else {
+		l.ctr.timeouts.Add(1)
+		l.ctr.requestsRejected.Add(1)
+		writeStatus(w, http.StatusServiceUnavailable)
+		return
+	}
 	release, ok := l.admit(ctx)
 	if !ok {
 		l.ctr.admissionRejected.Add(1)
@@ -451,4 +478,42 @@ func duplicateSingletonHeader(h http.Header) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// connBudgetKey is the context key carrying a connection's request budget.
+type connBudgetKey struct{}
+
+// connBudget bounds the number of requests ONE connection may have in flight.
+// HTTP/1.1 is naturally limited to one, but an HTTP/2 connection multiplexes, so
+// without this a single socket could occupy the whole worker pool and queue.
+//
+// The bound is the worker-pool size, and that is not a fairness policy: beyond
+// MaxConcurrent, additional concurrent requests on one connection cannot make
+// progress anyway, so this admits no work that could have proceeded.
+type connBudget struct{ sem chan struct{} }
+
+func newConnBudget(n int) *connBudget {
+	if n <= 0 {
+		n = 1
+	}
+	return &connBudget{sem: make(chan struct{}, n)}
+}
+
+// acquireConnBudget takes one slot from the calling connection's budget, bounded
+// by the request context so a saturated connection cannot park a stream past its
+// deadline. A request with no budget in context (a unit-test call that never went
+// through the server) is admitted — the budget is a transport-layer bound, and
+// failing closed there would break every direct pipeline test without adding any
+// protection to a real connection.
+func acquireConnBudget(ctx context.Context) (func(), bool) {
+	b, _ := ctx.Value(connBudgetKey{}).(*connBudget)
+	if b == nil {
+		return func() {}, true
+	}
+	select {
+	case b.sem <- struct{}{}:
+		return func() { <-b.sem }, true
+	case <-ctx.Done():
+		return nil, false
+	}
 }

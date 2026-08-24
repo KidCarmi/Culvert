@@ -243,3 +243,41 @@ func TestLimits_SlotWaitHonoursTheRequestBudget(t *testing.T) {
 		t.Fatal("a request with an elapsed budget was parked on the verification semaphore")
 	}
 }
+
+// limitsWithMaxConcurrent returns the default bounds with the worker pool narrowed.
+func limitsWithMaxConcurrent(t testing.TB, n int) Limits {
+	t.Helper()
+	l, err := NewLimits(LimitConfig{
+		MaxConns: 1024, MaxConcurrent: n, QueueDepth: 256, MaxSessions: 4096,
+		MaxOutstanding: 8192, MaxHeaderBytes: 64 << 10, MaxBodyBytes: 1 << 20,
+		MaxResponseBytes: 1 << 20, AuthConcurrency: 32, DPoPConcurrency: 32,
+		MaxObservations: 4096, AdmissionBudget: 256, CleanupPerOp: 256,
+		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second,
+		WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
+		HandshakeTimeout: 5 * time.Second, RequestDeadline: 30 * time.Second,
+		SessionTTL: 5 * time.Minute, ShutdownTimeout: 20 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewLimits: %v", err)
+	}
+	return l
+}
+
+// limitsWithPools returns the default bounds with the worker pool and queue set.
+func limitsWithPools(t testing.TB, workers, queue int) Limits {
+	t.Helper()
+	l, err := NewLimits(LimitConfig{
+		MaxConns: 1024, MaxConcurrent: workers, QueueDepth: queue, MaxSessions: 4096,
+		MaxOutstanding: 8192, MaxHeaderBytes: 64 << 10, MaxBodyBytes: 1 << 20,
+		MaxResponseBytes: 1 << 20, AuthConcurrency: 64, DPoPConcurrency: 64,
+		MaxObservations: 4096, AdmissionBudget: 256, CleanupPerOp: 256,
+		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second,
+		WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
+		HandshakeTimeout: 5 * time.Second, RequestDeadline: 30 * time.Second,
+		SessionTTL: 5 * time.Minute, ShutdownTimeout: 20 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewLimits: %v", err)
+	}
+	return l
+}
