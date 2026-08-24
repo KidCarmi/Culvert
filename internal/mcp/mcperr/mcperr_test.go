@@ -139,6 +139,7 @@ func TestReasonCodesStable(t *testing.T) {
 		{ReasonUpstreamRetryDenied, "upstream_retry_denied"},
 		{ReasonUpstreamCallFailed, "upstream_call_failed"},
 		{ReasonUpstreamDiscoveryFailed, "upstream_discovery_failed"},
+		{ReasonAmbiguousRequestHeader, "ambiguous_request_header"},
 	}
 	seen := map[Reason]bool{}
 	for _, p := range want {

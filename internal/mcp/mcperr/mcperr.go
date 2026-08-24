@@ -756,6 +756,15 @@ const (
 	// ReasonUpstreamDiscoveryFailed — an upstream tools/list discovery failed (fetch,
 	// decode, or ingestion). The previous known-good catalog is retained unchanged.
 	ReasonUpstreamDiscoveryFailed
+
+	// ── transport anti-ambiguity ──────────────────────────────────────────────
+
+	// ReasonAmbiguousRequestHeader — a SINGLETON security-relevant request header
+	// (Origin, DPoP, Mcp-Session-Id, MCP-Protocol-Version, Authorization) was
+	// presented more than once. Culvert never resolves such a conflict by picking a
+	// value: an intermediary and the gateway could pick differently, so the request
+	// is rejected whole. Appended at the END of the enum so no existing ordinal moves.
+	ReasonAmbiguousRequestHeader
 )
 
 // reasonCode maps each Reason to its stable machine string. The strings are part
@@ -982,6 +991,7 @@ var reasonCode = map[Reason]string{ // #nosec G101 -- stable machine-readable er
 	ReasonUpstreamRetryDenied:          "upstream_retry_denied",
 	ReasonUpstreamCallFailed:           "upstream_call_failed",
 	ReasonUpstreamDiscoveryFailed:      "upstream_discovery_failed",
+	ReasonAmbiguousRequestHeader:       "ambiguous_request_header",
 }
 
 // Code returns the stable machine string for the reason (e.g. "malformed_json").
