@@ -618,14 +618,13 @@ func applyFilterStoresFromBackup(b *configBackup) {
 		fileBlocker.Add(ext)
 	}
 
-	// IP filter: remove all, set mode, then add.
+	// IP filter: remove all, set mode, then add. ClearAll is exactly the
+	// List+Remove loop it replaces (Remove filters by the same canonical
+	// strings List emits) minus the quadratic cost, and AddAll bulk-loads in
+	// one pass with a single view publish — an Add loop is quadratic.
 	ipf.SetMode(b.IPFilterMode)
-	for _, ip := range ipf.List() {
-		ipf.Remove(ip)
-	}
-	for _, ip := range b.IPList {
-		_ = ipf.Add(ip)
-	}
+	ipf.ClearAll()
+	_ = ipf.AddAll(b.IPList)
 }
 
 // applyScanStoresFromBackup restores the SSL-bypass matcher and the content

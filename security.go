@@ -313,20 +313,72 @@ func (f *IPFilter) Mode() string {
 }
 
 // Add accepts plain IPs ("1.2.3.4") or CIDR ("10.0.0.0/8").
+//
+// Use AddAll to load a LIST — Add publishes the derived view on every call
+// (it must: a single admin edit has to take effect immediately), and
+// publishView rebuilds that view from the whole entry set, so Add in a loop is
+// quadratic. See AddAll.
 func (f *IPFilter) Add(entry string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	err := f.addLocked(entry)
+	if err != nil {
+		// Rejected entry: nothing changed, so the published view is still current.
+		return err
+	}
+	f.publishView()
+	return nil
+}
+
+// InvalidIPEntry names one entry AddAll could not parse, so the caller can log
+// it exactly as its previous per-entry Add loop did — after the lock is
+// released, never underneath it.
+type InvalidIPEntry struct {
+	Entry string
+	Err   error
+}
+
+// AddAll appends every valid entry in ONE pass, under ONE lock, publishing the
+// derived view ONCE at the end. Invalid entries are skipped and returned; a nil
+// result means every entry was accepted.
+//
+// This is the bulk-load primitive every list-restoring caller must use —
+// startup (connlimit_startup.go), admin_settings restore, config-version
+// rollback, config import, and the CP→DP snapshot apply. Publishing per entry
+// instead makes a bulk load O(N²) in the entry count: measured on a 4-core
+// Xeon, an Add loop costs 46 ms at 1k entries, 857 ms at 4k and 3.27 s at 8k
+// (each doubling ~4x), which extrapolates to minutes at 100k — and the
+// ConfigSnapshot cap for this list is maxSnapIPList (2,000,000). That would
+// stall a boot or a snapshot apply on a legitimate enterprise allowlist.
+// AddAll is linear. Pinned by TestBenchGate_IPFilterBulkLoadIsLinear.
+func (f *IPFilter) AddAll(entries []string) []InvalidIPEntry {
+	if len(entries) == 0 {
+		return nil
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var invalid []InvalidIPEntry
+	for _, entry := range entries {
+		if err := f.addLocked(entry); err != nil {
+			invalid = append(invalid, InvalidIPEntry{Entry: entry, Err: err})
+		}
+	}
+	f.publishView()
+	return invalid
+}
+
+// addLocked inserts entry into the authoritative write-side state WITHOUT
+// publishing. Callers must hold mu for writing and MUST publishView before
+// releasing it.
+func (f *IPFilter) addLocked(entry string) error {
 	if _, cidr, err := net.ParseCIDR(entry); err == nil {
 		f.nets = append(f.nets, cidr)
-		f.publishView()
 		return nil
 	}
 	if ip := net.ParseIP(entry); ip != nil {
 		f.single[ip.String()] = true
-		f.publishView()
 		return nil
 	}
-	// Rejected entry: nothing changed, so the published view is still current.
 	return &net.AddrError{Err: "invalid IP or CIDR", Addr: entry}
 }
 

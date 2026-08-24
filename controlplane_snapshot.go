@@ -813,10 +813,12 @@ func applySnapshotTrafficExceptBlocklist(snap ConfigSnapshot) {
 	// IP filter.
 	newIPF := &IPFilter{single: map[string]bool{}}
 	newIPF.SetMode(snap.IPFilterMode)
-	for _, ip := range snap.IPList {
-		if err := newIPF.Add(ip); err != nil {
-			logger.Printf("DataPlane: invalid IP %q: %v", ip, err)
-		}
+	// Bulk load: one pass, one view publish. An Add loop is quadratic in the
+	// entry count, and this list's snapshot cap is maxSnapIPList (2,000,000),
+	// so a large allowlist would stall the snapshot apply. Invalid entries are
+	// reported after the lock is released.
+	for _, bad := range newIPF.AddAll(snap.IPList) {
+		logger.Printf("DataPlane: invalid IP %q: %v", bad.Entry, bad.Err)
 	}
 	ipf = newIPF
 

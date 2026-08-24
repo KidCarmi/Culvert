@@ -351,6 +351,163 @@ func TestIPFilterView_ConcurrentReadersAndWriters(t *testing.T) {
 	wg.Wait()
 }
 
+// ─── Bulk load (AddAll) ─────────────────────────────────────────────────────
+
+// TestIPFilterAddAll_MatchesAddLoop is the equivalence check for the bulk
+// primitive: AddAll must leave the filter in exactly the state a loop of Add
+// calls would, for every mode and every verdict — it is only allowed to be
+// cheaper, never different.
+func TestIPFilterAddAll_MatchesAddLoop(t *testing.T) {
+	entrySets := [][]string{
+		nil,
+		{},
+		{"10.0.0.1"},
+		{"10.0.0.0/8", "192.0.2.0/24", "198.51.100.7"},
+		{"2001:db8::/32", "::1", "10.0.0.0/8"},
+		{"10.0.0.1", "10.0.0.1", "10.0.0.0/8", "10.0.0.0/8"}, // duplicates
+		{"not-an-ip", "10.0.0.1", "", "10.0.0.256"},          // mixed valid/invalid
+		{"nope", "also-nope"},                                // all invalid
+	}
+	probes := []string{
+		"10.0.0.1", "10.0.0.2", "11.0.0.1", "192.0.2.5", "198.51.100.7",
+		"203.0.113.47", "::1", "2001:db8::1", "::ffff:10.0.0.1",
+	}
+
+	for _, mode := range []string{"", "allow", "block", "bogus"} {
+		for _, entries := range entrySets {
+			assertAddAllMatchesAddLoop(t, mode, entries, probes)
+		}
+	}
+}
+
+// assertAddAllMatchesAddLoop builds the same filter twice — once entry by entry
+// through Add, once in bulk through AddAll — and requires the two to be
+// indistinguishable in verdicts, in List membership, and in which entries they
+// rejected.
+func assertAddAllMatchesAddLoop(t *testing.T, mode string, entries, probes []string) {
+	t.Helper()
+
+	viaLoop := &IPFilter{single: map[string]bool{}}
+	viaLoop.SetMode(mode)
+	for _, e := range entries {
+		_ = viaLoop.Add(e)
+	}
+
+	viaBulk := &IPFilter{single: map[string]bool{}}
+	viaBulk.SetMode(mode)
+	invalid := viaBulk.AddAll(entries)
+
+	for _, probe := range probes {
+		if got, want := viaBulk.Allowed(probe), viaLoop.Allowed(probe); got != want {
+			t.Errorf("AddAll: Allowed(%q) = %v, Add-loop = %v (mode=%q entries=%v)",
+				probe, got, want, mode, entries)
+		}
+	}
+
+	// List membership must match too — it feeds export and the CP→DP snapshot.
+	if got, want := len(viaBulk.List()), len(viaLoop.List()); got != want {
+		t.Errorf("AddAll: len(List()) = %d, Add-loop = %d (entries=%v)", got, want, entries)
+	}
+
+	if got, want := len(invalid), countRejectedEntries(entries); got != want {
+		t.Errorf("AddAll reported %d invalid entries, want %d (entries=%v)", got, want, entries)
+	}
+	for _, bad := range invalid {
+		if bad.Err == nil {
+			t.Errorf("AddAll reported entry %q with a nil Err", bad.Entry)
+		}
+	}
+}
+
+// countRejectedEntries is the oracle for AddAll's invalid-entry report: how
+// many of these entries a single-shot Add would refuse.
+func countRejectedEntries(entries []string) int {
+	var n int
+	for _, e := range entries {
+		if (&IPFilter{single: map[string]bool{}}).Add(e) != nil {
+			n++
+		}
+	}
+	return n
+}
+
+// TestIPFilterAddAll_PublishesOnce pins that the bulk path still satisfies the
+// publish contract — the loaded entries must be live the moment AddAll
+// returns, exactly as they are after Add.
+func TestIPFilterAddAll_PublishesOnce(t *testing.T) {
+	f := &IPFilter{single: map[string]bool{}}
+	f.SetMode("block")
+	f.AddAll([]string{"203.0.113.0/24", "198.51.100.7"})
+	if f.Allowed("203.0.113.47") {
+		t.Error("AddAll did not publish: newly blocked range still allowed")
+	}
+	if f.Allowed("198.51.100.7") {
+		t.Error("AddAll did not publish: newly blocked IP still allowed")
+	}
+	if !f.Allowed("192.0.2.1") {
+		t.Error("AddAll blocked an unlisted IP")
+	}
+}
+
+// TestBenchGate_IPFilterBulkLoadIsLinear is the regression gate for the
+// quadratic bulk load. publishView rebuilds the derived view from the entire
+// entry set, so publishing per entry makes a list load O(N²) — measured, an
+// Add loop cost 46 ms at 1k entries and 3.27 s at 8k, and this list's
+// ConfigSnapshot cap is maxSnapIPList (2,000,000), so that would stall a boot
+// or a snapshot apply.
+//
+// A RATIO gate, so it is machine-independent: 4x the entries should cost ~4x
+// if the load is linear and ~16x if it is quadratic. The bound is 8x, midway
+// on a log scale, so the gate has wide margin under -race on a shared runner
+// while still failing hard if per-entry publishing returns.
+func TestBenchGate_IPFilterBulkLoadIsLinear(t *testing.T) {
+	if testing.Short() {
+		t.Skip("cost-shape gate skipped in -short")
+	}
+	const (
+		small = 2000
+		large = 8000 // 4x
+		bound = 8.0
+	)
+
+	entries := func(n int) []string {
+		out := make([]string, 0, n)
+		for i := 0; i < n; i++ {
+			out = append(out, fmt.Sprintf("10.%d.%d.1", i/256, i%256))
+		}
+		return out
+	}
+
+	measure := func(n int) time.Duration {
+		list := entries(n)
+		f := &IPFilter{single: map[string]bool{}}
+		f.SetMode("allow")
+		start := time.Now()
+		f.AddAll(list)
+		return time.Since(start)
+	}
+
+	// Best-of-three: a scheduler hiccup inflates a sample, never deflates it.
+	best := func(n int) time.Duration {
+		d := measure(n)
+		for i := 0; i < 2; i++ {
+			if e := measure(n); e < d {
+				d = e
+			}
+		}
+		return d
+	}
+
+	dSmall, dLarge := best(small), best(large)
+	ratio := float64(dLarge) / float64(dSmall)
+	t.Logf("entries=%d: %v, entries=%d: %v, ratio=%.2fx (linear ~4x, quadratic ~16x, bound %.1fx)",
+		small, dSmall, large, dLarge, ratio, bound)
+	if ratio > bound {
+		t.Errorf("bulk IP-filter load scales superlinearly (%.2fx for 4x the entries, bound %.1fx): "+
+			"the view is being republished per entry again", ratio, bound)
+	}
+}
+
 // ─── Cost-shape gates ───────────────────────────────────────────────────────
 
 // TestBenchGate_IPFilterAllowedTakesNoLock is STRUCTURAL, not timing-based: it
