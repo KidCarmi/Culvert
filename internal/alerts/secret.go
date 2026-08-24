@@ -53,7 +53,19 @@ func clearWebhookKeyCacheForTest() {
 
 // webhookSecretKey loads (or creates) the AES-256 key in dir used to encrypt
 // webhook secrets at rest. The key is cached per path.
-func webhookSecretKey(dir string) ([]byte, error) {
+//
+// create=false is the READ path: a missing key is an error and NOTHING is
+// written. Minting on read was a real hazard, not just an odd side effect — on
+// a node whose alert_webhooks.json was restored without its key, the very act
+// of failing to decrypt used to write a fresh key file, so the store then held
+// ciphertext under a key that no longer existed anywhere while every later
+// write used the new one. An operator following the documented recovery
+// ("restore the original key file") would then break exactly the secrets they
+// had already re-entered. Deferring creation to the first ENCRYPT keeps the
+// two generations from being created behind the operator's back (Codex review
+// on PR #1222). It also stops a failed read from attempting a write at all,
+// which matters on a read-only or full volume.
+func webhookSecretKey(dir string, create bool) ([]byte, error) {
 	keyPath := filepath.Join(dir, webhookKeyFileName)
 
 	webhookKeyMu.Lock()
@@ -69,6 +81,9 @@ func webhookSecretKey(dir string) ([]byte, error) {
 		return data, nil
 	} else if !os.IsNotExist(err) {
 		return nil, fmt.Errorf("read webhook key: %w", err)
+	}
+	if !create {
+		return nil, fmt.Errorf("webhook key %s: not found", filepath.Base(keyPath))
 	}
 
 	key := make([]byte, 32)
@@ -92,7 +107,7 @@ func encryptWebhookSecret(plaintext, dir string) (string, error) {
 	if strings.HasPrefix(plaintext, webhookSecretEncPrefix) {
 		return plaintext, nil
 	}
-	gcm, err := webhookGCM(dir)
+	gcm, err := webhookGCM(dir, true) // encrypt: mint the node-local key if this is its first use
 	if err != nil {
 		return "", err
 	}
@@ -115,7 +130,7 @@ func decryptWebhookSecret(stored, dir string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("decode webhook secret: %w", err)
 	}
-	gcm, err := webhookGCM(dir)
+	gcm, err := webhookGCM(dir, false) // decrypt: read-only, a missing key must never mint one
 	if err != nil {
 		return "", err
 	}
@@ -130,9 +145,10 @@ func decryptWebhookSecret(stored, dir string) (string, error) {
 	return string(pt), nil
 }
 
-// webhookGCM builds an AES-GCM cipher from the per-dir webhook key.
-func webhookGCM(dir string) (cipher.AEAD, error) {
-	key, err := webhookSecretKey(dir)
+// webhookGCM builds an AES-GCM cipher from the per-dir webhook key. create is
+// passed through to webhookSecretKey: true only on the encrypt path.
+func webhookGCM(dir string, create bool) (cipher.AEAD, error) {
+	key, err := webhookSecretKey(dir, create)
 	if err != nil {
 		return nil, err
 	}

@@ -24,7 +24,7 @@ func seedRestoredWebhookStore(t *testing.T) *AlertStore {
 	origPath := filepath.Join(origDir, "alert_webhooks.json")
 	src := &AlertStore{}
 	src.Init(origPath)
-	src.Add(AlertWebhook{
+	src.Add(AlertWebhook{ // #nosec G101 -- test fixture: a literal stand-in for an operator-entered HMAC secret, written to a t.TempDir() store
 		Name:    "siem",
 		URL:     "https://siem.example.com/hook",
 		Events:  []string{"threat_detected"},

@@ -233,6 +233,7 @@ func TestSigningDegraded_ReEnteringTheSecretRecovers(t *testing.T) {
 	_, newPath, st := restoreWithoutKey(t, origPath)
 
 	id := st.List()[0].ID
+	// #nosec G101 -- test fixture: a literal stand-in for the operator re-entering the secret in the admin UI
 	if !st.Update(id, Webhook{Name: "siem", URL: "https://siem.example.com/hook", Events: []string{"threat_detected"}, Enabled: true, Secret: "re-entered-key"}) {
 		t.Fatal("update failed")
 	}
@@ -290,6 +291,43 @@ func TestSigningDegraded_RestoringTheKeyFileRecoversSigning(t *testing.T) {
 	h, ok := recovered.GetByID(recovered.List()[0].ID)
 	if !ok || h.Secret != "hmac-key" {
 		t.Errorf("secret did not recover: %q", h.Secret)
+	}
+}
+
+// TestSigningDegraded_FailedDecryptDoesNotMintAKey: a failed READ must not
+// write key material.
+//
+// It used to: webhookSecretKey created a fresh .alert_webhook_key on any miss,
+// including the miss that IS the restore-without-the-key case. That left the
+// store holding ciphertext under a key that exists nowhere while every later
+// write used the new one — two generations created behind the operator's back,
+// so restoring the original key file would break exactly the secrets that had
+// already been re-entered (Codex review on PR #1222). Creation now happens on
+// the first ENCRYPT, which is an explicit operator action.
+func TestSigningDegraded_FailedDecryptDoesNotMintAKey(t *testing.T) {
+	_, origPath := seedEncryptedStore(t, "hmac-key")
+	newDir, newPath, st := restoreWithoutKey(t, origPath)
+
+	if st.SigningDegradedCount() != 1 {
+		t.Fatalf("fixture did not reach the degraded state")
+	}
+	if _, err := os.Stat(filepath.Join(newDir, webhookKeyFileName)); !os.IsNotExist(err) {
+		t.Fatalf("a failed decrypt minted %s (err=%v) — the restored ciphertext and any later write would sit under different keys", webhookKeyFileName, err)
+	}
+
+	// Re-entering a secret is an explicit encrypt, and THAT may mint the key.
+	id := st.List()[0].ID
+	// #nosec G101 -- test fixture: a literal stand-in for the operator re-entering the secret in the admin UI
+	if !st.Update(id, Webhook{Name: "siem", URL: "https://siem.example.com/hook", Enabled: true, Secret: "re-entered"}) {
+		t.Fatal("update failed")
+	}
+	if _, err := os.Stat(filepath.Join(newDir, webhookKeyFileName)); err != nil {
+		t.Errorf("the encrypt path did not create the key file: %v", err)
+	}
+	reloaded := &Store{}
+	reloaded.Init(newPath)
+	if h, _ := reloaded.GetByID(id); h.Secret != "re-entered" {
+		t.Errorf("re-entered secret did not round-trip: %q", h.Secret)
 	}
 }
 

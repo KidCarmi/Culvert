@@ -688,7 +688,7 @@ func checkAlertWebhookSigning() OperatorContractCheck {
 		Status: diagWarn,
 		Message: fmt.Sprintf("%d alert webhook(s) were configured with an HMAC signing secret this node cannot decrypt — their deliveries are going out UNSIGNED",
 			degraded),
-		OperatorAction: "Re-enter the signing secret for the affected webhook(s) in Security → Alert Webhooks; the stored ciphertext is preserved, so restoring this node's original .alert_webhook_key (never included in a backup, by design) and restarting also recovers them. Until then a receiver that verifies X-Culvert-Signature will reject this node's alerts.",
+		OperatorAction: "Two remedies, and the ORDER matters. If you still have this node's original .alert_webhook_key (never included in a backup, by design), restore it and restart FIRST — the stored ciphertext is preserved, so every affected webhook recovers with no re-entry. Only if that key is gone, re-enter each affected signing secret in Security → Alert Webhooks. Do not restore the key file AFTER re-entering secrets: the re-entered ones are sealed under this node's new key and putting the old key back would make them unusable in turn. Until one remedy is applied, a receiver that verifies X-Culvert-Signature will reject this node's alerts.",
 	}
 }
 

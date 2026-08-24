@@ -447,11 +447,22 @@ So after restoring onto a host that does not have the original
 - This is **visible, not silent**: the affected webhooks are badged
   *"Unsigned — secret unusable"* in **Security → Alert Webhooks**, and
   `/api/diagnostics` carries an `alert_webhook_signing` warn row.
-- **Recovery:** edit each affected webhook and re-enter its signing secret.
-  The stored ciphertext is preserved untouched, so restoring this node's
-  original `.alert_webhook_key` out-of-band (the same way you would provision
-  a KEK, § 9.4) and restarting also recovers them — but a config *import*,
-  which replaces the webhook list wholesale, discards it.
+- **Recovery — two paths, and the order matters:**
+  1. **If you still have the node's original `.alert_webhook_key`** (kept
+     out-of-band, the same way you would keep a KEK — § 9.4): restore it and
+     restart **first**. The stored ciphertext is preserved untouched, so every
+     affected webhook recovers with no re-entry.
+  2. **Otherwise:** edit each affected webhook and re-enter its signing secret.
+
+  Do **not** restore the old key file *after* re-entering secrets. A re-entered
+  secret is sealed under this node's current key, so putting the old key back
+  would recover the restored webhooks and break the re-entered ones instead.
+  (Culvert no longer creates a key as a side effect of a failed decrypt, so a
+  node in this state has no key file at all until you supply one or write a
+  secret — that is what makes path 1 clean.)
+
+  A config *import*, which replaces the webhook list wholesale, discards the
+  preserved ciphertext; take path 1 before importing if you intend to use it.
 
 ---
 
