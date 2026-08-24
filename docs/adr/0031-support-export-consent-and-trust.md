@@ -1,9 +1,9 @@
-# ADR-0011: Support export/upload consent & trust model; remote support deferred
+# ADR-0031: Support export/upload consent & trust model; remote support deferred
 
 - **Status:** Proposed (design recorded 2026-07-12; no code moved)
 - **Date:** 2026-07-12
 - **Deciders:** Principal Supportability Architect (proposed); project maintainer (to ratify)
-- **Relates to:** ADR-0008 (bundle framework), ADR-0009 (redaction), `internal/backupcrypt`, `internal/ssrf`, the release-catalog trust/origin model. Full design in `docs/support/SECURE-UPLOAD-ARCHITECTURE.md`.
+- **Relates to:** ADR-0028 (bundle framework), ADR-0029 (redaction), `internal/backupcrypt`, `internal/ssrf`, the release-catalog trust/origin model. Full design in `docs/support/SECURE-UPLOAD-ARCHITECTURE.md`.
 
 ## Context
 

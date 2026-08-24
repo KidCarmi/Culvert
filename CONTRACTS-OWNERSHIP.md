@@ -40,7 +40,7 @@ a version and negotiates.
   minor and backward-compatible; removing/retyping a required section is a new
   `csb/N+1`. The cloud extractor advertises the `csb` versions it accepts.
 - **Why Culvert owns it:** the appliance is the sole producer; redaction and
-  consent happen appliance-side before the bytes ever leave (ADR-0011/0014).
+  consent happen appliance-side before the bytes ever leave (ADR-0031/0014).
 
 ### 2.2 Secure-upload API  (server: tac-platform · client contract: Culvert)
 - **Spec:** `docs/support/SECURE-UPLOAD-ARCHITECTURE.md` (outbound-only HTTPS,

@@ -1267,7 +1267,7 @@ func TestTelemetryOpenAPIContract(t *testing.T) {
 
 // TestTelemetryConsentIndependentFromUpload — enabling telemetry never
 // touches the upload config (content or existence), and vice versa; the two
-// consent switches are fully independent (ADR-0011/P6).
+// consent switches are fully independent (ADR-0031/P6).
 func TestTelemetryConsentIndependentFromUpload(t *testing.T) {
 	withTempTelemetryDir(t)
 

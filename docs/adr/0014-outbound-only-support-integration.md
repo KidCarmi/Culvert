@@ -3,7 +3,7 @@
 - **Status:** Proposed (design recorded 2026-07-13; no code moved)
 - **Date:** 2026-07-13
 - **Deciders:** Principal Supportability Architect (proposed); project maintainer (to ratify)
-- **Relates to:** ADR-0012 (cloud-first), ADR-0015 (cloud independence), ADR-0011 (export/consent). Basis: `docs/support/SECURE-UPLOAD-ARCHITECTURE.md`, `TAC-CLOUD-ARCHITECTURE.md`.
+- **Relates to:** ADR-0012 (cloud-first), ADR-0015 (cloud independence), ADR-0031 (export/consent). Basis: `docs/support/SECURE-UPLOAD-ARCHITECTURE.md`, `TAC-CLOUD-ARCHITECTURE.md`.
 
 ## Context
 Culvert is an internet-adjacent, egress-critical security appliance in the customer's environment. Any inbound path from a vendor cloud is a direct attack surface into the customer network and a compliance non-starter. The maintenance-agent precedent already forbids inbound TCP (UDS + peercred only).

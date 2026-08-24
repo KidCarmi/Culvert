@@ -26,7 +26,7 @@ import (
 // path are later PRs (SECURE-UPLOAD-ARCHITECTURE.md §2/§4); TestNoAutoUpload
 // pins that no auto-upload path exists in this slice.
 //
-// Consent SEPARATION (ADR-0011/P6): the upload switch is INDEPENDENT of bundle
+// Consent SEPARATION (ADR-0031/P6): the upload switch is INDEPENDENT of bundle
 // collection, remote support, and telemetry — enabling one never enables
 // another. TestConsentSeparation pins it.
 //
