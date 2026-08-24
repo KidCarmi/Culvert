@@ -18571,8 +18571,9 @@ function resetBlockPage() {
   <div class="setup-card" id="setup-card-inner">
     <div id="setup-tls-fallback-banner" style="display:none;margin:0 0 14px;padding:10px 12px;border-radius:6px;background:rgba(220,53,69,.12);border:1px solid var(--red,#dc3545);font-size:.82rem;text-align:left">
       <strong>Self-signed TLS setup failed — this page is being served over plain HTTP.</strong>
-      The admin password you set below will travel unencrypted. <span id="setup-tls-fallback-reason" style="color:var(--muted)"></span>
+      The admin password you set below will travel unencrypted.
       Consider completing setup over a trusted network only, then restart the appliance to retry TLS.
+      <span style="color:var(--muted)">The cause is in the server log.</span>
     </div>
     <div class="setup-logo"><svg class="ico" aria-hidden="true"><use href="#i-shield"/></svg></div>
     <h2>Welcome to Culvert</h2>
@@ -18827,7 +18828,8 @@ pre.diff-block { margin:0;white-space:pre-wrap;word-break:break-all;font-size:.7
   <div class="setup-card">
     <div id="login-tls-fallback-banner" style="display:none;margin:0 0 14px;padding:10px 12px;border-radius:6px;background:rgba(220,53,69,.12);border:1px solid var(--red,#dc3545);font-size:.82rem;text-align:left">
       <strong>Self-signed TLS setup failed — this page is being served over plain HTTP.</strong>
-      The credentials you enter below will travel unencrypted. <span id="login-tls-fallback-reason" style="color:var(--muted)"></span>
+      The credentials you enter below will travel unencrypted.
+      <span style="color:var(--muted)">The cause is in the server log, and on Settings &rarr; Network &amp; TLS once signed in.</span>
     </div>
     <div class="setup-logo"><svg class="ico" aria-hidden="true"><use href="#i-shield"/></svg></div>
     <h2>Sign in to Culvert</h2>
@@ -18882,14 +18884,15 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
 // public (reachable before any credential is submitted), so this is the
 // only point that can warn an operator BEFORE their password travels
 // unencrypted over a failed-self-sign HTTP fallback.
-function renderTLSFallbackBanner(idPrefix, active, reason) {
+//
+// The FLAG only: those two endpoints deliberately do not carry the self-sign
+// error (it can quote an operator-configured SAN or hostname, and they are
+// unauthenticated). The cause is on Settings -> Network & TLS once signed in,
+// and in the server log.
+function renderTLSFallbackBanner(idPrefix, active) {
   const banner = document.getElementById(idPrefix + '-tls-fallback-banner');
   if (!banner) return;
   banner.style.display = active ? '' : 'none';
-  if (active) {
-    const r = document.getElementById(idPrefix + '-tls-fallback-reason');
-    if (r) r.textContent = reason || '';
-  }
 }
 
 // ── Init: check setup status then auth status ───────────────────────────
@@ -18898,7 +18901,7 @@ function renderTLSFallbackBanner(idPrefix, active, reason) {
     const s = await fetch('/api/setup/status');
     if (!s.ok) { showLoginOverlay(); return; }
     const d = await s.json();
-    renderTLSFallbackBanner('setup', d.ui_tls_fallback, d.ui_tls_fallback_reason);
+    renderTLSFallbackBanner('setup', d.ui_tls_fallback);
 
     if (d.needsSetup) {
       // First-time setup - show the setup wizard.
@@ -18949,7 +18952,7 @@ function renderTLSFallbackBanner(idPrefix, active, reason) {
         const a = await fetch('/api/auth/status');
         if (a.ok) {
           const ad = await a.json();
-          renderTLSFallbackBanner('login', ad.ui_tls_fallback, ad.ui_tls_fallback_reason);
+          renderTLSFallbackBanner('login', ad.ui_tls_fallback);
           if (!ad.loggedIn) {
             showLoginOverlay();
           } else {

@@ -9,9 +9,18 @@ import { Callout } from "../../design-system/primitives";
 import { ThemeSwitcher } from "../../layouts/AppShell";
 import styles from "./auth.module.css";
 
+// TLSFallbackWarning renders BEFORE any credential field. The `reason` prop
+// is deliberately unused on the pre-auth surfaces: the server withholds the
+// raw self-sign cause from /api/setup/status and /api/auth/status because
+// they are unauthenticated public routes and the cause can quote an
+// operator-configured SAN or hostname. The full detail is on the viewer-gated
+// Settings → Network & TLS panel and in the server log; the prop is kept in
+// the signature (currently always "") so a viewer-scoped surface can render
+// it there without changing this component.
 export function TLSFallbackWarning({
   active,
-  reason,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  reason: _reason,
 }: {
   active: boolean;
   reason: string;
@@ -25,9 +34,9 @@ export function TLSFallbackWarning({
     >
       Automatic TLS setup failed, so the management interface is being served
       over plain HTTP. Credentials submitted on this page may travel
-      unencrypted.{reason !== "" ? ` Server detail: ${reason}.` : ""} Complete
-      this task over a trusted network only, then restart the appliance to retry
-      TLS.
+      unencrypted. The cause is in the server log, and on Settings → Network
+      &amp; TLS once signed in. Complete this task over a trusted network only,
+      then restart the appliance to retry TLS.
     </Callout>
   );
 }

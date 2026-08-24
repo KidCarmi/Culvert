@@ -168,8 +168,7 @@ components:
         needsSetup:
           type: boolean
           description: True until an initial admin credential (or explicit open mode) is configured.
-        ui_tls_fallback: { type: boolean, description: "True when self-signed TLS setup failed at startup and the admin UI fell back to plain HTTP. Exposed pre-authentication so the setup wizard can warn before the initial admin password is submitted." }
-        ui_tls_fallback_reason: { type: string, description: "The self-sign error, when ui_tls_fallback is true." }
+        ui_tls_fallback: { type: boolean, description: "True when self-signed TLS setup failed at startup and the admin UI fell back to plain HTTP. Exposed pre-authentication so the setup wizard can warn before the initial admin password is submitted. The FLAG only - this route is unauthenticated, so the underlying self-sign error (which can quote an operator-configured SAN or hostname) is NOT returned here; it is on the viewer-gated GET /api/settings/network and in the server log." }
     SetupCompleteRequest:
       type: object
       description: Provide credentials, OR set unauth=true for explicit open mode.
@@ -216,8 +215,7 @@ components:
         loggedIn: { type: boolean }
         user: { type: string }
         role: { $ref: '#/components/schemas/Role' }
-        ui_tls_fallback: { type: boolean, description: "True when self-signed TLS setup failed at startup and the admin UI fell back to plain HTTP. Exposed pre-authentication so the login overlay can warn before credentials are submitted." }
-        ui_tls_fallback_reason: { type: string, description: "The self-sign error, when ui_tls_fallback is true." }
+        ui_tls_fallback: { type: boolean, description: "True when self-signed TLS setup failed at startup and the admin UI fell back to plain HTTP. Exposed pre-authentication so the login overlay can warn before credentials are submitted. The FLAG only - this route is unauthenticated, so the underlying self-sign error (which can quote an operator-configured SAN or hostname) is NOT returned here; it is on the viewer-gated GET /api/settings/network and in the server log." }
     Role:
       type: string
       enum: [admin, operator, viewer]

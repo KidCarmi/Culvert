@@ -171,13 +171,26 @@ func apiAuthLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 // jsonOKAuthStatus writes an /api/auth/status response, adding the
-// pre-authentication TLS-fallback fields to every branch — the login overlay
+// pre-authentication TLS-fallback FLAG to every branch — the login overlay
 // reads this endpoint before a session exists, so it is the only place a
 // browser sitting on the login form (about to submit a password) can learn
 // the connection is unencrypted.
+//
+// The flag only, never uiTLSFallbackReason. /api/auth/status and
+// /api/setup/status are on the uiAuthMiddleware public allowlist, so anything
+// they return is readable by an UNAUTHENTICATED caller, and the reason is a
+// raw selfSignedTLS() error — x509.CreateCertificate rejects a bad SAN by
+// quoting it, so the string can carry a -ui-san/CULVERT_PUBLIC_IP value or an
+// internal hostname. That is the same rule the readiness rows follow ("FIXED
+// detail because the endpoint is unauthenticated", healthcheck.go) and that
+// checkIdentityBackend states outright: the cause goes to the log and to
+// authenticated surfaces, never to a pre-auth one. The flag itself discloses
+// nothing — a client reaching this response over plaintext already knows the
+// panel is plaintext — while the cause stays available on the viewer-gated
+// GET /api/settings/network and in the process log.
+// Pinned by TestTLSFallback_PreAuthSurfacesCarryNoReason.
 func jsonOKAuthStatus(w http.ResponseWriter, fields map[string]any) {
 	fields["ui_tls_fallback"] = uiTLSFallbackActive
-	fields["ui_tls_fallback_reason"] = uiTLSFallbackReason
 	jsonOK(w, fields)
 }
 
@@ -424,10 +437,11 @@ func apiSetupStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// Flag only — this route is public (isPublicUIAuthPath: /api/setup*), so
+	// the raw self-sign error must not travel with it. See jsonOKAuthStatus.
 	jsonOK(w, map[string]any{
-		"needsSetup":             !cfg.IsConfigured(),
-		"ui_tls_fallback":        uiTLSFallbackActive,
-		"ui_tls_fallback_reason": uiTLSFallbackReason,
+		"needsSetup":      !cfg.IsConfigured(),
+		"ui_tls_fallback": uiTLSFallbackActive,
 	})
 }
 

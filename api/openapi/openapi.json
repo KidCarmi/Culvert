@@ -350,12 +350,8 @@
             "$ref": "#/components/schemas/Role"
           },
           "ui_tls_fallback": {
-            "description": "True when self-signed TLS setup failed at startup and the admin UI fell back to plain HTTP. Exposed pre-authentication so the login overlay can warn before credentials are submitted.",
+            "description": "True when self-signed TLS setup failed at startup and the admin UI fell back to plain HTTP. Exposed pre-authentication so the login overlay can warn before credentials are submitted. The FLAG only - this route is unauthenticated, so the underlying self-sign error (which can quote an operator-configured SAN or hostname) is NOT returned here; it is on the viewer-gated GET /api/settings/network and in the server log.",
             "type": "boolean"
-          },
-          "ui_tls_fallback_reason": {
-            "description": "The self-sign error, when ui_tls_fallback is true.",
-            "type": "string"
           },
           "user": {
             "type": "string"
@@ -3621,12 +3617,8 @@
             "type": "boolean"
           },
           "ui_tls_fallback": {
-            "description": "True when self-signed TLS setup failed at startup and the admin UI fell back to plain HTTP. Exposed pre-authentication so the setup wizard can warn before the initial admin password is submitted.",
+            "description": "True when self-signed TLS setup failed at startup and the admin UI fell back to plain HTTP. Exposed pre-authentication so the setup wizard can warn before the initial admin password is submitted. The FLAG only - this route is unauthenticated, so the underlying self-sign error (which can quote an operator-configured SAN or hostname) is NOT returned here; it is on the viewer-gated GET /api/settings/network and in the server log.",
             "type": "boolean"
-          },
-          "ui_tls_fallback_reason": {
-            "description": "The self-sign error, when ui_tls_fallback is true.",
-            "type": "string"
           }
         },
         "required": [

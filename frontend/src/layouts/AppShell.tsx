@@ -264,10 +264,16 @@ export function AppShell(): JSX.Element {
             >
               This admin session runs over plain HTTP because automatic TLS
               setup failed
+              {/* The reason is empty on /api/auth/status by design — that
+                  route is unauthenticated and the raw x509 error can quote an
+                  operator-configured SAN (ui_auth.go jsonOKAuthStatus). It is
+                  rendered here only if some future authenticated source
+                  supplies it; otherwise point at where the cause lives. */}
               {state.tlsFallbackReason !== ""
                 ? ` (${state.tlsFallbackReason})`
                 : ""}
-              . Restart the appliance to retry TLS.
+              . The cause is on Settings → Network &amp; TLS and in the server
+              log. Restart the appliance to retry TLS.
             </Callout>
           </div>
         )}

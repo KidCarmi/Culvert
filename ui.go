@@ -60,6 +60,13 @@ var (
 // starts accepting connections; read-only afterward via
 // GET /api/settings/network. Never set when -ui-no-tls was explicitly
 // requested (an intentional plaintext choice, not a degraded fallback).
+//
+// The two halves have DIFFERENT exposure: uiTLSFallbackActive is a fact the
+// caller can already observe (it is reading this over plaintext), so it rides
+// the public pre-auth surfaces to warn a browser before a password is
+// submitted; uiTLSFallbackReason is a raw crypto/x509 error that can quote an
+// operator-configured SAN or hostname, so it stays on the viewer-gated
+// GET /api/settings/network and the process log. See jsonOKAuthStatus.
 var (
 	uiTLSFallbackActive bool
 	uiTLSFallbackReason string
