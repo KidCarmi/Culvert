@@ -765,6 +765,12 @@ const (
 	// value: an intermediary and the gateway could pick differently, so the request
 	// is rejected whole. Appended at the END of the enum so no existing ordinal moves.
 	ReasonAmbiguousRequestHeader
+
+	// ReasonDecisionSnapshotStale — the tool a policy decision was made ABOUT is no
+	// longer the tool the live catalog reports (its fingerprint moved, or it is
+	// gone). The decision is stale and must not authorize the call. Appended at the
+	// END of the enum so no existing ordinal moves.
+	ReasonDecisionSnapshotStale
 )
 
 // reasonCode maps each Reason to its stable machine string. The strings are part
@@ -992,6 +998,7 @@ var reasonCode = map[Reason]string{ // #nosec G101 -- stable machine-readable er
 	ReasonUpstreamCallFailed:           "upstream_call_failed",
 	ReasonUpstreamDiscoveryFailed:      "upstream_discovery_failed",
 	ReasonAmbiguousRequestHeader:       "ambiguous_request_header",
+	ReasonDecisionSnapshotStale:        "decision_snapshot_stale",
 }
 
 // Code returns the stable machine string for the reason (e.g. "malformed_json").

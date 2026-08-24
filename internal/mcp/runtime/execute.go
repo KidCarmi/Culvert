@@ -4,6 +4,9 @@ import (
 	"context"
 	"time"
 
+	"encoding/hex"
+
+	"github.com/KidCarmi/Culvert/internal/mcp/catalog"
 	"github.com/KidCarmi/Culvert/internal/mcp/identity"
 	"github.com/KidCarmi/Culvert/internal/mcp/inspection"
 	"github.com/KidCarmi/Culvert/internal/mcp/jsonrpc"
@@ -63,6 +66,17 @@ type ExecOutput struct {
 // the result back into a terminal Outcome. It is only reached when p.executor is
 // non-nil (the disabled-by-default posture keeps the decision-only path).
 func (p *pipeline) dispatchExecute(ctx context.Context, rb *recBuilder, req Request, msg jsonrpc.Message, ident *identity.ResolvedContext, in policy.DecisionInput, d policy.Decision, insp inspectionRun, snapshotHash string, now time.Time) Outcome {
+	// OVN-09 — decision/execution TOCTOU. The policy decision was computed against
+	// a catalog SNAPSHOT. Between then and the irreversible upstream call there is a
+	// real window (inspection, durable commit, credential planning, provider fetch)
+	// in which a concurrent discovery — execution.Discovery -> catalog.Ingest
+	// publishes a new snapshot — can change the tool the decision was made about.
+	// Re-validate against the LIVE catalog and refuse a stale decision before any
+	// side effect. This is the drift MCP-TOOL-001 / MCP-T-011 / MCP-T-016 exist to
+	// prevent, and the executor never re-checked it.
+	if out, stale := p.refuseOnToolDrift(rb, in, msg.ID); stale {
+		return out
+	}
 	var srv *registry.ServerRecord
 	if req.ServerID != "" && p.deps.Registry != nil {
 		if rec, ok := p.deps.Registry.Current().Get(registry.ServerID(req.ServerID)); ok {
@@ -111,4 +125,37 @@ func (p *pipeline) dispatchExecute(ctx context.Context, rb *recBuilder, req Requ
 		p.ctr.observeOnly.Add(1)
 	}
 	return p.finish(rb, Outcome{Status: out.Status, Disposition: out.Disposition, Reason: out.Reason, ResponseBody: out.ResponseBody})
+}
+
+// refuseOnToolDrift re-resolves the decision's tool against the LIVE catalog and
+// returns a terminal refusal when it no longer matches.
+//
+// It fails CLOSED in both directions: a fingerprint that moved, and a tool that
+// has disappeared from the catalog entirely, are both stale decisions. A decision
+// with no tool (tools/list, or a call whose tool never resolved) is unaffected —
+// there is nothing to have drifted.
+//
+// It runs BEFORE the executor is reached, so no credential is planned, no event is
+// committed and no upstream request is issued under a stale decision.
+func (p *pipeline) refuseOnToolDrift(rb *recBuilder, in policy.DecisionInput, id jsonrpc.ID) (Outcome, bool) {
+	if in.Tool == nil || p.deps.Catalog == nil {
+		return Outcome{}, false
+	}
+	rec, ok := p.deps.Catalog.Current().Get(catalog.ToolKey{
+		Server: registry.ServerID(in.Tool.ServerID), Name: in.Tool.Name,
+	})
+	if ok {
+		sum := rec.Fingerprint.Sum()
+		if hex.EncodeToString(sum[:]) == in.Tool.FingerprintHash {
+			return Outcome{}, false
+		}
+	}
+	p.ctr.requestsRejected.Add(1)
+	rb.rec.PolicyAction = "BLOCKED_BY_DECISION_STALE"
+	rb.rec.PolicyReason = mcperr.ReasonDecisionSnapshotStale.Code()
+	rb.rec.ExecutionState = "" // nothing executed
+	return p.finish(rb, Outcome{
+		Status: 200, Disposition: DispRejected, Reason: mcperr.ReasonDecisionSnapshotStale,
+		ResponseBody: inspectionError(id, mcperr.ReasonDecisionSnapshotStale),
+	}), true
 }

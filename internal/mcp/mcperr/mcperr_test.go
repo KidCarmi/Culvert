@@ -140,6 +140,7 @@ func TestReasonCodesStable(t *testing.T) {
 		{ReasonUpstreamCallFailed, "upstream_call_failed"},
 		{ReasonUpstreamDiscoveryFailed, "upstream_discovery_failed"},
 		{ReasonAmbiguousRequestHeader, "ambiguous_request_header"},
+		{ReasonDecisionSnapshotStale, "decision_snapshot_stale"},
 	}
 	seen := map[Reason]bool{}
 	for _, p := range want {
