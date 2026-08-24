@@ -19,6 +19,9 @@
 | DEBT-008 | ✅ CLOSED | Two parallel update mechanisms coexisted | legacy `updater/` removed 2026-07-11; `release_dispatch*.go` + maintenance agent is the sole path |
 | DEBT-009 | LOW ↓ | Three durability layers for config can drift — ownership now registry-declared; effective-config visibility remains | `config.go`, `admin_settings.go`, `configversion.go` |
 | DEBT-010 | ✅ CLOSED | Coverage floor 55% (doc said 60%); delta gate non-blocking | resolved in tree by CI-REDESIGN step 7 — verified 2026-07-04 |
+| DEBT-011 | MEDIUM | MCP has no anti-drift wall: designed-and-documented controls that the request path never invokes | `internal/mcp/**` — six of fifteen 2026-08-24 findings were "declared, validated, tested in isolation, never called" |
+| DEBT-012 | LOW | Five `runtime.Limits` knobs remain validated-but-unenforced at the MCP runtime layer | `internal/mcp/runtime/limits.go` (`MaxObservations`, `CleanupPerOp`, `HandshakeTimeout`, `MaxOutstanding`, `MaxResponseBytes`) |
+| DEBT-013 | LOW | MCP registry existence still leaks to an authenticated-shaped caller; upstream `MaxConnsPerServer` is per-call | `internal/mcp/runtime/pipeline.go:resolveServer`, `internal/mcp/upstreamclient/transport.go:roundTrip` |
 
 ---
 
@@ -237,3 +240,60 @@
   root + shim globals). DEBT-003 re-measured: `store.go` halved to 1,171; `controlplane.go` grew
   to 2,236 and is now the largest file — flagged as next split target. DEBT-004/006/008/009/010
   unchanged and still real.
+
+---
+
+## DEBT-011 — MCP has no anti-drift wall · MEDIUM (2026-08-24)
+- **Principal:** Culvert walls its cross-cutting contracts with executable parity tests —
+  `uiRoutes` C1 forward/reverse parity for admin routes, `config_surfaces_test.go` reflection
+  parity for config membership. `internal/mcp` has no equivalent. The consequence showed up as a
+  *pattern*, not a one-off: six of the fifteen findings in the 2026-08-24 backend review were the
+  same shape — a control designed, documented, validated at construction, unit-tested in
+  isolation, and **never invoked by the request path**.
+  - `RequestDeadline` bounded only admission (`ServeHTTP` built the ctx, used it for `admit()`,
+    then cancelled it).
+  - `AuthConcurrency`, `DPoPConcurrency`, `AdmissionBudget`, `MaxObservations`, `CleanupPerOp`
+    had zero enforcement call sites.
+  - `protocol.Adapter` / `AdapterFor` — the documented boundary keeping version out of downstream
+    code — was declared and never called.
+  - `mcperr.ReasonRequestDeadlineExceeded` was mapped into the rollout hard-failure table and
+    never produced by any code path.
+- **Interest paid per change:** every review has to re-derive reachability from the composition
+  root by hand (this one did, for every dependency and every rollout mode), and package-level
+  tests provide false assurance — they pass whether or not the control is wired.
+- **Recommended shape:** a `mcp_surfaces_test.go` in the spirit of `config_surfaces_test.go`,
+  declaring for each `Limits` field and each declared seam **where** it is enforced/invoked, and
+  failing when a declared row has no call site. The three structural tests added by the
+  2026-08-24 review (`TestContext_NoDetachedContextInTheRequestPath`,
+  `TestSecurity_GuardedSingletonSetIsComplete`,
+  `TestVersionAdapter_RequestPathInvokesTheSeam`) are the pattern, applied ad hoc; the wall
+  generalizes them.
+- **Evidence:** `docs/engineering/security-reviews/2026-08-24-mcp-backend-full-review.md` §1, §4.
+
+## DEBT-012 — Validated-but-unenforced MCP limit knobs · LOW (2026-08-24)
+- **Principal:** After `AuthConcurrency` and `DPoPConcurrency` were wired, five
+  `runtime.Limits` fields remain validated, ceiling-checked, accessor-exposed and unread:
+  `MaxObservations`, `CleanupPerOp`, `HandshakeTimeout`, `MaxOutstanding`, `MaxResponseBytes`.
+  None is currently a hole — in-flight observations are bounded transitively by `MaxConcurrent`
+  (the sink call is synchronous), the sweep is bounded by the live session set, `net/http` bounds
+  the TLS handshake by `max(ReadHeaderTimeout, ReadTimeout)`, `limits.MaxOutstandingPerSession`
+  is enforced in `session/ops.go`, and responses are generated internally today.
+- **Interest:** each is a knob an operator can set and get nothing from, and
+  `MaxResponseBytes` becomes load-bearing the moment guarded execution returns upstream content.
+- **Fix:** wire or explicitly deprecate each, under DEBT-011's wall. (`AdmissionBudget` is
+  *not* here — it is a live risk, RISK-026.)
+
+## DEBT-013 — MCP residual oracle and per-call upstream pooling · LOW (2026-08-24)
+- **Principal (a):** the credential *presence* pre-check now runs before registry resolution, so a
+  credential-less caller can no longer distinguish a registered MCP server from an unknown id. A
+  caller presenting a **syntactically valid but invalid** token still can, because step 8 still
+  precedes token validation. Closing it fully means deferring the registry *existence* decision
+  until after validation while still resolving the server id from the path for the audience
+  binding.
+- **Principal (b):** `upstreamclient.roundTrip` builds one `http.Transport` per call. The
+  2026-08-24 fix releases its idle connections (closing an unbounded FD/goroutine leak), but
+  `MaxConnsPerServer` / `MaxIdleConnsPerHost` are consequently per-call bounds, not per-server
+  pools — no two upstream calls share a connection. Fixing it means holding a transport per
+  server whose dialer reads the current pin, which the per-call pinning model makes non-trivial.
+- **Interest:** (a) bounded information disclosure; (b) a TLS handshake per upstream tool call
+  once execution is armed.
