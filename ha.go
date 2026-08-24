@@ -94,6 +94,10 @@ type HAState struct {
 	// Armed only for role=leader with leaseEpoch==0 — a node that holds the
 	// leader role but not the fence. See ha_lease_recovery.go.
 	leaseRecoveryCh chan struct{}
+	// leaseTTL is the backend's CONFIGURED lease TTL (0 = unknown). Never used
+	// for write authority — that keys on etcd's own confirmed validity — only
+	// to bound the recovery loop's poll interval (recoveryPollCeiling).
+	leaseTTL time.Duration
 
 	// ── Lease-arbitrated failover (ADR-0005 S4) ──
 	resync        haResyncContext // material to re-enter standby after a demotion (cluster loader)

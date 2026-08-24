@@ -67,30 +67,61 @@ func (h *HAState) SetLeaseProvider(p halease.Provider, candidateID string) {
 	h.mu.Unlock()
 }
 
+// SetLeaseTTL records the backend's CONFIGURED lease TTL. It is not used to
+// decide write authority — that stays keyed on the validity etcd itself
+// confirms (Finding 3, the backend is the clock) — but the CHAOS-55 recovery
+// loop needs it to bound how often it must look at the fence. See
+// recoveryPollCeiling.
+//
+// Zero (nothing recorded, e.g. in tests) means "unknown", and the consumer
+// falls back to the smallest TTL the startup path accepts. The conservative
+// direction for an unknown TTL is to poll MORE often, never less.
+func (h *HAState) SetLeaseTTL(d time.Duration) {
+	h.mu.Lock()
+	h.leaseTTL = d
+	h.mu.Unlock()
+}
+
 // acquireLeaseForLeadership gates every path to leadership. Returns true in
 // legacy mode (nil provider) or on a successful grant (recording the epoch +
 // confirmed validity, and collapsing term=epoch happens at the caller under
 // its own lock). Denied or transport-error returns false — the caller must
 // not take leadership.
 func (h *HAState) acquireLeaseForLeadership(reason string) bool {
+	granted, _, _ := h.acquireLeaseAttempt(reason)
+	return granted
+}
+
+// acquireLeaseAttempt is acquireLeaseForLeadership's implementation, additionally
+// returning the backend's OWN view of a denial.
+//
+// CHAOS-55 (Codex review of PR #1223): the bool wrapper discards the Status that
+// Provider.Acquire already computed inside its atomic transaction, so a caller
+// that needed to know WHO held the lease had to issue a second Read — and a
+// foreign holder whose lease expired between those two calls read back as free,
+// erasing the one piece of evidence that says this node must not lead. The
+// transaction's own answer is both cheaper and race-free, so callers that care
+// about the holder take it from here. `granted && err == nil && st.Holder == ""`
+// is the etcd provider's holder-vanished-mid-txn case: retryable, not free.
+func (h *HAState) acquireLeaseAttempt(reason string) (granted bool, st halease.Status, err error) {
 	h.mu.RLock()
 	p, id := h.lease, h.leaseCandidateID
 	h.mu.RUnlock()
 	if p == nil {
-		return true
+		return true, halease.Status{}, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), haLeaseOpTimeout)
 	defer cancel()
-	granted, st, err := p.Acquire(ctx, id)
+	granted, st, err = p.Acquire(ctx, id)
 	if err != nil {
 		logger.Printf("HA: fencing lease acquire failed (%s) — refusing leadership (fence state unknown): %v",
 			sanitizeLog(reason), err)
-		return false
+		return false, halease.Status{}, err
 	}
 	if !granted {
 		logger.Printf("HA: fencing lease held by %q (epoch=%d) — refusing leadership (%s)",
 			sanitizeLog(st.Holder), st.Epoch, sanitizeLog(reason))
-		return false
+		return false, st, nil
 	}
 	h.mu.Lock()
 	h.leaseEpoch = st.Epoch
@@ -98,7 +129,7 @@ func (h *HAState) acquireLeaseForLeadership(reason string) bool {
 	h.leaseValidFor = st.ValidFor
 	h.mu.Unlock()
 	logger.Printf("HA: fencing lease acquired (epoch=%d, valid_for=%s) — %s", st.Epoch, st.ValidFor, sanitizeLog(reason))
-	return true
+	return true, st, nil
 }
 
 // startLeaseKeepalive launches the renew loop (no-op in legacy mode or when

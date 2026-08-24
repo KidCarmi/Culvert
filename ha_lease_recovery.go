@@ -47,7 +47,6 @@ package main
 // were blind" case and nothing more.
 
 import (
-	"context"
 	"fmt"
 	"math/rand/v2"
 	"sync/atomic"
@@ -97,6 +96,52 @@ const (
 // haLeaseComponent labels contained recovery-loop panics in the crash plane.
 const haLeaseComponent = "ha-lease-recovery"
 
+// recoveryPollCeiling bounds how long the loop may go between looks at the
+// fence, and it is a CORRECTNESS bound, not a tuning knob.
+//
+// Codex review of PR #1223 (P1): a free lease proves nobody holds it NOW; it
+// does not prove nobody held it since we last looked. A peer can acquire, take
+// configuration changes, crash, and have its lease expire — and if all of that
+// fits between two of our observations we see only "free" and re-acquire as a
+// stale leader, reverting the peer's writes.
+//
+// etcd keeps a holder's key until its lease expires, i.e. for at least one full
+// TTL after the holder stops renewing. So a peer's key is VISIBLE for ≥ TTL,
+// and looking at least once per TTL makes a completed-and-vanished tenure
+// impossible to miss. Half the TTL leaves margin for one slow round trip.
+//
+// An unknown TTL falls back to the smallest the startup path accepts
+// (haLeaseMinTTLSec), because the safe direction for an unknown is to poll MORE
+// often. The result is never below haLeaseRecoveryMinBackoff, and never above
+// haLeaseRecoveryMaxBackoff.
+//
+// The cost is bounded and small: at the default 10 s TTL this is one RPC per
+// 5 s per unfenced node, which is LESS traffic than the keepalive
+// (validFor/3, capped at haLeaseMaxTick=2 s) that a healthy leader already
+// runs against the same backend.
+//
+// **This does not make recovery unconditionally safe** — see §23.5 / register
+// row HA-19: it closes the gap between two SUCCESSFUL observations, but a
+// partition in which we cannot reach etcd while a peer can is a blind period we
+// cannot bound from here, and choosing what to do after one is a
+// safety-vs-availability posture question recorded for an owner.
+func (h *HAState) recoveryPollCeiling() time.Duration {
+	h.mu.RLock()
+	ttl := h.leaseTTL
+	h.mu.RUnlock()
+	if ttl <= 0 {
+		ttl = time.Duration(haLeaseMinTTLSec) * time.Second
+	}
+	ceiling := ttl / 2
+	if ceiling < haLeaseRecoveryMinBackoff {
+		ceiling = haLeaseRecoveryMinBackoff
+	}
+	if ceiling > haLeaseRecoveryMaxBackoff {
+		ceiling = haLeaseRecoveryMaxBackoff
+	}
+	return ceiling
+}
+
 // statHALeaseReacquireAttempts counts recovery Acquire/Read rounds that did not
 // restore write authority. It is the magnitude behind the rate-limited log.
 var statHALeaseReacquireAttempts atomic.Int64
@@ -122,25 +167,26 @@ const (
 	resumeRaceRetryable                      // free on read but denied on acquire (or vice versa)
 )
 
-// resumeAcquireRound performs one Acquire and, on failure, one Read to classify
-// why. The Read is what separates "denied" from "unreachable" — Provider.Acquire
-// reports a denial as (false, status, nil) and a transport fault as an error,
-// but acquireLeaseForLeadership has already discarded that by the time we see
-// its bool, and re-deriving it here keeps the single logging site intact.
+// resumeAcquireRound performs ONE Acquire and classifies the outcome from the
+// backend's own atomic answer.
+//
+// It used to classify from a FOLLOW-UP Read, which lost the race Codex found in
+// review of PR #1223: `Provider.Acquire` reports a denial as
+// `(false, status, nil)` with the holder it saw inside the transaction, but the
+// bool wrapper discarded it, so this had to read again — and a foreign holder
+// whose lease expired between the two calls read back as free. The denial was
+// then downgraded to `resumeRaceRetryable`, erasing the one observation that
+// says this node must not lead. Taking the transaction's own view removes the
+// window entirely and costs one RPC less.
 func (h *HAState) resumeAcquireRound() (resumeOutcome, halease.Status) {
-	if h.acquireLeaseForLeadership("leader resume") {
-		return resumeGranted, halease.Status{}
-	}
 	h.mu.RLock()
-	p, id := h.lease, h.leaseCandidateID
+	id := h.leaseCandidateID
 	h.mu.RUnlock()
-	if p == nil {
-		return resumeGranted, halease.Status{} // legacy mode never reaches here, but never block it
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), haLeaseOpTimeout)
-	st, err := p.Read(ctx)
-	cancel()
+
+	granted, st, err := h.acquireLeaseAttempt("leader resume")
 	switch {
+	case granted:
+		return resumeGranted, st
 	case err != nil:
 		return resumeUnknown, halease.Status{}
 	case st.Holder == id:
@@ -148,9 +194,8 @@ func (h *HAState) resumeAcquireRound() (resumeOutcome, halease.Status) {
 	case st.Holder != "":
 		return resumeForeign, st
 	default:
-		// The backend says free but Acquire did not grant: another candidate
-		// won the race between the two calls, or the holder vanished mid-txn
-		// (the etcd provider's len(kvs)==0 branch). Retryable.
+		// Denied, but the transaction saw no holder: the etcd provider's
+		// holder-vanished-between-evaluation-and-range branch. Retryable.
 		return resumeRaceRetryable, st
 	}
 }
@@ -217,6 +262,7 @@ func (h *HAState) leaseRecoveryLoop(stop chan struct{}) {
 	defer h.clearLeaseRecoveryHandle(stop)
 
 	backoff := haLeaseRecoveryMinBackoff
+	ceiling := h.recoveryPollCeiling()
 	started := time.Now()
 	var lastLog time.Time
 	var suppressed int
@@ -230,9 +276,12 @@ func (h *HAState) leaseRecoveryLoop(stop chan struct{}) {
 		if !haSleepInterruptible(stop, jitterDuration(backoff, haLeaseRecoveryJitter)) {
 			return // Stop() — the node is going away, still read-only. Correct.
 		}
+		// Backs off, but never past the ceiling: that bound is what keeps a
+		// peer's entire tenure from fitting between two observations, so it is
+		// a correctness limit rather than a politeness one (recoveryPollCeiling).
 		backoff *= 2
-		if backoff > haLeaseRecoveryMaxBackoff {
-			backoff = haLeaseRecoveryMaxBackoff
+		if backoff > ceiling {
+			backoff = ceiling
 		}
 	}
 }
@@ -269,24 +318,29 @@ func (h *HAState) leaseRecoveryAttempt(started time.Time, lastLog *time.Time, su
 		return true
 	}
 
-	// READ BEFORE ACQUIRE. See the file header: a denial alone cannot tell us
-	// whether the fence was taken while we were blind, and that distinction
-	// decides whether recovering is safe or makes a stale node authoritative.
-	ctx, cancel := context.WithTimeout(context.Background(), haLeaseOpTimeout)
-	st, err := p.Read(ctx)
-	cancel()
-	if err != nil {
+	// ONE atomic Acquire, and the fence's own answer decides.
+	//
+	// This used to Read first and only then Acquire. The read was how this loop
+	// learned WHO held the lease, because the bool wrapper threw that away — but
+	// `Provider.Acquire` is a single transaction that already reports the holder
+	// when it denies, so the extra round trip bought no information and opened
+	// the window Codex found in review (a foreign holder expiring between the
+	// read and the acquire). Detection is unchanged: Acquire cannot succeed
+	// while anyone else holds the lease, so a grant IS proof the fence was free,
+	// and a denial carries the holder that made it so.
+	granted, st, err := h.acquireLeaseAttempt("lease recovery")
+	switch {
+	case err != nil:
+		// The truth is unknown, so we take nothing. Note a failing backend
+		// cannot have granted the lease to a peer either.
 		h.logRecoveryProgress(started, lastLog, suppressed, fmt.Sprintf("fencing backend unreachable: %v", err))
 		return false
-	}
-	if st.Holder != "" && st.Holder != id {
+	case !granted && st.Holder != "" && st.Holder != id:
 		h.handleForeignFenceHolder(st.Holder, st.Epoch)
 		return true
-	}
-
-	// Free, or still pinned by our own previous process's lease. Either way the
-	// fence has not moved to anyone else, so completing the resume is safe.
-	if !h.acquireLeaseForLeadership("lease recovery") {
+	case !granted:
+		// Denied with no holder in the transaction's view, or pinned by our own
+		// previous process's ghost. Both retry.
 		h.logRecoveryProgress(started, lastLog, suppressed, "acquire not granted (retrying)")
 		return false
 	}

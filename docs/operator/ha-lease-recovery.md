@@ -191,7 +191,35 @@ ratchet forward to it automatically.
 
 ---
 
-## 8. Known gap
+## 8. Known gaps
+
+### 8.1 A long blind period cannot be proven empty (HA-19)
+
+The recovery loop looks at the fence at least once per lease TTL, and etcd keeps
+a holder's key for a full TTL after that holder stops renewing — so a peer that
+acquires, leads and dies cannot slip past unnoticed between two **successful**
+observations.
+
+What it cannot rule out is a period in which this node could not reach etcd
+**while a peer could** (a one-sided partition). If a peer led and vanished
+entirely inside such a window, this node sees a free lease afterwards and takes
+it, with configuration that may be older than the peer's.
+
+Two things keep this in proportion, and both matter when you are deciding
+whether to intervene:
+
+- A backend that is *down* cannot have granted the lease to anyone else either,
+  so an ordinary etcd outage — the case this loop exists for — is unaffected.
+- The same is true of a plain restart: a leader you restart by hand acquires a
+  free lease with no proof either. This is not new behaviour, only newly
+  reachable without you.
+
+If you have had a one-sided partition longer than a lease TTL and configuration
+correctness matters more than availability, compare
+`culvert_cluster_config_version` across both CPs before letting the recovered
+node stay leader, exactly as in §5 step 3.
+
+### 8.2 A self-fenced ex-leader with no recorded peer
 
 A leader that **self-fences** (loses the lease mid-flight) and has **no
 recorded ex-standby address** becomes a passive standby with no loops running,

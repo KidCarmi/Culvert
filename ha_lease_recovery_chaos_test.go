@@ -670,52 +670,101 @@ func TestChaos55_ResumeDoesNotBlockBootOnALongOutage(t *testing.T) {
 
 // ── The invariant that makes the recovery loop safe ─────────────────────────
 
-// READ BEFORE ACQUIRE. A denial alone cannot distinguish "the lease is free and
-// we lost a race" from "a peer took the fence while we were blind", and only the
-// second means this node's state may be stale. The loop therefore reads first,
-// and this pins the ordering directly rather than inferring it from an outcome.
+// The fence's own answer must be the ONLY thing that grants leadership, and a
+// denial naming a foreign holder must never be downgraded into a retry.
 //
-// Without it, a future refactor could reorder the two calls, keep every other
-// gate green, and silently reintroduce the case where a node quietly waits for a
-// live leader to die and then takes over with state of unknown age.
-func TestChaos55_RecoveryReadsBeforeItAcquires(t *testing.T) {
+// This replaces an earlier read-before-acquire gate. That gate pinned a
+// MECHANISM (Read, then Acquire) which Codex review of PR #1223 showed was both
+// redundant and racy: Provider.Acquire is a single transaction that already
+// reports the holder when it denies, so the extra Read bought no information and
+// opened a window in which a foreign holder could expire between the two calls
+// and read back as free. The mechanism is gone; the invariant it was standing in
+// for is pinned directly here.
+func TestChaos55_ForeignHolderEvidenceSurvivesAnExpiringLease(t *testing.T) {
 	tempHADir(t)
-	o := &outageProvider{Provider: halease.NewFake(10 * time.Second)}
-	o.down.Store(true)
+	f := halease.NewFake(3 * time.Second)
+	if granted, _, _ := f.Acquire(context.Background(), "cp-b"); !granted {
+		t.Fatal("seed: peer holds the fence")
+	}
+	// expireAfterAcquire models the race: the Acquire transaction sees cp-b, and
+	// the lease lapses immediately afterwards. A follow-up Read would report
+	// free and erase the evidence.
+	p := &expireOnDenyProvider{Fake: f}
 
-	h, cfg := resumingLeader(t, o, "cp-a")
+	h, cfg := resumingLeader(t, p, "cp-a")
 	h.ResumeAsLeader(cfg)
 	defer h.Stop()
 
-	// Everything up to here is the resume path; the recovery loop's calls start
-	// after it. Mark the boundary, then let the backend recover.
-	o.callMu.Lock()
-	boundary := len(o.calls)
-	o.callMu.Unlock()
-
-	o.down.Store(false)
-	if !haWaitFor(20*time.Second, func() bool {
-		return h.WriteAllowed() && !h.leaseRecoveryActive()
-	}) {
-		t.Fatal("recovery did not settle")
+	if h.WriteAllowed() {
+		t.Fatal("a node whose acquire was denied by a live foreign holder must not hold write authority")
 	}
+	if !p.denied.Load() {
+		t.Fatal("harness: the acquire was never denied by the seeded holder")
+	}
+	if h.leaseRecoveryActive() {
+		t.Error("an affirmative foreign-holder denial must not arm the recovery loop — " +
+			"that evidence says another node leads, and it must not be retried away")
+	}
+}
 
-	loopCalls := o.callOrder()[boundary:]
-	var sawRead bool
-	for i, op := range loopCalls {
-		switch op {
-		case "read":
-			sawRead = true
-		case "acquire":
-			if !sawRead {
-				t.Fatalf("recovery loop called Acquire at position %d with no preceding Read: %v\n"+
-					"the loop MUST read the fence before taking it — a denial alone cannot tell us "+
-					"whether a peer led while we were blind, and that decides whether recovering is safe",
-					i, loopCalls)
+// expireOnDenyProvider expires the seeded lease the instant an Acquire is
+// denied, so any code that re-reads to learn the holder sees "free" instead.
+type expireOnDenyProvider struct {
+	*halease.Fake
+	denied atomic.Bool
+}
+
+func (e *expireOnDenyProvider) Acquire(ctx context.Context, id string) (bool, halease.Status, error) {
+	granted, st, err := e.Fake.Acquire(ctx, id)
+	if !granted && err == nil && st.Holder != "" {
+		e.denied.Store(true)
+		e.Fake.ExpireForTest() // the holder vanishes right after the transaction
+	}
+	return granted, st, err
+}
+
+// ── The poll ceiling is a correctness bound, not a tuning knob ──────────────
+
+// A holder's key survives for at least one full TTL after it stops renewing, so
+// looking at least once per TTL makes a completed-and-vanished peer tenure
+// impossible to miss between two SUCCESSFUL observations. If the backoff were
+// allowed to grow past the TTL, a peer could acquire, take writes, crash and
+// expire entirely inside one gap — and this node would then re-acquire as a
+// stale leader and revert that peer's configuration (Codex review, PR #1223).
+func TestChaos55_RecoveryPollCeilingStaysBelowTheLeaseTTL(t *testing.T) {
+	tempHADir(t)
+	for _, tc := range []struct {
+		name string
+		ttl  time.Duration
+	}{
+		{"default 10s", 10 * time.Second},
+		{"floor 3s", 3 * time.Second},
+		{"long 120s", 120 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := &HAState{}
+			h.SetLeaseProvider(halease.NewFake(tc.ttl), "cp-a")
+			h.SetLeaseTTL(tc.ttl)
+			got := h.recoveryPollCeiling()
+			if got >= tc.ttl {
+				t.Fatalf("poll ceiling %s >= lease TTL %s — a peer's whole tenure could pass unobserved", got, tc.ttl)
 			}
-		}
+			if got < haLeaseRecoveryMinBackoff {
+				t.Errorf("poll ceiling %s below the %s floor", got, haLeaseRecoveryMinBackoff)
+			}
+			if got > haLeaseRecoveryMaxBackoff {
+				t.Errorf("poll ceiling %s above the %s cap", got, haLeaseRecoveryMaxBackoff)
+			}
+		})
 	}
-	if !sawRead {
-		t.Fatalf("recovery loop made no backend Read at all: %v", loopCalls)
+
+	// An UNKNOWN TTL must fall back to the smallest the startup path accepts:
+	// the safe direction for an unknown is to poll MORE often, never less.
+	h := &HAState{}
+	h.SetLeaseProvider(halease.NewFake(time.Second), "cp-a")
+	unknown := h.recoveryPollCeiling()
+	floor := time.Duration(haLeaseMinTTLSec) * time.Second
+	if unknown >= floor {
+		t.Fatalf("unknown-TTL ceiling %s must stay below the %s minimum accepted TTL", unknown, floor)
 	}
 }

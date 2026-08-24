@@ -188,14 +188,24 @@ leader role and hands the decision to the recovery loop, which reads the
 backend **before** it acquires and demotes only on an affirmative foreign
 holder.
 
-Read-before-acquire is what makes the loop safe, and a denial alone would not
-have been enough. `Acquire` is denied while anyone else holds the lease, so the
-loop cannot take leadership from a live peer — but quietly retrying until that
-peer *dies* and then taking over would make a node with state of unknown age
-authoritative. That is precisely the judgement `haPromoteFreshnessWindow` was
-built to make, so recovery routes to it rather than around it: an observed
-foreign holder is **latched**, the loop exits, and the node never acquires
-again in that process.
+One atomic `Acquire` is what makes the loop safe. It cannot succeed while
+anyone else holds the lease, so a grant *is* proof the fence was free; and when
+it denies, the transaction reports the holder that made it so. Quietly retrying
+until a live peer *dies* and then taking over would make a node with state of
+unknown age authoritative — precisely the judgement `haPromoteFreshnessWindow`
+was built to make — so recovery routes to it rather than around it: an observed
+foreign holder is **latched**, the loop exits, and the node never acquires again
+in that process.
+
+The first draft of this reached for the holder with a separate `Read` before the
+`Acquire`, because the bool wrapper around `acquireLeaseForLeadership` discarded
+the Status the transaction had already computed. Codex review of the PR showed
+that was both redundant and racy: a foreign holder whose lease expired between
+the read and the acquire read back as free, downgrading a definite denial into a
+retry and erasing the one observation that says this node must not lead.
+`acquireLeaseAttempt` now surfaces the transaction's own answer, which removes
+the window and one round trip. See §7.1 for the bound that has to sit alongside
+it.
 
 The latched disposition mirrors the shipped ADR-0005 S4/S2 decision rather than
 inventing a third stance — resync from the recorded ex-standby when the
@@ -282,9 +292,52 @@ backends. Recorded.
 
 ---
 
+## 6.1 HA-19 — a free lease is not proof that the fence never moved
+
+Also from Codex review, and the deeper of the two. A free lease proves nobody
+holds it *now*. It does not prove nobody held it since we last looked. A peer
+can acquire, take configuration writes, crash, and have its lease expire; if
+that entire tenure fits between two of our observations, we see only "free" and
+re-acquire as a stale leader, reverting the peer's writes.
+
+The mechanical half is closed. etcd keeps a holder's key until its lease
+expires, i.e. for **at least one full TTL** after the holder stops renewing — so
+a peer's key is visible for ≥ TTL, and looking at least once per TTL makes a
+completed-and-vanished tenure impossible to miss. `recoveryPollCeiling` caps the
+backoff at half the configured TTL (falling back to the smallest TTL the startup
+path accepts when it is unknown, because the safe direction for an unknown is to
+poll *more* often). The cost is bounded and small: at the default 10 s TTL that
+is one RPC per 5 s per unfenced node — less traffic than the keepalive a healthy
+leader already runs against the same backend.
+
+What remains is a blind period this node cannot bound from the inside: **a
+partition in which we cannot reach etcd but a peer can.** Two things keep it in
+proportion. First, a *failing* backend cannot have granted the lease to anyone
+else either, so the ordinary etcd-outage case — the one this whole loop exists
+for — is not affected. Second, the shipped resume path already has the same
+property: an operator-restarted leader acquires a free lease with no proof
+either. The change makes the class reachable without a restart; it does not
+create it.
+
+Closing it properly needs one of two things, and neither is a small edit:
+
+- **Durable evidence of an intervening epoch.** Not available from this backend.
+  etcd's `create_revision` advances on unrelated writes, so an epoch gap carries
+  no information about how many grants happened, and a `Read` of a free lease
+  returns no watermark at all (the key is deleted on expiry).
+- **Route a long-blind recovery through the standby freshness machinery** rather
+  than acquiring — ask the peer instead of guessing, which is what
+  `enterStandbyResync` and `haPromoteFreshnessWindow` already exist to do.
+
+That is a safety-versus-availability posture decision of exactly the class
+already recorded as HA-18, so it is written down as **HA-19** for an owner
+rather than settled inside a chaos fix.
+
+---
+
 ## 7. Gates
 
-`ha_lease_recovery_chaos_test.go` — 18 tests. Every **defect** gate was verified
+`ha_lease_recovery_chaos_test.go` — 20 tests. Every **defect** gate was verified
 **failing against the pre-fix tree** before the fix landed; the arming, latching
 and jitter gates pin new behaviour and have no pre-fix counterpart.
 
@@ -306,6 +359,8 @@ and jitter gates pin new behaviour and have no pre-fix counterpart.
 | `StandbyIsNotReportedUnfenced` | the paging rule is not diluted |
 | `LeaseHealthReportsRecovering` | the JSON surfaces |
 | `RecoveryBackoffIsJittered` | fleet spreading |
+| `ForeignHolderEvidenceSurvivesAnExpiringLease` | a denial naming a live holder is never downgraded to a retry, even if that lease expires immediately after |
+| `RecoveryPollCeilingStaysBelowTheLeaseTTL` | HA-19: the poll interval stays under the TTL at every configured value, and an unknown TTL polls faster, not slower |
 | `LegacyModeUnchanged` | nil provider is byte-identical |
 
 ---
