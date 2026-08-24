@@ -48,10 +48,10 @@ func loadConnAndRateLimit(cfg connAndRateLimitStartupConfig, parentCtx context.C
 
 	if cfg.IPMode != "" {
 		ipf.SetMode(cfg.IPMode)
-		for _, entry := range cfg.IPList {
-			if err := ipf.Add(entry); err != nil {
-				logger.Printf("IP filter: invalid entry %q: %v", entry, err)
-			}
+		// Bulk load: one pass, one view publish (an Add loop is quadratic).
+		// Invalid entries are reported after the lock is released.
+		for _, bad := range ipf.AddAll(cfg.IPList) {
+			logger.Printf("IP filter: invalid entry %q: %v", bad.Entry, bad.Err)
 		}
 		logger.Printf("IPFilter: mode=%s entries=%d", cfg.IPMode, len(cfg.IPList))
 	}
