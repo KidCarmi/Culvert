@@ -148,6 +148,7 @@ func TestApiDiagnostics_DefaultOK(t *testing.T) {
 		"config_rollback_validation": false,
 		"key_at_rest":                false,
 		"identity_backend":           false,
+		"interactive_login_state":    false,
 		"memory_backstop":            false,
 	}
 	for i := range c.Checks {
@@ -216,6 +217,54 @@ func TestApiDiagnostics_WarnsOnClusterInsecure(t *testing.T) {
 	if c.Verdict == diagFail {
 		t.Error("top-level verdict escalated to fail; clusterInsecure must remain a warn")
 	}
+}
+
+// TestCheckInteractiveLoginState pins the OK/WARN split for the
+// interactive-login (OIDC PKCE / SAML) callback-state check: a store with no
+// evictions reports ok, and a store that had to evict entries at its cap
+// reports warn with an operator_action naming the affected store.
+func TestCheckInteractiveLoginState(t *testing.T) {
+	origPKCE, origSAML := globalPKCEStore, globalSAMLStateStore
+	t.Cleanup(func() {
+		globalPKCEStore = origPKCE
+		globalSAMLStateStore = origSAML
+	})
+
+	t.Run("ok when nothing evicted", func(t *testing.T) {
+		globalPKCEStore = newPKCEStore()
+		globalSAMLStateStore = newSAMLStateStore()
+		globalPKCEStore.Set("s1", "client-a", &pkceEntry{providerID: "corp-oidc"})
+
+		ck := checkInteractiveLoginState()
+		if ck.Code != "interactive_login_state" {
+			t.Fatalf("code = %q, want interactive_login_state", ck.Code)
+		}
+		if ck.Status != diagOK {
+			t.Fatalf("status = %q, want ok; message=%s", ck.Status, ck.Message)
+		}
+		if ck.OperatorAction != "" {
+			t.Errorf("ok status should carry no operator_action, got %q", ck.OperatorAction)
+		}
+	})
+
+	t.Run("warns once a store has evicted entries", func(t *testing.T) {
+		globalPKCEStore = newPKCEStore()
+		globalSAMLStateStore = newSAMLStateStore()
+		for i := 0; i < 2*pkceStoreMax; i++ {
+			globalPKCEStore.Set("flood-"+strconv.Itoa(i), "flooder", &pkceEntry{providerID: "corp-oidc"})
+		}
+
+		ck := checkInteractiveLoginState()
+		if ck.Status != diagWarn {
+			t.Fatalf("status = %q, want warn; message=%s", ck.Status, ck.Message)
+		}
+		if ck.OperatorAction == "" {
+			t.Error("warn status must carry an operator_action")
+		}
+		if !strings.Contains(ck.Message, "OIDC PKCE") {
+			t.Errorf("message missing OIDC PKCE detail: %s", ck.Message)
+		}
+	})
 }
 
 func TestApiDiagnostics_WarnsOnClusteredSAMLState(t *testing.T) {
