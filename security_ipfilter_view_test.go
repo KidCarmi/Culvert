@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -134,6 +135,7 @@ func TestIPFilterView_DifferentialAgainstLegacy(t *testing.T) {
 // randomly generated filters and probes. A fixed seed keeps failures
 // reproducible.
 func TestIPFilterView_DifferentialRandomized(t *testing.T) {
+	// #nosec G404 -- deterministic seeded generator for reproducible test data
 	rng := rand.New(rand.NewSource(20260823))
 
 	randV4 := func() string {
@@ -172,7 +174,7 @@ func TestIPFilterView_DifferentialRandomized(t *testing.T) {
 				// Probe an entry verbatim (bare IP entries become exact hits;
 				// CIDR entries exercise the network-address boundary).
 				probe = entries[rng.Intn(len(entries))]
-				if i := indexByte(probe, '/'); i >= 0 {
+				if i := strings.IndexByte(probe, '/'); i >= 0 {
 					probe = probe[:i]
 				}
 			default:
@@ -185,15 +187,6 @@ func TestIPFilterView_DifferentialRandomized(t *testing.T) {
 			}
 		}
 	}
-}
-
-func indexByte(s string, c byte) int {
-	for i := 0; i < len(s); i++ {
-		if s[i] == c {
-			return i
-		}
-	}
-	return -1
 }
 
 // ─── The publish contract ───────────────────────────────────────────────────
@@ -377,24 +370,37 @@ func TestBenchGate_IPFilterAllowedTakesNoLock(t *testing.T) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	done := make(chan bool, 2)
-	go func() { done <- f.Allowed("203.0.113.47") }() // miss → allowed
-	go func() { done <- f.Allowed("198.51.100.9") }() // hit  → denied
+	probes := []struct {
+		ip   string
+		want bool
+		note string
+	}{
+		{"203.0.113.47", true, "unlisted IP passes a blocklist"},
+		{"198.51.100.9", false, "IP inside a blocklisted range is denied"},
+	}
 
-	want := []bool{true, false}
-	got := make([]bool, 0, 2)
-	for i := 0; i < 2; i++ {
+	type result struct {
+		i   int
+		got bool
+	}
+	done := make(chan result, len(probes))
+	for i := range probes {
+		go func(i int, ip string) { done <- result{i, f.Allowed(ip)} }(i, probes[i].ip)
+	}
+
+	// Completion order is not deterministic, so each result carries its index
+	// and every verdict is checked individually — the gate proves the read path
+	// still ANSWERS under the write lock, and still answers CORRECTLY.
+	for range probes {
 		select {
-		case v := <-done:
-			got = append(got, v)
+		case r := <-done:
+			if p := probes[r.i]; r.got != p.want {
+				t.Errorf("Allowed(%q) = %v, want %v (%s)", p.ip, r.got, p.want, p.note)
+			}
 		case <-time.After(5 * time.Second):
 			t.Fatal("Allowed blocked while the write lock was held: the per-request " +
 				"read path has taken a lock again")
 		}
-	}
-	// Order is not deterministic; both verdicts must be present.
-	if !(got[0] != got[1]) {
-		t.Fatalf("expected one allow and one deny, got %v (want the set %v)", got, want)
 	}
 }
 
