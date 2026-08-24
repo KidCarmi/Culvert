@@ -90,6 +90,7 @@ func (p *pipeline) decisionFacts(in *policy.DecisionInput, d policy.Decision, ct
 			PrincipalType:      subjectKindString(in.Principal.Kind),
 			ClientID:           in.Client.ClientID,
 			Assurance:          assuranceString(ctx.Assurance()),
+			SenderBinding:      senderBindingString(ctx.SenderConstraint()),
 			SessionCorrelation: ctx.TokenDigest(),
 			Chain:              chainLinks(ctx),
 		},
@@ -186,6 +187,20 @@ func subjectKindString(k policy.SubjectKind) string {
 		return "workload"
 	default:
 		return ""
+	}
+}
+
+// senderBindingString labels the VERIFIED proof-of-possession binding for the
+// durable record. It is deliberately separate from assuranceString: conflating
+// them is OVN-05.
+func senderBindingString(sc identity.SenderConstraint) string {
+	switch sc.Method {
+	case identity.ConfirmDPoP:
+		return "dpop"
+	case identity.ConfirmMTLS:
+		return "mtls"
+	default:
+		return "none"
 	}
 }
 

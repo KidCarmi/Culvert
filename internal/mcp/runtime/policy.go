@@ -142,7 +142,11 @@ func (p *pipeline) buildPolicyInput(req Request, msg jsonrpc.Message, ctx *ident
 		EvalTime:         now,
 		Principal:        policyPrincipal(ctx),
 		Client:           policyClient(ctx, capNS),
-		Session:          policy.Session{Fingerprint: digest(ctx.Fingerprint()), Assurance: policyAssurance(ctx.Assurance())},
+		Session: policy.Session{
+			Fingerprint:   digest(ctx.Fingerprint()),
+			Assurance:     policyAssurance(ctx.Assurance()),
+			SenderBinding: policySenderBinding(ctx.SenderConstraint()),
+		},
 	}
 	if ag, ok := ctx.Agent(); ok {
 		in.Agent = &policy.Agent{
@@ -207,7 +211,11 @@ func policyPrincipal(ctx *identity.ResolvedContext) policy.Principal {
 	p := policy.Principal{
 		Tenant:    string(ctx.TenantID()),
 		Assurance: policyAssurance(ctx.Assurance()),
-		Issuer:    ctx.Issuer(),
+		// OVN-05: the VERIFIED proof-of-possession binding, carried as its own fact
+		// rather than folded into Assurance. A rule that means "require a
+		// sender-constrained token" can now say so directly.
+		SenderBinding: policySenderBinding(ctx.SenderConstraint()),
+		Issuer:        ctx.Issuer(),
 	}
 	sub := ctx.Subject()
 	switch sub.Kind {
@@ -370,4 +378,18 @@ func firstNonEmpty(a, b string) string {
 		return a
 	}
 	return b
+}
+
+// policySenderBinding maps the resolved (already VERIFIED) sender constraint to
+// the policy vocabulary. Only a constraint authn actually verified reaches here —
+// ConfirmNone means no proof-of-possession was established, never "not checked".
+func policySenderBinding(sc identity.SenderConstraint) policy.SenderBinding {
+	switch sc.Method {
+	case identity.ConfirmDPoP:
+		return policy.SenderBindingDPoP
+	case identity.ConfirmMTLS:
+		return policy.SenderBindingMTLS
+	default:
+		return policy.SenderBindingNone
+	}
 }

@@ -163,7 +163,7 @@ func (e Event) validateFieldBounds() error {
 		e.SnapshotHash, e.Identity.Tenant, e.Identity.PrincipalID, e.Identity.PrincipalType,
 		e.Identity.AgentID, e.Identity.ClientID, e.Identity.ServerID, e.Identity.ToolName,
 		e.Identity.ToolFingerprint, e.Identity.ResourceRef, e.Identity.ResourceHash,
-		e.Identity.Assurance, e.Identity.SessionCorrelation,
+		e.Identity.Assurance, e.Identity.SenderBinding, e.Identity.SessionCorrelation,
 		e.Decision.Action, e.Decision.ReasonCode, e.Decision.MatchedRuleID,
 		e.Decision.DecisiveConditionID, e.Decision.Remediation, e.Decision.PolicySnapshotHash,
 		e.Decision.OperationClass, e.Decision.RiskClass, e.Decision.ExecutionState,
