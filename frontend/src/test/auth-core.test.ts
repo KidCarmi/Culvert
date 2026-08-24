@@ -32,6 +32,30 @@ const tls = { ui_tls_fallback: false, ui_tls_fallback_reason: "" };
 
 describe("setup/auth decoders", () => {
   it("decodes setup status incl. TLS fallback fields", () => {
+    // The pre-auth surfaces never carry ui_tls_fallback_reason (ui_auth.go
+    // jsonOKAuthStatus): its ABSENCE must be accepted and normalized to "".
+    // A reason present on this wire is a server-side regression — accept it
+    // for now (it decodes verbatim) but the assertion below pins the
+    // production shape (no key on the wire ⇒ "" in the decoded value).
+    expect(
+      decodeSetupStatus({
+        needsSetup: true,
+        ui_tls_fallback: true,
+      }),
+    ).toEqual({
+      needsSetup: true,
+      tlsFallback: true,
+      tlsFallbackReason: "",
+    });
+    // The FLAG is still required — an absent flag is a malformed response.
+    expect(() => decodeSetupStatus({ needsSetup: true })).toThrow(DecodeError);
+    expect(() => decodeSetupStatus({ needsSetup: "yes", ...tls })).toThrow(
+      DecodeError,
+    );
+  });
+
+  it("decodes a legacy setup response that still carries the reason", () => {
+    // Backward-compat: if a server does emit the field, we still consume it.
     expect(
       decodeSetupStatus({
         needsSetup: true,
@@ -43,10 +67,6 @@ describe("setup/auth decoders", () => {
       tlsFallback: true,
       tlsFallbackReason: "self-sign failed",
     });
-    expect(() => decodeSetupStatus({ needsSetup: "yes", ...tls })).toThrow(
-      DecodeError,
-    );
-    expect(() => decodeSetupStatus({ needsSetup: true })).toThrow(DecodeError); // TLS fields required
   });
 
   it("decodes logged-out and authenticated auth status", () => {
