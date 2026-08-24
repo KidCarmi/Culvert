@@ -245,7 +245,27 @@ func (s *socks5Server) serve() {
 			continue
 		}
 		if errors.Is(err, net.ErrClosed) {
-			// Stop closed the listener; expected stop signal.
+			// net.ErrClosed means the listener is gone, but it does NOT by
+			// itself mean this was a shutdown: Stop is only one of the ways a
+			// listener can end up closed. Ask whether Stop actually ran.
+			//
+			// The check is race-free in the direction that matters because
+			// Stop closes `stopping` BEFORE `ln.Close()`, so an in-progress
+			// shutdown is always visible here by the time Accept returns.
+			//
+			// Treating every ErrClosed as an expected stop would leave the one
+			// hole this whole change exists to close: the loop exits, nothing
+			// is recorded, and `/healthz` keeps saying `socks5: ready` with
+			// `culvert_socks5_listener_up 1` on a node whose SOCKS5 service is
+			// gone — PX-18 in a narrower costume. Raised by Codex review on
+			// PR #1208.
+			select {
+			case <-s.stopping:
+				return
+			default:
+			}
+			noteSOCKS5ListenerDown("listener_closed_unexpectedly")
+			logger.Printf("SOCKS5 accept: listener was closed without a shutdown request — SOCKS5 is unavailable until restart")
 			return
 		}
 		reason := socks5AcceptReason(err)

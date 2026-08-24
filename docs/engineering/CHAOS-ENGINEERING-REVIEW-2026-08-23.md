@@ -46,9 +46,9 @@ Three further defects came with it: one posture for two opposite faults
 (PX-17), no health surface of any kind (PX-18), and no panic guard on the loop
 (PX-19).
 
-All four are closed in this PR. Sixteen regression gates ship with it; the two
-that can be run against the pre-fix loop were verified failing, and a third was
-verified failing against a deliberately regressed form of the fix.
+All four are closed in this PR. Eighteen regression gates ship with it; the two
+that can be run against the pre-fix loop were verified failing, and two more
+were verified failing against deliberately regressed forms of the fix.
 
 ---
 
@@ -99,6 +99,27 @@ unqualified healthy verdict from every probe.
 
 **Failure mode.** Silent failure — the register's §1 theme.
 
+### RS-5 (PX-20) — Every `net.ErrClosed` was read as an expected shutdown
+
+*Raised by Codex review on PR #1208, against the first version of this fix.*
+
+**Behaviour as first written.** `net.ErrClosed` means the listener is gone. It
+does **not** by itself mean a shutdown was requested — `Stop` is only one of the
+ways a listener can end up closed. The loop treated the two as the same thing
+and returned silently, so any closure that did not come through `Stop` left the
+accept loop terminated with **every probe still green**: `socks5: ready`,
+`culvert_socks5_listener_up 1`, an `ok` contract row, a passing readiness row.
+
+That is precisely PX-18 — the defect this change exists to close — reintroduced
+in a narrower costume, and it is worth recording as its own row rather than
+folding into the fix, because it shows the failure mode is easy to reproduce
+even while deliberately fixing it.
+
+**Expected behavior.** Ask whether `Stop` actually ran. `Stop` closes its
+`stopping` channel *before* `ln.Close()`, so an in-progress shutdown is always
+visible by the time `Accept` returns — the check is race-free in the direction
+that matters, and errs toward silence rather than toward a false page.
+
 ### RS-4 (PX-19) — No panic guard on the accept loop
 
 **Current behavior (pre-fix).** `handleSOCKS5` carries `recoverGoroutine`, so a
@@ -117,6 +138,7 @@ level up.
 | RS-3 no health surface | Certain (structural) | Medium-High — a dead service reported healthy | **P1** |
 | RS-2 permanent error retried / port left bound | Low — needs a socket-level fault | Medium-High — clients hang, no fast failure | **P1** |
 | RS-4 unguarded loop panic | Low | High — whole-process kill | **P1** |
+| RS-5 ErrClosed always read as shutdown | Low | Medium-High — dead listener, every probe green | **P1** |
 
 ---
 
@@ -241,7 +263,7 @@ had already been written — the only integrity cost in this finding.
 
 ## 8. Required Tests
 
-`socks5_accept_chaos_test.go` — 16 gates, all green under `-race`:
+`socks5_accept_chaos_test.go` — 18 gates, all green under `-race`:
 
 | Gate | Proves |
 |---|---|
@@ -255,6 +277,8 @@ had already been written — the only integrity cost in this finding.
 | `TestChaos54_AlertDetailIsBoundedForDedup` | Reason cardinality stays bounded across 12 errnos plus a non-syscall error |
 | `TestChaos54_TransientErrorsAreRetriedNotFatal` | Availability half of the classification, including the unrecognised-error default |
 | `TestChaos54_UnrecoverableSocketStopsTheLoopLoudly` | RS-2: loop exits, listener closed, DOWN recorded, one alert, fail row, `/healthz down`, failing `/readyz` row |
+| `TestChaos54_ListenerClosedWithoutStopIsReportedDown` | RS-5: a listener closed outside the shutdown path is recorded DOWN, not treated as an expected stop |
+| `TestChaos54_OrdinaryStopIsNotReportedDown` | Control for RS-5: a normal shutdown records nothing and pages nobody |
 | `TestChaos54_StopIsPromptDuringAcceptBackoff` | Shutdown: worst of 4 trials at the backoff ceiling, bound 25 ms |
 | `TestChaos54_StopStaysIdempotent` | The `sync.Once` around the stopping channel |
 | `TestChaos54_HealthyListenerIsUnchanged` | Control: nothing recorded, nothing fired, everything reports ready |
@@ -266,11 +290,18 @@ had already been written — the only integrity cost in this finding.
 re-run: `TestChaos54_AcceptBackoffBoundsTheRetryRate` failed (8,003,943 attempts
 against a bound of 32) and `TestChaos54_UnrecoverableSocketStopsTheLoopLoudly`
 failed (`accept loop did not exit … it is spinning`).
-`TestChaos54_StopIsPromptDuringAcceptBackoff` was verified separately against a
-regressed form of the fix (the interruptible `select` replaced with a bare
-`time.Sleep`), which it caught. The remaining gates cover surfaces that did not
-exist before this change and so have no pre-fix form to fail against; each is
-paired with a control gate that fails if the surface stops reporting.
+
+Two more were verified against deliberately regressed forms of the *fix*:
+`TestChaos54_StopIsPromptDuringAcceptBackoff` against the interruptible
+`select` replaced with a bare `time.Sleep`, and
+`TestChaos54_ListenerClosedWithoutStopIsReportedDown` against the bare
+`if errors.Is(err, net.ErrClosed) { return }` the fix originally shipped with
+(`listener closed without a shutdown request was not recorded as down; every
+probe still reports a healthy node`), with its control passing throughout.
+
+The remaining gates cover surfaces that did not exist before this change and so
+have no pre-fix form to fail against; each is paired with a control gate that
+fails if the surface stops reporting.
 
 ---
 

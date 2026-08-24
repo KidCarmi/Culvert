@@ -502,6 +502,83 @@ func TestChaos54_UnrecoverableSocketStopsTheLoopLoudly(t *testing.T) {
 	}
 }
 
+// TestChaos54_ListenerClosedWithoutStopIsReportedDown pins the distinction
+// between "the listener is gone" and "we were asked to shut down".
+//
+// net.ErrClosed says only the first. Treating every ErrClosed as an expected
+// stop leaves exactly the hole this change exists to close: the loop exits,
+// nothing is recorded, and every probe keeps reporting a healthy node
+// (`socks5: ready`, `culvert_socks5_listener_up 1`) while the service is dead —
+// PX-18 in a narrower costume. Raised by Codex review on PR #1208.
+//
+// The paired control below proves the ordinary Stop path is unaffected, so a
+// passing gate cannot mean the loop simply reports DOWN on every exit.
+func TestChaos54_ListenerClosedWithoutStopIsReportedDown(t *testing.T) {
+	fired := socks5ChaosSetup(t)
+	noteSOCKS5Configured(1080)
+
+	ln := newFaultListener(acceptErr(syscall.EMFILE))
+	ln.quiet = true // block in Accept until something closes the listener
+	srv := newSOCKS5Server(ln)
+	srv.Start()
+
+	// Close the listener directly — NOT through Stop. This is the shape of any
+	// path that ends the listener without going through the shutdown sequence.
+	_ = ln.Close()
+
+	select {
+	case <-srv.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("accept loop did not exit after the listener was closed")
+	}
+
+	snap := socks5ListenerState()
+	if !snap.Down {
+		t.Fatal("listener closed without a shutdown request was not recorded as down; every probe still reports a healthy node")
+	}
+	if snap.DownReason != "listener_closed_unexpectedly" {
+		t.Errorf("down reason = %q, want %q", snap.DownReason, "listener_closed_unexpectedly")
+	}
+	if len(*fired) != 1 {
+		t.Errorf("unexpected listener closure fired %d alerts; want 1", len(*fired))
+	}
+	if socks5ListenerStatus() != "down" {
+		t.Errorf("/healthz socks5 = %q, want \"down\"", socks5ListenerStatus())
+	}
+	if body := renderMetrics(t); !strings.Contains(body, "culvert_socks5_listener_up 0") {
+		t.Error("a listener closed without a shutdown request still exports culvert_socks5_listener_up 1")
+	}
+}
+
+// TestChaos54_OrdinaryStopIsNotReportedDown is the control for the gate above.
+// A normal shutdown must stay silent: no DOWN record, no alert, no
+// `listener_up 0`, or every clean restart would page the operator.
+func TestChaos54_OrdinaryStopIsNotReportedDown(t *testing.T) {
+	fired := socks5ChaosSetup(t)
+	noteSOCKS5Configured(1080)
+
+	ln := newFaultListener(acceptErr(syscall.EMFILE))
+	ln.quiet = true
+	srv := newSOCKS5Server(ln)
+	srv.Start()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := srv.Stop(ctx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	if snap := socks5ListenerState(); snap.Down {
+		t.Errorf("an ordinary Stop recorded the listener as down (%q)", snap.DownReason)
+	}
+	if len(*fired) != 0 {
+		t.Errorf("an ordinary Stop fired %d alerts; want 0", len(*fired))
+	}
+	if socks5ListenerStatus() != "ready" {
+		t.Errorf("/healthz socks5 = %q after an ordinary Stop, want \"ready\"", socks5ListenerStatus())
+	}
+}
+
 // ── Shutdown stays prompt while backing off ──────────────────────────────────
 
 // TestChaos54_StopIsPromptDuringAcceptBackoff pins the shutdown half. The

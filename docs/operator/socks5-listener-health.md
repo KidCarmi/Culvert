@@ -133,10 +133,17 @@ the log line; it is kept out of the alert so webhook dedup works, and out of
 | `connection_aborted` | ECONNABORTED | yes |
 | `listener_socket_invalid` | EBADF, ENOTSOCK, EINVAL, EFAULT, ENOTCONN | **no** — loop stops |
 | `accept_error` | anything else | yes (fail-safe default) |
+| `listener_closed_unexpectedly` | — the listening socket was closed outside the shutdown path | **no** — loop stops |
+
+`listener_closed_unexpectedly` is not a kernel error: it means the accept loop
+found the listener already closed without a shutdown having been requested. It
+is reported DOWN rather than treated as a clean stop, so a dead listener can
+never leave every probe green. A normal shutdown produces no row, no alert and
+no `listener_up 0`.
 
 ---
 
 ## See also
 
 - `docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-23.md` — the full finding
-- `roadmap/CHAOS-ENGINEERING-REVIEW.md` §22, register rows PX-16 … PX-19
+- `roadmap/CHAOS-ENGINEERING-REVIEW.md` §22, register rows PX-16 … PX-20
