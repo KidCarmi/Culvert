@@ -430,8 +430,8 @@ func jitterDuration(d time.Duration, frac float64) time.Duration {
 		return d
 	}
 	span := float64(d) * frac
-	//nolint:gosec // G404: jitter is a load-spreading device, not a security primitive
-	out := time.Duration(float64(d) + (rand.Float64()*2-1)*span)
+	off := (rand.Float64()*2 - 1) * span // #nosec G404 -- fleet spread, not crypto
+	out := d + time.Duration(off)
 	if out < time.Millisecond {
 		out = time.Millisecond
 	}

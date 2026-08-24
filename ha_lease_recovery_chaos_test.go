@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -28,12 +29,30 @@ type outageProvider struct {
 
 	acquires atomic.Int64
 	reads    atomic.Int64
+
+	// callMu/calls record the ORDER of backend calls, so the read-before-
+	// acquire invariant can be asserted directly rather than inferred.
+	callMu sync.Mutex
+	calls  []string
+}
+
+func (o *outageProvider) note(op string) {
+	o.callMu.Lock()
+	o.calls = append(o.calls, op)
+	o.callMu.Unlock()
+}
+
+func (o *outageProvider) callOrder() []string {
+	o.callMu.Lock()
+	defer o.callMu.Unlock()
+	return append([]string(nil), o.calls...)
 }
 
 var errBackendDown = errors.New("halease: connection refused (simulated etcd outage)")
 
 func (o *outageProvider) Acquire(ctx context.Context, candidateID string) (bool, halease.Status, error) {
 	o.acquires.Add(1)
+	o.note("acquire")
 	if o.down.Load() {
 		return false, halease.Status{}, errBackendDown
 	}
@@ -49,6 +68,7 @@ func (o *outageProvider) Renew(ctx context.Context, holderID string, epoch int64
 
 func (o *outageProvider) Read(ctx context.Context) (halease.Status, error) {
 	o.reads.Add(1)
+	o.note("read")
 	if o.down.Load() {
 		return halease.Status{}, errBackendDown
 	}
@@ -645,5 +665,57 @@ func TestChaos55_ResumeDoesNotBlockBootOnALongOutage(t *testing.T) {
 	}
 	if haResumeUnreachableWait >= haResumeGhostWait {
 		t.Fatal("haResumeUnreachableWait must stay well below haResumeGhostWait — it sits on the boot path")
+	}
+}
+
+// ── The invariant that makes the recovery loop safe ─────────────────────────
+
+// READ BEFORE ACQUIRE. A denial alone cannot distinguish "the lease is free and
+// we lost a race" from "a peer took the fence while we were blind", and only the
+// second means this node's state may be stale. The loop therefore reads first,
+// and this pins the ordering directly rather than inferring it from an outcome.
+//
+// Without it, a future refactor could reorder the two calls, keep every other
+// gate green, and silently reintroduce the case where a node quietly waits for a
+// live leader to die and then takes over with state of unknown age.
+func TestChaos55_RecoveryReadsBeforeItAcquires(t *testing.T) {
+	tempHADir(t)
+	o := &outageProvider{Provider: halease.NewFake(10 * time.Second)}
+	o.down.Store(true)
+
+	h, cfg := resumingLeader(t, o, "cp-a")
+	h.ResumeAsLeader(cfg)
+	defer h.Stop()
+
+	// Everything up to here is the resume path; the recovery loop's calls start
+	// after it. Mark the boundary, then let the backend recover.
+	o.callMu.Lock()
+	boundary := len(o.calls)
+	o.callMu.Unlock()
+
+	o.down.Store(false)
+	if !haWaitFor(20*time.Second, func() bool {
+		return h.WriteAllowed() && !h.leaseRecoveryActive()
+	}) {
+		t.Fatal("recovery did not settle")
+	}
+
+	loopCalls := o.callOrder()[boundary:]
+	var sawRead bool
+	for i, op := range loopCalls {
+		switch op {
+		case "read":
+			sawRead = true
+		case "acquire":
+			if !sawRead {
+				t.Fatalf("recovery loop called Acquire at position %d with no preceding Read: %v\n"+
+					"the loop MUST read the fence before taking it — a denial alone cannot tell us "+
+					"whether a peer led while we were blind, and that decides whether recovering is safe",
+					i, loopCalls)
+			}
+		}
+	}
+	if !sawRead {
+		t.Fatalf("recovery loop made no backend Read at all: %v", loopCalls)
 	}
 }
