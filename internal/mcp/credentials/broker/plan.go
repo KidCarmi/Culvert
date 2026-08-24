@@ -45,12 +45,27 @@ type CredentialPlan struct {
 	profileRev   uint64
 	deadline     time.Time
 	tokenDigest  string // PR-3 one-way correlation digest ONLY
+	// principalID / principalKind are the AUTHENTICATED subject's stable id and
+	// type, carried so a durable credential event can attribute the materialization
+	// to the principal that caused it instead of substituting the plan id. They are
+	// non-secret identifiers, never credential material.
+	principalID   string
+	principalKind string
 }
 
 // Accessors (all non-secret).
 
 // PlanID returns the plan field (non-secret).
 func (p CredentialPlan) PlanID() string { return p.planID }
+
+// PrincipalID returns the AUTHENTICATED subject's stable id (non-secret). It is
+// the plan's attribution anchor: a durable credential event must name the
+// principal that caused a materialization, not the plan that describes it.
+func (p CredentialPlan) PrincipalID() string { return p.principalID }
+
+// PrincipalKind returns the authenticated subject's type ("human"/"workload"), or
+// "" when the identity asserted none. It is never inferred.
+func (p CredentialPlan) PrincipalKind() string { return p.principalKind }
 
 // ProfileID returns the plan field (non-secret).
 func (p CredentialPlan) ProfileID() profile.ID { return p.profileID }
@@ -159,6 +174,7 @@ func (b *Broker) plan(in PlanInput, planID string) (CredentialPlan, error) {
 		kind: prof.Kind(), powerCeiling: planPowerCeiling(prof, in.Operation),
 		profileRev: prof.Revision(), deadline: b.clock().Add(prof.MaxTTL()),
 		tokenDigest: id.TokenDigest(),
+		principalID: subjectRefID(id), principalKind: subjectKindLabel(id),
 	}
 	if in.Tool != nil {
 		elig, err := b.resolveToolBinding(prof, in.Tool)
@@ -251,4 +267,40 @@ func (b *Broker) resolveToolBinding(prof profile.Profile, tb *profile.ToolBindin
 		return 0, planErr(mcperr.ReasonCredentialScopeMismatch, "tool fingerprint does not match the profile binding")
 	}
 	return rec.Eligibility, nil
+}
+
+// subjectRefID extracts the resolved subject's stable id. It never returns a token
+// or any credential material.
+func subjectRefID(id *identity.ResolvedContext) string {
+	if id == nil {
+		return ""
+	}
+	sub := id.Subject()
+	switch sub.Kind {
+	case identity.SubjectHuman:
+		if sub.Human != nil {
+			return sub.Human.Subject
+		}
+	case identity.SubjectWorkload:
+		if sub.Workload != nil {
+			return sub.Workload.Service
+		}
+	}
+	return ""
+}
+
+// subjectKindLabel maps the resolved subject to its event-model type label. An
+// unset kind yields "" — an event must not invent a principal type.
+func subjectKindLabel(id *identity.ResolvedContext) string {
+	if id == nil {
+		return ""
+	}
+	switch id.Subject().Kind {
+	case identity.SubjectHuman:
+		return "human"
+	case identity.SubjectWorkload:
+		return "workload"
+	default:
+		return ""
+	}
 }
