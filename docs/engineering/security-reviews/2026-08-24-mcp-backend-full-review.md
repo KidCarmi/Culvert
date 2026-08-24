@@ -249,6 +249,12 @@ of whether the server exists, with no registry lookup, no body read and no sessi
 churn — and with the same counter, denial-lane routing and reason the later stage
 produced.
 
+One deliberate consequence: the observe record for a credential-less rejection no
+longer carries `ServerID`, because the registry lookup that used to populate it no
+longer runs. That is the correct direction — an unauthenticated probe should not
+be attributed to a named server — but it is a change in the observation stream and
+is recorded here rather than left to be discovered.
+
 **Residual.** A caller presenting a *syntactically valid but invalid* token still
 reaches registry resolution and therefore still distinguishes known from unknown
 server ids. Fully closing it means authenticating before resolving the server,
@@ -413,17 +419,49 @@ Recorded so the next reviewer knows what was covered, not just what broke.
 | `go vet ./...` | **PASS** |
 | `go test ./internal/mcp/...` | **PASS** |
 | `go test -race -count=1 ./internal/mcp/...` | **PASS** |
-| `go test . -count=1` (root, incl. all MCP integration/e2e) | **PASS** |
-| `go test -race` root package | see §6.1 |
-| `golangci-lint` | **NOT AVAILABLE** in this environment |
-| `govulncheck` | **NOT AVAILABLE** in this environment |
-| `gitleaks` / `gosec` / `trivy` | **NOT AVAILABLE** in this environment |
-| Culvert binary build | **PASS** |
+| `go test -count=1 ./...` (whole tree, incl. all MCP integration/e2e) | **PASS** — exit 0, zero FAIL lines |
+| `go test -count=2 -shuffle=on ./...` (determinism gate) | **PASS** — exit 0 |
+| `go test -race -count=1 ./internal/mcp/... .` | **PASS** — exit 0, no data races |
+| `gofmt -l` (excluding `frontend/`) | **PASS** — clean |
+| Culvert binary build (`go build -o culvert .`) | **PASS** — 53 MB |
+| `golangci-lint` | **NOT AVAILABLE — installed but unusable.** The binary at `/usr/local/bin/golangci-lint` is built with Go 1.25; `go.mod` requires Go 1.26, so it panics during type-checking (`package requires newer Go version go1.26 (application built with go1.25)`) before emitting a single finding. This is a toolchain-version incompatibility in this environment, not a clean run — **no lint result was obtained**. CI's `pr-fast-gate` lane runs the diff-scoped lint on a matching toolchain and remains the authority. |
+| `govulncheck` | **NOT AVAILABLE** — not installed |
+| `gosec` / `gitleaks` / `trivy` / CodeQL | **NOT AVAILABLE** — not installed |
+| Fuzz corpora (`internal/mcp/{runtime,jsonrpc,authn,cpdp}` `Fuzz*`) | Executed as part of the standard suite (seed corpus only); no extended `-fuzz` run was performed |
 
-No existing test was weakened, skipped, renamed or deleted. Two existing tests
-were **updated, not relaxed**: `mcperr_test.go` pins the new reason code (its
-exhaustiveness wall did its job), and `mcp_policy_test.go`'s seam assertion follows
-the provider's field rename.
+### 6.1 A verification mistake worth recording
+
+The first full-tree run in this review was reported to itself as green on the
+strength of `go test ./... | grep -v ^ok | head -20`. That pipeline reports
+**grep's** exit code, and `head -20` truncated the output before any FAIL line,
+so a real failure was invisible. The `-shuffle=on` determinism run surfaced it.
+Every result in the table above was re-established by capturing `go test`'s own
+exit code to a file and grepping the whole file. The lesson generalizes: a
+verification command whose exit status comes from the last stage of a pipe is not
+a gate.
+
+### 6.2 Tests changed
+
+No existing test was weakened, skipped, renamed or deleted. Three existing tests
+were **updated, not relaxed**:
+
+- `mcperr_test.go` — pins the new reason code. Its exhaustiveness wall did exactly
+  its job and failed until the code was pinned.
+- `mcp_policy_test.go` — the seam assertion follows the provider's field rename.
+- `mcp_inventory_test.go:TestInventory_SeededRequestReachesAuth` — this one is the
+  interesting case. It **pinned the MCP-06 oracle as intended behaviour**: a
+  credential-less probe was asserted to receive 404 for an unseeded server and 401
+  for a seeded one. The fix makes both 401, so the test failed — correctly. It was
+  **strengthened, not relaxed**: it now asserts the two responses are *identical*
+  (the anti-oracle property), and the registry's fail-closed behaviour it
+  originally cared about is re-asserted one layer in, where it is still observable
+  — with a syntactically well-formed but invalid credential, an unseeded server is
+  still 404 and a seeded one still reaches auth and gets 401.
+
+  This is worth flagging to the MCP owners: the oracle was not an oversight, it
+  was a pinned contract. If the disclosure was a deliberate accepted risk, that
+  decision is not recorded anywhere in `docs/design/mcp/` — and the test now
+  encodes the opposite contract.
 
 **Mutation verification.** Every new security guard was mutation-tested — the
 guard was neutered, the test suite was confirmed to fail, and the guard restored:

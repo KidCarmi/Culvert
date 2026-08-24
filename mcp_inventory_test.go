@@ -342,8 +342,11 @@ func TestInventory_SeededRequestReachesAuth(t *testing.T) {
 		t.Fatal("seeded 401 must carry the RFC 9728 challenge")
 	}
 
-	// Unseeded server: still fails closed at registry resolution (404), never a default
-	// server, never a fabricated success.
+	// SEC-MCP-06. An unseeded server must NOT be distinguishable from a seeded one by
+	// a CREDENTIAL-LESS caller: registry resolution now runs after the credential
+	// presence check, so both answer 401. Before that ordering fix this request
+	// answered 404 while the seeded one answered 401 — an unauthenticated oracle
+	// enumerating a tenant's registered MCP servers.
 	unknown := mcpObserveReq(t, http.MethodPost, base+"/mcp/gateway/no-such-server", initBody)
 	unknown.Host = "gw.test"
 	ru, err := cli.Do(unknown)
@@ -352,8 +355,33 @@ func TestInventory_SeededRequestReachesAuth(t *testing.T) {
 	}
 	ub, _ := io.ReadAll(ru.Body)
 	_ = ru.Body.Close()
-	if ru.StatusCode != http.StatusNotFound {
-		t.Fatalf("unknown server status = %d body=%s, want 404", ru.StatusCode, ub)
+	if ru.StatusCode != rs.StatusCode {
+		t.Fatalf("unauthenticated server-existence oracle: unknown=%d body=%s, seeded=%d",
+			ru.StatusCode, ub, rs.StatusCode)
+	}
+
+	// The registry itself still fails CLOSED — never a default server, never a
+	// fabricated success. That is observable one layer in, to a caller that presents
+	// a (syntactically well-formed but invalid) credential and so passes the
+	// presence check: the seeded server reaches auth and is rejected there, while
+	// the unseeded one is still refused at registry resolution.
+	withCred := func(path string) int {
+		t.Helper()
+		r := mcpObserveReq(t, http.MethodPost, base+path, initBody)
+		r.Host = "gw.test"
+		r.Header.Set("Authorization", "Bearer not-a-real-token")
+		resp, derr := cli.Do(r)
+		if derr != nil {
+			t.Fatalf("request %s: %v", path, derr)
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+	if got := withCred("/mcp/gateway/no-such-server"); got != http.StatusNotFound {
+		t.Fatalf("unseeded server with a credential = %d, want 404 (registry fails closed)", got)
+	}
+	if got := withCred("/mcp/gateway/srv-1"); got != http.StatusUnauthorized {
+		t.Fatalf("seeded server with a bad credential = %d, want 401 (past registry, rejected at auth)", got)
 	}
 }
 

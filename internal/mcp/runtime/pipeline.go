@@ -406,9 +406,17 @@ func wireVersion(req Request) (protocol.Version, bool) {
 }
 
 // normalizeForVersion runs the message through the adapter for its wire version,
-// yielding the kernel's single version-agnostic representation. A request whose
-// declared version has no adapter is left untouched for resolveSession to reject
-// with its specific status; a message the adapter refuses is a 400.
+// yielding the kernel's single version-agnostic representation. A message the
+// adapter refuses is a 400.
+//
+// A request whose DECLARED version is unsupported is left UN-normalized and
+// handed on, because resolveSession owns the specific unsupported-version
+// rejection and normalizing first would launder the revision. That fall-through
+// is reachable for exactly one shape today: an `initialize` whose header names an
+// unsupported revision while its BODY requests a supported one — initialize
+// negotiates from the body, so the header is advisory there. It is harmless while
+// the V1 adapters are the identity. A future V2 adapter MUST handle that shape
+// explicitly rather than inheriting this fall-through.
 func (p *pipeline) normalizeForVersion(req Request, msg jsonrpc.Message) (jsonrpc.Message, error) {
 	v, ok := wireVersion(req)
 	if !ok {
