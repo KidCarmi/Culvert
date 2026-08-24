@@ -1,5 +1,5 @@
 # ── Build stage ───────────────────────────────────────────────────────────────
-FROM golang:1.26-alpine AS builder
+FROM golang:1.27-alpine AS builder
 
 WORKDIR /app
 RUN apk add --no-cache git
@@ -42,7 +42,7 @@ RUN if [ -z "$VERSION" ] && [ -d .git ]; then \
 # release-asset convention (vX.Y.Z) so the quick-start installer's
 # upgrade/idempotence check (`culvert-maint --version` vs target) works for
 # image-bundled installs exactly like signed-release downloads.
-FROM golang:1.26-alpine AS maintbuilder
+FROM golang:1.27-alpine AS maintbuilder
 
 WORKDIR /src
 COPY cmd/culvert-maint/go.mod cmd/culvert-maint/go.sum ./
