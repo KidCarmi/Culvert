@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"strings"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/inspection/destination"
@@ -130,7 +131,13 @@ func (c *Client) httpClientFor(target Target, canon destination.Canonical, pin d
 		ForceAttemptHTTP2:     false,
 	}
 	maxRedirects := c.cfg.Limits.MaxRedirects()
-	approvedHost := strings.ToLower(canon.Host)
+	// The approved server's identity is host AND port: Canonical.Host is the bare
+	// hostname (the port is a separate field), so comparing only the hostname would
+	// admit a redirect to a different port on the same name. The dial is pinned to
+	// the original port regardless, so such a redirect would silently reach a
+	// different endpoint than the one it named — a mismatch between what the request
+	// says and where it goes (OVN-04).
+	approvedHost, approvedPort := strings.ToLower(canon.Host), canon.Port
 	return &http.Client{
 		Transport: tr,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -143,7 +150,10 @@ func (c *Client) httpClientFor(target Target, canon destination.Canonical, pin d
 			// next. The pinned dialer bounds the damage, but "bounded two layers down"
 			// is not "refused" — and a redirect to a foreign host would still have the
 			// gateway speak that host's name on a connection it did not approve.
-			if req == nil || req.URL == nil || strings.ToLower(req.URL.Hostname()) != approvedHost {
+			if req == nil || req.URL == nil {
+				return mcperr.New(mcperr.ReasonUpstreamTLSIdentity, "upstreamclient", "redirect leaves the approved server identity")
+			}
+			if strings.ToLower(req.URL.Hostname()) != approvedHost || redirectPort(req.URL) != approvedPort {
 				return mcperr.New(mcperr.ReasonUpstreamTLSIdentity, "upstreamclient", "redirect leaves the approved server identity")
 			}
 			return nil
@@ -258,3 +268,16 @@ func classifyTransportError(err error) error {
 
 // bytesReader wraps a byte slice as a fresh io.Reader for each attempt.
 func bytesReader(b []byte) io.Reader { return bytes.NewReader(b) }
+
+// redirectPort returns a redirect target's effective port, defaulting to the
+// scheme port when none is given, so the comparison against the approved server's
+// canonical port is like-for-like (Canonical.Port is always explicit).
+func redirectPort(u *url.URL) string {
+	if p := u.Port(); p != "" {
+		return p
+	}
+	if strings.EqualFold(u.Scheme, "http") {
+		return "80"
+	}
+	return "443"
+}

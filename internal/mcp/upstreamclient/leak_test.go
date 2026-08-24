@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -150,4 +151,57 @@ func TestTransport_SameHostRedirectIsStillAllowed(t *testing.T) {
 	if hits.Load() < 2 {
 		t.Fatalf("redirect was not followed (hits=%d)", hits.Load())
 	}
+}
+
+// OVN-04. The approved server's identity is host AND port. Canonical.Host is the
+// bare hostname (the port is a separate field), so a host-only comparison admitted
+// a redirect to a different port on the same name — and because the dialer is
+// pinned to the original port, that request would silently reach a DIFFERENT
+// endpoint than the one it named.
+func TestTransport_RedirectToAnotherPortOnTheSameHostIsRefused(t *testing.T) {
+	c, tgt, _, done := pinnedTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		host := r.Host
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			host = h
+		}
+		http.Redirect(w, r, "https://"+net.JoinHostPort(host, "9443")+"/mcp", http.StatusTemporaryRedirect)
+	})
+	defer done()
+
+	lim, err := NewLimits(LimitConfig{MaxRedirects: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.cfg.Limits = lim
+
+	_, err = c.Call(context.Background(), tgt, "tools/list", nil, CallOptions{})
+	if err == nil {
+		t.Fatal("a redirect to a different port must be refused")
+	}
+	if r := mcperr.ReasonOf(err); r != mcperr.ReasonUpstreamTLSIdentity {
+		t.Fatalf("reason = %v, want upstream_tls_identity", r)
+	}
+}
+
+// The port comparison must be like-for-like: an https redirect that omits the port
+// means 443, and must not be refused merely for being written without one.
+func TestTransport_RedirectPortDefaultsAreNormalized(t *testing.T) {
+	if got := redirectPort(mustURL(t, "https://h/x")); got != "443" {
+		t.Fatalf("implicit https port = %q, want 443", got)
+	}
+	if got := redirectPort(mustURL(t, "http://h/x")); got != "80" {
+		t.Fatalf("implicit http port = %q, want 80", got)
+	}
+	if got := redirectPort(mustURL(t, "https://h:8443/x")); got != "8443" {
+		t.Fatalf("explicit port = %q, want 8443", got)
+	}
+}
+
+func mustURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse %q: %v", raw, err)
+	}
+	return u
 }
