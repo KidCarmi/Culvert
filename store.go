@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -646,9 +647,20 @@ func (c *Config) setDefaultAuthOutcomeChecked(outcome AuthOutcome) error {
 	}
 	// Persist so the setting survives restarts.
 	if err := c.SaveUIUsersFile(); err != nil {
-		c.mu.Lock()
-		c.defaultAuthOutcome = previous
-		c.mu.Unlock()
+		// fileutil.ErrReplacedNotSynced means the rename already landed the
+		// new content on disk — only the best-effort parent-directory sync
+		// afterward failed. Its contract explicitly forbids a compensating
+		// rollback on this error: restoring `previous` here would leave
+		// memory contradicting the file that every reader (including a
+		// restart) now sees, which is the same "reopens the wizard" hazard
+		// this function exists to close, just approached from the opposite
+		// direction. Still report the error — the write's durability across
+		// an immediate crash isn't guaranteed — but keep the new value.
+		if !errors.Is(err, fileutil.ErrReplacedNotSynced) {
+			c.mu.Lock()
+			c.defaultAuthOutcome = previous
+			c.mu.Unlock()
+		}
 		return err
 	}
 	return nil
