@@ -54,19 +54,31 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 		return err
 	}
 
+	// SEC-MCP-09. The DECISION event commits durably BEFORE anything that can have a
+	// side effect, on BOTH paths and through the SAME primitive. Previously only the
+	// no-credential branch went through CommitThenAct; the credential branch relied
+	// solely on the broker's own CREDENTIAL_SELECT gate, so an executed
+	// write/destructive tools/call with a credential profile — the ordinary
+	// enterprise shape — left NO critical decision event on record naming the policy
+	// action, matched rule, snapshot hash or action class. A commit failure now
+	// blocks the side effect identically on both paths, and the broker's
+	// pre-materialization gate still adds its own commit before any provider or
+	// cache is touched (defense in depth, not a substitute).
 	profileRef := in.Decision.Obligations.CredentialProfile
-	if e.cfg.Broker != nil && profileRef != "" {
-		if out, blocked := e.materializeAndCall(ctx, in, profileRef, callUpstream); blocked {
-			return out
-		}
-	} else {
-		// No credential profile: still commit the decision durably BEFORE the upstream
-		// call, so a commit failure prevents the side effect.
-		if err := e.cfg.Events.CommitThenAct(decisionFacts(in), func(spool.CommitReceipt) error {
+	useBroker := e.cfg.Broker != nil && profileRef != ""
+	var blockedOut runtime.ExecOutput
+	var didBlock bool
+	if err := e.cfg.Events.CommitThenAct(decisionFacts(in), func(spool.CommitReceipt) error {
+		if !useBroker {
 			return callUpstream("")
-		}); err != nil {
-			return e.blocked(in, mcperr.ReasonOf(err), false)
 		}
+		blockedOut, didBlock = e.materializeAndCall(ctx, in, profileRef, callUpstream)
+		return nil
+	}); err != nil {
+		return e.blocked(in, mcperr.ReasonOf(err), false)
+	}
+	if didBlock {
+		return blockedOut
 	}
 
 	if upErr != nil {
@@ -215,18 +227,52 @@ func toolRef(in runtime.ExecInput) inspection.ToolRef {
 // Criticality and action class are coupled so the fact passes model validation.
 func decisionFacts(in runtime.ExecInput) events.DecisionFacts {
 	crit, ac := criticalityFor(in.Input.Operation.Class)
-	return events.DecisionFacts{
+	f := events.DecisionFacts{
 		Capability:  model.CapGateway,
 		Criticality: crit,
 		ActionClass: ac,
 		Identity: model.IdentityEvidence{
-			Tenant: in.Input.Principal.Tenant, PrincipalID: in.Input.Principal.SubjectID, PrincipalType: "workload",
+			Tenant:      in.Input.Principal.Tenant,
+			PrincipalID: in.Input.Principal.SubjectID,
+			// SEC-MCP-08. Mirror the AUTHENTICATED subject kind. This was hard-coded
+			// "workload" while the runtime models token subjects as humans, so every
+			// execution event misattributed a human actor as a workload — an error no
+			// downstream consumer of the archive can detect or correct.
+			PrincipalType: subjectKindString(in.Input.Principal.Kind),
+			ClientID:      in.Input.Client.ClientID,
 		},
 		Decision: model.DecisionEvidence{
 			Action: in.Decision.Action.String(), ReasonCode: string(in.Decision.Reason),
+			MatchedRuleID:  string(in.Decision.MatchedRule),
+			PolicyRevision: uint64(in.Decision.PolicyRevision),
+			OperationClass: in.Input.Operation.Class.String(),
 			ExecutionState: "executing",
+
+			PolicySnapshotHash: in.SnapshotHash,
 		},
 		SnapshotHash: in.SnapshotHash,
+	}
+	if in.Input.Server != nil {
+		f.Identity.ServerID = in.Input.Server.ServerID
+	}
+	if in.Input.Tool != nil {
+		f.Identity.ToolName = in.Input.Tool.Name
+		f.Identity.ToolFingerprint = in.Input.Tool.FingerprintHash
+	}
+	return f
+}
+
+// subjectKindString maps the policy subject kind to the event-model principal type.
+// The empty string for an unset kind is deliberate: an event must not invent a
+// principal type it was never told.
+func subjectKindString(k policy.SubjectKind) string {
+	switch k {
+	case policy.SubjectHuman:
+		return "human"
+	case policy.SubjectWorkload:
+		return "workload"
+	default:
+		return ""
 	}
 }
 
@@ -234,8 +280,12 @@ func decisionFacts(in runtime.ExecInput) events.DecisionFacts {
 // successful execution (best-effort; never blocks the response).
 func outcomeFacts(in runtime.ExecInput) events.DecisionFacts {
 	f := decisionFacts(in)
+	// The outcome is ORDINARY criticality by design — it is emitted after the side
+	// effect and must never block the response. Its ACTION CLASS, however, must stay
+	// the real one: relabelling every outcome as a read (the pre-fix behavior) made
+	// the archive's record of what a destructive call DID contradict its own
+	// decision event.
 	f.Criticality = model.CritOrdinary
-	f.ActionClass = model.ActionClassRead
 	f.Decision.ExecutionState = "executed"
 	return f
 }
