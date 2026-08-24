@@ -1769,6 +1769,8 @@ func apiNetworkSettings(w http.ResponseWriter, r *http.Request) {
 			"trusted_proxy_cidrs":     ListTrustedProxyCIDRs(),
 			"ui_tls_fallback":         uiTLSFallbackActive,
 			"ui_tls_fallback_reason":  uiTLSFallbackReason,
+			"ui_custom_cert_uploaded": customUITLSFilesPresent(),
+			"ui_custom_cert_active":   uiCustomTLSActive,
 		})
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {

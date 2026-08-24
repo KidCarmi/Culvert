@@ -336,14 +336,34 @@ func apiCertsUpload(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, map[string]any{"status": "ok", "target": "mitm", "persisted": true})
 		return
 	}
-	// UI cert — validate only; actual rotation requires restart.
+	// UI cert — validate, then PERSIST it (CHAOS-50 durability idiom) so a
+	// restart genuinely activates it instead of silently discarding the
+	// upload while telling the admin "restart required".
 	if _, err := certMgr.ParseTLSPair(certPEM, keyPEM); err != nil {
 		logger.Printf("certs upload UI: %v", err)
 		http.Error(w, "invalid cert/key pair", http.StatusBadRequest)
 		return
 	}
+	if err := persistCustomUITLS(certPEM, keyPEM); err != nil {
+		logger.Printf("certs upload UI: persist failed: %v", err)
+		auditEvent(r, "certs.upload_ui", "custom UI cert", "NOT PERSISTED — validation only")
+		jsonOK(w, map[string]any{
+			"status":    "ok",
+			"target":    "ui",
+			"persisted": false,
+			"warning": "The uploaded certificate is valid but could not be saved — it will NOT " +
+				"be active after a restart, and the current UI certificate is unchanged. Restore " +
+				"write access to the data directory, then upload again.",
+		})
+		return
+	}
 	auditEvent(r, "certs.upload_ui", "custom UI cert (requires restart)", "")
-	jsonOK(w, map[string]string{"status": "ok", "target": "ui", "note": "restart required to activate"})
+	jsonOK(w, map[string]any{
+		"status":    "ok",
+		"target":    "ui",
+		"persisted": true,
+		"note":      "Saved. Restart the proxy to activate this certificate.",
+	})
 }
 
 // apiContentScan manages DPI signature patterns.

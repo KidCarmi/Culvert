@@ -1863,6 +1863,14 @@
             "nullable": true,
             "type": "array"
           },
+          "ui_custom_cert_active": {
+            "description": "True when the running UI server was started using the uploaded custom certificate (i.e. it is already live, not just saved pending a restart).",
+            "type": "boolean"
+          },
+          "ui_custom_cert_uploaded": {
+            "description": "True when a custom UI certificate uploaded via POST /api/certs/upload (target=ui) is saved to disk and will be used on the next restart.",
+            "type": "boolean"
+          },
           "ui_sans": {
             "items": {
               "type": "string"

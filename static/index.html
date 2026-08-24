@@ -2443,10 +2443,11 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
               <textarea class="input" id="cert-pem" rows="5" style="width:100%;font-family:monospace;font-size:.75rem;resize:vertical" placeholder="-----BEGIN CERTIFICATE-----&#10;...&#10;-----END CERTIFICATE-----"></textarea>
             </div>
             <div style="margin-bottom:14px">
-              <label class="form-label">Private Key (PEM) <span style="color:#ef4444;font-weight:400">- never logged; persisted to the CA bundle path for the MITM target (see confirmation after upload), validate-only (never persisted) for the UI target</span></label>
+              <label class="form-label">Private Key (PEM) <span style="color:#ef4444;font-weight:400">- never logged; persisted to the CA bundle path for the MITM target, or to the data directory for the UI target (see confirmation after upload); the UI target requires a restart to take effect</span></label>
               <textarea class="input" id="cert-key" rows="5" style="width:100%;font-family:monospace;font-size:.75rem;resize:vertical" placeholder="-----BEGIN EC PRIVATE KEY-----&#10;...&#10;-----END EC PRIVATE KEY-----"></textarea>
             </div>
             <button class="btn" data-click="uploadCustomCert"><svg class="ico" aria-hidden="true"><use href="#i-upload"/></svg> Upload & Activate</button>
+            <div id="ui-cert-status" style="margin-top:10px;font-size:.78rem;color:var(--muted)"></div>
           </div>
         </div>
 
@@ -13303,11 +13304,34 @@ async function uploadCustomCert() {
     const resp = await fetch('/api/certs/upload', { method: 'POST', body: fd });
     if (!resp.ok) { const t = await resp.text(); throw new Error(t); }
     const d = await resp.json();
-    toast(d.note ? d.note : 'Certificate uploaded & activated', 'success');
+    // persisted:false means the upload was validated but NOT saved — the
+    // generic success toast would be a false "it worked" signal, so surface
+    // the server's own warning instead of guessing.
+    if (d.persisted === false) {
+      toast(d.warning || 'Uploaded but not saved — see server log', 'error');
+    } else {
+      toast(d.note ? d.note : 'Certificate uploaded & activated', 'success');
+    }
     document.getElementById('cert-pem').value = '';
     document.getElementById('cert-key').value = '';
     if (target === 'mitm') loadCACertInfo();
+    if (target === 'ui') loadUICertStatus();
   } catch(e) { toast('Upload failed: ' + e.message, 'error'); }
+}
+
+// Surfaces whether a GUI-uploaded UI certificate is on file and whether the
+// running server is actually using it, so "restart required to activate"
+// (above) is something the admin can verify instead of taking on faith.
+async function loadUICertStatus() {
+  const el = document.getElementById('ui-cert-status');
+  if (!el) return;
+  try {
+    const n = await api('/api/settings/network');
+    if (!n.ui_custom_cert_uploaded) { el.textContent = ''; return; }
+    el.textContent = n.ui_custom_cert_active
+      ? 'Custom certificate uploaded and active.'
+      : 'Custom certificate saved — restart the proxy to activate it.';
+  } catch(e) { el.textContent = ''; }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -13389,7 +13413,7 @@ document.querySelectorAll('.nav-item').forEach(el => {
     if (el.dataset.view === 'rewrite')       fetchRewrite();
     if (el.dataset.view === 'dashboard')     { fetchTopHosts(); fetchDashboardHealth(); fetchDashboardThreats(); fetchTopRules(); }
     if (el.dataset.view === 'policy')        { fetchPolicy(); loadDefaultAction(); loadPolicyProviderOptions(); }
-    if (el.dataset.view === 'certificates')  { loadCACertInfo(); loadSSLBypass(); }
+    if (el.dataset.view === 'certificates')  { loadCACertInfo(); loadSSLBypass(); loadUICertStatus(); }
     if (el.dataset.view === 'idproviders')   loadIdPList();
     if (el.dataset.view === 'pac')           loadPACConfig();
     if (el.dataset.view === 'users')         { fetchUsers(); fetchLockouts(); }
