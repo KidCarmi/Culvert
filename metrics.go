@@ -954,6 +954,97 @@ culvert_socks5_accept_backoff_seconds %g
 		)
 	}
 
+	// RISK-027: MCP Agent Security Gateway capability health. Emitted ONLY on a
+	// node that requested MCP — `culvert_mcp_gateway_up 0` on a node that never had
+	// MCP is indistinguishable from a dead listener, and the paging rule is `== 0`
+	// (the socks5 rule, applied here). Every value is a plain total or a 0/1 gauge:
+	// /metrics is unauthenticated on the proxy port, so no tenant, server id, path,
+	// principal, policy content or bind address may appear, and nothing here is a
+	// label.
+	if m := mcpHealthState(); m.Configured {
+		_, _ = fmt.Fprintf(w, `# HELP culvert_mcp_gateway_up 1 while the MCP gateway listener is accepting requests; 0 while it is not
+# TYPE culvert_mcp_gateway_up gauge
+culvert_mcp_gateway_up %d
+
+# HELP culvert_mcp_gateway_faulted 1 while MCP enablement was requested but the capability is not serving (invalid, degraded or stopped)
+# TYPE culvert_mcp_gateway_faulted gauge
+culvert_mcp_gateway_faulted %d
+
+# HELP culvert_mcp_requests_total MCP gateway requests received since startup
+# TYPE culvert_mcp_requests_total counter
+culvert_mcp_requests_total %d
+
+# HELP culvert_mcp_requests_rejected_total MCP gateway requests rejected since startup
+# TYPE culvert_mcp_requests_rejected_total counter
+culvert_mcp_requests_rejected_total %d
+
+# HELP culvert_mcp_auth_failures_total MCP gateway authentication failures since startup
+# TYPE culvert_mcp_auth_failures_total counter
+culvert_mcp_auth_failures_total %d
+
+# HELP culvert_mcp_host_origin_failures_total MCP gateway Host/Origin rejections since startup (DNS-rebinding / cross-origin defense)
+# TYPE culvert_mcp_host_origin_failures_total counter
+culvert_mcp_host_origin_failures_total %d
+
+# HELP culvert_mcp_admission_rejected_total MCP gateway requests shed by admission since startup
+# TYPE culvert_mcp_admission_rejected_total counter
+culvert_mcp_admission_rejected_total %d
+
+# HELP culvert_mcp_request_timeouts_total MCP gateway requests that exhausted their deadline since startup
+# TYPE culvert_mcp_request_timeouts_total counter
+culvert_mcp_request_timeouts_total %d
+
+# HELP culvert_mcp_observe_drops_total MCP gateway observation records dropped by the bounded sink since startup
+# TYPE culvert_mcp_observe_drops_total counter
+culvert_mcp_observe_drops_total %d
+
+# HELP culvert_mcp_active_sessions MCP gateway live protocol sessions
+# TYPE culvert_mcp_active_sessions gauge
+culvert_mcp_active_sessions %d
+
+# HELP culvert_mcp_requests_in_flight MCP gateway requests currently being served
+# TYPE culvert_mcp_requests_in_flight gauge
+culvert_mcp_requests_in_flight %d
+
+# HELP culvert_mcp_requests_queued MCP gateway requests admitted and waiting for a worker
+# TYPE culvert_mcp_requests_queued gauge
+culvert_mcp_requests_queued %d
+
+# HELP culvert_mcp_policy_ready 1 while a node-local MCP policy snapshot is loaded and evaluable
+# TYPE culvert_mcp_policy_ready gauge
+culvert_mcp_policy_ready %d
+
+# HELP culvert_mcp_inventory_ready 1 while an MCP server/tool inventory is published
+# TYPE culvert_mcp_inventory_ready gauge
+culvert_mcp_inventory_ready %d
+
+# HELP culvert_mcp_telemetry_composed 1 while the MCP durable-event telemetry runtime is composed. Distinct from the labelled culvert_mcp_telemetry_ready{capability=...} series, which reports per-capability export readiness
+# TYPE culvert_mcp_telemetry_composed gauge
+culvert_mcp_telemetry_composed %d
+
+# HELP culvert_mcp_distribution_composed 1 while a signed CP/DP MCP distribution applier is composed
+# TYPE culvert_mcp_distribution_composed gauge
+culvert_mcp_distribution_composed %d
+`,
+			boolGauge(m.ListenerReady),
+			boolGauge(m.Faulted()),
+			m.RequestsTotal,
+			m.RequestsRejected,
+			m.AuthFailures,
+			m.HostOriginFailures,
+			m.AdmissionRejected,
+			m.Timeouts,
+			m.ObserveDrops,
+			m.ActiveSessions,
+			m.InFlight,
+			m.Queued,
+			boolGauge(m.PolicyState == "loaded"),
+			boolGauge(m.InventoryReady),
+			boolGauge(m.TelemetryReady),
+			boolGauge(m.DistributionComposed),
+		)
+	}
+
 	// CHAOS-45: durable-write (persistence) health. The boot-time writability
 	// probe cannot see a volume that goes read-only or full LATER, and most
 	// store Save() paths discard the write error — these series are the only
