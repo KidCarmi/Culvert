@@ -19,6 +19,7 @@ type healthReport struct {
 	CAExpiresDays     int    `json:"ca_expires_days" redact:"internal"`
 	SSLInspection     string `json:"ssl_inspection" redact:"internal"`
 	ClusterCA         string `json:"cluster_ca" redact:"internal"`
+	SOCKS5            string `json:"socks5" redact:"internal"`
 	ThreatFeedEntries int64  `json:"threat_feed_entries" redact:"internal"`
 }
 
@@ -63,13 +64,28 @@ func computeHealth() healthReport {
 	}
 
 	return healthReport{
-		Status:            "ok",
-		Uptime:            uptime(),
-		Version:           version,
-		ClamAV:            clamStatus,
-		CAExpiresDays:     caExpiresDays,
-		SSLInspection:     sslInspection,
-		ClusterCA:         clusterCAHealthStatus(),
+		Status:        "ok",
+		Uptime:        uptime(),
+		Version:       version,
+		ClamAV:        clamStatus,
+		CAExpiresDays: caExpiresDays,
+		SSLInspection: sslInspection,
+		ClusterCA:     clusterCAHealthStatus(),
+		// CHAOS-54: "disabled" on the ordinary appliance (no -socks5-port), so
+		// this field never reads as a fault on a node that never had SOCKS5.
+		// "degraded" (retrying) and "down" (loop stopped) are distinct because
+		// they point at different actions: wait/raise the FD limit vs restart.
+		//
+		// A fixed four-value enum, deliberately, because handleHealth serves
+		// this UNAUTHENTICATED on the proxy port. It is the same granularity
+		// the cluster_ca field already publishes (expired vs not_yet_valid),
+		// and the /readyz socks5 row already makes the existence of the
+		// degradation public — that is what a readiness row is. What stays off
+		// both public surfaces is the RESOLUTION: the consecutive-error count
+		// and the reason class (which would name descriptor exhaustion
+		// specifically) live only on the role-gated /api/diagnostics row, the
+		// alert, and the logs.
+		SOCKS5:            socks5ListenerStatus(),
 		ThreatFeedEntries: tfEntries,
 	}
 }
@@ -419,6 +435,10 @@ func computeReadiness() (report readinessReport, code int) {
 	// (CHAOS-09, cp_poll + node_cert, DP mode only): report-only rows like ca.
 	appendStateFileChecks(checks)
 	appendDPHealthChecks(checks)
+
+	// 9b. SOCKS5 listener (CHAOS-54) — report-only, absent entirely when
+	// SOCKS5 is not configured. See appendSOCKS5ReadinessCheck.
+	appendSOCKS5ReadinessCheck(checks)
 
 	// 10. Signed SaaS feed (F3b-4) — REPORT-ONLY, never gates readiness. A valid
 	// embedded baseline always exists, so the feed never makes readiness

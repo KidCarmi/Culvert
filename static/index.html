@@ -18658,6 +18658,11 @@ function resetBlockPage() {
              replication from the leader is stalled and this node deliberately
              will NOT auto-promote on its own fault (manual promotion available). -->
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="ha_sync_panic"> HA standby sync fault (replication stalled)</label>
+        <!-- CHAOS-54: the SOCKS5 accept loop has been unable to accept connections
+             for a sustained period (descriptor exhaustion — it retries and recovers
+             on its own) or has stopped entirely (the listening socket is gone —
+             restart required). Fires once per episode, never per retry. -->
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="socks5_listener_down"> SOCKS5 listener not accepting connections</label>
       </div>
     </div>
     <div class="form-group">

@@ -33,6 +33,9 @@ package alerts
 //   "cluster_node_reenrolled" — expired-but-registered node re-enrolled with a fresh token (CHAOS-12)
 //   "ha_sync_panic"         — a standby HA sync round panicked and was contained: state replication
 //                             is stalled and this node's automatic failover is suppressed (CHAOS-25)
+//   "socks5_listener_down"  — the SOCKS5 accept loop has been unable to accept connections for a
+//                             sustained period, or has stopped entirely: SOCKS5 clients cannot
+//                             connect (CHAOS-54). Fired once per episode, never per retry.
 //
 // Each webhook is stored in an in-memory list backed by a JSON file.
 // Delivery is async, never blocks the request path.

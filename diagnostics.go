@@ -161,6 +161,7 @@ func buildOperatorContract() OperatorContract {
 		checkKeyAtRest(),
 		checkAuditPersistence(),
 		checkCategoryFeedDB(),
+		checkSOCKS5Listener(),
 		checkRequestLogPersistence(),
 		checkIdentityBackend(),
 		checkInteractiveLoginState(),

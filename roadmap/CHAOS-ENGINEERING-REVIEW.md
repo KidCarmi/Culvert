@@ -36,6 +36,21 @@ everything else is triaged below with a suggested PR and required tests for foll
 > rewriting identifiers three merged PRs already reference, so it is an OWNER
 > decision, not a unilateral edit — recorded here rather than silently "fixed".
 
+**2026-08-23 — CHAOS-54 sweep (the SOCKS5 accept loop under listener faults).** The one
+hand-rolled accept loop in the data plane retried every non-`net.ErrClosed` accept error
+IMMEDIATELY and logged each attempt. Under EMFILE/ENFILE that measured **7.68 million accept
+attempts in 300 ms**, one log line each: a pinned core, ~40 MB/s into a 50 MB rotating log that
+therefore erased the evidence of the incident within seconds, and — because `internal/logsink`
+BLOCKS a producer on a full queue — added latency to every proxied HTTP request on a node whose
+SOCKS5 listener nobody was using. The listener also had NO health surface of any kind. Shipped:
+net/http-shaped exponential backoff (5 ms → 1 s) with an interruptible sleep, an errno
+classification that stops the loop only when the socket itself is gone, rate-limited logging,
+and a full observability plane (`socks5_listener` diagnostics row, report-only `/readyz socks5`
+row, `/healthz socks5` field, four `culvert_socks5_*` series, `socks5_listener_down` alert). PX-20
+was raised by Codex review against the fix itself — a bare `ErrClosed` return reproduced PX-18 in
+miniature — and closed in the same PR. See §22 and
+`docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-23.md`.
+
 **2026-08-22 — CHAOS-53 sweep (the remote scan sidecar under failure, slowness and saturation).**
 
 CHAOS-52 §20.5 handed this off: the sidecar "is the other fail-open scanning path, with its own 30 s
@@ -370,6 +385,11 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | PX-3 | Raw relays (CONNECT bypass, WebSocket, non-TLS fallback) have **no idle/read deadline** — a half-open peer leaks a goroutine + FD + 128KB pooled buffer indefinitely. Only the SSL-inspect *request loop* arms a deadline. | GAP → **CLOSED** (CHAOS-03 `idleCopyCounted`, `proxy_tunnel.go`) | H | `bidiRelayCounted` `proxy.go:1431,1262`; contrast deadline at `proxy.go:1621` |
 | PX-4 | Spawned relay/async goroutines have **no `recover()`** — a panic in any propagates to the runtime and kills the process, dropping every in-flight tunnel. | GAP | M | `go relayCounted(...)` `proxy.go:1290`, inline relays `proxy.go:1565,1747`, `go trackDestinationCountry` `proxy.go:696` |
 | PX-5 | SOCKS5 connections **bypass the per-IP connection limiter** entirely. | GAP | M | `handleSOCKS5` `socks5.go:251` never calls `connLimiter.Acquire`; HTTP path does at `proxy.go:627` |
+| PX-16 | **The SOCKS5 accept loop retried a failed `Accept` with NO delay, forever.** `net/http.Server.Serve` (every other listener in the process) backs off 5 ms→1 s and stops on a non-temporary error; this loop logged and `continue`d on anything that was not `net.ErrClosed`. EMFILE/ENFILE come straight out of `FD.Accept` without blocking, so a descriptor incident produced **7.68 M attempts / 300 ms**, one log line each — a pinned core, ~40 MB/s into a 50 MB rotating log that erased its own diagnostic history in seconds, and (via `logsink`'s blocking backpressure) added latency to the HTTP data path on a node not using SOCKS5. Self-amplifying: FD exhaustion is the terminal state of WK-11 and PX-6. | NEW → **CLOSED** (CHAOS-54: backoff + errno classification + rate-limited logging; interruptible sleep keeps shutdown prompt) | **H** | was: `socks5.go` `serve`; see §22 |
+| PX-17 | **An unrecoverable listener error was retried identically to a transient one.** EBADF/ENOTSOCK on the listening descriptor return instantly and forever, so the "retry" was a pure spin that could never accept anything, on a port that stayed BOUND — clients hung against a black hole instead of getting connection-refused. | NEW → **CLOSED** (CHAOS-54: the loop stops, closes the listener so clients fail fast, and records the service DOWN; transient/unknown errors still retry, which is the fail-safe direction) | M/H | was: `socks5.go` `serve`; now `socks5AcceptFatal` — see §22 |
+| PX-18 | **The SOCKS5 listener had NO health surface** — absent from `/healthz`, `/readyz`, `/api/diagnostics` and `/metrics`. A listener spinning on EMFILE and a listener that had stopped accepting entirely were both reported by every probe as a fully healthy node. | NEW → **CLOSED** (CHAOS-54: `socks5_listener` contract row, report-only `/readyz socks5` row, `/healthz socks5` field, `culvert_socks5_{listener_up,accept_errors_total,accept_degraded,accept_backoff_seconds}`, `socks5_listener_down` alert) | M/H | `socks5_health.go` — see §22 |
+| PX-20 | **Every `net.ErrClosed` from `Accept` was read as an expected shutdown.** `ErrClosed` says the listener is gone; it does NOT say a shutdown was requested, and `Stop` is only one of the ways a listener can end up closed. Any closure outside the shutdown path therefore terminated the accept loop with EVERY probe still green (`socks5: ready`, `culvert_socks5_listener_up 1`, `ok` contract row) — PX-18 reintroduced in a narrower costume, inside the very change that closed PX-18. Raised by Codex review on the PR, not by the sweep. | NEW → **CLOSED** (CHAOS-54: the loop checks whether `stopping` was actually closed; `Stop` closes it BEFORE `ln.Close()`, so the check is race-free in the direction that matters and errs toward silence, never toward a false page) | M/H | was: `socks5.go` `serve`; see §22.3 |
+| PX-19 | **The SOCKS5 accept loop had no panic guard.** `handleSOCKS5` carries `recoverGoroutine`, but a panic in `serve` itself propagated to the runtime and killed the whole proxy process (the PX-4 class, one level up). | NEW → **CLOSED** (CHAOS-54: contained and reported as listener DOWN — the CHAOS-24 objection to recovering in a worker goroutine does not apply when the recovery path is the loudest state the subsystem can produce) | M | was: `socks5.go` `serve`; see §22 |
 | PX-6 | **No global connection cap**; per-IP map is unbounded in cardinality; limiter ships **disabled by default**. Distributed flood → FD/memory exhaustion. | GAP | H | `internal/connlimit/connlimit.go:12,67` (default disabled, `Acquire`→true when off) |
 | PX-7 | Bandwidth/QoS token buckets are **never enforced on the data path** — `AllowBytes` has no call site in the relays. Configured QoS silently does nothing. | GAP (feature dead) | M | `internal/bandwidth` `AllowBytes` `bandwidth.go:261` — no caller in `proxy.go`/`socks5.go` |
 | PX-8 | Shutdown drain only accounts for CONNECT tunnels — WebSocket, non-TLS-fallback, and SOCKS5 relays are invisible to `drainActiveTunnels`, so SIGTERM hard-kills them. | GAP | M | `recordActiveConn` only at `proxy.go:1410,1599`; `drainActiveTunnels` `main.go:1131` |
@@ -2044,3 +2064,171 @@ CHAOS-52 §20.3's rule, one level up. The sibling here is not a branch but a BAC
   the per-request budget now bounds the damage.
 - **The sidecar's `/scan` has no authentication.** Documented as loopback/private-network, enforced
   nowhere. Out of scope; recorded.
+
+---
+
+## 22. CHAOS-54 — The SOCKS5 accept loop under listener faults
+
+**Date:** 2026-08-23 · **Register rows:** PX-16, PX-17, PX-18, PX-19 ·
+**Full report:** `docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-23.md`
+
+### 22.1 Why this domain
+
+SOCKS5 is named in the failure-domain list and had never been swept. It is also
+the only listener in the process whose accept loop is written by hand: the proxy
+port, the admin UI, the PAC endpoint and the MCP gateway all run under
+`net/http.Server.Serve`, and the control plane runs under gRPC. Both of those
+apply an exponential accept backoff and stop on a non-temporary error. This one
+did neither.
+
+That asymmetry is the whole finding, and it is the §21 process lesson repeating
+one level up: *a second implementation of a behaviour is a second posture until
+proven otherwise.* There, the second implementation was a scan back end. Here it
+is a listener.
+
+### 22.2 The defect (PX-16)
+
+```go
+conn, err := s.ln.Accept()
+if err != nil {
+    if errors.Is(err, net.ErrClosed) { return }
+    logger.Printf("SOCKS5 accept error: %v", err)
+    continue                      // ← immediately, forever
+}
+```
+
+`accept(2)` returns EMFILE when the process is out of descriptors and ENFILE
+when the system is. Go's `internal/poll.FD.Accept` retries only EINTR and
+ECONNABORTED and waits only on EAGAIN; EMFILE/ENFILE are returned to the caller
+straight away and do not block. So the loop above spins at the speed of a
+syscall.
+
+Measured with a listener returning EMFILE, on the same box in the same run:
+
+| loop | accept attempts in 300 ms |
+|---|---|
+| pre-fix (log-and-retry) | **7,681,156** |
+| with backoff | **6** |
+
+The cost is not the syscalls. It is what rides on them:
+
+1. **A pinned core** for the duration of the fault.
+2. **The log flood erases its own diagnosis.** One `logger.Printf` per attempt
+   is roughly 40 MB/s into a `fileutil.RotatingFile` capped at 50 MB with ONE
+   archive — the entire 100 MB of retained process log, including whatever
+   exhausted the descriptors, is overwritten in about two seconds.
+3. **It reaches the HTTP data path.** `internal/logsink` is a shock absorber,
+   not a load shedder: a full queue BLOCKS the caller. `handleRequest` writes
+   one POLICY_* line per proxied request through that same sink, so a fault in
+   an optional, disabled-by-default subsystem adds latency to every request on
+   the primary path.
+
+And the trigger is not exotic. FD exhaustion is the *terminal state* of two
+already-registered failures — WK-11 (one leaked socket + two goroutines per
+delivered alert, whose recorded end state is literally `accept: too many open
+files` in the proxy plane) and PX-6 (no global connection cap, limiter disabled
+by default). This loop converts a recoverable resource incident into a
+self-amplifying one that destroys the evidence of its own cause.
+
+### 22.3 The three that came with it
+
+**PX-17 — one posture for two opposite faults.** EMFILE clears on its own;
+EBADF on the listening descriptor never does. The loop treated them identically,
+so an unrecoverable socket error was a pure spin *and* the port stayed BOUND —
+clients hung against a listener that would never accept, which is
+operationally worse than connection-refused because nothing fails fast.
+
+**PX-18 — no health surface at all.** Not `/healthz`, not `/readyz`, not
+`/api/diagnostics`, not `/metrics`. A listener spinning on EMFILE and a listener
+that had stopped accepting entirely were both reported by every probe as a
+completely healthy node. This is the register's §1 theme verbatim.
+
+**PX-19 — no panic guard on the loop.** `handleSOCKS5` has `recoverGoroutine`;
+`serve` itself did not, so a panic there killed the whole proxy process.
+
+**PX-20 — and the fix reproduced PX-18 on its way past it.** Raised by Codex
+review on the PR, against the first version of this change: the loop returned
+silently on any `net.ErrClosed`, but `ErrClosed` only says the listener is gone,
+not that a shutdown was requested. Any closure outside the shutdown path ended
+the loop with every probe still reporting a healthy node. Worth recording as its
+own row rather than folding into the fix, because it shows how easy this failure
+mode is to reproduce even while deliberately closing it. The loop now asks
+whether `Stop` actually ran — `Stop` closes `stopping` BEFORE `ln.Close()`, so
+an in-progress shutdown is always visible by the time `Accept` returns, and the
+check errs toward silence rather than a false page.
+
+### 22.4 What shipped
+
+- **Backoff** with net/http's exact schedule (5 ms doubling to a 1 s ceiling),
+  reset on an OBSERVED successful accept. The shape is copied rather than
+  invented because it is the schedule every other listener in this process
+  already follows.
+- **The sleep is interruptible.** `Stop` closes a `stopping` channel BEFORE it
+  closes the listener, so shutdown never waits out a backoff inside the 2 s
+  `socks5-listener-stop` budget. Measured worst case over four trials at the
+  ceiling: 107 µs.
+- **`socks5AcceptFatal`** — an errno classification (`errors.As`, not string
+  matching) that stops the loop, closes the listener and reports DOWN only for
+  EBADF/ENOTSOCK/EINVAL/EFAULT/ENOTCONN. **An unrecognised error is NOT fatal:**
+  backed off to one syscall per second, retrying an unknown error costs nothing,
+  while misclassifying a transient fault as fatal is a customer-visible outage.
+  That is the fail-safe direction here, and it does not violate the
+  "avoid infinite retries" rule because the retry is never silent — see below.
+- **Rate-limited logging**: the first error of an episode immediately, then at
+  most one line per 30 s, then one recovery line naming what was suppressed.
+  Signal in the log, magnitude in the counter.
+- **Degradation is a DURATION, not a count.** The backoff ceiling is reached in
+  ~1.3 s; paging on that would page on every transient spike. Thirty seconds of
+  uninterrupted failure is no longer a transient.
+- **Recovery on evidence only.** Elapsed time never clears the degraded state —
+  an accept loop that stopped failing because nobody is dialling it has not
+  recovered (the `ca_health.go` / `storage_health.go` rule).
+- **Observability**: `socks5_listener` operator-contract row, report-only
+  `/readyz socks5` row (absent when SOCKS5 is unconfigured), `/healthz socks5`
+  field, `culvert_socks5_{listener_up,accept_errors_total,accept_degraded,accept_backoff_seconds}`
+  (emitted only when configured — `up 0` on a node that never had SOCKS5 is
+  indistinguishable from a dead listener), and a fire-once-per-episode
+  `socks5_listener_down` alert with a BOUNDED reason class in the Detail.
+- **Degraded and down carry SEPARATE fire-once latches.** Raised in review of
+  this fix: a single shared latch swallowed the page for a dead listener
+  whenever it had already been degraded — silencing the more urgent of two
+  states that point at opposite actions. This is `storage_health.go`'s
+  "two failures must not share a rate gate" rule in a different costume.
+
+Gates: `socks5_accept_chaos_test.go` (18), green under `-race` and under the
+`-count=2 -shuffle=on` determinism gate.
+
+### 22.5 What is deliberately left
+
+- **PX-1 / PX-5 / PX-6 / PX-7 / PX-8 are untouched.** SOCKS5 still dials the
+  origin directly (no parent-proxy chaining), there is still no global
+  connection cap, QoS is still not enforced on the data path, and in-flight
+  SOCKS5 handlers are still not drained on `Stop`. Each is its own change.
+  PX-8 picked up a supporting data point here: the first draft of the
+  healthy-path gate dialled the real listener, and the `handleSOCKS5` goroutine
+  it spawned outlived `Stop` and raced the next test's `setupProxyTest` over the
+  `ipf`/`rl`/`connLimiter` globals — caught by the race detector on the full
+  suite, and already predicted verbatim by a comment in
+  `socks5_shutdown_test.go`. That is a test-harness symptom of the production
+  property: after `Stop` returns, handlers are still running against live
+  shared state and nothing waits for them.
+- **SOCKS5 still does not consult the policy engine.** `handleSOCKS5` applies
+  the IP filter, rate limiter, per-IP connection limiter, blocklist, plugin
+  chain and SSRF guard, but never `Evaluate` — so category, GeoIP and schedule
+  rules, and the default-deny posture, do not apply to it. That is a
+  security-posture question, not a resilience one, and it is far too large to
+  fold into a chaos fix. Recorded here as the next sweep's headline candidate.
+- **The listener cannot be rebound at runtime.** A DOWN listener needs a
+  restart. Re-binding would need an owner decision about port reuse and about
+  what a half-rebound listener means for the shutdown sequence.
+
+### 22.6 The process lesson
+
+§21 stated it for back ends. The generalisation this sweep confirms:
+
+> **Every hand-rolled equivalent of a stdlib server loop is a place where the
+> stdlib's hard-won failure handling was silently opted out of.** `net/http`'s
+> accept backoff exists because someone hit exactly this; a loop that reproduces
+> the happy path without it has reproduced the shape, not the behaviour. When a
+> subsystem is the only one of its kind in a process, ask what the others do
+> that it does not.
