@@ -97,6 +97,18 @@ func (p *pipeline) authenticate(req Request, sess *session.Session, now time.Tim
 	if err != nil {
 		return nil, err
 	}
+	// SEC-MCP-05: bound the CPU-expensive stages. Signature verification /
+	// introspection runs under AuthConcurrency; a DPoP proof adds an independent
+	// verification whose own bound is DPoPConcurrency. Both are acquired for exactly
+	// the work they bound and released immediately after, so a token flood cannot
+	// convert the worker pool into unbounded crypto.
+	release := p.acquireAuthSlot()
+	defer release()
+	if req.HasDPoP {
+		releaseDPoP := p.acquireDPoPSlot()
+		defer releaseDPoP()
+	}
+
 	// First validation: token → normalized claims (PR-3), used only to derive the
 	// asserted principals the second call cross-checks.
 	claims, err := p.validateClaims(cred, now)
@@ -142,16 +154,21 @@ func (p *pipeline) validateClaims(cred authn.Credential, now time.Time) (*authn.
 
 // buildAuthRequest assembles the PR-3 AuthRequest from the validated claims and the
 // request binding. The subject is modeled as a Human principal keyed by the token
-// subject (a pure token cannot reliably distinguish a workload). Assurance reflects
-// the OBSERVED sender-binding strength — a DPoP proof or a verified peer
-// certificate yields high assurance, a plain bearer low — so it is derived, never
-// fabricated.
+// subject (a pure token cannot reliably distinguish a workload).
+//
+// SEC-MCP-01 — assurance. The observe runtime holds NO out-of-band evidence of the
+// subject's authentication strength, so it does not compute one from the request
+// shape. It asserts the maximum a verified sender binding could justify and lets
+// authn.Authenticate CLAMP that to what it actually verified (effectiveAssurance),
+// which is the single authoritative source. Deriving it here from header PRESENCE
+// (the previous `req.HasDPoP || req.PeerCertThumbprint != ""`) made an UNVERIFIED
+// `DPoP:` header — never validated at all under a BearerControlled profile —
+// satisfy the operator's MinAssurance floor and every `principal.assurance` policy
+// condition. Nothing in this function may read an unverified request field into the
+// assurance decision again.
 func (p *pipeline) buildAuthRequest(req Request, cred authn.Credential, claims *authn.Claims) (authn.AuthRequest, error) {
 	tenant := identity.TenantID(claims.Tenant)
-	assur := identity.AssuranceLow
-	if req.HasDPoP || req.PeerCertThumbprint != "" {
-		assur = identity.AssuranceHigh
-	}
+	assur := identity.AssuranceHigh // requested ceiling; authn clamps it to the verified constraint
 	subject := identity.Subject{
 		Kind: identity.SubjectHuman,
 		Human: &identity.Human{
@@ -188,4 +205,20 @@ func (p *pipeline) buildAuthRequest(req Request, cred authn.Credential, claims *
 		authReq.Server = &sid
 	}
 	return authReq, nil
+}
+
+// acquireAuthSlot blocks until an AuthConcurrency slot is free and returns its
+// release. It deliberately BLOCKS rather than shedding: the caller already holds a
+// worker slot bounded by MaxConcurrent and a request deadline bounded by
+// RequestDeadline, so waiting here is bounded by construction, while shedding
+// would turn a tuning knob into an availability cliff.
+func (p *pipeline) acquireAuthSlot() func() {
+	p.authSem <- struct{}{}
+	return func() { <-p.authSem }
+}
+
+// acquireDPoPSlot is acquireAuthSlot for the independent DPoP-verification bound.
+func (p *pipeline) acquireDPoPSlot() func() {
+	p.dpopSem <- struct{}{}
+	return func() { <-p.dpopSem }
 }

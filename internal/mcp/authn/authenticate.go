@@ -106,6 +106,16 @@ func Authenticate(req AuthRequest, cfg CapabilityAuthConfig, deps Deps, now time
 	if err != nil {
 		return nil, err
 	}
+	// SEC-MCP-01. Effective assurance is a property of what was CRYPTOGRAPHICALLY
+	// VERIFIED on THIS request, never of what the caller asserted. The asserted
+	// level is therefore CLAMPED to the ceiling the verified sender constraint
+	// justifies (see effectiveAssurance) BEFORE the MinAssurance floor is checked
+	// and before it enters the resolved context. Without the clamp, a caller that
+	// derives its assertion from a request-shaped hint — e.g. the mere PRESENCE of
+	// a `DPoP:` header under a BearerControlled profile, where no proof is ever
+	// verified — satisfies the operator's MinAssurance floor and every downstream
+	// `principal.assurance` / `session.assurance` policy condition for free.
+	effective := effectiveAssurance(req.Subject, sender)
 	in := identity.ResolveInput{
 		Capability:        cfg.capability,
 		Tenant:            req.Tenant,
@@ -118,7 +128,7 @@ func Authenticate(req AuthRequest, cfg CapabilityAuthConfig, deps Deps, now time
 		CanonicalResource: cfg.canonicalResource,
 		Issuer:            claims.Issuer,
 		Scopes:            claims.Scopes,
-		Assurance:         subjectAssurance(req.Subject),
+		Assurance:         effective,
 		SenderConstraint:  sender,
 		Expiry:            time.Unix(claims.Expiry, 0),
 		TokenDigest:       jose.SHA256B64URL([]byte(req.Credential.Token)),
@@ -127,7 +137,7 @@ func Authenticate(req AuthRequest, cfg CapabilityAuthConfig, deps Deps, now time
 		in.AuthTime = time.Unix(claims.AuthTime, 0)
 		in.HasAuthTime = true
 	}
-	if subjectAssurance(req.Subject) < cfg.minAssurance {
+	if effective < cfg.minAssurance {
 		return nil, mcperr.New(mcperr.ReasonDelegationChainInvalid, "authn", "subject assurance below the capability minimum")
 	}
 	return identity.Resolve(in, deps.Registry, deps.Catalog)
@@ -255,4 +265,49 @@ func subjectAssurance(s identity.Subject) identity.AssuranceLevel {
 		return identity.AssuranceLow
 	}
 	return identity.AssuranceUnknown
+}
+
+// assuranceCeiling is the highest assurance a VERIFIED sender constraint can
+// justify ON ITS OWN. A proof-of-possession binding (DPoP or mTLS) that THIS
+// request actually verified is phishing-resistant evidence and supports High; an
+// unbound bearer credential supports no more than Low, because nothing on the
+// request proves the presenter is the party the token was issued to.
+func assuranceCeiling(s identity.SenderConstraint) identity.AssuranceLevel {
+	switch s.Method {
+	case identity.ConfirmDPoP, identity.ConfirmMTLS:
+		return identity.AssuranceHigh
+	default:
+		return identity.AssuranceLow
+	}
+}
+
+// effectiveAssurance is the authoritative assurance for a request.
+//
+// The clamp applies to exactly the value that is a FREE-FORM CALLER ASSERTION with
+// no evidence behind it inside this package: Human.Assurance. A caller has no way
+// to prove a human's authentication strength through this API, so that field is
+// capped at what the verified sender constraint justifies.
+//
+// A WORKLOAD subject is deliberately NOT clamped: subjectAssurance already derives
+// its level from evidence THIS package checks (Workload.Attestation), so an
+// attested workload keeps High under any profile, and an unattested one is already
+// Low. Clamping it would not close any assertion seam — it would only break the
+// attestation contract (TestReviewFix_WorkloadAssuranceRequiresAttestation).
+//
+// The clamp is a CEILING, never a floor: a caller asserting Low stays Low even
+// under a verified DPoP proof, so it can never RAISE assurance.
+//
+// Extending this: a future caller with INDEPENDENT verified assurance evidence for
+// a human (a checked `amr`/`acr` claim, a verified step-up assertion) must add that
+// evidence as a new derivation branch here, where it can be checked — never by
+// re-admitting an unchecked caller-supplied level.
+func effectiveAssurance(sub identity.Subject, sender identity.SenderConstraint) identity.AssuranceLevel {
+	asserted := subjectAssurance(sub)
+	if sub.Kind != identity.SubjectHuman {
+		return asserted
+	}
+	if ceiling := assuranceCeiling(sender); asserted > ceiling {
+		return ceiling
+	}
+	return asserted
 }

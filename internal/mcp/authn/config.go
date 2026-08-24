@@ -178,3 +178,9 @@ func overlaps(a, b map[string]struct{}) bool {
 	}
 	return false
 }
+
+// MinAssurance returns the capability's minimum-assurance floor. It is exposed so a
+// composition root that knows its own SUBJECT MODEL can prove the (profile, floor)
+// pair is satisfiable before it binds a listener — authn itself cannot, because an
+// attested workload reaches High under any profile (see effectiveAssurance).
+func (c CapabilityAuthConfig) MinAssurance() identity.AssuranceLevel { return c.minAssurance }
