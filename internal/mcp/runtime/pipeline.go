@@ -349,6 +349,17 @@ func (p *pipeline) processPost(ctx context.Context, req Request, rb *recBuilder,
 		return p.reject(rb, 400, mcperr.ReasonOf(err), "")
 	}
 	rb.rec.Class = classOf(msg.Class)
+	// Version normalization (MCP-PROTO-011). protocol.Adapter is the documented
+	// boundary that keeps protocol version out of every downstream stage — but it
+	// was declared and never invoked, so the boundary did not exist at runtime and a
+	// future revision with real wire differences had nowhere to land. Normalize HERE,
+	// on the transport-declared version, which is the last point where the version is
+	// still a transport fact rather than session state. For the two supported V1
+	// revisions the adapters are the identity, so this is byte-identical today.
+	msg, err = p.normalizeForVersion(req, msg)
+	if err != nil {
+		return p.reject(rb, 400, mcperr.ReasonOf(err), "")
+	}
 	// The body is now buffered and decoded; re-check the budget before the first
 	// stage that can perform expensive cryptographic or durable work.
 	if out, expired := p.checkBudget(ctx, rb); expired {
@@ -375,6 +386,41 @@ func (p *pipeline) precheckCredential(req Request, rb *recBuilder) (Outcome, boo
 		return p.reject(rb, statusForAuth(reason), reason, ""), false
 	}
 	return Outcome{}, true
+}
+
+// wireVersion is the protocol revision this request is normalized under: the
+// transport-declared MCP-Protocol-Version when it names a supported revision,
+// otherwise the primary. A PRESENT-but-unsupported header is deliberately NOT
+// resolved to the primary here — resolveSession rejects it with the specific
+// unsupported-version status, and silently normalizing it first would be exactly
+// the best-effort downgrade MCP-PROTO-010 forbids.
+func wireVersion(req Request) (protocol.Version, bool) {
+	if req.HasVersionHeader {
+		v := protocol.Version(req.ProtocolVersion)
+		if !protocol.IsSupported(v) {
+			return "", false
+		}
+		return v, true
+	}
+	return protocol.VersionPrimary, true
+}
+
+// normalizeForVersion runs the message through the adapter for its wire version,
+// yielding the kernel's single version-agnostic representation. A request whose
+// declared version has no adapter is left untouched for resolveSession to reject
+// with its specific status; a message the adapter refuses is a 400.
+func (p *pipeline) normalizeForVersion(req Request, msg jsonrpc.Message) (jsonrpc.Message, error) {
+	v, ok := wireVersion(req)
+	if !ok {
+		return msg, nil
+	}
+	ad, ok := protocol.AdapterFor(v)
+	if !ok {
+		// Unreachable: wireVersion only returns supported revisions, and every
+		// supported revision has an adapter. Fail closed rather than pass through.
+		return jsonrpc.Message{}, mcperr.New(mcperr.ReasonUnsupportedVersion, "runtime.normalize", "no adapter for the negotiated version")
+	}
+	return ad.Normalize(msg)
 }
 
 // resolveServer performs step 8. For Gateway it resolves the opaque ServerID from
