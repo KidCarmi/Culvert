@@ -445,5 +445,5 @@ func TestMCPPolicy_InvalidateOnStartupFailure(t *testing.T) {
 // ── the provider satisfies the runtime seam ──────────────────────────────────
 
 func TestMCPPolicy_ProviderImplementsSeam(t *testing.T) {
-	var _ mcpruntime.PolicyProvider = gatewayPolicyProvider{gw: policy.NewStore(policy.CapGateway)}
+	var _ mcpruntime.PolicyProvider = gatewayPolicyProvider{h: newMCPPolicyHolder()}
 }

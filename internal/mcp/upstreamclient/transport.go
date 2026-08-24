@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"strings"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/inspection/destination"
 	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
@@ -70,7 +71,14 @@ func (c *Client) roundTrip(ctx context.Context, target Target, body []byte, auth
 		return nil, true, mcperr.Wrap(mcperr.ReasonUpstreamConnectFailed, "upstreamclient", "resolve", err)
 	}
 
-	client := c.httpClientFor(target, canon, pin)
+	client, transport := c.httpClientFor(target, canon, pin)
+	// SEC-MCP-10. The transport is built per call, and a Go http.Transport OWNS its
+	// idle connections: it sets no IdleConnTimeout, and nothing reclaims a Transport
+	// that has gone out of scope while a connection's read/write loops still
+	// reference it. Without this release every upstream call permanently leaked one
+	// socket and two goroutines — an unbounded file-descriptor leak on a gateway
+	// that makes one upstream call per agent tool invocation.
+	defer transport.CloseIdleConnections()
 	reqCtx, cancel := context.WithTimeout(ctx, c.cfg.Limits.RequestTimeout())
 	defer cancel()
 	// POST to the FULL validated canonical endpoint (origin + path), so a
@@ -107,8 +115,10 @@ func (c *Client) roundTrip(ctx context.Context, target Target, body []byte, auth
 
 // httpClientFor builds a per-call http.Client whose transport dials ONLY the
 // pinned IPs, re-verifies the connected peer, verifies the pinned TLS identity,
-// and rejects redirects beyond the bound.
-func (c *Client) httpClientFor(target Target, canon destination.Canonical, pin destination.PinnedDestination) *http.Client {
+// and refuses any redirect that leaves the approved server. The transport is
+// returned alongside the client so the caller can release its idle connections
+// when the call completes (SEC-MCP-10).
+func (c *Client) httpClientFor(target Target, canon destination.Canonical, pin destination.PinnedDestination) (*http.Client, *http.Transport) {
 	tr := &http.Transport{
 		DialContext:           c.pinnedDial(pin),
 		TLSClientConfig:       c.tlsConfig(target, canon),
@@ -120,15 +130,25 @@ func (c *Client) httpClientFor(target Target, canon destination.Canonical, pin d
 		ForceAttemptHTTP2:     false,
 	}
 	maxRedirects := c.cfg.Limits.MaxRedirects()
+	approvedHost := strings.ToLower(canon.Host)
 	return &http.Client{
 		Transport: tr,
-		CheckRedirect: func(_ *http.Request, via []*http.Request) error {
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) > maxRedirects {
 				return mcperr.New(mcperr.ReasonUpstreamTransportRejected, "upstreamclient", "redirect not permitted")
 			}
+			// SEC-MCP-13. A redirect must never leave the APPROVED SERVER. The hop
+			// count alone does not express that: with MaxRedirects raised above zero,
+			// an upstream's own response data chose where a credentialed request went
+			// next. The pinned dialer bounds the damage, but "bounded two layers down"
+			// is not "refused" — and a redirect to a foreign host would still have the
+			// gateway speak that host's name on a connection it did not approve.
+			if req == nil || req.URL == nil || strings.ToLower(req.URL.Hostname()) != approvedHost {
+				return mcperr.New(mcperr.ReasonUpstreamTLSIdentity, "upstreamclient", "redirect leaves the approved server identity")
+			}
 			return nil
 		},
-	}
+	}, tr
 }
 
 // pinnedDial returns a DialContext that dials ONLY an address in the pinned set,

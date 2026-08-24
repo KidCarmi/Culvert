@@ -139,7 +139,7 @@ func (h *mcpPolicyHolder) compose(sc mcpObserveStartupConfig) (*policy.Snapshot,
 		// fails closed so the Management surface can never be armed from this path.
 		return nil, nil, mcpPolInvalid, "qualification_policy_wrong_capability", errPolicy("policy capability must be gateway")
 	}
-	return snap, gatewayPolicyProvider{gw: h.gw}, mcpPolLoaded, "", nil
+	return snap, gatewayPolicyProvider{h: h}, mcpPolLoaded, "", nil
 }
 
 // publish records the node-local policy outcome. A loaded state publishes the
@@ -283,14 +283,26 @@ func mcpPolicyStatus() PolicyStatus { return mcpPolicy.status() }
 // Management — a Gateway qualification snapshot can never be consulted as a Management
 // policy. A nil snapshot for Gateway (should never happen once composed) fails the
 // runtime closed (SNAPSHOT_UNAVAILABLE), never permissive.
-type gatewayPolicyProvider struct{ gw *policy.Store }
+// It holds the HOLDER, not a captured *policy.Store. The holder documents its
+// store pointers as stable, but invalidateForStartupFailure and resetForTest both
+// REPLACE h.gw — so a captured pointer would keep serving the old store's snapshot
+// to the runtime evaluator while the admin surface (which reads the holder live)
+// reported no active policy. Nothing reaches that divergence today, because the
+// only replacement path runs when the listener never started; reading the holder
+// live makes the documented single-source-of-truth invariant true by construction
+// rather than by that coincidence.
+type gatewayPolicyProvider struct{ h *mcpPolicyHolder }
 
 // PolicySnapshot satisfies mcpruntime.PolicyProvider.
 func (p gatewayPolicyProvider) PolicySnapshot(capNS protocol.Capability) *policy.Snapshot {
-	if capNS != protocol.Gateway || p.gw == nil {
+	if capNS != protocol.Gateway || p.h == nil {
 		return nil // Management (and any non-Gateway) is never served a Gateway snapshot
 	}
-	return p.gw.Current()
+	gw, ok := p.h.storeFor("gateway")
+	if !ok || gw == nil {
+		return nil
+	}
+	return gw.Current()
 }
 
 // ── loader helpers ───────────────────────────────────────────────────────────
