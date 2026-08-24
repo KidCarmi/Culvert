@@ -46,10 +46,17 @@ func (b *blockingKeys) ResolveKey(issuer, kid, alg string) (crypto.PublicKey, er
 // the DPoP bound) narrowed to n.
 func limitsWithAuthConcurrency(t testing.TB, n int) Limits {
 	t.Helper()
+	return limitsWithConcurrency(t, n, n)
+}
+
+// limitsWithConcurrency returns the default bounds with the auth and DPoP
+// concurrency bounds set independently.
+func limitsWithConcurrency(t testing.TB, authN, dpopN int) Limits {
+	t.Helper()
 	c := LimitConfig{
 		MaxConns: 1024, MaxConcurrent: 64, QueueDepth: 256, MaxSessions: 4096,
 		MaxOutstanding: 8192, MaxHeaderBytes: 64 << 10, MaxBodyBytes: 1 << 20,
-		MaxResponseBytes: 1 << 20, AuthConcurrency: n, DPoPConcurrency: n,
+		MaxResponseBytes: 1 << 20, AuthConcurrency: authN, DPoPConcurrency: dpopN,
 		MaxObservations: 4096, AdmissionBudget: 256, CleanupPerOp: 256,
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second,
 		WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,

@@ -10,6 +10,7 @@ import (
 	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
 	"github.com/KidCarmi/Culvert/internal/mcp/protocol"
 	"github.com/KidCarmi/Culvert/internal/mcp/registry"
+	"github.com/KidCarmi/Culvert/internal/mcp/senderconstraint"
 	"github.com/KidCarmi/Culvert/internal/mcp/session"
 )
 
@@ -108,18 +109,25 @@ func (p *pipeline) authenticate(ctx context.Context, req Request, sess *session.
 	// the deadline would reintroduce the very unbounded stage the deadline exists to
 	// bound, and a slot holder that stalls (a hung introspector) would park every
 	// waiter for the process lifetime.
-	release, err := p.acquireSlot(ctx, p.authSem)
-	if err != nil {
-		return nil, err
-	}
-	defer release()
-	if req.HasDPoP {
+	//
+	// OVN-02 — ORDER. The DPoP bound is acquired FIRST. Taking the auth slot and
+	// then waiting for the DPoP slot while holding it is hold-and-wait: DPoP waiters
+	// would occupy the auth pool while doing no authentication work, starving every
+	// caller that needs only the auth bound as soon as DPoPConcurrency saturates.
+	// Scarcest-first means a caller queued for DPoP holds nothing, and the number of
+	// DPoP callers inside the auth pool is bounded by DPoPConcurrency.
+	if dpopVerificationRuns(p.authCfg.SenderProfile(), req.HasDPoP) {
 		releaseDPoP, derr := p.acquireSlot(ctx, p.dpopSem)
 		if derr != nil {
 			return nil, derr
 		}
 		defer releaseDPoP()
 	}
+	release, err := p.acquireSlot(ctx, p.authSem)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 
 	// First validation: token → normalized claims (PR-3), used only to derive the
 	// asserted principals the second call cross-checks.
@@ -237,4 +245,25 @@ func (p *pipeline) acquireSlot(ctx context.Context, sem chan struct{}) (func(), 
 		p.ctr.timeouts.Add(1)
 		return nil, mcperr.New(mcperr.ReasonRequestDeadlineExceeded, "runtime.auth", "request budget elapsed while queued for a verification slot")
 	}
+}
+
+// dpopVerificationRuns reports whether this request will actually reach DPoP proof
+// verification, and therefore whether it must consume a DPoPConcurrency slot.
+//
+// OVN-01. Gating on `HasDPoP` alone gated on an ATTACKER-SUPPLIED HEADER: under a
+// bearer or mTLS profile the proof is never verified, and under DPoPRequired with
+// no proof presented verifyDPoP errors before any cryptography — so a caller could
+// consume a scarce security bound for work that is never performed. A bound that
+// can be drained without doing the work it bounds is an amplifier, not a control.
+//
+// It mirrors authn.verifySenderConstraint exactly: BearerControlled and
+// MTLSRequired never call verifyDPoP; DPoPRequired and DPoPOrMTLSRequired reach it
+// only with a proof actually present. Keep the two in agreement — a slot taken
+// where no verification runs is an amplifier, and verification running without a
+// slot is an unbounded stage.
+func dpopVerificationRuns(prof senderconstraint.Profile, hasProof bool) bool {
+	if !hasProof {
+		return false
+	}
+	return prof == senderconstraint.DPoPRequired || prof == senderconstraint.DPoPOrMTLSRequired
 }
