@@ -149,6 +149,7 @@ func TestApiDiagnostics_DefaultOK(t *testing.T) {
 		"key_at_rest":                false,
 		"identity_backend":           false,
 		"interactive_login_state":    false,
+		"alert_webhook_signing":      false,
 		"memory_backstop":            false,
 	}
 	for i := range c.Checks {

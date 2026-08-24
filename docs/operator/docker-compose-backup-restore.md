@@ -125,8 +125,9 @@ docker compose --profile cli run --rm cli \
 
 > **Dev / lab only.** Unencrypted backups must not leave the host. They
 > contain ui_users hashes, TOTP secrets, the cluster CA private key,
-> session HMAC, and full policy state. For anything outside an
-> ephemeral lab, use § 3 instead.
+> session HMAC, alert-webhook endpoint URLs (which are themselves
+> bearer credentials for most receivers), and full policy state. For
+> anything outside an ephemeral lab, use § 3 instead.
 
 ---
 
@@ -426,6 +427,31 @@ key it unwraps — that would defeat at-rest encryption). This means:
   paired public cert parses; it does **not** decrypt the key. Plaintext keys
   still get full cert/key cross-validation. (Full KEK-based decrypt during
   restore is intentionally deferred.)
+
+### 9.5 Alert-webhook signing secrets are not portable
+
+Alert webhooks (`alert_webhooks.json`) **are** in the backup, and their HMAC
+signing secrets are AES-GCM encrypted at rest under a **node-local** key file,
+`<dataDir>/.alert_webhook_key`. That key follows the same rule as a KEK: it is
+never archived, and the packer refuses it explicitly, because shipping it in
+the same tarball as the ciphertext it unwraps would make the encryption
+decorative for anyone holding the archive.
+
+So after restoring onto a host that does not have the original
+`.alert_webhook_key`:
+
+- The webhooks come back — name, URL, events, enabled state — but their
+  signing secrets **cannot be unwrapped**, so deliveries go out **unsigned**
+  (no `X-Culvert-Signature` header). A receiver that verifies the signature
+  will reject this node's alerts.
+- This is **visible, not silent**: the affected webhooks are badged
+  *"Unsigned — secret unusable"* in **Security → Alert Webhooks**, and
+  `/api/diagnostics` carries an `alert_webhook_signing` warn row.
+- **Recovery:** edit each affected webhook and re-enter its signing secret.
+  The stored ciphertext is preserved untouched, so restoring this node's
+  original `.alert_webhook_key` out-of-band (the same way you would provision
+  a KEK, § 9.4) and restarting also recovers them — but a config *import*,
+  which replaces the webhook list wholesale, discards it.
 
 ---
 

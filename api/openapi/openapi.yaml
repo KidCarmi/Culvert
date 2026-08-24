@@ -1290,7 +1290,18 @@ components:
       required: [webhooks]
       additionalProperties: false
       properties:
-        webhooks: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
+        webhooks:
+          type: array
+          nullable: true
+          description: >-
+            Configured webhooks with the signing secret redacted. Each item also
+            carries a read-only `signing_degraded` boolean: true means this
+            webhook was configured with an HMAC signing secret the node cannot
+            decrypt (typically after restoring a backup onto a fresh volume —
+            the signing key is node-local and never archived), so its
+            deliveries carry no X-Culvert-Signature until the secret is
+            re-entered. It is server-derived and ignored on create/update.
+          items: { type: object, additionalProperties: true }
     TunablesPatch:
       type: object
       description: Adaptive auto-exclude tunables patch (subset of tunable fields).

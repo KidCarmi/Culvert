@@ -40,6 +40,17 @@ var (
 	webhookKeyCache = map[string][]byte{} // keyPath → 32-byte AES key
 )
 
+// clearWebhookKeyCacheForTest drops the per-path key cache. Production reaches
+// the same state by restarting the process; a test that swaps a key file on
+// disk (e.g. an operator restoring the node-local key after a backup restore)
+// needs it explicitly, because the cache is keyed by path and the path does not
+// change when the file behind it does.
+func clearWebhookKeyCacheForTest() {
+	webhookKeyMu.Lock()
+	defer webhookKeyMu.Unlock()
+	webhookKeyCache = map[string][]byte{}
+}
+
 // webhookSecretKey loads (or creates) the AES-256 key in dir used to encrypt
 // webhook secrets at rest. The key is cached per path.
 func webhookSecretKey(dir string) ([]byte, error) {
