@@ -11,7 +11,6 @@ import (
 	"context"
 	"errors"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -29,30 +28,12 @@ type outageProvider struct {
 
 	acquires atomic.Int64
 	reads    atomic.Int64
-
-	// callMu/calls record the ORDER of backend calls, so the read-before-
-	// acquire invariant can be asserted directly rather than inferred.
-	callMu sync.Mutex
-	calls  []string
-}
-
-func (o *outageProvider) note(op string) {
-	o.callMu.Lock()
-	o.calls = append(o.calls, op)
-	o.callMu.Unlock()
-}
-
-func (o *outageProvider) callOrder() []string {
-	o.callMu.Lock()
-	defer o.callMu.Unlock()
-	return append([]string(nil), o.calls...)
 }
 
 var errBackendDown = errors.New("halease: connection refused (simulated etcd outage)")
 
 func (o *outageProvider) Acquire(ctx context.Context, candidateID string) (bool, halease.Status, error) {
 	o.acquires.Add(1)
-	o.note("acquire")
 	if o.down.Load() {
 		return false, halease.Status{}, errBackendDown
 	}
@@ -68,7 +49,6 @@ func (o *outageProvider) Renew(ctx context.Context, holderID string, epoch int64
 
 func (o *outageProvider) Read(ctx context.Context) (halease.Status, error) {
 	o.reads.Add(1)
-	o.note("read")
 	if o.down.Load() {
 		return halease.Status{}, errBackendDown
 	}
@@ -141,6 +121,14 @@ func TestChaos55_ResumeDuringBackendOutage_RegainsWriteAuthority(t *testing.T) {
 	}
 	if got := h.Status().Term; got != termFromEpoch(h.CurrentEpoch()) {
 		t.Errorf("term = %d, want the fencing epoch %d (ADR-0005 Finding 6 collapse)", got, h.CurrentEpoch())
+	}
+	// Neither the resume nor the recovery loop issues a separate Read: the
+	// atomic Acquire already reports the holder when it denies, so a follow-up
+	// read would add a round trip AND a window in which a foreign holder could
+	// expire and read back as free (Codex review, PR #1223). Pinning zero keeps
+	// that redundant read from creeping back.
+	if n := o.reads.Load(); n != 0 {
+		t.Errorf("backend Reads = %d, want 0 — the fence's own atomic answer is the only thing consulted", n)
 	}
 }
 
@@ -718,7 +706,7 @@ func (e *expireOnDenyProvider) Acquire(ctx context.Context, id string) (bool, ha
 	granted, st, err := e.Fake.Acquire(ctx, id)
 	if !granted && err == nil && st.Holder != "" {
 		e.denied.Store(true)
-		e.Fake.ExpireForTest() // the holder vanishes right after the transaction
+		e.ExpireForTest() // the holder vanishes right after the transaction
 	}
 	return granted, st, err
 }
