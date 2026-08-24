@@ -21,7 +21,6 @@ import (
 	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
 	"github.com/KidCarmi/Culvert/internal/mcp/policy"
 	"github.com/KidCarmi/Culvert/internal/mcp/protocol"
-	"github.com/KidCarmi/Culvert/internal/mcp/registry"
 	"github.com/KidCarmi/Culvert/internal/mcp/session"
 )
 
@@ -443,7 +442,9 @@ func (p *pipeline) resolveServer(req Request, rb *recBuilder) (string, Outcome, 
 		return "", Outcome{}, true
 	}
 	// Gateway: use an explicitly-supplied server id (unit tests) or parse it from the
-	// route path (live listener). A malformed/foreign path resolves to no server.
+	// route path (live listener). A malformed/foreign path resolves to no server —
+	// a PURE SYNTACTIC check that consults no registry and therefore discloses
+	// nothing about what is registered.
 	serverID := req.ServerID
 	if serverID == "" {
 		serverID = parseGatewayServerID(req.Path)
@@ -451,15 +452,25 @@ func (p *pipeline) resolveServer(req Request, rb *recBuilder) (string, Outcome, 
 	if serverID == "" {
 		return "", p.reject(rb, 404, mcperr.ReasonRegistryServerUnavailable, ""), false
 	}
-	if p.deps.Registry == nil {
-		return "", p.reject(rb, 404, mcperr.ReasonRegistryServerUnavailable, ""), false
-	}
-	rec, ok := p.deps.Registry.Current().Get(registry.ServerID(serverID))
-	if !ok || !rec.Usable() {
-		return "", p.reject(rb, 404, mcperr.ReasonRegistryServerUnavailable, ""), false
-	}
-	// The server is registered + enabled: safe to carry its opaque id in the record.
-	rb.rec.ServerID = serverID
+	// OVN-08. The registry is deliberately NOT consulted here.
+	//
+	// This step used to look the server up and answer 404 for an unknown id while
+	// letting a registered one proceed — BEFORE the token was validated. A
+	// syntactically well-formed but invalid credential passes the pre-check, so the
+	// oracle was effectively unauthenticated, and it is tenant-blind by construction
+	// (no identity exists yet), so it disclosed the registered inventory of EVERY
+	// tenant to anyone who could reach the port.
+	//
+	// Nothing is lost: identity.Resolve performs the IDENTICAL existence + Usable()
+	// check, with the same ReasonRegistryServerUnavailable, after the token is
+	// cryptographically validated (identity/context.go, resolveCapabilityRefs). The
+	// pre-auth lookup was a fail-fast, never the enforcement point — so an
+	// unregistered or disabled server is still refused (MCP-SERVER-002/003), just at
+	// the stage where the caller has proved who they are.
+	//
+	// The observation record's ServerID is likewise stamped only AFTER authentication
+	// confirms the id is registered: it is a caller-supplied string until then, and
+	// an unbounded attacker-chosen value must not reach a telemetry field.
 	return serverID, Outcome{}, true
 }
 
@@ -517,6 +528,11 @@ func (p *pipeline) processMessage(ctx context.Context, req Request, rb *recBuild
 		// denial lane (attacker-mintable; no tenant attribution). Never blocks.
 		p.routeAuthDenial(mcperr.ReasonOf(err))
 		return p.reject(rb, statusForAuth(mcperr.ReasonOf(err)), mcperr.ReasonOf(err), "")
+	}
+	// The server id is confirmed registered by identity.Resolve, so it is now safe
+	// to carry the opaque id in the sanitized observation (OVN-08).
+	if srv, ok := ident.Server(); ok {
+		rb.rec.ServerID = string(srv)
 	}
 	rb.rec.PrincipalHash = digest(ident.Fingerprint())
 	rb.rec.ClientID = ident.Client().ClientID
