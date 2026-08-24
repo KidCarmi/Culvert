@@ -88,7 +88,7 @@ func TestTLSFallback_PreAuthSurfacesCarryNoReason(t *testing.T) {
 
 	t.Run("setup status", func(t *testing.T) {
 		w := httptest.NewRecorder()
-		apiSetupStatus(w, httptest.NewRequest(http.MethodGet, "/api/setup/status", nil))
+		apiSetupStatus(w, httptest.NewRequest(http.MethodGet, "/api/setup/status", http.NoBody))
 		assertNoReason(t, "apiSetupStatus", w)
 	})
 
@@ -100,7 +100,7 @@ func TestTLSFallback_PreAuthSurfacesCarryNoReason(t *testing.T) {
 		t.Cleanup(func() { cfg = prev })
 
 		w := httptest.NewRecorder()
-		apiAuthStatus(w, httptest.NewRequest(http.MethodGet, "/api/auth/status", nil))
+		apiAuthStatus(w, httptest.NewRequest(http.MethodGet, "/api/auth/status", http.NoBody))
 		assertNoReason(t, "apiAuthStatus (unconfigured)", w)
 	})
 
@@ -111,7 +111,7 @@ func TestTLSFallback_PreAuthSurfacesCarryNoReason(t *testing.T) {
 		t.Cleanup(func() { cfg = prev })
 
 		w := httptest.NewRecorder()
-		apiAuthStatus(w, httptest.NewRequest(http.MethodGet, "/api/auth/status", nil))
+		apiAuthStatus(w, httptest.NewRequest(http.MethodGet, "/api/auth/status", http.NoBody))
 		assertNoReason(t, "apiAuthStatus (anonymous)", w)
 	})
 
@@ -121,7 +121,7 @@ func TestTLSFallback_PreAuthSurfacesCarryNoReason(t *testing.T) {
 		cfg.SetDefaultAuthOutcome(OutcomeExempt)
 		t.Cleanup(func() { cfg = prev })
 
-		r := httptest.NewRequest(http.MethodGet, "/api/auth/status", nil)
+		r := httptest.NewRequest(http.MethodGet, "/api/auth/status", http.NoBody)
 		r.SetBasicAuth("nobody", "wrong-password")
 		w := httptest.NewRecorder()
 		apiAuthStatus(w, r)
@@ -137,7 +137,7 @@ func TestTLSFallback_AuthenticatedSurfaceStillCarriesReason(t *testing.T) {
 	withTLSFallback(t, true, tlsFallbackSentinel)
 
 	ctx := context.WithValue(context.Background(), uiRoleKey{}, RoleViewer)
-	r := httptest.NewRequestWithContext(ctx, http.MethodGet, "/api/settings/network", nil)
+	r := httptest.NewRequestWithContext(ctx, http.MethodGet, "/api/settings/network", http.NoBody)
 	w := httptest.NewRecorder()
 	apiNetworkSettings(w, r)
 
@@ -172,7 +172,7 @@ func TestTLSFallback_InactiveReportsFalse(t *testing.T) {
 		{"auth", "/api/auth/status", apiAuthStatus},
 	} {
 		w := httptest.NewRecorder()
-		tc.handler(w, httptest.NewRequest(http.MethodGet, tc.path, nil))
+		tc.handler(w, httptest.NewRequest(http.MethodGet, tc.path, http.NoBody))
 		body := decodeJSONBody(t, w)
 		if got, ok := body["ui_tls_fallback"]; !ok || got != false {
 			t.Errorf("%s: ui_tls_fallback = %v (present=%v); want false", tc.name, got, ok)
@@ -238,7 +238,7 @@ func TestTLSFallback_ConcurrentPreAuthReadsAreClean(t *testing.T) {
 				{"/api/auth/status", apiAuthStatus},
 			} {
 				w := httptest.NewRecorder()
-				tc.handler(w, httptest.NewRequest(http.MethodGet, tc.path, nil))
+				tc.handler(w, httptest.NewRequest(http.MethodGet, tc.path, http.NoBody))
 				if strings.Contains(w.Body.String(), "internal-mgmt.corp.invalid") {
 					errs <- tc.path + " leaked the self-sign cause"
 				}
