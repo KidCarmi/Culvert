@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/policy"
 	"github.com/KidCarmi/Culvert/internal/mcp/protocol"
@@ -70,4 +71,58 @@ func compileGatewayTestSnapshot(t *testing.T) *policy.Snapshot {
 		t.Fatalf("compile: %v", err)
 	}
 	return snap
+}
+
+// OVN-03. The runtime PolicyProvider dereferences the Gateway store on EVERY
+// decision-point request. Reading it under the holder's RWMutex made a
+// process-wide lock part of the request path — an atomic read-modify-write on one
+// shared word, i.e. a throughput ceiling rather than a constant cost. That is the
+// exact shape Culvert has repeatedly removed elsewhere (internal/threatfeed,
+// the IP filter, internal/connlimit), and re-introducing it for MCP would be a
+// regression against a standing architectural rule.
+//
+// Structural, not timing-based: hold the holder's write lock and require the
+// provider to answer anyway. Deterministic on any hardware, under -race, at any
+// load.
+func TestPolicyProvider_ReadTakesNoHolderLock(t *testing.T) {
+	h := newMCPPolicyHolder()
+	if err := h.publish(mcpPolLoaded, "", compileGatewayTestSnapshot(t)); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	prov := gatewayPolicyProvider{h: h}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	done := make(chan bool, 1)
+	go func() { done <- prov.PolicySnapshot(protocol.Gateway) != nil }()
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("provider returned no snapshot while the holder lock was held")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("PolicySnapshot blocked on the holder lock: the policy read is on the request path " +
+			"and must not take a process-wide mutex")
+	}
+}
+
+// A store REPLACEMENT must still be observed immediately by the provider — the
+// lock-free read may not trade freshness for speed.
+func TestPolicyProvider_LockFreeReadIsStillFresh(t *testing.T) {
+	h := newMCPPolicyHolder()
+	prov := gatewayPolicyProvider{h: h}
+	if got := prov.PolicySnapshot(protocol.Gateway); got != nil {
+		t.Fatal("a fresh holder must serve no snapshot")
+	}
+	if err := h.publish(mcpPolLoaded, "", compileGatewayTestSnapshot(t)); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	if got := prov.PolicySnapshot(protocol.Gateway); got == nil {
+		t.Fatal("publication not visible to the lock-free read")
+	}
+	h.invalidateForStartupFailure()
+	if got := prov.PolicySnapshot(protocol.Gateway); got != nil {
+		t.Fatal("store replacement not visible to the lock-free read")
+	}
 }

@@ -123,7 +123,7 @@ func TestMCPPolicy_ComposeValidLoadsAndPublishes(t *testing.T) {
 		t.Fatalf("snapshot capability = %v, want gateway", snap.Capability())
 	}
 	// Before publish the store is empty (compose does not publish).
-	if h.gw.Current() != nil {
+	if h.gw.Load().Current() != nil {
 		t.Fatal("compose must not publish; the store must stay empty until publish()")
 	}
 	if err := h.publish(state, reason, snap); err != nil {
@@ -131,14 +131,14 @@ func TestMCPPolicy_ComposeValidLoadsAndPublishes(t *testing.T) {
 	}
 	// Single source of truth: the runtime provider, the admin store adapter, and the
 	// holder all return the IDENTICAL published snapshot from the SAME store.
-	if h.gw.Current() != snap {
+	if h.gw.Load().Current() != snap {
 		t.Fatal("published snapshot not visible via the store")
 	}
 	if prov.PolicySnapshot(protocol.Gateway) != snap {
 		t.Fatal("provider must return the published snapshot for Gateway")
 	}
 	gwStore, ok := h.stores().Store("gateway")
-	if !ok || gwStore != h.gw || gwStore.Current() != snap {
+	if !ok || gwStore != h.gw.Load() || gwStore.Current() != snap {
 		t.Fatal("admin store adapter must read the SAME gateway store the provider reads")
 	}
 	// Status reflects the snapshot truthfully.
@@ -168,7 +168,7 @@ func TestMCPPolicy_ManagementIsolation(t *testing.T) {
 		t.Fatal("provider must return nil for the Management capability")
 	}
 	// The Management store is never published to.
-	if h.mgt.Current() != nil {
+	if h.mgt.Load().Current() != nil {
 		t.Fatal("management store must never carry a snapshot")
 	}
 	mgtStore, ok := h.stores().Store("management")
@@ -217,7 +217,7 @@ func TestMCPPolicy_ComposeInvalidFailsClosed(t *testing.T) {
 				t.Fatalf("error leaked path/content: %v", err)
 			}
 			// No partial snapshot is ever active.
-			if h.gw.Current() != nil || h.composed() {
+			if h.gw.Load().Current() != nil || h.composed() {
 				t.Fatal("an invalid policy must leave no active snapshot")
 			}
 		})
@@ -275,7 +275,7 @@ func TestMCPPolicy_PublishStaleRevisionFailsClosed(t *testing.T) {
 		t.Fatalf("stale publish must fold to invalid, got %q", h.status().State)
 	}
 	// The previously published snapshot is retained (no downgrade).
-	if h.gw.Current() != s2 {
+	if h.gw.Load().Current() != s2 {
 		t.Fatal("a failed publish must not replace the active snapshot")
 	}
 }
@@ -418,7 +418,7 @@ func TestMCPPolicy_InvalidateOnStartupFailure(t *testing.T) {
 	if err := h.publish(ls, lr, s); err != nil {
 		t.Fatalf("publish: %v", err)
 	}
-	if !h.composed() || h.gw.Current() == nil {
+	if !h.composed() || h.gw.Load().Current() == nil {
 		t.Fatal("precondition: snapshot must be active")
 	}
 	h.invalidateForStartupFailure()
