@@ -410,9 +410,38 @@ argument.
    unusable — a redundant guard, not a primary control. Modelled in the differential via the
    policy hard-override path, which both sides honour.
 
-Neither limitation can produce a real side effect, a hidden policy block, or a
-`WOULD_EXECUTE` for a policy-denied action (§8 invariant, pinned by
-`TestShadow_PreservesPolicyVerdictSeparately`).
+3. **Two failure classes are terminally handled by the runtime BEFORE the provider, so
+   their Shadow-outcome branches are not produced by a Shadow evaluation today**
+   (Codex review of `d0f747e`, tracked as `SHADOW-EVIDENCE-ROUTING-1`):
+   - **Request inspection hard-fail.** `dispatchPolicy` (`internal/mcp/runtime/policy.go`)
+     rejects an inspection `HardFail` and returns BEFORE the `p.executor != nil`
+     delegation, for EVERY rollout mode. So a hard-inspected request never reaches the
+     Shadow evaluator; it produces the runtime's own inspection-rejection observation, not
+     a `shadow_evaluated` / `WOULD_FAIL_INSPECTION` event. The evaluator's
+     `WOULD_FAIL_INSPECTION` branch is a provider-level contract (pinned by the
+     differential test via direct invocation) but is unreachable through the live pipeline
+     — there is no post-dispatch inspection re-check.
+   - **Initial tool drift.** `dispatchExecute` runs the OVN-09 TOCTOU-narrowing
+     `refuseOnToolDrift` at entry (`internal/mcp/runtime/execute.go`) and refuses a tool
+     that was ALREADY stale before dispatch, before `p.executor.Execute`. The evaluator's
+     `WOULD_FAIL_STALE_DECISION` is therefore reachable for drift that occurs AFTER the
+     entry check (between it and the side-effect boundary — the `ToolStillCurrent`
+     re-check), but the initial-drift case is runtime-refused and produces no Shadow event.
+
+   Routing these two signals into Shadow evaluation (so a Shadow evaluation records the
+   `WOULD_FAIL_*` evidence while enforcing modes keep their fail-closed block) is a
+   runtime-dispatch change on security-sensitive control flow — and for drift it must not
+   weaken the OVN-09 narrowing that runs before the executor for enforcing modes. It is
+   therefore deferred to the separately-reviewed Shadow-activation composition slice, not
+   this architecture-only increment (execution is disabled; nothing here runs in
+   production). Tracked as `SHADOW-EVIDENCE-ROUTING-1` in
+   `docs/engineering/TECHNICAL-DEBT-REGISTER.md`.
+
+Neither the allowance nor the `Server.Usable()` limitation can produce a real side effect,
+a hidden policy block, or a `WOULD_EXECUTE` for a policy-denied action (§8 invariant,
+pinned by `TestShadow_PreservesPolicyVerdictSeparately`); the two routing gaps above only
+mean certain fail-closed rejections are recorded by the runtime's own rejection path rather
+than as a `shadow_evaluated` event.
 
 ## 14. Posture answers (task 24 anchor)
 

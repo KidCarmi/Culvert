@@ -170,6 +170,11 @@ func TestShadow_LivePreSideEffectEquivalence(t *testing.T) {
 			},
 		},
 		{
+			// Provider-level contract: both paths map an inspection hard-fail to the same
+			// verdict WHEN reached. NOTE (SHADOW-EVIDENCE-ROUTING-1): the live runtime
+			// terminally rejects an inspection HardFail in dispatchPolicy BEFORE the
+			// executor, so in production neither path reaches the provider for this case —
+			// this asserts the provider contract via direct invocation, not live routing.
 			name: "request_inspection_fail",
 			want: cFailInspection,
 			setup: func(t *testing.T) (runtime.ExecInput, *Executor, *ShadowEvaluator, *fakeUpstream) {

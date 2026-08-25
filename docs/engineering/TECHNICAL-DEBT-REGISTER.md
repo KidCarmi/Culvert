@@ -324,3 +324,36 @@
   `docs/design/mcp/SHADOW-ARCHITECTURE.md`.
 - **Evidence:** `docs/design/mcp/SHADOW-ARCHITECTURE.md` §10 (PREREQ-MCP-KILL-1) + §12 exit
   criteria; non-vacuous gate `TestCanaryPrerequisite_KillStateNotRevalidatedAtSideEffectBoundary`.
+
+## SHADOW-EVIDENCE-ROUTING-1 — Pre-dispatch fail-closed signals not routed into Shadow evidence · LOW (2026-08-25)
+- **Principal:** Two failure classes are terminally handled by the runtime BEFORE the
+  guarded executor/Shadow provider is invoked, so the ShadowEvaluator never records a
+  `shadow_evaluated` event for them: (a) an inspection `HardFail` is rejected in
+  `dispatchPolicy` (`internal/mcp/runtime/policy.go`) before the `p.executor != nil`
+  delegation, for every rollout mode; (b) an initial (pre-dispatch) tool drift is refused
+  by the OVN-09 `refuseOnToolDrift` at the top of `dispatchExecute`
+  (`internal/mcp/runtime/execute.go`) before `p.executor.Execute`. The evaluator's
+  `WOULD_FAIL_INSPECTION` and (initial) `WOULD_FAIL_STALE_DECISION` outcomes are therefore
+  provider-level contracts (pinned by the differential test via direct invocation) but are
+  not produced through the live pipeline. `WOULD_FAIL_STALE_DECISION` IS reached for drift
+  detected at the side-effect boundary (the `ToolStillCurrent` re-check).
+- **Status:** OPEN, deferred by design. Execution is disabled (no executor composed), so
+  this is future-facing evidence completeness, not a live gap. Found by Codex review of
+  `d0f747e` on PR #1226.
+- **Interest:** for a future Shadow activation, an inspection-hard-fail or an
+  already-stale tool produces the runtime's own rejection observation instead of a
+  `shadow_evaluated` / `WOULD_FAIL_*` record, so a Canary-readiness analysis reading only
+  `culvert_mcp_shadow_*` would undercount those refusals (they are still recorded, in a
+  different evidence shape).
+- **Fix (proposed):** in the reviewed Shadow-activation composition slice, route these
+  signals into the executor when one is wired — gate the `dispatchPolicy` inspection-block
+  and let the executor enforce (fail-closed for Canary/Production via `hardFailure()` →
+  `EffectBlock`; evidence for Shadow via `EffectShadowEvaluate` → `WOULD_FAIL_INSPECTION`);
+  for drift, make the OVN-09 narrowing Shadow-aware so it records `WOULD_FAIL_STALE_DECISION`
+  in Shadow WITHOUT widening the TOCTOU window for enforcing modes. This modifies
+  security-sensitive dispatch and changes the enforcing-mode rejection observation shape, so
+  it is out of scope for the architecture-only PR #1226 and belongs with the executor-arming
+  review.
+- **Evidence:** `docs/design/mcp/SHADOW-ARCHITECTURE.md` §13 (limitation 3);
+  `internal/mcp/runtime/policy.go` (inspection block), `internal/mcp/runtime/execute.go`
+  (refuseOnToolDrift).

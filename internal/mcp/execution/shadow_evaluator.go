@@ -219,15 +219,14 @@ func (s *ShadowEvaluator) decide(in runtime.ExecInput) ShadowDecision {
 		ShadowOverride:     !action.IsAllowClass(),
 		CredentialPlan:     planStatusNone,
 		MaterializeReady:   materializeNotEval,
-		RequestInspection:  inspectionWouldPass,
+		RequestInspection:  requestInspectionStatus(in),
 		ResponseInspection: inspectionNotEval,
 	}
 
 	// 1. Hard controls (policy hard override or the pre-executor inspection hard block).
 	if hardFail {
 		if in.Inspection != nil && in.Inspection.HardFail {
-			d.RequestInspection = inspectionWouldFail
-			d.Outcome = ShadowWouldFailInspection
+			d.Outcome = ShadowWouldFailInspection // RequestInspection already would_fail
 		} else {
 			d.Outcome = ShadowWouldFailHardControl
 		}
@@ -287,6 +286,20 @@ func (s *ShadowEvaluator) decide(in runtime.ExecInput) ShadowDecision {
 	// 6. Everything an enforcing mode checks before the side-effect boundary passed.
 	d.Outcome = ShadowWouldExecute
 	return d
+}
+
+// requestInspectionStatus reports the truthful request-inspection sub-fact (§13): when no
+// inspection ran (no provider/profile composed, in.Inspection == nil) it is NOT_EVALUATED,
+// never a false would_pass — a skipped inspection did not "pass". would_pass is reserved
+// for an inspection that actually ran without a hard failure (Codex P2).
+func requestInspectionStatus(in runtime.ExecInput) string {
+	if in.Inspection == nil {
+		return inspectionNotEval
+	}
+	if in.Inspection.HardFail {
+		return inspectionWouldFail
+	}
+	return inspectionWouldPass
 }
 
 // shadowDecisionFacts builds the durable evidence for a Shadow evaluation. It reuses the
