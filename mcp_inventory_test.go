@@ -342,8 +342,11 @@ func TestInventory_SeededRequestReachesAuth(t *testing.T) {
 		t.Fatal("seeded 401 must carry the RFC 9728 challenge")
 	}
 
-	// Unseeded server: still fails closed at registry resolution (404), never a default
-	// server, never a fabricated success.
+	// SEC-MCP-06. An unseeded server must NOT be distinguishable from a seeded one by
+	// a CREDENTIAL-LESS caller: registry resolution now runs after the credential
+	// presence check, so both answer 401. Before that ordering fix this request
+	// answered 404 while the seeded one answered 401 — an unauthenticated oracle
+	// enumerating a tenant's registered MCP servers.
 	unknown := mcpObserveReq(t, http.MethodPost, base+"/mcp/gateway/no-such-server", initBody)
 	unknown.Host = "gw.test"
 	ru, err := cli.Do(unknown)
@@ -352,9 +355,45 @@ func TestInventory_SeededRequestReachesAuth(t *testing.T) {
 	}
 	ub, _ := io.ReadAll(ru.Body)
 	_ = ru.Body.Close()
-	if ru.StatusCode != http.StatusNotFound {
-		t.Fatalf("unknown server status = %d body=%s, want 404", ru.StatusCode, ub)
+	if ru.StatusCode != rs.StatusCode {
+		t.Fatalf("unauthenticated server-existence oracle: unknown=%d body=%s, seeded=%d",
+			ru.StatusCode, ub, rs.StatusCode)
 	}
+
+	// OVN-08. The oracle is closed for an INVALID credential too, not only a
+	// missing one. A syntactically well-formed but invalid token passes the
+	// syntactic pre-check, so if the registry were consulted before validation it
+	// would answer 404 for an unseeded server and 401 for a seeded one — an
+	// effectively unauthenticated, tenant-blind disclosure of the registered
+	// inventory. The registry is now consulted only inside identity.Resolve, after
+	// the token is cryptographically validated, so both answer the same.
+	withCred := func(path string) int {
+		t.Helper()
+		r := mcpObserveReq(t, http.MethodPost, base+path, initBody)
+		r.Host = "gw.test"
+		r.Header.Set("Authorization", "Bearer not-a-real-token")
+		resp, derr := cli.Do(r)
+		if derr != nil {
+			t.Fatalf("request %s: %v", path, derr)
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+	seededWithCred := withCred("/mcp/gateway/srv-1")
+	unseededWithCred := withCred("/mcp/gateway/no-such-server")
+	if seededWithCred != unseededWithCred {
+		t.Fatalf("server-existence oracle for an invalid credential: seeded=%d unseeded=%d",
+			seededWithCred, unseededWithCred)
+	}
+	if seededWithCred != http.StatusUnauthorized {
+		t.Fatalf("an invalid credential must be rejected at auth, got %d", seededWithCred)
+	}
+
+	// The registry still fails CLOSED — never a default server, never a fabricated
+	// success — for a caller who HAS authenticated. That half needs a valid token,
+	// which this end-to-end harness cannot mint, and is proven at the pipeline
+	// level by TestEnumeration_UnknownServerStillFailsClosedForAValidCredential
+	// (internal/mcp/runtime/enumeration_test.go).
 }
 
 // ── admin API redaction + tenant isolation ───────────────────────────────────

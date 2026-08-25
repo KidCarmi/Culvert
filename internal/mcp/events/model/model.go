@@ -276,17 +276,24 @@ type ChainLink struct {
 // hash or one-way session-correlation digest. There is no bearer token, DPoP
 // proof, certificate private material, raw subject email or raw session token.
 type IdentityEvidence struct {
-	Tenant             string      `json:"tenant"`
-	PrincipalID        string      `json:"principal_id"`
-	PrincipalType      string      `json:"principal_type"` // human / agent / workload
-	AgentID            string      `json:"agent_id,omitempty"`
-	ClientID           string      `json:"client_id,omitempty"`
-	ServerID           string      `json:"server_id,omitempty"`
-	ToolName           string      `json:"tool_name,omitempty"`
-	ToolFingerprint    string      `json:"tool_fingerprint,omitempty"`
-	ResourceRef        string      `json:"resource_ref,omitempty"`
-	ResourceHash       string      `json:"resource_hash,omitempty"`
-	Assurance          string      `json:"assurance,omitempty"`
+	Tenant          string `json:"tenant"`
+	PrincipalID     string `json:"principal_id"`
+	PrincipalType   string `json:"principal_type"` // human / agent / workload
+	AgentID         string `json:"agent_id,omitempty"`
+	ClientID        string `json:"client_id,omitempty"`
+	ServerID        string `json:"server_id,omitempty"`
+	ToolName        string `json:"tool_name,omitempty"`
+	ToolFingerprint string `json:"tool_fingerprint,omitempty"`
+	ResourceRef     string `json:"resource_ref,omitempty"`
+	ResourceHash    string `json:"resource_hash,omitempty"`
+	Assurance       string `json:"assurance,omitempty"`
+	// SenderBinding is the VERIFIED proof-of-possession binding for the request
+	// ("none" / "dpop" / "mtls"). It is recorded SEPARATELY from Assurance because
+	// they are different properties (OVN-05): a DPoP proof shows the presenter
+	// controls the token's key, not that a human authenticated strongly. Without
+	// it an auditor reading `assurance:"high"` under the documented NIST-AAL
+	// labels would conclude something the product never observed.
+	SenderBinding      string      `json:"sender_binding,omitempty"`
 	SessionCorrelation string      `json:"session_correlation,omitempty"` // TokenDigest / fingerprint, never a token
 	Chain              []ChainLink `json:"chain,omitempty"`
 }

@@ -55,6 +55,7 @@ type counters struct {
 	inFlight           atomic.Int64
 	timeouts           atomic.Int64
 	authFailures       atomic.Int64
+	ambiguousHeaders   atomic.Int64
 	hostOriginFailures atomic.Int64
 	admissionRejected  atomic.Int64
 	shutdownCancels    atomic.Int64
@@ -81,6 +82,7 @@ type HealthSnapshot struct {
 	InFlight           int64
 	Timeouts           int64
 	AuthFailures       int64
+	AmbiguousHeaders   int64
 	HostOriginFailures int64
 	AdmissionRejected  int64
 	ShutdownCancels    int64
@@ -96,6 +98,7 @@ func (c *counters) snapshot(capability, listenerID string) HealthSnapshot {
 		RequestsExecuted: c.requestsExecuted.Load(),
 		ActiveSessions:   c.activeSessions.Load(), Queued: c.queued.Load(), InFlight: c.inFlight.Load(),
 		Timeouts: c.timeouts.Load(), AuthFailures: c.authFailures.Load(),
+		AmbiguousHeaders:   c.ambiguousHeaders.Load(),
 		HostOriginFailures: c.hostOriginFailures.Load(), AdmissionRejected: c.admissionRejected.Load(),
 		ShutdownCancels: c.shutdownCancels.Load(), ObserveDrops: c.observeDrops.Load(),
 	}

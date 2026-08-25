@@ -14,6 +14,11 @@ type Metrics interface {
 	ObserveExecution(capability string, ok bool)
 	ObserveUpstream(capability string, outcome string)
 	ObserveDLPBlock(capability string, response bool)
+	// ObserveOutcomeEvidenceLoss records that a post-execution outcome event could
+	// not be committed. The side effect already happened, so this is the archive
+	// losing its record of it — best-effort must mean "does not block the response",
+	// never "fails invisibly".
+	ObserveOutcomeEvidenceLoss(capability string)
 }
 
 // noopMetrics is the default no-op sink.
@@ -33,3 +38,6 @@ func (noopMetrics) ObserveUpstream(string, string) {}
 
 // ObserveDLPBlock discards the response-DLP observation.
 func (noopMetrics) ObserveDLPBlock(string, bool) {}
+
+// ObserveOutcomeEvidenceLoss discards the outcome-evidence-loss observation.
+func (noopMetrics) ObserveOutcomeEvidenceLoss(string) {}

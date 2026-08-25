@@ -12,14 +12,18 @@ import (
 // collected into sections/health.json. Status/version/uptime are PUBLIC; the
 // subsystem-posture fields are INTERNAL (operationally revealing, not secret).
 type healthReport struct {
-	Status            string `json:"status" redact:"public"`
-	Uptime            string `json:"uptime" redact:"public"`
-	Version           string `json:"version" redact:"public"`
-	ClamAV            string `json:"clamav" redact:"internal"`
-	CAExpiresDays     int    `json:"ca_expires_days" redact:"internal"`
-	SSLInspection     string `json:"ssl_inspection" redact:"internal"`
-	ClusterCA         string `json:"cluster_ca" redact:"internal"`
-	SOCKS5            string `json:"socks5" redact:"internal"`
+	Status        string `json:"status" redact:"public"`
+	Uptime        string `json:"uptime" redact:"public"`
+	Version       string `json:"version" redact:"public"`
+	ClamAV        string `json:"clamav" redact:"internal"`
+	CAExpiresDays int    `json:"ca_expires_days" redact:"internal"`
+	SSLInspection string `json:"ssl_inspection" redact:"internal"`
+	ClusterCA     string `json:"cluster_ca" redact:"internal"`
+	SOCKS5        string `json:"socks5" redact:"internal"`
+	// MCP is the MCP Agent Security Gateway capability state (RISK-027). It is
+	// omitted entirely on a node that never requested MCP: an always-present field
+	// would make every node look like it has the capability.
+	MCP               string `json:"mcp,omitempty" redact:"internal"`
 	ThreatFeedEntries int64  `json:"threat_feed_entries" redact:"internal"`
 }
 
@@ -71,6 +75,7 @@ func computeHealth() healthReport {
 		CAExpiresDays: caExpiresDays,
 		SSLInspection: sslInspection,
 		ClusterCA:     clusterCAHealthStatus(),
+		MCP:           mcpHealthFieldValue(),
 		// CHAOS-54: "disabled" on the ordinary appliance (no -socks5-port), so
 		// this field never reads as a fault on a node that never had SOCKS5.
 		// "degraded" (retrying) and "down" (loop stopped) are distinct because
@@ -439,6 +444,13 @@ func computeReadiness() (report readinessReport, code int) {
 	// 9b. SOCKS5 listener (CHAOS-54) — report-only, absent entirely when
 	// SOCKS5 is not configured. See appendSOCKS5ReadinessCheck.
 	appendSOCKS5ReadinessCheck(checks)
+
+	// 9c. MCP gateway (RISK-027) — REPORT-ONLY, absent entirely when MCP was never
+	// requested. It must NEVER gate the default verdict: MCP is an optional,
+	// disabled-by-default capability that shares no state with the SWG data path,
+	// so an MCP fault must not eject a healthy proxy from rotation. Operators who
+	// want dependency-degraded nodes ejected opt in via /ready?strict=1.
+	appendMCPReadinessCheck(checks)
 
 	// 10. Signed SaaS feed (F3b-4) — REPORT-ONLY, never gates readiness. A valid
 	// embedded baseline always exists, so the feed never makes readiness

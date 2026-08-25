@@ -19,6 +19,29 @@ const (
 // (bounded call count + TTL) grants. Consumption is atomic under the mutex so
 // concurrent calls cannot over-consume a grant. It is bounded (a new grant is
 // refused — fail closed — when at capacity).
+//
+// OVN-10 — EXPIRED SESSION grants are reclaimed at capacity; ALLOW_ONCE records
+// are NEVER expired. The asymmetry is the whole point and must not be "tidied up"
+// into a uniform TTL.
+//
+// allowanceKey is built from identity.ResolvedContext.Fingerprint, which despite
+// the `Session` field name is computeFingerprint() over (capability, tenant,
+// subject kind+id, client id, agent id, canonical resource, server, tool). It
+// carries NO time, session id or nonce: the same principal invoking the same tool
+// produces the SAME key on every request, for the life of the deployment.
+//
+// Therefore an ALLOW_ONCE record is the only thing standing between a one-shot
+// grant and unlimited replay, and expiring it would silently redefine ALLOW_ONCE
+// as "allow once per retention window" — a weakening of the control disguised as
+// garbage collection. An expired ALLOW_FOR_SESSION grant is different: the lookup
+// below already discards and recreates it, so deleting it is provably
+// behaviour-neutral and is pure reclamation.
+//
+// The residual growth is therefore bounded by the number of DISTINCT principals
+// that have ever consumed an ALLOW_ONCE grant on this node, which is a property of
+// the estate rather than something a caller can inflate: subject and client come
+// from verified token claims, agent is never populated on the live path, and
+// server/tool come from the registry and catalog.
 type allowanceStore struct {
 	mu   sync.Mutex
 	once map[string]struct{}
@@ -34,6 +57,20 @@ func newAllowanceStore() *allowanceStore {
 	return &allowanceStore{once: map[string]struct{}{}, sess: map[string]*sessGrant{}}
 }
 
+// sweepExpiredSessionsLocked drops session grants that have passed their TTL. It
+// runs under the caller's lock and only at capacity, so the ordinary path stays
+// O(1) and the scan is paid exactly when it buys something.
+//
+// This is reclamation, not policy: consume() already treats an expired grant as
+// absent, so removing it cannot change any decision.
+func (s *allowanceStore) sweepExpiredSessionsLocked(now time.Time) {
+	for k, g := range s.sess {
+		if now.After(g.expiry) {
+			delete(s.sess, k)
+		}
+	}
+}
+
 // consume atomically consumes a unit of the allowance for this request. It returns
 // true only when the grant is valid and not exhausted. A failed pre-execution hard
 // control never reaches here (the caller consumes only when it will execute).
@@ -42,7 +79,13 @@ func (s *allowanceStore) consume(in runtime.ExecInput, action rollout.ActionKind
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(s.once)+len(s.sess) >= maxAllowanceEntries {
-		// At capacity: refuse a NEW grant (fail closed). Existing grants still resolve.
+		// At capacity: reclaim session grants that can no longer be used BEFORE
+		// refusing, so timed-out grants cannot crowd out live ones (OVN-10).
+		s.sweepExpiredSessionsLocked(now)
+	}
+	if len(s.once)+len(s.sess) >= maxAllowanceEntries {
+		// Still at capacity: refuse a NEW grant (fail closed). Existing grants still
+		// resolve, so a full table never converts a single-use record into a replay.
 		if _, known := s.once[key]; !known {
 			if _, kn := s.sess[key]; !kn {
 				return false

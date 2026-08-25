@@ -123,7 +123,21 @@ func (s SubjectKind) String() string {
 	}
 }
 
-// Assurance is the authentication assurance of the subject (loosely NIST AAL).
+// Assurance is the subject's authentication-assurance level.
+//
+// CAUTION (OVN-05). The labels below describe NIST-AAL-style HUMAN authentication
+// strength — how the person proved who they are. Culvert cannot currently
+// determine that: no token claim carrying it (`amr`/`acr`) is parsed anywhere, so
+// nothing in the product supplies an AAL fact. What the runtime actually derives
+// is the strength of the SENDER BINDING (is the token bound to the presenter's
+// key?), which is a different property: DPoP proves possession of a key, not that
+// a human completed MFA.
+//
+// Use `principal.sender_binding` / `session.sender_binding` to express a
+// sender-constraint requirement. Do NOT use `assurance` for it, and do not
+// "upgrade" the derivation here to claim an AAL it cannot observe — see
+// docs/design/mcp/OPEN-DECISION-assurance-model.md.
+//
 // Higher is stronger; the zero value is Unknown (the floor).
 type Assurance uint8
 
@@ -406,3 +420,37 @@ func (s ServerVerification) String() string {
 		return "unset"
 	}
 }
+
+// SenderBinding is the VERIFIED proof-of-possession binding between the access
+// token and the party presenting it. It is a distinct property from Assurance:
+// this says "the presenter proved control of the key the token is bound to", not
+// "the human authenticated strongly" (OVN-05).
+type SenderBinding uint8
+
+const (
+	// SenderBindingNone — a bearer credential: nothing binds it to its presenter,
+	// so a stolen token is usable by anyone. The zero value, so an unset input
+	// fails a binding requirement closed.
+	SenderBindingNone SenderBinding = iota
+	// SenderBindingDPoP — an RFC 9449 DPoP proof was VERIFIED for this request.
+	SenderBindingDPoP
+	// SenderBindingMTLS — an RFC 8705 mTLS certificate binding was VERIFIED.
+	SenderBindingMTLS
+)
+
+// String returns the sender-binding label used in rule values.
+func (s SenderBinding) String() string {
+	switch s {
+	case SenderBindingDPoP:
+		return "dpop"
+	case SenderBindingMTLS:
+		return "mtls"
+	default:
+		return "none"
+	}
+}
+
+// Bound reports whether ANY proof-of-possession binding was verified. It is the
+// predicate a rule author usually wants ("require a sender-constrained token")
+// without caring which mechanism produced it.
+func (s SenderBinding) Bound() bool { return s == SenderBindingDPoP || s == SenderBindingMTLS }

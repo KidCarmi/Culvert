@@ -17,6 +17,8 @@ var fieldKinds = map[string]fieldKind{
 	"principal.issuer":                  kindString,
 	"principal.groups":                  kindSet,
 	"principal.assurance":               kindAssurance,
+	"principal.sender_binding":          kindString,
+	"principal.sender_bound":            kindBool,
 	"agent.id":                          kindString,
 	"agent.owner":                       kindString,
 	"agent.version":                     kindString,
@@ -53,6 +55,7 @@ var fieldKinds = map[string]fieldKind{
 	"credential.kind":                   kindString,
 	"credential.power_ceiling":          kindPower,
 	"session.assurance":                 kindAssurance,
+	"session.sender_binding":            kindString,
 	"session.prior_confirmation":        kindBool,
 	"session.prior_approval":            kindBool,
 	"session.prior_grant":               kindBool,
@@ -75,6 +78,12 @@ var stringFields = map[string]func(*DecisionInput) (string, bool){
 	"principal.subject": func(in *DecisionInput) (string, bool) { return present(in.Principal.SubjectID) },
 	"principal.tenant":  func(in *DecisionInput) (string, bool) { return present(in.Principal.Tenant) },
 	"principal.issuer":  func(in *DecisionInput) (string, bool) { return present(in.Principal.Issuer) },
+	"principal.sender_binding": func(in *DecisionInput) (string, bool) {
+		return in.Principal.SenderBinding.String(), true
+	},
+	"session.sender_binding": func(in *DecisionInput) (string, bool) {
+		return in.Session.SenderBinding.String(), true
+	},
 	"agent.id": func(in *DecisionInput) (string, bool) {
 		return agentStr(in, func(a *Agent) string { return a.AgentID })
 	},
@@ -158,6 +167,7 @@ var setFields = map[string]func(*DecisionInput) []string{
 // boolFields maps a bool field to its accessor.
 var boolFields = map[string]func(*DecisionInput) bool{
 	"server.enabled":                    func(in *DecisionInput) bool { return in.Server != nil && in.Server.Enabled },
+	"principal.sender_bound":            func(in *DecisionInput) bool { return in.Principal.SenderBinding.Bound() },
 	"session.prior_confirmation":        func(in *DecisionInput) bool { return in.Session.PriorConfirmation },
 	"session.prior_approval":            func(in *DecisionInput) bool { return in.Session.PriorApproval },
 	"session.prior_grant":               func(in *DecisionInput) bool { return in.Session.PriorGrant },

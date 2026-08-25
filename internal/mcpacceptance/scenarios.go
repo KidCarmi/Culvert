@@ -108,16 +108,38 @@ func (h *Harness) checkDisabledBindsNothing(ctx context.Context) (st Status, obs
 
 // ── TLS / mTLS ───────────────────────────────────────────────────────────────
 
+// failTLSCriteria records BOTH canonical mTLS criteria as failed when the mTLS
+// fixture process could not be built or started.
+//
+// This path used to record a single criterion with the id "tls.mtls", which is in
+// no canonical set. The run still failed — tls.mtls_accept and tls.mtls_reject were
+// then absent, and absence fails — but it failed as two unexplained MISSING
+// criteria plus one orphan failure, so the artifact never said the thing that
+// actually happened: the mTLS fixture would not start. An acceptance artifact is
+// read by someone deciding whether a deployment is sound, and "missing" and "this
+// control failed, here is why" are different findings.
+func (h *Harness) failTLSCriteria(reason, observed string) {
+	for _, c := range []struct{ id, name string }{
+		{"tls.mtls_accept", "trusted client cert accepted"},
+		{"tls.mtls_reject", "missing client cert rejected"},
+	} {
+		h.record(CriterionResult{
+			ID: c.id, Name: c.name, Group: "tls", Required: true,
+			Status: StatusFail, Reason: reason, Observed: observed,
+		})
+	}
+}
+
 func (h *Harness) runTLS(ctx context.Context) {
 	pc, err := h.fixture.buildProc(procRole{name: "mtls", tenant: h.fixture.tenantA, serverID: h.fixture.serverA,
 		clientCertMode: "require", tripwireEndpoint: tripEndpoint(h.tripwireA), operatorPolicy: true})
 	if err != nil {
-		h.record(CriterionResult{ID: "tls.mtls", Name: "mTLS accept/reject", Group: "tls", Required: true, Status: StatusFail, Reason: "aux_build"})
+		h.failTLSCriteria("aux_build", "")
 		return
 	}
 	proc, err := h.startProcess(ctx, pc)
 	if err != nil {
-		h.record(CriterionResult{ID: "tls.mtls", Name: "mTLS accept/reject", Group: "tls", Required: true, Status: StatusFail, Reason: "aux_start", Observed: err.Error()})
+		h.failTLSCriteria("aux_start", err.Error())
 		return
 	}
 	defer func() { _ = proc.stop(h.spec.Run.shutdown()) }()

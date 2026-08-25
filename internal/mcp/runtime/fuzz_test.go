@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -21,7 +22,7 @@ func FuzzPipelineProcess(f *testing.F) {
 	f.Add([]byte(``))
 	f.Fuzz(func(t *testing.T, body []byte) {
 		p := newGatewayPipeline(t, testDeps(t, k, nil))
-		out := p.Process(gwRequest(tok, body), fixedClock())
+		out := p.Process(context.Background(), gwRequest(tok, body), fixedClock())
 		if out.RetainStream {
 			t.Fatal("pipeline retained a stream")
 		}

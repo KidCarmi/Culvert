@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
@@ -51,7 +52,7 @@ func driveToDecisionPoint(t *testing.T, p *pipeline, k *esKey) (token, sid strin
 	t.Helper()
 	token = gwToken(k)
 	sid = doInit(t, p, token)
-	p.Process(withSession(gwRequest(token, initializedNotification()), sid), fixedClock())
+	p.Process(context.Background(), withSession(gwRequest(token, initializedNotification()), sid), fixedClock())
 	return token, sid
 }
 
@@ -82,7 +83,7 @@ func TestPolicy_DefaultDenyRejects(t *testing.T) {
 	p := policyPipeline(t, k, fakePolicy{gw: gwPolicySnap(t, "")})
 	tok, sid := driveToDecisionPoint(t, p, k)
 
-	out := p.Process(withSession(gwRequest(tok, toolsListBody(3)), sid), fixedClock())
+	out := p.Process(context.Background(), withSession(gwRequest(tok, toolsListBody(3)), sid), fixedClock())
 	if out.Disposition != DispRejected || out.Status != 200 {
 		t.Fatalf("default deny: disp=%v status=%d", out.Disposition, out.Status)
 	}
@@ -108,7 +109,7 @@ func TestPolicy_AllowClassNeverExecutes(t *testing.T) {
 	p := policyPipeline(t, k, fakePolicy{gw: gwPolicySnap(t, rule)})
 	tok, sid := driveToDecisionPoint(t, p, k)
 
-	out := p.Process(withSession(gwRequest(tok, toolsListBody(3)), sid), fixedClock())
+	out := p.Process(context.Background(), withSession(gwRequest(tok, toolsListBody(3)), sid), fixedClock())
 	if out.Disposition != DispPolicyAllowed || out.Status != 200 {
 		t.Fatalf("allow-class: disp=%v status=%d", out.Disposition, out.Status)
 	}
@@ -148,7 +149,7 @@ func TestPolicy_UnknownToolQuarantined(t *testing.T) {
 	tok, sid := driveToDecisionPoint(t, p, k)
 
 	// The catalog is empty ⇒ tool "x" is unknown ⇒ hard quarantine.
-	out := p.Process(withSession(gwRequest(tok, toolsCallBody(4)), sid), fixedClock())
+	out := p.Process(context.Background(), withSession(gwRequest(tok, toolsCallBody(4)), sid), fixedClock())
 	if out.Disposition != DispRejected {
 		t.Fatalf("unknown tool: disp=%v, want rejected", out.Disposition)
 	}
@@ -172,7 +173,7 @@ func TestPolicy_MissingSnapshotFailsClosed(t *testing.T) {
 	p := policyPipeline(t, k, fakePolicy{gw: nil}) // provider set, but no snapshot
 	tok, sid := driveToDecisionPoint(t, p, k)
 
-	out := p.Process(withSession(gwRequest(tok, toolsListBody(3)), sid), fixedClock())
+	out := p.Process(context.Background(), withSession(gwRequest(tok, toolsListBody(3)), sid), fixedClock())
 	if out.Disposition != DispRejected {
 		t.Fatalf("missing snapshot: disp=%v, want rejected", out.Disposition)
 	}
@@ -197,7 +198,7 @@ func TestPolicy_NilProviderKeepsObserveOnly(t *testing.T) {
 		t.Fatal("nil provider must leave the pipeline observe-only")
 	}
 	tok, sid := driveToDecisionPoint(t, p, k)
-	out := p.Process(withSession(gwRequest(tok, toolsListBody(3)), sid), fixedClock())
+	out := p.Process(context.Background(), withSession(gwRequest(tok, toolsListBody(3)), sid), fixedClock())
 	if out.Disposition != DispObserveOnly || out.Reason != mcperr.ReasonObserveOnly {
 		t.Fatalf("nil provider: disp=%v reason=%v, want observe-only", out.Disposition, out.Reason)
 	}
@@ -211,7 +212,7 @@ func TestPolicy_KernelTerminalUnchanged(t *testing.T) {
 	tok := gwToken(k)
 	sid := doInit(t, p, tok) // initialize is kernel-terminal (doInit asserts it)
 
-	out := p.Process(withSession(gwRequest(tok, pingBody(2)), sid), fixedClock())
+	out := p.Process(context.Background(), withSession(gwRequest(tok, pingBody(2)), sid), fixedClock())
 	if out.Disposition != DispKernelTerminal || out.Status != 200 {
 		t.Fatalf("ping under policy: disp=%v status=%d", out.Disposition, out.Status)
 	}

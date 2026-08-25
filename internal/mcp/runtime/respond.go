@@ -177,6 +177,14 @@ func statusForAuth(r mcperr.Reason) int {
 		return 409
 	case mcperr.ReasonCredentialInQuery:
 		return 400
+	case mcperr.ReasonRegistryServerUnavailable:
+		// OVN-08. Reached only AFTER the token has been cryptographically validated
+		// (identity.Resolve owns the registry check), so answering 404 here tells a
+		// caller who has already proved who they are that the server is not
+		// registered — accurate, and not an oracle. A caller WITHOUT a valid token
+		// never reaches this: the registry is not consulted before authentication, so
+		// they receive the ordinary authentication rejection for every server id.
+		return 404
 	default:
 		return 401
 	}

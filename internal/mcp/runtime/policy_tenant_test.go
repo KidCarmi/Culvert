@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"testing"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/authn"
@@ -55,7 +56,7 @@ func TestTenantIsolation_CrossTenantRoutesToDenialLane(t *testing.T) {
 	tok, sid := driveToDecisionPoint(t, p, k)
 
 	// A tools/call on the foreign server, under a broad ALLOW policy.
-	out := p.Process(withSession(gwRequest(tok, toolsCallBody(4)), sid), fixedClock())
+	out := p.Process(context.Background(), withSession(gwRequest(tok, toolsCallBody(4)), sid), fixedClock())
 	if out.Disposition != DispRejected || out.Status != 200 {
 		t.Fatalf("cross-tenant request must be rejected: disp=%v status=%d", out.Disposition, out.Status)
 	}
@@ -101,7 +102,7 @@ func TestTenantIsolation_EmptyOwnerFailsClosedPipeline(t *testing.T) {
 	}
 	tok, sid := driveToDecisionPoint(t, p, k)
 
-	out := p.Process(withSession(gwRequest(tok, toolsListBody(3)), sid), fixedClock())
+	out := p.Process(context.Background(), withSession(gwRequest(tok, toolsListBody(3)), sid), fixedClock())
 	if out.Disposition != DispRejected {
 		t.Fatalf("empty-owner request must be rejected: disp=%v", out.Disposition)
 	}

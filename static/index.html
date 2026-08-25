@@ -18688,6 +18688,12 @@ function resetBlockPage() {
              on its own) or has stopped entirely (the listening socket is gone —
              restart required). Fires once per episode, never per retry. -->
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="socks5_listener_down"> SOCKS5 listener not accepting connections</label>
+        <!-- RISK-027 / OVN-16: MCP Agent Security Gateway enablement was requested but
+             the capability is not serving (port in use, startup failure, or the
+             listener stopped on its own). Fires once per episode, evaluated on a
+             timer so it does not depend on /healthz being scraped. Absent entirely
+             on the default disabled-MCP deployment. -->
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="mcp_gateway_down"> MCP gateway not serving (enabled but down)</label>
       </div>
     </div>
     <div class="form-group">

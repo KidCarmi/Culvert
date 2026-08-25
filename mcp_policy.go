@@ -33,6 +33,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/policy"
 	"github.com/KidCarmi/Culvert/internal/mcp/protocol"
@@ -78,8 +79,18 @@ type mcpPolicyHolder struct {
 	mu     sync.RWMutex
 	state  mcpPolicyState
 	reason string // bounded, secret-free classification when state == invalid
-	gw     *policy.Store
-	mgt    *policy.Store
+
+	// gw/mgt are published through atomic pointers, NOT read under mu. The runtime
+	// PolicyProvider dereferences the Gateway store on EVERY decision-point request,
+	// and Culvert's standing rule is that a per-request read never takes a
+	// process-wide RWMutex: RLock is an atomic read-modify-write on one shared word,
+	// so it is a throughput ceiling rather than a constant cost (the same finding
+	// that produced the internal/threatfeed, ipfilter and connlimit lock-free
+	// read paths). Writers still hold mu — they are startup/admin-rate — and publish
+	// the replacement pointer before releasing it, so a reader that observes a new
+	// store necessarily observes a fully-constructed one.
+	gw  atomic.Pointer[policy.Store]
+	mgt atomic.Pointer[policy.Store]
 
 	// Safe metadata cached at publish (all bounded, secret-free — never the raw
 	// policy source, a rule body, a file path, or a tenant).
@@ -98,11 +109,10 @@ var mcpPolicy = newMCPPolicyHolder()
 // stores exist from process start (stable pointers) so getMCPAdmin and the runtime
 // share the identical instances; they hold no snapshot until a valid policy loads.
 func newMCPPolicyHolder() *mcpPolicyHolder {
-	return &mcpPolicyHolder{
-		state: mcpPolNotConfigured,
-		gw:    policy.NewStore(policy.CapGateway),
-		mgt:   policy.NewStore(policy.CapManagement),
-	}
+	h := &mcpPolicyHolder{state: mcpPolNotConfigured}
+	h.gw.Store(policy.NewStore(policy.CapGateway))
+	h.mgt.Store(policy.NewStore(policy.CapManagement))
+	return h
 }
 
 // compose compiles the startup policy source (if any) for the resolved config and
@@ -139,7 +149,7 @@ func (h *mcpPolicyHolder) compose(sc mcpObserveStartupConfig) (*policy.Snapshot,
 		// fails closed so the Management surface can never be armed from this path.
 		return nil, nil, mcpPolInvalid, "qualification_policy_wrong_capability", errPolicy("policy capability must be gateway")
 	}
-	return snap, gatewayPolicyProvider{gw: h.gw}, mcpPolLoaded, "", nil
+	return snap, gatewayPolicyProvider{h: h}, mcpPolLoaded, "", nil
 }
 
 // publish records the node-local policy outcome. A loaded state publishes the
@@ -159,7 +169,8 @@ func (h *mcpPolicyHolder) publish(state mcpPolicyState, reason string, snap *pol
 	// Publish into the Gateway store (base = current revision; a fresh store is 0).
 	// The store enforces capability match + monotonic revision; a failure here is a
 	// fail-closed activation error (no partial snapshot).
-	if err := h.gw.Publish(h.gw.CurrentRevision(), snap); err != nil {
+	gw := h.gw.Load()
+	if err := gw.Publish(gw.CurrentRevision(), snap); err != nil {
 		h.state, h.reason = mcpPolInvalid, "qualification_policy_publish_failed"
 		return errPolicy("policy snapshot could not be published")
 	}
@@ -174,13 +185,11 @@ func (h *mcpPolicyHolder) publish(state mcpPolicyState, reason string, snap *pol
 // the holder so a snapshot published after getMCPAdmin captured the holder is still
 // visible. The runtime PolicyProvider reads the SAME Gateway store.
 func (h *mcpPolicyHolder) storeFor(capability string) (*policy.Store, bool) {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
 	switch capability {
 	case "gateway":
-		return h.gw, true
+		return h.gw.Load(), true
 	case "management":
-		return h.mgt, true
+		return h.mgt.Load(), true
 	default:
 		return nil, false
 	}
@@ -204,7 +213,7 @@ func (h *mcpPolicyHolder) invalidateForStartupFailure() {
 	}
 	h.state, h.reason = mcpPolInvalid, "runtime_start_failed"
 	h.revision, h.hash, h.ruleCount, h.defaultAction = 0, "", 0, ""
-	h.gw = policy.NewStore(policy.CapGateway) // clears store.Current() for apiMCPPolicy
+	h.gw.Store(policy.NewStore(policy.CapGateway)) // clears store.Current() for apiMCPPolicy
 }
 
 // invalidateMCPPolicyOnStartupFailure clears the process-wide node-local policy when
@@ -221,8 +230,8 @@ func (h *mcpPolicyHolder) resetForTest() {
 	defer h.mu.Unlock()
 	h.state, h.reason = mcpPolNotConfigured, ""
 	h.revision, h.hash, h.ruleCount, h.defaultAction = 0, "", 0, ""
-	h.gw = policy.NewStore(policy.CapGateway)
-	h.mgt = policy.NewStore(policy.CapManagement)
+	h.gw.Store(policy.NewStore(policy.CapGateway))
+	h.mgt.Store(policy.NewStore(policy.CapManagement))
 }
 
 // composed reports whether a valid node-local policy snapshot is active.
@@ -283,14 +292,26 @@ func mcpPolicyStatus() PolicyStatus { return mcpPolicy.status() }
 // Management — a Gateway qualification snapshot can never be consulted as a Management
 // policy. A nil snapshot for Gateway (should never happen once composed) fails the
 // runtime closed (SNAPSHOT_UNAVAILABLE), never permissive.
-type gatewayPolicyProvider struct{ gw *policy.Store }
+// It holds the HOLDER, not a captured *policy.Store. The holder documents its
+// store pointers as stable, but invalidateForStartupFailure and resetForTest both
+// REPLACE h.gw — so a captured pointer would keep serving the old store's snapshot
+// to the runtime evaluator while the admin surface (which reads the holder live)
+// reported no active policy. Nothing reaches that divergence today, because the
+// only replacement path runs when the listener never started; reading the holder
+// live makes the documented single-source-of-truth invariant true by construction
+// rather than by that coincidence.
+type gatewayPolicyProvider struct{ h *mcpPolicyHolder }
 
 // PolicySnapshot satisfies mcpruntime.PolicyProvider.
 func (p gatewayPolicyProvider) PolicySnapshot(capNS protocol.Capability) *policy.Snapshot {
-	if capNS != protocol.Gateway || p.gw == nil {
+	if capNS != protocol.Gateway || p.h == nil {
 		return nil // Management (and any non-Gateway) is never served a Gateway snapshot
 	}
-	return p.gw.Current()
+	gw, ok := p.h.storeFor("gateway")
+	if !ok || gw == nil {
+		return nil
+	}
+	return gw.Current()
 }
 
 // ── loader helpers ───────────────────────────────────────────────────────────

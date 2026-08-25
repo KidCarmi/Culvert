@@ -12,7 +12,6 @@ package jose
 
 import (
 	"crypto"
-	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -112,18 +111,23 @@ func parseECPublic(n *canonical.Node) (crypto.PublicKey, error) {
 	if len(xb) > 32 || len(yb) > 32 {
 		return nil, malformed("EC coordinate too large for P-256")
 	}
-	x := new(big.Int).SetBytes(xb)
-	y := new(big.Int).SetBytes(yb)
-	// On-curve validation via crypto/ecdh (the non-deprecated path): build the
-	// uncompressed SEC1 point and let NewPublicKey perform the on-curve check.
+	// Build the uncompressed SEC1 point and let ecdsa.ParseUncompressedPublicKey both
+	// VALIDATE and construct the key. It rejects a point that is not on the curve and
+	// the point at infinity — the same checks the previous crypto/ecdh round-trip
+	// performed — but it is also the non-deprecated construction path: as of Go 1.26
+	// ecdsa.PublicKey's X/Y fields are deprecated precisely because assembling a key
+	// from raw coordinates can produce one that was never validated. Keeping the
+	// validation and the construction in a single call is what makes that impossible
+	// here by shape rather than by an ordering the next editor has to preserve.
 	pt := make([]byte, 1+32+32)
 	pt[0] = 4
-	x.FillBytes(pt[1:33])
-	y.FillBytes(pt[33:])
-	if _, err := ecdh.P256().NewPublicKey(pt); err != nil {
+	new(big.Int).SetBytes(xb).FillBytes(pt[1:33])
+	new(big.Int).SetBytes(yb).FillBytes(pt[33:])
+	pub, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), pt)
+	if err != nil {
 		return nil, malformed("EC point is not on P-256")
 	}
-	return &ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y}, nil
+	return pub, nil
 }
 
 func parseOKPPublic(n *canonical.Node) (crypto.PublicKey, error) {

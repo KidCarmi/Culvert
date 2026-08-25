@@ -36,6 +36,11 @@ package alerts
 //   "socks5_listener_down"  — the SOCKS5 accept loop has been unable to accept connections for a
 //                             sustained period, or has stopped entirely: SOCKS5 clients cannot
 //                             connect (CHAOS-54). Fired once per episode, never per retry.
+//   "mcp_gateway_down"      — MCP enablement was requested but the capability is not serving:
+//                             activation failed, the listener degraded, or it stopped while still
+//                             configured (RISK-027). Fired once per episode, never per request.
+//                             MCP is REPORT-ONLY for SWG readiness — this alert says the MCP
+//                             capability is down, never that the proxy is.
 //
 // Each webhook is stored in an in-memory list backed by a JSON file.
 // Delivery is async, never blocks the request path.

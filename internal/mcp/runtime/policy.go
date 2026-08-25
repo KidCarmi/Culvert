@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"time"
@@ -34,7 +35,7 @@ const policyErrorCode = -32050
 // result to a deterministic response. It NEVER calls the credential broker, a
 // provider, or an upstream MCP server, and NEVER fabricates execution success:
 // even an ALLOW-class decision returns an execution-not-implemented result.
-func (p *pipeline) dispatchPolicy(rb *recBuilder, req Request, msg jsonrpc.Message, ctx *identity.ResolvedContext, now time.Time) Outcome {
+func (p *pipeline) dispatchPolicy(ctx context.Context, rb *recBuilder, req Request, msg jsonrpc.Message, ident *identity.ResolvedContext, now time.Time) Outcome {
 	snap := p.policy.PolicySnapshot(p.capability)
 	if snap == nil {
 		// Fail closed — never fall back to permissive observe mode.
@@ -44,13 +45,13 @@ func (p *pipeline) dispatchPolicy(rb *recBuilder, req Request, msg jsonrpc.Messa
 		body := policyError(msg.ID, policy.ReasonSnapshotUnavailable, policy.ActionDeny, "")
 		return p.finish(rb, Outcome{Status: 200, Disposition: DispRejected, Reason: mcperr.ReasonPolicySnapshotInvalid, ResponseBody: body})
 	}
-	in := p.buildPolicyInput(req, msg, ctx, snap.Revision(), now)
+	in := p.buildPolicyInput(req, msg, ident, snap.Revision(), now)
 
 	// PR-7: semantic inspection runs BEFORE policy evaluation (Gateway tools/call
 	// only). A hard security failure (schema invalid, SSRF/private destination,
 	// DLP block, malformed args) blocks HERE — an ordinary ALLOW rule can never
 	// override it, and schema-invalid arguments never reach policy as valid.
-	insp := p.runInspection(req, msg, now)
+	insp := p.runInspection(ctx, req, msg, now)
 	if insp.ran {
 		recordInspection(rb, insp.result.Summary)
 		applyInspectionToInput(&in, insp.result.Summary)
@@ -61,6 +62,13 @@ func (p *pipeline) dispatchPolicy(rb *recBuilder, req Request, msg jsonrpc.Messa
 			body := inspectionError(msg.ID, insp.result.HardReason)
 			return p.finish(rb, Outcome{Status: 200, Disposition: DispRejected, Reason: insp.result.HardReason, ResponseBody: body})
 		}
+	}
+
+	// The decision is made; the stages after it (durable commit, guarded
+	// execution, upstream I/O) are the expensive ones. Re-check the budget so an
+	// already-dead request never reaches them.
+	if out, expired := p.checkBudget(ctx, rb); expired {
+		return out
 	}
 
 	d, _, _ := p.policyEngine.Evaluate(snap, &in)
@@ -79,7 +87,7 @@ func (p *pipeline) dispatchPolicy(rb *recBuilder, req Request, msg jsonrpc.Messa
 	// executor is wired this branch is skipped and the decision-only path below runs
 	// byte-identically.
 	if p.executor != nil {
-		return p.dispatchExecute(rb, req, msg, ctx, in, d, insp, snap.Hash(), now)
+		return p.dispatchExecute(ctx, rb, req, msg, ident, in, d, insp, snap.Hash(), now)
 	}
 
 	if d.Action.IsAllowClass() {
@@ -99,7 +107,7 @@ func (p *pipeline) dispatchPolicy(rb *recBuilder, req Request, msg jsonrpc.Messa
 		// cannot commit fails closed here — the receipt is evidence a FUTURE
 		// execution stage may proceed, never an execution itself.
 		if p.events != nil {
-			if out, blocked := p.commitDecisionAllow(rb, &in, d, ctx, insp, snap.Hash(), msg); blocked {
+			if out, blocked := p.commitDecisionAllow(rb, &in, d, ident, insp, snap.Hash(), msg); blocked {
 				return out
 			}
 		}
@@ -112,7 +120,7 @@ func (p *pipeline) dispatchPolicy(rb *recBuilder, req Request, msg jsonrpc.Messa
 	// DENY / QUARANTINE / REQUIRE_* → deterministic typed JSON-RPC rejection. PR-8:
 	// route the authorization denial into the isolated denial lane (never blocks).
 	if p.events != nil {
-		p.routeDenial(ctx, string(d.Reason))
+		p.routeDenial(ident, string(d.Reason))
 	}
 	p.ctr.requestsRejected.Add(1)
 	body := policyError(msg.ID, d.Reason, d.Action, d.MatchedRule)
@@ -134,7 +142,11 @@ func (p *pipeline) buildPolicyInput(req Request, msg jsonrpc.Message, ctx *ident
 		EvalTime:         now,
 		Principal:        policyPrincipal(ctx),
 		Client:           policyClient(ctx, capNS),
-		Session:          policy.Session{Fingerprint: digest(ctx.Fingerprint()), Assurance: policyAssurance(ctx.Assurance())},
+		Session: policy.Session{
+			Fingerprint:   digest(ctx.Fingerprint()),
+			Assurance:     policyAssurance(ctx.Assurance()),
+			SenderBinding: policySenderBinding(ctx.SenderConstraint()),
+		},
 	}
 	if ag, ok := ctx.Agent(); ok {
 		in.Agent = &policy.Agent{
@@ -199,7 +211,11 @@ func policyPrincipal(ctx *identity.ResolvedContext) policy.Principal {
 	p := policy.Principal{
 		Tenant:    string(ctx.TenantID()),
 		Assurance: policyAssurance(ctx.Assurance()),
-		Issuer:    ctx.Issuer(),
+		// OVN-05: the VERIFIED proof-of-possession binding, carried as its own fact
+		// rather than folded into Assurance. A rule that means "require a
+		// sender-constrained token" can now say so directly.
+		SenderBinding: policySenderBinding(ctx.SenderConstraint()),
+		Issuer:        ctx.Issuer(),
 	}
 	sub := ctx.Subject()
 	switch sub.Kind {
@@ -362,4 +378,18 @@ func firstNonEmpty(a, b string) string {
 		return a
 	}
 	return b
+}
+
+// policySenderBinding maps the resolved (already VERIFIED) sender constraint to
+// the policy vocabulary. Only a constraint authn actually verified reaches here —
+// ConfirmNone means no proof-of-possession was established, never "not checked".
+func policySenderBinding(sc identity.SenderConstraint) policy.SenderBinding {
+	switch sc.Method {
+	case identity.ConfirmDPoP:
+		return policy.SenderBindingDPoP
+	case identity.ConfirmMTLS:
+		return policy.SenderBindingMTLS
+	default:
+		return policy.SenderBindingNone
+	}
 }
