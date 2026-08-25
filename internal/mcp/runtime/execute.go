@@ -180,7 +180,23 @@ func (p *pipeline) toolHasDrifted(in policy.DecisionInput) bool {
 		return true
 	}
 	sum := rec.Fingerprint.Sum()
-	return hex.EncodeToString(sum[:]) != in.Tool.FingerprintHash
+	if hex.EncodeToString(sum[:]) != in.Tool.FingerprintHash {
+		return true
+	}
+	// ELIGIBILITY IS A SEPARATE AXIS FROM THE FINGERPRINT, and checking only the
+	// fingerprint misses an entire class of revocation. catalog.DisableServer copies
+	// each record and changes ONLY Eligibility (to ServerDisabled) and Revision --
+	// the fingerprint is deliberately preserved, because the tool's shape did not
+	// change, its server's identity did. A fingerprint-only check therefore reports
+	// "still current" for a tool the catalog has just marked unusable, which is the
+	// operator action that says "stop calling this server". The same holds for a
+	// transition into Quarantined or ReviewRequired.
+	//
+	// Compared through policyDisposition -- the SAME mapping the decision input was
+	// built with (policy.go) -- so this asks exactly the question the decision
+	// answered, rather than a second, independently-drifting notion of "eligible".
+	disp, drift := policyDisposition(rec.Eligibility)
+	return disp != in.Tool.Disposition || drift != in.Tool.Drift
 }
 
 func (p *pipeline) refuseOnToolDrift(rb *recBuilder, in policy.DecisionInput, id jsonrpc.ID) (Outcome, bool) {

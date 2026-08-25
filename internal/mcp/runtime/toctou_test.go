@@ -145,10 +145,26 @@ func TestTOCTOU_StaleDecisionFingerprintIsRefusedAtTheExecutionBoundary(t *testi
 	deps.Executor = ex
 	p := newGatewayPipeline(t, deps)
 
+	// Disposition/Drift are populated exactly as the pipeline populates them
+	// (policy.go), from the LIVE record. DispUnset is documented as invalid for a
+	// Gateway tool input and the runtime never produces it, so a fixture leaving it
+	// zero would differ from the live record on the eligibility axis as well and the
+	// refusal below would no longer prove the FINGERPRINT is what refused it.
+	liveRec, ok := deps.Catalog.Current().Get(catalog.ToolKey{
+		Server: registry.ServerID(testServerID), Name: "x",
+	})
+	if !ok {
+		t.Fatal("the ingested tool is not in the catalog")
+	}
+	liveDisp, liveDrift := policyDisposition(liveRec.Eligibility)
+
 	rb := p.newRecord(Request{}, fixedClock())
 	in := policy.DecisionInput{
 		Capability: policy.CapGateway,
-		Tool:       &policy.Tool{Name: "x", ServerID: testServerID, FingerprintHash: "stale" + live},
+		Tool: &policy.Tool{
+			Name: "x", ServerID: testServerID, FingerprintHash: "stale" + live,
+			Disposition: liveDisp, Drift: liveDrift,
+		},
 	}
 	out, ok := p.refuseOnToolDrift(rb, in, jsonrpc.ID{})
 	if !ok {
@@ -164,7 +180,10 @@ func TestTOCTOU_StaleDecisionFingerprintIsRefusedAtTheExecutionBoundary(t *testi
 	// A MATCHING fingerprint must pass through untouched.
 	fresh := policy.DecisionInput{
 		Capability: policy.CapGateway,
-		Tool:       &policy.Tool{Name: "x", ServerID: testServerID, FingerprintHash: live},
+		Tool: &policy.Tool{
+			Name: "x", ServerID: testServerID, FingerprintHash: live,
+			Disposition: liveDisp, Drift: liveDrift,
+		},
 	}
 	if _, refused := p.refuseOnToolDrift(rb, fresh, jsonrpc.ID{}); refused {
 		t.Fatal("a current fingerprint must not be refused")
