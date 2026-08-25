@@ -2,36 +2,44 @@
 
 > **Owner:** Language & Terminology Governance routine · **Status:** Point-in-time review (repeatable)
 > **Method:** Audited the tree at `9b1ba86`, following up on
-> `TERMINOLOGY-GOVERNANCE-REVIEW-2026-08-22.md` (baseline `fdad525`). 30 commits separate the two
-> reviews. Two of them are this program's own prior work landing late: `a12cc1c`/`aec9dff` (PR
-> #1203, merged 2026-08-23) is the T-16 ADR-renumbering fix queued since 08-21, and `9ec8eb0`
-> ("Qualify PAC exclusions GUI label per frozen bypass-naming rule", 2026-08-23) is a small,
-> correctly-scoped fix that landed without a dated report of its own — folded into this review's
-> record below rather than re-litigated. The remaining 27 commits are dependency bumps
-> (`go.mod`/`go.sum`, `getkin/kin-openapi`, `beevik/etree`, `google.golang.org/grpc`, Docker base
-> image, GitHub Action pins — no terminology surface), a large chaos-engineering slice (CHAOS-54:
-> the SOCKS5 accept loop's backoff/health-plane work — `socks5.go`, `socks5_health.go`,
-> `socks5_accept_chaos_test.go`, `docs/operator/socks5-listener-health.md`), a large performance
-> slice (the per-request IP-filter gate made lock-free and flat in CIDR count — `security.go`,
-> `security_ipfilter_view_test.go`, `security_ipfilter_bench_test.go`, plus the two bulk-load call
-> sites in `configversion.go`/`connlimit_startup.go`), a pre-auth TLS-fallback-reason redaction fix
-> (`ui_auth.go`, `ui.go`, `healthcheck.go`, `ui_tls_fallback_preauth_test.go`, mirrored in
-> `frontend/src/api/auth.ts`), a D1.5 backup-surface completeness fix (`backup.go`: four
-> previously-unbacked-up admin-configurable stores added), and an `/api/diagnostics` addition
-> surfacing interactive-login callback-state evictions (`diagnostics.go`). Method: (1) diffed every
-> file touched in the 30-commit window against the naming this program has already pinned for its
-> subsystem (CLAUDE.md's own Architecture Notes bullets for CHAOS-54 and the IP-filter change were
-> written concurrently with the code and used as the ground truth to check against, not re-derived);
-> (2) traced the residual ADR-0018 collision that both the 07-19 and 08-23 reviews flagged and
-> explicitly deferred, to close it this pass; (3) re-confirmed the nineteen previously-open carry-over
-> findings (T-9 through T-39, all still open per 08-22) against this window's diff — none of their
-> dependent files were touched (`configversion.go`/`connlimit_startup.go` were touched, but only for
-> the IP-filter bulk-load call sites, not the T-29/T-30/T-36 territory those files also carry); (4) a
-> targeted check of the new/changed user-facing surfaces this window (SOCKS5 health GUI checkbox +
+> `TERMINOLOGY-GOVERNANCE-REVIEW-2026-08-22.md` (baseline `fdad525`). The full range separating the
+> two reviews is `fdad525..9b1ba86` — 52 commits total (34 excluding merges, 18 on the first-parent
+> path). An earlier draft of this report scoped its audit to only the last 30 of those (from
+> `a12cc1c` onward) and mischaracterized `fdad525` as already-fully-audited; a review comment on this
+> PR caught the gap (chatgpt-codex-connector), and the omitted 22-commit span (`fdad525..a12cc1c`)
+> was audited before this report was finalized. That span breaks down as: four commits that are
+> themselves the 08-22 review's own tail (`72fc168`/`e17f0cc`/`1e9e4d1`/`f41d37e` — the Dashboard-label
+> fix and two follow-up corrections already described in that report, not new material); CHAOS-53
+> (`3371778`/`f8e26d1`/`79ede6f`/`9f49411` — the remote scan-sidecar failure/slowness/saturation
+> hardening, incl. three additive `SecurityScanStatus` fields regenerated into the frontend types);
+> the request-latency histogram sharding rewrite (`8034ec8`/`7d89571`/`94ef9c7` — internal-only,
+> `metrics.go`, no API/GUI-facing name); an OIDC JWKS stale-trust-ceiling diagnostics addition
+> (`8bfec93` — new `oidc_jwks_trust` operator-contract row) plus its own follow-up race fix
+> (`2257c0b`); and a cloud-metadata/public-IP probe concurrency fix (`6fa90fe`/`598badd`,
+> `internal/uitls` — internal-only, no naming surface). None of these introduced terminology drift:
+> CHAOS-53's new fields (`stat_remote_scan_fail`, `stat_remote_scan_saturated`, `remote_scan_inflight`)
+> match the `culvert_remote_scan_*` vocabulary CLAUDE.md already documents for that subsystem, and
+> `oidc_jwks_trust` is a new, distinctly-scoped operator-contract code (signing-key trust ceiling, not
+> reachability) that does not collide with the existing `identity_backend` row. The remaining 30
+> commits from `a12cc1c` onward are as this report originally described: two are this program's own
+> prior work landing late (`a12cc1c`/`aec9dff`, PR #1203 — the T-16 ADR-renumbering fix queued since
+> 08-21; `9ec8eb0` — the PAC-exclusions GUI-label fix folded into this review's record below); 27 are
+> dependency bumps (no terminology surface), the CHAOS-54 SOCKS5 accept-loop slice, the lock-free
+> IP-filter slice, a pre-auth TLS-fallback-reason redaction fix, a D1.5 backup-surface completeness
+> fix, and an `/api/diagnostics` addition for interactive-login callback-state evictions — all
+> checked and found consistent with CLAUDE.md's already-pinned vocabulary for each subsystem, per the
+> original method below. Method: (1) diffed every file touched across the full `fdad525..9b1ba86`
+> range against the naming this program has already pinned for its subsystem; (2) traced the residual
+> ADR-0018 collision that both the 07-19 and 08-23 reviews flagged and explicitly deferred, to close
+> it this pass; (3) re-confirmed the previously-open carry-over findings (T-9 through T-39, all still
+> open per 08-22) against the full window's diff — none of their dependent files were touched in a way
+> bearing on their naming (`configversion.go`/`connlimit_startup.go` were touched, but only for the
+> IP-filter bulk-load call sites, not the T-29/T-30/T-36 territory those files also carry); (4) a
+> targeted check of every new/changed user-facing surface in the window (SOCKS5 health GUI checkbox +
 > metrics + alert name, TLS-fallback-reason JSON field vs. frontend camelCase binding, backup
-> filenames vs. their owning subsystem's established name, diagnostics eviction wording vs. the
-> existing `culvert_login_state_evictions_total` vocabulary) for internal consistency — none
-> introduced drift.
+> filenames vs. their owning subsystem's established name, diagnostics eviction wording, the new
+> `oidc_jwks_trust` contract row, CHAOS-53's new `SecurityScanStatus` fields) for internal
+> consistency — none introduced drift.
 > **Companion change:** one fix ships with this review — the ADR-0018 double-claim both the 07-19
 > and 08-23 reviews flagged as a known, deferred defect is now resolved.
 
@@ -84,16 +92,17 @@ JSON tag, `pac_exclusions` diff/audit key, `PACExclusions` struct field — conf
 still consistent in this pass). This landed correctly and needed no further action; it is recorded
 here so the fix has a governance-visible paper trail.
 
-**All nineteen previously carried-over findings (T-9 through T-39, per the 08-22 report's priority
-table) were re-checked against this window's 30-commit diff and remain open, unchanged** — none of
-their dependent files were touched in a way that bears on their naming (the two files this window's
-diff shares with that backlog, `configversion.go` and `connlimit_startup.go`, were touched only for
-an unrelated IP-filter bulk-load performance change, not the T-29/T-30/T-36 config-key/rollback-action
-territory those same files also carry).
+**All 18 previously carried-over finding IDs (T-9, T-11, T-12, T-13 residual, T-17, T-18, T-21, T-25
+residual, T-29, T-30, T-31, T-32, T-33, T-34, T-36, T-37, T-38, T-39 — 17 backlog rows, since T-21
+and T-32 share one paired row) were re-checked against the full `fdad525..9b1ba86` window's diff and
+remain open, unchanged** — none of their dependent files were touched in a way that bears on their
+naming (the two files this window's diff shares with that backlog, `configversion.go` and
+`connlimit_startup.go`, were touched only for an unrelated IP-filter bulk-load performance change, not
+the T-29/T-30/T-36 config-key/rollback-action territory those same files also carry).
 
 **Terminology Health Score: 8.5 / 10** (up 0.1 from 08-22's 8.4 — the ADR-numbering
 collision-prevention gap is now fully closed for the second and, per this pass's full-repo grep, last
-known instance; the score does not move further because the nineteen-item carry-over backlog is
+known instance; the score does not move further because the 18-item carry-over backlog is
 unchanged and is what continues to cap it).
 
 ---
@@ -138,8 +147,9 @@ unchanged and is what continues to cap it).
 ## Carried-Over Findings (unchanged, re-confirmed against this window's diff)
 
 Unchanged from 08-22. Re-confirmed open; none of their dependent files were touched by this window's
-30 commits in a way that bears on their naming. Full descriptions remain in the 08-22 report (and, for
-the older items, the reports where they were first raised) to avoid duplicating unchanged text:
+52-commit diff in a way that bears on their naming. Full descriptions remain in the 08-22 report (and,
+for the older items, the reports where they were first raised) to avoid duplicating unchanged text.
+18 finding IDs, 17 backlog rows (T-21 and T-32 share one paired row):
 T-9, T-11, T-12, T-13 (residual), T-17, T-18, T-21 + T-32 (pairing), T-25 (residual), T-29, T-30, T-31,
 T-33, T-34, T-36, T-37, T-38, T-39.
 
@@ -176,8 +186,9 @@ appear on the plan.
 
 Terminology is **not** fully consistent, but this was a productive pass: one genuinely tracked
 finding — flagged and deferred twice before, across two separate prior reviews — was fully closed at
-zero migration risk, a small already-landed fix was folded into the governance record, and all
-seventeen still-open carry-over findings were re-confirmed unchanged against this window's diff. No
+zero migration risk, a small already-landed fix was folded into the governance record, and all 18
+still-open carry-over finding IDs (17 backlog rows) were re-confirmed unchanged against the full
+`fdad525..9b1ba86` window's diff. No
 cosmetic or preference-driven renames were proposed. The large SOCKS5 chaos-engineering and IP-filter
 performance slices in this window were audited specifically for new terminology surface (metrics
 names, alert names, GUI strings, doc vocabulary) and found to introduce none — both were built
