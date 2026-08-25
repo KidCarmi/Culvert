@@ -1,8 +1,12 @@
 package execution
 
 import (
+	"context"
 	"reflect"
 	"testing"
+
+	"github.com/KidCarmi/Culvert/internal/mcp/policy"
+	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 )
 
 // TestShadow_TypeGraphHasNoExecuteCapability is the Layer-B structural gate (SH-INV-2,
@@ -85,6 +89,29 @@ func TestShadow_DoesNotRetainConcretePlanner(t *testing.T) {
 	// and exposes no path to the broker (a method value cannot be unwrapped to its receiver).
 	if got := reflect.TypeOf(ev.plan).Kind(); got != reflect.Func {
 		t.Fatalf("plan capability is %v, want a func (an unwrappable interface would defeat the narrowing)", got)
+	}
+}
+
+// TestShadow_EmbeddedEvaluatorSharesLiveAllowanceHistory proves the embedded shadow
+// evaluator predicts allowances against the SAME store the live executor consumes (Codex
+// P2). After the live Canary path consumes an ALLOW_ONCE, the embedded shadow must see it
+// as consumed and predict WOULD_BLOCK — not WOULD_EXECUTE against a fresh, independent
+// store. wouldSatisfy never mutates, so sharing preserves the read-only contract.
+func TestShadow_EmbeddedEvaluatorSharesLiveAllowanceHistory(t *testing.T) {
+	up := &fakeUpstream{}
+	e := newExec(t, stateForMode(t, rollout.ModeCanary), up, realEvents(t, nil))
+	if e.shadow.allowances != e.allowances {
+		t.Fatal("embedded shadow must SHARE the live executor's allowance store")
+	}
+	in := execInput(policy.ActionAllowOnce, false)
+	// Live Canary consumes the one-shot grant.
+	if out := e.Execute(context.Background(), in); !out.Executed {
+		t.Fatalf("canary ALLOW_ONCE should execute+consume, state=%q", out.ExecutionState)
+	}
+	// The embedded shadow now predicts WOULD_BLOCK for the same grant (consumed), matching
+	// what the same enforcing executor would return (allowance_consumed).
+	if d := e.shadow.decide(in); d.Outcome != ShadowWouldBlock {
+		t.Fatalf("embedded shadow should see the consumed ALLOW_ONCE and predict would_block, got %q", d.Outcome)
 	}
 }
 

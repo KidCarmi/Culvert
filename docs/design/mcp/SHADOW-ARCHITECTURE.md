@@ -401,17 +401,18 @@ deliberate and documented rather than papered over. Both are safe for Shadow (wh
 executes) but MUST be understood when reading Shadow evidence for a Canary-readiness
 argument.
 
-1. **Allowance prediction is optimistic (peek-only).** The `ShadowEvaluator` predicts an
-   ALLOW_ONCE / ALLOW_FOR_SESSION with a NON-destructive `wouldSatisfy` peek — it never
-   `consume`s, because a Shadow evaluation must be side-effect-free even against in-memory
-   allowance state. A pure Shadow deployment therefore has an allowance store that is always
-   empty (nothing executes to consume a grant), so an allowance already exhausted by real
-   prior execution in a live mode would be predicted `WOULD_EXECUTE`. The differential test
-   pins equivalence by seeding BOTH stores to the same history; in production this means
-   Shadow may OVER-predict `WOULD_EXECUTE` for allowance-gated actions — an
-   over-count of would-execute, never an under-count of a would-block, and never a real
-   execution. Read allowance-gated `WOULD_EXECUTE` as "would execute if the allowance is
-   fresh," not "the allowance is definitely available."
+1. **Allowance prediction is optimistic (peek-only) ONLY for a standalone shadow-only
+   deployment.** The `ShadowEvaluator` predicts an ALLOW_ONCE / ALLOW_FOR_SESSION with a
+   NON-destructive `wouldSatisfy` peek — it never `consume`s, because a Shadow evaluation
+   must be side-effect-free even against in-memory allowance state. The EMBEDDED shadow
+   inside a live `Executor` SHARES the executor's allowance store (Codex P2), so a Canary
+   out-of-scope → shadow fallback or a demotion sees the real consumed grants and predicts
+   `WOULD_BLOCK` for an exhausted one, matching enforcement. The residual limitation is a
+   PURE shadow-only deployment (a `ShadowEvaluator` with no live executor consuming its
+   store): its store is always empty, so an allowance exhausted by prior live execution
+   elsewhere would be predicted `WOULD_EXECUTE`. That is an over-count of would-execute,
+   never an under-count of a would-block, and never a real execution — read a shadow-only
+   allowance-gated `WOULD_EXECUTE` as "would execute if the allowance is fresh."
 
 2. **The executor's redundant `Server.Usable()` re-check is not mirrored.** `decide()`
    predicts the policy + inspection + credential + allowance + drift decision; it does not

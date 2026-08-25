@@ -82,7 +82,7 @@ func apiMCPRolloutTransition(w http.ResponseWriter, r *http.Request) {
 	// execution plane is not composed. Surface that fail-closed reason truthfully
 	// rather than the generic distribution message, so the operator sees the real
 	// blocker. Production was already rejected above.
-	if to.Executes() {
+	if to.RequiresExecutionPlane() {
 		capbManagement := mcpRolloutCapability(r) == rollout.CapabilityManagement
 		if req.Capability != "" {
 			if parsed, perr := rollout.ParseCapability(req.Capability); perr == nil {

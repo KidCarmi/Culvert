@@ -27,8 +27,10 @@ func TestModeParseAndRank(t *testing.T) {
 	if ModeDisabled.Rank() != 0 || ModeProduction.Rank() != 4 {
 		t.Fatal("unexpected ranks")
 	}
-	if ModeObserve.Executes() || !ModeShadow.Executes() {
-		t.Fatal("Executes wrong")
+	// Shadow requires the guarded-execution plane composed (to EVALUATE), Observe never
+	// does. This is not "performs upstream execution" — see FullyEnforces.
+	if ModeObserve.RequiresExecutionPlane() || !ModeShadow.RequiresExecutionPlane() {
+		t.Fatal("RequiresExecutionPlane wrong")
 	}
 	if ModeShadow.FullyEnforces() || !ModeCanary.FullyEnforces() {
 		t.Fatal("FullyEnforces wrong")

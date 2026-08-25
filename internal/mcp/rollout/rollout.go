@@ -128,10 +128,18 @@ func (m Mode) String() string {
 // demotion decreases it by one or more.
 func (m Mode) Rank() int { return int(m) }
 
-// Executes reports whether the mode permits any real upstream execution at all
-// (Shadow, Canary, Production do; Disabled and Observe never do). Whether a
-// SPECIFIC request executes further depends on scope + hard failures + policy.
-func (m Mode) Executes() bool { return m == ModeShadow || m == ModeCanary || m == ModeProduction }
+// RequiresExecutionPlane reports whether the mode requires the guarded-execution plane
+// (the executor / exec-deps) to be COMPOSED before a transition is honored — Shadow,
+// Canary and Production all do. This is deliberately NOT "performs real upstream
+// execution": Shadow composes the plane to EVALUATE via the non-executing
+// EffectShadowEvaluate disposition and NEVER crosses the side-effect boundary (Layer B).
+// Only Canary/Production perform real upstream execution (see FullyEnforces). Used to
+// fail a Shadow/Canary/Production transition closed when exec-deps are not configured, so
+// the value for Shadow MUST stay true (Codex P2: the old name/doc mislabelled Shadow as
+// live-execution-capable).
+func (m Mode) RequiresExecutionPlane() bool {
+	return m == ModeShadow || m == ModeCanary || m == ModeProduction
+}
 
 // FullyEnforces reports whether the mode blocks on a non-hard policy DENY inside
 // scope (Canary and Production). Shadow records-and-allows a non-hard DENY;

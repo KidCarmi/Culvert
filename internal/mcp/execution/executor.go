@@ -101,7 +101,16 @@ func New(cfg Config) (*Executor, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Executor{cfg: cfg, allowances: newAllowanceStore(), shadow: shadow}, nil
+	// The embedded shadow evaluator SHARES this executor's allowance store (Codex P2).
+	// Live execution consumes ALLOW_ONCE / ALLOW_FOR_SESSION grants from it; the shadow
+	// path reads the SAME store non-destructively via wouldSatisfy. Without sharing, a
+	// Canary out-of-scope → shadow fallback (or a demotion) would let the shadow see a
+	// fresh grant and predict WOULD_EXECUTE where the same executor would return
+	// allowance_consumed. wouldSatisfy never mutates, so sharing keeps the read-only
+	// contract intact.
+	allow := newAllowanceStore()
+	shadow.allowances = allow
+	return &Executor{cfg: cfg, allowances: allow, shadow: shadow}, nil
 }
 
 // Execute is the runtime.ExecutionProvider entry. It resolves the effective
