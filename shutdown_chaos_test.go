@@ -102,8 +102,8 @@ func TestChaos56_EarlyPhaseHookCannotStallTheSequence(t *testing.T) {
 	select {
 	case elapsed := <-done:
 		// Early share + its watchdog grace, plus the rest of the envelope.
-		if max := budget.Total + 3*shutdownHookGrace; elapsed > max {
-			t.Errorf("shutdown took %v; envelope bound is %v", elapsed, max)
+		if bound := budget.Total + 3*shutdownHookGrace; elapsed > bound {
+			t.Errorf("shutdown took %v; envelope bound is %v", elapsed, bound)
 		}
 	case <-time.After(budget.Total + 4*shutdownHookGrace):
 		t.Fatal("shutdown sequence never returned — a wedged early hook is stalling the whole sequence")
@@ -346,7 +346,8 @@ func TestChaos56_EscalationStopsWhenShutdownCompletes(t *testing.T) {
 // response (TCP zero-window persist retries indefinitely).
 func startBlockedRPCServer(t *testing.T, release <-chan struct{}) (*grpc.Server, string) {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	lc := net.ListenConfig{}
+	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -429,7 +430,9 @@ func TestChaos56_GracefulStopIsBoundedAgainstAWedgedStream(t *testing.T) {
 	// The listeners must be shut regardless of the parked goroutines: grpc-go
 	// closes them before the conns wait, so a new connection must be refused
 	// even though the transport force-close is asynchronous.
-	if c, err := net.DialTimeout("tcp", addr, 2*time.Second); err == nil {
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer dialCancel()
+	if c, err := (&net.Dialer{}).DialContext(dialCtx, "tcp", addr); err == nil {
 		_ = c.Close()
 		t.Error("server still accepting connections after a bounded stop")
 	}
@@ -465,7 +468,8 @@ func TestChaos56_BareGracefulStopIsUnboundedOnAWedgedStream(t *testing.T) {
 // TestChaos56_GracefulStopReturnsPromptlyWhenIdle is the control: bounding
 // the drain must not make an ordinary shutdown pay the budget.
 func TestChaos56_GracefulStopReturnsPromptlyWhenIdle(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	lc := net.ListenConfig{}
+	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -527,7 +531,7 @@ func TestChaos56_EnvelopeFitsTheContainerStopGrace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read docker-compose.yml: %v", err)
 	}
-	m := regexp.MustCompile(`(?m)^\s*stop_grace_period:\s*([0-9]+)s\s*$`).FindSubmatch(raw)
+	m := regexp.MustCompile(`(?m)^\s*stop_grace_period:\s*(\d+)s\s*$`).FindSubmatch(raw)
 	if m == nil {
 		t.Fatal("docker-compose.yml has no stop_grace_period; the shutdown envelope has nothing to fit inside")
 	}
