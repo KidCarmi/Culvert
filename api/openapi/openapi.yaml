@@ -478,6 +478,8 @@ components:
         trusted_proxy_cidrs: { type: array, items: { type: string }, nullable: true }
         ui_tls_fallback: { type: boolean, description: "True when self-signed TLS setup failed at startup and the admin UI fell back to plain HTTP." }
         ui_tls_fallback_reason: { type: string, description: "The self-sign error, when ui_tls_fallback is true." }
+        ui_custom_cert_uploaded: { type: boolean, description: "True when a custom UI certificate uploaded via POST /api/certs/upload (target=ui) is saved to disk and will be used on the next restart." }
+        ui_custom_cert_active: { type: boolean, description: "True when the running UI server was started using the uploaded custom certificate (i.e. it is already live, not just saved pending a restart)." }
     RewriteList:
       type: object
       required: [rules, count]

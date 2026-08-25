@@ -530,6 +530,7 @@ func loadFileConfigAndFlags(s *startupState) {
 	s.authP = firstStr(*s.pass, s.fc.Auth.Pass)
 	s.cert = firstStr(*s.tlsCert, s.fc.Proxy.TLSCert)
 	s.key = firstStr(*s.tlsKey, s.fc.Proxy.TLSKey)
+	s.cert, s.key = resolveUITLSCertKey(s.cert, s.key)
 	s.rlRPM = firstNonZero(*s.rateLimitRPM, s.fc.Security.RateLimit)
 	s.ipModeVal = firstStr(*s.ipMode, s.fc.Security.IPFilterMode)
 }
