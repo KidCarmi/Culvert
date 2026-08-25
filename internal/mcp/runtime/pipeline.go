@@ -6,7 +6,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -340,9 +342,14 @@ func (p *pipeline) processPost(ctx context.Context, req Request, rb *recBuilder,
 	// Step 9: read + byte-limit the body. Reached ONLY after Host/Origin, method
 	// dispatch, path/capability and registry resolution have passed — a rejected
 	// request never buffers its body.
-	body, ok := p.readBody(req)
+	body, bodyReason, ok := p.readBody(ctx, req)
 	if !ok {
-		return p.reject(rb, 413, mcperr.ReasonResourceLimit, "")
+		if bodyReason == mcperr.ReasonRequestDeadlineExceeded {
+			// Overload, not a client error: same 503 the budget check and the
+			// verification-slot bound answer with.
+			return p.reject(rb, 503, bodyReason, "")
+		}
+		return p.reject(rb, 413, bodyReason, "")
 	}
 	rb.rec.RequestBytes = len(body)
 	// Step 10: PR-1 strict JSON-RPC decode.
@@ -480,21 +487,39 @@ func (p *pipeline) resolveServer(req Request, rb *recBuilder) (string, Outcome, 
 // readBody obtains the request body: a pre-read Body (unit tests) or, on the live
 // path, a bounded read of BodyReader. It returns ok=false when the body exceeds the
 // configured byte cap (the caller returns 413).
-func (p *pipeline) readBody(req Request) ([]byte, bool) {
+func (p *pipeline) readBody(ctx context.Context, req Request) ([]byte, mcperr.Reason, bool) {
 	if req.Body != nil || req.BodyReader == nil {
 		if len(req.Body) > p.lim.MaxBodyBytes() {
-			return nil, false
+			return nil, mcperr.ReasonResourceLimit, false
 		}
-		return req.Body, true
+		return req.Body, mcperr.ReasonNone, true
 	}
 	// Read one byte past the cap so an exactly-at-cap body is accepted and an
 	// over-cap body is detected without trusting the transport's own limiter alone.
 	limited := io.LimitReader(req.BodyReader, int64(p.lim.MaxBodyBytes())+1)
 	body, err := io.ReadAll(limited)
-	if err != nil || len(body) > p.lim.MaxBodyBytes() {
-		return nil, false
+	if err != nil {
+		// A BODY THAT STOPPED ARRIVING IS AN OVERLOAD EPISODE, NOT AN OVER-CAP BODY.
+		// This read blocks on the socket while the request holds a worker slot and a
+		// per-connection budget slot, so the listener's read deadline (set from this
+		// same ctx in ServeHTTP) is what releases them. Reporting that as 413
+		// "resource limit" would tell a caller its body was too large when in fact
+		// the gateway gave up waiting for it, and would file a slow-upload flood
+		// under the wrong counter -- the same mistake as answering 401 for a
+		// saturated verification bound.
+		if ctx.Err() != nil || errors.Is(err, os.ErrDeadlineExceeded) {
+			return nil, mcperr.ReasonRequestDeadlineExceeded, false
+		}
+		// Any other read error (a client that disconnected mid-body) keeps the
+		// pre-existing classification. It is not literally a resource limit either,
+		// but the response goes to a socket that is already gone, and widening the
+		// reason set here is not what this change is for.
+		return nil, mcperr.ReasonResourceLimit, false
 	}
-	return body, true
+	if len(body) > p.lim.MaxBodyBytes() {
+		return nil, mcperr.ReasonResourceLimit, false
+	}
+	return body, mcperr.ReasonNone, true
 }
 
 // parseGatewayServerID extracts the opaque server id from a Gateway route path

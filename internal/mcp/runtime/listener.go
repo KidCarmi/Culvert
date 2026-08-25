@@ -193,6 +193,31 @@ func (l *Listener) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Step 1: admission — bounded worker pool + queue, before any expensive work.
 	ctx, cancel := context.WithTimeout(r.Context(), l.lim.RequestDeadline())
 	defer cancel()
+	// SEC-MCP-02, completion. ctx bounds every stage that OBSERVES it -- but the
+	// request-BODY read does not: pipeline.readBody blocks in io.ReadAll on the
+	// socket, and the budget is only re-checked after that read returns. A client
+	// that sends a well-formed header and then stalls its POST body therefore holds
+	// a worker slot AND a per-connection budget slot for as long as the socket stays
+	// open, which is ReadTimeout -- and LimitConfig.Validate deliberately does not
+	// tie ReadTimeout to RequestDeadline, so an operator may legitimately configure
+	// ReadTimeout far above it. Enough concurrent slow uploads then exhaust
+	// MaxConcurrent despite the end-to-end deadline, which is precisely the
+	// amplification OVN-07's per-connection budget exists to prevent.
+	//
+	// Pushing the SAME deadline down to the socket closes it: the blocked read is
+	// interrupted by the kernel at the request deadline, readBody classifies it as a
+	// timeout rather than an over-cap body, and both slots are released.
+	//
+	// The error is deliberately not fatal to the request. On a real net/http server
+	// (HTTP/1 and HTTP/2 alike) SetReadDeadline is supported; it returns
+	// ErrNotSupported only for a synthetic ResponseWriter such as
+	// httptest.ResponseRecorder, where there is no socket to bound and ReadTimeout
+	// still applies. Failing the request there would break every unit test to guard
+	// against a condition that cannot occur in production, so the real behaviour is
+	// pinned by a test over a REAL listener instead.
+	if dl, ok := ctx.Deadline(); ok {
+		_ = http.NewResponseController(w).SetReadDeadline(dl)
+	}
 	// Counted at the TRANSPORT entrypoint, not inside pipeline.Process: the three
 	// early returns below (connection budget, queue admission, header extraction)
 	// each move requestsRejected without ever reaching the pipeline, so a total
