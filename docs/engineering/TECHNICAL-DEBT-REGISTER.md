@@ -297,3 +297,30 @@
   server whose dialer reads the current pin, which the per-call pinning model makes non-trivial.
 - **Interest:** (a) bounded information disclosure; (b) a TLS handshake per upstream tool call
   once execution is armed.
+
+## PREREQ-MCP-KILL-1 — MCP kill switch not revalidated at the side-effect boundary · HARD CANARY PREREQUISITE (2026-08-25)
+- **Principal:** `Executor.Execute` checks `State.Killed()` once at admission, but the
+  irreversible boundary (`run.go` `callUpstream`) does NOT re-read the authoritative kill
+  state before the upstream side effect. Between admission and the boundary the executor
+  performs a durable decision commit, credential planning and credential materialization —
+  all of which can block — so an emergency kill engaged during that window does not abort an
+  in-flight live call. The OVN-09 tool-drift re-check already sits at that boundary; the kill
+  re-check does not yet join it.
+- **Status:** OPEN. This is a **blocking prerequisite**, not an ordinary debt item.
+  **Canary/Production activation is PROHIBITED until the authoritative kill state is
+  revalidated immediately before the irreversible side-effect boundary** (a kill during
+  planning/materialization must yield `up.calls == 0`, block reason
+  `rollout_emergency_active`). Compensating control today: no production executor is composed
+  (arming hooks uncalled; AST posture wall), so the window is unreachable in production — but
+  the prerequisite must be CLOSED before any live-capable mode is armed.
+- **Interest:** the kill switch is the operator's only immediate stop; a stop that a slow
+  commit/materialize window can outrun is not a stop. Purely a live-mode concern — Shadow
+  already reflects the kill at admission (`WOULD_BLOCK` / `rollout_emergency_active`) and never
+  reaches the boundary.
+- **Fix:** add a `killEpoch` re-read to `callUpstream` alongside the tool-drift re-check; on a
+  kill, abort before `Upstream.Call` and return the emergency block. Then invert
+  `TestCanaryPrerequisite_KillStateNotRevalidatedAtSideEffectBoundary`
+  (`internal/mcp/execution`) to assert `up.calls == 0` and check off the §12 exit criterion in
+  `docs/design/mcp/SHADOW-ARCHITECTURE.md`.
+- **Evidence:** `docs/design/mcp/SHADOW-ARCHITECTURE.md` §10 (PREREQ-MCP-KILL-1) + §12 exit
+  criteria; non-vacuous gate `TestCanaryPrerequisite_KillStateNotRevalidatedAtSideEffectBoundary`.

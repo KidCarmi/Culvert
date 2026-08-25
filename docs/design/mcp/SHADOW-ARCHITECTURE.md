@@ -182,6 +182,15 @@ effect replaced by a fake/sentinel `Upstream` that records-but-refuses. The ONLY
 permitted divergence is: live proceeds to `Upstream.Call`; Shadow stops with the
 equivalent `WOULD_EXECUTE`.
 
+**Implemented:** `TestShadow_LivePreSideEffectEquivalence` (`internal/mcp/execution`)
+drives both the capability-reduced `ShadowEvaluator` (Shadow) and the live `Executor`
+(Canary, fake upstream) with the same input across 14 classes — ALLOW, DENY,
+REQUIRE_APPROVAL, REQUIRE_CONFIRMATION, ALLOW_ONCE available/consumed, ALLOW_FOR_SESSION
+valid/exhausted, credential missing, tool fingerprint drift, tool eligibility changed,
+server disabled, request inspection fail, kill switch active — and asserts both project to
+the same canonical pre-side-effect verdict. See §13 for the two deliberately-excluded
+divergences.
+
 ---
 
 ## 5. Credential architecture for Shadow (task 14)
@@ -295,16 +304,37 @@ critical-commit-before-response ordering.
 
 ---
 
-## 10. Kill switch at the boundary (task 12)
+## 10. Kill switch at the boundary — HARD CANARY PREREQUISITE (task 12, PREREQ-MCP-KILL-1)
 
 The kill switch is checked once at the top of `Executor.Execute` but **not re-checked at
-the irreversible boundary** (`run.go` `callUpstream`). For live-capable modes the final
-boundary must re-read the authoritative execution state (kill epoch) immediately before
-the side effect, so a kill engaged during credential planning still stops the call. For
-Shadow, the kill switch must affect the `WOULD_EXECUTE` verdict consistently with live
-(a killed capability yields `WOULD_BLOCK` reason `rollout_emergency_active`). This is the
-concrete task-12 change: add a `killEpoch` to the boundary re-check alongside the
-existing tool-drift re-check.
+the irreversible boundary** (`run.go` `callUpstream`). Between admission and the boundary
+the executor performs a durable decision commit, credential planning and credential
+materialization — all of which can block — so a kill engaged during that window does NOT
+stop an in-flight live call today. The existing OVN-09 tool-drift re-check sits exactly at
+the boundary (`callUpstream` re-invokes `ToolStillCurrent`); the kill re-check does not yet
+join it.
+
+> **Prerequisite (blocking).** **Canary/Production activation is PROHIBITED until the
+> authoritative kill state is revalidated immediately before the irreversible side-effect
+> boundary.** A kill engaged during credential planning or materialization MUST abort the
+> upstream call (`up.calls == 0`), landing as `WOULD_BLOCK` / block reason
+> `rollout_emergency_active`. This is a HARD gate, not a nicety: the kill switch is the
+> operator's only immediate stop, and a stop that a slow commit window can outrun is not a
+> stop.
+
+Scope of the change (deferred; NOT implemented in the Shadow-readiness/Layer-B increment):
+add a `killEpoch` to the boundary re-check alongside the existing tool-drift re-check, so
+the final `callUpstream` re-reads the authoritative execution state before the side effect.
+For Shadow the kill switch already affects the verdict consistently with live at admission
+(a killed capability yields `WOULD_BLOCK` reason `rollout_emergency_active`); the boundary
+re-check matters only for a live-capable mode, which is why it is a Canary prerequisite
+rather than a Shadow one.
+
+Tracking: `PREREQ-MCP-KILL-1` in `docs/engineering/TECHNICAL-DEBT-REGISTER.md`. The gap is
+pinned non-vacuously by `TestCanaryPrerequisite_KillStateNotRevalidatedAtSideEffectBoundary`
+(`internal/mcp/execution`), which drives the admission→boundary window and asserts the
+current (gap-present) behaviour; closing the prerequisite means inverting that assertion to
+`up.calls == 0` and checking off the §12 exit criterion below.
 
 ---
 
@@ -344,15 +374,51 @@ Measurable gates before Canary may even be *reviewed* (rationale, not arbitrary)
 - stable latency (Shadow p99 within budget; no admission saturation).
 - credential planning reliability (readiness derivable without materialization).
 - kill-switch drills pass (engage → next evaluation is `WOULD_BLOCK`).
+- **`PREREQ-MCP-KILL-1` CLOSED** — the authoritative kill state is revalidated immediately
+  before the irreversible side-effect boundary (`run.go` `callUpstream`), so a kill engaged
+  during credential planning/materialization aborts the call (`up.calls == 0`). This is a
+  HARD blocker: Canary/Production activation is prohibited while this is open (§10).
 - restart drills pass (durable evidence survives; no execution replay).
 - observability verified (all series emit; health three-state correct).
 - operator procedure tested (runbook dry-run).
 
-## 13. Posture answers (task 24 anchor)
+## 13. Known Shadow-evidence limitations (deliberate, bounded)
+
+Two divergences between the Shadow prediction and live pre-side-effect behaviour are
+deliberate and documented rather than papered over. Both are safe for Shadow (which never
+executes) but MUST be understood when reading Shadow evidence for a Canary-readiness
+argument.
+
+1. **Allowance prediction is optimistic (peek-only).** The `ShadowEvaluator` predicts an
+   ALLOW_ONCE / ALLOW_FOR_SESSION with a NON-destructive `wouldSatisfy` peek — it never
+   `consume`s, because a Shadow evaluation must be side-effect-free even against in-memory
+   allowance state. A pure Shadow deployment therefore has an allowance store that is always
+   empty (nothing executes to consume a grant), so an allowance already exhausted by real
+   prior execution in a live mode would be predicted `WOULD_EXECUTE`. The differential test
+   pins equivalence by seeding BOTH stores to the same history; in production this means
+   Shadow may OVER-predict `WOULD_EXECUTE` for allowance-gated actions — an
+   over-count of would-execute, never an under-count of a would-block, and never a real
+   execution. Read allowance-gated `WOULD_EXECUTE` as "would execute if the allowance is
+   fresh," not "the allowance is definitely available."
+
+2. **The executor's redundant `Server.Usable()` re-check is not mirrored.** `decide()`
+   predicts the policy + inspection + credential + allowance + drift decision; it does not
+   reproduce the live executor's defense-in-depth `in.Server.Usable()` re-check inside
+   `runExecute`. In practice a disabled/unusable server is signalled by the policy engine as
+   a hard override (which Shadow DOES mirror as `WOULD_FAIL_HARD_CONTROL`), so this matters
+   only in the corner where policy said ALLOW but the server record is independently
+   unusable — a redundant guard, not a primary control. Modelled in the differential via the
+   policy hard-override path, which both sides honour.
+
+Neither limitation can produce a real side effect, a hidden policy block, or a
+`WOULD_EXECUTE` for a policy-denied action (§8 invariant, pinned by
+`TestShadow_PreservesPolicyVerdictSeparately`).
+
+## 14. Posture answers (task 24 anchor)
 
 ```
 Can Observe perform upstream side effects?      NO   (no executor composed)
-Can Shadow perform upstream side effects?       NO   (Layer A: no execute path; Layer B target: no capability object)
+Can Shadow perform upstream side effects?       NO   (Layer A: no execute path; Layer B DONE: ShadowEvaluator holds no upstream client and no materialize-capable broker — structural reflection + AST gates)
 Can Shadow materialize real credentials?        NO   (Plan-only; Materialize structurally unreachable)
 Is a production Executor armed?                 NO   (arming hooks uncalled; AST wall)
 Is Shadow currently enabled?                    NO
