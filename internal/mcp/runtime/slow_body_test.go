@@ -102,6 +102,13 @@ func TestSlowBody_BoundedByRequestDeadlineNotReadTimeout(t *testing.T) {
 		t.Fatalf("the stalled body was released only after %v; RequestDeadline is %v, "+
 			"so the request deadline is not bounding the body read", elapsed, reqDeadline)
 	}
+	// The episode must also be COUNTED. checkBudget and acquireSlot both increment
+	// timeouts when the budget elapses; a stalled body that answers 503 without
+	// counting leaves a slow-upload flood invisible on
+	// culvert_mcp_request_timeouts_total -- the series an operator alerts on.
+	if got := l.ctr.snapshot("gateway", "slow").Timeouts; got != 1 {
+		t.Fatalf("timeouts = %d after one stalled body, want exactly 1", got)
+	}
 	if resp != nil {
 		defer resp.Body.Close()
 		// 503 is the overload answer the budget check and the verification-slot

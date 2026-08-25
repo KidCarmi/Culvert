@@ -346,7 +346,13 @@ func (p *pipeline) processPost(ctx context.Context, req Request, rb *recBuilder,
 	if !ok {
 		if bodyReason == mcperr.ReasonRequestDeadlineExceeded {
 			// Overload, not a client error: same 503 the budget check and the
-			// verification-slot bound answer with.
+			// verification-slot bound answer with -- and counted on the same series.
+			// checkBudget and acquireSlot both increment timeouts when the budget
+			// elapses; omitting it here would leave slow-upload expirations out of
+			// culvert_mcp_request_timeouts_total, understating the exact overload
+			// condition this deadline was added to expose. Counted exactly once: this
+			// branch returns, so the post-decode checkBudget never runs for it.
+			p.ctr.timeouts.Add(1)
 			return p.reject(rb, 503, bodyReason, "")
 		}
 		return p.reject(rb, 413, bodyReason, "")
