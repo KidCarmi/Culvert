@@ -115,6 +115,43 @@ func TestShadow_EmbeddedEvaluatorSharesLiveAllowanceHistory(t *testing.T) {
 	}
 }
 
+// TestRecordsOnly_RoutesOnlyExecutingDispositions pins the runtime-routing contract: the
+// evaluator reports record-only for Observe / Disabled / out-of-scope (so the runtime
+// keeps its inline Observe evidence path) and NOT record-only for an in-scope Shadow
+// evaluation or a killed capability (so Execute handles the evaluation / emergency block).
+// This is what preserves Observe decision evidence on a shadow-ready node and routes a
+// killed node to the emergency block instead of a silent record.
+func TestRecordsOnly_RoutesOnlyExecutingDispositions(t *testing.T) {
+	newEv := func(st *rollout.State) *ShadowEvaluator {
+		e, err := NewShadowEvaluator(ShadowConfig{State: st, Events: realEvents(t, nil)})
+		if err != nil {
+			t.Fatalf("NewShadowEvaluator: %v", err)
+		}
+		return e
+	}
+	inScope := execInput(policy.ActionAllow, false) // server s1 ∈ scope
+	outScope := execInput(policy.ActionAllow, false)
+	outScope.Input.Server = &policy.Server{ServerID: "not-in-scope", Environment: "prod"}
+
+	if newEv(stateForMode(t, rollout.ModeShadow)).RecordsOnly(inScope) {
+		t.Fatal("Shadow in-scope must NOT be record-only (it evaluates via Execute)")
+	}
+	if !newEv(stateForMode(t, rollout.ModeShadow)).RecordsOnly(outScope) {
+		t.Fatal("Shadow out-of-scope must be record-only (Observe behaviour on the inline path)")
+	}
+	if !newEv(stateForMode(t, rollout.ModeObserve)).RecordsOnly(inScope) {
+		t.Fatal("Observe must be record-only")
+	}
+	if !newEv(stateForMode(t, rollout.ModeDisabled)).RecordsOnly(inScope) {
+		t.Fatal("Disabled must be record-only")
+	}
+	killed := stateForMode(t, rollout.ModeShadow)
+	killed.EngageKillSwitch("oncall", 1)
+	if newEv(killed).RecordsOnly(inScope) {
+		t.Fatal("SECURITY: a killed capability must NOT be record-only — Execute must emit the emergency block")
+	}
+}
+
 // forbiddenCapabilityFields returns, for a struct type, the "Field.Method" labels of any
 // field whose type (value OR pointer method set) exposes a Call or Materialize method.
 func forbiddenCapabilityFields(tt reflect.Type) []string {
