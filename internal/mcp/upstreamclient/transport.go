@@ -61,8 +61,19 @@ func (c *Client) roundTrip(ctx context.Context, target Target, body []byte, auth
 		return nil, false, mcperr.Wrap(mcperr.ReasonUpstreamEndpointInvalid, "upstreamclient", "endpoint canonicalize", err)
 	}
 	// Reject only structurally-forbidden endpoint classes here; the authoritative
-	// SSRF classification (private/loopback/metadata handling, honoring the policy's
-	// AllowPrivate for approved internal servers) happens in Resolve + VerifyPeer.
+	// SSRF classification (private/loopback/metadata handling) happens in Resolve +
+	// VerifyPeer.
+	//
+	// destination.Policy — including AllowPrivate — is CLIENT-WIDE, not per-server:
+	// Config carries one Policy and Target carries no override. So AllowPrivate is
+	// not, and must not be read as, "private destinations are permitted for the
+	// approved internal servers that need them": enabling it disables the
+	// private/loopback/metadata rejection for EVERY registered server this client
+	// calls, so a public server whose DNS answer is hostile or compromised could then
+	// reach link-local metadata. PolicyConfig.AllowPrivate is documented as TEST- or
+	// ENVIRONMENT-scoped for that reason and has no production caller. Supporting a
+	// genuinely internal MCP server needs a per-target policy that does not exist
+	// yet — adding one is a design change, not a flag flip.
 	if class == destination.ClassMalformed || class == destination.ClassBlockedScheme {
 		return nil, false, mcperr.New(mcperr.ReasonUpstreamEndpointInvalid, "upstreamclient", "endpoint scheme/form not permitted")
 	}
