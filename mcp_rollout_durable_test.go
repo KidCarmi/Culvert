@@ -44,11 +44,25 @@ func gwObserveCfg() *rollout.SignedConfig {
 	}
 }
 
-// withExecDepsReady flips the Gateway execution-dependency flag for the duration of a
-// test so an executing-mode transition can be exercised, then restores it. It uses the
-// real production hook (markGatewayExecDepsReady) so the future guarded-execution
-// composition is exercised end to end.
+// withExecDepsReady flips the Gateway SHADOW-readiness flag for the duration of a test
+// so a Shadow transition can be exercised, then restores it. These durable tests
+// exercise the Shadow mode, which after the readiness split gates on the shadow tier
+// (shadowDepsConfigured), so it uses the real Shadow composition hook
+// (markGatewayShadowDepsReady) — NOT the live-execution hook, which stays uncalled.
 func withExecDepsReady(t *testing.T) {
+	t.Helper()
+	prev := globalExecDeps.shadowGateway.Load()
+	markGatewayShadowDepsReady()
+	t.Cleanup(func() { globalExecDeps.shadowGateway.Store(prev) })
+}
+
+// withLiveExecDepsReady arms the LIVE-execution tier for the duration of a test so a
+// Canary/Production transition can be exercised end to end (evidence-window mechanics).
+// It is deliberately SEPARATE from withExecDepsReady: a test that only needs Shadow must
+// not arm the live tier, so the readiness split stays honestly exercised. Nothing in
+// production ever calls markGatewayExecDepsReady (pinned by the execution-posture wall);
+// this is test-only arming to reach the Canary code path.
+func withLiveExecDepsReady(t *testing.T) {
 	t.Helper()
 	prev := globalExecDeps.gateway.Load()
 	markGatewayExecDepsReady()
@@ -383,9 +397,9 @@ func TestDurable_RestoreClampsExecutingModeWithoutDeps(t *testing.T) {
 	if err := r.commitRolloutTransition(gwShadowCfg(1), "admin", time.Unix(1000, 0)); err != nil {
 		t.Fatal(err)
 	}
-	// Now simulate the shipped build (no exec deps) and restart: the persisted Shadow
+	// Now simulate the shipped build (no shadow deps) and restart: the persisted Shadow
 	// mode must be clamped to Disabled (fail-closed), not surfaced as executing.
-	globalExecDeps.gateway.Store(false)
+	globalExecDeps.shadowGateway.Store(false)
 	r2 := newTestRollout()
 	r2.restore()
 	if r2.gateway.CurrentMode() != rollout.ModeDisabled {
@@ -409,10 +423,10 @@ func TestDurable_ManagementExecDepsGate(t *testing.T) {
 	if err := r.commitRolloutTransition(mgShadow, "cp", time.Unix(1000, 0)); err != errShadowExecDepsNotConfigured {
 		t.Fatalf("management shadow must fail closed without deps, got %v", err)
 	}
-	// With management exec deps (real hook): the transition proceeds.
-	prev := globalExecDeps.management.Load()
-	markManagementExecDepsReady()
-	t.Cleanup(func() { globalExecDeps.management.Store(prev) })
+	// With management shadow deps (real hook): the transition proceeds.
+	prev := globalExecDeps.shadowManagement.Load()
+	markManagementShadowDepsReady()
+	t.Cleanup(func() { globalExecDeps.shadowManagement.Store(prev) })
 	if err := r.commitRolloutTransition(mgShadow, "cp", time.Unix(2000, 0)); err != nil {
 		t.Fatalf("management shadow with deps: %v", err)
 	}
@@ -441,7 +455,8 @@ func gwCanaryCfg(rev uint64, servers ...string) *rollout.SignedConfig {
 // two disjoint Shadow periods are never treated as one continuous window.
 func TestDurable_ShadowWindowRestartsAfterCanaryDemotion(t *testing.T) {
 	withTempDataDir(t)
-	withExecDepsReady(t)
+	withExecDepsReady(t)     // shadow tier — for the Shadow legs
+	withLiveExecDepsReady(t) // live tier — this test also exercises the Canary leg
 	r := newTestRollout()
 	// Shadow at t=1000.
 	if err := r.commitRolloutTransition(gwShadowCfg(1), "admin", time.Unix(1000, 0)); err != nil {

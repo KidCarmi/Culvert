@@ -266,7 +266,7 @@ func applyMCPCapabilityEnvelope(a *apply.Applier, env *cpdp.Envelope, capb cpdp.
 			logger.Printf("MCP %s snapshot rejected: rollout capability mismatch (distribution not applied)", capb.String())
 			return
 		}
-		if cfg.Mode.RequiresExecutionPlane() && !execDepsConfigured(mgmt) {
+		if !modeExecReady(cfg.Mode, mgmt) {
 			_ = a.RejectAck(env, errShadowExecDepsNotConfigured)
 			logger.Printf("MCP %s snapshot rejected: rollout %s requires execution dependencies (fail-closed; distribution not applied, no AckApplied)",
 				capb.String(), cfg.Mode.String())

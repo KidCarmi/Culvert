@@ -89,7 +89,10 @@ func apiMCPRolloutTransition(w http.ResponseWriter, r *http.Request) {
 				capbManagement = parsed == rollout.CapabilityManagement
 			}
 		}
-		if !execDepsConfigured(capbManagement) {
+		// The readiness TIER the target mode requires must be composed: Shadow needs
+		// only the non-executing shadow plane; Canary needs the live-execution plane
+		// (never composed in this build). modeExecReady owns the shadow-vs-live split.
+		if !modeExecReady(to, capbManagement) {
 			http.Error(w, "shadow_execution_dependencies_not_configured", http.StatusConflict)
 			return
 		}

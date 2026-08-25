@@ -175,8 +175,11 @@ func (r *mcpRollout) commitRolloutTransitionAt(cfg *rollout.SignedConfig, actor 
 	r.durableMu.Lock()
 	defer r.durableMu.Unlock()
 	st := r.stateFor(cfg.Capability)
-	// (1) Execution-dependency precondition: fail closed for an executing mode.
-	if cfg.Mode.RequiresExecutionPlane() && !execDepsConfigured(cfg.Capability == rollout.CapabilityManagement) {
+	// (1) Execution-dependency precondition: fail closed unless the readiness TIER the
+	// target mode requires is composed. Shadow requires only the non-executing shadow
+	// plane; Canary/Production require the live-execution plane (never composed in this
+	// build). modeExecReady owns the shadow-vs-live split.
+	if !modeExecReady(cfg.Mode, cfg.Capability == rollout.CapabilityManagement) {
 		return errShadowExecDepsNotConfigured
 	}
 	// Snapshot the prior state for a fail-closed rollback if persistence fails, and
@@ -246,10 +249,10 @@ func (r *mcpRollout) restore() {
 			// shipped build the exec-deps gate blocks such a state from ever being
 			// persisted, so this only fires against a hand-crafted state file — clamp it
 			// to Disabled (fail-closed) rather than surface a misleading executing label.
-			if st.CurrentMode().RequiresExecutionPlane() && !execDepsConfigured(st.Capability() == rollout.CapabilityManagement) {
+			if !modeExecReady(st.CurrentMode(), st.Capability() == rollout.CapabilityManagement) {
 				_ = st.SetConfig(rollout.DisabledConfig(st.Capability()), "restore-clamp", time.Now().UnixNano())
 				r.setPersistStatus(st.Capability(), "degraded")
-				logger.Printf("MCP rollout restore for %s: refused executing mode without execution deps; clamped to Disabled", st.Capability().String())
+				logger.Printf("MCP rollout restore for %s: refused executing mode without required execution deps; clamped to Disabled", st.Capability().String())
 				continue
 			}
 			r.setPersistStatus(st.Capability(), "recovered")

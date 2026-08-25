@@ -35,6 +35,20 @@ func TestModeParseAndRank(t *testing.T) {
 	if ModeShadow.FullyEnforces() || !ModeCanary.FullyEnforces() {
 		t.Fatal("FullyEnforces wrong")
 	}
+	// RequiresLiveExecution is the STRICT subset that excludes Shadow: after Layer B,
+	// Shadow composes the evaluation plane but performs NO real upstream side effect, so
+	// it must NOT require live-execution readiness. Only Canary/Production do. This is the
+	// predicate the readiness split relies on — Shadow gating on it would re-introduce the
+	// coupling this phase removes.
+	if ModeShadow.RequiresLiveExecution() {
+		t.Fatal("Shadow must not require live execution (Layer B: no upstream side effect)")
+	}
+	if ModeObserve.RequiresLiveExecution() || ModeDisabled.RequiresLiveExecution() {
+		t.Fatal("Observe/Disabled must not require live execution")
+	}
+	if !ModeCanary.RequiresLiveExecution() || !ModeProduction.RequiresLiveExecution() {
+		t.Fatal("Canary/Production must require live execution")
+	}
 }
 
 func TestPromotionOneStageOnly(t *testing.T) {
