@@ -98,13 +98,26 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 	}); err != nil {
 		// A drift refusal is not a transport or durability fault, and must not be
 		// classified as one: it is the decision-staleness reason the runtime's own
-		// entry check uses, so both refusals read identically to an operator.
+		// entry check uses, so both refusals read identically to an operator. This
+		// branch carries the NO-credential path, whose callUpstream error escapes
+		// CommitThenAct verbatim.
 		if staleAtCall {
 			return e.blocked(in, mcperr.ReasonDecisionSnapshotStale, false)
 		}
 		return e.blocked(in, mcperr.ReasonOf(err), false)
 	}
 	if didBlock {
+		// The CREDENTIAL path never lets callUpstream's error escape CommitThenAct:
+		// materializeAndCall swallows it into a blocked ExecOutput whose reason is
+		// ReasonOf(errToolDriftedBeforeCall) == ReasonNone (the sentinel is
+		// package-private and unregistered). A drift detected inside the broker
+		// callback must therefore be reclassified HERE too, or clients and block
+		// telemetry would read `none` where the no-credential path reads
+		// `decision_snapshot_stale`. staleAtCall is set only by callUpstream, so on
+		// this branch it is true iff the block was the drift refusal.
+		if staleAtCall {
+			return e.blocked(in, mcperr.ReasonDecisionSnapshotStale, false)
+		}
 		return blockedOut
 	}
 
