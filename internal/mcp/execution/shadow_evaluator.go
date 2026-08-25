@@ -314,21 +314,16 @@ func requestInspectionStatus(in runtime.ExecInput) string {
 // the raw policy action; the enforcement prediction rides in the Shadow-outcome fields so
 // the archive can reconstruct WHY the evaluation reached its verdict without materializing
 // a secret or making an upstream call.
-func shadowDecisionFacts(in runtime.ExecInput, d ShadowDecision) events.DecisionFacts {
+func shadowDecisionFacts(in runtime.ExecInput, _ ShadowDecision) events.DecisionFacts {
 	facts := decisionFacts(in)
+	// Mark the record a shadow evaluation via the EXISTING ExecutionState field only — a
+	// known, digest-safe value change, not a new field. The ShadowDecision sub-facts are
+	// deliberately NOT stamped into this schema_version:1 envelope: adding digest-covered
+	// fields would misverify valid shadow events on a binary rollback (Codex P2, PR #1226).
+	// The full decision rides the transient response body; durable persistence with a v2
+	// envelope is deferred to the Shadow-activation slice (SHADOW-EVIDENCE-ROUTING-1). The
+	// ShadowDecision argument is retained for signature stability and that future wiring.
 	facts.Decision.ExecutionState = "shadow_evaluated"
-	facts.Decision.ShadowOutcome = string(d.Outcome)
-	facts.Decision.ShadowOverride = d.ShadowOverride
-	// Persist the ShadowDecision SUB-FACTS too (Codex P2), not just the final outcome: the
-	// durable archive must let a Canary-readiness analysis distinguish, within one outcome,
-	// a valid credential plan from an unplanned/absent one and a passed request inspection
-	// from an un-evaluated one — otherwise two WOULD_EXECUTE records are indistinguishable
-	// and the readiness analysis promised by SHADOW-ARCHITECTURE.md lives only in the
-	// transient response body.
-	facts.Decision.ShadowCredentialPlan = d.CredentialPlan
-	facts.Decision.ShadowMaterializeReady = d.MaterializeReady
-	facts.Decision.ShadowRequestInspection = d.RequestInspection
-	facts.Decision.ShadowResponseInspection = d.ResponseInspection
 	return facts
 }
 

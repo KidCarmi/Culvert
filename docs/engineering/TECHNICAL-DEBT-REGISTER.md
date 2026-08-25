@@ -357,3 +357,23 @@
 - **Evidence:** `docs/design/mcp/SHADOW-ARCHITECTURE.md` §13 (limitation 3);
   `internal/mcp/runtime/policy.go` (inspection block), `internal/mcp/runtime/execute.go`
   (refuseOnToolDrift).
+
+## SHADOW-EVIDENCE-ROUTING-1 addendum — Durable Shadow sub-facts need a v2 envelope (2026-08-25)
+- **Principal:** The Shadow enforcement-prediction sub-facts (shadow_outcome/override,
+  credential-plan status, request/response inspection readiness) are NOT persisted as new
+  fields on the `schema_version:1` event envelope. Adding digest-covered fields in place is a
+  binary-rollback hazard: a pre-change reader drops the unknown JSON fields on unmarshal,
+  recomputes `CanonicalBytes` without them, and `VerifyDigest` misreports a valid shadow
+  record as corrupted (the model fails closed on an unknown schema version, but the fields
+  were added under v1, so it never gets that far). Found by Codex on PR #1226 (4bbf211).
+- **Status:** OPEN, deferred by design. Today a shadow evaluation is marked durably only by
+  the existing `ExecutionState = "shadow_evaluated"` value (digest-safe), and the full
+  ShadowDecision rides the response body. Execution is disabled, so no shadow event is ever
+  written in production.
+- **Fix:** in the Shadow-activation slice, introduce `schema_version:2` for the expanded
+  envelope with explicit v1/v2 recovery handling (a v2 event is rejected as "unknown schema
+  version" by a v1 reader — honest — rather than misverified), and stamp the sub-facts only
+  on v2 shadow events. Then `shadowDecisionFacts` populates the durable sub-facts.
+- **Evidence:** `internal/mcp/events/model/model.go` (DecisionEvidence note),
+  `internal/mcp/execution/shadow_evaluator.go` (`shadowDecisionFacts`),
+  `docs/design/mcp/SHADOW-ARCHITECTURE.md` §9.

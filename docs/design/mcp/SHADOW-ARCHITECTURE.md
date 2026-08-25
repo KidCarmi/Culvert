@@ -299,6 +299,18 @@ materialized credentials · upstream Authorization headers · secrets · raw sen
 request body beyond existing retention policy. Enforced by the existing redaction
 backstop that rejects any event containing secret patterns.
 
+**Current implementation state (this architecture-only increment).** The list above is the
+DESIGN target. Today a shadow evaluation commits a durable record marked by the existing
+`ExecutionState = "shadow_evaluated"` field (a digest-safe value on the current
+`schema_version:1` envelope), and the FULL ShadowDecision — outcome, credential-plan and
+inspection readiness — rides the transient JSON-RPC response body. The
+enforcement-prediction SUB-FACTS are deliberately NOT added as new digest-covered fields on
+v1: doing so would misverify valid shadow events after a binary rollback (a pre-change
+reader drops the unknown fields and recomputes a different `CanonicalBytes` digest — Codex
+P2, PR #1226). Persisting them durably requires a `schema_version:2` envelope with explicit
+v1/v2 recovery, which belongs in the reviewed Shadow-activation slice (execution is disabled
+here, so no shadow event is ever written). Tracked as `SHADOW-EVIDENCE-ROUTING-1`.
+
 Evidence is durable **before** Shadow reports success, consistent with the existing
 critical-commit-before-response ordering.
 

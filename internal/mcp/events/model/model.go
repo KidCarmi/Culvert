@@ -317,22 +317,17 @@ type DecisionEvidence struct {
 	OperationClass      string   `json:"operation_class,omitempty"`
 	RiskClass           string   `json:"risk_class,omitempty"`
 	ExecutionState      string   `json:"execution_state,omitempty"`
-	// ShadowOutcome + ShadowOverride carry a Shadow evaluation's Model-1 enforcement
-	// prediction into the durable archive (execution_state == "shadow_evaluated"). They
-	// are omitempty and are set on NO other path, so every pre-existing event serialises
-	// byte-identically and its digest is unchanged. Action above always stays the RAW
-	// policy verdict, so the archive preserves the policy decision separately from what a
-	// fully-enforcing mode would have done (§8/§11).
-	ShadowOutcome  string `json:"shadow_outcome,omitempty"`
-	ShadowOverride bool   `json:"shadow_override,omitempty"`
-	// The ShadowDecision SUB-FACTS: within one outcome they distinguish a valid credential
-	// plan from an absent/unplanned one and a passed request inspection from an un-evaluated
-	// one, so a Canary-readiness analysis can be reconstructed from the durable record and
-	// not only from the transient response. Same omitempty/shadow-only discipline as above.
-	ShadowCredentialPlan     string `json:"shadow_credential_plan,omitempty"`
-	ShadowMaterializeReady   string `json:"shadow_materialization_ready,omitempty"`
-	ShadowRequestInspection  string `json:"shadow_request_inspection,omitempty"`
-	ShadowResponseInspection string `json:"shadow_response_inspection,omitempty"`
+	// NOTE (Codex P2, PR #1226): the Shadow enforcement-prediction sub-facts
+	// (shadow_outcome/override, credential-plan and inspection readiness) are DELIBERATELY
+	// NOT persisted as new digest-covered fields on this schema_version:1 envelope. Adding
+	// them here would be a rollback hazard — a pre-change binary reading a shadow event
+	// drops the unknown fields on unmarshal, recomputes CanonicalBytes without them, and
+	// misreports the valid record as corrupted. Durable shadow-evidence persistence needs
+	// its own schema version (v2, with explicit v1/v2 recovery) and belongs in the reviewed
+	// Shadow-activation slice (execution is disabled here, so no shadow event is ever
+	// written). Today a shadow evaluation is marked ONLY by the existing ExecutionState
+	// value "shadow_evaluated" (a known field, digest-safe), and the full ShadowDecision is
+	// carried in the transient response body. Tracked as SHADOW-EVIDENCE-ROUTING-1.
 }
 
 // InspectionEvidence records only sanitized inspection facts (MCP-INSP-*). No
