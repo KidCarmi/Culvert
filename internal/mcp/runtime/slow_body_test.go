@@ -64,7 +64,10 @@ func TestSlowBody_BoundedByRequestDeadlineNotReadTimeout(t *testing.T) {
 	srv.Start()
 	defer srv.Close()
 
-	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer dialCancel()
+	var d net.Dialer
+	conn, err := d.DialContext(dialCtx, "tcp", addr)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
