@@ -86,6 +86,27 @@ counted as emitted; it passed only because the file that would have exposed it h
 contain no emitting functions. Both are fixed and both directions are now pinned
 (`emitted ⊆ classified` and `classified ⊆ emitted`).
 
+**A mutation sweep reported two false SURVIVED verdicts, and following them would have
+weakened a correct control.** Sweeping mutations across this review's own fixes, two came
+back "no test caught this": the OVN-07 per-connection budget and the duplicate-security-header
+rejection. Both were wrong, and for the same reason — the mutation did not change behaviour.
+
+For OVN-07 the mutation rewrote `if relConn, ok := acquireConnBudget(ctx); ok` into
+`ok || true`. But a request that cannot get a slot *blocks inside* `acquireConnBudget` on the
+semaphore; it only returns `false` when the context is done. So the altered branch was never
+reached and the mutant was semantically identical to the original. Replacing it with a real
+bypass — substituting a function that always grants — immediately produced
+`peak_queued=36` against a 4-worker pool and failed the test with its intended message. The
+control works and the test is a genuine gate.
+
+The lesson is about the harness, not the code: **a mutation must be shown to change behaviour
+before "survived" means anything.** A sweep that skips that step manufactures phantom gaps in
+exactly the places a reviewer is most likely to act on them — the natural next step from
+"survived" is to strengthen the test, and the step after that is to conclude the control is
+not doing anything. Diagnosing this one also corrected a second error of mine: I had read
+`len(bk.entered)` as evidence of concurrency when it is sampled *after* the fixture is
+released, so it measures nothing.
+
 ## 4. Verification
 
 Exit codes captured directly from `go test`, never inferred from piped or truncated output.
@@ -102,6 +123,9 @@ Exit codes captured directly from `go test`, never inferred from piped or trunca
 | `golangci-lint` | **NOT AVAILABLE** — installed binary is built with go1.25 and panics on this go1.26 module. Not remedied: changing the toolchain to satisfy a scanner was out of scope. |
 | `govulncheck` | **NOT AVAILABLE** — installs and builds against go1.26, but `vuln.go.dev` is blocked by the environment's network policy (403 at the proxy). No local database available. |
 | `gosec`, `gitleaks`, `trivy` | **NOT AVAILABLE** — not installed in this environment. |
+| Mutation sweep over this review's controls | PASS — OVN-04, OVN-07, OVN-09 and the duplicate-header rejection each fail their own test under a *behaviour-changing* mutation (see above). |
+| `go test -race ./internal/mcp/... ./internal/mcpacceptance/...` | PASS (exit 0) |
+| `go test -race -shuffle=on ./internal/mcp/...` | PASS (exit 0) |
 
 Fuzz targets exercised: jsonrpc decode; authn JWT / claims / introspection; JOSE JWK parse;
 runtime pipeline, credential parse and transport method; protocol negotiation; policy
