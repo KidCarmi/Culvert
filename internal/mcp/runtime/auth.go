@@ -236,6 +236,17 @@ func (p *pipeline) acquireSlot(ctx context.Context, sem chan struct{}) (func(), 
 	}
 	select {
 	case sem <- struct{}{}:
+		// A select whose cases are BOTH ready picks uniformly at random, so under
+		// saturation a slot freeing at the instant the budget expires lands here half
+		// the time -- and verification would then start on a request whose deadline
+		// has already passed, defeating the bound and misclassifying the result as a
+		// credential verdict instead of a timeout. Re-check and hand the slot straight
+		// back; a request past its budget must not consume a scarce security bound.
+		if ctx.Err() != nil {
+			<-sem
+			p.ctr.timeouts.Add(1)
+			return nil, mcperr.New(mcperr.ReasonRequestDeadlineExceeded, "runtime.auth", "request budget elapsed before the verification slot was used")
+		}
 		return func() { <-sem }, nil
 	case <-ctx.Done():
 		p.ctr.timeouts.Add(1)
