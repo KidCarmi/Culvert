@@ -1,6 +1,7 @@
 package authn
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
@@ -187,5 +188,56 @@ func TestVerified_ConfigIdentityIsContentAddressed(t *testing.T) {
 		if diff(in) == baseID {
 			t.Fatalf("changing %s did not change the config identity", name)
 		}
+	}
+}
+
+// A VerifiedCredential is a PROOF that a credential was cryptographically
+// validated, and AuthenticateVerified cross-checks a caller's asserted principals
+// against the claims it stores. Exposing those claims as a pointer made that
+// cross-check self-referential: mutate the stored issuer/tenant/subject/client and
+// the assertions that "match" are matching the mutation, not the validated token.
+//
+// The type must therefore expose no handle through which its verified state can be
+// edited. This is a structural test because the property is an ABSENCE — no
+// behavioural test can prove a method that does not exist.
+func TestVerified_ExposesNoMutableHandleOnItsClaims(t *testing.T) {
+	vt := reflect.TypeOf(&VerifiedCredential{})
+	claimsType := reflect.TypeOf(Claims{})
+	for i := 0; i < vt.NumMethod(); i++ {
+		m := vt.Method(i)
+		for r := 0; r < m.Type.NumOut(); r++ {
+			out := m.Type.Out(r)
+			// A pointer to the claim set, or the struct by value carrying its slices,
+			// both hand back state the holder can change.
+			if out == reflect.PointerTo(claimsType) || out == claimsType {
+				t.Errorf("method %s returns %s: the verified claim set must not escape as a "+
+					"mutable handle — expose value copies of the scalars a caller needs instead",
+					m.Name, out)
+			}
+			if out.Kind() == reflect.Slice || out.Kind() == reflect.Map || out.Kind() == reflect.Pointer {
+				t.Errorf("method %s returns %s: a slice, map or pointer shares backing state "+
+					"with the proof object and reintroduces the same defect", m.Name, out)
+			}
+		}
+	}
+}
+
+// The scalar accessors must report what was actually validated, so replacing the
+// pointer with copies did not also disconnect them from the verified claims.
+func TestVerified_ScalarAccessorsReportTheValidatedClaims(t *testing.T) {
+	v := &VerifiedCredential{claims: &Claims{
+		Issuer: "https://idp.example", Subject: "sub-1", ClientID: "client-1", Tenant: "tenant-1",
+	}}
+	if got := v.Issuer(); got != "https://idp.example" {
+		t.Errorf("Issuer() = %q", got)
+	}
+	if got := v.Subject(); got != "sub-1" {
+		t.Errorf("Subject() = %q", got)
+	}
+	if got := v.ClientID(); got != "client-1" {
+		t.Errorf("ClientID() = %q", got)
+	}
+	if got := v.Tenant(); got != "tenant-1" {
+		t.Errorf("Tenant() = %q", got)
 	}
 }

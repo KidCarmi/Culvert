@@ -66,32 +66,58 @@ func TestEvidence_DecisionFactsCarryTheFullTarget(t *testing.T) {
 	}
 }
 
-// The OUTCOME event must not relabel a destructive execution as an ordinary read.
-// The pre-fix code set ActionClassRead unconditionally, so the archive's record of
-// what a destructive call actually DID contradicted its own decision event.
-func TestEvidence_OutcomeKeepsTheRealActionClass(t *testing.T) {
-	cases := []struct {
-		class policy.OperationClass
-		want  model.ActionClass
-	}{
-		{policy.OpRead, model.ActionClassRead},
-		{policy.OpWrite, model.ActionClassWrite},
-		{policy.OpDestructive, model.ActionClassDestructive},
-	}
-	for _, c := range cases {
+// The OUTCOME event must actually COMMIT for every operation class — including the
+// mutating ones, which are the only executions whose outcome anyone needs.
+//
+// This test previously asserted struct fields on outcomeFacts and nothing else. It
+// passed while asserting an impossible combination: ordinary criticality carrying a
+// write/destructive ActionClass, which model.Event.Validate rejects outright
+// ("critical action class on an ordinary event"). Because the outcome commit is
+// best-effort and its error was discarded, every mutating execution silently lost
+// its outcome evidence — and the test that was supposed to guard the evidence was
+// the thing asserting the broken shape.
+//
+// It now commits through a REAL events.Manager. Reading back fields can only tell
+// you the fields are what you set; committing tells you the event exists.
+func TestEvidence_OutcomeCommitsForEveryOperationClass(t *testing.T) {
+	for _, class := range []policy.OperationClass{policy.OpRead, policy.OpWrite, policy.OpDestructive} {
+		mgr := realEvents(t, nil)
 		in := execInput(policy.ActionAllow, false)
-		in.Input.Operation.Class = c.class
+		in.Input.Operation.Class = class
+
 		f := outcomeFacts(in)
-		if f.ActionClass != c.want {
-			t.Fatalf("op class %v ⇒ outcome ActionClass %v, want %v", c.class, f.ActionClass, c.want)
+		rec, err := mgr.CommitDecision(f)
+		if err != nil {
+			t.Fatalf("op class %v: outcome event was REJECTED and would be silently lost: %v", class, err)
 		}
-		// The outcome stays ORDINARY criticality by design (it is emitted after the
-		// side effect and must never block the response).
-		if f.Criticality != model.CritOrdinary {
-			t.Fatalf("outcome criticality = %v, want ordinary", f.Criticality)
+		if !rec.Valid() {
+			t.Fatalf("op class %v: outcome commit returned no valid receipt", class)
+		}
+		// The real classification must survive on the field that carries it, so no
+		// consumer has to infer the operation from ActionClass.
+		if got := f.Decision.OperationClass; got != class.String() {
+			t.Fatalf("op class %v: outcome OperationClass = %q, want %q", class, got, class.String())
 		}
 		if f.Decision.ExecutionState != "executed" {
-			t.Fatalf("outcome ExecutionState = %q, want executed", f.Decision.ExecutionState)
+			t.Fatalf("op class %v: outcome ExecutionState = %q, want executed", class, f.Decision.ExecutionState)
+		}
+	}
+}
+
+// The criticality/action-class pair is a model invariant, not a local convention:
+// setting one without the other is what produced an unvalidatable event. Pin the
+// pairing directly so a future edit to either side has to keep them coupled.
+func TestEvidence_OutcomePairIsAlwaysValid(t *testing.T) {
+	for _, class := range []policy.OperationClass{policy.OpRead, policy.OpWrite, policy.OpDestructive} {
+		in := execInput(policy.ActionAllow, false)
+		in.Input.Operation.Class = class
+		f := outcomeFacts(in)
+		if f.Criticality == model.CritOrdinary && f.ActionClass.IsCritical() {
+			t.Fatalf("op class %v: ordinary outcome carries critical action class %v — "+
+				"model.Event.Validate rejects this pairing", class, f.ActionClass)
+		}
+		if f.Criticality == model.CritCritical && !f.ActionClass.IsCritical() {
+			t.Fatalf("op class %v: critical outcome lacks a critical action class", class)
 		}
 	}
 }

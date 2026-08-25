@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -284,5 +287,79 @@ func TestMCPHealth_PollerDoesNotRunWhenMCPWasNeverRequested(t *testing.T) {
 	case d := <-fired:
 		t.Fatalf("a node that never requested MCP produced an alert: %q", d)
 	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// initMCPRuntime has two early-return startup-failure branches (NewRuntime and
+// Start). Both mark the capability invalid — "configured but not serving", the
+// fault most worth paging on, an MCP port already in use being the obvious case.
+//
+// The poller was originally called at the END of initMCPRuntime, so neither branch
+// reached it and exactly those faults stayed silent until something scraped
+// /healthz — the dependency the poller exists to remove. It is now deferred, which
+// covers every return path including ones a later edit introduces.
+//
+// This test pins the structure, because the behaviour it protects is an ABSENCE (no
+// alert on a path not taken) that no unit test of the poller itself can observe.
+func TestMCPHealth_PollerIsDeferredSoStartupFailuresStillAlert(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "mcp_runtime.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse mcp_runtime.go: %v", err)
+	}
+	var fn *ast.FuncDecl
+	for _, d := range f.Decls {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Name.Name == "initMCPRuntime" {
+			fn = fd
+			break
+		}
+	}
+	if fn == nil {
+		t.Fatal("initMCPRuntime not found; this wall is not reading the startup path")
+	}
+
+	deferred, called := false, false
+	ast.Inspect(fn, func(n ast.Node) bool {
+		if _, ok := n.(*ast.DeferStmt); ok {
+			ast.Inspect(n, func(m ast.Node) bool {
+				if id, ok := m.(*ast.Ident); ok && id.Name == "startMCPHealthAlertPoller" {
+					deferred = true
+				}
+				return true
+			})
+			return true
+		}
+		if id, ok := n.(*ast.Ident); ok && id.Name == "startMCPHealthAlertPoller" {
+			called = true
+		}
+		return true
+	})
+	if !called {
+		t.Fatal("initMCPRuntime no longer starts the health-alert poller at all")
+	}
+	if !deferred {
+		t.Fatal("startMCPHealthAlertPoller is called but not DEFERRED in initMCPRuntime: " +
+			"the startup-failure branches return early, so a capability that failed to bind " +
+			"would never start the poller and its fault would stay silent until something " +
+			"read /healthz")
+	}
+}
+
+// The invalid-startup state must actually be one the poller acts on: configured,
+// faulted, and therefore alertable. If Faulted() ever stopped covering it, the
+// deferred call above would start a poller that reports nothing.
+func TestMCPHealth_InvalidStartupIsAFaultThePollerAlertsOn(t *testing.T) {
+	withMCPStatus(t, mcpObserveActivation{State: mcpObserveInvalid, EnableRequested: true, Reason: "runtime_start_failed"})
+	snap := mcpHealthState()
+	if !snap.Configured {
+		t.Fatal("a requested-but-failed MCP capability must count as configured")
+	}
+	if !snap.Faulted() {
+		t.Fatalf("state %q after a startup failure is not Faulted(); no alert would fire", snap.State)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	if !startMCPHealthAlertPoller(ctx) {
+		t.Fatal("the poller refused to start for a failed-startup capability")
 	}
 }

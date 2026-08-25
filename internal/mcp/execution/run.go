@@ -121,7 +121,13 @@ func (e *Executor) finishUpstream(ctx context.Context, in runtime.ExecInput, upR
 	}
 
 	// Best-effort outcome event (ordinary criticality; never blocks the response).
-	_, _ = e.cfg.Events.CommitDecision(outcomeFacts(in))
+	// Best-effort means the RESPONSE is not blocked — it does not mean the loss is
+	// invisible. Discarding this error is how an outcome event that failed validation
+	// went unnoticed for every mutating execution; a rejected commit here is a defect
+	// in the facts, not a transient, so it must be able to reach a human.
+	if _, cerr := e.cfg.Events.CommitDecision(outcomeFacts(in)); cerr != nil {
+		e.cfg.Metrics.ObserveOutcomeEvidenceLoss(in.Capability.String())
+	}
 	e.cfg.Metrics.ObserveExecution(in.Capability.String(), true)
 
 	effective := "execute"
@@ -280,12 +286,24 @@ func subjectKindString(k policy.SubjectKind) string {
 // successful execution (best-effort; never blocks the response).
 func outcomeFacts(in runtime.ExecInput) events.DecisionFacts {
 	f := decisionFacts(in)
-	// The outcome is ORDINARY criticality by design — it is emitted after the side
-	// effect and must never block the response. Its ACTION CLASS, however, must stay
-	// the real one: relabelling every outcome as a read (the pre-fix behavior) made
-	// the archive's record of what a destructive call DID contradict its own
-	// decision event.
-	f.Criticality = model.CritOrdinary
+	// Criticality and ActionClass are ONE coupled pair, and model.Event.Validate
+	// enforces it: an ordinary event carrying a critical action class is rejected
+	// ("critical action class on an ordinary event"). They must therefore be set
+	// together or not at all.
+	//
+	// A previous version of this function set only Criticality, leaving the write or
+	// destructive ActionClass inherited from decisionFacts. Every mutating execution
+	// then produced an outcome event that failed validation — and because the commit
+	// below is best-effort, the failure was discarded and the evidence vanished
+	// silently. That is strictly worse than the mislabelling it was meant to fix: an
+	// outcome that says "read" is wrong, an outcome that does not exist is unknowable.
+	//
+	// The outcome stays ORDINARY: it is emitted after the side effect, so its
+	// durability policy must not be able to drive the critical domain degraded for an
+	// operation that already happened. The real classification is not lost — it rides
+	// on Decision.OperationClass, which decisionFacts sets from the actual operation
+	// class and which no downstream consumer has to infer from ActionClass.
+	f.Criticality, f.ActionClass = model.CritOrdinary, model.ActionClassRead
 	f.Decision.ExecutionState = "executed"
 	return f
 }

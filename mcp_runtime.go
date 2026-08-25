@@ -38,6 +38,19 @@ func initMCPRuntime(s *startupState) {
 	cfg, act := loadMCPObserveRuntime(resolveMCPObserveStartupConfig(s.fc))
 	setMCPObserveStatus(act)
 
+	// RISK-027: evaluate capability health on a timer, so a fault alerts even on a
+	// deployment that never reads /healthz. DEFERRED, not called at the end of the
+	// function: both startup-failure branches below mark the capability invalid and
+	// return early, and those are precisely the faults most worth paging on — an MCP
+	// port already in use produces a node that is "configured but not serving" and
+	// would otherwise stay silent until something scraped /healthz. A deferred call
+	// runs on every return path, including ones a later edit adds.
+	//
+	// It reads the status published above rather than `act`, so an invalid marking
+	// made inside those branches is what it sees. No-ops when MCP was never
+	// requested, so the disabled default still spawns nothing.
+	defer func() { _ = startMCPHealthAlertPoller(context.Background()) }()
+
 	rt, err := mcpruntime.NewRuntime(cfg)
 	if err != nil {
 		// A disabled config never fails validation; an enabled-but-invalid config was
@@ -79,10 +92,6 @@ func initMCPRuntime(s *startupState) {
 	if reg, _ := mcpInventory.sharedInventory(); reg != nil || sharedTelemetry() != nil {
 		_ = getMCPAdmin()
 	}
-	// RISK-027: evaluate capability health on a timer, so a dead listener alerts
-	// even on a deployment that never reads /healthz. No-ops when MCP was not
-	// requested, so the disabled default spawns nothing.
-	_ = startMCPHealthAlertPoller(context.Background())
 }
 
 // setMCPObserveStatus publishes the activation summary for the health surface.

@@ -146,7 +146,7 @@ func (p *pipeline) authenticate(ctx context.Context, req Request, sess *session.
 	if err != nil {
 		return nil, err
 	}
-	authReq, err := p.buildAuthRequest(req, cred, verified.Claims())
+	authReq, err := p.buildAuthRequest(req, cred, verified)
 	if err != nil {
 		return nil, err
 	}
@@ -179,20 +179,23 @@ func (p *pipeline) authenticate(ctx context.Context, req Request, sess *session.
 // satisfy the operator's MinAssurance floor and every `principal.assurance` policy
 // condition. Nothing in this function may read an unverified request field into the
 // assurance decision again.
-func (p *pipeline) buildAuthRequest(req Request, cred authn.Credential, claims *authn.Claims) (authn.AuthRequest, error) {
-	tenant := identity.TenantID(claims.Tenant)
+// It takes the VerifiedCredential itself rather than a *authn.Claims: the proof
+// object exposes value copies of the scalars needed here, so this function cannot
+// mutate the claim set that AuthenticateVerified then cross-checks against.
+func (p *pipeline) buildAuthRequest(req Request, cred authn.Credential, verified *authn.VerifiedCredential) (authn.AuthRequest, error) {
+	tenant := identity.TenantID(verified.Tenant())
 	assur := identity.AssuranceHigh // requested ceiling; authn clamps it to the verified constraint
 	subject := identity.Subject{
 		Kind: identity.SubjectHuman,
 		Human: &identity.Human{
-			Subject:   claims.Subject,
+			Subject:   verified.Subject(),
 			Tenant:    tenant,
 			Assurance: assur,
-			Issuer:    claims.Issuer,
+			Issuer:    verified.Issuer(),
 		},
 	}
 	client := identity.Client{
-		ClientID:   claims.ClientID,
+		ClientID:   verified.ClientID(),
 		Tenant:     tenant,
 		Capability: p.capability,
 	}

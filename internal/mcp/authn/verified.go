@@ -31,11 +31,40 @@ type VerifiedCredential struct {
 	at     time.Time
 }
 
-// Claims returns the validated claim set. The returned pointer is the verified
-// one; callers derive asserted principals from it and must not mutate it (the
-// cross-check would then be comparing the claims against themselves after the
-// fact — AuthenticateVerified re-reads this same pointer).
-func (v *VerifiedCredential) Claims() *Claims { return v.claims }
+// The verified claim set is deliberately NOT exposed as a pointer.
+//
+// VerifiedCredential exists to be a proof that a credential was cryptographically
+// validated, and AuthenticateVerified re-reads the stored claims to cross-check the
+// principals a caller asserts. Handing out *Claims made that cross-check
+// self-referential: a caller could validate a legitimate token, mutate the returned
+// issuer, audiences, scopes, tenant or confirmation key, build an AuthRequest that
+// matches the mutation, and pass both back — AuthenticateVerified re-checks only
+// time and compares the assertions against those same mutated claims, so the
+// issuer/audience/scope validation done at ValidateCredential no longer constrains
+// what gets resolved.
+//
+// No caller today does that, and none can be induced to from outside the process —
+// this is an API-safety defect, not a live bypass. But the whole point of the type
+// is that holding one PROVES something, and a proof you can edit after the fact
+// proves nothing.
+//
+// The accessors below return value copies of exactly the scalars the runtime needs
+// to build an AuthRequest. Slice-valued claims (audiences, scopes) are deliberately
+// absent: nothing outside this package needs them, and returning one would hand
+// back shared backing memory — reintroducing the same defect in a subtler form. Add
+// a new accessor only for a scalar, and only when a caller genuinely needs it.
+
+// Issuer returns the validated `iss`.
+func (v *VerifiedCredential) Issuer() string { return v.claims.Issuer }
+
+// Subject returns the validated `sub`.
+func (v *VerifiedCredential) Subject() string { return v.claims.Subject }
+
+// ClientID returns the validated `client_id` (or `azp`).
+func (v *VerifiedCredential) ClientID() string { return v.claims.ClientID }
+
+// Tenant returns the validated tenant claim.
+func (v *VerifiedCredential) Tenant() string { return v.claims.Tenant }
 
 // ValidateCredential performs the ONE cryptographic validation of a credential
 // against cfg: the forbidden-location check, then the JWT signature or opaque
