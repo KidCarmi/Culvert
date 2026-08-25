@@ -115,6 +115,34 @@ func (s *allowanceStore) consume(in runtime.ExecInput, action rollout.ActionKind
 	}
 }
 
+// wouldSatisfy reports whether the allowance WOULD be satisfied for this request
+// WITHOUT consuming it — the non-destructive prediction a Shadow evaluation needs to
+// tell WOULD_EXECUTE from WOULD_BLOCK for an ALLOW_ONCE/ALLOW_FOR_SESSION. It never
+// mutates state (no consume, no grant creation, no sweep): a Shadow evaluation must be
+// side-effect-free even against in-memory allowance state. A non-allowance action is
+// trivially satisfied.
+func (s *allowanceStore) wouldSatisfy(in runtime.ExecInput, action rollout.ActionKind, now time.Time) bool {
+	if !needsAllowance(action) {
+		return true
+	}
+	key := allowanceKey(in)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch action {
+	case rollout.ActionKindAllowOnce:
+		_, used := s.once[key]
+		return !used // a fresh single-use would be granted; an already-used one would not
+	case rollout.ActionKindAllowSession:
+		g := s.sess[key]
+		if g == nil || now.After(g.expiry) {
+			return true // a new session grant would be created
+		}
+		return g.calls < sessionCallCap
+	default:
+		return true
+	}
+}
+
 // allowanceKey binds a grant to the exact session + tool + principal.
 func allowanceKey(in runtime.ExecInput) string {
 	sess := in.Input.Session.Fingerprint

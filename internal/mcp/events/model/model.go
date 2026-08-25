@@ -317,6 +317,14 @@ type DecisionEvidence struct {
 	OperationClass      string   `json:"operation_class,omitempty"`
 	RiskClass           string   `json:"risk_class,omitempty"`
 	ExecutionState      string   `json:"execution_state,omitempty"`
+	// ShadowOutcome + ShadowOverride carry a Shadow evaluation's Model-1 enforcement
+	// prediction into the durable archive (execution_state == "shadow_evaluated"). They
+	// are omitempty and are set on NO other path, so every pre-existing event serialises
+	// byte-identically and its digest is unchanged. Action above always stays the RAW
+	// policy verdict, so the archive preserves the policy decision separately from what a
+	// fully-enforcing mode would have done (§8/§11).
+	ShadowOutcome  string `json:"shadow_outcome,omitempty"`
+	ShadowOverride bool   `json:"shadow_override,omitempty"`
 }
 
 // InspectionEvidence records only sanitized inspection facts (MCP-INSP-*). No

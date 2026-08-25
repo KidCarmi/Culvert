@@ -285,13 +285,26 @@ func TestResolveShadowEvaluatesAndRecordsOverride(t *testing.T) {
 	}
 }
 
-func TestResolveShadowHardFailureBlocks(t *testing.T) {
+// TestResolveShadowHardFailureEvaluates pins the truthful non-enforcing Shadow
+// semantics: an in-scope hard failure is NOT downgraded to an EffectBlock (which would
+// be indistinguishable from real enforcement) — it is routed to the non-executing
+// EffectShadowEvaluate disposition so the evaluator can record WOULD_FAIL_HARD_CONTROL /
+// WOULD_FAIL_INSPECTION. `Executed` stays false and the classified hard reason is
+// preserved for the evaluator's evidence. Shadow predicts; it never executes and never
+// enforces.
+func TestResolveShadowHardFailureEvaluates(t *testing.T) {
 	r := Resolve(ResolveInput{Mode: ModeShadow, InScope: true, Action: ActionKindAllow, HardFailure: true, HardReason: mcperr.ReasonSSRFBlocked})
-	if r.Disposition != EffectBlock || r.Executed {
-		t.Fatal("hard failure must block even in shadow")
+	if r.Disposition != EffectShadowEvaluate || r.Executed {
+		t.Fatalf("hard failure in shadow must route to a non-executing evaluation, got disposition=%v executed=%v", r.Disposition, r.Executed)
+	}
+	if r.Disposition == EffectExecute {
+		t.Fatal("shadow must NEVER emit EffectExecute")
+	}
+	if r.HardFailure != true {
+		t.Fatal("hard-failure flag must be preserved for evidence")
 	}
 	if r.BlockReason != mcperr.ReasonSSRFBlocked {
-		t.Fatal("block reason must be preserved")
+		t.Fatal("classified hard reason must be preserved for the evaluator")
 	}
 }
 

@@ -178,16 +178,44 @@ func TestExecShadowEvaluatesDenyWithOverride(t *testing.T) {
 	}
 }
 
-func TestExecShadowHardFailureBlocks(t *testing.T) {
+// TestExecShadowHardFailureEvaluatesWouldFailInspection pins the truthful,
+// non-enforcing Shadow handling of a hard failure: an inspection hard-fail (SSRF) is
+// NOT executed and NOT softened to would_execute — it is recorded as a non-executing
+// shadow evaluation whose shadow_outcome is WOULD_FAIL_INSPECTION. No upstream call is
+// made. This preserves the anti-weakening guarantee (a hard control is never bypassed)
+// while keeping Shadow a pure predictor that never enforces.
+func TestExecShadowHardFailureEvaluatesWouldFailInspection(t *testing.T) {
 	up := &fakeUpstream{}
 	e := newExec(t, stateForMode(t, rollout.ModeShadow), up, realEvents(t, nil))
 	out := e.Execute(context.Background(), execInput(policy.ActionAllow, true))
 	if up.calls != 0 {
-		t.Fatal("a hard failure must block in shadow — no upstream")
+		t.Fatal("a hard failure must never reach upstream in shadow")
 	}
-	if out.Reason != mcperr.ReasonSSRFBlocked {
-		t.Fatalf("block reason should be the hard reason, got %v", out.Reason)
+	if out.Executed || out.ExecutionState != "shadow_evaluated" {
+		t.Fatalf("hard failure must be a non-executing shadow evaluation: executed=%v state=%q", out.Executed, out.ExecutionState)
 	}
+	got := shadowOutcomeFromBody(t, out.ResponseBody)
+	if got != string(ShadowWouldFailInspection) {
+		t.Fatalf("shadow_outcome = %q, want %q — a hard inspection control must be predicted as WOULD_FAIL_INSPECTION, never softened", got, ShadowWouldFailInspection)
+	}
+	if got == string(ShadowWouldExecute) {
+		t.Fatal("a hard failure must never be reported as WOULD_EXECUTE")
+	}
+}
+
+// shadowOutcomeFromBody extracts the shadow_outcome field from a shadow-evaluation
+// response body — the real wire contract an operator/evidence consumer reads.
+func shadowOutcomeFromBody(t *testing.T, body []byte) string {
+	t.Helper()
+	var env struct {
+		Result struct {
+			ShadowOutcome string `json:"shadow_outcome"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("unmarshal shadow body: %v", err)
+	}
+	return env.Result.ShadowOutcome
 }
 
 func TestExecCanaryBlocksDeny(t *testing.T) {

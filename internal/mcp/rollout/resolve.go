@@ -141,23 +141,25 @@ func resolveShadow(in ResolveInput, r Resolution) Resolution {
 		r.Disposition = EffectRecordOnly
 		return r
 	}
-	if in.HardFailure {
-		// Hard failures block even in Shadow.
-		r.Disposition = EffectBlock
-		r.EffectiveAction = ActionKindDenied
-		r.BlockReason = in.HardReason
-		return r
-	}
-	// Would-execute-and-record is the Shadow premise, but Shadow NEVER crosses the
-	// irreversible side-effect boundary (SH-INV-1): it computes the would-be outcome
-	// and records durable evidence via a NON-executing disposition. `Executed` stays
-	// false — Shadow evaluates, it does not execute. The evaluated action is preserved;
-	// the effective action is the would-be allow.
+	// Shadow NEVER crosses the irreversible side-effect boundary (SH-INV-1) and NEVER
+	// ENFORCES: every in-scope request — including a hard failure — is routed to the
+	// non-executing EffectShadowEvaluate disposition so the evaluator records a truthful
+	// Model-1 outcome (WOULD_EXECUTE / WOULD_BLOCK / WOULD_FAIL_*). A hard failure is NOT
+	// downgraded to an EffectBlock here: emitting a block in Shadow is indistinguishable
+	// from real enforcement, whereas Shadow must only ever PREDICT — the evaluator maps a
+	// hard failure to WOULD_FAIL_HARD_CONTROL / WOULD_FAIL_INSPECTION and a policy
+	// non-allow to WOULD_BLOCK / WOULD_REQUIRE_*. `Executed` stays false. The evaluated
+	// policy action is preserved unchanged; the effective action is the would-be allow.
 	r.Disposition = EffectShadowEvaluate
 	r.Executed = false
 	r.EffectiveAction = ActionKindAllow
+	if in.HardFailure {
+		// Carry the classified hard reason for evidence; the evaluator owns the outcome.
+		r.BlockReason = in.HardReason
+	}
 	if !in.Action.IsAllowClass() {
-		// Policy would have blocked; Shadow records a would-execute override.
+		// Policy verdict is itself restrictive; the evaluator records a policy-driven
+		// would-block and this flags that the enforcement prediction diverges from allow.
 		r.ShadowOverride = true
 	}
 	return r

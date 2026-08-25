@@ -7,18 +7,22 @@ import (
 	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
 )
 
-// TestHardFailureBlocksInEveryMode runs EVERY centrally-classified hard-failure
-// reason through Shadow, Canary, and Production semantic resolution and proves it
-// blocks in all three — a hard failure is never softened by any rollout mode.
-func TestHardFailureBlocksInEveryMode(t *testing.T) {
-	modes := []Mode{ModeShadow, ModeCanary, ModeProduction}
+// TestHardFailureNeverExecutesInAnyMode runs EVERY centrally-classified hard-failure
+// reason through Shadow, Canary, and Production semantic resolution and proves a hard
+// failure is never SOFTENED TO EXECUTION by any rollout mode. The enforcing modes
+// (Canary/Production) block it; Shadow — which never enforces and never executes —
+// routes it to the non-executing EffectShadowEvaluate disposition where the evaluator
+// records WOULD_FAIL_HARD_CONTROL/WOULD_FAIL_INSPECTION. In NO mode does a hard failure
+// reach EffectExecute, and in every mode the classified hard reason is preserved.
+func TestHardFailureNeverExecutesInAnyMode(t *testing.T) {
 	count := 0
 	for r := mcperr.Reason(0); r <= lastReason; r++ {
 		if strings.HasPrefix(r.Code(), "unknown(") || !IsHardFailure(r) {
 			continue
 		}
 		count++
-		for _, m := range modes {
+		// Enforcing modes block outright.
+		for _, m := range []Mode{ModeCanary, ModeProduction} {
 			res := Resolve(ResolveInput{Mode: m, InScope: true, Action: ActionKindAllow, HardFailure: true, HardReason: r})
 			if res.Disposition != EffectBlock {
 				t.Fatalf("hard failure %q in mode %v: disposition=%v, want block", r.Code(), m, res.Disposition)
@@ -26,6 +30,18 @@ func TestHardFailureBlocksInEveryMode(t *testing.T) {
 			if res.BlockReason != r {
 				t.Fatalf("hard failure %q: block reason=%q", r.Code(), res.BlockReason.Code())
 			}
+		}
+		// Shadow predicts a would-fail via the non-executing evaluation path; it must
+		// NEVER execute and must preserve the reason for evidence.
+		sh := Resolve(ResolveInput{Mode: ModeShadow, InScope: true, Action: ActionKindAllow, HardFailure: true, HardReason: r})
+		if sh.Disposition != EffectShadowEvaluate || sh.Executed {
+			t.Fatalf("hard failure %q in shadow: disposition=%v executed=%v, want non-executing evaluation", r.Code(), sh.Disposition, sh.Executed)
+		}
+		if sh.Disposition == EffectExecute {
+			t.Fatalf("hard failure %q in shadow reached EffectExecute — a hard failure must never be softened to execution", r.Code())
+		}
+		if sh.BlockReason != r {
+			t.Fatalf("hard failure %q in shadow: reason=%q not preserved for evidence", r.Code(), sh.BlockReason.Code())
 		}
 	}
 	if count < 30 {

@@ -162,6 +162,11 @@ func TestAntiWeakening_OutOfScopeDoesNotExecute(t *testing.T) {
 	}
 }
 
+// TestAntiWeakening_ShadowCannotSoftenHardAuthFailure proves a policy HARD OVERRIDE (a
+// tenant/auth hard failure) is never softened by Shadow. Under the truthful non-enforcing
+// model Shadow does not enforce (no EffectBlock) and does not execute — it PREDICTS the
+// hard control as WOULD_FAIL_HARD_CONTROL. The anti-weakening guarantee is intact: no
+// upstream call, not executed, and the outcome is never WOULD_EXECUTE.
 func TestAntiWeakening_ShadowCannotSoftenHardAuthFailure(t *testing.T) {
 	up := &fakeUpstream{}
 	e := newExec(t, stateForMode(t, rollout.ModeShadow), up, realEvents(t, nil))
@@ -170,10 +175,17 @@ func TestAntiWeakening_ShadowCannotSoftenHardAuthFailure(t *testing.T) {
 	in.Decision.Reason = policy.ReasonTenantMismatch // a hard auth/tenant failure
 	out := e.Execute(context.Background(), in)
 	if up.calls != 0 {
-		t.Fatal("shadow must never soften a hard tenant/auth failure")
+		t.Fatal("shadow must never soften a hard tenant/auth failure to an upstream call")
 	}
-	if out.Reason != mcperr.ReasonTenantMismatch {
-		t.Fatalf("expected tenant-mismatch block, got %v", out.Reason)
+	if out.Executed || out.ExecutionState != "shadow_evaluated" {
+		t.Fatalf("hard auth failure must be a non-executing shadow evaluation: executed=%v state=%q", out.Executed, out.ExecutionState)
+	}
+	got := shadowOutcomeFromBody(t, out.ResponseBody)
+	if got != string(ShadowWouldFailHardControl) {
+		t.Fatalf("shadow_outcome = %q, want %q — a hard auth/tenant control must be predicted, never softened", got, ShadowWouldFailHardControl)
+	}
+	if got == string(ShadowWouldExecute) {
+		t.Fatal("a hard auth failure must never be reported as WOULD_EXECUTE")
 	}
 }
 
