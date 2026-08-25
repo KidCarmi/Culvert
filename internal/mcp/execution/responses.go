@@ -46,6 +46,22 @@ func observeResult(id jsonrpc.ID, d policy.Decision) []byte {
 	return withID(env, id)
 }
 
+// shadowResult is the Shadow-evaluation body: the would-be outcome, explicitly NOT
+// executed. It never carries an upstream response because a Shadow evaluation makes no
+// upstream call.
+func shadowResult(id jsonrpc.ID, outcome shadowOutcome, override bool) []byte {
+	env := map[string]any{
+		"jsonrpc": "2.0",
+		"result": map[string]any{
+			"execution_state": "shadow_evaluated",
+			"shadow_outcome":  string(outcome),
+			"shadow_override": override,
+			"mode":            "shadow",
+		},
+	}
+	return withID(env, id)
+}
+
 // errorResult is a terminal classified JSON-RPC error (sanitized reason code only).
 func errorResult(id jsonrpc.ID, reason mcperr.Reason) []byte {
 	env := map[string]any{

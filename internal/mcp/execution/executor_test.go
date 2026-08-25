@@ -150,21 +150,31 @@ func TestExecObserveNoUpstream(t *testing.T) {
 	}
 }
 
-func TestExecShadowExecutesDenyWithOverride(t *testing.T) {
+// Shadow EVALUATES a would-be DENY and records the override, but NEVER executes:
+// no upstream call is made (SH-INV-1). This test was evolved from the pre-Shadow-
+// architecture "TestExecShadowExecutesDenyWithOverride", which asserted the old,
+// wrong "Shadow executes for real" semantics (up.calls==1).
+func TestExecShadowEvaluatesDenyWithOverride(t *testing.T) {
 	up := &fakeUpstream{}
 	e := newExec(t, stateForMode(t, rollout.ModeShadow), up, realEvents(t, nil))
 	out := e.Execute(context.Background(), execInput(policy.ActionDeny, false))
-	if up.calls != 1 {
-		t.Fatalf("shadow in-scope must execute (allow-and-record), calls=%d", up.calls)
+	if up.calls != 0 {
+		t.Fatalf("shadow must NOT cross the side-effect boundary — a Shadow evaluation makes no upstream call, calls=%d", up.calls)
+	}
+	if out.Executed {
+		t.Fatal("a Shadow evaluation must not be reported as executed")
+	}
+	if out.ExecutionState != "shadow_evaluated" {
+		t.Fatalf("shadow execution_state must be shadow_evaluated, got %q", out.ExecutionState)
+	}
+	if out.EffectiveAction != "shadow_evaluate" {
+		t.Fatalf("shadow effective_action must be shadow_evaluate, got %q", out.EffectiveAction)
 	}
 	if !out.ShadowOverride {
 		t.Fatal("shadow override must be set for a would-be DENY")
 	}
 	if out.EvaluatedAction != "DENY" {
 		t.Fatalf("evaluated action must be preserved as DENY, got %q", out.EvaluatedAction)
-	}
-	if up.lastAuth != "" {
-		t.Fatal("no client token / auth header must be forwarded (no broker configured)")
 	}
 }
 

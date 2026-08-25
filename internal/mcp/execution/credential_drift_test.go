@@ -137,11 +137,15 @@ func credDriftInput(id *identity.ResolvedContext, hook func() bool) runtime.Exec
 	return in
 }
 
-func credDriftState(t *testing.T) *rollout.State {
+func credDriftState(t *testing.T) *rollout.State { return credDriftStateMode(t, rollout.ModeCanary) }
+
+// credDriftStateMode builds a rollout state scoped to the credential-drift server in the
+// given mode, so the credDrift harness can be exercised under Shadow as well as Canary.
+func credDriftStateMode(t *testing.T, mode rollout.Mode) *rollout.State {
 	t.Helper()
 	st := rollout.NewState(rollout.CapabilityGateway, rollout.DefaultLimits())
 	cfg := rollout.SignedConfig{
-		SelectorSchema: 1, Capability: rollout.CapabilityGateway, Mode: rollout.ModeCanary, ScopeRevision: 1,
+		SelectorSchema: 1, Capability: rollout.CapabilityGateway, Mode: mode, ScopeRevision: 1,
 		Scope:         rollout.ScopeSpec{Capability: rollout.CapabilityGateway, Servers: []string{string(credDriftSrv)}},
 		ConnectorMode: rollout.ConnectorLocalClient,
 	}
@@ -153,8 +157,16 @@ func credDriftState(t *testing.T) *rollout.State {
 
 func credDriftExecutor(t *testing.T, b *broker.Broker, up *fakeUpstream) *Executor {
 	t.Helper()
+	return credDriftExecutorForState(t, b, up, credDriftState(t))
+}
+
+// credDriftExecutorForState builds the credential-drift executor under a caller-supplied
+// rollout state, so a test can exercise the same real-materializing-broker harness in
+// Shadow mode (proving Shadow's credential path never reaches upstream/materialize).
+func credDriftExecutorForState(t *testing.T, b *broker.Broker, up *fakeUpstream, st *rollout.State) *Executor {
+	t.Helper()
 	e, err := New(Config{
-		State: credDriftState(t), Upstream: up, Events: realEvents(t, nil), Broker: b,
+		State: st, Upstream: up, Events: realEvents(t, nil), Broker: b,
 		ResponseProfile: inspection.DefaultGatewayProfile(1),
 		Clock:           func() time.Time { return time.Unix(0, 1) },
 	})

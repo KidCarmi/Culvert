@@ -49,6 +49,14 @@ const (
 	// EffectBlock — block the call (a hard failure in any mode, or an enforced
 	// non-allow decision / unsatisfied obligation in Canary/Production).
 	EffectBlock
+	// EffectShadowEvaluate — Shadow mode: compute the would-be outcome
+	// (WOULD_EXECUTE / WOULD_BLOCK) and record durable evidence, but NEVER perform the
+	// upstream side effect. This is a DISTINCT disposition from EffectExecute
+	// precisely so a Shadow request can never share the execute path with
+	// Canary/Production. The executor routes it to a non-executing evaluator that holds
+	// no path to Upstream.Call or credential materialization (SH-INV-1/2,
+	// docs/design/mcp/SHADOW-ARCHITECTURE.md §3). Shadow does not execute; it evaluates.
+	EffectShadowEvaluate
 )
 
 // String returns a stable token for the disposition.
@@ -60,6 +68,8 @@ func (d EffectiveDisposition) String() string {
 		return "execute"
 	case EffectBlock:
 		return "block"
+	case EffectShadowEvaluate:
+		return "shadow_evaluate"
 	default:
 		return "unknown"
 	}
@@ -138,13 +148,16 @@ func resolveShadow(in ResolveInput, r Resolution) Resolution {
 		r.BlockReason = in.HardReason
 		return r
 	}
-	// Allow-and-record: execute regardless of the evaluated action (the Shadow
-	// premise). The evaluated action is preserved; the effective action is allow.
-	r.Disposition = EffectExecute
-	r.Executed = true
+	// Would-execute-and-record is the Shadow premise, but Shadow NEVER crosses the
+	// irreversible side-effect boundary (SH-INV-1): it computes the would-be outcome
+	// and records durable evidence via a NON-executing disposition. `Executed` stays
+	// false — Shadow evaluates, it does not execute. The evaluated action is preserved;
+	// the effective action is the would-be allow.
+	r.Disposition = EffectShadowEvaluate
+	r.Executed = false
 	r.EffectiveAction = ActionKindAllow
 	if !in.Action.IsAllowClass() {
-		// Policy would have blocked; Shadow allowed-and-recorded — a shadow override.
+		// Policy would have blocked; Shadow records a would-execute override.
 		r.ShadowOverride = true
 	}
 	return r

@@ -97,6 +97,10 @@ func (e *Executor) Execute(ctx context.Context, in runtime.ExecInput) runtime.Ex
 	switch res.Disposition {
 	case rollout.EffectRecordOnly:
 		return e.recordOnly(in, res)
+	case rollout.EffectShadowEvaluate:
+		// Shadow: compute the would-be outcome and record evidence, but NEVER execute.
+		// shadowEvaluate holds no path to Upstream.Call or Materialize (SH-INV-1/2).
+		return e.shadowEvaluate(ctx, in, res)
 	case rollout.EffectBlock:
 		return e.blocked(in, res.BlockReason, res.ShadowOverride)
 	case rollout.EffectExecute:

@@ -33,12 +33,14 @@ func TestHardFailureBlocksInEveryMode(t *testing.T) {
 	}
 }
 
-// TestNonHardShadowExecutes proves a NON-hard policy decision (even a DENY) is
-// allow-and-record in Shadow (executes), while the same decision blocks in Canary.
+// TestNonHardShadowVsCanary proves a NON-hard policy decision (even a DENY) is
+// would-execute-and-record in Shadow (a NON-executing shadow evaluation, override
+// set), while the same decision blocks in Canary. Shadow evaluates; it does not
+// execute (SH-INV-1) — the disposition is EffectShadowEvaluate, never EffectExecute.
 func TestNonHardShadowVsCanary(t *testing.T) {
 	sh := Resolve(ResolveInput{Mode: ModeShadow, InScope: true, Action: ActionKindDenied})
-	if sh.Disposition != EffectExecute || !sh.ShadowOverride {
-		t.Fatal("shadow must allow-and-record a non-hard DENY (execute + override)")
+	if sh.Disposition != EffectShadowEvaluate || !sh.ShadowOverride || sh.Executed {
+		t.Fatal("shadow must record a non-hard DENY as a would-execute override (shadow_evaluate, not executed)")
 	}
 	cn := Resolve(ResolveInput{Mode: ModeCanary, InScope: true, Action: ActionKindDenied})
 	if cn.Disposition != EffectBlock {
