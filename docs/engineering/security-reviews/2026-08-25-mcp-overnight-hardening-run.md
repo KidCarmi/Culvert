@@ -322,3 +322,53 @@ run. The durable fixes are the same shape as CI-01/CI-02 — make the root packa
 threat-feed tests hermetic (seed the feed, never dial the real URLhaus/OpenPhish endpoints
 under `go test`), and give secscan's chaos test a per-test in-flight reset — both
 repo-owned, neither a change a security PR should make blind to the failing assertion.
+
+## §11 — Owner-triggered `@codex review` round on `7fd0869` (two P2s, both fixed)
+
+The owner re-ran `@codex review` on head `7fd0869`. Two new P2 findings, both
+confirmed against the code by direct trace before any patch, both fixed and
+mutation-verified.
+
+**F-CDR — credential-path tool drift surfaced as `none`, not `decision_snapshot_stale`
+(`internal/mcp/execution/run.go`).** The OVN-09 side-effect-boundary drift re-check
+lives in `callUpstream`, shared by both commit paths. On the NO-credential path the
+drift error escapes `CommitThenAct` and the `staleAtCall` remap reclassifies it. On
+the CREDENTIAL path `materializeAndCall` swallows the same error into a blocked
+`ExecOutput` whose reason is `ReasonOf(errToolDriftedBeforeCall) == ReasonNone` (the
+sentinel is package-private and unregistered) and the `CommitThenAct` callback returns
+`nil`, so the remap never ran — clients and block telemetry read `none` on exactly the
+ordinary enterprise shape (an executed `tools/call` carrying a credential profile).
+Fix (44cfd3a): apply the same `staleAtCall` reclassification on the `didBlock` branch.
+`staleAtCall` is set only by `callUpstream`, so on that branch it is true iff the block
+was the drift refusal; the boolean is robust to any error wrapping the broker might add
+(unlike `errors.Is` on a verbatim-returned sentinel). Regression test builds a REAL
+materializing broker (Plan → PR-8 gate → provider materialization → scoped callback):
+a control proves the harness executes with the materialized bearer credential, and the
+drift case pins the stale reason. Verified failing with `reason=none` against the
+pre-fix tree.
+
+**F-DPOP — DPoP concurrency slot held across access-token validation
+(`internal/mcp/runtime/auth.go`).** `ValidateCredential` performs the access-token
+crypto (JWT signature OR opaque introspection); the DPoP proof is a separate
+verification that runs later inside `AuthenticateVerified`. The pipeline acquired the
+DPoP slot FIRST (OVN-02 scarcest-first) and held it across `ValidateCredential`, so a
+slow introspection — or an invalid token that never reaches the proof stage at all —
+occupied a scarce DPoP slot while no DPoP work was in progress; with
+`DPoPConcurrency < AuthConcurrency` such requests could stall legitimate DPoP callers
+into a timeout. Fix (529bf7e), matching Codex's recommendation exactly: validate the
+access token under the auth bound, RELEASE it, then acquire the DPoP bound only
+afterward and only when a proof will actually be verified (`dpopVerificationRuns`). The
+two bounds are never held at once, which closes BOTH starvation shapes at their root —
+no hold-and-wait on the auth pool (auth released before DPoP taken, so OVN-02 still
+holds), and no DPoP slot held across validation. The OVN-02 test was rewritten to
+exercise the invariant faithfully under the new model (a DPoP waiter parks on DPoP
+holding no auth slot); a new test pins the F-DPOP invariant (no DPoP slot held during
+validation). Each was verified failing against a DISTINCT regression: the pre-fix
+DPoP-first-across-validation ordering, and a hold-and-wait mutation, respectively. All
+other Limits-wall and slot-deadline tests are unchanged (`limits_ownership_test.go`
+pins only that both bounds are read via `acquireSlot`, which the restructure preserves).
+
+Both packages pass `go test -race` (execution 126.5s, runtime 17.6s); gofmt clean;
+both fixes committed by logical fix and pushed. All 19 PR #1224 review threads resolved.
+Execution remains disabled — neither fix composes an executor, arms a rollout mode, or
+touches the guarded-execution wiring.
