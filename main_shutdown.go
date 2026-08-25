@@ -194,8 +194,8 @@ const (
 	// PR3d: after the CONNECT listener is closed (no new inspected-H2 tunnels can
 	// begin) and before the tunnel drain waits, fence new tunnels and send the first
 	// GOAWAY wave to every active inspected-H2 tunnel.
-	shutdownOrderH2InspectGOAWAY  = 95
-	shutdownOrderTunnelDrain = 100
+	shutdownOrderH2InspectGOAWAY = 95
+	shutdownOrderTunnelDrain     = 100
 
 	// shutdownFlushBoundary is the second cut-line, inside the late phase.
 	// Hooks at or below it are DRAIN hooks — stop accepting, let in-flight

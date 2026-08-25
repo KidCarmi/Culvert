@@ -2428,3 +2428,272 @@ behaviour and have no pre-fix counterpart.
 > unknown, and the node then stopped asking. When a component states a rule
 > about uncertainty, check every branch that consumes it, not only the one the
 > rule was written for.
+
+---
+
+## 24. CHAOS-56 — The shutdown sequence under a hook that does not return
+
+**Date:** 2026-08-25 · **Domain:** system shutdown (SIGTERM → exit) ·
+**Status:** shipped · **Gates:** `shutdown_chaos_test.go` (14)
+
+### 24.1 Why this domain
+
+Every previous sweep in this register examined a subsystem while the process
+was *running*. This one examines the ten seconds in which it stops — the path
+every restart, every `docker compose down`, every maintenance-agent upgrade and
+every node reboot takes, on every node in the fleet, several times a week.
+
+It is also the path with the sharpest asymmetry in this codebase. Culvert's
+per-request sinks were deliberately made ASYNCHRONOUS by the performance work
+recorded in §§ above — `internal/logsink` for the process log, `internal/reqlog`
+for the JSONL request log, `internal/syslog` for the SIEM feed. Each of those
+packages documents the same residual in its own header: *an abrupt process
+death can lose the in-flight batch*. Each also names the mitigation — the
+orderly shutdown path flushes. So the correctness of three durability contracts
+was delegated, by design, to the shutdown sequence completing.
+
+The sequence had no bound of its own.
+
+### 24.2 The shape of the miss
+
+`runShutdownSequence` (main_shutdown.go) ran two registries: an EARLY phase
+under `context.Background()` and a LATE phase under a 30s `context.WithTimeout`.
+The split is deliberate and its rationale is sound — the early hooks pre-dated
+the budget and stopping HA before gRPC before the lifecycle context is the
+correct order. What was missing is that neither phase was actually bounded.
+
+**The early phase was documented as unbounded.** The wiring test said so
+explicitly, in a test named
+`TestRunShutdownSequence_EarlyCtxHasNoDeadline_LateCtxDoes`, whose comment
+records it as *"the test the user explicitly asked for"*. A defect can be
+pinned by a passing test as easily as a fix can.
+
+**The late phase's ctx was ADVISORY.** `shutdownRegistry.RunAll` looped over
+hooks calling `h.stop(ctx)` synchronously and never consulted `ctx` itself, and
+most of the hooks cannot consult it either — `syslog.Close`, `communityDB.Close`,
+`logstore.Close`, `reqlog.Close`, `audit.Close` and `logCloser.Close` take no
+context at all, and `drainActiveTunnels` took one and ignored it, running its
+own 15s timer that its comment describes as *"independent of the parent ctx"*.
+
+So the "30s budget" bounded exactly the four hooks that happened to observe it,
+and the two numbers an operator would reach for both described something that
+did not exist. `docker-compose.yml`'s `stop_grace_period` comment says the
+proxy needs time for *"up to a 15s tunnel-drain window inside the ~30s
+late-phase budget"*. The drain was not inside it. Nothing was.
+
+### 24.3 SD-1 — the unbounded hook, and where it actually is
+
+The early phase's second hook is `StopControlPlaneGRPC` → `srv.GracefulStop()`.
+
+The first hypothesis was the obvious one: a half-open DP connection (host
+power-lost, path blackholed) never acks the GOAWAY ping, so the transport is
+never removed and `GracefulStop` waits out the kernel's TCP retransmit budget.
+**That hypothesis was wrong, and measuring it is what found the real one.** A
+probe against grpc-go v1.83.1 — a raw socket that speaks the HTTP/2 client
+preface and then goes silent — returned in **6.005s**, because
+`outgoingGoAwayHandler` arms a 5s timer on the ping ack and then sends the
+second GOAWAY regardless.
+
+Reading that function for the constant showed what it does next:
+
+```go
+if len(t.activeStreams) == 0 {
+    retErr = errors.New("second GOAWAY written and no active streams left to process")
+}
+```
+
+The transport is closed only when there are **no active streams**. With a live
+stream the connection is left open and *no timer is armed at all* — and
+`GracefulStop` blocks in `for len(s.conns) != 0 { s.cv.Wait() }` until it goes.
+
+So the unbounded case is not the dead peer. It is the **stream that never
+finishes**, and Culvert has two ordinary routes to one, neither of which
+surfaces an error that would abort it:
+
+- **A handler that does not return.** `Enroll` and `RenewCert` sign a CSR and
+  persist it; `PushAuditEvents` appends to a `fileutil.RotatingFile`. On a
+  wedged volume — the hung-NFS and slow-filesystem faults the storage work in
+  §12/§13 is built around — the handler blocks inside `write(2)`.
+- **A response the peer stops reading.** `GetConfig` returns up to a 128 MiB
+  `ConfigSnapshot`. A DP that freezes mid-read leaves the CP blocked on HTTP/2
+  flow control over a TCP zero window, and the kernel's persist timer retries
+  that *indefinitely* rather than ever erroring out.
+
+One wedged DP therefore held the Control Plane's SIGTERM open with no bound,
+in the phase explicitly documented as having none.
+
+### 24.4 What the stall actually costs
+
+The compose file's 60s `stop_grace_period` then expires and Docker sends
+SIGKILL. Everything after the stalled hook is skipped:
+
+| Skipped | Consequence |
+|---|---|
+| `cluster-store-flush` | `LastSeen`/`Status` since the last 10th heartbeat lost (CL-2's whole purpose) |
+| `request-log-close` | The queued tail of the durable request log — the compliance record — is dropped |
+| `community-db-close` | An unclean badger close, i.e. exactly the torn `MANIFEST` that CHAOS-50 (§19) had to build a boot-path quarantine for |
+| `log-closer` | The in-flight log batch — **including every line explaining why shutdown stalled** |
+
+The last row is what makes this a *silent* failure rather than a loud one. The
+async sink was the right performance decision and its residual was correctly
+documented; the consequence nobody drew is that when the flush is the thing
+that fails, the evidence is destroyed by the same event. An operator sees a
+container that took 60s to stop and a log that ends mid-sentence.
+
+And §19 closes the loop the wrong way round: the recovery path CHAOS-50 built
+for a damaged category store is reachable *from Culvert's own shutdown*, not
+just from `docker kill`. A hung shutdown manufactures the corruption the
+previous sweep had to learn to survive.
+
+### 24.5 The three that came with it
+
+**SD-2 — the late budget was additive, not enclosing.** Worst case was 30s
+(a `proxySrv.Shutdown` riding its ctx to expiry) **plus** the drain's
+independent 15s **plus** the closers, against a documented envelope of 30s.
+
+**SD-3 — a second signal did nothing.** `signal.Notify` takes SIGINT/SIGTERM
+away from the Go runtime's default terminate behaviour, and after `<-quit`
+nothing read the channel again. An impatient operator's second Ctrl-C, or an
+orchestrator escalating, landed in a 1-deep buffer and was never observed. The
+only escalation left was SIGKILL — precisely the outcome an escalation exists
+to avoid, and the one that costs the durable flushes.
+
+**SD-4 — a hook panic killed the sequence.** `RunAll`'s contract says *"All
+hooks run even if one returns an error"*, which was only ever true for
+*errors*. A panic (badger's `Close` can panic — §19 documents that its `Open`
+panics from a goroutine the caller cannot recover) unwound the loop and took
+the process down mid-shutdown, before the flushes and before the log flush that
+would have named it.
+
+### 24.6 What shipped
+
+A **three-phase reserve model**, because the hooks fall into two classes with
+opposite failure costs and one budget cannot serve both:
+
+- **DRAIN hooks** (stop accepting, let in-flight work finish) are best-effort;
+  abandoning one costs a client retry.
+- **FLUSH hooks** (durable closes) are what make the next boot clean;
+  abandoning one costs durability or a store the next boot must quarantine.
+
+`shutdownFlushBoundary` (105) splits the late registry via
+`shutdownRegistry.partitionAt`, and the flush reserve is carved out **up
+front** and measured from the start of the flush phase — so a drain that
+overran its own share still cannot spend it.
+
+1. **Every phase carries a real deadline.** Early 12s, drain the remainder,
+   flush 10s reserved, inside a 45s Total.
+2. **Every hook runs under a watchdog** bounded by its phase deadline plus one
+   shared `shutdownHookGrace` (3s) — a per-PHASE overrun, not a per-hook one,
+   so the envelope is `Total + 2×grace` = **51s**, inside the 60s compose
+   grace. A hook past it is abandoned and **named in a log line emitted at the
+   point of abandonment**, not from the aggregated error at the end of the
+   phase — the last flush hook closes the log sink, so a phase-end line on the
+   flush phase would be enqueued into a channel nobody drains.
+3. **Panics are contained.** This lands the same way as CHAOS-55's recovery
+   loop and the opposite way from CHAOS-24's HA keepalive, for the reason
+   recorded there: containment is dangerous when it would extend authority the
+   node is no longer confirming, and a shutdown hook holds none.
+4. **`StopControlPlaneGRPC` is bounded** — `GracefulStop` on its own goroutine
+   under `cpGRPCGracefulStopBudget` (8s, sized above the measured 6.0s idle
+   drain so a merely-unresponsive fleet still completes gracefully), then
+   `Stop()`. Force-closing is safe by construction: an interrupted unary RPC is
+   retried by the caller's own sync loop, the same path a mid-flight CP restart
+   already exercises.
+5. **The tunnel drain honours its phase deadline**, clamping its 15s ceiling to
+   whatever the drain phase has left and reaching the SAME force-close backstop
+   on either bound — so the compose comment now describes something enforced.
+6. **A second SIGTERM/SIGINT exits immediately**, flushing the log sink first,
+   with status **1** so an orchestrator cannot read a forced teardown as a
+   clean stop.
+
+**The fix's own defect, caught by its own gate.** The first draft of
+`gracefulStopBounded` joined the abandoned `GracefulStop` goroutine after
+`Stop()`, on the reasoning that closing every connection must unblock it. It
+does not: grpc-go's `stop(graceful=true)` finishes with `s.handlersWG.Wait()`,
+so it does not return until every HANDLER has returned — and the handler that
+has not returned is exactly the fault being escaped. The join reintroduced the
+unbounded wait one level down, and
+`TestChaos56_GracefulStopIsBoundedAgainstAWedgedStream` failed on it. This is
+also the argument that the hook-level watchdog and the gRPC-level bound are not
+redundant: each catches a stall the other cannot.
+
+### 24.7 Gates
+
+`shutdown_chaos_test.go`, 14 tests. Every defect gate was verified failing
+against its pre-fix shape by reintroducing that shape in the current tree:
+
+| Gate | Pre-fix result |
+|---|---|
+| `EarlyPhaseHookCannotStallTheSequence` | sequence never returned |
+| `StuckDrainCannotSpendTheFlushReserve` | both flush hooks abandoned at 0s |
+| `TunnelDrainHonoursThePhaseDeadline` | drain took 15.0007s against a 150ms deadline |
+| `HookPanicDoesNotAbortTheSequence` | process panicked out of the test |
+
+`BareGracefulStopIsUnboundedOnAWedgedStream` is the **defect proof** for SD-1
+and runs permanently: it asserts that the unpatched call does NOT return within
+8s (well past grpc-go's only bound), so if a future grpc-go bounds the
+active-stream case, the gate says so rather than letting the bounded wrapper's
+test quietly prove less than it claims.
+
+Three CONTROLS keep the gates honest — a watchdog that abandoned everything, or
+a drain clamped to nothing, would pass the defect gates while being far worse
+than the defect: `HealthyHooksAreNotAbandonedEarly`,
+`TunnelDrainStillWaitsWhenItHasBudget`, `GracefulStopReturnsPromptlyWhenIdle`.
+
+`EnvelopeFitsTheContainerStopGrace` is a **cross-artifact** gate: it parses
+`stop_grace_period` out of `docker-compose.yml` and requires the worst-case
+envelope to fit inside it. The two numbers live in different files in different
+languages, which is exactly how they drift.
+
+`TestRunShutdownSequence_EarlyCtxHasNoDeadline_LateCtxDoes` was **inverted**
+into `TestRunShutdownSequence_EveryPhaseCarriesADeadline`. It had been pinning
+the defect. The budget-SCOPING property it genuinely protected — that the early
+phase does not share the late phase's clock — is preserved and still asserted.
+
+### 24.8 What is deliberately left
+
+- **SD-5 — no unclean-shutdown breadcrumb.** A marker file written at boot and
+  removed on a clean stop would let the NEXT boot report that the previous one
+  was killed. That is the one signal a SIGKILL cannot destroy, and everything
+  else here is invisible after the fact. Not shipped: it adds a boot-path write
+  with its own failure modes (read-only volume, full disk) to a change whose
+  whole point is bounding, and it deserves the same care CHAOS-50's flock-owned
+  poison marker got. Recorded for an owner.
+- **No shutdown metrics.** `/metrics` is scraped on an interval and a process
+  that is exiting will not be scraped again, so a `culvert_shutdown_*` series
+  would describe a shutdown nobody can read. The log line is the record — which
+  is only true because the envelope now guarantees the flush.
+- **`HAState.Stop()`'s `wg.Wait()` is still an unbounded join**, now covered by
+  the early phase's watchdog rather than by its own bound. The loops it joins
+  already plumb interruption (`standbyLoop` ties a derived ctx to `stopCh`
+  specifically so `Stop` "must not wait out a dial"), so an inner bound would
+  be belt-and-braces. Recorded, not fixed.
+- **The two durable flushes at orders 55 and 67** (cluster store,
+  policy-learning) sit in the DRAIN partition, not the flush reserve. Moving
+  them would change a documented ordering constraint (CL-2 requires the cluster
+  flush after the gRPC stop and the heartbeat monitor). They run FIRST in the
+  drain phase, before any hook that can meaningfully block, and the watchdog
+  means an earlier hook cannot starve them. Accepted.
+- **In-flight tunnels are cut, not migrated.** Draining a node before a restart
+  remains the operator's job.
+
+### 24.9 The process lesson
+
+§21 stated it for back ends, §22 for listeners, §23 for decisions. This sweep
+adds one about **documented residuals**:
+
+> When a component documents a residual risk and names the mechanism that
+> mitigates it, that mechanism has silently acquired a correctness requirement
+> it was never designed to meet. Three packages here independently concluded
+> "an abrupt death can lose the in-flight batch — the orderly path flushes."
+> Each was right in isolation. None of them checked whether the orderly path
+> was guaranteed to reach the flush, and it was not: it was bounded only by the
+> container's patience, and the fault that exhausts that patience is the same
+> class of fault — a wedged volume — that makes the flush matter.
+
+There is a second, smaller lesson in how SD-1 was found. The plausible
+mechanism (half-open TCP, ~15-minute retransmit budget) was written into the
+first draft of the fix as its rationale, and it was wrong — the idle case is
+bounded at 6s. Measuring it, rather than shipping the plausible story, is what
+surfaced the active-stream case, which is both unbounded and reachable by
+faults this codebase already has runbooks for.

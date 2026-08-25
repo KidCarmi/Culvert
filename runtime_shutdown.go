@@ -196,11 +196,15 @@ func runShutdownHook(ctx, hard context.Context, h shutdownHook) (err error) {
 // envelope and starve every flush behind it; partitioning gives the flush
 // hooks a slice that a drain cannot spend.
 //
-// Registering into a partition after RunAll ran on it panics, as on any
-// registry — the split is done once, immediately before the phases run.
+// The split CONSUMES the source registry: it is marked as run, so a later
+// RunAll on it is the documented idempotent no-op rather than a second
+// execution of every hook, and a later Register panics exactly as it would
+// after a RunAll. Without that, a caller that partitioned and then ran the
+// original would close every store twice.
 func (r *shutdownRegistry) partitionAt(boundary int) (atOrBelow, above *shutdownRegistry) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.ran = true
 	atOrBelow, above = &shutdownRegistry{}, &shutdownRegistry{}
 	for _, h := range r.hooks {
 		if h.order <= boundary {

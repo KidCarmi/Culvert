@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -1061,6 +1062,12 @@ func runProxyUntilShutdown(s *startupState, proxySrv *http.Server, quit chan os.
 	registerLateShutdownHooks(&late, s, proxySrv)
 	runShutdownSequence(&early, &late, defaultShutdownBudget)
 
+	// Disarm as soon as the sequence is done, not at function exit: a stray
+	// signal arriving in the gap would otherwise turn a shutdown that
+	// COMPLETED into exit status 1. stop is idempotent, so the defer above
+	// stays as the backstop for the paths that do not reach here.
+	stopEscalation()
+
 	// NOTE: the log sink is closed by the last flush hook, so this line
 	// reaches stderr/stdout only if the process log has not been redirected
 	// to a file-backed sink. The operator-visible completion record is the
@@ -1094,7 +1101,8 @@ func armShutdownEscalation(quit <-chan os.Signal, exit func(int)) (stop func()) 
 			exit(1)
 		}
 	}()
-	return func() { close(done) }
+	var once sync.Once
+	return func() { once.Do(func() { close(done) }) }
 }
 
 // seedYARARules copies bundled starter rules from /app/yara to the target

@@ -67,13 +67,22 @@ services:
     # build: .
     container_name: culvert
     restart: unless-stopped
-    # Graceful-shutdown envelope (PR3d). On `docker compose down`/`stop` and on the
-    # maintenance-agent upgrade restart, the proxy needs time to run its shutdown
-    # sequence — including the inspected-HTTP/2 GOAWAY drain (up to a 15s tunnel-drain
-    # window inside the ~30s late-phase budget). Docker's DEFAULT grace is only 10s,
-    # which would SIGKILL the proxy mid-drain and turn the client GOAWAY cosmetic. Set
-    # it to cover the full envelope so in-flight decrypted flows drain cleanly. Must
-    # stay >= the drain envelope; the maintenance-agent restart path honors it.
+    # Graceful-shutdown envelope (PR3d, bounded by CHAOS-56). On `docker compose
+    # down`/`stop` and on the maintenance-agent upgrade restart, the proxy needs time
+    # to run its shutdown sequence — including the inspected-HTTP/2 GOAWAY drain.
+    # Docker's DEFAULT grace is only 10s, which would SIGKILL the proxy mid-drain and
+    # turn the client GOAWAY cosmetic.
+    #
+    # The binary now ENFORCES the envelope rather than describing it (this comment
+    # used to claim a 15s tunnel drain "inside" a 30s late budget; the drain was
+    # explicitly independent of that budget, and the early phase had none at all).
+    # defaultShutdownBudget (main_shutdown.go) is Total 45s = early 12s + drain +
+    # flush reserve 10s, and the worst case adds one shutdownHookGrace per late phase:
+    # 45 + 2×3 = 51s. Past the grace below the container is SIGKILLed, which skips the
+    # durable flushes — the cluster store, the request-log queue, a clean badger close
+    # — so this value must stay ABOVE that worst case.
+    # TestChaos56_EnvelopeFitsTheContainerStopGrace pins the two together; change one
+    # and it names the other.
     stop_grace_period: 60s
     # Wait for ClamAV to pass its health check before starting the proxy.
     # The proxy still handles transient ClamAV unavailability gracefully
