@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/tls"
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -76,15 +77,22 @@ func customUITLSPairValid() bool {
 // matching pair) is used before falling back to the auto self-signed
 // certificate. Sets uiCustomTLSActive so the admin API can report whether the
 // running server is actually using it.
+//
+// Called from loadFileConfigAndFlags, which main.go runs BEFORE initLogger —
+// the package-level `logger` is still nil here, so this uses fmt.Printf with
+// the "[Culvert] " prefix (the same pre-init-safe convention config.go's own
+// deprecation notices use), never logger.Printf. logger.Printf on a nil
+// *log.Logger panics, which would have reintroduced exactly the unrecoverable
+// boot failure this function exists to prevent (Codex review, PR #1228).
 func resolveUITLSCertKey(cert, key string) (certPath, keyPath string) {
 	if cert != "" || key != "" {
 		return cert, key
 	}
 	if customUITLSFilesPresent() {
 		if !customUITLSPairValid() {
-			logger.Printf("UITLS: persisted custom UI cert/key pair under %s does not parse as a matching TLS pair "+
-				"(interrupted or corrupted upload) — ignoring it and falling back to the auto self-signed certificate. "+
-				"Upload a valid pair from the Certificates panel to replace it.", dataDir)
+			fmt.Printf("[Culvert] UITLS: persisted custom UI cert/key pair under %s does not parse as a matching TLS "+
+				"pair (interrupted or corrupted upload) — ignoring it and falling back to the auto self-signed "+
+				"certificate. Upload a valid pair from the Certificates panel to replace it.\n", dataDir)
 			return cert, key
 		}
 		uiCustomTLSActive = true

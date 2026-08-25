@@ -129,6 +129,32 @@ func TestResolveUITLSCertKey_IgnoresCorruptPersistedPair(t *testing.T) {
 	}
 }
 
+// TestResolveUITLSCertKey_InvalidPairDoesNotPanicBeforeLoggerInit is the
+// regression test for a defect Codex review caught in this same PR:
+// resolveUITLSCertKey is called from loadFileConfigAndFlags, which main.go
+// runs BEFORE initLogger (main.go: loadFileConfigAndFlags(s) precedes
+// initLogger(s)), so the package-level `logger` is still nil at the exact
+// call site this function runs from. logger.Printf on a nil *log.Logger
+// panics (log.Logger.Output locks a mutex embedded in the receiver), which
+// would have reintroduced an unrecoverable boot failure — a DIFFERENT crash,
+// but the same class this whole fix exists to close — the very first time
+// the invalid-pair branch actually fired on a freshly started process.
+func TestResolveUITLSCertKey_InvalidPairDoesNotPanicBeforeLoggerInit(t *testing.T) {
+	withTempDataDirForUITLS(t)
+	prevLogger := logger
+	logger = nil // exactly the pre-initLogger state loadFileConfigAndFlags runs under
+	t.Cleanup(func() { logger = prevLogger })
+
+	if err := persistCustomUITLS([]byte("not a cert"), []byte("not a key")); err != nil {
+		t.Fatal(err)
+	}
+
+	cert, key := resolveUITLSCertKey("", "") // must not panic
+	if cert != "" || key != "" {
+		t.Fatalf("resolveUITLSCertKey trusted a corrupt persisted pair instead of falling back: got (%q, %q)", cert, key)
+	}
+}
+
 func TestResolveUITLSCertKey_NothingPersisted(t *testing.T) {
 	withTempDataDirForUITLS(t)
 	cert, key := resolveUITLSCertKey("", "")
