@@ -99,22 +99,50 @@ func (p *pipeline) authenticate(ctx context.Context, req Request, sess *session.
 		return nil, err
 	}
 	// SEC-MCP-05: bound the CPU-expensive stages. Signature verification /
-	// introspection runs under AuthConcurrency; a DPoP proof adds an independent
-	// verification whose own bound is DPoPConcurrency. Both are acquired for exactly
-	// the work they bound and released immediately after, so a token flood cannot
+	// introspection runs under AuthConcurrency; the DPoP proof is a SEPARATE
+	// verification whose own bound is DPoPConcurrency. Each is acquired for exactly
+	// the work it bounds and released immediately after, so a token flood cannot
 	// convert the worker pool into unbounded crypto.
 	//
-	// The wait is bounded by the REQUEST CONTEXT (SEC-MCP-02): a queue that ignored
-	// the deadline would reintroduce the very unbounded stage the deadline exists to
-	// bound, and a slot holder that stalls (a hung introspector) would park every
-	// waiter for the process lifetime.
+	// The wait for either slot is bounded by the REQUEST CONTEXT (SEC-MCP-02): a
+	// queue that ignored the deadline would reintroduce the very unbounded stage the
+	// deadline exists to bound, and a slot holder that stalls (a hung introspector)
+	// would park every waiter for the process lifetime.
 	//
-	// OVN-02 — ORDER. The DPoP bound is acquired FIRST. Taking the auth slot and
-	// then waiting for the DPoP slot while holding it is hold-and-wait: DPoP waiters
-	// would occupy the auth pool while doing no authentication work, starving every
-	// caller that needs only the auth bound as soon as DPoPConcurrency saturates.
-	// Scarcest-first means a caller queued for DPoP holds nothing, and the number of
-	// DPoP callers inside the auth pool is bounded by DPoPConcurrency.
+	// OVN-02 — the two bounds are NEVER held at once. Access-token validation
+	// (JWT signature OR opaque introspection) runs under the auth bound and RELEASES
+	// it before the DPoP bound is taken; the DPoP proof (inside AuthenticateVerified)
+	// then runs under the DPoP bound alone. Releasing auth before acquiring DPoP
+	// closes both starvation shapes at their root:
+	//
+	//   - Holding the auth slot while WAITING for a saturated DPoP bound is
+	//     hold-and-wait — DPoP callers would occupy the auth pool doing no auth work
+	//     and starve auth-only callers. They don't: auth is released first.
+	//   - Holding the DPoP slot ACROSS access-token validation lets a slow
+	//     introspection — or an INVALID token, for which the proof stage below is
+	//     never reached — occupy a DPoP slot while no DPoP work is in progress. It
+	//     can't: the DPoP slot is acquired only after validation succeeds.
+	//
+	// validateUnderAuthBound scopes the auth slot to exactly the validation call; its
+	// defer releases the slot on every exit path (including a panic) before control
+	// returns here, so the DPoP acquisition below can never overlap it.
+	verified, err := func() (*authn.VerifiedCredential, error) {
+		release, aerr := p.acquireSlot(ctx, p.authSem)
+		if aerr != nil {
+			return nil, aerr
+		}
+		defer release()
+		return authn.ValidateCredential(cred, p.authCfg, p.deps.authDeps(), now)
+	}()
+	if err != nil {
+		return nil, err
+	}
+
+	// The DPoP proof verification (inside AuthenticateVerified below) is the only
+	// remaining attacker-reachable cryptography. Acquire its bound now — after a
+	// successful validation and only when a proof will actually be verified
+	// (dpopVerificationRuns) — so an invalid token or a slow introspection never
+	// occupied a DPoP slot above.
 	if dpopVerificationRuns(p.authCfg.SenderProfile(), req.HasDPoP) {
 		releaseDPoP, derr := p.acquireSlot(ctx, p.dpopSem)
 		if derr != nil {
@@ -122,30 +150,22 @@ func (p *pipeline) authenticate(ctx context.Context, req Request, sess *session.
 		}
 		defer releaseDPoP()
 	}
-	release, err := p.acquireSlot(ctx, p.authSem)
-	if err != nil {
-		return nil, err
-	}
-	defer release()
 
-	// OVN-06. The credential is validated EXACTLY ONCE. The runtime has no
-	// out-of-band principal channel, so it derives the asserted principals from the
-	// validated claims and then completes authentication against the SAME
-	// verification — rather than handing the raw token back to Authenticate, which
-	// would verify the signature a second time. Measured, that second verification
-	// was ~96 µs of a ~206 µs authenticated request (47%), 8.7 KB and 206 allocs,
-	// for a result already known: a 2x amplification of the most expensive
+	// OVN-06. The credential is validated EXACTLY ONCE (the ValidateCredential above).
+	// The runtime has no out-of-band principal channel, so it derives the asserted
+	// principals from the validated claims and then completes authentication against
+	// the SAME verification — rather than handing the raw token back to Authenticate,
+	// which would verify the signature a second time. Measured, that second
+	// verification was ~96 µs of a ~206 µs authenticated request (47%), 8.7 KB and 206
+	// allocs, for a result already known: a 2x amplification of the most expensive
 	// attacker-reachable operation.
 	//
 	// Nothing is weakened. AuthenticateVerified still runs every non-cryptographic
 	// check the combined API runs — cross-check, sender constraint, assurance clamp,
 	// identity resolution — and refuses a verification that does not match the
 	// presented credential, was made against a different capability config, or whose
-	// token has since expired.
-	verified, err := authn.ValidateCredential(cred, p.authCfg, p.deps.authDeps(), now)
-	if err != nil {
-		return nil, err
-	}
+	// token has since expired. The DPoP proof verification it performs runs under the
+	// DPoP bound acquired above.
 	authReq, err := p.buildAuthRequest(req, cred, verified)
 	if err != nil {
 		return nil, err

@@ -108,28 +108,30 @@ func TestLimits_JunkDPoPHeaderDoesNotConsumeTheDPoPBound(t *testing.T) {
 	}
 }
 
-// OVN-02. Acquiring the auth slot and then WAITING for the DPoP slot while
-// holding it is hold-and-wait: DPoP waiters occupy the auth pool without doing any
-// authentication work, so once DPoPConcurrency is saturated they starve every
-// caller that needs only the auth bound. The two bounds must be acquired
-// scarcest-first, so a caller queued for DPoP holds nothing.
+// OVN-02. The auth and DPoP bounds must NEVER be held at once. A DPoP-carrying
+// request validates its access token under the auth bound, RELEASES it, and only
+// then queues for the (scarcer) DPoP bound. Holding the auth slot while WAITING for
+// DPoP is hold-and-wait: DPoP waiters would occupy the auth pool doing no auth work,
+// so once DPoPConcurrency saturates they starve every caller that needs only the
+// auth bound.
 func TestLimits_DPoPQueueDoesNotHoldAnAuthSlot(t *testing.T) {
 	k := newESKey(t, "k1")
-	deps := testDeps(t, k, nil)
-	bk := &blockingKeys{inner: deps.Keys, entered: make(chan struct{}, 8), release: make(chan struct{})}
-	deps.Keys = bk
 	// DPoPOrMTLS: a request WITH a proof needs both bounds; one WITHOUT needs only
-	// the auth bound — the two classes the inversion pits against each other.
-	p := pipelineWithProfile(t, deps, senderconstraint.DPoPOrMTLSRequired, 2, 1)
+	// the auth bound — the two classes the inversion pits against each other. The
+	// NORMAL (fast) key source is deliberate: token validation completes quickly, so
+	// a DPoP request reaches — and parks on — the DPoP bound holding no auth slot.
+	// (A blocking key source would instead park it INSIDE validation, legitimately
+	// holding an auth slot for auth work — a different scenario from a DPoP waiter.)
+	p := pipelineWithProfile(t, testDeps(t, k, nil), senderconstraint.DPoPOrMTLSRequired, 2, 1)
 
-	// Saturate the DPoP bound.
+	// Saturate the single DPoP slot and never release it.
 	p.dpopSem <- struct{}{}
 
-	// Two DPoP-carrying requests: both must queue on the DPoP bound. One context is
-	// shared rather than one created per iteration: the two requests already had the
-	// same budget (the loop body runs in microseconds), and a per-iteration
-	// `defer cancel()` accumulates deferred calls inside the loop (gocritic
-	// deferInLoop) instead of releasing them as each iteration ends.
+	// Two DPoP-carrying requests: each validates under the auth bound, releases it,
+	// then blocks on the saturated DPoP bound. One shared context: the two requests
+	// already had the same budget (the loop body runs in microseconds), and a
+	// per-iteration `defer cancel()` accumulates deferred calls inside the loop
+	// (gocritic deferInLoop).
 	waiterCtx, cancelWaiters := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelWaiters()
 	for i := 0; i < 2; i++ {
@@ -137,21 +139,69 @@ func TestLimits_DPoPQueueDoesNotHoldAnAuthSlot(t *testing.T) {
 		r.DPoPProof, r.HasDPoP = "proof", true
 		go p.Process(waiterCtx, r, fixedClock())
 	}
-	time.Sleep(150 * time.Millisecond) // let them reach their queue
+	time.Sleep(200 * time.Millisecond) // let both validate, release auth, and park on DPoP
 
-	// A caller needing only the AUTH bound must still be admitted to it. With
-	// AuthConcurrency=2 and two DPoP waiters holding auth slots, it cannot be.
-	plain := gwRequest(gwToken(k), initializeBody(9))
+	// A caller needing only the AUTH bound (no proof ⇒ the mTLS branch ⇒ no DPoP
+	// slot) must be admitted to the auth bound rather than starving behind the DPoP
+	// waiters. The sender constraint will still REFUSE it later (no proof, no mTLS) —
+	// that is fine; the invariant is that it is not parked on the auth semaphore, so
+	// it must not time out. Under a hold-and-wait regression the two DPoP waiters
+	// pin both auth slots and this request elapses its budget instead.
+	plain := gwRequest(gwToken(k), initializeBody(9)) // HasDPoP=false
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	done := make(chan Outcome, 1)
+	go func() { done <- p.Process(ctx, plain, fixedClock()) }()
+	select {
+	case out := <-done:
+		if out.Reason == mcperr.ReasonRequestDeadlineExceeded {
+			t.Fatal("a non-DPoP request starved on the auth bound: DPoP waiters are holding auth slots while queued for DPoP")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("a non-DPoP request never completed: it is parked behind DPoP waiters holding the auth bound")
+	}
+}
+
+// The DPoP bound must not be held ACROSS access-token validation. The DPoP proof is
+// verified only inside AuthenticateVerified, AFTER the access token is validated, so
+// a slow opaque introspection — or an INVALID token, which never reaches the proof
+// stage at all — must not occupy a DPoP slot while no DPoP work is in progress.
+// (Codex review of 7fd0869: a DPoP slot held during validation is an amplifier that
+// stalls legitimate DPoP requests while no DPoP verification runs.)
+func TestLimits_DPoPSlotNotHeldDuringTokenValidation(t *testing.T) {
+	k := newESKey(t, "k1")
+	deps := testDeps(t, k, nil)
+	// Block token validation — a stand-in for a slow introspection / key fetch — so
+	// the request is observably parked mid-validation, before any proof stage.
+	bk := &blockingKeys{inner: deps.Keys, entered: make(chan struct{}, 2), release: make(chan struct{})}
+	deps.Keys = bk
+	// DPoPRequired with a proof present ⇒ the DPoP bound WOULD be consumed once
+	// validation succeeds; DPoPConcurrency=1 makes a single held slot observable.
+	p := pipelineWithProfile(t, deps, senderconstraint.DPoPRequired, 8, 1)
+
+	req := gwRequest(gwToken(k), initializeBody(1))
+	req.DPoPProof, req.HasDPoP = "proof", true
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	go p.Process(ctx, plain, fixedClock())
+	go p.Process(ctx, req, fixedClock())
 
+	// Wait until the request is parked INSIDE token validation (holding an auth slot,
+	// pre-proof).
 	select {
 	case <-bk.entered:
-		// reached token validation ⇒ it obtained an auth slot
 	case <-time.After(2 * time.Second):
 		close(bk.release)
-		t.Fatal("a non-DPoP request could not obtain an auth slot: DPoP waiters are holding the auth bound while queued")
+		t.Fatal("request never reached token validation")
+	}
+
+	// The DPoP bound must be FREE: the proof stage has not begun, so no DPoP slot is
+	// held across the (here stalled) validation. Probe it without blocking.
+	select {
+	case p.dpopSem <- struct{}{}:
+		<-p.dpopSem // release the probe immediately
+	default:
+		close(bk.release)
+		t.Fatal("a DPoP slot is held during access-token validation: a slow introspection or an invalid token occupies the DPoP bound for no DPoP work")
 	}
 	close(bk.release)
 }
