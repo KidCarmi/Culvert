@@ -256,7 +256,8 @@ catalog from that origin at startup and then on the periodic refresh cadence.
 **Egress posture (read this before deploying behind a strict firewall).** Because
 the default origin is always set, an enforce-mode appliance makes an outbound
 HTTPS request to `catalog.culvertlabs.com` at boot and every refresh interval
-(default 6h, ±10% jitter). Each request is a conditional `GET` (ETag/Last-Modified)
+(default 6h, ±10% jitter; override the cadence with `CULVERT_RELEASE_REFRESH_INTERVAL`,
+a Go duration clamped to a 1m floor — read once at startup). Each request is a conditional `GET` (ETag/Last-Modified)
 carrying no payload beyond the appliance's source IP and the standard HTTP
 validators — it is a catalog-freshness poll, not telemetry — but it is on-by-default
 outbound traffic a proxy-appliance operator should know about.
