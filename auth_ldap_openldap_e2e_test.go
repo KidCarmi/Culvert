@@ -69,31 +69,56 @@ func TestOpenLDAPInteropE2E_FilterMatchingMultipleEntriesDenies(t *testing.T) {
 	}
 }
 
-// 3. LDAP-injection guard, proven end to end. With the default (uid=%s) filter,
-// a username of "*" would match every user if it reached the directory
-// unescaped ((uid=*)); ldap.EscapeFilter turns it into the literal (uid=\2a),
-// which matches nobody — so authentication must be DENIED, never granted as
-// some arbitrary matched user. A classic filter-breakout payload is likewise
-// neutralized into a literal that matches nothing.
+// 3. LDAP-injection guard, proven end to end — and proven to DISCRIMINATE the
+// regression it claims to catch (Codex review on PR #1225).
+//
+// The discriminating payload is "alice*" combined with alice's REAL password:
+//   - Escaped (the correct code path): fmt.Sprintf("(uid=%s)", EscapeFilter("alice*"))
+//     = (uid=alice\2a), which matches the literal uid "alice*" — nobody — so the
+//     search returns 0 entries and authentication is DENIED.
+//   - Unescaped (the regression): (uid=alice*) is an initial-substring filter
+//     that selects EXACTLY alice, whose password we supply, so the user bind
+//     SUCCEEDS and the attacker authenticates as alice.
+//
+// The unescaped form therefore selects exactly one authenticatable entry, so a
+// dropped EscapeFilter flips this assertion from deny to allow — the earlier
+// "*" / breakout payloads did not, because unescaped they select two entries or
+// an invalid filter and are denied by len(entries)!=1 regardless of escaping.
 func TestOpenLDAPInteropE2E_InjectionAttemptIsEscaped(t *testing.T) {
 	p := openLDAPInteropProfile(t)
 	prov, err := NewLDAPIdPProvider(p)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
+
+	// Sanity floor: the genuine login works and a genuinely wrong login is
+	// denied, so the directory + credentials are sound before we test escaping.
+	if _, ok := prov.ResolveIdentity("alice", "alice-password"); !ok {
+		t.Fatal("control login for alice failed — fixture/directory problem, not the guard")
+	}
+	if _, ok := prov.ResolveIdentity("alice", "wrong-password"); ok {
+		t.Fatal("control: a wrong password authenticated — fixture/directory problem")
+	}
+
+	// The discriminating case: unescaped this selects exactly alice and binds
+	// with her real password (=> auth would succeed); escaped it matches nobody
+	// (=> deny). A dropped EscapeFilter makes this authenticate, failing here.
+	if id, ok := prov.ResolveIdentity("alice*", "alice-password"); ok || id != nil {
+		t.Errorf("injection payload %q authenticated (id=%+v) — a targeted wildcard "+
+			"selected exactly alice and bound with her password; EscapeFilter guard failed", "alice*", id)
+	}
+
+	// Additional breakout shapes must also be denied (non-discriminating on their
+	// own — unescaped they yield multi-match or an invalid filter — but they pin
+	// that a hostile username never produces an accepted bind).
 	for _, payload := range []string{
-		"*",               // wildcard — would match all users unescaped
-		"alice)(uid=bob",  // filter breakout — would rewrite the filter unescaped
+		"*",               // wildcard — unescaped matches all users
+		"alice)(uid=bob",  // filter breakout — unescaped rewrites the filter
 		`alice))(|(uid=*`, // parenthesis/OR injection
 	} {
 		if id, ok := prov.ResolveIdentity(payload, "alice-password"); ok || id != nil {
-			t.Errorf("injection payload %q authenticated (id=%+v) — EscapeFilter guard failed", payload, id)
+			t.Errorf("injection payload %q authenticated (id=%+v)", payload, id)
 		}
-	}
-	// Control: the same directory authenticates the genuine login, so the denials
-	// above are the escaping at work, not a broken fixture.
-	if _, ok := prov.ResolveIdentity("alice", "alice-password"); !ok {
-		t.Fatal("control login for alice failed — fixture/directory problem, not the guard")
 	}
 }
 
