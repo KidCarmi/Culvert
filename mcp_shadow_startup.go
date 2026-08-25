@@ -28,6 +28,7 @@ import (
 
 	"github.com/KidCarmi/Culvert/internal/mcp/events"
 	"github.com/KidCarmi/Culvert/internal/mcp/execution"
+	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 	mcpruntime "github.com/KidCarmi/Culvert/internal/mcp/runtime"
 )
 
@@ -69,6 +70,30 @@ func (c *mcpShadowComposition) Reason() string {
 		return "not_requested"
 	}
 	return c.reason
+}
+
+// mcpShadowStatus builds the bounded, read-only Shadow status for the admin surface. It
+// distinguishes the three postures an operator must be able to tell apart (§13): the
+// Gateway listener, the non-executing Shadow capability, and LIVE execution — which is
+// ALWAYS unarmed in this build. It carries no secret, tenant, subject, or raw error;
+// only fixed classification codes, booleans, and the bounded metric snapshot.
+func mcpShadowStatus() map[string]any {
+	m := map[string]any{
+		// The non-executing Shadow evaluation capability.
+		"evaluator_composed": globalMCPShadow.composed.Load(),
+		"requested":          globalMCPShadow.requested.Load(),
+		"reason":             globalMCPShadow.Reason(),
+		"shadow_deps_ready":  shadowDepsConfigured(false),
+		// LIVE execution readiness — Canary/Production only, never composed in this build.
+		// Surfaced so an operator can confirm the shadow-vs-live split holds on the node.
+		"live_execution_ready": liveExecDepsConfigured(false),
+		// The §14 operator dry-run: is this node ready to activate Shadow right now?
+		"preflight": evaluateShadowActivationPreflight(rollout.CapabilityGateway),
+	}
+	if snap := mcpShadowMetricsSnapshotOrNil(); snap != nil {
+		m["metrics"] = snap.snapshot()
+	}
+	return m
 }
 
 // mcpShadowReadyEnabled reports whether the operator explicitly opted this node into

@@ -458,6 +458,63 @@ func TestSignedConfigCanaryRequiresEnumerable(t *testing.T) {
 	}
 }
 
+// TestShadowNeverResolvesToExecute is §15 mutation #1: an in-scope Shadow request must
+// NEVER resolve to EffectExecute, for ANY policy action and with or without a hard
+// failure — Shadow evaluates, it never crosses the side-effect boundary. Mutation:
+// making resolveShadow return EffectExecute for the allow case fails this exhaustively.
+func TestShadowNeverResolvesToExecute(t *testing.T) {
+	actions := []ActionKind{
+		ActionKindDenied, ActionKindAllow, ActionKindConfirm, ActionKindApproval,
+		ActionKindAllowOnce, ActionKindAllowSession, ActionKindRedaction,
+	}
+	for _, inScope := range []bool{true, false} {
+		for _, hard := range []bool{true, false} {
+			for _, a := range actions {
+				r := Resolve(ResolveInput{
+					Mode: ModeShadow, InScope: inScope, Action: a,
+					HardFailure: hard, ObligationsSatisfied: true,
+				})
+				if r.Disposition == EffectExecute {
+					t.Fatalf("SECURITY: Shadow resolved to EffectExecute (inScope=%v hard=%v action=%v)", inScope, hard, a)
+				}
+				if r.Executed {
+					t.Fatalf("SECURITY: Shadow marked Executed (inScope=%v hard=%v action=%v)", inScope, hard, a)
+				}
+				// In-scope Shadow is always the non-executing evaluate disposition;
+				// out-of-scope is Observe (record-only). Never execute, never block.
+				want := EffectShadowEvaluate
+				if !inScope {
+					want = EffectRecordOnly
+				}
+				if r.Disposition != want {
+					t.Fatalf("Shadow disposition = %v, want %v (inScope=%v hard=%v action=%v)", r.Disposition, want, inScope, hard, a)
+				}
+			}
+		}
+	}
+}
+
+// TestEmptyScopeMatchesNoSubject is §15 mutation #6: a missing/empty scope must match
+// NOTHING (never "all subjects"). Combined with the Shadow-requires-enumerable
+// validation, this makes "missing scope shadows everything" impossible in both
+// directions — the config is rejected AND, defensively, an empty scope contains nothing.
+func TestEmptyScopeMatchesNoSubject(t *testing.T) {
+	empty := EmptyScope(CapabilityGateway)
+	if !empty.MatchesNothing() {
+		t.Fatal("an empty scope must report MatchesNothing")
+	}
+	subjects := []Subject{
+		{Capability: CapabilityGateway, PrincipalID: "p1", ServerID: "s1", Operation: RiskRead},
+		{Capability: CapabilityGateway, Tenant: "t1", Operation: RiskRead},
+		{Capability: CapabilityGateway, ClientID: "c1", AgentID: "a1", Operation: RiskWrite},
+	}
+	for _, s := range subjects {
+		if empty.Contains(s) {
+			t.Fatalf("SECURITY: an empty scope must not contain any subject, matched %+v", s)
+		}
+	}
+}
+
 // TestSignedConfigShadowRequiresEnumerable pins the "no scope = no Shadow" contract
 // (SHADOW-ACTIVATION.md §5). An EMPTY Shadow scope and a PERCENTAGE-ONLY Shadow scope
 // must both be rejected fail-closed at validation, so a mis-scoped Shadow activation can

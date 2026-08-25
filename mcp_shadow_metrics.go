@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -111,6 +113,36 @@ type shadowMetricsView struct {
 	WouldFailHardControl     int64 `json:"would_fail_hard_control"`
 	WouldOther               int64 `json:"would_other"`
 	EvaluationErrors         int64 `json:"evaluation_errors"`
+}
+
+// writeMCPShadowMetrics appends the bounded culvert_mcp_shadow_* series. It is called
+// from the /metrics fan-out. Nothing is emitted on a node that never armed Shadow (a
+// nil singleton) — an all-zero series would be indistinguishable from an idle armed node
+// and a security-control paging rule is "> 0"; the outcome label is the only dimension,
+// a fixed closed enum, so cardinality is constant.
+func writeMCPShadowMetrics(b *strings.Builder) {
+	m := mcpShadowMetricsSnapshotOrNil()
+	if m == nil {
+		return
+	}
+	v := m.snapshot()
+	b.WriteString("# HELP culvert_mcp_shadow_evaluations_total MCP non-executing Shadow evaluations by Model-1 outcome.\n")
+	b.WriteString("# TYPE culvert_mcp_shadow_evaluations_total counter\n")
+	row := func(outcome string, n int64) {
+		fmt.Fprintf(b, "culvert_mcp_shadow_evaluations_total{capability=\"gateway\",outcome=%q} %d\n", outcome, n)
+	}
+	row("would_execute", v.WouldExecute)
+	row("would_block", v.WouldBlock)
+	row("would_require_approval", v.WouldRequireApproval)
+	row("would_require_confirmation", v.WouldRequireConfirmation)
+	row("would_fail_credential_readiness", v.WouldFailCredential)
+	row("would_fail_inspection", v.WouldFailInspection)
+	row("would_fail_stale_decision", v.WouldFailStale)
+	row("would_fail_hard_control", v.WouldFailHardControl)
+	row("other", v.WouldOther)
+	b.WriteString("# HELP culvert_mcp_shadow_evaluation_errors_total MCP Shadow evaluations that failed closed (durability/kill/invalid mode).\n")
+	b.WriteString("# TYPE culvert_mcp_shadow_evaluation_errors_total counter\n")
+	fmt.Fprintf(b, "culvert_mcp_shadow_evaluation_errors_total{capability=\"gateway\"} %d\n", v.EvaluationErrors)
 }
 
 // snapshot reads all counters (each an independent atomic load; the view can land

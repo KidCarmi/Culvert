@@ -40,6 +40,10 @@ func apiMCPRollout(w http.ResponseWriter, r *http.Request) {
 	// Fleet-effective mode + DP ack counts come from the signed-distribution status;
 	// in disabled-default there is no fleet, so local == desired == effective.
 	st["distribution"] = mcpDistributionStatus()
+	// Controlled Shadow activation: the non-executing evaluator composition state, the
+	// two readiness tiers (shadow vs live), the §14 activation preflight, and the bounded
+	// shadow evaluation metrics. Read-only; distinguishes gateway / shadow / live-exec.
+	st["shadow"] = mcpShadowStatus()
 	jsonOK(w, st)
 }
 

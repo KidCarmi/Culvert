@@ -29,6 +29,13 @@ var errShadowExecDepsNotConfigured = mcperr.New(mcperr.ReasonRolloutTransitionIn
 var errRolloutCapabilityMismatch = mcperr.New(mcperr.ReasonSnapshotCapabilityMismatch,
 	"rollout.transition", "rollout capability does not match the envelope capability")
 
+// errShadowPreflightFailed marks a Shadow transition rejected because the node is not
+// genuinely ready to EVALUATE Shadow (the §14 preflight failed). It carries the same
+// transition-invalid reason class as the exec-deps gate so a DP nack reaches the CP with
+// a truthful, alertable code; the specific bounded reasons are logged, never embedded.
+var errShadowPreflightFailed = mcperr.New(mcperr.ReasonRolloutTransitionInvalid,
+	"rollout.transition", "shadow_activation_preflight_failed")
+
 // errRolloutPersistFailed wraps a durable-persistence failure so callers can reject a
 // transition rather than acknowledge a RAM-only mode change.
 var errRolloutPersistFailed = errors.New("rollout_persist_failed")
