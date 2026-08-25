@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -90,14 +92,50 @@ func productionGoFiles(t *testing.T) []string {
 	return out
 }
 
-func parseProduction(t *testing.T, path string) (*token.FileSet, *ast.File) {
+// parsedProductionFile is one parsed production source file, kept with the FileSet
+// that owns its positions so an error message can still name a file and line.
+type parsedProductionFile struct {
+	path string
+	fset *token.FileSet
+	file *ast.File
+}
+
+// productionAST parses the module's production files ONCE for the whole package
+// test binary and hands every gate the same trees.
+//
+// The three gates below are whole-module scans, and parsing the tree three times
+// made this file the most expensive test in the root package for no added
+// assurance: the parse is a pure function of files the test run never writes to,
+// so a shared result is the same result. Comments are deliberately NOT parsed —
+// none of the gates reads one, and the whole point of the AST approach is that a
+// comment can never satisfy a check (see the note above).
+//
+// The walk's vacuity guard runs inside the once, and its outcome is replayed to
+// every caller, so a tree that stops being scannable still fails all three gates
+// rather than passing two of them vacuously.
+var (
+	productionASTOnce  sync.Once
+	productionASTFiles []parsedProductionFile
+	productionASTErr   error
+)
+
+func productionAST(t *testing.T) []parsedProductionFile {
 	t.Helper()
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
-	if err != nil {
-		t.Fatalf("parse %s: %v", path, err)
+	productionASTOnce.Do(func() {
+		fset := token.NewFileSet()
+		for _, path := range productionGoFiles(t) {
+			f, err := parser.ParseFile(fset, path, nil, 0)
+			if err != nil {
+				productionASTErr = fmt.Errorf("parse %s: %w", path, err)
+				return
+			}
+			productionASTFiles = append(productionASTFiles, parsedProductionFile{path: path, fset: fset, file: f})
+		}
+	})
+	if productionASTErr != nil {
+		t.Fatal(productionASTErr)
 	}
-	return fset, f
+	return productionASTFiles
 }
 
 // TestExecPosture_ArmingHooksHaveNoProductionCaller pins fact (1).
@@ -107,9 +145,9 @@ func parseProduction(t *testing.T, path string) (*token.FileSet, *ast.File) {
 // check. A call from anywhere in production arms execDepsConfigured for that
 // capability and makes every Shadow/Canary/Production transition succeed.
 func TestExecPosture_ArmingHooksHaveNoProductionCaller(t *testing.T) {
-	for _, path := range productionGoFiles(t) {
-		fset, f := parseProduction(t, path)
-		ast.Inspect(f, func(n ast.Node) bool {
+	for _, pf := range productionAST(t) {
+		fset := pf.fset
+		ast.Inspect(pf.file, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
 			if !ok {
 				return true
@@ -144,11 +182,11 @@ func TestExecPosture_NoProductionExecutorAssignment(t *testing.T) {
 		t.Errorf("%s: production code assigns Deps.Executor, composing the guarded-execution "+
 			"plane. It must stay nil until execution is separately activated.", fset.Position(pos))
 	}
-	for _, path := range productionGoFiles(t) {
+	for _, pf := range productionAST(t) {
 		// The field's own declaration and the pipeline's nil-guarded read are the two
 		// legitimate mentions; neither is an assignment, so no exemption is needed.
-		fset, f := parseProduction(t, path)
-		ast.Inspect(f, func(n ast.Node) bool {
+		fset := pf.fset
+		ast.Inspect(pf.file, func(n ast.Node) bool {
 			switch v := n.(type) {
 			case *ast.KeyValueExpr:
 				if k, ok := v.Key.(*ast.Ident); ok && k.Name == "Executor" {
@@ -173,12 +211,12 @@ func TestExecPosture_NoProductionExecutorAssignment(t *testing.T) {
 // catches an arming route the other two miss — a helper inside some other package
 // that constructs and installs an executor itself.
 func TestExecPosture_ExecutionPackageHasNoProductionImporter(t *testing.T) {
-	for _, path := range productionGoFiles(t) {
-		if strings.HasPrefix(filepath.ToSlash(path), "internal/mcp/execution/") {
+	for _, pf := range productionAST(t) {
+		if strings.HasPrefix(filepath.ToSlash(pf.path), "internal/mcp/execution/") {
 			continue // the package's own files
 		}
-		fset, f := parseProduction(t, path)
-		for _, imp := range f.Imports {
+		fset := pf.fset
+		for _, imp := range pf.file.Imports {
 			p, err := strconv.Unquote(imp.Path.Value)
 			if err != nil {
 				continue
