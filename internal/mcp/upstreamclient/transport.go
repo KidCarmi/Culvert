@@ -174,7 +174,7 @@ func (c *Client) httpClientFor(target Target, canon destination.Canonical, pin d
 			if req == nil || req.URL == nil {
 				return mcperr.New(mcperr.ReasonUpstreamTLSIdentity, "upstreamclient", "redirect leaves the approved server identity")
 			}
-			if strings.ToLower(req.URL.Scheme) != approvedScheme ||
+			if !strings.EqualFold(req.URL.Scheme, approvedScheme) ||
 				strings.ToLower(req.URL.Hostname()) != approvedHost ||
 				redirectPort(req.URL) != approvedPort {
 				return mcperr.New(mcperr.ReasonUpstreamTLSIdentity, "upstreamclient", "redirect leaves the approved server identity")
