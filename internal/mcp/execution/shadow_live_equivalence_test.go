@@ -116,7 +116,7 @@ func TestShadow_LivePreSideEffectEquivalence(t *testing.T) {
 				b, id := credDriftSetup(t)
 				up := &fakeUpstream{}
 				live := credDriftExecutorForState(t, b, up, credDriftStateMode(t, rollout.ModeCanary))
-				shadow := shadowEvalPlanner(t, credDriftStateMode(t, rollout.ModeShadow), PlanOnly(b))
+				shadow := shadowEvalPlanner(t, credDriftStateMode(t, rollout.ModeShadow), b)
 				in := credDriftInput(id, func() bool { return true })
 				in.Decision.Obligations.CredentialProfile = "no-such-profile" // Plan fails closed
 				return in, live, shadow, up

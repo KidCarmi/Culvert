@@ -22,26 +22,18 @@ import (
 // absence is pinned structurally by shadow_capability_test.go (reflection over the
 // type graph) and shadow_no_execute_test.go.
 
-// CredentialPlanner is the NARROW, plan-only credential capability a Shadow evaluator
-// is permitted to hold. Plan is metadata-only: no provider call, no cache decrypt, no
-// secret. It deliberately does NOT expose Materialize, so materialization is not
-// reachable from anything a ShadowEvaluator holds. *broker.Broker satisfies it, but a
-// Shadow composition passes it only through this interface (or the planOnly adapter),
-// never as a materialize-capable value.
+// CredentialPlanner is the NARROW, plan-only credential capability a caller supplies to a
+// Shadow evaluator. Plan is metadata-only: no provider call, no cache decrypt, no secret;
+// it deliberately does NOT expose Materialize. *broker.Broker satisfies it. NOTE: this
+// interface is the CALLER-FACING config type only — a ShadowEvaluator does NOT retain the
+// planner as an interface value (which would keep the concrete broker recoverable by a
+// type assertion). NewShadowEvaluator extracts the bound `Plan` METHOD VALUE and drops the
+// interface (see the `plan` field + `NewShadowEvaluator`), so the materialize-capable
+// concrete value is genuinely unreachable from the stored evaluator, not merely un-called
+// (SEC — Codex P2 on PR #1226).
 type CredentialPlanner interface {
 	Plan(broker.PlanInput) (broker.CredentialPlan, error)
 }
-
-// planOnly wraps a CredentialPlanner so the concrete type reachable from a Shadow
-// composition exposes ONLY Plan — a type assertion back to *broker.Broker cannot
-// recover Materialize. Use it when composing a Shadow-only runtime from a broker.
-type planOnly struct{ p CredentialPlanner }
-
-// PlanOnly returns a plan-only view of a credential planner for a Shadow composition.
-func PlanOnly(p CredentialPlanner) CredentialPlanner { return planOnly{p: p} }
-
-// Plan forwards to the wrapped planner; the wrapper exposes ONLY Plan (never Materialize).
-func (a planOnly) Plan(in broker.PlanInput) (broker.CredentialPlan, error) { return a.p.Plan(in) }
 
 // ShadowOutcome is the formal Model-1 Shadow verdict: what a fully-enforcing mode
 // (Canary/Production) WOULD do with this request, computed without executing it. It is
@@ -109,7 +101,13 @@ type ShadowConfig struct {
 // broker, so it cannot perform an upstream call or materialize a credential. A request
 // that resolves to EffectExecute (impossible in Shadow mode) fails CLOSED here.
 type ShadowEvaluator struct {
-	cfg        ShadowConfig
+	cfg ShadowConfig // Planner is CLEARED before storage (see New); the evaluator never retains the interface value
+	// plan is the ONLY credential capability the evaluator holds: the bound Plan method
+	// value extracted from the supplied planner. A method value is an opaque closure over
+	// its receiver — Go exposes no way to recover the receiver from it — so even if the
+	// caller supplied a *broker.Broker, this field cannot be type-asserted back to it and
+	// Materialize is genuinely unreachable. nil ⇒ no planning capability was supplied.
+	plan       func(broker.PlanInput) (broker.CredentialPlan, error)
 	allowances *allowanceStore // read-only PREDICTION (wouldSatisfy); never consumed
 }
 
@@ -117,7 +115,8 @@ var _ runtime.ExecutionProvider = (*ShadowEvaluator)(nil)
 
 // NewShadowEvaluator constructs a Shadow evaluator. Note what it does NOT require: no
 // upstream client, no materializing broker. A Shadow evaluator is fully constructible
-// with neither.
+// with neither. It NARROWS the supplied planner to its Plan method value and drops the
+// interface, so no materialize-capable concrete value is retained (Codex P2).
 func NewShadowEvaluator(cfg ShadowConfig) (*ShadowEvaluator, error) {
 	if cfg.State == nil {
 		return nil, mcperr.New(mcperr.ReasonListenerConfigInvalid, "execution", "nil rollout state")
@@ -128,7 +127,14 @@ func NewShadowEvaluator(cfg ShadowConfig) (*ShadowEvaluator, error) {
 	if cfg.Metrics == nil {
 		cfg.Metrics = noopMetrics{}
 	}
-	return &ShadowEvaluator{cfg: cfg, allowances: newAllowanceStore()}, nil
+	var plan func(broker.PlanInput) (broker.CredentialPlan, error)
+	if cfg.Planner != nil {
+		plan = cfg.Planner.Plan // bound method value — cannot be asserted back to the concrete planner
+	}
+	// Drop the interface value so the concrete (possibly materialize-capable) planner is
+	// not retained anywhere reachable from the evaluator.
+	cfg.Planner = nil
+	return &ShadowEvaluator{cfg: cfg, plan: plan, allowances: newAllowanceStore()}, nil
 }
 
 // Execute is the runtime.ExecutionProvider entry for a Shadow-only runtime. It
@@ -265,7 +271,7 @@ func (s *ShadowEvaluator) decide(in runtime.ExecInput) ShadowDecision {
 
 	// 5. Credential readiness from Plan alone (metadata; never Materialize).
 	if profileRef := in.Decision.Obligations.CredentialProfile; profileRef != "" {
-		if s.cfg.Planner == nil {
+		if s.plan == nil {
 			// No planning capability is composed. Shadow must PREDICT what live does, not
 			// fail closed: the live executor gates credential materialization on
 			// `useBroker := e.cfg.Broker != nil && profileRef != ""` (run.go), so with no
@@ -274,7 +280,7 @@ func (s *ShadowEvaluator) decide(in runtime.ExecInput) ShadowDecision {
 			// WOULD_EXECUTE; the label records that the request would run with no credential
 			// attached — the truthful nuance an operator needs to read from the evidence.
 			d.CredentialPlan = planStatusNoPlanner
-		} else if _, err := s.cfg.Planner.Plan(planInput(in, profileRef)); err != nil {
+		} else if _, err := s.plan(planInput(in, profileRef)); err != nil {
 			d.CredentialPlan = planStatusInvalid
 			d.Outcome = ShadowWouldFailCredentialReadiness
 			return d

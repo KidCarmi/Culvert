@@ -92,7 +92,10 @@ func New(cfg Config) (*Executor, error) {
 		Actor:   cfg.Actor,
 	}
 	if cfg.Broker != nil {
-		shCfg.Planner = PlanOnly(cfg.Broker)
+		// Supply the broker as the plan-only CredentialPlanner. NewShadowEvaluator narrows
+		// it to the bound Plan method value and drops the interface, so the Shadow evaluator
+		// never retains the materialize-capable *broker.Broker (Codex P2).
+		shCfg.Planner = cfg.Broker
 	}
 	shadow, err := NewShadowEvaluator(shCfg)
 	if err != nil {

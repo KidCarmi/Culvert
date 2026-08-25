@@ -60,6 +60,34 @@ func TestShadow_ConstructibleWithoutUpstreamOrMaterializingBroker(t *testing.T) 
 	}
 }
 
+// TestShadow_DoesNotRetainConcretePlanner proves the Layer-B narrowing at the VALUE level
+// (Codex P2, PR #1226): even when a caller supplies a materialize-capable *broker.Broker as
+// the CredentialPlanner (it satisfies the interface), the constructed evaluator does NOT
+// retain that concrete value anywhere reachable — `cfg.Planner` is cleared and the only
+// credential capability held is the bound Plan method value, which cannot be type-asserted
+// back to *broker.Broker. So `s.cfg.Planner.(*broker.Broker).Materialize(...)` is
+// impossible: the field is nil, and `s.plan` is a func, not an interface.
+func TestShadow_DoesNotRetainConcretePlanner(t *testing.T) {
+	b, _ := credDriftSetup(t) // a REAL materializing broker
+	ev, err := NewShadowEvaluator(ShadowConfig{
+		State: stateForMode(t, 0), Events: realEvents(t, nil), Planner: b,
+	})
+	if err != nil {
+		t.Fatalf("NewShadowEvaluator: %v", err)
+	}
+	if ev.cfg.Planner != nil {
+		t.Fatal("the evaluator retained the CredentialPlanner interface — a type assertion could recover the materialize-capable broker")
+	}
+	if ev.plan == nil {
+		t.Fatal("the plan method value was not extracted — the evaluator cannot check credential readiness")
+	}
+	// The retained capability is a func, whose reflect.Kind is Func — it holds no methods
+	// and exposes no path to the broker (a method value cannot be unwrapped to its receiver).
+	if got := reflect.TypeOf(ev.plan).Kind(); got != reflect.Func {
+		t.Fatalf("plan capability is %v, want a func (an unwrappable interface would defeat the narrowing)", got)
+	}
+}
+
 // forbiddenCapabilityFields returns, for a struct type, the "Field.Method" labels of any
 // field whose type (value OR pointer method set) exposes a Call or Materialize method.
 func forbiddenCapabilityFields(tt reflect.Type) []string {
