@@ -194,8 +194,8 @@ func TestAcquireLeaseForResume_WaitsOutOwnGhost(t *testing.T) {
 
 	h := &HAState{}
 	h.SetLeaseProvider(f, "cp-me")
-	if !h.acquireLeaseForResume() {
-		t.Fatal("resume must succeed once our own ghost lease expires")
+	if granted, foreign := h.acquireLeaseForResume(); !granted || foreign {
+		t.Fatalf("resume must succeed once our own ghost lease expires (granted=%v foreign=%v)", granted, foreign)
 	}
 	if !h.WriteAllowed() {
 		t.Fatal("a successful resume acquire must confer write authority")
@@ -212,15 +212,19 @@ func TestAcquireLeaseForResume_OtherHolderDeniesImmediately(t *testing.T) {
 	h := &HAState{}
 	h.SetLeaseProvider(f, "cp-me")
 	start := time.Now()
-	if h.acquireLeaseForResume() {
+	granted, foreign := h.acquireLeaseForResume()
+	if granted {
 		t.Fatal("a lease held by ANOTHER node is a real denial — no ghost wait")
+	}
+	if !foreign {
+		t.Fatal("a live foreign holder must be reported as an affirmative fence decision (CHAOS-55)")
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Fatalf("other-holder denial must be immediate, took %s", elapsed)
 	}
 
 	// Legacy mode (nil provider): resume is always allowed.
-	if !(&HAState{}).acquireLeaseForResume() {
+	if granted, _ := (&HAState{}).acquireLeaseForResume(); !granted {
 		t.Fatal("nil provider must allow resume (legacy mode)")
 	}
 }
