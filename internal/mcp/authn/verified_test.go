@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/identity"
+	"github.com/KidCarmi/Culvert/internal/mcp/limits"
 	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
 	"github.com/KidCarmi/Culvert/internal/mcp/protocol"
 	"github.com/KidCarmi/Culvert/internal/mcp/senderconstraint"
@@ -240,4 +241,78 @@ func TestVerified_ScalarAccessorsReportTheValidatedClaims(t *testing.T) {
 	if got := v.Tenant(); got != "tenant-1" {
 		t.Errorf("Tenant() = %q", got)
 	}
+}
+
+// The config id is what makes a VerifiedCredential non-transferable between
+// configs. The AUTH LIMITS decide how strictly a credential is parsed and how much
+// of it is accepted, so two configs differing only in those bounds are NOT the same
+// config: a credential validated under the permissive one must not be redeemable
+// under the stricter one, where AuthenticateVerified re-checks time and nothing
+// else.
+func TestVerified_ConfigIdentityCoversTheAuthLimits(t *testing.T) {
+	base := limits.DefaultAuth()
+	tighter := []struct {
+		name string
+		lim  limits.AuthLimits
+	}{
+		// MaxClaimBytes must stay <= MaxTokenBytes, so tighten both for this case.
+		{"MaxTokenBytes", mustAuthLimits(t, func(c *limits.AuthConfig) {
+			c.MaxTokenBytes = base.MaxTokenBytes() / 2
+			c.MaxClaimBytes = base.MaxClaimBytes() / 2
+		})},
+		{"MaxClaimBytes", mustAuthLimits(t, func(c *limits.AuthConfig) { c.MaxClaimBytes = base.MaxClaimBytes() / 2 })},
+		{"MaxScopes", mustAuthLimits(t, func(c *limits.AuthConfig) { c.MaxScopes = base.MaxScopes() - 1 })},
+		{"MaxAudiences", mustAuthLimits(t, func(c *limits.AuthConfig) { c.MaxAudiences = base.MaxAudiences() - 1 })},
+		{"ClockSkew", mustAuthLimits(t, func(c *limits.AuthConfig) { c.ClockSkew = base.ClockSkew() / 2 })},
+		{"MaxTokenTTL", mustAuthLimits(t, func(c *limits.AuthConfig) { c.MaxTokenTTL = base.MaxTokenTTL() / 2 })},
+	}
+	baseID := configIDForLimits(t, base)
+	for _, c := range tighter {
+		if got := configIDForLimits(t, c.lim); got == baseID {
+			t.Errorf("a config differing only in %s produced the SAME config id: a credential "+
+				"validated under the permissive config would be redeemable under the stricter one",
+				c.name)
+		}
+	}
+	// Identical limits must still yield the same id — the id must be a function of
+	// the config, not of the object.
+	if configIDForLimits(t, base) != baseID {
+		t.Fatal("the config id is not stable for identical limits")
+	}
+}
+
+func configIDForLimits(t *testing.T, lim limits.AuthLimits) string {
+	t.Helper()
+	cfg, err := NewCapabilityConfig(CapabilityConfigInput{
+		Capability: protocol.Gateway, TrustedIssuers: []string{testIssuer},
+		AcceptedClientIDs: []string{testClientG}, CanonicalResource: gwResource,
+		RequiredScopes: []string{gwScope}, SenderProfile: senderconstraint.BearerControlled,
+		Limits: lim,
+	})
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	return cfg.cfgID
+}
+
+// mustAuthLimits builds an auth bound set from the defaults with one field
+// tightened. It reads the defaults back through the accessors rather than an
+// exported config literal, so the helper cannot drift from the real defaults.
+func mustAuthLimits(t *testing.T, mutate func(*limits.AuthConfig)) limits.AuthLimits {
+	t.Helper()
+	d := limits.DefaultAuth()
+	c := limits.AuthConfig{
+		MaxTokenTTL: d.MaxTokenTTL(), ClockSkew: d.ClockSkew(),
+		MaxFutureNbf: d.MaxFutureNbf(), MaxAuthAge: d.MaxAuthAge(),
+		MaxDPoPProofAge: d.MaxDPoPProofAge(), NonceLifetime: d.NonceLifetime(),
+		MaxReplayEntries: d.MaxReplayEntries(), MaxReplayPerPart: d.MaxReplayPerPart(),
+		MaxTokenBytes: d.MaxTokenBytes(), MaxClaimBytes: d.MaxClaimBytes(),
+		MaxScopes: d.MaxScopes(), MaxAudiences: d.MaxAudiences(),
+	}
+	mutate(&c)
+	lim, err := limits.NewAuth(c)
+	if err != nil {
+		t.Fatalf("limits: %v", err)
+	}
+	return lim
 }

@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
 )
 
 // Route prefixes. Gateway addresses a specific server by opaque id in the path;
@@ -226,9 +228,18 @@ func (l *Listener) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Steps 2–3 + transport extraction.
-	req, status := l.extractRequest(w, r)
+	req, status, reason := l.extractRequest(w, r)
 	if status != 0 {
 		l.ctr.requestsRejected.Add(1)
+		// A transport-level rejection that carries a classified reason is recorded on
+		// the same denial path as a pipeline rejection. Without this the duplicate
+		// singleton-header refusal — a deliberate header-confusion attempt — moved
+		// only the generic rejected counter and was invisible to authentication
+		// denial telemetry.
+		if reason != mcperr.ReasonNone {
+			l.ctr.authFailures.Add(1)
+			l.pipe.routeAuthDenial(reason)
+		}
 		if status == http.StatusUnauthorized && l.challenge != "" {
 			w.Header().Set("WWW-Authenticate", l.challenge)
 		}
@@ -276,7 +287,7 @@ func (l *Listener) admit(ctx context.Context) (func(), bool) {
 // body is exposed as a bounded reader the pipeline reads at its byte-limit step. It
 // NEVER trusts a forwarded Host/Origin header or a client-supplied certificate
 // thumbprint. A non-zero returned status means a transport-level rejection.
-func (l *Listener) extractRequest(w http.ResponseWriter, r *http.Request) (req Request, status int) {
+func (l *Listener) extractRequest(w http.ResponseWriter, r *http.Request) (req Request, status int, reason mcperr.Reason) {
 	// SEC-MCP-04. Anti-ambiguity, BEFORE any value is read: a singleton
 	// security-relevant header presented more than once is rejected whole. A
 	// first-value-wins reading lets an intermediary and this gateway resolve the
@@ -285,12 +296,18 @@ func (l *Listener) extractRequest(w http.ResponseWriter, r *http.Request) (req R
 	// parseCredential; applying it uniformly here is what makes the posture real.
 	if h, dup := duplicateSingletonHeader(r.Header); dup {
 		_ = h // the offending name is deliberately not echoed to the client
-		return Request{}, http.StatusBadRequest
+		// CLASSIFIED, not just refused. This rejection happens at the transport layer
+		// and returns before the pipeline, so nothing downstream can count it — and a
+		// deliberate header-confusion attempt would otherwise move only the generic
+		// rejected-request counter, indistinguishable from a malformed body. The
+		// reason travels back to the caller so the denial is recorded on the same
+		// observable path as every other authentication-shaped rejection.
+		return Request{}, http.StatusBadRequest, mcperr.ReasonAmbiguousRequestHeader
 	}
 	// mTLS defense-in-depth: a require-cert listener must have a verified peer cert.
 	if l.cfg.ClientCertMode == ClientCertRequire {
 		if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
-			return Request{}, http.StatusUnauthorized
+			return Request{}, http.StatusUnauthorized, mcperr.ReasonNone
 		}
 	}
 	// Cap the body at the server layer too (defense-in-depth); the pipeline applies
@@ -315,7 +332,7 @@ func (l *Listener) extractRequest(w http.ResponseWriter, r *http.Request) (req R
 		CanonicalURI:         canonicalURI(r),
 		BodyReader:           body,
 	}
-	return req, 0
+	return req, 0, mcperr.ReasonNone
 }
 
 // writeOutcome writes the pipeline outcome to the HTTP response. It NEVER opens a

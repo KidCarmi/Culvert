@@ -523,11 +523,25 @@ func (p *pipeline) processMessage(ctx context.Context, req Request, rb *recBuild
 		if created {
 			p.closeSession(sess.ID())
 		}
+		reason := mcperr.ReasonOf(err)
+		// OVERLOAD IS NOT AN AUTHENTICATION FAILURE. authenticate() bounds its wait
+		// for an auth/DPoP verification slot by the request budget, so a saturated
+		// listener returns ReasonRequestDeadlineExceeded from here — the SAME reason
+		// checkBudget answers with 503. Falling through to the branch below would
+		// answer 401 with a WWW-Authenticate challenge, telling a caller whose
+		// credential was never examined that their credential was rejected, and
+		// charging the episode to authFailures and the denial lane — so a capacity
+		// incident would read as a credential-stuffing spike in exactly the telemetry
+		// an operator uses to tell those two apart.
+		if reason == mcperr.ReasonRequestDeadlineExceeded {
+			p.ctr.timeouts.Add(1)
+			return p.reject(rb, 503, reason, "")
+		}
 		p.ctr.authFailures.Add(1)
 		// PR-8: route the pre-identity authentication failure into the isolated
 		// denial lane (attacker-mintable; no tenant attribution). Never blocks.
-		p.routeAuthDenial(mcperr.ReasonOf(err))
-		return p.reject(rb, statusForAuth(mcperr.ReasonOf(err)), mcperr.ReasonOf(err), "")
+		p.routeAuthDenial(reason)
+		return p.reject(rb, statusForAuth(reason), reason, "")
 	}
 	// The server id is confirmed registered by identity.Resolve, so it is now safe
 	// to carry the opaque id in the sanitized observation (OVN-08).

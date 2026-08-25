@@ -165,6 +165,33 @@ func computeConfigID(c CapabilityAuthConfig) string {
 	segSet("alw", c.allowedScopes)
 	segSet("wld", c.wildcardAllowed)
 	h.Write([]byte{byte(c.senderProfile), byte(c.minAssurance)})
+	// The AUTH LIMITS are part of the identity, not incidental tuning. They decide
+	// how strictly a credential is parsed and how much of it is accepted —
+	// MaxTokenBytes, MaxClaimBytes, MaxScopes and MaxAudiences all gate validation,
+	// and the temporal bounds gate the lifetime checks. Omitting them let two configs
+	// that differ ONLY in strictness share an id, which is exactly the case the id
+	// exists to refuse: a credential validated under the permissive one would be
+	// redeemable under the stricter one, where AuthenticateVerified re-checks time
+	// and nothing else. Every accessor is included, in a fixed order, so adding a
+	// limit without adding it here is the only way to reintroduce the gap.
+	num := func(v int64) {
+		var b [8]byte
+		binary.BigEndian.PutUint64(b[:], uint64(v))
+		h.Write(b[:])
+	}
+	seg("lim")
+	num(int64(c.lim.MaxTokenTTL()))
+	num(int64(c.lim.ClockSkew()))
+	num(int64(c.lim.MaxFutureNbf()))
+	num(int64(c.lim.MaxAuthAge()))
+	num(int64(c.lim.MaxDPoPProofAge()))
+	num(int64(c.lim.NonceLifetime()))
+	num(int64(c.lim.MaxReplayEntries()))
+	num(int64(c.lim.MaxReplayPerPart()))
+	num(int64(c.lim.MaxTokenBytes()))
+	num(int64(c.lim.MaxClaimBytes()))
+	num(int64(c.lim.MaxScopes()))
+	num(int64(c.lim.MaxAudiences()))
 	return hex.EncodeToString(h.Sum(nil))
 }
 
