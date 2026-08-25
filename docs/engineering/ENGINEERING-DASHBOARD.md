@@ -4,7 +4,7 @@
 > **Status:** Living document — re-validated against the repository, not assumed.
 > **Last full review:** 2026-06-28 · **Last drift sync:** 2026-07-05 (registers + tree re-checked; scores moved on evidence below)
 > **Next scheduled re-validation:** 2026-09-28 (quarterly) or on any change to architecture, HA, auth, or the release pipeline.
-> **Drift flagged 2026-08-18, re-verified 2026-08-24** (documentation-governance pass, fact-check only — no scores re-judged): `internal/` now holds **65** packages (`find internal -maxdepth 1 -type d | wc -l`; was 63 at the 08-18 check, 48 before that; §1 "Maintainability" and §2's ADR-0002 row corrected below). **ADR-0024** (MCP Agent Security Gateway trust boundary, Accepted 2026-07-31, ~55k LOC across 25 `internal/mcp` subpackages, PR-1 through PR-12 shipped) is **still absent** from the governance artifact index below and from both `TECHNICAL-DEBT-REGISTER.md`/`TECHNICAL-RISK-REGISTER.md` (zero matches for "MCP" in either as of this pass, unchanged since 08-18) — rule 5 of §4 below requires an ADR entry here for any change to long-term architecture, and a program of this size disabled-by-default or not warrants at least a register presence. This note does not re-score Security/Architecture/Maintainability below; that requires the specialized re-validation pass described in §4, which has not run since 2026-07-05.
+> **Drift flagged 2026-08-18, re-verified 2026-08-24** (documentation-governance pass, fact-check only — no scores re-judged): `internal/` now holds **65** packages (`ls internal | wc -l`; was 63 at the 08-18 check, 48 before that; §1 "Maintainability" and §2's ADR-0002 row corrected below). **ADR-0024** (MCP Agent Security Gateway trust boundary, Accepted 2026-07-31, ~55k LOC across 25 `internal/mcp` subpackages, PR-1 through PR-12 shipped) is **still absent** from the governance artifact index below and from both `TECHNICAL-DEBT-REGISTER.md`/`TECHNICAL-RISK-REGISTER.md` (zero matches for "MCP" in either as of this pass, unchanged since 08-18) — rule 5 of §4 below requires an ADR entry here for any change to long-term architecture, and a program of this size disabled-by-default or not warrants at least a register presence. This note does not re-score Security/Architecture/Maintainability below; that requires the specialized re-validation pass described in §4, which has not run since 2026-07-05.
 
 This is the single entry point for Culvert's engineering governance. It is intentionally short:
 a scorecard, an index, and the rules that keep these documents *alive* rather than stale.
@@ -159,7 +159,7 @@ Net effect: the config-surface-drift front is closed; Security/Maintainability/A
 scores nudged up on evidence; the update-trust chain is now the sole material open front.
 
 **2026-08-24 documentation-governance pass (fact-check only, no scores re-judged):** re-verified
-the 2026-08-18 drift note against the current tree. `find internal -maxdepth 1 -type d | wc -l` =
+the 2026-08-18 drift note against the current tree. `ls internal | wc -l` =
 **65 packages** (was 63 on 08-18, 48 before that) — the count had already drifted again six days
 after its last correction; §1 "Maintainability", §2's ADR-0002 row, and this note are now updated
 to 65. **ADR-0024 is still not entered** in `TECHNICAL-DEBT-REGISTER.md` or
@@ -167,5 +167,4 @@ to 65. **ADR-0024 is still not entered** in `TECHNICAL-DEBT-REGISTER.md` or
 gap is unchanged from 08-18 and is deliberately left open here rather than filled with an
 unreviewed entry: populating it requires the specialized review pass described in §4 (independent
 sub-reviewer read of the ~55k-LOC `internal/mcp` tree), which has not run since 2026-07-05, not a
-one-line addition. Recommend scheduling that pass; see the Executive Summary of this session's
-governance report for detail.
+one-line addition. Recommend scheduling that pass as the next §4 specialized review.
