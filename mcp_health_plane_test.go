@@ -363,3 +363,109 @@ func TestMCPHealth_InvalidStartupIsAFaultThePollerAlertsOn(t *testing.T) {
 		t.Fatal("the poller refused to start for a failed-startup capability")
 	}
 }
+
+// The poller must be bound to the PROCESS LIFECYCLE, not context.Background().
+//
+// mcpCapStopped is a Faulted() state, and graceful shutdown deliberately stops
+// the listener (the mcp-runtime-stop hook). A poller running on
+// context.Background() outlives appLifecycleCancel, so if shutdown spans a poll
+// interval it ticks after that hook, observes the intentional stop, and pages
+// mcp_gateway_down for a healthy orderly shutdown — the alert plane crying wolf
+// on precisely the event an operator triggers on purpose. Draining is already
+// exempt from Faulted(); Stopped, the state the listener actually ends in, is
+// not, and must not be, because a listener that stopped on its own IS a fault.
+//
+// Structural, because the property is a NEGATIVE — an alert that must not fire
+// during a shutdown that a unit test of the poller cannot stage.
+func TestMCPHealth_PollerIsBoundToTheProcessLifecycle(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "mcp_runtime.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse mcp_runtime.go: %v", err)
+	}
+	var fn *ast.FuncDecl
+	for _, d := range f.Decls {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Name.Name == "initMCPRuntime" {
+			fn = fd
+		}
+	}
+	if fn == nil {
+		t.Fatal("initMCPRuntime not found; this wall is not reading the startup path")
+	}
+	var arg string
+	ast.Inspect(fn, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		id, ok := call.Fun.(*ast.Ident)
+		if !ok || id.Name != "startMCPHealthAlertPoller" || len(call.Args) != 1 {
+			return true
+		}
+		switch a := call.Args[0].(type) {
+		case *ast.CallExpr:
+			switch fn := a.Fun.(type) {
+			case *ast.Ident:
+				arg = fn.Name
+			case *ast.SelectorExpr:
+				if pkg, ok := fn.X.(*ast.Ident); ok {
+					arg = pkg.Name + "." + fn.Sel.Name
+				}
+			}
+		case *ast.Ident:
+			arg = a.Name
+		}
+		return false
+	})
+	switch arg {
+	case "resolveLifecycleCtx", "appLifecycleCtx":
+		// Bound to the process lifecycle.
+	case "":
+		t.Fatal("could not resolve the context argument to startMCPHealthAlertPoller")
+	default:
+		t.Fatalf("startMCPHealthAlertPoller is started with %s, not the process "+
+			"lifecycle context. mcpCapStopped is a Faulted() state and shutdown stops "+
+			"the listener on purpose, so a poller that outlives appLifecycleCancel "+
+			"pages mcp_gateway_down for an orderly shutdown.", arg)
+	}
+}
+
+// The other half: the poller must actually OBSERVE the context it was handed.
+// Binding it to a lifecycle context it then ignores is no better than Background.
+//
+// Structural rather than a goroutine-count assertion: counting live goroutines
+// races with every other test in the package, and a gate that can flake gets
+// muted — the failure mode this repository already records for connlimit's and
+// threatfeed's benchgates.
+func TestMCPHealth_PollerObservesItsContext(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "mcp_health_plane.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse mcp_health_plane.go: %v", err)
+	}
+	var fn *ast.FuncDecl
+	for _, d := range f.Decls {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Name.Name == "startMCPHealthAlertPoller" {
+			fn = fd
+		}
+	}
+	if fn == nil {
+		t.Fatal("startMCPHealthAlertPoller not found")
+	}
+	sawDone := false
+	ast.Inspect(fn, func(n ast.Node) bool {
+		sel, ok := n.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "Done" {
+			return true
+		}
+		if id, ok := sel.X.(*ast.Ident); ok && id.Name == "ctx" {
+			sawDone = true
+		}
+		return true
+	})
+	if !sawDone {
+		t.Fatal("the poller loop never selects on ctx.Done(): it cannot stop before " +
+			"process exit, so binding it to the lifecycle context achieves nothing and " +
+			"an orderly shutdown can still be paged as mcp_gateway_down")
+	}
+}

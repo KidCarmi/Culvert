@@ -49,7 +49,20 @@ func initMCPRuntime(s *startupState) {
 	// It reads the status published above rather than `act`, so an invalid marking
 	// made inside those branches is what it sees. No-ops when MCP was never
 	// requested, so the disabled default still spawns nothing.
-	defer func() { _ = startMCPHealthAlertPoller(context.Background()) }()
+	//
+	// Bound to the PROCESS LIFECYCLE, never context.Background(). Two reasons, and
+	// the first is a correctness bug rather than tidiness: mcpCapStopped is a
+	// FAULTED state (mcp_health_plane.go), and graceful shutdown deliberately stops
+	// the listener via the mcp-runtime-stop hook. A poller that outlives
+	// appLifecycleCancel therefore ticks after that hook runs, observes the
+	// intentional stop, and pages mcp_gateway_down for a healthy orderly shutdown --
+	// the alert plane crying wolf on exactly the event operators trigger on purpose.
+	// (Draining is already exempt; Stopped, the state the listener actually ends in,
+	// is not -- and must not be, because a listener that stopped on its own IS a
+	// fault.) Second, it gives the goroutine a termination signal short of process
+	// exit. resolveLifecycleCtx falls back to Background before the context is
+	// wired, so early callers still work.
+	defer func() { _ = startMCPHealthAlertPoller(resolveLifecycleCtx()) }()
 
 	rt, err := mcpruntime.NewRuntime(cfg)
 	if err != nil {
