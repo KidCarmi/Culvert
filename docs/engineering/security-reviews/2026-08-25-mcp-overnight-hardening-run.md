@@ -372,3 +372,36 @@ Both packages pass `go test -race` (execution 126.5s, runtime 17.6s); gofmt clea
 both fixes committed by logical fix and pushed. All 19 PR #1224 review threads resolved.
 Execution remains disabled — neither fix composes an executor, arms a rollout mode, or
 touches the guarded-execution wiring.
+
+## §12 — CI-03 reproduced cleanly on `30568fe` (Fast gate `-race`), definitively not this PR's diff
+
+The Fast PR Gate `go test -race + coverage floors` job failed on head `30568fe`
+(run 32862440364, job 97850041642). The captured job log gives the cleanest CI-03
+reproduction so far — a full per-package pass/fail table:
+
+- **The ONLY failing package is the root `package main`:** `FAIL github.com/KidCarmi/Culvert 909.169s`.
+- **Every other package passed**, including all four this PR touches:
+  `internal/mcp/runtime` (24.0s, 80.7%), `internal/mcp/execution` (162.4s, 84.6%),
+  `internal/mcp/authn` (82.0%), `internal/mcp/credentials/broker` (145.3s, 77.6%) —
+  and ~90 more `internal/...` packages all `ok`.
+- The harden-runner egress audit shows `Culvert.test` making **live network calls**
+  to `urlhaus.abuse.ch` (151.101.2.49:443), `openphish.com` (165.22.207.217:443),
+  `feeds.culvertlabs.com` (172.67.167.202:443), `raw.githubusercontent.com`, and
+  `example.com` — the root-package threat-feed / SaaS-feed live-network surface CI-03
+  identifies.
+- This head's commits (`7fd0869` static/index.html, `44cfd3a` internal/mcp/execution,
+  `529bf7e` internal/mcp/runtime, `30568fe` docs) touch **zero root-package Go code**,
+  and the prior head `fd7b9a2` passed this same suite. So the failure cannot be this
+  diff's; it is the documented environment-sensitive live-network flake.
+- The individual `--- FAIL: Test…` line is again unobtainable from `get_job_logs`: the
+  root binary emits thousands of `POLICY_*` lines, pushing the failing-test line above
+  the tail window (the same retrieval limitation §9 records; this is the Fast `-race`
+  job, which uploads no determinism-log artifact).
+
+Per the CI-red discipline this is the legitimate "not mine" case: an unrelated
+live-network test in a package the diff does not touch, with every changed package
+green. The durable fix remains repo-owned and out of this security PR's scope — make
+the root package's threat-feed/SaaS-feed tests hermetic (inject a fake feed source;
+never dial urlhaus/openphish/feeds.culvertlabs.com under `go test`) — and it should
+not be made blind to the failing assertion. The PR stays watched until a re-run lands
+this ~50% flake green.
