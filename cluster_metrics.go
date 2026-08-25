@@ -106,6 +106,8 @@ func clusterWritePrometheus(w *strings.Builder) {
 	w.WriteString("# TYPE culvert_ha_failovers_total counter\n")
 	fmt.Fprintf(w, "culvert_ha_failovers_total %d\n", statHAFailovers.Load())
 
+	writeHALeaseMetrics(w)
+
 	// P1 #4: last full config-snapshot size received by this DP. Paired with the
 	// poll-duration histogram it lets an operator spot a WAN-starved node (large
 	// bytes + long duration) before a timeout trips spurious failover.
@@ -179,4 +181,53 @@ func writeConfigSnapshotSizeMetrics(w *strings.Builder) {
 	}
 	fmt.Fprintf(w, "culvert_config_snapshot_slice_cap{slice=\"url_category_hosts\"} %d\n", ps.URLCatHostsCap)
 	fmt.Fprintf(w, "culvert_config_snapshot_slice_cap{slice=\"aggregate_host_scale\"} %d\n", ps.AggregateCap)
+}
+
+// writeHALeaseMetrics exposes the fencing-lease posture (CHAOS-55). Before
+// this, an unfenced leader — role held, write authority OFF, unable to issue a
+// certificate, accept a revocation, or publish a config snapshot — reported
+// `culvert_ha_role 1` and nothing else, byte-identical to a fully healthy
+// leader. lease_valid existed only on the /healthz and /api/cluster/ha JSON,
+// which no Prometheus rule can alert on.
+//
+// Every series here is emitted ONLY when a fencing backend is armed. A
+// `culvert_ha_write_authority 0` on a node that never had a lease is
+// indistinguishable from a fenced-out one, and the documented paging rule is
+// `== 0` — the CHAOS-54 rule about gauges that must not exist on nodes without
+// the feature.
+func writeHALeaseMetrics(w *strings.Builder) {
+	if !haLeaseConfigured() {
+		return
+	}
+	writeup := func(help, name, typ string, v int64) {
+		fmt.Fprintf(w, "\n# HELP %s %s\n# TYPE %s %s\n%s %d\n", name, help, name, typ, name, v)
+	}
+	writeup("Whether this control plane currently holds confirmed fencing-lease write authority (1=yes)",
+		"culvert_ha_write_authority", "gauge", haBoolMetric(globalHA.WriteAllowed()))
+	writeup("Current fencing epoch held by this control plane (0=not held)",
+		"culvert_ha_lease_epoch", "gauge", globalHA.CurrentEpoch())
+	writeup("Whether this node holds the HA leader role WITHOUT fencing write authority — the state that must page (1=unfenced leader)",
+		"culvert_ha_unfenced", "gauge", haBoolMetric(haUnfencedLeader()))
+	writeup("Whether the background fencing-lease re-acquire loop is currently armed (1=recovering)",
+		"culvert_ha_lease_recovering", "gauge", haBoolMetric(globalHA.leaseRecoveryActive()))
+	writeup("Fencing-lease re-acquire rounds that did not restore write authority",
+		"culvert_ha_lease_reacquire_attempts_total", "counter", statHALeaseReacquireAttempts.Load())
+	writeup("Completed background fencing-lease recoveries (write authority restored with no operator action)",
+		"culvert_ha_lease_reacquired_total", "counter", statHALeaseReacquired.Load())
+}
+
+// haUnfencedLeader is the paging condition: this node believes it is the leader
+// and cannot write. It is deliberately NOT `!WriteAllowed()` — a standby has no
+// write authority either, and that is the healthy steady state for a standby.
+func haUnfencedLeader() bool {
+	st := globalHA.Status()
+	return st.Enabled && st.Role == "leader" && !globalHA.WriteAllowed()
+}
+
+// haBoolMetric renders a boolean posture as a Prometheus 0/1 gauge value.
+func haBoolMetric(b bool) int64 {
+	if b {
+		return 1
+	}
+	return 0
 }

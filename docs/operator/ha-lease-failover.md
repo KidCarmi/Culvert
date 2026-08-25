@@ -180,3 +180,11 @@ The TTL is the **failover-latency ↔ tolerance trade**:
   baseline this builds on.
 - `docs/engineering/TECHNICAL-RISK-REGISTER.md` RISK-001 — the split-brain
   risk this closes.
+
+---
+
+## See also
+
+- **`docs/operator/ha-lease-recovery.md`** — the state where a node holds the
+  leader role but *not* the fence (`culvert_ha_unfenced == 1`): what recovers on
+  its own, what latches and needs you, and the alert rules for both (CHAOS-55).

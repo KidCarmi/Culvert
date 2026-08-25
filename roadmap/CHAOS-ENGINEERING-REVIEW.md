@@ -36,6 +36,35 @@ everything else is triaged below with a suggested PR and required tests for foll
 > rewriting identifiers three merged PRs already reference, so it is an OWNER
 > decision, not a unilateral edit — recorded here rather than silently "fixed".
 
+**2026-08-24 — CHAOS-55 sweep (the fencing lease's recovery paths).** ADR-0005 built the
+fence to answer *may this node write?* and answers it correctly in every direction. What it never
+built was the way BACK. The lease has three exits from write authority — denied on promotion,
+denied on resume, self-fenced by the keepalive — and shipped a return path for exactly one. The
+other two dead-ended silently, and the mechanism is one sentence twice: **an unknown was treated as
+a decision.** `ha_lease.go`'s own header states the rule for the other direction ("leadership cannot
+be taken while the fence's state is unknown") and the promotion path obeys it exactly; the resume
+path broke it in reverse. **HA-7** (registered P1, open since the first sweep): the 45 s resume
+budget was spent ONLY on waiting out this node's own ghost lease, and a transport error returned
+false on the first attempt — so the boot-order fault, etcd a few seconds behind culvert on a host
+reboot, got zero retries. The node then asserted `role=leader, leaseEpoch=0`, and because
+`startLeaseKeepalive` no-ops on a zero epoch, **nothing left in the process ever called `Acquire`
+again**; `PromoteManually` refuses a node already roled leader, so a human restart was the only
+lever. **HA-16**, found in the sweep and worse: with a recorded ex-standby, ANY failed resume
+demoted to standby — including an unreachable backend. In a two-node cluster restarting together
+the guess is symmetric, neither node can sync (a lease-configured puller rejects a bundle with no
+live holder), `lastSyncOK` stays zero, and the freshness gate then refuses every auto-promotion —
+**a permanently leaderless cluster from a few seconds of etcd being slow to boot.** Shipped: the
+resume budget now covers transport errors; a rate-bounded, jittered, interruptible background
+re-acquire loop covers a longer outage; demotion is gated on an AFFIRMATIVE read of a foreign
+holder, which is also LATCHED (a node that has seen another leader never silently takes over when
+that leader vanishes — that judgement belongs to the freshness gate); and six `culvert_ha_lease_*`
+series close **HA-17**, the fact that an unfenced leader was indistinguishable from a healthy one on
+the only surface a Prometheus rule can read. **HA-18** (self-fenced ex-leader with no recorded peer)
+is recorded, not fixed — it needs a posture decision about what freshness means for a node that
+does not sync. 18 gates covering the defects and the arming/latching conditions; every defect gate was verified failing against the pre-fix tree. See rows HA-7/HA-16/HA-17/
+HA-18, §23, `docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-24.md` and
+`docs/operator/ha-lease-recovery.md`.
+
 **2026-08-23 — CHAOS-54 sweep (the SOCKS5 accept loop under listener faults).** The one
 hand-rolled accept loop in the data plane retried every non-`net.ErrClosed` accept error
 IMMEDIATELY and logged each attempt. Under EMFILE/ENFILE that measured **7.68 million accept
@@ -438,8 +467,12 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | HA-3 | Lease keepalive transport failure & clock skew: self-fence bounded by the etcd-confirmed window; `time.Since(confirmedAt)` monotonic → clock-jump-immune; cross-node absolute time never compared. | ✓ | — | `ha_lease.go:154-186`, `internal/halease/etcd.go:118-128`; tests `ha_lease_test.go:105,139` |
 | HA-4 | Split brain **with** the fence: structurally impossible (single `CreateRevision==0` txn; promote re-checks Acquire; term = epoch). | ✓ | — | `ha.go:617-621,634`, `internal/halease/etcd.go:73-92`; test `ha_split_brain_failover_evidence_test.go:172` |
 | HA-5 | Split brain **without** the fence (legacy 2-node `--ha-auto-failover`): restarted leader resumes with no peer probe, **no rejoin reconcile**. Documented RISK-001. | GAP (accepted) | H | `cluster_startup.go:101-111`; tests `ha_split_brain_failover_evidence_test.go:220,268` |
-| HA-6 | Ghost lease on fast leader restart: `acquireLeaseForResume` distinguishes own-ghost (`Holder==id`, wait ≤45s) from a real denial (immediate false). | ✓ | — | `ha_failover.go:145-182` |
-| HA-7 | **Unfenced resumed leader never re-acquires.** If etcd is briefly unreachable during a leader restart and there is no resync material, the node falls through to `role=leader, leaseEpoch=0` — permanently read-only (`WriteAllowed()==false`) with **no background retry** until an operator restarts it. | GAP | H | `ha.go:289-296`, `ha_failover.go:125-132`, keepalive no-op `ha_lease.go:108` |
+| HA-6 | Ghost lease on fast leader restart: `acquireLeaseForResume` distinguishes own-ghost (`Holder==id`, wait ≤45s) from a real denial (immediate false). Since CHAOS-55 it also distinguishes an UNREACHABLE backend (retried inside the same budget) — see HA-7/HA-16. | ✓ | — | `ha_failover.go` `acquireLeaseForResume` / `resumeAcquireRound` |
+| HA-7 | **Unfenced resumed leader never re-acquires.** `acquireLeaseForResume` spent its 45s budget ONLY on waiting out its own ghost lease and returned false on the FIRST transport error — the boot-order fault (etcd seconds behind culvert on a host reboot) got zero retries. `ResumeAsLeader` then asserted `role=leader, leaseEpoch=0`, and `startLeaseKeepalive` no-ops on a zero epoch, so nothing in the process ever called `Acquire` again: permanently read-only (no issuance, no revocation sync, no accepted snapshot) until a human restarted it — `PromoteManually` refuses a node already roled `leader`, so a restart was the ONLY lever. | GAP → **CLOSED** (CHAOS-55: the resume budget now covers transport errors; a rate-bounded background re-acquire loop covers a longer outage) | **H** | was: `ha.go` `ResumeAsLeader`, `ha_failover.go` `acquireLeaseForResume`, keepalive no-op `ha_lease.go:111`; see §23 |
+| HA-16 | **Leadership given up on an UNKNOWN fence state.** `ResumeAsLeader` demoted to standby on ANY failed resume when `standbyAddr` was recorded — including an unreachable backend, which says nothing about who leads. In a 2-node cluster restarting together the guess is symmetric: each node stands by against the other, neither can sync (`verifyBundleEpoch` rejects a bundle with no live holder), so `lastSyncOK` stays zero and `leaseAutoPromote`'s freshness gate refuses every promotion — a **permanently leaderless cluster** produced by a few seconds of etcd being slow to boot. Exactly the rule `ha_lease.go`'s own header states for the other direction, broken in reverse. | NEW → **CLOSED** (CHAOS-55: demotion gated on an AFFIRMATIVE foreign-holder read; an unknown keeps the read-only leader role and hands the decision to the recovery loop) | **H** | was: `ha.go` `ResumeAsLeader`; see §23 |
+| HA-17 | **An unfenced leader was invisible to Prometheus.** `culvert_ha_role 1` is emitted identically by a healthy leader and by one that cannot issue a certificate, accept a revocation or publish a snapshot; `lease_valid` existed only on JSON no alerting rule can read, and `ha_resume_unfenced` fired ONCE at boot (a webhook outage correlated with the restart that caused it hid the state permanently). | NEW → **CLOSED** (CHAOS-55: six `culvert_ha_{write_authority,lease_epoch,unfenced,lease_recovering,lease_reacquire_attempts_total,lease_reacquired_total}` series, emitted only when a fence is armed; `lease_recovering` separates "read-only and working on it" from "read-only and stuck") | **M** | was: `cluster_metrics.go`; see §23 |
+| HA-18 | **A self-fenced ex-leader with no recorded ex-standby is a passive standby forever.** `selfFence` demotes and `enterStandbyResync` fails when no standby has ever synced to this leader; the node then has no sync loop, no keepalive and no recovery loop. If the fence was lost to a transient etcd outage nobody else acquired either, so the lease is free on etcd's return and no node in the cluster is asking for it. NOT covered by the CHAOS-55 loop by design: re-acquiring from `role=standby` is a PROMOTION, and its freshness gate is keyed on `lastSyncOK` — structurally wrong for an ex-leader, which does not sync. **Owner question:** should an ex-leader's own last-write time substitute for `lastSyncOK`? Sibling of WK-2b / CA-3b. | NEW (recorded, not fixed) | **M** | `ha_lease.go` `selfFence`, `ha_failover.go` `leaseAutoPromote`; see §23.5 |
+| HA-19 | **A free lease proves nobody holds it NOW, not that nobody held it since we last looked.** Raised by Codex review of PR #1223 against the CHAOS-55 recovery loop. A peer can acquire, take config writes, crash, and have its lease expire; if that whole tenure fits between two of our observations we see only "free" and re-acquire as a STALE leader, reverting the peer's writes. Partly closed in the same PR: the poll interval is now capped below the lease TTL (`recoveryPollCeiling`), and because etcd keeps a holder's key for ≥1 TTL after it stops renewing, a completed-and-vanished tenure can no longer pass between two SUCCESSFUL observations. **The residual is a blind period we cannot bound from inside this node:** a partition in which WE cannot reach etcd but a peer CAN. Note the same property already holds for the shipped resume path — an operator-restarted leader acquires a free lease with no proof either — so this is the pre-existing class, now reachable without a restart. Closing it needs either durable evidence of the intervening epoch (etcd's `create_revision` advances on unrelated writes, so epoch gaps carry no information, and a free-lease `Read` returns no watermark) or routing a long-blind recovery through the standby freshness machinery instead of acquiring. That is a safety-vs-availability posture call of the same class as HA-18 — recorded for an owner, not settled here. | NEW (partly closed; residual recorded) | **M** | `ha_lease_recovery.go` `recoveryPollCeiling` / `leaseRecoveryAttempt`; see §23.5 |
 | HA-8 | Stale/rolled-back ConfigSnapshot: `dpObserveEpoch` monotonic CAS ratchet + puller-side no-live-holder reject; runs before any mutation. Caveat: in-memory floor re-seeds from last-good on restart. | ✓ | L | `ha_fencing.go:119-137,73-103`, `controlplane.go:1424,1667` |
 | HA-9 | **Enrollment token corrupt `AllowCIDR` → nil-deref panic** (`net.ParseCIDR` error discarded, `cidr.Contains` on nil). Otherwise replay/expiry/prefix/CIDR are atomically consumed under lock. **FIXED in this PR.** | GAP → fixed | L | `enrollment.go:273-279` (fix), consume-under-lock `enrollment.go:241-294` |
 | HA-10 | DP node lost: heartbeat monitor flips connected→disconnected after 90s (3 missed polls), race-safe persist; nodes warned at 24h, never auto-revoked. | ✓ | L | `enrollment.go:627-646,619-624` |
@@ -525,7 +558,7 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | R5 | CA-1 / CA-2 / CA-3 CA silent fail-open / expired-still-signs | Low-Medium | High (inspection dark / outage) | **P1** |
 | R6 | AU-2 stale SSO after IdP delete | Low (deliberate deletes) | High (security: revoked IdP still admits) | **P1** |
 | R7 | PX-3 half-open relay leak | Medium (mobile/flaky clients) | Medium-High (FD/goroutine exhaustion) | **P1** |
-| R8 | HA-7 unfenced resumed leader never recovers | Low | High (indefinite write outage, manual fix) | **P1** |
+| R8 | HA-7/HA-16 unfenced or mutually-standby CP never recovers | ~~Low~~ **Medium** (boot ordering, not an exotic fault) | High (indefinite write outage / leaderless cluster, manual fix) | ~~**P1**~~ **CLOSED** (CHAOS-55) |
 | R9 | PX-6 no global conn cap / limiter off by default | Medium (flood) | High (FD exhaustion) | **P1** |
 | R10 | AU-1 / AU-13 no OIDC introspection cache | High (every request) | Medium (latency + IdP amplification) | **P2** |
 | R11 | WK-9 syslog blocking on hot path | Medium (slow SIEM) | Medium (latency) | **P2** |
@@ -2232,3 +2265,166 @@ Gates: `socks5_accept_chaos_test.go` (18), green under `-race` and under the
 > the happy path without it has reproduced the shape, not the behaviour. When a
 > subsystem is the only one of its kind in a process, ask what the others do
 > that it does not.
+
+---
+
+## 23. CHAOS-55 — The fencing lease's recovery paths
+
+**Date:** 2026-08-24 · **Register rows:** HA-7, HA-16, HA-17, HA-18 ·
+**Full report:** `docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-08-24.md` ·
+**Runbook:** `docs/operator/ha-lease-recovery.md`
+
+### 23.1 Why this domain
+
+HA-7 has sat in this register as an open **P1** since the first sweep, with the
+remediation already written down (§8 item 8) and the test already specified
+(§10). It was scored *Low* likelihood. That scoring was wrong, and the reason it
+was wrong is the finding: the trigger is not an exotic etcd failure, it is
+**boot ordering**. On a host reboot the container runtime starts culvert and
+etcd concurrently, and a few seconds of `connection refused` was enough.
+
+### 23.2 HA-7 — a budget spent on the wrong fault
+
+```go
+if err != nil || st.Holder != id {
+    return false        // "real denial (other holder) or unknown backend state"
+}
+```
+
+The comment names the conflation and then acts on both halves identically. A
+foreign holder is a **decision** — retrying it means waiting for a live leader
+to die. An unreachable backend is an **absence of one**. `haResumeGhostWait`
+(45 s) was therefore spent exclusively on the denial shape that is not a fault.
+
+And the fail-closed choice made here bought nothing: `ResumeAsLeader` takes the
+leader role anyway, `WriteAllowed()` is false, `startLeaseKeepalive` no-ops on a
+zero epoch, and no code path remains that will ever call `Acquire` again. The
+node cannot issue a certificate, accept a revocation, or publish a snapshot a DP
+will take. `PromoteManually` refuses a node whose role is already `leader`, so
+the operator's only lever was a restart.
+
+### 23.3 HA-16 — leadership given up on an unknown
+
+Where the ex-standby's address WAS recorded, the demotion fired on any failed
+resume. In a two-node cluster restarting together, both nodes make the mirror
+guess:
+
+| | node A (persisted leader) | node B (persisted standby) |
+|---|---|---|
+| resume | acquire fails: etcd not up yet | — |
+| role | **standby**, syncing from B | **standby**, syncing from A |
+| sync | rejected — no live lease holder | rejected, same |
+| `lastSyncOK` | zero | zero |
+| `leaseAutoPromote` | refused: *"no successful state sync yet"* | refused, same |
+
+Two healthy processes, an etcd that has been up for hours, and no leader.
+Nothing is red.
+
+### 23.4 What shipped
+
+- **The resume budget now covers transport errors.** `resumeAcquireRound`
+  classifies each round (`granted / foreign / ownGhost / unknown /
+  raceRetryable`) and the retryable ones retry. This alone covers the common
+  boot-order case with no read-only window at all.
+- **…but under its OWN, much shorter budget** (`haResumeUnreachableWait`, 5 s,
+  vs the ghost path's 45 s). `ResumeAsLeader` runs inside `initCluster`, which
+  `main.go` orders BEFORE the root CA, the policy engine, the proxy listener and
+  the admin UI — so time blocked here is time the **secure web gateway data
+  plane is not serving**. Reusing the 45 s ghost budget would have fixed a
+  control-plane write outage by buying a data-plane availability outage, and the
+  fence governs control-plane writes and nothing on the data path. The resume
+  absorbs the short race it exists for and hands anything longer to the
+  background loop, which costs the boot nothing. Pinned from both ends
+  (`ResumeAbsorbsAShortBackendOutage` / `ResumeDoesNotBlockBootOnALongOutage`).
+  The ghost budget stays 45 s — that wait is for a condition with a known,
+  self-clearing expiry, and it is pre-existing behaviour.
+- **A background re-acquire loop** for a longer outage. Bounded in RATE, never
+  in ATTEMPTS (1 s → 30 s, ±20 % jitter): giving up would reinstate the dead
+  end. That does not violate "avoid infinite retries" for the same reason
+  CHAOS-54's accept loop does not — the retry is never silent (first failure
+  logged immediately, then ≤1 line/60 s, then a recovery line naming the
+  suppressed count; magnitude in a counter). The jitter is load-bearing: a fleet
+  restarts together after a site-wide power event, so a fixed cadence aims a
+  synchronised herd at the recovering etcd (the WK-13 shape).
+- **The sleep is interruptible** (CHAOS-54's rule): `Stop` closes the recovery
+  channel, so shutdown never waits out a 30 s backoff. Pinned over 8 trials —
+  where `Stop` lands inside a sleep is uniform, so one trial passes a broken
+  build most of the time.
+- **Read before acquire, and demote only on an affirmative foreign holder.**
+  `Acquire` is denied while anyone else holds the lease, so the loop cannot take
+  leadership from a live peer — but quietly retrying until that peer *dies* and
+  then taking over would make a node of unknown state age authoritative. That is
+  exactly `haPromoteFreshnessWindow`'s judgement, so recovery routes to it
+  rather than around it: an observed foreign holder is **LATCHED**, the loop
+  exits, and this process never acquires again.
+- **The latched disposition mirrors the shipped S4/S2 decision** rather than
+  inventing a third stance — resync from the recorded ex-standby when the
+  material exists, otherwise keep the read-only leader role plus a CRITICAL
+  alert.
+- **Panic containment lands the OPPOSITE way from `leaseRenewRound`**, and the
+  contrast is the point. Containing a keepalive panic is dangerous because it
+  would let a node keep authority it is no longer confirming (§12). Here the
+  node has NO authority to extend, so containing a panicking round and backing
+  off is strictly fail-closed; crashing a node that is already degraded helps
+  nobody. Reported via the crash plane and charged to the attempt counter.
+- **Six metrics** (HA-17), emitted only when a fence is armed:
+  `culvert_ha_{write_authority,lease_epoch,unfenced,lease_recovering,lease_reacquire_attempts_total,lease_reacquired_total}`,
+  plus `lease_recovering` on `/healthz` and `/api/cluster/ha`.
+  `culvert_ha_unfenced` is deliberately NOT `!WriteAllowed()` — a standby has no
+  write authority either and that is healthy; the gauge fires only for a node
+  that believes it is the leader and cannot write. The alertable pair is
+  `unfenced=1 AND recovering=0`: read-only and no longer trying.
+
+Gates: `ha_lease_recovery_chaos_test.go` (18). Every DEFECT gate was verified
+failing against the pre-fix tree; the arming, latching and jitter gates pin new
+behaviour and have no pre-fix counterpart.
+
+### 23.5 What is deliberately left
+
+- **HA-18 — a self-fenced ex-leader with no recorded ex-standby stays a passive
+  standby forever.** Not covered by the recovery loop by design: re-acquiring
+  from `role=standby` is a PROMOTION, and the freshness gate that governs
+  promotions is keyed on `lastSyncOK` — structurally wrong for an ex-leader,
+  which does not sync, so the gate would refuse the one node whose state is by
+  definition the freshest in the cluster. Whether an ex-leader's own last-write
+  time may substitute is a posture decision with split-brain implications, so it
+  is recorded for an owner rather than settled in a chaos fix.
+- **`WriteAllowed()` is silently false whenever `leaseValidFor <=
+  haLeaseWriteMargin`.** The config path is already covered (`haLeaseMinTTLSec`
+  = 3 s, fatal below), but the value trusted at runtime comes from the BACKEND,
+  so a backend reporting a shorter validity than configured reproduces it: a
+  leader that acquires, renews successfully forever, logs only success, and can
+  never write. Now detectable as `culvert_ha_write_authority 0` with
+  `culvert_ha_lease_epoch != 0` — otherwise impossible, and worth an operator
+  rule. Not otherwise changed.
+- **HA-19 — a free lease is not proof that the fence never moved.** Raised by
+  Codex review against this PR. The loop's poll interval is now capped below the
+  lease TTL, and since etcd keeps a holder's key for at least one full TTL after
+  it stops renewing, a peer tenure that begins and ends between two SUCCESSFUL
+  observations is no longer possible. What remains is a blind period this node
+  cannot bound: a partition where we cannot reach etcd but a peer can. Worth
+  keeping in proportion — the SHIPPED resume path has the same property (an
+  operator-restarted leader acquires a free lease with no proof either), so the
+  class is pre-existing and the change makes it reachable without a restart
+  rather than creating it. The two candidate closures are durable evidence of an
+  intervening epoch (not available: `create_revision` advances on unrelated
+  writes, and a free-lease `Read` carries no watermark) or routing a long-blind
+  recovery through the standby freshness machinery instead of acquiring. Same
+  posture class as HA-18, recorded for an owner.
+- **`Fake` and `Etcd` disagree about `Read` on a FREE lease** — `Fake` preserves
+  an epoch watermark, `Etcd` returns a zero `Status{}` because it deletes the
+  key on expiry. Nothing consumes it today, but the conformance suite claims the
+  two agree.
+
+### 23.6 The process lesson
+
+§21 stated it for back ends, §22 for listeners. This sweep generalises it to
+**decisions**:
+
+> A subsystem that is careful about what it may CONCLUDE from an unknown in one
+> direction is not automatically careful in the other. `ha_lease.go` documents
+> "leadership cannot be taken while the fence's state is unknown" and enforces
+> it exactly — while, forty lines away, leadership was GIVEN UP on the same
+> unknown, and the node then stopped asking. When a component states a rule
+> about uncertainty, check every branch that consumes it, not only the one the
+> rule was written for.
