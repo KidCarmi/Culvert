@@ -17,6 +17,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"sort"
+	"strconv"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/identity"
 	"github.com/KidCarmi/Culvert/internal/mcp/limits"
@@ -174,11 +175,13 @@ func computeConfigID(c CapabilityAuthConfig) string {
 	// redeemable under the stricter one, where AuthenticateVerified re-checks time
 	// and nothing else. Every accessor is included, in a fixed order, so adding a
 	// limit without adding it here is the only way to reintroduce the gap.
-	num := func(v int64) {
-		var b [8]byte
-		binary.BigEndian.PutUint64(b[:], uint64(v))
-		h.Write(b[:])
-	}
+	// Fed through seg as a decimal string rather than a fixed-width binary word: the
+	// int64->uint64 conversion that would need is a gosec G115 overflow conversion,
+	// and suppressing it would be suppressing a real question (these are durations
+	// and counts, non-negative by construction today, but nothing in the type says
+	// so). A length-framed decimal is just as canonical and just as collision-safe,
+	// and this runs once per config construction, never on the request path.
+	num := func(v int64) { seg(strconv.FormatInt(v, 10)) }
 	seg("lim")
 	num(int64(c.lim.MaxTokenTTL()))
 	num(int64(c.lim.ClockSkew()))
