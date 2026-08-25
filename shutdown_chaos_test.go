@@ -437,14 +437,14 @@ func TestChaos56_EscalationStopsWhenShutdownCompletes(t *testing.T) {
 // volume those block in write(2). The same stall is reachable without a
 // blocked handler at all, via a peer that stops reading a large GetConfig
 // response (TCP zero-window persist retries indefinitely).
-func startBlockedRPCServer(t *testing.T, release <-chan struct{}) (*grpc.Server, string) {
+func startBlockedRPCServer(t *testing.T, release <-chan struct{}) (srv *grpc.Server, addr string) {
 	t.Helper()
 	lc := net.ListenConfig{}
 	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := grpc.NewServer()
+	srv = grpc.NewServer()
 	entered := make(chan struct{})
 	var once sync.Once
 	// Registered through the same wrapUnary + rawCodec machinery as the real

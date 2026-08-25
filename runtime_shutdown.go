@@ -118,9 +118,9 @@ var errShutdownHookAbandoned = errors.New("exceeded the shutdown budget and was 
 // therefore never worse than the SIGKILL it replaces, and is usually much
 // better.
 //
-// The watchdog deadline is derived with context.WithoutCancel so a phase whose
-// ctx is CANCELLED (rather than expired) still gives its hooks the grace
-// window; hooks continue to receive the honest, un-extended ctx.
+// Each hook's own budget comes from hookBudget, which reserves a minimum slice
+// for every hook still behind it — see there for why the watchdog deadline is
+// per-hook rather than per-phase.
 func (r *shutdownRegistry) RunAll(ctx context.Context) error {
 	r.mu.Lock()
 	if r.ran {
@@ -175,7 +175,7 @@ func (r *shutdownRegistry) RunAll(ctx context.Context) error {
 // is taken from the healthy case — a hook that returns quickly hands its unused
 // share straight to the next one, so a legitimately slow close can still use
 // almost the whole phase when its neighbours are fast.
-func hookBudget(ctx context.Context, phaseEnd time.Time, bounded bool, behind int) (context.Context, context.CancelFunc) {
+func hookBudget(ctx context.Context, phaseEnd time.Time, bounded bool, behind int) (hookCtx context.Context, cancel context.CancelFunc) {
 	if !bounded {
 		return context.WithCancel(ctx)
 	}
