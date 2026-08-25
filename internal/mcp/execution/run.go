@@ -3,6 +3,7 @@ package execution
 import (
 	"context"
 	"encoding/json"
+	"errors"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/credentials/broker"
 	"github.com/KidCarmi/Culvert/internal/mcp/credentials/profile"
@@ -18,6 +19,11 @@ import (
 	"github.com/KidCarmi/Culvert/internal/mcp/runtime"
 	"github.com/KidCarmi/Culvert/internal/mcp/upstreamclient"
 )
+
+// errToolDriftedBeforeCall aborts the commit-then-act callback when the decision's
+// tool changed under it. It never escapes this package: the caller maps it to
+// mcperr.ReasonDecisionSnapshotStale before returning.
+var errToolDriftedBeforeCall = errors.New("mcp: tool drifted between decision and upstream call")
 
 // runExecute performs the real guarded upstream execution for an in-scope
 // executing mode. The mandatory order is preserved: policy already ran, then
@@ -46,7 +52,22 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 
 	var upResp *upstreamclient.Response
 	var upErr error
+	// OVN-09 (residual window). callUpstream is the ONE place either branch performs
+	// the irreversible side effect, so the last-moment drift re-check belongs here
+	// rather than at each call site: a later branch added above this line inherits it.
+	//
+	// The runtime's entry check narrowed the decision/execution window; everything
+	// between it and this line — the durable decision commit, credential planning,
+	// provider material fetch — can block for as long as those take, and a
+	// concurrent catalog ingest during that time would otherwise let the upstream
+	// call run under a decision made about a tool that no longer exists or has been
+	// redefined. Re-checking here makes the refusal precede the side effect.
+	staleAtCall := false
 	callUpstream := func(authHeader string) error {
+		if in.ToolStillCurrent != nil && !in.ToolStillCurrent() {
+			staleAtCall = true
+			return errToolDriftedBeforeCall
+		}
 		r, err := e.cfg.Upstream.Call(ctx, target, in.Method, json.RawMessage(in.RawParams), upstreamclient.CallOptions{
 			Idempotent: idempotent, AuthHeader: authHeader, WireID: "u-" + target.ServerID,
 		})
@@ -75,6 +96,12 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 		blockedOut, didBlock = e.materializeAndCall(ctx, in, profileRef, callUpstream)
 		return nil
 	}); err != nil {
+		// A drift refusal is not a transport or durability fault, and must not be
+		// classified as one: it is the decision-staleness reason the runtime's own
+		// entry check uses, so both refusals read identically to an operator.
+		if staleAtCall {
+			return e.blocked(in, mcperr.ReasonDecisionSnapshotStale, false)
+		}
 		return e.blocked(in, mcperr.ReasonOf(err), false)
 	}
 	if didBlock {

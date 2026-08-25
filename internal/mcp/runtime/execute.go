@@ -45,6 +45,24 @@ type ExecInput struct {
 	Server       *registry.ServerRecord // resolved server record (nil for tools/list on management)
 	SnapshotHash string
 	Now          time.Time
+
+	// ToolStillCurrent re-resolves the decision's tool against the LIVE catalog and
+	// reports whether it still carries the fingerprint the decision was computed
+	// against. It is called by the executor at the LAST moment before the
+	// irreversible upstream call.
+	//
+	// The check at the top of dispatchExecute NARROWS the decision/execution TOCTOU
+	// window (OVN-09); it does not close it. After that check the executor still
+	// commits durable evidence, plans credentials and fetches provider material —
+	// all of which can block — while a concurrent execution.Discovery -> catalog
+	// Ingest publishes a new snapshot. Only a re-check adjacent to the side effect
+	// makes "the tool the decision was about" and "the tool being called" the same
+	// tool.
+	//
+	// nil ⇒ no re-check (a caller with no catalog seam); the entry check still
+	// applies. It returns a bool rather than an error so the executor maps it to
+	// exactly one reason and cannot mistake a drift refusal for a transport fault.
+	ToolStillCurrent func() bool
 }
 
 // ExecOutput is the executor's truthful result. The runtime maps it into the
@@ -77,6 +95,10 @@ func (p *pipeline) dispatchExecute(ctx context.Context, rb *recBuilder, req Requ
 	if out, stale := p.refuseOnToolDrift(rb, in, msg.ID); stale {
 		return out
 	}
+	// The same predicate, handed to the executor to re-run adjacent to the upstream
+	// call. Captured by value from this decision's input, so it can never be
+	// satisfied by a DIFFERENT request's tool.
+	toolStillCurrent := func() bool { return !p.toolHasDrifted(in) }
 	var srv *registry.ServerRecord
 	if req.ServerID != "" && p.deps.Registry != nil {
 		if rec, ok := p.deps.Registry.Current().Get(registry.ServerID(req.ServerID)); ok {
@@ -100,6 +122,8 @@ func (p *pipeline) dispatchExecute(ctx context.Context, rb *recBuilder, req Requ
 		Server:       srv,
 		SnapshotHash: snapshotHash,
 		Now:          now,
+
+		ToolStillCurrent: toolStillCurrent,
 	}
 	// SEC-MCP-03. The executor performs the REAL upstream side effect and must
 	// inherit the request's deadline and cancellation: with a DETACHED background
@@ -137,18 +161,31 @@ func (p *pipeline) dispatchExecute(ctx context.Context, rb *recBuilder, req Requ
 //
 // It runs BEFORE the executor is reached, so no credential is planned, no event is
 // committed and no upstream request is issued under a stale decision.
-func (p *pipeline) refuseOnToolDrift(rb *recBuilder, in policy.DecisionInput, id jsonrpc.ID) (Outcome, bool) {
+// toolHasDrifted reports whether the decision's tool no longer resolves, in the
+// LIVE catalog, to the exact fingerprint the decision was computed against. A tool
+// that has been REMOVED counts as drifted: the decision described something the
+// catalog no longer offers.
+//
+// No tool in the decision, or no catalog seam, is not drift — there is nothing to
+// compare, and inventing drift there would refuse traffic the gateway is
+// configured to allow.
+func (p *pipeline) toolHasDrifted(in policy.DecisionInput) bool {
 	if in.Tool == nil || p.deps.Catalog == nil {
-		return Outcome{}, false
+		return false
 	}
 	rec, ok := p.deps.Catalog.Current().Get(catalog.ToolKey{
 		Server: registry.ServerID(in.Tool.ServerID), Name: in.Tool.Name,
 	})
-	if ok {
-		sum := rec.Fingerprint.Sum()
-		if hex.EncodeToString(sum[:]) == in.Tool.FingerprintHash {
-			return Outcome{}, false
-		}
+	if !ok {
+		return true
+	}
+	sum := rec.Fingerprint.Sum()
+	return hex.EncodeToString(sum[:]) != in.Tool.FingerprintHash
+}
+
+func (p *pipeline) refuseOnToolDrift(rb *recBuilder, in policy.DecisionInput, id jsonrpc.ID) (Outcome, bool) {
+	if !p.toolHasDrifted(in) {
+		return Outcome{}, false
 	}
 	p.ctr.requestsRejected.Add(1)
 	rb.rec.PolicyAction = "BLOCKED_BY_DECISION_STALE"
