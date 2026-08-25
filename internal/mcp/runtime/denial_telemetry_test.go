@@ -23,7 +23,7 @@ func TestDenialTelemetry_DuplicateSingletonHeaderIsClassified(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newListener: %v", err)
 	}
-	r, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://"+gwHost+gwResource, nil)
+	r, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://"+gwHost+gwResource, http.NoBody)
 	r.Host = gwHost
 	r.Header.Add("Authorization", "Bearer a")
 	r.Header.Add("Authorization", "Bearer b")
@@ -46,7 +46,7 @@ func TestDenialTelemetry_WellFormedRequestCarriesNoReason(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newListener: %v", err)
 	}
-	r, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://"+gwHost+gwResource, nil)
+	r, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://"+gwHost+gwResource, http.NoBody)
 	r.Host = gwHost
 	r.Header.Set("Authorization", "Bearer "+gwToken(k))
 
