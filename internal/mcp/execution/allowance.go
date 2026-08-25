@@ -115,6 +115,56 @@ func (s *allowanceStore) consume(in runtime.ExecInput, action rollout.ActionKind
 	}
 }
 
+// wouldSatisfy reports whether the allowance WOULD be satisfied for this request
+// WITHOUT consuming it — the non-destructive prediction a Shadow evaluation needs to
+// tell WOULD_EXECUTE from WOULD_BLOCK for an ALLOW_ONCE/ALLOW_FOR_SESSION. It never
+// mutates state (no consume, no grant creation, no sweep): a Shadow evaluation must be
+// side-effect-free even against in-memory allowance state. A non-allowance action is
+// trivially satisfied.
+func (s *allowanceStore) wouldSatisfy(in runtime.ExecInput, action rollout.ActionKind, now time.Time) bool {
+	if !needsAllowance(action) {
+		return true
+	}
+	key := allowanceKey(in)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, onceKnown := s.once[key]
+	g, sessKnown := s.sess[key]
+	// Capacity gate — mirror consume WITHOUT mutating (Codex P2). A request whose key is
+	// not already present needs a NEW entry, and consume refuses that (fail closed) once
+	// the store is at capacity AFTER reclaiming expired session grants. Counting live
+	// entries (expired sessions excluded, since consume sweeps them first) reproduces
+	// consume's post-sweep refusal without deleting anything. An existing key (incl. an
+	// expired-but-present session slot) reuses its slot, so it is never blocked here.
+	if !onceKnown && !sessKnown && s.liveEntryCountLocked(now) >= maxAllowanceEntries {
+		return false
+	}
+	switch action {
+	case rollout.ActionKindAllowOnce:
+		return !onceKnown // a fresh single-use would be granted; an already-used one would not
+	case rollout.ActionKindAllowSession:
+		if g == nil || now.After(g.expiry) {
+			return true // a new (or renewed) session grant would be created
+		}
+		return g.calls < sessionCallCap
+	default:
+		return true
+	}
+}
+
+// liveEntryCountLocked counts entries that consume would still see AFTER reclaiming
+// expired session grants: all ALLOW_ONCE records plus the non-expired sessions. It is the
+// post-sweep count consume's capacity check uses, computed here without mutating.
+func (s *allowanceStore) liveEntryCountLocked(now time.Time) int {
+	n := len(s.once)
+	for _, g := range s.sess {
+		if !now.After(g.expiry) {
+			n++
+		}
+	}
+	return n
+}
+
 // allowanceKey binds a grant to the exact session + tool + principal.
 func allowanceKey(in runtime.ExecInput) string {
 	sess := in.Input.Session.Fingerprint

@@ -141,3 +141,42 @@ func TestAllowance_SessionGrantCapAndTTLUnchanged(t *testing.T) {
 		t.Fatal("a new session grant after the TTL was refused")
 	}
 }
+
+// TestAllowance_WouldSatisfyMirrorsCapacityRefusal pins that the non-destructive
+// wouldSatisfy mirrors consume's fail-closed refusal of a NEW allowance key once the store
+// is at maxAllowanceEntries with nothing reclaimable (Codex P2). Pre-fix, wouldSatisfy
+// returned true here (key merely unused), so Shadow over-predicted would_execute where
+// Canary/Production would return allowance_consumed.
+func TestAllowance_WouldSatisfyMirrorsCapacityRefusal(t *testing.T) {
+	now := time.Unix(0, 1)
+	s := newAllowanceStore()
+	for i := 0; i < maxAllowanceEntries; i++ { // fill with distinct ALLOW_ONCE grants
+		s.once[allowanceKey(keyedInput(i))] = struct{}{}
+	}
+	newReq := keyedInput(maxAllowanceEntries + 1) // key NOT present
+	if s.wouldSatisfy(newReq, rollout.ActionKindAllowOnce, now) {
+		t.Fatal("wouldSatisfy must refuse a NEW allowance key at capacity (mirror consume)")
+	}
+	if s.consume(newReq, rollout.ActionKindAllowOnce, now) {
+		t.Fatal("control: consume must also refuse a new grant at capacity")
+	}
+}
+
+// TestAllowance_WouldSatisfyReclaimsExpiredSessions pins that wouldSatisfy, like consume,
+// treats an expired session grant as reclaimable — so a new key is admitted when the only
+// thing at capacity is a timed-out session.
+func TestAllowance_WouldSatisfyReclaimsExpiredSessions(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	s := newAllowanceStore()
+	for i := 0; i < maxAllowanceEntries-1; i++ {
+		s.once[allowanceKey(keyedInput(i))] = struct{}{}
+	}
+	s.sess["expired-slot"] = &sessGrant{calls: 1, expiry: now.Add(-time.Hour)} // reclaimable
+	newReq := keyedInput(maxAllowanceEntries + 5)
+	if !s.wouldSatisfy(newReq, rollout.ActionKindAllowOnce, now) {
+		t.Fatal("wouldSatisfy must admit a new key when an expired session is reclaimable")
+	}
+	if !s.consume(newReq, rollout.ActionKindAllowOnce, now) {
+		t.Fatal("control: consume reclaims the expired session and admits the new grant")
+	}
+}

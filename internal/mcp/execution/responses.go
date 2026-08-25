@@ -46,6 +46,33 @@ func observeResult(id jsonrpc.ID, d policy.Decision) []byte {
 	return withID(env, id)
 }
 
+// shadowResult is the Shadow-evaluation body: the truthful Model-1 verdict, explicitly
+// NOT executed. It never carries an upstream response because a Shadow evaluation makes
+// no upstream call. It preserves the raw policy action (evaluated_policy_action)
+// SEPARATELY from the enforcement prediction (shadow_outcome), so a policy DENY /
+// REQUIRE_APPROVAL / REQUIRE_CONFIRMATION is never laundered into a plain WOULD_EXECUTE.
+// Credential and inspection readiness are reported truthfully (§12/§13): Plan proves
+// metadata only, so materialization_readiness is "not_evaluated"; there is no upstream
+// response, so response_inspection is "not_evaluated".
+func shadowResult(id jsonrpc.ID, d ShadowDecision) []byte {
+	env := map[string]any{
+		"jsonrpc": "2.0",
+		"result": map[string]any{
+			"execution_state":         "shadow_evaluated",
+			"executed":                false,
+			"evaluated_policy_action": d.EvaluatedAction,
+			"shadow_outcome":          string(d.Outcome),
+			"shadow_override":         d.ShadowOverride,
+			"credential_plan":         d.CredentialPlan,
+			"materialization_ready":   d.MaterializeReady,
+			"request_inspection":      d.RequestInspection,
+			"response_inspection":     d.ResponseInspection,
+			"mode":                    "shadow",
+		},
+	}
+	return withID(env, id)
+}
+
 // errorResult is a terminal classified JSON-RPC error (sanitized reason code only).
 func errorResult(id jsonrpc.ID, reason mcperr.Reason) []byte {
 	env := map[string]any{

@@ -317,6 +317,17 @@ type DecisionEvidence struct {
 	OperationClass      string   `json:"operation_class,omitempty"`
 	RiskClass           string   `json:"risk_class,omitempty"`
 	ExecutionState      string   `json:"execution_state,omitempty"`
+	// NOTE (Codex P2, PR #1226): the Shadow enforcement-prediction sub-facts
+	// (shadow_outcome/override, credential-plan and inspection readiness) are DELIBERATELY
+	// NOT persisted as new digest-covered fields on this schema_version:1 envelope. Adding
+	// them here would be a rollback hazard — a pre-change binary reading a shadow event
+	// drops the unknown fields on unmarshal, recomputes CanonicalBytes without them, and
+	// misreports the valid record as corrupted. Durable shadow-evidence persistence needs
+	// its own schema version (v2, with explicit v1/v2 recovery) and belongs in the reviewed
+	// Shadow-activation slice (execution is disabled here, so no shadow event is ever
+	// written). Today a shadow evaluation is marked ONLY by the existing ExecutionState
+	// value "shadow_evaluated" (a known field, digest-safe), and the full ShadowDecision is
+	// carried in the transient response body. Tracked as SHADOW-EVIDENCE-ROUTING-1.
 }
 
 // InspectionEvidence records only sanitized inspection facts (MCP-INSP-*). No

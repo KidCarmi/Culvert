@@ -297,3 +297,83 @@
   server whose dialer reads the current pin, which the per-call pinning model makes non-trivial.
 - **Interest:** (a) bounded information disclosure; (b) a TLS handshake per upstream tool call
   once execution is armed.
+
+## PREREQ-MCP-KILL-1 — MCP kill switch not revalidated at the side-effect boundary · HARD CANARY PREREQUISITE (2026-08-25)
+- **Principal:** `Executor.Execute` checks `State.Killed()` once at admission, but the
+  irreversible boundary (`run.go` `callUpstream`) does NOT re-read the authoritative kill
+  state before the upstream side effect. Between admission and the boundary the executor
+  performs a durable decision commit, credential planning and credential materialization —
+  all of which can block — so an emergency kill engaged during that window does not abort an
+  in-flight live call. The OVN-09 tool-drift re-check already sits at that boundary; the kill
+  re-check does not yet join it.
+- **Status:** OPEN. This is a **blocking prerequisite**, not an ordinary debt item.
+  **Canary/Production activation is PROHIBITED until the authoritative kill state is
+  revalidated immediately before the irreversible side-effect boundary** (a kill during
+  planning/materialization must yield `up.calls == 0`, block reason
+  `rollout_emergency_active`). Compensating control today: no production executor is composed
+  (arming hooks uncalled; AST posture wall), so the window is unreachable in production — but
+  the prerequisite must be CLOSED before any live-capable mode is armed.
+- **Interest:** the kill switch is the operator's only immediate stop; a stop that a slow
+  commit/materialize window can outrun is not a stop. Purely a live-mode concern — Shadow
+  already reflects the kill at admission (`WOULD_BLOCK` / `rollout_emergency_active`) and never
+  reaches the boundary.
+- **Fix:** add a `killEpoch` re-read to `callUpstream` alongside the tool-drift re-check; on a
+  kill, abort before `Upstream.Call` and return the emergency block. Then invert
+  `TestCanaryPrerequisite_KillStateNotRevalidatedAtSideEffectBoundary`
+  (`internal/mcp/execution`) to assert `up.calls == 0` and check off the §12 exit criterion in
+  `docs/design/mcp/SHADOW-ARCHITECTURE.md`.
+- **Evidence:** `docs/design/mcp/SHADOW-ARCHITECTURE.md` §10 (PREREQ-MCP-KILL-1) + §12 exit
+  criteria; non-vacuous gate `TestCanaryPrerequisite_KillStateNotRevalidatedAtSideEffectBoundary`.
+
+## SHADOW-EVIDENCE-ROUTING-1 — Pre-dispatch fail-closed signals not routed into Shadow evidence · LOW (2026-08-25)
+- **Principal:** Two failure classes are terminally handled by the runtime BEFORE the
+  guarded executor/Shadow provider is invoked, so the ShadowEvaluator never records a
+  `shadow_evaluated` event for them: (a) an inspection `HardFail` is rejected in
+  `dispatchPolicy` (`internal/mcp/runtime/policy.go`) before the `p.executor != nil`
+  delegation, for every rollout mode; (b) an initial (pre-dispatch) tool drift is refused
+  by the OVN-09 `refuseOnToolDrift` at the top of `dispatchExecute`
+  (`internal/mcp/runtime/execute.go`) before `p.executor.Execute`. The evaluator's
+  `WOULD_FAIL_INSPECTION` and (initial) `WOULD_FAIL_STALE_DECISION` outcomes are therefore
+  provider-level contracts (pinned by the differential test via direct invocation) but are
+  not produced through the live pipeline. `WOULD_FAIL_STALE_DECISION` IS reached for drift
+  detected at the side-effect boundary (the `ToolStillCurrent` re-check).
+- **Status:** OPEN, deferred by design. Execution is disabled (no executor composed), so
+  this is future-facing evidence completeness, not a live gap. Found by Codex review of
+  `d0f747e` on PR #1226.
+- **Interest:** for a future Shadow activation, an inspection-hard-fail or an
+  already-stale tool produces the runtime's own rejection observation instead of a
+  `shadow_evaluated` / `WOULD_FAIL_*` record, so a Canary-readiness analysis reading only
+  `culvert_mcp_shadow_*` would undercount those refusals (they are still recorded, in a
+  different evidence shape).
+- **Fix (proposed):** in the reviewed Shadow-activation composition slice, route these
+  signals into the executor when one is wired — gate the `dispatchPolicy` inspection-block
+  and let the executor enforce (fail-closed for Canary/Production via `hardFailure()` →
+  `EffectBlock`; evidence for Shadow via `EffectShadowEvaluate` → `WOULD_FAIL_INSPECTION`);
+  for drift, make the OVN-09 narrowing Shadow-aware so it records `WOULD_FAIL_STALE_DECISION`
+  in Shadow WITHOUT widening the TOCTOU window for enforcing modes. This modifies
+  security-sensitive dispatch and changes the enforcing-mode rejection observation shape, so
+  it is out of scope for the architecture-only PR #1226 and belongs with the executor-arming
+  review.
+- **Evidence:** `docs/design/mcp/SHADOW-ARCHITECTURE.md` §13 (limitation 3);
+  `internal/mcp/runtime/policy.go` (inspection block), `internal/mcp/runtime/execute.go`
+  (refuseOnToolDrift).
+
+## SHADOW-EVIDENCE-ROUTING-1 addendum — Durable Shadow sub-facts need a v2 envelope (2026-08-25)
+- **Principal:** The Shadow enforcement-prediction sub-facts (shadow_outcome/override,
+  credential-plan status, request/response inspection readiness) are NOT persisted as new
+  fields on the `schema_version:1` event envelope. Adding digest-covered fields in place is a
+  binary-rollback hazard: a pre-change reader drops the unknown JSON fields on unmarshal,
+  recomputes `CanonicalBytes` without them, and `VerifyDigest` misreports a valid shadow
+  record as corrupted (the model fails closed on an unknown schema version, but the fields
+  were added under v1, so it never gets that far). Found by Codex on PR #1226 (4bbf211).
+- **Status:** OPEN, deferred by design. Today a shadow evaluation is marked durably only by
+  the existing `ExecutionState = "shadow_evaluated"` value (digest-safe), and the full
+  ShadowDecision rides the response body. Execution is disabled, so no shadow event is ever
+  written in production.
+- **Fix:** in the Shadow-activation slice, introduce `schema_version:2` for the expanded
+  envelope with explicit v1/v2 recovery handling (a v2 event is rejected as "unknown schema
+  version" by a v1 reader — honest — rather than misverified), and stamp the sub-facts only
+  on v2 shadow events. Then `shadowDecisionFacts` populates the durable sub-facts.
+- **Evidence:** `internal/mcp/events/model/model.go` (DecisionEvidence note),
+  `internal/mcp/execution/shadow_evaluator.go` (`shadowDecisionFacts`),
+  `docs/design/mcp/SHADOW-ARCHITECTURE.md` §9.
