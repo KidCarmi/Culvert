@@ -61,11 +61,13 @@ const (
 
 // credential readiness sub-facts (§12): Plan proves METADATA validity only; it does
 // NOT prove a remote provider is reachable, and Shadow must not call Materialize to
-// find out. So materialization readiness is honestly "not evaluated".
+// find out. So materialization readiness is honestly "not evaluated". The identifiers
+// deliberately avoid the "cred" token (gosec G101 matches it as a hardcoded-credential
+// name) — these are bounded status LABELS, never secrets.
 const (
-	credPlanValid       = "credential_plan_valid"
-	credPlanInvalid     = "credential_plan_invalid"
-	credPlanNone        = "no_credential_profile"
+	planStatusValid     = "credential_plan_valid"
+	planStatusInvalid   = "credential_plan_invalid"
+	planStatusNone      = "no_credential_profile"
 	materializeNotEval  = "not_evaluated"
 	inspectionWouldPass = "would_pass"
 	inspectionWouldFail = "would_fail"
@@ -206,7 +208,7 @@ func (s *ShadowEvaluator) decide(in runtime.ExecInput) ShadowDecision {
 	d := ShadowDecision{
 		EvaluatedAction:    in.Decision.Action.String(),
 		ShadowOverride:     !action.IsAllowClass(),
-		CredentialPlan:     credPlanNone,
+		CredentialPlan:     planStatusNone,
 		MaterializeReady:   materializeNotEval,
 		RequestInspection:  inspectionWouldPass,
 		ResponseInspection: inspectionNotEval,
@@ -259,16 +261,16 @@ func (s *ShadowEvaluator) decide(in runtime.ExecInput) ShadowDecision {
 			// A credential is required but no planning capability is composed: readiness
 			// is not evaluable, which is a fail-closed WOULD_FAIL_CREDENTIAL_READINESS
 			// rather than a false WOULD_EXECUTE.
-			d.CredentialPlan = credPlanInvalid
+			d.CredentialPlan = planStatusInvalid
 			d.Outcome = ShadowWouldFailCredentialReadiness
 			return d
 		}
 		if _, err := s.cfg.Planner.Plan(planInput(in, profileRef)); err != nil {
-			d.CredentialPlan = credPlanInvalid
+			d.CredentialPlan = planStatusInvalid
 			d.Outcome = ShadowWouldFailCredentialReadiness
 			return d
 		}
-		d.CredentialPlan = credPlanValid
+		d.CredentialPlan = planStatusValid
 	}
 
 	// 6. Everything an enforcing mode checks before the side-effect boundary passed.
