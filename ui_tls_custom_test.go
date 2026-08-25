@@ -61,7 +61,8 @@ func TestResolveUITLSCertKey_ExplicitWinsOverPersisted(t *testing.T) {
 
 func TestResolveUITLSCertKey_FallsBackToPersisted(t *testing.T) {
 	withTempDataDirForUITLS(t)
-	if err := persistCustomUITLS([]byte("cert-bytes"), []byte("key-bytes")); err != nil {
+	certPEM, keyPEM, _ := generateSelfSignedECDSA(t)
+	if err := persistCustomUITLS(certPEM, keyPEM); err != nil {
 		t.Fatal(err)
 	}
 	cert, key := resolveUITLSCertKey("", "")
@@ -70,6 +71,61 @@ func TestResolveUITLSCertKey_FallsBackToPersisted(t *testing.T) {
 	}
 	if !uiCustomTLSActive {
 		t.Error("uiCustomTLSActive should be true once the persisted cert is selected")
+	}
+}
+
+// TestResolveUITLSCertKey_IgnoresMismatchedPersistedPair is the regression
+// test for the fatal-boot-loop finding: persistCustomUITLS writes the cert
+// and key as two SEPARATE atomic writes (persistCustomUITLS in
+// ui_tls_custom.go). A process killed between those two writes — a container
+// OOM-kill, `docker compose restart`, a host crash, or simply losing the race
+// with a second upload — leaves a NEW cert paired with the OLD key (or vice
+// versa) on disk. customUITLSFilesPresent() only checks that both files
+// EXIST, so resolveUITLSCertKey used to hand this mismatched pair straight to
+// startUI, whose ListenAndServeTLS failure is fatal (logFatalf -> os.Exit)
+// with no fallback to self-signed — unlike every other TLS failure path in
+// startUI. A single interrupted re-upload therefore permanently prevented the
+// whole proxy process (not just the admin UI) from starting again, with no
+// self-heal short of an operator shelling in to delete the two files.
+//
+// resolveUITLSCertKey must validate the persisted pair the same way
+// ListenAndServeTLS will (tls.LoadX509KeyPair) and degrade to no custom cert
+// — exactly as if nothing had been uploaded — when it does not parse.
+func TestResolveUITLSCertKey_IgnoresMismatchedPersistedPair(t *testing.T) {
+	withTempDataDirForUITLS(t)
+	certPEM, _, _ := generateSelfSignedECDSA(t)
+	_, otherKeyPEM, _ := generateSelfSignedECDSA(t) // a different, unrelated key
+	if err := persistCustomUITLS(certPEM, otherKeyPEM); err != nil {
+		t.Fatal(err)
+	}
+	if !customUITLSFilesPresent() {
+		t.Fatal("both files should be on disk even though the pair is mismatched")
+	}
+
+	cert, key := resolveUITLSCertKey("", "")
+	if cert != "" || key != "" {
+		t.Fatalf("resolveUITLSCertKey trusted a mismatched cert/key pair instead of falling back: got (%q, %q) — "+
+			"this pair would fail ListenAndServeTLS's tls.LoadX509KeyPair and fatally exit the whole process via logFatalf", cert, key)
+	}
+	if uiCustomTLSActive {
+		t.Error("uiCustomTLSActive must stay false when the persisted pair fails to parse")
+	}
+}
+
+// TestResolveUITLSCertKey_IgnoresCorruptPersistedPair covers plain on-disk
+// corruption (not just a mismatched-but-individually-valid pair): neither
+// file even parses as PEM.
+func TestResolveUITLSCertKey_IgnoresCorruptPersistedPair(t *testing.T) {
+	withTempDataDirForUITLS(t)
+	if err := persistCustomUITLS([]byte("not a cert"), []byte("not a key")); err != nil {
+		t.Fatal(err)
+	}
+	cert, key := resolveUITLSCertKey("", "")
+	if cert != "" || key != "" {
+		t.Fatalf("resolveUITLSCertKey trusted a corrupt persisted pair instead of falling back: got (%q, %q)", cert, key)
+	}
+	if uiCustomTLSActive {
+		t.Error("uiCustomTLSActive must stay false when the persisted pair is corrupt")
 	}
 }
 

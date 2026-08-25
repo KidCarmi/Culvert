@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"os"
 	"path/filepath"
 
@@ -53,16 +54,39 @@ func persistCustomUITLS(certPEM, keyPEM []byte) error {
 	return fileutil.AtomicWrite(customUITLSKeyPath(), keyPEM, 0o600)
 }
 
+// customUITLSPairValid reports whether the persisted cert/key pair on disk
+// actually parses as a matching TLS key pair — the same check
+// http.Server.ListenAndServeTLS performs internally via tls.LoadX509KeyPair.
+// customUITLSFilesPresent() only proves the two files EXIST: persistCustomUITLS
+// writes them as two separate atomic writes, so a process killed between the
+// two (container OOM-kill, docker compose restart, host crash — none of them
+// rare) can leave a NEW cert paired with the OLD key, both individually
+// well-formed but mismatched. That pair must never reach ListenAndServeTLS,
+// whose load failure is fatal (startUI calls logFatalf, which os.Exit(1)s the
+// whole process) with no fallback — unlike the self-signed path right below
+// it in startUI.
+func customUITLSPairValid() bool {
+	_, err := tls.LoadX509KeyPair(customUITLSCertPath(), customUITLSKeyPath())
+	return err == nil
+}
+
 // resolveUITLSCertKey folds a persisted custom UI cert into startup cert/key
 // resolution: an explicit -tls-cert/-tls-key (flag or YAML) always wins, and
-// otherwise a GUI-uploaded cert (if any) is used before falling back to the
-// auto self-signed certificate. Sets uiCustomTLSActive so the admin API can
-// report whether the running server is actually using it.
+// otherwise a GUI-uploaded cert (if any, and only if it still parses as a
+// matching pair) is used before falling back to the auto self-signed
+// certificate. Sets uiCustomTLSActive so the admin API can report whether the
+// running server is actually using it.
 func resolveUITLSCertKey(cert, key string) (certPath, keyPath string) {
 	if cert != "" || key != "" {
 		return cert, key
 	}
 	if customUITLSFilesPresent() {
+		if !customUITLSPairValid() {
+			logger.Printf("UITLS: persisted custom UI cert/key pair under %s does not parse as a matching TLS pair "+
+				"(interrupted or corrupted upload) — ignoring it and falling back to the auto self-signed certificate. "+
+				"Upload a valid pair from the Certificates panel to replace it.", dataDir)
+			return cert, key
+		}
 		uiCustomTLSActive = true
 		return customUITLSCertPath(), customUITLSKeyPath()
 	}
