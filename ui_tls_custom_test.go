@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"mime/multipart"
 	"net/http"
@@ -30,13 +31,13 @@ func TestCustomUITLSFilesPresent(t *testing.T) {
 	if customUITLSFilesPresent() {
 		t.Fatal("expected no persisted UI cert in a fresh data dir")
 	}
-	if err := os.WriteFile(customUITLSCertPath(), []byte("cert"), 0644); err != nil {
+	if err := os.WriteFile(customUITLSCertPath(), []byte("cert"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if customUITLSFilesPresent() {
 		t.Fatal("expected false with only the cert half present")
 	}
-	if err := os.WriteFile(customUITLSKeyPath(), []byte("key"), 0600); err != nil {
+	if err := os.WriteFile(customUITLSKeyPath(), []byte("key"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if !customUITLSFilesPresent() {
@@ -125,7 +126,7 @@ func TestAPICertsUpload_UI_Persists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cert not persisted: %v", err)
 	}
-	if string(gotCert) != string(certPEM) {
+	if !bytes.Equal(gotCert, certPEM) {
 		t.Error("persisted cert does not match the uploaded cert")
 	}
 	if !customUITLSFilesPresent() {

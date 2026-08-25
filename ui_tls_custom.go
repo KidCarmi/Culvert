@@ -47,10 +47,10 @@ func customUITLSFilesPresent() bool {
 // material); the cert 0644 (public, and self-signed cert generation already
 // treats it as non-sensitive).
 func persistCustomUITLS(certPEM, keyPEM []byte) error {
-	if err := fileutil.AtomicWrite(customUITLSCertPath(), certPEM, 0644); err != nil {
+	if err := fileutil.AtomicWrite(customUITLSCertPath(), certPEM, 0o644); err != nil {
 		return err
 	}
-	return fileutil.AtomicWrite(customUITLSKeyPath(), keyPEM, 0600)
+	return fileutil.AtomicWrite(customUITLSKeyPath(), keyPEM, 0o600)
 }
 
 // resolveUITLSCertKey folds a persisted custom UI cert into startup cert/key
@@ -58,7 +58,7 @@ func persistCustomUITLS(certPEM, keyPEM []byte) error {
 // otherwise a GUI-uploaded cert (if any) is used before falling back to the
 // auto self-signed certificate. Sets uiCustomTLSActive so the admin API can
 // report whether the running server is actually using it.
-func resolveUITLSCertKey(cert, key string) (string, string) {
+func resolveUITLSCertKey(cert, key string) (certPath, keyPath string) {
 	if cert != "" || key != "" {
 		return cert, key
 	}
