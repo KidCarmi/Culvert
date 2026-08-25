@@ -3362,6 +3362,18 @@ Firefox (all platforms):
         </div>
       </div>
 
+      <div class="panel" id="ap-killswitch-panel" style="margin-bottom:14px;border:1px solid var(--border)">
+        <div class="panel-body" id="ap-killswitch-body" style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+          <div style="font-size:.85rem">
+            <span id="ap-killswitch-badge"></span>
+            <div id="ap-killswitch-note" style="color:var(--muted);margin-top:4px;font-size:.78rem">
+              Break-glass: forces every Auth Exempt rule (scoped and the global Open default) to require authentication, with no restart. CredentialRequired, SSORequired and Stage-2 access decisions are unaffected.
+            </div>
+          </div>
+          <button class="btn sm" id="ap-killswitch-btn" data-click="apToggleKillSwitch"></button>
+        </div>
+      </div>
+
       <div class="panel" style="margin-bottom:14px">
         <div class="panel-header">
           <span class="panel-title">Auth Policy Rules</span>
@@ -15196,7 +15208,50 @@ async function loadAuthPolicy() {
     document.getElementById('ap-default-allow-warn').style.display =
       (d.defaultAction === 'allow' && apRules.length) ? 'block' : 'none';
     renderAuthPolicy();
+    renderAuthKillSwitch(d.killSwitch);
   } catch(e) { console.error(e); }
+}
+
+// Auth Exempt break-glass kill switch (authKillSwitchStatus, /api/authpolicy/killswitch).
+// envDisabled is the read-once CULVERT_AUTHBYPASS_DISABLE var - it cannot be
+// changed at runtime, so the toggle only ever controls runtimeDisabled.
+let apKillSwitchState = null;
+
+function renderAuthKillSwitch(status) {
+  apKillSwitchState = status || { envDisabled: false, runtimeDisabled: false, engaged: false };
+  const badge = document.getElementById('ap-killswitch-badge');
+  const btn = document.getElementById('ap-killswitch-btn');
+  const isAdmin = (typeof window.currentRole !== 'undefined' && window.currentRole === 'admin');
+  if (apKillSwitchState.engaged) {
+    let why = apKillSwitchState.envDisabled
+      ? (apKillSwitchState.runtimeDisabled ? 'env + runtime' : 'env (CULVERT_AUTHBYPASS_DISABLE)')
+      : 'runtime toggle';
+    badge.innerHTML = `<span style="background:rgba(239,68,68,.15);color:#ef4444;padding:2px 8px;border-radius:12px;font-size:.78rem;font-weight:600"><svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> Kill switch engaged (${escHtml(why)})</span>`;
+  } else {
+    badge.innerHTML = '<span style="background:rgba(52,211,153,.15);color:#34d399;padding:2px 8px;border-radius:12px;font-size:.78rem;font-weight:600">Kill switch clear - exemptions active</span>';
+  }
+  if (apKillSwitchState.envDisabled && !apKillSwitchState.runtimeDisabled) {
+    // Runtime toggle has nothing to add: the env layer already forces Default,
+    // and only a restart with the env var cleared can release it.
+    btn.style.display = 'none';
+  } else {
+    btn.style.display = '';
+    btn.disabled = !isAdmin;
+    btn.title = isAdmin ? '' : 'Requires the admin role';
+    btn.textContent = apKillSwitchState.runtimeDisabled ? 'Release runtime kill switch' : 'Engage kill switch (require auth for all exemptions)';
+    btn.className = apKillSwitchState.runtimeDisabled ? 'btn sm' : 'btn sm danger-quiet';
+  }
+}
+
+async function apToggleKillSwitch() {
+  if (!apKillSwitchState) return;
+  const engaging = !apKillSwitchState.runtimeDisabled;
+  if (engaging && !window.confirm('Engage the Auth Exempt kill switch? Every Exempt rule and the Open default will require authentication until released. This does not affect CredentialRequired, SSORequired, or Stage-2 access decisions.')) return;
+  try {
+    const status = await api('/api/authpolicy/killswitch', { method: 'PUT', body: { disabled: engaging } });
+    renderAuthKillSwitch(status);
+    toast(engaging ? 'Kill switch engaged - exemptions now require authentication' : 'Kill switch released');
+  } catch(e) { toast('Failed: ' + e.message, 'error'); }
 }
 
 function apOutcomeBadge(r) {

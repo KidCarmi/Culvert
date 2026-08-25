@@ -242,11 +242,14 @@ func TestP2S4_Diagnostics_CRNoProvider_Fail(t *testing.T) {
 }
 
 // ── No new routes: the authpolicy surface is exactly the two Slice-8 routes ───
+// plus the killswitch break-glass control (added to expose the pre-existing
+// runtime kill switch — see authKillSwitchStatus / apiAuthPolicyKillSwitch).
 
 func TestP2S4_Routes_NoNewAuthPolicyRoutes(t *testing.T) {
 	want := map[string][]string{
-		"/api/authpolicy":         {"GET", "POST", "PUT", "DELETE"},
-		"/api/authpolicy/reorder": {"POST"},
+		"/api/authpolicy":            {"GET", "POST", "PUT", "DELETE"},
+		"/api/authpolicy/reorder":    {"POST"},
+		"/api/authpolicy/killswitch": {"GET", "PUT"},
 	}
 	got := map[string][]string{}
 	for i := range uiRoutes {

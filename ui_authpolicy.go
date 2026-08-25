@@ -65,6 +65,21 @@ func normalizeIncomingAuthRule(rule *PolicyRule) error {
 	return nil
 }
 
+// authKillSwitchStatus reports the state of both Auth Exempt kill-switch
+// layers — the read-once CULVERT_AUTHBYPASS_DISABLE env var and the
+// admin-settable runtime toggle (authpolicy.go, Phase 1 Slice 6) — plus the
+// combined "engaged" verdict the Stage-1 gate actually consults. Surfaced on
+// GET /api/authpolicy (list view) and GET /api/authpolicy/killswitch (the
+// break-glass control) so an admin never has to run a simulate call, read a
+// log, or SSH in just to learn whether exemptions are currently disabled.
+func authKillSwitchStatus() map[string]any {
+	return map[string]any{
+		"envDisabled":     authBypassDisabled(),
+		"runtimeDisabled": authExemptDisabledRuntimeState(),
+		"engaged":         authExemptKillSwitchEngaged(),
+	}
+}
+
 // GET/POST/PUT/DELETE /api/authpolicy — manage Stage-1 auth/exempt rules.
 func apiAuthPolicy(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
@@ -78,6 +93,7 @@ func apiAuthPolicy(w http.ResponseWriter, r *http.Request) {
 			"count":         len(rules),
 			"defaultAction": defaultPolicyAction(),
 			"note":          authExemptNote,
+			"killSwitch":    authKillSwitchStatus(),
 		})
 
 	case http.MethodPost:
@@ -231,6 +247,46 @@ func parsePriorityParam(w http.ResponseWriter, r *http.Request) (int, bool) {
 		return 0, false
 	}
 	return priority, true
+}
+
+// GET/PUT /api/authpolicy/killswitch — the Auth Exempt break-glass control.
+//
+// GET reports both kill-switch layers (see authKillSwitchStatus). PUT flips
+// ONLY the runtime toggle (authpolicy.go's authExemptDisabledRuntime) — the
+// env layer (CULVERT_AUTHBYPASS_DISABLE) is read-once by design and cannot be
+// changed without a restart. Engaging the switch fails every Auth Exempt rule
+// (scoped and the global Open default) closed to "authentication required"
+// with no restart required; CredentialRequired/SSORequired and Stage-2 access
+// decisions are unaffected. This exposes an existing runtime primitive that
+// already gates the live request path (authpolicy.go:510,542; proxy.go:346) —
+// no new decision logic is introduced.
+func apiAuthPolicyKillSwitch(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		jsonOK(w, authKillSwitchStatus())
+
+	case http.MethodPut:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		var body struct {
+			Disabled bool `json:"disabled"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		setAuthExemptDisabled(body.Disabled)
+		auditEvent(r, "authpolicy.killswitch", fmt.Sprintf("disabled=%t", body.Disabled), "")
+		logger.Printf("UI: auth-exempt runtime kill switch set to disabled=%t", body.Disabled)
+		jsonOK(w, authKillSwitchStatus())
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 // POST /api/authpolicy/reorder — reorder auth rules among themselves.
