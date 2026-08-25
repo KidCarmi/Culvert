@@ -184,6 +184,9 @@ func (s *ShadowEvaluator) evaluate(_ context.Context, in runtime.ExecInput) runt
 		return s.blocked(in, mcperr.ReasonEventDurabilityDegraded, false)
 	}
 	d := s.decide(in)
+	// Bounded, low-cardinality metric: ONE evaluation + its formal Model-1 verdict. The
+	// outcome enum is the only label; no tenant/subject/tool/argument is ever recorded.
+	s.cfg.Metrics.ObserveShadowOutcome(in.Capability.String(), string(d.Outcome))
 
 	// Durable evidence BEFORE reporting (evidence-before-report). The committed
 	// callback performs NO side effect — it exists only so a failed durable commit

@@ -7,6 +7,7 @@ import (
 	"go/token"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -14,44 +15,71 @@ import (
 	"testing"
 )
 
-// The MCP execution-posture wall.
+// The MCP execution-posture wall (EVOLVED for controlled Shadow activation).
 //
-// ADR-0024 ships the MCP Agent Security Gateway disabled by default, and the
-// guarded-execution plane is the part that must stay off: an executing rollout
-// mode (Shadow / Canary / Production) drives a real executor, a bounded upstream
-// client, a credential broker and the inspection/DLP plane, and activating one
-// against the shipped Observe-only composition would claim a contract the process
-// cannot satisfy. Today three independent facts keep it off:
+// ADR-0024 ships the MCP Agent Security Gateway disabled by default. After Layer B
+// (#1226) the guarded plane splits into TWO capabilities with very different postures,
+// and this wall now pins that split rather than a blanket "no executor":
 //
-//  1. nothing calls markGatewayExecDepsReady / markManagementExecDepsReady, so
-//     execDepsConfigured is false for both capabilities and every executing-mode
-//     transition fails closed at the commit gate;
-//  2. nothing assigns runtime.Deps.Executor, so the pipeline composes no executor;
-//  3. nothing outside internal/mcp/execution imports that package at all.
+//   - The NON-EXECUTING Shadow evaluator (*execution.ShadowEvaluator) MAY be composed
+//     in production, as runtime.Deps.Executor, so a controlled node can EVALUATE real
+//     traffic. It holds no upstream client and no materialize-capable broker (Layer B),
+//     so it can never cross the side-effect boundary.
+//   - LIVE execution — the *execution.Executor, the UpstreamCaller, credential
+//     Materialize — must stay OFF. Nothing may construct a live executor, and the
+//     live-execution arming hooks must stay uncalled, so every Canary/Production
+//     transition fails closed at the commit gate.
 //
-// Each of those is an ABSENCE, and an absence is the one property no unit test
-// observes: every package test passes just as well after the wiring is added.
-// Arming execution is a deliberate, separately-reviewed activation — this file
-// makes it impossible to do ACCIDENTALLY, by failing the build the moment any of
-// the three facts stops holding.
+// The wall therefore pins these facts (each an ABSENCE that no unit test observes, so
+// the build must fail the moment one stops holding):
 //
-// This is not a prohibition on ever shipping execution. It is the marker that
-// doing so is a decision: whoever arms it must edit this wall, and that edit is
-// what a reviewer sees.
+//  1. nothing calls markGatewayExecDepsReady / markManagementExecDepsReady (the LIVE
+//     arming hooks), so liveExecDepsConfigured is false and Canary/Production fail
+//     closed. (markGateway/ManagementShadowDepsReady — the SHADOW hooks — MAY be called;
+//     they arm only the non-executing evaluation tier.)
+//  2. no production code references a LIVE-execution symbol of the execution package —
+//     execution.New (the live constructor), execution.Executor, execution.Config,
+//     execution.UpstreamCaller — so no live executor is ever constructed.
+//  3. exactly ONE production file (mcp_shadow_startup.go) imports internal/mcp/execution,
+//     and it references only the Shadow symbols; nothing else may import the package.
+//  4. runtime.Deps.Executor is assigned in exactly that one file — the Shadow
+//     composition — and nowhere else.
+//
+// Arming LIVE execution is a deliberate, separately-reviewed activation: whoever does
+// it must edit this wall, and that edit is what a reviewer sees.
 //
 // AST-based rather than grep-based, deliberately: a string search matches comments
 // and test files, which is exactly how a documentation-only control passes for a
 // real one (the DEBT-011 lesson from internal/mcp/runtime/limits_ownership_test.go).
 
-// execArmingHooks are the registration hooks that switch guarded execution on.
+// execArmingHooks are the LIVE-execution registration hooks. The SHADOW hooks
+// (markGateway/ManagementShadowDepsReady) are deliberately NOT here — composing the
+// non-executing evaluator is allowed.
 var execArmingHooks = map[string]bool{
 	"markGatewayExecDepsReady":    true,
 	"markManagementExecDepsReady": true,
 }
 
-// execPackagePath is the guarded-execution plane. Nothing outside it may import it
-// while the shipped posture is Observe-only.
+// liveExecutionSymbols are the execution-package identifiers that belong to LIVE
+// execution ONLY. Referencing any of them from production constructs or names the live
+// executor, which must stay unwired. The Shadow symbols (NewShadowEvaluator,
+// ShadowEvaluator, ShadowConfig, CredentialPlanner) are deliberately absent so the
+// Shadow composition is permitted.
+var liveExecutionSymbols = map[string]bool{
+	"New":            true, // the live Executor constructor (NewShadowEvaluator is allowed)
+	"Executor":       true, // the live executor type (ShadowEvaluator is allowed)
+	"Config":         true, // the live executor config (ShadowConfig is allowed)
+	"UpstreamCaller": true, // the upstream side-effect capability — Shadow has none
+}
+
+// execPackagePath is the guarded-execution plane. Exactly one production file may import
+// it (the Shadow composition); nothing else may.
 const execPackagePath = "github.com/KidCarmi/Culvert/internal/mcp/execution"
+
+// shadowCompositionFile is the SINGLE production file permitted to import the execution
+// package and assign runtime.Deps.Executor. It composes only the non-executing Shadow
+// evaluator (SHADOW-ACTIVATION.md §4).
+const shadowCompositionFile = "mcp_shadow_startup.go"
 
 // productionGoFiles yields every non-test .go file of the main module, with the
 // vendored, generated and separately-moduled trees excluded.
@@ -138,13 +166,15 @@ func productionAST(t *testing.T) []parsedProductionFile {
 	return productionASTFiles
 }
 
-// TestExecPosture_ArmingHooksHaveNoProductionCaller pins fact (1).
+// TestExecPosture_LiveArmingHooksHaveNoProductionCaller pins fact (1).
 //
-// The hooks are defined in mcp_rollout_execdeps.go and documented as
+// The LIVE hooks are defined in mcp_rollout_execdeps.go and documented as
 // "intentionally UNCALLED in the current build". That is a comment; this is the
-// check. A call from anywhere in production arms execDepsConfigured for that
-// capability and makes every Shadow/Canary/Production transition succeed.
-func TestExecPosture_ArmingHooksHaveNoProductionCaller(t *testing.T) {
+// check. A call from anywhere in production arms liveExecDepsConfigured for that
+// capability and makes every Canary/Production transition succeed. The SHADOW hooks
+// are NOT in execArmingHooks, so composing the non-executing evaluator (which calls
+// markGatewayShadowDepsReady) is permitted.
+func TestExecPosture_LiveArmingHooksHaveNoProductionCaller(t *testing.T) {
 	for _, pf := range productionAST(t) {
 		fset := pf.fset
 		ast.Inspect(pf.file, func(n ast.Node) bool {
@@ -160,8 +190,8 @@ func TestExecPosture_ArmingHooksHaveNoProductionCaller(t *testing.T) {
 				name = fn.Sel.Name
 			}
 			if execArmingHooks[name] {
-				t.Errorf("%s: production code calls %s(), which arms guarded execution.\n"+
-					"Guarded execution is disabled by default (ADR-0024) and arming it is a "+
+				t.Errorf("%s: production code calls %s(), which arms LIVE guarded execution.\n"+
+					"Live execution is disabled by default (ADR-0024) and arming it is a "+
 					"separately-reviewed activation, not a side effect of another change. If this "+
 					"call is intended, the activation review updates this wall.",
 					fset.Position(call.Pos()), name)
@@ -171,16 +201,84 @@ func TestExecPosture_ArmingHooksHaveNoProductionCaller(t *testing.T) {
 	}
 }
 
-// TestExecPosture_NoProductionExecutorAssignment pins fact (2).
+// TestExecPosture_NoLiveExecutorConstruction pins fact (2).
+//
+// A live executor is composed by NAMING it: execution.New (the live constructor),
+// execution.Executor, execution.Config, or execution.UpstreamCaller. The Shadow
+// evaluator uses disjoint symbols (NewShadowEvaluator / ShadowConfig), so this catches
+// a live-executor composition while permitting the Shadow one. It resolves the local
+// import name of the execution package per file, so an aliased import cannot evade it.
+func TestExecPosture_NoLiveExecutorConstruction(t *testing.T) {
+	for _, pf := range productionAST(t) {
+		if strings.HasPrefix(filepath.ToSlash(pf.path), "internal/mcp/execution/") {
+			continue // the package's own files define these symbols
+		}
+		local := localImportName(pf.file, execPackagePath)
+		if local == "" {
+			continue // this file does not import the execution package
+		}
+		fset := pf.fset
+		ast.Inspect(pf.file, func(n ast.Node) bool {
+			sel, ok := n.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			x, ok := sel.X.(*ast.Ident)
+			if !ok || x.Name != local {
+				return true
+			}
+			if liveExecutionSymbols[sel.Sel.Name] {
+				t.Errorf("%s: production code references %s.%s — a LIVE-execution symbol.\n"+
+					"The live executor (upstream client + credential materialization) must stay "+
+					"unwired (ADR-0024). Only the non-executing Shadow evaluator may be composed; "+
+					"arming live execution is a separately-reviewed activation.",
+					fset.Position(sel.Pos()), local, sel.Sel.Name)
+			}
+			return true
+		})
+	}
+}
+
+// TestExecPosture_ExecutionImportedOnlyByShadowComposition pins fact (3).
+//
+// Exactly one production file — the Shadow composition — may import the execution
+// package. An import from anywhere else is a route to construct an executor the other
+// gates cannot see, so it is forbidden.
+func TestExecPosture_ExecutionImportedOnlyByShadowComposition(t *testing.T) {
+	for _, pf := range productionAST(t) {
+		if strings.HasPrefix(filepath.ToSlash(pf.path), "internal/mcp/execution/") {
+			continue // the package's own files
+		}
+		fset := pf.fset
+		for _, imp := range pf.file.Imports {
+			p, err := strconv.Unquote(imp.Path.Value)
+			if err != nil || p != execPackagePath {
+				continue
+			}
+			if filepath.Base(pf.path) != shadowCompositionFile {
+				t.Errorf("%s: production code imports %s.\nOnly %s (the non-executing Shadow "+
+					"composition) may import the execution package; wiring it elsewhere is a "+
+					"separately-reviewed activation.", fset.Position(imp.Pos()), execPackagePath, shadowCompositionFile)
+			}
+		}
+	}
+}
+
+// TestExecPosture_ExecutorAssignedOnlyByShadowComposition pins fact (4).
 //
 // runtime.Deps.Executor is the OPTIONAL guarded-execution provider; the pipeline
-// composes an executor if and only if it is non-nil. Assigning it — as a struct
-// field in a composite literal or by assignment — composes the execution plane
-// regardless of rollout mode.
-func TestExecPosture_NoProductionExecutorAssignment(t *testing.T) {
-	report := func(fset *token.FileSet, pos token.Pos) {
-		t.Errorf("%s: production code assigns Deps.Executor, composing the guarded-execution "+
-			"plane. It must stay nil until execution is separately activated.", fset.Position(pos))
+// composes an executor iff it is non-nil. Assigning it composes the execution plane, so
+// the assignment must live ONLY in the Shadow composition file (where it can only be a
+// *ShadowEvaluator — fact (2) forbids constructing anything else). An assignment
+// anywhere else is forbidden.
+func TestExecPosture_ExecutorAssignedOnlyByShadowComposition(t *testing.T) {
+	report := func(fset *token.FileSet, pos token.Pos, path string) {
+		if filepath.Base(path) == shadowCompositionFile {
+			return // the one permitted assignment site (the Shadow composition)
+		}
+		t.Errorf("%s: production code assigns Deps.Executor outside %s, composing the "+
+			"guarded-execution plane. Only the non-executing Shadow composition may assign it.",
+			fset.Position(pos), shadowCompositionFile)
 	}
 	for _, pf := range productionAST(t) {
 		// The field's own declaration and the pipeline's nil-guarded read are the two
@@ -190,12 +288,12 @@ func TestExecPosture_NoProductionExecutorAssignment(t *testing.T) {
 			switch v := n.(type) {
 			case *ast.KeyValueExpr:
 				if k, ok := v.Key.(*ast.Ident); ok && k.Name == "Executor" {
-					report(fset, v.Pos())
+					report(fset, v.Pos(), pf.path)
 				}
 			case *ast.AssignStmt:
 				for _, lhs := range v.Lhs {
 					if sel, ok := lhs.(*ast.SelectorExpr); ok && sel.Sel.Name == "Executor" {
-						report(fset, lhs.Pos())
+						report(fset, lhs.Pos(), pf.path)
 					}
 				}
 			}
@@ -204,28 +302,22 @@ func TestExecPosture_NoProductionExecutorAssignment(t *testing.T) {
 	}
 }
 
-// TestExecPosture_ExecutionPackageHasNoProductionImporter pins fact (3).
-//
-// This is the broadest of the three and the one that cannot be worked around: an
-// executor cannot be composed by code that cannot reference the package. It also
-// catches an arming route the other two miss — a helper inside some other package
-// that constructs and installs an executor itself.
-func TestExecPosture_ExecutionPackageHasNoProductionImporter(t *testing.T) {
-	for _, pf := range productionAST(t) {
-		if strings.HasPrefix(filepath.ToSlash(pf.path), "internal/mcp/execution/") {
-			continue // the package's own files
+// localImportName returns the identifier a file uses to reference the package at
+// importPath — its explicit alias, or the default package name (the last path segment,
+// which is correct for the execution package). Empty when the file does not import it.
+func localImportName(file *ast.File, importPath string) string {
+	for _, imp := range file.Imports {
+		p, err := strconv.Unquote(imp.Path.Value)
+		if err != nil || p != importPath {
+			continue
 		}
-		fset := pf.fset
-		for _, imp := range pf.file.Imports {
-			p, err := strconv.Unquote(imp.Path.Value)
-			if err != nil {
-				continue
+		if imp.Name != nil {
+			if imp.Name.Name == "_" || imp.Name.Name == "." {
+				return "" // blank/dot import exposes no qualified selector to scan
 			}
-			if p == execPackagePath {
-				t.Errorf("%s: production code imports %s.\nThe guarded-execution plane is "+
-					"unwired by design (ADR-0024, Observe-only shipped composition); wiring it is a "+
-					"separately-reviewed activation.", fset.Position(imp.Pos()), execPackagePath)
-			}
+			return imp.Name.Name
 		}
+		return path.Base(importPath)
 	}
+	return ""
 }

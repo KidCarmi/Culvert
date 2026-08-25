@@ -19,6 +19,12 @@ type Metrics interface {
 	// losing its record of it — best-effort must mean "does not block the response",
 	// never "fails invisibly".
 	ObserveOutcomeEvidenceLoss(capability string)
+	// ObserveShadowOutcome records ONE non-executing Shadow evaluation and its formal
+	// Model-1 verdict. outcome is a ShadowOutcome value (a bounded, low-cardinality enum:
+	// would_execute / would_block / would_require_* / would_fail_*) — never a tenant,
+	// subject, tool, or argument. It is emitted only by the ShadowEvaluator; the live
+	// executor never calls it.
+	ObserveShadowOutcome(capability string, outcome string)
 }
 
 // noopMetrics is the default no-op sink.
@@ -41,3 +47,6 @@ func (noopMetrics) ObserveDLPBlock(string, bool) {}
 
 // ObserveOutcomeEvidenceLoss discards the outcome-evidence-loss observation.
 func (noopMetrics) ObserveOutcomeEvidenceLoss(string) {}
+
+// ObserveShadowOutcome discards the shadow-outcome observation.
+func (noopMetrics) ObserveShadowOutcome(string, string) {}
