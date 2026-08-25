@@ -193,7 +193,7 @@ control that decides who can make the gateway do that work at all.
 
 This document does not authorise enabling execution.
 
-## 9. Two CI findings that are not this branch's
+## 9. Three CI findings that are not this branch's code
 
 Both were found while driving PR #1224 to green. Neither is caused by the MCP work, and
 both are recorded here rather than fixed inside a security PR, because widening this PR to
@@ -273,3 +273,52 @@ the outcome `internal/connlimit`'s benchgate notes already warn against.
 The fix is to make the measurement observe only the producer — drain the queue to
 quiescence before measuring, or measure against an engine whose consumer is not running —
 not to widen the bound, which would retire the contract the gate exists to hold.
+
+### CI-03 — `Deep · determinism` intermittently fails in the root package, unlocatable from here
+
+`Deep · determinism (shuffle, count=2)` runs `go test -count=2 -shuffle=on ./...`
+without `-race`. On this branch it **passed on `ff622ad` (2 of 2, including a re-run)
+and failed on `5d607af` (2 of 2)**. The failure is genuinely puzzling and, after a full
+investigation, could be neither attributed to this PR's changes nor located.
+
+What is established:
+
+- The **only** package `5d607af` changed is `internal/mcp/runtime`, and it **passed in
+  both failing runs** (8.954s), as did `internal/mcp/execution` and
+  `internal/mcp/catalog`. The failing package both times is the **root package**
+  (`package main`), which `5d607af` does not touch. No causal path from an
+  `internal/mcp/runtime` change to a root-package test is evident.
+- The root package **could not be made to fail locally in 7 `count=2 -shuffle` runs** —
+  2 at the exact CI seeds (`1787658349191607536`, `1787659684864451945`; 534.5s / 539.6s)
+  and 5 at fresh seeds — all exit 0. So it is **not an order-dependent bug reproducible
+  without the network**.
+- The root package's tests make **live calls to `urlhaus.abuse.ch` and `openphish.com`**
+  (the threat-feed defaults), which this review container's egress policy **blocks with
+  403** but CI permits — confirmed against the agent proxy's own recent-failure log. A
+  CI-only failure is therefore consistent with an **environment-dependent live-network
+  test**: it fetches real feed data in CI (variable, occasionally slow or malformed) and
+  fails open locally (so it passes here every time).
+- `internal/secscan` **also** failed on the first run (`TestChaos_AbandonedScansAreCountedAndUnwind`,
+  "precondition: inflight = 1, want 0" — a cross-test in-flight-scan leak under
+  `-count=2`) and **passed on the re-run**, so that one was a plain flake — independent
+  corroboration that this job carries pre-existing intermittency.
+
+What could not be obtained, and why — recorded rather than worked around:
+
+- **The failing test's name.** `get_job_logs` is tail-capped (~5000 lines) below the point
+  where the root package's `--- FAIL` line sits (the root binary emits thousands of
+  `POLICY_*` log lines, so its per-test failure is far above the tail window), and the
+  pre-signed `deep-determinism-log` **artifact blob host is egress-blocked (403)**. The
+  agent-proxy contract is to **report** such egress denials, not route around them, so the
+  log was not retrieved by other means.
+
+Conclusion: the `5d607af` correlation is unexplained, but with 7/7 local passes and no
+causal path from the changed package to the failing one, it is **most consistent with a
+pre-existing, environment-sensitive live-network flake landing fail/fail by chance**
+(a ~6% coincidence given a ~50%-ish per-run flake rate). It is **not** demonstrably this
+PR's code. Resolving it needs one datum this review environment cannot produce: the failing
+test's name, which is in the owner-accessible `deep-determinism-log` artifact on the failed
+run. The durable fixes are the same shape as CI-01/CI-02 — make the root package's
+threat-feed tests hermetic (seed the feed, never dial the real URLhaus/OpenPhish endpoints
+under `go test`), and give secscan's chaos test a per-test in-flight reset — both
+repo-owned, neither a change a security PR should make blind to the failing assertion.
