@@ -92,6 +92,29 @@ func TestReadinessSplit_CapabilityIsolation(t *testing.T) {
 	}
 }
 
+// TestReadinessSplit_ManagementLiveHookIsCapabilityLocal pins the Management symmetry of
+// the split: the LIVE Management arming hook arms ONLY the live Management tier — it does
+// not arm the shadow tier, the Gateway tier, or make a Management Shadow transition
+// succeed. Mutation: making markManagementExecDepsReady also set shadowManagement (or
+// gateway) fails here.
+func TestReadinessSplit_ManagementLiveHookIsCapabilityLocal(t *testing.T) {
+	resetExecDeps(t)
+	markManagementExecDepsReady()
+	if !liveExecDepsConfigured(true) {
+		t.Fatal("management live tier should be armed")
+	}
+	if shadowDepsConfigured(true) {
+		t.Fatal("the live Management hook must not arm the Management shadow tier")
+	}
+	if liveExecDepsConfigured(false) || shadowDepsConfigured(false) {
+		t.Fatal("the Management hook must not arm any Gateway tier")
+	}
+	// A Management Shadow transition still fails closed (it needs the shadow tier).
+	if modeExecReady(rollout.ModeShadow, true) {
+		t.Fatal("SECURITY: Management Shadow must fail closed with only the live tier armed")
+	}
+}
+
 // TestReadinessSplit_ModeExecReadyDefaults pins that Disabled/Observe need no readiness
 // tier (they never touch the execution plane) while an executing mode does.
 func TestReadinessSplit_ModeExecReadyDefaults(t *testing.T) {
