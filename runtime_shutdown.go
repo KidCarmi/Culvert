@@ -71,14 +71,25 @@ func (r *shutdownRegistry) Register(name string, order int, stop func(context.Co
 // run: at shutdown, leaking one goroutine is free (the process is exiting)
 // and a stalled hook that blocks the flush hooks behind it is not.
 //
-// CHAOS-56. Small on purpose — it is a per-phase overrun, not a per-hook one
-// (see the `hard` deadline in RunAll), so it is added to the shutdown envelope
-// exactly twice: once for the drain phase, once for the flush phase.
+// CHAOS-56. It is charged PER HOOK, but only by a hook that actually overruns,
+// and hookBudget hands the unused remainder of an overrunning hook's slice to
+// the hooks behind it — so a phase in which every hook stalls still finishes
+// within its own deadline plus one grace, and the envelope in main_shutdown.go
+// adds it exactly twice: once for the drain phase, once for the flush phase.
 //
 // A var, not a const, so the wedged-hook tests can lower it instead of each
 // spending the full grace — the same seam internal/logsink uses for its own
 // close timeout. Production never writes it.
 var shutdownHookGrace = 3 * time.Second
+
+// shutdownHookMinSlice is the watchdog budget every hook is guaranteed however
+// much of the phase the hooks before it consumed. See hookBudget — this is what
+// stops one stalled durable close from starving the closers behind it, which is
+// the flush reserve's own argument applied within a phase.
+//
+// A var for the same reason as shutdownHookGrace: tests lower it. Production
+// never writes it.
+var shutdownHookMinSlice = 1 * time.Second
 
 // errShutdownHookAbandoned marks a hook the watchdog gave up waiting for. It
 // is aggregated into RunAll's error like any other hook failure, but the
@@ -125,30 +136,72 @@ func (r *shutdownRegistry) RunAll(ctx context.Context) error {
 		return snapshot[i].order < snapshot[j].order
 	})
 
-	hard := context.WithoutCancel(ctx)
-	if dl, ok := ctx.Deadline(); ok {
-		var cancel context.CancelFunc
-		hard, cancel = context.WithDeadline(hard, dl.Add(shutdownHookGrace))
-		defer cancel()
-	}
+	phaseEnd, bounded := ctx.Deadline()
 
 	var errs []error
-	for _, h := range snapshot {
-		if err := runShutdownHook(ctx, hard, h); err != nil {
+	for i, h := range snapshot {
+		hookCtx, cancel := hookBudget(ctx, phaseEnd, bounded, len(snapshot)-i-1)
+		err := runShutdownHook(hookCtx, h)
+		cancel()
+		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", h.name, err))
 		}
 	}
 	return errors.Join(errs...)
 }
 
-// runShutdownHook executes one hook, contained against panics and bounded by
-// the phase-wide `hard` deadline. `ctx` — the hook's honest budget, without
-// the grace — is what the hook itself receives.
+// hookBudget derives the next hook's context from the phase's. The hook may
+// take as much of the phase as is left MINUS shutdownHookMinSlice for each hook
+// still behind it, so one hook that never returns cannot consume the whole
+// phase. An unbounded phase yields an unbounded hook budget.
 //
-// A phase with no deadline (the pre-CHAOS-56 early phase shape, still used by
-// tests and by runShutdownSequence when a budget is zero) has `hard` with no
-// deadline either, so the watchdog waits indefinitely and the behaviour is
-// byte-identical to a direct call apart from panic containment.
+// CHAOS-56 review (Codex P1). The first shipped shape gave the WHOLE PHASE one
+// watchdog deadline, and the rationale for that — "a stalled hook is abandoned,
+// and the flush hooks are safe because they have their own reserved phase" —
+// was wrong in a way worth spelling out, because it is the same error this PR
+// exists to fix, one level down. The flush RESERVE protects flush hooks from a
+// stuck DRAIN. It does nothing to protect them from EACH OTHER: with a single
+// phase-wide deadline, `syslog-close` or `community-db-close` stalling on a
+// wedged volume burned the entire reserve plus the grace, and every hook behind
+// it — `request-log-close`, `audit-log-close`, `log-closer` — was started and
+// then abandoned against an already-expired deadline. Those three are the
+// durable compliance record, the audit FD, and the log flush holding the
+// evidence: exactly what the reserve was carved out to protect, starved by
+// exactly the fault (a hung close on a wedged volume) the reserve was carved
+// out for.
+//
+// So the reserve principle applies recursively: a phase reserves for its flush
+// hooks, and within a phase each hook reserves for the hooks behind it. Nothing
+// is taken from the healthy case — a hook that returns quickly hands its unused
+// share straight to the next one, so a legitimately slow close can still use
+// almost the whole phase when its neighbours are fast.
+func hookBudget(ctx context.Context, phaseEnd time.Time, bounded bool, behind int) (context.Context, context.CancelFunc) {
+	if !bounded {
+		return context.WithCancel(ctx)
+	}
+	remaining := time.Until(phaseEnd)
+	reserved := time.Duration(behind) * shutdownHookMinSlice
+	slice := remaining - reserved
+	if slice < shutdownHookMinSlice {
+		// Not enough left to give every remaining hook a full minimum slice:
+		// share what is left evenly instead, so the hooks behind this one still
+		// get a turn rather than being abandoned at a deadline already past.
+		slice = remaining / time.Duration(behind+1)
+	}
+	return context.WithTimeout(context.WithoutCancel(ctx), slice)
+}
+
+// runShutdownHook executes one hook under its own budget, contained against
+// panics. The hook RECEIVES the same ctx the watchdog enforces, so a hook that
+// observes ctx winds itself down instead of being abandoned; the watchdog waits
+// one shutdownHookGrace past it for the hooks that cannot observe it at all —
+// an fsync inside a durable close, a badger compaction, a write(2) into a
+// wedged NFS mount.
+//
+// A hook whose ctx carries no deadline (an unbounded phase — the pre-CHAOS-56
+// early shape, still used by tests and by runShutdownSequence when a budget is
+// zero) is waited for indefinitely, so the behaviour is byte-identical to a
+// direct call apart from panic containment.
 //
 // Panic containment lands the same way it does in CHAOS-55's recovery loop and
 // the opposite way from CHAOS-24's HA keepalive: a panicking shutdown hook
@@ -156,7 +209,7 @@ func (r *shutdownRegistry) RunAll(ctx context.Context) error {
 // the process mid-sequence — losing the queued log lines that name it, the
 // durable flushes behind it, and a clean badger close, which CHAOS-50 showed
 // is what manufactures a quarantined category store on the next boot.
-func runShutdownHook(ctx, hard context.Context, h shutdownHook) (err error) {
+func runShutdownHook(ctx context.Context, h shutdownHook) (err error) {
 	done := make(chan error, 1) // buffered: the goroutine must never block on an abandoned hook
 	started := time.Now()
 	go func() {
@@ -168,10 +221,17 @@ func runShutdownHook(ctx, hard context.Context, h shutdownHook) (err error) {
 		done <- h.stop(ctx)
 	}()
 
+	var abandon <-chan time.Time
+	if dl, ok := ctx.Deadline(); ok {
+		t := time.NewTimer(time.Until(dl) + shutdownHookGrace)
+		defer t.Stop()
+		abandon = t.C
+	}
+
 	select {
 	case err = <-done:
 		return err
-	case <-hard.Done():
+	case <-abandon:
 	}
 
 	// Log HERE, not from the aggregated error at the end of the phase: the

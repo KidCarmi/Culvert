@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -70,6 +71,15 @@ func shortHookGrace(t *testing.T, d time.Duration) {
 	prev := shutdownHookGrace
 	shutdownHookGrace = d
 	t.Cleanup(func() { shutdownHookGrace = prev })
+}
+
+// shortHookMinSlice lowers the per-hook reserve for the duration of a test so
+// a multi-hook gate fits inside a sub-second budget, restoring it via Cleanup.
+func shortHookMinSlice(t *testing.T, d time.Duration) {
+	t.Helper()
+	prev := shutdownHookMinSlice
+	shutdownHookMinSlice = d
+	t.Cleanup(func() { shutdownHookMinSlice = prev })
 }
 
 // TestChaos56_EarlyPhaseHookCannotStallTheSequence is the SD-1 gate: the
@@ -150,6 +160,89 @@ func TestChaos56_StuckDrainCannotSpendTheFlushReserve(t *testing.T) {
 	}
 	if len(flushOrder) != 2 || flushOrder[0] != "a" || flushOrder[1] != "b" {
 		t.Errorf("flush hooks ran = %v; want [a b] — a stuck drain is still starving the durable flushes", flushOrder)
+	}
+}
+
+// TestChaos56_StalledFlushHookCannotStarveTheClosersBehindIt is the SD-2c gate
+// (Codex P1 on this PR). The flush RESERVE protects the flush hooks from a
+// stuck DRAIN; it does nothing to protect them from EACH OTHER. The first
+// shipped shape gave the whole phase ONE watchdog deadline, so a durable close
+// stalling on a wedged volume — precisely the fault the reserve exists for —
+// burned the entire reserve plus the grace, and every closer behind it was
+// started and then abandoned against an already-expired deadline. Those closers
+// are the durable request log, the audit FD and the log flush holding the
+// evidence.
+//
+// The hook that stalls here is FIRST in the flush phase, which is what the
+// drain-side gate cannot express.
+func TestChaos56_StalledFlushHookCannotStarveTheClosersBehindIt(t *testing.T) {
+	shortHookGrace(t, 50*time.Millisecond)
+	shortHookMinSlice(t, 50*time.Millisecond)
+	stop := make(chan struct{})
+	defer close(stop)
+
+	var early, late shutdownRegistry
+	var wedgedStarted atomic.Bool
+	closers := []string{"test-request-log-close", "test-audit-log-close", "test-log-closer"}
+	// A buffered channel, not a slice: an ABANDONED hook keeps running after
+	// the sequence returns, so a slice would be both racy and a false pass —
+	// the assertion has to be about what COMPLETED BEFORE the sequence
+	// returned, which is exactly the property at stake.
+	completed := make(chan string, len(closers))
+	late.Register("test-wedged-flush", shutdownFlushBoundary+1, blockUntil(stop, &wedgedStarted))
+	for _, name := range closers {
+		late.Register(name, shutdownFlushBoundary+2, func(context.Context) error {
+			// Non-zero work: a durable close is never instantaneous, and a
+			// hook abandoned at an already-expired deadline must not be able
+			// to sneak its completion in before the assertion.
+			time.Sleep(30 * time.Millisecond)
+			completed <- name
+			return nil
+		})
+	}
+
+	budget := shutdownBudget{Total: 900 * time.Millisecond, Early: 100 * time.Millisecond, Flush: 400 * time.Millisecond}
+	runShutdownSequence(&early, &late, budget)
+
+	if !wedgedStarted.Load() {
+		t.Fatal("the wedged flush hook never ran; the test proved nothing")
+	}
+	var ran []string
+	for len(completed) > 0 {
+		ran = append(ran, <-completed)
+	}
+	slices.Sort(ran)
+	want := slices.Clone(closers)
+	slices.Sort(want)
+	if !slices.Equal(ran, want) {
+		t.Errorf("closers that completed before shutdown returned = %v; want %v — one stalled durable close is still starving the closers behind it", ran, want)
+	}
+}
+
+// TestChaos56_EveryHookGetsItsMinimumSlice is the control for the gate above:
+// reserving a slice per hook must not turn into a per-hook budget so small that
+// a legitimately slow close is abandoned while the phase still had time. A hook
+// whose neighbours are fast must still be able to use most of the phase.
+func TestChaos56_EveryHookGetsItsMinimumSlice(t *testing.T) {
+	shortHookMinSlice(t, 20*time.Millisecond)
+
+	var reg shutdownRegistry
+	var slowRan atomic.Bool
+	reg.Register("test-fast", 1, func(context.Context) error { return nil })
+	reg.Register("test-slow-but-fine", 2, func(context.Context) error {
+		time.Sleep(300 * time.Millisecond)
+		slowRan.Store(true)
+		return nil
+	})
+	reg.Register("test-after", 3, func(context.Context) error { return nil })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := reg.RunAll(ctx); err != nil {
+		t.Errorf("RunAll error = %v; a slow hook with fast neighbours must not be abandoned", err)
+	}
+	if !slowRan.Load() {
+		t.Error("the slow hook did not complete — the per-hook reserve is starving legitimate work")
 	}
 }
 
@@ -389,6 +482,27 @@ func startBlockedRPCServer(t *testing.T, release <-chan struct{}) (*grpc.Server,
 		t.Fatal("handler never started; the wedged-stream shape was not reproduced")
 	}
 	return srv, ln.Addr().String()
+}
+
+// TestChaos56_DisarmBeatsASimultaneousSignal is the SD-3b gate (Codex P2 on
+// this PR). When the disarm and a second signal become ready at the same
+// moment, Go's select picks UNIFORMLY, so the watcher took the signal branch
+// half the time and reported a shutdown that had COMPLETED as exit status 1.
+//
+// The tie itself cannot be scheduled deterministically from a test, and a gate
+// that raced for it could only be probabilistic — which this repo mutes. The
+// decision is therefore its own function and is pinned directly.
+func TestChaos56_DisarmBeatsASimultaneousSignal(t *testing.T) {
+	open := make(chan struct{})
+	if !shouldEscalate(open) {
+		t.Error("an armed escalation must act on a second signal")
+	}
+
+	disarmed := make(chan struct{})
+	close(disarmed)
+	if shouldEscalate(disarmed) {
+		t.Error("a disarmed escalation must ignore a signal that ties with the disarm — a completed shutdown would be reported as exit status 1")
+	}
 }
 
 // TestChaos56_GracefulStopIsBoundedAgainstAWedgedStream is the SD-1 gate at

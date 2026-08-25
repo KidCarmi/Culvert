@@ -1096,6 +1096,9 @@ func armShutdownEscalation(quit <-chan os.Signal, exit func(int)) (stop func()) 
 		select {
 		case <-done:
 		case sig := <-quit:
+			if !shouldEscalate(done) {
+				return
+			}
 			logger.Printf("Second %v during shutdown — exiting immediately; in-flight tunnels and unflushed state are dropped", sig)
 			flushLogSink()
 			exit(1)
@@ -1103,6 +1106,30 @@ func armShutdownEscalation(quit <-chan os.Signal, exit func(int)) (stop func()) 
 	}()
 	var once sync.Once
 	return func() { once.Do(func() { close(done) }) }
+}
+
+// shouldEscalate reports whether a signal just received on the quit channel
+// should force an exit, given the escalation's disarm channel. False once the
+// escalation has been disarmed.
+//
+// This exists as its own function because the case it guards is one Go makes
+// NON-DETERMINISTIC: when the disarm and a second signal become ready at the
+// same moment, the watcher's select picks uniformly between them, so half the
+// time it took the signal branch and reported a shutdown that had COMPLETED as
+// exit status 1 (Codex P2 on this PR). Re-checking the disarm makes
+// "disarmed first" win every time.
+//
+// A gate that raced the scheduler to reproduce the tie could only ever be
+// probabilistic, and this repo's rule is that a gate which can flake gets muted
+// (see CHAOS-54's rejected scaling gates). Splitting the decision out makes it
+// pin deterministically instead.
+func shouldEscalate(done <-chan struct{}) bool {
+	select {
+	case <-done:
+		return false
+	default:
+		return true
+	}
 }
 
 // seedYARARules copies bundled starter rules from /app/yara to the target

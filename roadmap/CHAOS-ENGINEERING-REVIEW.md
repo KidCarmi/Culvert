@@ -2641,9 +2641,56 @@ than "the server is stopped", and §24.6's wording says so: the LISTENERS are
 closed (grpc-go closes them before the conns wait, so GracefulStop shut the door
 before it parked) and the transport force-close is best-effort and asynchronous.
 
+### 24.6b Review follow-ups — two defects in the fix, raised by Codex
+
+**P1 — the reserve was not recursive, and the wrong rationale was written down.**
+The first shipped shape gave the WHOLE PHASE one watchdog deadline, and the
+rationale recorded for it was: *a stalled hook is abandoned, and the flush hooks
+are safe because they have their own reserved phase.* That is wrong, and it is
+wrong in exactly the way this section is about. The flush reserve protects the
+flush hooks from a stuck DRAIN. It does nothing to protect them from EACH OTHER.
+With one deadline per phase, `syslog-close` or `community-db-close` stalling on
+a wedged volume — precisely the fault the reserve exists for — burned the entire
+reserve plus the grace, and `request-log-close`, `audit-log-close` and
+`log-closer` were each started and then abandoned against a deadline already in
+the past. Those three are the durable compliance record, the audit FD, and the
+log flush holding the evidence: SD-2b reproduced one level down, inside the fix
+for SD-2b.
+
+The reserve principle is therefore applied recursively (`hookBudget`): a phase
+reserves for its flush hooks, and within a phase each hook may take what is left
+MINUS `shutdownHookMinSlice` for every hook still behind it. Nothing is taken
+from the healthy case — a hook that returns quickly hands its unused share
+straight to the next, so a legitimately slow close still gets almost the whole
+phase when its neighbours are fast (pinned as a control by
+`EveryHookGetsItsMinimumSlice`). The hook now also RECEIVES the deadline the
+watchdog enforces, so a ctx-aware hook winds down instead of being abandoned.
+
+The gate for it needed a second pass too, and for a reason worth recording: an
+ABANDONED hook keeps running after the sequence returns, so a gate that asserted
+on a slice the hooks appended to was both racy and a FALSE PASS — the abandoned
+closers appended late and the assertion saw them. The property is *what completed
+BEFORE the sequence returned*, so the gate collects completions on a buffered
+channel and reads it immediately after. Against the pre-fix shape it now reports
+`closers that completed before shutdown returned = []`.
+
+**P2 — a completed shutdown could report as a forced one.** The escalation
+watcher selected on `done` and `quit`. Go picks UNIFORMLY among ready cases, so
+when a second signal was pending at the instant `stopEscalation` ran, the watcher
+took the signal branch half the time and exited 1 on a shutdown that had
+COMPLETED — the opposite of the escalation's purpose, on the exit status an
+orchestrator reads. The decision is now re-checked (`shouldEscalate`).
+
+Both findings share the shape of the two `gracefulStopBounded` drafts above: a
+race whose losing side is invisible at speed. Neither was reachable by any
+existing gate. And the P2 gate is deliberately NOT a scheduler race — the tie
+cannot be scheduled from a test, so a gate for it could only be probabilistic,
+which this repo mutes (CHAOS-54's rejected scaling gates). Splitting the decision
+into its own function makes it pin deterministically instead.
+
 ### 24.7 Gates
 
-`shutdown_chaos_test.go`, 14 tests. Every defect gate was verified failing
+`shutdown_chaos_test.go`, 17 tests. Every defect gate was verified failing
 against its pre-fix shape by reintroducing that shape in the current tree:
 
 | Gate | Pre-fix result |
