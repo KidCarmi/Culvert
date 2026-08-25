@@ -42,7 +42,7 @@ func TestSecurity_DuplicateSingletonHeadersAreRejected(t *testing.T) {
 			// Two DIFFERENT values: the conflict is the whole point.
 			r.Header.Add(h, "https://alpha.example")
 			r.Header.Add(h, "https://beta.example")
-			_, status, _ := l.extractRequest(httptest.NewRecorder(), r)
+			_, status, _, _ := l.extractRequest(httptest.NewRecorder(), r)
 			if status != http.StatusBadRequest {
 				t.Fatalf("duplicate %s: status = %d, want 400 (ambiguous)", h, status)
 			}
@@ -61,14 +61,14 @@ func TestSecurity_DuplicateRejectionIsAboutCountNotContent(t *testing.T) {
 		r.Host = gwHost
 		r.Header.Add(h, "same-value")
 		r.Header.Add(h, "same-value")
-		if _, status, _ := l.extractRequest(httptest.NewRecorder(), r); status != http.StatusBadRequest {
+		if _, status, _, _ := l.extractRequest(httptest.NewRecorder(), r); status != http.StatusBadRequest {
 			t.Fatalf("repeated identical %s must still be rejected, got %d", h, status)
 		}
 
 		single := httptest.NewRequest(http.MethodPost, "https://"+gwHost+gwResource, http.NoBody)
 		single.Host = gwHost
 		single.Header.Set(h, "same-value")
-		if _, status, _ := l.extractRequest(httptest.NewRecorder(), single); status != 0 {
+		if _, status, _, _ := l.extractRequest(httptest.NewRecorder(), single); status != 0 {
 			t.Fatalf("a single %s must pass transport extraction, got %d", h, status)
 		}
 	}

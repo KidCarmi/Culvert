@@ -249,7 +249,10 @@ func (p *pipeline) newRecord(req Request, start time.Time) *recBuilder {
 // A rejection at any step returns immediately WITHOUT touching later state
 // (no session, no auth, no binding, no upstream — none of which exist here anyway).
 func (p *pipeline) Process(ctx context.Context, req Request, now time.Time) Outcome {
-	p.ctr.requestsTotal.Add(1)
+	// requestsTotal is incremented by the LISTENER at the transport entrypoint, so
+	// that requests rejected before the pipeline are still counted as received. Do
+	// not re-add it here: Listener.ServeHTTP is the only production caller, and a
+	// second increment would double-count every request that reaches this far.
 	rb := p.newRecord(req, now)
 
 	// SEC-MCP-02. ctx carries the listener's RequestDeadline and the client's own

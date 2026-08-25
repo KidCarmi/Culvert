@@ -193,6 +193,13 @@ func (l *Listener) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Step 1: admission — bounded worker pool + queue, before any expensive work.
 	ctx, cancel := context.WithTimeout(r.Context(), l.lim.RequestDeadline())
 	defer cancel()
+	// Counted at the TRANSPORT entrypoint, not inside pipeline.Process: the three
+	// early returns below (connection budget, queue admission, header extraction)
+	// each move requestsRejected without ever reaching the pipeline, so a total
+	// incremented only in Process could be exceeded by the rejected counter under
+	// overload or an ambiguous-header flood — which inverts every rejection-rate
+	// dashboard built on the pair. The metric's contract is "requests received".
+	l.ctr.requestsTotal.Add(1)
 	// OVN-07: a single connection may not have more requests in flight than the
 	// listener has workers. Taken BEFORE the shared queue so one connection's excess
 	// streams cannot occupy queue slots either. This bounds the AMPLIFICATION; it
@@ -228,15 +235,31 @@ func (l *Listener) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Steps 2–3 + transport extraction.
-	req, status, reason := l.extractRequest(w, r)
+	req, status, reason, dupHeader := l.extractRequest(w, r)
 	if status != 0 {
 		l.ctr.requestsRejected.Add(1)
 		// A transport-level rejection that carries a classified reason is recorded on
 		// the same denial path as a pipeline rejection. Without this the duplicate
 		// singleton-header refusal — a deliberate header-confusion attempt — moved
-		// only the generic rejected counter and was invisible to authentication
-		// denial telemetry.
-		if reason != mcperr.ReasonNone {
+		// only the generic rejected counter and was invisible to denial telemetry.
+		//
+		// The durable denial record is written for EVERY classified reason; only the
+		// COUNTER is split. authFailures answers "are credentials being attacked?", so
+		// it is charged solely for the two credential-bearing headers; a duplicated
+		// Origin, Mcp-Session-Id or Mcp-Protocol-Version is header confusion, counted
+		// as such, and would otherwise have made routine protocol traffic
+		// indistinguishable from a credential attack on the same series.
+		switch {
+		case reason == mcperr.ReasonNone:
+			// Unclassified transport refusal (e.g. a require-cert listener with no
+			// verified peer): the generic rejected counter above is the whole record.
+		case reason == mcperr.ReasonAmbiguousRequestHeader:
+			l.ctr.ambiguousHeaders.Add(1)
+			if isCredentialHeader(dupHeader) {
+				l.ctr.authFailures.Add(1)
+			}
+			l.pipe.routeAuthDenial(reason)
+		default:
 			l.ctr.authFailures.Add(1)
 			l.pipe.routeAuthDenial(reason)
 		}
@@ -287,7 +310,7 @@ func (l *Listener) admit(ctx context.Context) (func(), bool) {
 // body is exposed as a bounded reader the pipeline reads at its byte-limit step. It
 // NEVER trusts a forwarded Host/Origin header or a client-supplied certificate
 // thumbprint. A non-zero returned status means a transport-level rejection.
-func (l *Listener) extractRequest(w http.ResponseWriter, r *http.Request) (req Request, status int, reason mcperr.Reason) {
+func (l *Listener) extractRequest(w http.ResponseWriter, r *http.Request) (req Request, status int, reason mcperr.Reason, dupHeader string) {
 	// SEC-MCP-04. Anti-ambiguity, BEFORE any value is read: a singleton
 	// security-relevant header presented more than once is rejected whole. A
 	// first-value-wins reading lets an intermediary and this gateway resolve the
@@ -295,19 +318,26 @@ func (l *Listener) extractRequest(w http.ResponseWriter, r *http.Request) (req R
 	// shape), so no value is picked. Authorization already had this rule inside
 	// parseCredential; applying it uniformly here is what makes the posture real.
 	if h, dup := duplicateSingletonHeader(r.Header); dup {
-		_ = h // the offending name is deliberately not echoed to the client
 		// CLASSIFIED, not just refused. This rejection happens at the transport layer
 		// and returns before the pipeline, so nothing downstream can count it — and a
 		// deliberate header-confusion attempt would otherwise move only the generic
 		// rejected-request counter, indistinguishable from a malformed body. The
 		// reason travels back to the caller so the denial is recorded on the same
-		// observable path as every other authentication-shaped rejection.
-		return Request{}, http.StatusBadRequest, mcperr.ReasonAmbiguousRequestHeader
+		// observable path as every other classified rejection.
+		//
+		// The NAME travels back too, and is used only to decide which counter the
+		// episode is charged to (never echoed to the client — telling a prober which
+		// of its duplicated headers was noticed is free reconnaissance). The guarded
+		// set spans Origin, Mcp-Session-Id and Mcp-Protocol-Version as well as the two
+		// credential-bearing headers, and charging all five to authFailures would let
+		// ordinary protocol-version or session-header duplication read as a credential
+		// attack on culvert_mcp_auth_failures_total.
+		return Request{}, http.StatusBadRequest, mcperr.ReasonAmbiguousRequestHeader, h
 	}
 	// mTLS defense-in-depth: a require-cert listener must have a verified peer cert.
 	if l.cfg.ClientCertMode == ClientCertRequire {
 		if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
-			return Request{}, http.StatusUnauthorized, mcperr.ReasonNone
+			return Request{}, http.StatusUnauthorized, mcperr.ReasonNone, ""
 		}
 	}
 	// Cap the body at the server layer too (defense-in-depth); the pipeline applies
@@ -332,7 +362,7 @@ func (l *Listener) extractRequest(w http.ResponseWriter, r *http.Request) (req R
 		CanonicalURI:         canonicalURI(r),
 		BodyReader:           body,
 	}
-	return req, 0, mcperr.ReasonNone
+	return req, 0, mcperr.ReasonNone, ""
 }
 
 // writeOutcome writes the pipeline outcome to the HTTP response. It NEVER opens a
@@ -471,6 +501,26 @@ var singletonSecurityHeaderNames = [...]string{
 	"Mcp-Session-Id",       // session resolution
 	"Mcp-Protocol-Version", // version admission
 	"Authorization",        // the credential itself
+}
+
+// credentialHeaderNames are the singleton security headers that carry the caller's
+// credential or its proof of possession. Duplication of one of these is the shape
+// of a credential attack; duplication of the others is header confusion. The split
+// exists so culvert_mcp_auth_failures_total keeps answering one question.
+var credentialHeaderNames = [...]string{"Authorization", "Dpop"}
+
+// isCredentialHeader reports whether name (any case) carries a credential.
+func isCredentialHeader(name string) bool {
+	if name == "" {
+		return false
+	}
+	c := http.CanonicalHeaderKey(name)
+	for _, h := range credentialHeaderNames {
+		if h == c {
+			return true
+		}
+	}
+	return false
 }
 
 // isSingletonSecurityHeader reports whether name (any case) is one of the guarded

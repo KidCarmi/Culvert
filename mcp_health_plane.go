@@ -85,6 +85,7 @@ type mcpHealthSnapshot struct {
 	RequestsTotal      int64
 	RequestsRejected   int64
 	AuthFailures       int64
+	AmbiguousHeaders   int64
 	HostOriginFailures int64
 	AdmissionRejected  int64
 	Timeouts           int64
@@ -128,6 +129,7 @@ func mcpHealthState() mcpHealthSnapshot {
 		snap.RequestsTotal = live.RequestsTotal
 		snap.RequestsRejected = live.RequestsRejected
 		snap.AuthFailures = live.AuthFailures
+		snap.AmbiguousHeaders = live.AmbiguousHeaders
 		snap.HostOriginFailures = live.HostOriginFailures
 		snap.AdmissionRejected = live.AdmissionRejected
 		snap.Timeouts = live.Timeouts

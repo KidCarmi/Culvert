@@ -982,6 +982,10 @@ culvert_mcp_requests_rejected_total %d
 # TYPE culvert_mcp_auth_failures_total counter
 culvert_mcp_auth_failures_total %d
 
+# HELP culvert_mcp_ambiguous_header_total MCP gateway requests refused for a duplicated singleton security header since startup (header-confusion / request-smuggling defense). Counts every guarded header; the credential-bearing subset is also counted by culvert_mcp_auth_failures_total
+# TYPE culvert_mcp_ambiguous_header_total counter
+culvert_mcp_ambiguous_header_total %d
+
 # HELP culvert_mcp_host_origin_failures_total MCP gateway Host/Origin rejections since startup (DNS-rebinding / cross-origin defense)
 # TYPE culvert_mcp_host_origin_failures_total counter
 culvert_mcp_host_origin_failures_total %d
@@ -1031,6 +1035,7 @@ culvert_mcp_distribution_composed %d
 			m.RequestsTotal,
 			m.RequestsRejected,
 			m.AuthFailures,
+			m.AmbiguousHeaders,
 			m.HostOriginFailures,
 			m.AdmissionRejected,
 			m.Timeouts,

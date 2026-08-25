@@ -28,7 +28,7 @@ func TestDenialTelemetry_DuplicateSingletonHeaderIsClassified(t *testing.T) {
 	r.Header.Add("Authorization", "Bearer a")
 	r.Header.Add("Authorization", "Bearer b")
 
-	_, status, reason := l.extractRequest(nil, r)
+	_, status, reason, _ := l.extractRequest(nil, r)
 	if status != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", status)
 	}
@@ -50,7 +50,7 @@ func TestDenialTelemetry_WellFormedRequestCarriesNoReason(t *testing.T) {
 	r.Host = gwHost
 	r.Header.Set("Authorization", "Bearer "+gwToken(k))
 
-	_, status, reason := l.extractRequest(nil, r)
+	_, status, reason, _ := l.extractRequest(nil, r)
 	if status != 0 {
 		t.Fatalf("a well-formed request was rejected with %d", status)
 	}
