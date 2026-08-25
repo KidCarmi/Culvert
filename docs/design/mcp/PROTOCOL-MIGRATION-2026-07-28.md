@@ -99,6 +99,44 @@ Under a stateless protocol, "one identity per session, immutable" has to become
 — a genuinely different design, not a parser change. That is the single largest
 item of work here and it is an ADR-level decision, not an implementation detail.
 
+### 3.1 Per-control stateless replacements
+
+Naming the replacement for each control is the work that turns §3's table from a list
+of losses into a design. Added 2026-08-25.
+
+The load-bearing observation is that the substrate already exists. A stateless protocol
+removes the *session id*, not the caller's identity — and Culvert already derives, per
+request, a cryptographically verified statement about who is presenting the credential:
+`identity.SenderConstraint` (`ConfirmDPoP` from the RFC 9449 proof's `jkt`, `ConfirmMTLS`
+from the client certificate's `x5t#S256`). That value is verified, not asserted, and it
+is stable across requests from the same caller. It is the natural binding key.
+
+| Control | V1 substrate | Stateless replacement | Status |
+|---|---|---|---|
+| Immutable session-identity binding | session id | Per-request binding key = the verified sender constraint (`jkt` / cert thumbprint). "One identity per session, rebind rejected" becomes "the subject claimed by this request must equal the subject this binding key has been seen with", enforced against a bounded, TTL'd key→subject map. | **Designable now.** Needs an ADR: the map's bound, eviction (the `internal/authstate` fair-share pattern applies — a flooding key must evict itself), and behaviour on first sight. |
+| Cross-server session confusion | server id inside `computeFingerprint` | Unchanged. `computeFingerprint` already spans capability, tenant, subject, client, agent, resource, server and tool and contains **no session id** — it is already a stateless value. `Mcp-Name` routing supplies the server id per request instead of per session. | **No work.** Verified 2026-08-25. |
+| Lifecycle admission (six methods) | `initialize` state machine | Per-request method admission against the transport-declared version. The admitted set is already a static allowlist; what disappears is the ordering constraint (`initialize` first), not the allowlist. | **Simplification, not a gap.** |
+| Session cap / sweeper / TTL | sessions existing | Replaced by the per-connection request budget (already shipped, OVN-07) plus the existing per-listener `MaxConcurrent`/`QueueDepth`. These bound the same resource without needing a session to hang state on. | **Already shipped.** |
+| Per-session outstanding-request bound | sessions existing | Same as above — the per-connection budget is strictly the better control, because it bounds the socket that actually consumes the workers rather than a logical session a client can mint at will. | **Already shipped.** |
+| Version pinning per session | negotiation happening once | Per-request transport-declared version, normalized through `protocol.Adapter` before any later stage. The adapter seam is invoked as of this review, so a V2 message is normalized at exactly one point. | **Seam exists.** |
+
+**The one genuine gap: a bearer-only deployment has no stable binding key.** With
+`sender_constraint: none` there is no `jkt` and no certificate thumbprint, so per-request
+binding degrades to "trust the token's `sub`" — which is what a bearer token means, but is
+strictly weaker than V1's immutable session binding. Three options, none of which should be
+chosen here:
+
+1. Require a sender constraint for V2 (the shipped observe default is already
+   `sender_constraint: mtls`, so this costs most deployments nothing).
+2. Accept the degradation for bearer-only and say so on the status surface, so it is
+   visibly absent rather than silently weaker.
+3. Derive a weaker binding key from the token itself (e.g. its `jti`), accepting that a
+   caller who can mint tokens can mint binding keys.
+
+Option 1 is the recommendation, and it is an ADR decision precisely because it changes what
+configurations are permitted. It should be settled BEFORE any V2 implementation begins, not
+during — the binding model determines the shape of everything else in this table.
+
 ## 4. Migration architecture — additive V2 adapter
 
 The repository already declares the right boundary:
