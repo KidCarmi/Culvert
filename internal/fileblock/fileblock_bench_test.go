@@ -134,9 +134,18 @@ func BenchmarkInspectedTransaction(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		var local string
 		for pb.Next() {
+			// Short-circuited exactly as inspectFileBlocked does: each check
+			// runs only while nothing has blocked yet. On this clean-traffic
+			// input all three always run, and — unlike three bare assignments
+			// to one variable — every result is consumed, so none of the calls
+			// is a dead store the compiler may elide (SA4006).
 			local = fb.CheckPath("/static/app.js")
-			local = fb.CheckContentDisposition("")
-			local = fb.CheckContentType("text/html; charset=utf-8")
+			if local == "" {
+				local = fb.CheckContentDisposition("")
+			}
+			if local == "" {
+				local = fb.CheckContentType("text/html; charset=utf-8")
+			}
 		}
 		parallelSink.Store(local)
 	})
@@ -150,8 +159,12 @@ func BenchmarkInspectedTransactionLegacy(b *testing.B) {
 		var local string
 		for pb.Next() {
 			local = checkPathLegacy(fb, "/static/app.js")
-			local = fb.CheckContentDisposition("")
-			local = checkContentTypeLegacy(fb, "text/html; charset=utf-8")
+			if local == "" {
+				local = fb.CheckContentDisposition("")
+			}
+			if local == "" {
+				local = checkContentTypeLegacy(fb, "text/html; charset=utf-8")
+			}
 		}
 		parallelSink.Store(local)
 	})
