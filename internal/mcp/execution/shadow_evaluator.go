@@ -214,9 +214,10 @@ type ShadowDecision struct {
 
 // decide computes the ShadowDecision. It mirrors, in the same order, the pre-side-effect
 // decision the LIVE executor reaches for an in-scope enforcing request (kill checked by
-// the caller): hard control → policy class → allowance → stale → credential readiness →
-// execute. Differential equivalence with the live path is pinned by
-// shadow_live_equivalence_test.go.
+// the caller): hard control → policy class → allowance → credential readiness → stale →
+// execute. Credential precedes the (boundary) stale re-check because run.go plans the
+// credential before callUpstream's final drift check (Codex P2). Differential equivalence
+// with the live path is pinned by shadow_live_equivalence_test.go.
 func (s *ShadowEvaluator) decide(in runtime.ExecInput) ShadowDecision {
 	action := mapAction(in.Decision.Action)
 	hardFail, _ := hardFailure(in)
@@ -263,22 +264,23 @@ func (s *ShadowEvaluator) decide(in runtime.ExecInput) ShadowDecision {
 		return d
 	}
 
-	// 4. Stale decision (tool drift re-check — pure, no side effect).
-	if in.ToolStillCurrent != nil && !in.ToolStillCurrent() {
-		d.Outcome = ShadowWouldFailStaleDecision
-		return d
-	}
-
-	// 5. Credential readiness from Plan alone (metadata; never Materialize).
+	// 4. Credential readiness from Plan alone (metadata; never Materialize). This PRECEDES
+	// the boundary drift re-check to match the LIVE order exactly (Codex P2): run.go plans
+	// the credential (materializeAndCall → Broker.Plan) BEFORE callUpstream performs the
+	// final drift check, so a request that is BOTH credential-invalid AND drifted returns
+	// the credential-readiness failure in enforcement. The runtime already refuses INITIAL
+	// (pre-dispatch) drift before the provider (SHADOW-EVIDENCE-ROUTING-1), so the only
+	// drift decide() can observe is POST-ENTRY (boundary) drift — whose live precedence is
+	// credential-first.
 	if profileRef := in.Decision.Obligations.CredentialProfile; profileRef != "" {
 		if s.plan == nil {
 			// No planning capability is composed. Shadow must PREDICT what live does, not
 			// fail closed: the live executor gates credential materialization on
 			// `useBroker := e.cfg.Broker != nil && profileRef != ""` (run.go), so with no
 			// broker it attaches NO Authorization and PROCEEDS to the call. Failing closed
-			// here would diverge from live enforcement (Codex P2). The outcome stays
-			// WOULD_EXECUTE; the label records that the request would run with no credential
-			// attached — the truthful nuance an operator needs to read from the evidence.
+			// here would diverge from live enforcement. The outcome stays WOULD_EXECUTE; the
+			// label records that the request would run with no credential attached — the
+			// truthful nuance an operator needs to read from the evidence.
 			d.CredentialPlan = planStatusNoPlanner
 		} else if _, err := s.plan(planInput(in, profileRef)); err != nil {
 			d.CredentialPlan = planStatusInvalid
@@ -287,6 +289,14 @@ func (s *ShadowEvaluator) decide(in runtime.ExecInput) ShadowDecision {
 		} else {
 			d.CredentialPlan = planStatusValid
 		}
+	}
+
+	// 5. Stale decision (post-entry tool drift — the boundary re-check). Reached only when
+	// the credential (if any) planned cleanly, mirroring callUpstream's drift check AFTER
+	// Broker.Plan. Pure, no side effect.
+	if in.ToolStillCurrent != nil && !in.ToolStillCurrent() {
+		d.Outcome = ShadowWouldFailStaleDecision
+		return d
 	}
 
 	// 6. Everything an enforcing mode checks before the side-effect boundary passed.

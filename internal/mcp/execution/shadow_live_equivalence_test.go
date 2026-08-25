@@ -138,6 +138,24 @@ func TestShadow_LivePreSideEffectEquivalence(t *testing.T) {
 			},
 		},
 		{
+			// Codex P2 precedence: a request that is BOTH credential-invalid AND
+			// drifted-after-entry must return the CREDENTIAL failure in both paths — live
+			// plans the credential (materializeAndCall → Broker.Plan) before callUpstream's
+			// drift re-check, so Plan fails first. decide() checks credential before the
+			// boundary stale re-check to match.
+			name: "credential_invalid_and_drift_prefers_credential",
+			want: cFailCredential,
+			setup: func(t *testing.T) (runtime.ExecInput, *Executor, *ShadowEvaluator, *fakeUpstream) {
+				b, id := credDriftSetup(t)
+				up := &fakeUpstream{}
+				live := credDriftExecutorForState(t, b, up, credDriftStateMode(t, rollout.ModeCanary))
+				shadow := shadowEvalPlanner(t, credDriftStateMode(t, rollout.ModeShadow), b)
+				in := credDriftInput(id, func() bool { return false }) // drifted at the boundary
+				in.Decision.Obligations.CredentialProfile = "no-such-profile"
+				return in, live, shadow, up
+			},
+		},
+		{
 			name: "tool_fingerprint_drift_fails_stale",
 			want: cFailStale,
 			setup: func(t *testing.T) (runtime.ExecInput, *Executor, *ShadowEvaluator, *fakeUpstream) {
