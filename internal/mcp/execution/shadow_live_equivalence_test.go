@@ -123,6 +123,21 @@ func TestShadow_LivePreSideEffectEquivalence(t *testing.T) {
 			},
 		},
 		{
+			// Codex P2: a profile is named but NO broker/planner is composed. The live
+			// executor gates materialization on `Broker != nil` and otherwise attaches no
+			// Authorization and PROCEEDS — so Shadow must predict WOULD_EXECUTE too, not
+			// fail closed. Live: newExec builds the Executor with a nil Broker; Shadow:
+			// planner nil.
+			name: "credential_no_broker_executes",
+			want: cExecute,
+			setup: func(t *testing.T) (runtime.ExecInput, *Executor, *ShadowEvaluator, *fakeUpstream) {
+				in := execInput(policy.ActionAllow, false)
+				in.Decision.Obligations.CredentialProfile = "prof-x"
+				live, up := liveCanary(t)
+				return in, live, shadowEval(t, nil), up
+			},
+		},
+		{
 			name: "tool_fingerprint_drift_fails_stale",
 			want: cFailStale,
 			setup: func(t *testing.T) (runtime.ExecInput, *Executor, *ShadowEvaluator, *fakeUpstream) {

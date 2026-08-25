@@ -85,7 +85,7 @@ func methodNamesOf(t reflect.Type) map[string]bool {
 	for i := 0; i < t.NumMethod(); i++ {
 		names[t.Method(i).Name] = true
 	}
-	if t.Kind() != reflect.Interface && t.Kind() != reflect.Ptr {
+	if t.Kind() != reflect.Interface && t.Kind() != reflect.Pointer {
 		pt := reflect.PointerTo(t)
 		for i := 0; i < pt.NumMethod(); i++ {
 			names[pt.Method(i).Name] = true

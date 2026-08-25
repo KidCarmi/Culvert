@@ -325,6 +325,14 @@ type DecisionEvidence struct {
 	// fully-enforcing mode would have done (§8/§11).
 	ShadowOutcome  string `json:"shadow_outcome,omitempty"`
 	ShadowOverride bool   `json:"shadow_override,omitempty"`
+	// The ShadowDecision SUB-FACTS: within one outcome they distinguish a valid credential
+	// plan from an absent/unplanned one and a passed request inspection from an un-evaluated
+	// one, so a Canary-readiness analysis can be reconstructed from the durable record and
+	// not only from the transient response. Same omitempty/shadow-only discipline as above.
+	ShadowCredentialPlan     string `json:"shadow_credential_plan,omitempty"`
+	ShadowMaterializeReady   string `json:"shadow_materialization_ready,omitempty"`
+	ShadowRequestInspection  string `json:"shadow_request_inspection,omitempty"`
+	ShadowResponseInspection string `json:"shadow_response_inspection,omitempty"`
 }
 
 // InspectionEvidence records only sanitized inspection facts (MCP-INSP-*). No

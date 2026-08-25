@@ -126,7 +126,7 @@ func (e *Executor) Execute(ctx context.Context, in runtime.ExecInput) runtime.Ex
 		// Delegated to the capability-reduced ShadowEvaluator, which holds no path to
 		// Upstream.Call or Materialize (SH-INV-1/2). The live Executor's own upstream
 		// client and broker are unreachable from this branch.
-		return e.shadow.evaluate(ctx, in, res)
+		return e.shadow.evaluate(ctx, in)
 	case rollout.EffectBlock:
 		return e.blocked(in, res.BlockReason, res.ShadowOverride)
 	case rollout.EffectExecute:

@@ -40,6 +40,7 @@ type planOnly struct{ p CredentialPlanner }
 // PlanOnly returns a plan-only view of a credential planner for a Shadow composition.
 func PlanOnly(p CredentialPlanner) CredentialPlanner { return planOnly{p: p} }
 
+// Plan forwards to the wrapped planner; the wrapper exposes ONLY Plan (never Materialize).
 func (a planOnly) Plan(in broker.PlanInput) (broker.CredentialPlan, error) { return a.p.Plan(in) }
 
 // ShadowOutcome is the formal Model-1 Shadow verdict: what a fully-enforcing mode
@@ -48,6 +49,9 @@ func (a planOnly) Plan(in broker.PlanInput) (broker.CredentialPlan, error) { ret
 // WOULD_EXECUTE (SH-INV, §8 of the phase brief).
 type ShadowOutcome string
 
+// The bounded set of Model-1 Shadow outcomes. Each names what a fully-enforcing mode
+// would do at the pre-side-effect boundary; the differential equivalence test pins them
+// to the live executor's decision.
 const (
 	ShadowWouldExecute                 ShadowOutcome = "would_execute"
 	ShadowWouldBlock                   ShadowOutcome = "would_block"
@@ -65,9 +69,14 @@ const (
 // deliberately avoid the "cred" token (gosec G101 matches it as a hardcoded-credential
 // name) — these are bounded status LABELS, never secrets.
 const (
-	planStatusValid     = "credential_plan_valid"
-	planStatusInvalid   = "credential_plan_invalid"
-	planStatusNone      = "no_credential_profile"
+	planStatusValid   = "credential_plan_valid"
+	planStatusInvalid = "credential_plan_invalid"
+	planStatusNone    = "no_credential_profile"
+	// planStatusNoPlanner — a profile is named but no planning capability is composed.
+	// This MIRRORS the live no-broker path (Config.Broker nil ⇒ no Authorization is
+	// attached and the call proceeds), so the outcome stays WOULD_EXECUTE; the label
+	// carries the truthful nuance that the request would run with NO credential attached.
+	planStatusNoPlanner = "no_planner_composed"
 	materializeNotEval  = "not_evaluated"
 	inspectionWouldPass = "would_pass"
 	inspectionWouldFail = "would_fail"
@@ -138,7 +147,7 @@ func (s *ShadowEvaluator) Execute(ctx context.Context, in runtime.ExecInput) run
 	case rollout.EffectRecordOnly:
 		return s.recordOnly(in, res)
 	case rollout.EffectShadowEvaluate:
-		return s.evaluate(ctx, in, res)
+		return s.evaluate(ctx, in)
 	case rollout.EffectBlock:
 		return s.blocked(in, res.BlockReason, res.ShadowOverride)
 	case rollout.EffectExecute:
@@ -156,7 +165,7 @@ func (s *ShadowEvaluator) Execute(ctx context.Context, in runtime.ExecInput) run
 // computes the Model-1 outcome (what a fully-enforcing mode WOULD do), derives
 // credential readiness from Plan alone, records durable evidence, and returns. There
 // is NO reference to an upstream client or Materialize anywhere on this path.
-func (s *ShadowEvaluator) evaluate(_ context.Context, in runtime.ExecInput, res rollout.Resolution) runtime.ExecOutput {
+func (s *ShadowEvaluator) evaluate(_ context.Context, in runtime.ExecInput) runtime.ExecOutput {
 	if s.cfg.Events == nil {
 		return s.blocked(in, mcperr.ReasonEventDurabilityDegraded, false)
 	}
@@ -258,19 +267,21 @@ func (s *ShadowEvaluator) decide(in runtime.ExecInput) ShadowDecision {
 	// 5. Credential readiness from Plan alone (metadata; never Materialize).
 	if profileRef := in.Decision.Obligations.CredentialProfile; profileRef != "" {
 		if s.cfg.Planner == nil {
-			// A credential is required but no planning capability is composed: readiness
-			// is not evaluable, which is a fail-closed WOULD_FAIL_CREDENTIAL_READINESS
-			// rather than a false WOULD_EXECUTE.
+			// No planning capability is composed. Shadow must PREDICT what live does, not
+			// fail closed: the live executor gates credential materialization on
+			// `useBroker := e.cfg.Broker != nil && profileRef != ""` (run.go), so with no
+			// broker it attaches NO Authorization and PROCEEDS to the call. Failing closed
+			// here would diverge from live enforcement (Codex P2). The outcome stays
+			// WOULD_EXECUTE; the label records that the request would run with no credential
+			// attached — the truthful nuance an operator needs to read from the evidence.
+			d.CredentialPlan = planStatusNoPlanner
+		} else if _, err := s.cfg.Planner.Plan(planInput(in, profileRef)); err != nil {
 			d.CredentialPlan = planStatusInvalid
 			d.Outcome = ShadowWouldFailCredentialReadiness
 			return d
+		} else {
+			d.CredentialPlan = planStatusValid
 		}
-		if _, err := s.cfg.Planner.Plan(planInput(in, profileRef)); err != nil {
-			d.CredentialPlan = planStatusInvalid
-			d.Outcome = ShadowWouldFailCredentialReadiness
-			return d
-		}
-		d.CredentialPlan = planStatusValid
 	}
 
 	// 6. Everything an enforcing mode checks before the side-effect boundary passed.
@@ -289,6 +300,16 @@ func shadowDecisionFacts(in runtime.ExecInput, d ShadowDecision) events.Decision
 	facts.Decision.ExecutionState = "shadow_evaluated"
 	facts.Decision.ShadowOutcome = string(d.Outcome)
 	facts.Decision.ShadowOverride = d.ShadowOverride
+	// Persist the ShadowDecision SUB-FACTS too (Codex P2), not just the final outcome: the
+	// durable archive must let a Canary-readiness analysis distinguish, within one outcome,
+	// a valid credential plan from an unplanned/absent one and a passed request inspection
+	// from an un-evaluated one — otherwise two WOULD_EXECUTE records are indistinguishable
+	// and the readiness analysis promised by SHADOW-ARCHITECTURE.md lives only in the
+	// transient response body.
+	facts.Decision.ShadowCredentialPlan = d.CredentialPlan
+	facts.Decision.ShadowMaterializeReady = d.MaterializeReady
+	facts.Decision.ShadowRequestInspection = d.RequestInspection
+	facts.Decision.ShadowResponseInspection = d.ResponseInspection
 	return facts
 }
 
