@@ -159,14 +159,27 @@ func TestTransport_SameHostRedirectIsStillAllowed(t *testing.T) {
 // pinned to the original port, that request would silently reach a DIFFERENT
 // endpoint than the one it named.
 func TestTransport_RedirectToAnotherPortOnTheSameHostIsRefused(t *testing.T) {
+	// The redirect target is derived from the SERVER's own address, published after
+	// startup, never from the request's Host header. Two reasons: a fixture that
+	// reflects a client-supplied header back into a Location is a textbook open
+	// redirect (gosec G710) even when the "client" is this test, and the fixture is
+	// more honest this way — the scenario under test is an upstream choosing a
+	// different port on its own name, which does not depend on what the caller sent.
+	var redirectTo atomic.Pointer[string]
 	c, tgt, _, done := pinnedTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		host := r.Host
-		if h, _, err := net.SplitHostPort(host); err == nil {
-			host = h
+		loc := redirectTo.Load()
+		if loc == nil {
+			t.Error("upstream was called before the redirect target was published")
+			w.WriteHeader(http.StatusInternalServerError)
+			return
 		}
-		http.Redirect(w, r, "https://"+net.JoinHostPort(host, "9443")+"/mcp", http.StatusTemporaryRedirect)
+		http.Redirect(w, r, *loc, http.StatusTemporaryRedirect)
 	})
 	defer done()
+
+	// Same host, DIFFERENT port — the exact shape a host-only check admitted.
+	otherPort := "https://" + net.JoinHostPort(mustURL(t, tgt.Endpoint).Hostname(), "9443") + "/mcp"
+	redirectTo.Store(&otherPort)
 
 	lim, err := NewLimits(LimitConfig{MaxRedirects: 3})
 	if err != nil {

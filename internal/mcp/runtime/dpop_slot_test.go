@@ -125,13 +125,17 @@ func TestLimits_DPoPQueueDoesNotHoldAnAuthSlot(t *testing.T) {
 	// Saturate the DPoP bound.
 	p.dpopSem <- struct{}{}
 
-	// Two DPoP-carrying requests: both must queue on the DPoP bound.
+	// Two DPoP-carrying requests: both must queue on the DPoP bound. One context is
+	// shared rather than one created per iteration: the two requests already had the
+	// same budget (the loop body runs in microseconds), and a per-iteration
+	// `defer cancel()` accumulates deferred calls inside the loop (gocritic
+	// deferInLoop) instead of releasing them as each iteration ends.
+	waiterCtx, cancelWaiters := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelWaiters()
 	for i := 0; i < 2; i++ {
 		r := gwRequest(gwToken(k), initializeBody(i+1))
 		r.DPoPProof, r.HasDPoP = "proof", true
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		go p.Process(ctx, r, fixedClock())
+		go p.Process(waiterCtx, r, fixedClock())
 	}
 	time.Sleep(150 * time.Millisecond) // let them reach their queue
 

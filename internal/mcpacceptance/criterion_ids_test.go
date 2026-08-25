@@ -82,75 +82,102 @@ func emittedCriterionIDs(t *testing.T) map[string]token.Position {
 			t.Fatalf("parse %s: %v", name, perr)
 		}
 		scanned++
-		lit := func(e ast.Expr) (string, bool) {
-			bl, ok := e.(*ast.BasicLit)
-			if !ok || bl.Kind != token.STRING {
-				return "", false
-			}
-			v, uerr := strconv.Unquote(bl.Value)
-			return v, uerr == nil
-		}
-		// (1) + (2): unambiguous emissions, anywhere in the file.
-		ast.Inspect(f, func(n ast.Node) bool {
-			switch v := n.(type) {
-			case *ast.CallExpr:
-				sel, ok := v.Fun.(*ast.SelectorExpr)
-				if !ok || sel.Sel.Name != "runCriterion" || len(v.Args) == 0 {
-					return true
-				}
-				if id, ok := lit(v.Args[0]); ok {
-					out[id] = fset.Position(v.Args[0].Pos())
-				}
-			case *ast.CompositeLit:
-				sel, ok := v.Type.(*ast.Ident)
-				if !ok || sel.Name != "CriterionResult" {
-					return true
-				}
-				for _, el := range v.Elts {
-					kv, ok := el.(*ast.KeyValueExpr)
-					if !ok {
-						continue
-					}
-					if k, ok := kv.Key.(*ast.Ident); ok && k.Name == "ID" {
-						if id, ok := lit(kv.Value); ok {
-							out[id] = fset.Position(kv.Value.Pos())
-						}
-					}
-				}
-			}
-			return true
-		})
-		// (3): table rows, scanned ONLY within a function that itself emits criteria.
-		// Scoping per FuncDecl (rather than a running flag over the whole file) is what
-		// keeps the scope real: a flag that is set on entering the first emitting
-		// function and never cleared makes every later table in the file look emitted.
-		for _, d := range f.Decls {
-			fn, ok := d.(*ast.FuncDecl)
-			if !ok || fn.Body == nil || !functionEmitsCriteria(fn) {
-				continue
-			}
-			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				cl, ok := n.(*ast.CompositeLit)
-				if !ok {
-					return true
-				}
-				for _, el := range cl.Elts {
-					row, ok := el.(*ast.CompositeLit)
-					if !ok || len(row.Elts) == 0 {
-						continue
-					}
-					if id, ok := lit(row.Elts[0]); ok && criterionIDShape.MatchString(id) {
-						out[id] = fset.Position(row.Elts[0].Pos())
-					}
-				}
-				return true
-			})
-		}
+		collectDirectIDs(fset, f, out)
+		collectTableIDs(fset, f, out)
 	}
 	if scanned == 0 || len(out) < 20 {
 		t.Fatalf("scanned %d files and found %d criterion ids; the wall is not reading the harness", scanned, len(out))
 	}
 	return out
+}
+
+// stringLit returns the value of a string literal expression.
+func stringLit(e ast.Expr) (string, bool) {
+	bl, ok := e.(*ast.BasicLit)
+	if !ok || bl.Kind != token.STRING {
+		return "", false
+	}
+	v, err := strconv.Unquote(bl.Value)
+	return v, err == nil
+}
+
+// collectDirectIDs records shapes (1) and (2): the first argument of a
+// runCriterion call, and the ID field of a CriterionResult literal. Both name a
+// criterion unambiguously, so they are read anywhere in the file.
+func collectDirectIDs(fset *token.FileSet, f *ast.File, out map[string]token.Position) {
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch v := n.(type) {
+		case *ast.CallExpr:
+			sel, ok := v.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "runCriterion" || len(v.Args) == 0 {
+				return true
+			}
+			if id, ok := stringLit(v.Args[0]); ok {
+				out[id] = fset.Position(v.Args[0].Pos())
+			}
+		case *ast.CompositeLit:
+			ident, ok := v.Type.(*ast.Ident)
+			if !ok || ident.Name != "CriterionResult" {
+				return true
+			}
+			recordIDField(fset, v, out)
+		}
+		return true
+	})
+}
+
+// recordIDField records the ID field of one CriterionResult literal.
+func recordIDField(fset *token.FileSet, lit *ast.CompositeLit, out map[string]token.Position) {
+	for _, el := range lit.Elts {
+		kv, ok := el.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		k, ok := kv.Key.(*ast.Ident)
+		if !ok || k.Name != "ID" {
+			continue
+		}
+		if id, ok := stringLit(kv.Value); ok {
+			out[id] = fset.Position(kv.Value.Pos())
+		}
+	}
+}
+
+// collectTableIDs records shape (3): the first element of a composite-literal row,
+// read ONLY inside a function that itself emits criteria.
+//
+// Scoping per FuncDecl (rather than a running flag over the whole file) is what
+// keeps the scope real: a flag set on entering the first emitting function and
+// never cleared makes every later table in the file look emitted.
+func collectTableIDs(fset *token.FileSet, f *ast.File, out map[string]token.Position) {
+	for _, d := range f.Decls {
+		fn, ok := d.(*ast.FuncDecl)
+		if !ok || fn.Body == nil || !functionEmitsCriteria(fn) {
+			continue
+		}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			cl, ok := n.(*ast.CompositeLit)
+			if !ok {
+				return true
+			}
+			recordTableRows(fset, cl, out)
+			return true
+		})
+	}
+}
+
+// recordTableRows records the first element of each row of one table literal, when
+// it is shaped like a criterion id.
+func recordTableRows(fset *token.FileSet, table *ast.CompositeLit, out map[string]token.Position) {
+	for _, el := range table.Elts {
+		row, ok := el.(*ast.CompositeLit)
+		if !ok || len(row.Elts) == 0 {
+			continue
+		}
+		if id, ok := stringLit(row.Elts[0]); ok && criterionIDShape.MatchString(id) {
+			out[id] = fset.Position(row.Elts[0].Pos())
+		}
+	}
 }
 
 // functionEmitsCriteria reports whether fn calls runCriterion or record, i.e.

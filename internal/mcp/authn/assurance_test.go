@@ -12,13 +12,13 @@ import (
 
 // gatewayConfigWith builds a gateway auth config with an explicit sender profile
 // and minimum assurance.
-func gatewayConfigWith(t testing.TB, prof senderconstraint.Profile, min identity.AssuranceLevel) CapabilityAuthConfig {
+func gatewayConfigWith(t testing.TB, prof senderconstraint.Profile, floor identity.AssuranceLevel) CapabilityAuthConfig {
 	t.Helper()
 	cfg, err := NewCapabilityConfig(CapabilityConfigInput{
 		Capability: protocol.Gateway, TrustedIssuers: []string{testIssuer},
 		AcceptedClientIDs: []string{testClientG}, CanonicalResource: gwResource,
 		RequiredScopes: []string{gwScope}, SenderProfile: prof,
-		MinAssurance: min, Limits: testAuthLimits(),
+		MinAssurance: floor, Limits: testAuthLimits(),
 	})
 	if err != nil {
 		t.Fatalf("gateway config: %v", err)
