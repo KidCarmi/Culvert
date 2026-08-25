@@ -458,6 +458,35 @@ func TestSignedConfigCanaryRequiresEnumerable(t *testing.T) {
 	}
 }
 
+// TestSignedConfigShadowRequiresEnumerable pins the "no scope = no Shadow" contract
+// (SHADOW-ACTIVATION.md §5). An EMPTY Shadow scope and a PERCENTAGE-ONLY Shadow scope
+// must both be rejected fail-closed at validation, so a mis-scoped Shadow activation can
+// never look accepted while shadowing nothing (or, via a later widening, everything).
+//
+// Mutation coverage: reverting the Validate change so ModeShadow is not in the
+// enumerable-required set makes the empty-scope case pass validation (would_execute a
+// fleet-wide shadow by omission) and fails this test.
+func TestSignedConfigShadowRequiresEnumerable(t *testing.T) {
+	// Empty scope (no inclusion selectors, no percentage) — the classic "missing scope".
+	empty := SignedConfig{SelectorSchema: selectorSchema, Capability: CapabilityGateway, Mode: ModeShadow,
+		Scope: ScopeSpec{Capability: CapabilityGateway}, ConnectorMode: ConnectorLocalClient}
+	if mcperr.ReasonOf(empty.Validate(CapabilityGateway, testLimits(t))) != mcperr.ReasonRolloutScopeInvalid {
+		t.Fatal("SECURITY: an empty-scope Shadow config must be rejected (no scope = no Shadow)")
+	}
+	// Percentage-only scope — "1% of everything" is not an enumerable bounded target.
+	pct := SignedConfig{SelectorSchema: selectorSchema, Capability: CapabilityGateway, Mode: ModeShadow,
+		Scope: ScopeSpec{Capability: CapabilityGateway, Percent: 1, BucketSalt: "s"}, ConnectorMode: ConnectorLocalClient}
+	if mcperr.ReasonOf(pct.Validate(CapabilityGateway, testLimits(t))) != mcperr.ReasonRolloutScopeInvalid {
+		t.Fatal("SECURITY: a percentage-only Shadow config must be rejected (not an enumerable bounded target)")
+	}
+	// A tightly bounded Shadow scope (one server) is valid — the first-activation shape.
+	ok := SignedConfig{SelectorSchema: selectorSchema, Capability: CapabilityGateway, Mode: ModeShadow, ScopeRevision: 1,
+		Scope: ScopeSpec{Capability: CapabilityGateway, Servers: []string{"controlled-test-server"}}, ConnectorMode: ConnectorLocalClient}
+	if err := ok.Validate(CapabilityGateway, testLimits(t)); err != nil {
+		t.Fatalf("a bounded single-server Shadow scope must validate: %v", err)
+	}
+}
+
 // ── Evidence (injected clock) ──────────────────────────────────────────────
 
 func TestEvidenceWindowsInjectedClock(t *testing.T) {
