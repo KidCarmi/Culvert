@@ -3,7 +3,7 @@ package fileblock
 import (
 	"mime"
 	"runtime"
-	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -12,7 +12,17 @@ import (
 // reproducible on whatever hardware CI happens to run — quote the RATIO, not
 // the constants.
 
+// benchSink is for SERIAL benchmarks only — one goroutine, so a plain variable
+// is safe and free.
 var benchSink string
+
+// parallelSink is the sink for RunParallel workers. A shared plain variable is
+// wrong here twice over: it is a data race (caught by -race), and it puts every
+// worker's write on ONE cache line — which is precisely the contention these
+// benchmarks exist to measure the ABSENCE of, so the harness would have been
+// measuring itself. Each worker accumulates locally and publishes once, AFTER
+// its timed loop.
+var parallelSink atomic.Value // string
 
 func benchFB() *FileBlocker {
 	fb := NewBlocker()
@@ -88,9 +98,11 @@ func BenchmarkCheckPathParallel(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
+		var local string
 		for pb.Next() {
-			benchSink = fb.CheckPath("/static/app.js")
+			local = fb.CheckPath("/static/app.js")
 		}
+		parallelSink.Store(local)
 	})
 }
 
@@ -99,25 +111,34 @@ func BenchmarkCheckPathParallelLegacy(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
+		var local string
 		for pb.Next() {
-			benchSink = checkPathLegacy(fb, "/static/app.js")
+			local = checkPathLegacy(fb, "/static/app.js")
 		}
+		parallelSink.Store(local)
 	})
 }
 
 // BenchmarkInspectedTransaction is the realistic unit: what ONE SSL-inspected
 // request/response pair pays this store — CheckPath on the inner request, then
 // CheckContentDisposition and CheckContentType on the response.
+//
+// Like every RunParallel benchmark here it keeps its sink WORKER-LOCAL. Sharing
+// one is not a style point: it measured the harness instead of the store (see
+// parallelSink), and it inflated the post-fix four-worker figure by ~1.8x
+// before this was caught in review.
 func BenchmarkInspectedTransaction(b *testing.B) {
 	fb := benchFB()
 	b.ReportAllocs()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
+		var local string
 		for pb.Next() {
-			benchSink = fb.CheckPath("/static/app.js")
-			benchSink = fb.CheckContentDisposition("")
-			benchSink = fb.CheckContentType("text/html; charset=utf-8")
+			local = fb.CheckPath("/static/app.js")
+			local = fb.CheckContentDisposition("")
+			local = fb.CheckContentType("text/html; charset=utf-8")
 		}
+		parallelSink.Store(local)
 	})
 }
 
@@ -126,11 +147,13 @@ func BenchmarkInspectedTransactionLegacy(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
+		var local string
 		for pb.Next() {
-			benchSink = checkPathLegacy(fb, "/static/app.js")
-			benchSink = fb.CheckContentDisposition("")
-			benchSink = checkContentTypeLegacy(fb, "text/html; charset=utf-8")
+			local = checkPathLegacy(fb, "/static/app.js")
+			local = fb.CheckContentDisposition("")
+			local = checkContentTypeLegacy(fb, "text/html; charset=utf-8")
 		}
+		parallelSink.Store(local)
 	})
 }
 
@@ -185,6 +208,8 @@ func TestBenchGate_ChecksTakeNoStoreLock(t *testing.T) {
 	fb := benchFB()
 
 	fb.mu.Lock()
+	defer fb.mu.Unlock()
+
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -194,29 +219,20 @@ func TestBenchGate_ChecksTakeNoStoreLock(t *testing.T) {
 		_ = fb.CheckContentDisposition(`attachment; filename="setup.exe"`)
 	}()
 
-	// Wait bounded — a lock-free reader finishes in nanoseconds; a locked one
-	// never finishes while the write lock is held.
-	timeout := make(chan struct{})
-	var once sync.Once
-	go func() {
-		for i := 0; i < 1_000_000; i++ {
-			select {
-			case <-done:
-				return
-			default:
-				runtime.Gosched()
-			}
+	// A lock-free reader finishes in nanoseconds; a reader that takes the lock
+	// cannot finish AT ALL while the write lock is held. Yielding a large fixed
+	// number of times rather than sleeping keeps the verdict "did it ever
+	// complete", not "did it complete within N milliseconds" — so this stays a
+	// structural gate rather than a timing one.
+	for i := 0; i < 1_000_000; i++ {
+		select {
+		case <-done:
+			return
+		default:
+			runtime.Gosched()
 		}
-		once.Do(func() { close(timeout) })
-	}()
-
-	select {
-	case <-done:
-	case <-timeout:
-		fb.mu.Unlock()
-		t.Fatal("per-transaction checks did not complete while the store write lock was held — a read path took the lock")
 	}
-	fb.mu.Unlock()
+	t.Fatal("per-transaction checks did not complete while the store write lock was held — a read path took the lock")
 }
 
 // TestBenchGate_DangerousMIMEStillParses is the control for the pre-filter: the

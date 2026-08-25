@@ -38,15 +38,21 @@ import (
 //
 // That is not a constant cost but a THROUGHPUT CEILING, the same shape already
 // recorded for internal/threatfeed, security.go's IP filter, internal/connlimit
-// and metrics.go's latency histogram. Measured on this machine (4-core Xeon,
-// Go 1.26, CheckPath against "/static/app.js", medians of n=6):
+// and metrics.go's latency histogram. Measured on this machine (4-vCPU Xeon,
+// Go 1.26, CheckPath against "/static/app.js", medians of n=15;
+// BenchmarkCheckPathParallel{,Legacy}, whose ns/op is already wall-normalized
+// across workers, so 1-core-ns ÷ 4-core-ns IS the scaling factor):
 //
-//	       │ 1 core  │ 4x parallel │ what four cores bought
-//	before │ 27.6 ns │   135.5 ns  │ 0.82x of ONE core — cores SUBTRACTED throughput
-//	after  │ 19.4 ns │    25.8 ns  │ 3.0x, i.e. 5.3x the old four-core ceiling
+//	       │ 1 core  │ 4 workers │ scaling
+//	before │ 28.4 ns │  105.6 ns │ 0.27x — four cores delivered a QUARTER of one
+//	after  │ 19.7 ns │   17.2 ns │ 1.15x — flat, and 6.2x the old four-core ceiling
 //
-// The absolute numbers are load-sensitive by construction (a contended lock
-// degrades further the busier the box is); quote the SHAPE, not the constants.
+// Note the shape, not the constants: the "after" row is FLAT, not linear. The
+// published view is a shared read-only cache line, so it does not scale a
+// four-worker load on a 4-vCPU VM into 4x; what it removes is the DEGRADATION.
+// The absolute numbers are load-sensitive by construction — a contended lock
+// degrades further the busier the box is, so the "before" row understates the
+// problem on the larger hardware the appliance ships to.
 //
 // Reads now go through an immutable view published via atomic.Pointer. THE
 // CONTRACT IS ONE LINE AND IT IS LOAD-BEARING: a map reachable from a published
@@ -302,14 +308,14 @@ var blockedMIMETypes = map[string]string{
 // PARAMETERS and then walks the header to fill it — and this function discards
 // that map. Every response paid it so that a ten-entry lookup could miss.
 //
-// Measured on this machine (4-core Xeon, Go 1.26, "text/html; charset=utf-8" —
+// Measured on this machine (4-vCPU Xeon, Go 1.26, "text/html; charset=utf-8" —
 // the shape almost all web traffic carries; medians of n=6):
 //
-//	before   283.7 ns/op   336 B/op   2 allocs/op
-//	after     35.9 ns/op     0 B/op   0 allocs/op
+//	before   281.7 ns/op   336 B/op   2 allocs/op
+//	after     35.6 ns/op     0 B/op   0 allocs/op
 //
 // The trade-off is stated rather than papered over: the ten dangerous media
-// types now pay the cheap split AND the parse, 341.2 -> 374.8 ns (+10%). They
+// types now pay the cheap split AND the parse, 347.2 -> 384.8 ns (+11%). They
 // are the arm that is about to serve a block page and write two log lines, and
 // ordinary traffic never reaches it, so the exchange is accepted deliberately.
 // BenchmarkCheckContentType_Dangerous keeps it measurable.
