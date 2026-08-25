@@ -242,20 +242,8 @@ func (s *ShadowEvaluator) decide(in runtime.ExecInput) ShadowDecision {
 	}
 
 	// 2. Policy verdict classes that a fully-enforcing mode blocks/gates.
-	switch action {
-	case rollout.ActionKindDenied:
-		d.Outcome = ShadowWouldBlock
-		return d
-	case rollout.ActionKindApproval:
-		d.Outcome = ShadowWouldRequireApproval
-		return d
-	case rollout.ActionKindConfirm:
-		d.Outcome = ShadowWouldRequireConfirmation
-		return d
-	case rollout.ActionKindRedaction:
-		// The guarded-execute path performs no request-argument redaction and fails
-		// closed (executor.go), so a fully-enforcing mode would block a redaction action.
-		d.Outcome = ShadowWouldBlock
+	if outcome, gated := policyClassOutcome(action); gated {
+		d.Outcome = outcome
 		return d
 	}
 
@@ -289,23 +277,14 @@ func (s *ShadowEvaluator) decide(in runtime.ExecInput) ShadowDecision {
 	// (pre-dispatch) drift before the provider (SHADOW-EVIDENCE-ROUTING-1), so the only
 	// drift decide() can observe is POST-ENTRY (boundary) drift — whose live precedence is
 	// credential-first.
-	if profileRef := in.Decision.Obligations.CredentialProfile; profileRef != "" {
-		if s.plan == nil {
-			// No planning capability is composed. Shadow must PREDICT what live does, not
-			// fail closed: the live executor gates credential materialization on
-			// `useBroker := e.cfg.Broker != nil && profileRef != ""` (run.go), so with no
-			// broker it attaches NO Authorization and PROCEEDS to the call. Failing closed
-			// here would diverge from live enforcement. The outcome stays WOULD_EXECUTE; the
-			// label records that the request would run with no credential attached — the
-			// truthful nuance an operator needs to read from the evidence.
-			d.CredentialPlan = planStatusNoPlanner
-		} else if _, err := s.plan(planInput(in, profileRef)); err != nil {
-			d.CredentialPlan = planStatusInvalid
-			d.Outcome = ShadowWouldFailCredentialReadiness
-			return d
-		} else {
-			d.CredentialPlan = planStatusValid
-		}
+	planStatus, planReady := s.credentialReadiness(in)
+	if !planReady {
+		d.CredentialPlan = planStatus
+		d.Outcome = ShadowWouldFailCredentialReadiness
+		return d
+	}
+	if planStatus != "" {
+		d.CredentialPlan = planStatus
 	}
 
 	// 6. Stale decision (post-entry tool drift — the boundary re-check). Reached only when
@@ -319,6 +298,60 @@ func (s *ShadowEvaluator) decide(in runtime.ExecInput) ShadowDecision {
 	// 7. Everything an enforcing mode checks before the side-effect boundary passed.
 	d.Outcome = ShadowWouldExecute
 	return d
+}
+
+// policyClassOutcome maps a policy verdict class that a fully-enforcing mode blocks or
+// gates onto its Model-1 outcome. gated=false means the action is allow-class and the
+// evaluation continues to the allowance, server, credential and staleness steps.
+//
+// Extracted from decide() only to keep it under the cyclop threshold; the mapping and its
+// order are unchanged. Every arm is a REFUSAL — nothing here can produce WOULD_EXECUTE, so
+// a class added without an arm falls through to the allow-class steps and must therefore
+// be an allow-class action.
+func policyClassOutcome(action rollout.ActionKind) (ShadowOutcome, bool) {
+	switch action {
+	case rollout.ActionKindDenied:
+		return ShadowWouldBlock, true
+	case rollout.ActionKindApproval:
+		return ShadowWouldRequireApproval, true
+	case rollout.ActionKindConfirm:
+		return ShadowWouldRequireConfirmation, true
+	case rollout.ActionKindRedaction:
+		// The guarded-execute path performs no request-argument redaction and fails
+		// closed (executor.go), so a fully-enforcing mode would block a redaction action.
+		return ShadowWouldBlock, true
+	default:
+		return "", false
+	}
+}
+
+// credentialReadiness derives the credential sub-fact from Plan alone — metadata only,
+// never Materialize. It returns the status label to record and whether the request would
+// still reach the call; ready=false means a fully-enforcing mode would fail credential
+// readiness. An empty status with ready=true means no credential profile was named, so the
+// caller keeps its planStatusNone default.
+//
+// Extracted from decide() only to keep it under the cyclop threshold; the semantics and
+// the position of this step in the live order are unchanged.
+func (s *ShadowEvaluator) credentialReadiness(in runtime.ExecInput) (string, bool) {
+	profileRef := in.Decision.Obligations.CredentialProfile
+	if profileRef == "" {
+		return "", true
+	}
+	if s.plan == nil {
+		// No planning capability is composed. Shadow must PREDICT what live does, not
+		// fail closed: the live executor gates credential materialization on
+		// `useBroker := e.cfg.Broker != nil && profileRef != ""` (run.go), so with no
+		// broker it attaches NO Authorization and PROCEEDS to the call. Failing closed
+		// here would diverge from live enforcement. The outcome stays WOULD_EXECUTE; the
+		// label records that the request would run with no credential attached — the
+		// truthful nuance an operator needs to read from the evidence.
+		return planStatusNoPlanner, true
+	}
+	if _, err := s.plan(planInput(in, profileRef)); err != nil {
+		return planStatusInvalid, false
+	}
+	return planStatusValid, true
 }
 
 // requestInspectionStatus reports the truthful request-inspection sub-fact (§13): when no
