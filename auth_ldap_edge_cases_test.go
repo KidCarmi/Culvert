@@ -14,7 +14,49 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	ldap "github.com/go-ldap/ldap/v3"
 )
+
+// ── CHAOS-47 blast-radius: the client-error range must track the library ─────
+//
+// ldapUserBindIsUnreachable classifies a step-2 user-bind failure as
+// "directory unreachable" (arms the provider-wide cooldown, and clears it on
+// reachable evidence) vs "the directory answered about this account" (must
+// NEVER gate — it is attacker-provokable per account). The reachable/unreachable
+// split for go-ldap's own client-side faults keys on the contiguous constant
+// block [ldapClientErrorFloor, ldapClientErrorCeil] == [ErrorNetwork,
+// ErrorEmptyPassword] == [200, 206]. TestLDAPUserBindIsUnreachable_ClientSpaceBoundaries
+// pins the CURRENT edges, but nothing catches go-ldap EXTENDING that block: a
+// new Error* constant at 207 would fall OUTSIDE the range and be misclassified
+// as "server answered" — so a genuine transport/client fault would (a) fail to
+// arm the cooldown and (b) be read as positive reachability that clears an
+// already-armed one. This guard fires on exactly that library change.
+func TestLDAPClientErrorCeil_TracksLibrary(t *testing.T) {
+	// Our ceiling must be the library's current top client-error constant.
+	if ldapClientErrorCeil != ldap.ErrorEmptyPassword {
+		t.Fatalf("ldapClientErrorCeil = %d, want ldap.ErrorEmptyPassword = %d — sync the constant",
+			ldapClientErrorCeil, ldap.ErrorEmptyPassword)
+	}
+	if ldapClientErrorFloor != ldap.ErrorNetwork {
+		t.Fatalf("ldapClientErrorFloor = %d, want ldap.ErrorNetwork = %d", ldapClientErrorFloor, ldap.ErrorNetwork)
+	}
+	// The go-ldap client-error block (Error* constants) is contiguous and 206
+	// is its top; every code in [floor, ceil] is a defined client fault…
+	for code := uint16(ldapClientErrorFloor); code <= ldapClientErrorCeil; code++ {
+		if _, ok := ldap.LDAPResultCodeMap[code]; !ok {
+			t.Errorf("client-error code %d is not defined in the library — the range no longer matches", code)
+		}
+	}
+	// …and the next code up is undefined. If a future go-ldap adds an Error*
+	// constant at ceil+1, it appears here, and ldapUserBindIsUnreachable must be
+	// re-examined before the range silently misclassifies it as reachable.
+	if desc, ok := ldap.LDAPResultCodeMap[ldapClientErrorCeil+1]; ok {
+		t.Fatalf("go-ldap now defines code %d (%q): the client-error block was extended past "+
+			"ldapClientErrorCeil — review ldapUserBindIsUnreachable and raise the ceiling",
+			ldapClientErrorCeil+1, desc)
+	}
+}
 
 // ── validateLDAPUserFilter: the LDAP-injection guard boundaries ──────────────
 //
