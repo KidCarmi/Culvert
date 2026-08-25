@@ -214,10 +214,11 @@ type ShadowDecision struct {
 
 // decide computes the ShadowDecision. It mirrors, in the same order, the pre-side-effect
 // decision the LIVE executor reaches for an in-scope enforcing request (kill checked by
-// the caller): hard control → policy class → allowance → credential readiness → stale →
-// execute. Credential precedes the (boundary) stale re-check because run.go plans the
-// credential before callUpstream's final drift check (Codex P2). Differential equivalence
-// with the live path is pinned by shadow_live_equivalence_test.go.
+// the caller): hard control → policy class → allowance → upstream-server usability →
+// credential readiness → stale → execute. Credential precedes the (boundary) stale
+// re-check because run.go plans the credential before callUpstream's final drift check
+// (Codex P2). Differential equivalence with the live path is pinned by
+// shadow_live_equivalence_test.go and shadow_prediction_parity_test.go.
 func (s *ShadowEvaluator) decide(in runtime.ExecInput) ShadowDecision {
 	action := mapAction(in.Decision.Action)
 	hardFail, _ := hardFailure(in)
@@ -264,7 +265,23 @@ func (s *ShadowEvaluator) decide(in runtime.ExecInput) ShadowDecision {
 		return d
 	}
 
-	// 4. Credential readiness from Plan alone (metadata; never Materialize). This PRECEDES
+	// 4. Upstream server usability. The live path refuses an absent or unusable server
+	// record inside runExecute — BEFORE the durable commit, the credential plan and the
+	// call — with ReasonUpstreamServerUnusable, a HardServerTrust hard failure, so it sits
+	// exactly here: after the allowance consumption, before credential planning.
+	//
+	// SR-02. This is NOT already covered by the hard-control step above. The policy engine
+	// reads server state from the DECISION snapshot, while the executor re-reads the LIVE
+	// registry (runtime dispatchExecute) — which is the whole reason the live refusal
+	// exists. A record disabled, identity-mismatched or deregistered in that window
+	// reaches decide() with no hard override set, and without this gate Shadow promised
+	// WOULD_EXECUTE for a server enforcement will not call.
+	if in.Server == nil || !in.Server.Usable() {
+		d.Outcome = ShadowWouldFailHardControl
+		return d
+	}
+
+	// 5. Credential readiness from Plan alone (metadata; never Materialize). This PRECEDES
 	// the boundary drift re-check to match the LIVE order exactly (Codex P2): run.go plans
 	// the credential (materializeAndCall → Broker.Plan) BEFORE callUpstream performs the
 	// final drift check, so a request that is BOTH credential-invalid AND drifted returns
@@ -291,7 +308,7 @@ func (s *ShadowEvaluator) decide(in runtime.ExecInput) ShadowDecision {
 		}
 	}
 
-	// 5. Stale decision (post-entry tool drift — the boundary re-check). Reached only when
+	// 6. Stale decision (post-entry tool drift — the boundary re-check). Reached only when
 	// the credential (if any) planned cleanly, mirroring callUpstream's drift check AFTER
 	// Broker.Plan. Pure, no side effect.
 	if in.ToolStillCurrent != nil && !in.ToolStillCurrent() {
@@ -299,7 +316,7 @@ func (s *ShadowEvaluator) decide(in runtime.ExecInput) ShadowDecision {
 		return d
 	}
 
-	// 6. Everything an enforcing mode checks before the side-effect boundary passed.
+	// 7. Everything an enforcing mode checks before the side-effect boundary passed.
 	d.Outcome = ShadowWouldExecute
 	return d
 }

@@ -377,3 +377,28 @@
 - **Evidence:** `internal/mcp/events/model/model.go` (DecisionEvidence note),
   `internal/mcp/execution/shadow_evaluator.go` (`shadowDecisionFacts`),
   `docs/design/mcp/SHADOW-ARCHITECTURE.md` §9.
+
+## SHADOW-PREDICTION-PARITY-1 — Pre-side-effect gates have no ownership wall · LOW (2026-08-25)
+- **Principal:** `ShadowEvaluator.decide()` re-states, by hand, the sequence of refusals the
+  live `Executor` performs before the side-effect boundary (hard control → policy class →
+  allowance → upstream-server usability → credential readiness → boundary drift). Nothing
+  structural couples the two: a gate added to `Execute`/`runExecute` without a matching step
+  in `decide()` silently makes Shadow MORE PERMISSIVE than the enforcement it predicts, and
+  the only thing that catches it is whether someone remembers to extend the differential
+  test. Two such gaps existed in the shipped Layer-B split and were found by review, not by
+  a failing build (SR-01 allowance-capacity, SR-02 upstream-server usability — both fixed
+  and walled in `internal/mcp/execution/shadow_prediction_parity_test.go`).
+- **Status:** OPEN, deferred. Execution is disabled, so the class is future-facing. The
+  direction of the failure is what makes it worth recording: an over-permissive Shadow
+  prediction is an input to the Canary promotion decision, so the defect is consumed as
+  evidence rather than surfacing as a refusal.
+- **Fix (proposed):** an ownership registry in the shape of
+  `internal/mcp/runtime/limits_ownership_test.go` — enumerate the pre-side-effect refusal
+  sites in `executor.go`/`run.go` (via `go/types`, so a same-named helper on another type
+  cannot satisfy a row) and require each to DECLARE either a modelling step in `decide()`
+  or an explicit `not-predicted` justification. Then a new live gate fails the build until
+  Shadow models it.
+- **Evidence:** `docs/engineering/security-reviews/2026-08-25-shadow-layerb-and-ldap-window.md`
+  §§3–4 and §6 residual risk; `docs/design/mcp/SHADOW-ARCHITECTURE.md` §4 (the stage list
+  that already named "server eligibility" as requiring proof); DEBT-011 is the same class
+  one layer up.
