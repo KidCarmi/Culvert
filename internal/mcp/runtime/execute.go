@@ -28,6 +28,17 @@ type ExecutionProvider interface {
 	// the observation fields to record. It performs its OWN durable
 	// commit-before-side-effect; the runtime does not pre-commit for this path.
 	Execute(ctx context.Context, in ExecInput) ExecOutput
+	// RecordsOnly reports whether the effective rollout disposition for this request is
+	// record-only (Observe / Disabled / out-of-scope with no fallback). It is PURE — no
+	// side effect, no commit, no upstream call — and must agree with what Execute would
+	// resolve. The runtime uses it to KEEP OWNING the canonical inline Observe evidence
+	// path (allow-class decision-event commit + denial-lane routing) for record-only
+	// dispositions, so composing an executor (e.g. a Shadow evaluator) never displaces
+	// that evidence. A killed capability is NOT record-only — it must emit an emergency
+	// block, which Execute owns. Everything that actually evaluates/executes/blocks
+	// (Shadow evaluate, Canary/Production execute, hard block) returns false and is
+	// handed to Execute.
+	RecordsOnly(in ExecInput) bool
 }
 
 // ExecInput carries the already-resolved request facts the executor needs. It
@@ -80,24 +91,14 @@ type ExecOutput struct {
 	Executed        bool
 }
 
-// dispatchExecute hands a decision-point outcome to the guarded executor and maps
-// the result back into a terminal Outcome. It is only reached when p.executor is
-// non-nil (the disabled-by-default posture keeps the decision-only path).
-func (p *pipeline) dispatchExecute(ctx context.Context, rb *recBuilder, req Request, msg jsonrpc.Message, ident *identity.ResolvedContext, in policy.DecisionInput, d policy.Decision, insp inspectionRun, snapshotHash string, now time.Time) Outcome {
-	// OVN-09 — decision/execution TOCTOU. The policy decision was computed against
-	// a catalog SNAPSHOT. Between then and the irreversible upstream call there is a
-	// real window (inspection, durable commit, credential planning, provider fetch)
-	// in which a concurrent discovery — execution.Discovery -> catalog.Ingest
-	// publishes a new snapshot — can change the tool the decision was made about.
-	// Re-validate against the LIVE catalog and refuse a stale decision before any
-	// side effect. This is the drift MCP-TOOL-001 / MCP-T-011 / MCP-T-016 exist to
-	// prevent, and the executor never re-checked it.
-	if out, stale := p.refuseOnToolDrift(rb, in, msg.ID); stale {
-		return out
-	}
-	// The same predicate, handed to the executor to re-run adjacent to the upstream
-	// call. Captured by value from this decision's input, so it can never be
-	// satisfied by a DIFFERENT request's tool.
+// buildExecInput materializes the ExecInput the executor needs from the resolved
+// decision facts. It is pure (a registry snapshot read + a captured drift predicate)
+// so it can be built once and used both for the RecordsOnly routing probe and for
+// Execute, guaranteeing the disposition the runtime routes on is computed from the
+// exact same input the executor acts on.
+func (p *pipeline) buildExecInput(req Request, msg jsonrpc.Message, ident *identity.ResolvedContext, in policy.DecisionInput, d policy.Decision, insp inspectionRun, snapshotHash string, now time.Time) ExecInput {
+	// The drift predicate, captured by value from this decision's input, so it can
+	// never be satisfied by a DIFFERENT request's tool.
 	toolStillCurrent := func() bool { return !p.toolHasDrifted(in) }
 	var srv *registry.ServerRecord
 	if req.ServerID != "" && p.deps.Registry != nil {
@@ -110,7 +111,7 @@ func (p *pipeline) dispatchExecute(ctx context.Context, rb *recBuilder, req Requ
 		r := insp.result
 		inspResult = &r
 	}
-	ei := ExecInput{
+	return ExecInput{
 		Capability:   p.capability,
 		Method:       msg.Method,
 		MessageID:    msg.ID,
@@ -124,6 +125,25 @@ func (p *pipeline) dispatchExecute(ctx context.Context, rb *recBuilder, req Requ
 		Now:          now,
 
 		ToolStillCurrent: toolStillCurrent,
+	}
+}
+
+// dispatchExecute hands a decision-point outcome to the guarded executor and maps
+// the result back into a terminal Outcome. It is reached only for a NON-record-only
+// disposition (Shadow evaluate / Canary-Production execute / hard block): a
+// record-only disposition keeps the runtime's inline Observe evidence path instead
+// (dispatchPolicy), so a composed evaluator never displaces the decision-event commit.
+func (p *pipeline) dispatchExecute(ctx context.Context, rb *recBuilder, ei ExecInput) Outcome {
+	// OVN-09 — decision/execution TOCTOU. The policy decision was computed against
+	// a catalog SNAPSHOT. Between then and the irreversible upstream call there is a
+	// real window (inspection, durable commit, credential planning, provider fetch)
+	// in which a concurrent discovery — execution.Discovery -> catalog.Ingest
+	// publishes a new snapshot — can change the tool the decision was made about.
+	// Re-validate against the LIVE catalog and refuse a stale decision before any
+	// side effect. This is the drift MCP-TOOL-001 / MCP-T-011 / MCP-T-016 exist to
+	// prevent, and the executor never re-checked it.
+	if out, stale := p.refuseOnToolDrift(rb, ei.Input, ei.MessageID); stale {
+		return out
 	}
 	// SEC-MCP-03. The executor performs the REAL upstream side effect and must
 	// inherit the request's deadline and cancellation: with a DETACHED background

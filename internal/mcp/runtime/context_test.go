@@ -82,6 +82,10 @@ func (e *recordingExecutor) Execute(ctx context.Context, _ ExecInput) ExecOutput
 	return ExecOutput{Status: 200, Disposition: DispObserveOnly, ExecutionState: "not_implemented"}
 }
 
+// RecordsOnly returns false so this fixture always reaches Execute (it exists to
+// observe the context the runtime hands the executor).
+func (e *recordingExecutor) RecordsOnly(ExecInput) bool { return false }
+
 // SEC-MCP-03. The guarded executor performs the real upstream side effect. It must
 // inherit the request's cancellation and deadline: `context.Background()` there
 // means a disconnected client, an exceeded budget or a shutdown cannot stop an

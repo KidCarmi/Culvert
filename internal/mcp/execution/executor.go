@@ -267,3 +267,24 @@ func policyHardReason(d policy.Decision) mcperr.Reason {
 func needsAllowance(a rollout.ActionKind) bool {
 	return a == rollout.ActionKindAllowOnce || a == rollout.ActionKindAllowSession
 }
+
+// recordsOnlyFor reports whether the effective rollout disposition for this request is
+// record-only (Observe / Disabled / out-of-scope). It is PURE — it reads the immutable
+// active rollout state via one lock-free load and delegates to the same Resolve the
+// executor uses, so it can never disagree with what Execute would resolve. A KILLED
+// capability is deliberately NOT record-only: it must emit an emergency block, which
+// Execute owns, so the runtime routes a killed request to Execute rather than to its
+// inline Observe path.
+func recordsOnlyFor(st *rollout.State, in runtime.ExecInput) bool {
+	if st.Killed() {
+		return false
+	}
+	subj := subjectFor(in)
+	action := mapAction(in.Decision.Action)
+	hardFail, hardReason := hardFailure(in)
+	res := st.ResolveFor(subj, action, hardFail, hardReason, true)
+	return res.Disposition == rollout.EffectRecordOnly
+}
+
+// RecordsOnly implements runtime.ExecutionProvider for the live Executor.
+func (e *Executor) RecordsOnly(in runtime.ExecInput) bool { return recordsOnlyFor(e.cfg.State, in) }

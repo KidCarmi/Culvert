@@ -79,15 +79,22 @@ func (p *pipeline) dispatchPolicy(ctx context.Context, rb *recBuilder, req Reque
 	rb.rec.MatchedRule = string(d.MatchedRule)
 	rb.rec.PolicyRevision = uint64(d.PolicyRevision)
 
-	// PR-11: when a guarded executor is wired (Gateway only, armed by rollout
-	// distribution), hand the fully-evaluated decision to it. The executor owns
-	// rollout-mode resolution (record-only / execute / block), the fixed
-	// hard-failure enforcement, obligations, and — for an in-scope executing mode —
-	// the real guarded upstream call with its own commit-before-side-effect. When no
-	// executor is wired this branch is skipped and the decision-only path below runs
-	// byte-identically.
+	// PR-11 / Shadow activation: when a guarded executor is wired (Gateway only, armed
+	// by rollout distribution or Shadow composition), hand it a NON-record-only
+	// disposition — Shadow evaluate, Canary/Production execute, or a hard block — and it
+	// owns the rollout-mode resolution + its own commit-before-side-effect. A RECORD-ONLY
+	// disposition (Observe / Disabled / out-of-scope) deliberately KEEPS the inline
+	// decision-only path below, which owns the canonical allow-class decision-event
+	// commit and denial-lane routing — so composing an evaluator (e.g. a Shadow evaluator
+	// on a shadow-ready node) never drops that Observe evidence for the traffic it does
+	// not evaluate. When no executor is wired the branch is skipped entirely and the
+	// decision-only path runs byte-identically.
 	if p.executor != nil {
-		return p.dispatchExecute(ctx, rb, req, msg, ident, in, d, insp, snap.Hash(), now)
+		ei := p.buildExecInput(req, msg, ident, in, d, insp, snap.Hash(), now)
+		if !p.executor.RecordsOnly(ei) {
+			return p.dispatchExecute(ctx, rb, ei)
+		}
+		// record-only disposition ⇒ fall through to the inline Observe evidence path.
 	}
 
 	if d.Action.IsAllowClass() {

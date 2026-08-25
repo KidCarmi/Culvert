@@ -137,6 +137,14 @@ func NewShadowEvaluator(cfg ShadowConfig) (*ShadowEvaluator, error) {
 	return &ShadowEvaluator{cfg: cfg, plan: plan, allowances: newAllowanceStore()}, nil
 }
 
+// RecordsOnly implements runtime.ExecutionProvider for the ShadowEvaluator. A
+// record-only disposition (Observe / Disabled / out-of-scope) is kept on the runtime's
+// inline Observe evidence path, so a shadow-ready node never drops the decision-event
+// commit for the traffic outside its Shadow scope.
+func (s *ShadowEvaluator) RecordsOnly(in runtime.ExecInput) bool {
+	return recordsOnlyFor(s.cfg.State, in)
+}
+
 // Execute is the runtime.ExecutionProvider entry for a Shadow-only runtime. It
 // resolves the rollout disposition and dispatches — but it has no execute path.
 func (s *ShadowEvaluator) Execute(ctx context.Context, in runtime.ExecInput) runtime.ExecOutput {

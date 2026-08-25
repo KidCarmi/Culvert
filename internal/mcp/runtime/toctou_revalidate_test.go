@@ -16,6 +16,10 @@ type hookCapturingExec struct {
 	sawHookIsNil bool
 }
 
+// RecordsOnly returns false so this fixture always reaches Execute (it exists to
+// exercise the last-moment drift re-check the runtime hands the executor).
+func (e *hookCapturingExec) RecordsOnly(ExecInput) bool { return false }
+
 func (e *hookCapturingExec) Execute(_ context.Context, in ExecInput) ExecOutput {
 	e.reached++
 	if in.ToolStillCurrent == nil {

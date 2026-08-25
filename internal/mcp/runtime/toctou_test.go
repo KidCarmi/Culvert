@@ -29,6 +29,10 @@ func (e *recordingExec) Execute(_ context.Context, in ExecInput) ExecOutput {
 	return ExecOutput{Status: 200, Disposition: DispObserveOnly, ExecutionState: "not_implemented"}
 }
 
+// RecordsOnly returns false so this fixture always reaches Execute (it exists to
+// verify the runtime's entry-side tool-drift refusal before the executor).
+func (e *recordingExec) RecordsOnly(ExecInput) bool { return false }
+
 // ingestTool publishes a tool into the catalog with the given input schema, and
 // returns its resulting fingerprint hash.
 func ingestTool(t *testing.T, reg *registry.Registry, cat *catalog.Catalog, server, name, inputSchema string) string {
