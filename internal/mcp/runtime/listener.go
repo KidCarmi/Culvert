@@ -249,11 +249,11 @@ func (l *Listener) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Origin, Mcp-Session-Id or Mcp-Protocol-Version is header confusion, counted
 		// as such, and would otherwise have made routine protocol traffic
 		// indistinguishable from a credential attack on the same series.
-		switch {
-		case reason == mcperr.ReasonNone:
+		switch reason {
+		case mcperr.ReasonNone:
 			// Unclassified transport refusal (e.g. a require-cert listener with no
 			// verified peer): the generic rejected counter above is the whole record.
-		case reason == mcperr.ReasonAmbiguousRequestHeader:
+		case mcperr.ReasonAmbiguousRequestHeader:
 			l.ctr.ambiguousHeaders.Add(1)
 			if isCredentialHeader(dupHeader) {
 				l.ctr.authFailures.Add(1)
