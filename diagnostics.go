@@ -165,6 +165,7 @@ func buildOperatorContract() OperatorContract {
 		checkRequestLogPersistence(),
 		checkIdentityBackend(),
 		checkInteractiveLoginState(),
+		checkAlertWebhookSigning(),
 		checkOIDCJWKSTrust(),
 		checkSyslogFeed(),
 		checkMemoryBackstop(),
@@ -650,6 +651,44 @@ func checkInteractiveLoginState() OperatorContractCheck {
 			pkceEvictions, globalPKCEStore.Len(), globalPKCEStore.Clients(),
 			samlEvictions, globalSAMLStateStore.Len(), globalSAMLStateStore.Clients()),
 		OperatorAction: "The eviction count is cumulative since boot while the in-flight/client counts are a snapshot of right now, so a store that has since drained can show this warning long after the cause resolved — do not read the current client count as the size of the event that caused the evictions. Re-check this endpoint (or culvert_login_state_evictions_total on /metrics) over time: if the eviction count is still climbing alongside a small, steady set of clients, that is an active flooding source hitting the captive-portal/SSO-portal resolution path worth rate-limiting or blocking; if it has stopped climbing, the store already recovered and no action is needed.",
+	}
+}
+
+// checkAlertWebhookSigning reports webhooks whose configured HMAC signing
+// secret could not be decrypted at load, so their deliveries go out UNSIGNED
+// (SEC-WHSIGN-1, internal/alerts).
+//
+// Webhook secrets are encrypted at rest (RISK-003) under a NODE-LOCAL key file
+// that is deliberately never archived — putting it in the same tarball as the
+// ciphertext it unwraps would defeat encryption at rest, the same rule that
+// excludes .kek files. alert_webhooks.json IS archived, so the reachable way to
+// land here is restoring a backup onto a fresh volume; an unreadable key file
+// (permissions, a descriptor exhaustion window at boot) gets there too.
+//
+// It needs a row of its own because the failure is INVISIBLE everywhere else an
+// operator looks: GET /api/alerts/webhooks redacts the secret, so a webhook
+// whose signing is dead renders exactly like one that never had a secret, and
+// the alerting plane cannot page about its own signing being off. A receiver
+// that verifies X-Culvert-Signature silently stops accepting this node's
+// security alerts — a monitoring blind spot that looks like quiet.
+//
+// Counts only; no webhook name, URL or secret material reaches this VIEWER-role
+// surface.
+func checkAlertWebhookSigning() OperatorContractCheck {
+	degraded := globalAlertStore.SigningDegradedCount()
+	if degraded == 0 {
+		return OperatorContractCheck{
+			Code:    "alert_webhook_signing",
+			Status:  diagOK,
+			Message: "no alert webhook has an unusable signing secret",
+		}
+	}
+	return OperatorContractCheck{
+		Code:   "alert_webhook_signing",
+		Status: diagWarn,
+		Message: fmt.Sprintf("%d alert webhook(s) were configured with an HMAC signing secret this node cannot decrypt — their deliveries are going out UNSIGNED",
+			degraded),
+		OperatorAction: "Two remedies, and the ORDER matters. If you still have this node's original .alert_webhook_key (never included in a backup, by design), restore it and restart FIRST — the stored ciphertext is preserved, so every affected webhook recovers with no re-entry. Only if that key is gone, re-enter each affected signing secret in Security → Alert Webhooks. Do not restore the key file AFTER re-entering secrets: the re-entered ones are sealed under this node's new key and putting the old key back would make them unusable in turn. Until one remedy is applied, a receiver that verifies X-Culvert-Signature will reject this node's alerts.",
 	}
 }
 

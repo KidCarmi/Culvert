@@ -133,6 +133,34 @@ type Webhook struct {
 	Events  []string `json:"events"` // e.g. ["threat_detected","policy_block"]
 	Enabled bool     `json:"enabled"`
 	Secret  string   `json:"secret,omitempty"` // HMAC-SHA256 signing secret (never returned in list)
+
+	// SigningDegraded is a READ-ONLY status field, set only on the redacted
+	// copies List returns: this webhook was configured WITH a signing secret,
+	// but the stored secret could not be decrypted (a lost or unreadable
+	// .alert_webhook_key), so deliveries carry no X-Culvert-Signature.
+	//
+	// It exists because Secret is blanked in List — which makes "no secret was
+	// ever configured" and "the configured secret is gone and deliveries are
+	// now UNSIGNED" render identically in the admin UI. An operator who cannot
+	// see the second case has no reason to re-enter the secret, and a receiver
+	// that verifies the HMAC silently stops accepting this node's alerts.
+	//
+	// Never persisted: save() clears it before marshalling (and a hook loaded
+	// from disk derives it from sealedSecret, never from the file).
+	SigningDegraded bool `json:"signing_degraded,omitempty"`
+
+	// sealedSecret holds the on-disk value for a secret that failed to decrypt
+	// at load. Unexported, so it never reaches the wire or the file as a field
+	// of its own — save() writes it back verbatim into Secret's slot.
+	//
+	// Keeping it is what makes the failure RECOVERABLE. The in-memory Secret is
+	// blanked (never sign with garbage), but blanking it on disk as well would
+	// destroy key material that is merely un-unwrappable right now: restore the
+	// key file and the secret works again. Without this field, the next save of
+	// ANY webhook — an unrelated add, edit, delete or enable-toggle, since
+	// save() rewrites the whole list — overwrote the ciphertext with "" and the
+	// secret was gone for good.
+	sealedSecret string
 }
 
 // ── Delivery History (Finding 8.1) ────────────────────────────────────────────
@@ -315,16 +343,32 @@ func (as *Store) Init(path string) {
 	// enc prefix) passes through unchanged and is migrated on the next save.
 	dir := filepath.Dir(path)
 	for i := range as.hooks {
+		// SigningDegraded is DERIVED, never read from the file: a hand-edited
+		// or imported document must not be able to assert a status the store
+		// has not observed for itself.
+		as.hooks[i].SigningDegraded = false
 		pt, err := decryptWebhookSecret(as.hooks[i].Secret, dir)
 		if err != nil {
-			// Unrecoverable (corrupt blob or lost key): drop the secret so
-			// deliveries continue UNSIGNED rather than signing with garbage.
-			// The admin must re-enter it; we do not auto-resave (no data loss
-			// on a transient key-read failure).
-			obs.Printf("AlertStore: webhook %q secret decrypt failed, disabling signing: %v", obs.Sanitize(as.hooks[i].ID), err)
+			// Undecryptable (corrupt blob, or — the reachable case — a key
+			// file that is missing or unreadable): drop the CLEARTEXT so
+			// deliveries continue UNSIGNED rather than signing with garbage,
+			// but KEEP the stored ciphertext in sealedSecret so the next save
+			// writes it back untouched. Blanking it on disk too would turn a
+			// recoverable state (restore .alert_webhook_key ⇒ signing works
+			// again) into permanent destruction of key material, triggered by
+			// an unrelated admin edit.
+			//
+			// The state is no longer log-only: List() reports SigningDegraded,
+			// the admin UI badges it, and /api/diagnostics carries the
+			// alert_webhook_signing operator-contract row. Unsigned delivery
+			// from a webhook the operator believes is signed is a silent
+			// authenticity failure — it must be visible where the webhook is.
+			obs.Printf("AlertStore: webhook %q secret decrypt failed, disabling signing (ciphertext preserved for recovery): %v", obs.Sanitize(as.hooks[i].ID), err)
+			as.hooks[i].sealedSecret = as.hooks[i].Secret
 			as.hooks[i].Secret = ""
 			continue
 		}
+		as.hooks[i].sealedSecret = ""
 		as.hooks[i].Secret = pt
 	}
 }
@@ -391,6 +435,16 @@ func (as *Store) save(path string, hooks []Webhook) {
 	encHooks := make([]Webhook, len(hooks))
 	copy(encHooks, hooks)
 	for i := range encHooks {
+		// Status field, never persisted (it is derived at load).
+		encHooks[i].SigningDegraded = false
+		if encHooks[i].Secret == "" && encHooks[i].sealedSecret != "" {
+			// This hook's stored secret could not be decrypted at load. Write
+			// the ORIGINAL ciphertext back byte-for-byte: re-encrypting the
+			// blanked cleartext would persist an empty secret and destroy key
+			// material that is still recoverable (see Webhook.sealedSecret).
+			encHooks[i].Secret = encHooks[i].sealedSecret
+			continue
+		}
 		enc, err := encryptWebhookSecret(encHooks[i].Secret, dir)
 		if err != nil {
 			// Fail closed: never fall back to writing the cleartext secret.
@@ -409,15 +463,43 @@ func (as *Store) save(path string, hooks []Webhook) {
 }
 
 // List returns the webhooks with secrets redacted.
+//
+// SigningDegraded is the one status bit that travels with the redacted copy:
+// with Secret blanked, it is the ONLY way an operator can tell a webhook that
+// never had a signing secret from one whose secret is unusable and whose
+// deliveries are therefore unsigned. It carries no key material — just the
+// fact that the configured one could not be unwrapped.
 func (as *Store) List() []Webhook {
 	as.mu.RLock()
 	defer as.mu.RUnlock()
 	out := make([]Webhook, len(as.hooks))
 	for i, h := range as.hooks {
+		h.SigningDegraded = h.sealedSecret != ""
 		h.Secret = "" // never expose secret in list
+		h.sealedSecret = ""
 		out[i] = h
 	}
 	return out
+}
+
+// SigningDegradedCount returns how many webhooks were configured with a signing
+// secret that could not be decrypted at load, so their deliveries go out
+// UNSIGNED. Zero on every healthy node; non-zero means either the node-local
+// key file (.alert_webhook_key) was lost — the reachable case is restoring a
+// backup onto a fresh volume, since the key is deliberately never archived —
+// or it was unreadable when the store loaded.
+//
+// Feeds the alert_webhook_signing operator-contract row; carries no secret.
+func (as *Store) SigningDegradedCount() int {
+	as.mu.RLock()
+	defer as.mu.RUnlock()
+	n := 0
+	for i := range as.hooks {
+		if as.hooks[i].sealedSecret != "" {
+			n++
+		}
+	}
+	return n
 }
 
 // HasSubscriber reports whether any ENABLED webhook is subscribed to event
@@ -453,6 +535,7 @@ func (as *Store) HasSubscriber(event string) bool {
 // instead of coming back permanently unsubscribed.
 func (as *Store) Add(h Webhook) Webhook {
 	h.Events = normalizeEventNames(h.Events)
+	h.SigningDegraded = false // status is derived, never accepted from a caller
 	h.ID = fmt.Sprintf("%d", time.Now().UnixNano())
 	as.mu.Lock()
 	as.hooks = append(as.hooks, h)
@@ -479,8 +562,18 @@ func (as *Store) Update(id string, upd Webhook) bool {
 			continue
 		}
 		upd.ID = id
+		upd.SigningDegraded = false // status is derived, never accepted from a caller
 		if upd.Secret == "" {
 			upd.Secret = as.hooks[i].Secret // preserve existing secret if not updated
+			// Carry the un-unwrappable ciphertext across too: an edit that does
+			// not touch the secret must not be the thing that destroys it.
+			upd.sealedSecret = as.hooks[i].sealedSecret
+		} else {
+			// A caller-supplied secret REPLACES the degraded one. Cleared
+			// explicitly rather than relying on the caller's zero value, so the
+			// invariant "sealedSecret != \"\" implies Secret == \"\"" holds even
+			// for an in-package caller that round-trips a GetByID copy.
+			upd.sealedSecret = ""
 		}
 		as.hooks[i] = upd
 		persist, ok = as.beginSaveLocked(), true

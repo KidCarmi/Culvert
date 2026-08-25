@@ -142,41 +142,89 @@ func (h *HAState) enterStandbyResync(reason string) bool {
 	return true
 }
 
-// acquireLeaseForResume is acquireLeaseForLeadership plus ghost-lease
-// handling for restarts (ADR-0005 S5): a leader that restarts WITHIN the
-// lease TTL finds the key still held by its previous process's lease —
-// holder == our own candidate ID with no keepaliver. Treating that as a
-// real denial would demote a healthy leader on every fast restart, so we
-// wait out our own ghost (bounded by the denial's reported validity plus
-// margin, capped at haResumeGhostWait) and retry. A denial by ANY OTHER
-// holder returns false immediately — that fence is real.
-func (h *HAState) acquireLeaseForResume() bool {
+// acquireLeaseForResume is acquireLeaseForLeadership plus RETRY handling for
+// restarts (ADR-0005 S5). Two denials are not decisions and are retried, each
+// under its own budget:
+//
+//   - our own GHOST lease: a leader that restarts WITHIN the lease TTL finds
+//     the key still held by its previous process's lease — holder == our own
+//     candidate ID with no keepaliver. Treating that as a real denial would
+//     demote a healthy leader on every fast restart. Budget: haResumeGhostWait
+//     (45 s) — the condition has a known, self-clearing expiry.
+//   - an UNREACHABLE backend: we learned nothing, so there is nothing to obey.
+//     Budget: haResumeUnreachableWait (5 s), much shorter because this call
+//     sits on the BOOT path ahead of the proxy listener — see that constant.
+//     CHAOS-55 — this branch used to return false on the FIRST transport error,
+//     so the 45 s budget was spent only on the denial shape that is not a
+//     fault, and the fault that actually happens got zero patience. A host
+//     reboot starts culvert and etcd concurrently; a few seconds of
+//     "connection refused" was enough to leave the node a read-only leader
+//     with nothing left in the process that would ever retry (register HA-7).
+//     Anything longer than the short budget is the background recovery loop's
+//     job (ha_lease_recovery.go), which costs the boot nothing.
+//
+// A denial by ANY OTHER holder returns false immediately — that fence is real,
+// and retrying it would be waiting for a live leader to die.
+//
+// sawForeignHolder is the second half of the CHAOS-55 finding and the reason
+// this returns two values rather than one. It reports whether the fence
+// AFFIRMATIVELY told us another node holds the lease, as opposed to us simply
+// failing to take it. ResumeAsLeader used to demote to standby on any failed
+// resume, so an unreachable backend — an absence of information — was acted on
+// as if it were a fence decision. On a whole-site restart that is how a
+// two-node cluster deadlocks: the ex-leader stands by against the ex-standby
+// while the ex-standby stands by against it, neither ever syncs (a
+// lease-configured puller rejects a bundle carrying no live holder), so the
+// freshness gate refuses every auto-promotion and the cluster is permanently
+// leaderless. Giving leadership up on an unknown is the same mistake as taking
+// it on one, in the other direction.
+func (h *HAState) acquireLeaseForResume() (granted bool, sawForeignHolder bool) {
 	h.mu.RLock()
-	p, id := h.lease, h.leaseCandidateID
+	p := h.lease
 	h.mu.RUnlock()
 	if p == nil {
-		return true
+		return true, false
 	}
-	deadline := time.Now().Add(haResumeGhostWait)
+	ghostDeadline := time.Now().Add(haResumeGhostWait)
+	unreachableDeadline := time.Now().Add(haResumeUnreachableWait)
+	unreachable := 0
 	for {
-		if h.acquireLeaseForLeadership("leader resume") {
-			return true
+		outcome, st := h.resumeAcquireRound()
+		switch outcome {
+		case resumeGranted:
+			return true, false
+		case resumeForeign:
+			return false, true // a live foreign holder — the fence has decided
+		case resumeOwnGhost:
+			if time.Now().After(ghostDeadline) {
+				logger.Printf("HA: own ghost lease did not expire within %s — giving up the resume acquire", haResumeGhostWait)
+				return false, false
+			}
+			logger.Printf("HA: waiting out our own ghost lease from the previous process (valid_for=%s)", st.ValidFor)
+			time.Sleep(ghostRetryWait(st.ValidFor))
+		default: // resumeUnknown, resumeRaceRetryable
+			if time.Now().After(unreachableDeadline) {
+				logger.Printf("HA: fencing backend still unreachable after %s — taking the leader role "+
+					"READ-ONLY and continuing to retry in the background so the data plane is not "+
+					"held up by a control-plane fence (CHAOS-55)", haResumeUnreachableWait)
+				return false, false
+			}
+			unreachable++
+			if unreachable == 1 {
+				logger.Printf("HA: fencing backend unreachable during leader resume — retrying for up to %s "+
+					"before falling back to a read-only leader role", haResumeUnreachableWait)
+			}
+			time.Sleep(haLeaseResumeRetryBackoff)
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), haLeaseOpTimeout)
-		st, err := p.Read(ctx)
-		cancel()
-		if err != nil || st.Holder != id {
-			return false // real denial (other holder) or unknown backend state
-		}
-		if time.Now().After(deadline) {
-			logger.Printf("HA: own ghost lease did not expire within %s — giving up the resume acquire", haResumeGhostWait)
-			return false
-		}
-		logger.Printf("HA: waiting out our own ghost lease from the previous process (valid_for=%s)", st.ValidFor)
-		wait := st.ValidFor + time.Second
-		if wait > 5*time.Second || wait <= time.Second {
-			wait = 5 * time.Second
-		}
-		time.Sleep(wait)
 	}
+}
+
+// ghostRetryWait is how long to wait before re-testing our own ghost lease:
+// its reported remaining validity plus a second, clamped into (1s, 5s].
+func ghostRetryWait(validFor time.Duration) time.Duration {
+	wait := validFor + time.Second
+	if wait > 5*time.Second || wait <= time.Second {
+		wait = 5 * time.Second
+	}
+	return wait
 }
