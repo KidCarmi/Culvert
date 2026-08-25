@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -616,11 +617,27 @@ func (c *Config) DefaultAuthOutcome() AuthOutcome {
 // OutcomeDefault. Persists so the setting survives restarts. This is the only
 // setter for the global default.
 func (c *Config) SetDefaultAuthOutcome(outcome AuthOutcome) {
+	if err := c.setDefaultAuthOutcomeChecked(outcome); err != nil {
+		logWarnf("Auth: failed to persist defaultAuthOutcome: %v", err)
+	}
+}
+
+// setDefaultAuthOutcomeChecked is SetDefaultAuthOutcome's persist-checked
+// variant: on a SaveUIUsersFile failure it rolls the in-memory value back to
+// whatever it was before the call and returns the error, instead of only
+// logging it. Used by apiSetupComplete's open-mode ("unauth") branch, which
+// — like the credentialed cfg.SetAuth branch beside it — must not report
+// first-time setup as complete when the choice was never durably saved: an
+// unpersisted Exempt default makes IsConfigured() report true for the rest
+// of this process's lifetime, but reverts to false on the next restart,
+// reopening the "one-time" setup wizard to any unauthenticated visitor.
+func (c *Config) setDefaultAuthOutcomeChecked(outcome AuthOutcome) error {
 	resolved := OutcomeDefault
 	if outcome == OutcomeExempt {
 		resolved = OutcomeExempt
 	}
 	c.mu.Lock()
+	previous := c.defaultAuthOutcome
 	c.defaultAuthOutcome = resolved
 	c.mu.Unlock()
 	if resolved == OutcomeExempt {
@@ -630,8 +647,23 @@ func (c *Config) SetDefaultAuthOutcome(outcome AuthOutcome) {
 	}
 	// Persist so the setting survives restarts.
 	if err := c.SaveUIUsersFile(); err != nil {
-		logWarnf("Auth: failed to persist defaultAuthOutcome: %v", err)
+		// fileutil.ErrReplacedNotSynced means the rename already landed the
+		// new content on disk — only the best-effort parent-directory sync
+		// afterward failed. Its contract explicitly forbids a compensating
+		// rollback on this error: restoring `previous` here would leave
+		// memory contradicting the file that every reader (including a
+		// restart) now sees, which is the same "reopens the wizard" hazard
+		// this function exists to close, just approached from the opposite
+		// direction. Still report the error — the write's durability across
+		// an immediate crash isn't guaranteed — but keep the new value.
+		if !errors.Is(err, fileutil.ErrReplacedNotSynced) {
+			c.mu.Lock()
+			c.defaultAuthOutcome = previous
+			c.mu.Unlock()
+		}
+		return err
 	}
+	return nil
 }
 
 // normalizeDefaultAuthOutcome maps a persisted string to a valid global default,

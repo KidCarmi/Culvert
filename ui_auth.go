@@ -516,9 +516,19 @@ func apiSetupComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Open (no-credential) mode — set the global default to Exempt.
+	// Open (no-credential) mode — set the global default to Exempt. Uses the
+	// persist-checked setter (unlike the general settings-API call site,
+	// which is reached only after setup is already complete) so a save
+	// failure here fails the request and rolls back in-memory state — see
+	// setDefaultAuthOutcomeChecked and the credentialed branch below for why:
+	// an unpersisted Exempt default would report setup as done for this
+	// process's lifetime while reopening the wizard on the next restart.
 	if body.Unauth {
-		cfg.SetDefaultAuthOutcome(OutcomeExempt)
+		if err := cfg.setDefaultAuthOutcomeChecked(OutcomeExempt); err != nil {
+			logger.Printf("UIUsers: failed to persist open-mode setup: %v", err)
+			http.Error(w, "internal error: open-mode setup could not be saved to disk; setup did not complete — check disk space/permissions and retry", http.StatusInternalServerError)
+			return
+		}
 		auditEvent(r, "setup.complete", "system", "open mode (defaultAuthOutcome=Exempt) — unmatched traffic requires no credentials")
 		jsonOK(w, map[string]any{"ok": true, "unauth": true})
 		return
