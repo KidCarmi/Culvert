@@ -49,7 +49,7 @@ Other lines worth knowing:
 
 | Line | Meaning |
 |---|---|
-| `ControlPlane: gRPC drain exceeded 8s — force-closed connections` | A Data Plane held a stream open past the graceful budget. Harmless: DPs re-sync on reconnect. Repeated occurrences point at a wedged DP or a stalled volume on the CP. |
+| `ControlPlane: gRPC drain exceeded 8s — force-closed connections` | A Data Plane held a stream open past the graceful budget. Harmless: DPs re-sync on reconnect. Repeated occurrences point at a wedged DP, or at a stalled volume on the CP blocking an `Enroll`/`RenewCert`/`PushAuditEvents` handler. The listeners are shut at this point; the force-close of any remaining transport is asynchronous and completes as the process exits. |
 | `Drain budget exhausted: N tunnel(s) still active (force-closed M inspected H2)` | The drain phase ran out before the tunnels finished. N clients saw a cut connection. |
 | `Drain timeout: N tunnel(s) still active …` | The tunnel drain's own 15s ceiling was reached first. Same customer impact. |
 | `Shutdown: drained; flushing durable state…` | The last line guaranteed to reach the log. Anything after it races the log sink's own close. |

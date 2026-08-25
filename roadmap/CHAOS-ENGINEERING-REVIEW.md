@@ -2595,10 +2595,11 @@ overran its own share still cannot spend it.
    node is no longer confirming, and a shutdown hook holds none.
 4. **`StopControlPlaneGRPC` is bounded** — `GracefulStop` on its own goroutine
    under `cpGRPCGracefulStopBudget` (8s, sized above the measured 6.0s idle
-   drain so a merely-unresponsive fleet still completes gracefully), then
-   `Stop()`. Force-closing is safe by construction: an interrupted unary RPC is
-   retried by the caller's own sync loop, the same path a mid-flight CP restart
-   already exercises.
+   drain so a merely-unresponsive fleet still completes gracefully), then a
+   force-close issued on ANOTHER goroutine (see below — a synchronous one
+   deadlocks). Force-closing is safe by construction: an interrupted unary RPC
+   is retried by the caller's own sync loop, the same path a mid-flight CP
+   restart already exercises.
 5. **The tunnel drain honours its phase deadline**, clamping its 15s ceiling to
    whatever the drain phase has left and reaching the SAME force-close backstop
    on either bound — so the compose comment now describes something enforced.
@@ -2606,16 +2607,39 @@ overran its own share still cannot spend it.
    with status **1** so an orchestrator cannot read a forced teardown as a
    clean stop.
 
-**The fix's own defect, caught by its own gate.** The first draft of
-`gracefulStopBounded` joined the abandoned `GracefulStop` goroutine after
-`Stop()`, on the reasoning that closing every connection must unblock it. It
-does not: grpc-go's `stop(graceful=true)` finishes with `s.handlersWG.Wait()`,
-so it does not return until every HANDLER has returned — and the handler that
-has not returned is exactly the fault being escaped. The join reintroduced the
-unbounded wait one level down, and
-`TestChaos56_GracefulStopIsBoundedAgainstAWedgedStream` failed on it. This is
-also the argument that the hook-level watchdog and the gRPC-level bound are not
-redundant: each catches a stall the other cannot.
+**The fix's own defect, TWICE, caught by its own gate both times.** grpc-go's
+`stop(graceful bool)` — the shared body behind `Stop` and `GracefulStop` — is
+hostile to being raced, in two distinct ways, and the obvious wrapper walks
+into both.
+
+*Draft one* joined the abandoned `GracefulStop` goroutine after `Stop()`, on the
+reasoning that closing every connection must unblock it. It does not:
+`stop(graceful=true)` finishes with `s.handlersWG.Wait()`, so it does not return
+until every HANDLER has returned — and the handler that has not returned is
+exactly the fault being escaped. The join reintroduced the unbounded wait one
+level down, and the gate failed on it immediately.
+
+*Draft two* dropped the join but still called `srv.Stop()` SYNCHRONOUSLY. That
+`handlersWG.Wait()` runs while **holding `s.mu`** — `stop` takes the lock with
+`defer s.mu.Unlock()` before the conns wait, and `s.cv.Wait()` releases it only
+for the duration of the wait. So when the last connection is removed both stops
+wake and contend for the mutex: if the GRACEFUL one wins, it takes `s.mu`, parks
+forever in `handlersWG.Wait()`, and the synchronous `Stop()` blocks on that
+mutex with no bound — the original fault, reconstructed inside its own fix. Which
+one wins is pure timing. **It passed every targeted run and the full suite, and
+failed only under `-race`**, where the instrumentation shifted the race. The
+force-close is now issued on its own goroutine and the function returns.
+
+Two things follow. First, the gate's tolerance is part of the gate: a generous
+"returns eventually" bound would have made draft two a FLAKE rather than a
+failure, and a flaky gate gets muted. It now requires the return to land close
+to the budget. Second, this is the argument that the hook-level watchdog and the
+gRPC-level bound are not redundant — the watchdog is the only HARD bound on this
+hook. `gracefulStopBounded` guarantees the sequence keeps moving; the watchdog
+guarantees the phase does. What the bounded stop actually promises is narrower
+than "the server is stopped", and §24.6's wording says so: the LISTENERS are
+closed (grpc-go closes them before the conns wait, so GracefulStop shut the door
+before it parked) and the transport force-close is best-effort and asynchronous.
 
 ### 24.7 Gates
 

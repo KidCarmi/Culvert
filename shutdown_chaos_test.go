@@ -344,7 +344,7 @@ func TestChaos56_EscalationStopsWhenShutdownCompletes(t *testing.T) {
 // volume those block in write(2). The same stall is reachable without a
 // blocked handler at all, via a peer that stops reading a large GetConfig
 // response (TCP zero-window persist retries indefinitely).
-func startBlockedRPCServer(t *testing.T, release <-chan struct{}) *grpc.Server {
+func startBlockedRPCServer(t *testing.T, release <-chan struct{}) (*grpc.Server, string) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -387,17 +387,25 @@ func startBlockedRPCServer(t *testing.T, release <-chan struct{}) *grpc.Server {
 	case <-time.After(15 * time.Second):
 		t.Fatal("handler never started; the wedged-stream shape was not reproduced")
 	}
-	return srv
+	return srv, ln.Addr().String()
 }
 
 // TestChaos56_GracefulStopIsBoundedAgainstAWedgedStream is the SD-1 gate at
 // the call site: with an in-flight RPC that never completes, GracefulStop has
-// no bound of its own, so the bounded wrapper must supply one and must leave
-// the server actually stopped.
+// no bound of its own, so the bounded wrapper must supply one and must return
+// CLOSE to its budget rather than merely eventually.
+//
+// The tight bound is the point. A generous one passed the second draft of
+// gracefulStopBounded at speed and only failed under -race, because that draft
+// called srv.Stop() synchronously: grpc-go's stop() holds s.mu across
+// handlersWG.Wait(), so whenever the parked GracefulStop won the wake race it
+// held the mutex forever and the synchronous Stop blocked on it. Which one
+// wins is pure timing, so a slack-tolerant assertion turns a hard hang into a
+// gate that flakes — and a gate that flakes gets muted.
 func TestChaos56_GracefulStopIsBoundedAgainstAWedgedStream(t *testing.T) {
 	release := make(chan struct{})
 	defer close(release)
-	srv := startBlockedRPCServer(t, release)
+	srv, addr := startBlockedRPCServer(t, release)
 
 	const budget = 750 * time.Millisecond
 	done := make(chan bool, 1)
@@ -409,11 +417,21 @@ func TestChaos56_GracefulStopIsBoundedAgainstAWedgedStream(t *testing.T) {
 		if graceful {
 			t.Error("reported a graceful drain while a stream was still wedged")
 		}
-		if elapsed := time.Since(start); elapsed > budget+5*time.Second {
-			t.Errorf("bounded stop took %v; budget is %v", elapsed, budget)
+		// Generous enough for a loaded -race runner, tight enough that a
+		// blocking force-close cannot hide inside it.
+		if elapsed := time.Since(start); elapsed > budget+3*time.Second {
+			t.Errorf("bounded stop took %v against a %v budget — the force-close is blocking, not escaping", elapsed, budget)
 		}
 	case <-time.After(budget + 20*time.Second):
 		t.Fatal("gracefulStopBounded never returned — a wedged stream still holds the shutdown open")
+	}
+
+	// The listeners must be shut regardless of the parked goroutines: grpc-go
+	// closes them before the conns wait, so a new connection must be refused
+	// even though the transport force-close is asynchronous.
+	if c, err := net.DialTimeout("tcp", addr, 2*time.Second); err == nil {
+		_ = c.Close()
+		t.Error("server still accepting connections after a bounded stop")
 	}
 }
 
@@ -423,7 +441,7 @@ func TestChaos56_GracefulStopIsBoundedAgainstAWedgedStream(t *testing.T) {
 // out — a gate that waited for "unbounded" could only ever time out the suite.
 func TestChaos56_BareGracefulStopIsUnboundedOnAWedgedStream(t *testing.T) {
 	release := make(chan struct{})
-	srv := startBlockedRPCServer(t, release)
+	srv, _ := startBlockedRPCServer(t, release)
 
 	done := make(chan struct{})
 	go func() { defer close(done); srv.GracefulStop() }()

@@ -1028,19 +1028,37 @@ func StopControlPlaneGRPC() {
 // testable against a real wedged stream without touching the clusterRole
 // global. CHAOS-56.
 //
-// On the force path it deliberately does NOT join the GracefulStop goroutine.
-// grpc-go's stop(graceful=true) finishes with s.handlersWG.Wait(), so it does
-// not return until every HANDLER has returned — and the handler that has not
-// returned is exactly the fault being escaped (a write(2) into a wedged
-// volume). Joining it would reintroduce the unbounded wait one level down,
-// which is what the first draft of this function did and what
-// TestChaos56_GracefulStopIsBoundedAgainstAWedgedStream caught.
+// The force path NEITHER joins the GracefulStop goroutine NOR waits on Stop,
+// and both halves of that are load-bearing. grpc-go gives no way to cancel an
+// in-flight GracefulStop, and its `stop(graceful bool)` — the shared body
+// behind both entry points — is hostile to being raced in two distinct ways:
 //
-// Abandoning it is safe: Stop closes the listeners and every connection, so
-// the server is fully stopped when this returns, and the parked goroutine
-// costs one stack in a process that is exiting. This is also why the hook-
-// level watchdog in shutdownRegistry.RunAll is not redundant with this bound —
-// each catches a stall the other cannot.
+//  1. It ends with `if graceful || waitForHandlers { s.handlersWG.Wait() }`,
+//     so GracefulStop does not return until every HANDLER has returned — and
+//     the handler that has not returned is exactly the fault being escaped.
+//     Joining it reintroduces the unbounded wait one level down. (First draft
+//     did this; TestChaos56_GracefulStopIsBoundedAgainstAWedgedStream caught it.)
+//  2. That handlersWG.Wait() runs while HOLDING `s.mu` — `stop` takes the lock
+//     with `defer s.mu.Unlock()` before the conns wait, and `s.cv.Wait()` only
+//     releases it for the duration of the wait. So when the last connection is
+//     removed, both stops wake and contend: if the GRACEFUL one wins it takes
+//     `s.mu`, parks forever in handlersWG.Wait(), and a synchronous
+//     `srv.Stop()` on this goroutine then blocks on that mutex — with no
+//     bound, which is the whole fault again. Which one wins is a timing race,
+//     so the synchronous form passes at speed and hangs under -race. (Second
+//     draft did this; the same gate caught it under the race detector.)
+//
+// So the force-close is issued on its own goroutine and this function returns.
+// What that guarantees is honest and worth stating exactly: the LISTENERS are
+// already closed — `stop` runs closeListenersLocked() before the conns wait,
+// so GracefulStop shut the door before it parked — and the force-close of the
+// remaining transports is best-effort and asynchronous. In a process that is
+// exiting, two parked goroutines cost two stacks.
+//
+// This is precisely why the hook-level watchdog in shutdownRegistry.RunAll is
+// NOT redundant with this bound: it is the only HARD bound on this hook. This
+// function guarantees the shutdown sequence keeps moving; the watchdog
+// guarantees the phase does.
 func gracefulStopBounded(srv *grpc.Server, budget time.Duration) bool {
 	drained := make(chan struct{})
 	go func() {
@@ -1053,7 +1071,7 @@ func gracefulStopBounded(srv *grpc.Server, budget time.Duration) bool {
 	case <-drained:
 		return true
 	case <-timer.C:
-		srv.Stop()
+		go srv.Stop()
 		return false
 	}
 }
