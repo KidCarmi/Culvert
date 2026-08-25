@@ -49,7 +49,7 @@ availability · **P2** latent / pre-activation · **P3** accuracy and maintainab
 | OVN-17 | P2 | The OVN-09 fix refused a drifted tool at the executor's **entry**, not at the side effect. Durable commit, credential planning and provider fetch all run in between, so a catalog ingest landing there still reached the upstream call under a stale decision. | Fixed `e000f2f` — re-checked at `callUpstream`, the single chokepoint both branches route through |
 | OVN-18 | P2 | `authFailures` was charged for **all five** guarded singleton headers. Duplicating `Origin`, `Mcp-Session-Id` or `Mcp-Protocol-Version` — ordinary protocol traffic — was indistinguishable from a credential attack on `culvert_mcp_auth_failures_total`. | Fixed `3806803` — split onto `culvert_mcp_ambiguous_header_total`; the durable denial record is still written for every one |
 | OVN-19 | P2 | `culvert_mcp_requests_total` was incremented only inside `pipeline.Process`, while three transport-level branches reject before it. Under overload `requestsRejected` could **exceed** the total, so the rejection rate derived from the pair is not a rate. | Fixed `3806803` — counted at the transport entrypoint |
-| CI-01 | P2 | The root package's `-race` + coverage run sits at the edge of its 15m CI budget. Reproduced at **902.1s locally vs 902.4s in CI** on this branch — and `origin/main` also exceeds 900s on the same box. Not introduced here; this branch's contribution was 8.3s, of which 3.3s is given back by `49b2d3c`. | **OPEN — repo-level.** See §9 |
+| CI-01 | P2 | The root package's `-race` + coverage run sits ON its 15m per-binary budget: `origin/main` clears it by **2.1s (0.23%)**, less than the suite's own run-to-run variance. This branch's five touched root test files cost 4.7s in total, which tips it. Not a defect in either tree; a required check running at coin-flip reliability. | **OPEN — needs a CI-ownership decision.** See §9 |
 | CI-02 | P3 | `TestBenchGate_LearnObserveEnabledBoundedAllocs` (Policy Learning, untouched by this branch) measures process-global `MemStats.Mallocs` while the learning engine's drain goroutine allocates concurrently, so it fails on scheduling. Reproduces on unmodified `origin/main`. | **OPEN — not this PR's.** See §9 |
 
 ### Refuted (investigated, no defect)
@@ -199,39 +199,54 @@ Both were found while driving PR #1224 to green. Neither is caused by the MCP wo
 both are recorded here rather than fixed inside a security PR, because widening this PR to
 carry unrelated CI repairs is exactly the habit that makes a security diff unreviewable.
 
-### CI-01 — the root package's `-race` + coverage run is at the edge of its budget
+### CI-01 — the root package's `-race` + coverage run sits ON its 15m budget
 
 `pr-fast-gate.yml` runs `go test -race -count=1 -timeout=15m -coverprofile=... ./...`. The
 `-timeout` is **per test binary**, and the root package alone consumes essentially all of
-it. Every other package in the module finishes in seconds; the largest, `internal/ssrf`,
-takes 37s.
+it. Every other package finishes in seconds; the largest, `internal/ssrf`, takes 37s.
 
-Measured:
+Measured, all on the same container, `-timeout=40m` where marked *unclamped* (a clamped
+run cannot report more than ~902s — the timeout firing is not a duration):
 
-| Tree | Where | Root package |
+| Tree | Run | Root package |
 |---|---|---|
 | this branch @ `adf7de8` | GitHub Actions | 902.4s — **timed out** |
-| this branch @ `adf7de8` | this container | 902.1s — **timed out** |
-| `origin/main` @ `17f237e` | this container | 901.4s — **timed out** |
+| this branch @ `1e27e0e` | GitHub Actions | 902.1s — **timed out** |
+| this branch @ `adf7de8` | local, clamped | 902.1s — **timed out** |
+| `origin/main` @ `17f237e` | local, clamped | 901.4s — **timed out** |
+| this branch | local, unclamped, quiet box | **918.5s** — passes |
+| `origin/main` | local, unclamped, quiet box | **897.9s** — passes, 2.1s of headroom |
 
-The first two lines agree to within 0.3s, so this container is a faithful proxy for the CI
-runner. The third is the finding: **`origin/main` exceeds the same budget on the same
-hardware**, with none of this branch's changes present.
+**A correction to an earlier reading of this data.** Two contended local runs put
+`origin/main` over 900s, and this section previously concluded that `main` itself exceeds
+the budget. The clean unclamped re-measurement refutes that: `main` comes in at 897.9s and
+passes. The contended figures (901.4s clamped, and a 929.3s run that shared the machine
+with a `staticcheck`/`gocritic` sweep) were measuring my own background load, not `main`.
 
-The failure is a budget overrun, not a hang — the panic dump names
-`TestAPISetupComplete_AlreadyDone` at 0s, i.e. a test that had only just started, and
-there is no data race in the log.
+The corrected finding is narrower and more useful: **`main` clears the budget by 2.1
+seconds — 0.23%.** That is smaller than the run-to-run variance of this suite, which makes
+real network calls during the run (the job log shows lookups to `urlhaus.abuse.ch`,
+`openphish.com` and `raw.githubusercontent.com`). A required check with a 0.23% margin is
+not a check that passes; it is a check that is currently winning a coin flip.
 
-This branch's contribution was 8.3s of new root-package tests, of which 3.3s is given back
-by `49b2d3c` (the execution-posture wall now parses the module once instead of three
-times). That is worth doing on its own merits, but it does not resolve CI-01: a package
-that is already over budget on `main` cannot be brought under it by trimming an 8-second
-contribution.
+This branch's own contribution is small but lands on that margin: **all 52 test functions
+in the five root test files it touches cost 4.7s** measured in isolation under
+`-race -coverprofile` (down from 8.3s — `49b2d3c` made the execution-posture wall parse
+the module once instead of three times). 4.7s against 2.1s of headroom is enough to tip it,
+and the failure is a budget overrun rather than a hang: the panic dump names a test that
+had only just started at 0s, and no run has produced a data race.
 
-The durable fix is a repo-level decision and belongs to whoever owns the CI lanes — raise
-the root package's `-timeout`, or split the package. Note the consequence of leaving it:
-the required `Gate · go test -race + coverage floors` check is at coin-flip reliability for
-**every** PR, not just this one.
+So this is not "a failure that isn't this PR's" — but neither is it a defect in this PR.
+Optimising the new tests further cannot fix it, because even zero added cost leaves 2.1s
+of margin on a suite whose variance is an order of magnitude larger. The durable fix is a
+CI-ownership decision, not a change this security PR should make on its own authority:
+
+1. **Raise the per-binary budget** (`-timeout=15m` and the job's `timeout-minutes: 25`).
+   One line, unblocks every PR, and honest about what the suite now costs.
+2. **Split the root package**, which is the real problem — 902s of a 15m budget in one
+   test binary while the other 65 packages finish in seconds.
+
+Either is out of scope for a diff whose subject is the MCP trust boundary.
 
 ### CI-02 — `TestBenchGate_LearnObserveEnabledBoundedAllocs` is a racy measurement
 
