@@ -196,6 +196,47 @@ func TestTransport_RedirectToAnotherPortOnTheSameHostIsRefused(t *testing.T) {
 	}
 }
 
+// P1. A redirect may change the PATH; it may not change the PROTOCOL the
+// credential travels over.
+//
+// The host+port check admitted http://<approved-host>:<approved-port>/... — same
+// host, same port, different scheme. Go forwards the Authorization header on a
+// same-host redirect, and for an http URL the transport uses the plain
+// DialContext, so pinnedDial would connect to the pinned address with no TLS and
+// the broker-materialized upstream credential would leave this process in
+// cleartext, on a downgrade chosen by the far end's own response data.
+func TestTransport_SchemeDowngradingRedirectIsRefused(t *testing.T) {
+	var redirectTo atomic.Pointer[string]
+	c, tgt, _, done := pinnedTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		loc := redirectTo.Load()
+		if loc == nil {
+			t.Error("upstream was called before the redirect target was published")
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		http.Redirect(w, r, *loc, http.StatusTemporaryRedirect)
+	})
+	defer done()
+
+	// Same host, SAME port, scheme downgraded to http.
+	u := mustURL(t, tgt.Endpoint)
+	downgrade := "http://" + net.JoinHostPort(u.Hostname(), redirectPort(u)) + "/mcp"
+	redirectTo.Store(&downgrade)
+
+	lim, err := NewLimits(LimitConfig{MaxRedirects: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.cfg.Limits = lim
+
+	if _, err := c.Call(context.Background(), tgt, "tools/list", nil, CallOptions{}); err == nil {
+		t.Fatal("a scheme-downgrading redirect was accepted: the upstream credential would " +
+			"have been sent in cleartext")
+	} else if r := mcperr.ReasonOf(err); r != mcperr.ReasonUpstreamTLSIdentity {
+		t.Fatalf("reason = %v, want upstream_tls_identity", r)
+	}
+}
+
 // The port comparison must be like-for-like: an https redirect that omits the port
 // means 443, and must not be refused merely for being written without one.
 func TestTransport_RedirectPortDefaultsAreNormalized(t *testing.T) {

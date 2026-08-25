@@ -148,6 +148,16 @@ func (c *Client) httpClientFor(target Target, canon destination.Canonical, pin d
 	// the original port regardless, so such a redirect would silently reach a
 	// different endpoint than the one it named — a mismatch between what the request
 	// says and where it goes (OVN-04).
+	// SCHEME is part of the approved identity too, and omitting it was a credential
+	// exposure, not a tidiness gap: an upstream could answer
+	// `http://<approved-host>:<approved-port>/...`, which matches on host and port,
+	// and Go forwards the Authorization header on a same-host redirect. The transport
+	// then uses the plain DialContext for an http URL — pinnedDial connects to the
+	// pinned address with NO TLS — so the broker-materialized upstream credential
+	// would leave this process in cleartext on the wire, chosen by the far end's own
+	// response data. A redirect may change the path; it may not change the protocol
+	// the credential travels over.
+	approvedScheme := strings.ToLower(canon.Scheme)
 	approvedHost, approvedPort := strings.ToLower(canon.Host), canon.Port
 	return &http.Client{
 		Transport: tr,
@@ -164,7 +174,9 @@ func (c *Client) httpClientFor(target Target, canon destination.Canonical, pin d
 			if req == nil || req.URL == nil {
 				return mcperr.New(mcperr.ReasonUpstreamTLSIdentity, "upstreamclient", "redirect leaves the approved server identity")
 			}
-			if strings.ToLower(req.URL.Hostname()) != approvedHost || redirectPort(req.URL) != approvedPort {
+			if strings.ToLower(req.URL.Scheme) != approvedScheme ||
+				strings.ToLower(req.URL.Hostname()) != approvedHost ||
+				redirectPort(req.URL) != approvedPort {
 				return mcperr.New(mcperr.ReasonUpstreamTLSIdentity, "upstreamclient", "redirect leaves the approved server identity")
 			}
 			return nil

@@ -534,7 +534,10 @@ func (p *pipeline) processMessage(ctx context.Context, req Request, rb *recBuild
 		// incident would read as a credential-stuffing spike in exactly the telemetry
 		// an operator uses to tell those two apart.
 		if reason == mcperr.ReasonRequestDeadlineExceeded {
-			p.ctr.timeouts.Add(1)
+			// acquireSlot — the ONLY producer of this reason on the authenticate path —
+			// has already counted the timeout. Counting it again here would export every
+			// verification-slot timeout twice in culvert_mcp_request_timeouts_total,
+			// overstating exactly the overload rate an operator would alert on.
 			return p.reject(rb, 503, reason, "")
 		}
 		p.ctr.authFailures.Add(1)

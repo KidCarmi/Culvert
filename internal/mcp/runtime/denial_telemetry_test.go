@@ -95,7 +95,11 @@ func TestDenialTelemetry_SlotTimeoutIsOverloadNotAuthFailure(t *testing.T) {
 		t.Errorf("authFailures = %d after an overload rejection; a capacity incident must not "+
 			"be charged to authentication-denial telemetry", n)
 	}
-	if n := p.ctr.timeouts.Load(); n == 0 {
-		t.Error("timeouts counter did not move for an overload rejection")
+	// EXACTLY once. acquireSlot is the only producer of this reason on the
+	// authenticate path and already counts it; counting again in the pipeline branch
+	// exported every verification-slot timeout twice, overstating the very overload
+	// rate an operator alerts on.
+	if n := p.ctr.timeouts.Load(); n != 1 {
+		t.Errorf("timeouts = %d after ONE overload rejection, want exactly 1", n)
 	}
 }
