@@ -44,7 +44,8 @@ availability · **P2** latent / pre-activation · **P3** accuracy and maintainab
 | OVN-15 | P3 | The upstream SSRF comment described `AllowPrivate` as scoped to "approved internal servers". It is client-wide: enabling it for one internal server disables private/loopback/metadata rejection for **every** registered server. | Comment corrected `54aa2a3`; per-target policy recorded as an absent design |
 | DEBT-011 | P2 | Six of the previous review's fifteen findings were the same shape — a control designed, documented and unit-tested but never invoked. | Limits anti-drift wall `cb57a80` |
 | RISK-026 | P1 | No per-source admission exists; `AdmissionBudget` has zero enforcement sites. | **OPEN.** ADR proposal written; knob recorded as `reserved` in the wall |
-| RISK-027 | P1 | MCP had no `/healthz` field, no `/readyz` row and no metrics — a dead listener was invisible. | Closed `9be3445` |
+| OVN-16 | P2 | The `mcp_gateway_down` alert was evaluated only when something read `/healthz` — an alert that fires only when someone is already looking. | Fixed `a42fede` (30s poller, disabled-by-default) |
+| RISK-027 | P1 | MCP had no `/healthz` field, no `/readyz` row and no metrics — a dead listener was invisible. | Closed `9be3445`, completed by `a42fede` |
 
 ### Refuted (investigated, no defect)
 
@@ -126,6 +127,8 @@ Exit codes captured directly from `go test`, never inferred from piped or trunca
 | Mutation sweep over this review's controls | PASS — OVN-04, OVN-07, OVN-09 and the duplicate-header rejection each fail their own test under a *behaviour-changing* mutation (see above). |
 | `go test -race ./internal/mcp/... ./internal/mcpacceptance/...` | PASS (exit 0) |
 | `go test -race -shuffle=on ./internal/mcp/...` | PASS (exit 0) |
+| `go test -race .` (root) | PASS (exit 0) |
+| `go test -shuffle=on .` (root) | PASS (exit 0) |
 
 Fuzz targets exercised: jsonrpc decode; authn JWT / claims / introspection; JOSE JWK parse;
 runtime pipeline, credential parse and transport method; protocol negotiation; policy
