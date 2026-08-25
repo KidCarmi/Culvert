@@ -46,6 +46,11 @@ availability · **P2** latent / pre-activation · **P3** accuracy and maintainab
 | RISK-026 | P1 | No per-source admission exists; `AdmissionBudget` has zero enforcement sites. | **OPEN.** ADR proposal written; knob recorded as `reserved` in the wall |
 | OVN-16 | P2 | The `mcp_gateway_down` alert was evaluated only when something read `/healthz` — an alert that fires only when someone is already looking. | Fixed `a42fede` (30s poller, disabled-by-default) |
 | RISK-027 | P1 | MCP had no `/healthz` field, no `/readyz` row and no metrics — a dead listener was invisible. | Closed `9be3445`, completed by `a42fede` |
+| OVN-17 | P2 | The OVN-09 fix refused a drifted tool at the executor's **entry**, not at the side effect. Durable commit, credential planning and provider fetch all run in between, so a catalog ingest landing there still reached the upstream call under a stale decision. | Fixed `e000f2f` — re-checked at `callUpstream`, the single chokepoint both branches route through |
+| OVN-18 | P2 | `authFailures` was charged for **all five** guarded singleton headers. Duplicating `Origin`, `Mcp-Session-Id` or `Mcp-Protocol-Version` — ordinary protocol traffic — was indistinguishable from a credential attack on `culvert_mcp_auth_failures_total`. | Fixed `3806803` — split onto `culvert_mcp_ambiguous_header_total`; the durable denial record is still written for every one |
+| OVN-19 | P2 | `culvert_mcp_requests_total` was incremented only inside `pipeline.Process`, while three transport-level branches reject before it. Under overload `requestsRejected` could **exceed** the total, so the rejection rate derived from the pair is not a rate. | Fixed `3806803` — counted at the transport entrypoint |
+| CI-01 | P2 | The root package's `-race` + coverage run sits at the edge of its 15m CI budget. Reproduced at **902.1s locally vs 902.4s in CI** on this branch — and `origin/main` also exceeds 900s on the same box. Not introduced here; this branch's contribution was 8.3s, of which 3.3s is given back by `49b2d3c`. | **OPEN — repo-level.** See §9 |
+| CI-02 | P3 | `TestBenchGate_LearnObserveEnabledBoundedAllocs` (Policy Learning, untouched by this branch) measures process-global `MemStats.Mallocs` while the learning engine's drain goroutine allocates concurrently, so it fails on scheduling. Reproduces on unmodified `origin/main`. | **OPEN — not this PR's.** See §9 |
 
 ### Refuted (investigated, no defect)
 
@@ -187,3 +192,69 @@ any mode that performs real upstream work, because pre-authentication admission 
 control that decides who can make the gateway do that work at all.
 
 This document does not authorise enabling execution.
+
+## 9. Two CI findings that are not this branch's
+
+Both were found while driving PR #1224 to green. Neither is caused by the MCP work, and
+both are recorded here rather than fixed inside a security PR, because widening this PR to
+carry unrelated CI repairs is exactly the habit that makes a security diff unreviewable.
+
+### CI-01 — the root package's `-race` + coverage run is at the edge of its budget
+
+`pr-fast-gate.yml` runs `go test -race -count=1 -timeout=15m -coverprofile=... ./...`. The
+`-timeout` is **per test binary**, and the root package alone consumes essentially all of
+it. Every other package in the module finishes in seconds; the largest, `internal/ssrf`,
+takes 37s.
+
+Measured:
+
+| Tree | Where | Root package |
+|---|---|---|
+| this branch @ `adf7de8` | GitHub Actions | 902.4s — **timed out** |
+| this branch @ `adf7de8` | this container | 902.1s — **timed out** |
+| `origin/main` @ `17f237e` | this container | 901.4s — **timed out** |
+
+The first two lines agree to within 0.3s, so this container is a faithful proxy for the CI
+runner. The third is the finding: **`origin/main` exceeds the same budget on the same
+hardware**, with none of this branch's changes present.
+
+The failure is a budget overrun, not a hang — the panic dump names
+`TestAPISetupComplete_AlreadyDone` at 0s, i.e. a test that had only just started, and
+there is no data race in the log.
+
+This branch's contribution was 8.3s of new root-package tests, of which 3.3s is given back
+by `49b2d3c` (the execution-posture wall now parses the module once instead of three
+times). That is worth doing on its own merits, but it does not resolve CI-01: a package
+that is already over budget on `main` cannot be brought under it by trimming an 8-second
+contribution.
+
+The durable fix is a repo-level decision and belongs to whoever owns the CI lanes — raise
+the root package's `-timeout`, or split the package. Note the consequence of leaving it:
+the required `Gate · go test -race + coverage floors` check is at coin-flip reliability for
+**every** PR, not just this one.
+
+### CI-02 — `TestBenchGate_LearnObserveEnabledBoundedAllocs` is a racy measurement
+
+The `Gate · perf-regression (allocs/op)` failure on `adf7de8` was
+`enabled enqueue (no groups) allocates 10.0/op, want 0`, in Policy Learning — code this
+branch does not touch.
+
+`testing.AllocsPerRun` brackets the measured loop with `runtime.ReadMemStats` and reads
+`MemStats.Mallocs`, which is **process-global**: it counts every goroutine's allocations,
+not the measured function's. The learning engine's drain goroutine aggregates observations
+concurrently, and `Observe`'s channel send is itself a scheduling point, so
+`GOMAXPROCS(1)` does not keep the drain out of the measured window.
+
+Correlating the two directly over 300 measurements: measurements that failed drained a
+mean of **1193** observations inside the window; measurements that passed drained **188**.
+Every failure sits in the high-drain tail. The producer's own path is provably not at
+fault — the identity fences (`learnFencedStamp`) held on every failing measurement, and
+292 of 300 measurements reported exactly 0 allocs/op for the same call.
+
+It reproduces on unmodified `origin/main` (1 failure in 40 runs) and on this branch
+(1 in 20 in one sample). A gate that fails a few percent of the time gets muted, which is
+the outcome `internal/connlimit`'s benchgate notes already warn against.
+
+The fix is to make the measurement observe only the producer — drain the queue to
+quiescence before measuring, or measure against an engine whose consumer is not running —
+not to widen the bound, which would retire the contract the gate exists to hold.
