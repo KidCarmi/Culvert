@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // withMCPStatus installs an activation status for the duration of a test and
@@ -208,5 +211,74 @@ func TestMCPHealth_MetricNamesDoNotCollide(t *testing.T) {
 	}
 	if len(seen) == 0 {
 		t.Fatal("no culvert_mcp_* samples rendered; the fixture proves nothing")
+	}
+}
+
+// RISK-027. The alert must not depend on being scraped.
+//
+// evaluateMCPHealthAlert also runs from mcpHealthFieldValue, i.e. whenever
+// something reads /healthz. On its own that inverts the relationship an alert has
+// with monitoring: the alert exists to tell an operator to look, so making it fire
+// only when someone is already looking means a node whose MCP listener dies — on a
+// deployment that scrapes /metrics but not /healthz, or while the scraper itself is
+// down — never says so.
+//
+// The poller fires an evaluation WITHOUT any probe read.
+func TestMCPHealth_AlertFiresWithoutAnyHealthzRead(t *testing.T) {
+	var mu sync.Mutex
+	fired := make(chan string, 4)
+	prev := fireMCPGatewayAlert
+	fireMCPGatewayAlert = func(d string) {
+		mu.Lock()
+		defer mu.Unlock()
+		select {
+		case fired <- d:
+		default:
+		}
+	}
+	t.Cleanup(func() { fireMCPGatewayAlert = prev })
+
+	// A configured capability that did not start: faulted, and nothing reads /healthz.
+	withMCPStatus(t, mcpObserveActivation{State: mcpObserveInvalid, EnableRequested: true, Reason: "tls_material_invalid"})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	startMCPHealthAlertPoller(ctx)
+
+	select {
+	case d := <-fired:
+		if !strings.Contains(d, "not serving") {
+			t.Fatalf("unexpected alert detail %q", d)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a faulted MCP capability produced no alert without a /healthz read: " +
+			"the alert depends on being scraped, which is the wrong way round")
+	}
+}
+
+// A node that never requested MCP must not even start the goroutine — the alert
+// plane follows the same disabled-by-default posture as the rest of MCP.
+func TestMCPHealth_PollerDoesNotRunWhenMCPWasNeverRequested(t *testing.T) {
+	prev := fireMCPGatewayAlert
+	fired := make(chan string, 1)
+	fireMCPGatewayAlert = func(d string) {
+		select {
+		case fired <- d:
+		default:
+		}
+	}
+	t.Cleanup(func() { fireMCPGatewayAlert = prev })
+
+	withMCPStatus(t, mcpObserveActivation{State: mcpObserveDisabled})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	if started := startMCPHealthAlertPoller(ctx); started {
+		t.Error("the health-alert poller started on a node that never requested MCP")
+	}
+
+	select {
+	case d := <-fired:
+		t.Fatalf("a node that never requested MCP produced an alert: %q", d)
+	case <-time.After(200 * time.Millisecond):
 	}
 }

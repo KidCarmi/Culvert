@@ -30,7 +30,9 @@ package main
 // exactly this reason.
 
 import (
+	"context"
 	"sync"
+	"time"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 	mcpruntime "github.com/KidCarmi/Culvert/internal/mcp/runtime"
@@ -296,4 +298,54 @@ func resetMCPHealthAlertForTest() {
 	mcpAlertState.mu.Lock()
 	mcpAlertState.alerted = false
 	mcpAlertState.mu.Unlock()
+}
+
+// ── periodic evaluation ──────────────────────────────────────────────────────
+
+// mcpHealthAlertInterval is how often the capability's health is re-evaluated for
+// alerting. It is deliberately coarse: the latch means a standing fault alerts
+// once, so the interval governs DETECTION LATENCY for a new fault, not alert
+// volume.
+const mcpHealthAlertInterval = 30 * time.Second
+
+// startMCPHealthAlertPoller evaluates the MCP capability's health on a timer.
+//
+// Without it the alert is POLL-DRIVEN: evaluateMCPHealthAlert runs from
+// mcpHealthFieldValue, i.e. only when something reads /healthz. That inverts the
+// relationship an alert is supposed to have with monitoring — the alert exists to
+// tell an operator to look, so making it depend on someone already looking means a
+// node whose MCP listener dies, on a deployment that scrapes /metrics but not
+// /healthz, or during an outage of the scraper itself, would never say so.
+//
+// Evaluation stays idempotent and latched, so the timer cannot produce duplicate
+// alerts and the probe path keeps working exactly as before — this only removes
+// the dependency on being scraped.
+//
+// Started only when MCP was actually requested: a node that never asked for MCP
+// gets no goroutine, matching the rest of the disabled-by-default posture. The
+// round is panic-guarded for the CHAOS-24 reason — a panic here must not take down
+// the gateway, and must not silently stop the poller, which would freeze detection
+// at "healthy" for the life of the process.
+// It reports whether the poller was started, so the disabled-by-default posture is
+// directly assertable rather than inferred from a goroutine count (a count-based
+// test tolerates slack for unrelated goroutines and so cannot distinguish "did not
+// start" from "started one").
+func startMCPHealthAlertPoller(ctx context.Context) bool {
+	if !mcpHealthState().Configured {
+		return false
+	}
+	go func() {
+		t := time.NewTicker(mcpHealthAlertInterval)
+		defer t.Stop()
+		runGuarded("mcp_health_alert", func() { evaluateMCPHealthAlert(mcpHealthState()) })
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				runGuarded("mcp_health_alert", func() { evaluateMCPHealthAlert(mcpHealthState()) })
+			}
+		}
+	}()
+	return true
 }

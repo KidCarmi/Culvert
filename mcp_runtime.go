@@ -79,6 +79,10 @@ func initMCPRuntime(s *startupState) {
 	if reg, _ := mcpInventory.sharedInventory(); reg != nil || sharedTelemetry() != nil {
 		_ = getMCPAdmin()
 	}
+	// RISK-027: evaluate capability health on a timer, so a dead listener alerts
+	// even on a deployment that never reads /healthz. No-ops when MCP was not
+	// requested, so the disabled default spawns nothing.
+	_ = startMCPHealthAlertPoller(context.Background())
 }
 
 // setMCPObserveStatus publishes the activation summary for the health surface.
