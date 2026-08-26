@@ -134,9 +134,23 @@ func (s *allowanceStore) wouldSatisfy(in runtime.ExecInput, action rollout.Actio
 	// not already present needs a NEW entry, and consume refuses that (fail closed) once
 	// the store is at capacity AFTER reclaiming expired session grants. Counting live
 	// entries (expired sessions excluded, since consume sweeps them first) reproduces
-	// consume's post-sweep refusal without deleting anything. An existing key (incl. an
-	// expired-but-present session slot) reuses its slot, so it is never blocked here.
-	if !onceKnown && !sessKnown && s.liveEntryCountLocked(now) >= maxAllowanceEntries {
+	// consume's post-sweep refusal without deleting anything.
+	//
+	// SR-01. Only a slot that SURVIVES that sweep exempts the request from the gate. An
+	// EXPIRED session slot does not: consume's sweep deletes it and the capacity check
+	// that follows then finds the key ABSENT and refuses. Treating any present key as
+	// reusable (the first form of this check) therefore predicted a satisfied allowance
+	// for exactly the request live enforcement blocks with allowance_consumed — a Shadow
+	// prediction more permissive than the enforcement it exists to predict. ALLOW_ONCE
+	// records are never swept, so they always survive.
+	//
+	// The pre-sweep count is checked FIRST, exactly as consume does: below capacity
+	// consume never refuses, and the post-sweep count can only be smaller, so the answer
+	// is already known. That keeps the O(len(sess)) live-entry scan off the ordinary path
+	// — it is paid only when the store is actually full, which is when it buys something.
+	slotSurvivesSweep := onceKnown || (sessKnown && g != nil && !now.After(g.expiry))
+	if !slotSurvivesSweep && len(s.once)+len(s.sess) >= maxAllowanceEntries &&
+		s.liveEntryCountLocked(now) >= maxAllowanceEntries {
 		return false
 	}
 	switch action {
