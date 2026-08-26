@@ -194,75 +194,114 @@ func TestRegisterShutdownHooks_NamesAreUniqueAcrossPhases(t *testing.T) {
 	check("late", late.hooksSnapshot())
 }
 
-// TestRunShutdownSequence_EarlyCtxHasNoDeadline_LateCtxDoes is the
-// budget-scoping contract test: the entire reason this PR splits into two
-// registries. Synthetic hooks record the deadline status of the ctx they
-// receive; the assertion fails if the 30s budget leaks into the early
-// phase.
+// TestRunShutdownSequence_EveryPhaseCarriesADeadline is the budget-scoping
+// contract test. Synthetic hooks record the deadline status of the ctx they
+// receive; the assertion fails if any phase runs unbounded.
 //
-// This is the test the user explicitly asked for — "would fail if the 30s
-// ctx is created before hooks 1–5".
-func TestRunShutdownSequence_EarlyCtxHasNoDeadline_LateCtxDoes(t *testing.T) {
+// CHAOS-56 INVERTED THIS TEST. It previously asserted the OPPOSITE for the
+// early phase — that the early ctx must NOT carry a deadline, pinning the
+// P2.2 decision to run HA stop / gRPC GracefulStop / CDR shutdown under
+// context.Background(). That is the defect: GracefulStop waits for every
+// client transport to close, and a half-open DP never acks the GOAWAY ping,
+// so the early phase could hold SIGTERM open for the TCP retransmit budget
+// (~15 min) while the container's 60s stop_grace_period ticked down to a
+// SIGKILL that skipped every durable flush behind it. The early phase now
+// carries its own bound; the budget-SCOPING intent the old test protected —
+// that the early phase does not share the late phase's clock — is preserved
+// and asserted below.
+func TestRunShutdownSequence_EveryPhaseCarriesADeadline(t *testing.T) {
+	var early, late shutdownRegistry
+	var earlyRemaining, drainRemaining, flushRemaining time.Duration
+	var earlyRan, drainRan, flushRan atomic.Bool
+
+	budget := shutdownBudget{Total: 30 * time.Second, Early: 6 * time.Second, Flush: 8 * time.Second}
+
+	early.Register("test-early-probe", 1, func(ctx context.Context) error {
+		earlyRemaining = remainingOf(t, ctx)
+		earlyRan.Store(true)
+		return nil
+	})
+	late.Register("test-drain-probe", shutdownFlushBoundary, func(ctx context.Context) error {
+		drainRemaining = remainingOf(t, ctx)
+		drainRan.Store(true)
+		return nil
+	})
+	late.Register("test-flush-probe", shutdownFlushBoundary+1, func(ctx context.Context) error {
+		flushRemaining = remainingOf(t, ctx)
+		flushRan.Store(true)
+		return nil
+	})
+
+	runShutdownSequence(&early, &late, budget)
+
+	for _, c := range []struct {
+		name string
+		ran  *atomic.Bool
+	}{{"early", &earlyRan}, {"drain", &drainRan}, {"flush", &flushRan}} {
+		if !c.ran.Load() {
+			t.Fatalf("%s probe hook did not run", c.name)
+		}
+	}
+
+	// Early is bounded by its OWN share, not by the whole envelope — the
+	// budget-scoping property the pre-CHAOS-56 test protected with
+	// "no deadline at all".
+	assertRemaining(t, "early", earlyRemaining, budget.Early)
+	// The drain phase gets the envelope MINUS the flush reserve, so a stuck
+	// drain cannot spend the durability budget.
+	assertRemaining(t, "drain", drainRemaining, budget.Total-budget.Flush)
+	// The flush reserve is measured from the start of the flush phase, so it
+	// is the full reserve regardless of what the drain phase did.
+	assertRemaining(t, "flush", flushRemaining, budget.Flush)
+}
+
+// remainingOf reports how long ctx has left, failing the test if it carries
+// no deadline at all.
+func remainingOf(t *testing.T, ctx context.Context) time.Duration {
+	t.Helper()
+	dl, ok := ctx.Deadline()
+	if !ok {
+		t.Error("phase ctx has no deadline — the shutdown envelope is not being enforced")
+		return 0
+	}
+	return time.Until(dl)
+}
+
+// assertRemaining pins an observed phase budget to its expected share, with
+// generous slack for goroutine scheduling. The deadline is set before the
+// hook runs, so the observed remaining time should be just under `want`.
+func assertRemaining(t *testing.T, phase string, got, want time.Duration) {
+	t.Helper()
+	if got > want {
+		t.Errorf("%s phase remaining = %v; must be ≤ its share %v", phase, got, want)
+	}
+	if got < want-time.Second {
+		t.Errorf("%s phase remaining = %v; must be ≥ share − 1s = %v", phase, got, want-time.Second)
+	}
+}
+
+// TestRunShutdownSequence_ZeroBudgetRunsUnbounded pins the escape hatch: a
+// zero Total reproduces the pre-CHAOS-56 un-budgeted shape, so a caller (or a
+// test) can still run the sequence with no envelope at all.
+func TestRunShutdownSequence_ZeroBudgetRunsUnbounded(t *testing.T) {
 	var early, late shutdownRegistry
 	var earlyHasDeadline, lateHasDeadline atomic.Bool
-	var earlyRan, lateRan atomic.Bool
 
 	early.Register("test-early-probe", 1, func(ctx context.Context) error {
 		_, has := ctx.Deadline()
 		earlyHasDeadline.Store(has)
-		earlyRan.Store(true)
 		return nil
 	})
 	late.Register("test-late-probe", 1, func(ctx context.Context) error {
 		_, has := ctx.Deadline()
 		lateHasDeadline.Store(has)
-		lateRan.Store(true)
 		return nil
 	})
 
-	runShutdownSequence(&early, &late, 30*time.Second)
+	runShutdownSequence(&early, &late, shutdownBudget{})
 
-	if !earlyRan.Load() {
-		t.Fatal("early probe hook did not run")
-	}
-	if !lateRan.Load() {
-		t.Fatal("late probe hook did not run")
-	}
-	if earlyHasDeadline.Load() {
-		t.Error("early phase ctx must NOT carry a deadline; got one — the 30s shutdown budget is leaking into the early phase")
-	}
-	if !lateHasDeadline.Load() {
-		t.Error("late phase ctx must carry the 30s shutdown deadline; got none — the budget is missing")
-	}
-}
-
-// TestRunShutdownSequence_LateCtxBudgetMatchesArgument confirms that the
-// budget passed to runShutdownSequence is the budget the late ctx
-// actually carries (within a generous tolerance for scheduling).
-func TestRunShutdownSequence_LateCtxBudgetMatchesArgument(t *testing.T) {
-	const want = 7 * time.Second
-	var early, late shutdownRegistry
-	var observedRemaining time.Duration
-
-	late.Register("test-late-probe", 1, func(ctx context.Context) error {
-		dl, ok := ctx.Deadline()
-		if !ok {
-			t.Error("late ctx has no deadline")
-			return nil
-		}
-		observedRemaining = time.Until(dl)
-		return nil
-	})
-
-	runShutdownSequence(&early, &late, want)
-
-	// Allow generous slack for goroutine scheduling. The deadline is set
-	// before the hook runs; the observed remaining time should be very
-	// close to (but no more than) `want`.
-	if observedRemaining > want {
-		t.Errorf("late ctx remaining = %v; must be ≤ budget %v", observedRemaining, want)
-	}
-	if observedRemaining < want-time.Second {
-		t.Errorf("late ctx remaining = %v; must be ≥ budget − 1s = %v", observedRemaining, want-time.Second)
+	if earlyHasDeadline.Load() || lateHasDeadline.Load() {
+		t.Errorf("zero budget must run unbounded; early deadline=%v late deadline=%v",
+			earlyHasDeadline.Load(), lateHasDeadline.Load())
 	}
 }

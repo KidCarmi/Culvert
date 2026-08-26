@@ -10,31 +10,144 @@ import (
 	"github.com/KidCarmi/Culvert/internal/reqlog"
 )
 
-// runShutdownSequence runs the early registry with context.Background()
-// (no shutdown budget), then creates a fresh ctx with the supplied late
-// budget and runs the late registry. The late ctx's cancel is deferred so
-// it runs at function exit, mirroring the original
-// `defer cancel()` placement in runProxyUntilShutdown.
+// shutdownBudget is the enforced shutdown envelope, in three parts. CHAOS-56.
 //
-// Extracted so the budget-vs-no-budget contract — the entire reason this
-// PR splits into two registries — is unit-testable end to end without
-// touching production globals. P2.2 / S5.
-func runShutdownSequence(early, late *shutdownRegistry, lateBudget time.Duration) {
-	if err := early.RunAll(context.Background()); err != nil {
-		logger.Printf("Early shutdown error(s): %v", err)
+// Before CHAOS-56 there was ONE number — a 30s "late budget" — and it bounded
+// nothing:
+//
+//   - The early phase ran under context.Background(), documented as "not
+//     subject to any shutdown timeout". Its first two hooks are HAState.Stop
+//     (a WaitGroup join) and gRPC GracefulStop, which waits for every client
+//     transport to close. A half-open DP connection never acks the GOAWAY
+//     ping, so GracefulStop waits out the TCP retransmit budget (~15 min at
+//     Linux defaults) or gRPC's 2h server keepalive.
+//   - The late phase's ctx was advisory: shutdownRegistry ran every hook
+//     regardless of whether it had expired, and the hooks that ignore ctx
+//     (tunnel drain, syslog/badger/logstore/reqlog/audit/log closers) added
+//     their own time on top of it. The tunnel drain's own comment says its
+//     15s budget is "independent of the parent ctx" — so the real late worst
+//     case was 30s + 15s + the closers, not 30s.
+//
+// docker-compose.yml sets stop_grace_period: 60s and its comment describes an
+// envelope of "up to a 15s tunnel-drain window INSIDE the ~30s late-phase
+// budget". No code enforced either half of that sentence. Past the grace the
+// container gets SIGKILL, which skips every remaining hook: the cluster-store
+// flush, the request-log queue drain, a clean badger close (an unclean one is
+// exactly what CHAOS-50's boot-path quarantine had to be built for), and the
+// log-sink flush — so the record of WHY shutdown stalled dies with the
+// process that stalled.
+//
+// The three parts are a reserve model, not a subdivision of one timer:
+//
+//	Early — bounds the stop-accepting hooks (HA, gRPC, CDR, lifecycle cancel).
+//	        Their work is best-effort: an interrupted GetConfig is re-fetched
+//	        by the DP's own sync loop on reconnect. Sized above the gRPC
+//	        server's own drain bound (cpGRPCGracefulStopBudget) so the inner,
+//	        more informative force-close fires before the outer watchdog does.
+//	Total — the whole envelope. The drain phase gets whatever is left of it
+//	        after the early phase and the flush reserve.
+//	Flush — carved out UP FRONT for the hooks above shutdownFlushBoundary, so
+//	        a stuck drain cannot spend the durability budget.
+//
+// Worst case is Total + 2×shutdownHookGrace (one grace per late phase; the
+// early phase's grace is charged inside Total by the drain phase's absolute
+// deadline). At the shipped values that is 51s, inside the 60s compose grace
+// with headroom — pinned as a cross-artifact contract by
+// TestChaos56_EnvelopeFitsTheContainerStopGrace.
+type shutdownBudget struct {
+	Total time.Duration
+	Early time.Duration
+	Flush time.Duration
+}
+
+// defaultShutdownBudget is the shipped envelope. Total preserves the
+// pre-CHAOS-56 INTENT exactly — 30s late + a 15s tunnel drain = 45s — so no
+// drain gets less generous, only bounded. Early is sized for the stop-
+// accepting hooks against a healthy peer (gRPC GracefulStop of unary RPCs is
+// sub-second) and is short because everything it waits for is retried by the
+// peer. Flush is sized for the durable closers, whose own internal bounds are
+// already smaller (logsink Close/Sync is capped at 5s).
+var defaultShutdownBudget = shutdownBudget{
+	Total: 45 * time.Second,
+	Early: 12 * time.Second,
+	Flush: 10 * time.Second,
+}
+
+// runShutdownSequence runs the registered hooks in three bounded phases:
+// early (stop accepting), drain (let in-flight work finish), and flush
+// (durable closes). The late registry is split at shutdownFlushBoundary by
+// partitionAt, so the flush hooks run under a reserve the drain phase cannot
+// consume. Every phase's ctx carries a real deadline and shutdownRegistry
+// watchdogs each hook against it. CHAOS-56.
+//
+// A zero Total means "no envelope" and reproduces the pre-CHAOS-56 shape for
+// tests that assert on the un-budgeted behaviour; a zero Early or Flush means
+// that phase inherits the remaining envelope rather than a reserve.
+func runShutdownSequence(early, late *shutdownRegistry, budget shutdownBudget) {
+	deadline := time.Time{}
+	if budget.Total > 0 {
+		deadline = time.Now().Add(budget.Total)
 	}
 
-	// 30s shutdown budget begins HERE — same point as the original
-	// `ctx, cancel := context.WithTimeout(...)` in the pre-P2.2 body,
-	// after the rate-limit cleanup cancel and before scanSvc.Shutdown.
-	ctx, cancel := context.WithTimeout(context.Background(), lateBudget)
-	defer cancel()
+	// Phase 1 — early. Bounded now: this is where an unbounded GracefulStop
+	// used to hold the whole sequence open until the container was killed.
+	runShutdownPhase(early, "early", phaseDeadline(deadline, budget.Early))
 
-	if err := late.RunAll(ctx); err != nil {
-		// All late hooks currently log per-hook on failure and return nil,
-		// so this branch is unreachable today. Kept as a backstop for
-		// future hooks that opt into registry-level error aggregation.
-		logger.Printf("Shutdown error(s): %v", err)
+	// Phase 2/3 — the late registry, split so the durable closers get their
+	// own reserve.
+	drain, flush := late.partitionAt(shutdownFlushBoundary)
+
+	drainEnd := deadline
+	if !deadline.IsZero() && budget.Flush > 0 {
+		drainEnd = deadline.Add(-budget.Flush)
+	}
+	runShutdownPhase(drain, "drain", drainEnd)
+
+	// The flush deadline is computed from NOW, not from the envelope: if the
+	// drain phase overran its own share (a hook the watchdog had to abandon
+	// inside the grace window), the reserve is still the full reserve. That
+	// is the whole point of reserving it — durability must not be charged for
+	// a drain that misbehaved.
+	flushEnd := time.Time{}
+	if budget.Flush > 0 {
+		flushEnd = time.Now().Add(budget.Flush)
+	} else if !deadline.IsZero() {
+		flushEnd = deadline
+	}
+	// Emit the completion line BEFORE the flush phase: the last flush hook
+	// closes the log sink, and logsink.Writer.Write after Close enqueues into
+	// a channel nobody drains — so a "Stopped." logged after this point is
+	// silently swallowed and never reaches the log file the operator reads.
+	logger.Println("Shutdown: drained; flushing durable state…")
+	runShutdownPhase(flush, "flush", flushEnd)
+}
+
+// phaseDeadline returns the earlier of `share` from now and the overall
+// envelope deadline. A zero share means the phase runs to the envelope; a
+// zero envelope with a zero share means no deadline at all.
+func phaseDeadline(envelope time.Time, share time.Duration) time.Time {
+	if share <= 0 {
+		return envelope
+	}
+	end := time.Now().Add(share)
+	if !envelope.IsZero() && envelope.Before(end) {
+		return envelope
+	}
+	return end
+}
+
+// runShutdownPhase runs one registry under `end`, logging any hook failures
+// (including watchdog abandonment) with the phase name. A zero `end` runs the
+// phase without a deadline.
+func runShutdownPhase(reg *shutdownRegistry, name string, end time.Time) {
+	ctx := context.Background()
+	if !end.IsZero() {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, end)
+		defer cancel()
+	}
+	if err := reg.RunAll(ctx); err != nil {
+		logger.Printf("Shutdown (%s phase) error(s): %v", name, err)
 	}
 }
 
@@ -81,8 +194,18 @@ const (
 	// PR3d: after the CONNECT listener is closed (no new inspected-H2 tunnels can
 	// begin) and before the tunnel drain waits, fence new tunnels and send the first
 	// GOAWAY wave to every active inspected-H2 tunnel.
-	shutdownOrderH2InspectGOAWAY  = 95
-	shutdownOrderTunnelDrain      = 100
+	shutdownOrderH2InspectGOAWAY = 95
+	shutdownOrderTunnelDrain     = 100
+
+	// shutdownFlushBoundary is the second cut-line, inside the late phase.
+	// Hooks at or below it are DRAIN hooks — stop accepting, let in-flight
+	// work finish; abandoning one costs a retry. Hooks above it are FLUSH
+	// hooks — they persist state and release handles, and abandoning one
+	// costs durability or leaves a store the next boot has to quarantine.
+	// runShutdownSequence splits the late registry here so the flush hooks
+	// run under a reserve no drain can spend. CHAOS-56.
+	shutdownFlushBoundary = 105
+
 	shutdownOrderSyslogClose      = 110
 	shutdownOrderCommunityDBClose = 120
 	shutdownOrderLogStoreClose    = 125
@@ -128,13 +251,28 @@ func registerEarlyShutdownHooks(reg *shutdownRegistry, s *startupState) {
 	})
 }
 
+// tunnelDrainWindow caps how long the tunnel drain waits for hijacked
+// CONNECT/WebSocket conns to finish. It is a CEILING, not a budget: CHAOS-56
+// made the drain honour the phase deadline too, so the effective window is
+// min(tunnelDrainWindow, time left in the drain phase).
+const tunnelDrainWindow = 15 * time.Second
+
 // drainActiveTunnels drains in-flight CONNECT/WebSocket tunnels after the
 // proxy server's HTTP listener has shut down. proxySrv.Shutdown only closes
-// HTTP/1.x idle connections; hijacked tunnels need time to finish. The 15s
-// drain budget is independent of the parent ctx — extracted as a named
-// function (rather than an inline closure inside registerLateShutdownHooks)
-// to keep the wiring function's cognitive complexity low. P2.2 / S5.
-func drainActiveTunnels(context.Context) error {
+// HTTP/1.x idle connections; hijacked tunnels need time to finish. Extracted
+// as a named function (rather than an inline closure inside
+// registerLateShutdownHooks) to keep the wiring function's cognitive
+// complexity low. P2.2 / S5.
+//
+// CHAOS-56 — the 15s window used to be "independent of the parent ctx", so it
+// was ADDED to the late-phase budget rather than spent inside it, and the
+// compose file's stop_grace_period comment (which describes the drain as
+// living "inside the ~30s late-phase budget") was describing an envelope
+// nothing enforced. The window is now clamped to whatever the drain phase has
+// left, and the force-close backstop fires on EITHER bound — so a laggard
+// inspected-H2 tunnel still gets a deterministic teardown instead of being
+// left to the container's SIGKILL.
+func drainActiveTunnels(ctx context.Context) error {
 	active := atomic.LoadInt64(&activeConns)
 	if active <= 0 {
 		return nil
@@ -143,11 +281,22 @@ func drainActiveTunnels(context.Context) error {
 	// raw-bypass tunnels), so "drained" here does not imply every waited-on conn was
 	// GOAWAY'd — only the inspected-H2 subset is (PR3d).
 	logger.Printf("Draining %d active tunnel(s) (%d inspected H2)…", active, atomic.LoadInt64(&statH2InspectActive))
-	drainDeadline := time.After(15 * time.Second)
+	drainTimer := time.NewTimer(tunnelDrainWindow)
+	defer drainTimer.Stop()
+	drainDeadline := drainTimer.C
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		select {
+		case <-ctx.Done():
+			// The drain phase's budget is gone. Fall through to the SAME
+			// force-close backstop rather than returning quietly: a tunnel
+			// abandoned here would otherwise survive until process exit, and
+			// the flush hooks are waiting behind this one.
+			forced := forceCloseH2InspectTunnels()
+			logger.Printf("Drain budget exhausted: %d tunnel(s) still active (force-closed %d inspected H2)",
+				atomic.LoadInt64(&activeConns), forced)
+			return nil
 		case <-drainDeadline:
 			// PR3d backstop: force-close inspected-H2 tunnels whose in-flight streams
 			// did not finish within the window (infinite SSE/gRPC/large-download

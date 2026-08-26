@@ -963,13 +963,116 @@ func registerConfigService(srv grpc.ServiceRegistrar) {
 	}, nil)
 }
 
-// StopControlPlaneGRPC gracefully stops the gRPC server, draining in-flight
-// RPCs before closing. Called during SIGTERM/SIGINT shutdown.
+// cpGRPCGracefulStopBudget bounds the graceful half of the gRPC shutdown.
+// Every method on ConfigService is UNARY (see registerConfigService — Streams
+// is empty), so against a live peer the drain is sub-second: the longest RPC
+// is a GetConfig writing one ConfigSnapshot, and a DP that loses it re-fetches
+// on its next sync tick. Sized above grpc-go's own 5s GOAWAY ping-ack timer
+// (measured 6.0s end to end on v1.83.1) so a peer that is merely unresponsive
+// still completes the graceful path. CHAOS-56.
+const cpGRPCGracefulStopBudget = 8 * time.Second
+
+// StopControlPlaneGRPC stops the gRPC server, draining in-flight RPCs, and
+// force-closes anything still holding a transport once the graceful budget is
+// spent. Called during SIGTERM/SIGINT shutdown.
+//
+// CHAOS-56 — GracefulStop used to be called bare, from the early shutdown
+// phase, which ran under context.Background() and was documented as "not
+// subject to any shutdown timeout". GracefulStop blocks in
+// `for len(s.conns) != 0 { s.cv.Wait() }` (grpc-go server.go), and a transport
+// leaves that map only once its ACTIVE STREAMS are done: grpc-go's
+// outgoingGoAwayHandler bounds the idle case at a 5s ping-ack timer — measured
+// at 6.0s against a silent HTTP/2 peer on v1.83.1 — but when the second GOAWAY
+// finds `len(t.activeStreams) != 0` it deliberately leaves the connection open
+// with no timer at all. Two ordinary faults produce a stream that never
+// finishes, and neither surfaces an error to abort it:
+//
+//   - A handler that does not return. Enroll and RenewCert sign a CSR and
+//     write it out; PushAuditEvents appends to a fileutil.RotatingFile. On a
+//     wedged volume — the hung NFS mount and slow-filesystem cases the rest of
+//     this review's storage work is built around — the handler blocks in a
+//     write(2) that never completes.
+//   - A response the peer stops reading. GetConfig returns up to a 128 MiB
+//     ConfigSnapshot; a DP that freezes mid-read leaves the server blocked on
+//     HTTP/2 flow control over a TCP zero-window, and the kernel's persist
+//     timer retries that indefinitely rather than ever erroring out.
+//
+// So one wedged DP held the CP's SIGTERM open with no bound whatsoever, until
+// the container's 60s stop_grace_period ran out and SIGKILL skipped every hook
+// behind it — the cluster-store flush, the request-log queue drain, a clean
+// badger close, and the log-sink flush that would have said why.
+//
+// The bounded pattern is the canonical one: run GracefulStop on its own
+// goroutine, wait out the budget, then Stop() to force-close. Force-closing is
+// safe by construction here — an interrupted unary RPC is retried by the
+// caller's own sync loop, which is the same recovery path a mid-flight CP
+// restart already exercises. The budget is above the 6s idle-drain figure so a
+// fleet of merely-unresponsive peers still drains gracefully; it is the
+// unbounded active-stream case the force-close exists for.
 func StopControlPlaneGRPC() {
-	if clusterRole.grpcSrv != nil {
-		logger.Printf("ControlPlane: graceful gRPC shutdown...")
-		clusterRole.grpcSrv.GracefulStop()
+	srv := clusterRole.grpcSrv
+	if srv == nil {
+		return
+	}
+	logger.Printf("ControlPlane: graceful gRPC shutdown...")
+	if gracefulStopBounded(srv, cpGRPCGracefulStopBudget) {
 		logger.Printf("ControlPlane: gRPC stopped")
+		return
+	}
+	logger.Printf("ControlPlane: gRPC drain exceeded %s — force-closed connections", cpGRPCGracefulStopBudget)
+}
+
+// gracefulStopBounded runs srv.GracefulStop under a budget and falls back to
+// srv.Stop when it expires. Reports whether the graceful drain completed
+// within the budget. Split out from StopControlPlaneGRPC so the bound is
+// testable against a real wedged stream without touching the clusterRole
+// global. CHAOS-56.
+//
+// The force path NEITHER joins the GracefulStop goroutine NOR waits on Stop,
+// and both halves of that are load-bearing. grpc-go gives no way to cancel an
+// in-flight GracefulStop, and its `stop(graceful bool)` — the shared body
+// behind both entry points — is hostile to being raced in two distinct ways:
+//
+//  1. It ends with `if graceful || waitForHandlers { s.handlersWG.Wait() }`,
+//     so GracefulStop does not return until every HANDLER has returned — and
+//     the handler that has not returned is exactly the fault being escaped.
+//     Joining it reintroduces the unbounded wait one level down. (First draft
+//     did this; TestChaos56_GracefulStopIsBoundedAgainstAWedgedStream caught it.)
+//  2. That handlersWG.Wait() runs while HOLDING `s.mu` — `stop` takes the lock
+//     with `defer s.mu.Unlock()` before the conns wait, and `s.cv.Wait()` only
+//     releases it for the duration of the wait. So when the last connection is
+//     removed, both stops wake and contend: if the GRACEFUL one wins it takes
+//     `s.mu`, parks forever in handlersWG.Wait(), and a synchronous
+//     `srv.Stop()` on this goroutine then blocks on that mutex — with no
+//     bound, which is the whole fault again. Which one wins is a timing race,
+//     so the synchronous form passes at speed and hangs under -race. (Second
+//     draft did this; the same gate caught it under the race detector.)
+//
+// So the force-close is issued on its own goroutine and this function returns.
+// What that guarantees is honest and worth stating exactly: the LISTENERS are
+// already closed — `stop` runs closeListenersLocked() before the conns wait,
+// so GracefulStop shut the door before it parked — and the force-close of the
+// remaining transports is best-effort and asynchronous. In a process that is
+// exiting, two parked goroutines cost two stacks.
+//
+// This is precisely why the hook-level watchdog in shutdownRegistry.RunAll is
+// NOT redundant with this bound: it is the only HARD bound on this hook. This
+// function guarantees the shutdown sequence keeps moving; the watchdog
+// guarantees the phase does.
+func gracefulStopBounded(srv *grpc.Server, budget time.Duration) bool {
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		srv.GracefulStop()
+	}()
+	timer := time.NewTimer(budget)
+	defer timer.Stop()
+	select {
+	case <-drained:
+		return true
+	case <-timer.C:
+		go srv.Stop()
+		return false
 	}
 }
 
