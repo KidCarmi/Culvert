@@ -48,16 +48,24 @@ type RuntimeStateHealth struct {
 
 // CapabilityHealth is the composed safe health of one MCP capability.
 type CapabilityHealth struct {
-	Capability          string             `json:"capability"`
-	Runtime             RuntimeStateHealth `json:"runtime"`
-	Durability          DurabilityHealth   `json:"durability"`
-	Servers             int                `json:"servers"`
-	QuarantinedTools    int                `json:"quarantined_tools"`
-	DriftedTools        int                `json:"drifted_tools"`
-	PolicyRevision      uint64             `json:"policy_revision"`
-	PolicySnapshotHash  string             `json:"policy_snapshot_hash"`
-	PendingApprovals    int                `json:"pending_approvals"`
-	PendingPublications int                `json:"pending_publications"`
+	Capability       string             `json:"capability"`
+	Runtime          RuntimeStateHealth `json:"runtime"`
+	Durability       DurabilityHealth   `json:"durability"`
+	Servers          int                `json:"servers"`
+	QuarantinedTools int                `json:"quarantined_tools"`
+	// DriftedTools is the pre-PR-9 field name for this count. ReviewRequiredTools
+	// is the canonical name used everywhere else in the codebase for the same
+	// catalog.ReviewRequired disposition (the catalog package's own String(),
+	// the per-tool inventory DTO's "review_required" fields, the GUI's "review
+	// required" chip labels, and InventoryStatus.ReviewRequiredTools below).
+	// Both are populated from the same count; DriftedTools is kept only for
+	// wire compatibility with existing consumers (T-38).
+	DriftedTools        int    `json:"drifted_tools"`
+	ReviewRequiredTools int    `json:"review_required_tools"`
+	PolicyRevision      uint64 `json:"policy_revision"`
+	PolicySnapshotHash  string `json:"policy_snapshot_hash"`
+	PendingApprovals    int    `json:"pending_approvals"`
+	PendingPublications int    `json:"pending_publications"`
 }
 
 // ManagementAccessHealth is the safe Management-access surface state.
@@ -148,6 +156,7 @@ func (s *HealthService) capability(capNS string) CapabilityHealth {
 	}
 	if s.src.Inventory != nil {
 		c.Servers, c.QuarantinedTools, c.DriftedTools = s.src.Inventory.Counts(capNS)
+		c.ReviewRequiredTools = c.DriftedTools
 	}
 	if s.src.Approvals != nil {
 		c.PendingApprovals, c.PendingPublications = s.src.Approvals.PendingCounts(capNS)
