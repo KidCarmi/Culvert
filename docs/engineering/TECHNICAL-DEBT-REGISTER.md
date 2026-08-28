@@ -366,14 +366,25 @@
   recomputes `CanonicalBytes` without them, and `VerifyDigest` misreports a valid shadow
   record as corrupted (the model fails closed on an unknown schema version, but the fields
   were added under v1, so it never gets that far). Found by Codex on PR #1226 (4bbf211).
-- **Status:** OPEN, deferred by design. Today a shadow evaluation is marked durably only by
-  the existing `ExecutionState = "shadow_evaluated"` value (digest-safe), and the full
-  ShadowDecision rides the response body. Execution is disabled, so no shadow event is ever
-  written in production.
-- **Fix:** in the Shadow-activation slice, introduce `schema_version:2` for the expanded
-  envelope with explicit v1/v2 recovery handling (a v2 event is rejected as "unknown schema
-  version" by a v1 reader — honest — rather than misverified), and stamp the sub-facts only
-  on v2 shadow events. Then `shadowDecisionFacts` populates the durable sub-facts.
+- **Status:** OPEN — **HARD PREREQUISITE for any real Controlled Shadow activation** (elevated
+  from "deferred by design" after Codex re-raised it on PR #1234, the activation-plumbing slice).
+  Today a shadow evaluation is marked durably only by the existing
+  `ExecutionState = "shadow_evaluated"` value (digest-safe), and the full ShadowDecision rides the
+  transient response body. PR #1234 lands the activation PLUMBING but is DEFERRED-here-by-decision:
+  it does NOT implement schema v2, its final verdict does NOT claim activation-ready, and because
+  activation is unreachable in production on that PR (the usable-tool prerequisite fails closed) no
+  shadow event is ever durably written there — so the gap has zero production exposure on #1234 but
+  must be closed before any real activation. Owner decision (PR #1234): keep this OPEN and treat it
+  as a hard gate, distinct from and NOT absorbed by the tool-approval / promotion slice.
+- **Fix (dedicated follow-up PR — not this PR, not the approval slice):** introduce
+  `schema_version:2` for the expanded envelope with explicit v1/v2 fail-closed recovery (a v2 event
+  is rejected as "unknown schema version" by a v1 reader — honest — rather than misverified), stamp
+  the sub-facts only on v2 shadow events, and have `shadowDecisionFacts` populate the durable
+  sub-facts. The follow-up PR must include: canonical-digest compatibility, migration/rollback
+  behaviour, schema validation, corruption / fail-closed recovery tests, and a proof that the
+  durable record carries the SAME ShadowDecision facts returned to the client. **No production
+  Controlled Shadow activation until BOTH this prerequisite AND the usable-scoped-tool prerequisite
+  (approval slice) are closed.**
 - **Evidence:** `internal/mcp/events/model/model.go` (DecisionEvidence note),
   `internal/mcp/execution/shadow_evaluator.go` (`shadowDecisionFacts`),
   `docs/design/mcp/SHADOW-ARCHITECTURE.md` §9.

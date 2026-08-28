@@ -1,9 +1,12 @@
 # Controlled Shadow Activation — Dependency Graph & Design
 
 Status: **design + implementation** (phase "Controlled Shadow Activation Preparation").
-The mechanism is complete and fail-closed, but Controlled Shadow activation is **NOT yet
-reachable in production**: it is gated on a tool being `Usable` in the requested scope, and
-catalog ingestion never yields `Usable` (tool approval is a later slice) — see §8.
+The mechanism is complete and fail-closed, but Controlled Shadow activation is **NOT
+activation-ready in production**: it is gated on TWO independent hard prerequisites, both OPEN
+— (1) a tool being `Usable` in the requested scope, which catalog ingestion never yields (tool
+approval is a later slice, §8), and (2) durable per-request `ShadowDecision` evidence via a
+`schema_version:2` envelope, delivered as a dedicated follow-up PR (`SHADOW-EVIDENCE-ROUTING-1`,
+§8a). Neither absorbs the other; BOTH must close before any real activation — see §8b.
 Predecessors: ADR-0024 (MCP Agent Security Gateway, disabled-by-default), PR #1224
 (hardened MCP backend), PR #1226 (Layer B Shadow capability separation + formal
 `ShadowDecision` Model 1). Baseline `main` = `e698a12`.
@@ -219,9 +222,46 @@ activation — the active scope is the empty Observe/Disabled scope at that poin
 could never see a healthy node. The apply-time gate is where the candidate scope is known and
 where the precondition therefore belongs.
 
-**Corrected verdict.** With no tool-approval / promotion slice, Controlled Shadow activation is
-**NOT yet reachable in production** — the mechanism is READY and fail-closed, but the usable-tool
-prerequisite is structurally unsatisfiable until that slice ships. This PR intentionally does
-NOT implement approval/promotion (out of scope for a composition-only change). When the approval
-slice lands and promotes the controlled server's tool to `Usable` within the scope, the preflight
-clears and Controlled Shadow activation becomes reachable.
+## 8a. Prerequisite for reachability: durable ShadowDecision evidence (Codex P1, PR #1234)
+
+A real Controlled Shadow activation ALSO requires that the full per-request `ShadowDecision`
+is recorded **durably**, not just returned transiently to the client. Today a shadow evaluation
+persists only the existing `ExecutionState = "shadow_evaluated"` value on the `schema_version:1`
+event envelope (a digest-safe value change); the enforcement-prediction sub-facts — `Outcome`
+(`would_execute` / `would_fail_credential_readiness` / `would_fail_stale_decision` / …),
+credential-plan status, and request/response inspection readiness — ride ONLY the transient
+JSON-RPC response body (`shadowResult`). The aggregate `culvert_mcp_shadow_*` metric records the
+outcome enum as a counter, but no per-request archive row can be reconstructed or correlated.
+
+The sub-facts are deliberately NOT stamped onto v1 in place: a pre-change reader drops unknown
+JSON fields on unmarshal and recomputes a different `CanonicalBytes` digest, so `VerifyDigest`
+would misreport a valid shadow record as corrupted on a binary rollback (Codex P2, PR #1226).
+Persisting them durably requires a `schema_version:2` envelope with explicit v1/v2 fail-closed
+recovery (a v1 reader rejects a v2 event as *unknown schema version* — honest — rather than
+misverifying it). Tracked as **`SHADOW-EVIDENCE-ROUTING-1`**, now an explicit HARD PREREQUISITE
+for real Controlled Shadow activation. It is delivered as a **dedicated follow-up PR** — NOT
+absorbed into this composition PR and NOT into the tool-approval slice — covering the v2 envelope,
+canonical-digest compatibility, migration/rollback behaviour, schema validation, corruption /
+fail-closed recovery tests, and proof that the durable record carries the SAME `ShadowDecision`
+facts returned to the client. This PR lands the activation PLUMBING only; it does not close this
+prerequisite, and the runbook's evidence-parity / zero-gap exit criteria stage under it.
+
+## 8b. Corrected verdict — TWO hard prerequisites, both OPEN
+
+**Controlled Shadow activation is NOT activation-ready in production**, and this PR does not
+claim otherwise. The mechanism is READY and fail-closed, but production activation is gated on
+**TWO** independent hard prerequisites, both currently OPEN, and **both** must close first:
+
+1. **A usable scoped tool** (§8) — a catalog tool promoted to `Usable` within the requested
+   scope. Structurally unsatisfiable until the tool-approval / promotion slice ships; until then
+   the activation preflight fails closed with `no_usable_shadow_tools`. This PR intentionally does
+   NOT implement approval/promotion.
+2. **Durable ShadowDecision evidence** (§8a, `SHADOW-EVIDENCE-ROUTING-1`) — the `schema_version:2`
+   durable envelope so the full per-request verdict is reconstructable from the archive. Delivered
+   as a dedicated follow-up PR; this PR does NOT implement schema v2.
+
+These two prerequisites are SEPARATE slices and neither absorbs the other. Because activation is
+unreachable in production today (prerequisite 1 fails closed), no shadow event is ever durably
+written here, so the evidence-parity gap has zero production exposure on this PR — but the gap
+must be closed before any real activation, not after. No production Controlled Shadow activation
+until BOTH are closed.
