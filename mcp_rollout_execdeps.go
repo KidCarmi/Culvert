@@ -1,50 +1,114 @@
 package main
 
-import "sync/atomic"
+import (
+	"sync/atomic"
 
-// Execution-dependency precondition for MCP rollout (Shadow execution safety gate).
-//
-// An "executing" rollout mode (Shadow / Canary / Production) may drive the guarded
-// execution pipeline: the executor, bounded upstream client, credential broker,
-// event manager, and inspection/DLP components. The current shipped Gateway
-// composition (mcp_observe_startup.go) is Observe-only and composes NONE of those.
-//
-// Activating an executing mode against that composition would create a partial,
-// unsafe Shadow state that claims ModeShadow but cannot satisfy its execution
-// contract. That is forbidden. Instead, a transition to an executing mode is
-// REJECTED, fail-closed, unless every required execution-plane dependency has been
-// registered here by the (separate, later) guarded-execution composition task.
-//
-// Until that task lands, gatewayExecDepsReady stays false and every Shadow/Canary/
-// Production activation fails closed with shadow_execution_dependencies_not_configured.
-// This is the deliberate, safe boundary described in the remediation task §12: the
-// rollout transport, persistence, and evidence-window mechanics are fully wired,
-// while an actual Shadow transition still fails safely until execution is configured.
+	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
+)
 
-// execDepsRegistry tracks, per capability, whether the guarded-execution plane is
-// composed. Both default to false (Observe-only shipped posture). The values are
-// process-global and set once at startup by the execution composition (none today).
+// Rollout execution-readiness gates (MCP Shadow / live-execution safety).
+//
+// A rollout mode above Observe drives some part of the guarded-execution plane, and
+// after Layer B (#1226) that plane splits into TWO readiness tiers that MUST stay
+// independent (see docs/design/mcp/SHADOW-ACTIVATION.md §3):
+//
+//   - SHADOW readiness — the non-executing evaluation plane: a composed
+//     *execution.ShadowEvaluator (no upstream client, no materialize-capable broker),
+//     durable events, policy/catalog/registry, an optional plan-only CredentialPlanner,
+//     request inspection, rollout state, health/metrics. Shadow evaluates real traffic
+//     and records evidence but NEVER crosses the irreversible side-effect boundary.
+//
+//   - LIVE-EXECUTION readiness — everything Shadow has PLUS the live capabilities:
+//     a live *execution.Executor, the bounded UpstreamCaller, credential Materialize,
+//     and the final kill-switch boundary recheck. Only Canary/Production need this.
+//
+// The two tiers are separate atomic.Bools with a strict, non-negotiable invariant:
+//
+//	Shadow readiness MUST NOT imply live-execution readiness.
+//	Live-execution readiness MUST NOT become true merely because Shadow is available.
+//
+// So markGatewayShadowDepsReady sets ONLY the shadow tier, markGatewayExecDepsReady
+// sets ONLY the live tier, and neither reads or writes the other. This phase composes
+// the ShadowEvaluator (mcp_shadow_startup.go) and calls markGatewayShadowDepsReady;
+// it composes NO live executor and never calls markGatewayExecDepsReady, so a Shadow
+// transition can be admitted while every Canary/Production transition still fails
+// closed at the same gate. The evolved execution-posture wall
+// (mcp_execution_posture_test.go) pins that the LIVE hooks stay uncalled.
+
+// execDepsRegistry tracks, per capability, the two independent readiness tiers. All
+// four default to false (the Observe-only shipped posture). Values are process-global
+// and set once at startup by the composition layer.
 type execDepsRegistry struct {
+	// shadow — the non-executing Shadow evaluation plane is composed.
+	shadowGateway    atomic.Bool
+	shadowManagement atomic.Bool
+	// live — the live-execution plane (executor + upstream + materialize) is composed.
+	// This phase never sets either; both stay false so Canary/Production fail closed.
 	gateway    atomic.Bool
 	management atomic.Bool
 }
 
 var globalExecDeps = &execDepsRegistry{}
 
-// markGatewayExecDepsReady is the registration hook the future guarded-execution
-// composition calls once it has composed the executor, upstream client, credential
-// broker, event manager, and inspection/DLP plane for the Gateway capability. It is
-// intentionally UNCALLED in the current build, so the precondition stays fail-closed.
+// markGatewayShadowDepsReady is the registration hook the Shadow composition
+// (mcp_shadow_startup.go) calls once it has composed the non-executing ShadowEvaluator
+// and its evaluation-plane dependencies for the Gateway capability. It arms ONLY the
+// shadow tier — it never touches the live tier, so composing Shadow can never make a
+// live-execution transition succeed.
+func markGatewayShadowDepsReady() { globalExecDeps.shadowGateway.Store(true) }
+
+// markManagementShadowDepsReady mirrors the Gateway hook for Management. Management
+// never executes an upstream tools/call, so this is provided for symmetry only; the
+// Management Shadow path is not composed in this phase.
+func markManagementShadowDepsReady() { globalExecDeps.shadowManagement.Store(true) }
+
+// markGatewayExecDepsReady is the registration hook the FUTURE live-execution
+// composition would call once it has composed the live executor, upstream client,
+// credential broker (with Materialize), event manager, and inspection/DLP plane for
+// the Gateway capability. It is intentionally UNCALLED in this build, so
+// Canary/Production stay fail-closed. Arming it is a separately-reviewed activation.
 func markGatewayExecDepsReady() { globalExecDeps.gateway.Store(true) }
 
-// markManagementExecDepsReady mirrors the Gateway hook for the Management capability.
+// markManagementExecDepsReady mirrors the Gateway live hook for Management.
 func markManagementExecDepsReady() { globalExecDeps.management.Store(true) }
 
-// execDepsConfigured reports whether the guarded-execution plane for a capability is
-// composed. False (fail-closed) is the shipped default for both capabilities.
-func execDepsConfigured(capbManagement bool) bool {
+// shadowDepsConfigured reports whether the non-executing Shadow evaluation plane for a
+// capability is composed. False (fail-closed) is the shipped default.
+func shadowDepsConfigured(capbManagement bool) bool {
+	if capbManagement {
+		return globalExecDeps.shadowManagement.Load()
+	}
+	return globalExecDeps.shadowGateway.Load()
+}
+
+// liveExecDepsConfigured reports whether the LIVE-execution plane for a capability is
+// composed. False (fail-closed) is the shipped default for both capabilities, and this
+// phase never sets it. It is deliberately independent of the shadow tier: a Shadow-only
+// node reports shadowDepsConfigured==true and liveExecDepsConfigured==false.
+func liveExecDepsConfigured(capbManagement bool) bool {
 	if capbManagement {
 		return globalExecDeps.management.Load()
 	}
 	return globalExecDeps.gateway.Load()
+}
+
+// modeExecReady reports whether the readiness tier a target mode REQUIRES is composed
+// for the capability. It is the single decision every rollout-transition gate uses so
+// the shadow-vs-live split is expressed in exactly one place:
+//
+//   - Canary/Production require the LIVE tier (liveExecDepsConfigured).
+//   - Shadow requires only the SHADOW tier (shadowDepsConfigured).
+//   - Disabled/Observe require nothing.
+//
+// Fail-closed: an unknown mode falls through to the Shadow/Observe arms and is only
+// admitted if it is Disabled/Observe.
+func modeExecReady(mode rollout.Mode, capbManagement bool) bool {
+	switch {
+	case mode.RequiresLiveExecution():
+		return liveExecDepsConfigured(capbManagement)
+	case mode == rollout.ModeShadow:
+		return shadowDepsConfigured(capbManagement)
+	default:
+		return true
+	}
 }

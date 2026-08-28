@@ -35,6 +35,20 @@ func TestModeParseAndRank(t *testing.T) {
 	if ModeShadow.FullyEnforces() || !ModeCanary.FullyEnforces() {
 		t.Fatal("FullyEnforces wrong")
 	}
+	// RequiresLiveExecution is the STRICT subset that excludes Shadow: after Layer B,
+	// Shadow composes the evaluation plane but performs NO real upstream side effect, so
+	// it must NOT require live-execution readiness. Only Canary/Production do. This is the
+	// predicate the readiness split relies on — Shadow gating on it would re-introduce the
+	// coupling this phase removes.
+	if ModeShadow.RequiresLiveExecution() {
+		t.Fatal("Shadow must not require live execution (Layer B: no upstream side effect)")
+	}
+	if ModeObserve.RequiresLiveExecution() || ModeDisabled.RequiresLiveExecution() {
+		t.Fatal("Observe/Disabled must not require live execution")
+	}
+	if !ModeCanary.RequiresLiveExecution() || !ModeProduction.RequiresLiveExecution() {
+		t.Fatal("Canary/Production must require live execution")
+	}
 }
 
 func TestPromotionOneStageOnly(t *testing.T) {
@@ -444,6 +458,92 @@ func TestSignedConfigCanaryRequiresEnumerable(t *testing.T) {
 	}
 }
 
+// TestShadowNeverResolvesToExecute is §15 mutation #1: an in-scope Shadow request must
+// NEVER resolve to EffectExecute, for ANY policy action and with or without a hard
+// failure — Shadow evaluates, it never crosses the side-effect boundary. Mutation:
+// making resolveShadow return EffectExecute for the allow case fails this exhaustively.
+func TestShadowNeverResolvesToExecute(t *testing.T) {
+	actions := []ActionKind{
+		ActionKindDenied, ActionKindAllow, ActionKindConfirm, ActionKindApproval,
+		ActionKindAllowOnce, ActionKindAllowSession, ActionKindRedaction,
+	}
+	for _, inScope := range []bool{true, false} {
+		for _, hard := range []bool{true, false} {
+			for _, a := range actions {
+				r := Resolve(ResolveInput{
+					Mode: ModeShadow, InScope: inScope, Action: a,
+					HardFailure: hard, ObligationsSatisfied: true,
+				})
+				if r.Disposition == EffectExecute {
+					t.Fatalf("SECURITY: Shadow resolved to EffectExecute (inScope=%v hard=%v action=%v)", inScope, hard, a)
+				}
+				if r.Executed {
+					t.Fatalf("SECURITY: Shadow marked Executed (inScope=%v hard=%v action=%v)", inScope, hard, a)
+				}
+				// In-scope Shadow is always the non-executing evaluate disposition;
+				// out-of-scope is Observe (record-only). Never execute, never block.
+				want := EffectShadowEvaluate
+				if !inScope {
+					want = EffectRecordOnly
+				}
+				if r.Disposition != want {
+					t.Fatalf("Shadow disposition = %v, want %v (inScope=%v hard=%v action=%v)", r.Disposition, want, inScope, hard, a)
+				}
+			}
+		}
+	}
+}
+
+// TestEmptyScopeMatchesNoSubject is §15 mutation #6: a missing/empty scope must match
+// NOTHING (never "all subjects"). Combined with the Shadow-requires-enumerable
+// validation, this makes "missing scope shadows everything" impossible in both
+// directions — the config is rejected AND, defensively, an empty scope contains nothing.
+func TestEmptyScopeMatchesNoSubject(t *testing.T) {
+	empty := EmptyScope(CapabilityGateway)
+	if !empty.MatchesNothing() {
+		t.Fatal("an empty scope must report MatchesNothing")
+	}
+	subjects := []Subject{
+		{Capability: CapabilityGateway, PrincipalID: "p1", ServerID: "s1", Operation: RiskRead},
+		{Capability: CapabilityGateway, Tenant: "t1", Operation: RiskRead},
+		{Capability: CapabilityGateway, ClientID: "c1", AgentID: "a1", Operation: RiskWrite},
+	}
+	for _, s := range subjects {
+		if empty.Contains(s) {
+			t.Fatalf("SECURITY: an empty scope must not contain any subject, matched %+v", s)
+		}
+	}
+}
+
+// TestSignedConfigShadowRequiresEnumerable pins the "no scope = no Shadow" contract
+// (SHADOW-ACTIVATION.md §5). An EMPTY Shadow scope and a PERCENTAGE-ONLY Shadow scope
+// must both be rejected fail-closed at validation, so a mis-scoped Shadow activation can
+// never look accepted while shadowing nothing (or, via a later widening, everything).
+//
+// Mutation coverage: reverting the Validate change so ModeShadow is not in the
+// enumerable-required set makes the empty-scope case pass validation (would_execute a
+// fleet-wide shadow by omission) and fails this test.
+func TestSignedConfigShadowRequiresEnumerable(t *testing.T) {
+	// Empty scope (no inclusion selectors, no percentage) — the classic "missing scope".
+	empty := SignedConfig{SelectorSchema: selectorSchema, Capability: CapabilityGateway, Mode: ModeShadow,
+		Scope: ScopeSpec{Capability: CapabilityGateway}, ConnectorMode: ConnectorLocalClient}
+	if mcperr.ReasonOf(empty.Validate(CapabilityGateway, testLimits(t))) != mcperr.ReasonRolloutScopeInvalid {
+		t.Fatal("SECURITY: an empty-scope Shadow config must be rejected (no scope = no Shadow)")
+	}
+	// Percentage-only scope — "1% of everything" is not an enumerable bounded target.
+	pct := SignedConfig{SelectorSchema: selectorSchema, Capability: CapabilityGateway, Mode: ModeShadow,
+		Scope: ScopeSpec{Capability: CapabilityGateway, Percent: 1, BucketSalt: "s"}, ConnectorMode: ConnectorLocalClient}
+	if mcperr.ReasonOf(pct.Validate(CapabilityGateway, testLimits(t))) != mcperr.ReasonRolloutScopeInvalid {
+		t.Fatal("SECURITY: a percentage-only Shadow config must be rejected (not an enumerable bounded target)")
+	}
+	// A tightly bounded Shadow scope (one server) is valid — the first-activation shape.
+	ok := SignedConfig{SelectorSchema: selectorSchema, Capability: CapabilityGateway, Mode: ModeShadow, ScopeRevision: 1,
+		Scope: ScopeSpec{Capability: CapabilityGateway, Servers: []string{"controlled-test-server"}}, ConnectorMode: ConnectorLocalClient}
+	if err := ok.Validate(CapabilityGateway, testLimits(t)); err != nil {
+		t.Fatalf("a bounded single-server Shadow scope must validate: %v", err)
+	}
+}
+
 // ── Evidence (injected clock) ──────────────────────────────────────────────
 
 func TestEvidenceWindowsInjectedClock(t *testing.T) {
@@ -466,5 +566,158 @@ func TestEvidenceWindowsInjectedClock(t *testing.T) {
 	e.OpenCriticalHighDefects = 1
 	if met, _ := e.PromotionEvidenceMet(ModeShadow, ModeCanary, start.Add(30*24*time.Hour)); met {
 		t.Fatal("open critical/high defects must block promotion")
+	}
+}
+
+// TestAdmitsToolForEvaluation pins the principal-agnostic tool-in-scope check that the
+// Shadow usable-tool preflight uses (Codex P1, PR #1234): a scope targets a tool for a
+// tools/call evaluation when it admits the write risk class and the tool's server/tool
+// selectors, independent of the calling identity. A read-only scope, an excluded server,
+// or an off-scope server/tool must NOT be admitted.
+func TestAdmitsToolForEvaluation(t *testing.T) {
+	lim := DefaultLimits()
+	mk := func(spec ScopeSpec) Scope {
+		sc, err := Compile(spec, 1, lim)
+		if err != nil {
+			t.Fatalf("compile: %v", err)
+		}
+		return sc
+	}
+
+	// Server-scoped, write-admitting scope: the in-scope tool is targeted.
+	write := mk(ScopeSpec{Capability: CapabilityGateway, Servers: []string{"s1"}, Operations: []RiskClass{RiskWrite}, HighRisk: true})
+	if !write.AdmitsToolForEvaluation("s1", "t", "fp") {
+		t.Fatal("a write-admitting scope over server s1 must target s1's tool")
+	}
+	// Identity is not part of the check: no principal was configured, yet the tool is targeted.
+	if !write.AdmitsToolForEvaluation("s1", "other-tool", "fp2") {
+		t.Fatal("the tool match must be principal-agnostic and cover any tool on the in-scope server")
+	}
+	// A server NOT in the scope is not targeted.
+	if write.AdmitsToolForEvaluation("s2", "t", "fp") {
+		t.Fatal("a tool on an out-of-scope server must not be targeted")
+	}
+
+	// Read-only scope: no tools/call (write class) is ever targeted.
+	readOnly := mk(ScopeSpec{Capability: CapabilityGateway, Servers: []string{"s1"}, Operations: []RiskClass{RiskRead}})
+	if readOnly.AdmitsToolForEvaluation("s1", "t", "fp") {
+		t.Fatal("a read-only scope must not target a write-class tools/call tool")
+	}
+
+	// Explicit server exclusion wins.
+	excl := mk(ScopeSpec{Capability: CapabilityGateway, Servers: []string{"s1"}, ExcludeServers: []string{"s1"}, Operations: []RiskClass{RiskWrite}, HighRisk: true})
+	if excl.AdmitsToolForEvaluation("s1", "t", "fp") {
+		t.Fatal("an excluded server must not be targeted")
+	}
+
+	// The empty (matches-nothing) scope targets no tool.
+	if EmptyScope(CapabilityGateway).AdmitsToolForEvaluation("s1", "t", "fp") {
+		t.Fatal("the empty scope must target no tool")
+	}
+
+	// A tool-selector scope targets only the named tool.
+	toolSel := mk(ScopeSpec{Capability: CapabilityGateway, Servers: []string{"s1"}, Tools: []ToolSel{{Server: "s1", Name: "t", Fingerprint: "fp"}}, Operations: []RiskClass{RiskWrite}, HighRisk: true})
+	if !toolSel.AdmitsToolForEvaluation("s1", "t", "fp") {
+		t.Fatal("the named tool must be targeted")
+	}
+	if toolSel.AdmitsToolForEvaluation("s1", "t", "different-fp") {
+		t.Fatal("a tool selector must not target a different fingerprint")
+	}
+
+	// The fingerprint dimension is honored (Codex P1, PR #1234): a scope pinned to a specific
+	// fingerprint must NOT be satisfied by a Usable tool on the same admitted server whose
+	// fingerprint it does not admit — otherwise the usable-tool gate would pass for a scope
+	// Contains could never admit.
+	fpScope := mk(ScopeSpec{Capability: CapabilityGateway, Servers: []string{"s1"}, ToolFingerprints: []string{"pinned-fp"}, Operations: []RiskClass{RiskWrite}, HighRisk: true})
+	if !fpScope.AdmitsToolForEvaluation("s1", "t", "pinned-fp") {
+		t.Fatal("the pinned fingerprint must be targeted")
+	}
+	if fpScope.AdmitsToolForEvaluation("s1", "other", "unpinned-fp") {
+		t.Fatal("a tool whose fingerprint the scope does not admit must NOT be targeted — even on an in-scope server")
+	}
+
+	// A self-contradicting identity dimension admits NO request (Contains rejects all), so a
+	// Usable tool on an in-scope server must NOT be treated as reachable (Codex P2, PR #1234).
+	principalContradiction := mk(ScopeSpec{Capability: CapabilityGateway, Servers: []string{"s1"}, Principals: []string{"p"}, ExcludePrincipals: []string{"p"}, Operations: []RiskClass{RiskWrite}, HighRisk: true})
+	if principalContradiction.AdmitsToolForEvaluation("s1", "t", "fp") {
+		t.Fatal("a scope whose only principal is also excluded admits no request — its usable tool must not be reachable")
+	}
+	tenantContradiction := mk(ScopeSpec{Capability: CapabilityGateway, Servers: []string{"s1"}, Tenants: []string{"acme"}, ExcludeTenants: []string{"acme"}, Operations: []RiskClass{RiskWrite}, HighRisk: true})
+	if tenantContradiction.AdmitsToolForEvaluation("s1", "t", "fp") {
+		t.Fatal("a scope whose only tenant is also excluded admits no request — its usable tool must not be reachable")
+	}
+	// A partial exclusion (one of two included principals excluded) still admits the other, so
+	// the tool remains reachable — the contradiction check must not over-reject.
+	partial := mk(ScopeSpec{Capability: CapabilityGateway, Servers: []string{"s1"}, Principals: []string{"p", "q"}, ExcludePrincipals: []string{"p"}, Operations: []RiskClass{RiskWrite}, HighRisk: true})
+	if !partial.AdmitsToolForEvaluation("s1", "t", "fp") {
+		t.Fatal("a scope that still admits principal q must keep its usable tool reachable")
+	}
+
+	// An environments inclusion admits NO production request: executor.subjectFor never sets
+	// Subject.Environment, so Contains rejects every request against an environment-scoped
+	// scope even though a Usable tool is targeted (Codex P2, PR #1234). Mutation: dropping the
+	// !s.environments.empty() guard makes AdmitsToolForEvaluation return true and fails here.
+	envScope := mk(ScopeSpec{Capability: CapabilityGateway, Servers: []string{"s1"}, Environments: []string{"prod"}, Operations: []RiskClass{RiskWrite}, HighRisk: true})
+	if envScope.AdmitsToolForEvaluation("s1", "t", "fp") {
+		t.Fatal("an environment-scoped scope must not be reachable — no production subject carries an Environment")
+	}
+	// Cross-check the property: the best-possible production subject (everything matches, but
+	// Environment is empty as subjectFor produces) is still rejected by Contains, while the
+	// same subject WITH the environment set does match — proving the fail-closed is about the
+	// unpopulated subject field, not a broken environments dimension.
+	subjNoEnv := Subject{Capability: CapabilityGateway, ServerID: "s1", ToolName: "t", ToolFingerprint: "fp", Operation: RiskWrite}
+	if envScope.Contains(subjNoEnv) {
+		t.Fatal("control: a production subject with no Environment must not match an environment-scoped scope")
+	}
+	subjWithEnv := subjNoEnv
+	subjWithEnv.Environment = "prod"
+	if !envScope.Contains(subjWithEnv) {
+		t.Fatal("control: the environments dimension itself must match when the subject carries the environment")
+	}
+
+	// A percentage sub-sample over a FINITE bucket-key set can be unsatisfiable: with salt "s9"
+	// every included principal here hashes OUTSIDE a 50% bucket (StableBucket q=86, r=82), so
+	// Contains rejects every request even though the tool is targeted (Codex P2, PR #1234).
+	// Mutation: dropping the !s.bucketHasSurvivingKey() guard makes admit return true and fails
+	// here.
+	bucketDead := mk(ScopeSpec{Capability: CapabilityGateway, Servers: []string{"s1"}, Principals: []string{"q", "r"}, Percent: 50, BucketSalt: "s9", Operations: []RiskClass{RiskWrite}, HighRisk: true})
+	if bucketDead.AdmitsToolForEvaluation("s1", "t", "fp") {
+		t.Fatal("a percentage bucket whose every included key hashes outside the bucket admits no request — its usable tool must not be reachable")
+	}
+	// Cross-check: Contains rejects every included principal for this dead bucket.
+	for _, p := range []string{"q", "r"} {
+		if bucketDead.Contains(Subject{Capability: CapabilityGateway, ServerID: "s1", ToolName: "t", ToolFingerprint: "fp", PrincipalID: p, Operation: RiskWrite}) {
+			t.Fatalf("control: principal %q must fall outside the 50%% bucket for salt s9", p)
+		}
+	}
+	// A bucket with at least one surviving included key stays reachable (principal p hashes to 1,
+	// inside a 50% bucket) — the survivor check must not over-reject.
+	bucketLive := mk(ScopeSpec{Capability: CapabilityGateway, Servers: []string{"s1"}, Principals: []string{"p", "q"}, Percent: 50, BucketSalt: "s9", Operations: []RiskClass{RiskWrite}, HighRisk: true})
+	if !bucketLive.AdmitsToolForEvaluation("s1", "t", "fp") {
+		t.Fatal("a percentage bucket with a surviving included key must keep its usable tool reachable")
+	}
+	if !bucketLive.Contains(Subject{Capability: CapabilityGateway, ServerID: "s1", ToolName: "t", ToolFingerprint: "fp", PrincipalID: "p", Operation: RiskWrite}) {
+		t.Fatal("control: principal p must fall inside the 50% bucket for salt s9")
+	}
+
+	// An EXCLUDED in-bucket key is not a survivor: Contains rejects it via the exclusion before
+	// the bucket, so the only in-bucket principal (p) being excluded, while the surviving one (q)
+	// hashes outside, means the scope evaluates nothing (Codex P2, PR #1234). Mutation: not
+	// filtering exclusions in bucketHasSurvivingKey counts p as a survivor and fails here.
+	bucketExcludedSurvivor := mk(ScopeSpec{Capability: CapabilityGateway, Servers: []string{"s1"}, Principals: []string{"p", "q"}, ExcludePrincipals: []string{"p"}, Percent: 50, BucketSalt: "s9", Operations: []RiskClass{RiskWrite}, HighRisk: true})
+	if bucketExcludedSurvivor.AdmitsToolForEvaluation("s1", "t", "fp") {
+		t.Fatal("a bucket whose only in-bucket key is excluded (and the non-excluded key is out-of-bucket) admits no request")
+	}
+	// Cross-check: Contains rejects the excluded in-bucket p (exclusion) AND the out-of-bucket q.
+	if bucketExcludedSurvivor.Contains(Subject{Capability: CapabilityGateway, ServerID: "s1", ToolName: "t", ToolFingerprint: "fp", PrincipalID: "p", Operation: RiskWrite}) {
+		t.Fatal("control: excluded principal p must be rejected by Contains")
+	}
+	if bucketExcludedSurvivor.Contains(Subject{Capability: CapabilityGateway, ServerID: "s1", ToolName: "t", ToolFingerprint: "fp", PrincipalID: "q", Operation: RiskWrite}) {
+		t.Fatal("control: out-of-bucket principal q must be rejected by Contains")
+	}
+	// Excluding an OUT-of-bucket key must not over-reject: p survives (in-bucket, not excluded).
+	bucketExcludeOutOfBucket := mk(ScopeSpec{Capability: CapabilityGateway, Servers: []string{"s1"}, Principals: []string{"p", "q"}, ExcludePrincipals: []string{"q"}, Percent: 50, BucketSalt: "s9", Operations: []RiskClass{RiskWrite}, HighRisk: true})
+	if !bucketExcludeOutOfBucket.AdmitsToolForEvaluation("s1", "t", "fp") {
+		t.Fatal("excluding an out-of-bucket key must not reject a scope whose in-bucket key still survives")
 	}
 }

@@ -29,6 +29,13 @@ var errShadowExecDepsNotConfigured = mcperr.New(mcperr.ReasonRolloutTransitionIn
 var errRolloutCapabilityMismatch = mcperr.New(mcperr.ReasonSnapshotCapabilityMismatch,
 	"rollout.transition", "rollout capability does not match the envelope capability")
 
+// errShadowPreflightFailed marks a Shadow transition rejected because the node is not
+// genuinely ready to EVALUATE Shadow (the §14 preflight failed). It carries the same
+// transition-invalid reason class as the exec-deps gate so a DP nack reaches the CP with
+// a truthful, alertable code; the specific bounded reasons are logged, never embedded.
+var errShadowPreflightFailed = mcperr.New(mcperr.ReasonRolloutTransitionInvalid,
+	"rollout.transition", "shadow_activation_preflight_failed")
+
 // errRolloutPersistFailed wraps a durable-persistence failure so callers can reject a
 // transition rather than acknowledge a RAM-only mode change.
 var errRolloutPersistFailed = errors.New("rollout_persist_failed")
@@ -175,9 +182,28 @@ func (r *mcpRollout) commitRolloutTransitionAt(cfg *rollout.SignedConfig, actor 
 	r.durableMu.Lock()
 	defer r.durableMu.Unlock()
 	st := r.stateFor(cfg.Capability)
-	// (1) Execution-dependency precondition: fail closed for an executing mode.
-	if cfg.Mode.RequiresExecutionPlane() && !execDepsConfigured(cfg.Capability == rollout.CapabilityManagement) {
+	// (1) Execution-dependency precondition: fail closed unless the readiness TIER the
+	// target mode requires is composed. Shadow requires only the non-executing shadow
+	// plane; Canary/Production require the live-execution plane (never composed in this
+	// build). modeExecReady owns the shadow-vs-live split.
+	if !modeExecReady(cfg.Mode, cfg.Capability == rollout.CapabilityManagement) {
 		return errShadowExecDepsNotConfigured
+	}
+	// (1b) Gateway Shadow activation preflight, enforced in the SHARED commit path so
+	// EVERY caller is covered — the CP→DP apply (applyMCPCapabilityEnvelope), the startup
+	// reconcile (reconcileRolloutWithAppliers), and any future caller. The coarse
+	// modeExecReady tier only proves the shadow evaluator is composed; it does NOT prove
+	// the node can actually EVALUATE (policy/inventory/inspection/listener). Without this,
+	// startup reconciliation could re-install a recovered active Gateway Shadow envelope
+	// right after restore() clamped it, re-advertising Shadow on a node that fails every
+	// request closed and restarting the evidence window (Codex P1, PR #1234). Management
+	// Shadow is a distinct, read-only concept (no upstream evaluation) and is intentionally
+	// NOT gated by this Gateway preflight — its shadow tier gate above suffices.
+	if cfg.Mode == rollout.ModeShadow && cfg.Capability == rollout.CapabilityGateway {
+		if pf := evaluateShadowActivationPreflight(cfg.Capability, cfg.Scope, cfg.ScopeRevision); !pf.Ready {
+			logger.Printf("MCP rollout: Gateway Shadow transition rejected by activation preflight %v (fail-closed)", pf.Reasons)
+			return errShadowPreflightFailed
+		}
 	}
 	// Snapshot the prior state for a fail-closed rollback if persistence fails, and
 	// for the scope-change continuity check below.
@@ -246,11 +272,29 @@ func (r *mcpRollout) restore() {
 			// shipped build the exec-deps gate blocks such a state from ever being
 			// persisted, so this only fires against a hand-crafted state file — clamp it
 			// to Disabled (fail-closed) rather than surface a misleading executing label.
-			if st.CurrentMode().RequiresExecutionPlane() && !execDepsConfigured(st.Capability() == rollout.CapabilityManagement) {
+			if !modeExecReady(st.CurrentMode(), st.Capability() == rollout.CapabilityManagement) {
 				_ = st.SetConfig(rollout.DisabledConfig(st.Capability()), "restore-clamp", time.Now().UnixNano())
 				r.setPersistStatus(st.Capability(), "degraded")
-				logger.Printf("MCP rollout restore for %s: refused executing mode without execution deps; clamped to Disabled", st.Capability().String())
+				logger.Printf("MCP rollout restore for %s: refused executing mode without required execution deps; clamped to Disabled", st.Capability().String())
 				continue
+			}
+			// A restored Shadow mode must also pass the full activation preflight — not just
+			// the coarse exec-deps tier (Codex P1, PR #1234). On a restart where the shadow
+			// flag is armed (composition) but the node cannot actually EVALUATE — policy or
+			// inventory removed, listener not serving, inspection absent — the node would
+			// otherwise advertise an active Shadow rollout while its status preflight says
+			// not-ready and the evidence window accrues invalid time. The KILL reason is
+			// EXCLUDED: the kill switch is restored independently and is reversible via
+			// clearEmergency, so a killed-but-otherwise-ready Shadow node keeps its mode
+			// (clamping it to Disabled would make the kill irreversible for the mode).
+			if st.CurrentMode() == rollout.ModeShadow {
+				restored := st.CurrentConfig()
+				if pf := evaluateShadowActivationPreflight(st.Capability(), restored.Scope, restored.ScopeRevision); shadowPreflightUnreadyIgnoringKill(pf) {
+					_ = st.SetConfig(rollout.DisabledConfig(st.Capability()), "restore-clamp", time.Now().UnixNano())
+					r.setPersistStatus(st.Capability(), "degraded")
+					logger.Printf("MCP rollout restore for %s: restored Shadow failed activation preflight %v; clamped to Disabled (fail-closed)", st.Capability().String(), pf.Reasons)
+					continue
+				}
 			}
 			r.setPersistStatus(st.Capability(), "recovered")
 			logger.Printf("MCP rollout restore for %s: mode=%s (recovered)", st.Capability().String(), st.CurrentMode().String())

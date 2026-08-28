@@ -21,6 +21,12 @@ import (
 	"github.com/KidCarmi/Culvert/internal/secret"
 )
 
+// runExec is the test-side of the single-resolution seam: it resolves the disposition
+// once and executes it, mirroring what the runtime does (Resolve then Execute(res)).
+func runExec(p runtime.ExecutionProvider, ctx context.Context, in runtime.ExecInput) runtime.ExecOutput {
+	return p.Execute(ctx, in, p.Resolve(in))
+}
+
 // fakeUpstream records calls and returns a canned result.
 type fakeUpstream struct {
 	calls    int
@@ -129,7 +135,7 @@ func newExec(t *testing.T, st *rollout.State, up UpstreamCaller, ev *events.Mana
 func TestExecDisabledNoUpstream(t *testing.T) {
 	up := &fakeUpstream{}
 	e := newExec(t, stateForMode(t, rollout.ModeDisabled), up, realEvents(t, nil))
-	out := e.Execute(context.Background(), execInput(policy.ActionAllow, false))
+	out := runExec(e, context.Background(), execInput(policy.ActionAllow, false))
 	if up.calls != 0 {
 		t.Fatal("disabled must not call upstream")
 	}
@@ -141,7 +147,7 @@ func TestExecDisabledNoUpstream(t *testing.T) {
 func TestExecObserveNoUpstream(t *testing.T) {
 	up := &fakeUpstream{}
 	e := newExec(t, stateForMode(t, rollout.ModeObserve), up, realEvents(t, nil))
-	out := e.Execute(context.Background(), execInput(policy.ActionAllow, false))
+	out := runExec(e, context.Background(), execInput(policy.ActionAllow, false))
 	if up.calls != 0 {
 		t.Fatal("observe must not call upstream")
 	}
@@ -157,7 +163,7 @@ func TestExecObserveNoUpstream(t *testing.T) {
 func TestExecShadowEvaluatesDenyWithOverride(t *testing.T) {
 	up := &fakeUpstream{}
 	e := newExec(t, stateForMode(t, rollout.ModeShadow), up, realEvents(t, nil))
-	out := e.Execute(context.Background(), execInput(policy.ActionDeny, false))
+	out := runExec(e, context.Background(), execInput(policy.ActionDeny, false))
 	if up.calls != 0 {
 		t.Fatalf("shadow must NOT cross the side-effect boundary — a Shadow evaluation makes no upstream call, calls=%d", up.calls)
 	}
@@ -187,7 +193,7 @@ func TestExecShadowEvaluatesDenyWithOverride(t *testing.T) {
 func TestExecShadowHardFailureEvaluatesWouldFailInspection(t *testing.T) {
 	up := &fakeUpstream{}
 	e := newExec(t, stateForMode(t, rollout.ModeShadow), up, realEvents(t, nil))
-	out := e.Execute(context.Background(), execInput(policy.ActionAllow, true))
+	out := runExec(e, context.Background(), execInput(policy.ActionAllow, true))
 	if up.calls != 0 {
 		t.Fatal("a hard failure must never reach upstream in shadow")
 	}
@@ -221,7 +227,7 @@ func shadowOutcomeFromBody(t *testing.T, body []byte) string {
 func TestExecCanaryBlocksDeny(t *testing.T) {
 	up := &fakeUpstream{}
 	e := newExec(t, stateForMode(t, rollout.ModeCanary), up, realEvents(t, nil))
-	out := e.Execute(context.Background(), execInput(policy.ActionDeny, false))
+	out := runExec(e, context.Background(), execInput(policy.ActionDeny, false))
 	if up.calls != 0 {
 		t.Fatal("canary must block a DENY — no upstream")
 	}
@@ -233,7 +239,7 @@ func TestExecCanaryBlocksDeny(t *testing.T) {
 func TestExecCanaryExecutesAllow(t *testing.T) {
 	up := &fakeUpstream{}
 	e := newExec(t, stateForMode(t, rollout.ModeCanary), up, realEvents(t, nil))
-	out := e.Execute(context.Background(), execInput(policy.ActionAllow, false))
+	out := runExec(e, context.Background(), execInput(policy.ActionAllow, false))
 	if up.calls != 1 {
 		t.Fatalf("canary must execute an ALLOW, calls=%d", up.calls)
 	}
@@ -247,7 +253,7 @@ func TestExecKillSwitchBlocks(t *testing.T) {
 	st.EngageKillSwitch("oncall", 1)
 	up := &fakeUpstream{}
 	e := newExec(t, st, up, realEvents(t, nil))
-	out := e.Execute(context.Background(), execInput(policy.ActionAllow, false))
+	out := runExec(e, context.Background(), execInput(policy.ActionAllow, false))
 	if up.calls != 0 {
 		t.Fatal("kill switch must stop admission — no upstream")
 	}
@@ -281,7 +287,7 @@ func TestExecCommitFailureNoUpstream(t *testing.T) {
 	up := &fakeUpstream{}
 	// Canary + ALLOW ⇒ would execute, but the durable commit MUST fail closed first.
 	e := newExec(t, stateForMode(t, rollout.ModeCanary), up, ev)
-	out := e.Execute(context.Background(), execInput(policy.ActionAllow, false))
+	out := runExec(e, context.Background(), execInput(policy.ActionAllow, false))
 	if up.calls != 0 {
 		t.Fatalf("a durable-commit failure must prevent the upstream call, calls=%d", up.calls)
 	}
@@ -293,7 +299,7 @@ func TestExecCommitFailureNoUpstream(t *testing.T) {
 func TestExecNilEventsFailsClosed(t *testing.T) {
 	up := &fakeUpstream{}
 	e := newExec(t, stateForMode(t, rollout.ModeCanary), up, nil)
-	out := e.Execute(context.Background(), execInput(policy.ActionAllow, false))
+	out := runExec(e, context.Background(), execInput(policy.ActionAllow, false))
 	if up.calls != 0 {
 		t.Fatal("nil events (no durability) must fail closed — no upstream")
 	}

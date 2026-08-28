@@ -70,6 +70,28 @@ func gatewayHealthSnapshot() (mcpruntime.HealthSnapshot, bool) {
 	return mcpruntime.HealthSnapshot{}, false
 }
 
+// gatewayServingReady reports whether the Gateway observe listener is not merely
+// CONFIGURED at startup but LIVE and SERVING: the observe state is mcpObserveConfigured
+// AND the runtime's Gateway health snapshot is present and in PhaseReady. It is pure (no
+// global reads) so the phase mapping is unit-testable without a live runtime.
+//
+// The distinction is load-bearing for the Shadow activation preflight: serve() sets
+// PhaseReady synchronously at Start, but a listener that started and later exited its serve
+// loop with an unexpected error becomes PhaseDegraded while getMCPObserveStatus().State
+// stays mcpObserveConfigured. Relying on the startup result alone would let the preflight
+// declare a node ready and open a Shadow evidence window on a listener that can no longer
+// receive traffic (Codex P1, PR #1234).
+func gatewayServingReady(state mcpObserveState, snap mcpruntime.HealthSnapshot, haveSnap bool) bool {
+	return state == mcpObserveConfigured && haveSnap && snap.Phase == mcpruntime.PhaseReady
+}
+
+// liveGatewayListenerReady is the production Shadow-preflight listener probe: it reads the
+// current observe state and the live Gateway health snapshot and requires PhaseReady.
+func liveGatewayListenerReady() bool {
+	snap, ok := gatewayHealthSnapshot()
+	return gatewayServingReady(getMCPObserveStatus().State, snap, ok)
+}
+
 // mcpPhaseState maps a listener Phase to the admin health state label.
 func mcpPhaseState(p mcpruntime.Phase) string {
 	switch p {

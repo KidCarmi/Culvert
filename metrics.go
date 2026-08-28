@@ -1167,5 +1167,6 @@ culvert_decrypt_autoexclude_surge_total %d
 	supportWritePrometheus(&ruleMetBuf)   // culvert_support_bundle_retention_* (M5 retention observability)
 	saasFeedWritePrometheus(&ruleMetBuf)  // culvert_saasfeed_* (F3b-4 signed-feed observability)
 	writeMCPTelemetryMetrics(&ruleMetBuf) // culvert_mcp_* (QUAL-3 durable telemetry, low-cardinality)
+	writeMCPShadowMetrics(&ruleMetBuf)    // culvert_mcp_shadow_* (controlled Shadow activation, low-cardinality)
 	fmt.Fprint(w, ruleMetBuf.String())    //nolint:errcheck // writes to http.ResponseWriter; an error only means the client disconnected
 }

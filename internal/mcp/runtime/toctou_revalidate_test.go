@@ -3,6 +3,8 @@ package runtime
 import (
 	"context"
 	"testing"
+
+	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 )
 
 // hookCapturingExec captures the last-moment revalidation hook the runtime hands
@@ -16,7 +18,16 @@ type hookCapturingExec struct {
 	sawHookIsNil bool
 }
 
-func (e *hookCapturingExec) Execute(_ context.Context, in ExecInput) ExecOutput {
+// Resolve returns a non-record-only disposition so the runtime always reaches Execute
+// (this fixture exercises the last-moment drift re-check the runtime hands the executor).
+func (e *hookCapturingExec) Resolve(ExecInput) rollout.Resolution {
+	return rollout.Resolution{Disposition: rollout.EffectShadowEvaluate}
+}
+
+// KillActive: these fixtures never engage the kill switch.
+func (e *hookCapturingExec) KillActive() bool { return false }
+
+func (e *hookCapturingExec) Execute(_ context.Context, in ExecInput, _ rollout.Resolution) ExecOutput {
 	e.reached++
 	if in.ToolStillCurrent == nil {
 		e.sawHookIsNil = true
