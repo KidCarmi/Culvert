@@ -21,6 +21,7 @@ import { AccessRulesPage } from "../features/policy/AccessRulesPage";
 import { AuthRulesPage } from "../features/policy/AuthRulesPage";
 import { TesterPage } from "../features/policy/TesterPage";
 import { PolicyLearningPage } from "../features/learning/PolicyLearningPage";
+import { CategoryGroupsPage } from "../features/objects/CategoryGroupsPage";
 
 function NotFoundPage(): JSX.Element {
   return (
@@ -51,6 +52,10 @@ export function createAppRouter(): ReturnType<typeof createBrowserRouter> {
             element: <AuthRulesPage />,
           },
           { path: "policies/tester", element: <TesterPage /> },
+          {
+            path: "objects/category-groups",
+            element: <CategoryGroupsPage />,
+          },
           { path: "policies/learning", element: <PolicyLearningPage /> },
           { path: "diagnostics", element: <DiagnosticsPage /> },
           { path: "governance", element: <GovernancePage /> },

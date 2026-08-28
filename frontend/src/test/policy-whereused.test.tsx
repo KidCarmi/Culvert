@@ -120,7 +120,7 @@ it("access-rule/policy consumers deep-link by stable ID to the migrated route", 
   );
 });
 
-it("auth-rule consumers render as information only (no route before 2C)", async () => {
+it("auth-rule and category-group consumers deep-link by stable ID (2D-A §19)", async () => {
   await mount([
     {
       consumerType: "auth-rule",
@@ -129,10 +129,35 @@ it("auth-rule consumers render as information only (no route before 2C)", async 
       detail: "destCategory",
       view: "authpolicy",
     },
+    {
+      consumerType: "category-group",
+      id: "abc123def456",
+      name: "Prod Allowed",
+      detail: "categories",
+      view: "catgroups",
+    },
+  ]);
+  await openPanel("printer waiver");
+  const hrefs = Array.from(container.querySelectorAll("a")).map((a) =>
+    a.getAttribute("href"),
+  );
+  expect(hrefs).toContain("/policies/authentication-rules?rule=01XAUTH");
+  expect(hrefs).toContain("/objects/category-groups?id=abc123def456");
+});
+
+it("an auth-rule consumer with an unreviewed view string renders info-only", async () => {
+  await mount([
+    {
+      consumerType: "auth-rule",
+      id: "01XAUTH",
+      name: "printer waiver",
+      detail: "destCategory",
+      view: "not-the-reviewed-view",
+    },
   ]);
   await openPanel("printer waiver");
   expect(container.querySelector("a")).toBeNull();
-  expect(container.textContent).toContain("later slice");
+  expect(container.textContent).toContain("Authentication rule");
 });
 
 it("an arbitrary/malicious server view string can never mint a route", async () => {

@@ -27,11 +27,13 @@ const REF_TYPE_LABEL: Record<ObjectRefType, string> = {
   "decryption-profile": "Decryption profile",
 };
 
-// Explicit reviewed consumer → destination mapping (2A scope). An access-rule
-// consumer deep-links by its STABLE ID to the migrated Access Rules route;
-// every other consumer type renders as information only until its surface has
-// a real v2 route (extended per slice — never derived from server strings).
-function consumerDestination(c: ObjectRefConsumer): JSX.Element {
+// Explicit reviewed consumer → destination mapping (2A foundation, extended in
+// 2D-A §19 for routes that now exist). Deep links use STABLE IDs only. The
+// server `view` value stays data, never navigation authority — only these
+// reviewed (consumerType, view) pairs navigate; everything else renders as
+// reference information. Exported for the object-management delete dialog,
+// which renders the authoritative 409 consumer list with the same mapping.
+export function consumerDestination(c: ObjectRefConsumer): JSX.Element {
   if (c.consumerType === "access-rule" && c.view === "policy" && c.id !== "") {
     return (
       <Link to={`/policies/access-rules?rule=${encodeURIComponent(c.id)}`}>
@@ -39,11 +41,35 @@ function consumerDestination(c: ObjectRefConsumer): JSX.Element {
       </Link>
     );
   }
+  if (
+    c.consumerType === "auth-rule" &&
+    c.view === "authpolicy" &&
+    c.id !== ""
+  ) {
+    return (
+      <Link
+        to={`/policies/authentication-rules?rule=${encodeURIComponent(c.id)}`}
+      >
+        {c.name}
+      </Link>
+    );
+  }
+  if (
+    c.consumerType === "category-group" &&
+    c.view === "catgroups" &&
+    c.id !== ""
+  ) {
+    return (
+      <Link to={`/objects/category-groups?id=${encodeURIComponent(c.id)}`}>
+        {c.name}
+      </Link>
+    );
+  }
   const note =
     c.consumerType === "auth-rule"
-      ? "Authentication rule — surface migrates in a later slice"
+      ? "Authentication rule"
       : c.consumerType === "category-group"
-        ? "Category group — surface migrates in a later slice"
+        ? "Category group"
         : c.consumerType === "access-rule"
           ? "Access rule"
           : `${c.consumerType} — not navigable here`;

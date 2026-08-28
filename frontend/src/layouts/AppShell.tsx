@@ -86,6 +86,18 @@ const NAV: readonly NavSection[] = [
     ],
   },
   {
+    heading: "Objects",
+    icon: <IconPolicy />,
+    entries: [
+      {
+        label: "Category Groups",
+        to: "/objects/category-groups",
+        minRole: "viewer",
+      },
+      { label: "Decryption Profiles", minRole: "viewer" },
+    ],
+  },
+  {
     heading: "Security",
     icon: <IconShield />,
     entries: [
