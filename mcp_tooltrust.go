@@ -62,6 +62,14 @@ type mcpToolTrustCoordinator struct {
 	// the tool Usable until the next reconcile). It is an OUTER lock: taken before any
 	// store/catalog lock, never from under one.
 	deriveMu sync.Mutex
+	// pendingDemotions holds tools whose catalog Demote FAILED (Catalog.Demote returns
+	// ReasonStaleSnapshot when its bounded CAS loses to a concurrent ingest). A failed
+	// demote leaves the tool Usable, and if its last approval record is later pruned at the
+	// store cap, ToolRefs can no longer rediscover it — so the demotion would be lost and
+	// withdrawn trust would stay effective. Every reconcile re-derives ToolRefs UNION this
+	// set, so a failed demotion is retried until it succeeds even after the record is gone.
+	// Accessed only under deriveMu (every rederive path holds it).
+	pendingDemotions map[activeToolKey]struct{}
 }
 
 // now returns the coordinator clock (time.Now when unset). It reads nowFn under the
@@ -212,8 +220,18 @@ func (c *mcpToolTrustCoordinator) reconcile() {
 	// leave a no-longer-covered tool Usable. The active set is snapshotted+indexed ONCE
 	// here and reused for every tool (O(refs + approvals), not O(refs × approvals)).
 	activeByTool := indexActiveByTool(store.ActiveApprovals(now))
+	// Work set is ToolRefs UNION pendingDemotions: a tool whose Demote failed on an earlier
+	// pass (and whose record may since have been pruned) is NOT in ToolRefs any more, but it
+	// may still be Usable, so it must keep being re-derived until the demotion lands.
+	work := make(map[activeToolKey]struct{}, len(activeByTool))
 	for _, ref := range store.ToolRefs() {
-		c.rederiveToolWith(reg, cat, ref.ServerID, ref.ToolName, activeByTool)
+		work[activeToolKey{serverID: ref.ServerID, toolName: ref.ToolName}] = struct{}{}
+	}
+	for k := range c.pendingDemotions {
+		work[k] = struct{}{}
+	}
+	for k := range work {
+		c.rederiveToolWith(reg, cat, k.serverID, k.toolName, activeByTool)
 	}
 }
 
@@ -461,16 +479,19 @@ func indexActiveByTool(active []*tooltrust.ToolApproval) map[activeToolKey][]*to
 // some active grant in the index covers the tool's current fingerprint on a usable,
 // correctly-owned server; demotes otherwise. Fail-closed and idempotent.
 func (c *mcpToolTrustCoordinator) rederiveToolWith(reg *registry.Registry, cat *catalog.Catalog, serverID, toolName string, activeByTool map[activeToolKey][]*tooltrust.ToolApproval) {
+	tk := activeToolKey{serverID: serverID, toolName: toolName}
 	key := catalog.ToolKey{Server: registry.ServerID(serverID), Name: toolName}
 	rec, ok := cat.Current().Get(key)
 	if !ok {
+		// The tool is absent from the catalog, so it cannot be Usable — nothing is owed.
+		c.clearPendingDemotion(tk)
 		return
 	}
 	srv, sok := reg.Current().Get(registry.ServerID(serverID))
 	sum := rec.Fingerprint.Sum()
 	covered := false
 	if sok && srv.Usable() {
-		for _, a := range activeByTool[activeToolKey{serverID: serverID, toolName: toolName}] {
+		for _, a := range activeByTool[tk] {
 			if string(srv.OwnerScope) == a.Tenant &&
 				a.MatchesTool(a.Tenant, serverID, toolName, tooltrust.FingerprintDigest(sum), rec.Fingerprint.FormatVersion) {
 				covered = true
@@ -480,9 +501,30 @@ func (c *mcpToolTrustCoordinator) rederiveToolWith(reg *registry.Registry, cat *
 	}
 	if covered {
 		_, _ = cat.Promote(key, rec.Fingerprint)
-	} else {
-		_, _ = cat.Demote(key)
+		c.clearPendingDemotion(tk) // legitimately Usable ⇒ no demotion owed
+		return
 	}
+	// Not covered ⇒ the tool must be demoted. If Demote loses its bounded CAS to a concurrent
+	// ingest it returns an error and the tool stays Usable; record the debt so the next
+	// reconcile retries it even if the approval record is pruned in the meantime.
+	if _, err := cat.Demote(key); err != nil {
+		c.markPendingDemotion(tk)
+	} else {
+		c.clearPendingDemotion(tk)
+	}
+}
+
+// markPendingDemotion / clearPendingDemotion track tools whose catalog demotion is still
+// owed. Called only from the rederive paths, all of which hold deriveMu.
+func (c *mcpToolTrustCoordinator) markPendingDemotion(k activeToolKey) {
+	if c.pendingDemotions == nil {
+		c.pendingDemotions = make(map[activeToolKey]struct{})
+	}
+	c.pendingDemotions[k] = struct{}{}
+}
+
+func (c *mcpToolTrustCoordinator) clearPendingDemotion(k activeToolKey) {
+	delete(c.pendingDemotions, k)
 }
 
 // Get returns a tenant-scoped approval copy.
@@ -586,5 +628,8 @@ func resetMCPToolTrustForTest() {
 	mcpToolTrust.reason = ""
 	mcpToolTrust.nowFn = nil
 	mcpToolTrust.mu.Unlock()
+	mcpToolTrust.deriveMu.Lock()
+	mcpToolTrust.pendingDemotions = nil
+	mcpToolTrust.deriveMu.Unlock()
 	mcpToolTrustReconcile = func() {}
 }

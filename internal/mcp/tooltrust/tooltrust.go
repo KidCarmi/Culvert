@@ -26,10 +26,14 @@ const SchemaVersion uint16 = 1
 // grow the durable record without limit. Enforced at construction; over-bound input is a
 // request error, never silently truncated into evidence.
 const (
-	maxReasonBytes   = 512
-	maxTicketBytes   = 128
-	maxIDBytes       = 96
-	maxTenantBytes   = 256
+	maxReasonBytes = 512
+	maxTicketBytes = 128
+	maxIDBytes     = 96
+	// maxTenantBytes MUST be >= the catalog's authoritative MaxOwnerScopeBytes
+	// (internal/mcp/limits DefaultCatalog = 512): the tenant is the server's registry
+	// OwnerScope, so a bound below it would reject an otherwise-valid inventory tenant and
+	// make every tool on that server impossible to approve (CreateRequest fails validation).
+	maxTenantBytes   = 512
 	maxServerIDBytes = 256
 	maxToolNameBytes = 256
 	maxActorBytes    = 256

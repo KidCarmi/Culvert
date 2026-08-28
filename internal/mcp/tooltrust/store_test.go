@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -994,5 +995,24 @@ func TestLoad_WorstCaseEscapedRecordRoundTrips(t *testing.T) {
 	s, _ := NewStore(Config{Path: path, Clock: clk.now, MaxRecords: 1, MaxPerTenant: 8})
 	if err := s.Load(); err != nil {
 		t.Fatalf("the store own worst-case-escaped record must reload, got %v", err)
+	}
+}
+
+// TestCreate_TenantBoundMatchesInventoryOwnerScope proves the round-7 P2: the tenant byte
+// bound is >= the catalog's authoritative MaxOwnerScopeBytes (512), so a valid inventory
+// tenant at that maximum is approvable instead of failing CreateRequest validation.
+func TestCreate_TenantBoundMatchesInventoryOwnerScope(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	s := newTestStore(t, clk)
+	in := goodRequest()
+	in.Tenant = strings.Repeat("a", 512) // the inventory owner-scope maximum
+	if _, err := s.CreateRequest(in); err != nil {
+		t.Fatalf("a 512-byte tenant (the inventory owner-scope max) must be accepted, got %v", err)
+	}
+	over := goodRequest()
+	over.ToolName = "other"
+	over.Tenant = strings.Repeat("a", 513)
+	if _, err := s.CreateRequest(over); err == nil {
+		t.Fatal("a tenant over the byte bound must still be rejected")
 	}
 }

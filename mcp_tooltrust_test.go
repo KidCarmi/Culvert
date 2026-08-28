@@ -46,10 +46,21 @@ func seedToolTrustInventory(t *testing.T) (reg *registry.Registry, cat *catalog.
 	return reg, cat, "controlled", "t", hex.EncodeToString(sum[:])
 }
 
+// twoToolInv is the seeded two-tool inventory a race test drives (a struct rather than a
+// six-value return to stay within the gocritic result-count bound).
+type twoToolInv struct {
+	cat      *catalog.Catalog
+	serverID string
+	toolA    string
+	toolB    string
+	fpA      string
+	fpB      string
+}
+
 // seedToolTrustInventory2 seeds a one-server, TWO-tool inventory so a test can approve
 // one tool and prune its record while creating a request for the other — the exact shape
 // of the reconcile-vs-prune race (a pruned record is the LAST ToolRef for its tool).
-func seedToolTrustInventory2(t *testing.T) (cat *catalog.Catalog, serverID, toolA, toolB, fpA, fpB string) {
+func seedToolTrustInventory2(t *testing.T) twoToolInv {
 	t.Helper()
 	doc, err := decodeInventory([]byte(`{"schema_version":1,"tenant":"` + ttTenant + `","servers":[
 	  {"server_id":"controlled","endpoint":"e","pinned_identity":"id","enabled":true,
@@ -73,7 +84,14 @@ func seedToolTrustInventory2(t *testing.T) (cat *catalog.Catalog, serverID, tool
 	}
 	sumA := recA.Fingerprint.Sum()
 	sumB := recB.Fingerprint.Sum()
-	return cat, "controlled", "t", "u", hex.EncodeToString(sumA[:]), hex.EncodeToString(sumB[:])
+	return twoToolInv{
+		cat:      cat,
+		serverID: "controlled",
+		toolA:    "t",
+		toolB:    "u",
+		fpA:      hex.EncodeToString(sumA[:]),
+		fpB:      hex.EncodeToString(sumB[:]),
+	}
 }
 
 // composeToolTrust composes the coordinator against a temp data dir with the given
@@ -368,7 +386,8 @@ func TestToolTrust_Revoke_ConcurrentReconcileEndsDemoted(t *testing.T) {
 // delete its last ToolRef mid-pass and strand it Usable.
 func TestToolTrust_RequestPrune_ConcurrentReconcileKeepsExpiredDemoted(t *testing.T) {
 	resetInventory(t)
-	cat, sid, toolA, toolB, fpA, fpB := seedToolTrustInventory2(t)
+	inv := seedToolTrustInventory2(t)
+	cat, sid, toolA, toolB, fpA, fpB := inv.cat, inv.serverID, inv.toolA, inv.toolB, inv.fpA, inv.fpB
 	base := time.Unix(1_700_000_000, 0)
 	var clkMu sync.Mutex
 	now := base
@@ -607,4 +626,44 @@ func TestToolTrust_NotComposedFailsClosed(t *testing.T) {
 	}
 	// The reconcile hook is a safe no-op when uncomposed.
 	mcpToolTrustReconcile()
+}
+
+// TestToolTrust_PendingDemotion_RetriedWhenRecordAbsent proves the round-7 P1: a tool that
+// is Usable in the catalog but has NO backing approval record (as if its record was pruned
+// after a failed Demote) is still demoted by a later reconcile, because reconcile re-derives
+// pendingDemotions in addition to ToolRefs. Without the pending set, an empty ToolRefs would
+// leave the stranded projection Usable forever.
+func TestToolTrust_PendingDemotion_RetriedWhenRecordAbsent(t *testing.T) {
+	resetInventory(t)
+	inv := seedToolTrustInventory2(t)
+	composeToolTrust(t, nil)
+	// Simulate the stranded state: promote toolA to Usable directly (no approval record), and
+	// record the demotion debt as a failed demote would have.
+	key := catalog.ToolKey{Server: registry.ServerID(inv.serverID), Name: inv.toolA}
+	rec, ok := inv.cat.Current().Get(key)
+	if !ok {
+		t.Fatal("tool A must exist")
+	}
+	if _, err := inv.cat.Promote(key, rec.Fingerprint); err != nil {
+		t.Fatalf("setup promote: %v", err)
+	}
+	if eligibility(t, inv.cat, inv.serverID, inv.toolA) != catalog.Usable {
+		t.Fatal("setup: tool A must be Usable")
+	}
+	tk := activeToolKey{serverID: inv.serverID, toolName: inv.toolA}
+	mcpToolTrust.deriveMu.Lock()
+	mcpToolTrust.markPendingDemotion(tk)
+	mcpToolTrust.deriveMu.Unlock()
+	// The store has no approval for A, so ToolRefs cannot rediscover it; only pendingDemotions
+	// keeps it in the reconcile work set.
+	mcpToolTrust.reconcile()
+	if got := eligibility(t, inv.cat, inv.serverID, inv.toolA); got != catalog.Quarantined {
+		t.Fatalf("a stranded Usable tool must be demoted via pendingDemotions, got %s", got)
+	}
+	mcpToolTrust.deriveMu.Lock()
+	_, still := mcpToolTrust.pendingDemotions[tk]
+	mcpToolTrust.deriveMu.Unlock()
+	if still {
+		t.Fatal("a successful demotion must clear the pending-demotion entry")
+	}
 }
