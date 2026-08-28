@@ -255,10 +255,40 @@ epoch can validate again (no ABA generation alias, including the token-0
 case where a fresh store legitimately serves version 0). The retired
 `<store>.meta` sidecar is READ only when loading a legacy bare-array file
 (first non-whitespace byte `[`) and is removed by the first durable envelope
-save; it is never written again. Recorded downgrade residual: a pre-envelope
-binary cannot parse the envelope — its load errors to an EMPTY store, and
-ID-authoritative references degrade fail-closed (never resolve to a
-different object).
+save; it is never written again.
+
+The `schema_version` discriminator is LOAD-BEARING (fail-closed format
+validation): for non-legacy-array input, exactly `schema_version: 1` is
+accepted — a missing/zero discriminator (`{}` included), a negative value,
+an unknown/future schema version, or a negative persisted fence generation
+is refused with an explicit load error. A future envelope is never silently
+parsed with today's struct. A legitimate empty schema-1 envelope stays
+valid.
+
+**Recorded downgrade residual (explicit — not backward-readable):** a
+pre-envelope binary cannot parse the envelope — its load errors to an EMPTY
+store, and ID-authoritative references degrade fail-closed (never resolve
+to a different object). Software-release rollback compatibility across this
+format boundary is a lifecycle/release-design responsibility to settle
+before GA; this correction deliberately does not pretend the envelope is
+backward-readable.
+
+**Durable-publication ordering (`saveMu`, PolicyStore.saveMu's sibling):**
+`SaveErr` runs its ENTIRE body — snapshot → marshal → AtomicWrite — under a
+store-local publication serializer, so publications form one monotonic
+order and each writes the state CURRENT at its own snapshot. Without it, an
+older `Save` (the production `ReplaceAll(...)` + `Save()` bulk shape) could
+snapshot S1, pause, lose the race to a `MutateDurable` that persisted S2
+and returned a confirmed 2xx, then resume and rename its stale S1 envelope
+over S2 — destroying an acknowledged mutation on disk. Locking only the
+write (after the snapshot) would NOT restore the invariant. Every runtime
+persistence path routes through `SaveErr` (`Save` is a thin wrapper):
+hardened admin mutations, caller-side `Save` after cluster `ReplaceAll`,
+config import/rollback, rename-cascade persistence, the startup seed, and
+`Load`'s migration save — no raw path sits outside the ordering domain.
+LOCK ORDER (acyclic, documented on the field): `mutMu` → `saveMu` → `mu`;
+standalone `Save`/`SaveErr` take `saveMu` → `mu(RLock)`; nothing takes `mu`
+then `saveMu`, nothing takes `saveMu` then `mutMu`.
 
 The generation is served on the list read (`version`) and asserted via the
 optional `?ifVersion=` query on POST/PUT/DELETE; a mismatch is the SAME

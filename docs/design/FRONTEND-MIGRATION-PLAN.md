@@ -741,7 +741,13 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > structurally impossible; legacy bare-array files + sidecar still load and
 > migrate on first save; `ReplaceAll`/bulk installs hold the SAME mutation
 > serializer as `MutateDurable`, so every runtime writer orders against the
-> fence; served on list reads; the same structured 409 conflict contract as
+> fence; publication-ordering correction: `SaveErr` additionally runs
+> snapshot→marshal→AtomicWrite under a store-local `saveMu`, so an older
+> in-flight `Save` can never resume and rename a stale envelope over a
+> later acknowledged publication, and the envelope loader enforces
+> `schema_version == 1` fail-closed — `{}`, unknown/future schemas, and
+> negative persisted versions refuse to load; served on list reads; the
+> same structured 409 conflict contract as
 > the policy fence), and name-collision
 > refusals under the store lock (409, `ErrNameTaken`). Rename is an
 > explicitly composed cross-store operation (object domain → running
