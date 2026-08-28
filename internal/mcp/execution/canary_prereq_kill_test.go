@@ -47,7 +47,7 @@ func TestCanaryPrerequisite_KillStateNotRevalidatedAtSideEffectBoundary(t *testi
 		return true
 	}
 
-	out := e.Execute(context.Background(), in)
+	out := runExec(e, context.Background(), in)
 
 	if !killed {
 		t.Fatal("boundary hook was never invoked — the test did not reach the side-effect boundary, so it proves nothing")
@@ -73,7 +73,7 @@ func TestCanaryPrerequisite_KillStateNotRevalidatedAtSideEffectBoundary(t *testi
 	if err != nil {
 		t.Fatalf("NewShadowEvaluator: %v", err)
 	}
-	shOut := shadow.Execute(context.Background(), execInput(policy.ActionAllow, false))
+	shOut := runExec(shadow, context.Background(), execInput(policy.ActionAllow, false))
 	if shOut.Executed || shOut.ExecutionState == "shadow_evaluated" {
 		t.Fatalf("a killed Shadow capability must terminally block at admission, not evaluate: executed=%v state=%q", shOut.Executed, shOut.ExecutionState)
 	}

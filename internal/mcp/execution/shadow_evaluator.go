@@ -137,24 +137,18 @@ func NewShadowEvaluator(cfg ShadowConfig) (*ShadowEvaluator, error) {
 	return &ShadowEvaluator{cfg: cfg, plan: plan, allowances: newAllowanceStore()}, nil
 }
 
-// RecordsOnly implements runtime.ExecutionProvider for the ShadowEvaluator. A
-// record-only disposition (Observe / Disabled / out-of-scope) is kept on the runtime's
-// inline Observe evidence path, so a shadow-ready node never drops the decision-event
-// commit for the traffic outside its Shadow scope.
-func (s *ShadowEvaluator) RecordsOnly(in runtime.ExecInput) bool {
-	return recordsOnlyFor(s.cfg.State, in)
+// Resolve implements runtime.ExecutionProvider: it resolves the rollout disposition for
+// this request EXACTLY ONCE (no side effect) so the runtime can route on it and hand the
+// SAME resolution back to Execute. A killed capability resolves to an emergency block
+// (never record-only), so the runtime routes it to Execute rather than its inline path.
+func (s *ShadowEvaluator) Resolve(in runtime.ExecInput) rollout.Resolution {
+	return resolveDisposition(s.cfg.State, in)
 }
 
-// Execute is the runtime.ExecutionProvider entry for a Shadow-only runtime. It
-// resolves the rollout disposition and dispatches — but it has no execute path.
-func (s *ShadowEvaluator) Execute(ctx context.Context, in runtime.ExecInput) runtime.ExecOutput {
-	if s.cfg.State.Killed() {
-		return s.blocked(in, mcperr.ReasonRolloutEmergencyActive, false)
-	}
-	subj := subjectFor(in)
-	action := mapAction(in.Decision.Action)
-	hardFail, hardReason := hardFailure(in)
-	res := s.cfg.State.ResolveFor(subj, action, hardFail, hardReason, true)
+// Execute is the runtime.ExecutionProvider entry for a Shadow-only runtime. It acts on
+// the PRE-RESOLVED disposition — it never re-resolves — and dispatches. It has no execute
+// path.
+func (s *ShadowEvaluator) Execute(ctx context.Context, in runtime.ExecInput, res rollout.Resolution) runtime.ExecOutput {
 	s.cfg.Metrics.ObserveResolution(in.Capability.String(), res)
 
 	switch res.Disposition {

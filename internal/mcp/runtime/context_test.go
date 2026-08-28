@@ -11,6 +11,7 @@ import (
 
 	"github.com/KidCarmi/Culvert/internal/mcp/authn"
 	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
+	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 )
 
 // countingKeys wraps a key resolver and records whether it was ever consulted.
@@ -77,14 +78,16 @@ func TestContext_LiveBudgetIsTransparent(t *testing.T) {
 // recordingExecutor captures the context the runtime hands the guarded executor.
 type recordingExecutor struct{ got context.Context }
 
-func (e *recordingExecutor) Execute(ctx context.Context, _ ExecInput) ExecOutput {
+func (e *recordingExecutor) Execute(ctx context.Context, _ ExecInput, _ rollout.Resolution) ExecOutput {
 	e.got = ctx
 	return ExecOutput{Status: 200, Disposition: DispObserveOnly, ExecutionState: "not_implemented"}
 }
 
-// RecordsOnly returns false so this fixture always reaches Execute (it exists to
-// observe the context the runtime hands the executor).
-func (e *recordingExecutor) RecordsOnly(ExecInput) bool { return false }
+// Resolve returns a non-record-only disposition so the runtime always reaches Execute
+// (this fixture exists to observe the context the runtime hands the executor).
+func (e *recordingExecutor) Resolve(ExecInput) rollout.Resolution {
+	return rollout.Resolution{Disposition: rollout.EffectShadowEvaluate}
+}
 
 // SEC-MCP-03. The guarded executor performs the real upstream side effect. It must
 // inherit the request's cancellation and deadline: `context.Background()` there

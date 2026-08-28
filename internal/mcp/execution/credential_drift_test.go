@@ -185,7 +185,7 @@ func TestCredentialDrift_CurrentToolMaterializesAndExecutes(t *testing.T) {
 	up := &fakeUpstream{}
 	e := credDriftExecutor(t, b, up)
 
-	out := e.Execute(context.Background(), credDriftInput(id, func() bool { return true }))
+	out := runExec(e, context.Background(), credDriftInput(id, func() bool { return true }))
 
 	if up.calls != 1 {
 		t.Fatalf("credential path must materialize and execute a current tool, calls=%d", up.calls)
@@ -209,7 +209,7 @@ func TestCredentialDrift_DriftedToolIsRefusedAsDecisionStale(t *testing.T) {
 	e := credDriftExecutor(t, b, up)
 
 	checked := false
-	out := e.Execute(context.Background(), credDriftInput(id, func() bool { checked = true; return false }))
+	out := runExec(e, context.Background(), credDriftInput(id, func() bool { checked = true; return false }))
 
 	if !checked {
 		t.Fatal("ToolStillCurrent was never consulted: the credential path did not reach the " +

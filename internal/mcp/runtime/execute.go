@@ -14,6 +14,7 @@ import (
 	"github.com/KidCarmi/Culvert/internal/mcp/policy"
 	"github.com/KidCarmi/Culvert/internal/mcp/protocol"
 	"github.com/KidCarmi/Culvert/internal/mcp/registry"
+	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 )
 
 // ExecutionProvider is the PR-11 guarded-execution seam. It is consulted AFTER a
@@ -24,21 +25,21 @@ import (
 // The provider MUST NOT be consulted for Management (which never executes an
 // upstream tools/call); the runtime only wires it for the Gateway capability.
 type ExecutionProvider interface {
-	// Execute runs the guarded rollout-mode path and returns the terminal result +
-	// the observation fields to record. It performs its OWN durable
-	// commit-before-side-effect; the runtime does not pre-commit for this path.
-	Execute(ctx context.Context, in ExecInput) ExecOutput
-	// RecordsOnly reports whether the effective rollout disposition for this request is
-	// record-only (Observe / Disabled / out-of-scope with no fallback). It is PURE — no
-	// side effect, no commit, no upstream call — and must agree with what Execute would
-	// resolve. The runtime uses it to KEEP OWNING the canonical inline Observe evidence
-	// path (allow-class decision-event commit + denial-lane routing) for record-only
-	// dispositions, so composing an executor (e.g. a Shadow evaluator) never displaces
-	// that evidence. A killed capability is NOT record-only — it must emit an emergency
-	// block, which Execute owns. Everything that actually evaluates/executes/blocks
-	// (Shadow evaluate, Canary/Production execute, hard block) returns false and is
-	// handed to Execute.
-	RecordsOnly(in ExecInput) bool
+	// Resolve resolves the effective rollout disposition for this request EXACTLY ONCE,
+	// with no side effect (no commit, no upstream call). The runtime routes on it — a
+	// record-only disposition (Observe / Disabled / out-of-scope, and a killed capability
+	// resolves to a block, never record-only) keeps the runtime's inline Observe evidence
+	// path — and hands the SAME resolution back to Execute. Resolving once and carrying it
+	// into execution is what closes the TOCTOU: routing and execution can never observe two
+	// different snapshots of the mutable rollout state across a concurrent transition, so a
+	// request never falls through as Observe without its Shadow evaluation, nor reaches the
+	// evaluator's record-only path without the inline durable commit (Codex P2, PR #1234).
+	Resolve(in ExecInput) rollout.Resolution
+	// Execute runs the guarded rollout-mode path for a PRE-RESOLVED disposition and returns
+	// the terminal result + the observation fields to record. It NEVER re-resolves the
+	// rollout state — it acts on the resolution Resolve produced. It performs its OWN
+	// durable commit-before-side-effect; the runtime does not pre-commit for this path.
+	Execute(ctx context.Context, in ExecInput, res rollout.Resolution) ExecOutput
 }
 
 // ExecInput carries the already-resolved request facts the executor needs. It
@@ -133,7 +134,9 @@ func (p *pipeline) buildExecInput(req Request, msg jsonrpc.Message, ident *ident
 // disposition (Shadow evaluate / Canary-Production execute / hard block): a
 // record-only disposition keeps the runtime's inline Observe evidence path instead
 // (dispatchPolicy), so a composed evaluator never displaces the decision-event commit.
-func (p *pipeline) dispatchExecute(ctx context.Context, rb *recBuilder, ei ExecInput) Outcome {
+// It receives the resolution the runtime already resolved and passes it to Execute, so
+// the disposition is never re-resolved.
+func (p *pipeline) dispatchExecute(ctx context.Context, rb *recBuilder, ei ExecInput, res rollout.Resolution) Outcome {
 	// OVN-09 — decision/execution TOCTOU. The policy decision was computed against
 	// a catalog SNAPSHOT. Between then and the irreversible upstream call there is a
 	// real window (inspection, durable commit, credential planning, provider fetch)
@@ -151,7 +154,7 @@ func (p *pipeline) dispatchExecute(ctx context.Context, rb *recBuilder, ei ExecI
 	// shutdown could not stop an in-flight upstream call, and every ctx-honouring
 	// stage the executor reaches (broker, provider, dial, TLS, response read,
 	// response inspection) silently lost its bound.
-	out := p.executor.Execute(ctx, ei)
+	out := p.executor.Execute(ctx, ei, res)
 
 	// Record the truthful observation fields.
 	if out.EvaluatedAction != "" {

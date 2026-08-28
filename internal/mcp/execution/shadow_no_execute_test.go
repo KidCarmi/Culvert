@@ -21,7 +21,7 @@ func TestShadow_MakesNoUpstreamCall(t *testing.T) {
 	for _, action := range []policy.Action{policy.ActionAllow, policy.ActionDeny} {
 		up := &fakeUpstream{}
 		e := newExec(t, stateForMode(t, rollout.ModeShadow), up, realEvents(t, nil))
-		out := e.Execute(context.Background(), execInput(action, false))
+		out := runExec(e, context.Background(), execInput(action, false))
 		if up.calls != 0 {
 			t.Fatalf("action %v: shadow made %d upstream call(s) — it must never cross the side-effect boundary", action, up.calls)
 		}
@@ -39,7 +39,7 @@ func TestShadow_MakesNoUpstreamCall(t *testing.T) {
 func TestShadow_ControlCanaryDoesCallUpstream(t *testing.T) {
 	up := &fakeUpstream{}
 	e := newExec(t, stateForMode(t, rollout.ModeCanary), up, realEvents(t, nil))
-	e.Execute(context.Background(), execInput(policy.ActionAllow, false))
+	runExec(e, context.Background(), execInput(policy.ActionAllow, false))
 	if up.calls != 1 {
 		t.Fatalf("control: canary ALLOW must call upstream once, got %d", up.calls)
 	}
@@ -55,7 +55,7 @@ func TestShadow_CredentialPathNeverReachesUpstream(t *testing.T) {
 	up := &fakeUpstream{}
 	e := credDriftExecutorForState(t, b, up, credDriftStateMode(t, rollout.ModeShadow))
 	in := credDriftInput(id, func() bool { return true })
-	out := e.Execute(context.Background(), in)
+	out := runExec(e, context.Background(), in)
 	if up.calls != 0 {
 		t.Fatalf("shadow credential path made %d upstream call(s) — no secret may be sent upstream in Shadow", up.calls)
 	}

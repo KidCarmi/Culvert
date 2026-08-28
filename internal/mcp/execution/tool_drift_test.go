@@ -31,7 +31,7 @@ func TestToolDrift_RefusedAtTheSideEffectBoundary(t *testing.T) {
 	checked := false
 	in.ToolStillCurrent = func() bool { checked = true; return false }
 
-	out := e.Execute(context.Background(), in)
+	out := runExec(e, context.Background(), in)
 
 	if !checked {
 		t.Fatal("ToolStillCurrent was never consulted: the executor performs the upstream " +
@@ -60,7 +60,7 @@ func TestToolDrift_CurrentToolStillExecutes(t *testing.T) {
 	in := execInput(policy.ActionAllow, false)
 	in.ToolStillCurrent = func() bool { return true }
 
-	out := e.Execute(context.Background(), in)
+	out := runExec(e, context.Background(), in)
 	if up.calls != 1 {
 		t.Fatalf("a current tool must still execute, calls=%d", up.calls)
 	}
@@ -79,7 +79,7 @@ func TestToolDrift_NilHookIsUnchangedBehaviour(t *testing.T) {
 	in := execInput(policy.ActionAllow, false)
 	in.ToolStillCurrent = nil
 
-	if out := e.Execute(context.Background(), in); !out.Executed || up.calls != 1 {
+	if out := runExec(e, context.Background(), in); !out.Executed || up.calls != 1 {
 		t.Fatalf("nil hook changed behaviour: executed=%v calls=%d, want true/1", out.Executed, up.calls)
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/KidCarmi/Culvert/internal/mcp/policy"
 	"github.com/KidCarmi/Culvert/internal/mcp/protocol"
 	"github.com/KidCarmi/Culvert/internal/mcp/registry"
+	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 )
 
 // recordingExec captures whether the guarded executor was reached, standing in for
@@ -21,7 +22,7 @@ type recordingExec struct {
 	gotTool string
 }
 
-func (e *recordingExec) Execute(_ context.Context, in ExecInput) ExecOutput {
+func (e *recordingExec) Execute(_ context.Context, in ExecInput, _ rollout.Resolution) ExecOutput {
 	e.reached++
 	if in.Input.Tool != nil {
 		e.gotTool = in.Input.Tool.FingerprintHash
@@ -29,9 +30,11 @@ func (e *recordingExec) Execute(_ context.Context, in ExecInput) ExecOutput {
 	return ExecOutput{Status: 200, Disposition: DispObserveOnly, ExecutionState: "not_implemented"}
 }
 
-// RecordsOnly returns false so this fixture always reaches Execute (it exists to
-// verify the runtime's entry-side tool-drift refusal before the executor).
-func (e *recordingExec) RecordsOnly(ExecInput) bool { return false }
+// Resolve returns a non-record-only disposition so the runtime always reaches Execute
+// (this fixture verifies the runtime's entry-side tool-drift refusal before the executor).
+func (e *recordingExec) Resolve(ExecInput) rollout.Resolution {
+	return rollout.Resolution{Disposition: rollout.EffectShadowEvaluate}
+}
 
 // ingestTool publishes a tool into the catalog with the given input schema, and
 // returns its resulting fingerprint hash.

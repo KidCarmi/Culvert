@@ -13,6 +13,7 @@ import (
 	"github.com/KidCarmi/Culvert/internal/mcp/policy"
 	"github.com/KidCarmi/Culvert/internal/mcp/protocol"
 	"github.com/KidCarmi/Culvert/internal/mcp/registry"
+	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 )
 
 // PolicyProvider supplies the current capability-local policy snapshot to a
@@ -91,8 +92,13 @@ func (p *pipeline) dispatchPolicy(ctx context.Context, rb *recBuilder, req Reque
 	// decision-only path runs byte-identically.
 	if p.executor != nil {
 		ei := p.buildExecInput(req, msg, ident, in, d, insp, snap.Hash(), now)
-		if !p.executor.RecordsOnly(ei) {
-			return p.dispatchExecute(ctx, rb, ei)
+		// Resolve the rollout disposition EXACTLY ONCE and carry it into execution, so
+		// routing and execution never observe two snapshots of the mutable rollout state
+		// (Codex P2, PR #1234). A record-only disposition keeps the inline Observe path;
+		// everything else is handed to Execute with the same resolution.
+		res := p.executor.Resolve(ei)
+		if res.Disposition != rollout.EffectRecordOnly {
+			return p.dispatchExecute(ctx, rb, ei, res)
 		}
 		// record-only disposition ⇒ fall through to the inline Observe evidence path.
 	}

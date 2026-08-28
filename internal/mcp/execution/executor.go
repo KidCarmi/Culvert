@@ -113,21 +113,18 @@ func New(cfg Config) (*Executor, error) {
 	return &Executor{cfg: cfg, allowances: allow, shadow: shadow}, nil
 }
 
-// Execute is the runtime.ExecutionProvider entry. It resolves the effective
-// rollout disposition and dispatches record-only / block / execute.
-func (e *Executor) Execute(ctx context.Context, in runtime.ExecInput) runtime.ExecOutput {
-	// A capability-local kill switch stops all admission immediately.
-	if e.cfg.State.Killed() {
-		return e.blocked(in, mcperr.ReasonRolloutEmergencyActive, false)
-	}
+// Resolve implements runtime.ExecutionProvider: it resolves the effective rollout
+// disposition for this request EXACTLY ONCE (no side effect), so routing and execution
+// use the same snapshot. A killed capability resolves to an emergency block.
+func (e *Executor) Resolve(in runtime.ExecInput) rollout.Resolution {
+	return resolveDisposition(e.cfg.State, in)
+}
+
+// Execute is the runtime.ExecutionProvider entry. It acts on the PRE-RESOLVED disposition
+// (it never re-resolves) and dispatches record-only / block / execute.
+func (e *Executor) Execute(ctx context.Context, in runtime.ExecInput, res rollout.Resolution) runtime.ExecOutput {
 	subj := subjectFor(in)
 	action := mapAction(in.Decision.Action)
-	hardFail, hardReason := hardFailure(in)
-
-	// Resolve optimistically (obligations satisfied) to learn the disposition; only
-	// consume an allowance when we would actually execute (so a failed pre-execution
-	// hard control never consumes it).
-	res := e.cfg.State.ResolveFor(subj, action, hardFail, hardReason, true)
 	e.cfg.Metrics.ObserveResolution(in.Capability.String(), res)
 
 	switch res.Disposition {
@@ -268,23 +265,22 @@ func needsAllowance(a rollout.ActionKind) bool {
 	return a == rollout.ActionKindAllowOnce || a == rollout.ActionKindAllowSession
 }
 
-// recordsOnlyFor reports whether the effective rollout disposition for this request is
-// record-only (Observe / Disabled / out-of-scope). It is PURE — it reads the immutable
-// active rollout state via one lock-free load and delegates to the same Resolve the
-// executor uses, so it can never disagree with what Execute would resolve. A KILLED
-// capability is deliberately NOT record-only: it must emit an emergency block, which
-// Execute owns, so the runtime routes a killed request to Execute rather than to its
-// inline Observe path.
-func recordsOnlyFor(st *rollout.State, in runtime.ExecInput) bool {
+// resolveDisposition resolves the effective rollout disposition for a request EXACTLY
+// ONCE — the SINGLE point at which the mutable rollout state is read for this request, so
+// routing (record-only vs not) and execution act on the same snapshot and can never
+// diverge across a concurrent transition (Codex P2, PR #1234). A KILLED capability
+// resolves to an emergency block (never record-only): admission is stopped, so the
+// runtime routes it to Execute, which emits the block, rather than to its inline Observe
+// path. It performs no side effect.
+func resolveDisposition(st *rollout.State, in runtime.ExecInput) rollout.Resolution {
+	action := mapAction(in.Decision.Action)
 	if st.Killed() {
-		return false
+		return rollout.Resolution{
+			Disposition: rollout.EffectBlock, BlockReason: mcperr.ReasonRolloutEmergencyActive,
+			EvaluatedAction: action, EffectiveAction: action,
+		}
 	}
 	subj := subjectFor(in)
-	action := mapAction(in.Decision.Action)
 	hardFail, hardReason := hardFailure(in)
-	res := st.ResolveFor(subj, action, hardFail, hardReason, true)
-	return res.Disposition == rollout.EffectRecordOnly
+	return st.ResolveFor(subj, action, hardFail, hardReason, true)
 }
-
-// RecordsOnly implements runtime.ExecutionProvider for the live Executor.
-func (e *Executor) RecordsOnly(in runtime.ExecInput) bool { return recordsOnlyFor(e.cfg.State, in) }

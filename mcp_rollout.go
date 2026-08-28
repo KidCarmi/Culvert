@@ -189,6 +189,22 @@ func (r *mcpRollout) commitRolloutTransitionAt(cfg *rollout.SignedConfig, actor 
 	if !modeExecReady(cfg.Mode, cfg.Capability == rollout.CapabilityManagement) {
 		return errShadowExecDepsNotConfigured
 	}
+	// (1b) Gateway Shadow activation preflight, enforced in the SHARED commit path so
+	// EVERY caller is covered — the CP→DP apply (applyMCPCapabilityEnvelope), the startup
+	// reconcile (reconcileRolloutWithAppliers), and any future caller. The coarse
+	// modeExecReady tier only proves the shadow evaluator is composed; it does NOT prove
+	// the node can actually EVALUATE (policy/inventory/inspection/listener). Without this,
+	// startup reconciliation could re-install a recovered active Gateway Shadow envelope
+	// right after restore() clamped it, re-advertising Shadow on a node that fails every
+	// request closed and restarting the evidence window (Codex P1, PR #1234). Management
+	// Shadow is a distinct, read-only concept (no upstream evaluation) and is intentionally
+	// NOT gated by this Gateway preflight — its shadow tier gate above suffices.
+	if cfg.Mode == rollout.ModeShadow && cfg.Capability == rollout.CapabilityGateway {
+		if pf := evaluateShadowActivationPreflight(cfg.Capability); !pf.Ready {
+			logger.Printf("MCP rollout: Gateway Shadow transition rejected by activation preflight %v (fail-closed)", pf.Reasons)
+			return errShadowPreflightFailed
+		}
+	}
 	// Snapshot the prior state for a fail-closed rollback if persistence fails, and
 	// for the scope-change continuity check below.
 	prevCfg := st.CurrentConfig()

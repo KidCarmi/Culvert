@@ -92,19 +92,6 @@ func withReadyShadowNode(t *testing.T) {
 	})
 }
 
-// withLiveExecDepsReady arms the LIVE-execution tier for the duration of a test so a
-// Canary/Production transition can be exercised end to end (evidence-window mechanics).
-// It is deliberately SEPARATE from withExecDepsReady: a test that only needs Shadow must
-// not arm the live tier, so the readiness split stays honestly exercised. Nothing in
-// production ever calls markGatewayExecDepsReady (pinned by the execution-posture wall);
-// this is test-only arming to reach the Canary code path.
-func withLiveExecDepsReady(t *testing.T) {
-	t.Helper()
-	prev := globalExecDeps.gateway.Load()
-	markGatewayExecDepsReady()
-	t.Cleanup(func() { globalExecDeps.gateway.Store(prev) })
-}
-
 // Test 8: Shadow activation is blocked fail-closed when execution deps are missing.
 func TestDurable_ShadowBlockedWhenExecDepsMissing(t *testing.T) {
 	withTempDataDir(t)
@@ -121,10 +108,37 @@ func TestDurable_ShadowBlockedWhenExecDepsMissing(t *testing.T) {
 	}
 }
 
+// TestDurable_CommitRejectsShadowWhenNodeCannotEvaluate is Codex P1 round-2 (PR #1234):
+// the Gateway Shadow preflight is enforced in the SHARED commit path (commitRolloutTransition),
+// so EVERY caller — the CP→DP apply AND the startup reconcile — is covered. With the coarse
+// shadow tier armed but the node unable to evaluate (no policy/inventory/inspection/listener),
+// a direct commit (the shape reconcileRolloutWithAppliers uses) must be rejected, not just the
+// apply-envelope path. Mutation: removing the commit-path preflight lets the commit advance to
+// Shadow and fails this test.
+func TestDurable_CommitRejectsShadowWhenNodeCannotEvaluate(t *testing.T) {
+	withTempDataDir(t)
+	resetExecDeps(t)
+	resetShadowComposition(t)
+	markGatewayShadowDepsReady() // coarse tier armed ⇒ modeExecReady passes
+	globalMCPShadow.composed.Store(true)
+	// Deliberately leave policy/inventory/telemetry/inspection/listener UNSET ⇒ preflight fails.
+	r := newTestRollout()
+	err := r.commitRolloutTransition(gwShadowCfg(1), "admin", time.Unix(1000, 0))
+	if err != errShadowPreflightFailed {
+		t.Fatalf("commit must reject Gateway Shadow when the node cannot evaluate, got %v", err)
+	}
+	if r.gateway.CurrentMode() != rollout.ModeDisabled {
+		t.Fatalf("mode must stay Disabled after a preflight-rejected commit, got %s", r.gateway.CurrentMode())
+	}
+	if r.gateway.Evidence().ShadowStartUnix != 0 {
+		t.Fatal("no Shadow window may be stamped on a preflight-rejected commit")
+	}
+}
+
 // Test 9: a mechanically complete Shadow transition starts the window exactly once.
 func TestDurable_ShadowTransitionStartsWindowOnce(t *testing.T) {
 	withTempDataDir(t)
-	withExecDepsReady(t)
+	withReadyShadowNode(t)
 	r := newTestRollout()
 	if err := r.commitRolloutTransition(gwShadowCfg(1), "admin", time.Unix(1000, 0)); err != nil {
 		t.Fatalf("shadow transition: %v", err)
@@ -144,7 +158,7 @@ func TestDurable_ShadowTransitionStartsWindowOnce(t *testing.T) {
 // Test 10: idempotent re-apply of the same accepted mode does not restamp the window.
 func TestDurable_IdempotentReapplyDoesNotRestamp(t *testing.T) {
 	withTempDataDir(t)
-	withExecDepsReady(t)
+	withReadyShadowNode(t)
 	r := newTestRollout()
 	if err := r.commitRolloutTransition(gwShadowCfg(1), "admin", time.Unix(1000, 0)); err != nil {
 		t.Fatal(err)
@@ -232,7 +246,7 @@ func TestDurable_RestartKilledShadowKeepsMode(t *testing.T) {
 // Test 14: a material scope change resets/invalidates the continuous window.
 func TestDurable_ScopeChangeResetsWindow(t *testing.T) {
 	withTempDataDir(t)
-	withExecDepsReady(t)
+	withReadyShadowNode(t)
 	r := newTestRollout()
 	if err := r.commitRolloutTransition(gwShadowCfg(1, "s1"), "admin", time.Unix(1000, 0)); err != nil {
 		t.Fatal(err)
@@ -252,7 +266,7 @@ func TestDurable_ScopeChangeResetsWindow(t *testing.T) {
 // Test 15: demotion to Observe breaks Shadow continuity (window reset to 0).
 func TestDurable_DemotionBreaksContinuity(t *testing.T) {
 	withTempDataDir(t)
-	withExecDepsReady(t)
+	withReadyShadowNode(t)
 	r := newTestRollout()
 	if err := r.commitRolloutTransition(gwShadowCfg(1), "admin", time.Unix(1000, 0)); err != nil {
 		t.Fatal(err)
@@ -270,7 +284,7 @@ func TestDurable_DemotionBreaksContinuity(t *testing.T) {
 
 // Test 16: a persistence write failure prevents transition success (fail-closed).
 func TestDurable_PersistFailurePreventsTransition(t *testing.T) {
-	withExecDepsReady(t)
+	withReadyShadowNode(t)
 	// Isolate the global storage-health observer: this test deliberately trips a
 	// durable-write failure, which must not pollute the process-global storage
 	// counter other tests assert on.
@@ -311,7 +325,7 @@ func TestDurable_CorruptStateFailsClosed(t *testing.T) {
 // Test 18: synthetic evidence origin can never be reported as production.
 func TestDurable_SyntheticOriginNotProduction(t *testing.T) {
 	withTempDataDir(t)
-	withExecDepsReady(t)
+	withReadyShadowNode(t)
 	r := newTestRollout()
 	if err := r.commitRolloutTransitionAt(gwShadowCfg(1), "admin", time.Unix(1000, 0), rollout.OriginSynthetic); err != nil {
 		t.Fatal(err)
@@ -408,7 +422,7 @@ func TestDurable_PersistenceStatusSurfaced(t *testing.T) {
 // Test: concurrent durable mutations are serialized (no torn window/persist).
 func TestDurable_ConcurrentCommitsSerialized(t *testing.T) {
 	withTempDataDir(t)
-	withExecDepsReady(t)
+	withReadyShadowNode(t)
 	r := newTestRollout()
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
@@ -471,7 +485,7 @@ func TestDurable_KillSwitchToggleStormThenRestart(t *testing.T) {
 // to Disabled at restore when execution deps are not configured.
 func TestDurable_RestoreClampsExecutingModeWithoutDeps(t *testing.T) {
 	withTempDataDir(t)
-	withExecDepsReady(t) // allow persisting a Shadow state first
+	withReadyShadowNode(t) // allow persisting a Shadow state first
 	r := newTestRollout()
 	if err := r.commitRolloutTransition(gwShadowCfg(1), "admin", time.Unix(1000, 0)); err != nil {
 		t.Fatal(err)
@@ -534,15 +548,20 @@ func gwCanaryCfg(rev uint64, servers ...string) *rollout.SignedConfig {
 // two disjoint Shadow periods are never treated as one continuous window.
 func TestDurable_ShadowWindowRestartsAfterCanaryDemotion(t *testing.T) {
 	withTempDataDir(t)
-	withExecDepsReady(t)     // shadow tier — for the Shadow legs
-	withLiveExecDepsReady(t) // live tier — this test also exercises the Canary leg
+	withReadyShadowNode(t) // shadow-ready node — for the Shadow legs
 	r := newTestRollout()
-	// Shadow at t=1000.
+	// Shadow at t=1000. The Gateway Shadow preflight forbids a node that ALSO has the live
+	// tier armed (forbidden_live_execution_requirement), so the live tier is armed ONLY
+	// transiently around the Canary commit below — matching production, where live is never
+	// armed at all (this state-machine test artificially reaches the Canary path).
 	if err := r.commitRolloutTransition(gwShadowCfg(1), "admin", time.Unix(1000, 0)); err != nil {
 		t.Fatal(err)
 	}
-	// Promote to Canary at t=2000: Shadow evidence preserved for the promotion gate.
-	if err := r.commitRolloutTransition(gwCanaryCfg(2), "admin", time.Unix(2000, 0)); err != nil {
+	// Promote to Canary at t=2000 (needs the live tier): Shadow evidence preserved.
+	globalExecDeps.gateway.Store(true)
+	err := r.commitRolloutTransition(gwCanaryCfg(2), "admin", time.Unix(2000, 0))
+	globalExecDeps.gateway.Store(false) // disarm live so the demotion-to-Shadow preflight passes
+	if err != nil {
 		t.Fatal(err)
 	}
 	if r.gateway.Evidence().ShadowStartUnix != 1000 {
@@ -564,7 +583,7 @@ func TestDurable_ShadowWindowRestartsAfterCanaryDemotion(t *testing.T) {
 // timer (repeated ConfigSnapshot delivery must not reset the 24h soak).
 func TestDurable_SoakPreservedOnIdempotentReapply(t *testing.T) {
 	withTempDataDir(t)
-	withExecDepsReady(t)
+	withReadyShadowNode(t)
 	r := newTestRollout()
 	if err := r.commitRolloutTransition(gwShadowCfg(1), "admin", time.Unix(1000, 0)); err != nil {
 		t.Fatal(err)
