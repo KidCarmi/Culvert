@@ -321,7 +321,14 @@ durably on a `schema_version:2` envelope: the typed `Event.Shadow *ShadowEvidenc
 carries outcome, override, credential-plan, and request/response inspection readiness, and the
 raw evaluated action stays in `Decision.Action`. The transient JSON-RPC response and the durable
 record derive from ONE mapping (`execution.shadowEvidence(ShadowDecision)`), so the archive
-reconstructs exactly what the client saw at request time. `SHADOW-EVIDENCE-ROUTING-1` is CLOSED.
+reconstructs exactly what the client saw at request time. This closes the
+`SHADOW-EVIDENCE-ROUTING-1` **durable-envelope addendum** (the v2 sub-fact persistence) only. The
+PARENT `SHADOW-EVIDENCE-ROUTING-1` item — routing the pre-dispatch fail-closed signals (an
+inspection `HardFail`, an initial pre-dispatch tool drift) into `shadow_evaluated` evidence
+instead of the runtime's own rejection observation — **REMAINS OPEN, deferred by design** (see
+§13, limitation 3): those two classes are terminally handled before the Shadow provider is
+invoked, so a Shadow-only (`culvert_mcp_shadow_*`) readiness analysis still undercounts them
+(they ARE recorded, in a different evidence shape) until the executor-arming slice routes them.
 
 The v2 envelope is ADDITIVE and stamped ONLY on shadow events — every non-shadow event stays v1
 with a byte-identical canonical digest (golden-vector proven), so no historical record is

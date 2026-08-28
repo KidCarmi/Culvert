@@ -5,8 +5,8 @@ The mechanism is complete and fail-closed, but Controlled Shadow activation is *
 activation-ready in production**: it is gated on TWO independent hard prerequisites — (1) a tool
 being `Usable` in the requested scope, which catalog ingestion never yields (tool approval is a
 later slice, §8), still **OPEN**; and (2) durable per-request `ShadowDecision` evidence via a
-`schema_version:2` envelope (`SHADOW-EVIDENCE-ROUTING-1`, §8a), now **CLOSED** — shipped on this
-branch. Neither absorbs the other, and prerequisite 1 remaining open keeps activation out of
+`schema_version:2` envelope (the `SHADOW-EVIDENCE-ROUTING-1` durable-envelope addendum, §8a), now
+**CLOSED** — shipped on this branch (the parent routing item stays a separate open debt). Neither absorbs the other, and prerequisite 1 remaining open keeps activation out of
 reach: no production activation until it closes too — see §8b.
 Predecessors: ADR-0024 (MCP Agent Security Gateway, disabled-by-default), PR #1224
 (hardened MCP backend), PR #1226 (Layer B Shadow capability separation + formal
@@ -264,11 +264,14 @@ close. Status as of the durable-evidence follow-up:
    requested scope; structurally unsatisfiable until the tool-approval / promotion slice ships,
    so the activation preflight fails closed with `no_usable_shadow_tools`. That slice is separate
    and is NOT delivered by the durable-evidence follow-up.
-2. **Durable ShadowDecision evidence** (§8a, `SHADOW-EVIDENCE-ROUTING-1`) — **CLOSED** by the
-   dedicated durable-evidence follow-up (branch `claude/mcp-shadow-evidence-v2`): the
-   `schema_version:2` envelope now persists the full per-request verdict (typed
-   `Event.Shadow *ShadowEvidence`), the durable record and the client response derive from one
-   mapping, v1 digests are byte-identical, and v1/v2 recovery + rollback semantics are proven.
+2. **Durable ShadowDecision evidence** (§8a, the `SHADOW-EVIDENCE-ROUTING-1` durable-envelope
+   addendum) — **CLOSED** by the dedicated durable-evidence follow-up (branch
+   `claude/mcp-shadow-evidence-v2`): the `schema_version:2` envelope now persists the full
+   per-request verdict (typed `Event.Shadow *ShadowEvidence`), the durable record and the client
+   response derive from one mapping, v1 digests are byte-identical, and v1/v2 recovery + rollback
+   semantics are proven. (Only the addendum closes here; the parent `SHADOW-EVIDENCE-ROUTING-1`
+   item — pre-dispatch fail-closed signals not routed into `shadow_evaluated` evidence — is a
+   separate LOW-severity item that stays OPEN/deferred, tracked in the debt register.)
 
 These two prerequisites are SEPARATE slices and neither absorbs the other. **No production
 Controlled Shadow activation until BOTH close** — prerequisite 1 remains open, so activation stays
