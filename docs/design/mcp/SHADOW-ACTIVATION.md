@@ -2,11 +2,12 @@
 
 Status: **design + implementation** (phase "Controlled Shadow Activation Preparation").
 The mechanism is complete and fail-closed, but Controlled Shadow activation is **NOT
-activation-ready in production**: it is gated on TWO independent hard prerequisites, both OPEN
-— (1) a tool being `Usable` in the requested scope, which catalog ingestion never yields (tool
-approval is a later slice, §8), and (2) durable per-request `ShadowDecision` evidence via a
-`schema_version:2` envelope, delivered as a dedicated follow-up PR (`SHADOW-EVIDENCE-ROUTING-1`,
-§8a). Neither absorbs the other; BOTH must close before any real activation — see §8b.
+activation-ready in production**: it is gated on TWO independent hard prerequisites — (1) a tool
+being `Usable` in the requested scope, which catalog ingestion never yields (tool approval is a
+later slice, §8), still **OPEN**; and (2) durable per-request `ShadowDecision` evidence via a
+`schema_version:2` envelope (`SHADOW-EVIDENCE-ROUTING-1`, §8a), now **CLOSED** — shipped on this
+branch. Neither absorbs the other, and prerequisite 1 remaining open keeps activation out of
+reach: no production activation until it closes too — see §8b.
 Predecessors: ADR-0024 (MCP Agent Security Gateway, disabled-by-default), PR #1224
 (hardened MCP backend), PR #1226 (Layer B Shadow capability separation + formal
 `ShadowDecision` Model 1). Baseline `main` = `e698a12`.
