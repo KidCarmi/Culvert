@@ -564,3 +564,52 @@ it("SSORequired provider refs: resolved refs render; a dangling ref is marked un
   expect(container.textContent).toContain("deleted-idp");
   expect(container.textContent).toContain("unresolved");
 });
+
+// ── ?rule= stable-ID deep link (2D-A §19 — Where Used consumer links) ───────
+
+async function mountWithRuleParam(rule: string): Promise<void> {
+  const router = createMemoryRouter(
+    [{ path: "/policies/authentication-rules", element: <AuthRulesPage /> }],
+    {
+      initialEntries: [
+        `/policies/authentication-rules?rule=${encodeURIComponent(rule)}`,
+      ],
+    },
+  );
+  const qc = new QueryClient();
+  const machine = machineFor("viewer", qc);
+  await machine.boot();
+  act(() => {
+    root = createRoot(container);
+    root.render(
+      <StrictMode>
+        <QueryClientProvider client={qc}>
+          <AuthProvider machine={machine}>
+            <RouterProvider router={router} />
+          </AuthProvider>
+        </QueryClientProvider>
+      </StrictMode>,
+    );
+  });
+  await flushUntil(() => {
+    expect(container.textContent).toContain("Exempt printers");
+  });
+}
+
+it("a ?rule= deep link opens the linked rule's detail by stable ID", async () => {
+  await mountWithRuleParam(RULE_A.id);
+  await flushUntil(() => {
+    // The detail panel (Rule ID + owner/reason fields) is open for RULE_A.
+    expect(container.textContent).toContain(RULE_A.id);
+  });
+  expect(container.textContent).toContain("printer fleet cannot authenticate");
+});
+
+it("a valid-but-absent ?rule= renders the truthful not-in-snapshot callout", async () => {
+  await mountWithRuleParam("01J3ZV9E3JD0ZZZZZZZZZZZZZZ");
+  await flushUntil(() => {
+    expect(container.textContent).toContain(
+      "Referenced rule not in this snapshot",
+    );
+  });
+});

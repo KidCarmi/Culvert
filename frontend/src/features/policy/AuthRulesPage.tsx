@@ -14,6 +14,7 @@
 // and the Exempt outcome is presented as a warning-class waiver — never with
 // green "allowed" semantics.
 import { useEffect, useMemo, useState, type JSX, type ReactNode } from "react";
+import { useSearchParams } from "react-router";
 import { PageHeader } from "../../layouts/AppShell";
 import {
   Button,
@@ -39,6 +40,7 @@ import {
   getCategoryGroupNames,
   getURLCategoryNames,
 } from "../../api/policyWrite";
+import { isPlausibleRuleID } from "../../api/policy";
 import type { PolicyConflict } from "../../api/policyWrite";
 import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "../../auth/AuthProvider";
@@ -193,6 +195,13 @@ export function AuthRulesPage(): JSX.Element {
   const isAdmin = hasRole(state.role ?? "viewer", "admin");
   const [openId, setOpenId] = useState<string | null>(null);
 
+  // ?rule= stable-ID deep link (2D-A §19 — Where Used consumer links). The
+  // parameter is resolved by DATA EQUALITY against decoded rule ULIDs only;
+  // a valid-but-absent ID renders the truthful not-in-snapshot callout.
+  const [searchParams] = useSearchParams();
+  const ruleParam = searchParams.get("rule") ?? "";
+  const ruleParamValid = ruleParam === "" || isPlausibleRuleID(ruleParam);
+
   // ── editor state ─────────────────────────────────────────────────────────
   const [editor, setEditor] = useState<AuthRuleEditorMode | null>(null);
   const [editorPending, setEditorPending] = useState(false);
@@ -251,6 +260,14 @@ export function AuthRulesPage(): JSX.Element {
   }, [q.dataUpdatedAt]);
 
   const rules = useMemo(() => snap?.rules ?? [], [snap]);
+
+  const linkedRule =
+    ruleParamValid && ruleParam !== ""
+      ? rules.find((r) => r.id === ruleParam)
+      : undefined;
+  useEffect(() => {
+    if (linkedRule !== undefined) setOpenId(linkedRule.id);
+  }, [linkedRule]);
 
   // Staged-reorder integrity: membership changed under the staging ⇒ discard
   // VISIBLY (never rebase automatically).
@@ -456,6 +473,22 @@ export function AuthRulesPage(): JSX.Element {
         </div>
       )}
 
+      {snap !== undefined &&
+        ruleParamValid &&
+        ruleParam !== "" &&
+        linkedRule === undefined && (
+          <div className={styles.calloutSpace}>
+            <Callout
+              variant="info"
+              title="Referenced rule not in this snapshot"
+            >
+              The referenced Rule ID is not present in the current
+              authentication rulebase. It may represent historical data or a
+              rule that was since deleted.
+            </Callout>
+          </div>
+        )}
+
       <DefaultAuthOutcomeControl
         isAdmin={isAdmin}
         blocked={blocked}
@@ -579,6 +612,9 @@ export function AuthRulesPage(): JSX.Element {
                       key={rowKey}
                       r={r}
                       open={open}
+                      highlighted={
+                        linkedRule !== undefined && r.id === linkedRule.id
+                      }
                       danglingRefs={
                         ap.providersQ.data !== undefined ? dangling : []
                       }
@@ -724,6 +760,7 @@ export function AuthRulesPage(): JSX.Element {
 function AuthRuleRowGroup({
   r,
   open,
+  highlighted,
   danglingRefs,
   onToggle,
   isAdmin,
@@ -731,6 +768,7 @@ function AuthRuleRowGroup({
 }: {
   r: AuthRuleView;
   open: boolean;
+  highlighted: boolean;
   danglingRefs: readonly string[];
   onToggle: () => void;
   isAdmin: boolean;
@@ -739,7 +777,10 @@ function AuthRuleRowGroup({
   const flagCount = r.warnings.length + danglingRefs.length;
   return (
     <>
-      <tr>
+      <tr
+        className={styles.ruleRow}
+        data-highlight={highlighted ? "true" : undefined}
+      >
         <td>
           <Button
             size="sm"

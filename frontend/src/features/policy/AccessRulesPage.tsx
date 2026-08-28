@@ -553,7 +553,14 @@ export function AccessRulesPage(): JSX.Element {
             fetching={q.isFetching}
             error={q.isError}
             hasData={snap !== undefined}
-            onRefresh={rb.refreshToResolve}
+            onRefresh={() => {
+              rb.refreshToResolve();
+              // 2D-A §20: an explicit snapshot refresh also refreshes the
+              // reference option lists, so objects created/renamed/deleted on
+              // the management surfaces are reflected here without a remount
+              // (no cross-page global stores — server truth is refetched).
+              if (optQ.isFetched) void optQ.refetch();
+            }}
           />
         }
       />
