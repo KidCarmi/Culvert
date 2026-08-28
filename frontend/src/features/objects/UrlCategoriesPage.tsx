@@ -40,7 +40,7 @@ import {
   getUrlCategoryState,
   replaceUrlCategoryHosts,
 } from "../../api/urlcat";
-import type { UrlCategoryRow } from "../../api/urlcat";
+import type { BuiltInAuthority, UrlCategoryRow } from "../../api/urlcat";
 import { WhereUsed } from "../policy/WhereUsed";
 import { UrlCategoryDeleteDialog } from "./UrlCategoryDeleteDialog";
 import { UrlCatLookupTab } from "./UrlCatLookupTab";
@@ -91,6 +91,9 @@ export function UrlCategoriesPage(): JSX.Element {
   const blocked = page.unknown !== null;
   const categories = snap?.categories ?? [];
   const revision = snap?.revision ?? "";
+  // Server-owned ownership truth (Blocker D): the browser renders it, never
+  // derives it from builtIn/provenance/state.
+  const builtInAuthority = snap?.builtInAuthority ?? "local";
 
   const onConflict = (text: string): void => {
     setEditor(null);
@@ -168,6 +171,11 @@ export function UrlCategoriesPage(): JSX.Element {
           error={q.isError}
           blocked={blocked}
           canWrite={canWrite}
+          builtInAuthority={builtInAuthority}
+          onManageOverrides={() => {
+            setNotice("");
+            setTab("Overrides");
+          }}
           onCreate={() => {
             setNotice("");
             setEditor({ kind: "create" });
@@ -230,6 +238,8 @@ function CategoriesTab({
   error,
   blocked,
   canWrite,
+  builtInAuthority,
+  onManageOverrides,
   onCreate,
   onEdit,
   onDelete,
@@ -239,6 +249,8 @@ function CategoriesTab({
   error: boolean;
   blocked: boolean;
   canWrite: boolean;
+  builtInAuthority: BuiltInAuthority;
+  onManageOverrides: () => void;
   onCreate: () => void;
   onEdit: (row: UrlCategoryRow) => void;
   onDelete: (row: UrlCategoryRow) => void;
@@ -248,6 +260,19 @@ function CategoriesTab({
   if (error) return <ErrorState title="Could not load URL categories" />;
   return (
     <section aria-label="URL categories">
+      {builtInAuthority === "signed-feed" && (
+        <div className={styles.calloutSpace}>
+          <Callout
+            variant="info"
+            title="Built-in categories are signed-feed owned"
+          >
+            An active signed SaaS feed generation currently serves the built-in
+            categories, so their local definitions are read-only here — a local
+            edit would be stored but never enforced. Adjust signed-feed content
+            with SaaS Overrides; admin-created categories stay fully editable.
+          </Callout>
+        </div>
+      )}
       {canWrite && (
         <div className={styles.calloutSpace}>
           <Button onClick={onCreate} disabled={blocked}>
@@ -304,29 +329,46 @@ function CategoriesTab({
                 )}
               </td>
               <td>
-                {canWrite && (
+                {!row.writable ? (
+                  // Server-owned truth: this row's classes are served from
+                  // the active signed feed generation — no Edit/Delete.
                   <>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      disabled={blocked}
-                      onClick={() => {
-                        onEdit(row);
-                      }}
-                    >
-                      Edit hosts
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      disabled={blocked}
-                      onClick={() => {
-                        onDelete(row);
-                      }}
-                    >
-                      Delete
-                    </Button>
+                    <StatusBadge status="info">Signed-feed owned</StatusBadge>
+                    {canWrite && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={onManageOverrides}
+                      >
+                        Manage with Overrides
+                      </Button>
+                    )}
                   </>
+                ) : (
+                  canWrite && (
+                    <>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={blocked}
+                        onClick={() => {
+                          onEdit(row);
+                        }}
+                      >
+                        Edit hosts
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={blocked}
+                        onClick={() => {
+                          onDelete(row);
+                        }}
+                      >
+                        Delete
+                      </Button>
+                    </>
+                  )
                 )}
               </td>
             </tr>

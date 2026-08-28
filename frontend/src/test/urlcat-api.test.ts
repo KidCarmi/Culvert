@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import { ApiError } from "../api/client";
 import {
   SAAS_FEED_STATES,
+  asFeedOwnedConflict,
   asRevisionConflict,
   decodeSaasFeedSettings,
   decodeSaasFeedStatus,
@@ -18,7 +19,7 @@ import {
 } from "../api/urlcat";
 
 describe("decodeUrlCategoryState", () => {
-  it("decodes categories + the server-owned revision", () => {
+  it("decodes categories + the server-owned revision and ownership truth", () => {
     const out = decodeUrlCategoryState({
       categories: [
         {
@@ -26,19 +27,89 @@ describe("decodeUrlCategoryState", () => {
           hosts: ["a.example"],
           builtIn: false,
           feedBacked: true,
+          writable: true,
         },
-        { name: "Baseline", hosts: [], builtIn: true, feedBacked: false },
+        {
+          name: "Baseline",
+          hosts: [],
+          builtIn: true,
+          feedBacked: false,
+          writable: false,
+        },
       ],
       revision: "abc123",
+      builtInAuthority: "signed-feed",
     });
     expect(out.revision).toBe("abc123");
+    expect(out.builtInAuthority).toBe("signed-feed");
     expect(out.categories).toHaveLength(2);
     expect(out.categories[0]?.feedBacked).toBe(true);
+    expect(out.categories[0]?.writable).toBe(true);
     expect(out.categories[1]?.builtIn).toBe(true);
+    expect(out.categories[1]?.writable).toBe(false);
   });
 
   it("refuses a payload without a revision (fail-closed)", () => {
-    expect(() => decodeUrlCategoryState({ categories: [] })).toThrow();
+    expect(() =>
+      decodeUrlCategoryState({ categories: [], builtInAuthority: "local" }),
+    ).toThrow();
+  });
+
+  it("refuses a row without the server-owned writable truth (fail-closed)", () => {
+    expect(() =>
+      decodeUrlCategoryState({
+        categories: [{ name: "Social", hosts: [], builtIn: false }],
+        revision: "abc",
+        builtInAuthority: "local",
+      }),
+    ).toThrow();
+  });
+
+  it("refuses a missing or unknown builtInAuthority (fail-closed)", () => {
+    expect(() =>
+      decodeUrlCategoryState({ categories: [], revision: "abc" }),
+    ).toThrow();
+    expect(() =>
+      decodeUrlCategoryState({
+        categories: [],
+        revision: "abc",
+        builtInAuthority: "vendor",
+      }),
+    ).toThrow();
+  });
+});
+
+describe("asFeedOwnedConflict", () => {
+  it("recognizes the Blocker-D structured 409", () => {
+    const err = new ApiError(
+      "http",
+      "conflict",
+      409,
+      JSON.stringify({
+        error:
+          "category is owned by the active signed SaaS feed: local edits are superseded until the feed releases ownership",
+        owner: "signed-feed",
+        manageWith: "saas-overrides",
+      }),
+    );
+    const c = asFeedOwnedConflict(err);
+    expect(c).not.toBeNull();
+    expect(c?.owner).toBe("signed-feed");
+    expect(c?.manageWith).toBe("saas-overrides");
+  });
+
+  it("returns null for a revision conflict (distinct 409 shape)", () => {
+    const err = new ApiError(
+      "http",
+      "conflict",
+      409,
+      JSON.stringify({
+        error: "taxonomy revision conflict",
+        currentRevision: "cur",
+        yourRevision: "mine",
+      }),
+    );
+    expect(asFeedOwnedConflict(err)).toBeNull();
   });
 });
 

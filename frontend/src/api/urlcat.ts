@@ -24,6 +24,7 @@ import {
   field,
   readArray,
   readBoolean,
+  readEnum,
   readNumber,
   readOptional,
   readRecord,
@@ -70,6 +71,40 @@ export function asRevisionConflict(err: unknown): RevisionConflict | null {
   }
 }
 
+// ── Feed-ownership refusal (Blocker D structured 409) ──────────────────────
+
+export interface FeedOwnedConflict {
+  error: string;
+  /** Always "signed-feed" today. */
+  owner: string;
+  /** Where the server says to manage this content: "saas-overrides". */
+  manageWith: string;
+}
+
+/** Recognizes the Blocker-D structured 409 ({error, owner, manageWith}) the
+ * v2 surface returns for a mutation on a signed-feed-owned built-in
+ * category. Returns null for any other error (incl. revision conflicts). */
+export function asFeedOwnedConflict(err: unknown): FeedOwnedConflict | null {
+  if (!(err instanceof ApiError)) return null;
+  if (err.status !== 409 || err.bodyText === undefined) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(err.bodyText);
+  } catch {
+    return null;
+  }
+  try {
+    const o = readRecord(parsed, "$");
+    return {
+      error: field(o, "error", readString, "$"),
+      owner: field(o, "owner", readString, "$"),
+      manageWith: field(o, "manageWith", readString, "$"),
+    };
+  } catch {
+    return null;
+  }
+}
+
 // ── URL category state (v2 read) ───────────────────────────────────────────
 
 export interface UrlCategoryRow {
@@ -78,12 +113,24 @@ export interface UrlCategoryRow {
   builtIn: boolean;
   /** UT1 community-feed name mapping — NOT the signed SaaS corpus. */
   feedBacked: boolean;
+  /** SERVER-OWNED mutability truth (Blocker D): false exactly when this is a
+   * BuiltIn row whose classes are currently served from a committed signed
+   * feed generation — the v2 mutation surface refuses it (409 pointing at
+   * SaaS Overrides). The browser NEVER derives this from
+   * builtIn/provenance/state; the field is required, fail-closed. */
+  writable: boolean;
 }
+
+/** Page-level built-in ownership truth — "signed-feed" while a committed
+ * signed generation's classes serve (built-in rows read-only, managed via
+ * SaaS Overrides), "local" while the embedded baseline / raw store serves. */
+export type BuiltInAuthority = "signed-feed" | "local";
 
 export interface UrlCategoryState {
   categories: readonly UrlCategoryRow[];
   /** Server-owned restart-stable semantic taxonomy revision. */
   revision: string;
+  builtInAuthority: BuiltInAuthority;
 }
 
 const decodeCategoryRow: Decoder<UrlCategoryRow> = (v, path = "$") => {
@@ -96,8 +143,16 @@ const decodeCategoryRow: Decoder<UrlCategoryRow> = (v, path = "$") => {
         : field(o, "hosts", readArray(readString), path),
     builtIn: field(o, "builtIn", optBool, path) ?? false,
     feedBacked: field(o, "feedBacked", optBool, path) ?? false,
+    // Required — a payload without the server-owned mutability truth is
+    // refused rather than guessed at (fail-closed, like the revision).
+    writable: field(o, "writable", readBoolean, path),
   };
 };
+
+const decodeBuiltInAuthority: Decoder<BuiltInAuthority> = readEnum([
+  "signed-feed",
+  "local",
+] as const);
 
 export const decodeUrlCategoryState: Decoder<UrlCategoryState> = (
   v,
@@ -110,6 +165,12 @@ export const decodeUrlCategoryState: Decoder<UrlCategoryState> = (
         ? []
         : field(o, "categories", readArray(decodeCategoryRow), path),
     revision: field(o, "revision", readString, path),
+    builtInAuthority: field(
+      o,
+      "builtInAuthority",
+      decodeBuiltInAuthority,
+      path,
+    ),
   };
 };
 

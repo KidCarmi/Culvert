@@ -92,15 +92,18 @@ beforeEach(() => {
         hosts: ["a.example"],
         builtIn: false,
         feedBacked: true,
+        writable: true,
       },
       {
         name: "Finance",
         hosts: ["b.example"],
         builtIn: true,
         feedBacked: false,
+        writable: true,
       },
     ],
     revision: "rev-1",
+    builtInAuthority: "local",
   };
   refsBody = { object: { type: "category", name: "Social" }, referencedBy: [] };
   statusBody = SIGNED_STATUS_BASE;
@@ -500,6 +503,59 @@ it("cluster_publish_rejected renders local-saved-fleet-rejected — never Save f
   const m = mutations[0];
   if (m === undefined) throw new Error("no mutation");
   expect(m.url).toContain("ifRevision=srev-1");
+});
+
+// ── Signed-feed ownership truth (Blocker D) ────────────────────────────────
+
+it("signed-feed owned built-ins lose Edit/Delete, offer Manage with Overrides (tab switch), and the page explains authority", async () => {
+  stateBody = {
+    categories: [
+      {
+        name: "Social",
+        hosts: ["a.example"],
+        builtIn: false,
+        feedBacked: true,
+        writable: true,
+      },
+      {
+        name: "Finance",
+        hosts: ["b.example"],
+        builtIn: true,
+        feedBacked: false,
+        writable: false,
+      },
+    ],
+    revision: "rev-1",
+    builtInAuthority: "signed-feed",
+  };
+  await mount("operator");
+  expect(container.textContent).toContain("Signed-feed owned");
+  expect(container.textContent).toContain(
+    "Built-in categories are signed-feed owned",
+  );
+  // The feed-owned row offers no Edit/Delete; the admin-created row keeps both.
+  const editButtons = Array.from(container.querySelectorAll("button")).filter(
+    (b) => (b.textContent ?? "").includes("Edit hosts"),
+  );
+  expect(editButtons).toHaveLength(1);
+  const deleteButtons = Array.from(container.querySelectorAll("button")).filter(
+    (b) => (b.textContent ?? "").trim() === "Delete",
+  );
+  expect(deleteButtons).toHaveLength(1);
+  // Manage with Overrides routes the operator to the Overrides section.
+  click(findButton((t) => t.includes("Manage with Overrides")));
+  await flushUntil(() => {
+    expect(container.textContent).toContain("Subtree scope");
+  });
+});
+
+it("local authority keeps built-in rows editable and shows no ownership callout", async () => {
+  await mount("operator"); // default fixture: builtInAuthority=local, all writable
+  expect(container.textContent).not.toContain("Signed-feed owned");
+  const editButtons = Array.from(container.querySelectorAll("button")).filter(
+    (b) => (b.textContent ?? "").includes("Edit hosts"),
+  );
+  expect(editButtons).toHaveLength(2);
 });
 
 // ── Overrides tab ──────────────────────────────────────────────────────────
