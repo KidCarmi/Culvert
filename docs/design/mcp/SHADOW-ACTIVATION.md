@@ -115,9 +115,17 @@ a plan-only `CredentialPlanner`. It receives **no** `UpstreamCaller`, **no**
 materialize-capable `*broker.Broker`, **no** live `*execution.Executor`. It then
 assigns the evaluator to `Deps.Executor` and calls `markGatewayShadowDepsReady()`.
 
+The composition also wires request inspection (`Deps.Inspection`, the default gateway
+schema/DLP/destination profile) so a Shadow evaluation runs against inspection — an
+inspection-rejectable input is blocked or reflected in the policy decision, never
+classified `would_execute`. The preflight requires it (`request_inspection_unavailable`
+otherwise). A hard inspection failure still blocks in the runtime before the executor
+(§10 "degrade toward Block"; the `would_fail_inspection` evidence-shape is the tracked
+`SHADOW-EVIDENCE-ROUTING-1` deferral) — never a `would_execute` for a rejected input.
+
 Disabled by default: composition happens ONLY when the operator explicitly enables
 Shadow readiness (`CULVERT_MCP_SHADOW_READY`, off by default). Unset ⇒ `Deps.Executor`
-stays nil ⇒ byte-identical Observe/SWG path.
+and `Deps.Inspection` stay nil ⇒ byte-identical Observe/SWG path.
 
 Observe-window evidence parity: with the evaluator composed but mode still Observe
 (or an out-of-scope subject in Shadow mode), requests resolve to `EffectRecordOnly`.

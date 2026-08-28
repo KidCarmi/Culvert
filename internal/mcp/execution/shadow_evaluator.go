@@ -184,9 +184,6 @@ func (s *ShadowEvaluator) evaluate(_ context.Context, in runtime.ExecInput) runt
 		return s.blocked(in, mcperr.ReasonEventDurabilityDegraded, false)
 	}
 	d := s.decide(in)
-	// Bounded, low-cardinality metric: ONE evaluation + its formal Model-1 verdict. The
-	// outcome enum is the only label; no tenant/subject/tool/argument is ever recorded.
-	s.cfg.Metrics.ObserveShadowOutcome(in.Capability.String(), string(d.Outcome))
 
 	// Durable evidence BEFORE reporting (evidence-before-report). The committed
 	// callback performs NO side effect — it exists only so a failed durable commit
@@ -195,6 +192,13 @@ func (s *ShadowEvaluator) evaluate(_ context.Context, in runtime.ExecInput) runt
 	if err := s.cfg.Events.CommitThenAct(facts, func(spool.CommitReceipt) error { return nil }); err != nil {
 		return s.blocked(in, mcperr.ReasonOf(err), false)
 	}
+	// Bounded, low-cardinality metric: ONE evaluation + its formal Model-1 verdict. The
+	// outcome enum is the only label; no tenant/subject/tool/argument is ever recorded.
+	// Emitted ONLY AFTER the durable commit succeeds (evidence-before-report): on a commit
+	// failure the evaluator returns a block (counted as an evaluation error), and recording
+	// a would_* verdict here too would double-count and overstate successful Shadow outcomes
+	// during exactly the durability failures an operator needs to see (Codex P2, PR #1234).
+	s.cfg.Metrics.ObserveShadowOutcome(in.Capability.String(), string(d.Outcome))
 
 	return runtime.ExecOutput{
 		Status:          200,

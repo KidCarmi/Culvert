@@ -7,6 +7,9 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/fileutil"
+	"github.com/KidCarmi/Culvert/internal/mcp/catalog"
+	"github.com/KidCarmi/Culvert/internal/mcp/limits"
+	"github.com/KidCarmi/Culvert/internal/mcp/registry"
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 )
 
@@ -54,6 +57,39 @@ func withExecDepsReady(t *testing.T) {
 	prev := globalExecDeps.shadowGateway.Load()
 	markGatewayShadowDepsReady()
 	t.Cleanup(func() { globalExecDeps.shadowGateway.Store(prev) })
+}
+
+// withReadyShadowNode composes the minimal node state the Shadow activation preflight
+// requires, so a RESTORED ModeShadow survives restore() instead of being clamped as
+// unable-to-evaluate. In production initMCPRuntime composes all of this (shadow evaluator
+// + inspection + durable events + policy + inventory + a serving listener) BEFORE
+// initMCPRollout restores; these isolated rollout tests must reproduce that readiness to
+// exercise a genuine Shadow restart. It also arms the shadow tier (withExecDepsReady).
+func withReadyShadowNode(t *testing.T) {
+	t.Helper()
+	withExecDepsReady(t) // shadow readiness tier
+	prevComposed := globalMCPShadow.composed.Load()
+	prevInsp := globalMCPShadow.inspectionComposed.Load()
+	prevStatus := getMCPObserveStatus()
+	globalMCPShadow.composed.Store(true)
+	globalMCPShadow.inspectionComposed.Store(true)
+	setMCPObserveStatus(mcpObserveActivation{State: mcpObserveConfigured})
+	publishMCPTelemetry(mcpTelemReady, "", buildReadyTelemetry(t))
+	publishMCPInventory(mcpInvLoaded, "", registry.New(limits.DefaultCatalog()), catalog.New(limits.DefaultCatalog()))
+	// Reset the shared policy holder so the monotonic-revision store accepts this test's
+	// snapshot (a prior test may have advanced the global store's revision).
+	mcpPolicy.resetForTest()
+	if err := publishMCPPolicy(mcpPolLoaded, "", compileGatewayTestSnapshot(t)); err != nil {
+		t.Fatalf("publish test policy: %v", err)
+	}
+	t.Cleanup(func() {
+		globalMCPShadow.composed.Store(prevComposed)
+		globalMCPShadow.inspectionComposed.Store(prevInsp)
+		setMCPObserveStatus(prevStatus)
+		publishMCPTelemetry(mcpTelemNotConfigured, "", nil)
+		publishMCPInventory(mcpInvNotConfigured, "", nil, nil)
+		_ = publishMCPPolicy(mcpPolNotConfigured, "", nil)
+	})
 }
 
 // withLiveExecDepsReady arms the LIVE-execution tier for the duration of a test so a
@@ -125,7 +161,7 @@ func TestDurable_IdempotentReapplyDoesNotRestamp(t *testing.T) {
 // Test 11/13: restart preserves the exact Shadow window start (soak too).
 func TestDurable_RestartPreservesShadowStart(t *testing.T) {
 	withTempDataDir(t)
-	withExecDepsReady(t)
+	withReadyShadowNode(t) // a genuine Shadow restart requires node readiness (preflight)
 	r := newTestRollout()
 	if err := r.commitRolloutTransition(gwShadowCfg(1), "admin", time.Unix(1000, 0)); err != nil {
 		t.Fatal(err)
@@ -147,6 +183,49 @@ func TestDurable_RestartPreservesShadowStart(t *testing.T) {
 	// Elapsed continues from the ORIGINAL start, not the restart.
 	if el := rec.ShadowElapsed(time.Unix(1000+3600, 0)); el != time.Hour {
 		t.Fatalf("elapsed should continue from original start (1h), got %s", el)
+	}
+}
+
+// TestDurable_RestartClampsShadowWhenNodeCannotEvaluate is Codex P1 (PR #1234): a
+// restored ModeShadow whose node can no longer EVALUATE (policy removed between persist
+// and restart) must clamp to Disabled — not advertise an active Shadow rollout while the
+// runtime fails every request closed and the evidence window accrues invalid time.
+func TestDurable_RestartClampsShadowWhenNodeCannotEvaluate(t *testing.T) {
+	withTempDataDir(t)
+	withReadyShadowNode(t)
+	r := newTestRollout()
+	if err := r.commitRolloutTransition(gwShadowCfg(1), "admin", time.Unix(1000, 0)); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate the policy source removed before the restart: the node keeps shadow deps +
+	// events but can no longer reach a policy decision.
+	_ = publishMCPPolicy(mcpPolNotConfigured, "", nil)
+	r2 := newTestRollout()
+	r2.restore()
+	if r2.gateway.CurrentMode() != rollout.ModeDisabled {
+		t.Fatalf("a restored Shadow node that cannot evaluate must clamp to Disabled, got %s", r2.gateway.CurrentMode())
+	}
+}
+
+// TestDurable_RestartKilledShadowKeepsMode pins that the restore-clamp preflight EXCLUDES
+// the kill reason: a killed-but-otherwise-ready Shadow node keeps its mode across a
+// restart (the kill is restored independently and is reversible via clearEmergency), so
+// clamping it to Disabled would make the kill irreversible for the mode.
+func TestDurable_RestartKilledShadowKeepsMode(t *testing.T) {
+	withTempDataDir(t)
+	withReadyShadowNode(t)
+	r := newTestRollout()
+	if err := r.commitRolloutTransition(gwShadowCfg(1), "admin", time.Unix(1000, 0)); err != nil {
+		t.Fatal(err)
+	}
+	_ = r.emergencyDisable(rollout.CapabilityGateway, "oncall") // engage + persist the kill
+	r2 := newTestRollout()
+	r2.restore()
+	if r2.gateway.CurrentMode() != rollout.ModeShadow {
+		t.Fatalf("a killed-but-ready Shadow node must keep its mode across restart, got %s", r2.gateway.CurrentMode())
+	}
+	if !r2.gateway.Killed() {
+		t.Fatal("the kill state must be restored")
 	}
 }
 

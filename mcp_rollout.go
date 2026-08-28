@@ -262,6 +262,23 @@ func (r *mcpRollout) restore() {
 				logger.Printf("MCP rollout restore for %s: refused executing mode without required execution deps; clamped to Disabled", st.Capability().String())
 				continue
 			}
+			// A restored Shadow mode must also pass the full activation preflight — not just
+			// the coarse exec-deps tier (Codex P1, PR #1234). On a restart where the shadow
+			// flag is armed (composition) but the node cannot actually EVALUATE — policy or
+			// inventory removed, listener not serving, inspection absent — the node would
+			// otherwise advertise an active Shadow rollout while its status preflight says
+			// not-ready and the evidence window accrues invalid time. The KILL reason is
+			// EXCLUDED: the kill switch is restored independently and is reversible via
+			// clearEmergency, so a killed-but-otherwise-ready Shadow node keeps its mode
+			// (clamping it to Disabled would make the kill irreversible for the mode).
+			if st.CurrentMode() == rollout.ModeShadow {
+				if pf := evaluateShadowActivationPreflight(st.Capability()); shadowPreflightUnreadyIgnoringKill(pf) {
+					_ = st.SetConfig(rollout.DisabledConfig(st.Capability()), "restore-clamp", time.Now().UnixNano())
+					r.setPersistStatus(st.Capability(), "degraded")
+					logger.Printf("MCP rollout restore for %s: restored Shadow failed activation preflight %v; clamped to Disabled (fail-closed)", st.Capability().String(), pf.Reasons)
+					continue
+				}
+			}
 			r.setPersistStatus(st.Capability(), "recovered")
 			logger.Printf("MCP rollout restore for %s: mode=%s (recovered)", st.Capability().String(), st.CurrentMode().String())
 		} else {

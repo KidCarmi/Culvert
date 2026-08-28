@@ -5,6 +5,8 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/KidCarmi/Culvert/internal/mcp/events/spool"
+	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
 	"github.com/KidCarmi/Culvert/internal/mcp/policy"
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 )
@@ -149,6 +151,59 @@ func TestRecordsOnly_RoutesOnlyExecutingDispositions(t *testing.T) {
 	killed.EngageKillSwitch("oncall", 1)
 	if newEv(killed).RecordsOnly(inScope) {
 		t.Fatal("SECURITY: a killed capability must NOT be record-only — Execute must emit the emergency block")
+	}
+}
+
+// spyMetrics records how many times the Shadow-outcome and block observations fire. It
+// embeds noopMetrics for every other method of the interface.
+type spyMetrics struct {
+	noopMetrics
+	outcomes int
+	blocks   int
+}
+
+func (s *spyMetrics) ObserveShadowOutcome(string, string) { s.outcomes++ }
+func (s *spyMetrics) ObserveBlock(string, mcperr.Reason)  { s.blocks++ }
+
+// TestShadow_OutcomeMetricRecordedOnlyAfterDurableCommit is the evidence-before-report
+// gate (Codex P2, PR #1234): when the durable commit fails, the evaluator returns a block
+// (counted as an error) and must NOT ALSO record a would_* verdict — that would
+// double-count and overstate successful Shadow outcomes during the durability failures an
+// operator most needs to see. Mutation: moving ObserveShadowOutcome back before
+// CommitThenAct makes outcomes==1 here and fails the test.
+func TestShadow_OutcomeMetricRecordedOnlyAfterDurableCommit(t *testing.T) {
+	// Success path: exactly one outcome, no block.
+	okSpy := &spyMetrics{}
+	okEv, err := NewShadowEvaluator(ShadowConfig{
+		State: stateForMode(t, rollout.ModeShadow), Events: realEvents(t, nil), Metrics: okSpy,
+	})
+	if err != nil {
+		t.Fatalf("NewShadowEvaluator: %v", err)
+	}
+	if out := okEv.evaluate(context.Background(), execInput(policy.ActionAllow, false)); out.ExecutionState != "shadow_evaluated" {
+		t.Fatalf("success path should shadow_evaluate, got %q", out.ExecutionState)
+	}
+	if okSpy.outcomes != 1 || okSpy.blocks != 0 {
+		t.Fatalf("success path: outcomes=%d blocks=%d, want 1/0", okSpy.outcomes, okSpy.blocks)
+	}
+
+	// Durable-commit failure: a block, NO would_* verdict recorded.
+	failSpy := &spyMetrics{}
+	failEv, err := NewShadowEvaluator(ShadowConfig{
+		State: stateForMode(t, rollout.ModeShadow), Events: realEvents(t, failBackend{inner: spool.NewOSBackend()}), Metrics: failSpy,
+	})
+	if err != nil {
+		t.Fatalf("NewShadowEvaluator: %v", err)
+	}
+	out := failEv.evaluate(context.Background(), execInput(policy.ActionAllow, false))
+	if out.ExecutionState != "blocked" {
+		t.Fatalf("commit failure must block, got %q", out.ExecutionState)
+	}
+	if failSpy.outcomes != 0 {
+		t.Fatal("a would_* verdict must NOT be recorded when the durable commit fails (evidence-before-report)")
+	}
+	if failSpy.blocks == 0 {
+		t.Fatal("a durable-commit failure must be counted as a block/evaluation error")
 	}
 }
 

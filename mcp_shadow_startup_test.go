@@ -18,13 +18,16 @@ func resetShadowComposition(t *testing.T) {
 	t.Helper()
 	prevComposed := globalMCPShadow.composed.Load()
 	prevRequested := globalMCPShadow.requested.Load()
+	prevInspection := globalMCPShadow.inspectionComposed.Load()
 	prevReason := globalMCPShadow.Reason()
 	globalMCPShadow.composed.Store(false)
 	globalMCPShadow.requested.Store(false)
+	globalMCPShadow.inspectionComposed.Store(false)
 	globalMCPShadow.setReason("")
 	t.Cleanup(func() {
 		globalMCPShadow.composed.Store(prevComposed)
 		globalMCPShadow.requested.Store(prevRequested)
+		globalMCPShadow.inspectionComposed.Store(prevInspection)
 		globalMCPShadow.setReason(prevReason)
 	})
 }
@@ -62,6 +65,14 @@ func TestShadowComposition_ProducesNonExecutingEvaluator(t *testing.T) {
 	}
 	if !globalMCPShadow.composed.Load() || globalMCPShadow.Reason() != "composed" {
 		t.Fatalf("composition record wrong: composed=%v reason=%q", globalMCPShadow.composed.Load(), globalMCPShadow.Reason())
+	}
+	// Request inspection must be wired so a Shadow evaluation runs against inspection (an
+	// inspection-rejectable input must never be classified would_execute).
+	if cfg.Deps.Inspection == nil {
+		t.Fatal("shadow composition must wire Deps.Inspection (request inspection)")
+	}
+	if !globalMCPShadow.inspectionComposed.Load() {
+		t.Fatal("composition must record inspection as composed")
 	}
 	// Structural: the composed object holds no path to Upstream.Call or Materialize.
 	if bad := shadowTypeGraphCapabilities(reflect.TypeOf(cfg.Deps.Executor)); len(bad) != 0 {

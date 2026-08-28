@@ -28,9 +28,23 @@ import (
 
 	"github.com/KidCarmi/Culvert/internal/mcp/events"
 	"github.com/KidCarmi/Culvert/internal/mcp/execution"
+	"github.com/KidCarmi/Culvert/internal/mcp/inspection"
+	"github.com/KidCarmi/Culvert/internal/mcp/protocol"
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 	mcpruntime "github.com/KidCarmi/Culvert/internal/mcp/runtime"
 )
+
+// staticGatewayInspection serves one immutable Gateway inspection profile as the runtime
+// InspectionProvider. It is read-only and capability-scoped: it answers only for the
+// Gateway capability (Management never runs tools/call inspection).
+type staticGatewayInspection struct{ prof inspection.Profile }
+
+func (s staticGatewayInspection) InspectionProfile(capNS protocol.Capability) (inspection.Profile, bool) {
+	if capNS != protocol.Gateway {
+		return inspection.Profile{}, false
+	}
+	return s.prof, true
+}
 
 // mcpShadowReadyEnvVar is the explicit, operator-controlled opt-in for composing the
 // non-executing Shadow evaluator on this node. Startup-scoped, read once. Default OFF.
@@ -49,6 +63,11 @@ type mcpShadowComposition struct {
 	// then failed closed), so the health surface can distinguish "not asked for" from
 	// "asked for but a dependency was missing".
 	requested atomic.Bool
+	// inspectionComposed is true once the shadow composition has wired the request
+	// inspection provider (Deps.Inspection) into the runtime, so the preflight can require
+	// it — Shadow must evaluate against inspection, not classify inspection-rejectable
+	// inputs as would_execute.
+	inspectionComposed atomic.Bool
 	// reason is a bounded, fixed classification code (never a secret/path/raw error).
 	reasonMu sync.Mutex
 	reason   string
@@ -157,6 +176,18 @@ func composeGatewayShadowIntoConfig(cfg *mcpruntime.Config, shadowReady bool, ev
 	// Install the evaluator as the runtime executor. It is a non-nil concrete pointer, so
 	// the runtime's `deps.Executor != nil` guard reads it correctly (no nil-interface trap).
 	cfg.Deps.Executor = ev
+	// Wire request inspection so a Shadow evaluation actually runs against schema/DLP/
+	// destination inspection (Codex P1, PR #1234). Without it, a tools/call is recorded
+	// with request_inspection=not_evaluated and an inspection-rejectable input could be
+	// classified WOULD_EXECUTE, corrupting the soak the runbook promises. Only wired on a
+	// shadow-ready node (gated by this whole function), so a plain Observe node is
+	// unaffected. A hard inspection failure still BLOCKS in the runtime before the executor
+	// (§10 "degrade toward Block"; the would_fail_inspection evidence shape is the tracked
+	// SHADOW-EVIDENCE-ROUTING-1 deferral) — never a would_execute for a rejected input.
+	if cfg.Deps.Inspection == nil {
+		cfg.Deps.Inspection = staticGatewayInspection{prof: inspection.DefaultGatewayProfile(1)}
+	}
+	globalMCPShadow.inspectionComposed.Store(true)
 	// Arm ONLY the shadow readiness tier — never the live-execution tier. This is what
 	// lets a Shadow transition be admitted while every Canary/Production transition
 	// stays fail-closed (mcp_rollout_execdeps.go).

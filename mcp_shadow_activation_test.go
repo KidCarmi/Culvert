@@ -62,6 +62,24 @@ func TestPreflight_ComposedClearsComposedReason(t *testing.T) {
 	}
 }
 
+// TestPreflight_RequiresInspectionComposed pins that a Shadow node without request
+// inspection wired fails preflight (Codex P1, PR #1234) — Shadow must evaluate against
+// inspection, never classify an inspection-rejectable input as would_execute.
+func TestPreflight_RequiresInspectionComposed(t *testing.T) {
+	resetExecDeps(t)
+	resetShadowComposition(t)
+	markGatewayShadowDepsReady()
+	globalMCPShadow.composed.Store(true)
+	// inspectionComposed deliberately left false.
+	pf := evaluateShadowActivationPreflight(rollout.CapabilityGateway)
+	if pf.Ready {
+		t.Fatal("preflight must not be ready without request inspection composed")
+	}
+	if !containsReason(pf.Reasons, shadowPFNoInspection) {
+		t.Fatalf("expected %s, got %v", shadowPFNoInspection, pf.Reasons)
+	}
+}
+
 // TestShadowActivation_FailedPreflightDoesNotCommit is §15 mutation #7: a signed Shadow
 // envelope reaching the CP→DP accept path with shadow deps ARMED but the node NOT ready
 // (no telemetry/policy/inventory/listener) must be rejected by the preflight — no rollout
