@@ -13,7 +13,12 @@ package main
 // next restart). It is INERT config storage — nothing in F3a-1 consumes it to
 // change proxy behavior; the URL stays owned by the legacy syncer.
 
-import "sync"
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"sync"
+)
 
 // saasFeedDurable is the durable feed-config ownership state. As of F3a-2 it OWNS
 // the URL too: the signed-feed manifest URL is deliberately decoupled from the
@@ -58,13 +63,43 @@ func getSaaSFeedDurable() saasFeedDurable {
 // It is the SOLE writer of s.SaaSFeedURL (F3a-2): the legacy syncer no longer
 // owns the field, so the signed-feed URL round-trips through the holder alone.
 func snapshotSaaSFeedDurable(s *AdminSettings) {
-	d := getSaaSFeedDurable()
+	snapshotSaaSFeedDurableFrom(s, getSaaSFeedDurable())
+}
+
+// snapshotSaaSFeedDurableFrom writes an EXPLICIT durable value into s — the
+// 2D-B.0c persist-before-apply seam: the fenced settings PUT persists its
+// TARGET configuration while the live holder still carries the old one.
+func snapshotSaaSFeedDurableFrom(s *AdminSettings, d saasFeedDurable) {
 	s.SaaSFeedManaged = d.Managed
 	s.SaaSFeedEnabled = d.Enabled
 	s.SaaSFeedURL = d.URL
 	s.SaaSFeedProtocol = d.Protocol
 	s.SaaSFeedRefreshSeconds = d.RefreshSeconds
 	s.SaaSStoreSchemaVersion = d.SchemaVersion
+}
+
+// saasFeedSettingsRevision is the narrow content-derived optimistic-concurrency
+// revision of the signed-feed CONFIGURATION (2D-B §25): managed, enabled, the
+// RESOLVED official URL (an unset URL and the explicit official endpoint hash
+// identically — they are the same configuration), protocol, refresh, and the
+// schema marker. Nothing else — runtime status never moves it. Length-framed
+// so field boundaries are unambiguous.
+func saasFeedSettingsRevision(d saasFeedDurable) string {
+	resolvedURL := d.URL
+	if u, err := resolveFeedURL(d.URL); err == nil {
+		resolvedURL = u
+	}
+	h := sha256.New()
+	frame := func(field string) {
+		_, _ = fmt.Fprintf(h, "%d:%s|", len(field), field)
+	}
+	frame(fmt.Sprintf("managed=%t", d.Managed))
+	frame(fmt.Sprintf("enabled=%t", d.Enabled))
+	frame("url=" + resolvedURL)
+	frame("protocol=" + d.Protocol)
+	frame(fmt.Sprintf("refresh=%d", d.RefreshSeconds))
+	frame(fmt.Sprintf("schema=%d", d.SchemaVersion))
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // resolvedSaaSFeedConfig applies the F0 §3 single-source rule to the current
@@ -82,3 +117,13 @@ func resolvedSaaSFeedConfig() (SaaSFeedConfig, error) {
 		SaaSFeedRefreshSeconds: d.RefreshSeconds,
 	})
 }
+
+// errSaaSSettingsRevisionConflict marks a failed settings revision fence: the
+// asserted revision no longer matches inside the serialized save domain. The
+// handler renders it as the structured 409.
+var errSaaSSettingsRevisionConflict = errSentinel("saas feed settings revision conflict")
+
+// errSentinel builds a simple sentinel error value.
+type errSentinel string
+
+func (e errSentinel) Error() string { return string(e) }

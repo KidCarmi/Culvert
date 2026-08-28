@@ -203,12 +203,41 @@ func putSaaSFeedSettings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, sanitizeLog(err.Error()), http.StatusBadRequest)
 		return
 	}
-	// Apply-then-persist with runtime rollback on durable-write failure.
-	old := getSaaSFeedDurable()
-	setSaaSFeedDurable(next)
-	if err := SaveAdminSettings(); err != nil {
-		setSaaSFeedDurable(old) // ROLLBACK runtime; no config-snapshot change committed
-		logger.Printf("SaaSFeedSettings: persist failed, runtime reverted: %v", err)
+	// 2D-B.0c: persist-before-apply inside the serialized AdminSettings save
+	// domain, with the OPTIONAL revision fence (?ifRevision= — the v2 client
+	// always sends it; legacy callers without it keep replacement semantics).
+	// The comparison, the durable TARGET write and the runtime apply all run
+	// under ONE adminSettingsMu critical section — never a handler check
+	// followed by an unlocked save. A persist failure means the target was
+	// never applied: runtime and disk stay in agreement, no rollback branch.
+	ifRev := parseIfRevision(r)
+	var conflictCurrent string
+	err = saveAdminSettingsWithOverrides(adminSaveOverrides{
+		saasFeed: &next,
+		precondition: func() error {
+			if ifRev == nil {
+				return nil
+			}
+			if cur := saasFeedSettingsRevision(getSaaSFeedDurable()); cur != *ifRev {
+				conflictCurrent = cur
+				return errSaaSSettingsRevisionConflict
+			}
+			return nil
+		},
+		applyOnSuccess: func() { setSaaSFeedDurable(next) },
+	})
+	if errors.Is(err, errSaaSSettingsRevisionConflict) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // response write
+			"error":           "settings revision conflict",
+			"currentRevision": conflictCurrent,
+			"yourRevision":    *ifRev,
+		})
+		return
+	}
+	if err != nil {
+		logger.Printf("SaaSFeedSettings: persist failed, target never applied: %v", err)
 		http.Error(w, "failed to persist saas feed settings", http.StatusInternalServerError)
 		return
 	}
@@ -268,6 +297,10 @@ func saasFeedSettingsView() map[string]any {
 		// exact host the GUI constrains input to (no generic mirror).
 		"official_url": builtinSaaSFeedURL,
 		"editable":     !isManagedDataPlane(),
+		// The server-owned settings revision (content-derived over the feed
+		// CONFIGURATION only) — echoed back via ?ifRevision= on the PUT so two
+		// admins can never silently overwrite each other (2D-B §25).
+		"revision": saasFeedSettingsRevision(d),
 		// F3b-4: the signed-feed runtime (download/verify/activate/serve) is now wired.
 		// This endpoint stays CONFIG-only; the live runtime state (state/provenance/
 		// version/freshness/counts/activity) is on GET /api/saas-feed/status.

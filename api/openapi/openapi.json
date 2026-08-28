@@ -2760,6 +2760,10 @@
             },
             "type": "object"
           },
+          "revision": {
+            "description": "Server-owned content-derived settings revision (managed/enabled/resolved official URL/protocol/refresh/schema). Echo back via ?ifRevision= on the PUT; a mismatch is the structured 409 ({error, currentRevision, yourRevision}).",
+            "type": "string"
+          },
           "runtime_activation_available": {
             "description": "Always false in this release — configuration is stored but no feed is fetched, verified, activated, or served yet.",
             "type": "boolean"
@@ -17142,6 +17146,17 @@
       "put": {
         "description": "Updates the SaaS signed category-feed configuration. The protocol is signed-only (signed_manifest_v1); the URL is constrained to the official Culvert feed origin (an empty URL resolves to the built-in official endpoint). Configuration only — no feed is downloaded, verified, or activated. Denied with 409 on a managed data-plane node (feed policy is control-plane-authoritative).",
         "operationId": "setSaaSFeedSettings",
+        "parameters": [
+          {
+            "description": "Optional settings-revision assertion (from the GET's `revision`); when present the comparison and the durable target write share one serialized save domain, and a stale token returns the structured 409 without applying anything.",
+            "in": "query",
+            "name": "ifRevision",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {

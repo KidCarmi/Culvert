@@ -688,6 +688,18 @@ type adminSaveOverrides struct {
 	autoExclude      *autoExcludeTunables
 	supportRetention *supportRetentionConfig
 	policyLearning   *policyLearnSettings
+	// saasFeed carries the TARGET signed-feed configuration for the 2D-B.0c
+	// persist-before-apply settings PUT: the durable file records these target
+	// values while the live holder still carries the old ones; applyOnSuccess
+	// then publishes them to the holder only after the write landed.
+	saasFeed *saasFeedDurable
+	// precondition, when set, runs INSIDE adminSettingsMu before anything is
+	// snapshotted or written; a non-nil error aborts the save untouched and is
+	// returned to the caller. This is what makes an optimistic-revision fence
+	// real (2D-B §25): the comparison and the durable target write share ONE
+	// serialized AdminSettings save domain — never a handler check followed by
+	// an unlocked SaveAdminSettings later.
+	precondition func() error
 	// applyOnSuccess, when set, is the runtime apply for a persist-before-apply PUT.
 	// It runs INSIDE the save's adminSettingsMu critical section, immediately after a
 	// successful write — so no concurrent omnibus save can snapshot the pre-apply
@@ -718,8 +730,19 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 	// free; adminSettingsSave already runs this off the request goroutine.
 	adminSettingsMu.Lock()
 	defer adminSettingsMu.Unlock()
+	if ov.precondition != nil {
+		if err := ov.precondition(); err != nil {
+			return err
+		}
+	}
 	path := adminSettingsPath
 	if path == "" {
+		// No persistence configured: the (empty) write trivially succeeds, so a
+		// persist-before-apply target still applies — the caller was promised
+		// "returns nil ⇒ the target is live".
+		if ov.applyOnSuccess != nil {
+			ov.applyOnSuccess()
+		}
 		return nil
 	}
 
@@ -755,7 +778,14 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 	// of s.SaaSFeedURL). The legacy syncer no longer owns the URL, so an unrelated
 	// admin mutation preserves the signed-feed config + schema marker without
 	// re-reading (and thereby coupling to) the legacy additive syncer.
-	snapshotSaaSFeedDurable(&s)
+	if ov.saasFeed != nil {
+		// 2D-B.0c persist-before-apply: the durable file records the TARGET feed
+		// configuration while the live holder still carries the old one;
+		// applyOnSuccess publishes the target only after the write landed.
+		snapshotSaaSFeedDurableFrom(&s, *ov.saasFeed)
+	} else {
+		snapshotSaaSFeedDurable(&s)
+	}
 
 	// Upstream proxy pool (raw entries — see field comment)
 	s.UpstreamProxiesSaved = true
