@@ -90,6 +90,11 @@ const NAV: readonly NavSection[] = [
     icon: <IconPolicy />,
     entries: [
       {
+        label: "URL Categories",
+        to: "/objects/url-categories",
+        minRole: "viewer",
+      },
+      {
         label: "Category Groups",
         to: "/objects/category-groups",
         minRole: "viewer",
