@@ -218,7 +218,9 @@ test("settings: interval-only save round-trips with the settings revision", asyn
   try {
     await page.goto(ROUTE);
     await page.getByRole("tab", { name: "Signed SaaS Feed" }).click();
-    await expect(page.getByText("Configuration")).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "Configuration" }),
+    ).toBeVisible();
 
     // Interval-only change (enablement untouched — both switches stay OFF on
     // the unmanaged harness appliance, so the runtime gate stays closed and
@@ -285,7 +287,9 @@ test("overrides: fenced replace and clear-all with subtree ceremony", async ({
       await page.getByLabel(label).fill("");
     }
     await page.getByRole("button", { name: "Clear all overrides" }).click();
-    await expect(page.getByText("Clear ALL overrides")).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "Clear ALL overrides" }),
+    ).toBeVisible();
     await expect(page.getByText("Total to remove")).toBeVisible();
     await page.getByRole("button", { name: "Clear all", exact: true }).click();
     await expect(page.getByText("Overrides replaced")).toBeVisible();
