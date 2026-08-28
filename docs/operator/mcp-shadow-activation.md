@@ -267,17 +267,18 @@ unrelated durable evidence.
   cleared. `gateway/P-DEN/` holds only coalesced denial aggregates (never a Shadow decision
   event, never v2), so it — together with the sealed DEK (`gateway/dek.sealed`) and the entire
   `management/` subtree — carries NO v2 evidence and MUST be preserved.
-- **`gateway/degraded_state.json` must be RESET, not preserved, when a pre-v2 boot was already
-  attempted.** The realistic emergency order is downgrade → it fails → *then* the operator finds
-  this runbook. On that failed boot, spool recovery classified the v2 records as corruption and
-  `NewManager` latched the Gateway domain into `critical-durability-degraded`, persisting it to
-  `gateway/degraded_state.json`. That lockout blocks write/destructive Gateway operations and is
-  reloaded on every subsequent boot, so leaving the file in place would keep the node degraded
-  even after both partitions are cleared. Because this procedure resets the entire Gateway
-  telemetry domain (whose state machine is *about* the partitions you are clearing), remove
-  `gateway/degraded_state.json` too — a fresh boot with the v2 records gone re-derives a normal
-  state and there is no corruption left to re-flag. `management/degraded_state.json` and any
-  other capability's state are UNRELATED and stay preserved.
+- **`gateway/degraded_state.json` may need resetting — but ONLY when the degradation is
+  *exclusively* schema-induced.** The realistic emergency order is downgrade → it fails → *then*
+  the operator finds this runbook. On that failed boot, spool recovery classified the v2 records
+  as corruption and `NewManager` called `OnCriticalCommitFailure`, latching the Gateway domain
+  into `critical-durability-degraded` and persisting it to `gateway/degraded_state.json`; that
+  lockout blocks write/destructive Gateway operations and reloads on every subsequent boot. But
+  this one file ALSO carries any UNRELATED, pre-existing Gateway degradation — a real
+  critical-durability commit failure, or a `denial-lane-degraded` track (which corresponds to the
+  `P-DEN` partition you are preserving) — and `OnCriticalCommitFailure` only sets the critical
+  `reason` on the FIRST transition, so a failed boot does NOT by itself make the file exclusively
+  schema-induced. Reset it only under the conditions in step 5; otherwise preserve it.
+  `management/degraded_state.json` and any other capability's state are always preserved.
 
 `<mcp-data-dir>` is the MCP telemetry `DataDir` configured for this node's Gateway; under it
 each capability (`gateway/`, `management/`) has per-partition subdirectories (`P-ORD/`,
@@ -303,15 +304,25 @@ each capability (`gateway/`, `management/`) has per-partition subdirectories (`P
    rm -f <mcp-data-dir>/gateway/P-CRIT/seg-*.dat <mcp-data-dir>/gateway/P-CRIT/checkpoint.json
    ```
    Do NOT touch `gateway/P-DEN`, `gateway/dek.sealed`, or anything under `management/`.
-5. **Reset the Gateway domain's degraded state.** If a pre-v2 boot was already attempted, it
-   latched `critical-durability-degraded` here from the v2 records you just cleared; leaving it
-   would keep write/destructive Gateway operations blocked after recovery. Remove ONLY the
-   Gateway file — never the management one:
+5. **Reset the Gateway degraded state ONLY if it is exclusively schema-induced.** A failed pre-v2
+   boot latches `critical-durability-degraded` into `gateway/degraded_state.json` from the v2
+   records you just cleared, which would otherwise keep write/destructive Gateway operations
+   blocked after recovery. But the same file also carries any UNRELATED, restart-persistent
+   Gateway degradation, so inspect it (plain JSON, `0600`) and remove it ONLY when **both**:
+   - `"denial"` is the normal state (`0` — the denial-lane track, which corresponds to the
+     `P-DEN` partition you are preserving, is NOT degraded); AND
+   - `"critical"` is degraded with a `"reason"` naming the schema-recovery corruption (the failed
+     boot logged `recovery detected spool corruption: …`). Because the `reason` is set only on the
+     FIRST transition to degraded, its naming the corruption proves the schema corruption was the
+     first critical failure — i.e. there was no unrelated prior critical degradation underneath it.
    ```
    rm -f <mcp-data-dir>/gateway/degraded_state.json
    ```
-   (Harmless if no failed boot occurred: an absent file re-derives a normal state on next boot.)
-   Leave `<mcp-data-dir>/management/degraded_state.json` and any other capability's state intact.
+   If EITHER condition fails — the `"denial"` track is degraded, or the `"critical"` `"reason"`
+   names some other, real failure — the file carries unrelated durable state (a genuine
+   commit-loss or denial-lane lockout with its own loss counters): **LEAVE IT** and address that
+   degradation through the normal recovery path instead. Never touch
+   `<mcp-data-dir>/management/degraded_state.json` or any other capability's state.
 6. **Reset the export cursor for every partition you cleared — unconditionally.** Clearing a
    partition restarts its commit sequence at 1, but the archive exporter's cursor still holds
    the old (high) `afterSeq`; `CommittedForExport` skips any segment whose `lastSeq <= afterSeq`
@@ -325,8 +336,8 @@ each capability (`gateway/`, `management/`) has per-partition subdirectories (`P
    ```
    Leave `den.cursor` and the `management/` cursors alone (their partitions were not cleared).
 7. Start the pre-v2 binary. Its spool recovery now sees empty `P-ORD` and `P-CRIT` (fresh
-   partitions), no leftover Gateway degraded-state lockout, and starts clean; `P-DEN` and
-   `management/` recover normally.
+   partitions) — and, if you reset it in step 5, no schema-induced Gateway degraded-state
+   lockout — and starts clean; `P-DEN` and `management/` recover normally.
 
 **Reading the archived evidence — offline is the default.** To consult the archived v2
 evidence, unpack the tarball to a **scratch location** and point a **v2-capable** binary/tool
