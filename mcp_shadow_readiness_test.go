@@ -130,3 +130,74 @@ func TestReadinessSplit_ModeExecReadyDefaults(t *testing.T) {
 		t.Fatal("Canary must fail closed with nothing armed")
 	}
 }
+
+// TestReadinessSplit_UnknownModeFailsClosed pins that modeExecReady never hands the
+// "no readiness tier needed" answer to a mode it does not recognise.
+//
+// The gate used to answer with a bare `default: return true`, so ANY Mode value that was
+// neither Canary/Production nor Shadow — including one outside the five-token taxonomy —
+// was admitted without proving a readiness tier. Nothing exploited it (every caller
+// re-validates the mode downstream: SignedConfig.Validate rejects !Mode.Valid(),
+// rollout.Resolve blocks an unknown mode, and the admin surface parses through
+// ParseMode), but a readiness GATE whose default arm is "admit" is exactly the shape a
+// later refactor turns into a real hole, and a newly-added rollout.Mode would have been
+// silently admitted rather than failing closed until it was explicitly classified.
+//
+// Mutation: restoring `default: return true` fails this test.
+func TestReadinessSplit_UnknownModeFailsClosed(t *testing.T) {
+	resetExecDeps(t)
+	// 200 is outside the five-token taxonomy (Mode is a uint8 iota) and is therefore
+	// !Mode.Valid(). It must never be admitted, with nothing armed...
+	unknown := rollout.Mode(200)
+	if unknown.Valid() {
+		t.Fatalf("test premise broken: Mode(200) is a real mode (%s)", unknown.String())
+	}
+	if modeExecReady(unknown, false) || modeExecReady(unknown, true) {
+		t.Fatal("SECURITY: an unrecognised rollout mode must fail closed with nothing armed")
+	}
+	// ...and still not once BOTH readiness tiers are armed, for both capabilities: an
+	// unknown mode has no tier to satisfy, so no amount of composition admits it.
+	markGatewayShadowDepsReady()
+	markManagementShadowDepsReady()
+	markGatewayExecDepsReady()
+	markManagementExecDepsReady()
+	if modeExecReady(unknown, false) || modeExecReady(unknown, true) {
+		t.Fatal("SECURITY: an unrecognised rollout mode must fail closed even with every tier armed")
+	}
+	// The valid modes keep their exact prior answers with everything armed, so the
+	// hardening is behaviour-preserving for the whole real taxonomy.
+	for _, m := range []rollout.Mode{
+		rollout.ModeDisabled, rollout.ModeObserve, rollout.ModeShadow,
+		rollout.ModeCanary, rollout.ModeProduction,
+	} {
+		if !modeExecReady(m, false) {
+			t.Fatalf("mode %s must be ready with every tier armed", m.String())
+		}
+	}
+}
+
+// TestReadinessSplit_EveryValidModeIsExplicitlyClassified pins the completeness half:
+// every mode in the real taxonomy must reach one of the three NAMED arms, never the
+// fail-closed default. Without this, adding a rollout.Mode and forgetting to classify it
+// would fail closed silently — safe, but as an unexplained transition rejection rather
+// than a build-time signal. With nothing armed the answer separates the arms exactly:
+// Disabled/Observe need no tier (true), every executing mode needs one (false).
+func TestReadinessSplit_EveryValidModeIsExplicitlyClassified(t *testing.T) {
+	resetExecDeps(t)
+	needsTier := map[rollout.Mode]bool{
+		rollout.ModeDisabled:   false,
+		rollout.ModeObserve:    false,
+		rollout.ModeShadow:     true,
+		rollout.ModeCanary:     true,
+		rollout.ModeProduction: true,
+	}
+	for m, wantTier := range needsTier {
+		if !m.Valid() {
+			t.Fatalf("test premise broken: %d is not a valid mode", m)
+		}
+		if got := modeExecReady(m, false); got == wantTier {
+			t.Fatalf("mode %s: with nothing armed modeExecReady=%v; a mode that needs a tier must be false and one that does not must be true",
+				m.String(), got)
+		}
+	}
+}

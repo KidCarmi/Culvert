@@ -100,15 +100,27 @@ func liveExecDepsConfigured(capbManagement bool) bool {
 //   - Shadow requires only the SHADOW tier (shadowDepsConfigured).
 //   - Disabled/Observe require nothing.
 //
-// Fail-closed: an unknown mode falls through to the Shadow/Observe arms and is only
-// admitted if it is Disabled/Observe.
+// Fail-closed on an UNRECOGNISED mode. The no-readiness-needed answer is given ONLY to
+// the two modes that genuinely need none — Disabled and Observe — never as a catch-all
+// default. The distinction is defence-in-depth rather than a live hole: every caller
+// today hands this a mode that is subsequently re-validated (SignedConfig.Validate
+// rejects !Mode.Valid(); rollout.Resolve blocks an unknown mode with
+// ReasonRolloutModeInvalid; ParseMode fails closed on the admin surface), so an unknown
+// mode is rejected downstream either way. But this is a security GATE, and a gate whose
+// default arm is "admit" is one refactor away from being the only thing standing between
+// an unrecognised mode value and an execution tier it never proved. Enumerating the
+// admitted modes makes a newly-added rollout.Mode fail closed here until it is
+// explicitly classified, which is the direction a readiness gate must err in.
 func modeExecReady(mode rollout.Mode, capbManagement bool) bool {
 	switch {
 	case mode.RequiresLiveExecution():
 		return liveExecDepsConfigured(capbManagement)
 	case mode == rollout.ModeShadow:
 		return shadowDepsConfigured(capbManagement)
-	default:
+	case mode == rollout.ModeDisabled || mode == rollout.ModeObserve:
+		// Neither touches the execution plane, so neither requires a readiness tier.
 		return true
+	default:
+		return false
 	}
 }
