@@ -344,7 +344,7 @@ func runChildOpen(t *testing.T, dir string) (string, error) {
 	// The child is this same test binary with a literal flag and no external
 	// input; a subprocess is the only way to observe a panic badger raises from
 	// its own goroutine without killing the parent test process.
-	cmd := exec.CommandContext(t.Context(), os.Args[0], // #nosec G204 -- this test binary + a fixed flag, not external/user input
+	cmd := exec.CommandContext(t.Context(), os.Args[0], // #nosec G204,G702 -- this test binary + a fixed flag, not external/user input
 		"-test.run", "TestOpenResilientTTL_SurvivesUncatchablePanicOnNextOpen")
 	cmd.Env = append(os.Environ(), "CULVERT_LOGSTORE_PANIC_CHILD="+dir)
 	out, err := cmd.CombinedOutput()
