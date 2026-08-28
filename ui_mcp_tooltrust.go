@@ -293,12 +293,12 @@ func expiryFromSeconds(sec int64) *time.Time {
 // mcpToolApprovalLimit clamps the list page size to a safe bound.
 func mcpToolApprovalLimit(r *http.Request) int {
 	n := mcpQueryLimit(r)
-	const def, max = 100, 500
+	const defLimit, maxLimit = 100, 500
 	if n <= 0 {
-		return def
+		return defLimit
 	}
-	if n > max {
-		return max
+	if n > maxLimit {
+		return maxLimit
 	}
 	return n
 }

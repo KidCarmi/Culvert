@@ -453,26 +453,14 @@ func (c *mcpToolTrustCoordinator) annotateTool(tenant, serverID, name, fingerpri
 	}
 	now := c.now()
 	var best *tooltrust.ToolApproval
-	rank := func(a *tooltrust.ToolApproval) int {
-		// active-and-matching (3) > pending (2) > anything else (1).
-		if a.Status == tooltrust.StatusActive {
-			fpMatch := fingerprintHex == hex.EncodeToString(a.Fingerprint[:])
-			if fpMatch && a.Purpose.PermitsShadowEvaluation() && (a.ExpiresAt == nil || now.Before(*a.ExpiresAt)) {
-				return 3
-			}
-		}
-		if a.Status == tooltrust.StatusPending {
-			return 2
-		}
-		return 1
-	}
+	var bestRank int
 	for _, a := range store.List(tenant, 0xFFFF) {
 		if a.ServerID != serverID || a.ToolName != name {
 			continue
 		}
-		if best == nil || rank(a) > rank(best) ||
-			(rank(a) == rank(best) && a.RequestedAt.After(best.RequestedAt)) {
-			best = a
+		r := toolApprovalRank(a, fingerprintHex, now)
+		if best == nil || r > bestRank || (r == bestRank && a.RequestedAt.After(best.RequestedAt)) {
+			best, bestRank = a, r
 		}
 	}
 	if best == nil {
@@ -484,6 +472,23 @@ func (c *mcpToolTrustCoordinator) annotateTool(tenant, serverID, name, fingerpri
 		ID:        best.ApprovalID,
 		ExpiresAt: best.ExpiresAt,
 	}, true
+}
+
+// toolApprovalRank ranks how strongly an approval governs a tool's current
+// eligibility: an active grant matching the current fingerprint (3) outranks a
+// pending request (2), which outranks any other record (1). Used only for the
+// read-only inventory overlay.
+func toolApprovalRank(a *tooltrust.ToolApproval, fingerprintHex string, now time.Time) int {
+	if a.Status == tooltrust.StatusActive &&
+		fingerprintHex == hex.EncodeToString(a.Fingerprint[:]) &&
+		a.Purpose.PermitsShadowEvaluation() &&
+		(a.ExpiresAt == nil || now.Before(*a.ExpiresAt)) {
+		return 3
+	}
+	if a.Status == tooltrust.StatusPending {
+		return 2
+	}
+	return 1
 }
 
 // parseFingerprintHex decodes a 64-char hex string into a fingerprint digest,
