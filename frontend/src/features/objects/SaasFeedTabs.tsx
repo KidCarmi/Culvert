@@ -184,6 +184,19 @@ export function SignedSaasFeedTab({
     void statusQ.refetch();
     void settingsQ.refetch();
   };
+  // The settings card is remounted per loaded revision (key below) so a fresh
+  // server truth re-seeds the form; the outcome notice therefore lives HERE,
+  // or a successful save's own refetch would destroy it mid-render.
+  const [settingsNotice, setSettingsNotice] = useState<JSX.Element | null>(
+    null,
+  );
+  useEffect(() => {
+    const cleanup = (): void => {
+      setSettingsNotice(null);
+    };
+    const unregister = registerAuthCleanup(cleanup);
+    return unregister;
+  }, []);
   return (
     <section aria-label="Signed SaaS feed">
       <div className={styles.calloutSpace}>
@@ -206,12 +219,14 @@ export function SignedSaasFeedTab({
           onAfterRefresh={refreshAll}
         />
       )}
+      {settingsNotice}
       {settingsQ.data !== undefined && (
         <SignedSettingsCard
           key={settingsQ.data.revision}
           view={settingsQ.data}
           isAdmin={isAdmin}
           onSaved={refreshAll}
+          onNotice={setSettingsNotice}
         />
       )}
     </section>
@@ -462,10 +477,12 @@ function SignedSettingsCard({
   view,
   isAdmin,
   onSaved,
+  onNotice,
 }: {
   view: SaasFeedSettingsView;
   isAdmin: boolean;
   onSaved: () => void;
+  onNotice: (n: JSX.Element | null) => void;
 }): JSX.Element {
   const [managed, setManaged] = useState(view.managed);
   const [enabled, setEnabled] = useState(view.enabled);
@@ -474,7 +491,7 @@ function SignedSettingsCard({
   );
   const [confirming, setConfirming] = useState(false);
   const [pending, setPending] = useState(false);
-  const [notice, setNotice] = useState<JSX.Element | null>(null);
+  const setNotice = onNotice;
   const ownerRef = useRef(createRequestRunOwner());
 
   useEffect(() => {
@@ -483,7 +500,6 @@ function SignedSettingsCard({
       owner.abort();
       setConfirming(false);
       setPending(false);
-      setNotice(null);
     };
     const unregister = registerAuthCleanup(cleanup);
     return () => {
@@ -638,7 +654,6 @@ function SignedSettingsCard({
           </Button>
         </div>
       )}
-      {notice}
       <Dialog
         open={confirming}
         onClose={() => {
