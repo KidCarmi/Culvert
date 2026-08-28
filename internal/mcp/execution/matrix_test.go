@@ -300,3 +300,42 @@ func spoolNewOSBackend() spool.Backend { return spool.NewOSBackend() }
 type spoolReceipt = spool.CommitReceipt
 
 var _ = json.Marshal
+
+// TestDiscovery_OnIngestFiresOnSuccessNotFailure proves the post-ingest reconcile seam: the
+// OnIngest hook fires exactly once after a SUCCESSFUL catalog ingest (so the composition root
+// can re-materialize an active approval's projection immediately, not after the next reconcile
+// tick) and never fires when discovery fails and the previous snapshot is retained.
+func TestDiscovery_OnIngestFiresOnSuccessNotFailure(t *testing.T) {
+	reg := registry.New(limits.DefaultCatalog())
+	id := registry.Identity("pin-1")
+	if _, err := reg.Register(registry.Registration{
+		ID: "s1", Endpoint: "https://s1.internal:443", PinnedIdentity: id, Capability: 0,
+		CreatedAt: time.Unix(1, 0), UpdatedAt: time.Unix(1, 0),
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if _, _, err := reg.VerifyIdentity("s1", id); err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	cat := catalog.New(limits.DefaultCatalog())
+	up := &fakeUpstream{result: `{"tools":[]}`}
+	d, err := NewDiscovery(reg, cat, up)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ingests int
+	d.OnIngest = func() { ingests++ }
+	if _, err := d.Discover(context.Background(), "s1"); err != nil {
+		t.Fatalf("discovery happy path: %v", err)
+	}
+	if ingests != 1 {
+		t.Fatalf("OnIngest must fire once after a successful ingest, got %d", ingests)
+	}
+	up.err = mcperr.New(mcperr.ReasonUpstreamTimeout, "test", "boom")
+	if _, err := d.Discover(context.Background(), "s1"); err == nil {
+		t.Fatal("expected a discovery failure")
+	}
+	if ingests != 1 {
+		t.Fatalf("OnIngest must NOT fire on a discovery failure, got %d", ingests)
+	}
+}

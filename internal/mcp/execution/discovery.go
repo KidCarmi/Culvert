@@ -19,6 +19,16 @@ type Discovery struct {
 	Registry *registry.Registry
 	Catalog  *catalog.Catalog
 	Upstream UpstreamCaller
+	// OnIngest, when set, is invoked after a SUCCESSFUL catalog ingest (a new snapshot was
+	// published). Ingestion can only ever land a tool Quarantined/ReviewRequired — it never
+	// produces catalog.Usable — so a re-discovered tool that exactly matches an active trust
+	// approval would otherwise stay non-Usable until the next inventory read, Shadow
+	// preflight, or the periodic 30s reconcile tick, contaminating an in-flight Shadow
+	// experiment. The composition root wires this to the tool-trust reconcile hook so the
+	// approval's projection is re-materialized immediately. Optional and nil-safe; it must
+	// only WITHDRAW-or-re-affirm trust (it can never widen usability), so calling it here is
+	// safe even though this package holds no trust authority.
+	OnIngest func()
 }
 
 // NewDiscovery constructs a Discovery. It fails closed on missing collaborators.
@@ -72,6 +82,11 @@ func (d *Discovery) Discover(ctx context.Context, serverID string) (*catalog.Rep
 	})
 	if err != nil {
 		return nil, mcperr.Wrap(mcperr.ReasonUpstreamDiscoveryFailed, "execution.discovery", "catalog ingest", err)
+	}
+	// A new snapshot was published. Reconcile trust NOW so a re-discovered tool that matches
+	// an active approval is re-promoted immediately rather than after the next reconcile tick.
+	if d.OnIngest != nil {
+		d.OnIngest()
 	}
 	return report, nil
 }
