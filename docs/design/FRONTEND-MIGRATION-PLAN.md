@@ -577,6 +577,55 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > | `ruleType` | STAGE-1 GATE | only `""`/`"access"` representable in the DTO; `"auth"` structurally impossible (2C) |
 > | `auth`, `subjectMatch` | STAGE-1 ONLY / RESERVED | never in the write DTO |
 > | (priority-addressed update/delete, `{priorities:[…]}` bulk delete) | DEPRECATED/compat | backend-only for legacy callers; the v2 client is exclusively id-addressed — v2 bulk delete DEFERRED (stable-ID bulk contract does not exist; recorded parity residue) |
+>
+> **2B write surface (2B.1–2B.7)** — `/app/policies/access-rules` gains the
+> full Access Rule write story on top of the frozen 2A read surface:
+> - **Write contract** (`policyWrite.ts`/`policyDraft.ts`): `AccessRuleWrite`
+>   DTO + serializer (tri-state absent preservation, zero server-owned
+>   leakage), fenced mutation client (every call sends `ifVersion`),
+>   structured-409 decoder, discriminated draft-state decoder (active shape
+>   fails closed; stranded shape decodes), read-only reference option
+>   sources (categories / groups / file profiles / decryption profiles).
+> - **Editor** (`RuleEditor`): semantic field groups, server-validator
+>   mirror (Redirect URL, timezone), Inspect-only TLS controls that
+>   PRESERVE hidden values, option selects that keep values a stale list
+>   does not carry. Conflict keeps the form and blocks resubmit until
+>   fresh truth; unknown outcomes latch the page.
+> - **Draft Bar** (`DraftBar`): states A–D from BOTH server contracts;
+>   stranded recovery is never hidden and never blindly committable
+>   (admin resumes review via the arm ceremony; operators get safe
+>   revert); Require Commit is an explicit mode-change ceremony; the
+>   shared-actor warning states one shared candidate.
+> - **Staged reorder**: local permutation with deterministic
+>   First/Up/Down/Last controls (no drag, no virtualization), filter
+>   paused, create/edit/delete blocked while staged, fenced apply, 409 =
+>   visible discard with the required copy, membership-change discard.
+> - **Commit review** (`CommitReview`): fresh draft+policy capture on
+>   open; the reviewed candidate generation fences the commit; diff
+>   counts + names, shadow findings with the advisory disclaimer and a
+>   Policy Tester link, required comment; success only after refreshed
+>   truth agrees (else a controlled inconsistency posture); known
+>   failures surface the server's bounded detail (incl. draft-retained
+>   persistence failures) and clear nothing.
+> - **Default action** (`DefaultActionControl`): separate immediate-live
+>   T2 ceremony (never staged, even with Require Commit armed), its own
+>   unknown latch resolved only by a fresh successful GET.
+> - **Cross-cutting**: one policy-mutation request owner per surface;
+>   page-level unknown latch resolved only when BOTH policy and draft
+>   refetches succeed with advanced stamps; auth-boundary cleanup clears
+>   editor/reorder/dialog/conflict state; targeted dirty-route guard
+>   (react-router blocker + beforeunload) for editor + staged reorder.
+> - **Real-binary proofs** (`e2e/policy-2b.spec.ts`): 500-rule-scale
+>   edit/create/delete and reorder cycles, two-client live fencing (real
+>   server 409), shared-draft actor warning + stale-draft conflict +
+>   commit-fence refusal of unreviewed changes, draft/commit/live reload
+>   durability, revert ceremony, default-action ceremony with restore.
+>   §19 discipline: every mode-touching test restores live mode + no
+>   draft + fixture order + default action (RequireCommit persists in the
+>   SHARED `/data` admin settings). The STRANDED draft state is not
+>   constructible through supported public APIs by design (disarm refuses
+>   while dirty), so its posture is proven at component level against the
+>   decoded real contract — recorded, not papered over.
 
 ### FE-6 — Cluster, identity, certificates, settings, releases, support, MCP, decryption
 - **Objective**: FE-V27..V30, FE-V33, FE-V35, FE-V36 (settings decomposed per IA §5),

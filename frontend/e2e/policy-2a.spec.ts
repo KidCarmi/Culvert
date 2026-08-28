@@ -122,7 +122,7 @@ const RULES_HEADING = { name: "Access Rules" };
 for (const who of ["viewer", "operator"] as const) {
   test.describe(`${who} access`, () => {
     test.use({ storageState: EMPTY_STATE });
-    test(`${who} → Access Rules renders the read surface without mutation controls`, async ({
+    test(`${who} → Access Rules renders the read surface (viewer without mutation controls)`, async ({
       page,
       baseURL,
     }) => {
@@ -133,17 +133,26 @@ for (const who of ["viewer", "operator"] as const) {
         page.getByRole("heading", RULES_HEADING).first(),
       ).toBeVisible();
       await expect(page.getByText("of 502 access rules")).toBeVisible();
-      await expect(page.getByText("Running rulebase")).toBeVisible();
-      // No mutation affordances exist in 2A for ANY role.
-      await expect(
-        page.getByRole("button", { name: /delete|edit|create|commit|revert/i }),
-      ).toHaveCount(0);
+      await expect(page.getByText("Live-write mode")).toBeVisible();
+      if (who === "viewer") {
+        // Viewer mounts NO mutation affordances (2B posture: absent, not
+        // disabled). Operator+ write flows are proven in policy-2b.spec.ts.
+        await expect(
+          page.getByRole("button", {
+            name: /delete|edit|create|commit|revert/i,
+          }),
+        ).toHaveCount(0);
+      } else {
+        await expect(
+          page.getByRole("button", { name: "New rule…" }),
+        ).toBeVisible();
+      }
       assertClean(w);
     });
   });
 }
 
-test("admin → Access Rules renders the same read surface (server order, no mutation controls)", async ({
+test("admin → Access Rules renders the same read surface (server order preserved)", async ({
   page,
   baseURL,
 }) => {
@@ -151,9 +160,6 @@ test("admin → Access Rules renders the same read surface (server order, no mut
   await page.goto("/app/policies/access-rules");
   await expect(page.getByRole("heading", RULES_HEADING).first()).toBeVisible();
   await expect(page.getByText("502 of 502 access rules")).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: /delete|edit|create|commit|revert/i }),
-  ).toHaveCount(0);
 
   // Server priority order preserved: the first data rows are priorities 1, 5,
   // 10 in that order (evaluation order is load-bearing — §6).
@@ -338,7 +344,9 @@ test("a new deep link overrides the active filter via a real Where Used link; A 
     expect(rowBox.y + rowBox.height).toBeLessThanOrEqual(vp.height);
   }
   await expect(highlighted).toBeFocused();
-  await expect(page.getByRole("status")).toContainText("Rule E2E Match Rule");
+  await expect(page.getByRole("status").first()).toContainText(
+    "Rule E2E Match Rule",
+  );
 
   // B → A through the same real consumer path (B also carries the profile).
   await page
@@ -352,7 +360,7 @@ test("a new deep link overrides the active filter via a real Where Used link; A 
   await expect(highlighted).toHaveCount(1);
   await expect(highlighted).toContainText("E2E Reference Rule");
   await expect(highlighted).toBeFocused();
-  await expect(page.getByRole("status")).toContainText(
+  await expect(page.getByRole("status").first()).toContainText(
     "Rule E2E Reference Rule",
   );
 
@@ -364,7 +372,9 @@ test("a new deep link overrides the active filter via a real Where Used link; A 
   );
   await expect(highlighted).toHaveCount(1);
   await expect(highlighted).toContainText("E2E Match Rule");
-  await expect(page.getByRole("status")).toContainText("Rule E2E Match Rule");
+  await expect(page.getByRole("status").first()).toContainText(
+    "Rule E2E Match Rule",
+  );
   assertClean(w);
 });
 
@@ -474,10 +484,10 @@ test("draft=true: Access Rules shows the candidate truth and the tester reports 
     // Flow 5: the surface tells the candidate truth.
     await page.goto("/app/policies/access-rules");
     await expect(
-      page.getByText("Viewing Policy Draft candidate"),
+      page.getByText("Editing the shared Policy Draft"),
     ).toBeVisible();
     await expect(
-      page.getByText("not the running enforcement policy"),
+      page.getByText("Changes take effect only when the draft is committed."),
     ).toBeVisible();
     await expect(page.getByText("E2E Draft Probe")).toBeVisible();
     await expect(page.getByText("503 of 503 access rules")).toBeVisible();
@@ -503,7 +513,7 @@ test("draft=true: Access Rules shows the candidate truth and the tester reports 
   }
   expect((await apiPolicy(page)).draft).toBe(false);
   await page.goto("/app/policies/access-rules");
-  await expect(page.getByText("Running rulebase")).toBeVisible();
+  await expect(page.getByText("Live-write mode")).toBeVisible();
   await expect(page.getByText("502 of 502 access rules")).toBeVisible();
   assertClean(w);
 });

@@ -455,7 +455,7 @@ export function AccessRulesPage(): JSX.Element {
     next.splice(toIdx, 0, moved);
     setReorder(next);
     setReorderAnnounce(
-      `Rule ${moved.name} moved to position ${String(toIdx + 1)} of ${String(next.length)}. Reorder staged, not applied.`,
+      `Rule ${moved.name} moved to position ${String(toIdx + 1)} of ${String(next.length)}. Staged locally — not applied yet.`,
     );
   };
 
