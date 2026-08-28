@@ -580,18 +580,54 @@ test("policy learning journey: enable → session → proxied traffic → comple
 // stable id, enabled) — binding the component-test fixtures for states A/B
 // to real server truth. Accept itself never enforces anything: the rule is
 // running only because of B's separate commit.
-test("post-accept lifecycle: disabled draft rule committed by a second admin keeps its stable id into RUNNING (the running-now shape)", async ({
-  page,
-  browser,
-}) => {
-  await resetDraftMode(page);
+test("post-accept lifecycle: disabled draft rule committed by a second admin keeps its stable id into RUNNING (the running-now shape)", async () => {
+  // Each admin is a dedicated authenticated API client with its OWN
+  // X-Forwarded-For identity (the harness trusts loopback as a reverse
+  // proxy — the RISK-019 deployment shape), so this test's mutation burst
+  // draws on per-client admin-API rate budgets instead of the suite-shared
+  // 127.0.0.1 budget that the accumulated specs exhaust (the deliberate
+  // 60-mutations/min posture stays fully armed per identity).
+  const newAdminClient = async (xff: string) => {
+    const ctx = await request.newContext({
+      baseURL: AUTH_URL,
+      extraHTTPHeaders: { "X-Forwarded-For": xff },
+    });
+    const login = await ctx.post("/api/auth/login", {
+      data: { user: USERS.admin.user, pass: USERS.admin.pass },
+    });
+    expect(login.ok()).toBe(true);
+    return ctx;
+  };
+  const adminA = await newAdminClient("198.51.100.10");
+  const adminB = await newAdminClient("198.51.100.11");
+  const draftStateA = async () => {
+    const resp = await adminA.get("/api/policy/draft");
+    expect(resp.ok()).toBe(true);
+    const v: unknown = await resp.json();
+    if (!isRecord(v)) throw new Error("bad draft payload");
+    return {
+      requireCommit: v["requireCommit"] === true,
+      active: v["active"] === true,
+    };
+  };
+  const resetDraftA = async () => {
+    const d = await draftStateA();
+    if (d.active) await adminA.post("/api/policy/draft/revert");
+    if (d.requireCommit) {
+      await adminA.put("/api/policy/draft", {
+        data: { require_commit: false },
+      });
+    }
+  };
   try {
+    await resetDraftA();
     // Arm Require Commit; admin A stages the DISABLED rule (the exact shape
     // Accept's draft append creates: born disabled, in the candidate).
-    await page.request.put("/api/policy/draft", {
+    const armed = await adminA.put("/api/policy/draft", {
       data: { require_commit: true },
     });
-    const created = await page.request.post("/api/policy", {
+    expect(armed.ok()).toBe(true);
+    const created = await adminA.post("/api/policy", {
       data: {
         name: "E2E 2C PostAccept Target",
         action: "Allow",
@@ -603,7 +639,7 @@ test("post-accept lifecycle: disabled draft rule committed by a second admin kee
     // Admin A's pre-commit observation: the EFFECTIVE snapshot is the
     // candidate (draft:true) and carries the disabled target — the
     // draft-confirmed shape (state A).
-    const preResp = await page.request.get("/api/policy");
+    const preResp = await adminA.get("/api/policy");
     expect(preResp.ok()).toBe(true);
     const pre: unknown = await preResp.json();
     if (!isRecord(pre) || !Array.isArray(pre["rules"]))
@@ -617,27 +653,23 @@ test("post-accept lifecycle: disabled draft rule committed by a second admin kee
     const targetID = preRule["id"];
     expect(typeof targetID).toBe("string");
     expect(preRule["enabled"]).toBe(false);
-    expect((await apiDraftState(page)).active).toBe(true);
+    expect((await draftStateA()).active).toBe(true);
 
     // Admin B (a separate authenticated client) commits the draft — the
     // concurrent lifecycle that advances the Policy state after acceptance.
-    const ctxB = await browser.newContext({ storageState: EMPTY_STATE });
-    const clientB = await ctxB.request.post(`${AUTH_URL}/api/auth/login`, {
-      data: { user: USERS.admin.user, pass: USERS.admin.pass },
+    const commit = await adminB.post("/api/policy/draft/commit", {
+      data: { comment: "concurrent commit during A's verification window" },
     });
-    expect(clientB.ok()).toBe(true);
-    const commit = await ctxB.request.post(
-      `${AUTH_URL}/api/policy/draft/commit`,
-      { data: { comment: "concurrent commit during A's verification window" } },
-    );
-    expect(commit.ok()).toBe(true);
-    await ctxB.close();
+    expect(
+      commit.ok(),
+      `commit refused: ${String(commit.status())} ${await commit.text()}`,
+    ).toBe(true);
 
     // Admin A's verification observation now sees the running-now shape
     // (state B): effective snapshot is RUNNING, SAME stable id, still the
     // born-safe disabled state — Accept never enforced anything; the commit
     // moved it.
-    const postResp = await page.request.get("/api/policy");
+    const postResp = await adminA.get("/api/policy");
     expect(postResp.ok()).toBe(true);
     const post: unknown = await postResp.json();
     if (!isRecord(post) || !Array.isArray(post["rules"]))
@@ -649,19 +681,20 @@ test("post-accept lifecycle: disabled draft rule committed by a second admin kee
     expect(postRule).toBeDefined();
     if (!isRecord(postRule)) return;
     expect(postRule["enabled"]).toBe(false);
-    const draftAfter = await apiDraftState(page);
-    expect(draftAfter.active).toBe(false);
+    expect((await draftStateA()).active).toBe(false);
   } finally {
     // Restore: remove the committed rule from RUNNING and disarm.
-    const snap = await page.request.get("/api/policy");
+    const snap = await adminA.get("/api/policy");
     const v: unknown = await snap.json();
     if (isRecord(v) && Array.isArray(v["rules"])) {
       for (const r of v["rules"]) {
         if (isRecord(r) && r["name"] === "E2E 2C PostAccept Target") {
-          await page.request.delete(`/api/policy?id=${String(r["id"])}`);
+          await adminA.delete(`/api/policy?id=${String(r["id"])}`);
         }
       }
     }
-    await resetDraftMode(page);
+    await resetDraftA();
+    await adminA.dispose();
+    await adminB.dispose();
   }
 });

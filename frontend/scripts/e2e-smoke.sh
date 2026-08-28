@@ -172,6 +172,30 @@ curl -s -o /dev/null -c "$SEED_JAR" -X POST -H 'Content-Type: application/json' 
 curl -s -o /dev/null -b "$SEED_JAR" -X PUT -H 'Content-Type: application/json' \
   -d '{"enabled":true,"retentionDays":7,"retentionMaxGB":1,"criticalDiskPct":99}' \
   "http://127.0.0.1:$UI_PORT/api/logs/retention"
+# Trusted-proxy premise (supported admin API, RISK-019): the admin-plane
+# per-IP rate limiter (60 mutations/min, hard-coded — a deliberate security
+# posture) keys on realClientIP, and every suite client shares 127.0.0.1, so
+# the budget is a SUITE-LENGTH shared resource — as specs accumulated, late
+# tests started drawing 429s on legitimate mutations (first observed on the
+# 2C post-accept lifecycle proof). Trusting loopback as a reverse proxy (the
+# exact deployment shape the feature exists for) lets multi-client tests
+# present distinct synthetic X-Forwarded-For identities and draw from their
+# OWN per-IP budgets; clients that send no XFF still resolve to 127.0.0.1
+# and the limiter stays fully armed for them.
+curl -s -o /dev/null -b "$SEED_JAR" -X POST -H 'Content-Type: application/json' \
+  -d '{"base_url":"","ui_sans":[],"trust_forwarded_headers":false,"trusted_proxy_cidrs":["127.0.0.1"]}' \
+  "http://127.0.0.1:$UI_PORT/api/settings/network"
+# Draft-mode hygiene: the SHARED /data admin_settings.json can carry
+# require_commit=true (and /data/policy_draft state) from an interrupted
+# previous run — e.g. a test's own cleanup drew a 429 — which breaks the 2A/2B
+# live-write premises. Revert any inherited draft (tolerated 4xx when none is
+# active), then disarm (the disarm refuses while a candidate is dirty, hence
+# revert first).
+curl -s -o /dev/null -b "$SEED_JAR" -X POST \
+  "http://127.0.0.1:$UI_PORT/api/policy/draft/revert" || true
+curl -s -o /dev/null -b "$SEED_JAR" -X PUT -H 'Content-Type: application/json' \
+  -d '{"require_commit":false}' \
+  "http://127.0.0.1:$UI_PORT/api/policy/draft"
 
 echo "e2e-smoke: seeding traffic history through the AUTH proxy (default-deny)"
 i=0
