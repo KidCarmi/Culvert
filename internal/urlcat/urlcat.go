@@ -679,6 +679,41 @@ func (s *Store) All() []Entry {
 	return out
 }
 
+// SnapshotWithRevision returns a copy of all category entries TOGETHER WITH
+// the semantic ContentFingerprint of exactly those entries, captured under one
+// hold of the read lock (2D-B final coherency correction, Blocker A). All()
+// followed by ContentFingerprint() is two independent reads — a writer landing
+// between them hands the caller superseded rows paired with the successor's
+// revision, and a client editing from that pair passes the fence against
+// content it never saw. This is the ONLY read the v2 state contract may use.
+//
+// Lock order is the fingerprint reader's own: fpMu → mu (read). fpMu is held
+// so the memo single-flight stays intact (a valid memo is reused; a computed
+// pair is published for the next reader), and the entries copy happens under
+// the SAME mu.RLock as the rev/fingerprint capture, so no writer's critical
+// section can land between the rows and the revision that names them.
+func (s *Store) SnapshotWithRevision() ([]Entry, string) {
+	s.fpMu.Lock()
+	defer s.fpMu.Unlock()
+	s.mu.RLock()
+	out := make([]Entry, len(s.entries))
+	for i, e := range s.entries {
+		cp := *e
+		cp.Hosts = append([]string(nil), e.Hosts...)
+		out[i] = cp
+	}
+	rev := s.rev.Load()
+	var fp string
+	if c := s.fp.Load(); c != nil && c.rev == rev {
+		fp = c.fp
+	} else {
+		fp = computeFingerprint(s.entries)
+	}
+	s.mu.RUnlock()
+	s.fp.Store(&fingerprintCache{rev: rev, fp: fp})
+	return out, fp
+}
+
 // ReplaceAll atomically replaces all categories (used by cluster config sync,
 // config import, and config-version rollback). Holds mutMu so a bulk install
 // orders against the v2 revision fence and the publication/commit boundary

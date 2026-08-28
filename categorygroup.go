@@ -20,6 +20,10 @@ type CategoryGroup = catgroup.Group
 // catgroup.Store).
 type CategoryGroupStore = catgroup.Store
 
+// CategoryGroupSnapshot is one coherent groups+names+version capture (engine
+// type is catgroup.Snapshot) — the GET /api/category-groups list contract.
+type CategoryGroupSnapshot = catgroup.Snapshot
+
 var globalCategoryGroups = catgroup.New()
 
 // categoryGroupMatchesHostScratch reports whether the scratch's host belongs to

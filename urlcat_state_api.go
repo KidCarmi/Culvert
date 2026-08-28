@@ -36,10 +36,20 @@ type enrichedURLCategory struct {
 }
 
 // enrichedURLCategories returns every category with the UT1 enrichment —
-// shared by the legacy GET /api/urlcat array and the v2 /state contract so
-// the two reads can never disagree.
+// the legacy GET /api/urlcat array read (no revision, so no pairing to keep
+// coherent). The v2 /state contract goes through enrichURLCategories over a
+// coherent SnapshotWithRevision capture instead.
 func enrichedURLCategories() []enrichedURLCategory {
-	all := catStore.All()
+	return enrichURLCategories(catStore.All())
+}
+
+// enrichURLCategories layers the UT1 community-feed badge over an
+// already-captured row set. The enrichment is DERIVED display state from a
+// separate subsystem (the UT1 corpus), deliberately outside the taxonomy
+// revision — it decorates the captured rows and never mutates them, so the
+// revision paired with the rows by SnapshotWithRevision keeps describing
+// exactly what is returned (Blocker A).
+func enrichURLCategories(all []CategoryEntry) []enrichedURLCategory {
 	ut1Set := make(map[string]bool)
 	if communityDB != nil { // badge only when the community feed is actually configured
 		for _, cat := range feedsync.MappedCategories() {
@@ -57,15 +67,18 @@ func enrichedURLCategories() []enrichedURLCategory {
 }
 
 // GET /api/urlcat/state — v2 read: categories + the server-owned semantic
-// revision. Viewer read; no side effects.
+// revision, captured as ONE coherent snapshot (the revision describes exactly
+// the rows returned — never All() then ContentFingerprint() as two reads a
+// writer can land between; Blocker A).
 func apiURLCatState(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	entries, revision := catStore.SnapshotWithRevision()
 	jsonOK(w, map[string]any{
-		"categories": enrichedURLCategories(),
-		"revision":   catStore.ContentFingerprint(),
+		"categories": enrichURLCategories(entries),
+		"revision":   revision,
 	})
 }
 

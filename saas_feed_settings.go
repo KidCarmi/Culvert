@@ -108,7 +108,17 @@ func saasFeedSettingsRevision(d saasFeedDurable) string {
 // anything. Shared by the admin API read path and the CP→DP capture so both
 // agree on the resolved values.
 func resolvedSaaSFeedConfig() (SaaSFeedConfig, error) {
-	d := getSaaSFeedDurable()
+	return resolveSaaSFeedConfigFrom(getSaaSFeedDurable())
+}
+
+// resolveSaaSFeedConfigFrom resolves the effective feed configuration from an
+// ALREADY-CAPTURED durable value, so a view that has captured `d` can render
+// raw fields, revision, and the resolved block from the SAME state — calling
+// resolvedSaaSFeedConfig() after capturing `d` is a second holder read a
+// concurrent writer can land between, pairing one configuration's raw fields
+// with another's resolution (POST-2D-A COHERENT-READ CORRECTION DISCOVERED
+// DURING 2D-B REVIEW). Pure/read-only.
+func resolveSaaSFeedConfigFrom(d saasFeedDurable) (SaaSFeedConfig, error) {
 	return ResolveSaaSFeedConfig(&AdminSettings{
 		SaaSFeedManaged:        d.Managed,
 		SaaSFeedEnabled:        d.Enabled,

@@ -44,6 +44,11 @@ type DecryptionProfile = decryptprofile.Profile
 // decryptprofile.Store).
 type DecryptionProfileStore = decryptprofile.Store
 
+// DecryptionProfileSnapshot is one coherent profiles+names+version capture
+// (engine type decryptprofile.Snapshot) — the GET /api/decryption-profiles
+// list contract.
+type DecryptionProfileSnapshot = decryptprofile.Snapshot
+
 // globalDecryptionProfiles is the process-wide decryption-profile store, read on
 // the proxy hot path by the profile-aware resolvers and mutated by the admin API,
 // config import, and CP→DP snapshot apply.

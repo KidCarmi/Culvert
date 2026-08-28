@@ -461,10 +461,16 @@ func apiCategoryGroups(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleViewer) {
 			return
 		}
+		// One coherent snapshot: groups, names, and the fence version must
+		// describe the SAME store state — List()/Names()/Version() are three
+		// independent reads a writer can land between, handing the client rows
+		// from one state paired with the successor's fence value (POST-2D-A
+		// COHERENT-READ CORRECTION DISCOVERED DURING 2D-B REVIEW).
+		snap := globalCategoryGroups.SnapshotView()
 		jsonOK(w, map[string]any{
-			"groups":  globalCategoryGroups.List(),
-			"names":   globalCategoryGroups.Names(),
-			"version": globalCategoryGroups.Version(),
+			"groups":  snap.Groups,
+			"names":   snap.Names,
+			"version": snap.Version,
 		})
 
 	case http.MethodPost:
@@ -658,10 +664,14 @@ func apiDecryptionProfiles(w http.ResponseWriter, r *http.Request) { //nolint:cy
 		if !requireRole(w, r, RoleViewer) {
 			return
 		}
+		// One coherent snapshot — same coherent-read contract as the category-
+		// group list (POST-2D-A COHERENT-READ CORRECTION DISCOVERED DURING
+		// 2D-B REVIEW): rows, names, and the fence version from one lock hold.
+		snap := globalDecryptionProfiles.SnapshotView()
 		jsonOK(w, map[string]any{
-			"profiles": globalDecryptionProfiles.List(),
-			"names":    globalDecryptionProfiles.Names(),
-			"version":  globalDecryptionProfiles.Version(),
+			"profiles": snap.Profiles,
+			"names":    snap.Names,
+			"version":  snap.Version,
 		})
 
 	case http.MethodPost:

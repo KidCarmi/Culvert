@@ -285,8 +285,13 @@ func resolveSaaSFeedSettingsUpdate(body saasFeedSettingsBody) (saasFeedDurable, 
 // unavailable until the F3b signed-feed client lands — it NEVER fabricates
 // last_success, active version, freshness, or provenance.
 func saasFeedSettingsView() map[string]any {
+	// ONE capture of the durable holder: raw fields, the settings revision,
+	// AND the resolved block are all derived from the same `d` — a second
+	// holder read for the resolved block would let a concurrent writer pair
+	// one configuration's raw fields with another's resolution (POST-2D-A
+	// COHERENT-READ CORRECTION DISCOVERED DURING 2D-B REVIEW).
 	d := getSaaSFeedDurable()
-	resolved, resolveErr := resolvedSaaSFeedConfig()
+	resolved, resolveErr := resolveSaaSFeedConfigFrom(d)
 	view := map[string]any{
 		"managed":         d.Managed,
 		"enabled":         d.Enabled,

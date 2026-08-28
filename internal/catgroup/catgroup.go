@@ -495,6 +495,45 @@ func (s *Store) List() []Group {
 	return out
 }
 
+// Snapshot is one coherent read of the whole list contract: the groups, the
+// derived name list, and the durable fence version, all describing the SAME
+// store state (POST-2D-A COHERENT-READ CORRECTION DISCOVERED DURING 2D-B
+// REVIEW).
+type Snapshot struct {
+	Groups  []Group
+	Names   []string
+	Version int64
+}
+
+// SnapshotView captures groups + names + version under ONE hold of the read
+// lock. List()/Names()/Version() assembled by a caller are three independent
+// reads — a writer landing between any two hands the client rows from one
+// state paired with the fence version of another, and an edit from that pair
+// passes the ifVersion fence against content the client never saw. Handlers
+// serving the fenced list contract must use this, never the trio.
+func (s *Store) SnapshotView() Snapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	snap := Snapshot{
+		Groups:  make([]Group, 0, len(s.order)),
+		Names:   make([]string, 0, len(s.order)),
+		Version: s.version,
+	}
+	for _, key := range s.order {
+		if g, ok := s.groups[key]; ok {
+			snap.Groups = append(snap.Groups, Group{
+				ID:         g.ID,
+				Name:       g.Name,
+				Categories: append([]string(nil), g.Categories...),
+				CreatedAt:  g.CreatedAt,
+				UpdatedAt:  g.UpdatedAt,
+			})
+			snap.Names = append(snap.Names, g.Name)
+		}
+	}
+	return snap
+}
+
 // GetByName returns a group by name (case-insensitive). O(1).
 // Returns nil if not found. The returned pointer is safe to read
 // concurrently — catSet is immutable between mutations.

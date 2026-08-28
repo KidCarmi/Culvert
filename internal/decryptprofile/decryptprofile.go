@@ -633,6 +633,39 @@ func (s *Store) List() []Profile {
 	return out
 }
 
+// Snapshot is one coherent read of the whole list contract: the profiles, the
+// derived name list, and the durable fence version, all describing the SAME
+// store state (POST-2D-A COHERENT-READ CORRECTION DISCOVERED DURING 2D-B
+// REVIEW).
+type Snapshot struct {
+	Profiles []Profile
+	Names    []string
+	Version  int64
+}
+
+// SnapshotView captures profiles + names + version under ONE hold of the read
+// lock. List()/Names()/Version() assembled by a caller are three independent
+// reads — a writer landing between any two hands the client rows from one
+// state paired with the fence version of another, and an edit from that pair
+// passes the ifVersion fence against content the client never saw. Handlers
+// serving the fenced list contract must use this, never the trio.
+func (s *Store) SnapshotView() Snapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	snap := Snapshot{
+		Profiles: make([]Profile, 0, len(s.order)),
+		Names:    make([]string, 0, len(s.order)),
+		Version:  s.version,
+	}
+	for _, key := range s.order {
+		if p, ok := s.profiles[key]; ok {
+			snap.Profiles = append(snap.Profiles, copyOut(p))
+			snap.Names = append(snap.Names, p.Name)
+		}
+	}
+	return snap
+}
+
 // FailOpenScope returns the profile's ID, its precomputed security generation, and
 // true IFF a profile with the given name exists AND opts into fail-open
 // (OnInspectError=="fail-open"). It is a HOT-PATH accessor (resolveSSLAction calls
