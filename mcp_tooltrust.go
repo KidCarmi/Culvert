@@ -21,6 +21,7 @@ package main
 // liveExecDepsConfigured / modeExecReady.
 
 import (
+	"context"
 	"encoding/hex"
 	"path/filepath"
 	"sync"
@@ -56,10 +57,15 @@ type mcpToolTrustCoordinator struct {
 	nowFn func() time.Time
 }
 
-// now returns the coordinator clock (time.Now when unset).
+// now returns the coordinator clock (time.Now when unset). It reads nowFn under the
+// lock because the background reconcile loop may call it concurrently with a test
+// swapping the coordinator (production sets nowFn once at init and never mutates it).
 func (c *mcpToolTrustCoordinator) now() time.Time {
-	if c.nowFn != nil {
-		return c.nowFn()
+	c.mu.RLock()
+	fn := c.nowFn
+	c.mu.RUnlock()
+	if fn != nil {
+		return fn()
 	}
 	return time.Now()
 }
@@ -102,6 +108,41 @@ func initMCPToolTrust(_ *startupState) {
 	// fingerprint matches the freshly-seeded tool. Without it every restart silently
 	// revokes trust.
 	mcpToolTrust.reconcile()
+	// A periodic sweep bounds the expired-trust window. reconcile is otherwise driven
+	// only by inventory reads + the Shadow preflight; during an ACTIVE Shadow experiment
+	// no such read happens, so an approval that reaches its ExpiresAt mid-run would keep
+	// its tool catalog.Usable indefinitely (the runtime policy path reads eligibility
+	// directly). The loop expires + demotes on a timer so stale trust cannot outlive its
+	// TTL by more than the tick. Bound to the process lifecycle (stops on shutdown).
+	startToolTrustReconcileLoop(resolveLifecycleCtx())
+}
+
+// mcpToolTrustReconcileInterval bounds how long an expired grant can keep a tool
+// Usable during an active Shadow experiment (no inventory read is guaranteed then).
+// A package var so a test can shorten it.
+var mcpToolTrustReconcileInterval = 30 * time.Second
+
+// startToolTrustReconcileLoop runs a periodic reconcile bound to ctx. It reports
+// whether it started (false when the coordinator is not composed), so the
+// disabled-by-default posture is directly assertable. The reconcile is panic-guarded.
+func startToolTrustReconcileLoop(ctx context.Context) bool {
+	if composed, _ := mcpToolTrust.composedStatus(); !composed {
+		return false
+	}
+	interval := mcpToolTrustReconcileInterval // read in the caller goroutine (ordered with tests)
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				runGuarded("mcp_tooltrust_reconcile", mcpToolTrust.reconcile)
+			}
+		}
+	}()
+	return true
 }
 
 func (c *mcpToolTrustCoordinator) setUncomposed(reason string) {

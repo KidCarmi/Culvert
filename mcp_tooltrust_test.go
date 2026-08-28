@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"encoding/hex"
 	"net/http"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -304,6 +306,58 @@ func TestToolTrust_Expiry_DemotesAtReconcile(t *testing.T) {
 	if eligibility(t, cat, sid, tool) != catalog.Quarantined {
 		t.Fatalf("expiry reconcile must demote to Quarantined, got %s", eligibility(t, cat, sid, tool))
 	}
+}
+
+// ── Codex P1: the periodic loop bounds the expired-trust window during Shadow ──
+
+func TestToolTrust_ReconcileLoop_StartsOnlyWhenComposed(t *testing.T) {
+	resetMCPToolTrustForTest()
+	t.Cleanup(resetMCPToolTrustForTest)
+	// Not composed ⇒ no loop (disabled-by-default posture is directly assertable).
+	if startToolTrustReconcileLoop(context.Background()) {
+		t.Fatal("an uncomposed coordinator must not start a reconcile loop")
+	}
+	resetInventory(t)
+	seedToolTrustInventory(t)
+	composeToolTrust(t, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	if !startToolTrustReconcileLoop(ctx) {
+		t.Fatal("a composed coordinator must start a reconcile loop")
+	}
+}
+
+func TestToolTrust_ReconcileLoop_DemotesExpired(t *testing.T) {
+	resetInventory(t)
+	_, cat, sid, tool, fpHex := seedToolTrustInventory(t)
+	base := time.Unix(1_700_000_000, 0)
+	var mu sync.Mutex
+	nowVal := base
+	clk := func() time.Time { mu.Lock(); defer mu.Unlock(); return nowVal }
+	composeToolTrust(t, clk)
+	requestAndApprove(t, sid, tool, fpHex, cat.Current().Revision(), 10*time.Minute)
+	if eligibility(t, cat, sid, tool) != catalog.Usable {
+		t.Fatal("tool must be Usable while the grant is live")
+	}
+	// Advance past expiry, then let the periodic loop (short interval) demote it —
+	// no inventory read / preflight is performed here.
+	mu.Lock()
+	nowVal = base.Add(11 * time.Minute)
+	mu.Unlock()
+	prevInterval := mcpToolTrustReconcileInterval
+	mcpToolTrustReconcileInterval = 5 * time.Millisecond
+	t.Cleanup(func() { mcpToolTrustReconcileInterval = prevInterval })
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	startToolTrustReconcileLoop(ctx)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if eligibility(t, cat, sid, tool) == catalog.Quarantined {
+			return // demoted by the loop
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("periodic loop must demote an expired grant, still %s", eligibility(t, cat, sid, tool))
 }
 
 // ── rug-pull: drift away from the reviewed fingerprint drops Usable (Sec 15) ──

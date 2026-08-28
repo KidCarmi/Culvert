@@ -53,7 +53,10 @@ it.
    later identical discovery — re-approval requires a new decision.
 
 Prefer a short-lived approval (`expires_in_seconds`) for the first Controlled Shadow
-run: an expired approval keeps no tool `usable`.
+run: an expired approval keeps no tool `usable`. Trust is re-derived on every
+inventory read and Shadow preflight, and a background sweep also runs on a timer, so
+an expired grant's tool is demoted within that interval even during an active Shadow
+run with no operator reads.
 
 ## Durability & recovery
 

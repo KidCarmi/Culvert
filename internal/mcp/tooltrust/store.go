@@ -127,6 +127,12 @@ func (s *Store) Load() error {
 	if err := dec.Decode(&env); err != nil {
 		return mcperr.Wrap(mcperr.ReasonConfigInvalid, "tooltrust.load", "corrupt store file", err)
 	}
+	// A single Decode accepts the first valid value and ignores anything after it, so
+	// trailing bytes (a second JSON value, or arbitrary garbage from a partial/tampered
+	// write) would still load. Require the stream to be at EOF — fail closed otherwise.
+	if dec.More() {
+		return mcperr.New(mcperr.ReasonConfigInvalid, "tooltrust.load", "store file has trailing data")
+	}
 	if env.SchemaVersion != SchemaVersion {
 		return mcperr.New(mcperr.ReasonConfigInvalid, "tooltrust.load", "unknown store schema version")
 	}

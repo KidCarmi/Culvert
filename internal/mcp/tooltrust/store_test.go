@@ -517,6 +517,20 @@ func TestLoad_UnknownFieldFailsClosed(t *testing.T) {
 	}
 }
 
+func TestLoad_TrailingDataFailsClosed(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "approvals.json")
+	// A valid envelope followed by trailing bytes (a second value / tamper).
+	if err := os.WriteFile(path, []byte(`{"schema_version":1,"approvals":[]}{"evil":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, _ := NewStore(Config{Path: path, Clock: clk.now})
+	if err := s.Load(); err == nil {
+		t.Fatal("trailing data after the envelope must fail closed")
+	}
+}
+
 func TestPersistFailure_LeavesStateUnchanged(t *testing.T) {
 	clk := &fakeClock{t: time.Unix(1000, 0)}
 	s := newTestStore(t, clk)
