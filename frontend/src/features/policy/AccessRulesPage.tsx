@@ -51,6 +51,7 @@ import { serverErrorText, unknownOutcome } from "../../shared/mutationOutcome";
 import { useDirtyGuard } from "../../shared/dirtyGuard";
 import { WhereUsed } from "./WhereUsed";
 import { CommitReview } from "./CommitReview";
+import { DefaultActionControl } from "./DefaultActionControl";
 import { DraftBar } from "./DraftBar";
 import { RuleEditor } from "./RuleEditor";
 import type { RuleEditorMode } from "./RuleEditor";
@@ -605,6 +606,14 @@ export function AccessRulesPage(): JSX.Element {
           onOpenCommit={() => {
             setCommitOpen(true);
           }}
+        />
+      )}
+
+      {snap !== undefined && (
+        <DefaultActionControl
+          canWrite={canWrite}
+          blocked={blocked}
+          owner={rb.owner}
         />
       )}
 

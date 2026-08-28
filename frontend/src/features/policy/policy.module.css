@@ -301,3 +301,16 @@
   margin: var(--sp-1) 0 0;
   padding-left: var(--sp-4);
 }
+
+.defaultActionRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--r-md);
+  margin-bottom: var(--sp-4);
+  font-size: var(--fs-sm);
+}
