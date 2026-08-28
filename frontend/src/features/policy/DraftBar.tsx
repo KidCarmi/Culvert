@@ -230,8 +230,27 @@ export function DraftBar(props: DraftBarProps): JSX.Element {
     />
   );
 
+  // 2C §8 — the draft's fork baseline is stale: the RUNNING rulebase advanced
+  // after this draft was opened (an import, rollback, or a live Stage-1
+  // Authentication Rule change). SERVER truth (GET /api/policy/draft
+  // baseStale, the same fact the commit's fail-closed guard reads) — never a
+  // client-side comparison. No automatic rebase exists by design.
+  const baseStale = draft.active && draft.baseStale;
+
   return (
     <div className={styles.calloutSpace} data-testid="draft-bar">
+      {/* 2C §8 — critical: running changed under the draft; commit would fail closed */}
+      {baseStale && (
+        <Callout
+          variant="critical"
+          title="Draft baseline is stale"
+          role="alert"
+        >
+          The running policy changed after this Access Policy Draft was opened.
+          This draft cannot be safely committed as-is. Revert and
+          re-stage/review against the current running policy.
+        </Callout>
+      )}
       {/* State D — stranded recovery draft: never hidden, never blindly committable */}
       {stranded && (
         <Callout variant="warning" title="Stranded Policy Draft" role="alert">
@@ -295,7 +314,10 @@ export function DraftBar(props: DraftBarProps): JSX.Element {
           )}
           {canWrite && (
             <div className={styles.draftBarActions}>
-              {onOpenCommit !== undefined && snapshotIsDraft && (
+              {/* Commit entry is withheld while the base is stale (§8): the
+                  server refuses that commit fail-closed, so offering it would
+                  be an affordance for a guaranteed failure. Revert stays. */}
+              {onOpenCommit !== undefined && snapshotIsDraft && !baseStale && (
                 <Button size="sm" disabled={blocked} onClick={onOpenCommit}>
                   Review &amp; commit…
                 </Button>

@@ -12,6 +12,7 @@ import {
   readArray,
   readBoolean,
   readNumber,
+  readOptional,
   readRecord,
   readString,
 } from "./decode";
@@ -45,6 +46,12 @@ export interface DraftActive extends DraftStateCommon {
   /** the candidate generation — the ifVersion a reviewed commit must assert */
   version: number;
   shadows: readonly ShadowFinding[];
+  /** SERVER truth (2C §8): the RUNNING rulebase advanced past the generation
+   * this draft forked from (an import, rollback, or a live Stage-1
+   * auth-policy mutation). The commit fails closed on the same backend fact;
+   * the UI must report the draft as not safely committable as-is. Absent on
+   * a pre-2C server ⇒ decoded false (the commit guard still protects). */
+  baseStale: boolean;
 }
 
 export type DraftState = DraftInactive | DraftActive;
@@ -97,6 +104,7 @@ export const decodeDraftState: Decoder<DraftState> = (v, path = "$") => {
     pendingCount: field(o, "pendingCount", readNumber, path),
     version: field(o, "version", readNumber, path),
     shadows: readShadowsOrNull(o["shadows"], `${path}.shadows`),
+    baseStale: field(o, "baseStale", readOptional(readBoolean), path) ?? false,
   };
 };
 

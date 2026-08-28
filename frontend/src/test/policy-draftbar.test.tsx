@@ -308,3 +308,26 @@ it("state D (stranded): operator gets the warning and safe revert, never resume 
   expect(hasButton((t) => t.includes("Revert draft"))).toBe(true);
   expect(hasButton((t) => t.includes("Review & commit"))).toBe(false);
 });
+
+it("2C §8 (stale base): critical callout with the exact guidance; commit entry withheld; revert still offered", async () => {
+  draftBody = { ...ACTIVE_DRAFT, baseStale: true };
+  policyBody = { ...POLICY_BODY, draft: true };
+  await mount("admin", "other-admin");
+  expect(container.textContent).toContain("Draft baseline is stale");
+  expect(container.textContent).toContain(
+    "The running policy changed after this Access Policy Draft was opened.",
+  );
+  expect(container.textContent).toContain(
+    "This draft cannot be safely committed as-is.",
+  );
+  expect(hasButton((t) => t.includes("Review & commit"))).toBe(false);
+  expect(hasButton((t) => t.includes("Revert draft"))).toBe(true);
+});
+
+it("2C §8 (fresh base): no stale callout; commit entry offered; absent baseStale decodes as fresh", async () => {
+  draftBody = ACTIVE_DRAFT; // baseStale absent on the wire ⇒ decoded false
+  policyBody = { ...POLICY_BODY, draft: true };
+  await mount("admin", "other-admin");
+  expect(container.textContent).not.toContain("Draft baseline is stale");
+  expect(hasButton((t) => t.includes("Review & commit"))).toBe(true);
+});
