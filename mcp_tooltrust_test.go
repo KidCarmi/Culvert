@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"math"
 	"net/http"
 	"path/filepath"
@@ -11,11 +12,13 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/catalog"
+	"github.com/KidCarmi/Culvert/internal/mcp/execution"
 	"github.com/KidCarmi/Culvert/internal/mcp/limits"
 	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
 	"github.com/KidCarmi/Culvert/internal/mcp/registry"
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 	"github.com/KidCarmi/Culvert/internal/mcp/tooltrust"
+	"github.com/KidCarmi/Culvert/internal/mcp/upstreamclient"
 )
 
 // ── harness ──────────────────────────────────────────────────────────────────
@@ -128,6 +131,7 @@ func composeToolTrustBounded(t *testing.T, clk func() time.Time, maxRecords, max
 	mcpToolTrust.nowFn = clk
 	mcpToolTrust.mu.Unlock()
 	mcpToolTrustReconcile = mcpToolTrust.reconcile
+	execution.SetReconcileHook(func() { mcpToolTrustReconcile() }) // mirror the production wiring
 	mcpToolTrust.reconcile()
 }
 
@@ -813,5 +817,28 @@ func TestToolTrust_Annotator_SharedSnapshotAnnotatesEachTool(t *testing.T) {
 	// Parity with the single-tool path.
 	if a, ok := mcpToolTrust.annotateTool(ttTenant, inv.serverID, inv.toolA, inv.fpA); !ok || a.Status != "active" {
 		t.Fatalf("annotateTool parity = %+v ok=%v, want active", a, ok)
+	}
+}
+
+// ttStubUpstream is a no-op UpstreamCaller for wiring tests (never actually called).
+type ttStubUpstream struct{}
+
+func (ttStubUpstream) Call(context.Context, upstreamclient.Target, string, json.RawMessage, upstreamclient.CallOptions) (*upstreamclient.Response, error) {
+	return &upstreamclient.Response{Result: json.RawMessage(`{"tools":[]}`)}, nil
+}
+
+// TestToolTrust_ComposeWiresDiscoveryReconcile proves the round-14 production wiring: once tool
+// trust is composed, a Discovery built by execution.NewDiscovery carries the reconcile hook, so
+// a successful ingest reconciles trust with no per-caller wiring.
+func TestToolTrust_ComposeWiresDiscoveryReconcile(t *testing.T) {
+	resetInventory(t)
+	reg, cat, _, _, _ := seedToolTrustInventory(t)
+	composeToolTrust(t, nil)
+	d, err := execution.NewDiscovery(reg, cat, ttStubUpstream{})
+	if err != nil {
+		t.Fatalf("NewDiscovery: %v", err)
+	}
+	if d.OnIngest == nil {
+		t.Fatal("composing tool trust must install the discovery reconcile hook (NewDiscovery.OnIngest)")
 	}
 }

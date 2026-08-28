@@ -31,12 +31,28 @@ type Discovery struct {
 	OnIngest func()
 }
 
-// NewDiscovery constructs a Discovery. It fails closed on missing collaborators.
+// discoveryReconcileHook is the default OnIngest callback installed on every Discovery built
+// by NewDiscovery. The composition root sets it (SetReconcileHook) to the tool-trust reconcile
+// hook so a successful discovery ingest re-materializes matching approvals immediately, rather
+// than requiring each caller to remember to wire it. Nil (tests, or tool trust not composed) ⇒
+// no default (a no-op ingest). It is set once at startup before any Discovery is constructed,
+// so no synchronization is required — the same convention as the other startup-wired MCP seams.
+var discoveryReconcileHook func()
+
+// SetReconcileHook installs the default post-ingest reconcile callback used by NewDiscovery.
+// The composition root calls it once at startup; nil clears it (tests). It keeps this package
+// decoupled from tool trust — it only ever invokes the func it is handed, and that func can
+// only withdraw-or-re-affirm trust, never widen usability.
+func SetReconcileHook(fn func()) { discoveryReconcileHook = fn }
+
+// NewDiscovery constructs a Discovery. It fails closed on missing collaborators and installs
+// the default post-ingest reconcile hook (SetReconcileHook) so the ingest path reconciles
+// trust without the caller having to wire OnIngest itself.
 func NewDiscovery(reg *registry.Registry, cat *catalog.Catalog, up UpstreamCaller) (*Discovery, error) {
 	if reg == nil || cat == nil || up == nil {
 		return nil, mcperr.New(mcperr.ReasonListenerConfigInvalid, "execution.discovery", "incomplete discovery config")
 	}
-	return &Discovery{Registry: reg, Catalog: cat, Upstream: up}, nil
+	return &Discovery{Registry: reg, Catalog: cat, Upstream: up, OnIngest: discoveryReconcileHook}, nil
 }
 
 // Discover runs the ordered discovery sequence for one registered server:

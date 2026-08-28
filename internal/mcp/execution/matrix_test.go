@@ -339,3 +339,38 @@ func TestDiscovery_OnIngestFiresOnSuccessNotFailure(t *testing.T) {
 		t.Fatalf("OnIngest must NOT fire on a discovery failure, got %d", ingests)
 	}
 }
+
+// TestNewDiscovery_InstallsDefaultReconcileHook proves the round-14 wiring: NewDiscovery
+// installs the default post-ingest reconcile hook set by SetReconcileHook, so a normally
+// constructed Discovery reconciles trust after a successful ingest without the caller wiring
+// OnIngest itself. A cleared hook leaves OnIngest nil.
+func TestNewDiscovery_InstallsDefaultReconcileHook(t *testing.T) {
+	reg := registry.New(limits.DefaultCatalog())
+	cat := catalog.New(limits.DefaultCatalog())
+	up := &fakeUpstream{}
+
+	var fired int
+	SetReconcileHook(func() { fired++ })
+	defer SetReconcileHook(nil)
+	d, err := NewDiscovery(reg, cat, up)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.OnIngest == nil {
+		t.Fatal("NewDiscovery must install the default reconcile hook when one is set")
+	}
+	d.OnIngest()
+	if fired != 1 {
+		t.Fatalf("the installed default hook must invoke the reconcile callback, fired=%d", fired)
+	}
+
+	// With the hook cleared, a fresh Discovery carries no default.
+	SetReconcileHook(nil)
+	d2, err := NewDiscovery(reg, cat, up)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d2.OnIngest != nil {
+		t.Fatal("a cleared reconcile hook must leave OnIngest nil")
+	}
+}

@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/catalog"
+	"github.com/KidCarmi/Culvert/internal/mcp/execution"
 	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
 	"github.com/KidCarmi/Culvert/internal/mcp/registry"
 	"github.com/KidCarmi/Culvert/internal/mcp/tooltrust"
@@ -118,6 +119,11 @@ func initMCPToolTrust(_ *startupState) {
 	mcpToolTrust.reason = ""
 	mcpToolTrust.mu.Unlock()
 	mcpToolTrustReconcile = mcpToolTrust.reconcile
+	// Wire the discovery ingest path (ADR-0034): a Discovery built by execution.NewDiscovery
+	// reconciles trust immediately after a successful ingest, so a re-discovered tool matching
+	// an active approval is re-promoted at once (not after the periodic sweep). The closure
+	// reads the CURRENT mcpToolTrustReconcile, so a later reset makes it a no-op.
+	execution.SetReconcileHook(func() { mcpToolTrustReconcile() })
 	// Startup reconcile is load-bearing (ADR-0034 D3): the boot inventory re-seeds
 	// every tool Quarantined; this re-applies each active approval whose bound
 	// fingerprint matches the freshly-seeded tool. Without it every restart silently
@@ -678,4 +684,5 @@ func resetMCPToolTrustForTest() {
 	mcpToolTrust.pendingDemotions = nil
 	mcpToolTrust.deriveMu.Unlock()
 	mcpToolTrustReconcile = func() {}
+	execution.SetReconcileHook(nil)
 }
