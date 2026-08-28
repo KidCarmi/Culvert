@@ -347,6 +347,8 @@ var uiRoutes = []uiRouteMetadata{
 			{Method: "PUT", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
 			{Method: "DELETE", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
 		}},
+	{Path: "/api/urlcat/state", Handler: "apiURLCatState", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer, Note: "v2 read: categories + server-owned semantic revision (2D-B); no direct requireRole; protected by uiAuthMiddleware"}}},
 	{Path: "/api/urlcat/host", Handler: "apiURLCatHost", Domain: "policy", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true},

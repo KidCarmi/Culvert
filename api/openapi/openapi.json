@@ -4209,6 +4209,28 @@
         ],
         "type": "object"
       },
+      "URLCategoryState": {
+        "additionalProperties": false,
+        "properties": {
+          "categories": {
+            "description": "Every category (name/hosts/builtIn + feedBacked UT1 enrichment).",
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "revision": {
+            "description": "Server-owned restart-stable semantic taxonomy revision. Echo back via ?ifRevision= on mutations; a mismatch is the structured 409 ({error, currentRevision, yourRevision}).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "categories",
+          "revision"
+        ],
+        "type": "object"
+      },
       "URLCategoryUpdate": {
         "additionalProperties": false,
         "description": "URL-category update body — the category name is the required `name` query parameter; the body carries only the replacement hosts.",
@@ -21213,6 +21235,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "Optional semantic-revision assertion (fenced durable path; structured 409 on mismatch).",
+            "in": "query",
+            "name": "ifRevision",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -21295,6 +21326,17 @@
       "post": {
         "description": "Create URL category.",
         "operationId": "createURLCategory",
+        "parameters": [
+          {
+            "description": "Optional semantic-revision assertion (the `revision` from GET /api/urlcat/state); when present the mutation runs on the fenced durable path (2D-B) and a mismatch returns the structured 409 ({error, currentRevision, yourRevision}) without running the mutation. POST with ifRevision is a STRICT create (409 on an existing name).",
+            "in": "query",
+            "name": "ifRevision",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -21322,6 +21364,9 @@
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "description": "Fenced-path conflict — stale ifRevision (structured {error, currentRevision, yourRevision}) or strict-create name collision (plain text)."
           }
         },
         "security": [
@@ -21356,6 +21401,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "Optional semantic-revision assertion (fenced durable path; structured 409 on mismatch).",
+            "in": "query",
+            "name": "ifRevision",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -21385,6 +21439,9 @@
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "description": "Fenced-path conflict — stale ifRevision (structured {error, currentRevision, yourRevision})."
           }
         },
         "security": [
@@ -21454,6 +21511,15 @@
         "operationId": "deleteURLCatHost",
         "parameters": [
           {
+            "description": "Optional semantic-revision assertion (fenced durable path; structured 409 on mismatch).",
+            "in": "query",
+            "name": "ifRevision",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "in": "query",
             "name": "id",
             "required": false,
@@ -21521,6 +21587,17 @@
       "post": {
         "description": "Add URL-category host.",
         "operationId": "addURLCatHost",
+        "parameters": [
+          {
+            "description": "Optional semantic-revision assertion (fenced durable path; structured 409 on mismatch).",
+            "in": "query",
+            "name": "ifRevision",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -21618,6 +21695,45 @@
           }
         ],
         "summary": "Lookup URL category",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/urlcat/state": {
+      "get": {
+        "description": "v2 read contract — every category (with the UT1 community-feed enrichment) plus the server-owned restart-stable semantic taxonomy revision (ContentFingerprint). Echo the revision back as ?ifRevision= on mutations; the browser never computes it. The legacy raw-array GET /api/urlcat is unchanged.",
+        "operationId": "getURLCategoryState",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/URLCategoryState"
+                }
+              }
+            },
+            "description": "Categories + semantic revision."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "URL category state (v2)",
         "tags": [
           "policy"
         ],

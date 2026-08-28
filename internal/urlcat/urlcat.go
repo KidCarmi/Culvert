@@ -16,6 +16,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -25,7 +26,44 @@ import (
 
 	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/hostutil"
+	"github.com/KidCarmi/Culvert/internal/obs"
 )
+
+// MaxHostsPerCategory is the post-mutation size bound for ONE category,
+// enforced at the store boundary (2D-B §11) so no write path — POST, PUT,
+// single-host AddHost, or a future caller — can grow a category past it.
+const MaxHostsPerCategory = 10000
+
+// ErrPersist marks a durable-mutation failure: the mutation was rolled back
+// and nothing changed, in memory or on disk (2D-B.0a, the 2D-A doctrine).
+var ErrPersist = errors.New("url category persistence failed")
+
+// ErrNameExists is the strict-create refusal: the v2 "Create category" path
+// must never silently update an existing category (2D-B §10).
+var ErrNameExists = errors.New("category name already exists")
+
+// ErrTooManyHosts is the MaxHostsPerCategory bound refusal.
+var ErrTooManyHosts = fmt.Errorf("category cannot contain more than %d hosts", MaxHostsPerCategory)
+
+// RevisionConflictError reports a failed optimistic-revision fence: the
+// client asserted the semantic taxonomy revision (ContentFingerprint) it
+// loaded, and the store's current revision differs. Mirrors the 2D-A
+// VersionConflictError shape so handlers render the same structured 409.
+// The fingerprint is ABA-blind by design (an A→B→A round trip restores the
+// same identity) — accepted for this fence per the 2D-B §7 decision: equality
+// means the CURRENT semantic taxonomy is equivalent to what the operator
+// loaded, which is exactly what the fence protects.
+type RevisionConflictError struct {
+	Current  string // the store's current ContentFingerprint
+	Asserted string // the revision the caller asserted
+}
+
+func (e *RevisionConflictError) Error() string {
+	return fmt.Sprintf("taxonomy revision conflict: current %s, asserted %s", e.Current, e.Asserted)
+}
+
+// writeFile is the persistence seam (tests inject failures / ErrReplacedNotSynced).
+var writeFile = fileutil.AtomicWrite
 
 // Category names a URL category referenced by policy rules.
 type Category string
@@ -84,6 +122,29 @@ type Store struct {
 	// string). Bumped INSIDE the write-lock critical section, so the unlock
 	// that publishes new content also publishes the advanced revision.
 	rev atomic.Uint64
+
+	// mutMu serializes EVERY runtime writer of the taxonomy — the fenced v2
+	// durable primitives, the legacy self-persisting mutators, standalone
+	// Save/SaveErr, and bulk installs (ReplaceAll from cluster sync / config
+	// import / rollback) — so no writer can alter contents between a client's
+	// revision comparison and its protected mutation, and no standalone save
+	// can observe (or publish) an in-flight mutation's memory (the 2D-A
+	// fence + commit-boundary doctrine transposed; 2D-B.0a). Readers and the
+	// proxy hot path never touch it. Startup-only writers (Load, before
+	// listeners) are exempt by ordering.
+	mutMu sync.Mutex
+
+	// saveMu is the durable-PUBLICATION serializer: saveErrLocked runs
+	// snapshot → marshal → AtomicWrite as one unit under it, so publications
+	// land in acquisition order and each writes the state CURRENT at its own
+	// snapshot — an older save can never resume and rename a stale file over
+	// a newer acknowledged publication. LOCK ORDER (acyclic):
+	// mutMu → {saveMu, fpMu} → mu. Every runtime persistence entry goes
+	// through mutMu first (public SaveErr acquires it; the durable primitives
+	// hold it across the whole transaction and call saveErrLocked, which must
+	// never reacquire mutMu). Nothing takes mu then any other store lock;
+	// nothing takes saveMu or fpMu then mutMu.
+	saveMu sync.Mutex
 }
 
 // Revision returns the process-local semantic-mutation counter. Monotonic
@@ -427,22 +488,182 @@ func (s *Store) Load(path string) error {
 	return nil
 }
 
-// Save atomically persists categories to disk.
-func (s *Store) Save() {
-	if s.path == "" {
-		return
-	}
+// Save atomically persists categories to disk. Best-effort legacy wrapper
+// (errors discarded — the pre-2D-B contract); the fenced v2 durable
+// primitives use the error-returning path and roll back on failure.
+func (s *Store) Save() { _ = s.SaveErr() }
+
+// SaveErr is the PUBLIC error-returning persistence entry. It acquires mutMu
+// FIRST (the 2D-A commit-boundary doctrine), so a standalone save orders
+// against the whole mutation domain and can never observe — let alone
+// publish — an in-flight durable mutation's memory. The durable primitives
+// already hold mutMu and call saveErrLocked directly; mutMu is not
+// reentrant, so an internal SaveErr call from inside the mutation domain
+// would deadlock and must never be added.
+func (s *Store) SaveErr() error {
+	s.mutMu.Lock()
+	defer s.mutMu.Unlock()
+	return s.saveErrLocked()
+}
+
+// saveErrLocked is the INTERNAL publication helper. LOCK OWNERSHIP CONTRACT:
+// the caller MUST hold mutMu. The WHOLE helper runs under saveMu — snapshot
+// included — so publications form one monotonic order and each writes the
+// state current at its own snapshot. The on-disk format stays the legacy
+// bare JSON array (2D-B §7: no new envelope — the optimistic fence is the
+// restart-stable ContentFingerprint, derived from content, so nothing
+// beyond the content needs to persist).
+func (s *Store) saveErrLocked() error {
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+
 	s.mu.RLock()
+	path := s.path
+	if path == "" {
+		s.mu.RUnlock()
+		return nil
+	}
 	data, err := json.MarshalIndent(s.entries, "", "  ")
 	s.mu.RUnlock()
 	if err != nil {
-		return
+		return fmt.Errorf("marshal url categories: %w", err)
 	}
 	// Bucket-4 durability hardening: fileutil.AtomicWrite gives unique
 	// tmp + chmod + fsync(file) + rename + best-effort fsync(parent
 	// dir) — replaces the previous os.WriteFile+os.Rename which was
 	// atomic-via-rename but NOT fsynced (P6.1 UC-1).
-	_ = fileutil.AtomicWrite(s.path, data, 0o600)
+	if werr := writeFile(path, data, 0o600); werr != nil {
+		return fmt.Errorf("write url categories: %w", werr)
+	}
+	return nil
+}
+
+// snapshotEntries deep-copies the current entries for the rollback path.
+func (s *Store) snapshotEntries() []*Entry {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]*Entry, len(s.entries))
+	for i, e := range s.entries {
+		cp := *e
+		cp.Hosts = append([]string(nil), e.Hosts...)
+		out[i] = &cp
+	}
+	return out
+}
+
+// restoreEntries reinstalls a pre-mutation snapshot (rollback). rebuildIndex
+// re-derives every index and invalidates the fingerprint memo, so the
+// semantic revision returns to the pre-mutation identity automatically (the
+// fingerprint is content-derived).
+func (s *Store) restoreEntries(prev []*Entry) {
+	s.mu.Lock()
+	s.entries = prev
+	s.rebuildIndex()
+	s.mu.Unlock()
+}
+
+// mutateDurable is the shared fenced transaction core (2D-B.0a; the 2D-A
+// MutateDurable contract transposed to the name-keyed taxonomy):
+//
+//	fence (optional expected ContentFingerprint) → memory mutation → durable
+//	publish → success — all under mutMu, so the comparison, the mutation and
+//	the publication are one serialized transaction (no TOCTOU) and no other
+//	writer or standalone save can interleave.
+//
+// Fence mismatch ⇒ *RevisionConflictError (nothing ran). fn error ⇒ rollback,
+// nothing changed. Persist failure ⇒ rollback + ErrPersist — memory AND a
+// restart both see the pre-mutation taxonomy, so a failed durable mutation
+// can never be recomposed into the effective policy view by a caller that
+// honors the error. ErrReplacedNotSynced follows the landed-content
+// doctrine: the renamed file already carries the new taxonomy, so memory is
+// kept and success reported.
+func (s *Store) mutateDurable(expectedRev *string, fn func() error) error {
+	s.mutMu.Lock()
+	defer s.mutMu.Unlock()
+	if expectedRev != nil {
+		if cur := s.ContentFingerprint(); *expectedRev != cur {
+			return &RevisionConflictError{Current: cur, Asserted: *expectedRev}
+		}
+	}
+	prev := s.snapshotEntries()
+	if err := fn(); err != nil {
+		return err // memory-only mutators are atomic per operation; nothing landed
+	}
+	if err := s.saveErrLocked(); err != nil {
+		if errors.Is(err, fileutil.ErrReplacedNotSynced) {
+			obs.Warnf("URLCategories: mutation persisted but parent-dir sync failed: %v", err)
+			return nil
+		}
+		s.restoreEntries(prev)
+		return fmt.Errorf("%w: %w", ErrPersist, err)
+	}
+	return nil
+}
+
+// CreateDurable is the fenced v2 "create category" primitive — STRICT create
+// (2D-B §10): an existing case-insensitive name is refused with ErrNameExists,
+// never silently updated. Enforces MaxHostsPerCategory.
+func (s *Store) CreateDurable(expectedRev *string, name string, hosts []string) error {
+	return s.mutateDurable(expectedRev, func() error {
+		if len(hosts) > MaxHostsPerCategory {
+			return ErrTooManyHosts
+		}
+		if hosts == nil {
+			hosts = []string{}
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		for _, e := range s.entries {
+			if strings.EqualFold(e.Name, name) {
+				return ErrNameExists
+			}
+		}
+		s.entries = append(s.entries, &Entry{Name: name, Hosts: hosts, BuiltIn: false})
+		s.rebuildIndex()
+		return nil
+	})
+}
+
+// ReplaceHostsDurable is the fenced v2 "replace category hosts" primitive.
+// The category must exist; its BuiltIn flag is preserved INSIDE the
+// transaction (the legacy handler's read-then-write of the flag had a
+// window). Enforces MaxHostsPerCategory (the legacy PUT lacked the cap —
+// 2D-B §11 closes the contract at the store boundary).
+func (s *Store) ReplaceHostsDurable(expectedRev *string, name string, hosts []string) error {
+	return s.mutateDurable(expectedRev, func() error {
+		if len(hosts) > MaxHostsPerCategory {
+			return ErrTooManyHosts
+		}
+		if hosts == nil {
+			hosts = []string{}
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		for _, e := range s.entries {
+			if strings.EqualFold(e.Name, name) {
+				e.Hosts = hosts
+				s.rebuildIndex()
+				return nil
+			}
+		}
+		return fmt.Errorf("category %q not found", name)
+	})
+}
+
+// DeleteDurable is the fenced v2 "delete category" primitive.
+func (s *Store) DeleteDurable(expectedRev *string, name string) error {
+	return s.mutateDurable(expectedRev, func() error { return s.deleteMem(name) })
+}
+
+// AddHostDurable is the fenced v2 single-host add. Enforces the post-mutation
+// MaxHostsPerCategory bound (the legacy AddHost could grow past the cap).
+func (s *Store) AddHostDurable(expectedRev *string, category, host string) error {
+	return s.mutateDurable(expectedRev, func() error { return s.addHostMem(category, host) })
+}
+
+// RemoveHostDurable is the fenced v2 single-host remove.
+func (s *Store) RemoveHostDurable(expectedRev *string, category, host string) error {
+	return s.mutateDurable(expectedRev, func() error { return s.removeHostMem(category, host) })
 }
 
 // All returns a copy of all category entries.
@@ -458,8 +679,14 @@ func (s *Store) All() []Entry {
 	return out
 }
 
-// ReplaceAll atomically replaces all categories (used by cluster config sync).
+// ReplaceAll atomically replaces all categories (used by cluster config sync,
+// config import, and config-version rollback). Holds mutMu so a bulk install
+// orders against the v2 revision fence and the publication/commit boundary
+// (2D-B §12); memory-only — the callers' separate Save() reacquires the
+// domain and publishes the current committed state.
 func (s *Store) ReplaceAll(cats []Entry) {
+	s.mutMu.Lock()
+	defer s.mutMu.Unlock()
 	s.mu.Lock()
 	s.entries = make([]*Entry, len(cats))
 	for i := range cats {
@@ -471,52 +698,96 @@ func (s *Store) ReplaceAll(cats []Entry) {
 	s.mu.Unlock()
 }
 
-// Set creates or replaces the host list for a named category.
+// Set creates or replaces the host list for a named category. LEGACY
+// upsert wrapper (pre-2D-B contract preserved for old callers): mutation +
+// best-effort persistence, errors discarded. The fenced v2 path uses
+// CreateDurable (strict create) / ReplaceHostsDurable instead.
 func (s *Store) Set(name string, hosts []string, builtIn bool) error {
 	if name == "" {
 		return fmt.Errorf("category name must not be empty")
+	}
+	s.mutMu.Lock()
+	defer s.mutMu.Unlock()
+	if err := s.setMem(name, hosts, builtIn); err != nil {
+		return err
+	}
+	_ = s.saveErrLocked() // legacy best-effort persistence
+	return nil
+}
+
+// setMem is the memory-only upsert core. Caller holds mutMu. Enforces the
+// MaxHostsPerCategory bound at the store boundary (2D-B §11 — the legacy PUT
+// had no cap).
+func (s *Store) setMem(name string, hosts []string, builtIn bool) error {
+	if len(hosts) > MaxHostsPerCategory {
+		return ErrTooManyHosts
 	}
 	if hosts == nil {
 		hosts = []string{}
 	}
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	for _, e := range s.entries {
 		if !strings.EqualFold(e.Name, name) {
 			continue
 		}
 		e.Hosts = hosts
 		s.rebuildIndex()
-		s.mu.Unlock()
-		s.Save()
 		return nil
 	}
 	s.entries = append(s.entries, &Entry{Name: name, Hosts: hosts, BuiltIn: builtIn})
 	s.rebuildIndex()
-	s.mu.Unlock()
-	s.Save()
 	return nil
 }
 
-// Delete removes a category by name. Returns an error if not found.
+// Delete removes a category by name. Returns an error if not found. LEGACY
+// wrapper: mutation + best-effort persistence.
 func (s *Store) Delete(name string) error {
+	s.mutMu.Lock()
+	defer s.mutMu.Unlock()
+	if err := s.deleteMem(name); err != nil {
+		return err
+	}
+	_ = s.saveErrLocked() // legacy best-effort persistence
+	return nil
+}
+
+// deleteMem is the memory-only delete core. Caller holds mutMu.
+func (s *Store) deleteMem(name string) error {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	for i, e := range s.entries {
 		if !strings.EqualFold(e.Name, name) {
 			continue
 		}
 		s.entries = append(s.entries[:i], s.entries[i+1:]...)
 		s.rebuildIndex()
-		s.mu.Unlock()
-		s.Save()
 		return nil
 	}
-	s.mu.Unlock()
 	return fmt.Errorf("category %q not found", name)
 }
 
 // AddHost appends a host to the named category (no-op if already present).
+// LEGACY wrapper: mutation + best-effort persistence per call — the SaaS
+// legacy feed merge calls it once per merged host, so the memory mutation
+// must stay the incremental-index fold (addHostToIndexes), never a wholesale
+// rebuild.
 func (s *Store) AddHost(category, host string) error {
+	s.mutMu.Lock()
+	defer s.mutMu.Unlock()
+	if err := s.addHostMem(category, host); err != nil {
+		return err
+	}
+	_ = s.saveErrLocked() // legacy best-effort persistence
+	return nil
+}
+
+// addHostMem is the memory-only single-host add core. Caller holds mutMu.
+// Enforces the post-mutation MaxHostsPerCategory bound (2D-B §11 — a
+// single-host add could previously grow a category past the cap).
+func (s *Store) addHostMem(category, host string) error {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	key := strings.ToLower(category)
 	for ei, e := range s.entries {
 		if !strings.EqualFold(e.Name, category) {
@@ -524,8 +795,10 @@ func (s *Store) AddHost(category, host string) error {
 		}
 		host = hostutil.NormalizeHost(strings.TrimSpace(host))
 		if s.index[key][host] {
-			s.mu.Unlock()
 			return nil // already present
+		}
+		if len(e.Hosts)+1 > MaxHostsPerCategory {
+			return ErrTooManyHosts
 		}
 		e.Hosts = append(e.Hosts, host)
 		s.addHostToIndexes(ei, e, key, host)
@@ -533,11 +806,8 @@ func (s *Store) AddHost(category, host string) error {
 		// invalidate the fingerprint memo. O(1) by contract — see
 		// invalidateFingerprintLocked and addHostToIndexes.
 		s.invalidateFingerprintLocked()
-		s.mu.Unlock()
-		s.Save()
 		return nil
 	}
-	s.mu.Unlock()
 	return fmt.Errorf("category %q not found", category)
 }
 
@@ -593,9 +863,22 @@ func (s *Store) addHostToIndexes(ei int, e *Entry, key, host string) {
 	}
 }
 
-// RemoveHost deletes a host from the named category.
+// RemoveHost deletes a host from the named category. LEGACY wrapper:
+// mutation + best-effort persistence.
 func (s *Store) RemoveHost(category, host string) error {
+	s.mutMu.Lock()
+	defer s.mutMu.Unlock()
+	if err := s.removeHostMem(category, host); err != nil {
+		return err
+	}
+	_ = s.saveErrLocked() // legacy best-effort persistence
+	return nil
+}
+
+// removeHostMem is the memory-only single-host remove core. Caller holds mutMu.
+func (s *Store) removeHostMem(category, host string) error {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	for _, e := range s.entries {
 		if strings.EqualFold(e.Name, category) {
 			host = hostutil.NormalizeHost(strings.TrimSpace(host))
@@ -605,15 +888,11 @@ func (s *Store) RemoveHost(category, host string) error {
 				}
 				e.Hosts = append(e.Hosts[:i], e.Hosts[i+1:]...)
 				s.rebuildIndex()
-				s.mu.Unlock()
-				s.Save()
 				return nil
 			}
-			s.mu.Unlock()
 			return fmt.Errorf("host %q not in category %q", host, category)
 		}
 	}
-	s.mu.Unlock()
 	return fmt.Errorf("category %q not found", category)
 }
 

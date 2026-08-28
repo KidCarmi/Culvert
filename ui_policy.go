@@ -997,28 +997,10 @@ func apiDecryptionExclusionTunables(w http.ResponseWriter, r *http.Request) {
 func apiURLCat(w http.ResponseWriter, r *http.Request) { //nolint:cyclop,funlen,gocognit // CRUD handler: one branch per HTTP method is intentional
 	switch r.Method {
 	case http.MethodGet:
-		all := catStore.All()
-		// Enrich with feed-backed flag so the GUI shows which categories
-		// have UT1 community feed domains behind them.
-		ut1Set := make(map[string]bool)
-		feedActive := communityDB != nil // only show badge if feed is actually configured
-		if feedActive {
-			for _, cat := range feedsync.MappedCategories() {
-				ut1Set[strings.ToLower(cat)] = true
-			}
-		}
-		type enrichedCat struct {
-			CategoryEntry
-			FeedBacked bool `json:"feedBacked"`
-		}
-		enriched := make([]enrichedCat, len(all))
-		for i, e := range all {
-			enriched[i] = enrichedCat{
-				CategoryEntry: e,
-				FeedBacked:    ut1Set[strings.ToLower(e.Name)],
-			}
-		}
-		jsonOK(w, enriched)
+		// LEGACY raw-array contract — never reshaped (2D-B §8; the v2 read
+		// is GET /api/urlcat/state). Same enrichment helper as /state so the
+		// two reads cannot disagree.
+		jsonOK(w, enrichedURLCategories())
 
 	case http.MethodPost:
 		if !requireRole(w, r, RoleOperator) {
@@ -1042,6 +1024,22 @@ func apiURLCat(w http.ResponseWriter, r *http.Request) { //nolint:cyclop,funlen,
 		}
 		if len(body.Hosts) > 10000 {
 			http.Error(w, "category cannot contain more than 10000 hosts", http.StatusBadRequest)
+			return
+		}
+		if ifRev := parseIfRevision(r); ifRev != nil {
+			// v2 fenced STRICT create (2D-B §9/§10): fence + mutation +
+			// durable publish in one serialization domain; an existing name
+			// is a 409, never a silent upsert. Recompose ONLY after durable
+			// success (§13) — a failed mutation never reaches the effective
+			// policy view.
+			if err := catStore.CreateDurable(ifRev, body.Name, body.Hosts); err != nil {
+				writeTaxonomyMutationError(w, err)
+				return
+			}
+			recomposeSignedFeedTaxonomy()
+			auditEvent(r, "urlcat.create", body.Name, fmt.Sprintf("%d host(s)", len(body.Hosts)))
+			saveConfigVersion(sessionAdmin(r), "urlcat.create")
+			jsonOK(w, map[string]any{"name": body.Name, "revision": catStore.ContentFingerprint()})
 			return
 		}
 		if err := catStore.Set(body.Name, body.Hosts, false); err != nil {
@@ -1070,6 +1068,20 @@ func apiURLCat(w http.ResponseWriter, r *http.Request) { //nolint:cyclop,funlen,
 		}
 		if err := decodeJSON(r, &body); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if ifRev := parseIfRevision(r); ifRev != nil {
+			// v2 fenced host replacement: the store preserves BuiltIn INSIDE
+			// the transaction (no read-then-write window) and enforces the
+			// MaxHostsPerCategory bound; recompose only after durable success.
+			if err := catStore.ReplaceHostsDurable(ifRev, name, body.Hosts); err != nil {
+				writeTaxonomyMutationError(w, err)
+				return
+			}
+			recomposeSignedFeedTaxonomy()
+			auditEvent(r, "urlcat.update", name, fmt.Sprintf("%d host(s)", len(body.Hosts)))
+			saveConfigVersion(sessionAdmin(r), "urlcat.update")
+			jsonOK(w, map[string]any{"name": name, "revision": catStore.ContentFingerprint()})
 			return
 		}
 		// Preserve builtIn flag when updating.
@@ -1110,6 +1122,18 @@ func apiURLCat(w http.ResponseWriter, r *http.Request) { //nolint:cyclop,funlen,
 		if deleteBlockedByReferences(w, r, "category", name, "urlcat.delete.blocked") {
 			return
 		}
+		if ifRev := parseIfRevision(r); ifRev != nil {
+			// v2 fenced durable delete; recompose only after durable success.
+			if err := catStore.DeleteDurable(ifRev, name); err != nil {
+				writeTaxonomyMutationError(w, err)
+				return
+			}
+			recomposeSignedFeedTaxonomy()
+			auditEvent(r, "urlcat.delete", name, "")
+			saveConfigVersion(sessionAdmin(r), "urlcat.delete")
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		if err := catStore.Delete(name); err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
@@ -1145,6 +1169,19 @@ func apiURLCatHost(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "category and host are required", http.StatusBadRequest)
 			return
 		}
+		if ifRev := parseIfRevision(r); ifRev != nil {
+			// v2 fenced durable single-host add (post-mutation cap enforced
+			// at the store boundary); recompose only after durable success.
+			if err := catStore.AddHostDurable(ifRev, body.Category, body.Host); err != nil {
+				writeTaxonomyMutationError(w, err)
+				return
+			}
+			recomposeSignedFeedTaxonomy()
+			auditEvent(r, "urlcat.host.add", body.Category, body.Host)
+			saveConfigVersion(sessionAdmin(r), "urlcat.host.add")
+			jsonOK(w, map[string]any{"category": body.Category, "host": body.Host, "revision": catStore.ContentFingerprint()})
+			return
+		}
 		if err := catStore.AddHost(body.Category, body.Host); err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
@@ -1164,6 +1201,18 @@ func apiURLCatHost(w http.ResponseWriter, r *http.Request) {
 		host := r.URL.Query().Get("host")
 		if category == "" || host == "" {
 			http.Error(w, "category and host query params required", http.StatusBadRequest)
+			return
+		}
+		if ifRev := parseIfRevision(r); ifRev != nil {
+			// v2 fenced durable single-host remove.
+			if err := catStore.RemoveHostDurable(ifRev, category, host); err != nil {
+				writeTaxonomyMutationError(w, err)
+				return
+			}
+			recomposeSignedFeedTaxonomy()
+			auditEvent(r, "urlcat.host.remove", category, host)
+			saveConfigVersion(sessionAdmin(r), "urlcat.host.remove")
+			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		if err := catStore.RemoveHost(category, host); err != nil {
@@ -2482,6 +2531,7 @@ func registerPolicyRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/decryption-exclusions", apiDecryptionExclusions)                 // GET list learned exclusions / DELETE evict one (?host=) or clear all
 	mux.HandleFunc("/api/decryption-exclusions/tunables", apiDecryptionExclusionTunables) // GET defaults+bounds / PUT admin runtime tunables (F10)
 	mux.HandleFunc("/api/urlcat", apiURLCat)                                              // GET/POST/PUT/DELETE categories
+	mux.HandleFunc("/api/urlcat/state", apiURLCatState)                                   // GET — v2 read: categories + server-owned semantic revision (2D-B)
 	mux.HandleFunc("/api/urlcat/host", apiURLCatHost)                                     // POST/DELETE individual hosts
 	mux.HandleFunc("/api/urlcat/lookup", apiURLCatLookup)                                 // GET — resolve a domain to its category
 	mux.HandleFunc("/api/urlcat/feed-status", apiURLCatFeedStatus)                        // GET — UT1 + SaaS feed freshness/failure counts (viewer, read-only)

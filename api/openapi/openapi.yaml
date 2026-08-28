@@ -1756,6 +1756,18 @@ components:
         name: { type: string }
         hosts: { type: array, items: { type: string }, nullable: true }
         builtIn: { type: boolean }
+    URLCategoryState:
+      type: object
+      required: [categories, revision]
+      additionalProperties: false
+      properties:
+        categories:
+          type: array
+          items: { type: object, additionalProperties: true }
+          description: Every category (name/hosts/builtIn + feedBacked UT1 enrichment).
+        revision:
+          type: string
+          description: Server-owned restart-stable semantic taxonomy revision. Echo back via ?ifRevision= on mutations; a mismatch is the structured 409 ({error, currentRevision, yourRevision}).
     URLCategoryUpdate:
       type: object
       description: URL-category update body — the category name is the required `name` query parameter; the body carries only the replacement hosts.
@@ -4120,6 +4132,12 @@ paths:
       x-culvert-introduced-version: 1.0.0
       x-culvert-danger-level: medium
       x-culvert-audit-event: urlcat.create
+      parameters:
+        - name: ifRevision
+          in: query
+          required: false
+          schema: { type: string }
+          description: Optional semantic-revision assertion (the `revision` from GET /api/urlcat/state); when present the mutation runs on the fenced durable path (2D-B) and a mismatch returns the structured 409 ({error, currentRevision, yourRevision}) without running the mutation. POST with ifRevision is a STRICT create (409 on an existing name).
       requestBody:
         required: true
         content:
@@ -4133,6 +4151,8 @@ paths:
               schema: { type: object, additionalProperties: true }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+        '409':
+          description: Fenced-path conflict — stale ifRevision (structured {error, currentRevision, yourRevision}) or strict-create name collision (plain text).
     put:
       operationId: updateURLCategory
       tags: [policy]
@@ -4154,6 +4174,11 @@ paths:
           in: query
           required: true
           schema: { type: string }
+        - name: ifRevision
+          in: query
+          required: false
+          schema: { type: string }
+          description: Optional semantic-revision assertion (fenced durable path; structured 409 on mismatch).
       requestBody:
         required: true
         content:
@@ -4167,6 +4192,8 @@ paths:
               schema: { type: object, additionalProperties: true }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+        '409':
+          description: Fenced-path conflict — stale ifRevision (structured {error, currentRevision, yourRevision}).
     delete:
       operationId: deleteURLCategory
       tags: [policy]
@@ -4192,6 +4219,11 @@ paths:
           in: query
           required: false
           schema: { type: string }
+        - name: ifRevision
+          in: query
+          required: false
+          schema: { type: string }
+          description: Optional semantic-revision assertion (fenced durable path; structured 409 on mismatch).
       responses:
         '200':
           description: Delete URL category.
@@ -9520,6 +9552,28 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/GenericRead' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/urlcat/state:
+    get:
+      operationId: getURLCategoryState
+      tags: [policy]
+      summary: URL category state (v2)
+      description: v2 read contract — every category (with the UT1 community-feed enrichment) plus the server-owned restart-stable semantic taxonomy revision (ContentFingerprint). Echo the revision back as ?ifRevision= on mutations; the browser never computes it. The legacy raw-array GET /api/urlcat is unchanged.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Categories + semantic revision.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/URLCategoryState' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
   /api/urlcat/host:
     post:
       operationId: addURLCatHost
@@ -9537,6 +9591,12 @@ paths:
       x-culvert-introduced-version: 1.0.0
       x-culvert-danger-level: medium
       x-culvert-audit-event: urlcat.host.add
+      parameters:
+        - name: ifRevision
+          in: query
+          required: false
+          schema: { type: string }
+          description: Optional semantic-revision assertion (fenced durable path; structured 409 on mismatch).
       requestBody:
         required: true
         content:
@@ -9567,6 +9627,11 @@ paths:
       x-culvert-danger-level: medium
       x-culvert-audit-event: urlcat.host.delete
       parameters:
+        - name: ifRevision
+          in: query
+          required: false
+          schema: { type: string }
+          description: Optional semantic-revision assertion (fenced durable path; structured 409 on mismatch).
         - name: id
           in: query
           required: false
