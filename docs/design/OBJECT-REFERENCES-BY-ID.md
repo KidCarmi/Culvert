@@ -242,20 +242,40 @@ rename collision after the content applied) restores the pre-mutation state.
 Legacy best-effort `Save()` wrappers remain for old non-critical callers
 (bulk installs, load-time migrations).
 
-### Object concurrency fencing (2D-A.0c)
+### Object concurrency fencing (2D-A.0c, corrected — durable epoch envelope)
 
-Each store carries a durable per-store mutation generation: bumped on every
-successful mutation and on bulk installs (`ReplaceAll`), persisted to a
-`<store>.meta` sidecar (written after — and skipped on — an objects-file
-failure, so it is never newer than the objects on disk; absent/corrupt reads
-as 0, degrading conservatively into 409s). The generation is served on the
-list read (`version`) and asserted via the optional `?ifVersion=` query on
-POST/PUT/DELETE; a mismatch is the SAME structured 409 as the policy
-rulebase fence ({error, currentVersion, yourVersion}). The check runs inside
-`MutateDurable`'s critical section — no TOCTOU between check and write. The
-v2 frontend always asserts it; legacy clients without it keep last-write-wins
-semantics. Bulk install paths bypass the mutation serializer by design
-(whole-surface replaces whose authority re-converges on the next push).
+Each store carries a durable per-store mutation generation (the fence
+epoch), bumped on every successful mutation and on bulk installs
+(`ReplaceAll`). Content and epoch are persisted in ONE atomic write — the
+`storeEnvelope` (`{schema_version, version, groups|profiles}`) — so they are
+structurally incapable of diverging: an acknowledged content change (a real
+success, or the landed-content `ErrReplacedNotSynced` success) always lands
+WITH its epoch, and after restart no token issued for an earlier content
+epoch can validate again (no ABA generation alias, including the token-0
+case where a fresh store legitimately serves version 0). The retired
+`<store>.meta` sidecar is READ only when loading a legacy bare-array file
+(first non-whitespace byte `[`) and is removed by the first durable envelope
+save; it is never written again. Recorded downgrade residual: a pre-envelope
+binary cannot parse the envelope — its load errors to an EMPTY store, and
+ID-authoritative references degrade fail-closed (never resolve to a
+different object).
+
+The generation is served on the list read (`version`) and asserted via the
+optional `?ifVersion=` query on POST/PUT/DELETE; a mismatch is the SAME
+structured 409 as the policy rulebase fence ({error, currentVersion,
+yourVersion}). The check runs inside `MutateDurable`'s critical section — no
+TOCTOU between check and write. The v2 frontend always asserts it; legacy
+clients without it keep last-write-wins semantics.
+
+Every RUNTIME writer of the fenced domain orders against the fence:
+`ReplaceAll` (cluster snapshot apply, config import, version rollback,
+restore) holds the SAME mutation serializer (`mutMu`) as `MutateDurable`, so
+a bulk install can never interleave between the fence comparison and the
+protected mutation, and each ordered change advances the generation on the
+LIVE value (`version++`, never `captured + 1` — a concurrent advance is
+never rewound into an alias). Startup-only writers (`Load`, the default
+decryption-profile seed) run before any listener and are exempt by
+ordering.
 
 ### Rename recovery model (2D-A.0b)
 

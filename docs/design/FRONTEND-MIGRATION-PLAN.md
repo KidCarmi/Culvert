@@ -734,9 +734,15 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > `MutateDurable` primitive (optional `?ifVersion=` fence + mutation +
 > persist + rollback in ONE critical section; confirmed 2xx =
 > restart-durable; `ErrReplacedNotSynced` follows the landed-content
-> doctrine), a durable per-store generation persisted in a `.meta` sidecar
-> (never newer than the objects file; served on list reads; the same
-> structured 409 conflict contract as the policy fence), and name-collision
+> doctrine), a durable per-store generation persisted ATOMICALLY WITH the
+> content in a single `storeEnvelope` write (fence-durability correction:
+> the earlier `.meta` sidecar could diverge from the objects file across a
+> landed-content success — the envelope makes the ABA generation alias
+> structurally impossible; legacy bare-array files + sidecar still load and
+> migrate on first save; `ReplaceAll`/bulk installs hold the SAME mutation
+> serializer as `MutateDurable`, so every runtime writer orders against the
+> fence; served on list reads; the same structured 409 conflict contract as
+> the policy fence), and name-collision
 > refusals under the store lock (409, `ErrNameTaken`). Rename is an
 > explicitly composed cross-store operation (object domain → running
 > cascade → draft-candidate cascade, each persist error-aware; a cascade
