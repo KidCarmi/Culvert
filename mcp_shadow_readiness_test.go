@@ -1,6 +1,7 @@
 package main
 
 import (
+	"math"
 	"testing"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
@@ -170,6 +171,25 @@ func TestReadinessSplit_UnknownModeFailsClosed(t *testing.T) {
 	}
 }
 
+// eachMode calls fn once for every value in rollout.Mode's domain.
+//
+// The counter is a uint8, not an int: rollout.Mode's underlying type is uint8, so
+// rollout.Mode(v) here converts between two uint8-width types and narrows nothing,
+// whereas the int form is an int -> uint8 conversion the lint gate rejects as a
+// potential integer overflow (gosec G115) even though 0..255 provably fits. Removing
+// the conversion is preferred over a #nosec suppression — the same direction
+// rollout.bucketHasSurvivingKey takes when it widens to int to avoid the mirror-image
+// narrowing. It cannot be written `for v := uint8(0); v <= 255; v++`, which wraps and
+// never terminates, so the exit test is on the last value instead.
+func eachMode(fn func(rollout.Mode)) {
+	for v := uint8(0); ; v++ {
+		fn(rollout.Mode(v))
+		if v == math.MaxUint8 {
+			return
+		}
+	}
+}
+
 // validModes returns every rollout.Mode the package's own taxonomy claims, derived by
 // exhausting the uint8 domain and asking Mode.Valid(). It is the authoritative list: a
 // mode added to rollout's modeToken registry appears here with no edit to this file,
@@ -178,26 +198,26 @@ func TestReadinessSplit_UnknownModeFailsClosed(t *testing.T) {
 func validModes(t *testing.T) []rollout.Mode {
 	t.Helper()
 	var out []rollout.Mode
-	for v := 0; v <= 255; v++ {
-		if m := rollout.Mode(v); m.Valid() {
+	eachMode(func(m rollout.Mode) {
+		if m.Valid() {
 			out = append(out, m)
 		}
-	}
+	})
 	if len(out) == 0 {
 		t.Fatal("test premise broken: the rollout taxonomy claims no modes at all")
 	}
 	return out
 }
 
-// invalidModes returns every uint8 value the taxonomy does NOT claim.
+// invalidModes returns every value in the domain the taxonomy does NOT claim.
 func invalidModes(t *testing.T) []rollout.Mode {
 	t.Helper()
 	var out []rollout.Mode
-	for v := 0; v <= 255; v++ {
-		if m := rollout.Mode(v); !m.Valid() {
+	eachMode(func(m rollout.Mode) {
+		if !m.Valid() {
 			out = append(out, m)
 		}
-	}
+	})
 	if len(out) == 0 {
 		t.Fatal("test premise broken: every uint8 is a valid mode, so there is no unknown to test")
 	}
@@ -210,7 +230,7 @@ func assertUnknownModesFailClosed(t *testing.T, unknown []rollout.Mode) {
 	t.Helper()
 	for _, m := range unknown {
 		if modeExecReady(m, false) || modeExecReady(m, true) {
-			t.Fatalf("SECURITY: unrecognised rollout mode %d must fail closed", uint8(m))
+			t.Fatalf("SECURITY: unrecognised rollout mode %d must fail closed", m)
 		}
 	}
 }
