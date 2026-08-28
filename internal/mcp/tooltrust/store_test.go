@@ -1060,3 +1060,58 @@ func TestList_ReturnsNewestFirstWithinLimit(t *testing.T) {
 		}
 	}
 }
+
+// TestLoad_PendingWithDecisionEvidenceFailsClosed proves the round-12 P2: a pending record
+// that carries terminal (rejection/revocation) or approval evidence — e.g. a rejected record
+// whose status byte was corrupted to pending — is rejected at Load. Otherwise a normal approve
+// would launder it into an Active record still carrying that evidence, which the Active
+// lifecycle check then rejects on the next restart (bricking tool trust).
+func TestLoad_PendingWithDecisionEvidenceFailsClosed(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	when := time.Unix(1000, 0)
+	cases := map[string]*ToolApproval{
+		"rejection_evidence": {
+			SchemaVersion: SchemaVersion, ApprovalID: "a", Tenant: "t", ServerID: "s", ToolName: "n",
+			FingerprintFormatVersion: 1, Purpose: PurposeShadowEvaluation, Status: StatusPending,
+			RequestedBy: "op", RequestedAt: when, RejectedBy: "admin", RejectedAt: &when,
+		},
+		"revocation_evidence": {
+			SchemaVersion: SchemaVersion, ApprovalID: "a", Tenant: "t", ServerID: "s", ToolName: "n",
+			FingerprintFormatVersion: 1, Purpose: PurposeShadowEvaluation, Status: StatusPending,
+			RequestedBy: "op", RequestedAt: when, RevokedBy: "admin", RevokedAt: &when,
+		},
+		"approval_evidence": {
+			SchemaVersion: SchemaVersion, ApprovalID: "a", Tenant: "t", ServerID: "s", ToolName: "n",
+			FingerprintFormatVersion: 1, Purpose: PurposeShadowEvaluation, Status: StatusPending,
+			RequestedBy: "op", RequestedAt: when, ApprovedBy: "admin", ApprovedAt: when,
+		},
+	}
+	for name, a := range cases {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "approvals.json")
+		raw, _ := json.Marshal(persistedStore{SchemaVersion: SchemaVersion, Approvals: []*ToolApproval{a}})
+		if err := os.WriteFile(path, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		s, _ := NewStore(Config{Path: path, Clock: clk.now})
+		if err := s.Load(); err == nil {
+			t.Fatalf("[%s] a pending record carrying decision evidence must fail closed", name)
+		}
+	}
+	// A clean pending record (no decision fields) still loads.
+	clean := &ToolApproval{
+		SchemaVersion: SchemaVersion, ApprovalID: "a", Tenant: "t", ServerID: "s", ToolName: "n",
+		FingerprintFormatVersion: 1, Purpose: PurposeShadowEvaluation, Status: StatusPending,
+		RequestedBy: "op", RequestedAt: when,
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "approvals.json")
+	raw, _ := json.Marshal(persistedStore{SchemaVersion: SchemaVersion, Approvals: []*ToolApproval{clean}})
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, _ := NewStore(Config{Path: path, Clock: clk.now})
+	if err := s.Load(); err != nil {
+		t.Fatalf("a clean pending record must load, got %v", err)
+	}
+}

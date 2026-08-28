@@ -869,7 +869,7 @@ func (a *ToolApproval) validateStatusLifecycle() error {
 	}
 	switch a.Status {
 	case StatusPending:
-		return nil
+		return a.validatePendingEvidence(bad)
 	case StatusActive:
 		return a.validateActiveEvidence(bad)
 	case StatusRejected:
@@ -884,6 +884,21 @@ func (a *ToolApproval) validateStatusLifecycle() error {
 		return nil // automatic transition; no decider required
 	default:
 		return bad("record has an unknown status")
+	}
+	return nil
+}
+
+// validatePendingEvidence enforces that a StatusPending record carries NO decision fields
+// yet. This is load-bearing, not cosmetic: Approve only sets the status + approver, so a
+// corrupt pending record that retains terminal (rejection/revocation) evidence would be
+// laundered by a normal approve into an Active record that STILL carries that evidence —
+// which validateActiveEvidence then rejects on the next restart, leaving tool trust
+// uncomposed. Fail closed so Load never admits state a supported mutation makes unrecoverable.
+func (a *ToolApproval) validatePendingEvidence(bad func(string) error) error {
+	if a.ApprovedBy != "" || !a.ApprovedAt.IsZero() ||
+		a.RejectedBy != "" || a.RejectedAt != nil ||
+		a.RevokedBy != "" || a.RevokedAt != nil {
+		return bad("pending record carries decision evidence")
 	}
 	return nil
 }
