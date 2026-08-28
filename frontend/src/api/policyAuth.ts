@@ -415,12 +415,14 @@ const decodeDefaultAuthOutcome: Decoder<DefaultAuthOutcome> = (
   );
 };
 
-/** GET /api/security — the read surface carrying the global default. */
+/** GET /api/settings — the read surface carrying the global default
+ * (apiSettings, ui_config.go; /api/security is the IP-filter/rate-limit
+ * surface and carries no auth default — caught by the 2C.7 real-binary e2e). */
 export function getDefaultAuthOutcome(
   signal?: AbortSignal,
 ): Promise<DefaultAuthOutcome> {
   return apiRequest(
-    "/api/security",
+    "/api/settings",
     decodeDefaultAuthOutcome,
     signal !== undefined ? { signal } : {},
   );

@@ -135,7 +135,7 @@ beforeEach(() => {
       if (url.includes("/api/authpolicy")) return okJSON(authBody);
       if (url.includes("/api/policy/draft")) return okJSON(draftBody);
       if (url.includes("/api/idp")) return okJSON(idpBody);
-      if (url.includes("/api/security")) return okJSON(securityBody);
+      if (url.includes("/api/settings")) return okJSON(securityBody);
       if (url.includes("/api/urlcat")) return okJSON([{ name: "News" }]);
       if (url.includes("/api/category-groups"))
         return okJSON({ names: ["Business"] });

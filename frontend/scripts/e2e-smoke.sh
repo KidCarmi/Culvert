@@ -117,9 +117,25 @@ EOF2
   printf ']\n'
 } > "$WORK/auth/policy.json"
 
+# FRESH/SETUPFAIL get their OWN log_store_path (recorded harness debt: the
+# dataDir is a fixed absolute /data SHARED by all local instances, and the
+# shared admin_settings.json can carry log_store_enabled from a previous
+# run/instance — at boot every path-less instance then races for the ONE
+# badger flock on /data/logstore, so whichever instance loses cannot enable
+# history mid-suite: "cannot enable history store" on a coin flip). A
+# per-instance path makes the FRESH history journeys deterministic; a config
+# file does not affect the fresh appliance's needsSetup state (that is the
+# ui-users roster).
+cat > "$WORK/fresh/config.yaml" <<EOF2
+log_store_path: $WORK/fresh/logstore
+EOF2
+cat > "$WORK/failcfg.yaml" <<EOF2
+log_store_path: $WORK/faillogstore
+EOF2
+
 start_instance AUTH "$UI_PORT" "$PROXY_PORT" -ui-users-file "$WORK/auth/ui_users.json" -config "$WORK/auth/config.yaml" -policy "$WORK/auth/policy.json"
-start_instance FRESH "$FRESH_PORT" "$((PROXY_PORT + 1))" -ui-users-file "$WORK/fresh/ui_users.json"
-start_instance FAIL "$FAIL_PORT" "$((PROXY_PORT + 2))" -ui-users-file "$WORK/failparent/blocker/ui_users.json"
+start_instance FRESH "$FRESH_PORT" "$((PROXY_PORT + 1))" -ui-users-file "$WORK/fresh/ui_users.json" -config "$WORK/fresh/config.yaml"
+start_instance FAIL "$FAIL_PORT" "$((PROXY_PORT + 2))" -ui-users-file "$WORK/failparent/blocker/ui_users.json" -config "$WORK/failcfg.yaml"
 
 wait_ready() {
   port="$1"; name="$2"

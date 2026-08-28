@@ -198,8 +198,8 @@ test("auth rules: fixture rules render with Exempt-is-not-Allow; admin create/ed
   await page.getByLabel("Rule name").fill("E2E 2C Created");
   await page.getByLabel("IPs / CIDRs").fill("10.77.0.0/24");
   await page.getByLabel("Destination FQDN").fill("e2e-2c.test");
-  await page.getByLabel("Owner", { exact: true }).fill("e2e-2c");
-  await page.getByLabel("Reason", { exact: true }).fill("browser journey");
+  await page.getByLabel("Owner").fill("e2e-2c");
+  await page.getByLabel("Reason").fill("browser journey");
   await page.getByRole("button", { name: "Create rule (live)" }).click();
   await expect(
     page.getByText("New authentication rule", { exact: true }),
@@ -213,9 +213,7 @@ test("auth rules: fixture rules render with Exempt-is-not-Allow; admin create/ed
   await expect(
     page.getByText("Edit authentication rule: E2E 2C Created"),
   ).toBeVisible();
-  await page
-    .getByLabel("Reason", { exact: true })
-    .fill("browser journey (edited)");
+  await page.getByLabel("Reason").fill("browser journey (edited)");
   await page.getByRole("button", { name: "Save changes (live)" }).click();
   await expect(
     page.getByText("Edit authentication rule: E2E 2C Created"),
@@ -251,7 +249,7 @@ test("operator: authentication rules render read-only — no mutation or default
   const ctx = await browser.newContext({ storageState: EMPTY_STATE });
   const page = await ctx.newPage();
   const w = watch(page, baseURL ?? AUTH_URL);
-  await page.goto(AUTH_ROUTE);
+  await page.goto(`${AUTH_URL}${AUTH_ROUTE}`);
   await login(page, USERS.operator.user, USERS.operator.pass);
   await expect(
     page.getByText("E2E Auth Exempt", { exact: true }),
