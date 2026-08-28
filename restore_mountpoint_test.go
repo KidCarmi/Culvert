@@ -38,7 +38,7 @@ func TestRestoreCommit_DataDirIsMountPoint_FailsInsteadOfCommitting(t *testing.T
 	backing := t.TempDir()
 	mountParent := t.TempDir()
 	mountPoint := filepath.Join(mountParent, "data")
-	if err := os.Mkdir(mountPoint, 0o755); err != nil {
+	if err := os.Mkdir(mountPoint, 0o750); err != nil {
 		t.Fatalf("mkdir mount point: %v", err)
 	}
 	if err := syscall.Mount(backing, mountPoint, "", syscall.MS_BIND, ""); err != nil {
