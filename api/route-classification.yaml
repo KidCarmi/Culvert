@@ -3035,6 +3035,16 @@ routes:
     audit_expected: true
     danger_level: high
     documented: true
+  - route: "/api/urlcat/state"
+    method: "GET"
+    handler: "apiURLCatState"
+    domain: "policy"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
   - route: "/api/urlcat/lookup"
     method: "GET"
     handler: "apiURLCatLookup"
