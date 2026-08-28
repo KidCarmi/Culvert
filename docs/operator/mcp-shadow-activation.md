@@ -309,10 +309,25 @@ each capability (`gateway/`, `management/`) has per-partition subdirectories (`P
 6. Start the pre-v2 binary. Its spool recovery now sees empty `P-ORD` and `P-CRIT` (fresh
    partitions) and starts clean; `P-DEN` and `management/` recover normally.
 
-**Restore / re-upgrade.** To read the archived v2 evidence again, return the node to a
-v2-capable binary and restore the archived `gateway/` subtree (or read the archive offline
-with a v2-capable tool). **Never restore a v2 archive under a pre-v2 binary** — it
-re-introduces the same rejected records.
+**Reading the archived evidence — offline is the default.** To consult the archived v2
+evidence, unpack the tarball to a **scratch location** and point a **v2-capable** binary/tool
+at that copy. Do this offline; **never point a pre-v2 binary at it** (it re-introduces the same
+rejected records), and **never unpack it back over the node's live data dir**. Once the node
+has taken any traffic after step 6, its `P-ORD`/`P-CRIT` hold NEW evidence, so restoring the
+archive in place would overwrite that downgrade-period evidence — and, because the export
+cursors live OUTSIDE the `gateway/` subtree (under `export_cursors/gateway/`, so a subtree
+restore does not bring matching cursors back), the cursors advanced during the downgrade would
+silently suppress every restored record whose sequence is below the current cursor (the same
+skip in step 5). Treat the archive as read-only history, not a spool to reinstate.
+
+**In-place restore is only for a no-traffic revert.** If you downgraded by mistake and the node
+took **no** traffic afterwards (its `P-ORD`/`P-CRIT` are still the empty fresh partitions from
+step 6), you may restore the pre-downgrade spool exactly: with the node **stopped**, replace the
+empty `gateway/P-ORD` and `gateway/P-CRIT` with the archived copies, then **reset
+`ord.cursor` and `crit.cursor`** (as in step 5) so the restored lower-sequence records are not
+suppressed, and start a v2-capable binary. Do NOT do this once post-downgrade evidence exists —
+the two hash-chained histories cannot be merged into one partition; keep that evidence and read
+the archive offline instead.
 
 **Why validation is not weakened to make downgrade transparent.** A v1 reader silently
 reinterpreting a v2 record would misreport its digest and could surface an inconsistent
