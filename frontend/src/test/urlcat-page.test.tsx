@@ -87,8 +87,18 @@ beforeEach(() => {
   });
   stateBody = {
     categories: [
-      { name: "Social", hosts: ["a.example"], builtIn: false, feedBacked: true },
-      { name: "Finance", hosts: ["b.example"], builtIn: true, feedBacked: false },
+      {
+        name: "Social",
+        hosts: ["a.example"],
+        builtIn: false,
+        feedBacked: true,
+      },
+      {
+        name: "Finance",
+        hosts: ["b.example"],
+        builtIn: true,
+        feedBacked: false,
+      },
     ],
     revision: "rev-1",
   };
@@ -162,10 +172,12 @@ beforeEach(() => {
       if (url.includes("/api/objects/references")) return okJSON(refsBody);
       if (url.includes("/api/urlcat/state")) return okJSON(stateBody);
       if (url.includes("/api/urlcat/lookup")) return okJSON(lookupBody);
-      if (url.includes("/api/urlcat/feed-status")) return okJSON(feedStatusBody);
+      if (url.includes("/api/urlcat/feed-status"))
+        return okJSON(feedStatusBody);
       if (url.includes("/api/saas-feed/status")) return okJSON(statusBody);
       if (url.includes("/api/saas-feed/settings")) return okJSON(settingsBody);
-      if (url.includes("/api/saas-feed/overrides")) return okJSON(overridesBody);
+      if (url.includes("/api/saas-feed/overrides"))
+        return okJSON(overridesBody);
       return Promise.reject(new TypeError(`unexpected ${method} ${url}`));
     }),
   );
@@ -273,7 +285,8 @@ it("strict create sends the fenced POST and the editor mirrors the host cap", as
   await mount("operator");
   click(findButton((t) => t.includes("Create category")));
   const name = container.querySelector<HTMLInputElement>("dialog input");
-  const hostsTa = container.querySelector<HTMLTextAreaElement>("dialog textarea");
+  const hostsTa =
+    container.querySelector<HTMLTextAreaElement>("dialog textarea");
   if (name === null || hostsTa === null) throw new Error("editor not open");
   act(() => {
     Object.getOwnPropertyDescriptor(
@@ -299,7 +312,10 @@ it("strict create sends the fenced POST and the editor mirrors the host cap", as
   if (m === undefined) throw new Error("no mutation");
   expect(m.method).toBe("POST");
   expect(m.url).toContain("ifRevision=rev-1");
-  expect(m.body).toEqual({ name: "Media", hosts: ["m1.example", "m2.example"] });
+  expect(m.body).toEqual({
+    name: "Media",
+    hosts: ["m1.example", "m2.example"],
+  });
 });
 
 it("a stale-revision 409 renders the Not applied notice — never a silent overwrite", async () => {
@@ -340,7 +356,9 @@ it("a delete refused by references renders the server's consumers", async () => 
   });
   click(findButton((t) => t === "Delete category"));
   await flushUntil(() => {
-    expect(container.textContent).toContain("Delete refused — still referenced");
+    expect(container.textContent).toContain(
+      "Delete refused — still referenced",
+    );
     expect(container.textContent).toContain("Block Social");
   });
 });
@@ -495,7 +513,9 @@ it("overrides render subtree copy and clear-all shows counts in the T2 dialog", 
     expect(container.textContent).toContain("Tombstones (1)");
   });
   // Empty every editor → clear-all ceremony with counts.
-  const tas = Array.from(container.querySelectorAll<HTMLTextAreaElement>("textarea"));
+  const tas = Array.from(
+    container.querySelectorAll<HTMLTextAreaElement>("textarea"),
+  );
   act(() => {
     for (const ta of tas) {
       Object.getOwnPropertyDescriptor(
@@ -550,7 +570,9 @@ it("a stale override replacement renders the conflict notice and keeps the set",
       409,
     );
   await flushUntil(() => {
-    expect(findButton((t) => t === "Replace override set").disabled).toBe(false);
+    expect(findButton((t) => t === "Replace override set").disabled).toBe(
+      false,
+    );
   });
   click(findButton((t) => t === "Replace override set"));
   await flushUntil(() => {

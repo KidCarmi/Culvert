@@ -21,7 +21,12 @@ describe("decodeUrlCategoryState", () => {
   it("decodes categories + the server-owned revision", () => {
     const out = decodeUrlCategoryState({
       categories: [
-        { name: "Social", hosts: ["a.example"], builtIn: false, feedBacked: true },
+        {
+          name: "Social",
+          hosts: ["a.example"],
+          builtIn: false,
+          feedBacked: true,
+        },
         { name: "Baseline", hosts: [], builtIn: true, feedBacked: false },
       ],
       revision: "abc123",
@@ -56,7 +61,12 @@ describe("asRevisionConflict", () => {
   });
 
   it("returns null for a plain-text 409 (e.g. strict-create name collision)", () => {
-    const err = new ApiError("http", "conflict", 409, "category name already exists\n");
+    const err = new ApiError(
+      "http",
+      "conflict",
+      409,
+      "category name already exists\n",
+    );
     expect(asRevisionConflict(err)).toBeNull();
   });
 

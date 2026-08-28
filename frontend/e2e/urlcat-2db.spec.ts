@@ -114,15 +114,11 @@ test("url categories: operator CRUD journey with the revision fence", async ({
       .getByLabel("Hosts / patterns — one per line")
       .fill("e2e-a.example");
     await page.getByRole("button", { name: "Save hosts" }).click();
-    await expect(
-      row.getByText("1", { exact: true }),
-    ).toBeVisible();
+    await expect(row.getByText("1", { exact: true })).toBeVisible();
 
     // Delete (unreferenced) — T2 ceremony, fenced.
     await row.getByRole("button", { name: "Delete", exact: true }).click();
-    await expect(
-      page.getByText("Delete category — E2E 2DB Cat"),
-    ).toBeVisible();
+    await expect(page.getByText("Delete category — E2E 2DB Cat")).toBeVisible();
     await page
       .getByRole("button", { name: "Delete category", exact: true })
       .click();
@@ -155,7 +151,9 @@ test("two-client stale category write is a structured 409 — no silent overwrit
     await page.goto(ROUTE);
     await login(page, USERS.admin.user, USERS.admin.pass);
     const rowA = page.getByRole("row").filter({ hasText: "E2E Stale Cat" });
-    await expect(rowA.getByRole("button", { name: "Edit hosts" })).toBeVisible();
+    await expect(
+      rowA.getByRole("button", { name: "Edit hosts" }),
+    ).toBeVisible();
 
     // Client B advances the taxonomy AFTER A's load.
     rev = await stateRevision(api);
@@ -205,9 +203,7 @@ test("feed status + signed status render server truth while the feed stays dorma
 
   await page.getByRole("tab", { name: "Feed Status" }).click();
   await expect(page.getByText("UT1 community feed").first()).toBeVisible();
-  await expect(
-    page.getByText("Signed SaaS feed (summary)"),
-  ).toBeVisible();
+  await expect(page.getByText("Signed SaaS feed (summary)")).toBeVisible();
 
   await page.getByRole("tab", { name: "Signed SaaS Feed" }).click();
   await expect(page.getByText("Runtime status")).toBeVisible();
@@ -255,7 +251,8 @@ test("settings: interval-only save round-trips with the settings revision", asyn
     // Restore the default interval.
     const resp = await api.get("/api/saas-feed/settings");
     const v: unknown = await resp.json();
-    const rev = isRecord(v) && typeof v["revision"] === "string" ? v["revision"] : "";
+    const rev =
+      isRecord(v) && typeof v["revision"] === "string" ? v["revision"] : "";
     await api.put(
       `/api/saas-feed/settings?ifRevision=${encodeURIComponent(rev)}`,
       { data: { managed: false, enabled: false } },
@@ -312,7 +309,8 @@ test("overrides: fenced replace and clear-all with subtree ceremony", async ({
     // Ensure a clean override set for later specs.
     const resp = await api.get("/api/saas-feed/overrides");
     const v: unknown = await resp.json();
-    const rev = isRecord(v) && typeof v["revision"] === "string" ? v["revision"] : "";
+    const rev =
+      isRecord(v) && typeof v["revision"] === "string" ? v["revision"] : "";
     await api.put(
       `/api/saas-feed/overrides?ifRevision=${encodeURIComponent(rev)}`,
       { data: {} },
