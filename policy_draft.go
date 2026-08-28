@@ -948,6 +948,14 @@ func apiPolicyDraft(w http.ResponseWriter, r *http.Request) {
 			// Advisory shadow warnings over the CANDIDATE (what will go live),
 			// so the operator sees them before committing (G4).
 			resp["shadows"] = detectShadowedRules(policyDraft.candidateList())
+			// baseStale: running advanced past the generation this draft forked
+			// from (an import, rollback, or a Stage-1 auth-policy mutation — auth
+			// rules write the running domain immediately). The SAME backend truth
+			// the commit's fail-closed guard reads (baseGenerationStale), surfaced
+			// so the UI can say the draft cannot be safely committed as-is
+			// (2C §8). Only meaningful — and only present — while a draft is
+			// active.
+			resp["baseStale"] = policyDraft.baseGenerationStale()
 		}
 		jsonOK(w, resp)
 

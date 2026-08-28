@@ -7,7 +7,7 @@ import (
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Auth Policy admin API — Phase 1 Slice 8.
+// Auth Policy admin API — Phase 1 Slice 8; hardened in Batch-2 slice 2C.0.
 //
 // CRUD + reorder for Stage-1 auth/exempt rules, kept on a DEDICATED endpoint:
 // /api/policy rejects ruleType="auth" payloads, and this endpoint refuses to
@@ -16,6 +16,26 @@ import (
 // reads are viewer. No runtime behavior is added here: rules flow through the
 // same validatePolicyRule → PolicyStore path the rest of the system uses, and
 // the Stage-1 resolver wiring from Slice 7 is untouched.
+//
+// 2C.0 write contract (mirrors the 2B Stage-2 hardening, transposed to the
+// RUNNING domain):
+//
+//   - Addressing: ?id=<ULID> (stable-ID, reorder-safe, preferred) alongside
+//     the legacy ?priority= path. The id path is strict — malformed 400,
+//     unknown 404, access-rule 400 — and never falls through to priority.
+//   - Version contract: GET serves version/updatedAt from the RUNNING
+//     PolicyStore generation (never a draft candidate's), and every mutation
+//     accepts an optional ?ifVersion= assertion.
+//   - Atomicity: mutations run through fencedRunningMutate
+//     (policy_mutation.go) — the fence comparison, the mutation, and the
+//     durable persist share ONE coordinator critical section, ALWAYS against
+//     the running store. Auth rules take effect immediately; Require Commit
+//     never stages them, and a successful auth mutation deliberately stales
+//     an active Access-Policy Draft's base generation (its commit fails
+//     closed; GET /api/policy/draft surfaces baseStale).
+//   - Durability: durable-or-nothing — a pre-replacement persist failure
+//     rolls the mutation back and fails the request; a 2xx means the change
+//     is on disk (or the recorded ErrReplacedNotSynced degradation).
 // ─────────────────────────────────────────────────────────────────────────────
 
 // authRuleView is a PolicyRule enriched with the non-fatal validation warnings
@@ -73,11 +93,18 @@ func apiAuthPolicy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		rules := listAuthRules()
+		// version/updatedAt are the RUNNING PolicyStore generation — the fence
+		// clients echo via ?ifVersion=. Deliberately NOT effectivePolicyVersion:
+		// auth rules live in the running domain even while a Stage-2 draft is
+		// engaged, so the candidate's generation must never leak here (2C.0a).
+		ver, updatedAt := policyStore.policyVersion()
 		jsonOK(w, map[string]any{
 			"rules":         rules,
 			"count":         len(rules),
 			"defaultAction": defaultPolicyAction(),
 			"note":          authExemptNote,
+			"version":       ver,
+			"updatedAt":     updatedAt,
 		})
 
 	case http.MethodPost:
@@ -108,7 +135,88 @@ func apiAuthPolicy(w http.ResponseWriter, r *http.Request) {
 const authExemptNote = "Exempt skips end-user authentication only — it never allows traffic. " +
 	"It applies only when the client presents no credentials; Stage-2 policy still decides access and default-deny still applies."
 
+// authRuleTarget is the resolved addressing of one EXISTING auth rule: the
+// stable-ID path (?id=<ULID>, preferred — reorder-safe) or the legacy
+// ?priority= path, kept for the deprecation window.
+type authRuleTarget struct {
+	id       string      // non-empty on the id path
+	priority int         // the target's priority (resolved on both paths)
+	before   *PolicyRule // detached pre-mutation copy (never nil when ok)
+}
+
+// resolveAuthRuleTarget resolves ?id= (preferred) or legacy ?priority= to an
+// existing Stage-1 auth rule, writing the 4xx and returning ok=false
+// otherwise. The id path is STRICT: a malformed id is 400, an unknown id is
+// 404, and an access-rule id is 400 — it never falls through to a priority
+// guess (2C.0a).
+func resolveAuthRuleTarget(w http.ResponseWriter, r *http.Request) (authRuleTarget, bool) {
+	if id := strings.TrimSpace(r.URL.Query().Get("id")); id != "" {
+		if !validRuleID(id) {
+			http.Error(w, "invalid id param (must be a rule ULID)", http.StatusBadRequest)
+			return authRuleTarget{}, false
+		}
+		before := policyStore.findByIDCopy(id)
+		if before == nil {
+			http.Error(w, "rule not found", http.StatusNotFound)
+			return authRuleTarget{}, false
+		}
+		if ruleTypeOf(before) != ruleTypeAuth {
+			http.Error(w, "rule with this id is an access rule (use /api/policy)", http.StatusBadRequest)
+			return authRuleTarget{}, false
+		}
+		return authRuleTarget{id: id, priority: before.Priority, before: before}, true
+	}
+	priority, ok := parsePriorityParam(w, r)
+	if !ok {
+		return authRuleTarget{}, false
+	}
+	before := findRuleByPriority(priority)
+	if before == nil {
+		http.Error(w, "rule not found", http.StatusNotFound)
+		return authRuleTarget{}, false
+	}
+	if ruleTypeOf(before) != ruleTypeAuth {
+		http.Error(w, "rule at this priority is an access rule (use /api/policy)", http.StatusBadRequest)
+		return authRuleTarget{}, false
+	}
+	return authRuleTarget{priority: priority, before: before}, true
+}
+
+// authRuleWithID / authRuleAtPriority re-verify — INSIDE the fenced critical
+// section — that the addressed rule still exists in ps and is still a Stage-1
+// auth rule, so a racing mutation between the handler's optimistic resolution
+// and the locked mutation can never make this endpoint touch an access rule
+// (fail-closed: the mutation reports not-found instead).
+func authRuleWithID(ps *PolicyStore, id string) bool {
+	r := ps.findByIDCopy(id)
+	return r != nil && ruleTypeOf(r) == ruleTypeAuth
+}
+
+func authRuleAtPriority(ps *PolicyStore, priority int) bool {
+	rules := ps.List()
+	for i := range rules {
+		if rules[i].Priority == priority {
+			return ruleTypeOf(&rules[i]) == ruleTypeAuth
+		}
+	}
+	return false
+}
+
+// runningPolicyVersionConflict is the handler-level fast-path for the RUNNING
+// fence: it 400s a malformed ?ifVersion= and 409s an already-stale assertion
+// against the RUNNING generation before any body work. fencedRunningMutate
+// re-verifies the same assertion inside its critical section — this early
+// check exists only for cheap rejection and the canonical 400, exactly like
+// the Stage-2 handlers' policyVersionConflict fast-path.
+func runningPolicyVersionConflict(w http.ResponseWriter, r *http.Request) bool {
+	cur, _ := policyStore.policyVersion()
+	return policyVersionConflictAgainst(w, r, cur)
+}
+
 func apiAuthPolicyCreate(w http.ResponseWriter, r *http.Request) {
+	if runningPolicyVersionConflict(w, r) {
+		return
+	}
 	var rule PolicyRule
 	if err := decodeJSON(r, &rule); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
@@ -136,29 +244,39 @@ func apiAuthPolicyCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	stampRuleMetadataForWrite(&rule, nil, sessionAdmin(r))
-	added := policyStore.Add(rule)
-	policyStore.Save()
+	// Serialize with commit/revert exactly like the Stage-2 handlers.
+	beginPolicyWrite()
+	defer endPolicyWrite()
+	// Atomic RUNNING-domain fence + mutation + durable persist (2C.0a) — an
+	// auth rule is live the moment this succeeds, draft or no draft.
+	var added PolicyRule
+	res := policyDraft.fencedRunningMutate(parseIfVersion(r), func(ps *PolicyStore) bool {
+		added = ps.Add(rule)
+		return true
+	})
+	if res.conflict != nil {
+		writePolicyVersionConflictError(w, res.conflict)
+		return
+	}
+	if res.err != nil {
+		writePolicyPersistFailure(w, res.err)
+		return
+	}
 	logger.Printf("UI: auth rule added priority=%s name=%q owner=%q",
 		strings.ReplaceAll(fmt.Sprintf("%d", added.Priority), "\n", "_"), sanitizeLog(added.Name), sanitizeLog(added.Auth.Owner))
 	auditEventDiff(r, "authpolicy.add", added.Name,
 		fmt.Sprintf("priority=%d outcome=%s owner=%s", added.Priority, added.Auth.Outcome, added.Auth.Owner), nil, added)
-	saveConfigVersion(sessionAdmin(r), "authpolicy.add")
+	finalizeFencedPolicyWrite(r, "authpolicy.add", res)
 	warnings, _ := validateAuthRule(added)
 	jsonOK(w, authRuleView{PolicyRule: added, Warnings: warnings})
 }
 
 func apiAuthPolicyUpdate(w http.ResponseWriter, r *http.Request) {
-	priority, ok := parsePriorityParam(w, r)
+	if runningPolicyVersionConflict(w, r) {
+		return
+	}
+	target, ok := resolveAuthRuleTarget(w, r)
 	if !ok {
-		return
-	}
-	before := findRuleByPriority(priority)
-	if before == nil {
-		http.Error(w, "rule not found", http.StatusNotFound)
-		return
-	}
-	if ruleTypeOf(before) != ruleTypeAuth {
-		http.Error(w, "rule at this priority is an access rule (use /api/policy)", http.StatusBadRequest)
 		return
 	}
 	var rule PolicyRule
@@ -170,7 +288,7 @@ func apiAuthPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := validatePolicyRule(rule, policyStore.List(), priority); err != nil {
+	if err := validatePolicyRule(rule, policyStore.List(), target.priority); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -181,43 +299,67 @@ func apiAuthPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	stampRuleMetadataForWrite(&rule, before, sessionAdmin(r))
-	if !policyStore.Update(priority, rule) {
+	stampRuleMetadataForWrite(&rule, target.before, sessionAdmin(r))
+	beginPolicyWrite()
+	defer endPolicyWrite()
+	res := policyDraft.fencedRunningMutate(parseIfVersion(r), func(ps *PolicyStore) bool {
+		if target.id != "" {
+			return authRuleWithID(ps, target.id) && ps.UpdateByID(target.id, rule)
+		}
+		return authRuleAtPriority(ps, target.priority) && ps.Update(target.priority, rule)
+	})
+	if res.conflict != nil {
+		writePolicyVersionConflictError(w, res.conflict)
+		return
+	}
+	if res.err != nil {
+		writePolicyPersistFailure(w, res.err)
+		return
+	}
+	if !res.ok {
 		http.Error(w, "rule not found", http.StatusNotFound)
 		return
 	}
-	policyStore.Save()
 	logger.Printf("UI: auth rule updated priority=%s name=%q",
-		strings.ReplaceAll(fmt.Sprintf("%d", priority), "\n", "_"), sanitizeLog(rule.Name))
-	auditEventDiff(r, "authpolicy.update", rule.Name,
-		fmt.Sprintf("priority=%d outcome=%s", priority, rule.Auth.Outcome), before, rule)
-	saveConfigVersion(sessionAdmin(r), "authpolicy.update")
+		strings.ReplaceAll(fmt.Sprintf("%d", target.priority), "\n", "_"), sanitizeLog(rule.Name))
+	auditEventDiffID(r, "authpolicy.update", rule.Name, ruleAuditID(target.before),
+		fmt.Sprintf("priority=%d outcome=%s", target.priority, rule.Auth.Outcome), target.before, rule)
+	finalizeFencedPolicyWrite(r, "authpolicy.update", res)
 	jsonOK(w, map[string]any{"ok": true})
 }
 
 func apiAuthPolicyDelete(w http.ResponseWriter, r *http.Request) {
-	priority, ok := parsePriorityParam(w, r)
+	if runningPolicyVersionConflict(w, r) {
+		return
+	}
+	target, ok := resolveAuthRuleTarget(w, r)
 	if !ok {
 		return
 	}
-	before := findRuleByPriority(priority)
-	if before == nil {
+	beginPolicyWrite()
+	defer endPolicyWrite()
+	res := policyDraft.fencedRunningMutate(parseIfVersion(r), func(ps *PolicyStore) bool {
+		if target.id != "" {
+			return authRuleWithID(ps, target.id) && ps.DeleteByID(target.id)
+		}
+		return authRuleAtPriority(ps, target.priority) && ps.Delete(target.priority)
+	})
+	if res.conflict != nil {
+		writePolicyVersionConflictError(w, res.conflict)
+		return
+	}
+	if res.err != nil {
+		writePolicyPersistFailure(w, res.err)
+		return
+	}
+	if !res.ok {
 		http.Error(w, "rule not found", http.StatusNotFound)
 		return
 	}
-	if ruleTypeOf(before) != ruleTypeAuth {
-		http.Error(w, "rule at this priority is an access rule (use /api/policy)", http.StatusBadRequest)
-		return
-	}
-	if !policyStore.Delete(priority) {
-		http.Error(w, "rule not found", http.StatusNotFound)
-		return
-	}
-	policyStore.Save()
 	logger.Printf("UI: auth rule deleted priority=%s",
-		strings.ReplaceAll(fmt.Sprintf("%d", priority), "\n", "_"))
-	auditEventDiff(r, "authpolicy.remove", before.Name, "", before, nil)
-	saveConfigVersion(sessionAdmin(r), "authpolicy.remove")
+		strings.ReplaceAll(fmt.Sprintf("%d", target.priority), "\n", "_"))
+	auditEventDiffID(r, "authpolicy.remove", target.before.Name, ruleAuditID(target.before), "", target.before, nil)
+	finalizeFencedPolicyWrite(r, "authpolicy.remove", res)
 	w.WriteHeader(http.StatusNoContent)
 }
 

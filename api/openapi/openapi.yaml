@@ -361,13 +361,18 @@ components:
         draft: { type: boolean }
     AuthPolicyList:
       type: object
-      required: [rules, count, defaultAction, note]
+      required: [rules, count, defaultAction, note, version, updatedAt]
       additionalProperties: false
       properties:
         rules: { type: array, items: { type: object, additionalProperties: true } }
         count: { type: integer }
         defaultAction: { type: string, enum: [allow, deny] }
         note: { type: string }
+        version:
+          type: integer
+          format: int64
+          description: RUNNING PolicyStore generation (never a draft candidate's) — echo via ?ifVersion= on mutations for atomic optimistic concurrency (2C.0a).
+        updatedAt: { type: string, description: RFC3339 timestamp of the last running-rulebase mutation. }
     DefaultActionStatus:
       type: object
       required: [defaultAction]
@@ -522,7 +527,7 @@ components:
         dualCAActive: { type: boolean }
     PolicyDraftStatus:
       type: object
-      description: Policy draft/require-commit state; diff/version/shadows appear only when a draft is active.
+      description: Policy draft/require-commit state; diff/version/shadows/baseStale appear only when a draft is active.
       required: [requireCommit, active, actor, startedAt]
       additionalProperties: true
       properties:
@@ -530,6 +535,9 @@ components:
         active: { type: boolean }
         actor: { type: string }
         startedAt: { type: string }
+        baseStale:
+          type: boolean
+          description: Present only while a draft is active — true when the RUNNING rulebase advanced past the generation the draft forked from (an import, rollback, or a live Stage-1 auth-policy mutation); the commit fails closed on the same backend truth until the draft is reverted and re-staged.
     SessionSecretStatus:
       type: object
       required: [shared]
@@ -2684,6 +2692,12 @@ paths:
       x-culvert-introduced-version: 1.0.0
       x-culvert-danger-level: high
       x-culvert-audit-event: authpolicy.create
+      parameters:
+        - name: ifVersion
+          in: query
+          required: false
+          schema: { type: integer, format: int64 }
+          description: Optional running-generation assertion (from GET version); on mismatch the mutation never runs and a structured 409 is returned.
       requestBody:
         required: true
         content:
@@ -2697,11 +2711,13 @@ paths:
               schema: { type: object, additionalProperties: true }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+        '409': { description: 'Version fence conflict — the running rulebase changed since the asserted generation ({error, currentVersion, yourVersion}).' }
+        '500': { description: 'Durable persist failed — the mutation was rolled back, nothing durable changed.' }
     put:
       operationId: updateAuthPolicyRule
       tags: [policy]
       summary: Update auth policy rule
-      description: Update auth policy rule.
+      description: Update auth policy rule. Addressed by stable rule ULID (?id=, preferred — reorder-safe; malformed 400, unknown 404, access-rule 400, never a priority fall-through) or legacy ?priority=.
       security:
         - sessionCookie: []
         - basicAuth: []
@@ -2713,6 +2729,22 @@ paths:
       x-culvert-introduced-version: 1.0.0
       x-culvert-danger-level: high
       x-culvert-audit-event: authpolicy.update
+      parameters:
+        - name: id
+          in: query
+          required: false
+          schema: { type: string }
+          description: Stable rule ULID (preferred addressing — reorder-safe, strict).
+        - name: priority
+          in: query
+          required: false
+          schema: { type: integer }
+          description: Legacy priority addressing (deprecation window).
+        - name: ifVersion
+          in: query
+          required: false
+          schema: { type: integer, format: int64 }
+          description: Optional running-generation assertion (from GET version).
       requestBody:
         required: true
         content:
@@ -2726,11 +2758,14 @@ paths:
               schema: { type: object, additionalProperties: true }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404': { description: 'No auth rule with this id/priority.' }
+        '409': { description: 'Version fence conflict ({error, currentVersion, yourVersion}).' }
+        '500': { description: 'Durable persist failed — the mutation was rolled back.' }
     delete:
       operationId: deleteAuthPolicyRule
       tags: [policy]
       summary: Delete auth policy rule
-      description: Delete auth policy rule.
+      description: Delete auth policy rule. Addressed by stable rule ULID (?id=, preferred) or legacy ?priority=; same strict id contract as PUT. Returns 204 on success.
       security:
         - sessionCookie: []
         - basicAuth: []
@@ -2747,18 +2782,24 @@ paths:
           in: query
           required: false
           schema: { type: string }
-        - name: name
+          description: Stable rule ULID (preferred addressing — reorder-safe, strict).
+        - name: priority
           in: query
           required: false
-          schema: { type: string }
+          schema: { type: integer }
+          description: Legacy priority addressing (deprecation window).
+        - name: ifVersion
+          in: query
+          required: false
+          schema: { type: integer, format: int64 }
+          description: Optional running-generation assertion (from GET version).
       responses:
-        '200':
-          description: Delete auth policy rule.
-          content:
-            application/json:
-              schema: { type: object, additionalProperties: true }
+        '204': { description: Deleted. }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404': { description: 'No auth rule with this id/priority.' }
+        '409': { description: 'Version fence conflict ({error, currentVersion, yourVersion}).' }
+        '500': { description: 'Durable persist failed — the mutation was rolled back.' }
 
   /api/default-action:
     get:

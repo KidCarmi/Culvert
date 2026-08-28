@@ -174,6 +174,79 @@ func (c *policyDraftCoordinator) fencedMutate(actor string, ifVersion *int64, mu
 	return res
 }
 
+// fencedRunningMutate runs ONE RUNNING-domain policy mutation with the same
+// atomic expected-version fence and durable-or-nothing contract as
+// fencedMutate's live branch — but the write target is ALWAYS the running
+// PolicyStore, and the fence is ALWAYS compared against the RUNNING
+// generation (2C.0a).
+//
+// This is the EXPLICIT running-domain seam for Stage-1 authentication-policy
+// mutations: auth rules are admin-managed and take effect in the running
+// rulebase immediately — they are NEVER routed into the shared Access-Policy
+// Draft candidate, and Require Commit must not appear to govern them. The 2B
+// primitive (fencedMutate) resolves its target by requireCommitEnabled(),
+// which is correct for Stage-2 access writes and wrong for Stage-1 — using it
+// for auth writes would silently stage an authentication change behind a
+// commit ceremony that was never designed to review it. Keeping the domain
+// choice in the FUNCTION NAME (rather than a boolean parameter) makes a
+// wrong-domain call visible at the call site.
+//
+// It still serializes on the coordinator's c.mu — the same critical section
+// every draft operation and every fenced Stage-2 write runs under — so the
+// version comparison, the mutation, and the durable persist are atomic
+// against all of them. A successful running mutation bumps the running
+// generation, which deliberately STALES an active Access-Policy Draft's
+// BaseGeneration: the Stage-2 commit already fails closed on that
+// (baseGenerationStale), and GET /api/policy/draft surfaces it as baseStale.
+//
+// Callers hold beginPolicyWrite (writeGate.RLock) exactly like the ordinary
+// Stage-2 handlers, so a commit/revert (exclusive side) can never interleave
+// with the mutation + finalize sequence.
+func (c *policyDraftCoordinator) fencedRunningMutate(ifVersion *int64, mutate func(target *PolicyStore) bool) fencedMutateResult {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// RUNNING generation, never the candidate's: the fence a Stage-1 client
+	// echoes is the version GET /api/authpolicy served, which is the running
+	// store's — even while a Stage-2 draft is engaged.
+	cur, _ := policyStore.policyVersion()
+	if ifVersion != nil && *ifVersion != cur {
+		return fencedMutateResult{conflict: &policyVersionConflictError{Current: cur, Asserted: *ifVersion}}
+	}
+	return runningMutateLocked(mutate)
+}
+
+// runningMutateLocked mutates the RUNNING store durable-or-nothing. Shared by
+// fencedMutate's live branch and fencedRunningMutate; the caller holds c.mu.
+//
+//   - Success ⇒ the running mutation is durably persisted (PolicyStore.SaveErr,
+//     atomic temp+fsync+rename+dir-fsync).
+//   - Pre-replacement persist failure ⇒ the semantic mutation is ROLLED BACK
+//     (ReplaceAll on the pre-mutation snapshot) and err is returned — the
+//     durable file still holds the previous truth, so memory and disk agree
+//     that the mutation did not happen.
+//   - ErrReplacedNotSynced ⇒ the file already carries the new content; the
+//     mutation stands as SUCCESS with a logged degradation (commit durability
+//     doctrine — see commitActivate).
+func runningMutateLocked(mutate func(target *PolicyStore) bool) fencedMutateResult {
+	prevRunning := policyStore.List()
+	if !mutate(policyStore) {
+		return fencedMutateResult{}
+	}
+	if err := persistRunningPolicy(); err != nil {
+		if errors.Is(err, fileutil.ErrReplacedNotSynced) {
+			// Post-rename failure: the policy file already carries the new
+			// content (commit durability doctrine — see commitActivate).
+			logWarnf("Policy: mutation persisted but parent-dir sync failed: %v", err)
+		} else {
+			// Pre-replacement failure: disk holds the previous truth —
+			// restore memory to match it and fail the request.
+			policyStore.ReplaceAll(prevRunning)
+			return fencedMutateResult{ok: true, err: fmt.Errorf("running-policy persist failed — the change was rolled back, nothing durable changed: %w", err)}
+		}
+	}
+	return fencedMutateResult{ok: true}
+}
+
 func (c *policyDraftCoordinator) fencedMutateLocked(actor string, ifVersion *int64, mutate func(target *PolicyStore) bool, removePath *string, saveMetaBump *bool) fencedMutateResult {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -195,23 +268,7 @@ func (c *policyDraftCoordinator) fencedMutateLocked(actor string, ifVersion *int
 	staged := requireCommitEnabled()
 	if !staged {
 		// ── LIVE mode: mutate running, persist durable-or-nothing. ──
-		prevRunning := policyStore.List()
-		if !mutate(policyStore) {
-			return fencedMutateResult{}
-		}
-		if err := persistRunningPolicy(); err != nil {
-			if errors.Is(err, fileutil.ErrReplacedNotSynced) {
-				// Post-rename failure: the policy file already carries the new
-				// content (commit durability doctrine — see commitActivate).
-				logWarnf("Policy: mutation persisted but parent-dir sync failed: %v", err)
-			} else {
-				// Pre-replacement failure: disk holds the previous truth —
-				// restore memory to match it and fail the request.
-				policyStore.ReplaceAll(prevRunning)
-				return fencedMutateResult{ok: true, err: fmt.Errorf("running-policy persist failed — the change was rolled back, nothing durable changed: %w", err)}
-			}
-		}
-		return fencedMutateResult{ok: true}
+		return runningMutateLocked(mutate)
 	}
 
 	// ── DRAFT mode: mutate the shared candidate, persist durable-or-nothing. ──

@@ -331,13 +331,24 @@
               "type": "object"
             },
             "type": "array"
+          },
+          "updatedAt": {
+            "description": "RFC3339 timestamp of the last running-rulebase mutation.",
+            "type": "string"
+          },
+          "version": {
+            "description": "RUNNING PolicyStore generation (never a draft candidate's) — echo via ?ifVersion= on mutations for atomic optimistic concurrency (2C.0a).",
+            "format": "int64",
+            "type": "integer"
           }
         },
         "required": [
           "rules",
           "count",
           "defaultAction",
-          "note"
+          "note",
+          "version",
+          "updatedAt"
         ],
         "type": "object"
       },
@@ -2216,13 +2227,17 @@
       },
       "PolicyDraftStatus": {
         "additionalProperties": true,
-        "description": "Policy draft/require-commit state; diff/version/shadows appear only when a draft is active.",
+        "description": "Policy draft/require-commit state; diff/version/shadows/baseStale appear only when a draft is active.",
         "properties": {
           "active": {
             "type": "boolean"
           },
           "actor": {
             "type": "string"
+          },
+          "baseStale": {
+            "description": "Present only while a draft is active — true when the RUNNING rulebase advanced past the generation the draft forked from (an import, rollback, or a live Stage-1 auth-policy mutation); the commit fails closed on the same backend truth until the draft is reverted and re-staged.",
+            "type": "boolean"
           },
           "requireCommit": {
             "type": "boolean"
@@ -5249,10 +5264,11 @@
     },
     "/api/authpolicy": {
       "delete": {
-        "description": "Delete auth policy rule.",
+        "description": "Delete auth policy rule. Addressed by stable rule ULID (?id=, preferred) or legacy ?priority=; same strict id contract as PUT. Returns 204 on success.",
         "operationId": "deleteAuthPolicyRule",
         "parameters": [
           {
+            "description": "Stable rule ULID (preferred addressing — reorder-safe, strict).",
             "in": "query",
             "name": "id",
             "required": false,
@@ -5261,31 +5277,43 @@
             }
           },
           {
+            "description": "Legacy priority addressing (deprecation window).",
             "in": "query",
-            "name": "name",
+            "name": "priority",
             "required": false,
             "schema": {
-              "type": "string"
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Optional running-generation assertion (from GET version).",
+            "in": "query",
+            "name": "ifVersion",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
             }
           }
         ],
         "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "additionalProperties": true,
-                  "type": "object"
-                }
-              }
-            },
-            "description": "Delete auth policy rule."
+          "204": {
+            "description": "Deleted."
           },
           "400": {
             "$ref": "#/components/responses/PlainBadRequest"
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "description": "No auth rule with this id/priority."
+          },
+          "409": {
+            "description": "Version fence conflict ({error, currentVersion, yourVersion})."
+          },
+          "500": {
+            "description": "Durable persist failed — the mutation was rolled back."
           }
         },
         "security": [
@@ -5349,6 +5377,18 @@
       "post": {
         "description": "Create auth policy rule.",
         "operationId": "createAuthPolicyRule",
+        "parameters": [
+          {
+            "description": "Optional running-generation assertion (from GET version); on mismatch the mutation never runs and a structured 409 is returned.",
+            "in": "query",
+            "name": "ifVersion",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -5376,6 +5416,12 @@
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "description": "Version fence conflict — the running rulebase changed since the asserted generation ({error, currentVersion, yourVersion})."
+          },
+          "500": {
+            "description": "Durable persist failed — the mutation was rolled back, nothing durable changed."
           }
         },
         "security": [
@@ -5400,8 +5446,38 @@
         "x-culvert-visibility": "admin-supported"
       },
       "put": {
-        "description": "Update auth policy rule.",
+        "description": "Update auth policy rule. Addressed by stable rule ULID (?id=, preferred — reorder-safe; malformed 400, unknown 404, access-rule 400, never a priority fall-through) or legacy ?priority=.",
         "operationId": "updateAuthPolicyRule",
+        "parameters": [
+          {
+            "description": "Stable rule ULID (preferred addressing — reorder-safe, strict).",
+            "in": "query",
+            "name": "id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Legacy priority addressing (deprecation window).",
+            "in": "query",
+            "name": "priority",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Optional running-generation assertion (from GET version).",
+            "in": "query",
+            "name": "ifVersion",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -5429,6 +5505,15 @@
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "description": "No auth rule with this id/priority."
+          },
+          "409": {
+            "description": "Version fence conflict ({error, currentVersion, yourVersion})."
+          },
+          "500": {
+            "description": "Durable persist failed — the mutation was rolled back."
           }
         },
         "security": [
