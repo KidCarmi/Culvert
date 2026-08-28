@@ -24,6 +24,7 @@ package catgroup
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -36,6 +37,45 @@ import (
 	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/obs"
 )
+
+// writeFile is the persistence primitive, swappable ONLY for fault injection in
+// package-internal tests (the ErrReplacedNotSynced branch cannot be induced
+// through the real filesystem deterministically). Production behavior is always
+// fileutil.AtomicWrite.
+var writeFile = fileutil.AtomicWrite
+
+// ErrPersist marks a durable-persistence failure surfaced by MutateDurable
+// AFTER the in-memory mutation was rolled back: nothing durable changed and the
+// in-memory store was restored to the pre-mutation truth. Handlers map it to a
+// 5xx — never a success.
+var ErrPersist = errors.New("category groups: durable persistence failed")
+
+// ErrNameTaken marks a name-collision refusal (create against an existing name,
+// or rename onto a name a DIFFERENT group owns). Handlers map it to a 409 —
+// the server-authoritative refusal, checked under the store lock so a
+// concurrent create/rename cannot slip past a handler-level pre-check.
+var ErrNameTaken = errors.New("name already in use")
+
+// VersionConflictError is the optimistic-concurrency failure returned by
+// MutateDurable when the caller's asserted store generation no longer matches:
+// another admin mutated the store since the caller loaded it. The mutation
+// never ran. Mirrors package main's policyVersionConflictError contract.
+type VersionConflictError struct {
+	Current  int64 // the store generation at the locked moment of the check
+	Asserted int64 // the caller's ?ifVersion= assertion
+}
+
+func (e *VersionConflictError) Error() string {
+	return fmt.Sprintf("the category groups changed since you loaded them (your version %d, current %d) — reload and reapply your change", e.Asserted, e.Current)
+}
+
+// storeMeta is the durable per-store generation sidecar (path+".meta"),
+// mirroring package main's policyMeta convention: it is written AFTER the
+// object file (and skipped when that write fails), so the recorded generation
+// is never newer than the objects actually on disk.
+type storeMeta struct {
+	Version int64 `json:"version"`
+}
 
 // Group is a named bundle of URL category names.
 type Group struct {
@@ -57,6 +97,24 @@ type Store struct {
 	order  []string          // insertion order for stable list output
 	path   string
 
+	// version is the DURABLE per-store mutation generation (2D-A object
+	// concurrency): bumped on every successful admin mutation and on bulk
+	// installs (ReplaceAll), persisted to the path+".meta" sidecar so it stays
+	// monotonic across restarts, surfaced on the list read, and asserted by
+	// MutateDurable's optional ifVersion fence. Distinct from rev below (a
+	// process-local memo signal): version is a client-visible fence value.
+	version int64
+
+	// mutMu serializes DURABLE admin mutations (MutateDurable): the fence
+	// check, the mutation, the persist, and the failure rollback form one
+	// critical section, so two admin writes can never interleave between the
+	// version check and the durable write (no TOCTOU). Readers and the proxy
+	// hot path never touch it. Bulk install paths (ReplaceAll from cluster
+	// sync / import / rollback) deliberately bypass it — they are whole-surface
+	// replaces whose authority (CP snapshot, import payload) re-converges on
+	// the next push; documented residual.
+	mutMu sync.Mutex
+
 	// rev counts successful mutations (Load/Add/Update/Delete/Rename/
 	// ReplaceAll). It is a PROCESS-LOCAL change signal for memoization only
 	// ("contents may have changed since revision N") — never an identity:
@@ -64,6 +122,14 @@ type Store struct {
 	// group CONTENTS (the QB-2 lesson from urlcat's retired revision
 	// counter). Atomic so readers never touch mu.
 	rev atomic.Uint64
+}
+
+// Version returns the durable per-store mutation generation (the ifVersion
+// fence value clients echo back on mutations).
+func (s *Store) Version() int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.version
 }
 
 // Revision returns the process-local mutation counter. Monotonic within a
@@ -133,9 +199,18 @@ func (s *Store) Load(path string) error {
 		order = append(order, key)
 	}
 
+	// Restore the durable generation from the sidecar (absent/corrupt ⇒ 0:
+	// the fence degrades conservatively — any stale pre-restart token then
+	// mismatches and 409s into a refetch, never a silent overwrite).
+	var meta storeMeta
+	if mdata, merr := os.ReadFile(path + ".meta"); merr == nil { // #nosec G304 -- sibling of the operator-configured path
+		_ = json.Unmarshal(mdata, &meta)
+	}
+
 	s.mu.Lock()
 	s.groups = built
 	s.order = order
+	s.version = meta.Version
 	// Bump BEFORE unlock (round 19 follow-up): the mutex release publishes
 	// the new contents, so any reader that can observe them already sees the
 	// advanced revision — value and change signal are never out of step.
@@ -152,13 +227,21 @@ func (s *Store) Load(path string) error {
 	return nil
 }
 
-// Save persists the current groups to disk (atomic write).
-func (s *Store) Save() {
+// Save persists the current groups to disk (atomic write). Best-effort legacy
+// wrapper for old non-critical callers; the hardened v2 mutation path
+// (MutateDurable) uses the error-returning SaveErr and rolls back on failure.
+func (s *Store) Save() { _ = s.SaveErr() }
+
+// SaveErr is the error-returning persistence core (2D-A durable-or-nothing):
+// callers that must know whether the durable write landed use it directly.
+// The version sidecar is written AFTER (and skipped on) an objects-file
+// failure, so the recorded generation is never newer than the objects on disk.
+func (s *Store) SaveErr() error {
 	s.mu.RLock()
 	path := s.path
 	if path == "" {
 		s.mu.RUnlock()
-		return
+		return nil
 	}
 	groups := make([]Group, 0, len(s.order))
 	for _, key := range s.order {
@@ -169,17 +252,99 @@ func (s *Store) Save() {
 			})
 		}
 	}
+	meta := storeMeta{Version: s.version}
 	s.mu.RUnlock()
 
 	data, err := json.MarshalIndent(groups, "", "  ")
 	if err != nil {
-		return
+		return fmt.Errorf("marshal category groups: %w", err)
 	}
 	// Bucket-4 durability hardening: fileutil.AtomicWrite gives unique
 	// tmp + chmod + fsync(file) + rename + best-effort fsync(parent
 	// dir) — replaces the previous os.WriteFile+os.Rename which was
 	// atomic-via-rename but NOT fsynced (P6.1 UC-1).
-	_ = fileutil.AtomicWrite(path, data, 0o600)
+	if err := writeFile(path, data, 0o600); err != nil {
+		return fmt.Errorf("write category groups: %w", err)
+	}
+	if mdata, merr := json.Marshal(meta); merr == nil {
+		// Best-effort like policy's saveMetaSnapshot: a lost sidecar degrades
+		// the fence to 0 at next boot (conservative — stale tokens 409).
+		_ = writeFile(path+".meta", mdata, 0o600)
+	}
+	return nil
+}
+
+// MutateDurable runs ONE admin mutation with the OPTIONAL expected-version
+// fence AND the durable persist evaluated in the same serialized critical
+// section (the 2B.0a/2B.0b contract transposed to the object store):
+//
+//   - ifVersion == nil: no fence — the mutation proceeds (still serialized,
+//     still durable-or-nothing). Legacy name-addressed callers land here.
+//   - ifVersion != nil: compared against the store generation BEFORE fn runs;
+//     a mismatch returns *VersionConflictError and the mutation never runs.
+//   - fn applies the in-memory mutation through the normal store methods; its
+//     error is returned verbatim (validation/not-found → the handler's 4xx).
+//   - On fn success the generation bumps and SaveErr persists. A
+//     pre-replacement persist failure restores the pre-mutation in-memory
+//     state (objects AND generation) and returns the failure wrapped in
+//     ErrPersist — confirmed 2xx therefore means restart-durable.
+//   - ErrReplacedNotSynced follows the repository's landed-content doctrine
+//     (the renamed file already carries the new objects; rolling memory back
+//     would contradict the visible file and a restart would activate the
+//     "failed" state anyway): proceed as success with a warning.
+//
+// Bulk install paths (ReplaceAll) bypass mutMu by design; see the field doc.
+func (s *Store) MutateDurable(ifVersion *int64, fn func() error) error {
+	s.mutMu.Lock()
+	defer s.mutMu.Unlock()
+
+	s.mu.RLock()
+	cur := s.version
+	s.mu.RUnlock()
+	if ifVersion != nil && *ifVersion != cur {
+		return &VersionConflictError{Current: cur, Asserted: *ifVersion}
+	}
+	prev := s.List() // value snapshot for the rollback path
+	if err := fn(); err != nil {
+		// fn is ATOMIC-or-nothing too: a composed mutation (content update +
+		// rename) that fails partway (e.g. rename collision after the content
+		// applied) must not half-land — restore the pre-mutation state.
+		s.restoreSnapshot(prev, cur)
+		return err
+	}
+	s.mu.Lock()
+	s.version = cur + 1
+	s.mu.Unlock()
+	if err := s.SaveErr(); err != nil {
+		if errors.Is(err, fileutil.ErrReplacedNotSynced) {
+			obs.Warnf("CategoryGroups: mutation persisted but parent-dir sync failed: %v", err)
+			return nil
+		}
+		s.restoreSnapshot(prev, cur)
+		return fmt.Errorf("%w: %w", ErrPersist, err)
+	}
+	return nil
+}
+
+// restoreSnapshot reinstalls a pre-mutation value snapshot and generation (the
+// MutateDurable rollback path). Rebuilds indexes like ReplaceAll but does NOT
+// bump version (the failed mutation never happened).
+func (s *Store) restoreSnapshot(groups []Group, version int64) {
+	built := make(map[string]*Group, len(groups))
+	order := make([]string, 0, len(groups))
+	for i := range groups {
+		g := &groups[i]
+		g.catSet = buildCatSet(g.Categories)
+		key := strings.ToLower(g.Name)
+		built[key] = g
+		order = append(order, key)
+	}
+	s.mu.Lock()
+	s.groups = built
+	s.order = order
+	s.version = version
+	s.rev.Add(1) // contents may have changed twice (mutate + restore) — memo readers must refresh
+	s.mu.Unlock()
 }
 
 // List returns a copy of all groups (safe for JSON serialization).
@@ -222,7 +387,7 @@ func (s *Store) Add(name string, categories []string) (*Group, error) {
 	defer s.mu.Unlock()
 
 	if _, exists := s.groups[key]; exists {
-		return nil, fmt.Errorf("group %q already exists", name)
+		return nil, fmt.Errorf("group %q already exists: %w", name, ErrNameTaken)
 	}
 
 	g := &Group{
@@ -383,7 +548,7 @@ func (s *Store) Rename(id, newName string) (oldName string, err error) {
 		return oldName, nil
 	}
 	if _, taken := s.groups[newKey]; taken {
-		return "", fmt.Errorf("a group named %q already exists", newName)
+		return "", fmt.Errorf("a group named %q already exists: %w", newName, ErrNameTaken)
 	}
 	cur.Name = newName
 	cur.UpdatedAt = now
@@ -444,6 +609,10 @@ func (s *Store) ReplaceAll(groups []Group) {
 	s.mu.Lock()
 	s.groups = built
 	s.order = order
+	// Bulk install = a content change: advance the client-visible fence so any
+	// admin edit loaded against the pre-install contents conflicts instead of
+	// silently overwriting the installed truth.
+	s.version++
 	// Bump BEFORE unlock (round 19 follow-up): the mutex release publishes
 	// the new contents, so any reader that can observe them already sees the
 	// advanced revision — value and change signal are never out of step.
