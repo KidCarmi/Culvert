@@ -167,7 +167,7 @@ func (c *mcpToolTrustCoordinator) getStore() (*tooltrust.Store, error) {
 
 // composedStatus reports whether the coordinator is composed and its bounded reason
 // (for the admin status surface).
-func (c *mcpToolTrustCoordinator) composedStatus() (bool, string) {
+func (c *mcpToolTrustCoordinator) composedStatus() (composed bool, reason string) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.composed, c.reason
