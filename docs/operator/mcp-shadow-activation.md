@@ -168,9 +168,11 @@ Abort the activation immediately if ANY of these is observed:
 
 Rollback is deterministic and always accepted (a demotion never needs exec-deps):
 
-1. Publish a signed config with `mode: "observe"` (or `disabled`) for the Gateway
-   capability to the target node.
-2. Confirm `gateway.mode` returns to `observe`, the Shadow evidence window clears, and
+1. Publish a signed config with `mode: 1` (Observe) — or `mode: 0` (Disabled) — for the
+   Gateway capability to the target node. `mode` is a numeric enum on the wire (see the §2
+   legend); the string form `"observe"` does not deserialize, so a rollback payload using it
+   would fail to apply instead of demoting the node during an incident.
+2. Confirm `gateway.mode` returns to Observe (`1`), the Shadow evidence window clears, and
    `culvert_mcp_shadow_evaluations_total` stops incrementing.
 3. To fully disarm the node, restart it without `CULVERT_MCP_SHADOW_READY` — the
    evaluator is then not composed and `Deps.Executor` is nil (byte-identical Observe).

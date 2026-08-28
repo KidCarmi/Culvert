@@ -145,10 +145,22 @@ func (s *ShadowEvaluator) Resolve(in runtime.ExecInput) rollout.Resolution {
 	return resolveDisposition(s.cfg.State, in)
 }
 
-// Execute is the runtime.ExecutionProvider entry for a Shadow-only runtime. It acts on
-// the PRE-RESOLVED disposition — it never re-resolves — and dispatches. It has no execute
-// path.
+// Execute is the runtime.ExecutionProvider entry for a Shadow-only runtime. It acts on the
+// PRE-RESOLVED mode/scope disposition — it never re-resolves mode or scope (F7 single
+// resolution, Codex P2 #1234) — and dispatches. It has no execute path.
+//
+// The one thing it DOES re-read is the emergency kill: the kill switch is an immediate
+// admission stop (admin surface + runbook contract), so a kill engaged AFTER Resolve but
+// before this evaluation commits must still stop it — otherwise the evaluator would commit
+// durable evidence and return a would_* verdict AFTER the operator's emergency stop. This is
+// orthogonal to single-resolution: it reads only the monotonic kill flag and can only make
+// the outcome MORE restrictive (an emergency block), never turn a record-only into an
+// evaluation or an evaluation into an execute, so it cannot reopen the routing TOCTOU that
+// F7 closed (Codex P2, PR #1234).
 func (s *ShadowEvaluator) Execute(ctx context.Context, in runtime.ExecInput, res rollout.Resolution) runtime.ExecOutput {
+	if s.cfg.State.Killed() {
+		return s.blocked(in, mcperr.ReasonRolloutEmergencyActive, false)
+	}
 	s.cfg.Metrics.ObserveResolution(in.Capability.String(), res)
 
 	switch res.Disposition {

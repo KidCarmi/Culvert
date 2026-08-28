@@ -120,9 +120,20 @@ func (e *Executor) Resolve(in runtime.ExecInput) rollout.Resolution {
 	return resolveDisposition(e.cfg.State, in)
 }
 
-// Execute is the runtime.ExecutionProvider entry. It acts on the PRE-RESOLVED disposition
-// (it never re-resolves) and dispatches record-only / block / execute.
+// Execute is the runtime.ExecutionProvider entry. It acts on the PRE-RESOLVED mode/scope
+// disposition (it never re-resolves mode or scope — F7 single resolution, Codex P2 #1234)
+// and dispatches record-only / block / execute.
+//
+// It re-reads ONLY the emergency kill: the kill switch is an immediate admission stop, so a
+// kill engaged AFTER Resolve but before the irreversible upstream call must still stop it.
+// This is orthogonal to single-resolution — it reads only the monotonic kill flag and can
+// only make the outcome MORE restrictive (an emergency block), so it cannot reopen the
+// routing TOCTOU F7 closed. Fail-closed here matters most on the LIVE path: it stops an
+// upstream side effect that Resolve had cleared microseconds before the operator hit kill.
 func (e *Executor) Execute(ctx context.Context, in runtime.ExecInput, res rollout.Resolution) runtime.ExecOutput {
+	if e.cfg.State.Killed() {
+		return e.blocked(in, mcperr.ReasonRolloutEmergencyActive, false)
+	}
 	subj := subjectFor(in)
 	action := mapAction(in.Decision.Action)
 	e.cfg.Metrics.ObserveResolution(in.Capability.String(), res)

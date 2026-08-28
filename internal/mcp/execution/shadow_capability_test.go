@@ -163,56 +163,72 @@ func TestResolve_RoutesOnlyExecutingDispositions(t *testing.T) {
 	}
 }
 
-// TestExecute_ActsOnTheCarriedResolutionNotAFreshRead is the single-resolution TOCTOU gate
-// (Codex P2, PR #1234). The mutable rollout state (mode, scope, kill switch) is read EXACTLY
-// ONCE per request — in Resolve, via resolveDisposition — and the resulting Resolution is
-// carried into Execute. Execute must ACT on that carried resolution and must NOT re-read the
-// state, so routing (record-only vs not) and execution can never observe two different
-// snapshots across a concurrent transition.
-//
-// The proof is a state mutation landing STRICTLY BETWEEN Resolve and Execute: resolve while
-// healthy (→ shadow-evaluate), engage the kill switch, then Execute with the resolution
-// captured before the kill. Execute must still shadow-evaluate — the outcome the carried
-// resolution names — not the emergency block a fresh read of the now-killed state would
-// produce. If Execute re-resolved (the pre-fix behaviour the finding removed), the kill would
-// flip the outcome to a block and this test fails.
-//
-// The ShadowEvaluator is used deliberately: both of its branches (shadow-evaluate and block)
-// are side-effect-free, so the gate exercises the resolution-carrying WIRING without asserting
-// anything about executing after a kill. The control below proves the mutation is observable —
-// resolving AFTER the kill yields the block — so a green test cannot mean the kill was inert.
-func TestExecute_ActsOnTheCarriedResolutionNotAFreshRead(t *testing.T) {
-	newEv := func(st *rollout.State) *ShadowEvaluator {
-		e, err := NewShadowEvaluator(ShadowConfig{State: st, Events: realEvents(t, nil)})
-		if err != nil {
-			t.Fatalf("NewShadowEvaluator: %v", err)
-		}
-		return e
+func newShadowEvaluatorForTest(t *testing.T, st *rollout.State) *ShadowEvaluator {
+	t.Helper()
+	e, err := NewShadowEvaluator(ShadowConfig{State: st, Events: realEvents(t, nil)})
+	if err != nil {
+		t.Fatalf("NewShadowEvaluator: %v", err)
 	}
+	return e
+}
+
+// TestExecute_CarriesModeScopeResolutionWithoutReResolving is the F7 single-resolution gate
+// (Codex P2, PR #1234): the MODE/SCOPE disposition is resolved EXACTLY ONCE (in Resolve) and
+// carried into Execute, which must act on the carried disposition and NOT re-resolve mode or
+// scope — so a mode/scope transition landing between Resolve and Execute can never make routing
+// and execution observe two different snapshots.
+//
+// The proof: hand Execute a request the CURRENT state would resolve to record-only (out of
+// scope — standing in for "the scope moved out from under the in-flight request after Resolve")
+// together with a carried EffectShadowEvaluate resolution (what an earlier in-scope Resolve
+// produced). Execute must honour the carried disposition and shadow-evaluate. If Execute
+// re-resolved mode/scope it would see the out-of-scope request, return record-only, and fail —
+// reopening exactly the evidence gap F7 closed.
+func TestExecute_CarriesModeScopeResolutionWithoutReResolving(t *testing.T) {
+	st := stateForMode(t, rollout.ModeShadow)
+	ev := newShadowEvaluatorForTest(t, st)
+
+	outScope := execInput(policy.ActionAllow, false)
+	outScope.Input.Server = &policy.Server{ServerID: "not-in-scope", Environment: "prod"}
+	// Sanity: the state genuinely resolves this request to record-only.
+	if d := ev.Resolve(outScope).Disposition; d != rollout.EffectRecordOnly {
+		t.Fatalf("precondition: out-of-scope Shadow must resolve to record-only, got %v", d)
+	}
+
+	// Carry a shadow-evaluate resolution (from a prior in-scope Resolve) into Execute.
+	out := ev.Execute(context.Background(), outScope, rollout.Resolution{Disposition: rollout.EffectShadowEvaluate})
+	if out.ExecutionState != "shadow_evaluated" {
+		t.Fatalf("Execute re-resolved mode/scope instead of acting on the carried resolution: "+
+			"an out-of-scope request with a carried shadow-evaluate returned %q (single-resolution TOCTOU is open)", out.ExecutionState)
+	}
+}
+
+// TestExecute_ReHonorsEmergencyKillEngagedAfterResolve pins the round-5 correction (Codex P2,
+// PR #1234): the kill switch is an immediate admission stop, so a kill engaged AFTER Resolve
+// but before Execute must still stop the evaluation — Execute re-reads the monotonic kill flag
+// even though it carries (never re-resolves) the mode/scope disposition. Without the re-check
+// the evaluator would commit durable evidence and return a would_* verdict AFTER the operator's
+// emergency stop.
+//
+// Mutation: dropping the kill re-check at Execute entry shadow-evaluates the carried resolution
+// and fails this gate. This is deliberately the OPPOSITE assertion from the mode/scope gate
+// above — kill is the one axis Execute re-reads, because re-honouring it can only make the
+// outcome more restrictive and so cannot reopen the routing TOCTOU.
+func TestExecute_ReHonorsEmergencyKillEngagedAfterResolve(t *testing.T) {
+	st := stateForMode(t, rollout.ModeShadow)
+	ev := newShadowEvaluatorForTest(t, st)
 	in := execInput(policy.ActionAllow, false) // server s1 ∈ scope
 
-	// Carried path: resolve healthy, THEN kill, THEN execute on the pre-kill resolution.
-	st := stateForMode(t, rollout.ModeShadow)
-	ev := newEv(st)
 	res := ev.Resolve(in)
 	if res.Disposition != rollout.EffectShadowEvaluate {
 		t.Fatalf("precondition: in-scope Shadow must resolve to shadow-evaluate, got %v", res.Disposition)
 	}
-	st.EngageKillSwitch("oncall", 1) // the state changes AFTER routing decided
-	out := ev.Execute(context.Background(), in, res)
-	if out.ExecutionState != "shadow_evaluated" {
-		t.Fatalf("Execute re-read the mutable state instead of acting on the carried resolution: "+
-			"a kill landing after Resolve flipped shadow_evaluate → %q (single-resolution TOCTOU is open)", out.ExecutionState)
-	}
+	st.EngageKillSwitch("oncall", 1) // emergency stop lands AFTER routing decided
 
-	// Control: a resolution taken AFTER the kill is a block — so the mutation above is real and
-	// the carried-path green result is the resolution being honoured, not a no-op kill.
-	killedRes := ev.Resolve(in)
-	if killedRes.Disposition != rollout.EffectBlock || killedRes.BlockReason != mcperr.ReasonRolloutEmergencyActive {
-		t.Fatalf("control: a post-kill resolution must be an emergency block, got disp=%v reason=%v", killedRes.Disposition, killedRes.BlockReason)
-	}
-	if blocked := ev.Execute(context.Background(), in, killedRes); blocked.ExecutionState != "blocked" {
-		t.Fatalf("control: executing a carried emergency-block resolution must block, got %q", blocked.ExecutionState)
+	out := ev.Execute(context.Background(), in, res)
+	if out.ExecutionState != "blocked" || out.Reason != mcperr.ReasonRolloutEmergencyActive {
+		t.Fatalf("SECURITY: a kill engaged after Resolve must stop the evaluation at Execute: "+
+			"got state=%q reason=%v, want blocked/emergency", out.ExecutionState, out.Reason)
 	}
 }
 
