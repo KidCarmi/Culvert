@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/cpdp"
@@ -193,6 +194,54 @@ func TestRunbookShadowScope_AdmitsWriteToolCall(t *testing.T) {
 	if roSc.Contains(subj) {
 		t.Fatal("a read-only scope must NOT admit a write-class tools/call — this is exactly the " +
 			"zero-evaluations bug the runbook fix documents")
+	}
+}
+
+// TestRunbookShadowSignedConfig_WireFormatDeserializesAndValidates pins the runbook §2
+// activation example (docs/operator/mcp-shadow-activation.md) against the real wire format
+// (Codex P2, PR #1234): capability/mode/scope.capability/operations are NUMERIC enums (no
+// string form) and selector_schema is REQUIRED. The documented JSON must round-trip through
+// rollout.SignedConfig and pass Validate for the Gateway capability, and the two mistakes the
+// fix corrects — the string enum form and an omitted selector_schema — must fail.
+func TestRunbookShadowSignedConfig_WireFormatDeserializesAndValidates(t *testing.T) {
+	// The exact wire form documented in §2.
+	const doc = `{
+      "selector_schema": 1,
+      "capability": 1,
+      "mode": 2,
+      "scope": {
+        "capability": 1,
+        "servers": ["controlled-test-server"],
+        "principals": ["synthetic-shadow-principal"],
+        "operations": [2],
+        "high_risk": true
+      },
+      "scope_revision": 1,
+      "connector_mode": "local-client"
+    }`
+	var cfg rollout.SignedConfig
+	if err := json.Unmarshal([]byte(doc), &cfg); err != nil {
+		t.Fatalf("the documented SignedConfig must deserialize: %v", err)
+	}
+	if cfg.SelectorSchema != 1 || cfg.Capability != rollout.CapabilityGateway || cfg.Mode != rollout.ModeShadow {
+		t.Fatalf("wire values decoded wrong: schema=%d capability=%v mode=%v", cfg.SelectorSchema, cfg.Capability, cfg.Mode)
+	}
+	if err := cfg.Validate(rollout.CapabilityGateway, rollout.DefaultLimits()); err != nil {
+		t.Fatalf("the documented Shadow SignedConfig must pass Validate: %v", err)
+	}
+
+	// (1) The old string enum form must NOT deserialize (capability/mode are numeric enums).
+	const strForm = `{"selector_schema":1,"capability":"gateway","mode":"shadow","scope":{"capability":"gateway","servers":["s"]},"scope_revision":1,"connector_mode":"local-client"}`
+	var strCfg rollout.SignedConfig
+	if err := json.Unmarshal([]byte(strForm), &strCfg); err == nil {
+		t.Fatal("the string enum form must NOT deserialize into rollout.SignedConfig — it is the doc bug the fix corrects")
+	}
+
+	// (2) Omitting selector_schema (defaults to 0) must be rejected by Validate.
+	noSchema := cfg
+	noSchema.SelectorSchema = 0
+	if err := noSchema.Validate(rollout.CapabilityGateway, rollout.DefaultLimits()); err == nil {
+		t.Fatal("selector_schema 0 (omitted) must be rejected as an unsupported schema")
 	}
 }
 

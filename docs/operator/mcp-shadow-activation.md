@@ -53,14 +53,22 @@ rejected fail-closed; fix each named reason first.
 
 Shadow REQUIRES a bounded, enumerable scope — an empty or percentage-only scope is
 rejected at validation ("no scope = no Shadow"). For the first activation, scope to a
-single controlled server + a synthetic principal:
+single controlled server + a synthetic principal.
+
+This is the `rollout.SignedConfig` structure the Control Plane fills in and **signs** into
+the Gateway payload of a ConfigSnapshot (§3) — you do not hand-write the signature. It is
+shown here as its exact JSON wire form so it round-trips through `rollout.SignedConfig`:
+`capability`, `mode`, and the nested `scope.capability` / `operations` are **numeric enums**
+on the wire (there is no string form), and `selector_schema` is **required** — omitting it
+defaults to `0`, which `SignedConfig.Validate` rejects as an unsupported schema.
 
 ```json
 {
-  "capability": "gateway",
-  "mode": "shadow",
+  "selector_schema": 1,
+  "capability": 1,
+  "mode": 2,
   "scope": {
-    "capability": "gateway",
+    "capability": 1,
     "servers": ["controlled-test-server"],
     "principals": ["synthetic-shadow-principal"],
     "operations": [2],
@@ -70,6 +78,11 @@ single controlled server + a synthetic principal:
   "connector_mode": "local-client"
 }
 ```
+
+Wire-value legend (all `internal/mcp/rollout`): `selector_schema: 1` (current schema).
+`capability: 1` = Gateway (`2` = Management). `mode: 2` = Shadow (`0` Disabled, `1` Observe,
+`3` Canary, `4` Production). `operations: [2]` = the write risk class (`1` read, `3`
+destructive).
 
 - `servers` / `principals`: the ONE controlled server and the ONE synthetic identity.
 - `operations: [2]` with `high_risk: true` — **required to shadow any `tools/call`.** The
