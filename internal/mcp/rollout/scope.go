@@ -425,6 +425,13 @@ func (s Scope) AdmitsToolForEvaluation(serverID, toolName, fingerprint string) b
 	if !dimOK(s.servers, serverID) {
 		return false
 	}
+	// The fingerprint dimension is a real inclusion selector (a scope may pin exact tool
+	// fingerprints); a Usable tool whose fingerprint the scope does not admit is NOT targeted,
+	// so it must not satisfy the usable-tool gate for a scope that Contains would never admit
+	// (Codex P1, PR #1234).
+	if !dimOK(s.fingerprints, fingerprint) {
+		return false
+	}
 	return s.tools.empty() || s.tools.has(sel)
 }
 

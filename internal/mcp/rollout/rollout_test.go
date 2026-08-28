@@ -623,4 +623,16 @@ func TestAdmitsToolForEvaluation(t *testing.T) {
 	if toolSel.AdmitsToolForEvaluation("s1", "t", "different-fp") {
 		t.Fatal("a tool selector must not target a different fingerprint")
 	}
+
+	// The fingerprint dimension is honored (Codex P1, PR #1234): a scope pinned to a specific
+	// fingerprint must NOT be satisfied by a Usable tool on the same admitted server whose
+	// fingerprint it does not admit — otherwise the usable-tool gate would pass for a scope
+	// Contains could never admit.
+	fpScope := mk(ScopeSpec{Capability: CapabilityGateway, Servers: []string{"s1"}, ToolFingerprints: []string{"pinned-fp"}, Operations: []RiskClass{RiskWrite}, HighRisk: true})
+	if !fpScope.AdmitsToolForEvaluation("s1", "t", "pinned-fp") {
+		t.Fatal("the pinned fingerprint must be targeted")
+	}
+	if fpScope.AdmitsToolForEvaluation("s1", "other", "unpinned-fp") {
+		t.Fatal("a tool whose fingerprint the scope does not admit must NOT be targeted — even on an in-scope server")
+	}
 }
