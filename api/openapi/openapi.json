@@ -13614,6 +13614,16 @@
           },
           "409": {
             "$ref": "#/components/responses/PlainConflict"
+          },
+          "503": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The durable approval store could not be written (full/read-only disk); the mutation is retryable once storage recovers. Body is plain text."
           }
         },
         "security": [
@@ -13756,6 +13766,16 @@
           },
           "409": {
             "$ref": "#/components/responses/PlainConflict"
+          },
+          "503": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The durable approval store could not be written (full/read-only disk); the mutation is retryable once storage recovers. Body is plain text."
           }
         },
         "security": [

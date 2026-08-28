@@ -150,6 +150,7 @@ func TestReasonCodesStable(t *testing.T) {
 		{ReasonApprovalTenantConflict, "approval_tenant_conflict"},
 		{ReasonApprovalPurposeUnsupported, "approval_purpose_unsupported"},
 		{ReasonApprovalNotAuthorized, "approval_not_authorized"},
+		{ReasonApprovalStoreUnavailable, "approval_store_unavailable"},
 	}
 	seen := map[Reason]bool{}
 	for _, p := range want {

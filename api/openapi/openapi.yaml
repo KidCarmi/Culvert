@@ -10846,6 +10846,10 @@ paths:
         '403': { $ref: '#/components/responses/PlainForbidden' }
         '404': { $ref: '#/components/responses/PlainNotFound' }
         '409': { $ref: '#/components/responses/PlainConflict' }
+        '503':
+          description: The durable approval store could not be written (full/read-only disk); the mutation is retryable once storage recovers. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
   /api/mcp/tool-approval-decision:
     post:
       operationId: decideMCPToolApproval
@@ -10874,6 +10878,10 @@ paths:
         '403': { $ref: '#/components/responses/PlainForbidden' }
         '404': { $ref: '#/components/responses/PlainNotFound' }
         '409': { $ref: '#/components/responses/PlainConflict' }
+        '503':
+          description: The durable approval store could not be written (full/read-only disk); the mutation is retryable once storage recovers. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
   /api/mcp/config:
     get:
       operationId: getMCPConfig

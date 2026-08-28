@@ -1016,3 +1016,15 @@ func TestCreate_TenantBoundMatchesInventoryOwnerScope(t *testing.T) {
 		t.Fatal("a tenant over the byte bound must still be rejected")
 	}
 }
+
+// TestPersistFailure_ClassifiedAsStoreUnavailable proves the round-8 P2: a durable-write
+// failure (full/read-only disk) is classified as the retryable ReasonApprovalStoreUnavailable
+// (→ HTTP 503), never ReasonConfigInvalid (→ 400), so a client is not told its valid input is
+// permanently invalid.
+func TestPersistFailure_ClassifiedAsStoreUnavailable(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	s := newTestStore(t, clk)
+	s.writeFile = func(string, []byte, os.FileMode) error { return errors.New("no space left on device") }
+	_, err := s.CreateRequest(goodRequest())
+	mustReason(t, err, mcperr.ReasonApprovalStoreUnavailable)
+}

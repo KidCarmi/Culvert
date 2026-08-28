@@ -667,3 +667,46 @@ func TestToolTrust_PendingDemotion_RetriedWhenRecordAbsent(t *testing.T) {
 		t.Fatal("a successful demotion must clear the pending-demotion entry")
 	}
 }
+
+// TestToolTrust_RequestUsesPerRecordRevision proves the round-8 P2: an approval request
+// validates the submitted revision against the tool's PER-RECORD revision (the value the
+// inventory endpoint exposes as ToolView.Revision), not the global catalog snapshot revision.
+// An unrelated tool update advances the global revision but not the reviewed tool's record, so
+// posting the exposed per-record revision must NOT produce a spurious stale-target 409.
+func TestToolTrust_RequestUsesPerRecordRevision(t *testing.T) {
+	resetInventory(t)
+	inv := seedToolTrustInventory2(t)
+	composeToolTrust(t, nil)
+	// Advance the GLOBAL catalog revision via an UNRELATED tool (toolA), leaving toolB's
+	// per-record revision unchanged.
+	keyA := catalog.ToolKey{Server: registry.ServerID(inv.serverID), Name: inv.toolA}
+	recA, ok := inv.cat.Current().Get(keyA)
+	if !ok {
+		t.Fatal("tool A must exist")
+	}
+	if _, err := inv.cat.Promote(keyA, recA.Fingerprint); err != nil {
+		t.Fatalf("promote unrelated tool A: %v", err)
+	}
+	keyB := catalog.ToolKey{Server: registry.ServerID(inv.serverID), Name: inv.toolB}
+	recB, ok := inv.cat.Current().Get(keyB)
+	if !ok {
+		t.Fatal("tool B must exist")
+	}
+	if inv.cat.Current().Revision() == recB.Revision {
+		t.Fatal("setup: the global revision must have advanced past toolB's per-record revision")
+	}
+	// The operator posts the per-record revision the inventory endpoint exposes for toolB.
+	_, err := mcpToolTrust.RequestApproval(toolTrustRequestInput{
+		Tenant:              ttTenant,
+		ServerID:            inv.serverID,
+		ToolName:            inv.toolB,
+		ExpectedFingerprint: inv.fpB,
+		ExpectedCatalogRev:  recB.Revision,
+		Purpose:             tooltrust.PurposeShadowEvaluation,
+		RequestedBy:         "operator@corp",
+		Reason:              "b",
+	})
+	if err != nil {
+		t.Fatalf("an unrelated catalog change must not make toolB's request stale, got %v", err)
+	}
+}

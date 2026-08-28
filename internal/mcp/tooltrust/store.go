@@ -666,7 +666,10 @@ func (s *Store) persistLocked() error {
 		return mcperr.Wrap(mcperr.ReasonConfigInvalid, "tooltrust.persist", "marshal store", err)
 	}
 	if err := s.writeFile(s.path, raw, 0o600); err != nil {
-		return mcperr.Wrap(mcperr.ReasonConfigInvalid, "tooltrust.persist", "atomic write", err)
+		// A failed durable write (full/read-only disk, I/O error) is RETRYABLE: the in-memory
+		// state is reverted by the caller and the same mutation can succeed once storage
+		// recovers. Classify it as service-unavailable (503), never invalid-input (400).
+		return mcperr.Wrap(mcperr.ReasonApprovalStoreUnavailable, "tooltrust.persist", "atomic write", err)
 	}
 	return nil
 }

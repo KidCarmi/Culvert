@@ -199,7 +199,8 @@ func mcpErr(w http.ResponseWriter, err error) {
 		mcperr.ReasonToolApprovalStale, mcperr.ReasonToolFingerprintMismatch,
 		mcperr.ReasonServerNotUsable:
 		status = http.StatusConflict
-	case mcperr.ReasonPublicationDurabilityRequired, mcperr.ReasonEventDurabilityDegraded:
+	case mcperr.ReasonPublicationDurabilityRequired, mcperr.ReasonEventDurabilityDegraded,
+		mcperr.ReasonApprovalStoreUnavailable:
 		status = http.StatusServiceUnavailable
 	}
 	code := reason.Code()

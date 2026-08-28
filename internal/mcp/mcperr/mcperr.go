@@ -811,6 +811,12 @@ const (
 	// ReasonApprovalNotAuthorized — the actor is not authorized for the requested
 	// trust operation (role, scope, or an empty/over-bound actor). Fails closed.
 	ReasonApprovalNotAuthorized
+	// ReasonApprovalStoreUnavailable — the durable approval store could not be written
+	// (a full or read-only disk, an I/O error). The in-memory state is left unchanged and
+	// the unchanged mutation is RETRYABLE once storage recovers, so it maps to 503 (service
+	// unavailable), never 400 — the caller's input was valid. Distinct from
+	// ReasonConfigInvalid, which is reserved for a corrupt/marshal/decode fault.
+	ReasonApprovalStoreUnavailable
 )
 
 // reasonCode maps each Reason to its stable machine string. The strings are part
@@ -1050,6 +1056,7 @@ var reasonCode = map[Reason]string{ // #nosec G101 -- stable machine-readable er
 	ReasonApprovalTenantConflict:     "approval_tenant_conflict",
 	ReasonApprovalPurposeUnsupported: "approval_purpose_unsupported",
 	ReasonApprovalNotAuthorized:      "approval_not_authorized",
+	ReasonApprovalStoreUnavailable:   "approval_store_unavailable",
 }
 
 // Code returns the stable machine string for the reason (e.g. "malformed_json").

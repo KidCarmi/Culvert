@@ -255,10 +255,9 @@ func (c *mcpToolTrustCoordinator) loadTarget(serverID, toolName string) toolTrus
 	rec, ok := cat.Current().Get(key)
 	srv, sok := reg.Current().Get(registry.ServerID(serverID))
 	t := tooltrust.CurrentTarget{
-		ServerExists:    sok,
-		ServerUsable:    sok && srv.Usable(),
-		ToolExists:      ok,
-		CatalogRevision: cat.Current().Revision(),
+		ServerExists: sok,
+		ServerUsable: sok && srv.Usable(),
+		ToolExists:   ok,
 	}
 	if sok {
 		t.Tenant = string(srv.OwnerScope)
@@ -269,6 +268,12 @@ func (c *mcpToolTrustCoordinator) loadTarget(serverID, toolName string) toolTrus
 		sum := rec.Fingerprint.Sum()
 		t.Fingerprint = tooltrust.FingerprintDigest(sum)
 		t.FingerprintFormatVersion = rec.Fingerprint.FormatVersion
+		// The optimistic-concurrency token is the tool's PER-RECORD revision — the value the
+		// admin inventory endpoint exposes as ToolView.Revision — NOT the global catalog
+		// snapshot revision. Using the global revision made an unrelated tool/server update
+		// advance the token and produce a spurious 409 stale-target even when the reviewed
+		// tool was unchanged; the per-record revision advances iff THIS tool changed.
+		t.CatalogRevision = rec.Revision
 	}
 	return toolTrustTargetInput{target: t, fingerprint: rec.Fingerprint, key: key, found: ok && sok}
 }
