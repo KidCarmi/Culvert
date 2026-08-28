@@ -374,3 +374,97 @@ func TestNewDiscovery_InstallsDefaultReconcileHook(t *testing.T) {
 		t.Fatal("a cleared reconcile hook must leave OnIngest nil")
 	}
 }
+
+// TestNewDiscovery_InstallsDefaultIngestGuard proves the round-15 wiring: NewDiscovery installs
+// the default ingest-serialization guard set by SetIngestGuard, and Discover runs the catalog
+// ingest INSIDE that guard (so the composition root can hold the tool-trust derive lock across
+// the publish). A cleared guard leaves IngestGuard nil and the ingest runs directly.
+func TestNewDiscovery_InstallsDefaultIngestGuard(t *testing.T) {
+	reg := registry.New(limits.DefaultCatalog())
+	id := registry.Identity("pin-1")
+	if _, err := reg.Register(registry.Registration{
+		ID: "s1", Endpoint: "https://s1.internal:443", PinnedIdentity: id, Capability: 0,
+		CreatedAt: time.Unix(1, 0), UpdatedAt: time.Unix(1, 0),
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if _, _, err := reg.VerifyIdentity("s1", id); err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	cat := catalog.New(limits.DefaultCatalog())
+	up := &fakeUpstream{result: `{"tools":[]}`}
+
+	var guardEntered, ingestRanInsideGuard bool
+	SetIngestGuard(func(ingest func() error) error {
+		guardEntered = true
+		// The ingest MUST run inside the guard — that is what makes the publish mutually
+		// exclusive with an approval critical section.
+		err := ingest()
+		ingestRanInsideGuard = true
+		return err
+	})
+	defer SetIngestGuard(nil)
+
+	d, err := NewDiscovery(reg, cat, up)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.IngestGuard == nil {
+		t.Fatal("NewDiscovery must install the default ingest guard when one is set")
+	}
+	if _, err := d.Discover(context.Background(), "s1"); err != nil {
+		t.Fatalf("discover under guard: %v", err)
+	}
+	if !guardEntered || !ingestRanInsideGuard {
+		t.Fatalf("Discover must run the ingest inside the guard: entered=%v ranInside=%v", guardEntered, ingestRanInsideGuard)
+	}
+
+	// With the guard cleared, a fresh Discovery carries no default and the ingest runs directly.
+	SetIngestGuard(nil)
+	d2, err := NewDiscovery(reg, cat, up)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d2.IngestGuard != nil {
+		t.Fatal("a cleared ingest guard must leave IngestGuard nil")
+	}
+	if _, err := d2.Discover(context.Background(), "s1"); err != nil {
+		t.Fatalf("discover without guard: %v", err)
+	}
+}
+
+// TestDiscovery_IngestGuardErrorFailsClosed proves a guard that refuses to run the ingest (e.g.
+// the critical section could not be entered) propagates as a discovery failure, so the previous
+// catalog snapshot is retained rather than silently skipping serialization.
+func TestDiscovery_IngestGuardErrorFailsClosed(t *testing.T) {
+	reg := registry.New(limits.DefaultCatalog())
+	id := registry.Identity("pin-1")
+	if _, err := reg.Register(registry.Registration{
+		ID: "s1", Endpoint: "https://s1.internal:443", PinnedIdentity: id, Capability: 0,
+		CreatedAt: time.Unix(1, 0), UpdatedAt: time.Unix(1, 0),
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if _, _, err := reg.VerifyIdentity("s1", id); err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	cat := catalog.New(limits.DefaultCatalog())
+	up := &fakeUpstream{result: `{"tools":[]}`}
+	d, err := NewDiscovery(reg, cat, up)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ingestRan int
+	d.IngestGuard = func(ingest func() error) error {
+		// Refuse without running the ingest.
+		_ = ingest
+		return mcperr.New(mcperr.ReasonUpstreamDiscoveryFailed, "test", "guard refused")
+	}
+	d.OnIngest = func() { ingestRan++ }
+	if _, err := d.Discover(context.Background(), "s1"); err == nil {
+		t.Fatal("a guard error must fail the discovery closed")
+	}
+	if ingestRan != 0 {
+		t.Fatalf("OnIngest must not fire when the guard refused, got %d", ingestRan)
+	}
+}

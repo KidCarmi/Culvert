@@ -131,7 +131,8 @@ func composeToolTrustBounded(t *testing.T, clk func() time.Time, maxRecords, max
 	mcpToolTrust.nowFn = clk
 	mcpToolTrust.mu.Unlock()
 	mcpToolTrustReconcile = mcpToolTrust.reconcile
-	execution.SetReconcileHook(func() { mcpToolTrustReconcile() }) // mirror the production wiring
+	execution.SetReconcileHook(func() { mcpToolTrustReconcile() })    // mirror the production wiring
+	execution.SetIngestGuard(mcpToolTrust.runCatalogIngestSerialized) // mirror the production wiring
 	mcpToolTrust.reconcile()
 }
 
@@ -840,5 +841,63 @@ func TestToolTrust_ComposeWiresDiscoveryReconcile(t *testing.T) {
 	}
 	if d.OnIngest == nil {
 		t.Fatal("composing tool trust must install the discovery reconcile hook (NewDiscovery.OnIngest)")
+	}
+}
+
+// TestToolTrust_ComposeWiresIngestGuard proves the round-15 production wiring: once tool trust
+// is composed, a Discovery built by execution.NewDiscovery carries the ingest-serialization
+// guard, so a discovery publish runs under the coordinator's derive lock with no per-caller
+// wiring.
+func TestToolTrust_ComposeWiresIngestGuard(t *testing.T) {
+	resetInventory(t)
+	reg, cat, _, _, _ := seedToolTrustInventory(t)
+	composeToolTrust(t, nil)
+	d, err := execution.NewDiscovery(reg, cat, ttStubUpstream{})
+	if err != nil {
+		t.Fatalf("NewDiscovery: %v", err)
+	}
+	if d.IngestGuard == nil {
+		t.Fatal("composing tool trust must install the discovery ingest guard (NewDiscovery.IngestGuard)")
+	}
+}
+
+// TestToolTrust_IngestSerializedUnderDeriveMu proves the round-15 fix: runCatalogIngestSerialized
+// (the execution.SetIngestGuard seam) runs the discovery ingest under deriveMu, so a catalog
+// revision advance is mutually exclusive with an in-flight approve/revoke/reconcile critical
+// section. While deriveMu is held (as ApproveShadow holds it across loadTarget→store.Approve),
+// a serialized ingest must NOT run; it must proceed once the lock is released.
+func TestToolTrust_IngestSerializedUnderDeriveMu(t *testing.T) {
+	resetInventory(t)
+	seedToolTrustInventory(t)
+	composeToolTrust(t, nil)
+
+	// Hold deriveMu as an in-flight approval's critical section would.
+	mcpToolTrust.deriveMu.Lock()
+
+	started := make(chan struct{})
+	ran := make(chan struct{})
+	go func() {
+		close(started)
+		_ = mcpToolTrust.runCatalogIngestSerialized(func() error {
+			close(ran)
+			return nil
+		})
+	}()
+	<-started
+
+	select {
+	case <-ran:
+		mcpToolTrust.deriveMu.Unlock()
+		t.Fatal("a serialized ingest ran while deriveMu was held — the publish is not serialized with the approve critical section")
+	case <-time.After(50 * time.Millisecond):
+		// Expected: the ingest is blocked on deriveMu.
+	}
+
+	mcpToolTrust.deriveMu.Unlock()
+	select {
+	case <-ran:
+		// Expected: released, the ingest proceeds.
+	case <-time.After(2 * time.Second):
+		t.Fatal("the serialized ingest did not run after deriveMu was released")
 	}
 }

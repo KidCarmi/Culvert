@@ -86,6 +86,23 @@ func (c *mcpToolTrustCoordinator) now() time.Time {
 	return time.Now()
 }
 
+// runCatalogIngestSerialized runs a discovery catalog ingest (its snapshot PUBLISH) under
+// deriveMu, so the catalog revision advance it performs is MUTUALLY EXCLUSIVE with an
+// approve/request/revoke/reconcile critical section. It is the execution.SetIngestGuard seam:
+// without it, a rediscovery could advance the live revision after ApproveShadow's loadTarget
+// captured the pre-advance copy but before store.Approve validated it, so an identical
+// rediscovery (or an F1→F2→F1 flap) in that window would pass the optimistic-concurrency check
+// against a stale revision and be approved instead of returning the required stale-target
+// conflict. deriveMu is the OUTER lock (taken before any store/catalog lock, never from under
+// one), and discovery is never invoked from within a deriveMu section, so wrapping the ingest
+// here cannot deadlock. The post-ingest reconcile (OnIngest) still takes deriveMu separately
+// after this returns.
+func (c *mcpToolTrustCoordinator) runCatalogIngestSerialized(ingest func() error) error {
+	c.deriveMu.Lock()
+	defer c.deriveMu.Unlock()
+	return ingest()
+}
+
 // initMCPToolTrust composes the tool-trust store and runs the startup reconcile. It
 // runs AFTER initMCPRuntime (which publishes the qualification inventory) so the
 // derivation has a live catalog to project onto. Fail-closed at every gate: if the
@@ -124,6 +141,13 @@ func initMCPToolTrust(_ *startupState) {
 	// an active approval is re-promoted at once (not after the periodic sweep). The closure
 	// reads the CURRENT mcpToolTrustReconcile, so a later reset makes it a no-op.
 	execution.SetReconcileHook(func() { mcpToolTrustReconcile() })
+	// Serialize the discovery ingest PUBLISH with the approve/revoke/reconcile critical
+	// section (ADR-0034 optimistic concurrency): a rediscovery cannot advance the catalog
+	// revision underneath an in-flight approval's loadTarget→store.Approve window, so an
+	// identical rediscovery / revision flap in that window is caught as a stale-target
+	// conflict rather than silently approved. Bound to the coordinator, not the swappable
+	// reconcile var, because it is a pure critical-section wrapper.
+	execution.SetIngestGuard(mcpToolTrust.runCatalogIngestSerialized)
 	// Startup reconcile is load-bearing (ADR-0034 D3): the boot inventory re-seeds
 	// every tool Quarantined; this re-applies each active approval whose bound
 	// fingerprint matches the freshly-seeded tool. Without it every restart silently
@@ -685,4 +709,5 @@ func resetMCPToolTrustForTest() {
 	mcpToolTrust.deriveMu.Unlock()
 	mcpToolTrustReconcile = func() {}
 	execution.SetReconcileHook(nil)
+	execution.SetIngestGuard(nil)
 }
