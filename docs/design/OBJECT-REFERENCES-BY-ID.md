@@ -1,10 +1,19 @@
 # Object References by ID (rename-safe rule → object links)
 
-Status: **design record, pre-implementation.** Authority for the final P3
-`references-by-id` item in `POLICY-ARCHITECTURE-FUTURE.md` §6 ("Object references
-by ID (rename-safe), object ULIDs"). Nothing here is implemented yet.
+Status: **IMPLEMENTED for both in-scope object kinds.** S1 (decryption
+profiles) and S2 (category groups) are shipped: `PolicyRule` carries the
+authoritative `DecryptionProfileID` / `DestCategoryGroupID` link IDs, the
+match paths resolve ID-first with name fallback for un-migrated/dangling
+references only, rename cascades onto running rules AND the open draft
+candidate, and the delete-block walk is ID-first. The 2D-A checkpoint
+(§13 below) added the durable object-mutation contract, the rename recovery
+model, per-store optimistic-concurrency fencing, and the draft-aware
+reference walk. The historical design sections below are preserved as
+written (decisions recorded 2026-07-13); §13 records what the
+implementation guarantees today.
 
-Date: 2026-07-13.
+Date: 2026-07-13 (design). Implementation checkpoint recorded 2026-08-28
+(Batch 2 Slice 2D-A).
 
 ---
 
@@ -199,3 +208,107 @@ feature off-nobody's-path until its own match/rename wiring lands.
   export/rollback snapshots. Cascade-on-rename keeps the denormalized copy honest
   once, at rename time.
 - **Migrating URL categories** — §2 (feed + membership name-coupling; out of scope).
+
+## 13. 2D-A implementation checkpoint (2026-08-28)
+
+Recorded as-built for the frontend-modernization Slice 2D-A backend
+hardening; this section is the current contract.
+
+### ID-authoritative reference model (shipped, unchanged by 2D-A)
+
+The rule → object link is the stable object ID; the rule-side name is a
+denormalized display/export cache the SERVER keeps honest (rename cascade +
+the reconciliation below). The browser never chooses or submits object-link
+IDs — `stampObjectRefIDs` derives them server-side from the submitted name.
+A resolved ID is final on every consumer path (match, fail-open scope,
+delete-block): the stale name is never consulted, so a rename can never make
+a rule follow a DIFFERENT object. Name fallback exists only for un-migrated
+rules and dangling IDs.
+
+### Durable object mutation contract (2D-A.0a)
+
+Both object stores (`internal/catgroup`, `internal/decryptprofile`) carry an
+error-returning persistence core (`SaveErr`) and a serialized
+durable-mutation primitive (`MutateDurable`): the optional expected-version
+fence, the mutation, the persist, and the failure rollback form ONE critical
+section. A confirmed 2xx on `/api/category-groups` and
+`/api/decryption-profiles` means the mutation is restart-durable; a
+pre-replacement persist failure restores the in-memory objects AND the
+generation and returns 500 (nothing durable changed); `ErrReplacedNotSynced`
+follows the repository's landed-content doctrine (the renamed file already
+carries the new objects — memory kept, success reported). `fn` itself is
+atomic-or-nothing: a composed content+rename that fails partway (e.g. a
+rename collision after the content applied) restores the pre-mutation state.
+Legacy best-effort `Save()` wrappers remain for old non-critical callers
+(bulk installs, load-time migrations).
+
+### Object concurrency fencing (2D-A.0c)
+
+Each store carries a durable per-store mutation generation: bumped on every
+successful mutation and on bulk installs (`ReplaceAll`), persisted to a
+`<store>.meta` sidecar (written after — and skipped on — an objects-file
+failure, so it is never newer than the objects on disk; absent/corrupt reads
+as 0, degrading conservatively into 409s). The generation is served on the
+list read (`version`) and asserted via the optional `?ifVersion=` query on
+POST/PUT/DELETE; a mismatch is the SAME structured 409 as the policy
+rulebase fence ({error, currentVersion, yourVersion}). The check runs inside
+`MutateDurable`'s critical section — no TOCTOU between check and write. The
+v2 frontend always asserts it; legacy clients without it keep last-write-wins
+semantics. Bulk install paths bypass the mutation serializer by design
+(whole-surface replaces whose authority re-converges on the next push).
+
+### Rename recovery model (2D-A.0b)
+
+Rename is a composed cross-store operation with NO multi-file atomicity
+pretense. Ordered durable phases:
+
+1. **Object store** — content update + rename under `MutateDurable`
+   (durable-or-nothing; a failure here changes nothing anywhere).
+2. **Running policy cascade** — `CascadeDestCategoryGroupRename` /
+   `CascadeDecryptionProfileRename` + an error-aware `SaveErr`.
+3. **Draft candidate cascade** — under the draft coordinator's lock via
+   `persistLocked`, error-returned.
+
+A cascade persist failure AFTER the durable object rename keeps the correct
+in-memory cascade, returns a truthful 500 naming the failed domain (never a
+2xx with a known-failed durable domain), and audits the partial state.
+
+Crash points and recovery (deterministic, ID-authoritative):
+
+| Crash after…                | Disk state                                   | Recovery |
+|-----------------------------|----------------------------------------------|----------|
+| nothing persisted           | all-old (consistent pre-rename)              | none needed |
+| object store persisted      | object new; rule names stale (IDs intact)    | boot reconciliation refreshes names |
+| + running cascade persisted | draft candidate names stale (IDs intact)     | boot reconciliation refreshes the candidate |
+| everything persisted        | consistent                                   | none needed |
+
+**Enforcement is correct at every crash point** — rules reference the stable
+object ID throughout; any disagreement is display/export-only.
+`reconcileObjectRefNames()` (startup, after policy + draft + object stores
+load) re-derives stale denormalized names from the ID-authoritative object
+stores and persists only when something changed; a dangling ID is left
+untouched (its stale name is the documented name-fallback matching input). A
+refresh that touches running rules advances the running generation — an
+active draft then truthfully reads base-stale (after a crashed rename the
+operator should re-review before committing).
+
+Draft interaction: a rename whose cascade touches RUNNING rules advances the
+running generation, so an active draft's base goes stale and commit is
+fenced until review (the deliberate 2B/2C fence behavior — rendered as
+truth, not suppressed). A rename referenced ONLY by the draft candidate
+moves nothing on running: the candidate follows (same ID, new name) and the
+draft commits cleanly to the same object.
+
+### Draft-aware reference walk (2D-A.0b)
+
+`objectReferences` walks RUNNING rules and, when a Policy Draft is active,
+the CANDIDATE too: a staged rule referencing an object blocks its delete and
+appears in Where Used (annotated "(draft candidate)"; a staged copy of a
+running rule dedups by its stable ULID). The endpoint and the delete guard
+still share the single walk, so they can never disagree.
+
+Proofs: `internal/catgroup/catgroup_durable_test.go`,
+`internal/decryptprofile/decryptprofile_durable_test.go`,
+root `object_durability_test.go` (fault injection at every phase +
+disk-reload oracles + the full §27 reference-integrity matrix),
+`objects_enum_lockstep_test.go` (frontend/runtime enum lockstep).

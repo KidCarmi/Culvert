@@ -411,7 +411,7 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > | **2A-M** | Monitor residue micro-slice: Traffic retention / purge / export (destructive mutation + retention configuration + Blob/download ownership — deliberately SPLIT out of 2A; no architectural dependency on the Policy read surface) | this round |
 > | **2B** | Policy Write: rule create/edit/delete/bulk, staged reorder + move, draft commit/revert, Require Commit toggle, multi-admin actor warning, shadow warnings, `ifVersion` fencing UX, default-action mutation, dirty-route guard | pending |
 > | **2C** | Authentication Policy (Stage-1 rules + default-auth-outcome T3 ceremony) + Policy Learning (advisory panel, accept-to-draft, reject) | pending |
-> | **2D** | Objects & Taxonomy: URL categories (+hosts, lookup, feed status), SaaS feed settings/overrides/refresh, category groups (+rename), decryption profiles (+rename, cert-enum lockstep), file profiles, rewrite | pending |
+> | **2D** | Objects & Taxonomy: URL categories (+hosts, lookup, feed status), SaaS feed settings/overrides/refresh, category groups (+rename), decryption profiles (+rename, cert-enum lockstep), file profiles, rewrite. **Internal review decomposition (2026-08-28, checkpoint boundaries only — product scope unchanged): 2D-A** Category Groups + Decryption Profiles (shipped — see the 2D-A record below); **2D-B** URL Categories + SaaS feed/settings/overrides/status/refresh; **2D-C** File Profiles + Rewrite Rules. Two already-discovered later gates, recorded here and deliberately NOT solved in 2D-A: **(2D-B)** the URL-category PUT path needs the same 10,000-host cap the POST path enforces, and taxonomy writes need truthful durability (the urlcat store's Save is still best-effort); **(2D-C)** File Profiles are ID-bearing objects but Policy references them by NAME (`FileProfile`), and Rewrite Rule IDs are process-local integers, not durable identities — both need their reference/identity model settled before a v2 write surface. | 2D-A shipped |
 > | **2E** | Scanning / Content Security / Decryption / CDR: blocklist (+feeds/exceptions/mode T3), Content & Scanning (YARA/DPI/exclusions/threat feeds/cache/saturation), decryption exclusions + tunables + health (pulled forward from FE-6 for cohesion with 2D profiles), CDR | pending |
 > | **2F** | Network: PAC (profiles/pools/lifecycle/simulator/analyze/posture/exceptions + server-named DIRECT-bypass T3 ceremony) + Upstream (write-only credentials, direct-fallback banner) | pending |
 >
@@ -724,6 +724,60 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > per-instance `log_store_path` premises (harness debt addendum: the
 > FRESH/SETUPFAIL instances now carry their own paths, making the history
 > journeys deterministic).
+>
+> **Slice 2D-A implementation record (this branch, 2026-08-28).**
+>
+> **2D-A.0 backend hardening** — the shared-object stores
+> (`internal/catgroup`, `internal/decryptprofile`) were the last mutation
+> surfaces behind the v2 program still on best-effort persistence. They now
+> carry the 2B/2C-class contract: error-returning `SaveErr`, a serialized
+> `MutateDurable` primitive (optional `?ifVersion=` fence + mutation +
+> persist + rollback in ONE critical section; confirmed 2xx =
+> restart-durable; `ErrReplacedNotSynced` follows the landed-content
+> doctrine), a durable per-store generation persisted in a `.meta` sidecar
+> (never newer than the objects file; served on list reads; the same
+> structured 409 conflict contract as the policy fence), and name-collision
+> refusals under the store lock (409, `ErrNameTaken`). Rename is an
+> explicitly composed cross-store operation (object domain → running
+> cascade → draft-candidate cascade, each persist error-aware; a cascade
+> failure after the durable object rename is a truthful 500 naming the
+> failed domain, never a false 2xx) with deterministic recovery:
+> `reconcileObjectRefNames()` at boot re-derives stale denormalized names
+> from the ID-authoritative object stores, converging every crash point —
+> enforcement is ID-linked and provably unchanged throughout. The
+> `objectReferences` walk now also covers an ACTIVE draft candidate (a
+> staged reference blocks delete and appears in Where Used). Authority:
+> `docs/design/OBJECT-REFERENCES-BY-ID.md` §13.
+>
+> **2D-A.1–2D-A.4 frontend** — `frontend/src/api/objects.ts` (fenced
+> stable-ID clients; strict security-enum decoders with a per-profile
+> DEGRADED state — unknown values never coerce to inherit/fail-open;
+> tri-state `inspectHttp2` fidelity with inherit-by-omission
+> serialization; reference-block 409 recognizer), enum lockstep pinned
+> three ways (OpenAPI enum vocabularies → generated-union compile-time
+> `satisfies`/exhaustiveness, and `objects_enum_lockstep_test.go` probing
+> every frontend value through `decryptprofile.Validate` both directions;
+> "permissive" tripwired). Surfaces: `/app/objects/category-groups`
+> (membership from the authoritative URL-category name list, dangling
+> members preserved and badged, rename truth callout, T1 ref-guarded
+> delete) and `/app/objects/decryption-profiles` (security-precise copy:
+> skip = "verification DISABLED", the pre-save fail-open
+> adaptive-exclusion warning, distinct onUnsupported/onInspectError
+> copy, degraded read-only rows). Shared `ObjectDeleteDialog`: Where Used
+> preflight is information only; the server's structured 409 renders the
+> REAL consumers with stable-ID deep links. Where Used route map extended
+> for the routes that now exist (auth-rule → `?rule=` deep link with
+> not-in-snapshot truth; category-group → `?id=`); Access Rules' explicit
+> refresh now refetches the editor option lists (§20). Unknown-outcome
+> latch, run-owner mutations, auth-boundary cleanup, dirty guard on both
+> pages.
+>
+> **Draft interplay (derived from the implementation, §28)**: a rename
+> cascading onto RUNNING rules advances the running generation, so an
+> active draft truthfully reads base-stale and commit is fenced until
+> review; a draft-only reference follows the rename (same object ID) and
+> commits cleanly. Both shapes are proven at the Go layer and against the
+> real binary (policy-2d.spec.ts).
 
 ### FE-6 — Cluster, identity, certificates, settings, releases, support, MCP, decryption
 - **Objective**: FE-V27..V30, FE-V33, FE-V35, FE-V36 (settings decomposed per IA §5),
