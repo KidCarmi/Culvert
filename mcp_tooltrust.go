@@ -386,6 +386,17 @@ func (c *mcpToolTrustCoordinator) ApproveShadow(id, approver, tenant string) (*t
 	if err != nil {
 		return nil, err
 	}
+	// The grant is durably active, but a short TTL may have ELAPSED during the Approve write:
+	// Approve checks expiry before the durable transition, and the clock advances under it.
+	// promoteFor only re-verifies the fingerprint, so an already-expired grant would be
+	// promoted Usable until the next reconcile tick. Recheck expiry as of now and re-derive
+	// (which demotes an expired grant) instead of promoting an elapsed one.
+	if granted.ExpiresAt != nil && !c.now().Before(*granted.ExpiresAt) {
+		if reg, cat := mcpInventory.sharedInventory(); reg != nil && cat != nil {
+			c.rederiveTool(store, reg, cat, granted.ServerID, granted.ToolName, c.now())
+		}
+		return granted, nil
+	}
 	// Materialize the trust: promote the exact reviewed fingerprint. Fail-closed and
 	// idempotent; a stale CAS is surfaced but the durable grant stands.
 	if _, perr := c.promoteFor(granted); perr != nil {

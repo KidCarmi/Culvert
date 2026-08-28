@@ -607,8 +607,11 @@ func (s *Store) Get(id, tenant string) (*ToolApproval, error) {
 	return a.clone(), nil
 }
 
-// List returns a bounded, tenant-scoped view of approvals in a deterministic order
-// (RequestedAt, then ApprovalID). Results are copies.
+// List returns a bounded, tenant-scoped view of approvals in NEWEST-FIRST order
+// (RequestedAt descending, then ApprovalID for determinism). Results are copies. The order
+// is deliberately newest-first: the endpoint exposes no cursor/offset, so an ascending sort
+// followed by truncation would return only the OLDEST records and hide every request past
+// the limit — including brand-new pending approvals an admin needs to decide.
 func (s *Store) List(tenant string, limit int) []*ToolApproval {
 	if limit <= 0 {
 		return nil
@@ -622,7 +625,12 @@ func (s *Store) List(tenant string, limit int) []*ToolApproval {
 		}
 		out = append(out, a.clone())
 	}
-	sortApprovals(out)
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].RequestedAt.Equal(out[j].RequestedAt) {
+			return out[i].RequestedAt.After(out[j].RequestedAt) // newest first
+		}
+		return out[i].ApprovalID < out[j].ApprovalID
+	})
 	if len(out) > limit {
 		out = out[:limit]
 	}

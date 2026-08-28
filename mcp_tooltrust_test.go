@@ -736,3 +736,41 @@ func TestExpiryFromSeconds_RejectsOutOfRange(t *testing.T) {
 		t.Fatalf("a TTL at the cap must be accepted, got %v", err)
 	}
 }
+
+// TestToolTrust_ApproveExpiredDuringWrite_DemotesNotPromotes proves the round-10 P2: if a
+// short-lived grant's TTL elapses during the durable Approve write, ApproveShadow must NOT
+// promote the elapsed grant to Usable. The store clock stays at T0 (so Approve accepts the
+// not-yet-expired request) while the coordinator clock is advanced past the expiry (modeling
+// the TTL elapsing under the write); the post-transition recheck must demote, not promote.
+func TestToolTrust_ApproveExpiredDuringWrite_DemotesNotPromotes(t *testing.T) {
+	resetInventory(t)
+	_, cat, sid, tool, fpHex := seedToolTrustInventory(t)
+	t0 := time.Unix(1_700_000_000, 0)
+	composeToolTrust(t, func() time.Time { return t0 }) // store + coordinator both at T0
+	exp := t0.Add(time.Minute)
+	req, err := mcpToolTrust.RequestApproval(toolTrustRequestInput{
+		Tenant:              ttTenant,
+		ServerID:            sid,
+		ToolName:            tool,
+		ExpectedFingerprint: fpHex,
+		ExpectedCatalogRev:  cat.Current().Revision(),
+		Purpose:             tooltrust.PurposeShadowEvaluation,
+		RequestedBy:         "operator@corp",
+		Reason:              "short ttl",
+		ExpiresAt:           &exp,
+	})
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	// Advance ONLY the coordinator clock past the expiry — the store still sees T0, so Approve
+	// accepts the request, but the post-write recheck sees an already-elapsed grant.
+	mcpToolTrust.mu.Lock()
+	mcpToolTrust.nowFn = func() time.Time { return t0.Add(2 * time.Minute) }
+	mcpToolTrust.mu.Unlock()
+	if _, err := mcpToolTrust.ApproveShadow(req.ApprovalID, "admin@corp", ttTenant); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	if got := eligibility(t, cat, sid, tool); got != catalog.Quarantined {
+		t.Fatalf("an approved-but-already-expired grant must NOT be promoted Usable, got %s", got)
+	}
+}

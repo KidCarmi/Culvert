@@ -1028,3 +1028,35 @@ func TestPersistFailure_ClassifiedAsStoreUnavailable(t *testing.T) {
 	_, err := s.CreateRequest(goodRequest())
 	mustReason(t, err, mcperr.ReasonApprovalStoreUnavailable)
 }
+
+// TestList_ReturnsNewestFirstWithinLimit proves the round-10 P2: List returns the NEWEST
+// records first, so truncating to a limit surfaces recent (incl. brand-new pending) requests
+// instead of hiding them behind the oldest ones (the endpoint has no cursor/offset).
+func TestList_ReturnsNewestFirstWithinLimit(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	s := newTestStore(t, clk)
+	var ids []string
+	for i := 0; i < 3; i++ {
+		in := goodRequest()
+		in.ToolName = "tool-" + string(rune('a'+i))
+		req, err := s.CreateRequest(in)
+		if err != nil {
+			t.Fatalf("create %d: %v", i, err)
+		}
+		ids = append(ids, req.ApprovalID)
+		clk.t = clk.t.Add(time.Minute) // each request is newer than the previous
+	}
+	// ids[2] is the newest. A limit of 2 must return the two NEWEST and exclude the oldest.
+	got := s.List("tenant-a", 2)
+	if len(got) != 2 {
+		t.Fatalf("want 2 results, got %d", len(got))
+	}
+	if got[0].ApprovalID != ids[2] {
+		t.Fatalf("newest-first: got[0] = %s, want newest %s", got[0].ApprovalID, ids[2])
+	}
+	for _, a := range got {
+		if a.ApprovalID == ids[0] {
+			t.Fatal("the OLDEST record must be excluded when the limit truncates, not the newest")
+		}
+	}
+}
