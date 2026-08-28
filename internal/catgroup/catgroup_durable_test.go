@@ -690,3 +690,169 @@ func TestEnvelopeLoad_SchemaDiscriminator(t *testing.T) {
 		})
 	}
 }
+
+// ─── Commit boundary (2D-A commit-boundary correction) ─────────────────
+
+// TestCommitBoundary_FailedMutationNeverVisibleOnDisk (§7): a standalone
+// Save (the production ReplaceAll+Save bulk shape) racing an admin
+// MutateDurable whose fn has mutated memory but NOT yet returned must not be
+// able to publish that in-flight state. Sequence: durable seed → ReplaceAll
+// installs BULK (its following Save still pending) → admin fn mutates and
+// blocks pre-return → the standalone Save runs → admin fn released → the
+// admin's OWN publication is failed hard → MutateDurable rolls back and
+// returns ErrPersist. Required final truth: a fresh reload equals the
+// rollback state — the failed, unacknowledged admin mutation must NOT exist
+// on disk at any epoch. On an implementation whose Save does not enter the
+// mutation domain, the standalone Save publishes uncommitted-new-content +
+// old-epoch and the failed mutation survives on disk. Channels + bounded
+// yields only — no sleeps.
+func TestCommitBoundary_FailedMutationNeverVisibleOnDisk(t *testing.T) {
+	s, path := newDurableStore(t)
+	if err := s.MutateDurable(nil, func() error {
+		_, err := s.Add("Keep", []string{"news"})
+		return err
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	s.ReplaceAll([]Group{{ID: "bulk-id-01", Name: "Bulk", Categories: []string{"ai"}}}) // v2, Save pending
+
+	prev := writeFile
+	t.Cleanup(func() { writeFile = prev })
+	var stubMu sync.Mutex
+	failArmed := false
+	writeFile = func(p string, data []byte, mode os.FileMode) error {
+		stubMu.Lock()
+		if failArmed && p == path {
+			failArmed = false
+			stubMu.Unlock()
+			return errors.New("injected admin publication failure")
+		}
+		stubMu.Unlock()
+		return fileutil.AtomicWrite(p, data, mode)
+	}
+
+	fnMutated := make(chan struct{})
+	fnRelease := make(chan struct{})
+	adminDone := make(chan struct{})
+	var adminErr error
+	go func() {
+		defer close(adminDone)
+		adminErr = s.MutateDurable(nil, func() error {
+			_, err := s.Add("AdminAdd", []string{"marketing"})
+			if err != nil {
+				return err
+			}
+			close(fnMutated) // memory now carries the in-flight mutation
+			<-fnRelease      // blocked BEFORE fn returns
+			return nil
+		})
+	}()
+	<-fnMutated
+
+	saveDone := make(chan struct{})
+	go func() {
+		defer close(saveDone)
+		s.Save() // the bulk caller's pending standalone Save
+	}()
+
+	// Give the standalone Save every opportunity to complete while the
+	// mutation transaction is still open (possible only when Save does not
+	// enter the mutation domain).
+	saveCompletedWhileFnBlocked := false
+	for i := 0; i < 200000 && !saveCompletedWhileFnBlocked; i++ {
+		select {
+		case <-saveDone:
+			saveCompletedWhileFnBlocked = true
+		default:
+			runtime.Gosched()
+		}
+	}
+	if saveCompletedWhileFnBlocked {
+		t.Error("standalone Save completed while the mutation transaction was open — it published an unfinished mutation")
+	}
+
+	// Fail the admin's OWN durable publication (the next store-path write).
+	stubMu.Lock()
+	failArmed = true
+	stubMu.Unlock()
+	close(fnRelease)
+	<-adminDone
+	<-saveDone
+	if !errors.Is(adminErr, ErrPersist) {
+		t.Fatalf("admin publication failure = %v, want ErrPersist", adminErr)
+	}
+	writeFile = prev
+
+	// Memory rolled back to the pre-admin truth.
+	if s.GetByName("AdminAdd") != nil || s.Version() != 2 {
+		t.Fatalf("memory rollback truth violated: version %d, names %q", s.Version(), namesOf(s))
+	}
+	// Disk must equal the rollback truth — the failed mutation must not be
+	// durable at ANY epoch.
+	fresh := reload(t, path)
+	if fresh.GetByName("AdminAdd") != nil {
+		t.Fatalf("failed, unacknowledged admin mutation exists on disk (names %q, epoch %d)", namesOf(fresh), fresh.Version())
+	}
+	if fresh.Version() != 2 || namesOf(fresh) != namesOf(s) {
+		t.Fatalf("reload = epoch %d names %q, want rollback truth epoch 2 names %q", fresh.Version(), namesOf(fresh), namesOf(s))
+	}
+}
+
+// TestCommitBoundary_SaveWaitsForMutationBoundary (§8, the crash-window pin
+// independent of any forced write error): while a MutateDurable fn is blocked
+// after its memory mutation, a standalone Save must NOT complete — an
+// external publication observing an unfinished transaction is forbidden even
+// when the transaction later succeeds. After the boundary closes, the Save
+// publishes the committed state.
+func TestCommitBoundary_SaveWaitsForMutationBoundary(t *testing.T) {
+	s, path := newDurableStore(t)
+	if err := s.MutateDurable(nil, func() error {
+		_, err := s.Add("Keep", []string{"news"})
+		return err
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	fnMutated := make(chan struct{})
+	fnRelease := make(chan struct{})
+	adminDone := make(chan struct{})
+	var adminErr error
+	go func() {
+		defer close(adminDone)
+		adminErr = s.MutateDurable(nil, func() error {
+			_, err := s.Add("AdminAdd", []string{"marketing"})
+			if err != nil {
+				return err
+			}
+			close(fnMutated)
+			<-fnRelease
+			return nil
+		})
+	}()
+	<-fnMutated
+
+	saveDone := make(chan struct{})
+	go func() {
+		defer close(saveDone)
+		s.Save()
+	}()
+	for i := 0; i < 200000; i++ {
+		runtime.Gosched()
+	}
+	select {
+	case <-saveDone:
+		t.Fatal("standalone Save completed while the mutation transaction was open — published an unfinished mutation")
+	default:
+	}
+
+	close(fnRelease)
+	<-adminDone
+	<-saveDone
+	if adminErr != nil {
+		t.Fatalf("admin mutation must succeed, got %v", adminErr)
+	}
+	fresh := reload(t, path)
+	if fresh.GetByName("AdminAdd") == nil || fresh.Version() != s.Version() || namesOf(fresh) != namesOf(s) {
+		t.Fatalf("committed state not durable after boundary closed: epoch %d names %q (memory %d %q)", fresh.Version(), namesOf(fresh), s.Version(), namesOf(s))
+	}
+}

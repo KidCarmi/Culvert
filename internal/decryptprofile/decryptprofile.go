@@ -338,8 +338,12 @@ type Store struct {
 	// that lost the race to a confirmed MutateDurable can never resume and
 	// rename a stale envelope over the acknowledged one. Locking only the
 	// write (after the snapshot) would NOT restore the invariant. LOCK ORDER:
-	// mutMu → saveMu → mu; Save/SaveErr standalone take saveMu → mu(RLock);
-	// nothing takes mu then saveMu, nothing takes saveMu then mutMu.
+	// mutMu → saveMu → mu. EVERY runtime persistence entry goes through mutMu
+	// first (public SaveErr acquires it; MutateDurable holds it across the
+	// whole transaction and calls the internal saveErrLocked, which must
+	// never reacquire mutMu — the commit-boundary correction, so a standalone
+	// save can never publish an in-flight mutation's memory). Nothing takes
+	// mu then saveMu or mutMu, nothing takes saveMu then mutMu.
 	saveMu sync.Mutex
 }
 
@@ -488,13 +492,36 @@ func (s *Store) Save() { _ = s.SaveErr() }
 // landed replacement carries the new epoch with the new content. The retired
 // legacy sidecar is removed once the envelope has landed.
 //
-// The WHOLE function runs under saveMu — snapshot included, not just the
+// SaveErr is the PUBLIC entry: it acquires mutMu FIRST (2D-A commit-boundary
+// correction), so a standalone save orders against the whole mutation domain
+// and can never observe — let alone publish — the memory state of an
+// in-flight MutateDurable transaction: fn's uncommitted content paired with
+// the not-yet-advanced epoch. Without this, a caller-side Save (the
+// production ReplaceAll+Save bulk shape) racing an admin mutation could
+// persist uncommitted-new-content + old-epoch; if that mutation then failed
+// its own publication and rolled back, the failed, unacknowledged mutation
+// stayed on disk. MutateDurable already holds mutMu and calls saveErrLocked
+// directly — mutMu is not reentrant, so an internal SaveErr call from inside
+// the mutation path would deadlock and must never be added.
+func (s *Store) SaveErr() error {
+	s.mutMu.Lock()
+	defer s.mutMu.Unlock()
+	return s.saveErrLocked()
+}
+
+// saveErrLocked is the INTERNAL publication helper. LOCK OWNERSHIP CONTRACT:
+// the caller MUST hold mutMu (public SaveErr acquires it; MutateDurable holds
+// it across the whole transaction) — it is never called bare, and it must
+// NOT reacquire mutMu.
+//
+// The WHOLE helper runs under saveMu — snapshot included, not just the
 // write — so publications form one monotonic order and durable state never
 // goes backwards: once MutateDurable has returned success for epoch N, no
 // older in-flight Save can replace the envelope with epoch < N. Every runtime
-// persistence path routes through here (Save is a thin wrapper), so no caller
-// sits outside the ordering domain.
-func (s *Store) SaveErr() error {
+// persistence path routes through here (Save is a thin wrapper over
+// SaveErr), so no caller sits outside the ordering domain. Lock order
+// within: saveMu → mu(RLock).
+func (s *Store) saveErrLocked() error {
 	s.saveMu.Lock()
 	defer s.saveMu.Unlock()
 
@@ -558,7 +585,9 @@ func (s *Store) MutateDurable(ifVersion *int64, fn func() error) error {
 	// them equal, but the live increment stays monotonic regardless.
 	s.version++
 	s.mu.Unlock()
-	if err := s.SaveErr(); err != nil {
+	// mutMu is already held for the whole transaction — call the internal
+	// publication helper directly (public SaveErr would self-deadlock).
+	if err := s.saveErrLocked(); err != nil {
 		if errors.Is(err, fileutil.ErrReplacedNotSynced) {
 			obs.Warnf("DecryptionProfiles: mutation persisted but parent-dir sync failed: %v", err)
 			return nil
