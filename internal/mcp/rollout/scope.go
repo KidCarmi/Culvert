@@ -530,14 +530,30 @@ func (s Scope) bucketKeyInclusionSet() stringSet {
 	}
 }
 
+// bucketKeyExclusionSet returns the exclusion set on the bucket-key dimension, or nil when
+// that dimension carries none. Only tenant and principal have an exclusion set; a bucket
+// keyed by agent or client has no exclusion dimension, so no key is ever excluded there.
+func (s Scope) bucketKeyExclusionSet() stringSet {
+	switch s.bucketKey {
+	case BucketByTenant:
+		return s.exTenants
+	case BucketByAgent, BucketByClient:
+		return nil
+	default: // BucketByPrincipal
+		return s.exPrincipals
+	}
+}
+
 // bucketHasSurvivingKey reports whether the percentage bucket can admit at least one
 // request GIVEN the scope's inclusion set on the bucket-key dimension. When
 // 0 < percent < 100 the bucket keys on a stable subject attribute (principal/tenant/
 // agent/client), and a matching request must ALSO satisfy that dimension's inclusion set
-// (dimOK), so a FINITE inclusion set enumerates every possible bucket key. If every one of
-// them hashes outside the bucket, no request can pass and the scope shadows nothing. An
-// EMPTY (unbounded) bucket-key set can always produce a surviving key, so it is treated as
-// satisfiable (and a pure-percentage scope is not enumerable enough for Shadow anyway).
+// (dimOK) AND its exclusion set, so a FINITE inclusion set enumerates every possible bucket
+// key. If every NON-EXCLUDED one hashes outside the bucket, no request can pass and the
+// scope shadows nothing. An EMPTY (unbounded) bucket-key set can always produce a surviving
+// key, so it is treated as satisfiable (and a pure-percentage scope is not enumerable enough
+// for Shadow anyway). Excluded keys are skipped: Contains rejects them before the bucket, so
+// a key that is in-bucket but excluded is NOT a survivor (Codex P2, PR #1234).
 func (s Scope) bucketHasSurvivingKey() bool {
 	if s.percent <= 0 || s.percent >= 100 {
 		return true // no sub-sampling gate: every keyed request is in-bucket
@@ -546,7 +562,11 @@ func (s Scope) bucketHasSurvivingKey() bool {
 	if keys.empty() {
 		return true // unbounded keyspace ⇒ a surviving key exists for any percent ≥ 1
 	}
+	excl := s.bucketKeyExclusionSet()
 	for k := range keys {
+		if excl.has(k) {
+			continue // Contains rejects an excluded key before the bucket — never a survivor
+		}
 		// StableBucket returns [0,100); widening it to int is always safe (avoids an
 		// int→uint32 narrowing on s.percent that the lint gate flags). Same boundary as
 		// inBucket.

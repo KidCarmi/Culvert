@@ -699,4 +699,25 @@ func TestAdmitsToolForEvaluation(t *testing.T) {
 	if !bucketLive.Contains(Subject{Capability: CapabilityGateway, ServerID: "s1", ToolName: "t", ToolFingerprint: "fp", PrincipalID: "p", Operation: RiskWrite}) {
 		t.Fatal("control: principal p must fall inside the 50% bucket for salt s9")
 	}
+
+	// An EXCLUDED in-bucket key is not a survivor: Contains rejects it via the exclusion before
+	// the bucket, so the only in-bucket principal (p) being excluded, while the surviving one (q)
+	// hashes outside, means the scope evaluates nothing (Codex P2, PR #1234). Mutation: not
+	// filtering exclusions in bucketHasSurvivingKey counts p as a survivor and fails here.
+	bucketExcludedSurvivor := mk(ScopeSpec{Capability: CapabilityGateway, Servers: []string{"s1"}, Principals: []string{"p", "q"}, ExcludePrincipals: []string{"p"}, Percent: 50, BucketSalt: "s9", Operations: []RiskClass{RiskWrite}, HighRisk: true})
+	if bucketExcludedSurvivor.AdmitsToolForEvaluation("s1", "t", "fp") {
+		t.Fatal("a bucket whose only in-bucket key is excluded (and the non-excluded key is out-of-bucket) admits no request")
+	}
+	// Cross-check: Contains rejects the excluded in-bucket p (exclusion) AND the out-of-bucket q.
+	if bucketExcludedSurvivor.Contains(Subject{Capability: CapabilityGateway, ServerID: "s1", ToolName: "t", ToolFingerprint: "fp", PrincipalID: "p", Operation: RiskWrite}) {
+		t.Fatal("control: excluded principal p must be rejected by Contains")
+	}
+	if bucketExcludedSurvivor.Contains(Subject{Capability: CapabilityGateway, ServerID: "s1", ToolName: "t", ToolFingerprint: "fp", PrincipalID: "q", Operation: RiskWrite}) {
+		t.Fatal("control: out-of-bucket principal q must be rejected by Contains")
+	}
+	// Excluding an OUT-of-bucket key must not over-reject: p survives (in-bucket, not excluded).
+	bucketExcludeOutOfBucket := mk(ScopeSpec{Capability: CapabilityGateway, Servers: []string{"s1"}, Principals: []string{"p", "q"}, ExcludePrincipals: []string{"q"}, Percent: 50, BucketSalt: "s9", Operations: []RiskClass{RiskWrite}, HighRisk: true})
+	if !bucketExcludeOutOfBucket.AdmitsToolForEvaluation("s1", "t", "fp") {
+		t.Fatal("excluding an out-of-bucket key must not reject a scope whose in-bucket key still survives")
+	}
 }
