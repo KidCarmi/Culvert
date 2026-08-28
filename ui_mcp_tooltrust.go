@@ -249,11 +249,17 @@ func apiMCPToolApprovalDecision(w http.ResponseWriter, r *http.Request) {
 	switch body.Action {
 	case "approve":
 		a, err := mcpToolTrust.ApproveShadow(body.ApprovalID, actor, tenant)
+		// A non-nil grant means the durable active grant was committed even if the catalog
+		// projection (promotion) failed afterward (a stale CAS). That IS a real trust
+		// decision — it becomes effective on the next reconcile — so audit it regardless of
+		// the projection error, then surface any error.
+		if a != nil {
+			auditEvent(r, "mcp.tooltrust.approve", a.ApprovalID, a.ServerID+"/"+a.ToolName)
+		}
 		if err != nil {
 			mcpErr(w, err)
 			return
 		}
-		auditEvent(r, "mcp.tooltrust.approve", a.ApprovalID, a.ServerID+"/"+a.ToolName)
 		jsonOK(w, mcpToolApprovalViewOf(a))
 	case "reject":
 		if err := mcpToolTrust.Reject(body.ApprovalID, actor, tenant, body.Reason); err != nil {

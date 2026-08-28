@@ -209,9 +209,11 @@ func (c *mcpToolTrustCoordinator) reconcile() {
 	// unexpired grant covers the current fingerprint; demote otherwise. This is what
 	// makes expiry effective even when persisting the Expired status failed, and it is
 	// the single place trust is materialized — never a blind promote-only pass that could
-	// leave a no-longer-covered tool Usable.
+	// leave a no-longer-covered tool Usable. The active set is snapshotted+indexed ONCE
+	// here and reused for every tool (O(refs + approvals), not O(refs × approvals)).
+	activeByTool := indexActiveByTool(store.ActiveApprovals(now))
 	for _, ref := range store.ToolRefs() {
-		c.rederiveTool(store, reg, cat, ref.ServerID, ref.ToolName, now)
+		c.rederiveToolWith(reg, cat, ref.ServerID, ref.ToolName, activeByTool)
 	}
 }
 
@@ -427,6 +429,29 @@ func (c *mcpToolTrustCoordinator) Revoke(id, actor, tenant, reason string) (*too
 // trust — used by revoke and the expiry sweep so withdrawing one grant never drops a
 // tool a different grant still covers.
 func (c *mcpToolTrustCoordinator) rederiveTool(store *tooltrust.Store, reg *registry.Registry, cat *catalog.Catalog, serverID, toolName string, now time.Time) {
+	c.rederiveToolWith(reg, cat, serverID, toolName, indexActiveByTool(store.ActiveApprovals(now)))
+}
+
+// activeToolKey groups active approvals by their (server, tool).
+type activeToolKey struct{ serverID, toolName string }
+
+// indexActiveByTool groups a single ActiveApprovals snapshot by (server, tool) so a
+// reconcile that touches many tools scans/clones/sorts the active set ONCE instead of
+// once per tool (O(references + approvals) rather than O(references × approvals)).
+func indexActiveByTool(active []*tooltrust.ToolApproval) map[activeToolKey][]*tooltrust.ToolApproval {
+	idx := make(map[activeToolKey][]*tooltrust.ToolApproval, len(active))
+	for _, a := range active {
+		k := activeToolKey{serverID: a.ServerID, toolName: a.ToolName}
+		idx[k] = append(idx[k], a)
+	}
+	return idx
+}
+
+// rederiveToolWith re-derives one tool's eligibility against a PRECOMPUTED active-by-tool
+// index (so the caller controls how often ActiveApprovals is snapshotted). Promotes when
+// some active grant in the index covers the tool's current fingerprint on a usable,
+// correctly-owned server; demotes otherwise. Fail-closed and idempotent.
+func (c *mcpToolTrustCoordinator) rederiveToolWith(reg *registry.Registry, cat *catalog.Catalog, serverID, toolName string, activeByTool map[activeToolKey][]*tooltrust.ToolApproval) {
 	key := catalog.ToolKey{Server: registry.ServerID(serverID), Name: toolName}
 	rec, ok := cat.Current().Get(key)
 	if !ok {
@@ -436,9 +461,8 @@ func (c *mcpToolTrustCoordinator) rederiveTool(store *tooltrust.Store, reg *regi
 	sum := rec.Fingerprint.Sum()
 	covered := false
 	if sok && srv.Usable() {
-		for _, a := range store.ActiveApprovals(now) {
-			if a.ServerID == serverID && a.ToolName == toolName &&
-				string(srv.OwnerScope) == a.Tenant &&
+		for _, a := range activeByTool[activeToolKey{serverID: serverID, toolName: toolName}] {
+			if string(srv.OwnerScope) == a.Tenant &&
 				a.MatchesTool(a.Tenant, serverID, toolName, tooltrust.FingerprintDigest(sum), rec.Fingerprint.FormatVersion) {
 				covered = true
 				break

@@ -13772,7 +13772,7 @@
         ],
         "x-culvert-audit-event": "mcp.tooltrust.request",
         "x-culvert-danger-level": "medium",
-        "x-culvert-idempotency": "idempotent",
+        "x-culvert-idempotency": "non-idempotent",
         "x-culvert-introduced-version": "1.0.0",
         "x-culvert-permission": "operator",
         "x-culvert-stability": "stable",

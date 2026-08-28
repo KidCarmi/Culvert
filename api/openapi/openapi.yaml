@@ -10829,7 +10829,7 @@ paths:
       x-culvert-permission: operator
       x-culvert-tenant-scope: tenant
       x-culvert-stability: stable
-      x-culvert-idempotency: idempotent
+      x-culvert-idempotency: non-idempotent
       x-culvert-introduced-version: 1.0.0
       x-culvert-danger-level: medium
       x-culvert-audit-event: mcp.tooltrust.request
