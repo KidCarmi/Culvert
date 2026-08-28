@@ -666,6 +666,19 @@ func (s *Store) RemoveHostDurable(expectedRev *string, category, host string) er
 	return s.mutateDurable(expectedRev, func() error { return s.removeHostMem(category, host) })
 }
 
+// BuiltInFlag reports whether the named category (case-insensitive) exists
+// and carries the BuiltIn flag. Cheap read accessor — no host copying.
+func (s *Store) BuiltInFlag(name string) (builtIn, found bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, e := range s.entries {
+		if strings.EqualFold(e.Name, name) {
+			return e.BuiltIn, true
+		}
+	}
+	return false, false
+}
+
 // All returns a copy of all category entries.
 func (s *Store) All() []Entry {
 	s.mu.RLock()

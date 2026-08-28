@@ -1103,6 +1103,13 @@ func apiURLCat(w http.ResponseWriter, r *http.Request) { //nolint:cyclop,funlen,
 			return
 		}
 		if ifRev := parseIfRevision(r); ifRev != nil {
+			// Blocker D: a BuiltIn category owned by an active signed feed
+			// generation is read-only on the v2 surface — a durable 2xx the
+			// enforced view ignores would be a lie. Structured 409 points at
+			// SaaS Overrides.
+			if refuseFeedOwnedBuiltIn(w, name) {
+				return
+			}
 			// v2 fenced host replacement: the store preserves BuiltIn INSIDE
 			// the transaction (no read-then-write window) and enforces the
 			// MaxHostsPerCategory bound; recompose only after durable success.
@@ -1162,6 +1169,12 @@ func apiURLCat(w http.ResponseWriter, r *http.Request) { //nolint:cyclop,funlen,
 			return
 		}
 		if ifRev := parseIfRevision(r); ifRev != nil {
+			// Blocker D: deleting a feed-owned BuiltIn category cannot remove
+			// it from enforcement (the signed generation serves it) — refuse
+			// on the v2 surface and point at SaaS Overrides (tombstones).
+			if refuseFeedOwnedBuiltIn(w, name) {
+				return
+			}
 			// v2 fenced durable delete; recompose only after durable success.
 			if err := catStore.DeleteDurable(ifRev, name); err != nil {
 				writeTaxonomyMutationError(w, err)
@@ -1209,6 +1222,10 @@ func apiURLCatHost(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if ifRev := parseIfRevision(r); ifRev != nil {
+			// Blocker D: no v2 host mutation on a feed-owned BuiltIn category.
+			if refuseFeedOwnedBuiltIn(w, body.Category) {
+				return
+			}
 			// v2 fenced durable single-host add (post-mutation cap enforced
 			// at the store boundary); recompose only after durable success.
 			if err := catStore.AddHostDurable(ifRev, body.Category, body.Host); err != nil {
@@ -1243,6 +1260,10 @@ func apiURLCatHost(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if ifRev := parseIfRevision(r); ifRev != nil {
+			// Blocker D: no v2 host mutation on a feed-owned BuiltIn category.
+			if refuseFeedOwnedBuiltIn(w, category) {
+				return
+			}
 			// v2 fenced durable single-host remove.
 			if err := catStore.RemoveHostDurable(ifRev, category, host); err != nil {
 				writeTaxonomyMutationError(w, err)

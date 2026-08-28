@@ -1764,16 +1764,20 @@ components:
         builtIn: { type: boolean }
     URLCategoryState:
       type: object
-      required: [categories, revision]
+      required: [categories, revision, builtInAuthority]
       additionalProperties: false
       properties:
         categories:
           type: array
           items: { type: object, additionalProperties: true }
-          description: Every category (name/hosts/builtIn + feedBacked UT1 enrichment).
+          description: Every category (name/hosts/builtIn + feedBacked UT1 enrichment + the server-owned `writable` mutability truth — false exactly for a BuiltIn row whose classes are currently served from a committed signed feed generation; the browser never derives this from builtIn/provenance/state).
         revision:
           type: string
           description: Server-owned restart-stable semantic taxonomy revision. Echo back via ?ifRevision= on mutations; a mismatch is the structured 409 ({error, currentRevision, yourRevision}).
+        builtInAuthority:
+          type: string
+          enum: [signed-feed, local]
+          description: Page-level ownership truth for BuiltIn categories, derived from the live effective view's source — "signed-feed" while a committed signed generation's classes serve (built-in rows are read-only on the v2 surface, managed via SaaS Overrides; a v2 mutation is the structured 409 {error, owner, manageWith:"saas-overrides"}); "local" while the embedded baseline / raw store serves (built-in rows editable).
     URLCategoryUpdate:
       type: object
       description: URL-category update body — the category name is the required `name` query parameter; the body carries only the replacement hosts.

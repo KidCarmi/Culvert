@@ -346,3 +346,30 @@ func setSignedFeedOwnsLiveStore(owned bool) { signedFeedOwnsLiveStore.Store(owne
 
 // signedFeedOwnsLive reports the current ownership (read by the legacy syncer guard).
 func signedFeedOwnsLive() bool { return signedFeedOwnsLiveStore.Load() }
+
+// signedFeedOwnsBuiltInCategories is the AUTHORITATIVE mutability predicate for
+// BUILT-IN categories (2D-B final correction, Blocker D): true iff the live
+// effective view is serving a COMMITTED SIGNED GENERATION's classes. It is
+// derived from the actual authority semantics — the live view's Source — not
+// from provenance strings or status.state:
+//
+//   - view == nil (lifecycle unarmed): the full catStore taxonomy serves the
+//     policy path directly — built-in edits are live. NOT owned.
+//   - Source == embedded: the view is COMPOSED FROM catStore's BuiltIn
+//     taxonomy (embeddedBaselineEntries), so a built-in edit + recompose is
+//     effective. NOT owned.
+//   - Source == downloaded / cached / resumed: the classes come from the
+//     signed snapshot; a recompose rebuilds overrides over the SIGNED
+//     classes, so a catStore built-in edit is durable yet NEVER reaches
+//     enforcement. OWNED — the admin manages that content with SaaS
+//     Overrides. (This covers disabled-recovery/stale too by construction:
+//     whatever state the scheduler is in, the view Source says whose classes
+//     are actually serving — stale keeps serving the LKG signed generation,
+//     so it stays owned.)
+//
+// Admin-created (BuiltIn=false) categories are never feed-owned: the policy
+// path resolves them from catStore's adminIndex regardless of the view.
+func signedFeedOwnsBuiltInCategories() bool {
+	v := saasEffectiveView.Current()
+	return v != nil && v.Source != sourceEmbedded
+}

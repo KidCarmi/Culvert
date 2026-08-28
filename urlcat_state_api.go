@@ -29,10 +29,17 @@ import (
 
 // enrichedURLCategory is one category row with the UT1 community-feed
 // enrichment (the `feedBacked` flag means "this category NAME is mapped by
-// the UT1 community feed", never "backed by the signed SaaS corpus").
+// the UT1 community feed", never "backed by the signed SaaS corpus") and the
+// SERVER-OWNED mutability truth (`writable`, Blocker D): false exactly when
+// the row is a BuiltIn category whose classes are currently served from a
+// committed signed feed generation (signedFeedOwnsBuiltInCategories) — a
+// local edit would be durable yet superseded, so the v2 mutation surface
+// refuses it and the GUI must not offer it. The browser NEVER derives this
+// from builtIn/provenance/status.state.
 type enrichedURLCategory struct {
 	CategoryEntry
 	FeedBacked bool `json:"feedBacked"`
+	Writable   bool `json:"writable"`
 }
 
 // enrichedURLCategories returns every category with the UT1 enrichment —
@@ -56,11 +63,15 @@ func enrichURLCategories(all []CategoryEntry) []enrichedURLCategory {
 			ut1Set[strings.ToLower(cat)] = true
 		}
 	}
+	// One ownership read for the whole row set (the predicate is a single
+	// atomic view load; per-row reads could straddle an activation).
+	feedOwned := signedFeedOwnsBuiltInCategories()
 	enriched := make([]enrichedURLCategory, len(all))
 	for i, e := range all {
 		enriched[i] = enrichedURLCategory{
 			CategoryEntry: e,
 			FeedBacked:    ut1Set[strings.ToLower(e.Name)],
+			Writable:      !(e.BuiltIn && feedOwned),
 		}
 	}
 	return enriched
@@ -76,10 +87,46 @@ func apiURLCatState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	entries, revision := catStore.SnapshotWithRevision()
+	// builtInAuthority is the page-level ownership truth (Blocker D):
+	// "signed-feed" while a committed signed generation's classes are serving
+	// (built-in rows are read-only, managed via SaaS Overrides), "local"
+	// while the embedded baseline / raw catStore serves (built-in rows are
+	// editable and a recompose makes edits effective). Runtime authority
+	// state, deliberately OUTSIDE the taxonomy revision.
+	authority := "local"
+	if signedFeedOwnsBuiltInCategories() {
+		authority = "signed-feed"
+	}
 	jsonOK(w, map[string]any{
-		"categories": enrichURLCategories(entries),
-		"revision":   revision,
+		"categories":       enrichURLCategories(entries),
+		"revision":         revision,
+		"builtInAuthority": authority,
 	})
+}
+
+// refuseFeedOwnedBuiltIn writes the structured Blocker-D 409 and returns true
+// when the named category is a BuiltIn row whose classes are currently owned
+// by a committed signed feed generation. Applied to the V2 (fenced) mutation
+// surface only — a durable 2xx the enforced view ignores is a lie the fenced
+// contract must not tell. Legacy unfenced callers keep their pre-existing
+// compatibility behavior (durable write, superseded until the feed releases
+// ownership), and admin-created (BuiltIn=false) categories are never refused.
+func refuseFeedOwnedBuiltIn(w http.ResponseWriter, name string) bool {
+	if !signedFeedOwnsBuiltInCategories() {
+		return false
+	}
+	builtIn, found := catStore.BuiltInFlag(name)
+	if !found || !builtIn {
+		return false
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusConflict)
+	_ = json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // response write
+		"error":      "category is owned by the active signed SaaS feed: local edits are superseded until the feed releases ownership",
+		"owner":      "signed-feed",
+		"manageWith": "saas-overrides",
+	})
+	return true
 }
 
 // parseIfRevision reads the optional ?ifRevision= optimistic-fence assertion.

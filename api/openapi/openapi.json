@@ -4220,8 +4220,16 @@
       "URLCategoryState": {
         "additionalProperties": false,
         "properties": {
+          "builtInAuthority": {
+            "description": "Page-level ownership truth for BuiltIn categories, derived from the live effective view's source — \"signed-feed\" while a committed signed generation's classes serve (built-in rows are read-only on the v2 surface, managed via SaaS Overrides; a v2 mutation is the structured 409 {error, owner, manageWith:\"saas-overrides\"}); \"local\" while the embedded baseline / raw store serves (built-in rows editable).",
+            "enum": [
+              "signed-feed",
+              "local"
+            ],
+            "type": "string"
+          },
           "categories": {
-            "description": "Every category (name/hosts/builtIn + feedBacked UT1 enrichment).",
+            "description": "Every category (name/hosts/builtIn + feedBacked UT1 enrichment + the server-owned `writable` mutability truth — false exactly for a BuiltIn row whose classes are currently served from a committed signed feed generation; the browser never derives this from builtIn/provenance/state).",
             "items": {
               "additionalProperties": true,
               "type": "object"
@@ -4235,7 +4243,8 @@
         },
         "required": [
           "categories",
-          "revision"
+          "revision",
+          "builtInAuthority"
         ],
         "type": "object"
       },
