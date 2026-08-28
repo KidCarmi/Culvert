@@ -606,11 +606,17 @@
             },
             "nullable": true,
             "type": "array"
+          },
+          "version": {
+            "description": "Durable per-store mutation generation. Echo it back as the optional `ifVersion` query parameter on POST/PUT/DELETE for optimistic concurrency; a mismatch returns the structured 409 conflict ({error, currentVersion, yourVersion}).",
+            "format": "int64",
+            "type": "integer"
           }
         },
         "required": [
           "groups",
-          "names"
+          "names",
+          "version"
         ],
         "type": "object"
       },
@@ -1184,11 +1190,17 @@
             },
             "nullable": true,
             "type": "array"
+          },
+          "version": {
+            "description": "Durable per-store mutation generation. Echo it back as the optional `ifVersion` query parameter on POST/PUT/DELETE for optimistic concurrency; a mismatch returns the structured 409 conflict ({error, currentVersion, yourVersion}).",
+            "format": "int64",
+            "type": "integer"
           }
         },
         "required": [
           "profiles",
-          "names"
+          "names",
+          "version"
         ],
         "type": "object"
       },
@@ -6676,7 +6688,7 @@
     },
     "/api/category-groups": {
       "delete": {
-        "description": "Deletes a URL category group by id or name.",
+        "description": "Deletes a URL category group by id or name. Fails closed (409 with the referencedBy payload) while any policy rule — running or staged in an active draft candidate — references the group.",
         "operationId": "deleteCategoryGroup",
         "parameters": [
           {
@@ -6694,6 +6706,16 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "Optional optimistic-concurrency assertion of the store generation from the list read; a mismatch returns 409 without mutating.",
+            "in": "query",
+            "name": "ifVersion",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -6706,13 +6728,22 @@
                 }
               }
             },
-            "description": "Deleted."
+            "description": "Deleted (restart-durable on 2xx)."
           },
           "400": {
             "$ref": "#/components/responses/PlainBadRequest"
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "description": "No group carries the given id."
+          },
+          "409": {
+            "description": "Referenced by policy rules ({error, object, referencedBy}), or version fence conflict ({error, currentVersion, yourVersion})."
+          },
+          "500": {
+            "description": "Durable persistence failed — the delete was rolled back; the group still exists."
           }
         },
         "security": [
@@ -6776,6 +6807,18 @@
       "post": {
         "description": "Creates a URL category group.",
         "operationId": "createCategoryGroup",
+        "parameters": [
+          {
+            "description": "Optional optimistic-concurrency assertion of the store generation from the list read; a mismatch returns 409 without mutating.",
+            "in": "query",
+            "name": "ifVersion",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -6796,13 +6839,19 @@
                 }
               }
             },
-            "description": "Updated."
+            "description": "Created (restart-durable on 2xx — a persistence failure returns 500 with the mutation rolled back)."
           },
           "400": {
             "$ref": "#/components/responses/PlainBadRequest"
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "description": "Name already in use, or version fence conflict ({error, currentVersion, yourVersion})."
+          },
+          "500": {
+            "description": "Durable persistence failed — the mutation was rolled back; nothing changed."
           }
         },
         "security": [
@@ -6827,8 +6876,29 @@
         "x-culvert-visibility": "admin-supported"
       },
       "put": {
-        "description": "Updates a URL category group.",
+        "description": "Updates a URL category group. With `?id=` (stable-ID addressing, preferred) a changed `name` performs a RENAME — the stable ID is preserved and the denormalized name on referencing policy rules (running and any open draft candidate) is cascaded server-side.",
         "operationId": "updateCategoryGroup",
+        "parameters": [
+          {
+            "description": "Stable group ID (rename-safe addressing). Without it the body `name` addresses the group (legacy) and no rename is possible.",
+            "in": "query",
+            "name": "id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional optimistic-concurrency assertion of the store generation from the list read; a mismatch returns 409 without mutating.",
+            "in": "query",
+            "name": "ifVersion",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -6849,13 +6919,22 @@
                 }
               }
             },
-            "description": "Updated."
+            "description": "Updated (restart-durable on 2xx)."
           },
           "400": {
             "$ref": "#/components/responses/PlainBadRequest"
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "description": "No group carries the given id."
+          },
+          "409": {
+            "description": "Name already in use, or version fence conflict ({error, currentVersion, yourVersion})."
+          },
+          "500": {
+            "description": "Durable persistence failed. Either the object mutation was rolled back (nothing changed), or — on a rename — the object rename is durable but a policy display-name refresh could not be persisted (enforcement unchanged; names reconcile at the next restart). The body states which."
           }
         },
         "security": [
@@ -9776,7 +9855,7 @@
     },
     "/api/decryption-profiles": {
       "delete": {
-        "description": "Deletes a decryption profile by id or name.",
+        "description": "Deletes a decryption profile by id or name. Fails closed (409 with the referencedBy payload) while any policy rule — running or staged in an active draft candidate — references the profile.",
         "operationId": "deleteDecryptionProfile",
         "parameters": [
           {
@@ -9794,6 +9873,16 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "Optional optimistic-concurrency assertion of the store generation from the list read; a mismatch returns 409 without mutating.",
+            "in": "query",
+            "name": "ifVersion",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -9806,13 +9895,22 @@
                 }
               }
             },
-            "description": "Deleted."
+            "description": "Deleted (restart-durable on 2xx)."
           },
           "400": {
             "$ref": "#/components/responses/PlainBadRequest"
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "description": "No profile carries the given id."
+          },
+          "409": {
+            "description": "Referenced by policy rules ({error, object, referencedBy}), or version fence conflict ({error, currentVersion, yourVersion})."
+          },
+          "500": {
+            "description": "Durable persistence failed — the delete was rolled back; the profile still exists."
           }
         },
         "security": [
@@ -9876,6 +9974,18 @@
       "post": {
         "description": "Creates a TLS-inspection decryption profile.",
         "operationId": "createDecryptionProfile",
+        "parameters": [
+          {
+            "description": "Optional optimistic-concurrency assertion of the store generation from the list read; a mismatch returns 409 without mutating.",
+            "in": "query",
+            "name": "ifVersion",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -9896,13 +10006,19 @@
                 }
               }
             },
-            "description": "Updated."
+            "description": "Created (restart-durable on 2xx — a persistence failure returns 500 with the mutation rolled back)."
           },
           "400": {
             "$ref": "#/components/responses/PlainBadRequest"
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "description": "Name already in use, or version fence conflict ({error, currentVersion, yourVersion})."
+          },
+          "500": {
+            "description": "Durable persistence failed — the mutation was rolled back; nothing changed."
           }
         },
         "security": [
@@ -9927,8 +10043,29 @@
         "x-culvert-visibility": "admin-supported"
       },
       "put": {
-        "description": "Updates a decryption profile.",
+        "description": "Updates a decryption profile. With `?id=` (stable-ID addressing, preferred) a changed `name` performs a RENAME — the stable ID (and therefore the adaptive-decryption exclusion scope and security generation) is preserved and the denormalized name on referencing policy rules (running and any open draft candidate) is cascaded server-side.",
         "operationId": "updateDecryptionProfile",
+        "parameters": [
+          {
+            "description": "Stable profile ID (rename-safe addressing). Without it the body `name` addresses the profile (legacy) and no rename is possible.",
+            "in": "query",
+            "name": "id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional optimistic-concurrency assertion of the store generation from the list read; a mismatch returns 409 without mutating.",
+            "in": "query",
+            "name": "ifVersion",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -9949,13 +10086,22 @@
                 }
               }
             },
-            "description": "Updated."
+            "description": "Updated (restart-durable on 2xx)."
           },
           "400": {
             "$ref": "#/components/responses/PlainBadRequest"
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "description": "No profile carries the given id."
+          },
+          "409": {
+            "description": "Name already in use, or version fence conflict ({error, currentVersion, yourVersion})."
+          },
+          "500": {
+            "description": "Durable persistence failed. Either the object mutation was rolled back (nothing changed), or — on a rename — the object rename is durable but a policy display-name refresh could not be persisted (enforcement unchanged; names reconcile at the next restart). The body states which."
           }
         },
         "security": [

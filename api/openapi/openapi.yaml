@@ -494,11 +494,15 @@ components:
         count: { type: integer }
     CategoryGroups:
       type: object
-      required: [groups, names]
+      required: [groups, names, version]
       additionalProperties: false
       properties:
         groups: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
         names: { type: array, items: { type: string }, nullable: true }
+        version:
+          type: integer
+          format: int64
+          description: Durable per-store mutation generation. Echo it back as the optional `ifVersion` query parameter on POST/PUT/DELETE for optimistic concurrency; a mismatch returns the structured 409 conflict ({error, currentVersion, yourVersion}).
     MetricsConfig:
       type: object
       required: [tokenSet, path]
@@ -597,11 +601,15 @@ components:
       items: { type: object, additionalProperties: true }
     DecryptionProfiles:
       type: object
-      required: [profiles, names]
+      required: [profiles, names, version]
       additionalProperties: false
       properties:
         profiles: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
         names: { type: array, items: { type: string }, nullable: true }
+        version:
+          type: integer
+          format: int64
+          description: Durable per-store mutation generation. Echo it back as the optional `ifVersion` query parameter on POST/PUT/DELETE for optimistic concurrency; a mismatch returns the structured 409 conflict ({error, currentVersion, yourVersion}).
     DPIConfig:
       type: object
       required: [patterns, count, blocked_total]
@@ -3576,6 +3584,12 @@ paths:
       x-culvert-introduced-version: 1.0.0
       x-culvert-danger-level: medium
       x-culvert-audit-event: category_group.create
+      parameters:
+        - name: ifVersion
+          in: query
+          required: false
+          schema: { type: integer, format: int64 }
+          description: Optional optimistic-concurrency assertion of the store generation from the list read; a mismatch returns 409 without mutating.
       requestBody:
         required: true
         content:
@@ -3583,17 +3597,19 @@ paths:
             schema: { $ref: '#/components/schemas/UpsertCategoryGroup' }
       responses:
         '200':
-          description: Updated.
+          description: Created (restart-durable on 2xx — a persistence failure returns 500 with the mutation rolled back).
           content:
             application/json:
               schema: { type: object, additionalProperties: true }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+        '409': { description: 'Name already in use, or version fence conflict ({error, currentVersion, yourVersion}).' }
+        '500': { description: 'Durable persistence failed — the mutation was rolled back; nothing changed.' }
     put:
       operationId: updateCategoryGroup
       tags: [policy]
       summary: Update URL category group
-      description: Updates a URL category group.
+      description: Updates a URL category group. With `?id=` (stable-ID addressing, preferred) a changed `name` performs a RENAME — the stable ID is preserved and the denormalized name on referencing policy rules (running and any open draft candidate) is cascaded server-side.
       security:
         - sessionCookie: []
         - basicAuth: []
@@ -3605,6 +3621,17 @@ paths:
       x-culvert-introduced-version: 1.0.0
       x-culvert-danger-level: medium
       x-culvert-audit-event: category_group.update
+      parameters:
+        - name: id
+          in: query
+          required: false
+          schema: { type: string }
+          description: Stable group ID (rename-safe addressing). Without it the body `name` addresses the group (legacy) and no rename is possible.
+        - name: ifVersion
+          in: query
+          required: false
+          schema: { type: integer, format: int64 }
+          description: Optional optimistic-concurrency assertion of the store generation from the list read; a mismatch returns 409 without mutating.
       requestBody:
         required: true
         content:
@@ -3612,17 +3639,20 @@ paths:
             schema: { $ref: '#/components/schemas/UpsertCategoryGroup' }
       responses:
         '200':
-          description: Updated.
+          description: Updated (restart-durable on 2xx).
           content:
             application/json:
               schema: { type: object, additionalProperties: true }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404': { description: 'No group carries the given id.' }
+        '409': { description: 'Name already in use, or version fence conflict ({error, currentVersion, yourVersion}).' }
+        '500': { description: 'Durable persistence failed. Either the object mutation was rolled back (nothing changed), or — on a rename — the object rename is durable but a policy display-name refresh could not be persisted (enforcement unchanged; names reconcile at the next restart). The body states which.' }
     delete:
       operationId: deleteCategoryGroup
       tags: [policy]
       summary: Delete URL category group
-      description: Deletes a URL category group by id or name.
+      description: Deletes a URL category group by id or name. Fails closed (409 with the referencedBy payload) while any policy rule — running or staged in an active draft candidate — references the group.
       security:
         - sessionCookie: []
         - basicAuth: []
@@ -3643,14 +3673,22 @@ paths:
           in: query
           required: false
           schema: { type: string }
+        - name: ifVersion
+          in: query
+          required: false
+          schema: { type: integer, format: int64 }
+          description: Optional optimistic-concurrency assertion of the store generation from the list read; a mismatch returns 409 without mutating.
       responses:
         '200':
-          description: Deleted.
+          description: Deleted (restart-durable on 2xx).
           content:
             application/json:
               schema: { type: object, additionalProperties: true }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404': { description: 'No group carries the given id.' }
+        '409': { description: 'Referenced by policy rules ({error, object, referencedBy}), or version fence conflict ({error, currentVersion, yourVersion}).' }
+        '500': { description: 'Durable persistence failed — the delete was rolled back; the group still exists.' }
 
   /api/metrics-config:
     get:
@@ -4471,6 +4509,12 @@ paths:
       x-culvert-introduced-version: 1.0.0
       x-culvert-danger-level: medium
       x-culvert-audit-event: decryption_profile.create
+      parameters:
+        - name: ifVersion
+          in: query
+          required: false
+          schema: { type: integer, format: int64 }
+          description: Optional optimistic-concurrency assertion of the store generation from the list read; a mismatch returns 409 without mutating.
       requestBody:
         required: true
         content:
@@ -4478,17 +4522,19 @@ paths:
             schema: { $ref: '#/components/schemas/DecryptionProfileFull' }
       responses:
         '200':
-          description: Updated.
+          description: Created (restart-durable on 2xx — a persistence failure returns 500 with the mutation rolled back).
           content:
             application/json:
               schema: { type: object, additionalProperties: true }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+        '409': { description: 'Name already in use, or version fence conflict ({error, currentVersion, yourVersion}).' }
+        '500': { description: 'Durable persistence failed — the mutation was rolled back; nothing changed.' }
     put:
       operationId: updateDecryptionProfile
       tags: [policy]
       summary: Update decryption profile
-      description: Updates a decryption profile.
+      description: Updates a decryption profile. With `?id=` (stable-ID addressing, preferred) a changed `name` performs a RENAME — the stable ID (and therefore the adaptive-decryption exclusion scope and security generation) is preserved and the denormalized name on referencing policy rules (running and any open draft candidate) is cascaded server-side.
       security:
         - sessionCookie: []
         - basicAuth: []
@@ -4500,6 +4546,17 @@ paths:
       x-culvert-introduced-version: 1.0.0
       x-culvert-danger-level: medium
       x-culvert-audit-event: decryption_profile.update
+      parameters:
+        - name: id
+          in: query
+          required: false
+          schema: { type: string }
+          description: Stable profile ID (rename-safe addressing). Without it the body `name` addresses the profile (legacy) and no rename is possible.
+        - name: ifVersion
+          in: query
+          required: false
+          schema: { type: integer, format: int64 }
+          description: Optional optimistic-concurrency assertion of the store generation from the list read; a mismatch returns 409 without mutating.
       requestBody:
         required: true
         content:
@@ -4507,17 +4564,20 @@ paths:
             schema: { $ref: '#/components/schemas/DecryptionProfileFull' }
       responses:
         '200':
-          description: Updated.
+          description: Updated (restart-durable on 2xx).
           content:
             application/json:
               schema: { type: object, additionalProperties: true }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404': { description: 'No profile carries the given id.' }
+        '409': { description: 'Name already in use, or version fence conflict ({error, currentVersion, yourVersion}).' }
+        '500': { description: 'Durable persistence failed. Either the object mutation was rolled back (nothing changed), or — on a rename — the object rename is durable but a policy display-name refresh could not be persisted (enforcement unchanged; names reconcile at the next restart). The body states which.' }
     delete:
       operationId: deleteDecryptionProfile
       tags: [policy]
       summary: Delete decryption profile
-      description: Deletes a decryption profile by id or name.
+      description: Deletes a decryption profile by id or name. Fails closed (409 with the referencedBy payload) while any policy rule — running or staged in an active draft candidate — references the profile.
       security:
         - sessionCookie: []
         - basicAuth: []
@@ -4538,14 +4598,22 @@ paths:
           in: query
           required: false
           schema: { type: string }
+        - name: ifVersion
+          in: query
+          required: false
+          schema: { type: integer, format: int64 }
+          description: Optional optimistic-concurrency assertion of the store generation from the list read; a mismatch returns 409 without mutating.
       responses:
         '200':
-          description: Deleted.
+          description: Deleted (restart-durable on 2xx).
           content:
             application/json:
               schema: { type: object, additionalProperties: true }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404': { description: 'No profile carries the given id.' }
+        '409': { description: 'Referenced by policy rules ({error, object, referencedBy}), or version fence conflict ({error, currentVersion, yourVersion}).' }
+        '500': { description: 'Durable persistence failed — the delete was rolled back; the profile still exists.' }
 
   /api/dpi:
     get:

@@ -755,6 +755,54 @@ func (ps *PolicyStore) CascadeDestCategoryGroupRename(id, oldName, newName strin
 	return n
 }
 
+// RefreshObjectRefNames re-derives every rule's denormalized object display
+// names from the ID-authoritative object stores (boot reconciliation — the
+// deterministic recovery half of the 2D-A rename model; see
+// reconcileObjectRefNames). Only rules whose object-link ID resolves to a live
+// object AND whose cached name differs are touched; a dangling ID is left
+// alone (its stale name is the documented legacy/name-fallback input, so
+// rewriting it would change match semantics). Returns the number of rules
+// touched; the caller persists via SaveErr. Race-safe by pointer swap, like
+// the Cascade*Rename methods.
+func (ps *PolicyStore) RefreshObjectRefNames(groupNames, profileNames map[string]string) int {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	next := append([]*PolicyRule(nil), ps.rules...)
+	n := 0
+	for i, rule := range next {
+		newGroup, hasGroup := "", false
+		if rule.DestCategoryGroupID != "" {
+			if cur, ok := groupNames[rule.DestCategoryGroupID]; ok && rule.DestCategoryGroup != cur {
+				newGroup, hasGroup = cur, true
+			}
+		}
+		newProfile, hasProfile := "", false
+		if rule.DecryptionProfileID != "" {
+			if cur, ok := profileNames[rule.DecryptionProfileID]; ok && rule.DecryptionProfile != cur {
+				newProfile, hasProfile = cur, true
+			}
+		}
+		if !hasGroup && !hasProfile {
+			continue
+		}
+		nr := *rule
+		if hasGroup {
+			nr.DestCategoryGroup = newGroup
+		}
+		if hasProfile {
+			nr.DecryptionProfile = newProfile
+		}
+		next[i] = &nr
+		n++
+	}
+	if n > 0 {
+		ps.rules = next
+		ps.sortLocked()
+		ps.bumpVersion()
+	}
+	return n
+}
+
 // DeleteByID removes the rule with the given stable ULID. Rename/reorder-safe
 // counterpart to Delete. Returns false if not found.
 func (ps *PolicyStore) DeleteByID(id string) bool {

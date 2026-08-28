@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/feedsync"
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/pac"
 )
 
@@ -460,8 +462,9 @@ func apiCategoryGroups(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		jsonOK(w, map[string]any{
-			"groups": globalCategoryGroups.List(),
-			"names":  globalCategoryGroups.Names(),
+			"groups":  globalCategoryGroups.List(),
+			"names":   globalCategoryGroups.Names(),
+			"version": globalCategoryGroups.Version(),
 		})
 
 	case http.MethodPost:
@@ -476,15 +479,25 @@ func apiCategoryGroups(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
-		g, err := globalCategoryGroups.Add(body.Name, body.Categories)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+		// Durable-or-nothing (2D-A.0): the fence check (optional ?ifVersion=),
+		// the mutation, and the persist run in one serialized critical section;
+		// a persist failure rolls the store back and maps to 500 — a confirmed
+		// 2xx means the group is restart-durable.
+		var g *CategoryGroup
+		err := globalCategoryGroups.MutateDurable(parseIfVersion(r), func() error {
+			created, aerr := globalCategoryGroups.Add(body.Name, body.Categories)
+			if aerr != nil {
+				return aerr
+			}
+			g = created
+			return nil
+		})
+		if writeObjectMutationError(w, err) {
 			return
 		}
-		globalCategoryGroups.Save()
 		auditEvent(r, "category-group.create", g.Name, fmt.Sprintf("%d categories", len(g.Categories)))
 		saveConfigVersion(sessionAdmin(r), "category-group.create")
-		jsonOK(w, map[string]any{"ok": true, "group": g})
+		jsonOK(w, map[string]any{"ok": true, "group": g, "version": globalCategoryGroups.Version()})
 
 	case http.MethodPut:
 		if !requireRole(w, r, RoleOperator) {
@@ -513,52 +526,69 @@ func apiCategoryGroups(w http.ResponseWriter, r *http.Request) {
 			// honest for display/export/DP-sync.
 			newName := strings.TrimSpace(body.Name)
 			renamed := newName != "" && !strings.EqualFold(newName, before.Name)
-			if renamed {
-				// Pre-check the collision before mutating anything so a taken name
-				// fails cleanly (Rename re-checks under its own lock).
-				if g := globalCategoryGroups.GetByName(newName); g != nil && g.ID != id {
-					http.Error(w, "a group named "+newName+" already exists", http.StatusConflict)
-					return
+			// Phase 1 — the OBJECT domain, durable-or-nothing (2D-A.0): content
+			// update + rename apply and persist in one serialized critical section
+			// under the optional ?ifVersion= fence. Validation rejects before any
+			// state changes; a persist failure rolls everything back (500); a name
+			// collision is refused under the store lock (409, no TOCTOU).
+			err := globalCategoryGroups.MutateDurable(parseIfVersion(r), func() error {
+				if uerr := globalCategoryGroups.UpdateByID(id, body.Categories); uerr != nil {
+					return uerr
 				}
-			}
-			// Apply the category update FIRST so a bad body returns before any
-			// rename is applied (no half-applied name change).
-			if err := globalCategoryGroups.UpdateByID(id, body.Categories); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
+				if renamed {
+					if _, rerr := globalCategoryGroups.Rename(id, newName); rerr != nil {
+						return rerr
+					}
+				}
+				return nil
+			})
+			if writeObjectMutationError(w, err) {
 				return
 			}
-			if renamed {
-				if _, err := globalCategoryGroups.Rename(id, newName); err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-			}
-			globalCategoryGroups.Save()
 			detail := fmt.Sprintf("%d categories", len(body.Categories))
+			// Phase 2/3 — the rename cascade onto RUNNING policy and the open
+			// draft candidate (composed cross-store operation, §6/§7): each is a
+			// real policy mutation that must survive a restart, so both persists
+			// are error-aware. A failure after the durable object rename keeps the
+			// (correct) in-memory cascade, is surfaced as a truthful 500 — never a
+			// 2xx with a known-failed durable domain — and converges at the next
+			// restart via reconcileObjectRefNames (the object store owns name truth).
+			var cascadeErr error
 			if renamed {
-				// Refresh referencing rules on running AND the open draft candidate,
-				// then persist the policy store BEFORE versioning (the cascade is a
-				// real policy mutation that must survive a restart).
 				if n := policyStore.CascadeDestCategoryGroupRename(id, before.Name, newName); n > 0 {
-					policyStore.Save()
+					if perr := policyStore.SaveErr(); perr != nil && !errors.Is(perr, fileutil.ErrReplacedNotSynced) {
+						cascadeErr = fmt.Errorf("running policy: %w", perr)
+					}
 				}
-				policyDraft.cascadeDestCategoryGroupRename(id, before.Name, newName)
+				if derr := policyDraft.cascadeDestCategoryGroupRename(id, before.Name, newName); derr != nil {
+					if cascadeErr != nil {
+						cascadeErr = fmt.Errorf("%w; draft candidate: %w", cascadeErr, derr)
+					} else {
+						cascadeErr = fmt.Errorf("draft candidate: %w", derr)
+					}
+				}
 				detail += ", renamed from " + sanitizeLog(before.Name)
 			}
 			auditName := before.Name
 			if renamed {
 				auditName = newName
 			}
+			if cascadeErr != nil {
+				auditEventDiffID(r, "category-group.update", auditName, id,
+					detail+" — rename durable but display-name cascade not persisted: "+cascadeErr.Error(), nil, nil)
+				writeRenameCascadePersistFailure(w, "category group", cascadeErr)
+				return
+			}
 			auditEventDiffID(r, "category-group.update", auditName, id, detail, nil, nil)
 			saveConfigVersion(sessionAdmin(r), "category-group.update")
-			jsonOK(w, map[string]any{"ok": true})
+			jsonOK(w, map[string]any{"ok": true, "version": globalCategoryGroups.Version()})
 			return
 		}
-		if err := globalCategoryGroups.Update(body.Name, body.Categories); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+		if err := globalCategoryGroups.MutateDurable(nil, func() error {
+			return globalCategoryGroups.Update(body.Name, body.Categories)
+		}); writeObjectMutationError(w, err) {
 			return
 		}
-		globalCategoryGroups.Save()
 		auditEvent(r, "category-group.update", body.Name, fmt.Sprintf("%d categories", len(body.Categories)))
 		saveConfigVersion(sessionAdmin(r), "category-group.update")
 		jsonOK(w, map[string]any{"ok": true})
@@ -578,15 +608,18 @@ func apiCategoryGroups(w http.ResponseWriter, r *http.Request) {
 			if deleteBlockedByReferences(w, r, "category-group", before.Name, "category-group.remove.blocked") {
 				return
 			}
-			name, err := globalCategoryGroups.DeleteByID(id)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
+			var name string
+			err := globalCategoryGroups.MutateDurable(parseIfVersion(r), func() error {
+				n, derr := globalCategoryGroups.DeleteByID(id)
+				name = n
+				return derr
+			})
+			if writeObjectMutationError(w, err) {
 				return
 			}
-			globalCategoryGroups.Save()
 			auditEventDiffID(r, "category-group.delete", name, id, "", nil, nil)
 			saveConfigVersion(sessionAdmin(r), "category-group.delete")
-			jsonOK(w, map[string]any{"ok": true})
+			jsonOK(w, map[string]any{"ok": true, "version": globalCategoryGroups.Version()})
 			return
 		}
 		name := strings.TrimSpace(r.URL.Query().Get("name"))
@@ -600,11 +633,11 @@ func apiCategoryGroups(w http.ResponseWriter, r *http.Request) {
 		if deleteBlockedByReferences(w, r, "category-group", name, "category-group.remove.blocked") {
 			return
 		}
-		if err := globalCategoryGroups.Delete(name); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+		if err := globalCategoryGroups.MutateDurable(nil, func() error {
+			return globalCategoryGroups.Delete(name)
+		}); writeObjectMutationError(w, err) {
 			return
 		}
-		globalCategoryGroups.Save()
 		auditEvent(r, "category-group.delete", name, "")
 		saveConfigVersion(sessionAdmin(r), "category-group.delete")
 		jsonOK(w, map[string]any{"ok": true})
@@ -628,6 +661,7 @@ func apiDecryptionProfiles(w http.ResponseWriter, r *http.Request) { //nolint:cy
 		jsonOK(w, map[string]any{
 			"profiles": globalDecryptionProfiles.List(),
 			"names":    globalDecryptionProfiles.Names(),
+			"version":  globalDecryptionProfiles.Version(),
 		})
 
 	case http.MethodPost:
@@ -639,15 +673,24 @@ func apiDecryptionProfiles(w http.ResponseWriter, r *http.Request) { //nolint:cy
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
-		created, err := globalDecryptionProfiles.Add(p)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+		// Durable-or-nothing (2D-A.0): fence + mutation + persist in one
+		// serialized critical section; persist failure rolls back (500), name
+		// collision refuses under the store lock (409).
+		var created *DecryptionProfile
+		err := globalDecryptionProfiles.MutateDurable(parseIfVersion(r), func() error {
+			c, aerr := globalDecryptionProfiles.Add(p)
+			if aerr != nil {
+				return aerr
+			}
+			created = c
+			return nil
+		})
+		if writeObjectMutationError(w, err) {
 			return
 		}
-		globalDecryptionProfiles.Save()
 		auditEvent(r, "decryption-profile.create", created.Name, "")
 		saveConfigVersion(sessionAdmin(r), "decryption-profile.create")
-		jsonOK(w, map[string]any{"ok": true, "profile": created})
+		jsonOK(w, map[string]any{"ok": true, "profile": created, "version": globalDecryptionProfiles.Version()})
 
 	case http.MethodPut:
 		if !requireRole(w, r, RoleOperator) {
@@ -673,57 +716,68 @@ func apiDecryptionProfiles(w http.ResponseWriter, r *http.Request) { //nolint:cy
 			// honest for display/export/DP-sync.
 			newName := strings.TrimSpace(p.Name)
 			renamed := newName != "" && !strings.EqualFold(newName, before.Name)
-			if renamed {
-				// Pre-check the name collision BEFORE mutating anything so a taken
-				// name fails cleanly (Rename re-checks under its own lock — this only
-				// avoids applying the content update below and then bouncing on the
-				// rename). A different profile owning the target name is a conflict.
-				if g := globalDecryptionProfiles.GetByName(newName); g != nil && g.ID != id {
-					http.Error(w, "a profile named "+newName+" already exists", http.StatusConflict)
-					return
+			// Phase 1 — the OBJECT domain, durable-or-nothing (2D-A.0): content
+			// update (validates first — no partial state where the name changed but
+			// the content bounced) + rename apply and persist in one serialized
+			// critical section under the optional ?ifVersion= fence. Persist
+			// failure rolls back (500); a name collision is refused under the
+			// store lock (409, no TOCTOU).
+			err := globalDecryptionProfiles.MutateDurable(parseIfVersion(r), func() error {
+				if uerr := globalDecryptionProfiles.UpdateByID(id, p); uerr != nil {
+					return uerr
 				}
-			}
-			// Apply the content update FIRST: it validates the profile body, so a
-			// bad-field rejection returns before any rename is applied (no partial
-			// state where the name changed but the content update bounced).
-			if err := globalDecryptionProfiles.UpdateByID(id, p); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
+				if renamed {
+					if _, rerr := globalDecryptionProfiles.Rename(id, newName); rerr != nil {
+						return rerr
+					}
+				}
+				return nil
+			})
+			if writeObjectMutationError(w, err) {
 				return
 			}
-			if renamed {
-				if _, err := globalDecryptionProfiles.Rename(id, newName); err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-			}
-			globalDecryptionProfiles.Save()
 			detail := ""
+			// Phase 2/3 — the rename cascade onto RUNNING policy and the open
+			// draft candidate (§6/§7): error-aware persists; a failure after the
+			// durable object rename keeps the correct in-memory cascade, surfaces
+			// a truthful 500 (never 2xx with a known-failed durable domain), and
+			// converges at the next restart via reconcileObjectRefNames.
+			var cascadeErr error
 			if renamed {
-				// Refresh referencing rules on running AND the open draft candidate,
-				// then persist the policy store BEFORE versioning (durability: a
-				// restart before the next policy edit must not reload stale names —
-				// the cascade is a real policy mutation). The draft cascade keeps a
-				// staged candidate from re-writing stale names back at commit time.
 				if n := policyStore.CascadeDecryptionProfileRename(id, before.Name, newName); n > 0 {
-					policyStore.Save()
+					if perr := policyStore.SaveErr(); perr != nil && !errors.Is(perr, fileutil.ErrReplacedNotSynced) {
+						cascadeErr = fmt.Errorf("running policy: %w", perr)
+					}
 				}
-				policyDraft.cascadeDecryptionProfileRename(id, before.Name, newName)
+				if derr := policyDraft.cascadeDecryptionProfileRename(id, before.Name, newName); derr != nil {
+					if cascadeErr != nil {
+						cascadeErr = fmt.Errorf("%w; draft candidate: %w", cascadeErr, derr)
+					} else {
+						cascadeErr = fmt.Errorf("draft candidate: %w", derr)
+					}
+				}
 				detail = "renamed from " + sanitizeLog(before.Name)
 			}
 			auditName := before.Name
 			if renamed {
 				auditName = newName
 			}
+			if cascadeErr != nil {
+				auditEventDiffID(r, "decryption-profile.update", auditName, id,
+					detail+" — rename durable but display-name cascade not persisted: "+cascadeErr.Error(), nil, nil)
+				writeRenameCascadePersistFailure(w, "decryption profile", cascadeErr)
+				return
+			}
 			auditEventDiffID(r, "decryption-profile.update", auditName, id, detail, nil, nil)
 			saveConfigVersion(sessionAdmin(r), "decryption-profile.update")
-			jsonOK(w, map[string]any{"ok": true})
+			jsonOK(w, map[string]any{"ok": true, "version": globalDecryptionProfiles.Version()})
 			return
 		}
-		if err := globalDecryptionProfiles.Update(p); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+		if err := globalDecryptionProfiles.MutateDurable(nil, func() error {
+			return globalDecryptionProfiles.Update(p)
+		}); writeObjectMutationError(w, err) {
 			return
 		}
-		globalDecryptionProfiles.Save()
 		auditEvent(r, "decryption-profile.update", p.Name, "")
 		saveConfigVersion(sessionAdmin(r), "decryption-profile.update")
 		jsonOK(w, map[string]any{"ok": true})
@@ -743,15 +797,18 @@ func apiDecryptionProfiles(w http.ResponseWriter, r *http.Request) { //nolint:cy
 			if deleteBlockedByReferences(w, r, "decryption-profile", before.Name, "decryption-profile.remove.blocked") {
 				return
 			}
-			name, err := globalDecryptionProfiles.DeleteByID(id)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
+			var name string
+			err := globalDecryptionProfiles.MutateDurable(parseIfVersion(r), func() error {
+				n, derr := globalDecryptionProfiles.DeleteByID(id)
+				name = n
+				return derr
+			})
+			if writeObjectMutationError(w, err) {
 				return
 			}
-			globalDecryptionProfiles.Save()
 			auditEventDiffID(r, "decryption-profile.delete", name, id, "", nil, nil)
 			saveConfigVersion(sessionAdmin(r), "decryption-profile.delete")
-			jsonOK(w, map[string]any{"ok": true})
+			jsonOK(w, map[string]any{"ok": true, "version": globalDecryptionProfiles.Version()})
 			return
 		}
 		name := strings.TrimSpace(r.URL.Query().Get("name"))
@@ -765,11 +822,11 @@ func apiDecryptionProfiles(w http.ResponseWriter, r *http.Request) { //nolint:cy
 		if deleteBlockedByReferences(w, r, "decryption-profile", name, "decryption-profile.remove.blocked") {
 			return
 		}
-		if err := globalDecryptionProfiles.Delete(name); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+		if err := globalDecryptionProfiles.MutateDurable(nil, func() error {
+			return globalDecryptionProfiles.Delete(name)
+		}); writeObjectMutationError(w, err) {
 			return
 		}
-		globalDecryptionProfiles.Save()
 		auditEvent(r, "decryption-profile.delete", name, "")
 		saveConfigVersion(sessionAdmin(r), "decryption-profile.delete")
 		jsonOK(w, map[string]any{"ok": true})

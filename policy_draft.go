@@ -575,37 +575,56 @@ func (c *policyDraftCoordinator) clear() {
 // onto the open candidate so a profile rename keeps the DRAFT's denormalized names
 // honest too — otherwise a rename during an active draft would refresh running but
 // leave the candidate carrying stale names that a later commit would write back.
-// No-op when no draft is open. Persists only when a rule was actually touched.
-// Lock order c.mu → PolicyStore.mu (as in stageTarget); persist() takes c.mu
-// itself, so it runs after the unlock.
-func (c *policyDraftCoordinator) cascadeDecryptionProfileRename(id, oldName, newName string) {
+// No-op when no draft is open. Persists only when a rule was actually touched —
+// DURABLY (2D-A rename hardening): the persist runs under the SAME c.mu as the
+// cascade (persistLocked) and its failure is RETURNED so the rename handler can
+// refuse a 2xx while a required durable domain is known-failed. The in-memory
+// candidate keeps the cascaded (correct) names either way; boot reconciliation
+// (reconcileObjectRefNames) converges the durable copy at the next restart.
+// Lock order c.mu → PolicyStore.mu (as in stageTarget).
+func (c *policyDraftCoordinator) cascadeDecryptionProfileRename(id, oldName, newName string) error {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	if !c.state.Active {
-		c.mu.Unlock()
-		return
+		return nil
 	}
-	n := c.cand.CascadeDecryptionProfileRename(id, oldName, newName)
-	c.mu.Unlock()
-	if n > 0 {
-		c.persist()
+	if n := c.cand.CascadeDecryptionProfileRename(id, oldName, newName); n == 0 {
+		return nil
 	}
+	return c.persistLocked()
 }
 
 // cascadeDestCategoryGroupRename mirrors PolicyStore.CascadeDestCategoryGroupRename
 // onto the open candidate (references-by-id S2), so a group rename keeps the
-// DRAFT's denormalized names honest too. No-op when no draft is open; persists
-// only when a rule was actually touched. Lock order c.mu → PolicyStore.mu.
-func (c *policyDraftCoordinator) cascadeDestCategoryGroupRename(id, oldName, newName string) {
+// DRAFT's denormalized names honest too. Same durable contract as
+// cascadeDecryptionProfileRename above. Lock order c.mu → PolicyStore.mu.
+func (c *policyDraftCoordinator) cascadeDestCategoryGroupRename(id, oldName, newName string) error {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	if !c.state.Active {
-		c.mu.Unlock()
-		return
+		return nil
 	}
-	n := c.cand.CascadeDestCategoryGroupRename(id, oldName, newName)
-	c.mu.Unlock()
-	if n > 0 {
-		c.persist()
+	if n := c.cand.CascadeDestCategoryGroupRename(id, oldName, newName); n == 0 {
+		return nil
 	}
+	return c.persistLocked()
+}
+
+// refreshObjectRefNames mirrors PolicyStore.RefreshObjectRefNames onto the open
+// candidate (boot reconciliation for the 2D-A rename model). Returns the number
+// of candidate rules touched plus the persist outcome; (0, nil) when no draft
+// is open or nothing was stale. Lock order c.mu → PolicyStore.mu.
+func (c *policyDraftCoordinator) refreshObjectRefNames(groupNames, profileNames map[string]string) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.state.Active {
+		return 0, nil
+	}
+	n := c.cand.RefreshObjectRefNames(groupNames, profileNames)
+	if n == 0 {
+		return 0, nil
+	}
+	return n, c.persistLocked()
 }
 
 // reconcile auto-discards the draft when its candidate has become identical to

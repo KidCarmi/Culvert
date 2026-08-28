@@ -73,16 +73,42 @@ func objectReferences(objType, name string) (found bool, refs []objectRef) {
 	// match the ID too, not just the name (else a still-referenced object could be
 	// deleted → dangling ref). "" for name-referenced types / not-found.
 	objID := resolveObjectID(objType, name)
-	rules := policyStore.List()
-	for i := range rules {
-		r := &rules[i]
-		if detail := ruleReferencesObject(r, objType, name, objID); detail != "" {
+	// Walk RUNNING rules and, when a Policy Draft is active, the CANDIDATE too
+	// (2D-A §3): a staged rule referencing the object is a real consumer — an
+	// operator has reviewed-and-staged it — so deleting the object out from
+	// under it would commit a dangling reference nobody was warned about.
+	// A staged copy of a running rule shares its stable ULID and dedups away
+	// (same logical consumer); a draft-only rule is annotated so the 409/Where
+	// Used output says which domain holds the reference. Un-migrated rules
+	// (no ID) never dedup — two distinct legacy rules must both appear.
+	seen := make(map[string]bool)
+	walk := func(rules []PolicyRule, staged bool) {
+		for i := range rules {
+			r := &rules[i]
+			detail := ruleReferencesObject(r, objType, name, objID)
+			if detail == "" {
+				continue
+			}
+			if r.ID != "" {
+				key := r.ID + "\x00" + detail
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+			}
+			if staged {
+				detail += " (draft candidate)"
+			}
 			consumerType, view := consumerTypeForRule(r)
 			refs = append(refs, objectRef{
 				ConsumerType: consumerType, ID: r.ID, Name: r.Name,
 				Detail: detail, View: view,
 			})
 		}
+	}
+	walk(policyStore.List(), false)
+	if policyDraft.active() {
+		walk(policyDraft.candidateList(), true)
 	}
 	// A category is referenced by TWO kinds of consumer: policy rules
 	// (DestCategory, above) AND category groups (membership). Emitting both

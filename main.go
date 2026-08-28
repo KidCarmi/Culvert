@@ -206,6 +206,11 @@ func main() {
 	initRootCA(s)
 	initPolicy(s)
 	initURLCategories(s)
+	// 2D-A rename recovery: with policy + draft + object stores loaded, converge
+	// any denormalized object display names a crashed/failed rename left stale
+	// (the stable object-link IDs kept enforcement correct throughout). No-op —
+	// no write, no version movement — on a clean boot.
+	reconcileObjectRefNames()
 	initFileBlocking(s)
 	initSSLBypassAndDPI(s)
 	initH2InspectServer() // PR3d: eager-build the shared graceful-shutdown H2 server
