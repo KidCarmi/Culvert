@@ -369,9 +369,15 @@
 - **Status:** **CLOSED (2026-08-28)** — the dedicated durable-Shadow-evidence follow-up shipped
   the `schema_version:2` envelope. This was the FIRST of the two hard prerequisites for a real
   Controlled Shadow activation; it is now satisfied. The SECOND (a usable scoped tool via the
-  tool-approval / promotion slice) **REMAINS OPEN** and is tracked separately — **no production
-  Controlled Shadow activation until that one also closes**. (Elevated from "deferred by design"
-  to a hard prerequisite on PR #1234, the activation-plumbing slice; closed here.)
+  tool-approval / promotion slice) is now **CLOSED (2026-08-28)** by the MCP tool-trust approval /
+  promotion slice (ADR-0034, branch `claude/mcp-tool-trust-approval`): a durable
+  `internal/mcp/tooltrust` approval store is the source of truth and the catalog `Usable` state is
+  a materialized projection of it (promote on approve, demote on revoke/expiry, re-derive on
+  startup + read), so a scoped, human-approved tool now satisfies `evaluateShadowActivationPreflight`.
+  With BOTH prerequisites closed, Controlled Shadow activation is mechanically reachable — it stays a
+  deliberate, separately-reviewed operator action, and a `shadow_evaluation` approval structurally
+  cannot arm the live-execution tier (purpose firewall). (Elevated from "deferred by design"
+  to a hard prerequisite on PR #1234, the activation-plumbing slice; both prerequisites now closed.)
 - **Fix (shipped):** `schema_version:2` is an ADDITIVE envelope carrying a typed
   `Event.Shadow *ShadowEvidence` sub-evidence (outcome, override, credential-plan, request/response
   inspection readiness; the raw evaluated action stays in `Decision.Action`). It is stamped ONLY on

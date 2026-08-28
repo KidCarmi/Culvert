@@ -10797,6 +10797,83 @@ paths:
         '404': { $ref: '#/components/responses/PlainNotFound' }
         '409': { $ref: '#/components/responses/PlainConflict' }
         '503': { description: Durability not available; approval unchanged. Body is plain text., content: { text/plain: { schema: { type: string } } } }
+  /api/mcp/tool-approvals:
+    get:
+      operationId: listMCPToolApprovals
+      tags: [mcp]
+      summary: List MCP tool-trust approvals
+      description: Tenant-scoped tool-trust (catalog promotion) approvals. An id parameter returns one. Safe view only — fingerprint digest + lifecycle metadata, never a token, credential, or raw schema/body.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: tenant
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      parameters:
+        - { name: tenant, in: query, required: true, schema: { type: string } }
+        - { name: id, in: query, required: false, schema: { type: string } }
+        - { name: limit, in: query, required: false, schema: { type: integer } }
+      responses:
+        '200': { description: Approvals or one approval, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404': { $ref: '#/components/responses/PlainNotFound' }
+    post:
+      operationId: requestMCPToolApproval
+      tags: [mcp]
+      summary: Request an MCP tool-trust approval
+      description: Create a pending tool-trust request bound to an exact reviewed fingerprint digest for a declared purpose (only shadow_evaluation is issuable). This is NOT a grant — it never changes catalog eligibility. The tenant comes from the query scope, validated against the server's ownership; the client never submits server facts. Fails closed on a stale target (fingerprint or catalog revision advanced).
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: tenant
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: mcp.tooltrust.request
+      parameters:
+        - { name: tenant, in: query, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        '200': { description: Pending approval created, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404': { $ref: '#/components/responses/PlainNotFound' }
+        '409': { $ref: '#/components/responses/PlainConflict' }
+  /api/mcp/tool-approval-decision:
+    post:
+      operationId: decideMCPToolApproval
+      tags: [mcp]
+      summary: Approve/reject/revoke an MCP tool-trust approval
+      description: Decide a tool-trust request. approve (shadow purpose) re-verifies the exact reviewed fingerprint against current facts and materializes catalog.Usable; revoke immediately withdraws usability; reject terminates a pending request. Trust is not authorization — runtime policy stays authoritative for every call. Never executes, calls upstream, or materializes a credential.
+      security: [ { sessionCookie: [] }, { basicAuth: [] } ]
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: tenant
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: mcp.tooltrust.decision
+      parameters:
+        - { name: tenant, in: query, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        '200': { description: Decision applied, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404': { $ref: '#/components/responses/PlainNotFound' }
+        '409': { $ref: '#/components/responses/PlainConflict' }
   /api/mcp/config:
     get:
       operationId: getMCPConfig

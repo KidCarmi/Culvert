@@ -13566,6 +13566,220 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/mcp/tool-approval-decision": {
+      "post": {
+        "description": "Decide a tool-trust request. approve (shadow purpose) re-verifies the exact reviewed fingerprint against current facts and materializes catalog.Usable; revoke immediately withdraws usability; reject terminates a pending request. Trust is not authorization — runtime policy stays authoritative for every call. Never executes, calls upstream, or materializes a credential.",
+        "operationId": "decideMCPToolApproval",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "tenant",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Decision applied"
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/PlainNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/PlainConflict"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Approve/reject/revoke an MCP tool-trust approval",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-audit-event": "mcp.tooltrust.decision",
+        "x-culvert-danger-level": "high",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "tenant",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/mcp/tool-approvals": {
+      "get": {
+        "description": "Tenant-scoped tool-trust (catalog promotion) approvals. An id parameter returns one. Safe view only — fingerprint digest + lifecycle metadata, never a token, credential, or raw schema/body.",
+        "operationId": "listMCPToolApprovals",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "tenant",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Approvals or one approval"
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/PlainNotFound"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "List MCP tool-trust approvals",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "tenant",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "post": {
+        "description": "Create a pending tool-trust request bound to an exact reviewed fingerprint digest for a declared purpose (only shadow_evaluation is issuable). This is NOT a grant — it never changes catalog eligibility. The tenant comes from the query scope, validated against the server's ownership; the client never submits server facts. Fails closed on a stale target (fingerprint or catalog revision advanced).",
+        "operationId": "requestMCPToolApproval",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "tenant",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Pending approval created"
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/PlainNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/PlainConflict"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Request an MCP tool-trust approval",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-audit-event": "mcp.tooltrust.request",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "operator",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "tenant",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/mcp/tools": {
       "get": {
         "description": "Tenant-scoped, redacted tool inventory. Quarantined/drifted tools stay visibly quarantined. No complete schemas, arguments or output.",

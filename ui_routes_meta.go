@@ -926,6 +926,14 @@ var uiRoutes = []uiRouteMetadata{
 	{Path: "/api/mcp/approval-decision", Handler: "apiMCPApprovalDecision", Domain: "mcp", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
 			Note: "four-eyes approve/reject of an operational approval; never executes"}}},
+	{Path: "/api/mcp/tool-approvals", Handler: "apiMCPToolApprovals", Domain: "mcp", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "ADR-0034 tenant-scoped tool-trust approvals list/get (safe view; no secret/raw schema)"},
+			{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true,
+				Note: "ADR-0034 create a pending tool-trust request bound to an exact reviewed fingerprint; NOT a grant (no catalog effect)"}}},
+	{Path: "/api/mcp/tool-approval-decision", Handler: "apiMCPToolApprovalDecision", Domain: "mcp", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
+			Note: "ADR-0034 approve[shadow]/reject/revoke a tool-trust decision; approve materializes catalog.Usable for the exact fingerprint, revoke withdraws it; never executes"}}},
 	{Path: "/api/mcp/config", Handler: "apiMCPConfig", Domain: "mcp", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer},

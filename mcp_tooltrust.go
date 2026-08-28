@@ -1,0 +1,479 @@
+package main
+
+// MCP tool-trust coordinator (ADR-0034). This is the composition-root seam that
+// owns the durable ToolApproval store (the SOURCE OF TRUTH for MCP tool trust) and
+// materializes its authoritative state as the catalog's Usable projection. It is
+// disabled-by-default: with no Gateway qualification inventory loaded, no store is
+// composed, no file is written, and the catalog + preflight behave byte-identically
+// to the pre-approval slice.
+//
+// The invariant the whole file exists to keep: a tool is catalog.Usable IFF an
+// ACTIVE, unexpired, unrevoked, shadow-purpose ToolApproval binds to the tool's
+// CURRENT observed fingerprint AND the server is usable AND the record is not
+// ServerDisabled. The store persists the decision; the coordinator derives the
+// projection and reconciles the catalog on approve / revoke / expiry / startup /
+// read. Trust is NOT authorization — a Usable tool merely survives to the
+// default-deny policy step (proved in internal/mcp/policy anti-weakening tests).
+//
+// Nothing here executes a tool, dials a server, materializes a credential, or arms
+// any live-execution tier: a shadow_evaluation approval only ever produces
+// catalog.Usable, which satisfies ONLY evaluateShadowActivationPreflight — never
+// liveExecDepsConfigured / modeExecReady.
+
+import (
+	"encoding/hex"
+	"path/filepath"
+	"sync"
+	"time"
+
+	"github.com/KidCarmi/Culvert/internal/mcp/catalog"
+	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
+	"github.com/KidCarmi/Culvert/internal/mcp/registry"
+	"github.com/KidCarmi/Culvert/internal/mcp/tooltrust"
+)
+
+// mcpToolTrust is the process-wide coordinator singleton.
+var mcpToolTrust = &mcpToolTrustCoordinator{}
+
+// mcpToolTrustReconcile is the read-path reconcile hook. It is installed by
+// initMCPToolTrust when the coordinator is composed and defaults to a no-op, so a
+// caller (the Shadow preflight's usable-tool scan, the admin inventory read) can
+// always call it to make the catalog Usable projection reflect current trust
+// (expiring + demoting due grants) WITHOUT importing the coordinator or changing
+// its own filtering. It never widens usability — it only ever withdraws expired
+// trust and re-affirms matching active trust.
+var mcpToolTrustReconcile = func() {}
+
+// mcpToolTrustCoordinator owns the durable store and the catalog derivation.
+type mcpToolTrustCoordinator struct {
+	mu       sync.RWMutex
+	store    *tooltrust.Store
+	composed bool
+	reason   string // bounded, secret-free classification when not composed
+	// nowFn is the injected clock the derivation reads (default time.Now). It drives
+	// expiry in reconcile + annotateTool so a test can advance it deterministically;
+	// production leaves it as time.Now.
+	nowFn func() time.Time
+}
+
+// now returns the coordinator clock (time.Now when unset).
+func (c *mcpToolTrustCoordinator) now() time.Time {
+	if c.nowFn != nil {
+		return c.nowFn()
+	}
+	return time.Now()
+}
+
+// initMCPToolTrust composes the tool-trust store and runs the startup reconcile. It
+// runs AFTER initMCPRuntime (which publishes the qualification inventory) so the
+// derivation has a live catalog to project onto. Fail-closed at every gate: if the
+// inventory is not loaded, or the durable store cannot be constructed/loaded, no
+// store is composed and NO tool is ever promoted (the catalog stays at its seeded
+// Quarantined dispositions).
+func initMCPToolTrust(_ *startupState) {
+	reg, cat := mcpInventory.sharedInventory()
+	if reg == nil || cat == nil {
+		mcpToolTrust.setUncomposed("inventory_not_loaded")
+		return
+	}
+	store, err := tooltrust.NewStore(tooltrust.Config{
+		Path: filepath.Join(dataDir, "mcp_tooltrust", "approvals.json"),
+	})
+	if err != nil {
+		mcpToolTrust.setUncomposed("store_unavailable")
+		logger.Printf("MCP tool-trust compose skipped (fail-closed): %q", sanitizeLog(err.Error()))
+		return
+	}
+	if err := store.Load(); err != nil {
+		// A corrupt/newer durable store fails closed: no trust is materialized. We do
+		// NOT quarantine or delete the file — an operator recovers it out of band.
+		mcpToolTrust.setUncomposed("store_load_failed")
+		logger.Printf("MCP tool-trust load failed (fail-closed, no trust materialized): %q", sanitizeLog(err.Error()))
+		return
+	}
+	mcpToolTrust.mu.Lock()
+	mcpToolTrust.store = store
+	mcpToolTrust.composed = true
+	mcpToolTrust.reason = ""
+	mcpToolTrust.mu.Unlock()
+	mcpToolTrustReconcile = mcpToolTrust.reconcile
+	// Startup reconcile is load-bearing (ADR-0034 D3): the boot inventory re-seeds
+	// every tool Quarantined; this re-applies each active approval whose bound
+	// fingerprint matches the freshly-seeded tool. Without it every restart silently
+	// revokes trust.
+	mcpToolTrust.reconcile()
+}
+
+func (c *mcpToolTrustCoordinator) setUncomposed(reason string) {
+	c.mu.Lock()
+	c.store = nil
+	c.composed = false
+	c.reason = reason
+	c.mu.Unlock()
+}
+
+// getStore returns the composed store or a fail-closed error. A nil store means the
+// trust subsystem is not composed (no MCP inventory / load failure), so every trust
+// mutation and read is refused rather than silently succeeding.
+func (c *mcpToolTrustCoordinator) getStore() (*tooltrust.Store, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if !c.composed || c.store == nil {
+		return nil, mcperr.New(mcperr.ReasonAdminNotFound, "tooltrust.coordinator", "tool trust not configured")
+	}
+	return c.store, nil
+}
+
+// composedStatus reports whether the coordinator is composed and its bounded reason
+// (for the admin status surface).
+func (c *mcpToolTrustCoordinator) composedStatus() (bool, string) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.composed, c.reason
+}
+
+// reconcile makes the catalog Usable projection consistent with the durable store as
+// of now: it first EXPIRES due grants and demotes their tools (withdraw stale
+// trust), then PROMOTES every active grant whose bound fingerprint exactly matches
+// the tool's current observed fingerprint (re-affirm matching trust). It is
+// idempotent, fail-safe (a per-tool CAS/stale failure is skipped, never fails open),
+// and cheap (O(active approvals)). Because it only ever demotes-expired and
+// promotes-exact-match, calling it from a read path can never widen usability.
+func (c *mcpToolTrustCoordinator) reconcile() {
+	store, err := c.getStore()
+	if err != nil {
+		return
+	}
+	reg, cat := mcpInventory.sharedInventory()
+	if reg == nil || cat == nil {
+		return
+	}
+	now := c.now()
+	// 1. Expire due grants and withdraw their trust from the catalog.
+	expired, err := store.ExpireDue(now)
+	if err == nil {
+		for _, a := range expired {
+			_, _ = cat.Demote(catalog.ToolKey{Server: registry.ServerID(a.ServerID), Name: a.ToolName})
+		}
+	}
+	// 2. Re-affirm every active grant against the CURRENT observation. A grant whose
+	//    fingerprint no longer matches is simply not promoted (the ingest fold already
+	//    moved the tool off Usable); it is never demoted here, because a DIFFERENT
+	//    active grant, or a benign flap-back to the exact reviewed fingerprint, may
+	//    legitimately keep/return it Usable.
+	active := store.ActiveApprovals(now)
+	for _, a := range active {
+		key := catalog.ToolKey{Server: registry.ServerID(a.ServerID), Name: a.ToolName}
+		rec, ok := cat.Current().Get(key)
+		if !ok {
+			continue
+		}
+		srv, sok := reg.Current().Get(registry.ServerID(a.ServerID))
+		if !sok || !srv.Usable() || string(srv.OwnerScope) != a.Tenant {
+			continue // server gone, unusable, or re-owned: do not promote
+		}
+		sum := rec.Fingerprint.Sum()
+		if !a.MatchesTool(a.Tenant, a.ServerID, a.ToolName,
+			tooltrust.FingerprintDigest(sum), rec.Fingerprint.FormatVersion) {
+			continue // drifted away from the reviewed fingerprint
+		}
+		// Promote is fail-closed and idempotent: it refuses a ServerDisabled record and
+		// a fingerprint mismatch, so a stale read here cannot force a bad promotion.
+		_, _ = cat.Promote(key, rec.Fingerprint)
+	}
+}
+
+// toolTrustTargetInput carries the current facts a request/approve is verified
+// against, resolved from the LIVE registry + catalog (never from the caller).
+type toolTrustTargetInput struct {
+	target      tooltrust.CurrentTarget
+	fingerprint catalog.Fingerprint // the live record fingerprint (for the catalog CAS)
+	key         catalog.ToolKey
+	found       bool
+}
+
+// loadTarget resolves the authoritative current facts for a (server, tool) from the
+// shared inventory. found is false when the tool is not in the catalog.
+func (c *mcpToolTrustCoordinator) loadTarget(serverID, toolName string) toolTrustTargetInput {
+	reg, cat := mcpInventory.sharedInventory()
+	if reg == nil || cat == nil {
+		return toolTrustTargetInput{}
+	}
+	key := catalog.ToolKey{Server: registry.ServerID(serverID), Name: toolName}
+	rec, ok := cat.Current().Get(key)
+	srv, sok := reg.Current().Get(registry.ServerID(serverID))
+	t := tooltrust.CurrentTarget{
+		ServerExists:    sok,
+		ServerUsable:    sok && srv.Usable(),
+		ToolExists:      ok,
+		CatalogRevision: cat.Current().Revision(),
+	}
+	if sok {
+		t.Tenant = string(srv.OwnerScope)
+		t.ServerRevision = srv.Revision
+	}
+	if ok {
+		t.Approvable = rec.Eligibility != catalog.ServerDisabled
+		sum := rec.Fingerprint.Sum()
+		t.Fingerprint = tooltrust.FingerprintDigest(sum)
+		t.FingerprintFormatVersion = rec.Fingerprint.FormatVersion
+	}
+	return toolTrustTargetInput{target: t, fingerprint: rec.Fingerprint, key: key, found: ok && sok}
+}
+
+// toolTrustRequestInput is the coordinator-level request (already RBAC-checked by the
+// handler). It carries the client's EXPECTED fingerprint hex + expected catalog
+// revision (the review-time optimistic-concurrency evidence) — never arbitrary
+// server facts.
+type toolTrustRequestInput struct {
+	Tenant              string
+	ServerID            string
+	ToolName            string
+	ExpectedFingerprint string // hex of the 32-byte digest the reviewer saw
+	ExpectedCatalogRev  uint64
+	Purpose             tooltrust.Purpose
+	RequestedBy         string
+	Reason              string
+	TicketRef           string
+	ExpiresAt           *time.Time
+}
+
+// RequestApproval records a pending trust request after resolving and validating the
+// current facts. The client's expected fingerprint MUST equal the tool's current
+// observed fingerprint (else the reviewer's view is stale — rejected fail-closed);
+// the request then binds that exact digest. The tenant is taken from the SERVER's
+// ownership scope, never from the caller.
+func (c *mcpToolTrustCoordinator) RequestApproval(in toolTrustRequestInput) (*tooltrust.ToolApproval, error) {
+	store, err := c.getStore()
+	if err != nil {
+		return nil, err
+	}
+	ti := c.loadTarget(in.ServerID, in.ToolName)
+	if !ti.found {
+		return nil, mcperr.New(mcperr.ReasonToolNotFound, "tooltrust.request", "target tool not found")
+	}
+	if !ti.target.ServerUsable {
+		return nil, mcperr.New(mcperr.ReasonServerNotUsable, "tooltrust.request", "server not usable")
+	}
+	if ti.target.Tenant != in.Tenant {
+		// The caller selected a tenant that does not own this server: uniform not-found
+		// so a caller cannot probe another tenant's servers.
+		return nil, mcperr.New(mcperr.ReasonToolNotFound, "tooltrust.request", "target tool not found")
+	}
+	if !ti.target.Approvable {
+		return nil, mcperr.New(mcperr.ReasonToolNotApprovable, "tooltrust.request", "tool not in an approvable state")
+	}
+	expected, err := parseFingerprintHex(in.ExpectedFingerprint)
+	if err != nil {
+		return nil, err
+	}
+	if expected != ti.target.Fingerprint {
+		return nil, mcperr.New(mcperr.ReasonToolFingerprintMismatch, "tooltrust.request", "expected fingerprint does not match the current tool")
+	}
+	if in.ExpectedCatalogRev != 0 && in.ExpectedCatalogRev != ti.target.CatalogRevision {
+		// The reviewer's catalog view is stale even though the fingerprint still
+		// matches (a benign flap can cause this). Fail closed and let the reviewer
+		// re-fetch — the exact-target contract is optimistic-concurrency, not just a
+		// fingerprint compare.
+		return nil, mcperr.New(mcperr.ReasonToolApprovalStale, "tooltrust.request", "catalog revision advanced since review")
+	}
+	return store.CreateRequest(tooltrust.RequestInput{
+		Tenant:                   in.Tenant,
+		ServerID:                 in.ServerID,
+		ToolName:                 in.ToolName,
+		Fingerprint:              ti.target.Fingerprint,
+		FingerprintFormatVersion: ti.target.FingerprintFormatVersion,
+		Purpose:                  in.Purpose,
+		CatalogRevision:          ti.target.CatalogRevision,
+		ServerRevision:           ti.target.ServerRevision,
+		RequestedBy:              in.RequestedBy,
+		Reason:                   in.Reason,
+		TicketRef:                in.TicketRef,
+		ExpiresAt:                in.ExpiresAt,
+	})
+}
+
+// ApproveShadow approves a pending request (shadow purpose) after re-verifying the
+// bound target against freshly-loaded CURRENT facts, then materializes the trust by
+// promoting the tool to catalog.Usable. Commit order is durable-first (ADR-0034
+// D6/D13): the store persists the active grant BEFORE the catalog CAS, so a crash
+// between the two is repaired by the next startup/read reconcile. A promote that
+// loses the CAS (a concurrent ingest advanced the catalog under the decision) leaves
+// the grant durably active but the tool not yet Usable; the next reconcile promotes
+// it — no false trust, and the caller is told it is stale.
+func (c *mcpToolTrustCoordinator) ApproveShadow(id, approver, tenant string) (*tooltrust.ToolApproval, error) {
+	store, err := c.getStore()
+	if err != nil {
+		return nil, err
+	}
+	// The approval must exist within the caller's tenant BEFORE we load facts.
+	existing, err := store.Get(id, tenant)
+	if err != nil {
+		return nil, err
+	}
+	ti := c.loadTarget(existing.ServerID, existing.ToolName)
+	granted, err := store.Approve(id, approver, ti.target)
+	if err != nil {
+		return nil, err
+	}
+	// Materialize the trust: promote the exact reviewed fingerprint. Fail-closed and
+	// idempotent; a stale CAS is surfaced but the durable grant stands.
+	if _, perr := c.promoteFor(granted); perr != nil {
+		return granted, perr
+	}
+	return granted, nil
+}
+
+// promoteFor promotes the tool an active grant binds to, using the live record
+// fingerprint as the CAS-expected value. It re-reads the live record so the promote
+// is verified against the current observation, never a stale copy.
+func (c *mcpToolTrustCoordinator) promoteFor(a *tooltrust.ToolApproval) (*catalog.Snapshot, error) {
+	_, cat := mcpInventory.sharedInventory()
+	if cat == nil {
+		return nil, mcperr.New(mcperr.ReasonToolNotFound, "tooltrust.promote", "catalog unavailable")
+	}
+	key := catalog.ToolKey{Server: registry.ServerID(a.ServerID), Name: a.ToolName}
+	rec, ok := cat.Current().Get(key)
+	if !ok {
+		return nil, mcperr.New(mcperr.ReasonToolNotFound, "tooltrust.promote", "tool not found")
+	}
+	sum := rec.Fingerprint.Sum()
+	if !a.MatchesTool(a.Tenant, a.ServerID, a.ToolName,
+		tooltrust.FingerprintDigest(sum), rec.Fingerprint.FormatVersion) {
+		return nil, mcperr.New(mcperr.ReasonToolFingerprintMismatch, "tooltrust.promote", "tool drifted since approval")
+	}
+	return cat.Promote(key, rec.Fingerprint)
+}
+
+// Reject decides a pending request as rejected (no catalog effect).
+func (c *mcpToolTrustCoordinator) Reject(id, actor, tenant, reason string) error {
+	store, err := c.getStore()
+	if err != nil {
+		return err
+	}
+	// Tenant scope the reject: resolve within tenant first.
+	if _, gerr := store.Get(id, tenant); gerr != nil {
+		return gerr
+	}
+	return store.Reject(id, actor, reason)
+}
+
+// Revoke terminates a grant and immediately withdraws its trust from the catalog
+// (durable-first: the store persists the revocation, then the catalog is demoted).
+func (c *mcpToolTrustCoordinator) Revoke(id, actor, tenant, reason string) (*tooltrust.ToolApproval, error) {
+	store, err := c.getStore()
+	if err != nil {
+		return nil, err
+	}
+	revoked, err := store.Revoke(id, actor, tenant, reason)
+	if err != nil {
+		return nil, err
+	}
+	_, cat := mcpInventory.sharedInventory()
+	if cat != nil {
+		// Demote is the withdrawal; a stale CAS is retried inside Demote and never fails
+		// open. If it somehow does not converge, the next reconcile re-derives (the grant
+		// is durably revoked, so it will never be re-promoted).
+		_, _ = cat.Demote(catalog.ToolKey{Server: registry.ServerID(revoked.ServerID), Name: revoked.ToolName})
+	}
+	return revoked, nil
+}
+
+// Get returns a tenant-scoped approval copy.
+func (c *mcpToolTrustCoordinator) Get(id, tenant string) (*tooltrust.ToolApproval, error) {
+	store, err := c.getStore()
+	if err != nil {
+		return nil, err
+	}
+	return store.Get(id, tenant)
+}
+
+// List returns a tenant-scoped, bounded approval list.
+func (c *mcpToolTrustCoordinator) List(tenant string, limit int) ([]*tooltrust.ToolApproval, error) {
+	store, err := c.getStore()
+	if err != nil {
+		return nil, err
+	}
+	return store.List(tenant, limit), nil
+}
+
+// toolTrustAnnotation is the trust overlay for one inventory tool (ADR-0034 Sec 21):
+// the governing approval's status/purpose/id and optional expiry. Empty when no
+// approval references the tool.
+type toolTrustAnnotation struct {
+	Status    string
+	Purpose   string
+	ID        string
+	ExpiresAt *time.Time
+}
+
+// annotateTool returns the trust overlay for a (tenant, server, tool) at the given
+// current fingerprint hex. It prefers the ACTIVE approval that matches the current
+// fingerprint (the one that makes the tool Usable); otherwise the most recent
+// pending request; otherwise the most recent record. It is read-only.
+func (c *mcpToolTrustCoordinator) annotateTool(tenant, serverID, name, fingerprintHex string) (toolTrustAnnotation, bool) {
+	store, err := c.getStore()
+	if err != nil {
+		return toolTrustAnnotation{}, false
+	}
+	now := c.now()
+	var best *tooltrust.ToolApproval
+	rank := func(a *tooltrust.ToolApproval) int {
+		// active-and-matching (3) > pending (2) > anything else (1).
+		if a.Status == tooltrust.StatusActive {
+			fpMatch := fingerprintHex == hex.EncodeToString(a.Fingerprint[:])
+			if fpMatch && a.Purpose.PermitsShadowEvaluation() && (a.ExpiresAt == nil || now.Before(*a.ExpiresAt)) {
+				return 3
+			}
+		}
+		if a.Status == tooltrust.StatusPending {
+			return 2
+		}
+		return 1
+	}
+	for _, a := range store.List(tenant, 0xFFFF) {
+		if a.ServerID != serverID || a.ToolName != name {
+			continue
+		}
+		if best == nil || rank(a) > rank(best) ||
+			(rank(a) == rank(best) && a.RequestedAt.After(best.RequestedAt)) {
+			best = a
+		}
+	}
+	if best == nil {
+		return toolTrustAnnotation{}, false
+	}
+	return toolTrustAnnotation{
+		Status:    best.Status.String(),
+		Purpose:   best.Purpose.String(),
+		ID:        best.ApprovalID,
+		ExpiresAt: best.ExpiresAt,
+	}, true
+}
+
+// parseFingerprintHex decodes a 64-char hex string into a fingerprint digest,
+// failing closed on any malformed input.
+func parseFingerprintHex(s string) (tooltrust.FingerprintDigest, error) {
+	var d tooltrust.FingerprintDigest
+	if len(s) != 2*len(d) {
+		return d, mcperr.New(mcperr.ReasonAdminRequestInvalid, "tooltrust.request", "fingerprint must be 32-byte hex")
+	}
+	b, err := hex.DecodeString(s)
+	if err != nil || len(b) != len(d) {
+		return d, mcperr.New(mcperr.ReasonAdminRequestInvalid, "tooltrust.request", "fingerprint is not valid hex")
+	}
+	copy(d[:], b)
+	return d, nil
+}
+
+// resetMCPToolTrustForTest restores the coordinator + reconcile hook to their
+// uncomposed defaults so a test can isolate the process-global singleton.
+func resetMCPToolTrustForTest() {
+	mcpToolTrust.mu.Lock()
+	mcpToolTrust.store = nil
+	mcpToolTrust.composed = false
+	mcpToolTrust.reason = ""
+	mcpToolTrust.nowFn = nil
+	mcpToolTrust.mu.Unlock()
+	mcpToolTrustReconcile = func() {}
+}

@@ -40,6 +40,12 @@ var shadowScopeUsableToolProbe = shadowScopeHasUsableTool
 // structurally unreachable (Codex P1, PR #1234). Identity dimensions are request-time, so the
 // scope match is principal-agnostic (Scope.AdmitsToolForEvaluation).
 func shadowScopeHasUsableTool(spec rollout.ScopeSpec, scopeRev uint64) bool {
+	// Make the catalog Usable projection reflect current trust before the scan: this
+	// EXPIRES + demotes any grant past its TTL so an expired approval can never leave a
+	// tool Usable at preflight time (ADR-0034 D7). It never widens usability — it only
+	// withdraws expired trust and re-affirms exact-match active trust. A no-op when the
+	// tool-trust coordinator is not composed.
+	mcpToolTrustReconcile()
 	_, cat := mcpInventory.sharedInventory()
 	if cat == nil {
 		return false

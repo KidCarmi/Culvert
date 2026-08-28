@@ -221,6 +221,7 @@ func main() {
 	initMCPRuntime(s)      // PR-5: disabled-by-default MCP listener runtime (no SWG effect when off)
 	initMCPRollout(s)      // PR-11: disabled-by-default rollout composition (Gateway/Management isolated)
 	initMCPDistribution(s) // PR-12: disabled-by-default DP applier composition (after rollout state is restored)
+	initMCPToolTrust(s)    // ADR-0034: disabled-by-default tool-trust store + catalog Usable projection (after inventory is published)
 	loadReleaseManagement(resolveReleaseStartupConfig())
 	startAdminUI(s)
 

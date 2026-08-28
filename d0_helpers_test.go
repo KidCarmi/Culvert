@@ -192,7 +192,7 @@ var d0KnownRoutes = func() []string {
 //   - Remove an entry from uiRoutes only             → fails C1 reverse
 //     (helper-registered route has no metadata) AND this D0 count test.
 func TestD0_RouteInventory_Locked141(t *testing.T) {
-	const want = 232 // 222 (incl. the 3 ADR-0027 LDAP IdP routes) + 6 /api/policy-learning/* (ADR-0025 M5A) + 1 /api/backups (backup-archive visibility) + 3 FrontendV2 preview routes (FE-1B: /app, /app/, /assets/)
+	const want = 234 // 222 (incl. the 3 ADR-0027 LDAP IdP routes) + 6 /api/policy-learning/* (ADR-0025 M5A) + 1 /api/backups (backup-archive visibility) + 3 FrontendV2 preview routes (FE-1B: /app, /app/, /assets/) + 2 ADR-0034 tool-trust routes (/api/mcp/tool-approvals, /api/mcp/tool-approval-decision)
 	if got := len(d0KnownRoutes); got != want {
 		t.Fatalf("d0KnownRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}

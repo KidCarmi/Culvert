@@ -141,6 +141,15 @@ func TestReasonCodesStable(t *testing.T) {
 		{ReasonUpstreamDiscoveryFailed, "upstream_discovery_failed"},
 		{ReasonAmbiguousRequestHeader, "ambiguous_request_header"},
 		{ReasonDecisionSnapshotStale, "decision_snapshot_stale"},
+		{ReasonToolNotApprovable, "tool_not_approvable"},
+		{ReasonToolApprovalStale, "tool_approval_stale"},
+		{ReasonToolFingerprintMismatch, "tool_fingerprint_mismatch"},
+		{ReasonServerNotUsable, "server_not_usable"},
+		{ReasonToolNotFound, "tool_not_found"},
+		{ReasonApprovalRevoked, "approval_revoked"},
+		{ReasonApprovalTenantConflict, "approval_tenant_conflict"},
+		{ReasonApprovalPurposeUnsupported, "approval_purpose_unsupported"},
+		{ReasonApprovalNotAuthorized, "approval_not_authorized"},
 	}
 	seen := map[Reason]bool{}
 	for _, p := range want {
