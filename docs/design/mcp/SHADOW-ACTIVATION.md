@@ -141,11 +141,19 @@ nil-executor Observe node produces — no durability weakening.
 (`config.go:80`) but NOT for Shadow, so a Shadow config with an empty scope validated
 and silently behaved as Observe. This phase makes `ModeShadow` **also** require an
 enumerable, non-empty scope (`rollout/config.go`): an empty/percentage-only scope for
-Shadow is rejected fail-closed at validation. Combined with the existing `HighRisk`
-gate and read-only-by-default `Operations`, this supports a first activation scoped
-to one server + synthetic principal + read-only tools, and makes "missing scope
-shadows everything" structurally impossible (the empty scope matches nothing AND the
-config is rejected).
+Shadow is rejected fail-closed at validation. This supports a first activation scoped
+to one server + one synthetic principal, and makes "missing scope shadows everything"
+structurally impossible (the empty scope matches nothing AND the config is rejected).
+
+Note the `Operations` risk class the scope must admit: `policyOperation`
+(`internal/mcp/runtime/policy.go`) classifies EVERY Gateway `tools/call` as the `write`
+class (a conservative default until a finer trusted read/write classification ships), so a
+Shadow scope intended to evaluate tool calls must admit the write class (`operations: [2]`
+on the wire — numeric risk classes: 1=read, 2=write, 3=destructive) with `high_risk: true`;
+a read-only scope admits no `tools/call` and records zero Shadow evaluations. Admitting `write` is safe because Shadow performs no upstream side effect
+regardless of risk class (Layer B: no upstream client, no materialize-capable broker); the
+`HighRisk` gate here selects which calls are EVALUATED, never any that are executed. The
+operator runbook (`docs/operator/mcp-shadow-activation.md` §2) carries the concrete scope.
 
 ---
 

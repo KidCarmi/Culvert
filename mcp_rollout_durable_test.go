@@ -71,9 +71,13 @@ func withReadyShadowNode(t *testing.T) {
 	prevComposed := globalMCPShadow.composed.Load()
 	prevInsp := globalMCPShadow.inspectionComposed.Load()
 	prevStatus := getMCPObserveStatus()
+	prevListenerProbe := gatewayListenerReadyProbe
 	globalMCPShadow.composed.Store(true)
 	globalMCPShadow.inspectionComposed.Store(true)
 	setMCPObserveStatus(mcpObserveActivation{State: mcpObserveConfigured})
+	// The isolated rollout tests do not stand up a real serving listener; arm the live-phase
+	// probe so the Shadow preflight's PhaseReady requirement (Codex P1, PR #1234) is satisfied.
+	gatewayListenerReadyProbe = func() bool { return true }
 	publishMCPTelemetry(mcpTelemReady, "", buildReadyTelemetry(t))
 	publishMCPInventory(mcpInvLoaded, "", registry.New(limits.DefaultCatalog()), catalog.New(limits.DefaultCatalog()))
 	// Reset the shared policy holder so the monotonic-revision store accepts this test's
@@ -86,6 +90,7 @@ func withReadyShadowNode(t *testing.T) {
 		globalMCPShadow.composed.Store(prevComposed)
 		globalMCPShadow.inspectionComposed.Store(prevInsp)
 		setMCPObserveStatus(prevStatus)
+		gatewayListenerReadyProbe = prevListenerProbe
 		publishMCPTelemetry(mcpTelemNotConfigured, "", nil)
 		publishMCPInventory(mcpInvNotConfigured, "", nil, nil)
 		_ = publishMCPPolicy(mcpPolNotConfigured, "", nil)

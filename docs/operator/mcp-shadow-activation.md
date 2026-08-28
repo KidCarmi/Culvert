@@ -53,7 +53,7 @@ rejected fail-closed; fix each named reason first.
 
 Shadow REQUIRES a bounded, enumerable scope — an empty or percentage-only scope is
 rejected at validation ("no scope = no Shadow"). For the first activation, scope to a
-single controlled server + a synthetic principal + read-only tools:
+single controlled server + a synthetic principal:
 
 ```json
 {
@@ -63,7 +63,8 @@ single controlled server + a synthetic principal + read-only tools:
     "capability": "gateway",
     "servers": ["controlled-test-server"],
     "principals": ["synthetic-shadow-principal"],
-    "operations": ["read"]
+    "operations": [2],
+    "high_risk": true
   },
   "scope_revision": 1,
   "connector_mode": "local-client"
@@ -71,12 +72,27 @@ single controlled server + a synthetic principal + read-only tools:
 ```
 
 - `servers` / `principals`: the ONE controlled server and the ONE synthetic identity.
-- `operations: ["read"]`: read-only/harmless tools only. Do NOT set `high_risk` or add
-  write/destructive operations for a first activation.
+- `operations: [2]` with `high_risk: true` — **required to shadow any `tools/call`.** The
+  `operations` values are numeric risk classes on the wire: `1` = read, `2` = write, `3` =
+  destructive (an empty list admits read only). The runtime classifies EVERY Gateway
+  `tools/call` as the **`write`** class (`policyOperation` in
+  `internal/mcp/runtime/policy.go`, a conservative default until a finer trusted read/write
+  classification ships), so the scope must admit `2` — a read-only scope admits no
+  `tools/call` traffic at all: the config would validate and activate, but every intended
+  call resolves out of scope and stays Observe, so the controlled experiment records ZERO
+  Shadow evaluations. A scope admitting the write/destructive class requires `high_risk:
+  true` (validation rejects it otherwise). Admitting the `write` class is SAFE here because
+  **Shadow performs no upstream side effect regardless of risk class** — it holds no upstream
+  client and no materialize-capable broker (Layer B, #1226), so `high_risk` selects which
+  calls are EVALUATED, never any that are executed.
 - No `percent` gate (the scope must be enumerable).
 
+Keep the ONE controlled server's tools harmless/reversible even though the scope admits the
+`write` class: Shadow will never call them, but a zero-blast-radius target keeps the
+experiment safe if a Canary decision for the same scope is ever contemplated later.
+
 Validate the candidate scope first: `POST /api/mcp/rollout/scope/validate` (viewer) and
-confirm it reports enumerable, bounded, and read-only.
+confirm it reports enumerable and bounded.
 
 ---
 

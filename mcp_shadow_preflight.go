@@ -13,6 +13,12 @@ import "github.com/KidCarmi/Culvert/internal/mcp/rollout"
 // signed Shadow config on it, and the admin surface exposes it read-only as an operator
 // dry-run before publishing a Shadow config.
 
+// gatewayListenerReadyProbe reports whether the Gateway listener is live and serving
+// (PhaseReady). It is a seam: production uses liveGatewayListenerReady (observe state +
+// runtime health snapshot); isolated preflight/rollout tests, which do not stand up a real
+// listener, arm it via withReadyShadowNode.
+var gatewayListenerReadyProbe = liveGatewayListenerReady
+
 // shadowPreflightResult is the structured, safe preflight outcome.
 type shadowPreflightResult struct {
 	Ready   bool     `json:"ready"`
@@ -74,8 +80,14 @@ func evaluateShadowActivationPreflight(capb rollout.Capability) shadowPreflightR
 	if !globalMCPShadow.inspectionComposed.Load() {
 		reasons = append(reasons, shadowPFNoInspection)
 	}
-	// The Gateway listener must be configured/serving.
-	if getMCPObserveStatus().State != mcpObserveConfigured {
+	// The Gateway listener must be not merely CONFIGURED at startup but LIVE and SERVING.
+	// serve() sets PhaseReady synchronously at Start, but a listener that started and then
+	// exited its serve loop with an unexpected error becomes PhaseDegraded while the observe
+	// state stays mcpObserveConfigured — so consulting the startup result alone would let a
+	// Shadow evidence window open on a node that can no longer receive traffic (Codex P1,
+	// PR #1234). The probe consults the runtime's live Gateway health snapshot and requires
+	// PhaseReady; it is a seam so isolated preflight tests can arm it without a live listener.
+	if !gatewayListenerReadyProbe() {
 		reasons = append(reasons, shadowPFListenerNotReady)
 	}
 	// An engaged emergency kill switch stops admission; activating Shadow into it would be
