@@ -387,10 +387,12 @@
   `DisallowUnknownFields`, so the unknown `shadow` key fails the decode, and the record is rejected as
   corrupt (fail closed) rather than misverified. This is the accepted downgrade posture: **rolling a
   binary back across persisted v2 shadow evidence requires an operator procedure** — the concrete,
-  surgical steps (archive the Gateway spool subtree, clear ONLY the `P-ORD` partition that holds the
-  Shadow evidence, restart) are in `docs/operator/mcp-shadow-activation.md` §8, which explicitly
-  preserves the `P-CRIT`/`P-DEN` partitions, the sealed DEK, and the `management/` subtree so an
-  operator never deletes unrelated durable evidence. Arbitrary binary downgrade over v2 evidence is
+  surgical steps (archive the Gateway spool subtree, clear the Shadow-bearing `P-ORD` **and**
+  `P-CRIT` partitions — a read-class shadow `tools/call` is ordinary→`P-ORD`, a write/destructive
+  one is critical→`P-CRIT` — reset both export cursors, restart) are in
+  `docs/operator/mcp-shadow-activation.md` §8, which explicitly preserves the `P-DEN` partition,
+  the sealed DEK, and the `management/` subtree so an operator never deletes unrelated durable
+  evidence. Arbitrary binary downgrade over v2 evidence is
   NOT silently safe, by design, and validation is not weakened to make it appear so. No historical v1
   event is rewritten or migrated in place; existing v1 evidence stays immutable.
 - **Gates:** `internal/mcp/events/model/shadow_v2_compat_test.go` (golden v1 digest invariance),

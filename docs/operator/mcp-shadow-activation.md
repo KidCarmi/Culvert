@@ -260,10 +260,14 @@ unrelated durable evidence.
 - The MCP events spool is a BOUNDED, encrypted, per-capability **qualification-telemetry
   cache** — NOT authoritative policy, config, or enforcement state. Clearing it loses
   decision/outcome history, never enforcement.
-- v2 Shadow decision events are ordinary-criticality **Gateway** events, so they live ONLY in
-  `<mcp-data-dir>/gateway/P-ORD/`. The `P-CRIT` and `P-DEN` partitions, the sealed DEK
-  (`gateway/dek.sealed`), `gateway/degraded_state.json`, and the entire `management/` subtree
-  carry NO v2 evidence and MUST be preserved.
+- A v2 Shadow decision event routes by the tool call's operation class (`criticalityFor`):
+  a **read**-class `tools/call` is ordinary → `gateway/P-ORD/`, while a **write** or
+  **destructive** call is critical → `gateway/P-CRIT/`. So v2 Shadow evidence can land in
+  **either** the `P-ORD` **or** the `P-CRIT` Gateway partition, and BOTH must be archived and
+  cleared. `gateway/P-DEN/` holds only coalesced denial aggregates (never a Shadow decision
+  event, never v2), so it — together with the sealed DEK (`gateway/dek.sealed`),
+  `gateway/degraded_state.json`, and the entire `management/` subtree — carries NO v2 evidence
+  and MUST be preserved.
 
 `<mcp-data-dir>` is the MCP telemetry `DataDir` configured for this node's Gateway; under it
 each capability (`gateway/`, `management/`) has per-partition subdirectories (`P-ORD/`,
@@ -281,19 +285,29 @@ each capability (`gateway/`, `management/`) has per-partition subdirectories (`P
    tar -czf /var/backups/culvert/mcp-gateway-spool-$(date +%Y%m%dT%H%M%SZ).tgz \
        -C <mcp-data-dir> gateway
    ```
-4. Clear ONLY the Shadow partition — remove its segments and checkpoint (the directory is
-   recreated on next open; recovery treats an empty partition as fresh):
+4. Clear BOTH Shadow-bearing partitions — remove the segments and checkpoint of `P-ORD` and
+   `P-CRIT` (the directories are recreated on next open; recovery treats an empty partition as
+   fresh):
    ```
-   rm -f <mcp-data-dir>/gateway/P-ORD/seg-*.dat <mcp-data-dir>/gateway/P-ORD/checkpoint.json
+   rm -f <mcp-data-dir>/gateway/P-ORD/seg-*.dat  <mcp-data-dir>/gateway/P-ORD/checkpoint.json
+   rm -f <mcp-data-dir>/gateway/P-CRIT/seg-*.dat <mcp-data-dir>/gateway/P-CRIT/checkpoint.json
    ```
-   Do NOT touch `gateway/P-CRIT`, `gateway/P-DEN`, `gateway/dek.sealed`,
-   `gateway/degraded_state.json`, or anything under `management/`.
-5. Only if the downgraded binary then logs an export cursor/segment mismatch for the Gateway
-   `P-ORD` partition, remove that partition's cursor file under
-   `<mcp-data-dir>/export_cursors/gateway/` (the per-partition `*.cursor`) so the exporter
-   restarts cleanly from the fresh partition. Skip this step otherwise.
-6. Start the pre-v2 binary. Its spool recovery now sees an empty `P-ORD` (a fresh partition)
-   and starts clean; `P-CRIT`, `P-DEN`, and `management/` recover normally.
+   Do NOT touch `gateway/P-DEN`, `gateway/dek.sealed`, `gateway/degraded_state.json`, or
+   anything under `management/`.
+5. **Reset the export cursor for every partition you cleared — unconditionally.** Clearing a
+   partition restarts its commit sequence at 1, but the archive exporter's cursor still holds
+   the old (high) `afterSeq`; `CommittedForExport` skips any segment whose `lastSeq <= afterSeq`
+   and `exportStep` returns without an error on the resulting empty batch, so a **retained**
+   cursor SILENTLY drops every new event of the reset partition (with no logged mismatch) until
+   the restarted sequence overtakes the old cursor. Remove the matching cursor files so the
+   exporter restarts from the fresh partitions:
+   ```
+   rm -f <mcp-data-dir>/export_cursors/gateway/ord.cursor \
+         <mcp-data-dir>/export_cursors/gateway/crit.cursor
+   ```
+   Leave `den.cursor` and the `management/` cursors alone (their partitions were not cleared).
+6. Start the pre-v2 binary. Its spool recovery now sees empty `P-ORD` and `P-CRIT` (fresh
+   partitions) and starts clean; `P-DEN` and `management/` recover normally.
 
 **Restore / re-upgrade.** To read the archived v2 evidence again, return the node to a
 v2-capable binary and restore the archived `gateway/` subtree (or read the archive offline

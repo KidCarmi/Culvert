@@ -249,7 +249,8 @@ the v2 envelope, canonical-digest compatibility, schema/consistency validation, 
 fail-closed recovery tests, export round-trip, and proof that the durable record carries the SAME
 `ShadowDecision` facts returned to the client. **Binary-downgrade semantics** across persisted v2
 evidence are an operator procedure — `docs/operator/mcp-shadow-activation.md` §8 (archive the
-Gateway spool, clear only the `P-ORD` partition, restart). With this prerequisite closed, the
+Gateway spool, clear the Shadow-bearing `P-ORD` and `P-CRIT` partitions, reset both export
+cursors, restart). With this prerequisite closed, the
 runbook's evidence-parity / zero-gap exit criteria are now satisfiable; activation still stays
 unreachable in production on prerequisite 1 (§8, a usable scoped tool) below.
 
