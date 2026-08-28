@@ -519,15 +519,52 @@ func TestLoad_UnknownFieldFailsClosed(t *testing.T) {
 
 func TestLoad_TrailingDataFailsClosed(t *testing.T) {
 	clk := &fakeClock{t: time.Unix(1000, 0)}
-	dir := t.TempDir()
-	path := filepath.Join(dir, "approvals.json")
-	// A valid envelope followed by trailing bytes (a second value / tamper).
-	if err := os.WriteFile(path, []byte(`{"schema_version":1,"approvals":[]}{"evil":1}`), 0o600); err != nil {
-		t.Fatal(err)
+	// Each of these is a valid envelope followed by trailing bytes that a naive
+	// Decoder.More check misses (a trailing delimiter reads as "no more elements").
+	for name, body := range map[string]string{
+		"second_value":    `{"schema_version":1,"approvals":[]}{"evil":1}`,
+		"closing_bracket": `{"schema_version":1,"approvals":[]}]`,
+		"closing_brace":   `{"schema_version":1,"approvals":[]}}`,
+		"garbage":         `{"schema_version":1,"approvals":[]} not json`,
+	} {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "approvals.json")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		s, _ := NewStore(Config{Path: path, Clock: clk.now})
+		if err := s.Load(); err == nil {
+			t.Fatalf("[%s] trailing data after the envelope must fail closed", name)
+		}
 	}
-	s, _ := NewStore(Config{Path: path, Clock: clk.now})
-	if err := s.Load(); err == nil {
-		t.Fatal("trailing data after the envelope must fail closed")
+}
+
+func TestExpireDue_PersistFailureStillExcludesFromActive(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	s := newTestStore(t, clk)
+	in := goodRequest()
+	exp := clk.t.Add(5 * time.Minute)
+	in.ExpiresAt = &exp
+	req, _ := s.CreateRequest(in)
+	if _, err := s.Approve(req.ApprovalID, "admin@corp", matchingTarget(in)); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	// Advance past expiry, then make the durable Expired transition fail.
+	clk.t = exp.Add(time.Second)
+	s.writeFile = func(string, []byte, os.FileMode) error { return errors.New("disk full") }
+	if _, err := s.ExpireDue(clk.now()); err == nil {
+		t.Fatal("ExpireDue must surface the persist failure")
+	}
+	// Even though the durable status could not flip to Expired, the grant is past its
+	// expiry, so it is NOT active — the coordinator's re-derivation therefore demotes its
+	// tool regardless of the persistence failure (the expiry invariant does not depend on
+	// a successful write).
+	if act := s.ActiveApprovals(clk.now()); len(act) != 0 {
+		t.Fatalf("an expired grant must be excluded from ActiveApprovals even if the Expired persist failed, got %d", len(act))
+	}
+	// And it is still refused at approve (pastExpiry), never re-activated.
+	if _, err := s.Approve(req.ApprovalID, "admin@corp", matchingTarget(in)); mcperr.ReasonOf(err) != mcperr.ReasonApprovalExpired {
+		t.Fatalf("expired grant must stay refused, got %v", mcperr.ReasonOf(err).Code())
 	}
 }
 

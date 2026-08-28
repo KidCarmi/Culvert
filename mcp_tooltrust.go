@@ -190,39 +190,19 @@ func (c *mcpToolTrustCoordinator) reconcile() {
 		return
 	}
 	now := c.now()
-	// 1. Expire due grants and RE-DERIVE each affected tool. A tool is demoted only
-	//    when NO remaining active grant covers its current fingerprint — another active
-	//    approval (or a benign flap-back) may still legitimately keep it Usable.
-	expired, err := store.ExpireDue(now)
-	if err == nil {
-		for _, a := range expired {
-			c.rederiveTool(store, reg, cat, a.ServerID, a.ToolName, now)
-		}
-	}
-	// 2. Re-affirm every active grant against the CURRENT observation. A grant whose
-	//    fingerprint no longer matches is simply not promoted (the ingest fold already
-	//    moved the tool off Usable); it is never demoted here, because a DIFFERENT
-	//    active grant, or a benign flap-back to the exact reviewed fingerprint, may
-	//    legitimately keep/return it Usable.
-	active := store.ActiveApprovals(now)
-	for _, a := range active {
-		key := catalog.ToolKey{Server: registry.ServerID(a.ServerID), Name: a.ToolName}
-		rec, ok := cat.Current().Get(key)
-		if !ok {
-			continue
-		}
-		srv, sok := reg.Current().Get(registry.ServerID(a.ServerID))
-		if !sok || !srv.Usable() || string(srv.OwnerScope) != a.Tenant {
-			continue // server gone, unusable, or re-owned: do not promote
-		}
-		sum := rec.Fingerprint.Sum()
-		if !a.MatchesTool(a.Tenant, a.ServerID, a.ToolName,
-			tooltrust.FingerprintDigest(sum), rec.Fingerprint.FormatVersion) {
-			continue // drifted away from the reviewed fingerprint
-		}
-		// Promote is fail-closed and idempotent: it refuses a ServerDisabled record and
-		// a fingerprint mismatch, so a stale read here cannot force a bad promotion.
-		_, _ = cat.Promote(key, rec.Fingerprint)
+	// Best-effort durable transition of due grants to Expired (for the admin view). The
+	// CATALOG demotion below deliberately does NOT depend on this succeeding: if the
+	// store is unwritable, ExpireDue reverts the in-memory status to Active but the grant
+	// is still past its expiry, so activeAsOf (and thus ActiveApprovals) already excludes
+	// it — rederiveTool will demote its tool regardless.
+	_, _ = store.ExpireDue(now)
+	// Re-derive EVERY tool referenced by any approval: promote when an active, matching,
+	// unexpired grant covers the current fingerprint; demote otherwise. This is what
+	// makes expiry effective even when persisting the Expired status failed, and it is
+	// the single place trust is materialized — never a blind promote-only pass that could
+	// leave a no-longer-covered tool Usable.
+	for _, ref := range store.ToolRefs() {
+		c.rederiveTool(store, reg, cat, ref.ServerID, ref.ToolName, now)
 	}
 }
 

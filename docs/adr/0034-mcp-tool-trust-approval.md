@@ -61,11 +61,19 @@ The approval store persists to `<dataDir>/mcp_tooltrust/approvals.json` via
 **secret-free** (never a token, credential, raw schema/body, or private identity
 material — only safe references and the fingerprint digest). It is authoritative and
 recoverable **independently of the MCP events spool** (which is armed only when MCP is
-composed). Best-effort tamper-evident governance evidence is *additionally* committed
-through `events.Manager.CommitDecision` (PhaseDecision / CritCritical / Gateway) when a
-committer is available, and every mutation writes the root admin audit ring
-(`mcp.tooltrust.<verb>`). The AtomicWrite store — not the event — is the recovery
-authority.
+composed). The two durability guarantees this slice ships are: (1) the **AtomicWrite
+store** is the recovery authority — startup `Recover` re-materializes trust from it; and
+(2) every mutation writes the **root admin audit ring** (`mcp.tooltrust.<verb>`), the
+queryable governance record.
+
+**Deferred (NOT shipped in this slice):** a *supplementary* tamper-evident record in the
+MCP events spool. The existing `events.Manager.CommitDecision` API is decision-point
+specific (`DecisionFacts` with typed identity/decision/inspection/credential evidence) —
+a tool-trust approval is a governance action, not a policy decision, so committing it
+there would require a purpose-built tool-trust event type rather than a synthetic
+decision event. That integration is a follow-up; it changes none of the authoritative
+guarantees above (the AtomicWrite store stays the recovery authority and the audit ring
+stays the governance record), so trust durability does not depend on it.
 
 **Startup reconcile is load-bearing:** the boot inventory re-seeds every tool
 `Quarantined`; `Recover` then re-applies each active, unexpired, unrevoked approval

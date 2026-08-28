@@ -7,6 +7,12 @@ package main
 // admin audit ring. Nothing here executes a tool, dials a server, materializes a
 // credential, or arms any live-execution tier.
 //
+// Durability of a trust decision is the durable AtomicWrite store (the recovery
+// authority) plus the admin audit ring written here (`mcp.tooltrust.<verb>`). A
+// supplementary MCP-events-spool tamper record is a documented follow-up, not shipped in
+// this slice — see ADR-0034 D3 (the events API is decision-point specific and a
+// governance action needs its own event type); it changes no authoritative guarantee.
+//
 // Trust ≠ availability ≠ authorization: an approval only ever promotes a tool to
 // catalog.Usable (a supply-chain trust decision reviewed by a privileged human for a
 // declared purpose); it never authorizes a call. Runtime policy stays authoritative

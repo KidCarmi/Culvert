@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -128,9 +129,12 @@ func (s *Store) Load() error {
 		return mcperr.Wrap(mcperr.ReasonConfigInvalid, "tooltrust.load", "corrupt store file", err)
 	}
 	// A single Decode accepts the first valid value and ignores anything after it, so
-	// trailing bytes (a second JSON value, or arbitrary garbage from a partial/tampered
-	// write) would still load. Require the stream to be at EOF — fail closed otherwise.
-	if dec.More() {
+	// trailing bytes (a second JSON value, arbitrary garbage, or a stray closing
+	// delimiter from a partial/tampered write) would still load. Decoder.More is an
+	// array/object iteration predicate and returns false for a trailing `]`/`}`, so it
+	// is NOT an EOF check — a second decode that must report io.EOF is. Fail closed on
+	// anything but a clean end of stream.
+	if err := dec.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
 		return mcperr.New(mcperr.ReasonConfigInvalid, "tooltrust.load", "store file has trailing data")
 	}
 	if env.SchemaVersion != SchemaVersion {
@@ -497,6 +501,36 @@ func (s *Store) ExpireDue(now time.Time) ([]*ToolApproval, error) {
 		expired = append(expired, a.clone())
 	}
 	return expired, nil
+}
+
+// ToolRef identifies a (server, tool) an approval refers to.
+type ToolRef struct {
+	ServerID string
+	ToolName string
+}
+
+// ToolRefs returns the distinct (server, tool) pairs referenced by ANY stored
+// approval, active or terminal. The coordinator re-derives each so a tool whose only
+// grants have expired or been revoked is demoted even when persisting the terminal
+// status failed — the catalog demotion must not depend on the durable write.
+func (s *Store) ToolRefs() []ToolRef {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	seen := make(map[ToolRef]struct{}, len(s.byID))
+	for _, a := range s.byID {
+		seen[ToolRef{ServerID: a.ServerID, ToolName: a.ToolName}] = struct{}{}
+	}
+	out := make([]ToolRef, 0, len(seen))
+	for r := range seen {
+		out = append(out, r)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ServerID != out[j].ServerID {
+			return out[i].ServerID < out[j].ServerID
+		}
+		return out[i].ToolName < out[j].ToolName
+	})
+	return out
 }
 
 // Get returns a copy of the approval iff it exists within the caller's tenant
