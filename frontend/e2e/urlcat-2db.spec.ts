@@ -37,12 +37,6 @@ async function newAdminClient(xff: string): Promise<APIRequestContext> {
   return ctx;
 }
 
-async function login(page: Page, user: string, pass: string): Promise<void> {
-  await page.getByLabel("Username").fill(user);
-  await page.getByLabel("Password").fill(pass);
-  await page.getByRole("button", { name: "Sign in" }).click();
-}
-
 /** §31 guard: collect every request origin; the public feed host must never
  * be contacted by the browser qualification. */
 function armFeedHostGuard(page: Page): () => void {
@@ -88,7 +82,6 @@ test("url categories: operator CRUD journey with the revision fence", async ({
   const assertNoFeedContact = armFeedHostGuard(page);
   try {
     await page.goto(ROUTE);
-    await login(page, USERS.admin.user, USERS.admin.pass);
     await expect(page.getByText("URL Categories").first()).toBeVisible();
 
     // Create (strict, fenced).
@@ -149,7 +142,6 @@ test("two-client stale category write is a structured 409 — no silent overwrit
 
     // Browser (client A) loads revision R.
     await page.goto(ROUTE);
-    await login(page, USERS.admin.user, USERS.admin.pass);
     const rowA = page.getByRole("row").filter({ hasText: "E2E Stale Cat" });
     await expect(
       rowA.getByRole("button", { name: "Edit hosts" }),
@@ -185,7 +177,6 @@ test("two-client stale category write is a structured 409 — no silent overwrit
 test("lookup renders Uncategorized as taxonomy truth", async ({ page }) => {
   const assertNoFeedContact = armFeedHostGuard(page);
   await page.goto(ROUTE);
-  await login(page, USERS.viewer.user, USERS.viewer.pass);
   await page.getByRole("tab", { name: "Lookup" }).click();
   await page.getByLabel("Hostname").fill("no-such-host-2db.example");
   await page.getByRole("button", { name: "Run lookup" }).click();
@@ -199,7 +190,6 @@ test("feed status + signed status render server truth while the feed stays dorma
 }) => {
   const assertNoFeedContact = armFeedHostGuard(page);
   await page.goto(ROUTE);
-  await login(page, USERS.admin.user, USERS.admin.pass);
 
   await page.getByRole("tab", { name: "Feed Status" }).click();
   await expect(page.getByText("UT1 community feed").first()).toBeVisible();
@@ -227,7 +217,6 @@ test("settings: interval-only save round-trips with the settings revision", asyn
   const assertNoFeedContact = armFeedHostGuard(page);
   try {
     await page.goto(ROUTE);
-    await login(page, USERS.admin.user, USERS.admin.pass);
     await page.getByRole("tab", { name: "Signed SaaS Feed" }).click();
     await expect(page.getByText("Configuration")).toBeVisible();
 
@@ -269,7 +258,6 @@ test("overrides: fenced replace and clear-all with subtree ceremony", async ({
   const assertNoFeedContact = armFeedHostGuard(page);
   try {
     await page.goto(ROUTE);
-    await login(page, USERS.admin.user, USERS.admin.pass);
     await page.getByRole("tab", { name: "Overrides" }).click();
     await expect(page.getByText("Subtree scope")).toBeVisible();
 
