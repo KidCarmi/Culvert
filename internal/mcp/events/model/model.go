@@ -27,10 +27,35 @@
 // its intrinsic digest.
 package model
 
-// SchemaVersion is the current event-envelope schema version. An event carrying
-// an unknown schema version is rejected at validation (fail closed; no
-// forward-guessing of an unrecognised layout).
-const SchemaVersion = 1
+// Event-envelope schema versions. An event carrying an UNSUPPORTED schema version
+// is rejected at validation AND at recovery (fail closed; no forward-guessing of an
+// unrecognised layout).
+//
+// v1 is the original envelope. v2 is ADDITIVE: it introduces the durable Shadow
+// sub-facts (ShadowEvidence) and is stamped ONLY on a Shadow decision event — the
+// only event that carries ShadowEvidence. Every non-shadow event stays v1, so its
+// canonical digest is byte-identical across this change (SHADOW-EVIDENCE-ROUTING-1).
+const (
+	// SchemaVersionV1 is the original envelope (no Shadow sub-facts).
+	SchemaVersionV1 = 1
+	// SchemaVersionV2 adds durable ShadowEvidence; stamped only on Shadow events.
+	SchemaVersionV2 = 2
+	// SchemaVersion is the DEFAULT version stamped on an event that carries no Shadow
+	// sub-facts. It is deliberately kept at v1 so every non-shadow writer's events, and
+	// their digests, are unchanged. A Shadow decision event is stamped SchemaVersionV2
+	// by the adapter when it carries ShadowEvidence.
+	SchemaVersion = SchemaVersionV1
+)
+
+// SupportedSchemaVersion reports whether THIS build can interpret an event carrying
+// schema version v. A Shadow-capable (v2) build supports v1 AND v2; any other version
+// is rejected as an unknown schema (fail closed) at validation and at recovery. A
+// pre-v2 build supports only v1, so it rejects a v2 event — the documented downgrade
+// posture (SHADOW-EVIDENCE-ROUTING-1): a v1 binary must refuse v2 evidence, never
+// partially interpret it as v1.
+func SupportedSchemaVersion(v int) bool {
+	return v == SchemaVersionV1 || v == SchemaVersionV2
+}
 
 // Phase is the lifecycle phase of an event. The zero value is invalid.
 type Phase uint8
@@ -317,17 +342,48 @@ type DecisionEvidence struct {
 	OperationClass      string   `json:"operation_class,omitempty"`
 	RiskClass           string   `json:"risk_class,omitempty"`
 	ExecutionState      string   `json:"execution_state,omitempty"`
-	// NOTE (Codex P2, PR #1226): the Shadow enforcement-prediction sub-facts
-	// (shadow_outcome/override, credential-plan and inspection readiness) are DELIBERATELY
-	// NOT persisted as new digest-covered fields on this schema_version:1 envelope. Adding
-	// them here would be a rollback hazard — a pre-change binary reading a shadow event
-	// drops the unknown fields on unmarshal, recomputes CanonicalBytes without them, and
-	// misreports the valid record as corrupted. Durable shadow-evidence persistence needs
-	// its own schema version (v2, with explicit v1/v2 recovery) and belongs in the reviewed
-	// Shadow-activation slice (execution is disabled here, so no shadow event is ever
-	// written). Today a shadow evaluation is marked ONLY by the existing ExecutionState
-	// value "shadow_evaluated" (a known field, digest-safe), and the full ShadowDecision is
-	// carried in the transient response body. Tracked as SHADOW-EVIDENCE-ROUTING-1.
+	// NOTE: the Shadow enforcement-prediction sub-facts are NOT stored inline on
+	// DecisionEvidence. Adding them here as digest-covered v1 fields would be a rollback
+	// hazard — a pre-change binary reading a shadow event drops the unknown fields on
+	// unmarshal, recomputes CanonicalBytes without them, and misreports the valid record
+	// as corrupted. They live in a SEPARATE typed sub-evidence pointer, Event.Shadow, on a
+	// v2 envelope with explicit v1/v2 recovery (SHADOW-EVIDENCE-ROUTING-1, closed). The raw
+	// evaluated policy action stays in Action above (its existing home); ExecutionState
+	// carries "shadow_evaluated" for a shadow event. See ShadowEvidence.
+}
+
+// ShadowEvidence records the durable, per-request Shadow enforcement prediction — the
+// full ShadowDecision an operator uses to judge Canary readiness. It is a typed,
+// secret-free sub-evidence (like Outcome/Denial/Marker): present ONLY on a
+// SchemaVersionV2 Shadow decision event (ExecutionState "shadow_evaluated") and nil
+// otherwise. It carries the SAME facts returned to the client in the transient Shadow
+// response body (execution.shadowResult), so the durable record reconstructs exactly
+// what the caller saw at request time.
+//
+// The raw/evaluated policy action is NOT duplicated here — it lives in
+// DecisionEvidence.Action (single source of truth). Every field below is a bounded enum
+// (validated in Validate); no secret, argument, output or credential value appears.
+type ShadowEvidence struct {
+	// Outcome is the Model-1 enforcement prediction (would_execute, would_block,
+	// would_require_approval, would_require_confirmation, would_fail_credential_readiness,
+	// would_fail_inspection, would_fail_stale_decision, would_fail_hard_control).
+	Outcome string `json:"outcome"`
+	// Override is true when the policy verdict itself is restrictive (non-allow-class),
+	// so a policy DENY/APPROVAL/CONFIRMATION is never laundered into a plain would_execute.
+	Override bool `json:"override"`
+	// CredentialPlan is the credential-readiness sub-fact derived from Plan metadata only
+	// (no_credential_profile, credential_plan_valid, credential_plan_invalid,
+	// no_planner_composed). Shadow never materializes a credential.
+	CredentialPlan string `json:"credential_plan"`
+	// MaterializationReadiness is ALWAYS "not_evaluated": Shadow never evaluates
+	// materialization (it holds no materialize-capable broker). Any other value is invalid.
+	MaterializationReadiness string `json:"materialization_readiness"`
+	// RequestInspection is the pre-executor inspection sub-fact (would_pass, would_fail,
+	// not_evaluated). not_evaluated means no inspection ran — never a false would_pass.
+	RequestInspection string `json:"request_inspection"`
+	// ResponseInspection is ALWAYS "not_evaluated": a Shadow evaluation makes no upstream
+	// call, so no upstream response exists to inspect. Any other value is invalid.
+	ResponseInspection string `json:"response_inspection"`
 }
 
 // InspectionEvidence records only sanitized inspection facts (MCP-INSP-*). No
@@ -426,6 +482,12 @@ type Event struct {
 	Outcome    *OutcomeEvidence   `json:"outcome,omitempty"`
 	Denial     *DenialEvidence    `json:"denial,omitempty"`
 	Marker     *MarkerEvidence    `json:"marker,omitempty"`
+	// Shadow is the durable Shadow enforcement prediction, present ONLY on a
+	// SchemaVersionV2 Shadow decision event and nil otherwise. Because it is a nil
+	// pointer with omitempty on every non-shadow (v1) event, it is OMITTED from the
+	// canonical encoding of those events, so their digest is byte-identical to the
+	// pre-v2 encoding (SHADOW-EVIDENCE-ROUTING-1 digest-compatibility invariant).
+	Shadow *ShadowEvidence `json:"shadow,omitempty"`
 
 	// EventDigest is the intrinsic content digest (hex sha256). It is excluded
 	// from the canonical encoding used to compute it.

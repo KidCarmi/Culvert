@@ -2,11 +2,12 @@
 
 Status: **design + implementation** (phase "Controlled Shadow Activation Preparation").
 The mechanism is complete and fail-closed, but Controlled Shadow activation is **NOT
-activation-ready in production**: it is gated on TWO independent hard prerequisites, both OPEN
-— (1) a tool being `Usable` in the requested scope, which catalog ingestion never yields (tool
-approval is a later slice, §8), and (2) durable per-request `ShadowDecision` evidence via a
-`schema_version:2` envelope, delivered as a dedicated follow-up PR (`SHADOW-EVIDENCE-ROUTING-1`,
-§8a). Neither absorbs the other; BOTH must close before any real activation — see §8b.
+activation-ready in production**: it is gated on TWO independent hard prerequisites — (1) a tool
+being `Usable` in the requested scope, which catalog ingestion never yields (tool approval is a
+later slice, §8), still **OPEN**; and (2) durable per-request `ShadowDecision` evidence via a
+`schema_version:2` envelope (the `SHADOW-EVIDENCE-ROUTING-1` durable-envelope addendum, §8a), now
+**CLOSED** — shipped on this branch (the parent routing item stays a separate open debt). Neither absorbs the other, and prerequisite 1 remaining open keeps activation out of
+reach: no production activation until it closes too — see §8b.
 Predecessors: ADR-0024 (MCP Agent Security Gateway, disabled-by-default), PR #1224
 (hardened MCP backend), PR #1226 (Layer B Shadow capability separation + formal
 `ShadowDecision` Model 1). Baseline `main` = `e698a12`.
@@ -222,46 +223,57 @@ activation — the active scope is the empty Observe/Disabled scope at that poin
 could never see a healthy node. The apply-time gate is where the candidate scope is known and
 where the precondition therefore belongs.
 
-## 8a. Prerequisite for reachability: durable ShadowDecision evidence (Codex P1, PR #1234)
+## 8a. Prerequisite for reachability: durable ShadowDecision evidence — SHIPPED (Codex P1, PR #1234; closed by the durable-evidence follow-up)
 
 A real Controlled Shadow activation ALSO requires that the full per-request `ShadowDecision`
-is recorded **durably**, not just returned transiently to the client. Today a shadow evaluation
-persists only the existing `ExecutionState = "shadow_evaluated"` value on the `schema_version:1`
-event envelope (a digest-safe value change); the enforcement-prediction sub-facts — `Outcome`
-(`would_execute` / `would_fail_credential_readiness` / `would_fail_stale_decision` / …),
-credential-plan status, and request/response inspection readiness — ride ONLY the transient
-JSON-RPC response body (`shadowResult`). The aggregate `culvert_mcp_shadow_*` metric records the
-outcome enum as a counter, but no per-request archive row can be reconstructed or correlated.
+is recorded **durably**, not just returned transiently to the client. **This is now shipped**
+(branch `claude/mcp-shadow-evidence-v2`): a shadow evaluation persists a `schema_version:2`
+event carrying a typed `Event.Shadow *ShadowEvidence` — the enforcement-prediction sub-facts
+`Outcome` (`would_execute` / `would_fail_credential_readiness` / `would_fail_stale_decision` /
+…), credential-plan status, and request/response inspection readiness — so a per-request
+archive row can be reconstructed and correlated, not just counted by the aggregate
+`culvert_mcp_shadow_*` metric. The transient JSON-RPC response body (`shadowResult`) and the
+durable event derive from ONE mapping (`execution.shadowEvidence(ShadowDecision)`), pinned by a
+field-by-field parity gate, so the archived record is fact-for-fact identical to what the client
+saw.
 
-The sub-facts are deliberately NOT stamped onto v1 in place: a pre-change reader drops unknown
-JSON fields on unmarshal and recomputes a different `CanonicalBytes` digest, so `VerifyDigest`
-would misreport a valid shadow record as corrupted on a binary rollback (Codex P2, PR #1226).
-Persisting them durably requires a `schema_version:2` envelope with explicit v1/v2 fail-closed
-recovery (a v1 reader rejects a v2 event as *unknown schema version* — honest — rather than
-misverifying it). Tracked as **`SHADOW-EVIDENCE-ROUTING-1`**, now an explicit HARD PREREQUISITE
-for real Controlled Shadow activation. It is delivered as a **dedicated follow-up PR** — NOT
-absorbed into this composition PR and NOT into the tool-approval slice — covering the v2 envelope,
-canonical-digest compatibility, migration/rollback behaviour, schema validation, corruption /
-fail-closed recovery tests, and proof that the durable record carries the SAME `ShadowDecision`
-facts returned to the client. This PR lands the activation PLUMBING only; it does not close this
-prerequisite, and the runbook's evidence-parity / zero-gap exit criteria stage under it.
+The sub-facts are deliberately NOT stamped onto v1 in place — that is why a v2 envelope was
+required. A pre-change (v1-only) reader drops unknown JSON fields on unmarshal and recomputes a
+different `CanonicalBytes` digest, so `VerifyDigest` would misreport a valid shadow record as
+corrupted on a binary rollback (Codex P2, PR #1226). The `schema_version:2` envelope is ADDITIVE
+(every non-shadow event stays v1 with a byte-identical digest, proven by golden vectors) and
+carries explicit v1/v2 fail-closed recovery: a pre-v2 reader **rejects** a v2 event rather than
+misverifying it (`unmarshalEvent` uses `DisallowUnknownFields`), and a v2-capable build reads
+both v1 and v2. Tracked as **`SHADOW-EVIDENCE-ROUTING-1`** and delivered as a **dedicated
+follow-up PR** (NOT absorbed into the #1234 composition PR and NOT into the tool-approval slice):
+the v2 envelope, canonical-digest compatibility, schema/consistency validation, corruption /
+fail-closed recovery tests, export round-trip, and proof that the durable record carries the SAME
+`ShadowDecision` facts returned to the client. **Binary-downgrade semantics** across persisted v2
+evidence are an operator procedure — `docs/operator/mcp-shadow-activation.md` §8 (archive the
+Gateway spool, clear the Shadow-bearing `P-ORD` and `P-CRIT` partitions, reset both export
+cursors, restart). With this prerequisite closed, the
+runbook's evidence-parity / zero-gap exit criteria are now satisfiable; activation still stays
+unreachable in production on prerequisite 1 (§8, a usable scoped tool) below.
 
-## 8b. Corrected verdict — TWO hard prerequisites, both OPEN
+## 8b. Corrected verdict — TWO hard prerequisites (one now CLOSED, one still OPEN)
 
-**Controlled Shadow activation is NOT activation-ready in production**, and this PR does not
-claim otherwise. The mechanism is READY and fail-closed, but production activation is gated on
-**TWO** independent hard prerequisites, both currently OPEN, and **both** must close first:
+**Controlled Shadow activation is NOT activation-ready in production** until BOTH prerequisites
+close. Status as of the durable-evidence follow-up:
 
-1. **A usable scoped tool** (§8) — a catalog tool promoted to `Usable` within the requested
-   scope. Structurally unsatisfiable until the tool-approval / promotion slice ships; until then
-   the activation preflight fails closed with `no_usable_shadow_tools`. This PR intentionally does
-   NOT implement approval/promotion.
-2. **Durable ShadowDecision evidence** (§8a, `SHADOW-EVIDENCE-ROUTING-1`) — the `schema_version:2`
-   durable envelope so the full per-request verdict is reconstructable from the archive. Delivered
-   as a dedicated follow-up PR; this PR does NOT implement schema v2.
+1. **A usable scoped tool** (§8) — **OPEN**. A catalog tool promoted to `Usable` within the
+   requested scope; structurally unsatisfiable until the tool-approval / promotion slice ships,
+   so the activation preflight fails closed with `no_usable_shadow_tools`. That slice is separate
+   and is NOT delivered by the durable-evidence follow-up.
+2. **Durable ShadowDecision evidence** (§8a, the `SHADOW-EVIDENCE-ROUTING-1` durable-envelope
+   addendum) — **CLOSED** by the dedicated durable-evidence follow-up (branch
+   `claude/mcp-shadow-evidence-v2`): the `schema_version:2` envelope now persists the full
+   per-request verdict (typed `Event.Shadow *ShadowEvidence`), the durable record and the client
+   response derive from one mapping, v1 digests are byte-identical, and v1/v2 recovery + rollback
+   semantics are proven. (Only the addendum closes here; the parent `SHADOW-EVIDENCE-ROUTING-1`
+   item — pre-dispatch fail-closed signals not routed into `shadow_evaluated` evidence — is a
+   separate LOW-severity item that stays OPEN/deferred, tracked in the debt register.)
 
-These two prerequisites are SEPARATE slices and neither absorbs the other. Because activation is
-unreachable in production today (prerequisite 1 fails closed), no shadow event is ever durably
-written here, so the evidence-parity gap has zero production exposure on this PR — but the gap
-must be closed before any real activation, not after. No production Controlled Shadow activation
-until BOTH are closed.
+These two prerequisites are SEPARATE slices and neither absorbs the other. **No production
+Controlled Shadow activation until BOTH close** — prerequisite 1 remains open, so activation stays
+unreachable in production, and the runbook's evidence-parity / zero-gap exit criteria are now
+satisfiable (prerequisite 2) but not yet reachable (prerequisite 1).

@@ -73,7 +73,44 @@ func TestBenchGate_LearnObserveEnabledIdleZeroAlloc(t *testing.T) {
 }
 
 func TestBenchGate_LearnObserveEnabledBoundedAllocs(t *testing.T) {
-	eng, err := policylearn.New(policylearn.Config{Now: time.Now}) // nil sink: drain discards
+	// This gate measures the allocations of the ENQUEUE CALL ITSELF (Observe on
+	// the request goroutine), which is the documented M5A §1 contract: 0 with no
+	// groups, ≤1 (the bounded groups copy) otherwise. It must NOT measure the
+	// single async drain goroutine's per-observation aggregation
+	// (aggregateLocked: pseudonym HMAC, category resolution, cell maps), which
+	// allocates by design OFF the request path.
+	//
+	// testing.AllocsPerRun reads runtime.MemStats.Mallocs, which is
+	// PROCESS-WIDE — it attributes every heap allocation by ANY goroutine during
+	// the sampling window to the measured op. With a nil sink the drain consumed
+	// and aggregated the enqueued observations concurrently, so whenever Go's
+	// async preemption scheduled the drain inside the window its aggregation
+	// allocations leaked into the per-op figure (a nondeterministic ~12/op,
+	// likelier under the full benchgate suite's load/GC pressure than in
+	// isolation). That was a MEASUREMENT ARTIFACT, never an enqueue-path
+	// regression: the enqueue path is 0-alloc, proven by the deterministic
+	// 0.0000/op this test now yields with the drain parked.
+	//
+	// To measure only the caller, the drain is PARKED before the window: a
+	// blocking sink halts the single drain goroutine after it consumes its first
+	// (priming) observation, so it allocates nothing during measurement. Later
+	// enqueues just fill the bounded queue (overflow drops are alloc-free), so
+	// the figure reflects the enqueue path alone. The sink is released before
+	// Close so the drain can be joined.
+	sinkEntered := make(chan struct{}, 1)
+	releaseSink := make(chan struct{})
+	eng, err := policylearn.New(policylearn.Config{
+		Now: time.Now,
+		Sink: func(policylearn.Observation) {
+			// Signal that the drain has consumed the priming observation and is
+			// now parked here, then block until the test releases it.
+			select {
+			case sinkEntered <- struct{}{}:
+			default:
+			}
+			<-releaseSink
+		},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,6 +121,7 @@ func TestBenchGate_LearnObserveEnabledBoundedAllocs(t *testing.T) {
 	policyLearnEngine.Store(eng)
 	defer func() {
 		policyLearnEngine.Store(prev)
+		close(releaseSink) // unblock the parked drain so Close can join it
 		_ = eng.Close()
 	}()
 
@@ -92,6 +130,10 @@ func TestBenchGate_LearnObserveEnabledBoundedAllocs(t *testing.T) {
 		t.Fatal("learnDecisionSnapshot refused with an active session")
 	}
 	authNoGroups := authOutcome{identity: "alice", source: "test-idp"}
+	// Prime one observation and wait for the drain to park in the blocking sink
+	// BEFORE any measurement, so no aggregation runs during either window.
+	learnObserveDecision(authNoGroups, "host.example", "GET", nil, "OK", "Bypass", benchCtx, true)
+	<-sinkEntered
 	if got := testing.AllocsPerRun(2000, func() {
 		learnObserveDecision(authNoGroups, "host.example", "GET", nil, "OK", "Bypass", benchCtx, true)
 	}); got > 0 {

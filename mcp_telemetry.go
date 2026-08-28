@@ -743,14 +743,21 @@ func (e *qualArchiveExporter) stats() archiveStats {
 	}
 }
 
-// validateBatch verifies every event carries schema version 1, a non-empty digest,
-// and the SAME capability+partition (a pump batch is single-partition). It rejects an
-// unknown schema version and returns the safe cap/partition names.
+// validateBatch verifies every event carries a SUPPORTED schema version (v1 or the v2
+// durable-Shadow-evidence envelope), a non-empty digest, and the SAME capability+partition
+// (a pump batch is single-partition). It rejects a genuinely unknown schema version and
+// returns the safe cap/partition names.
+//
+// This MUST accept every supported version, not just the default (v1): a Shadow decision
+// event is stamped SchemaVersionV2 (SHADOW-EVIDENCE-ROUTING-1), and because the export pump
+// retries an all-or-nothing batch without advancing its cursor, a hardcoded `!= v1` check
+// would let the first v2 Shadow event wedge its whole partition out of the durable archive —
+// exactly the evidence the activation verification requires to be flowing there.
 func validateBatch(batch []evmodel.Event) (capName, partName string, err error) {
 	c0, p0 := batch[0].Capability, batch[0].Partition
 	for i := range batch {
 		e := batch[i]
-		if e.SchemaVersion != evmodel.SchemaVersion {
+		if !evmodel.SupportedSchemaVersion(e.SchemaVersion) {
 			return "", "", errTelemetry("unsupported event schema version")
 		}
 		if e.EventDigest == "" {
