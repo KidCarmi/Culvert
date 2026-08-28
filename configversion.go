@@ -468,6 +468,13 @@ func restoreBlocklistFromBackup(b *configBackup) {
 // scoped collector rather than from return values (see storage_health.go for
 // the scope's time-window semantics).
 func applyConfigBackup(b *configBackup) error {
+	// Blocker B (exclusive side): a rollback both REMOVES shared objects and
+	// INSTALLS references wholesale, so it must not interleave with either
+	// side of the reference-integrity gate. Acquired OUTERMOST, before
+	// configRollbackMu (gate → configRollbackMu → adminSettingsMu — acyclic;
+	// nothing under those locks acquires the gate).
+	refScanDeleteLock()
+	defer refScanDeleteUnlock()
 	configRollbackMu.Lock()
 	defer configRollbackMu.Unlock()
 	finishScope := beginStorageWriteScope()

@@ -1054,6 +1054,13 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Blocker B (exclusive side): from here down the import both REMOVES
+	// shared objects (replace mode) and INSTALLS references wholesale, so the
+	// whole apply region holds the reference-integrity gate exclusively —
+	// no rule/group write or object delete can interleave with it.
+	refScanDeleteLock()
+	defer refScanDeleteUnlock()
+
 	// Blocklist. Feed attribution is carried across a replace-mode
 	// rebuild — ClearAll+Add would otherwise strand every feed entry as
 	// unattributed (Codex P1, PR #447).

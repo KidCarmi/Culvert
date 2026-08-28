@@ -132,8 +132,15 @@ func plAcceptRecommendation(eng *policylearn.Engine, recID string, ifVersion int
 	// (which let an append land on a candidate newer than expectedVersion,
 	// bypassing the optimistic conflict) nor remove the staged target between
 	// the append and the latch (which let accepted latch with an absent
-	// TargetRuleID). Lock order: policyLearnAdminMu (caller) → writeGate →
-	// c.mu → PolicyStore.mu; nothing below re-enters the gate.
+	// TargetRuleID). Lock order: policyLearnAdminMu (caller) →
+	// objectReferenceMutationGate (shared) → writeGate → c.mu →
+	// PolicyStore.mu; nothing below re-enters any of them.
+	//
+	// Blocker B (shared side): the accepted draft rule REFERENCES a category
+	// (ProposedRule DestCategory) — the append must not land between a
+	// concurrent category delete's reference scan and its deletion.
+	refWriteLock()
+	defer refWriteUnlock()
 	policyDraft.writeGate.Lock()
 	defer policyDraft.writeGate.Unlock()
 

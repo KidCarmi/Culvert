@@ -214,6 +214,11 @@ func runningPolicyVersionConflict(w http.ResponseWriter, r *http.Request) bool {
 }
 
 func apiAuthPolicyCreate(w http.ResponseWriter, r *http.Request) {
+	// Blocker B (shared side): an auth rule can reference shared objects
+	// (destination category/group) — acquired before the policy writeGate
+	// (gate → writeGate, the documented lock order).
+	refWriteLock()
+	defer refWriteUnlock()
 	if runningPolicyVersionConflict(w, r) {
 		return
 	}
@@ -272,6 +277,10 @@ func apiAuthPolicyCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 func apiAuthPolicyUpdate(w http.ResponseWriter, r *http.Request) {
+	// Blocker B (shared side): an edited auth rule can change its shared-
+	// object references.
+	refWriteLock()
+	defer refWriteUnlock()
 	if runningPolicyVersionConflict(w, r) {
 		return
 	}

@@ -753,6 +753,14 @@ func applyConfigSnapshot(snap ConfigSnapshot) error {
 		return fmt.Errorf("config snapshot v%d rejected: %w", snap.Version, err)
 	}
 
+	// Blocker B (exclusive side): a snapshot apply both REMOVES shared
+	// objects and INSTALLS references wholesale, so the whole apply holds the
+	// reference-integrity gate exclusively — a node-local rule/group write or
+	// object delete cannot interleave with it. Acquired OUTERMOST; nothing
+	// under the apply acquires the gate.
+	refScanDeleteLock()
+	defer refScanDeleteUnlock()
+
 	applySnapshotPolicyAndTraffic(snap)
 	applySnapshotClusterRuntime(snap)
 

@@ -558,6 +558,10 @@ func apiFileblockProfiles(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "missing id param", http.StatusBadRequest)
 			return
 		}
+		// Blocker B: reference scan + delete as one atomic decision under the
+		// exclusive side of the reference-integrity gate.
+		refScanDeleteLock()
+		defer refScanDeleteUnlock()
 		// The DELETE addresses a profile by id, but rules reference it by
 		// NAME. Resolve the name under the store lock (NameByID copies it —
 		// reading GetByID().Name outside the lock races a concurrent rename).

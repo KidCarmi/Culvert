@@ -477,6 +477,11 @@ func apiCategoryGroups(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleOperator) {
 			return
 		}
+		// Blocker B (shared side): group membership REFERENCES categories —
+		// creating one must not interleave with a category delete's
+		// scan-and-delete decision.
+		refWriteLock()
+		defer refWriteUnlock()
 		var body struct {
 			Name       string   `json:"name"`
 			Categories []string `json:"categories"`
@@ -509,6 +514,10 @@ func apiCategoryGroups(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleOperator) {
 			return
 		}
+		// Blocker B (shared side): membership edits CHANGE which categories a
+		// group references (and the rename cascade rewrites rule references).
+		refWriteLock()
+		defer refWriteUnlock()
 		var body struct {
 			Name       string   `json:"name"`
 			Categories []string `json:"categories"`
@@ -603,6 +612,10 @@ func apiCategoryGroups(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleOperator) {
 			return
 		}
+		// Blocker B: reference scan + durable delete as one atomic decision
+		// under the exclusive side of the reference-integrity gate.
+		refScanDeleteLock()
+		defer refScanDeleteUnlock()
 		// Stable-ID addressing (rename-safe); resolve to the current name for the
 		// reference-integrity check + audit, then delete by id.
 		if id := strings.TrimSpace(r.URL.Query().Get("id")); id != "" {
@@ -706,6 +719,11 @@ func apiDecryptionProfiles(w http.ResponseWriter, r *http.Request) { //nolint:cy
 		if !requireRole(w, r, RoleOperator) {
 			return
 		}
+		// Blocker B (shared side): the rename cascade REWRITES rule
+		// references, so a profile update must not interleave with a
+		// concurrent object delete's scan-and-delete decision.
+		refWriteLock()
+		defer refWriteUnlock()
 		var p DecryptionProfile
 		if err := decodeJSON(r, &p); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
@@ -796,6 +814,10 @@ func apiDecryptionProfiles(w http.ResponseWriter, r *http.Request) { //nolint:cy
 		if !requireRole(w, r, RoleOperator) {
 			return
 		}
+		// Blocker B: reference scan + durable delete as one atomic decision
+		// under the exclusive side of the reference-integrity gate.
+		refScanDeleteLock()
+		defer refScanDeleteUnlock()
 		// Stable-ID addressing (rename-safe); resolve to the current name for the
 		// reference-integrity check + audit, then delete by id.
 		if id := strings.TrimSpace(r.URL.Query().Get("id")); id != "" {
@@ -1129,6 +1151,13 @@ func apiURLCat(w http.ResponseWriter, r *http.Request) { //nolint:cyclop,funlen,
 		// GET /api/objects/references can never disagree. Deleting a referenced
 		// category was fail-open: a Deny rule scoped to it silently stopped
 		// blocking.
+		//
+		// Blocker B: the scan and the deletion hold the reference-integrity
+		// gate EXCLUSIVELY as one atomic decision — a reference writer can no
+		// longer land between "unreferenced" and the delete (the recorded
+		// POLICY-REFS-PLAN.md TOCTOU).
+		refScanDeleteLock()
+		defer refScanDeleteUnlock()
 		if deleteBlockedByReferences(w, r, "category", name, "urlcat.delete.blocked") {
 			return
 		}
@@ -1679,6 +1708,11 @@ func apiPolicyCreate(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleOperator) {
 		return
 	}
+	// Blocker B (shared side): a new rule CREATES references (destCategory /
+	// destCategoryGroup / fileProfile / decryptionProfile) — it must not land
+	// between a concurrent object delete's reference scan and its deletion.
+	refWriteLock()
+	defer refWriteUnlock()
 	if policyVersionConflict(w, r) {
 		return
 	}
@@ -1735,6 +1769,11 @@ func apiPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleOperator) {
 		return
 	}
+	// Blocker B (shared side): an edited rule can CHANGE which objects it
+	// references — covers the ?id= delegate below too (acquire once here;
+	// shared holds must never nest).
+	refWriteLock()
+	defer refWriteUnlock()
 	if policyVersionConflict(w, r) {
 		return
 	}
