@@ -1,6 +1,11 @@
 package main
 
-import "github.com/KidCarmi/Culvert/internal/mcp/rollout"
+import (
+	"encoding/hex"
+
+	"github.com/KidCarmi/Culvert/internal/mcp/catalog"
+	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
+)
 
 // Shadow activation preflight (SHADOW-ACTIVATION.md §14). Before a node ACCEPTS a
 // transition to Shadow, it must verify it is genuinely able to EVALUATE Shadow traffic
@@ -19,6 +24,44 @@ import "github.com/KidCarmi/Culvert/internal/mcp/rollout"
 // listener, arm it via withReadyShadowNode.
 var gatewayListenerReadyProbe = liveGatewayListenerReady
 
+// shadowScopeUsableToolProbe reports whether the requested Shadow scope targets at least one
+// catalog tool that is currently Usable (evaluable without the policy quarantine hard-override).
+// It is a seam: production uses shadowScopeHasUsableTool (a live catalog scan); isolated
+// preflight/rollout tests arm it, since a Usable tool is unreachable through ingestion.
+var shadowScopeUsableToolProbe = shadowScopeHasUsableTool
+
+// shadowScopeHasUsableTool reports whether the compiled Shadow scope targets at least one
+// catalog tool whose eligibility is Usable — the ONLY state that evaluates without the policy
+// engine's quarantine hard-override. Catalog ingestion NEVER yields Usable ("approval is a
+// later slice", internal/mcp/catalog), so until that approval/promotion slice ships this
+// returns false in production and Shadow activation fails closed. Without the gate a Shadow
+// experiment would validate + activate but predict would_fail_hard_control for EVERY tools/call,
+// so the advertised would_execute / credential-readiness / stale-decision predictions are
+// structurally unreachable (Codex P1, PR #1234). Identity dimensions are request-time, so the
+// scope match is principal-agnostic (Scope.AdmitsToolForEvaluation).
+func shadowScopeHasUsableTool(spec rollout.ScopeSpec, scopeRev uint64) bool {
+	_, cat := mcpInventory.sharedInventory()
+	if cat == nil {
+		return false
+	}
+	sc, err := rollout.Compile(spec, scopeRev, rollout.DefaultLimits())
+	if err != nil {
+		return false // an uncompilable scope targets no evaluable tool (fail closed)
+	}
+	recs := cat.Current().Records()
+	for i := range recs { // index-based: ToolRecord is a wide struct (rangeValCopy)
+		rec := &recs[i]
+		if rec.Eligibility != catalog.Usable {
+			continue
+		}
+		sum := rec.Fingerprint.Sum()
+		if sc.AdmitsToolForEvaluation(string(rec.Key.Server), rec.Key.Name, hex.EncodeToString(sum[:])) {
+			return true
+		}
+	}
+	return false
+}
+
 // shadowPreflightResult is the structured, safe preflight outcome.
 type shadowPreflightResult struct {
 	Ready   bool     `json:"ready"`
@@ -36,12 +79,15 @@ const (
 	shadowPFNoInspection     = "request_inspection_unavailable"
 	shadowPFListenerNotReady = "gateway_listener_not_ready"
 	shadowPFKillActive       = "emergency_kill_active"
+	shadowPFNoUsableTools    = "no_usable_shadow_tools"
 )
 
 // evaluateShadowActivationPreflight verifies node readiness to activate Shadow for a
-// capability. It is pure w.r.t. state (reads node-local holders, no mutation) and
-// fail-closed: any missing prerequisite adds a reason and marks the result not-ready.
-func evaluateShadowActivationPreflight(capb rollout.Capability) shadowPreflightResult {
+// capability + the requested scope. It is pure w.r.t. state (reads node-local holders, no
+// mutation) and fail-closed: any missing prerequisite adds a reason and marks the result
+// not-ready. scope/scopeRev are the requested Shadow scope (Gateway only); they gate the
+// usable-tool precondition below.
+func evaluateShadowActivationPreflight(capb rollout.Capability, scope rollout.ScopeSpec, scopeRev uint64) shadowPreflightResult {
 	// Shadow (an upstream-evaluation concept) is Gateway-only. Management never evaluates
 	// an upstream tools/call, so a Management Shadow activation fails closed here.
 	if capb != rollout.CapabilityGateway {
@@ -89,6 +135,17 @@ func evaluateShadowActivationPreflight(capb rollout.Capability) shadowPreflightR
 	// PhaseReady; it is a seam so isolated preflight tests can arm it without a live listener.
 	if !gatewayListenerReadyProbe() {
 		reasons = append(reasons, shadowPFListenerNotReady)
+	}
+	// The requested Shadow scope must target at least one catalog tool that is currently
+	// Usable — the only eligibility that evaluates without the policy quarantine hard-override.
+	// Catalog ingestion never yields Usable (approval is a later slice), so without this a
+	// Shadow experiment would validate + activate but only ever predict would_fail_hard_control,
+	// and the advertised would_execute / credential-readiness / stale-decision predictions would
+	// be structurally unreachable (Codex P1, PR #1234). This deliberately makes Shadow activation
+	// fail closed until the tool-approval/promotion slice ships — that slice is the prerequisite
+	// that will make Controlled Shadow activation reachable.
+	if !shadowScopeUsableToolProbe(scope, scopeRev) {
+		reasons = append(reasons, shadowPFNoUsableTools)
 	}
 	// An engaged emergency kill switch stops admission; activating Shadow into it would be
 	// misleading (no traffic would be evaluated). Refuse until the kill is cleared.

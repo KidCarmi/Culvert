@@ -568,3 +568,59 @@ func TestEvidenceWindowsInjectedClock(t *testing.T) {
 		t.Fatal("open critical/high defects must block promotion")
 	}
 }
+
+// TestAdmitsToolForEvaluation pins the principal-agnostic tool-in-scope check that the
+// Shadow usable-tool preflight uses (Codex P1, PR #1234): a scope targets a tool for a
+// tools/call evaluation when it admits the write risk class and the tool's server/tool
+// selectors, independent of the calling identity. A read-only scope, an excluded server,
+// or an off-scope server/tool must NOT be admitted.
+func TestAdmitsToolForEvaluation(t *testing.T) {
+	lim := DefaultLimits()
+	mk := func(spec ScopeSpec) Scope {
+		sc, err := Compile(spec, 1, lim)
+		if err != nil {
+			t.Fatalf("compile: %v", err)
+		}
+		return sc
+	}
+
+	// Server-scoped, write-admitting scope: the in-scope tool is targeted.
+	write := mk(ScopeSpec{Capability: CapabilityGateway, Servers: []string{"s1"}, Operations: []RiskClass{RiskWrite}, HighRisk: true})
+	if !write.AdmitsToolForEvaluation("s1", "t", "fp") {
+		t.Fatal("a write-admitting scope over server s1 must target s1's tool")
+	}
+	// Identity is not part of the check: no principal was configured, yet the tool is targeted.
+	if !write.AdmitsToolForEvaluation("s1", "other-tool", "fp2") {
+		t.Fatal("the tool match must be principal-agnostic and cover any tool on the in-scope server")
+	}
+	// A server NOT in the scope is not targeted.
+	if write.AdmitsToolForEvaluation("s2", "t", "fp") {
+		t.Fatal("a tool on an out-of-scope server must not be targeted")
+	}
+
+	// Read-only scope: no tools/call (write class) is ever targeted.
+	readOnly := mk(ScopeSpec{Capability: CapabilityGateway, Servers: []string{"s1"}, Operations: []RiskClass{RiskRead}})
+	if readOnly.AdmitsToolForEvaluation("s1", "t", "fp") {
+		t.Fatal("a read-only scope must not target a write-class tools/call tool")
+	}
+
+	// Explicit server exclusion wins.
+	excl := mk(ScopeSpec{Capability: CapabilityGateway, Servers: []string{"s1"}, ExcludeServers: []string{"s1"}, Operations: []RiskClass{RiskWrite}, HighRisk: true})
+	if excl.AdmitsToolForEvaluation("s1", "t", "fp") {
+		t.Fatal("an excluded server must not be targeted")
+	}
+
+	// The empty (matches-nothing) scope targets no tool.
+	if EmptyScope(CapabilityGateway).AdmitsToolForEvaluation("s1", "t", "fp") {
+		t.Fatal("the empty scope must target no tool")
+	}
+
+	// A tool-selector scope targets only the named tool.
+	toolSel := mk(ScopeSpec{Capability: CapabilityGateway, Servers: []string{"s1"}, Tools: []ToolSel{{Server: "s1", Name: "t", Fingerprint: "fp"}}, Operations: []RiskClass{RiskWrite}, HighRisk: true})
+	if !toolSel.AdmitsToolForEvaluation("s1", "t", "fp") {
+		t.Fatal("the named tool must be targeted")
+	}
+	if toolSel.AdmitsToolForEvaluation("s1", "t", "different-fp") {
+		t.Fatal("a tool selector must not target a different fingerprint")
+	}
+}

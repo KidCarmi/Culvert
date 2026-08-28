@@ -97,6 +97,10 @@ func (c *mcpShadowComposition) Reason() string {
 // ALWAYS unarmed in this build. It carries no secret, tenant, subject, or raw error;
 // only fixed classification codes, booleans, and the bounded metric snapshot.
 func mcpShadowStatus() map[string]any {
+	// The §14 operator dry-run reflects the CURRENT active Gateway scope (empty until a
+	// Shadow config is applied), so the usable-tool precondition is evaluated against the
+	// scope the node would run.
+	scope, scopeRev := gwShadowScope()
 	m := map[string]any{
 		// The non-executing Shadow evaluation capability.
 		"evaluator_composed": globalMCPShadow.composed.Load(),
@@ -107,12 +111,20 @@ func mcpShadowStatus() map[string]any {
 		// Surfaced so an operator can confirm the shadow-vs-live split holds on the node.
 		"live_execution_ready": liveExecDepsConfigured(false),
 		// The §14 operator dry-run: is this node ready to activate Shadow right now?
-		"preflight": evaluateShadowActivationPreflight(rollout.CapabilityGateway),
+		"preflight": evaluateShadowActivationPreflight(rollout.CapabilityGateway, scope, scopeRev),
 	}
 	if snap := mcpShadowMetricsSnapshotOrNil(); snap != nil {
 		m["metrics"] = snap.snapshot()
 	}
 	return m
+}
+
+// gwShadowScope returns the current active Gateway rollout scope + its revision, for the
+// Shadow preflight dry-run. It is empty (matches nothing) until a Shadow config is applied,
+// so the usable-tool precondition is evaluated against the exact scope the node would run.
+func gwShadowScope() (scope rollout.ScopeSpec, revision uint64) {
+	cfg := getMCPRollout().gateway.CurrentConfig()
+	return cfg.Scope, cfg.ScopeRevision
 }
 
 // mcpShadowReadyEnabled reports whether the operator explicitly opted this node into

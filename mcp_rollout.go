@@ -200,7 +200,7 @@ func (r *mcpRollout) commitRolloutTransitionAt(cfg *rollout.SignedConfig, actor 
 	// Shadow is a distinct, read-only concept (no upstream evaluation) and is intentionally
 	// NOT gated by this Gateway preflight — its shadow tier gate above suffices.
 	if cfg.Mode == rollout.ModeShadow && cfg.Capability == rollout.CapabilityGateway {
-		if pf := evaluateShadowActivationPreflight(cfg.Capability); !pf.Ready {
+		if pf := evaluateShadowActivationPreflight(cfg.Capability, cfg.Scope, cfg.ScopeRevision); !pf.Ready {
 			logger.Printf("MCP rollout: Gateway Shadow transition rejected by activation preflight %v (fail-closed)", pf.Reasons)
 			return errShadowPreflightFailed
 		}
@@ -288,7 +288,8 @@ func (r *mcpRollout) restore() {
 			// clearEmergency, so a killed-but-otherwise-ready Shadow node keeps its mode
 			// (clamping it to Disabled would make the kill irreversible for the mode).
 			if st.CurrentMode() == rollout.ModeShadow {
-				if pf := evaluateShadowActivationPreflight(st.Capability()); shadowPreflightUnreadyIgnoringKill(pf) {
+				restored := st.CurrentConfig()
+				if pf := evaluateShadowActivationPreflight(st.Capability(), restored.Scope, restored.ScopeRevision); shadowPreflightUnreadyIgnoringKill(pf) {
 					_ = st.SetConfig(rollout.DisabledConfig(st.Capability()), "restore-clamp", time.Now().UnixNano())
 					r.setPersistStatus(st.Capability(), "degraded")
 					logger.Printf("MCP rollout restore for %s: restored Shadow failed activation preflight %v; clamped to Disabled (fail-closed)", st.Capability().String(), pf.Reasons)

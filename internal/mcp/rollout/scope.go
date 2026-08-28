@@ -394,6 +394,40 @@ func (s Scope) matchDimensions(subj Subject) bool {
 	return true
 }
 
+// AdmitsToolForEvaluation reports whether this scope TARGETS the given tool for a
+// Gateway tools/call evaluation, INDEPENDENT of the calling identity. It checks the
+// capability, the server and tool selectors, the server/tool exclusions, and that the
+// write risk class (the class every tools/call is classified as) is admitted — but NOT
+// the request-identity dimensions (principal/agent/client/tenant/environment/group),
+// which are supplied per request, not by the catalog. A tool that is Usable AND targeted
+// by the scope is one the scope can actually evaluate (rather than fail closed under the
+// quarantine hard-override); Contains stays the per-request membership authority.
+//
+// It is the scope half of the "does this Shadow scope have any evaluable tool" preflight
+// gate (Codex P1, PR #1234): a scope that admits only the read class, excludes the tool's
+// server, or does not target the tool returns false.
+func (s Scope) AdmitsToolForEvaluation(serverID, toolName, fingerprint string) bool {
+	if !s.built || s.MatchesNothing() {
+		return false
+	}
+	if s.exServers.has(serverID) {
+		return false
+	}
+	sel := ToolSel{Server: serverID, Name: toolName, Fingerprint: fingerprint}
+	if !s.exTools.empty() && s.exTools.has(sel) {
+		return false
+	}
+	// tools/call is the write risk class; the scope must admit it (a read-only scope
+	// targets no tools/call at all).
+	if _, ok := s.operations[RiskWrite]; !ok {
+		return false
+	}
+	if !dimOK(s.servers, serverID) {
+		return false
+	}
+	return s.tools.empty() || s.tools.has(sel)
+}
+
 // dimOK reports whether a single string-selector inclusion dimension admits val:
 // an empty set matches anything; otherwise val must be present.
 func dimOK(set stringSet, val string) bool { return set.empty() || set.has(val) }

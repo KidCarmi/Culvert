@@ -22,7 +22,7 @@ func containsReason(rs []string, code string) bool {
 // TestPreflight_ManagementCapabilityFailsClosed pins that Shadow is Gateway-only: a
 // Management capability preflight is never ready.
 func TestPreflight_ManagementCapabilityFailsClosed(t *testing.T) {
-	pf := evaluateShadowActivationPreflight(rollout.CapabilityManagement)
+	pf := evaluateShadowActivationPreflight(rollout.CapabilityManagement, rollout.ScopeSpec{}, 0)
 	if pf.Ready {
 		t.Fatal("Management shadow preflight must never be ready (shadow is Gateway-only)")
 	}
@@ -36,7 +36,7 @@ func TestPreflight_ManagementCapabilityFailsClosed(t *testing.T) {
 func TestPreflight_NotComposedIsNotReady(t *testing.T) {
 	resetExecDeps(t)
 	resetShadowComposition(t)
-	pf := evaluateShadowActivationPreflight(rollout.CapabilityGateway)
+	pf := evaluateShadowActivationPreflight(rollout.CapabilityGateway, rollout.ScopeSpec{}, 0)
 	if pf.Ready {
 		t.Fatal("preflight must not be ready when the evaluator is not composed")
 	}
@@ -53,7 +53,7 @@ func TestPreflight_ComposedClearsComposedReason(t *testing.T) {
 	resetShadowComposition(t)
 	markGatewayShadowDepsReady()
 	globalMCPShadow.composed.Store(true)
-	pf := evaluateShadowActivationPreflight(rollout.CapabilityGateway)
+	pf := evaluateShadowActivationPreflight(rollout.CapabilityGateway, rollout.ScopeSpec{}, 0)
 	if containsReason(pf.Reasons, shadowPFNotComposed) {
 		t.Fatalf("composed node must not report %s, got %v", shadowPFNotComposed, pf.Reasons)
 	}
@@ -73,7 +73,7 @@ func TestPreflight_RequiresInspectionComposed(t *testing.T) {
 	markGatewayShadowDepsReady()
 	globalMCPShadow.composed.Store(true)
 	// inspectionComposed deliberately left false.
-	pf := evaluateShadowActivationPreflight(rollout.CapabilityGateway)
+	pf := evaluateShadowActivationPreflight(rollout.CapabilityGateway, rollout.ScopeSpec{}, 0)
 	if pf.Ready {
 		t.Fatal("preflight must not be ready without request inspection composed")
 	}
@@ -135,13 +135,13 @@ func TestPreflight_RequiresLiveListenerServing(t *testing.T) {
 
 	// Listener started then degraded: observe state stays configured, live phase is not ready.
 	gatewayListenerReadyProbe = func() bool { return false }
-	if !containsReason(evaluateShadowActivationPreflight(rollout.CapabilityGateway).Reasons, shadowPFListenerNotReady) {
+	if !containsReason(evaluateShadowActivationPreflight(rollout.CapabilityGateway, rollout.ScopeSpec{}, 0).Reasons, shadowPFListenerNotReady) {
 		t.Fatalf("a configured-but-degraded gateway listener must report %s", shadowPFListenerNotReady)
 	}
 
 	// Live and serving ⇒ the listener reason is cleared.
 	gatewayListenerReadyProbe = func() bool { return true }
-	if containsReason(evaluateShadowActivationPreflight(rollout.CapabilityGateway).Reasons, shadowPFListenerNotReady) {
+	if containsReason(evaluateShadowActivationPreflight(rollout.CapabilityGateway, rollout.ScopeSpec{}, 0).Reasons, shadowPFListenerNotReady) {
 		t.Fatal("a live, serving gateway listener must clear the listener-not-ready reason")
 	}
 }

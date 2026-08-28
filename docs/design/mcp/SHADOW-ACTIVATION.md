@@ -1,6 +1,9 @@
 # Controlled Shadow Activation — Dependency Graph & Design
 
 Status: **design + implementation** (phase "Controlled Shadow Activation Preparation").
+The mechanism is complete and fail-closed, but Controlled Shadow activation is **NOT yet
+reachable in production**: it is gated on a tool being `Usable` in the requested scope, and
+catalog ingestion never yields `Usable` (tool approval is a later slice) — see §8.
 Predecessors: ADR-0024 (MCP Agent Security Gateway, disabled-by-default), PR #1224
 (hardened MCP backend), PR #1226 (Layer B Shadow capability separation + formal
 `ShadowDecision` Model 1). Baseline `main` = `e698a12`.
@@ -184,5 +187,30 @@ Canary and Production remain gated on `liveExecDepsConfigured`, which stays fals
 (no production caller of `markGatewayExecDepsReady`, pinned by the evolved wall).
 Production additionally stays locked behind the absent qualification issuer. Live
 execution — `Upstream.Call`, `Broker.Materialize`, a composed `*Executor` — is
-composed nowhere in production. This phase makes Shadow **activatable** and keeps
+composed nowhere in production. This phase makes the Shadow mechanism **complete** and keeps
 execution **impossible**.
+
+---
+
+## 8. Prerequisite for reachability: a Usable tool in scope (Codex P1, PR #1234)
+
+The Shadow mechanism is ready, but a MEANINGFUL controlled experiment additionally requires
+at least one catalog tool that is `Usable` within the requested scope. `policyOperation`
+classifies every Gateway `tools/call` as write, and the policy engine hard-overrides any tool
+whose eligibility is not `Usable` (Quarantined / ReviewRequired / ServerDisabled) — so Shadow
+would predict `would_fail_hard_control` for all such traffic and never reach `would_execute`,
+credential-readiness, or stale-decision predictions. `Usable` is **unreachable through catalog
+ingestion** — "approval is a later slice" (`internal/mcp/catalog`) — so no production path
+promotes a tool to `Usable` today.
+
+The preflight therefore fails closed with `no_usable_shadow_tools` unless the requested scope
+targets a `Usable` tool (`shadowScopeHasUsableTool` + `Scope.AdmitsToolForEvaluation`, a
+principal-agnostic server/tool/write-class match). This is deliberate: it never falsely reports
+a node "ready" for an experiment that could only produce hard-control blocks.
+
+**Corrected verdict.** With no tool-approval / promotion slice, Controlled Shadow activation is
+**NOT yet reachable in production** — the mechanism is READY and fail-closed, but the usable-tool
+prerequisite is structurally unsatisfiable until that slice ships. This PR intentionally does
+NOT implement approval/promotion (out of scope for a composition-only change). When the approval
+slice lands and promotes the controlled server's tool to `Usable` within the scope, the preflight
+clears and Controlled Shadow activation becomes reachable.

@@ -278,7 +278,7 @@ func applyMCPCapabilityEnvelope(a *apply.Applier, env *cpdp.Envelope, capb cpdp.
 		// preflight rejects fail-closed BEFORE any distribution activation or rollout commit,
 		// so a not-ready node never commits Shadow state and delivers no AckApplied.
 		if cfg.Mode == rollout.ModeShadow {
-			if pf := evaluateShadowActivationPreflight(cfg.Capability); !pf.Ready {
+			if pf := evaluateShadowActivationPreflight(cfg.Capability, cfg.Scope, cfg.ScopeRevision); !pf.Ready {
 				_ = a.RejectAck(env, errShadowPreflightFailed)
 				logger.Printf("MCP %s snapshot rejected: shadow activation preflight failed %v (fail-closed; distribution not applied, no AckApplied)",
 					capb.String(), pf.Reasons)
