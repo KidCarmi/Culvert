@@ -288,3 +288,16 @@
   margin: var(--sp-2) 0 0;
   font-weight: 600;
 }
+
+.commitDiff {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-3);
+}
+
+.diffNameList,
+.shadowList {
+  margin: var(--sp-1) 0 0;
+  padding-left: var(--sp-4);
+}

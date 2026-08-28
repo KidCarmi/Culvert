@@ -50,6 +50,7 @@ import { hasRole } from "../../auth/rbac";
 import { serverErrorText, unknownOutcome } from "../../shared/mutationOutcome";
 import { useDirtyGuard } from "../../shared/dirtyGuard";
 import { WhereUsed } from "./WhereUsed";
+import { CommitReview } from "./CommitReview";
 import { DraftBar } from "./DraftBar";
 import { RuleEditor } from "./RuleEditor";
 import type { RuleEditorMode } from "./RuleEditor";
@@ -247,6 +248,9 @@ export function AccessRulesPage(): JSX.Element {
   const [reorderPending, setReorderPending] = useState(false);
   const [reorderAnnounce, setReorderAnnounce] = useState("");
 
+  // ── commit review (2B.5) ─────────────────────────────────────────────────
+  const [commitOpen, setCommitOpen] = useState(false);
+
   // Reference option sources (§12): loaded once a write control asks for the
   // editor; read-only, never managed here.
   const wantOptions = editor !== null;
@@ -282,6 +286,7 @@ export function AccessRulesPage(): JSX.Element {
     setReorderNotice("");
     setReorderPending(false);
     setReorderAnnounce("");
+    setCommitOpen(false);
   };
   // Installed every render so the boundary always runs the LATEST closure
   // (single-slot ref inside the hook — no accumulation, no stale state).
@@ -597,6 +602,21 @@ export function AccessRulesPage(): JSX.Element {
           owner={rb.owner}
           refetchAll={rb.refetchAll}
           latchUnknown={rb.latchUnknown}
+          onOpenCommit={() => {
+            setCommitOpen(true);
+          }}
+        />
+      )}
+
+      {commitOpen && canWrite && (
+        <CommitReview
+          owner={rb.owner}
+          blocked={blocked}
+          refetchAll={rb.refetchAll}
+          latchUnknown={rb.latchUnknown}
+          onClose={() => {
+            setCommitOpen(false);
+          }}
         />
       )}
       {snap !== undefined && snap.unknownKindCount > 0 && (
