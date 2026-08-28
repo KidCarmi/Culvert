@@ -203,10 +203,21 @@ credential-readiness, or stale-decision predictions. `Usable` is **unreachable t
 ingestion** — "approval is a later slice" (`internal/mcp/catalog`) — so no production path
 promotes a tool to `Usable` today.
 
-The preflight therefore fails closed with `no_usable_shadow_tools` unless the requested scope
-targets a `Usable` tool (`shadowScopeHasUsableTool` + `Scope.AdmitsToolForEvaluation`, a
-principal-agnostic server/tool/write-class match). This is deliberate: it never falsely reports
-a node "ready" for an experiment that could only produce hard-control blocks.
+The activation preflight therefore fails closed with `no_usable_shadow_tools` unless the
+requested scope targets a `Usable` tool (`shadowScopeHasUsableTool` +
+`Scope.AdmitsToolForEvaluation`, a principal-agnostic server/tool/write-class match). This is
+deliberate: it never falsely activates an experiment that could only produce hard-control blocks.
+
+Because this precondition is **scope-dependent**, it is split from the scope-independent node
+readiness (Codex P2, PR #1234): `evaluateShadowNodeReadiness` checks only node properties
+(evaluator composed, no live-exec tier, durable events, policy, inventory, inspection, live
+listener, no kill) and is what the operator dry-run (`mcpShadowStatus` → `shadow.preflight`)
+reports, while `evaluateShadowActivationPreflight` layers the usable-tool check on top and is
+what the CP→DP apply/commit/restore paths use. Folding the usable-tool check into the node
+dry-run would make it always report `no_usable_shadow_tools` before the first Observe→Shadow
+activation — the active scope is the empty Observe/Disabled scope at that point — so an operator
+could never see a healthy node. The apply-time gate is where the candidate scope is known and
+where the precondition therefore belongs.
 
 **Corrected verdict.** With no tool-approval / promotion slice, Controlled Shadow activation is
 **NOT yet reachable in production** — the mechanism is READY and fail-closed, but the usable-tool

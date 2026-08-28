@@ -181,6 +181,10 @@ func (s *ShadowEvaluator) Execute(ctx context.Context, in runtime.ExecInput, res
 	}
 }
 
+// KillActive implements runtime.ExecutionProvider: it reports whether this capability's
+// emergency kill switch is engaged, for the runtime's record-only fall-through re-check.
+func (s *ShadowEvaluator) KillActive() bool { return s.cfg.State.Killed() }
+
 // evaluate produces the formal ShadowDecision for an in-scope Shadow request. It
 // computes the Model-1 outcome (what a fully-enforcing mode WOULD do), derives
 // credential readiness from Plan alone, records durable evidence, and returns. There

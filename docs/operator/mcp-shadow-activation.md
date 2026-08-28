@@ -42,23 +42,32 @@ Out-of-scope traffic on a Shadow node behaves as **Observe** (recorded, not eval
    `shadow.live_execution_ready: false`, `shadow.reason: "composed"`.
 7. **Live execution stays off**: `shadow.live_execution_ready` MUST be `false`. If it is
    ever `true`, STOP — this build/node is not a valid Shadow-only target.
-8. **At least one USABLE tool in the requested scope** — preflight must not report
-   `no_usable_shadow_tools`. Every Gateway `tools/call` against a Quarantined /
-   ReviewRequired / ServerDisabled catalog entry hits the policy quarantine hard-override,
-   so Shadow would predict `would_fail_hard_control` for all of it and never reach
-   `would_execute` / credential-readiness / stale-decision. The ONLY catalog state that
-   evaluates is `Usable`, and **catalog ingestion never produces `Usable` — tool approval is
-   a later slice** (`internal/mcp/catalog`). This precondition is therefore the gating
-   prerequisite: **until the tool-approval / promotion slice ships, this is UNSATISFIABLE and
-   Controlled Shadow activation is not yet reachable in production** (the preflight fails
-   closed with `no_usable_shadow_tools`, by design). When that slice lands and the controlled
-   server's tool is promoted to `Usable` within the scope, this precondition clears.
+8. **At least one USABLE tool in the requested scope** — the CP→DP activation that applies
+   the signed Shadow config must not be rejected with `no_usable_shadow_tools`. Every Gateway
+   `tools/call` against a Quarantined / ReviewRequired / ServerDisabled catalog entry hits the
+   policy quarantine hard-override, so Shadow would predict `would_fail_hard_control` for all of
+   it and never reach `would_execute` / credential-readiness / stale-decision. The ONLY catalog
+   state that evaluates is `Usable`, and **catalog ingestion never produces `Usable` — tool
+   approval is a later slice** (`internal/mcp/catalog`). This precondition is therefore the
+   gating prerequisite: **until the tool-approval / promotion slice ships, this is UNSATISFIABLE
+   and Controlled Shadow activation is not yet reachable in production** (the apply-time preflight
+   fails closed with `no_usable_shadow_tools`, by design). Because it is scope-dependent, it is
+   checked at APPLY time (when the candidate scope is known), NOT by the node dry-run below — a
+   healthy node reports `shadow.preflight.ready: true` yet a signed Shadow activation still fails
+   closed with `no_usable_shadow_tools` until the controlled server's tool is promoted to `Usable`
+   within the scope.
 
 Run the operator dry-run: `GET /api/mcp/rollout` and confirm `shadow.preflight.ready:
-true` with an empty `reasons` list. A non-empty list means Shadow activation will be
-rejected fail-closed; fix each named reason first. Note that in a build without the
-tool-approval slice, `no_usable_shadow_tools` will always be present (see precondition 8),
-so `shadow.preflight.ready` cannot yet be `true` in production.
+true` with an empty `reasons` list. This dry-run reports **node** readiness only — the
+scope-independent prerequisites above (evaluator composed, no live-exec tier, durable events,
+policy, inventory, inspection, live listener, no kill) — because before the first
+Observe→Shadow activation the active scope is the empty Observe/Disabled scope, so a
+scope-dependent check folded in here would always report not-ready regardless of node health.
+A non-empty `reasons` list means the node cannot host Shadow; fix each named reason first. The
+scope-dependent usable-tool precondition (8) is enforced separately, at the CP→DP apply that
+activates the signed scope — so `shadow.preflight.ready: true` confirms the node is ready but
+does NOT by itself mean a signed Shadow activation will be accepted in a build without the
+tool-approval slice.
 
 ---
 

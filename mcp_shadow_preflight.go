@@ -82,12 +82,20 @@ const (
 	shadowPFNoUsableTools    = "no_usable_shadow_tools"
 )
 
-// evaluateShadowActivationPreflight verifies node readiness to activate Shadow for a
-// capability + the requested scope. It is pure w.r.t. state (reads node-local holders, no
-// mutation) and fail-closed: any missing prerequisite adds a reason and marks the result
-// not-ready. scope/scopeRev are the requested Shadow scope (Gateway only); they gate the
-// usable-tool precondition below.
-func evaluateShadowActivationPreflight(capb rollout.Capability, scope rollout.ScopeSpec, scopeRev uint64) shadowPreflightResult {
+// evaluateShadowNodeReadiness verifies the SCOPE-INDEPENDENT half of Shadow readiness for a
+// capability: everything about THIS node that must hold before it can evaluate any Shadow
+// traffic at all (evaluator composed, no live-exec tier, durable events, policy, inventory,
+// inspection, live listener, kill switch). It is pure w.r.t. state (reads node-local holders,
+// no mutation) and fail-closed: any missing prerequisite adds a reason.
+//
+// It is separated from the scope-dependent usable-tool check so the operator dry-run
+// (mcpShadowStatus) can report node posture WITHOUT a candidate scope — before the first
+// Observe→Shadow activation the active scope is the empty Observe/Disabled scope, and folding
+// the usable-tool check into the node status would make that dry-run ALWAYS report
+// no_usable_shadow_tools regardless of node health (Codex P2, PR #1234). The apply/commit/restore
+// paths, which DO know the candidate scope, call evaluateShadowActivationPreflight, which layers
+// the usable-tool precondition on top of this.
+func evaluateShadowNodeReadiness(capb rollout.Capability) shadowPreflightResult {
 	// Shadow (an upstream-evaluation concept) is Gateway-only. Management never evaluates
 	// an upstream tools/call, so a Management Shadow activation fails closed here.
 	if capb != rollout.CapabilityGateway {
@@ -136,6 +144,27 @@ func evaluateShadowActivationPreflight(capb rollout.Capability, scope rollout.Sc
 	if !gatewayListenerReadyProbe() {
 		reasons = append(reasons, shadowPFListenerNotReady)
 	}
+	// An engaged emergency kill switch stops admission; activating Shadow into it would be
+	// misleading (no traffic would be evaluated). Refuse until the kill is cleared.
+	if getMCPRollout().stateFor(capb).Killed() {
+		reasons = append(reasons, shadowPFKillActive)
+	}
+	return shadowPreflightResult{Ready: len(reasons) == 0, Reasons: reasons}
+}
+
+// evaluateShadowActivationPreflight verifies node readiness to activate Shadow for a
+// capability + the requested scope. It layers the SCOPE-DEPENDENT usable-tool precondition
+// on top of the scope-independent node readiness (evaluateShadowNodeReadiness), and is
+// fail-closed: any missing prerequisite adds a reason and marks the result not-ready.
+// scope/scopeRev are the requested Shadow scope (Gateway only). This is the gate the
+// apply/commit/restore paths use, since only they know the candidate scope.
+func evaluateShadowActivationPreflight(capb rollout.Capability, scope rollout.ScopeSpec, scopeRev uint64) shadowPreflightResult {
+	pf := evaluateShadowNodeReadiness(capb)
+	// The capability gate already short-circuited a non-Gateway capability with a single
+	// reason; the usable-tool precondition is Gateway-scoped, so only layer it on for Gateway.
+	if capb != rollout.CapabilityGateway {
+		return pf
+	}
 	// The requested Shadow scope must target at least one catalog tool that is currently
 	// Usable — the only eligibility that evaluates without the policy quarantine hard-override.
 	// Catalog ingestion never yields Usable (approval is a later slice), so without this a
@@ -145,14 +174,10 @@ func evaluateShadowActivationPreflight(capb rollout.Capability, scope rollout.Sc
 	// fail closed until the tool-approval/promotion slice ships — that slice is the prerequisite
 	// that will make Controlled Shadow activation reachable.
 	if !shadowScopeUsableToolProbe(scope, scopeRev) {
-		reasons = append(reasons, shadowPFNoUsableTools)
+		pf.Reasons = append(pf.Reasons, shadowPFNoUsableTools)
 	}
-	// An engaged emergency kill switch stops admission; activating Shadow into it would be
-	// misleading (no traffic would be evaluated). Refuse until the kill is cleared.
-	if getMCPRollout().stateFor(capb).Killed() {
-		reasons = append(reasons, shadowPFKillActive)
-	}
-	return shadowPreflightResult{Ready: len(reasons) == 0, Reasons: reasons}
+	pf.Ready = len(pf.Reasons) == 0
+	return pf
 }
 
 // shadowPreflightUnreadyIgnoringKill reports whether the preflight is not-ready for a

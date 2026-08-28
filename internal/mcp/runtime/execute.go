@@ -40,6 +40,12 @@ type ExecutionProvider interface {
 	// rollout state — it acts on the resolution Resolve produced. It performs its OWN
 	// durable commit-before-side-effect; the runtime does not pre-commit for this path.
 	Execute(ctx context.Context, in ExecInput, res rollout.Resolution) ExecOutput
+	// KillActive reports whether the capability's emergency kill switch is currently engaged.
+	// The runtime consults it on the RECORD-ONLY fall-through, so an emergency admission stop
+	// blocks even the inline Observe path; the executing path is covered by Execute's own
+	// entry re-check. Reading only the monotonic kill flag can only make the outcome more
+	// restrictive, so it does not reopen the single-resolution TOCTOU (Codex P2, PR #1234).
+	KillActive() bool
 }
 
 // ExecInput carries the already-resolved request facts the executor needs. It

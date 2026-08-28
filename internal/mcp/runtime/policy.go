@@ -100,7 +100,19 @@ func (p *pipeline) dispatchPolicy(ctx context.Context, rb *recBuilder, req Reque
 		if res.Disposition != rollout.EffectRecordOnly {
 			return p.dispatchExecute(ctx, rb, ei, res)
 		}
-		// record-only disposition ⇒ fall through to the inline Observe evidence path.
+		// record-only disposition ⇒ the inline Observe evidence path. Honor an emergency kill
+		// engaged AFTER Resolve before that path commits: the kill is a capability-wide
+		// admission stop, so even a record-only request must not proceed under an active kill
+		// (parity with Execute's entry re-check — the executing path is covered there; Codex P2,
+		// PR #1234). Reading only the monotonic kill flag can only make the outcome more
+		// restrictive, so it does not reopen the single-resolution TOCTOU.
+		if p.executor.KillActive() {
+			p.ctr.requestsRejected.Add(1)
+			rb.rec.PolicyAction = "BLOCKED_BY_EMERGENCY_KILL"
+			rb.rec.PolicyReason = mcperr.ReasonRolloutEmergencyActive.Code()
+			body := inspectionError(msg.ID, mcperr.ReasonRolloutEmergencyActive)
+			return p.finish(rb, Outcome{Status: 200, Disposition: DispRejected, Reason: mcperr.ReasonRolloutEmergencyActive, ResponseBody: body})
+		}
 	}
 
 	if d.Action.IsAllowClass() {

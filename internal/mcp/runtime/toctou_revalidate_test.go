@@ -24,6 +24,9 @@ func (e *hookCapturingExec) Resolve(ExecInput) rollout.Resolution {
 	return rollout.Resolution{Disposition: rollout.EffectShadowEvaluate}
 }
 
+// KillActive: these fixtures never engage the kill switch.
+func (e *hookCapturingExec) KillActive() bool { return false }
+
 func (e *hookCapturingExec) Execute(_ context.Context, in ExecInput, _ rollout.Resolution) ExecOutput {
 	e.reached++
 	if in.ToolStillCurrent == nil {

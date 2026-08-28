@@ -168,6 +168,10 @@ func (e *Executor) Execute(ctx context.Context, in runtime.ExecInput, res rollou
 	}
 }
 
+// KillActive implements runtime.ExecutionProvider: it reports whether this capability's
+// emergency kill switch is engaged, for the runtime's record-only fall-through re-check.
+func (e *Executor) KillActive() bool { return e.cfg.State.Killed() }
+
 // recordOnly returns the decision-only (observe) result: the true policy action is
 // recorded, no upstream call is made.
 func (e *Executor) recordOnly(in runtime.ExecInput, res rollout.Resolution) runtime.ExecOutput {

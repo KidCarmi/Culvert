@@ -85,3 +85,57 @@ func TestPreflight_RequiresUsableToolInScope(t *testing.T) {
 		t.Fatal("a usable in-scope tool must clear the no-usable-tools reason")
 	}
 }
+
+// TestNodeReadiness_ExcludesScopeDependentUsableToolCheck pins the round-8 split (Codex P2,
+// PR #1234): the scope-INDEPENDENT node-readiness dry-run must NEVER report
+// no_usable_shadow_tools — that precondition is scope-dependent and belongs only to the
+// apply/commit preflight. Before the first Observe→Shadow activation the active scope is the
+// empty Observe/Disabled scope, so if the node status folded the usable-tool check in it would
+// always report node-not-ready regardless of node health, and an operator could never see a
+// healthy node. Mutation: making evaluateShadowNodeReadiness append the usable-tool reason (or
+// having the dry-run call evaluateShadowActivationPreflight against the empty scope again) fails
+// the first assertion.
+func TestNodeReadiness_ExcludesScopeDependentUsableToolCheck(t *testing.T) {
+	resetExecDeps(t)
+	resetShadowComposition(t)
+	markGatewayShadowDepsReady()
+	globalMCPShadow.composed.Store(true)
+	globalMCPShadow.inspectionComposed.Store(true)
+
+	prevStatus := getMCPObserveStatus()
+	setMCPObserveStatus(mcpObserveActivation{State: mcpObserveConfigured})
+	prevListener := gatewayListenerReadyProbe
+	prevUsable := shadowScopeUsableToolProbe
+	t.Cleanup(func() {
+		setMCPObserveStatus(prevStatus)
+		gatewayListenerReadyProbe = prevListener
+		shadowScopeUsableToolProbe = prevUsable
+	})
+	gatewayListenerReadyProbe = func() bool { return true }
+
+	// No usable tool anywhere. The scope-independent node readiness must NEVER report the
+	// usable-tool reason — it never consults the probe — regardless of which other node
+	// prerequisites are (un)met in this minimal harness.
+	shadowScopeUsableToolProbe = func(rollout.ScopeSpec, uint64) bool { return false }
+	node := evaluateShadowNodeReadiness(rollout.CapabilityGateway)
+	if containsReason(node.Reasons, shadowPFNoUsableTools) {
+		t.Fatalf("node readiness must NOT report %s (it is scope-dependent, not a node property); reasons=%v",
+			shadowPFNoUsableTools, node.Reasons)
+	}
+
+	// The scope-aware activation preflight, with the SAME probe returning false, MUST report it
+	// on top of the exact node-readiness reasons — so the split moved the check onto the apply
+	// path, it neither deleted it nor changed the node checks.
+	full := evaluateShadowActivationPreflight(rollout.CapabilityGateway, rollout.ScopeSpec{}, 0)
+	if !containsReason(full.Reasons, shadowPFNoUsableTools) {
+		t.Fatalf("the activation preflight must still report %s when no usable tool is in scope; reasons=%v",
+			shadowPFNoUsableTools, full.Reasons)
+	}
+	if len(full.Reasons) != len(node.Reasons)+1 {
+		t.Fatalf("the activation preflight must be node reasons %v plus exactly the usable-tool reason, got %v",
+			node.Reasons, full.Reasons)
+	}
+	if full.Ready {
+		t.Fatal("the activation preflight must be not-ready when the usable-tool precondition fails")
+	}
+}

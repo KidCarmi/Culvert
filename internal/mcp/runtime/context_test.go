@@ -89,6 +89,9 @@ func (e *recordingExecutor) Resolve(ExecInput) rollout.Resolution {
 	return rollout.Resolution{Disposition: rollout.EffectShadowEvaluate}
 }
 
+// KillActive: these fixtures never engage the kill switch.
+func (e *recordingExecutor) KillActive() bool { return false }
+
 // SEC-MCP-03. The guarded executor performs the real upstream side effect. It must
 // inherit the request's cancellation and deadline: `context.Background()` there
 // means a disconnected client, an exceeded budget or a shutdown cannot stop an

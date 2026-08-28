@@ -635,4 +635,21 @@ func TestAdmitsToolForEvaluation(t *testing.T) {
 	if fpScope.AdmitsToolForEvaluation("s1", "other", "unpinned-fp") {
 		t.Fatal("a tool whose fingerprint the scope does not admit must NOT be targeted — even on an in-scope server")
 	}
+
+	// A self-contradicting identity dimension admits NO request (Contains rejects all), so a
+	// Usable tool on an in-scope server must NOT be treated as reachable (Codex P2, PR #1234).
+	principalContradiction := mk(ScopeSpec{Capability: CapabilityGateway, Servers: []string{"s1"}, Principals: []string{"p"}, ExcludePrincipals: []string{"p"}, Operations: []RiskClass{RiskWrite}, HighRisk: true})
+	if principalContradiction.AdmitsToolForEvaluation("s1", "t", "fp") {
+		t.Fatal("a scope whose only principal is also excluded admits no request — its usable tool must not be reachable")
+	}
+	tenantContradiction := mk(ScopeSpec{Capability: CapabilityGateway, Servers: []string{"s1"}, Tenants: []string{"acme"}, ExcludeTenants: []string{"acme"}, Operations: []RiskClass{RiskWrite}, HighRisk: true})
+	if tenantContradiction.AdmitsToolForEvaluation("s1", "t", "fp") {
+		t.Fatal("a scope whose only tenant is also excluded admits no request — its usable tool must not be reachable")
+	}
+	// A partial exclusion (one of two included principals excluded) still admits the other, so
+	// the tool remains reachable — the contradiction check must not over-reject.
+	partial := mk(ScopeSpec{Capability: CapabilityGateway, Servers: []string{"s1"}, Principals: []string{"p", "q"}, ExcludePrincipals: []string{"p"}, Operations: []RiskClass{RiskWrite}, HighRisk: true})
+	if !partial.AdmitsToolForEvaluation("s1", "t", "fp") {
+		t.Fatal("a scope that still admits principal q must keep its usable tool reachable")
+	}
 }

@@ -410,6 +410,15 @@ func (s Scope) AdmitsToolForEvaluation(serverID, toolName, fingerprint string) b
 	if !s.built || s.MatchesNothing() {
 		return false
 	}
+	// An identity inclusion dimension whose every included value is also excluded admits NO
+	// request (Contains rejects all), so a Usable tool on an in-scope server is still
+	// unreachable — the scope validates as enumerable but evaluates nothing. Reject such a
+	// self-contradicting scope here (Codex P2, PR #1234). Only tenant and principal carry both
+	// an inclusion and an exclusion set; the identity dimensions without an exclusion set
+	// (agent/client/group/environment) can never be self-emptied.
+	if fullyExcluded(s.tenants, s.exTenants) || fullyExcluded(s.principals, s.exPrincipals) {
+		return false
+	}
 	if s.exServers.has(serverID) {
 		return false
 	}
@@ -438,6 +447,21 @@ func (s Scope) AdmitsToolForEvaluation(serverID, toolName, fingerprint string) b
 // dimOK reports whether a single string-selector inclusion dimension admits val:
 // an empty set matches anything; otherwise val must be present.
 func dimOK(set stringSet, val string) bool { return set.empty() || set.has(val) }
+
+// fullyExcluded reports whether a non-empty inclusion set is entirely covered by its
+// exclusion set — i.e. every included value is also excluded, so the dimension admits no
+// value at all. An empty inclusion set (matches anything) is never fully excluded.
+func fullyExcluded(incl, excl stringSet) bool {
+	if incl.empty() {
+		return false
+	}
+	for v := range incl {
+		if !excl.has(v) {
+			return false
+		}
+	}
+	return true
+}
 
 func (s Scope) matchGroup(subj Subject) bool {
 	for _, g := range subj.Groups {

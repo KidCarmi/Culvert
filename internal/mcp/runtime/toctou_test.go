@@ -36,6 +36,9 @@ func (e *recordingExec) Resolve(ExecInput) rollout.Resolution {
 	return rollout.Resolution{Disposition: rollout.EffectShadowEvaluate}
 }
 
+// KillActive: these fixtures never engage the kill switch.
+func (e *recordingExec) KillActive() bool { return false }
+
 // ingestTool publishes a tool into the catalog with the given input schema, and
 // returns its resulting fingerprint hash.
 func ingestTool(t *testing.T, reg *registry.Registry, cat *catalog.Catalog, server, name, inputSchema string) string {
