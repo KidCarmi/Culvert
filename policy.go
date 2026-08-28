@@ -244,6 +244,36 @@ func (ps *PolicyStore) bumpVersion() {
 	ps.updatedAt = time.Now().UTC().Format(time.RFC3339)
 }
 
+// seedVersion pins the version counter and timestamp — the draft-fork
+// continuity seam (2B.0a): the candidate's generation stream CONTINUES the
+// running stream it forked from, so a stale pre-fork running token can never
+// numerically collide with a post-fork candidate generation (the first staged
+// mutation lands at baseGen+1). Only the fork path may call this.
+func (ps *PolicyStore) seedVersion(v int64, updatedAt string) {
+	ps.mu.Lock()
+	ps.version = v
+	if updatedAt != "" {
+		ps.updatedAt = updatedAt
+	}
+	ps.mu.Unlock()
+}
+
+// ensureVersionAbove advances the version counter strictly past floor — the
+// candidate-RETIREMENT seam (2B.0a): when a draft is committed, reverted, or
+// reconciled away, the running counter jumps past every generation the
+// candidate ever exposed, so a stale candidate-era ?ifVersion= token can never
+// numerically equal a later running generation and silently pass the fence.
+// The only cost is a conservative false conflict for clients holding the
+// pre-draft running token after a revert (they reload; content unchanged).
+func (ps *PolicyStore) ensureVersionAbove(floor int64) {
+	ps.mu.Lock()
+	if ps.version <= floor {
+		ps.version = floor + 1
+		ps.updatedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	ps.mu.Unlock()
+}
+
 var policyStore = &PolicyStore{}
 
 // Load reads rules from a JSON file. Missing file is treated as empty ruleset.

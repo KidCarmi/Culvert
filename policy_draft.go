@@ -119,17 +119,28 @@ func (c *policyDraftCoordinator) stageTarget(actor string) *PolicyStore {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.state.Active {
-		// Fork the candidate from the current running rulebase.
-		baseGen, _ := policyStore.policyVersion()
-		c.cand.ReplaceAll(policyStore.List())
-		c.state = draftState{
-			Active:         true,
-			Actor:          actor,
-			StartedAt:      time.Now().UTC().Format(time.RFC3339),
-			BaseGeneration: baseGen,
-		}
+		c.openDraftLocked(actor)
 	}
 	return c.cand
+}
+
+// openDraftLocked forks the candidate from the current running rulebase.
+// Caller holds c.mu. The candidate's generation counter is SEEDED from the
+// running generation (2B.0a version-stream continuity): the first staged
+// mutation lands at baseGen+1, so a second writer still holding the pre-fork
+// running token baseGen conflicts deterministically instead of colliding with
+// a candidate counter that restarted from zero (running v2 vs a fork+add
+// landing the old candidate counter at exactly 2 used to pass the fence).
+func (c *policyDraftCoordinator) openDraftLocked(actor string) {
+	baseGen, baseUpdated := policyStore.policyVersion()
+	c.cand.ReplaceAll(policyStore.List())
+	c.cand.seedVersion(baseGen, baseUpdated)
+	c.state = draftState{
+		Active:         true,
+		Actor:          actor,
+		StartedAt:      time.Now().UTC().Format(time.RFC3339),
+		BaseGeneration: baseGen,
+	}
 }
 
 // candidateList / candidateVersion expose the candidate for the effective-read
@@ -292,14 +303,7 @@ func (c *policyDraftCoordinator) stageDurableAppendLocked(actor string, expected
 	}
 	opened := false
 	if !c.state.Active {
-		baseGen, _ := policyStore.policyVersion()
-		c.cand.ReplaceAll(policyStore.List())
-		c.state = draftState{
-			Active:         true,
-			Actor:          actor,
-			StartedAt:      time.Now().UTC().Format(time.RFC3339),
-			BaseGeneration: baseGen,
-		}
+		c.openDraftLocked(actor)
 		opened = true
 	}
 	added := c.cand.Add(rule)
@@ -497,7 +501,13 @@ func (c *policyDraftCoordinator) commitActivate(ifVersion *int64) (policyDraftDi
 	// home). On persist failure the in-memory activation is reverted and the
 	// draft retained, so the operator can retry once the volume recovers.
 	prevRunning := policyStore.List()
+	candVer, _ := c.cand.policyVersion()
 	policyStore.ReplaceAll(cand)
+	// Candidate retirement (2B.0a): advance running strictly past every
+	// generation the candidate exposed, so a stale candidate-era ifVersion
+	// token can never numerically collide with a later running generation.
+	// Runs BEFORE SaveErr so the persisted .meta carries the final version.
+	policyStore.ensureVersionAbove(candVer)
 	if err := policyStore.SaveErr(); err != nil && errors.Is(err, fileutil.ErrReplacedNotSynced) {
 		// Post-rename failure (Codex fix): the policy file already CARRIES the
 		// candidate — rolling back memory would contradict the visible file
@@ -543,11 +553,19 @@ func (c *policyDraftCoordinator) clearLocked() string {
 	return c.path
 }
 
-// clear discards the candidate and marks the draft inactive.
+// clear discards the candidate and marks the draft inactive (the revert path).
+// Candidate retirement (2B.0a): running's generation is advanced past every
+// generation the discarded candidate exposed, so a client still holding a
+// stale candidate-era ifVersion token conflicts instead of numerically
+// colliding with a later running generation. The .meta sidecar is refreshed so
+// the advanced counter survives a restart.
 func (c *policyDraftCoordinator) clear() {
 	c.mu.Lock()
+	candVer, _ := c.cand.policyVersion()
 	path := c.clearLocked()
+	policyStore.ensureVersionAbove(candVer)
 	c.mu.Unlock()
+	policyStore.saveMeta()
 	if path != "" {
 		_ = os.Remove(path)
 	}
@@ -610,8 +628,13 @@ func (c *policyDraftCoordinator) reconcile() bool {
 		c.mu.Unlock()
 		return false
 	}
+	candVer, _ := c.cand.policyVersion()
 	path := c.clearLocked()
+	// Candidate retirement (2B.0a): see clear() — stale candidate-era tokens
+	// must conflict, never numerically collide with later running generations.
+	policyStore.ensureVersionAbove(candVer)
 	c.mu.Unlock()
+	policyStore.saveMeta()
 	if path != "" {
 		_ = os.Remove(path)
 	}

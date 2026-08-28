@@ -1589,7 +1589,17 @@ func apiPolicyCreate(w http.ResponseWriter, r *http.Request) {
 	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
 	beginPolicyWrite()
 	defer endPolicyWrite()
-	added := policyWriteStore(sessionAdmin(r)).Add(rule)
+	// Atomic fence + mutation (2B.0a): when ?ifVersion= is asserted, the
+	// version comparison and the Add run in one coordinator critical section —
+	// the early policyVersionConflict above stays as fast-path/400 only.
+	var added PolicyRule
+	if conflict, _ := policyDraft.fencedMutate(sessionAdmin(r), parseIfVersion(r), func(target *PolicyStore) bool {
+		added = target.Add(rule)
+		return true
+	}); conflict != nil {
+		writePolicyVersionConflictError(w, conflict)
+		return
+	}
 	logName := strings.ReplaceAll(strings.ReplaceAll(added.Name, "\n", "_"), "\r", "_")
 	logAction := strings.ReplaceAll(strings.ReplaceAll(string(added.Action), "\n", "_"), "\r", "_")
 	logPriority := strings.ReplaceAll(fmt.Sprintf("%d", added.Priority), "\n", "_")
@@ -1643,8 +1653,16 @@ func apiPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
 	beginPolicyWrite()
 	defer endPolicyWrite()
-	if !policyWriteStore(sessionAdmin(r)).Update(priority, rule) {
-		policyDraft.reconcile() // a failed mutation may have opened a now-clean draft
+	// Atomic fence + mutation (2B.0a); a failed mutation that opened the draft
+	// fork is discarded inside the same critical section.
+	conflict, ok := policyDraft.fencedMutate(sessionAdmin(r), parseIfVersion(r), func(target *PolicyStore) bool {
+		return target.Update(priority, rule)
+	})
+	if conflict != nil {
+		writePolicyVersionConflictError(w, conflict)
+		return
+	}
+	if !ok {
 		http.Error(w, "rule not found", http.StatusNotFound)
 		return
 	}
@@ -1688,8 +1706,15 @@ func apiPolicyDelete(w http.ResponseWriter, r *http.Request) {
 	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
 	beginPolicyWrite()
 	defer endPolicyWrite()
-	if !policyWriteStore(sessionAdmin(r)).Delete(priority) {
-		policyDraft.reconcile() // a failed mutation may have opened a now-clean draft
+	// Atomic fence + mutation (2B.0a).
+	conflict, ok := policyDraft.fencedMutate(sessionAdmin(r), parseIfVersion(r), func(target *PolicyStore) bool {
+		return target.Delete(priority)
+	})
+	if conflict != nil {
+		writePolicyVersionConflictError(w, conflict)
+		return
+	}
+	if !ok {
 		http.Error(w, "rule not found", http.StatusNotFound)
 		return
 	}
@@ -1747,8 +1772,15 @@ func apiPolicyUpdateByID(w http.ResponseWriter, r *http.Request, id string) {
 	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
 	beginPolicyWrite()
 	defer endPolicyWrite()
-	if !policyWriteStore(sessionAdmin(r)).UpdateByID(id, rule) {
-		policyDraft.reconcile() // a failed mutation may have opened a now-clean draft
+	// Atomic fence + mutation (2B.0a).
+	conflict, ok := policyDraft.fencedMutate(sessionAdmin(r), parseIfVersion(r), func(target *PolicyStore) bool {
+		return target.UpdateByID(id, rule)
+	})
+	if conflict != nil {
+		writePolicyVersionConflictError(w, conflict)
+		return
+	}
+	if !ok {
 		http.Error(w, "rule not found", http.StatusNotFound)
 		return
 	}
@@ -1773,8 +1805,15 @@ func apiPolicyDeleteByID(w http.ResponseWriter, r *http.Request, id string) {
 	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
 	beginPolicyWrite()
 	defer endPolicyWrite()
-	if !policyWriteStore(sessionAdmin(r)).DeleteByID(id) {
-		policyDraft.reconcile() // a failed mutation may have opened a now-clean draft
+	// Atomic fence + mutation (2B.0a).
+	conflict, ok := policyDraft.fencedMutate(sessionAdmin(r), parseIfVersion(r), func(target *PolicyStore) bool {
+		return target.DeleteByID(id)
+	})
+	if conflict != nil {
+		writePolicyVersionConflictError(w, conflict)
+		return
+	}
+	if !ok {
 		http.Error(w, "rule not found", http.StatusNotFound)
 		return
 	}
@@ -1816,12 +1855,22 @@ func apiPolicyBulkDelete(w http.ResponseWriter, r *http.Request) {
 	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
 	beginPolicyWrite()
 	defer endPolicyWrite()
-	ws := policyWriteStore(sessionAdmin(r))
+	// Atomic fence + mutation (2B.0a): the whole batch runs in one critical
+	// section, so a fenced bulk delete is all-checked-then-deleted against the
+	// generation the client asserted. NOTE (recorded for the v2 client): this
+	// endpoint addresses rules by PRIORITY, which is not stable across a
+	// reorder — the v2 frontend does not use it (see the 2B parity record).
 	deleted := 0
-	for _, p := range body.Priorities {
-		if ws.Delete(p) {
-			deleted++
+	if conflict, _ := policyDraft.fencedMutate(sessionAdmin(r), parseIfVersion(r), func(target *PolicyStore) bool {
+		for _, p := range body.Priorities {
+			if target.Delete(p) {
+				deleted++
+			}
 		}
+		return deleted > 0
+	}); conflict != nil {
+		writePolicyVersionConflictError(w, conflict)
+		return
 	}
 	logger.Printf("UI: bulk policy delete %d rule(s)", deleted)
 	auditEvent(r, "policy.bulk_remove", fmt.Sprintf("%d rule(s)", deleted), "")
@@ -1891,8 +1940,15 @@ func apiPolicyReorder(w http.ResponseWriter, r *http.Request) {
 	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
 	beginPolicyWrite()
 	defer endPolicyWrite()
-	if !policyWriteStore(sessionAdmin(r)).PermutePriorities(body.Priorities) {
-		policyDraft.reconcile() // a failed permute may have opened a now-clean draft
+	// Atomic fence + mutation (2B.0a).
+	conflict, ok := policyDraft.fencedMutate(sessionAdmin(r), parseIfVersion(r), func(target *PolicyStore) bool {
+		return target.PermutePriorities(body.Priorities)
+	})
+	if conflict != nil {
+		writePolicyVersionConflictError(w, conflict)
+		return
+	}
+	if !ok {
 		http.Error(w, "priority list length mismatch or unknown priority", http.StatusBadRequest)
 		return
 	}
@@ -2008,8 +2064,15 @@ func apiPolicyMove(w http.ResponseWriter, r *http.Request) {
 	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
 	beginPolicyWrite()
 	defer endPolicyWrite()
-	if !policyWriteStore(sessionAdmin(r)).PermutePriorities(priorities) {
-		policyDraft.reconcile() // a failed permute may have opened a now-clean draft
+	// Atomic fence + mutation (2B.0a).
+	conflict, ok := policyDraft.fencedMutate(sessionAdmin(r), parseIfVersion(r), func(target *PolicyStore) bool {
+		return target.PermutePriorities(priorities)
+	})
+	if conflict != nil {
+		writePolicyVersionConflictError(w, conflict)
+		return
+	}
+	if !ok {
 		http.Error(w, "reorder failed (concurrent modification?)", http.StatusConflict)
 		return
 	}
