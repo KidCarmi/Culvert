@@ -333,6 +333,104 @@ func TestExpiry_LazyAndSweep(t *testing.T) {
 	mustReason(t, err, mcperr.ReasonApprovalExpired)
 }
 
+// --- Codex P1: a request whose TTL elapsed before approval is rejected ----
+
+func TestApprove_PendingExpiredBeforeApprovalRejected(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	s := newTestStore(t, clk)
+	in := goodRequest()
+	exp := clk.t.Add(5 * time.Minute)
+	in.ExpiresAt = &exp
+	req, err := s.CreateRequest(in)
+	if err != nil {
+		t.Fatalf("CreateRequest: %v", err)
+	}
+	// The admin does not get to it until AFTER the TTL elapses.
+	clk.t = exp.Add(time.Second)
+	_, err = s.Approve(req.ApprovalID, "admin@corp", matchingTarget(in))
+	mustReason(t, err, mcperr.ReasonApprovalExpired)
+	// It must stay pending→never active (no grant was conferred).
+	got, _ := s.Get(req.ApprovalID, in.Tenant)
+	if got.Status == StatusActive {
+		t.Fatal("an expired pending request must never be activated")
+	}
+	if len(s.ActiveApprovals(clk.now())) != 0 {
+		t.Fatal("no active grant may exist for an expired-before-approval request")
+	}
+}
+
+// --- Codex P2: reviewed revision advancing (same fingerprint) is stale ----
+
+func TestApprove_CatalogRevisionAdvancedRejected(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	s := newTestStore(t, clk)
+	in := goodRequest() // records CatalogRevision 7
+	req, _ := s.CreateRequest(in)
+	target := matchingTarget(in)
+	target.CatalogRevision = in.CatalogRevision + 1 // identical rediscovery bumped the revision
+	_, err := s.Approve(req.ApprovalID, "admin@corp", target)
+	mustReason(t, err, mcperr.ReasonToolApprovalStale)
+	got, _ := s.Get(req.ApprovalID, in.Tenant)
+	if got.Status != StatusPending {
+		t.Fatalf("a revision-stale approve must leave the request pending, got %s", got.Status)
+	}
+}
+
+func TestApprove_ServerRevisionAdvancedRejected(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	s := newTestStore(t, clk)
+	in := goodRequest() // records ServerRevision 3
+	req, _ := s.CreateRequest(in)
+	target := matchingTarget(in)
+	target.ServerRevision = in.ServerRevision + 1
+	_, err := s.Approve(req.ApprovalID, "admin@corp", target)
+	mustReason(t, err, mcperr.ReasonToolApprovalStale)
+}
+
+// --- Codex P2: a pruned terminal record is restored on persist failure ----
+
+func TestCreate_PrunePersistFailureRestoresEvicted(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	dir := t.TempDir()
+	s, err := NewStore(Config{Path: filepath.Join(dir, "approvals.json"), Clock: clk.now, MaxRecords: 2, MaxPerTenant: 8})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := s.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	// Fill to the total cap with two terminal (rejected) records.
+	in1 := goodRequest()
+	in1.ToolName = "one"
+	r1, _ := s.CreateRequest(in1)
+	in2 := goodRequest()
+	in2.ToolName = "two"
+	r2, _ := s.CreateRequest(in2)
+	if err := s.Reject(r1.ApprovalID, "admin@corp", "x"); err != nil {
+		t.Fatalf("reject r1: %v", err)
+	}
+	if err := s.Reject(r2.ApprovalID, "admin@corp", "x"); err != nil {
+		t.Fatalf("reject r2: %v", err)
+	}
+	// Now a new create at cap must prune the oldest terminal — but persistence fails.
+	s.writeFile = func(string, []byte, os.FileMode) error { return errors.New("disk full") }
+	in3 := goodRequest()
+	in3.ToolName = "three"
+	if _, err := s.CreateRequest(in3); err == nil {
+		t.Fatal("create must fail when persistence fails")
+	}
+	// The evicted terminal record must be RESTORED (no silent loss), and the new record
+	// must be absent — the in-memory index matches the durable file (still 2 records).
+	s.mu.Lock()
+	_, haveR1 := s.byID[r1.ApprovalID]
+	_, haveR2 := s.byID[r2.ApprovalID]
+	n := len(s.byID)
+	s.mu.Unlock()
+	if !haveR1 || !haveR2 || n != 2 {
+		t.Fatalf("prune must be restored on persist failure: r1=%v r2=%v n=%d", haveR1, haveR2, n)
+	}
+}
+
 // --- reject ---------------------------------------------------------------
 
 func TestReject_TerminalAndIdempotent(t *testing.T) {

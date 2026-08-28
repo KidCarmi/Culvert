@@ -178,7 +178,10 @@ func (s *Store) CreateRequest(in RequestInput) (*ToolApproval, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.clock()
-	if err := s.ensureCapacityLocked(in.Tenant, now); err != nil {
+	// Decide capacity + id BEFORE any mutation, so an id-generation failure prunes
+	// nothing.
+	pruneID, err := s.capacityCheckLocked(in.Tenant, now)
+	if err != nil {
 		return nil, err
 	}
 	id, err := newApprovalID()
@@ -208,9 +211,20 @@ func (s *Store) CreateRequest(in RequestInput) (*ToolApproval, error) {
 		TicketRef:                in.TicketRef,
 		ExpiresAt:                cloneTimePtr(in.ExpiresAt),
 	}
+	// Apply the prune + the insert together, then persist. On a persist failure BOTH
+	// are reverted (delete the new record AND restore the pruned one) so the durable
+	// file and the in-memory index never diverge.
+	var pruned *ToolApproval
+	if pruneID != "" {
+		pruned = s.byID[pruneID]
+		delete(s.byID, pruneID)
+	}
 	s.byID[id] = a
 	if err := s.persistLocked(); err != nil {
-		delete(s.byID, id) // durable-before-effect: revert on persist failure
+		delete(s.byID, id)
+		if pruned != nil {
+			s.byID[pruneID] = pruned // restore the evicted record
+		}
 		return nil, err
 	}
 	return a.clone(), nil
@@ -251,9 +265,11 @@ func (s *Store) Approve(id, approver string, target CurrentTarget) (*ToolApprova
 		return nil, mcperr.New(mcperr.ReasonApprovalNotFound, "tooltrust.approve", "not found")
 	}
 	now := s.clock()
-	// Lazy expiry surfaces an expired grant as a definite terminal state to the
-	// caller; it is derivable and cheap, so it is not itself persisted here.
-	if a.expiredAsOf(now) {
+	// Expiry is checked REGARDLESS of status (pastExpiry, not expiredAsOf): a pending
+	// request whose TTL elapsed before approval must be rejected, never activated into
+	// an already-expired grant that would promote a tool to Usable until the next
+	// reconcile. It is derivable and cheap, so it is not itself persisted here.
+	if a.pastExpiry(now) {
 		return nil, mcperr.New(mcperr.ReasonApprovalExpired, "tooltrust.approve", "expired")
 	}
 	switch a.Status {
@@ -282,14 +298,20 @@ func (s *Store) Approve(id, approver string, target CurrentTarget) (*ToolApprova
 	if err := a.verifyTarget(target); err != nil {
 		return nil, err
 	}
+	// Optimistic-concurrency (ADR-0034 D6): the reviewed catalog/registry revision must
+	// not have advanced between request and approval, even when the fingerprint is
+	// unchanged (an identical rediscovery bumps the revision). Enforced ONLY on the
+	// pending→active transition, never on the idempotent re-approve of an already-active
+	// grant (whose recorded revisions may legitimately trail an unrelated later ingest).
+	if a.revisionStale(target) {
+		return nil, mcperr.New(mcperr.ReasonToolApprovalStale, "tooltrust.approve", "reviewed catalog/registry revision advanced")
+	}
 	prior := a.clone()
 	a.Status = StatusActive
 	a.ApprovedBy = approver
 	a.ApprovedAt = now
-	// Record the revisions the GRANT (not the request) was reasoned about — the
-	// decision evidence at the moment trust was conferred.
-	a.CatalogRevision = target.CatalogRevision
-	a.ServerRevision = target.ServerRevision
+	// The recorded revisions stay the REVIEWED ones (they equal the current facts here,
+	// since revisionStale just proved no advance) — the decision evidence at review time.
 	if err := s.persistLocked(); err != nil {
 		*a = *prior // durable-before-effect: revert on persist failure
 		return nil, err
@@ -317,6 +339,22 @@ func (a *ToolApproval) verifyTarget(t CurrentTarget) error {
 		return mcperr.New(mcperr.ReasonToolNotApprovable, "tooltrust.approve", "tool not in an approvable state")
 	}
 	return nil
+}
+
+// revisionStale reports whether the catalog (or registry) revision the request was
+// reasoned about has advanced under the decision. A recorded revision of 0 means the
+// reviewer did not assert it, so it is not enforced. This is the optimistic-concurrency
+// half of the exact-target contract (the fingerprint is the capability half): an
+// identical rediscovery keeps the fingerprint but bumps the revision, and approving it
+// would confer trust on a snapshot the reviewer never saw.
+func (a *ToolApproval) revisionStale(t CurrentTarget) bool {
+	if a.CatalogRevision != 0 && a.CatalogRevision != t.CatalogRevision {
+		return true
+	}
+	if a.ServerRevision != 0 && a.ServerRevision != t.ServerRevision {
+		return true
+	}
+	return false
 }
 
 // Reject decides a pending request as rejected (terminal). It persists durably
@@ -522,10 +560,13 @@ func (s *Store) persistLocked() error {
 	return nil
 }
 
-// ensureCapacityLocked enforces the per-tenant non-terminal bound and the total
-// record bound, pruning the oldest terminal record to make room. It fails closed
-// (never grows past a bound) when nothing can be pruned.
-func (s *Store) ensureCapacityLocked(tenant string, now time.Time) error {
+// capacityCheckLocked enforces the per-tenant non-terminal bound and the total record
+// bound WITHOUT mutating: it returns the id of the oldest terminal record to prune when
+// the store is at the total cap (empty string when no prune is needed), or an error when
+// a bound is exceeded and nothing can be pruned. The caller applies the prune inside the
+// same persist transaction so a persistence failure can restore it — pruning here (as an
+// eager side effect) left an evicted record unrecoverable on a later persist failure.
+func (s *Store) capacityCheckLocked(tenant string, now time.Time) (pruneID string, err error) {
 	nonTerminal := 0
 	for _, a := range s.byID {
 		if a.Tenant == tenant && !a.effectiveTerminal(now) {
@@ -533,14 +574,13 @@ func (s *Store) ensureCapacityLocked(tenant string, now time.Time) error {
 		}
 	}
 	if nonTerminal >= s.maxPerTenant {
-		return mcperr.New(mcperr.ReasonAdminRangeExceeded, "tooltrust.request", "tenant approval capacity reached")
+		return "", mcperr.New(mcperr.ReasonAdminRangeExceeded, "tooltrust.request", "tenant approval capacity reached")
 	}
 	if len(s.byID) < s.maxRecords {
-		return nil
+		return "", nil
 	}
-	// At the total cap: prune the single oldest terminal record. A non-terminal
-	// record is never evicted (that would drop live trust); if none is prunable the
-	// request fails closed.
+	// At the total cap: pick the single oldest terminal record. A non-terminal record
+	// is never evicted (that would drop live trust); if none is prunable, fail closed.
 	var oldest *ToolApproval
 	for _, a := range s.byID {
 		if !a.effectiveTerminal(now) {
@@ -551,10 +591,9 @@ func (s *Store) ensureCapacityLocked(tenant string, now time.Time) error {
 		}
 	}
 	if oldest == nil {
-		return mcperr.New(mcperr.ReasonAdminRangeExceeded, "tooltrust.request", "approval store capacity reached")
+		return "", mcperr.New(mcperr.ReasonAdminRangeExceeded, "tooltrust.request", "approval store capacity reached")
 	}
-	delete(s.byID, oldest.ApprovalID)
-	return nil
+	return oldest.ApprovalID, nil
 }
 
 // effectiveTerminal reports whether the approval is terminal as of now, treating an

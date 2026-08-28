@@ -204,10 +204,18 @@ func (a *ToolApproval) activeAsOf(now time.Time) bool {
 	return true
 }
 
-// expiredAsOf reports whether an active approval has passed its expiry as of now. Used by the
+// pastExpiry reports whether the approval carries an expiry that has elapsed as of now,
+// REGARDLESS of status. A pending request whose TTL elapsed before an admin approved it is
+// past its expiry too — approving it would activate an already-expired grant, so the approve
+// path must consult this (not expiredAsOf, which is Active-only) before any transition.
+func (a *ToolApproval) pastExpiry(now time.Time) bool {
+	return a.ExpiresAt != nil && !now.Before(*a.ExpiresAt)
+}
+
+// expiredAsOf reports whether an ACTIVE approval has passed its expiry as of now. Used by the
 // lazy expiry sweep to transition Active → Expired deterministically under the injected clock.
 func (a *ToolApproval) expiredAsOf(now time.Time) bool {
-	return a.Status == StatusActive && a.ExpiresAt != nil && !now.Before(*a.ExpiresAt)
+	return a.Status == StatusActive && a.pastExpiry(now)
 }
 
 // MatchesTool reports whether this approval binds to the given tool identity AND exact

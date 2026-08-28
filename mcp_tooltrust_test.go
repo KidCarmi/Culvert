@@ -253,6 +253,37 @@ func TestToolTrust_Revoke_DemotesImmediately(t *testing.T) {
 	}
 }
 
+// ── Codex P1: revoking ONE grant must not demote a tool a second grant covers ──
+
+func TestToolTrust_Revoke_PreservesOtherActiveGrant(t *testing.T) {
+	resetInventory(t)
+	_, cat, sid, tool, fpHex := seedToolTrustInventory(t)
+	composeToolTrust(t, nil)
+	// Two independent active approvals for the SAME tool at the SAME fingerprint.
+	g1 := requestAndApprove(t, sid, tool, fpHex, cat.Current().Revision(), 0)
+	g2 := requestAndApprove(t, sid, tool, fpHex, cat.Current().Revision(), 0)
+	if g1.ApprovalID == g2.ApprovalID {
+		t.Fatal("expected two distinct approvals")
+	}
+	if eligibility(t, cat, sid, tool) != catalog.Usable {
+		t.Fatal("tool must be Usable with two active grants")
+	}
+	// Revoking one must leave the tool Usable — the other grant still covers it.
+	if _, err := mcpToolTrust.Revoke(g1.ApprovalID, "admin@corp", ttTenant, "rotate"); err != nil {
+		t.Fatalf("revoke g1: %v", err)
+	}
+	if eligibility(t, cat, sid, tool) != catalog.Usable {
+		t.Fatalf("revoking one of two grants must NOT demote the tool, got %s", eligibility(t, cat, sid, tool))
+	}
+	// Revoking the last grant withdraws trust.
+	if _, err := mcpToolTrust.Revoke(g2.ApprovalID, "admin@corp", ttTenant, "done"); err != nil {
+		t.Fatalf("revoke g2: %v", err)
+	}
+	if eligibility(t, cat, sid, tool) != catalog.Quarantined {
+		t.Fatalf("revoking the last grant must demote to Quarantined, got %s", eligibility(t, cat, sid, tool))
+	}
+}
+
 // ── expiry demotes at the preflight reconcile (Sec 9) ─────────────────────────
 
 func TestToolTrust_Expiry_DemotesAtReconcile(t *testing.T) {

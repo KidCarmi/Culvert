@@ -149,11 +149,13 @@ func (c *mcpToolTrustCoordinator) reconcile() {
 		return
 	}
 	now := c.now()
-	// 1. Expire due grants and withdraw their trust from the catalog.
+	// 1. Expire due grants and RE-DERIVE each affected tool. A tool is demoted only
+	//    when NO remaining active grant covers its current fingerprint — another active
+	//    approval (or a benign flap-back) may still legitimately keep it Usable.
 	expired, err := store.ExpireDue(now)
 	if err == nil {
 		for _, a := range expired {
-			_, _ = cat.Demote(catalog.ToolKey{Server: registry.ServerID(a.ServerID), Name: a.ToolName})
+			c.rederiveTool(store, reg, cat, a.ServerID, a.ToolName, now)
 		}
 	}
 	// 2. Re-affirm every active grant against the CURRENT observation. A grant whose
@@ -369,14 +371,47 @@ func (c *mcpToolTrustCoordinator) Revoke(id, actor, tenant, reason string) (*too
 	if err != nil {
 		return nil, err
 	}
-	_, cat := mcpInventory.sharedInventory()
-	if cat != nil {
-		// Demote is the withdrawal; a stale CAS is retried inside Demote and never fails
-		// open. If it somehow does not converge, the next reconcile re-derives (the grant
-		// is durably revoked, so it will never be re-promoted).
-		_, _ = cat.Demote(catalog.ToolKey{Server: registry.ServerID(revoked.ServerID), Name: revoked.ToolName})
+	// RE-DERIVE the tool rather than blindly demoting: another active approval (or a
+	// pending record that was the revoke target) may still leave the tool legitimately
+	// covered, and ordinary Shadow evaluation does not reconcile per call, so a wrong
+	// demotion would block a still-trusted tool until the next read/preflight.
+	reg, cat := mcpInventory.sharedInventory()
+	if reg != nil && cat != nil {
+		c.rederiveTool(store, reg, cat, revoked.ServerID, revoked.ToolName, c.now())
 	}
 	return revoked, nil
+}
+
+// rederiveTool re-derives ONE tool's catalog eligibility from the durable store: it
+// promotes when some active, unexpired, shadow-purpose approval binds the tool's CURRENT
+// fingerprint on a usable, correctly-owned server, and demotes otherwise. It is
+// fail-closed and idempotent (Promote/Demote CAS), so it only ever reflects durable
+// trust — used by revoke and the expiry sweep so withdrawing one grant never drops a
+// tool a different grant still covers.
+func (c *mcpToolTrustCoordinator) rederiveTool(store *tooltrust.Store, reg *registry.Registry, cat *catalog.Catalog, serverID, toolName string, now time.Time) {
+	key := catalog.ToolKey{Server: registry.ServerID(serverID), Name: toolName}
+	rec, ok := cat.Current().Get(key)
+	if !ok {
+		return
+	}
+	srv, sok := reg.Current().Get(registry.ServerID(serverID))
+	sum := rec.Fingerprint.Sum()
+	covered := false
+	if sok && srv.Usable() {
+		for _, a := range store.ActiveApprovals(now) {
+			if a.ServerID == serverID && a.ToolName == toolName &&
+				string(srv.OwnerScope) == a.Tenant &&
+				a.MatchesTool(a.Tenant, serverID, toolName, tooltrust.FingerprintDigest(sum), rec.Fingerprint.FormatVersion) {
+				covered = true
+				break
+			}
+		}
+	}
+	if covered {
+		_, _ = cat.Promote(key, rec.Fingerprint)
+	} else {
+		_, _ = cat.Demote(key)
+	}
 }
 
 // Get returns a tenant-scoped approval copy.
