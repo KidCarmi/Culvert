@@ -4381,6 +4381,8 @@ Firefox (all platforms):
           <div style="display:flex;gap:8px;align-items:center">
             <input type="text" class="input" style="width:200px" id="audit-filter" placeholder="Filter (name, rule id, actor…)" data-input="renderAuditLog">
             <button class="btn ghost sm" data-click="loadAuditLog"><svg class="ico" aria-hidden="true"><use href="#i-refresh"/></svg> Refresh</button>
+            <button class="btn ghost sm" data-click="exportAuditLog" data-arg="csv" title="Download the persisted audit history as CSV"><svg class="ico" aria-hidden="true"><use href="#i-download"/></svg> CSV</button>
+            <button class="btn ghost sm" data-click="exportAuditLog" data-arg="json" title="Download the persisted audit history as JSON"><svg class="ico" aria-hidden="true"><use href="#i-download"/></svg> JSON</button>
           </div>
         </div>
         <div class="tbl-wrap">
@@ -5665,6 +5667,7 @@ document.addEventListener('click', e => {
 
     // ── Audit / CA management ──
     case 'loadAuditLog':      loadAuditLog(); break;
+    case 'exportAuditLog':    exportAuditLog(arg); break;
     case 'toggleAuditDiff':   toggleAuditDiff(+arg); break;
     case 'loadCAMgmt':        loadCAMgmt(); break;
     case 'downloadCA':        downloadCA(); break;
@@ -10419,6 +10422,19 @@ function exportLogs(format) {
   a.click();
   document.body.removeChild(a);
   toast('Downloading logs as ' + format.toUpperCase(), 'success');
+}
+
+// exportAuditLog downloads the persisted audit history (not just the 500-entry
+// in-memory ring the panel renders from) as CSV/JSON, same server-streamed
+// attachment pattern as exportLogs — no client-side reassembly needed.
+function exportAuditLog(format) {
+  const a = document.createElement('a');
+  a.href = '/api/audit?format=' + format + '&source=file';
+  a.download = '';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  toast('Downloading audit log as ' + format.toUpperCase(), 'success');
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
