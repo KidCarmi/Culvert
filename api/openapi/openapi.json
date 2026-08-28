@@ -1134,9 +1134,14 @@
       },
       "DecryptionProfileFull": {
         "additionalProperties": false,
-        "description": "A TLS-inspection decryption profile.",
+        "description": "A TLS-inspection decryption profile. The empty string always means \"inherit the engine/rule default\"; empty enum fields are omitted from responses. `inspectHttp2` is TRI-STATE — absent/null = inherit, true = native HTTP/2 inspection, false = force strip; clients must never collapse the absent state into false. `certVerification` deliberately has NO \"permissive\" value (retired; legacy persisted values are fail-closed-migrated to \"strict\" server-side).",
         "properties": {
           "certVerification": {
+            "enum": [
+              "",
+              "strict",
+              "skip"
+            ],
             "type": "string"
           },
           "created_at": {
@@ -1150,21 +1155,42 @@
             "type": "boolean"
           },
           "maxTlsVersion": {
+            "enum": [
+              "",
+              "1.2",
+              "1.3"
+            ],
             "type": "string"
           },
           "minTlsVersion": {
+            "enum": [
+              "",
+              "1.2",
+              "1.3"
+            ],
             "type": "string"
           },
           "name": {
             "type": "string"
           },
           "onInspectError": {
+            "enum": [
+              "",
+              "fail-close",
+              "fail-open"
+            ],
             "type": "string"
           },
           "onUnsupported": {
+            "enum": [
+              "",
+              "fail-close",
+              "fail-open"
+            ],
             "type": "string"
           },
           "stallTimeoutSecs": {
+            "description": "0 = inherit the engine default; otherwise clamped to [5, 3600] seconds by the backend.",
             "type": "integer"
           },
           "updated_at": {
