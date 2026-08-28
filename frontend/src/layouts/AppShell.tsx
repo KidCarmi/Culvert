@@ -78,6 +78,11 @@ const NAV: readonly NavSection[] = [
         minRole: "viewer",
       },
       { label: "Policy Tester", to: "/policies/tester", minRole: "viewer" },
+      {
+        label: "Policy Learning",
+        to: "/policies/learning",
+        minRole: "viewer",
+      },
     ],
   },
   {

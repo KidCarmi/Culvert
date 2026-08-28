@@ -20,6 +20,7 @@ import { GovernancePage } from "../features/governance/GovernancePage";
 import { AccessRulesPage } from "../features/policy/AccessRulesPage";
 import { AuthRulesPage } from "../features/policy/AuthRulesPage";
 import { TesterPage } from "../features/policy/TesterPage";
+import { PolicyLearningPage } from "../features/learning/PolicyLearningPage";
 
 function NotFoundPage(): JSX.Element {
   return (
@@ -50,6 +51,7 @@ export function createAppRouter(): ReturnType<typeof createBrowserRouter> {
             element: <AuthRulesPage />,
           },
           { path: "policies/tester", element: <TesterPage /> },
+          { path: "policies/learning", element: <PolicyLearningPage /> },
           { path: "diagnostics", element: <DiagnosticsPage /> },
           { path: "governance", element: <GovernancePage /> },
           {

@@ -1,0 +1,95 @@
+/* 2C.4 — Policy Learning surface styles. */
+.calloutSpace {
+  margin-block: var(--space-3, 0.75rem);
+  display: grid;
+  gap: 0.5rem;
+}
+
+.calloutAction {
+  margin-top: 0.5rem;
+  display: flex;
+  gap: 0.5rem;
+}
+
+.factLine {
+  font-size: 0.85rem;
+  color: var(--color-text-secondary, #667);
+  margin-block: 0.25rem;
+}
+
+.factGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr));
+  gap: 0.4rem 1rem;
+  margin-block: 0.5rem;
+}
+
+.factGrid dt {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--color-text-secondary, #667);
+}
+
+.factGrid dd {
+  margin: 0;
+}
+
+.sessionFacts {
+  margin-block: 0.5rem;
+}
+
+.sessionList {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: 0.75rem;
+}
+
+.sessionList > li {
+  border-top: 1px solid var(--color-border, #dde);
+  padding-top: 0.5rem;
+}
+
+.guardrailEditor {
+  margin-block: 0.5rem;
+  display: grid;
+  gap: 0.25rem;
+}
+
+.recList {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: 1rem;
+}
+
+.recCard {
+  border: 1px solid var(--color-border, #dde);
+  border-radius: 0.5rem;
+  padding: 0.75rem;
+}
+
+.recHeader {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.recMeta {
+  font-size: 0.85rem;
+  color: var(--color-text-secondary, #667);
+  margin-block: 0.25rem;
+}
+
+.recActions {
+  margin-top: 0.5rem;
+  display: flex;
+  gap: 0.5rem;
+}
+
+.hostList {
+  font-size: 0.85rem;
+  margin-block: 0.25rem;
+}
