@@ -626,6 +626,14 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 >   constructible through supported public APIs by design (disarm refuses
 >   while dirty), so its posture is proven at component level against the
 >   decoded real contract — recorded, not papered over.
+> - **Harness debt addendum (2B.7a/b)**: two more shared-`/data` premises
+>   are now API-established by `e2e-smoke.sh` before seeding — the AUTH
+>   log-store ENABLEMENT (boot state inherits the previous run's
+>   `admin_settings.json`) and the disk-guard threshold
+>   (`criticalDiskPct=99`: the dev machine's session disk allowance makes
+>   statvfs read ~91% used permanently, so the default 90% threshold made
+>   the LogGuard — correctly — engage emergency minimal logging and clean
+>   retained history mid-suite, destroying the seeded evidence).
 
 ### FE-6 — Cluster, identity, certificates, settings, releases, support, MCP, decryption
 - **Objective**: FE-V27..V30, FE-V33, FE-V35, FE-V36 (settings decomposed per IA §5),
