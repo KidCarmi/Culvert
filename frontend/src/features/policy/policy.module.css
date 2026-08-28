@@ -276,3 +276,15 @@
   flex-wrap: wrap;
   gap: var(--sp-2);
 }
+
+.draftBarActions {
+  margin-top: var(--sp-2);
+  display: flex;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.sharedActorWarning {
+  margin: var(--sp-2) 0 0;
+  font-weight: 600;
+}

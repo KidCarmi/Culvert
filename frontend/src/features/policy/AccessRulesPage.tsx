@@ -49,6 +49,7 @@ import { hasRole } from "../../auth/rbac";
 import { serverErrorText, unknownOutcome } from "../../shared/mutationOutcome";
 import { useDirtyGuard } from "../../shared/dirtyGuard";
 import { WhereUsed } from "./WhereUsed";
+import { DraftBar } from "./DraftBar";
 import { RuleEditor } from "./RuleEditor";
 import type { RuleEditorMode } from "./RuleEditor";
 import { useRulebaseWrites } from "./useRulebaseWrites";
@@ -214,6 +215,7 @@ export function AccessRulesPage(): JSX.Element {
   const snap: PolicySnapshot | undefined = q.data;
   const { state } = useAuth();
   const canWrite = hasRole(state.role ?? "viewer", "operator");
+  const isAdmin = hasRole(state.role ?? "viewer", "admin");
   const [filter, setFilter] = useState("");
   const [openId, setOpenId] = useState<string | null>(null);
   const [searchParams] = useSearchParams();
@@ -469,20 +471,19 @@ export function AccessRulesPage(): JSX.Element {
         </div>
       )}
 
-      {snap !== undefined && draft && (
-        <div className={styles.calloutSpace}>
-          <Callout variant="warning" title="Viewing Policy Draft candidate">
-            These rules are staged and are not the running enforcement policy
-            until the draft is committed.
-          </Callout>
-        </div>
-      )}
-      {snap !== undefined && !draft && (
-        <div className={styles.calloutSpace}>
-          <Callout variant="info" title="Running rulebase">
-            This is the effective rulebase currently enforcing traffic.
-          </Callout>
-        </div>
+      {snap !== undefined && (
+        <DraftBar
+          draft={rb.draftQ.data}
+          draftError={rb.draftQ.isError}
+          snapshotIsDraft={draft}
+          isAdmin={isAdmin}
+          canWrite={canWrite}
+          currentUser={state.user}
+          blocked={blocked}
+          owner={rb.owner}
+          refetchAll={rb.refetchAll}
+          latchUnknown={rb.latchUnknown}
+        />
       )}
       {snap !== undefined && snap.unknownKindCount > 0 && (
         <div className={styles.calloutSpace}>
