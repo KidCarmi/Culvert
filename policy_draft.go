@@ -818,24 +818,13 @@ func effectivePolicyVersion() (version int64, updatedAt string) {
 	return policyStore.policyVersion()
 }
 
-// afterPolicyWrite finalizes a successful policy mutation. Live-write mode
-// persists running and writes a per-edit config version (today's behavior).
-// Draft mode persists the candidate and SKIPS config-versioning — the version
-// is captured once at commit, so per-edit snapshots of the unchanged running
-// config would be misleading no-ops.
-func afterPolicyWrite(r *http.Request, action string) {
-	if policyDraftEngaged() {
-		// A no-op edit (candidate == running) auto-discards the draft rather
-		// than leaving a zero-diff pending draft; otherwise persist the change.
-		if policyDraft.reconcile() {
-			return
-		}
-		policyDraft.persist()
-		return
-	}
-	policyStore.Save()
-	saveConfigVersion(sessionAdmin(r), action)
-}
+// afterPolicyWrite is RETIRED (2B.0b): ordinary policy mutations run their
+// persist durable-or-nothing INSIDE fencedMutate's critical section (see
+// policy_mutation.go), and the handler-side finalize —
+// finalizeFencedPolicyWrite — only records the per-edit config version for
+// live-mode writes. Draft mode still skips config-versioning (the version is
+// captured once at commit), and the no-op auto-discard (reconcile contract)
+// now runs inside the same critical section as the mutation it reconciles.
 
 // ── Commit-time shadow detection (G4, advisory) ──────────────────────────────
 

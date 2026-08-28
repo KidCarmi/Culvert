@@ -35,9 +35,35 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"os"
+
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 )
+
+// finalizeFencedPolicyWrite records the per-edit config version for a LIVE
+// mutation (the persist itself already happened inside fencedMutate).
+// Draft-staged mutations skip it — the config version is captured once at
+// commit, exactly as before.
+func finalizeFencedPolicyWrite(r *http.Request, action string, res fencedMutateResult) {
+	if !res.staged {
+		saveConfigVersion(sessionAdmin(r), action)
+	}
+}
+
+// writePolicyPersistFailure maps a durable-persistence failure (the mutation
+// was rolled back; nothing durable changed) to a 500 with the truthful cause.
+func writePolicyPersistFailure(w http.ResponseWriter, err error) {
+	http.Error(w, err.Error(), http.StatusInternalServerError)
+}
+
+// persistRunningPolicy is the live-mode durable persist, swappable ONLY for
+// fault injection in tests (the ErrReplacedNotSynced branch cannot be induced
+// through the real filesystem deterministically). Production behavior is
+// always policyStore.SaveErr.
+var persistRunningPolicy = func() error { return policyStore.SaveErr() }
 
 // policyVersionConflictError is the structured optimistic-concurrency failure
 // returned by the atomic fence: the client's asserted generation no longer
@@ -64,32 +90,91 @@ func writePolicyVersionConflictError(w http.ResponseWriter, e *policyVersionConf
 	})
 }
 
+// fencedMutateResult reports one ordinary policy mutation's outcome.
+type fencedMutateResult struct {
+	// conflict is non-nil when the ?ifVersion= assertion failed — the
+	// mutation never ran.
+	conflict *policyVersionConflictError
+	// ok reports whether the store mutation itself happened (false = target
+	// not found / invalid permutation; the handler maps it to its 4xx).
+	ok bool
+	// staged reports which durable domain the mutation landed in: true = the
+	// shared draft candidate (no per-edit config version), false = running
+	// policy (the handler writes the config version).
+	staged bool
+	// err is non-nil when durable persistence failed BEFORE publication — the
+	// semantic mutation was rolled back and nothing durable changed. The
+	// handler must fail the request.
+	err error
+}
+
 // fencedMutate runs ONE ordinary policy mutation against the correct write
 // target (running store, or the shared draft candidate — opening the draft on
-// the first write) with the OPTIONAL expected-version fence evaluated
-// atomically in the same critical section as the mutation.
+// the first write) with the OPTIONAL expected-version fence AND the durable
+// persist evaluated atomically in the same critical section as the mutation
+// (2B.0a fencing + 2B.0b durable-or-nothing).
 //
-//   - ifVersion == nil: no fence — legacy behavior, the mutation always
-//     proceeds (still serialized, still correctly draft-targeted).
+//   - ifVersion == nil: no fence — the mutation always proceeds (still
+//     serialized, still correctly draft-targeted, still durable-or-nothing).
 //   - ifVersion != nil: the assertion is compared against the EFFECTIVE
 //     generation (candidate while the draft is engaged, else running) under
 //     c.mu. On mismatch the mutation NEVER runs and the structured conflict is
 //     returned. On match, the draft fork (when Require Commit is armed and no
-//     draft exists) and the mutation run before c.mu is released, so no other
-//     fenced writer can interleave between check and write.
+//     draft exists), the mutation, and the persist run before c.mu is
+//     released, so no other fenced writer can interleave between check and
+//     write.
+//
+// Durability contract (§5/§6, mirroring the commitActivate doctrine):
+//
+//   - LIVE success ⇒ the running mutation is durably persisted
+//     (PolicyStore.SaveErr, atomic temp+fsync+rename+dir-fsync).
+//   - DRAFT success ⇒ the candidate mutation is durably persisted to
+//     policy_draft.json, so a restart recovers the staged edit
+//     (persistLocked; in-memory mode has no durable domain by configuration).
+//   - Pre-replacement persist failure ⇒ the semantic mutation is ROLLED BACK
+//     (memory restored to the pre-mutation snapshot; a fork opened by this
+//     call is discarded entirely) and err is returned — the durable file
+//     still holds the previous truth, so memory and disk agree that the
+//     mutation did not happen.
+//   - ErrReplacedNotSynced (replacement happened, parent-dir fsync failed) ⇒
+//     the file already CARRIES the new content; rolling memory back would
+//     contradict the visible durable file, so the mutation stands as
+//     SUCCESS with a logged degradation (the CHAOS-45 write-failure observer
+//     has already surfaced the storage fault). The draft path inherits this
+//     from persistSnapshotLocked; the live path applies it explicitly.
+//
+// The rollback uses ReplaceAll on the pre-mutation snapshot — the same
+// mechanism commitActivate uses to revert a failed activation — so the
+// failure path can never invent a third state (it bumps the generation,
+// which costs at most a conservative fence conflict).
 //
 // mutate runs with c.mu held and receives the target store; it must confine
 // itself to store operations (lock order c.mu → PolicyStore.mu, the
-// stageTarget convention) and report whether it actually mutated. When the
-// mutation reports false after this call opened the draft fork, the fork is
-// discarded — an untouched forked candidate must not linger as an "active"
-// zero-diff draft.
+// stageTarget convention) and report whether it actually mutated.
 //
 // Ordinary handlers hold beginPolicyWrite (writeGate.RLock) around this call
 // plus their finalize sequence, exactly as before: commit/revert still take
 // the gate exclusively, so a commit cannot snapshot-and-clear between this
 // mutation and its finalize.
-func (c *policyDraftCoordinator) fencedMutate(actor string, ifVersion *int64, mutate func(target *PolicyStore) bool) (conflict *policyVersionConflictError, ok bool) {
+func (c *policyDraftCoordinator) fencedMutate(actor string, ifVersion *int64, mutate func(target *PolicyStore) bool) fencedMutateResult {
+	var (
+		removePath   string
+		saveMetaBump bool
+	)
+	res := c.fencedMutateLocked(actor, ifVersion, mutate, &removePath, &saveMetaBump)
+	// Post-critical-section housekeeping for a no-op reconcile retirement
+	// (matches clear()/reconcile(): the file removal and .meta refresh happen
+	// off the coordinator lock).
+	if saveMetaBump {
+		policyStore.saveMeta()
+	}
+	if removePath != "" {
+		_ = os.Remove(removePath)
+	}
+	return res
+}
+
+func (c *policyDraftCoordinator) fencedMutateLocked(actor string, ifVersion *int64, mutate func(target *PolicyStore) bool, removePath *string, saveMetaBump *bool) fencedMutateResult {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -104,26 +189,71 @@ func (c *policyDraftCoordinator) fencedMutate(actor string, ifVersion *int64, mu
 		cur, _ = policyStore.policyVersion()
 	}
 	if ifVersion != nil && *ifVersion != cur {
-		return &policyVersionConflictError{Current: cur, Asserted: *ifVersion}, false
+		return fencedMutateResult{conflict: &policyVersionConflictError{Current: cur, Asserted: *ifVersion}}
 	}
 
-	target := policyStore
-	opened := false
-	if requireCommitEnabled() {
-		if !c.state.Active {
-			c.openDraftLocked(actor)
-			opened = true
+	staged := requireCommitEnabled()
+	if !staged {
+		// ── LIVE mode: mutate running, persist durable-or-nothing. ──
+		prevRunning := policyStore.List()
+		if !mutate(policyStore) {
+			return fencedMutateResult{}
 		}
-		target = c.cand
+		if err := persistRunningPolicy(); err != nil {
+			if errors.Is(err, fileutil.ErrReplacedNotSynced) {
+				// Post-rename failure: the policy file already carries the new
+				// content (commit durability doctrine — see commitActivate).
+				logWarnf("Policy: mutation persisted but parent-dir sync failed: %v", err)
+			} else {
+				// Pre-replacement failure: disk holds the previous truth —
+				// restore memory to match it and fail the request.
+				policyStore.ReplaceAll(prevRunning)
+				return fencedMutateResult{ok: true, err: fmt.Errorf("running-policy persist failed — the change was rolled back, nothing durable changed: %w", err)}
+			}
+		}
+		return fencedMutateResult{ok: true}
 	}
-	ok = mutate(target)
-	if !ok && opened {
-		// The fork was opened for a mutation that did not happen (rule not
-		// found, invalid permutation). Nothing was persisted for it yet, so
-		// discarding is purely in-memory — equivalent to the legacy handlers'
-		// post-failure reconcile(), but without ever exposing the zero-diff
-		// draft outside this critical section.
-		_ = c.clearLocked()
+
+	// ── DRAFT mode: mutate the shared candidate, persist durable-or-nothing. ──
+	opened := false
+	var prevCand []PolicyRule
+	if !c.state.Active {
+		c.openDraftLocked(actor)
+		opened = true
+	} else {
+		prevCand = c.cand.List()
 	}
-	return nil, ok
+	if !mutate(c.cand) {
+		if opened {
+			// The fork was opened for a mutation that did not happen (rule not
+			// found, invalid permutation). Nothing was persisted for it, so
+			// discarding is purely in-memory.
+			_ = c.clearLocked()
+		}
+		return fencedMutateResult{staged: true}
+	}
+	// No-op auto-discard (the reconcile contract): a staged edit that leaves
+	// the candidate content-identical to running retires the draft instead of
+	// leaving a zero-diff "active" draft. Runs inside the same critical
+	// section now; the file removal + .meta refresh happen after unlock.
+	if sameRuleSet(policyStore.List(), c.cand.List()) {
+		candVer, _ := c.cand.policyVersion()
+		*removePath = c.clearLocked()
+		policyStore.ensureVersionAbove(candVer)
+		*saveMetaBump = true
+		return fencedMutateResult{ok: true, staged: true}
+	}
+	if err := c.persistLocked(); err != nil {
+		// persistSnapshotLocked already absorbs ErrReplacedNotSynced (the file
+		// carries the new candidate — that IS durable), so any error here is a
+		// pre-replacement failure: the durable domain still holds the previous
+		// truth. Restore memory to match it.
+		if opened {
+			_ = c.clearLocked()
+		} else {
+			c.cand.ReplaceAll(prevCand)
+		}
+		return fencedMutateResult{ok: true, staged: true, err: fmt.Errorf("%v: %w", err, errDraftPersistFailed)}
+	}
+	return fencedMutateResult{ok: true, staged: true}
 }
