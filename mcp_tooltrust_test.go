@@ -286,6 +286,38 @@ func TestToolTrust_Revoke_PreservesOtherActiveGrant(t *testing.T) {
 	}
 }
 
+// ── Codex P1: revoke concurrent with reconcile ends demoted (TOCTOU) ──────────
+
+func TestToolTrust_Revoke_ConcurrentReconcileEndsDemoted(t *testing.T) {
+	resetInventory(t)
+	_, cat, sid, tool, fpHex := seedToolTrustInventory(t)
+	composeToolTrust(t, nil)
+	g := requestAndApprove(t, sid, tool, fpHex, cat.Current().Revision(), 0)
+	if eligibility(t, cat, sid, tool) != catalog.Usable {
+		t.Fatal("tool must be Usable after approval")
+	}
+	// Race a revoke against a reconcile loop. deriveMu serializes the revoke's demote
+	// with reconcile's promote, so a stale ActiveApprovals snapshot can never re-promote
+	// a just-revoked tool. The final state must be Quarantined (revoked trust withdrawn).
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, _ = mcpToolTrust.Revoke(g.ApprovalID, "admin@corp", ttTenant, "rotate")
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			mcpToolTrust.reconcile()
+		}
+	}()
+	wg.Wait()
+	mcpToolTrust.reconcile() // settle
+	if eligibility(t, cat, sid, tool) != catalog.Quarantined {
+		t.Fatalf("a revoked tool must end Quarantined, not %s (TOCTOU re-promotion)", eligibility(t, cat, sid, tool))
+	}
+}
+
 // ── expiry demotes at the preflight reconcile (Sec 9) ─────────────────────────
 
 func TestToolTrust_Expiry_DemotesAtReconcile(t *testing.T) {

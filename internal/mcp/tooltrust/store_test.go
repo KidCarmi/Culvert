@@ -1,6 +1,7 @@
 package tooltrust
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -536,6 +537,75 @@ func TestLoad_TrailingDataFailsClosed(t *testing.T) {
 		if err := s.Load(); err == nil {
 			t.Fatalf("[%s] trailing data after the envelope must fail closed", name)
 		}
+	}
+}
+
+func TestLoad_ActiveWithoutApprovalEvidenceFailsClosed(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "approvals.json")
+	// A record whose status was tampered to Active but carries NO approval evidence.
+	a := &ToolApproval{
+		SchemaVersion: SchemaVersion, ApprovalID: "a", Tenant: "t", ServerID: "s", ToolName: "n",
+		FingerprintFormatVersion: 1, Purpose: PurposeShadowEvaluation, Status: StatusActive,
+		RequestedBy: "op", RequestedAt: time.Unix(1000, 0),
+		// ApprovedBy empty, ApprovedAt zero — must be rejected.
+	}
+	raw, _ := json.Marshal(persistedStore{SchemaVersion: SchemaVersion, Approvals: []*ToolApproval{a}})
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, _ := NewStore(Config{Path: path, Clock: clk.now})
+	if err := s.Load(); err == nil {
+		t.Fatal("an active record without recorded approval evidence must fail closed")
+	}
+}
+
+func TestLoad_UnknownStatusFailsClosed(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "approvals.json")
+	a := &ToolApproval{
+		SchemaVersion: SchemaVersion, ApprovalID: "a", Tenant: "t", ServerID: "s", ToolName: "n",
+		FingerprintFormatVersion: 1, Purpose: PurposeShadowEvaluation, Status: Status(99),
+		RequestedBy: "op", RequestedAt: time.Unix(1000, 0),
+	}
+	raw, _ := json.Marshal(persistedStore{SchemaVersion: SchemaVersion, Approvals: []*ToolApproval{a}})
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, _ := NewStore(Config{Path: path, Clock: clk.now})
+	if err := s.Load(); err == nil {
+		t.Fatal("an unknown status must fail closed")
+	}
+}
+
+func TestCreate_ExpiredPendingRequestsFreeCapacity(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	dir := t.TempDir()
+	s, err := NewStore(Config{Path: filepath.Join(dir, "approvals.json"), Clock: clk.now, MaxRecords: 64, MaxPerTenant: 2})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := s.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	exp := clk.t.Add(time.Minute)
+	for i := 0; i < 2; i++ {
+		in := goodRequest()
+		in.ToolName = "tool-" + string(rune('a'+i))
+		in.ExpiresAt = &exp
+		if _, err := s.CreateRequest(in); err != nil {
+			t.Fatalf("create %d: %v", i, err)
+		}
+	}
+	// At the per-tenant cap with two pending. Advance past their TTL: they must no longer
+	// count against capacity, so a fresh request succeeds instead of failing forever.
+	clk.t = exp.Add(time.Second)
+	in := goodRequest()
+	in.ToolName = "fresh"
+	if _, err := s.CreateRequest(in); err != nil {
+		t.Fatalf("abandoned expired pending requests must free capacity, got %v", err)
 	}
 }
 

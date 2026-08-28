@@ -55,6 +55,13 @@ type mcpToolTrustCoordinator struct {
 	// expiry in reconcile + annotateTool so a test can advance it deterministically;
 	// production leaves it as time.Now.
 	nowFn func() time.Time
+	// deriveMu serializes every path that reads the durable grants and then mutates the
+	// catalog projection (reconcile, ApproveShadow's promote, Revoke's demote). Without
+	// it a reconcile that snapshotted ActiveApprovals just before a concurrent revoke
+	// could promote a just-revoked tool after the revoke demoted it (a TOCTOU that left
+	// the tool Usable until the next reconcile). It is an OUTER lock: taken before any
+	// store/catalog lock, never from under one.
+	deriveMu sync.Mutex
 }
 
 // now returns the coordinator clock (time.Now when unset). It reads nowFn under the
@@ -181,6 +188,8 @@ func (c *mcpToolTrustCoordinator) composedStatus() (composed bool, reason string
 // and cheap (O(active approvals)). Because it only ever demotes-expired and
 // promotes-exact-match, calling it from a read path can never widen usability.
 func (c *mcpToolTrustCoordinator) reconcile() {
+	c.deriveMu.Lock()
+	defer c.deriveMu.Unlock()
 	store, err := c.getStore()
 	if err != nil {
 		return
@@ -334,6 +343,10 @@ func (c *mcpToolTrustCoordinator) ApproveShadow(id, approver, tenant string) (*t
 	if err != nil {
 		return nil, err
 	}
+	// Serialize the approve+promote with reconcile/revoke so the durable transition and
+	// the catalog promotion are one critical section (no interleaving demote/promote).
+	c.deriveMu.Lock()
+	defer c.deriveMu.Unlock()
 	ti := c.loadTarget(existing.ServerID, existing.ToolName)
 	granted, err := store.Approve(id, approver, ti.target)
 	if err != nil {
@@ -388,6 +401,10 @@ func (c *mcpToolTrustCoordinator) Revoke(id, actor, tenant, reason string) (*too
 	if err != nil {
 		return nil, err
 	}
+	// Serialize the revoke+demote with reconcile/approve so a concurrent reconcile cannot
+	// promote this tool from a pre-revoke ActiveApprovals snapshot after we demote it.
+	c.deriveMu.Lock()
+	defer c.deriveMu.Unlock()
 	revoked, err := store.Revoke(id, actor, tenant, reason)
 	if err != nil {
 		return nil, err

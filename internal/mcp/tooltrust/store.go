@@ -480,7 +480,9 @@ func (s *Store) ExpireDue(now time.Time) ([]*ToolApproval, error) {
 	var priors []*ToolApproval
 	var targets []*ToolApproval
 	for _, a := range s.byID {
-		if a.expiredAsOf(now) {
+		// Sweep ANY non-terminal record past its expiry — pending as well as active — to
+		// Expired, so abandoned short-lived requests do not hold tenant/global capacity.
+		if !a.Status.terminal() && a.pastExpiry(now) {
 			priors = append(priors, a.clone())
 			targets = append(targets, a)
 		}
@@ -646,14 +648,15 @@ func (s *Store) capacityCheckLocked(tenant string, now time.Time) (pruneID strin
 	return oldest.ApprovalID, nil
 }
 
-// effectiveTerminal reports whether the approval is terminal as of now, treating an
-// active-but-expired grant as terminal (it will be swept to Expired) for capacity
-// accounting.
+// effectiveTerminal reports whether the approval is terminal as of now, treating ANY
+// past-expiry record (pending as well as active) as terminal for capacity accounting —
+// an abandoned short-lived request must not permanently hold a tenant/global slot until
+// an admin manually rejects it.
 func (a *ToolApproval) effectiveTerminal(now time.Time) bool {
 	if a.Status.terminal() {
 		return true
 	}
-	return a.expiredAsOf(now)
+	return a.pastExpiry(now)
 }
 
 // --- request validation ---------------------------------------------------
@@ -727,11 +730,50 @@ func (a *ToolApproval) validateStored() error {
 	if a.Purpose != PurposeShadowEvaluation {
 		return mcperr.New(mcperr.ReasonConfigInvalid, "tooltrust.load", "record carries a non-issuable purpose")
 	}
-	if a.Status == StatusUnset {
-		return mcperr.New(mcperr.ReasonConfigInvalid, "tooltrust.load", "record has no status")
-	}
 	if a.freeTextOverBound() {
 		return mcperr.New(mcperr.ReasonConfigInvalid, "tooltrust.load", "record free-text field exceeds byte bound")
+	}
+	if err := a.validateStatusLifecycle(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateStatusLifecycle enforces the per-status decision-evidence invariants a
+// legitimately-persisted record always satisfies, so a corrupt or hand-edited file
+// (e.g. a pending record's numeric status flipped to Active) cannot materialize an
+// active grant with NO recorded human approval. The status must be a known enum, and:
+//
+//   - Active   ⇒ an approver + approval time (a grant was consciously conferred);
+//   - Rejected ⇒ an actor + decision time;
+//   - Revoked  ⇒ a revoker + revocation time;
+//   - Pending  ⇒ no decision fields yet; Expired ⇒ no decider required (automatic).
+//
+// Any violation fails the whole Load closed (recovery is fail-closed, never
+// fail-open into an unapproved active grant).
+func (a *ToolApproval) validateStatusLifecycle() error {
+	bad := func(detail string) error {
+		return mcperr.New(mcperr.ReasonConfigInvalid, "tooltrust.load", detail)
+	}
+	switch a.Status {
+	case StatusPending:
+		return nil
+	case StatusActive:
+		if a.ApprovedBy == "" || a.ApprovedAt.IsZero() {
+			return bad("active record without recorded approval evidence")
+		}
+	case StatusRejected:
+		if a.ApprovedBy == "" || a.ApprovedAt.IsZero() {
+			return bad("rejected record without recorded decision evidence")
+		}
+	case StatusRevoked:
+		if a.RevokedBy == "" || a.RevokedAt == nil {
+			return bad("revoked record without recorded revocation evidence")
+		}
+	case StatusExpired:
+		return nil // automatic transition; no decider required
+	default:
+		return bad("record has an unknown status")
 	}
 	return nil
 }
