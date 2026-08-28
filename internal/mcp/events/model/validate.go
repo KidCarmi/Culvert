@@ -112,11 +112,34 @@ const (
 
 	shadowOutWouldExecute        = "would_execute"
 	shadowOutWouldFailInspection = "would_fail_inspection"
+	shadowOutWouldFailStale      = "would_fail_stale_decision"
+	shadowOutRequireApproval     = "would_require_approval"
+	shadowOutRequireConfirm      = "would_require_confirmation"
 	// gosec G101 matches a credential-like identifier; these are enum TOKENS, so the
 	// names deliberately avoid the "credential" pattern (repo gosec convention).
 	shadowOutWouldFailCredReady = "would_fail_credential_readiness"
 	shadowPlanInvalid           = "credential_plan_invalid"
 )
+
+// Override is the durable, LEAF-SAFE projection of the policy action class: the producer
+// sets ShadowOverride = !action.IsAllowClass() (shadow_evaluator.decide). It is the ONLY
+// action-class fact the event pipeline carries — the leaf model/events packages deliberately
+// do NOT import the policy action taxonomy (the same discipline rollout follows), so the
+// Action STRING↔class binding stays owned by the producer that maps policy.Action → class.
+// These two sets pin the Outcome→Override consistency that IS expressible in the leaf: an
+// outcome reachable ONLY through the producer's allow-class path can never carry a restrictive
+// Override, and an outcome emitted ONLY by a restrictive policy class can never carry a
+// permissive one (SHADOW-EVIDENCE-ROUTING-1, Codex P2 PR #1235).
+var shadowAllowClassOnlyOutcomes = map[string]struct{}{
+	shadowOutWouldExecute:       {}, // decide() step 7: everything before the side effect passed
+	shadowOutWouldFailCredReady: {}, // step 5: reached only after the policy class passed
+	shadowOutWouldFailStale:     {}, // step 6: reached only after the policy class passed
+}
+
+var shadowRestrictiveClassOutcomes = map[string]struct{}{
+	shadowOutRequireApproval: {}, // policyClassOutcome(Approval): non-allow class ⇒ Override true
+	shadowOutRequireConfirm:  {}, // policyClassOutcome(Confirm): non-allow class ⇒ Override true
+}
 
 var shadowOutcomes = map[string]struct{}{
 	"would_execute": {}, "would_block": {}, "would_require_approval": {},
@@ -185,6 +208,22 @@ func (e Event) validateShadowV2() error {
 	if sh == nil {
 		return evtErr(mcperr.ReasonEventEvidenceMissing, "v2 shadow event without shadow evidence")
 	}
+	return validateShadowEvidenceFields(sh)
+}
+
+// validateShadowEvidenceFields fails closed on the ShadowEvidence value contract. It is
+// split into enum/constant membership and cross-field combination checks only to keep each
+// function under the cyclop threshold; the rules and their order are unchanged.
+func validateShadowEvidenceFields(sh *ShadowEvidence) error {
+	if err := validateShadowEvidenceEnums(sh); err != nil {
+		return err
+	}
+	return validateShadowEvidenceCombinations(sh)
+}
+
+// validateShadowEvidenceEnums checks enum membership and the architectural not_evaluated
+// constants (Shadow never materializes and never has an upstream response).
+func validateShadowEvidenceEnums(sh *ShadowEvidence) error {
 	if _, ok := shadowOutcomes[sh.Outcome]; !ok {
 		return evtErr(mcperr.ReasonEventInvalid, "unknown shadow outcome")
 	}
@@ -194,13 +233,18 @@ func (e Event) validateShadowV2() error {
 	if _, ok := shadowRequestInspections[sh.RequestInspection]; !ok {
 		return evtErr(mcperr.ReasonEventInvalid, "unknown shadow request inspection")
 	}
-	// Architectural constants: Shadow never materializes and never has an upstream response.
 	if sh.MaterializationReadiness != shadowOutMaterializeNotEval {
 		return evtErr(mcperr.ReasonEventInvalid, "shadow materialization_readiness must be not_evaluated")
 	}
 	if sh.ResponseInspection != shadowRespInspectionNotEval {
 		return evtErr(mcperr.ReasonEventInvalid, "shadow response_inspection must be not_evaluated")
 	}
+	return nil
+}
+
+// validateShadowEvidenceCombinations fails closed on the impossible outcome↔sub-fact
+// combinations and the outcome↔override consistency.
+func validateShadowEvidenceCombinations(sh *ShadowEvidence) error {
 	// Impossible-combination fail-closed rules that mirror the producer (decide()):
 	//   - would_execute is unreachable when the request inspection would fail (a hard
 	//     inspection failure yields would_fail_inspection, never would_execute);
@@ -214,6 +258,17 @@ func (e Event) validateShadowV2() error {
 	}
 	if sh.Outcome == shadowOutWouldFailCredReady && sh.CredentialPlan != shadowPlanInvalid {
 		return evtErr(mcperr.ReasonEventInvalid, "would_fail_credential_readiness without an invalid credential plan")
+	}
+	// The verdict must be consistent with the durable action-class projection (Override).
+	// An allow-path-only outcome carrying a restrictive Override is exactly the shape of a
+	// restrictive policy decision falsely presented as executable; a policy-gating outcome
+	// carrying a permissive Override is its inverse. Both are impossible in the producer and
+	// fail closed here so an adapter regression or another producer cannot persist them.
+	if _, ok := shadowAllowClassOnlyOutcomes[sh.Outcome]; ok && sh.Override {
+		return evtErr(mcperr.ReasonEventInvalid, "an allow-class-only shadow outcome cannot carry a restrictive override")
+	}
+	if _, ok := shadowRestrictiveClassOutcomes[sh.Outcome]; ok && !sh.Override {
+		return evtErr(mcperr.ReasonEventInvalid, "a policy-gating shadow outcome must carry a restrictive override")
 	}
 	return nil
 }

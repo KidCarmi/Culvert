@@ -102,6 +102,21 @@ func TestV2_ValidationRejectsMalformedShadowEvidence(t *testing.T) {
 			e.Shadow.Outcome = "would_fail_credential_readiness"
 			e.Shadow.CredentialPlan = shadowPlanValid
 		},
+		// Outcome↔Override consistency (Codex P2, PR #1235): the durable action-class
+		// projection (Override) must agree with the verdict. An allow-path-only outcome with
+		// a restrictive override is a restrictive decision falsely presented as executable;
+		// a policy-gating outcome with a permissive override is its inverse.
+		"would_execute with a restrictive override": func(e *Event) { e.Shadow.Override = true },
+		"would_fail_stale with a restrictive override": func(e *Event) {
+			e.Shadow.Outcome = "would_fail_stale_decision"
+			e.Shadow.Override = true
+		},
+		"would_require_approval with a permissive override": func(e *Event) {
+			e.Shadow.Outcome = "would_require_approval" // base Override stays false
+		},
+		"would_require_confirmation with a permissive override": func(e *Event) {
+			e.Shadow.Outcome = "would_require_confirmation" // base Override stays false
+		},
 		"unsupported schema version": func(e *Event) { e.SchemaVersion = 3 },
 	}
 	for name, mut := range cases {
@@ -143,6 +158,48 @@ func TestV2_LegacyV1ShadowMarker_ReadableButNotWritable(t *testing.T) {
 	plain.Decision.ExecutionState = "not_implemented"
 	if err := plain.Validate(); err != nil {
 		t.Fatalf("a plain v1 event must still validate at write time: %v", err)
+	}
+}
+
+// TestV2_OutcomeOverrideConsistency_NotOverBroad proves the Outcome↔Override rule (Codex
+// P2, PR #1235) constrains ONLY the outcomes whose producer path fixes the action class,
+// and leaves the genuinely ambiguous outcomes free to carry either override. Over-rejecting
+// here would drop legitimate durable evidence — a would_block reached via an allowance miss
+// (Override=false) and one reached via a DENY policy class (Override=true) are BOTH real.
+func TestV2_OutcomeOverrideConsistency_NotOverBroad(t *testing.T) {
+	// Ambiguous outcomes: reachable from both an allow-class and a restrictive path in
+	// decide(), so BOTH override values must validate.
+	for _, oc := range []string{"would_block", "would_fail_inspection", "would_fail_hard_control"} {
+		for _, ov := range []bool{false, true} {
+			e := validV2ShadowEvent()
+			e.Shadow.Outcome = oc
+			e.Shadow.Override = ov
+			// would_fail_inspection additionally requires a failing request inspection.
+			if oc == "would_fail_inspection" {
+				e.Shadow.RequestInspection = "would_fail"
+			}
+			if err := e.Validate(); err != nil {
+				t.Fatalf("ambiguous outcome %q with override=%v must validate: %v", oc, ov, err)
+			}
+		}
+	}
+	// The required-consistent pairs must pass (the rule admits the true producer shapes).
+	consistent := []struct {
+		outcome  string
+		override bool
+	}{
+		{"would_execute", false},
+		{"would_fail_stale_decision", false},
+		{"would_require_approval", true},
+		{"would_require_confirmation", true},
+	}
+	for _, c := range consistent {
+		e := validV2ShadowEvent()
+		e.Shadow.Outcome = c.outcome
+		e.Shadow.Override = c.override
+		if err := e.Validate(); err != nil {
+			t.Fatalf("consistent pair (%s, override=%v) must validate: %v", c.outcome, c.override, err)
+		}
 	}
 }
 
