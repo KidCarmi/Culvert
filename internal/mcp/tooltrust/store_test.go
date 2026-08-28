@@ -957,3 +957,42 @@ func TestLoad_OversizeFileFailsClosed(t *testing.T) {
 		t.Fatal("an oversized store file must fail closed before full decode")
 	}
 }
+
+// TestLoad_WorstCaseEscapedRecordRoundTrips proves the round-6 P2: a lifecycle-valid record
+// whose bounded string fields are packed with control characters (each expanding to a six-byte
+// unicode JSON escape) serializes past the naive 8 KiB estimate the read cap replaced, and the
+// worst-case-derived cap still accepts the store own persisted file (no self-rejection).
+func TestLoad_WorstCaseEscapedRecordRoundTrips(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	when := time.Unix(1000, 0)
+	ctrl := func(n int) string {
+		b := make([]byte, n)
+		for i := range b {
+			b[i] = 0x01 // a control byte json.Marshal expands each into a six-byte unicode escape
+		}
+		return string(b)
+	}
+	// A lifecycle-valid Revoked record with every bounded string field at max length, filled
+	// with control characters (the JSON worst case).
+	rec := &ToolApproval{
+		SchemaVersion: SchemaVersion, ApprovalID: "id", Tenant: "t", ServerID: "s", ToolName: "n",
+		FingerprintFormatVersion: 1, Purpose: PurposeShadowEvaluation, Status: StatusRevoked,
+		RequestedBy: ctrl(maxActorBytes), RequestedAt: when,
+		ApprovedBy: ctrl(maxActorBytes), ApprovedAt: when,
+		Reason: ctrl(maxReasonBytes), TicketRef: ctrl(maxTicketBytes),
+		RevokedBy: ctrl(maxActorBytes), RevokedAt: &when, RevocationReason: ctrl(maxReasonBytes),
+	}
+	if one, _ := json.Marshal(rec); len(one) <= 8192 {
+		t.Fatalf("a worst-case-escaped record must exceed the old 8192 estimate (got %d) for this test to be meaningful", len(one))
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "approvals.json")
+	raw, _ := json.Marshal(persistedStore{SchemaVersion: SchemaVersion, Approvals: []*ToolApproval{rec}})
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, _ := NewStore(Config{Path: path, Clock: clk.now, MaxRecords: 1, MaxPerTenant: 8})
+	if err := s.Load(); err != nil {
+		t.Fatalf("the store own worst-case-escaped record must reload, got %v", err)
+	}
+}

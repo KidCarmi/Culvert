@@ -46,14 +46,56 @@ func seedToolTrustInventory(t *testing.T) (reg *registry.Registry, cat *catalog.
 	return reg, cat, "controlled", "t", hex.EncodeToString(sum[:])
 }
 
+// seedToolTrustInventory2 seeds a one-server, TWO-tool inventory so a test can approve
+// one tool and prune its record while creating a request for the other — the exact shape
+// of the reconcile-vs-prune race (a pruned record is the LAST ToolRef for its tool).
+func seedToolTrustInventory2(t *testing.T) (cat *catalog.Catalog, serverID, toolA, toolB, fpA, fpB string) {
+	t.Helper()
+	doc, err := decodeInventory([]byte(`{"schema_version":1,"tenant":"` + ttTenant + `","servers":[
+	  {"server_id":"controlled","endpoint":"e","pinned_identity":"id","enabled":true,
+	   "tools":[{"name":"t","input_schema":{"type":"object"}},{"name":"u","input_schema":{"type":"object"}}]}
+	]}`))
+	if err != nil {
+		t.Fatalf("decode inventory: %v", err)
+	}
+	reg, cat, err := seedInventory(doc, limits.DefaultCatalog())
+	if err != nil {
+		t.Fatalf("seed inventory: %v", err)
+	}
+	publishMCPInventory(mcpInvLoaded, "", reg, cat)
+	recA, ok := cat.Current().Get(catalog.ToolKey{Server: "controlled", Name: "t"})
+	if !ok {
+		t.Fatal("seeded tool t must exist")
+	}
+	recB, ok := cat.Current().Get(catalog.ToolKey{Server: "controlled", Name: "u"})
+	if !ok {
+		t.Fatal("seeded tool u must exist")
+	}
+	sumA := recA.Fingerprint.Sum()
+	sumB := recB.Fingerprint.Sum()
+	return cat, "controlled", "t", "u", hex.EncodeToString(sumA[:]), hex.EncodeToString(sumB[:])
+}
+
 // composeToolTrust composes the coordinator against a temp data dir with the given
 // clock (nil ⇒ real time). It isolates the process-global singleton for the test.
 func composeToolTrust(t *testing.T, clk func() time.Time) {
 	t.Helper()
+	composeToolTrustBounded(t, clk, 0, 0)
+}
+
+// composeToolTrustBounded is composeToolTrust with explicit store bounds (0 ⇒ store
+// defaults). A small MaxRecords lets a test drive the at-capacity prune path.
+func composeToolTrustBounded(t *testing.T, clk func() time.Time, maxRecords, maxPerTenant int) {
+	t.Helper()
 	resetMCPToolTrustForTest()
 	t.Cleanup(resetMCPToolTrustForTest)
 	dir := t.TempDir()
-	store, err := tooltrust.NewStore(tooltrust.Config{Path: filepath.Join(dir, "mcp_tooltrust", "approvals.json"), Clock: clk})
+	store, err := tooltrust.NewStore(tooltrust.Config{
+		Path:         filepath.Join(dir, "mcp_tooltrust", "approvals.json"),
+		Clock:        clk,
+		MaxRecords:   maxRecords,
+		MaxPerTenant: maxPerTenant,
+	})
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
@@ -315,6 +357,63 @@ func TestToolTrust_Revoke_ConcurrentReconcileEndsDemoted(t *testing.T) {
 	mcpToolTrust.reconcile() // settle
 	if eligibility(t, cat, sid, tool) != catalog.Quarantined {
 		t.Fatalf("a revoked tool must end Quarantined, not %s (TOCTOU re-promotion)", eligibility(t, cat, sid, tool))
+	}
+}
+
+// TestToolTrust_RequestPrune_ConcurrentReconcileKeepsExpiredDemoted proves the round-6 P1:
+// at the store's record cap, a RequestApproval's prune of a just-Expired record must not
+// interleave between reconcile's ExpireDue (which makes the grant terminal) and its
+// ToolRefs re-derivation. deriveMu now serializes the create's prune with reconcile, so the
+// expired tool is always demoted in the same pass that expired it — the prune can never
+// delete its last ToolRef mid-pass and strand it Usable.
+func TestToolTrust_RequestPrune_ConcurrentReconcileKeepsExpiredDemoted(t *testing.T) {
+	resetInventory(t)
+	cat, sid, toolA, toolB, fpA, fpB := seedToolTrustInventory2(t)
+	base := time.Unix(1_700_000_000, 0)
+	var clkMu sync.Mutex
+	now := base
+	clk := func() time.Time { clkMu.Lock(); defer clkMu.Unlock(); return now }
+	// MaxRecords=1 so the store is at capacity after the single approval; a new request must
+	// prune to make room (only possible once A's expired record is swept to terminal).
+	composeToolTrustBounded(t, clk, 1, 8)
+	requestAndApprove(t, sid, toolA, fpA, cat.Current().Revision(), 10*time.Minute)
+	if eligibility(t, cat, sid, toolA) != catalog.Usable {
+		t.Fatal("tool A must be Usable after approval")
+	}
+	// Advance past A's expiry: A is now expired trust that reconcile must withdraw.
+	clkMu.Lock()
+	now = base.Add(11 * time.Minute)
+	clkMu.Unlock()
+	rev := cat.Current().Revision()
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			mcpToolTrust.reconcile()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		// Repeatedly attempt a request for tool B: at the cap this prunes A's Expired record
+		// once reconcile has swept it, exercising the prune-vs-reconcile window each time.
+		for i := 0; i < 200; i++ {
+			_, _ = mcpToolTrust.RequestApproval(toolTrustRequestInput{
+				Tenant:              ttTenant,
+				ServerID:            sid,
+				ToolName:            toolB,
+				ExpectedFingerprint: fpB,
+				ExpectedCatalogRev:  rev,
+				Purpose:             tooltrust.PurposeShadowEvaluation,
+				RequestedBy:         "operator@corp",
+				Reason:              "b",
+			})
+		}
+	}()
+	wg.Wait()
+	mcpToolTrust.reconcile() // settle
+	if eligibility(t, cat, sid, toolA) != catalog.Quarantined {
+		t.Fatalf("expired tool A must end Quarantined even under a concurrent at-cap prune, not %s", eligibility(t, cat, sid, toolA))
 	}
 }
 

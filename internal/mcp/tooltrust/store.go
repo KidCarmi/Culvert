@@ -50,13 +50,17 @@ const (
 	defaultMaxRecords   = 4096
 	defaultMaxPerTenant = 256
 
-	// maxRecordJSONBytes is a generous upper bound on one serialized ToolApproval. The
-	// record's every free-text/reference field is byte-bounded (maxReasonBytes et al), so
-	// the marshaled JSON — keys, quoting, the seven ~256-byte actor/reference fields, three
-	// ~512-byte reason fields, the fingerprint hex, and the timestamps — cannot exceed this.
-	// It is only used to size the recovery read cap, so it is set well above the true worst
-	// case; a legitimately-written record is far smaller.
-	maxRecordJSONBytes = 8192
+	// maxRecordJSONBytes is a WORST-CASE upper bound on one serialized ToolApproval, used only
+	// to size the recovery read cap. It must never under-count, or Load would reject the
+	// store's OWN persisted file: encoding/json expands a control byte (and <, >, &) to a
+	// 6-byte \u00xx escape, so a bounded string can serialize at up to 6x its byte length. The
+	// bound is therefore 6x the sum of every byte-bounded string field plus a fixed overhead
+	// for JSON keys, the timestamps, the fingerprint hex, the numeric fields, and punctuation.
+	// It is a deliberate over-estimate (a real record is far smaller); the cap only rejects a
+	// pathologically large file before it is fully decoded.
+	maxRecordStringBounds  = 3*maxReasonBytes + 4*maxActorBytes + maxTenantBytes + maxServerIDBytes + maxToolNameBytes + maxTicketBytes + maxIDBytes
+	recordFixedOverhead    = 2048
+	maxRecordJSONBytes     = 6*maxRecordStringBounds + recordFixedOverhead
 	// storeEnvelopeSlackBytes covers the persistedStore wrapper (schema_version, the array
 	// brackets/commas) independent of record count.
 	storeEnvelopeSlackBytes = 4096
