@@ -25,6 +25,7 @@ import (
 
 	"github.com/KidCarmi/Culvert/internal/configver"
 	"github.com/KidCarmi/Culvert/internal/pac"
+	"github.com/KidCarmi/Culvert/internal/urlcat"
 )
 
 // ConfigVersion is metadata for a stored config snapshot.
@@ -260,6 +261,19 @@ func rollbackConfigVersion(w http.ResponseWriter, r *http.Request) {
 			"changes":  changes,
 			"valid":    len(warnings) == 0,
 		})
+		return
+	}
+
+	// URL-category hard gate (Blocker C): the stored version's taxonomy must
+	// satisfy the canonical per-category host cap BEFORE anything applies —
+	// the WHOLE rollback is refused (400, nothing mutated), never truncated
+	// and never a partial taxonomy. A stored version can only carry an
+	// over-cap category if it predates the cap (or was created through a
+	// pre-correction bulk path); restoring it would have a runtime mutation
+	// re-create what startup Load merely grandfathers. Remedy: split the
+	// category, then re-capture.
+	if err := urlcat.ValidateEntries(target.URLCategories); err != nil {
+		http.Error(w, "rollback refused: "+sanitizeLog(err.Error()), http.StatusBadRequest)
 		return
 	}
 

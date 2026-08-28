@@ -20,6 +20,7 @@ import (
 	"github.com/KidCarmi/Culvert/internal/reqlog"
 	"github.com/KidCarmi/Culvert/internal/secscan"
 	"github.com/KidCarmi/Culvert/internal/session"
+	"github.com/KidCarmi/Culvert/internal/urlcat"
 )
 
 // GET /api/audit — return configuration-change audit entries (newest first).
@@ -1032,6 +1033,18 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// URL-category pre-validation (Blocker C, before ANY store mutation): every
+	// INCOMING category must satisfy the canonical per-category host cap — the
+	// whole import is refused (400), never truncated or partially applied. Only
+	// the incoming payload is judged: a legacy over-cap category already live
+	// (grandfathered by startup Load) does not block an import that leaves it
+	// untouched, and merge-mode upserts replace a category's hosts wholesale by
+	// name, so validating the incoming entries covers every installed change.
+	if err := urlcat.ValidateEntries(b.URLCategories); err != nil {
+		http.Error(w, "invalid url categories: "+sanitizeLog(err.Error()), http.StatusBadRequest)
+		return
+	}
+
 	// PAC pre-validation (before ANY store mutation): strictly validate the
 	// IMPORTED PAC fields themselves so a malformed backup is rejected whole
 	// with actionable errors instead of silently importing junk. Pre-existing
@@ -1328,6 +1341,14 @@ func importPACProfilesCandidate(cur pac.ProfilesConfig, b *configBackup, replace
 // rollback-surface capability only. Merge mode upserts by name (incoming
 // wins) so re-importing an edited backup updates entries instead of
 // duplicating them.
+// MaxHostsPerCategory is enforced by the caller's pre-apply gate
+// (urlcat.ValidateEntries over the INCOMING entries, apiConfigImport) —
+// judged before ANY store mutation so an over-cap backup refuses the whole
+// import. The merge branch deliberately installs through the unchecked
+// ReplaceAll: the merged set may contain a legacy over-cap category the
+// import leaves untouched (grandfathered by startup Load), and merge-mode
+// upserts replace hosts wholesale by name, so validating the incoming
+// entries covers every change this call installs (Blocker C).
 func importCategoryTaxonomy(b *configBackup, replaceMode bool) {
 	if len(b.URLCategories) > 0 {
 		if replaceMode {

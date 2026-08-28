@@ -714,11 +714,46 @@ func (s *Store) SnapshotWithRevision() ([]Entry, string) {
 	return out, fp
 }
 
-// ReplaceAll atomically replaces all categories (used by cluster config sync,
-// config import, and config-version rollback). Holds mutMu so a bulk install
-// orders against the v2 revision fence and the publication/commit boundary
-// (2D-B §12); memory-only — the callers' separate Save() reacquires the
-// domain and publishes the current committed state.
+// ValidateEntries is the CANONICAL full-set bulk validation seam (2D-B final
+// correction, Blocker C): every category in a bulk candidate must satisfy the
+// same MaxHostsPerCategory bound the admin write paths enforce (raw len, the
+// exact check setMem/addHostMem/CreateDurable/ReplaceHostsDurable apply).
+// Every RUNTIME bulk installer — cluster snapshot apply, config import,
+// config-version rollback — must judge its whole candidate through this (or
+// ReplaceAllChecked) BEFORE installing anything: an over-cap category rejects
+// the WHOLE candidate, never truncated, never partially applied. Startup Load
+// is the one deliberate exemption (legacy compatibility: a pre-cap on-disk
+// file keeps loading; no runtime path may re-create what it grandfathers).
+func ValidateEntries(entries []Entry) error {
+	for i := range entries {
+		if len(entries[i].Hosts) > MaxHostsPerCategory {
+			return fmt.Errorf("category %q has %d hosts: %w", entries[i].Name, len(entries[i].Hosts), ErrTooManyHosts)
+		}
+	}
+	return nil
+}
+
+// ReplaceAllChecked validates the whole candidate through ValidateEntries and
+// installs it only when every category passes — the checked bulk installer
+// runtime callers must use. On error NOTHING changes (whole-candidate
+// reject; the store keeps serving its current taxonomy).
+func (s *Store) ReplaceAllChecked(cats []Entry) error {
+	if err := ValidateEntries(cats); err != nil {
+		return err
+	}
+	s.ReplaceAll(cats)
+	return nil
+}
+
+// ReplaceAll atomically replaces all categories. Holds mutMu so a bulk
+// install orders against the v2 revision fence and the publication/commit
+// boundary (2D-B §12); memory-only — the callers' separate Save() reacquires
+// the domain and publishes the current committed state.
+//
+// UNCHECKED: it does not enforce MaxHostsPerCategory, for exactly one caller
+// class — startup Load's legacy-compatibility installs (and tests). Every
+// RUNTIME bulk path (cluster snapshot apply, config import, rollback) must go
+// through ReplaceAllChecked / ValidateEntries instead (Blocker C).
 func (s *Store) ReplaceAll(cats []Entry) {
 	s.mutMu.Lock()
 	defer s.mutMu.Unlock()

@@ -860,18 +860,27 @@ func applySnapshotTrafficExceptBlocklist(snap ConfigSnapshot) {
 		}
 	}
 
-	// URL categories.
+	// URL categories. Checked install (Blocker C): the whole pushed taxonomy
+	// is judged against the canonical per-category host cap BEFORE anything
+	// installs — an over-cap candidate is rejected wholesale (logged; the node
+	// keeps serving its current taxonomy), never truncated or partially
+	// applied. Same per-field reject-and-continue posture as the SSL-bypass
+	// Set above; the aggregate maxSnapURLCategoryHosts snapshot cap is NOT
+	// this invariant.
 	if snap.URLCategories != nil {
-		catStore.ReplaceAll(snap.URLCategories)
-		// P3.4 caller-side persist (Bucket-4 fsync-safe Save
-		// hardened in PR #246).
-		catStore.Save()
-		// The CP-pushed taxonomy's BuiltIn entries are served to policy from the
-		// effective view, not catStore, so without this recompose a CP taxonomy
-		// change that carries no override change is silently unenforced on EVERY
-		// data-plane node until it restarts. applySnapshotSaaSFeed's recompose is
-		// gated on an override-fingerprint change and does not cover this.
-		recomposeSignedFeedTaxonomy()
+		if err := catStore.ReplaceAllChecked(snap.URLCategories); err != nil {
+			logger.Printf("DataPlane: URL categories rejected (taxonomy unchanged): %v", err)
+		} else {
+			// P3.4 caller-side persist (Bucket-4 fsync-safe Save
+			// hardened in PR #246).
+			catStore.Save()
+			// The CP-pushed taxonomy's BuiltIn entries are served to policy from the
+			// effective view, not catStore, so without this recompose a CP taxonomy
+			// change that carries no override change is silently unenforced on EVERY
+			// data-plane node until it restarts. applySnapshotSaaSFeed's recompose is
+			// gated on an override-fingerprint change and does not cover this.
+			recomposeSignedFeedTaxonomy()
+		}
 	}
 
 	// File profiles.
