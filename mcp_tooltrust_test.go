@@ -861,6 +861,40 @@ func TestToolTrust_ComposeWiresIngestGuard(t *testing.T) {
 	}
 }
 
+// TestMCPDiscoveryHookWrappers_DelegateToExecution proves the package-main indirection the
+// coordinator routes through — setMCPDiscoveryReconcileHook / setMCPDiscoveryIngestGuard, defined
+// in mcp_shadow_startup.go — actually installs the execution.Discovery seams. The coordinator
+// (mcp_tooltrust.go) uses these wrappers so it never imports internal/mcp/execution itself: the
+// execution-posture wall pins mcp_shadow_startup.go as the SINGLE production importer of that
+// package. This test guards that the indirection stays wired end to end.
+func TestMCPDiscoveryHookWrappers_DelegateToExecution(t *testing.T) {
+	resetInventory(t)
+	reg, cat, _, _, _ := seedToolTrustInventory(t)
+
+	var reconciled int
+	setMCPDiscoveryReconcileHook(func() { reconciled++ })
+	setMCPDiscoveryIngestGuard(func(ingest func() error) error { return ingest() })
+	t.Cleanup(func() {
+		setMCPDiscoveryReconcileHook(nil)
+		setMCPDiscoveryIngestGuard(nil)
+	})
+
+	d, err := execution.NewDiscovery(reg, cat, ttStubUpstream{})
+	if err != nil {
+		t.Fatalf("NewDiscovery: %v", err)
+	}
+	if d.OnIngest == nil {
+		t.Fatal("setMCPDiscoveryReconcileHook must install the reconcile hook on NewDiscovery")
+	}
+	d.OnIngest()
+	if reconciled != 1 {
+		t.Fatalf("the wrapper-installed reconcile hook was not invoked, got %d", reconciled)
+	}
+	if d.IngestGuard == nil {
+		t.Fatal("setMCPDiscoveryIngestGuard must install the ingest guard on NewDiscovery")
+	}
+}
+
 // TestToolTrust_IngestSerializedUnderDeriveMu proves the round-15 fix: runCatalogIngestSerialized
 // (the execution.SetIngestGuard seam) runs the discovery ingest under deriveMu, so a catalog
 // revision advance is mutually exclusive with an in-flight approve/revoke/reconcile critical

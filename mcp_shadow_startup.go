@@ -202,3 +202,15 @@ func composeGatewayShadowIntoConfig(cfg *mcpruntime.Config, shadowReady bool, ev
 	globalMCPShadow.setReason("composed")
 	logger.Printf("MCP gateway shadow evaluator composed (non-executing; no upstream client, no credential materialization). Shadow may be activated for a bounded scope.")
 }
+
+// setMCPDiscoveryReconcileHook and setMCPDiscoveryIngestGuard are the package-main indirection
+// the tool-trust coordinator (mcp_tooltrust.go) uses to wire the execution.Discovery seams —
+// the post-ingest reconcile hook and the ingest-serialization guard — WITHOUT importing the
+// execution package itself. The execution-posture wall (mcp_execution_posture_test.go) pins
+// THIS file as the single production importer of internal/mcp/execution, so these thin wrappers
+// keep that bright line intact. Neither touches a live-execution symbol: SetReconcileHook and
+// SetIngestGuard only install trust-reconciliation callbacks that can withdraw-or-re-affirm a
+// tool's usability, never widen it, and constructing a live executor stays impossible.
+func setMCPDiscoveryReconcileHook(fn func()) { execution.SetReconcileHook(fn) }
+
+func setMCPDiscoveryIngestGuard(fn func(ingest func() error) error) { execution.SetIngestGuard(fn) }

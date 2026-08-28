@@ -28,7 +28,6 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/catalog"
-	"github.com/KidCarmi/Culvert/internal/mcp/execution"
 	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
 	"github.com/KidCarmi/Culvert/internal/mcp/registry"
 	"github.com/KidCarmi/Culvert/internal/mcp/tooltrust"
@@ -140,14 +139,14 @@ func initMCPToolTrust(_ *startupState) {
 	// reconciles trust immediately after a successful ingest, so a re-discovered tool matching
 	// an active approval is re-promoted at once (not after the periodic sweep). The closure
 	// reads the CURRENT mcpToolTrustReconcile, so a later reset makes it a no-op.
-	execution.SetReconcileHook(func() { mcpToolTrustReconcile() })
+	setMCPDiscoveryReconcileHook(func() { mcpToolTrustReconcile() })
 	// Serialize the discovery ingest PUBLISH with the approve/revoke/reconcile critical
 	// section (ADR-0034 optimistic concurrency): a rediscovery cannot advance the catalog
 	// revision underneath an in-flight approval's loadTarget→store.Approve window, so an
 	// identical rediscovery / revision flap in that window is caught as a stale-target
 	// conflict rather than silently approved. Bound to the coordinator, not the swappable
 	// reconcile var, because it is a pure critical-section wrapper.
-	execution.SetIngestGuard(mcpToolTrust.runCatalogIngestSerialized)
+	setMCPDiscoveryIngestGuard(mcpToolTrust.runCatalogIngestSerialized)
 	// Startup reconcile is load-bearing (ADR-0034 D3): the boot inventory re-seeds
 	// every tool Quarantined; this re-applies each active approval whose bound
 	// fingerprint matches the freshly-seeded tool. Without it every restart silently
@@ -708,6 +707,6 @@ func resetMCPToolTrustForTest() {
 	mcpToolTrust.pendingDemotions = nil
 	mcpToolTrust.deriveMu.Unlock()
 	mcpToolTrustReconcile = func() {}
-	execution.SetReconcileHook(nil)
-	execution.SetIngestGuard(nil)
+	setMCPDiscoveryReconcileHook(nil)
+	setMCPDiscoveryIngestGuard(nil)
 }
