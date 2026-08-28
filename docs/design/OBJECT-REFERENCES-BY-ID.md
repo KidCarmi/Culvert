@@ -286,9 +286,30 @@ persistence path routes through `SaveErr` (`Save` is a thin wrapper):
 hardened admin mutations, caller-side `Save` after cluster `ReplaceAll`,
 config import/rollback, rename-cascade persistence, the startup seed, and
 `Load`'s migration save — no raw path sits outside the ordering domain.
-LOCK ORDER (acyclic, documented on the field): `mutMu` → `saveMu` → `mu`;
-standalone `Save`/`SaveErr` take `saveMu` → `mu(RLock)`; nothing takes `mu`
-then `saveMu`, nothing takes `saveMu` then `mutMu`.
+
+**Commit boundary (`SaveErr` enters `mutMu`):** publication ordering alone
+does not stop an external save from OBSERVING an in-flight transaction — a
+standalone `Save` running while a `MutateDurable` fn had mutated memory but
+not yet returned could snapshot uncommitted-new-content + old-epoch and
+publish it; if that mutation then failed its own publication and rolled
+back, the failed, unacknowledged mutation stayed on disk. Public
+`Save`/`SaveErr` therefore acquire `mutMu` FIRST and delegate to the
+internal `saveErrLocked` helper (saveMu → snapshot → marshal →
+AtomicWrite); `MutateDurable`, which already holds `mutMu` for the whole
+transaction, calls `saveErrLocked` directly — `mutMu` is not reentrant, so
+an internal public-`SaveErr` call from the mutation path is forbidden. No
+external persistence path can publish an unfinished mutation's memory:
+before success nothing publishes the intermediate state; after a confirmed
+pre-replacement failure both memory and a fresh reload equal the
+pre-mutation truth. The bulk caller's `ReplaceAll(...)` + `Save()` shape
+stays valid: `Save` reacquires the domain and publishes the CURRENT
+committed state (serial order, which may be newer than the bulk install —
+that is the invariant, not a loss).
+
+LOCK ORDER (acyclic, documented on the field): `mutMu` → `saveMu` → `mu`.
+Every runtime persistence entry goes through `mutMu` first; internal
+helpers called with `mutMu` held never reacquire it; nothing takes `mu`
+then `saveMu` or `mutMu`, nothing takes `saveMu` then `mutMu`.
 
 The generation is served on the list read (`version`) and asserted via the
 optional `?ifVersion=` query on POST/PUT/DELETE; a mismatch is the SAME

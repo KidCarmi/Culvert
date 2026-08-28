@@ -744,7 +744,12 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > fence; publication-ordering correction: `SaveErr` additionally runs
 > snapshot→marshal→AtomicWrite under a store-local `saveMu`, so an older
 > in-flight `Save` can never resume and rename a stale envelope over a
-> later acknowledged publication, and the envelope loader enforces
+> later acknowledged publication; commit-boundary correction: public
+> `Save`/`SaveErr` enter `mutMu` and delegate to the internal
+> `saveErrLocked`, so a standalone save can never observe or publish an
+> in-flight `MutateDurable` transaction's memory (uncommitted content +
+> old epoch) and a failed-and-rolled-back mutation exists on disk at no
+> epoch, and the envelope loader enforces
 > `schema_version == 1` fail-closed — `{}`, unknown/future schemas, and
 > negative persisted versions refuse to load; served on list reads; the
 > same structured 409 conflict contract as
