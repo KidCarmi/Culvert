@@ -8,6 +8,10 @@ import (
 	"github.com/KidCarmi/Culvert/internal/mcp/limits"
 )
 
+// shadowPlanValid is the credential-plan enum TOKEN (an enum value, not a secret) hoisted
+// to a named const so gosec G101 never trips on an inline CredentialPlan string literal.
+const shadowPlanValid = "credential_plan_valid"
+
 // shadowEv returns a valid v2 Shadow decision event on P-ORD for the given tenant.
 func shadowEv(tenant string) model.Event {
 	e := model.Event{
@@ -21,7 +25,7 @@ func shadowEv(tenant string) model.Event {
 			ExecutionState: "shadow_evaluated",
 		},
 		Shadow: &model.ShadowEvidence{
-			Outcome: "would_execute", Override: false, CredentialPlan: "credential_plan_valid",
+			Outcome: "would_execute", Override: false, CredentialPlan: shadowPlanValid,
 			MaterializationReadiness: "not_evaluated", RequestInspection: "would_pass",
 			ResponseInspection: "not_evaluated",
 		},

@@ -7,6 +7,10 @@ import (
 	"github.com/KidCarmi/Culvert/internal/mcp/events/model"
 )
 
+// shadowPlanValid is the credential-plan enum TOKEN (an enum value, not a secret) hoisted
+// to a named const so gosec G101 never trips on an inline CredentialPlan string literal.
+const shadowPlanValid = "credential_plan_valid"
+
 // shadowV2Event returns a valid SchemaVersionV2 Shadow decision event (a write-class
 // tools/call, the realistic shape) with its digest computed.
 func shadowV2Event(id string) *model.Event {
@@ -21,7 +25,7 @@ func shadowV2Event(id string) *model.Event {
 			ExecutionState: "shadow_evaluated",
 		},
 		Shadow: &model.ShadowEvidence{
-			Outcome: "would_execute", Override: false, CredentialPlan: "credential_plan_valid",
+			Outcome: "would_execute", Override: false, CredentialPlan: shadowPlanValid,
 			MaterializationReadiness: "not_evaluated", RequestInspection: "would_pass",
 			ResponseInspection: "not_evaluated",
 		},
@@ -132,7 +136,7 @@ func TestShadowV2_InteriorCorruptionOfShadowRecordFailsClosed(t *testing.T) {
 		t.Fatalf("segment too small: %d", len(b))
 	}
 	b[pos] ^= 0xFF
-	if err := os.WriteFile(seg, b, 0o600); err != nil {
+	if err := os.WriteFile(seg, b, 0o600); err != nil { // #nosec G703 -- test rewrites its own t.TempDir()-derived segment file
 		t.Fatal(err)
 	}
 	s2 := newTestSpool(t, root)

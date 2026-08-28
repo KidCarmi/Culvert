@@ -5,6 +5,11 @@ import (
 	"testing"
 )
 
+// shadowPlanValid is the credential-plan enum TOKEN used by the v2 test fixtures. It is a
+// named const (not an inline string literal on a CredentialPlan field) so a gosec G101
+// "hardcoded credential" heuristic never trips on an enum value that is not a secret.
+const shadowPlanValid = "credential_plan_valid"
+
 // validV2ShadowEvent returns a structurally-valid SchemaVersionV2 Shadow decision event
 // with a complete, valid ShadowEvidence. Tests tweak one field to prove a specific rule.
 func validV2ShadowEvent() Event {
@@ -21,7 +26,7 @@ func validV2ShadowEvent() Event {
 		Shadow: &ShadowEvidence{
 			Outcome:                  "would_execute",
 			Override:                 false,
-			CredentialPlan:           "credential_plan_valid",
+			CredentialPlan:           shadowPlanValid,
 			MaterializationReadiness: "not_evaluated",
 			RequestInspection:        "would_pass",
 			ResponseInspection:       "not_evaluated",
@@ -95,7 +100,7 @@ func TestV2_ValidationRejectsMalformedShadowEvidence(t *testing.T) {
 		"would_fail_inspection without would_fail": func(e *Event) { e.Shadow.Outcome = "would_fail_inspection"; e.Shadow.RequestInspection = "would_pass" },
 		"would_fail_credential without invalid plan": func(e *Event) {
 			e.Shadow.Outcome = "would_fail_credential_readiness"
-			e.Shadow.CredentialPlan = "credential_plan_valid"
+			e.Shadow.CredentialPlan = shadowPlanValid
 		},
 		"unsupported schema version": func(e *Event) { e.SchemaVersion = 3 },
 	}
