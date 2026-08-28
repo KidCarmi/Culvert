@@ -127,9 +127,15 @@ func TestV2_ValidationRejectsMalformedShadowEvidence(t *testing.T) {
 		// Outcome↔Override consistency (Codex P2, PR #1235): the durable action-class
 		// projection (Override) must agree with the verdict. An allow-path-only outcome with
 		// a restrictive override is a restrictive decision falsely presented as executable;
-		// a policy-gating outcome with a permissive override is its inverse.
-		"would_execute with a restrictive override": func(e *Event) { e.Shadow.Override = true },
+		// a policy-gating outcome with a permissive override is its inverse. Action is set to a
+		// restrictive code (DENY) so the Action↔Override binding is SATISFIED and only the
+		// Outcome↔Override guard fires — the case isolates that guard, not the action binding.
+		"would_execute with a restrictive override": func(e *Event) {
+			e.Decision.Action = "DENY"
+			e.Shadow.Override = true
+		},
 		"would_fail_stale with a restrictive override": func(e *Event) {
+			e.Decision.Action = "DENY"
 			e.Shadow.Outcome = "would_fail_stale_decision"
 			e.Shadow.Override = true
 		},
@@ -150,9 +156,35 @@ func TestV2_ValidationRejectsMalformedShadowEvidence(t *testing.T) {
 			// base CredentialPlan stays credential_plan_valid → impossible for a pre-planning outcome
 		},
 		"valid plan on a would_require_approval outcome": func(e *Event) {
+			e.Decision.Action = "REQUIRE_APPROVAL" // satisfy the Action↔Override binding (restrictive ⇒ Override=true)
 			e.Shadow.Outcome = "would_require_approval"
 			e.Shadow.Override = true // satisfy the restrictive-override rule so only the new guard fires
 			// base CredentialPlan stays credential_plan_valid
+		},
+		// Action↔Override binding (Codex round, PR #1235): the durable Override must equal
+		// !isAllowClass(Decision.Action). These isolate the new guard — the outcome/sub-facts
+		// stay internally consistent so ONLY the action binding rejects them.
+		//
+		// A restrictive action (DENY) presented as an override-free (executable-class) decision.
+		// This is the round-12 case the Outcome↔Override rule alone did not reject: would_execute
+		// is allow-class-only and Override=false is consistent WITH that outcome, so nothing but
+		// the action binding catches the DENY.
+		"deny action with a permissive override": func(e *Event) {
+			e.Decision.Action = "DENY" // base Override=false, base Outcome=would_execute
+		},
+		// An allow-class action (ALLOW) mislabelled with a restrictive override. would_block is
+		// ambiguous w.r.t. Override, so the Outcome↔Override guard does not fire — only the
+		// action binding does.
+		"allow action with a restrictive override": func(e *Event) {
+			e.Shadow.Override = true // base Action=ALLOW
+			e.Shadow.Outcome = "would_block"
+			e.Shadow.CredentialPlan = "no_credential_profile"
+		},
+		// An action outside the nine-code taxonomy: the leaf model cannot classify it, so it
+		// cannot prove the durable evidence consistent and must fail closed. A non-empty code is
+		// used so validateDecisionPhase's action-present check does not fire first.
+		"unknown decision action": func(e *Event) {
+			e.Decision.Action = "FROBNICATE" // base Override=false, base Outcome=would_execute
 		},
 		"unsupported schema version": func(e *Event) { e.SchemaVersion = 3 },
 	}
@@ -205,12 +237,19 @@ func TestV2_LegacyV1ShadowMarker_ReadableButNotWritable(t *testing.T) {
 // (Override=false) and one reached via a DENY policy class (Override=true) are BOTH real.
 func TestV2_OutcomeOverrideConsistency_NotOverBroad(t *testing.T) {
 	// Ambiguous outcomes: reachable from both an allow-class and a restrictive path in
-	// decide(), so BOTH override values must validate.
+	// decide(), so BOTH override values must validate. The Action↔Override binding still
+	// applies, so each override value is paired with a consistent action (an allow-class
+	// action for Override=false, a restrictive one for Override=true) — the outcome remains
+	// ambiguous, the action binding is satisfied, and validation must accept both.
 	for _, oc := range []string{"would_block", "would_fail_inspection", "would_fail_hard_control"} {
-		for _, ov := range []bool{false, true} {
+		for _, tc := range []struct {
+			action   string
+			override bool
+		}{{"ALLOW", false}, {"DENY", true}} {
 			e := validV2ShadowEvent()
+			e.Decision.Action = tc.action
 			e.Shadow.Outcome = oc
-			e.Shadow.Override = ov
+			e.Shadow.Override = tc.override
 			// These are all pre-credential-step outcomes, so the plan must be unplanned.
 			e.Shadow.CredentialPlan = "no_credential_profile"
 			// would_fail_inspection additionally requires a failing request inspection.
@@ -218,28 +257,31 @@ func TestV2_OutcomeOverrideConsistency_NotOverBroad(t *testing.T) {
 				e.Shadow.RequestInspection = "would_fail"
 			}
 			if err := e.Validate(); err != nil {
-				t.Fatalf("ambiguous outcome %q with override=%v must validate: %v", oc, ov, err)
+				t.Fatalf("ambiguous outcome %q with action=%s override=%v must validate: %v", oc, tc.action, tc.override, err)
 			}
 		}
 	}
-	// The required-consistent pairs must pass (the rule admits the true producer shapes).
+	// The required-consistent pairs must pass (the rule admits the true producer shapes). Each
+	// carries the action whose class matches the override (Override == !isAllowClass(action)).
 	consistent := []struct {
+		action   string
 		outcome  string
 		override bool
 		plan     string // pre-planning outcomes must carry the unplanned default
 	}{
-		{"would_execute", false, "credential_plan_valid"},
-		{"would_fail_stale_decision", false, "credential_plan_valid"},
-		{"would_require_approval", true, "no_credential_profile"},
-		{"would_require_confirmation", true, "no_credential_profile"},
+		{"ALLOW", "would_execute", false, "credential_plan_valid"},
+		{"ALLOW", "would_fail_stale_decision", false, "credential_plan_valid"},
+		{"REQUIRE_APPROVAL", "would_require_approval", true, "no_credential_profile"},
+		{"REQUIRE_CONFIRMATION", "would_require_confirmation", true, "no_credential_profile"},
 	}
 	for _, c := range consistent {
 		e := validV2ShadowEvent()
+		e.Decision.Action = c.action
 		e.Shadow.Outcome = c.outcome
 		e.Shadow.Override = c.override
 		e.Shadow.CredentialPlan = c.plan
 		if err := e.Validate(); err != nil {
-			t.Fatalf("consistent pair (%s, override=%v) must validate: %v", c.outcome, c.override, err)
+			t.Fatalf("consistent pair (%s, action=%s, override=%v) must validate: %v", c.outcome, c.action, c.override, err)
 		}
 	}
 	// The one consistent invalid-plan shape — the credential-readiness failure — must validate

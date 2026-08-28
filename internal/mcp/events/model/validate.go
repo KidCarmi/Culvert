@@ -225,7 +225,35 @@ func (e Event) validateShadowV2() error {
 	if sh == nil {
 		return evtErr(mcperr.ReasonEventEvidenceMissing, "v2 shadow event without shadow evidence")
 	}
+	// The durable Override boolean is the producer's action-class projection: decide()
+	// sets ShadowOverride = !action.IsAllowClass() over the SAME policy action that becomes
+	// Decision.Action. Bind the two here so a v2 shadow event whose action and override
+	// disagree is rejected at the write boundary — a restrictive action mislabelled as an
+	// override-free (executable-class) decision, or the inverse. An action outside the known
+	// nine-code taxonomy fails closed: the leaf model cannot classify it, so it cannot prove
+	// the durable evidence is consistent (SHADOW-EVIDENCE-ROUTING-1, Codex round PR #1235).
+	if err := validateShadowActionOverride(e.Decision.Action, sh.Override); err != nil {
+		return err
+	}
 	return validateShadowEvidenceFields(sh)
+}
+
+// validateShadowActionOverride binds the durable Override to the event's own policy action
+// code via the model-local action-class classifier (which the cross-package parity wall pins
+// to policy.Action.IsAllowClass()). An unknown action fails closed; a known action must
+// carry Override == !isAllowClass(action). It deliberately does NOT infer that every
+// allow-class action produces would_execute: ALLOW_WITH_REDACTION is allow-class at policy
+// level but currently fails closed in the live execution layer, so the Outcome↔Override and
+// Outcome↔sub-fact checks (validateShadowEvidenceFields) remain the authority on the outcome.
+func validateShadowActionOverride(action string, override bool) error {
+	isAllowClass, known := shadowActionClass(action)
+	if !known {
+		return evtErr(mcperr.ReasonEventInvalid, "v2 shadow event carries an unknown decision action")
+	}
+	if override != !isAllowClass {
+		return evtErr(mcperr.ReasonEventInvalid, "shadow override must equal !isAllowClass(decision action)")
+	}
+	return nil
 }
 
 // validateShadowEvidenceFields fails closed on the ShadowEvidence value contract. It is
