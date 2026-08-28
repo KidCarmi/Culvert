@@ -12,6 +12,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { AuthMachine } from "../auth/machine";
 import { AuthProvider } from "../auth/AuthProvider";
 import { CategoryGroupsPage } from "../features/objects/CategoryGroupsPage";
+import { isRecord } from "../api/decode";
 
 const GROUP_A = {
   id: "aaa111bbb222",
@@ -206,12 +207,11 @@ function setField(labelIncludes: string, value: string): void {
   if (!(el instanceof HTMLInputElement)) {
     throw new Error(`input not found for label: ${labelIncludes}`);
   }
-  const setter = Object.getOwnPropertyDescriptor(
+  Object.getOwnPropertyDescriptor(
     HTMLInputElement.prototype,
     "value",
-  )?.set;
+  )?.set?.call(el, value);
   act(() => {
-    setter?.call(el, value);
     el.dispatchEvent(new Event("input", { bubbles: true }));
   });
 }
@@ -307,9 +307,10 @@ it("keeps a dangling member on save unless explicitly unchecked", async () => {
   await flushUntil(() => {
     expect(mutations).toHaveLength(1);
   });
-  const body = mutations[0]?.body as { categories: string[] };
-  expect(body.categories).toContain("retiredcat");
-  expect(body.categories).toContain("News");
+  const body = mutations[0]?.body;
+  if (!isRecord(body)) throw new Error("mutation body missing");
+  expect(body["categories"]).toContain("retiredcat");
+  expect(body["categories"]).toContain("News");
 });
 
 // F — delete: the server's structured 409 renders the REAL consumers and the

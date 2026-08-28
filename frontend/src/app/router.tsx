@@ -22,6 +22,7 @@ import { AuthRulesPage } from "../features/policy/AuthRulesPage";
 import { TesterPage } from "../features/policy/TesterPage";
 import { PolicyLearningPage } from "../features/learning/PolicyLearningPage";
 import { CategoryGroupsPage } from "../features/objects/CategoryGroupsPage";
+import { DecryptionProfilesPage } from "../features/objects/DecryptionProfilesPage";
 
 function NotFoundPage(): JSX.Element {
   return (
@@ -55,6 +56,10 @@ export function createAppRouter(): ReturnType<typeof createBrowserRouter> {
           {
             path: "objects/category-groups",
             element: <CategoryGroupsPage />,
+          },
+          {
+            path: "objects/decryption-profiles",
+            element: <DecryptionProfilesPage />,
           },
           { path: "policies/learning", element: <PolicyLearningPage /> },
           { path: "diagnostics", element: <DiagnosticsPage /> },

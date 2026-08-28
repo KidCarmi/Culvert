@@ -94,7 +94,11 @@ const NAV: readonly NavSection[] = [
         to: "/objects/category-groups",
         minRole: "viewer",
       },
-      { label: "Decryption Profiles", minRole: "viewer" },
+      {
+        label: "Decryption Profiles",
+        to: "/objects/decryption-profiles",
+        minRole: "viewer",
+      },
     ],
   },
   {
