@@ -263,6 +263,24 @@ jobs:
         # run so the two event paths can never drift).
         run: .github/scripts/coverage-floor.sh coverage.out
 
+      - name: Mount-point regression (privileged)
+        # TestRestoreCommit_DataDirIsMountPoint_FailsInsteadOfCommitting
+        # (restore_mountpoint_test.go) needs CAP_SYS_ADMIN to bind-mount a
+        # directory — it reproduces docker-compose.yml's `cli` service
+        # topology, where the named volume proxy-data is mounted at /data.
+        # The main "Run full suite" step above runs as the unprivileged
+        # runner user, so this test only ever hits its t.Skip branch there
+        # and the regression is never actually exercised. ubuntu-latest
+        # grants the runner user passwordless sudo, so run just this test
+        # again, as root. sudo resets PATH (secure_path) and HOME (→ /root),
+        # which would hide the setup-go-cache toolchain and the module/build
+        # caches the step above just populated, forcing a cold re-download
+        # under root — forward PATH/GOCACHE/GOMODCACHE explicitly instead of
+        # `sudo -E`, so the toolchain resolves and the warm caches are reused.
+        run: |
+          sudo env "PATH=$PATH" "GOCACHE=$(go env GOCACHE)" "GOMODCACHE=$(go env GOMODCACHE)" \
+            go test -run TestRestoreCommit_DataDirIsMountPoint_FailsInsteadOfCommitting -count=1 -v .
+
       - name: Upload coverage
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
