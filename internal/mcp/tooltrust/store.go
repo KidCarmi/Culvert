@@ -282,15 +282,9 @@ func (s *Store) Approve(id, approver string, target CurrentTarget) (*ToolApprova
 		}
 		return a.clone(), nil
 	case StatusPending:
-		// fallthrough to the decision below
-	case StatusRevoked:
-		return nil, mcperr.New(mcperr.ReasonApprovalRevoked, "tooltrust.approve", "revoked")
-	case StatusExpired:
-		return nil, mcperr.New(mcperr.ReasonApprovalExpired, "tooltrust.approve", "expired")
-	case StatusRejected:
-		return nil, mcperr.New(mcperr.ReasonApprovalTerminalState, "tooltrust.approve", "already rejected")
+		// fall through to the decision below
 	default:
-		return nil, mcperr.New(mcperr.ReasonApprovalTerminalState, "tooltrust.approve", "not approvable")
+		return nil, terminalApproveErr(a.Status)
 	}
 	if !a.Purpose.Issuable() {
 		return nil, mcperr.New(mcperr.ReasonApprovalPurposeUnsupported, "tooltrust.approve", "purpose not issuable")
@@ -317,6 +311,22 @@ func (s *Store) Approve(id, approver string, target CurrentTarget) (*ToolApprova
 		return nil, err
 	}
 	return a.clone(), nil
+}
+
+// terminalApproveErr maps a non-pending, non-active status to the precise reason an
+// approve is refused (terminal states are immutable; a revoked/expired grant needs a
+// fresh decision).
+func terminalApproveErr(status Status) error {
+	switch status {
+	case StatusRevoked:
+		return mcperr.New(mcperr.ReasonApprovalRevoked, "tooltrust.approve", "revoked")
+	case StatusExpired:
+		return mcperr.New(mcperr.ReasonApprovalExpired, "tooltrust.approve", "expired")
+	case StatusRejected:
+		return mcperr.New(mcperr.ReasonApprovalTerminalState, "tooltrust.approve", "already rejected")
+	default:
+		return mcperr.New(mcperr.ReasonApprovalTerminalState, "tooltrust.approve", "not approvable")
+	}
 }
 
 // verifyTarget checks the approval's bound identity + fingerprint against the
@@ -680,12 +690,18 @@ func (a *ToolApproval) validateStored() error {
 	if a.Status == StatusUnset {
 		return mcperr.New(mcperr.ReasonConfigInvalid, "tooltrust.load", "record has no status")
 	}
-	if len(a.Reason) > maxReasonBytes || len(a.TicketRef) > maxTicketBytes ||
-		len(a.RevocationReason) > maxReasonBytes || len(a.RejectedReason) > maxReasonBytes ||
-		len(a.RequestedBy) > maxActorBytes || len(a.ApprovedBy) > maxActorBytes || len(a.RevokedBy) > maxActorBytes {
+	if a.freeTextOverBound() {
 		return mcperr.New(mcperr.ReasonConfigInvalid, "tooltrust.load", "record free-text field exceeds byte bound")
 	}
 	return nil
+}
+
+// freeTextOverBound reports whether any of the record's free-text / actor fields
+// exceeds its byte bound (a corrupt or hand-edited durable record).
+func (a *ToolApproval) freeTextOverBound() bool {
+	return len(a.Reason) > maxReasonBytes || len(a.TicketRef) > maxTicketBytes ||
+		len(a.RevocationReason) > maxReasonBytes || len(a.RejectedReason) > maxReasonBytes ||
+		len(a.RequestedBy) > maxActorBytes || len(a.ApprovedBy) > maxActorBytes || len(a.RevokedBy) > maxActorBytes
 }
 
 // --- small helpers --------------------------------------------------------
