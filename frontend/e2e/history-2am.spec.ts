@@ -261,7 +261,7 @@ test("admin journey: enable with retention → edit retention → purge → disa
 }) => {
   const w = watch(page, FRESH_URL);
   await loginFresh(page);
-  await setFreshRetention(page, { enabled: false }); // known baseline (§19)
+  await setFreshRetention(page, { enabled: false, criticalDiskPct: 99 }); // known baseline (§19)
   await page.getByRole("button", { name: "Refresh" }).click();
   await expect(page.getByText("Disabled", { exact: true })).toBeVisible();
 
@@ -270,10 +270,14 @@ test("admin journey: enable with retention → edit retention → purge → disa
   await page.getByLabel("Persistent history").selectOption("enabled");
   await page.getByLabel("Retention days").fill("7");
   await page.getByLabel("Max storage GB").fill("1");
-  await page.getByLabel("Critical disk threshold %").fill("90");
+  // 99, not the default 90: the dev-machine session disk allowance reads
+  // ~90%+ used via statvfs, and a lower threshold engages EMERGENCY minimal
+  // logging + retained-history cleanup mid-test (correct product behavior
+  // that would destroy every premise here).
+  await page.getByLabel("Critical disk threshold %").fill("99");
   await page.getByRole("button", { name: "Save history settings" }).click();
   await expect(page.getByText("Enabled", { exact: true })).toBeVisible();
-  await expect(page.getByText("90%", { exact: true })).toBeVisible();
+  await expect(page.getByText("99%", { exact: true })).toBeVisible();
   // Server truth for the numeric values (precise, selector-ambiguity-free).
   const afterEnable: unknown = await (
     await page.request.get(`${FRESH_URL}/api/logs/retention`)
@@ -340,7 +344,7 @@ test("client-side bounds block a bad Save with no request; server 400/409 pinned
 }) => {
   const w = watch(page, FRESH_URL);
   await loginFresh(page);
-  await setFreshRetention(page, { enabled: false });
+  await setFreshRetention(page, { enabled: false, criticalDiskPct: 99 });
 
   const puts: string[] = [];
   page.on("request", (r) => {
@@ -383,7 +387,7 @@ test("unknown Save outcome: prior snapshot kept, unconfirmed declared, blocked u
 }) => {
   const w = watch(page, FRESH_URL, [/ERR_FAILED/, /ERR_ABORTED/]);
   await loginFresh(page);
-  await setFreshRetention(page, { enabled: false });
+  await setFreshRetention(page, { enabled: false, criticalDiskPct: 99 });
   await page.getByRole("button", { name: "Refresh" }).click();
   await expect(page.getByText("Disabled", { exact: true })).toBeVisible();
 
@@ -455,7 +459,7 @@ test("unknown Purge outcome: dialog closes into the unconfirmed state with the r
 }) => {
   const w = watch(page, FRESH_URL, [/ERR_FAILED/, /ERR_ABORTED/]);
   await loginFresh(page);
-  await setFreshRetention(page, { enabled: false });
+  await setFreshRetention(page, { enabled: false, criticalDiskPct: 99 });
   await page.getByRole("button", { name: "Refresh" }).click();
 
   await page.route("**/api/logs/purge", async (route) => {
@@ -514,7 +518,7 @@ test("auth boundary during a Save leaks nothing into the next session (flow 21)"
 }) => {
   const w = watch(page, FRESH_URL, [/ERR_FAILED/, /ERR_ABORTED/]);
   await loginFresh(page);
-  await setFreshRetention(page, { enabled: false });
+  await setFreshRetention(page, { enabled: false, criticalDiskPct: 99 });
   await page.getByRole("button", { name: "Refresh" }).click();
 
   await page.route("**/api/logs/retention", async (route) => {

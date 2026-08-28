@@ -145,12 +145,16 @@ echo "e2e-smoke: all three instances ready"
 # path), so if a prior run ended with the store disabled the seeds below
 # would silently land only in the memory ring and every retained-history
 # assertion would fail. Enable it through the supported admin API first.
+# criticalDiskPct=99: on dev machines the session disk allowance makes
+# statvfs read ~90%+ used permanently, and the default 90% threshold
+# engages EMERGENCY minimal logging + retained-history cleanup mid-suite
+# (a CORRECT product behavior that destroys the harness premise).
 SEED_JAR="$WORK/auth/seed-cookies.txt"
 curl -s -o /dev/null -c "$SEED_JAR" -X POST -H 'Content-Type: application/json' \
   -d '{"user":"admin","pass":"Password123"}' \
   "http://127.0.0.1:$UI_PORT/api/auth/login"
 curl -s -o /dev/null -b "$SEED_JAR" -X PUT -H 'Content-Type: application/json' \
-  -d '{"enabled":true,"retentionDays":7,"retentionMaxGB":1,"criticalDiskPct":90}' \
+  -d '{"enabled":true,"retentionDays":7,"retentionMaxGB":1,"criticalDiskPct":99}' \
   "http://127.0.0.1:$UI_PORT/api/logs/retention"
 
 echo "e2e-smoke: seeding traffic history through the AUTH proxy (default-deny)"
