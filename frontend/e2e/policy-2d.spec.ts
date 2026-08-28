@@ -27,6 +27,12 @@ import { expect, request, test } from "@playwright/test";
 import type { APIRequestContext, Page } from "@playwright/test";
 import { AUTH_URL, EMPTY_STATE, USERS } from "./fixtures";
 
+// This spec's BROWSER traffic carries its own client identity (the harness
+// trusts loopback as a reverse proxy), so its mutation burst draws on a
+// per-spec admin-plane rate budget instead of the suite-shared 127.0.0.1
+// budget (the deliberate 60-mutations/min posture stays armed per identity).
+test.use({ extraHTTPHeaders: { "X-Forwarded-For": "198.51.100.30" } });
+
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null;
 }
@@ -211,7 +217,7 @@ test("group referenced by an access rule: Where Used finds it, delete is refused
     await expect(
       page.getByText("Delete refused — still referenced"),
     ).toBeVisible();
-    await page.getByRole("button", { name: "Close" }).click();
+    await page.getByRole("button", { name: "Close", exact: true }).click();
 
     // Rename via UI; the RULE follows the SAME object by ID, new display name.
     await page
@@ -219,7 +225,7 @@ test("group referenced by an access rule: Where Used finds it, delete is refused
       .click();
     await page.getByLabel("Group name").fill("E2E 2D RefGroup v2");
     await page.getByRole("button", { name: "Save changes" }).click();
-    await expect(page.getByText("E2E 2D RefGroup v2")).toBeVisible();
+    await expect(page.getByText("E2E 2D RefGroup v2").first()).toBeVisible();
 
     const polResp = await api.get("/api/policy");
     const pol: unknown = await polResp.json();
@@ -230,7 +236,7 @@ test("group referenced by an access rule: Where Used finds it, delete is refused
       .filter(isRecord)
       .find((r) => r["name"] === "E2E 2D RefRule");
     expect(refRule).toBeDefined();
-    expect(refRule?.["destCategoryGroupID"]).toBe(gid);
+    expect(refRule?.["destCategoryGroupId"]).toBe(gid);
     expect(refRule?.["destCategoryGroup"]).toBe("E2E 2D RefGroup v2");
   } finally {
     await deleteRuleByName(api, "E2E 2D RefRule");
@@ -398,7 +404,7 @@ test("rename with an active draft: a draft-only reference follows and commits to
       .map((r: unknown) => r)
       .filter(isRecord)
       .find((r) => r["name"] === "E2E 2D DraftRef");
-    expect(committed?.["decryptionProfileID"]).toBe(pid);
+    expect(committed?.["decryptionProfileId"]).toBe(pid);
     expect(committed?.["decryptionProfile"]).toBe("e2e-2d-draftprof-v2");
 
     // Now the RUNNING-reference shape: the committed rule references the
@@ -441,7 +447,10 @@ test("rename with an active draft: a draft-only reference follows and commits to
 test("viewer reads both object surfaces without mutation controls; signing out clears open editor state", async ({
   browser,
 }) => {
-  const ctx = await browser.newContext({ storageState: EMPTY_STATE });
+  const ctx = await browser.newContext({
+    storageState: EMPTY_STATE,
+    extraHTTPHeaders: { "X-Forwarded-For": "198.51.100.31" },
+  });
   const page = await ctx.newPage();
   try {
     await page.goto(`${AUTH_URL}${GROUPS_ROUTE}`);
@@ -458,8 +467,9 @@ test("viewer reads both object surfaces without mutation controls; signing out c
     await expect(page.getByLabel("Username")).toBeVisible();
 
     // Operator: open the editor, then sign out — the boundary clears it.
-    await login(page, USERS.operator.user, USERS.operator.pass);
     await page.goto(`${AUTH_URL}${GROUPS_ROUTE}`);
+    await login(page, USERS.operator.user, USERS.operator.pass);
+    // The route intent returns to the requested page after sign-in.
     await page.getByRole("button", { name: "New category group…" }).click();
     await expect(page.getByLabel("Group name")).toBeVisible();
     await page.keyboard.press("Escape"); // dialog closes; dirty state cleared
