@@ -309,8 +309,11 @@ each capability (`gateway/`, `management/`) has per-partition subdirectories (`P
    records you just cleared, which would otherwise keep write/destructive Gateway operations
    blocked after recovery. But the same file also carries any UNRELATED, restart-persistent
    Gateway degradation, so inspect it (plain JSON, `0600`) and remove it ONLY when **both**:
-   - `"denial"` is the normal state (`0` — the denial-lane track, which corresponds to the
-     `P-DEN` partition you are preserving, is NOT degraded); AND
+   - `"denial"` is the normal state — value **`1`** (`StateNormal`); the denial-lane track, which
+     corresponds to the `P-DEN` partition you are preserving, is NOT degraded. Note the numbering
+     (`internal/mcp/events/state/state.go`): `0` is `StateUnknown`, which is NOT normal — it fails
+     closed on load — and `2` is `StateDenialLaneDegraded`. So the clean-denial case is exactly
+     `"denial": 1`; a `0` or a `2` there means LEAVE THE FILE (see below); AND
    - `"critical"` is degraded with a `"reason"` naming the schema-recovery corruption (the failed
      boot logged `recovery detected spool corruption: …`). Because the `reason` is set only on the
      FIRST transition to degraded, its naming the corruption proves the schema corruption was the
