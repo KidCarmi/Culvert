@@ -725,6 +725,55 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > FRESH/SETUPFAIL instances now carry their own paths, making the history
 > journeys deterministic).
 >
+> **Slice 2D-B implementation record (this branch, 2026-08-28).**
+>
+> **2D-B.0 backend hardening** — the URL-category store (`internal/urlcat`)
+> joined the durable/fenced mutation doctrine WITHOUT a new on-disk format:
+> the optimistic fence is the existing restart-stable `ContentFingerprint`
+> (§7 decision — ABA equality accepted; the on-disk file stays the legacy
+> bare array), evaluated inside the store's new mutMu/saveMu serialization
+> domain (fence → memory mutation → durable publish, rollback to the
+> pre-mutation taxonomy on persist failure, landed-content doctrine,
+> publication ordering + commit boundary per 2D-A). Legacy mutators became
+> memory-only cores + best-effort wrappers; `ReplaceAll` (cluster apply /
+> import / rollback) holds the mutation domain; the 10,000-host bound is
+> enforced at the store boundary on EVERY write path (the legacy PUT and
+> single-host add were uncapped); fenced create is STRICT. The v2 read seam
+> is `GET /api/urlcat/state` ({categories, revision}) — the legacy raw-array
+> GET is byte-identical; `?ifRevision=` mutations recompose the signed
+> effective view ONLY after durable success. Overrides gained
+> `catoverride.ReplaceAllDurable` (fenced full-set replacement over the
+> `saasFeedOverridesFingerprint` durable authority revision, same
+> serialization/rollback doctrine; empty set stays the deliberate
+> clear-all). SaaS settings gained a content-derived configuration revision
+> fenced INSIDE the serialized AdminSettings save domain via the extended
+> persist-before-apply pattern (`precondition` + `saasFeed` target override:
+> comparison, durable target write and runtime apply under one
+> `adminSettingsMu` section — a persist failure never applies the target).
+>
+> **2D-B.1–5 frontend** — `frontend/src/api/urlcat.ts` (fail-closed decoders
+> for state/lookup/feed-status/signed status/settings/overrides/refresh;
+> the shared string-revision conflict recognizer; null semantics preserved;
+> the nine-state signed vocabulary with an unknown bucket never coerced
+> healthy) + `/app/objects/url-categories` (five sections: Categories with
+> the bounded one-host-per-line editor and no rename affordance — category
+> NAMES stay authoritative, §3; Lookup manual-run with "Uncategorized" as
+> taxonomy truth; Feed Status with UT1 corpus semantics labeled "UT1
+> community feed"; Signed SaaS Feed with stale = LKG-serving copy,
+> official-endpoint-only settings, T2 enablement ceremonies, managed-DP
+> read-only posture, `cluster_publish_rejected` as local-saved/fleet-
+> rejected, §30 manual refresh; Overrides with subtree-scope ceremony and
+> counted clear-all). Browser proofs: unit matrices (urlcat-api,
+> urlcat-page) + real-binary `urlcat-2db.spec.ts` incl. the two-client
+> stale-write 409 and a per-test guard that the browser never contacts the
+> public signed-feed hostname (§31). §47: the Policy Learning category
+> epoch moves on an admin semantic edit, is restart-stable over identical
+> persisted taxonomy, and the override fingerprint moves the signed
+> identity; the UT1 community DB stays OUTSIDE the epoch (recorded
+> limitation, stated nowhere as covered). Recorded residual: the v2
+> downgrade posture and release-rollback lifecycle notes from 2D-A carry
+> forward unchanged.
+>
 > **Slice 2D-A implementation record (this branch, 2026-08-28).**
 >
 > **2D-A.0 backend hardening** — the shared-object stores
