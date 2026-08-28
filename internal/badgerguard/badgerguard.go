@@ -248,12 +248,26 @@ func Open[T any](dir string, p Policy, open func(string) (T, error)) (T, Recover
 	if poison := AbandonedMarkers(dir); len(poison) > 0 {
 		rec.Trigger = TriggerPoisonMarker
 		rec.Cause = "a previous open entered the store and never returned (corrupt table, kill, or out-of-memory)"
-		ApplyQuarantine(dir, &rec)
-		if rec.Quarantined {
-			// Clear only markers this call acted on. A skipped quarantine
-			// leaves the condition unresolved, so the breadcrumbs must survive
-			// for the next attempt — and markers belonging to a LIVE opener are
-			// never in this list to begin with.
+		skip := applyQuarantine(dir, &rec)
+		// Retire the markers this call has settled. A marker must not outlive
+		// the incident it describes, and there are exactly two ways it is
+		// settled: the damaged store was moved aside, or there was NO store to
+		// move aside.
+		//
+		// The second case is not a formality. A process killed after
+		// BeginAttempt but BEFORE badger created the directory leaves a marker
+		// describing a store that never existed. Keeping it — which is what
+		// gating solely on Quarantined did — lets the very next open create a
+		// healthy store beside the stale marker, and the open AFTER that
+		// quarantines that healthy store and resets its history. So the
+		// no-store skip has to clear, or the mechanism manufactures the data
+		// loss it exists to prevent.
+		//
+		// skipBlocked still keeps them: a live lock holder, an unreadable path
+		// or a failed rename all leave the condition genuinely unresolved, so
+		// the breadcrumbs must survive for the next attempt. (Markers belonging
+		// to a LIVE opener are never in this list to begin with.)
+		if rec.Quarantined || skip == skipNoStore {
 			for _, m := range poison {
 				_ = os.Remove(m)
 			}
@@ -292,6 +306,23 @@ func Open[T any](dir string, p Policy, open func(string) (T, error)) (T, Recover
 	return store, rec, nil
 }
 
+// quarantineSkip classifies WHY a quarantine did not happen, so the caller can
+// tell "there was nothing to quarantine" from "something was in the way". The
+// two demand opposite handling of the poison markers, and collapsing them into
+// the single Skipped string was the bug described in Open.
+type quarantineSkip int
+
+const (
+	// skipNone — the quarantine happened.
+	skipNone quarantineSkip = iota
+	// skipNoStore — there is no store directory. Nothing was ever created
+	// here, so nothing can be damaged and nothing needs preserving.
+	skipNoStore
+	// skipBlocked — a live lock holder, an unreadable path, or a failed
+	// rename. The condition is unresolved and the evidence must survive.
+	skipBlocked
+)
+
 // ApplyQuarantine moves dir aside, recording the outcome on rec. It refuses
 // when the directory is absent, when another process holds the store lock, or
 // when the lock state cannot be determined — the fail-safe default is to leave
@@ -302,33 +333,37 @@ func Open[T any](dir string, p Policy, open func(string) (T, error)) (T, Recover
 // lock and starts opening, only to have its live directory renamed underneath
 // it: rename does not consult flocks, so the probe has to remain in force until
 // the move is done.
-func ApplyQuarantine(dir string, rec *Recovery) {
+func ApplyQuarantine(dir string, rec *Recovery) { _ = applyQuarantine(dir, rec) }
+
+// applyQuarantine is ApplyQuarantine plus the skip classification Open needs.
+func applyQuarantine(dir string, rec *Recovery) quarantineSkip {
 	if _, err := os.Stat(dir); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			rec.Skipped = "no store directory present"
-		} else {
-			rec.Skipped = "cannot stat the store directory: " + err.Error()
+			return skipNoStore
 		}
-		return
+		rec.Skipped = "cannot stat the store directory: " + err.Error()
+		return skipBlocked
 	}
 	lock, err := LockStore(dir)
 	switch {
 	case err != nil:
 		rec.Skipped = "cannot determine whether the store is in use: " + err.Error()
-		return
+		return skipBlocked
 	case lock == nil:
 		rec.Skipped = "another process holds the store lock"
-		return
+		return skipBlocked
 	}
 	defer lock.Release()
 
 	qpath, err := QuarantineDir(lock, dir)
 	if err != nil {
 		rec.Skipped = "could not move the damaged store aside: " + err.Error()
-		return
+		return skipBlocked
 	}
 	rec.Quarantined = true
 	rec.QuarantinePath = qpath
+	return skipNone
 }
 
 // openGuarded arms this attempt's marker for the duration of one badger.Open

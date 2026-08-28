@@ -408,3 +408,90 @@ func TestApplyQuarantine_MissingDirectoryIsRecordedNotAnError(t *testing.T) {
 		t.Errorf("Skipped = %q, want the missing-directory reason", rec.Skipped)
 	}
 }
+
+// ── the marker must not outlive the incident it describes ────────────────────
+
+// Codex review, PR #1242 (P2). A process killed after BeginAttempt but BEFORE
+// the store directory exists leaves a marker describing a store that was never
+// created. The quarantine is then correctly skipped — there is nothing to move
+// aside — but gating the marker cleanup solely on Quarantined left the marker
+// behind, so:
+//
+//	open 1 — creates a healthy store beside the stale marker
+//	open 2 — reads that same marker as poison and quarantines the HEALTHY store
+//
+// i.e. the mechanism manufactured exactly the data loss it exists to prevent,
+// one open later. This shape is inherited from the original catdb implementation,
+// so it was latent in the shipped Layer-2 store too.
+func TestOpen_StaleMarkerOnAnAbsentStoreDoesNotQuarantineTheNextStore(t *testing.T) {
+	dir := tempStore(t)
+	// The store directory deliberately does NOT exist: the dead process never
+	// got far enough to create it.
+	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
+		t.Fatalf("mkdir parent: %v", err)
+	}
+	marker := StoreBase(dir) + MarkerSuffix + "777-1"
+	if err := os.WriteFile(marker, []byte("pid=777\n"), 0o600); err != nil {
+		t.Fatalf("plant marker: %v", err)
+	}
+
+	// Open 1: nothing to quarantine, store gets created.
+	s1, rec1, err := Open(dir, DefaultPolicy(), newDirStore)
+	if err != nil || s1 == nil {
+		t.Fatalf("open 1 = (%v, %v)", s1, err)
+	}
+	if rec1.Quarantined {
+		t.Fatalf("open 1 quarantined a store that did not exist: %+v", rec1)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatal("the stale marker survived an open that settled it — open 2 will quarantine a healthy store")
+	}
+
+	// Open 2: the store is healthy and must be left completely alone.
+	canary := filepath.Join(dir, "canary")
+	if err := os.WriteFile(canary, []byte("healthy"), 0o600); err != nil {
+		t.Fatalf("seed canary: %v", err)
+	}
+	s2, rec2, err := Open(dir, DefaultPolicy(), newDirStore)
+	if err != nil || s2 == nil {
+		t.Fatalf("open 2 = (%v, %v)", s2, err)
+	}
+	if rec2.Quarantined {
+		t.Errorf("open 2 quarantined a HEALTHY store (moved to %s)", rec2.QuarantinePath)
+	}
+	if _, err := os.Stat(canary); err != nil {
+		t.Errorf("the healthy store's contents were moved aside: %v", err)
+	}
+	if n := len(QuarantinedCopies(dir)); n != 0 {
+		t.Errorf("quarantined copies = %d, want 0 — a healthy store was reset", n)
+	}
+}
+
+// The control for the fix above: a marker must still be KEPT when the
+// quarantine was blocked rather than unnecessary. A live lock holder means the
+// condition is genuinely unresolved, so the breadcrumb has to survive for the
+// next attempt — clearing it there would silently disarm the recovery.
+func TestOpen_BlockedQuarantineKeepsTheMarkerForTheNextAttempt(t *testing.T) {
+	dir := tempStore(t)
+	if _, err := newDirStore(dir); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	holder, err := LockStore(dir)
+	if err != nil || holder == nil {
+		t.Fatalf("LockStore = (%v, %v)", holder, err)
+	}
+	defer holder.Release()
+
+	marker := StoreBase(dir) + MarkerSuffix + "888-1"
+	if err := os.WriteFile(marker, []byte("pid=888\n"), 0o600); err != nil {
+		t.Fatalf("plant marker: %v", err)
+	}
+
+	_, rec, _ := Open(dir, DefaultPolicy(), newDirStore)
+	if rec.Quarantined {
+		t.Fatal("quarantined a store held by another opener")
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Error("a marker was discarded while the condition was still unresolved; the next attempt cannot recover")
+	}
+}

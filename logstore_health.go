@@ -182,12 +182,22 @@ func reportLogStoreUnavailable(path string, rec logstore.Recovery, openErr error
 // checkHistoryStore is the `history_store` operator-contract row.
 //
 // Severity policy:
-//   - never enabled, or enabled and healthy with no evidence on disk → ok.
-//   - quarantined copies still present → warn. The gateway is serving
-//     correctly; the operator has evidence to inspect and disk to reclaim.
-//     Keyed on the copies being PRESENT, so it clears when they are removed.
 //   - the last enable failed → warn, never fail. History is an enhancement;
 //     a fail row here would report a fully-serving gateway as broken.
+//   - quarantined copies still present → warn, worded differently depending on
+//     whether THIS process did the quarantining. The gateway is serving
+//     correctly; the operator has evidence to inspect and disk to reclaim.
+//   - anything else → ok, reporting whether a store is actually published.
+//
+// **Every warn is keyed on evidence that is still on disk**, never on the fact
+// that a recovery once happened. A recovery always leaves a copy behind, so
+// nothing is lost by keying on the copy — and it is what lets the row clear the
+// moment the operator does what OperatorAction asked, with no restart and no
+// history toggle. Keying the recovered branch on the historical flag instead
+// (as the first draft did) left the row warning after the copies were gone,
+// claiming "0 quarantined copy/copies on disk" and contradicting its own
+// advice. Same rule as ca_health.go's persistence warning: report the degraded
+// STATE, never a latch that can no longer clear.
 func checkHistoryStore() OperatorContractCheck {
 	h := logStoreOpenState()
 	residual := logStoreResidualQuarantines()
@@ -200,16 +210,16 @@ func checkHistoryStore() OperatorContractCheck {
 			OperatorAction: "Check the data volume for the history store (space, permissions, mount). If the passphrase changed, purge saved logs and enable history again. See server logs for the cause.",
 		}
 	}
-	if h.Recovered {
-		return OperatorContractCheck{
-			Code:   "history_store",
-			Status: diagWarn,
-			Message: fmt.Sprintf("request-history store was damaged and re-created (%d quarantined copy/copies on disk); saved history was reset, the durable request log is unaffected",
-				residual),
-			OperatorAction: "Confirm the data volume is healthy, then delete the quarantined .corrupt.* copy to reclaim disk.",
-		}
-	}
 	if residual > 0 {
+		if h.Recovered {
+			return OperatorContractCheck{
+				Code:   "history_store",
+				Status: diagWarn,
+				Message: fmt.Sprintf("request-history store was damaged and re-created (%d quarantined copy/copies on disk); saved history was reset, the durable request log is unaffected",
+					residual),
+				OperatorAction: "Confirm the data volume is healthy, then delete the quarantined .corrupt.* copy to reclaim disk.",
+			}
+		}
 		return OperatorContractCheck{
 			Code:   "history_store",
 			Status: diagWarn,
@@ -218,7 +228,12 @@ func checkHistoryStore() OperatorContractCheck {
 			OperatorAction: "Delete the quarantined .corrupt.* copy of the request-history store to reclaim disk.",
 		}
 	}
-	if !h.Attempted {
+	// "Open" is a claim about right now, so it is read from the published
+	// store rather than from the fact that an enable was once attempted —
+	// otherwise every disable (a runtime toggle, or persisted admin settings
+	// switching off a YAML-seeded store) left the row insisting history was
+	// still open.
+	if globalLogStore.Load() == nil {
 		return OperatorContractCheck{
 			Code:    "history_store",
 			Status:  diagOK,

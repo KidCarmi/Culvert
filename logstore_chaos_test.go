@@ -212,22 +212,31 @@ func TestChaos57_ContractRowClearsWhenTheOperatorReclaimsTheDisk(t *testing.T) {
 			t.Fatalf("reclaim %s: %v", c, err)
 		}
 	}
-	// A later clean open is what clears the "this open recovered" fact; the
-	// residual-copy signal must already be gone on its own.
 	if n := logStoreResidualQuarantines(); n != 0 {
 		t.Errorf("residual quarantines after reclaim = %d, want 0 — the metric cannot clear", n)
 	}
-	disableLogStore()
-	if err := enableLogStore(context.Background(), dir, 1, 0); err != nil {
-		t.Fatalf("re-enable: %v", err)
-	}
+	// The row must clear RIGHT NOW: no restart, no history toggle, no second
+	// open. The first draft keyed this branch on the historical `Recovered`
+	// flag, so it kept warning after the copies were gone — and said "0
+	// quarantined copy/copies on disk" while doing it (Codex review, PR #1242).
+	// Asserting only after a disable/re-enable, as this test first did, hid
+	// that: re-enabling resets the flag, so the row cleared for the wrong
+	// reason and the gate proved less than it claimed.
 	if got := checkHistoryStore(); got.Status != diagOK {
-		t.Errorf("contract row after the operator reconciled = %q (%s), want ok", got.Status, got.Message)
+		t.Errorf("contract row immediately after the operator reconciled = %q (%s), want ok", got.Status, got.Message)
 	}
 	// The cumulative counter is deliberately NOT cleared: "did this ever
 	// happen?" must survive the cleanup that clears "is there still evidence?".
 	if logStoreQuarantines.Load() == 0 {
 		t.Error("the cumulative quarantine counter was reset by the cleanup; the incident is now invisible")
+	}
+	// And it stays ok across a toggle.
+	disableLogStore()
+	if err := enableLogStore(context.Background(), dir, 1, 0); err != nil {
+		t.Fatalf("re-enable: %v", err)
+	}
+	if got := checkHistoryStore(); got.Status != diagOK {
+		t.Errorf("contract row after a re-enable = %q (%s), want ok", got.Status, got.Message)
 	}
 }
 
@@ -297,5 +306,31 @@ func TestChaos57_NoRootPathOpensTheHistoryStoreUnguarded(t *testing.T) {
 	}
 	if !guarded {
 		t.Error("no root file opens the history store through the guard; the CHAOS-57 fix has been removed")
+	}
+}
+
+// Codex review, PR #1242 (P2). "Open" is a claim about the present, so it must
+// be read from the published store. Keyed on "an enable was once attempted",
+// the row went on reporting an open history store after every disable — a
+// runtime toggle, or persisted admin settings switching off a YAML-seeded
+// store — which is a monitoring blind spot in the direction that looks healthy.
+func TestChaos57_ContractRowReportsADisabledStoreAsDisabled(t *testing.T) {
+	dir := withHistoryStoreDir(t)
+	seedHistoryStore(t, dir)
+
+	if err := enableLogStore(context.Background(), dir, 1, 0); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	if got := checkHistoryStore(); got.Message != "request-history store open" {
+		t.Fatalf("row while enabled = %q, want the open message", got.Message)
+	}
+
+	disableLogStore()
+	got := checkHistoryStore()
+	if got.Status != diagOK {
+		t.Errorf("row after disable = %q, want ok (a disabled store is not a fault)", got.Status)
+	}
+	if got.Message == "request-history store open" {
+		t.Error("the row still reports history as open after disableLogStore closed and unpublished it")
 	}
 }

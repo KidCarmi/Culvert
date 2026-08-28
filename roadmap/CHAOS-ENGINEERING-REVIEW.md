@@ -2991,6 +2991,55 @@ survive to observe:
   the open func that the quarantine already happened, pinning the ordering that
   is the entire mechanism.
 
+### 25.7b Review follow-ups — three defects in the fix, raised by Codex
+
+All three were verified against the code before being accepted, and each is
+pinned by a gate verified failing against the shape it replaces.
+
+**A stale marker outlived the incident it described — and this one was
+INHERITED, so it was latent in the shipped catdb store too.** A process killed
+after `BeginAttempt` but BEFORE badger created the directory leaves a marker
+describing a store that never existed. The quarantine is then correctly skipped
+(there is nothing to move aside), but the marker cleanup was gated solely on
+`Quarantined`, so the marker survived. The next open created a healthy store
+beside it; the open AFTER that read the same marker as poison and quarantined
+that healthy store. **The mechanism manufactured, one open later, exactly the
+data loss it exists to prevent.**
+
+The fix is a distinction the original code did not draw. `Skipped` was a single
+human-readable string, so "there is nothing here to quarantine" and "something
+is in the way" were indistinguishable to the caller — and they demand opposite
+handling. `applyQuarantine` now returns a `quarantineSkip`: `skipNoStore`
+retires the markers (nothing was ever created, so nothing can be damaged),
+while `skipBlocked` keeps them (a live lock holder, an unreadable path or a
+failed rename all leave the condition genuinely unresolved, and discarding the
+breadcrumb there would silently disarm the recovery). The control gate pins
+that second half, because a fix that cleared markers unconditionally would pass
+the defect gate while being strictly worse than the defect.
+
+**The contract row contradicted its own documented rule.** §25.6 claims every
+warn is keyed on evidence still on disk so the row clears when the operator
+reclaims it. The `Recovered` branch was keyed on the historical flag instead, so
+after the copies were deleted it went on warning — while interpolating
+`residual` into its own message and thus reporting *"0 quarantined copy/copies
+on disk"*. Worse, the gate did not catch it: it asserted `ok` only after a
+disable/re-enable, which resets the flag, so the row cleared for the wrong
+reason and the test proved less than it claimed. Both branches now sit under
+`residual > 0`, and the gate asserts the row clears IMMEDIATELY, with the
+toggle kept as a separate follow-on assertion.
+
+**"Open" was a claim about the past.** The row read `Attempted` — "an enable was
+tried in this process" — so after any `disableLogStore` (a runtime toggle, or
+persisted admin settings switching off a YAML-seeded store) it kept reporting
+`request-history store open`. It now reads `globalLogStore.Load()`. A blind spot
+in the direction that looks healthy is the §1 theme, on the very row added to
+close one.
+
+The second and third are the same error in two places, and it is worth naming:
+**a status surface must be derived from current state, not from a latch set when
+something once happened.** That is `ca_health.go`'s rule, cited in this
+section's own prose while two of its three branches broke it.
+
 ### 25.8 What is deliberately left
 
 - **R-F is untouched and still open.** Three fatal boot loads (`catStore.Load`,
