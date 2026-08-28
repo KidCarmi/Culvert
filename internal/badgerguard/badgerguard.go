@@ -353,6 +353,9 @@ type HeldLock struct {
 	released bool
 }
 
+// Release drops the flock and closes the handle. Idempotent, and safe on a nil
+// receiver so callers can defer it unconditionally. Once released the handle is
+// permanently unusable for a quarantine — see ErrStoreLockNotHeld.
 func (h *HeldLock) Release() {
 	if !h.Held() {
 		return
@@ -362,6 +365,9 @@ func (h *HeldLock) Release() {
 	h.released = true
 }
 
+// Held reports whether this handle still holds the lock. It is what
+// QuarantineDir checks, so it is the enforcement point for "the store lock is
+// held ACROSS the rename" rather than merely probed before it.
 func (h *HeldLock) Held() bool { return h != nil && h.f != nil && !h.released }
 
 // ErrStoreLockNotHeld guards the rename against a future refactor that probes

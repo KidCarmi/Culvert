@@ -96,7 +96,7 @@ var logStoreEnableMu sync.Mutex
 // quarantines a directory a previous process died inside of before badger is
 // handed it again. The recovery is returned, not logged here: the caller owns
 // the operator-facing surfaces.
-func openLogStore(dir string, retentionDays int, maxGB float64) (*logStore, logstore.Recovery, error) {
+func openLogStore(dir string, retentionDays int, maxGB float64) (store *logStore, recovery logstore.Recovery, err error) {
 	var ttl time.Duration
 	if retentionDays > 0 {
 		ttl = time.Duration(retentionDays) * 24 * time.Hour
