@@ -508,6 +508,76 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 >   process can hold the Badger lock on `/data/logstore`) — premises must
 >   be API-established, never assumed.
 
+> **Slice 2B implementation record (this branch, 2026-08-28).**
+>
+> **Entry-gate delta review**: `origin/main` advanced 183 commits past the
+> Batch-2 base `fdad5254` (merge-base unchanged). No Policy / Policy Draft /
+> PolicyStore / route-metadata changes; the auth surface changed twice —
+> (1) the pre-auth surfaces (`/api/auth/status`, `/api/setup/status`) now send
+> `ui_tls_fallback` WITHOUT `ui_tls_fallback_reason` (unauthenticated-surface
+> redaction), reconciled here by making the reason OPTIONAL in
+> `decodeSetupStatus`/`decodeAuthStatus` (default `""`; the flag alone drives
+> the warning UI); (2) open-mode setup persistence is fail-closed on main
+> (backend-only, no frontend contract impact).
+>
+> **2B.0 backend hardening (precedes all write UI):**
+> - **2B.0a atomic fencing** (`policy_mutation.go`): when `?ifVersion=` is
+>   asserted, the effective-generation comparison, the first-write draft
+>   fork, and the store mutation run under ONE coordinator critical section
+>   (`fencedMutate`) — the documented two-writers-both-pass window is closed.
+>   `ifVersion` stays optional (absent = legacy last-write-wins, unchanged).
+>   Version-stream continuity: the draft fork SEEDS the candidate counter
+>   from the running generation (first staged write lands at vN+1, so a stale
+>   pre-fork vN deterministically conflicts), and candidate retirement
+>   (commit/revert/no-op reconcile) advances running past every candidate
+>   generation — stale tokens can only ever produce a conservative conflict,
+>   never a false pass. Proofs: `policy_mutation_fence_test.go` (concurrent
+>   edit/edit, create/create, reorder/edit, first-write-opens-draft incl. the
+>   deterministic fork version-collision regression, commit-vs-mutation,
+>   legacy compatibility, retired-token revival), green under `-race`.
+> - **2B.0b durable-or-nothing** : a 2xx ordinary policy write now means the
+>   mutation is durably persisted in the current mode's domain
+>   (`policy_rules.json` live / `policy_draft.json` staged); a pre-replacement
+>   persistence failure fails the request AND rolls the semantic state back
+>   (memory and restart-visible file agree the mutation never happened);
+>   `ErrReplacedNotSynced` counts as landed per the commitActivate doctrine.
+>   Proofs: `policy_mutation_durability_test.go` (real AtomicWrite failures
+>   via the directory-blocker technique + restart-reload verification through
+>   the real recovery paths).
+>
+> **PolicyRule field classification matrix (§11 — the write contract).**
+> PUT `/api/policy` is FULL REPLACEMENT; the v2 editor submits exactly the
+> EDITABLE set below (`AccessRuleWrite`, `frontend/src/api/policyWrite.ts`)
+> and never the rest. Tri-state fields (`*bool` on the wire) preserve ABSENT
+> as a distinct value.
+>
+> | Wire field | Class | Notes |
+> |---|---|---|
+> | `name` | EDITABLE | required |
+> | `priority` | EDITABLE (create hint) / SERVER-OWNED (edit) | position is reorder/move-owned; `UpdateByID` preserves the stored slot; create may request a slot (collision ⇒ server reassigns) |
+> | `enabled` | EDITABLE tri-state | absent ⇒ enabled; absent preserved unless the operator flips the control |
+> | `sourceIP`, `sourceIdentity`, `sourceGroup`, `authSource` | EDITABLE | empty = any |
+> | `destFQDN`, `destCategory`, `destCountry` | EDITABLE | empty = any |
+> | `destCategoryGroup` | EDITABLE (NAME) | authoritative id stamped server-side |
+> | `destCategoryGroupId` | SERVER-OWNED | `stampObjectRefIDs` discards client values |
+> | `schedule` | EDITABLE | days/timeStart/timeEnd/timezone preserved exactly; absent = always active |
+> | `sslAction` | EDITABLE | `Inspect`\|`Bypass` only |
+> | `fileFiltering`, `fileProfile` | EDITABLE | server auto-enables filtering when a profile is set |
+> | `logFullUri` | EDITABLE | |
+> | `logTraffic` | EDITABLE tri-state | absent/true = log; false = stats only; absent preserved |
+> | `stripAlpn` | EDITABLE tri-state | absent/true = HTTP/1.1 downgrade; false = native H2 — PRESENCE-AWARE server-side; absent preserved |
+> | `tlsSkipVerify` | EDITABLE | |
+> | `decryptionProfile` | EDITABLE (NAME) | authoritative id stamped server-side |
+> | `decryptionProfileId` | SERVER-OWNED | |
+> | `action`, `redirectURL` | EDITABLE | `Allow`\|`Drop`\|`Block_Page`\|`Redirect`; redirectURL used by Redirect |
+> | `comment` | EDITABLE | the one admin-authored metadata field |
+> | `id` | SERVER-OWNED | stable ULID minted server-side; an ADDRESS (`?id=`), never form content |
+> | `hitCount`, `lastHit` | DERIVED | runtime counters, never submitted |
+> | `createdAt`, `modifiedAt`, `modifiedBy` | SERVER-OWNED | stamped in `stampRuleMetadataForWrite`; client values ignored |
+> | `ruleType` | STAGE-1 GATE | only `""`/`"access"` representable in the DTO; `"auth"` structurally impossible (2C) |
+> | `auth`, `subjectMatch` | STAGE-1 ONLY / RESERVED | never in the write DTO |
+> | (priority-addressed update/delete, `{priorities:[…]}` bulk delete) | DEPRECATED/compat | backend-only for legacy callers; the v2 client is exclusively id-addressed — v2 bulk delete DEFERRED (stable-ID bulk contract does not exist; recorded parity residue) |
+
 ### FE-6 — Cluster, identity, certificates, settings, releases, support, MCP, decryption
 - **Objective**: FE-V27..V30, FE-V33, FE-V35, FE-V36 (settings decomposed per IA §5),
   FE-V37, FE-V04/05, FE-V07..V15.

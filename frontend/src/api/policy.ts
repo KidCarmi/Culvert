@@ -65,6 +65,17 @@ export interface PolicyRuleView {
   action: string;
   redirectURL: string;
   logFullUri: boolean;
+  // ── wire-fidelity fields (2B): PUT /api/policy is FULL REPLACEMENT, so the
+  // editor must preserve every editable field — including tri-states whose
+  // ABSENT wire value is distinct from an explicit boolean. `undefined` here
+  // means "absent on the wire" and must round-trip as absent.
+  tlsSkipVerify: boolean;
+  /** nil/true = log allowed traffic; false = stats only. Absent preserved. */
+  logTraffic: boolean | undefined;
+  /** nil/true = downgrade inspected tunnel to HTTP/1.1; false = native H2. */
+  stripAlpn: boolean | undefined;
+  /** raw wire value of `enabled` (display convenience `enabled` collapses absent⇒true) */
+  enabledWire: boolean | undefined;
   hitCount: number;
   lastHit: string;
   createdAt: string;
@@ -121,6 +132,10 @@ export const decodePolicyRule: Decoder<PolicyRuleView> = (v, path = "$") => {
     action: field(o, "action", readString, path),
     redirectURL: field(o, "redirectURL", optStr, path) ?? "",
     logFullUri: field(o, "logFullUri", optBool, path) ?? false,
+    tlsSkipVerify: field(o, "tlsSkipVerify", optBool, path) ?? false,
+    logTraffic: field(o, "logTraffic", optBool, path),
+    stripAlpn: field(o, "stripAlpn", optBool, path),
+    enabledWire: field(o, "enabled", optBool, path),
     hitCount: field(o, "hitCount", optNum, path) ?? 0,
     lastHit: field(o, "lastHit", optStr, path) ?? "",
     createdAt: field(o, "createdAt", optStr, path) ?? "",

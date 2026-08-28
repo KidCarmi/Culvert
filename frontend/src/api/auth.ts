@@ -17,6 +17,7 @@ import {
   field,
   readBoolean,
   readEnum,
+  readOptional,
   readRecord,
   readString,
 } from "./decode";
@@ -57,7 +58,12 @@ function readTLSFallback(o: Record<string, unknown>): {
 } {
   return {
     tlsFallback: field(o, "ui_tls_fallback", readBoolean),
-    tlsFallbackReason: field(o, "ui_tls_fallback_reason", readString),
+    // OPTIONAL: current main redacts the raw self-sign cause from the
+    // pre-auth surfaces (the reason string could quote a -ui-san value or an
+    // internal hostname to an UNAUTHENTICATED caller) and sends only the
+    // flag. Tolerate both shapes; the flag alone drives the warning UI.
+    tlsFallbackReason:
+      field(o, "ui_tls_fallback_reason", readOptional(readString)) ?? "",
   };
 }
 
