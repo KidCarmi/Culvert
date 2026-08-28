@@ -25,22 +25,26 @@ package model
 
 // shadowAllowClassActionCodes are the ALLOW-class policy action wire codes.
 var shadowAllowClassActionCodes = map[string]struct{}{
-	"ALLOW":                {},
-	"MONITOR":              {},
-	"ALLOW_ONCE":           {},
-	"ALLOW_FOR_SESSION":    {},
-	"ALLOW_WITH_REDACTION": {},
+	"ALLOW":                      {},
+	"MONITOR":                    {},
+	"ALLOW_ONCE":                 {},
+	"ALLOW_FOR_SESSION":          {},
+	actionCodeAllowWithRedaction: {},
 }
 
-// The two policy-gating action wire codes that have a 1:1 correspondence with a single
-// Shadow outcome in the producer (policyClassOutcome emits would_require_approval ONLY for
-// REQUIRE_APPROVAL and would_require_confirmation ONLY for REQUIRE_CONFIRMATION). They are
-// named constants so the classifier set below and the exact-action binding
-// (validateShadowGatedOutcomeAction) share ONE source; the cross-package parity wall pins
-// both — like every code — to policy.Action.String(), so a wire-code rename fails CI here.
+// Action wire codes bound BY NAME in the durable v2 Shadow contract, beyond the allow/restrictive
+// class. The two gating codes have a 1:1 correspondence with a single Shadow outcome
+// (policyClassOutcome emits would_require_approval ONLY for REQUIRE_APPROVAL and
+// would_require_confirmation ONLY for REQUIRE_CONFIRMATION); ALLOW_WITH_REDACTION is the one
+// ALLOW-class action the live layer fails closed, so it is gated to would_block and never reaches
+// an allow-path outcome. Named constants so the classifier sets and the outcome bindings
+// (validateShadowGatedOutcomeAction / validateShadowRedactionOutcome) share ONE source; the
+// cross-package parity wall pins every code to policy.Action.String(), so a wire-code rename fails
+// CI here.
 const (
 	actionCodeRequireApproval     = "REQUIRE_APPROVAL"
 	actionCodeRequireConfirmation = "REQUIRE_CONFIRMATION"
+	actionCodeAllowWithRedaction  = "ALLOW_WITH_REDACTION"
 )
 
 // shadowRestrictiveActionCodes are the restrictive (non-ALLOW-class) policy action wire

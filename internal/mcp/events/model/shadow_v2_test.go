@@ -218,6 +218,14 @@ func TestV2_ValidationRejectsMalformedShadowEvidence(t *testing.T) {
 			e.Shadow.Outcome = "would_require_confirmation"
 			e.Shadow.CredentialPlan = "no_credential_profile"
 		},
+		// Redaction reachability (Codex round, PR #1235): ALLOW_WITH_REDACTION is allow-class (so
+		// Override=false) but the live layer fails it closed, so the producer gates it to
+		// would_block and it never reaches an allow-path outcome. would_execute is allow-class-only
+		// with Override=false (consistent with the base), so only the new redaction guard rejects
+		// this — the class-only Action↔Override binding cannot.
+		"redaction action with an executable outcome": func(e *Event) {
+			e.Decision.Action = "ALLOW_WITH_REDACTION" // base Override=false, base Outcome=would_execute, plan valid
+		},
 		"unsupported schema version": func(e *Event) { e.SchemaVersion = 3 },
 	}
 	for name, mut := range cases {
@@ -305,6 +313,10 @@ func TestV2_OutcomeOverrideConsistency_NotOverBroad(t *testing.T) {
 		{"ALLOW", "would_fail_stale_decision", false, "credential_plan_valid"},
 		{"REQUIRE_APPROVAL", "would_require_approval", true, "no_credential_profile"},
 		{"REQUIRE_CONFIRMATION", "would_require_confirmation", true, "no_credential_profile"},
+		// The one reachable ALLOW_WITH_REDACTION shape: allow-class (Override=false) but gated to
+		// would_block by the producer, so its true durable form must still validate (the redaction
+		// guard rejects only the allow-path outcomes, not would_block).
+		{"ALLOW_WITH_REDACTION", "would_block", false, "no_credential_profile"},
 	}
 	for _, c := range consistent {
 		e := validV2ShadowEvent()

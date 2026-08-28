@@ -241,7 +241,30 @@ func (e Event) validateShadowV2() error {
 	if err := validateShadowGatedOutcomeAction(e.Decision.Action, sh.Outcome); err != nil {
 		return err
 	}
+	if err := validateShadowRedactionOutcome(e.Decision.Action, sh.Outcome); err != nil {
+		return err
+	}
 	return validateShadowEvidenceFields(sh)
+}
+
+// validateShadowRedactionOutcome constrains ALLOW_WITH_REDACTION — the one ALLOW-CLASS action the
+// live execution layer fails closed. In the producer mapAction(ALLOW_WITH_REDACTION) is
+// ActionKindRedaction, which policyClassOutcome gates to would_block at step 2 (the guarded path
+// performs no request-argument redaction), so it NEVER reaches the allow-path steps (5–7). Because
+// it is allow-class the Action↔Override binding correctly pins Override=false — but that alone
+// leaves the allow-path-only outcomes acceptable, letting an adapter regression present an action
+// a fully-enforcing mode would BLOCK as executable. Its only reachable outcomes are would_block
+// (step 2) and the step-1 hard-fails (would_fail_inspection / would_fail_hard_control), so reject
+// any allow-path-only outcome (SHADOW-EVIDENCE-ROUTING-1, Codex round PR #1235). Runs on recovery
+// too; a real v2 record always satisfies it.
+func validateShadowRedactionOutcome(action, outcome string) error {
+	if action != actionCodeAllowWithRedaction {
+		return nil
+	}
+	if _, ok := shadowAllowClassOnlyOutcomes[outcome]; ok {
+		return evtErr(mcperr.ReasonEventInvalid, "ALLOW_WITH_REDACTION cannot carry an allow-path outcome; a redaction action is gated to would_block")
+	}
+	return nil
 }
 
 // validateShadowGatedOutcomeAction binds the two policy-gating outcomes that have a 1:1
