@@ -226,6 +226,16 @@ func TestV2_ValidationRejectsMalformedShadowEvidence(t *testing.T) {
 		"redaction action with an executable outcome": func(e *Event) {
 			e.Decision.Action = "ALLOW_WITH_REDACTION" // base Override=false, base Outcome=would_execute, plan valid
 		},
+		// would_block reachability (Codex round, PR #1235): an unconditional ALLOW carries no
+		// allowance, so the producer never resolves it to would_block — it continues to
+		// hard-control/credential/stale/execute. Isolated: Override=false is consistent with ALLOW
+		// (allow-class), would_block is Override-ambiguous, and no_credential_profile satisfies the
+		// pre-planning rule, so only the new block-reachability guard rejects it.
+		"unconditional allow with a would_block outcome": func(e *Event) {
+			e.Decision.Action = "ALLOW"
+			e.Shadow.Outcome = "would_block"
+			e.Shadow.CredentialPlan = "no_credential_profile"
+		},
 		"unsupported schema version": func(e *Event) { e.SchemaVersion = 3 },
 	}
 	for name, mut := range cases {
@@ -282,10 +292,13 @@ func TestV2_OutcomeOverrideConsistency_NotOverBroad(t *testing.T) {
 	// action for Override=false, a restrictive one for Override=true) — the outcome remains
 	// ambiguous, the action binding is satisfied, and validation must accept both.
 	for _, oc := range []string{"would_block", "would_fail_inspection", "would_fail_hard_control"} {
+		// The allow-class representative is ALLOW_ONCE, not ALLOW: all three outcomes are reachable
+		// for it (would_block via an allowance miss, the two hard-fails via step 1), whereas an
+		// unconditional ALLOW can never reach would_block (validateShadowBlockOutcome).
 		for _, tc := range []struct {
 			action   string
 			override bool
-		}{{"ALLOW", false}, {"DENY", true}} {
+		}{{"ALLOW_ONCE", false}, {"DENY", true}} {
 			e := validV2ShadowEvent()
 			e.Decision.Action = tc.action
 			e.Shadow.Outcome = oc
@@ -317,6 +330,9 @@ func TestV2_OutcomeOverrideConsistency_NotOverBroad(t *testing.T) {
 		// would_block by the producer, so its true durable form must still validate (the redaction
 		// guard rejects only the allow-path outcomes, not would_block).
 		{"ALLOW_WITH_REDACTION", "would_block", false, "no_credential_profile"},
+		// An allowance-bearing allow-class action reaching would_block via an allowance miss:
+		// allow-class (Override=false) and a reachable would_block action, so it must still validate.
+		{"ALLOW_ONCE", "would_block", false, "no_credential_profile"},
 	}
 	for _, c := range consistent {
 		e := validV2ShadowEvent()

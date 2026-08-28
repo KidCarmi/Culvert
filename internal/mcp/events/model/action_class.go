@@ -27,9 +27,25 @@ package model
 var shadowAllowClassActionCodes = map[string]struct{}{
 	"ALLOW":                      {},
 	"MONITOR":                    {},
-	"ALLOW_ONCE":                 {},
-	"ALLOW_FOR_SESSION":          {},
+	actionCodeAllowOnce:          {},
+	actionCodeAllowForSession:    {},
 	actionCodeAllowWithRedaction: {},
+}
+
+// shadowBlockReachableActions are the policy actions the producer can resolve to would_block:
+// DENY/QUARANTINE and ALLOW_WITH_REDACTION are gated to it at decide() step 2, and
+// ALLOW_ONCE/ALLOW_FOR_SESSION reach it via an unsatisfied allowance at step 3 (needsAllowance is
+// true only for those two). An unconditional ALLOW/MONITOR carries no allowance, so it never
+// blocks — it continues to hard-control/credential/stale/execute — and REQUIRE_APPROVAL/
+// REQUIRE_CONFIRMATION resolve to their own gate outcomes, so would_block on any of those four is
+// impossible in the producer (validateShadowBlockOutcome). Pinned to policy.Action.String() by the
+// cross-package parity wall.
+var shadowBlockReachableActions = map[string]struct{}{
+	"DENY":                       {},
+	"QUARANTINE":                 {},
+	actionCodeAllowWithRedaction: {},
+	actionCodeAllowOnce:          {},
+	actionCodeAllowForSession:    {},
 }
 
 // Action wire codes bound BY NAME in the durable v2 Shadow contract, beyond the allow/restrictive
@@ -45,6 +61,8 @@ const (
 	actionCodeRequireApproval     = "REQUIRE_APPROVAL"
 	actionCodeRequireConfirmation = "REQUIRE_CONFIRMATION"
 	actionCodeAllowWithRedaction  = "ALLOW_WITH_REDACTION"
+	actionCodeAllowOnce           = "ALLOW_ONCE"
+	actionCodeAllowForSession     = "ALLOW_FOR_SESSION"
 )
 
 // shadowRestrictiveActionCodes are the restrictive (non-ALLOW-class) policy action wire

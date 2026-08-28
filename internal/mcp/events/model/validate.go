@@ -244,7 +244,30 @@ func (e Event) validateShadowV2() error {
 	if err := validateShadowRedactionOutcome(e.Decision.Action, sh.Outcome); err != nil {
 		return err
 	}
+	if err := validateShadowBlockOutcome(e.Decision.Action, sh.Outcome); err != nil {
+		return err
+	}
 	return validateShadowEvidenceFields(sh)
+}
+
+// validateShadowBlockOutcome binds would_block to the actions that can actually reach it. In the
+// producer, would_block comes only from decide() step 2 (policyClassOutcome gates DENY/QUARANTINE
+// via ActionKindDenied and ALLOW_WITH_REDACTION via ActionKindRedaction to it) or step 3 (an
+// unsatisfied ALLOW_ONCE/ALLOW_FOR_SESSION allowance; needsAllowance is true only for those two).
+// An unconditional ALLOW/MONITOR carries no allowance and continues past step 3, and
+// REQUIRE_APPROVAL/REQUIRE_CONFIRMATION resolve to their own gate outcomes, so would_block on any
+// of those four misstates an executable-or-gated decision as blocked. would_block stays Override-
+// ambiguous (DENY/QUARANTINE are restrictive, the three allow-class sources are not), so this binds
+// the ACTION, not the override (SHADOW-EVIDENCE-ROUTING-1, Codex round PR #1235). Runs on recovery
+// too; a real v2 record always satisfies it.
+func validateShadowBlockOutcome(action, outcome string) error {
+	if outcome != shadowOutWouldBlock {
+		return nil
+	}
+	if _, ok := shadowBlockReachableActions[action]; !ok {
+		return evtErr(mcperr.ReasonEventInvalid, "would_block is unreachable for this action; the producer resolves it only for DENY/QUARANTINE, ALLOW_WITH_REDACTION, or an unsatisfied ALLOW_ONCE/ALLOW_FOR_SESSION allowance")
+	}
+	return nil
 }
 
 // validateShadowRedactionOutcome constrains ALLOW_WITH_REDACTION — the one ALLOW-CLASS action the
