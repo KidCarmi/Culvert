@@ -57,20 +57,21 @@ Out-of-scope traffic on a Shadow node behaves as **Observe** (recorded, not eval
    closed with `no_usable_shadow_tools` until the controlled server's tool is promoted to `Usable`
    within the scope.
 9. **Durable ShadowDecision evidence must be in the build** (`SHADOW-EVIDENCE-ROUTING-1`, a HARD
-   PREREQUISITE). A real activation requires that the full per-request `ShadowDecision` — the
-   Model-1 `Outcome`, credential-plan status, and inspection readiness — is recorded **durably**,
-   not only returned in the transient JSON-RPC response body. Until the dedicated `schema_version:2`
-   durable-evidence follow-up PR ships, a shadow evaluation persists only
-   `execution_state="shadow_evaluated"` on the v1 envelope, so per-request outcomes cannot be
-   reconstructed from the archive and the evidence-parity / zero-gap exit criteria below are
-   **unverifiable**. This prerequisite is NOT enforced by the preflight (it is a build/schema
-   property, not a node-config toggle): it is verified by running the follow-up PR's durable-record
-   tests, and this runbook must not be used for a production activation on a build that lacks them.
-   This is a SEPARATE slice from precondition 8 — neither absorbs the other.
+   PREREQUISITE — **now SATISFIED**). A real activation requires that the full per-request
+   `ShadowDecision` — the Model-1 `Outcome`, credential-plan status, and inspection readiness — is
+   recorded **durably**, not only returned in the transient JSON-RPC response body. The durable-evidence
+   follow-up shipped the `schema_version:2` envelope: a shadow evaluation now persists a typed
+   `Event.Shadow` sub-evidence carrying the full verdict, so per-request outcomes are reconstructable
+   from the archive with the SAME facts the client saw, and the evidence-parity / zero-gap exit
+   criteria are verifiable. This prerequisite is a build/schema property (not a node-config toggle);
+   it is verified by the durable-record tests (`internal/mcp/events/**` shadow_v2_* +
+   `internal/mcp/execution/shadow_evidence_parity_test.go`). This is a SEPARATE slice from
+   precondition 8 — neither absorbs the other.
 
-**Both prerequisites 8 and 9 are OPEN, and BOTH must close before any production Controlled Shadow
-activation.** This build lands the activation plumbing but is NOT activation-ready: precondition 8
-fails closed today (no `Usable` tool), and precondition 9's durable evidence is not yet implemented.
+**Prerequisite 9 (durable evidence) is CLOSED; prerequisite 8 (a `Usable` scoped tool) REMAINS OPEN,
+and BOTH must be closed before any production Controlled Shadow activation.** This build has durable
+Shadow evidence but is still NOT activation-ready: precondition 8 fails closed today (no `Usable`
+tool via the tool-approval / promotion slice).
 
 Run the operator dry-run: `GET /api/mcp/rollout` and confirm `shadow.preflight.ready:
 true` with an empty `reasons` list. This dry-run reports **node** readiness only — the
@@ -240,3 +241,141 @@ A controlled Shadow soak is successful only if, for its full duration:
 These criteria gate any future consideration of Canary — which this phase does NOT
 prepare and which remains blocked on live-execution readiness and the
 `PREREQ-MCP-KILL-1` side-effect-boundary revalidation.
+
+---
+
+## 8. Binary downgrade across persisted v2 Shadow evidence
+
+Once this node has run a **v2-capable** binary and persisted at least one Shadow decision
+event, the Gateway `P-ORD` spool partition holds `schema_version:2` records. A **pre-v2**
+binary rejects a v2 record at decode (`unmarshalEvent` uses `DisallowUnknownFields`), so its
+spool recovery fails that partition **closed** rather than misverifying it — the deliberate
+downgrade posture (`SHADOW-EVIDENCE-ROUTING-1`; `docs/design/mcp/SHADOW-ARCHITECTURE.md` §9).
+Rolling the binary back across such evidence therefore needs this procedure. It is
+**surgical**: it touches ONLY the partition that holds Shadow evidence and never deletes
+unrelated durable evidence.
+
+**What is and is NOT affected**
+
+- The MCP events spool is a BOUNDED, encrypted, per-capability **qualification-telemetry
+  cache** — NOT authoritative policy, config, or enforcement state. Clearing it loses
+  decision/outcome history, never enforcement.
+- A v2 Shadow decision event routes by the tool call's operation class (`criticalityFor`):
+  a **read**-class `tools/call` is ordinary → `gateway/P-ORD/`, while a **write** or
+  **destructive** call is critical → `gateway/P-CRIT/`. So v2 Shadow evidence can land in
+  **either** the `P-ORD` **or** the `P-CRIT` Gateway partition, and BOTH must be archived and
+  cleared. `gateway/P-DEN/` holds only coalesced denial aggregates (never a Shadow decision
+  event, never v2), so it — together with the sealed DEK (`gateway/dek.sealed`) and the entire
+  `management/` subtree — carries NO v2 evidence and MUST be preserved.
+- **`gateway/degraded_state.json` may need resetting — but ONLY when the degradation is
+  *exclusively* schema-induced.** The realistic emergency order is downgrade → it fails → *then*
+  the operator finds this runbook. On that failed boot, spool recovery classified the v2 records
+  as corruption and `NewManager` called `OnCriticalCommitFailure`, latching the Gateway domain
+  into `critical-durability-degraded` and persisting it to `gateway/degraded_state.json`; that
+  lockout blocks write/destructive Gateway operations and reloads on every subsequent boot. But
+  this one file ALSO carries the `denial-lane-degraded` track, which corresponds to the `P-DEN`
+  partition you are preserving and is NOT re-derived from a partition scan at boot. The
+  deterministic, safe gate is therefore the DENIAL track alone (step 5): the critical track is
+  about the Gateway critical partition you archive and clear in steps 3–4, so a fresh boot
+  re-derives it, while a degraded denial track is real, restart-persistent state you must not
+  wipe. Do NOT try to prove the critical degradation is schema-induced from its persisted
+  `reason` text — the pre-v2 binary collapses the strict-unmarshal failure into a generic
+  corruption reason (`record event invalid`) that cannot distinguish schema-induced from
+  unrelated corruption. `management/degraded_state.json` and any other capability's state are
+  always preserved.
+
+`<mcp-data-dir>` is the MCP telemetry `DataDir` configured for this node's Gateway; under it
+each capability (`gateway/`, `management/`) has per-partition subdirectories (`P-ORD/`,
+`P-CRIT/`, `P-DEN/`) with `seg-<id>.dat` segments + `checkpoint.json`, plus `dek.sealed` and
+`degraded_state.json`.
+
+**Procedure (node stopped throughout — never mutate a live spool)**
+
+1. Stop the node (or bring the container down).
+2. Locate `<mcp-data-dir>` and confirm the layout above.
+3. **Archive first, then clear.** Tar the whole `gateway/` subtree to durable storage OUTSIDE
+   the data dir, so the v2 evidence stays readable later by a v2-capable binary (and for
+   forensics):
+   ```
+   tar -czf /var/backups/culvert/mcp-gateway-spool-$(date +%Y%m%dT%H%M%SZ).tgz \
+       -C <mcp-data-dir> gateway
+   ```
+4. Clear BOTH Shadow-bearing partitions — remove the segments and checkpoint of `P-ORD` and
+   `P-CRIT` (the directories are recreated on next open; recovery treats an empty partition as
+   fresh):
+   ```
+   rm -f <mcp-data-dir>/gateway/P-ORD/seg-*.dat  <mcp-data-dir>/gateway/P-ORD/checkpoint.json
+   rm -f <mcp-data-dir>/gateway/P-CRIT/seg-*.dat <mcp-data-dir>/gateway/P-CRIT/checkpoint.json
+   ```
+   Do NOT touch `gateway/P-DEN`, `gateway/dek.sealed`, or anything under `management/`.
+5. **Reset the Gateway degraded state — gated ONLY on the denial track.** A failed pre-v2 boot
+   latches `critical-durability-degraded` into `gateway/degraded_state.json` from the v2 records
+   you just cleared, which would otherwise keep write/destructive Gateway operations blocked after
+   recovery. Inspect the file (plain JSON, `0600`) and remove it ONLY when the `"denial"` track is
+   normal — value **`1`** (`StateNormal`):
+   ```
+   rm -f <mcp-data-dir>/gateway/degraded_state.json
+   ```
+   Why the denial track is the whole gate, and why the `"critical"` `"reason"` is deliberately NOT
+   used:
+   - The `"critical"` track is about the Gateway critical partition (`P-CRIT`) you archived and
+     cleared in steps 3–4. Whatever caused it — the schema-induced v2 records, or an unrelated
+     prior commit failure — its data is now archived (forensics preserved) and the partition is
+     reset, so a fresh boot re-derives the correct critical state (and re-degrades only if a real
+     durability problem still exists). Its persisted `"reason"` CANNOT serve as proof: the pre-v2
+     binary collapses the strict-unmarshal failure into a generic `record event invalid` →
+     `recovery detected spool corruption: …` that does not distinguish schema-induced corruption
+     from unrelated corruption.
+   - The `"denial"` track is different: it corresponds to the `P-DEN` partition you are PRESERVING
+     and, unlike the critical track, is NOT re-derived from a partition scan at boot — a
+     `denial-lane-degraded` latch re-asserts only on the next denial commit failure, so a `2` there
+     is real, restart-persistent state that deleting the file would silently wipe. The numbering
+     (`internal/mcp/events/state/state.go`): `0` is `StateUnknown` (NOT normal — fails closed on
+     load), `1` is `StateNormal`, `2` is `StateDenialLaneDegraded`. The safe case is exactly
+     `"denial": 1`.
+
+   If `"denial"` is `2` (degraded) or `0` (unknown): **LEAVE THE FILE** — it carries real
+   denial-lane state tied to the preserved `P-DEN`, and because both tracks share one file the
+   critical lockout stays too. Address the denial-lane degradation through the normal recovery path
+   first; once `"denial"` is back to `1`, delete the file then. Never touch
+   `<mcp-data-dir>/management/degraded_state.json` or any other capability's state.
+6. **Reset the export cursor for every partition you cleared — unconditionally.** Clearing a
+   partition restarts its commit sequence at 1, but the archive exporter's cursor still holds
+   the old (high) `afterSeq`; `CommittedForExport` skips any segment whose `lastSeq <= afterSeq`
+   and `exportStep` returns without an error on the resulting empty batch, so a **retained**
+   cursor SILENTLY drops every new event of the reset partition (with no logged mismatch) until
+   the restarted sequence overtakes the old cursor. Remove the matching cursor files so the
+   exporter restarts from the fresh partitions:
+   ```
+   rm -f <mcp-data-dir>/export_cursors/gateway/ord.cursor \
+         <mcp-data-dir>/export_cursors/gateway/crit.cursor
+   ```
+   Leave `den.cursor` and the `management/` cursors alone (their partitions were not cleared).
+7. Start the pre-v2 binary. Its spool recovery now sees empty `P-ORD` and `P-CRIT` (fresh
+   partitions) — and, if you reset it in step 5, no schema-induced Gateway degraded-state
+   lockout — and starts clean; `P-DEN` and `management/` recover normally.
+
+**Reading the archived evidence — offline is the default.** To consult the archived v2
+evidence, unpack the tarball to a **scratch location** and point a **v2-capable** binary/tool
+at that copy. Do this offline; **never point a pre-v2 binary at it** (it re-introduces the same
+rejected records), and **never unpack it back over the node's live data dir**. Once the node
+has taken any traffic after step 7, its `P-ORD`/`P-CRIT` hold NEW evidence, so restoring the
+archive in place would overwrite that downgrade-period evidence — and, because the export
+cursors live OUTSIDE the `gateway/` subtree (under `export_cursors/gateway/`, so a subtree
+restore does not bring matching cursors back), the cursors advanced during the downgrade would
+silently suppress every restored record whose sequence is below the current cursor (the same
+skip in step 6). Treat the archive as read-only history, not a spool to reinstate.
+
+**In-place restore is only for a no-traffic revert.** If you downgraded by mistake and the node
+took **no** traffic afterwards (its `P-ORD`/`P-CRIT` are still the empty fresh partitions from
+step 7), you may restore the pre-downgrade spool exactly: with the node **stopped**, replace the
+empty `gateway/P-ORD` and `gateway/P-CRIT` with the archived copies, then **reset
+`ord.cursor` and `crit.cursor`** (as in step 6) so the restored lower-sequence records are not
+suppressed, and start a v2-capable binary. Do NOT do this once post-downgrade evidence exists —
+the two hash-chained histories cannot be merged into one partition; keep that evidence and read
+the archive offline instead.
+
+**Why validation is not weakened to make downgrade transparent.** A v1 reader silently
+reinterpreting a v2 record would misreport its digest and could surface an inconsistent
+verdict as valid; the fail-closed rejection is deliberate. Downgrade is a rare, deliberate,
+node-local operator action, not a silent-safe default.

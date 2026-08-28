@@ -22,6 +22,11 @@ type DecisionFacts struct {
 	Decision   model.DecisionEvidence
 	Inspection model.InspectionEvidence
 	Credential model.CredentialEvidence
+	// Shadow, when non-nil, carries the durable Shadow enforcement prediction. Its
+	// presence makes the built event a SchemaVersionV2 Shadow decision event; every
+	// other event stays v1 (buildEvent). It is set ONLY by the Shadow evaluator's
+	// shadowDecisionFacts, from the SAME ShadowDecision returned to the client.
+	Shadow *model.ShadowEvidence
 
 	SnapshotHash  string
 	CorrelationID string // optional; generated when empty
@@ -75,8 +80,15 @@ func (m *Manager) buildEvent(d *domain, f DecisionFacts) *model.Event {
 	if corr == "" {
 		corr = randID("cor_")
 	}
+	// A Shadow decision event (carrying ShadowEvidence) is stamped SchemaVersionV2 — the
+	// only events that are v2. Every other event stays the default v1, so its canonical
+	// digest is unchanged (SHADOW-EVIDENCE-ROUTING-1 §5, smallest compatibility-safe model).
+	schema := model.SchemaVersion
+	if f.Shadow != nil {
+		schema = model.SchemaVersionV2
+	}
 	return &model.Event{
-		SchemaVersion: model.SchemaVersion,
+		SchemaVersion: schema,
 		EventID:       randID("evt_"),
 		Phase:         model.PhaseDecision,
 		Criticality:   f.Criticality,
@@ -93,6 +105,7 @@ func (m *Manager) buildEvent(d *domain, f DecisionFacts) *model.Event {
 		Decision:      f.Decision,
 		Inspection:    f.Inspection,
 		Credential:    f.Credential,
+		Shadow:        f.Shadow,
 	}
 }
 

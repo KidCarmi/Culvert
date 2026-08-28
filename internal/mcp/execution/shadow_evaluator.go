@@ -6,6 +6,7 @@ import (
 
 	"github.com/KidCarmi/Culvert/internal/mcp/credentials/broker"
 	"github.com/KidCarmi/Culvert/internal/mcp/events"
+	"github.com/KidCarmi/Culvert/internal/mcp/events/model"
 	"github.com/KidCarmi/Culvert/internal/mcp/events/spool"
 	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
@@ -393,22 +394,35 @@ func requestInspectionStatus(in runtime.ExecInput) string {
 	return inspectionWouldPass
 }
 
+// shadowEvidence is THE single mapping from a ShadowDecision to the durable/reportable
+// Shadow sub-facts. Both the transient JSON-RPC response (shadowResult) and the durable
+// event (shadowDecisionFacts) derive from this ONE function, so the record an operator
+// reads back from the archive is fact-for-fact identical to what the client saw at
+// request time (SHADOW-EVIDENCE-ROUTING-1 §3 parity). The raw evaluated policy action is
+// NOT duplicated here: it is carried in DecisionEvidence.Action (its single home).
+func shadowEvidence(d ShadowDecision) model.ShadowEvidence {
+	return model.ShadowEvidence{
+		Outcome:                  string(d.Outcome),
+		Override:                 d.ShadowOverride,
+		CredentialPlan:           d.CredentialPlan,
+		MaterializationReadiness: d.MaterializeReady,
+		RequestInspection:        d.RequestInspection,
+		ResponseInspection:       d.ResponseInspection,
+	}
+}
+
 // shadowDecisionFacts builds the durable evidence for a Shadow evaluation. It reuses the
-// execute path's decisionFacts (same identity/decision/snapshot shape) and re-stamps the
-// execution state as a shadow evaluation, never an execution. The recorded action stays
-// the raw policy action; the enforcement prediction rides in the Shadow-outcome fields so
-// the archive can reconstruct WHY the evaluation reached its verdict without materializing
-// a secret or making an upstream call.
-func shadowDecisionFacts(in runtime.ExecInput, _ ShadowDecision) events.DecisionFacts {
+// execute path's decisionFacts (same identity/decision/snapshot shape), re-stamps the
+// execution state as a shadow evaluation (never an execution), and attaches the complete
+// durable ShadowEvidence built from the SAME ShadowDecision returned to the client. The
+// event is thereby a SchemaVersionV2 Shadow decision event (buildEvent), which persists
+// the full enforcement prediction so the archive reconstructs WHY the evaluation reached
+// its verdict — with no secret, credential value, or upstream call (SHADOW-EVIDENCE-ROUTING-1).
+func shadowDecisionFacts(in runtime.ExecInput, d ShadowDecision) events.DecisionFacts {
 	facts := decisionFacts(in)
-	// Mark the record a shadow evaluation via the EXISTING ExecutionState field only — a
-	// known, digest-safe value change, not a new field. The ShadowDecision sub-facts are
-	// deliberately NOT stamped into this schema_version:1 envelope: adding digest-covered
-	// fields would misverify valid shadow events on a binary rollback (Codex P2, PR #1226).
-	// The full decision rides the transient response body; durable persistence with a v2
-	// envelope is deferred to the Shadow-activation slice (SHADOW-EVIDENCE-ROUTING-1). The
-	// ShadowDecision argument is retained for signature stability and that future wiring.
 	facts.Decision.ExecutionState = "shadow_evaluated"
+	ev := shadowEvidence(d)
+	facts.Shadow = &ev
 	return facts
 }
 

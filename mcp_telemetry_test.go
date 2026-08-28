@@ -451,3 +451,31 @@ func countFiles(t *testing.T, root string) int {
 	})
 	return n
 }
+
+// TestValidateBatch_AcceptsV1AndV2RejectsUnknown pins the SHADOW-EVIDENCE-ROUTING-1
+// qualification-archive fix: the export-pump batch validator must accept a SUPPORTED
+// schema version — v1 AND the v2 durable-Shadow-evidence envelope — not just the default
+// v1. A hardcoded `!= v1` check would reject the first v2 Shadow event, and because the
+// pump retries an all-or-nothing batch without advancing its cursor, that would wedge the
+// whole partition out of the durable archive (Codex P1, PR #1235). A genuinely unknown
+// version is still rejected. Mutation: reverting to `!= evmodel.SchemaVersion` fails the
+// v2 assertion below.
+func TestValidateBatch_AcceptsV1AndV2RejectsUnknown(t *testing.T) {
+	v2 := func(d string) evmodel.Event {
+		return evmodel.Event{
+			SchemaVersion: evmodel.SchemaVersionV2, Capability: evmodel.CapGateway,
+			Partition: evmodel.PartCrit, EventID: "ev-" + d, EventDigest: d,
+		}
+	}
+	if _, _, err := validateBatch([]evmodel.Event{denialEvent("d1"), denialEvent("d2")}); err != nil {
+		t.Fatalf("a v1 batch must validate: %v", err)
+	}
+	if _, _, err := validateBatch([]evmodel.Event{v2("a"), v2("b")}); err != nil {
+		t.Fatalf("a v2 shadow batch must validate (else its partition wedges out of the archive): %v", err)
+	}
+	bad := v2("c")
+	bad.SchemaVersion = 3
+	if _, _, err := validateBatch([]evmodel.Event{bad}); err == nil {
+		t.Fatal("an unsupported schema version must be rejected")
+	}
+}

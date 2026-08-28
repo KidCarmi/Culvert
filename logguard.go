@@ -72,6 +72,13 @@ var logGuard struct {
 // GetDiskFreeSpaceEx on Windows (diskusage_windows.go) — because the syscall
 // primitives differ per OS while this orchestrator stays cross-platform.
 
+// diskUsageFn is the seam the disk-guard path measures through. It defaults to
+// the real diskUsage (production behavior is unchanged); tests override it to
+// assert the guard LOGIC against a controlled value instead of the runner's real
+// unprivileged free space (statfs Bavail), which a disk-starved CI runner or
+// sandbox can legitimately report above the critical threshold.
+var diskUsageFn = diskUsage
+
 // fmtBytes renders a byte count for audit/log detail (server-side counterpart
 // to the UI's humanBytes).
 func fmtBytes(n int64) string {
@@ -107,7 +114,7 @@ func recordPressureCleanup(reason string, freed, count int64, levels map[string]
 	if count == 0 {
 		return
 	}
-	usedPct, _, _, _ := diskUsage(logStoreDir)
+	usedPct, _, _, _ := diskUsageFn(logStoreDir)
 	logGuard.mu.Lock()
 	logGuard.lastCleanupMs = time.Now().UnixMilli()
 	logGuard.lastReason = reason
@@ -213,7 +220,7 @@ func runDiskGuard(s *logStore) {
 	if s == nil {
 		return
 	}
-	usedPct, _, total, err := diskUsage(logStoreDir)
+	usedPct, _, total, err := diskUsageFn(logStoreDir)
 	crit := float64(getCriticalDiskPct())
 
 	switch {
@@ -259,7 +266,7 @@ func handleDiskCritical(s *logStore, usedPct, total, crit float64) {
 	}
 	// Re-check: if still critical, deleting logs can't fix it (disk full from
 	// non-log data) → emergency minimal mode. Otherwise post a warning.
-	if again, _, _, e2 := diskUsage(logStoreDir); e2 == nil && again >= crit {
+	if again, _, _, e2 := diskUsageFn(logStoreDir); e2 == nil && again >= crit {
 		enterMinimalMode(again)
 		return
 	}
@@ -271,7 +278,7 @@ func handleDiskCritical(s *logStore, usedPct, total, crit float64) {
 
 // diskGuardStatus is the GUI/status snapshot of disk protection.
 func diskGuardStatus() map[string]any {
-	usedPct, free, total, err := diskUsage(logStoreDir)
+	usedPct, free, total, err := diskUsageFn(logStoreDir)
 	logGuard.mu.Lock()
 	st := map[string]any{
 		"criticalDiskPct":   getCriticalDiskPct(),
