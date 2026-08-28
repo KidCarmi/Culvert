@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/pac"
 	"github.com/KidCarmi/Culvert/internal/reqlog"
 	"github.com/KidCarmi/Culvert/internal/secscan"
@@ -1710,7 +1711,21 @@ func apiDefaultAuthOutcome(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	outcome := AuthOutcome(body.DefaultAuthOutcome)
-	cfg.SetDefaultAuthOutcome(outcome)
+	// Durable-or-nothing (2C.0c): the checked setter rolls the in-memory value
+	// back on a pre-replacement persist failure, so this endpoint can never
+	// 2xx a global authentication default that would silently revert on the
+	// next restart. ErrReplacedNotSynced counts as landed with the value kept
+	// (the rename already carries the new content — the setter's documented
+	// contract), matching the policy-write commit doctrine.
+	if err := cfg.setDefaultAuthOutcomeChecked(outcome); err != nil {
+		if errors.Is(err, fileutil.ErrReplacedNotSynced) {
+			logWarnf("Settings: defaultAuthOutcome persisted but parent-dir sync failed: %v", err)
+		} else {
+			logWarnf("Settings: defaultAuthOutcome persist failed (rolled back): %v", err)
+			http.Error(w, "failed to persist defaultAuthOutcome — the setting was rolled back, nothing durable changed", http.StatusInternalServerError)
+			return
+		}
+	}
 	adminSettingsSave()
 	if outcome == OutcomeExempt {
 		auditEvent(r, "settings.update", "defaultAuthOutcome", "Exempt — unmatched traffic is open (not Allow; Stage-2 policy still governs); scoped auth rules still enforce")
