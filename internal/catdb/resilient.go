@@ -111,4 +111,6 @@ func quarantineDir(lock *badgerguard.HeldLock, dir string) (string, error) {
 	return badgerguard.QuarantineDir(lock, dir)
 }
 
-func applyQuarantine(dir string, rec *Recovery) { badgerguard.ApplyQuarantine(dir, rec) }
+// No shim for ApplyQuarantine: this package's gates reach it only through
+// OpenResilient, and badgerguard covers it directly. A pass-through with no
+// caller is dead code, which staticcheck (U1000) is right to reject.

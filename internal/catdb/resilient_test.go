@@ -574,7 +574,7 @@ func TestOpenResilient_HeldStoreLockRefusesACompetingOpen(t *testing.T) {
 	_ = db.Close()
 }
 
-// applyQuarantine must not leak the lock it takes: the quarantined copy has to
+// The quarantine must not leak the lock it takes: the quarantined copy has to
 // be openable afterwards (an operator inspecting the evidence) and the
 // replacement has to be openable by this very process on the retry.
 func TestOpenResilient_QuarantineReleasesTheStoreLock(t *testing.T) {
