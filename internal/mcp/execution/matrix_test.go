@@ -37,7 +37,7 @@ func TestCanaryNineActionMatrix(t *testing.T) {
 	for action, shouldExecute := range execClass {
 		up := &fakeUpstream{}
 		e := newExec(t, stateForMode(t, rollout.ModeCanary), up, realEvents(t, nil))
-		out := e.Execute(context.Background(), execInput(action, false))
+		out := runExec(e, context.Background(), execInput(action, false))
 		if shouldExecute && up.calls != 1 {
 			t.Fatalf("canary action %v should execute (calls=%d)", action, up.calls)
 		}
@@ -56,7 +56,7 @@ func TestCanaryNineActionMatrix(t *testing.T) {
 func TestCanaryRedactionFailsClosed(t *testing.T) {
 	up := &fakeUpstream{}
 	e := newExec(t, stateForMode(t, rollout.ModeCanary), up, realEvents(t, nil))
-	out := e.Execute(context.Background(), execInput(policy.ActionAllowWithRedaction, false))
+	out := runExec(e, context.Background(), execInput(policy.ActionAllowWithRedaction, false))
 	if up.calls != 0 {
 		t.Fatalf("redaction must not reach the upstream (calls=%d)", up.calls)
 	}
@@ -86,7 +86,7 @@ func TestExecAdmissionSaturationNoUpstream(t *testing.T) {
 	}
 	up := &fakeUpstream{}
 	e := newExec(t, stateForMode(t, rollout.ModeCanary), up, ev)
-	out := e.Execute(context.Background(), execInput(policy.ActionAllow, false))
+	out := runExec(e, context.Background(), execInput(policy.ActionAllow, false))
 	if up.calls != 0 {
 		t.Fatalf("a degraded/saturated critical domain must reject admission with no upstream call (calls=%d)", up.calls)
 	}
@@ -153,7 +153,7 @@ func TestAntiWeakening_OutOfScopeDoesNotExecute(t *testing.T) {
 	in := execInput(policy.ActionAllow, false)
 	in.Input.Server.ServerID = "OTHER" // not in the canary scope (servers: s1)
 	in.Server.ID = "OTHER"
-	out := e.Execute(context.Background(), in)
+	out := runExec(e, context.Background(), in)
 	if up.calls != 0 {
 		t.Fatal("an out-of-scope call must not execute")
 	}
@@ -173,7 +173,7 @@ func TestAntiWeakening_ShadowCannotSoftenHardAuthFailure(t *testing.T) {
 	in := execInput(policy.ActionAllow, false)
 	in.Decision.HardOverride = true
 	in.Decision.Reason = policy.ReasonTenantMismatch // a hard auth/tenant failure
-	out := e.Execute(context.Background(), in)
+	out := runExec(e, context.Background(), in)
 	if up.calls != 0 {
 		t.Fatal("shadow must never soften a hard tenant/auth failure to an upstream call")
 	}
@@ -196,7 +196,7 @@ func TestAntiWeakening_DefaultEmptyScopeExecutesNothing(t *testing.T) {
 		Scope: rollout.ScopeSpec{Capability: rollout.CapabilityGateway}, ConnectorMode: rollout.ConnectorLocalClient}, "a", 1)
 	up := &fakeUpstream{}
 	e := newExec(t, st, up, realEvents(t, nil))
-	if out := e.Execute(context.Background(), execInput(policy.ActionAllow, false)); out.Executed || up.calls != 0 {
+	if out := runExec(e, context.Background(), execInput(policy.ActionAllow, false)); out.Executed || up.calls != 0 {
 		t.Fatal("a default empty shadow scope must execute nothing")
 	}
 }
@@ -205,10 +205,10 @@ func TestAntiWeakening_AllowOnceConsumedOnce(t *testing.T) {
 	up := &fakeUpstream{}
 	e := newExec(t, stateForMode(t, rollout.ModeCanary), up, realEvents(t, nil))
 	in := execInput(policy.ActionAllowOnce, false)
-	if out := e.Execute(context.Background(), in); !out.Executed {
+	if out := runExec(e, context.Background(), in); !out.Executed {
 		t.Fatal("first ALLOW_ONCE should execute")
 	}
-	if out := e.Execute(context.Background(), in); out.Executed {
+	if out := runExec(e, context.Background(), in); out.Executed {
 		t.Fatal("a second ALLOW_ONCE must not execute (single use)")
 	}
 	if up.calls != 1 {
@@ -223,7 +223,7 @@ func TestExecResponseDLPBlocksSecret(t *testing.T) {
 	// before it is delivered to the client (no sensitive content returned).
 	up := &fakeUpstream{result: `{"data":"-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Q\n-----END RSA PRIVATE KEY-----"}`} // #nosec G101 -- test fixture; asserts response DLP blocks a private key
 	e := newExec(t, stateForMode(t, rollout.ModeCanary), up, realEvents(t, nil))
-	out := e.Execute(context.Background(), execInput(policy.ActionAllow, false))
+	out := runExec(e, context.Background(), execInput(policy.ActionAllow, false))
 	if up.calls != 1 {
 		t.Fatal("the upstream is called, then the response is inspected")
 	}
@@ -257,7 +257,7 @@ func TestConcurrencyTransitionVsExecution(t *testing.T) {
 	for i := 0; i < 200; i++ {
 		// Must never panic or observe a half-applied mode; the result is always one
 		// of the valid dispositions.
-		out := e.Execute(context.Background(), execInput(policy.ActionAllow, false))
+		out := runExec(e, context.Background(), execInput(policy.ActionAllow, false))
 		if out.ExecutionState == "" {
 			t.Fatal("execution produced no state under concurrency")
 		}
@@ -272,7 +272,7 @@ func TestNoTokenPassthrough(t *testing.T) {
 	e := newExec(t, stateForMode(t, rollout.ModeCanary), up, realEvents(t, nil))
 	// The ExecInput carries a resolved identity, never a raw token; with no broker
 	// configured the upstream call carries NO Authorization header.
-	_ = e.Execute(context.Background(), execInput(policy.ActionAllow, false))
+	_ = runExec(e, context.Background(), execInput(policy.ActionAllow, false))
 	if up.lastAuth != "" {
 		t.Fatalf("no client token / auth header may be forwarded upstream, got %q", up.lastAuth)
 	}

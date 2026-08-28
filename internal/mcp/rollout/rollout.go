@@ -84,11 +84,15 @@ const (
 	// no credential is materialized, and no provider is contacted. The decision-only
 	// posture (execution_state = not_implemented / observe) is preserved.
 	ModeObserve
-	// ModeShadow — for an explicit bounded Shadow scope only (default empty), real
-	// Gateway traffic reaches the approved upstream server for allow-class decisions;
-	// the exact PR-6 evaluator computes the would-be enforcement decision, which is
-	// recorded unchanged (a non-hard DENY is allow-and-record). The fixed hard-failure
-	// set still BLOCKS, and DLP stays enforcing. Outside the scope: Observe behavior.
+	// ModeShadow — for an explicit bounded Shadow scope only (default empty; a Shadow
+	// config with an empty/non-enumerable scope is REJECTED at validation, so "no scope"
+	// can never mean "shadow everything"). After Layer B (#1226) Shadow does NOT reach
+	// the upstream: an in-scope request is handed to the capability-reduced
+	// ShadowEvaluator, which computes the formal Model-1 ShadowDecision (WOULD_EXECUTE /
+	// WOULD_BLOCK / WOULD_FAIL_*), records durable evidence, and returns — it holds no
+	// path to Upstream.Call or credential materialization, so it NEVER crosses the
+	// irreversible side-effect boundary and NEVER enforces (a hard failure is PREDICTED
+	// as WOULD_FAIL_*, never emitted as a real block). Outside the scope: Observe behavior.
 	ModeShadow
 	// ModeCanary — full enforcement (all nine policy actions) for an explicit,
 	// enumerated, read-first scope. Outside scope: Shadow (if enabled) else Observe.
@@ -145,6 +149,20 @@ func (m Mode) RequiresExecutionPlane() bool {
 // scope (Canary and Production). Shadow records-and-allows a non-hard DENY;
 // Observe/Disabled never enforce policy at all.
 func (m Mode) FullyEnforces() bool { return m == ModeCanary || m == ModeProduction }
+
+// RequiresLiveExecution reports whether the mode performs a REAL upstream side
+// effect — an upstream tools/call and credential materialization — for an in-scope
+// allow-class request (Canary and Production). It is the STRICT subset of
+// RequiresExecutionPlane that excludes Shadow: after Layer B (#1226) Shadow composes
+// the evaluation plane but NEVER crosses the irreversible side-effect boundary, so
+// its readiness is a distinct, weaker gate (a non-executing ShadowEvaluator, no
+// upstream client, no materialize-capable broker). The two predicates are the whole
+// point of splitting shadow readiness from live-execution readiness — a Shadow
+// transition must NOT be gated on live-execution dependencies it does not require,
+// and a live-execution transition must NOT be admitted merely because Shadow is
+// composed. Value-identical to FullyEnforces by construction; named for the readiness
+// gate so the call site reads as the capability it demands.
+func (m Mode) RequiresLiveExecution() bool { return m == ModeCanary || m == ModeProduction }
 
 // ParseMode parses a stable mode token, failing closed on anything unknown.
 func ParseMode(s string) (Mode, error) {

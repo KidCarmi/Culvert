@@ -137,16 +137,30 @@ func NewShadowEvaluator(cfg ShadowConfig) (*ShadowEvaluator, error) {
 	return &ShadowEvaluator{cfg: cfg, plan: plan, allowances: newAllowanceStore()}, nil
 }
 
-// Execute is the runtime.ExecutionProvider entry for a Shadow-only runtime. It
-// resolves the rollout disposition and dispatches — but it has no execute path.
-func (s *ShadowEvaluator) Execute(ctx context.Context, in runtime.ExecInput) runtime.ExecOutput {
+// Resolve implements runtime.ExecutionProvider: it resolves the rollout disposition for
+// this request EXACTLY ONCE (no side effect) so the runtime can route on it and hand the
+// SAME resolution back to Execute. A killed capability resolves to an emergency block
+// (never record-only), so the runtime routes it to Execute rather than its inline path.
+func (s *ShadowEvaluator) Resolve(in runtime.ExecInput) rollout.Resolution {
+	return resolveDisposition(s.cfg.State, in)
+}
+
+// Execute is the runtime.ExecutionProvider entry for a Shadow-only runtime. It acts on the
+// PRE-RESOLVED mode/scope disposition — it never re-resolves mode or scope (F7 single
+// resolution, Codex P2 #1234) — and dispatches. It has no execute path.
+//
+// The one thing it DOES re-read is the emergency kill: the kill switch is an immediate
+// admission stop (admin surface + runbook contract), so a kill engaged AFTER Resolve but
+// before this evaluation commits must still stop it — otherwise the evaluator would commit
+// durable evidence and return a would_* verdict AFTER the operator's emergency stop. This is
+// orthogonal to single-resolution: it reads only the monotonic kill flag and can only make
+// the outcome MORE restrictive (an emergency block), never turn a record-only into an
+// evaluation or an evaluation into an execute, so it cannot reopen the routing TOCTOU that
+// F7 closed (Codex P2, PR #1234).
+func (s *ShadowEvaluator) Execute(ctx context.Context, in runtime.ExecInput, res rollout.Resolution) runtime.ExecOutput {
 	if s.cfg.State.Killed() {
 		return s.blocked(in, mcperr.ReasonRolloutEmergencyActive, false)
 	}
-	subj := subjectFor(in)
-	action := mapAction(in.Decision.Action)
-	hardFail, hardReason := hardFailure(in)
-	res := s.cfg.State.ResolveFor(subj, action, hardFail, hardReason, true)
 	s.cfg.Metrics.ObserveResolution(in.Capability.String(), res)
 
 	switch res.Disposition {
@@ -167,6 +181,10 @@ func (s *ShadowEvaluator) Execute(ctx context.Context, in runtime.ExecInput) run
 	}
 }
 
+// KillActive implements runtime.ExecutionProvider: it reports whether this capability's
+// emergency kill switch is engaged, for the runtime's record-only fall-through re-check.
+func (s *ShadowEvaluator) KillActive() bool { return s.cfg.State.Killed() }
+
 // evaluate produces the formal ShadowDecision for an in-scope Shadow request. It
 // computes the Model-1 outcome (what a fully-enforcing mode WOULD do), derives
 // credential readiness from Plan alone, records durable evidence, and returns. There
@@ -184,6 +202,13 @@ func (s *ShadowEvaluator) evaluate(_ context.Context, in runtime.ExecInput) runt
 	if err := s.cfg.Events.CommitThenAct(facts, func(spool.CommitReceipt) error { return nil }); err != nil {
 		return s.blocked(in, mcperr.ReasonOf(err), false)
 	}
+	// Bounded, low-cardinality metric: ONE evaluation + its formal Model-1 verdict. The
+	// outcome enum is the only label; no tenant/subject/tool/argument is ever recorded.
+	// Emitted ONLY AFTER the durable commit succeeds (evidence-before-report): on a commit
+	// failure the evaluator returns a block (counted as an evaluation error), and recording
+	// a would_* verdict here too would double-count and overstate successful Shadow outcomes
+	// during exactly the durability failures an operator needs to see (Codex P2, PR #1234).
+	s.cfg.Metrics.ObserveShadowOutcome(in.Capability.String(), string(d.Outcome))
 
 	return runtime.ExecOutput{
 		Status:          200,

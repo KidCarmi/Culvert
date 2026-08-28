@@ -147,7 +147,7 @@ func TestEvidence_CredentialPathCommitsTheDecisionBeforeAnySideEffect(t *testing
 	in.Decision.Obligations.CredentialProfile = "profile-a"
 
 	before := ev.Health().Domains[model.CapGateway].CommitOK
-	out := e.Execute(context.Background(), in)
+	out := runExec(e, context.Background(), in)
 	after := ev.Health().Domains[model.CapGateway].CommitOK
 
 	if up.calls != 0 {
@@ -187,7 +187,7 @@ func TestEvidence_CommitFailureBlocksTheUpstreamCall(t *testing.T) {
 
 	// Sanity: this configuration really does execute, so a zero call count below is
 	// caused by the commit failure and not by the rollout scope.
-	if warm := e.Execute(context.Background(), in); !warm.Executed {
+	if warm := runExec(e, context.Background(), in); !warm.Executed {
 		t.Fatalf("fixture does not execute (eff=%q); the commit gate is not exercised", warm.EffectiveAction)
 	}
 	up.calls = 0
@@ -196,7 +196,7 @@ func TestEvidence_CommitFailureBlocksTheUpstreamCall(t *testing.T) {
 	// commit.
 	fb.fail.Store(true)
 
-	out := e.Execute(context.Background(), in)
+	out := runExec(e, context.Background(), in)
 	if up.calls != 0 {
 		t.Fatalf("a failed critical commit must prevent the upstream side effect, calls=%d", up.calls)
 	}

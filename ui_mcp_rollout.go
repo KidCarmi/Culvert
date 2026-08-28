@@ -40,6 +40,10 @@ func apiMCPRollout(w http.ResponseWriter, r *http.Request) {
 	// Fleet-effective mode + DP ack counts come from the signed-distribution status;
 	// in disabled-default there is no fleet, so local == desired == effective.
 	st["distribution"] = mcpDistributionStatus()
+	// Controlled Shadow activation: the non-executing evaluator composition state, the
+	// two readiness tiers (shadow vs live), the §14 activation preflight, and the bounded
+	// shadow evaluation metrics. Read-only; distinguishes gateway / shadow / live-exec.
+	st["shadow"] = mcpShadowStatus()
 	jsonOK(w, st)
 }
 
@@ -89,7 +93,10 @@ func apiMCPRolloutTransition(w http.ResponseWriter, r *http.Request) {
 				capbManagement = parsed == rollout.CapabilityManagement
 			}
 		}
-		if !execDepsConfigured(capbManagement) {
+		// The readiness TIER the target mode requires must be composed: Shadow needs
+		// only the non-executing shadow plane; Canary needs the live-execution plane
+		// (never composed in this build). modeExecReady owns the shadow-vs-live split.
+		if !modeExecReady(to, capbManagement) {
 			http.Error(w, "shadow_execution_dependencies_not_configured", http.StatusConflict)
 			return
 		}

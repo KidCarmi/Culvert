@@ -212,6 +212,19 @@ func loadMCPObserveRuntime(sc mcpObserveStartupConfig) (mcpruntime.Config, mcpOb
 		_ = tel.Close(context.Background())
 		return invalid("qualification_policy_invalid", err)
 	}
+	// Controlled Shadow activation (SHADOW-ACTIVATION.md §4): when the operator has
+	// explicitly opted this node into Shadow readiness, compose the NON-EXECUTING Shadow
+	// evaluator and inject it as Deps.Executor. It holds no upstream client and no
+	// materialize-capable broker, so the Gateway can EVALUATE an in-scope Shadow request
+	// (formal ShadowDecision + durable evidence) while remaining structurally incapable
+	// of an upstream side effect. Disabled by default: with CULVERT_MCP_SHADOW_READY
+	// unset the executor is nil and the runtime keeps its byte-identical Observe path.
+	// A record-only disposition (out-of-scope / Observe mode) still runs the runtime's
+	// inline Observe evidence path (see runtime.ExecutionProvider.RecordsOnly), so
+	// composing the evaluator never drops decision evidence for traffic it does not
+	// evaluate. It requires the durable events manager (tel.Manager()); fail-closed to a
+	// nil executor otherwise. Metrics are the bounded Shadow sink (nil ⇒ no-op).
+	composeGatewayShadowIntoConfig(&cfg, mcpShadowReadyEnabled(), tel.Manager())
 	// Publish the seeded inventory + telemetry as the single sources of truth ONLY
 	// after the whole activation is valid, so the Admin API and runtime observe the
 	// identical instances.

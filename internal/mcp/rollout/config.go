@@ -76,11 +76,20 @@ func (c SignedConfig) Validate(capability Capability, lim Limits) error {
 			return err
 		}
 	}
-	// Canary/Production require an enumerable scope (no "1% of everything").
-	if c.Mode == ModeCanary || c.Mode == ModeProduction {
+	// Shadow, Canary and Production all require an ENUMERABLE scope — one with concrete
+	// inclusion selectors, not a pure-percentage "N% of everything" and not empty. For
+	// Canary/Production this bounds enforcement; for Shadow it is the "no scope = no
+	// Shadow" contract (SHADOW-ACTIVATION.md §5): an empty or percentage-only Shadow scope
+	// used to validate and then silently behave as Observe (matches nothing), so a
+	// mis-scoped activation looked accepted while shadowing nothing — and, worse, a future
+	// widening could not be reasoned about from "the scope is empty". Requiring an
+	// enumerable scope makes a Shadow activation name the exact bounded target it evaluates
+	// and makes "missing scope shadows everything" structurally impossible (the empty scope
+	// matches nothing AND the config is now rejected fail-closed at validation).
+	if c.Mode == ModeShadow || c.Mode == ModeCanary || c.Mode == ModeProduction {
 		sc, _ := c.CompileScope(lim)
 		if !sc.Enumerable() {
-			return mcperr.New(mcperr.ReasonRolloutScopeInvalid, "rollout.config", "canary/production requires an enumerable scope")
+			return mcperr.New(mcperr.ReasonRolloutScopeInvalid, "rollout.config", "shadow/canary/production requires an enumerable scope (no empty or percentage-only scope)")
 		}
 	}
 	return nil

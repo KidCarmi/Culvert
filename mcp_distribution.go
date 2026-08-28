@@ -7,6 +7,7 @@ import (
 
 	"github.com/KidCarmi/Culvert/internal/mcp/cpdp"
 	"github.com/KidCarmi/Culvert/internal/mcp/cpdp/apply"
+	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 )
 
 // mcpDistribution holds the node-local MCP CP→DP signed-snapshot distribution
@@ -266,11 +267,23 @@ func applyMCPCapabilityEnvelope(a *apply.Applier, env *cpdp.Envelope, capb cpdp.
 			logger.Printf("MCP %s snapshot rejected: rollout capability mismatch (distribution not applied)", capb.String())
 			return
 		}
-		if cfg.Mode.RequiresExecutionPlane() && !execDepsConfigured(mgmt) {
+		if !modeExecReady(cfg.Mode, mgmt) {
 			_ = a.RejectAck(env, errShadowExecDepsNotConfigured)
 			logger.Printf("MCP %s snapshot rejected: rollout %s requires execution dependencies (fail-closed; distribution not applied, no AckApplied)",
 				capb.String(), cfg.Mode.String())
 			return
+		}
+		// Shadow activation preflight (§14): a signed Shadow config is ACCEPTED only when
+		// the node is genuinely ready to EVALUATE Shadow and record the evidence. A failed
+		// preflight rejects fail-closed BEFORE any distribution activation or rollout commit,
+		// so a not-ready node never commits Shadow state and delivers no AckApplied.
+		if cfg.Mode == rollout.ModeShadow {
+			if pf := evaluateShadowActivationPreflight(cfg.Capability, cfg.Scope, cfg.ScopeRevision); !pf.Ready {
+				_ = a.RejectAck(env, errShadowPreflightFailed)
+				logger.Printf("MCP %s snapshot rejected: shadow activation preflight failed %v (fail-closed; distribution not applied, no AckApplied)",
+					capb.String(), pf.Reasons)
+				return
+			}
 		}
 	}
 	// (2) Distribution transaction: verify + persist + activate (Applied ack pending).

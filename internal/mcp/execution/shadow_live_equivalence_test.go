@@ -220,8 +220,8 @@ func TestShadow_LivePreSideEffectEquivalence(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			in, live, shadow, up := tc.setup(t)
 
-			liveOut := live.Execute(context.Background(), in)
-			shadowOut := shadow.Execute(context.Background(), in)
+			liveOut := runExec(live, context.Background(), in)
+			shadowOut := runExec(shadow, context.Background(), in)
 
 			// The Shadow evaluator must NEVER execute or touch upstream, ever.
 			if shadowOut.Executed {
@@ -267,7 +267,7 @@ func TestShadow_PreservesPolicyVerdictSeparately(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.wantAction, func(t *testing.T) {
 			shadow := shadowEval(t, nil)
-			out := shadow.Execute(context.Background(), execInput(tc.action, false))
+			out := runExec(shadow, context.Background(), execInput(tc.action, false))
 			if out.Executed {
 				t.Fatal("shadow must never execute")
 			}

@@ -13,6 +13,7 @@ import (
 	"github.com/KidCarmi/Culvert/internal/mcp/policy"
 	"github.com/KidCarmi/Culvert/internal/mcp/protocol"
 	"github.com/KidCarmi/Culvert/internal/mcp/registry"
+	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 )
 
 // PolicyProvider supplies the current capability-local policy snapshot to a
@@ -79,15 +80,39 @@ func (p *pipeline) dispatchPolicy(ctx context.Context, rb *recBuilder, req Reque
 	rb.rec.MatchedRule = string(d.MatchedRule)
 	rb.rec.PolicyRevision = uint64(d.PolicyRevision)
 
-	// PR-11: when a guarded executor is wired (Gateway only, armed by rollout
-	// distribution), hand the fully-evaluated decision to it. The executor owns
-	// rollout-mode resolution (record-only / execute / block), the fixed
-	// hard-failure enforcement, obligations, and — for an in-scope executing mode —
-	// the real guarded upstream call with its own commit-before-side-effect. When no
-	// executor is wired this branch is skipped and the decision-only path below runs
-	// byte-identically.
+	// PR-11 / Shadow activation: when a guarded executor is wired (Gateway only, armed
+	// by rollout distribution or Shadow composition), hand it a NON-record-only
+	// disposition — Shadow evaluate, Canary/Production execute, or a hard block — and it
+	// owns the rollout-mode resolution + its own commit-before-side-effect. A RECORD-ONLY
+	// disposition (Observe / Disabled / out-of-scope) deliberately KEEPS the inline
+	// decision-only path below, which owns the canonical allow-class decision-event
+	// commit and denial-lane routing — so composing an evaluator (e.g. a Shadow evaluator
+	// on a shadow-ready node) never drops that Observe evidence for the traffic it does
+	// not evaluate. When no executor is wired the branch is skipped entirely and the
+	// decision-only path runs byte-identically.
 	if p.executor != nil {
-		return p.dispatchExecute(ctx, rb, req, msg, ident, in, d, insp, snap.Hash(), now)
+		ei := p.buildExecInput(req, msg, ident, in, d, insp, snap.Hash(), now)
+		// Resolve the rollout disposition EXACTLY ONCE and carry it into execution, so
+		// routing and execution never observe two snapshots of the mutable rollout state
+		// (Codex P2, PR #1234). A record-only disposition keeps the inline Observe path;
+		// everything else is handed to Execute with the same resolution.
+		res := p.executor.Resolve(ei)
+		if res.Disposition != rollout.EffectRecordOnly {
+			return p.dispatchExecute(ctx, rb, ei, res)
+		}
+		// record-only disposition ⇒ the inline Observe evidence path. Honor an emergency kill
+		// engaged AFTER Resolve before that path commits: the kill is a capability-wide
+		// admission stop, so even a record-only request must not proceed under an active kill
+		// (parity with Execute's entry re-check — the executing path is covered there; Codex P2,
+		// PR #1234). Reading only the monotonic kill flag can only make the outcome more
+		// restrictive, so it does not reopen the single-resolution TOCTOU.
+		if p.executor.KillActive() {
+			p.ctr.requestsRejected.Add(1)
+			rb.rec.PolicyAction = "BLOCKED_BY_EMERGENCY_KILL"
+			rb.rec.PolicyReason = mcperr.ReasonRolloutEmergencyActive.Code()
+			body := inspectionError(msg.ID, mcperr.ReasonRolloutEmergencyActive)
+			return p.finish(rb, Outcome{Status: 200, Disposition: DispRejected, Reason: mcperr.ReasonRolloutEmergencyActive, ResponseBody: body})
+		}
 	}
 
 	if d.Action.IsAllowClass() {

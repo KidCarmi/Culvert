@@ -112,7 +112,19 @@ func TestChaos55_ResumeDuringBackendOutage_RegainsWriteAuthority(t *testing.T) {
 	// etcd comes back. No operator, no restart.
 	o.down.Store(false)
 
-	if !haWaitFor(20*time.Second, h.WriteAllowed) {
+	// Wait for the SETTLED state, not just for write authority: the grant is
+	// installed (making WriteAllowed true) a beat before completeLeaseRecovery
+	// collapses the term into the epoch and the loop clears the recovering flag,
+	// so a check landing between the two would read the pre-recovery term (11)
+	// while the epoch already carries the grant — the Term assertion below would
+	// then flake under load. That transient is harmless in production (authority
+	// first, bookkeeping second is the safe direction), but asserting on a
+	// mid-commit snapshot is not a real contract. The recovery loop drops its
+	// channel handle only after the term is written, so !leaseRecoveryActive()
+	// gates on the fully-settled state.
+	if !haWaitFor(20*time.Second, func() bool {
+		return h.WriteAllowed() && !h.leaseRecoveryActive()
+	}) {
 		t.Fatal("HA-7: write authority never returned after the fencing backend recovered — " +
 			"the node is a permanently read-only leader until an operator intervenes")
 	}

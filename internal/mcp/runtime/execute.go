@@ -14,6 +14,7 @@ import (
 	"github.com/KidCarmi/Culvert/internal/mcp/policy"
 	"github.com/KidCarmi/Culvert/internal/mcp/protocol"
 	"github.com/KidCarmi/Culvert/internal/mcp/registry"
+	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 )
 
 // ExecutionProvider is the PR-11 guarded-execution seam. It is consulted AFTER a
@@ -24,10 +25,27 @@ import (
 // The provider MUST NOT be consulted for Management (which never executes an
 // upstream tools/call); the runtime only wires it for the Gateway capability.
 type ExecutionProvider interface {
-	// Execute runs the guarded rollout-mode path and returns the terminal result +
-	// the observation fields to record. It performs its OWN durable
-	// commit-before-side-effect; the runtime does not pre-commit for this path.
-	Execute(ctx context.Context, in ExecInput) ExecOutput
+	// Resolve resolves the effective rollout disposition for this request EXACTLY ONCE,
+	// with no side effect (no commit, no upstream call). The runtime routes on it — a
+	// record-only disposition (Observe / Disabled / out-of-scope, and a killed capability
+	// resolves to a block, never record-only) keeps the runtime's inline Observe evidence
+	// path — and hands the SAME resolution back to Execute. Resolving once and carrying it
+	// into execution is what closes the TOCTOU: routing and execution can never observe two
+	// different snapshots of the mutable rollout state across a concurrent transition, so a
+	// request never falls through as Observe without its Shadow evaluation, nor reaches the
+	// evaluator's record-only path without the inline durable commit (Codex P2, PR #1234).
+	Resolve(in ExecInput) rollout.Resolution
+	// Execute runs the guarded rollout-mode path for a PRE-RESOLVED disposition and returns
+	// the terminal result + the observation fields to record. It NEVER re-resolves the
+	// rollout state — it acts on the resolution Resolve produced. It performs its OWN
+	// durable commit-before-side-effect; the runtime does not pre-commit for this path.
+	Execute(ctx context.Context, in ExecInput, res rollout.Resolution) ExecOutput
+	// KillActive reports whether the capability's emergency kill switch is currently engaged.
+	// The runtime consults it on the RECORD-ONLY fall-through, so an emergency admission stop
+	// blocks even the inline Observe path; the executing path is covered by Execute's own
+	// entry re-check. Reading only the monotonic kill flag can only make the outcome more
+	// restrictive, so it does not reopen the single-resolution TOCTOU (Codex P2, PR #1234).
+	KillActive() bool
 }
 
 // ExecInput carries the already-resolved request facts the executor needs. It
@@ -80,24 +98,14 @@ type ExecOutput struct {
 	Executed        bool
 }
 
-// dispatchExecute hands a decision-point outcome to the guarded executor and maps
-// the result back into a terminal Outcome. It is only reached when p.executor is
-// non-nil (the disabled-by-default posture keeps the decision-only path).
-func (p *pipeline) dispatchExecute(ctx context.Context, rb *recBuilder, req Request, msg jsonrpc.Message, ident *identity.ResolvedContext, in policy.DecisionInput, d policy.Decision, insp inspectionRun, snapshotHash string, now time.Time) Outcome {
-	// OVN-09 — decision/execution TOCTOU. The policy decision was computed against
-	// a catalog SNAPSHOT. Between then and the irreversible upstream call there is a
-	// real window (inspection, durable commit, credential planning, provider fetch)
-	// in which a concurrent discovery — execution.Discovery -> catalog.Ingest
-	// publishes a new snapshot — can change the tool the decision was made about.
-	// Re-validate against the LIVE catalog and refuse a stale decision before any
-	// side effect. This is the drift MCP-TOOL-001 / MCP-T-011 / MCP-T-016 exist to
-	// prevent, and the executor never re-checked it.
-	if out, stale := p.refuseOnToolDrift(rb, in, msg.ID); stale {
-		return out
-	}
-	// The same predicate, handed to the executor to re-run adjacent to the upstream
-	// call. Captured by value from this decision's input, so it can never be
-	// satisfied by a DIFFERENT request's tool.
+// buildExecInput materializes the ExecInput the executor needs from the resolved
+// decision facts. It is pure (a registry snapshot read + a captured drift predicate)
+// so it can be built once and used both for the RecordsOnly routing probe and for
+// Execute, guaranteeing the disposition the runtime routes on is computed from the
+// exact same input the executor acts on.
+func (p *pipeline) buildExecInput(req Request, msg jsonrpc.Message, ident *identity.ResolvedContext, in policy.DecisionInput, d policy.Decision, insp inspectionRun, snapshotHash string, now time.Time) ExecInput {
+	// The drift predicate, captured by value from this decision's input, so it can
+	// never be satisfied by a DIFFERENT request's tool.
 	toolStillCurrent := func() bool { return !p.toolHasDrifted(in) }
 	var srv *registry.ServerRecord
 	if req.ServerID != "" && p.deps.Registry != nil {
@@ -110,7 +118,7 @@ func (p *pipeline) dispatchExecute(ctx context.Context, rb *recBuilder, req Requ
 		r := insp.result
 		inspResult = &r
 	}
-	ei := ExecInput{
+	return ExecInput{
 		Capability:   p.capability,
 		Method:       msg.Method,
 		MessageID:    msg.ID,
@@ -125,13 +133,34 @@ func (p *pipeline) dispatchExecute(ctx context.Context, rb *recBuilder, req Requ
 
 		ToolStillCurrent: toolStillCurrent,
 	}
+}
+
+// dispatchExecute hands a decision-point outcome to the guarded executor and maps
+// the result back into a terminal Outcome. It is reached only for a NON-record-only
+// disposition (Shadow evaluate / Canary-Production execute / hard block): a
+// record-only disposition keeps the runtime's inline Observe evidence path instead
+// (dispatchPolicy), so a composed evaluator never displaces the decision-event commit.
+// It receives the resolution the runtime already resolved and passes it to Execute, so
+// the disposition is never re-resolved.
+func (p *pipeline) dispatchExecute(ctx context.Context, rb *recBuilder, ei ExecInput, res rollout.Resolution) Outcome {
+	// OVN-09 — decision/execution TOCTOU. The policy decision was computed against
+	// a catalog SNAPSHOT. Between then and the irreversible upstream call there is a
+	// real window (inspection, durable commit, credential planning, provider fetch)
+	// in which a concurrent discovery — execution.Discovery -> catalog.Ingest
+	// publishes a new snapshot — can change the tool the decision was made about.
+	// Re-validate against the LIVE catalog and refuse a stale decision before any
+	// side effect. This is the drift MCP-TOOL-001 / MCP-T-011 / MCP-T-016 exist to
+	// prevent, and the executor never re-checked it.
+	if out, stale := p.refuseOnToolDrift(rb, ei.Input, ei.MessageID); stale {
+		return out
+	}
 	// SEC-MCP-03. The executor performs the REAL upstream side effect and must
 	// inherit the request's deadline and cancellation: with a DETACHED background
 	// context here, a disconnected client, an exhausted RequestDeadline or a
 	// shutdown could not stop an in-flight upstream call, and every ctx-honouring
 	// stage the executor reaches (broker, provider, dial, TLS, response read,
 	// response inspection) silently lost its bound.
-	out := p.executor.Execute(ctx, ei)
+	out := p.executor.Execute(ctx, ei, res)
 
 	// Record the truthful observation fields.
 	if out.EvaluatedAction != "" {

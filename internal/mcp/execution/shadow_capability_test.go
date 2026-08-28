@@ -5,8 +5,11 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/KidCarmi/Culvert/internal/mcp/events/spool"
+	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
 	"github.com/KidCarmi/Culvert/internal/mcp/policy"
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
+	"github.com/KidCarmi/Culvert/internal/mcp/runtime"
 )
 
 // TestShadow_TypeGraphHasNoExecuteCapability is the Layer-B structural gate (SH-INV-2,
@@ -105,13 +108,180 @@ func TestShadow_EmbeddedEvaluatorSharesLiveAllowanceHistory(t *testing.T) {
 	}
 	in := execInput(policy.ActionAllowOnce, false)
 	// Live Canary consumes the one-shot grant.
-	if out := e.Execute(context.Background(), in); !out.Executed {
+	if out := runExec(e, context.Background(), in); !out.Executed {
 		t.Fatalf("canary ALLOW_ONCE should execute+consume, state=%q", out.ExecutionState)
 	}
 	// The embedded shadow now predicts WOULD_BLOCK for the same grant (consumed), matching
 	// what the same enforcing executor would return (allowance_consumed).
 	if d := e.shadow.decide(in); d.Outcome != ShadowWouldBlock {
 		t.Fatalf("embedded shadow should see the consumed ALLOW_ONCE and predict would_block, got %q", d.Outcome)
+	}
+}
+
+// TestResolve_RoutesOnlyExecutingDispositions pins the single-resolution routing contract:
+// Resolve reports record-only for Observe / Disabled / out-of-scope (so the runtime keeps
+// its inline Observe evidence path) and NOT record-only for an in-scope Shadow evaluation
+// or a killed capability (so Execute handles the evaluation / emergency block). Resolving
+// ONCE and carrying the result into Execute is what preserves Observe evidence on a
+// shadow-ready node and routes a killed node to the emergency block instead of a silent
+// record — without a second, divergent resolution (Codex P2, PR #1234).
+func TestResolve_RoutesOnlyExecutingDispositions(t *testing.T) {
+	newEv := func(st *rollout.State) *ShadowEvaluator {
+		e, err := NewShadowEvaluator(ShadowConfig{State: st, Events: realEvents(t, nil)})
+		if err != nil {
+			t.Fatalf("NewShadowEvaluator: %v", err)
+		}
+		return e
+	}
+	recordOnly := func(ev *ShadowEvaluator, in runtime.ExecInput) bool {
+		return ev.Resolve(in).Disposition == rollout.EffectRecordOnly
+	}
+	inScope := execInput(policy.ActionAllow, false) // server s1 ∈ scope
+	outScope := execInput(policy.ActionAllow, false)
+	outScope.Input.Server = &policy.Server{ServerID: "not-in-scope", Environment: "prod"}
+
+	if recordOnly(newEv(stateForMode(t, rollout.ModeShadow)), inScope) {
+		t.Fatal("Shadow in-scope must NOT resolve to record-only (it evaluates via Execute)")
+	}
+	if !recordOnly(newEv(stateForMode(t, rollout.ModeShadow)), outScope) {
+		t.Fatal("Shadow out-of-scope must resolve to record-only (Observe behaviour on the inline path)")
+	}
+	if !recordOnly(newEv(stateForMode(t, rollout.ModeObserve)), inScope) {
+		t.Fatal("Observe must resolve to record-only")
+	}
+	if !recordOnly(newEv(stateForMode(t, rollout.ModeDisabled)), inScope) {
+		t.Fatal("Disabled must resolve to record-only")
+	}
+	killed := stateForMode(t, rollout.ModeShadow)
+	killed.EngageKillSwitch("oncall", 1)
+	if recordOnly(newEv(killed), inScope) {
+		t.Fatal("SECURITY: a killed capability must NOT resolve to record-only — Execute must emit the emergency block")
+	}
+	// And a killed capability resolves specifically to a block with the emergency reason.
+	if res := newEv(killed).Resolve(inScope); res.Disposition != rollout.EffectBlock || res.BlockReason != mcperr.ReasonRolloutEmergencyActive {
+		t.Fatalf("killed capability must resolve to an emergency block, got disp=%v reason=%v", res.Disposition, res.BlockReason)
+	}
+}
+
+func newShadowEvaluatorForTest(t *testing.T, st *rollout.State) *ShadowEvaluator {
+	t.Helper()
+	e, err := NewShadowEvaluator(ShadowConfig{State: st, Events: realEvents(t, nil)})
+	if err != nil {
+		t.Fatalf("NewShadowEvaluator: %v", err)
+	}
+	return e
+}
+
+// TestExecute_CarriesModeScopeResolutionWithoutReResolving is the F7 single-resolution gate
+// (Codex P2, PR #1234): the MODE/SCOPE disposition is resolved EXACTLY ONCE (in Resolve) and
+// carried into Execute, which must act on the carried disposition and NOT re-resolve mode or
+// scope — so a mode/scope transition landing between Resolve and Execute can never make routing
+// and execution observe two different snapshots.
+//
+// The proof: hand Execute a request the CURRENT state would resolve to record-only (out of
+// scope — standing in for "the scope moved out from under the in-flight request after Resolve")
+// together with a carried EffectShadowEvaluate resolution (what an earlier in-scope Resolve
+// produced). Execute must honour the carried disposition and shadow-evaluate. If Execute
+// re-resolved mode/scope it would see the out-of-scope request, return record-only, and fail —
+// reopening exactly the evidence gap F7 closed.
+func TestExecute_CarriesModeScopeResolutionWithoutReResolving(t *testing.T) {
+	st := stateForMode(t, rollout.ModeShadow)
+	ev := newShadowEvaluatorForTest(t, st)
+
+	outScope := execInput(policy.ActionAllow, false)
+	outScope.Input.Server = &policy.Server{ServerID: "not-in-scope", Environment: "prod"}
+	// Sanity: the state genuinely resolves this request to record-only.
+	if d := ev.Resolve(outScope).Disposition; d != rollout.EffectRecordOnly {
+		t.Fatalf("precondition: out-of-scope Shadow must resolve to record-only, got %v", d)
+	}
+
+	// Carry a shadow-evaluate resolution (from a prior in-scope Resolve) into Execute.
+	out := ev.Execute(context.Background(), outScope, rollout.Resolution{Disposition: rollout.EffectShadowEvaluate})
+	if out.ExecutionState != "shadow_evaluated" {
+		t.Fatalf("Execute re-resolved mode/scope instead of acting on the carried resolution: "+
+			"an out-of-scope request with a carried shadow-evaluate returned %q (single-resolution TOCTOU is open)", out.ExecutionState)
+	}
+}
+
+// TestExecute_ReHonorsEmergencyKillEngagedAfterResolve pins the round-5 correction (Codex P2,
+// PR #1234): the kill switch is an immediate admission stop, so a kill engaged AFTER Resolve
+// but before Execute must still stop the evaluation — Execute re-reads the monotonic kill flag
+// even though it carries (never re-resolves) the mode/scope disposition. Without the re-check
+// the evaluator would commit durable evidence and return a would_* verdict AFTER the operator's
+// emergency stop.
+//
+// Mutation: dropping the kill re-check at Execute entry shadow-evaluates the carried resolution
+// and fails this gate. This is deliberately the OPPOSITE assertion from the mode/scope gate
+// above — kill is the one axis Execute re-reads, because re-honouring it can only make the
+// outcome more restrictive and so cannot reopen the routing TOCTOU.
+func TestExecute_ReHonorsEmergencyKillEngagedAfterResolve(t *testing.T) {
+	st := stateForMode(t, rollout.ModeShadow)
+	ev := newShadowEvaluatorForTest(t, st)
+	in := execInput(policy.ActionAllow, false) // server s1 ∈ scope
+
+	res := ev.Resolve(in)
+	if res.Disposition != rollout.EffectShadowEvaluate {
+		t.Fatalf("precondition: in-scope Shadow must resolve to shadow-evaluate, got %v", res.Disposition)
+	}
+	st.EngageKillSwitch("oncall", 1) // emergency stop lands AFTER routing decided
+
+	out := ev.Execute(context.Background(), in, res)
+	if out.ExecutionState != "blocked" || out.Reason != mcperr.ReasonRolloutEmergencyActive {
+		t.Fatalf("SECURITY: a kill engaged after Resolve must stop the evaluation at Execute: "+
+			"got state=%q reason=%v, want blocked/emergency", out.ExecutionState, out.Reason)
+	}
+}
+
+// spyMetrics records how many times the Shadow-outcome and block observations fire. It
+// embeds noopMetrics for every other method of the interface.
+type spyMetrics struct {
+	noopMetrics
+	outcomes int
+	blocks   int
+}
+
+func (s *spyMetrics) ObserveShadowOutcome(string, string) { s.outcomes++ }
+func (s *spyMetrics) ObserveBlock(string, mcperr.Reason)  { s.blocks++ }
+
+// TestShadow_OutcomeMetricRecordedOnlyAfterDurableCommit is the evidence-before-report
+// gate (Codex P2, PR #1234): when the durable commit fails, the evaluator returns a block
+// (counted as an error) and must NOT ALSO record a would_* verdict — that would
+// double-count and overstate successful Shadow outcomes during the durability failures an
+// operator most needs to see. Mutation: moving ObserveShadowOutcome back before
+// CommitThenAct makes outcomes==1 here and fails the test.
+func TestShadow_OutcomeMetricRecordedOnlyAfterDurableCommit(t *testing.T) {
+	// Success path: exactly one outcome, no block.
+	okSpy := &spyMetrics{}
+	okEv, err := NewShadowEvaluator(ShadowConfig{
+		State: stateForMode(t, rollout.ModeShadow), Events: realEvents(t, nil), Metrics: okSpy,
+	})
+	if err != nil {
+		t.Fatalf("NewShadowEvaluator: %v", err)
+	}
+	if out := okEv.evaluate(context.Background(), execInput(policy.ActionAllow, false)); out.ExecutionState != "shadow_evaluated" {
+		t.Fatalf("success path should shadow_evaluate, got %q", out.ExecutionState)
+	}
+	if okSpy.outcomes != 1 || okSpy.blocks != 0 {
+		t.Fatalf("success path: outcomes=%d blocks=%d, want 1/0", okSpy.outcomes, okSpy.blocks)
+	}
+
+	// Durable-commit failure: a block, NO would_* verdict recorded.
+	failSpy := &spyMetrics{}
+	failEv, err := NewShadowEvaluator(ShadowConfig{
+		State: stateForMode(t, rollout.ModeShadow), Events: realEvents(t, failBackend{inner: spool.NewOSBackend()}), Metrics: failSpy,
+	})
+	if err != nil {
+		t.Fatalf("NewShadowEvaluator: %v", err)
+	}
+	out := failEv.evaluate(context.Background(), execInput(policy.ActionAllow, false))
+	if out.ExecutionState != "blocked" {
+		t.Fatalf("commit failure must block, got %q", out.ExecutionState)
+	}
+	if failSpy.outcomes != 0 {
+		t.Fatal("a would_* verdict must NOT be recorded when the durable commit fails (evidence-before-report)")
+	}
+	if failSpy.blocks == 0 {
+		t.Fatal("a durable-commit failure must be counted as a block/evaluation error")
 	}
 }
 

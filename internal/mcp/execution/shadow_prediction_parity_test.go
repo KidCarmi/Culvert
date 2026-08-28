@@ -201,8 +201,8 @@ func TestSR02_ShadowPredictsTheLiveUpstreamServerRefusal(t *testing.T) {
 			live, up := liveCanary(t)
 			shadow := shadowEval(t, nil)
 
-			liveOut := live.Execute(context.Background(), in)
-			shadowOut := shadow.Execute(context.Background(), in)
+			liveOut := runExec(live, context.Background(), in)
+			shadowOut := runExec(shadow, context.Background(), in)
 
 			if liveOut.Executed || up.calls != 0 {
 				t.Fatalf("control: live enforcement must refuse an unusable server before the side effect (executed=%v calls=%d)",
@@ -231,7 +231,7 @@ func TestSR02_ShadowPredictsTheLiveUpstreamServerRefusal(t *testing.T) {
 func TestSR02_UsableServerStillPredictsWouldExecute(t *testing.T) {
 	in := execInput(policy.ActionAllow, false) // carries Enabled + VerifyVerified
 	shadow := shadowEval(t, nil)
-	out := shadow.Execute(context.Background(), in)
+	out := runExec(shadow, context.Background(), in)
 	if got := shadowCanon(t, out); got != cExecute {
 		t.Fatalf("shadow verdict = %v, want execute — the server-usability gate must not refuse a usable server", got)
 	}
@@ -252,8 +252,8 @@ func TestSR02_ServerUsabilityIsCheckedAfterPolicyAndAllowance(t *testing.T) {
 	seedConsumedOnce(t, live.allowances, in)
 	seedConsumedOnce(t, shadow.allowances, in)
 
-	gotLive := liveCanon(t, in, live.Execute(context.Background(), in), up.calls)
-	gotShadow := shadowCanon(t, shadow.Execute(context.Background(), in))
+	gotLive := liveCanon(t, in, runExec(live, context.Background(), in), up.calls)
+	gotShadow := shadowCanon(t, runExec(shadow, context.Background(), in))
 	if gotLive != cBlock {
 		t.Fatalf("control: live verdict = %v, want block (allowance_consumed precedes the server gate)", gotLive)
 	}

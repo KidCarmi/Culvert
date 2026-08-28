@@ -113,21 +113,29 @@ func New(cfg Config) (*Executor, error) {
 	return &Executor{cfg: cfg, allowances: allow, shadow: shadow}, nil
 }
 
-// Execute is the runtime.ExecutionProvider entry. It resolves the effective
-// rollout disposition and dispatches record-only / block / execute.
-func (e *Executor) Execute(ctx context.Context, in runtime.ExecInput) runtime.ExecOutput {
-	// A capability-local kill switch stops all admission immediately.
+// Resolve implements runtime.ExecutionProvider: it resolves the effective rollout
+// disposition for this request EXACTLY ONCE (no side effect), so routing and execution
+// use the same snapshot. A killed capability resolves to an emergency block.
+func (e *Executor) Resolve(in runtime.ExecInput) rollout.Resolution {
+	return resolveDisposition(e.cfg.State, in)
+}
+
+// Execute is the runtime.ExecutionProvider entry. It acts on the PRE-RESOLVED mode/scope
+// disposition (it never re-resolves mode or scope — F7 single resolution, Codex P2 #1234)
+// and dispatches record-only / block / execute.
+//
+// It re-reads ONLY the emergency kill: the kill switch is an immediate admission stop, so a
+// kill engaged AFTER Resolve but before the irreversible upstream call must still stop it.
+// This is orthogonal to single-resolution — it reads only the monotonic kill flag and can
+// only make the outcome MORE restrictive (an emergency block), so it cannot reopen the
+// routing TOCTOU F7 closed. Fail-closed here matters most on the LIVE path: it stops an
+// upstream side effect that Resolve had cleared microseconds before the operator hit kill.
+func (e *Executor) Execute(ctx context.Context, in runtime.ExecInput, res rollout.Resolution) runtime.ExecOutput {
 	if e.cfg.State.Killed() {
 		return e.blocked(in, mcperr.ReasonRolloutEmergencyActive, false)
 	}
 	subj := subjectFor(in)
 	action := mapAction(in.Decision.Action)
-	hardFail, hardReason := hardFailure(in)
-
-	// Resolve optimistically (obligations satisfied) to learn the disposition; only
-	// consume an allowance when we would actually execute (so a failed pre-execution
-	// hard control never consumes it).
-	res := e.cfg.State.ResolveFor(subj, action, hardFail, hardReason, true)
 	e.cfg.Metrics.ObserveResolution(in.Capability.String(), res)
 
 	switch res.Disposition {
@@ -159,6 +167,10 @@ func (e *Executor) Execute(ctx context.Context, in runtime.ExecInput) runtime.Ex
 		return e.blocked(in, mcperr.ReasonRolloutModeInvalid, false)
 	}
 }
+
+// KillActive implements runtime.ExecutionProvider: it reports whether this capability's
+// emergency kill switch is engaged, for the runtime's record-only fall-through re-check.
+func (e *Executor) KillActive() bool { return e.cfg.State.Killed() }
 
 // recordOnly returns the decision-only (observe) result: the true policy action is
 // recorded, no upstream call is made.
@@ -266,4 +278,24 @@ func policyHardReason(d policy.Decision) mcperr.Reason {
 // needsAllowance reports whether the action consumes a per-call/session allowance.
 func needsAllowance(a rollout.ActionKind) bool {
 	return a == rollout.ActionKindAllowOnce || a == rollout.ActionKindAllowSession
+}
+
+// resolveDisposition resolves the effective rollout disposition for a request EXACTLY
+// ONCE — the SINGLE point at which the mutable rollout state is read for this request, so
+// routing (record-only vs not) and execution act on the same snapshot and can never
+// diverge across a concurrent transition (Codex P2, PR #1234). A KILLED capability
+// resolves to an emergency block (never record-only): admission is stopped, so the
+// runtime routes it to Execute, which emits the block, rather than to its inline Observe
+// path. It performs no side effect.
+func resolveDisposition(st *rollout.State, in runtime.ExecInput) rollout.Resolution {
+	action := mapAction(in.Decision.Action)
+	if st.Killed() {
+		return rollout.Resolution{
+			Disposition: rollout.EffectBlock, BlockReason: mcperr.ReasonRolloutEmergencyActive,
+			EvaluatedAction: action, EffectiveAction: action,
+		}
+	}
+	subj := subjectFor(in)
+	hardFail, hardReason := hardFailure(in)
+	return st.ResolveFor(subj, action, hardFail, hardReason, true)
 }

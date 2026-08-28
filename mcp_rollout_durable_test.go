@@ -7,6 +7,9 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/fileutil"
+	"github.com/KidCarmi/Culvert/internal/mcp/catalog"
+	"github.com/KidCarmi/Culvert/internal/mcp/limits"
+	"github.com/KidCarmi/Culvert/internal/mcp/registry"
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 )
 
@@ -44,15 +47,59 @@ func gwObserveCfg() *rollout.SignedConfig {
 	}
 }
 
-// withExecDepsReady flips the Gateway execution-dependency flag for the duration of a
-// test so an executing-mode transition can be exercised, then restores it. It uses the
-// real production hook (markGatewayExecDepsReady) so the future guarded-execution
-// composition is exercised end to end.
+// withExecDepsReady flips the Gateway SHADOW-readiness flag for the duration of a test
+// so a Shadow transition can be exercised, then restores it. These durable tests
+// exercise the Shadow mode, which after the readiness split gates on the shadow tier
+// (shadowDepsConfigured), so it uses the real Shadow composition hook
+// (markGatewayShadowDepsReady) — NOT the live-execution hook, which stays uncalled.
 func withExecDepsReady(t *testing.T) {
 	t.Helper()
-	prev := globalExecDeps.gateway.Load()
-	markGatewayExecDepsReady()
-	t.Cleanup(func() { globalExecDeps.gateway.Store(prev) })
+	prev := globalExecDeps.shadowGateway.Load()
+	markGatewayShadowDepsReady()
+	t.Cleanup(func() { globalExecDeps.shadowGateway.Store(prev) })
+}
+
+// withReadyShadowNode composes the minimal node state the Shadow activation preflight
+// requires, so a RESTORED ModeShadow survives restore() instead of being clamped as
+// unable-to-evaluate. In production initMCPRuntime composes all of this (shadow evaluator
+// + inspection + durable events + policy + inventory + a serving listener) BEFORE
+// initMCPRollout restores; these isolated rollout tests must reproduce that readiness to
+// exercise a genuine Shadow restart. It also arms the shadow tier (withExecDepsReady).
+func withReadyShadowNode(t *testing.T) {
+	t.Helper()
+	withExecDepsReady(t) // shadow readiness tier
+	prevComposed := globalMCPShadow.composed.Load()
+	prevInsp := globalMCPShadow.inspectionComposed.Load()
+	prevStatus := getMCPObserveStatus()
+	prevListenerProbe := gatewayListenerReadyProbe
+	prevUsableToolProbe := shadowScopeUsableToolProbe
+	globalMCPShadow.composed.Store(true)
+	globalMCPShadow.inspectionComposed.Store(true)
+	setMCPObserveStatus(mcpObserveActivation{State: mcpObserveConfigured})
+	// The isolated rollout tests do not stand up a real serving listener; arm the live-phase
+	// probe so the Shadow preflight's PhaseReady requirement (Codex P1, PR #1234) is satisfied.
+	gatewayListenerReadyProbe = func() bool { return true }
+	// The test catalog holds no Usable tool (ingestion never yields Usable); arm the usable-tool
+	// probe so the Shadow preflight's usable-tool precondition (Codex P1, PR #1234) is satisfied.
+	shadowScopeUsableToolProbe = func(rollout.ScopeSpec, uint64) bool { return true }
+	publishMCPTelemetry(mcpTelemReady, "", buildReadyTelemetry(t))
+	publishMCPInventory(mcpInvLoaded, "", registry.New(limits.DefaultCatalog()), catalog.New(limits.DefaultCatalog()))
+	// Reset the shared policy holder so the monotonic-revision store accepts this test's
+	// snapshot (a prior test may have advanced the global store's revision).
+	mcpPolicy.resetForTest()
+	if err := publishMCPPolicy(mcpPolLoaded, "", compileGatewayTestSnapshot(t)); err != nil {
+		t.Fatalf("publish test policy: %v", err)
+	}
+	t.Cleanup(func() {
+		globalMCPShadow.composed.Store(prevComposed)
+		globalMCPShadow.inspectionComposed.Store(prevInsp)
+		setMCPObserveStatus(prevStatus)
+		gatewayListenerReadyProbe = prevListenerProbe
+		shadowScopeUsableToolProbe = prevUsableToolProbe
+		publishMCPTelemetry(mcpTelemNotConfigured, "", nil)
+		publishMCPInventory(mcpInvNotConfigured, "", nil, nil)
+		_ = publishMCPPolicy(mcpPolNotConfigured, "", nil)
+	})
 }
 
 // Test 8: Shadow activation is blocked fail-closed when execution deps are missing.
@@ -71,10 +118,37 @@ func TestDurable_ShadowBlockedWhenExecDepsMissing(t *testing.T) {
 	}
 }
 
+// TestDurable_CommitRejectsShadowWhenNodeCannotEvaluate is Codex P1 round-2 (PR #1234):
+// the Gateway Shadow preflight is enforced in the SHARED commit path (commitRolloutTransition),
+// so EVERY caller — the CP→DP apply AND the startup reconcile — is covered. With the coarse
+// shadow tier armed but the node unable to evaluate (no policy/inventory/inspection/listener),
+// a direct commit (the shape reconcileRolloutWithAppliers uses) must be rejected, not just the
+// apply-envelope path. Mutation: removing the commit-path preflight lets the commit advance to
+// Shadow and fails this test.
+func TestDurable_CommitRejectsShadowWhenNodeCannotEvaluate(t *testing.T) {
+	withTempDataDir(t)
+	resetExecDeps(t)
+	resetShadowComposition(t)
+	markGatewayShadowDepsReady() // coarse tier armed ⇒ modeExecReady passes
+	globalMCPShadow.composed.Store(true)
+	// Deliberately leave policy/inventory/telemetry/inspection/listener UNSET ⇒ preflight fails.
+	r := newTestRollout()
+	err := r.commitRolloutTransition(gwShadowCfg(1), "admin", time.Unix(1000, 0))
+	if err != errShadowPreflightFailed {
+		t.Fatalf("commit must reject Gateway Shadow when the node cannot evaluate, got %v", err)
+	}
+	if r.gateway.CurrentMode() != rollout.ModeDisabled {
+		t.Fatalf("mode must stay Disabled after a preflight-rejected commit, got %s", r.gateway.CurrentMode())
+	}
+	if r.gateway.Evidence().ShadowStartUnix != 0 {
+		t.Fatal("no Shadow window may be stamped on a preflight-rejected commit")
+	}
+}
+
 // Test 9: a mechanically complete Shadow transition starts the window exactly once.
 func TestDurable_ShadowTransitionStartsWindowOnce(t *testing.T) {
 	withTempDataDir(t)
-	withExecDepsReady(t)
+	withReadyShadowNode(t)
 	r := newTestRollout()
 	if err := r.commitRolloutTransition(gwShadowCfg(1), "admin", time.Unix(1000, 0)); err != nil {
 		t.Fatalf("shadow transition: %v", err)
@@ -94,7 +168,7 @@ func TestDurable_ShadowTransitionStartsWindowOnce(t *testing.T) {
 // Test 10: idempotent re-apply of the same accepted mode does not restamp the window.
 func TestDurable_IdempotentReapplyDoesNotRestamp(t *testing.T) {
 	withTempDataDir(t)
-	withExecDepsReady(t)
+	withReadyShadowNode(t)
 	r := newTestRollout()
 	if err := r.commitRolloutTransition(gwShadowCfg(1), "admin", time.Unix(1000, 0)); err != nil {
 		t.Fatal(err)
@@ -111,7 +185,7 @@ func TestDurable_IdempotentReapplyDoesNotRestamp(t *testing.T) {
 // Test 11/13: restart preserves the exact Shadow window start (soak too).
 func TestDurable_RestartPreservesShadowStart(t *testing.T) {
 	withTempDataDir(t)
-	withExecDepsReady(t)
+	withReadyShadowNode(t) // a genuine Shadow restart requires node readiness (preflight)
 	r := newTestRollout()
 	if err := r.commitRolloutTransition(gwShadowCfg(1), "admin", time.Unix(1000, 0)); err != nil {
 		t.Fatal(err)
@@ -136,10 +210,53 @@ func TestDurable_RestartPreservesShadowStart(t *testing.T) {
 	}
 }
 
+// TestDurable_RestartClampsShadowWhenNodeCannotEvaluate is Codex P1 (PR #1234): a
+// restored ModeShadow whose node can no longer EVALUATE (policy removed between persist
+// and restart) must clamp to Disabled — not advertise an active Shadow rollout while the
+// runtime fails every request closed and the evidence window accrues invalid time.
+func TestDurable_RestartClampsShadowWhenNodeCannotEvaluate(t *testing.T) {
+	withTempDataDir(t)
+	withReadyShadowNode(t)
+	r := newTestRollout()
+	if err := r.commitRolloutTransition(gwShadowCfg(1), "admin", time.Unix(1000, 0)); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate the policy source removed before the restart: the node keeps shadow deps +
+	// events but can no longer reach a policy decision.
+	_ = publishMCPPolicy(mcpPolNotConfigured, "", nil)
+	r2 := newTestRollout()
+	r2.restore()
+	if r2.gateway.CurrentMode() != rollout.ModeDisabled {
+		t.Fatalf("a restored Shadow node that cannot evaluate must clamp to Disabled, got %s", r2.gateway.CurrentMode())
+	}
+}
+
+// TestDurable_RestartKilledShadowKeepsMode pins that the restore-clamp preflight EXCLUDES
+// the kill reason: a killed-but-otherwise-ready Shadow node keeps its mode across a
+// restart (the kill is restored independently and is reversible via clearEmergency), so
+// clamping it to Disabled would make the kill irreversible for the mode.
+func TestDurable_RestartKilledShadowKeepsMode(t *testing.T) {
+	withTempDataDir(t)
+	withReadyShadowNode(t)
+	r := newTestRollout()
+	if err := r.commitRolloutTransition(gwShadowCfg(1), "admin", time.Unix(1000, 0)); err != nil {
+		t.Fatal(err)
+	}
+	_ = r.emergencyDisable(rollout.CapabilityGateway, "oncall") // engage + persist the kill
+	r2 := newTestRollout()
+	r2.restore()
+	if r2.gateway.CurrentMode() != rollout.ModeShadow {
+		t.Fatalf("a killed-but-ready Shadow node must keep its mode across restart, got %s", r2.gateway.CurrentMode())
+	}
+	if !r2.gateway.Killed() {
+		t.Fatal("the kill state must be restored")
+	}
+}
+
 // Test 14: a material scope change resets/invalidates the continuous window.
 func TestDurable_ScopeChangeResetsWindow(t *testing.T) {
 	withTempDataDir(t)
-	withExecDepsReady(t)
+	withReadyShadowNode(t)
 	r := newTestRollout()
 	if err := r.commitRolloutTransition(gwShadowCfg(1, "s1"), "admin", time.Unix(1000, 0)); err != nil {
 		t.Fatal(err)
@@ -159,7 +276,7 @@ func TestDurable_ScopeChangeResetsWindow(t *testing.T) {
 // Test 15: demotion to Observe breaks Shadow continuity (window reset to 0).
 func TestDurable_DemotionBreaksContinuity(t *testing.T) {
 	withTempDataDir(t)
-	withExecDepsReady(t)
+	withReadyShadowNode(t)
 	r := newTestRollout()
 	if err := r.commitRolloutTransition(gwShadowCfg(1), "admin", time.Unix(1000, 0)); err != nil {
 		t.Fatal(err)
@@ -177,7 +294,7 @@ func TestDurable_DemotionBreaksContinuity(t *testing.T) {
 
 // Test 16: a persistence write failure prevents transition success (fail-closed).
 func TestDurable_PersistFailurePreventsTransition(t *testing.T) {
-	withExecDepsReady(t)
+	withReadyShadowNode(t)
 	// Isolate the global storage-health observer: this test deliberately trips a
 	// durable-write failure, which must not pollute the process-global storage
 	// counter other tests assert on.
@@ -218,7 +335,7 @@ func TestDurable_CorruptStateFailsClosed(t *testing.T) {
 // Test 18: synthetic evidence origin can never be reported as production.
 func TestDurable_SyntheticOriginNotProduction(t *testing.T) {
 	withTempDataDir(t)
-	withExecDepsReady(t)
+	withReadyShadowNode(t)
 	r := newTestRollout()
 	if err := r.commitRolloutTransitionAt(gwShadowCfg(1), "admin", time.Unix(1000, 0), rollout.OriginSynthetic); err != nil {
 		t.Fatal(err)
@@ -315,7 +432,7 @@ func TestDurable_PersistenceStatusSurfaced(t *testing.T) {
 // Test: concurrent durable mutations are serialized (no torn window/persist).
 func TestDurable_ConcurrentCommitsSerialized(t *testing.T) {
 	withTempDataDir(t)
-	withExecDepsReady(t)
+	withReadyShadowNode(t)
 	r := newTestRollout()
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
@@ -378,14 +495,14 @@ func TestDurable_KillSwitchToggleStormThenRestart(t *testing.T) {
 // to Disabled at restore when execution deps are not configured.
 func TestDurable_RestoreClampsExecutingModeWithoutDeps(t *testing.T) {
 	withTempDataDir(t)
-	withExecDepsReady(t) // allow persisting a Shadow state first
+	withReadyShadowNode(t) // allow persisting a Shadow state first
 	r := newTestRollout()
 	if err := r.commitRolloutTransition(gwShadowCfg(1), "admin", time.Unix(1000, 0)); err != nil {
 		t.Fatal(err)
 	}
-	// Now simulate the shipped build (no exec deps) and restart: the persisted Shadow
+	// Now simulate the shipped build (no shadow deps) and restart: the persisted Shadow
 	// mode must be clamped to Disabled (fail-closed), not surfaced as executing.
-	globalExecDeps.gateway.Store(false)
+	globalExecDeps.shadowGateway.Store(false)
 	r2 := newTestRollout()
 	r2.restore()
 	if r2.gateway.CurrentMode() != rollout.ModeDisabled {
@@ -409,10 +526,10 @@ func TestDurable_ManagementExecDepsGate(t *testing.T) {
 	if err := r.commitRolloutTransition(mgShadow, "cp", time.Unix(1000, 0)); err != errShadowExecDepsNotConfigured {
 		t.Fatalf("management shadow must fail closed without deps, got %v", err)
 	}
-	// With management exec deps (real hook): the transition proceeds.
-	prev := globalExecDeps.management.Load()
-	markManagementExecDepsReady()
-	t.Cleanup(func() { globalExecDeps.management.Store(prev) })
+	// With management shadow deps (real hook): the transition proceeds.
+	prev := globalExecDeps.shadowManagement.Load()
+	markManagementShadowDepsReady()
+	t.Cleanup(func() { globalExecDeps.shadowManagement.Store(prev) })
 	if err := r.commitRolloutTransition(mgShadow, "cp", time.Unix(2000, 0)); err != nil {
 		t.Fatalf("management shadow with deps: %v", err)
 	}
@@ -441,14 +558,20 @@ func gwCanaryCfg(rev uint64, servers ...string) *rollout.SignedConfig {
 // two disjoint Shadow periods are never treated as one continuous window.
 func TestDurable_ShadowWindowRestartsAfterCanaryDemotion(t *testing.T) {
 	withTempDataDir(t)
-	withExecDepsReady(t)
+	withReadyShadowNode(t) // shadow-ready node — for the Shadow legs
 	r := newTestRollout()
-	// Shadow at t=1000.
+	// Shadow at t=1000. The Gateway Shadow preflight forbids a node that ALSO has the live
+	// tier armed (forbidden_live_execution_requirement), so the live tier is armed ONLY
+	// transiently around the Canary commit below — matching production, where live is never
+	// armed at all (this state-machine test artificially reaches the Canary path).
 	if err := r.commitRolloutTransition(gwShadowCfg(1), "admin", time.Unix(1000, 0)); err != nil {
 		t.Fatal(err)
 	}
-	// Promote to Canary at t=2000: Shadow evidence preserved for the promotion gate.
-	if err := r.commitRolloutTransition(gwCanaryCfg(2), "admin", time.Unix(2000, 0)); err != nil {
+	// Promote to Canary at t=2000 (needs the live tier): Shadow evidence preserved.
+	globalExecDeps.gateway.Store(true)
+	err := r.commitRolloutTransition(gwCanaryCfg(2), "admin", time.Unix(2000, 0))
+	globalExecDeps.gateway.Store(false) // disarm live so the demotion-to-Shadow preflight passes
+	if err != nil {
 		t.Fatal(err)
 	}
 	if r.gateway.Evidence().ShadowStartUnix != 1000 {
@@ -470,7 +593,7 @@ func TestDurable_ShadowWindowRestartsAfterCanaryDemotion(t *testing.T) {
 // timer (repeated ConfigSnapshot delivery must not reset the 24h soak).
 func TestDurable_SoakPreservedOnIdempotentReapply(t *testing.T) {
 	withTempDataDir(t)
-	withExecDepsReady(t)
+	withReadyShadowNode(t)
 	r := newTestRollout()
 	if err := r.commitRolloutTransition(gwShadowCfg(1), "admin", time.Unix(1000, 0)); err != nil {
 		t.Fatal(err)
