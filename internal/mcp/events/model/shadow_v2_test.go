@@ -102,6 +102,16 @@ func TestV2_ValidationRejectsMalformedShadowEvidence(t *testing.T) {
 			e.Shadow.Outcome = "would_fail_credential_readiness"
 			e.Shadow.CredentialPlan = shadowPlanValid
 		},
+		// The credential biconditional (Codex P2, PR #1235): an invalid plan implies the
+		// credential-readiness failure outcome, so pairing it with any other outcome is
+		// impossible readiness evidence. Base Override stays false (allow-class outcomes).
+		"invalid plan with would_execute": func(e *Event) {
+			e.Shadow.CredentialPlan = "credential_plan_invalid" // base Outcome stays would_execute
+		},
+		"invalid plan with would_fail_stale": func(e *Event) {
+			e.Shadow.CredentialPlan = "credential_plan_invalid"
+			e.Shadow.Outcome = "would_fail_stale_decision"
+		},
 		// Outcome↔Override consistency (Codex P2, PR #1235): the durable action-class
 		// projection (Override) must agree with the verdict. An allow-path-only outcome with
 		// a restrictive override is a restrictive decision falsely presented as executable;
@@ -200,6 +210,14 @@ func TestV2_OutcomeOverrideConsistency_NotOverBroad(t *testing.T) {
 		if err := e.Validate(); err != nil {
 			t.Fatalf("consistent pair (%s, override=%v) must validate: %v", c.outcome, c.override, err)
 		}
+	}
+	// The one consistent invalid-plan shape — the credential-readiness failure — must validate
+	// (the biconditional admits its true producer shape, not just rejects the false ones).
+	e := validV2ShadowEvent()
+	e.Shadow.Outcome = "would_fail_credential_readiness"
+	e.Shadow.CredentialPlan = "credential_plan_invalid"
+	if err := e.Validate(); err != nil {
+		t.Fatalf("would_fail_credential_readiness with an invalid plan must validate: %v", err)
 	}
 }
 

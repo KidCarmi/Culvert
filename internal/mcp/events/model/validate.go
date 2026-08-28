@@ -249,7 +249,10 @@ func validateShadowEvidenceCombinations(sh *ShadowEvidence) error {
 	//   - would_execute is unreachable when the request inspection would fail (a hard
 	//     inspection failure yields would_fail_inspection, never would_execute);
 	//   - would_fail_inspection is reached ONLY via a failing request inspection;
-	//   - would_fail_credential_readiness is reached ONLY with an invalid credential plan.
+	//   - would_fail_credential_readiness is reached IFF the credential plan is invalid
+	//     (a BICONDITION: decide() sets planStatusInvalid only on the fail branch that also
+	//     sets this outcome, and no ready-branch outcome ever carries the invalid plan — so
+	//     an invalid plan paired with any other outcome is impossible readiness evidence).
 	if sh.Outcome == shadowOutWouldExecute && sh.RequestInspection == shadowReqInspWouldFail {
 		return evtErr(mcperr.ReasonEventInvalid, "would_execute with a failing request inspection")
 	}
@@ -258,6 +261,9 @@ func validateShadowEvidenceCombinations(sh *ShadowEvidence) error {
 	}
 	if sh.Outcome == shadowOutWouldFailCredReady && sh.CredentialPlan != shadowPlanInvalid {
 		return evtErr(mcperr.ReasonEventInvalid, "would_fail_credential_readiness without an invalid credential plan")
+	}
+	if sh.CredentialPlan == shadowPlanInvalid && sh.Outcome != shadowOutWouldFailCredReady {
+		return evtErr(mcperr.ReasonEventInvalid, "an invalid credential plan must yield would_fail_credential_readiness")
 	}
 	// The verdict must be consistent with the durable action-class projection (Override).
 	// An allow-path-only outcome carrying a restrictive Override is exactly the shape of a
