@@ -935,3 +935,53 @@ func TestToolTrust_IngestSerializedUnderDeriveMu(t *testing.T) {
 		t.Fatal("the serialized ingest did not run after deriveMu was released")
 	}
 }
+
+// TestToolTrust_RequestApprovalHoldsDeriveMuAcrossTargetLoad proves the round-17 fix: RequestApproval
+// acquires deriveMu BEFORE loadTarget and holds it through CreateRequest. Because a discovery ingest
+// advances the catalog revision/fingerprint only under deriveMu (runCatalogIngestSerialized), holding
+// the lock across the whole resolve→validate→create makes the target the request binds atomic with its
+// validation — a rediscovery can no longer advance it in the gap and leave a stale, immediately-
+// unapprovable pending record. While deriveMu is held, RequestApproval must block; it must proceed once
+// released.
+func TestToolTrust_RequestApprovalHoldsDeriveMuAcrossTargetLoad(t *testing.T) {
+	resetInventory(t)
+	_, _, sid, tool, fpHex := seedToolTrustInventory(t)
+	composeToolTrust(t, nil)
+
+	mcpToolTrust.deriveMu.Lock()
+
+	started := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		close(started)
+		_, err := mcpToolTrust.RequestApproval(toolTrustRequestInput{
+			Tenant:              ttTenant,
+			ServerID:            sid,
+			ToolName:            tool,
+			ExpectedFingerprint: fpHex,
+			Purpose:             tooltrust.PurposeShadowEvaluation,
+			RequestedBy:         "operator@corp",
+			Reason:              "reviewed for shadow eval",
+		})
+		done <- err
+	}()
+	<-started
+
+	select {
+	case <-done:
+		mcpToolTrust.deriveMu.Unlock()
+		t.Fatal("RequestApproval completed while deriveMu was held — it does not serialize the target load/create under the lock")
+	case <-time.After(50 * time.Millisecond):
+		// Expected: blocked on deriveMu before it can load or validate the target.
+	}
+
+	mcpToolTrust.deriveMu.Unlock()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RequestApproval after release: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("RequestApproval did not complete after deriveMu was released")
+	}
+}

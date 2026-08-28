@@ -334,6 +334,19 @@ func (c *mcpToolTrustCoordinator) RequestApproval(in toolTrustRequestInput) (*to
 	if err != nil {
 		return nil, err
 	}
+	// Serialize the WHOLE resolve→validate→create against ingest/reconcile/approve/revoke.
+	// deriveMu is the OUTER lock, and taking it BEFORE loadTarget is load-bearing: catalog
+	// ingestion advances the revision/fingerprint only under deriveMu (runCatalogIngestSerialized),
+	// so without holding it here a rediscovery could advance the target between loadTarget and
+	// CreateRequest and the STALE copied target would be persisted as an immediately-unapprovable
+	// pending record (the exact-target optimistic-concurrency contract must fail closed, not admit
+	// a dead record that consumes store capacity). It ALSO serializes the at-capacity PRUNE that
+	// CreateRequest may run: a prune that interleaves between reconcile's ExpireDue (which makes a
+	// grant terminal) and its ToolRefs re-derivation would delete that grant's last ToolRef before
+	// the tool is demoted, stranding a still-Usable projection with no record left to discover.
+	// Taken before the store lock, never from under it, matching the approve/revoke paths.
+	c.deriveMu.Lock()
+	defer c.deriveMu.Unlock()
 	ti := c.loadTarget(in.ServerID, in.ToolName)
 	if !ti.found {
 		return nil, mcperr.New(mcperr.ReasonToolNotFound, "tooltrust.request", "target tool not found")
@@ -363,15 +376,6 @@ func (c *mcpToolTrustCoordinator) RequestApproval(in toolTrustRequestInput) (*to
 		// fingerprint compare.
 		return nil, mcperr.New(mcperr.ReasonToolApprovalStale, "tooltrust.request", "catalog revision advanced since review")
 	}
-	// Serialize the create — specifically its at-capacity PRUNE — with reconcile/approve/
-	// revoke. CreateRequest may evict a terminal record to reclaim a slot, and a prune that
-	// interleaves between reconcile's ExpireDue (which makes a grant terminal) and its
-	// ToolRefs re-derivation would delete that grant's last ToolRef before the tool is
-	// demoted, stranding a still-Usable projection with no record left to discover. deriveMu
-	// is the OUTER lock (taken before the store lock, never from under it), matching the
-	// approve/revoke paths.
-	c.deriveMu.Lock()
-	defer c.deriveMu.Unlock()
 	return store.CreateRequest(tooltrust.RequestInput{
 		Tenant:                   in.Tenant,
 		ServerID:                 in.ServerID,

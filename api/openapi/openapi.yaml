@@ -10815,7 +10815,16 @@ paths:
         - { name: id, in: query, required: false, schema: { type: string } }
         - { name: limit, in: query, required: false, schema: { type: integer } }
       responses:
-        '200': { description: Approvals or one approval, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '200':
+          description: A JSON array of approvals when no id is given, or a single approval object when id is set.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: array
+                    items: { type: object, additionalProperties: true }
+                  - type: object
+                    additionalProperties: true
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
         '404': { $ref: '#/components/responses/PlainNotFound' }

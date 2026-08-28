@@ -13683,12 +13683,23 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "type": "object"
+                  "oneOf": [
+                    {
+                      "items": {
+                        "additionalProperties": true,
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "additionalProperties": true,
+                      "type": "object"
+                    }
+                  ]
                 }
               }
             },
-            "description": "Approvals or one approval"
+            "description": "A JSON array of approvals when no id is given, or a single approval object when id is set."
           },
           "400": {
             "$ref": "#/components/responses/PlainBadRequest"
