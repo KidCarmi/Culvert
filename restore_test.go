@@ -1441,8 +1441,17 @@ func TestRestoreCommit_PreExistingStagingDir_AbortsBeforeDataTouched(t *testing.
 	// Even simpler: make every possible derivation collide by creating
 	// the exact path the function will produce — we know it uses
 	// time.Now + os.Getpid, so create one matching that.
+	// Pin the clock via the restoreNow seam (the PreExistingBakDir test's
+	// established idiom): the suffix truncates to the SECOND, so two
+	// independent time.Now reads flake whenever the clock ticks between
+	// them — observed once under a fully loaded -race run.
+	fixedNow := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	origNow := restoreNow
+	restoreNow = func() time.Time { return fixedNow }
+	t.Cleanup(func() { restoreNow = origNow })
+
 	suffix := fmt.Sprintf("%s-%d",
-		time.Now().UTC().Format("20060102T150405Z"), os.Getpid())
+		fixedNow.Format("20060102T150405Z"), os.Getpid())
 	stagingDir := currentDir + ".staging." + suffix
 	if err := os.Mkdir(stagingDir, 0o700); err != nil {
 		t.Fatalf("pre-create staging: %v", err)
