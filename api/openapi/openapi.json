@@ -352,6 +352,25 @@
         ],
         "type": "object"
       },
+      "AuthReorderRequest": {
+        "additionalProperties": false,
+        "description": "Exactly one of ids (stable rule ULIDs, preferred — reorder-safe) or the legacy priorities; either way every auth rule exactly once in the desired order. Resolved against one fenced running snapshot; the same priority values are redistributed so access-rule ordering is never disturbed.",
+        "properties": {
+          "ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "priorities": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
       "AuthStatus": {
         "additionalProperties": true,
         "properties": {
@@ -5540,13 +5559,25 @@
     },
     "/api/authpolicy/reorder": {
       "post": {
-        "description": "Reorder auth policy rules.",
+        "description": "Reorder auth policy rules among themselves (access-rule ordering is never disturbed). Body carries stable rule ULIDs ({ids}) or the legacy {priorities}.",
         "operationId": "reorderAuthPolicy",
+        "parameters": [
+          {
+            "description": "Optional running-generation assertion (from GET /api/authpolicy version).",
+            "in": "query",
+            "name": "ifVersion",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/ReorderPolicy"
+                "$ref": "#/components/schemas/AuthReorderRequest"
               }
             }
           },
@@ -5569,6 +5600,12 @@
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "description": "Version fence conflict ({error, currentVersion, yourVersion})."
+          },
+          "500": {
+            "description": "Durable persist failed — the reorder was rolled back."
           }
         },
         "security": [

@@ -1715,6 +1715,13 @@ components:
       additionalProperties: false
       properties:
         priorities: { type: array, items: { type: integer } }
+    AuthReorderRequest:
+      type: object
+      description: Exactly one of ids (stable rule ULIDs, preferred — reorder-safe) or the legacy priorities; either way every auth rule exactly once in the desired order. Resolved against one fenced running snapshot; the same priority values are redistributed so access-rule ordering is never disturbed.
+      additionalProperties: false
+      properties:
+        ids: { type: array, items: { type: string } }
+        priorities: { type: array, items: { type: integer } }
 
     DecryptionProfileFull:
       type: object
@@ -8483,7 +8490,7 @@ paths:
       operationId: reorderAuthPolicy
       tags: [policy]
       summary: Reorder auth policy rules
-      description: Reorder auth policy rules.
+      description: Reorder auth policy rules among themselves (access-rule ordering is never disturbed). Body carries stable rule ULIDs ({ids}) or the legacy {priorities}.
       security:
         - sessionCookie: []
         - basicAuth: []
@@ -8495,11 +8502,17 @@ paths:
       x-culvert-introduced-version: 1.0.0
       x-culvert-danger-level: medium
       x-culvert-audit-event: authpolicy.reorder
+      parameters:
+        - name: ifVersion
+          in: query
+          required: false
+          schema: { type: integer, format: int64 }
+          description: Optional running-generation assertion (from GET /api/authpolicy version).
       requestBody:
         required: false
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/ReorderPolicy' }
+            schema: { $ref: '#/components/schemas/AuthReorderRequest' }
       responses:
         '200':
           description: Reorder auth policy rules.
@@ -8508,6 +8521,8 @@ paths:
               schema: { type: object, additionalProperties: true }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+        '409': { description: 'Version fence conflict ({error, currentVersion, yourVersion}).' }
+        '500': { description: 'Durable persist failed — the reorder was rolled back.' }
   /api/pac/analyze:
     post:
       operationId: analyzePAC

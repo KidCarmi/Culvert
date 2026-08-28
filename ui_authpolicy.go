@@ -376,9 +376,14 @@ func parsePriorityParam(w http.ResponseWriter, r *http.Request) (int, bool) {
 }
 
 // POST /api/authpolicy/reorder — reorder auth rules among themselves.
-// Body: {"priorities":[...]} — ALL auth-rule priorities in the desired order.
-// The same priority values are redistributed across the auth rules, so access
-// rule ordering is never disturbed.
+// Body: {"ids":[<ULID>,...]} (preferred, stable-ID — reorder-safe against a
+// concurrent priority shift) or the legacy {"priorities":[...]} — either way,
+// ALL auth rules exactly once in the desired order. The same priority VALUES
+// are redistributed across the auth rules, so access-rule ordering is never
+// disturbed. Optional ?ifVersion= fence; the requested order is resolved into
+// a priority permutation against ONE running snapshot INSIDE the fenced
+// critical section (2C.0b), and the permutation is persisted
+// durable-or-nothing.
 func apiAuthPolicyReorder(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -387,42 +392,119 @@ func apiAuthPolicyReorder(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleAdmin) {
 		return
 	}
+	if runningPolicyVersionConflict(w, r) {
+		return
+	}
 	var body struct {
-		Priorities []int `json:"priorities"`
+		IDs        []string `json:"ids"`
+		Priorities []int    `json:"priorities"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
-	// The list must be exactly the current auth-rule priority set: rejecting
-	// partial or stale lists keeps the permutation well-defined and guarantees
-	// no access-rule priority can ever appear in it.
-	authPris := make(map[int]bool)
-	rules := policyStore.List()
-	for i := range rules {
-		if ruleTypeOf(&rules[i]) == ruleTypeAuth {
-			authPris[rules[i].Priority] = true
-		}
-	}
-	if len(body.Priorities) != len(authPris) {
-		http.Error(w, "priorities must list every auth rule exactly once", http.StatusBadRequest)
+	switch {
+	case len(body.IDs) > 0 && len(body.Priorities) > 0:
+		http.Error(w, "provide ids or priorities, not both", http.StatusBadRequest)
+		return
+	case len(body.IDs) == 0 && len(body.Priorities) == 0:
+		http.Error(w, "ids (or legacy priorities) must list every auth rule exactly once", http.StatusBadRequest)
 		return
 	}
-	for _, p := range body.Priorities {
-		if !authPris[p] {
-			http.Error(w, fmt.Sprintf("priority %d is not an auth rule", p), http.StatusBadRequest)
+	// Shape-check ids before the critical section so every id echoed into a
+	// later error message is ULID-charset-bounded.
+	for _, id := range body.IDs {
+		if !validRuleID(id) {
+			http.Error(w, "ids entries must be rule ULIDs", http.StatusBadRequest)
 			return
 		}
 	}
-	if !policyStore.PermutePriorities(body.Priorities) {
-		http.Error(w, "reorder failed (duplicate or stale priority list)", http.StatusBadRequest)
+	beginPolicyWrite()
+	defer endPolicyWrite()
+	var (
+		reorderErr error
+		count      int
+	)
+	res := policyDraft.fencedRunningMutate(parseIfVersion(r), func(ps *PolicyStore) bool {
+		perm, err := authReorderPermutation(ps, body.IDs, body.Priorities)
+		if err != nil {
+			reorderErr = err
+			return false
+		}
+		count = len(perm)
+		if !ps.PermutePriorities(perm) {
+			reorderErr = fmt.Errorf("reorder failed (duplicate or stale priority list)")
+			return false
+		}
+		return true
+	})
+	if res.conflict != nil {
+		writePolicyVersionConflictError(w, res.conflict)
 		return
 	}
-	policyStore.Save()
-	logger.Printf("UI: auth rules reordered (%d rule(s))", len(body.Priorities))
-	auditEvent(r, "authpolicy.reorder", fmt.Sprintf("%d rule(s)", len(body.Priorities)), "")
-	saveConfigVersion(sessionAdmin(r), "authpolicy.reorder")
+	if res.err != nil {
+		writePolicyPersistFailure(w, res.err)
+		return
+	}
+	if !res.ok {
+		msg := "reorder failed"
+		if reorderErr != nil {
+			msg = reorderErr.Error()
+		}
+		http.Error(w, msg, http.StatusBadRequest)
+		return
+	}
+	logger.Printf("UI: auth rules reordered (%d rule(s))", count)
+	auditEvent(r, "authpolicy.reorder", fmt.Sprintf("%d rule(s)", count), "")
+	finalizeFencedPolicyWrite(r, "authpolicy.reorder", res)
 	jsonOK(w, map[string]any{"ok": true})
+}
+
+// authReorderPermutation resolves the requested order — stable IDs (preferred)
+// or the legacy priority list — into a priority permutation against ONE
+// snapshot of ps. It runs INSIDE the fenced critical section, so the set it
+// validates against is exactly the set the permutation applies to. The list
+// must cover every auth rule exactly once: partial, duplicate, unknown, and
+// access-rule entries are all rejected, which guarantees no access-rule
+// priority can ever enter the permutation.
+func authReorderPermutation(ps *PolicyStore, ids []string, priorities []int) ([]int, error) {
+	rules := ps.List()
+	authByID := make(map[string]int) // stable ID → current priority
+	authPris := make(map[int]bool)
+	for i := range rules {
+		if ruleTypeOf(&rules[i]) == ruleTypeAuth {
+			authByID[rules[i].ID] = rules[i].Priority
+			authPris[rules[i].Priority] = true
+		}
+	}
+	if len(ids) > 0 {
+		if len(ids) != len(authByID) {
+			return nil, fmt.Errorf("ids must list every auth rule exactly once (%d listed, %d auth rules)", len(ids), len(authByID))
+		}
+		seen := make(map[string]bool, len(ids))
+		perm := make([]int, 0, len(ids))
+		for _, id := range ids {
+			if seen[id] {
+				return nil, fmt.Errorf("ids contains a duplicate entry %q", id)
+			}
+			seen[id] = true
+			pri, ok := authByID[id]
+			if !ok {
+				return nil, fmt.Errorf("id %q is not an auth rule", id)
+			}
+			perm = append(perm, pri)
+		}
+		return perm, nil
+	}
+	if len(priorities) != len(authPris) {
+		return nil, fmt.Errorf("priorities must list every auth rule exactly once")
+	}
+	for _, p := range priorities {
+		if !authPris[p] {
+			return nil, fmt.Errorf("priority %d is not an auth rule", p)
+		}
+	}
+	return priorities, nil
 }
 
 // isAuthRulePriority reports whether the rule at the given priority is a
