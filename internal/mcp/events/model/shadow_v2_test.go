@@ -112,6 +112,18 @@ func TestV2_ValidationRejectsMalformedShadowEvidence(t *testing.T) {
 			e.Shadow.CredentialPlan = "credential_plan_invalid"
 			e.Shadow.Outcome = "would_fail_stale_decision"
 		},
+		// The inspection biconditional's reverse half (Codex P2, PR #1235): a failing request
+		// inspection is handled first in decide() and always yields would_fail_inspection, so
+		// pairing would_fail with any other outcome is impossible. These isolate the new guard
+		// (would_fail_hard_control / would_fail_stale trip no other rule with Override=false).
+		"failed inspection with would_fail_hard_control": func(e *Event) {
+			e.Shadow.RequestInspection = "would_fail"
+			e.Shadow.Outcome = "would_fail_hard_control"
+		},
+		"failed inspection with would_fail_stale": func(e *Event) {
+			e.Shadow.RequestInspection = "would_fail"
+			e.Shadow.Outcome = "would_fail_stale_decision"
+		},
 		// Outcome↔Override consistency (Codex P2, PR #1235): the durable action-class
 		// projection (Override) must agree with the verdict. An allow-path-only outcome with
 		// a restrictive override is a restrictive decision falsely presented as executable;

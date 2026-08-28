@@ -259,6 +259,14 @@ func validateShadowEvidenceCombinations(sh *ShadowEvidence) error {
 	if sh.Outcome == shadowOutWouldFailInspection && sh.RequestInspection != shadowReqInspWouldFail {
 		return evtErr(mcperr.ReasonEventInvalid, "would_fail_inspection without a failing request inspection")
 	}
+	// The inspection biconditional's other half: a failing request inspection is handled
+	// FIRST in decide() (step 1, before policy class / credential / staleness) and always
+	// yields would_fail_inspection, so pairing would_fail with any other outcome is
+	// impossible evidence (requestInspectionStatus returns would_fail iff Inspection.HardFail,
+	// and hardFailure is true whenever Inspection.HardFail).
+	if sh.RequestInspection == shadowReqInspWouldFail && sh.Outcome != shadowOutWouldFailInspection {
+		return evtErr(mcperr.ReasonEventInvalid, "a failing request inspection must yield would_fail_inspection")
+	}
 	if sh.Outcome == shadowOutWouldFailCredReady && sh.CredentialPlan != shadowPlanInvalid {
 		return evtErr(mcperr.ReasonEventInvalid, "would_fail_credential_readiness without an invalid credential plan")
 	}
