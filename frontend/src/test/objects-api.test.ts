@@ -201,7 +201,9 @@ describe("reference-block 409 recognizer", () => {
   });
 
   it("returns null for non-409s, unstructured bodies, and the version-conflict shape", () => {
-    expect(asReferenceBlock(new ApiError("http", "nope", 500, body))).toBeNull();
+    expect(
+      asReferenceBlock(new ApiError("http", "nope", 500, body)),
+    ).toBeNull();
     expect(
       asReferenceBlock(new ApiError("http", "nope", 409, "plain text")),
     ).toBeNull();
