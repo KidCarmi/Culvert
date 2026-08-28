@@ -2,6 +2,8 @@ package main
 
 import (
 	"net"
+	"net/netip"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -57,14 +59,235 @@ var ssrfSafeDialContext = ssrf.SafeDialContext
 // IPFilter supports allowlist and blocklist mode with CIDR ranges.
 // Mode "allow"  → only IPs in the list are permitted (default: allow all).
 // Mode "block"  → IPs in the list are denied.
+//
+// Allowed() runs on EVERY proxied request (handleRequest, and the SOCKS5
+// handler) before any other work, so the read path is LOCK-FREE: it loads an
+// immutable *ipFilterView through an atomic.Pointer and never touches mu. The
+// mu-guarded fields below stay the authoritative write-side state — Add,
+// Remove, ClearAll, List and Mode keep their exact previous semantics — and
+// every mutator republishes a freshly derived view before releasing the lock.
+// Same contract, and the same reason, as internal/threatfeed's read view.
+//
+// A mutator added WITHOUT a publishView() call is a silent SECURITY failure,
+// not a performance one: a revoked allowlist entry that keeps admitting, or a
+// removed blocklist entry that keeps denying. It is pinned per mutator by
+// TestIPFilterView_EveryMutatorRepublishes.
 type IPFilter struct {
 	mu     sync.RWMutex
 	mode   string // "allow" | "block" | "" (disabled)
 	nets   []*net.IPNet
 	single map[string]bool
+
+	// view is the derived, immutable read-side snapshot. Written only under
+	// mu (by publishView); read without any lock by Allowed.
+	view atomic.Pointer[ipFilterView]
 }
 
+// ipFilterView is an immutable snapshot of an IPFilter's decision state.
+//
+// Nothing reachable from a published view is ever mutated in place — a mutator
+// builds a REPLACEMENT and stores it — so readers need no synchronisation
+// beyond the atomic load.
+//
+// The membership test is bucketed by prefix length rather than run as a linear
+// scan over the CIDR list: "does any configured prefix contain this address"
+// is answered by masking the address to each DISTINCT prefix length present
+// and probing a set. The number of distinct lengths is bounded by 33 (v4) /
+// 129 (v6) and is 2–5 in any real operator config, so the cost is flat in the
+// number of prefixes instead of proportional to it.
+type ipFilterView struct {
+	mode string
+
+	// singles is the exact-address set. Keyed by netip.Addr rather than by
+	// net.IP.String() so a lookup formats no string and allocates nothing.
+	singles map[netip.Addr]struct{}
+
+	// prefixes holds every configured CIDR in canonical (masked) form;
+	// v4Lens/v6Lens are the sorted distinct prefix lengths present in it,
+	// split by address family so a v4 probe never tests a v6 prefix (which
+	// is what net.IPNet.Contains does via its length check).
+	prefixes map[netip.Prefix]struct{}
+	v4Lens   []int
+	v6Lens   []int
+
+	// oddNets carries any *net.IPNet that could not be represented as a
+	// netip.Prefix (a non-contiguous mask). net.ParseCIDR — the only writer
+	// of IPFilter.nets — cannot produce one, so this is unreachable in
+	// practice; it exists so the representation change can never silently
+	// drop an entry from a security filter. Scanned linearly, empty in every
+	// real config.
+	oddNets []*net.IPNet
+}
+
+// emptyIPFilterView is the view of a freshly constructed IPFilter: filter
+// disabled, no entries. Filters are built as bare composite literals in
+// several places (the DP snapshot path, tests), so Allowed must have a
+// well-defined answer before the first mutator publishes.
+var emptyIPFilterView = ipFilterView{}
+
 var ipf = &IPFilter{single: map[string]bool{}}
+
+// loadView returns the current read-side snapshot, never nil.
+func (f *IPFilter) loadView() *ipFilterView {
+	if v := f.view.Load(); v != nil {
+		return v
+	}
+	return &emptyIPFilterView
+}
+
+// publishView rebuilds the read-side snapshot from the authoritative
+// mu-guarded state and stores it. MUST be called by every mutator, with mu
+// held for writing.
+func (f *IPFilter) publishView() {
+	v := &ipFilterView{mode: f.mode}
+
+	if len(f.single) > 0 {
+		v.singles = make(map[netip.Addr]struct{}, len(f.single))
+		for s := range f.single {
+			// Keys are produced by net.IP.String(), so they always parse and
+			// never carry a zone. Skipping an unparseable key is defensive
+			// only: the probe side canonicalises identically, so such a key
+			// could not have matched anything before this change either.
+			if a, err := netip.ParseAddr(s); err == nil {
+				v.singles[a.Unmap()] = struct{}{}
+			}
+		}
+	}
+
+	if len(f.nets) > 0 {
+		v.prefixes = make(map[netip.Prefix]struct{}, len(f.nets))
+		v4 := map[int]struct{}{}
+		v6 := map[int]struct{}{}
+		for _, n := range f.nets {
+			p, ok := prefixFromIPNet(n)
+			if !ok {
+				v.oddNets = append(v.oddNets, n)
+				continue
+			}
+			v.prefixes[p] = struct{}{}
+			if p.Addr().Is4() {
+				v4[p.Bits()] = struct{}{}
+			} else {
+				v6[p.Bits()] = struct{}{}
+			}
+		}
+		v.v4Lens = sortedPrefixLens(v4)
+		v.v6Lens = sortedPrefixLens(v6)
+	}
+
+	f.view.Store(v)
+}
+
+// sortedPrefixLens returns the prefix lengths in ascending order, for a
+// deterministic probe order.
+func sortedPrefixLens(m map[int]struct{}) []int {
+	out := make([]int, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Ints(out)
+	return out
+}
+
+// prefixFromIPNet converts a *net.IPNet into its canonical netip.Prefix.
+// ok=false for a non-contiguous mask or a width combination net itself
+// rejects — see ipFilterView.oddNets.
+//
+// The family normalisation here MIRRORS net.networkNumberAndMask, which is
+// what net.IPNet.Contains uses, and it is not obvious: a network address that
+// To4() accepts is an IPv4 network however many bytes it is STORED in, and a
+// 16-byte mask is then re-read as its low four bytes. That makes
+// "::ffff:10.0.0.0/104" behave exactly like "10.0.0.0/8" — including matching
+// the plain IPv4 address 10.0.0.1 — which a naive "16 bytes means IPv6"
+// reading gets wrong in the fail-open direction for a blocklist. Pinned by
+// TestIPFilterView_DifferentialAgainstLegacy, which caught precisely this.
+//
+// A genuinely-IPv6 prefix keeps its 128-bit width, so it goes on failing to
+// match IPv4 probes exactly as it does today.
+func prefixFromIPNet(n *net.IPNet) (netip.Prefix, bool) {
+	if n == nil {
+		return netip.Prefix{}, false
+	}
+	ones, bits := n.Mask.Size()
+	if bits == 0 { // non-contiguous mask
+		return netip.Prefix{}, false
+	}
+	ip := n.IP
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+		if bits == 128 {
+			// net drops the leading 96 mask bits (m = m[12:]); the same
+			// prefix expressed over 32 bits is 96 bits shorter. To4 only
+			// succeeds when those 96 bits survived masking, so ones >= 96.
+			ones -= 96
+			bits = 32
+		}
+		if ones < 0 || bits != 32 {
+			return netip.Prefix{}, false
+		}
+	}
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok || addr.BitLen() != bits {
+		return netip.Prefix{}, false
+	}
+	// Masked() canonicalises so the key equals what a probe's Addr.Prefix(n)
+	// produces. net.ParseCIDR already masks, so this is normally a no-op.
+	return netip.PrefixFrom(addr, ones).Masked(), true
+}
+
+// contains reports whether ipStr matches any entry in the view. Allocation-
+// free: netip.ParseAddr returns a value type and every probe is a comparison
+// or a map lookup on that value.
+func (v *ipFilterView) contains(ipStr string) bool {
+	if len(v.singles) == 0 && len(v.prefixes) == 0 && len(v.oddNets) == 0 {
+		return false
+	}
+	addr, err := netip.ParseAddr(ipStr)
+	if err != nil {
+		return false
+	}
+	// net.ParseIP — what this path used before — rejects a zoned address
+	// outright, and a rejected parse means "matches nothing". netip.ParseAddr
+	// accepts zones, so drop them here to keep the previous verdict.
+	if addr.Zone() != "" {
+		return false
+	}
+	// An IPv4-mapped IPv6 address ("::ffff:10.0.0.1") is an IPv4 address to
+	// net.IP.String() and to net.IPNet.Contains (both go through To4). Unmap
+	// so it keeps matching v4 entries and keeps NOT matching v6 ones.
+	addr = addr.Unmap()
+
+	if _, ok := v.singles[addr]; ok {
+		return true
+	}
+
+	lens := v.v4Lens
+	if !addr.Is4() {
+		lens = v.v6Lens
+	}
+	for _, n := range lens {
+		p, err := addr.Prefix(n)
+		if err != nil {
+			continue // n > addr.BitLen(); cannot happen, family-split above
+		}
+		if _, ok := v.prefixes[p]; ok {
+			return true
+		}
+	}
+
+	if len(v.oddNets) > 0 {
+		ip := net.ParseIP(ipStr)
+		if ip == nil {
+			return false
+		}
+		for _, n := range v.oddNets {
+			if n.Contains(ip) {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // SetMode sets the IP-filter mode. Valid values are "allow" (allowlist),
 // "block" (blocklist), and "" (disabled). The mode is stored verbatim — the
@@ -79,6 +302,7 @@ var ipf = &IPFilter{single: map[string]bool{}}
 func (f *IPFilter) SetMode(mode string) {
 	f.mu.Lock()
 	f.mode = mode
+	f.publishView()
 	f.mu.Unlock()
 }
 
@@ -89,9 +313,64 @@ func (f *IPFilter) Mode() string {
 }
 
 // Add accepts plain IPs ("1.2.3.4") or CIDR ("10.0.0.0/8").
+//
+// Use AddAll to load a LIST — Add publishes the derived view on every call
+// (it must: a single admin edit has to take effect immediately), and
+// publishView rebuilds that view from the whole entry set, so Add in a loop is
+// quadratic. See AddAll.
 func (f *IPFilter) Add(entry string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	err := f.addLocked(entry)
+	if err != nil {
+		// Rejected entry: nothing changed, so the published view is still current.
+		return err
+	}
+	f.publishView()
+	return nil
+}
+
+// InvalidIPEntry names one entry AddAll could not parse, so the caller can log
+// it exactly as its previous per-entry Add loop did — after the lock is
+// released, never underneath it.
+type InvalidIPEntry struct {
+	Entry string
+	Err   error
+}
+
+// AddAll appends every valid entry in ONE pass, under ONE lock, publishing the
+// derived view ONCE at the end. Invalid entries are skipped and returned; a nil
+// result means every entry was accepted.
+//
+// This is the bulk-load primitive every list-restoring caller must use —
+// startup (connlimit_startup.go), admin_settings restore, config-version
+// rollback, config import, and the CP→DP snapshot apply. Publishing per entry
+// instead makes a bulk load O(N²) in the entry count: measured on a 4-core
+// Xeon, an Add loop costs 46 ms at 1k entries, 857 ms at 4k and 3.27 s at 8k
+// (each doubling ~4x), which extrapolates to minutes at 100k — and the
+// ConfigSnapshot cap for this list is maxSnapIPList (2,000,000). That would
+// stall a boot or a snapshot apply on a legitimate enterprise allowlist.
+// AddAll is linear. Pinned by TestBenchGate_IPFilterBulkLoadIsLinear.
+func (f *IPFilter) AddAll(entries []string) []InvalidIPEntry {
+	if len(entries) == 0 {
+		return nil
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var invalid []InvalidIPEntry
+	for _, entry := range entries {
+		if err := f.addLocked(entry); err != nil {
+			invalid = append(invalid, InvalidIPEntry{Entry: entry, Err: err})
+		}
+	}
+	f.publishView()
+	return invalid
+}
+
+// addLocked inserts entry into the authoritative write-side state WITHOUT
+// publishing. Callers must hold mu for writing and MUST publishView before
+// releasing it.
+func (f *IPFilter) addLocked(entry string) error {
 	if _, cidr, err := net.ParseCIDR(entry); err == nil {
 		f.nets = append(f.nets, cidr)
 		return nil
@@ -115,6 +394,7 @@ func (f *IPFilter) Remove(entry string) {
 		}
 	}
 	f.nets = filtered
+	f.publishView()
 }
 
 // ClearAll removes all IP filter entries. Used by config import "replace" mode.
@@ -122,6 +402,7 @@ func (f *IPFilter) ClearAll() {
 	f.mu.Lock()
 	f.nets = nil
 	f.single = map[string]bool{}
+	f.publishView()
 	f.mu.Unlock()
 }
 
@@ -138,22 +419,10 @@ func (f *IPFilter) List() []string {
 	return out
 }
 
-// contains returns true if the given IP string matches any entry.
-func (f *IPFilter) contains(ipStr string) bool {
-	ip := net.ParseIP(ipStr)
-	if ip == nil {
-		return false
-	}
-	if f.single[ip.String()] {
-		return true
-	}
-	for _, n := range f.nets {
-		if n.Contains(ip) {
-			return true
-		}
-	}
-	return false
-}
+// The membership test itself now lives on the immutable view
+// (ipFilterView.contains) — the former (*IPFilter).contains helper existed
+// only to be called by Allowed under the read lock that Allowed no longer
+// takes.
 
 // Allowed returns true when the IP should be allowed through.
 //
@@ -165,14 +434,21 @@ func (f *IPFilter) contains(ipStr string) bool {
 // trusted IPs) would become a blocklist that admits every IP not on the list —
 // fail open. When we cannot trust the mode, we cannot reason about the list, so
 // we deny everything until an operator restores a valid config.
+//
+// Reads ONE atomic pointer and takes no lock: this runs on every proxied
+// request, and an RWMutex.RLock is an atomic read-modify-write on a single
+// shared word, so the previous shape made every request in the process
+// contend on one cache line — including the default posture, where the filter
+// is disabled and the lock guarded a decision that never changes. The mode and
+// the entry set are read from ONE view, so a concurrent mutation can no longer
+// be observed half-applied either.
 func (f *IPFilter) Allowed(ipStr string) bool {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
-	switch f.mode {
+	v := f.loadView()
+	switch v.mode {
 	case "allow":
-		return f.contains(ipStr)
+		return v.contains(ipStr)
 	case "block":
-		return !f.contains(ipStr)
+		return !v.contains(ipStr)
 	case "":
 		return true // filter disabled
 	default:

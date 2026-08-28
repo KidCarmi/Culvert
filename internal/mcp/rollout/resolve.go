@@ -49,6 +49,14 @@ const (
 	// EffectBlock — block the call (a hard failure in any mode, or an enforced
 	// non-allow decision / unsatisfied obligation in Canary/Production).
 	EffectBlock
+	// EffectShadowEvaluate — Shadow mode: compute the would-be outcome
+	// (WOULD_EXECUTE / WOULD_BLOCK) and record durable evidence, but NEVER perform the
+	// upstream side effect. This is a DISTINCT disposition from EffectExecute
+	// precisely so a Shadow request can never share the execute path with
+	// Canary/Production. The executor routes it to a non-executing evaluator that holds
+	// no path to Upstream.Call or credential materialization (SH-INV-1/2,
+	// docs/design/mcp/SHADOW-ARCHITECTURE.md §3). Shadow does not execute; it evaluates.
+	EffectShadowEvaluate
 )
 
 // String returns a stable token for the disposition.
@@ -60,6 +68,8 @@ func (d EffectiveDisposition) String() string {
 		return "execute"
 	case EffectBlock:
 		return "block"
+	case EffectShadowEvaluate:
+		return "shadow_evaluate"
 	default:
 		return "unknown"
 	}
@@ -131,20 +141,25 @@ func resolveShadow(in ResolveInput, r Resolution) Resolution {
 		r.Disposition = EffectRecordOnly
 		return r
 	}
-	if in.HardFailure {
-		// Hard failures block even in Shadow.
-		r.Disposition = EffectBlock
-		r.EffectiveAction = ActionKindDenied
-		r.BlockReason = in.HardReason
-		return r
-	}
-	// Allow-and-record: execute regardless of the evaluated action (the Shadow
-	// premise). The evaluated action is preserved; the effective action is allow.
-	r.Disposition = EffectExecute
-	r.Executed = true
+	// Shadow NEVER crosses the irreversible side-effect boundary (SH-INV-1) and NEVER
+	// ENFORCES: every in-scope request — including a hard failure — is routed to the
+	// non-executing EffectShadowEvaluate disposition so the evaluator records a truthful
+	// Model-1 outcome (WOULD_EXECUTE / WOULD_BLOCK / WOULD_FAIL_*). A hard failure is NOT
+	// downgraded to an EffectBlock here: emitting a block in Shadow is indistinguishable
+	// from real enforcement, whereas Shadow must only ever PREDICT — the evaluator maps a
+	// hard failure to WOULD_FAIL_HARD_CONTROL / WOULD_FAIL_INSPECTION and a policy
+	// non-allow to WOULD_BLOCK / WOULD_REQUIRE_*. `Executed` stays false. The evaluated
+	// policy action is preserved unchanged; the effective action is the would-be allow.
+	r.Disposition = EffectShadowEvaluate
+	r.Executed = false
 	r.EffectiveAction = ActionKindAllow
+	if in.HardFailure {
+		// Carry the classified hard reason for evidence; the evaluator owns the outcome.
+		r.BlockReason = in.HardReason
+	}
 	if !in.Action.IsAllowClass() {
-		// Policy would have blocked; Shadow allowed-and-recorded — a shadow override.
+		// Policy verdict is itself restrictive; the evaluator records a policy-driven
+		// would-block and this flags that the enforcement prediction diverges from allow.
 		r.ShadowOverride = true
 	}
 	return r

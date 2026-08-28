@@ -72,7 +72,7 @@ jobs:
     # Retirement step 5 (roadmap/CI-REDESIGN.md): PR-time run superseded by the Fast/Deep PR Gates; full behavior retained on main pushes and tags. Dependent jobs cascade-skip; the aggregate below treats skipped as pass so the required-check name keeps reporting.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35  # > the 25m per-binary test budget below (compile + tee + upload)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -98,12 +98,19 @@ jobs:
         # pipefail is load-bearing: the default Actions shell does not set it,
         # so without it this pipeline returns tee's always-zero status and the
         # gate goes green on failing tests (P0, CI review). The former second
-        # -json run doubled the full -race suite inside the 25m job budget for
-        # a report nothing consumed — dropped; logic.log remains the artifact.
+        # -json run doubled the full -race suite inside the job budget (25m at
+        # the time, 35m now — see CI-01) for a report nothing consumed — dropped;
+        # logic.log remains the artifact.
         run: |
           set -o pipefail
           mkdir -p qa-reports
-          go test -race -count=1 -timeout=15m -v ./... \
+          # -timeout is PER TEST BINARY and the root package alone measures
+          # 897.9s against a 900s limit on origin/main -- 0.23% of headroom, far
+          # below this suite's run-to-run variance. Raised to 25m for the same
+          # reason as pr-fast-gate.yml's test-race job; see CI-01 in
+          # docs/engineering/security-reviews/2026-08-25-mcp-overnight-hardening-run.md
+          # A genuinely hung test still fails, ~10 minutes later.
+          go test -race -count=1 -timeout=25m -v ./... \
             2>&1 | tee qa-reports/logic.log
 
       - name: Upload logic test reports
@@ -206,7 +213,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Build proxy image (local only)
         run: |

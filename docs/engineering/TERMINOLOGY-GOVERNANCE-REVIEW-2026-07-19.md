@@ -191,6 +191,29 @@ destination-privacy feature (keyed HMAC). Findings T-13 through T-20 below are n
 - **Priority:** Medium (real risk of a reader/agent citing or acting on the wrong decision record;
   no runtime/functional impact — this is documentation-identifier collision only).
   **Estimated PR size:** Medium (renumber 4 files + update ~6 cross-referencing docs; no code touched).
+- **Resolution (2026-08-23, PR #1203):** Fixed per the recommendation above, with two adjustments
+  found only during review. First: the original target block (`0018`–`0021`) had since been claimed
+  twice over — once by `0018-openapi-contract.md`, and again (unnoticed until a reviewer flagged it)
+  by `docs/support/rfc/0019`–`0022`, an exploratory infra-ops RFC series that self-titles its headers
+  `# ADR-0019` through `# ADR-0022` despite living outside `docs/adr/` — confirming this program's own
+  "repository-wide" numbering discipline (see ADR-0025's numbering note) has to be checked against
+  `docs/support/rfc/` too, not just `docs/adr/`. The Supportability-framework track's four colliding
+  files were renumbered a second time, to the next block confirmed clean against every `# ADR-NNNN`
+  header in the repo AND against all open PRs at landing time: `0008` → `0028`, `0009` → `0029`,
+  `0010` → `0030`, `0011` → `0031`. Second: the initial pass missed two more support-track citations
+  outside `docs/` — `CONTRACTS-OWNERSHIP.md` (ADR-0011) and `roadmap/PAC-EXCEPTION-INTELLIGENCE.md`
+  (ADR-0009/0010) — also flagged by the same reviewer and fixed. Complete list of files updated: the
+  four renamed ADRs' own headers/"Relates to" lines, two other ADRs (`0014-*.md`, `0016-*.md`), six
+  `docs/support/*` design docs (including the `docs/support/SUPPORTABILITY-ARCHITECTURE.md:6` summary
+  line, which cited the range by number rather than by link and was easy to miss), the two files just
+  named, and the `/P6`-qualified code comments in `support_upload.go`, `support_telemetry_config.go`,
+  their tests, and `internal/redaction/class.go`. The decryption-track files (`0008`–`0011`
+  decryption-exclusion/observability) were left untouched, per the recommendation. **Noted but not
+  fixed in this pass** (separate concern, needs its own blast-radius analysis): `ADR-0018` is now
+  *also* double-claimed — `docs/adr/0018-openapi-contract.md` (30+ call sites) vs.
+  `docs/support/rfc/0018-ai-receives-normalized-evidence.md` (self-titled `# ADR-0018`, cited by that
+  number in `SUPPORTABILITY-THREAT-MODEL.md` and `TAC-CLOUD-ARCHITECTURE.md`) — same defect class,
+  should get its own T-16-style entry.
 
 ### T-17 — Traffic-log destination-privacy config key still says "decryption" after its scope expanded (new — documented, not fixed)
 - **Business concept:** the destination-privacy (pseudonymization) toggle for traffic-log entries.

@@ -336,9 +336,9 @@ func applyAdminSecurity(s *AdminSettings) {
 	setRequireCommit(s.RequireCommit)
 	if s.IPFilterMode != "" {
 		ipf.SetMode(s.IPFilterMode)
-		for _, ip := range s.IPFilterList {
-			_ = ipf.Add(ip)
-		}
+		// Bulk load: one pass, one view publish (an Add loop is quadratic).
+		// Invalid entries stay silently skipped, as the Add loop did.
+		_ = ipf.AddAll(s.IPFilterList)
 	}
 	if s.RateLimitRPM > 0 {
 		rl.Configure(s.RateLimitRPM, time.Minute)

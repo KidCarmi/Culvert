@@ -51,10 +51,15 @@ type Config struct {
 	Actor string
 }
 
-// Executor implements runtime.ExecutionProvider.
+// Executor implements runtime.ExecutionProvider. It is the LIVE object: it possesses
+// the upstream client and the materialize-capable broker and is composed ONLY for
+// Canary/Production (both prohibited today). Its Shadow-fallback disposition
+// (out-of-scope Canary → Shadow) is delegated to a distinct, capability-reduced
+// *ShadowEvaluator so the shadow path never touches this object's live capabilities.
 type Executor struct {
 	cfg        Config
 	allowances *allowanceStore
+	shadow     *ShadowEvaluator // capability-reduced; handles EffectShadowEvaluate
 }
 
 var _ runtime.ExecutionProvider = (*Executor)(nil)
@@ -74,7 +79,38 @@ func New(cfg Config) (*Executor, error) {
 	if cfg.Metrics == nil {
 		cfg.Metrics = noopMetrics{}
 	}
-	return &Executor{cfg: cfg, allowances: newAllowanceStore()}, nil
+	// Build the capability-reduced Shadow evaluator that handles EffectShadowEvaluate.
+	// It receives ONLY the plan-only credential capability — never the materialize-
+	// capable *broker.Broker itself — and no upstream client at all, so the shadow path
+	// structurally cannot reach Upstream.Call or Materialize even though it lives inside
+	// the live Executor (SH-INV-2, Layer B).
+	shCfg := ShadowConfig{
+		State:   cfg.State,
+		Events:  cfg.Events,
+		Metrics: cfg.Metrics,
+		Clock:   cfg.Clock,
+		Actor:   cfg.Actor,
+	}
+	if cfg.Broker != nil {
+		// Supply the broker as the plan-only CredentialPlanner. NewShadowEvaluator narrows
+		// it to the bound Plan method value and drops the interface, so the Shadow evaluator
+		// never retains the materialize-capable *broker.Broker (Codex P2).
+		shCfg.Planner = cfg.Broker
+	}
+	shadow, err := NewShadowEvaluator(shCfg)
+	if err != nil {
+		return nil, err
+	}
+	// The embedded shadow evaluator SHARES this executor's allowance store (Codex P2).
+	// Live execution consumes ALLOW_ONCE / ALLOW_FOR_SESSION grants from it; the shadow
+	// path reads the SAME store non-destructively via wouldSatisfy. Without sharing, a
+	// Canary out-of-scope → shadow fallback (or a demotion) would let the shadow see a
+	// fresh grant and predict WOULD_EXECUTE where the same executor would return
+	// allowance_consumed. wouldSatisfy never mutates, so sharing keeps the read-only
+	// contract intact.
+	allow := newAllowanceStore()
+	shadow.allowances = allow
+	return &Executor{cfg: cfg, allowances: allow, shadow: shadow}, nil
 }
 
 // Execute is the runtime.ExecutionProvider entry. It resolves the effective
@@ -97,6 +133,12 @@ func (e *Executor) Execute(ctx context.Context, in runtime.ExecInput) runtime.Ex
 	switch res.Disposition {
 	case rollout.EffectRecordOnly:
 		return e.recordOnly(in, res)
+	case rollout.EffectShadowEvaluate:
+		// Shadow: compute the would-be outcome and record evidence, but NEVER execute.
+		// Delegated to the capability-reduced ShadowEvaluator, which holds no path to
+		// Upstream.Call or Materialize (SH-INV-1/2). The live Executor's own upstream
+		// client and broker are unreachable from this branch.
+		return e.shadow.evaluate(ctx, in)
 	case rollout.EffectBlock:
 		return e.blocked(in, res.BlockReason, res.ShadowOverride)
 	case rollout.EffectExecute:

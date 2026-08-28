@@ -219,7 +219,11 @@ jobs:
   test-race:
     name: "Gate · go test -race + coverage floors"
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # 35, against a 25m go-test budget below: the job also pays checkout, cache
+    # restore, ~4m of -race compilation and the coverage-floor step, so the job
+    # ceiling has to sit well above the test budget or it becomes the real limit
+    # and truncates the panic dump that says WHICH test overran.
+    timeout-minutes: 35
     needs: changes
     if: needs.changes.outputs.code == 'true'
     steps:
@@ -233,7 +237,25 @@ jobs:
       - name: Run full suite (-race, coverage)
         env:
           TEST_SEED: "20260421"
-        run: go test -race -count=1 -timeout=15m -coverprofile=coverage.out ./...
+        # -timeout is PER TEST BINARY, and the root package alone consumes
+        # essentially the whole budget: measured 897.9s on origin/main against a
+        # 900s limit -- 2.1s, or 0.23%, of headroom. Every other package in the
+        # module finishes in seconds (the largest, internal/ssrf, takes 37s).
+        #
+        # 0.23% is far below this suite's own run-to-run variance; it makes real
+        # network calls while it runs (urlhaus.abuse.ch, openphish.com and
+        # raw.githubusercontent.com all appear in the job log), so the gate was
+        # not passing so much as winning a coin flip, and any PR adding a few
+        # seconds of root-package tests tipped it into a 15m timeout that reads
+        # like a hang rather than a budget overrun.
+        #
+        # 25m restores a real margin without weakening what is checked: the
+        # timeout exists to stop a genuinely hung test, and a hang still fails,
+        # ~10 minutes later. It does NOT make the underlying problem acceptable
+        # -- one test binary holding 900s while 65 others finish in seconds is
+        # the thing to fix, by splitting the root package. Recorded as CI-01 in
+        # docs/engineering/security-reviews/2026-08-25-mcp-overnight-hardening-run.md
+        run: go test -race -count=1 -timeout=25m -coverprofile=coverage.out ./...
 
       - name: Enforce coverage floors (global + per-file)
         # Single source of truth for BOTH coverage contracts — floors live in

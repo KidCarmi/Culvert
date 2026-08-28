@@ -161,8 +161,12 @@ func buildOperatorContract() OperatorContract {
 		checkKeyAtRest(),
 		checkAuditPersistence(),
 		checkCategoryFeedDB(),
+		checkSOCKS5Listener(),
 		checkRequestLogPersistence(),
 		checkIdentityBackend(),
+		checkInteractiveLoginState(),
+		checkAlertWebhookSigning(),
+		checkOIDCJWKSTrust(),
 		checkSyslogFeed(),
 		checkMemoryBackstop(),
 	}
@@ -599,6 +603,120 @@ func checkIdentityBackend() OperatorContractCheck {
 		Message: fmt.Sprintf("identity backend %q was unreachable earlier in this process and has since answered (%d outage(s), %d request(s) denied during them; last at %s)",
 			s.Backend, s.Unavailable, s.GatedDenials, last),
 		OperatorAction: "Authentication has recovered. Users who authenticated during the window saw 407s; investigate the transient directory/IdP outage on the host or the identity service itself.",
+	}
+}
+
+// checkInteractiveLoginState reports whether the OIDC PKCE / SAML AuthnRequest
+// callback-state stores (internal/authstate) have evicted any in-flight login
+// before it could be redeemed.
+//
+// Both stores are populated by UNAUTHENTICATED requests — every captive/SSO
+// portal resolution mints an entry — so a non-zero eviction count is the
+// operator's ONLY signal that some in-flight logins were displaced before
+// their browser could redeem them: either the fixed 1000-entry cap is
+// undersized for real login volume, or an anonymous client is flooding the
+// login path. An evicted entry does not prove a user actually hit "invalid or
+// expired state" — that requires the browser to attempt the callback after
+// its state was dropped, which this store does not observe — so the message
+// says "may have", not "did".
+//
+// Evictions() is cumulative for the process lifetime; Len()/Clients() are a
+// snapshot of right now. They can describe different points in time: a burst
+// that has long since drained (every entry redeemed or expired) still shows a
+// non-zero eviction count next to a near-empty, low-client store, which looks
+// identical to a resolved incident and MUST NOT be read as "one small active
+// flooding source" from this snapshot alone. Distinguishing an active flood
+// from a historical one needs a trend (is the counter still climbing?), which
+// the operator_action below asks for explicitly instead of inferring it here.
+//
+// Prior to this check the only place these counters were visible was the raw
+// /metrics text (culvert_login_state_*) — an operator had no reason to look
+// there for the cause of a wave of "please try logging in again" tickets.
+// Memory-only read; no probe is issued from the diagnostics path.
+func checkInteractiveLoginState() OperatorContractCheck {
+	pkceEvictions := globalPKCEStore.Evictions()
+	samlEvictions := globalSAMLStateStore.Evictions()
+	if pkceEvictions == 0 && samlEvictions == 0 {
+		return OperatorContractCheck{
+			Code:   "interactive_login_state",
+			Status: diagOK,
+			Message: fmt.Sprintf("no interactive-login (OIDC PKCE / SAML) callback state has been evicted since boot (%d OIDC PKCE, %d SAML entr(ies) currently in flight)",
+				globalPKCEStore.Len(), globalSAMLStateStore.Len()),
+		}
+	}
+	return OperatorContractCheck{
+		Code:   "interactive_login_state",
+		Status: diagWarn,
+		Message: fmt.Sprintf("interactive-login callback state has been evicted at the cap since boot — some evicted logins may have failed their SSO callback with \"invalid or expired state\" (OIDC PKCE: %d evicted since boot, %d currently in flight across %d client(s) right now; SAML: %d evicted since boot, %d currently in flight across %d client(s) right now)",
+			pkceEvictions, globalPKCEStore.Len(), globalPKCEStore.Clients(),
+			samlEvictions, globalSAMLStateStore.Len(), globalSAMLStateStore.Clients()),
+		OperatorAction: "The eviction count is cumulative since boot while the in-flight/client counts are a snapshot of right now, so a store that has since drained can show this warning long after the cause resolved — do not read the current client count as the size of the event that caused the evictions. Re-check this endpoint (or culvert_login_state_evictions_total on /metrics) over time: if the eviction count is still climbing alongside a small, steady set of clients, that is an active flooding source hitting the captive-portal/SSO-portal resolution path worth rate-limiting or blocking; if it has stopped climbing, the store already recovered and no action is needed.",
+	}
+}
+
+// checkAlertWebhookSigning reports webhooks whose configured HMAC signing
+// secret could not be decrypted at load, so their deliveries go out UNSIGNED
+// (SEC-WHSIGN-1, internal/alerts).
+//
+// Webhook secrets are encrypted at rest (RISK-003) under a NODE-LOCAL key file
+// that is deliberately never archived — putting it in the same tarball as the
+// ciphertext it unwraps would defeat encryption at rest, the same rule that
+// excludes .kek files. alert_webhooks.json IS archived, so the reachable way to
+// land here is restoring a backup onto a fresh volume; an unreadable key file
+// (permissions, a descriptor exhaustion window at boot) gets there too.
+//
+// It needs a row of its own because the failure is INVISIBLE everywhere else an
+// operator looks: GET /api/alerts/webhooks redacts the secret, so a webhook
+// whose signing is dead renders exactly like one that never had a secret, and
+// the alerting plane cannot page about its own signing being off. A receiver
+// that verifies X-Culvert-Signature silently stops accepting this node's
+// security alerts — a monitoring blind spot that looks like quiet.
+//
+// Counts only; no webhook name, URL or secret material reaches this VIEWER-role
+// surface.
+func checkAlertWebhookSigning() OperatorContractCheck {
+	degraded := globalAlertStore.SigningDegradedCount()
+	if degraded == 0 {
+		return OperatorContractCheck{
+			Code:    "alert_webhook_signing",
+			Status:  diagOK,
+			Message: "no alert webhook has an unusable signing secret",
+		}
+	}
+	return OperatorContractCheck{
+		Code:   "alert_webhook_signing",
+		Status: diagWarn,
+		Message: fmt.Sprintf("%d alert webhook(s) were configured with an HMAC signing secret this node cannot decrypt — their deliveries are going out UNSIGNED",
+			degraded),
+		OperatorAction: "Two remedies, and the ORDER matters. If you still have this node's original .alert_webhook_key (never included in a backup, by design), restore it and restart FIRST — the stored ciphertext is preserved, so every affected webhook recovers with no re-entry. Only if that key is gone, re-enter each affected signing secret in Security → Alert Webhooks. Do not restore the key file AFTER re-entering secrets: the re-entered ones are sealed under this node's new key and putting the old key back would make them unusable in turn. Until one remedy is applied, a receiver that verifies X-Culvert-Signature will reject this node's alerts.",
+	}
+}
+
+// checkOIDCJWKSTrust reports whether any live OIDC provider's JWKS key set is
+// past the stale-trust ceiling (SEC-JWKS-1, auth_oidc_flow.go). The engine
+// keeps authenticating with a stale-but-still-trusted key set for up to
+// jwksStaleMaxAge while the IdP's JWKS endpoint stays unreachable — a
+// deliberate availability trade — but past that ceiling ID-token validation
+// starts failing CLOSED for that provider, and the only prior signal was a
+// rate-limited log line: "the transition from degraded but working to
+// authentication is failing must not be silent" (see logStaleRefusal).
+// Memory-only read; issues no fetch. Contributes nothing when no configured
+// OIDC provider has ever breached the ceiling.
+func checkOIDCJWKSTrust() OperatorContractCheck {
+	stale := jwksStaleProviders()
+	if len(stale) == 0 {
+		return OperatorContractCheck{
+			Code:    "oidc_jwks_trust",
+			Status:  diagOK,
+			Message: "no OIDC provider's JWKS key set is past the stale-trust ceiling",
+		}
+	}
+	return OperatorContractCheck{
+		Code:   "oidc_jwks_trust",
+		Status: diagFail,
+		Message: fmt.Sprintf("OIDC provider(s) %s cannot refresh their JWKS key set and are past the stale-trust ceiling — ID-token validation is FAILING CLOSED for them (a signing key withdrawn at the IdP would otherwise keep authenticating indefinitely)",
+			strings.Join(stale, ", ")),
+		OperatorAction: "Restore reachability to the provider's JWKS endpoint (DNS, route, firewall, TLS). Logins via this provider will keep failing until one refresh succeeds; no operator action is needed once it does — recovery is automatic on the next successful fetch.",
 	}
 }
 

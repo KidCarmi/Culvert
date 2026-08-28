@@ -60,7 +60,7 @@ test("capture FE-3 auth evidence", async ({ page, context }) => {
   await page.getByLabel("Username").fill(USERS.admin.user);
   await page.getByLabel("Password").fill(USERS.admin.pass);
   await page.getByRole("button", { name: "Sign in" }).click();
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
   await page.screenshot({ path: out("authenticated-admin-shell.png") });
 
   // Session-expired → login (route intent preserved in the address bar).
@@ -77,7 +77,7 @@ test("capture FE-3 auth evidence", async ({ page, context }) => {
     page.getByRole("heading", { name: "Design system" }),
   ).toBeVisible();
   await page.goto(`${AUTH_URL}/app/`);
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
   await page.screenshot({ path: out("authenticated-viewer-shell.png") });
   await page.getByRole("button", { name: "Sign out" }).click();
   await page.waitForSelector("text=Sign in");

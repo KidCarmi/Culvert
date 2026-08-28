@@ -32,6 +32,14 @@ export const readRole: Decoder<Role> = readEnum(ROLES);
 export interface SetupStatus {
   needsSetup: boolean;
   tlsFallback: boolean;
+  /**
+   * The self-sign error. Empty on /api/setup/status and /api/auth/status —
+   * those are unauthenticated public routes and the cause can quote an
+   * operator-configured SAN or hostname (see ui_auth.go jsonOKAuthStatus).
+   * The full cause is served on the viewer-gated GET /api/settings/network
+   * and printed to the server log. Kept in the type so a viewer-scoped
+   * screen can still surface it after login.
+   */
   tlsFallbackReason: string;
 }
 
@@ -52,16 +60,20 @@ export type LoginResult =
 
 // ── decoders ───────────────────────────────────────────────────────────────
 
+// readTLSFallback: the FLAG is required on /api/setup/status and
+// /api/auth/status (the pre-auth surfaces surface it so the overlays can warn
+// before a password is submitted); the REASON is deliberately absent there —
+// the server keeps it on the viewer-gated GET /api/settings/network only, so
+// a raw x509 error can't quote an operator-configured SAN back to an
+// unauthenticated caller (ui_auth.go jsonOKAuthStatus). readOptional means an
+// absent-or-null field decodes to undefined; normalized to "" so callers keep
+// treating tlsFallbackReason as a plain string.
 function readTLSFallback(o: Record<string, unknown>): {
   tlsFallback: boolean;
   tlsFallbackReason: string;
 } {
   return {
     tlsFallback: field(o, "ui_tls_fallback", readBoolean),
-    // OPTIONAL: current main redacts the raw self-sign cause from the
-    // pre-auth surfaces (the reason string could quote a -ui-san value or an
-    // internal hostname to an UNAUTHENTICATED caller) and sends only the
-    // flag. Tolerate both shapes; the flag alone drives the warning UI.
     tlsFallbackReason:
       field(o, "ui_tls_fallback_reason", readOptional(readString)) ?? "",
   };

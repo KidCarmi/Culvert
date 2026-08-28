@@ -46,27 +46,48 @@ type Limits struct{ c LimitConfig }
 
 // LimitConfig is the mutable input to NewLimits.
 type LimitConfig struct {
-	MaxConns          int           // accepted connections
-	MaxConcurrent     int           // concurrent in-flight requests (worker pool size)
-	QueueDepth        int           // admission queue depth beyond the workers
-	MaxSessions       int           // live protocol sessions
-	MaxOutstanding    int           // outstanding JSON-RPC requests across sessions
-	MaxHeaderBytes    int           // request header bytes
-	MaxBodyBytes      int           // request body bytes
-	MaxResponseBytes  int           // response bytes
-	AuthConcurrency   int           // concurrent authentications
-	DPoPConcurrency   int           // concurrent DPoP verifications
-	MaxObservations   int           // observe records in flight to the sink
-	AdmissionBudget   int           // per-source admission budget (token bucket size)
-	CleanupPerOp      int           // bounded cleanup scan per operation
+	MaxConns      int // accepted connections
+	MaxConcurrent int // concurrent in-flight requests (worker pool size)
+	QueueDepth    int // admission queue depth beyond the workers
+	// MaxSessions mirrors the kernel bound for the listener-facing config; the cap
+	// is ENFORCED by internal/mcp/session.Manager via ListenerConfig.SessionLimits.
+	MaxSessions int
+	// MaxOutstanding mirrors the kernel bound; outstanding-request accounting is
+	// ENFORCED per (session, direction) in internal/mcp/session/ops.go.
+	MaxOutstanding int
+	MaxHeaderBytes int // request header bytes
+	MaxBodyBytes   int // request body bytes
+	// MaxResponseBytes: the observe runtime generates every response itself from
+	// bounded internal values, so the attacker-sized case is the UPSTREAM leg,
+	// where internal/mcp/upstreamclient enforces its own bound.
+	MaxResponseBytes int
+	AuthConcurrency  int // concurrent authentications
+	DPoPConcurrency  int // concurrent DPoP verifications
+	// MaxObservations is RESERVED: observe records are emitted synchronously on the
+	// request goroutine, so in-flight records cannot exceed MaxConcurrent. It
+	// becomes meaningful only if the sink becomes asynchronous.
+	MaxObservations int
+	// AdmissionBudget is RESERVED AND UNENFORCED (RISK-026). It is documented as a
+	// per-source budget, but admission has no source identity and runs before
+	// authentication, so nothing consumes it. Wiring it requires a
+	// deployment-topology decision — see
+	// docs/design/mcp/ADR-PROPOSAL-mcp-admission-fairness.md. The Limits ownership
+	// wall (limits_ownership_test.go) fails the build if this is silently read.
+	AdmissionBudget int
+	// CleanupPerOp is RESERVED: the sweeper walks sessions the manager already caps
+	// at MaxSessions, so the scan is bounded without it. (The credential broker's
+	// MaxCleanupPerOp is a DIFFERENT, enforced bound.)
+	CleanupPerOp      int
 	ReadHeaderTimeout time.Duration // slowloris: header read deadline
 	ReadTimeout       time.Duration // full request read deadline
 	WriteTimeout      time.Duration // response write deadline
 	IdleTimeout       time.Duration // idle keep-alive deadline
-	HandshakeTimeout  time.Duration // TLS handshake deadline
-	RequestDeadline   time.Duration // absolute per-request deadline
-	SessionTTL        time.Duration // idle session expiry
-	ShutdownTimeout   time.Duration // graceful-shutdown budget
+	// HandshakeTimeout: net/http bounds the TLS handshake itself from
+	// max(ReadHeaderTimeout, ReadTimeout), which are set from this same set.
+	HandshakeTimeout time.Duration
+	RequestDeadline  time.Duration // absolute per-request deadline
+	SessionTTL       time.Duration // idle session expiry
+	ShutdownTimeout  time.Duration // graceful-shutdown budget
 }
 
 func limErr(detail string) error {

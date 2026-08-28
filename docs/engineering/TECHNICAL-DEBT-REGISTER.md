@@ -19,6 +19,9 @@
 | DEBT-008 | ✅ CLOSED | Two parallel update mechanisms coexisted | legacy `updater/` removed 2026-07-11; `release_dispatch*.go` + maintenance agent is the sole path |
 | DEBT-009 | LOW ↓ | Three durability layers for config can drift — ownership now registry-declared; effective-config visibility remains | `config.go`, `admin_settings.go`, `configversion.go` |
 | DEBT-010 | ✅ CLOSED | Coverage floor 55% (doc said 60%); delta gate non-blocking | resolved in tree by CI-REDESIGN step 7 — verified 2026-07-04 |
+| DEBT-011 | 🟡 PARTIAL | MCP has no anti-drift wall: designed-and-documented controls that the request path never invokes | Two walls landed 2026-08-24/25 — `internal/mcp/runtime/limits_ownership_test.go` (every Limits bound must DECLARE an enforcement owner; type-aware via go/types, so a same-named accessor on a different type cannot satisfy a row) and `mcp_execution_posture_test.go` (the disabled-execution posture is three ABSENCES no unit test observes; now executable facts). `internal/mcpacceptance/criterion_ids_test.go` applies the same idea to acceptance criterion ids in both directions. The class is NOT fully walled: policy fields, event fields and inspection controls have no equivalent ownership registry yet. |
+| DEBT-012 | ✅ CLOSED | Five `runtime.Limits` knobs remain validated-but-unenforced at the MCP runtime layer | RESOLVED 2026-08-24: every bound now carries a declared enforcement status — `enforcedHere`, `delegated` (with the owning control named) or `reserved` (with a linked decision). `AdmissionBudget`, `MaxObservations` and `CleanupPerOp` are recorded as `reserved`, and the wall fails the build if a reserved bound is ever silently read, so none can quietly become load-bearing. `AdmissionBudget` remains tied to the still-open RISK-026. |
+| DEBT-013 | 🟡 PARTIAL | MCP registry existence still leaks to an authenticated-shaped caller; upstream `MaxConnsPerServer` is per-call | Enumeration half CLOSED 2026-08-24 (OVN-08): `resolveServer` no longer consults the registry, so server identity is resolved only AFTER authentication and an invalid credential can no longer distinguish a known from an unknown server id. The per-call transport half stands and is now a recorded trade-off rather than an oversight — a per-call `http.Transport` is what makes cross-server connection, TLS-identity and credential inheritance structurally impossible, at the cost of a TLS handshake per call. Revisit only with a per-server transport whose isolation is proven. |
 
 ---
 
@@ -237,3 +240,165 @@
   root + shim globals). DEBT-003 re-measured: `store.go` halved to 1,171; `controlplane.go` grew
   to 2,236 and is now the largest file — flagged as next split target. DEBT-004/006/008/009/010
   unchanged and still real.
+
+---
+
+## DEBT-011 — MCP has no anti-drift wall · MEDIUM (2026-08-24)
+- **Principal:** Culvert walls its cross-cutting contracts with executable parity tests —
+  `uiRoutes` C1 forward/reverse parity for admin routes, `config_surfaces_test.go` reflection
+  parity for config membership. `internal/mcp` has no equivalent. The consequence showed up as a
+  *pattern*, not a one-off: six of the fifteen findings in the 2026-08-24 backend review were the
+  same shape — a control designed, documented, validated at construction, unit-tested in
+  isolation, and **never invoked by the request path**.
+  - `RequestDeadline` bounded only admission (`ServeHTTP` built the ctx, used it for `admit()`,
+    then cancelled it).
+  - `AuthConcurrency`, `DPoPConcurrency`, `AdmissionBudget`, `MaxObservations`, `CleanupPerOp`
+    had zero enforcement call sites.
+  - `protocol.Adapter` / `AdapterFor` — the documented boundary keeping version out of downstream
+    code — was declared and never called.
+  - `mcperr.ReasonRequestDeadlineExceeded` was mapped into the rollout hard-failure table and
+    never produced by any code path.
+- **Interest paid per change:** every review has to re-derive reachability from the composition
+  root by hand (this one did, for every dependency and every rollout mode), and package-level
+  tests provide false assurance — they pass whether or not the control is wired.
+- **Recommended shape:** a `mcp_surfaces_test.go` in the spirit of `config_surfaces_test.go`,
+  declaring for each `Limits` field and each declared seam **where** it is enforced/invoked, and
+  failing when a declared row has no call site. The three structural tests added by the
+  2026-08-24 review (`TestContext_NoDetachedContextInTheRequestPath`,
+  `TestSecurity_GuardedSingletonSetIsComplete`,
+  `TestVersionAdapter_RequestPathInvokesTheSeam`) are the pattern, applied ad hoc; the wall
+  generalizes them.
+- **Evidence:** `docs/engineering/security-reviews/2026-08-24-mcp-backend-full-review.md` §1, §4.
+
+## DEBT-012 — Validated-but-unenforced MCP limit knobs · LOW (2026-08-24)
+- **Principal:** After `AuthConcurrency` and `DPoPConcurrency` were wired, five
+  `runtime.Limits` fields remain validated, ceiling-checked, accessor-exposed and unread:
+  `MaxObservations`, `CleanupPerOp`, `HandshakeTimeout`, `MaxOutstanding`, `MaxResponseBytes`.
+  None is currently a hole — in-flight observations are bounded transitively by `MaxConcurrent`
+  (the sink call is synchronous), the sweep is bounded by the live session set, `net/http` bounds
+  the TLS handshake by `max(ReadHeaderTimeout, ReadTimeout)`, `limits.MaxOutstandingPerSession`
+  is enforced in `session/ops.go`, and responses are generated internally today.
+- **Interest:** each is a knob an operator can set and get nothing from, and
+  `MaxResponseBytes` becomes load-bearing the moment guarded execution returns upstream content.
+- **Fix:** wire or explicitly deprecate each, under DEBT-011's wall. (`AdmissionBudget` is
+  *not* here — it is a live risk, RISK-026.)
+
+## DEBT-013 — MCP residual oracle and per-call upstream pooling · LOW (2026-08-24)
+- **Principal (a):** the credential *presence* pre-check now runs before registry resolution, so a
+  credential-less caller can no longer distinguish a registered MCP server from an unknown id. A
+  caller presenting a **syntactically valid but invalid** token still can, because step 8 still
+  precedes token validation. Closing it fully means deferring the registry *existence* decision
+  until after validation while still resolving the server id from the path for the audience
+  binding.
+- **Principal (b):** `upstreamclient.roundTrip` builds one `http.Transport` per call. The
+  2026-08-24 fix releases its idle connections (closing an unbounded FD/goroutine leak), but
+  `MaxConnsPerServer` / `MaxIdleConnsPerHost` are consequently per-call bounds, not per-server
+  pools — no two upstream calls share a connection. Fixing it means holding a transport per
+  server whose dialer reads the current pin, which the per-call pinning model makes non-trivial.
+- **Interest:** (a) bounded information disclosure; (b) a TLS handshake per upstream tool call
+  once execution is armed.
+
+## PREREQ-MCP-KILL-1 — MCP kill switch not revalidated at the side-effect boundary · HARD CANARY PREREQUISITE (2026-08-25)
+- **Principal:** `Executor.Execute` checks `State.Killed()` once at admission, but the
+  irreversible boundary (`run.go` `callUpstream`) does NOT re-read the authoritative kill
+  state before the upstream side effect. Between admission and the boundary the executor
+  performs a durable decision commit, credential planning and credential materialization —
+  all of which can block — so an emergency kill engaged during that window does not abort an
+  in-flight live call. The OVN-09 tool-drift re-check already sits at that boundary; the kill
+  re-check does not yet join it.
+- **Status:** OPEN. This is a **blocking prerequisite**, not an ordinary debt item.
+  **Canary/Production activation is PROHIBITED until the authoritative kill state is
+  revalidated immediately before the irreversible side-effect boundary** (a kill during
+  planning/materialization must yield `up.calls == 0`, block reason
+  `rollout_emergency_active`). Compensating control today: no production executor is composed
+  (arming hooks uncalled; AST posture wall), so the window is unreachable in production — but
+  the prerequisite must be CLOSED before any live-capable mode is armed.
+- **Interest:** the kill switch is the operator's only immediate stop; a stop that a slow
+  commit/materialize window can outrun is not a stop. Purely a live-mode concern — Shadow
+  already reflects the kill at admission (`WOULD_BLOCK` / `rollout_emergency_active`) and never
+  reaches the boundary.
+- **Fix:** add a `killEpoch` re-read to `callUpstream` alongside the tool-drift re-check; on a
+  kill, abort before `Upstream.Call` and return the emergency block. Then invert
+  `TestCanaryPrerequisite_KillStateNotRevalidatedAtSideEffectBoundary`
+  (`internal/mcp/execution`) to assert `up.calls == 0` and check off the §12 exit criterion in
+  `docs/design/mcp/SHADOW-ARCHITECTURE.md`.
+- **Evidence:** `docs/design/mcp/SHADOW-ARCHITECTURE.md` §10 (PREREQ-MCP-KILL-1) + §12 exit
+  criteria; non-vacuous gate `TestCanaryPrerequisite_KillStateNotRevalidatedAtSideEffectBoundary`.
+
+## SHADOW-EVIDENCE-ROUTING-1 — Pre-dispatch fail-closed signals not routed into Shadow evidence · LOW (2026-08-25)
+- **Principal:** Two failure classes are terminally handled by the runtime BEFORE the
+  guarded executor/Shadow provider is invoked, so the ShadowEvaluator never records a
+  `shadow_evaluated` event for them: (a) an inspection `HardFail` is rejected in
+  `dispatchPolicy` (`internal/mcp/runtime/policy.go`) before the `p.executor != nil`
+  delegation, for every rollout mode; (b) an initial (pre-dispatch) tool drift is refused
+  by the OVN-09 `refuseOnToolDrift` at the top of `dispatchExecute`
+  (`internal/mcp/runtime/execute.go`) before `p.executor.Execute`. The evaluator's
+  `WOULD_FAIL_INSPECTION` and (initial) `WOULD_FAIL_STALE_DECISION` outcomes are therefore
+  provider-level contracts (pinned by the differential test via direct invocation) but are
+  not produced through the live pipeline. `WOULD_FAIL_STALE_DECISION` IS reached for drift
+  detected at the side-effect boundary (the `ToolStillCurrent` re-check).
+- **Status:** OPEN, deferred by design. Execution is disabled (no executor composed), so
+  this is future-facing evidence completeness, not a live gap. Found by Codex review of
+  `d0f747e` on PR #1226.
+- **Interest:** for a future Shadow activation, an inspection-hard-fail or an
+  already-stale tool produces the runtime's own rejection observation instead of a
+  `shadow_evaluated` / `WOULD_FAIL_*` record, so a Canary-readiness analysis reading only
+  `culvert_mcp_shadow_*` would undercount those refusals (they are still recorded, in a
+  different evidence shape).
+- **Fix (proposed):** in the reviewed Shadow-activation composition slice, route these
+  signals into the executor when one is wired — gate the `dispatchPolicy` inspection-block
+  and let the executor enforce (fail-closed for Canary/Production via `hardFailure()` →
+  `EffectBlock`; evidence for Shadow via `EffectShadowEvaluate` → `WOULD_FAIL_INSPECTION`);
+  for drift, make the OVN-09 narrowing Shadow-aware so it records `WOULD_FAIL_STALE_DECISION`
+  in Shadow WITHOUT widening the TOCTOU window for enforcing modes. This modifies
+  security-sensitive dispatch and changes the enforcing-mode rejection observation shape, so
+  it is out of scope for the architecture-only PR #1226 and belongs with the executor-arming
+  review.
+- **Evidence:** `docs/design/mcp/SHADOW-ARCHITECTURE.md` §13 (limitation 3);
+  `internal/mcp/runtime/policy.go` (inspection block), `internal/mcp/runtime/execute.go`
+  (refuseOnToolDrift).
+
+## SHADOW-EVIDENCE-ROUTING-1 addendum — Durable Shadow sub-facts need a v2 envelope (2026-08-25)
+- **Principal:** The Shadow enforcement-prediction sub-facts (shadow_outcome/override,
+  credential-plan status, request/response inspection readiness) are NOT persisted as new
+  fields on the `schema_version:1` event envelope. Adding digest-covered fields in place is a
+  binary-rollback hazard: a pre-change reader drops the unknown JSON fields on unmarshal,
+  recomputes `CanonicalBytes` without them, and `VerifyDigest` misreports a valid shadow
+  record as corrupted (the model fails closed on an unknown schema version, but the fields
+  were added under v1, so it never gets that far). Found by Codex on PR #1226 (4bbf211).
+- **Status:** OPEN, deferred by design. Today a shadow evaluation is marked durably only by
+  the existing `ExecutionState = "shadow_evaluated"` value (digest-safe), and the full
+  ShadowDecision rides the response body. Execution is disabled, so no shadow event is ever
+  written in production.
+- **Fix:** in the Shadow-activation slice, introduce `schema_version:2` for the expanded
+  envelope with explicit v1/v2 recovery handling (a v2 event is rejected as "unknown schema
+  version" by a v1 reader — honest — rather than misverified), and stamp the sub-facts only
+  on v2 shadow events. Then `shadowDecisionFacts` populates the durable sub-facts.
+- **Evidence:** `internal/mcp/events/model/model.go` (DecisionEvidence note),
+  `internal/mcp/execution/shadow_evaluator.go` (`shadowDecisionFacts`),
+  `docs/design/mcp/SHADOW-ARCHITECTURE.md` §9.
+
+## SHADOW-PREDICTION-PARITY-1 — Pre-side-effect gates have no ownership wall · LOW (2026-08-25)
+- **Principal:** `ShadowEvaluator.decide()` re-states, by hand, the sequence of refusals the
+  live `Executor` performs before the side-effect boundary (hard control → policy class →
+  allowance → upstream-server usability → credential readiness → boundary drift). Nothing
+  structural couples the two: a gate added to `Execute`/`runExecute` without a matching step
+  in `decide()` silently makes Shadow MORE PERMISSIVE than the enforcement it predicts, and
+  the only thing that catches it is whether someone remembers to extend the differential
+  test. Two such gaps existed in the shipped Layer-B split and were found by review, not by
+  a failing build (SR-01 allowance-capacity, SR-02 upstream-server usability — both fixed
+  and walled in `internal/mcp/execution/shadow_prediction_parity_test.go`).
+- **Status:** OPEN, deferred. Execution is disabled, so the class is future-facing. The
+  direction of the failure is what makes it worth recording: an over-permissive Shadow
+  prediction is an input to the Canary promotion decision, so the defect is consumed as
+  evidence rather than surfacing as a refusal.
+- **Fix (proposed):** an ownership registry in the shape of
+  `internal/mcp/runtime/limits_ownership_test.go` — enumerate the pre-side-effect refusal
+  sites in `executor.go`/`run.go` (via `go/types`, so a same-named helper on another type
+  cannot satisfy a row) and require each to DECLARE either a modelling step in `decide()`
+  or an explicit `not-predicted` justification. Then a new live gate fails the build until
+  Shadow models it.
+- **Evidence:** `docs/engineering/security-reviews/2026-08-25-shadow-layerb-and-ldap-window.md`
+  §§3–4 and §6 residual risk; `docs/design/mcp/SHADOW-ARCHITECTURE.md` §4 (the stage list
+  that already named "server eligibility" as requiring proof); DEBT-011 is the same class
+  one layer up.

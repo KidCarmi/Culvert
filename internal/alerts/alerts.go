@@ -35,3 +35,32 @@ func Fire(event string, p Payload) {
 		(*s)(event, p)
 	}
 }
+
+// SubscriberProbe reports whether any enabled webhook subscribes to event. The
+// real implementation is *Store.HasSubscriber, installed from package main.
+type SubscriberProbe func(event string) bool
+
+var probe atomic.Pointer[SubscriberProbe]
+
+// SetSubscriberProbe installs the subscription query (publish-once, same
+// lifecycle as SetSink).
+func SetSubscriberProbe(fn SubscriberProbe) { probe.Store(&fn) }
+
+// HasSubscriber reports whether firing event would reach anyone, so a producer
+// on the request path can skip the goroutine, the payload build and the round
+// trip through the process-wide dedup mutex when — as in the default posture —
+// no webhook is configured. This is the internal-package half of the contract
+// package main's fireDNSFailureAlert documents: producers whose rate is set by
+// a FAULT rather than by the operator must gate, because the fault puts every
+// request on that path and the alert would otherwise degrade the node hardest
+// exactly when it is already degraded.
+//
+// It fails toward DELIVERY: with no probe installed (unit tests that wire a
+// sink but no store, and any call ordering where the store is not yet up) the
+// answer is true, so a missing probe can never silence a real alert.
+func HasSubscriber(event string) bool {
+	if p := probe.Load(); p != nil {
+		return (*p)(event)
+	}
+	return true
+}

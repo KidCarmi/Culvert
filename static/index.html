@@ -1591,6 +1591,14 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
               <div style="font-size:.7rem;color:var(--muted);margin-bottom:2px" title="Clean verdicts that arrived after the scan budget expired and were discarded — the content was refused by the deadline, not judged by the engines.">Late verdicts discarded</div>
               <div id="sec-scan-late-discard" style="font-weight:600;font-size:.85rem">0</div>
             </div>
+            <div style="background:var(--surface2);border-radius:8px;padding:10px">
+              <div style="font-size:.7rem;color:var(--muted);margin-bottom:2px" title="Remote scan sidecar refused for capacity (HTTP 429). Fail-closed — also counted as a scan timeout. Add scanning capacity.">Sidecar at capacity</div>
+              <div id="sec-remote-saturated" style="font-weight:600;font-size:.85rem">0</div>
+            </div>
+            <div style="background:var(--surface2);border-radius:8px;padding:10px">
+              <div style="font-size:.7rem;color:var(--muted);margin-bottom:2px" title="Remote scan round trips in flight. The saturation gauge for a sidecar deployment, where 'Scans in flight' is always zero.">Remote scans in flight</div>
+              <div id="sec-remote-inflight" style="font-weight:600;font-size:.85rem">0</div>
+            </div>
           </div>
           <div id="sec-yara-warnings" style="display:none;background:rgba(234,179,8,.1);border-left:3px solid var(--yellow);padding:8px 12px;border-radius:6px;margin-bottom:14px;font-size:.78rem;color:var(--yellow)"></div>
 
@@ -2264,7 +2272,7 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
             <label class="form-label">Proxy Port</label>
             <input type="number" id="pac-port" class="input" style="width:100%;margin-bottom:12px" placeholder="8080" value="8080" min="1" max="65535">
 
-            <label class="form-label">Bypass Exclusions <span style="color:var(--muted);font-weight:400">(one per line - domain, *.wildcard, or 10.0.0.0/8 CIDR)</span></label>
+            <label class="form-label">PAC Exclusions (DIRECT Bypass) <span style="color:var(--muted);font-weight:400">(one per line - domain, *.wildcard, or 10.0.0.0/8 CIDR)</span></label>
             <textarea id="pac-exclusions" class="input" rows="7" style="width:100%;font-family:monospace;font-size:.82rem;resize:vertical"
               placeholder="*.corp.local&#10;internal.mycompany.com&#10;192.168.0.0/16&#10;10.0.0.0/8"></textarea>
 
@@ -2435,10 +2443,11 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
               <textarea class="input" id="cert-pem" rows="5" style="width:100%;font-family:monospace;font-size:.75rem;resize:vertical" placeholder="-----BEGIN CERTIFICATE-----&#10;...&#10;-----END CERTIFICATE-----"></textarea>
             </div>
             <div style="margin-bottom:14px">
-              <label class="form-label">Private Key (PEM) <span style="color:#ef4444;font-weight:400">- never logged; persisted to the CA bundle path for the MITM target (see confirmation after upload), validate-only (never persisted) for the UI target</span></label>
+              <label class="form-label">Private Key (PEM) <span style="color:#ef4444;font-weight:400">- never logged; persisted to the CA bundle path for the MITM target, or to the data directory for the UI target (see confirmation after upload); the UI target requires a restart to take effect</span></label>
               <textarea class="input" id="cert-key" rows="5" style="width:100%;font-family:monospace;font-size:.75rem;resize:vertical" placeholder="-----BEGIN EC PRIVATE KEY-----&#10;...&#10;-----END EC PRIVATE KEY-----"></textarea>
             </div>
             <button class="btn" data-click="uploadCustomCert"><svg class="ico" aria-hidden="true"><use href="#i-upload"/></svg> Upload & Activate</button>
+            <div id="ui-cert-status" style="margin-top:10px;font-size:.78rem;color:var(--muted)"></div>
           </div>
         </div>
 
@@ -9428,6 +9437,8 @@ async function loadSecScanStatus() {
     setMetric('sec-scan-skipped', s.stat_scan_skipped, 1, null);
     setMetric('sec-yara-inflight', s.yara_inflight, (s.yara_inflight_max||50)*0.8, s.yara_inflight_max||50);
     setMetric('sec-remote-fail', s.stat_remote_scan_fail, 1, 10);
+    setMetric('sec-remote-saturated', s.stat_remote_scan_saturated, 1, 10);
+    setMetric('sec-remote-inflight', s.remote_scan_inflight, 4, 16);
     setMetric('sec-clam-error', s.stat_clam_scan_error, 1, 10);
     setMetric('sec-clam-saturated', s.stat_clam_saturated, 1, 10);
     setMetric('sec-scan-inflight', s.scan_inflight, 4, 16);
@@ -10930,7 +10941,7 @@ async function loadWebhooks() {
       <td style="font-weight:500">${escHtml(h.name||'-')}</td>
       <td style="font-family:monospace;font-size:.78rem;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(h.url)}">${escHtml(h.url)}</td>
       <td style="font-size:.78rem">${(h.events||[]).join(', ')}</td>
-      <td><span style="font-size:.75rem;padding:2px 8px;border-radius:10px;background:${h.enabled?'rgba(34,197,94,.15)':'rgba(100,116,139,.15)'};color:${h.enabled?'var(--green)':'var(--muted)'}">${h.enabled?'Active':'Disabled'}</span></td>
+      <td><span style="font-size:.75rem;padding:2px 8px;border-radius:10px;background:${h.enabled?'rgba(34,197,94,.15)':'rgba(100,116,139,.15)'};color:${h.enabled?'var(--green)':'var(--muted)'}">${h.enabled?'Active':'Disabled'}</span>${h.signing_degraded?`<span title="This webhook was configured with an HMAC signing secret this node cannot decrypt (typically after restoring a backup onto a fresh volume — the signing key is node-local and never archived). Deliveries are going out UNSIGNED. Edit the webhook and re-enter the secret." style="font-size:.75rem;padding:2px 8px;border-radius:10px;margin-left:6px;background:rgba(245,158,11,.15);color:var(--amber,#f59e0b)">Unsigned — secret unusable</span>`:''}</td>
       <td style="display:flex;gap:6px">
         <button class="btn ghost sm" data-click="testWebhook" data-arg="${h.id}">Test</button>
         <button class="btn ghost sm" data-click="editWebhook" data-arg="${h.id}">Edit</button>
@@ -13293,11 +13304,34 @@ async function uploadCustomCert() {
     const resp = await fetch('/api/certs/upload', { method: 'POST', body: fd });
     if (!resp.ok) { const t = await resp.text(); throw new Error(t); }
     const d = await resp.json();
-    toast(d.note ? d.note : 'Certificate uploaded & activated', 'success');
+    // persisted:false means the upload was validated but NOT saved — the
+    // generic success toast would be a false "it worked" signal, so surface
+    // the server's own warning instead of guessing.
+    if (d.persisted === false) {
+      toast(d.warning || 'Uploaded but not saved — see server log', 'error');
+    } else {
+      toast(d.note ? d.note : 'Certificate uploaded & activated', 'success');
+    }
     document.getElementById('cert-pem').value = '';
     document.getElementById('cert-key').value = '';
     if (target === 'mitm') loadCACertInfo();
+    if (target === 'ui') loadUICertStatus();
   } catch(e) { toast('Upload failed: ' + e.message, 'error'); }
+}
+
+// Surfaces whether a GUI-uploaded UI certificate is on file and whether the
+// running server is actually using it, so "restart required to activate"
+// (above) is something the admin can verify instead of taking on faith.
+async function loadUICertStatus() {
+  const el = document.getElementById('ui-cert-status');
+  if (!el) return;
+  try {
+    const n = await api('/api/settings/network');
+    if (!n.ui_custom_cert_uploaded) { el.textContent = ''; return; }
+    el.textContent = n.ui_custom_cert_active
+      ? 'Custom certificate uploaded and active.'
+      : 'Custom certificate saved — restart the proxy to activate it.';
+  } catch(e) { el.textContent = ''; }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -13379,7 +13413,7 @@ document.querySelectorAll('.nav-item').forEach(el => {
     if (el.dataset.view === 'rewrite')       fetchRewrite();
     if (el.dataset.view === 'dashboard')     { fetchTopHosts(); fetchDashboardHealth(); fetchDashboardThreats(); fetchTopRules(); }
     if (el.dataset.view === 'policy')        { fetchPolicy(); loadDefaultAction(); loadPolicyProviderOptions(); }
-    if (el.dataset.view === 'certificates')  { loadCACertInfo(); loadSSLBypass(); }
+    if (el.dataset.view === 'certificates')  { loadCACertInfo(); loadSSLBypass(); loadUICertStatus(); }
     if (el.dataset.view === 'idproviders')   loadIdPList();
     if (el.dataset.view === 'pac')           loadPACConfig();
     if (el.dataset.view === 'users')         { fetchUsers(); fetchLockouts(); }
@@ -18561,8 +18595,9 @@ function resetBlockPage() {
   <div class="setup-card" id="setup-card-inner">
     <div id="setup-tls-fallback-banner" style="display:none;margin:0 0 14px;padding:10px 12px;border-radius:6px;background:rgba(220,53,69,.12);border:1px solid var(--red,#dc3545);font-size:.82rem;text-align:left">
       <strong>Self-signed TLS setup failed — this page is being served over plain HTTP.</strong>
-      The admin password you set below will travel unencrypted. <span id="setup-tls-fallback-reason" style="color:var(--muted)"></span>
+      The admin password you set below will travel unencrypted.
       Consider completing setup over a trusted network only, then restart the appliance to retry TLS.
+      <span style="color:var(--muted)">The cause is in the server log.</span>
     </div>
     <div class="setup-logo"><svg class="ico" aria-hidden="true"><use href="#i-shield"/></svg></div>
     <h2>Welcome to Culvert</h2>
@@ -18648,6 +18683,17 @@ function resetBlockPage() {
              replication from the leader is stalled and this node deliberately
              will NOT auto-promote on its own fault (manual promotion available). -->
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="ha_sync_panic"> HA standby sync fault (replication stalled)</label>
+        <!-- CHAOS-54: the SOCKS5 accept loop has been unable to accept connections
+             for a sustained period (descriptor exhaustion — it retries and recovers
+             on its own) or has stopped entirely (the listening socket is gone —
+             restart required). Fires once per episode, never per retry. -->
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="socks5_listener_down"> SOCKS5 listener not accepting connections</label>
+        <!-- RISK-027 / OVN-16: MCP Agent Security Gateway enablement was requested but
+             the capability is not serving (port in use, startup failure, or the
+             listener stopped on its own). Fires once per episode, evaluated on a
+             timer so it does not depend on /healthz being scraped. Absent entirely
+             on the default disabled-MCP deployment. -->
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="mcp_gateway_down"> MCP gateway not serving (enabled but down)</label>
       </div>
     </div>
     <div class="form-group">
@@ -18812,7 +18858,8 @@ pre.diff-block { margin:0;white-space:pre-wrap;word-break:break-all;font-size:.7
   <div class="setup-card">
     <div id="login-tls-fallback-banner" style="display:none;margin:0 0 14px;padding:10px 12px;border-radius:6px;background:rgba(220,53,69,.12);border:1px solid var(--red,#dc3545);font-size:.82rem;text-align:left">
       <strong>Self-signed TLS setup failed — this page is being served over plain HTTP.</strong>
-      The credentials you enter below will travel unencrypted. <span id="login-tls-fallback-reason" style="color:var(--muted)"></span>
+      The credentials you enter below will travel unencrypted.
+      <span style="color:var(--muted)">The cause is in the server log, and on Settings &rarr; Network &amp; TLS once signed in.</span>
     </div>
     <div class="setup-logo"><svg class="ico" aria-hidden="true"><use href="#i-shield"/></svg></div>
     <h2>Sign in to Culvert</h2>
@@ -18867,14 +18914,15 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
 // public (reachable before any credential is submitted), so this is the
 // only point that can warn an operator BEFORE their password travels
 // unencrypted over a failed-self-sign HTTP fallback.
-function renderTLSFallbackBanner(idPrefix, active, reason) {
+//
+// The FLAG only: those two endpoints deliberately do not carry the self-sign
+// error (it can quote an operator-configured SAN or hostname, and they are
+// unauthenticated). The cause is on Settings -> Network & TLS once signed in,
+// and in the server log.
+function renderTLSFallbackBanner(idPrefix, active) {
   const banner = document.getElementById(idPrefix + '-tls-fallback-banner');
   if (!banner) return;
   banner.style.display = active ? '' : 'none';
-  if (active) {
-    const r = document.getElementById(idPrefix + '-tls-fallback-reason');
-    if (r) r.textContent = reason || '';
-  }
 }
 
 // ── Init: check setup status then auth status ───────────────────────────
@@ -18883,7 +18931,7 @@ function renderTLSFallbackBanner(idPrefix, active, reason) {
     const s = await fetch('/api/setup/status');
     if (!s.ok) { showLoginOverlay(); return; }
     const d = await s.json();
-    renderTLSFallbackBanner('setup', d.ui_tls_fallback, d.ui_tls_fallback_reason);
+    renderTLSFallbackBanner('setup', d.ui_tls_fallback);
 
     if (d.needsSetup) {
       // First-time setup - show the setup wizard.
@@ -18934,7 +18982,7 @@ function renderTLSFallbackBanner(idPrefix, active, reason) {
         const a = await fetch('/api/auth/status');
         if (a.ok) {
           const ad = await a.json();
-          renderTLSFallbackBanner('login', ad.ui_tls_fallback, ad.ui_tls_fallback_reason);
+          renderTLSFallbackBanner('login', ad.ui_tls_fallback);
           if (!ad.loggedIn) {
             showLoginOverlay();
           } else {
@@ -21044,7 +21092,7 @@ function mcpxHealthCard(name, cap){
   mcpxRfKv(dl,'In flight', rt.in_flight);
   mcpxRfKv(dl,'Servers', cap.servers);
   mcpxRfKv(dl,'Quarantined tools', cap.quarantined_tools);
-  mcpxRfKv(dl,'Drifted tools', cap.drifted_tools);
+  mcpxRfKv(dl,'Review required tools', cap.review_required_tools);
   mcpxRfKv(dl,'Policy revision', cap.policy_revision);
   mcpxRfKvHash(dl,'Policy snapshot', cap.policy_snapshot_hash);
   mcpxRfKv(dl,'Pending approvals', cap.pending_approvals);

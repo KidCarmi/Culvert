@@ -78,6 +78,15 @@ var (
 	statClamScanError     int64 // ClamAV scan errors mid-request (fail-open, alerted)
 	statClamSaturated     int64 // scans that could not get a ClamAV slot within the budget
 	statScanLateDiscarded int64 // clean verdicts computed after the deadline and discarded
+
+	// statRemoteScanSaturated counts remote scans the SIDECAR refused for
+	// capacity (HTTP 429). Kept apart from statRemoteScanFail for the reason
+	// CHAOS-52 kept ClamSaturated apart from ClamScanError: "at capacity" and
+	// "faulted" have different operator actions — add scanning capacity vs. fix
+	// the scanner — and conflating them sends the wrong runbook. These are
+	// fail-CLOSED (they also increment statScanTimeout); statRemoteScanFail is
+	// fail-OPEN.
+	statRemoteScanSaturated int64
 )
 
 // scanInflight counts body scans currently running, INCLUDING scans whose
@@ -93,6 +102,21 @@ var scanInflight atomic.Int64
 // the timeout-and-abandon regime.
 func ScanInflight() int64 { return scanInflight.Load() }
 
+// remoteScanInflight is the same saturation gauge for the sidecar deployment,
+// where scanInflight is structurally zero because no local scanner runs. A
+// value that climbs and stays there means the sidecar is answering slower than
+// the node is asking, which is the leading indicator of the budget-refusal
+// regime — and, before CHAOS-53, of the fail-open one.
+var remoteScanInflight atomic.Int64
+
+// RemoteScanInflight reports remote scan round trips currently in flight.
+func RemoteScanInflight() int64 { return remoteScanInflight.Load() }
+
+// RemoteScanFailTotal reports fail-OPEN sidecar faults so far. Used by the
+// rate-limited degradation log, where the counter carries the magnitude the
+// suppressed lines would have.
+func RemoteScanFailTotal() int64 { return atomic.LoadInt64(&statRemoteScanFail) }
+
 // CounterSnapshot is a point-in-time copy of the scan counters.
 type CounterSnapshot struct {
 	ClamBlocked       int64
@@ -105,6 +129,12 @@ type CounterSnapshot struct {
 	ClamSaturated     int64
 	ScanLateDiscarded int64
 	ScanInflight      int64
+
+	// Remote (sidecar) deployment. Every counter above except RemoteScanFail is
+	// structurally zero there, so before CHAOS-53 a sidecar node exported no
+	// scanning signal at all.
+	RemoteScanSaturated int64
+	RemoteScanInflight  int64
 }
 
 // Counters returns a snapshot of all scan counters.
@@ -120,6 +150,9 @@ func Counters() CounterSnapshot {
 		ClamSaturated:     atomic.LoadInt64(&statClamSaturated),
 		ScanLateDiscarded: atomic.LoadInt64(&statScanLateDiscarded),
 		ScanInflight:      scanInflight.Load(),
+
+		RemoteScanSaturated: atomic.LoadInt64(&statRemoteScanSaturated),
+		RemoteScanInflight:  remoteScanInflight.Load(),
 	}
 }
 

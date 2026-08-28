@@ -150,12 +150,25 @@ func TestExecObserveNoUpstream(t *testing.T) {
 	}
 }
 
-func TestExecShadowExecutesDenyWithOverride(t *testing.T) {
+// Shadow EVALUATES a would-be DENY and records the override, but NEVER executes:
+// no upstream call is made (SH-INV-1). This test was evolved from the pre-Shadow-
+// architecture "TestExecShadowExecutesDenyWithOverride", which asserted the old,
+// wrong "Shadow executes for real" semantics (up.calls==1).
+func TestExecShadowEvaluatesDenyWithOverride(t *testing.T) {
 	up := &fakeUpstream{}
 	e := newExec(t, stateForMode(t, rollout.ModeShadow), up, realEvents(t, nil))
 	out := e.Execute(context.Background(), execInput(policy.ActionDeny, false))
-	if up.calls != 1 {
-		t.Fatalf("shadow in-scope must execute (allow-and-record), calls=%d", up.calls)
+	if up.calls != 0 {
+		t.Fatalf("shadow must NOT cross the side-effect boundary — a Shadow evaluation makes no upstream call, calls=%d", up.calls)
+	}
+	if out.Executed {
+		t.Fatal("a Shadow evaluation must not be reported as executed")
+	}
+	if out.ExecutionState != "shadow_evaluated" {
+		t.Fatalf("shadow execution_state must be shadow_evaluated, got %q", out.ExecutionState)
+	}
+	if out.EffectiveAction != "shadow_evaluate" {
+		t.Fatalf("shadow effective_action must be shadow_evaluate, got %q", out.EffectiveAction)
 	}
 	if !out.ShadowOverride {
 		t.Fatal("shadow override must be set for a would-be DENY")
@@ -163,21 +176,46 @@ func TestExecShadowExecutesDenyWithOverride(t *testing.T) {
 	if out.EvaluatedAction != "DENY" {
 		t.Fatalf("evaluated action must be preserved as DENY, got %q", out.EvaluatedAction)
 	}
-	if up.lastAuth != "" {
-		t.Fatal("no client token / auth header must be forwarded (no broker configured)")
-	}
 }
 
-func TestExecShadowHardFailureBlocks(t *testing.T) {
+// TestExecShadowHardFailureEvaluatesWouldFailInspection pins the truthful,
+// non-enforcing Shadow handling of a hard failure: an inspection hard-fail (SSRF) is
+// NOT executed and NOT softened to would_execute — it is recorded as a non-executing
+// shadow evaluation whose shadow_outcome is WOULD_FAIL_INSPECTION. No upstream call is
+// made. This preserves the anti-weakening guarantee (a hard control is never bypassed)
+// while keeping Shadow a pure predictor that never enforces.
+func TestExecShadowHardFailureEvaluatesWouldFailInspection(t *testing.T) {
 	up := &fakeUpstream{}
 	e := newExec(t, stateForMode(t, rollout.ModeShadow), up, realEvents(t, nil))
 	out := e.Execute(context.Background(), execInput(policy.ActionAllow, true))
 	if up.calls != 0 {
-		t.Fatal("a hard failure must block in shadow — no upstream")
+		t.Fatal("a hard failure must never reach upstream in shadow")
 	}
-	if out.Reason != mcperr.ReasonSSRFBlocked {
-		t.Fatalf("block reason should be the hard reason, got %v", out.Reason)
+	if out.Executed || out.ExecutionState != "shadow_evaluated" {
+		t.Fatalf("hard failure must be a non-executing shadow evaluation: executed=%v state=%q", out.Executed, out.ExecutionState)
 	}
+	got := shadowOutcomeFromBody(t, out.ResponseBody)
+	if got != string(ShadowWouldFailInspection) {
+		t.Fatalf("shadow_outcome = %q, want %q — a hard inspection control must be predicted as WOULD_FAIL_INSPECTION, never softened", got, ShadowWouldFailInspection)
+	}
+	if got == string(ShadowWouldExecute) {
+		t.Fatal("a hard failure must never be reported as WOULD_EXECUTE")
+	}
+}
+
+// shadowOutcomeFromBody extracts the shadow_outcome field from a shadow-evaluation
+// response body — the real wire contract an operator/evidence consumer reads.
+func shadowOutcomeFromBody(t *testing.T, body []byte) string {
+	t.Helper()
+	var env struct {
+		Result struct {
+			ShadowOutcome string `json:"shadow_outcome"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("unmarshal shadow body: %v", err)
+	}
+	return env.Result.ShadowOutcome
 }
 
 func TestExecCanaryBlocksDeny(t *testing.T) {

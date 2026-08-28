@@ -13,6 +13,12 @@
 package authn
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
+	"sort"
+	"strconv"
+
 	"github.com/KidCarmi/Culvert/internal/mcp/identity"
 	"github.com/KidCarmi/Culvert/internal/mcp/limits"
 	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
@@ -35,6 +41,11 @@ type CapabilityAuthConfig struct {
 	senderProfile     senderconstraint.Profile
 	minAssurance      identity.AssuranceLevel
 	lim               limits.AuthLimits
+	// cfgID is a stable content identity over every acceptance-relevant field. It
+	// binds a VerifiedCredential to the exact config it was validated against, so a
+	// credential verified for one capability can never be presented to
+	// AuthenticateVerified under another (OVN-06).
+	cfgID string
 }
 
 // Capability returns the surface this config governs.
@@ -118,7 +129,73 @@ func NewCapabilityConfig(in CapabilityConfigInput) (CapabilityAuthConfig, error)
 	for s := range cfg.requiredScopes {
 		cfg.allowedScopes[s] = struct{}{}
 	}
+	cfg.cfgID = computeConfigID(cfg)
 	return cfg, nil
+}
+
+// computeConfigID hashes every acceptance-relevant field into a stable identity.
+// Length-framed segments prevent field-boundary collisions; set members are sorted
+// so the identity is a function of CONTENT, not of map iteration order.
+func computeConfigID(c CapabilityAuthConfig) string {
+	h := sha256.New()
+	seg := func(s string) {
+		var n [8]byte
+		binary.BigEndian.PutUint64(n[:], uint64(len(s)))
+		h.Write(n[:])
+		h.Write([]byte(s))
+	}
+	segSet := func(label string, m map[string]struct{}) {
+		keys := make([]string, 0, len(m))
+		for k := range m {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		seg(label)
+		var n [8]byte
+		binary.BigEndian.PutUint64(n[:], uint64(len(keys)))
+		h.Write(n[:])
+		for _, k := range keys {
+			seg(k)
+		}
+	}
+	seg("cap:" + c.capability.String())
+	seg("res:" + c.canonicalResource)
+	segSet("iss", c.trustedIssuers)
+	segSet("cli", c.acceptedClientIDs)
+	segSet("req", c.requiredScopes)
+	segSet("alw", c.allowedScopes)
+	segSet("wld", c.wildcardAllowed)
+	h.Write([]byte{byte(c.senderProfile), byte(c.minAssurance)})
+	// The AUTH LIMITS are part of the identity, not incidental tuning. They decide
+	// how strictly a credential is parsed and how much of it is accepted —
+	// MaxTokenBytes, MaxClaimBytes, MaxScopes and MaxAudiences all gate validation,
+	// and the temporal bounds gate the lifetime checks. Omitting them let two configs
+	// that differ ONLY in strictness share an id, which is exactly the case the id
+	// exists to refuse: a credential validated under the permissive one would be
+	// redeemable under the stricter one, where AuthenticateVerified re-checks time
+	// and nothing else. Every accessor is included, in a fixed order, so adding a
+	// limit without adding it here is the only way to reintroduce the gap.
+	// Fed through seg as a decimal string rather than a fixed-width binary word: the
+	// int64->uint64 conversion that would need is a gosec G115 overflow conversion,
+	// and suppressing it would be suppressing a real question (these are durations
+	// and counts, non-negative by construction today, but nothing in the type says
+	// so). A length-framed decimal is just as canonical and just as collision-safe,
+	// and this runs once per config construction, never on the request path.
+	num := func(v int64) { seg(strconv.FormatInt(v, 10)) }
+	seg("lim")
+	num(int64(c.lim.MaxTokenTTL()))
+	num(int64(c.lim.ClockSkew()))
+	num(int64(c.lim.MaxFutureNbf()))
+	num(int64(c.lim.MaxAuthAge()))
+	num(int64(c.lim.MaxDPoPProofAge()))
+	num(int64(c.lim.NonceLifetime()))
+	num(int64(c.lim.MaxReplayEntries()))
+	num(int64(c.lim.MaxReplayPerPart()))
+	num(int64(c.lim.MaxTokenBytes()))
+	num(int64(c.lim.MaxClaimBytes()))
+	num(int64(c.lim.MaxScopes()))
+	num(int64(c.lim.MaxAudiences()))
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // ConfigSet holds the two INDEPENDENT capability configs and proves, at
@@ -178,3 +255,9 @@ func overlaps(a, b map[string]struct{}) bool {
 	}
 	return false
 }
+
+// MinAssurance returns the capability's minimum-assurance floor. It is exposed so a
+// composition root that knows its own SUBJECT MODEL can prove the (profile, floor)
+// pair is satisfiable before it binds a listener — authn itself cannot, because an
+// attested workload reaches High under any profile (see effectiveAssurance).
+func (c CapabilityAuthConfig) MinAssurance() identity.AssuranceLevel { return c.minAssurance }

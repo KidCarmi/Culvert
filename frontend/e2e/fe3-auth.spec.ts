@@ -88,7 +88,7 @@ test("TOTP: second step, invalid code error, success via real code", async ({
   // Real RFC 6238 code (same host clock as the server) → authenticated.
   await code.fill(totpCode(TOTP_SECRET));
   await page.getByRole("button", { name: "Verify" }).click();
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
   await expect(page.getByText(USERS.totp.user)).toBeVisible();
   expect(w.errors).toEqual([]);
   expect(w.external).toEqual([]);
@@ -101,7 +101,7 @@ test("logout: server revocation, teardown, storage hygiene (§23)", async ({
   const w = watch(page);
   await page.goto(`${AUTH_URL}/app/`);
   await login(page, USERS.admin.user, USERS.admin.pass);
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
 
   // §23 while authenticated: the session cookie is HttpOnly (not
   // JS-readable), storage carries at most the theme key.
@@ -136,7 +136,7 @@ test("session expiry: boundary 401 → one teardown → login; route intent hono
   const w = watch(page);
   await page.goto(`${AUTH_URL}/app/`);
   await login(page, USERS.admin.user, USERS.admin.pass);
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
 
   // The server-side session disappears (cookie invalidated in the browser);
   // the route-transition identity revalidation discovers loggedOut → ONE
@@ -172,7 +172,7 @@ test("RBAC navigation: viewer, operator, admin differences", async ({
   // viewer: no Administration affordances.
   await page.goto(`${AUTH_URL}/app/`);
   await login(page, USERS.viewer.user, USERS.viewer.pass);
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
   await expect(page.getByText("viewer", { exact: true })).toBeVisible();
   await expect(page.getByText("Administrators")).toHaveCount(0);
   await expect(page.getByText("Settings")).toHaveCount(0);
@@ -183,7 +183,7 @@ test("RBAC navigation: viewer, operator, admin differences", async ({
   // operator: intermediate — same read surfaces, no admin governance, and
   // the role is visible in the shell.
   await login(page, USERS.operator.user, USERS.operator.pass);
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
   await expect(page.getByText("operator", { exact: true })).toBeVisible();
   await expect(page.getByText("Administrators")).toHaveCount(0);
   await page.getByRole("button", { name: "Sign out" }).click();
@@ -191,7 +191,7 @@ test("RBAC navigation: viewer, operator, admin differences", async ({
 
   // admin: governance affordances appear.
   await login(page, USERS.admin.user, USERS.admin.pass);
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
   await expect(page.getByText("Administrators")).toBeVisible();
   await expect(page.getByText("Settings")).toBeVisible();
   expect(w.errors).toEqual([]);
@@ -205,39 +205,47 @@ test("TLS fallback warning renders BEFORE credentials and inside the shell", asy
   // production changes (uitls.SelfSigned is in-memory crypto), so the REAL
   // responses are rewritten in the browser network layer — decode + render
   // paths are the production code.
-  await page.route("**/api/setup/status", async (route) => {
+  //
+  // SEC-TLSFB-1: the fixture patches ONLY ui_tls_fallback, because that is the
+  // real pre-auth wire shape. /api/setup/status and /api/auth/status are on
+  // uiAuthMiddleware's public allowlist, so the server deliberately withholds
+  // ui_tls_fallback_reason there — a raw x509 SAN-rejection error quotes the
+  // offending value, which can be an operator-configured -ui-san entry or an
+  // internal hostname. Patching the flag alone therefore also proves the
+  // decoder tolerates the reason being ABSENT (it used to require it, and
+  // required-field decoding turned this response into a DecodeError before
+  // login could render).
+  const patchFlagOnly = async (route: import("@playwright/test").Route) => {
     const resp = await route.fetch();
     const body: unknown = await resp.json();
     const patched = {
       ...(typeof body === "object" && body !== null ? body : {}),
       ui_tls_fallback: true,
-      ui_tls_fallback_reason:
-        "self-signed certificate generation failed (fixture)",
     };
     await route.fulfill({ response: resp, json: patched });
-  });
-  await page.route("**/api/auth/status", async (route) => {
-    const resp = await route.fetch();
-    const body: unknown = await resp.json();
-    const patched = {
-      ...(typeof body === "object" && body !== null ? body : {}),
-      ui_tls_fallback: true,
-      ui_tls_fallback_reason:
-        "self-signed certificate generation failed (fixture)",
-    };
-    await route.fulfill({ response: resp, json: patched });
-  });
+  };
+  await page.route("**/api/setup/status", patchFlagOnly);
+  await page.route("**/api/auth/status", patchFlagOnly);
+
   await page.goto(`${AUTH_URL}/app/`);
   // Prominent warning on the login screen, before any credential entry.
   await expect(
     page.getByText("This connection is NOT encrypted"),
   ).toBeVisible();
-  await expect(
-    page.getByText(/self-signed certificate generation failed/),
-  ).toBeVisible();
+  // It points at where the cause actually lives, rather than reprinting it.
+  // Scoped to the alert so this stays single-match under strict mode.
+  await expect(page.getByRole("alert")).toContainText(
+    "Settings → Network & TLS",
+  );
+  // ...and the pre-auth DOM carries no self-sign cause at all. A regression
+  // that re-adds the reason to the public routes fails HERE, in the browser,
+  // as well as in the Go wall (ui_tls_fallback_preauth_test.go).
+  await expect(page.locator("body")).not.toContainText("x509:");
+  await expect(page.locator("body")).not.toContainText("cannot parse dnsName");
+
   // And it carries into the authenticated shell.
   await login(page, USERS.admin.user, USERS.admin.pass);
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
   await expect(
     page.getByText("Management traffic is NOT encrypted"),
   ).toBeVisible();

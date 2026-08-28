@@ -4,7 +4,22 @@
 > **Status:** Living document — re-validated against the repository, not assumed.
 > **Last full review:** 2026-06-28 · **Last drift sync:** 2026-07-05 (registers + tree re-checked; scores moved on evidence below)
 > **Next scheduled re-validation:** 2026-09-28 (quarterly) or on any change to architecture, HA, auth, or the release pipeline.
-> **Drift flagged 2026-08-18** (documentation-governance pass, fact-check only — no scores re-judged): `internal/` now holds **63** packages (was 48 at the last sync; §1 "Maintainability" and §2's ADR-0002 row still say 48). **ADR-0024** (MCP Agent Security Gateway trust boundary, Accepted 2026-07-31, ~55k LOC across 25 `internal/mcp` subpackages, PR-1 through PR-12 shipped) is absent from the governance artifact index below and from both `TECHNICAL-DEBT-REGISTER.md`/`TECHNICAL-RISK-REGISTER.md` (zero matches for "MCP" in either as of this pass) — rule 5 of §4 below requires an ADR entry here for any change to long-term architecture, and a program of this size disabled-by-default or not warrants at least a register presence. This note does not re-score Security/Architecture/Maintainability below; that requires the specialized re-validation pass described in §4, which has not run since 2026-07-05.
+> **Drift flagged 2026-08-18, re-verified 2026-08-24, partially resolved 2026-08-25**
+> (documentation-governance passes, fact-check only — **no maturity score has been re-judged**).
+> Both halves of the 08-18 note have now moved, and this note states what is true of the tree as
+> merged, not what either branch found in isolation:
+>
+> - **Package count — CORRECTED.** `ls internal | wc -l` = **65** (63 on 08-18; 48 before that).
+>   §1 "Maintainability" and §2's ADR-0002 row are updated to 65.
+> - **Register MCP-blindness — CLOSED.** The 2026-08-24/25 MCP backend security review
+>   (`security-reviews/2026-08-24-mcp-backend-full-review.md` and the `2026-08-25` overnight
+>   hardening run) entered RISK-026/027/028 and DEBT-011/012/013, so
+>   `TECHNICAL-RISK-REGISTER.md` and `TECHNICAL-DEBT-REGISTER.md` are no longer MCP-blind. The
+>   "zero matches for MCP in either" finding recorded in the 08-24 pass below is superseded.
+> - **ADR-0024 index entry — PRESENT.** It is listed in the §2 governance artifact index.
+> - **Still open:** the §4 specialized re-validation pass has not run since 2026-07-05. Closing
+>   defects is not evidence of a higher maturity band, so no score moves here on the strength of
+>   the MCP review; that judgement belongs to the specialized pass.
 
 This is the single entry point for Culvert's engineering governance. It is intentionally short:
 a scorecard, an index, and the rules that keep these documents *alive* rather than stale.
@@ -28,7 +43,7 @@ A score only moves when the underlying evidence changes in the repository.
 | Documentation | 4.0 | ↑ | Strong `CLAUDE.md` + roadmap + governance layer. Both formerly-missing runbooks now exist: `docs/operator/ha-lease-failover.md`, backup-restore §8b recovery. |
 | Operability (single-CP) | 3.5 | → | Fail-static confirmed, atomic restore + interrupted-restore boot guard (RISK-005), OTLP traces, alert webhooks now durable (RISK-017). A distinct readiness probe exists on the proxy server (`/ready` → `handleReady`, config-snapshot-gated); the admin/LB probe `/healthz` still has no readiness sibling. |
 | HA / DR readiness | 3.5 | ↑ | RISK-001 CLOSED: ADR-0005 etcd fencing lease — split-brain structurally prevented in lease mode (pinned by `TestCL4_*`), safe auto-failover, runbook. Residual: bounded LWW ≤TTL on partition; legacy (no-etcd) mode stays safe-manual. |
-| Maintainability | 3.5 | ↑ | ADR-0002 decomposition COMPLETE (63 `internal/` packages as of 2026-08-18, up from 48 — count corrected, score not re-judged; the MITM trust core behind a compiler boundary); startup slices complete (24, contract-tested); DEBT-003 CLOSED — the three god-files (`controlplane.go`/`proxy.go`/`main.go`) split into cohesive same-package files + `handleHTTP`/`handleTunnelInspect` decomposed. Residual: root files still share one namespace (DEBT-001). |
+| Maintainability | 3.5 | ↑ | ADR-0002 decomposition COMPLETE (65 `internal/` packages as of 2026-08-24, up from 48 — count corrected, score not re-judged; the MITM trust core behind a compiler boundary); startup slices complete (24, contract-tested); DEBT-003 CLOSED — the three god-files (`controlplane.go`/`proxy.go`/`main.go`) split into cohesive same-package files + `handleHTTP`/`handleTunnelInspect` decomposed. Residual: root files still share one namespace (DEBT-001). |
 | Architecture | 3.4 | ↑ | Engines own logic/state/persistence behind compiler-enforced `internal/` boundaries; `main` reduced to composition roots + shims. Config-surface drift (DEBT-004/006) CLOSED — the shared config DTOs are walled by the `config_surfaces` registry + reflection parity. Residual: the flat root namespace and its globals remain the tax (DEBT-001). |
 
 **Headline:** The two items that blocked the enterprise claim in June — HA split-brain and the
@@ -55,11 +70,13 @@ a maintainer re-validation pass to re-rank the current material front.
 | Technical Risk Register | `docs/engineering/TECHNICAL-RISK-REGISTER.md` | ✅ Live (last review 2026-07-05) |
 | Technical Debt Register | `docs/engineering/TECHNICAL-DEBT-REGISTER.md` | ✅ Live (drift-synced 2026-07-04) |
 | ADR practice | `docs/adr/0001-record-architecture-decisions.md` | ✅ Live |
-| ADR-0002: package decomposition | `docs/adr/0002-flat-package-to-internal-decomposition.md` | ✅ Implemented (63 packages as of 2026-08-18, was 48; program complete) |
+| ADR-0002: package decomposition | `docs/adr/0002-flat-package-to-internal-decomposition.md` | ✅ Implemented (65 packages as of 2026-08-24, was 48; program complete) |
 | ADR-0003: shared foundation seam | `docs/adr/0003-shared-foundation-seam.md` | ✅ Implemented |
 | ADR-0004/0005: HA fencing + lease failover | `docs/adr/0004-*.md`, `docs/adr/0005-*.md` | ✅ Implemented (S0–S5 shipped; closed RISK-001) |
 | ADR-0006: security-scanner DI | `docs/adr/0006-security-scanner-di.md` | ✅ Implemented |
-| ADR-0024: MCP Agent Security Gateway trust boundary | `docs/adr/0024-mcp-agent-security-gateway-trust-boundary.md` | ✅ Accepted 2026-07-31; implemented PR-1..PR-12 (`internal/mcp`, 25 subpackages, disabled-by-default). **Not yet reflected** in the Technical Risk/Debt Registers (no entries) or in the §1 scorecard — flagged 2026-08-18, needs a specialized review pass per §4 |
+| ADR-0024: MCP Agent Security Gateway trust boundary | `docs/adr/0024-mcp-agent-security-gateway-trust-boundary.md` | ✅ Accepted 2026-07-31; implemented PR-1..PR-12 (`internal/mcp`, 25 subpackages, disabled-by-default). **Register drift CLOSED 2026-08-24** by a full backend security review (`security-reviews/2026-08-24-mcp-backend-full-review.md`): 15 findings, 1 reachable-today P0 (assurance escalation via an unverified `DPoP:` header) fixed, 11 fixed in total; RISK-026/027/028 and DEBT-011/012/013 registered. **§1 scores NOT re-judged** — the review removed defects, which is not by itself evidence of a higher maturity band; the specialized re-validation pass described in §4 still has not run |
+| MCP backend security review (2026-08-24) | `docs/engineering/security-reviews/2026-08-24-mcp-backend-full-review.md` | ✅ Complete. Establishes the shipped **reachability matrix** (Gateway/Observe only; Management, guarded execution, credential broker, upstream client and inspection are composed **nowhere** in production — `internal/mcp/execution` has zero importers in the tree). Verdict: **READY FOR SEPARATE SHADOW ACTIVATION REVIEW** for the code, with RISK-026 (no per-source admission) a blocker for exposing a listener beyond a controlled host |
+| MCP protocol migration (frozen V1 → `2026-07-28`) | `docs/design/mcp/PROTOCOL-MIGRATION-2026-07-28.md` | 📝 Design only, 2026-08-24. `2026-07-28` is the FINAL MCP specification (the code comment had it as a non-final RC); the V1 allowlist is deliberately unchanged. Records the staged additive-adapter plan and the blocking ADR: a stateless core removes the substrate for session-identity binding, lifecycle admission and the session cap |
 | Runbooks / Recovery Procedures | `docs/operator/` | ✅ HA failover + backup/restore/interrupted-restore covered; keep growing per feature |
 | Enterprise Readiness Assessment | _(deferred)_ | ⏳ **Unblocked** (RISK-001 closed) — create at the next full review |
 | Operational Readiness Assessment | _(deferred)_ | ⏳ Create alongside the Enterprise Readiness Assessment |
@@ -157,3 +174,22 @@ adversarially reviewed). DEBT-009 downgraded (ownership half now registry-declar
 resolution clarified: it closes via the DEBT-008 updater retirement, not a patch on `update.go`.
 Net effect: the config-surface-drift front is closed; Security/Maintainability/Architecture/Testing
 scores nudged up on evidence; the update-trust chain is now the sole material open front.
+
+**2026-08-24 documentation-governance pass (fact-check only, no scores re-judged):** re-verified
+the 2026-08-18 drift note against the current tree. `ls internal | wc -l` =
+**65 packages** (was 63 on 08-18, 48 before that) — the count had already drifted again six days
+after its last correction; §1 "Maintainability", §2's ADR-0002 row, and this note are now updated
+to 65. **ADR-0024 is still not entered** in `TECHNICAL-DEBT-REGISTER.md` or
+`TECHNICAL-RISK-REGISTER.md` (zero matches for "MCP" in either, confirmed again this pass) — that
+gap is unchanged from 08-18 and is deliberately left open here rather than filled with an
+unreviewed entry: populating it requires the specialized review pass described in §4 (independent
+sub-reviewer read of the ~55k-LOC `internal/mcp` tree), which has not run since 2026-07-05, not a
+one-line addition. Recommend scheduling that pass as the next §4 specialized review.
+
+**Superseded 2026-08-25 (the register half only).** The "ADR-0024 is still not entered / zero
+matches for MCP" finding above was accurate when that pass ran and is kept as written, but it no
+longer describes the tree: the MCP backend security review entered RISK-026/027/028 and
+DEBT-011/012/013 in the two registers. It was closed by exactly the route the entry asked for — a
+review of the `internal/mcp` tree that produced reviewed entries — not by a one-line addition. The
+**score** half stands unchanged: the §4 specialized re-validation pass still has not run since
+2026-07-05, and no maturity band has moved.

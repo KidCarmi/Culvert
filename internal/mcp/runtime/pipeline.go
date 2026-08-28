@@ -1,11 +1,14 @@
 package runtime
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,7 +23,6 @@ import (
 	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
 	"github.com/KidCarmi/Culvert/internal/mcp/policy"
 	"github.com/KidCarmi/Culvert/internal/mcp/protocol"
-	"github.com/KidCarmi/Culvert/internal/mcp/registry"
 	"github.com/KidCarmi/Culvert/internal/mcp/session"
 )
 
@@ -121,6 +123,16 @@ type pipeline struct {
 	// pipeline keeps the decision-only path (execution_state not_implemented).
 	executor ExecutionProvider
 
+	// authSem and dpopSem enforce Limits.AuthConcurrency / Limits.DPoPConcurrency —
+	// the two attacker-reachable stages that cost real CPU (signature verification,
+	// token introspection, DPoP proof verification). Both bounds were validated at
+	// construction and then never read (SEC-MCP-05); a validated-but-unenforced knob
+	// is a false control, so they are buffered channels acquired for exactly the
+	// duration of the work they bound. Per-pipeline, so one capability's
+	// authentication storm can never starve the other's.
+	authSem chan struct{}
+	dpopSem chan struct{}
+
 	// boundMu guards boundIDs — the set of session ids this pipeline has bound an
 	// identity to. It lets reconcileBindings unbind identities for sessions the
 	// kernel sweeper reclaimed (which has no per-binding hook), so the binding store
@@ -156,6 +168,8 @@ func newPipeline(cfg ListenerConfig, deps Deps, listenerID string, ctr *counters
 		ctr:        ctr,
 		rev:        rev,
 		boundIDs:   make(map[string]struct{}),
+		authSem:    make(chan struct{}, cfg.Limits.AuthConcurrency()),
+		dpopSem:    make(chan struct{}, cfg.Limits.DPoPConcurrency()),
 	}
 	if deps.Policy != nil {
 		p.policy = deps.Policy
@@ -236,10 +250,20 @@ func (p *pipeline) newRecord(req Request, start time.Time) *recBuilder {
 // the listener owns admission/TLS/header bounds — steps 1–3 — before calling in).
 // A rejection at any step returns immediately WITHOUT touching later state
 // (no session, no auth, no binding, no upstream — none of which exist here anyway).
-func (p *pipeline) Process(req Request, now time.Time) Outcome {
-	p.ctr.requestsTotal.Add(1)
+func (p *pipeline) Process(ctx context.Context, req Request, now time.Time) Outcome {
+	// requestsTotal is incremented by the LISTENER at the transport entrypoint, so
+	// that requests rejected before the pipeline are still counted as received. Do
+	// not re-add it here: Listener.ServeHTTP is the only production caller, and a
+	// second increment would double-count every request that reaches this far.
 	rb := p.newRecord(req, now)
 
+	// SEC-MCP-02. ctx carries the listener's RequestDeadline and the client's own
+	// cancellation. It is checked at every stage boundary below and handed to every
+	// stage that can block (inspection, guarded execution and everything they
+	// reach), so the deadline bounds the WHOLE request rather than admission alone.
+	if out, expired := p.checkBudget(ctx, rb); expired {
+		return out
+	}
 	// Step 4–6: Host/:authority + Origin — on EVERY request/stream, before any
 	// method dispatch (the DNS-rebinding / cross-origin defense, MCP-INSP-009).
 	if out, ok := p.checkHostOrigin(req, rb); !ok {
@@ -251,7 +275,21 @@ func (p *pipeline) Process(req Request, now time.Time) Outcome {
 		tr := decideTransportMethod(req.HTTPMethod)
 		return p.reject(rb, tr.status, mcperr.ReasonHTTPMethodRejected, "")
 	}
-	return p.processPost(req, rb, now)
+	return p.processPost(ctx, req, rb, now)
+}
+
+// checkBudget terminates the request when its context is already done (deadline
+// exceeded, client gone, or shutdown). It is the ONLY place a deadline turns into
+// an outcome, so the disposition, counter and record are identical wherever the
+// budget runs out. 503 matches the listener's other availability refusals; the
+// reason is the specific, already-classified request_deadline_exceeded (which the
+// rollout hard-failure table maps to HardAvailabilityBounds).
+func (p *pipeline) checkBudget(ctx context.Context, rb *recBuilder) (Outcome, bool) {
+	if ctx == nil || ctx.Err() == nil {
+		return Outcome{}, false
+	}
+	p.ctr.timeouts.Add(1)
+	return p.reject(rb, 503, mcperr.ReasonRequestDeadlineExceeded, ""), true
 }
 
 // checkHostOrigin performs steps 4–6. Returns ok=false and a rejection Outcome on
@@ -271,10 +309,27 @@ func (p *pipeline) checkHostOrigin(req Request, rb *recBuilder) (Outcome, bool) 
 }
 
 // processPost runs steps 7–15 for a POST request.
-func (p *pipeline) processPost(req Request, rb *recBuilder, now time.Time) Outcome {
+func (p *pipeline) processPost(ctx context.Context, req Request, rb *recBuilder, now time.Time) Outcome {
 	// Step 7: path/capability — the route's capability must match this listener's.
 	if req.Capability != p.capability {
 		return p.reject(rb, 404, mcperr.ReasonAdmissionRejected, "")
+	}
+	// SEC-MCP-06. Credential PRESENCE and SHAPE are checked here — before the
+	// registry is consulted, before the body is buffered, before a session can be
+	// opened. Two things follow:
+	//
+	//   1. no unauthenticated server-existence ORACLE. Registry resolution used to
+	//      run first, so a credential-less probe got 404 for an unknown server id and
+	//      401 for a registered one, enumerating a tenant's MCP servers for free;
+	//   2. no pre-authentication work amplification. A credential-less request no
+	//      longer buffers up to MaxBodyBytes, runs the strict decoder, or churns a
+	//      session open/close.
+	//
+	// This is a CHEAP, purely syntactic check (no crypto, no I/O). The authoritative
+	// validation still happens at step 12 against the same headers; this can only
+	// ever reject earlier, never admit.
+	if out, ok := p.precheckCredential(req, rb); !ok {
+		return out
 	}
 	// Step 8: server-id / registry (Gateway only). Management must not access the
 	// Gateway catalog/registry. The opaque server id is resolved from the route here,
@@ -287,9 +342,20 @@ func (p *pipeline) processPost(req Request, rb *recBuilder, now time.Time) Outco
 	// Step 9: read + byte-limit the body. Reached ONLY after Host/Origin, method
 	// dispatch, path/capability and registry resolution have passed — a rejected
 	// request never buffers its body.
-	body, ok := p.readBody(req)
+	body, bodyReason, ok := p.readBody(ctx, req)
 	if !ok {
-		return p.reject(rb, 413, mcperr.ReasonResourceLimit, "")
+		if bodyReason == mcperr.ReasonRequestDeadlineExceeded {
+			// Overload, not a client error: same 503 the budget check and the
+			// verification-slot bound answer with -- and counted on the same series.
+			// checkBudget and acquireSlot both increment timeouts when the budget
+			// elapses; omitting it here would leave slow-upload expirations out of
+			// culvert_mcp_request_timeouts_total, understating the exact overload
+			// condition this deadline was added to expose. Counted exactly once: this
+			// branch returns, so the post-decode checkBudget never runs for it.
+			p.ctr.timeouts.Add(1)
+			return p.reject(rb, 503, bodyReason, "")
+		}
+		return p.reject(rb, 413, bodyReason, "")
 	}
 	rb.rec.RequestBytes = len(body)
 	// Step 10: PR-1 strict JSON-RPC decode.
@@ -298,13 +364,86 @@ func (p *pipeline) processPost(req Request, rb *recBuilder, now time.Time) Outco
 		return p.reject(rb, 400, mcperr.ReasonOf(err), "")
 	}
 	rb.rec.Class = classOf(msg.Class)
+	// Version normalization (MCP-PROTO-011). protocol.Adapter is the documented
+	// boundary that keeps protocol version out of every downstream stage — but it
+	// was declared and never invoked, so the boundary did not exist at runtime and a
+	// future revision with real wire differences had nowhere to land. Normalize HERE,
+	// on the transport-declared version, which is the last point where the version is
+	// still a transport fact rather than session state. For the two supported V1
+	// revisions the adapters are the identity, so this is byte-identical today.
+	msg, err = p.normalizeForVersion(req, msg)
+	if err != nil {
+		return p.reject(rb, 400, mcperr.ReasonOf(err), "")
+	}
+	// The body is now buffered and decoded; re-check the budget before the first
+	// stage that can perform expensive cryptographic or durable work.
+	if out, expired := p.checkBudget(ctx, rb); expired {
+		return out
+	}
 	// A response arriving on the client-facing leg is not a client-originated
 	// request; the observe listener never correlates upstream responses (there is no
 	// upstream). Reject a bare response frame.
 	if msg.Class == jsonrpc.ClassResponse {
 		return p.reject(rb, 400, mcperr.ReasonInvalidJSONRPC, "")
 	}
-	return p.processMessage(req, rb, msg, now)
+	return p.processMessage(ctx, req, rb, msg, now)
+}
+
+// precheckCredential rejects a request whose credential is absent, ambiguous, or
+// malformed, recording it EXACTLY as the later authentication stage would: same
+// counter, same denial-lane routing, same reason, same status. Moving a rejection
+// earlier must never make it less observable.
+func (p *pipeline) precheckCredential(req Request, rb *recBuilder) (Outcome, bool) {
+	if _, err := parseCredential(req); err != nil {
+		reason := mcperr.ReasonOf(err)
+		p.ctr.authFailures.Add(1)
+		p.routeAuthDenial(reason)
+		return p.reject(rb, statusForAuth(reason), reason, ""), false
+	}
+	return Outcome{}, true
+}
+
+// wireVersion is the protocol revision this request is normalized under: the
+// transport-declared MCP-Protocol-Version when it names a supported revision,
+// otherwise the primary. A PRESENT-but-unsupported header is deliberately NOT
+// resolved to the primary here — resolveSession rejects it with the specific
+// unsupported-version status, and silently normalizing it first would be exactly
+// the best-effort downgrade MCP-PROTO-010 forbids.
+func wireVersion(req Request) (protocol.Version, bool) {
+	if req.HasVersionHeader {
+		v := protocol.Version(req.ProtocolVersion)
+		if !protocol.IsSupported(v) {
+			return "", false
+		}
+		return v, true
+	}
+	return protocol.VersionPrimary, true
+}
+
+// normalizeForVersion runs the message through the adapter for its wire version,
+// yielding the kernel's single version-agnostic representation. A message the
+// adapter refuses is a 400.
+//
+// A request whose DECLARED version is unsupported is left UN-normalized and
+// handed on, because resolveSession owns the specific unsupported-version
+// rejection and normalizing first would launder the revision. That fall-through
+// is reachable for exactly one shape today: an `initialize` whose header names an
+// unsupported revision while its BODY requests a supported one — initialize
+// negotiates from the body, so the header is advisory there. It is harmless while
+// the V1 adapters are the identity. A future V2 adapter MUST handle that shape
+// explicitly rather than inheriting this fall-through.
+func (p *pipeline) normalizeForVersion(req Request, msg jsonrpc.Message) (jsonrpc.Message, error) {
+	v, ok := wireVersion(req)
+	if !ok {
+		return msg, nil
+	}
+	ad, ok := protocol.AdapterFor(v)
+	if !ok {
+		// Unreachable: wireVersion only returns supported revisions, and every
+		// supported revision has an adapter. Fail closed rather than pass through.
+		return jsonrpc.Message{}, mcperr.New(mcperr.ReasonUnsupportedVersion, "runtime.normalize", "no adapter for the negotiated version")
+	}
+	return ad.Normalize(msg)
 }
 
 // resolveServer performs step 8. For Gateway it resolves the opaque ServerID from
@@ -319,7 +458,9 @@ func (p *pipeline) resolveServer(req Request, rb *recBuilder) (string, Outcome, 
 		return "", Outcome{}, true
 	}
 	// Gateway: use an explicitly-supplied server id (unit tests) or parse it from the
-	// route path (live listener). A malformed/foreign path resolves to no server.
+	// route path (live listener). A malformed/foreign path resolves to no server —
+	// a PURE SYNTACTIC check that consults no registry and therefore discloses
+	// nothing about what is registered.
 	serverID := req.ServerID
 	if serverID == "" {
 		serverID = parseGatewayServerID(req.Path)
@@ -327,36 +468,64 @@ func (p *pipeline) resolveServer(req Request, rb *recBuilder) (string, Outcome, 
 	if serverID == "" {
 		return "", p.reject(rb, 404, mcperr.ReasonRegistryServerUnavailable, ""), false
 	}
-	if p.deps.Registry == nil {
-		return "", p.reject(rb, 404, mcperr.ReasonRegistryServerUnavailable, ""), false
-	}
-	rec, ok := p.deps.Registry.Current().Get(registry.ServerID(serverID))
-	if !ok || !rec.Usable() {
-		return "", p.reject(rb, 404, mcperr.ReasonRegistryServerUnavailable, ""), false
-	}
-	// The server is registered + enabled: safe to carry its opaque id in the record.
-	rb.rec.ServerID = serverID
+	// OVN-08. The registry is deliberately NOT consulted here.
+	//
+	// This step used to look the server up and answer 404 for an unknown id while
+	// letting a registered one proceed — BEFORE the token was validated. A
+	// syntactically well-formed but invalid credential passes the pre-check, so the
+	// oracle was effectively unauthenticated, and it is tenant-blind by construction
+	// (no identity exists yet), so it disclosed the registered inventory of EVERY
+	// tenant to anyone who could reach the port.
+	//
+	// Nothing is lost: identity.Resolve performs the IDENTICAL existence + Usable()
+	// check, with the same ReasonRegistryServerUnavailable, after the token is
+	// cryptographically validated (identity/context.go, resolveCapabilityRefs). The
+	// pre-auth lookup was a fail-fast, never the enforcement point — so an
+	// unregistered or disabled server is still refused (MCP-SERVER-002/003), just at
+	// the stage where the caller has proved who they are.
+	//
+	// The observation record's ServerID is likewise stamped only AFTER authentication
+	// confirms the id is registered: it is a caller-supplied string until then, and
+	// an unbounded attacker-chosen value must not reach a telemetry field.
 	return serverID, Outcome{}, true
 }
 
 // readBody obtains the request body: a pre-read Body (unit tests) or, on the live
 // path, a bounded read of BodyReader. It returns ok=false when the body exceeds the
 // configured byte cap (the caller returns 413).
-func (p *pipeline) readBody(req Request) ([]byte, bool) {
+func (p *pipeline) readBody(ctx context.Context, req Request) ([]byte, mcperr.Reason, bool) {
 	if req.Body != nil || req.BodyReader == nil {
 		if len(req.Body) > p.lim.MaxBodyBytes() {
-			return nil, false
+			return nil, mcperr.ReasonResourceLimit, false
 		}
-		return req.Body, true
+		return req.Body, mcperr.ReasonNone, true
 	}
 	// Read one byte past the cap so an exactly-at-cap body is accepted and an
 	// over-cap body is detected without trusting the transport's own limiter alone.
 	limited := io.LimitReader(req.BodyReader, int64(p.lim.MaxBodyBytes())+1)
 	body, err := io.ReadAll(limited)
-	if err != nil || len(body) > p.lim.MaxBodyBytes() {
-		return nil, false
+	if err != nil {
+		// A BODY THAT STOPPED ARRIVING IS AN OVERLOAD EPISODE, NOT AN OVER-CAP BODY.
+		// This read blocks on the socket while the request holds a worker slot and a
+		// per-connection budget slot, so the listener's read deadline (set from this
+		// same ctx in ServeHTTP) is what releases them. Reporting that as 413
+		// "resource limit" would tell a caller its body was too large when in fact
+		// the gateway gave up waiting for it, and would file a slow-upload flood
+		// under the wrong counter -- the same mistake as answering 401 for a
+		// saturated verification bound.
+		if ctx.Err() != nil || errors.Is(err, os.ErrDeadlineExceeded) {
+			return nil, mcperr.ReasonRequestDeadlineExceeded, false
+		}
+		// Any other read error (a client that disconnected mid-body) keeps the
+		// pre-existing classification. It is not literally a resource limit either,
+		// but the response goes to a socket that is already gone, and widening the
+		// reason set here is not what this change is for.
+		return nil, mcperr.ReasonResourceLimit, false
 	}
-	return body, true
+	if len(body) > p.lim.MaxBodyBytes() {
+		return nil, mcperr.ReasonResourceLimit, false
+	}
+	return body, mcperr.ReasonNone, true
 }
 
 // parseGatewayServerID extracts the opaque server id from a Gateway route path
@@ -373,7 +542,7 @@ func parseGatewayServerID(path string) string {
 }
 
 // processMessage runs steps 11–15 for a decoded request/notification.
-func (p *pipeline) processMessage(req Request, rb *recBuilder, msg jsonrpc.Message, now time.Time) Outcome {
+func (p *pipeline) processMessage(ctx context.Context, req Request, rb *recBuilder, msg jsonrpc.Message, now time.Time) Outcome {
 	// Step 11: version / session / lifecycle — resolve or create the session and,
 	// for initialize, negotiate the protocol version. `created` is true only for a
 	// session this request just opened (an initialize), so a later-step rejection can
@@ -383,19 +552,41 @@ func (p *pipeline) processMessage(req Request, rb *recBuilder, msg jsonrpc.Messa
 		return out
 	}
 	// Step 12: PR-3 auth + sender-constraint (+ step 13: immutable identity binding).
-	ctx, err := p.authenticate(req, sess, now)
+	ident, err := p.authenticate(ctx, req, sess, now)
 	if err != nil {
 		if created {
 			p.closeSession(sess.ID())
 		}
+		reason := mcperr.ReasonOf(err)
+		// OVERLOAD IS NOT AN AUTHENTICATION FAILURE. authenticate() bounds its wait
+		// for an auth/DPoP verification slot by the request budget, so a saturated
+		// listener returns ReasonRequestDeadlineExceeded from here — the SAME reason
+		// checkBudget answers with 503. Falling through to the branch below would
+		// answer 401 with a WWW-Authenticate challenge, telling a caller whose
+		// credential was never examined that their credential was rejected, and
+		// charging the episode to authFailures and the denial lane — so a capacity
+		// incident would read as a credential-stuffing spike in exactly the telemetry
+		// an operator uses to tell those two apart.
+		if reason == mcperr.ReasonRequestDeadlineExceeded {
+			// acquireSlot — the ONLY producer of this reason on the authenticate path —
+			// has already counted the timeout. Counting it again here would export every
+			// verification-slot timeout twice in culvert_mcp_request_timeouts_total,
+			// overstating exactly the overload rate an operator would alert on.
+			return p.reject(rb, 503, reason, "")
+		}
 		p.ctr.authFailures.Add(1)
 		// PR-8: route the pre-identity authentication failure into the isolated
 		// denial lane (attacker-mintable; no tenant attribution). Never blocks.
-		p.routeAuthDenial(mcperr.ReasonOf(err))
-		return p.reject(rb, statusForAuth(mcperr.ReasonOf(err)), mcperr.ReasonOf(err), "")
+		p.routeAuthDenial(reason)
+		return p.reject(rb, statusForAuth(reason), reason, "")
 	}
-	rb.rec.PrincipalHash = digest(ctx.Fingerprint())
-	rb.rec.ClientID = ctx.Client().ClientID
+	// The server id is confirmed registered by identity.Resolve, so it is now safe
+	// to carry the opaque id in the sanitized observation (OVN-08).
+	if srv, ok := ident.Server(); ok {
+		rb.rec.ServerID = string(srv)
+	}
+	rb.rec.PrincipalHash = digest(ident.Fingerprint())
+	rb.rec.ClientID = ident.Client().ClientID
 	rb.rec.AuthResult = "ok"
 	rb.rec.SessionDigest = digest(sess.ID())
 	// Step 14: method admission (lifecycle + reviewed registry, via the session).
@@ -407,12 +598,12 @@ func (p *pipeline) processMessage(req Request, rb *recBuilder, msg jsonrpc.Messa
 		p.ctr.admissionRejected.Add(1)
 		// PR-8: route the authorization/admission denial into the denial lane, with
 		// the verified identity that now exists. Never blocks authenticated work.
-		p.routeDenial(ctx, mcperr.ReasonOf(err).Code())
+		p.routeDenial(ident, mcperr.ReasonOf(err).Code())
 		return p.reject(rb, statusForAdmission(mcperr.ReasonOf(err)), mcperr.ReasonOf(err), "")
 	}
 	rb.rec.Method = msg.Method // safe: an admitted method is one of the reviewed six
 	// Step 15: disposition (observe-only in PR-5; decision-only policy in PR-6).
-	return p.dispatch(rb, req, msg, sess, ctx, negotiated, adm, now)
+	return p.dispatch(ctx, rb, req, msg, sess, ident, negotiated, adm, now)
 }
 
 // resolveSession performs step 11. On an initialize it opens a new session and
@@ -477,13 +668,13 @@ func (p *pipeline) openInitialize(req Request, rb *recBuilder, msg jsonrpc.Messa
 // complete normally; decision-point methods (tools/list, tools/call) end in a
 // deterministic observe-only rejection — never a policy call, credential
 // materialization, upstream contact, or fabricated success.
-func (p *pipeline) dispatch(rb *recBuilder, req Request, msg jsonrpc.Message, sess *session.Session, ctx *identity.ResolvedContext, negotiated protocol.Version, adm protocol.Admission, now time.Time) Outcome {
+func (p *pipeline) dispatch(ctx context.Context, rb *recBuilder, req Request, msg jsonrpc.Message, sess *session.Session, ident *identity.ResolvedContext, negotiated protocol.Version, adm protocol.Admission, now time.Time) Outcome {
 	if adm.Handling == protocol.HandlingDecisionPoint {
 		// PR-6: if a policy provider is wired, evaluate the capability-local snapshot
 		// (decision-only — never an upstream/credential/broker call). Otherwise keep
 		// the PR-5 observe-only disposition.
 		if p.policy != nil {
-			return p.dispatchPolicy(rb, req, msg, ctx, now)
+			return p.dispatchPolicy(ctx, rb, req, msg, ident, now)
 		}
 		p.ctr.observeOnly.Add(1)
 		body := observeOnlyError(msg.ID)

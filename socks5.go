@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -25,6 +27,14 @@ import (
 type socks5Server struct {
 	ln   net.Listener
 	done chan struct{}
+
+	// stopping is closed by Stop BEFORE the listener is closed, so the accept
+	// loop's backoff sleep is interruptible (CHAOS-54). Without it, a Stop that
+	// lands while the loop is sleeping off an accept error would wait out the
+	// remaining backoff — up to socks5AcceptBackoffMax — inside a 2 s shutdown
+	// budget. stopOnce keeps Stop idempotent: closing a closed channel panics.
+	stopping chan struct{}
+	stopOnce sync.Once
 }
 
 // newSOCKS5Server wraps a pre-bound listener. Tests use this directly with
@@ -32,8 +42,9 @@ type socks5Server struct {
 // also binds the listener.
 func newSOCKS5Server(ln net.Listener) *socks5Server {
 	return &socks5Server{
-		ln:   ln,
-		done: make(chan struct{}),
+		ln:       ln,
+		done:     make(chan struct{}),
+		stopping: make(chan struct{}),
 	}
 }
 
@@ -53,6 +64,10 @@ func startSOCKS5(port int) *socks5Server {
 		logFatalf("SOCKS5 listen error: %v", err)
 	}
 	srv := newSOCKS5Server(ln)
+	// Record the feature as configured BEFORE the accept loop starts, so a
+	// listener that fails on its very first Accept is reported against a
+	// configured service rather than as "SOCKS5 not configured" (CHAOS-54).
+	noteSOCKS5Configured(port)
 	srv.Start()
 	logger.Printf("SOCKS5: socks5://localhost:%d", port)
 	return srv
@@ -88,6 +103,10 @@ func (s *socks5Server) Stop(ctx context.Context) error {
 	if s == nil || s.ln == nil {
 		return nil
 	}
+	// Signal first, close second: the accept loop may be sleeping off an accept
+	// backoff, and only the signal wakes it early (CHAOS-54). Closing the
+	// listener alone would be observed no sooner than the next Accept call.
+	s.stopOnce.Do(func() { close(s.stopping) })
 	closeErr := s.ln.Close()
 	select {
 	case <-s.done:
@@ -100,23 +119,172 @@ func (s *socks5Server) Stop(ctx context.Context) error {
 	return closeErr
 }
 
-// serve is the accept loop. Returns cleanly when the listener is closed
-// (errors.Is(err, net.ErrClosed)); other accept errors are logged and the
-// loop continues, matching the previous startSOCKS5 behaviour for transient
-// failures.
+// socks5AcceptFatal reports whether an accept error means the LISTENING SOCKET
+// itself is gone, so that retrying can never succeed (CHAOS-54).
+//
+// The distinction is the whole safety argument for retrying forever. EMFILE,
+// ENFILE, ENOBUFS and ENOMEM are resource conditions that clear on their own —
+// backing off and retrying is exactly right, and giving up on them would turn a
+// transient descriptor spike into a permanent SOCKS5 outage requiring a
+// restart. EBADF/ENOTSOCK/EINVAL/EFAULT/ENOTCONN mean the descriptor is no
+// longer a listening socket; every subsequent Accept returns the same error
+// immediately, so a retry loop is a pure spin that will never accept anything.
+//
+// UNRECOGNISED errors are NOT fatal. That is the fail-safe direction here:
+// backed off to one syscall per second, retrying an unknown error costs
+// nothing and keeps a recoverable service alive, whereas misclassifying a
+// transient fault as fatal is a customer-visible outage. The degradation is
+// never silent — a listener stuck retrying is reported degraded after
+// socks5AcceptDegradedAfter with an alert, a warn row and a gauge.
+//
+// The errno set is matched with errors.As rather than by string: net wraps
+// accept errors in *net.OpError{Err: *os.SyscallError{Err: syscall.Errno}} and
+// the text is platform-specific.
+func socks5AcceptFatal(err error) bool {
+	var errno syscall.Errno
+	if !errors.As(err, &errno) {
+		return false
+	}
+	switch errno {
+	case syscall.EBADF, syscall.ENOTSOCK, syscall.EINVAL, syscall.EFAULT, syscall.ENOTCONN:
+		return true
+	}
+	return false
+}
+
+// socks5AcceptReason classifies an accept error into a BOUNDED reason string
+// for the health record.
+//
+// It must stay bounded. The reason reaches the alert Detail, which
+// alerts.Store.Dispatch dedups on `event + ":" + Detail`; a raw err.Error()
+// embeds the listener address and would yield a distinct key per failure that
+// the dedup window cannot suppress by construction — the WK-12/RS-5 defect. It
+// also reaches the viewer-role /api/diagnostics row, which must not carry
+// internal addresses. The full error text goes to the rate-limited log line.
+func socks5AcceptReason(err error) string {
+	var errno syscall.Errno
+	if !errors.As(err, &errno) {
+		return "accept_error"
+	}
+	switch errno {
+	case syscall.EMFILE:
+		return "process_fd_limit"
+	case syscall.ENFILE:
+		return "system_fd_limit"
+	case syscall.ENOBUFS, syscall.ENOMEM:
+		return "kernel_memory"
+	case syscall.ECONNABORTED:
+		return "connection_aborted"
+	case syscall.EBADF, syscall.ENOTSOCK, syscall.EINVAL, syscall.EFAULT, syscall.ENOTCONN:
+		return "listener_socket_invalid"
+	}
+	return "accept_error"
+}
+
+// nextSOCKS5AcceptBackoff advances the accept backoff: 5 ms on the first
+// failure, doubling, capped at 1 s. Same schedule net/http.Server.Serve uses.
+func nextSOCKS5AcceptBackoff(cur time.Duration) time.Duration {
+	if cur == 0 {
+		return socks5AcceptBackoffInitial
+	}
+	cur *= 2
+	if cur > socks5AcceptBackoffMax {
+		return socks5AcceptBackoffMax
+	}
+	return cur
+}
+
+// serve is the accept loop.
+//
+// Returns cleanly when the listener is closed (errors.Is(err, net.ErrClosed)),
+// which is Stop's signal.
+//
+// CHAOS-54 — every other branch used to be `log and retry immediately`, which
+// under EMFILE spun at ~870,000 attempts/second, pinned a core, and flooded the
+// process log fast enough to rotate away the evidence of the incident (see
+// socks5_health.go for the full chain). The loop now:
+//
+//   - backs off exponentially on a retryable error, 5 ms → 1 s, resetting on an
+//     observed successful accept;
+//   - sleeps INTERRUPTIBLY so Stop stays prompt;
+//   - stops, closes the listener and reports the service DOWN when the socket
+//     itself is unrecoverable, rather than spinning on an error that can never
+//     clear. Closing is deliberate: a bound-but-never-accepting port is a black
+//     hole in which clients hang, while connection-refused fails fast and is
+//     what a health check can see.
+//
+// The whole loop runs under a panic guard for the same reason handleSOCKS5
+// does. A panic here would otherwise take the entire proxy process down, and
+// the CHAOS-24 objection to recovering at the top of a worker goroutine
+// (turning a loud crash into a silent stall) does not apply: this guard reports
+// the listener DOWN — fail row, alert, gauge at zero — which is the loudest
+// state this file can produce.
 func (s *socks5Server) serve() {
 	defer close(s.done)
+	defer func() {
+		if v := recover(); v != nil {
+			recordCrash("socks5-accept", "", v)
+			_ = s.ln.Close()
+			noteSOCKS5ListenerDown("accept loop panicked")
+		}
+	}()
+
+	var backoff time.Duration
 	for {
 		conn, err := s.ln.Accept()
-		if err != nil {
-			if errors.Is(err, net.ErrClosed) {
-				// Stop closed the listener; expected stop signal.
-				return
+		if err == nil {
+			// One atomic load on a healthy listener (socks5EverFailed); the
+			// mutex is only taken when there is an episode to close out.
+			suppressed := noteSOCKS5AcceptSuccess()
+			if backoff > 0 {
+				logger.Printf("SOCKS5 accept recovered after backing off to %s (%d further error lines suppressed)",
+					backoff, suppressed)
+				backoff = 0
 			}
-			logger.Printf("SOCKS5 accept error: %v", err)
+			go handleSOCKS5(conn)
 			continue
 		}
-		go handleSOCKS5(conn)
+		if errors.Is(err, net.ErrClosed) {
+			// net.ErrClosed means the listener is gone, but it does NOT by
+			// itself mean this was a shutdown: Stop is only one of the ways a
+			// listener can end up closed. Ask whether Stop actually ran.
+			//
+			// The check is race-free in the direction that matters because
+			// Stop closes `stopping` BEFORE `ln.Close()`, so an in-progress
+			// shutdown is always visible here by the time Accept returns.
+			//
+			// Treating every ErrClosed as an expected stop would leave the one
+			// hole this whole change exists to close: the loop exits, nothing
+			// is recorded, and `/healthz` keeps saying `socks5: ready` with
+			// `culvert_socks5_listener_up 1` on a node whose SOCKS5 service is
+			// gone — PX-18 in a narrower costume. Raised by Codex review on
+			// PR #1208.
+			select {
+			case <-s.stopping:
+				return
+			default:
+			}
+			noteSOCKS5ListenerDown("listener_closed_unexpectedly")
+			logger.Printf("SOCKS5 accept: listener was closed without a shutdown request — SOCKS5 is unavailable until restart")
+			return
+		}
+		reason := socks5AcceptReason(err)
+		if socks5AcceptFatal(err) {
+			_ = s.ln.Close()
+			noteSOCKS5ListenerDown(reason)
+			logger.Printf("SOCKS5 accept FATAL (%s): %v — listener closed, SOCKS5 is unavailable until restart",
+				reason, err)
+			return
+		}
+		backoff = nextSOCKS5AcceptBackoff(backoff)
+		if noteSOCKS5AcceptFailure(reason, backoff, time.Now()) {
+			logger.Printf("SOCKS5 accept error (%s): %v; retrying in %s", reason, err, backoff)
+		}
+		select {
+		case <-s.stopping:
+			return
+		case <-time.After(backoff):
+		}
 	}
 }
 

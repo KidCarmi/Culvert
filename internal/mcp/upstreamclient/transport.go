@@ -11,6 +11,8 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
+	"strings"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/inspection/destination"
 	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
@@ -59,8 +61,19 @@ func (c *Client) roundTrip(ctx context.Context, target Target, body []byte, auth
 		return nil, false, mcperr.Wrap(mcperr.ReasonUpstreamEndpointInvalid, "upstreamclient", "endpoint canonicalize", err)
 	}
 	// Reject only structurally-forbidden endpoint classes here; the authoritative
-	// SSRF classification (private/loopback/metadata handling, honoring the policy's
-	// AllowPrivate for approved internal servers) happens in Resolve + VerifyPeer.
+	// SSRF classification (private/loopback/metadata handling) happens in Resolve +
+	// VerifyPeer.
+	//
+	// destination.Policy — including AllowPrivate — is CLIENT-WIDE, not per-server:
+	// Config carries one Policy and Target carries no override. So AllowPrivate is
+	// not, and must not be read as, "private destinations are permitted for the
+	// approved internal servers that need them": enabling it disables the
+	// private/loopback/metadata rejection for EVERY registered server this client
+	// calls, so a public server whose DNS answer is hostile or compromised could then
+	// reach link-local metadata. PolicyConfig.AllowPrivate is documented as TEST- or
+	// ENVIRONMENT-scoped for that reason and has no production caller. Supporting a
+	// genuinely internal MCP server needs a per-target policy that does not exist
+	// yet — adding one is a design change, not a flag flip.
 	if class == destination.ClassMalformed || class == destination.ClassBlockedScheme {
 		return nil, false, mcperr.New(mcperr.ReasonUpstreamEndpointInvalid, "upstreamclient", "endpoint scheme/form not permitted")
 	}
@@ -70,7 +83,14 @@ func (c *Client) roundTrip(ctx context.Context, target Target, body []byte, auth
 		return nil, true, mcperr.Wrap(mcperr.ReasonUpstreamConnectFailed, "upstreamclient", "resolve", err)
 	}
 
-	client := c.httpClientFor(target, canon, pin)
+	client, transport := c.httpClientFor(target, canon, pin)
+	// SEC-MCP-10. The transport is built per call, and a Go http.Transport OWNS its
+	// idle connections: it sets no IdleConnTimeout, and nothing reclaims a Transport
+	// that has gone out of scope while a connection's read/write loops still
+	// reference it. Without this release every upstream call permanently leaked one
+	// socket and two goroutines — an unbounded file-descriptor leak on a gateway
+	// that makes one upstream call per agent tool invocation.
+	defer transport.CloseIdleConnections()
 	reqCtx, cancel := context.WithTimeout(ctx, c.cfg.Limits.RequestTimeout())
 	defer cancel()
 	// POST to the FULL validated canonical endpoint (origin + path), so a
@@ -107,8 +127,10 @@ func (c *Client) roundTrip(ctx context.Context, target Target, body []byte, auth
 
 // httpClientFor builds a per-call http.Client whose transport dials ONLY the
 // pinned IPs, re-verifies the connected peer, verifies the pinned TLS identity,
-// and rejects redirects beyond the bound.
-func (c *Client) httpClientFor(target Target, canon destination.Canonical, pin destination.PinnedDestination) *http.Client {
+// and refuses any redirect that leaves the approved server. The transport is
+// returned alongside the client so the caller can release its idle connections
+// when the call completes (SEC-MCP-10).
+func (c *Client) httpClientFor(target Target, canon destination.Canonical, pin destination.PinnedDestination) (*http.Client, *http.Transport) {
 	tr := &http.Transport{
 		DialContext:           c.pinnedDial(pin),
 		TLSClientConfig:       c.tlsConfig(target, canon),
@@ -120,15 +142,46 @@ func (c *Client) httpClientFor(target Target, canon destination.Canonical, pin d
 		ForceAttemptHTTP2:     false,
 	}
 	maxRedirects := c.cfg.Limits.MaxRedirects()
+	// The approved server's identity is host AND port: Canonical.Host is the bare
+	// hostname (the port is a separate field), so comparing only the hostname would
+	// admit a redirect to a different port on the same name. The dial is pinned to
+	// the original port regardless, so such a redirect would silently reach a
+	// different endpoint than the one it named — a mismatch between what the request
+	// says and where it goes (OVN-04).
+	// SCHEME is part of the approved identity too, and omitting it was a credential
+	// exposure, not a tidiness gap: an upstream could answer
+	// `http://<approved-host>:<approved-port>/...`, which matches on host and port,
+	// and Go forwards the Authorization header on a same-host redirect. The transport
+	// then uses the plain DialContext for an http URL — pinnedDial connects to the
+	// pinned address with NO TLS — so the broker-materialized upstream credential
+	// would leave this process in cleartext on the wire, chosen by the far end's own
+	// response data. A redirect may change the path; it may not change the protocol
+	// the credential travels over.
+	approvedScheme := strings.ToLower(canon.Scheme)
+	approvedHost, approvedPort := strings.ToLower(canon.Host), canon.Port
 	return &http.Client{
 		Transport: tr,
-		CheckRedirect: func(_ *http.Request, via []*http.Request) error {
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) > maxRedirects {
 				return mcperr.New(mcperr.ReasonUpstreamTransportRejected, "upstreamclient", "redirect not permitted")
 			}
+			// SEC-MCP-13. A redirect must never leave the APPROVED SERVER. The hop
+			// count alone does not express that: with MaxRedirects raised above zero,
+			// an upstream's own response data chose where a credentialed request went
+			// next. The pinned dialer bounds the damage, but "bounded two layers down"
+			// is not "refused" — and a redirect to a foreign host would still have the
+			// gateway speak that host's name on a connection it did not approve.
+			if req == nil || req.URL == nil {
+				return mcperr.New(mcperr.ReasonUpstreamTLSIdentity, "upstreamclient", "redirect leaves the approved server identity")
+			}
+			if !strings.EqualFold(req.URL.Scheme, approvedScheme) ||
+				strings.ToLower(req.URL.Hostname()) != approvedHost ||
+				redirectPort(req.URL) != approvedPort {
+				return mcperr.New(mcperr.ReasonUpstreamTLSIdentity, "upstreamclient", "redirect leaves the approved server identity")
+			}
 			return nil
 		},
-	}
+	}, tr
 }
 
 // pinnedDial returns a DialContext that dials ONLY an address in the pinned set,
@@ -238,3 +291,16 @@ func classifyTransportError(err error) error {
 
 // bytesReader wraps a byte slice as a fresh io.Reader for each attempt.
 func bytesReader(b []byte) io.Reader { return bytes.NewReader(b) }
+
+// redirectPort returns a redirect target's effective port, defaulting to the
+// scheme port when none is given, so the comparison against the approved server's
+// canonical port is like-for-like (Canonical.Port is always explicit).
+func redirectPort(u *url.URL) string {
+	if p := u.Port(); p != "" {
+		return p
+	}
+	if strings.EqualFold(u.Scheme, "http") {
+		return "80"
+	}
+	return "443"
+}

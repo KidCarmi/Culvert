@@ -33,7 +33,7 @@ test("new UI renders under strict CSP with no console errors or external request
   expect(resp?.headers()["cache-control"]).toBe("no-store");
 
   // Shell renders (JS executed): the app shell + overview page are React-drawn.
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
   await expect(page.getByText("Secure Web Gateway")).toBeVisible();
 
   // CSS loaded: the token canvas paints the dark background.
@@ -44,7 +44,7 @@ test("new UI renders under strict CSP with no console errors or external request
 
   // Reload succeeds.
   await page.reload();
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
 
   // Direct deep-link navigation + reload succeed (SPA fallback → router).
   const deep = await page.goto("/app/no/such/route");

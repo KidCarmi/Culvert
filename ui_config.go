@@ -1133,9 +1133,9 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	if replaceMode && len(b.IPList) > 0 {
 		ipf.ClearAll()
 	}
-	for _, ip := range b.IPList {
-		_ = ipf.Add(ip)
-	}
+	// Bulk load: one pass, one view publish (an Add loop is quadratic).
+	// Invalid entries stay silently skipped, as the Add loop did.
+	_ = ipf.AddAll(b.IPList)
 	if b.RateLimitRPM > 0 {
 		rl.Configure(b.RateLimitRPM, time.Minute)
 	}
@@ -1769,6 +1769,8 @@ func apiNetworkSettings(w http.ResponseWriter, r *http.Request) {
 			"trusted_proxy_cidrs":     ListTrustedProxyCIDRs(),
 			"ui_tls_fallback":         uiTLSFallbackActive,
 			"ui_tls_fallback_reason":  uiTLSFallbackReason,
+			"ui_custom_cert_uploaded": customUITLSFilesPresent(),
+			"ui_custom_cert_active":   uiCustomTLSActive,
 		})
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {

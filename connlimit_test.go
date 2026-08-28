@@ -3,7 +3,6 @@ package main
 import (
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 )
 
@@ -149,7 +148,7 @@ func TestLatencyHistogram_Observe(t *testing.T) {
 	h.Observe(0.05)  // 50ms bucket
 	h.Observe(100)   // +Inf bucket
 
-	if total := atomic.LoadInt64(&h.total); total != 3 {
+	if total := h.Count(); total != 3 {
 		t.Fatalf("total = %d, want 3", total)
 	}
 }

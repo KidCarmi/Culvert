@@ -37,10 +37,19 @@ func (g *CredentialGate) Authorize(_ context.Context, plan broker.CredentialPlan
 		Capability:  model.CapGateway,
 		Criticality: model.CritCritical,
 		ActionClass: model.ActionClassCredentialSelect,
+		// SEC-MCP-15. Attribute the materialization to the AUTHENTICATED PRINCIPAL.
+		// This used to put the PLAN id in PrincipalID and assert PrincipalType
+		// "workload" — a type nothing had determined — so a credential event named a
+		// plan as its principal and claimed a subject type for it. The plan id is not
+		// lost: it is carried in Credential.PlanID below, which is what it means.
+		// PrincipalID stays required by the event model, so a plan with no resolved
+		// principal falls back to the plan id rather than failing an otherwise valid
+		// gate commit — but the TYPE is never invented.
 		Identity: model.IdentityEvidence{
-			Tenant:        string(plan.Tenant()),
-			PrincipalID:   plan.PlanID(),
-			PrincipalType: "workload",
+			Tenant:             string(plan.Tenant()),
+			PrincipalID:        principalOrPlan(plan),
+			PrincipalType:      plan.PrincipalKind(),
+			SessionCorrelation: plan.TokenDigest(),
 		},
 		Decision: model.DecisionEvidence{
 			Action: "ALLOW", ReasonCode: "MCP.CREDENTIAL.MATERIALIZE",
@@ -89,3 +98,14 @@ func (m *Manager) CommitThenAct(f DecisionFacts, act func(spool.CommitReceipt) e
 
 // Ensure the adapter satisfies the broker contract at compile time.
 var _ broker.PreMaterializationGate = (*CredentialGate)(nil)
+
+// principalOrPlan returns the plan's authenticated principal id, falling back to
+// the plan id when the plan carries no resolved principal (the event model
+// requires a non-empty PrincipalID, and refusing the commit here would fail a
+// credential gate CLOSED for an evidence-shape reason rather than a security one).
+func principalOrPlan(plan broker.CredentialPlan) string {
+	if id := plan.PrincipalID(); id != "" {
+		return id
+	}
+	return plan.PlanID()
+}

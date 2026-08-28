@@ -176,7 +176,7 @@ func (r *mcpRollout) commitRolloutTransitionAt(cfg *rollout.SignedConfig, actor 
 	defer r.durableMu.Unlock()
 	st := r.stateFor(cfg.Capability)
 	// (1) Execution-dependency precondition: fail closed for an executing mode.
-	if cfg.Mode.Executes() && !execDepsConfigured(cfg.Capability == rollout.CapabilityManagement) {
+	if cfg.Mode.RequiresExecutionPlane() && !execDepsConfigured(cfg.Capability == rollout.CapabilityManagement) {
 		return errShadowExecDepsNotConfigured
 	}
 	// Snapshot the prior state for a fail-closed rollback if persistence fails, and
@@ -202,7 +202,7 @@ func (r *mcpRollout) commitRolloutTransitionAt(cfg *rollout.SignedConfig, actor 
 	sameModeSameScope := prevMode == cfg.Mode && prevScopeHash == st.ScopeHash()
 	if !sameModeSameScope {
 		st.UpdateEvidence(func(e *rollout.EvidenceSummary) {
-			if cfg.Mode.Executes() {
+			if cfg.Mode.RequiresExecutionPlane() {
 				switch cfg.Mode {
 				case rollout.ModeShadow:
 					e.ShadowStartUnix = 0
@@ -246,7 +246,7 @@ func (r *mcpRollout) restore() {
 			// shipped build the exec-deps gate blocks such a state from ever being
 			// persisted, so this only fires against a hand-crafted state file — clamp it
 			// to Disabled (fail-closed) rather than surface a misleading executing label.
-			if st.CurrentMode().Executes() && !execDepsConfigured(st.Capability() == rollout.CapabilityManagement) {
+			if st.CurrentMode().RequiresExecutionPlane() && !execDepsConfigured(st.Capability() == rollout.CapabilityManagement) {
 				_ = st.SetConfig(rollout.DisabledConfig(st.Capability()), "restore-clamp", time.Now().UnixNano())
 				r.setPersistStatus(st.Capability(), "degraded")
 				logger.Printf("MCP rollout restore for %s: refused executing mode without execution deps; clamped to Disabled", st.Capability().String())

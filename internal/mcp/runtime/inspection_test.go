@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"testing"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/canonical"
@@ -68,7 +69,7 @@ func TestInspection_SSRFHardBlockBeatsAllow(t *testing.T) {
 	p := inspectionPipeline(t, k, fakePolicy{gw: gwPolicySnap(t, broadAllow)}, fakeInspection{gw: gwInspectionProfile(t)})
 	tok, sid := driveToDecisionPoint(t, p, k)
 
-	out := p.Process(withSession(gwRequest(tok, toolsCallArgs(3, "fetch", `{"url":"https://10.0.0.1/x"}`)), sid), fixedClock())
+	out := p.Process(context.Background(), withSession(gwRequest(tok, toolsCallArgs(3, "fetch", `{"url":"https://10.0.0.1/x"}`)), sid), fixedClock())
 	if out.Disposition != DispRejected {
 		t.Fatalf("SSRF must be rejected, got %v", out.Disposition)
 	}
@@ -88,7 +89,7 @@ func TestInspection_SecretHardBlockBeatsAllow(t *testing.T) {
 	p := inspectionPipeline(t, k, fakePolicy{gw: gwPolicySnap(t, broadAllow)}, fakeInspection{gw: gwInspectionProfile(t)})
 	tok, sid := driveToDecisionPoint(t, p, k)
 
-	out := p.Process(withSession(gwRequest(tok, toolsCallArgs(3, "echo", `{"token":"`+jwt+`"}`)), sid), fixedClock())
+	out := p.Process(context.Background(), withSession(gwRequest(tok, toolsCallArgs(3, "echo", `{"token":"`+jwt+`"}`)), sid), fixedClock())
 	if out.Disposition != DispRejected || out.Reason != mcperr.ReasonSecretDetected {
 		t.Fatalf("secret must hard-block: disp=%v reason=%v", out.Disposition, out.Reason.Code())
 	}
@@ -102,7 +103,7 @@ func TestInspection_CleanArgsPolicyGoverns(t *testing.T) {
 	p := inspectionPipeline(t, k, fakePolicy{gw: gwPolicySnap(t, broadAllow)}, fakeInspection{gw: gwInspectionProfile(t)})
 	tok, sid := driveToDecisionPoint(t, p, k)
 
-	out := p.Process(withSession(gwRequest(tok, toolsCallArgs(3, "echo", `{"msg":"hello"}`)), sid), fixedClock())
+	out := p.Process(context.Background(), withSession(gwRequest(tok, toolsCallArgs(3, "echo", `{"msg":"hello"}`)), sid), fixedClock())
 	// Unknown tool (empty catalog) → hard quarantine override by policy, NOT inspection.
 	if out.Record.PolicyAction != "QUARANTINE" {
 		t.Fatalf("expected policy QUARANTINE for unknown tool, got %q (reason %v)", out.Record.PolicyAction, out.Reason.Code())
@@ -121,7 +122,7 @@ func TestInspection_ToolsListUnchanged(t *testing.T) {
 	p := inspectionPipeline(t, k, fakePolicy{gw: gwPolicySnap(t, rule)}, fakeInspection{gw: gwInspectionProfile(t)})
 	tok, sid := driveToDecisionPoint(t, p, k)
 
-	out := p.Process(withSession(gwRequest(tok, toolsListBody(3)), sid), fixedClock())
+	out := p.Process(context.Background(), withSession(gwRequest(tok, toolsListBody(3)), sid), fixedClock())
 	if out.Disposition != DispPolicyAllowed {
 		t.Fatalf("tools/list allow-class unchanged expected, got %v", out.Disposition)
 	}
@@ -146,7 +147,7 @@ func TestInspection_ManagementDoesNotRunGatewayInspection(t *testing.T) {
 		t.Fatal("management pipeline should still carry the provider (it just never resolves a gateway profile)")
 	}
 	// runInspection must not run for a Management capability (capability gate).
-	run := p.runInspection(Request{ServerID: ""}, jsonrpc.Message{Class: jsonrpc.ClassRequest, Method: "tools/call"}, fixedClock())
+	run := p.runInspection(context.Background(), Request{ServerID: ""}, jsonrpc.Message{Class: jsonrpc.ClassRequest, Method: "tools/call"}, fixedClock())
 	if run.ran {
 		t.Fatal("management capability must not run gateway inspection")
 	}

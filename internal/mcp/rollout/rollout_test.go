@@ -27,8 +27,10 @@ func TestModeParseAndRank(t *testing.T) {
 	if ModeDisabled.Rank() != 0 || ModeProduction.Rank() != 4 {
 		t.Fatal("unexpected ranks")
 	}
-	if ModeObserve.Executes() || !ModeShadow.Executes() {
-		t.Fatal("Executes wrong")
+	// Shadow requires the guarded-execution plane composed (to EVALUATE), Observe never
+	// does. This is not "performs upstream execution" — see FullyEnforces.
+	if ModeObserve.RequiresExecutionPlane() || !ModeShadow.RequiresExecutionPlane() {
+		t.Fatal("RequiresExecutionPlane wrong")
 	}
 	if ModeShadow.FullyEnforces() || !ModeCanary.FullyEnforces() {
 		t.Fatal("FullyEnforces wrong")
@@ -265,11 +267,17 @@ func TestResolveDisabledObserveRecordOnly(t *testing.T) {
 	}
 }
 
-func TestResolveShadowExecutesAndRecordsOverride(t *testing.T) {
-	// A non-hard DENY in shadow scope is allow-and-record (executes, override set).
+func TestResolveShadowEvaluatesAndRecordsOverride(t *testing.T) {
+	// A non-hard DENY in shadow scope is a would-execute-and-record: a NON-executing
+	// shadow evaluation (EffectShadowEvaluate, Executed=false), override set. Shadow
+	// evaluates the would-be outcome; it never crosses the side-effect boundary
+	// (SH-INV-1).
 	r := Resolve(ResolveInput{Mode: ModeShadow, InScope: true, Action: ActionKindDenied})
-	if r.Disposition != EffectExecute || !r.Executed {
-		t.Fatalf("shadow in-scope should execute, got %v", r.Disposition)
+	if r.Disposition != EffectShadowEvaluate {
+		t.Fatalf("shadow in-scope should shadow-evaluate, got %v", r.Disposition)
+	}
+	if r.Executed {
+		t.Fatal("shadow must NOT be marked executed — it evaluates, it does not execute")
 	}
 	if r.EvaluatedAction != ActionKindDenied {
 		t.Fatal("evaluated action must be preserved as DENY")
@@ -279,13 +287,26 @@ func TestResolveShadowExecutesAndRecordsOverride(t *testing.T) {
 	}
 }
 
-func TestResolveShadowHardFailureBlocks(t *testing.T) {
+// TestResolveShadowHardFailureEvaluates pins the truthful non-enforcing Shadow
+// semantics: an in-scope hard failure is NOT downgraded to an EffectBlock (which would
+// be indistinguishable from real enforcement) — it is routed to the non-executing
+// EffectShadowEvaluate disposition so the evaluator can record WOULD_FAIL_HARD_CONTROL /
+// WOULD_FAIL_INSPECTION. `Executed` stays false and the classified hard reason is
+// preserved for the evaluator's evidence. Shadow predicts; it never executes and never
+// enforces.
+func TestResolveShadowHardFailureEvaluates(t *testing.T) {
 	r := Resolve(ResolveInput{Mode: ModeShadow, InScope: true, Action: ActionKindAllow, HardFailure: true, HardReason: mcperr.ReasonSSRFBlocked})
-	if r.Disposition != EffectBlock || r.Executed {
-		t.Fatal("hard failure must block even in shadow")
+	if r.Disposition != EffectShadowEvaluate || r.Executed {
+		t.Fatalf("hard failure in shadow must route to a non-executing evaluation, got disposition=%v executed=%v", r.Disposition, r.Executed)
+	}
+	if r.Disposition == EffectExecute {
+		t.Fatal("shadow must NEVER emit EffectExecute")
+	}
+	if r.HardFailure != true {
+		t.Fatal("hard-failure flag must be preserved for evidence")
 	}
 	if r.BlockReason != mcperr.ReasonSSRFBlocked {
-		t.Fatal("block reason must be preserved")
+		t.Fatal("classified hard reason must be preserved for the evaluator")
 	}
 }
 
@@ -317,10 +338,11 @@ func TestResolveCanaryEnforces(t *testing.T) {
 }
 
 func TestResolveCanaryOutOfScopeShadowFallback(t *testing.T) {
-	// Out of canary scope, but in shadow scope, retains shadow behavior (executes).
+	// Out of canary scope, but in shadow scope, retains shadow behavior: a NON-executing
+	// shadow evaluation (never the enforcing execute path).
 	r := Resolve(ResolveInput{Mode: ModeCanary, InScope: false, ShadowEnabled: true, ShadowInScope: true, Action: ActionKindDenied})
-	if r.Disposition != EffectExecute {
-		t.Fatalf("canary out-of-scope with shadow fallback should execute (shadow), got %v", r.Disposition)
+	if r.Disposition != EffectShadowEvaluate || r.Executed {
+		t.Fatalf("canary out-of-scope with shadow fallback should shadow-evaluate (not execute), got %v", r.Disposition)
 	}
 	// Out of both scopes → observe behavior.
 	r2 := Resolve(ResolveInput{Mode: ModeCanary, InScope: false, ShadowEnabled: false, Action: ActionKindAllow})
@@ -345,8 +367,8 @@ func TestStateSetConfigAndResolve(t *testing.T) {
 		t.Fatal("mode should be Shadow after SetConfig")
 	}
 	res := st.ResolveFor(gwSubject(), ActionKindDenied, false, mcperr.ReasonNone, false)
-	if res.Disposition != EffectExecute {
-		t.Fatal("in-scope shadow should execute")
+	if res.Disposition != EffectShadowEvaluate || res.Executed {
+		t.Fatal("in-scope shadow should shadow-evaluate (not execute)")
 	}
 	if len(st.History()) != 1 {
 		t.Fatal("a mode change should be recorded in history")

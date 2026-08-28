@@ -90,6 +90,14 @@ func defaultBackupArtifacts(dataDir string) []backupArtifact {
 		{SrcPath: p("admin_settings.json"), TarPath: "data/admin_settings.json"},
 		{SrcPath: p("ssl_bypass.json"), TarPath: "data/ssl_bypass.json"},
 		{SrcPath: p("dpi_patterns.json"), TarPath: "data/dpi_patterns.json"},
+		// Admin-configurable stores that had drifted out of this list (nightly
+		// QA edge-case pass): each is persisted via its own API-backed store,
+		// exactly like policy.json/bandwidth.json above, but was never added
+		// here — so a backup taken today had no way to ever restore them.
+		{SrcPath: p("decryption_profiles.json"), TarPath: "data/decryption_profiles.json"},
+		{SrcPath: p("alert_webhooks.json"), TarPath: "data/alert_webhooks.json"},
+		{SrcPath: p("fileblock.json"), TarPath: "data/fileblock.json"},
+		{SrcPath: p(filepath.Join("saas_feed", "overrides.json")), TarPath: "data/saas_feed/overrides.json"},
 	}
 }
 
@@ -101,6 +109,27 @@ func defaultBackupArtifacts(dataDir string) []backupArtifact {
 // the base name so it works for both top-level and walked (dir) entries.
 func isKEKArtifactPath(tarOrSrcPath string) bool {
 	return strings.HasSuffix(filepath.Base(filepath.ToSlash(tarOrSrcPath)), ".kek")
+}
+
+// webhookSigningKeyFileName is the node-local AES key internal/alerts uses to
+// encrypt webhook HMAC signing secrets at rest (RISK-003). Duplicated here as a
+// literal on purpose: the constant is unexported in that package, and this
+// exclusion must not depend on an import that a future refactor could drop.
+const webhookSigningKeyFileName = ".alert_webhook_key"
+
+// isNodeLocalKeyArtifactPath reports whether a path refers to node-local key
+// material that must never share an archive with the ciphertext it unwraps —
+// today a CA-3 KEK or the alert-webhook signing key.
+//
+// alert_webhooks.json joined the artifact list, and its secrets are AES-GCM
+// blobs whose key lives beside it as .alert_webhook_key. Packing both would
+// make the encryption-at-rest of every webhook secret decorative for anyone
+// holding the tarball, which is exactly the ADR §9 rule the KEK exclusion
+// already states. The named artifact list contains neither, so this is
+// defense-in-depth for the config_versions/ walk and any future dataDir glob.
+func isNodeLocalKeyArtifactPath(tarOrSrcPath string) bool {
+	base := filepath.Base(filepath.ToSlash(tarOrSrcPath))
+	return isKEKArtifactPath(tarOrSrcPath) || base == webhookSigningKeyFileName
 }
 
 // runBackup is the CLI entrypoint. Packs the default Tier-1+2 artifact
@@ -245,14 +274,16 @@ func collectArtifacts(artifacts []backupArtifact) (
 }
 
 func packOne(srcPath, tarPath string, info os.FileInfo, required bool, manifestFiles *[]backupManifestFile, packed *[]packedFile) error {
-	// CA-3 (PR4): never pack a local KEK file. KEKs wrap the encrypted
-	// private keys (cluster-ca.key, dp-node.key, CDR client keys); storing a
-	// KEK in the same archive as the key it unwraps would defeat at-rest
-	// encryption (ADR §9). The named artifact list never includes a .kek, so
-	// this is defense-in-depth for the config_versions/ walk and any future
-	// dataDir glob. Skip silently (a KEK here is never an error, just excluded).
-	if isKEKArtifactPath(tarPath) {
-		fmt.Fprintf(os.Stderr, "Backup: excluding KEK file %q (must not share an archive with encrypted keys)\n", tarPath)
+	// CA-3 (PR4): never pack node-local key material. KEKs wrap the encrypted
+	// private keys (cluster-ca.key, dp-node.key, CDR client keys) and
+	// .alert_webhook_key wraps every webhook HMAC signing secret in
+	// alert_webhooks.json; storing either in the same archive as the material
+	// it unwraps would defeat at-rest encryption (ADR §9). The named artifact
+	// list includes neither, so this is defense-in-depth for the
+	// config_versions/ walk and any future dataDir glob. Skip silently (such a
+	// file here is never an error, just excluded).
+	if isNodeLocalKeyArtifactPath(tarPath) {
+		fmt.Fprintf(os.Stderr, "Backup: excluding node-local key file %q (must not share an archive with the material it unwraps)\n", tarPath)
 		return nil
 	}
 	// Path-traversal guard: refuse any tarPath whose path components include

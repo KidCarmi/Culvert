@@ -262,6 +262,7 @@
         "additionalProperties": false,
         "properties": {
           "webhooks": {
+            "description": "Configured webhooks with the signing secret redacted. Each item also carries a read-only `signing_degraded` boolean: true means this webhook was configured with an HMAC signing secret the node cannot decrypt (typically after restoring a backup onto a fresh volume — the signing key is node-local and never archived), so its deliveries carry no X-Culvert-Signature until the secret is re-entered. It is server-derived and ignored on create/update.",
             "items": {
               "additionalProperties": true,
               "type": "object"
@@ -350,12 +351,8 @@
             "$ref": "#/components/schemas/Role"
           },
           "ui_tls_fallback": {
-            "description": "True when self-signed TLS setup failed at startup and the admin UI fell back to plain HTTP. Exposed pre-authentication so the login overlay can warn before credentials are submitted.",
+            "description": "True when self-signed TLS setup failed at startup and the admin UI fell back to plain HTTP. Exposed pre-authentication so the login overlay can warn before credentials are submitted. The FLAG only - this route is unauthenticated, so the underlying self-sign error (which can quote an operator-configured SAN or hostname) is NOT returned here; it is on the viewer-gated GET /api/settings/network and in the server log.",
             "type": "boolean"
-          },
-          "ui_tls_fallback_reason": {
-            "description": "The self-sign error, when ui_tls_fallback is true.",
-            "type": "string"
           },
           "user": {
             "type": "string"
@@ -1867,6 +1864,14 @@
             "nullable": true,
             "type": "array"
           },
+          "ui_custom_cert_active": {
+            "description": "True when the running UI server was started using the uploaded custom certificate (i.e. it is already live, not just saved pending a restart).",
+            "type": "boolean"
+          },
+          "ui_custom_cert_uploaded": {
+            "description": "True when a custom UI certificate uploaded via POST /api/certs/upload (target=ui) is saved to disk and will be used on the next restart.",
+            "type": "boolean"
+          },
           "ui_sans": {
             "items": {
               "type": "string"
@@ -3003,6 +3008,10 @@
           "enabled": {
             "type": "boolean"
           },
+          "remote_scan_inflight": {
+            "description": "Remote scan round trips currently in flight. The saturation gauge for a sidecar deployment, where scan_inflight is structurally zero.",
+            "type": "integer"
+          },
           "scan_inflight": {
             "description": "Body scans currently running, including scans whose caller already gave up and was served the fail-closed refusal.",
             "type": "integer"
@@ -3012,6 +3021,14 @@
           },
           "stat_clam_saturated": {
             "description": "Body scans that could not obtain a ClamAV slot within the scan budget. The daemon is healthy; the node is at scanning capacity. Reported separately from stat_clam_scan_error because the operator response differs (add capacity vs. fix the daemon).",
+            "type": "integer"
+          },
+          "stat_remote_scan_fail": {
+            "description": "Remote scan-sidecar FAULTS that forwarded content unscanned (fail-open): unreachable, HTTP error, unreadable or unintelligible reply, or a 200 carrying no affirmative verdict. Slowness and capacity are NOT here — those fail closed and are counted as stat_scan_timeout.",
+            "type": "integer"
+          },
+          "stat_remote_scan_saturated": {
+            "description": "Remote scans the sidecar refused for capacity (HTTP 429). Fail-closed, and also counted as stat_scan_timeout. Reported separately from stat_remote_scan_fail because the operator response differs (add scanning capacity vs. fix the sidecar).",
             "type": "integer"
           },
           "stat_scan_late_discard": {
@@ -3609,12 +3626,8 @@
             "type": "boolean"
           },
           "ui_tls_fallback": {
-            "description": "True when self-signed TLS setup failed at startup and the admin UI fell back to plain HTTP. Exposed pre-authentication so the setup wizard can warn before the initial admin password is submitted.",
+            "description": "True when self-signed TLS setup failed at startup and the admin UI fell back to plain HTTP. Exposed pre-authentication so the setup wizard can warn before the initial admin password is submitted. The FLAG only - this route is unauthenticated, so the underlying self-sign error (which can quote an operator-configured SAN or hostname) is NOT returned here; it is on the viewer-gated GET /api/settings/network and in the server log.",
             "type": "boolean"
-          },
-          "ui_tls_fallback_reason": {
-            "description": "The self-sign error, when ui_tls_fallback is true.",
-            "type": "string"
           }
         },
         "required": [

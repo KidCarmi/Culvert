@@ -24,8 +24,20 @@ import (
 // equality across every reference in a resolved context.
 type TenantID string
 
-// AssuranceLevel is the authentication assurance of the subject (loosely NIST
-// AAL). Higher is stronger; the capability config sets the minimum accepted.
+// AssuranceLevel is the subject's authentication-assurance level.
+//
+// CAUTION (OVN-05). The labels below describe NIST-AAL-style HUMAN authentication
+// strength. Culvert cannot currently determine that: no `amr`/`acr` claim is
+// parsed anywhere, so no AAL fact exists in the product. What is actually derived
+// is the strength of the VERIFIED SENDER BINDING — a DPoP proof shows the
+// presenter controls the token's key, not that a person completed MFA.
+//
+// Express a sender-constraint requirement with the policy fields
+// `principal.sender_binding` / `principal.sender_bound`, not with this value, and
+// do not "upgrade" the derivation to claim an AAL it cannot observe — see
+// docs/design/mcp/OPEN-DECISION-assurance-model.md.
+//
+// Higher is stronger; the capability config sets the minimum accepted.
 type AssuranceLevel uint8
 
 const (

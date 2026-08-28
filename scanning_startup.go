@@ -18,19 +18,36 @@ func loadScanning(cfg scanningStartupConfig, ctx context.Context) *ScanService {
 	switch {
 	case cfg.RemoteScanURL != "":
 		globalRemoteScanner.Init(cfg.RemoteScanURL)
+		globalRemoteScanner.SetExclusions(globalScanExclusions)
 		logger.Printf("ScanSvc: remote mode, delegating to %s", cfg.RemoteScanURL)
+		loadScanExclusions(cfg.ScanExclusionsPath)
 		startThreatFeedIfEnabled(cfg, ctx)
 	case cfg.LocalEnabled:
 		globalSecScanner.Init(cfg.ClamAddr, cfg.MaxScanBytes, newHashCache(cfg.CacheSize, cfg.CacheTTL))
 		loadYARARules(cfg.YaraDir)
-		if cfg.ScanExclusionsPath != "" {
-			if err := globalScanExclusions.Load(cfg.ScanExclusionsPath); err != nil {
-				logger.Printf("ScanExclusions: load error: %v", err)
-			}
-		}
+		loadScanExclusions(cfg.ScanExclusionsPath)
 		startThreatFeedIfEnabled(cfg, ctx)
 	}
 	return startScanServiceSidecar(cfg.SvcListenAddr)
+}
+
+// loadScanExclusions loads the admin-managed scan allowlist. It runs in BOTH
+// scanning modes, which is the CHAOS-53 fix: it used to run only on the local
+// branch, so a sidecar deployment never loaded the file — and, because
+// scanexcl.Store learns its path from Load, never had one to save to either.
+// Store.Save() is a documented no-op without a path, so every admin edit to
+// the exclusion lists returned 200, wrote an audit entry, took a config-version
+// snapshot, and persisted nothing: the lists silently reverted to empty on the
+// next restart. The HOST list is consulted on the request path in remote mode
+// too (proxy_tunnel.go, proxy_http.go), so this also restored a setting that
+// was being ignored outright.
+func loadScanExclusions(path string) {
+	if path == "" {
+		return
+	}
+	if err := globalScanExclusions.Load(path); err != nil {
+		logger.Printf("ScanExclusions: load error: %v", err)
+	}
 }
 
 // startThreatFeedIfEnabled starts the threat-feed syncer (identical gate in

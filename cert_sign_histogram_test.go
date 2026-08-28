@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync/atomic"
 	"testing"
 
 	"github.com/KidCarmi/Culvert/internal/ca"
@@ -61,16 +60,16 @@ func TestCertSignHistogram_ObservesSignOnly(t *testing.T) {
 		}
 	}
 
-	before := atomic.LoadInt64(&certSignHist.total)
+	before := certSignHist.Count()
 
 	get("sign.test") // miss → signs → +1 observation
-	afterMiss := atomic.LoadInt64(&certSignHist.total)
+	afterMiss := certSignHist.Count()
 	if afterMiss != before+1 {
 		t.Fatalf("sign histogram count after miss = %d, want %d (one observation per sign)", afterMiss, before+1)
 	}
 
 	get("sign.test") // cache hit → must NOT observe a sign
-	afterHit := atomic.LoadInt64(&certSignHist.total)
+	afterHit := certSignHist.Count()
 	if afterHit != afterMiss {
 		t.Fatalf("sign histogram count after cache hit = %d, want %d (hit must not record a sign)", afterHit, afterMiss)
 	}

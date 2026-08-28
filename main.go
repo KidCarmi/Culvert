@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -530,6 +531,7 @@ func loadFileConfigAndFlags(s *startupState) {
 	s.authP = firstStr(*s.pass, s.fc.Auth.Pass)
 	s.cert = firstStr(*s.tlsCert, s.fc.Proxy.TLSCert)
 	s.key = firstStr(*s.tlsKey, s.fc.Proxy.TLSKey)
+	s.cert, s.key = resolveUITLSCertKey(s.cert, s.key)
 	s.rlRPM = firstNonZero(*s.rateLimitRPM, s.fc.Security.RateLimit)
 	s.ipModeVal = firstStr(*s.ipMode, s.fc.Security.IPFilterMode)
 }
@@ -1045,12 +1047,89 @@ func runProxyUntilShutdown(s *startupState, proxySrv *http.Server, quit chan os.
 	<-quit
 	logger.Println("Shutting down gracefully…")
 
+	// CHAOS-56: arm the escalation path BEFORE the sequence starts. Until
+	// now signal.Notify had taken SIGINT/SIGTERM away from the Go runtime's
+	// default terminate behaviour and nothing read `quit` again, so a second
+	// signal — an impatient operator's Ctrl-C, an orchestrator escalating —
+	// landed in the channel buffer and did nothing at all. The only way to
+	// end a stalled shutdown was SIGKILL, which is exactly the outcome the
+	// escalation is trying to avoid.
+	stopEscalation := armShutdownEscalation(quit, os.Exit)
+	defer stopEscalation()
+
 	var early, late shutdownRegistry
 	registerEarlyShutdownHooks(&early, s)
 	registerLateShutdownHooks(&late, s, proxySrv)
-	runShutdownSequence(&early, &late, 30*time.Second)
+	runShutdownSequence(&early, &late, defaultShutdownBudget)
 
+	// Disarm as soon as the sequence is done, not at function exit: a stray
+	// signal arriving in the gap would otherwise turn a shutdown that
+	// COMPLETED into exit status 1. stop is idempotent, so the defer above
+	// stays as the backstop for the paths that do not reach here.
+	stopEscalation()
+
+	// NOTE: the log sink is closed by the last flush hook, so this line
+	// reaches stderr/stdout only if the process log has not been redirected
+	// to a file-backed sink. The operator-visible completion record is the
+	// "flushing durable state…" line runShutdownSequence emits BEFORE the
+	// flush phase.
 	logger.Println("Stopped.")
+}
+
+// armShutdownEscalation watches for a SECOND shutdown signal while the
+// shutdown sequence runs and exits the process immediately when one arrives,
+// flushing the process log first so the reason survives. Returns a function
+// that stops the watcher.
+//
+// `exit` is injected so the escalation contract is testable without killing
+// the test binary. CHAOS-56.
+//
+// A second signal is an explicit operator instruction to stop waiting, so it
+// is honoured immediately rather than shortening a budget: the flush hooks
+// that have already run are on disk, and the ones that have not are exactly
+// what the operator has decided not to wait for. Exit code 1 (not 0) because
+// the shutdown did not complete — an orchestrator reading the exit status
+// must not record a forced teardown as a clean stop.
+func armShutdownEscalation(quit <-chan os.Signal, exit func(int)) (stop func()) {
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-done:
+		case sig := <-quit:
+			if !shouldEscalate(done) {
+				return
+			}
+			logger.Printf("Second %v during shutdown — exiting immediately; in-flight tunnels and unflushed state are dropped", sig)
+			flushLogSink()
+			exit(1)
+		}
+	}()
+	var once sync.Once
+	return func() { once.Do(func() { close(done) }) }
+}
+
+// shouldEscalate reports whether a signal just received on the quit channel
+// should force an exit, given the escalation's disarm channel. False once the
+// escalation has been disarmed.
+//
+// This exists as its own function because the case it guards is one Go makes
+// NON-DETERMINISTIC: when the disarm and a second signal become ready at the
+// same moment, the watcher's select picks uniformly between them, so half the
+// time it took the signal branch and reported a shutdown that had COMPLETED as
+// exit status 1 (Codex P2 on this PR). Re-checking the disarm makes
+// "disarmed first" win every time.
+//
+// A gate that raced the scheduler to reproduce the tie could only ever be
+// probabilistic, and this repo's rule is that a gate which can flake gets muted
+// (see CHAOS-54's rejected scaling gates). Splitting the decision out makes it
+// pin deterministically instead.
+func shouldEscalate(done <-chan struct{}) bool {
+	select {
+	case <-done:
+		return false
+	default:
+		return true
+	}
 }
 
 // seedYARARules copies bundled starter rules from /app/yara to the target

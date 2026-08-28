@@ -43,7 +43,12 @@ type Principal struct {
 	Tenant    string
 	Groups    []string
 	Assurance Assurance
-	Issuer    string
+	// SenderBinding is the VERIFIED proof-of-possession binding for this request
+	// (none / dpop / mtls). Distinct from Assurance — see the OVN-05 note on the
+	// Assurance type. The zero value is None, so an input that never sets it fails
+	// a binding requirement closed.
+	SenderBinding SenderBinding
+	Issuer        string
 }
 
 // Agent is an optional agent principal acting on behalf of the subject.
@@ -129,6 +134,7 @@ type CredentialMeta struct {
 type Session struct {
 	Fingerprint       string
 	Assurance         Assurance
+	SenderBinding     SenderBinding
 	PriorConfirmation bool
 	PriorApproval     bool
 	PriorGrant        bool

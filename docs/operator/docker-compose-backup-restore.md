@@ -125,8 +125,9 @@ docker compose --profile cli run --rm cli \
 
 > **Dev / lab only.** Unencrypted backups must not leave the host. They
 > contain ui_users hashes, TOTP secrets, the cluster CA private key,
-> session HMAC, and full policy state. For anything outside an
-> ephemeral lab, use § 3 instead.
+> session HMAC, alert-webhook endpoint URLs (which are themselves
+> bearer credentials for most receivers), and full policy state. For
+> anything outside an ephemeral lab, use § 3 instead.
 
 ---
 
@@ -426,6 +427,42 @@ key it unwraps — that would defeat at-rest encryption). This means:
   paired public cert parses; it does **not** decrypt the key. Plaintext keys
   still get full cert/key cross-validation. (Full KEK-based decrypt during
   restore is intentionally deferred.)
+
+### 9.5 Alert-webhook signing secrets are not portable
+
+Alert webhooks (`alert_webhooks.json`) **are** in the backup, and their HMAC
+signing secrets are AES-GCM encrypted at rest under a **node-local** key file,
+`<dataDir>/.alert_webhook_key`. That key follows the same rule as a KEK: it is
+never archived, and the packer refuses it explicitly, because shipping it in
+the same tarball as the ciphertext it unwraps would make the encryption
+decorative for anyone holding the archive.
+
+So after restoring onto a host that does not have the original
+`.alert_webhook_key`:
+
+- The webhooks come back — name, URL, events, enabled state — but their
+  signing secrets **cannot be unwrapped**, so deliveries go out **unsigned**
+  (no `X-Culvert-Signature` header). A receiver that verifies the signature
+  will reject this node's alerts.
+- This is **visible, not silent**: the affected webhooks are badged
+  *"Unsigned — secret unusable"* in **Security → Alert Webhooks**, and
+  `/api/diagnostics` carries an `alert_webhook_signing` warn row.
+- **Recovery — two paths, and the order matters:**
+  1. **If you still have the node's original `.alert_webhook_key`** (kept
+     out-of-band, the same way you would keep a KEK — § 9.4): restore it and
+     restart **first**. The stored ciphertext is preserved untouched, so every
+     affected webhook recovers with no re-entry.
+  2. **Otherwise:** edit each affected webhook and re-enter its signing secret.
+
+  Do **not** restore the old key file *after* re-entering secrets. A re-entered
+  secret is sealed under this node's current key, so putting the old key back
+  would recover the restored webhooks and break the re-entered ones instead.
+  (Culvert no longer creates a key as a side effect of a failed decrypt, so a
+  node in this state has no key file at all until you supply one or write a
+  secret — that is what makes path 1 clean.)
+
+  A config *import*, which replaces the webhook list wholesale, discards the
+  preserved ciphertext; take path 1 before importing if you intend to use it.
 
 ---
 

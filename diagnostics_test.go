@@ -148,6 +148,8 @@ func TestApiDiagnostics_DefaultOK(t *testing.T) {
 		"config_rollback_validation": false,
 		"key_at_rest":                false,
 		"identity_backend":           false,
+		"interactive_login_state":    false,
+		"alert_webhook_signing":      false,
 		"memory_backstop":            false,
 	}
 	for i := range c.Checks {
@@ -216,6 +218,54 @@ func TestApiDiagnostics_WarnsOnClusterInsecure(t *testing.T) {
 	if c.Verdict == diagFail {
 		t.Error("top-level verdict escalated to fail; clusterInsecure must remain a warn")
 	}
+}
+
+// TestCheckInteractiveLoginState pins the OK/WARN split for the
+// interactive-login (OIDC PKCE / SAML) callback-state check: a store with no
+// evictions reports ok, and a store that had to evict entries at its cap
+// reports warn with an operator_action naming the affected store.
+func TestCheckInteractiveLoginState(t *testing.T) {
+	origPKCE, origSAML := globalPKCEStore, globalSAMLStateStore
+	t.Cleanup(func() {
+		globalPKCEStore = origPKCE
+		globalSAMLStateStore = origSAML
+	})
+
+	t.Run("ok when nothing evicted", func(t *testing.T) {
+		globalPKCEStore = newPKCEStore()
+		globalSAMLStateStore = newSAMLStateStore()
+		globalPKCEStore.Set("s1", "client-a", &pkceEntry{providerID: "corp-oidc"})
+
+		ck := checkInteractiveLoginState()
+		if ck.Code != "interactive_login_state" {
+			t.Fatalf("code = %q, want interactive_login_state", ck.Code)
+		}
+		if ck.Status != diagOK {
+			t.Fatalf("status = %q, want ok; message=%s", ck.Status, ck.Message)
+		}
+		if ck.OperatorAction != "" {
+			t.Errorf("ok status should carry no operator_action, got %q", ck.OperatorAction)
+		}
+	})
+
+	t.Run("warns once a store has evicted entries", func(t *testing.T) {
+		globalPKCEStore = newPKCEStore()
+		globalSAMLStateStore = newSAMLStateStore()
+		for i := 0; i < 2*pkceStoreMax; i++ {
+			globalPKCEStore.Set("flood-"+strconv.Itoa(i), "flooder", &pkceEntry{providerID: "corp-oidc"})
+		}
+
+		ck := checkInteractiveLoginState()
+		if ck.Status != diagWarn {
+			t.Fatalf("status = %q, want warn; message=%s", ck.Status, ck.Message)
+		}
+		if ck.OperatorAction == "" {
+			t.Error("warn status must carry an operator_action")
+		}
+		if !strings.Contains(ck.Message, "OIDC PKCE") {
+			t.Errorf("message missing OIDC PKCE detail: %s", ck.Message)
+		}
+	})
 }
 
 func TestApiDiagnostics_WarnsOnClusteredSAMLState(t *testing.T) {
@@ -1328,5 +1378,74 @@ func TestApiDiagnostics_SyslogFeedStalePreviousTarget(t *testing.T) {
 	found := findSyslogFeedCheck(t, c)
 	if found.Status != diagFail {
 		t.Errorf("syslog_feed status = %q, want fail when the intended target is not the connected one (stale writer)", found.Status)
+	}
+}
+
+// findOIDCJWKSTrustCheck locates the oidc_jwks_trust row.
+func findOIDCJWKSTrustCheck(t *testing.T, c OperatorContract) OperatorContractCheck {
+	t.Helper()
+	for i := range c.Checks {
+		if c.Checks[i].Code == "oidc_jwks_trust" {
+			return c.Checks[i]
+		}
+	}
+	t.Fatal("oidc_jwks_trust check missing from report")
+	return OperatorContractCheck{}
+}
+
+// TestApiDiagnostics_OIDCJWKSTrustDefaultOK — no configured OIDC provider has
+// ever breached the SEC-JWKS-1 stale-trust ceiling (the common case, including
+// deployments with no OIDC provider at all): the row must read ok.
+func TestApiDiagnostics_OIDCJWKSTrustDefaultOK(t *testing.T) {
+	orig := idpRegistry
+	t.Cleanup(func() { idpRegistry = orig })
+	idpRegistry = &IdPRegistry{live: make(map[string]IdentityProvider)}
+
+	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+	w := httptest.NewRecorder()
+	apiDiagnostics(w, r)
+
+	c := decodeContract(t, w)
+	found := findOIDCJWKSTrustCheck(t, c)
+	if found.Status != diagOK {
+		t.Errorf("oidc_jwks_trust status = %q, want ok with no OIDC provider configured", found.Status)
+	}
+}
+
+// TestApiDiagnostics_OIDCJWKSTrustReportsCeilingBreach — this is the fix under
+// test: before it, the SEC-JWKS-1 fail-closed transition (ID-token validation
+// refusing every login for a provider) was visible only via a rate-limited log
+// line, with nothing on /api/diagnostics or the admin GUI. A breached provider
+// must surface as a fail row naming it.
+func TestApiDiagnostics_OIDCJWKSTrustReportsCeilingBreach(t *testing.T) {
+	orig := idpRegistry
+	t.Cleanup(func() { idpRegistry = orig })
+	profile := &IdPProfile{ID: "p1", Name: "Corporate Okta", Type: IdPTypeOIDC, Enabled: true}
+	prov := &OIDCFlowProvider{
+		profile: profile,
+		jwks: &jwksCache{
+			keys:            map[string]interface{}{},
+			ceilingBreached: true,
+		},
+	}
+	idpRegistry = &IdPRegistry{
+		profiles: []*IdPProfile{profile},
+		live:     map[string]IdentityProvider{profile.ID: prov},
+	}
+
+	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+	w := httptest.NewRecorder()
+	apiDiagnostics(w, r)
+
+	c := decodeContract(t, w)
+	found := findOIDCJWKSTrustCheck(t, c)
+	if found.Status != diagFail {
+		t.Errorf("oidc_jwks_trust status = %q, want fail when a provider is past the stale-trust ceiling", found.Status)
+	}
+	if !strings.Contains(found.Message, "Corporate Okta") {
+		t.Errorf("oidc_jwks_trust message = %q, want it to name the affected provider", found.Message)
+	}
+	if found.OperatorAction == "" {
+		t.Error("oidc_jwks_trust fail row has no operator_action")
 	}
 }

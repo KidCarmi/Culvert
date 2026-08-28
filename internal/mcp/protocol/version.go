@@ -27,9 +27,21 @@ var supported = map[Version]struct{}{
 }
 
 // rejected names the versions Culvert explicitly excludes, so diagnostics can
-// distinguish a known-excluded revision from an unknown string. 2026-07-28 is a
-// non-final RC kept as comparison material only; admitting 2025-03-26 would
-// re-admit batch/version-surface semantics the baseline removes.
+// distinguish a known-excluded revision from an unknown string.
+//
+// 2026-07-28 is NOT an RC — it was released as the final MCP specification on
+// 2026-07-28 (the comment here previously still described the May 2026 release
+// candidate). It stays EXCLUDED, deliberately: it is a stateless redesign that
+// retires the initialize/initialized handshake and the Mcp-Session-Id header,
+// moves the protocol version and client identity into per-request `_meta`, adds
+// `server/discover` and the Mcp-Method / Mcp-Name routing headers, and replaces
+// DCR with Client ID Metadata Documents. Culvert's session lifecycle, immutable
+// session-identity binding, admitted-method set and OAuth resource validation are
+// all built on the V1 shape, so admitting it is an additive V2 adapter, never a
+// widened allowlist. See docs/design/mcp/PROTOCOL-MIGRATION-2026-07-28.md.
+//
+// Admitting 2025-03-26 would re-admit batch/version-surface semantics the
+// baseline removes.
 var rejected = map[Version]struct{}{
 	"2024-11-05": {},
 	"2025-03-26": {},

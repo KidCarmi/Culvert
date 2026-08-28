@@ -276,17 +276,24 @@ type ChainLink struct {
 // hash or one-way session-correlation digest. There is no bearer token, DPoP
 // proof, certificate private material, raw subject email or raw session token.
 type IdentityEvidence struct {
-	Tenant             string      `json:"tenant"`
-	PrincipalID        string      `json:"principal_id"`
-	PrincipalType      string      `json:"principal_type"` // human / agent / workload
-	AgentID            string      `json:"agent_id,omitempty"`
-	ClientID           string      `json:"client_id,omitempty"`
-	ServerID           string      `json:"server_id,omitempty"`
-	ToolName           string      `json:"tool_name,omitempty"`
-	ToolFingerprint    string      `json:"tool_fingerprint,omitempty"`
-	ResourceRef        string      `json:"resource_ref,omitempty"`
-	ResourceHash       string      `json:"resource_hash,omitempty"`
-	Assurance          string      `json:"assurance,omitempty"`
+	Tenant          string `json:"tenant"`
+	PrincipalID     string `json:"principal_id"`
+	PrincipalType   string `json:"principal_type"` // human / agent / workload
+	AgentID         string `json:"agent_id,omitempty"`
+	ClientID        string `json:"client_id,omitempty"`
+	ServerID        string `json:"server_id,omitempty"`
+	ToolName        string `json:"tool_name,omitempty"`
+	ToolFingerprint string `json:"tool_fingerprint,omitempty"`
+	ResourceRef     string `json:"resource_ref,omitempty"`
+	ResourceHash    string `json:"resource_hash,omitempty"`
+	Assurance       string `json:"assurance,omitempty"`
+	// SenderBinding is the VERIFIED proof-of-possession binding for the request
+	// ("none" / "dpop" / "mtls"). It is recorded SEPARATELY from Assurance because
+	// they are different properties (OVN-05): a DPoP proof shows the presenter
+	// controls the token's key, not that a human authenticated strongly. Without
+	// it an auditor reading `assurance:"high"` under the documented NIST-AAL
+	// labels would conclude something the product never observed.
+	SenderBinding      string      `json:"sender_binding,omitempty"`
 	SessionCorrelation string      `json:"session_correlation,omitempty"` // TokenDigest / fingerprint, never a token
 	Chain              []ChainLink `json:"chain,omitempty"`
 }
@@ -310,6 +317,17 @@ type DecisionEvidence struct {
 	OperationClass      string   `json:"operation_class,omitempty"`
 	RiskClass           string   `json:"risk_class,omitempty"`
 	ExecutionState      string   `json:"execution_state,omitempty"`
+	// NOTE (Codex P2, PR #1226): the Shadow enforcement-prediction sub-facts
+	// (shadow_outcome/override, credential-plan and inspection readiness) are DELIBERATELY
+	// NOT persisted as new digest-covered fields on this schema_version:1 envelope. Adding
+	// them here would be a rollback hazard — a pre-change binary reading a shadow event
+	// drops the unknown fields on unmarshal, recomputes CanonicalBytes without them, and
+	// misreports the valid record as corrupted. Durable shadow-evidence persistence needs
+	// its own schema version (v2, with explicit v1/v2 recovery) and belongs in the reviewed
+	// Shadow-activation slice (execution is disabled here, so no shadow event is ever
+	// written). Today a shadow evaluation is marked ONLY by the existing ExecutionState
+	// value "shadow_evaluated" (a known field, digest-safe), and the full ShadowDecision is
+	// carried in the transient response body. Tracked as SHADOW-EVIDENCE-ROUTING-1.
 }
 
 // InspectionEvidence records only sanitized inspection facts (MCP-INSP-*). No

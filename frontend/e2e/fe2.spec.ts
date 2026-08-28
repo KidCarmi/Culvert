@@ -41,9 +41,9 @@ test("lazy design-system route loads through the manifest chain", async ({
   await expect(
     page.getByRole("heading", { name: "Design system" }),
   ).toBeVisible();
-  // Browser Back returns to Overview.
+  // Browser Back returns to the Dashboard.
   await page.goBack();
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
   expect(w.errors).toEqual([]);
   expect(w.external).toEqual([]);
 });
@@ -84,7 +84,7 @@ test("shell keyboard navigation: skip link first, nav reachable", async ({
   await page.goto("/app/");
   // FE-3: wait for the authenticated shell (past the boot phase) before
   // exercising the tab order.
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
   await page.keyboard.press("Tab");
   await expect(
     page.getByRole("link", { name: "Skip to content" }),
@@ -92,8 +92,8 @@ test("shell keyboard navigation: skip link first, nav reachable", async ({
   await page.keyboard.press("Enter");
   expect(await page.evaluate(() => document.activeElement?.id)).toBe("main");
   // Tab order reaches primary navigation links.
-  await page.getByRole("link", { name: "Overview" }).focus();
-  await expect(page.getByRole("link", { name: "Overview" })).toBeFocused();
+  await page.getByRole("link", { name: "Dashboard" }).focus();
+  await expect(page.getByRole("link", { name: "Dashboard" })).toBeFocused();
 });
 
 test("dialog focus lifecycle under the native top layer", async ({ page }) => {
@@ -191,7 +191,7 @@ test("zoom/narrow reflow: no page-level horizontal scroll, nav fully opens", asy
   // Governance entries) and the sidebar scrolls by design, so the honest
   // condition is scroll-within-the-panel → fully visible.
   await expectNavLinkReachable(page, "Design System");
-  await expectNavLinkReachable(page, "Overview");
+  await expectNavLinkReachable(page, "Dashboard");
   // The open panel introduces no page-level horizontal overflow either.
   const overflowOpen = await page.evaluate(
     () =>

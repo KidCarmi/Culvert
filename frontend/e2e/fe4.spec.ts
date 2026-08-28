@@ -81,7 +81,7 @@ test("overview loads one snapshot set, manual refresh advances freshness, zero S
 }) => {
   const w = watch(page, baseURL ?? AUTH_URL);
   await page.goto("/app/");
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
   await expect(page.getByText("Management health")).toBeVisible();
   await expect(
     page.getByText("Traffic counters — since process start"),
@@ -505,7 +505,9 @@ test.describe("viewer boundaries", () => {
     const w = watch(page, baseURL ?? AUTH_URL);
     await page.goto("/app/");
     await login(page, USERS.viewer.user, USERS.viewer.pass);
-    await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "Dashboard" }),
+    ).toBeVisible();
 
     // Role-aware nav: Monitor surfaces present, Governance absent.
     await expect(page.getByRole("link", { name: "Diagnostics" })).toBeVisible();

@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"sync"
@@ -75,7 +76,7 @@ func TestEvents_AllowClassCommitsAndStaysNotImplemented(t *testing.T) {
 	p := eventsPipeline(t, k, fakePolicy{gw: gwPolicySnap(t, rule)}, ev)
 	tok, sid := driveToDecisionPoint(t, p, k)
 
-	out := p.Process(withSession(gwRequest(tok, toolsListBody(3)), sid), fixedClock())
+	out := p.Process(context.Background(), withSession(gwRequest(tok, toolsListBody(3)), sid), fixedClock())
 	if out.Disposition != DispPolicyAllowed {
 		t.Fatalf("disp=%v", out.Disposition)
 	}
@@ -109,7 +110,7 @@ func TestEvents_OrdinaryCommitFailureDoesNotBlock(t *testing.T) {
 	p := eventsPipeline(t, k, fakePolicy{gw: gwPolicySnap(t, rule)}, ev)
 	tok, sid := driveToDecisionPoint(t, p, k)
 
-	out := p.Process(withSession(gwRequest(tok, toolsListBody(3)), sid), fixedClock())
+	out := p.Process(context.Background(), withSession(gwRequest(tok, toolsListBody(3)), sid), fixedClock())
 	// tools/list is a discovery (ordinary) op: a commit failure does not block.
 	if out.Disposition != DispPolicyAllowed {
 		t.Fatalf("ordinary commit failure blocked the operation: disp=%v", out.Disposition)
@@ -123,7 +124,7 @@ func TestEvents_DenialRouted(t *testing.T) {
 	p := eventsPipeline(t, k, fakePolicy{gw: gwPolicySnap(t, "")}, ev) // default deny
 	tok, sid := driveToDecisionPoint(t, p, k)
 
-	out := p.Process(withSession(gwRequest(tok, toolsListBody(3)), sid), fixedClock())
+	out := p.Process(context.Background(), withSession(gwRequest(tok, toolsListBody(3)), sid), fixedClock())
 	if out.Disposition != DispRejected {
 		t.Fatalf("disp=%v", out.Disposition)
 	}
@@ -140,7 +141,7 @@ func TestEvents_AuthFailureRoutedWithoutTenant(t *testing.T) {
 	p := eventsPipeline(t, k, fakePolicy{gw: gwPolicySnap(t, "")}, ev)
 	sid := doInit(t, p, gwToken(k))
 	// Send a decision-point request with a BAD token → auth failure.
-	out := p.Process(withSession(gwRequest("bad.token.value", toolsListBody(3)), sid), fixedClock())
+	out := p.Process(context.Background(), withSession(gwRequest("bad.token.value", toolsListBody(3)), sid), fixedClock())
 	if out.Disposition != DispRejected {
 		t.Fatalf("expected rejection, got %v", out.Disposition)
 	}
@@ -163,7 +164,7 @@ func TestEvents_NilProviderNoCalls(t *testing.T) {
 	rule := `{"id":"ALLOW_LIST","priority":1,"action":"ALLOW","reason":"MCP.POLICY.RESOURCE_SCOPE","remediation":"none","conditions":[{"field":"operation.method","op":"exact","value":"tools/list"}],"obligations":{"logging":"standard"}}`
 	p := policyPipeline(t, k, fakePolicy{gw: gwPolicySnap(t, rule)}) // no Events
 	tok, sid := driveToDecisionPoint(t, p, k)
-	out := p.Process(withSession(gwRequest(tok, toolsListBody(3)), sid), fixedClock())
+	out := p.Process(context.Background(), withSession(gwRequest(tok, toolsListBody(3)), sid), fixedClock())
 	if out.Disposition != DispPolicyAllowed {
 		t.Fatalf("nil-events path changed disposition: %v", out.Disposition)
 	}

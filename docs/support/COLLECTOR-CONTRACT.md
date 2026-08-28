@@ -91,7 +91,7 @@ type CollectorMeta struct {
 
 ## 3. Redaction is the collector's job (source-side)
 
-Every value a collector writes goes through `in.Redactor` first (ADR-0009). A collector MUST NOT:
+Every value a collector writes goes through `in.Redactor` first (ADR-0029). A collector MUST NOT:
 - read a store's raw accessor when a redacted one exists (`Entries()` → use `List()`; raw `URL` → `URL.Redacted()`);
 - write a `SECRET`/`NEVER_EXPORT` field at all;
 - construct free-form text (log lines) without passing it through the free-form scrubber.

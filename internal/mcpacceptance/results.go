@@ -44,7 +44,27 @@ func expectedRequiredIDs(authoritative bool) []string {
 // passed, the artifact identity is authoritative when the mode demands it, and no
 // required criterion failed. It returns the list of missing required IDs so the
 // caller can record them.
+//
+// Requiredness is decided by MEMBERSHIP IN expected, not by the per-criterion
+// Required flag. The flag is a hand-written argument at ~44 call sites that
+// duplicates the canonical list in expectedRequiredIDs, and the two used to be
+// consulted for different things: the list decided PRESENCE, the flag decided
+// FAILURE. So a criterion recorded with the right ID, a FAIL status and a mistyped
+// Required:false satisfied the presence check and was skipped by the failure check
+// — a failing startup.ready produced an overall PASS with nothing reported missing.
+// That is this harness certifying a system it just watched fail, which is the one
+// outcome an acceptance gate must never produce.
+//
+// The flag is still honoured ON TOP of the list (a criterion outside the expected
+// set may still declare itself required), so this only ever adds failures. A
+// criterion in the expected set that is flagged non-required is itself reported as
+// a harness defect rather than silently absorbed: a gate that disagrees with itself
+// about what it requires has not earned the right to issue a PASS.
 func computeOverall(criteria []CriterionResult, expected []string, authoritative bool, wantAuthoritative bool) (status Status, absent []string) {
+	required := make(map[string]bool, len(expected))
+	for _, id := range expected {
+		required[id] = true
+	}
 	present := map[string]Status{}
 	for i := range criteria {
 		present[criteria[i].ID] = criteria[i].Status
@@ -57,7 +77,12 @@ func computeOverall(criteria []CriterionResult, expected []string, authoritative
 	}
 	overall := StatusPass
 	for i := range criteria {
-		if criteria[i].Required && criteria[i].Status != StatusPass {
+		isRequired := criteria[i].Required || required[criteria[i].ID]
+		if isRequired && criteria[i].Status != StatusPass {
+			overall = StatusFail
+		}
+		// Declaration drift: the canonical set says required, the call site said not.
+		if required[criteria[i].ID] && !criteria[i].Required {
 			overall = StatusFail
 		}
 	}

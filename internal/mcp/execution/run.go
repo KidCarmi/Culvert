@@ -3,6 +3,7 @@ package execution
 import (
 	"context"
 	"encoding/json"
+	"errors"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/credentials/broker"
 	"github.com/KidCarmi/Culvert/internal/mcp/credentials/profile"
@@ -18,6 +19,11 @@ import (
 	"github.com/KidCarmi/Culvert/internal/mcp/runtime"
 	"github.com/KidCarmi/Culvert/internal/mcp/upstreamclient"
 )
+
+// errToolDriftedBeforeCall aborts the commit-then-act callback when the decision's
+// tool changed under it. It never escapes this package: the caller maps it to
+// mcperr.ReasonDecisionSnapshotStale before returning.
+var errToolDriftedBeforeCall = errors.New("mcp: tool drifted between decision and upstream call")
 
 // runExecute performs the real guarded upstream execution for an in-scope
 // executing mode. The mandatory order is preserved: policy already ran, then
@@ -46,7 +52,22 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 
 	var upResp *upstreamclient.Response
 	var upErr error
+	// OVN-09 (residual window). callUpstream is the ONE place either branch performs
+	// the irreversible side effect, so the last-moment drift re-check belongs here
+	// rather than at each call site: a later branch added above this line inherits it.
+	//
+	// The runtime's entry check narrowed the decision/execution window; everything
+	// between it and this line — the durable decision commit, credential planning,
+	// provider material fetch — can block for as long as those take, and a
+	// concurrent catalog ingest during that time would otherwise let the upstream
+	// call run under a decision made about a tool that no longer exists or has been
+	// redefined. Re-checking here makes the refusal precede the side effect.
+	staleAtCall := false
 	callUpstream := func(authHeader string) error {
+		if in.ToolStillCurrent != nil && !in.ToolStillCurrent() {
+			staleAtCall = true
+			return errToolDriftedBeforeCall
+		}
 		r, err := e.cfg.Upstream.Call(ctx, target, in.Method, json.RawMessage(in.RawParams), upstreamclient.CallOptions{
 			Idempotent: idempotent, AuthHeader: authHeader, WireID: "u-" + target.ServerID,
 		})
@@ -54,19 +75,50 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 		return err
 	}
 
+	// SEC-MCP-09. The DECISION event commits durably BEFORE anything that can have a
+	// side effect, on BOTH paths and through the SAME primitive. Previously only the
+	// no-credential branch went through CommitThenAct; the credential branch relied
+	// solely on the broker's own CREDENTIAL_SELECT gate, so an executed
+	// write/destructive tools/call with a credential profile — the ordinary
+	// enterprise shape — left NO critical decision event on record naming the policy
+	// action, matched rule, snapshot hash or action class. A commit failure now
+	// blocks the side effect identically on both paths, and the broker's
+	// pre-materialization gate still adds its own commit before any provider or
+	// cache is touched (defense in depth, not a substitute).
 	profileRef := in.Decision.Obligations.CredentialProfile
-	if e.cfg.Broker != nil && profileRef != "" {
-		if out, blocked := e.materializeAndCall(ctx, in, profileRef, callUpstream); blocked {
-			return out
-		}
-	} else {
-		// No credential profile: still commit the decision durably BEFORE the upstream
-		// call, so a commit failure prevents the side effect.
-		if err := e.cfg.Events.CommitThenAct(decisionFacts(in), func(spool.CommitReceipt) error {
+	useBroker := e.cfg.Broker != nil && profileRef != ""
+	var blockedOut runtime.ExecOutput
+	var didBlock bool
+	if err := e.cfg.Events.CommitThenAct(decisionFacts(in), func(spool.CommitReceipt) error {
+		if !useBroker {
 			return callUpstream("")
-		}); err != nil {
-			return e.blocked(in, mcperr.ReasonOf(err), false)
 		}
+		blockedOut, didBlock = e.materializeAndCall(ctx, in, profileRef, callUpstream)
+		return nil
+	}); err != nil {
+		// A drift refusal is not a transport or durability fault, and must not be
+		// classified as one: it is the decision-staleness reason the runtime's own
+		// entry check uses, so both refusals read identically to an operator. This
+		// branch carries the NO-credential path, whose callUpstream error escapes
+		// CommitThenAct verbatim.
+		if staleAtCall {
+			return e.blocked(in, mcperr.ReasonDecisionSnapshotStale, false)
+		}
+		return e.blocked(in, mcperr.ReasonOf(err), false)
+	}
+	if didBlock {
+		// The CREDENTIAL path never lets callUpstream's error escape CommitThenAct:
+		// materializeAndCall swallows it into a blocked ExecOutput whose reason is
+		// ReasonOf(errToolDriftedBeforeCall) == ReasonNone (the sentinel is
+		// package-private and unregistered). A drift detected inside the broker
+		// callback must therefore be reclassified HERE too, or clients and block
+		// telemetry would read `none` where the no-credential path reads
+		// `decision_snapshot_stale`. staleAtCall is set only by callUpstream, so on
+		// this branch it is true iff the block was the drift refusal.
+		if staleAtCall {
+			return e.blocked(in, mcperr.ReasonDecisionSnapshotStale, false)
+		}
+		return blockedOut
 	}
 
 	if upErr != nil {
@@ -109,7 +161,13 @@ func (e *Executor) finishUpstream(ctx context.Context, in runtime.ExecInput, upR
 	}
 
 	// Best-effort outcome event (ordinary criticality; never blocks the response).
-	_, _ = e.cfg.Events.CommitDecision(outcomeFacts(in))
+	// Best-effort means the RESPONSE is not blocked — it does not mean the loss is
+	// invisible. Discarding this error is how an outcome event that failed validation
+	// went unnoticed for every mutating execution; a rejected commit here is a defect
+	// in the facts, not a transient, so it must be able to reach a human.
+	if _, cerr := e.cfg.Events.CommitDecision(outcomeFacts(in)); cerr != nil {
+		e.cfg.Metrics.ObserveOutcomeEvidenceLoss(in.Capability.String())
+	}
 	e.cfg.Metrics.ObserveExecution(in.Capability.String(), true)
 
 	effective := "execute"
@@ -215,18 +273,52 @@ func toolRef(in runtime.ExecInput) inspection.ToolRef {
 // Criticality and action class are coupled so the fact passes model validation.
 func decisionFacts(in runtime.ExecInput) events.DecisionFacts {
 	crit, ac := criticalityFor(in.Input.Operation.Class)
-	return events.DecisionFacts{
+	f := events.DecisionFacts{
 		Capability:  model.CapGateway,
 		Criticality: crit,
 		ActionClass: ac,
 		Identity: model.IdentityEvidence{
-			Tenant: in.Input.Principal.Tenant, PrincipalID: in.Input.Principal.SubjectID, PrincipalType: "workload",
+			Tenant:      in.Input.Principal.Tenant,
+			PrincipalID: in.Input.Principal.SubjectID,
+			// SEC-MCP-08. Mirror the AUTHENTICATED subject kind. This was hard-coded
+			// "workload" while the runtime models token subjects as humans, so every
+			// execution event misattributed a human actor as a workload — an error no
+			// downstream consumer of the archive can detect or correct.
+			PrincipalType: subjectKindString(in.Input.Principal.Kind),
+			ClientID:      in.Input.Client.ClientID,
 		},
 		Decision: model.DecisionEvidence{
 			Action: in.Decision.Action.String(), ReasonCode: string(in.Decision.Reason),
+			MatchedRuleID:  string(in.Decision.MatchedRule),
+			PolicyRevision: uint64(in.Decision.PolicyRevision),
+			OperationClass: in.Input.Operation.Class.String(),
 			ExecutionState: "executing",
+
+			PolicySnapshotHash: in.SnapshotHash,
 		},
 		SnapshotHash: in.SnapshotHash,
+	}
+	if in.Input.Server != nil {
+		f.Identity.ServerID = in.Input.Server.ServerID
+	}
+	if in.Input.Tool != nil {
+		f.Identity.ToolName = in.Input.Tool.Name
+		f.Identity.ToolFingerprint = in.Input.Tool.FingerprintHash
+	}
+	return f
+}
+
+// subjectKindString maps the policy subject kind to the event-model principal type.
+// The empty string for an unset kind is deliberate: an event must not invent a
+// principal type it was never told.
+func subjectKindString(k policy.SubjectKind) string {
+	switch k {
+	case policy.SubjectHuman:
+		return "human"
+	case policy.SubjectWorkload:
+		return "workload"
+	default:
+		return ""
 	}
 }
 
@@ -234,8 +326,24 @@ func decisionFacts(in runtime.ExecInput) events.DecisionFacts {
 // successful execution (best-effort; never blocks the response).
 func outcomeFacts(in runtime.ExecInput) events.DecisionFacts {
 	f := decisionFacts(in)
-	f.Criticality = model.CritOrdinary
-	f.ActionClass = model.ActionClassRead
+	// Criticality and ActionClass are ONE coupled pair, and model.Event.Validate
+	// enforces it: an ordinary event carrying a critical action class is rejected
+	// ("critical action class on an ordinary event"). They must therefore be set
+	// together or not at all.
+	//
+	// A previous version of this function set only Criticality, leaving the write or
+	// destructive ActionClass inherited from decisionFacts. Every mutating execution
+	// then produced an outcome event that failed validation — and because the commit
+	// below is best-effort, the failure was discarded and the evidence vanished
+	// silently. That is strictly worse than the mislabelling it was meant to fix: an
+	// outcome that says "read" is wrong, an outcome that does not exist is unknowable.
+	//
+	// The outcome stays ORDINARY: it is emitted after the side effect, so its
+	// durability policy must not be able to drive the critical domain degraded for an
+	// operation that already happened. The real classification is not lost — it rides
+	// on Decision.OperationClass, which decisionFacts sets from the actual operation
+	// class and which no downstream consumer has to infer from ActionClass.
+	f.Criticality, f.ActionClass = model.CritOrdinary, model.ActionClassRead
 	f.Decision.ExecutionState = "executed"
 	return f
 }
