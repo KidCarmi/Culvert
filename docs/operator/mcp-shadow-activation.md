@@ -241,3 +241,66 @@ A controlled Shadow soak is successful only if, for its full duration:
 These criteria gate any future consideration of Canary — which this phase does NOT
 prepare and which remains blocked on live-execution readiness and the
 `PREREQ-MCP-KILL-1` side-effect-boundary revalidation.
+
+---
+
+## 8. Binary downgrade across persisted v2 Shadow evidence
+
+Once this node has run a **v2-capable** binary and persisted at least one Shadow decision
+event, the Gateway `P-ORD` spool partition holds `schema_version:2` records. A **pre-v2**
+binary rejects a v2 record at decode (`unmarshalEvent` uses `DisallowUnknownFields`), so its
+spool recovery fails that partition **closed** rather than misverifying it — the deliberate
+downgrade posture (`SHADOW-EVIDENCE-ROUTING-1`; `docs/design/mcp/SHADOW-ARCHITECTURE.md` §9).
+Rolling the binary back across such evidence therefore needs this procedure. It is
+**surgical**: it touches ONLY the partition that holds Shadow evidence and never deletes
+unrelated durable evidence.
+
+**What is and is NOT affected**
+
+- The MCP events spool is a BOUNDED, encrypted, per-capability **qualification-telemetry
+  cache** — NOT authoritative policy, config, or enforcement state. Clearing it loses
+  decision/outcome history, never enforcement.
+- v2 Shadow decision events are ordinary-criticality **Gateway** events, so they live ONLY in
+  `<mcp-data-dir>/gateway/P-ORD/`. The `P-CRIT` and `P-DEN` partitions, the sealed DEK
+  (`gateway/dek.sealed`), `gateway/degraded_state.json`, and the entire `management/` subtree
+  carry NO v2 evidence and MUST be preserved.
+
+`<mcp-data-dir>` is the MCP telemetry `DataDir` configured for this node's Gateway; under it
+each capability (`gateway/`, `management/`) has per-partition subdirectories (`P-ORD/`,
+`P-CRIT/`, `P-DEN/`) with `seg-<id>.dat` segments + `checkpoint.json`, plus `dek.sealed` and
+`degraded_state.json`.
+
+**Procedure (node stopped throughout — never mutate a live spool)**
+
+1. Stop the node (or bring the container down).
+2. Locate `<mcp-data-dir>` and confirm the layout above.
+3. **Archive first, then clear.** Tar the whole `gateway/` subtree to durable storage OUTSIDE
+   the data dir, so the v2 evidence stays readable later by a v2-capable binary (and for
+   forensics):
+   ```
+   tar -czf /var/backups/culvert/mcp-gateway-spool-$(date +%Y%m%dT%H%M%SZ).tgz \
+       -C <mcp-data-dir> gateway
+   ```
+4. Clear ONLY the Shadow partition — remove its segments and checkpoint (the directory is
+   recreated on next open; recovery treats an empty partition as fresh):
+   ```
+   rm -f <mcp-data-dir>/gateway/P-ORD/seg-*.dat <mcp-data-dir>/gateway/P-ORD/checkpoint.json
+   ```
+   Do NOT touch `gateway/P-CRIT`, `gateway/P-DEN`, `gateway/dek.sealed`,
+   `gateway/degraded_state.json`, or anything under `management/`.
+5. Only if the downgraded binary then logs an export cursor/segment mismatch for the Gateway
+   `P-ORD` partition, remove that partition's cursor file under
+   `<mcp-data-dir>/export_cursors/gateway/` (the per-partition `*.cursor`) so the exporter
+   restarts cleanly from the fresh partition. Skip this step otherwise.
+6. Start the pre-v2 binary. Its spool recovery now sees an empty `P-ORD` (a fresh partition)
+   and starts clean; `P-CRIT`, `P-DEN`, and `management/` recover normally.
+
+**Restore / re-upgrade.** To read the archived v2 evidence again, return the node to a
+v2-capable binary and restore the archived `gateway/` subtree (or read the archive offline
+with a v2-capable tool). **Never restore a v2 archive under a pre-v2 binary** — it
+re-introduces the same rejected records.
+
+**Why validation is not weakened to make downgrade transparent.** A v1 reader silently
+reinterpreting a v2 record would misreport its digest and could surface an inconsistent
+verdict as valid; the fail-closed rejection is deliberate. Downgrade is a rare, deliberate,
+node-local operator action, not a silent-safe default.
