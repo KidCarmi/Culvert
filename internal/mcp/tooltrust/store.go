@@ -58,9 +58,9 @@ const (
 	// for JSON keys, the timestamps, the fingerprint hex, the numeric fields, and punctuation.
 	// It is a deliberate over-estimate (a real record is far smaller); the cap only rejects a
 	// pathologically large file before it is fully decoded.
-	maxRecordStringBounds  = 3*maxReasonBytes + 4*maxActorBytes + maxTenantBytes + maxServerIDBytes + maxToolNameBytes + maxTicketBytes + maxIDBytes
-	recordFixedOverhead    = 2048
-	maxRecordJSONBytes     = 6*maxRecordStringBounds + recordFixedOverhead
+	maxRecordStringBounds = 3*maxReasonBytes + 4*maxActorBytes + maxTenantBytes + maxServerIDBytes + maxToolNameBytes + maxTicketBytes + maxIDBytes
+	recordFixedOverhead   = 2048
+	maxRecordJSONBytes    = 6*maxRecordStringBounds + recordFixedOverhead
 	// storeEnvelopeSlackBytes covers the persistedStore wrapper (schema_version, the array
 	// brackets/commas) independent of record count.
 	storeEnvelopeSlackBytes = 4096
