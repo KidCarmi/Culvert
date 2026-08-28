@@ -41,6 +41,7 @@ import {
   getDecryptionProfileNames,
   getFileProfileNames,
   getURLCategoryNames,
+  reorderRules,
   updateRule,
 } from "../../api/policyWrite";
 import type { AccessRuleWrite, PolicyConflict } from "../../api/policyWrite";
@@ -235,6 +236,17 @@ export function AccessRulesPage(): JSX.Element {
   const [deleteResult, setDeleteResult] = useState<ConfirmResult>("idle");
   const [deleteError, setDeleteError] = useState("");
 
+  // ── staged reorder (§22): LOCAL permutation, no server mutation until
+  // Apply; never persisted; cleared at the auth boundary. While staged,
+  // create/edit/delete on this view are blocked so nothing composes against
+  // a permutation the server does not know.
+  const [reorder, setReorder] = useState<readonly PolicyRuleView[] | null>(
+    null,
+  );
+  const [reorderNotice, setReorderNotice] = useState("");
+  const [reorderPending, setReorderPending] = useState(false);
+  const [reorderAnnounce, setReorderAnnounce] = useState("");
+
   // Reference option sources (§12): loaded once a write control asks for the
   // editor; read-only, never managed here.
   const wantOptions = editor !== null;
@@ -266,6 +278,10 @@ export function AccessRulesPage(): JSX.Element {
     setDeleting(null);
     setDeleteResult("idle");
     setDeleteError("");
+    setReorder(null);
+    setReorderNotice("");
+    setReorderPending(false);
+    setReorderAnnounce("");
   };
   // Installed every render so the boundary always runs the LATEST closure
   // (single-slot ref inside the hook — no accumulation, no stale state).
@@ -277,9 +293,16 @@ export function AccessRulesPage(): JSX.Element {
     setEditorConflict(null);
   }, [q.dataUpdatedAt]);
 
+  const accessRulesForDirty = snap?.accessRules ?? [];
+  const reorderChanged =
+    reorder !== null &&
+    (reorder.length !== accessRulesForDirty.length ||
+      reorder.some((r, i) => accessRulesForDirty[i]?.id !== r.id));
   const guard = useDirtyGuard(
-    editorDirty,
-    "the unsaved rule changes in the editor",
+    editorDirty || reorderChanged,
+    editorDirty
+      ? "the unsaved rule changes in the editor"
+      : "the staged reorder",
   );
 
   const accessRules = useMemo(() => snap?.accessRules ?? [], [snap]);
@@ -288,6 +311,23 @@ export function AccessRulesPage(): JSX.Element {
     if (needle === "") return accessRules;
     return accessRules.filter((r) => ruleMatchesFilter(r, needle));
   }, [accessRules, filter]);
+
+  // Staged-reorder integrity: if a refetch shows the rulebase membership
+  // changed under the staged permutation, discard it VISIBLY — the local
+  // order can no longer be rebased safely (§23: never rebase automatically).
+  useEffect(() => {
+    if (reorder === null) return;
+    const ids = new Set(accessRules.map((r) => r.id));
+    const stale =
+      reorder.length !== accessRules.length ||
+      reorder.some((r) => !ids.has(r.id));
+    if (stale) {
+      setReorder(null);
+      setReorderNotice(
+        "The rulebase changed while you were reordering. Review the current order and try again.",
+      );
+    }
+  }, [accessRules, reorder]);
 
   // Deep-link resolution (§10): pure data equality against the decoded
   // snapshot; the raw parameter never reaches the DOM as a selector.
@@ -400,6 +440,69 @@ export function AccessRulesPage(): JSX.Element {
       });
   };
 
+  const moveStaged = (fromIdx: number, toIdx: number): void => {
+    if (reorder === null) return;
+    if (toIdx < 0 || toIdx >= reorder.length || fromIdx === toIdx) return;
+    const next = [...reorder];
+    const moved = next.splice(fromIdx, 1)[0];
+    if (moved === undefined) return;
+    next.splice(toIdx, 0, moved);
+    setReorder(next);
+    setReorderAnnounce(
+      `Rule ${moved.name} moved to position ${String(toIdx + 1)} of ${String(next.length)}. Reorder staged, not applied.`,
+    );
+  };
+
+  const applyReorder = (): void => {
+    if (snap === undefined || reorder === null) return;
+    const version = snap.version;
+    const signal = rb.owner.begin();
+    setReorderPending(true);
+    setReorderNotice("");
+    // The permutation: every current access rule's OLD priority, in the NEW
+    // display order — exactly once each (Stage-1 auth priorities are never
+    // present; accessRules structurally excludes them).
+    reorderRules(
+      reorder.map((r) => r.priority),
+      version,
+      signal,
+    )
+      .then(() => {
+        setReorder(null);
+        setReorderAnnounce("");
+        rb.refetchAll();
+      })
+      .catch((err: unknown) => {
+        if (unknownOutcome(err)) {
+          // The permutation may or may not have applied — the local staging
+          // is no longer trustworthy. Discard it visibly and latch.
+          setReorder(null);
+          setReorderAnnounce("");
+          rb.latchUnknown("reorder");
+          return;
+        }
+        const conflict = asPolicyConflict(err);
+        if (conflict !== null) {
+          // §23: the staged permutation is stale. Never rebase automatically —
+          // discard visibly and refetch server truth.
+          setReorder(null);
+          setReorderAnnounce("");
+          setReorderNotice(
+            "The rulebase changed while you were reordering. Review the current order and try again.",
+          );
+          rb.refetchAll();
+          return;
+        }
+        setReorderNotice(
+          serverErrorText(err, "The appliance refused the reorder."),
+        );
+      })
+      .finally(() => {
+        rb.owner.settle(signal);
+        setReorderPending(false);
+      });
+  };
+
   const confirmDelete = (): void => {
     if (snap === undefined || deleting === null) return;
     const version = snap.version;
@@ -471,6 +574,17 @@ export function AccessRulesPage(): JSX.Element {
         </div>
       )}
 
+      <span role="status" aria-live="polite" className={styles.srOnly}>
+        {reorderAnnounce}
+      </span>
+      {reorderNotice !== "" && (
+        <div className={styles.calloutSpace}>
+          <Callout variant="warning" title="Reorder not applied" role="alert">
+            {reorderNotice}
+          </Callout>
+        </div>
+      )}
+
       {snap !== undefined && (
         <DraftBar
           draft={rb.draftQ.data}
@@ -530,13 +644,18 @@ export function AccessRulesPage(): JSX.Element {
           <div className={styles.toolbar}>
             <InputField
               label="Filter"
-              help="Matches name, source, destination, action, and rule ID. Display only — priority order is preserved."
+              help={
+                reorder !== null
+                  ? "Filtering is paused while a reorder is staged — the full evaluation order must stay visible."
+                  : "Matches name, source, destination, action, and rule ID. Display only — priority order is preserved."
+              }
               value={filter}
+              disabled={reorder !== null}
               onChange={(e) => {
                 setFilter(e.target.value);
               }}
             />
-            {canWrite && (
+            {canWrite && reorder === null && (
               <div className={styles.toolbarActions}>
                 <Button
                   disabled={blocked}
@@ -547,6 +666,41 @@ export function AccessRulesPage(): JSX.Element {
                   }}
                 >
                   New rule…
+                </Button>
+                <Button
+                  variant="ghost"
+                  disabled={blocked || accessRules.length < 2}
+                  onClick={() => {
+                    setFilter("");
+                    setReorder(accessRules);
+                    setReorderNotice("");
+                  }}
+                >
+                  Reorder rules…
+                </Button>
+              </div>
+            )}
+            {canWrite && reorder !== null && (
+              <div className={styles.toolbarActions}>
+                {reorderChanged && (
+                  <StatusBadge status="warn">Reorder staged</StatusBadge>
+                )}
+                <Button
+                  disabled={blocked || !reorderChanged || reorderPending}
+                  onClick={applyReorder}
+                >
+                  Apply reorder
+                </Button>
+                <Button
+                  variant="ghost"
+                  disabled={reorderPending}
+                  onClick={() => {
+                    setReorder(null);
+                    setReorderNotice("");
+                    setReorderAnnounce("");
+                  }}
+                >
+                  Discard reorder
                 </Button>
               </div>
             )}
@@ -584,7 +738,7 @@ export function AccessRulesPage(): JSX.Element {
                 </tr>
               </thead>
               <tbody>
-                {filtered.length === 0 && (
+                {(reorder ?? filtered).length === 0 && (
                   <tr>
                     <td colSpan={canWrite ? 11 : 10}>
                       {accessRules.length === 0
@@ -593,10 +747,12 @@ export function AccessRulesPage(): JSX.Element {
                     </td>
                   </tr>
                 )}
-                {filtered.map((r) => {
+                {(reorder ?? filtered).map((r, idx) => {
                   const rowKey = r.id !== "" ? r.id : `p${String(r.priority)}`;
                   const isTarget = target !== undefined && r.id === target.id;
                   const open = openId === rowKey;
+                  const staging = reorder !== null;
+                  const last = (reorder ?? filtered).length - 1;
                   return (
                     <RuleRow
                       key={rowKey}
@@ -608,7 +764,54 @@ export function AccessRulesPage(): JSX.Element {
                         setOpenId(open ? null : rowKey);
                       }}
                       actions={
-                        canWrite ? (
+                        canWrite && staging ? (
+                          <span className={styles.rowActions}>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              disabled={idx === 0 || reorderPending}
+                              aria-label={`Move rule ${r.name} first`}
+                              onClick={() => {
+                                moveStaged(idx, 0);
+                              }}
+                            >
+                              ⇤
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              disabled={idx === 0 || reorderPending}
+                              aria-label={`Move rule ${r.name} up`}
+                              onClick={() => {
+                                moveStaged(idx, idx - 1);
+                              }}
+                            >
+                              ↑
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              disabled={idx === last || reorderPending}
+                              aria-label={`Move rule ${r.name} down`}
+                              onClick={() => {
+                                moveStaged(idx, idx + 1);
+                              }}
+                            >
+                              ↓
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              disabled={idx === last || reorderPending}
+                              aria-label={`Move rule ${r.name} last`}
+                              onClick={() => {
+                                moveStaged(idx, last);
+                              }}
+                            >
+                              ⇥
+                            </Button>
+                          </span>
+                        ) : canWrite ? (
                           <span className={styles.rowActions}>
                             <Button
                               size="sm"
