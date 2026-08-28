@@ -238,7 +238,34 @@ func (e Event) validateShadowV2() error {
 	if err := validateShadowActionOverride(e.Decision.Action, sh.Override); err != nil {
 		return err
 	}
+	if err := validateShadowGatedOutcomeAction(e.Decision.Action, sh.Outcome); err != nil {
+		return err
+	}
 	return validateShadowEvidenceFields(sh)
+}
+
+// validateShadowGatedOutcomeAction binds the two policy-gating outcomes that have a 1:1
+// correspondence with a single policy action to that EXACT action. In the producer,
+// policyClassOutcome emits would_require_approval ONLY for REQUIRE_APPROVAL and
+// would_require_confirmation ONLY for REQUIRE_CONFIRMATION, so a would_require_approval record
+// carrying any other action (e.g. DENY) misstates a denial as an approval gate — and the
+// class-only Action↔Override binding cannot catch it, because DENY and REQUIRE_APPROVAL are
+// BOTH restrictive. would_block is deliberately NOT bound here: the producer emits it for
+// DENY, QUARANTINE, ALLOW_WITH_REDACTION AND an allow-class allowance miss, so it maps to no
+// single action (SHADOW-EVIDENCE-ROUTING-1, Codex round PR #1235). Runs on recovery too; a real
+// v2 record always satisfies it.
+func validateShadowGatedOutcomeAction(action, outcome string) error {
+	switch outcome {
+	case shadowOutRequireApproval:
+		if action != actionCodeRequireApproval {
+			return evtErr(mcperr.ReasonEventInvalid, "shadow would_require_approval must carry the REQUIRE_APPROVAL action")
+		}
+	case shadowOutRequireConfirm:
+		if action != actionCodeRequireConfirmation {
+			return evtErr(mcperr.ReasonEventInvalid, "shadow would_require_confirmation must carry the REQUIRE_CONFIRMATION action")
+		}
+	}
+	return nil
 }
 
 // validateShadowRouting enforces that a v2 Shadow event is a GATEWAY ordinary/critical decision

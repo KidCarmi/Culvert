@@ -32,14 +32,25 @@ var shadowAllowClassActionCodes = map[string]struct{}{
 	"ALLOW_WITH_REDACTION": {},
 }
 
+// The two policy-gating action wire codes that have a 1:1 correspondence with a single
+// Shadow outcome in the producer (policyClassOutcome emits would_require_approval ONLY for
+// REQUIRE_APPROVAL and would_require_confirmation ONLY for REQUIRE_CONFIRMATION). They are
+// named constants so the classifier set below and the exact-action binding
+// (validateShadowGatedOutcomeAction) share ONE source; the cross-package parity wall pins
+// both — like every code — to policy.Action.String(), so a wire-code rename fails CI here.
+const (
+	actionCodeRequireApproval     = "REQUIRE_APPROVAL"
+	actionCodeRequireConfirmation = "REQUIRE_CONFIRMATION"
+)
+
 // shadowRestrictiveActionCodes are the restrictive (non-ALLOW-class) policy action wire
 // codes. Kept as an explicit set (rather than "anything not allow-class") so an unknown
 // or malformed code is DISTINGUISHABLE from a known restrictive one and can fail closed.
 var shadowRestrictiveActionCodes = map[string]struct{}{
-	"DENY":                 {},
-	"QUARANTINE":           {},
-	"REQUIRE_CONFIRMATION": {},
-	"REQUIRE_APPROVAL":     {},
+	"DENY":                        {},
+	"QUARANTINE":                  {},
+	actionCodeRequireConfirmation: {},
+	actionCodeRequireApproval:     {},
 }
 
 // shadowActionClass classifies a policy action wire code. known is false for any code

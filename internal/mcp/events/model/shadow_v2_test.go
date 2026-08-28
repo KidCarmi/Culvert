@@ -199,6 +199,25 @@ func TestV2_ValidationRejectsMalformedShadowEvidence(t *testing.T) {
 			e.Criticality = CritDenial
 			e.Partition = PartDen
 		},
+		// Gated-outcome exact-action binding (Codex round, PR #1235): would_require_approval /
+		// would_require_confirmation have a 1:1 correspondence with REQUIRE_APPROVAL /
+		// REQUIRE_CONFIRMATION in the producer, so a restrictive-but-different action misstates a
+		// denial/quarantine as an approval/confirmation gate. The class-only Action↔Override
+		// binding can't catch it (both actions are restrictive). Each case is isolated — Override
+		// stays true (satisfies Action↔Override + Outcome↔Override) and the plan is unplanned, so
+		// only the new exact-action guard fires.
+		"deny action on a would_require_approval outcome": func(e *Event) {
+			e.Decision.Action = "DENY"
+			e.Shadow.Override = true
+			e.Shadow.Outcome = "would_require_approval"
+			e.Shadow.CredentialPlan = "no_credential_profile"
+		},
+		"quarantine action on a would_require_confirmation outcome": func(e *Event) {
+			e.Decision.Action = "QUARANTINE"
+			e.Shadow.Override = true
+			e.Shadow.Outcome = "would_require_confirmation"
+			e.Shadow.CredentialPlan = "no_credential_profile"
+		},
 		"unsupported schema version": func(e *Event) { e.SchemaVersion = 3 },
 	}
 	for name, mut := range cases {
