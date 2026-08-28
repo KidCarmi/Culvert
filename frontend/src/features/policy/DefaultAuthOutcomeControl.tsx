@@ -80,9 +80,7 @@ export function DefaultAuthOutcomeControl(
           return;
         }
         setResult("failed");
-        setErrorText(
-          serverErrorText(err, "The appliance refused the change."),
-        );
+        setErrorText(serverErrorText(err, "The appliance refused the change."));
       })
       .finally(() => {
         owner.settle(signal);
@@ -101,8 +99,8 @@ export function DefaultAuthOutcomeControl(
           role="alert"
         >
           The appliance&apos;s global authentication default could not be read
-          as a recognized value. Changing it is blocked until a refresh
-          returns recognizable truth.
+          as a recognized value. Changing it is blocked until a refresh returns
+          recognizable truth.
           <div className={styles.draftBarActions}>
             <Button
               size="sm"
@@ -134,15 +132,15 @@ export function DefaultAuthOutcomeControl(
               <>
                 <StatusBadge status="warn">Open</StatusBadge> Unmatched clients
                 proceed WITHOUT end-user authentication
-                (defaultAuthOutcome=Exempt). This is NOT Allow — Stage-2
-                Access Policy still decides, and default-deny still applies.
-                Scoped Authentication Rules evaluate first.
+                (defaultAuthOutcome=Exempt). This is NOT Allow — Stage-2 Access
+                Policy still decides, and default-deny still applies. Scoped
+                Authentication Rules evaluate first.
               </>
             ) : (
               <>
-                <StatusBadge status="ok">Require</StatusBadge> Unmatched
-                clients must authenticate (defaultAuthOutcome=Default).
-                Scoped Authentication Rules evaluate first.
+                <StatusBadge status="ok">Require</StatusBadge> Unmatched clients
+                must authenticate (defaultAuthOutcome=Default). Scoped
+                Authentication Rules evaluate first.
               </>
             )}
           </p>
@@ -189,8 +187,8 @@ export function DefaultAuthOutcomeControl(
           body={
             <>
               Unmatched clients may proceed without end-user authentication.
-              This does NOT allow traffic by itself; Stage-2 Access Policy
-              still decides. Scoped Authentication Rules still evaluate first.
+              This does NOT allow traffic by itself; Stage-2 Access Policy still
+              decides. Scoped Authentication Rules still evaluate first.
             </>
           }
           impact="Every client that matches no Authentication Rule stops being challenged for credentials, appliance-wide, immediately."
@@ -222,9 +220,9 @@ export function DefaultAuthOutcomeControl(
           title="Require authentication for unmatched traffic"
           body={
             <>
-              Every client that matches no Authentication Rule must
-              authenticate before its traffic proceeds. Clients without
-              credentials receive an authentication challenge immediately.
+              Every client that matches no Authentication Rule must authenticate
+              before its traffic proceeds. Clients without credentials receive
+              an authentication challenge immediately.
             </>
           }
           impact="Unauthenticated clients that were relying on the open default lose access appliance-wide, immediately."

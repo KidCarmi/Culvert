@@ -79,13 +79,12 @@ function SessionFacts({ s }: { s: PLSession }): JSX.Element {
         {s.cellsDropped > 0 && ` · ${String(s.cellsDropped)} cells dropped`}
         {s.churnEvents > 0 &&
           ` · ${String(s.churnEvents)} category churn events`}
-        {s.churnOverflow > 0 &&
-          ` · churn overflow ${String(s.churnOverflow)}`}
+        {s.churnOverflow > 0 && ` · churn overflow ${String(s.churnOverflow)}`}
       </p>
       {s.subjectKeyChanged && (
         <Callout variant="warning" title="Subject key changed">
-          The pseudonymization key changed during this session&apos;s lifetime
-          — distinct-subject evidence cannot be trusted and recommendation
+          The pseudonymization key changed during this session&apos;s lifetime —
+          distinct-subject evidence cannot be trusted and recommendation
           generation from it is refused.
         </Callout>
       )}
@@ -349,8 +348,8 @@ export function PolicyLearningPage(): JSX.Element {
               </>
             ) : (
               <>
-                <StatusBadge status="neutral">disabled</StatusBadge> Learning
-                is disabled. Node-local learning state is retained on disk.
+                <StatusBadge status="neutral">disabled</StatusBadge> Learning is
+                disabled. Node-local learning state is retained on disk.
               </>
             )}
           </p>
@@ -456,7 +455,8 @@ export function PolicyLearningPage(): JSX.Element {
           {status.recommendationPolicy !== undefined && (
             <p className={styles.factLine}>
               Decision thresholds (read-only — not editable in this release):
-              high ≥ {String(status.recommendationPolicy.highMinAllowedRequests)}{" "}
+              high ≥{" "}
+              {String(status.recommendationPolicy.highMinAllowedRequests)}{" "}
               requests / {String(status.recommendationPolicy.highMinSubjects)}{" "}
               subjects / {String(status.recommendationPolicy.highMinDays)} days;
               medium ≥{" "}
@@ -589,7 +589,9 @@ export function PolicyLearningPage(): JSX.Element {
         <ConfirmationDialog
           open
           tier={2}
-          title={enableTarget ? "Enable Policy Learning" : "Disable Policy Learning"}
+          title={
+            enableTarget ? "Enable Policy Learning" : "Disable Policy Learning"
+          }
           body={
             enableTarget ? (
               <>
@@ -601,8 +603,8 @@ export function PolicyLearningPage(): JSX.Element {
               <>
                 Disables the learning engine on this node. If a session is
                 active the appliance refuses — Complete or Cancel the active
-                session first. Node-local learning state stays on disk;
-                nothing is deleted.
+                session first. Node-local learning state stays on disk; nothing
+                is deleted.
               </>
             )
           }
@@ -693,8 +695,8 @@ export function PolicyLearningPage(): JSX.Element {
             <>
               Stops observation and marks this session cancelled. A cancelled
               session is never eligible for recommendation generation; its
-              recorded facts remain in the retained session list until pruned
-              by the engine&apos;s retention bound.
+              recorded facts remain in the retained session list until pruned by
+              the engine&apos;s retention bound.
             </>
           }
           impact="This session's observation window ends without producing recommendations."

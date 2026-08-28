@@ -304,12 +304,10 @@ it("operator: STILL read-only — the backend is admin-only and the page mirrors
 
 it("renders the server's Exempt note verbatim and badges Exempt as a warning-class waiver", async () => {
   await mount("viewer");
-  expect(container.textContent).toContain(
-    "it never allows traffic",
+  expect(container.textContent).toContain("it never allows traffic");
+  const badges = Array.from(container.querySelectorAll("[data-status]")).filter(
+    (el) => el.textContent === "Exempt",
   );
-  const badges = Array.from(
-    container.querySelectorAll("[data-status]"),
-  ).filter((el) => el.textContent === "Exempt");
   expect(badges.length).toBeGreaterThan(0);
   for (const b of badges) {
     expect(b.getAttribute("data-status")).not.toBe("ok");
@@ -368,9 +366,7 @@ it("editor warns when an Access Policy Draft is active: the save invalidates its
   await mount("admin");
   await click(findButton((t) => t.includes("New authentication rule")));
   await flushUntil(() => {
-    expect(container.textContent).toContain(
-      "An Access Policy Draft is active",
-    );
+    expect(container.textContent).toContain("An Access Policy Draft is active");
   });
   expect(container.textContent).toContain(
     "will invalidate that draft's running-generation baseline",
@@ -381,9 +377,9 @@ it("editor warns when an Access Policy Draft is active: the save invalidates its
 
 it("admin delete: tier-2 ceremony names the rule and immediacy; DELETE goes by stable id with ifVersion", async () => {
   await mount("admin");
-  const deleteButtons = Array.from(
-    container.querySelectorAll("button"),
-  ).filter((b) => b.textContent === "Delete");
+  const deleteButtons = Array.from(container.querySelectorAll("button")).filter(
+    (b) => b.textContent === "Delete",
+  );
   const first = deleteButtons[0];
   expect(first).toBeDefined();
   if (first === undefined) return;

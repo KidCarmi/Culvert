@@ -152,9 +152,9 @@ describe("decodePLRecommendation", () => {
     expect(() =>
       decodePLRecommendation({ ...WIRE_REC, coverage: "nope" }),
     ).toThrow(DecodeError);
-    expect(() =>
-      decodePLRecommendation({ ...WIRE_REC, policy: null }),
-    ).toThrow(DecodeError);
+    expect(() => decodePLRecommendation({ ...WIRE_REC, policy: null })).toThrow(
+      DecodeError,
+    );
   });
 });
 

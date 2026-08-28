@@ -208,7 +208,8 @@ beforeEach(() => {
         return okJSON(recsBody);
       if (url.includes("/api/policy-learning/sessions"))
         return okJSON(sessionsBody);
-      if (url.includes("/api/policy-learning/config")) return okJSON(configBody);
+      if (url.includes("/api/policy-learning/config"))
+        return okJSON(configBody);
       if (url.includes("/api/policy-learning")) return okJSON(statusBody);
       if (url.includes("/api/policy/draft")) return okJSON(draftBody);
       if (url.includes("/api/policy")) return okJSON(policyBody);
@@ -446,7 +447,8 @@ it("admin accept: exact ceremony wording; POST body is exactly {id, action, if_v
     expect(container.textContent).toContain("Accepted to Policy Draft");
   });
   const acceptCall = mutations.find(
-    (m) => typeof m.body === "object" && JSON.stringify(m.body).includes("accept"),
+    (m) =>
+      typeof m.body === "object" && JSON.stringify(m.body).includes("accept"),
   );
   expect(acceptCall?.body).toEqual({
     id: REC.id,
@@ -528,8 +530,8 @@ it("operator reject: decision-only POST with the bounded reason", async () => {
       "no policy or configuration changes",
     );
   });
-  const ta = Array.from(container.querySelectorAll("textarea")).find((el) =>
-    el.closest("dialog") !== null,
+  const ta = Array.from(container.querySelectorAll("textarea")).find(
+    (el) => el.closest("dialog") !== null,
   );
   expect(ta).toBeDefined();
   if (ta !== undefined) {
@@ -572,8 +574,6 @@ it("disable while a session is active: the server 409 renders verbatim (complete
   await click(findButton((t) => t.includes("Disable learning…")));
   await click(findButton((t) => t === "Disable learning"));
   await flushUntil(() => {
-    expect(container.textContent).toContain(
-      "complete or cancel it first",
-    );
+    expect(container.textContent).toContain("complete or cancel it first");
   });
 });

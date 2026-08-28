@@ -32,7 +32,11 @@ function readStringsOrNull(v: unknown, path: string): readonly string[] {
 
 // ── vocabulary (closed sets from the engine; unknown values are preserved
 // verbatim and classified unknown — never guessed) ─────────────────────────
-export const PL_SESSION_STATES = ["learning", "completed", "cancelled"] as const;
+export const PL_SESSION_STATES = [
+  "learning",
+  "completed",
+  "cancelled",
+] as const;
 export const PL_REC_STATES = [
   "generated",
   "superseded",
@@ -172,7 +176,10 @@ export interface LearningStatus {
   guardrailsHash: string;
 }
 
-export const decodeLearningStatus: Decoder<LearningStatus> = (v, path = "$") => {
+export const decodeLearningStatus: Decoder<LearningStatus> = (
+  v,
+  path = "$",
+) => {
   const o = readRecord(v, path);
   const engineRaw = o["engine"];
   let engine: PLEngineStats | undefined;
@@ -180,11 +187,21 @@ export const decodeLearningStatus: Decoder<LearningStatus> = (v, path = "$") => 
     const e = readRecord(engineRaw, `${path}.engine`);
     engine = {
       sessions: field(e, "sessions", readNumber, `${path}.engine`),
-      recommendations: field(e, "recommendations", readNumber, `${path}.engine`),
+      recommendations: field(
+        e,
+        "recommendations",
+        readNumber,
+        `${path}.engine`,
+      ),
       readOnly: field(e, "read_only", readBoolean, `${path}.engine`),
       schemaVersion: field(e, "schema_version", readNumber, `${path}.engine`),
       maxRetained: field(e, "max_retained", readNumber, `${path}.engine`),
-      maxDurationSec: field(e, "max_duration_sec", readNumber, `${path}.engine`),
+      maxDurationSec: field(
+        e,
+        "max_duration_sec",
+        readNumber,
+        `${path}.engine`,
+      ),
     };
   }
   return {
@@ -194,7 +211,12 @@ export const decodeLearningStatus: Decoder<LearningStatus> = (v, path = "$") => 
     advisoryNote: field(o, "advisory_note", optStr, path) ?? "",
     runtimeError: field(o, "runtime_error", optStr, path) ?? "",
     learningActive: field(o, "learning_active", optBool, path) ?? false,
-    activeSession: field(o, "active_session", readOptional(decodePLSession), path),
+    activeSession: field(
+      o,
+      "active_session",
+      readOptional(decodePLSession),
+      path,
+    ),
     engine,
     observation: field(o, "observation", readOptional(decodeTransport), path),
     recommendationPolicy: field(
@@ -209,7 +231,9 @@ export const decodeLearningStatus: Decoder<LearningStatus> = (v, path = "$") => 
   };
 };
 
-export function getLearningStatus(signal?: AbortSignal): Promise<LearningStatus> {
+export function getLearningStatus(
+  signal?: AbortSignal,
+): Promise<LearningStatus> {
   return apiRequest(
     "/api/policy-learning",
     decodeLearningStatus,
@@ -234,7 +258,10 @@ export interface LearningConfig {
   guardrailsHash: string;
 }
 
-export const decodeLearningConfig: Decoder<LearningConfig> = (v, path = "$") => {
+export const decodeLearningConfig: Decoder<LearningConfig> = (
+  v,
+  path = "$",
+) => {
   const o = readRecord(v, path);
   return {
     enabled: field(o, "enabled", readBoolean, path),
@@ -260,7 +287,9 @@ export const decodeLearningConfig: Decoder<LearningConfig> = (v, path = "$") => 
   };
 };
 
-export function getLearningConfig(signal?: AbortSignal): Promise<LearningConfig> {
+export function getLearningConfig(
+  signal?: AbortSignal,
+): Promise<LearningConfig> {
   return apiRequest(
     "/api/policy-learning/config",
     decodeLearningConfig,
@@ -342,7 +371,9 @@ const decodeSessionList: Decoder<SessionList> = (v, path = "$") => {
   };
 };
 
-export function getLearningSessions(signal?: AbortSignal): Promise<SessionList> {
+export function getLearningSessions(
+  signal?: AbortSignal,
+): Promise<SessionList> {
   return apiRequest(
     "/api/policy-learning/sessions",
     decodeSessionList,
@@ -424,12 +455,25 @@ const decodeEvidence: Decoder<PLEvidence> = (v, path = "$") => {
   const tiersRaw = o["tier_hits"];
   return {
     allowedRequests: field(o, "allowed_requests", readNumber, path),
-    policyBlockedRequests: field(o, "policy_blocked_requests", optNum, path) ?? 0,
-    threatBlockedRequests: field(o, "threat_blocked_requests", optNum, path) ?? 0,
-    observedAllowedSubjects: field(o, "observed_allowed_subjects", readNumber, path),
-    subjectsIsLowerBound: field(o, "subjects_is_lower_bound", optBool, path) ?? false,
+    policyBlockedRequests:
+      field(o, "policy_blocked_requests", optNum, path) ?? 0,
+    threatBlockedRequests:
+      field(o, "threat_blocked_requests", optNum, path) ?? 0,
+    observedAllowedSubjects: field(
+      o,
+      "observed_allowed_subjects",
+      readNumber,
+      path,
+    ),
+    subjectsIsLowerBound:
+      field(o, "subjects_is_lower_bound", optBool, path) ?? false,
     subjectOverflow: field(o, "subject_overflow", optNum, path) ?? 0,
-    allowedObservationDays: field(o, "allowed_observation_days", readNumber, path),
+    allowedObservationDays: field(
+      o,
+      "allowed_observation_days",
+      readNumber,
+      path,
+    ),
     daysIsLowerBound: field(o, "days_is_lower_bound", optBool, path) ?? false,
     dayOverflow: field(o, "day_overflow", optNum, path) ?? 0,
     allowedFirstSeen: field(o, "allowed_first_seen", optNum, path) ?? 0,
@@ -486,13 +530,24 @@ const decodeCoverage: Decoder<PLCoverage> = (v, path = "$") => {
   const o = readRecord(v, path);
   return {
     observedSubjects: field(o, "observed_subjects", readNumber, path),
-    subjectsIsLowerBound: field(o, "subjects_is_lower_bound", optBool, path) ?? false,
+    subjectsIsLowerBound:
+      field(o, "subjects_is_lower_bound", optBool, path) ?? false,
     observationDays: field(o, "observation_days", readNumber, path),
     daysIsLowerBound: field(o, "days_is_lower_bound", optBool, path) ?? false,
     sessionWindowDays: field(o, "session_window_days", optNum, path) ?? 0,
-    transportLoss: field(o, "transport_loss", readOptional(decodeTransportWindow), path),
+    transportLoss: field(
+      o,
+      "transport_loss",
+      readOptional(decodeTransportWindow),
+      path,
+    ),
     transportDegraded: field(o, "transport_degraded", optBool, path) ?? false,
-    membershipDenominatorKnown: field(o, "membership_denominator_known", readBoolean, path),
+    membershipDenominatorKnown: field(
+      o,
+      "membership_denominator_known",
+      readBoolean,
+      path,
+    ),
   };
 };
 
@@ -514,13 +569,26 @@ const decodeRecommendationPolicy: Decoder<PLRecommendationPolicy> = (
   const o = readRecord(v, path);
   return {
     algorithmVersion: field(o, "algorithm_version", readNumber, path),
-    highMinAllowedRequests: field(o, "high_min_allowed_requests", readNumber, path),
+    highMinAllowedRequests: field(
+      o,
+      "high_min_allowed_requests",
+      readNumber,
+      path,
+    ),
     highMinSubjects: field(o, "high_min_subjects", readNumber, path),
     highMinDays: field(o, "high_min_days", readNumber, path),
-    mediumMinAllowedRequests: field(o, "medium_min_allowed_requests", readNumber, path),
+    mediumMinAllowedRequests: field(
+      o,
+      "medium_min_allowed_requests",
+      readNumber,
+      path,
+    ),
     mediumMinSubjects: field(o, "medium_min_subjects", readNumber, path),
     mediumMinDays: field(o, "medium_min_days", readNumber, path),
-    communityTiers: readStringsOrNull(o["community_tiers"], `${path}.community_tiers`),
+    communityTiers: readStringsOrNull(
+      o["community_tiers"],
+      `${path}.community_tiers`,
+    ),
   };
 };
 
@@ -581,7 +649,10 @@ export const decodePLRecommendation: Decoder<PLRecommendation> = (
     policy: field(o, "policy", decodeRecommendationPolicy, path),
     policyHash: field(o, "policy_hash", readString, path),
     generatedAt: field(o, "generated_at", readString, path),
-    staleReasons: readStringsOrNull(o["stale_reasons"], `${path}.stale_reasons`),
+    staleReasons: readStringsOrNull(
+      o["stale_reasons"],
+      `${path}.stale_reasons`,
+    ),
     targetRuleId: field(o, "target_rule_id", optStr, path) ?? "",
     acceptedAt: field(o, "accepted_at", optStr, path) ?? "",
     acceptedBy: field(o, "accepted_by", optStr, path) ?? "",
@@ -600,7 +671,10 @@ export interface RecommendationList {
   policyVersion: number;
 }
 
-const decodeRecommendationList: Decoder<RecommendationList> = (v, path = "$") => {
+const decodeRecommendationList: Decoder<RecommendationList> = (
+  v,
+  path = "$",
+) => {
   const o = readRecord(v, path);
   const raw = o["recommendations"];
   return {
@@ -650,7 +724,8 @@ const decodeGenerateResult: Decoder<GenerateResult> = (v, path = "$") => {
         : readArray(decodePLRecommendation)(raw, `${path}.recommendations`),
     eligibleCells: field(o, "eligible_cells", optNum, path) ?? 0,
     truncatedCells: field(o, "truncated_cells", optNum, path) ?? 0,
-    skippedSyntheticScope: field(o, "skipped_synthetic_scope", optNum, path) ?? 0,
+    skippedSyntheticScope:
+      field(o, "skipped_synthetic_scope", optNum, path) ?? 0,
     skippedCategory: field(o, "skipped_category", optNum, path) ?? 0,
     skippedNoAllowedEvidence:
       field(o, "skipped_no_allowed_evidence", optNum, path) ?? 0,

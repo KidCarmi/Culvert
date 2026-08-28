@@ -73,9 +73,7 @@ function subjectSummary(rule: AuthRuleView): string {
   const sm = rule.subjectMatch;
   if (sm === undefined) return "—";
   return sm.all
-    .map((p) =>
-      p.known ? p.values.join(", ") : `[unrecognized: ${p.type}]`,
-    )
+    .map((p) => (p.known ? p.values.join(", ") : `[unrecognized: ${p.type}]`))
     .join(" AND ");
 }
 
@@ -109,16 +107,23 @@ function AuthRuleDetail({
         "—"
       ) : (
         <span key="sm">
-          {subjectSummary(r)} (schema v
-          {String(r.subjectMatch.schemaVersion)})
+          {subjectSummary(r)} (schema v{String(r.subjectMatch.schemaVersion)})
         </span>
       ),
     ],
-    ["Protocol", spec?.protocol === "" || spec === undefined ? "any" : spec.protocol],
+    [
+      "Protocol",
+      spec?.protocol === "" || spec === undefined ? "any" : spec.protocol,
+    ],
     ["Method", spec?.method === "" || spec === undefined ? "any" : spec.method],
     ["Owner", spec?.owner ?? "—"],
     ["Reason", spec?.reason ?? "—"],
-    ["Expires", spec?.expiresAt === "" || spec === undefined ? "no expiry" : spec.expiresAt],
+    [
+      "Expires",
+      spec?.expiresAt === "" || spec === undefined
+        ? "no expiry"
+        : spec.expiresAt,
+    ],
     [
       "Providers",
       spec === undefined || spec.providerRefs.length === 0 ? (
@@ -468,8 +473,8 @@ export function AuthRulesPage(): JSX.Element {
       {snap === undefined && q.isPending && <Skeleton>Loading rules…</Skeleton>}
       {snap === undefined && q.isError && (
         <ErrorState title="Auth rulebase unavailable">
-          The authentication-policy snapshot could not be loaded. Refresh to
-          try again.
+          The authentication-policy snapshot could not be loaded. Refresh to try
+          again.
         </ErrorState>
       )}
 
@@ -555,8 +560,8 @@ export function AuthRulesPage(): JSX.Element {
                 {displayRules.length === 0 && (
                   <tr>
                     <td colSpan={isAdmin ? 10 : 9}>
-                      No authentication rules are defined. Every request
-                      follows the global default authentication above.
+                      No authentication rules are defined. Every request follows
+                      the global default authentication above.
                     </td>
                   </tr>
                 )}
@@ -613,6 +618,7 @@ export function AuthRulesPage(): JSX.Element {
                               size="sm"
                               variant="ghost"
                               disabled={blocked || !editable}
+                              aria-label={`Edit rule ${r.name}`}
                               title={
                                 editable
                                   ? undefined
@@ -631,6 +637,7 @@ export function AuthRulesPage(): JSX.Element {
                               size="sm"
                               variant="ghost"
                               disabled={blocked}
+                              aria-label={`Delete rule ${r.name}`}
                               onClick={() => {
                                 setDeleting(r);
                                 setDeleteResult("idle");

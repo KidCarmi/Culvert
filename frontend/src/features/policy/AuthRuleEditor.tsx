@@ -315,7 +315,11 @@ export function AuthRuleEditor(props: AuthRuleEditorProps): JSX.Element {
             value={w.outcome}
             onChange={(e) => {
               const v = e.target.value;
-              if (v === "Exempt" || v === "CredentialRequired" || v === "SSORequired") {
+              if (
+                v === "Exempt" ||
+                v === "CredentialRequired" ||
+                v === "SSORequired"
+              ) {
                 setW({ outcome: v });
               }
             }}

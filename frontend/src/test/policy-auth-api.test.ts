@@ -37,7 +37,7 @@ const WIRE_RULE = {
     reason: "printer fleet cannot authenticate",
     expiresAt: "2027-01-01T00:00:00Z",
   },
-  warnings: ["source \"10.99.0.0/24\" is broader than /24"],
+  warnings: ['source "10.99.0.0/24" is broader than /24'],
   hitCount: 3,
   createdAt: "2026-08-01T00:00:00Z",
   modifiedAt: "2026-08-02T00:00:00Z",

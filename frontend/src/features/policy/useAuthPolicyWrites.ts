@@ -16,11 +16,7 @@ import type { RequestRunOwner } from "../../shared/runOwner";
 import { registerAuthCleanup } from "../../auth/teardown";
 
 export type AuthUnknownOp =
-  | "create"
-  | "edit"
-  | "delete"
-  | "reorder"
-  | "default outcome change";
+  "create" | "edit" | "delete" | "reorder" | "default outcome change";
 
 export interface AuthPolicyWrites {
   authQ: UseQueryResult<AuthPolicySnapshot>;

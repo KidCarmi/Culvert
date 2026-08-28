@@ -147,7 +147,12 @@ export const decodeAuthRule: Decoder<AuthRuleView> = (v, path = "$") => {
   const o = readRecord(v, path);
   return {
     ...base,
-    subjectMatch: field(o, "subjectMatch", readOptional(decodeSubjectMatch), path),
+    subjectMatch: field(
+      o,
+      "subjectMatch",
+      readOptional(decodeSubjectMatch),
+      path,
+    ),
     authSpec: field(o, "auth", readOptional(decodeAuthSpec), path),
     warnings: readStringsOrNull(o["warnings"], `${path}.warnings`),
   };
@@ -193,7 +198,9 @@ export const decodeAuthPolicySnapshot: Decoder<AuthPolicySnapshot> = (
   };
 };
 
-export function getAuthPolicy(signal?: AbortSignal): Promise<AuthPolicySnapshot> {
+export function getAuthPolicy(
+  signal?: AbortSignal,
+): Promise<AuthPolicySnapshot> {
   return apiRequest(
     "/api/authpolicy",
     decodeAuthPolicySnapshot,
@@ -240,7 +247,9 @@ export interface AuthRuleWrite {
 /** Seed a write DTO from a decoded rule. Returns null for a rule this client
  * cannot faithfully rebuild (unknown outcome / unknown predicate / missing
  * spec) — the editor must refuse instead of guessing (§11 fail closed). */
-export function writeSeedFromAuthView(view: AuthRuleView): AuthRuleWrite | null {
+export function writeSeedFromAuthView(
+  view: AuthRuleView,
+): AuthRuleWrite | null {
   if (!authRuleEditable(view)) return null;
   const spec = view.authSpec;
   const sm = view.subjectMatch;
@@ -274,7 +283,9 @@ export function writeSeedFromAuthView(view: AuthRuleView): AuthRuleWrite | null 
 /** Serialize for POST/PUT. Only real PolicyRule JSON keys (the server decodes
  * with DisallowUnknownFields) and only auth-editable fields — server-owned
  * and Stage-2-only keys are never emitted. */
-export function serializeAuthRuleWrite(w: AuthRuleWrite): Record<string, unknown> {
+export function serializeAuthRuleWrite(
+  w: AuthRuleWrite,
+): Record<string, unknown> {
   const auth: Record<string, unknown> = {
     outcome: w.outcome,
     owner: w.owner,
@@ -475,7 +486,9 @@ const decodeIdPProviderList: Decoder<IdPProviderList> = (v, path = "$") => {
   };
 };
 
-export function getIdPProviders(signal?: AbortSignal): Promise<IdPProviderList> {
+export function getIdPProviders(
+  signal?: AbortSignal,
+): Promise<IdPProviderList> {
   return apiRequest(
     "/api/idp",
     decodeIdPProviderList,

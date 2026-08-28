@@ -159,8 +159,15 @@ function RecommendationEvidence({ r }: { r: PLRecommendation }): JSX.Element {
 export function LearningRecommendations(
   props: LearningRecommendationsProps,
 ): JSX.Element {
-  const { list, isAdmin, canOperate, blocked, owner, refetchAll, latchUnknown } =
-    props;
+  const {
+    list,
+    isAdmin,
+    canOperate,
+    blocked,
+    owner,
+    refetchAll,
+    latchUnknown,
+  } = props;
 
   const [accepting, setAccepting] = useState<PLRecommendation | null>(null);
   const [acceptResult, setAcceptResult] = useState<ConfirmResult>("idle");
@@ -182,10 +189,7 @@ export function LearningRecommendations(
       .then(([snap, draft]) => {
         const target = snap.rules.find((r) => r.id === ruleId);
         const ok =
-          draft.active &&
-          snap.draft &&
-          target !== undefined &&
-          !target.enabled;
+          draft.active && snap.draft && target !== undefined && !target.enabled;
         setAcceptSuccess((cur) =>
           cur === null || cur.recId !== recId
             ? cur
@@ -289,15 +293,16 @@ export function LearningRecommendations(
     <Card title="Recommendations">
       {acceptSuccess !== null && (
         <Callout
-          variant={acceptSuccess.agreement === "inconsistent" ? "warning" : "success"}
+          variant={
+            acceptSuccess.agreement === "inconsistent" ? "warning" : "success"
+          }
           title={
             acceptSuccess.alreadyDone
               ? "Already accepted (idempotent)"
               : "Accepted to Policy Draft"
           }
         >
-          {acceptSuccess.note}{" "}
-          Created rule <Mono>{acceptSuccess.ruleId}</Mono>.{" "}
+          {acceptSuccess.note} Created rule <Mono>{acceptSuccess.ruleId}</Mono>.{" "}
           <Link
             to={`/policies/access-rules?rule=${encodeURIComponent(acceptSuccess.ruleId)}`}
           >
@@ -318,8 +323,7 @@ export function LearningRecommendations(
         <Callout variant="info" title="Policy Draft mode is not armed">
           Accepting a recommendation creates a DISABLED rule in the shared
           Policy Draft, which requires Require Commit to be armed. Arm it from
-          the Access Rules page — this page never changes the draft mode
-          itself.
+          the Access Rules page — this page never changes the draft mode itself.
         </Callout>
       )}
 
@@ -334,10 +338,7 @@ export function LearningRecommendations(
         {list.recommendations.map((r) => {
           const fresh = r.staleReasons.length === 0;
           const acceptable =
-            isAdmin &&
-            r.state === "generated" &&
-            fresh &&
-            list.draftModeArmed;
+            isAdmin && r.state === "generated" && fresh && list.draftModeArmed;
           return (
             <li key={r.id} className={styles.recCard}>
               <div className={styles.recHeader}>
@@ -351,7 +352,8 @@ export function LearningRecommendations(
                 Proposed rule (born safe): action {r.proposedRule.action}, TLS{" "}
                 {r.proposedRule.sslAction},{" "}
                 {r.proposedRule.enabled ? "ENABLED" : "disabled"} · generated{" "}
-                {r.generatedAt} · session <Mono>{r.sessionId.slice(0, 12)}</Mono>
+                {r.generatedAt} · session{" "}
+                <Mono>{r.sessionId.slice(0, 12)}</Mono>
               </p>
               {r.confidenceReasons.length > 0 && (
                 <p className={styles.recMeta}>
@@ -433,8 +435,8 @@ export function LearningRecommendations(
           title={`Accept to Policy Draft: ${accepting.group} → ${accepting.category}`}
           body={
             <>
-              This creates a DISABLED Access Rule in the shared Policy Draft.
-              It does not change enforcement. The rule must be reviewed and
+              This creates a DISABLED Access Rule in the shared Policy Draft. It
+              does not change enforcement. The rule must be reviewed and
               explicitly committed before it can affect live traffic.
             </>
           }
