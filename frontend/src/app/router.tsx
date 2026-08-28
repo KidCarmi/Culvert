@@ -18,6 +18,7 @@ import { HistoryPage } from "../features/monitor/HistoryPage";
 import { DiagnosticsPage } from "../features/diagnostics/DiagnosticsPage";
 import { GovernancePage } from "../features/governance/GovernancePage";
 import { AccessRulesPage } from "../features/policy/AccessRulesPage";
+import { AuthRulesPage } from "../features/policy/AuthRulesPage";
 import { TesterPage } from "../features/policy/TesterPage";
 
 function NotFoundPage(): JSX.Element {
@@ -44,6 +45,10 @@ export function createAppRouter(): ReturnType<typeof createBrowserRouter> {
           { path: "monitor/audit", element: <AuditPage /> },
           { path: "monitor/history", element: <HistoryPage /> },
           { path: "policies/access-rules", element: <AccessRulesPage /> },
+          {
+            path: "policies/authentication-rules",
+            element: <AuthRulesPage />,
+          },
           { path: "policies/tester", element: <TesterPage /> },
           { path: "diagnostics", element: <DiagnosticsPage /> },
           { path: "governance", element: <GovernancePage /> },
