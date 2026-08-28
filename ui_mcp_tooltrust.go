@@ -36,6 +36,19 @@ type mcpToolViewEnriched struct {
 	ApprovalExpiresAt *time.Time `json:"approval_expires_at,omitempty"`
 }
 
+// mcpToolTrustStatusView is the safe, read-only tool-trust subsystem status for the
+// MCP overview: whether the coordinator is composed and a bounded reason when not.
+type mcpToolTrustStatusView struct {
+	Composed bool   `json:"composed"`
+	Reason   string `json:"reason,omitempty"`
+}
+
+// mcpToolTrustStatus builds the read-only status view from the coordinator.
+func mcpToolTrustStatus() mcpToolTrustStatusView {
+	composed, reason := mcpToolTrust.composedStatus()
+	return mcpToolTrustStatusView{Composed: composed, Reason: reason}
+}
+
 // enrichToolView overlays the tool-trust annotation onto an inventory ToolView.
 func enrichToolView(tenant string, v adminapi.ToolView) mcpToolViewEnriched {
 	out := mcpToolViewEnriched{ToolView: v}

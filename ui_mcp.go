@@ -267,6 +267,10 @@ func apiMCPOverview(w http.ResponseWriter, r *http.Request) {
 		// enforcement/execution/fleet-distribution all truthfully false. The active
 		// snapshot detail is also on /api/mcp/policy (the same shared store).
 		"policy": mcpPolicyStatus(),
+		// ADR-0034: read-only tool-trust subsystem status (composed + reason). The
+		// approvals themselves are on /api/mcp/tool-approvals; this is composition state
+		// only. Not composed unless the Gateway qualification inventory is loaded.
+		"tool_trust": mcpToolTrustStatus(),
 	})
 }
 
