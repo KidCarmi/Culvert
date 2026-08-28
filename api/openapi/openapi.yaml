@@ -1627,6 +1627,9 @@ components:
       properties:
         overrides: { $ref: '#/components/schemas/CategoryOverrides' }
         editable: { type: boolean, description: "false on a managed data-plane node." }
+        revision:
+          type: string
+          description: Server-owned override revision (the durable authority fingerprint; the sentinel "none" for an empty set). Echo back via ?ifRevision= on the PUT for stale-overwrite protection; a mismatch is the structured 409 ({error, currentRevision, yourRevision}).
     SaaSFeedActivationDelta:
       type: object
       additionalProperties: false
@@ -9813,6 +9816,12 @@ paths:
       x-culvert-introduced-version: 1.0.0
       x-culvert-danger-level: medium
       x-culvert-audit-event: saasfeed.overrides
+      parameters:
+        - name: ifRevision
+          in: query
+          required: false
+          schema: { type: string }
+          description: Optional override-revision assertion (from the GET's `revision`); when present the full-set replacement runs the fenced durable path (2D-B) and a stale token returns the structured 409 without replacing anything.
       requestBody:
         required: true
         content:

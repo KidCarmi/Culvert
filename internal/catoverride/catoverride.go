@@ -63,13 +63,49 @@ var (
 	// ErrUnknownField is returned when the file carries JSON keys the contract
 	// does not define (strict decode).
 	ErrUnknownField = errors.New("catoverride: overrides file has unknown fields")
+	// ErrPersist marks a durable full-set replacement failure: the replacement
+	// was rolled back and the previous override set is live in memory AND on a
+	// reload (2D-B.0b, the 2D-A doctrine).
+	ErrPersist = errors.New("catoverride: override persistence failed")
 )
+
+// RevisionConflictError reports a failed optimistic-revision fence on the
+// full-set replacement: the client asserted the override revision it loaded
+// (the caller-supplied content fingerprint) and the current set differs. Same
+// structured-409 contract as the other 2D fences.
+type RevisionConflictError struct {
+	Current  string
+	Asserted string
+}
+
+func (e *RevisionConflictError) Error() string {
+	return fmt.Sprintf("override revision conflict: current %s, asserted %s", e.Current, e.Asserted)
+}
+
+// writeFile is the persistence seam (tests inject failures / ErrReplacedNotSynced).
+var writeFile = fileutil.AtomicWrite
 
 // Store holds the current overrides with race-safe access and file persistence.
 type Store struct {
 	mu   sync.RWMutex
 	ov   Overrides
 	path string
+
+	// mutMu serializes EVERY runtime writer — the fenced durable replacement,
+	// the memory-only ReplaceAll (cluster apply / import / rollback), and
+	// standalone Save — so the fence comparison, the replacement and the
+	// durable publication are one transaction, no standalone save can publish
+	// an in-flight replacement, and no bulk install can interleave (the 2D-A
+	// fence + commit-boundary doctrine; 2D-B.0b). Startup-only Load is exempt
+	// by ordering.
+	mutMu sync.Mutex
+
+	// saveMu is the durable-publication serializer: saveLocked runs snapshot →
+	// marshal → AtomicWrite as one unit under it, so publications land in
+	// acquisition order. LOCK ORDER (acyclic): mutMu → saveMu → mu; every
+	// runtime persistence entry goes through mutMu first; saveLocked never
+	// reacquires mutMu.
+	saveMu sync.Mutex
 }
 
 // New builds an empty store.
@@ -152,7 +188,23 @@ func decodeEnvelope(data []byte) (fileEnvelope, error) {
 
 // Save persists the current overrides as the schema-versioned envelope via an
 // atomic (temp+fsync+rename+parent-fsync) write. A no-path store is a no-op.
+// PUBLIC entry: acquires mutMu first (commit-boundary doctrine) so a
+// standalone save can never observe — or publish — an in-flight durable
+// replacement; the durable primitive holds mutMu and calls saveLocked
+// directly (mutMu is not reentrant — never call Save from inside it).
 func (s *Store) Save() error {
+	s.mutMu.Lock()
+	defer s.mutMu.Unlock()
+	return s.saveLocked()
+}
+
+// saveLocked is the internal publication helper. Caller MUST hold mutMu. The
+// whole helper runs under saveMu — snapshot included — so publications form
+// one monotonic order.
+func (s *Store) saveLocked() error {
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+
 	s.mu.RLock()
 	path := s.path
 	env := fileEnvelope{SchemaVersion: SchemaVersion, Overrides: cloneOverrides(s.ov)}
@@ -164,7 +216,54 @@ func (s *Store) Save() error {
 	if err != nil {
 		return err
 	}
-	return fileutil.AtomicWrite(path, data, 0o600)
+	return writeFile(path, data, 0o600)
+}
+
+// ReplaceAllDurable is the fenced durable FULL-SET replacement (2D-B.0b):
+//
+//	fence (optional expected revision, computed by the caller-supplied revOf
+//	over the CURRENT set) → normalize/validate the target → replace → durable
+//	save → success — all under mutMu, one serialization domain, no detached
+//	check, no TOCTOU, no last-write-wins.
+//
+// revOf is the caller's canonical content-revision function (production: the
+// saasFeedOverridesFingerprint that is already the durable authority
+// revision truth). Fence mismatch ⇒ *RevisionConflictError (nothing ran).
+// Validation failure ⇒ error, current set untouched. Persistence failure ⇒
+// the previous set is restored (memory AND a reload agree) + ErrPersist —
+// a failed full-set replacement is never present after restart.
+// ErrReplacedNotSynced follows the landed-content doctrine. On success the
+// stored (normalized) set is returned for the caller's response/recompose.
+func (s *Store) ReplaceAllDurable(expectedRev *string, next Overrides, revOf func(Overrides) string) (Overrides, error) {
+	s.mutMu.Lock()
+	defer s.mutMu.Unlock()
+
+	if expectedRev != nil {
+		s.mu.RLock()
+		cur := revOf(cloneOverrides(s.ov))
+		s.mu.RUnlock()
+		if *expectedRev != cur {
+			return Overrides{}, &RevisionConflictError{Current: cur, Asserted: *expectedRev}
+		}
+	}
+	norm, err := Normalize(next)
+	if err != nil {
+		return Overrides{}, err
+	}
+	s.mu.Lock()
+	prev := s.ov
+	s.ov = norm
+	s.mu.Unlock()
+	if werr := s.saveLocked(); werr != nil {
+		if errors.Is(werr, fileutil.ErrReplacedNotSynced) {
+			return cloneOverrides(norm), nil // landed-content success
+		}
+		s.mu.Lock()
+		s.ov = prev
+		s.mu.Unlock()
+		return Overrides{}, fmt.Errorf("%w: %w", ErrPersist, werr)
+	}
+	return cloneOverrides(norm), nil
 }
 
 // Get returns a deep copy of the current overrides (safe to mutate/serialize).
@@ -177,12 +276,17 @@ func (s *Store) Get() Overrides {
 // ReplaceAll validates then wholesale-replaces the override set. An empty set is
 // a legitimate value (clears every override) — the store-level counterpart to the
 // wire deletion-propagation the later CP→DP slice adds. Invalid input is rejected
-// and the current set is left untouched (all-or-nothing).
+// and the current set is left untouched (all-or-nothing). Holds mutMu so a bulk
+// install (cluster apply / import / rollback) orders against the fenced durable
+// replacement; memory-only — the callers' separate Save() reacquires the domain
+// and publishes the current committed state.
 func (s *Store) ReplaceAll(o Overrides) error {
 	norm, err := Normalize(o)
 	if err != nil {
 		return err
 	}
+	s.mutMu.Lock()
+	defer s.mutMu.Unlock()
 	s.mu.Lock()
 	s.ov = norm
 	s.mu.Unlock()

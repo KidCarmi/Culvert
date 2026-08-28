@@ -2663,6 +2663,10 @@
           },
           "overrides": {
             "$ref": "#/components/schemas/CategoryOverrides"
+          },
+          "revision": {
+            "description": "Server-owned override revision (the durable authority fingerprint; the sentinel \"none\" for an empty set). Echo back via ?ifRevision= on the PUT for stale-overwrite protection; a mismatch is the structured 409 ({error, currentRevision, yourRevision}).",
+            "type": "string"
           }
         },
         "required": [
@@ -16971,6 +16975,17 @@
       "put": {
         "description": "Full-set replacement of the admin category overrides. Transmit the complete desired set; an empty body ({}) is a deliberate clear of every override (an explicit empty replacement that delete-propagates to the fleet). Denied with 409 on a managed data-plane node.",
         "operationId": "setSaaSFeedOverrides",
+        "parameters": [
+          {
+            "description": "Optional override-revision assertion (from the GET's `revision`); when present the full-set replacement runs the fenced durable path (2D-B) and a stale token returns the structured 409 without replacing anything.",
+            "in": "query",
+            "name": "ifRevision",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {

@@ -18,6 +18,8 @@ package main
 // (409): feed policy is control-plane-authoritative.
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -308,6 +310,10 @@ func apiSaaSFeedOverrides(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, map[string]any{
 			"overrides": ov,
 			"editable":  !isManagedDataPlane(),
+			// The server-owned override revision (the durable authority
+			// fingerprint) — echoed back via ?ifRevision= on the v2 PUT for
+			// stale-overwrite protection (2D-B §34).
+			"revision": saasFeedOverridesFingerprint(ov),
 		})
 
 	case http.MethodPut:
@@ -336,6 +342,32 @@ func putSaaSFeedOverrides(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
+	if ifRev := parseIfRevision(r); ifRev != nil {
+		// v2 fenced durable replacement (2D-B §34/§35): fence + validate +
+		// replace + durable save in ONE serialization domain — no detached
+		// handler check, no last-write-wins. A failed replacement is rolled
+		// back (memory + reload); recompose happens ONLY after durable
+		// success.
+		stored, err := globalCategoryOverrides.ReplaceAllDurable(ifRev, incoming, saasFeedOverridesFingerprint)
+		if err != nil {
+			writeOverrideMutationError(w, err)
+			return
+		}
+		auditEvent(r, "saasfeed.overrides", "replace", "category overrides updated")
+		saveConfigVersion(sessionAdmin(r), "saasfeed.overrides")
+		recomposeSignedFeedOverrides()
+		pubErr := publishCurrentConfigSnapshot()
+		resp := map[string]any{
+			"ok":        true,
+			"overrides": stored,
+			"revision":  saasFeedOverridesFingerprint(stored),
+		}
+		if pubErr != nil {
+			resp["cluster_publish_rejected"] = pubErr.Error()
+		}
+		jsonOK(w, resp)
+		return
+	}
 	old := globalCategoryOverrides.Get()
 	if err := globalCategoryOverrides.ReplaceAll(incoming); err != nil {
 		http.Error(w, "invalid overrides: "+sanitizeLog(err.Error()), http.StatusBadRequest)
@@ -358,4 +390,23 @@ func putSaaSFeedOverrides(w http.ResponseWriter, r *http.Request) {
 		resp["cluster_publish_rejected"] = pubErr.Error()
 	}
 	jsonOK(w, resp)
+}
+
+// writeOverrideMutationError maps a fenced override-replacement failure.
+func writeOverrideMutationError(w http.ResponseWriter, err error) {
+	var conflict *catoverride.RevisionConflictError
+	switch {
+	case errors.As(err, &conflict):
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // response write
+			"error":           "override revision conflict",
+			"currentRevision": conflict.Current,
+			"yourRevision":    conflict.Asserted,
+		})
+	case errors.Is(err, catoverride.ErrPersist):
+		http.Error(w, "failed to persist overrides: the replacement was rolled back", http.StatusInternalServerError)
+	default:
+		http.Error(w, "invalid overrides: "+sanitizeLog(err.Error()), http.StatusBadRequest)
+	}
 }
