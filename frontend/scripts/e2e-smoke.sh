@@ -139,6 +139,20 @@ wait_ready "$FRESH_PORT" FRESH
 wait_ready "$FAIL_PORT" FAIL
 echo "e2e-smoke: all three instances ready"
 
+# API-establish the retained-history premise (§19): the AUTH instance's
+# log-store boot state inherits the SHARED /data/admin_settings.json left by
+# the PREVIOUS run (recorded harness debt — dataDir is a fixed absolute
+# path), so if a prior run ended with the store disabled the seeds below
+# would silently land only in the memory ring and every retained-history
+# assertion would fail. Enable it through the supported admin API first.
+SEED_JAR="$WORK/auth/seed-cookies.txt"
+curl -s -o /dev/null -c "$SEED_JAR" -X POST -H 'Content-Type: application/json' \
+  -d '{"user":"admin","pass":"Password123"}' \
+  "http://127.0.0.1:$UI_PORT/api/auth/login"
+curl -s -o /dev/null -b "$SEED_JAR" -X PUT -H 'Content-Type: application/json' \
+  -d '{"enabled":true,"retentionDays":7,"retentionMaxGB":1,"criticalDiskPct":90}' \
+  "http://127.0.0.1:$UI_PORT/api/logs/retention"
+
 echo "e2e-smoke: seeding traffic history through the AUTH proxy (default-deny)"
 i=0
 while [ "$i" -lt 150 ]; do

@@ -86,7 +86,8 @@ test("admin reads History & Storage on an enabled appliance (nav + posture + usa
   await expect(
     page.getByRole("heading", { name: "History & Storage" }).first(),
   ).toBeVisible();
-  // AUTH's harness config seed-enables the store (log_store_path).
+  // The harness API-enables the AUTH store before seeding (e2e-smoke.sh
+  // §19 premise — boot state inherits the SHARED /data admin settings).
   await expect(page.getByText("Enabled", { exact: true })).toBeVisible();
   await expect(page.getByText("Stored size")).toBeVisible();
   await expect(page.getByText("Projected growth")).toBeVisible();
