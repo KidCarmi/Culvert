@@ -49,6 +49,17 @@ type Config struct {
 const (
 	defaultMaxRecords   = 4096
 	defaultMaxPerTenant = 256
+
+	// maxRecordJSONBytes is a generous upper bound on one serialized ToolApproval. The
+	// record's every free-text/reference field is byte-bounded (maxReasonBytes et al), so
+	// the marshaled JSON — keys, quoting, the seven ~256-byte actor/reference fields, three
+	// ~512-byte reason fields, the fingerprint hex, and the timestamps — cannot exceed this.
+	// It is only used to size the recovery read cap, so it is set well above the true worst
+	// case; a legitimately-written record is far smaller.
+	maxRecordJSONBytes = 8192
+	// storeEnvelopeSlackBytes covers the persistedStore wrapper (schema_version, the array
+	// brackets/commas) independent of record count.
+	storeEnvelopeSlackBytes = 4096
 )
 
 // Store is the durable, bounded, tenant-scoped, secret-free ToolApproval store —
@@ -115,12 +126,25 @@ func NewStore(cfg Config) (*Store, error) {
 func (s *Store) Load() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	raw, err := os.ReadFile(s.path) // #nosec G304 -- fixed store path under the data dir
+	f, err := os.Open(s.path) // #nosec G304 -- fixed store path under the data dir
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil // fresh store
 		}
+		return mcperr.Wrap(mcperr.ReasonConfigInvalid, "tooltrust.load", "open store", err)
+	}
+	defer func() { _ = f.Close() }()
+	// Bound the recovery read: a store within its configured cap cannot exceed this many
+	// bytes, so a larger file is corruption or a restore from a bigger-cap store. Reading it
+	// unbounded would let a schema-valid but oversized file exhaust memory during startup.
+	// LimitReader to cap+1 so hitting the ceiling is detectable without materializing more.
+	readLimit := int64(s.maxRecords)*maxRecordJSONBytes + storeEnvelopeSlackBytes
+	raw, err := io.ReadAll(io.LimitReader(f, readLimit+1))
+	if err != nil {
 		return mcperr.Wrap(mcperr.ReasonConfigInvalid, "tooltrust.load", "read store", err)
+	}
+	if int64(len(raw)) > readLimit {
+		return mcperr.New(mcperr.ReasonConfigInvalid, "tooltrust.load", "store file exceeds size bound")
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
@@ -140,21 +164,49 @@ func (s *Store) Load() error {
 	if env.SchemaVersion != SchemaVersion {
 		return mcperr.New(mcperr.ReasonConfigInvalid, "tooltrust.load", "unknown store schema version")
 	}
-	byID := make(map[string]*ToolApproval, len(env.Approvals))
-	for _, a := range env.Approvals {
-		if a == nil {
-			return mcperr.New(mcperr.ReasonConfigInvalid, "tooltrust.load", "nil approval record")
-		}
-		if err := a.validateStored(); err != nil {
-			return err
-		}
-		if _, dup := byID[a.ApprovalID]; dup {
-			return mcperr.New(mcperr.ReasonConfigInvalid, "tooltrust.load", "duplicate approval id")
-		}
-		byID[a.ApprovalID] = a
+	// Enforce the configured TOTAL-record bound before publishing: a file with more records
+	// than this store's cap (e.g. restored from a larger-cap deployment, or tampered) must
+	// fail closed rather than load an over-capacity index the mutation paths would then keep.
+	if len(env.Approvals) > s.maxRecords {
+		return mcperr.New(mcperr.ReasonConfigInvalid, "tooltrust.load", "store record count exceeds configured bound")
+	}
+	byID, err := s.buildLoadedIndexLocked(env.Approvals)
+	if err != nil {
+		return err
 	}
 	s.byID = byID
 	return nil
+}
+
+// buildLoadedIndexLocked validates every recovered record and enforces the per-tenant
+// non-terminal bound, returning the in-memory index or a fail-closed error. Split out of
+// Load to keep each function's control flow within the cyclomatic bound.
+func (s *Store) buildLoadedIndexLocked(approvals []*ToolApproval) (map[string]*ToolApproval, error) {
+	now := s.clock()
+	perTenantNonTerminal := make(map[string]int)
+	byID := make(map[string]*ToolApproval, len(approvals))
+	for _, a := range approvals {
+		if a == nil {
+			return nil, mcperr.New(mcperr.ReasonConfigInvalid, "tooltrust.load", "nil approval record")
+		}
+		if err := a.validateStored(); err != nil {
+			return nil, err
+		}
+		if _, dup := byID[a.ApprovalID]; dup {
+			return nil, mcperr.New(mcperr.ReasonConfigInvalid, "tooltrust.load", "duplicate approval id")
+		}
+		// Enforce the per-tenant non-terminal bound too, using the same effectiveTerminal
+		// accounting CreateRequest uses, so recovery can never publish a store already over
+		// the per-tenant cap (which would let one tenant hold more live slots than allowed).
+		if !a.effectiveTerminal(now) {
+			perTenantNonTerminal[a.Tenant]++
+			if perTenantNonTerminal[a.Tenant] > s.maxPerTenant {
+				return nil, mcperr.New(mcperr.ReasonConfigInvalid, "tooltrust.load", "tenant non-terminal count exceeds configured bound")
+			}
+		}
+		byID[a.ApprovalID] = a
+	}
+	return byID, nil
 }
 
 // RequestInput is the caller-supplied input to CreateRequest. It carries only safe
@@ -413,8 +465,11 @@ func (s *Store) Reject(id, actor, reason string) error {
 	}
 	prior := a.clone()
 	a.Status = StatusRejected
-	a.ApprovedBy = actor
-	a.ApprovedAt = now
+	// Record the denial in its OWN evidence fields, NOT ApprovedBy/ApprovedAt: a rejection
+	// must be distinguishable from a grant so a single status-byte flip (Rejected → Active)
+	// cannot pass Load's lifecycle check (validateStatusLifecycle) as an approved grant.
+	a.RejectedBy = actor
+	a.RejectedAt = &now
 	a.RejectedReason = reason
 	if err := s.persistLocked(); err != nil {
 		*a = *prior
@@ -631,11 +686,17 @@ func (s *Store) capacityCheckLocked(tenant string, now time.Time) (pruneID strin
 	if len(s.byID) < s.maxRecords {
 		return "", nil
 	}
-	// At the total cap: pick the single oldest terminal record. A non-terminal record
-	// is never evicted (that would drop live trust); if none is prunable, fail closed.
+	// At the total cap: pick the single oldest PRUNABLE record. Prunable is NARROWER than
+	// effectiveTerminal — it deliberately EXCLUDES a past-expiry ACTIVE grant, because such a
+	// grant may still project catalog.Usable and the store cannot withdraw that projection
+	// (only the coordinator's reconcile can). Deleting it here would remove its last ToolRef
+	// before demotion, leaving the tool Usable with no record left for reconcile to discover.
+	// A past-expiry active grant is swept to Expired (and demoted) by the periodic reconcile
+	// within one tick, after which it becomes genuinely terminal and prunable. If nothing is
+	// prunable yet, fail closed (safe, self-healing) rather than orphan a live projection.
 	var oldest *ToolApproval
 	for _, a := range s.byID {
-		if !a.effectiveTerminal(now) {
+		if !a.prunableAsOf(now) {
 			continue
 		}
 		if oldest == nil || a.RequestedAt.Before(oldest.RequestedAt) {
@@ -651,12 +712,27 @@ func (s *Store) capacityCheckLocked(tenant string, now time.Time) (pruneID strin
 // effectiveTerminal reports whether the approval is terminal as of now, treating ANY
 // past-expiry record (pending as well as active) as terminal for capacity accounting —
 // an abandoned short-lived request must not permanently hold a tenant/global slot until
-// an admin manually rejects it.
+// an admin manually rejects it. Used for the per-tenant non-terminal COUNT (never for
+// prune selection — see prunableAsOf).
 func (a *ToolApproval) effectiveTerminal(now time.Time) bool {
 	if a.Status.terminal() {
 		return true
 	}
 	return a.pastExpiry(now)
+}
+
+// prunableAsOf reports whether the record can be safely EVICTED to reclaim a capacity
+// slot. It is narrower than effectiveTerminal: a genuinely-terminal record (its tool was
+// demoted at the transition, or never promoted) and a past-expiry PENDING record (a
+// pending record never projects catalog.Usable) are prunable, but a past-expiry ACTIVE
+// grant is NOT — it may still be a Usable projection whose only withdrawal path is the
+// coordinator re-deriving its tool, and pruning it would delete the last ToolRef before
+// that demotion. It becomes prunable once reconcile sweeps it to Expired.
+func (a *ToolApproval) prunableAsOf(now time.Time) bool {
+	if a.Status.terminal() {
+		return true
+	}
+	return a.Status == StatusPending && a.pastExpiry(now)
 }
 
 // --- request validation ---------------------------------------------------
@@ -744,12 +820,17 @@ func (a *ToolApproval) validateStored() error {
 // (e.g. a pending record's numeric status flipped to Active) cannot materialize an
 // active grant with NO recorded human approval. The status must be a known enum, and:
 //
-//   - Active   ⇒ an approver + approval time (a grant was consciously conferred);
-//   - Rejected ⇒ an actor + decision time;
+//   - Active   ⇒ an approver + approval time, AND no terminal-decider evidence;
+//   - Rejected ⇒ a rejecter + rejection time (its OWN fields, not the approver's);
 //   - Revoked  ⇒ a revoker + revocation time;
 //   - Pending  ⇒ no decision fields yet; Expired ⇒ no decider required (automatic).
 //
-// Any violation fails the whole Load closed (recovery is fail-closed, never
+// The Active branch additionally REJECTS any record that also carries rejection or
+// revocation evidence: a rejection and a revocation each record their decider in their
+// OWN fields, so a single valid-JSON status-byte flip from a terminal denial to Active
+// leaves that terminal evidence behind and is caught here (the previous shared
+// ApprovedBy/ApprovedAt shape made a Rejected→Active flip indistinguishable from a real
+// grant). Any violation fails the whole Load closed (recovery is fail-closed, never
 // fail-open into an unapproved active grant).
 func (a *ToolApproval) validateStatusLifecycle() error {
 	bad := func(detail string) error {
@@ -759,12 +840,10 @@ func (a *ToolApproval) validateStatusLifecycle() error {
 	case StatusPending:
 		return nil
 	case StatusActive:
-		if a.ApprovedBy == "" || a.ApprovedAt.IsZero() {
-			return bad("active record without recorded approval evidence")
-		}
+		return a.validateActiveEvidence(bad)
 	case StatusRejected:
-		if a.ApprovedBy == "" || a.ApprovedAt.IsZero() {
-			return bad("rejected record without recorded decision evidence")
+		if a.RejectedBy == "" || a.RejectedAt == nil {
+			return bad("rejected record without recorded rejection evidence")
 		}
 	case StatusRevoked:
 		if a.RevokedBy == "" || a.RevokedAt == nil {
@@ -778,12 +857,27 @@ func (a *ToolApproval) validateStatusLifecycle() error {
 	return nil
 }
 
+// validateActiveEvidence enforces the StatusActive invariants: an approver + approval time
+// must be present, AND no terminal-decision evidence may be — a rejection/revocation flipped
+// to Active by a single status-byte edit keeps its own decider fields, which a real active
+// grant never carries.
+func (a *ToolApproval) validateActiveEvidence(bad func(string) error) error {
+	if a.ApprovedBy == "" || a.ApprovedAt.IsZero() {
+		return bad("active record without recorded approval evidence")
+	}
+	if a.RejectedBy != "" || a.RejectedAt != nil || a.RevokedBy != "" || a.RevokedAt != nil {
+		return bad("active record carries terminal-decision evidence")
+	}
+	return nil
+}
+
 // freeTextOverBound reports whether any of the record's free-text / actor fields
 // exceeds its byte bound (a corrupt or hand-edited durable record).
 func (a *ToolApproval) freeTextOverBound() bool {
 	return len(a.Reason) > maxReasonBytes || len(a.TicketRef) > maxTicketBytes ||
 		len(a.RevocationReason) > maxReasonBytes || len(a.RejectedReason) > maxReasonBytes ||
-		len(a.RequestedBy) > maxActorBytes || len(a.ApprovedBy) > maxActorBytes || len(a.RevokedBy) > maxActorBytes
+		len(a.RequestedBy) > maxActorBytes || len(a.ApprovedBy) > maxActorBytes ||
+		len(a.RevokedBy) > maxActorBytes || len(a.RejectedBy) > maxActorBytes
 }
 
 // --- small helpers --------------------------------------------------------

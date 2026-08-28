@@ -186,6 +186,15 @@ type ToolApproval struct {
 	RevokedAt        *time.Time `json:"revoked_at,omitempty"`
 	RevocationReason string     `json:"revocation_reason,omitempty"`
 
+	// RejectedBy / RejectedAt record WHO denied a pending request and WHEN. They are the
+	// rejection's OWN decision-evidence fields — deliberately DISTINCT from ApprovedBy /
+	// ApprovedAt, which a rejection previously reused. A shared evidence shape let a single
+	// valid-JSON status byte flip (Rejected 3 → Active 2) pass Load's per-status lifecycle
+	// check and materialize an active grant from a denial (ADR-0034 recovery is fail-closed
+	// against single-field tamper). With distinct fields, a flipped-to-Active record still
+	// carries RejectedBy/RejectedAt, which the Active-lifecycle invariant forbids.
+	RejectedBy string     `json:"rejected_by,omitempty"`
+	RejectedAt *time.Time `json:"rejected_at,omitempty"`
 	// RejectedReason records why a pending request was rejected (governance evidence).
 	RejectedReason string `json:"rejected_reason,omitempty"`
 }
@@ -241,6 +250,10 @@ func (a *ToolApproval) clone() *ToolApproval {
 	if a.RevokedAt != nil {
 		t := *a.RevokedAt
 		out.RevokedAt = &t
+	}
+	if a.RejectedAt != nil {
+		t := *a.RejectedAt
+		out.RejectedAt = &t
 	}
 	return &out
 }

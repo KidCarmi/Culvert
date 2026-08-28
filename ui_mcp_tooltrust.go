@@ -92,6 +92,8 @@ type mcpToolApprovalView struct {
 	RevokedBy                string     `json:"revoked_by,omitempty"`
 	RevokedAt                *time.Time `json:"revoked_at,omitempty"`
 	RevocationReason         string     `json:"revocation_reason,omitempty"`
+	RejectedBy               string     `json:"rejected_by,omitempty"`
+	RejectedAt               *time.Time `json:"rejected_at,omitempty"`
 	RejectedReason           string     `json:"rejected_reason,omitempty"`
 }
 
@@ -116,6 +118,8 @@ func mcpToolApprovalViewOf(a *tooltrust.ToolApproval) mcpToolApprovalView {
 		RevokedBy:                a.RevokedBy,
 		RevokedAt:                a.RevokedAt,
 		RevocationReason:         a.RevocationReason,
+		RejectedBy:               a.RejectedBy,
+		RejectedAt:               a.RejectedAt,
 		RejectedReason:           a.RejectedReason,
 	}
 	if !a.ApprovedAt.IsZero() {

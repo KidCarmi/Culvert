@@ -738,3 +738,222 @@ func TestActiveApprovals_DoesNotSelfMatchFingerprint(t *testing.T) {
 		t.Fatal("active approval must match its exact reviewed fingerprint")
 	}
 }
+
+// --- Codex round 5 regressions --------------------------------------------
+
+// TestCreate_DoesNotPruneExpiredActiveGrant proves the round-5 P1: at the total cap, a
+// past-expiry ACTIVE grant (which may still project catalog.Usable) is NOT chosen as the
+// prune victim, because deleting its last ToolRef would strand the projection with no
+// record for reconcile to demote. The create fails closed until a sweep converts the
+// grant to Expired (genuinely terminal), after which it is prunable.
+func TestCreate_DoesNotPruneExpiredActiveGrant(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	dir := t.TempDir()
+	s, err := NewStore(Config{Path: filepath.Join(dir, "approvals.json"), Clock: clk.now, MaxRecords: 1, MaxPerTenant: 8})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := s.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	in := goodRequest()
+	exp := clk.t.Add(time.Minute)
+	in.ExpiresAt = &exp
+	req, err := s.CreateRequest(in)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := s.Approve(req.ApprovalID, "admin@corp", matchingTarget(in)); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	// Advance past expiry. The grant is now past-expiry ACTIVE and the store is at its
+	// 1-record cap. A new request must NOT prune the expired-active grant (that would orphan
+	// its Usable projection); it fails closed instead.
+	clk.t = exp.Add(time.Second)
+	fresh := goodRequest()
+	fresh.ToolName = "fresh"
+	if _, err := s.CreateRequest(fresh); err == nil {
+		t.Fatal("must not prune a past-expiry ACTIVE grant to make room — expected capacity error")
+	} else {
+		mustReason(t, err, mcperr.ReasonAdminRangeExceeded)
+	}
+	// The expired-active grant is still present, so its ToolRef survives for the coordinator
+	// to demote.
+	if refs := s.ToolRefs(); len(refs) != 1 {
+		t.Fatalf("the expired-active grant's ToolRef must survive for reconcile, got %d refs", len(refs))
+	}
+	// Sweep it to Expired (what the periodic reconcile does), then the slot is reclaimable.
+	if _, err := s.ExpireDue(clk.now()); err != nil {
+		t.Fatalf("ExpireDue: %v", err)
+	}
+	if _, err := s.CreateRequest(fresh); err != nil {
+		t.Fatalf("after the sweep the now-Expired record must be prunable, got %v", err)
+	}
+}
+
+// TestLoad_RejectedFlippedToActiveFailsClosed proves the round-5 P1: a rejection records
+// its decider in its OWN fields (RejectedBy/RejectedAt), so a Rejected record whose status
+// byte is flipped to Active — even one that also carries approval fields — is caught by the
+// Active-lifecycle invariant that forbids terminal-decision evidence, instead of loading as
+// a live grant.
+func TestLoad_RejectedFlippedToActiveFailsClosed(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	when := time.Unix(1000, 0)
+	cases := map[string]*ToolApproval{
+		// Simple single-byte flip: rejection evidence present, no approval evidence.
+		"flip_only": {
+			SchemaVersion: SchemaVersion, ApprovalID: "a", Tenant: "t", ServerID: "s", ToolName: "n",
+			FingerprintFormatVersion: 1, Purpose: PurposeShadowEvaluation, Status: StatusActive,
+			RequestedBy: "op", RequestedAt: when,
+			RejectedBy: "admin", RejectedAt: &when,
+		},
+		// Flip that also forges approval fields to satisfy the approval-evidence check: still
+		// caught because the leftover rejection evidence is forbidden on an Active record.
+		"flip_with_forged_approval": {
+			SchemaVersion: SchemaVersion, ApprovalID: "a", Tenant: "t", ServerID: "s", ToolName: "n",
+			FingerprintFormatVersion: 1, Purpose: PurposeShadowEvaluation, Status: StatusActive,
+			RequestedBy: "op", RequestedAt: when,
+			ApprovedBy: "admin", ApprovedAt: when,
+			RejectedBy: "admin", RejectedAt: &when,
+		},
+	}
+	for name, a := range cases {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "approvals.json")
+		raw, _ := json.Marshal(persistedStore{SchemaVersion: SchemaVersion, Approvals: []*ToolApproval{a}})
+		if err := os.WriteFile(path, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		s, _ := NewStore(Config{Path: path, Clock: clk.now})
+		if err := s.Load(); err == nil {
+			t.Fatalf("[%s] a rejected record flipped to Active must fail closed", name)
+		}
+	}
+}
+
+// TestLoad_RejectedRequiresOwnEvidence proves a Rejected record must carry its own
+// RejectedBy/RejectedAt, and that a genuine rejection round-trips through reload.
+func TestLoad_RejectedRequiresOwnEvidence(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	when := time.Unix(1000, 0)
+	// Missing rejection evidence → fail closed.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "approvals.json")
+	missing := &ToolApproval{
+		SchemaVersion: SchemaVersion, ApprovalID: "a", Tenant: "t", ServerID: "s", ToolName: "n",
+		FingerprintFormatVersion: 1, Purpose: PurposeShadowEvaluation, Status: StatusRejected,
+		RequestedBy: "op", RequestedAt: when,
+	}
+	raw, _ := json.Marshal(persistedStore{SchemaVersion: SchemaVersion, Approvals: []*ToolApproval{missing}})
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, _ := NewStore(Config{Path: path, Clock: clk.now})
+	if err := s.Load(); err == nil {
+		t.Fatal("a rejected record without its own rejection evidence must fail closed")
+	}
+}
+
+// TestReject_PersistsDistinctEvidenceAndSurvivesReload proves Reject records RejectedBy/
+// RejectedAt (not ApprovedBy/ApprovedAt) and the terminal state survives a reload.
+func TestReject_PersistsDistinctEvidenceAndSurvivesReload(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(2000, 0)}
+	s := newTestStore(t, clk)
+	req, err := s.CreateRequest(goodRequest())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := s.Reject(req.ApprovalID, "admin@corp", "not this build"); err != nil {
+		t.Fatalf("reject: %v", err)
+	}
+	got, err := s.Get(req.ApprovalID, "tenant-a")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Status != StatusRejected {
+		t.Fatalf("status = %v, want rejected", got.Status)
+	}
+	if got.RejectedBy != "admin@corp" || got.RejectedAt == nil {
+		t.Fatalf("rejection must record its own decider fields, got by=%q at=%v", got.RejectedBy, got.RejectedAt)
+	}
+	if got.ApprovedBy != "" || !got.ApprovedAt.IsZero() {
+		t.Fatalf("a rejection must NOT write approval evidence, got by=%q at=%v", got.ApprovedBy, got.ApprovedAt)
+	}
+	// Reload the durable file: the rejected record must survive validation.
+	s2, _ := NewStore(Config{Path: s.path, Clock: clk.now, MaxRecords: 64, MaxPerTenant: 8})
+	if err := s2.Load(); err != nil {
+		t.Fatalf("a legitimately-rejected record must reload cleanly, got %v", err)
+	}
+}
+
+// TestLoad_OverRecordCountFailsClosed proves the round-5 P2: a file with more records than
+// the configured MaxRecords fails closed rather than publishing an over-capacity index.
+func TestLoad_OverRecordCountFailsClosed(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "approvals.json")
+	var recs []*ToolApproval
+	for i := 0; i < 3; i++ {
+		recs = append(recs, &ToolApproval{
+			SchemaVersion: SchemaVersion, ApprovalID: "id-" + string(rune('a'+i)),
+			Tenant: "t", ServerID: "s", ToolName: "n", FingerprintFormatVersion: 1,
+			Purpose: PurposeShadowEvaluation, Status: StatusPending, RequestedBy: "op",
+			RequestedAt: time.Unix(1000, 0),
+		})
+	}
+	raw, _ := json.Marshal(persistedStore{SchemaVersion: SchemaVersion, Approvals: recs})
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, _ := NewStore(Config{Path: path, Clock: clk.now, MaxRecords: 2, MaxPerTenant: 8})
+	if err := s.Load(); err == nil {
+		t.Fatal("a store file exceeding MaxRecords must fail closed")
+	}
+}
+
+// TestLoad_OverPerTenantFailsClosed proves the per-tenant non-terminal bound is enforced at
+// recovery (a restore from a larger-cap store cannot exceed this store's per-tenant cap).
+func TestLoad_OverPerTenantFailsClosed(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "approvals.json")
+	var recs []*ToolApproval
+	for i := 0; i < 3; i++ {
+		recs = append(recs, &ToolApproval{
+			SchemaVersion: SchemaVersion, ApprovalID: "id-" + string(rune('a'+i)),
+			Tenant: "t", ServerID: "s", ToolName: "n", FingerprintFormatVersion: 1,
+			Purpose: PurposeShadowEvaluation, Status: StatusPending, RequestedBy: "op",
+			RequestedAt: time.Unix(1000, 0),
+		})
+	}
+	raw, _ := json.Marshal(persistedStore{SchemaVersion: SchemaVersion, Approvals: recs})
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, _ := NewStore(Config{Path: path, Clock: clk.now, MaxRecords: 64, MaxPerTenant: 2})
+	if err := s.Load(); err == nil {
+		t.Fatal("a store file exceeding MaxPerTenant non-terminal records must fail closed")
+	}
+}
+
+// TestLoad_OversizeFileFailsClosed proves the recovery read is byte-bounded: a file larger
+// than the size a within-cap store could occupy fails closed before it is fully decoded,
+// closing the startup-OOM vector.
+func TestLoad_OversizeFileFailsClosed(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "approvals.json")
+	// MaxRecords=1 → readLimit = 1*maxRecordJSONBytes + storeEnvelopeSlackBytes. Write more.
+	limit := 1*maxRecordJSONBytes + storeEnvelopeSlackBytes
+	big := make([]byte, limit+1024)
+	for i := range big {
+		big[i] = ' '
+	}
+	if err := os.WriteFile(path, big, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, _ := NewStore(Config{Path: path, Clock: clk.now, MaxRecords: 1, MaxPerTenant: 8})
+	if err := s.Load(); err == nil {
+		t.Fatal("an oversized store file must fail closed before full decode")
+	}
+}
