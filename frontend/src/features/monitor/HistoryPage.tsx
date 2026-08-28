@@ -43,6 +43,7 @@ import { createDownloadOwner } from "../../shared/blobOwner";
 import { registerAuthCleanup } from "../../auth/teardown";
 import { useAuth } from "../../auth/AuthProvider";
 import { hasRole } from "../../auth/rbac";
+import { serverErrorText, unknownOutcome } from "../../shared/mutationOutcome";
 import styles from "./monitor.module.css";
 
 const RETENTION_KEY = ["monitor", "retention"] as const;
@@ -58,24 +59,6 @@ function fmtBytes(n: number | undefined): string {
 function fmtMs(ms: number | undefined): string {
   if (ms === undefined || ms === 0) return "—";
   return new Date(ms).toISOString();
-}
-
-/** Is a mutation outcome UNKNOWN (client never observed a server verdict)?
- * An HTTP status — success or error — is a known outcome; network loss,
- * timeout, and abort are not. */
-function unknownOutcome(err: unknown): boolean {
-  return (
-    err instanceof ApiError &&
-    (err.kind === "network" || err.kind === "timeout" || err.kind === "aborted")
-  );
-}
-
-function serverErrorText(err: unknown, fallback: string): string {
-  if (err instanceof ApiError) {
-    if (err.bodyText !== undefined && err.bodyText !== "") return err.bodyText;
-    return err.message;
-  }
-  return fallback;
 }
 
 function exportFilename(format: "json" | "csv"): string {

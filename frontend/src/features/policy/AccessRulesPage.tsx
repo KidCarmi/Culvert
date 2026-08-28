@@ -1,10 +1,12 @@
-// Slice 2A Access Rules (FE-V16 READ surface): the Stage-2 rulebase as an
-// appliance rulebase — server priority order preserved (evaluation order is
-// load-bearing; no arbitrary column sorting), snapshot/refresh per ADR-FE-002,
-// client-side filtering for the bounded 500-rule target, row-detail expansion
-// for secondary metadata, and the ?rule=<stable-id> deep link resolved by
-// DATA EQUALITY (never a selector). Read-only: mutation controls do not exist
-// until Slice 2B — the draft/running truth is presented, never operated on.
+// Access Rules (FE-V16): the Stage-2 rulebase. Slice 2A built the READ
+// surface (server priority order, snapshot/refresh per ADR-FE-002, deep links
+// by data equality); Slice 2B adds the WRITE surface — create/edit/delete
+// through the fenced mutation contract (every mutation asserts ifVersion; the
+// server checks + mutates atomically after 2B.0), with the 2A-M unknown-
+// outcome doctrine at page level and a targeted dirty-route guard.
+//
+// RBAC: viewer mounts NO mutation controls (absent, not disabled); operator+
+// gets create/edit/delete; the server stays authoritative (403 tests).
 import {
   useEffect,
   useMemo,
@@ -15,19 +17,41 @@ import {
   type Ref,
 } from "react";
 import { useSearchParams } from "react-router";
+import { useQuery } from "@tanstack/react-query";
 import { PageHeader } from "../../layouts/AppShell";
 import {
+  Button,
   Callout,
   ErrorState,
   Mono,
   Skeleton,
   StatusBadge,
 } from "../../design-system/primitives";
+import { ConfirmationDialog } from "../../design-system/dialog";
+import type { ConfirmResult } from "../../design-system/dialog";
 import { InputField } from "../../design-system/forms";
-import { SnapshotBar, useSnapshot } from "../../shared/snapshot";
-import { getPolicy, isPlausibleRuleID } from "../../api/policy";
+import { SnapshotBar } from "../../shared/snapshot";
+import { isPlausibleRuleID } from "../../api/policy";
 import type { PolicyRuleView, PolicySnapshot } from "../../api/policy";
+import {
+  asPolicyConflict,
+  createRule,
+  deleteRule,
+  getCategoryGroupNames,
+  getDecryptionProfileNames,
+  getFileProfileNames,
+  getURLCategoryNames,
+  updateRule,
+} from "../../api/policyWrite";
+import type { AccessRuleWrite, PolicyConflict } from "../../api/policyWrite";
+import { useAuth } from "../../auth/AuthProvider";
+import { hasRole } from "../../auth/rbac";
+import { serverErrorText, unknownOutcome } from "../../shared/mutationOutcome";
+import { useDirtyGuard } from "../../shared/dirtyGuard";
 import { WhereUsed } from "./WhereUsed";
+import { RuleEditor } from "./RuleEditor";
+import type { RuleEditorMode } from "./RuleEditor";
+import { useRulebaseWrites } from "./useRulebaseWrites";
 import styles from "./policy.module.css";
 
 function actionBadge(action: string): JSX.Element {
@@ -185,14 +209,78 @@ function logSummary(r: PolicyRuleView): string {
 }
 
 export function AccessRulesPage(): JSX.Element {
-  const q = useSnapshot(["policy", "snapshot"], (signal) => getPolicy(signal));
+  const rb = useRulebaseWrites();
+  const q = rb.policyQ;
   const snap: PolicySnapshot | undefined = q.data;
+  const { state } = useAuth();
+  const canWrite = hasRole(state.role ?? "viewer", "operator");
   const [filter, setFilter] = useState("");
   const [openId, setOpenId] = useState<string | null>(null);
   const [searchParams] = useSearchParams();
   const ruleParam = searchParams.get("rule") ?? "";
 
-  const accessRules = snap?.accessRules ?? [];
+  // ── editor state ─────────────────────────────────────────────────────────
+  const [editor, setEditor] = useState<RuleEditorMode | null>(null);
+  const [editorPending, setEditorPending] = useState(false);
+  const [editorConflict, setEditorConflict] = useState<PolicyConflict | null>(
+    null,
+  );
+  const [editorServerError, setEditorServerError] = useState("");
+  const [editorDirty, setEditorDirty] = useState(false);
+
+  // ── delete ceremony state ────────────────────────────────────────────────
+  const [deleting, setDeleting] = useState<PolicyRuleView | null>(null);
+  const [deleteResult, setDeleteResult] = useState<ConfirmResult>("idle");
+  const [deleteError, setDeleteError] = useState("");
+
+  // Reference option sources (§12): loaded once a write control asks for the
+  // editor; read-only, never managed here.
+  const wantOptions = editor !== null;
+  const optQ = useQuery({
+    queryKey: ["policy", "rule-editor-options"],
+    enabled: wantOptions,
+    staleTime: Infinity,
+    retry: false,
+    queryFn: async ({ signal }) => {
+      const [categories, categoryGroups, fileProfiles, decryptionProfiles] =
+        await Promise.all([
+          getURLCategoryNames(signal),
+          getCategoryGroupNames(signal),
+          getFileProfileNames(signal),
+          getDecryptionProfileNames(signal),
+        ]);
+      return { categories, categoryGroups, fileProfiles, decryptionProfiles };
+    },
+  });
+
+  // Auth boundary / unmount: clear every write intent belonging to this
+  // identity (the run owner is aborted by the hook itself).
+  const closeAllWriteState = (): void => {
+    setEditor(null);
+    setEditorPending(false);
+    setEditorConflict(null);
+    setEditorServerError("");
+    setEditorDirty(false);
+    setDeleting(null);
+    setDeleteResult("idle");
+    setDeleteError("");
+  };
+  // Installed every render so the boundary always runs the LATEST closure
+  // (single-slot ref inside the hook — no accumulation, no stale state).
+  rb.setBoundaryCleanup(closeAllWriteState);
+
+  // A fresh policy snapshot resolves a stale-version conflict: the operator
+  // can now review current truth and resubmit deliberately.
+  useEffect(() => {
+    setEditorConflict(null);
+  }, [q.dataUpdatedAt]);
+
+  const guard = useDirtyGuard(
+    editorDirty,
+    "the unsaved rule changes in the editor",
+  );
+
+  const accessRules = useMemo(() => snap?.accessRules ?? [], [snap]);
   const filtered = useMemo(() => {
     const needle = filter.trim();
     if (needle === "") return accessRules;
@@ -263,6 +351,85 @@ export function AccessRulesPage(): JSX.Element {
   }, [ruleParam, paramValid, target, targetVisible, filtered, snap]);
 
   const draft = snap?.draft === true;
+  const blocked = rb.unknown !== null;
+  // Whether the NEXT write will stage into the draft (server-authoritative
+  // signal: Require Commit is armed on the draft surface).
+  const nextWriteStaged =
+    rb.draftQ.data !== undefined ? rb.draftQ.data.requireCommit : draft;
+
+  // ── mutation flows ───────────────────────────────────────────────────────
+  const submitEditor = (write: AccessRuleWrite): void => {
+    if (snap === undefined || editor === null) return;
+    const version = snap.version;
+    const signal = rb.owner.begin();
+    setEditorPending(true);
+    setEditorServerError("");
+    const call =
+      editor.kind === "create"
+        ? createRule(write, version, signal).then(() => undefined)
+        : updateRule(editor.rule.id, write, version, signal);
+    call
+      .then(() => {
+        // Confirmed success: render server truth, never the form echo.
+        setEditor(null);
+        setEditorDirty(false);
+        setEditorConflict(null);
+        rb.refetchAll();
+      })
+      .catch((err: unknown) => {
+        if (unknownOutcome(err)) {
+          // Outcome unconfirmed: keep the form content for review, block
+          // every mutation until a fresh refetch confirms server state.
+          rb.latchUnknown(editor.kind === "create" ? "create" : "edit");
+          return;
+        }
+        const conflict = asPolicyConflict(err);
+        if (conflict !== null) {
+          setEditorConflict(conflict);
+          return;
+        }
+        setEditorServerError(
+          serverErrorText(err, "The appliance rejected the rule."),
+        );
+      })
+      .finally(() => {
+        rb.owner.settle(signal);
+        setEditorPending(false);
+      });
+  };
+
+  const confirmDelete = (): void => {
+    if (snap === undefined || deleting === null) return;
+    const version = snap.version;
+    const signal = rb.owner.begin();
+    setDeleteResult("pending");
+    deleteRule(deleting.id, version, signal)
+      .then(() => {
+        setDeleting(null);
+        setDeleteResult("idle");
+        setDeleteError("");
+        rb.refetchAll();
+      })
+      .catch((err: unknown) => {
+        if (unknownOutcome(err)) {
+          // Never blindly repeat DELETE: close into the page-level latch.
+          setDeleting(null);
+          setDeleteResult("idle");
+          rb.latchUnknown("delete");
+          return;
+        }
+        const conflict = asPolicyConflict(err);
+        setDeleteResult("failed");
+        setDeleteError(
+          conflict !== null
+            ? conflict.error
+            : serverErrorText(err, "The appliance refused the delete."),
+        );
+      })
+      .finally(() => {
+        rb.owner.settle(signal);
+      });
+  };
 
   return (
     <>
@@ -275,9 +442,7 @@ export function AccessRulesPage(): JSX.Element {
             fetching={q.isFetching}
             error={q.isError}
             hasData={snap !== undefined}
-            onRefresh={() => {
-              void q.refetch();
-            }}
+            onRefresh={rb.refreshToResolve}
           />
         }
       />
@@ -285,12 +450,30 @@ export function AccessRulesPage(): JSX.Element {
         {announce}
       </span>
 
+      {rb.unknown !== null && (
+        <div className={styles.calloutSpace}>
+          <Callout
+            variant="unknown"
+            title={`${rb.unknown === "delete" ? "Delete" : rb.unknown === "create" ? "Create" : "Save"} outcome unconfirmed`}
+            role="alert"
+          >
+            The connection was lost before the appliance&apos;s answer arrived —
+            the change may or may not have been applied. Refresh the rulebase
+            and review the current state before making further changes.
+            <div className={styles.fallbackAction}>
+              <Button size="sm" onClick={rb.refreshToResolve}>
+                Refresh rulebase
+              </Button>
+            </div>
+          </Callout>
+        </div>
+      )}
+
       {snap !== undefined && draft && (
         <div className={styles.calloutSpace}>
           <Callout variant="warning" title="Viewing Policy Draft candidate">
             These rules are staged and are not the running enforcement policy
-            until they are committed. Draft review and commit arrive in a later
-            slice; the legacy console remains the write surface.
+            until the draft is committed.
           </Callout>
         </div>
       )}
@@ -352,6 +535,20 @@ export function AccessRulesPage(): JSX.Element {
                 setFilter(e.target.value);
               }}
             />
+            {canWrite && (
+              <div className={styles.toolbarActions}>
+                <Button
+                  disabled={blocked}
+                  onClick={() => {
+                    setEditor({ kind: "create" });
+                    setEditorConflict(null);
+                    setEditorServerError("");
+                  }}
+                >
+                  New rule…
+                </Button>
+              </div>
+            )}
             <span className={styles.counts}>
               {String(filtered.length)} of {String(accessRules.length)} access
               rules
@@ -382,12 +579,13 @@ export function AccessRulesPage(): JSX.Element {
                     Hits
                   </th>
                   <th scope="col">Last hit</th>
+                  {canWrite && <th scope="col">Actions</th>}
                 </tr>
               </thead>
               <tbody>
                 {filtered.length === 0 && (
                   <tr>
-                    <td colSpan={10}>
+                    <td colSpan={canWrite ? 11 : 10}>
                       {accessRules.length === 0
                         ? "No access rules are defined. Unmatched traffic receives the default action."
                         : "No rules match the filter."}
@@ -408,6 +606,38 @@ export function AccessRulesPage(): JSX.Element {
                       onToggle={() => {
                         setOpenId(open ? null : rowKey);
                       }}
+                      actions={
+                        canWrite ? (
+                          <span className={styles.rowActions}>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              disabled={blocked || r.id === ""}
+                              aria-label={`Edit rule ${r.name}`}
+                              onClick={() => {
+                                setEditor({ kind: "edit", rule: r });
+                                setEditorConflict(null);
+                                setEditorServerError("");
+                              }}
+                            >
+                              Edit
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              disabled={blocked || r.id === ""}
+                              aria-label={`Delete rule ${r.name}`}
+                              onClick={() => {
+                                setDeleting(r);
+                                setDeleteResult("idle");
+                                setDeleteError("");
+                              }}
+                            >
+                              Delete
+                            </Button>
+                          </span>
+                        ) : undefined
+                      }
                     />
                   );
                 })}
@@ -415,6 +645,96 @@ export function AccessRulesPage(): JSX.Element {
             </table>
           </div>
         </>
+      )}
+
+      {guard.element}
+
+      {editor !== null && snap !== undefined && (
+        <>
+          {optQ.isPending && (
+            <div className={styles.calloutSpace}>
+              <Skeleton>Loading reference lists…</Skeleton>
+            </div>
+          )}
+          {optQ.isError && (
+            <div className={styles.calloutSpace}>
+              <Callout variant="critical" title="Reference lists unavailable">
+                The category / profile option lists could not be loaded, so the
+                editor cannot open safely.
+                <div className={styles.fallbackAction}>
+                  <Button
+                    size="sm"
+                    onClick={() => {
+                      void optQ.refetch();
+                    }}
+                  >
+                    Retry
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => {
+                      setEditor(null);
+                      setEditorDirty(false);
+                    }}
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              </Callout>
+            </div>
+          )}
+          {optQ.data !== undefined && (
+            <RuleEditor
+              mode={editor}
+              staged={nextWriteStaged}
+              options={optQ.data}
+              blocked={blocked}
+              pending={editorPending}
+              conflict={editorConflict}
+              serverError={editorServerError}
+              onSubmit={submitEditor}
+              onCancel={() => {
+                setEditor(null);
+                setEditorDirty(false);
+                setEditorConflict(null);
+                setEditorServerError("");
+              }}
+              onDirtyChange={setEditorDirty}
+            />
+          )}
+        </>
+      )}
+
+      {canWrite && deleting !== null && (
+        <ConfirmationDialog
+          open
+          tier={1}
+          title="Delete access rule"
+          body={
+            <>
+              Delete rule <strong>{deleting.name}</strong> (priority{" "}
+              {deleting.priority}, action {deleting.action})?{" "}
+              {nextWriteStaged
+                ? "The delete will be STAGED in the shared Policy Draft and takes effect only when the draft is committed."
+                : "The delete is LIVE immediately."}
+            </>
+          }
+          confirmLabel="Delete rule"
+          destructive
+          result={deleteResult}
+          errorText={deleteError}
+          onConfirm={() => {
+            if (deleteResult !== "pending") confirmDelete();
+          }}
+          onCancel={() => {
+            if (deleteResult !== "pending") {
+              setDeleting(null);
+              setDeleteResult("idle");
+              setDeleteError("");
+            }
+          }}
+        />
       )}
     </>
   );
@@ -426,13 +746,16 @@ function RuleRow({
   highlighted,
   rowRef,
   onToggle,
+  actions,
 }: {
   r: PolicyRuleView;
   open: boolean;
   highlighted: boolean;
   rowRef: Ref<HTMLTableRowElement> | undefined;
   onToggle: () => void;
+  actions: ReactNode | undefined;
 }): JSX.Element {
+  const cols = actions !== undefined ? 11 : 10;
   return (
     <>
       <tr
@@ -467,10 +790,11 @@ function RuleRow({
         <td className={styles.matchCell}>{tlsSummary(r)}</td>
         <td className={styles.numeric}>{r.hitCount}</td>
         <td className={styles.mono}>{r.lastHit === "" ? "—" : r.lastHit}</td>
+        {actions !== undefined && <td>{actions}</td>}
       </tr>
       {open && (
         <tr className={styles.detailRow}>
-          <td colSpan={10}>
+          <td colSpan={cols}>
             <RuleDetail r={r} />
           </td>
         </tr>

@@ -12,6 +12,8 @@ import type { Root } from "react-dom/client";
 import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 import { RouterProvider, createMemoryRouter } from "react-router";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { AuthMachine } from "../auth/machine";
+import { AuthProvider } from "../auth/AuthProvider";
 import { AccessRulesPage } from "../features/policy/AccessRulesPage";
 
 const RULE_A = {
@@ -47,20 +49,24 @@ beforeEach(() => {
   Element.prototype.scrollIntoView = vi.fn();
   vi.stubGlobal(
     "fetch",
-    vi.fn(() =>
-      Promise.resolve(
-        new Response(
-          JSON.stringify({
+    vi.fn((input: unknown) => {
+      const url = String(input);
+      const body = url.includes("/api/policy/draft")
+        ? { requireCommit: false, active: false, actor: "", startedAt: "" }
+        : {
             rules: [RULE_A, RULE_B],
             count: 2,
             version: 3,
             updatedAt: "2026-08-22T12:00:00Z",
             draft: false,
-          }),
-          { status: 200, headers: { "Content-Type": "application/json" } },
-        ),
-      ),
-    ),
+          };
+      return Promise.resolve(
+        new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    }),
   );
 });
 
@@ -73,17 +79,43 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+function viewerMachine(qc: QueryClient): AuthMachine {
+  return new AuthMachine(qc, {
+    getSetupStatus: () =>
+      Promise.resolve({
+        needsSetup: false,
+        tlsFallback: false,
+        tlsFallbackReason: "",
+      }),
+    getAuthStatus: () =>
+      Promise.resolve({
+        loggedIn: true,
+        user: "view-user",
+        role: "viewer",
+        bootstrap: false,
+        tlsFallback: false,
+        tlsFallbackReason: "",
+      }),
+    postLogout: () => Promise.resolve({ ok: true }),
+  });
+}
+
 function mount(initialQuery: string): void {
   router = createMemoryRouter(
     [{ path: "/policies/access-rules", element: <AccessRulesPage /> }],
     { initialEntries: [`/policies/access-rules${initialQuery}`] },
   );
+  const qc = new QueryClient();
+  const machine = viewerMachine(qc);
+  void machine.boot();
   act(() => {
     root = createRoot(container);
     root.render(
       <StrictMode>
-        <QueryClientProvider client={new QueryClient()}>
-          <RouterProvider router={router} />
+        <QueryClientProvider client={qc}>
+          <AuthProvider machine={machine}>
+            <RouterProvider router={router} />
+          </AuthProvider>
         </QueryClientProvider>
       </StrictMode>,
     );
