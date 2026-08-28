@@ -30,7 +30,7 @@ func evtErr(r mcperr.Reason, detail string) error {
 // No malformed event may partially publish: Validate is called before the event
 // reaches the queue, and a non-nil error blocks persistence entirely.
 func (e Event) Validate() error { //nolint:gocyclo,cyclop // a flat set of independent structural rejections
-	if e.SchemaVersion != SchemaVersion {
+	if !SupportedSchemaVersion(e.SchemaVersion) {
 		return evtErr(mcperr.ReasonEventSchemaVersion, "unknown schema version")
 	}
 	if !e.Phase.Valid() {
@@ -73,6 +73,129 @@ func (e Event) Validate() error { //nolint:gocyclo,cyclop // a flat set of indep
 	}
 	if err := e.validatePhase(); err != nil {
 		return err
+	}
+	if err := e.validateShadow(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// Bounded ShadowEvidence enum vocabularies (SHADOW-EVIDENCE-ROUTING-1). These mirror
+// the execution-package ShadowDecision producer exactly; an unknown value fails closed.
+const (
+	shadowExecutionState = "shadow_evaluated"
+
+	shadowOutMaterializeNotEval = "not_evaluated"
+	shadowRespInspectionNotEval = "not_evaluated"
+
+	shadowReqInspWouldPass = "would_pass"
+	shadowReqInspWouldFail = "would_fail"
+	shadowReqInspNotEval   = "not_evaluated"
+
+	shadowOutWouldExecute        = "would_execute"
+	shadowOutWouldFailInspection = "would_fail_inspection"
+	// gosec G101 matches a credential-like identifier; these are enum TOKENS, so the
+	// names deliberately avoid the "credential" pattern (repo gosec convention).
+	shadowOutWouldFailCredReady = "would_fail_credential_readiness"
+	shadowPlanInvalid           = "credential_plan_invalid"
+)
+
+var shadowOutcomes = map[string]struct{}{
+	"would_execute": {}, "would_block": {}, "would_require_approval": {},
+	"would_require_confirmation": {}, "would_fail_credential_readiness": {},
+	"would_fail_inspection": {}, "would_fail_stale_decision": {}, "would_fail_hard_control": {},
+}
+
+var shadowCredentialPlans = map[string]struct{}{
+	"no_credential_profile": {}, "credential_plan_valid": {},
+	"credential_plan_invalid": {}, "no_planner_composed": {},
+}
+
+var shadowRequestInspections = map[string]struct{}{
+	shadowReqInspWouldPass: {}, shadowReqInspWouldFail: {}, shadowReqInspNotEval: {},
+}
+
+// ValidateShadowEvidence is the NARROW, evidence-scoped Shadow check the spool applies
+// to a digest-verified record on recovery. It fails closed only on the ShadowEvidence
+// contract this schema owns (schema/shadow consistency, enum membership, impossible
+// combinations) and deliberately does NOT re-run the full structural Validate: recovery
+// must never "repair" malformed evidence into valid evidence, and must never newly reject
+// a pre-existing NON-shadow event (the v1 branch passes for a nil Shadow). The spool
+// checks SupportedSchemaVersion separately for a clean unknown-schema signal.
+func (e Event) ValidateShadowEvidence() error { return e.validateShadow() }
+
+// validateShadow enforces the v1/v2 ShadowEvidence contract:
+//   - a v1 event MUST NOT carry ShadowEvidence (a Shadow event is v2 by construction);
+//   - a v2 event is a Shadow decision event: it MUST be a decision phase, carry
+//     ExecutionState "shadow_evaluated", and carry a complete, valid ShadowEvidence;
+//   - conversely ExecutionState "shadow_evaluated" MUST be a v2 event with ShadowEvidence
+//     (a v1 "shadow_evaluated" marker is a legacy record and is only ever READ, never
+//     produced by this build — see the v2 reader contract; it is not writable here).
+//
+// Every ShadowEvidence field is a bounded enum, and the architecturally-impossible
+// combinations fail closed (§7): a Shadow evaluation never materializes and never has an
+// upstream response, and would_execute is unreachable through a failing request inspection.
+func (e Event) validateShadow() error {
+	switch e.SchemaVersion {
+	case SchemaVersionV1:
+		// v1 never carries the new sub-facts. A legacy v1 "shadow_evaluated" marker is
+		// tolerated on READ (no ShadowEvidence), but a v1 event with ShadowEvidence is
+		// structurally impossible and must fail closed.
+		if e.Shadow != nil {
+			return evtErr(mcperr.ReasonEventInvalid, "shadow evidence on a v1 event")
+		}
+		return nil
+	case SchemaVersionV2:
+		return e.validateShadowV2()
+	default:
+		// Unreachable: SupportedSchemaVersion already gated the version.
+		return evtErr(mcperr.ReasonEventSchemaVersion, "unknown schema version")
+	}
+}
+
+func (e Event) validateShadowV2() error {
+	// A v2 event is a Shadow decision event by construction.
+	if e.Phase != PhaseDecision {
+		return evtErr(mcperr.ReasonEventInvalid, "v2 shadow event must be a decision phase")
+	}
+	if e.Decision.ExecutionState != shadowExecutionState {
+		return evtErr(mcperr.ReasonEventInvalid, "v2 shadow event must carry execution_state shadow_evaluated")
+	}
+	// shadow_evaluated + Shadow == nil -> invalid (§7): a Shadow event must carry the
+	// complete durable evidence, never claim to be a shadow evaluation without it.
+	sh := e.Shadow
+	if sh == nil {
+		return evtErr(mcperr.ReasonEventEvidenceMissing, "v2 shadow event without shadow evidence")
+	}
+	if _, ok := shadowOutcomes[sh.Outcome]; !ok {
+		return evtErr(mcperr.ReasonEventInvalid, "unknown shadow outcome")
+	}
+	if _, ok := shadowCredentialPlans[sh.CredentialPlan]; !ok {
+		return evtErr(mcperr.ReasonEventInvalid, "unknown shadow credential plan")
+	}
+	if _, ok := shadowRequestInspections[sh.RequestInspection]; !ok {
+		return evtErr(mcperr.ReasonEventInvalid, "unknown shadow request inspection")
+	}
+	// Architectural constants: Shadow never materializes and never has an upstream response.
+	if sh.MaterializationReadiness != shadowOutMaterializeNotEval {
+		return evtErr(mcperr.ReasonEventInvalid, "shadow materialization_readiness must be not_evaluated")
+	}
+	if sh.ResponseInspection != shadowRespInspectionNotEval {
+		return evtErr(mcperr.ReasonEventInvalid, "shadow response_inspection must be not_evaluated")
+	}
+	// Impossible-combination fail-closed rules that mirror the producer (decide()):
+	//   - would_execute is unreachable when the request inspection would fail (a hard
+	//     inspection failure yields would_fail_inspection, never would_execute);
+	//   - would_fail_inspection is reached ONLY via a failing request inspection;
+	//   - would_fail_credential_readiness is reached ONLY with an invalid credential plan.
+	if sh.Outcome == shadowOutWouldExecute && sh.RequestInspection == shadowReqInspWouldFail {
+		return evtErr(mcperr.ReasonEventInvalid, "would_execute with a failing request inspection")
+	}
+	if sh.Outcome == shadowOutWouldFailInspection && sh.RequestInspection != shadowReqInspWouldFail {
+		return evtErr(mcperr.ReasonEventInvalid, "would_fail_inspection without a failing request inspection")
+	}
+	if sh.Outcome == shadowOutWouldFailCredReady && sh.CredentialPlan != shadowPlanInvalid {
+		return evtErr(mcperr.ReasonEventInvalid, "would_fail_credential_readiness without an invalid credential plan")
 	}
 	return nil
 }
@@ -175,6 +298,13 @@ func (e Event) validateFieldBounds() error {
 	} {
 		if len(s) > maxFieldBytes {
 			return evtErr(mcperr.ReasonEventTooLarge, "a safe field exceeds its structural bound")
+		}
+	}
+	if sh := e.Shadow; sh != nil {
+		for _, s := range []string{sh.Outcome, sh.CredentialPlan, sh.MaterializationReadiness, sh.RequestInspection, sh.ResponseInspection} {
+			if len(s) > maxFieldBytes {
+				return evtErr(mcperr.ReasonEventTooLarge, "a shadow field exceeds its structural bound")
+			}
 		}
 	}
 	for _, l := range e.Identity.Chain {

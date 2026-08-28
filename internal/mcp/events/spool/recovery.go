@@ -221,6 +221,18 @@ func (s *Spool) replaySegmentRecordsLocked(seg *segState, buf []byte, chain [32]
 		if uerr := unmarshalEvent(pt, &e); uerr != nil || !e.VerifyDigest() {
 			return nil, chain, spErr(mcperr.ReasonEventSpoolCorrupt, "record event invalid")
 		}
+		// v1/v2 reader contract (SHADOW-EVIDENCE-ROUTING-1 §4/§8). A digest-valid record
+		// must still carry a SUPPORTED schema version — an unknown version is rejected as
+		// such (fail closed), never partially interpreted — and its Shadow sub-facts, if
+		// any, must be consistent (complete evidence on a v2 event, no shadow evidence on a
+		// v1 event, valid enums, no impossible combination). Recovery never repairs
+		// malformed evidence into valid evidence.
+		if !model.SupportedSchemaVersion(e.SchemaVersion) {
+			return nil, chain, spErr(mcperr.ReasonEventSchemaVersion, "record unknown schema version")
+		}
+		if serr := e.ValidateShadowEvidence(); serr != nil {
+			return nil, chain, spWrap(mcperr.ReasonEventSpoolCorrupt, "record shadow evidence invalid", serr)
+		}
 		chain = next
 		seg.records++
 		evs = append(evs, recoveredEvent{

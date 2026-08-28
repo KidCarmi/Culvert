@@ -57,20 +57,21 @@ Out-of-scope traffic on a Shadow node behaves as **Observe** (recorded, not eval
    closed with `no_usable_shadow_tools` until the controlled server's tool is promoted to `Usable`
    within the scope.
 9. **Durable ShadowDecision evidence must be in the build** (`SHADOW-EVIDENCE-ROUTING-1`, a HARD
-   PREREQUISITE). A real activation requires that the full per-request `ShadowDecision` — the
-   Model-1 `Outcome`, credential-plan status, and inspection readiness — is recorded **durably**,
-   not only returned in the transient JSON-RPC response body. Until the dedicated `schema_version:2`
-   durable-evidence follow-up PR ships, a shadow evaluation persists only
-   `execution_state="shadow_evaluated"` on the v1 envelope, so per-request outcomes cannot be
-   reconstructed from the archive and the evidence-parity / zero-gap exit criteria below are
-   **unverifiable**. This prerequisite is NOT enforced by the preflight (it is a build/schema
-   property, not a node-config toggle): it is verified by running the follow-up PR's durable-record
-   tests, and this runbook must not be used for a production activation on a build that lacks them.
-   This is a SEPARATE slice from precondition 8 — neither absorbs the other.
+   PREREQUISITE — **now SATISFIED**). A real activation requires that the full per-request
+   `ShadowDecision` — the Model-1 `Outcome`, credential-plan status, and inspection readiness — is
+   recorded **durably**, not only returned in the transient JSON-RPC response body. The durable-evidence
+   follow-up shipped the `schema_version:2` envelope: a shadow evaluation now persists a typed
+   `Event.Shadow` sub-evidence carrying the full verdict, so per-request outcomes are reconstructable
+   from the archive with the SAME facts the client saw, and the evidence-parity / zero-gap exit
+   criteria are verifiable. This prerequisite is a build/schema property (not a node-config toggle);
+   it is verified by the durable-record tests (`internal/mcp/events/**` shadow_v2_* +
+   `internal/mcp/execution/shadow_evidence_parity_test.go`). This is a SEPARATE slice from
+   precondition 8 — neither absorbs the other.
 
-**Both prerequisites 8 and 9 are OPEN, and BOTH must close before any production Controlled Shadow
-activation.** This build lands the activation plumbing but is NOT activation-ready: precondition 8
-fails closed today (no `Usable` tool), and precondition 9's durable evidence is not yet implemented.
+**Prerequisite 9 (durable evidence) is CLOSED; prerequisite 8 (a `Usable` scoped tool) REMAINS OPEN,
+and BOTH must be closed before any production Controlled Shadow activation.** This build has durable
+Shadow evidence but is still NOT activation-ready: precondition 8 fails closed today (no `Usable`
+tool via the tool-approval / promotion slice).
 
 Run the operator dry-run: `GET /api/mcp/rollout` and confirm `shadow.preflight.ready:
 true` with an empty `reasons` list. This dry-run reports **node** readiness only — the

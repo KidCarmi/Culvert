@@ -246,22 +246,22 @@ fail-closed recovery tests, and proof that the durable record carries the SAME `
 facts returned to the client. This PR lands the activation PLUMBING only; it does not close this
 prerequisite, and the runbook's evidence-parity / zero-gap exit criteria stage under it.
 
-## 8b. Corrected verdict — TWO hard prerequisites, both OPEN
+## 8b. Corrected verdict — TWO hard prerequisites (one now CLOSED, one still OPEN)
 
-**Controlled Shadow activation is NOT activation-ready in production**, and this PR does not
-claim otherwise. The mechanism is READY and fail-closed, but production activation is gated on
-**TWO** independent hard prerequisites, both currently OPEN, and **both** must close first:
+**Controlled Shadow activation is NOT activation-ready in production** until BOTH prerequisites
+close. Status as of the durable-evidence follow-up:
 
-1. **A usable scoped tool** (§8) — a catalog tool promoted to `Usable` within the requested
-   scope. Structurally unsatisfiable until the tool-approval / promotion slice ships; until then
-   the activation preflight fails closed with `no_usable_shadow_tools`. This PR intentionally does
-   NOT implement approval/promotion.
-2. **Durable ShadowDecision evidence** (§8a, `SHADOW-EVIDENCE-ROUTING-1`) — the `schema_version:2`
-   durable envelope so the full per-request verdict is reconstructable from the archive. Delivered
-   as a dedicated follow-up PR; this PR does NOT implement schema v2.
+1. **A usable scoped tool** (§8) — **OPEN**. A catalog tool promoted to `Usable` within the
+   requested scope; structurally unsatisfiable until the tool-approval / promotion slice ships,
+   so the activation preflight fails closed with `no_usable_shadow_tools`. That slice is separate
+   and is NOT delivered by the durable-evidence follow-up.
+2. **Durable ShadowDecision evidence** (§8a, `SHADOW-EVIDENCE-ROUTING-1`) — **CLOSED** by the
+   dedicated durable-evidence follow-up (branch `claude/mcp-shadow-evidence-v2`): the
+   `schema_version:2` envelope now persists the full per-request verdict (typed
+   `Event.Shadow *ShadowEvidence`), the durable record and the client response derive from one
+   mapping, v1 digests are byte-identical, and v1/v2 recovery + rollback semantics are proven.
 
-These two prerequisites are SEPARATE slices and neither absorbs the other. Because activation is
-unreachable in production today (prerequisite 1 fails closed), no shadow event is ever durably
-written here, so the evidence-parity gap has zero production exposure on this PR — but the gap
-must be closed before any real activation, not after. No production Controlled Shadow activation
-until BOTH are closed.
+These two prerequisites are SEPARATE slices and neither absorbs the other. **No production
+Controlled Shadow activation until BOTH close** — prerequisite 1 remains open, so activation stays
+unreachable in production, and the runbook's evidence-parity / zero-gap exit criteria are now
+satisfiable (prerequisite 2) but not yet reachable (prerequisite 1).

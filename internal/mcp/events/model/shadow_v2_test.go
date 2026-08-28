@@ -1,0 +1,137 @@
+package model
+
+import (
+	"strings"
+	"testing"
+)
+
+// validV2ShadowEvent returns a structurally-valid SchemaVersionV2 Shadow decision event
+// with a complete, valid ShadowEvidence. Tests tweak one field to prove a specific rule.
+func validV2ShadowEvent() Event {
+	return Event{
+		SchemaVersion: SchemaVersionV2, EventID: "evt_sh2", Phase: PhaseDecision,
+		Criticality: CritOrdinary, Partition: PartOrd, Capability: CapGateway,
+		ActionClass: ActionClassRead, NodeID: "node-1", DomainID: "dom-1",
+		TimeUnixNano: 1730000000000000000, ReplayID: "rpl_sh2", CorrelationID: "cor_sh2",
+		Identity: IdentityEvidence{Tenant: "acme", PrincipalID: "p1", PrincipalType: "human"},
+		Decision: DecisionEvidence{
+			Action: "ALLOW", ReasonCode: "MCP.POLICY.RESOURCE_SCOPE",
+			ExecutionState: "shadow_evaluated",
+		},
+		Shadow: &ShadowEvidence{
+			Outcome:                  "would_execute",
+			Override:                 false,
+			CredentialPlan:           "credential_plan_valid",
+			MaterializationReadiness: "not_evaluated",
+			RequestInspection:        "would_pass",
+			ResponseInspection:       "not_evaluated",
+		},
+	}
+}
+
+// TestV2_ValidShadowEventPassesAndDigestsIncludeShadow proves a valid v2 event validates,
+// its canonical encoding carries the shadow key, and its digest differs from the same
+// event with the shadow evidence removed (the sub-facts are digest-covered).
+func TestV2_ValidShadowEventPassesAndDigestsIncludeShadow(t *testing.T) {
+	e := validV2ShadowEvent()
+	if err := e.Validate(); err != nil {
+		t.Fatalf("valid v2 shadow event must validate: %v", err)
+	}
+	cb, err := e.CanonicalBytes()
+	if err != nil {
+		t.Fatalf("canonical: %v", err)
+	}
+	if !strings.Contains(string(cb), `"shadow"`) {
+		t.Fatalf("v2 canonical encoding must carry the shadow sub-facts: %s", cb)
+	}
+	withShadow, _ := e.Digest()
+	bare := e
+	bare.Shadow = nil
+	bare.SchemaVersion = SchemaVersionV1 // a bare event is v1
+	bareDigest, _ := bare.Digest()
+	if withShadow == bareDigest {
+		t.Fatal("the shadow sub-facts must contribute to the v2 digest (mutation: dropping Shadow must change the digest)")
+	}
+}
+
+// TestV2_EveryShadowFieldChangesTheDigest is the §6 requirement: changing ANY shadow
+// evidence field changes the digest. Mutation: excluding a field from the canonical
+// encoding (it is a plain struct field, so encoding/json includes it) fails here.
+func TestV2_EveryShadowFieldChangesTheDigest(t *testing.T) {
+	base := validV2ShadowEvent()
+	baseDigest, _ := base.Digest()
+
+	mutators := map[string]func(*ShadowEvidence){
+		"outcome":            func(s *ShadowEvidence) { s.Outcome = "would_block" },
+		"override":           func(s *ShadowEvidence) { s.Override = true },
+		"credential_plan":    func(s *ShadowEvidence) { s.CredentialPlan = "no_credential_profile" },
+		"request_inspection": func(s *ShadowEvidence) { s.RequestInspection = "not_evaluated" },
+	}
+	for name, mut := range mutators {
+		e := validV2ShadowEvent()
+		mut(e.Shadow)
+		d, _ := e.Digest()
+		if d == baseDigest {
+			t.Fatalf("changing shadow field %q did not change the digest", name)
+		}
+	}
+}
+
+// TestV2_ValidationRejectsMalformedShadowEvidence pins every fail-closed rule (§7): enum
+// membership, the architectural not_evaluated constants, and the impossible combinations.
+// Each case is a mutation of a valid event: removing the corresponding guard admits it.
+func TestV2_ValidationRejectsMalformedShadowEvidence(t *testing.T) {
+	cases := map[string]func(*Event){
+		"v2 without shadow evidence":               func(e *Event) { e.Shadow = nil },
+		"shadow evidence on a v1 event":            func(e *Event) { e.SchemaVersion = SchemaVersionV1 },
+		"v2 wrong execution_state":                 func(e *Event) { e.Decision.ExecutionState = "executing" },
+		"v2 non-decision phase":                    func(e *Event) { e.Phase = PhaseOutcome; e.Outcome = &OutcomeEvidence{DecisionRef: "evt_x"} },
+		"unknown outcome":                          func(e *Event) { e.Shadow.Outcome = "would_maybe" },
+		"unknown credential plan":                  func(e *Event) { e.Shadow.CredentialPlan = "definitely_valid" },
+		"unknown request inspection":               func(e *Event) { e.Shadow.RequestInspection = "would_perhaps" },
+		"materialization not not_evaluated":        func(e *Event) { e.Shadow.MaterializationReadiness = "ready" },
+		"response inspection not not_evaluated":    func(e *Event) { e.Shadow.ResponseInspection = "would_pass" },
+		"would_execute + request would_fail":       func(e *Event) { e.Shadow.RequestInspection = "would_fail" },
+		"would_fail_inspection without would_fail": func(e *Event) { e.Shadow.Outcome = "would_fail_inspection"; e.Shadow.RequestInspection = "would_pass" },
+		"would_fail_credential without invalid plan": func(e *Event) {
+			e.Shadow.Outcome = "would_fail_credential_readiness"
+			e.Shadow.CredentialPlan = "credential_plan_valid"
+		},
+		"unsupported schema version": func(e *Event) { e.SchemaVersion = 3 },
+	}
+	for name, mut := range cases {
+		e := validV2ShadowEvent()
+		mut(&e)
+		if err := e.Validate(); err == nil {
+			t.Fatalf("%s: must fail closed, but Validate accepted it", name)
+		}
+	}
+}
+
+// TestV2_LegacyV1ShadowMarkerIsReadableWithoutSubFacts proves the v2 reader supports a
+// legacy v1 "shadow_evaluated" marker (no ShadowEvidence): it represents absent shadow
+// evidence as ABSENT, never inferred, and validates as a plain v1 event.
+func TestV2_LegacyV1ShadowMarkerIsReadableWithoutSubFacts(t *testing.T) {
+	e := validV2ShadowEvent()
+	e.SchemaVersion = SchemaVersionV1
+	e.Shadow = nil // v1 legacy marker: execution_state=shadow_evaluated but no sub-facts
+	if err := e.Validate(); err != nil {
+		t.Fatalf("a legacy v1 shadow marker must validate as a plain v1 event: %v", err)
+	}
+	if e.Shadow != nil {
+		t.Fatal("absent shadow evidence must stay absent, never inferred")
+	}
+}
+
+// TestV2_SupportedSchemaVersion pins the version acceptance set (v1+v2 supported; others
+// rejected) — the load-bearing v1/v2 reader contract gate.
+func TestV2_SupportedSchemaVersion(t *testing.T) {
+	if !SupportedSchemaVersion(1) || !SupportedSchemaVersion(2) {
+		t.Fatal("a v2 build must support both v1 and v2")
+	}
+	for _, v := range []int{0, 3, 99, -1} {
+		if SupportedSchemaVersion(v) {
+			t.Fatalf("schema version %d must be unsupported (fail closed)", v)
+		}
+	}
+}

@@ -55,18 +55,24 @@ func observeResult(id jsonrpc.ID, d policy.Decision) []byte {
 // metadata only, so materialization_readiness is "not_evaluated"; there is no upstream
 // response, so response_inspection is "not_evaluated".
 func shadowResult(id jsonrpc.ID, d ShadowDecision) []byte {
+	// Derive the reportable sub-facts from the SINGLE mapping shared with the durable
+	// event (shadowDecisionFacts → shadowEvidence), so the response the client sees and
+	// the record persisted to the archive are the SAME facts (SHADOW-EVIDENCE-ROUTING-1
+	// §3 parity). The raw evaluated policy action rides Decision.Action durably and
+	// evaluated_policy_action here — one value, one source (d.EvaluatedAction).
+	ev := shadowEvidence(d)
 	env := map[string]any{
 		"jsonrpc": "2.0",
 		"result": map[string]any{
 			"execution_state":         "shadow_evaluated",
 			"executed":                false,
 			"evaluated_policy_action": d.EvaluatedAction,
-			"shadow_outcome":          string(d.Outcome),
-			"shadow_override":         d.ShadowOverride,
-			"credential_plan":         d.CredentialPlan,
-			"materialization_ready":   d.MaterializeReady,
-			"request_inspection":      d.RequestInspection,
-			"response_inspection":     d.ResponseInspection,
+			"shadow_outcome":          ev.Outcome,
+			"shadow_override":         ev.Override,
+			"credential_plan":         ev.CredentialPlan,
+			"materialization_ready":   ev.MaterializationReadiness,
+			"request_inspection":      ev.RequestInspection,
+			"response_inspection":     ev.ResponseInspection,
 			"mode":                    "shadow",
 		},
 	}

@@ -366,27 +366,39 @@
   recomputes `CanonicalBytes` without them, and `VerifyDigest` misreports a valid shadow
   record as corrupted (the model fails closed on an unknown schema version, but the fields
   were added under v1, so it never gets that far). Found by Codex on PR #1226 (4bbf211).
-- **Status:** OPEN — **HARD PREREQUISITE for any real Controlled Shadow activation** (elevated
-  from "deferred by design" after Codex re-raised it on PR #1234, the activation-plumbing slice).
-  Today a shadow evaluation is marked durably only by the existing
-  `ExecutionState = "shadow_evaluated"` value (digest-safe), and the full ShadowDecision rides the
-  transient response body. PR #1234 lands the activation PLUMBING but is DEFERRED-here-by-decision:
-  it does NOT implement schema v2, its final verdict does NOT claim activation-ready, and because
-  activation is unreachable in production on that PR (the usable-tool prerequisite fails closed) no
-  shadow event is ever durably written there — so the gap has zero production exposure on #1234 but
-  must be closed before any real activation. Owner decision (PR #1234): keep this OPEN and treat it
-  as a hard gate, distinct from and NOT absorbed by the tool-approval / promotion slice.
-- **Fix (dedicated follow-up PR — not this PR, not the approval slice):** introduce
-  `schema_version:2` for the expanded envelope with explicit v1/v2 fail-closed recovery (a v2 event
-  is rejected as "unknown schema version" by a v1 reader — honest — rather than misverified), stamp
-  the sub-facts only on v2 shadow events, and have `shadowDecisionFacts` populate the durable
-  sub-facts. The follow-up PR must include: canonical-digest compatibility, migration/rollback
-  behaviour, schema validation, corruption / fail-closed recovery tests, and a proof that the
-  durable record carries the SAME ShadowDecision facts returned to the client. **No production
-  Controlled Shadow activation until BOTH this prerequisite AND the usable-scoped-tool prerequisite
-  (approval slice) are closed.**
-- **Evidence:** `internal/mcp/events/model/model.go` (DecisionEvidence note),
-  `internal/mcp/execution/shadow_evaluator.go` (`shadowDecisionFacts`),
+- **Status:** **CLOSED (2026-08-28)** — the dedicated durable-Shadow-evidence follow-up shipped
+  the `schema_version:2` envelope. This was the FIRST of the two hard prerequisites for a real
+  Controlled Shadow activation; it is now satisfied. The SECOND (a usable scoped tool via the
+  tool-approval / promotion slice) **REMAINS OPEN** and is tracked separately — **no production
+  Controlled Shadow activation until that one also closes**. (Elevated from "deferred by design"
+  to a hard prerequisite on PR #1234, the activation-plumbing slice; closed here.)
+- **Fix (shipped):** `schema_version:2` is an ADDITIVE envelope carrying a typed
+  `Event.Shadow *ShadowEvidence` sub-evidence (outcome, override, credential-plan, request/response
+  inspection readiness; the raw evaluated action stays in `Decision.Action`). It is stamped ONLY on
+  a Shadow decision event — every non-shadow event stays v1, so its canonical digest is byte-identical
+  (proven by golden vectors). One source of truth: the transient JSON-RPC response and the durable
+  event both derive from `execution.shadowEvidence(ShadowDecision)`, pinned by a field-by-field parity
+  gate. `Validate` fails closed on schema/shadow consistency, enum membership and the architecturally
+  impossible combinations; recovery re-checks `SupportedSchemaVersion` + `ValidateShadowEvidence` as
+  defense-in-depth over Commit-time validation + the AEAD record chain.
+- **v1/v2 reader contract + rollback semantics (§9):** a v2-capable build supports v1 AND v2
+  (`model.SupportedSchemaVersion`); a v2 event carries facts a v1 event never did. A pre-v2 (v1-only)
+  build **refuses v2 evidence** and never partially interprets it — `unmarshalEvent` uses
+  `DisallowUnknownFields`, so the unknown `shadow` key fails the decode, and the record is rejected as
+  corrupt (fail closed) rather than misverified. This is the accepted downgrade posture: **rolling a
+  binary back across persisted v2 shadow evidence requires an operator procedure** (archive/clear the
+  bounded shadow-evidence spool under the documented recovery flow) — arbitrary binary downgrade over
+  v2 evidence is NOT silently safe, by design, and validation is not weakened to make it appear so.
+  No historical v1 event is rewritten or migrated in place; existing v1 evidence stays immutable.
+- **Gates:** `internal/mcp/events/model/shadow_v2_compat_test.go` (golden v1 digest invariance),
+  `shadow_v2_test.go` (v2 digest sensitivity + validation fail-closed + supported-version set),
+  `shadow_v2_fuzz_test.go`; `internal/mcp/execution/shadow_evidence_parity_test.go` (response↔durable
+  parity + real-manager v2 commit); `internal/mcp/events/spool/shadow_v2_recovery_test.go`
+  (recover round-trip, mixed v1/v2, interior-corruption fail-closed, Commit rejects malformed);
+  `internal/mcp/events/export/shadow_v2_export_test.go` (export read → marshal → re-read round-trip).
+- **Evidence:** `internal/mcp/events/model/{model.go,validate.go,canonical.go}` (v2 envelope +
+  ShadowEvidence + Validate), `internal/mcp/events/decide.go` (v2 stamping), `internal/mcp/events/spool/recovery.go`
+  (recovery guard), `internal/mcp/execution/{responses.go,shadow_evaluator.go}` (single mapping),
   `docs/design/mcp/SHADOW-ARCHITECTURE.md` §9.
 
 ## SHADOW-PREDICTION-PARITY-1 — Pre-side-effect gates have no ownership wall · LOW (2026-08-25)

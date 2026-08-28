@@ -316,17 +316,23 @@ materialized credentials · upstream Authorization headers · secrets · raw sen
 request body beyond existing retention policy. Enforced by the existing redaction
 backstop that rejects any event containing secret patterns.
 
-**Current implementation state (this architecture-only increment).** The list above is the
-DESIGN target. Today a shadow evaluation commits a durable record marked by the existing
-`ExecutionState = "shadow_evaluated"` field (a digest-safe value on the current
-`schema_version:1` envelope), and the FULL ShadowDecision — outcome, credential-plan and
-inspection readiness — rides the transient JSON-RPC response body. The
-enforcement-prediction SUB-FACTS are deliberately NOT added as new digest-covered fields on
-v1: doing so would misverify valid shadow events after a binary rollback (a pre-change
-reader drops the unknown fields and recomputes a different `CanonicalBytes` digest — Codex
-P2, PR #1226). Persisting them durably requires a `schema_version:2` envelope with explicit
-v1/v2 recovery, which belongs in the reviewed Shadow-activation slice (execution is disabled
-here, so no shadow event is ever written). Tracked as `SHADOW-EVIDENCE-ROUTING-1`.
+**Current implementation state.** A shadow evaluation now commits the FULL ShadowDecision
+durably on a `schema_version:2` envelope: the typed `Event.Shadow *ShadowEvidence` sub-evidence
+carries outcome, override, credential-plan, and request/response inspection readiness, and the
+raw evaluated action stays in `Decision.Action`. The transient JSON-RPC response and the durable
+record derive from ONE mapping (`execution.shadowEvidence(ShadowDecision)`), so the archive
+reconstructs exactly what the client saw at request time. `SHADOW-EVIDENCE-ROUTING-1` is CLOSED.
+
+The v2 envelope is ADDITIVE and stamped ONLY on shadow events — every non-shadow event stays v1
+with a byte-identical canonical digest (golden-vector proven), so no historical record is
+rewritten. A v2-capable build reads v1 and v2; a pre-v2 build refuses a v2 event (its decoder
+rejects the unknown `shadow` field — fail closed, never a partial v1 interpretation), which is
+the documented downgrade posture (rolling back across persisted v2 evidence is an operator
+procedure, not a silent downgrade). `Validate` fails closed on unknown enums and the
+architecturally impossible combinations (materialization/response-inspection are always
+`not_evaluated`; `would_execute` is unreachable through a failing request inspection); recovery
+re-checks the schema and shadow consistency as defense-in-depth over Commit-time validation and
+the AEAD record chain.
 
 Evidence is durable **before** Shadow reports success, consistent with the existing
 critical-commit-before-response ordering.
