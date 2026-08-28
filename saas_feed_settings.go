@@ -128,6 +128,49 @@ func resolveSaaSFeedConfigFrom(d saasFeedDurable) (SaaSFeedConfig, error) {
 	})
 }
 
+// installSaaSFeedDurable is the ONE runtime install path for the signed-feed
+// configuration on an authoritative (CP/standalone) node outside the settings
+// PUT itself (2D-B final correction, Blocker E — §§17–19). The derivation
+// from the current holder, the durable AdminSettings write, and the runtime
+// holder publish all run inside ONE adminSettingsMu critical section — the
+// same transaction shape as the fenced PUT — so no writer can land between
+// another writer's precondition and its apply, and the runtime holder, the
+// GET revision, and the durable file can never disagree about which write
+// won.
+//
+// WRITER DOMAIN (audited §17):
+//   - putSaaSFeedSettings (v2 fenced + legacy): adminSaveOverrides with
+//     precondition + saasFeed target + applyOnSuccess — in the domain.
+//   - config import (importSaaSFeedConfig): THIS helper — in the domain.
+//   - config-version rollback (applyPACFromBackup's feed block): THIS helper —
+//     in the domain (called under configRollbackMu; lock order is
+//     configRollbackMu → adminSettingsMu, acyclic — nothing acquires
+//     configRollbackMu while holding adminSettingsMu, and the signed-feed
+//     scheduler's runMu is never taken by any of these writers).
+//   - CP→DP snapshot apply (applySnapshotSaaSFeed): SEPARATE ownership
+//     domain by design — on a managed data plane the CP is authoritative,
+//     every local feed writer above refuses (isManagedDataPlane), and the
+//     apply is deliberately holder-only/in-memory (never admin_settings.json,
+//     see its comment), so it shares no writers to serialize against.
+//   - startup (applyAdminServices via LoadAdminSettings): pre-listener, before
+//     any runtime writer exists — exempt by ordering.
+//
+// The overlay runs INSIDE the critical section against the holder state
+// current at that moment (never a stale pre-lock read), must be pure, and
+// returns the full target state. A persist failure means the target was never
+// applied — runtime and disk stay in agreement.
+func installSaaSFeedDurable(overlay func(cur saasFeedDurable) saasFeedDurable) error {
+	var next saasFeedDurable
+	return saveAdminSettingsWithOverrides(adminSaveOverrides{
+		saasFeed: &next,
+		precondition: func() error {
+			next = overlay(getSaaSFeedDurable())
+			return nil
+		},
+		applyOnSuccess: func() { setSaaSFeedDurable(next) },
+	})
+}
+
 // errSaaSSettingsRevisionConflict marks a failed settings revision fence: the
 // asserted revision no longer matches inside the serialized save domain. The
 // handler renders it as the structured 409.

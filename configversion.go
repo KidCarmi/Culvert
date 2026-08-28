@@ -284,17 +284,16 @@ func rollbackConfigVersion(w http.ResponseWriter, r *http.Request) {
 	// apply that silently reverts on the next restart.
 	persistErr := applyConfigBackup(&target)
 
-	// Feed scalars persist ONLY via admin_settings.json (SaveAdminSettings) —
-	// unlike the versioned stores (blocklist/overrides) that persist themselves
-	// inside applyConfigBackup. A feed-carrying rollback must therefore save, else
-	// a restart reloads the pre-rollback values, silently undoing this slice of the
-	// rollback (Codex P2). Rollback runs on an authoritative CP/standalone node, so
-	// admin_settings.json IS the source of truth here (unlike a follower DP).
-	if target.SaaSFeedProtocol != "" {
-		if err := SaveAdminSettings(); err != nil {
-			logger.Printf("ConfigRollback: SaaS feed persist failed: %v", err)
-		}
-	}
+	// Feed scalars persist ONLY via admin_settings.json — and since the
+	// Blocker E writer-domain correction the feed slice of applyConfigBackup
+	// installs through installSaaSFeedDurable, which persists the target
+	// INSIDE the same adminSettingsMu transaction that publishes it to the
+	// holder (rollback runs on an authoritative CP/standalone node, so
+	// admin_settings.json IS the source of truth here — unlike a follower
+	// DP). The old post-apply SaveAdminSettings call here was the unlocked
+	// second half of that write and is gone: a persist failure now means the
+	// feed target was never applied at all, keeping runtime and disk in
+	// agreement (the original Codex P2 durability concern stays closed).
 
 	actor := sessionAdmin(r)
 	auditDetail := fmt.Sprintf("rolled back to version %d (from %s by %s)",
@@ -706,16 +705,25 @@ func applyPACFromBackup(b *configBackup) {
 	// (SaaSFeedProtocol set — capture always sets it, a pre-extension snapshot does
 	// not), then unconditionally within that gate (like DefaultAction). This
 	// restores the exact captured feed configuration WITHOUT touching the
-	// node-local floor/active-generation state (those are off every surface). It
-	// publishes to the durable holder only — no downloader/legacy-syncer call.
+	// node-local floor/active-generation state (those are off every surface).
+	// Blocker E: the install goes through installSaaSFeedDurable — read,
+	// durable AdminSettings write, and holder publish in ONE adminSettingsMu
+	// transaction — so rollback serializes against the fenced settings PUT
+	// (lock order configRollbackMu → adminSettingsMu, acyclic). A persist
+	// failure means the target was never applied; the failed file is also
+	// captured by the surrounding storage-write scope. No downloader/legacy-
+	// syncer call.
 	if b.SaaSFeedProtocol != "" {
-		d := getSaaSFeedDurable()
-		d.Managed = b.SaaSFeedManaged
-		d.Enabled = b.SaaSFeedEnabled
-		d.URL = b.SaaSFeedURL
-		d.Protocol = b.SaaSFeedProtocol
-		d.RefreshSeconds = b.SaaSFeedRefreshSeconds
-		setSaaSFeedDurable(d)
+		if err := installSaaSFeedDurable(func(cur saasFeedDurable) saasFeedDurable {
+			cur.Managed = b.SaaSFeedManaged
+			cur.Enabled = b.SaaSFeedEnabled
+			cur.URL = b.SaaSFeedURL
+			cur.Protocol = b.SaaSFeedProtocol
+			cur.RefreshSeconds = b.SaaSFeedRefreshSeconds
+			return cur
+		}); err != nil {
+			logger.Printf("ConfigRollback: saas feed settings persist failed, target never applied: %v", err)
+		}
 	}
 }
 

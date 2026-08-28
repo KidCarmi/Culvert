@@ -135,19 +135,29 @@ func mergeCategoryOverrides(base, incoming CategoryOverrides) CategoryOverrides 
 
 // importSaaSFeedConfig applies the feed-config scalars from an import payload.
 // Never-wipe: applied only when the backup carries the config (SaaSFeedProtocol
-// set). Publishes to the durable holder only — persisted by the caller's
-// adminSettingsSave; no downloader/legacy-syncer call.
+// set). Blocker E: the install goes through installSaaSFeedDurable — read,
+// durable write, and holder publish in ONE adminSettingsMu transaction — so it
+// serializes against the fenced settings PUT instead of landing between a
+// PUT's precondition and its apply (the old direct setSaaSFeedDurable +
+// later adminSettingsSave pair could leave holder, revision, and file
+// disagreeing about which writer won). No downloader/legacy-syncer call.
 func importSaaSFeedConfig(b *configBackup) {
 	if b.SaaSFeedProtocol == "" {
 		return
 	}
-	d := getSaaSFeedDurable()
-	d.Managed = b.SaaSFeedManaged
-	d.Enabled = b.SaaSFeedEnabled
-	d.URL = b.SaaSFeedURL
-	d.Protocol = b.SaaSFeedProtocol
-	d.RefreshSeconds = b.SaaSFeedRefreshSeconds
-	setSaaSFeedDurable(d)
+	if err := installSaaSFeedDurable(func(cur saasFeedDurable) saasFeedDurable {
+		cur.Managed = b.SaaSFeedManaged
+		cur.Enabled = b.SaaSFeedEnabled
+		cur.URL = b.SaaSFeedURL
+		cur.Protocol = b.SaaSFeedProtocol
+		cur.RefreshSeconds = b.SaaSFeedRefreshSeconds
+		return cur
+	}); err != nil {
+		// Import stays section-tolerant: the feed target was never applied
+		// (runtime and disk agree on the pre-import config), the rest of the
+		// import proceeds, and the failure is logged.
+		logger.Printf("ConfigImport: saas feed settings persist failed, target never applied: %v", err)
+	}
 }
 
 // ─── GET/PUT /api/saas-feed/settings ────────────────────────────────────────────
