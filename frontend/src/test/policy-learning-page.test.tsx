@@ -109,6 +109,7 @@ let policyBody: unknown;
 let draftBody: unknown;
 let mutations: Array<{ method: string; url: string; body: unknown }>;
 let onMutate: (method: string, url: string, body: unknown) => Promise<Response>;
+let failVerifyGets: boolean;
 
 beforeEach(() => {
   container = document.createElement("div");
@@ -193,6 +194,7 @@ beforeEach(() => {
   };
   mutations = [];
   onMutate = () => okJSON({ ok: true });
+  failVerifyGets = false;
   vi.stubGlobal(
     "fetch",
     vi.fn((input: unknown, init?: RequestInit) => {
@@ -211,8 +213,14 @@ beforeEach(() => {
       if (url.includes("/api/policy-learning/config"))
         return okJSON(configBody);
       if (url.includes("/api/policy-learning")) return okJSON(statusBody);
-      if (url.includes("/api/policy/draft")) return okJSON(draftBody);
-      if (url.includes("/api/policy")) return okJSON(policyBody);
+      if (url.includes("/api/policy/draft"))
+        return failVerifyGets
+          ? plainText(500, "verification injected failure")
+          : okJSON(draftBody);
+      if (url.includes("/api/policy"))
+        return failVerifyGets
+          ? plainText(500, "verification injected failure")
+          : okJSON(policyBody);
       if (url.includes("/api/urlcat"))
         return okJSON([{ name: "News" }, { name: "Software Downloads" }]);
       return Promise.reject(new TypeError(`unexpected ${method} ${url}`));
@@ -414,8 +422,8 @@ it("admin accept: exact ceremony wording; POST body is exactly {id, action, if_v
     }
     return okJSON({ ok: true });
   };
-  // The §33 agreement check reads the draft rulebase: it must carry the
-  // created DISABLED rule.
+  // The §33 verification reads the effective rulebase: the candidate carries
+  // the created DISABLED rule and the draft is active → draft-confirmed.
   policyBody = {
     rules: [
       {
@@ -463,10 +471,13 @@ it("admin accept: exact ceremony wording; POST body is exactly {id, action, if_v
   expect(link?.getAttribute("href")).toContain(
     "/policies/access-rules?rule=01J3ZV9E3JD0CCCCCCCCCCCCCC",
   );
-  // §33 agreement check passed — no inconsistency warning.
+  // §33 verification (concurrency-corrected): DRAFT-CONFIRMED state A.
   await flushUntil(() => {
-    expect(container.textContent).not.toContain("inconsistency");
+    expect(container.textContent).toContain(
+      "Acceptance confirmed. The disabled rule is present in the Policy Draft. Enforcement is unchanged until an explicit commit.",
+    );
   });
+  expect(container.textContent).not.toContain("inconsisten");
 });
 
 it("draft mode NOT armed: no Accept button, an explanation instead, and NO way to arm from this page", async () => {
@@ -576,4 +587,196 @@ it("disable while a session is active: the server 409 renders verbatim (complete
   await flushUntil(() => {
     expect(container.textContent).toContain("complete or cancel it first");
   });
+});
+
+// ── Post-accept concurrency correction: states B–F ─────────────────────────
+// The M5B backend deliberately supports the accepted target living in the
+// Policy Draft candidate OR in RUNNING after a separate commit; concurrent
+// admins may legitimately commit/edit/delete/revert between the confirmed
+// Accept response and the verification GETs. These proofs pin that the UI
+// reports POLICY STATE ADVANCEMENT truthfully and never mislabels a
+// legitimate concurrent lifecycle as a backend inconsistency.
+
+const TARGET_ID = "01J3ZV9E3JD0CCCCCCCCCCCCCC";
+
+function armAcceptResponse(alreadyDone: boolean): void {
+  onMutate = (_method, url, body) => {
+    const b = JSON.stringify(body);
+    if (url.includes("recommendations") && b.includes("accept")) {
+      return okJSON({
+        recommendation: {
+          ...REC,
+          state: "accepted",
+          target_rule_id: TARGET_ID,
+          accepted_at: "t",
+          accepted_by: "admin-user",
+        },
+        rule_id: TARGET_ID,
+        already_done: alreadyDone,
+        note: "Created a DISABLED rule in the Policy Draft. Enforcement is unchanged until the draft is reviewed and committed.",
+      });
+    }
+    return okJSON({ ok: true });
+  };
+}
+
+function targetRule(enabled: boolean): Record<string, unknown> {
+  return {
+    priority: 1,
+    id: TARGET_ID,
+    name: "learned rule",
+    action: "Allow",
+    enabled,
+  };
+}
+
+const INACTIVE_DRAFT = {
+  requireCommit: true,
+  active: false,
+  actor: "",
+  startedAt: "",
+};
+
+async function acceptThrough(): Promise<void> {
+  await mount("admin");
+  await click(findButton((t) => t.includes("Accept to Policy Draft…")));
+  await click(findButton((t) => t === "Accept to Policy Draft"));
+  await flushUntil(() => {
+    expect(container.textContent).toContain("Accepted to Policy Draft");
+  });
+}
+
+function expectNoInconsistencyClaims(): void {
+  expect(container.textContent).not.toContain("inconsisten");
+  expect(container.textContent).not.toContain("reconciles");
+  expect(container.textContent).not.toContain("accept failed");
+  expect(container.textContent).not.toContain("corrupt");
+}
+
+it("state B: verification sees the target in RUNNING — Policy state advanced, NOT an inconsistency", async () => {
+  armAcceptResponse(false);
+  // Another admin committed between the Accept response and the verification
+  // GETs: the effective snapshot is RUNNING and carries the target.
+  policyBody = {
+    rules: [targetRule(false)],
+    count: 1,
+    version: 14,
+    updatedAt: "t",
+    draft: false,
+  };
+  draftBody = INACTIVE_DRAFT;
+  await acceptThrough();
+  await flushUntil(() => {
+    expect(container.textContent).toContain(
+      "The target rule is now present in running policy, indicating the Policy state advanced after acceptance",
+    );
+  });
+  expect(container.textContent).toContain(
+    "for example, through a separate commit",
+  );
+  expect(container.textContent).toContain("Review the current rule state.");
+  // Accept itself is never described as directly enforcing the rule; the
+  // Accept-operation truth (server note) still stands verbatim.
+  expect(container.textContent).toContain(
+    "Enforcement is unchanged until the draft is reviewed and committed.",
+  );
+  expectNoInconsistencyClaims();
+});
+
+it("state C: already_done=true with the target in RUNNING — legitimate idempotent success, no draft requirement", async () => {
+  armAcceptResponse(true);
+  policyBody = {
+    rules: [targetRule(false)],
+    count: 1,
+    version: 14,
+    updatedAt: "t",
+    draft: false,
+  };
+  draftBody = INACTIVE_DRAFT;
+  await mount("admin");
+  await click(findButton((t) => t.includes("Accept to Policy Draft…")));
+  await click(findButton((t) => t === "Accept to Policy Draft"));
+  await flushUntil(() => {
+    expect(container.textContent).toContain("Already accepted (idempotent)");
+  });
+  // Historical decision truth: target rule id + review affordance.
+  expect(container.textContent).toContain(TARGET_ID);
+  const link = Array.from(container.querySelectorAll("a")).find((a) =>
+    (a.textContent ?? "").includes("Review created rule"),
+  );
+  expect(link?.getAttribute("href")).toContain(
+    `/policies/access-rules?rule=${TARGET_ID}`,
+  );
+  // Current policy truth, classified separately.
+  await flushUntil(() => {
+    expect(container.textContent).toContain(
+      "now present in running policy, indicating the Policy state advanced",
+    );
+  });
+  expectNoInconsistencyClaims();
+});
+
+it("state D: target exists but is now enabled/edited — state advanced, never 'Accept corrupted'", async () => {
+  armAcceptResponse(false);
+  // Another admin enabled the accepted draft rule before verification ran.
+  policyBody = {
+    rules: [targetRule(true)],
+    count: 1,
+    version: 14,
+    updatedAt: "t",
+    draft: true,
+  };
+  await acceptThrough();
+  await flushUntil(() => {
+    expect(container.textContent).toContain(
+      "The target rule's current state differs from that translation",
+    );
+  });
+  expect(container.textContent).toContain(
+    "the Policy state advanced after acceptance (for example, another admin edited or enabled it)",
+  );
+  expectNoInconsistencyClaims();
+});
+
+it("state E: target absent / draft reverted — state advanced, historical Accepted truth retained", async () => {
+  armAcceptResponse(false);
+  policyBody = {
+    rules: [],
+    count: 0,
+    version: 14,
+    updatedAt: "t",
+    draft: false,
+  };
+  draftBody = INACTIVE_DRAFT;
+  await acceptThrough();
+  await flushUntil(() => {
+    expect(container.textContent).toContain(
+      "the target rule is not currently present in the effective rulebase",
+    );
+  });
+  expect(container.textContent).toContain(
+    "a concurrent revert, delete, or commit lifecycle may have occurred",
+  );
+  expect(container.textContent).toContain(
+    "The server's Accepted decision remains the historical record.",
+  );
+  // Historical truth still rendered: title + target rule id.
+  expect(container.textContent).toContain("Accepted to Policy Draft");
+  expect(container.textContent).toContain(TARGET_ID);
+  expectNoInconsistencyClaims();
+});
+
+it("state F: verification GET failure — verification unavailable, no false inconsistency assertion", async () => {
+  armAcceptResponse(false);
+  failVerifyGets = true;
+  await acceptThrough();
+  await flushUntil(() => {
+    expect(container.textContent).toContain(
+      "The acceptance was confirmed, but the current Policy state could not be verified.",
+    );
+  });
+  expect(container.textContent).toContain(
+    "Review the target rule and current Policy Draft before taking another action",
+  );
+  expectNoInconsistencyClaims();
 });

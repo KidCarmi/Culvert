@@ -561,3 +561,107 @@ test("policy learning journey: enable → session → proxied traffic → comple
     await resetLearning(page);
   }
 });
+
+// ── Post-accept concurrency: the real-server lifecycle the verification
+// classifier consumes ─────────────────────────────────────────────────────
+//
+// A REAL browser-level Accept needs an honestly generated recommendation,
+// which requires grouped authenticated identity this harness cannot mint
+// (recorded constraint — the learning journey above proves the honest zero
+// outcome). The M5B Go suite owns the Accept protocol proofs through the
+// supported API handlers, including TestM5B_ConcurrentDoubleAccept
+// (already_done=true, same target rule id, zero duplicate rules). What the
+// FRONTEND classifier consumes is the SERVER LIFECYCLE of the accepted
+// target: a DISABLED rule in the Policy Draft candidate that a SECOND admin
+// commits between the confirmed Accept and the verification GETs, after
+// which the same stable rule id is present in RUNNING. This test reproduces
+// exactly that ordering through supported server calls with two authenticated
+// clients and pins the envelope fields the classifier keys on (draft flag,
+// stable id, enabled) — binding the component-test fixtures for states A/B
+// to real server truth. Accept itself never enforces anything: the rule is
+// running only because of B's separate commit.
+test("post-accept lifecycle: disabled draft rule committed by a second admin keeps its stable id into RUNNING (the running-now shape)", async ({
+  page,
+  browser,
+}) => {
+  await resetDraftMode(page);
+  try {
+    // Arm Require Commit; admin A stages the DISABLED rule (the exact shape
+    // Accept's draft append creates: born disabled, in the candidate).
+    await page.request.put("/api/policy/draft", {
+      data: { require_commit: true },
+    });
+    const created = await page.request.post("/api/policy", {
+      data: {
+        name: "E2E 2C PostAccept Target",
+        action: "Allow",
+        enabled: false,
+      },
+    });
+    expect(created.ok()).toBe(true);
+
+    // Admin A's pre-commit observation: the EFFECTIVE snapshot is the
+    // candidate (draft:true) and carries the disabled target — the
+    // draft-confirmed shape (state A).
+    const preResp = await page.request.get("/api/policy");
+    expect(preResp.ok()).toBe(true);
+    const pre: unknown = await preResp.json();
+    if (!isRecord(pre) || !Array.isArray(pre["rules"]))
+      throw new Error("bad policy envelope");
+    expect(pre["draft"]).toBe(true);
+    const preRule = pre["rules"]
+      .map((r: unknown) => r)
+      .find((r) => isRecord(r) && r["name"] === "E2E 2C PostAccept Target");
+    expect(preRule).toBeDefined();
+    if (!isRecord(preRule)) return;
+    const targetID = preRule["id"];
+    expect(typeof targetID).toBe("string");
+    expect(preRule["enabled"]).toBe(false);
+    expect((await apiDraftState(page)).active).toBe(true);
+
+    // Admin B (a separate authenticated client) commits the draft — the
+    // concurrent lifecycle that advances the Policy state after acceptance.
+    const ctxB = await browser.newContext({ storageState: EMPTY_STATE });
+    const clientB = await ctxB.request.post(`${AUTH_URL}/api/auth/login`, {
+      data: { user: USERS.admin.user, pass: USERS.admin.pass },
+    });
+    expect(clientB.ok()).toBe(true);
+    const commit = await ctxB.request.post(
+      `${AUTH_URL}/api/policy/draft/commit`,
+      { data: { comment: "concurrent commit during A's verification window" } },
+    );
+    expect(commit.ok()).toBe(true);
+    await ctxB.close();
+
+    // Admin A's verification observation now sees the running-now shape
+    // (state B): effective snapshot is RUNNING, SAME stable id, still the
+    // born-safe disabled state — Accept never enforced anything; the commit
+    // moved it.
+    const postResp = await page.request.get("/api/policy");
+    expect(postResp.ok()).toBe(true);
+    const post: unknown = await postResp.json();
+    if (!isRecord(post) || !Array.isArray(post["rules"]))
+      throw new Error("bad policy envelope");
+    expect(post["draft"]).toBe(false);
+    const postRule = post["rules"]
+      .map((r: unknown) => r)
+      .find((r) => isRecord(r) && r["id"] === targetID);
+    expect(postRule).toBeDefined();
+    if (!isRecord(postRule)) return;
+    expect(postRule["enabled"]).toBe(false);
+    const draftAfter = await apiDraftState(page);
+    expect(draftAfter.active).toBe(false);
+  } finally {
+    // Restore: remove the committed rule from RUNNING and disarm.
+    const snap = await page.request.get("/api/policy");
+    const v: unknown = await snap.json();
+    if (isRecord(v) && Array.isArray(v["rules"])) {
+      for (const r of v["rules"]) {
+        if (isRecord(r) && r["name"] === "E2E 2C PostAccept Target") {
+          await page.request.delete(`/api/policy?id=${String(r["id"])}`);
+        }
+      }
+    }
+    await resetDraftMode(page);
+  }
+});

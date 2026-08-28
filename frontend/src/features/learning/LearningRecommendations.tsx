@@ -16,9 +16,17 @@
 //
 // Success renders SERVER truth (the returned recommendation + rule_id +
 // already_done + note) and offers "Review created rule" into the Access
-// Rules draft view. A post-accept agreement check (§33) verifies the draft
-// now carries the DISABLED target rule; disagreement renders a controlled
-// inconsistency warning, never silence.
+// Rules view. A post-accept verification (§33, corrected for concurrency)
+// then classifies the CURRENT policy location of the stable target rule via
+// the explicit state model in postAccept.ts: the M5B backend deliberately
+// supports the target living in the Policy Draft candidate OR in RUNNING
+// after a separate commit, and a concurrent admin may legitimately commit,
+// edit, delete, or revert between the confirmed Accept and the verification
+// GETs. Historical decision truth (the server's Accepted response,
+// already_done included) and current policy truth are rendered as two
+// separate facts — a changed current state is reported as the Policy state
+// ADVANCING, never as a backend inconsistency, and a failed observation is
+// "verification unavailable", never a false inconsistency claim.
 import { useState, type JSX } from "react";
 import { Link } from "react-router";
 import {
@@ -41,6 +49,8 @@ import type {
 } from "../../api/policyLearning";
 import { getPolicy } from "../../api/policy";
 import { getDraftState } from "../../api/policyDraft";
+import { classifyPostAccept } from "./postAccept";
+import type { PostAcceptState } from "./postAccept";
 import type { RequestRunOwner } from "../../shared/runOwner";
 import { serverErrorText, unknownOutcome } from "../../shared/mutationOutcome";
 import styles from "./learning.module.css";
@@ -60,9 +70,8 @@ interface AcceptSuccess {
   ruleId: string;
   alreadyDone: boolean;
   note: string;
-  /** §33 agreement check outcome: null = checking / not run */
-  agreement: "ok" | "inconsistent" | null;
-  agreementDetail: string;
+  /** the post-accept verification lifecycle (postAccept.ts state model) */
+  verify: PostAcceptState;
 }
 
 function confidenceBadge(c: string): JSX.Element {
@@ -181,41 +190,26 @@ export function LearningRecommendations(
   const [rejectResult, setRejectResult] = useState<ConfirmResult>("idle");
   const [rejectError, setRejectError] = useState("");
 
-  // §33 — post-accept agreement check: the draft must be active and the
-  // effective (candidate) rulebase must carry the DISABLED target rule.
-  const runAgreementCheck = (recId: string, ruleId: string): void => {
+  // §33 (concurrency-corrected) — post-accept verification: observe the
+  // CURRENT policy location of the stable target rule and classify it via
+  // the explicit state model (postAccept.ts). Read-only: minimum current
+  // truth (GET /api/policy + GET /api/policy/draft), never a mutation,
+  // never an Accept retry. A failed observation is "verification
+  // unavailable" — not an inconsistency claim.
+  const runPostAcceptVerification = (recId: string, ruleId: string): void => {
     const signal = owner.begin();
     void Promise.all([getPolicy(signal), getDraftState(signal)])
       .then(([snap, draft]) => {
-        const target = snap.rules.find((r) => r.id === ruleId);
-        const ok =
-          draft.active && snap.draft && target !== undefined && !target.enabled;
+        const verify = classifyPostAccept(snap, draft, ruleId);
         setAcceptSuccess((cur) =>
-          cur === null || cur.recId !== recId
-            ? cur
-            : {
-                ...cur,
-                agreement: ok ? "ok" : "inconsistent",
-                agreementDetail: ok
-                  ? ""
-                  : !draft.active
-                    ? "No active Policy Draft was found after the accept."
-                    : target === undefined
-                      ? "The created rule is not visible in the draft rulebase snapshot."
-                      : "The created rule is not disabled as expected.",
-              },
+          cur === null || cur.recId !== recId ? cur : { ...cur, verify },
         );
       })
       .catch(() => {
         setAcceptSuccess((cur) =>
           cur === null || cur.recId !== recId
             ? cur
-            : {
-                ...cur,
-                agreement: "inconsistent",
-                agreementDetail:
-                  "The post-accept verification could not be completed — review the Policy Draft directly.",
-              },
+            : { ...cur, verify: "verification-unavailable" },
         );
       })
       .finally(() => {
@@ -231,16 +225,20 @@ export function LearningRecommendations(
         setAccepting(null);
         setAcceptResult("idle");
         setAcceptError("");
+        // already_done is a first-class successful backend outcome: the
+        // historical decision truth (accepted, target rule id) renders the
+        // same way, and the CURRENT policy location of the target is
+        // classified separately — an active candidate is NOT required for an
+        // idempotent Accepted response to be legitimate.
         setAcceptSuccess({
           recId: res.recommendation.id,
           ruleId: res.ruleId,
           alreadyDone: res.alreadyDone,
           note: res.note,
-          agreement: null,
-          agreementDetail: "",
+          verify: "checking",
         });
         refetchAll();
-        runAgreementCheck(res.recommendation.id, res.ruleId);
+        runPostAcceptVerification(res.recommendation.id, res.ruleId);
       })
       .catch((err: unknown) => {
         if (unknownOutcome(err)) {
@@ -294,7 +292,12 @@ export function LearningRecommendations(
       {acceptSuccess !== null && (
         <Callout
           variant={
-            acceptSuccess.agreement === "inconsistent" ? "warning" : "success"
+            acceptSuccess.verify === "checking" ||
+            acceptSuccess.verify === "draft-confirmed"
+              ? "success"
+              : acceptSuccess.verify === "verification-unavailable"
+                ? "unknown"
+                : "info"
           }
           title={
             acceptSuccess.alreadyDone
@@ -302,18 +305,55 @@ export function LearningRecommendations(
               : "Accepted to Policy Draft"
           }
         >
-          {acceptSuccess.note} Created rule <Mono>{acceptSuccess.ruleId}</Mono>.{" "}
+          {/* Historical decision truth — the server's confirmed Accept
+              response. Rendered unconditionally: it stays true whatever the
+              current policy state does afterward. */}
+          {acceptSuccess.note} Target rule <Mono>{acceptSuccess.ruleId}</Mono>.{" "}
           <Link
             to={`/policies/access-rules?rule=${encodeURIComponent(acceptSuccess.ruleId)}`}
           >
             Review created rule
           </Link>
-          {acceptSuccess.agreement === "inconsistent" && (
+          {/* Current policy truth — a separate fact, classified from the
+              verification observation (postAccept.ts state model). */}
+          {acceptSuccess.verify === "draft-confirmed" && (
             <p>
-              Post-accept verification found an inconsistency:{" "}
-              {acceptSuccess.agreementDetail} The appliance&apos;s durable
-              intent record reconciles on the next admin action — review the
-              Policy Draft before further decisions.
+              Acceptance confirmed. The disabled rule is present in the Policy
+              Draft. Enforcement is unchanged until an explicit commit.
+            </p>
+          )}
+          {acceptSuccess.verify === "running-now" && (
+            <p>
+              The recommendation was accepted to the Policy Draft. The target
+              rule is now present in running policy, indicating the Policy state
+              advanced after acceptance (for example, through a separate
+              commit). Review the current rule state.
+            </p>
+          )}
+          {acceptSuccess.verify === "advanced-changed" && (
+            <p>
+              The recommendation was accepted with a disabled, born-safe rule.
+              The target rule&apos;s current state differs from that translation
+              — the Policy state advanced after acceptance (for example, another
+              admin edited or enabled it). Review the current rule state and the
+              Policy Draft.
+            </p>
+          )}
+          {acceptSuccess.verify === "advanced-absent" && (
+            <p>
+              The recommendation was accepted, but the target rule is not
+              currently present in the effective rulebase — a concurrent revert,
+              delete, or commit lifecycle may have occurred after acceptance.
+              The server&apos;s Accepted decision remains the historical record.
+              Review the current Policy Draft and Access Rules.
+            </p>
+          )}
+          {acceptSuccess.verify === "verification-unavailable" && (
+            <p>
+              The acceptance was confirmed, but the current Policy state could
+              not be verified. Review the target rule and current Policy Draft
+              before taking another action, or refresh and check the Access
+              Rules page.
             </p>
           )}
         </Callout>
