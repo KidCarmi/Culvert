@@ -52,6 +52,33 @@ func TestHealth_ManagementAccessFromConfig(t *testing.T) {
 	}
 }
 
+// TestHealth_ReviewRequiredToolsDualEmit pins the T-38 wire-compatibility
+// contract: DriftedTools (drifted_tools, the pre-existing tested field) and
+// ReviewRequiredTools (review_required_tools, the name used everywhere else
+// in the codebase for the same catalog.ReviewRequired disposition) must
+// always carry the identical count from the same Inventory source.
+func TestHealth_ReviewRequiredToolsDualEmit(t *testing.T) {
+	src := HealthSources{
+		Inventory: fakeInventoryCounts{servers: 4, quarantined: 1, drifted: 2},
+	}
+	h := NewHealthService(src, DefaultLimits())
+	v := h.Snapshot()
+	if v.Gateway.DriftedTools != 2 || v.Gateway.ReviewRequiredTools != 2 {
+		t.Fatalf("expected both fields at 2, got drifted_tools=%d review_required_tools=%d",
+			v.Gateway.DriftedTools, v.Gateway.ReviewRequiredTools)
+	}
+	if v.Gateway.DriftedTools != v.Gateway.ReviewRequiredTools {
+		t.Fatalf("drifted_tools and review_required_tools diverged: %d != %d",
+			v.Gateway.DriftedTools, v.Gateway.ReviewRequiredTools)
+	}
+}
+
+type fakeInventoryCounts struct{ servers, quarantined, drifted int }
+
+func (f fakeInventoryCounts) Counts(string) (servers, quarantined, drifted int) {
+	return f.servers, f.quarantined, f.drifted
+}
+
 // TestHealth_ConcurrentSnapshots is a race-detector smoke test for concurrent
 // reads (run under -race in CI).
 func TestHealth_ConcurrentSnapshots(t *testing.T) {

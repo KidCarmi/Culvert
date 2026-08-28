@@ -14,6 +14,7 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/obs"
@@ -23,16 +24,91 @@ import (
 // Extensions are normalised to lowercase with a leading dot (e.g. ".exe").
 // All operations are safe for concurrent use. Persists to a JSON file when
 // a path is configured via SetPath().
+//
+// ── The per-transaction gate is LOCK-FREE ─────────────────────────────────────
+//
+// CheckPath runs on every plain-HTTP request (proxy.go preDispatchBlocked) and
+// every SSL-inspected inner request; CheckContentType and
+// CheckContentDisposition run on every plain-HTTP response (proxy_http.go
+// blockedByResponseHeaders) and every inspected response (proxy_tunnel.go
+// inspectFileBlocked). So one inspected transaction reached this store up to
+// THREE times, and each probe took mu.RLock — an atomic read-modify-write on
+// ONE process-wide word — purely to read a set that in steady state never
+// changes (the shipped default is ten extensions seeded once at startup).
+//
+// That is not a constant cost but a THROUGHPUT CEILING, the same shape already
+// recorded for internal/threatfeed, security.go's IP filter, internal/connlimit
+// and metrics.go's latency histogram. Measured on this machine (4-vCPU Xeon,
+// Go 1.26, CheckPath against "/static/app.js", medians of n=15;
+// BenchmarkCheckPathParallel{,Legacy}, whose ns/op is already wall-normalized
+// across workers, so 1-core-ns ÷ 4-core-ns IS the scaling factor):
+//
+//	       │ 1 core  │ 4 workers │ scaling
+//	before │ 28.4 ns │  105.6 ns │ 0.27x — four cores delivered a QUARTER of one
+//	after  │ 19.7 ns │   17.2 ns │ 1.15x — flat, and 6.2x the old four-core ceiling
+//
+// Note the shape, not the constants: the "after" row is FLAT, not linear. The
+// published view is a shared read-only cache line, so it does not scale a
+// four-worker load on a 4-vCPU VM into 4x; what it removes is the DEGRADATION.
+// The absolute numbers are load-sensitive by construction — a contended lock
+// degrades further the busier the box is, so the "before" row understates the
+// problem on the larger hardware the appliance ships to.
+//
+// Reads now go through an immutable view published via atomic.Pointer. THE
+// CONTRACT IS ONE LINE AND IT IS LOAD-BEARING: a map reachable from a published
+// view is never mutated in place. The mu-guarded fields stay the AUTHORITATIVE
+// write-side state — every mutator keeps its exact prior semantics and calls
+// publishLocked() before releasing the lock. Adding a mutator without that call
+// is a silent SECURITY failure, not a performance one (a newly-blocked
+// extension that never blocks, a removed one that keeps blocking), so it is
+// pinned per mutator by TestBlockerView_EveryMutatorRepublishes.
+//
+// publishLocked COPIES rather than aliasing, so an Add loop is O(N) per call.
+// That introduces no new complexity class: Add already calls save(), which
+// marshals the WHOLE set and rewrites the file on every single call, so the
+// bulk paths were quadratic in bytes-to-disk before this change and the map
+// copy is strictly cheaper than the marshal it sits beside. ReplaceAll remains
+// the batch entry point for bulk loads (CL-13).
 type FileBlocker struct {
 	mu         sync.RWMutex
 	extensions map[string]bool
 	path       string // persistence file (e.g. /data/fileblock.json); "" = no persistence
+
+	// view is the immutable read side, rebuilt by publishLocked on every
+	// mutation. Nil until the first publish, which is indistinguishable from an
+	// empty set — the shape a zero-valued FileBlocker already had.
+	view atomic.Pointer[blockerView]
+}
+
+// blockerView is the immutable snapshot the per-transaction checks read. Its
+// map is never mutated after publication (see FileBlocker's contract note).
+type blockerView struct {
+	extensions map[string]bool
+}
+
+// blockedExt reports whether ext (already normalised) is in the published
+// block set. Lock-free and allocation-free; safe on a never-published view.
+func (fb *FileBlocker) blockedExt(ext string) bool {
+	v := fb.view.Load()
+	return v != nil && v.extensions[ext]
+}
+
+// publishLocked rebuilds the immutable read view from the authoritative map.
+// Callers MUST hold fb.mu for writing.
+func (fb *FileBlocker) publishLocked() {
+	cp := make(map[string]bool, len(fb.extensions))
+	for ext, on := range fb.extensions {
+		cp[ext] = on
+	}
+	fb.view.Store(&blockerView{extensions: cp})
 }
 
 // NewBlocker returns an empty, ready-to-use FileBlocker. package main holds the
 // process-wide singleton (var fileBlocker = fileblock.NewBlocker()).
 func NewBlocker() *FileBlocker {
-	return &FileBlocker{extensions: map[string]bool{}}
+	fb := &FileBlocker{extensions: map[string]bool{}}
+	fb.view.Store(&blockerView{extensions: map[string]bool{}})
+	return fb
 }
 
 // SetPath configures the persistence file and loads any previously saved
@@ -58,6 +134,7 @@ func (fb *FileBlocker) SetPath(p string) {
 	for _, ext := range exts {
 		fb.extensions[fb.norm(ext)] = true
 	}
+	fb.publishLocked()
 	fb.mu.Unlock()
 }
 
@@ -98,6 +175,7 @@ func (fb *FileBlocker) Add(ext string) {
 	}
 	fb.mu.Lock()
 	fb.extensions[ext] = true
+	fb.publishLocked()
 	fb.save()
 	fb.mu.Unlock()
 }
@@ -130,6 +208,7 @@ func (fb *FileBlocker) ReplaceAll(exts []string) {
 	}
 	fb.mu.Lock()
 	fb.extensions = newSet
+	fb.publishLocked()
 	fb.save()
 	fb.mu.Unlock()
 }
@@ -139,6 +218,7 @@ func (fb *FileBlocker) Remove(ext string) {
 	ext = fb.norm(ext)
 	fb.mu.Lock()
 	delete(fb.extensions, ext)
+	fb.publishLocked()
 	fb.save()
 	fb.mu.Unlock()
 }
@@ -158,6 +238,7 @@ func (fb *FileBlocker) List() []string {
 func (fb *FileBlocker) ClearAll() {
 	fb.mu.Lock()
 	fb.extensions = map[string]bool{}
+	fb.publishLocked()
 	fb.save()
 	fb.mu.Unlock()
 }
@@ -177,9 +258,7 @@ func (fb *FileBlocker) CheckPath(urlPath string) string {
 	if ext == "" {
 		return ""
 	}
-	fb.mu.RLock()
-	defer fb.mu.RUnlock()
-	if fb.extensions[ext] {
+	if fb.blockedExt(ext) {
 		return ext
 	}
 	return ""
@@ -192,9 +271,7 @@ func (fb *FileBlocker) CheckExt(ext string) string {
 	if ext == "" {
 		return ""
 	}
-	fb.mu.RLock()
-	defer fb.mu.RUnlock()
-	if fb.extensions[ext] {
+	if fb.blockedExt(ext) {
 		return ext
 	}
 	return ""
@@ -221,24 +298,76 @@ var blockedMIMETypes = map[string]string{
 // block list. This prevents bypass by renaming files (e.g. malware.exe → malware.txt).
 // The contentType parameter should be the raw Content-Type header value
 // (e.g. "application/x-msdownload; charset=utf-8").
+//
+// ── Why the media type is decided before the header is parsed ─────────────────
+//
+// This runs on EVERY proxied response that carries a Content-Type — the
+// plain-HTTP forward path (proxy_http.go blockedByResponseHeaders) and the
+// SSL-inspect path (proxy_tunnel.go inspectFileBlocked) alike. It consumed the
+// full mime.ParseMediaType, which allocates a map[string]string for the header
+// PARAMETERS and then walks the header to fill it — and this function discards
+// that map. Every response paid it so that a ten-entry lookup could miss.
+//
+// Measured on this machine (4-vCPU Xeon, Go 1.26, "text/html; charset=utf-8" —
+// the shape almost all web traffic carries; medians of n=6):
+//
+//	before   281.7 ns/op   336 B/op   2 allocs/op
+//	after     35.6 ns/op     0 B/op   0 allocs/op
+//
+// The trade-off is stated rather than papered over: the ten dangerous media
+// types now pay the cheap split AND the parse, 347.2 -> 384.8 ns (+11%). They
+// are the arm that is about to serve a block page and write two log lines, and
+// ordinary traffic never reaches it, so the exchange is accepted deliberately.
+// BenchmarkCheckContentType_Dangerous keeps it measurable.
+//
+// The parse is now reached ONLY for a header whose media type is one of the ten
+// dangerous types, i.e. never on ordinary traffic. The pre-filter is a pure
+// NEGATIVE one: it can only return the empty (allow) answer early, and every
+// BLOCK is still decided by the original body, unchanged, parse included. So
+// the malformed-parameter case still declines to block exactly as before —
+// ParseMediaType reports ErrInvalidMediaParameter for "application/x-msdownload;
+// bogus" and this returns "", which a naive prefix split would have turned into
+// a block. That would have been a tightening, but a tightening is still a
+// behaviour change in a cost fix, so it is deliberately not taken here.
+//
+// The equivalence is exact, not approximate. ParseMediaType computes its
+// returned mediatype as strings.TrimSpace(strings.ToLower(base)) over
+// base, _, _ := strings.Cut(v, ";") — reproduced verbatim below — and returns a
+// non-nil error otherwise, in which case the pre-fix body returned "" as well.
+// So "candidate is not a blocked MIME type" implies the pre-fix body returned
+// "" for every input, including the malformed ones. Pinned against a verbatim
+// copy of the pre-fix body by TestCheckContentType_MatchesPreFilterBehaviour
+// and FuzzCheckContentType, so an upstream mime behaviour change fails CI
+// rather than silently diverging.
 func (fb *FileBlocker) CheckContentType(contentType string) string {
 	if contentType == "" {
 		return ""
 	}
-	mediaType, _, err := mime.ParseMediaType(contentType)
-	if err != nil {
-		return ""
-	}
-	ext, ok := blockedMIMETypes[mediaType]
+	ext, ok := blockedMIMETypes[mediaTypeOf(contentType)]
 	if !ok {
 		return ""
 	}
-	fb.mu.RLock()
-	defer fb.mu.RUnlock()
-	if fb.extensions[ext] {
+	// Candidate is a dangerous MIME type: re-decide through the original,
+	// unchanged path so parameter validation is preserved byte-for-byte.
+	if _, _, err := mime.ParseMediaType(contentType); err != nil {
+		return ""
+	}
+	if fb.blockedExt(ext) {
 		return ext
 	}
 	return ""
+}
+
+// mediaTypeOf returns the media type mime.ParseMediaType would report for v,
+// without parsing its parameters. It reproduces the stdlib's first two lines
+// verbatim (order included — ToLower before TrimSpace), and allocates nothing
+// for an already-lowercase header value, which is what real traffic sends.
+//
+// It is only ever used to decide that a header CANNOT be blocked; a value
+// ParseMediaType would reject still reaches ParseMediaType above.
+func mediaTypeOf(v string) string {
+	base, _, _ := strings.Cut(v, ";")
+	return strings.TrimSpace(strings.ToLower(base))
 }
 
 // ExtractCDFilename extracts the filename from a Content-Disposition header.
@@ -276,9 +405,7 @@ func (fb *FileBlocker) CheckContentDisposition(cd string) string {
 	if ext == "" {
 		return ""
 	}
-	fb.mu.RLock()
-	defer fb.mu.RUnlock()
-	if fb.extensions[ext] {
+	if fb.blockedExt(ext) {
 		return ext
 	}
 	return ""

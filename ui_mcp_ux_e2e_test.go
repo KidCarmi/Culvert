@@ -29,7 +29,7 @@ const mcpuxAssets = "docs/design/mcp/ux-audit-assets/production"
 const fxOverview = `{"distribution_state":"partially_acknowledged","execution_state":"executed","management_tools":14,` +
 	`"health":{"gateway":{"capability":"gateway","runtime":{"state":"ready","listener_ready":true,"active_sessions":7,"in_flight":3},` +
 	`"durability":{"critical_state":"degraded","denial_state":"degraded","severity":"high","commit_failures":37,"recovery_state":"recovering"},` +
-	`"servers":4,"quarantined_tools":1,"drifted_tools":2,"policy_revision":12,"policy_snapshot_hash":"sha256:11aa22bb33cc44dd55ee66ff77009988","pending_approvals":0},` +
+	`"servers":4,"quarantined_tools":1,"drifted_tools":2,"review_required_tools":2,"policy_revision":12,"policy_snapshot_hash":"sha256:11aa22bb33cc44dd55ee66ff77009988","pending_approvals":0},` +
 	`"management":{"capability":"management","runtime":{"state":"ready","active_sessions":1,"in_flight":0},"durability":{"severity":"none"},"pending_approvals":0},` +
 	`"distribution_state":"partially_acknowledged","management_access":{"enabled":true,"default_min_role":"viewer","mutation_enabled":false}}}`
 

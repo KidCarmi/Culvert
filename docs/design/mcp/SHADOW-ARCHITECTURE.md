@@ -191,6 +191,23 @@ server disabled, request inspection fail, kill switch active — and asserts bot
 the same canonical pre-side-effect verdict. See §13 for the two deliberately-excluded
 divergences.
 
+**Extended (SR-01/SR-02, `shadow_prediction_parity_test.go`):** the equivalence above is
+directional — an over-permissive prediction is the one that costs a promotion made on
+false evidence, so the wall states it as *Shadow is never more permissive than the
+enforcement it predicts* and closes the two stages the first differential set did not
+reach:
+
+- **Upstream-server eligibility** (listed in the stage list above but unmodelled): the
+  live path refuses an absent or `!Usable()` server record inside `runExecute` with
+  `ReasonUpstreamServerUnusable`, and it is not subsumed by the policy hard override — the
+  policy engine reads server state from the DECISION snapshot while the executor re-reads
+  the LIVE registry, which is exactly why that refusal exists. `decide()` now models it,
+  between the allowance step and credential planning, where live sits it.
+- **Allowance capacity**: `wouldSatisfy` treated any present key as a reusable slot, but
+  `consume` SWEEPS expired session grants before its capacity check, so a request whose own
+  slot is an expired session has it deleted and is then refused if the store is still full.
+  Only a slot that survives that sweep now exempts the request from the gate.
+
 ---
 
 ## 5. Credential architecture for Shadow (task 14)
