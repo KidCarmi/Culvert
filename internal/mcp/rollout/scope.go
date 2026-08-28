@@ -419,6 +419,23 @@ func (s Scope) AdmitsToolForEvaluation(serverID, toolName, fingerprint string) b
 	if fullyExcluded(s.tenants, s.exTenants) || fullyExcluded(s.principals, s.exPrincipals) {
 		return false
 	}
+	// No production Subject carries an Environment — executor.subjectFor never copies
+	// in.Input.Server.Environment, so Subject.Environment is always "". A non-empty
+	// environments inclusion therefore makes Contains reject EVERY request (dimOK on a
+	// non-empty set with an empty value fails), so the scope validates as enumerable but
+	// shadows nothing. Fail closed rather than open a zero-evaluation evidence window
+	// (Codex P2, PR #1234). Populating Subject.Environment would be a runtime-matching
+	// change and is deferred with the approval slice.
+	if !s.environments.empty() {
+		return false
+	}
+	// A percentage sub-sample over a FINITE bucket-key inclusion set can be unsatisfiable:
+	// a matching request must satisfy BOTH the bucket-key dimension's inclusion set AND the
+	// percentage bucket, so if every included bucket key hashes OUTSIDE the bucket, Contains
+	// rejects every request even though a Usable tool is targeted (Codex P2, PR #1234).
+	if !s.bucketHasSurvivingKey() {
+		return false
+	}
 	if s.exServers.has(serverID) {
 		return false
 	}
@@ -495,6 +512,49 @@ func (s Scope) bucketKeyValue(subj Subject) string {
 	default:
 		return subj.PrincipalID
 	}
+}
+
+// bucketKeyInclusionSet returns the inclusion set on the dimension the percentage bucket
+// keys on. A matching request's bucket key is drawn from exactly this dimension, so when
+// the set is finite it enumerates every key that can ever be bucketed.
+func (s Scope) bucketKeyInclusionSet() stringSet {
+	switch s.bucketKey {
+	case BucketByTenant:
+		return s.tenants
+	case BucketByAgent:
+		return s.agents
+	case BucketByClient:
+		return s.clients
+	default:
+		return s.principals
+	}
+}
+
+// bucketHasSurvivingKey reports whether the percentage bucket can admit at least one
+// request GIVEN the scope's inclusion set on the bucket-key dimension. When
+// 0 < percent < 100 the bucket keys on a stable subject attribute (principal/tenant/
+// agent/client), and a matching request must ALSO satisfy that dimension's inclusion set
+// (dimOK), so a FINITE inclusion set enumerates every possible bucket key. If every one of
+// them hashes outside the bucket, no request can pass and the scope shadows nothing. An
+// EMPTY (unbounded) bucket-key set can always produce a surviving key, so it is treated as
+// satisfiable (and a pure-percentage scope is not enumerable enough for Shadow anyway).
+func (s Scope) bucketHasSurvivingKey() bool {
+	if s.percent <= 0 || s.percent >= 100 {
+		return true // no sub-sampling gate: every keyed request is in-bucket
+	}
+	keys := s.bucketKeyInclusionSet()
+	if keys.empty() {
+		return true // unbounded keyspace ⇒ a surviving key exists for any percent ≥ 1
+	}
+	for k := range keys {
+		// StableBucket returns [0,100); widening it to int is always safe (avoids an
+		// int→uint32 narrowing on s.percent that the lint gate flags). Same boundary as
+		// inBucket.
+		if int(StableBucket(s.bucketSalt, k)) < s.percent {
+			return true
+		}
+	}
+	return false
 }
 
 // StableBucket maps (salt, key) deterministically into [0,100). It uses a

@@ -652,4 +652,51 @@ func TestAdmitsToolForEvaluation(t *testing.T) {
 	if !partial.AdmitsToolForEvaluation("s1", "t", "fp") {
 		t.Fatal("a scope that still admits principal q must keep its usable tool reachable")
 	}
+
+	// An environments inclusion admits NO production request: executor.subjectFor never sets
+	// Subject.Environment, so Contains rejects every request against an environment-scoped
+	// scope even though a Usable tool is targeted (Codex P2, PR #1234). Mutation: dropping the
+	// !s.environments.empty() guard makes AdmitsToolForEvaluation return true and fails here.
+	envScope := mk(ScopeSpec{Capability: CapabilityGateway, Servers: []string{"s1"}, Environments: []string{"prod"}, Operations: []RiskClass{RiskWrite}, HighRisk: true})
+	if envScope.AdmitsToolForEvaluation("s1", "t", "fp") {
+		t.Fatal("an environment-scoped scope must not be reachable — no production subject carries an Environment")
+	}
+	// Cross-check the property: the best-possible production subject (everything matches, but
+	// Environment is empty as subjectFor produces) is still rejected by Contains, while the
+	// same subject WITH the environment set does match — proving the fail-closed is about the
+	// unpopulated subject field, not a broken environments dimension.
+	subjNoEnv := Subject{Capability: CapabilityGateway, ServerID: "s1", ToolName: "t", ToolFingerprint: "fp", Operation: RiskWrite}
+	if envScope.Contains(subjNoEnv) {
+		t.Fatal("control: a production subject with no Environment must not match an environment-scoped scope")
+	}
+	subjWithEnv := subjNoEnv
+	subjWithEnv.Environment = "prod"
+	if !envScope.Contains(subjWithEnv) {
+		t.Fatal("control: the environments dimension itself must match when the subject carries the environment")
+	}
+
+	// A percentage sub-sample over a FINITE bucket-key set can be unsatisfiable: with salt "s9"
+	// every included principal here hashes OUTSIDE a 50% bucket (StableBucket q=86, r=82), so
+	// Contains rejects every request even though the tool is targeted (Codex P2, PR #1234).
+	// Mutation: dropping the !s.bucketHasSurvivingKey() guard makes admit return true and fails
+	// here.
+	bucketDead := mk(ScopeSpec{Capability: CapabilityGateway, Servers: []string{"s1"}, Principals: []string{"q", "r"}, Percent: 50, BucketSalt: "s9", Operations: []RiskClass{RiskWrite}, HighRisk: true})
+	if bucketDead.AdmitsToolForEvaluation("s1", "t", "fp") {
+		t.Fatal("a percentage bucket whose every included key hashes outside the bucket admits no request — its usable tool must not be reachable")
+	}
+	// Cross-check: Contains rejects every included principal for this dead bucket.
+	for _, p := range []string{"q", "r"} {
+		if bucketDead.Contains(Subject{Capability: CapabilityGateway, ServerID: "s1", ToolName: "t", ToolFingerprint: "fp", PrincipalID: p, Operation: RiskWrite}) {
+			t.Fatalf("control: principal %q must fall outside the 50%% bucket for salt s9", p)
+		}
+	}
+	// A bucket with at least one surviving included key stays reachable (principal p hashes to 1,
+	// inside a 50% bucket) — the survivor check must not over-reject.
+	bucketLive := mk(ScopeSpec{Capability: CapabilityGateway, Servers: []string{"s1"}, Principals: []string{"p", "q"}, Percent: 50, BucketSalt: "s9", Operations: []RiskClass{RiskWrite}, HighRisk: true})
+	if !bucketLive.AdmitsToolForEvaluation("s1", "t", "fp") {
+		t.Fatal("a percentage bucket with a surviving included key must keep its usable tool reachable")
+	}
+	if !bucketLive.Contains(Subject{Capability: CapabilityGateway, ServerID: "s1", ToolName: "t", ToolFingerprint: "fp", PrincipalID: "p", Operation: RiskWrite}) {
+		t.Fatal("control: principal p must fall inside the 50% bucket for salt s9")
+	}
 }
