@@ -635,6 +635,96 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 >   the LogGuard — correctly — engage emergency minimal logging and clean
 >   retained history mid-suite, destroying the seeded evidence).
 
+> **Slice 2C implementation record (this branch, 2026-08-28).**
+>
+> **2C.0 backend hardening (2C.0a/0b/0c)** — the Stage-1 auth-policy API
+> gains the 2B write discipline, transposed to the RUNNING domain:
+> - **`fencedRunningMutate`** (policy_mutation.go) is the EXPLICIT
+>   running-domain seam: the `?ifVersion=` fence, the mutation, and the
+>   durable persist share ONE coordinator critical section, ALWAYS against
+>   the running store. It never resolves to the draft candidate, regardless
+>   of Require Commit — the domain choice is the function name, not a mode
+>   flag. The 2B primitive's live branch is factored into the shared
+>   `runningMutateLocked` (durable-or-nothing; `ErrReplacedNotSynced`
+>   counts as landed, commit doctrine).
+> - **Stable-ID addressing**: `PUT/DELETE /api/authpolicy?id=<ULID>`
+>   (strict — malformed 400, unknown 404, access-rule 400, never a priority
+>   fall-through), legacy `?priority=` kept for the deprecation window; the
+>   target is re-verified INSIDE the fenced section. `GET /api/authpolicy`
+>   serves `version`/`updatedAt` from the RUNNING generation (never a
+>   candidate's). Reorder accepts the stable-ID `{ids:[…]}` shape (every
+>   auth rule exactly once; duplicate/partial/unknown/malformed/access-rule
+>   entries rejected; resolved against ONE fenced running snapshot; access
+>   ordering untouched by construction) alongside legacy `{priorities}`.
+> - **`GET /api/policy/draft` gains `baseStale`** (active drafts only) —
+>   the SAME backend truth as the commit's fail-closed base-generation
+>   guard, surfaced for the UI (§8).
+> - **2C.0c**: `PUT /api/settings/default-auth-outcome` is
+>   durable-or-nothing via `setDefaultAuthOutcomeChecked` (it used to 200
+>   after a persist failure that would silently revert on restart).
+> - **Proofs**: concurrency pairs (edit/edit, create/create, delete/edit,
+>   reorder/edit — exactly one winner, structured 409 loser), strict-ID
+>   matrix, running-domain invariant end-to-end (auth mutation lands live
+>   under an active Stage-2 draft; candidate untouched; draft baseStale;
+>   commit 409), durable-or-nothing fault injection + restart-visibility
+>   for all four mutation classes, default-outcome rollback.
+>
+> **2C.1–2C.3 Authentication Rules surface** —
+> `/app/policies/authentication-rules` (nav: Policies → Access Rules,
+> Authentication Rules, Policy Tester, Policy Learning); viewer+ read,
+> **ADMIN-only writes** (backend is intentionally stricter than the Stage-2
+> operator surface; viewer AND operator mount zero mutation controls).
+> Dedicated `AuthRuleView`/`AuthRuleWrite` DTOs derived exactly from Go
+> (`SubjectMatch` cidr-only predicates, `AuthRuleSpec`); unknown outcomes
+> and unknown predicate types FAIL CLOSED into explicit markers — degraded
+> read-only rendering, `writeSeedFromAuthView` refuses to seed. Exempt is
+> presented as a warning-class waiver with the server's note verbatim —
+> never green "allowed" semantics. SSORequired provider references come
+> from the authoritative IdP read API (no secrets; dangling refs marked
+> "unresolved", preserved, never silently dropped). Server warnings render
+> verbatim. Every save is labeled LIVE; with an Access-Policy Draft active
+> the editor warns the save invalidates that draft's baseline (§9), and the
+> 2B DraftBar gains the critical "Draft baseline is stale" state that
+> withholds the commit entry (revert stays). The global default outcome is
+> a TIER-3 typed ceremony in both directions (OPEN → Exempt, REQUIRE →
+> Default, exact §19 copy); an unrecognized current value blocks all change
+> (fail closed).
+>
+> **2C.4–2C.6 Policy Learning surface** — `/app/policies/learning`:
+> NODE-LOCAL and ADVISORY ONLY rendered from the server's own notes;
+> factual quality signals only (no invented health/confidence); snapshot
+> model (no polling/SSE/auto-generate/auto-accept). Governance (admin):
+> enable/disable T2 with the active-session 409 verbatim, guardrail
+> category allowlist editor, thresholds READ-ONLY (no sliders — M5A).
+> Sessions (operator+): start/complete T1, cancel T2, generate as an
+> explicit action with the engine's factual summary. Recommendations:
+> full-fidelity decode (evidence/coverage/policy transparency/baseline/
+> SERVER-computed staleness/decision metadata). **Accept to Policy Draft**
+> preserves the M5B contract exactly: admin-only, fresh + `generated` +
+> `draft_mode_armed` only (absent otherwise; the page never arms Require
+> Commit), body exactly `{id, action:"accept", if_version}`, success
+> renders server truth + a "Review created rule" deep link, §33
+> post-accept agreement check (disabled rule in the active draft, else a
+> controlled inconsistency). Reject is operator+, decision-only, bounded
+> reason. An unconfirmed Accept latches and is never blindly repeated.
+>
+> **Real-binary proofs** (`e2e/policy-2c.spec.ts`): admin CRUD journey,
+> operator read-only posture, two-client fencing (real 409 + reorder/edit
+> one-winner), the flagship §39 proof (LIVE auth mutation → draft
+> `baseStale` → DraftBar critical → commit 409 → revert recovery), both
+> T3 ceremonies with restore, and the honest learning journey (enable →
+> session → proxied traffic → complete → generate: unauthenticated
+> traffic lands in the synthetic `s:unauth` scope, so ZERO generated
+> recommendations is the honest outcome; the accept path is proven by the
+> M5B backend suite + the unit contract tests — no production fake data).
+> The first full-suite run caught three real defects the mocked layers
+> could not (recorded in the 2C.7 commit): the default-outcome read
+> surface is `GET /api/settings` (not `/api/security`), `KNOWN_ROUTES`
+> needed the 2C routes, and the shared-`/data` logstore boot race needed
+> per-instance `log_store_path` premises (harness debt addendum: the
+> FRESH/SETUPFAIL instances now carry their own paths, making the history
+> journeys deterministic).
+
 ### FE-6 — Cluster, identity, certificates, settings, releases, support, MCP, decryption
 - **Objective**: FE-V27..V30, FE-V33, FE-V35, FE-V36 (settings decomposed per IA §5),
   FE-V37, FE-V04/05, FE-V07..V15.
