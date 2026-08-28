@@ -153,6 +153,20 @@ type Store struct {
 	// Startup-only writers (Load, before listeners) are exempt by ordering.
 	mutMu sync.Mutex
 
+	// saveMu is the durable-PUBLICATION serializer (2D-A publication-ordering
+	// correction; PolicyStore.saveMu's sibling): it covers SNAPSHOT → marshal
+	// → AtomicWrite as one unit, so publications land in acquisition order and
+	// each one writes the store state CURRENT at its own snapshot. Without it,
+	// an older Save could snapshot S1, pause, lose the race to a MutateDurable
+	// that persisted S2 and returned a confirmed 2xx, then resume and rename
+	// its stale S1 envelope over S2 — an acknowledged mutation silently
+	// destroyed on disk. Acquiring the lock only around the write (after the
+	// snapshot) would NOT restore the invariant: the stale snapshot would
+	// still be published late. LOCK ORDER: mutMu → saveMu → mu. Save/SaveErr
+	// standalone take saveMu → mu(RLock); nothing takes mu and then saveMu,
+	// and nothing takes saveMu and then mutMu, so the order is acyclic.
+	saveMu sync.Mutex
+
 	// rev counts successful mutations (Load/Add/Update/Delete/Rename/
 	// ReplaceAll). It is a PROCESS-LOCAL change signal for memoization only
 	// ("contents may have changed since revision N") — never an identity:
@@ -236,6 +250,22 @@ func (s *Store) Load(path string) error {
 			obs.Printf("CategoryGroups: unmarshal error from %s", path)
 			return err
 		}
+		// The schema discriminator is LOAD-BEARING (fail-closed format
+		// validation): exactly schema_version 1 is accepted. Missing/zero,
+		// negative, and unknown/future versions are refused with an explicit
+		// error — a future envelope must never be silently parsed with
+		// today's struct (fields it relies on would be dropped and the
+		// truncated state re-persisted as if authoritative).
+		if env.SchemaVersion != 1 {
+			obs.Printf("CategoryGroups: unsupported envelope schema_version %d in %s (this binary supports 1)", env.SchemaVersion, path)
+			return fmt.Errorf("category groups: unsupported envelope schema_version %d (want 1)", env.SchemaVersion)
+		}
+		// A negative persisted fence generation is impossible for this store
+		// to have written — refuse rather than install a corrupt epoch.
+		if env.Version < 0 {
+			obs.Printf("CategoryGroups: invalid negative persisted version %d in %s", env.Version, path)
+			return fmt.Errorf("category groups: invalid negative persisted version %d", env.Version)
+		}
 		groups = env.Groups
 		loadedVersion = env.Version
 	}
@@ -291,7 +321,18 @@ func (s *Store) Save() { _ = s.SaveErr() }
 // landed replacement carries the new epoch with the new content. The retired
 // legacy sidecar is removed once the envelope has landed (it would otherwise
 // carry a stale epoch a future downgrade-then-upgrade could resurrect).
+//
+// The WHOLE function runs under saveMu — snapshot included, not just the
+// write. Publications therefore form one monotonic order: a publication that
+// acquires saveMu after another completed snapshots the CURRENT (equal or
+// newer) state, so durable state never goes backwards, and once MutateDurable
+// has returned success for epoch N no older in-flight Save can replace the
+// envelope with epoch < N. Every runtime persistence path routes through here
+// (Save is a thin wrapper), so no caller sits outside the ordering domain.
 func (s *Store) SaveErr() error {
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+
 	s.mu.RLock()
 	path := s.path
 	if path == "" {

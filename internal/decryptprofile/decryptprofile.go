@@ -330,6 +330,17 @@ type Store struct {
 	// never touch it. Startup-only writers (Load, seedDefault*, before
 	// listeners) are exempt by ordering.
 	mutMu sync.Mutex
+
+	// saveMu is the durable-PUBLICATION serializer (2D-A publication-ordering
+	// correction; PolicyStore.saveMu's sibling): it covers SNAPSHOT → marshal
+	// → AtomicWrite as one unit, so publications land in acquisition order and
+	// each writes the store state CURRENT at its own snapshot — an older Save
+	// that lost the race to a confirmed MutateDurable can never resume and
+	// rename a stale envelope over the acknowledged one. Locking only the
+	// write (after the snapshot) would NOT restore the invariant. LOCK ORDER:
+	// mutMu → saveMu → mu; Save/SaveErr standalone take saveMu → mu(RLock);
+	// nothing takes mu then saveMu, nothing takes saveMu then mutMu.
+	saveMu sync.Mutex
 }
 
 // Version returns the durable per-store mutation generation (the ifVersion
@@ -421,6 +432,22 @@ func (s *Store) Load(path string) error {
 			obs.Printf("DecryptionProfiles: unmarshal error from %s", path)
 			return err
 		}
+		// The schema discriminator is LOAD-BEARING (fail-closed format
+		// validation): exactly schema_version 1 is accepted. Missing/zero,
+		// negative, and unknown/future versions are refused with an explicit
+		// error — a future envelope must never be silently parsed with
+		// today's struct (fields it relies on would be dropped and the
+		// truncated state re-persisted as if authoritative).
+		if env.SchemaVersion != 1 {
+			obs.Printf("DecryptionProfiles: unsupported envelope schema_version %d in %s (this binary supports 1)", env.SchemaVersion, path)
+			return fmt.Errorf("decryption profiles: unsupported envelope schema_version %d (want 1)", env.SchemaVersion)
+		}
+		// A negative persisted fence generation is impossible for this store
+		// to have written — refuse rather than install a corrupt epoch.
+		if env.Version < 0 {
+			obs.Printf("DecryptionProfiles: invalid negative persisted version %d in %s", env.Version, path)
+			return fmt.Errorf("decryption profiles: invalid negative persisted version %d", env.Version)
+		}
 		profiles = env.Profiles
 		loadedVersion = env.Version
 	}
@@ -460,7 +487,17 @@ func (s *Store) Save() { _ = s.SaveErr() }
 // can never diverge durably — including under ErrReplacedNotSynced, where the
 // landed replacement carries the new epoch with the new content. The retired
 // legacy sidecar is removed once the envelope has landed.
+//
+// The WHOLE function runs under saveMu — snapshot included, not just the
+// write — so publications form one monotonic order and durable state never
+// goes backwards: once MutateDurable has returned success for epoch N, no
+// older in-flight Save can replace the envelope with epoch < N. Every runtime
+// persistence path routes through here (Save is a thin wrapper), so no caller
+// sits outside the ordering domain.
 func (s *Store) SaveErr() error {
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+
 	s.mu.RLock()
 	path := s.path
 	if path == "" {

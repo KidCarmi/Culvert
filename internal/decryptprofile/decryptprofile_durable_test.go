@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/KidCarmi/Culvert/internal/fileutil"
@@ -410,5 +412,238 @@ func TestVersionEpoch_AdminReplaceAllAdmin(t *testing.T) {
 		if err := fresh.MutateDurable(&staleTok, func() error { return nil }); err == nil {
 			t.Fatalf("stale token %d must conflict after restart (current %d)", stale, fresh.Version())
 		}
+	}
+}
+
+// ─── Publication ordering (2D-A publication-ordering correction) ───────
+
+// namesOf joins a store's profile names for order-sensitive content
+// comparison.
+func namesOf(s *Store) string { return strings.Join(s.Names(), "|") }
+
+// TestPublication_StaleBulkSaveCannotClobberAcknowledgedMutation mirrors the
+// catgroup proof (symmetry proven, not assumed): the PRODUCTION bulk shape
+// (ReplaceAll + Save) parks at the publication seam post-snapshot, an admin
+// MutateDurable lands and is acknowledged, then the stale publication resumes
+// LAST. The acknowledged mutation and its epoch must survive on disk.
+func TestPublication_StaleBulkSaveCannotClobberAcknowledgedMutation(t *testing.T) {
+	s, path := newDurableStore(t)
+	if err := s.MutateDurable(nil, func() error {
+		_, err := s.Add(Profile{Name: "seed", CertVerification: "strict"})
+		return err
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	prev := writeFile
+	t.Cleanup(func() { writeFile = prev })
+	var stubMu sync.Mutex
+	calls := 0
+	bulkInWrite := make(chan struct{})
+	releaseBulk := make(chan struct{})
+	writeFile = func(p string, data []byte, mode os.FileMode) error {
+		stubMu.Lock()
+		calls++
+		n := calls
+		stubMu.Unlock()
+		if n == 1 {
+			close(bulkInWrite) // parked at the publication seam, snapshot taken
+			<-releaseBulk
+		}
+		return fileutil.AtomicWrite(p, data, mode)
+	}
+
+	bulkDone := make(chan struct{})
+	go func() {
+		defer close(bulkDone)
+		s.ReplaceAll([]Profile{{ID: "bulk-id-01", Name: "bulk", CertVerification: "strict"}})
+		s.Save()
+	}()
+	<-bulkInWrite
+
+	adminDone := make(chan struct{})
+	var adminErr error
+	go func() {
+		defer close(adminDone)
+		adminErr = s.MutateDurable(nil, func() error {
+			_, err := s.Add(Profile{Name: "adminadd", CertVerification: "strict"})
+			return err
+		})
+	}()
+
+	adminFinishedFirst := false
+	for i := 0; i < 200000 && !adminFinishedFirst; i++ {
+		select {
+		case <-adminDone:
+			adminFinishedFirst = true
+		default:
+			runtime.Gosched()
+		}
+	}
+	close(releaseBulk) // the stale publication resumes LAST
+	<-bulkDone
+	<-adminDone
+	if adminErr != nil {
+		t.Fatalf("admin mutation must succeed, got %v", adminErr)
+	}
+	writeFile = prev
+
+	memVersion := s.Version()
+	fresh := reloadStore(t, path)
+	if fresh.GetByName("adminadd") == nil {
+		t.Fatalf("acknowledged admin mutation missing after reload — a stale publication clobbered it (adminFinishedFirst=%v)", adminFinishedFirst)
+	}
+	if fresh.GetByName("bulk") == nil {
+		t.Fatal("bulk install missing after reload")
+	}
+	if got := fresh.Version(); got != 3 || got != memVersion {
+		t.Fatalf("reloaded epoch = %d, want 3 (memory %d) — durable publication went backwards", got, memVersion)
+	}
+}
+
+// TestPublication_AdminThenBulkSerialOrder proves the property is SERIAL
+// ORDER, not "admin always wins": admin first, bulk ReplaceAll+Save second ⇒
+// the final durable state is the LATER bulk state at the later epoch.
+func TestPublication_AdminThenBulkSerialOrder(t *testing.T) {
+	s, path := newDurableStore(t)
+	if err := s.MutateDurable(nil, func() error {
+		_, err := s.Add(Profile{Name: "seed", CertVerification: "strict"})
+		return err
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := s.MutateDurable(nil, func() error {
+		_, err := s.Add(Profile{Name: "adminadd", CertVerification: "strict"})
+		return err
+	}); err != nil {
+		t.Fatalf("admin: %v", err)
+	}
+	s.ReplaceAll([]Profile{{ID: "bulk-id-01", Name: "bulk", CertVerification: "strict"}})
+	s.Save()
+
+	fresh := reloadStore(t, path)
+	if fresh.GetByName("bulk") == nil || fresh.GetByName("adminadd") != nil || fresh.GetByName("seed") != nil {
+		t.Fatalf("final durable state must be the later BULK install, got %q", namesOf(fresh))
+	}
+	if got := fresh.Version(); got != 3 || got != s.Version() {
+		t.Fatalf("reloaded epoch = %d, want 3 (memory %d)", got, s.Version())
+	}
+}
+
+// TestPublication_AlternatingWritersConvergeOnReload (§7): repeated
+// ReplaceAll+Save ↔ MutateDurable alternation; after EVERY completed
+// publication a fresh reload must describe the same latest ordered durable
+// state as memory — same epoch, same content, no epoch regression.
+func TestPublication_AlternatingWritersConvergeOnReload(t *testing.T) {
+	s, path := newDurableStore(t)
+	lastVersion := int64(0)
+	for i := 0; i < 8; i++ {
+		if i%2 == 0 {
+			s.ReplaceAll([]Profile{{Name: fmt.Sprintf("bulk%d", i), CertVerification: "strict"}})
+			s.Save()
+		} else {
+			name := fmt.Sprintf("admin%d", i)
+			if err := s.MutateDurable(nil, func() error {
+				_, err := s.Add(Profile{Name: name, CertVerification: "strict"})
+				return err
+			}); err != nil {
+				t.Fatalf("round %d admin: %v", i, err)
+			}
+		}
+		fresh := reloadStore(t, path)
+		if fresh.Version() != s.Version() {
+			t.Fatalf("round %d: reloaded epoch %d != memory %d", i, fresh.Version(), s.Version())
+		}
+		if namesOf(fresh) != namesOf(s) {
+			t.Fatalf("round %d: reloaded content %q != memory %q", i, namesOf(fresh), namesOf(s))
+		}
+		if fresh.Version() <= lastVersion {
+			t.Fatalf("round %d: epoch did not advance (%d -> %d)", i, lastVersion, fresh.Version())
+		}
+		lastVersion = fresh.Version()
+	}
+}
+
+// TestPublication_ConcurrentWritersConverge (§7, bounded concurrency under
+// -race): admin MutateDurable and bulk ReplaceAll+Save writers run
+// concurrently; after ALL complete, disk must equal final memory exactly.
+func TestPublication_ConcurrentWritersConverge(t *testing.T) {
+	s, path := newDurableStore(t)
+	var wg sync.WaitGroup
+	for w := 0; w < 2; w++ {
+		wg.Add(2)
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; i < 5; i++ {
+				name := fmt.Sprintf("admin-%d-%d", w, i)
+				if err := s.MutateDurable(nil, func() error {
+					_, err := s.Add(Profile{Name: name, CertVerification: "strict"})
+					return err
+				}); err != nil {
+					t.Errorf("admin %s: %v", name, err)
+				}
+			}
+		}(w)
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; i < 5; i++ {
+				s.ReplaceAll([]Profile{{Name: fmt.Sprintf("bulk-%d-%d", w, i), CertVerification: "strict"}})
+				s.Save()
+			}
+		}(w)
+	}
+	wg.Wait()
+
+	fresh := reloadStore(t, path)
+	if fresh.Version() != s.Version() {
+		t.Fatalf("reloaded epoch %d != final memory epoch %d", fresh.Version(), s.Version())
+	}
+	if namesOf(fresh) != namesOf(s) {
+		t.Fatalf("reloaded content %q != final memory content %q", namesOf(fresh), namesOf(s))
+	}
+}
+
+// ─── Envelope schema discriminator (fail-closed format validation) ─────
+
+// TestEnvelopeLoad_SchemaDiscriminator mirrors the catgroup proof: for
+// non-legacy-array input, exactly schema_version 1 is accepted; {}, explicit
+// 0, unknown/future versions, and a negative persisted fence generation are
+// refused with an explicit load error. A valid empty schema-1 envelope loads.
+func TestEnvelopeLoad_SchemaDiscriminator(t *testing.T) {
+	cases := []struct {
+		name    string
+		body    string
+		wantErr bool
+	}{
+		{"missing schema_version", `{}`, true},
+		{"explicit schema_version 0", `{"schema_version":0,"version":3,"profiles":[]}`, true},
+		{"future schema_version 2", `{"schema_version":2,"version":3,"profiles":[{"id":"x1","name":"p","certVerification":"strict"}]}`, true},
+		{"negative version", `{"schema_version":1,"version":-5,"profiles":[]}`, true},
+		{"valid empty envelope", `{"schema_version":1,"version":7,"profiles":[]}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "decryption_profiles.json")
+			if err := os.WriteFile(path, []byte(tc.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			s := New()
+			err := s.Load(path)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("Load must refuse %s (fail-closed format validation), got nil", tc.name)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("valid envelope refused: %v", err)
+			}
+			if got := s.Version(); got != 7 {
+				t.Fatalf("valid empty envelope version = %d, want 7", got)
+			}
+			if len(s.List()) != 0 {
+				t.Fatalf("valid empty envelope must load zero profiles, got %v", s.Names())
+			}
+		})
 	}
 }
