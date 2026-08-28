@@ -774,6 +774,57 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > downgrade posture and release-rollback lifecycle notes from 2D-A carry
 > forward unchanged.
 >
+> **2D-B final coherency / reference-integrity / ownership correction
+> (this branch, 2026-08-28 — external-review follow-up on the first 2D-B
+> candidate).** Five defects, each with red-before evidence against the
+> prior frozen candidate:
+> **(A) Coherent fenced reads.** `GET /api/urlcat/state` assembled rows and
+> revision from two independent store reads; `urlcat.SnapshotWithRevision()`
+> now captures both under one read-lock hold (fpMu → mu, memo single-flight
+> preserved) and is the only read the v2 state contract uses; the UT1
+> enrichment layers over the captured rows. **POST-2D-A COHERENT-READ
+> CORRECTION DISCOVERED DURING 2D-B REVIEW:** the Category Groups and
+> Decryption Profiles list GETs had the same defect as three reads
+> (List/Names/Version) — each engine gained `SnapshotView()` (rows + names +
+> fence version from one lock hold; response shapes unchanged), and the SaaS
+> settings view resolves its effective block from the SAME captured durable
+> value (`resolveSaaSFeedConfigFrom`). Proofs: `coherent_read_2db_test.go`
+> (engine-identity fingerprints over returned rows; the directional
+> version invariant — a fence token AHEAD of returned rows is the dangerous
+> pair).
+> **(B) Reference-integrity transaction.** The recorded POLICY-REFS-PLAN
+> TOCTOU (scan-then-delete) is closed by `objectReferenceMutationGate`
+> (narrow RWMutex, NOT a config-transaction framework): deletes + bulk
+> installs exclusive over scan+durable-delete, reference writers shared;
+> lock order and the audited non-holder classification live at the gate;
+> proofs in `object_reference_gate_test.go` (structural mutual exclusion
+> through the real handlers + §7 A–E semantic pins incl. the active draft
+> candidate).
+> **(C) Per-category 10k cap on bulk paths.** `urlcat.ValidateEntries` is
+> the canonical full-set seam and `ReplaceAllChecked` the checked installer;
+> cluster snapshot apply, config import (pre-apply, whole-import 400) and
+> rollback (pre-apply, whole-rollback 400) reject an over-cap candidate
+> wholesale — never truncated, never partial. Explicit legacy decision:
+> startup Load grandfathers a pre-cap on-disk file; no runtime path may
+> re-create one.
+> **(D) Signed-feed ownership truth.** `signedFeedOwnsBuiltInCategories()`
+> derives built-in mutability from the live effective view's SOURCE
+> (embedded/nil = local; downloaded/cached/resumed = signed-feed — covers
+> stale/disabled-recovery by construction); `/api/urlcat/state` carries
+> `builtInAuthority` + per-row `writable`; v2 mutations on a feed-owned
+> built-in refuse with the structured 409 pointing at SaaS Overrides
+> (legacy unfenced callers keep compatibility, pinned); the Categories tab
+> renders the server truth — "Signed-feed owned" badge, no Edit/Delete,
+> "Manage with Overrides" tab switch, page-level authority callout.
+> **(E) SaaS settings writer domain.** `installSaaSFeedDurable` puts config
+> import and the rollback feed slice inside the SAME adminSettingsMu
+> transaction as the fenced settings PUT (derive → durable write → holder
+> publish; rollback's unlocked post-apply save removed); the CP→DP apply is
+> a separate managed-DP ownership domain and startup is pre-listener —
+> audited at the helper. Proofs: `saas_feed_writer_domain_test.go` (paused
+> transaction blocks import/rollback; three-surface agreement on the
+> serialized winner; the reverse-direction fenced-PUT 409).
+>
 > **Slice 2D-A implementation record (this branch, 2026-08-28).**
 >
 > **2D-A.0 backend hardening** — the shared-object stores

@@ -116,11 +116,21 @@ single-source guarantee.
   the rename-silent-unlink problem the object-ID work (P3) closes; slice 1
   closes DELETE only. Categories/category-groups are accidentally
   rename-safe (name-keyed, their PUT cannot rename).
-- **TOCTOU.** The reference check and the store delete are not atomic — a
-  rule added between them re-opens the hole for that instant. Same
-  last-write-wins gap the parent doc §5 flags (no generation counter); the
-  existing category-group guard has it too. Closed by the P2 rule-set
-  generation counter, not slice 1.
+- **TOCTOU.** ~~The reference check and the store delete are not atomic — a
+  rule added between them re-opens the hole for that instant.~~ **CLOSED
+  (2D-B final coherency/reference-integrity correction, Blocker B)** by
+  `objectReferenceMutationGate` (`object_reference_gate.go`): every
+  shared-object delete (URL category, category group, decryption profile,
+  file profile) holds the gate EXCLUSIVELY across the authoritative
+  `objectReferences` scan and the durable deletion, and every
+  reference-creating/changing writer (live/staged rule create+edit,
+  auth-rule create+edit, group membership writes, decryption-profile
+  update/rename-cascade, Policy Learning Accept-to-Draft) holds it SHARED;
+  the three bulk installers (config import apply region, config-version
+  rollback, CP→DP snapshot apply) are exclusive. Lock order, the audited
+  non-holder classification (reference-removing/order-only ops, draft
+  commit/revert, startup loaders), and the structural + §7 A–E proofs are
+  documented at the gate and in `object_reference_gate_test.go`.
 
 ### Enforcement SITE migrates when candidate/commit lands (architect note)
 
