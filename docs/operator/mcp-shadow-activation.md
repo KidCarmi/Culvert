@@ -273,12 +273,16 @@ unrelated durable evidence.
   as corruption and `NewManager` called `OnCriticalCommitFailure`, latching the Gateway domain
   into `critical-durability-degraded` and persisting it to `gateway/degraded_state.json`; that
   lockout blocks write/destructive Gateway operations and reloads on every subsequent boot. But
-  this one file ALSO carries any UNRELATED, pre-existing Gateway degradation — a real
-  critical-durability commit failure, or a `denial-lane-degraded` track (which corresponds to the
-  `P-DEN` partition you are preserving) — and `OnCriticalCommitFailure` only sets the critical
-  `reason` on the FIRST transition, so a failed boot does NOT by itself make the file exclusively
-  schema-induced. Reset it only under the conditions in step 5; otherwise preserve it.
-  `management/degraded_state.json` and any other capability's state are always preserved.
+  this one file ALSO carries the `denial-lane-degraded` track, which corresponds to the `P-DEN`
+  partition you are preserving and is NOT re-derived from a partition scan at boot. The
+  deterministic, safe gate is therefore the DENIAL track alone (step 5): the critical track is
+  about the Gateway critical partition you archive and clear in steps 3–4, so a fresh boot
+  re-derives it, while a degraded denial track is real, restart-persistent state you must not
+  wipe. Do NOT try to prove the critical degradation is schema-induced from its persisted
+  `reason` text — the pre-v2 binary collapses the strict-unmarshal failure into a generic
+  corruption reason (`record event invalid`) that cannot distinguish schema-induced from
+  unrelated corruption. `management/degraded_state.json` and any other capability's state are
+  always preserved.
 
 `<mcp-data-dir>` is the MCP telemetry `DataDir` configured for this node's Gateway; under it
 each capability (`gateway/`, `management/`) has per-partition subdirectories (`P-ORD/`,
@@ -304,27 +308,36 @@ each capability (`gateway/`, `management/`) has per-partition subdirectories (`P
    rm -f <mcp-data-dir>/gateway/P-CRIT/seg-*.dat <mcp-data-dir>/gateway/P-CRIT/checkpoint.json
    ```
    Do NOT touch `gateway/P-DEN`, `gateway/dek.sealed`, or anything under `management/`.
-5. **Reset the Gateway degraded state ONLY if it is exclusively schema-induced.** A failed pre-v2
-   boot latches `critical-durability-degraded` into `gateway/degraded_state.json` from the v2
-   records you just cleared, which would otherwise keep write/destructive Gateway operations
-   blocked after recovery. But the same file also carries any UNRELATED, restart-persistent
-   Gateway degradation, so inspect it (plain JSON, `0600`) and remove it ONLY when **both**:
-   - `"denial"` is the normal state — value **`1`** (`StateNormal`); the denial-lane track, which
-     corresponds to the `P-DEN` partition you are preserving, is NOT degraded. Note the numbering
-     (`internal/mcp/events/state/state.go`): `0` is `StateUnknown`, which is NOT normal — it fails
-     closed on load — and `2` is `StateDenialLaneDegraded`. So the clean-denial case is exactly
-     `"denial": 1`; a `0` or a `2` there means LEAVE THE FILE (see below); AND
-   - `"critical"` is degraded with a `"reason"` naming the schema-recovery corruption (the failed
-     boot logged `recovery detected spool corruption: …`). Because the `reason` is set only on the
-     FIRST transition to degraded, its naming the corruption proves the schema corruption was the
-     first critical failure — i.e. there was no unrelated prior critical degradation underneath it.
+5. **Reset the Gateway degraded state — gated ONLY on the denial track.** A failed pre-v2 boot
+   latches `critical-durability-degraded` into `gateway/degraded_state.json` from the v2 records
+   you just cleared, which would otherwise keep write/destructive Gateway operations blocked after
+   recovery. Inspect the file (plain JSON, `0600`) and remove it ONLY when the `"denial"` track is
+   normal — value **`1`** (`StateNormal`):
    ```
    rm -f <mcp-data-dir>/gateway/degraded_state.json
    ```
-   If EITHER condition fails — the `"denial"` track is degraded, or the `"critical"` `"reason"`
-   names some other, real failure — the file carries unrelated durable state (a genuine
-   commit-loss or denial-lane lockout with its own loss counters): **LEAVE IT** and address that
-   degradation through the normal recovery path instead. Never touch
+   Why the denial track is the whole gate, and why the `"critical"` `"reason"` is deliberately NOT
+   used:
+   - The `"critical"` track is about the Gateway critical partition (`P-CRIT`) you archived and
+     cleared in steps 3–4. Whatever caused it — the schema-induced v2 records, or an unrelated
+     prior commit failure — its data is now archived (forensics preserved) and the partition is
+     reset, so a fresh boot re-derives the correct critical state (and re-degrades only if a real
+     durability problem still exists). Its persisted `"reason"` CANNOT serve as proof: the pre-v2
+     binary collapses the strict-unmarshal failure into a generic `record event invalid` →
+     `recovery detected spool corruption: …` that does not distinguish schema-induced corruption
+     from unrelated corruption.
+   - The `"denial"` track is different: it corresponds to the `P-DEN` partition you are PRESERVING
+     and, unlike the critical track, is NOT re-derived from a partition scan at boot — a
+     `denial-lane-degraded` latch re-asserts only on the next denial commit failure, so a `2` there
+     is real, restart-persistent state that deleting the file would silently wipe. The numbering
+     (`internal/mcp/events/state/state.go`): `0` is `StateUnknown` (NOT normal — fails closed on
+     load), `1` is `StateNormal`, `2` is `StateDenialLaneDegraded`. The safe case is exactly
+     `"denial": 1`.
+
+   If `"denial"` is `2` (degraded) or `0` (unknown): **LEAVE THE FILE** — it carries real
+   denial-lane state tied to the preserved `P-DEN`, and because both tracks share one file the
+   critical lockout stays too. Address the denial-lane degradation through the normal recovery path
+   first; once `"denial"` is back to `1`, delete the file then. Never touch
    `<mcp-data-dir>/management/degraded_state.json` or any other capability's state.
 6. **Reset the export cursor for every partition you cleared — unconditionally.** Clearing a
    partition restarts its commit sequence at 1, but the archive exporter's cursor still holds

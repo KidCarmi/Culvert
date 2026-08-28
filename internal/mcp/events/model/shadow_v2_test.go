@@ -186,6 +186,19 @@ func TestV2_ValidationRejectsMalformedShadowEvidence(t *testing.T) {
 		"unknown decision action": func(e *Event) {
 			e.Decision.Action = "FROBNICATE" // base Override=false, base Outcome=would_execute
 		},
+		// Shadow routing (Codex round, PR #1235): a v2 Shadow event is a Gateway ordinary/critical
+		// decision, never a Management event and never a denial. These would land durable v2 evidence
+		// in a partition (Management subtree / Gateway P-DEN) the downgrade runbook preserves, so the
+		// validator must reject them. Each isolates the routing guard.
+		"v2 shadow on the Management capability": func(e *Event) {
+			e.Capability = CapManagement // base Criticality=CritOrdinary/PartOrd stays consistent
+		},
+		"v2 shadow as a denial criticality": func(e *Event) {
+			// Route it to P-DEN so the criticality→partition binding is satisfied and ONLY the
+			// Shadow routing guard fires (a denial is never a Shadow decision).
+			e.Criticality = CritDenial
+			e.Partition = PartDen
+		},
 		"unsupported schema version": func(e *Event) { e.SchemaVersion = 3 },
 	}
 	for name, mut := range cases {

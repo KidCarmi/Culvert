@@ -216,6 +216,9 @@ func (e Event) validateShadowV2() error {
 	if e.Phase != PhaseDecision {
 		return evtErr(mcperr.ReasonEventInvalid, "v2 shadow event must be a decision phase")
 	}
+	if err := validateShadowRouting(e.Capability, e.Criticality); err != nil {
+		return err
+	}
 	if e.Decision.ExecutionState != shadowExecutionState {
 		return evtErr(mcperr.ReasonEventInvalid, "v2 shadow event must carry execution_state shadow_evaluated")
 	}
@@ -236,6 +239,27 @@ func (e Event) validateShadowV2() error {
 		return err
 	}
 	return validateShadowEvidenceFields(sh)
+}
+
+// validateShadowRouting enforces that a v2 Shadow event is a GATEWAY ordinary/critical decision
+// — never a Management event, never a denial aggregate. The producer only ever emits Shadow
+// evidence for Gateway tool calls, routed by criticalityFor to P-ORD (read) or P-CRIT (write /
+// destructive); a denial is the SEPARATE attacker-mintable lane (P-DEN, PhaseDenialAggregate) and
+// Management is read-only with no Shadow decisions. The binary-downgrade runbook preserves the
+// Management subtree and the Gateway P-DEN partition on EXACTLY this premise (they can never hold a
+// v2 record), so a malformed producer landing a v2 Shadow event in either would silently defeat the
+// documented cleanup and keep a pre-v2 restart failing. Reject it at the write/recovery boundary so
+// the premise is a validated invariant, not an assumption (SHADOW-EVIDENCE-ROUTING-1, Codex round
+// PR #1235). Runs on recovery too (ValidateShadowEvidence): a real v2 record always satisfies it, so
+// only a malformed one is newly rejected.
+func validateShadowRouting(capability Capability, crit Criticality) error {
+	if capability != CapGateway {
+		return evtErr(mcperr.ReasonEventInvalid, "v2 shadow event must be a Gateway capability event")
+	}
+	if crit != CritOrdinary && crit != CritCritical {
+		return evtErr(mcperr.ReasonEventInvalid, "v2 shadow event must be an ordinary or critical Gateway decision, never a denial")
+	}
+	return nil
 }
 
 // validateShadowActionOverride binds the durable Override to the event's own policy action
