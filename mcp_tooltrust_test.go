@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/hex"
+	"math"
 	"net/http"
 	"path/filepath"
 	"sync"
@@ -708,5 +709,30 @@ func TestToolTrust_RequestUsesPerRecordRevision(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("an unrelated catalog change must not make toolB's request stale, got %v", err)
+	}
+}
+
+// TestExpiryFromSeconds_RejectsOutOfRange proves the round-9 P2: an approval TTL of zero
+// means no-expiry, a positive in-range value yields a future timestamp, and a negative or
+// overflowing value is REJECTED (never silently turned into a never-expiring or
+// already-expired grant).
+func TestExpiryFromSeconds_RejectsOutOfRange(t *testing.T) {
+	if got, err := expiryFromSeconds(0); err != nil || got != nil {
+		t.Fatalf("0 must mean no-expiry with no error, got (%v, %v)", got, err)
+	}
+	if got, err := expiryFromSeconds(3600); err != nil || got == nil || !got.After(time.Now()) {
+		t.Fatalf("3600 must produce a future expiry, got (%v, %v)", got, err)
+	}
+	if _, err := expiryFromSeconds(-1); err == nil {
+		t.Fatal("a negative TTL must be rejected, not silently treated as no-expiry")
+	}
+	if _, err := expiryFromSeconds(math.MaxInt64); err == nil {
+		t.Fatal("an overflowing TTL must be rejected before the Duration multiply wraps")
+	}
+	if _, err := expiryFromSeconds(maxApprovalTTLSeconds + 1); err == nil {
+		t.Fatal("a TTL over the cap must be rejected")
+	}
+	if _, err := expiryFromSeconds(maxApprovalTTLSeconds); err != nil {
+		t.Fatalf("a TTL at the cap must be accepted, got %v", err)
 	}
 }

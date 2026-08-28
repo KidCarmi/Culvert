@@ -142,7 +142,7 @@ type mcpToolApprovalRequestBody struct {
 	Purpose          string `json:"purpose"`          // shadow_evaluation (default; only issuable)
 	Reason           string `json:"reason"`
 	TicketRef        string `json:"ticket_ref"`
-	ExpiresInSeconds int64  `json:"expires_in_seconds"` // 0 ⇒ no expiry
+	ExpiresInSeconds int64  `json:"expires_in_seconds"` // 0 ⇒ no expiry; negative or > ~10y is rejected
 }
 
 // mcpToolApprovalDecisionBody is the approve/reject/revoke body.
@@ -158,74 +158,91 @@ type mcpToolApprovalDecisionBody struct {
 func apiMCPToolApprovals(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		if !requireRole(w, r, RoleViewer) {
-			return
-		}
-		tenant, ok := mcpTenant(r)
-		if !ok {
-			mcpErr(w, mcperr.New(mcperr.ReasonAdminTenantScope, "mcp", "tenant required"))
-			return
-		}
-		if id := r.URL.Query().Get("id"); id != "" {
-			a, err := mcpToolTrust.Get(id, tenant)
-			if err != nil {
-				mcpErr(w, err)
-				return
-			}
-			jsonOK(w, mcpToolApprovalViewOf(a))
-			return
-		}
-		list, err := mcpToolTrust.List(tenant, mcpToolApprovalLimit(r))
-		if err != nil {
-			mcpErr(w, err)
-			return
-		}
-		views := make([]mcpToolApprovalView, 0, len(list))
-		for _, a := range list {
-			views = append(views, mcpToolApprovalViewOf(a))
-		}
-		jsonOK(w, views)
+		apiMCPToolApprovalsList(w, r)
 	case http.MethodPost:
-		if !requireRole(w, r, RoleOperator) {
-			return
-		}
-		tenant, ok := mcpTenant(r)
-		if !ok {
-			mcpErr(w, mcperr.New(mcperr.ReasonAdminTenantScope, "mcp", "tenant required"))
-			return
-		}
-		var body mcpToolApprovalRequestBody
-		if err := decodeJSON(r, &body); err != nil {
-			http.Error(w, "invalid JSON", http.StatusBadRequest)
-			return
-		}
-		purpose, ok := parseToolApprovalPurpose(body.Purpose)
-		if !ok {
-			mcpErr(w, mcperr.New(mcperr.ReasonApprovalPurposeUnsupported, "mcp", "unsupported approval purpose"))
-			return
-		}
-		in := toolTrustRequestInput{
-			Tenant:              tenant,
-			ServerID:            body.ServerID,
-			ToolName:            body.ToolName,
-			ExpectedFingerprint: body.Fingerprint,
-			ExpectedCatalogRev:  body.CatalogRevision,
-			Purpose:             purpose,
-			RequestedBy:         auditActor(r),
-			Reason:              body.Reason,
-			TicketRef:           body.TicketRef,
-			ExpiresAt:           expiryFromSeconds(body.ExpiresInSeconds),
-		}
-		a, err := mcpToolTrust.RequestApproval(in)
-		if err != nil {
-			mcpErr(w, err)
-			return
-		}
-		auditEvent(r, "mcp.tooltrust.request", a.ApprovalID, a.ServerID+"/"+a.ToolName)
-		jsonOK(w, mcpToolApprovalViewOf(a))
+		apiMCPToolApprovalCreate(w, r)
 	default:
 		mcpMethodNotAllowed(w)
 	}
+}
+
+// apiMCPToolApprovalsList serves the viewer GET: one approval by ?id= or a bounded,
+// tenant-scoped list.
+func apiMCPToolApprovalsList(w http.ResponseWriter, r *http.Request) {
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+	tenant, ok := mcpTenant(r)
+	if !ok {
+		mcpErr(w, mcperr.New(mcperr.ReasonAdminTenantScope, "mcp", "tenant required"))
+		return
+	}
+	if id := r.URL.Query().Get("id"); id != "" {
+		a, err := mcpToolTrust.Get(id, tenant)
+		if err != nil {
+			mcpErr(w, err)
+			return
+		}
+		jsonOK(w, mcpToolApprovalViewOf(a))
+		return
+	}
+	list, err := mcpToolTrust.List(tenant, mcpToolApprovalLimit(r))
+	if err != nil {
+		mcpErr(w, err)
+		return
+	}
+	views := make([]mcpToolApprovalView, 0, len(list))
+	for _, a := range list {
+		views = append(views, mcpToolApprovalViewOf(a))
+	}
+	jsonOK(w, views)
+}
+
+// apiMCPToolApprovalCreate serves the operator POST: create a pending trust request bound to
+// the reviewed fingerprint. It validates purpose and TTL before constructing the request.
+func apiMCPToolApprovalCreate(w http.ResponseWriter, r *http.Request) {
+	if !requireRole(w, r, RoleOperator) {
+		return
+	}
+	tenant, ok := mcpTenant(r)
+	if !ok {
+		mcpErr(w, mcperr.New(mcperr.ReasonAdminTenantScope, "mcp", "tenant required"))
+		return
+	}
+	var body mcpToolApprovalRequestBody
+	if err := decodeJSON(r, &body); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	purpose, ok := parseToolApprovalPurpose(body.Purpose)
+	if !ok {
+		mcpErr(w, mcperr.New(mcperr.ReasonApprovalPurposeUnsupported, "mcp", "unsupported approval purpose"))
+		return
+	}
+	expiresAt, err := expiryFromSeconds(body.ExpiresInSeconds)
+	if err != nil {
+		mcpErr(w, err)
+		return
+	}
+	in := toolTrustRequestInput{
+		Tenant:              tenant,
+		ServerID:            body.ServerID,
+		ToolName:            body.ToolName,
+		ExpectedFingerprint: body.Fingerprint,
+		ExpectedCatalogRev:  body.CatalogRevision,
+		Purpose:             purpose,
+		RequestedBy:         auditActor(r),
+		Reason:              body.Reason,
+		TicketRef:           body.TicketRef,
+		ExpiresAt:           expiresAt,
+	}
+	a, err := mcpToolTrust.RequestApproval(in)
+	if err != nil {
+		mcpErr(w, err)
+		return
+	}
+	auditEvent(r, "mcp.tooltrust.request", a.ApprovalID, a.ServerID+"/"+a.ToolName)
+	jsonOK(w, mcpToolApprovalViewOf(a))
 }
 
 // apiMCPToolApprovalDecision approves (shadow), rejects, or revokes a tool-trust
@@ -296,14 +313,25 @@ func parseToolApprovalPurpose(s string) (tooltrust.Purpose, bool) {
 	return tooltrust.ParsePurpose(s)
 }
 
-// expiryFromSeconds converts a positive relative expiry to an absolute timestamp; a
-// non-positive value means no expiry.
-func expiryFromSeconds(sec int64) *time.Time {
-	if sec <= 0 {
-		return nil
+// maxApprovalTTLSeconds bounds a relative approval expiry. It is generous for any real
+// shadow-evaluation approval yet far below the point where a seconds→time.Duration
+// (nanoseconds) conversion overflows int64 (~9.2e9 s), so the multiply is always defined.
+const maxApprovalTTLSeconds = 10 * 365 * 24 * 3600 // ~10 years
+
+// expiryFromSeconds converts a relative expiry (seconds) to an absolute timestamp. Zero is
+// the documented "no expiry" sentinel. A NEGATIVE value is rejected as invalid input rather
+// than silently treated as no-expiry (which would turn an intended short/invalid TTL into a
+// never-expiring grant), and a value above maxApprovalTTLSeconds is rejected before the
+// time.Duration nanosecond conversion can overflow into an already-expired timestamp.
+func expiryFromSeconds(sec int64) (*time.Time, error) {
+	if sec == 0 {
+		return nil, nil // no expiry
+	}
+	if sec < 0 || sec > maxApprovalTTLSeconds {
+		return nil, mcperr.New(mcperr.ReasonAdminRequestInvalid, "mcp", "expires_in_seconds out of range")
 	}
 	t := time.Now().Add(time.Duration(sec) * time.Second)
-	return &t
+	return &t, nil
 }
 
 // mcpToolApprovalLimit clamps the list page size to a safe bound.
