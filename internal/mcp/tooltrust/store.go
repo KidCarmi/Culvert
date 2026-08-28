@@ -637,6 +637,22 @@ func (s *Store) List(tenant string, limit int) []*ToolApproval {
 	return out
 }
 
+// AllForTenant returns copies of EVERY approval for the tenant, unsorted and unbounded
+// (the store's total-record cap already bounds it). It exists so a caller enriching a whole
+// inventory response snapshots the tenant's approvals ONCE and builds a per-tool index,
+// instead of calling List (which pre-allocates a large slice and scans/sorts) once per tool.
+func (s *Store) AllForTenant(tenant string) []*ToolApproval {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*ToolApproval, 0, len(s.byID))
+	for _, a := range s.byID {
+		if a.Tenant == tenant {
+			out = append(out, a.clone())
+		}
+	}
+	return out
+}
+
 // ActiveApprovals returns copies of every grant that is live as of now (active,
 // shadow-purpose, unexpired) across ALL tenants. The coordinator (a trusted,
 // in-process caller — never a tenant-scoped request handler) uses it to derive the

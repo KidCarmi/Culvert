@@ -407,9 +407,12 @@ func apiMCPTools(w http.ResponseWriter, r *http.Request) {
 		mcpErr(w, err)
 		return
 	}
+	// Snapshot the tenant's approvals ONCE and reuse the index for every tool, so a large
+	// inventory cannot amplify one request into O(tools × approvals) list allocations.
+	ann := mcpToolTrust.newToolTrustAnnotator(tenant)
 	enriched := make([]mcpToolViewEnriched, 0, len(v))
 	for i := range v {
-		enriched = append(enriched, enrichToolView(tenant, v[i]))
+		enriched = append(enriched, enrichToolViewWith(ann, v[i]))
 	}
 	jsonOK(w, enriched)
 }

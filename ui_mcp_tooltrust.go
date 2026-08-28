@@ -55,14 +55,23 @@ func mcpToolTrustStatus() mcpToolTrustStatusView {
 	return mcpToolTrustStatusView{Composed: composed, Reason: reason}
 }
 
-// enrichToolView overlays the tool-trust annotation onto an inventory ToolView.
+// enrichToolView overlays the tool-trust annotation onto a SINGLE inventory ToolView. For a
+// whole inventory response use enrichToolViewWith with one shared annotator (below).
 func enrichToolView(tenant string, v adminapi.ToolView) mcpToolViewEnriched {
+	return enrichToolViewWith(mcpToolTrust.newToolTrustAnnotator(tenant), v)
+}
+
+// enrichToolViewWith overlays the tool-trust annotation using a PRE-BUILT annotator, so a
+// list of tools shares one approval snapshot instead of re-listing per tool (the O(tools ×
+// approvals) amplification a viewer could otherwise trigger on GET /api/mcp/tools). A nil
+// annotator (trust not composed) leaves the bare ToolView unchanged.
+func enrichToolViewWith(ann *toolTrustAnnotator, v adminapi.ToolView) mcpToolViewEnriched {
 	out := mcpToolViewEnriched{ToolView: v}
-	if ann, ok := mcpToolTrust.annotateTool(tenant, v.ServerID, v.Name, v.Fingerprint); ok {
-		out.ApprovalStatus = ann.Status
-		out.ApprovalPurpose = ann.Purpose
-		out.ApprovalID = ann.ID
-		out.ApprovalExpiresAt = ann.ExpiresAt
+	if a, ok := ann.annotate(v.ServerID, v.Name, v.Fingerprint); ok {
+		out.ApprovalStatus = a.Status
+		out.ApprovalPurpose = a.Purpose
+		out.ApprovalID = a.ID
+		out.ApprovalExpiresAt = a.ExpiresAt
 	}
 	return out
 }

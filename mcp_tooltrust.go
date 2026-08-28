@@ -571,23 +571,46 @@ type toolTrustAnnotation struct {
 	ExpiresAt *time.Time
 }
 
-// annotateTool returns the trust overlay for a (tenant, server, tool) at the given
-// current fingerprint hex. It prefers the ACTIVE approval that matches the current
-// fingerprint (the one that makes the tool Usable); otherwise the most recent
-// pending request; otherwise the most recent record. It is read-only.
-func (c *mcpToolTrustCoordinator) annotateTool(tenant, serverID, name, fingerprintHex string) (toolTrustAnnotation, bool) {
+// toolTrustAnnotator is a per-inventory-response snapshot of a tenant's approvals, grouped
+// by (server, tool). It exists so GET /api/mcp/tools annotates every tool from ONE snapshot
+// instead of re-listing (and re-allocating) all approvals per tool — an unbounded tool
+// inventory would otherwise let a viewer amplify a single request into O(tools × approvals)
+// clones + sorts (a memory/CPU DoS). Build it once with newToolTrustAnnotator, then call
+// annotate per tool. A nil annotator yields no annotation (trust not composed).
+type toolTrustAnnotator struct {
+	byTool map[activeToolKey][]*tooltrust.ToolApproval
+	now    time.Time
+}
+
+// newToolTrustAnnotator snapshots the tenant's approvals ONCE and groups them by (server,
+// tool). Returns nil when the coordinator is not composed (callers treat nil as "no
+// annotations", identical to the pre-change fail-closed behavior).
+func (c *mcpToolTrustCoordinator) newToolTrustAnnotator(tenant string) *toolTrustAnnotator {
 	store, err := c.getStore()
 	if err != nil {
+		return nil
+	}
+	all := store.AllForTenant(tenant)
+	byTool := make(map[activeToolKey][]*tooltrust.ToolApproval, len(all))
+	for _, a := range all {
+		k := activeToolKey{serverID: a.ServerID, toolName: a.ToolName}
+		byTool[k] = append(byTool[k], a)
+	}
+	return &toolTrustAnnotator{byTool: byTool, now: c.now()}
+}
+
+// annotate returns the trust overlay for one tool at the given current fingerprint hex from
+// the pre-grouped snapshot. It prefers the ACTIVE approval matching the current fingerprint
+// (the one that makes the tool Usable); otherwise the most recent pending request; otherwise
+// the most recent record. A nil annotator (trust not composed) yields no annotation.
+func (t *toolTrustAnnotator) annotate(serverID, name, fingerprintHex string) (toolTrustAnnotation, bool) {
+	if t == nil {
 		return toolTrustAnnotation{}, false
 	}
-	now := c.now()
 	var best *tooltrust.ToolApproval
 	var bestRank int
-	for _, a := range store.List(tenant, 0xFFFF) {
-		if a.ServerID != serverID || a.ToolName != name {
-			continue
-		}
-		r := toolApprovalRank(a, fingerprintHex, now)
+	for _, a := range t.byTool[activeToolKey{serverID: serverID, toolName: name}] {
+		r := toolApprovalRank(a, fingerprintHex, t.now)
 		if best == nil || r > bestRank || (r == bestRank && a.RequestedAt.After(best.RequestedAt)) {
 			best, bestRank = a, r
 		}
@@ -601,6 +624,13 @@ func (c *mcpToolTrustCoordinator) annotateTool(tenant, serverID, name, fingerpri
 		ID:        best.ApprovalID,
 		ExpiresAt: best.ExpiresAt,
 	}, true
+}
+
+// annotateTool returns the trust overlay for a SINGLE (tenant, server, tool). It builds a
+// one-shot annotator, so it is O(tenant approvals) with no large pre-allocation; the list
+// path (many tools) must instead build one annotator and reuse it.
+func (c *mcpToolTrustCoordinator) annotateTool(tenant, serverID, name, fingerprintHex string) (toolTrustAnnotation, bool) {
+	return c.newToolTrustAnnotator(tenant).annotate(serverID, name, fingerprintHex)
 }
 
 // toolApprovalRank ranks how strongly an approval governs a tool's current

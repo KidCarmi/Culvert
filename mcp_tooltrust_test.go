@@ -774,3 +774,44 @@ func TestToolTrust_ApproveExpiredDuringWrite_DemotesNotPromotes(t *testing.T) {
 		t.Fatalf("an approved-but-already-expired grant must NOT be promoted Usable, got %s", got)
 	}
 }
+
+// TestToolTrust_Annotator_SharedSnapshotAnnotatesEachTool proves the round-11 P1 fix: one
+// annotator snapshot (built once per inventory response) correctly annotates multiple tools —
+// an active grant, a pending request, and a tool with no approval — matching the single-tool
+// annotateTool path, so GET /api/mcp/tools no longer re-lists all approvals per tool.
+func TestToolTrust_Annotator_SharedSnapshotAnnotatesEachTool(t *testing.T) {
+	resetInventory(t)
+	inv := seedToolTrustInventory2(t)
+	composeToolTrust(t, nil)
+	// toolA → active (approved); toolB → pending.
+	requestAndApprove(t, inv.serverID, inv.toolA, inv.fpA, inv.cat.Current().Revision(), 0)
+	if _, err := mcpToolTrust.RequestApproval(toolTrustRequestInput{
+		Tenant:              ttTenant,
+		ServerID:            inv.serverID,
+		ToolName:            inv.toolB,
+		ExpectedFingerprint: inv.fpB,
+		ExpectedCatalogRev:  0, // not asserted
+		Purpose:             tooltrust.PurposeShadowEvaluation,
+		RequestedBy:         "operator@corp",
+		Reason:              "b pending",
+	}); err != nil {
+		t.Fatalf("request B: %v", err)
+	}
+	ann := mcpToolTrust.newToolTrustAnnotator(ttTenant)
+	if ann == nil {
+		t.Fatal("annotator must be composed")
+	}
+	if a, ok := ann.annotate(inv.serverID, inv.toolA, inv.fpA); !ok || a.Status != "active" {
+		t.Fatalf("toolA annotation = %+v ok=%v, want active", a, ok)
+	}
+	if a, ok := ann.annotate(inv.serverID, inv.toolB, inv.fpB); !ok || a.Status != "pending" {
+		t.Fatalf("toolB annotation = %+v ok=%v, want pending", a, ok)
+	}
+	if _, ok := ann.annotate(inv.serverID, "no-such-tool", inv.fpA); ok {
+		t.Fatal("a tool with no approval must have no annotation")
+	}
+	// Parity with the single-tool path.
+	if a, ok := mcpToolTrust.annotateTool(ttTenant, inv.serverID, inv.toolA, inv.fpA); !ok || a.Status != "active" {
+		t.Fatalf("annotateTool parity = %+v ok=%v, want active", a, ok)
+	}
+}
