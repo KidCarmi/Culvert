@@ -895,23 +895,30 @@ func (a *ToolApproval) validateStatusLifecycle() error {
 // which validateActiveEvidence then rejects on the next restart, leaving tool trust
 // uncomposed. Fail closed so Load never admits state a supported mutation makes unrecoverable.
 func (a *ToolApproval) validatePendingEvidence(bad func(string) error) error {
-	if a.ApprovedBy != "" || !a.ApprovedAt.IsZero() ||
-		a.RejectedBy != "" || a.RejectedAt != nil ||
-		a.RevokedBy != "" || a.RevokedAt != nil {
+	if a.ApprovedBy != "" || !a.ApprovedAt.IsZero() || a.hasTerminalEvidence() {
 		return bad("pending record carries decision evidence")
 	}
 	return nil
 }
 
+// hasTerminalEvidence reports whether the record carries ANY rejection or revocation
+// evidence — the decider, the timestamp, OR the reason. Only a Rejected/Revoked record
+// legitimately carries it; a pending or active record that does is corrupt/hand-edited, and
+// the REASON fields count because Reject/Revoke persist them alongside the actor/timestamp.
+func (a *ToolApproval) hasTerminalEvidence() bool {
+	return a.RejectedBy != "" || a.RejectedAt != nil || a.RejectedReason != "" ||
+		a.RevokedBy != "" || a.RevokedAt != nil || a.RevocationReason != ""
+}
+
 // validateActiveEvidence enforces the StatusActive invariants: an approver + approval time
 // must be present, AND no terminal-decision evidence may be — a rejection/revocation flipped
-// to Active by a single status-byte edit keeps its own decider fields, which a real active
-// grant never carries.
+// to Active by a single status-byte edit keeps its own decider fields (including the reason),
+// which a real active grant never carries.
 func (a *ToolApproval) validateActiveEvidence(bad func(string) error) error {
 	if a.ApprovedBy == "" || a.ApprovedAt.IsZero() {
 		return bad("active record without recorded approval evidence")
 	}
-	if a.RejectedBy != "" || a.RejectedAt != nil || a.RevokedBy != "" || a.RevokedAt != nil {
+	if a.hasTerminalEvidence() {
 		return bad("active record carries terminal-decision evidence")
 	}
 	return nil

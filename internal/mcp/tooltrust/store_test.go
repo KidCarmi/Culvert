@@ -1115,3 +1115,46 @@ func TestLoad_PendingWithDecisionEvidenceFailsClosed(t *testing.T) {
 		t.Fatalf("a clean pending record must load, got %v", err)
 	}
 }
+
+// TestLoad_ReasonOnlyTerminalEvidenceFailsClosed proves the round-13 P2: the pending/active
+// evidence checks include the terminal REASON fields (RejectedReason/RevocationReason), so a
+// corrupt record carrying only a reason — with no decider actor/timestamp — is still rejected,
+// on both the pending and the active path.
+func TestLoad_ReasonOnlyTerminalEvidenceFailsClosed(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	when := time.Unix(1000, 0)
+	cases := map[string]*ToolApproval{
+		"pending_rejected_reason": {
+			SchemaVersion: SchemaVersion, ApprovalID: "a", Tenant: "t", ServerID: "s", ToolName: "n",
+			FingerprintFormatVersion: 1, Purpose: PurposeShadowEvaluation, Status: StatusPending,
+			RequestedBy: "op", RequestedAt: when, RejectedReason: "denied",
+		},
+		"pending_revocation_reason": {
+			SchemaVersion: SchemaVersion, ApprovalID: "a", Tenant: "t", ServerID: "s", ToolName: "n",
+			FingerprintFormatVersion: 1, Purpose: PurposeShadowEvaluation, Status: StatusPending,
+			RequestedBy: "op", RequestedAt: when, RevocationReason: "rotated",
+		},
+		"active_rejected_reason": {
+			SchemaVersion: SchemaVersion, ApprovalID: "a", Tenant: "t", ServerID: "s", ToolName: "n",
+			FingerprintFormatVersion: 1, Purpose: PurposeShadowEvaluation, Status: StatusActive,
+			RequestedBy: "op", RequestedAt: when, ApprovedBy: "admin", ApprovedAt: when, RejectedReason: "denied",
+		},
+		"active_revocation_reason": {
+			SchemaVersion: SchemaVersion, ApprovalID: "a", Tenant: "t", ServerID: "s", ToolName: "n",
+			FingerprintFormatVersion: 1, Purpose: PurposeShadowEvaluation, Status: StatusActive,
+			RequestedBy: "op", RequestedAt: when, ApprovedBy: "admin", ApprovedAt: when, RevocationReason: "rotated",
+		},
+	}
+	for name, a := range cases {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "approvals.json")
+		raw, _ := json.Marshal(persistedStore{SchemaVersion: SchemaVersion, Approvals: []*ToolApproval{a}})
+		if err := os.WriteFile(path, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		s, _ := NewStore(Config{Path: path, Clock: clk.now})
+		if err := s.Load(); err == nil {
+			t.Fatalf("[%s] a record carrying a terminal reason without a decider must fail closed", name)
+		}
+	}
+}
