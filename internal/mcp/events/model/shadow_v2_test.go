@@ -113,18 +113,36 @@ func TestV2_ValidationRejectsMalformedShadowEvidence(t *testing.T) {
 	}
 }
 
-// TestV2_LegacyV1ShadowMarkerIsReadableWithoutSubFacts proves the v2 reader supports a
-// legacy v1 "shadow_evaluated" marker (no ShadowEvidence): it represents absent shadow
-// evidence as ABSENT, never inferred, and validates as a plain v1 event.
-func TestV2_LegacyV1ShadowMarkerIsReadableWithoutSubFacts(t *testing.T) {
+// TestV2_LegacyV1ShadowMarker_ReadableButNotWritable pins the read/write split (Codex P2,
+// PR #1235): a legacy v1 "shadow_evaluated" marker (no ShadowEvidence, e.g. written by a
+// pre-v2 binary) stays READABLE on the recovery path (ValidateShadowEvidence tolerates it and
+// never infers absent evidence), but the WRITE path (Validate) REJECTS it — so an adapter
+// regression or another producer can never PERSIST a new incomplete shadow event. Mutation:
+// dropping validateShadowWriteOnly makes Validate accept the marker and fails the write half.
+func TestV2_LegacyV1ShadowMarker_ReadableButNotWritable(t *testing.T) {
 	e := validV2ShadowEvent()
 	e.SchemaVersion = SchemaVersionV1
 	e.Shadow = nil // v1 legacy marker: execution_state=shadow_evaluated but no sub-facts
-	if err := e.Validate(); err != nil {
-		t.Fatalf("a legacy v1 shadow marker must validate as a plain v1 event: %v", err)
+
+	// READ (recovery) tolerates the legacy marker and never invents evidence.
+	if err := e.ValidateShadowEvidence(); err != nil {
+		t.Fatalf("a legacy v1 shadow marker must stay readable on recovery: %v", err)
 	}
 	if e.Shadow != nil {
 		t.Fatal("absent shadow evidence must stay absent, never inferred")
+	}
+	// WRITE (Validate) rejects it — a new shadow event must be a complete v2 record.
+	if err := e.Validate(); err == nil {
+		t.Fatal("a bare v1 shadow marker must be rejected at write time (never persist incomplete shadow evidence)")
+	}
+
+	// A plain v1 event (no shadow marker) is of course still both readable and writable.
+	plain := validV2ShadowEvent()
+	plain.SchemaVersion = SchemaVersionV1
+	plain.Shadow = nil
+	plain.Decision.ExecutionState = "not_implemented"
+	if err := plain.Validate(); err != nil {
+		t.Fatalf("a plain v1 event must still validate at write time: %v", err)
 	}
 }
 

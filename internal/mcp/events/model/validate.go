@@ -77,6 +77,24 @@ func (e Event) Validate() error { //nolint:gocyclo,cyclop // a flat set of indep
 	if err := e.validateShadow(); err != nil {
 		return err
 	}
+	if err := e.validateShadowWriteOnly(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateShadowWriteOnly rejects shapes that must never be PRODUCED, even though a legacy
+// instance of them may still be READ. Validate runs only on the write/commit path
+// (CommitDecision, spool.Commit); recovery uses ValidateShadowEvidence, which does NOT run
+// this. So this is the write-time-only guard: a NEW shadow event must be a complete
+// SchemaVersionV2 record (Shadow present), never a bare v1 "shadow_evaluated" marker with no
+// durable verdict. A legacy v1 marker written by a pre-v2 binary stays readable on recovery;
+// this only stops an adapter regression or another producer from persisting incomplete Shadow
+// evidence going forward (SHADOW-EVIDENCE-ROUTING-1, Codex P2 PR #1235).
+func (e Event) validateShadowWriteOnly() error {
+	if e.SchemaVersion == SchemaVersionV1 && e.Decision.ExecutionState == shadowExecutionState {
+		return evtErr(mcperr.ReasonEventInvalid, "a new shadow event must be schema v2 with complete evidence, not a bare v1 marker")
+	}
 	return nil
 }
 
