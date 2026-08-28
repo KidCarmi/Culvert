@@ -68,12 +68,44 @@ func (e *VersionConflictError) Error() string {
 	return fmt.Sprintf("the decryption profiles changed since you loaded them (your version %d, current %d) — reload and reapply your change", e.Asserted, e.Current)
 }
 
-// storeMeta is the durable per-store generation sidecar (path+".meta"),
-// mirroring package main's policyMeta convention: written AFTER the objects
-// file (and skipped when that write fails), so the recorded generation is never
-// newer than the objects actually on disk.
+// storeEnvelope is the durable persistence unit (2D-A fence correction):
+// object CONTENT and the concurrency EPOCH land in ONE atomic write, so an
+// acknowledged mutation can never leave new content with an old durable
+// generation — including under ErrReplacedNotSynced, where the landed
+// replacement carries the new epoch with the new content. See the catgroup
+// twin for the full rationale; both implementations are proven independently.
+//
+// Backward compatibility: a legacy bare-array file (optionally with the
+// retired path+".meta" sidecar) still loads; the first durable save migrates
+// the format and removes the superseded sidecar. An older binary cannot read
+// the envelope (unmarshal error → empty store; recorded downgrade residual —
+// rules reference profiles by stable ID, so resolution degrades fail-closed).
+type storeEnvelope struct {
+	SchemaVersion int       `json:"schema_version"`
+	Version       int64     `json:"version"`
+	Profiles      []Profile `json:"profiles"`
+}
+
+// storeMeta is the RETIRED legacy sidecar shape (path+".meta") — read only
+// when loading a legacy bare-array file, never written.
 type storeMeta struct {
 	Version int64 `json:"version"`
+}
+
+// isLegacyArrayFile reports whether the persisted bytes are the legacy
+// bare-array format (pre-envelope).
+func isLegacyArrayFile(data []byte) bool {
+	for _, b := range data {
+		switch b {
+		case ' ', '\t', '\r', '\n':
+			continue
+		case '[':
+			return true
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 // Clamp bounds for StallTimeoutSecs. 0 means "engine default" (the caller
@@ -284,18 +316,19 @@ type Store struct {
 
 	// version is the DURABLE per-store mutation generation (2D-A object
 	// concurrency): bumped on every successful admin mutation and on bulk
-	// installs (ReplaceAll), persisted to the path+".meta" sidecar so it stays
-	// monotonic across restarts, surfaced on the list read, and asserted by
-	// MutateDurable's optional ifVersion fence.
+	// installs (ReplaceAll), persisted ATOMICALLY WITH THE CONTENT in the
+	// storeEnvelope so it stays monotonic across restarts and can never
+	// diverge from the objects it fences, surfaced on the list read, and
+	// asserted by MutateDurable's optional ifVersion fence.
 	version int64
 
-	// mutMu serializes DURABLE admin mutations (MutateDurable): fence check,
-	// mutation, persist, and failure rollback form one critical section, so two
-	// admin writes can never interleave between the version check and the
-	// durable write (no TOCTOU). Readers and the proxy hot path never touch it.
-	// Bulk install paths (ReplaceAll from cluster sync / import / rollback)
-	// deliberately bypass it — whole-surface replaces whose authority
-	// re-converges on the next push; documented residual.
+	// mutMu serializes EVERY runtime writer of the fenced domain — admin
+	// mutations (MutateDurable) AND bulk installs (ReplaceAll from cluster
+	// sync / import / rollback) — so no writer can alter contents or version
+	// between a client's version comparison and its protected mutation
+	// (2D-A fence correction, Blocker B). Readers and the proxy hot path
+	// never touch it. Startup-only writers (Load, seedDefault*, before
+	// listeners) are exempt by ordering.
 	mutMu sync.Mutex
 }
 
@@ -365,22 +398,35 @@ func (s *Store) Load(path string) error {
 	if err != nil {
 		return nil // first run — no file
 	}
+	// Format sniff (2D-A fence correction): the envelope couples content +
+	// epoch; a legacy bare array is still accepted, with its version taken
+	// from the retired sidecar (absent ⇒ 0 — safe for LEGACY files only:
+	// every mutation acknowledged under the envelope model persists its epoch
+	// atomically with the content).
 	var profiles []Profile
-	if err := json.Unmarshal(data, &profiles); err != nil {
-		obs.Printf("DecryptionProfiles: unmarshal error from %s", path)
-		return err
+	var loadedVersion int64
+	if isLegacyArrayFile(data) {
+		if err := json.Unmarshal(data, &profiles); err != nil {
+			obs.Printf("DecryptionProfiles: unmarshal error from %s", path)
+			return err
+		}
+		var meta storeMeta
+		if mdata, merr := os.ReadFile(path + ".meta"); merr == nil { // #nosec G304 -- sibling of the operator-configured path
+			_ = json.Unmarshal(mdata, &meta)
+		}
+		loadedVersion = meta.Version
+	} else {
+		var env storeEnvelope
+		if err := json.Unmarshal(data, &env); err != nil {
+			obs.Printf("DecryptionProfiles: unmarshal error from %s", path)
+			return err
+		}
+		profiles = env.Profiles
+		loadedVersion = env.Version
 	}
-	migrated, skipped, certMigrated := s.replace(profiles, true)
-	// Restore the durable generation from the sidecar (absent/corrupt ⇒ 0: the
-	// fence degrades conservatively — a stale pre-restart token mismatches and
-	// 409s into a refetch, never a silent overwrite). After replace(), which
-	// does not touch version.
-	var meta storeMeta
-	if mdata, merr := os.ReadFile(path + ".meta"); merr == nil { // #nosec G304 -- sibling of the operator-configured path
-		_ = json.Unmarshal(mdata, &meta)
-	}
+	migrated, skipped, certMigrated := s.replaceContents(profiles, true)
 	s.mu.Lock()
-	s.version = meta.Version
+	s.version = loadedVersion
 	s.mu.Unlock()
 	obs.Printf("DecryptionProfiles: loaded %d profile(s) from %s", len(profiles), path)
 	// Persist backfilled IDs (?id= stability) and any fail-closed
@@ -410,8 +456,10 @@ func (s *Store) Load(path string) error {
 func (s *Store) Save() { _ = s.SaveErr() }
 
 // SaveErr is the error-returning persistence core (2D-A durable-or-nothing).
-// The version sidecar is written AFTER (and skipped on) an objects-file
-// failure, so the recorded generation is never newer than the objects on disk.
+// Content and the fence epoch are ONE envelope in ONE atomic write, so they
+// can never diverge durably — including under ErrReplacedNotSynced, where the
+// landed replacement carries the new epoch with the new content. The retired
+// legacy sidecar is removed once the envelope has landed.
 func (s *Store) SaveErr() error {
 	s.mu.RLock()
 	path := s.path
@@ -425,20 +473,19 @@ func (s *Store) SaveErr() error {
 			profiles = append(profiles, copyOut(p))
 		}
 	}
-	meta := storeMeta{Version: s.version}
+	env := storeEnvelope{SchemaVersion: 1, Version: s.version, Profiles: profiles}
 	s.mu.RUnlock()
 
-	data, err := json.MarshalIndent(profiles, "", "  ")
+	data, err := json.MarshalIndent(env, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal decryption profiles: %w", err)
 	}
-	if err := writeFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("write decryption profiles: %w", err)
+	werr := writeFile(path, data, 0o600)
+	if werr == nil || errors.Is(werr, fileutil.ErrReplacedNotSynced) {
+		_ = os.Remove(path + ".meta") // superseded legacy sidecar (best-effort)
 	}
-	if mdata, merr := json.Marshal(meta); merr == nil {
-		// Best-effort like policy's saveMetaSnapshot: a lost sidecar degrades
-		// the fence to 0 at next boot (conservative — stale tokens 409).
-		_ = writeFile(path+".meta", mdata, 0o600)
+	if werr != nil {
+		return fmt.Errorf("write decryption profiles: %w", werr)
 	}
 	return nil
 }
@@ -446,8 +493,11 @@ func (s *Store) SaveErr() error {
 // MutateDurable runs ONE admin mutation with the OPTIONAL expected-version
 // fence AND the durable persist evaluated in the same serialized critical
 // section — the exact contract documented on catgroup.Store.MutateDurable
-// (fence mismatch ⇒ *VersionConflictError, fn error verbatim, persist failure
-// ⇒ rollback + ErrPersist, ErrReplacedNotSynced ⇒ landed-content success).
+// (fence mismatch ⇒ *VersionConflictError, fn error ⇒ atomic rollback,
+// persist failure ⇒ rollback + ErrPersist, ErrReplacedNotSynced ⇒
+// landed-content success WITH the epoch, since content + version are one
+// atomic envelope). ReplaceAll holds the same mutMu, so no writer can alter
+// the fenced domain between the version comparison and the mutation.
 func (s *Store) MutateDurable(ifVersion *int64, fn func() error) error {
 	s.mutMu.Lock()
 	defer s.mutMu.Unlock()
@@ -467,7 +517,9 @@ func (s *Store) MutateDurable(ifVersion *int64, fn func() error) error {
 		return err
 	}
 	s.mu.Lock()
-	s.version = cur + 1
+	// Bump the LIVE value, never "captured + 1" (§7): serialized writers make
+	// them equal, but the live increment stays monotonic regardless.
+	s.version++
 	s.mu.Unlock()
 	if err := s.SaveErr(); err != nil {
 		if errors.Is(err, fileutil.ErrReplacedNotSynced) {
@@ -652,21 +704,31 @@ func (s *Store) Delete(name string) error {
 // Bulk install = a content change: the client-visible fence advances so any admin
 // edit loaded against the pre-install contents conflicts instead of silently
 // overwriting the installed truth.
+//
+// SERIALIZATION (2D-A fence correction, Blocker B): ReplaceAll holds the SAME
+// mutMu as MutateDurable, so a bulk install can never interleave between a
+// client's ifVersion comparison and its protected mutation — the two writer
+// classes observe exactly one serial order, and the fence generation cannot
+// alias across them.
 func (s *Store) ReplaceAll(profiles []Profile) {
-	s.replace(profiles, false)
+	s.mutMu.Lock()
+	defer s.mutMu.Unlock()
+	s.replaceContents(profiles, false)
 	s.mu.Lock()
 	s.version++
 	s.mu.Unlock()
 }
 
-// replace is the shared install path. skipInvalidLog controls whether skipped
+// replaceContents is the shared install path (no serialization, no version
+// movement — Load and the mutMu-holding ReplaceAll own those). skipInvalidLog
+// controls whether skipped
 // entries are logged (Load logs; ReplaceAll stays quiet on the hot sync path).
 // Returns the number of profiles that had a stable ID backfilled (migrated), the
 // number skipped as invalid/duplicate (skipped), and the number whose retired
 // certVerification=permissive was fail-closed-migrated to strict (certMigrated).
 // Load persists (migrated>0 || certMigrated>0) only when skipped==0, so a rewrite
 // never drops skipped entries.
-func (s *Store) replace(profiles []Profile, logSkips bool) (migrated, skipped, certMigrated int) {
+func (s *Store) replaceContents(profiles []Profile, logSkips bool) (migrated, skipped, certMigrated int) {
 	built := make(map[string]*Profile, len(profiles))
 	order := make([]string, 0, len(profiles))
 	for i := range profiles {

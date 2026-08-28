@@ -69,12 +69,48 @@ func (e *VersionConflictError) Error() string {
 	return fmt.Sprintf("the category groups changed since you loaded them (your version %d, current %d) — reload and reapply your change", e.Asserted, e.Current)
 }
 
-// storeMeta is the durable per-store generation sidecar (path+".meta"),
-// mirroring package main's policyMeta convention: it is written AFTER the
-// object file (and skipped when that write fails), so the recorded generation
-// is never newer than the objects actually on disk.
+// storeEnvelope is the durable persistence unit (2D-A fence correction):
+// object CONTENT and the concurrency EPOCH land in ONE atomic write, so an
+// acknowledged mutation can never leave new content with an old durable
+// generation (the divergence a separate best-effort sidecar permitted — most
+// directly through ErrReplacedNotSynced, where the objects file had landed
+// and the sidecar write was never reached). Because the envelope is one
+// AtomicWrite, the landed-content doctrine now covers the epoch too: if the
+// replacement landed, the new version landed with it, and a restart can never
+// revalidate a token issued for an earlier content epoch.
+//
+// Backward compatibility: a legacy bare-array file (optionally with the
+// retired path+".meta" version sidecar) still loads; the first durable save
+// migrates to the envelope and removes the superseded sidecar. A binary
+// predating the envelope cannot read it (it degrades to an unmarshal error
+// and an empty store — recorded downgrade residual; rules reference objects
+// by stable ID, so matching degrades fail-closed, never to a wrong object).
+type storeEnvelope struct {
+	SchemaVersion int     `json:"schema_version"`
+	Version       int64   `json:"version"`
+	Groups        []Group `json:"groups"`
+}
+
+// storeMeta is the RETIRED legacy sidecar shape (path+".meta") — read only
+// when loading a legacy bare-array file, never written.
 type storeMeta struct {
 	Version int64 `json:"version"`
+}
+
+// isLegacyArrayFile reports whether the persisted bytes are the legacy
+// bare-array format (pre-envelope).
+func isLegacyArrayFile(data []byte) bool {
+	for _, b := range data {
+		switch b {
+		case ' ', '\t', '\r', '\n':
+			continue
+		case '[':
+			return true
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 // Group is a named bundle of URL category names.
@@ -99,20 +135,22 @@ type Store struct {
 
 	// version is the DURABLE per-store mutation generation (2D-A object
 	// concurrency): bumped on every successful admin mutation and on bulk
-	// installs (ReplaceAll), persisted to the path+".meta" sidecar so it stays
-	// monotonic across restarts, surfaced on the list read, and asserted by
-	// MutateDurable's optional ifVersion fence. Distinct from rev below (a
-	// process-local memo signal): version is a client-visible fence value.
+	// installs (ReplaceAll), persisted ATOMICALLY WITH THE CONTENT in the
+	// storeEnvelope so it stays monotonic across restarts and can never
+	// diverge from the objects it fences, surfaced on the list read, and
+	// asserted by MutateDurable's optional ifVersion fence. Distinct from rev
+	// below (a process-local memo signal): version is a client-visible fence
+	// value.
 	version int64
 
-	// mutMu serializes DURABLE admin mutations (MutateDurable): the fence
-	// check, the mutation, the persist, and the failure rollback form one
-	// critical section, so two admin writes can never interleave between the
-	// version check and the durable write (no TOCTOU). Readers and the proxy
-	// hot path never touch it. Bulk install paths (ReplaceAll from cluster
-	// sync / import / rollback) deliberately bypass it — they are whole-surface
-	// replaces whose authority (CP snapshot, import payload) re-converges on
-	// the next push; documented residual.
+	// mutMu serializes EVERY runtime writer of the fenced domain — admin
+	// mutations (MutateDurable: fence check + mutation + persist + rollback as
+	// one critical section) AND bulk installs (ReplaceAll from cluster sync /
+	// import / rollback). No writer can alter contents or version between a
+	// client's version comparison and its protected mutation, so a stale
+	// assertion can never false-pass around a bulk install (2D-A fence
+	// correction, Blocker B). Readers and the proxy hot path never touch it.
+	// Startup-only writers (Load, before listeners) are exempt by ordering.
 	mutMu sync.Mutex
 
 	// rev counts successful mutations (Load/Add/Update/Delete/Rename/
@@ -174,10 +212,32 @@ func (s *Store) Load(path string) error {
 	if err != nil {
 		return nil // first run — no file
 	}
+	// Format sniff (2D-A fence correction): the envelope couples content +
+	// epoch; a legacy bare array is still accepted, with its version taken
+	// from the retired sidecar (absent ⇒ 0 — safe for LEGACY files only,
+	// because every mutation acknowledged under the envelope model persists
+	// its epoch atomically with the content, so a changed-content/lost-epoch
+	// state is no longer producible by this store).
 	var groups []Group
-	if err := json.Unmarshal(data, &groups); err != nil {
-		obs.Printf("CategoryGroups: unmarshal error from %s", path)
-		return err
+	var loadedVersion int64
+	if isLegacyArrayFile(data) {
+		if err := json.Unmarshal(data, &groups); err != nil {
+			obs.Printf("CategoryGroups: unmarshal error from %s", path)
+			return err
+		}
+		var meta storeMeta
+		if mdata, merr := os.ReadFile(path + ".meta"); merr == nil { // #nosec G304 -- sibling of the operator-configured path
+			_ = json.Unmarshal(mdata, &meta)
+		}
+		loadedVersion = meta.Version
+	} else {
+		var env storeEnvelope
+		if err := json.Unmarshal(data, &env); err != nil {
+			obs.Printf("CategoryGroups: unmarshal error from %s", path)
+			return err
+		}
+		groups = env.Groups
+		loadedVersion = env.Version
 	}
 
 	built := make(map[string]*Group, len(groups))
@@ -199,18 +259,10 @@ func (s *Store) Load(path string) error {
 		order = append(order, key)
 	}
 
-	// Restore the durable generation from the sidecar (absent/corrupt ⇒ 0:
-	// the fence degrades conservatively — any stale pre-restart token then
-	// mismatches and 409s into a refetch, never a silent overwrite).
-	var meta storeMeta
-	if mdata, merr := os.ReadFile(path + ".meta"); merr == nil { // #nosec G304 -- sibling of the operator-configured path
-		_ = json.Unmarshal(mdata, &meta)
-	}
-
 	s.mu.Lock()
 	s.groups = built
 	s.order = order
-	s.version = meta.Version
+	s.version = loadedVersion
 	// Bump BEFORE unlock (round 19 follow-up): the mutex release publishes
 	// the new contents, so any reader that can observe them already sees the
 	// advanced revision — value and change signal are never out of step.
@@ -234,8 +286,11 @@ func (s *Store) Save() { _ = s.SaveErr() }
 
 // SaveErr is the error-returning persistence core (2D-A durable-or-nothing):
 // callers that must know whether the durable write landed use it directly.
-// The version sidecar is written AFTER (and skipped on) an objects-file
-// failure, so the recorded generation is never newer than the objects on disk.
+// Content and the fence epoch are ONE envelope in ONE atomic write, so they
+// can never diverge durably — including under ErrReplacedNotSynced, where the
+// landed replacement carries the new epoch with the new content. The retired
+// legacy sidecar is removed once the envelope has landed (it would otherwise
+// carry a stale epoch a future downgrade-then-upgrade could resurrect).
 func (s *Store) SaveErr() error {
 	s.mu.RLock()
 	path := s.path
@@ -252,10 +307,10 @@ func (s *Store) SaveErr() error {
 			})
 		}
 	}
-	meta := storeMeta{Version: s.version}
+	env := storeEnvelope{SchemaVersion: 1, Version: s.version, Groups: groups}
 	s.mu.RUnlock()
 
-	data, err := json.MarshalIndent(groups, "", "  ")
+	data, err := json.MarshalIndent(env, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal category groups: %w", err)
 	}
@@ -263,13 +318,12 @@ func (s *Store) SaveErr() error {
 	// tmp + chmod + fsync(file) + rename + best-effort fsync(parent
 	// dir) — replaces the previous os.WriteFile+os.Rename which was
 	// atomic-via-rename but NOT fsynced (P6.1 UC-1).
-	if err := writeFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("write category groups: %w", err)
+	werr := writeFile(path, data, 0o600)
+	if werr == nil || errors.Is(werr, fileutil.ErrReplacedNotSynced) {
+		_ = os.Remove(path + ".meta") // superseded legacy sidecar (best-effort)
 	}
-	if mdata, merr := json.Marshal(meta); merr == nil {
-		// Best-effort like policy's saveMetaSnapshot: a lost sidecar degrades
-		// the fence to 0 at next boot (conservative — stale tokens 409).
-		_ = writeFile(path+".meta", mdata, 0o600)
+	if werr != nil {
+		return fmt.Errorf("write category groups: %w", werr)
 	}
 	return nil
 }
@@ -284,16 +338,20 @@ func (s *Store) SaveErr() error {
 //     a mismatch returns *VersionConflictError and the mutation never runs.
 //   - fn applies the in-memory mutation through the normal store methods; its
 //     error is returned verbatim (validation/not-found → the handler's 4xx).
-//   - On fn success the generation bumps and SaveErr persists. A
-//     pre-replacement persist failure restores the pre-mutation in-memory
-//     state (objects AND generation) and returns the failure wrapped in
-//     ErrPersist — confirmed 2xx therefore means restart-durable.
+//   - On fn success the generation bumps and SaveErr persists content + epoch
+//     as ONE atomic envelope. A pre-replacement persist failure restores the
+//     pre-mutation in-memory state (objects AND generation) and returns the
+//     failure wrapped in ErrPersist — confirmed 2xx therefore means
+//     restart-durable, epoch included.
 //   - ErrReplacedNotSynced follows the repository's landed-content doctrine
 //     (the renamed file already carries the new objects; rolling memory back
 //     would contradict the visible file and a restart would activate the
-//     "failed" state anyway): proceed as success with a warning.
+//     "failed" state anyway): proceed as success with a warning. Because the
+//     envelope is one write, the landed content CARRIES the new epoch — a
+//     restart can never re-expose the pre-mutation token.
 //
-// Bulk install paths (ReplaceAll) bypass mutMu by design; see the field doc.
+// Bulk install writers (ReplaceAll) hold the SAME mutMu, so nothing can alter
+// the fenced domain between the version comparison and the mutation.
 func (s *Store) MutateDurable(ifVersion *int64, fn func() error) error {
 	s.mutMu.Lock()
 	defer s.mutMu.Unlock()
@@ -313,7 +371,10 @@ func (s *Store) MutateDurable(ifVersion *int64, fn func() error) error {
 		return err
 	}
 	s.mu.Lock()
-	s.version = cur + 1
+	// Bump the LIVE value, never "captured + 1": with all writers serialized
+	// they are equal, but the live increment stays monotonic even if a future
+	// writer class were ever to slip outside the serialization domain (§7).
+	s.version++
 	s.mu.Unlock()
 	if err := s.SaveErr(); err != nil {
 		if errors.Is(err, fileutil.ErrReplacedNotSynced) {
@@ -589,9 +650,18 @@ func (s *Store) MatchesCategoryByID(id, category string) (matched, resolved bool
 	return false, false
 }
 
-// ReplaceAll atomically replaces all groups (used by cluster config sync).
-// Builds catSets outside the lock for zero contention.
+// ReplaceAll atomically replaces all groups (used by cluster config sync,
+// config import, and config-version rollback). Builds catSets outside the
+// store lock for zero contention.
+//
+// SERIALIZATION (2D-A fence correction, Blocker B): ReplaceAll holds the SAME
+// mutMu as MutateDurable, so a bulk install can never interleave between a
+// client's ifVersion comparison and its protected mutation — the two writer
+// classes observe exactly one serial order, and the fence generation cannot
+// alias across them.
 func (s *Store) ReplaceAll(groups []Group) {
+	s.mutMu.Lock()
+	defer s.mutMu.Unlock()
 	built := make(map[string]*Group, len(groups))
 	order := make([]string, 0, len(groups))
 	for i := range groups {

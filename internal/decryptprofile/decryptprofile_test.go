@@ -133,11 +133,16 @@ func TestStore_LoadSaveRoundTrip(t *testing.T) {
 
 // TestOnInspectError_SchemaRoundTripAndDowngrade pins the config-schema-change
 // contract (B5): (a) OnInspectError survives Save→Load (forward round-trip, so
-// config export / version rollback carry it), and (b) an OLDER binary that does
-// not know the field degrades SAFELY — the unknown JSON key is ignored on load
-// and the profile still parses, resolving to fail-close (today's behavior) rather
-// than failing to load. This is why the field is additive + omitempty and why the
-// resolver treats "" / unknown as fail-close.
+// config export / version rollback carry it), and (b) the DOWNGRADE posture.
+// The original field-level claim ("old binary ignores the unknown key, profile
+// still loads") was superseded by the 2D-A durable-epoch envelope: the persisted
+// file is now {schema_version, version, profiles}, which a pre-envelope binary's
+// bare-array decode CANNOT parse at all. The recorded residual is the coarser,
+// still fail-SAFE one — the old binary's load errors, it starts with an EMPTY
+// profile store, and rules referencing profiles by stable ID resolve to nothing
+// (fail-closed: no decryption profile ⇒ no fail-open learning, default inspect
+// posture unchanged). This test pins that the failure is a load ERROR, never a
+// silent misread of the envelope as profile data.
 func TestOnInspectError_SchemaRoundTripAndDowngrade(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "dp.json")
@@ -157,10 +162,11 @@ func TestOnInspectError_SchemaRoundTripAndDowngrade(t *testing.T) {
 		t.Fatalf("OnInspectError did not round-trip: %+v", p)
 	}
 
-	// (b) Downgrade safety: an old binary's profile struct has no OnInspectError
-	// field. Unmarshaling the new on-disk JSON into it must succeed and ignore the
-	// unknown key (encoding/json ignores unknown fields), so an old binary keeps
-	// loading and defaults to fail-close.
+	// (b) Downgrade posture: a pre-envelope binary decoded the file as a bare
+	// array. The envelope is an object, so that decode must FAIL (an error the
+	// old loader surfaces → empty store, fail-closed) rather than silently
+	// half-parse. Within the envelope the per-profile downgrade rule is intact:
+	// an old profile struct ignores the unknown OnInspectError key.
 	type oldProfile struct {
 		ID   string `json:"id"`
 		Name string `json:"name"`
@@ -171,10 +177,16 @@ func TestOnInspectError_SchemaRoundTripAndDowngrade(t *testing.T) {
 		t.Fatalf("read: %v", err)
 	}
 	var old []oldProfile
-	if err := json.Unmarshal(data, &old); err != nil {
-		t.Fatalf("old binary failed to parse new profile JSON (downgrade broken): %v", err)
+	if err := json.Unmarshal(data, &old); err == nil {
+		t.Fatalf("pre-envelope bare-array decode unexpectedly parsed the envelope (silent misread): %+v", old)
 	}
-	if len(old) != 1 || old[0].Name != "fo" {
-		t.Fatalf("old binary lost the profile on downgrade: %+v", old)
+	var env struct {
+		Profiles []oldProfile `json:"profiles"`
+	}
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Fatalf("envelope failed to parse: %v", err)
+	}
+	if len(env.Profiles) != 1 || env.Profiles[0].Name != "fo" {
+		t.Fatalf("old profile struct lost the profile inside the envelope: %+v", env.Profiles)
 	}
 }

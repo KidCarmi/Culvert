@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/KidCarmi/Culvert/internal/fileutil"
@@ -158,11 +159,24 @@ func TestMutateDurable_FnErrorMutatesNothing(t *testing.T) {
 	}
 }
 
-// TestMutateDurable_LandedContentDoctrine: ErrReplacedNotSynced means the
-// renamed file already carries the new objects — memory must NOT roll back and
-// the call reports success (repository landed-content doctrine, §5).
+// TestMutateDurable_LandedContentDoctrine (2D-A fence correction, Blocker A —
+// the §10 gap-closer): ErrReplacedNotSynced means the replacement already
+// carries the new objects — memory must NOT roll back and the call reports
+// success. Because content and epoch are ONE atomic envelope, the landed
+// write ALSO carries the new generation: after restart the effective epoch is
+// NOT the pre-mutation token, and that stale token conflicts. (Against the
+// separate-sidecar implementation this test fails: the sidecar write was
+// never reached, so a restart re-exposed the pre-mutation token.)
 func TestMutateDurable_LandedContentDoctrine(t *testing.T) {
 	s, path := newDurableStore(t)
+	if err := s.MutateDurable(nil, func() error {
+		_, err := s.Add("Keep", nil)
+		return err
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	staleToken := s.Version() // the pre-mutation epoch a slow client holds
+
 	prev := writeFile
 	writeFile = func(p string, data []byte, mode os.FileMode) error {
 		if err := fileutil.AtomicWrite(p, data, mode); err != nil {
@@ -184,16 +198,65 @@ func TestMutateDurable_LandedContentDoctrine(t *testing.T) {
 	if s.GetByName("Landed") == nil {
 		t.Fatal("landed-content success must keep the in-memory mutation")
 	}
-	writeFile = prev // reload uses the real reader anyway
-	if reload(t, path).GetByName("Landed") == nil {
+	writeFile = prev // restart path uses the real reader/writer
+
+	fresh := reload(t, path)
+	if fresh.GetByName("Landed") == nil {
 		t.Fatal("the file the doctrine trusts must actually carry the object")
+	}
+	if got := fresh.Version(); got != staleToken+1 {
+		t.Fatalf("reloaded epoch = %d, want %d — landed content must carry the landed epoch", got, staleToken+1)
+	}
+	ran := false
+	err := fresh.MutateDurable(&staleToken, func() error { ran = true; return nil })
+	var vc *VersionConflictError
+	if !errors.As(err, &vc) || ran {
+		t.Fatalf("stale pre-mutation token must conflict after restart, got err=%v ran=%v", err, ran)
 	}
 }
 
-// TestMetaSidecar_NeverNewerThanObjects: an objects-file failure skips the meta
-// write, so a recorded generation can never describe objects that are not on
-// disk.
-func TestMetaSidecar_NeverNewerThanObjects(t *testing.T) {
+// TestEnvelope_NoStaleTokenReuseAfterMetadataLoss (2D-A fence correction §2 —
+// the explicit version-0 ABA case): a client may legitimately hold token 0
+// from a fresh store. After an ACKNOWLEDGED content change, no restart state
+// may revalidate that token — the epoch travels inside the content envelope,
+// so losing a separate metadata file (removed here to simulate the retired
+// sidecar being lost) cannot resurrect it. (Against the separate-sidecar
+// implementation this test fails: content reloaded with version 0 and the
+// stale token false-passed.)
+func TestEnvelope_NoStaleTokenReuseAfterMetadataLoss(t *testing.T) {
+	s, path := newDurableStore(t)
+	tokenZero := s.Version()
+	if tokenZero != 0 {
+		t.Fatalf("fresh store version = %d, want 0", tokenZero)
+	}
+	if err := s.MutateDurable(nil, func() error {
+		_, err := s.Add("First", []string{"news"})
+		return err
+	}); err != nil {
+		t.Fatalf("mutation: %v", err)
+	}
+	// Any sibling metadata is gone (lost volume file, retired-sidecar cleanup —
+	// the envelope must not depend on it).
+	_ = os.Remove(path + ".meta")
+
+	fresh := reload(t, path)
+	if fresh.GetByName("First") == nil {
+		t.Fatal("acknowledged content missing after restart")
+	}
+	if got := fresh.Version(); got < 1 {
+		t.Fatalf("reloaded epoch = %d, want >= 1 after an acknowledged change", got)
+	}
+	err := fresh.MutateDurable(&tokenZero, func() error { return nil })
+	var vc *VersionConflictError
+	if !errors.As(err, &vc) {
+		t.Fatalf("token 0 from the pre-change epoch must conflict after restart, got %v", err)
+	}
+}
+
+// TestEnvelope_FailedWriteLeavesEpochAndContentCoupled: a hard persistence
+// failure rolls the mutation back, and the durable truth keeps OLD content
+// with the OLD epoch — one file, structurally incapable of diverging.
+func TestEnvelope_FailedWriteLeavesEpochAndContentCoupled(t *testing.T) {
 	s, path := newDurableStore(t)
 	if err := s.MutateDurable(nil, func() error {
 		_, err := s.Add("A", nil)
@@ -217,15 +280,159 @@ func TestMetaSidecar_NeverNewerThanObjects(t *testing.T) {
 		t.Fatalf("objects failure = %v, want ErrPersist", err)
 	}
 	writeFile = prev
-	var meta storeMeta
-	mdata, rerr := os.ReadFile(path + ".meta")
-	if rerr != nil {
-		t.Fatalf("meta sidecar missing: %v", rerr)
+	fresh := reload(t, path)
+	if fresh.GetByName("B") != nil {
+		t.Fatal("failed mutation's content must not be durable")
 	}
-	if err := json.Unmarshal(mdata, &meta); err != nil {
+	if got := fresh.Version(); got != 1 {
+		t.Fatalf("durable epoch = %d, want 1 (coupled to the durable content)", got)
+	}
+}
+
+// TestLegacyArrayFileMigration: a pre-envelope bare-array file with the
+// retired sidecar loads with its recorded version; the first durable mutation
+// migrates the format (envelope carries content + epoch) and removes the
+// superseded sidecar so a stale epoch can never be resurrected from it.
+func TestLegacyArrayFileMigration(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "category_groups.json")
+	legacy, err := json.MarshalIndent([]Group{{ID: "legacy-id-001", Name: "Legacy", Categories: []string{"news"}}}, "", "  ")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if meta.Version != 1 {
-		t.Fatalf("meta version = %d, want 1 (never newer than the objects file)", meta.Version)
+	if err := os.WriteFile(path, legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+".meta", []byte(`{"version":5}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := New()
+	if err := s.Load(path); err != nil {
+		t.Fatalf("legacy load: %v", err)
+	}
+	if s.GetByName("Legacy") == nil || s.Version() != 5 {
+		t.Fatalf("legacy load = version %d (want 5), group present %v", s.Version(), s.GetByName("Legacy") != nil)
+	}
+	if err := s.MutateDurable(nil, func() error {
+		_, aerr := s.Add("Migrated", nil)
+		return aerr
+	}); err != nil {
+		t.Fatalf("migrating mutation: %v", err)
+	}
+	if _, err := os.Stat(path + ".meta"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("superseded legacy sidecar must be removed, stat err = %v", err)
+	}
+	fresh := reload(t, path)
+	if fresh.Version() != 6 || fresh.GetByName("Migrated") == nil || fresh.GetByName("Legacy") == nil {
+		t.Fatalf("post-migration reload = version %d (want 6), groups %v", fresh.Version(), fresh.List())
+	}
+}
+
+// TestReplaceAll_SerializesAgainstMutateDurable (2D-A fence correction,
+// Blocker B — §8D): a bulk install must NOT interleave between the fence
+// comparison and the protected mutation. Deterministic barriers: the client
+// mutation parks INSIDE fn (holding the serialization domain); ReplaceAll is
+// then started and must not complete until the client finishes. (Against the
+// unserialized implementation, ReplaceAll completes during the pause and the
+// stale-asserted client mutates the bulk-installed content — this test fails
+// at the interleaving check.)
+func TestReplaceAll_SerializesAgainstMutateDurable(t *testing.T) {
+	s, path := newDurableStore(t)
+	if err := s.MutateDurable(nil, func() error {
+		_, err := s.Add("Seed", nil)
+		return err
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	token := s.Version() // == 1
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	aDone := make(chan error, 1)
+	go func() {
+		aDone <- s.MutateDurable(&token, func() error {
+			close(entered)
+			<-release
+			_, err := s.Add("AdminAdd", nil)
+			return err
+		})
+	}()
+	<-entered // the client holds the serialization domain, fence already checked
+
+	bDone := make(chan struct{})
+	go func() {
+		s.ReplaceAll([]Group{{ID: "bulk-id-01", Name: "Bulk", Categories: []string{"ai"}}})
+		close(bDone)
+	}()
+	// Give the scheduler ample opportunity to run the bulk install; with the
+	// serialization fix it is BLOCKED on the shared mutation domain, so it can
+	// never complete while the client is parked inside fn. (Bounded yields, not
+	// wall-clock sleeps: the property is a mutex, not a timing window.)
+	for i := 0; i < 10000; i++ {
+		runtime.Gosched()
+	}
+	select {
+	case <-bDone:
+		t.Fatal("ReplaceAll interleaved between the fence comparison and the protected mutation")
+	default:
+	}
+
+	close(release)
+	if err := <-aDone; err != nil {
+		t.Fatalf("serialized client mutation must succeed, got %v", err)
+	}
+	<-bDone
+
+	// Exactly one serial order: client (v2, persisted) then bulk (v3, memory).
+	if got := s.Version(); got != 3 {
+		t.Fatalf("final version = %d, want 3 (client v2, then bulk v3)", got)
+	}
+	if s.GetByName("Bulk") == nil || s.GetByName("AdminAdd") != nil {
+		t.Fatalf("final content must be the bulk install (wholesale replace ran last): %v", s.List())
+	}
+	// The durable envelope holds the CLIENT's committed state (ReplaceAll does
+	// not persist) — proving the client ran first.
+	fresh := reload(t, path)
+	if fresh.Version() != 2 || fresh.GetByName("AdminAdd") == nil {
+		t.Fatalf("durable state = version %d (want 2 with AdminAdd) — client must have committed before the bulk install", fresh.Version())
+	}
+}
+
+// TestVersionEpoch_AdminReplaceAllAdmin (§8E): interleaved writer classes keep
+// the fence strictly monotonic — no token issued against an earlier state can
+// alias a later one, in-process or across restart.
+func TestVersionEpoch_AdminReplaceAllAdmin(t *testing.T) {
+	s, path := newDurableStore(t)
+	if err := s.MutateDurable(nil, func() error {
+		_, err := s.Add("A1", nil)
+		return err
+	}); err != nil {
+		t.Fatalf("admin 1: %v", err)
+	}
+	t1 := s.Version() // 1
+	s.ReplaceAll([]Group{{ID: "bulk-id-02", Name: "Bulk", Categories: nil}})
+	if got := s.Version(); got != t1+1 {
+		t.Fatalf("bulk install version = %d, want %d", got, t1+1)
+	}
+	// The stale admin token from before the bulk install must conflict.
+	if err := s.MutateDurable(&t1, func() error { return nil }); err == nil {
+		t.Fatal("stale token across a bulk install must conflict")
+	}
+	cur := s.Version()
+	if err := s.MutateDurable(&cur, func() error {
+		_, err := s.Add("A2", nil)
+		return err
+	}); err != nil {
+		t.Fatalf("admin 2: %v", err)
+	}
+	if got := s.Version(); got != 3 {
+		t.Fatalf("final version = %d, want 3", got)
+	}
+	fresh := reload(t, path)
+	for _, stale := range []int64{0, 1, 2} {
+		staleTok := stale
+		if err := fresh.MutateDurable(&staleTok, func() error { return nil }); err == nil {
+			t.Fatalf("stale token %d must conflict after restart (current %d)", stale, fresh.Version())
+		}
 	}
 }

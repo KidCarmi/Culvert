@@ -40,11 +40,14 @@ func TestLoad_BackfillsMissingIDs(t *testing.T) {
 	if g2 := s2.GetByName("Legacy"); g2 == nil || g2.ID != id {
 		t.Errorf("reloaded ID = %v, want the persisted %q (stable across restart)", g2, id)
 	}
-	// The file on disk must now carry the id.
+	// The file on disk must now carry the id. The migration Save writes the
+	// 2D-A envelope format ({schema_version, version, groups}).
 	data, _ := os.ReadFile(path)
-	var raw []map[string]any
+	var raw struct {
+		Groups []map[string]any `json:"groups"`
+	}
 	_ = json.Unmarshal(data, &raw)
-	if len(raw) != 1 || raw[0]["id"] != id {
+	if len(raw.Groups) != 1 || raw.Groups[0]["id"] != id {
 		t.Errorf("persisted file missing backfilled id: %s", data)
 	}
 }

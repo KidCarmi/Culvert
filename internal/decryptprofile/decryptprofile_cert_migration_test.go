@@ -191,16 +191,19 @@ func TestLoad_MigratesAndPersistsPermissive(t *testing.T) {
 		t.Fatalf("loaded profile must be migrated to strict, got %+v", got)
 	}
 
-	// Persisted: the on-disk file no longer carries permissive.
+	// Persisted: the on-disk file no longer carries permissive. The migration
+	// Save writes the 2D-A envelope ({schema_version, version, profiles}).
 	after, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read back: %v", err)
 	}
-	var reloaded []Profile
+	var reloaded struct {
+		Profiles []Profile `json:"profiles"`
+	}
 	if err := json.Unmarshal(after, &reloaded); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(reloaded) != 1 || reloaded[0].CertVerification != "strict" {
+	if len(reloaded.Profiles) != 1 || reloaded.Profiles[0].CertVerification != "strict" {
 		t.Fatalf("on-disk file must be rewritten with strict, got %s", after)
 	}
 
