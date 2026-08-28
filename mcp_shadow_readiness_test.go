@@ -146,42 +146,91 @@ func TestReadinessSplit_ModeExecReadyDefaults(t *testing.T) {
 // Mutation: restoring `default: return true` fails this test.
 func TestReadinessSplit_UnknownModeFailsClosed(t *testing.T) {
 	resetExecDeps(t)
-	// 200 is outside the five-token taxonomy (Mode is a uint8 iota) and is therefore
-	// !Mode.Valid(). It must never be admitted, with nothing armed...
-	unknown := rollout.Mode(200)
-	if unknown.Valid() {
-		t.Fatalf("test premise broken: Mode(200) is a real mode (%s)", unknown.String())
-	}
-	if modeExecReady(unknown, false) || modeExecReady(unknown, true) {
-		t.Fatal("SECURITY: an unrecognised rollout mode must fail closed with nothing armed")
-	}
+	// Every mode value the taxonomy does NOT claim must fail closed. rollout.Mode is a
+	// uint8, so the 256 candidates are exhaustively enumerable and Mode.Valid() — which
+	// answers from the package's own modeToken registry — is the authority on which of
+	// them are real. Deriving the unknown set this way (rather than hardcoding a magic
+	// value) keeps the test correct if the taxonomy ever grows into the value it used to
+	// pick. With nothing armed...
+	unknown := invalidModes(t)
+	assertUnknownModesFailClosed(t, unknown)
 	// ...and still not once BOTH readiness tiers are armed, for both capabilities: an
 	// unknown mode has no tier to satisfy, so no amount of composition admits it.
 	markGatewayShadowDepsReady()
 	markManagementShadowDepsReady()
 	markGatewayExecDepsReady()
 	markManagementExecDepsReady()
-	if modeExecReady(unknown, false) || modeExecReady(unknown, true) {
-		t.Fatal("SECURITY: an unrecognised rollout mode must fail closed even with every tier armed")
-	}
-	// The valid modes keep their exact prior answers with everything armed, so the
-	// hardening is behaviour-preserving for the whole real taxonomy.
-	for _, m := range []rollout.Mode{
-		rollout.ModeDisabled, rollout.ModeObserve, rollout.ModeShadow,
-		rollout.ModeCanary, rollout.ModeProduction,
-	} {
+	assertUnknownModesFailClosed(t, unknown)
+	// Every VALID mode keeps its prior answer with everything armed, so the hardening is
+	// behaviour-preserving for the whole real taxonomy, whatever that taxonomy contains.
+	for _, m := range validModes(t) {
 		if !modeExecReady(m, false) {
 			t.Fatalf("mode %s must be ready with every tier armed", m.String())
 		}
 	}
 }
 
+// validModes returns every rollout.Mode the package's own taxonomy claims, derived by
+// exhausting the uint8 domain and asking Mode.Valid(). It is the authoritative list: a
+// mode added to rollout's modeToken registry appears here with no edit to this file,
+// which is what makes the completeness gate below a real signal rather than a
+// self-fulfilling loop over a hand-copied table (Codex P2, PR #1240).
+func validModes(t *testing.T) []rollout.Mode {
+	t.Helper()
+	var out []rollout.Mode
+	for v := 0; v <= 255; v++ {
+		if m := rollout.Mode(v); m.Valid() {
+			out = append(out, m)
+		}
+	}
+	if len(out) == 0 {
+		t.Fatal("test premise broken: the rollout taxonomy claims no modes at all")
+	}
+	return out
+}
+
+// invalidModes returns every uint8 value the taxonomy does NOT claim.
+func invalidModes(t *testing.T) []rollout.Mode {
+	t.Helper()
+	var out []rollout.Mode
+	for v := 0; v <= 255; v++ {
+		if m := rollout.Mode(v); !m.Valid() {
+			out = append(out, m)
+		}
+	}
+	if len(out) == 0 {
+		t.Fatal("test premise broken: every uint8 is a valid mode, so there is no unknown to test")
+	}
+	return out
+}
+
+// assertUnknownModesFailClosed requires modeExecReady to refuse every unrecognised mode
+// for both capabilities, whatever readiness tiers are armed.
+func assertUnknownModesFailClosed(t *testing.T, unknown []rollout.Mode) {
+	t.Helper()
+	for _, m := range unknown {
+		if modeExecReady(m, false) || modeExecReady(m, true) {
+			t.Fatalf("SECURITY: unrecognised rollout mode %d must fail closed", uint8(m))
+		}
+	}
+}
+
 // TestReadinessSplit_EveryValidModeIsExplicitlyClassified pins the completeness half:
-// every mode in the real taxonomy must reach one of the three NAMED arms, never the
-// fail-closed default. Without this, adding a rollout.Mode and forgetting to classify it
-// would fail closed silently — safe, but as an unexplained transition rejection rather
-// than a build-time signal. With nothing armed the answer separates the arms exactly:
-// Disabled/Observe need no tier (true), every executing mode needs one (false).
+// every mode in the real taxonomy must reach one of the three NAMED arms in
+// modeExecReady, never the fail-closed default. Without it, adding a rollout.Mode and
+// forgetting to classify it would fail closed SILENTLY — safe, but surfacing as an
+// unexplained rollout-transition rejection in production rather than a red build.
+//
+// The expectation table is checked AGAINST the authoritative taxonomy first (Codex P2,
+// PR #1240). Iterating the hand-written table alone would have made this gate
+// self-fulfilling: a sixth mode added to rollout's modeToken registry but omitted from
+// modeExecReady would keep the test green, since the table it walks would not know the
+// mode exists. Driving the loop from validModes() — derived by exhausting the uint8
+// domain against Mode.Valid() — means a new mode fails HERE until it is deliberately
+// classified in both places, which is the build-time signal this test claims to be.
+//
+// With nothing armed the answer separates the arms exactly: Disabled/Observe need no
+// tier (ready), every executing mode needs one (not ready).
 func TestReadinessSplit_EveryValidModeIsExplicitlyClassified(t *testing.T) {
 	resetExecDeps(t)
 	needsTier := map[rollout.Mode]bool{
@@ -191,13 +240,22 @@ func TestReadinessSplit_EveryValidModeIsExplicitlyClassified(t *testing.T) {
 		rollout.ModeCanary:     true,
 		rollout.ModeProduction: true,
 	}
-	for m, wantTier := range needsTier {
-		if !m.Valid() {
-			t.Fatalf("test premise broken: %d is not a valid mode", m)
+	for _, m := range validModes(t) {
+		wantTier, classified := needsTier[m]
+		if !classified {
+			t.Fatalf("rollout mode %q is in the taxonomy but this test does not classify it: "+
+				"classify it in modeExecReady (a named arm, never the fail-closed default) and add it here",
+				m.String())
 		}
 		if got := modeExecReady(m, false); got == wantTier {
 			t.Fatalf("mode %s: with nothing armed modeExecReady=%v; a mode that needs a tier must be false and one that does not must be true",
 				m.String(), got)
 		}
+	}
+	// The reverse direction: the table must not claim a mode the taxonomy dropped, or a
+	// removed mode would keep a stale expectation alive.
+	if len(needsTier) != len(validModes(t)) {
+		t.Fatalf("expectation table has %d modes but the taxonomy claims %d; a mode was added or removed",
+			len(needsTier), len(validModes(t)))
 	}
 }

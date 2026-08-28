@@ -161,10 +161,21 @@ and `SetPath`'s three early-return paths do not mutate the map, so no path leave
 - **Fix (applied):** enumerate the admitted modes; `default` now returns `false`.
   `mcp_rollout_execdeps.go:105`.
 - **Tests (added):** `TestReadinessSplit_UnknownModeFailsClosed` (negative + boundary:
-  unrecognised mode with nothing armed *and* with every tier armed, both capabilities) and
-  `TestReadinessSplit_EveryValidModeIsExplicitlyClassified` (positive/completeness: every valid
-  mode reaches a named arm). **Mutation-verified** — restoring `default: return true` fails
-  `TestReadinessSplit_UnknownModeFailsClosed` at `mcp_shadow_readiness_test.go:156`.
+  **every** unrecognised value of the `uint8` domain, with nothing armed *and* with every tier
+  armed, both capabilities) and `TestReadinessSplit_EveryValidModeIsExplicitlyClassified`
+  (positive/completeness: every valid mode reaches a named arm).
+  **Both loops are driven from the authoritative taxonomy**, not a hand-copied table —
+  `validModes`/`invalidModes` exhaust the `uint8` domain against `rollout.Mode.Valid()`, which
+  answers from the rollout package's own `modeToken` registry. That is what makes the
+  completeness gate a real build-time signal rather than a self-fulfilling loop: a sixth mode
+  added to `modeToken` but omitted from `modeExecReady` would otherwise have kept the test
+  green (Codex P2 on PR #1240 — the finding was correct and is closed here).
+- **Mutation-verified, both directions:**
+  - restoring `default: return true` → `TestReadinessSplit_UnknownModeFailsClosed` fails
+    (`SECURITY: unrecognised rollout mode 5 must fail closed`);
+  - adding `Mode(5): "experimental"` to `rollout.modeToken` without classifying it →
+    `TestReadinessSplit_EveryValidModeIsExplicitlyClassified` fails
+    (`rollout mode "experimental" is in the taxonomy but this test does not classify it`).
 
 ### SRR-02 — UI-TLS fallback trades a boot DoS for a visible identity downgrade *(accepted, no change)*
 
@@ -314,5 +325,7 @@ go test ./internal/fileblock/... ./internal/mcp/events/... \
         ./internal/mcp/rollout/... ./internal/mcp/execution/... \
         ./internal/mcp/runtime/...                                      all ok
 go test -run 'TestMCP|TestShadow|TestReadiness|TestChaos56|TestRollout' .  ok
-mutation: restore `default: return true` in modeExecReady            → FAIL (expected)
+go test -run 'TestReadinessSplit|TestShadow|TestRollout' -count=2 -shuffle=on .  ok
+mutation A: restore `default: return true` in modeExecReady          → FAIL (expected)
+mutation B: add Mode(5) to rollout.modeToken, leave it unclassified  → FAIL (expected)
 ```
