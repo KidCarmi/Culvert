@@ -135,9 +135,24 @@ func TestV2_ValidationRejectsMalformedShadowEvidence(t *testing.T) {
 		},
 		"would_require_approval with a permissive override": func(e *Event) {
 			e.Shadow.Outcome = "would_require_approval" // base Override stays false
+			e.Shadow.CredentialPlan = "no_credential_profile"
 		},
 		"would_require_confirmation with a permissive override": func(e *Event) {
 			e.Shadow.Outcome = "would_require_confirmation" // base Override stays false
+			e.Shadow.CredentialPlan = "no_credential_profile"
+		},
+		// A pre-credential-step outcome must carry no_credential_profile (Codex P2, PR #1235):
+		// a valid/no_planner status on it falsely claims readiness was evaluated. These isolate
+		// the new guard — would_block leaves Override free, and would_require_approval sets
+		// Override=true, so no other rule fires.
+		"valid plan on a would_block outcome": func(e *Event) {
+			e.Shadow.Outcome = "would_block" // ambiguous override, base false is fine
+			// base CredentialPlan stays credential_plan_valid → impossible for a pre-planning outcome
+		},
+		"valid plan on a would_require_approval outcome": func(e *Event) {
+			e.Shadow.Outcome = "would_require_approval"
+			e.Shadow.Override = true // satisfy the restrictive-override rule so only the new guard fires
+			// base CredentialPlan stays credential_plan_valid
 		},
 		"unsupported schema version": func(e *Event) { e.SchemaVersion = 3 },
 	}
@@ -196,6 +211,8 @@ func TestV2_OutcomeOverrideConsistency_NotOverBroad(t *testing.T) {
 			e := validV2ShadowEvent()
 			e.Shadow.Outcome = oc
 			e.Shadow.Override = ov
+			// These are all pre-credential-step outcomes, so the plan must be unplanned.
+			e.Shadow.CredentialPlan = "no_credential_profile"
 			// would_fail_inspection additionally requires a failing request inspection.
 			if oc == "would_fail_inspection" {
 				e.Shadow.RequestInspection = "would_fail"
@@ -209,16 +226,18 @@ func TestV2_OutcomeOverrideConsistency_NotOverBroad(t *testing.T) {
 	consistent := []struct {
 		outcome  string
 		override bool
+		plan     string // pre-planning outcomes must carry the unplanned default
 	}{
-		{"would_execute", false},
-		{"would_fail_stale_decision", false},
-		{"would_require_approval", true},
-		{"would_require_confirmation", true},
+		{"would_execute", false, "credential_plan_valid"},
+		{"would_fail_stale_decision", false, "credential_plan_valid"},
+		{"would_require_approval", true, "no_credential_profile"},
+		{"would_require_confirmation", true, "no_credential_profile"},
 	}
 	for _, c := range consistent {
 		e := validV2ShadowEvent()
 		e.Shadow.Outcome = c.outcome
 		e.Shadow.Override = c.override
+		e.Shadow.CredentialPlan = c.plan
 		if err := e.Validate(); err != nil {
 			t.Fatalf("consistent pair (%s, override=%v) must validate: %v", c.outcome, c.override, err)
 		}

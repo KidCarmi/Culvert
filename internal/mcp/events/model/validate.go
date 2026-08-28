@@ -110,16 +110,33 @@ const (
 	shadowReqInspWouldFail = "would_fail"
 	shadowReqInspNotEval   = "not_evaluated"
 
-	shadowOutWouldExecute        = "would_execute"
-	shadowOutWouldFailInspection = "would_fail_inspection"
-	shadowOutWouldFailStale      = "would_fail_stale_decision"
-	shadowOutRequireApproval     = "would_require_approval"
-	shadowOutRequireConfirm      = "would_require_confirmation"
+	shadowOutWouldExecute         = "would_execute"
+	shadowOutWouldBlock           = "would_block"
+	shadowOutWouldFailInspection  = "would_fail_inspection"
+	shadowOutWouldFailHardControl = "would_fail_hard_control"
+	shadowOutWouldFailStale       = "would_fail_stale_decision"
+	shadowOutRequireApproval      = "would_require_approval"
+	shadowOutRequireConfirm       = "would_require_confirmation"
 	// gosec G101 matches a credential-like identifier; these are enum TOKENS, so the
 	// names deliberately avoid the "credential" pattern (repo gosec convention).
 	shadowOutWouldFailCredReady = "would_fail_credential_readiness"
 	shadowPlanInvalid           = "credential_plan_invalid"
+	shadowPlanNone              = "no_credential_profile"
 )
+
+// shadowPrePlanningOutcomes are the outcomes decide() returns BEFORE the credential-readiness
+// step (step 5): the pre-executor inspection hard-fail and hard control (step 1), the
+// policy-class gates block/approval/confirmation (step 2), allowance denial (step 3), and the
+// server-usability hard-fail (step 4). None of these reach credentialReadiness, so the plan
+// stays at its unplanned default (no_credential_profile). A valid/invalid/no_planner status on
+// one of these would falsely claim credential readiness was evaluated (Codex P2, PR #1235).
+var shadowPrePlanningOutcomes = map[string]struct{}{
+	shadowOutWouldBlock:           {},
+	shadowOutRequireApproval:      {},
+	shadowOutRequireConfirm:       {},
+	shadowOutWouldFailInspection:  {},
+	shadowOutWouldFailHardControl: {},
+}
 
 // Override is the durable, LEAF-SAFE projection of the policy action class: the producer
 // sets ShadowOverride = !action.IsAllowClass() (shadow_evaluator.decide). It is the ONLY
@@ -243,16 +260,22 @@ func validateShadowEvidenceEnums(sh *ShadowEvidence) error {
 }
 
 // validateShadowEvidenceCombinations fails closed on the impossible outcome↔sub-fact
-// combinations and the outcome↔override consistency.
+// combinations and the outcome↔override consistency. Split into the sub-fact and override
+// halves only to keep each function under the cyclop threshold; the rules are unchanged.
 func validateShadowEvidenceCombinations(sh *ShadowEvidence) error {
-	// Impossible-combination fail-closed rules that mirror the producer (decide()):
-	//   - would_execute is unreachable when the request inspection would fail (a hard
-	//     inspection failure yields would_fail_inspection, never would_execute);
-	//   - would_fail_inspection is reached ONLY via a failing request inspection;
-	//   - would_fail_credential_readiness is reached IFF the credential plan is invalid
-	//     (a BICONDITION: decide() sets planStatusInvalid only on the fail branch that also
-	//     sets this outcome, and no ready-branch outcome ever carries the invalid plan — so
-	//     an invalid plan paired with any other outcome is impossible readiness evidence).
+	if err := validateShadowOutcomeSubfacts(sh); err != nil {
+		return err
+	}
+	return validateShadowOutcomeOverride(sh)
+}
+
+// validateShadowOutcomeSubfacts pins the impossible outcome↔(inspection, credential-plan)
+// combinations that mirror the producer (decide()):
+//   - would_execute is unreachable when the request inspection would fail;
+//   - would_fail_inspection ⇔ a failing request inspection (both halves of the bicondition);
+//   - would_fail_credential_readiness ⇔ an invalid credential plan (both halves); and
+//   - an outcome decide() returns before the credential step carries no_credential_profile.
+func validateShadowOutcomeSubfacts(sh *ShadowEvidence) error {
 	if sh.Outcome == shadowOutWouldExecute && sh.RequestInspection == shadowReqInspWouldFail {
 		return evtErr(mcperr.ReasonEventInvalid, "would_execute with a failing request inspection")
 	}
@@ -261,23 +284,33 @@ func validateShadowEvidenceCombinations(sh *ShadowEvidence) error {
 	}
 	// The inspection biconditional's other half: a failing request inspection is handled
 	// FIRST in decide() (step 1, before policy class / credential / staleness) and always
-	// yields would_fail_inspection, so pairing would_fail with any other outcome is
-	// impossible evidence (requestInspectionStatus returns would_fail iff Inspection.HardFail,
-	// and hardFailure is true whenever Inspection.HardFail).
+	// yields would_fail_inspection (requestInspectionStatus returns would_fail iff
+	// Inspection.HardFail, and hardFailure is true whenever Inspection.HardFail).
 	if sh.RequestInspection == shadowReqInspWouldFail && sh.Outcome != shadowOutWouldFailInspection {
 		return evtErr(mcperr.ReasonEventInvalid, "a failing request inspection must yield would_fail_inspection")
 	}
 	if sh.Outcome == shadowOutWouldFailCredReady && sh.CredentialPlan != shadowPlanInvalid {
 		return evtErr(mcperr.ReasonEventInvalid, "would_fail_credential_readiness without an invalid credential plan")
 	}
+	// decide() sets planStatusInvalid only on the fail branch that also sets this outcome,
+	// and no ready-branch outcome ever carries the invalid plan, so it is a biconditional.
 	if sh.CredentialPlan == shadowPlanInvalid && sh.Outcome != shadowOutWouldFailCredReady {
 		return evtErr(mcperr.ReasonEventInvalid, "an invalid credential plan must yield would_fail_credential_readiness")
 	}
-	// The verdict must be consistent with the durable action-class projection (Override).
-	// An allow-path-only outcome carrying a restrictive Override is exactly the shape of a
-	// restrictive policy decision falsely presented as executable; a policy-gating outcome
-	// carrying a permissive Override is its inverse. Both are impossible in the producer and
-	// fail closed here so an adapter regression or another producer cannot persist them.
+	// An outcome decide() returns before the credential step never evaluated the plan, so it
+	// must carry the unplanned default — a valid/invalid/no_planner status would falsely claim
+	// credential readiness was evaluated when it was not.
+	if _, ok := shadowPrePlanningOutcomes[sh.Outcome]; ok && sh.CredentialPlan != shadowPlanNone {
+		return evtErr(mcperr.ReasonEventInvalid, "a pre-credential-step outcome must carry no_credential_profile")
+	}
+	return nil
+}
+
+// validateShadowOutcomeOverride pins the verdict↔Override (action-class projection)
+// consistency: an allow-path-only outcome carrying a restrictive Override is a restrictive
+// policy decision falsely presented as executable; a policy-gating outcome carrying a
+// permissive Override is its inverse. Both are impossible in the producer.
+func validateShadowOutcomeOverride(sh *ShadowEvidence) error {
 	if _, ok := shadowAllowClassOnlyOutcomes[sh.Outcome]; ok && sh.Override {
 		return evtErr(mcperr.ReasonEventInvalid, "an allow-class-only shadow outcome cannot carry a restrictive override")
 	}
