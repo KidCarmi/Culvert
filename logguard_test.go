@@ -248,14 +248,21 @@ func TestDiskGuardStatus_Keys(t *testing.T) {
 }
 
 // TestRunDiskGuard_HealthyDoesNotEnterMinimal exercises the janitor pass on a
-// healthy disk (a tempdir is far below 95%): it must not engage minimal mode and
-// must still run the size cap without panicking.
+// healthy disk: it must not engage minimal mode and must still run the size cap
+// without panicking. The disk measurement is injected via diskUsageFn so the
+// assertion is on the guard LOGIC, not the runner's real unprivileged free space
+// (statfs Bavail) — a disk-starved CI runner or sandbox can legitimately report a
+// tempdir above the critical threshold, which is environmental, not a bug.
 func TestRunDiskGuard_HealthyDoesNotEnterMinimal(t *testing.T) {
 	isolateLogRing(t)
 	s := newTestLogStore(t)
 	oldDir := logStoreDir
 	logStoreDir = t.TempDir()
-	t.Cleanup(func() { logStoreDir = oldDir; exitMinimalMode() })
+	oldDiskUsage := diskUsageFn
+	diskUsageFn = func(string) (float64, uint64, uint64, error) {
+		return 10.0, 90 << 30, 100 << 30, nil // healthy: 10% used, well below 95%
+	}
+	t.Cleanup(func() { diskUsageFn = oldDiskUsage; logStoreDir = oldDir; exitMinimalMode() })
 
 	runDiskGuard(s)
 	if minimalMode() {
