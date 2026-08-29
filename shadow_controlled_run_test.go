@@ -48,12 +48,12 @@ import (
 // ---- controlled fixtures (the runbook's canonical experiment identities) --------
 
 const (
-	ctrlServer   = "controlled-test-server"
-	ctrlPrincip  = "synthetic-shadow-principal"
-	ctrlTenant   = "qualification"
-	toolEcho     = "echo"    // policy ALLOW  -> would_execute
-	toolDanger   = "danger"  // default DENY  -> would_block
-	outsiderSub  = "outsider-principal"
+	ctrlServer  = "controlled-test-server"
+	ctrlPrincip = "synthetic-shadow-principal"
+	ctrlTenant  = "qualification"
+	toolEcho    = "echo"   // policy ALLOW  -> would_execute
+	toolDanger  = "danger" // default DENY  -> would_block
+	outsiderSub = "outsider-principal"
 )
 
 // controlledInventoryJSON seeds ONE controlled server owning two harmless tools, at the
@@ -689,7 +689,7 @@ func TestControlledShadowRestartDrill(t *testing.T) {
 	globalMCPShadow.composed.Store(false)
 	globalMCPShadow.inspectionComposed.Store(false)
 	globalExecDeps.shadowGateway.Store(false)
-	mcpResetGlobals(t)  // fresh rollout + distribution (as a process restart)
+	mcpResetGlobals(t) // fresh rollout + distribution (as a process restart)
 	mcpRuntime = nil
 
 	// ---- boot #2: re-compose against the SAME dataDir/files, recover, restore ----
@@ -703,8 +703,8 @@ func TestControlledShadowRestartDrill(t *testing.T) {
 	if _, _, elig := catRec(t, cat2, ctrlServer, toolEcho); elig != catalog.Usable {
 		t.Fatalf("boot#2: approval store must recover and re-derive echo Usable, got %v", elig)
 	}
-	initMCPDistribution(nil)      // recompose DP appliers from durable state
-	getMCPRollout().restore()     // restore rollout mode from durable state (+ shadow clamp)
+	initMCPDistribution(nil)  // recompose DP appliers from durable state
+	getMCPRollout().restore() // restore rollout mode from durable state (+ shadow clamp)
 
 	if m := getMCPRollout().gateway.CurrentMode(); m != rollout.ModeShadow {
 		t.Fatalf("SECURITY/CONTRACT: Shadow must survive restart, mode=%s", m)
