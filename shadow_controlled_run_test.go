@@ -29,10 +29,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -463,9 +465,64 @@ func (r *shadowRun) rollbackToObserve() {
 func (r *shadowRun) finalAssertions() {
 	req(r.t, atomic.LoadInt64(r.upstreamHits) == 0, "SECURITY: controlled upstream observed %d invocations across the run", atomic.LoadInt64(r.upstreamHits))
 	fin := shadowSnap()
+	r.assertOperatorObservability(fin)
 	r.ev("FINAL: controlled_upstream_invocations=0 shadow_evaluations=%d would_execute=%d would_block=%d evaluation_errors=%d live_executions=0 materializations=0",
 		fin.Evaluations, fin.WouldExecute, fin.WouldBlock, fin.EvaluationErrors)
 	r.ev("VERDICT-INPUT: all controlled Shadow safety invariants observed at runtime")
+}
+
+// assertOperatorObservability proves the Shadow evaluation counts are visible on the
+// ACTUAL operator-facing surfaces — the /metrics fan-out serializer (writeMCPShadowMetrics,
+// the exact function metrics.go invokes) and the status map (mcpShadowStatus) — not merely
+// in the internal mcpShadowMetrics singleton that shadowSnap() reads. A broken serializer
+// (the culvert_mcp_shadow_* rows dropped, or the status "metrics" field detached from the
+// live counters) would pass every shadowSnap()-based assertion in this harness yet FAIL
+// here, which is exactly the gap this closes (the metrics+status exit criterion in
+// docs/operator/mcp-shadow-activation.md). It calls only existing production serializers;
+// it composes nothing and changes no posture.
+func (r *shadowRun) assertOperatorObservability(fin shadowMetricsView) {
+	t := r.t
+	// (1) The real /metrics fan-out serialization for the culvert_mcp_shadow_* series. The
+	// singleton is a process-global accumulator (never reset between tests — the per-phase
+	// assertions above use before/after deltas for exactly this reason), so the operator
+	// rows are asserted against fin's live ABSOLUTE values, not run-local constants: a
+	// serializer that dropped a row, mislabeled it, or read a stale/other source would
+	// diverge from fin and fail here. Every fixed-enum outcome row (incl. the clean-by-
+	// construction ones) is pinned so a spurious bucket cannot slip through.
+	var b strings.Builder
+	writeMCPShadowMetrics(&b)
+	metricsText := b.String()
+	for _, w := range []struct {
+		outcome string
+		n       int64
+	}{
+		{"would_execute", fin.WouldExecute},
+		{"would_block", fin.WouldBlock},
+		{"would_require_approval", fin.WouldRequireApproval},
+		{"would_require_confirmation", fin.WouldRequireConfirmation},
+		{"would_fail_credential_readiness", fin.WouldFailCredential},
+		{"would_fail_inspection", fin.WouldFailInspection},
+		{"would_fail_stale_decision", fin.WouldFailStale},
+		{"would_fail_hard_control", fin.WouldFailHardControl},
+		{"other", fin.WouldOther},
+	} {
+		line := fmt.Sprintf(`culvert_mcp_shadow_evaluations_total{capability="gateway",outcome=%q} %d`, w.outcome, w.n)
+		req(t, strings.Contains(metricsText, line), "operator /metrics missing %q in:\n%s", line, metricsText)
+	}
+	errLine := fmt.Sprintf(`culvert_mcp_shadow_evaluation_errors_total{capability="gateway"} %d`, fin.EvaluationErrors)
+	req(t, strings.Contains(metricsText, errLine), "operator /metrics missing %q in:\n%s", errLine, metricsText)
+
+	// (2) The operator status map: its bounded "metrics" snapshot must EQUAL the live
+	// counters (proving the status surface reads the same singleton, not a stale copy),
+	// and its posture booleans must report shadow-composed / live-execution-unarmed.
+	st := mcpShadowStatus()
+	req(t, st["evaluator_composed"] == true, "status evaluator_composed must be true, got %v", st["evaluator_composed"])
+	req(t, st["live_execution_ready"] == false, "status live_execution_ready must be false, got %v", st["live_execution_ready"])
+	sv, ok := st["metrics"].(shadowMetricsView)
+	req(t, ok, "status metrics must be a shadowMetricsView, got %T", st["metrics"])
+	req(t, sv == fin, "status metrics snapshot must equal the final counters: status=%+v final=%+v", sv, fin)
+	r.ev("operator observability: /metrics culvert_mcp_shadow_* rows == live singleton (evaluations=%d would_execute=%d would_block=%d would_fail_hard_control=%d other=%d evaluation_errors=%d); status.evaluator_composed=true status.live_execution_ready=false status.metrics==singleton",
+		fin.Evaluations, fin.WouldExecute, fin.WouldBlock, fin.WouldFailHardControl, fin.WouldOther, fin.EvaluationErrors)
 }
 
 // resetShadowGlobalsForRun resets the process-global singletons a controlled run touches

@@ -127,6 +127,10 @@ revocation drill: approval revoked -> eligibility!=Usable
             durable_outcome=would_fail_hard_control
 rollback Shadow->Observe: mode=observe post_rollback_execution_state=not_implemented
             shadow_evaluations UNCHANGED live_executor=absent canary=off production=off
+operator observability: /metrics culvert_mcp_shadow_* rows == live singleton
+            (evaluations=3 would_execute=1 would_block=1 would_fail_hard_control=1 other=0
+            evaluation_errors=1); status.evaluator_composed=true
+            status.live_execution_ready=false status.metrics==singleton
 FINAL: controlled_upstream_invocations=0 shadow_evaluations=3 would_execute=1 would_block=1
             evaluation_errors=1 live_executions=0 materializations=0
 ```
@@ -207,6 +211,7 @@ Shadow explicitly activated                        YES
 Activation scope bounded                           YES
 Exact fingerprint approval active                  YES
 Real Shadow evaluations observed                   YES (3)
+Shadow reflected on operator /metrics + status     YES (rows == live counters)
 Schema-v2 durable evidence observed                YES
 Response <-> durable evidence parity               YES
 Upstream calls caused by Shadow                    0
@@ -228,8 +233,10 @@ Restart survival + durable recovery                PASS
 controlled experiment over the production code paths (see §2). Every mandatory safety
 invariant was observed at runtime: Culvert ingested real authenticated MCP requests,
 evaluated them through the full security pipeline, produced correct ShadowDecisions,
-committed truthful schema-v2 durable evidence matching the responses, reflected Shadow in
-metrics/health, contained scope, performed ZERO upstream side effects and ZERO credential
+committed truthful schema-v2 durable evidence matching the responses, reflected Shadow on
+the operator-facing surfaces — the `/metrics` `culvert_mcp_shadow_*` serialization and the
+status map, both asserted equal to the live evaluation counters (not merely the internal
+metrics singleton) — contained scope, performed ZERO upstream side effects and ZERO credential
 materializations, never armed live execution, and rolled back Shadow→Observe deterministically
 (and survived a restart). The protected upstream observed 0 invocations while Culvert recorded
 3 Shadow evaluations — the central differential.
