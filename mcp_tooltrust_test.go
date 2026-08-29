@@ -21,7 +21,7 @@ import (
 	"github.com/KidCarmi/Culvert/internal/mcp/upstreamclient"
 )
 
-// ── harness ──────────────────────────────────────────────────────────────────
+// ── harness ───────────────────────────────────────────────────────────────────────
 
 const ttTenant = "qualification"
 
@@ -250,7 +250,7 @@ func TestToolTrust_LiveExecutionPurposeRefusedAtIssue(t *testing.T) {
 	}
 }
 
-// ── crash / restart recovery (Sec 13, D3) ─────────────────────────────────────
+// ── crash / restart recovery (Sec 13, D3) ────────────────────────────────
 
 func TestToolTrust_Recovery_RePromotesAcrossRestart(t *testing.T) {
 	resetInventory(t)
@@ -295,7 +295,7 @@ func mustDecodeControlled(t *testing.T) *qualInventoryDoc {
 	return doc
 }
 
-// ── revocation demotes immediately (Sec 8) ─────────────────────────────────────
+// ── revocation demotes immediately (Sec 8) ────────────────────────────────
 
 func TestToolTrust_Revoke_DemotesImmediately(t *testing.T) {
 	resetInventory(t)
@@ -596,7 +596,7 @@ func TestToolTrust_ConcurrentDiscovery_ApproveRejectsStale(t *testing.T) {
 	}
 }
 
-// ── HTTP RBAC / tenant scope on the admin routes ──────────────────────────────
+// ── HTTP RBAC / tenant scope on the admin routes ─────────────────────────────
 
 func TestToolTrust_HTTP_RBACAndTenant(t *testing.T) {
 	// tool-approvals GET is viewer; a tenant is mandatory.
@@ -617,7 +617,7 @@ func TestToolTrust_HTTP_RBACAndTenant(t *testing.T) {
 	}
 }
 
-// ── coordinator not composed ⇒ fail closed ────────────────────────────────────
+// ── coordinator not composed ⇒ fail closed ────────────────────────────────
 
 func TestToolTrust_NotComposedFailsClosed(t *testing.T) {
 	resetMCPToolTrustForTest()
@@ -1026,5 +1026,77 @@ func TestToolTrust_RequestApprovalHoldsDeriveMuAcrossTargetLoad(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("RequestApproval did not complete after deriveMu was released")
+	}
+}
+
+// TestToolTrust_OmittedToolWithdrawsTrust proves the round-27 P1 fix at the coordinator
+// level: when a COMPLETE discovery for a server stops advertising a tool that was
+// previously approved-and-Usable, the ingest fold WITHDRAWS that tool from the catalog
+// (drops its record). A server that no longer exposes a tool must not leave a stale
+// approved-and-Usable projection behind, a reconcile must not resurrect it, and the
+// withdrawn tool must be un-approvable. Tools the server still advertises are untouched.
+func TestToolTrust_OmittedToolWithdrawsTrust(t *testing.T) {
+	resetInventory(t)
+	doc, err := decodeInventory([]byte(`{"schema_version":1,"tenant":"` + ttTenant + `","servers":[
+	  {"server_id":"controlled","endpoint":"e","pinned_identity":"id","enabled":true,
+	   "tools":[{"name":"t","input_schema":{"type":"object"}},{"name":"u","input_schema":{"type":"object"}}]}
+	]}`))
+	if err != nil {
+		t.Fatalf("decode inventory: %v", err)
+	}
+	reg, cat, err := seedInventory(doc, limits.DefaultCatalog())
+	if err != nil {
+		t.Fatalf("seed inventory: %v", err)
+	}
+	publishMCPInventory(mcpInvLoaded, "", reg, cat)
+	recA, ok := cat.Current().Get(catalog.ToolKey{Server: "controlled", Name: "t"})
+	if !ok {
+		t.Fatal("seeded tool t must exist")
+	}
+	sumA := recA.Fingerprint.Sum()
+	fpA := hex.EncodeToString(sumA[:])
+
+	composeToolTrust(t, nil)
+	requestAndApprove(t, "controlled", "t", fpA, cat.Current().Revision(), 0)
+	if eligibility(t, cat, "controlled", "t") != catalog.Usable {
+		t.Fatal("tool t must be Usable after approval")
+	}
+
+	// A COMPLETE re-discovery of the server advertises ONLY tool u — tool t is withdrawn.
+	if _, _, err := cat.Ingest(reg, catalog.DiscoveryInput{
+		ServerID: registry.ServerID("controlled"), Identity: "id",
+		Raw: []byte(`{"tools":[{"name":"u","inputSchema":{"type":"object"}}]}`),
+	}); err != nil {
+		t.Fatalf("re-ingest: %v", err)
+	}
+
+	// The ingest fold must DROP the withdrawn tool's record entirely.
+	if _, ok := cat.Current().Get(catalog.ToolKey{Server: "controlled", Name: "t"}); ok {
+		t.Fatal("a tool omitted by a complete discovery must be withdrawn from the catalog")
+	}
+	// Tool u (still advertised) is untouched.
+	if _, ok := cat.Current().Get(catalog.ToolKey{Server: "controlled", Name: "u"}); !ok {
+		t.Fatal("a tool still advertised must remain in the catalog")
+	}
+
+	// Reconcile must not resurrect the withdrawn tool.
+	mcpToolTrust.reconcile()
+	if _, ok := cat.Current().Get(catalog.ToolKey{Server: "controlled", Name: "t"}); ok {
+		t.Fatal("reconcile must not restore a withdrawn tool")
+	}
+
+	// The withdrawn tool is un-approvable: a fresh request against its old fingerprint fails
+	// closed because the tool no longer exists in the catalog.
+	if _, err := mcpToolTrust.RequestApproval(toolTrustRequestInput{
+		Tenant:              ttTenant,
+		ServerID:            "controlled",
+		ToolName:            "t",
+		ExpectedFingerprint: fpA,
+		ExpectedCatalogRev:  cat.Current().Revision(),
+		Purpose:             tooltrust.PurposeShadowEvaluation,
+		RequestedBy:         "operator@corp",
+		Reason:              "attempt to re-approve a withdrawn tool",
+	}); err == nil {
+		t.Fatal("a withdrawn tool must be un-approvable")
 	}
 }
