@@ -22,7 +22,7 @@ package execution
 // re-introduced into the production source and the named guard confirmed to FAIL (a passing
 // guard would be vacuous); the driver is scratch tooling, the mapping is the durable record:
 //   M1  remove the final boundary kill re-read          → TestCanaryPrerequisite_KillStateRevalidatedAtSideEffectBoundary
-//   M2  move the kill re-read before ToolStillCurrent    → TestCanaryPrerequisite_KillStateRevalidatedAtSideEffectBoundary
+//   M2  return drift before re-reading the kill gen      → TestKillBoundary_RaceMatrix (8_drift_and_kill)
 //   M3  drop kill reclassification on credential path    → TestKillBoundary_RaceMatrix (credential subtests)
 //   M4  drop kill reclassification on no-credential path → TestKillBoundary_NoCredentialReasonMapping
 //   M5  map the boundary kill to ReasonNone              → TestCanaryPrerequisite_KillStateRevalidatedAtSideEffectBoundary
@@ -272,8 +272,10 @@ func TestKillBoundary_RaceMatrix(t *testing.T) {
 		killReq(t, out.Reason == mcperr.ReasonDecisionSnapshotStale, "drift-only reason=%v want decision_snapshot_stale", out.Reason)
 	})
 
-	// 8. tool drift + kill concurrently — the boundary refuses (upstream 0). Drift is checked
-	// first, so its reason wins; either way it is a fail-closed refusal that never executes.
+	// 8. tool drift + kill concurrently — the boundary refuses (upstream 0). The emergency kill
+	// is PARAMOUNT in the refusal precedence, so even though the tool also drifted the refusal
+	// is reported as rollout_emergency_active, never staleness (Codex P2, PR #1248: metering it
+	// as staleness would undercount emergency blocks).
 	t.Run("8_drift_and_kill", func(t *testing.T) {
 		st := stateForMode(t, rollout.ModeCanary)
 		up := &fakeUpstream{}
@@ -282,9 +284,7 @@ func TestKillBoundary_RaceMatrix(t *testing.T) {
 		in.ToolStillCurrent = func() bool { st.EngageKillSwitch("oncall", 8); return false } // drifted AND killed
 		out := runExec(e, context.Background(), in)
 		req0Upstream(t, up)
-		killReq(t, !out.Executed, "drift+kill refusal must not execute")
-		killReq(t, out.Reason == mcperr.ReasonDecisionSnapshotStale || out.Reason == mcperr.ReasonRolloutEmergencyActive,
-			"drift+kill reason=%v want a fail-closed refusal (stale or emergency)", out.Reason)
+		mustEmergencyBlock(t, out) // kill is paramount: emergency, not stale
 	})
 
 	// 9. engage→clear ABA: the kill is engaged AND cleared before the boundary, so at the

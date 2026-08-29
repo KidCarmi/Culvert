@@ -142,26 +142,32 @@ func (e *Executor) runExecute(ctx context.Context, in runtime.ExecInput, _ rollo
 }
 
 // preCallGuard runs the last-moment boundary re-validations immediately before the
-// irreversible upstream side effect, in refusal-precedence order: first the OVN-09 tool-drift
-// re-check, then the PREREQ-MCP-KILL-1 emergency-kill re-check. It returns the sentinel to
-// abort with (mapped to a reason by the caller), or nil to proceed.
+// irreversible upstream side effect and returns the sentinel to abort with (mapped to a reason
+// by the caller), or nil to proceed.
 //
-// The kill re-read is the FINAL authoritative revalidation — the last executable instruction
-// before Culvert crosses into the irreversible MCP upstream side effect. A security decision
-// made at admission is not permission to ignore an emergency stop issued since: if the
-// monotonic kill generation has advanced past the value captured at admission, an emergency
-// kill was engaged while this request was in flight (even one already cleared — the ABA case)
-// and the call MUST NOT proceed. It re-reads SOLELY the monotonic kill generation, so it does
-// not re-resolve mode/scope/policy/approval and cannot reopen the F7 single-resolution TOCTOU;
-// it only ever makes the outcome MORE restrictive. This is the ONE side-effect boundary shared
-// by both the credential and no-credential paths, so the check lives here and nowhere else, and
-// callUpstream places NOTHING between this guard and Upstream.Call.
+// Ordering is deliberate. Tool freshness is EVALUATED first because the ToolStillCurrent
+// callback may itself observe or change authoritative state (in the boundary tests it engages
+// the emergency kill), so its result is captured before the kill generation is read. But the
+// emergency kill is PARAMOUNT in the refusal PRECEDENCE: if the monotonic kill generation has
+// advanced past the value captured at admission, an emergency kill was engaged while this
+// request was in flight (even one already cleared — the ABA case, and even when the tool ALSO
+// drifted) and the refusal is reported as rollout_emergency_active rather than staleness — the
+// operator's emergency stop is the reason the call did not happen, and metering it as staleness
+// would undercount emergency blocks (§9 telemetry truth). Reading the generation AFTER invoking
+// the freshness callback is also what closes the "callback engages the kill and returns drift"
+// window Codex flagged on PR #1248. The kill re-read is the FINAL authoritative revalidation —
+// it re-reads SOLELY the monotonic kill generation, so it does not re-resolve
+// mode/scope/policy/approval and cannot reopen the F7 single-resolution TOCTOU, and only ever
+// makes the outcome MORE restrictive. This is the ONE side-effect boundary shared by both the
+// credential and no-credential paths, so the check lives here and nowhere else, and callUpstream
+// places NOTHING between this guard and Upstream.Call.
 func (e *Executor) preCallGuard(in runtime.ExecInput, admKillGen uint64) error {
-	if in.ToolStillCurrent != nil && !in.ToolStillCurrent() {
-		return errToolDriftedBeforeCall
-	}
+	drifted := in.ToolStillCurrent != nil && !in.ToolStillCurrent()
 	if e.cfg.State.KillGeneration() != admKillGen {
-		return errKilledAtBoundary
+		return errKilledAtBoundary // emergency stop is paramount, even if the tool also drifted
+	}
+	if drifted {
+		return errToolDriftedBeforeCall
 	}
 	return nil
 }
