@@ -224,11 +224,11 @@ func (e *BudgetEnforcer) Reserve(gen uint64, now time.Time, ident ExecutionIdent
 
 // isNewBeyondCap reports whether v is NOT already in set AND admitting it would exceed cap. An
 // already-present value is always admissible (it does not grow the distinct count).
-func isNewBeyondCap(set map[string]struct{}, v string, cap int) bool {
+func isNewBeyondCap(set map[string]struct{}, v string, capLimit int) bool {
 	if _, ok := set[v]; ok {
 		return false
 	}
-	return len(set) >= cap
+	return len(set) >= capLimit
 }
 
 // Release returns one in-flight concurrency slot after an execution completes. It NEVER decrements
@@ -334,12 +334,12 @@ func sortedSetKeys(set map[string]struct{}) []string {
 
 // setFromKeys rebuilds a set from persisted keys, capped defensively at cap (a corrupt over-cap
 // list is truncated deterministically rather than admitting an over-budget identity set).
-func setFromKeys(keys []string, cap int) map[string]struct{} {
+func setFromKeys(keys []string, capLimit int) map[string]struct{} {
 	set := make(map[string]struct{}, len(keys))
 	sorted := append([]string(nil), keys...)
 	sort.Strings(sorted)
 	for _, k := range sorted {
-		if len(set) >= cap {
+		if len(set) >= capLimit {
 			break
 		}
 		set[k] = struct{}{}

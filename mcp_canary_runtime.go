@@ -180,35 +180,35 @@ func (rt *canaryRuntime) currentGeneration(capb rollout.Capability) uint64 {
 // activation generation the reservation was made under, so the caller can Release against the SAME
 // generation (a stale release after a demotion/reactivation is rejected). Fail-closed: any
 // not-armed / aborted / persist failure denies.
-func (rt *canaryRuntime) reserveCanaryExecution(capb rollout.Capability, now time.Time, ident canary.ExecutionIdentity) (canary.BudgetOutcome, uint64) {
+func (rt *canaryRuntime) reserveCanaryExecution(capb rollout.Capability, now time.Time, ident canary.ExecutionIdentity) (outcome canary.BudgetOutcome, generation uint64) {
 	cr := rt.capRuntime(capb)
 	cr.mu.Lock()
 	defer cr.mu.Unlock()
 	if !cr.active || cr.enforcer == nil || cr.aborter == nil {
 		return canary.BudgetDeniedInvalid, 0
 	}
-	gen := cr.generation
-	if !cr.aborter.ExecutionEligible(gen) {
-		return canary.BudgetDeniedInvalid, gen // the Canary is aborted — no execution
+	generation = cr.generation
+	if !cr.aborter.ExecutionEligible(generation) {
+		return canary.BudgetDeniedInvalid, generation // the Canary is aborted — no execution
 	}
-	outcome := cr.enforcer.Reserve(gen, now, ident)
+	outcome = cr.enforcer.Reserve(generation, now, ident)
 	switch {
 	case outcome.WholeCanaryExhaustion():
 		// The blast-radius budget is spent — a whole-Canary breach. Latch the abort.
-		cr.aborter.Trip("budget_exhausted", gen, now)
+		cr.aborter.Trip("budget_exhausted", generation, now)
 	case outcome.IdentityCapExceeded():
 		// An execution for an identity beyond the enumerated blast radius — a scope escape.
-		cr.aborter.Trip("scope_escape", gen, now)
+		cr.aborter.Trip("scope_escape", generation, now)
 	}
 	// Persist the spend/abort BEFORE the caller could cross the side-effect boundary. On a persist
 	// failure the in-memory spend is already consumed (monotonic — never replayed), and we deny.
 	if err := canaryRuntimePersist(rt, capb, cr); err != nil {
 		logger.Printf("MCP canary runtime: persist after reserve for %s failed (fail-closed): %q", capb.String(), sanitizeLog(err.Error()))
 		if outcome.Granted() {
-			return canary.BudgetDeniedInvalid, gen
+			return canary.BudgetDeniedInvalid, generation
 		}
 	}
-	return outcome, gen
+	return outcome, generation
 }
 
 // releaseCanaryExecution returns one in-flight concurrency slot after an execution reserved under
