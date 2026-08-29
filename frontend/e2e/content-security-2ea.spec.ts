@@ -185,12 +185,23 @@ test("admin: reversible DPI bypass mutation with ceremony, stale fence refused, 
       page.getByText("Replace the DPI bypass host list"),
     ).toBeVisible();
     await expect(page.getByText("NOT inspected by DPI")).toBeVisible();
+    // Register the wait BEFORE confirming: the first bypass GET after the
+    // confirm is the page's own post-save refetch — once it lands, the
+    // page's held revision is FIXED, so the racer below is deterministically
+    // concurrent-stale (no timing dependence).
+    const pageRefetch = page.waitForResponse(
+      (r) =>
+        r.url().includes("/api/dpi/bypass") &&
+        r.request().method() === "GET" &&
+        r.ok(),
+    );
     await page
       .getByRole("button", { name: "Replace DPI bypass hosts" })
       .click();
     await expect
       .poll(async () => (await getBypass(api)).hosts)
       .toContain("e2e-2ea-bypass.test");
+    await pageRefetch;
 
     // Stale concurrent write: another admin changes the list via the API;
     // the page still holds the pre-change revision, so its next save is the
