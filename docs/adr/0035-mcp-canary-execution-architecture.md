@@ -66,26 +66,31 @@ future-relative window cannot smuggle a long TTL — the unelapsed-expiry and no
 checks jointly guarantee `ExpiresAt>ApprovedAt`), and **four-eyes** (distinct present requester
 and approver — separation of duties).
 
-A Canary scope names up to two tools, so a **single** approval must never authorize the whole
-scope. `canary.ValidateScopeApprovals(scope, bindings, now)` is the scope-level gate: EVERY
-scoped tool must have its OWN binding whose target is that exact tool (server+name) AND whose
-target fingerprint equals the scope's declared fingerprint (both are hex of the same 32-byte
-digest), each satisfying `SatisfiesLiveExecution`; a missing, duplicate, wrong-fingerprint, or
-out-of-scope binding fails closed. The preflight's `LiveApprovalValid` fact is driven by this,
-not by an unconstrained target supplied alongside the scope. Issuance stays refused in this
-build; these predicates are what a future, separately-reviewed live phase's issue path must
-satisfy.
+A Canary scope names up to two tools across one tenant, so a **single** approval must never
+authorize the whole scope. `canary.ValidateScopeApprovals(scope, bindings, now)` is the
+scope-level gate: EVERY admitted (tenant × tool) combination must have its OWN binding whose
+target is that exact tenant+server+name AND whose target fingerprint equals the scope's declared
+fingerprint (both are hex of the same 32-byte digest), each satisfying `SatisfiesLiveExecution`;
+a missing, duplicate, wrong-fingerprint, wrong-tenant, or out-of-scope binding fails closed.
+Keying coverage on the **tenant** is load-bearing: a rollout scope admits a subject only when its
+tenant matches, so an approval for tenant `t2` can never count as coverage for a scope admitting
+`t1` (Codex P1). The preflight's `LiveApprovalValid` fact is driven by this, not by an
+unconstrained target supplied alongside the scope. Issuance stays refused in this build; these
+predicates are what a future, separately-reviewed live phase's issue path must satisfy.
 
 ### 3. Bounded, read-first Canary scope (§4/§5)
 
 `canary.ValidateScope` requires the scope be Gateway-only, enumerable (a percentage-only scope
 is rejected — "1% of everything cannot enter Canary"), bind **exact** servers and tools each
-with a pinned fingerprint (no wildcard-future-tools), bind at least one **exact** principal/
-client/agent with **groups forbidden** (`ScopeNoIdentity`/`ScopeUsesGroups` — a group's
+with a pinned fingerprint (no wildcard-future-tools), bind exactly one **concrete** tenant
+(`ScopeNoTenant`/`ScopeTooManyTenants` — rollout treats an empty tenant selector as a wildcard
+that admits the same subject ID from every tenant, and identities are tenant-local, so the "who"
+axis is only actually bounded once a tenant is pinned; Codex P1), bind at least one **exact**
+principal/client/agent with **groups forbidden** (`ScopeNoIdentity`/`ScopeUsesGroups` — a group's
 membership can change without a scope edit, so the "who" axis would not be enumerable), stay
-within tiny first-Canary caps (`MaxCanaryServers=1`, `MaxCanaryTools=2`, `MaxCanaryPrincipals=2`
-— structurally incapable of fleet-wide), and be **read-first** (`Operations ⊆ {read}`,
-`!HighRisk`).
+within tiny first-Canary caps (`MaxCanaryServers=1`, `MaxCanaryTools=2`, `MaxCanaryPrincipals=2`,
+`MaxCanaryTenants=1` — structurally incapable of fleet-wide), and be **read-first**
+(`Operations ⊆ {read}`, `!HighRisk`).
 
 Read-first is enforced at **two** levels because `rollout.RiskClass` has only four buckets and
 the root `mapRisk` folds `policy.OpControl` (and `OpDiscovery`) into `RiskRead` — so a
@@ -168,6 +173,9 @@ Twelve defects, each caught by a named gate:
 | 16 | group-only / identity-less scope enters Canary | `TestValidateScope_Rejections` (no_identity/group_only_identity/uses_groups) |
 | 17 | degraded durable-event plane still Canary-ready | `durableEventsHealthy` (domain CriticalState=="normal"; `mcp_canary_preflight_test.go`) |
 | 18 | node dry-run conflates missing activation inputs with node deficiencies | `TestEvaluateNode_ExcludesActivationInputs` (node dry-run evaluates node-level facts only) |
+| 19 | rollback readiness from coordinator existence, not durable+rehearsed health | `rollbackPathHealthy` (persist not degraded/write_failed AND `RollbackRehearsed`) |
+| 20 | approval for tenant t2 covers a scope admitting tenant t1 | `TestValidateScopeApprovals_Rejections` (wrong_tenant) |
+| 21 | identity-less/wildcard-tenant scope enters Canary | `TestValidateScope_Rejections` (no_tenant/empty_tenant_string/too_many_tenants) |
 
 Mutations 1–4 and 13–17 (plus four-eyes, TTL ceiling, read-first, bound-cap, fingerprint,
 per-tool coverage, exact identity) are mechanically re-introduced and confirmed to fail their

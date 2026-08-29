@@ -51,7 +51,7 @@ live tier; Canary *requires* it).
 | 16 | Exact live_execution approval (PER SCOPED TOOL) | `live_execution_approval_invalid` | `canary.ValidateScopeApprovals` (→ per-tool `SatisfiesLiveExecution`) | **unissuable** |
 | 17 | Server usable | `server_not_usable` | registry/catalog | activation input |
 | 18 | Tool fingerprint current | `tool_fingerprint_stale` | catalog | activation input |
-| 19 | Rollback path healthy | `rollback_path_unhealthy` | rollout coordinator | ✓ (coordinator live) |
+| 19 | Rollback path healthy | `rollback_path_unhealthy` | `rollbackPathHealthy` — durable persist not degraded/write_failed AND rollback rehearsed | **NO (unrehearsed)** |
 | 20 | Budget configured | `canary_budget_not_configured` | `canary.ValidateBudget` | activation input |
 
 Live-tier facts (5, 6, 7, 14, 15) are all false together in this build (the guarded live
@@ -78,7 +78,7 @@ exist) checks both. Pinned by `TestEvaluateNode_ExcludesActivationInputs` (Codex
 | target binding | exact tenant+server+tool+fingerprint+format (rug-pull) | same |
 | expiry | present, unelapsed, ≤ 24h measured from a real, non-future approval instant | same + `TestSatisfiesLiveExecution_Rejections/{approved_in_future,approved_zero}` |
 | four-eyes | distinct present requester + approver | same |
-| per-tool coverage | EVERY scoped tool has its OWN approval bound to that exact tool identity+fingerprint; no unconstrained target; no approval outside scope | `canary.ValidateScopeApprovals` (`approval_test.go`) |
+| per-(tenant,tool) coverage | EVERY admitted (tenant × tool) has its OWN approval bound to that exact tenant+tool+fingerprint; no unconstrained target; no approval outside scope (a t2 approval never covers a t1 scope) | `canary.ValidateScopeApprovals` (`approval_test.go`) |
 | issuance | refused fail-closed in this build | `tooltrust.Purpose.Issuable()` |
 
 ### Read-first is TWO gates, not one (§5)
@@ -98,6 +98,7 @@ as the policy engine actually classified it. Pinned by `operation_test.go`.
 | max servers | 1 | `MaxCanaryServers` |
 | max tools | 2 | `MaxCanaryTools` |
 | max principals | 2 | `MaxCanaryPrincipals` |
+| max tenants | 1 (concrete, required) | `MaxCanaryTenants` |
 | max total executions ceiling | 1000 | `FirstCanaryMaxTotalCeiling` |
 | max window ceiling | 7 days | `FirstCanaryMaxWindowCeiling` |
 | max approval TTL | 24 hours | `MaxInitialCanaryApprovalTTL` |

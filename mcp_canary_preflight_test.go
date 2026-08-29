@@ -66,6 +66,7 @@ func validCanaryActivationInput(now time.Time) CanaryActivationInput {
 		Capability: rollout.CapabilityGateway,
 		Scope: rollout.ScopeSpec{
 			Capability: rollout.CapabilityGateway,
+			Tenants:    []string{"t1"},
 			Servers:    []string{"srv-canary"},
 			Tools:      []rollout.ToolSel{{Server: "srv-canary", Name: "echo", Fingerprint: fpHex}},
 			Principals: []string{"synthetic"},

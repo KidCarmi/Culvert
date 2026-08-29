@@ -16,6 +16,9 @@ const (
 	MaxCanaryTools = 2
 	// MaxCanaryPrincipals — at most this many exact principals/clients (synthetic identities).
 	MaxCanaryPrincipals = 2
+	// MaxCanaryTenants — a first Canary binds exactly one concrete tenant (identities are
+	// tenant-local, so an unbound tenant would widen the "who" axis to every tenant).
+	MaxCanaryTenants = 1
 )
 
 // ScopeReason is a bounded classification for WHY a candidate Canary scope is rejected. It
@@ -42,6 +45,8 @@ const (
 	ScopeNotReadFirst           ScopeReason = "scope_not_read_first"       // Operations include a non-read class
 	ScopeNoIdentity             ScopeReason = "scope_no_explicit_identity" // no exact principal/client/agent bound
 	ScopeUsesGroups             ScopeReason = "scope_uses_groups"          // group-based identity forbidden for first Canary
+	ScopeNoTenant               ScopeReason = "scope_no_explicit_tenant"   // no concrete tenant bound (empty ⇒ every tenant)
+	ScopeTooManyTenants         ScopeReason = "scope_too_many_tenants"     // more than MaxCanaryTenants tenants bound
 )
 
 // ValidateScope enforces the first-Canary scope contract (§4/§5) on a candidate
@@ -102,6 +107,13 @@ func validateScopeRawFields(spec rollout.ScopeSpec) ScopeReason {
 			return ScopeToolMissingFingerprint
 		}
 	}
+	// An empty tenant string is not a concrete tenant (and rollout.Compile rejects it) — surface
+	// the precise reason before Compile can fold it into scope_uncompilable.
+	for i := range spec.Tenants {
+		if spec.Tenants[i] == "" {
+			return ScopeNoTenant
+		}
+	}
 	return ScopeOK
 }
 
@@ -128,6 +140,16 @@ func validateScopeBounds(spec rollout.ScopeSpec) ScopeReason {
 	}
 	if len(spec.Tools) > MaxCanaryTools {
 		return ScopeTooManyTools
+	}
+	// A first Canary must bind a CONCRETE tenant. rollout.Scope treats an empty tenant selector
+	// as a wildcard that admits the same subject ID from EVERY tenant, so identities (which are
+	// tenant-local) are only actually bounded once a tenant is pinned (Codex P1, PR #1249). Bound
+	// to exactly one tenant, non-empty.
+	if len(spec.Tenants) == 0 {
+		return ScopeNoTenant
+	}
+	if len(spec.Tenants) > MaxCanaryTenants {
+		return ScopeTooManyTenants
 	}
 	// A first Canary must name WHO can trigger it — at least one exact principal/client/agent.
 	// A scope with zero explicit identities would be triggerable by any authenticated caller

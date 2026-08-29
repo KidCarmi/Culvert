@@ -408,12 +408,17 @@
   (approved_in_future); group-only/identity-less scope → `TestValidateScope_Rejections`
   (no_identity/uses_groups); degraded durable-event plane still ready → `durableEventsHealthy`.
   No open red-team finding: every attack maps to a standing gate or a dormant fail-closed state.
-- **Codex review hardening (PR #1249):** five architecture gaps found by Codex and closed in the
-  contract before merge — (P1-A) request-time read-first gate `IsReadFirstOperation` distinct
-  from the RiskClass axis; (P1-B) `durableEventsHealthy` from real critical-state health, not
-  presence; (P1-C) per-tool approval binding `ValidateScopeApprovals` replacing a single
-  unconstrained approval; (P1-D) exact-identity requirement / groups forbidden; (P2)
-  future/zero-dated `ApprovedAt` rejected before the TTL ceiling.
+- **Codex review hardening (PR #1249):** nine architecture gaps found across three Codex rounds
+  and closed in the contract before merge — (P1-A) request-time read-first gate
+  `IsReadFirstOperation` distinct from the RiskClass axis; (P1-B) `durableEventsHealthy` from real
+  critical-state health, not presence; (P1-C) per-tool approval binding `ValidateScopeApprovals`
+  replacing a single unconstrained approval; (P1-D) exact-identity requirement / groups forbidden;
+  (P2a) future/zero-dated `ApprovedAt` rejected before the TTL ceiling; (P2b) node-readiness
+  dry-run (`EvaluateNode`) evaluates node-level facts only, not not-yet-supplied activation
+  inputs; (P1-E) `rollbackPathHealthy` from durable persist + rollback-rehearsal state, not
+  coordinator existence; (P1-F) approval coverage keyed by tenant (a t2 approval never covers a
+  t1 scope); (P1-G) scope must bind exactly one concrete tenant (`ScopeNoTenant`/
+  `ScopeTooManyTenants` — an empty tenant selector is a rollout wildcard over every tenant).
 - **Evidence:** ADR-0035; `docs/design/mcp/CANARY-READINESS-MATRIX.md`;
   `docs/design/mcp/CANARY-FIRST-RUNBOOK.md`; `internal/mcp/canary/*_test.go`;
   `mcp_canary_preflight_test.go`; the differential gate `TestShadow_LivePreSideEffectEquivalence`.

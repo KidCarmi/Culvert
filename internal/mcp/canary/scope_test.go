@@ -11,6 +11,7 @@ import (
 func validFirstCanaryScope() rollout.ScopeSpec {
 	return rollout.ScopeSpec{
 		Capability: rollout.CapabilityGateway,
+		Tenants:    []string{"t1"},
 		Servers:    []string{"srv-canary"},
 		Tools:      []rollout.ToolSel{{Server: "srv-canary", Name: "echo", Fingerprint: "abc123"}},
 		Principals: []string{"synthetic-canary-principal"},
@@ -62,6 +63,9 @@ func TestValidateScope_Rejections(t *testing.T) {
 			// membership can change without a scope edit (Codex P1-D).
 			s.Groups = []string{"g1"}
 		}, ScopeUsesGroups},
+		{"no_tenant", func(s *rollout.ScopeSpec) { s.Tenants = nil }, ScopeNoTenant},
+		{"empty_tenant_string", func(s *rollout.ScopeSpec) { s.Tenants = []string{""} }, ScopeNoTenant},
+		{"too_many_tenants", func(s *rollout.ScopeSpec) { s.Tenants = []string{"t1", "t2"} }, ScopeTooManyTenants},
 		{"tool_missing_fingerprint", func(s *rollout.ScopeSpec) {
 			s.Tools = []rollout.ToolSel{{Server: "srv-canary", Name: "echo"}} // no Fingerprint (wildcard-future-tool)
 		}, ScopeToolMissingFingerprint},

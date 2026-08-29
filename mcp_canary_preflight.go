@@ -63,9 +63,10 @@ func canaryNodeFacts(capb rollout.Capability) canary.Facts {
 		PolicyHealthy:           mcpPolicy.composed(),
 		EmergencyKillClear:      !getMCPRollout().stateFor(capb).Killed(),
 
-		// Rollback: a node whose rollout coordinator is live can always demote (narrowing-only
-		// emergency disable is unconditional); reflect that the coordinator exists.
-		RollbackPathHealthy: getMCPRollout() != nil,
+		// Rollback: NOT mere coordinator existence. A durable, rehearsed rollback path is
+		// required — emergencyDisable that only lands in memory can be silently re-admitted on
+		// restart (Codex P1, PR #1249). See rollbackPathHealthy.
+		RollbackPathHealthy: rollbackPathHealthy(capb),
 
 		// Scope/approval/budget facts default false here. They are ACTIVATION-level, so the node
 		// dry-run (EvaluateNode) skips them entirely — they are set and evaluated only by
@@ -106,6 +107,31 @@ func durableEventsHealthy(capb rollout.Capability) bool {
 		return false
 	}
 	return dh.CriticalState == "normal"
+}
+
+// rollbackPathHealthy reports whether the deterministic Canary→Shadow/Observe rollback path is
+// actually durable and rehearsed for the capability — not merely that the rollout coordinator
+// object exists. A Canary must be instantly, RELIABLY reversible; if the coordinator's durable
+// state is degraded or a write failed, an emergency demotion may land only in memory and be
+// silently re-admitted on restart, and if rollback was never rehearsed the reversal is unproven
+// (Codex P1, PR #1249). Fail-closed: false unless the coordinator exists AND its persistence is
+// not degraded/write_failed AND a rollback rehearsal has been recorded in the capability's
+// evidence. In this build nothing rehearses a rollback, so this is false — one more reason the
+// dormant Canary is never ready.
+func rollbackPathHealthy(capb rollout.Capability) bool {
+	r := getMCPRollout()
+	if r == nil {
+		return false
+	}
+	switch r.persistStatus(capb) {
+	case "degraded", "write_failed":
+		return false
+	}
+	st := r.stateFor(capb)
+	if st == nil {
+		return false
+	}
+	return st.Evidence().RollbackRehearsed
 }
 
 // CanaryActivationInput carries the scope-dependent activation inputs the preflight layers on

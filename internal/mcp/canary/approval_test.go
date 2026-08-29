@@ -40,6 +40,7 @@ func fpHex(b byte) string {
 func twoToolScope() rollout.ScopeSpec {
 	return rollout.ScopeSpec{
 		Capability: rollout.CapabilityGateway,
+		Tenants:    []string{"t1"},
 		Servers:    []string{"srv"},
 		Tools: []rollout.ToolSel{
 			{Server: "srv", Name: "echo", Fingerprint: fpHex(0x11)},
@@ -104,6 +105,14 @@ func TestValidateScopeApprovals_Rejections(t *testing.T) {
 			b[1].Approval = nil
 			return b
 		}, ScopeApprovalToolUnapproved},
+		{"wrong_tenant", func() []ToolApprovalBinding {
+			// A binding for tenant t2 must NOT count as coverage for a scope admitting t1: the
+			// t1/echo combination is then uncovered (Codex P1). Approvals are keyed by tenant too.
+			b := twoToolBindings(now)
+			b[0].Target.Tenant = "t2"
+			b[0].Approval.Tenant = "t2"
+			return b
+		}, ScopeApprovalToolUnapproved},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -120,5 +129,14 @@ func TestValidateScopeApprovals_NoTools(t *testing.T) {
 	s.Tools = nil
 	if r := ValidateScopeApprovals(s, nil, now); r != ScopeApprovalNoTools {
 		t.Fatalf("a scope naming no tools must be scope_has_no_tools, got %q", r)
+	}
+}
+
+func TestValidateScopeApprovals_NoTenant(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	s := twoToolScope()
+	s.Tenants = nil
+	if r := ValidateScopeApprovals(s, twoToolBindings(now), now); r != ScopeApprovalNoTenant {
+		t.Fatalf("a scope naming no tenant must be scope_has_no_tenant, got %q", r)
 	}
 }
