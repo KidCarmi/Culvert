@@ -204,6 +204,10 @@ func TestApiCategoryGroup_RenameCascades(t *testing.T) {
 	snapshotGlobalCategoryGroups(t)
 	snapshotPolicyStoreForTest(t)
 	snapshotConfigVersionsDir(t)
+	// Member names must resolve in a category authority (delete-first
+	// referential-integrity correction) — seed them as admin categories.
+	snapshotCatStore(t)
+	catStore.ReplaceAll([]CategoryEntry{{Name: "news"}, {Name: "saas"}})
 	globalCategoryGroups.ReplaceAll(nil)
 	g, err := globalCategoryGroups.Add("old", []string{"news"})
 	if err != nil {
@@ -276,6 +280,10 @@ func TestApiCategoryGroup_RenameCollision409(t *testing.T) {
 	snapshotGlobalCategoryGroups(t)
 	snapshotPolicyStoreForTest(t)
 	snapshotConfigVersionsDir(t)
+	// Member names must resolve in a category authority (delete-first
+	// referential-integrity correction) — seed them as admin categories.
+	snapshotCatStore(t)
+	catStore.ReplaceAll([]CategoryEntry{{Name: "news"}, {Name: "ads"}, {Name: "saas"}})
 	globalCategoryGroups.ReplaceAll(nil)
 	g, err := globalCategoryGroups.Add("a", []string{"news"})
 	if err != nil {
