@@ -150,6 +150,16 @@ func (s *Store) Load() error {
 	if int64(len(raw)) > readLimit {
 		return mcperr.New(mcperr.ReasonConfigInvalid, "tooltrust.load", "store file exceeds size bound")
 	}
+	// Reject invalid UTF-8 on the RAW bytes BEFORE decoding. encoding/json silently replaces an
+	// invalid byte sequence in any string with U+FFFD rather than erroring, so a corrupted or
+	// tampered file whose strings contain invalid UTF-8 would decode cleanly and the per-field
+	// utf8.ValidString checks in validateStored would then see the (valid) replacement runes and
+	// pass — publishing active grants despite the fail-closed corruption contract. A legitimately
+	// written store is always valid UTF-8 (json.Marshal emits it), so this only ever rejects
+	// corruption/tampering. JSON is UTF-8 by definition (RFC 8259).
+	if !utf8.Valid(raw) {
+		return mcperr.New(mcperr.ReasonConfigInvalid, "tooltrust.load", "store file is not valid UTF-8")
+	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	var env persistedStore

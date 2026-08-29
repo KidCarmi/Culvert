@@ -1,6 +1,7 @@
 package tooltrust
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
 )
@@ -578,6 +580,66 @@ func TestLoad_UnknownStatusFailsClosed(t *testing.T) {
 	s, _ := NewStore(Config{Path: path, Clock: clk.now})
 	if err := s.Load(); err == nil {
 		t.Fatal("an unknown status must fail closed")
+	}
+}
+
+func TestLoad_InvalidUTF8InStringFailsClosed(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1000, 0)}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "approvals.json")
+
+	// Produce a genuinely VALID active record through the real request→approve flow, so the
+	// only thing wrong with the persisted file below is the injected invalid UTF-8 byte.
+	s, err := NewStore(Config{Path: path, Clock: clk.now})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := s.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	in := goodRequest()
+	req, err := s.CreateRequest(in)
+	if err != nil {
+		t.Fatalf("CreateRequest: %v", err)
+	}
+	if _, err := s.Approve(req.ApprovalID, "admin@corp", matchingTarget(in)); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Sanity: the untouched file loads cleanly (isolates the corruption as the sole cause).
+	s2, _ := NewStore(Config{Path: path, Clock: clk.now})
+	if err := s2.Load(); err != nil {
+		t.Fatalf("the untouched persisted store must load: %v", err)
+	}
+
+	// Inject an invalid UTF-8 byte INSIDE a JSON string value (the Reason). encoding/json would
+	// tolerate it by replacing it with U+FFFD, so without the raw-bytes UTF-8 guard the record
+	// would decode and its per-field utf8.ValidString checks would pass — publishing the active
+	// grant. The guard must reject it before decoding.
+	idx := bytes.Index(raw, []byte(in.Reason))
+	if idx < 0 {
+		t.Fatal("could not locate the Reason string in the persisted file")
+	}
+	corrupt := append([]byte(nil), raw...)
+	corrupt[idx] = 0xff // a lone 0xff is never valid UTF-8
+	if utf8.Valid(corrupt) {
+		t.Fatal("test setup error: corrupted bytes are still valid UTF-8")
+	}
+	if err := os.WriteFile(path, corrupt, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s3, _ := NewStore(Config{Path: path, Clock: clk.now})
+	err = s3.Load()
+	if err == nil {
+		t.Fatal("invalid UTF-8 in the store file must fail closed, not load via U+FFFD replacement")
+	}
+	if !strings.Contains(err.Error(), "UTF-8") {
+		t.Fatalf("expected the fail-closed reason to name invalid UTF-8, got: %v", err)
 	}
 }
 
