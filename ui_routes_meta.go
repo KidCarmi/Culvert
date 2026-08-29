@@ -214,11 +214,19 @@ var uiRoutes = []uiRouteMetadata{
 			{Method: "PUT", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
 			{Method: "DELETE", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
 		}},
+	{Path: "/api/fileblock/profiles/state", Handler: "apiFileblockProfilesState", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "2D-C v2 coherent read: profiles + content-derived revision from one committed snapshot"},
+		}},
 	{Path: "/api/rewrite", Handler: "apiRewrite", Domain: "policy", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer, Note: "GET branch protected by uiAuthMiddleware; no explicit requireRole call observed"},
 			{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
 			{Method: "DELETE", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/rewrite/state", Handler: "apiRewriteState", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "2D-C v2 coherent read: ordered rules + content-derived revision from one committed snapshot"},
 		}},
 	{Path: "/api/policy", Handler: "apiPolicy", Domain: "policy", Public: false,
 		Methods: []uiRouteMethod{

@@ -1487,6 +1487,16 @@ routes:
     audit_expected: false
     danger_level: none
     documented: true
+  - route: "/api/fileblock/profiles/state"
+    method: "GET"
+    handler: "apiFileblockProfilesState"
+    domain: "policy"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
   - route: "/api/fileblock/profiles"
     method: "POST"
     handler: "apiFileblockProfiles"
@@ -2161,6 +2171,16 @@ routes:
     mutating: true
     audit_expected: true
     danger_level: high
+    documented: true
+  - route: "/api/rewrite/state"
+    method: "GET"
+    handler: "apiRewriteState"
+    domain: "policy"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
     documented: true
   - route: "/api/security"
     method: "GET"

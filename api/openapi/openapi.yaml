@@ -322,6 +322,7 @@ components:
         sslAction: { type: string }
         fileFiltering: { type: boolean }
         fileProfile: { type: string }
+        fileProfileId: { type: string }
         logFullUri: { type: boolean }
         logTraffic: { type: boolean, nullable: true }
         tlsSkipVerify: { type: boolean }
@@ -492,6 +493,15 @@ components:
       properties:
         rules: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
         count: { type: integer }
+    RewriteState:
+      type: object
+      required: [rules, revision, count]
+      additionalProperties: false
+      description: v2 header-rewrite state — ordered rules (evaluation order) + the server-owned restart-stable content revision, from one committed snapshot.
+      properties:
+        rules: { type: array, items: { $ref: '#/components/schemas/RewriteRuleFull' }, nullable: true }
+        revision: { type: string }
+        count: { type: integer }
     CategoryGroups:
       type: object
       required: [groups, names, version]
@@ -595,6 +605,15 @@ components:
       type: array
       nullable: true
       items: { type: object, additionalProperties: true }
+    FileblockProfileState:
+      type: object
+      required: [profiles, revision, count]
+      additionalProperties: false
+      description: v2 file-profile state — profiles + the server-owned restart-stable content revision, from one committed snapshot.
+      properties:
+        profiles: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
+        revision: { type: string }
+        count: { type: integer }
     ConfigVersionList:
       type: array
       nullable: true
@@ -1796,6 +1815,7 @@ components:
       additionalProperties: false
       properties:
         id: { type: integer }
+        stableId: { type: string }
         host: { type: string }
         req_set: { type: object, additionalProperties: { type: string } }
         req_add: { type: object, additionalProperties: { type: string } }
@@ -3525,6 +3545,12 @@ paths:
       x-culvert-introduced-version: 1.0.0
       x-culvert-danger-level: medium
       x-culvert-audit-event: rewrite.add
+      parameters:
+        - name: ifRevision
+          in: query
+          required: false
+          description: Optional revision assertion (the `revision` from GET /api/rewrite/state); a mismatch returns the structured 409 without mutating. Any client-supplied stableId in the body is ignored — the server owns identity on create.
+          schema: { type: string }
       requestBody:
         required: true
         content:
@@ -3532,12 +3558,17 @@ paths:
             schema: { $ref: '#/components/schemas/RewriteRuleFull' }
       responses:
         '200':
-          description: Updated.
+          description: The created rule with its server-assigned stableId (and process-local integer id).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RewriteRuleFull' }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '409':
+          description: Stale revision assertion; carries the current revision.
           content:
             application/json:
               schema: { type: object, additionalProperties: true }
-        '400': { $ref: '#/components/responses/PlainBadRequest' }
-        '403': { $ref: '#/components/responses/PlainForbidden' }
     delete:
       operationId: deleteRewriteRule
       tags: [policy]
@@ -3558,6 +3589,17 @@ paths:
         - name: id
           in: query
           required: false
+          description: Legacy process-local integer id (compatibility addressing).
+          schema: { type: string }
+        - name: stableId
+          in: query
+          required: false
+          description: Durable rule identity (preferred v2 addressing).
+          schema: { type: string }
+        - name: ifRevision
+          in: query
+          required: false
+          description: Optional revision assertion (GET /api/rewrite/state); mismatch returns the structured 409 without mutating.
           schema: { type: string }
       responses:
         '200':
@@ -3566,6 +3608,35 @@ paths:
             application/json:
               schema: { type: object, additionalProperties: true }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404': { $ref: '#/components/responses/PlainNotFound' }
+        '409':
+          description: Stale revision assertion; carries the current revision.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+
+  /api/rewrite/state:
+    get:
+      operationId: getRewriteState
+      tags: [policy]
+      summary: Header-rewrite state (v2)
+      description: v2 read contract — the ordered rewrite rules (evaluation order) plus the server-owned restart-stable content revision, captured from one committed snapshot. Echo the revision back as ?ifRevision= on mutations; the browser never computes it. The legacy GET /api/rewrite is unchanged.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Ordered rules + content revision.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RewriteState' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
 
   /api/category-groups:
@@ -4366,6 +4437,12 @@ paths:
       x-culvert-introduced-version: 1.0.0
       x-culvert-danger-level: medium
       x-culvert-audit-event: fileblock_profile.create
+      parameters:
+        - name: ifRevision
+          in: query
+          required: false
+          description: Optional revision assertion (the `revision` from GET /api/fileblock/profiles/state); a mismatch returns the structured 409 ({error, conflict, revision}) without mutating.
+          schema: { type: string }
       requestBody:
         required: true
         content:
@@ -4379,6 +4456,11 @@ paths:
               schema: { type: object, additionalProperties: true }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+        '409':
+          description: Name already taken, or stale revision assertion (carries the current revision).
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
     put:
       operationId: updateFileblockProfile
       tags: [policy]
@@ -4395,6 +4477,16 @@ paths:
       x-culvert-introduced-version: 1.0.0
       x-culvert-danger-level: medium
       x-culvert-audit-event: fileblock_profile.update
+      parameters:
+        - name: id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: ifRevision
+          in: query
+          required: false
+          description: Optional revision assertion (the `revision` from GET /api/fileblock/profiles/state); a mismatch returns the structured 409 ({error, conflict, revision}) without mutating.
+          schema: { type: string }
       requestBody:
         required: true
         content:
@@ -4408,6 +4500,16 @@ paths:
               schema: { type: object, additionalProperties: true }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+        '409':
+          description: Stale revision assertion; carries the current revision.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '500':
+          description: Rename durable but the display-name cascade did not persist (truthful non-2xx; converges at next restart).
+          content:
+            text/plain:
+              schema: { type: string }
     delete:
       operationId: deleteFileblockProfile
       tags: [policy]
@@ -4433,6 +4535,11 @@ paths:
           in: query
           required: false
           schema: { type: string }
+        - name: ifRevision
+          in: query
+          required: false
+          description: Optional revision assertion (GET /api/fileblock/profiles/state); mismatch returns the structured 409 without mutating.
+          schema: { type: string }
       responses:
         '200':
           description: Delete file-block profile.
@@ -4440,6 +4547,34 @@ paths:
             application/json:
               schema: { type: object, additionalProperties: true }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '409':
+          description: Profile still referenced (delete blocked), or stale revision assertion.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+
+  /api/fileblock/profiles/state:
+    get:
+      operationId: getFileblockProfilesState
+      tags: [policy]
+      summary: File-profile state (v2)
+      description: v2 read contract — every file profile plus the server-owned restart-stable content revision, captured from one committed snapshot. Echo the revision back as ?ifRevision= on mutations; the browser never computes it. The legacy raw-array GET /api/fileblock/profiles is unchanged.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Profiles + content revision.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FileblockProfileState' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
 
   /api/config/versions:

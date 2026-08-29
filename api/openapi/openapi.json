@@ -1388,6 +1388,32 @@
         "nullable": true,
         "type": "array"
       },
+      "FileblockProfileState": {
+        "additionalProperties": false,
+        "description": "v2 file-profile state — profiles + the server-owned restart-stable content revision, from one committed snapshot.",
+        "properties": {
+          "count": {
+            "type": "integer"
+          },
+          "profiles": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "revision": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "profiles",
+          "revision",
+          "count"
+        ],
+        "type": "object"
+      },
       "FleetConvergence": {
         "additionalProperties": false,
         "description": "Control-plane aggregate of fleet config-sync convergence.",
@@ -2399,6 +2425,9 @@
           "fileProfile": {
             "type": "string"
           },
+          "fileProfileId": {
+            "type": "string"
+          },
           "hitCount": {
             "format": "int64",
             "type": "integer"
@@ -2606,8 +2635,36 @@
               "type": "string"
             },
             "type": "object"
+          },
+          "stableId": {
+            "type": "string"
           }
         },
+        "type": "object"
+      },
+      "RewriteState": {
+        "additionalProperties": false,
+        "description": "v2 header-rewrite state — ordered rules (evaluation order) + the server-owned restart-stable content revision, from one committed snapshot.",
+        "properties": {
+          "count": {
+            "type": "integer"
+          },
+          "revision": {
+            "type": "string"
+          },
+          "rules": {
+            "items": {
+              "$ref": "#/components/schemas/RewriteRuleFull"
+            },
+            "nullable": true,
+            "type": "array"
+          }
+        },
+        "required": [
+          "rules",
+          "revision",
+          "count"
+        ],
         "type": "object"
       },
       "Role": {
@@ -11315,6 +11372,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "Optional revision assertion (GET /api/fileblock/profiles/state); mismatch returns the structured 409 without mutating.",
+            "in": "query",
+            "name": "ifRevision",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -11334,6 +11400,17 @@
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Profile still referenced (delete blocked), or stale revision assertion."
           }
         },
         "security": [
@@ -11397,6 +11474,17 @@
       "post": {
         "description": "Create file-block profile.",
         "operationId": "createFileblockProfile",
+        "parameters": [
+          {
+            "description": "Optional revision assertion (the `revision` from GET /api/fileblock/profiles/state); a mismatch returns the structured 409 ({error, conflict, revision}) without mutating.",
+            "in": "query",
+            "name": "ifRevision",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -11424,6 +11512,17 @@
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Name already taken, or stale revision assertion (carries the current revision)."
           }
         },
         "security": [
@@ -11450,6 +11549,25 @@
       "put": {
         "description": "Update file-block profile.",
         "operationId": "updateFileblockProfile",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional revision assertion (the `revision` from GET /api/fileblock/profiles/state); a mismatch returns the structured 409 ({error, conflict, revision}) without mutating.",
+            "in": "query",
+            "name": "ifRevision",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -11477,6 +11595,27 @@
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Stale revision assertion; carries the current revision."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Rename durable but the display-name cascade did not persist (truthful non-2xx; converges at next restart)."
           }
         },
         "security": [
@@ -11496,6 +11635,45 @@
         "x-culvert-idempotency": "idempotent",
         "x-culvert-introduced-version": "1.0.0",
         "x-culvert-permission": "operator",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/fileblock/profiles/state": {
+      "get": {
+        "description": "v2 read contract — every file profile plus the server-owned restart-stable content revision, captured from one committed snapshot. Echo the revision back as ?ifRevision= on mutations; the browser never computes it. The legacy raw-array GET /api/fileblock/profiles is unchanged.",
+        "operationId": "getFileblockProfilesState",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileblockProfileState"
+                }
+              }
+            },
+            "description": "Profiles + content revision."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "File-profile state (v2)",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"
@@ -17137,8 +17315,27 @@
         "operationId": "deleteRewriteRule",
         "parameters": [
           {
+            "description": "Legacy process-local integer id (compatibility addressing).",
             "in": "query",
             "name": "id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Durable rule identity (preferred v2 addressing).",
+            "in": "query",
+            "name": "stableId",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional revision assertion (GET /api/rewrite/state); mismatch returns the structured 409 without mutating.",
+            "in": "query",
+            "name": "ifRevision",
             "required": false,
             "schema": {
               "type": "string"
@@ -17162,6 +17359,20 @@
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/PlainNotFound"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Stale revision assertion; carries the current revision."
           }
         },
         "security": [
@@ -17225,6 +17436,17 @@
       "post": {
         "description": "Adds an HTTP header rewrite rule.",
         "operationId": "addRewriteRule",
+        "parameters": [
+          {
+            "description": "Optional revision assertion (the `revision` from GET /api/rewrite/state); a mismatch returns the structured 409 without mutating. Any client-supplied stableId in the body is ignored — the server owns identity on create.",
+            "in": "query",
+            "name": "ifRevision",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -17240,18 +17462,28 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "type": "object"
+                  "$ref": "#/components/schemas/RewriteRuleFull"
                 }
               }
             },
-            "description": "Updated."
+            "description": "The created rule with its server-assigned stableId (and process-local integer id)."
           },
           "400": {
             "$ref": "#/components/responses/PlainBadRequest"
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Stale revision assertion; carries the current revision."
           }
         },
         "security": [
@@ -17271,6 +17503,45 @@
         "x-culvert-idempotency": "idempotent",
         "x-culvert-introduced-version": "1.0.0",
         "x-culvert-permission": "operator",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/rewrite/state": {
+      "get": {
+        "description": "v2 read contract — the ordered rewrite rules (evaluation order) plus the server-owned restart-stable content revision, captured from one committed snapshot. Echo the revision back as ?ifRevision= on mutations; the browser never computes it. The legacy GET /api/rewrite is unchanged.",
+        "operationId": "getRewriteState",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RewriteState"
+                }
+              }
+            },
+            "description": "Ordered rules + content revision."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Header-rewrite state (v2)",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"
