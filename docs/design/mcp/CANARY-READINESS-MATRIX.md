@@ -40,7 +40,7 @@ live tier; Canary *requires* it).
 | 5 | Live executor composed | `live_executor_absent` | `liveExecDepsConfigured` | **NO (dormant)** |
 | 6 | Authoritative UpstreamCaller | `upstream_caller_absent` | live tier | **NO** |
 | 7 | Credential path ready | `credential_path_not_ready` | live tier | **NO** |
-| 8 | Durable events healthy | `durable_events_degraded` | `sharedTelemetry()` | node-dependent |
+| 8 | Durable events healthy | `durable_events_degraded` | `durableEventsHealthy()` — domain CriticalState=="normal" | node-dependent |
 | 9 | Response inspection ready | `response_inspection_not_ready` | `globalMCPShadow.inspectionComposed` | node-dependent |
 | 10 | Registry healthy | `registry_unhealthy` | `mcpInventory.sharedInventory()` | node-dependent |
 | 11 | Catalog healthy | `catalog_unhealthy` | `mcpInventory.sharedInventory()` | node-dependent |
@@ -48,7 +48,7 @@ live tier; Canary *requires* it).
 | 13 | Emergency kill clear | `emergency_kill_active` | `State.Killed()` | node-dependent |
 | 14 | Kill-generation boundary guard | `kill_boundary_guard_absent` | live tier (PREREQ-MCP-KILL-1) | **NO** |
 | 15 | Tool-freshness boundary guard | `tool_freshness_guard_absent` | live tier | **NO** |
-| 16 | Exact live_execution approval | `live_execution_approval_invalid` | `canary.SatisfiesLiveExecution` | **unissuable** |
+| 16 | Exact live_execution approval (PER SCOPED TOOL) | `live_execution_approval_invalid` | `canary.ValidateScopeApprovals` (→ per-tool `SatisfiesLiveExecution`) | **unissuable** |
 | 17 | Server usable | `server_not_usable` | registry/catalog | activation input |
 | 18 | Tool fingerprint current | `tool_fingerprint_stale` | catalog | activation input |
 | 19 | Rollback path healthy | `rollback_path_unhealthy` | rollout coordinator | ✓ (coordinator live) |
@@ -66,9 +66,20 @@ tests — composes as one unit and is never composed).
 | disjointness | no purpose permits both shadow + live | `Purpose.PermitsLiveExecution/PermitsShadowEvaluation` |
 | status | active | `TestSatisfiesLiveExecution_Rejections` |
 | target binding | exact tenant+server+tool+fingerprint+format (rug-pull) | same |
-| expiry | present, unelapsed, ≤ 24h from approval | same |
+| expiry | present, unelapsed, ≤ 24h measured from a real, non-future approval instant | same + `TestSatisfiesLiveExecution_Rejections/{approved_in_future,approved_zero}` |
 | four-eyes | distinct present requester + approver | same |
+| per-tool coverage | EVERY scoped tool has its OWN approval bound to that exact tool identity+fingerprint; no unconstrained target; no approval outside scope | `canary.ValidateScopeApprovals` (`approval_test.go`) |
 | issuance | refused fail-closed in this build | `tooltrust.Purpose.Issuable()` |
+
+### Read-first is TWO gates, not one (§5)
+
+`ScopeReadFirst` (over `rollout.RiskClass`) is **necessary but not sufficient**: the four
+RiskClass buckets cannot separate a control-plane operation from a read — the root `mapRisk`
+folds `policy.OpControl` **and** `OpDiscovery` into `RiskRead`. The authoritative per-request
+gate is `canary.IsReadFirstOperation(policy.OperationClass)`, which admits ONLY `OpRead` and
+`OpDiscovery` and rejects `OpControl`/`OpWrite`/`OpDestructive`/`OpUnset`. A live executor must
+enforce **both**: the scope bounds *which tools*, `IsReadFirstOperation` bounds *which operation*
+as the policy engine actually classified it. Pinned by `operation_test.go`.
 
 ## First-Canary bounds (structurally incapable of fleet-wide)
 
@@ -80,7 +91,9 @@ tests — composes as one unit and is never composed).
 | max total executions ceiling | 1000 | `FirstCanaryMaxTotalCeiling` |
 | max window ceiling | 7 days | `FirstCanaryMaxWindowCeiling` |
 | max approval TTL | 24 hours | `MaxInitialCanaryApprovalTTL` |
-| operation classes | read/discovery only | `ScopeReadFirst` |
+| operation classes (scope axis) | read/discovery only | `ScopeReadFirst` |
+| operation classes (per-request) | OpRead / OpDiscovery only (OpControl excluded) | `IsReadFirstOperation` |
+| identity | ≥1 EXACT principal/client/agent; groups forbidden | `ScopeNoIdentity` / `ScopeUsesGroups` |
 
 ## Automatic-abort taxonomy (§16)
 

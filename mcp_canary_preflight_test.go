@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"testing"
 	"time"
 
@@ -60,23 +61,27 @@ func validCanaryActivationInput(now time.Time) CanaryActivationInput {
 	for i := range digest {
 		digest[i] = 0x11
 	}
+	fpHex := hex.EncodeToString(digest[:]) // scope tool fingerprint == hex of the digest
 	return CanaryActivationInput{
 		Capability: rollout.CapabilityGateway,
 		Scope: rollout.ScopeSpec{
 			Capability: rollout.CapabilityGateway,
 			Servers:    []string{"srv-canary"},
-			Tools:      []rollout.ToolSel{{Server: "srv-canary", Name: "echo", Fingerprint: "abc"}},
+			Tools:      []rollout.ToolSel{{Server: "srv-canary", Name: "echo", Fingerprint: fpHex}},
 			Principals: []string{"synthetic"},
 			Operations: []rollout.RiskClass{rollout.RiskRead},
 		},
 		ScopeRev: 1,
-		Approval: &tooltrust.ToolApproval{
-			Tenant: "t1", ServerID: "srv", ToolName: "echo",
-			Fingerprint: digest, FingerprintFormatVersion: 1,
-			Purpose: tooltrust.PurposeLiveExecution, Status: tooltrust.StatusActive,
-			RequestedBy: "alice", ApprovedBy: "bob", ApprovedAt: now, ExpiresAt: &exp,
-		},
-		Target: canary.LiveTarget{Tenant: "t1", ServerID: "srv", ToolName: "echo", Fingerprint: digest, FingerprintFormat: 1},
+		// One live_execution approval bound to the EXACT scoped tool (server+name+fingerprint).
+		ToolApprovals: []canary.ToolApprovalBinding{{
+			Target: canary.LiveTarget{Tenant: "t1", ServerID: "srv-canary", ToolName: "echo", Fingerprint: digest, FingerprintFormat: 1},
+			Approval: &tooltrust.ToolApproval{
+				Tenant: "t1", ServerID: "srv-canary", ToolName: "echo",
+				Fingerprint: digest, FingerprintFormatVersion: 1,
+				Purpose: tooltrust.PurposeLiveExecution, Status: tooltrust.StatusActive,
+				RequestedBy: "alice", ApprovedBy: "bob", ApprovedAt: now, ExpiresAt: &exp,
+			},
+		}},
 		Budget: canary.Budget{
 			MaxTotalExecutions: 50, MaxExecutionsPerMinute: 5, MaxConcurrentExecutions: 1,
 			MaxPrincipals: 1, MaxTools: 1, MaxServers: 1, Window: time.Hour,
@@ -113,8 +118,15 @@ func TestCanaryActivationPreflight_WiresScopeApprovalBudget(t *testing.T) {
 	}{
 		{"unbounded_scope", func(in *CanaryActivationInput) { in.Scope.Servers = nil }, canary.ReasonScopeNotBounded},
 		{"non_read_first", func(in *CanaryActivationInput) { in.Scope.Operations = []rollout.RiskClass{rollout.RiskWrite} }, canary.ReasonScopeNotReadFirst},
-		{"shadow_approval", func(in *CanaryActivationInput) { in.Approval.Purpose = tooltrust.PurposeShadowEvaluation }, canary.ReasonLiveApprovalInvalid},
-		{"nil_approval", func(in *CanaryActivationInput) { in.Approval = nil }, canary.ReasonLiveApprovalInvalid},
+		{"shadow_approval", func(in *CanaryActivationInput) {
+			in.ToolApprovals[0].Approval.Purpose = tooltrust.PurposeShadowEvaluation
+		}, canary.ReasonLiveApprovalInvalid},
+		{"nil_approval", func(in *CanaryActivationInput) { in.ToolApprovals[0].Approval = nil }, canary.ReasonLiveApprovalInvalid},
+		{"tool_unapproved", func(in *CanaryActivationInput) { in.ToolApprovals = nil }, canary.ReasonLiveApprovalInvalid},
+		{"approval_outside_scope", func(in *CanaryActivationInput) {
+			in.ToolApprovals[0].Target.ToolName = "other"
+			in.ToolApprovals[0].Approval.ToolName = "other"
+		}, canary.ReasonLiveApprovalInvalid},
 		{"server_not_usable", func(in *CanaryActivationInput) { in.ServerUsable = false }, canary.ReasonServerNotUsable},
 		{"stale_fingerprint", func(in *CanaryActivationInput) { in.FingerprintCurrent = false }, canary.ReasonToolFingerprintStale},
 		{"no_budget", func(in *CanaryActivationInput) { in.Budget = canary.Budget{} }, canary.ReasonBudgetNotConfigured},

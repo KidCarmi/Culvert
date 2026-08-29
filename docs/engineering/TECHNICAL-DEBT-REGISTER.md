@@ -377,9 +377,18 @@
      (shadow-only). The consumption predicate already exists (`canary.SatisfiesLiveExecution`);
      the ISSUE path does not.
   3. **Bounded read-first scope** at activation (`canary.ValidateScope` → `ScopeOK`): enumerable,
-     ≤1 server / ≤2 tools / ≤2 principals, exact fingerprints, read/discovery only.
+     ≤1 server / ≤2 tools / ≤2 principals, exact fingerprints, ≥1 EXACT principal with groups
+     forbidden, read/discovery only. Read-first is TWO gates: the scope axis (`ScopeReadFirst`
+     over `rollout.RiskClass`) is necessary but not sufficient — `mapRisk` folds `OpControl` into
+     `RiskRead`, so a live executor must ALSO enforce `canary.IsReadFirstOperation` per request
+     (OpRead/OpDiscovery only). Additionally, EVERY scoped tool needs its OWN live approval bound
+     to that exact tool+fingerprint (`canary.ValidateScopeApprovals`) — no single unconstrained
+     approval authorizes a multi-tool scope.
   4. **Blast-radius budget** at activation (`canary.ValidateBudget` → `BudgetOK`) enforced at
      runtime (total/rate/concurrency/window). The runtime ENFORCEMENT is a live-tier concern.
+     Durable-event readiness is a real HEALTH check, not presence: `durableEventsHealthy`
+     requires the capability domain's critical state to be "normal" (a degraded plane fails
+     `durable_events_degraded`).
   5. **Shadow-Exit attestation surface** (`shadowExitReviewAttested` returns false today).
   6. **Wire the preflight as the primary activation gate** and the abort taxonomy
      (`canary.AbortConditions`) into runtime detectors.
@@ -392,8 +401,19 @@
   CP rollback/replay + restart while configured → existing rollout apply/restore gates;
   out-of-scope fallback executing → `TestAntiWeakening_OutOfScopeDoesNotExecute`; upstream success
   + DLP failure → existing `finishUpstream` inspection fail-closed; LiveExecutor leak into Shadow
-  → `TestShadow_TypeGraphHasNoExecuteCapability` + `TestCanaryPackageHoldsNoExecutionCapability`.
+  → `TestShadow_TypeGraphHasNoExecuteCapability` + `TestCanaryPackageHoldsNoExecutionCapability`;
+  one approval covering a multi-tool scope → `TestValidateScopeApprovals_MissingToolIsUnapproved`;
+  control-plane op smuggled as read-first → `TestIsReadFirstOperation_ControlIsExcluded`;
+  future-dated approval defeating the TTL ceiling → `TestSatisfiesLiveExecution_Rejections`
+  (approved_in_future); group-only/identity-less scope → `TestValidateScope_Rejections`
+  (no_identity/uses_groups); degraded durable-event plane still ready → `durableEventsHealthy`.
   No open red-team finding: every attack maps to a standing gate or a dormant fail-closed state.
+- **Codex review hardening (PR #1249):** five architecture gaps found by Codex and closed in the
+  contract before merge — (P1-A) request-time read-first gate `IsReadFirstOperation` distinct
+  from the RiskClass axis; (P1-B) `durableEventsHealthy` from real critical-state health, not
+  presence; (P1-C) per-tool approval binding `ValidateScopeApprovals` replacing a single
+  unconstrained approval; (P1-D) exact-identity requirement / groups forbidden; (P2)
+  future/zero-dated `ApprovedAt` rejected before the TTL ceiling.
 - **Evidence:** ADR-0035; `docs/design/mcp/CANARY-READINESS-MATRIX.md`;
   `docs/design/mcp/CANARY-FIRST-RUNBOOK.md`; `internal/mcp/canary/*_test.go`;
   `mcp_canary_preflight_test.go`; the differential gate `TestShadow_LivePreSideEffectEquivalence`.

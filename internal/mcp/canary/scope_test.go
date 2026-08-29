@@ -50,6 +50,18 @@ func TestValidateScope_Rejections(t *testing.T) {
 			}
 		}, ScopeTooManyTools},
 		{"too_many_principals", func(s *rollout.ScopeSpec) { s.Principals = []string{"a", "b", "c"} }, ScopeTooManyPrincipals},
+		{"no_identity", func(s *rollout.ScopeSpec) { s.Principals = nil }, ScopeNoIdentity},
+		{"group_only_identity", func(s *rollout.ScopeSpec) {
+			// A group-only scope binds no exact principal — rejected as no-identity (groups are
+			// not a bounded principal axis; Codex P1-D).
+			s.Principals = nil
+			s.Groups = []string{"g1"}
+		}, ScopeNoIdentity},
+		{"uses_groups", func(s *rollout.ScopeSpec) {
+			// Even WITH an exact principal, adding a group is forbidden for a first Canary —
+			// membership can change without a scope edit (Codex P1-D).
+			s.Groups = []string{"g1"}
+		}, ScopeUsesGroups},
 		{"tool_missing_fingerprint", func(s *rollout.ScopeSpec) {
 			s.Tools = []rollout.ToolSel{{Server: "srv-canary", Name: "echo"}} // no Fingerprint (wildcard-future-tool)
 		}, ScopeToolMissingFingerprint},

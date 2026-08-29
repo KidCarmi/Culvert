@@ -30,6 +30,7 @@ const (
 	TrustNoFourEyes        TrustReason = "approval_not_four_eyes"       // requester == approver, or either missing
 	TrustTargetMismatch    TrustReason = "approval_target_mismatch"     // tenant/server/tool/fingerprint mismatch
 	TrustFingerprintFormat TrustReason = "approval_fingerprint_format_mismatch"
+	TrustApprovedInFuture  TrustReason = "approval_instant_in_future" // ApprovedAt zero or after now (malformed / clock-skew)
 )
 
 // LiveTarget is the exact current tool identity a live execution is about to act on. Every
@@ -85,11 +86,21 @@ func SatisfiesLiveExecution(a *tooltrust.ToolApproval, tgt LiveTarget, now time.
 	if !now.Before(*a.ExpiresAt) {
 		return TrustExpired
 	}
-	// The validity window is measured from the APPROVAL instant (when the grant became
-	// live), not from now, so a long-dormant-then-approved request cannot smuggle a long
-	// window. A missing ApprovedAt was already excluded by four-eyes requiring ApprovedBy,
-	// but guard the zero time defensively.
-	if a.ApprovedAt.IsZero() || a.ExpiresAt.Sub(a.ApprovedAt) > MaxInitialCanaryApprovalTTL {
+	// The validity window is measured from the APPROVAL instant (when the grant became live),
+	// not from now, so a long-dormant-then-approved request cannot smuggle a long window. The
+	// approval instant must be real and not in the future: a future ApprovedAt (malformed,
+	// corrupt, or clock-skewed record) with a future-relative TTL would otherwise be accepted
+	// for the whole intervening span, defeating the short-lived ceiling (Codex P2, PR #1249).
+	//
+	// This check is placed AFTER the unelapsed-expiry check above, and together they make the
+	// window necessarily positive: ApprovedAt <= now (here) and now < ExpiresAt (above) imply
+	// ExpiresAt > ApprovedAt. So the ceiling below measures a real forward window — Codex P2's
+	// "ExpiresAt > ApprovedAt before accepting the TTL" holds by construction, no separate
+	// backwards-window branch is reachable.
+	if a.ApprovedAt.IsZero() || a.ApprovedAt.After(now) {
+		return TrustApprovedInFuture
+	}
+	if a.ExpiresAt.Sub(a.ApprovedAt) > MaxInitialCanaryApprovalTTL {
 		return TrustTTLTooLong
 	}
 	// (3) exact current-target binding (rug-pull invariant). MatchesTool compares tenant,

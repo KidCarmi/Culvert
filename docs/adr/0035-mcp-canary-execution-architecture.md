@@ -57,25 +57,46 @@ for `live_execution`), making the firewall a compile-checkable predicate: the tw
 disjoint, so **no approval satisfies both** — a `shadow_evaluation` approval can never authorize
 a real side effect (`TestSatisfiesLiveExecution_ShadowApprovalNeverQualifies`).
 
-`canary.SatisfiesLiveExecution(approval, target, now)` is the consumption predicate. It requires,
-fail-closed: `purpose==live_execution`, `status==active`, exact current-target binding
-(tenant+server+tool+fingerprint+format — the rug-pull invariant), a present, unelapsed expiry no
-longer than `MaxInitialCanaryApprovalTTL` (24h) measured from the approval instant, and
-**four-eyes** (distinct present requester and approver — separation of duties). Issuance stays
-refused in this build; this predicate is what a future, separately-reviewed live phase's issue
-path must satisfy.
+`canary.SatisfiesLiveExecution(approval, target, now)` is the per-approval consumption predicate.
+It requires, fail-closed: `purpose==live_execution`, `status==active`, exact current-target
+binding (tenant+server+tool+fingerprint+format — the rug-pull invariant), a present, unelapsed
+expiry no longer than `MaxInitialCanaryApprovalTTL` (24h) measured from a **real, non-future**
+approval instant (`ApprovedAt<=now`; a future or zero `ApprovedAt` is rejected so a
+future-relative window cannot smuggle a long TTL — the unelapsed-expiry and non-future-approval
+checks jointly guarantee `ExpiresAt>ApprovedAt`), and **four-eyes** (distinct present requester
+and approver — separation of duties).
+
+A Canary scope names up to two tools, so a **single** approval must never authorize the whole
+scope. `canary.ValidateScopeApprovals(scope, bindings, now)` is the scope-level gate: EVERY
+scoped tool must have its OWN binding whose target is that exact tool (server+name) AND whose
+target fingerprint equals the scope's declared fingerprint (both are hex of the same 32-byte
+digest), each satisfying `SatisfiesLiveExecution`; a missing, duplicate, wrong-fingerprint, or
+out-of-scope binding fails closed. The preflight's `LiveApprovalValid` fact is driven by this,
+not by an unconstrained target supplied alongside the scope. Issuance stays refused in this
+build; these predicates are what a future, separately-reviewed live phase's issue path must
+satisfy.
 
 ### 3. Bounded, read-first Canary scope (§4/§5)
 
 `canary.ValidateScope` requires the scope be Gateway-only, enumerable (a percentage-only scope
 is rejected — "1% of everything cannot enter Canary"), bind **exact** servers and tools each
-with a pinned fingerprint (no wildcard-future-tools), stay within tiny first-Canary caps
-(`MaxCanaryServers=1`, `MaxCanaryTools=2`, `MaxCanaryPrincipals=2` — structurally incapable of
-fleet-wide), and be **read-first** (`Operations ⊆ {read}`, `!HighRisk`). The authority for
-read-first is Culvert's own `rollout.RiskClass` classification (derived by the policy engine),
-**never** the server-provided MCP `readOnlyHint`. Graduation
-(read/discovery → bounded write → destructive/control) raises these constants under its own
-review — the edit is what a reviewer sees; existing policy-action semantics are unchanged.
+with a pinned fingerprint (no wildcard-future-tools), bind at least one **exact** principal/
+client/agent with **groups forbidden** (`ScopeNoIdentity`/`ScopeUsesGroups` — a group's
+membership can change without a scope edit, so the "who" axis would not be enumerable), stay
+within tiny first-Canary caps (`MaxCanaryServers=1`, `MaxCanaryTools=2`, `MaxCanaryPrincipals=2`
+— structurally incapable of fleet-wide), and be **read-first** (`Operations ⊆ {read}`,
+`!HighRisk`).
+
+Read-first is enforced at **two** levels because `rollout.RiskClass` has only four buckets and
+the root `mapRisk` folds `policy.OpControl` (and `OpDiscovery`) into `RiskRead` — so a
+scope-level read-first check cannot exclude a control-plane operation. `ScopeReadFirst` is the
+necessary scope axis; `canary.IsReadFirstOperation(policy.OperationClass)` is the authoritative
+per-request gate a live executor must ALSO enforce, admitting only `OpRead`/`OpDiscovery` and
+rejecting `OpControl`/`OpWrite`/`OpDestructive`. The authority for read-first is Culvert's own
+operation classification (derived by the policy engine), **never** the server-provided MCP
+`readOnlyHint`. Graduation (read/discovery → bounded write → destructive/control) raises these
+constants under its own review — the edit is what a reviewer sees; existing policy-action
+semantics are unchanged.
 
 ### 4. Blast-radius budget (§15)
 
@@ -141,10 +162,15 @@ Twelve defects, each caught by a named gate:
 | 10 | out-of-scope Canary executes | `TestAntiWeakening_OutOfScopeDoesNotExecute` (execution) |
 | 11 | LiveExecutor armed without prerequisites | `TestExecPosture_LiveArmingHooksHaveNoProductionCaller` |
 | 12 | LiveExecutor leaks into Shadow type graph | `TestShadow_TypeGraphHasNoExecuteCapability` + `TestCanaryPackageHoldsNoExecutionCapability` |
+| 13 | one approval authorizes a multi-tool scope | `TestValidateScopeApprovals_MissingToolIsUnapproved` + `_Rejections` (outside_scope/duplicate/wrong_fingerprint) |
+| 14 | control-plane op treated as read-first | `TestIsReadFirstOperation_ControlIsExcluded` |
+| 15 | future/zero-dated approval passes the TTL ceiling | `TestSatisfiesLiveExecution_Rejections` (approved_in_future/approved_zero) |
+| 16 | group-only / identity-less scope enters Canary | `TestValidateScope_Rejections` (no_identity/group_only_identity/uses_groups) |
+| 17 | degraded durable-event plane still Canary-ready | `durableEventsHealthy` (domain CriticalState=="normal"; `mcp_canary_preflight_test.go`) |
 
-Mutations 1–4 (plus four-eyes, TTL ceiling, read-first, bound-cap, fingerprint) are mechanically
-re-introduced and confirmed to fail their gate by the Canary mutation campaign; 5–12 are covered
-by existing execution-plane gates.
+Mutations 1–4 and 13–17 (plus four-eyes, TTL ceiling, read-first, bound-cap, fingerprint,
+per-tool coverage, exact identity) are mechanically re-introduced and confirmed to fail their
+gate by the Canary mutation campaign; 5–12 are covered by existing execution-plane gates.
 
 ## Consequences
 

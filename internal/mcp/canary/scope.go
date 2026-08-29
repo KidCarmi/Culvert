@@ -38,8 +38,10 @@ const (
 	ScopeTooManyTools           ScopeReason = "scope_too_many_tools"
 	ScopeTooManyPrincipals      ScopeReason = "scope_too_many_principals"
 	ScopeToolMissingFingerprint ScopeReason = "scope_tool_missing_fingerprint"
-	ScopeHighRisk               ScopeReason = "scope_high_risk"      // HighRisk set, or write/destructive operations
-	ScopeNotReadFirst           ScopeReason = "scope_not_read_first" // Operations include a non-read class
+	ScopeHighRisk               ScopeReason = "scope_high_risk"            // HighRisk set, or write/destructive operations
+	ScopeNotReadFirst           ScopeReason = "scope_not_read_first"       // Operations include a non-read class
+	ScopeNoIdentity             ScopeReason = "scope_no_explicit_identity" // no exact principal/client/agent bound
+	ScopeUsesGroups             ScopeReason = "scope_uses_groups"          // group-based identity forbidden for first Canary
 )
 
 // ValidateScope enforces the first-Canary scope contract (§4/§5) on a candidate
@@ -127,6 +129,20 @@ func validateScopeBounds(spec rollout.ScopeSpec) ScopeReason {
 	if len(spec.Tools) > MaxCanaryTools {
 		return ScopeTooManyTools
 	}
+	// A first Canary must name WHO can trigger it — at least one exact principal/client/agent.
+	// A scope with zero explicit identities would be triggerable by any authenticated caller
+	// the other dimensions admit (an unbounded "who" axis), which the first-Canary contract
+	// forbids: the blast radius includes the identity, not only the server+tool (Codex P1-D,
+	// PR #1249).
+	if principalCount(spec) == 0 {
+		return ScopeNoIdentity
+	}
+	// Groups are NOT an admissible identity binding for a first Canary: a group expands to a
+	// membership set that can change without a scope edit, so a group-scoped Canary is not
+	// enumerable on the identity axis. The first Canary binds exact synthetic principals only.
+	if len(spec.Groups) > 0 {
+		return ScopeUsesGroups
+	}
 	if principalCount(spec) > MaxCanaryPrincipals {
 		return ScopeTooManyPrincipals
 	}
@@ -146,6 +162,14 @@ func principalCount(spec rollout.ScopeSpec) int {
 // the fact the readiness layer consumes as ScopeReadFirst. It is the isolated read-first
 // half of ValidateScope (a scope can be bounded but not read-first, and the two produce
 // distinct readiness reasons).
+//
+// NECESSARY BUT NOT SUFFICIENT: this operates on rollout.RiskClass, whose four buckets cannot
+// separate a control-plane operation from a read — the root mapRisk() folds OpControl into
+// RiskRead. A scope that passes ScopeReadFirst therefore still admits a request the policy
+// engine classifies as OpControl. The per-request authoritative read-first gate is
+// IsReadFirstOperation (operation.go), over the finer policy.OperationClass; a live executor
+// must enforce BOTH — the scope bounds which tools, IsReadFirstOperation bounds the operation
+// as actually classified (Codex P1-A, PR #1249).
 func ScopeReadFirst(spec rollout.ScopeSpec) bool {
 	if spec.HighRisk {
 		return false

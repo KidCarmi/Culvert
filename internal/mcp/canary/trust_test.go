@@ -80,6 +80,20 @@ func TestSatisfiesLiveExecution_Rejections(t *testing.T) {
 			e := a.ApprovedAt.Add(MaxInitialCanaryApprovalTTL + time.Hour)
 			a.ExpiresAt = &e
 		}, TrustTTLTooLong},
+		{"approved_in_future", func(a *tooltrust.ToolApproval) {
+			// A future approval instant with a future-relative, in-window expiry would pass the
+			// TTL ceiling (window measured from the future ApprovedAt) but must be rejected: the
+			// approval has not yet become live (Codex P2). ExpiresAt stays after now so it passes
+			// the expiry check and actually reaches the ApprovedInFuture guard.
+			a.ApprovedAt = now.Add(2 * time.Hour)
+			e := a.ApprovedAt.Add(time.Hour) // 3h from now — unelapsed, so not caught as expired
+			a.ExpiresAt = &e
+		}, TrustApprovedInFuture},
+		{"approved_zero", func(a *tooltrust.ToolApproval) {
+			// A zero ApprovedAt is a malformed record: the window would be measured from the epoch
+			// and trivially exceed the ceiling. Reject as in-future (the instant is not real).
+			a.ApprovedAt = time.Time{}
+		}, TrustApprovedInFuture},
 		{"fingerprint_format", func(a *tooltrust.ToolApproval) { a.FingerprintFormatVersion = 2 }, TrustFingerprintFormat},
 		{"fingerprint_mismatch", func(a *tooltrust.ToolApproval) { a.Fingerprint = fp(0x22) }, TrustTargetMismatch},
 		{"server_mismatch", func(a *tooltrust.ToolApproval) { a.ServerID = "other" }, TrustTargetMismatch},

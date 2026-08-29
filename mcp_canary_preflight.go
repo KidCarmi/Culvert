@@ -4,8 +4,8 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/canary"
+	evmodel "github.com/KidCarmi/Culvert/internal/mcp/events/model"
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
-	"github.com/KidCarmi/Culvert/internal/mcp/tooltrust"
 )
 
 // Canary activation preflight (ADR-0035). This is the root composition-layer bridge between
@@ -56,7 +56,7 @@ func canaryNodeFacts(capb rollout.Capability) canary.Facts {
 		ToolFreshnessGuardPresent: live,
 
 		// Evaluation plane — each from its own live signal.
-		DurableEventsHealthy:    sharedTelemetry() != nil,
+		DurableEventsHealthy:    durableEventsHealthy(capb),
 		ResponseInspectionReady: globalMCPShadow.inspectionComposed.Load(),
 		RegistryHealthy:         reg != nil,
 		CatalogHealthy:          cat != nil,
@@ -77,19 +77,50 @@ func canaryNodeFacts(capb rollout.Capability) canary.Facts {
 	}
 }
 
+// durableEventsHealthy reports whether the durable-event plane is actually HEALTHY for the
+// Canary's capability domain — not merely present. A live execution commits an
+// evidence-before-side-effect decision through this plane; if the domain's critical durability
+// is degraded, a decision may not be durably recorded before the irreversible side effect, so
+// Canary must NOT be ready (Codex P1-B, PR #1249). It is fail-closed: false unless the
+// telemetry runtime is composed AND the matching capability domain reports the "normal"
+// critical state (a degraded/recovering/unknown domain, or a missing domain snapshot, all fail
+// closed).
+func durableEventsHealthy(capb rollout.Capability) bool {
+	t := sharedTelemetry()
+	if t == nil {
+		return false
+	}
+	mgr := t.Manager()
+	if mgr == nil {
+		return false
+	}
+	dom := evmodel.CapGateway
+	if capb == rollout.CapabilityManagement {
+		dom = evmodel.CapManagement
+	}
+	dh, ok := mgr.Health().Domains[dom]
+	if !ok {
+		return false
+	}
+	return dh.CriticalState == "normal"
+}
+
 // CanaryActivationInput carries the scope-dependent activation inputs the preflight layers on
-// top of node readiness: the requested Canary scope, a candidate live_execution approval and
-// the exact current target it must bind, and the blast-radius budget. All are supplied by the
-// (future) activation caller; the pure canary validators decide.
+// top of node readiness: the requested Canary scope, one candidate live_execution approval
+// PER SCOPED TOOL (each bound to that tool's exact current target — never a single
+// unconstrained approval trusted for the whole scope; Codex P1-C), and the blast-radius
+// budget. All are supplied by the (future) activation caller; the pure canary validators decide.
 type CanaryActivationInput struct {
 	Capability rollout.Capability
 	Scope      rollout.ScopeSpec
 	ScopeRev   uint64
-	Approval   *tooltrust.ToolApproval
-	Target     canary.LiveTarget
-	Budget     canary.Budget
+	// ToolApprovals must exactly cover every tool in Scope.Tools — one valid live_execution
+	// approval bound to each scoped tool's exact current target. A partial or over-broad set
+	// fails closed (LiveApprovalValid stays false).
+	ToolApprovals []canary.ToolApprovalBinding
+	Budget        canary.Budget
 	// ServerUsable / FingerprintCurrent are the live-observation facts the caller resolves
-	// from the registry/catalog for the exact target (kept as inputs so the preflight stays
+	// from the registry/catalog for the exact targets (kept as inputs so the preflight stays
 	// pure w.r.t. inventory beyond the node scan).
 	ServerUsable       bool
 	FingerprintCurrent bool
@@ -111,7 +142,9 @@ func evaluateCanaryActivationPreflight(in CanaryActivationInput) canary.Readines
 	f := canaryNodeFacts(in.Capability)
 	f.ScopeBounded = canary.ValidateScope(in.Scope, in.ScopeRev) == canary.ScopeOK
 	f.ScopeReadFirst = canary.ScopeReadFirst(in.Scope)
-	f.LiveApprovalValid = canary.SatisfiesLiveExecution(in.Approval, in.Target, in.Now) == canary.TrustOK
+	// LiveApprovalValid is true only when EVERY scoped tool has its own valid live_execution
+	// approval bound to that exact tool identity — never a single unconstrained approval.
+	f.LiveApprovalValid = canary.ValidateScopeApprovals(in.Scope, in.ToolApprovals, in.Now) == canary.ScopeApprovalOK
 	f.ServerUsable = in.ServerUsable
 	f.ToolFingerprintCurrent = in.FingerprintCurrent
 	f.BudgetConfigured = canary.ValidateBudget(in.Budget) == canary.BudgetOK
