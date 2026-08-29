@@ -111,7 +111,7 @@ func controlledScope() rollout.ScopeSpec {
 // witnessEndpoint starts a REAL controlled upstream server and returns it plus the
 // inventory endpoint token that registers it as the controlled server. A regressed
 // upstream dial to the registered endpoint would land on hits.
-func witnessEndpoint(t *testing.T, hits *int64) (*httptest.Server, string) {
+func witnessEndpoint(t *testing.T, hits *int64) (srv *httptest.Server, endpoint string) {
 	t.Helper()
 	w := httptest.NewTLSServer(http.HandlerFunc(func(wr http.ResponseWriter, _ *http.Request) {
 		atomic.AddInt64(hits, 1)
@@ -143,7 +143,7 @@ func mintBearerSub(t *testing.T, p *mcpTestPKI, aud, tenant, sub string) string 
 }
 
 // gwPost issues one authenticated MCP POST to the controlled server path.
-func gwPost(t *testing.T, cli *http.Client, base, serverID, token, sid, body string) (int, string, []byte) {
+func gwPost(t *testing.T, cli *http.Client, base, serverID, token, sid, body string) (status int, sessionID string, respBody []byte) {
 	t.Helper()
 	r := mcpObserveReq(t, "POST", base+"/mcp/gateway/"+serverID, body)
 	r.Host = "gw.test"
@@ -155,7 +155,7 @@ func gwPost(t *testing.T, cli *http.Client, base, serverID, token, sid, body str
 	}
 	resp, err := cli.Do(r)
 	req(t, err == nil, "post: %v", err)
-	defer resp.Body.Close() //nolint:errcheck
+	defer resp.Body.Close() //nolint:errcheck // best-effort close of the response body in a test
 	raw, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, resp.Header.Get("Mcp-Session-Id"), raw
 }
@@ -173,7 +173,7 @@ func handshake(t *testing.T, cli *http.Client, base, serverID, token string) str
 }
 
 // toolsCall posts a tools/call and returns status + the parsed result object.
-func toolsCall(t *testing.T, cli *http.Client, base, token, sid, id, tool, arg string) (int, map[string]any) {
+func toolsCall(t *testing.T, cli *http.Client, base, token, sid, id, tool, arg string) (status int, result map[string]any) {
 	t.Helper()
 	st, _, body := gwPost(t, cli, base, ctrlServer, token, sid,
 		`{"jsonrpc":"2.0","id":`+id+`,"method":"tools/call","params":{"name":"`+tool+`","arguments":`+arg+`}}`)
