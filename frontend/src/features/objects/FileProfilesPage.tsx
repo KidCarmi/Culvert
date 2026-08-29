@@ -48,8 +48,7 @@ import { ObjectDeleteDialog } from "./ObjectDeleteDialog";
 import styles from "../policy/policy.module.css";
 
 type EditorMode =
-  | { kind: "create" }
-  | { kind: "edit"; profile: FileProfileView };
+  { kind: "create" } | { kind: "edit"; profile: FileProfileView };
 
 export function FileProfilesPage(): JSX.Element {
   const page = useObjectPage(["objects", "file-profiles"], getFileProfileState);
@@ -234,11 +233,10 @@ export function FileProfilesPage(): JSX.Element {
           body={
             <>
               This deletes the file profile <strong>{deleting.name}</strong> (
-              <Mono>{deleting.id}</Mono>,{" "}
-              {String(deleting.extensions.length)}{" "}
+              <Mono>{deleting.id}</Mono>, {String(deleting.extensions.length)}{" "}
               {deleting.extensions.length === 1 ? "extension" : "extensions"}).
-              The delete is refused while any Access Rule — running or staged
-              in an active Policy Draft — references it.
+              The delete is refused while any Access Rule — running or staged in
+              an active Policy Draft — references it.
             </>
           }
           doDelete={(signal) =>
@@ -360,8 +358,8 @@ function ProfileRow({
                 <Callout variant="info" title="Seeded built-in profile">
                   This profile was seeded at first run. It can be edited,
                   renamed, or deleted like any profile — referencing rules
-                  follow its stable object ID, and legacy rules naming a
-                  removed built-in fall back to the compiled extension set.
+                  follow its stable object ID, and legacy rules naming a removed
+                  built-in fall back to the compiled extension set.
                 </Callout>
               )}
               <WhereUsed type="file-profile" name={p.name} />
@@ -396,10 +394,12 @@ function ProfileEditor({
   onDirtyChange: (dirty: boolean) => void;
   onConflictNotice: (text: string) => void;
 }): JSX.Element {
-  const initial =
-    mode.kind === "edit"
-      ? mode.profile
-      : { id: "", name: "", extensions: [] as readonly string[] };
+  const emptyInitial: Pick<FileProfileView, "id" | "name" | "extensions"> = {
+    id: "",
+    name: "",
+    extensions: [],
+  };
+  const initial = mode.kind === "edit" ? mode.profile : emptyInitial;
   const [name, setName] = useState(initial.name);
   const [extText, setExtText] = useState(initial.extensions.join("\n"));
   const [pending, setPending] = useState(false);
@@ -489,10 +489,10 @@ function ProfileEditor({
         {renaming && (
           <Callout variant="info" title="This is a rename">
             The stable object ID is preserved, so every referencing Access Rule
-            keeps enforcing this same profile. The appliance updates the
-            display name on referencing rules — in the running policy and in
-            any open Policy Draft candidate. A name already used by another
-            profile is refused.
+            keeps enforcing this same profile. The appliance updates the display
+            name on referencing rules — in the running policy and in any open
+            Policy Draft candidate. A name already used by another profile is
+            refused.
           </Callout>
         )}
         <TextareaField

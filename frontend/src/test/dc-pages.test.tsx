@@ -433,9 +433,7 @@ it("header rewrite: zero header operations is refused before any request", async
   setField("Host scope", "app.example.com");
   await click(findButton((t) => t === "Create rule"));
   await flushUntil(() => {
-    expect(container.textContent).toContain(
-      "At least one header operation",
-    );
+    expect(container.textContent).toContain("At least one header operation");
   });
   expect(mutations).toHaveLength(0);
 });

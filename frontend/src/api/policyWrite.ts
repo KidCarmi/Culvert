@@ -343,7 +343,8 @@ export function getFileProfileNames(
 ): Promise<readonly string[]> {
   return apiRequest(
     "/api/fileblock/profiles/state",
-    (v, path = "$") => decodeFileProfileState(v, path).profiles.map((p) => p.name),
+    (v, path = "$") =>
+      decodeFileProfileState(v, path).profiles.map((p) => p.name),
     signal !== undefined ? { signal } : {},
   );
 }

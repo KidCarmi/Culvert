@@ -270,13 +270,7 @@ function RewriteRow({
           </Button>
         </td>
         <td className={styles.numeric}>{String(position)}</td>
-        <td>
-          {r.host === "" ? (
-            <em>All hosts</em>
-          ) : (
-            <Mono>{r.host}</Mono>
-          )}
-        </td>
+        <td>{r.host === "" ? <em>All hosts</em> : <Mono>{r.host}</Mono>}</td>
         <td className={styles.refDetail}>
           {summarizeOps(r.reqSet, r.reqAdd, r.reqRemove)}
         </td>
@@ -307,7 +301,9 @@ function RewriteRow({
                 <div>
                   <dt className={styles.refDetail}>Stable ID</dt>
                   <dd>
-                    <Mono>{r.stableId === "" ? "(not assigned)" : r.stableId}</Mono>
+                    <Mono>
+                      {r.stableId === "" ? "(not assigned)" : r.stableId}
+                    </Mono>
                   </dd>
                 </div>
                 <div>
@@ -322,8 +318,18 @@ function RewriteRow({
                   <dd>{hostScopeLabel(r.host)}</dd>
                 </div>
               </dl>
-              <OpsDetail title="Request headers" set={r.reqSet} add={r.reqAdd} remove={r.reqRemove} />
-              <OpsDetail title="Response headers" set={r.respSet} add={r.respAdd} remove={r.respRemove} />
+              <OpsDetail
+                title="Request headers"
+                set={r.reqSet}
+                add={r.reqAdd}
+                remove={r.reqRemove}
+              />
+              <OpsDetail
+                title="Response headers"
+                set={r.respSet}
+                add={r.respAdd}
+                remove={r.respRemove}
+              />
             </div>
           </td>
         </tr>
@@ -607,7 +613,9 @@ function RewriteEditor<T>({
           onCancel();
           return;
         }
-        setServerError(serverErrorText(err, "The appliance rejected the rule."));
+        setServerError(
+          serverErrorText(err, "The appliance rejected the rule."),
+        );
       })
       .finally(() => {
         page.owner.settle(signal);
@@ -693,9 +701,9 @@ function RewriteEditor<T>({
         />
 
         <p className={styles.refDetail}>
-          {String(opCount)} header{" "}
-          {opCount === 1 ? "operation" : "operations"} defined. The appliance
-          assigns the rule&apos;s durable identity on create.
+          {String(opCount)} header {opCount === 1 ? "operation" : "operations"}{" "}
+          defined. The appliance assigns the rule&apos;s durable identity on
+          create.
         </p>
 
         {parseErrors.length > 0 && (

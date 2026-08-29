@@ -202,7 +202,10 @@ export interface RewriteState {
 
 const optStr = readOptional(readString);
 
-function readStrMap(v: unknown, path: string): Readonly<Record<string, string>> {
+function readStrMap(
+  v: unknown,
+  path: string,
+): Readonly<Record<string, string>> {
   if (v === undefined || v === null) return {};
   const o = readRecord(v, path);
   const out: Record<string, string> = {};
@@ -282,15 +285,11 @@ export function createRewriteRule(
   ifRevision: string,
   signal?: AbortSignal,
 ): Promise<RewriteRuleView> {
-  return apiRequest(
-    fencedRev("/api/rewrite", ifRevision),
-    decodeRewriteRule,
-    {
-      method: "POST",
-      body: serializeRewriteWrite(write),
-      ...(signal !== undefined ? { signal } : {}),
-    },
-  );
+  return apiRequest(fencedRev("/api/rewrite", ifRevision), decodeRewriteRule, {
+    method: "POST",
+    body: serializeRewriteWrite(write),
+    ...(signal !== undefined ? { signal } : {}),
+  });
 }
 
 export function deleteRewriteRule(
@@ -299,7 +298,10 @@ export function deleteRewriteRule(
   signal?: AbortSignal,
 ): Promise<void> {
   return apiRequest(
-    fencedRev(`/api/rewrite?stableId=${encodeURIComponent(stableId)}`, ifRevision),
+    fencedRev(
+      `/api/rewrite?stableId=${encodeURIComponent(stableId)}`,
+      ifRevision,
+    ),
     decodeOk,
     { method: "DELETE", ...(signal !== undefined ? { signal } : {}) },
   );
