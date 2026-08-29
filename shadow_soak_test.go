@@ -589,16 +589,17 @@ func TestShadowSoak(t *testing.T) {
 
 // publishEchoPolicy publishes a new policy revision into the LIVE holder (immediate pickup,
 // no recompose) in which echo is ALLOW or DENY (default-deny) and everything else is stable.
-func (r *soakRun) publishEchoPolicy(rev int, echoAllow bool) {
+func (r *soakRun) publishEchoPolicy(rev uint64, echoAllow bool) {
 	t := r.t
 	rules := allowDiscoveryRule + "," + soakAllowRug + "," + soakRequireApproval + "," + soakRequireConfirm
 	if echoAllow {
 		rules += "," + soakAllowEcho
 	}
-	snap, err := policy.Compile([]byte(gwPolicyDoc(rev, rules)), policy.CreatedMeta{}, policy.DefaultLimits())
+	//nolint:gosec // G115: rev is a small positive test revision; gwPolicyDoc takes int.
+	snap, err := policy.Compile([]byte(gwPolicyDoc(int(rev), rules)), policy.CreatedMeta{}, policy.DefaultLimits())
 	req(t, err == nil, "compile policy rev %d: %v", rev, err)
 	req(t, mcpPolicy.publish(mcpPolLoaded, "", snap) == nil, "publish policy rev %d", rev)
-	req(t, mcpPolicy.status().Revision == uint64(rev), "live policy revision must be %d after publish, got %d", rev, mcpPolicy.status().Revision)
+	req(t, mcpPolicy.status().Revision == rev, "live policy revision must be %d after publish, got %d", rev, mcpPolicy.status().Revision)
 }
 
 // policyChurn proves policy revisions are applied atomically with correct evidence stamping
@@ -650,7 +651,7 @@ func (r *soakRun) policyChurn() {
 	// thousands under heavy soak), and the policy holder rejects a publish at or below the
 	// live revision, so the restore revision must be read from the now-stopped holder rather
 	// than hardcoded.
-	r.publishEchoPolicy(int(mcpPolicy.status().Revision)+1, true)
+	r.publishEchoPolicy(mcpPolicy.status().Revision+1, true)
 }
 
 // echoChurn coordinates the concurrent policy churner: which revisions had echo ALLOW,
@@ -663,7 +664,7 @@ type echoChurn struct {
 
 // run flips echo's rule across alternating revisions until stop is closed.
 func (c *echoChurn) run(stop <-chan struct{}) {
-	rev := 4
+	rev := uint64(4)
 	for {
 		select {
 		case <-stop:
@@ -673,7 +674,7 @@ func (c *echoChurn) run(stop <-chan struct{}) {
 		allow := rev%2 == 0
 		c.mu.Lock()
 		c.r.publishEchoPolicy(rev, allow)
-		c.allowAtRev[uint64(rev)] = allow
+		c.allowAtRev[rev] = allow
 		c.mu.Unlock()
 		rev++
 		time.Sleep(time.Millisecond)
@@ -712,7 +713,9 @@ func (r *soakRun) echoChurnWorker(w, churnPer int) {
 func (r *soakRun) auditChurnEvents(c *echoChurn, preIDs map[string]bool) int {
 	t := r.t
 	var newEvts int
-	for _, e := range committedShadowEvents(t) {
+	evs := committedShadowEvents(t)
+	for i := range evs {
+		e := &evs[i]
 		if preIDs[e.EventID] {
 			continue
 		}
@@ -1041,9 +1044,9 @@ func soakSmallEvents(t *testing.T, n int) limits.EventLimits {
 	// SpoolMaxBytes at 2x the critical reserve keeps n events near ~50% utilization — well
 	// under HighWatermarkPct (85%), so the total-spool watermark never triggers a reclaim
 	// that cannot free retained critical events (the event_durability_degraded path).
-	spool := 2*crit + 256<<10
+	spoolMax := 2*crit + 256<<10
 	segMax := 32 << 10
-	segments := spool/segMax + 64
+	segments := spoolMax/segMax + 64
 	// The crash-consistent checkpoint records per-segment state, so its size scales with the
 	// live segment count. With 32 KiB segments the count grows into the hundreds at volume,
 	// so MaxMetadataBytes (which bounds the checkpoint) must scale with the segment cap or a
@@ -1051,12 +1054,12 @@ func soakSmallEvents(t *testing.T, n int) limits.EventLimits {
 	// not a durability property. ~512 B/segment with a 64 KiB floor.
 	metaBound := 64<<10 + segments*512
 	lim, err := limits.NewEvent(limits.EventConfig{
-		SpoolMaxBytes: spool, CriticalReserveBytes: crit,
+		SpoolMaxBytes: spoolMax, CriticalReserveBytes: crit,
 		OrdinaryQuotaBytes: 128 << 10, DenialQuotaBytes: 64 << 10,
 		SegmentMaxBytes: segMax, MaxEventBytes: 16 << 10, MaxMetadataBytes: metaBound,
 		MaxSafeResultBytes: 64 << 10, MaxSegments: segments, MaxQueuePerPartition: 4096,
 		MaxInFlightCommits: 64, CommitBatchSize: 64, MaxSyncOps: 16, MaxDenialBuckets: 4096,
-		MaxBucketsPerSource: 128, MaxCoalescePerAggregate: 1 << 20, MaxRecoveryScanBytes: spool + 1<<20,
+		MaxBucketsPerSource: 128, MaxCoalescePerAggregate: 1 << 20, MaxRecoveryScanBytes: spoolMax + 1<<20,
 		MaxRecoverySegments: segments, MaxRecoveryRecords: n + 65536, MaxReclaimPerPass: 256,
 		ExporterWorkers: 2, ExportBatchRecords: 256, ExportBatchBytes: 1 << 20, ExportMaxRetries: 4,
 		ReplayWindowEntries: n + 65536, TenantExportMaxRecords: 4096, TenantExportMaxBytes: 4 << 20,
