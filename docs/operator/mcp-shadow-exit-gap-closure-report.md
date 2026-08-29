@@ -72,7 +72,10 @@ test records p50/p95/p99/max for both and enforces `shadow_p99 ≤ 5× observe_p
 catches a gross regression — an unbounded scan, a double commit, a per-request re-hash — while
 the measured overhead is ~1–2×; a baseline floor guards against a noise-dominated denominator).
 The precise, deterministic mutation guard is a pure table test on the gate function, which
-cannot flake on any hardware.
+cannot flake on any hardware. **No admission saturation** is established with a bounded
+CONCURRENT burst (16 in-scope Shadow requests on distinct sessions in flight at once), each of
+which must complete `200 / shadow_evaluated / would_execute` with upstream = 0 — serial latency
+alone would not prove it (raised in review).
 
 ### Criterion 8 — real metadata-only credential-planning path
 
@@ -88,6 +91,19 @@ even when a `Materialize`-capable value is supplied — that the Shadow type gra
 field whose method set contains `Call` or `Materialize`
 (`TestExitGapC8_MaterializeStructurallyUnreachableEvenWhenSupplied`,
 `TestShadow_TypeGraphHasNoExecuteCapability`).
+
+**Scope (what is and is not closed).** This criterion is "readiness *derivable* without
+materialization" — a property of the Shadow **evaluator**, proven and exercised through the
+production `composeGatewayShadowIntoConfig` composition path via `shadowCredentialPlannerSeam`.
+A shipped binary installs **no** planner by default (`shadowCredentialPlannerSeam == nil` ⇒
+readiness `not_evaluated` ⇒ byte-identical shipped build); the evidence run arms the seam,
+exactly as the phase brief specified ("set only by the controlled credential-planning evidence
+run") and mirroring the two existing startup-scoped seams. Wiring a **deployable** production
+credential planner is a distinct, larger change (real credential-broker composition surface,
+materialization-adjacent) that belongs to the executing-mode / Canary track and is deliberately
+**deferred** — the Shadow Exit criterion does not require a production binary to ship credential
+planning, only that the Shadow evaluation can derive readiness from a plan without materializing.
+(Raised in review; framing made explicit here and in the seam comment.)
 
 ### Criterion 9 — kill honored fail-closed before evaluation (Invariant A)
 
@@ -112,7 +128,9 @@ surfaces (not internal Go functions in the same order): baseline/status (`GET /a
 inventory (`GET /api/mcp/tools`), tool approval (`POST /api/mcp/tool-approvals` →
 `POST /api/mcp/tool-approval-decision`), preflight dry-run (`shadow.preflight` +
 `POST /api/mcp/rollout/scope/validate`), activation (the documented signed CP→DP publish),
-verification (`GET /api/mcp/rollout`, `GET /api/mcp/executions`, `/metrics`), evidence
+verification (`GET /api/mcp/rollout`, `GET /api/mcp/executions`, and the real `/metrics`
+serializer asserted against the live `culvert_mcp_shadow_*` counters AFTER the in-scope request
+— raised in review), evidence
 (`GET /api/mcp/rollout/evidence`), kill and clear (`POST /api/mcp/rollout/emergency`), and
 rollback (signed Observe publish). No manual state-file edits. Mutation proof ("make the runbook
 preflight bypassable"): with no approved (Usable) tool in scope, the activation preflight is

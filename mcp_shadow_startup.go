@@ -63,6 +63,18 @@ const mcpShadowActor = "mcp-gateway-shadow"
 // evaluator additionally drops the interface after binding its Plan method
 // (TestShadow_DoesNotRetainConcretePlanner). Set only by the controlled credential-planning
 // evidence run to exercise the real Shadow credential-readiness path.
+//
+// SCOPE (read before "wiring a real planner here"): unlike the two sibling seams above, which
+// carry LIVE production defaults, this one has NO production caller by design — a shipped
+// build installs no planner and reports credential readiness not-evaluated. That is
+// deliberate: Shadow Exit criterion 8 ("readiness derivable without materialization") is a
+// property of the Shadow EVALUATOR — proven, and exercised through THIS production
+// composition path, by the controlled evidence run — NOT a requirement that a production
+// binary ship credential planning. Composing a deployable production planner is a distinct,
+// larger change (real credential-broker composition surface, materialization-adjacent) that
+// belongs to the executing-mode / Canary track, not this disabled-by-default Shadow-evidence
+// phase, and is intentionally deferred. Installing a planner here in production is a
+// deliberate feature decision, never a test convenience.
 var shadowCredentialPlannerSeam execution.CredentialPlanner
 
 // mcpShadowComposition records, for the read-only health/status surface, whether the

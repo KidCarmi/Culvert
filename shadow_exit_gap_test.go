@@ -32,6 +32,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -703,11 +704,22 @@ func TestShadowExitC12_OperatorRunbookEndToEnd(t *testing.T) {
 	st, ra := toolsCall(t, env.cli, env.base, tok, sid, "3", toolEcho, `{"text":"runbook"}`)
 	req(t, st == 200 && ra["shadow_outcome"] == "would_execute", "runbook traffic: echo shadow_outcome=%v", ra["shadow_outcome"])
 
-	// (8) Verification — execution counts (0 executed / 0 upstream) + shadow metrics emitted.
+	// (8) Verification — execution counts (0 executed / 0 upstream) + the /metrics operator surface.
 	code, execs := mcpAdminJSON(t, http.MethodGet, "/api/mcp/executions", RoleViewer, "")
 	req(t, code == 200 && numEq(execs["executed"], 0) && numEq(execs["upstream_ok"], 0) && numEq(execs["upstream_err"], 0),
 		"runbook verify: /api/mcp/executions must report 0 executed/upstream, got %v", execs)
-	env.ev("C12 step8 verify: GET /api/mcp/executions executed=0 upstream_ok=0 upstream_err=0 (no side effects)")
+	// The operator observability surface the runbook promises: drive the ACTUAL /metrics
+	// serializer (writeMCPShadowMetrics, the exact function metrics.go invokes) AFTER the
+	// in-scope Shadow request and assert the culvert_mcp_shadow_* rows match the live counters
+	// and reflect the evaluation (would_execute >= 1). A broken/dropped serializer would pass
+	// every /api check above yet fail here (Codex review).
+	var mb strings.Builder
+	writeMCPShadowMetrics(&mb)
+	outcomes, _, errSeen := shadowMetricRows(t, mb.String())
+	fin := shadowSnap()
+	req(t, errSeen == 1 && fin.WouldExecute >= 1 && outcomes["would_execute"] == fin.WouldExecute,
+		"runbook verify: /metrics culvert_mcp_shadow_evaluations_total{would_execute} must equal the live counter and be >=1 (rows=%v fin=%d)", outcomes, fin.WouldExecute)
+	env.ev("C12 step8 verify: GET /api/mcp/executions executed=0 upstream_ok=0 upstream_err=0 ; /metrics culvert_mcp_shadow_evaluations_total{would_execute}=%d matches the live singleton", fin.WouldExecute)
 
 	// (9) Evidence — the operator inspects durable decision evidence.
 	code, ev := mcpAdminJSON(t, http.MethodGet, "/api/mcp/rollout/evidence", RoleViewer, "")

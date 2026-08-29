@@ -29,13 +29,41 @@ package main
 // path performs no upstream I/O (a real upstream call would dwarf the budget).
 
 import (
+	"context"
+	"io"
+	"net/http"
 	"sort"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 )
+
+// rawShadowCall issues one authenticated Shadow tools/call WITHOUT any t.Fatal, so it is safe
+// to call from a goroutine (the concurrent admission burst). It returns the HTTP status and the
+// raw response body.
+func rawShadowCall(cli *http.Client, base, token, sid, id string) (status int, respBody string) {
+	body := `{"jsonrpc":"2.0","id":` + id + `,"method":"tools/call","params":{"name":"` + toolEcho + `","arguments":{"text":"burst"}}}`
+	r, err := http.NewRequestWithContext(context.Background(), http.MethodPost, base+"/mcp/gateway/"+ctrlServer, strings.NewReader(body))
+	if err != nil {
+		return 0, ""
+	}
+	r.Host = "gw.test"
+	r.Header.Set("Authorization", "Bearer "+token)
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("MCP-Protocol-Version", "2025-11-25")
+	r.Header.Set("Mcp-Session-Id", sid)
+	resp, err := cli.Do(r)
+	if err != nil {
+		return 0, ""
+	}
+	defer resp.Body.Close() //nolint:errcheck // best-effort close of a test response body
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(b)
+}
 
 // shadowLatencyBudgetRatio is the Shadow-over-Observe p99 ceiling. Justification: the Shadow
 // path adds decide() (a bounded, allocation-lean, non-executing decision) plus a schema-v2
@@ -134,12 +162,44 @@ func TestShadowExitC7_LatencyBudget(t *testing.T) {
 		env.ev("C7 latency: baseline p99 %v below floor %v; ratio gate skipped (absolute cost already trivial)", oP99, shadowLatencyBaselineFloor)
 	}
 
-	// No admission saturation: every one of the n measured Shadow requests completed (200); the
-	// loop's per-request 200 assertion already established that, and upstream stayed at zero
-	// (a Shadow evaluation performs no upstream I/O — a real call would dwarf this budget).
-	req(t, atomic.LoadInt64(&hits) == 0, "SECURITY: upstream invoked during C7 latency measurement: %d", atomic.LoadInt64(&hits))
+	// No admission saturation — a bounded CONCURRENT burst. Serial latency proves only
+	// single-request progress; a regression in concurrency limits, queueing, or handling
+	// multiple outstanding Shadow evaluations would still pass a serial loop (Codex review).
+	// Pre-establish distinct sessions serially (handshake asserts in the test goroutine), then
+	// fire the Shadow calls concurrently through the fatal-free poster and assert every one
+	// completed as a non-executing Shadow evaluation.
+	const burst = 16
+	sids := make([]string, burst)
+	for i := range sids {
+		sids[i] = handshake(t, env.cli, env.base, ctrlServer, tok)
+	}
+	type burstRes struct {
+		status    int
+		evaluated bool
+	}
+	results := make([]burstRes, burst)
+	var wg sync.WaitGroup
+	for i := 0; i < burst; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			st, body := rawShadowCall(env.cli, env.base, tok, sids[i], itoaGap(3_000_000+i))
+			results[i] = burstRes{
+				status:    st,
+				evaluated: strings.Contains(body, `"execution_state":"shadow_evaluated"`) && strings.Contains(body, `"shadow_outcome":"would_execute"`),
+			}
+		}(i)
+	}
+	wg.Wait()
+	for i := range results {
+		req(t, results[i].status == 200 && results[i].evaluated,
+			"C7 concurrency: burst request %d did not complete as a Shadow evaluation (status=%d evaluated=%v) — admission saturation?", i, results[i].status, results[i].evaluated)
+	}
+	env.ev("C7 concurrency: %d concurrent in-scope Shadow requests all completed 200/shadow_evaluated/would_execute (no admission saturation)", burst)
+
+	req(t, atomic.LoadInt64(&hits) == 0, "SECURITY: upstream invoked during C7 (serial + concurrent): %d", atomic.LoadInt64(&hits))
 	req(t, !liveExecDepsConfigured(false), "SECURITY: live executor must stay unarmed through C7")
-	env.ev("C7 VERDICT: shadow-eval latency within a %.1fx regression budget of the Observe baseline; no admission saturation; upstream=0", shadowLatencyBudgetRatio)
+	env.ev("C7 VERDICT: shadow-eval latency within a %.1fx regression budget of the Observe baseline; %d-way concurrent burst completed with no admission saturation; upstream=0", shadowLatencyBudgetRatio, burst)
 }
 
 // TestShadowExitC7_RegressionGateIsNotBypassable is the deterministic mutation guard for
