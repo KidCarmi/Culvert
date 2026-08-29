@@ -211,6 +211,13 @@ Toolchain: Go 1.26.6. Commands run from the repo root on the branch head.
 
 ## 10. Formal Shadow → Canary Exit Review (§26)
 
+> **Update (2026-08-29 — Shadow Exit Gap Closure, Phase A):** the six criteria this review
+> enumerates as future work — **4, 6, 7, 8, 9, 12** — have since been closed with dedicated
+> end-to-end runtime proofs and mutation proofs. See
+> `docs/operator/mcp-shadow-exit-gap-closure-report.md`. Criterion **13 / `PREREQ-MCP-KILL-1`**
+> remains **OPEN** (a separate follow-up product-security PR and a HARD Canary blocker), so this
+> is still not a full Shadow Exit PASS and Canary architecture may not begin.
+
 Answered against the repository's own authoritative exit criteria (`docs/design/mcp/SHADOW-ARCHITECTURE.md` §12).
 
 1. **≥ N Shadow evaluations covering the tool set and each policy branch?** — YES. 7,516 heavy / 248 default; every tool × every policy branch, plus hard‑control, exercised.

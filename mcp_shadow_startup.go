@@ -53,6 +53,18 @@ const mcpShadowReadyEnvVar = "CULVERT_MCP_SHADOW_READY"
 // mcpShadowActor labels the durable evidence the Shadow evaluator emits.
 const mcpShadowActor = "mcp-gateway-shadow"
 
+// shadowCredentialPlannerSeam is the OPTIONAL, disabled-by-default composition seam for the
+// Shadow evaluator's metadata-only CredentialPlanner (same startup-scoped seam pattern as
+// gatewayListenerReadyProbe / shadowScopeUsableToolProbe). Default nil ⇒ no planner is
+// composed, so a shipped build is byte-identical to "no credential planning" and credential
+// readiness reports not-evaluated. It is deliberately typed as the Plan-only
+// execution.CredentialPlanner interface (which exposes NO Materialize), so installing a
+// planner cannot widen the Shadow type graph toward a materializing capability, and the
+// evaluator additionally drops the interface after binding its Plan method
+// (TestShadow_DoesNotRetainConcretePlanner). Set only by the controlled credential-planning
+// evidence run to exercise the real Shadow credential-readiness path.
+var shadowCredentialPlannerSeam execution.CredentialPlanner
+
 // mcpShadowComposition records, for the read-only health/status surface, whether the
 // Shadow evaluator was composed this boot and why not when it was requested. It is
 // node-local, set once at startup, and never a secret.
@@ -169,10 +181,16 @@ func composeGatewayShadowIntoConfig(cfg *mcpruntime.Config, shadowReady bool, ev
 		// composing), so a node that never armed Shadow exposes no shadow series.
 		Metrics: newMCPShadowMetrics(),
 		Actor:   mcpShadowActor,
-		// Clock: nil ⇒ time.Now. Planner: nil ⇒ no credential planning capability is
-		// composed (no broker in this build), so credential readiness reports
-		// not-evaluated. NO Upstream, NO materialize-capable broker — the ShadowConfig
-		// type structurally cannot carry either (Layer B).
+		// Planner: the OPTIONAL metadata-only credential planner (Plan-only). Default nil ⇒
+		// no credential planning capability is composed, so credential readiness reports
+		// not-evaluated — byte-identical to the shipped build. When a real deployment or a
+		// controlled evidence run installs one via shadowCredentialPlannerSeam, the evaluator
+		// extracts ONLY its bound Plan method and drops the interface (TestShadow_
+		// DoesNotRetainConcretePlanner), so a materialize-capable broker can never enter the
+		// Shadow type graph — the CredentialPlanner interface exposes no Materialize. NO
+		// Upstream, NO materialize-capable broker: the ShadowConfig type structurally cannot
+		// carry either (Layer B). Clock: nil ⇒ time.Now.
+		Planner: shadowCredentialPlannerSeam,
 	})
 	if err != nil {
 		globalMCPShadow.setReason("evaluator_construct_failed")
