@@ -725,6 +725,49 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > FRESH/SETUPFAIL instances now carry their own paths, making the history
 > journeys deterministic).
 >
+> **2D-C FINAL recovery trust-boundary correction (this branch, 2026-08-29 —
+> external-review follow-up on the 161eb79e candidate).** Three gaps, each
+> red-before against 161eb79e (`dc_final2_red_test.go`):
+> **(A) Settings-owned rewrite restore bypassed the UUID contract.** The
+> restore published whatever admin_settings.json carried; SetRules only
+> regenerates empty/duplicate IDs, so a malformed non-empty stableId
+> ("hello") became live authoritative identity that /api/rewrite/state
+> exposed and the newer trust doors later rejected. The restore now runs
+> the SAME validateRewriteStableIDs seam: empty = the one legacy migration
+> input (backfilled as before); malformed non-empty or duplicate refuses
+> the WHOLE rewrite slice — nothing published, the previously-seeded
+> runtime source stays live per startup ownership, and the named
+> management-identity degradation latches. No silent re-mint of a
+> malformed identity.
+> **(B) A failed identity migration still exposed ephemeral StableIDs.**
+> finalizeRewriteSeedIdentities logged and continued when the ledger (or
+> the legacy backfill) could not persist — identities KNOWN to re-mint on
+> restart were presented as durable management identity. A rewrite
+> management-identity durability LATCH now holds instead (re-evaluated by
+> every settings load): traffic rewrite enforcement and legacy runtime
+> semantics continue, but GET /api/rewrite/state answers a structured 503
+> ({error, degraded:"rewrite-identity", reason}) — ephemeral IDs are never
+> exposed at all — and v2 rewrite mutations refuse until durable identity
+> is established (fix the file/volume, restart). The unreadable-file and
+> quarantined-corrupt settings load paths run the same finalize judgment.
+> The Header Rewrite page recognizes the structured 503 (strict
+> marker-checked decoder) and renders the dedicated degraded state naming
+> the appliance's reason, mounting no write controls.
+> **(C) The interactive write door could manufacture ID-less legacy
+> references.** validateRuleObjectRefs let the compiled fileProfileExts
+> map satisfy a NEW create/update, so after a built-in was renamed or
+> deleted a modern rule persisted with FileProfile=legacy name and
+> FileProfileID="" — legacy-fallback enforcement, bypassing the promotion.
+> The interactive door now requires LIVE store resolution (structured
+> dangling-reference 400; the stamp always lands); a write against the
+> renamed profile's NEW name binds to the SAME built-in stable ID. The
+> compiled map remains the EVALUATOR fallback for historical ID-less
+> rules, and the bulk doors keep their documented trust-domain
+> classification (modern exports judged by ID; historical ID-less backups
+> and untouched live rules legitimately reach the compiled-map arm;
+> rollback/CP snapshots verbatim) — the invariant is that the interactive
+> modern door can never mint another ID-less reference.
+>
 > **2D-C FINAL identity / recovery / fail-closed correction (this branch,
 > 2026-08-29 — external-review follow-up on the dc638a22 candidate).** Six
 > defects, each red-before against dc638a22 (matrix rows A–H,
