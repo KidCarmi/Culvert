@@ -289,6 +289,15 @@ func rollbackConfigVersion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Rewrite identity uniqueness (2D-C §22/§36): a historical candidate
+	// carrying duplicate stable rewrite identities is corrupt — refuse the
+	// WHOLE rollback before any slice applies rather than silently
+	// re-identifying one of the claimants.
+	if err := validateRewriteStableIDs(target.RewriteRules); err != nil {
+		http.Error(w, "rollback refused: "+sanitizeLog(err.Error()), http.StatusBadRequest)
+		return
+	}
+
 	// CHAOS-27 / F-12: the apply is unconditional, but a persistence failure
 	// during it is no longer swallowed. The running config IS rolled back
 	// either way; what changes is that the operator is told when the result
@@ -575,8 +584,19 @@ func applyConfigBackup(b *configBackup) error {
 	policyStore.Save()
 	setDefaultPolicyAction(b.DefaultAction)
 
-	// Rewrite rules: replace all.
-	rewriter.SetRules(b.RewriteRules)
+	// Rewrite rules: replace all, DURABLY through the AdminSettings owner
+	// (2D-C §24/§38 — the Blocker-E feed precedent): the restored set persists
+	// INSIDE the same adminSettingsMu transaction that publishes it, so a
+	// rollback's rewrite slice can no longer be runtime-only and silently
+	// revert on restart. Restored stable IDs are preserved verbatim (a config
+	// version must never create fresh rewrite identities merely because it was
+	// restored); pre-2D-C captured versions without stable IDs are backfilled
+	// at publication — the documented one-time legacy migration. A persist
+	// failure means the slice was never applied (durable-or-nothing) and is
+	// collected by the storage-write scope.
+	if err := installRewriteRulesDurable(b.RewriteRules); err != nil {
+		logger.Printf("ConfigVersion: rewrite slice not applied (persist failed): %v", err)
+	}
 
 	applyScanStoresFromBackup(b)
 

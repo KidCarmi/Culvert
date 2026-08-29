@@ -26,9 +26,12 @@ package main
 //   - PolicyRule → URL category       (direct DestCategory, where the edge is
 //     deterministic — the same closure)
 //
-// FileProfile is deliberately NOT judged here: the File Profiles surface
-// moves into 2D-C and its legacy built-in fallback map makes the edge
-// non-deterministic for historical candidates (§15 scope note).
+//   - PolicyRule → FileProfile        (2D-C §16 — the 2D-B legacy exclusion is
+//     CLOSED: the reference model is deterministic now. A non-empty
+//     authoritative FileProfileID must resolve in the candidate — never by
+//     name (anti-rebinding); an ID-less legacy reference resolves by
+//     candidate name or the compiled fileProfileExts map, exactly as
+//     enforcement does.)
 //
 // CATEGORY CLOSURE: a category NAME resolves against the candidate's OWN
 // category entries (any BuiltIn flag — after apply they are recompose input)
@@ -70,10 +73,15 @@ type bulkCandidate struct {
 	Rules    []PolicyRule
 	Groups   []CategoryGroup
 	Profiles []DecryptionProfile
+	// FileProfiles is the candidate file-profile set (2D-C §16 — the legacy
+	// exclusion is closed now that the reference model is deterministic:
+	// ID-first, no dangling-ID name retarget, legacy map for ID-less names).
+	FileProfiles []*FileExtProfile
 
-	CheckRuleGroups   bool
-	CheckRuleProfiles bool
-	CheckCategories   bool
+	CheckRuleGroups       bool
+	CheckRuleProfiles     bool
+	CheckRuleFileProfiles bool
+	CheckCategories       bool
 	// CategoryOK is the category-name closure (candidate entries + live
 	// view/UT1 layers). Required when CheckCategories is set.
 	CategoryOK func(name string) bool
@@ -200,7 +208,7 @@ func candidateBuiltInMemberships(cands []CategoryEntry) map[string][]string {
 // yields an empty ID, exactly what importPolicyRules will install; a valid
 // unrelated client ID can therefore never make an invalid name pass
 // validation, and a mismatched name/ID pair binds to the NAME's object.
-func canonicalizeCandidateRuleRefs(r *PolicyRule, groups []CategoryGroup, profiles []DecryptionProfile) {
+func canonicalizeCandidateRuleRefs(r *PolicyRule, groups []CategoryGroup, profiles []DecryptionProfile, fileProfiles []*FileExtProfile) {
 	r.DestCategoryGroupID = ""
 	if r.DestCategoryGroup != "" {
 		for i := range groups {
@@ -215,6 +223,18 @@ func canonicalizeCandidateRuleRefs(r *PolicyRule, groups []CategoryGroup, profil
 		for i := range profiles {
 			if strings.EqualFold(profiles[i].Name, r.DecryptionProfile) {
 				r.DecryptionProfileID = profiles[i].ID
+				break
+			}
+		}
+	}
+	// File profile (2D-C promotion): same doctrine — the NAME is import
+	// intent, the ID is derived from the candidate set; a legacy built-in
+	// name resolving only through the compiled map legitimately carries no ID.
+	r.FileProfileID = ""
+	if r.FileProfile != "" && r.FileProfile != FileProfileNone {
+		for i := range fileProfiles {
+			if strings.EqualFold(fileProfiles[i].Name, string(r.FileProfile)) {
+				r.FileProfileID = fileProfiles[i].ID
 				break
 			}
 		}
@@ -275,8 +295,36 @@ func validateBulkCandidateRefs(c bulkCandidate) error {
 				return &bulkRefViolation{Owner: owner, Type: "category", Name: string(r.DestCategory)}
 			}
 		}
+		if c.CheckRuleFileProfiles && r.FileProfile != "" && r.FileProfile != FileProfileNone {
+			if !fileProfileRefResolves(r, c.FileProfiles) {
+				return &bulkRefViolation{Owner: owner, Type: "file-profile", Name: string(r.FileProfile)}
+			}
+		}
 	}
 	return nil
+}
+
+// fileProfileRefResolves judges one rule's file-profile reference against the
+// candidate profile set, mirroring the ENFORCEMENT resolution exactly (2D-C):
+// a non-empty authoritative ID must resolve in the candidate — never by name
+// (the anti-rebinding doctrine); an ID-less (legacy/un-migrated) reference
+// resolves by candidate name or the compiled fileProfileExts legacy map.
+func fileProfileRefResolves(r *PolicyRule, profiles []*FileExtProfile) bool {
+	if r.FileProfileID != "" {
+		for _, p := range profiles {
+			if p.ID == r.FileProfileID {
+				return true
+			}
+		}
+		return false
+	}
+	for _, p := range profiles {
+		if strings.EqualFold(p.Name, string(r.FileProfile)) {
+			return true
+		}
+	}
+	_, legacy := fileProfileExts[r.FileProfile]
+	return legacy
 }
 
 // ─── Per-path effective-candidate constructors ─────────────────────────────
@@ -308,9 +356,9 @@ func effectiveImportSlice[T any](live, incoming []T, replaceMode bool, key func(
 // never satisfy validation for an unresolvable name. UNTOUCHED live rules in
 // merge/never-wipe candidates are carried verbatim and retain their existing
 // ID-authoritative semantics — the import does not restamp them.
-func effectiveImportRules(b *configBackup, replaceMode bool, groups []CategoryGroup, profiles []DecryptionProfile) []PolicyRule {
+func effectiveImportRules(b *configBackup, replaceMode bool, groups []CategoryGroup, profiles []DecryptionProfile, fileProfiles []*FileExtProfile) []PolicyRule {
 	canon := func(r PolicyRule) PolicyRule {
-		canonicalizeCandidateRuleRefs(&r, groups, profiles)
+		canonicalizeCandidateRuleRefs(&r, groups, profiles, fileProfiles)
 		return r
 	}
 	if replaceMode && len(b.PolicyRules) > 0 {
@@ -378,14 +426,22 @@ func validateImportCandidateRefs(b *configBackup, replaceMode bool) error {
 		func(g CategoryGroup) string { return g.Name })
 	profiles := effectiveImportSlice(globalDecryptionProfiles.List(), b.DecryptionProfiles, replaceMode,
 		func(p DecryptionProfile) string { return p.Name })
+	// File profiles are deliberately NOT on the export/import surface (Finding
+	// 10.3 registry: ConfigSnapshot-only), so the candidate profile set is the
+	// LIVE store — the only set the imported rules can resolve against. The
+	// exported RULES carry fileProfileId, but import intent is the NAME
+	// (canonicalized above), preserving the interactive doctrine.
+	fileProfiles := globalProfileStore.List()
 	return validateBulkCandidateRefs(bulkCandidate{
-		Rules:             effectiveImportRules(b, replaceMode, groups, profiles),
-		Groups:            groups,
-		Profiles:          profiles,
-		CheckRuleGroups:   true,
-		CheckRuleProfiles: true,
-		CheckCategories:   true,
-		CategoryOK:        postApplyCategoryClosure(cats, effectiveImportOverrides(b, replaceMode)),
+		Rules:                 effectiveImportRules(b, replaceMode, groups, profiles, fileProfiles),
+		Groups:                groups,
+		Profiles:              profiles,
+		FileProfiles:          fileProfiles,
+		CheckRuleGroups:       true,
+		CheckRuleProfiles:     true,
+		CheckRuleFileProfiles: true,
+		CheckCategories:       true,
+		CategoryOK:            postApplyCategoryClosure(cats, effectiveImportOverrides(b, replaceMode)),
 	})
 }
 
@@ -425,14 +481,19 @@ func validateRestoredCandidateRefs(b *configBackup) error {
 	// resolution with name fallback). The validator therefore judges the
 	// restored rules exactly as captured — ID-or-name — and never converts
 	// them to the interactive name-intent doctrine.
+	// File profiles are not on the rollback surface (ConfigSnapshot-only), so
+	// the restored candidate's profile set is the LIVE store. Restored rules
+	// are applied VERBATIM (ID-authoritative where stamped) and judged so.
 	return validateBulkCandidateRefs(bulkCandidate{
-		Rules:             rules,
-		Groups:            groups,
-		Profiles:          profiles,
-		CheckRuleGroups:   true,
-		CheckRuleProfiles: true,
-		CheckCategories:   true,
-		CategoryOK:        postApplyCategoryClosure(cats, ov),
+		Rules:                 rules,
+		Groups:                groups,
+		Profiles:              profiles,
+		FileProfiles:          globalProfileStore.List(),
+		CheckRuleGroups:       true,
+		CheckRuleProfiles:     true,
+		CheckRuleFileProfiles: true,
+		CheckCategories:       true,
+		CategoryOK:            postApplyCategoryClosure(cats, ov),
 	})
 }
 
@@ -448,13 +509,19 @@ func validateRestoredCandidateRefs(b *configBackup) error {
 // invalid graph rejects the ENTIRE snapshot: config sync keeps the last valid
 // config rather than installing a rulebase whose references dangle.
 func validateSnapshotRefGraph(snap ConfigSnapshot) error {
+	snapFileProfiles := make([]*FileExtProfile, len(snap.FileProfiles))
+	for i := range snap.FileProfiles {
+		snapFileProfiles[i] = &snap.FileProfiles[i]
+	}
 	c := bulkCandidate{
-		Rules:             snap.PolicyRules,
-		Groups:            snap.CategoryGroups,
-		Profiles:          snap.DecryptionProfiles,
-		CheckRuleGroups:   snap.PolicyRules != nil && snap.CategoryGroups != nil,
-		CheckRuleProfiles: snap.PolicyRules != nil && snap.DecryptionProfiles != nil,
-		CheckCategories:   snap.URLCategories != nil && (snap.CategoryGroups != nil || snap.PolicyRules != nil),
+		Rules:                 snap.PolicyRules,
+		Groups:                snap.CategoryGroups,
+		Profiles:              snap.DecryptionProfiles,
+		FileProfiles:          snapFileProfiles,
+		CheckRuleGroups:       snap.PolicyRules != nil && snap.CategoryGroups != nil,
+		CheckRuleProfiles:     snap.PolicyRules != nil && snap.DecryptionProfiles != nil,
+		CheckRuleFileProfiles: snap.PolicyRules != nil && snap.FileProfiles != nil,
+		CheckCategories:       snap.URLCategories != nil && (snap.CategoryGroups != nil || snap.PolicyRules != nil),
 	}
 	if c.CheckCategories {
 		// A nil Rules/Groups slice simply contributes no edges to the walk, so

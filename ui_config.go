@@ -1076,6 +1076,14 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Rewrite identity uniqueness (2D-C §22): duplicate stable IDs within the
+	// incoming payload are a corrupted backup — refuse the WHOLE import before
+	// any mutation rather than silently re-identifying one claimant.
+	if err := validateRewriteStableIDs(b.RewriteRules); err != nil {
+		http.Error(w, "import refused: "+sanitizeLog(err.Error()), http.StatusBadRequest)
+		return
+	}
+
 	// Blocklist. Feed attribution is carried across a replace-mode
 	// rebuild — ClearAll+Add would otherwise strand every feed entry as
 	// unattributed (Codex P1, PR #447).
@@ -1110,12 +1118,42 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 		setDefaultPolicyAction(b.DefaultAction)
 	}
 
-	// Rewrite rules.
-	if replaceMode && len(b.RewriteRules) > 0 {
-		rewriter.SetRules(b.RewriteRules)
-	} else {
-		for _, rule := range b.RewriteRules {
-			rewriter.Add(rule)
+	// Rewrite rules (2D-C stable-identity trust semantics, §22/§37):
+	//   - replace: the incoming set installs wholesale; valid unique stable IDs
+	//     from a modern export are preserved verbatim, legacy ID-less rules are
+	//     server-generated at publication (candidate migration).
+	//   - merge: upsert by stable identity — an incoming rule carrying the
+	//     stableId of a live rule REPLACES it in place (idempotent re-import,
+	//     mirroring the policy-rule merge doctrine); everything else appends in
+	//     order with server-generated identity.
+	// Duplicate stable IDs WITHIN the incoming payload were rejected by the
+	// pre-mutation gate (whole import 400). The install is DURABLE through the
+	// AdminSettings owner — persist target, then publish (§24).
+	if len(b.RewriteRules) > 0 {
+		var target []RewriteRule
+		if replaceMode {
+			target = append([]RewriteRule(nil), b.RewriteRules...)
+		} else {
+			target = rewriter.List()
+			for _, in := range b.RewriteRules {
+				replaced := false
+				if in.StableID != "" {
+					for j := range target {
+						if target[j].StableID == in.StableID {
+							target[j] = in
+							replaced = true
+							break
+						}
+					}
+				}
+				if !replaced {
+					in.StableID = "" // appended rule: server-generated identity
+					target = append(target, in)
+				}
+			}
+		}
+		if err := installRewriteRulesDurable(target); err != nil {
+			logger.Printf("ConfigImport: rewrite slice not applied (persist failed): %v", err)
 		}
 	}
 

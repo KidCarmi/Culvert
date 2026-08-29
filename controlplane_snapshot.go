@@ -407,6 +407,12 @@ func validateConfigSnapshot(snap ConfigSnapshot) error {
 	if err := validateSnapshotRefGraph(snap); err != nil {
 		return fmt.Errorf("config snapshot reference graph invalid: %w", err)
 	}
+	// Rewrite stable-identity uniqueness (2D-C §22/§39): duplicate stable IDs
+	// in the synced rule set reject the ENTIRE snapshot — the DP must never
+	// silently re-identify one of two claimants of a CP identity.
+	if err := validateRewriteStableIDs(snap.RewriteRules); err != nil {
+		return fmt.Errorf("config snapshot rewrite_rules invalid: %w", err)
+	}
 	return nil
 }
 
@@ -917,9 +923,15 @@ func applySnapshotTrafficExceptBlocklist(snap ConfigSnapshot) {
 		globalProfileStore.ReplaceAll(snap.FileProfiles)
 	}
 
-	// Rewrite rules.
+	// Rewrite rules. FOLLOWER semantics (2D-C §39): the CP is authoritative —
+	// its stable rule identities are preserved verbatim (SetRules keeps
+	// non-empty stableIds; uniqueness was validated with the whole snapshot),
+	// published under the settings writer domain so the bulk publish cannot
+	// interleave with a node-local interactive mutation, and deliberately NOT
+	// written to the follower's admin_settings (the CP re-syncs on every
+	// version bump — same posture as the file-profile / feed-config slices).
 	if snap.RewriteRules != nil {
-		rewriter.SetRules(snap.RewriteRules)
+		publishRewriteRules(snap.RewriteRules)
 	}
 
 	// DPI patterns.
