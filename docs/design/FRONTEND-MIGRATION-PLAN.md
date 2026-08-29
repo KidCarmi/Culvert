@@ -725,6 +725,33 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > FRESH/SETUPFAIL instances now carry their own paths, making the history
 > journeys deterministic).
 >
+> **2D-C FINAL two-defect closure (this branch, 2026-08-29 —
+> external-review follow-up on the 86c9c17a candidate).** Both red-before
+> against 86c9c17a (`dc_final5_red_test.go`):
+> **(1) Rollback dry-run identity leak.** The dry-run preview diffed the
+> target against `captureConfigBackup()`'s live `rewriter.List()`, and
+> `diffRewriteRules` is identity-aware — a degraded node exposed the
+> KNOWN-ephemeral StableIDs through a healthy 200 preview. The dry-run
+> branch now answers the ONE structured rewrite-identity 503
+> (authorization first; no blanking/substitution/partial diff); the real
+> rollback of a durable artifact stays available (its response carries no
+> live-identity diff), and `apiConfigDiff` was checked: it diffs two
+> STORED versions only. Healthy dry-run unchanged; OpenAPI documents the
+> 503.
+> **(2) Legacy install was not restart-stable.**
+> `installRewriteRulesDurable` persisted an ID-less legacy target AS-IS
+> and `SetRules` backfilled UUIDs only into its internal published copy —
+> disk="" vs runtime=UUID, re-minting on every restart (the historical
+> proof uses a genuine pre-extension artifact, because an artifact
+> carrying SaaS-feed fields was incidentally repaired by the LATER feed
+> slice's settings write — exactly the later-save dependency the invariant
+> forbids). Legacy identity is now canonicalized on a copy of the target
+> BEFORE the durable write, and that exact canonical slice is persisted
+> AND published — identity generated once, modern IDs verbatim, persist
+> failure publishes nothing, CP follower path untouched. Proven for
+> direct install, historical rollback, and import replace + merge-append,
+> each across restart.
+>
 > **2D-C FINAL identity egress & persistence closure (this branch,
 > 2026-08-29 — external-review follow-up on the eec0ca44 candidate).** The
 > accepted state/legacy-GET closures left the KNOWN-ephemeral StableIDs
