@@ -257,6 +257,11 @@ var uiRoutes = []uiRouteMetadata{
 		}},
 	{Path: "/api/authpolicy/reorder", Handler: "apiAuthPolicyReorder", Domain: "policy", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true}}},
+	{Path: "/api/authpolicy/killswitch", Handler: "apiAuthPolicyKillSwitch", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "break-glass status: env + runtime Auth Exempt kill switch layers"},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "engage/release the runtime layer only; env layer is read-once"},
+		}},
 	{Path: "/api/default-action", Handler: "apiDefaultAction", Domain: "policy", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer, Note: "GET branch protected by uiAuthMiddleware; no explicit requireRole call observed"},

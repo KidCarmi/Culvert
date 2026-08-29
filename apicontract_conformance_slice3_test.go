@@ -38,6 +38,7 @@ func TestConformance_Response_Slice3(t *testing.T) {
 	}{
 		{"policy", "/api/policy", apiPolicy},
 		{"authpolicy", "/api/authpolicy", apiAuthPolicy},
+		{"authpolicy-killswitch", "/api/authpolicy/killswitch", apiAuthPolicyKillSwitch},
 		{"default-action", "/api/default-action", apiDefaultAction},
 		{"blocklist-mode", "/api/blocklist/mode", apiBlocklistMode},
 		{"ssl-bypass", "/api/ssl-bypass", apiSSLBypass},

@@ -361,13 +361,22 @@ components:
         draft: { type: boolean }
     AuthPolicyList:
       type: object
-      required: [rules, count, defaultAction, note]
+      required: [rules, count, defaultAction, note, killSwitch]
       additionalProperties: false
       properties:
         rules: { type: array, items: { type: object, additionalProperties: true } }
         count: { type: integer }
         defaultAction: { type: string, enum: [allow, deny] }
         note: { type: string }
+        killSwitch: { $ref: '#/components/schemas/AuthExemptKillSwitchStatus' }
+    AuthExemptKillSwitchStatus:
+      type: object
+      required: [envDisabled, runtimeDisabled, engaged]
+      additionalProperties: false
+      properties:
+        envDisabled: { type: boolean }
+        runtimeDisabled: { type: boolean }
+        engaged: { type: boolean }
     DefaultActionStatus:
       type: object
       required: [defaultAction]
@@ -8465,6 +8474,70 @@ paths:
           content:
             application/json:
               schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/authpolicy/killswitch:
+    get:
+      operationId: getAuthPolicyKillSwitch
+      tags: [policy]
+      summary: Get Auth Exempt kill-switch status
+      description: >-
+        Reports the Auth Exempt break-glass kill switch: the read-once
+        CULVERT_AUTHBYPASS_DISABLE env layer, the admin-settable runtime
+        toggle, and the combined verdict the Stage-1 gate consults.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Get Auth Exempt kill-switch status.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthExemptKillSwitchStatus' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    put:
+      operationId: setAuthPolicyKillSwitch
+      tags: [policy]
+      summary: Engage or release the Auth Exempt kill switch
+      description: >-
+        Engages or releases ONLY the runtime toggle (no restart required); the
+        env layer is read-once and cannot be changed at runtime. Engaging the
+        switch fails every Auth Exempt rule (scoped and the global Open
+        default) closed to "authentication required" — it never affects
+        Stage-2 access decisions.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: authpolicy.killswitch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [disabled]
+              additionalProperties: false
+              properties:
+                disabled: { type: boolean }
+      responses:
+        '200':
+          description: Engage or release the Auth Exempt kill switch.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthExemptKillSwitchStatus' }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
   /api/pac/analyze:

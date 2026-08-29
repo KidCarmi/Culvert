@@ -2309,8 +2309,9 @@ func registerPolicyRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/objects/references", apiObjectReferences)
 
 	// Stage-1 authentication-policy (auth/exempt) rules — admin-only writes.
-	mux.HandleFunc("/api/authpolicy", apiAuthPolicy)                // GET list / POST add / PUT update / DELETE remove
-	mux.HandleFunc("/api/authpolicy/reorder", apiAuthPolicyReorder) // POST reorder auth rules among themselves
+	mux.HandleFunc("/api/authpolicy", apiAuthPolicy)                      // GET list / POST add / PUT update / DELETE remove
+	mux.HandleFunc("/api/authpolicy/reorder", apiAuthPolicyReorder)       // POST reorder auth rules among themselves
+	mux.HandleFunc("/api/authpolicy/killswitch", apiAuthPolicyKillSwitch) // GET status / PUT engage-or-release the runtime Auth Exempt kill switch
 	mux.HandleFunc("/api/default-action", apiDefaultAction)
 
 	// Blocklist mode + feed sync.
