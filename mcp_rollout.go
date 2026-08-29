@@ -7,7 +7,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/KidCarmi/Culvert/internal/mcp/canary"
 	"github.com/KidCarmi/Culvert/internal/mcp/cpdp"
 	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
@@ -129,6 +128,17 @@ func (r *mcpRollout) persistStatus(capb rollout.Capability) string {
 func (r *mcpRollout) rollbackPathReady(capb rollout.Capability) bool {
 	r.durableMu.Lock()
 	defer r.durableMu.Unlock()
+	return r.rollbackPathReadyLocked(capb)
+}
+
+// rollbackPathReadyLocked is rollbackPathReady for a caller that ALREADY holds r.durableMu — the
+// commit path re-validates the full Canary activation verdict INSIDE its serialized section (so a
+// concurrent emergencyDisable or attestation revocation cannot make a pre-lock verdict stale before
+// install — Codex P1), and durableMu is non-reentrant, so it must consult this locked variant rather
+// than the locking wrapper above. It reads persistStatus (its own persistMu) and stateFor (a field),
+// neither of which takes durableMu, and the durable rehearsal evidence — consistent against an
+// in-flight rehearsal because that writer holds durableMu too.
+func (r *mcpRollout) rollbackPathReadyLocked(capb rollout.Capability) bool {
 	switch r.persistStatus(capb) {
 	case "degraded", "write_failed":
 		return false
@@ -225,30 +235,6 @@ func (r *mcpRollout) commitRolloutTransitionAt(cfg *rollout.SignedConfig, actor 
 	if cfg == nil {
 		return nil
 	}
-	// Pre-compute the Canary/Production activation verdict BEFORE taking durableMu. The full
-	// preflight reads rollback health (canaryNodeFacts → rollbackPathHealthy → rollbackPathReady),
-	// which itself takes r.durableMu; computing it inside the commit's own durableMu critical section
-	// would self-deadlock (the mutex is non-reentrant), which in production is the same singleton the
-	// commit holds (Codex P1). It is a read-only, fail-closed gate, so evaluating it just before the
-	// lock is safe: a benign state change in the tiny window only ever fails the transition closed,
-	// and the verdict is consumed inside the lock so modeExecReady still owns the first rejection.
-	canaryPreflightReady := true
-	var canaryPreflightUnmet []canary.Reason
-	if cfg.Mode.RequiresLiveExecution() {
-		ai := canaryActivationInputsProbe(cfg.Capability, cfg.Scope, cfg.ScopeRevision)
-		rd := evaluateCanaryActivationPreflight(CanaryActivationInput{
-			Capability:         cfg.Capability,
-			Scope:              cfg.Scope,
-			ScopeRev:           cfg.ScopeRevision,
-			ToolApprovals:      ai.ToolApprovals,
-			Budget:             ai.Budget,
-			ServerUsable:       ai.ServerUsable,
-			FingerprintCurrent: ai.FingerprintCurrent,
-			Now:                now,
-		})
-		canaryPreflightReady = rd.Ready
-		canaryPreflightUnmet = rd.Unmet
-	}
 	// Serialize the whole read-modify-write-persist sequence against other durable
 	// mutations (kill switch, rehearsal, another commit).
 	r.durableMu.Lock()
@@ -291,10 +277,32 @@ func (r *mcpRollout) commitRolloutTransitionAt(cfg *rollout.SignedConfig, actor 
 	// envelope cannot smuggle an approval or budget past the gate (Codex P1). In this build the
 	// authoritative approval/budget store does not exist (the probe returns empties) and the live
 	// tier is never armed, so a Canary/Production transition ALWAYS fails here.
-	if cfg.Mode.RequiresLiveExecution() && !canaryPreflightReady {
-		logger.Printf("MCP rollout: %s transition to %s refused by Canary activation preflight %v (fail-closed)",
-			cfg.Capability.String(), cfg.Mode.String(), canaryPreflightUnmet)
-		return errCanaryActivationPreflightFailed
+	if cfg.Mode.RequiresLiveExecution() {
+		// Evaluate the FULL activation verdict INSIDE the serialized section, against THIS rollout's
+		// state, so a mutable fail-closed fact that changed after the caller's checks — an
+		// emergencyDisable kill engaged, an attestation revoked, the rehearsal evidence removed — cannot
+		// leave a stale verdict that installs Canary anyway (Codex P1). It consults the LOCKED readiness
+		// path (evaluateCanaryActivationPreflightLocked → rollbackPathReadyLocked): durableMu is
+		// non-reentrant and we already hold it, so the locking wrapper would self-deadlock — which in
+		// production is the same singleton the commit holds. Activation inputs come from authoritative
+		// state via the probe (never the signed config), keeping a valid signed Canary from smuggling an
+		// approval/budget past the gate.
+		ai := canaryActivationInputsProbe(cfg.Capability, cfg.Scope, cfg.ScopeRevision)
+		rd := evaluateCanaryActivationPreflightLocked(r, CanaryActivationInput{
+			Capability:         cfg.Capability,
+			Scope:              cfg.Scope,
+			ScopeRev:           cfg.ScopeRevision,
+			ToolApprovals:      ai.ToolApprovals,
+			Budget:             ai.Budget,
+			ServerUsable:       ai.ServerUsable,
+			FingerprintCurrent: ai.FingerprintCurrent,
+			Now:                now,
+		})
+		if !rd.Ready {
+			logger.Printf("MCP rollout: %s transition to %s refused by Canary activation preflight %v (fail-closed)",
+				cfg.Capability.String(), cfg.Mode.String(), rd.Unmet)
+			return errCanaryActivationPreflightFailed
+		}
 	}
 	// Snapshot the prior state for a fail-closed rollback if persistence fails, and
 	// for the scope-change continuity check below.

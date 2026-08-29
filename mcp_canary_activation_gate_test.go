@@ -192,6 +192,54 @@ func TestCanaryCommitGate_SingletonCommitDoesNotDeadlock(t *testing.T) {
 	}
 }
 
+// TestCanaryCommitGate_RevalidatesKillStateUnderLock is the Codex P1 (round-5) proof: the commit
+// evaluates the FULL activation verdict INSIDE the serialized durableMu section, against the rollout
+// instance being mutated, so a mutable fail-closed fact (here, the emergency kill switch) is honored
+// at commit time rather than from a possibly-stale pre-lock snapshot. A fully-ready Canary whose kill
+// switch is engaged must be refused with emergency_kill_engaged. It runs on the SINGLETON (shared
+// durableMu) to also prove the in-lock revalidation path does not deadlock.
+func TestCanaryCommitGate_RevalidatesKillStateUnderLock(t *testing.T) {
+	withTempDataDir(t)
+	withCanaryReadyNode(t)
+	now := time.Unix(1000, 0)
+	vin := validCanaryActivationInput(now)
+	armCanaryActivationInputs(t, vin)
+
+	_ = getMCPRollout()
+	prev := globalMCPRollout
+	globalMCPRollout = &mcpRollout{
+		gateway:    rollout.NewState(rollout.CapabilityGateway, rollout.DefaultLimits()),
+		management: rollout.NewState(rollout.CapabilityManagement, rollout.DefaultLimits()),
+	}
+	t.Cleanup(func() { globalMCPRollout = prev })
+
+	// Precondition: without the kill switch, this exact fixture is Ready (so the refusal below is due
+	// to the kill state, not a missing prerequisite).
+	if rd := evaluateCanaryActivationPreflight(vin); !rd.Ready {
+		t.Fatalf("fixture must be preflight-ready before the kill, unmet=%v", rd.Unmet)
+	}
+	// Engage the emergency kill on the instance the commit will mutate.
+	if err := getMCPRollout().emergencyDisable(rollout.CapabilityGateway, "test-kill"); err != nil {
+		t.Fatalf("emergencyDisable: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- getMCPRollout().commitRolloutTransitionAt(canaryCfgForScope(vin.Scope, vin.ScopeRev), "admin", now, rollout.OriginSynthetic)
+	}()
+	select {
+	case err := <-done:
+		if err != errCanaryActivationPreflightFailed {
+			t.Fatalf("a Canary commit while killed must be refused by the in-lock revalidation, got %v", err)
+		}
+		if getMCPRollout().gateway.CurrentMode() != rollout.ModeDisabled {
+			t.Fatalf("mode must stay Disabled after a refused Canary commit, got %s", getMCPRollout().gateway.CurrentMode())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("LIVENESS: the in-lock revalidation deadlocked on the singleton durableMu")
+	}
+}
+
 // TestCanaryCommitGate_RefusesWhenActivationInputsMissing proves the ACTIVATION-level half: a node
 // that is fully canary-READY but whose authoritative activation inputs are absent (the shipped
 // production posture — no approval/budget store) still refuses the Canary transition. This is the

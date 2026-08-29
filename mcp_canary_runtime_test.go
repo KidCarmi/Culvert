@@ -488,6 +488,81 @@ func TestCanaryRuntime_ReserveNotSyncedPersistDeniesGrant(t *testing.T) {
 	}
 }
 
+// TestCanaryRuntime_BeginNotSyncedPersistRemovesRecord is the Codex P1 (round-5) proof: when begin's
+// persist replaces the target but cannot durably sync it (fileutil.ErrReplacedNotSynced), a VISIBLE
+// Active record may be on disk even though begin returns failure and disarms only memory. Begin must
+// durably remove that possibly-installed record so a restart cannot re-arm an activation the caller
+// was told never became durable.
+func TestCanaryRuntime_BeginNotSyncedPersistRemovesRecord(t *testing.T) {
+	rt := withCanaryRuntimeTestEnv(t, "v9.9.9")
+	capb := rollout.CapabilityGateway
+	now := time.Unix(1_700_000_000, 0)
+	// Simulate a not-synced replacement: the record IS written (visible) but the write reports
+	// ErrReplacedNotSynced, so begin must treat it as a failure AND remove the visible record.
+	prevWrite := canaryAtomicWrite
+	canaryAtomicWrite = func(path string, data []byte, perm os.FileMode) error {
+		_ = os.WriteFile(path, data, perm) // the target is replaced and visible…
+		return fileutil.ErrReplacedNotSynced
+	}
+	t.Cleanup(func() { canaryAtomicWrite = prevWrite })
+
+	if _, err := rt.beginCanaryActivation(capb, runtimeTestBudget(5), now); err == nil {
+		t.Fatal("a begin whose persist is not durably synced must return an error")
+	}
+	// Begin must have removed the visible-but-unsynced record.
+	if _, err := os.Stat(canaryRuntimeStatePath(capb)); !os.IsNotExist(err) {
+		t.Fatal("a not-synced begin must durably remove the possibly-installed Active record")
+	}
+	canaryAtomicWrite = prevWrite
+	fresh := &canaryRuntime{}
+	globalCanaryRuntime = fresh
+	fresh.restore()
+	if fresh.executionEligible(capb) {
+		t.Fatal("SECURITY: a not-synced begin must not re-arm the activation on restart")
+	}
+}
+
+// TestCanaryRuntime_PersistFailureReleasesConcurrencySlot is the Codex P2 (round-5) proof: when a
+// reserve grants in memory but its persist fails (so the grant is turned into a denial and no side
+// effect crosses the boundary), the in-flight concurrency slot Reserve took must be released — a
+// single transient write failure must not permanently wedge concurrency. The monotonic total spend
+// still stands (no replay).
+func TestCanaryRuntime_PersistFailureReleasesConcurrencySlot(t *testing.T) {
+	rt := withCanaryRuntimeTestEnv(t, "v9.9.9")
+	capb := rollout.CapabilityGateway
+	now := time.Unix(1_700_000_000, 0)
+	b := runtimeTestBudget(100)
+	b.MaxConcurrentExecutions = 1 // one leaked slot would deny every later reserve on concurrency
+	if _, err := rt.beginCanaryActivation(capb, b, now); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	// Reserve #1: the enforcer grants, but the persist fails → the grant becomes a denial.
+	prevWrite := canaryAtomicWrite
+	canaryAtomicWrite = func(_ string, _ []byte, _ os.FileMode) error { return fileutil.ErrReplacedNotSynced }
+	if o, _ := rt.reserveCanaryExecution(capb, now, rtIdent); o != canary.BudgetDeniedInvalid {
+		t.Fatalf("a granted reserve whose persist fails must be denied, got %s", o)
+	}
+	canaryAtomicWrite = prevWrite
+	// Reserve #2 (durable writes restored) must be GRANTED — the leaked in-flight slot was released,
+	// so concurrency is not wedged at 1.
+	if o, _ := rt.reserveCanaryExecution(capb, now, rtIdent); o != canary.BudgetGranted {
+		t.Fatalf("SECURITY: a transient persist failure must not wedge concurrency; reserve #2 got %s", o)
+	}
+}
+
+// TestSyncParentDir_ReportsFailure proves syncParentDir returns nil for a real directory and an error
+// when the directory cannot be opened — so removeRuntimeStateAfterSafetyPersistFailure reports an
+// un-synced removal as UNRESOLVED (Codex P1, round-5) rather than as a clean fail-closed removal.
+func TestSyncParentDir_ReportsFailure(t *testing.T) {
+	dir := t.TempDir()
+	if err := syncParentDir(filepath.Join(dir, "some-file")); err != nil {
+		t.Fatalf("syncing a valid parent directory must succeed, got %v", err)
+	}
+	if err := syncParentDir(filepath.Join(dir, "no-such-subdir", "file")); err == nil {
+		t.Fatal("syncing a nonexistent parent directory must return an error (removal reported unresolved)")
+	}
+}
+
 // TestCanaryRuntime_StaleReleaseDoesNotFreeNewGeneration proves the §3 generation-bound release
 // (Codex P1): a release carrying a superseded generation is a no-op and cannot free a concurrency
 // slot on the current activation (which would admit an extra in-flight execution beyond the cap).

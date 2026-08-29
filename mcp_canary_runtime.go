@@ -89,18 +89,44 @@ func canaryRuntimeStatePath(capb rollout.Capability) string {
 // errCanaryBudgetInvalid marks an activation refused because its budget is not first-Canary valid.
 var errCanaryBudgetInvalid = errors.New("canary_budget_invalid")
 
-// removeRuntimeStateAfterSafetyPersistFailure best-effort removes the durable runtime file after a
-// FAIL-CLOSED safety mutation (a whole-Canary abort or a demotion) could not be persisted, so a
+// removeRuntimeStateAfterSafetyPersistFailure DURABLY removes the runtime file after a FAIL-CLOSED
+// safety mutation (a whole-Canary abort, a demotion, or a failed begin) could not be persisted, so a
 // restart cannot restore the pre-mutation record and revive an execution-eligible activation the
-// mutation was meant to stop. A missing file restores to the dormant default (the safe direction);
-// if the removal also fails the stale record remains and that is logged. Caller holds cr.mu.
+// mutation was meant to stop. A missing file restores to the dormant default (the safe direction).
+//
+// The unlink is NOT crash-durable until the parent directory is synced: on filesystems where the
+// directory entry survives in cache, an immediate crash could restore the stale Active record after a
+// bare os.Remove logged success (Codex P1). So the parent directory is fsynced after the remove, and
+// a remove OR a directory-sync failure is reported as UNRESOLVED — the stale record may still revive
+// on restart — rather than logged as a clean fail-closed removal. Caller holds cr.mu.
 func (rt *canaryRuntime) removeRuntimeStateAfterSafetyPersistFailure(capb rollout.Capability, what string, persistErr error) {
-	if rerr := os.Remove(canaryRuntimeStatePath(capb)); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+	path := canaryRuntimeStatePath(capb)
+	if rerr := os.Remove(path); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
 		logger.Printf("MCP canary runtime: %s persist AND remove for %s failed; a restart may revive the activation: persist=%q remove=%q",
 			what, capb.String(), sanitizeLog(persistErr.Error()), sanitizeLog(rerr.Error()))
 		return
 	}
-	logger.Printf("MCP canary runtime: %s persist for %s failed; removed durable state to fail closed to dormant: %q", what, capb.String(), sanitizeLog(persistErr.Error()))
+	if derr := syncParentDir(path); derr != nil {
+		logger.Printf("MCP canary runtime: %s persist failed and the fail-closed removal for %s is NOT durably synced; a restart may revive the activation: persist=%q dirsync=%q",
+			what, capb.String(), sanitizeLog(persistErr.Error()), sanitizeLog(derr.Error()))
+		return
+	}
+	logger.Printf("MCP canary runtime: %s persist for %s failed; durably removed the state to fail closed to dormant: %q", what, capb.String(), sanitizeLog(persistErr.Error()))
+}
+
+// syncParentDir fsyncs the directory containing path so a preceding unlink (or rename) is
+// crash-durable before the caller reports the fail-closed removal complete.
+func syncParentDir(path string) error {
+	d, err := os.Open(filepath.Dir(path)) // #nosec G304 -- fixed operator-owned dir under dataDir
+	if err != nil {
+		return err
+	}
+	serr := d.Sync()
+	cerr := d.Close()
+	if serr != nil {
+		return serr
+	}
+	return cerr
 }
 
 // canaryRuntimePersist is the durable persist step for every canary-runtime mutation (begin,
@@ -141,7 +167,10 @@ func (rt *canaryRuntime) beginCanaryActivation(capb rollout.Capability, budget c
 		cr.enforcer = nil
 		cr.aborter = nil
 		cr.budget = canary.Budget{}
-		logger.Printf("MCP canary runtime: begin persist for %s failed; disarmed in memory (fail-closed): %q", capb.String(), sanitizeLog(err.Error()))
+		// The persist may have left a VISIBLE Active record on disk (e.g. an AtomicWrite that replaced
+		// the target but could not fsync — ErrReplacedNotSynced). Durably remove it so a restart cannot
+		// re-arm an activation the caller was told never became durable (Codex P1).
+		rt.removeRuntimeStateAfterSafetyPersistFailure(capb, "begin", err)
 		return gen, err
 	}
 	return gen, nil
@@ -226,6 +255,13 @@ func (rt *canaryRuntime) reserveCanaryExecution(capb rollout.Capability, now tim
 			rt.removeRuntimeStateAfterSafetyPersistFailure(capb, "reserve-abort", err)
 		}
 		if outcome.Granted() {
+			// The grant is being turned into a denial (no side effect will cross the boundary), but
+			// Reserve already took an in-flight concurrency slot and the caller — seeing a denial — will
+			// NOT call releaseCanaryExecution. Release the unstarted slot here so a single transient write
+			// failure cannot permanently wedge concurrency (with MaxConcurrentExecutions:1, a leaked slot
+			// denies every later reserve on concurrency until restart). The monotonic TOTAL spend stays
+			// consumed (Release never decrements it), so the budget is never replayed (Codex P2).
+			cr.enforcer.Release()
 			return canary.BudgetDeniedInvalid, generation
 		}
 	}

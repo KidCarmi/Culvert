@@ -38,6 +38,24 @@ import (
 // facts (events, policy, inventory, inspection, kill) derive from their own live signals so a
 // future live node with, say, degraded durable events fails on that specific fact.
 func canaryNodeFacts(capb rollout.Capability) canary.Facts {
+	// The two durableMu-dependent facts (kill-clear, rollback health) come from the process singleton
+	// via their own locking reads — this is the dry-run/status path with no lock held.
+	return canaryNodeFactsWith(capb, !getMCPRollout().stateFor(capb).Killed(), rollbackPathHealthy(capb))
+}
+
+// canaryNodeFactsLocked is canaryNodeFacts for a caller that ALREADY holds r.durableMu (the commit's
+// in-lock revalidation — Codex P1). It reads the two durableMu-sensitive facts from r WITHOUT
+// re-locking: the kill state through State's own mutex, and rollback health through the LOCKED
+// variant (rollbackPathReadyLocked). Every other fact reads a holder unrelated to durableMu, so it
+// is safe to gather while the commit holds the lock.
+func canaryNodeFactsLocked(r *mcpRollout, capb rollout.Capability) canary.Facts {
+	return canaryNodeFactsWith(capb, !r.stateFor(capb).Killed(), r.rollbackPathReadyLocked(capb))
+}
+
+// canaryNodeFactsWith fills the scope-independent Canary facts, taking the two durableMu-dependent
+// facts as parameters so both the locking dry-run (canaryNodeFacts) and the in-lock commit
+// revalidation (canaryNodeFactsLocked) share one fact table without either re-entering durableMu.
+func canaryNodeFactsWith(capb rollout.Capability, emergencyKillClear, rollbackHealthy bool) canary.Facts {
 	live := liveExecDepsConfigured(capb == rollout.CapabilityManagement)
 	reg, cat := mcpInventory.sharedInventory()
 	return canary.Facts{
@@ -57,12 +75,12 @@ func canaryNodeFacts(capb rollout.Capability) canary.Facts {
 		RegistryHealthy:         reg != nil,
 		CatalogHealthy:          cat != nil,
 		PolicyHealthy:           mcpPolicy.composed(),
-		EmergencyKillClear:      !getMCPRollout().stateFor(capb).Killed(),
+		EmergencyKillClear:      emergencyKillClear,
 
 		// Rollback: NOT mere coordinator existence. A durable, rehearsed rollback path is
 		// required — emergencyDisable that only lands in memory can be silently re-admitted on
 		// restart (Codex P1, PR #1249). See rollbackPathHealthy.
-		RollbackPathHealthy: rollbackPathHealthy(capb),
+		RollbackPathHealthy: rollbackHealthy,
 
 		// Scope/approval/budget facts default false here. They are ACTIVATION-level, so the node
 		// dry-run (EvaluateNode) skips them entirely — they are set and evaluated only by
@@ -191,7 +209,21 @@ func productionCanaryActivationInputs(_ rollout.Capability, _ rollout.ScopeSpec,
 // budget/target facts (decided by the pure canary validators) onto node readiness. Fail-
 // closed: any unmet prerequisite appears in Unmet and Ready stays false.
 func evaluateCanaryActivationPreflight(in CanaryActivationInput) canary.Readiness {
-	f := canaryNodeFacts(in.Capability)
+	return evaluateActivationOnFacts(canaryNodeFacts(in.Capability), in)
+}
+
+// evaluateCanaryActivationPreflightLocked is evaluateCanaryActivationPreflight for a caller that
+// ALREADY holds r.durableMu — the commit path revalidates the full verdict inside its serialized
+// section against THIS rollout's live state (Codex P1). It gathers the node facts via the LOCKED
+// path (no durableMu re-entry) and layers the same scope/approval/budget facts on top.
+func evaluateCanaryActivationPreflightLocked(r *mcpRollout, in CanaryActivationInput) canary.Readiness {
+	return evaluateActivationOnFacts(canaryNodeFactsLocked(r, in.Capability), in)
+}
+
+// evaluateActivationOnFacts layers the ACTIVATION-level scope/approval/budget/target facts onto a
+// pre-gathered node fact table and returns the full pure verdict. Shared by the locking and
+// already-locked preflight entry points so the activation logic exists once.
+func evaluateActivationOnFacts(f canary.Facts, in CanaryActivationInput) canary.Readiness {
 	f.ScopeBounded = canary.ValidateScope(in.Scope, in.ScopeRev) == canary.ScopeOK
 	f.ScopeReadFirst = canary.ScopeReadFirst(in.Scope)
 	// LiveApprovalValid is true only when EVERY scoped tool has its own valid live_execution
