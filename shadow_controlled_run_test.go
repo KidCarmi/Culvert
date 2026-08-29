@@ -29,11 +29,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -43,6 +44,7 @@ import (
 	"github.com/KidCarmi/Culvert/internal/mcp/cpdp"
 	evmodel "github.com/KidCarmi/Culvert/internal/mcp/events/model"
 	"github.com/KidCarmi/Culvert/internal/mcp/execution"
+	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
 	"github.com/KidCarmi/Culvert/internal/mcp/registry"
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 	mcpruntime "github.com/KidCarmi/Culvert/internal/mcp/runtime"
@@ -486,31 +488,32 @@ func (r *shadowRun) assertOperatorObservability(fin shadowMetricsView) {
 	// singleton is a process-global accumulator (never reset between tests — the per-phase
 	// assertions above use before/after deltas for exactly this reason), so the operator
 	// rows are asserted against fin's live ABSOLUTE values, not run-local constants: a
-	// serializer that dropped a row, mislabeled it, or read a stale/other source would
-	// diverge from fin and fail here. Every fixed-enum outcome row (incl. the clean-by-
-	// construction ones) is pinned so a spurious bucket cannot slip through.
+	// serializer that dropped a row, mislabeled it, or read a stale/other source diverges
+	// from fin and fails here. Rows are PARSED (exact integer + uniqueness), never
+	// prefix-matched, so an emitted "10" can never satisfy an expected "1" and a
+	// contradictory duplicate is caught rather than masked.
 	var b strings.Builder
 	writeMCPShadowMetrics(&b)
-	metricsText := b.String()
-	for _, w := range []struct {
-		outcome string
-		n       int64
-	}{
-		{"would_execute", fin.WouldExecute},
-		{"would_block", fin.WouldBlock},
-		{"would_require_approval", fin.WouldRequireApproval},
-		{"would_require_confirmation", fin.WouldRequireConfirmation},
-		{"would_fail_credential_readiness", fin.WouldFailCredential},
-		{"would_fail_inspection", fin.WouldFailInspection},
-		{"would_fail_stale_decision", fin.WouldFailStale},
-		{"would_fail_hard_control", fin.WouldFailHardControl},
-		{"other", fin.WouldOther},
-	} {
-		line := fmt.Sprintf(`culvert_mcp_shadow_evaluations_total{capability="gateway",outcome=%q} %d`, w.outcome, w.n)
-		req(t, strings.Contains(metricsText, line), "operator /metrics missing %q in:\n%s", line, metricsText)
+	outcomes, evalErrors, errSeen := shadowMetricRows(t, b.String())
+	req(t, errSeen == 1, "operator /metrics must emit exactly one evaluation_errors row, saw %d", errSeen)
+	want := map[string]int64{
+		"would_execute":                   fin.WouldExecute,
+		"would_block":                     fin.WouldBlock,
+		"would_require_approval":          fin.WouldRequireApproval,
+		"would_require_confirmation":      fin.WouldRequireConfirmation,
+		"would_fail_credential_readiness": fin.WouldFailCredential,
+		"would_fail_inspection":           fin.WouldFailInspection,
+		"would_fail_stale_decision":       fin.WouldFailStale,
+		"would_fail_hard_control":         fin.WouldFailHardControl,
+		"other":                           fin.WouldOther,
 	}
-	errLine := fmt.Sprintf(`culvert_mcp_shadow_evaluation_errors_total{capability="gateway"} %d`, fin.EvaluationErrors)
-	req(t, strings.Contains(metricsText, errLine), "operator /metrics missing %q in:\n%s", errLine, metricsText)
+	req(t, len(outcomes) == len(want), "operator /metrics outcome row count=%d want=%d rows=%v", len(outcomes), len(want), outcomes)
+	for oc, n := range want {
+		got, ok := outcomes[oc]
+		req(t, ok, "operator /metrics missing outcome=%q row (rows=%v)", oc, outcomes)
+		req(t, got == n, "operator /metrics outcome=%q = %d, want live counter %d", oc, got, n)
+	}
+	req(t, evalErrors == fin.EvaluationErrors, "operator /metrics evaluation_errors=%d, want live counter %d", evalErrors, fin.EvaluationErrors)
 
 	// (2) The operator status map: its bounded "metrics" snapshot must EQUAL the live
 	// counters (proving the status surface reads the same singleton, not a stale copy),
@@ -521,8 +524,108 @@ func (r *shadowRun) assertOperatorObservability(fin shadowMetricsView) {
 	sv, ok := st["metrics"].(shadowMetricsView)
 	req(t, ok, "status metrics must be a shadowMetricsView, got %T", st["metrics"])
 	req(t, sv == fin, "status metrics snapshot must equal the final counters: status=%+v final=%+v", sv, fin)
-	r.ev("operator observability: /metrics culvert_mcp_shadow_* rows == live singleton (evaluations=%d would_execute=%d would_block=%d would_fail_hard_control=%d other=%d evaluation_errors=%d); status.evaluator_composed=true status.live_execution_ready=false status.metrics==singleton",
+	r.ev("operator observability: /metrics culvert_mcp_shadow_* rows parsed 1:1 == live singleton (evaluations=%d would_execute=%d would_block=%d would_fail_hard_control=%d other=%d evaluation_errors=%d); status.evaluator_composed=true status.live_execution_ready=false status.metrics==singleton",
 		fin.Evaluations, fin.WouldExecute, fin.WouldBlock, fin.WouldFailHardControl, fin.WouldOther, fin.EvaluationErrors)
+}
+
+var (
+	shadowEvalRowRE = regexp.MustCompile(`^culvert_mcp_shadow_evaluations_total\{capability="gateway",outcome="([^"]+)"\} (\d+)$`)
+	shadowErrRowRE  = regexp.MustCompile(`^culvert_mcp_shadow_evaluation_errors_total\{capability="gateway"\} (\d+)$`)
+)
+
+// shadowMetricRows parses the culvert_mcp_shadow_* exposition text into the outcome->count
+// map and the evaluation_errors count, and returns how many evaluation_errors rows were
+// seen. It matches COMPLETE, anchored samples (never prefixes), fails on a duplicate
+// outcome row, and fails on any culvert_mcp_shadow_ line that matches NEITHER anchored
+// form (a mislabeled/extra sample) — so a scaling, formatting, duplicate, or mislabel
+// regression cannot survive behind an exact-equality claim (Codex P2 on 5825cc4). HELP/TYPE
+// (#) lines are ignored.
+func shadowMetricRows(t *testing.T, text string) (outcomes map[string]int64, evalErrors int64, evalErrorsSeen int) {
+	t.Helper()
+	outcomes = map[string]int64{}
+	for _, ln := range strings.Split(text, "\n") {
+		if ln == "" || strings.HasPrefix(ln, "#") {
+			continue
+		}
+		if m := shadowEvalRowRE.FindStringSubmatch(ln); m != nil {
+			n, err := strconv.ParseInt(m[2], 10, 64)
+			req(t, err == nil, "unparsable evaluations count in %q: %v", ln, err)
+			_, dup := outcomes[m[1]]
+			req(t, !dup, "duplicate operator /metrics row for outcome=%q:\n%s", m[1], text)
+			outcomes[m[1]] = n
+			continue
+		}
+		if m := shadowErrRowRE.FindStringSubmatch(ln); m != nil {
+			n, err := strconv.ParseInt(m[1], 10, 64)
+			req(t, err == nil, "unparsable evaluation_errors count in %q: %v", ln, err)
+			evalErrors = n
+			evalErrorsSeen++
+			continue
+		}
+		// A culvert_mcp_shadow_ line matching neither anchored form is a serializer
+		// regression (mislabel/extra sample) and must fail rather than be silently ignored.
+		req(t, !strings.HasPrefix(ln, "culvert_mcp_shadow_"), "unrecognized culvert_mcp_shadow_ row (possible mislabel/format regression):\n%q", ln)
+	}
+	return outcomes, evalErrors, evalErrorsSeen
+}
+
+// TestMCPShadowMetricsSerializationDistinct pins the operator /metrics serializer's
+// label->value MAPPING with DISTINCT per-outcome counts (1..9) plus a distinct
+// evaluation_errors count. In the controlled run the exercised outcomes are all 1 and the
+// rest 0, so a serializer that emitted one outcome's count under another label — or
+// permuted the zero-valued rows — would still produce every expected string; here every
+// outcome carries a unique value, so any label permutation changes at least one parsed row
+// and fails (Codex P2 on 5825cc4). It swaps in a fresh process-global metrics singleton
+// (the serializer reads the global) and restores it, so it is order-independent under
+// -shuffle/-count.
+func TestMCPShadowMetricsSerializationDistinct(t *testing.T) {
+	prev := globalMCPShadowMetrics
+	t.Cleanup(func() { globalMCPShadowMetrics = prev })
+	m := &mcpShadowMetrics{}
+	globalMCPShadowMetrics = m
+
+	seed := []struct {
+		outcome string
+		n       int
+	}{
+		{"would_execute", 1},
+		{"would_block", 2},
+		{"would_require_approval", 3},
+		{"would_require_confirmation", 4},
+		{"would_fail_credential_readiness", 5},
+		{"would_fail_inspection", 6},
+		{"would_fail_stale_decision", 7},
+		{"would_fail_hard_control", 8},
+		{"__unknown_outcome__", 9}, // routes to the fail-safe "other" bucket
+	}
+	for _, s := range seed {
+		for i := 0; i < s.n; i++ {
+			m.ObserveShadowOutcome("gateway", s.outcome)
+		}
+	}
+	const wantErrs = 11
+	for i := 0; i < wantErrs; i++ {
+		m.ObserveBlock("gateway", mcperr.ReasonUpstreamCallFailed) // evaluation_errors path
+	}
+
+	var b strings.Builder
+	writeMCPShadowMetrics(&b)
+	outcomes, evalErrors, errSeen := shadowMetricRows(t, b.String())
+	req(t, errSeen == 1, "expected exactly one evaluation_errors row, saw %d", errSeen)
+
+	want := map[string]int64{
+		"would_execute": 1, "would_block": 2, "would_require_approval": 3,
+		"would_require_confirmation": 4, "would_fail_credential_readiness": 5,
+		"would_fail_inspection": 6, "would_fail_stale_decision": 7,
+		"would_fail_hard_control": 8, "other": 9,
+	}
+	req(t, len(outcomes) == len(want), "serializer outcome row count=%d want=%d rows=%v", len(outcomes), len(want), outcomes)
+	for oc, n := range want {
+		got, ok := outcomes[oc]
+		req(t, ok, "serializer missing outcome=%q (rows=%v)", oc, outcomes)
+		req(t, got == n, "serializer label->value mismatch: outcome=%q = %d, want %d", oc, got, n)
+	}
+	req(t, evalErrors == wantErrs, "serializer evaluation_errors=%d, want %d", evalErrors, wantErrs)
 }
 
 // resetShadowGlobalsForRun resets the process-global singletons a controlled run touches

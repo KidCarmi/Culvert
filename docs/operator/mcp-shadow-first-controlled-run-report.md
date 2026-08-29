@@ -127,7 +127,7 @@ revocation drill: approval revoked -> eligibility!=Usable
             durable_outcome=would_fail_hard_control
 rollback Shadow->Observe: mode=observe post_rollback_execution_state=not_implemented
             shadow_evaluations UNCHANGED live_executor=absent canary=off production=off
-operator observability: /metrics culvert_mcp_shadow_* rows == live singleton
+operator observability: /metrics culvert_mcp_shadow_* rows parsed 1:1 == live singleton
             (evaluations=3 would_execute=1 would_block=1 would_fail_hard_control=1 other=0
             evaluation_errors=1); status.evaluator_composed=true
             status.live_execution_ready=false status.metrics==singleton
@@ -211,7 +211,7 @@ Shadow explicitly activated                        YES
 Activation scope bounded                           YES
 Exact fingerprint approval active                  YES
 Real Shadow evaluations observed                   YES (3)
-Shadow reflected on operator /metrics + status     YES (rows == live counters)
+Shadow reflected on operator /metrics + status     YES (rows parsed 1:1 == live counters)
 Schema-v2 durable evidence observed                YES
 Response <-> durable evidence parity               YES
 Upstream calls caused by Shadow                    0
