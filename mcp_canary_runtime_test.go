@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -293,6 +294,43 @@ func TestCanaryRuntime_CapabilityIsolation(t *testing.T) {
 	}
 	if rt.executionEligible(mg) || rt.executionEligible(gw) {
 		t.Fatal("after demoting Management, neither capability is eligible")
+	}
+}
+
+// TestCanaryRuntime_FailedDemoteDoesNotReviveOnRestart is the §4/§7 fail-closed-demotion proof
+// (Codex P1): if persisting a demotion fails, the durable Active:true record must not survive to
+// re-arm the Canary on restart. The runtime removes the durable file on a persist failure so a
+// restart restores the dormant default.
+func TestCanaryRuntime_FailedDemoteDoesNotReviveOnRestart(t *testing.T) {
+	rt := withCanaryRuntimeTestEnv(t, "v9.9.9")
+	capb := rollout.CapabilityGateway
+	now := time.Unix(1_700_000_000, 0)
+	if _, err := rt.beginCanaryActivation(capb, runtimeTestBudget(5), now); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	// Sanity: the durable record is active — a naive restart would revive it.
+	if _, err := os.Stat(canaryRuntimeStatePath(capb)); err != nil {
+		t.Fatalf("begin must have written a durable active record: %v", err)
+	}
+	// Inject a persist failure for the demotion that leaves the prior active record on disk.
+	prev := canaryDemotePersist
+	canaryDemotePersist = func(_ *canaryRuntime, _ rollout.Capability, _ *canaryCapRuntime) error {
+		return errors.New("injected demote persist failure")
+	}
+	t.Cleanup(func() { canaryDemotePersist = prev })
+
+	if err := rt.demoteCanary(capb); err == nil {
+		t.Fatal("a demote whose persist fails must return the error, not report durable success")
+	}
+	// The fix removed the durable file so a restart cannot revive the activation.
+	if _, err := os.Stat(canaryRuntimeStatePath(capb)); !os.IsNotExist(err) {
+		t.Fatal("a failed demote must remove the durable state to fail closed to dormant")
+	}
+	fresh := &canaryRuntime{}
+	globalCanaryRuntime = fresh
+	fresh.restore()
+	if fresh.executionEligible(capb) {
+		t.Fatal("SECURITY: a failed demote must not revive the Canary on restart")
 	}
 }
 

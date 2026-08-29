@@ -43,12 +43,24 @@ func persistRolloutState(st *rollout.State) error {
 	if st == nil {
 		return fmt.Errorf("rollout persist: nil state")
 	}
+	return persistRolloutStateTo(st, rolloutStateFileName(st.Capability()))
+}
+
+// persistRolloutStateTo is the path-injectable core of persistRolloutState: it serializes st and
+// atomically writes it to path. Production persistence uses persistRolloutState (the canonical
+// per-capability path); the rollback-rehearsal drill (mcp_canary_rollback_rehearsal.go) uses this
+// with a scratch path so it exercises the REAL persistence code — the same ToPersist + marshal +
+// AtomicWrite chain — rather than a parallel implementation that could drift from production (Codex
+// P1). A nil state is a programmer error, not a durable-write failure.
+func persistRolloutStateTo(st *rollout.State, path string) error {
+	if st == nil {
+		return fmt.Errorf("rollout persist: nil state")
+	}
 	p := st.ToPersist()
 	data, err := json.Marshal(p)
 	if err != nil {
 		return fmt.Errorf("rollout persist: marshal: %w", err)
 	}
-	path := rolloutStateFileName(st.Capability())
 	if err := fileutil.AtomicWrite(path, data, 0o600); err != nil {
 		return fmt.Errorf("rollout persist: write %s: %w", filepath.Base(path), err)
 	}
@@ -62,7 +74,13 @@ func persistRolloutState(st *rollout.State) error {
 // so the operator can see degraded persistence (the caller keeps the safe Disabled
 // default). It never silently promotes to a more permissive mode.
 func restoreRolloutState(st *rollout.State) (restored bool, err error) {
-	path := rolloutStateFileName(st.Capability())
+	return restoreRolloutStateFrom(st, rolloutStateFileName(st.Capability()))
+}
+
+// restoreRolloutStateFrom is the path-injectable core of restoreRolloutState (see that function for
+// the fail-closed contract). The rollback-rehearsal drill uses it with a scratch path so it restores
+// through the SAME production read + unmarshal + LoadPersist chain it is meant to prove (Codex P1).
+func restoreRolloutStateFrom(st *rollout.State, path string) (restored bool, err error) {
 	data, rerr := os.ReadFile(path) // #nosec G304 -- fixed operator-owned path under dataDir
 	if rerr != nil {
 		if os.IsNotExist(rerr) {

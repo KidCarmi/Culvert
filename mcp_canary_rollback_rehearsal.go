@@ -108,30 +108,19 @@ func executeRollbackRehearsalDrill(capb rollout.Capability) ([]string, error) {
 		if err := work.SetConfig(rung.cfg, "rollback-rehearsal", time.Now().UnixNano()); err != nil {
 			return steps, fmt.Errorf("rehearsal set %s: %w", rung.step, err)
 		}
-		// Persist the current rung to the SCRATCH file via the real durable path. An
-		// ErrReplacedNotSynced means the content is durable (only the dir fsync failed) — success.
-		p := work.ToPersist()
-		data, merr := json.Marshal(p)
-		if merr != nil {
-			return steps, fmt.Errorf("rehearsal marshal %s: %w", rung.step, merr)
+		// Persist the current rung to the SCRATCH file through the REAL production persistence
+		// (persistRolloutStateTo — the same ToPersist + marshal + AtomicWrite chain persistRolloutState
+		// uses), so a regression in that wrapper is caught by the drill rather than hidden behind a
+		// parallel implementation (Codex P1). Only the destination path is injected.
+		if err := persistRolloutStateTo(work, scratch); err != nil {
+			return steps, fmt.Errorf("rehearsal persist %s: %w", rung.step, err)
 		}
-		if werr := fileutil.AtomicWrite(scratch, data, 0o600); werr != nil && !errors.Is(werr, fileutil.ErrReplacedNotSynced) {
-			return steps, fmt.Errorf("rehearsal persist %s: %w", rung.step, werr)
-		}
-		// Restore into a FRESH state and require the mode to round-trip durably. LoadPersist
-		// re-validates + re-compiles the config and fails closed to Disabled on any error, so a
-		// rung that does not survive the durable round-trip fails the mode assertion here.
-		raw, rerr := os.ReadFile(scratch) // #nosec G304 -- fixed drill-scratch path under dataDir
-		if rerr != nil {
-			return steps, fmt.Errorf("rehearsal read %s: %w", rung.step, rerr)
-		}
-		var restored rollout.StatePersist
-		if uerr := json.Unmarshal(raw, &restored); uerr != nil {
-			return steps, fmt.Errorf("rehearsal decode %s: %w", rung.step, uerr)
-		}
+		// Restore into a FRESH state through the REAL production restore (restoreRolloutStateFrom):
+		// it re-validates + re-compiles and fails closed to Disabled on any error, so a rung that does
+		// not survive the durable round-trip fails the mode assertion below.
 		fresh := rollout.NewState(capb, lim)
-		if lerr := fresh.LoadPersist(restored); lerr != nil {
-			return steps, fmt.Errorf("rehearsal loadpersist %s: %w", rung.step, lerr)
+		if ok, rerr := restoreRolloutStateFrom(fresh, scratch); rerr != nil || !ok {
+			return steps, fmt.Errorf("rehearsal restore %s: ok=%v err=%w", rung.step, ok, rerr)
 		}
 		if fresh.CurrentMode() != rung.cfg.Mode {
 			return steps, fmt.Errorf("rehearsal %s did not round-trip: restored mode %s", rung.step, fresh.CurrentMode())

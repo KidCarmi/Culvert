@@ -224,11 +224,18 @@ stay unissuable, Canary/Production stay unreachable, and no real upstream side e
 2. **The Canary preflight is the authoritative activation gate (§2).**
    `commitRolloutTransitionAt` — the single shared commit path used by the CP→DP apply
    (`applyMCPCapabilityEnvelope`), the startup reconcile (`reconcileRolloutWithAppliers`), and any
-   future caller — refuses a transition into a live-execution mode unless `evaluateCanaryNodeReadiness`
-   is Ready, resolved from AUTHORITATIVE node state (`canary.EvaluateNode`), never a request-supplied
-   approval/budget claim. `restore()` clamps a restored executing mode to Disabled. There is no API,
-   restart, CP→DP, or restore bypass; the syntactic validity of a signed Canary config is never
-   sufficient. Redundant with `modeExecReady` (defense-in-depth), and always refuses in this build.
+   future caller — refuses a transition into a live-execution mode unless the WHOLE
+   `evaluateCanaryActivationPreflight` verdict (`canary.Evaluate`) is Ready: node readiness AND the
+   activation-level facts (bounded read-first scope, one valid live approval per scoped tool,
+   blast-radius budget, target usability/fingerprint). The scope comes from the SIGNED config
+   (authoritative); the other activation inputs are resolved from authoritative node state via the
+   `canaryActivationInputsProbe` seam — never a request-supplied claim — which in this build returns
+   fail-closed empties (no approval/budget store exists), so the full verdict can never pass. Using
+   node readiness alone would let a future armed build commit Canary without scope/approval/budget
+   validation (Codex P1); the full verdict closes that. `restore()` clamps a restored executing mode
+   to Disabled. There is no API, restart, CP→DP, or restore bypass; the syntactic validity of a
+   signed Canary config is never sufficient. Redundant with `modeExecReady` (defense-in-depth), and
+   always refuses in this build.
 
 3. **Runtime blast-radius budget (§3).** `canary.BudgetEnforcer` is generation-bound, atomic under
    concurrency (one mutex over the whole check-then-reserve), and fail-closed: exactly
@@ -263,3 +270,13 @@ counters, clear the whole-Canary abort automatically, treat a per-request deny a
 abort, accept a corrupt/stale attestation, accept a self-attested rollback without a drill, and
 reuse an old budget/abort generation after reactivation. See
 `mcp_canary_matrix_mutation_test.go` for the roster.
+
+Codex-review hardening (P1, each with a dedicated gate): the runtime budget's rate-window position
+is durable generation-bound state so a restart cannot replay a `MaxExecutionsPerMinute` burst
+mid-window (`TestBudgetEnforcer_RestartDoesNotReplayRateWindow`); a demotion whose persist fails
+removes the durable record so a failed rollback cannot revive on restart
+(`TestCanaryRuntime_FailedDemoteDoesNotReviveOnRestart`); the commit gate requires the FULL
+activation verdict, not just node readiness (`TestCanaryCommitGate_RefusesWhenActivationInputsMissing`
+/ `_AllowsWhenFullyReady`); and the rollback-rehearsal drill runs through the REAL production
+`persistRolloutStateTo`/`restoreRolloutStateFrom` (destination path injected) rather than a parallel
+persistence copy.

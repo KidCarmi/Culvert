@@ -158,6 +158,34 @@ func evaluateCanaryNodeReadiness(capb rollout.Capability) canary.Readiness {
 	return canary.EvaluateNode(canaryNodeFacts(capb))
 }
 
+// canaryActivationInputs are the ACTIVATION-level facts a Canary transition needs beyond the
+// signed scope: one valid live_execution approval per scoped tool, the blast-radius budget, and the
+// target server-usability / tool-fingerprint observations. They are resolved from AUTHORITATIVE
+// node state (never request-supplied), so a signed Canary config can never smuggle them.
+type canaryActivationInputs struct {
+	ToolApprovals      []canary.ToolApprovalBinding
+	Budget             canary.Budget
+	ServerUsable       bool
+	FingerprintCurrent bool
+}
+
+// canaryActivationInputsProbe derives the authoritative activation-level inputs for a Canary
+// transition into a scope. It is a SEAM: production is productionCanaryActivationInputs, which — in
+// this build — returns fail-closed empties because no authoritative approval/budget store exists,
+// so the full activation preflight can never be satisfied and a Canary transition always refuses. A
+// future, separately-reviewed live activation wires the real authoritative sources here (the
+// tool-trust store for per-tool live approvals, the admin budget, the registry/catalog for
+// server-usability and fingerprint currency). Tests arm it to supply valid inputs.
+var canaryActivationInputsProbe = productionCanaryActivationInputs
+
+// productionCanaryActivationInputs is fail-closed by construction: this build ships NO authoritative
+// live-approval or budget store, and activation-level facts must never be taken from a request, so
+// it returns empties. The full preflight therefore reports live_execution_approval_invalid +
+// canary_budget_not_configured (+ the unarmed-node reasons), keeping Canary unreachable.
+func productionCanaryActivationInputs(_ rollout.Capability, _ rollout.ScopeSpec, _ uint64) canaryActivationInputs {
+	return canaryActivationInputs{}
+}
+
 // evaluateCanaryActivationPreflight returns the FULL Canary readiness verdict for a capability
 // plus a requested scope, candidate live approval, and budget. It layers the scope/approval/
 // budget/target facts (decided by the pure canary validators) onto node readiness. Fail-

@@ -567,16 +567,25 @@ func TestDurable_ShadowWindowRestartsAfterCanaryDemotion(t *testing.T) {
 	if err := r.commitRolloutTransition(gwShadowCfg(1), "admin", time.Unix(1000, 0)); err != nil {
 		t.Fatal(err)
 	}
-	// The §2 Canary activation gate requires FULL canary node readiness at the commit, not merely
-	// the live tier. Provide the remaining node facts (Shadow Exit attestation + executable
-	// rollback rehearsal) durably; they are inert for the Shadow legs and let the artificial
-	// Canary commit below pass the authoritative preflight.
+	// The §2 Canary activation gate requires the FULL canary verdict at the commit — node
+	// readiness AND the activation-level scope/approval/budget/target facts. Provide the remaining
+	// node facts (Shadow Exit attestation + executable rollback rehearsal) durably; they are inert
+	// for the Shadow legs. The Canary leg below uses a valid canary scope + armed authoritative
+	// activation inputs so the artificial Canary commit passes the authoritative preflight.
 	writeValidShadowExitAttestation(t)
 	writeValidRollbackRehearsal(t, rollout.CapabilityGateway)
-	// Promote to Canary at t=2000 (needs the live tier): Shadow evidence preserved.
+	// Promote to Canary at t=2000 (needs the live tier + full activation readiness): Shadow
+	// evidence preserved.
+	now2 := time.Unix(2000, 0)
+	vin := validCanaryActivationInput(now2)
+	prevProbe := canaryActivationInputsProbe
+	canaryActivationInputsProbe = func(_ rollout.Capability, _ rollout.ScopeSpec, _ uint64) canaryActivationInputs {
+		return canaryActivationInputs{ToolApprovals: vin.ToolApprovals, Budget: vin.Budget, ServerUsable: true, FingerprintCurrent: true}
+	}
 	globalExecDeps.gateway.Store(true)
-	err := r.commitRolloutTransition(gwCanaryCfg(2), "admin", time.Unix(2000, 0))
+	err := r.commitRolloutTransition(canaryCfgForScope(vin.Scope, vin.ScopeRev), "admin", now2)
 	globalExecDeps.gateway.Store(false) // disarm live so the demotion-to-Shadow preflight passes
+	canaryActivationInputsProbe = prevProbe
 	if err != nil {
 		t.Fatal(err)
 	}

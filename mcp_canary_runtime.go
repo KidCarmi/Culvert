@@ -89,6 +89,12 @@ func canaryRuntimeStatePath(capb rollout.Capability) string {
 // errCanaryBudgetInvalid marks an activation refused because its budget is not first-Canary valid.
 var errCanaryBudgetInvalid = errors.New("canary_budget_invalid")
 
+// canaryDemotePersist is the persist step of demoteCanary, isolated as a seam so a test can inject
+// a durable-write failure that leaves the prior active record on disk — exercising the fail-closed
+// remove path that prevents a failed demotion from reviving on restart (Codex P1). Production is the
+// real persistLocked.
+var canaryDemotePersist = (*canaryRuntime).persistLocked
+
 // beginCanaryActivation bumps the activation generation and arms a fresh budget enforcer + abort
 // controller for it, then persists. It is the FUTURE-arming seam (never invoked in this build). It
 // composes no executor and reaches no upstream — it only initialises the accounting a live Canary
@@ -117,6 +123,14 @@ func (rt *canaryRuntime) beginCanaryActivation(capb rollout.Capability, budget c
 // further execution can be reserved, and persists. The generation is NOT reused — the next
 // beginCanaryActivation bumps it, so the demoted generation's budget/abort snapshots can never be
 // restored into, or reused by, the new activation. This is the runtime half of a rollback/demotion.
+//
+// A demotion is a SAFETY narrowing, so the durable state MUST fail closed: if persisting the
+// disarmed record fails, the on-disk file would still say Active:true for this generation and a
+// restart would re-arm it, silently undoing the rollback (Codex P1). To prevent that revival the
+// durable file is best-effort REMOVED on a persist failure — a missing file restores to the dormant
+// default (nothing armed), which is the safe direction. Only if BOTH the disarmed write and the
+// remove fail is the demotion not durably fail-closed, and that is RETURNED so the caller never
+// reports a durable rollback that a restart could reverse.
 func (rt *canaryRuntime) demoteCanary(capb rollout.Capability) error {
 	cr := rt.capRuntime(capb)
 	cr.mu.Lock()
@@ -125,7 +139,19 @@ func (rt *canaryRuntime) demoteCanary(capb rollout.Capability) error {
 	cr.enforcer = nil
 	cr.aborter = nil
 	cr.budget = canary.Budget{}
-	return rt.persistLocked(capb, cr)
+	if err := canaryDemotePersist(rt, capb, cr); err != nil {
+		// Persisting the disarmed record failed — remove the durable file so a restart cannot
+		// restore the prior Active:true record. A removal that succeeds fails the runtime closed to
+		// dormant; a removal that also fails leaves the stale record, so surface the original error.
+		if rerr := os.Remove(canaryRuntimeStatePath(capb)); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+			logger.Printf("MCP canary runtime: demote persist AND remove for %s failed; a restart may revive the activation: persist=%q remove=%q",
+				capb.String(), sanitizeLog(err.Error()), sanitizeLog(rerr.Error()))
+			return err
+		}
+		logger.Printf("MCP canary runtime: demote persist for %s failed; removed durable state to fail closed to dormant: %q", capb.String(), sanitizeLog(err.Error()))
+		return err
+	}
+	return nil
 }
 
 // currentGeneration returns the capability's current activation generation (0 = never activated).

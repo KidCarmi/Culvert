@@ -222,6 +222,57 @@ func TestBudgetEnforcer_RestartPreservesSpend(t *testing.T) {
 	}
 }
 
+// TestBudgetEnforcer_RestartDoesNotReplayRateWindow is the §3 restart-rate proof (Codex P1): a
+// restart mid rate-window must NOT reset the rate budget and admit another full burst in the same
+// wall-clock minute. The rate-window position is generation-bound durable state.
+func TestBudgetEnforcer_RestartDoesNotReplayRateWindow(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	b := testBudget(100)
+	b.MaxExecutionsPerMinute = 2
+	e := NewBudgetEnforcer(b, 1, now)
+	// Spend the whole rate window (2 in this minute).
+	for i := 0; i < 2; i++ {
+		if o := e.Reserve(1, now); o != BudgetGranted {
+			t.Fatalf("rate reserve %d must be granted, got %s", i, o)
+		}
+		e.Release()
+	}
+	if o := e.Reserve(1, now); o != BudgetDeniedRate {
+		t.Fatalf("the 3rd within the minute must be denied on rate, got %s", o)
+	}
+	// Restart within the SAME minute: the rate window must be preserved (still spent).
+	snap := e.Snapshot()
+	restored := RestoreBudgetEnforcer(b, 1, snap)
+	if restored == nil {
+		t.Fatal("same-generation snapshot must restore")
+	}
+	if o := restored.Reserve(1, now); o != BudgetDeniedRate {
+		t.Fatalf("SECURITY: a restart within the rate window must NOT replay the rate budget, got %s", o)
+	}
+	// Once the window rolls over, the restored enforcer grants again.
+	later := now.Add(61 * time.Second)
+	if o := restored.Reserve(1, later); o != BudgetGranted {
+		t.Fatalf("after the window rolls over the restored enforcer must grant, got %s", o)
+	}
+}
+
+// TestBudgetEnforcer_LegacySnapshotFailsClosedOnRate proves a snapshot predating the rate-window
+// fields fails CLOSED (the window is treated as spent) rather than open.
+func TestBudgetEnforcer_LegacySnapshotFailsClosedOnRate(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	b := testBudget(100)
+	b.MaxExecutionsPerMinute = 2
+	// A legacy snapshot: total spend recorded, but no rate-window fields (both zero).
+	legacy := BudgetSnapshot{Generation: 1, TotalReserved: 1, StartUnixNano: now.UnixNano()}
+	restored := RestoreBudgetEnforcer(b, 1, legacy)
+	if restored == nil {
+		t.Fatal("a legacy snapshot must still restore")
+	}
+	if o := restored.Reserve(1, now); o != BudgetDeniedRate {
+		t.Fatalf("a legacy snapshot must fail closed to a spent rate window, got %s", o)
+	}
+}
+
 // TestBudgetEnforcer_ConcurrentReserveNeverExceedsTotal is the atomicity gate: many goroutines
 // reserving at once must grant EXACTLY MaxTotalExecutions in total — never more (a race in the
 // check-then-reserve would over-grant and breach the blast radius).

@@ -253,21 +253,32 @@ func (r *mcpRollout) commitRolloutTransitionAt(cfg *rollout.SignedConfig, actor 
 		}
 	}
 	// (1c) Canary/Production activation gate (§2, Canary Activation Gate). A transition into a
-	// mode that performs a REAL upstream side effect is authorized ONLY by the Canary activation
-	// preflight, enforced HERE in the shared commit path so EVERY caller is covered — the CP→DP
-	// apply (applyMCPCapabilityEnvelope), the startup reconcile (reconcileRolloutWithAppliers),
-	// and any future caller. This makes the preflight — not a syntactically-valid signed config —
-	// the SOLE authority for a live-execution mode: a Canary config can be perfectly valid and
-	// signed yet MUST NOT become active unless canary readiness holds. It consults
-	// evaluateCanaryNodeReadiness, which resolves NODE readiness (canary.EvaluateNode) from
-	// AUTHORITATIVE current node/build state, NEVER a request-supplied approval/budget/server
-	// claim — so a signed Canary envelope cannot smuggle activation-level facts past the gate.
-	// modeExecReady above already fails such a transition closed on the unarmed live tier; this is
-	// the redundant, reason-carrying authoritative gate (defense-in-depth). In this build the live
-	// tier is never armed, so a Canary/Production transition ALWAYS fails here with at least
-	// live_executor_absent.
+	// mode that performs a REAL upstream side effect is authorized ONLY by the FULL Canary
+	// activation preflight, enforced HERE in the shared commit path so EVERY caller is covered —
+	// the CP→DP apply (applyMCPCapabilityEnvelope), the startup reconcile
+	// (reconcileRolloutWithAppliers), and any future caller. This makes the preflight — not a
+	// syntactically-valid signed config — the SOLE authority for a live-execution mode: a Canary
+	// config can be perfectly valid and signed yet MUST NOT become active unless the WHOLE
+	// canary.Evaluate verdict (node readiness AND the activation-level scope/read-first/per-tool
+	// live-approval/budget/server/fingerprint facts) is Ready. The scope comes from the SIGNED
+	// config (authoritative); the other activation inputs are resolved from AUTHORITATIVE node
+	// state via canaryActivationInputsProbe — NEVER a request-supplied claim — so a signed Canary
+	// envelope cannot smuggle an approval or budget past the gate (Codex P1). In this build the
+	// authoritative approval/budget store does not exist (the probe returns empties) and the live
+	// tier is never armed, so a Canary/Production transition ALWAYS fails here.
 	if cfg.Mode.RequiresLiveExecution() {
-		if rd := evaluateCanaryNodeReadiness(cfg.Capability); !rd.Ready {
+		ai := canaryActivationInputsProbe(cfg.Capability, cfg.Scope, cfg.ScopeRevision)
+		in := CanaryActivationInput{
+			Capability:         cfg.Capability,
+			Scope:              cfg.Scope,
+			ScopeRev:           cfg.ScopeRevision,
+			ToolApprovals:      ai.ToolApprovals,
+			Budget:             ai.Budget,
+			ServerUsable:       ai.ServerUsable,
+			FingerprintCurrent: ai.FingerprintCurrent,
+			Now:                now,
+		}
+		if rd := evaluateCanaryActivationPreflight(in); !rd.Ready {
 			logger.Printf("MCP rollout: %s transition to %s refused by Canary activation preflight %v (fail-closed)",
 				cfg.Capability.String(), cfg.Mode.String(), rd.Unmet)
 			return errCanaryActivationPreflightFailed

@@ -219,18 +219,29 @@ type BudgetSnapshot struct {
 	Generation    uint64 `json:"generation"`
 	TotalReserved int    `json:"total_reserved"`
 	StartUnixNano int64  `json:"start_unix_nano"`
+	// RateWindowStartNano + RateCount are the current rate-limit window position. They are durable
+	// generation-bound state so a restart mid-window cannot reset the rate budget and admit another
+	// full MaxExecutionsPerMinute burst (a restart-replay of the rate cap; Codex P1).
+	RateWindowStartNano int64 `json:"rate_window_start_nano"`
+	RateCount           int   `json:"rate_count"`
 }
 
 // Snapshot returns the durable state so the composition layer can persist the budget spend. On
-// restart the SAME generation restores the SAME total — the budget is never reset to zero, so a
-// restart cannot replay a spent budget.
+// restart the SAME generation restores the SAME total AND the current rate-window position — the
+// budget is never reset to zero, so a restart cannot replay a spent total or a spent rate window.
 func (e *BudgetEnforcer) Snapshot() BudgetSnapshot {
 	if e == nil {
 		return BudgetSnapshot{}
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return BudgetSnapshot{Generation: e.generation, TotalReserved: e.total, StartUnixNano: e.startNanos}
+	return BudgetSnapshot{
+		Generation:          e.generation,
+		TotalReserved:       e.total,
+		StartUnixNano:       e.startNanos,
+		RateWindowStartNano: e.rateWindowStart,
+		RateCount:           e.rateCount,
+	}
 }
 
 // RestoreBudgetEnforcer rebuilds an enforcer from a durable snapshot for the SAME generation. It is
@@ -251,11 +262,22 @@ func RestoreBudgetEnforcer(budget Budget, generation uint64, snap BudgetSnapshot
 	if snap.StartUnixNano == 0 {
 		return nil // no window instant ⇒ cannot bound the TTL, fail closed
 	}
+	// Restore the rate-window position so the rate cap is not replayed across a restart. A snapshot
+	// predating these fields (zero start) or a corrupt count fails CLOSED: the window is anchored at
+	// the activation instant and treated as SPENT, so the next Reserve grants only after
+	// budgetRateWindow has elapsed — a restart never earns a fresh in-window burst.
+	rateStart := snap.RateWindowStartNano
+	rateCount := snap.RateCount
+	if rateStart == 0 || rateCount < 0 || rateCount > budget.MaxExecutionsPerMinute {
+		rateStart = snap.StartUnixNano
+		rateCount = budget.MaxExecutionsPerMinute
+	}
 	return &BudgetEnforcer{
 		budget:          budget,
 		generation:      generation,
 		startNanos:      snap.StartUnixNano,
 		total:           snap.TotalReserved,
-		rateWindowStart: snap.StartUnixNano,
+		rateWindowStart: rateStart,
+		rateCount:       rateCount,
 	}
 }

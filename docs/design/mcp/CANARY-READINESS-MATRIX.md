@@ -142,9 +142,12 @@ composed are now implemented and dormant-by-construction (Execution posture stay
   attestation validates.
 - **§2 Authoritative Canary preflight** — `commitRolloutTransitionAt` (the single shared commit
   path for the CP→DP apply, the startup reconcile, and any future caller) refuses any transition
-  into a live-execution mode (Canary/Production) unless `evaluateCanaryNodeReadiness` is Ready,
-  from AUTHORITATIVE node state — never a request-supplied approval/budget claim. No API, restart,
-  CP→DP, or restore path bypasses it (restore additionally clamps executing modes to Disabled).
+  into a live-execution mode (Canary/Production) unless the FULL `evaluateCanaryActivationPreflight`
+  verdict is Ready — node readiness AND the activation-level scope/approval/budget/target facts. The
+  scope comes from the signed config; the other activation inputs are resolved from AUTHORITATIVE
+  node state via `canaryActivationInputsProbe` (fail-closed empties in this build) — never a
+  request-supplied claim. No API, restart, CP→DP, or restore path bypasses it (restore additionally
+  clamps executing modes to Disabled).
 - **§3 Runtime blast-radius budget** — `canary.BudgetEnforcer`: generation-bound, atomic, monotonic
   total (no replay), exact-N/deny-N+1, concurrency + per-minute rate + time-boxed window, restart
   spend preserved. Exhaustion fails closed before the side-effect boundary and trips the abort.

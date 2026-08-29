@@ -92,23 +92,76 @@ func TestCanaryCommitGate_RefusesWhenNodeNotReady(t *testing.T) {
 	}
 }
 
-// TestCanaryCommitGate_AllowsWhenNodeReady proves the gate is not a blanket refusal: when the FULL
-// canary node readiness fixture holds, the same commit path admits the Canary transition. This is
-// the positive control that keeps TestCanaryCommitGate_RefusesWhenNodeNotReady honest (a gate that
-// refused everything would pass the refusal test while being wrong).
-func TestCanaryCommitGate_AllowsWhenNodeReady(t *testing.T) {
+// armCanaryActivationInputs points the authoritative-inputs seam at the given valid activation
+// inputs for the duration of a test, restoring it on cleanup. Production returns fail-closed
+// empties; a test that must reach a committed Canary supplies valid inputs this way.
+func armCanaryActivationInputs(t *testing.T, in CanaryActivationInput) {
+	t.Helper()
+	prev := canaryActivationInputsProbe
+	canaryActivationInputsProbe = func(_ rollout.Capability, _ rollout.ScopeSpec, _ uint64) canaryActivationInputs {
+		return canaryActivationInputs{
+			ToolApprovals:      in.ToolApprovals,
+			Budget:             in.Budget,
+			ServerUsable:       in.ServerUsable,
+			FingerprintCurrent: in.FingerprintCurrent,
+		}
+	}
+	t.Cleanup(func() { canaryActivationInputsProbe = prev })
+}
+
+// canaryCfgForScope builds a Canary SignedConfig over a scope (used to drive a committed Canary in
+// tests where the FULL activation preflight must pass).
+func canaryCfgForScope(scope rollout.ScopeSpec, rev uint64) *rollout.SignedConfig {
+	return &rollout.SignedConfig{
+		SelectorSchema: 1, Capability: rollout.CapabilityGateway, Mode: rollout.ModeCanary,
+		Scope: scope, ScopeRevision: rev, ConnectorMode: rollout.ConnectorLocalClient,
+	}
+}
+
+// TestCanaryCommitGate_AllowsWhenFullyReady proves the gate is not a blanket refusal: when the FULL
+// canary verdict holds — node canary-ready AND a valid bounded read-first scope AND authoritative
+// per-tool live approvals AND a valid budget AND usable/current targets — the same commit path
+// admits the Canary transition. This is the positive control that keeps the refusal tests honest (a
+// gate that refused everything would pass those while being wrong), and it proves the gate enforces
+// the ACTIVATION-level facts (scope/approval/budget), not merely node readiness.
+func TestCanaryCommitGate_AllowsWhenFullyReady(t *testing.T) {
 	withTempDataDir(t)
-	withCanaryReadyNode(t)
-	// Precondition: the node genuinely reports Canary-ready.
-	if rd := evaluateCanaryNodeReadiness(rollout.CapabilityGateway); !rd.Ready {
-		t.Fatalf("fixture must make the node canary-ready, unmet=%v", rd.Unmet)
+	withCanaryReadyNode(t) // node facts + live tier + attestation + rehearsal
+	now := time.Unix(1000, 0)
+	vin := validCanaryActivationInput(now) // valid scope + per-tool approvals + budget + server + fingerprint
+	armCanaryActivationInputs(t, vin)
+	// Precondition: the FULL activation preflight is Ready for this scope + inputs.
+	if rd := evaluateCanaryActivationPreflight(vin); !rd.Ready {
+		t.Fatalf("fixture must make the FULL preflight ready, unmet=%v", rd.Unmet)
 	}
 	r := newTestRollout()
-	if err := r.commitRolloutTransition(gwCanaryCfg(1), "admin", time.Unix(1000, 0)); err != nil {
-		t.Fatalf("a Canary transition on a canary-ready node must be admitted, got %v", err)
+	if err := r.commitRolloutTransitionAt(canaryCfgForScope(vin.Scope, vin.ScopeRev), "admin", now, rollout.OriginSynthetic); err != nil {
+		t.Fatalf("a fully-ready Canary transition must be admitted, got %v", err)
 	}
 	if r.gateway.CurrentMode() != rollout.ModeCanary {
 		t.Fatalf("mode must be Canary after an admitted transition, got %s", r.gateway.CurrentMode())
+	}
+}
+
+// TestCanaryCommitGate_RefusesWhenActivationInputsMissing proves the ACTIVATION-level half: a node
+// that is fully canary-READY but whose authoritative activation inputs are absent (the shipped
+// production posture — no approval/budget store) still refuses the Canary transition. This is the
+// Codex P1 fix: node readiness alone can never admit Canary.
+func TestCanaryCommitGate_RefusesWhenActivationInputsMissing(t *testing.T) {
+	withTempDataDir(t)
+	withCanaryReadyNode(t) // node canary-ready, but the activation-inputs probe stays production (empties)
+	now := time.Unix(1000, 0)
+	if rd := evaluateCanaryNodeReadiness(rollout.CapabilityGateway); !rd.Ready {
+		t.Fatalf("node must be canary-ready for this test, unmet=%v", rd.Unmet)
+	}
+	// A valid signed Canary scope, but NO authoritative approvals/budget (the default probe).
+	vin := validCanaryActivationInput(now)
+	r := newTestRollout()
+	if err := r.commitRolloutTransitionAt(canaryCfgForScope(vin.Scope, vin.ScopeRev), "admin", now, rollout.OriginSynthetic); err != errCanaryActivationPreflightFailed {
+		t.Fatalf("SECURITY: a canary-ready node with no authoritative approvals/budget must still refuse Canary, got %v", err)
+	}
+	if r.gateway.CurrentMode() != rollout.ModeDisabled {
+		t.Fatalf("mode must stay Disabled, got %s", r.gateway.CurrentMode())
 	}
 }
 
