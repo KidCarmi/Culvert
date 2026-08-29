@@ -356,6 +356,89 @@
   re-introduced and confirmed to fail its named guard (mapping recorded at the head of
   `internal/mcp/execution/kill_boundary_race_test.go`).
 
+## CANARY-ACTIVATION-PREREQS — Machine-verifiable prerequisites before the first real MCP upstream execution · OPEN, DORMANT (2026-08-29)
+- **Principal:** Canary is the first phase where Culvert causes a real, irreversible MCP upstream
+  side effect. ADR-0035 defines the machine-verifiable readiness contract (`internal/mcp/canary`)
+  and a dormant activation preflight (`mcp_canary_preflight.go`); Canary is **architecturally
+  defined but not activatable**. The remaining prerequisites are each a **separately-reviewed
+  activation**, never a config change, and until they land the system stays fail-closed.
+- **Status:** OPEN (by design — this is the prerequisite ledger, not a defect). Every row below
+  is a HARD gate a future Canary-arming activation must satisfy with executable evidence; "code
+  basically supports it" does not close a row.
+- **Prerequisite ledger (each must become machine-attested before the first Canary):**
+  1. **Arm the live tier** — compose a live `execution.Executor` + bounded `UpstreamCaller` +
+     materialize-broker + inspection and call `markGatewayExecDepsReady`. Blocked today by the
+     execution-posture wall (`mcp_execution_posture_test.go`); arming EDITS that wall.
+     Machine-signal: `live_executor_absent` / `upstream_caller_absent` /
+     `credential_path_not_ready` / `kill_boundary_guard_absent` / `tool_freshness_guard_absent`
+     clear.
+  2. **Make `live_execution` issuable** under stronger governance (four-eyes distinct
+     requester+approver, ≤24h TTL, exact target). Blocked by `tooltrust.Purpose.Issuable()`
+     (shadow-only). The consumption predicate already exists (`canary.SatisfiesLiveExecution`);
+     the ISSUE path does not.
+  3. **Bounded read-first scope** at activation (`canary.ValidateScope` → `ScopeOK`): enumerable,
+     ≤1 server / ≤2 tools / ≤2 principals, exact fingerprints, ≥1 EXACT principal with groups
+     forbidden, read/discovery only. Read-first is TWO gates: the scope axis (`ScopeReadFirst`
+     over `rollout.RiskClass`) is necessary but not sufficient — `mapRisk` folds `OpControl` into
+     `RiskRead`, so a live executor must ALSO enforce `canary.IsReadFirstOperation` per request
+     (OpRead/OpDiscovery only). Additionally, EVERY scoped tool needs its OWN live approval bound
+     to that exact tool+fingerprint (`canary.ValidateScopeApprovals`) — no single unconstrained
+     approval authorizes a multi-tool scope.
+  4. **Blast-radius budget** at activation (`canary.ValidateBudget` → `BudgetOK`) enforced at
+     runtime (total/rate/concurrency/window). The runtime ENFORCEMENT is a live-tier concern.
+     Durable-event readiness is a real HEALTH check, not presence: `durableEventsHealthy`
+     requires the capability domain's critical state to be "normal" (a degraded plane fails
+     `durable_events_degraded`).
+  5. **Shadow-Exit attestation surface** (`shadowExitReviewAttested` returns false today).
+  6. **Wire the preflight as the primary activation gate** and the abort taxonomy
+     (`canary.AbortConditions`) into runtime detectors.
+  7. **Real rollback-rehearsal attestation** (Codex P2, PR #1249): `RollbackPathHealthy` today
+     reads the `RollbackRehearsed` marker, which the admin `POST /api/mcp/rollout/rehearse`
+     (`recordRehearsal`) sets WITHOUT executing an actual Canary→Shadow/Observe demotion — a
+     self-attested marker, harmless while Canary never activates. Before the first Canary, bind
+     readiness to evidence produced by a SUCCESSFULLY EXECUTED rollback drill (a real demotion
+     with recorded evidence/attestation), not the manual marker. This is a live-activation
+     concern — the dormant build has no live Canary to roll back — so the readiness FACT stays as
+     the contract and the attestation strengthening lands with the live tier.
+- **Red-team → defense mapping (§18; all real attacks have a standing gate):** shadow approval
+  reused as live → `TestSatisfiesLiveExecution_ShadowApprovalNeverQualifies`; stale/long-TTL/
+  no-four-eyes approval → `TestSatisfiesLiveExecution_Rejections`; F1→F2 rug-pull → exact
+  fingerprint binding (same); scope widening / percentage / wildcard-tool → `TestValidateScope_Rejections`;
+  kill engage→clear ABA + tool-drift at boundary → PREREQ-MCP-KILL-1 gates; credential revoke
+  mid-flight / server-identity drift → whole-Canary abort taxonomy (`TestAbortConditions_*`);
+  CP rollback/replay + restart while configured → existing rollout apply/restore gates;
+  out-of-scope fallback executing → `TestAntiWeakening_OutOfScopeDoesNotExecute`; upstream success
+  + DLP failure → existing `finishUpstream` inspection fail-closed; LiveExecutor leak into Shadow
+  → `TestShadow_TypeGraphHasNoExecuteCapability` + `TestCanaryPackageHoldsNoExecutionCapability`;
+  one approval covering a multi-tool scope → `TestValidateScopeApprovals_MissingToolIsUnapproved`;
+  control-plane op smuggled as read-first → `TestIsReadFirstOperation_ControlIsExcluded`;
+  future-dated approval defeating the TTL ceiling → `TestSatisfiesLiveExecution_Rejections`
+  (approved_in_future); group-only/identity-less scope → `TestValidateScope_Rejections`
+  (no_identity/uses_groups); degraded durable-event plane still ready → `durableEventsHealthy`.
+  No open red-team finding: every attack maps to a standing gate or a dormant fail-closed state.
+- **Codex review hardening (PR #1249):** nine architecture gaps found across three Codex rounds
+  and closed in the contract before merge — (P1-A) request-time read-first gate
+  `IsReadFirstOperation` distinct from the RiskClass axis; (P1-B) `durableEventsHealthy` from real
+  critical-state health, not presence; (P1-C) per-tool approval binding `ValidateScopeApprovals`
+  replacing a single unconstrained approval; (P1-D) exact-identity requirement / groups forbidden;
+  (P2a) future/zero-dated `ApprovedAt` rejected before the TTL ceiling; (P2b) node-readiness
+  dry-run (`EvaluateNode`) evaluates node-level facts only, not not-yet-supplied activation
+  inputs; (P1-E) `rollbackPathHealthy` from durable persist + rollback-rehearsal state, not
+  coordinator existence; (P1-F) approval coverage keyed by tenant (a t2 approval never covers a
+  t1 scope); (P1-G) scope must bind exactly one concrete tenant (`ScopeNoTenant`/
+  `ScopeTooManyTenants` — an empty tenant selector is a rollout wildcard over every tenant);
+  (P2c) scope realizability — `scopeRealizable` witness check rejects a contradictory scope
+  (tool off the server dimension, or an excluded inclusion) that is enumerable yet matches
+  nothing (`ScopeNotRealizable`); (P1-H) `rollbackPathReady` reads persistStatus + rehearsal
+  evidence under `durableMu` so a preflight cannot observe an in-flight rehearsal as durable;
+  (P2d) `scopeRealizable` picks a non-excluded identity (`firstNotExcluded`) so a scope with a
+  surviving principal is not falsely rejected; (P2e) every durable rollout mutation clears a
+  stale `write_failed` on success, so a durable rehearsal after a transient failure is not stuck
+  reporting the rollback path unhealthy.
+- **Evidence:** ADR-0035; `docs/design/mcp/CANARY-READINESS-MATRIX.md`;
+  `docs/design/mcp/CANARY-FIRST-RUNBOOK.md`; `internal/mcp/canary/*_test.go`;
+  `mcp_canary_preflight_test.go`; the differential gate `TestShadow_LivePreSideEffectEquivalence`.
+
 ## SHADOW-EVIDENCE-ROUTING-1 — Pre-dispatch fail-closed signals not routed into Shadow evidence · LOW (2026-08-25)
 - **Principal:** Two failure classes are terminally handled by the runtime BEFORE the
   guarded executor/Shadow provider is invoked, so the ShadowEvaluator never records a
