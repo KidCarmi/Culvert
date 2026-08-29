@@ -13819,9 +13819,10 @@
                     "type": "string"
                   },
                   "tool_name": {
-                    "description": "Nonempty; backend limit is 256 UTF-8 BYTES (maxLength counts characters).",
-                    "maxLength": 256,
+                    "description": "Catalog tool token: nonempty, at most 128 bytes, ASCII [A-Za-z0-9._/-] only (limits.DefaultCatalog MaxNameBytes). A value outside this contract can never identify a catalog tool.",
+                    "maxLength": 128,
                     "minLength": 1,
+                    "pattern": "^[A-Za-z0-9._/-]+$",
                     "type": "string"
                   }
                 },
