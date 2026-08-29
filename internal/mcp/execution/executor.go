@@ -131,6 +131,13 @@ func (e *Executor) Resolve(in runtime.ExecInput) rollout.Resolution {
 // routing TOCTOU F7 closed. Fail-closed here matters most on the LIVE path: it stops an
 // upstream side effect that Resolve had cleared microseconds before the operator hit kill.
 func (e *Executor) Execute(ctx context.Context, in runtime.ExecInput, res rollout.Resolution) runtime.ExecOutput {
+	// Capture the authoritative emergency-kill generation at ADMISSION, before the
+	// admission check, so the irreversible side-effect boundary can detect any emergency
+	// kill engaged while this request is in flight — even one later cleared (Model B /
+	// monotonic epoch, PREREQ-MCP-KILL-1). A kill that races between this capture and the
+	// Killed() check below is caught by that check; one that races after it is caught at the
+	// boundary because the generation will have advanced past admKillGen.
+	admKillGen := e.cfg.State.KillGeneration()
 	if e.cfg.State.Killed() {
 		return e.blocked(in, mcperr.ReasonRolloutEmergencyActive, false)
 	}
@@ -162,7 +169,7 @@ func (e *Executor) Execute(ctx context.Context, in runtime.ExecInput, res rollou
 				return e.blocked(in, mcperr.ReasonAllowanceConsumed, false)
 			}
 		}
-		return e.runExecute(ctx, in, subj, res)
+		return e.runExecute(ctx, in, subj, res, admKillGen)
 	default:
 		return e.blocked(in, mcperr.ReasonRolloutModeInvalid, false)
 	}

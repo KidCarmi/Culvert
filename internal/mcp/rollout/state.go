@@ -17,6 +17,14 @@ type activeState struct {
 	shadowScope Scope
 	hasShadow   bool
 	killed      bool
+
+	// killGen is the MONOTONIC emergency-kill generation, incremented once per distinct
+	// kill ENGAGEMENT (a false→true transition) and NEVER decremented — clearing the kill
+	// does not roll it back. It lives INSIDE the snapshot (not a separate atomic) so that
+	// `killed` and the generation are published by the SAME pointer swap: a lock-free reader
+	// can never observe `killed==true` while still reading the pre-engage generation (the
+	// split-publication window a separate atomic would leave open). See KillGeneration.
+	killGen uint64
 }
 
 // State is the capability-local rollout runtime state: the active mode + compiled
@@ -86,6 +94,19 @@ func (s *State) CurrentConfig() SignedConfig { return s.cur.Load().config }
 // killed capability refuses new admission (ReasonRolloutEmergencyActive).
 func (s *State) Killed() bool { return s.cur.Load().killed }
 
+// KillGeneration returns the MONOTONIC emergency-kill generation (lock-free), read from
+// the same atomic snapshot as Killed() so the two are always mutually consistent. It
+// increments once per distinct kill engagement and is never rolled back by a clear. The
+// executor captures it at admission and re-reads it immediately before the irreversible
+// upstream side effect: a differing value means an emergency kill was engaged while the
+// request was in flight (even if since cleared), and the request MUST NOT cross the boundary
+// (PREREQ-MCP-KILL-1, docs/design/mcp/SHADOW-ARCHITECTURE.md §10). Because the generation is
+// published in the SAME pointer swap that sets `killed`, an engagement that is observable via
+// Killed() has necessarily advanced the generation too — so the boundary's generation-only
+// re-read also catches a kill still in its engage critical section, with no split-publication
+// window, and subsumes the "currently killed" case.
+func (s *State) KillGeneration() uint64 { return s.cur.Load().killGen }
+
 // ScopeHash returns the active scope's content hash (lock-free).
 func (s *State) ScopeHash() string { return s.cur.Load().scope.Hash() }
 
@@ -137,6 +158,10 @@ func (s *State) SetConfig(cfg SignedConfig, actor string, atUnixNano int64) erro
 	next := &activeState{
 		config: cfg, mode: cfg.Mode, scope: scope, shadowScope: shadow,
 		hasShadow: cfg.hasShadowScope(), killed: prev.killed,
+		// Carry the monotonic kill generation forward — a config apply must never roll it
+		// back (that would let a request admitted before the apply read a lower boundary
+		// generation and miss an intervening kill).
+		killGen: prev.killGen,
 	}
 	s.cur.Store(next)
 	s.swapMu.Unlock()
@@ -161,6 +186,14 @@ func (s *State) EngageKillSwitch(actor string, atUnixNano int64) {
 	}
 	next := *prev
 	next.killed = true
+	// Advance the monotonic kill generation on the ENGAGE transition ONLY (this branch is
+	// reached iff prev.killed was false) and publish it in the SAME pointer swap as `killed`,
+	// so a lock-free reader never sees `killed==true` with the pre-engage generation (no
+	// split-publication window — Codex P1 on PR #1248). A subsequent ClearKillSwitch
+	// deliberately does NOT decrement it (it copies the field forward via `*prev`) — that is
+	// what lets the side-effect boundary detect an engage→clear that straddled an in-flight
+	// request (PREREQ-MCP-KILL-1, Model B).
+	next.killGen = prev.killGen + 1
 	s.cur.Store(&next)
 	s.swapMu.Unlock()
 	s.appendHistory(TransitionRecord{From: prev.mode, To: prev.mode, Kind: TransitionDemotion, ScopeHash: prev.scope.Hash(), Actor: sanitize(actor), AtUnixNano: atUnixNano, Emergency: true, Note: "kill-switch engaged"})
