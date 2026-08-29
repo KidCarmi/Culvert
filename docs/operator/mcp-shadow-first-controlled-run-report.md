@@ -112,16 +112,19 @@ A first request echo: execution_state=shadow_evaluated executed=false
             shadow_outcome=would_execute mode=shadow mat_ready=not_evaluated resp_insp=not_evaluated
 A metrics: evaluations 0->1 would_execute 0->1 evaluation_errors=0
 ZERO side effects: controlled_upstream_invocations=0 upstream_call_count=0
-            materialize_count=0 live_executions=0
+            materialize_count=0 live_executions=0 evaluation_errors=0
 durable v2 evidence: schema_version=2 execution_state=shadow_evaluated outcome=would_execute
             override=false credential_plan=no_credential_profile
             mat_ready=not_evaluated resp_insp=not_evaluated digest_ok=true parity=response==durable
 B danger request: execution_state=shadow_evaluated executed=false shadow_outcome=would_block
-            shadow_override=true would_block 0->1
+            shadow_override=true would_block 0->1 durable_outcome=would_block
 out-of-scope containment: principal=outsider-principal execution_state=not_implemented
             shadow_evaluations UNCHANGED 2 (behaves as Observe)
-kill drill: emergency engaged -> request status=200 not_would_execute=true no_shadow_eval=true -> cleared
-revocation drill: approval revoked -> eligibility!=Usable -> echo shadow_outcome=would_fail_hard_control
+kill drill: emergency engaged -> error=rollout_emergency_active evaluation_errors 0->1
+            not_would_execute no_shadow_eval upstream=0 -> kill cleared
+revocation drill: approval revoked -> eligibility!=Usable
+            -> echo shadow_outcome=would_fail_hard_control would_fail_hard_control 0->1
+            durable_outcome=would_fail_hard_control
 rollback Shadow->Observe: mode=observe post_rollback_execution_state=not_implemented
             shadow_evaluations UNCHANGED live_executor=absent canary=off production=off
 FINAL: controlled_upstream_invocations=0 shadow_evaluations=3 would_execute=1 would_block=1
