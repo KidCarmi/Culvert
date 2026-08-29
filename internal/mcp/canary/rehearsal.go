@@ -58,7 +58,7 @@ const (
 // wrong-capability, not-executed, incomplete-path, or identity-mismatched record is rejected with
 // its named reason. It NEVER returns OK for a record that did not exercise the full required
 // demotion ladder under the current build.
-func ValidateRehearsal(rec *RollbackRehearsalRecord, cap string, current RuntimeIdentity) RehearsalReason {
+func ValidateRehearsal(rec *RollbackRehearsalRecord, capToken string, current RuntimeIdentity) RehearsalReason {
 	if rec == nil {
 		return RehearsalMissing
 	}
@@ -68,7 +68,7 @@ func ValidateRehearsal(rec *RollbackRehearsalRecord, cap string, current Runtime
 	if rec.Capability == "" {
 		return RehearsalNoCapability
 	}
-	if rec.Capability != cap {
+	if rec.Capability != capToken {
 		return RehearsalCapabilityWrong
 	}
 	if !rec.Executed {
@@ -86,8 +86,8 @@ func ValidateRehearsal(rec *RollbackRehearsalRecord, cap string, current Runtime
 }
 
 // RehearsalValid is the boolean form of ValidateRehearsal.
-func RehearsalValid(rec *RollbackRehearsalRecord, cap string, current RuntimeIdentity) bool {
-	return ValidateRehearsal(rec, cap, current) == RehearsalOK
+func RehearsalValid(rec *RollbackRehearsalRecord, capToken string, current RuntimeIdentity) bool {
+	return ValidateRehearsal(rec, capToken, current) == RehearsalOK
 }
 
 // RequiredRollbackPath returns a copy of the exact demotion ladder a rehearsal must exercise, so

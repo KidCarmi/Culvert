@@ -249,6 +249,53 @@ func TestCanaryRuntime_RestartAfterDemotionStaysDisarmed(t *testing.T) {
 	}
 }
 
+// TestCanaryRuntime_CapabilityIsolation proves the two capability runtimes are fully isolated: a
+// Management activation (with its own generation, budget, and abort) never touches the Gateway
+// runtime and vice versa. It also exercises every runtime method with the Management capability
+// (Canary is Gateway-only in practice, but the runtime accounting is capability-parameterized and
+// must stay isolated).
+func TestCanaryRuntime_CapabilityIsolation(t *testing.T) {
+	rt := withCanaryRuntimeTestEnv(t, "v9.9.9")
+	now := time.Unix(1_700_000_000, 0)
+	gw, mg := rollout.CapabilityGateway, rollout.CapabilityManagement
+
+	// Arm ONLY the Management runtime.
+	if _, err := rt.beginCanaryActivation(mg, runtimeTestBudget(2), now); err != nil {
+		t.Fatalf("begin(management): %v", err)
+	}
+	if rt.currentGeneration(gw) != 0 {
+		t.Fatal("a Management activation must not bump the Gateway generation (isolation)")
+	}
+	if rt.currentGeneration(mg) != 1 {
+		t.Fatalf("Management generation must be 1, got %d", rt.currentGeneration(mg))
+	}
+	if rt.executionEligible(gw) {
+		t.Fatal("Gateway must stay dormant while only Management is armed")
+	}
+	if !rt.executionEligible(mg) {
+		t.Fatal("Management must be execution-eligible after its activation")
+	}
+	// A per-request trip on Management does not stop it (taxonomy split holds per-capability).
+	if r := rt.tripCanaryAbort(mg, "policy_deny", now); r != canary.TripRequestScoped {
+		t.Fatalf("a per-request trip on management must be request-scoped, got %s", r)
+	}
+	// Reserve/release on Management only; Gateway is untouched.
+	if o := rt.reserveCanaryExecution(mg, now); o != canary.BudgetGranted {
+		t.Fatalf("management reserve must be granted, got %s", o)
+	}
+	rt.releaseCanaryExecution(mg)
+	if o := rt.reserveCanaryExecution(gw, now); o != canary.BudgetDeniedInvalid {
+		t.Fatalf("a Gateway reserve must be denied while only Management is armed, got %s", o)
+	}
+	// Demoting Management leaves Gateway untouched (still dormant).
+	if err := rt.demoteCanary(mg); err != nil {
+		t.Fatalf("demote(management): %v", err)
+	}
+	if rt.executionEligible(mg) || rt.executionEligible(gw) {
+		t.Fatal("after demoting Management, neither capability is eligible")
+	}
+}
+
 // TestCanaryRuntime_CorruptStateQuarantined proves a tampered durable state is quarantined and the
 // runtime falls back to the safe dormant default (fail closed).
 func TestCanaryRuntime_CorruptStateQuarantined(t *testing.T) {
