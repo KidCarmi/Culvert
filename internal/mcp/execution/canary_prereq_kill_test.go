@@ -4,32 +4,28 @@ import (
 	"context"
 	"testing"
 
+	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
 	"github.com/KidCarmi/Culvert/internal/mcp/policy"
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 )
 
-// TestCanaryPrerequisite_KillStateNotRevalidatedAtSideEffectBoundary is the non-vacuous
-// gate for PREREQ-MCP-KILL-1 (docs/design/mcp/SHADOW-ARCHITECTURE.md §10).
+// TestCanaryPrerequisite_KillStateRevalidatedAtSideEffectBoundary is the permanent,
+// non-vacuous security gate for PREREQ-MCP-KILL-1 (docs/design/mcp/SHADOW-ARCHITECTURE.md
+// §10). It was formerly *_KillStateNotRevalidated* and documented the OPEN gap by observing
+// one upstream call; it is now inverted to prove the CLOSED invariant.
 //
-// The prerequisite: Canary/Production activation is PROHIBITED until the authoritative
-// kill state is revalidated immediately before the irreversible side-effect boundary.
-// Today it is NOT: `Executor.Execute` checks `State.Killed()` once at admission, but
-// `run.go` `callUpstream` — the boundary — does not re-read it. A kill engaged after
-// admission but before the boundary therefore does not abort an in-flight live call.
+// The prerequisite: the authoritative emergency-kill state is revalidated immediately before
+// the irreversible side-effect boundary, so a kill engaged after admission aborts an in-flight
+// live call. This test drives that exact window: it engages the kill switch from INSIDE the
+// `ToolStillCurrent` hook, which the executor invokes at the boundary immediately before
+// `Upstream.Call` — so the kill is live microseconds before the side effect and the hook itself
+// reports "not drifted", leaving the boundary kill re-check as the ONLY thing that can stop the
+// call. It is non-vacuous precisely because it reaches the real production boundary, not a
+// stand-in.
 //
-// This test drives that exact window: it engages the kill switch inside the
-// `ToolStillCurrent` hook, which the executor invokes at the boundary (immediately before
-// `Upstream.Call`) — so the kill is live microseconds before the side effect. It asserts
-// the CURRENT (gap-present) behaviour: the call still proceeds. It is non-vacuous because
-// it exercises the real boundary; it is a placeholder because closing PREREQ-MCP-KILL-1
-// means adding a kill re-read at the boundary and INVERTING this assertion to
-// `up.calls == 0` (see the §12 exit criterion and the debt-register fix note).
-//
-// The gap is safe today ONLY because no production executor is composed (arming hooks
-// uncalled; AST posture wall in mcp_execution_posture_test.go), so this window is
-// unreachable in production. The test also asserts, as the compensating fact, that Shadow
-// — which never reaches the boundary — reflects a kill immediately at admission.
-func TestCanaryPrerequisite_KillStateNotRevalidatedAtSideEffectBoundary(t *testing.T) {
+// Proven here: boundary hook reached = true, kill engaged = true, upstream calls = 0,
+// Executed = false, reason = rollout_emergency_active.
+func TestCanaryPrerequisite_KillStateRevalidatedAtSideEffectBoundary(t *testing.T) {
 	st := stateForMode(t, rollout.ModeCanary)
 	up := &fakeUpstream{}
 	e := newExec(t, st, up, realEvents(t, nil))
@@ -38,8 +34,8 @@ func TestCanaryPrerequisite_KillStateNotRevalidatedAtSideEffectBoundary(t *testi
 	killed := false
 	in.ToolStillCurrent = func() bool {
 		// Emergency kill engaged AFTER admission, at the boundary, immediately before the
-		// upstream side effect. Report "not drifted" so ONLY the (missing) kill re-check
-		// could stop the call.
+		// upstream side effect. Report "not drifted" so ONLY the boundary kill re-check could
+		// stop the call.
 		if !killed {
 			st.EngageKillSwitch("oncall", 2)
 			killed = true
@@ -52,21 +48,20 @@ func TestCanaryPrerequisite_KillStateNotRevalidatedAtSideEffectBoundary(t *testi
 	if !killed {
 		t.Fatal("boundary hook was never invoked — the test did not reach the side-effect boundary, so it proves nothing")
 	}
-
-	// PREREQ-MCP-KILL-1 (OPEN): the boundary does not re-validate the kill state, so the
-	// call proceeds despite a kill engaged immediately before it. When the prerequisite is
-	// CLOSED (a killEpoch re-read added to callUpstream), invert this to `up.calls == 0`,
-	// assert the emergency block reason, and check off the §12 Shadow→Canary exit criterion.
-	if up.calls != 1 {
-		t.Fatalf("expected the CURRENT gap behaviour of exactly 1 upstream call (kill NOT re-validated at the boundary), got %d.\n"+
-			"If the boundary kill re-check has been implemented, this is the intended fix: invert this assertion to `up.calls == 0`, "+
-			"assert reason rollout_emergency_active, update PREREQ-MCP-KILL-1 in the debt register, and check off the §12 exit criterion.", up.calls)
+	// PREREQ-MCP-KILL-1 (CLOSED): the boundary re-validates the authoritative kill state, so a
+	// kill engaged immediately before the irreversible call aborts it.
+	if up.calls != 0 {
+		t.Fatalf("SECURITY: an emergency kill engaged at the side-effect boundary must abort the upstream call — got %d upstream call(s), want 0 (PREREQ-MCP-KILL-1)", up.calls)
 	}
-	_ = out
+	if out.Executed {
+		t.Fatalf("SECURITY: a boundary emergency-kill refusal must not report Executed=true, got state=%q", out.ExecutionState)
+	}
+	if out.Reason != mcperr.ReasonRolloutEmergencyActive {
+		t.Fatalf("boundary kill refusal reason = %v, want %v (never a transport/durability fault or ReasonNone)", out.Reason, mcperr.ReasonRolloutEmergencyActive)
+	}
 
 	// Compensating fact: Shadow reflects a kill at ADMISSION (it never reaches the boundary),
-	// so a killed capability yields a terminal block, never a would-execute. This is the
-	// reason the boundary re-check is a Canary prerequisite, not a Shadow one.
+	// so a killed capability yields a terminal block, never a would-execute.
 	shSt := stateForMode(t, rollout.ModeShadow)
 	shSt.EngageKillSwitch("oncall", 3)
 	shadow, err := NewShadowEvaluator(ShadowConfig{State: shSt, Events: realEvents(t, nil)})
