@@ -309,6 +309,20 @@ func validateBulkCandidateRefs(c bulkCandidate) error {
 // a non-empty authoritative ID must resolve in the candidate — never by name
 // (the anti-rebinding doctrine); an ID-less (legacy/un-migrated) reference
 // resolves by candidate name or the compiled fileProfileExts legacy map.
+//
+// TRUST-DOMAIN CLASSIFICATION (2D-C recovery correction §10): the legacy-map
+// arm is DELIBERATELY retained here, unlike the interactive door
+// (validateRuleObjectRefs), because the bulk candidates legitimately carry
+// historical shapes:
+//   - modern exports/snapshots carry FileProfileID (the ID arm judges them);
+//   - historical pre-2D-C backups and untouched live rules in merge
+//     candidates are ID-less with names that may resolve ONLY in the
+//     compiled map (their enforcement uses that same fallback, so rejecting
+//     them would refuse legitimate restores);
+//   - rollback / CP snapshots are applied verbatim as captured.
+// The invariant that matters is upheld at the other end: the INTERACTIVE
+// modern write door can never manufacture a NEW ID-less reference, so the
+// legacy shape only ever enters through evidence-bearing historical inputs.
 func fileProfileRefResolves(r *PolicyRule, profiles []*FileExtProfile) bool {
 	if r.FileProfileID != "" {
 		for _, p := range profiles {

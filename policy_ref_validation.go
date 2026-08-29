@@ -35,9 +35,11 @@ package main
 //     references resolve ID-first with a documented name fallback
 //     (categoryGroupMatchesHostScratch / the profile resolvers): the
 //     reference is valid iff the ID or the name resolves in the live store.
-//   - File profiles resolve by name through globalProfileStore and then the
-//     legacy built-in fileProfileExts map (PolicyRule.FileProfileBlocked);
-//     the reference is valid iff either resolves.
+//   - File profiles must resolve to a LIVE globalProfileStore object (2D-C
+//     recovery correction §8): the interactive door stamps the object's
+//     stable ID, so the compiled legacy fileProfileExts map — which carries
+//     no identity — can never satisfy a NEW write. The legacy map remains an
+//     EVALUATOR fallback for historical ID-less rules only.
 //
 // Engine-level mutators and the bulk installers stay unvalidated here: bulk
 // installs (config import / rollback / CP→DP snapshot apply) hold the gate
@@ -136,10 +138,16 @@ func validateRuleObjectRefs(r *PolicyRule) *danglingRefError {
 		return &danglingRefError{Type: "decryption-profile", Name: r.DecryptionProfile}
 	}
 	if r.FileProfile != "" && r.FileProfile != FileProfileNone {
+		// INTERACTIVE trust domain (2D-C recovery correction §7–§8): a NEW
+		// write must bind to a LIVE FileProfile object so the server can
+		// stamp its stable ID. The compiled fileProfileExts map is a legacy
+		// EVALUATOR fallback for historical ID-less rules only — letting it
+		// satisfy this door manufactured fresh ID-less legacy-shaped
+		// references whenever a built-in was renamed/deleted, bypassing the
+		// stable-ID promotion. Bulk doors keep their own classification
+		// (see bulk_ref_validation.go).
 		if globalProfileStore.GetByName(string(r.FileProfile)) == nil {
-			if _, legacy := fileProfileExts[r.FileProfile]; !legacy {
-				return &danglingRefError{Type: "file-profile", Name: string(r.FileProfile)}
-			}
+			return &danglingRefError{Type: "file-profile", Name: string(r.FileProfile)}
 		}
 	}
 	return nil
