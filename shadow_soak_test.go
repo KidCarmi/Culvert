@@ -672,8 +672,14 @@ func (c *echoChurn) run(stop <-chan struct{}) {
 		default:
 		}
 		allow := rev%2 == 0
-		c.mu.Lock()
+		// publishEchoPolicy can t.Fatalf on a compile/publish/status regression, which
+		// runtime.Goexit()s THIS churner goroutine. Do it OUTSIDE c.mu so a failure never
+		// abandons the lock held — otherwise the post-churn auditChurnEvents -> allowedAt would
+		// block forever on the leaked mutex, turning an intended failure into a CI timeout
+		// (Codex). The lock guards only the allowAtRev map write; allowedAt is called only after
+		// the churner has stopped (churnerWG.Wait()), so recording after publish is race-free.
 		c.r.publishEchoPolicy(rev, allow)
+		c.mu.Lock()
 		c.allowAtRev[rev] = allow
 		c.mu.Unlock()
 		rev++
