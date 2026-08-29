@@ -362,8 +362,10 @@ materialization — all of which can block — so a kill engaged during that win
 an in-flight live call. The existing OVN-09 tool-drift re-check already sat exactly at the
 boundary; the kill re-check now joins it.
 
-**Design — Model B (monotonic kill generation).** `rollout.State` carries a `killGen`
-`atomic.Uint64`, incremented exactly once per false→true engage transition (never decremented
+**Design — Model B (monotonic kill generation).** `rollout.State` carries a `killGen` field
+**inside the immutable `activeState` snapshot** (published by the same atomic pointer swap as
+`killed`, so a lock-free reader can never see `killed==true` with the pre-engage generation —
+Codex P1 on PR #1248), incremented exactly once per false→true engage transition (never decremented
 on clear) and read lock-free via `State.KillGeneration()`. `Executor.Execute` captures
 `admKillGen` at admission; `callUpstream` re-reads the generation and, when
 `KillGeneration() != admKillGen`, aborts with the package-private `errKilledAtBoundary` before

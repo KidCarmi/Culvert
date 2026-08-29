@@ -310,9 +310,10 @@
   revalidated at the ONE irreversible boundary (`run.go` `callUpstream`, shared by the
   credential and no-credential paths) immediately before `Upstream.Call`, with NOTHING between
   the final check and the call.
-- **Resolution — Model B (monotonic epoch):** `rollout.State` carries a `killGen`
-  `atomic.Uint64`, incremented exactly once per false→true engage transition (never on clear),
-  read lock-free via `State.KillGeneration()`. `Executor.Execute` captures `admKillGen` at
+- **Resolution — Model B (monotonic epoch):** `rollout.State` carries a `killGen` field inside
+  the immutable `activeState` snapshot — published by the SAME atomic pointer swap as `killed`
+  (so no split-publication window; Codex P1 on PR #1248) — incremented exactly once per
+  false→true engage transition (never on clear), read lock-free via `State.KillGeneration()`. `Executor.Execute` captures `admKillGen` at
   admission; `callUpstream` re-reads the generation and aborts with the package-private
   `errKilledAtBoundary` when `KillGeneration() != admKillGen`. Model B was chosen over a
   current-state boolean specifically to also refuse the engage→clear (ABA) window that a

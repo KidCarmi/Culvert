@@ -56,9 +56,11 @@ irreversible boundary shared by the credential and no-credential paths. Sequence
 final tool-freshness revalidation (`ToolStillCurrent`) → FINAL authoritative kill-state
 revalidation → `Upstream.Call`. Nothing runs between the final kill check and the call.
 
-**Model B (monotonic epoch), not a boolean.** `rollout.State` carries `killGen atomic.Uint64`,
-incremented once per false→true engage transition (never on clear), read lock-free via
-`State.KillGeneration()`. `Executor.Execute` captures `admKillGen` at admission; the boundary
+**Model B (monotonic epoch), not a boolean.** `rollout.State` carries a `killGen` field inside
+the immutable `activeState` snapshot — published by the same atomic pointer swap as `killed`,
+so a lock-free reader never sees `killed==true` with the pre-engage generation (no
+split-publication window; Codex P1 on PR #1248) — incremented once per false→true engage
+transition (never on clear), read lock-free via `State.KillGeneration()`. `Executor.Execute` captures `admKillGen` at admission; the boundary
 aborts when `KillGeneration() != admKillGen`. This subsumes the current-killed case AND the
 engage→clear (ABA) case a boolean re-read would miss. The re-read touches only the kill
 generation — it does not re-resolve mode/scope/policy/approval, so F7 single-resolution is
