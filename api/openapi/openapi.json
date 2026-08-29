@@ -13778,12 +13778,17 @@
                     "type": "integer"
                   },
                   "expires_in_seconds": {
-                    "description": "TTL in seconds; 0 means no expiry. Negative or > ~10 years is rejected.",
+                    "description": "TTL in seconds; 0 means no expiry. Range is 0..315360000 (~10 years); a negative or larger value is rejected.",
                     "format": "int64",
+                    "maximum": 315360000,
+                    "minimum": 0,
                     "type": "integer"
                   },
                   "fingerprint": {
-                    "description": "64-char hex of the reviewed tool fingerprint digest",
+                    "description": "64-char hex of the reviewed 32-byte tool fingerprint digest",
+                    "maxLength": 64,
+                    "minLength": 64,
+                    "pattern": "^[0-9a-fA-F]{64}$",
                     "type": "string"
                   },
                   "purpose": {
