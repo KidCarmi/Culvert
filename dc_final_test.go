@@ -31,6 +31,11 @@ func dcFinYAMLBootEnv(t *testing.T) (settingsPath string) {
 	})
 	restoreRewriter := rewriter.Snapshot()
 	t.Cleanup(restoreRewriter)
+	// Tests may boot into a latched rewrite-identity degradation (e.g. a
+	// refused settings-owned slice); the latch is otherwise cleared only by
+	// the next LoadAdminSettings, and it now gates export/version-capture/
+	// omnibus-save/CP-publish process-wide, so it must not leak.
+	t.Cleanup(clearRewriteIdentityDegraded)
 	rewriter.SetRules(nil) // isolate from rules other tests left live
 	swapAdminSettingsPath(t, settingsPath)
 	return settingsPath

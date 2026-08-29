@@ -44,6 +44,11 @@ func dcFin3DegradedBoot(t *testing.T) string {
 	t.Cleanup(func() { setDefaultPolicyAction(prevAction) })
 	restoreRewriter := rewriter.Snapshot()
 	t.Cleanup(restoreRewriter)
+	// The latch is otherwise cleared only by the next LoadAdminSettings, so
+	// without this it would leak into later tests — and now that the latch
+	// gates export/version-capture/omnibus-save/CP-publish process-wide, a
+	// leaked latch silently changes unrelated suites' behavior.
+	t.Cleanup(clearRewriteIdentityDegraded)
 	swapAdminSettingsPath(t, broken)
 
 	rewriter.SetRules(nil)
