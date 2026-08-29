@@ -22,7 +22,13 @@ func dcFinYAMLBootEnv(t *testing.T) (settingsPath string) {
 	dir := t.TempDir()
 	settingsPath = filepath.Join(dir, "admin_settings.json")
 	prevAction := defaultPolicyAction()
-	t.Cleanup(func() { setDefaultPolicyAction(prevAction) })
+	prevMetricsToken := metricsToken
+	prevTrusted := ListTrustedProxyCIDRs()
+	t.Cleanup(func() {
+		setDefaultPolicyAction(prevAction)
+		metricsToken = prevMetricsToken
+		_ = SetTrustedProxyCIDRs(prevTrusted)
+	})
 	restoreRewriter := rewriter.Snapshot()
 	t.Cleanup(restoreRewriter)
 	swapAdminSettingsPath(t, settingsPath)

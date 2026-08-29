@@ -93,7 +93,7 @@ func TestDCFin_LegacyIDLessRuleKeepsHistoricalResolution(t *testing.T) {
 // crash-recovery model for a FileProfile rename never executes against the
 // loaded authority and a stale denormalized name survives every restart.
 func TestDCFin_StartupOrderLoadsFileProfilesBeforeReconcile(t *testing.T) {
-	src, err := os.ReadFile("main.go")
+	src, err := os.ReadFile(filepath.Join(pkgSourceDir(), "main.go"))
 	if err != nil {
 		t.Fatalf("read main.go: %v", err)
 	}

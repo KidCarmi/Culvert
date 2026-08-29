@@ -92,6 +92,7 @@ func TestApplyConfigSnapshot_FileProfilesPersist(t *testing.T) {
 		Version: 1,
 		FileProfiles: []FileExtProfile{
 			{
+				ID:         "p34-test-id",
 				Name:       "p34-test-profile",
 				Extensions: []string{".test", ".p34"},
 			},
