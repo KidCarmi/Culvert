@@ -137,6 +137,33 @@ func writeRewriteIdentityDegraded(w http.ResponseWriter, d *rewriteIdentityDegra
 	})
 }
 
+// carryFileRewriteFields copies the EXISTING settings file's rewrite fields
+// (rules + ownership sentinel + seed-identity ledger) verbatim into an
+// omnibus-save snapshot taken while the management-identity degradation is
+// latched — the live StableIDs are KNOWN-ephemeral, so the save must not
+// record them as authoritative and must not destroy the refused-but-
+// recoverable slice the load preserved on disk. No file ⇒ no rewrite claim
+// (all three fields stay zero). A file that exists but cannot be read or
+// decoded returns an error so the caller refuses the whole save rather than
+// overwrite a slice it cannot carry forward. Caller holds adminSettingsMu.
+func carryFileRewriteFields(s *AdminSettings, path string) error {
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil // no durable claim exists; this save makes none either
+	}
+	if err != nil {
+		return fmt.Errorf("rewrite identity degraded: cannot read existing settings to preserve the rewrite slice: %w", err)
+	}
+	var prev AdminSettings
+	if err := json.Unmarshal(data, &prev); err != nil {
+		return fmt.Errorf("rewrite identity degraded: existing settings undecodable; refusing to overwrite the rewrite slice: %w", err)
+	}
+	s.RewriteRules = prev.RewriteRules
+	s.RewriteRulesSaved = prev.RewriteRulesSaved
+	s.RewriteSeedIdentities = prev.RewriteSeedIdentities
+	return nil
+}
+
 // ─── YAML-seed identity durability (2D-C final §7–§9) ──────────────────────
 
 // rewriteRuleContentEqual reports whether two rules carry the same SEMANTIC

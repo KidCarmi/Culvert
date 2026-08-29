@@ -177,6 +177,19 @@ func saveConfigVersionNote(actor, action, note string) {
 	saveConfigVersionMu.Lock()
 	defer saveConfigVersionMu.Unlock()
 
+	// While the rewrite management-identity degradation is latched,
+	// captureConfigBackup would record the KNOWN-ephemeral StableIDs into a
+	// durable artifact a later rollback treats as authoritative (valid UUIDs
+	// pass the rollback identity gate and install through
+	// installRewriteRulesDurable). The triggering mutation itself has already
+	// completed and stays best-effort-complete; only the version capture is
+	// refused, with named operator evidence.
+	if d := rewriteIdentityDegraded(); d != nil {
+		logger.Printf("ConfigVersion: capture refused — rewrite identity non-durable (%s); actor=%q action=%q",
+			d.reason, sanitizeLog(actor), sanitizeLog(action))
+		return
+	}
+
 	snap := captureConfigBackup()
 	raw, err := json.Marshal(snap)
 	if err != nil {

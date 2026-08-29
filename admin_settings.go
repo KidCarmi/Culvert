@@ -881,14 +881,31 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 	snapshotAdminEndpoints(&s)
 
 	// Rewrite rules: the TARGET set for a rewrite-mutating save (persist-before-
-	// apply), else the live set. Always stamped saved-authoritative so an
-	// explicit empty set survives restart (see RewriteRulesSaved).
-	if rewriteApply {
+	// apply), else the live set. Stamped saved-authoritative so an explicit
+	// empty set survives restart (see RewriteRulesSaved) — EXCEPT while the
+	// management-identity degradation is latched: the live StableIDs are
+	// KNOWN-ephemeral, so an unrelated omnibus save must neither record them
+	// as authoritative settings identity nor destroy the refused-but-
+	// recoverable slice the load deliberately preserved on disk. It carries
+	// the existing file's rewrite fields verbatim instead (or makes no rewrite
+	// claim when no file exists), and refuses the whole save rather than
+	// overwrite a slice it cannot read back. A rewrite-mutating save stays
+	// exempt: its target carries durable-artifact identities (rollback/import
+	// via installRewriteRulesDurable), and the interactive mutations are
+	// already refused upstream while degraded.
+	switch {
+	case rewriteApply:
 		s.RewriteRules = rewriteTarget
-	} else {
+		s.RewriteRulesSaved = true
+	case rewriteIdentityDegraded() != nil:
+		if err := carryFileRewriteFields(&s, path); err != nil {
+			logger.Printf("AdminSettings: %v", err)
+			return err
+		}
+	default:
 		s.RewriteRules = rewriter.List()
+		s.RewriteRulesSaved = true
 	}
-	s.RewriteRulesSaved = true
 
 	snapshotBlocklistFeeds(&s)
 

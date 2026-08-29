@@ -575,6 +575,16 @@ var dpControlPlanePollFailing atomic.Bool
 // clear signal (fail-open on new threats). The CP's own local proxying is
 // unaffected (its stores already hold the data); only distribution is gated.
 func (s *ConfigStore) Update(snap ConfigSnapshot) error {
+	// Gate 0 — rewrite management-identity degradation: while the latch is
+	// set, CurrentConfigSnapshot has captured KNOWN-ephemeral rewrite
+	// StableIDs that must not be distributed to the fleet as authoritative
+	// identity (a DP applies them verbatim, and they re-mint on the CP's next
+	// restart). Reuses the existing commit-time rejection contract — logged,
+	// alerted, LastPublishError; the fleet stays on the last valid snapshot —
+	// rather than silently omitting or re-minting the rewrite slice.
+	if d := rewriteIdentityDegraded(); d != nil {
+		return s.rejectPublish(fmt.Errorf("rewrite management identity degraded (%s): refusing to publish ephemeral rewrite StableIDs as authoritative fleet identity", d.reason))
+	}
 	// Gate 1 — entry counts (fast pre-check).
 	if err := validateConfigSnapshot(snap); err != nil {
 		return s.rejectPublish(err)

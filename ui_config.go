@@ -606,6 +606,25 @@ func apiConfigExport(w http.ResponseWriter, r *http.Request) {
 	// Supported: blocklist, policy, rewrite, sslbypass, fileblock, ipfilter, all (default).
 	section := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("section")))
 
+	// While the rewrite management-identity degradation is latched the live
+	// StableIDs are KNOWN-ephemeral, so any export that would carry
+	// RewriteRules — the rewrite section, and the full export the default arm
+	// serves for "all"/empty/unknown sections — answers the one structured
+	// rewrite-identity 503 instead of recording them as an authoritative
+	// backup (which a later import would install as durable identity).
+	// Sections that carry no rewrite identity stay available unchanged.
+	// requireRole above deliberately precedes this disclosure.
+	if d := rewriteIdentityDegraded(); d != nil {
+		switch section {
+		case "blocklist", "policy", "sslbypass", "fileblock", "ipfilter",
+			"pac", "alerts", "blockpage", "upstream", "connlimit":
+			// no rewrite identity in these exports
+		default: // "rewrite", "all", empty, or unknown → the full export
+			writeRewriteIdentityDegraded(w, d)
+			return
+		}
+	}
+
 	b := configBackup{
 		Version:    1,
 		ExportedAt: time.Now().UTC().Format(time.RFC3339),
