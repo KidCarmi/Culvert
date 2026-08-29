@@ -725,6 +725,53 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > FRESH/SETUPFAIL instances now carry their own paths, making the history
 > journeys deterministic).
 >
+> **2E-A FINAL transaction & fleet-truth closure (this branch, 2026-08-29 —
+> correction slice against candidate b60d4ed6).** Four blockers, each with a
+> deterministic red-before (`secscan_2ea2_*_test.go` +
+> `internal/scanner/scanner_writer_domain_test.go`; interleavings driven by
+> the `contentSecGETPauseHook` GET seam and the scanner
+> `SetWriteFileForTest` publication seam — never sleeps; the §2 select
+> valve's other arm is lock-impossible at the fixed tree). **(§1) COHERENT
+> FENCED READS:** the four fenced GETs assembled state and revision from
+> separate store reads, so a writer landing between them made the GET emit
+> `{data A, revision(B)}` — a token that let a stale A-based write PASS the
+> fence against B. Every fenced GET (and PUT success response) now derives
+> its revision from the ONE committed snapshot it returns (pure
+> `*RevisionOf` derivations over the single-lock store copies; YARA
+> settings snapshot under `adminSettingsMu`, the writer domain, so the six
+> engine values can never serialize torn; the settings PUT responds/audits
+> with the posture it installed). **(§2) ONE WRITER DOMAIN FOR THE SHARED
+> DPI ENVELOPE:** `content_scan.json` carries patterns AND bypass hosts,
+> but Save snapshotted under RLock and published after unlock — two
+> successful mutation+Save sequences could publish in reverse order (both
+> callers told success; restart trusts the STALE envelope).
+> `ContentScanner.saveMu` now holds across snapshot+publication, so
+> publication order equals snapshot order; every writer (interactive
+> handlers, rollback, CP→DP apply, inspection seed, import) already
+> funnels through Save. Hot-path pattern publication, mutators, and the
+> Save API are unchanged. **(§3) FENCED DESTRUCTIVE YARA DELETE:** DELETE
+> ignored concurrency (a delete reviewed against v1 destroyed v2) and a
+> missing target was a 400. It now joins the POST/PUT contract — optional
+> `?ifRevision=` (v2 always asserts), compared inside `contentSecMu`,
+> truthful 404 first, structured 409 with the rule preserved
+> byte-identical; the reload handler joins the same domain (LoadDir reads
+> the dir outside `y.mu` — an unserialized reload could install a stale
+> read last). The v2 delete ceremony fetches the authoritative rule on
+> open, binds to that reviewed revision, and a conflict forces fresh
+> truth. **(§4) CP/DP OWNERSHIP + FLEET TRUTH:** the 2E-0 inventory's
+> "node-local" classification of DPI patterns was WRONG — DPI patterns and
+> the threat-domain allowlist are ClusterSynced (`config_surfaces.go`), so
+> the established F3a-2 managed-DP posture now applies (write refusal
+> BEFORE mutation + `editable` on the GETs; bypass/exclusions/YARA stay
+> node-local and writable), the allowlist PUT no longer discards the
+> publish error (the established `cluster_publish_rejected` fact; local
+> mutation kept per doctrine), and DPI mutations publish a fresh snapshot
+> (DELETE keeps 204 on full success; 200-with-fact only when rejected).
+> The v2 UI renders "saved on this node / fleet publication rejected" as
+> two distinct facts and mounts the synced surfaces read-only on a
+> managed DP. OpenAPI updated truthfully (editable, publish facts, DELETE
+> ifRevision + 404/409, coherent-pair wording).
+>
 > **2E-A — Content Security & DPI (this branch, 2026-08-29).** First slice
 > of the 2E decomposition (2E-0 inventory + 2E-A implementation; 2E-B
 > Decryption Operations and 2E-C CDR/Sluice are inventoried but explicitly
