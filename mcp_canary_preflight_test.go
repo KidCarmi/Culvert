@@ -1,0 +1,159 @@
+package main
+
+import (
+	"testing"
+	"time"
+
+	"github.com/KidCarmi/Culvert/internal/mcp/canary"
+	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
+	"github.com/KidCarmi/Culvert/internal/mcp/tooltrust"
+)
+
+func canaryUnmetHas(rd canary.Readiness, want canary.Reason) bool {
+	for _, r := range rd.Unmet {
+		if r == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestCanaryNodeReadiness_DormantDefault is the load-bearing dormancy proof: in the shipped
+// build the Canary node is NEVER ready, and the blocker set always includes
+// live_executor_absent (the unarmed live tier). This is what keeps Canary unreachable.
+func TestCanaryNodeReadiness_DormantDefault(t *testing.T) {
+	rd := evaluateCanaryNodeReadiness(rollout.CapabilityGateway)
+	if rd.Ready {
+		t.Fatal("SECURITY: Canary node readiness must be false in the shipped build (live tier unarmed)")
+	}
+	if !canaryUnmetHas(rd, canary.ReasonLiveExecutorAbsent) {
+		t.Fatalf("dormant Canary must report live_executor_absent, got %v", rd.Unmet)
+	}
+	// The live-execution-specific facts must all be unmet together (they compose as one unit).
+	for _, want := range []canary.Reason{
+		canary.ReasonLiveExecutorAbsent, canary.ReasonUpstreamCallerAbsent,
+		canary.ReasonCredentialPathNotReady, canary.ReasonKillBoundaryGuardAbsent,
+		canary.ReasonToolFreshnessGuardAbsent,
+	} {
+		if !canaryUnmetHas(rd, want) {
+			t.Errorf("dormant Canary must report %s", want)
+		}
+	}
+	// Management is a category error for Canary — never executes upstream.
+	if rd := evaluateCanaryNodeReadiness(rollout.CapabilityManagement); rd.Ready ||
+		len(rd.Unmet) != 1 || rd.Unmet[0] != canary.ReasonCapabilityNotGateway {
+		t.Fatalf("Management Canary must fail with exactly capability_not_gateway, got %v", rd.Unmet)
+	}
+	// The boolean gate a future arming would consult must agree: never ready in this build.
+	if canaryActivationReady(rollout.CapabilityGateway) {
+		t.Fatal("SECURITY: canaryActivationReady must be false in the shipped build")
+	}
+}
+
+// validCanaryActivationInput builds an activation input whose SCOPE / APPROVAL / BUDGET /
+// server / fingerprint facts are all satisfied — so any of those reasons appearing in Unmet
+// proves the wiring, and their ABSENCE proves a valid input is honoured (the node facts still
+// block via live_executor_absent).
+func validCanaryActivationInput(now time.Time) CanaryActivationInput {
+	exp := now.Add(time.Hour)
+	var digest tooltrust.FingerprintDigest
+	for i := range digest {
+		digest[i] = 0x11
+	}
+	return CanaryActivationInput{
+		Capability: rollout.CapabilityGateway,
+		Scope: rollout.ScopeSpec{
+			Capability: rollout.CapabilityGateway,
+			Servers:    []string{"srv-canary"},
+			Tools:      []rollout.ToolSel{{Server: "srv-canary", Name: "echo", Fingerprint: "abc"}},
+			Principals: []string{"synthetic"},
+			Operations: []rollout.RiskClass{rollout.RiskRead},
+		},
+		ScopeRev: 1,
+		Approval: &tooltrust.ToolApproval{
+			Tenant: "t1", ServerID: "srv", ToolName: "echo",
+			Fingerprint: digest, FingerprintFormatVersion: 1,
+			Purpose: tooltrust.PurposeLiveExecution, Status: tooltrust.StatusActive,
+			RequestedBy: "alice", ApprovedBy: "bob", ApprovedAt: now, ExpiresAt: &exp,
+		},
+		Target: canary.LiveTarget{Tenant: "t1", ServerID: "srv", ToolName: "echo", Fingerprint: digest, FingerprintFormat: 1},
+		Budget: canary.Budget{
+			MaxTotalExecutions: 50, MaxExecutionsPerMinute: 5, MaxConcurrentExecutions: 1,
+			MaxPrincipals: 1, MaxTools: 1, MaxServers: 1, Window: time.Hour,
+		},
+		ServerUsable: true, FingerprintCurrent: true, Now: now,
+	}
+}
+
+// TestCanaryActivationPreflight_WiresScopeApprovalBudget proves the root preflight correctly
+// maps activation inputs to facts: with valid inputs the scope/approval/budget/server/
+// fingerprint reasons are ABSENT (satisfied); flipping any input surfaces exactly its reason.
+// The overall verdict stays not-ready via the node facts (live tier absent) throughout — no
+// activation input can make Canary ready by itself.
+func TestCanaryActivationPreflight_WiresScopeApprovalBudget(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+
+	base := evaluateCanaryActivationPreflight(validCanaryActivationInput(now))
+	if base.Ready {
+		t.Fatal("SECURITY: no set of activation inputs may make Canary ready while the live tier is unarmed")
+	}
+	for _, notWanted := range []canary.Reason{
+		canary.ReasonScopeNotBounded, canary.ReasonScopeNotReadFirst, canary.ReasonLiveApprovalInvalid,
+		canary.ReasonServerNotUsable, canary.ReasonToolFingerprintStale, canary.ReasonBudgetNotConfigured,
+	} {
+		if canaryUnmetHas(base, notWanted) {
+			t.Errorf("valid activation input should satisfy %s, but it is unmet", notWanted)
+		}
+	}
+
+	flips := []struct {
+		name   string
+		mutate func(*CanaryActivationInput)
+		reason canary.Reason
+	}{
+		{"unbounded_scope", func(in *CanaryActivationInput) { in.Scope.Servers = nil }, canary.ReasonScopeNotBounded},
+		{"non_read_first", func(in *CanaryActivationInput) { in.Scope.Operations = []rollout.RiskClass{rollout.RiskWrite} }, canary.ReasonScopeNotReadFirst},
+		{"shadow_approval", func(in *CanaryActivationInput) { in.Approval.Purpose = tooltrust.PurposeShadowEvaluation }, canary.ReasonLiveApprovalInvalid},
+		{"nil_approval", func(in *CanaryActivationInput) { in.Approval = nil }, canary.ReasonLiveApprovalInvalid},
+		{"server_not_usable", func(in *CanaryActivationInput) { in.ServerUsable = false }, canary.ReasonServerNotUsable},
+		{"stale_fingerprint", func(in *CanaryActivationInput) { in.FingerprintCurrent = false }, canary.ReasonToolFingerprintStale},
+		{"no_budget", func(in *CanaryActivationInput) { in.Budget = canary.Budget{} }, canary.ReasonBudgetNotConfigured},
+	}
+	for _, tc := range flips {
+		t.Run(tc.name, func(t *testing.T) {
+			in := validCanaryActivationInput(now)
+			tc.mutate(&in)
+			rd := evaluateCanaryActivationPreflight(in)
+			if rd.Ready {
+				t.Fatalf("%s must keep Canary not-ready", tc.name)
+			}
+			if !canaryUnmetHas(rd, tc.reason) {
+				t.Fatalf("%s must surface %s, got %v", tc.name, tc.reason, rd.Unmet)
+			}
+		})
+	}
+}
+
+// TestMCPCanaryStatus_ReadOnlyContract proves the admin surface reports the contract honestly:
+// defined but not ready, a non-empty unmet list, the full prerequisite vocabulary, and the
+// live tier unarmed.
+func TestMCPCanaryStatus_ReadOnlyContract(t *testing.T) {
+	st := mcpCanaryStatus()
+	if st["defined"] != true {
+		t.Error("canary status must report defined=true")
+	}
+	if st["node_ready"] != false {
+		t.Error("canary status must report node_ready=false in this build")
+	}
+	if st["live_execution_armed"] != false {
+		t.Error("canary status must report live_execution_armed=false")
+	}
+	unmet, _ := st["unmet"].([]string)
+	if len(unmet) == 0 {
+		t.Error("canary status unmet list must be non-empty in the dormant build")
+	}
+	all, _ := st["all_prerequisites"].([]string)
+	if len(all) != len(canary.AllReasons()) {
+		t.Errorf("all_prerequisites must advertise the full vocabulary (%d), got %d", len(canary.AllReasons()), len(all))
+	}
+}

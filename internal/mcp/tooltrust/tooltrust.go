@@ -96,6 +96,18 @@ func (p Purpose) Issuable() bool { return p == PurposeShadowEvaluation }
 // this is the live-execution firewall's positive half.
 func (p Purpose) PermitsShadowEvaluation() bool { return p == PurposeShadowEvaluation }
 
+// PermitsLiveExecution reports whether an approval of this purpose may satisfy a CANARY /
+// live-execution trust requirement. ONLY live_execution qualifies — the firewall's OTHER
+// positive half, and the mirror of PermitsShadowEvaluation: a shadow_evaluation approval
+// can NEVER authorize a real upstream side effect, and a live_execution approval can never
+// satisfy the Shadow "usable tool" prerequisite. The two purposes are disjoint by
+// construction (a Purpose is exactly one value), so no approval satisfies both. This makes
+// the "shadow != live" invariant a compile-checkable predicate, not a runtime convention.
+// Issuance of live_execution stays refused fail-closed (Issuable) in this build; this
+// predicate only defines what a live_execution approval WOULD permit once a future,
+// separately-reviewed live phase makes it issuable under stronger governance.
+func (p Purpose) PermitsLiveExecution() bool { return p == PurposeLiveExecution }
+
 // Status is the ToolApproval lifecycle status. Rejected/Revoked/Expired are terminal and
 // never re-activate — a revoked or expired approval never becomes valid again from a later
 // identical tools/list; re-approval requires a NEW human decision (ADR-0034 D7).

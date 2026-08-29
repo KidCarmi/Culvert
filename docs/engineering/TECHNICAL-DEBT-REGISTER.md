@@ -356,6 +356,48 @@
   re-introduced and confirmed to fail its named guard (mapping recorded at the head of
   `internal/mcp/execution/kill_boundary_race_test.go`).
 
+## CANARY-ACTIVATION-PREREQS — Machine-verifiable prerequisites before the first real MCP upstream execution · OPEN, DORMANT (2026-08-29)
+- **Principal:** Canary is the first phase where Culvert causes a real, irreversible MCP upstream
+  side effect. ADR-0035 defines the machine-verifiable readiness contract (`internal/mcp/canary`)
+  and a dormant activation preflight (`mcp_canary_preflight.go`); Canary is **architecturally
+  defined but not activatable**. The remaining prerequisites are each a **separately-reviewed
+  activation**, never a config change, and until they land the system stays fail-closed.
+- **Status:** OPEN (by design — this is the prerequisite ledger, not a defect). Every row below
+  is a HARD gate a future Canary-arming activation must satisfy with executable evidence; "code
+  basically supports it" does not close a row.
+- **Prerequisite ledger (each must become machine-attested before the first Canary):**
+  1. **Arm the live tier** — compose a live `execution.Executor` + bounded `UpstreamCaller` +
+     materialize-broker + inspection and call `markGatewayExecDepsReady`. Blocked today by the
+     execution-posture wall (`mcp_execution_posture_test.go`); arming EDITS that wall.
+     Machine-signal: `live_executor_absent` / `upstream_caller_absent` /
+     `credential_path_not_ready` / `kill_boundary_guard_absent` / `tool_freshness_guard_absent`
+     clear.
+  2. **Make `live_execution` issuable** under stronger governance (four-eyes distinct
+     requester+approver, ≤24h TTL, exact target). Blocked by `tooltrust.Purpose.Issuable()`
+     (shadow-only). The consumption predicate already exists (`canary.SatisfiesLiveExecution`);
+     the ISSUE path does not.
+  3. **Bounded read-first scope** at activation (`canary.ValidateScope` → `ScopeOK`): enumerable,
+     ≤1 server / ≤2 tools / ≤2 principals, exact fingerprints, read/discovery only.
+  4. **Blast-radius budget** at activation (`canary.ValidateBudget` → `BudgetOK`) enforced at
+     runtime (total/rate/concurrency/window). The runtime ENFORCEMENT is a live-tier concern.
+  5. **Shadow-Exit attestation surface** (`shadowExitReviewAttested` returns false today).
+  6. **Wire the preflight as the primary activation gate** and the abort taxonomy
+     (`canary.AbortConditions`) into runtime detectors.
+- **Red-team → defense mapping (§18; all real attacks have a standing gate):** shadow approval
+  reused as live → `TestSatisfiesLiveExecution_ShadowApprovalNeverQualifies`; stale/long-TTL/
+  no-four-eyes approval → `TestSatisfiesLiveExecution_Rejections`; F1→F2 rug-pull → exact
+  fingerprint binding (same); scope widening / percentage / wildcard-tool → `TestValidateScope_Rejections`;
+  kill engage→clear ABA + tool-drift at boundary → PREREQ-MCP-KILL-1 gates; credential revoke
+  mid-flight / server-identity drift → whole-Canary abort taxonomy (`TestAbortConditions_*`);
+  CP rollback/replay + restart while configured → existing rollout apply/restore gates;
+  out-of-scope fallback executing → `TestAntiWeakening_OutOfScopeDoesNotExecute`; upstream success
+  + DLP failure → existing `finishUpstream` inspection fail-closed; LiveExecutor leak into Shadow
+  → `TestShadow_TypeGraphHasNoExecuteCapability` + `TestCanaryPackageHoldsNoExecutionCapability`.
+  No open red-team finding: every attack maps to a standing gate or a dormant fail-closed state.
+- **Evidence:** ADR-0035; `docs/design/mcp/CANARY-READINESS-MATRIX.md`;
+  `docs/design/mcp/CANARY-FIRST-RUNBOOK.md`; `internal/mcp/canary/*_test.go`;
+  `mcp_canary_preflight_test.go`; the differential gate `TestShadow_LivePreSideEffectEquivalence`.
+
 ## SHADOW-EVIDENCE-ROUTING-1 — Pre-dispatch fail-closed signals not routed into Shadow evidence · LOW (2026-08-25)
 - **Principal:** Two failure classes are terminally handled by the runtime BEFORE the
   guarded executor/Shadow provider is invoked, so the ShadowEvaluator never records a
