@@ -120,7 +120,11 @@ const NAV: readonly NavSection[] = [
     heading: "Security",
     icon: <IconShield />,
     entries: [
-      { label: "Content & Scanning", minRole: "viewer" },
+      {
+        label: "Content Security",
+        to: "/security/content-security",
+        minRole: "viewer",
+      },
       { label: "Certificates", minRole: "viewer" },
     ],
   },
