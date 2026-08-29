@@ -50,6 +50,10 @@ func canonImportBackup(t *testing.T, mode string, b *configBackup) *httptest.Res
 	t.Helper()
 	w := httptest.NewRecorder()
 	apiConfigImport(w, jsonReq("POST", "/api/config/import?mode="+mode, b))
+	// apiConfigImport fires a DETACHED adminSettingsSave goroutine that reads
+	// package globals; drain it before returning so a caller's t.Cleanup
+	// restores can never race it (caught by -race on the 2D-C import tests).
+	adminSettingsSaveWG.Wait()
 	return w
 }
 

@@ -911,8 +911,18 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 // The write error is intentionally ignored here (best-effort, logged inside
 // SaveAdminSettings); callers that need durable-vs-runtime consistency call
 // SaveAdminSettings directly and handle the returned error (the F10 tunables PUT).
+//
+// adminSettingsSaveWG tracks every detached save so a caller that must not
+// outrun one (a test whose cleanup restores package globals SaveAdminSettings
+// reads) can Wait for the drain deterministically instead of polling the file.
+var adminSettingsSaveWG sync.WaitGroup
+
 func adminSettingsSave() {
-	go func() { _ = SaveAdminSettings() }()
+	adminSettingsSaveWG.Add(1)
+	go func() {
+		defer adminSettingsSaveWG.Done()
+		_ = SaveAdminSettings()
+	}()
 }
 
 // syslogConfigured is declared in ui.go (line 2404).
