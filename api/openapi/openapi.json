@@ -13747,7 +13747,46 @@
           "content": {
             "application/json": {
               "schema": {
-                "additionalProperties": true,
+                "additionalProperties": false,
+                "properties": {
+                  "catalog_revision": {
+                    "description": "The reviewed per-record catalog revision (the tool's Revision from the inventory view). REQUIRED — a zero/omitted value is rejected so the exact-target contract cannot be bypassed.",
+                    "format": "int64",
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "expires_in_seconds": {
+                    "description": "TTL in seconds; 0 means no expiry. Negative or > ~10 years is rejected.",
+                    "format": "int64",
+                    "type": "integer"
+                  },
+                  "fingerprint": {
+                    "description": "64-char hex of the reviewed tool fingerprint digest",
+                    "type": "string"
+                  },
+                  "purpose": {
+                    "description": "Declared purpose; only shadow_evaluation is issuable. Empty defaults to shadow_evaluation.",
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": "string"
+                  },
+                  "server_id": {
+                    "type": "string"
+                  },
+                  "ticket_ref": {
+                    "type": "string"
+                  },
+                  "tool_name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "server_id",
+                  "tool_name",
+                  "fingerprint",
+                  "catalog_revision"
+                ],
                 "type": "object"
               }
             }

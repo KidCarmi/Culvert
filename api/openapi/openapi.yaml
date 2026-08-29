@@ -10848,7 +10848,19 @@ paths:
         required: true
         content:
           application/json:
-            schema: { type: object, additionalProperties: true }
+            schema:
+              type: object
+              additionalProperties: false
+              required: [server_id, tool_name, fingerprint, catalog_revision]
+              properties:
+                server_id: { type: string }
+                tool_name: { type: string }
+                fingerprint: { type: string, description: 64-char hex of the reviewed tool fingerprint digest }
+                catalog_revision: { type: integer, format: int64, minimum: 1, description: The reviewed per-record catalog revision (the tool's Revision from the inventory view). REQUIRED — a zero/omitted value is rejected so the exact-target contract cannot be bypassed. }
+                purpose: { type: string, description: 'Declared purpose; only shadow_evaluation is issuable. Empty defaults to shadow_evaluation.' }
+                reason: { type: string }
+                ticket_ref: { type: string }
+                expires_in_seconds: { type: integer, format: int64, description: 'TTL in seconds; 0 means no expiry. Negative or > ~10 years is rejected.' }
       responses:
         '200': { description: Pending approval created, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
