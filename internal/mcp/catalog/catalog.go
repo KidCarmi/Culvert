@@ -188,21 +188,21 @@ func (c *Catalog) Ingest(reg *registry.Registry, in DiscoveryInput) (*Snapshot, 
 	if in.Identity != server.PinnedIdentity {
 		return nil, nil, mcperr.New(mcperr.ReasonServerIdentityMismatch, "catalog.ingest", "verified identity does not match the server pin")
 	}
-	observed, err := parseDiscovery(server, in, c.lim)
+	observed, complete, err := parseDiscovery(server, in, c.lim)
 	if err != nil {
 		return nil, nil, err
 	}
-	return c.publishIngest(server.ID, observed)
+	return c.publishIngest(server.ID, observed, complete)
 }
 
 // publishIngest classifies observed records against the current base and installs
 // the new snapshot via optimistic CAS, retrying against the newer base on
 // conflict (bounded). Classification is recomputed each attempt so a concurrent
 // update to the same tool is honored.
-func (c *Catalog) publishIngest(serverID registry.ServerID, observed []*ToolRecord) (*Snapshot, *Report, error) {
+func (c *Catalog) publishIngest(serverID registry.ServerID, observed []*ToolRecord, complete bool) (*Snapshot, *Report, error) {
 	for attempt := 0; attempt < maxPublishRetries; attempt++ {
 		base := c.cur.Load()
-		next, report, err := c.buildIngest(base, serverID, observed)
+		next, report, err := c.buildIngest(base, serverID, observed, complete)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -226,13 +226,41 @@ func (c *Catalog) tryPublish(base, next *Snapshot) error {
 // buildIngest is the pure build step: it classifies each observed record against
 // base, computes the disposition, and returns the next snapshot + report without
 // mutating base. It enforces the total catalog-entry capacity.
-func (c *Catalog) buildIngest(base *Snapshot, serverID registry.ServerID, observed []*ToolRecord) (*Snapshot, *Report, error) {
+func (c *Catalog) buildIngest(base *Snapshot, serverID registry.ServerID, observed []*ToolRecord, complete bool) (*Snapshot, *Report, error) {
 	rev := base.revision + 1
 	next := base.clone(rev)
 	report := &Report{ServerID: serverID, Revision: rev, Observations: make([]Observation, 0, len(observed))}
 	observedKeys := make(map[ToolKey]struct{}, len(observed))
 	for _, obs := range observed {
-		prior := base.byKey[obs.Key] // nil ⇒ unknown tool
+		observedKeys[obs.Key] = struct{}{}
+	}
+	// Withdraw records of THIS server that a COMPLETE discovery did not observe — BEFORE the
+	// insertion loop below enforces capacity. Withdrawal is gated on `complete`: a tools/list
+	// result MAY paginate (MCP `nextCursor`) and execution.Discovery fetches only the FIRST
+	// page, so a tool absent from a PARTIAL page has NOT been proven withdrawn — dropping it
+	// there would wrongly withdraw a later page's still-advertised tool (and its approval). On
+	// a partial page this is a no-op, preserving the additive-merge behaviour. On a complete
+	// list, a previously-known tool absent here means the server no longer offers it: left in
+	// place, the stale record would keep conferring eligibility — and, once tool-trust derives
+	// from the catalog (ADR-0034), a withdrawn tool would stay Usable and its active approval
+	// would keep matching the unchanged fingerprint indefinitely. Dropping it is fail-safe: a
+	// re-added tool re-ingests against an empty prior (unknown ⇒ re-quarantined, never silently
+	// re-Usable), and only serverID's records are touched. Doing it before insertion means a
+	// tool-for-tool replacement at exactly MaxCatalogEntries frees the withdrawn slot first
+	// instead of failing capacity, so the bound is checked against the final key set. Classify
+	// below reads the untouched `base`, so drift/quarantine of OBSERVED tools is unaffected.
+	if complete {
+		for k := range next.byKey {
+			if k.Server != serverID {
+				continue
+			}
+			if _, seen := observedKeys[k]; !seen {
+				delete(next.byKey, k)
+			}
+		}
+	}
+	for _, obs := range observed {
+		prior := base.byKey[obs.Key] // nil ⇒ unknown tool; classified against the pre-ingest base
 		class, diffs := Classify(prior, obs)
 		diffs = boundDiffs(diffs, c.lim.MaxDiffOps())
 		elig := dispositionFor(class, prior)
@@ -245,26 +273,7 @@ func (c *Catalog) buildIngest(base *Snapshot, serverID registry.ServerID, observ
 			}
 		}
 		next.byKey[obs.Key] = &rec
-		observedKeys[obs.Key] = struct{}{}
 		report.Observations = append(report.Observations, Observation{Key: obs.Key, Class: class, Diffs: diffs, Eligibility: elig})
-	}
-	// Withdraw records of THIS server that the discovery did not observe. Every Ingest carries a
-	// server's COMPLETE tools/list (execution.Discovery fetches a full tools/list; seedTools
-	// ingests the full declared set), so a previously-known tool absent here means the server no
-	// longer offers it. Left in place, the stale record would keep conferring eligibility — and,
-	// once tool-trust derives from the catalog (ADR-0034), a withdrawn tool would stay Usable and
-	// its active approval would keep matching the unchanged fingerprint indefinitely. Dropping it
-	// is fail-safe: a re-added tool re-ingests against an empty prior (unknown ⇒ re-quarantined,
-	// never silently re-Usable), and only serverID's records are touched — other servers' tools
-	// (and this server's observed tools) are untouched. `Classify` above already ran against the
-	// pre-drop base, so drift/quarantine of OBSERVED tools is unaffected.
-	for k := range next.byKey {
-		if k.Server != serverID {
-			continue
-		}
-		if _, seen := observedKeys[k]; !seen {
-			delete(next.byKey, k)
-		}
 	}
 	sort.Slice(report.Observations, func(i, j int) bool {
 		return report.Observations[i].Key.Name < report.Observations[j].Key.Name
