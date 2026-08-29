@@ -119,8 +119,12 @@ beforeEach(() => {
       if (url.includes("/api/decryption-profiles")) {
         return okJSON({ profiles: [], names: ["strict"] });
       }
-      if (url.includes("/api/fileblock/profiles")) {
-        return okJSON([{ name: "Executables" }]);
+      if (url.includes("/api/fileblock/profiles/state")) {
+        // 2D-C: the selector reads the coherent v2 state envelope.
+        return okJSON({
+          profiles: [{ id: "builtin-executables", name: "Executables" }],
+          revision: "fp1",
+        });
       }
       return Promise.reject(new TypeError(`unexpected fetch ${method} ${url}`));
     }),
