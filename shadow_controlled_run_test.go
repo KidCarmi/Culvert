@@ -109,10 +109,14 @@ func controlledScope() rollout.ScopeSpec {
 }
 
 // witnessEndpoint starts a REAL controlled upstream TLS server and returns it plus its
-// dialable HTTPS URL, registered as the controlled server's inventory endpoint. The URL
-// is a plain https:// loopback address the real upstream transport can actually dial
-// (it rejects non-allowlisted schemes before dialing), so a regressed upstream call would
-// reach this handler and increment hits — making the zero-invocation assertion meaningful.
+// https:// loopback URL, registered as the controlled server's inventory endpoint. Its
+// hit counter is an AUXILIARY / defense-in-depth witness: a real HTTP server that received
+// zero requests during the run. It is deliberately NOT the primary zero-invocation proof —
+// that is STRUCTURAL: Shadow composes no upstream client and no materialize-capable broker
+// (Layer B, enforced by the execution-posture wall, TestExecPosture_*), so it CANNOT dial
+// any endpoint regardless of this witness's reachability. Wiring the production upstream
+// transport's resolver policy / SPKI pin here would mean composing an upstream path the
+// Shadow build structurally lacks, so it is intentionally left out.
 func witnessEndpoint(t *testing.T, hits *int64) (srv *httptest.Server, endpoint string) {
 	t.Helper()
 	w := httptest.NewTLSServer(http.HandlerFunc(func(wr http.ResponseWriter, _ *http.Request) {
@@ -316,8 +320,8 @@ func (r *shadowRun) firstRequestWouldExecute() {
 	req(t, ra["materialization_ready"] == "not_evaluated" && ra["response_inspection"] == "not_evaluated",
 		"A: materialization_ready and response_inspection must be not_evaluated, got %v", ra)
 	after := shadowSnap()
-	req(t, after.Evaluations > before.Evaluations && after.WouldExecute > before.WouldExecute,
-		"A: shadow metrics must increment (before=%+v after=%+v)", before, after)
+	req(t, after.Evaluations == before.Evaluations+1 && after.WouldExecute == before.WouldExecute+1,
+		"A: exactly one shadow evaluation + one would_execute must be counted (before=%+v after=%+v)", before, after)
 	r.ev("A first request echo: execution_state=shadow_evaluated executed=false shadow_outcome=would_execute mode=shadow mat_ready=not_evaluated resp_insp=not_evaluated")
 	r.ev("A metrics: evaluations %d->%d would_execute %d->%d evaluation_errors=%d",
 		before.Evaluations, after.Evaluations, before.WouldExecute, after.WouldExecute, after.EvaluationErrors)
@@ -353,8 +357,8 @@ func (r *shadowRun) matrixWouldBlock() {
 		"B: expected shadow_evaluated/would_block, got %v", rb)
 	req(t, rb["shadow_override"] == true, "B: a policy DENY must set shadow_override=true, got %v", rb)
 	after := shadowSnap()
-	req(t, after.Evaluations > before.Evaluations && after.WouldBlock > before.WouldBlock,
-		"B: the would_block metric must increment (before=%+v after=%+v)", before, after)
+	req(t, after.Evaluations == before.Evaluations+1 && after.WouldBlock == before.WouldBlock+1,
+		"B: exactly one shadow evaluation + one would_block must be counted (before=%+v after=%+v)", before, after)
 	// A durable schema-v2 event must exist for THIS would_block evaluation (no evidence gap).
 	de, ok := latestShadowEvidence(t)
 	req(t, ok && de.Shadow.Outcome == "would_block" && de.VerifyDigest() && de.Validate() == nil,
@@ -390,13 +394,23 @@ func (r *shadowRun) killDrill() {
 	req(t, getMCPRollout().stateFor(rollout.CapabilityGateway).Killed(), "emergency kill must be engaged")
 	before := shadowSnap()
 	st, rk := toolsCall(t, r.cli, r.base, r.inToken, r.sid, "6", toolEcho, `{"text":"z"}`)
-	// resultOf returns the result object directly (or the error envelope) — inspect it directly.
-	req(t, rk["shadow_outcome"] != "would_execute", "SECURITY: killed node emitted would_execute: %v", rk)
-	req(t, rk["execution_state"] != "shadow_evaluated", "SECURITY: killed node must not shadow-evaluate: %v", rk)
+	// resultOf returns the result object directly, or (for the emergency block) the whole
+	// error envelope. A killed node must emit the DETERMINISTIC emergency-block error, never
+	// a would_execute / shadow_evaluated result — assert the exact envelope, not just its
+	// absence, so an unrelated error can't pass this drill.
+	req(t, st == 200, "kill: status=%d", st)
+	req(t, rk["shadow_outcome"] != "would_execute" && rk["execution_state"] != "shadow_evaluated",
+		"SECURITY: killed node must not would_execute / shadow-evaluate: %v", rk)
+	errObj, _ := rk["error"].(map[string]any)
+	req(t, errObj != nil && errObj["message"] == "rollout_emergency_active",
+		"kill: expected emergency-block error rollout_emergency_active, got %v", rk)
+	after := shadowSnap()
+	req(t, after.EvaluationErrors == before.EvaluationErrors+1,
+		"kill: exactly one fail-closed evaluation error must be counted (%d->%d)", before.EvaluationErrors, after.EvaluationErrors)
 	req(t, atomic.LoadInt64(r.upstreamHits) == 0, "SECURITY: upstream invoked during kill drill: %d", atomic.LoadInt64(r.upstreamHits))
 	req(t, getMCPRollout().clearEmergency(rollout.CapabilityGateway) == nil, "clearEmergency failed")
-	r.ev("kill drill: emergency engaged -> request status=%d shadow_outcome=%v not_would_execute=true no_shadow_eval=true (evals %d) -> kill cleared",
-		st, rk["shadow_outcome"], before.Evaluations)
+	r.ev("kill drill: emergency engaged -> error=rollout_emergency_active evaluation_errors %d->%d not_would_execute no_shadow_eval upstream=0 -> kill cleared",
+		before.EvaluationErrors, after.EvaluationErrors)
 }
 
 // revokeDrill — revoking the echo ToolApproval withdraws its Usable projection, so the
