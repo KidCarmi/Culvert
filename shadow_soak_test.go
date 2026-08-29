@@ -1106,9 +1106,17 @@ func TestShadowSoakEvidenceStress(t *testing.T) {
 	}
 	var clk atomic.Int64
 	clock := func() time.Time { return time.Unix(0, clk.Add(1)) }
+	// Honor the documented heavy band [5000, 20000] INCLUSIVELY; CLAMP above it rather than
+	// silently falling back to the CI size (the evidence-stress spool/recovery cost is bounded
+	// here — the full request-count soak still scales with h in TestShadowSoak). A strict
+	// `h < 20000` would make CULVERT_MCP_SOAK=20000, the documented upper endpoint, run the
+	// 150-record CI workload instead (Codex).
 	n := 150
-	if h := soakHeavyCount(); h > 0 && h < 20000 {
+	if h := soakHeavyCount(); h > 0 {
 		n = h
+		if n > 20000 {
+			n = 20000
+		}
 	}
 	mkMgr := func() *events.Manager {
 		m, err := events.NewManager(events.ManagerConfig{
