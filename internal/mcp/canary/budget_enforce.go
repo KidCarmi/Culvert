@@ -1,6 +1,7 @@
 package canary
 
 import (
+	"sort"
 	"sync"
 	"time"
 )
@@ -42,7 +43,25 @@ const (
 	BudgetDeniedGeneration
 	// BudgetDeniedInvalid — the enforcer is not armed with a valid budget (fail-closed default).
 	BudgetDeniedInvalid
+	// BudgetDeniedPrincipalCap — this execution's principal is a NEW distinct principal that would
+	// exceed MaxPrincipals. A blast-radius (identity) breach, not a throttle.
+	BudgetDeniedPrincipalCap
+	// BudgetDeniedToolCap — this execution's tool is a NEW distinct tool that would exceed MaxTools.
+	BudgetDeniedToolCap
+	// BudgetDeniedServerCap — this execution's server is a NEW distinct server that would exceed
+	// MaxServers.
+	BudgetDeniedServerCap
 )
+
+// ExecutionIdentity carries the authoritative identity of one execution so the runtime budget can
+// enforce the distinct-identity blast-radius ceilings (MaxPrincipals/MaxTools/MaxServers). It is
+// supplied by the (future) live executor from resolved request state — never a request-supplied
+// claim trusted without policy resolution.
+type ExecutionIdentity struct {
+	Principal string
+	Tool      string
+	Server    string
+}
 
 // String returns a stable token for logs/metrics.
 func (o BudgetOutcome) String() string {
@@ -61,9 +80,22 @@ func (o BudgetOutcome) String() string {
 		return "denied_generation"
 	case BudgetDeniedInvalid:
 		return "denied_invalid"
+	case BudgetDeniedPrincipalCap:
+		return "denied_principal_cap"
+	case BudgetDeniedToolCap:
+		return "denied_tool_cap"
+	case BudgetDeniedServerCap:
+		return "denied_server_cap"
 	default:
 		return "unknown"
 	}
+}
+
+// IdentityCapExceeded reports whether the outcome is a distinct-identity blast-radius denial (a new
+// principal/tool/server beyond the configured ceiling) — a scope/blast-radius breach the runtime
+// treats as a whole-Canary abort signal, distinct from a transient throttle.
+func (o BudgetOutcome) IdentityCapExceeded() bool {
+	return o == BudgetDeniedPrincipalCap || o == BudgetDeniedToolCap || o == BudgetDeniedServerCap
 }
 
 // Granted reports whether the outcome authorizes crossing the side-effect boundary.
@@ -91,6 +123,12 @@ type BudgetEnforcer struct {
 	inflight        int   // current in-flight reservations (Release decrements)
 	rateWindowStart int64 // start of the current rate window, UnixNano
 	rateCount       int   // reservations granted in the current rate window
+	// Distinct-identity sets: the blast-radius ceilings (MaxPrincipals/MaxTools/MaxServers) are
+	// enforced by admitting at most that many DISTINCT identities. Bounded by the caps (tiny). They
+	// are durable so a restart cannot admit a fresh set of identities beyond the ceiling.
+	principals map[string]struct{}
+	tools      map[string]struct{}
+	servers    map[string]struct{}
 }
 
 // NewBudgetEnforcer arms an enforcer for a fresh activation at generation gen (which MUST be ≥1 —
@@ -107,6 +145,9 @@ func NewBudgetEnforcer(budget Budget, generation uint64, now time.Time) *BudgetE
 		generation:      generation,
 		startNanos:      start,
 		rateWindowStart: start,
+		principals:      make(map[string]struct{}),
+		tools:           make(map[string]struct{}),
+		servers:         make(map[string]struct{}),
 	}
 }
 
@@ -118,12 +159,15 @@ func (e *BudgetEnforcer) Generation() uint64 {
 	return e.generation
 }
 
-// Reserve atomically decides whether one execution may cross the side-effect boundary NOW, for the
-// activation generation gen, and — on grant — consumes the slot (monotonic total++, inflight++,
-// rate++). It is fail-closed: a nil enforcer, invalid budget, generation mismatch, elapsed window,
-// spent total, exhausted concurrency, or exhausted rate all deny. The generation check is FIRST so
-// a stale reservation against a superseded activation can never consume the new one's budget.
-func (e *BudgetEnforcer) Reserve(gen uint64, now time.Time) BudgetOutcome {
+// Reserve atomically decides whether one execution — for the identity ident — may cross the
+// side-effect boundary NOW, for the activation generation gen, and — on grant — consumes the slot
+// (monotonic total++, inflight++, rate++) and records the identity against the distinct-identity
+// ceilings. It is fail-closed: a nil enforcer, invalid budget, generation mismatch, elapsed window,
+// spent total, a NEW identity beyond MaxPrincipals/MaxTools/MaxServers, exhausted concurrency, or
+// exhausted rate all deny. The generation check is FIRST so a stale reservation against a superseded
+// activation can never consume the new one's budget. The identity caps are checked BEFORE the
+// throttles so a blast-radius breach is reported as such, and no dimension is consumed on any denial.
+func (e *BudgetEnforcer) Reserve(gen uint64, now time.Time, ident ExecutionIdentity) BudgetOutcome {
 	if e == nil {
 		return BudgetDeniedInvalid
 	}
@@ -144,6 +188,17 @@ func (e *BudgetEnforcer) Reserve(gen uint64, now time.Time) BudgetOutcome {
 	if e.total >= e.budget.MaxTotalExecutions {
 		return BudgetDeniedTotal
 	}
+	// Distinct-identity blast-radius ceilings: a NEW principal/tool/server beyond its cap is denied
+	// (a scope/identity breach), and no slot is consumed. An already-admitted identity is fine.
+	if isNewBeyondCap(e.principals, ident.Principal, e.budget.MaxPrincipals) {
+		return BudgetDeniedPrincipalCap
+	}
+	if isNewBeyondCap(e.tools, ident.Tool, e.budget.MaxTools) {
+		return BudgetDeniedToolCap
+	}
+	if isNewBeyondCap(e.servers, ident.Server, e.budget.MaxServers) {
+		return BudgetDeniedServerCap
+	}
 	// Concurrency — simultaneous in-flight cap (per-request throttle; Release frees a slot).
 	if e.inflight >= e.budget.MaxConcurrentExecutions {
 		return BudgetDeniedConcurrency
@@ -156,12 +211,24 @@ func (e *BudgetEnforcer) Reserve(gen uint64, now time.Time) BudgetOutcome {
 	if e.rateCount >= e.budget.MaxExecutionsPerMinute {
 		return BudgetDeniedRate
 	}
-	// Grant: consume one slot on every dimension. total is MONOTONIC — never decremented, so a
-	// crash between here and the side effect cannot replay the budget.
+	// Grant: consume one slot on every dimension and record the identities. total is MONOTONIC —
+	// never decremented, so a crash between here and the side effect cannot replay the budget.
 	e.total++
 	e.inflight++
 	e.rateCount++
+	e.principals[ident.Principal] = struct{}{}
+	e.tools[ident.Tool] = struct{}{}
+	e.servers[ident.Server] = struct{}{}
 	return BudgetGranted
+}
+
+// isNewBeyondCap reports whether v is NOT already in set AND admitting it would exceed cap. An
+// already-present value is always admissible (it does not grow the distinct count).
+func isNewBeyondCap(set map[string]struct{}, v string, cap int) bool {
+	if _, ok := set[v]; ok {
+		return false
+	}
+	return len(set) >= cap
 }
 
 // Release returns one in-flight concurrency slot after an execution completes. It NEVER decrements
@@ -224,6 +291,11 @@ type BudgetSnapshot struct {
 	// full MaxExecutionsPerMinute burst (a restart-replay of the rate cap; Codex P1).
 	RateWindowStartNano int64 `json:"rate_window_start_nano"`
 	RateCount           int   `json:"rate_count"`
+	// The distinct-identity sets consumed so far, so a restart cannot admit a fresh set of
+	// identities beyond the MaxPrincipals/MaxTools/MaxServers ceilings.
+	Principals []string `json:"principals,omitempty"`
+	Tools      []string `json:"tools,omitempty"`
+	Servers    []string `json:"servers,omitempty"`
 }
 
 // Snapshot returns the durable state so the composition layer can persist the budget spend. On
@@ -241,7 +313,38 @@ func (e *BudgetEnforcer) Snapshot() BudgetSnapshot {
 		StartUnixNano:       e.startNanos,
 		RateWindowStartNano: e.rateWindowStart,
 		RateCount:           e.rateCount,
+		Principals:          sortedSetKeys(e.principals),
+		Tools:               sortedSetKeys(e.tools),
+		Servers:             sortedSetKeys(e.servers),
 	}
+}
+
+// sortedSetKeys returns the set's keys in deterministic order (so the snapshot is stable).
+func sortedSetKeys(set map[string]struct{}) []string {
+	if len(set) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// setFromKeys rebuilds a set from persisted keys, capped defensively at cap (a corrupt over-cap
+// list is truncated deterministically rather than admitting an over-budget identity set).
+func setFromKeys(keys []string, cap int) map[string]struct{} {
+	set := make(map[string]struct{}, len(keys))
+	sorted := append([]string(nil), keys...)
+	sort.Strings(sorted)
+	for _, k := range sorted {
+		if len(set) >= cap {
+			break
+		}
+		set[k] = struct{}{}
+	}
+	return set
 }
 
 // RestoreBudgetEnforcer rebuilds an enforcer from a durable snapshot for the SAME generation. It is
@@ -279,5 +382,8 @@ func RestoreBudgetEnforcer(budget Budget, generation uint64, snap BudgetSnapshot
 		total:           snap.TotalReserved,
 		rateWindowStart: rateStart,
 		rateCount:       rateCount,
+		principals:      setFromKeys(snap.Principals, budget.MaxPrincipals),
+		tools:           setFromKeys(snap.Tools, budget.MaxTools),
+		servers:         setFromKeys(snap.Servers, budget.MaxServers),
 	}
 }

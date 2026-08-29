@@ -6,6 +6,10 @@ import (
 	"time"
 )
 
+// idOne is a single fixed execution identity for tests that are not exercising the
+// distinct-identity caps: reusing it keeps the distinct principal/tool/server count at 1.
+var idOne = ExecutionIdentity{Principal: "p1", Tool: "t1", Server: "s1"}
+
 func testBudget(total int) Budget {
 	return Budget{
 		MaxTotalExecutions:      total,
@@ -29,15 +33,15 @@ func TestBudgetEnforcer_ExactNThenDeniesNPlus1(t *testing.T) {
 		t.Fatal("valid budget must arm an enforcer")
 	}
 	for i := 0; i < N; i++ {
-		if o := e.Reserve(1, now); o != BudgetGranted {
+		if o := e.Reserve(1, now, idOne); o != BudgetGranted {
 			t.Fatalf("reservation %d of %d must be granted, got %s", i+1, N, o)
 		}
 		e.Release()
 	}
-	if o := e.Reserve(1, now); o != BudgetDeniedTotal {
+	if o := e.Reserve(1, now, idOne); o != BudgetDeniedTotal {
 		t.Fatalf("the N+1th reservation must be denied on total, got %s", o)
 	}
-	if !e.Reserve(1, now).WholeCanaryExhaustion() {
+	if !e.Reserve(1, now, idOne).WholeCanaryExhaustion() {
 		t.Fatal("a total-exhaustion denial must classify as a whole-Canary exhaustion (budget_exhausted)")
 	}
 	if e.TotalReserved() != N {
@@ -56,14 +60,14 @@ func TestBudgetEnforcer_MonotonicTotalNoReplay(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	e := NewBudgetEnforcer(testBudget(N), 1, now)
 	for i := 0; i < N; i++ {
-		if o := e.Reserve(1, now); o != BudgetGranted {
+		if o := e.Reserve(1, now, idOne); o != BudgetGranted {
 			t.Fatalf("reserve %d must be granted, got %s", i, o)
 		}
 	}
 	for i := 0; i < N; i++ {
 		e.Release()
 	}
-	if o := e.Reserve(1, now); o != BudgetDeniedTotal {
+	if o := e.Reserve(1, now, idOne); o != BudgetDeniedTotal {
 		t.Fatalf("releasing must not replay the total budget; N+1 must still be denied, got %s", o)
 	}
 }
@@ -75,20 +79,20 @@ func TestBudgetEnforcer_ConcurrencyCap(t *testing.T) {
 	b := testBudget(100)
 	b.MaxConcurrentExecutions = 2
 	e := NewBudgetEnforcer(b, 1, now)
-	if o := e.Reserve(1, now); o != BudgetGranted {
+	if o := e.Reserve(1, now, idOne); o != BudgetGranted {
 		t.Fatalf("1st concurrent must be granted, got %s", o)
 	}
-	if o := e.Reserve(1, now); o != BudgetGranted {
+	if o := e.Reserve(1, now, idOne); o != BudgetGranted {
 		t.Fatalf("2nd concurrent must be granted, got %s", o)
 	}
-	if o := e.Reserve(1, now); o != BudgetDeniedConcurrency {
+	if o := e.Reserve(1, now, idOne); o != BudgetDeniedConcurrency {
 		t.Fatalf("3rd concurrent must be denied on concurrency, got %s", o)
 	}
-	if e.Reserve(1, now).WholeCanaryExhaustion() {
+	if e.Reserve(1, now, idOne).WholeCanaryExhaustion() {
 		t.Fatal("a concurrency denial is a per-request throttle, NOT a whole-Canary exhaustion")
 	}
 	e.Release()
-	if o := e.Reserve(1, now); o != BudgetGranted {
+	if o := e.Reserve(1, now, idOne); o != BudgetGranted {
 		t.Fatalf("after a Release a concurrent slot must free up, got %s", o)
 	}
 }
@@ -101,17 +105,17 @@ func TestBudgetEnforcer_RateCapAndWindowReset(t *testing.T) {
 	b.MaxExecutionsPerMinute = 2
 	e := NewBudgetEnforcer(b, 1, now)
 	for i := 0; i < 2; i++ {
-		if o := e.Reserve(1, now); o != BudgetGranted {
+		if o := e.Reserve(1, now, idOne); o != BudgetGranted {
 			t.Fatalf("rate reserve %d must be granted, got %s", i, o)
 		}
 		e.Release()
 	}
-	if o := e.Reserve(1, now); o != BudgetDeniedRate {
+	if o := e.Reserve(1, now, idOne); o != BudgetDeniedRate {
 		t.Fatalf("the 3rd within a minute must be denied on rate, got %s", o)
 	}
 	// Roll the window forward one minute: the rate budget resets.
 	later := now.Add(61 * time.Second)
-	if o := e.Reserve(1, later); o != BudgetGranted {
+	if o := e.Reserve(1, later, idOne); o != BudgetGranted {
 		t.Fatalf("after the rate window rolls over a reservation must be granted, got %s", o)
 	}
 }
@@ -123,15 +127,15 @@ func TestBudgetEnforcer_WindowTTL(t *testing.T) {
 	b := testBudget(100)
 	b.Window = 10 * time.Minute
 	e := NewBudgetEnforcer(b, 1, now)
-	if o := e.Reserve(1, now); o != BudgetGranted {
+	if o := e.Reserve(1, now, idOne); o != BudgetGranted {
 		t.Fatalf("within the window a reservation must be granted, got %s", o)
 	}
 	e.Release()
 	past := now.Add(10 * time.Minute) // exactly at the boundary is elapsed (>=)
-	if o := e.Reserve(1, past); o != BudgetDeniedWindow {
+	if o := e.Reserve(1, past, idOne); o != BudgetDeniedWindow {
 		t.Fatalf("at/after the window a reservation must be denied on window, got %s", o)
 	}
-	if !e.Reserve(1, past).WholeCanaryExhaustion() {
+	if !e.Reserve(1, past, idOne).WholeCanaryExhaustion() {
 		t.Fatal("a window denial must classify as a whole-Canary exhaustion (budget_exhausted)")
 	}
 }
@@ -144,13 +148,13 @@ func TestBudgetEnforcer_GenerationBinding(t *testing.T) {
 	if e.Generation() != 7 {
 		t.Fatalf("generation = %d, want 7", e.Generation())
 	}
-	if o := e.Reserve(6, now); o != BudgetDeniedGeneration {
+	if o := e.Reserve(6, now, idOne); o != BudgetDeniedGeneration {
 		t.Fatalf("a reserve for the wrong generation must be denied, got %s", o)
 	}
-	if o := e.Reserve(8, now); o != BudgetDeniedGeneration {
+	if o := e.Reserve(8, now, idOne); o != BudgetDeniedGeneration {
 		t.Fatalf("a reserve for a newer generation must be denied, got %s", o)
 	}
-	if o := e.Reserve(7, now); o != BudgetGranted {
+	if o := e.Reserve(7, now, idOne); o != BudgetGranted {
 		t.Fatalf("a reserve for the correct generation must be granted, got %s", o)
 	}
 	// A generation-denied reserve must NOT consume any budget.
@@ -171,7 +175,7 @@ func TestBudgetEnforcer_FailClosedConstruction(t *testing.T) {
 	}
 	// A nil enforcer fails closed on every method.
 	var nilE *BudgetEnforcer
-	if o := nilE.Reserve(1, now); o != BudgetDeniedInvalid {
+	if o := nilE.Reserve(1, now, idOne); o != BudgetDeniedInvalid {
 		t.Fatalf("a nil enforcer must deny, got %s", o)
 	}
 }
@@ -184,7 +188,7 @@ func TestBudgetEnforcer_RestartPreservesSpend(t *testing.T) {
 	b := testBudget(5)
 	e := NewBudgetEnforcer(b, 3, now)
 	for i := 0; i < 3; i++ {
-		if o := e.Reserve(3, now); o != BudgetGranted {
+		if o := e.Reserve(3, now, idOne); o != BudgetGranted {
 			t.Fatalf("reserve %d must be granted, got %s", i, o)
 		}
 		e.Release()
@@ -202,13 +206,13 @@ func TestBudgetEnforcer_RestartPreservesSpend(t *testing.T) {
 	if restored.Remaining() != 2 {
 		t.Fatalf("restored budget must preserve spend (remaining 2), got %d", restored.Remaining())
 	}
-	if o := restored.Reserve(3, now); o != BudgetGranted {
+	if o := restored.Reserve(3, now, idOne); o != BudgetGranted {
 		t.Fatalf("restored budget must still grant within remaining, got %s", o)
 	}
-	if o := restored.Reserve(3, now); o != BudgetGranted {
+	if o := restored.Reserve(3, now, idOne); o != BudgetGranted {
 		t.Fatalf("restored budget: 2nd remaining grant, got %s", o)
 	}
-	if o := restored.Reserve(3, now); o != BudgetDeniedTotal {
+	if o := restored.Reserve(3, now, idOne); o != BudgetDeniedTotal {
 		t.Fatalf("restored budget must deny once the preserved spend reaches the cap, got %s", o)
 	}
 
@@ -232,12 +236,12 @@ func TestBudgetEnforcer_RestartDoesNotReplayRateWindow(t *testing.T) {
 	e := NewBudgetEnforcer(b, 1, now)
 	// Spend the whole rate window (2 in this minute).
 	for i := 0; i < 2; i++ {
-		if o := e.Reserve(1, now); o != BudgetGranted {
+		if o := e.Reserve(1, now, idOne); o != BudgetGranted {
 			t.Fatalf("rate reserve %d must be granted, got %s", i, o)
 		}
 		e.Release()
 	}
-	if o := e.Reserve(1, now); o != BudgetDeniedRate {
+	if o := e.Reserve(1, now, idOne); o != BudgetDeniedRate {
 		t.Fatalf("the 3rd within the minute must be denied on rate, got %s", o)
 	}
 	// Restart within the SAME minute: the rate window must be preserved (still spent).
@@ -246,12 +250,12 @@ func TestBudgetEnforcer_RestartDoesNotReplayRateWindow(t *testing.T) {
 	if restored == nil {
 		t.Fatal("same-generation snapshot must restore")
 	}
-	if o := restored.Reserve(1, now); o != BudgetDeniedRate {
+	if o := restored.Reserve(1, now, idOne); o != BudgetDeniedRate {
 		t.Fatalf("SECURITY: a restart within the rate window must NOT replay the rate budget, got %s", o)
 	}
 	// Once the window rolls over, the restored enforcer grants again.
 	later := now.Add(61 * time.Second)
-	if o := restored.Reserve(1, later); o != BudgetGranted {
+	if o := restored.Reserve(1, later, idOne); o != BudgetGranted {
 		t.Fatalf("after the window rolls over the restored enforcer must grant, got %s", o)
 	}
 }
@@ -268,8 +272,61 @@ func TestBudgetEnforcer_LegacySnapshotFailsClosedOnRate(t *testing.T) {
 	if restored == nil {
 		t.Fatal("a legacy snapshot must still restore")
 	}
-	if o := restored.Reserve(1, now); o != BudgetDeniedRate {
+	if o := restored.Reserve(1, now, idOne); o != BudgetDeniedRate {
 		t.Fatalf("a legacy snapshot must fail closed to a spent rate window, got %s", o)
+	}
+}
+
+// TestBudgetEnforcer_IdentityCapsEnforced is the §3 blast-radius-identity proof (Codex P1): the
+// distinct principal/tool/server ceilings are enforced at runtime — a NEW identity beyond its cap is
+// denied, an already-admitted identity is always allowed, and the denial is classified as an
+// identity/blast-radius breach (not a throttle). Restart preserves the admitted identity sets.
+func TestBudgetEnforcer_IdentityCapsEnforced(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	b := testBudget(100)
+	b.MaxPrincipals = 2
+	b.MaxTools = 2
+	b.MaxServers = 1
+	e := NewBudgetEnforcer(b, 1, now)
+
+	// Two distinct tools on one server for two principals — all within caps.
+	if o := e.Reserve(1, now, ExecutionIdentity{Principal: "p1", Tool: "t1", Server: "s1"}); o != BudgetGranted {
+		t.Fatalf("p1/t1/s1 must be granted, got %s", o)
+	}
+	if o := e.Reserve(1, now, ExecutionIdentity{Principal: "p2", Tool: "t2", Server: "s1"}); o != BudgetGranted {
+		t.Fatalf("p2/t2/s1 must be granted, got %s", o)
+	}
+	// A THIRD distinct tool exceeds MaxTools=2.
+	if o := e.Reserve(1, now, ExecutionIdentity{Principal: "p1", Tool: "t3", Server: "s1"}); o != BudgetDeniedToolCap {
+		t.Fatalf("a 3rd distinct tool must be denied on the tool cap, got %s", o)
+	}
+	// A THIRD distinct principal exceeds MaxPrincipals=2.
+	if o := e.Reserve(1, now, ExecutionIdentity{Principal: "p3", Tool: "t1", Server: "s1"}); o != BudgetDeniedPrincipalCap {
+		t.Fatalf("a 3rd distinct principal must be denied on the principal cap, got %s", o)
+	}
+	// A SECOND distinct server exceeds MaxServers=1.
+	if o := e.Reserve(1, now, ExecutionIdentity{Principal: "p1", Tool: "t1", Server: "s2"}); o != BudgetDeniedServerCap {
+		t.Fatalf("a 2nd distinct server must be denied on the server cap, got %s", o)
+	}
+	if !e.Reserve(1, now, ExecutionIdentity{Principal: "p3", Tool: "t1", Server: "s1"}).IdentityCapExceeded() {
+		t.Fatal("an identity-cap denial must classify as an identity/blast-radius breach")
+	}
+	// An ALREADY-admitted identity is still allowed at cap.
+	if o := e.Reserve(1, now, ExecutionIdentity{Principal: "p1", Tool: "t1", Server: "s1"}); o != BudgetGranted {
+		t.Fatalf("an already-admitted identity must remain grantable at cap, got %s", o)
+	}
+
+	// Restart must preserve the admitted identity sets: a new identity is still denied after restore.
+	snap := e.Snapshot()
+	restored := RestoreBudgetEnforcer(b, 1, snap)
+	if restored == nil {
+		t.Fatal("snapshot must restore")
+	}
+	if o := restored.Reserve(1, now, ExecutionIdentity{Principal: "p9", Tool: "t1", Server: "s1"}); o != BudgetDeniedPrincipalCap {
+		t.Fatalf("SECURITY: a restart must not admit a fresh principal beyond the cap, got %s", o)
+	}
+	if o := restored.Reserve(1, now, ExecutionIdentity{Principal: "p1", Tool: "t1", Server: "s1"}); o != BudgetGranted {
+		t.Fatalf("a restored already-admitted identity must remain grantable, got %s", o)
 	}
 }
 
@@ -291,7 +348,7 @@ func TestBudgetEnforcer_ConcurrentReserveNeverExceedsTotal(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if e.Reserve(1, now).Granted() {
+			if e.Reserve(1, now, idOne).Granted() {
 				mu.Lock()
 				granted++
 				mu.Unlock()

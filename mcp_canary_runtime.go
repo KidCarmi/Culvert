@@ -89,11 +89,12 @@ func canaryRuntimeStatePath(capb rollout.Capability) string {
 // errCanaryBudgetInvalid marks an activation refused because its budget is not first-Canary valid.
 var errCanaryBudgetInvalid = errors.New("canary_budget_invalid")
 
-// canaryDemotePersist is the persist step of demoteCanary, isolated as a seam so a test can inject
-// a durable-write failure that leaves the prior active record on disk — exercising the fail-closed
-// remove path that prevents a failed demotion from reviving on restart (Codex P1). Production is the
-// real persistLocked.
-var canaryDemotePersist = (*canaryRuntime).persistLocked
+// canaryRuntimePersist is the durable persist step for every canary-runtime mutation (begin,
+// reserve, abort trip, demote), isolated as a seam so a test can inject a durable-write failure and
+// exercise the fail-closed paths (disarm on begin failure; remove-durable-record on demote/abort
+// failure) that prevent a non-durable activation from reviving on restart (Codex P1). Production is
+// the real persistLocked.
+var canaryRuntimePersist = (*canaryRuntime).persistLocked
 
 // beginCanaryActivation bumps the activation generation and arms a fresh budget enforcer + abort
 // controller for it, then persists. It is the FUTURE-arming seam (never invoked in this build). It
@@ -113,7 +114,15 @@ func (rt *canaryRuntime) beginCanaryActivation(capb rollout.Capability, budget c
 	cr.budget = budget
 	cr.enforcer = canary.NewBudgetEnforcer(budget, gen, now)
 	cr.aborter = canary.NewAbortController(gen)
-	if err := rt.persistLocked(capb, cr); err != nil {
+	if err := canaryRuntimePersist(rt, capb, cr); err != nil {
+		// The activation was never durably established — DISARM in memory (fail closed) so no
+		// execution path can reserve work for an activation that does not durably exist (Codex P1).
+		// The generation stays bumped (monotonic), so a later begin cannot reuse it.
+		cr.active = false
+		cr.enforcer = nil
+		cr.aborter = nil
+		cr.budget = canary.Budget{}
+		logger.Printf("MCP canary runtime: begin persist for %s failed; disarmed in memory (fail-closed): %q", capb.String(), sanitizeLog(err.Error()))
 		return gen, err
 	}
 	return gen, nil
@@ -139,7 +148,7 @@ func (rt *canaryRuntime) demoteCanary(capb rollout.Capability) error {
 	cr.enforcer = nil
 	cr.aborter = nil
 	cr.budget = canary.Budget{}
-	if err := canaryDemotePersist(rt, capb, cr); err != nil {
+	if err := canaryRuntimePersist(rt, capb, cr); err != nil {
 		// Persisting the disarmed record failed — remove the durable file so a restart cannot
 		// restore the prior Active:true record. A removal that succeeds fails the runtime closed to
 		// dormant; a removal that also fails leaves the stale record, so surface the original error.
@@ -163,45 +172,56 @@ func (rt *canaryRuntime) currentGeneration(capb rollout.Capability) uint64 {
 }
 
 // reserveCanaryExecution is the pre-side-effect gate a live Canary would call: it refuses unless an
-// activation is armed AND the abort controller is execution-eligible AND the budget grants a slot.
-// A whole-Canary budget exhaustion (total spent / window elapsed) trips the abort controller
-// (budget_exhausted) so the Canary stops, not just the request. The budget spend is persisted BEFORE
-// returning a grant so a restart cannot replay it. Fail-closed: any not-armed / aborted / persist
-// failure denies.
-func (rt *canaryRuntime) reserveCanaryExecution(capb rollout.Capability, now time.Time) canary.BudgetOutcome {
+// activation is armed AND the abort controller is execution-eligible AND the budget grants a slot
+// for the execution's identity ident (enforcing the distinct principal/tool/server ceilings). A
+// whole-Canary budget exhaustion (total spent / window elapsed) OR an identity/blast-radius breach
+// trips the abort controller so the Canary stops, not just the request. The budget spend is
+// persisted BEFORE returning a grant so a restart cannot replay it. It returns the outcome AND the
+// activation generation the reservation was made under, so the caller can Release against the SAME
+// generation (a stale release after a demotion/reactivation is rejected). Fail-closed: any
+// not-armed / aborted / persist failure denies.
+func (rt *canaryRuntime) reserveCanaryExecution(capb rollout.Capability, now time.Time, ident canary.ExecutionIdentity) (canary.BudgetOutcome, uint64) {
 	cr := rt.capRuntime(capb)
 	cr.mu.Lock()
 	defer cr.mu.Unlock()
 	if !cr.active || cr.enforcer == nil || cr.aborter == nil {
-		return canary.BudgetDeniedInvalid
+		return canary.BudgetDeniedInvalid, 0
 	}
 	gen := cr.generation
 	if !cr.aborter.ExecutionEligible(gen) {
-		return canary.BudgetDeniedInvalid // the Canary is aborted — no execution
+		return canary.BudgetDeniedInvalid, gen // the Canary is aborted — no execution
 	}
-	outcome := cr.enforcer.Reserve(gen, now)
-	if outcome.WholeCanaryExhaustion() {
+	outcome := cr.enforcer.Reserve(gen, now, ident)
+	switch {
+	case outcome.WholeCanaryExhaustion():
 		// The blast-radius budget is spent — a whole-Canary breach. Latch the abort.
 		cr.aborter.Trip("budget_exhausted", gen, now)
+	case outcome.IdentityCapExceeded():
+		// An execution for an identity beyond the enumerated blast radius — a scope escape.
+		cr.aborter.Trip("scope_escape", gen, now)
 	}
 	// Persist the spend/abort BEFORE the caller could cross the side-effect boundary. On a persist
 	// failure the in-memory spend is already consumed (monotonic — never replayed), and we deny.
-	if err := rt.persistLocked(capb, cr); err != nil {
+	if err := canaryRuntimePersist(rt, capb, cr); err != nil {
 		logger.Printf("MCP canary runtime: persist after reserve for %s failed (fail-closed): %q", capb.String(), sanitizeLog(err.Error()))
 		if outcome.Granted() {
-			return canary.BudgetDeniedInvalid
+			return canary.BudgetDeniedInvalid, gen
 		}
 	}
-	return outcome
+	return outcome, gen
 }
 
-// releaseCanaryExecution returns one in-flight concurrency slot after an execution completes. It
-// does not persist (the monotonic total was already made durable at reserve).
-func (rt *canaryRuntime) releaseCanaryExecution(capb rollout.Capability) {
+// releaseCanaryExecution returns one in-flight concurrency slot after an execution reserved under
+// generation gen completes. It is GENERATION-BOUND: a stale release (one whose gen no longer matches
+// the current activation — e.g. an execution that finishes after a demotion/reactivation) is a
+// no-op, so it can never decrement a DIFFERENT generation's concurrency counter and admit an extra
+// request beyond MaxConcurrentExecutions (Codex P1). It does not persist (the monotonic total was
+// already made durable at reserve).
+func (rt *canaryRuntime) releaseCanaryExecution(capb rollout.Capability, gen uint64) {
 	cr := rt.capRuntime(capb)
 	cr.mu.Lock()
 	defer cr.mu.Unlock()
-	if cr.enforcer != nil {
+	if cr.enforcer != nil && cr.generation == gen {
 		cr.enforcer.Release()
 	}
 }
@@ -210,6 +230,12 @@ func (rt *canaryRuntime) releaseCanaryExecution(capb rollout.Capability) {
 // state may have changed. It returns the TripResult so a caller can distinguish a per-request
 // fail-closed (Canary continues) from a whole-Canary latch. A not-armed runtime fails closed to a
 // latch result.
+//
+// A whole-Canary abort is a SAFETY stop, so it MUST fail closed durably: if persisting the latched
+// abort fails, the on-disk record still says Active:true, Aborted:false, and a restart would restore
+// it and make the same generation execution-eligible again (Codex P1). To prevent that revival the
+// durable file is best-effort REMOVED on a persist failure — a missing file restores to the dormant
+// default (no execution), the safe direction. The in-memory abort is in effect regardless.
 func (rt *canaryRuntime) tripCanaryAbort(capb rollout.Capability, code string, now time.Time) canary.TripResult {
 	cr := rt.capRuntime(capb)
 	cr.mu.Lock()
@@ -219,8 +245,13 @@ func (rt *canaryRuntime) tripCanaryAbort(capb rollout.Capability, code string, n
 	}
 	res := cr.aborter.Trip(code, cr.generation, now)
 	if res == canary.TripCanaryLatched {
-		if err := rt.persistLocked(capb, cr); err != nil {
-			logger.Printf("MCP canary runtime: persist after abort for %s failed: %q", capb.String(), sanitizeLog(err.Error()))
+		if err := canaryRuntimePersist(rt, capb, cr); err != nil {
+			if rerr := os.Remove(canaryRuntimeStatePath(capb)); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+				logger.Printf("MCP canary runtime: abort persist AND remove for %s failed; a restart may revive the activation: persist=%q remove=%q",
+					capb.String(), sanitizeLog(err.Error()), sanitizeLog(rerr.Error()))
+			} else {
+				logger.Printf("MCP canary runtime: abort persist for %s failed; removed durable state to fail closed to dormant: %q", capb.String(), sanitizeLog(err.Error()))
+			}
 		}
 	}
 	return res
@@ -305,6 +336,20 @@ func (rt *canaryRuntime) restoreCapability(capb rollout.Capability) {
 		cr.enforcer = nil
 		cr.aborter = nil
 		cr.budget = canary.Budget{}
+		return
+	}
+	// An active record MUST carry generation-matched budget AND abort snapshots. A missing or
+	// foreign-generation snapshot on an otherwise-active record is corruption: RestoreBudgetEnforcer
+	// returns nil for a mismatched budget snapshot (→ disarm below), but RestoreAbortController
+	// returns a FRESH not-aborted controller for a mismatched abort snapshot, which would silently
+	// CLEAR a latched abort and re-arm execution. Require both snapshot generations to match this
+	// record's generation and disarm (fail-closed) otherwise (Codex P1).
+	if st.BudgetSnapshot.Generation != st.Generation || st.AbortSnapshot.Generation != st.Generation {
+		cr.active = false
+		cr.enforcer = nil
+		cr.aborter = nil
+		cr.budget = canary.Budget{}
+		logger.Printf("MCP canary runtime restore for %s: active record has a foreign-generation budget/abort snapshot; disarmed (fail-closed)", capb.String())
 		return
 	}
 	// Rebuild the enforcer + controller for the SAME generation. RestoreBudgetEnforcer /
