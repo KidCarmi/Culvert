@@ -12035,6 +12035,152 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/mcp/canary/shadow-exit-review": {
+      "delete": {
+        "description": "Revokes the durable Shadow Exit Review attestation. After revocation the Canary readiness prerequisite fails closed to not-attested.",
+        "operationId": "deleteMCPShadowExitReview",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Attestation revoked"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Revoke the Shadow Exit Review attestation",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-audit-event": "mcp.canary.shadow-exit-review.revoke",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "get": {
+        "description": "Reports whether a durable, current-build Shadow Exit Review attestation is present and valid (the Canary readiness prerequisite). Never returns the raw review evidence — only bounded status fields.",
+        "operationId": "getMCPShadowExitReview",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Attestation status"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Shadow Exit Review attestation status",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-danger-level": "none",
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "post": {
+        "description": "Creates the durable, build-bound Shadow Exit Review PASSED attestation — the explicit privileged review sign-off. This is the ONLY path that writes a PASSED attestation; it is never created on startup or because tests passed.",
+        "operationId": "createMCPShadowExitReview",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "evidence_digest": {
+                    "type": "string"
+                  },
+                  "review_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "review_id",
+                  "evidence_digest"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Attestation created"
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Create the Shadow Exit Review attestation",
+        "tags": [
+          "mcp"
+        ],
+        "x-culvert-audit-event": "mcp.canary.shadow-exit-review.attest",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/mcp/config": {
       "get": {
         "description": "Node-local Gateway/Management MCP listener+access configuration (references and metadata only; no secrets). distribution_state local_only.",

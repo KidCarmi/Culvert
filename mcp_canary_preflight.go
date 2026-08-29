@@ -25,13 +25,9 @@ import (
 // for a RequiresLiveExecution mode — AFTER modeExecReady already fails such a transition
 // closed — and is exposed read-only on the admin surface as an operator dry-run.
 
-// shadowExitReviewAttested reports whether the full 13-criterion Shadow Exit Review is
-// attested for this node/scope. There is deliberately NO runtime attestation surface yet:
-// the review is a governance artifact, and the separately-reviewed Canary arming activation
-// is what would supply the attestation. Until then this returns false, so Canary readiness
-// carries shadow_exit_review_not_passed — a truthful "this prerequisite is not machine-
-// attested here", never a silent pass.
-func shadowExitReviewAttested() bool { return false }
+// shadowExitReviewAttested is defined in mcp_canary_attestation.go — it reads the durable,
+// schema-versioned, build-bound Shadow Exit Review attestation (§1). It feeds
+// canary.Facts.ShadowExitReviewPassed below; it is never a hard-coded boolean.
 
 // canaryNodeFacts fills the SCOPE-INDEPENDENT half of the Canary facts for a capability from
 // live node state. The live-execution-specific facts (executor, upstream, credential path,
@@ -110,18 +106,22 @@ func durableEventsHealthy(capb rollout.Capability) bool {
 }
 
 // rollbackPathHealthy reports whether the deterministic Canary→Shadow/Observe rollback path is
-// actually durable and rehearsed for the capability — not merely that the rollout coordinator
-// object exists. A Canary must be instantly, RELIABLY reversible; if the coordinator's durable
-// state is degraded or a write failed, an emergency demotion may land only in memory and be
-// silently re-admitted on restart, and if rollback was never rehearsed the reversal is unproven
-// (Codex P1, PR #1249). Fail-closed: false unless the coordinator exists AND its persistence is
-// not degraded/write_failed AND a rollback rehearsal has been recorded in the capability's
-// evidence. In this build nothing rehearses a rollback, so this is false — one more reason the
+// actually durable and EXECUTABLY rehearsed for the capability — not merely that the rollout
+// coordinator object exists, and no longer merely that a self-attested boolean was toggled. A
+// Canary must be instantly, RELIABLY reversible; if the coordinator's durable state is degraded or
+// a write failed, an emergency demotion may land only in memory and be silently re-admitted on
+// restart, and if rollback was never PROVEN reversible the reversal is unproven (Codex P1,
+// PR #1249). §5 (Canary Activation Gate): the rehearsal fact is now driven by durable, build-bound
+// executable evidence — a record that a REAL Canary→Shadow→Observe demotion drill produced through
+// the actual persist/restore path — so an operator toggling a marker, or an ancient drill against a
+// materially changed runtime, no longer satisfies it. Fail-closed: false unless the coordinator
+// exists AND its persistence is not degraded/write_failed AND rollbackRehearsalAttested validates a
+// current-build record. Until an operator runs the drill this is false — one more reason the
 // dormant Canary is never ready.
 func rollbackPathHealthy(capb rollout.Capability) bool {
 	r := getMCPRollout()
-	// rollbackPathReady reads persistStatus AND the rehearsal evidence under durableMu, so it
-	// never observes the pre-persist window of an in-flight rehearsal (Codex P1, PR #1249).
+	// rollbackPathReady reads persistStatus AND the durable rehearsal evidence under durableMu, so
+	// it never observes the pre-persist window of an in-flight rehearsal (Codex P1, PR #1249).
 	return r != nil && r.rollbackPathReady(capb)
 }
 
@@ -210,6 +210,15 @@ func mcpCanaryStatus() map[string]any {
 		"unmet":                unmet,
 		"all_prerequisites":    allStr,
 		"live_execution_armed": liveExecDepsConfigured(false),
+		// Read-only view of the dormant activation runtime (§3/§4): the current activation
+		// generation, whether a budget/abort controller are armed, and whether an execution could
+		// be reserved right now. In the shipped build these are always the dormant zero values
+		// (generation 0, not eligible) — no Canary ever activated.
+		"activation_runtime": map[string]any{
+			"generation":          globalCanaryRuntime.currentGeneration(rollout.CapabilityGateway),
+			"execution_eligible":  globalCanaryRuntime.executionEligible(rollout.CapabilityGateway),
+			"budget_ceilings_are": "first_canary",
+		},
 		"first_canary_bounds": map[string]any{
 			"max_servers":            canary.MaxCanaryServers,
 			"max_tools":              canary.MaxCanaryTools,

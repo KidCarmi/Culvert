@@ -567,6 +567,12 @@ func TestDurable_ShadowWindowRestartsAfterCanaryDemotion(t *testing.T) {
 	if err := r.commitRolloutTransition(gwShadowCfg(1), "admin", time.Unix(1000, 0)); err != nil {
 		t.Fatal(err)
 	}
+	// The §2 Canary activation gate requires FULL canary node readiness at the commit, not merely
+	// the live tier. Provide the remaining node facts (Shadow Exit attestation + executable
+	// rollback rehearsal) durably; they are inert for the Shadow legs and let the artificial
+	// Canary commit below pass the authoritative preflight.
+	writeValidShadowExitAttestation(t)
+	writeValidRollbackRehearsal(t, rollout.CapabilityGateway)
 	// Promote to Canary at t=2000 (needs the live tier): Shadow evidence preserved.
 	globalExecDeps.gateway.Store(true)
 	err := r.commitRolloutTransition(gwCanaryCfg(2), "admin", time.Unix(2000, 0))
