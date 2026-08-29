@@ -15,6 +15,7 @@ package logstore
 // sidecar after an unclean kill.
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -51,7 +52,7 @@ func TestChaos57_TornSaltNeverMintsOverAnExistingStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("salt sidecar disappeared: %v", err)
 	}
-	if string(after) != string(torn) {
+	if !bytes.Equal(after, torn) {
 		t.Fatal("EncKey WROTE to the salt sidecar on the failure path — the original key material is unrecoverable")
 	}
 
@@ -68,7 +69,9 @@ func TestChaos57_TornSaltNeverMintsOverAnExistingStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store did not reopen after restoring the sidecar: %v", err)
 	}
-	defer s.Close() //nolint:errcheck // test cleanup
+	if err := s.Close(); err != nil {
+		t.Fatalf("close the recovered store: %v", err)
+	}
 }
 
 // A MISSING sidecar next to an existing store is the same condition — the
@@ -130,7 +133,7 @@ func TestChaos57_SaltIsMintedWhenThereIsNothingToLose(t *testing.T) {
 		if err != nil {
 			t.Fatalf("second: %v", err)
 		}
-		if string(first) != string(second) {
+		if !bytes.Equal(first, second) {
 			t.Fatal("EncKey is not stable across calls — every restart would lose the store")
 		}
 	})

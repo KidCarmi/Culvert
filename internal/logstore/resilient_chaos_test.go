@@ -16,6 +16,7 @@ package logstore
 // store aside over an ordinary configuration change.
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"os/exec"
@@ -282,7 +283,7 @@ func TestChaos57_QuarantinedHistoryStaysReadableWithTheSameSalt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("salt sidecar disappeared with the quarantine: %v", err)
 	}
-	if string(saltBefore) != string(saltAfter) {
+	if !bytes.Equal(saltBefore, saltAfter) {
 		t.Fatal("salt sidecar changed across the quarantine — the quarantined copy is now undecryptable")
 	}
 	if strings.HasPrefix(dir+".salt", rec.QuarantinePath+string(filepath.Separator)) {
