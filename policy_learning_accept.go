@@ -254,16 +254,17 @@ func plAcceptRecommendation(eng *policylearn.Engine, recID string, ifVersion int
 		// collision converges on the same target.
 		return plAcceptOutcome{}, fmt.Errorf("translated rule failed validation: %w", err)
 	}
+	stampRuleMetadataForWrite(&rule, nil, actor)
 	// Blocker B delete-first order: the recommendation's category was live at
-	// generation time but may have been deleted since. Validated here — under
-	// the shared objectReferenceMutationGate acquired above, before the staged
-	// append — so a delete that already won refuses the accept instead of
-	// staging a dangling candidate rule. The intent stays pending (a retry
-	// after the operator restores the category converges on the same target).
+	// generation time but may have been deleted since. Validated here — on the
+	// FINAL canonical rule, under the shared objectReferenceMutationGate
+	// acquired above, before the staged append — so a delete that already won
+	// refuses the accept instead of staging a dangling candidate rule. The
+	// intent stays pending (a retry after the operator restores the category
+	// converges on the same target).
 	if e := validateRuleObjectRefs(&rule); e != nil {
 		return plAcceptOutcome{}, fmt.Errorf("%v: %w", e, errAcceptDanglingReference)
 	}
-	stampRuleMetadataForWrite(&rule, nil, actor)
 
 	// M5B.1: the coordinator's durable check-and-mutate primitive — fence,
 	// append, and DURABLE persist under one lock. Structurally candidate-only

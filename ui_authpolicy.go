@@ -248,13 +248,17 @@ func apiAuthPolicyCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// SERVER CANONICALIZATION FIRST (ID-trust correction): stamp metadata and
+	// re-derive object IDs from NAMES (client-supplied IDs are discarded),
+	// then validate the FINAL canonical rule — reference validation must
+	// never trust a client ID, and no restamp may follow it.
+	stampRuleMetadataForWrite(&rule, nil, sessionAdmin(r))
 	// Blocker B delete-first order: validate destination object references
 	// under the shared gate before committing (auth rules may carry
 	// destination category/group/profile scopes).
 	if refuseDanglingRuleRefs(w, &rule) {
 		return
 	}
-	stampRuleMetadataForWrite(&rule, nil, sessionAdmin(r))
 	// Serialize with commit/revert exactly like the Stage-2 handlers.
 	beginPolicyWrite()
 	defer endPolicyWrite()
@@ -314,12 +318,16 @@ func apiAuthPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// SERVER CANONICALIZATION FIRST (ID-trust correction): stamp metadata and
+	// re-derive object IDs from NAMES (client-supplied IDs are discarded),
+	// then validate the FINAL canonical rule — reference validation must
+	// never trust a client ID, and no restamp may follow it.
+	stampRuleMetadataForWrite(&rule, target.before, sessionAdmin(r))
 	// Blocker B delete-first order: validate destination object references
 	// under the shared gate before committing the edit.
 	if refuseDanglingRuleRefs(w, &rule) {
 		return
 	}
-	stampRuleMetadataForWrite(&rule, target.before, sessionAdmin(r))
 	beginPolicyWrite()
 	defer endPolicyWrite()
 	res := policyDraft.fencedRunningMutate(parseIfVersion(r), func(ps *PolicyStore) bool {

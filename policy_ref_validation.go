@@ -58,16 +58,34 @@ import (
 	"github.com/KidCarmi/Culvert/internal/feedsync"
 )
 
-// referencedCategoryResolvable is the §9 authoritative predicate for a URL
-// category NAME: does any CURRENT category authority resolve it?
+// referencedCategoryResolvable is the authoritative predicate for a URL
+// category NAME: does a CURRENT category authority resolve it? It mirrors the
+// REAL hot-path source model (hostCatScratch.resolveFusion/matchesCategory,
+// policy_hostcat.go) exactly — never status.state, never bare store
+// membership:
+//
+//   - effective view INSTALLED: the admin tier is catStore's BuiltIn=false
+//     categories ONLY (MatchesHostAdmin), the SaaS tier is the CURRENT view's
+//     classes, then UT1. A BuiltIn=true catStore-only name the view does not
+//     serve is NOT a live authority — a signed generation may simply not
+//     contain that old local category, and a rule keyed on it would never
+//     match (fail-open for a Deny intent).
+//   - NO view: the full catStore taxonomy (BuiltIn included), then UT1.
+//
+// The view pointer is read ONCE so the verdict is against one authority
+// state.
 func referencedCategoryResolvable(name string) bool {
 	if name == "" {
 		return true // "" = no reference
 	}
-	if _, found := catStore.BuiltInFlag(name); found {
-		return true
-	}
-	if v := saasEffectiveView.Current(); v != nil && v.HasCategoryName(name) {
+	if v := saasEffectiveView.Current(); v != nil {
+		if builtIn, found := catStore.BuiltInFlag(name); found && !builtIn {
+			return true
+		}
+		if v.HasCategoryName(name) {
+			return true
+		}
+	} else if _, found := catStore.BuiltInFlag(name); found {
 		return true
 	}
 	if communityDB != nil {
@@ -90,35 +108,32 @@ func (e *danglingRefError) Error() string {
 	return fmt.Sprintf("referenced %s %q does not exist in any current authority", e.Type, e.Name)
 }
 
-// validateRuleObjectRefs checks every shared-object reference a rule carries
-// against the runtime resolution semantics above. Caller MUST hold the
-// shared side of objectReferenceMutationGate.
+// validateRuleObjectRefs checks every shared-object reference the FINAL
+// SERVER-CANONICAL rule carries. Callers MUST (a) hold the shared side of
+// objectReferenceMutationGate and (b) run this AFTER
+// stampRuleMetadataForWrite/stampObjectRefIDs, so the rule being validated is
+// exactly the rule that persists and no restamp can change what was
+// validated.
+//
+// TRUST BOUNDARY (ID-trust correction): on the interactive write path the
+// NAME is the client's intent and object IDs are SERVER-DERIVED ONLY —
+// stampObjectRefIDs discards any client-supplied destCategoryGroupId /
+// decryptionProfileId and re-derives from the name. Validation therefore
+// keys on the NAMES and never consults an ID: a client-supplied ID for an
+// unrelated live object must not be able to satisfy validation of a name
+// the server cannot resolve (post-stamp, a non-empty ID exists exactly when
+// its name resolved). A mismatched name/ID pair binds to the NAME's object,
+// per the standing name-intent doctrine.
 func validateRuleObjectRefs(r *PolicyRule) *danglingRefError {
 	if r.DestCategory != CategoryAny && r.DestCategory != "" &&
 		!referencedCategoryResolvable(string(r.DestCategory)) {
 		return &danglingRefError{Type: "category", Name: string(r.DestCategory)}
 	}
-	if r.DestCategoryGroupID != "" || r.DestCategoryGroup != "" {
-		resolved := (r.DestCategoryGroupID != "" && globalCategoryGroups.GetByID(r.DestCategoryGroupID) != nil) ||
-			(r.DestCategoryGroup != "" && globalCategoryGroups.GetByName(r.DestCategoryGroup) != nil)
-		if !resolved {
-			name := r.DestCategoryGroup
-			if name == "" {
-				name = r.DestCategoryGroupID
-			}
-			return &danglingRefError{Type: "category-group", Name: name}
-		}
+	if r.DestCategoryGroup != "" && globalCategoryGroups.GetByName(r.DestCategoryGroup) == nil {
+		return &danglingRefError{Type: "category-group", Name: r.DestCategoryGroup}
 	}
-	if r.DecryptionProfileID != "" || r.DecryptionProfile != "" {
-		resolved := (r.DecryptionProfileID != "" && globalDecryptionProfiles.GetByID(r.DecryptionProfileID) != nil) ||
-			(r.DecryptionProfile != "" && globalDecryptionProfiles.GetByName(r.DecryptionProfile) != nil)
-		if !resolved {
-			name := r.DecryptionProfile
-			if name == "" {
-				name = r.DecryptionProfileID
-			}
-			return &danglingRefError{Type: "decryption-profile", Name: name}
-		}
+	if r.DecryptionProfile != "" && globalDecryptionProfiles.GetByName(r.DecryptionProfile) == nil {
+		return &danglingRefError{Type: "decryption-profile", Name: r.DecryptionProfile}
 	}
 	if r.FileProfile != "" && r.FileProfile != FileProfileNone {
 		if globalProfileStore.GetByName(string(r.FileProfile)) == nil {

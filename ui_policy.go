@@ -1783,13 +1783,17 @@ func apiPolicyCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	// SERVER CANONICALIZATION FIRST (ID-trust correction): stamp metadata and
+	// re-derive object IDs from NAMES (client-supplied IDs are discarded),
+	// then validate the FINAL canonical rule — reference validation must
+	// never trust a client ID, and no restamp may follow it.
+	stampRuleMetadataForWrite(&rule, nil, sessionAdmin(r))
 	// Blocker B delete-first order: validate every referenced object UNDER the
 	// shared gate, before the commit — a delete that already won makes this
 	// fail 400 instead of committing a dangling reference.
 	if refuseDanglingRuleRefs(w, &rule) {
 		return
 	}
-	stampRuleMetadataForWrite(&rule, nil, sessionAdmin(r))
 	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
 	beginPolicyWrite()
 	defer endPolicyWrite()
@@ -1863,12 +1867,16 @@ func apiPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	// SERVER CANONICALIZATION FIRST (ID-trust correction): stamp metadata and
+	// re-derive object IDs from NAMES (client-supplied IDs are discarded),
+	// then validate the FINAL canonical rule — reference validation must
+	// never trust a client ID, and no restamp may follow it.
+	stampRuleMetadataForWrite(&rule, beforeRule, sessionAdmin(r))
 	// Blocker B delete-first order: validate referenced objects under the
 	// shared gate before committing the edit.
 	if refuseDanglingRuleRefs(w, &rule) {
 		return
 	}
-	stampRuleMetadataForWrite(&rule, beforeRule, sessionAdmin(r))
 	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
 	beginPolicyWrite()
 	defer endPolicyWrite()
@@ -1995,12 +2003,16 @@ func apiPolicyUpdateByID(w http.ResponseWriter, r *http.Request, id string) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	// SERVER CANONICALIZATION FIRST (ID-trust correction): stamp metadata and
+	// re-derive object IDs from NAMES (client-supplied IDs are discarded),
+	// then validate the FINAL canonical rule — reference validation must
+	// never trust a client ID, and no restamp may follow it.
+	stampRuleMetadataForWrite(&rule, beforeRule, sessionAdmin(r))
 	// Blocker B delete-first order: validate referenced objects under the
 	// shared gate (held by the apiPolicyUpdate caller) before committing.
 	if refuseDanglingRuleRefs(w, &rule) {
 		return
 	}
-	stampRuleMetadataForWrite(&rule, beforeRule, sessionAdmin(r))
 	// Serialize with commit/revert (Codex round 16; see beginPolicyWrite).
 	beginPolicyWrite()
 	defer endPolicyWrite()
