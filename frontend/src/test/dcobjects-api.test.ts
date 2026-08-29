@@ -7,6 +7,7 @@
 // bodies.
 import { describe, expect, it } from "vitest";
 import {
+  asRewriteIdentityDegraded,
   decodeFileProfileState,
   decodeRewriteState,
   previewNormalizedExtensions,
@@ -167,5 +168,33 @@ describe("shared revision-409 recognizer against the 2D-C bodies", () => {
     const c = asRevisionConflict(err);
     expect(c?.currentRevision).toBe("rwv1:new");
     expect(c?.yourRevision).toBe("rwv1:old");
+  });
+});
+
+describe("rewrite identity-degradation recognizer (recovery correction)", () => {
+  it("recognizes the structured 503 and rejects other errors", () => {
+    const degraded = new ApiError(
+      "http",
+      "unavailable",
+      503,
+      JSON.stringify({
+        error: "rewrite management identity is not durable on this node",
+        degraded: "rewrite-identity",
+        reason: "YAML seed identity ledger could not persist: disk full",
+      }),
+    );
+    const d = asRewriteIdentityDegraded(degraded);
+    expect(d?.reason).toContain("disk full");
+    // A plain 503 without the marker is NOT the degradation.
+    expect(
+      asRewriteIdentityDegraded(
+        new ApiError("http", "unavailable", 503, "maintenance"),
+      ),
+    ).toBeNull();
+    expect(
+      asRewriteIdentityDegraded(
+        new ApiError("http", "server error", 500, "{}"),
+      ),
+    ).toBeNull();
   });
 });

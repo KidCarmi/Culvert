@@ -497,3 +497,39 @@ it("header rewrite: a lost connection latches unknown-outcome", async () => {
   });
   expect(findButton((t) => t.includes("New rewrite rule")).disabled).toBe(true);
 });
+
+// L — identity-degradation truth: the structured 503 renders the dedicated
+// degraded state (appliance reason shown) and mounts NO write controls or
+// ephemeral identities.
+it("header rewrite: the identity-degradation 503 renders truthfully with no controls", async () => {
+  const degradedBody = JSON.stringify({
+    error: "rewrite management identity is not durable on this node",
+    degraded: "rewrite-identity",
+    reason: "YAML seed identity ledger could not persist: read-only volume",
+  });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn((input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (method === "GET" && url.includes("/api/rewrite/state")) {
+        return Promise.resolve(
+          new Response(degradedBody, {
+            status: 503,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }
+      return Promise.reject(new TypeError(`unexpected ${method} ${url}`));
+    }),
+  );
+  await mount(
+    "operator",
+    "/policies/header-rewrite",
+    <HeaderRewritePage />,
+    "Rewrite management identity is not durable",
+  );
+  expect(container.textContent).toContain("read-only volume");
+  expect(hasButton((t) => t.includes("New rewrite rule"))).toBe(false);
+  expect(container.textContent).not.toContain("aaaa1111");
+});

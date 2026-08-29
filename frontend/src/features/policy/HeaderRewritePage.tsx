@@ -32,6 +32,7 @@ import { hasRole } from "../../auth/rbac";
 import { serverErrorText, unknownOutcome } from "../../shared/mutationOutcome";
 import { useDirtyGuard } from "../../shared/dirtyGuard";
 import {
+  asRewriteIdentityDegraded,
   createRewriteRule,
   deleteRewriteRule,
   getRewriteState,
@@ -66,6 +67,12 @@ export function HeaderRewritePage(): JSX.Element {
   const blocked = page.unknown !== null;
   const rules = snap?.rules ?? [];
   const revision = snap?.revision ?? "";
+  // Recovery correction: the appliance answers a structured 503 while rewrite
+  // MANAGEMENT identity is not durable — the ephemeral StableIDs are never
+  // exposed, so no snapshot (and no write controls) render; the page states
+  // the truth instead of a generic load failure.
+  const identityDegraded =
+    snap === undefined && q.isError ? asRewriteIdentityDegraded(q.error) : null;
 
   const guard = useDirtyGuard(
     editorDirty,
@@ -114,7 +121,16 @@ export function HeaderRewritePage(): JSX.Element {
       {snap === undefined && q.isPending && (
         <Skeleton>Loading header-rewrite rules…</Skeleton>
       )}
-      {snap === undefined && q.isError && (
+      {snap === undefined && q.isError && identityDegraded !== null && (
+        <ErrorState title="Rewrite management identity is not durable">
+          Traffic rewrite enforcement continues, but the appliance refused to
+          present rule identities that would not survive a restart, and
+          identity-addressed changes are refused until durable identity is
+          established. Appliance reason: <Mono>{identityDegraded.reason}</Mono>.
+          Fix the settings persistence issue on the appliance and restart it.
+        </ErrorState>
+      )}
+      {snap === undefined && q.isError && identityDegraded === null && (
         <ErrorState title="Header-rewrite rules unavailable">
           The rewrite-rule snapshot could not be loaded. Refresh to try again.
         </ErrorState>
