@@ -44,6 +44,11 @@ func apiMCPRollout(w http.ResponseWriter, r *http.Request) {
 	// two readiness tiers (shadow vs live), the §14 activation preflight, and the bounded
 	// shadow evaluation metrics. Read-only; distinguishes gateway / shadow / live-exec.
 	st["shadow"] = mcpShadowStatus()
+	// Canary architecture (ADR-0035): read-only machine-verifiable readiness contract. Always
+	// defined, never armed in this build — node_ready is false and unmet names every missing
+	// prerequisite. Surfacing it here (viewer-gated) makes the activation contract observable
+	// without any ability to activate.
+	st["canary"] = mcpCanaryStatus()
 	jsonOK(w, st)
 }
 

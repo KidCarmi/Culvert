@@ -98,6 +98,37 @@ func (r *mcpRollout) persistStatus(capb rollout.Capability) string {
 	return s
 }
 
+// rollbackPathReady reports whether the capability's rollback path is durable AND rehearsed —
+// read as ONE consistent snapshot. It takes durableMu, which recordRehearsal and every other
+// durable read-modify-write-persist holds for its whole sequence, so no rehearsal write can be
+// in flight while this reads: the in-memory RollbackRehearsed evidence and the persistStatus it
+// observes are both post-write (never the pre-persist window where evidence is set but not yet
+// durable). Fail-closed: false unless persistence is not degraded/write_failed AND a rollback
+// rehearsal is durably recorded. Lock order is durableMu → persistMu (persistStatus takes
+// persistMu), the SAME order recordRehearsal uses, so there is no deadlock (Codex P1, PR #1249).
+//
+// SCOPE NOTE (Codex P2, PR #1249): RollbackRehearsed is today a SELF-ATTESTED marker — the
+// pre-existing admin POST /api/mcp/rollout/rehearse sets it via recordRehearsal WITHOUT actually
+// executing a Canary→Shadow/Observe demotion (there is no live Canary to roll back in this
+// dormant build). Binding readiness to a REAL, attested rollback drill — evidence produced by a
+// successfully executed demotion, not a manual marker — is a LIVE-ACTIVATION prerequisite,
+// recorded in the CANARY-ACTIVATION-PREREQS ledger. This fact remains correct as the dormant
+// CONTRACT (readiness requires the marker); strengthening what the marker PROVES is out of scope
+// for the dormant architecture and cannot be exercised while Canary never activates.
+func (r *mcpRollout) rollbackPathReady(capb rollout.Capability) bool {
+	r.durableMu.Lock()
+	defer r.durableMu.Unlock()
+	switch r.persistStatus(capb) {
+	case "degraded", "write_failed":
+		return false
+	}
+	st := r.stateFor(capb)
+	if st == nil {
+		return false
+	}
+	return st.Evidence().RollbackRehearsed
+}
+
 // mcpRolloutMetrics are bounded, low-cardinality counters. No tenant/subject/
 // session/URL/argument/tool-name label is ever used.
 type mcpRolloutMetrics struct {
@@ -321,6 +352,7 @@ func (r *mcpRollout) emergencyDisable(capb rollout.Capability, actor string) err
 		logger.Printf("MCP rollout emergency-disable persist for %s failed (disable in effect in memory, NOT restart-durable): %q", capb.String(), sanitizeLog(err.Error()))
 		return fmt.Errorf("%w: %v", errRolloutPersistFailed, err)
 	}
+	r.setPersistStatus(capb, "recovered") // a successful durable write clears any stale write_failed
 	return nil
 }
 
@@ -337,6 +369,7 @@ func (r *mcpRollout) clearEmergency(capb rollout.Capability) error {
 		logger.Printf("MCP rollout emergency-clear persist for %s failed: %q", capb.String(), sanitizeLog(err.Error()))
 		return fmt.Errorf("%w: %v", errRolloutPersistFailed, err)
 	}
+	r.setPersistStatus(capb, "recovered") // a successful durable write clears any stale write_failed
 	return nil
 }
 
@@ -353,6 +386,10 @@ func (r *mcpRollout) recordRehearsal(capb rollout.Capability) error {
 		logger.Printf("MCP rollout rehearsal persist for %s failed: %q", capb.String(), sanitizeLog(err.Error()))
 		return fmt.Errorf("%w: %v", errRolloutPersistFailed, err)
 	}
+	// A successful durable write clears any stale write_failed, so a rehearsal that succeeds
+	// after an earlier failure is not stuck reporting the rollback path unhealthy forever
+	// (Codex P2, PR #1249). Mirrors commitRolloutTransition's success path.
+	r.setPersistStatus(capb, "recovered")
 	return nil
 }
 
