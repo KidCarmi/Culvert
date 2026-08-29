@@ -2,54 +2,92 @@
 
 package main
 
-// Allocation-regression gate for the per-request policy-decision log line.
+// Allocation-regression gate for the per-request policy-decision log lines.
 //
 //	go test -tags benchgate -run 'TestBenchGate_PolicyDecisionLine' -v .
 
-import "testing"
+import (
+	"io"
+	"testing"
+)
 
 // TestBenchGate_PolicyDecisionLineAllocs locks in the allocation contract for
 // the one log line applyPolicyDecision writes per proxied request.
 //
-// GATE DESIGN. Keyed on ALLOCATIONS PER OP, not ns/op, for the reason
-// bench_regression_test.go states: allocation counts are deterministic and
-// hardware-independent, so this gate means the same thing on any runner, under
+// GATE DESIGN. Two properties make this gate mean something.
+//
+// (1) It measures the PRODUCTION emitters — logPolicyAllow and its siblings,
+// the exact functions applyPolicyDecision calls — not a copy of them. An
+// earlier draft benchmarked a test-local replica of the same formatting, which
+// would have stayed green while someone reintroduced fmt.Sprintf or a second
+// sanitizeLog call into the real request path: a gate that cannot fail for the
+// regression it names is worse than no gate, because it manufactures confidence
+// (Codex review, PR #1256). Taking the RAW rule name as a parameter is part of
+// this — it puts the sanitize-once decision inside the measured function.
+//
+// (2) It is keyed on ALLOCATIONS PER OP, not ns/op, for the reason
+// bench_regression_test.go states: alloc counts are deterministic and
+// hardware-independent, so the gate means the same thing on any runner, under
 // -race, at any load. ns/op on a shared CI box does not.
 //
-// The bound is a CONSTANT and it is the point of the gate. Both defects this
-// change removed were of the same shape — a per-request allocation hidden
-// inside an argument list, where it reads as formatting rather than as work:
+// The bounds are CONSTANTS and tight rather than padded, and they are stated
+// PER BRANCH because the branches genuinely differ: allow and redirect pass
+// nine format arguments, block and drop pass eight, and one fewer argument is
+// one fewer interface box. Measured on the production emitters: 8/8/7/7
+// allocs/op (from 10/10/9/9 before). Every remaining allocation is accounted
+// for — the []any argument slice plus the boxing of each distinct string
+// argument that escapes into it — so there is no legitimate reason for these
+// lines to grow another one. A change that needs one more should say so here
+// with its justification, not slip past a generous bound.
 //
-//   - strings.ReplaceAll(fmt.Sprintf("%d", Priority), "\n", "") rendered an int
-//     to a string and scanned it for a newline it could not contain. Two allocs
-//     (the Sprintf result, then boxing it into the Printf argument list).
-//   - sanitizeLog(match.Rule.Name) appeared twice on the same line.
+// The arguments come from plArgs (variables), never the pl* constants. Go boxes
+// a constant into an interface at compile time into read-only data, so passing
+// constants would make the gate measure a cost production never has — an
+// earlier draft did exactly that and reported 5 allocs/op for a line that
+// really does 8.
 //
-// Measured after the fix: 5 allocs/op, 80 B/op (from 7 and 99). The bound is 5,
-// tight rather than padded, because every remaining allocation is accounted for
-// — the []any argument slice plus the boxing of the four string arguments that
-// escape — and there is no legitimate reason for this line to grow another one.
-// A change that needs a sixth should say so here with its justification, not
-// slip past a generous bound.
+// All four branches are gated, not just the hot allow path: block and drop run
+// hardest under a scanning or beaconing flood, which is exactly when the
+// gateway can least afford the waste.
 func TestBenchGate_PolicyDecisionLineAllocs(t *testing.T) {
-	const maxAllocs int64 = 5
+	cases := []struct {
+		name      string
+		maxAllocs int64
+		emit      func()
+	}{
+		{"allow", 8, func() {
+			logPolicyAllow(plRule, plPriority, plArgs.clientIP, plArgs.method, plArgs.host, plArgs.cond, plArgs.reqID, plArgs.identity)
+		}},
+		{"redirect", 8, func() {
+			logPolicyRedirect(plRule, plPriority, plArgs.clientIP, plArgs.host, plArgs.redirectURL, plArgs.cond, plArgs.reqID, plArgs.identity)
+		}},
+		{"block", 7, func() {
+			logPolicyBlock(plRule, plPriority, plArgs.clientIP, plArgs.host, plArgs.cond, plArgs.reqID, plArgs.identity)
+		}},
+		{"drop", 7, func() {
+			logPolicyDrop(plRule, plPriority, plArgs.clientIP, plArgs.host, plArgs.cond, plArgs.reqID, plArgs.identity)
+		}},
+	}
 
-	res := testing.Benchmark(func(b *testing.B) {
-		dst := discardLogger()
-		b.ReportAllocs()
-		for i := 0; i < b.N; i++ {
-			plCurrentAllowLine(dst, plRule, plPriority)
+	for _, tc := range cases {
+		restore := plSwapLogger(io.Discard)
+		res := testing.Benchmark(func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				tc.emit()
+			}
+		})
+		restore()
+
+		allocs := res.AllocsPerOp()
+		t.Logf("%s decision line: %d allocs/op (bound %d), %d B/op, %d ns/op",
+			tc.name, allocs, tc.maxAllocs, res.AllocedBytesPerOp(), res.NsPerOp())
+		if allocs > tc.maxAllocs {
+			t.Errorf("REGRESSION: the per-request %s decision line allocates %d/op, exceeds bound %d — "+
+				"an allocation has returned to the log-argument construction on the request hot path "+
+				"(a re-introduced fmt.Sprintf over a non-string value, or a duplicated sanitizeLog call?). "+
+				"See the contract comment above logPolicyAllow in proxy.go.", tc.name, allocs, tc.maxAllocs)
 		}
-	})
-
-	allocs := res.AllocsPerOp()
-	t.Logf("policy decision line: %d allocs/op (bound %d), %d B/op, %d ns/op",
-		allocs, maxAllocs, res.AllocedBytesPerOp(), res.NsPerOp())
-	if allocs > maxAllocs {
-		t.Errorf("REGRESSION: the per-request policy decision line allocates %d/op, exceeds bound %d — "+
-			"an allocation has returned to the log-argument construction on the request hot path "+
-			"(a re-introduced fmt.Sprintf over a non-string value, or a duplicated sanitizeLog call?). "+
-			"See proxy_policylog_bench_test.go for the before/after measurement.", allocs, maxAllocs)
 	}
 }
 
@@ -57,39 +95,40 @@ func TestBenchGate_PolicyDecisionLineAllocs(t *testing.T) {
 //
 // A constant alloc bound proves the line is cheap; it does not prove the fix is
 // what made it cheap, and a bound alone would still pass if someone reverted the
-// change and simultaneously loosened the number. Measuring both shapes in the
-// SAME run, on the same hardware, makes the comparison self-contained: the
-// current shape must allocate strictly less than the frozen pre-change shape.
-// Strictly-less is a real assertion here and not a tautology — the two shapes
-// render byte-identical output (TestPolicyDecisionLine_RenderIsByteIdentical),
-// so nothing but the removed waste separates them.
+// change and simultaneously loosened the number. Measuring the production
+// emitter against the frozen pre-change shape in the SAME run, on the same
+// hardware, makes the comparison self-contained: the production line must
+// allocate strictly less. Strictly-less is a real assertion and not a tautology
+// — the two render byte-identical output
+// (TestPolicyDecisionLine_RenderIsByteIdentical), so nothing but the removed
+// waste separates them.
 func TestBenchGate_PolicyDecisionLineBeatsLegacy(t *testing.T) {
+	restore := plSwapLogger(io.Discard)
 	legacy := testing.Benchmark(func(b *testing.B) {
-		dst := discardLogger()
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
-			plLegacyAllowLine(dst, plRule, plPriority)
+			plLegacy(plRule, plPriority)
 		}
 	})
 	current := testing.Benchmark(func(b *testing.B) {
-		dst := discardLogger()
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
-			plCurrentAllowLine(dst, plRule, plPriority)
+			plCurrentAllowLine(plRule, plPriority)
 		}
 	})
+	restore()
 
-	t.Logf("legacy %d allocs/op %d B/op %d ns/op → current %d allocs/op %d B/op %d ns/op",
+	t.Logf("legacy %d allocs/op %d B/op %d ns/op → production %d allocs/op %d B/op %d ns/op",
 		legacy.AllocsPerOp(), legacy.AllocedBytesPerOp(), legacy.NsPerOp(),
 		current.AllocsPerOp(), current.AllocedBytesPerOp(), current.NsPerOp())
 
 	if current.AllocsPerOp() >= legacy.AllocsPerOp() {
-		t.Errorf("REGRESSION: the current decision line allocates %d/op, not fewer than the frozen "+
+		t.Errorf("REGRESSION: the production decision line allocates %d/op, not fewer than the frozen "+
 			"pre-change shape's %d/op — the Sprintf-over-an-int and/or the duplicated sanitizeLog "+
-			"call has returned to applyPolicyDecision.", current.AllocsPerOp(), legacy.AllocsPerOp())
+			"call has returned to the policy decision path.", current.AllocsPerOp(), legacy.AllocsPerOp())
 	}
 	if current.AllocedBytesPerOp() >= legacy.AllocedBytesPerOp() {
-		t.Errorf("REGRESSION: the current decision line allocates %d B/op, not fewer than the frozen "+
+		t.Errorf("REGRESSION: the production decision line allocates %d B/op, not fewer than the frozen "+
 			"pre-change shape's %d B/op.", current.AllocedBytesPerOp(), legacy.AllocedBytesPerOp())
 	}
 }
