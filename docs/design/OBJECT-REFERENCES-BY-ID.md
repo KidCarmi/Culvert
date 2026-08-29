@@ -396,10 +396,15 @@ binds to the name).
 
 **Deliberate divergence from §6:** for file profiles, a rule carrying a
 non-empty authoritative `FileProfileID` whose object no longer resolves does
-NOT fall back to name matching — in enforcement (`FileProfileBlocked`
-returns false: fail-safe, nothing is retargeted to a same-named object) and
+NOT fall back to name matching — in enforcement (`FileProfileBlocked` FAILS
+CLOSED: every extension-bearing transaction on the rule is blocked, counted
+on `culvert_fileprofile_unresolved_block_total` and logged rate-limited,
+while extension-less transactions stay untouched because no extension set
+could ever match them; nothing is retargeted to a same-named object — the
+2D-C final correction replaced the earlier fail-open "no block" branch) and
 in the reference walk (`ruleReferencesObject` reports no reference for a
-non-matching ID-bearing rule), so the walk and the match can never disagree.
+non-matching ID-bearing rule), so the walk and the match can never disagree
+about WHICH object is referenced.
 The group/decrypt-profile name fallback exists to serve pre-promotion rules;
 the file-profile space additionally contains COMPILED-IN legacy built-in
 names (`fileProfileExts`), where a name fallback would let a deleted

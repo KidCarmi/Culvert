@@ -725,6 +725,82 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > FRESH/SETUPFAIL instances now carry their own paths, making the history
 > journeys deterministic).
 >
+> **2D-C FINAL identity / recovery / fail-closed correction (this branch,
+> 2026-08-29 — external-review follow-up on the dc638a22 candidate).** Six
+> defects, each red-before against dc638a22 (matrix rows A–H,
+> `dc_final_red_test.go` + `internal/fileblock/fileprofile_final_red_test.go`):
+> **(A) Dangling authoritative FileProfileID was FAIL-OPEN.** The reviewed
+> `FileProfileBlocked` returned false when a non-empty authoritative ID no
+> longer resolved — the configured file control silently disappeared (and
+> the path is reachable: profile-store Load errors are non-fatal). It now
+> FAILS CLOSED for exactly the transactions any profile could ever block —
+> paths carrying a file extension — while extension-less transactions stay
+> untouched (an extension set can never match them, so blocking those would
+> invent semantics). Anti-rebinding is preserved: still no name/legacy
+> retarget. The degradation is operator-visible:
+> `culvert_fileprofile_unresolved_block_total` + a rate-limited WARN naming
+> the unresolved ID. Legacy ID-less rules keep byte-identical historical
+> resolution (control-pinned).
+> **(B) Boot reconciliation ran before the FileProfile store loaded.**
+> `reconcileObjectRefNames()` preceded `initFileBlocking(s)` in main.go, so
+> the FileProfile rename crash-recovery pass consulted an EMPTY store and a
+> stale denormalized name survived every restart. The single pass now runs
+> AFTER initFileBlocking — every store it reads (policy+draft, groups,
+> decryption profiles, file profiles) is loaded first, and no listener has
+> started. Pinned by a source-order gate plus a permanent defect-mechanism
+> proof and the loaded-store recovery proof (running name converges,
+> identity + enforcement unchanged).
+> **(C) YAML-only rewrite StableIDs were not durable.** With no
+> admin_settings.json and no admin write, every boot re-identified the
+> YAML-seeded rules. `finalizeRewriteSeedIdentities` (run from
+> LoadAdminSettings on BOTH the loaded and file-absent paths, before the
+> admin listeners start) now records the minted identities in a durable
+> IDENTITY LEDGER (`rewrite_seed_identities`, AdminSettings — no second
+> file) and re-attaches them per position+content each boot: an unchanged
+> YAML file presents the SAME StableIDs every restart, an edited position
+> is a new object with fresh identity, and YAML stays the source of the
+> RULES (the ledger claims ownership of nothing — not even the rewrite
+> sentinel). All migration writes go through a TARGETED writer
+> (`persistRewriteIdentityMutation`) that preserves every unrelated field
+> and ownership sentinel; the earlier in-file legacy backfill migration was
+> converted off the omnibus SaveAdminSettings for the same reason (it
+> stamped unrelated surfaces saved-authoritative). Admin-persisted explicit
+> empty (sentinel) still never resurrects YAML rules.
+> **(D) fpv1 fingerprint ambiguity.** The profile row joined extensions
+> with "," while normExts permits a comma inside an extension, so
+> [".a",".b"] and [".a,.b"] collided into one revision (stale-editor
+> false-pass). fpv2 length-frames every user-controlled string and the
+> extension count (no reserved delimiters); profile ordering stays
+> canonicalized by sorting encoded rows; extension ordering is PRESERVED
+> as stored (documented choice — the fence distinguishes every observable
+> difference).
+> **(E) FileProfile identity invariants now validated at every boundary.**
+> `fileblock.ValidateProfiles` (one seam): non-empty unique IDs, non-empty
+> case-insensitively-unique names — applied at disk Load (refusal keeps
+> the store empty; ID-bearing rules then fail closed), at the CP snapshot
+> preflight (whole snapshot rejected BEFORE any slice applies), and at
+> ReplaceAll (candidate validity separate from follower durability).
+> Audit verdict: FileExtProfile was BORN with the ID field, the
+> deterministic `builtin-*` IDs and a uuid-minting Create, so missing IDs
+> are corruption → refuse (no migration; IDs deliberately NOT required to
+> be UUIDs — the built-ins are not).
+> **(F) Rewrite StableID format contract.** `validateRewriteStableIDs` now
+> enforces what the prose always said: empty = legacy candidate (migrated
+> at install), non-empty must parse as a UUID, duplicates AND malformed
+> non-empty values reject the whole candidate — at import, rollback and CP
+> snapshot (one shared seam). A hand-edited seed LEDGER failing the same
+> validation is discarded (re-mint), never trusted.
+> **(G) Rollback operator truth.** rewrite_rules left
+> `rollbackRuntimeOnlySurfaces` — the 2D-C rollback slice persists through
+> the AdminSettings owner, and a restart-simulation proof
+> (`TestDCFin_RewriteRollbackSurvivesRestart`) pins that a successful
+> rewrite rollback survives restart with the same identities.
+> **(H) Identity-aware rewrite history diff.** `diffRewriteRules` now
+> detects add/remove by StableID, operation/host changes on the SAME
+> identity, and pure ordering changes (order is semantics); legacy entries
+> without stable identity get a conservative ordered content comparison
+> that can never report a changed set as "no change".
+
 > **Slice 2D-C implementation record (this branch, 2026-08-29).**
 >
 > **2D-C.0 backend hardening — two identity promotions before any
@@ -736,8 +812,10 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > from the submitted name and a client-supplied `fileProfileId` is never
 > trusted (a mismatched pair binds to the NAME). Enforcement resolves
 > ID-first; a rule carrying a non-empty authoritative ID whose profile is
-> gone FAILS SAFE (no extensions blocked-by-that-profile, and NEVER
-> retargeted to a same-named object) — deliberately STRICTER than the
+> gone FAILS CLOSED (2D-C final correction — see the record above; the
+> as-reviewed candidate returned false here, which was fail-OPEN for the
+> configured control, and it is NEVER retargeted to a same-named object)
+> — deliberately STRICTER than the
 > group precedent's name fallback because the legacy built-in name space is
 > compiled-in; the Where Used walk agrees with enforcement (no
 > dangling-name fallback), divergence documented at both sites and in
