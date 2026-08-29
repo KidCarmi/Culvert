@@ -206,12 +206,18 @@ func main() {
 	initRootCA(s)
 	initPolicy(s)
 	initURLCategories(s)
-	// 2D-A rename recovery: with policy + draft + object stores loaded, converge
-	// any denormalized object display names a crashed/failed rename left stale
-	// (the stable object-link IDs kept enforcement correct throughout). No-op —
-	// no write, no version movement — on a clean boot.
-	reconcileObjectRefNames()
 	initFileBlocking(s)
+	// 2D-A/2D-C rename recovery: ONE pass, and its position is load-bearing —
+	// every store it reads must already be loaded: policy + draft (initPolicy),
+	// category groups + decryption profiles (initURLCategories), and file
+	// profiles (initFileBlocking — the 2D-C final correction: running before it
+	// reconciled FileProfileID names against an EMPTY store, so a crashed
+	// rename's stale display name survived every restart). Converges any
+	// denormalized object display names a crashed/failed rename left stale
+	// (the stable object-link IDs kept enforcement correct throughout). No-op —
+	// no write, no version movement — on a clean boot. Runs long before any
+	// listener starts (startUI / startProxy come after the init block).
+	reconcileObjectRefNames()
 	initSSLBypassAndDPI(s)
 	initH2InspectServer() // PR3d: eager-build the shared graceful-shutdown H2 server
 	initRewriteAndDefaultAction(s)

@@ -114,7 +114,8 @@ type PolicyRule struct {
 	// Resolution is ID-FIRST; a rule with NO ID (legacy/un-migrated) resolves by
 	// name through the store and then the compiled legacy fileProfileExts map,
 	// byte-identical to the pre-promotion behavior. A NON-EMPTY ID that no longer
-	// resolves is fail-SAFE for the file-control dimension (no extensions block)
+	// resolves FAILS CLOSED for the file-control dimension (every
+	// extension-bearing transaction on the rule is blocked — 2D-C final §2)
 	// and deliberately does NOT retarget by name — an authoritative identity must
 	// never silently rebind to a different object that happens to carry the same
 	// name (2D-C anti-rebinding doctrine, stricter here than the group shape
@@ -1803,10 +1804,16 @@ func matchCountry(countries []string, code string) bool {
 // Resolution (2D-C references-by-id): the STABLE ID is authoritative when
 // present — a stamped rule resolves via GetByID, so a profile rename never
 // changes which extensions this rule enforces. A non-empty ID that no longer
-// resolves is fail-SAFE (no block) and deliberately does NOT fall back to the
-// name: retargeting an authoritative identity to a different profile that
-// happens to carry the same name is the rebinding hazard the promotion
-// closes (the delete gate + bulk graph make this branch defense-in-depth).
+// resolves FAILS CLOSED (2D-C final §2): the configured file control cannot
+// silently disappear, and it deliberately does NOT fall back to the name —
+// retargeting an authoritative identity to a same-named store or compiled
+// legacy profile is the rebinding hazard the promotion closes. The
+// fail-closed scope is exactly the set of transactions ANY profile could
+// block: paths carrying a file extension (an extension set can never match an
+// extension-less path, so blocking those would invent semantics, not restrict
+// them). Each unresolved-ID block is counted
+// (culvert_fileprofile_unresolved_block_total) and logged rate-limited so the
+// degradation is operator-visible.
 // Legacy rules with NO ID keep the exact pre-promotion resolution: dynamic
 // store by name first, then the compiled fileProfileExts map.
 func (r *PolicyRule) FileProfileBlocked(urlPath string) bool {
@@ -1817,7 +1824,12 @@ func (r *PolicyRule) FileProfileBlocked(urlPath string) bool {
 	if r.FileProfileID != "" {
 		p := globalProfileStore.GetByID(r.FileProfileID)
 		if p == nil {
-			return false // dangling authoritative ID — never retarget by name
+			// Dangling authoritative ID — fail CLOSED for file transactions.
+			if pathFileExt(urlPath) == "" {
+				return false // no profile could ever block an extension-less path
+			}
+			noteFileProfileUnresolvedBlock(r.FileProfileID, string(r.FileProfile))
+			return true
 		}
 		exts = p.Extensions
 	} else if p := globalProfileStore.GetByName(string(r.FileProfile)); p != nil {
@@ -1830,15 +1842,44 @@ func (r *PolicyRule) FileProfileBlocked(urlPath string) bool {
 	return matchFileExt(urlPath, exts)
 }
 
-// matchFileExt returns true if urlPath ends with one of the given extensions.
-func matchFileExt(urlPath string, exts []string) bool {
-	ext := ""
+// statFileProfileUnresolvedBlocked counts file transactions blocked because a
+// rule's authoritative FileProfileID no longer resolves (the fail-closed
+// branch above). Exported on /metrics; a non-zero value means a policy rule
+// references a file profile the store does not carry — restore the profile
+// store or re-point the rule.
+var (
+	statFileProfileUnresolvedBlocked int64
+	fileProfileUnresolvedLastLog     int64 // unix seconds, rate-limits the log line
+)
+
+// noteFileProfileUnresolvedBlock records the fail-closed degradation: always
+// counted, logged at most once per 5 minutes (this sits on the request path
+// of every transaction the broken rule matches).
+func noteFileProfileUnresolvedBlock(id, name string) {
+	atomic.AddInt64(&statFileProfileUnresolvedBlocked, 1)
+	now := time.Now().Unix()
+	last := atomic.LoadInt64(&fileProfileUnresolvedLastLog)
+	if now-last >= 300 && atomic.CompareAndSwapInt64(&fileProfileUnresolvedLastLog, last, now) {
+		logger.Printf("WARN Policy: file profile id=%q (cached name %q) is referenced by a rule but does not resolve — file-bearing transactions on that rule are BLOCKED (fail-closed) until the profile store is restored or the rule is re-pointed (%d blocked since boot)",
+			sanitizeLog(id), sanitizeLog(name), atomic.LoadInt64(&statFileProfileUnresolvedBlocked))
+	}
+}
+
+// pathFileExt extracts the lowercase file extension of the last path segment
+// ("" when the segment carries none) — the shared scope test for file-control
+// decisions.
+func pathFileExt(urlPath string) string {
 	for i := len(urlPath) - 1; i >= 0 && urlPath[i] != '/'; i-- {
 		if urlPath[i] == '.' {
-			ext = strings.ToLower(urlPath[i:])
-			break
+			return strings.ToLower(urlPath[i:])
 		}
 	}
+	return ""
+}
+
+// matchFileExt returns true if urlPath ends with one of the given extensions.
+func matchFileExt(urlPath string, exts []string) bool {
+	ext := pathFileExt(urlPath)
 	if ext == "" {
 		return false
 	}

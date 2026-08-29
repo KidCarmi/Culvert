@@ -708,6 +708,10 @@ culvert_file_blocked_total %d
 # TYPE culvert_file_block_profile_size gauge
 culvert_file_block_profile_size %d
 
+# HELP culvert_fileprofile_unresolved_block_total File transactions blocked fail-closed because a rule's authoritative file-profile ID no longer resolves
+# TYPE culvert_fileprofile_unresolved_block_total counter
+culvert_fileprofile_unresolved_block_total %d
+
 # HELP culvert_dpi_blocked_total Total requests blocked by DPI content signatures
 # TYPE culvert_dpi_blocked_total counter
 culvert_dpi_blocked_total %d
@@ -801,6 +805,7 @@ culvert_auth_sso_required_total %d
 		time.Since(startTime).Seconds(),
 		rlLimit, rlEnabled,
 		fileBlocked, int64(fileBlocker.Count()),
+		atomic.LoadInt64(&statFileProfileUnresolvedBlocked),
 		dpiBlocked,
 		clamBlocked,
 		yaraBlocked,
