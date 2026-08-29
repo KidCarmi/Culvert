@@ -1,5 +1,7 @@
 package main
 
+import "path/filepath"
+
 // fileblock_startup_config.go — resolved configuration for the file-blocking
 // startup slice (PR3 follow-up pilot, Phase 1).
 //
@@ -20,21 +22,34 @@ type fileBlockStartupConfig struct {
 	// Empty ⇒ fall back to fileblock.DefaultBlockedExts.
 	Extensions []string
 	// ProfilesPath is the persistence file for globalProfileStore.
-	// Always non-empty after resolution (default "fileprofiles.json" if
-	// neither CLI flag nor FileConfig provided a path).
+	// Always non-empty after resolution (default "<dataDir>/fileprofiles.json"
+	// if neither CLI flag nor FileConfig provided a path).
 	ProfilesPath string
 }
 
 // resolveFileBlockStartupConfig is the single startup-time reader of
 // fc.FileBlock.Extensions and fc.Proxy.FileProfilesFile. fileProfilesFlag is
 // the already-dereferenced --fileprofiles-file CLI override (pass the empty
-// string when the flag is unset).
+// string when the flag is unset). dataDirVal anchors the default path (below)
+// and is otherwise unused.
 //
 // Resolution precedence for ProfilesPath: CLI flag > FileConfig > default.
-func resolveFileBlockStartupConfig(fc *FileConfig, fileProfilesFlag string) fileBlockStartupConfig {
+//
+// The default is anchored to dataDirVal — not a bare CWD-relative filename —
+// for the same reason loadFileBlockerExtensions anchors fileblock.json there:
+// dataDir is the one path guaranteed to survive a container restart (the
+// persisted volume). A bare "fileprofiles.json" default previously resolved
+// relative to the process's working directory, which for the shipped image's
+// own default CMD (no -fileprofiles-file, no proxy.fileprofiles_file — that
+// flag is set only by docker-compose.yml, not by a bare `docker run` or a
+// config.example.yaml-only deployment) is /app — NOT the /data volume, so
+// admin-created file-type profiles were silently lost on every container
+// recreate, and (independently) invisible to backup.go's dataDir-relative
+// artifact list (Codex review, PR #1255).
+func resolveFileBlockStartupConfig(fc *FileConfig, fileProfilesFlag, dataDirVal string) fileBlockStartupConfig {
 	profilesPath := firstStr(fileProfilesFlag, fc.Proxy.FileProfilesFile)
 	if profilesPath == "" {
-		profilesPath = "fileprofiles.json"
+		profilesPath = filepath.Join(dataDirVal, "fileprofiles.json")
 	}
 	return fileBlockStartupConfig{
 		Extensions:   fc.FileBlock.Extensions,

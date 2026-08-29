@@ -772,7 +772,7 @@ func initLogStore(s *startupState) {
 // Behaviour is unchanged — loader errors are logged (non-fatal) so
 // startup continues with in-memory defaults, matching the original body.
 func initFileBlocking(s *startupState) {
-	if err := loadFileBlocking(resolveFileBlockStartupConfig(s.fc, *s.fileProfilesFile)); err != nil {
+	if err := loadFileBlocking(resolveFileBlockStartupConfig(s.fc, *s.fileProfilesFile, dataDir)); err != nil {
 		logger.Printf("FileProfiles: load error (%v) — using in-memory defaults", err)
 	}
 }
