@@ -422,7 +422,11 @@
   (P2c) scope realizability — `scopeRealizable` witness check rejects a contradictory scope
   (tool off the server dimension, or an excluded inclusion) that is enumerable yet matches
   nothing (`ScopeNotRealizable`); (P1-H) `rollbackPathReady` reads persistStatus + rehearsal
-  evidence under `durableMu` so a preflight cannot observe an in-flight rehearsal as durable.
+  evidence under `durableMu` so a preflight cannot observe an in-flight rehearsal as durable;
+  (P2d) `scopeRealizable` picks a non-excluded identity (`firstNotExcluded`) so a scope with a
+  surviving principal is not falsely rejected; (P2e) every durable rollout mutation clears a
+  stale `write_failed` on success, so a durable rehearsal after a transient failure is not stuck
+  reporting the rollback path unhealthy.
 - **Evidence:** ADR-0035; `docs/design/mcp/CANARY-READINESS-MATRIX.md`;
   `docs/design/mcp/CANARY-FIRST-RUNBOOK.md`; `internal/mcp/canary/*_test.go`;
   `mcp_canary_preflight_test.go`; the differential gate `TestShadow_LivePreSideEffectEquivalence`.

@@ -114,17 +114,28 @@ func scopeRealizable(sc rollout.Scope, spec rollout.ScopeSpec) bool {
 		}
 		return ""
 	}
+	// For a dimension that carries an exclusion set (tenant, principal), the witness must use a
+	// value that survives its exclusions — otherwise a scope like Principals:[p1,p2] +
+	// ExcludePrincipals:[p1] would be wrongly rejected because the witness picked the excluded p1
+	// even though p2 is realizable (Codex P2, PR #1249). An EMPTY inclusion set means the
+	// dimension matches anything (witness uses ""); a non-empty inclusion set with EVERY value
+	// excluded genuinely empties the dimension → no witness → not realizable.
+	tenant, tenantOK := firstNotExcluded(spec.Tenants, spec.ExcludeTenants)
+	principal, principalOK := firstNotExcluded(spec.Principals, spec.ExcludePrincipals)
+	if !tenantOK || !principalOK {
+		return false
+	}
 	for i := range spec.Tools {
 		t := spec.Tools[i]
 		w := rollout.Subject{
 			Capability:      spec.Capability,
-			Tenant:          firstOr(spec.Tenants),
+			Tenant:          tenant,
 			ServerID:        t.Server, // must also lie in the Servers dimension, else the witness fails
 			ToolName:        t.Name,
 			ToolFingerprint: t.Fingerprint,
-			PrincipalID:     firstOr(spec.Principals),
-			AgentID:         firstOr(spec.Agents),
-			ClientID:        firstOr(spec.Clients),
+			PrincipalID:     principal,
+			AgentID:         firstOr(spec.Agents),  // no exclusion set exists for these dimensions
+			ClientID:        firstOr(spec.Clients), // (agent/client/environment) — any included value works
 			Environment:     firstOr(spec.Environments),
 			Operation:       rollout.RiskRead,
 		}
@@ -133,6 +144,26 @@ func scopeRealizable(sc rollout.Scope, spec rollout.ScopeSpec) bool {
 		}
 	}
 	return false
+}
+
+// firstNotExcluded returns a value from incl that is not present in excl. The bool is false ONLY
+// when incl is non-empty and every one of its values is excluded (the dimension is fully
+// cancelled → no realizable value). An empty incl returns ("", true): the dimension matches
+// anything, and the witness's zero value for it is fine.
+func firstNotExcluded(incl, excl []string) (string, bool) {
+	if len(incl) == 0 {
+		return "", true
+	}
+	ex := make(map[string]struct{}, len(excl))
+	for _, e := range excl {
+		ex[e] = struct{}{}
+	}
+	for _, v := range incl {
+		if _, bad := ex[v]; !bad {
+			return v, true
+		}
+	}
+	return "", false
 }
 
 // validateScopeRawFields enforces the read-first and exact-fingerprint constraints on the raw

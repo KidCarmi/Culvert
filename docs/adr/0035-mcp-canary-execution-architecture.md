@@ -185,6 +185,8 @@ Twelve defects, each caught by a named gate:
 | 21 | identity-less/wildcard-tenant scope enters Canary | `TestValidateScope_Rejections` (no_tenant/empty_tenant_string/too_many_tenants) |
 | 22 | contradictory scope (tool off-server / excluded inclusion) validates | `TestValidateScope_Rejections` (tool_server_not_in_scope/excluded_tenant) via `scopeRealizable` |
 | 23 | rollback health read torn from an in-flight rehearsal write | `TestRollbackPathHealthy_DurableRehearsalAndRace` (both facts under `durableMu`) |
+| 24 | realizability witness picks an excluded identity, rejecting a good scope | `TestValidateScope_ExcludedIdentityStillRealizable` (`firstNotExcluded`) |
+| 25 | stale `write_failed` blocks rollback readiness after a durable rehearsal | `TestRollbackPathHealthy_ClearsStaleWriteFailed` (success clears the status) |
 
 Mutations 1–4 and 13–17 (plus four-eyes, TTL ceiling, read-first, bound-cap, fingerprint,
 per-tool coverage, exact identity) are mechanically re-introduced and confirmed to fail their

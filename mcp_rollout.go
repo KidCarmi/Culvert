@@ -343,6 +343,7 @@ func (r *mcpRollout) emergencyDisable(capb rollout.Capability, actor string) err
 		logger.Printf("MCP rollout emergency-disable persist for %s failed (disable in effect in memory, NOT restart-durable): %q", capb.String(), sanitizeLog(err.Error()))
 		return fmt.Errorf("%w: %v", errRolloutPersistFailed, err)
 	}
+	r.setPersistStatus(capb, "recovered") // a successful durable write clears any stale write_failed
 	return nil
 }
 
@@ -359,6 +360,7 @@ func (r *mcpRollout) clearEmergency(capb rollout.Capability) error {
 		logger.Printf("MCP rollout emergency-clear persist for %s failed: %q", capb.String(), sanitizeLog(err.Error()))
 		return fmt.Errorf("%w: %v", errRolloutPersistFailed, err)
 	}
+	r.setPersistStatus(capb, "recovered") // a successful durable write clears any stale write_failed
 	return nil
 }
 
@@ -375,6 +377,10 @@ func (r *mcpRollout) recordRehearsal(capb rollout.Capability) error {
 		logger.Printf("MCP rollout rehearsal persist for %s failed: %q", capb.String(), sanitizeLog(err.Error()))
 		return fmt.Errorf("%w: %v", errRolloutPersistFailed, err)
 	}
+	// A successful durable write clears any stale write_failed, so a rehearsal that succeeds
+	// after an earlier failure is not stuck reporting the rollback path unhealthy forever
+	// (Codex P2, PR #1249). Mirrors commitRolloutTransition's success path.
+	r.setPersistStatus(capb, "recovered")
 	return nil
 }
 

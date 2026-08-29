@@ -188,6 +188,36 @@ func TestRollbackPathHealthy_DurableRehearsalAndRace(t *testing.T) {
 	}
 }
 
+// TestRollbackPathHealthy_ClearsStaleWriteFailed proves the Codex P2 fix: a successful durable
+// rehearsal clears a prior write_failed persistence status, so the rollback path is not stuck
+// reporting unhealthy forever after one transient write failure.
+func TestRollbackPathHealthy_ClearsStaleWriteFailed(t *testing.T) {
+	_ = getMCPRollout()
+	prevR := globalMCPRollout
+	globalMCPRollout = &mcpRollout{
+		gateway:    rollout.NewState(rollout.CapabilityGateway, rollout.DefaultLimits()),
+		management: rollout.NewState(rollout.CapabilityManagement, rollout.DefaultLimits()),
+	}
+	prevDir := dataDir
+	dataDir = t.TempDir()
+	t.Cleanup(func() { globalMCPRollout = prevR; dataDir = prevDir })
+
+	capb := rollout.CapabilityGateway
+	globalMCPRollout.setPersistStatus(capb, "write_failed") // an earlier rehearsal write failed
+	if rollbackPathHealthy(capb) {
+		t.Fatal("a write_failed persistence status must report the rollback path unhealthy")
+	}
+	if err := globalMCPRollout.recordRehearsal(capb); err != nil {
+		t.Fatalf("recordRehearsal: %v", err)
+	}
+	if got := globalMCPRollout.persistStatus(capb); got != "recovered" {
+		t.Fatalf("a successful rehearsal must clear stale write_failed, got %q", got)
+	}
+	if !rollbackPathHealthy(capb) {
+		t.Fatal("rollback path must be healthy after a durable rehearsal cleared the stale failure")
+	}
+}
+
 // TestMCPCanaryStatus_ReadOnlyContract proves the admin surface reports the contract honestly:
 // defined but not ready, a non-empty unmet list, the full prerequisite vocabulary, and the
 // live tier unarmed.

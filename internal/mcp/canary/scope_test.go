@@ -93,6 +93,23 @@ func TestValidateScope_Rejections(t *testing.T) {
 	}
 }
 
+// TestValidateScope_ExcludedIdentityStillRealizable proves the Codex P2 fix: a scope that
+// excludes one of several bound principals is still realizable via the surviving principal and
+// must NOT be rejected as ScopeNotRealizable (the witness picks a non-excluded identity).
+func TestValidateScope_ExcludedIdentityStillRealizable(t *testing.T) {
+	s := validFirstCanaryScope()
+	s.Principals = []string{"p1", "p2"}
+	s.ExcludePrincipals = []string{"p1"} // p2 survives → realizable
+	if r := ValidateScope(s, 1); r != ScopeOK {
+		t.Fatalf("a scope with a surviving non-excluded principal must be realizable, got %q", r)
+	}
+	// But excluding EVERY bound principal genuinely empties the dimension → not realizable.
+	s.ExcludePrincipals = []string{"p1", "p2"}
+	if r := ValidateScope(s, 1); r != ScopeNotRealizable {
+		t.Fatalf("a scope whose every principal is excluded must be unrealizable, got %q", r)
+	}
+}
+
 // TestScopeReadFirst_IndependentOfBounds proves read-first is a distinct axis from
 // boundedness: a well-bounded scope can still be non-read-first, and that must surface as
 // its own signal (the readiness layer maps it to a distinct reason).
