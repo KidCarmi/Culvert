@@ -1,13 +1,15 @@
 # Controlled Shadow Activation — Dependency Graph & Design
 
 Status: **design + implementation** (phase "Controlled Shadow Activation Preparation").
-The mechanism is complete and fail-closed, but Controlled Shadow activation is **NOT
-activation-ready in production**: it is gated on TWO independent hard prerequisites — (1) a tool
-being `Usable` in the requested scope, which catalog ingestion never yields (tool approval is a
-later slice, §8), still **OPEN**; and (2) durable per-request `ShadowDecision` evidence via a
-`schema_version:2` envelope (the `SHADOW-EVIDENCE-ROUTING-1` durable-envelope addendum, §8a), now
-**CLOSED** — shipped on this branch (the parent routing item stays a separate open debt). Neither absorbs the other, and prerequisite 1 remaining open keeps activation out of
-reach: no production activation until it closes too — see §8b.
+The mechanism is complete and fail-closed. Both hard prerequisites are now **CLOSED**: (1) a tool
+being `Usable` in the requested scope — closed by the MCP tool-trust approval / promotion slice
+(ADR-0034, §8), which lets a privileged human trust an exact observed fingerprint for the
+`shadow_evaluation` purpose and materializes that trust as the catalog `Usable` projection; and
+(2) durable per-request `ShadowDecision` evidence via a `schema_version:2` envelope (the
+`SHADOW-EVIDENCE-ROUTING-1` durable-envelope addendum, §8a). The mechanism is now reachable, but
+activation remains a deliberate, separately-reviewed operator action — the tool-trust slice does
+NOT activate Shadow, Canary, or Production, and a `shadow_evaluation` approval structurally cannot
+arm the live-execution tier (the purpose firewall). See §8b.
 Predecessors: ADR-0024 (MCP Agent Security Gateway, disabled-by-default), PR #1224
 (hardened MCP backend), PR #1226 (Layer B Shadow capability separation + formal
 `ShadowDecision` Model 1). Baseline `main` = `e698a12`.
@@ -255,15 +257,22 @@ cursors, restart). With this prerequisite closed, the
 runbook's evidence-parity / zero-gap exit criteria are now satisfiable; activation still stays
 unreachable in production on prerequisite 1 (§8, a usable scoped tool) below.
 
-## 8b. Corrected verdict — TWO hard prerequisites (one now CLOSED, one still OPEN)
+## 8b. Corrected verdict — TWO hard prerequisites (BOTH now CLOSED)
 
-**Controlled Shadow activation is NOT activation-ready in production** until BOTH prerequisites
-close. Status as of the durable-evidence follow-up:
+**Controlled Shadow activation is now mechanically reachable** — both hard prerequisites are
+closed. Status as of the tool-trust approval slice (ADR-0034):
 
-1. **A usable scoped tool** (§8) — **OPEN**. A catalog tool promoted to `Usable` within the
-   requested scope; structurally unsatisfiable until the tool-approval / promotion slice ships,
-   so the activation preflight fails closed with `no_usable_shadow_tools`. That slice is separate
-   and is NOT delivered by the durable-evidence follow-up.
+1. **A usable scoped tool** (§8) — **CLOSED** by the MCP tool-trust approval / promotion slice
+   (ADR-0034, branch `claude/mcp-tool-trust-approval`). A privileged human approves an exact
+   observed tool fingerprint for the `shadow_evaluation` purpose; the durable `internal/mcp/tooltrust`
+   store is the source of truth and the catalog `Usable` state is a materialized projection of it
+   (a coordinator promotes on approve, demotes on revoke/expiry, and re-derives on startup + read).
+   A scoped, approved tool now satisfies `evaluateShadowActivationPreflight` — the `no_usable_shadow_tools`
+   reason clears. Trust is NOT authorization: a `Usable` tool still only survives to the default-deny
+   policy step (anti-weakening tests pin `Usable + DENY/REQUIRE_APPROVAL/REQUIRE_CONFIRMATION/no-rule`),
+   and a `shadow_evaluation` approval structurally can never arm the live-execution tier
+   (`liveExecDepsConfigured` / `modeExecReady` for Canary/Production) — the purpose firewall. This
+   slice does NOT activate Shadow; it makes the last hard prerequisite reachable.
 2. **Durable ShadowDecision evidence** (§8a, the `SHADOW-EVIDENCE-ROUTING-1` durable-envelope
    addendum) — **CLOSED** by the dedicated durable-evidence follow-up (branch
    `claude/mcp-shadow-evidence-v2`): the `schema_version:2` envelope now persists the full
@@ -273,7 +282,9 @@ close. Status as of the durable-evidence follow-up:
    item — pre-dispatch fail-closed signals not routed into `shadow_evaluated` evidence — is a
    separate LOW-severity item that stays OPEN/deferred, tracked in the debt register.)
 
-These two prerequisites are SEPARATE slices and neither absorbs the other. **No production
-Controlled Shadow activation until BOTH close** — prerequisite 1 remains open, so activation stays
-unreachable in production, and the runbook's evidence-parity / zero-gap exit criteria are now
-satisfiable (prerequisite 2) but not yet reachable (prerequisite 1).
+These two prerequisites are SEPARATE slices and neither absorbs the other. **Both are now CLOSED**,
+so Controlled Shadow activation is mechanically reachable and the runbook's evidence-parity /
+zero-gap exit criteria are satisfiable. Activation itself remains a deliberate, separately-reviewed
+operator action (a stable host, real scope, parity evidence, monitoring, ownership, and fresh
+identity per the runbook); it is NOT performed by the tool-trust slice, which only makes
+prerequisite 1 reachable.

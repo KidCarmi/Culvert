@@ -93,7 +93,7 @@ func buildRecord(t *testing.T, l limits.CatalogLimits, id registry.Identity, sch
 func buildRecordID(t *testing.T, l limits.CatalogLimits, id registry.Identity, schema []byte) *ToolRecord {
 	t.Helper()
 	srv := serverRecord(testServer, id)
-	recs, err := parseDiscovery(srv, DiscoveryInput{ServerID: srv.ID, Identity: id, Raw: wrapTool(schema)}, l)
+	recs, _, err := parseDiscovery(srv, DiscoveryInput{ServerID: srv.ID, Identity: id, Raw: wrapTool(schema)}, l)
 	if err != nil || len(recs) != 1 {
 		return nil
 	}

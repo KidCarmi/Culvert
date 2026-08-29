@@ -162,6 +162,9 @@ func registerMCPRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/mcp/publication-decision", apiMCPPublicationDecision)
 	mux.HandleFunc("/api/mcp/approvals", apiMCPApprovals)
 	mux.HandleFunc("/api/mcp/approval-decision", apiMCPApprovalDecision)
+	// ADR-0034 tool-trust approval / promotion surface.
+	mux.HandleFunc("/api/mcp/tool-approvals", apiMCPToolApprovals)
+	mux.HandleFunc("/api/mcp/tool-approval-decision", apiMCPToolApprovalDecision)
 	mux.HandleFunc("/api/mcp/config", apiMCPConfig)
 	mux.HandleFunc("/api/mcp/management-access", apiMCPManagementAccess)
 	mux.HandleFunc("/api/mcp/distribution", apiMCPDistribution)
@@ -187,13 +190,17 @@ func mcpErr(w http.ResponseWriter, err error) {
 	reason := mcperr.ReasonOf(err)
 	status := http.StatusBadRequest
 	switch reason {
-	case mcperr.ReasonAdminNotFound, mcperr.ReasonApprovalNotFound:
+	case mcperr.ReasonAdminNotFound, mcperr.ReasonApprovalNotFound, mcperr.ReasonToolNotFound:
 		status = http.StatusNotFound
-	case mcperr.ReasonAdminForbidden, mcperr.ReasonManagementToolUnauthorized:
+	case mcperr.ReasonAdminForbidden, mcperr.ReasonManagementToolUnauthorized, mcperr.ReasonApprovalNotAuthorized:
 		status = http.StatusForbidden
-	case mcperr.ReasonApprovalTerminalState:
+	case mcperr.ReasonApprovalTerminalState, mcperr.ReasonApprovalRevoked,
+		mcperr.ReasonApprovalTenantConflict, mcperr.ReasonToolNotApprovable,
+		mcperr.ReasonToolApprovalStale, mcperr.ReasonToolFingerprintMismatch,
+		mcperr.ReasonServerNotUsable:
 		status = http.StatusConflict
-	case mcperr.ReasonPublicationDurabilityRequired, mcperr.ReasonEventDurabilityDegraded:
+	case mcperr.ReasonPublicationDurabilityRequired, mcperr.ReasonEventDurabilityDegraded,
+		mcperr.ReasonApprovalStoreUnavailable:
 		status = http.StatusServiceUnavailable
 	}
 	code := reason.Code()
@@ -261,6 +268,10 @@ func apiMCPOverview(w http.ResponseWriter, r *http.Request) {
 		// enforcement/execution/fleet-distribution all truthfully false. The active
 		// snapshot detail is also on /api/mcp/policy (the same shared store).
 		"policy": mcpPolicyStatus(),
+		// ADR-0034: read-only tool-trust subsystem status (composed + reason). The
+		// approvals themselves are on /api/mcp/tool-approvals; this is composition state
+		// only. Not composed unless the Gateway qualification inventory is loaded.
+		"tool_trust": mcpToolTrustStatus(),
 	})
 }
 
@@ -377,6 +388,10 @@ func apiMCPTools(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, []adminapi.ToolView{})
 		return
 	}
+	// Reconcile the catalog Usable projection before the read so a promoted/expired
+	// tool's disposition and its ADR-0034 trust overlay are current (no-op when the
+	// tool-trust coordinator is not composed).
+	mcpToolTrustReconcile()
 	sid := r.URL.Query().Get("server_id")
 	if name := r.URL.Query().Get("tool_name"); name != "" {
 		v, err := m.svc.Inventory.GetTool(tenant, sid, name)
@@ -384,7 +399,7 @@ func apiMCPTools(w http.ResponseWriter, r *http.Request) {
 			mcpErr(w, err)
 			return
 		}
-		jsonOK(w, v)
+		jsonOK(w, enrichToolView(tenant, v))
 		return
 	}
 	v, err := m.svc.Inventory.ListTools(tenant, sid, mcpQueryLimit(r))
@@ -392,7 +407,14 @@ func apiMCPTools(w http.ResponseWriter, r *http.Request) {
 		mcpErr(w, err)
 		return
 	}
-	jsonOK(w, v)
+	// Snapshot the tenant's approvals ONCE and reuse the index for every tool, so a large
+	// inventory cannot amplify one request into O(tools × approvals) list allocations.
+	ann := mcpToolTrust.newToolTrustAnnotator(tenant)
+	enriched := make([]mcpToolViewEnriched, 0, len(v))
+	for i := range v {
+		enriched = append(enriched, enrichToolViewWith(ann, v[i]))
+	}
+	jsonOK(w, enriched)
 }
 
 func apiMCPDecisions(w http.ResponseWriter, r *http.Request) {
