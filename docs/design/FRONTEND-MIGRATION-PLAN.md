@@ -725,6 +725,58 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > FRESH/SETUPFAIL instances now carry their own paths, making the history
 > journeys deterministic).
 >
+> **2E-A — Content Security & DPI (this branch, 2026-08-29).** First slice
+> of the 2E decomposition (2E-0 inventory + 2E-A implementation; 2E-B
+> Decryption Operations and 2E-C CDR/Sluice are inventoried but explicitly
+> deferred — nothing decryption-operational or CDR ships here, and the
+> 2D-owned Decryption Profiles / File Profiles surfaces are untouched).
+> **Backend hardening (red-before against ac0e16f2,
+> `secscan_2ea_red_test.go`):** (1) STALE-WRITER FENCES on the whole-set
+> configuration writes — threat-feed domain allowlist, YARA engine
+> settings, scan exclusions, DPI bypass — and the per-file YARA rule
+> create/update: GETs serve a content-derived `revision`
+> (`ui_security_fence.go`; no new persisted state, restart-stable for
+> identical content), writes accept an optional `ifRevision` whose
+> mismatch is the ONE structured 409 with no mutation; a fenced YARA
+> CREATE asserts the `new` sentinel so an existing rule file is never
+> silently replaced; absent fence = legacy last-writer-wins verbatim;
+> `contentSecMu` (or the settings save's own adminSettingsMu precondition
+> for YARA settings) makes compare+apply atomic; bulk doors
+> (import/rollback/CP snapshot/seeds) deliberately bypass, matching 2D.
+> (2) DURABILITY TRUTH: `ContentScanner.Save` returns its write error; DPI
+> pattern add/remove, DPI bypass replace, and the scan-exclusions replace
+> answer a truthful 500 on persist failure (applied in memory — fail-safe
+> — with distinct `*_unpersisted` audit actions, the domain-allowlist
+> precedent); the YARA settings PUT is persist-before-apply via a
+> dedicated adminSaveOverrides target — its 500 leaves the live engine
+> posture untouched. (3) SECRET BOUNDARY: the scan-service URL is
+> userinfo-redacted on every viewer read surface (svc + both status-map
+> sites). DPI pattern POST/DELETE stay item-level (no fence — commuting
+> ops); imperative actions (feed sync, YARA reload, cache clear, validate)
+> carry no fence by design. OpenAPI documents revisions, fences, 409s,
+> durability 500s, and the redaction.
+> **Frontend:** one Security-domain surface at /app/security/content-security
+> (nav: Security → Content Security) with Overview / Threat Intelligence /
+> YARA / DPI / Exclusions & Cache sections; dedicated `api/contentsec.ts`
+> (fail-closed decoders, verbatim-preserved posture strings rendered as
+> unrecognized when unknown, read/write DTO separation, canonical /api/dpi
+> only — the deprecated /api/content-scan aliases are never requested,
+> pinned by unit + e2e). RBAC-exact mounting (viewer zero write controls;
+> Operator exactly DPI patterns + validate dry-run; Admin the rest).
+> Ceremonies state effect and scope: whole-set replaces confirm with exact
+> add/remove counts and the surface's real consequence; YARA delete,
+> reload (cache cleared), coverage-reducing settings changes, pattern
+> removal, and whole-cache clear are T2; validate is explicitly
+> validation-only. Structured 409 → fresh-truth notice; transport-lost
+> mutations latch until an advanced successful refetch (useObjectPage).
+> **Proofs:** 20 new unit tests (391 total); real-binary
+> `content-security-2ea.spec.ts` — viewer/operator posture, admin
+> reversible bypass round trip with API verification and restore, live
+> stale-fence 409, validate-only, ceremonial YARA rule delete against a
+> per-run LOCAL rules directory (new harness premise in e2e-smoke.sh),
+> truthful feed-sync refusal with feeds disabled, zero external-origin
+> requests, zero deprecated-alias requests, full state restore at exit.
+>
 > **2D-C FINAL two-defect closure (this branch, 2026-08-29 —
 > external-review follow-up on the 86c9c17a candidate).** Both red-before
 > against 86c9c17a (`dc_final5_red_test.go`):

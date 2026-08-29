@@ -133,7 +133,11 @@ cat > "$WORK/failcfg.yaml" <<EOF2
 log_store_path: $WORK/faillogstore
 EOF2
 
-start_instance AUTH "$UI_PORT" "$PROXY_PORT" -ui-users-file "$WORK/auth/ui_users.json" -config "$WORK/auth/config.yaml" -policy "$WORK/auth/policy.json"
+# 2E-A premise: a per-run LOCAL YARA rules directory so the Content Security
+# YARA journey exercises the real engine deterministically (no external
+# service; the dir starts empty and the spec cleans up what it creates).
+mkdir -p "$WORK/auth/yara"
+start_instance AUTH "$UI_PORT" "$PROXY_PORT" -ui-users-file "$WORK/auth/ui_users.json" -config "$WORK/auth/config.yaml" -policy "$WORK/auth/policy.json" -yara-rules-dir "$WORK/auth/yara"
 start_instance FRESH "$FRESH_PORT" "$((PROXY_PORT + 1))" -ui-users-file "$WORK/fresh/ui_users.json" -config "$WORK/fresh/config.yaml"
 start_instance FAIL "$FAIL_PORT" "$((PROXY_PORT + 2))" -ui-users-file "$WORK/failparent/blocker/ui_users.json" -config "$WORK/failcfg.yaml"
 
