@@ -64,39 +64,115 @@ func contentSecRevision(parts ...string) string {
 	return fmt.Sprintf("sha256:%x", h.Sum(nil))
 }
 
-// domainAllowlistRevision derives the threat-feed domain-allowlist revision
-// (DomainAllowlist() returns the normalized, sorted entries).
-func domainAllowlistRevision() string {
-	return contentSecRevision(append([]string{"allowlist"}, globalThreatFeed.DomainAllowlist()...)...)
+// COHERENT {state, revision(state)} PAIRS (2E-A-2 §1): every fenced GET (and
+// every fenced PUT's success response) derives its revision from the SAME
+// single committed store snapshot it returns — never from a second store read,
+// which could interleave with a writer and emit data=A with revision(B) (a
+// token that lets a stale A-based write pass the fence against state B). The
+// three list stores each return a coherent copy under one lock
+// (threatfeed.DomainAllowlist, scanexcl.Lists, scanner.BypassHosts), so the
+// pure *RevisionOf derivations below fingerprint exactly that copy; the YARA
+// settings snapshot is taken under adminSettingsMu, the surface's writer
+// domain (yaraSettingsSnapshot).
+
+// domainAllowlistRevisionOf derives the threat-feed domain-allowlist revision
+// from one returned snapshot (DomainAllowlist() copies are normalized+sorted).
+func domainAllowlistRevisionOf(domains []string) string {
+	return contentSecRevision(append([]string{"allowlist"}, domains...)...)
 }
 
-// scanExclusionsRevision derives the scan-exclusion revision (Lists() returns
-// both lists normalized + sorted; the section markers keep them unambiguous).
-func scanExclusionsRevision() string {
-	hashes, hosts := globalScanExclusions.Lists()
+// domainAllowlistRevision reads the current committed allowlist and derives
+// its revision (fence-compare sites; response sites derive from the snapshot
+// they return instead).
+func domainAllowlistRevision() string {
+	return domainAllowlistRevisionOf(globalThreatFeed.DomainAllowlist())
+}
+
+// scanExclusionsRevisionOf derives the scan-exclusion revision from one
+// returned snapshot pair (Lists() copies are normalized + sorted; the section
+// markers keep the two lists unambiguous).
+func scanExclusionsRevisionOf(hashes, hosts []string) string {
 	parts := append([]string{"hashes"}, hashes...)
 	parts = append(parts, "hosts")
 	parts = append(parts, hosts...)
 	return contentSecRevision(parts...)
 }
 
-// dpiBypassRevision derives the DPI bypass-host revision (BypassHosts()
-// returns the normalized, sorted entries).
-func dpiBypassRevision() string {
-	return contentSecRevision(append([]string{"dpi-bypass"}, dpiScanner.BypassHosts()...)...)
+// scanExclusionsRevision reads the current committed lists and derives their
+// revision (fence-compare sites).
+func scanExclusionsRevision() string {
+	hashes, hosts := globalScanExclusions.Lists()
+	return scanExclusionsRevisionOf(hashes, hosts)
 }
 
-// yaraSettingsRevision derives the YARA engine-settings revision from the six
-// live values in canonical order.
-func yaraSettingsRevision() string {
+// dpiBypassRevisionOf derives the DPI bypass-host revision from one returned
+// snapshot (BypassHosts() copies are normalized, sorted).
+func dpiBypassRevisionOf(hosts []string) string {
+	return contentSecRevision(append([]string{"dpi-bypass"}, hosts...)...)
+}
+
+// dpiBypassRevision reads the current committed bypass list and derives its
+// revision (fence-compare sites).
+func dpiBypassRevision() string {
+	return dpiBypassRevisionOf(dpiScanner.BypassHosts())
+}
+
+// yaraSettingsSnapshot reads the six YARA engine values as ONE coherent
+// posture under adminSettingsMu — the surface's writer domain (the settings
+// PUT's applyOnSuccess installs all six while holding that mutex, so a
+// lock-free reader could observe a torn mix of old and new values).
+func yaraSettingsSnapshot() yaraSettingsTarget {
+	adminSettingsMu.Lock()
+	defer adminSettingsMu.Unlock()
+	return yaraSettingsTarget{
+		Enabled:       yaraGetEnabled(),
+		TimeoutSecs:   yaraGetTimeoutSecs(),
+		MaxInflight:   yaraGetMaxInflight(),
+		OnTimeout:     yaraGetOnTimeout(),
+		OnSaturation:  yaraGetOnSaturation(),
+		AlertDegraded: yaraGetAlertDegraded(),
+	}
+}
+
+// yaraSettingsRevisionOf derives the engine-settings revision from one
+// coherent posture snapshot.
+func yaraSettingsRevisionOf(s yaraSettingsTarget) string {
 	return contentSecRevision("yara-settings",
-		fmt.Sprintf("%t", yaraGetEnabled()),
-		fmt.Sprintf("%d", yaraGetTimeoutSecs()),
-		fmt.Sprintf("%d", yaraGetMaxInflight()),
-		yaraGetOnTimeout(),
-		yaraGetOnSaturation(),
-		fmt.Sprintf("%t", yaraGetAlertDegraded()),
+		fmt.Sprintf("%t", s.Enabled),
+		fmt.Sprintf("%d", s.TimeoutSecs),
+		fmt.Sprintf("%d", s.MaxInflight),
+		s.OnTimeout,
+		s.OnSaturation,
+		fmt.Sprintf("%t", s.AlertDegraded),
 	)
+}
+
+// yaraSettingsMapOf renders one coherent posture snapshot for JSON responses
+// and audit diffs.
+func yaraSettingsMapOf(s yaraSettingsTarget) map[string]any {
+	return map[string]any{
+		"enabled":        s.Enabled,
+		"timeout_secs":   s.TimeoutSecs,
+		"max_inflight":   s.MaxInflight,
+		"on_timeout":     s.OnTimeout,
+		"on_saturation":  s.OnSaturation,
+		"alert_degraded": s.AlertDegraded,
+	}
+}
+
+// yaraSettingsRevision derives the engine-settings revision from the live
+// values. ONLY safe where the caller already holds adminSettingsMu (the
+// settings PUT precondition) — everywhere else use yaraSettingsSnapshot +
+// yaraSettingsRevisionOf so the read is serialized with the writer domain.
+func yaraSettingsRevision() string {
+	return yaraSettingsRevisionOf(yaraSettingsTarget{
+		Enabled:       yaraGetEnabled(),
+		TimeoutSecs:   yaraGetTimeoutSecs(),
+		MaxInflight:   yaraGetMaxInflight(),
+		OnTimeout:     yaraGetOnTimeout(),
+		OnSaturation:  yaraGetOnSaturation(),
+		AlertDegraded: yaraGetAlertDegraded(),
+	})
 }
 
 // yaraRuleRevision derives a rule FILE's revision from its raw source. The

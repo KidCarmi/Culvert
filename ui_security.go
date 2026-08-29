@@ -745,7 +745,10 @@ func apiDomainAllowlist(w http.ResponseWriter, r *http.Request) {
 			list = []string{}
 		}
 		contentSecGETPause("allowlist")
-		jsonOK(w, map[string]any{"domains": list, "revision": domainAllowlistRevision()})
+		// Revision derived from the SAME snapshot returned (2E-A-2 §1) — a
+		// second store read could interleave with a writer and mint a token
+		// for a state this response does not show.
+		jsonOK(w, map[string]any{"domains": list, "revision": domainAllowlistRevisionOf(list)})
 	case http.MethodPut:
 		if !requireRole(w, r, RoleAdmin) {
 			return
@@ -804,9 +807,11 @@ func apiDomainAllowlist(w http.ResponseWriter, r *http.Request) {
 		// empty, dedupes via map), so the audit reflects what was actually
 		// stored — raw len(body.Domains) over-reports when clients send
 		// blanks, duplicates, or case/whitespace variants (Codex P2 on PR #284).
-		count := len(globalThreatFeed.DomainAllowlist())
+		stored := globalThreatFeed.DomainAllowlist()
+		count := len(stored)
 		auditEvent(r, "threatfeed.allowlist.update", fmt.Sprintf("%d domain(s)", count), "")
-		jsonOK(w, map[string]any{"ok": true, "count": count, "revision": domainAllowlistRevision()})
+		// Count and revision from ONE committed snapshot (2E-A-2 §1).
+		jsonOK(w, map[string]any{"ok": true, "count": count, "revision": domainAllowlistRevisionOf(stored)})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -854,6 +859,11 @@ func apiSecYARAReload(w http.ResponseWriter, r *http.Request) {
 //
 // yaraSettingsMap returns the current YARA engine runtime config as a map
 // suitable for JSON serialisation.
+// yaraSettingsMap renders the live values. ONLY safe where the caller already
+// holds adminSettingsMu (the settings PUT precondition) — response and audit
+// sites use a coherent yaraSettingsTarget snapshot via yaraSettingsMapOf
+// instead (2E-A-2 §1: the six values are installed together under
+// adminSettingsMu, so a lock-free multi-read can observe a torn mix).
 func yaraSettingsMap() map[string]any {
 	return map[string]any{
 		"enabled":        yaraGetEnabled(),
@@ -909,9 +919,12 @@ func apiSecYARASettings(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleViewer) {
 			return
 		}
-		m := yaraSettingsMap()
+		// One coherent posture snapshot under the writer domain; the revision
+		// fingerprints exactly the returned state (2E-A-2 §1).
+		snap := yaraSettingsSnapshot()
 		contentSecGETPause("yara-settings")
-		m["revision"] = yaraSettingsRevision()
+		m := yaraSettingsMapOf(snap)
+		m["revision"] = yaraSettingsRevisionOf(snap)
 		jsonOK(w, m)
 
 	case http.MethodPut:
@@ -970,15 +983,19 @@ func apiSecYARASettings(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "YARA settings could not be persisted; the live engine posture is unchanged", http.StatusInternalServerError)
 			return
 		}
-		auditEventDiff(r, "security.yara_settings", "yara_engine", "", prev, yaraSettingsMap())
+		auditEventDiff(r, "security.yara_settings", "yara_engine", "", prev, yaraSettingsMapOf(target))
 		// Intentionally NOT calling saveConfigVersion: YARA engine
 		// settings are out of the rollback surface by design (D-sec,
 		// CONFIG-VERSIONING-TRIAGE.md §4.2). Rolling back could
 		// un-harden yara_on_timeout / yara_on_saturation / yara_enabled
 		// — silently relaxing a scanner posture the operator chose to
 		// tighten.
-		m := yaraSettingsMap()
-		m["revision"] = yaraSettingsRevision()
+		//
+		// The response is the posture THIS PUT installed (coherent by
+		// construction — never a re-read that could interleave with a
+		// concurrent writer, 2E-A-2 §1).
+		m := yaraSettingsMapOf(target)
+		m["revision"] = yaraSettingsRevisionOf(target)
 		jsonOK(w, m)
 
 	default:
@@ -1181,10 +1198,11 @@ func apiSecScanExclusions(w http.ResponseWriter, r *http.Request) {
 		}
 		hashes, hosts := globalScanExclusions.Lists()
 		contentSecGETPause("exclusions")
+		// Revision derived from the SAME snapshot returned (2E-A-2 §1).
 		jsonOK(w, map[string]any{
 			"hashes":   hashes,
 			"hosts":    hosts,
-			"revision": scanExclusionsRevision(),
+			"revision": scanExclusionsRevisionOf(hashes, hosts),
 		})
 	case http.MethodPut:
 		if !requireRole(w, r, RoleAdmin) {
@@ -1230,10 +1248,11 @@ func apiSecScanExclusions(w http.ResponseWriter, r *http.Request) {
 		// binary/host the operator just chose to scan. Same shape as
 		// auth.password_change.
 		hashes, hosts := globalScanExclusions.Lists()
+		// Revision from the SAME committed snapshot returned (2E-A-2 §1).
 		jsonOK(w, map[string]any{
 			"hashes":   hashes,
 			"hosts":    hosts,
-			"revision": scanExclusionsRevision(),
+			"revision": scanExclusionsRevisionOf(hashes, hosts),
 		})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1254,7 +1273,8 @@ func apiContentScanBypass(w http.ResponseWriter, r *http.Request) {
 		}
 		hosts := dpiScanner.BypassHosts()
 		contentSecGETPause("dpi-bypass")
-		jsonOK(w, map[string]any{"hosts": hosts, "revision": dpiBypassRevision()})
+		// Revision derived from the SAME snapshot returned (2E-A-2 §1).
+		jsonOK(w, map[string]any{"hosts": hosts, "revision": dpiBypassRevisionOf(hosts)})
 	case http.MethodPut:
 		if !requireRole(w, r, RoleAdmin) {
 			return
@@ -1292,7 +1312,9 @@ func apiContentScanBypass(w http.ResponseWriter, r *http.Request) {
 		// roadmap/SCANNER-ROLLBACK-EXTENSION-SPEC.md (configBackup
 		// .ContentScanBypassHosts); snapshot so rollback restores them.
 		saveConfigVersion(sessionAdmin(r), "security.dpi_bypass")
-		jsonOK(w, map[string]any{"hosts": dpiScanner.BypassHosts(), "revision": dpiBypassRevision()})
+		// Revision from the SAME committed snapshot returned (2E-A-2 §1).
+		storedHosts := dpiScanner.BypassHosts()
+		jsonOK(w, map[string]any{"hosts": storedHosts, "revision": dpiBypassRevisionOf(storedHosts)})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
