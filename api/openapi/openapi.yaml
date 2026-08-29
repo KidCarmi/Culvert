@@ -2544,6 +2544,12 @@ paths:
       x-culvert-introduced-version: 1.0.0
       x-culvert-danger-level: medium
       x-culvert-audit-event: config.export
+      parameters:
+        - name: section
+          in: query
+          required: false
+          description: "Optional section-scoped export (e.g. `blocklist`, `policy`, `rewrite`, `pac`). Empty, `all`, or an unrecognized value returns the full backup."
+          schema: { type: string }
       responses:
         '200':
           description: Configuration backup.
@@ -2551,6 +2557,8 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ConfigBackup' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+        '503':
+          description: Rewrite MANAGEMENT identity is not durable on this node, and the requested export would carry RewriteRules (the `rewrite` section, or the full export for empty/`all`/unrecognized sections) — it answers the SAME structured `{error, degraded:"rewrite-identity", reason}` as GET /api/rewrite/state instead of recording ephemeral StableIDs as an authoritative backup. Sections that carry no rewrite identity stay available; traffic rewrite enforcement continues.
 
   /api/config/import:
     post:

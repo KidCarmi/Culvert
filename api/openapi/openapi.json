@@ -9057,6 +9057,17 @@
       "get": {
         "description": "Returns the complete configuration backup envelope. May contain secrets\n(session HMAC, IdP secrets, upstream credentials). Admin-only and audited.\n",
         "operationId": "exportConfig",
+        "parameters": [
+          {
+            "description": "Optional section-scoped export (e.g. `blocklist`, `policy`, `rewrite`, `pac`). Empty, `all`, or an unrecognized value returns the full backup.",
+            "in": "query",
+            "name": "section",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -9070,6 +9081,9 @@
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "503": {
+            "description": "Rewrite MANAGEMENT identity is not durable on this node, and the requested export would carry RewriteRules (the `rewrite` section, or the full export for empty/`all`/unrecognized sections) — it answers the SAME structured `{error, degraded:\"rewrite-identity\", reason}` as GET /api/rewrite/state instead of recording ephemeral StableIDs as an authoritative backup. Sections that carry no rewrite identity stay available; traffic rewrite enforcement continues."
           }
         },
         "security": [
