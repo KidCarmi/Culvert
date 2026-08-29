@@ -89,7 +89,7 @@ func TestResolveFileBlockStartupConfig_CLIWinsOverFileConfig(t *testing.T) {
 // review, PR #1255).
 func TestResolveFileBlockStartupConfig_DefaultPath(t *testing.T) {
 	got := resolveFileBlockStartupConfig(&FileConfig{}, "", "/data")
-	if want := filepath.Join("/data", "fileprofiles.json"); got.ProfilesPath != want {
+	if want := "/data/fileprofiles.json"; got.ProfilesPath != want {
 		t.Errorf("expected default %q, got %q", want, got.ProfilesPath)
 	}
 	if len(got.Extensions) != 0 {
