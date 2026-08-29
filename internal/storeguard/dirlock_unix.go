@@ -1,8 +1,8 @@
 //go:build unix
 
-package catdb
+package storeguard
 
-// dirlock_unix.go — CHAOS-50: the one primitive the recovery path trusts.
+// dirlock_unix.go — CHAOS-50/57: the one primitive the recovery path trusts.
 //
 // Two questions have to be answered before a damaged store can be moved aside,
 // and both reduce to "is a live process holding this?":

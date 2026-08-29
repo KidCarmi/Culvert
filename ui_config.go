@@ -529,6 +529,16 @@ func applyRetentionUpdate(w http.ResponseWriter, r *http.Request, enabled *bool,
 				http.Error(w, "saved logs use a different encryption key — purge saved logs, then enable again", http.StatusConflict)
 				return false
 			}
+			// A DIFFERENT remedy from the mismatch above, which is why it is a
+			// distinct sentinel: the saved history is still intact and still
+			// decryptable, but only by the salt sidecar that went missing. The
+			// key is never re-minted over an existing store (CHAOS-57), so
+			// restoring that one file recovers the history — purging is the
+			// fallback for an operator who cannot, and it is irreversible.
+			if errors.Is(err, errLogStoreSaltUnusable) {
+				http.Error(w, "saved logs exist but their encryption salt file is missing or damaged — restore the .salt sidecar next to the history store from a backup to recover them, or purge saved logs to start fresh (this discards the saved history)", http.StatusConflict)
+				return false
+			}
 			// Log the detail; return a generic message so a filesystem path
 			// can't leak in the HTTP response.
 			logger.Printf("WARN apiLogsRetention: enable failed: %v", err)
