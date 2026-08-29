@@ -79,6 +79,11 @@ const NAV: readonly NavSection[] = [
       },
       { label: "Policy Tester", to: "/policies/tester", minRole: "viewer" },
       {
+        label: "Header Rewrite",
+        to: "/policies/header-rewrite",
+        minRole: "viewer",
+      },
+      {
         label: "Policy Learning",
         to: "/policies/learning",
         minRole: "viewer",
@@ -102,6 +107,11 @@ const NAV: readonly NavSection[] = [
       {
         label: "Decryption Profiles",
         to: "/objects/decryption-profiles",
+        minRole: "viewer",
+      },
+      {
+        label: "File Profiles",
+        to: "/objects/file-profiles",
         minRole: "viewer",
       },
     ],

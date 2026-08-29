@@ -21,9 +21,11 @@ import { AccessRulesPage } from "../features/policy/AccessRulesPage";
 import { AuthRulesPage } from "../features/policy/AuthRulesPage";
 import { TesterPage } from "../features/policy/TesterPage";
 import { PolicyLearningPage } from "../features/learning/PolicyLearningPage";
+import { HeaderRewritePage } from "../features/policy/HeaderRewritePage";
 import { CategoryGroupsPage } from "../features/objects/CategoryGroupsPage";
 import { UrlCategoriesPage } from "../features/objects/UrlCategoriesPage";
 import { DecryptionProfilesPage } from "../features/objects/DecryptionProfilesPage";
+import { FileProfilesPage } from "../features/objects/FileProfilesPage";
 
 function NotFoundPage(): JSX.Element {
   return (
@@ -55,6 +57,10 @@ export function createAppRouter(): ReturnType<typeof createBrowserRouter> {
           },
           { path: "policies/tester", element: <TesterPage /> },
           {
+            path: "policies/header-rewrite",
+            element: <HeaderRewritePage />,
+          },
+          {
             path: "objects/url-categories",
             element: <UrlCategoriesPage />,
           },
@@ -65,6 +71,10 @@ export function createAppRouter(): ReturnType<typeof createBrowserRouter> {
           {
             path: "objects/decryption-profiles",
             element: <DecryptionProfilesPage />,
+          },
+          {
+            path: "objects/file-profiles",
+            element: <FileProfilesPage />,
           },
           { path: "policies/learning", element: <PolicyLearningPage /> },
           { path: "diagnostics", element: <DiagnosticsPage /> },

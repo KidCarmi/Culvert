@@ -30,6 +30,7 @@ import {
 import { ApiError, apiRequest } from "./client";
 import type { PolicyRuleView, PolicySchedule } from "./policy";
 import { decodePolicyRule } from "./policy";
+import { decodeFileProfileState } from "./dcobjects";
 
 // ── Write DTO ───────────────────────────────────────────────────────────────
 
@@ -334,12 +335,15 @@ export function getDecryptionProfileNames(
   );
 }
 
+// 2D-C §32: the Access Rule File Profile selector reads the coherent v2
+// state endpoint (one committed snapshot; names in a rule stay INTENT — the
+// server stamps name → stable fileProfileId at rule save).
 export function getFileProfileNames(
   signal?: AbortSignal,
 ): Promise<readonly string[]> {
   return apiRequest(
-    "/api/fileblock/profiles",
-    decodeNamedObjectList,
+    "/api/fileblock/profiles/state",
+    (v, path = "$") => decodeFileProfileState(v, path).profiles.map((p) => p.name),
     signal !== undefined ? { signal } : {},
   );
 }
