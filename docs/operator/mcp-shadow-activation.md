@@ -215,9 +215,28 @@ Rollback is deterministic and always accepted (a demotion never needs exec-deps)
 3. To fully disarm the node, restart it without `CULVERT_MCP_SHADOW_READY` — the
    evaluator is then not composed and `Deps.Executor` is nil (byte-identical Observe).
 
-The emergency kill switch (`emergencyDisable`) stops all admission immediately without a
-CP round trip and is restart-durable; use it if a rollback publish cannot be issued in
-time.
+The emergency kill switch stops all admission immediately without a CP round trip and is
+restart-durable; use it if a rollback publish cannot be issued in time. Engage it over the
+admin API with `POST /api/mcp/rollout/emergency` (admin role) and body
+`{"capability":"gateway","action":"disable"}` — the response reports `{"killed":true,
+"persisted":true}`. Clear it with the same endpoint and `"action":"clear"`. (The underlying
+node-local function is `emergencyDisable`/`clearEmergency`; the endpoint is the operator-facing
+surface.) While engaged, every admitted request is fail-closed with the deterministic
+`rollout_emergency_active` error BEFORE any Shadow evaluation — no `shadow_evaluated` event is
+committed — so the kill is honored strictly before evaluation, mirroring how the live executor
+short-circuits at admission (Shadow Exit criterion 9, Invariant A).
+
+**Read-only operator surfaces exposed over the admin API** (all under `/api/mcp`, for
+inspection during a controlled activation): `GET /api/mcp/rollout` (rollout + `shadow`
+node-readiness `preflight` + `metrics`), `POST /api/mcp/rollout/scope/validate` (scope
+dry-run), `GET /api/mcp/tools?tenant=…` (catalog + tool-trust overlay), `GET /api/mcp/executions`
+and `GET /api/mcp/upstream-health` (0 executed / 0 upstream in Shadow), and
+`GET /api/mcp/rollout/evidence` (qualification windows). Tool approval — the
+Observe→Shadow precondition that promotes a tool to `Usable` — is `POST /api/mcp/tool-approvals`
+(operator) then `POST /api/mcp/tool-approval-decision` (admin, `"action":"approve"`).
+**Activation and rollback themselves have no admin-API mutation endpoint** — they are the
+signed CP→DP `SignedConfig` publishes described above; the activation preflight is fail-closed
+and cannot be bypassed by publishing a config (Shadow Exit criterion 12).
 
 ---
 

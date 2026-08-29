@@ -411,11 +411,38 @@ Measurable gates before Canary may even be *reviewed* (rationale, not arbitrary)
 - zero evidence gaps (every evaluation has a durable record).
 - zero stale-decision `WOULD_EXECUTE` (any staleness must land as `WOULD_FAIL_STALE_*`).
 - no unauthorized `WOULD_EXECUTE` (every one maps to an allow-class policy decision).
-- expected denial parity (Shadow `WOULD_BLOCK` set == Observe deny set for the same
-  traffic).
-- stable latency (Shadow p99 within budget; no admission saturation).
+- expected denial parity (driving the same traffic through Observe and Shadow does not
+  ALTER the denial decision — the raw policy action and reason code are identical across
+  modes, and Shadow never softens a non-allow decision into `WOULD_EXECUTE`; each refusal
+  maps to its faithful class outcome, `WOULD_BLOCK` for a policy DENY and
+  `WOULD_FAIL_HARD_CONTROL` for a hard-control denial. Authentication and tenant denials are
+  enforced before the rollout-mode branch and are therefore byte-identical across modes. The
+  mode-specific record shape — `execution_state`, the added `shadow_*` prediction fields, the
+  response envelope — is deliberately NOT part of the parity claim.
+  **Corrected 2026-08-29:** the earlier wording "Shadow `WOULD_BLOCK` set == Observe deny
+  set" was too narrow — a hard-control denial is `WOULD_FAIL_HARD_CONTROL`, not `WOULD_BLOCK`,
+  so a set-equality on `WOULD_BLOCK` alone would demand architecturally-incorrect behavior.
+  Parity is on the DECISION, not on one outcome label.)
+- stable latency (the Shadow-evaluation overhead is within a defined budget; no admission
+  saturation). The budget is expressed as a same-machine, same-run RATIO of the Shadow path
+  to the Observe baseline — both traverse the identical listener/auth/policy/durable-commit
+  path, so the ratio isolates the Shadow-evaluation + evidence overhead — following Culvert's
+  benchgate ratio-gate convention rather than an invented absolute SLA (which would be
+  hardware-dependent and CI-flaky).
 - credential planning reliability (readiness derivable without materialization).
-- kill-switch drills pass (engage → next evaluation is `WOULD_BLOCK`).
+- kill-switch drills pass — an engaged kill is honored FAIL-CLOSED at admission, BEFORE any
+  Shadow evaluation: the request returns the deterministic `rollout_emergency_active` error,
+  commits NO `shadow_evaluated` event, and records an evaluation error rather than a `would_*`
+  verdict; clearing the kill restores normal evaluation.
+  **Corrected 2026-08-29 (Invariant A):** the earlier wording "engage → next evaluation is
+  `WOULD_BLOCK`" described an evaluation-path outcome the implementation deliberately does not
+  take, and demanding it would be architecturally WRONG. The kill switch is the operator's
+  immediate admission stop; the live `Executor` and the `ShadowEvaluator` BOTH short-circuit
+  at their `Execute` entry before any evaluation — so Shadow blocking before it evaluates is
+  the stronger, parity-preserving behavior, and fabricating a `shadow_evaluated`/`WOULD_BLOCK`
+  event after admission has already rejected the request would misrepresent what the node did
+  (it did not evaluate). The criterion now measures the real invariant (Option A of the
+  Phase-A brief).
 - **`PREREQ-MCP-KILL-1` CLOSED** — the authoritative kill state is revalidated immediately
   before the irreversible side-effect boundary (`run.go` `callUpstream`), so a kill engaged
   during credential planning/materialization aborts the call (`up.calls == 0`). This is a
@@ -470,6 +497,16 @@ argument.
      `WOULD_FAIL_STALE_DECISION` is therefore reachable for drift that occurs AFTER the
      entry check (between it and the side-effect boundary — the `ToolStillCurrent`
      re-check), but the initial-drift case is runtime-refused and produces no Shadow event.
+     **Driven end-to-end 2026-08-29 (Shadow Exit criterion 4):** a controlled boundary drift
+     is now injected deterministically in the post-entry / pre-boundary window — the
+     credential-planner callback (one of the real blocking stages this comment names)
+     re-ingests a changed echo fingerprint through the production `catalog.Ingest` path — so
+     the production `ToolStillCurrent` re-check observes it and the evaluator records a
+     `shadow_evaluated` event with `WOULD_FAIL_STALE_DECISION`, with `up.calls == 0`
+     (`TestShadowExitC4_BoundaryDriftYieldsStale`). This does not change the routing of the
+     two runtime-terminal signals below; it exercises the boundary-drift branch that was
+     already reachable, using the real seam at the correct lifecycle point (the outcome is
+     computed by the production evaluator, never fabricated).
 
    Routing these two signals into Shadow evaluation (so a Shadow evaluation records the
    `WOULD_FAIL_*` evidence while enforcing modes keep their fail-closed block) is a
