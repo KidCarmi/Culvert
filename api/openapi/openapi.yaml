@@ -10853,8 +10853,8 @@ paths:
               additionalProperties: false
               required: [server_id, tool_name, fingerprint, catalog_revision]
               properties:
-                server_id: { type: string }
-                tool_name: { type: string }
+                server_id: { type: string, minLength: 1, maxLength: 256, description: 'Nonempty; backend limit is 256 UTF-8 BYTES (maxLength counts characters).' }
+                tool_name: { type: string, minLength: 1, maxLength: 256, description: 'Nonempty; backend limit is 256 UTF-8 BYTES (maxLength counts characters).' }
                 fingerprint: { type: string, minLength: 64, maxLength: 64, pattern: '^[0-9a-fA-F]{64}$', description: 64-char hex of the reviewed 32-byte tool fingerprint digest }
                 catalog_revision: { type: integer, format: int64, minimum: 1, description: The reviewed per-record catalog revision (the tool's Revision from the inventory view). REQUIRED — a zero/omitted value is rejected so the exact-target contract cannot be bypassed. }
                 purpose: { type: string, enum: [shadow_evaluation], description: 'Declared purpose. Only shadow_evaluation is issuable by this endpoint; omit to default to it. (live_execution exists in the trust model but is never issuable here.)' }
@@ -10897,7 +10897,7 @@ paths:
               additionalProperties: false
               required: [approval_id, action]
               properties:
-                approval_id: { type: string }
+                approval_id: { type: string, minLength: 1, maxLength: 96, description: 'Nonempty; approval IDs are at most 96 UTF-8 bytes, so a longer value can only 404.' }
                 action: { type: string, enum: [approve, reject, revoke], description: 'approve materializes catalog.Usable for the exact reviewed fingerprint; reject decides a pending request; revoke withdraws an active grant.' }
                 reason: { type: string, maxLength: 512, description: 'Optional free-text reason (used for reject/revoke). The backend limit is 512 UTF-8 BYTES (maxLength counts characters, so multi-byte input may be rejected below this).' }
       responses:

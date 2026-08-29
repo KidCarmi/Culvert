@@ -13596,6 +13596,9 @@
                     "type": "string"
                   },
                   "approval_id": {
+                    "description": "Nonempty; approval IDs are at most 96 UTF-8 bytes, so a longer value can only 404.",
+                    "maxLength": 96,
+                    "minLength": 1,
                     "type": "string"
                   },
                   "reason": {
@@ -13805,6 +13808,9 @@
                     "type": "string"
                   },
                   "server_id": {
+                    "description": "Nonempty; backend limit is 256 UTF-8 BYTES (maxLength counts characters).",
+                    "maxLength": 256,
+                    "minLength": 1,
                     "type": "string"
                   },
                   "ticket_ref": {
@@ -13813,6 +13819,9 @@
                     "type": "string"
                   },
                   "tool_name": {
+                    "description": "Nonempty; backend limit is 256 UTF-8 BYTES (maxLength counts characters).",
+                    "maxLength": 256,
+                    "minLength": 1,
                     "type": "string"
                   }
                 },
