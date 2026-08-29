@@ -14,8 +14,10 @@ package main
 //     distribution commit -> rollout commit);
 //   - the REAL durable schema-v2 evidence spool and the REAL culvert_mcp_shadow_* sink;
 //   - a REAL controlled upstream server (owned here), REGISTERED as the controlled
-//     server's inventory endpoint, whose invocation counter is the independent witness
-//     that the protected upstream observes ZERO invocations.
+//     server's inventory endpoint, whose invocation counter is an AUXILIARY /
+//     defense-in-depth check that the protected upstream observes ZERO invocations
+//     (NOT the primary proof — see witnessEndpoint; the structural ShadowEvaluator
+//     assertion is what proves zero upstream side effects).
 //
 // It performs NO product-code change. It never composes a LiveExecutor, never calls
 // markGatewayExecDepsReady, never materializes a credential, never arms Canary/Production.
@@ -72,8 +74,10 @@ func req(t *testing.T, ok bool, format string, a ...any) {
 }
 
 // controlledInventoryJSON seeds ONE controlled server owning two harmless tools, at the
-// given endpoint (wired to the witness server so a regressed upstream dial WOULD reach
-// it). Both tools ingest Quarantined (approval is a separate slice).
+// given endpoint (the auxiliary witness server; note the production upstream transport can
+// reject an attempted dial during resolution/identity verification before that handler is
+// reached, so the hit counter is defense-in-depth, not the proof — see witnessEndpoint).
+// Both tools ingest Quarantined (approval is a separate slice).
 func controlledInventoryJSON(endpoint string) string {
 	return `{
   "schema_version": 1,
@@ -331,7 +335,7 @@ func (r *shadowRun) firstRequestWouldExecute() {
 	r.ev("A metrics: evaluations %d->%d would_execute %d->%d evaluation_errors=%d",
 		before.Evaluations, after.Evaluations, before.WouldExecute, after.WouldExecute, after.EvaluationErrors)
 
-	// Zero side effects (independent witness + structural).
+	// Zero side effects (auxiliary witness; the structural ShadowEvaluator is the proof).
 	req(t, atomic.LoadInt64(r.upstreamHits) == 0, "SECURITY: controlled upstream observed %d invocations (must be 0)", atomic.LoadInt64(r.upstreamHits))
 	r.ev("ZERO side effects: controlled_upstream_invocations=0 upstream_call_count=0 materialize_count=0 live_executions=0 evaluation_errors=%d", after.EvaluationErrors)
 
