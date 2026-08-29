@@ -27,10 +27,7 @@ import (
 
 // ── the machinery under test, at its new address ─────────────────────────────
 
-type (
-	heldLock     = storeguard.HeldLock
-	openErrClass = storeguard.OpenErrClass
-)
+type openErrClass = storeguard.OpenErrClass
 
 const (
 	classUnknown         = storeguard.ClassUnknown
@@ -47,7 +44,6 @@ var (
 	quarantineDir       = storeguard.QuarantineDir
 	abandonedMarkers    = storeguard.AbandonedMarkers
 	beginAttempt        = storeguard.BeginAttempt
-	applyQuarantine     = storeguard.ApplyQuarantine
 	errStoreLockNotHeld = storeguard.ErrStoreLockNotHeld
 	trimSep             = func(p string) string { return strings.TrimSuffix(p, string(os.PathSeparator)) }
 )

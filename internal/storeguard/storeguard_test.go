@@ -22,24 +22,22 @@ import (
 )
 
 // fakeStore stands in for a *badger.DB.
-type fakeStore struct{ dir string }
+type fakeStore struct{}
 
 // opener returns an open func that fails with errs[i] on call i, then succeeds.
 // A nil element means success.
 type opener struct {
 	errs  []error
 	calls int
-	dirs  []string
 }
 
-func (o *opener) open(dir string) (*fakeStore, error) {
-	o.dirs = append(o.dirs, dir)
+func (o *opener) open(string) (*fakeStore, error) {
 	i := o.calls
 	o.calls++
 	if i < len(o.errs) && o.errs[i] != nil {
 		return nil, o.errs[i]
 	}
-	return &fakeStore{dir: dir}, nil
+	return &fakeStore{}, nil
 }
 
 // seedDir creates a non-empty directory at path, standing in for a store that
