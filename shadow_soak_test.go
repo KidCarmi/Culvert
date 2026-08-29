@@ -319,11 +319,12 @@ func (r *soakRun) assertOutcome(principal, server, tool, arg, wantOutcome string
 	before := shadowSnap()
 	hitsBefore := atomic.LoadInt64(r.upstreamHits)
 	token, sid := r.session(principal, server)
+	preIDs := committedShadowEventIDs(t)
 	st, res := r.callOn(server, token, sid, "1", tool, arg)
 	req(t, st == 200, "%s: status=%d", tool, st)
 	req(t, res["execution_state"] == "shadow_evaluated" && res["executed"] == false && res["shadow_outcome"] == wantOutcome,
 		"%s: want shadow_evaluated/%s executed=false, got %v", tool, wantOutcome, res)
-	de, ok := latestShadowEvidence(t)
+	de, ok := newShadowEvidence(t, preIDs)
 	req(t, ok, "%s: no committed schema-v2 evidence", tool)
 	req(t, de.Shadow.Outcome == wantOutcome, "%s: durable outcome=%q want %q", tool, de.Shadow.Outcome, wantOutcome)
 	req(t, de.VerifyDigest(), "%s: durable digest must verify", tool)
@@ -801,10 +802,11 @@ func (r *soakRun) catalogRediscoveryAndRugPull() {
 	req(t, f2Hex != f1Hex, "rug-pull: fingerprint must change F1(%s)->F2(%s)", f1Hex[:12], f2Hex[:12])
 	req(t, f2Elig == catalog.Quarantined, "rug-pull: privilege-expansion drift must Quarantine, got %v", f2Elig)
 	tok, sid = r.session(soakP3, rugServer)
+	preIDs := committedShadowEventIDs(t)
 	st, res = r.callOn(rugServer, tok, sid, "2", rugTool, `{"r":"x"}`)
 	req(t, st == 200 && res["shadow_outcome"] == "would_fail_hard_control",
 		"rug-pull: a fresh Shadow request under stale F1 trust must be would_fail_hard_control, never would_execute, got %v", res)
-	de, ok := latestShadowEvidence(t)
+	de, ok := newShadowEvidence(t, preIDs)
 	req(t, ok && de.Shadow.Outcome == "would_fail_hard_control" && de.VerifyDigest(), "rug-pull: durable would_fail_hard_control evidence must be committed")
 	r.ev("RUG-PULL F1->F2 (privilege expansion, destination None->Arbitrary): fingerprint %s->%s, Quarantined, F1 approval does NOT govern F2, reconcile did NOT auto-reapprove, fresh request=would_fail_hard_control", f1Hex[:12], f2Hex[:12])
 
@@ -1223,10 +1225,16 @@ func TestShadowSoakMutationCampaign(t *testing.T) {
 		req(t, !liveExecDepsConfigured(false), "GATE exec-posture: live-execution tier must never arm")
 	})
 
-	// M2 — allow one Materialize call. Gate: MaterializationReadiness is always not_evaluated.
+	// M2 — allow one Materialize call. Gate: MaterializationReadiness is always not_evaluated —
+	// asserted over EVERY committed shadow event (no broker composed ⇒ readiness is never
+	// derived), not merely one "latest" event.
 	t.Run("M2_no_materialization", func(t *testing.T) {
-		de, ok := latestShadowEvidence(t)
-		req(t, ok && de.Shadow.MaterializationReadiness == "not_evaluated", "GATE materialization: readiness must be not_evaluated, got %+v", de.Shadow)
+		evs := committedShadowEvents(t)
+		req(t, len(evs) > 0, "GATE materialization: expected committed shadow events")
+		for i := range evs {
+			req(t, evs[i].Shadow.MaterializationReadiness == "not_evaluated",
+				"GATE materialization: event %s readiness must be not_evaluated, got %q", evs[i].EventID, evs[i].Shadow.MaterializationReadiness)
+		}
 	})
 
 	// M3 — let an out-of-scope principal enter Shadow. Gate: scope containment.
@@ -1258,9 +1266,10 @@ func TestShadowSoakMutationCampaign(t *testing.T) {
 	// M5 — mismatch response and durable outcome. Gate: response<->durable parity (single
 	// shadowEvidence source). A would_block request's response and durable event must agree.
 	t.Run("M5_response_durable_parity", func(t *testing.T) {
+		preIDs := committedShadowEventIDs(t)
 		st, res := r.callOn(ctrlServer, tok, sid, "5", toolDanger, `{"x":"y"}`)
 		req(t, st == 200, "danger status")
-		de, ok := latestShadowEvidence(t)
+		de, ok := newShadowEvidence(t, preIDs)
 		req(t, ok && de.Shadow.Outcome == res["shadow_outcome"] &&
 			de.Shadow.MaterializationReadiness == res["materialization_ready"] &&
 			de.Shadow.ResponseInspection == res["response_inspection"],
@@ -1313,9 +1322,10 @@ func TestShadowSoakMutationCampaign(t *testing.T) {
 	// revision (atomic snapshot), a restrictive revision is never would_execute.
 	t.Run("M10_no_policy_mixing", func(t *testing.T) {
 		r.publishEchoPolicy(5000, false) // echo DENY at rev 5000
+		preIDs := committedShadowEventIDs(t)
 		st, res := r.callOn(ctrlServer, tok, sid, "10", toolEcho, `{"text":"x"}`)
 		req(t, st == 200 && res["shadow_outcome"] == "would_block", "echo must be would_block at the deny revision")
-		de, ok := latestShadowEvidence(t)
+		de, ok := newShadowEvidence(t, preIDs)
 		req(t, ok && de.Decision.PolicyRevision == 5000 && de.Shadow.Outcome == "would_block",
 			"GATE no-mixing: event must carry revision 5000 with would_block, got rev=%d outcome=%s", de.Decision.PolicyRevision, de.Shadow.Outcome)
 		r.publishEchoPolicy(5001, true) // restore echo ALLOW
@@ -1324,8 +1334,9 @@ func TestShadowSoakMutationCampaign(t *testing.T) {
 	// M11 — recover a malformed v2 event permissively. Gate: unknown schema fails closed; a
 	// tampered event fails its digest.
 	t.Run("M11_no_permissive_recovery", func(t *testing.T) {
-		de, ok := latestShadowEvidence(t)
-		req(t, ok, "need a committed event")
+		evs := committedShadowEvents(t)
+		req(t, len(evs) > 0, "need a committed event")
+		de := evs[0] // any committed shadow event serves as the tamper sample
 		bad := de
 		bad.SchemaVersion = 3
 		req(t, !evmodel.SupportedSchemaVersion(3) && bad.Validate() != nil, "GATE schema: an unknown v3 event must fail closed")

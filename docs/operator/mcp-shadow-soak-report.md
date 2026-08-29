@@ -213,18 +213,18 @@ Answered against the repository's own authoritative exit criteria (`docs/design/
 1. **≥ N Shadow evaluations covering the tool set and each policy branch?** — YES. 7,516 heavy / 248 default; every tool × every policy branch, plus hard‑control, exercised.
 2. **Zero real side effects (`up.calls == 0` + evidence audit)?** — YES. Independent upstream witness = 0 at every phase; evaluations == committed events.
 3. **Zero evidence gaps (every evaluation has a durable record)?** — YES. 7,516 == 7,516; 248 == 248.
-4. **Zero stale‑decision `would_execute`?** — YES. Staleness lands as `would_fail_hard_control` (Quarantine) or the drift refusal; never `would_execute`.
+4. **Zero stale‑decision `would_execute`?** — **NOT VERIFIED in this build (no regression observed).** No `would_execute` was ever observed under a staleness condition, and a tool‑trust rug‑pull correctly yields `would_fail_hard_control` (Quarantine) — but the authoritative criterion requires staleness to land as `WOULD_FAIL_STALE_*`, and `would_fail_stale_decision` is **structurally unreachable** through the live pipeline here (initial drift is refused pre‑dispatch; boundary‑drift is race‑only — SHADOW‑EVIDENCE‑ROUTING‑1, outcome #8). Observing no stale outcome cannot establish that a boundary‑drift race never yields `would_execute`. This criterion is therefore **not established by the soak** and does not count toward the satisfied set.
 5. **No unauthorized `would_execute` (each maps to an allow‑class decision)?** — YES. Every `would_execute` carries an ALLOW policy decision at a known revision on a Usable tool.
 6. **Expected denial parity (Shadow `would_block` == the deny set for the same traffic)?** — YES. Deny‑class tools and deny‑revisions produce `would_block`; parity asserted per request.
 7. **Stable latency (p99 within budget; no admission saturation)?** — YES (informational). p99 ≈ 27 ms; no saturation. No SLA asserted.
-8. **Credential planning reliability without materialization?** — YES, by construction: no broker is composed, readiness is honestly `not_evaluated`, and 0 materializations occurred.
+8. **Credential planning reliability without materialization?** — **NOT ASSESSED in this build.** With `Planner: nil` (no broker composed — Layer B), every request reports readiness as `not_evaluated`. The soak proves **0 materializations**, but it never derives readiness from a plan or exercises a ready/failure credential path, so the criterion — readiness must be *derivable* without materialization — is **not exercised**. Establishing it requires composing a plan‑only credential path, which this Shadow build deliberately lacks.
 9. **Kill‑switch drills pass (engage → next evaluation blocked)?** — YES. Under load: 608/608 emergency‑blocked, 0 `would_execute`, upstream 0, deterministic recovery.
 10. **Restart drills pass (durable evidence survives; no execution replay)?** — YES. Full recovery; LiveExecutor absent; upstream 0.
 11. **Observability verified (all shadow series emit; health three‑state correct)?** — YES. Per‑bucket deltas asserted; `evaluator_composed / live_execution_ready=false / preflight` three‑state confirmed.
 12. **Operator procedure tested (runbook dry‑run)?** — YES. The node‑readiness dry‑run (`evaluateShadowNodeReadiness`) and the activation preflight are exercised on the real node before activation.
 13. **`PREREQ‑MCP‑KILL‑1` CLOSED?** — **NO. OPEN.** See §11.
 
-**Exit Review outcome:** Every Shadow‑correctness criterion (1–12) is satisfied. Criterion 13 — a **HARD Canary prerequisite** — is **OPEN**. Therefore the Shadow soak is complete and passes, but the Exit Review **does not authorize Canary architecture to begin.**
+**Exit Review outcome:** The Shadow‑correctness criteria that this Shadow‑only build can exercise — **1–3, 5–7, 9–12** — are all satisfied. Three criteria are **not established here, by construction**: criterion 4 (stale‑decision) and criterion 8 (credential‑planning) require capabilities this build deliberately lacks (a live boundary‑drift path and a composed credential planner — the same reason 3 of the 8 outcomes are structurally unreachable), and criterion 13 (`PREREQ‑MCP‑KILL‑1`) is a **HARD Canary prerequisite that is OPEN**. The soak itself passes (all seven hard invariants hold — §2), but the Exit Review **does not authorize Canary architecture to begin**: it names exactly what a Canary phase must still build and prove (a real credential‑planning path, a driven boundary‑drift stale path, and the closed kill‑switch prerequisite).
 
 ---
 
@@ -243,6 +243,6 @@ Answered against the repository's own authoritative exit criteria (`docs/design/
 
 **SHADOW SOAK PASSED — READY FOR SHADOW EXIT REVIEW**
 
-The Shadow Exit Review (§10) confirms every Shadow‑correctness criterion is met, and surfaces exactly one remaining **HARD Canary prerequisite — `PREREQ‑MCP‑KILL‑1` — which is OPEN.** Canary architecture may **not** begin until that prerequisite is implemented and proven. Accordingly, the `SHADOW EXIT REVIEW PASSED — CANARY ARCHITECTURE MAY BEGIN` line is **deliberately withheld.**
+The Shadow Exit Review (§10) confirms every Shadow‑correctness criterion this Shadow‑only build can exercise (1–3, 5–7, 9–12) is met, and surfaces what a Canary phase must still build and prove: criterion 4 (a driven boundary‑drift stale path), criterion 8 (a real credential‑planning path), and — the **HARD Canary prerequisite** — criterion 13, `PREREQ‑MCP‑KILL‑1`, which is **OPEN**. Canary architecture may **not** begin until those are implemented and proven. Accordingly, the `SHADOW EXIT REVIEW PASSED — CANARY ARCHITECTURE MAY BEGIN` line is **deliberately withheld.**
 
 This is not readiness for Canary. Canary has not been built or activated.

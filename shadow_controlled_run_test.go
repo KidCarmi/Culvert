@@ -271,45 +271,38 @@ func assertShadowDelta(t *testing.T, before, after, deltas shadowMetricsView) {
 	req(t, after == want, "shadow metric delta: only the intended buckets may change. before=%+v after=%+v want=%+v (deltas=%+v)", before, after, want, deltas)
 }
 
-// latestShadowEvidence scans the Gateway partitions for the most recent committed
-// schema-v2 shadow decision event.
-func latestShadowEvidence(t *testing.T) (event evmodel.Event, found bool) {
+// committedShadowEventIDs snapshots the ids of every currently-committed schema-v2 shadow
+// event on the Gateway. Captured BEFORE a request so newShadowEvidence can identify that
+// request's durable event by set difference.
+func committedShadowEventIDs(t *testing.T) map[string]bool {
 	t.Helper()
-	er := mcpAdminEventReader()
-	if er == nil {
-		return event, false
-	}
-	// Return the genuinely most-recently-committed schema-v2 shadow event. The reader is a
-	// paginated cursor (afterSeq -> next), and a shadow decision lands in EITHER partition
-	// depending on its criticality, so a single bounded read of the FIRST page of one
-	// partition-then-the-other does not reach the latest event once either partition holds
-	// more than one page (the soak's high-volume mode). Fully paginate BOTH partitions and
-	// pick the match with the maximum TimeUnixNano — the event's own recorded commit time,
-	// which is globally comparable across partitions and strictly monotonic under both the
-	// real clock and the injected monotonic test clocks.
-	const batch = 512
-	for _, part := range []string{"P-CRIT", "P-ORD"} {
-		afterSeq := uint64(0)
-		for {
-			evs, _, next, err := er.CommittedEvents("gateway", part, afterSeq, batch)
-			if err != nil {
-				break
-			}
-			for i := range evs {
-				e := evs[i]
-				if e.SchemaVersion == evmodel.SchemaVersionV2 && e.Decision.ExecutionState == "shadow_evaluated" && e.Shadow != nil {
-					if !found || e.TimeUnixNano >= event.TimeUnixNano {
-						event, found = e, true
-					}
-				}
-			}
-			if len(evs) < batch {
-				break
-			}
-			afterSeq = next
+	return eventIDSet(committedShadowEvents(t))
+}
+
+// newShadowEvidence returns the SINGLE committed schema-v2 shadow event whose id is not in
+// preIDs — the durable event produced by the one request issued after preIDs was captured.
+//
+// It identifies the event by its NEW id, deliberately NOT by "latest". Event.TimeUnixNano is
+// stamped by events.Manager.buildEvent at event CONSTRUCTION, before Spool.Commit takes the
+// partition lock, so it is not a commit-order value and is not strictly monotonic with commit
+// order (and the two partitions commit under independent locks). Selecting a max timestamp
+// could therefore return an unrelated event under concurrency and invalidate a parity
+// assertion. Requiring exactly one new id makes the sequential-request precondition explicit
+// and removes any dependence on timestamp-vs-commit-order skew.
+func newShadowEvidence(t *testing.T, preIDs map[string]bool) (evmodel.Event, bool) {
+	t.Helper()
+	var news []evmodel.Event
+	evs := committedShadowEvents(t)
+	for i := range evs {
+		if !preIDs[evs[i].EventID] {
+			news = append(news, evs[i])
 		}
 	}
-	return event, found
+	if len(news) != 1 {
+		t.Fatalf("expected exactly one new committed schema-v2 shadow event since the snapshot, got %d", len(news))
+		return evmodel.Event{}, false
+	}
+	return news[0], true
 }
 
 // shadowEventByIDPresent reports whether a specific committed schema-v2 shadow event id
@@ -372,6 +365,7 @@ func (r *shadowRun) firstRequestWouldExecute() {
 	t := r.t
 	before := shadowSnap()
 	r.sid = handshake(t, r.cli, r.base, ctrlServer, r.inToken)
+	preIDs := committedShadowEventIDs(t)
 	st, ra := toolsCall(t, r.cli, r.base, r.inToken, r.sid, "3", toolEcho, `{"text":"hello"}`)
 	req(t, st == 200, "A: status=%d", st)
 	req(t, ra["execution_state"] == "shadow_evaluated" && ra["executed"] == false &&
@@ -389,8 +383,9 @@ func (r *shadowRun) firstRequestWouldExecute() {
 	req(t, atomic.LoadInt64(r.upstreamHits) == 0, "SECURITY: controlled upstream observed %d invocations (must be 0)", atomic.LoadInt64(r.upstreamHits))
 	r.ev("ZERO side effects: controlled_upstream_invocations=0 upstream_call_count=0 materialize_count=0 live_executions=0 evaluation_errors=%d", after.EvaluationErrors)
 
-	// Durable v2 evidence + response<->durable parity.
-	de, ok := latestShadowEvidence(t)
+	// Durable v2 evidence + response<->durable parity. Identify THIS request's event by the
+	// new id since the pre-request snapshot (preIDs), never by "latest".
+	de, ok := newShadowEvidence(t, preIDs)
 	req(t, ok, "no committed schema-v2 shadow evidence found")
 	req(t, de.Shadow.Outcome == "would_execute", "durable outcome=%q want would_execute", de.Shadow.Outcome)
 	req(t, de.Shadow.MaterializationReadiness == "not_evaluated" && de.Shadow.ResponseInspection == "not_evaluated",
@@ -410,6 +405,7 @@ func (r *shadowRun) firstRequestWouldExecute() {
 func (r *shadowRun) matrixWouldBlock() {
 	t := r.t
 	before := shadowSnap()
+	preIDs := committedShadowEventIDs(t)
 	st, rb := toolsCall(t, r.cli, r.base, r.inToken, r.sid, "4", toolDanger, `{"x":"y"}`)
 	req(t, st == 200, "B: status=%d", st)
 	req(t, rb["execution_state"] == "shadow_evaluated" && rb["executed"] == false && rb["shadow_outcome"] == "would_block",
@@ -418,7 +414,7 @@ func (r *shadowRun) matrixWouldBlock() {
 	after := shadowSnap()
 	assertShadowDelta(t, before, after, shadowMetricsView{Evaluations: 1, WouldBlock: 1})
 	// A durable schema-v2 event must exist for THIS would_block evaluation (no evidence gap).
-	de, ok := latestShadowEvidence(t)
+	de, ok := newShadowEvidence(t, preIDs)
 	req(t, ok && de.Shadow.Outcome == "would_block" && de.VerifyDigest() && de.Validate() == nil,
 		"B: a durable schema-v2 would_block event must be committed, got ok=%v %+v", ok, de.Shadow)
 	r.ev("B danger request: execution_state=shadow_evaluated executed=false shadow_outcome=would_block shadow_override=true would_block %d->%d durable_outcome=%s",
@@ -482,6 +478,7 @@ func (r *shadowRun) revokeDrill() {
 	_, _, elig := catRec(t, r.cat, ctrlServer, toolEcho)
 	req(t, elig != catalog.Usable, "revoked tool must lose Usable projection, got %v", elig)
 	before := shadowSnap()
+	preIDs := committedShadowEventIDs(t)
 	st, rr := toolsCall(t, r.cli, r.base, r.inToken, r.sid, "7", toolEcho, `{"text":"after-revoke"}`)
 	req(t, st == 200, "post-revoke call: status=%d", st)
 	req(t, rr["shadow_outcome"] == "would_fail_hard_control",
@@ -489,7 +486,7 @@ func (r *shadowRun) revokeDrill() {
 	after := shadowSnap()
 	assertShadowDelta(t, before, after, shadowMetricsView{Evaluations: 1, WouldFailHardControl: 1})
 	// A durable schema-v2 event must exist for THIS would_fail_hard_control evaluation.
-	de, ok := latestShadowEvidence(t)
+	de, ok := newShadowEvidence(t, preIDs)
 	req(t, ok && de.Shadow.Outcome == "would_fail_hard_control" && de.VerifyDigest() && de.Validate() == nil,
 		"revoke: a durable schema-v2 would_fail_hard_control event must be committed, got ok=%v %+v", ok, de.Shadow)
 	r.ev("revocation drill: approval revoked -> eligibility!=Usable -> echo shadow_outcome=would_fail_hard_control would_fail_hard_control %d->%d durable_outcome=%s",
@@ -907,9 +904,10 @@ func (e *restartEnv) boot1CommitEvent() string {
 	req(t, getMCPRollout().gateway.CurrentMode() == rollout.ModeShadow, "boot#1: activation failed, mode=%s", getMCPRollout().gateway.CurrentMode())
 	tok := mintBearerSub(t, e.pki, act1.CanonicalURL, ctrlTenant, ctrlPrincip)
 	sid := handshake(t, e.cli, "https://"+rt1.Addr(false), ctrlServer, tok)
+	preIDs := committedShadowEventIDs(t)
 	st, r := toolsCall(t, e.cli, "https://"+rt1.Addr(false), tok, sid, "10", toolEcho, `{"text":"pre-restart"}`)
 	req(t, st == 200 && r["shadow_outcome"] == "would_execute", "boot#1: pre-restart shadow call must be would_execute, got %v", r)
-	de1, ok := latestShadowEvidence(t)
+	de1, ok := newShadowEvidence(t, preIDs)
 	req(t, ok && de1.EventID != "", "boot#1: an identifiable schema-v2 event must be committed before restart")
 	e.ev("restart boot#1: Shadow ACTIVE, echo Usable, committed schema-v2 event id=%s under durable dataDir", de1.EventID)
 	req(t, rt1.Shutdown(ctxWithTimeout(t)) == nil, "shutdown boot#1 failed")
