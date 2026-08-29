@@ -24,11 +24,11 @@ import (
 // composition wall (mcp_execution_posture_test.go) separately pins that production wiring
 // composes no live executor.
 func TestCanaryPackageHoldsNoExecutionCapability(t *testing.T) {
-	forbidden := map[string]string{
+	forbidden := map[string]string{ // #nosec G101 -- import paths + descriptions, not hardcoded credentials
 		"github.com/KidCarmi/Culvert/internal/mcp/execution":            "the guarded-execution plane (Upstream.Call)",
 		"github.com/KidCarmi/Culvert/internal/mcp/upstreamclient":       "the upstream HTTPS client (real egress)",
-		"github.com/KidCarmi/Culvert/internal/mcp/credentials/broker":   "the materialize-capable credential broker (secret)",
-		"github.com/KidCarmi/Culvert/internal/mcp/credentials/provider": "a credential provider (secret fetch)",
+		"github.com/KidCarmi/Culvert/internal/mcp/credentials/broker":   "the materialize-capable broker (real key material)",
+		"github.com/KidCarmi/Culvert/internal/mcp/credentials/provider": "a provider of key material",
 	}
 	fset := token.NewFileSet()
 	entries, err := os.ReadDir(".")
