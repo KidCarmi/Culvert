@@ -182,8 +182,15 @@ export function ThreatIntelTab({ isAdmin }: { isAdmin: boolean }): JSX.Element {
             The domain allowlist could not be loaded. Refresh to try again.
           </ErrorState>
         )}
+        {allow !== undefined && !allow.editable && (
+          <Callout variant="info" title="Control-plane managed" role="status">
+            This node is a managed data plane: the domain allowlist is owned by
+            the control plane and distributed with the fleet configuration.
+            Local edits are refused — make the change on the control plane.
+          </Callout>
+        )}
         {allow !== undefined &&
-          (isAdmin ? (
+          (isAdmin && allow.editable ? (
             <FencedListEditor
               label="allowlisted domains"
               itemNoun="domain"

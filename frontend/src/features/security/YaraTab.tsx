@@ -274,6 +274,11 @@ export function YaraTab({
             setDeleting(null);
             page.refreshToResolve();
           }}
+          onConflict={(text) => {
+            setDeleting(null);
+            setNotice(text);
+            page.refreshToResolve();
+          }}
           onCancel={() => {
             setDeleting(null);
           }}
@@ -479,6 +484,7 @@ function DeleteRuleDialog({
   name,
   page,
   onDone,
+  onConflict,
   onCancel,
 }: {
   name: string;
@@ -486,10 +492,39 @@ function DeleteRuleDialog({
     typeof useObjectPage<Awaited<ReturnType<typeof getYaraInventory>>>
   >;
   onDone: () => void;
+  /** Refused stale delete / vanished target: the rule is preserved (or was
+   * already gone) — the parent shows the notice and refreshes to fresh truth. */
+  onConflict: (text: string) => void;
   onCancel: () => void;
 }): JSX.Element {
   const [result, setResult] = useState<ConfirmResult>("idle");
   const [errorText, setErrorText] = useState("");
+  // 2E-A-2 §3: the ceremony is bound to the AUTHORITATIVE current revision of
+  // the rule file, fetched when the dialog opens (never a list-position or
+  // remembered identity) and asserted with the DELETE — a delete reviewed
+  // against one version can never destroy another admin's newer version (the
+  // appliance refuses it with the structured 409 and nothing is deleted).
+  const [reviewed, setReviewed] = useState<YaraRule | null>(null);
+  useEffect(() => {
+    const ctrl = new AbortController();
+    getYaraRule(name, ctrl.signal)
+      .then((r) => {
+        setReviewed(r);
+      })
+      .catch((err: unknown) => {
+        if (ctrl.signal.aborted) return;
+        onConflict(
+          serverErrorText(
+            err,
+            `The rule file ${name} could not be loaded for review — it may already have been deleted. Review the refreshed inventory.`,
+          ),
+        );
+      });
+    return () => {
+      ctrl.abort();
+    };
+    // The dialog is mounted per delete attempt; name is stable for its life.
+  }, [name]);
   return (
     <ConfirmationDialog
       open
@@ -499,25 +534,45 @@ function DeleteRuleDialog({
         <>
           This removes the rule file <Mono>{name}</Mono> from the rules
           directory and reloads the rule set — every rule inside it stops
-          matching immediately. The scan verdict cache is cleared.
+          matching immediately. The scan verdict cache is cleared.{" "}
+          {reviewed === null ? (
+            "Loading the current rule version…"
+          ) : (
+            <>
+              The delete is bound to the current version just loaded (
+              <Mono>{reviewed.revision.slice(0, 19)}…</Mono>); if the file
+              changes first, the appliance refuses.
+            </>
+          )}
         </>
       }
       impact="Content previously blocked by these rules will no longer be blocked by YARA."
       rollback="Re-create the rule file with the same source."
-      confirmLabel="Delete rule file"
+      // The confirm control is inert (guarded no-op) until the reviewed
+      // revision is loaded; the label says so.
+      confirmLabel={
+        reviewed === null ? "Loading current version…" : "Delete rule file"
+      }
       destructive
       result={result}
       {...(errorText !== "" ? { errorText } : {})}
       onConfirm={() => {
+        if (reviewed === null) return; // review not loaded — nothing to assert
         const signal = page.owner.begin();
         setResult("pending");
-        deleteYaraRule(name, signal)
+        deleteYaraRule(name, reviewed.revision, signal)
           .then(onDone)
           .catch((err: unknown) => {
             if (unknownOutcome(err)) {
               page.latchUnknown("delete");
               setResult("unknown");
               onCancel();
+              return;
+            }
+            if (asRevisionConflict(err) !== null) {
+              onConflict(
+                `The rule file ${name} changed on the appliance after you reviewed it. Nothing was deleted — review the refreshed inventory and retry.`,
+              );
               return;
             }
             setResult("failed");

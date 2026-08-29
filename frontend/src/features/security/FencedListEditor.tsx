@@ -22,6 +22,15 @@ export function splitLines(text: string): readonly string[] {
     .filter((l) => l !== "");
 }
 
+/** Extracts a decoded FleetPublication rejection fact from a save result
+ * (2E-A-2 §4): present ⇒ the LOCAL durable save succeeded but the fleet
+ * config publish was rejected — two distinct facts, rendered as such. */
+export function publishRejectedOf(res: unknown): string | undefined {
+  if (typeof res !== "object" || res === null) return undefined;
+  const v: unknown = Reflect.get(res, "publishRejected");
+  return typeof v === "string" && v !== "" ? v : undefined;
+}
+
 export function diffCounts(
   current: readonly string[],
   next: readonly string[],
@@ -70,6 +79,7 @@ export function FencedListEditor({
   const [result, setResult] = useState<ConfirmResult>("idle");
   const [serverError, setServerError] = useState("");
   const [notice, setNotice] = useState("");
+  const [publishRejected, setPublishRejected] = useState("");
 
   const next = splitLines(text);
   const { added, removed } = diffCounts(current, next);
@@ -79,10 +89,13 @@ export function FencedListEditor({
     const signal = page.owner.begin();
     setResult("pending");
     setServerError("");
+    setPublishRejected("");
     doSave(next, revision, signal)
-      .then(() => {
+      .then((res) => {
         setConfirming(false);
         setResult("idle");
+        const rej = publishRejectedOf(res);
+        if (rej !== undefined) setPublishRejected(rej);
         page.refreshToResolve();
       })
       .catch((err: unknown) => {
@@ -118,6 +131,20 @@ export function FencedListEditor({
         <div className={styles.calloutSpace}>
           <Callout variant="warning" title="Not applied" role="alert">
             {notice}
+          </Callout>
+        </div>
+      )}
+      {publishRejected !== "" && (
+        <div className={styles.calloutSpace}>
+          <Callout
+            variant="critical"
+            title="Saved on this node — fleet publication rejected"
+            role="alert"
+          >
+            The {label} was saved and is enforcing on THIS node, but publishing
+            the configuration to the fleet was rejected: {publishRejected}.
+            Data-plane nodes keep the previous configuration until a publish
+            succeeds.
           </Callout>
         </div>
       )}

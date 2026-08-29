@@ -146,11 +146,39 @@ export function syncThreatFeeds(signal?: AbortSignal): Promise<SecScanStatus> {
   });
 }
 
+// ── Fleet publication truth (2E-A-2 §4) ─────────────────────────────────────
+
+/** Outcome of the fleet config publish a cluster-synced write triggers.
+ * `publishRejected` (server field cluster_publish_rejected) is present ONLY
+ * when the LOCAL durable mutation succeeded but the fleet publish was
+ * REJECTED at commit — two distinct facts: this node enforces the new state,
+ * the fleet stays on the last valid snapshot. */
+export interface FleetPublication {
+  publishRejected?: string;
+}
+
+function readPublishRejected(
+  o: Record<string, unknown>,
+  path: string,
+): string | undefined {
+  return opt(o, "cluster_publish_rejected", readString, path);
+}
+
+/** Ownership signal: false on a managed Data Plane node, where the surface is
+ * control-plane managed and local writes are refused with 409. Absent on
+ * pre-2E-A-2 responses ⇒ treated as editable (the pre-signal behavior). */
+function readEditable(o: Record<string, unknown>, path: string): boolean {
+  const e = opt(o, "editable", readBoolean, path);
+  return e === undefined ? true : e;
+}
+
 // ── Threat-feed domain allowlist ────────────────────────────────────────────
 
 export interface DomainAllowlist {
   domains: readonly string[];
   revision: string;
+  /** false ⇒ control-plane managed on this node (writes are refused). */
+  editable: boolean;
 }
 
 export const decodeDomainAllowlist: Decoder<DomainAllowlist> = (
@@ -165,6 +193,7 @@ export const decodeDomainAllowlist: Decoder<DomainAllowlist> = (
         ? []
         : field(o, "domains", readArray(readString), path),
     revision: field(o, "revision", readString, path),
+    editable: readEditable(o, path),
   };
 };
 
@@ -178,22 +207,30 @@ export function getDomainAllowlist(
   );
 }
 
-const decodeAllowlistPutResult: Decoder<{ count: number; revision: string }> = (
+export interface AllowlistPutResult extends FleetPublication {
+  count: number;
+  revision: string;
+}
+
+const decodeAllowlistPutResult: Decoder<AllowlistPutResult> = (
   v,
   path = "$",
 ) => {
   const o = readRecord(v, path);
-  return {
+  const out: AllowlistPutResult = {
     count: field(o, "count", readNumber, path),
     revision: field(o, "revision", readString, path),
   };
+  const rej = readPublishRejected(o, path);
+  if (rej !== undefined) out.publishRejected = rej;
+  return out;
 };
 
 export function putDomainAllowlist(
   domains: readonly string[],
   ifRevision: string,
   signal?: AbortSignal,
-): Promise<{ count: number; revision: string }> {
+): Promise<AllowlistPutResult> {
   return apiRequest(
     "/api/security-scan/feeds/domain-allowlist",
     decodeAllowlistPutResult,
@@ -335,12 +372,17 @@ export function updateYaraRule(
   );
 }
 
+/** Fenced DELETE (2E-A-2 §3): asserts the content revision of the rule source
+ * the admin reviewed in the delete ceremony. A stale token is the structured
+ * 409 with NOTHING deleted; a missing target is a truthful 404. This client
+ * ALWAYS asserts the fence. */
 export function deleteYaraRule(
   name: string,
+  ifRevision: string,
   signal?: AbortSignal,
 ): Promise<void> {
   return apiRequest(
-    `/api/security-scan/yara/rules/${encodeURIComponent(name)}`,
+    `/api/security-scan/yara/rules/${encodeURIComponent(name)}?ifRevision=${encodeURIComponent(ifRevision)}`,
     () => undefined,
     { method: "DELETE", ...(signal !== undefined ? { signal } : {}) },
   );
@@ -613,6 +655,8 @@ export interface DpiConfig {
   patterns: readonly string[];
   count: number;
   blockedTotal: number;
+  /** false ⇒ control-plane managed on this node (writes are refused). */
+  editable: boolean;
 }
 
 export const decodeDpiConfig: Decoder<DpiConfig> = (v, path = "$") => {
@@ -625,6 +669,7 @@ export const decodeDpiConfig: Decoder<DpiConfig> = (v, path = "$") => {
         : field(o, "patterns", readArray(readString), path),
     count: field(o, "count", readNumber, path),
     blockedTotal: field(o, "blocked_total", readNumber, path),
+    editable: readEditable(o, path),
   };
 };
 
@@ -636,11 +681,22 @@ export function getDpi(signal?: AbortSignal): Promise<DpiConfig> {
   );
 }
 
+/** DPI patterns are cluster-synced: a successful mutation publishes a fresh
+ * config snapshot; a rejected publish comes back as publishRejected. */
+const decodeFleetPublication: Decoder<FleetPublication> = (v, path = "$") => {
+  if (v === undefined || v === null) return {}; // 204 — full success
+  const o = readRecord(v, path);
+  const out: FleetPublication = {};
+  const rej = readPublishRejected(o, path);
+  if (rej !== undefined) out.publishRejected = rej;
+  return out;
+};
+
 export function addDpiPattern(
   pattern: string,
   signal?: AbortSignal,
-): Promise<void> {
-  return apiRequest("/api/dpi", () => undefined, {
+): Promise<FleetPublication> {
+  return apiRequest("/api/dpi", decodeFleetPublication, {
     method: "POST",
     body: { pattern },
     ...(signal !== undefined ? { signal } : {}),
@@ -650,10 +706,10 @@ export function addDpiPattern(
 export function removeDpiPattern(
   pattern: string,
   signal?: AbortSignal,
-): Promise<void> {
+): Promise<FleetPublication> {
   return apiRequest(
     `/api/dpi?pattern=${encodeURIComponent(pattern)}`,
-    () => undefined,
+    decodeFleetPublication,
     { method: "DELETE", ...(signal !== undefined ? { signal } : {}) },
   );
 }

@@ -26,7 +26,7 @@ import {
   putDpiBypass,
   removeDpiPattern,
 } from "../../api/contentsec";
-import { FencedListEditor } from "./FencedListEditor";
+import { FencedListEditor, publishRejectedOf } from "./FencedListEditor";
 import styles from "../policy/policy.module.css";
 
 export function DpiTab({
@@ -46,12 +46,15 @@ export function DpiTab({
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState<string | null>(null);
   const [serverError, setServerError] = useState("");
+  const [publishRejected, setPublishRejected] = useState("");
   const blocked = page.unknown !== null;
+  const editable = dpi === undefined || dpi.editable;
 
   page.setBoundaryCleanup(() => {
     setNewPattern("");
     setRemoving(null);
     setServerError("");
+    setPublishRejected("");
   });
 
   const refreshAll = (): void => {
@@ -64,9 +67,12 @@ export function DpiTab({
     const signal = page.owner.begin();
     setAdding(true);
     setServerError("");
+    setPublishRejected("");
     addDpiPattern(newPattern.trim(), signal)
-      .then(() => {
+      .then((res) => {
         setNewPattern("");
+        const rej = publishRejectedOf(res);
+        if (rej !== undefined) setPublishRejected(rej);
         page.refreshToResolve();
       })
       .catch((err: unknown) => {
@@ -128,7 +134,14 @@ export function DpiTab({
               ["Requests blocked by DPI", String(dpi.blockedTotal)],
             ]}
           />
-          {isOperator && (
+          {!dpi.editable && (
+            <Callout variant="info" title="Control-plane managed" role="status">
+              This node is a managed data plane: DPI patterns are owned by the
+              control plane and distributed with the fleet configuration. Local
+              edits are refused — make the change on the control plane.
+            </Callout>
+          )}
+          {isOperator && dpi.editable && (
             <div className={styles.toolbarActions}>
               <InputField
                 label="New pattern (regular expression)"
@@ -152,19 +165,31 @@ export function DpiTab({
               {serverError}
             </Callout>
           )}
+          {publishRejected !== "" && (
+            <Callout
+              variant="critical"
+              title="Saved on this node — fleet publication rejected"
+              role="alert"
+            >
+              The DPI pattern change was saved and is enforcing on THIS node,
+              but publishing the configuration to the fleet was rejected:{" "}
+              {publishRejected}. Data-plane nodes keep the previous pattern set
+              until a publish succeeds.
+            </Callout>
+          )}
           <div className={styles.tableWrap}>
             <table className={styles.table}>
               <caption className="sr-only">DPI patterns</caption>
               <thead>
                 <tr>
                   <th scope="col">Pattern</th>
-                  {isOperator && <th scope="col">Actions</th>}
+                  {isOperator && editable && <th scope="col">Actions</th>}
                 </tr>
               </thead>
               <tbody>
                 {dpi.patterns.length === 0 && (
                   <tr>
-                    <td colSpan={isOperator ? 2 : 1}>
+                    <td colSpan={isOperator && editable ? 2 : 1}>
                       No DPI patterns are configured — DPI content matching is
                       inactive.
                     </td>
@@ -175,7 +200,7 @@ export function DpiTab({
                     <td>
                       <Mono>{p}</Mono>
                     </td>
-                    {isOperator && (
+                    {isOperator && editable && (
                       <td>
                         <Button
                           size="sm"
@@ -198,12 +223,13 @@ export function DpiTab({
         </Card>
       )}
 
-      {removing !== null && isOperator && (
+      {removing !== null && isOperator && editable && (
         <RemovePatternDialog
           pattern={removing}
           page={page}
-          onDone={() => {
+          onDone={(rej) => {
             setRemoving(null);
+            if (rej !== undefined) setPublishRejected(rej);
             page.refreshToResolve();
           }}
           onCancel={() => {
@@ -275,7 +301,9 @@ function RemovePatternDialog({
 }: {
   pattern: string;
   page: ReturnType<typeof useObjectPage<Awaited<ReturnType<typeof getDpi>>>>;
-  onDone: () => void;
+  /** Called on success; carries the fleet publish-rejected reason when the
+   * local removal landed but the fleet publication was refused (2E-A-2 §4). */
+  onDone: (publishRejected?: string) => void;
   onCancel: () => void;
 }): JSX.Element {
   const [result, setResult] = useState<ConfirmResult>("idle");
@@ -301,7 +329,9 @@ function RemovePatternDialog({
         const signal = page.owner.begin();
         setResult("pending");
         removeDpiPattern(pattern, signal)
-          .then(onDone)
+          .then((res) => {
+            onDone(publishRejectedOf(res));
+          })
           .catch((err: unknown) => {
             if (unknownOutcome(err)) {
               page.latchUnknown("delete");

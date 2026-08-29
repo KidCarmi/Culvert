@@ -19,6 +19,7 @@ import {
   decodeYaraInventory,
   decodeYaraSettings,
   decodeYaraValidateResult,
+  deleteYaraRule,
   getDpi,
   getDpiBypass,
   getSecScanStatus,
@@ -84,10 +85,11 @@ describe("allowlist / exclusions / bypass decoding", () => {
   it("decodes lists with the revision fence; requires the revision", () => {
     expect(
       decodeDomainAllowlist({ domains: ["a.example"], revision: "sha256:x" }),
-    ).toEqual({ domains: ["a.example"], revision: "sha256:x" });
+    ).toEqual({ domains: ["a.example"], revision: "sha256:x", editable: true });
     expect(decodeDomainAllowlist({ domains: null, revision: "r" })).toEqual({
       domains: [],
       revision: "r",
+      editable: true,
     });
     expect(() => decodeDomainAllowlist({ domains: [] })).toThrow(DecodeError);
 
@@ -170,7 +172,25 @@ describe("svc / cache / dpi decoding", () => {
   it("decodes DPI config", () => {
     expect(
       decodeDpiConfig({ patterns: ["p1"], count: 1, blocked_total: 9 }),
-    ).toEqual({ patterns: ["p1"], count: 1, blockedTotal: 9 });
+    ).toEqual({ patterns: ["p1"], count: 1, blockedTotal: 9, editable: true });
+  });
+
+  it("decodes the managed-DP ownership signal (editable=false) verbatim", () => {
+    // 2E-A-2 §4: false means the surface is control-plane managed on this
+    // node and local writes are refused; absent (older appliance) defaults
+    // to editable — the pre-signal behavior.
+    expect(
+      decodeDomainAllowlist({ domains: [], revision: "r", editable: false })
+        .editable,
+    ).toBe(false);
+    expect(
+      decodeDpiConfig({
+        patterns: [],
+        count: 0,
+        blocked_total: 0,
+        editable: false,
+      }).editable,
+    ).toBe(false);
   });
 });
 
@@ -310,4 +330,57 @@ it("recognizes the shared structured revision 409 from the 2E-A surfaces", () =>
   const conflict = asRevisionConflict(err);
   expect(conflict).not.toBeNull();
   expect(conflict?.currentRevision).toBe("sha256:current");
+});
+
+// ── 2E-A-2: fleet publication truth + the fenced destructive YARA delete ────
+
+it("surfaces cluster_publish_rejected as the distinct fleet fact on the allowlist PUT", async () => {
+  stubFetch(() => ({
+    ok: true,
+    count: 1,
+    revision: "r2",
+    cluster_publish_rejected:
+      "config publish rejected: rewrite identity degraded",
+  }));
+  const res = await putDomainAllowlist(["a.example"], "revA");
+  expect(res.count).toBe(1);
+  expect(res.publishRejected).toBe(
+    "config publish rejected: rewrite identity degraded",
+  );
+  // Healthy publish: the fact is ABSENT, never fabricated.
+  stubFetch(() => ({ ok: true, count: 1, revision: "r2" }));
+  const healthy = await putDomainAllowlist(["a.example"], "revA");
+  expect(healthy.publishRejected).toBeUndefined();
+});
+
+it("decodes the DPI mutation fleet facts: 200-with-fact and 204 full success", async () => {
+  stubFetch(() => ({
+    added: 1,
+    cluster_publish_rejected: "over-cap",
+  }));
+  expect((await addDpiPattern("p")).publishRejected).toBe("over-cap");
+
+  // DELETE full success is a 204 with no body — no fact.
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(() => Promise.resolve(new Response(null, { status: 204 }))),
+  );
+  expect((await removeDpiPattern("p")).publishRejected).toBeUndefined();
+
+  // DELETE with a rejected publish is a 200 carrying the fact.
+  stubFetch(() => ({ removed: "p", cluster_publish_rejected: "over-cap" }));
+  expect((await removeDpiPattern("p")).publishRejected).toBe("over-cap");
+});
+
+it("YARA DELETE always asserts the reviewed revision as ?ifRevision=", async () => {
+  const sent = stubFetch(() => ({
+    deleted: "r1",
+    yara_rules: 0,
+    cache_cleared: true,
+  }));
+  await deleteYaraRule("r1", "sha256:reviewed");
+  const del = sent.find((s) => s.method === "DELETE");
+  expect(del?.url).toBe(
+    "/api/security-scan/yara/rules/r1?ifRevision=sha256%3Areviewed",
+  );
 });

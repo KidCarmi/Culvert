@@ -30,6 +30,9 @@ let root: Root;
 let requested: string[];
 let mutations: Array<{ method: string; url: string; body: unknown }>;
 let onMutate: (method: string, url: string) => Promise<Response>;
+// 2E-A-2 §4 ownership fixtures (true = locally authoritative node).
+let dpiEditable: boolean;
+let allowlistEditable: boolean;
 
 const STATUS = {
   enabled: true,
@@ -66,6 +69,8 @@ beforeEach(() => {
   requested = [];
   mutations = [];
   onMutate = () => okJSON({ ok: true });
+  dpiEditable = true;
+  allowlistEditable = true;
   vi.stubGlobal(
     "fetch",
     vi.fn((input: unknown, init?: RequestInit) => {
@@ -89,7 +94,11 @@ beforeEach(() => {
           cache_size: 3,
         });
       if (url.includes("/api/security-scan/feeds/domain-allowlist"))
-        return okJSON({ domains: ["ok.example"], revision: "alrev1" });
+        return okJSON({
+          domains: ["ok.example"],
+          revision: "alrev1",
+          editable: allowlistEditable,
+        });
       if (url.includes("/api/security-scan/yara/settings"))
         return okJSON({
           enabled: true,
@@ -99,6 +108,14 @@ beforeEach(() => {
           on_saturation: "fail_closed",
           alert_degraded: true,
           revision: "ysrev1",
+        });
+      // Item GET (the delete ceremony's authoritative review fetch) before
+      // the collection match.
+      if (/\/api\/security-scan\/yara\/rules\/.+/.test(url))
+        return okJSON({
+          name: "corp",
+          source: "rule corp_rule { condition: true }",
+          revision: "rulerev1",
         });
       if (url.includes("/api/security-scan/yara/rules"))
         return okJSON({
@@ -122,6 +139,7 @@ beforeEach(() => {
           patterns: ["secret-[0-9]+"],
           count: 1,
           blocked_total: 7,
+          editable: dpiEditable,
         });
       return Promise.reject(new TypeError(`unexpected ${method} ${url}`));
     }),
@@ -417,4 +435,105 @@ it("no interaction ever touches the deprecated /api/content-scan aliases", async
   for (const r of requested) {
     expect(r).not.toContain("/api/content-scan");
   }
+});
+
+// ── 2E-A-2: revision-bound YARA delete + fleet truth + ownership ────────────
+
+it("YARA delete: ceremony bound to the reviewed revision; DELETE asserts it", async () => {
+  await mountPage("admin");
+  await openTab("YARA", "Rule files");
+  clickButton((t) => t === "Delete");
+  // The dialog fetches the AUTHORITATIVE current rule and binds the ceremony
+  // to that reviewed revision (2E-A-2 §3).
+  await flushUntil(() => {
+    expect(container.textContent).toContain("Delete YARA rule file corp");
+    expect(container.textContent).toContain("bound to the current version");
+  });
+  onMutate = () =>
+    okJSON({ deleted: "corp", yara_rules: 0, cache_cleared: true });
+  clickButton((t) => t === "Delete rule file");
+  await flushUntil(() => {
+    expect(mutations).toHaveLength(1);
+  });
+  const del = mutations[0];
+  expect(del?.method).toBe("DELETE");
+  expect(del?.url).toBe(
+    "/api/security-scan/yara/rules/corp?ifRevision=rulerev1",
+  );
+});
+
+it("stale YARA delete: structured 409 preserves the rule and forces fresh truth", async () => {
+  await mountPage("admin");
+  await openTab("YARA", "Rule files");
+  clickButton((t) => t === "Delete");
+  await flushUntil(() => {
+    expect(container.textContent).toContain("bound to the current version");
+  });
+  onMutate = () =>
+    okJSON(
+      {
+        error: "YARA rule corp changed since you loaded it",
+        currentRevision: "rulerevX",
+        yourRevision: "rulerev1",
+      },
+      409,
+    );
+  clickButton((t) => t === "Delete rule file");
+  await flushUntil(() => {
+    expect(container.textContent).toContain(
+      "changed on the appliance after you reviewed it",
+    );
+    expect(container.textContent).toContain("Nothing was deleted");
+  });
+});
+
+it("DPI add renders the fleet publication rejection as a distinct fact", async () => {
+  await mountPage("admin");
+  await openTab("DPI", "Signature patterns");
+  const input = Array.from(container.querySelectorAll("input")).find(
+    (i) => i.type === "text",
+  );
+  if (input === undefined) throw new Error("pattern input not found");
+  act(() => {
+    const proto = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    );
+    proto?.set?.call(input, "leak-[0-9]+");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  onMutate = () =>
+    okJSON({
+      added: 1,
+      cluster_publish_rejected: "config publish rejected: over-cap",
+    });
+  clickButton((t) => t === "Add pattern");
+  await flushUntil(() => {
+    // Two DISTINCT facts, both rendered: local save succeeded, fleet
+    // publication was rejected with the reason.
+    expect(container.textContent).toContain("fleet publication rejected");
+    expect(container.textContent).toContain("over-cap");
+  });
+});
+
+it("managed data plane: cluster-synced surfaces mount read-only; node-local stays writable", async () => {
+  dpiEditable = false;
+  allowlistEditable = false;
+  await mountPage("admin");
+  await openTab("DPI", "Signature patterns");
+  await flushUntil(() => {
+    expect(container.textContent).toContain("Control-plane managed");
+  });
+  // Cluster-synced DPI patterns: no local write controls.
+  expect(buttons().some((t) => t === "Add pattern")).toBe(false);
+  expect(buttons().some((t) => t === "Remove")).toBe(false);
+  // Node-local bypass hosts are NOT cluster-synced — the editor stays.
+  await flushUntil(() => {
+    expect(buttons().some((t) => t.startsWith("Save DPI bypass"))).toBe(true);
+  });
+  await openTab("Threat Intelligence", "Feed synchronization");
+  await flushUntil(() => {
+    expect(container.textContent).toContain("Control-plane managed");
+  });
+  expect(buttons().some((t) => t.startsWith("Save allowlisted"))).toBe(false);
 });
