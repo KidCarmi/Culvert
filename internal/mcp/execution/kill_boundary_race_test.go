@@ -44,6 +44,7 @@ import (
 	"github.com/KidCarmi/Culvert/internal/mcp/credentials/profile"
 	"github.com/KidCarmi/Culvert/internal/mcp/credentials/provider"
 	"github.com/KidCarmi/Culvert/internal/mcp/identity"
+	"github.com/KidCarmi/Culvert/internal/mcp/inspection"
 	"github.com/KidCarmi/Culvert/internal/mcp/limits"
 	"github.com/KidCarmi/Culvert/internal/mcp/mcperr"
 	"github.com/KidCarmi/Culvert/internal/mcp/policy"
@@ -162,6 +163,71 @@ func credKillExecutor(t *testing.T, st *rollout.State, up *fakeUpstream, onFetch
 	t.Helper()
 	b, id := newCredKillBroker(t, onFetch)
 	return credDriftExecutorForState(t, b, up, st), id
+}
+
+// blockReasonSpy records every ObserveBlock reason so a test can assert a refusal is metered
+// exactly once and never on the wrong series. Embeds noopMetrics for the other methods.
+type blockReasonSpy struct {
+	noopMetrics
+	mu      sync.Mutex
+	reasons []mcperr.Reason
+}
+
+func (s *blockReasonSpy) ObserveBlock(_ string, reason mcperr.Reason) {
+	s.mu.Lock()
+	s.reasons = append(s.reasons, reason)
+	s.mu.Unlock()
+}
+
+func (s *blockReasonSpy) count(r mcperr.Reason) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, x := range s.reasons {
+		if x == r {
+			n++
+		}
+	}
+	return n
+}
+
+// credKillExecutorWithMetrics builds the credential-path Executor with a block-reason spy so
+// the metering contract can be asserted.
+func credKillExecutorWithMetrics(t *testing.T, st *rollout.State, up *fakeUpstream, onFetch func(), m Metrics) (*Executor, *identity.ResolvedContext) {
+	t.Helper()
+	b, id := newCredKillBroker(t, onFetch)
+	e, err := New(Config{
+		State: st, Upstream: up, Events: realEvents(t, nil), Broker: b, Metrics: m,
+		ResponseProfile: inspection.DefaultGatewayProfile(1),
+		Clock:           credDriftClock(),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return e, id
+}
+
+// TestKillBoundary_CredentialKillMetersOnce is the regression guard for Codex P2 (PR #1248):
+// a credential-path boundary kill must emit EXACTLY ONE block observation, on the
+// rollout_emergency_active series — never a second, and never a stray ReasonNone from the
+// broker-callback error being pre-metered inside materializeAndCall before reclassification.
+func TestKillBoundary_CredentialKillMetersOnce(t *testing.T) {
+	st := credDriftStateMode(t, rollout.ModeCanary)
+	up := &fakeUpstream{}
+	spy := &blockReasonSpy{}
+	e, id := credKillExecutorWithMetrics(t, st, up, nil, spy)
+	in := credDriftInput(id, func() bool { st.EngageKillSwitch("oncall", 7); return true })
+
+	out := runExec(e, context.Background(), in)
+
+	req0Upstream(t, up)
+	mustEmergencyBlock(t, out)
+	if got := spy.count(mcperr.ReasonRolloutEmergencyActive); got != 1 {
+		t.Fatalf("credential boundary kill must meter rollout_emergency_active exactly once, got %d (total observations: %v)", got, spy.reasons)
+	}
+	if got := spy.count(mcperr.ReasonNone); got != 0 {
+		t.Fatalf("credential boundary kill must NOT contaminate the ReasonNone series, got %d none-observations (total: %v)", got, spy.reasons)
+	}
 }
 
 // ── the race matrix ──────────────────────────────────────────────────────────
