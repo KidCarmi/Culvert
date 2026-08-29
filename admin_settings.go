@@ -45,6 +45,19 @@ type AdminSettings struct {
 	RewriteRules      []RewriteRule `json:"rewrite_rules,omitempty"`
 	RewriteRulesSaved bool          `json:"rewrite_rules_saved"`
 
+	// RewriteSeedIdentities is the IDENTITY LEDGER for YAML-seeded rewrite
+	// rules on an appliance where AdminSettings does NOT (yet) own the rewrite
+	// set (2D-C final §7–§9): the YAML file stays the source of the RULES, but
+	// the stable identities minted for them must survive a restart with no
+	// admin write — a read-only management session must never observe objects
+	// re-identified across boots. finalizeRewriteSeedIdentities re-attaches
+	// these IDs to the seeded rules per position+content each boot and updates
+	// the ledger through the targeted migration writer (which preserves every
+	// unrelated field and ownership sentinel). Once any ordinary admin save
+	// claims the rewrite surface (RewriteRulesSaved), the ledger is obsolete
+	// and the next omnibus snapshot drops it.
+	RewriteSeedIdentities []RewriteRule `json:"rewrite_seed_identities,omitempty"`
+
 	// Block page
 	BlockPageHTML string `json:"block_page_html,omitempty"`
 
@@ -271,7 +284,13 @@ func LoadAdminSettings(path string) {
 
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
-		return // first run — no settings file yet; components keep their config defaults
+		// First run — no settings file yet; components keep their config
+		// defaults. YAML-seeded rewrite rules still need their minted stable
+		// identities made durable BEFORE the admin listeners expose them
+		// (2D-C final §7–§8): the finalize pass writes the minimal identity
+		// ledger, claiming ownership of nothing else.
+		finalizeRewriteSeedIdentities()
+		return
 	}
 	if err != nil {
 		// Read error on an EXISTING file (EACCES/EIO): the content may be intact, so do
@@ -328,21 +347,13 @@ func LoadAdminSettings(path string) {
 
 	snapshotOverriddenSurfaces(s)
 
-	// One-time rewrite stable-identity migration (2D-C §21): legacy persisted
-	// rules were just backfilled with durable StableIDs in memory; persist them
-	// NOW through the real owner so a restart before the next ordinary save
-	// cannot re-identify them. Boot-time, so a failure only logs — the disk
-	// that failed this save would fail every later one too, and the next
-	// successful save completes the migration.
-	if rewriteIDsBackfilledAtLoad > 0 {
-		n := rewriteIDsBackfilledAtLoad
-		rewriteIDsBackfilledAtLoad = 0
-		if err := SaveAdminSettings(); err != nil {
-			logger.Printf("AdminSettings: rewrite stable-ID migration (%d rule(s)) not yet durable: %v", n, err)
-		} else {
-			logger.Printf("AdminSettings: migrated %d rewrite rule(s) to durable stable identities", n)
-		}
-	}
+	// Rewrite stable-identity durability (2D-C final §7–§9): one pass that
+	// (a) persists the one-time in-file legacy backfill for a settings-owned
+	// rewrite surface, or (b) re-attaches + persists the YAML-seed identity
+	// ledger — both through the TARGETED migration writer, which preserves
+	// every unrelated field and ownership sentinel (the earlier omnibus
+	// SaveAdminSettings here stamped unrelated surfaces saved-authoritative).
+	finalizeRewriteSeedIdentities()
 
 	logger.Printf("AdminSettings: loaded from %s", path)
 }
@@ -384,15 +395,26 @@ func applyAdminSecurity(s *AdminSettings) {
 	// identities immediately (a restart before the next save must not
 	// re-identify them — 2D-C §21).
 	if s.RewriteRulesSaved || len(s.RewriteRules) > 0 {
+		rewriteSettingsOwnedAtLoad = true
 		rewriteIDsBackfilledAtLoad = rewriter.SetRules(s.RewriteRules)
 	}
+	// Identity ledger for YAML-seeded rules (2D-C final §7): captured here,
+	// consumed by finalizeRewriteSeedIdentities at the end of the load.
+	rewriteSeedLedgerAtLoad = s.RewriteSeedIdentities
 }
 
 // rewriteIDsBackfilledAtLoad counts the stable rewrite identities minted while
 // restoring admin_settings.json this boot (legacy file without stableIds).
-// Consumed once at the end of LoadAdminSettings to trigger the one-time
-// migration save; boot-time only (single-threaded startup).
-var rewriteIDsBackfilledAtLoad int
+// rewriteSettingsOwnedAtLoad records whether the settings file claimed the
+// rewrite surface this boot (sentinel or legacy len>0 gate), and
+// rewriteSeedLedgerAtLoad carries the persisted YAML-seed identity ledger.
+// All three are consumed once by finalizeRewriteSeedIdentities at the end of
+// LoadAdminSettings; boot-time only (single-threaded startup).
+var (
+	rewriteIDsBackfilledAtLoad int
+	rewriteSettingsOwnedAtLoad bool
+	rewriteSeedLedgerAtLoad    []RewriteRule
+)
 
 // applyAdminServices applies logging, monitoring, and session settings.
 func applyAdminServices(s *AdminSettings) {

@@ -31,9 +31,16 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
 	"net/http"
+	"os"
+	"slices"
 
+	"github.com/google/uuid"
+
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/rewrite"
 )
 
@@ -61,11 +68,15 @@ func installRewriteRulesDurable(target []RewriteRule) error {
 	})
 }
 
-// validateRewriteStableIDs rejects duplicate non-empty stable identities in a
-// candidate rule set (§22): two rules claiming one identity is a corrupted
-// candidate — regenerating one of them silently would pretend identity was
-// preserved. Missing IDs are fine (legacy candidates — server-generated at
-// install).
+// validateRewriteStableIDs enforces the StableID format contract at the
+// trust doors (config import, config-version rollback, CP snapshot — 2D-C
+// final §16): empty = legacy candidate (eligible for controlled one-time
+// migration at install); non-empty MUST be a valid UUID (the contract has
+// always said "server-owned UUID" — the validator now enforces what the
+// prose promises); duplicates and malformed non-empty values reject the
+// WHOLE candidate. Two rules claiming one identity, or an identity the
+// server could never have minted, is a corrupted candidate — regenerating
+// or accepting either silently would pretend identity was preserved.
 func validateRewriteStableIDs(rules []RewriteRule) error {
 	seen := make(map[string]bool, len(rules))
 	for i := range rules {
@@ -73,12 +84,155 @@ func validateRewriteStableIDs(rules []RewriteRule) error {
 		if id == "" {
 			continue
 		}
+		if _, err := uuid.Parse(id); err != nil {
+			return fmt.Errorf("malformed rewrite rule stableId %q (must be a UUID)", id)
+		}
 		if seen[id] {
 			return fmt.Errorf("duplicate rewrite rule stableId %q", id)
 		}
 		seen[id] = true
 	}
 	return nil
+}
+
+// ─── YAML-seed identity durability (2D-C final §7–§9) ──────────────────────
+
+// rewriteRuleContentEqual reports whether two rules carry the same SEMANTIC
+// content (host scope + every header operation), ignoring both identity
+// fields. Used only for re-attaching persisted identities to YAML-seeded
+// rules — never as identity itself (two identical rules stay two objects;
+// position disambiguates them here).
+func rewriteRuleContentEqual(a, b RewriteRule) bool {
+	return a.Host == b.Host &&
+		maps.Equal(a.ReqSet, b.ReqSet) &&
+		maps.Equal(a.ReqAdd, b.ReqAdd) &&
+		slices.Equal(a.ReqRemove, b.ReqRemove) &&
+		maps.Equal(a.RespSet, b.RespSet) &&
+		maps.Equal(a.RespAdd, b.RespAdd) &&
+		slices.Equal(a.RespRemove, b.RespRemove)
+}
+
+// finalizeRewriteSeedIdentities is the single boot-time pass (called from
+// LoadAdminSettings on BOTH the loaded and the file-absent paths) that makes
+// rewrite stable identity durable BEFORE any admin listener exposes
+// /api/rewrite/state:
+//
+//   - settings-OWNED rewrite surface (sentinel or legacy len>0 file): the
+//     in-file legacy backfill that SetRules just performed is persisted
+//     through the TARGETED writer — only rewrite_rules changes; every
+//     unrelated field and ownership sentinel is preserved byte-for-byte
+//     semantics (the pre-correction omnibus save stamped them all
+//     saved-authoritative).
+//   - YAML-seeded surface (settings do not own rewrite): the persisted
+//     identity LEDGER is re-attached to the seeded rules per position+content
+//     (an unchanged YAML file therefore presents the SAME StableIDs every
+//     boot), fresh identities stay minted for changed/new positions, and the
+//     updated ledger is persisted — creating a minimal settings file when
+//     none exists, claiming ownership of nothing but the ledger itself.
+func finalizeRewriteSeedIdentities() {
+	owned := rewriteSettingsOwnedAtLoad
+	ledger := rewriteSeedLedgerAtLoad
+	backfilled := rewriteIDsBackfilledAtLoad
+	rewriteSettingsOwnedAtLoad = false
+	rewriteSeedLedgerAtLoad = nil
+	rewriteIDsBackfilledAtLoad = 0
+
+	if owned {
+		if backfilled > 0 {
+			migrated := rewriter.List()
+			if err := persistRewriteIdentityMutation(func(s *AdminSettings) {
+				s.RewriteRules = migrated
+			}); err != nil {
+				logger.Printf("AdminSettings: rewrite stable-ID migration (%d rule(s)) not yet durable: %v", backfilled, err)
+			} else {
+				logger.Printf("AdminSettings: migrated %d rewrite rule(s) to durable stable identities", backfilled)
+			}
+		}
+		return
+	}
+
+	live := rewriter.List()
+	if len(live) == 0 && len(ledger) == 0 {
+		return // nothing seeded, nothing recorded — no write on a clean boot
+	}
+
+	// Re-attach persisted identities: position + content match. Ledger
+	// validity is checked defensively (a hand-edited settings file could
+	// carry junk); an unusable ledger is discarded, never trusted.
+	if validateRewriteStableIDs(ledger) != nil {
+		logger.Printf("AdminSettings: rewrite seed-identity ledger is invalid — re-minting seed identities")
+		ledger = nil
+	}
+	attached := make([]RewriteRule, len(live))
+	copy(attached, live)
+	for i := range attached {
+		if i < len(ledger) && ledger[i].StableID != "" && rewriteRuleContentEqual(attached[i], ledger[i]) {
+			attached[i].StableID = ledger[i].StableID
+		}
+	}
+	if !slices.EqualFunc(attached, live, func(a, b RewriteRule) bool { return a.StableID == b.StableID }) {
+		publishRewriteRules(attached)
+		attached = rewriter.List() // republished truth (legacy ints renumbered)
+	}
+	if rewriteSeedLedgerEqual(attached, ledger) {
+		return // ledger already current — no boot-time write
+	}
+	if err := persistRewriteIdentityMutation(func(s *AdminSettings) {
+		s.RewriteSeedIdentities = attached
+	}); err != nil {
+		logger.Printf("AdminSettings: rewrite seed identities not yet durable (%v) — identities will re-mint if the node restarts before a successful save", err)
+	} else {
+		logger.Printf("AdminSettings: recorded %d YAML-seeded rewrite identit%s in the durable ledger", len(attached), pluralYIes(len(attached)))
+	}
+}
+
+func pluralYIes(n int) string {
+	if n == 1 {
+		return "y"
+	}
+	return "ies"
+}
+
+// rewriteSeedLedgerEqual reports whether the persisted ledger already records
+// exactly these rules (identity AND content, in order).
+func rewriteSeedLedgerEqual(a, b []RewriteRule) bool {
+	return slices.EqualFunc(a, b, func(x, y RewriteRule) bool {
+		return x.StableID == y.StableID && rewriteRuleContentEqual(x, y)
+	})
+}
+
+// persistRewriteIdentityMutation is the TARGETED migration writer (2D-C final
+// §8): read the settings file as-is (zero value when absent), apply ONLY the
+// given mutation, and write it back atomically under adminSettingsMu. Unlike
+// the omnibus save it snapshots nothing from the runtime, so every unrelated
+// field and ownership sentinel keeps exactly the value the operator's file
+// carried — a rewrite-identity migration can never flip another surface to
+// saved-authoritative. Never call while holding adminSettingsMu.
+func persistRewriteIdentityMutation(mut func(*AdminSettings)) error {
+	adminSettingsMu.Lock()
+	defer adminSettingsMu.Unlock()
+	path := adminSettingsPath
+	if path == "" {
+		return nil // no persistence configured (tests / ephemeral runs)
+	}
+	var s AdminSettings
+	data, err := os.ReadFile(path)
+	switch {
+	case err == nil:
+		if err := json.Unmarshal(data, &s); err != nil {
+			return fmt.Errorf("existing settings unreadable (refusing to overwrite): %w", err)
+		}
+	case errors.Is(err, os.ErrNotExist):
+		// First write: a minimal file carrying only the mutated fields.
+	default:
+		return err
+	}
+	mut(&s)
+	out, err := json.MarshalIndent(s, "", "  ")
+	if err != nil {
+		return err
+	}
+	return fileutil.AtomicWrite(path, out, 0o600)
 }
 
 // validateIncomingRewriteRule enforces structural sanity on an interactive
