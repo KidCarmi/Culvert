@@ -403,9 +403,13 @@ func rollbackConfigVersion(w http.ResponseWriter, r *http.Request) {
 // Whether rollback SHOULD persist these (by extending the apply path to
 // admin-settings durability) is an owner decision recorded as CHAOS-46, not a
 // change to make silently inside an observability fix.
+// rewrite_rules left this list in the 2D-C final correction (§17): the
+// rollback rewrite slice installs through installRewriteRulesDurable (the
+// AdminSettings owner, persist-before-publish), so a successful rewrite
+// rollback DOES survive restart — reporting it runtime-only was stale
+// operator information.
 var rollbackRuntimeOnlySurfaces = []string{
 	"default_action",
-	"rewrite_rules",
 	"ip_filter_mode",
 	"ip_list",
 	"rate_limit_rpm",
@@ -1021,32 +1025,80 @@ func diffPolicyRules(a, b []PolicyRule, out *[]configChange) {
 	}
 }
 
-// diffRewriteRules compares rewrite rules by host.
+// diffRewriteRules compares rewrite rules IDENTITY-aware (2D-C final §18):
+// with StableID durable it detects add/remove by identity, operation/host
+// changes on the SAME identity, and pure ordering changes (evaluation order
+// is semantics). Legacy history entries without StableIDs get a CONSERVATIVE
+// fallback — any difference in the ordered (host, operations) sequence is
+// reported as changed, so a same-host operation-only edit can never read as
+// "no change". Backend truth only; the change entry shape stays the existing
+// {Field, From, To} envelope.
 func diffRewriteRules(a, b []RewriteRule, out *[]configChange) {
-	setA := make(map[string]struct{}, len(a))
-	for i := range a {
-		setA[a[i].Host] = struct{}{}
+	idsOf := func(rules []RewriteRule) (map[string]int, bool) {
+		m := make(map[string]int, len(rules))
+		for i := range rules {
+			if rules[i].StableID == "" {
+				return nil, false
+			}
+			m[rules[i].StableID] = i
+		}
+		return m, len(m) == len(rules) // duplicates ⇒ fall back conservatively
 	}
-	setB := make(map[string]struct{}, len(b))
-	for i := range b {
-		setB[b[i].Host] = struct{}{}
+	mapA, okA := idsOf(a)
+	mapB, okB := idsOf(b)
+
+	if !okA || !okB {
+		// Legacy/partial identity: conservative ordered content comparison —
+		// never claim "no change" when the actual rewrite set changed.
+		same := len(a) == len(b)
+		if same {
+			for i := range a {
+				if a[i].Host != b[i].Host || !rewriteRuleContentEqual(a[i], b[i]) {
+					same = false
+					break
+				}
+			}
+		}
+		if !same {
+			*out = append(*out, configChange{
+				Field: "rewrite_rules",
+				From:  map[string]any{"count": len(a)},
+				To:    map[string]any{"count": len(b), "note": "rewrite set changed (legacy entries without stable identity — content compared conservatively)"},
+			})
+		}
+		return
 	}
-	var added, removed []string
+
+	var added, removed, changed []string
 	for i := range b {
-		if _, ok := setA[b[i].Host]; !ok {
-			added = append(added, b[i].Host)
+		id := b[i].StableID
+		ai, ok := mapA[id]
+		switch {
+		case !ok:
+			added = append(added, id)
+		case a[ai].Host != b[i].Host || !rewriteRuleContentEqual(a[ai], b[i]):
+			changed = append(changed, id)
 		}
 	}
 	for i := range a {
-		if _, ok := setB[a[i].Host]; !ok {
-			removed = append(removed, a[i].Host)
+		if _, ok := mapB[a[i].StableID]; !ok {
+			removed = append(removed, a[i].StableID)
 		}
 	}
-	if len(added) > 0 || len(removed) > 0 {
+	reordered := false
+	if len(added) == 0 && len(removed) == 0 && len(a) == len(b) {
+		for i := range a {
+			if a[i].StableID != b[i].StableID {
+				reordered = true
+				break
+			}
+		}
+	}
+	if len(added) > 0 || len(removed) > 0 || len(changed) > 0 || reordered {
 		*out = append(*out, configChange{
 			Field: "rewrite_rules",
 			From:  map[string]any{"count": len(a), "removed": removed},
-			To:    map[string]any{"count": len(b), "added": added},
+			To:    map[string]any{"count": len(b), "added": added, "changed": changed, "reordered": reordered},
 		})
 	}
 }
