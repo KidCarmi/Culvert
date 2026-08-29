@@ -98,6 +98,18 @@ type effectiveCategoryView struct {
 	// signed feed with no overrides), where the walk behaves exactly as before.
 	sealed map[string]bool
 
+	// base is the RAW, PRE-OVERRIDE host→category map this view was composed
+	// from — the signed generation's SnapshotEntries for a signed source, the
+	// embedded BuiltIn baseline classes for source=embedded. Captured at
+	// composition time (the production recompose's own input, never re-derived)
+	// so the bulk candidate validators can PREVIEW the post-apply effective
+	// view for a CANDIDATE override set by composing over this base — composing
+	// over the already-composed entries would double-apply the current
+	// overrides (final bulk-integrity correction §7). Read-only after
+	// construction; defaults to the composed entries for an override-free view
+	// (where raw == composed by definition).
+	base map[string]string
+
 	// Identity / provenance (all read-only).
 	Source         effectiveSource
 	FeedVersion    int64  // 0 for the embedded baseline
@@ -167,10 +179,27 @@ func newEffectiveViewWithMembership(entries map[string]string, members map[strin
 	} else {
 		meta.sealed = nil
 	}
+	// Raw pre-override base: defensively copied when the composer supplied one;
+	// an override-free construction defaults to the composed entries (raw ==
+	// composed by definition there).
+	if meta.base != nil {
+		bcp := make(map[string]string, len(meta.base))
+		for h, c := range meta.base {
+			bcp[h] = c
+		}
+		meta.base = bcp
+	} else {
+		meta.base = ecp
+	}
 	meta.entries = ecp
 	meta.members = mcp
 	return &meta
 }
+
+// baseClasses returns the view's RAW pre-override host→category base (see the
+// base field). READ-ONLY contract: callers (the bulk candidate preview) pass
+// it to the pure catoverride composers, which never mutate their input.
+func (v *effectiveCategoryView) baseClasses() map[string]string { return v.base }
 
 // HasCategoryName reports whether the view carries any host classified (or
 // membership-listed) under the named category, case-insensitively. Used by the

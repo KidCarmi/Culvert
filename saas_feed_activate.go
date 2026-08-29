@@ -281,7 +281,7 @@ func (c *activationCoordinator) composeEmbeddedForOverrides() (*effectiveCategor
 	// tombstoned host cannot survive through one of its other categories.
 	composedMembers := catoverride.ComposeMembership(baseMembers, ov)
 	return newEffectiveViewWithMembership(composed, composedMembers,
-		effectiveCategoryView{Source: sourceEmbedded, ConfigRevision: rev, sealed: catoverride.SealedKeys(ov)}), nil
+		effectiveCategoryView{Source: sourceEmbedded, ConfigRevision: rev, sealed: catoverride.SealedKeys(ov), base: baseClasses}), nil
 }
 
 // buildEmbeddedComposedView is the FAIL-SAFE embedded view builder for recovery's
@@ -313,6 +313,7 @@ func (c *activationCoordinator) buildEffectiveView(rg *reverifiedGeneration, ov 
 		ConfigRevision: rev,
 		Stale:          stale,
 		sealed:         catoverride.SealedKeys(ov),
+		base:           rg.SnapshotEntries, // raw signed classes — the recompose/preview base
 	}), nil
 }
 
