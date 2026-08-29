@@ -75,9 +75,10 @@ functional gap — noted, not patched, per the no-code-change rule.)
 
 - Target: ONE controlled in-process node (this container), dedicated to the experiment.
 - Controlled MCP server: `controlled-test-server`, owned by the harness, exposing two
-  harmless deterministic tools — `echo` (policy ALLOW) and `danger` (policy DENY) — plus
-  a REAL controlled upstream HTTP server (httptest) whose invocation counter is the
-  independent zero-side-effect witness.
+  harmless deterministic tools — `echo` (policy ALLOW) and `danger` (policy DENY). It is
+  backed by a REAL controlled upstream TLS server (httptest) **registered as the server's
+  inventory endpoint**, so a regressed upstream dial would land on its handler; its
+  invocation counter is the independent zero-side-effect witness.
 - Synthetic identity: tenant `qualification`, principal/sub `synthetic-shadow-principal`,
   client_id `client-gw`, auth = ES256 bearer (RFC-9728 audience), scope `gateway.tools.call`.
 - Tool fingerprint (deterministic from the tool definition): `8f7e32e0c4fa380a9ae085a0a306ca3a8552252ffdbb6e7795973e7fd011043c`
@@ -149,19 +150,21 @@ loss. Durable-commit failures would also appear here; none occurred.
 ## 7. Runtime results — `TestControlledShadowRestartDrill` (PASS)
 
 ```
-restart boot#1: Shadow ACTIVE (mode=shadow), echo Usable, durable state persisted under dataDir
+restart boot#1: Shadow ACTIVE, echo Usable, committed schema-v2 event id=<evt-id> under durable dataDir
 [ clean shutdown; in-memory singletons dropped; fresh rollout+distribution ]
 restart boot#2: Shadow RESTORED (mode=shadow) approval_store_recovered=true
-            echo_reDerived=Usable evidence_spool_recovered=true live_executor=absent upstream=0
+            echo_reDerived=Usable evidence_record_recovered(id=<evt-id>)=true live_executor=absent upstream=0
 restart post-request: execution_state=shadow_evaluated executed=false
             shadow_outcome=would_execute upstream_invocations=0
 ```
 
-Across a clean restart against the same durable dataDir: Shadow mode restored (via the
-real restore-clamp + activation preflight), the ToolApproval store recovered and re-derived
-`echo` to Usable, the schema-v2 evidence spool recovered, the LiveExecutor stayed absent,
-and no side effect occurred during startup/reconciliation. A fresh in-scope request is still
-`shadow_evaluated` / `executed=false` / upstream=0.
+Boot #1 activates Shadow AND commits one identifiable schema-v2 shadow event (capturing its
+event id) before shutdown. Across a clean restart against the same durable dataDir: Shadow
+mode restored (via the real restore-clamp + activation preflight), the ToolApproval store
+recovered and re-derived `echo` to Usable, **the exact same committed schema-v2 evidence
+record was read back from the recovered spool by its event id**, the LiveExecutor stayed
+absent, and no side effect occurred during startup/reconciliation. A fresh in-scope request
+is still `shadow_evaluated` / `executed=false` / upstream=0.
 
 ## 8. Drills NOT performed at runtime (honest accounting)
 

@@ -13,8 +13,9 @@ package main
 //   - the REAL signed CP->DP rollout activation (applySnapshotMCP -> preflight ->
 //     distribution commit -> rollout commit);
 //   - the REAL durable schema-v2 evidence spool and the REAL culvert_mcp_shadow_* sink;
-//   - a REAL controlled upstream HTTP server (owned here) whose invocation counter is
-//     the independent witness that the protected upstream observes ZERO invocations.
+//   - a REAL controlled upstream server (owned here), REGISTERED as the controlled
+//     server's inventory endpoint, whose invocation counter is the independent witness
+//     that the protected upstream observes ZERO invocations.
 //
 // It performs NO product-code change. It never composes a LiveExecutor, never calls
 // markGatewayExecDepsReady, never materializes a credential, never arms Canary/Production.
@@ -56,8 +57,18 @@ const (
 	outsiderSub = "outsider-principal"
 )
 
+// req fails the test unless ok. Extracting the assertion out of an `if` keeps the
+// experiment phases readable and their cognitive complexity low.
+func req(t *testing.T, ok bool, format string, a ...any) {
+	t.Helper()
+	if !ok {
+		t.Fatalf(format, a...)
+	}
+}
+
 // controlledInventoryJSON seeds ONE controlled server owning two harmless tools, at the
-// witness endpoint. Both tools ingest Quarantined (approval is a separate slice).
+// given endpoint (wired to the witness server so a regressed upstream dial WOULD reach
+// it). Both tools ingest Quarantined (approval is a separate slice).
 func controlledInventoryJSON(endpoint string) string {
 	return `{
   "schema_version": 1,
@@ -86,6 +97,30 @@ const allowEchoRule = `{"id":"ALLOW_ECHO","priority":20,"action":"ALLOW",` +
 	`"conditions":[{"field":"tool.name","op":"exact","value":"echo"}],` +
 	`"obligations":{"logging":"standard"}}`
 
+// controlledScope is the bounded, enumerable Shadow scope (no wildcard).
+func controlledScope() rollout.ScopeSpec {
+	return rollout.ScopeSpec{
+		Capability: rollout.CapabilityGateway,
+		Servers:    []string{ctrlServer},
+		Principals: []string{ctrlPrincip},
+		Operations: []rollout.RiskClass{rollout.RiskWrite},
+		HighRisk:   true,
+	}
+}
+
+// witnessEndpoint starts a REAL controlled upstream server and returns it plus the
+// inventory endpoint token that registers it as the controlled server. A regressed
+// upstream dial to the registered endpoint would land on hits.
+func witnessEndpoint(t *testing.T, hits *int64) (*httptest.Server, string) {
+	t.Helper()
+	w := httptest.NewTLSServer(http.HandlerFunc(func(wr http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt64(hits, 1)
+		wr.WriteHeader(200)
+	}))
+	t.Cleanup(w.Close)
+	return w, "mcp+https://" + w.Listener.Addr().String()
+}
+
 // mintBearerSub mints a valid ES256 gateway bearer with a caller-chosen subject
 // (the runtime maps sub -> rollout PrincipalID, driving scope membership).
 func mintBearerSub(t *testing.T, p *mcpTestPKI, aud, tenant, sub string) string {
@@ -100,9 +135,7 @@ func mintBearerSub(t *testing.T, p *mcpTestPKI, aud, tenant, sub string) string 
 	in := mustB64(hb) + "." + mustB64(cb)
 	sum := sha256.Sum256([]byte(in))
 	r, s, err := ecdsa.Sign(rand.Reader, p.signer, sum[:])
-	if err != nil {
-		t.Fatalf("sign token: %v", err)
-	}
+	req(t, err == nil, "sign token: %v", err)
 	sig := make([]byte, 64)
 	r.FillBytes(sig[:32])
 	s.FillBytes(sig[32:])
@@ -112,18 +145,16 @@ func mintBearerSub(t *testing.T, p *mcpTestPKI, aud, tenant, sub string) string 
 // gwPost issues one authenticated MCP POST to the controlled server path.
 func gwPost(t *testing.T, cli *http.Client, base, serverID, token, sid, body string) (int, string, []byte) {
 	t.Helper()
-	req := mcpObserveReq(t, "POST", base+"/mcp/gateway/"+serverID, body)
-	req.Host = "gw.test"
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("MCP-Protocol-Version", "2025-11-25")
+	r := mcpObserveReq(t, "POST", base+"/mcp/gateway/"+serverID, body)
+	r.Host = "gw.test"
+	r.Header.Set("Authorization", "Bearer "+token)
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("MCP-Protocol-Version", "2025-11-25")
 	if sid != "" {
-		req.Header.Set("Mcp-Session-Id", sid)
+		r.Header.Set("Mcp-Session-Id", sid)
 	}
-	resp, err := cli.Do(req)
-	if err != nil {
-		t.Fatalf("post: %v", err)
-	}
+	resp, err := cli.Do(r)
+	req(t, err == nil, "post: %v", err)
 	defer resp.Body.Close() //nolint:errcheck
 	raw, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, resp.Header.Get("Mcp-Session-Id"), raw
@@ -134,28 +165,31 @@ func handshake(t *testing.T, cli *http.Client, base, serverID, token string) str
 	t.Helper()
 	st, sid, body := gwPost(t, cli, base, serverID, token, "",
 		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}`)
-	if st != 200 || sid == "" {
-		t.Fatalf("initialize: status=%d sid=%q body=%s", st, sid, body)
-	}
-	if st, _, body = gwPost(t, cli, base, serverID, token, sid,
-		`{"jsonrpc":"2.0","method":"notifications/initialized"}`); st/100 != 2 {
-		t.Fatalf("initialized: status=%d body=%s", st, body)
-	}
+	req(t, st == 200 && sid != "", "initialize: status=%d sid=%q body=%s", st, sid, body)
+	st, _, body = gwPost(t, cli, base, serverID, token, sid,
+		`{"jsonrpc":"2.0","method":"notifications/initialized"}`)
+	req(t, st/100 == 2, "initialized: status=%d body=%s", st, body)
 	return sid
 }
 
-// resultOf parses a JSON-RPC response body's "result" object.
+// toolsCall posts a tools/call and returns status + the parsed result object.
+func toolsCall(t *testing.T, cli *http.Client, base, token, sid, id, tool, arg string) (int, map[string]any) {
+	t.Helper()
+	st, _, body := gwPost(t, cli, base, ctrlServer, token, sid,
+		`{"jsonrpc":"2.0","id":`+id+`,"method":"tools/call","params":{"name":"`+tool+`","arguments":`+arg+`}}`)
+	return st, resultOf(t, body)
+}
+
+// resultOf parses a JSON-RPC response body's "result" object. An error envelope (e.g.
+// emergency kill) has no "result", so the whole envelope is returned and the caller
+// simply finds no shadow fields in it.
 func resultOf(t *testing.T, body []byte) map[string]any {
 	t.Helper()
 	var env map[string]any
-	if err := json.Unmarshal(body, &env); err != nil {
-		t.Fatalf("parse body: %v (%s)", err, body)
-	}
+	req(t, json.Unmarshal(body, &env) == nil, "parse body: %s", body)
 	if r, ok := env["result"].(map[string]any); ok {
 		return r
 	}
-	// An error envelope (e.g. emergency kill) has no "result"; return the whole env
-	// so the caller can inspect env["error"].
 	return env
 }
 
@@ -163,9 +197,7 @@ func resultOf(t *testing.T, body []byte) map[string]any {
 func catRec(t *testing.T, cat *catalog.Catalog, serverID, tool string) (string, uint64, catalog.Eligibility) {
 	t.Helper()
 	rec, ok := cat.Current().Get(catalog.ToolKey{Server: registry.ServerID(serverID), Name: tool})
-	if !ok {
-		t.Fatalf("tool %s/%s not in catalog", serverID, tool)
-	}
+	req(t, ok, "tool %s/%s not in catalog", serverID, tool)
 	sum := rec.Fingerprint.Sum()
 	return hex.EncodeToString(sum[:]), rec.Revision, rec.Eligibility
 }
@@ -175,7 +207,7 @@ func catRec(t *testing.T, cat *catalog.Catalog, serverID, tool string) (string, 
 func approveToUsable(t *testing.T, cat *catalog.Catalog, serverID, tool string) string {
 	t.Helper()
 	fpHex, rev, _ := catRec(t, cat, serverID, tool)
-	req, err := mcpToolTrust.RequestApproval(toolTrustRequestInput{
+	r, err := mcpToolTrust.RequestApproval(toolTrustRequestInput{
 		Tenant:              ctrlTenant,
 		ServerID:            serverID,
 		ToolName:            tool,
@@ -185,13 +217,10 @@ func approveToUsable(t *testing.T, cat *catalog.Catalog, serverID, tool string) 
 		RequestedBy:         "operator@corp",
 		Reason:              "reviewed for controlled shadow evaluation",
 	})
-	if err != nil {
-		t.Fatalf("RequestApproval(%s): %v", tool, err)
-	}
-	if _, err := mcpToolTrust.ApproveShadow(req.ApprovalID, "admin@corp", ctrlTenant); err != nil {
-		t.Fatalf("ApproveShadow(%s): %v", tool, err)
-	}
-	return req.ApprovalID
+	req(t, err == nil, "RequestApproval(%s): %v", tool, err)
+	_, err = mcpToolTrust.ApproveShadow(r.ApprovalID, "admin@corp", ctrlTenant)
+	req(t, err == nil, "ApproveShadow(%s): %v", tool, err)
+	return r.ApprovalID
 }
 
 // shadowSnap reads the process-wide shadow metric singleton (nil-safe).
@@ -202,9 +231,9 @@ func shadowSnap() shadowMetricsView {
 	return shadowMetricsView{}
 }
 
-// findShadowEvidence scans the Gateway P-CRIT and P-ORD partitions for the most recent
-// committed schema-v2 shadow decision event.
-func findShadowEvidence(t *testing.T) (evmodel.Event, bool) {
+// latestShadowEvidence scans the Gateway partitions for the most recent committed
+// schema-v2 shadow decision event.
+func latestShadowEvidence(t *testing.T) (evmodel.Event, bool) {
 	t.Helper()
 	er := mcpAdminEventReader()
 	if er == nil {
@@ -219,8 +248,7 @@ func findShadowEvidence(t *testing.T) (evmodel.Event, bool) {
 		}
 		for i := range evs {
 			e := evs[i]
-			if e.SchemaVersion == evmodel.SchemaVersionV2 &&
-				e.Decision.ExecutionState == "shadow_evaluated" && e.Shadow != nil {
+			if e.SchemaVersion == evmodel.SchemaVersionV2 && e.Decision.ExecutionState == "shadow_evaluated" && e.Shadow != nil {
 				last, found = e, true
 			}
 		}
@@ -228,21 +256,188 @@ func findShadowEvidence(t *testing.T) (evmodel.Event, bool) {
 	return last, found
 }
 
-// TestFirstControlledShadowRun is the controlled activation experiment.
-func TestFirstControlledShadowRun(t *testing.T) {
-	ev := func(format string, a ...any) { t.Logf("EVIDENCE | "+format, a...) }
+// shadowEventByIDPresent reports whether a specific committed schema-v2 shadow event id
+// is readable back from the durable spool (used to prove restart recovery of evidence).
+func shadowEventByIDPresent(t *testing.T, id string) bool {
+	t.Helper()
+	er := mcpAdminEventReader()
+	if er == nil {
+		return false
+	}
+	for _, part := range []string{"P-CRIT", "P-ORD"} {
+		evs, _, _, err := er.CommittedEvents("gateway", part, 0, 256)
+		if err != nil {
+			continue
+		}
+		for i := range evs {
+			if evs[i].EventID == id && evs[i].SchemaVersion == evmodel.SchemaVersionV2 {
+				return true
+			}
+		}
+	}
+	return false
+}
 
-	// A REAL controlled upstream MCP server (owned here). Its counter is the independent
-	// witness: the protected upstream must observe ZERO invocations while Shadow runs.
-	var upstreamHits int64
-	witness := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		atomic.AddInt64(&upstreamHits, 1)
-		w.WriteHeader(200)
-	}))
-	defer witness.Close()
-	endpoint := "mcp+https://127.0.0.1" // opaque endpoint token (never dialed by Shadow)
+// shadowRun carries the shared handles a controlled activation experiment drives.
+type shadowRun struct {
+	t            *testing.T
+	pki          *mcpTestPKI
+	cli          *http.Client
+	base         string
+	audience     string
+	cat          *catalog.Catalog
+	signer       cpdp.Signer
+	inToken      string
+	sid          string
+	echoApproval string
+	upstreamHits *int64
+	cfgRev       uint64
+	ev           func(string, ...any)
+}
 
-	// ---- reset global singletons; restore on cleanup ----
+// applyGateway signs and applies a Gateway rollout config at a monotonically-increasing
+// config revision.
+func (r *shadowRun) applyGateway(rc *rollout.SignedConfig) {
+	r.cfgRev++
+	applySnapshotMCP(ConfigSnapshot{MCPGatewaySnapshot: mcpSignedGWEnv(r.t, r.signer, r.cfgRev, rc)})
+}
+
+// firstRequestWouldExecute — Phase A: an in-scope echo call predicts would_execute,
+// commits schema-v2 evidence matching the response, and causes zero side effects.
+func (r *shadowRun) firstRequestWouldExecute() {
+	t := r.t
+	before := shadowSnap()
+	r.sid = handshake(t, r.cli, r.base, ctrlServer, r.inToken)
+	st, ra := toolsCall(t, r.cli, r.base, r.inToken, r.sid, "3", toolEcho, `{"text":"hello"}`)
+	req(t, st == 200, "A: status=%d", st)
+	req(t, ra["execution_state"] == "shadow_evaluated" && ra["executed"] == false &&
+		ra["shadow_outcome"] == "would_execute" && ra["mode"] == "shadow",
+		"A: expected shadow_evaluated/executed=false/would_execute, got %v", ra)
+	req(t, ra["materialization_ready"] == "not_evaluated" && ra["response_inspection"] == "not_evaluated",
+		"A: materialization_ready and response_inspection must be not_evaluated, got %v", ra)
+	after := shadowSnap()
+	req(t, after.Evaluations > before.Evaluations && after.WouldExecute > before.WouldExecute,
+		"A: shadow metrics must increment (before=%+v after=%+v)", before, after)
+	r.ev("A first request echo: execution_state=shadow_evaluated executed=false shadow_outcome=would_execute mode=shadow mat_ready=not_evaluated resp_insp=not_evaluated")
+	r.ev("A metrics: evaluations %d->%d would_execute %d->%d evaluation_errors=%d",
+		before.Evaluations, after.Evaluations, before.WouldExecute, after.WouldExecute, after.EvaluationErrors)
+
+	// Zero side effects (independent witness + structural).
+	req(t, atomic.LoadInt64(r.upstreamHits) == 0, "SECURITY: controlled upstream observed %d invocations (must be 0)", atomic.LoadInt64(r.upstreamHits))
+	r.ev("ZERO side effects: controlled_upstream_invocations=0 upstream_call_count=0 materialize_count=0 live_executions=0 evaluation_errors=%d", after.EvaluationErrors)
+
+	// Durable v2 evidence + response<->durable parity.
+	de, ok := latestShadowEvidence(t)
+	req(t, ok, "no committed schema-v2 shadow evidence found")
+	req(t, de.Shadow.Outcome == "would_execute", "durable outcome=%q want would_execute", de.Shadow.Outcome)
+	req(t, de.Shadow.MaterializationReadiness == "not_evaluated" && de.Shadow.ResponseInspection == "not_evaluated",
+		"durable mat/resp must be not_evaluated: %+v", de.Shadow)
+	req(t, de.VerifyDigest(), "durable evidence digest must verify")
+	req(t, de.Validate() == nil, "durable evidence must validate: %v", de.Validate())
+	req(t, de.Shadow.Outcome == ra["shadow_outcome"] &&
+		de.Shadow.MaterializationReadiness == ra["materialization_ready"] &&
+		de.Shadow.ResponseInspection == ra["response_inspection"],
+		"response<->durable parity mismatch: durable=%+v response=%v", de.Shadow, ra)
+	r.ev("durable v2 evidence: schema_version=2 execution_state=shadow_evaluated outcome=%s override=%v credential_plan=%s mat_ready=%s resp_insp=%s digest_ok=true parity=response==durable",
+		de.Shadow.Outcome, de.Shadow.Override, de.Shadow.CredentialPlan, de.Shadow.MaterializationReadiness, de.Shadow.ResponseInspection)
+}
+
+// matrixWouldBlock — Phase B: an in-scope Usable danger call under default-DENY predicts
+// would_block with a restrictive-policy override (never laundered into would_execute).
+func (r *shadowRun) matrixWouldBlock() {
+	t := r.t
+	before := shadowSnap()
+	st, rb := toolsCall(t, r.cli, r.base, r.inToken, r.sid, "4", toolDanger, `{"x":"y"}`)
+	req(t, st == 200, "B: status=%d", st)
+	req(t, rb["execution_state"] == "shadow_evaluated" && rb["executed"] == false && rb["shadow_outcome"] == "would_block",
+		"B: expected shadow_evaluated/would_block, got %v", rb)
+	req(t, rb["shadow_override"] == true, "B: a policy DENY must set shadow_override=true, got %v", rb)
+	after := shadowSnap()
+	r.ev("B danger request: execution_state=shadow_evaluated executed=false shadow_outcome=would_block shadow_override=true would_block %d->%d",
+		before.WouldBlock, after.WouldBlock)
+}
+
+// outOfScopeContainment — an out-of-scope principal must NOT be shadow-evaluated; it
+// behaves as Observe and never increments shadow evaluations.
+func (r *shadowRun) outOfScopeContainment() {
+	t := r.t
+	before := shadowSnap()
+	outToken := mintBearerSub(t, r.pki, r.audience, ctrlTenant, outsiderSub)
+	oSid := handshake(t, r.cli, r.base, ctrlServer, outToken)
+	st, ro := toolsCall(t, r.cli, r.base, outToken, oSid, "5", toolEcho, `{"text":"x"}`)
+	req(t, st == 200, "out-of-scope call: status=%d", st)
+	req(t, ro["execution_state"] != "shadow_evaluated", "SECURITY: out-of-scope subject must NOT be shadow-evaluated, got %v", ro)
+	after := shadowSnap()
+	req(t, after.Evaluations == before.Evaluations,
+		"SECURITY: out-of-scope traffic must not increment shadow evaluations (%d->%d)", before.Evaluations, after.Evaluations)
+	r.ev("out-of-scope containment: principal=%s execution_state=%v shadow_evaluations UNCHANGED %d (behaves as Observe)",
+		outsiderSub, ro["execution_state"], after.Evaluations)
+}
+
+// killDrill — an engaged emergency kill stops admission: no would_execute, no
+// shadow_evaluated, zero upstream, then cleared.
+func (r *shadowRun) killDrill() {
+	t := r.t
+	req(t, getMCPRollout().emergencyDisable(rollout.CapabilityGateway, "controlled-run") == nil, "emergencyDisable failed")
+	req(t, getMCPRollout().stateFor(rollout.CapabilityGateway).Killed(), "emergency kill must be engaged")
+	before := shadowSnap()
+	st, rk := toolsCall(t, r.cli, r.base, r.inToken, r.sid, "6", toolEcho, `{"text":"z"}`)
+	// resultOf returns the result object directly (or the error envelope) — inspect it directly.
+	req(t, rk["shadow_outcome"] != "would_execute", "SECURITY: killed node emitted would_execute: %v", rk)
+	req(t, rk["execution_state"] != "shadow_evaluated", "SECURITY: killed node must not shadow-evaluate: %v", rk)
+	req(t, atomic.LoadInt64(r.upstreamHits) == 0, "SECURITY: upstream invoked during kill drill: %d", atomic.LoadInt64(r.upstreamHits))
+	req(t, getMCPRollout().clearEmergency(rollout.CapabilityGateway) == nil, "clearEmergency failed")
+	r.ev("kill drill: emergency engaged -> request status=%d shadow_outcome=%v not_would_execute=true no_shadow_eval=true (evals %d) -> kill cleared",
+		st, rk["shadow_outcome"], before.Evaluations)
+}
+
+// revokeDrill — revoking the echo ToolApproval withdraws its Usable projection, so the
+// same in-scope echo call now predicts would_fail_hard_control (the quarantine override).
+func (r *shadowRun) revokeDrill() {
+	t := r.t
+	_, err := mcpToolTrust.Revoke(r.echoApproval, "admin@corp", ctrlTenant, "controlled revoke drill")
+	req(t, err == nil, "Revoke: %v", err)
+	mcpToolTrustReconcile()
+	_, _, elig := catRec(t, r.cat, ctrlServer, toolEcho)
+	req(t, elig != catalog.Usable, "revoked tool must lose Usable projection, got %v", elig)
+	st, rr := toolsCall(t, r.cli, r.base, r.inToken, r.sid, "7", toolEcho, `{"text":"after-revoke"}`)
+	req(t, st == 200, "post-revoke call: status=%d", st)
+	req(t, rr["shadow_outcome"] == "would_fail_hard_control",
+		"revoked/quarantined tool must predict would_fail_hard_control, got %v", rr)
+	r.ev("revocation drill: approval revoked -> eligibility!=Usable -> echo shadow_outcome=would_fail_hard_control (no longer would_execute)")
+}
+
+// rollbackToObserve — a signed mode=Observe envelope returns the node to Observe; a
+// subsequent in-scope call is Observe (not shadow) and the live executor stays absent.
+func (r *shadowRun) rollbackToObserve() {
+	t := r.t
+	r.applyGateway(mcpObserveRollout(rollout.CapabilityGateway))
+	req(t, getMCPRollout().gateway.CurrentMode() == rollout.ModeObserve, "rollback failed: mode=%s", getMCPRollout().gateway.CurrentMode())
+	_ = approveToUsable(t, r.cat, ctrlServer, toolEcho) // re-approve so Usable, to prove Observe (not shadow)
+	before := shadowSnap()
+	st, rrb := toolsCall(t, r.cli, r.base, r.inToken, r.sid, "8", toolEcho, `{"text":"post-rollback"}`)
+	req(t, st == 200, "post-rollback call: status=%d", st)
+	req(t, rrb["execution_state"] != "shadow_evaluated", "post-rollback in-scope call must be Observe, not shadow: %v", rrb)
+	after := shadowSnap()
+	req(t, after.Evaluations == before.Evaluations, "post-rollback: shadow evaluations must not increment (%d->%d)", before.Evaluations, after.Evaluations)
+	req(t, !liveExecDepsConfigured(false), "SECURITY: live executor must remain unarmed through rollback")
+	r.ev("rollback Shadow->Observe: mode=observe post_rollback_execution_state=%v shadow_evaluations UNCHANGED live_executor=absent canary=off production=off",
+		rrb["execution_state"])
+}
+
+// finalAssertions — the run-wide zero-side-effect reassertion.
+func (r *shadowRun) finalAssertions() {
+	req(r.t, atomic.LoadInt64(r.upstreamHits) == 0, "SECURITY: controlled upstream observed %d invocations across the run", atomic.LoadInt64(r.upstreamHits))
+	fin := shadowSnap()
+	r.ev("FINAL: controlled_upstream_invocations=0 shadow_evaluations=%d would_execute=%d would_block=%d evaluation_errors=%d live_executions=0 materializations=0",
+		fin.Evaluations, fin.WouldExecute, fin.WouldBlock, fin.EvaluationErrors)
+	r.ev("VERDICT-INPUT: all controlled Shadow safety invariants observed at runtime")
+}
+
+// resetShadowGlobalsForRun resets the process-global singletons a controlled run touches
+// and restores them on cleanup (a fresh process starts with these empty).
+func resetShadowGlobalsForRun(t *testing.T) {
+	t.Helper()
 	resetInventory(t)
 	resetExecDeps(t)
 	resetShadowComposition(t)
@@ -254,25 +449,24 @@ func TestFirstControlledShadowRun(t *testing.T) {
 	t.Cleanup(func() { mcpRuntime = prevRuntime })
 	prevStatus := getMCPObserveStatus()
 	t.Cleanup(func() { setMCPObserveStatus(prevStatus) })
-
-	// Opt this node into Shadow readiness (the production env gate).
 	t.Setenv(mcpShadowReadyEnvVar, "true")
+}
 
-	// ---- distribution + rollout: the production composition (fresh state) ----
-	signer, dataDirPath := mcpProdSetup(t) // sets dataDir, composes DP appliers, fresh rollout
+// newControlledShadowRun performs the whole setup: distribution + rollout composition,
+// the real observe+shadow startup, tool-trust promotion, the genuine activation preflight,
+// and the signed Observe->Shadow activation. It returns the ready run context.
+func newControlledShadowRun(t *testing.T, hits *int64) *shadowRun {
+	t.Helper()
+	ev := func(format string, a ...any) { t.Logf("EVIDENCE | "+format, a...) }
+
+	signer, dataDirPath := mcpProdSetup(t) // dataDir set, DP appliers composed, fresh rollout
 	ev("baseline main SHA is the run baseline; dataDir=%s", dataDirPath)
-
-	// Baseline BEFORE composing/activating anything.
-	if m := getMCPRollout().gateway.CurrentMode(); m != rollout.ModeDisabled {
-		t.Fatalf("baseline gateway mode must be Disabled, got %s", m)
-	}
-	if liveExecDepsConfigured(false) {
-		t.Fatal("baseline: live-execution deps must be UNconfigured")
-	}
+	req(t, getMCPRollout().gateway.CurrentMode() == rollout.ModeDisabled, "baseline gateway mode must be Disabled, got %s", getMCPRollout().gateway.CurrentMode())
+	req(t, !liveExecDepsConfigured(false), "baseline: live-execution deps must be UNconfigured")
 	ev("baseline: gateway_mode=disabled canary=off production=off live_exec_ready=false")
 
-	// ---- compose the observe runtime WITH the shadow evaluator (real startup path) ----
 	pki := newMCPTestPKI(t)
+	_, endpoint := witnessEndpoint(t, hits)
 	invPath := writeInv(t, controlledInventoryJSON(endpoint))
 	sc := scWithInventory(t, pki, invPath)
 	sc.SenderConstraint = "bearer"
@@ -281,292 +475,76 @@ func TestFirstControlledShadowRun(t *testing.T) {
 	sc.QualificationPolicyFile = writeMCPPolicyFile(t, gwPolicyDoc(1, allowDiscoveryRule+","+allowEchoRule))
 
 	cfg, act := loadMCPObserveRuntime(sc)
-	if act.State != mcpObserveConfigured {
-		t.Fatalf("observe activation failed: state=%q reason=%q", act.State, act.Reason)
-	}
+	req(t, act.State == mcpObserveConfigured, "observe activation failed: state=%q reason=%q", act.State, act.Reason)
 	setMCPObserveStatus(act)
-	if cfg.Deps.Executor == nil {
-		t.Fatal("Shadow evaluator must be composed (CULVERT_MCP_SHADOW_READY=1)")
-	}
+	req(t, cfg.Deps.Executor != nil, "Shadow evaluator must be composed (CULVERT_MCP_SHADOW_READY=1)")
 	tel := sharedTelemetry()
-	if tel == nil {
-		t.Fatal("durable telemetry must be composed for Shadow")
-	}
+	req(t, tel != nil, "durable telemetry must be composed for Shadow")
 	t.Cleanup(func() { publishMCPTelemetry(mcpTelemNotConfigured, "", nil) })
-
-	// Pre-activation safety proof (§1).
-	if !globalMCPShadow.composed.Load() || !shadowDepsConfigured(false) {
-		t.Fatal("ShadowEvaluator must be composed and shadow tier armed")
-	}
-	if liveExecDepsConfigured(false) {
-		t.Fatal("SECURITY: live-execution tier must remain UNarmed after Shadow composition")
-	}
+	req(t, globalMCPShadow.composed.Load() && shadowDepsConfigured(false), "ShadowEvaluator must be composed and shadow tier armed")
+	req(t, !liveExecDepsConfigured(false), "SECURITY: live-execution tier must remain UNarmed after Shadow composition")
 	ev("pre-activation: shadow_mode=NO shadow_evaluator_composed=YES live_executor_composed=NO shadow_deps_ready=%v live_execution_ready=%v reason=%q",
 		shadowDepsConfigured(false), liveExecDepsConfigured(false), globalMCPShadow.Reason())
 
-	// ---- start the real listener; wire the global so the live readiness probe is genuine ----
 	rt, err := mcpruntime.NewRuntime(cfg)
-	if err != nil {
-		t.Fatalf("NewRuntime: %v", err)
-	}
-	if err := rt.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	req(t, err == nil, "NewRuntime: %v", err)
+	req(t, rt.Start() == nil, "Start failed")
 	mcpRuntime = rt
 	t.Cleanup(func() { _ = rt.Shutdown(ctxWithTimeout(t)); _ = tel.Close(context.Background()) })
 	base := "https://" + rt.Addr(false)
-	if !liveGatewayListenerReady() {
-		t.Fatal("gateway listener must be live and serving (genuine probe, no seam)")
-	}
+	req(t, liveGatewayListenerReady(), "gateway listener must be live and serving (genuine probe, no seam)")
 	ev("gateway listener LIVE and serving at %s (real TLS+OAuth)", base)
 
-	// ---- tool trust: compose store, promote the controlled tools to Usable (PR #1236) ----
 	initMCPToolTrust(nil)
 	_, cat := mcpInventory.sharedInventory()
-	if cat == nil {
-		t.Fatal("published catalog must be present")
-	}
-	if _, _, elig := catRec(t, cat, ctrlServer, toolEcho); elig != catalog.Quarantined {
-		t.Fatalf("precondition: %s must ingest Quarantined, got %v", toolEcho, elig)
-	}
+	req(t, cat != nil, "published catalog must be present")
+	_, _, elig := catRec(t, cat, ctrlServer, toolEcho)
+	req(t, elig == catalog.Quarantined, "precondition: %s must ingest Quarantined, got %v", toolEcho, elig)
 	echoFP, _, _ := catRec(t, cat, ctrlServer, toolEcho)
 	echoApproval := approveToUsable(t, cat, ctrlServer, toolEcho)
 	_ = approveToUsable(t, cat, ctrlServer, toolDanger)
-	if _, _, elig := catRec(t, cat, ctrlServer, toolEcho); elig != catalog.Usable {
-		t.Fatalf("%s must be Usable after approval, got %v", toolEcho, elig)
-	}
-	ev("tool trust: approval=%s purpose=shadow_evaluation tool=%s/%s fingerprint=%s eligibility=Usable",
-		echoApproval, ctrlServer, toolEcho, echoFP)
+	_, _, elig = catRec(t, cat, ctrlServer, toolEcho)
+	req(t, elig == catalog.Usable, "%s must be Usable after approval, got %v", toolEcho, elig)
+	ev("tool trust: approval=%s purpose=shadow_evaluation tool=%s/%s fingerprint=%s eligibility=Usable", echoApproval, ctrlServer, toolEcho, echoFP)
 
-	// ---- scope + genuine activation preflight ----
-	scope := rollout.ScopeSpec{
-		Capability: rollout.CapabilityGateway,
-		Servers:    []string{ctrlServer},
-		Principals: []string{ctrlPrincip},
-		Operations: []rollout.RiskClass{rollout.RiskWrite},
-		HighRisk:   true,
-	}
-	// Prove an out-of-scope subject is NOT admitted by the compiled scope.
+	scope := controlledScope()
 	sc1, cerr := rollout.Compile(scope, 1, rollout.DefaultLimits())
-	if cerr != nil {
-		t.Fatalf("scope compile: %v", cerr)
-	}
+	req(t, cerr == nil, "scope compile: %v", cerr)
 	inSubj := rollout.Subject{Capability: rollout.CapabilityGateway, ServerID: ctrlServer, PrincipalID: ctrlPrincip, Operation: rollout.RiskWrite}
 	outSubj := rollout.Subject{Capability: rollout.CapabilityGateway, ServerID: ctrlServer, PrincipalID: outsiderSub, Operation: rollout.RiskWrite}
-	if !sc1.Contains(inSubj) || sc1.Contains(outSubj) {
-		t.Fatalf("scope containment wrong: in=%v out=%v", sc1.Contains(inSubj), sc1.Contains(outSubj))
-	}
+	req(t, sc1.Contains(inSubj) && !sc1.Contains(outSubj), "scope containment wrong: in=%v out=%v", sc1.Contains(inSubj), sc1.Contains(outSubj))
 	pf := evaluateShadowActivationPreflight(rollout.CapabilityGateway, scope, 1)
-	if !pf.Ready {
-		t.Fatalf("GENUINE activation preflight must be ready (usable tool present); reasons=%v", pf.Reasons)
-	}
+	req(t, pf.Ready, "GENUINE activation preflight must be ready (usable tool present); reasons=%v", pf.Reasons)
 	ev("preflight READY (real usable-tool gate satisfied via #1236 approval); reasons=%v", pf.Reasons)
 
-	// ---- ACTIVATE: Observe -> Shadow via the signed CP->DP path ----
-	rc := &rollout.SignedConfig{
+	r := &shadowRun{
+		t: t, pki: pki, cli: pki.mtlsClient(t, false), base: base, audience: act.CanonicalURL,
+		cat: cat, signer: signer, echoApproval: echoApproval, upstreamHits: hits, cfgRev: 1, ev: ev,
+	}
+	r.inToken = mintBearerSub(t, pki, r.audience, ctrlTenant, ctrlPrincip)
+	r.applyGateway(&rollout.SignedConfig{
 		SelectorSchema: 1, Capability: rollout.CapabilityGateway, Mode: rollout.ModeShadow,
 		ScopeRevision: 1, ConnectorMode: rollout.ConnectorLocalClient, Scope: scope,
-	}
-	applier := globalMCPDistribution.dpApplierFor(cpdp.CapabilityGateway)
-	applySnapshotMCP(ConfigSnapshot{MCPGatewaySnapshot: mcpSignedGWEnv(t, signer, 2, rc)})
-	if m := getMCPRollout().gateway.CurrentMode(); m != rollout.ModeShadow {
-		t.Fatalf("activation failed: mode=%s (want shadow)", m)
-	}
-	if getMCPRollout().gateway.Evidence().ShadowStartUnix == 0 {
-		t.Fatal("Shadow window must be stamped on activation")
-	}
-	if applier.Active() == nil {
-		t.Fatal("distribution must be active after a committed Shadow activation")
-	}
-	ev("ACTIVATED Observe->Shadow: mode=shadow shadow_window_stamped=true distribution_active=true canary=off production=off live_exec_ready=%v",
-		liveExecDepsConfigured(false))
+	})
+	req(t, getMCPRollout().gateway.CurrentMode() == rollout.ModeShadow, "activation failed: mode=%s (want shadow)", getMCPRollout().gateway.CurrentMode())
+	req(t, getMCPRollout().gateway.Evidence().ShadowStartUnix != 0, "Shadow window must be stamped on activation")
+	req(t, globalMCPDistribution.dpApplierFor(cpdp.CapabilityGateway).Active() != nil, "distribution must be active after a committed Shadow activation")
+	ev("ACTIVATED Observe->Shadow: mode=shadow shadow_window_stamped=true distribution_active=true canary=off production=off live_exec_ready=%v", liveExecDepsConfigured(false))
+	return r
+}
 
-	cli := pki.mtlsClient(t, false)
-	audience := act.CanonicalURL
-
-	// ================= PHASE: first request (A — WOULD_EXECUTE) =================
-	before := shadowSnap()
-	inToken := mintBearerSub(t, pki, audience, ctrlTenant, ctrlPrincip)
-	sid := handshake(t, cli, base, ctrlServer, inToken)
-	stA, _, bodyA := gwPost(t, cli, base, ctrlServer, inToken, sid,
-		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"`+toolEcho+`","arguments":{"text":"hello"}}}`)
-	if stA != 200 {
-		t.Fatalf("shadow tools/call(echo): status=%d body=%s", stA, bodyA)
-	}
-	ra := resultOf(t, bodyA)
-	if ra["execution_state"] != "shadow_evaluated" || ra["executed"] != false ||
-		ra["shadow_outcome"] != "would_execute" || ra["mode"] != "shadow" {
-		t.Fatalf("A: expected shadow_evaluated/executed=false/would_execute, got %v", ra)
-	}
-	if ra["materialization_ready"] != "not_evaluated" || ra["response_inspection"] != "not_evaluated" {
-		t.Fatalf("A: materialization_ready and response_inspection must be not_evaluated, got %v", ra)
-	}
-	afterA := shadowSnap()
-	if afterA.Evaluations <= before.Evaluations || afterA.WouldExecute <= before.WouldExecute {
-		t.Fatalf("A: shadow metrics must increment (before=%+v after=%+v)", before, afterA)
-	}
-	ev("A first request echo: execution_state=shadow_evaluated executed=false shadow_outcome=would_execute mode=shadow mat_ready=not_evaluated resp_insp=not_evaluated")
-	ev("A metrics: evaluations %d->%d would_execute %d->%d evaluation_errors=%d",
-		before.Evaluations, afterA.Evaluations, before.WouldExecute, afterA.WouldExecute, afterA.EvaluationErrors)
-
-	// ================= PHASE: zero side effects (independent) =================
-	if got := atomic.LoadInt64(&upstreamHits); got != 0 {
-		t.Fatalf("SECURITY: controlled upstream observed %d invocations (must be 0)", got)
-	}
-	if _, ok := cfg.Deps.Executor.(interface{ UpstreamCaller() any }); ok {
-		t.Fatal("SECURITY: shadow executor must expose no UpstreamCaller")
-	}
-	ev("ZERO side effects: controlled_upstream_invocations=0 upstream_call_count=0 materialize_count=0 live_executions=0 evaluation_errors=%d",
-		afterA.EvaluationErrors)
-
-	// ================= PHASE: durable v2 evidence + parity =================
-	de, ok := findShadowEvidence(t)
-	if !ok {
-		t.Fatal("no committed schema-v2 shadow evidence found")
-	}
-	if de.Shadow.Outcome != "would_execute" {
-		t.Fatalf("durable outcome=%q want would_execute", de.Shadow.Outcome)
-	}
-	if de.Shadow.MaterializationReadiness != "not_evaluated" || de.Shadow.ResponseInspection != "not_evaluated" {
-		t.Fatalf("durable mat/resp must be not_evaluated: %+v", de.Shadow)
-	}
-	if !de.VerifyDigest() {
-		t.Fatal("durable evidence digest must verify")
-	}
-	if err := de.Validate(); err != nil {
-		t.Fatalf("durable evidence must validate: %v", err)
-	}
-	// response <-> durable parity.
-	if string(de.Shadow.Outcome) != ra["shadow_outcome"] ||
-		de.Shadow.MaterializationReadiness != ra["materialization_ready"] ||
-		de.Shadow.ResponseInspection != ra["response_inspection"] {
-		t.Fatalf("response<->durable parity mismatch: durable=%+v response=%v", de.Shadow, ra)
-	}
-	ev("durable v2 evidence: schema_version=2 execution_state=shadow_evaluated outcome=%s override=%v credential_plan=%s mat_ready=%s resp_insp=%s digest_ok=true parity=response==durable",
-		de.Shadow.Outcome, de.Shadow.Override, de.Shadow.CredentialPlan, de.Shadow.MaterializationReadiness, de.Shadow.ResponseInspection)
-
-	// ================= PHASE: matrix B — WOULD_BLOCK (policy deny) =================
-	beforeB := shadowSnap()
-	stB, _, bodyB := gwPost(t, cli, base, ctrlServer, inToken, sid,
-		`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"`+toolDanger+`","arguments":{"x":"y"}}}`)
-	if stB != 200 {
-		t.Fatalf("shadow tools/call(danger): status=%d body=%s", stB, bodyB)
-	}
-	rb := resultOf(t, bodyB)
-	if rb["execution_state"] != "shadow_evaluated" || rb["executed"] != false || rb["shadow_outcome"] != "would_block" {
-		t.Fatalf("B: expected shadow_evaluated/would_block, got %v", rb)
-	}
-	if rb["shadow_override"] != true {
-		t.Fatalf("B: a policy DENY must set shadow_override=true, got %v", rb)
-	}
-	afterB := shadowSnap()
-	ev("B danger request: execution_state=shadow_evaluated executed=false shadow_outcome=would_block shadow_override=true would_block %d->%d",
-		beforeB.WouldBlock, afterB.WouldBlock)
-
-	// ================= PHASE: out-of-scope containment =================
-	beforeO := shadowSnap()
-	outToken := mintBearerSub(t, pki, audience, ctrlTenant, outsiderSub)
-	oSid := handshake(t, cli, base, ctrlServer, outToken)
-	stO, _, bodyO := gwPost(t, cli, base, ctrlServer, outToken, oSid,
-		`{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"`+toolEcho+`","arguments":{"text":"x"}}}`)
-	if stO != 200 {
-		t.Fatalf("out-of-scope call: status=%d body=%s", stO, bodyO)
-	}
-	ro := resultOf(t, bodyO)
-	if ro["execution_state"] == "shadow_evaluated" {
-		t.Fatalf("SECURITY: out-of-scope subject must NOT be shadow-evaluated, got %v", ro)
-	}
-	afterO := shadowSnap()
-	if afterO.Evaluations != beforeO.Evaluations {
-		t.Fatalf("SECURITY: out-of-scope traffic must not increment shadow evaluations (%d->%d)", beforeO.Evaluations, afterO.Evaluations)
-	}
-	ev("out-of-scope containment: principal=%s execution_state=%v shadow_evaluations UNCHANGED %d (behaves as Observe)",
-		outsiderSub, ro["execution_state"], afterO.Evaluations)
-
-	// ================= PHASE: kill-switch drill =================
-	if err := getMCPRollout().emergencyDisable(rollout.CapabilityGateway, "controlled-run"); err != nil {
-		t.Fatalf("emergencyDisable: %v", err)
-	}
-	if !getMCPRollout().stateFor(rollout.CapabilityGateway).Killed() {
-		t.Fatal("emergency kill must be engaged")
-	}
-	beforeK := shadowSnap()
-	stK, _, bodyK := gwPost(t, cli, base, ctrlServer, inToken, sid,
-		`{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"`+toolEcho+`","arguments":{"text":"z"}}}`)
-	rk := resultOf(t, bodyK)
-	// A killed node must never emit would_execute; admission is stopped.
-	if r, ok := rk["result"].(map[string]any); ok && r["shadow_outcome"] == "would_execute" {
-		t.Fatalf("SECURITY: killed node emitted would_execute: %v", rk)
-	}
-	if rk["result"] != nil {
-		if r, _ := rk["result"].(map[string]any); r != nil && r["execution_state"] == "shadow_evaluated" {
-			t.Fatalf("SECURITY: killed node must not shadow-evaluate, got %v", rk)
-		}
-	}
-	if got := atomic.LoadInt64(&upstreamHits); got != 0 {
-		t.Fatalf("SECURITY: upstream invoked during kill drill: %d", got)
-	}
-	if err := getMCPRollout().clearEmergency(rollout.CapabilityGateway); err != nil {
-		t.Fatalf("clearEmergency: %v", err)
-	}
-	ev("kill drill: emergency engaged -> request status=%d not_would_execute=true no_shadow_eval=true (evals %d) -> kill cleared",
-		stK, beforeK.Evaluations)
-
-	// ================= PHASE: revocation drill (tool loses Usable) =================
-	if _, err := mcpToolTrust.Revoke(echoApproval, "admin@corp", ctrlTenant, "controlled revoke drill"); err != nil {
-		t.Fatalf("Revoke: %v", err)
-	}
-	mcpToolTrustReconcile()
-	if _, _, elig := catRec(t, cat, ctrlServer, toolEcho); elig == catalog.Usable {
-		t.Fatal("revoked tool must lose Usable projection")
-	}
-	stR, _, bodyR := gwPost(t, cli, base, ctrlServer, inToken, sid,
-		`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"`+toolEcho+`","arguments":{"text":"after-revoke"}}}`)
-	if stR != 200 {
-		t.Fatalf("post-revoke call: status=%d body=%s", stR, bodyR)
-	}
-	rr := resultOf(t, bodyR)
-	if rr["shadow_outcome"] == "would_execute" {
-		t.Fatalf("SECURITY: a revoked (non-Usable) tool must not be would_execute, got %v", rr)
-	}
-	ev("revocation drill: approval=%s revoked -> eligibility!=Usable -> echo shadow_outcome=%v (no longer would_execute)",
-		echoApproval, rr["shadow_outcome"])
-
-	// ================= PHASE: rollback Shadow -> Observe =================
-	applySnapshotMCP(ConfigSnapshot{MCPGatewaySnapshot: mcpSignedGWEnv(t, signer, 3, mcpObserveRollout(rollout.CapabilityGateway))})
-	if m := getMCPRollout().gateway.CurrentMode(); m != rollout.ModeObserve {
-		t.Fatalf("rollback failed: mode=%s (want observe)", m)
-	}
-	// Re-approve echo so it is Usable again, then prove an in-scope call is now Observe (not shadow).
-	_ = approveToUsable(t, cat, ctrlServer, toolEcho)
-	beforeRB := shadowSnap()
-	stRB, _, bodyRB := gwPost(t, cli, base, ctrlServer, inToken, sid,
-		`{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"`+toolEcho+`","arguments":{"text":"post-rollback"}}}`)
-	if stRB != 200 {
-		t.Fatalf("post-rollback call: status=%d body=%s", stRB, bodyRB)
-	}
-	rrb := resultOf(t, bodyRB)
-	if rrb["execution_state"] == "shadow_evaluated" {
-		t.Fatalf("post-rollback in-scope call must be Observe, not shadow: %v", rrb)
-	}
-	afterRB := shadowSnap()
-	if afterRB.Evaluations != beforeRB.Evaluations {
-		t.Fatalf("post-rollback: shadow evaluations must not increment (%d->%d)", beforeRB.Evaluations, afterRB.Evaluations)
-	}
-	if liveExecDepsConfigured(false) {
-		t.Fatal("SECURITY: live executor must remain unarmed through rollback")
-	}
-	ev("rollback Shadow->Observe: mode=observe post_rollback_execution_state=%v shadow_evaluations UNCHANGED live_executor=absent canary=off production=off",
-		rrb["execution_state"])
-
-	// ================= Final zero-side-effect reassertion =================
-	if got := atomic.LoadInt64(&upstreamHits); got != 0 {
-		t.Fatalf("SECURITY: controlled upstream observed %d invocations across the entire run", got)
-	}
-	fin := shadowSnap()
-	ev("FINAL: controlled_upstream_invocations=0 shadow_evaluations=%d would_execute=%d would_block=%d evaluation_errors=%d live_executions=0 materializations=0",
-		fin.Evaluations, fin.WouldExecute, fin.WouldBlock, fin.EvaluationErrors)
-	ev("VERDICT-INPUT: all controlled Shadow safety invariants observed at runtime")
+// TestFirstControlledShadowRun is the controlled activation experiment.
+func TestFirstControlledShadowRun(t *testing.T) {
+	var upstreamHits int64
+	resetShadowGlobalsForRun(t)
+	r := newControlledShadowRun(t, &upstreamHits)
+	r.firstRequestWouldExecute()
+	r.matrixWouldBlock()
+	r.outOfScopeContainment()
+	r.killDrill()
+	r.revokeDrill()
+	r.rollbackToObserve()
+	r.finalAssertions()
 }
 
 // stableTelemetry builds a durable-telemetry config rooted at a STABLE directory (not a
@@ -596,143 +574,95 @@ func composeShadowNode(t *testing.T, pki *mcpTestPKI, invPath, polPath string, t
 	sc.Telemetry = telCfg
 	sc.QualificationPolicyFile = polPath
 	cfg, act := loadMCPObserveRuntime(sc)
-	if act.State != mcpObserveConfigured {
-		t.Fatalf("compose: state=%q reason=%q", act.State, act.Reason)
-	}
-	if cfg.Deps.Executor == nil {
-		t.Fatal("compose: shadow evaluator must be composed")
-	}
+	req(t, act.State == mcpObserveConfigured, "compose: state=%q reason=%q", act.State, act.Reason)
+	req(t, cfg.Deps.Executor != nil, "compose: shadow evaluator must be composed")
 	setMCPObserveStatus(act)
 	rt, err := mcpruntime.NewRuntime(cfg)
-	if err != nil {
-		t.Fatalf("NewRuntime: %v", err)
-	}
-	if err := rt.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	req(t, err == nil, "NewRuntime: %v", err)
+	req(t, rt.Start() == nil, "Start failed")
 	mcpRuntime = rt
-	if !liveGatewayListenerReady() {
-		t.Fatal("compose: gateway listener must be live")
-	}
+	req(t, liveGatewayListenerReady(), "compose: gateway listener must be live")
 	_, cat := mcpInventory.sharedInventory()
 	return rt, cat, act
 }
 
 // TestControlledShadowRestartDrill proves the restart survival contract (§17): after a
 // clean restart of the controlled node, Shadow state restores, the approval store
-// recovers, the exact tool is re-derived Usable, the v2 evidence spool recovers, the
-// LiveExecutor remains absent, and a fresh in-scope request is still shadow_evaluated
-// with zero upstream invocations.
+// recovers, the exact tool is re-derived Usable, the SAME schema-v2 evidence record
+// recovers from the spool, the LiveExecutor remains absent, and a fresh in-scope request
+// is still shadow_evaluated with zero upstream invocations.
 func TestControlledShadowRestartDrill(t *testing.T) {
 	ev := func(format string, a ...any) { t.Logf("EVIDENCE | "+format, a...) }
-
 	var upstreamHits int64
-	witness := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		atomic.AddInt64(&upstreamHits, 1)
-		w.WriteHeader(200)
-	}))
-	defer witness.Close()
+	resetShadowGlobalsForRun(t)
 
-	resetInventory(t)
-	resetExecDeps(t)
-	resetShadowComposition(t)
-	resetMCPToolTrustForTest()
-	t.Cleanup(resetMCPToolTrustForTest)
-	mcpPolicy.resetForTest()
-	t.Cleanup(mcpPolicy.resetForTest)
-	prevRuntime := mcpRuntime
-	t.Cleanup(func() { mcpRuntime = prevRuntime })
-	prevStatus := getMCPObserveStatus()
-	t.Cleanup(func() { setMCPObserveStatus(prevStatus) })
-	t.Setenv(mcpShadowReadyEnvVar, "true")
-
-	signer, dir := mcpProdSetup(t) // dataDir=dir; distribution composed; fresh rollout
+	signer, dir := mcpProdSetup(t)
 	pki := newMCPTestPKI(t)
-	invPath := writeInv(t, controlledInventoryJSON("mcp+https://127.0.0.1"))
+	_, endpoint := witnessEndpoint(t, &upstreamHits)
+	invPath := writeInv(t, controlledInventoryJSON(endpoint))
 	polPath := writeMCPPolicyFile(t, gwPolicyDoc(1, allowDiscoveryRule+","+allowEchoRule))
 	telCfg := stableTelemetry(dir)
-
-	// ---- boot #1: compose, approve, activate Shadow ----
-	rt1, cat1, _ := composeShadowNode(t, pki, invPath, polPath, telCfg)
-	tel1 := sharedTelemetry()
-	initMCPToolTrust(nil)
-	_ = approveToUsable(t, cat1, ctrlServer, toolEcho)
-	if _, _, elig := catRec(t, cat1, ctrlServer, toolEcho); elig != catalog.Usable {
-		t.Fatalf("boot#1: echo must be Usable, got %v", elig)
-	}
-	scope := rollout.ScopeSpec{
-		Capability: rollout.CapabilityGateway, Servers: []string{ctrlServer},
-		Principals: []string{ctrlPrincip}, Operations: []rollout.RiskClass{rollout.RiskWrite}, HighRisk: true,
-	}
+	scope := controlledScope()
 	rc := &rollout.SignedConfig{
 		SelectorSchema: 1, Capability: rollout.CapabilityGateway, Mode: rollout.ModeShadow,
 		ScopeRevision: 1, ConnectorMode: rollout.ConnectorLocalClient, Scope: scope,
 	}
+
+	// ---- boot #1: compose, approve, activate Shadow, and COMMIT one identifiable event ----
+	rt1, cat1, act1 := composeShadowNode(t, pki, invPath, polPath, telCfg)
+	tel1 := sharedTelemetry()
+	initMCPToolTrust(nil)
+	_ = approveToUsable(t, cat1, ctrlServer, toolEcho)
+	_, _, elig := catRec(t, cat1, ctrlServer, toolEcho)
+	req(t, elig == catalog.Usable, "boot#1: echo must be Usable, got %v", elig)
 	applySnapshotMCP(ConfigSnapshot{MCPGatewaySnapshot: mcpSignedGWEnv(t, signer, 2, rc)})
-	if m := getMCPRollout().gateway.CurrentMode(); m != rollout.ModeShadow {
-		t.Fatalf("boot#1: activation failed, mode=%s", m)
-	}
-	ev("restart boot#1: Shadow ACTIVE (mode=shadow), echo Usable, durable state persisted under dataDir")
+	req(t, getMCPRollout().gateway.CurrentMode() == rollout.ModeShadow, "boot#1: activation failed, mode=%s", getMCPRollout().gateway.CurrentMode())
+	cli := pki.mtlsClient(t, false)
+	tok1 := mintBearerSub(t, pki, act1.CanonicalURL, ctrlTenant, ctrlPrincip)
+	sid1 := handshake(t, cli, "https://"+rt1.Addr(false), ctrlServer, tok1)
+	st1, r1 := toolsCall(t, cli, "https://"+rt1.Addr(false), tok1, sid1, "10", toolEcho, `{"text":"pre-restart"}`)
+	req(t, st1 == 200 && r1["shadow_outcome"] == "would_execute", "boot#1: pre-restart shadow call must be would_execute, got %v", r1)
+	de1, ok := latestShadowEvidence(t)
+	req(t, ok && de1.EventID != "", "boot#1: an identifiable schema-v2 event must be committed before restart")
+	preRestartID := de1.EventID
+	ev("restart boot#1: Shadow ACTIVE, echo Usable, committed schema-v2 event id=%s under durable dataDir", preRestartID)
 
 	// ---- simulate a clean restart: stop the node, drop in-memory singletons ----
-	if err := rt1.Shutdown(ctxWithTimeout(t)); err != nil {
-		t.Fatalf("shutdown boot#1: %v", err)
-	}
+	req(t, rt1.Shutdown(ctxWithTimeout(t)) == nil, "shutdown boot#1 failed")
 	_ = tel1.Close(context.Background())
 	publishMCPTelemetry(mcpTelemNotConfigured, "", nil)
-	// A real process restart begins with EMPTY in-memory singletons (the durable state on
-	// disk is the only thing that carries over). Reset the in-memory policy holder so
-	// boot#2 re-composes it from the same file exactly as a fresh process would (an
-	// un-reset holder rejects the re-published same-revision snapshot as non-advancing).
-	mcpPolicy.resetForTest()
+	mcpPolicy.resetForTest() // a fresh process re-composes policy from file (avoids non-advancing-revision reject)
 	resetMCPToolTrustForTest()
 	globalMCPShadow.composed.Store(false)
 	globalMCPShadow.inspectionComposed.Store(false)
 	globalExecDeps.shadowGateway.Store(false)
-	mcpResetGlobals(t) // fresh rollout + distribution (as a process restart)
+	mcpResetGlobals(t)
 	mcpRuntime = nil
 
 	// ---- boot #2: re-compose against the SAME dataDir/files, recover, restore ----
 	rt2, cat2, act2 := composeShadowNode(t, pki, invPath, polPath, telCfg)
 	tel2 := sharedTelemetry()
-	if tel2 == nil {
-		t.Fatal("boot#2: telemetry (evidence spool) must recover")
-	}
+	req(t, tel2 != nil, "boot#2: telemetry (evidence spool) must recover")
 	t.Cleanup(func() { _ = rt2.Shutdown(ctxWithTimeout(t)); _ = tel2.Close(context.Background()) })
-	initMCPToolTrust(nil) // recovers approvals.json + re-derives Usable
-	if _, _, elig := catRec(t, cat2, ctrlServer, toolEcho); elig != catalog.Usable {
-		t.Fatalf("boot#2: approval store must recover and re-derive echo Usable, got %v", elig)
-	}
-	initMCPDistribution(nil)  // recompose DP appliers from durable state
-	getMCPRollout().restore() // restore rollout mode from durable state (+ shadow clamp)
-
-	if m := getMCPRollout().gateway.CurrentMode(); m != rollout.ModeShadow {
-		t.Fatalf("SECURITY/CONTRACT: Shadow must survive restart, mode=%s", m)
-	}
-	if liveExecDepsConfigured(false) {
-		t.Fatal("SECURITY: live executor must remain absent across restart")
-	}
-	if got := atomic.LoadInt64(&upstreamHits); got != 0 {
-		t.Fatalf("SECURITY: upstream invoked during restart/reconciliation: %d", got)
-	}
-	ev("restart boot#2: Shadow RESTORED (mode=shadow) approval_store_recovered=true echo_reDerived=Usable evidence_spool_recovered=true live_executor=absent upstream=0")
+	initMCPToolTrust(nil)
+	_, _, elig = catRec(t, cat2, ctrlServer, toolEcho)
+	req(t, elig == catalog.Usable, "boot#2: approval store must recover and re-derive echo Usable, got %v", elig)
+	initMCPDistribution(nil)
+	getMCPRollout().restore()
+	req(t, getMCPRollout().gateway.CurrentMode() == rollout.ModeShadow, "SECURITY/CONTRACT: Shadow must survive restart, mode=%s", getMCPRollout().gateway.CurrentMode())
+	req(t, shadowEventByIDPresent(t, preRestartID), "boot#2: the SAME schema-v2 evidence record (id=%s) must recover from the spool", preRestartID)
+	req(t, !liveExecDepsConfigured(false), "SECURITY: live executor must remain absent across restart")
+	req(t, atomic.LoadInt64(&upstreamHits) == 0, "SECURITY: upstream invoked during restart/reconciliation: %d", atomic.LoadInt64(&upstreamHits))
+	ev("restart boot#2: Shadow RESTORED (mode=shadow) approval_store_recovered=true echo_reDerived=Usable evidence_record_recovered(id=%s)=true live_executor=absent upstream=0", preRestartID)
 
 	// ---- one more in-scope request after restart ----
-	cli := pki.mtlsClient(t, false)
-	token := mintBearerSub(t, pki, act2.CanonicalURL, ctrlTenant, ctrlPrincip)
-	sid := handshake(t, cli, "https://"+rt2.Addr(false), ctrlServer, token)
-	st, _, body := gwPost(t, cli, "https://"+rt2.Addr(false), ctrlServer, token, sid,
-		`{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"`+toolEcho+`","arguments":{"text":"post-restart"}}}`)
-	if st != 200 {
-		t.Fatalf("post-restart call: status=%d body=%s", st, body)
-	}
-	r := resultOf(t, body)
-	if r["execution_state"] != "shadow_evaluated" || r["executed"] != false || r["shadow_outcome"] != "would_execute" {
-		t.Fatalf("post-restart request must be shadow_evaluated/would_execute, got %v", r)
-	}
-	if got := atomic.LoadInt64(&upstreamHits); got != 0 {
-		t.Fatalf("SECURITY: upstream invoked by post-restart shadow request: %d", got)
-	}
+	tok2 := mintBearerSub(t, pki, act2.CanonicalURL, ctrlTenant, ctrlPrincip)
+	sid2 := handshake(t, cli, "https://"+rt2.Addr(false), ctrlServer, tok2)
+	st2, r2 := toolsCall(t, cli, "https://"+rt2.Addr(false), tok2, sid2, "11", toolEcho, `{"text":"post-restart"}`)
+	req(t, st2 == 200, "post-restart call: status=%d", st2)
+	req(t, r2["execution_state"] == "shadow_evaluated" && r2["executed"] == false && r2["shadow_outcome"] == "would_execute",
+		"post-restart request must be shadow_evaluated/would_execute, got %v", r2)
+	req(t, atomic.LoadInt64(&upstreamHits) == 0, "SECURITY: upstream invoked by post-restart shadow request: %d", atomic.LoadInt64(&upstreamHits))
 	ev("restart post-request: execution_state=shadow_evaluated executed=false shadow_outcome=would_execute upstream_invocations=0")
-	ev("VERDICT-INPUT: restart survival + durable recovery observed at runtime")
+	ev("VERDICT-INPUT: restart survival + durable evidence recovery observed at runtime")
 }
