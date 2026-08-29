@@ -411,7 +411,16 @@ func apiContentScan(w http.ResponseWriter, r *http.Request) {
 			logger.Printf("UI: DPI pattern added %q", p)
 			added++
 		}
-		dpiScanner.Save()
+		if err := dpiScanner.Save(); err != nil {
+			// 2E-A durability truth: the patterns are live in memory (more
+			// scanning — the safe direction) but the 200 must not claim a
+			// durable configuration that reverts on restart.
+			logger.Printf("DPI: pattern persist error: %v", err)
+			auditEvent(r, "dpi.add.unpersisted",
+				fmt.Sprintf("%d pattern(s) applied in memory; persist failed", added), "")
+			http.Error(w, "DPI pattern(s) applied in memory but failed to persist", http.StatusInternalServerError)
+			return
+		}
 		auditEvent(r, "dpi.add", fmt.Sprintf("%d pattern(s)", added),
 			strings.Join(body.Patterns, ", "))
 		saveConfigVersion(sessionAdmin(r), "dpi.add")
@@ -427,7 +436,14 @@ func apiContentScan(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		dpiScanner.Remove(pattern)
-		dpiScanner.Save()
+		if err := dpiScanner.Save(); err != nil {
+			// 2E-A durability truth: the removal is live in memory but would
+			// silently return on restart — never a 2xx over that.
+			logger.Printf("DPI: pattern persist error: %v", err)
+			auditEvent(r, "dpi.remove.unpersisted", pattern, "removed in memory; persist failed")
+			http.Error(w, "DPI pattern removed in memory but failed to persist", http.StatusInternalServerError)
+			return
+		}
 		logger.Printf("UI: DPI pattern removed %q", pattern)
 		auditEvent(r, "dpi.remove", pattern, "")
 		saveConfigVersion(sessionAdmin(r), "dpi.remove")
@@ -728,17 +744,29 @@ func apiDomainAllowlist(w http.ResponseWriter, r *http.Request) {
 		if list == nil {
 			list = []string{}
 		}
-		jsonOK(w, map[string]any{"domains": list})
+		jsonOK(w, map[string]any{"domains": list, "revision": domainAllowlistRevision()})
 	case http.MethodPut:
 		if !requireRole(w, r, RoleAdmin) {
 			return
 		}
 		var body struct {
-			Domains []string `json:"domains"`
+			Domains    []string `json:"domains"`
+			IfRevision string   `json:"ifRevision"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
+		}
+		// 2E-A stale-writer fence (see ui_security_fence.go): the compare and
+		// the replace are one serialized section, so two racing fenced admins
+		// cannot both pass. An absent fence keeps the legacy contract.
+		contentSecMu.Lock()
+		defer contentSecMu.Unlock()
+		if body.IfRevision != "" {
+			if cur := domainAllowlistRevision(); cur != body.IfRevision {
+				writeContentSecRevisionConflict(w, "threat-feed domain allowlist", cur, body.IfRevision)
+				return
+			}
 		}
 		if err := globalThreatFeed.SetDomainAllowlist(body.Domains); err != nil {
 			// The allowlist is already live in memory (fail-safe apply,
@@ -777,7 +805,7 @@ func apiDomainAllowlist(w http.ResponseWriter, r *http.Request) {
 		// blanks, duplicates, or case/whitespace variants (Codex P2 on PR #284).
 		count := len(globalThreatFeed.DomainAllowlist())
 		auditEvent(r, "threatfeed.allowlist.update", fmt.Sprintf("%d domain(s)", count), "")
-		jsonOK(w, map[string]any{"ok": true, "count": count})
+		jsonOK(w, map[string]any{"ok": true, "count": count, "revision": domainAllowlistRevision()})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -854,15 +882,35 @@ func validateYARASettings(timeoutSecs, maxInflight int64, onTimeout, onSaturatio
 	return nil
 }
 
+// yaraSettingsTarget is the TARGET engine posture a persist-before-apply
+// settings PUT hands to saveAdminSettingsWithOverrides (2E-A).
+type yaraSettingsTarget struct {
+	Enabled       bool
+	TimeoutSecs   int64
+	MaxInflight   int64
+	OnTimeout     string
+	OnSaturation  string
+	AlertDegraded bool
+}
+
 // GET /api/security-scan/yara/settings — read YARA engine runtime config.
 // PUT /api/security-scan/yara/settings — update YARA engine runtime config.
+//
+// The PUT is persist-before-apply (2E-A durability truth): the settings file
+// records the TARGET posture first, and only a successful write applies it to
+// the live engine — a persist failure is a truthful 500 with the running
+// posture untouched. The optional ifRevision fence is evaluated inside the
+// same adminSettingsMu critical section (that mutex is this surface's writer
+// domain), so two racing fenced admins cannot both pass the compare.
 func apiSecYARASettings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		if !requireRole(w, r, RoleViewer) {
 			return
 		}
-		jsonOK(w, yaraSettingsMap())
+		m := yaraSettingsMap()
+		m["revision"] = yaraSettingsRevision()
+		jsonOK(w, m)
 
 	case http.MethodPut:
 		if !requireRole(w, r, RoleAdmin) {
@@ -875,6 +923,7 @@ func apiSecYARASettings(w http.ResponseWriter, r *http.Request) {
 			OnTimeout     string `json:"on_timeout"`
 			OnSaturation  string `json:"on_saturation"`
 			AlertDegraded bool   `json:"alert_degraded"`
+			IfRevision    string `json:"ifRevision"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
@@ -884,22 +933,51 @@ func apiSecYARASettings(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		prev := yaraSettingsMap()
-		yaraSetEnabled(body.Enabled)
-		yaraSetTimeoutSecs(body.TimeoutSecs)
-		yaraSetMaxInflight(body.MaxInflight)
-		yaraSetOnTimeout(body.OnTimeout)
-		yaraSetOnSaturation(body.OnSaturation)
-		yaraSetAlertDegraded(body.AlertDegraded)
+		target := yaraSettingsTarget{
+			Enabled: body.Enabled, TimeoutSecs: body.TimeoutSecs, MaxInflight: body.MaxInflight,
+			OnTimeout: body.OnTimeout, OnSaturation: body.OnSaturation, AlertDegraded: body.AlertDegraded,
+		}
+		var prev map[string]any
+		err := saveAdminSettingsWithOverrides(adminSaveOverrides{
+			yaraSettings: &target,
+			precondition: func() error {
+				if body.IfRevision != "" {
+					if cur := yaraSettingsRevision(); cur != body.IfRevision {
+						return errContentSecRevisionConflict{current: cur, asserted: body.IfRevision}
+					}
+				}
+				prev = yaraSettingsMap()
+				return nil
+			},
+			applyOnSuccess: func() {
+				yaraSetEnabled(target.Enabled)
+				yaraSetTimeoutSecs(target.TimeoutSecs)
+				yaraSetMaxInflight(target.MaxInflight)
+				yaraSetOnTimeout(target.OnTimeout)
+				yaraSetOnSaturation(target.OnSaturation)
+				yaraSetAlertDegraded(target.AlertDegraded)
+			},
+		})
+		var conflict errContentSecRevisionConflict
+		if errors.As(err, &conflict) {
+			writeContentSecRevisionConflict(w, "YARA engine settings", conflict.current, conflict.asserted)
+			return
+		}
+		if err != nil {
+			logger.Printf("YARA: settings persist error: %v", err)
+			http.Error(w, "YARA settings could not be persisted; the live engine posture is unchanged", http.StatusInternalServerError)
+			return
+		}
 		auditEventDiff(r, "security.yara_settings", "yara_engine", "", prev, yaraSettingsMap())
-		adminSettingsSave()
 		// Intentionally NOT calling saveConfigVersion: YARA engine
 		// settings are out of the rollback surface by design (D-sec,
 		// CONFIG-VERSIONING-TRIAGE.md §4.2). Rolling back could
 		// un-harden yara_on_timeout / yara_on_saturation / yara_enabled
 		// — silently relaxing a scanner posture the operator chose to
 		// tighten.
-		jsonOK(w, yaraSettingsMap())
+		m := yaraSettingsMap()
+		m["revision"] = yaraSettingsRevision()
+		jsonOK(w, m)
 
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -943,8 +1021,9 @@ func apiSecYARARules(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		jsonOK(w, map[string]any{
-			"name":   name,
-			"source": src,
+			"name":     name,
+			"source":   src,
+			"revision": yaraRuleRevision(src),
 		})
 
 	case http.MethodPost, http.MethodPut:
@@ -952,8 +1031,9 @@ func apiSecYARARules(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var req struct {
-			Name   string `json:"name"`
-			Source string `json:"source"`
+			Name       string `json:"name"`
+			Source     string `json:"source"`
+			IfRevision string `json:"ifRevision"`
 		}
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256*1024)).Decode(&req); err != nil {
 			http.Error(w, "bad JSON body: "+err.Error(), http.StatusBadRequest)
@@ -967,6 +1047,29 @@ func apiSecYARARules(w http.ResponseWriter, r *http.Request) {
 		if req.Name == "" {
 			http.Error(w, "missing rule name", http.StatusBadRequest)
 			return
+		}
+		// 2E-A stale-writer fence: a fenced CREATE asserts the "new" sentinel
+		// (refused when the file already exists — never a silent replace of
+		// another admin's rule); a fenced UPDATE asserts the content revision
+		// of the source it edited. The compare and the write share one
+		// serialized section. An absent fence keeps the legacy contract.
+		contentSecMu.Lock()
+		defer contentSecMu.Unlock()
+		if req.IfRevision != "" {
+			cur, readErr := globalYARA.ReadRule(req.Name)
+			switch {
+			case req.IfRevision == yaraRuleCreateSentinel:
+				if readErr == nil {
+					writeContentSecRevisionConflict(w, "YARA rule "+req.Name, yaraRuleRevision(cur), req.IfRevision)
+					return
+				}
+			case readErr != nil:
+				writeContentSecRevisionConflict(w, "YARA rule "+req.Name, yaraRuleCreateSentinel, req.IfRevision)
+				return
+			case yaraRuleRevision(cur) != req.IfRevision:
+				writeContentSecRevisionConflict(w, "YARA rule "+req.Name, yaraRuleRevision(cur), req.IfRevision)
+				return
+			}
 		}
 		warnings, err := globalYARA.WriteRule(req.Name, req.Source)
 		if err != nil {
@@ -1076,24 +1179,44 @@ func apiSecScanExclusions(w http.ResponseWriter, r *http.Request) {
 		}
 		hashes, hosts := globalScanExclusions.Lists()
 		jsonOK(w, map[string]any{
-			"hashes": hashes,
-			"hosts":  hosts,
+			"hashes":   hashes,
+			"hosts":    hosts,
+			"revision": scanExclusionsRevision(),
 		})
 	case http.MethodPut:
 		if !requireRole(w, r, RoleAdmin) {
 			return
 		}
 		var req struct {
-			Hashes []string `json:"hashes"`
-			Hosts  []string `json:"hosts"`
+			Hashes     []string `json:"hashes"`
+			Hosts      []string `json:"hosts"`
+			IfRevision string   `json:"ifRevision"`
 		}
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&req); err != nil {
 			http.Error(w, "bad JSON body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		// 2E-A stale-writer fence (ui_security_fence.go).
+		contentSecMu.Lock()
+		defer contentSecMu.Unlock()
+		if req.IfRevision != "" {
+			if cur := scanExclusionsRevision(); cur != req.IfRevision {
+				writeContentSecRevisionConflict(w, "scan exclusions", cur, req.IfRevision)
+				return
+			}
+		}
 		globalScanExclusions.Replace(req.Hashes, req.Hosts)
 		if err := globalScanExclusions.Save(); err != nil {
+			// 2E-A durability truth: the exclusions are already live in memory
+			// (fail-safe replace — the same posture as the domain allowlist),
+			// but excluded hashes/hosts SKIP scanning, so an unpersisted
+			// trust-elevation state must stay attributable and the client must
+			// not see a 200 for a change that reverts on restart.
 			logger.Printf("ScanExclusions: save error: %v", err)
+			auditEvent(r, "security.scan_exclusions.update_unpersisted",
+				fmt.Sprintf("%d hash(es), %d host(s) applied in memory; persist failed", len(req.Hashes), len(req.Hosts)), "")
+			http.Error(w, "scan exclusions applied in memory but failed to persist", http.StatusInternalServerError)
+			return
 		}
 		auditEvent(r, "security.scan_exclusions", "update", fmt.Sprintf("%d hash(es), %d host(s)", len(req.Hashes), len(req.Hosts)))
 		// Intentionally NOT calling saveConfigVersion: scan exclusions
@@ -1105,8 +1228,9 @@ func apiSecScanExclusions(w http.ResponseWriter, r *http.Request) {
 		// auth.password_change.
 		hashes, hosts := globalScanExclusions.Lists()
 		jsonOK(w, map[string]any{
-			"hashes": hashes,
-			"hosts":  hosts,
+			"hashes":   hashes,
+			"hosts":    hosts,
+			"revision": scanExclusionsRevision(),
 		})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1125,26 +1249,45 @@ func apiContentScanBypass(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleViewer) {
 			return
 		}
-		jsonOK(w, map[string]any{"hosts": dpiScanner.BypassHosts()})
+		jsonOK(w, map[string]any{"hosts": dpiScanner.BypassHosts(), "revision": dpiBypassRevision()})
 	case http.MethodPut:
 		if !requireRole(w, r, RoleAdmin) {
 			return
 		}
 		var req struct {
-			Hosts []string `json:"hosts"`
+			Hosts      []string `json:"hosts"`
+			IfRevision string   `json:"ifRevision"`
 		}
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32*1024)).Decode(&req); err != nil {
 			http.Error(w, "bad JSON body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		// 2E-A stale-writer fence (ui_security_fence.go).
+		contentSecMu.Lock()
+		defer contentSecMu.Unlock()
+		if req.IfRevision != "" {
+			if cur := dpiBypassRevision(); cur != req.IfRevision {
+				writeContentSecRevisionConflict(w, "DPI bypass hosts", cur, req.IfRevision)
+				return
+			}
+		}
 		dpiScanner.SetBypassHosts(req.Hosts)
-		dpiScanner.Save()
+		if err := dpiScanner.Save(); err != nil {
+			// 2E-A durability truth: applied in memory (a bypass host SKIPS
+			// DPI, so the transient trust-elevation must stay attributable),
+			// never a 200 over a change that reverts on restart.
+			logger.Printf("DPI: bypass persist error: %v", err)
+			auditEvent(r, "security.dpi_bypass.update_unpersisted",
+				fmt.Sprintf("%d host(s) applied in memory; persist failed", len(req.Hosts)), "")
+			http.Error(w, "DPI bypass hosts applied in memory but failed to persist", http.StatusInternalServerError)
+			return
+		}
 		auditEvent(r, "security.dpi_bypass", "update", fmt.Sprintf("%d host(s)", len(req.Hosts)))
 		// Bypass hosts are in the rollback surface as of
 		// roadmap/SCANNER-ROLLBACK-EXTENSION-SPEC.md (configBackup
 		// .ContentScanBypassHosts); snapshot so rollback restores them.
 		saveConfigVersion(sessionAdmin(r), "security.dpi_bypass")
-		jsonOK(w, map[string]any{"hosts": dpiScanner.BypassHosts()})
+		jsonOK(w, map[string]any{"hosts": dpiScanner.BypassHosts(), "revision": dpiBypassRevision()})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -1161,7 +1304,9 @@ func apiScanSvcConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := map[string]interface{}{
 		"remote_enabled": globalRemoteScanner.Enabled(),
-		"remote_url":     globalRemoteScanner.URL(),
+		// Userinfo-redacted (2E-A secret boundary): an operator URL carrying
+		// embedded credentials must never echo them to a viewer surface.
+		"remote_url": redactURLUserinfo(globalRemoteScanner.URL()),
 	}
 	if globalRemoteScanner.Enabled() {
 		if err := globalRemoteScanner.Health(); err != nil {

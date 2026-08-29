@@ -776,6 +776,13 @@ type adminSaveOverrides struct {
 	autoExclude      *autoExcludeTunables
 	supportRetention *supportRetentionConfig
 	policyLearning   *policyLearnSettings
+	// yaraSettings carries the TARGET YARA engine posture for the 2E-A
+	// persist-before-apply settings PUT: the durable file records these
+	// target values while the live engine still runs the old ones;
+	// applyOnSuccess applies them only after the write landed, so a persist
+	// failure leaves the running posture untouched (never a 200 over a
+	// change that silently reverts on restart).
+	yaraSettings *yaraSettingsTarget
 	// saasFeed carries the TARGET signed-feed configuration for the 2D-B.0c
 	// persist-before-apply settings PUT: the durable file records these target
 	// values while the live holder still carries the old ones; applyOnSuccess
@@ -934,14 +941,24 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 	s.LogRetentionDays, s.LogRetentionMaxGB = getLogStoreDesired()
 	s.LogCriticalDiskPct = getCriticalDiskPct()
 
-	// YARA engine settings
+	// YARA engine settings — the TARGET posture for a persist-before-apply
+	// settings PUT (2E-A), else the live values.
 	s.YARASettingsSaved = true
-	s.YARAEnabled = yaraGetEnabled()
-	s.YARATimeoutSecs = yaraGetTimeoutSecs()
-	s.YARAMaxInflight = yaraGetMaxInflight()
-	s.YARAOnTimeout = yaraGetOnTimeout()
-	s.YARAOnSaturation = yaraGetOnSaturation()
-	s.YARAAlertDegraded = yaraGetAlertDegraded()
+	if ov.yaraSettings != nil {
+		s.YARAEnabled = ov.yaraSettings.Enabled
+		s.YARATimeoutSecs = ov.yaraSettings.TimeoutSecs
+		s.YARAMaxInflight = ov.yaraSettings.MaxInflight
+		s.YARAOnTimeout = ov.yaraSettings.OnTimeout
+		s.YARAOnSaturation = ov.yaraSettings.OnSaturation
+		s.YARAAlertDegraded = ov.yaraSettings.AlertDegraded
+	} else {
+		s.YARAEnabled = yaraGetEnabled()
+		s.YARATimeoutSecs = yaraGetTimeoutSecs()
+		s.YARAMaxInflight = yaraGetMaxInflight()
+		s.YARAOnTimeout = yaraGetOnTimeout()
+		s.YARAOnSaturation = yaraGetOnSaturation()
+		s.YARAAlertDegraded = yaraGetAlertDegraded()
+	}
 
 	snapshotAutoExcludeTunables(&s, ov.autoExclude)
 	snapshotSupportRetention(&s, ov.supportRetention) // Slice B: configurable retention caps

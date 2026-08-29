@@ -183,7 +183,11 @@ func (s *ContentScanner) Load(path string) error {
 // leaves a partial file. No-op if no path is configured. Writes the envelope
 // format when bypass hosts are present, otherwise the legacy array format so
 // existing tooling keeps working. Tier 3.4.
-func (s *ContentScanner) Save() {
+//
+// Returns the write error (2E-A durability truth): the admin handlers must
+// not report a durable configuration change that never reached disk. Callers
+// on bulk/best-effort paths may keep ignoring it (statement call).
+func (s *ContentScanner) Save() error {
 	s.mu.RLock()
 	// Loaded inside the RLock purely to keep the persisted (patterns, bypassHosts)
 	// pair as close to a single instant as it was before the snapshot change.
@@ -207,11 +211,11 @@ func (s *ContentScanner) Save() {
 	s.mu.RUnlock()
 
 	if path == "" || data == nil {
-		return
+		return nil
 	}
 	// Bucket-4 durability hardening: AtomicWrite gives unique tmp + chmod +
 	// fsync(file) + rename + best-effort fsync(parent dir).
-	_ = fileutil.AtomicWrite(path, data, 0o600)
+	return fileutil.AtomicWrite(path, data, 0o600)
 }
 
 // SetBypassHosts atomically replaces the DPI bypass host list. Hosts are
