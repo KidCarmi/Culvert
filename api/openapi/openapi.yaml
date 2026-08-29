@@ -10857,7 +10857,7 @@ paths:
                 tool_name: { type: string }
                 fingerprint: { type: string, description: 64-char hex of the reviewed tool fingerprint digest }
                 catalog_revision: { type: integer, format: int64, minimum: 1, description: The reviewed per-record catalog revision (the tool's Revision from the inventory view). REQUIRED — a zero/omitted value is rejected so the exact-target contract cannot be bypassed. }
-                purpose: { type: string, description: 'Declared purpose; only shadow_evaluation is issuable. Empty defaults to shadow_evaluation.' }
+                purpose: { type: string, enum: [shadow_evaluation], description: 'Declared purpose. Only shadow_evaluation is issuable by this endpoint; omit to default to it. (live_execution exists in the trust model but is never issuable here.)' }
                 reason: { type: string }
                 ticket_ref: { type: string }
                 expires_in_seconds: { type: integer, format: int64, description: 'TTL in seconds; 0 means no expiry. Negative or > ~10 years is rejected.' }

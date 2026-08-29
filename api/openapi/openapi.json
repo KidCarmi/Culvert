@@ -13787,7 +13787,10 @@
                     "type": "string"
                   },
                   "purpose": {
-                    "description": "Declared purpose; only shadow_evaluation is issuable. Empty defaults to shadow_evaluation.",
+                    "description": "Declared purpose. Only shadow_evaluation is issuable by this endpoint; omit to default to it. (live_execution exists in the trust model but is never issuable here.)",
+                    "enum": [
+                      "shadow_evaluation"
+                    ],
                     "type": "string"
                   },
                   "reason": {
