@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/hex"
+	"sync"
 	"testing"
 	"time"
 
@@ -144,6 +145,46 @@ func TestCanaryActivationPreflight_WiresScopeApprovalBudget(t *testing.T) {
 				t.Fatalf("%s must surface %s, got %v", tc.name, tc.reason, rd.Unmet)
 			}
 		})
+	}
+}
+
+// TestRollbackPathHealthy_DurableRehearsalAndRace proves the Codex P1 fix: RollbackPathHealthy
+// is false until a rollback is DURABLY rehearsed, true after, and reads persistStatus + the
+// rehearsal evidence as one consistent snapshot under durableMu (no torn read of an in-flight
+// rehearsal). The concurrent half is a race-detector gate.
+func TestRollbackPathHealthy_DurableRehearsalAndRace(t *testing.T) {
+	_ = getMCPRollout() // fire the sync.Once before swapping
+	prevR := globalMCPRollout
+	globalMCPRollout = &mcpRollout{
+		gateway:    rollout.NewState(rollout.CapabilityGateway, rollout.DefaultLimits()),
+		management: rollout.NewState(rollout.CapabilityManagement, rollout.DefaultLimits()),
+	}
+	prevDir := dataDir
+	dataDir = t.TempDir()
+	t.Cleanup(func() { globalMCPRollout = prevR; dataDir = prevDir })
+
+	capb := rollout.CapabilityGateway
+	if rollbackPathHealthy(capb) {
+		t.Fatal("an unrehearsed rollback path must be unhealthy")
+	}
+	if err := globalMCPRollout.recordRehearsal(capb); err != nil {
+		t.Fatalf("recordRehearsal: %v", err)
+	}
+	if !rollbackPathHealthy(capb) {
+		t.Fatal("a durably-rehearsed rollback path must be healthy")
+	}
+
+	// Concurrent rehearsals and readiness reads must not race and must never panic (the fix
+	// reads both facts under durableMu, the same lock recordRehearsal holds).
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(2)
+		go func() { defer wg.Done(); _ = globalMCPRollout.recordRehearsal(capb) }()
+		go func() { defer wg.Done(); _ = rollbackPathHealthy(capb) }()
+	}
+	wg.Wait()
+	if !rollbackPathHealthy(capb) {
+		t.Fatal("rollback path must remain healthy after concurrent rehearsals")
 	}
 }
 

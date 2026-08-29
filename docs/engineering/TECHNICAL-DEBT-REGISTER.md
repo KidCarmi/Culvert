@@ -418,7 +418,11 @@
   inputs; (P1-E) `rollbackPathHealthy` from durable persist + rollback-rehearsal state, not
   coordinator existence; (P1-F) approval coverage keyed by tenant (a t2 approval never covers a
   t1 scope); (P1-G) scope must bind exactly one concrete tenant (`ScopeNoTenant`/
-  `ScopeTooManyTenants` — an empty tenant selector is a rollout wildcard over every tenant).
+  `ScopeTooManyTenants` — an empty tenant selector is a rollout wildcard over every tenant);
+  (P2c) scope realizability — `scopeRealizable` witness check rejects a contradictory scope
+  (tool off the server dimension, or an excluded inclusion) that is enumerable yet matches
+  nothing (`ScopeNotRealizable`); (P1-H) `rollbackPathReady` reads persistStatus + rehearsal
+  evidence under `durableMu` so a preflight cannot observe an in-flight rehearsal as durable.
 - **Evidence:** ADR-0035; `docs/design/mcp/CANARY-READINESS-MATRIX.md`;
   `docs/design/mcp/CANARY-FIRST-RUNBOOK.md`; `internal/mcp/canary/*_test.go`;
   `mcp_canary_preflight_test.go`; the differential gate `TestShadow_LivePreSideEffectEquivalence`.

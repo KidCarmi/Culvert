@@ -120,18 +120,9 @@ func durableEventsHealthy(capb rollout.Capability) bool {
 // dormant Canary is never ready.
 func rollbackPathHealthy(capb rollout.Capability) bool {
 	r := getMCPRollout()
-	if r == nil {
-		return false
-	}
-	switch r.persistStatus(capb) {
-	case "degraded", "write_failed":
-		return false
-	}
-	st := r.stateFor(capb)
-	if st == nil {
-		return false
-	}
-	return st.Evidence().RollbackRehearsed
+	// rollbackPathReady reads persistStatus AND the rehearsal evidence under durableMu, so it
+	// never observes the pre-persist window of an in-flight rehearsal (Codex P1, PR #1249).
+	return r != nil && r.rollbackPathReady(capb)
 }
 
 // CanaryActivationInput carries the scope-dependent activation inputs the preflight layers on

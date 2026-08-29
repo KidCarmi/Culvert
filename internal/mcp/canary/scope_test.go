@@ -66,6 +66,15 @@ func TestValidateScope_Rejections(t *testing.T) {
 		{"no_tenant", func(s *rollout.ScopeSpec) { s.Tenants = nil }, ScopeNoTenant},
 		{"empty_tenant_string", func(s *rollout.ScopeSpec) { s.Tenants = []string{""} }, ScopeNoTenant},
 		{"too_many_tenants", func(s *rollout.ScopeSpec) { s.Tenants = []string{"t1", "t2"} }, ScopeTooManyTenants},
+		{"tool_server_not_in_scope", func(s *rollout.ScopeSpec) {
+			// The only tool is on a server the scope's server dimension does not include, so no
+			// subject can ever match — enumerable but contradictory (Codex P2).
+			s.Tools = []rollout.ToolSel{{Server: "other-server", Name: "echo", Fingerprint: "abc123"}}
+		}, ScopeNotRealizable},
+		{"excluded_tenant", func(s *rollout.ScopeSpec) {
+			// The sole tenant is also excluded — Contains rejects every subject (Codex P2).
+			s.ExcludeTenants = []string{"t1"}
+		}, ScopeNotRealizable},
 		{"tool_missing_fingerprint", func(s *rollout.ScopeSpec) {
 			s.Tools = []rollout.ToolSel{{Server: "srv-canary", Name: "echo"}} // no Fingerprint (wildcard-future-tool)
 		}, ScopeToolMissingFingerprint},

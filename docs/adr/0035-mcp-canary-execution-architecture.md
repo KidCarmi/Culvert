@@ -92,6 +92,13 @@ within tiny first-Canary caps (`MaxCanaryServers=1`, `MaxCanaryTools=2`, `MaxCan
 `MaxCanaryTenants=1` — structurally incapable of fleet-wide), and be **read-first**
 (`Operations ⊆ {read}`, `!HighRisk`).
 
+The scope must also be **realizable**: `MatchesNothing` detects only ABSENT inclusion selectors,
+not CONTRADICTORY ones (a tool whose server is not in the server dimension, or an inclusion value
+that is also excluded), so `ValidateScope` builds a witness subject from the scope's own inclusion
+selectors and requires the compiled matcher to admit it (`scopeRealizable` → `ScopeNotRealizable`),
+reusing rollout's exact `Contains` semantics rather than reimplementing them — a Canary that can
+never match its own corpus must never report ready (Codex P2).
+
 Read-first is enforced at **two** levels because `rollout.RiskClass` has only four buckets and
 the root `mapRisk` folds `policy.OpControl` (and `OpDiscovery`) into `RiskRead` — so a
 scope-level read-first check cannot exclude a control-plane operation. `ScopeReadFirst` is the
@@ -176,6 +183,8 @@ Twelve defects, each caught by a named gate:
 | 19 | rollback readiness from coordinator existence, not durable+rehearsed health | `rollbackPathHealthy` (persist not degraded/write_failed AND `RollbackRehearsed`) |
 | 20 | approval for tenant t2 covers a scope admitting tenant t1 | `TestValidateScopeApprovals_Rejections` (wrong_tenant) |
 | 21 | identity-less/wildcard-tenant scope enters Canary | `TestValidateScope_Rejections` (no_tenant/empty_tenant_string/too_many_tenants) |
+| 22 | contradictory scope (tool off-server / excluded inclusion) validates | `TestValidateScope_Rejections` (tool_server_not_in_scope/excluded_tenant) via `scopeRealizable` |
+| 23 | rollback health read torn from an in-flight rehearsal write | `TestRollbackPathHealthy_DurableRehearsalAndRace` (both facts under `durableMu`) |
 
 Mutations 1–4 and 13–17 (plus four-eyes, TTL ceiling, read-first, bound-cap, fingerprint,
 per-tool coverage, exact identity) are mechanically re-introduced and confirmed to fail their

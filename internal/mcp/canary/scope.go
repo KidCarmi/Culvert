@@ -47,6 +47,7 @@ const (
 	ScopeUsesGroups             ScopeReason = "scope_uses_groups"          // group-based identity forbidden for first Canary
 	ScopeNoTenant               ScopeReason = "scope_no_explicit_tenant"   // no concrete tenant bound (empty ⇒ every tenant)
 	ScopeTooManyTenants         ScopeReason = "scope_too_many_tenants"     // more than MaxCanaryTenants tenants bound
+	ScopeNotRealizable          ScopeReason = "scope_not_realizable"       // selectors/exclusions cannot intersect any subject
 )
 
 // ValidateScope enforces the first-Canary scope contract (§4/§5) on a candidate
@@ -84,7 +85,54 @@ func ValidateScope(spec rollout.ScopeSpec, scopeRev uint64) ScopeReason {
 	if !sc.Enumerable() {
 		return ScopeNotEnumerable
 	}
-	return validateScopeBounds(spec)
+	if r := validateScopeBounds(spec); r != ScopeOK {
+		return r
+	}
+	// Realizability: MatchesNothing only detects ABSENT inclusion selectors, not CONTRADICTORY
+	// ones — a scope with Servers:[s1] but its only tool on s2, or Tenants:[t1] with
+	// ExcludeTenants:[t1], is enumerable yet Contains can never match a subject, so the Canary
+	// would report ready while unable to execute its corpus (Codex P2, PR #1249). Assert at
+	// least one realizable subject by building a witness from the scope's OWN inclusion
+	// selectors and requiring the compiled matcher to admit it — reusing rollout's exact
+	// Contains semantics rather than reimplementing them.
+	if !scopeRealizable(sc, spec) {
+		return ScopeNotRealizable
+	}
+	return ScopeOK
+}
+
+// scopeRealizable reports whether at least one subject can satisfy the compiled scope. For each
+// bound tool it builds a witness subject from the scope's own inclusion selectors (one value per
+// non-empty dimension; a read operation, which every read-first scope admits) and asks the
+// compiled matcher. If ANY tool yields a matching witness the scope is realizable; if none does,
+// the inclusion/exclusion selectors are contradictory (e.g. the tool's server is not in the
+// server dimension, or an inclusion value is also excluded). Pure; no I/O.
+func scopeRealizable(sc rollout.Scope, spec rollout.ScopeSpec) bool {
+	firstOr := func(ss []string) string {
+		if len(ss) > 0 {
+			return ss[0]
+		}
+		return ""
+	}
+	for i := range spec.Tools {
+		t := spec.Tools[i]
+		w := rollout.Subject{
+			Capability:      spec.Capability,
+			Tenant:          firstOr(spec.Tenants),
+			ServerID:        t.Server, // must also lie in the Servers dimension, else the witness fails
+			ToolName:        t.Name,
+			ToolFingerprint: t.Fingerprint,
+			PrincipalID:     firstOr(spec.Principals),
+			AgentID:         firstOr(spec.Agents),
+			ClientID:        firstOr(spec.Clients),
+			Environment:     firstOr(spec.Environments),
+			Operation:       rollout.RiskRead,
+		}
+		if sc.Contains(w) {
+			return true
+		}
+	}
+	return false
 }
 
 // validateScopeRawFields enforces the read-first and exact-fingerprint constraints on the raw

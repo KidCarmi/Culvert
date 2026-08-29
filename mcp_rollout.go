@@ -98,6 +98,28 @@ func (r *mcpRollout) persistStatus(capb rollout.Capability) string {
 	return s
 }
 
+// rollbackPathReady reports whether the capability's rollback path is durable AND rehearsed —
+// read as ONE consistent snapshot. It takes durableMu, which recordRehearsal and every other
+// durable read-modify-write-persist holds for its whole sequence, so no rehearsal write can be
+// in flight while this reads: the in-memory RollbackRehearsed evidence and the persistStatus it
+// observes are both post-write (never the pre-persist window where evidence is set but not yet
+// durable). Fail-closed: false unless persistence is not degraded/write_failed AND a rollback
+// rehearsal is durably recorded. Lock order is durableMu → persistMu (persistStatus takes
+// persistMu), the SAME order recordRehearsal uses, so there is no deadlock (Codex P1, PR #1249).
+func (r *mcpRollout) rollbackPathReady(capb rollout.Capability) bool {
+	r.durableMu.Lock()
+	defer r.durableMu.Unlock()
+	switch r.persistStatus(capb) {
+	case "degraded", "write_failed":
+		return false
+	}
+	st := r.stateFor(capb)
+	if st == nil {
+		return false
+	}
+	return st.Evidence().RollbackRehearsed
+}
+
 // mcpRolloutMetrics are bounded, low-cardinality counters. No tenant/subject/
 // session/URL/argument/tool-name label is ever used.
 type mcpRolloutMetrics struct {
