@@ -725,6 +725,122 @@ UI leans on C2 semantics and must not cut over onto a known enforcement gap).
 > FRESH/SETUPFAIL instances now carry their own paths, making the history
 > journeys deterministic).
 >
+> **Slice 2D-C implementation record (this branch, 2026-08-29).**
+>
+> **2D-C.0 backend hardening — two identity promotions before any
+> write-capable control mounted (§3 order held).**
+> **File Profiles (0A/0B):** `PolicyRule.FileProfileID` promoted alongside
+> the existing group/decrypt-profile IDs (JSON per repo convention;
+> DecryptionProfile-scale precedent, so the §5 STOP condition did not
+> fire). Name = intent: `stampObjectRefIDs` derives the ID server-side
+> from the submitted name and a client-supplied `fileProfileId` is never
+> trusted (a mismatched pair binds to the NAME). Enforcement resolves
+> ID-first; a rule carrying a non-empty authoritative ID whose profile is
+> gone FAILS SAFE (no extensions blocked-by-that-profile, and NEVER
+> retargeted to a same-named object) — deliberately STRICTER than the
+> group precedent's name fallback because the legacy built-in name space is
+> compiled-in; the Where Used walk agrees with enforcement (no
+> dangling-name fallback), divergence documented at both sites and in
+> OBJECT-REFERENCES-BY-ID.md. ID-less legacy rules keep byte-identical
+> behavior (store name, then the compiled `fileProfileExts` map).
+> `internal/fileblock` moved to copy-on-write immutable publication (also
+> closing an in-place `Update` data race against the lock-free
+> `Extensions` read path) with durable-or-nothing commits (persist target
+> THEN swap; hard failure = old memory + old disk; `ErrReplacedNotSynced`
+> = landed-content doctrine), a content-derived restart-stable revision
+> (`fpv1` over sorted id/name/extensions rows), one-lock
+> `SnapshotWithRevision`, and fenced CRUD (`ifRevision` compared inside
+> the critical section; `ReplaceAll` documented as the CP→DP follower
+> path only). Rename is a TRUE rename: `CascadeFileProfileRename` updates
+> the denormalized display name on running rules (by ID; by name for
+> ID-less rules, stamping the ID) and the active draft candidate, with a
+> truthful 500 on cascade-persist failure. Built-ins (deterministic
+> `builtin-*` IDs) remain fully mutable — the inspected pre-slice product
+> behavior, preserved and made safe by ID promotion (§14: documented, no
+> silent product change).
+> **Header Rewrite (0C/0D):** the integer `Rule.ID` is process-local and
+> reassigned by `SetRules` — NOT product identity (§19: no deep links, no
+> fencing on it). `internal/rewrite` gained `StableID` (server-owned UUID;
+> `yaml:"-"`), backfilled once at load and made durable through the REAL
+> AdminSettings owner (§24: `RewriteRules` + `RewriteRulesSaved` sentinel
+> — saved-authoritative including empty; no second configuration file);
+> one narrow writer domain: interactive mutations run read-current + fence
+> + build inside `adminSettingsMu` (`rewriteMutate` override), bulk
+> installs go through `publishRewriteRules` (runtime-only follower: SIGHUP
+> reload, boot seed, CP→DP snapshot) or `installRewriteRulesDurable`
+> (rollback + import — fixing a REAL pre-existing durability hole where
+> rollback's rewrite slice was runtime-only). Restart-stable content
+> revision `rwv1` (position + stableId + host + all ops, deterministic map
+> canonicalization, length-framed); `GET /api/rewrite/state` returns
+> {rules, revision} from one coherent snapshot; create/delete assert
+> `?ifRevision=`. Create ignores any caller stableId (server mints);
+> delete addresses `?stableId=` (legacy `?id=` retained). ORDER IS
+> SEMANTICS (§23): evaluation order preserved verbatim everywhere; no
+> reorder invented. Identity trust at the bulk doors (§20–22/§36–39):
+> import replace preserves modern IDs, merge upserts in place by stableId
+> with ID-less appends minted fresh; duplicate stableIds reject the WHOLE
+> candidate (import 400 / rollback 400 / snapshot validation) — never a
+> silent single-side regeneration; rollback/CP-snapshot identities are
+> applied verbatim (a restored version never mints fresh identities);
+> legacy integer IDs are never reinterpreted as stable IDs.
+> **Bulk graph closure (0E):** the FileProfile edge joined
+> `bulkCandidate` (`CheckRuleFileProfiles`): an ID-bearing rule must
+> resolve within the candidate ID set (no name fallback — matching
+> enforcement), an ID-less rule by candidate name or the legacy compiled
+> map; `canonicalizeCandidateRuleRefs` stamps FileProfileID from the
+> candidate set so the validator judges the EXACT rule the path installs.
+> File profiles are deliberately NOT on the export/import/rollback
+> surfaces (ConfigSnapshot-only per the Finding 10.3 registry), so those
+> candidates use the LIVE store; the CP→DP snapshot judges both-sides-
+> carried `snap.FileProfiles`.
+> **Shared 409 dialect:** both new fenced surfaces render the established
+> `{error, currentRevision, yourRevision}` revision conflict — one dialect
+> across every fenced admin surface; the existing client recognizer
+> applies unchanged.
+>
+> **2D-C.1 File Profiles page** (`/app/objects/file-profiles`, viewer+
+> read / operator+ writes): coherent `GET /api/fileblock/profiles/state`
+> snapshot; list with built-in badges and extension counts; stable-ID row
+> detail + Where Used; create/edit dialog with the rename truth callout,
+> one-extension-per-line editor and a normalization preview (server
+> authoritative — the saved profile shows the appliance's normalization);
+> fenced mutations with the shared structured 409 notice; T2 delete with
+> the Where Used preflight (information only) and the authoritative
+> referencedBy 409; unknown-outcome latch; dirty guard; auth-boundary
+> cleanup; `?id=` deep link. The Access Rule File Profile selector now
+> reads the coherent state endpoint (§32) — names in a rule stay intent,
+> the server stamps the ID at rule save.
+>
+> **2D-C.2 Header Rewrite page** (`/app/policies/header-rewrite` — a
+> POLICY surface, §29: not under Objects): evaluation-order table
+> (position, host scope, per-direction ops summaries) with the ordering
+> note ("multiple matching rules are applied in the displayed order");
+> stableId only in the row detail (legacy integer id labeled process-local
+> — not an identity); Create + Delete only (no backend update primitive →
+> no Edit offered; no reorder invented); structured editor sections (host
+> scope; request/response Set / Add / Remove as Header-Name: value lines)
+> — not a JSON textbox; zero-op creates refused locally mirroring the
+> server contract; fenced mutations; unknown-outcome latch; dirty guard.
+>
+> **Proofs:** `dc_identity_red_test.go` (11 red-before at the 69f53bea
+> checkpoint + the honest green control: the file-profile delete gate was
+> ALREADY closed by 2D-B) + `dc_identity_test.go` (12 green contracts);
+> frontend `dcobjects-api.test.ts` + `dc-pages.test.tsx` (21 tests:
+> decoders incl. order preservation and pre-backfill tolerance, viewer
+> posture, fenced bodies, create-never-submits-stableId, delete-by-
+> stableId, zero-op refusal, conflict notices, unknown-outcome latch);
+> real-binary `e2e/dc-2dc.spec.ts` (server normalization, rename keeps
+> identity + cascades onto the referencing rule, referenced delete
+> refused with the authoritative consumer, delete after unreference,
+> UI-created rule receives a server-owned stableId, truthful order,
+> delete by stableId, stale-fence 409 leaves the appliance unchanged) —
+> no external traffic; the data-plane rewrite effect stays proven by the
+> Go suites against deterministic local fixtures (§42).
+> **Recorded postures:** YAML-only no-settings-file deployments carry
+> process-local rewrite IDs until the first settings save (backfill
+> persists once a durable owner exists); pre-promotion config-version
+> captures backfill at publication (one-time migration, documented).
+>
 > **Slice 2D-B implementation record (this branch, 2026-08-28).**
 >
 > **2D-B.0 backend hardening** — the URL-category store (`internal/urlcat`)

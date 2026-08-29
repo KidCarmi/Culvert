@@ -383,3 +383,69 @@ Proofs: `internal/catgroup/catgroup_durable_test.go`,
 root `object_durability_test.go` (fault injection at every phase +
 disk-reload oracles + the full §27 reference-integrity matrix),
 `objects_enum_lockstep_test.go` (frontend/runtime enum lockstep).
+
+## 14. 2D-C implementation checkpoint (2026-08-29) — File Profiles + Header Rewrite
+
+### File Profile references (ID-authoritative, STRICT dangling semantics)
+
+`PolicyRule.FileProfileID` (JSON `fileProfileId,omitempty`) joined the
+reference model with the same trust boundary as groups/decryption profiles:
+the NAME is the client's intent, `stampObjectRefIDs` derives the ID
+server-side, and a client-supplied ID is never trusted (a mismatched pair
+binds to the name).
+
+**Deliberate divergence from §6:** for file profiles, a rule carrying a
+non-empty authoritative `FileProfileID` whose object no longer resolves does
+NOT fall back to name matching — in enforcement (`FileProfileBlocked`
+returns false: fail-safe, nothing is retargeted to a same-named object) and
+in the reference walk (`ruleReferencesObject` reports no reference for a
+non-matching ID-bearing rule), so the walk and the match can never disagree.
+The group/decrypt-profile name fallback exists to serve pre-promotion rules;
+the file-profile space additionally contains COMPILED-IN legacy built-in
+names (`fileProfileExts`), where a name fallback would let a deleted
+profile's rule silently rebind to the compiled set — the §7 anti-rebinding
+rule ("do not retarget an authoritative ID by name") therefore wins over
+walk symmetry with the older kinds. ID-LESS rules keep the full legacy
+resolution (store name → compiled map) byte-identically.
+
+Rename follows §7: `CascadeFileProfileRename` refreshes the denormalized
+name on running rules (by ID; by name for ID-less rules, stamping the ID as
+a side effect) and on an active draft candidate
+(`policyDraft.cascadeFileProfileRename`), with the truthful-500 persist
+contract; `reconcileObjectRefNames` converges names at boot via the 3-map
+`RefreshObjectRefNames`.
+
+Store contract: `internal/fileblock` carries the 2D-A-class durability
+(copy-on-write immutable publication, persist-target-then-swap
+`commitLocked`, `ErrReplacedNotSynced` landed-content doctrine) with a
+CONTENT-DERIVED restart-stable revision (`fpv1`) as the fence —
+`SnapshotWithRevision` under one lock, `CreateFenced`/`UpdateFenced`/
+`DeleteFenced` comparing `ifRevision` inside the critical section, and
+`ReplaceAll` documented as the CP→DP follower path only. Bulk validation
+(`CheckRuleFileProfiles`) matches enforcement exactly: ID-bearing rules
+resolve only within the candidate ID set. File profiles remain OFF the
+export/import/rollback surfaces (ConfigSnapshot-only per the Finding 10.3
+registry), so import/rollback candidates judge against the live store.
+
+Built-ins (deterministic `builtin-*` IDs) remain fully editable/renamable/
+deletable — the pre-slice product behavior, preserved (§14 of the 2D-C
+directive) and made safe by ID promotion.
+
+### Header Rewrite identity (stableId; NOT a rule→object reference)
+
+Rewrite rules are not referenced by policy rules — the identity work is
+about the OBJECTS themselves. The legacy integer `Rule.ID` is process-local
+(reassigned by `SetRules`) and is NOT product identity: no deep links, no
+fencing, never reinterpreted as the stable ID. `StableID` (server-owned
+UUID, `yaml:"-"`) is the durable identity: backfilled once at load,
+persisted through the AdminSettings owner (`RewriteRules` +
+`RewriteRulesSaved` sentinel), preserved verbatim by rollback and CP→DP
+sync (a restored version never mints fresh identities), minted fresh for
+interactive creates and ID-less import entries, and duplicate stableIds
+reject the whole candidate at every bulk door. Evaluation ORDER is
+semantics and is preserved verbatim on every surface; the content revision
+(`rwv1`) covers identity + position + host + all operations.
+
+Proofs: `dc_identity_test.go`, `dc_identity_red_test.go` (red-before at the
+2D-B frozen checkpoint), `internal/fileblock` + `internal/rewrite` suites,
+`bulk_ref_integrity`/`bulk_canonical_authority` extensions.
