@@ -832,6 +832,13 @@ func apiSecYARAReload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no YARA rules directory configured", http.StatusServiceUnavailable)
 		return
 	}
+	// 2E-A-2 §3: serialized with the rule CRUD (contentSecMu). LoadDir reads
+	// the rules directory OUTSIDE y.mu and installs the result under it, so an
+	// unserialized reload racing a WriteRule/DeleteRule (each of which ends in
+	// its own LoadDir) could install a STALE directory read last — a compiled
+	// rule set that silently does not match the files on disk.
+	contentSecMu.Lock()
+	defer contentSecMu.Unlock()
 	if err := globalYARA.LoadDir(dir); err != nil {
 		http.Error(w, "YARA reload failed: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -1122,8 +1129,31 @@ func apiSecYARARules(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "missing rule name", http.StatusBadRequest)
 			return
 		}
+		// 2E-A-2 §3: DELETE is a destructive write and joins the same
+		// optimistic-concurrency contract as POST/PUT — an OPTIONAL
+		// ifRevision assertion (legacy callers without it keep replacement
+		// semantics; the v2 client always asserts), compared and acted on
+		// inside the same serialized rule-mutation domain. A delete reviewed
+		// against v1 must never destroy another admin's v2.
+		contentSecMu.Lock()
+		defer contentSecMu.Unlock()
+		cur, readErr := globalYARA.ReadRule(name)
+		if readErr != nil {
+			// Truthful 404: the target does not exist (it may have been
+			// deleted by another admin already).
+			http.Error(w, "rule not found: "+sanitizeLog(name), http.StatusNotFound)
+			return
+		}
+		if ifRev := strings.TrimSpace(r.URL.Query().Get("ifRevision")); ifRev != "" {
+			if curRev := yaraRuleRevision(cur); curRev != ifRev {
+				writeContentSecRevisionConflict(w, "YARA rule "+name, curRev, ifRev)
+				return
+			}
+		}
 		if err := globalYARA.DeleteRule(name); err != nil {
-			http.Error(w, "delete rule: "+err.Error(), http.StatusBadRequest)
+			// Existence was just verified, so a failure here is an I/O
+			// fault, not a client error.
+			http.Error(w, "delete rule: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		globalSecScanner.CacheClear()
