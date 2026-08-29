@@ -9273,6 +9273,9 @@
               }
             },
             "description": "Either the stored version could not be read, or (CHAOS-27) the\nrollback was applied to the RUNNING configuration but one or more\nstores could not be written to disk — `status:rolled_back_not_durable`\nwith `applied:true`, `stores_persisted:false`, and `persist_errors`\nnaming the files. The running config has already changed, so the\nrecovery is to fix the data directory and re-save, not to retry the\nrollback.\n"
+          },
+          "503": {
+            "description": "`dry_run` only — rewrite MANAGEMENT identity is not durable on this\nnode, and the preview diff would compare against the live rewrite\nrules whose StableIDs are known-ephemeral. Answers the SAME\nstructured `{error, degraded:\"rewrite-identity\", reason}` as\nGET /api/rewrite/state instead of exposing ephemeral identities in\nthe identity-aware diff. A real (non-dry-run) rollback of a stored\nversion remains available; traffic rewrite enforcement continues.\n"
           }
         },
         "security": [

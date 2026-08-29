@@ -4663,6 +4663,15 @@ paths:
             application/json:
               schema: { type: object, additionalProperties: true }
             text/plain: { schema: { type: string } }
+        '503':
+          description: |
+            `dry_run` only — rewrite MANAGEMENT identity is not durable on this
+            node, and the preview diff would compare against the live rewrite
+            rules whose StableIDs are known-ephemeral. Answers the SAME
+            structured `{error, degraded:"rewrite-identity", reason}` as
+            GET /api/rewrite/state instead of exposing ephemeral identities in
+            the identity-aware diff. A real (non-dry-run) rollback of a stored
+            version remains available; traffic rewrite enforcement continues.
 
   /api/decryption-profiles:
     get:
