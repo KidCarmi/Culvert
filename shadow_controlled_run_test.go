@@ -575,7 +575,19 @@ func (r *shadowRun) assertOperatorObservability(fin shadowMetricsView) {
 	sv, ok := st["metrics"].(shadowMetricsView)
 	req(t, ok, "status metrics must be a shadowMetricsView, got %T", st["metrics"])
 	req(t, sv == fin, "status metrics snapshot must equal the final counters: status=%+v final=%+v", sv, fin)
-	r.ev("operator observability: /metrics culvert_mcp_shadow_* rows parsed 1:1 == live singleton (evaluations=%d would_execute=%d would_block=%d would_fail_hard_control=%d other=%d evaluation_errors=%d); status.evaluator_composed=true status.live_execution_ready=false status.metrics==singleton",
+	// The full three-state health the operator surface reports must be asserted, not merely
+	// surfaced: Shadow evaluator healthy (requested+composed reason, shadow tier armed, and the
+	// node-readiness PREFLIGHT actually Ready with no reasons) AND live execution unarmed
+	// (already checked above). A regression that made the reported preflight/Observe posture
+	// incorrect would otherwise pass this gate.
+	req(t, st["requested"] == true, "status requested must be true, got %v", st["requested"])
+	req(t, st["reason"] == "composed", "status reason must be \"composed\", got %v", st["reason"])
+	req(t, st["shadow_deps_ready"] == true, "status shadow_deps_ready must be true, got %v", st["shadow_deps_ready"])
+	pf, ok := st["preflight"].(shadowPreflightResult)
+	req(t, ok, "status preflight must be a shadowPreflightResult, got %T", st["preflight"])
+	req(t, pf.Ready && len(pf.Reasons) == 0,
+		"status preflight must report Ready with no reasons (node is able to evaluate Shadow), got %+v", pf)
+	r.ev("operator observability: /metrics culvert_mcp_shadow_* rows parsed 1:1 == live singleton (evaluations=%d would_execute=%d would_block=%d would_fail_hard_control=%d other=%d evaluation_errors=%d); status three-state: evaluator_composed=true shadow_deps_ready=true reason=composed preflight.Ready=true live_execution_ready=false; status.metrics==singleton",
 		fin.Evaluations, fin.WouldExecute, fin.WouldBlock, fin.WouldFailHardControl, fin.WouldOther, fin.EvaluationErrors)
 }
 
