@@ -109,6 +109,14 @@ func newGapEnv(t *testing.T, hits *int64, invFactory func(endpoint string) strin
 	req(t, globalMCPShadow.composed.Load() && shadowDepsConfigured(false), "ShadowEvaluator must be composed and shadow tier armed")
 	req(t, !liveExecDepsConfigured(false), "SECURITY: live-execution tier must remain UNarmed after Shadow composition")
 	initMCPToolTrust(nil)
+	// The admin-API singleton (getMCPAdmin) snapshots the inventory exactly ONCE (sync.Once) and
+	// is a process global that no other reset touches. Reset it AFTER this node's inventory is
+	// published so the operator admin endpoints (C12) bind to THIS inventory regardless of test
+	// order, and restore a fresh disabled default on cleanup so a bound singleton never leaks
+	// into another test — otherwise a prior test that bound it against an empty holder makes
+	// GET /api/mcp/tools report 0 tools here (order-dependent flake under -shuffle/-count).
+	resetMCPAdminSingleton()
+	t.Cleanup(resetMCPAdminSingleton)
 	reg, _ := mcpInventory.sharedInventory()
 	e := &gapEnv{
 		t: t, pki: pki, cli: pki.mtlsClient(t, false), base: "https://" + rt.Addr(false),
