@@ -48,6 +48,19 @@ type ContentScanner struct {
 	// mu alongside the snapshot so the race detector sees the handoff.
 	writeFile func(path string, data []byte) error
 
+	// saveMu serializes Save's snapshot→publication sequence (2E-A-2 §2): the
+	// patterns and bypass hosts share ONE durable envelope, and with the
+	// snapshot taken under mu.RLock but the AtomicWrite issued after release,
+	// two successful mutation+Save sequences could publish in REVERSE order —
+	// both callers told success while the file (what a restart trusts) holds
+	// the STALE envelope. Holding saveMu across snapshot AND write makes
+	// publication order equal snapshot order, so the last publication contains
+	// every mutation that happened-before its Save. Deliberately NOT mu: the
+	// hot path (Scan/IsBypassHost) and the mutators never touch it, and a slow
+	// volume stalls only concurrent Saves — exactly the pre-change behavior of
+	// fileutil.RotatingFile-style serialization at the write itself.
+	saveMu sync.Mutex
+
 	// Tier 3.4: per-host DPI bypass list. Hosts in this map skip DPI regex
 	// scanning entirely even when the scanner has patterns loaded. Used for
 	// internal content mirrors, CI artifact servers, etc. where DPI false
@@ -193,7 +206,15 @@ func (s *ContentScanner) Load(path string) error {
 // Returns the write error (2E-A durability truth): the admin handlers must
 // not report a durable configuration change that never reached disk. Callers
 // on bulk/best-effort paths may keep ignoring it (statement call).
+//
+// Snapshot and publication run as ONE serialized critical section (saveMu —
+// see the field comment): every writer of the shared envelope (interactive
+// handlers, config-version rollback, CP→DP snapshot apply, inspection-rules
+// seed, config import) funnels through Save, so serializing here is the
+// single writer domain the envelope needs — no caller-side protocol.
 func (s *ContentScanner) Save() error {
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
 	s.mu.RLock()
 	// Loaded inside the RLock purely to keep the persisted (patterns, bypassHosts)
 	// pair as close to a single instant as it was before the snapshot change.
